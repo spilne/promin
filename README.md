@@ -13,14 +13,16 @@ All of these compose on [perfect](https://github.com/spilne/perfect) (`@spilne/p
 
 ## Packages
 
-| Package | Description |
-|---|---|
-| **[@promin/workflow](./packages/workflow/)** | Durable workflows, distributed workers, state machines, scheduler |
-| **[@promin/data](./packages/data/)** | DataFrame, data quality, profiling, diff, contracts |
-| **[@promin/duckdb](./packages/duckdb/)** | DuckDB executor for DataFrame — SQL compilation, file sources |
-| **[@promin/postgres](./packages/postgres/)** | Postgres workflow storage, step queue (SKIP LOCKED), durable scheduler |
-| **[@promin/redis](./packages/redis/)** | Redis workflow storage, step queue, scheduler |
-| **[@promin/container](./packages/container/)** | Container step executor (Docker, K8s, local process) |
+| Package                                                    | Description                                                                                       |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| **[@promin/workflow](./packages/workflow/)**               | Durable workflows, distributed workers, state machines, scheduler, SQL models                     |
+| **[@promin/data](./packages/data/)**                       | DataFrame, data quality, profiling, diff, contracts                                               |
+| **[@promin/duckdb](./packages/duckdb/)**                   | DuckDB executor for DataFrame — SQL compilation, file sources                                     |
+| **[@promin/postgres](./packages/postgres/)**               | Postgres workflow storage, step queue (SKIP LOCKED), durable scheduler, leader leases, registries |
+| **[@promin/redis](./packages/redis/)**                     | Redis workflow storage, step queue, scheduler, state machines (Cluster-safe)                      |
+| **[@promin/sqlite](./packages/sqlite/)**                   | SQLite workflow storage, step queue, scheduler, leader leases                                     |
+| **[@promin/workflow-remote](./packages/workflow-remote/)** | Workflow storage and worker RPC over HTTP                                                         |
+| **[@promin/container](./packages/container/)**             | Container step executor (Docker, K8s, local process)                                              |
 
 The effect runtime, streams and concurrency primitives come from [perfect](https://github.com/spilne/perfect) (`@spilne/perfect-core`); HTTP client, Kafka transport, and stateful stream topology live there too: `@spilne/perfect-http`, `@spilne/perfect-kafka`, `@spilne/perfect-topology`.
 
@@ -31,18 +33,25 @@ bun install
 ```
 
 ```typescript
-import { tryPromise } from "@spilne/perfect-core";
-import { DataFrame, col } from "@promin/data";
-import { workflow } from "@promin/workflow";
+import { TaggedError, tryPromise } from "@spilne/perfect-core";
+import { col, DataFrame } from "@promin/data";
+import { createWorkflowRunner, InMemoryWorkflowStorage, workflow } from "@promin/workflow";
+
+class FetchError extends TaggedError("FetchError")<{ message: string }>() {}
+class TimeoutError extends TaggedError("TimeoutError")<{ message: string }>() {}
 
 // perfect — typed async effects with retry and timeout
-const result = await tryPromise(() => fetch("/api/data").then((r) => r.json()), (e) => new FetchError(e))
+const data = await tryPromise(
+  () => fetch("https://api.example.com/data").then((r) => r.json()),
+  (e) => new FetchError({ message: String(e) }),
+)
   .retry({ times: 3, backoff: "exponential" })
-  .timeoutFail(5_000, () => new TimeoutError())
+  .timeoutFail(5_000, () => new TimeoutError({ message: "slow" }))
   .orDie()
   .run();
 
 // DataFrame — analytics with pluggable executors
+declare const sales: { region: string; revenue: number }[];
 const topRegions = await DataFrame.fromArray(sales)
   .filter(col("revenue").gt(1000))
   .groupBy("region")
@@ -51,16 +60,26 @@ const topRegions = await DataFrame.fromArray(sales)
   .limit(10)
   .collect();
 
-// Durable workflow — survives crashes, supports signals
-const kyc = workflow<KycInput>({ name: "kyc", storage })
-  .stepAsync("validate", async ({ input }) => validate(input))
-  .stepAsync("submit-check", async ({ input }) => submitCheck(input))
-  .waitForSignal<CheckResult>("result", { signalName: "check-done", timeoutMs: 30 * 60_000 })
-  .stepAsync("decide", async ({ prev }) => prev.passed ? approve() : reject())
+// Durable workflow — survives crashes, waits for signals
+declare function submitCheck(input: { userId: string }): Promise<{ checkId: string }>;
+const kyc = workflow<{ userId: string }>({ name: "kyc" })
+  .stepAsync("submit-check", ({ input }) => submitCheck(input))
+  .waitForSignal<{ passed: boolean }>("result", {
+    signalName: "check-done",
+    timeoutMs: 30 * 60_000,
+  })
+  .stepAsync("decide", async ({ prev }) => (prev.passed ? "approved" : "rejected"))
   .build();
 
-await kyc.runSafe({ workflowId: "kyc-123", input });
-const status = await kyc.getStatus("kyc-123");
+const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+const handle = await runner.start({
+  workflow: kyc,
+  workflowId: "kyc-123",
+  input: { userId: "u1" },
+});
+await handle.signal({ signalName: "check-done", payload: { passed: true } });
+const status = await runner.getStatus({ workflowId: "kyc-123" });
+console.log(data, topRegions, status?.state);
 ```
 
 ## Development
@@ -74,13 +93,13 @@ bun run bench:all    # all benchmark suites
 
 ### Commands
 
-| Command | Description |
-|---|---|
-| `bun run test` | Tests (workflow, data, postgres, redis; store tests use testcontainers) |
-| `bun run bench` | Cross-language benchmarks (Promin vs Pandas vs Polars) |
-| `bun run bench:all` | All benchmarks (dataframe, workflow, cross-language) |
-| `bun nx run-many -t typecheck` | Typecheck all packages |
-| `bun nx run-many -t lint` | Lint all packages |
+| Command                        | Description                                                             |
+| ------------------------------ | ----------------------------------------------------------------------- |
+| `bun run test`                 | Tests (workflow, data, postgres, redis; store tests use testcontainers) |
+| `bun run bench`                | Cross-language benchmarks (Promin vs Pandas vs Polars)                  |
+| `bun run bench:all`            | All benchmarks (dataframe, workflow, cross-language)                    |
+| `bun nx run-many -t typecheck` | Typecheck all packages                                                  |
+| `bun nx run-many -t lint`      | Lint all packages                                                       |
 
 ## Architecture
 
@@ -89,8 +108,9 @@ bun run bench:all    # all benchmark suites
   Eff<A,S>, Stream<A,S>  — effect runtime, streams, retry, concurrency primitives
 
 @promin/workflow
-  workflow()             — durable workflows with DAG, signals, sleep
-  Distributed            — coordinator + workers via Postgres SKIP LOCKED
+  workflow()             — durable workflows: DAG steps, journaled steps, signals, sleep, sagas
+  /distributed           — distributed runner + workers over a step queue
+  /scheduler             — cron / RRULE / interval schedules, fenced leader leases
 
 @promin/data (no native deps)
   DataFrame<T>           — lazy analytics with pluggable executors
@@ -99,23 +119,23 @@ bun run bench:all    # all benchmark suites
   DuckDBExecutor         — compiles DataFrame plans to SQL
   AutoExecutor           — smart routing: Array for small, DuckDB for large
 
-@promin/redis, @promin/postgres
-  Workflow storage, step queue and scheduler backends
+@promin/postgres, @promin/redis, @promin/sqlite, @promin/workflow-remote
+  Workflow storage, step queue and scheduler backends (and HTTP transport)
 ```
 
 ## Technology Stack
 
-| Purpose | Library |
-|---|---|
-| Runtime | Bun |
-| Language | TypeScript |
+| Purpose        | Library                          |
+| -------------- | -------------------------------- |
+| Runtime        | Bun                              |
+| Language       | TypeScript                       |
 | FP/Concurrency | perfect (`@spilne/perfect-core`) |
-| Validation | Zod |
-| Monorepo | Nx |
-| Linting | oxlint |
-| Formatting | oxfmt |
-| Testing | bun:test |
-| Benchmarking | mitata |
+| Validation     | Zod                              |
+| Monorepo       | Nx                               |
+| Linting        | oxlint                           |
+| Formatting     | oxfmt                            |
+| Testing        | bun:test                         |
+| Benchmarking   | mitata                           |
 
 ## Documentation
 

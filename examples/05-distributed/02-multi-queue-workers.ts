@@ -1,53 +1,62 @@
 /**
- * Multi-queue worker setup for the video pipeline.
- * Coordinator routes steps to specialized queues.
- * Each worker process handles its own queue.
+ * Specialized workers for the video pipeline.
+ * Steps declare the capabilities they need; workers declare what they offer
+ * and the step names they host. The queue matches them inside each claim.
  */
 
-import { InMemoryWorkflowStorage } from "@promin/workflow";
-import { createDistributedWorkflowRunner } from "@promin/workflow/distributed";
-import { createWorker, MapStepRegistry, InMemoryStepQueue } from "@promin/workflow/distributed";
+import { InMemoryWorkflowStorage, workflow } from "@promin/workflow";
+import {
+  createDistributedWorkflowRunner,
+  createWorker,
+  InMemoryStepQueue,
+  MapStepRegistry,
+} from "@promin/workflow/distributed";
+import { succeed } from "@spilne/perfect-core";
 
+// Shared by every process (Postgres / Redis / SQLite stores in production).
 const storage = new InMemoryWorkflowStorage();
 const stepQueue = new InMemoryStepQueue();
 
-// --- Coordinator process ---
+// The definition. Under the distributed runner each step becomes a queue
+// task named after the step; the registered worker handlers run, not these
+// bodies (they run when the same workflow is used in-process).
+const processVideo = workflow<{ videoId: string }>({ name: "process-video" })
+  .step("download", ({ input }) => succeed({ path: `/tmp/${input.videoId}.mp4` }))
+  .step("transcribe", ({ prev }) => succeed({ text: `Transcription of ${prev.path}` }), {
+    needs: ["gpu"],
+  })
+  .step("summarize", ({ prev }) => succeed({ summary: prev.text.slice(0, 50) }), {
+    needs: ["ai"],
+  })
+  .build();
 
-// Routing is now declared on each step via `needs` (see the workflow
-// definition in 01-video-pipeline.ts). Workers declare capabilities;
-// the coordinator just dispatches.
+// --- Coordinator process ---
 const coordinator = createDistributedWorkflowRunner({ storage, stepQueue });
 
-// --- Default worker (download, general tasks) ---
-
+// --- Default worker (download) ---
 const defaultRegistry = new MapStepRegistry();
 defaultRegistry.register({
   stepName: "download",
-  handler: async (ctx) => {
-    const videoId = (ctx.input as any).videoId;
-    return { path: `/tmp/${videoId}.mp4` };
-  },
+  handler: async (ctx) => ({ path: `/tmp/${(ctx.input as { videoId: string }).videoId}.mp4` }),
 });
-
 const defaultWorker = createWorker({
   storage,
   stepQueue,
   registry: defaultRegistry,
-  capabilities: ["default"],
   concurrency: 5,
 });
 
 // --- GPU worker (transcription) ---
-
 const gpuRegistry = new MapStepRegistry();
 gpuRegistry.register({
   stepName: "transcribe",
+  // `ctx.deps` holds every result the run has so far, by step name.
   handler: async (ctx) => {
-    const path = (ctx.prev as any).path;
+    const { path } = ctx.deps["download"] as { path: string };
     return { text: `Transcription of ${path}` };
   },
+  retry: { maxRetries: 2 },
 });
-
 const gpuWorker = createWorker({
   storage,
   stepQueue,
@@ -57,16 +66,14 @@ const gpuWorker = createWorker({
 });
 
 // --- AI worker (summarization) ---
-
 const aiRegistry = new MapStepRegistry();
 aiRegistry.register({
   stepName: "summarize",
   handler: async (ctx) => {
-    const text = (ctx.prev as any).text;
-    return { summary: `Summary: ${text.slice(0, 50)}` };
+    const { text } = ctx.deps["transcribe"] as { text: string };
+    return { summary: text.slice(0, 50) };
   },
 });
-
 const aiWorker = createWorker({
   storage,
   stepQueue,
@@ -75,16 +82,17 @@ const aiWorker = createWorker({
   concurrency: 10,
 });
 
-// Start all processes
+// Start the loops. `start()` resolves only once a worker stops, so don't await it.
 void coordinator.startLoop();
-await defaultWorker.start();
-await gpuWorker.start();
-await aiWorker.start();
+for (const worker of [defaultWorker, gpuWorker, aiWorker]) void worker.start();
 
-// Submit work
-declare const processVideo: any;
-await coordinator.submit({
+const result = await coordinator.run({
   workflow: processVideo,
   workflowId: "video-abc",
   input: { videoId: "abc" },
 });
+console.log(result); // { summary: "Transcription of /tmp/abc.mp4" }
+
+// Graceful shutdown: unfinished tasks are released to other workers after 10 s.
+await Promise.all([defaultWorker, gpuWorker, aiWorker].map((w) => w.stop({ timeoutMs: 10_000 })));
+await coordinator.stopLoop();

@@ -185,8 +185,9 @@ export interface WorkflowHandle<Output, E extends TaggedError = never> {
   signal(params: { signalName: string; payload: unknown }): Promise<void>;
 
   /**
-   * Wait for the workflow to complete. Resumes suspended workflows on each
-   * poll. The run may execute elsewhere, so a failure is read back from
+   * Wait for the workflow to complete by polling storage (it does not
+   * resume a suspended run; the scanners or another `run` do). The run may
+   * execute elsewhere, so a failure is read back from
    * storage: `result()` rejects with `WorkflowFailedError`, whose `errorTag`
    * is the `_tag` of the error that failed the run (for a typed failure,
    * one of `E["_tag"]`), `WorkflowCancelledError` or `WorkflowTripwireError`.

@@ -27,7 +27,7 @@ Resilient async actions (retry, timeout, circuit breaker, race, cache), stream c
 | File                   | Scenario                                                       |
 | ---------------------- | -------------------------------------------------------------- |
 | 01-video-pipeline      | Download → transcribe → summarize (same code for dev and prod) |
-| 02-multi-queue-workers | Coordinator + GPU/AI/default workers with routing              |
+| 02-multi-queue-workers | Coordinator + GPU/AI/default workers, capability routing       |
 
 ## 06-scheduler — Recurring tasks
 

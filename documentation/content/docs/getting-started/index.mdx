@@ -5,15 +5,17 @@ title: Getting Started
 Install the workflow package:
 
 ```bash
-bun add @promin/workflow     # Durable workflows with compensation (sagas)
+bun add @promin/workflow @spilne/perfect-core   # Durable workflows
 ```
 
 Optional packages for specific use cases:
 
 ```bash
 bun add @promin/data         # DataFrame, profiling, diff, quality checks
-bun add @promin/redis        # Redis workflow storage, step queue, scheduler
 bun add @promin/postgres     # Postgres workflow storage, step queue, scheduler
+bun add @promin/redis        # Redis workflow storage, step queue, scheduler
+bun add @promin/sqlite       # SQLite workflow storage, step queue, scheduler
+bun add @promin/workflow-remote  # workflow storage and workers over HTTP
 bun add @promin/duckdb       # DuckDB executor for analytical queries
 ```
 
@@ -23,10 +25,12 @@ Promin is built on [perfect](https://github.com/spilne/perfect). For resilient a
 
 | Package | What it provides |
 |---------|-----------------|
-| `@promin/workflow` | Durable workflows, DAG steps, compensation, distributed workers |
-| `@promin/data` | DataFrame, data profiler, diff, quality, contracts, SQL models |
+| `@promin/workflow` | Durable workflows, DAG steps, compensation, distributed workers, schedulers, SQL models |
+| `@promin/data` | DataFrame, data profiler, diff, quality, contracts |
+| `@promin/postgres` | Postgres workflow storage, step queue, scheduler, leases, registries |
 | `@promin/redis` | Redis workflow storage, step queue, scheduler, state machine storage |
-| `@promin/postgres` | Postgres workflow storage, step queue, scheduler |
+| `@promin/sqlite` | SQLite workflow storage, step queue, scheduler |
+| `@promin/workflow-remote` | Workflow storage and worker RPC over HTTP |
 | `@promin/duckdb` | DuckDB executor for analytical queries |
 
 ## Your first Workflow
@@ -34,23 +38,32 @@ Promin is built on [perfect](https://github.com/spilne/perfect). For resilient a
 Durable workflows survive crashes. Each step is persisted — on restart, completed steps are skipped automatically.
 
 ```typescript
-import { workflow } from "@promin/workflow";
+import { createWorkflowRunner, InMemoryWorkflowStorage, workflow } from "@promin/workflow";
 
-const orderFlow = workflow({ name: "process-order", storage })
-  .stepAsync("validate", async ({ input }) => validate(input))
-  .stepAsync("charge", async ({ prev }) => charge(prev), {
-    compensate: async ({ result }) => refund(result),
+declare function validate(order: { id: string }): Promise<{ id: string; total: number }>;
+declare function charge(order: { id: string; total: number }): Promise<{ chargeId: string }>;
+declare function refund(chargeId: string): Promise<void>;
+declare function ship(chargeId: string): Promise<{ trackingId: string }>;
+
+const orderFlow = workflow<{ id: string }>({ name: "process-order" })
+  .stepAsync("validate", ({ input }) => validate(input))
+  .stepAsync("charge", ({ prev }) => charge(prev), {
+    compensate: ({ result }) => refund(result.chargeId),
   })
-  .stepAsync("ship", async ({ prev }) => ship(prev))
+  .stepAsync("ship", ({ prev }) => ship(prev.chargeId))
   .build();
 
-const result = await orderFlow.run({ workflowId: "order-1", input: order });
+// A Workflow is plain data; a runner executes it against a storage.
+const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+const result = await runner.run({ workflow: orderFlow, workflowId: "order-1", input: { id: "1" } });
 ```
 
-If "ship" fails, the workflow automatically runs the "charge" compensation (refund) — a saga pattern with zero boilerplate.
+If "ship" fails for good, the run compensates the completed "charge" step (refund) and then fails — a saga with no extra code. Running the same `workflowId` again after a crash resumes from the last checkpointed step; running a completed one returns its stored result. Swap `InMemoryWorkflowStorage` for Postgres, Redis or SQLite storage to survive restarts.
 
 ## Next steps
 
-- [Workflows](/docs/workflow/workflows) — durable execution, compensation, distributed workers
+- [Workflows](/docs/workflow/workflows) — the builder, run lifecycle, retries, compensation, journaled steps
+- [Storage](/docs/workflow/storage) — backends and their capabilities
+- [Distributed workers](/docs/workflow/distributed-workers) — coordinator, workers, delivery guarantees
 - [DataFrame](/docs/data/dataframe) — lazy analytics with expression builder
 - [perfect](https://github.com/spilne/perfect) — the effect runtime promin is built on: `Eff`, streams, retry, timeout, and concurrency primitives (`@spilne/perfect-core`)

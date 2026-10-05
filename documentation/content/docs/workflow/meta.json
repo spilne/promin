@@ -1,10 +1,13 @@
 {
   "title": "Workflow",
   "pages": [
+    "overview",
     "workflows",
+    "storage",
     "distributed-workers",
-    "sql-models",
     "scheduler",
+    "versioning",
+    "sql-models",
     "examples"
   ]
 }

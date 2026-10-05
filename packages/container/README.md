@@ -14,31 +14,30 @@ Three runtimes, same interface:
 
 ```typescript
 import { containerStep, LocalProcessRuntime } from "@promin/container";
-import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
+import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { createWorker, InMemoryStepQueue, MapStepRegistry } from "@promin/workflow/distributed";
 
 const runtime = new LocalProcessRuntime();
 
+const [handler, options] = containerStep({
+  spec: {
+    image: "my-ml-image:latest",
+    command: ["python", "train.py"],
+    memoryLimit: "4g",
+    timeoutMs: 300_000,
+  },
+  runtime,
+});
 const registry = new MapStepRegistry();
-registry.register(
-  "train-model",
-  ...containerStep({
-    spec: {
-      image: "my-ml-image:latest",
-      command: ["python", "train.py"],
-      memoryLimit: "4g",
-      timeoutMs: 300_000,
-    },
-    runtime,
-  }),
-);
+registry.register({ stepName: "train-model", handler, ...options });
 
 const worker = createWorker({
-  storage,
-  stepQueue,
+  storage: new InMemoryWorkflowStorage(), // the shared workflow storage in production
+  stepQueue: new InMemoryStepQueue(), // the shared step queue
   registry,
-  queues: ["gpu"],
+  capabilities: ["gpu"], // claims steps declared with { needs: ["gpu"] }
 });
-worker.start();
+void worker.start();
 ```
 
 ## I/O Protocol
@@ -109,26 +108,26 @@ console.log(result.durationMs);
 Runs containers via `docker run` CLI. Volume-mounts a temp directory for I/O.
 
 ```typescript
-import { DockerRuntime } from "@promin/container";
+import { containerStep, DockerRuntime } from "@promin/container";
+import { MapStepRegistry } from "@promin/workflow/distributed";
 
 const runtime = new DockerRuntime({
   network: "workflows", // Docker network
   extraArgs: ["--gpus", "all"], // pass-through args
 });
 
-registry.register(
-  "transcribe",
-  ...containerStep({
-    spec: {
-      image: "openai/whisper:latest",
-      command: ["python", "-m", "whisper", "--input", "/pipeline/input.json"],
-      memoryLimit: "8g",
-      cpuLimit: "4",
-      timeoutMs: 600_000,
-    },
-    runtime,
-  }),
-);
+const [handler, options] = containerStep({
+  spec: {
+    image: "openai/whisper:latest",
+    command: ["python", "-m", "whisper", "--input", "/pipeline/input.json"],
+    memoryLimit: "8g",
+    cpuLimit: "4",
+    timeoutMs: 600_000,
+  },
+  runtime,
+});
+const registry = new MapStepRegistry();
+registry.register({ stepName: "transcribe", handler, ...options });
 ```
 
 ### K8sRuntime
@@ -136,7 +135,8 @@ registry.register(
 Creates Kubernetes Jobs. Input mounted via ConfigMap, output read from pod logs.
 
 ```typescript
-import { K8sRuntime } from "@promin/container";
+import { containerStep, K8sRuntime } from "@promin/container";
+import { MapStepRegistry } from "@promin/workflow/distributed";
 
 const runtime = new K8sRuntime({
   namespace: "ml-workflows",
@@ -146,24 +146,23 @@ const runtime = new K8sRuntime({
   ttlAfterFinished: 3600,
 });
 
-registry.register(
-  "train-model",
-  ...containerStep({
-    spec: {
-      image: "my-registry.com/ml-trainer:v2",
-      command: ["python", "train.py"],
-      memoryLimit: "16Gi",
-      cpuLimit: "8",
-      gpu: true,
-      timeoutMs: 3600_000,
-    },
-    runtime,
-    options: {
-      retry: { maxRetries: 2 },
-      onFailure: { fallback: () => ({ status: "failed", model: null }) },
-    },
-  }),
-);
+const [handler, options] = containerStep({
+  spec: {
+    image: "my-registry.com/ml-trainer:v2",
+    command: ["python", "train.py"],
+    memoryLimit: "16Gi",
+    cpuLimit: "8",
+    gpu: true,
+    timeoutMs: 3600_000,
+  },
+  runtime,
+  options: {
+    retry: { maxRetries: 2 },
+    onFailure: { fallback: () => ({ status: "failed", model: null }) },
+  },
+});
+const registry = new MapStepRegistry();
+registry.register({ stepName: "train-model", handler, ...options });
 ```
 
 ## Mixed Workflow — In-Process + Container Steps
@@ -171,13 +170,28 @@ registry.register(
 Same workflow, some steps local, some containerized:
 
 ```typescript
-import { workflow, createWorkflowRunner, RoutingStepExecutor } from "@promin/workflow";
-import { createWorker, StepQueueExecutor } from "@promin/workflow/distributed";
+import { containerStep, DockerRuntime } from "@promin/container";
+import {
+  createWorkflowRunner,
+  InMemoryWorkflowStorage,
+  RoutingStepExecutor,
+  workflow,
+} from "@promin/workflow";
+import {
+  createWorker,
+  InMemoryStepQueue,
+  MapStepRegistry,
+  StepQueueExecutor,
+} from "@promin/workflow/distributed";
+import { succeed } from "@spilne/perfect-core";
+
+const storage = new InMemoryWorkflowStorage();
+const stepQueue = new InMemoryStepQueue();
 
 const processVideo = workflow<{ videoId: string }>({ name: "process-video" })
-  .step("download", ({ input }) => downloadVideo(input.videoId)) // local
-  .step("transcribe", { dependsOn: ["download"] }, fn, { needs: ["gpu"] }) // → GPU worker
-  .step("summarize", { dependsOn: ["transcribe"] }, fn) // local
+  .step("download", ({ input }) => succeed({ path: `/tmp/${input.videoId}.mp4` })) // local
+  .step("transcribe", { dependsOn: ["download"] }, () => succeed({ text: "" }), { needs: ["gpu"] }) // → GPU worker
+  .step("summarize", { dependsOn: ["transcribe"] }, ({ deps }) => succeed(deps.transcribe.text)) // local
   .build();
 
 // "transcribe" goes through the step queue; every other step runs in-process.
@@ -190,11 +204,20 @@ const runner = createWorkflowRunner({
   }),
 });
 
-// GPU worker runs container steps
+// GPU worker runs the container step.
+const [handler, options] = containerStep({
+  spec: { image: "openai/whisper:latest", command: ["python", "-m", "whisper"] },
+  runtime: new DockerRuntime(),
+});
+const gpuRegistry = new MapStepRegistry();
+gpuRegistry.register({ stepName: "transcribe", handler, ...options });
 const gpuWorker = createWorker({
   storage,
   stepQueue,
-  registry: gpuRegistry, // has containerStep("transcribe") registered
+  registry: gpuRegistry,
   capabilities: ["gpu"],
 });
+void gpuWorker.start();
+
+await runner.run({ workflow: processVideo, workflowId: "video-1", input: { videoId: "abc" } });
 ```

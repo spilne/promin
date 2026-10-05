@@ -11,8 +11,10 @@ TypeScript toolkit for resilient async operations, durable workflows, stream pro
 | --- | --- |
 | [`@promin/workflow`](/docs/workflow/workflows) | Durable workflows, state machines, distributed workers, scheduler |
 | [`@promin/data`](/docs/data/dataframe) | DataFrame, data quality, profiling, diff |
-| [`@promin/redis`](/docs/integrations/redis) | Redis workflow storage, step queue, scheduler |
-| [`@promin/postgres`](/docs/integrations/postgres) | Postgres stores — workflow storage, step queue, scheduler |
+| [`@promin/redis`](/docs/integrations/redis) | Redis workflow storage, step queue, scheduler, state machines (Cluster-safe) |
+| [`@promin/postgres`](/docs/integrations/postgres) | Postgres stores — workflow storage, step queue, scheduler, leases, registries |
+| [`@promin/sqlite`](/docs/integrations/sqlite) | SQLite workflow storage, step queue, scheduler |
+| [`@promin/workflow-remote`](/docs/integrations/workflow-remote) | Workflow storage and worker RPC over HTTP |
 | [`@promin/duckdb`](/docs/data/dataframe) | DuckDB executor for DataFrame — SQL, Arrow IPC |
 
 The effect runtime, streams, retry/timeout, and concurrency primitives (semaphore, queue, circuit breaker, rate limiter, cache) come from [perfect](https://github.com/spilne/perfect) — `@spilne/perfect-core`. HTTP client, Kafka transport, and stateful stream topology live there too: `@spilne/perfect-http`, `@spilne/perfect-kafka`, `@spilne/perfect-topology`.
@@ -21,25 +23,44 @@ The effect runtime, streams, retry/timeout, and concurrency primitives (semaphor
 
 ### [Durable Workflows](/docs/workflow/workflows) — Crash-recoverable execution
 
-DAG-based workflows with compensation (sagas), map steps, sleep/signal, retry, and visual editor schema.
+Typed DAG steps on perfect `Eff`, checkpoint and resume, journaled steps, durable sleep and signals, child workflows, compensation (sagas) and typed errors. Storage is pluggable: in-memory, [Postgres](/docs/integrations/postgres), [Redis](/docs/integrations/redis), [SQLite](/docs/integrations/sqlite) or [over HTTP](/docs/integrations/workflow-remote).
 
 ```typescript
-const orderFlow = workflow({ name: "process-order", storage })
-  .stepAsync("validate", async ({ input }) => validate(input))
-  .stepAsync("charge", async ({ prev }) => charge(prev), {
-    compensate: async ({ result }) => refund(result),
+import { createWorkflowRunner, InMemoryWorkflowStorage, workflow } from "@promin/workflow";
+
+declare function charge(orderId: string): Promise<{ chargeId: string }>;
+declare function refund(chargeId: string): Promise<void>;
+declare function ship(chargeId: string): Promise<{ trackingId: string }>;
+
+const orderFlow = workflow<{ orderId: string }>({ name: "process-order" })
+  .stepAsync("charge", ({ input }) => charge(input.orderId), {
+    compensate: ({ result }) => refund(result.chargeId),
   })
-  .stepAsync("ship", async ({ prev }) => ship(prev))
+  .stepAsync("ship", ({ prev }) => ship(prev.chargeId))
   .build();
+
+const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+await runner.run({ workflow: orderFlow, workflowId: "order-1", input: { orderId: "1" } });
 ```
 
 ### [Distributed Workers](/docs/workflow/distributed-workers) — Multi-machine step execution
 
-Coordinator + workers via Postgres queues. Route steps to specialized hardware (GPU, AI). Same workflow definition works in-process and distributed.
+A distributed runner hands steps to a step queue; workers claim the steps they host (by step name, capabilities and version) and commit the outcome. Same workflow definition in-process and distributed; at-least-once step execution with claim-token fencing.
 
 ```typescript
-const runner = createDistributedWorkflowRunner({ storage, stepQueue });
-await runner.submit({ workflow: processVideo, workflowId: "v1", input });
+import { InMemoryWorkflowStorage, workflow } from "@promin/workflow";
+import { createDistributedWorkflowRunner, InMemoryStepQueue } from "@promin/workflow/distributed";
+import { succeed } from "@spilne/perfect-core";
+
+const processVideo = workflow<{ videoId: string }>({ name: "process-video" })
+  .step("transcribe", ({ input }) => succeed(input.videoId), { needs: ["gpu"] })
+  .build();
+
+const runner = createDistributedWorkflowRunner({
+  storage: new InMemoryWorkflowStorage(),
+  stepQueue: new InMemoryStepQueue(),
+});
+await runner.submit({ workflow: processVideo, workflowId: "v1", input: { videoId: "abc" } });
 ```
 
 ### [DataFrame](/docs/data/dataframe) — Lazy analytics
@@ -47,11 +68,15 @@ await runner.submit({ workflow: processVideo, workflowId: "v1", input });
 Composable DataFrame with expression builder, window functions, joins, and pluggable executors (Array or DuckDB).
 
 ```typescript
-const result = await DataFrame.fromRows(sales)
+import { col, DataFrame, lit } from "@promin/data";
+
+declare const sales: { region: string; amount: number }[];
+
+const result = await DataFrame.fromArray(sales)
   .filter(col("amount").gt(lit(100)))
   .groupBy("region")
-  .agg({ total: { column: "amount", fn: "sum" } })
-  .sort("total", "desc")
+  .agg({ amount: "sum" })
+  .sort("amount", "desc")
   .collect();
 ```
 
@@ -61,4 +86,6 @@ const result = await DataFrame.fromRows(sales)
 | --- | --- |
 | [Data Quality](/docs/data/quality) | Profiling, expectations, diff, contracts |
 | [SQL Models](/docs/workflow/sql-models) | dbt-style SQL model DAG with materialization |
-| [Scheduler](/docs/workflow/scheduler) | Cron + rrule-based workflow scheduling |
+| [Scheduler](/docs/workflow/scheduler) | Cron / RRULE / interval schedules, at-least-once ticks, fenced leader leases |
+| [Storage](/docs/workflow/storage) | The storage contract, capabilities per backend, fencing |
+| [Versioning](/docs/workflow/versioning) | Strict / drain / `ctx.patched()` / rolling worker deploys |

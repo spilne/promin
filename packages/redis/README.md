@@ -1,6 +1,6 @@
 # @promin/redis
 
-Redis backends for `@promin/workflow`: workflow storage, the distributed step queue, the durable scheduler, and state machine storage.
+Redis backends for `@promin/workflow`: workflow storage (`RedisWorkflowStorage`), the distributed step queue (`RedisStepQueue`), the durable scheduler (`RedisSchedulerStorage`, `RedisDurableScheduler`), leader leases (`RedisLeaderLeaseStore`) and state machine storage (`RedisStateMachineStorage`). Every store is Redis Cluster safe (see [key layout](#redis-cluster)).
 
 Generic distributed primitives (refs, semaphores, latches, rate limiters, cache store, streams, pub/sub, queues) live in [`@spilne/perfect-redis`](https://www.npmjs.com/package/@spilne/perfect-redis). One connection can back both.
 
@@ -19,10 +19,19 @@ const redis = new Redis("redis://localhost:6379") as unknown as RedisStoreClient
 
 ## RedisWorkflowStorage
 
-Full `WorkflowStorage` (including the activity journal and journaled suspend) for the `@promin/workflow` engine. Workflow state, step results, signals, sleeps and fenced locks live in hashes and sorted sets.
+Full `WorkflowStorage` for the `@promin/workflow` engine. Workflow state, step results, the activity journal, signals, sleeps and fenced locks live in hashes and sorted sets; every fenced write is one Lua script that compares the fence token before writing, and a lock is a key with a `PX` expiry, so an expired lock fences nothing.
+
+| Capability                                  |     | Capability                                     |                      |
+| ------------------------------------------- | :-: | ---------------------------------------------- | :------------------: |
+| `journal`, `stepAttempts`, `stepCheckpoint` | yes | `summaries`, `countWorkflows`                  | yes (index records)  |
+| `compensationLedger`                        | yes | `dueTimers` / `signalWakeups` / `orphanedRuns` |         yes          |
+| `tripwire`, `resetSteps`                    | yes | `runEvents` / `stepStartedEvents`              | – (the runner polls) |
+|                                             |     | `cancelStale`                                  |          –           |
 
 ```typescript
-import { RedisWorkflowStorage } from "@promin/redis";
+import { RedisWorkflowStorage, type RedisStoreClient } from "@promin/redis";
+
+declare const redis: RedisStoreClient;
 
 const storage = new RedisWorkflowStorage({
   redis,
@@ -40,6 +49,18 @@ const storage = new RedisWorkflowStorage({
 `checkpointStep` writes a settled step's row and its attempt rows and reads back the run's status in one fenced script, so the runner spends one Redis round trip per step: a 100-step chain sends 109 commands in all, against 408 with the separate writes.
 
 ### Redis Cluster
+
+Key layout (`<p>` is the store's `prefix`):
+
+| Store                      | Keys                                                                                                                                                                     | Slot                       |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------- |
+| `RedisWorkflowStorage`     | `<p>:{wf:<id>}` (run hash) and `<p>:{wf:<id>}:steps:<run>`, `:tasks:…`, `:lock`, `:fence`, `:journal:…`, `:signals`, `:signal_tokens`, `:streams:…`, `:child-intents`, … | one per workflow           |
+|                            | `<p>:{idx}:status:<s>`, `:name:<n>`, `:ns:<ns>`, `:children:<id>`, ordering sets, the sleep schedule                                                                     | one for all indexes        |
+|                            | `<p>:wf-idempotency:<ns>:<name>:<key>`, `<p>:signal_token:<tokenId>` (single-key lookups)                                                                                | any                        |
+| `RedisStepQueue`           | `{<p>}:task:<id>`, `{<p>}:pending`, running / done sets, concurrency-key sets                                                                                            | one per queue              |
+| `RedisSchedulerStorage`    | `{<p>}:schedule:<id>`, per-namespace due sets, the namespace set, leader leases                                                                                          | one per scheduler prefix   |
+| `RedisStateMachineStorage` | `<p>:{sm:<id>}:machine`, `:events`, `:lock`                                                                                                                              | one per machine            |
+| `RedisLeaderLeaseStore`    | `<p>:{<key>}:…` (holder with `PX`, persistent epoch counter); a prefix with its own tag keeps that tag                                                                   | per lease, or the prefix's |
 
 Every key of one workflow carries the hash tag `{wf:<workflowId>}`, so all of a workflow's keys share a slot. The cross-workflow indexes (status, name, parent and namespace sets, the ordering sorted sets, the sleep schedule) share the tag `{idx}`, so they all sit in one other slot. No script touches both slots:
 
@@ -60,9 +81,11 @@ The other stores are Cluster-safe too:
 Distributed `StepQueue`. Pending tasks sit in a priority-ordered sorted set (higher priority first, FIFO within a priority); enqueue, claim, complete, fail and requeue are Lua scripts, so each is atomic.
 
 ```typescript
-import { RedisStepQueue } from "@promin/redis";
+import { RedisStepQueue, type RedisStoreClient } from "@promin/redis";
 
-const queue = new RedisStepQueue({ redis, prefix: "sq", workerId: "worker-1" });
+declare const redis: RedisStoreClient;
+
+const queue = new RedisStepQueue({ redis, prefix: "sq", maxDeliveries: 10 });
 
 await queue.enqueue({
   workflowId: "wf-1",
@@ -110,7 +133,9 @@ await queue.purge({ completedBefore: new Date(Date.now() - 24 * 60 * 60 * 1000) 
 The `@promin/workflow` `DurableScheduler` (cron, rrule, intervals, catch-up, jitter, leader election) on `RedisSchedulerStorage`. Swapping it for the Postgres scheduler is a one-line change.
 
 ```typescript
-import { RedisDurableScheduler } from "@promin/redis";
+import { RedisDurableScheduler, type RedisStoreClient } from "@promin/redis";
+
+declare const redis: RedisStoreClient;
 
 const scheduler = new RedisDurableScheduler({ redis, prefix: "sched", pollIntervalMs: 1000 });
 
@@ -125,7 +150,14 @@ State machine persistence with transition history and TTLs for terminal or aband
 
 ```typescript
 import { stateMachine } from "@promin/workflow";
-import { RedisStateMachineStorage } from "@promin/redis";
+import { RedisStateMachineStorage, type RedisStoreClient } from "@promin/redis";
+
+declare const redis: RedisStoreClient;
+
+type OrderStates = {
+  open: { context: { items: number }; transitions: { close: "closed" } };
+  closed: { context: { items: number }; transitions: {} };
+};
 
 const storage = new RedisStateMachineStorage({
   redis,
@@ -135,7 +167,9 @@ const storage = new RedisStateMachineStorage({
 });
 
 const order = stateMachine<OrderStates>({ name: "order", storage })
-  // ...states and transitions
+  .state("open")
+  .state("closed", { terminal: true })
+  .on("close", { from: "open", to: "closed" })
   .build();
 ```
 
@@ -148,5 +182,9 @@ const order = stateMachine<OrderStates>({ name: "order", storage })
 Stores pass driver errors through unchanged. Reconnection is up to the driver (ioredis reconnects by default). The stores never close the connection you pass in. Close it yourself on shutdown:
 
 ```typescript
+import { Redis } from "ioredis";
+
+const redis = new Redis("redis://localhost:6379");
+// ... stores built on it ...
 redis.disconnect(); // ioredis
 ```

@@ -499,7 +499,7 @@ export class InMemoryWorkflowVersionRegistry implements WorkflowVersionRegistry 
 
 /**
  * Thin wrapper over `InMemoryWorkflowVersionRegistry` scoped to a single
- * workflow name. Returned by `InMemoryWorkflowVersionRegistry.for(name)` for
+ * workflow name, built with `new ScopedWorkflowVersionRegistry({ registry, name })`, for
  * a fluent API when you only manage one workflow's versions.
  */
 export class ScopedWorkflowVersionRegistry {

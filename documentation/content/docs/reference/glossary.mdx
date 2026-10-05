@@ -13,8 +13,8 @@ description: "How Promin concepts map to Temporal, Celery, Airflow, Spark, and P
 | **StepRegistry**       | Activity registry              | Task registry (@app.task) | Operator classes      | Maps step names to handler functions             |
 | **WorkflowStorage**    | Workflow history (event store) | Result backend            | XCom + metadata DB    | Persists workflow state and step results         |
 | **StepQueue**          | Task Queue                     | Broker (Redis/RabbitMQ)   | Executor queue        | Dispatches steps to workers                      |
-| **Worker**             | Worker                         | Worker (celery worker)    | Executor              | Process that polls queues and executes steps     |
-| **Coordinator**        | Temporal Server                | Beat + Flower             | Scheduler             | Orchestrates workflow execution, manages DAG     |
+| **Worker**             | Worker                         | Worker (celery worker)    | Executor              | Process that claims step tasks and runs handlers |
+| **DistributedWorkflowRunner** | Temporal Server         | Beat + Flower             | Scheduler             | Coordinator: drives runs, dispatches steps       |
 | **Sleep**              | Timer (workflow.sleep)         | countdown/eta             | TimeSensor            | Durable pause — survives process restart         |
 | **Signal**             | Signal                         | —                         | TriggerDagRunOperator | External message delivered to a running workflow |
 | **waitForSignal**      | condition() + setHandler       | —                         | ExternalTaskSensor    | Suspend workflow until external event            |
@@ -22,9 +22,10 @@ description: "How Promin concepts map to Temporal, Celery, Airflow, Spark, and P
 | **branch**             | if/else in workflow code       | —                         | BranchPythonOperator  | Conditional execution path                       |
 | **mapOver**            | —                              | group()                   | Dynamic task mapping  | Fan-out: run same step over a list               |
 | **Retry**              | RetryPolicy                    | autoretry                 | retries param         | Retry failed steps with backoff                  |
-| **WorkflowDefinition** | Workflow type                  | Task signature            | DAG object            | The compiled, runnable workflow                  |
-| **runSafe**            | client.workflow.start()        | .apply_async()            | dag.run()             | Start a workflow execution                       |
-| **loadWorkflow**       | client.workflow.query()        | AsyncResult               | get_task_instance()   | Query workflow state                             |
+| **Workflow**           | Workflow type                  | Task signature            | DAG object            | The built, portable workflow definition (`build()`) |
+| **journaled / ctx.activity** | Workflow code + activities | —                       | —                     | Generator step whose side effects are journaled  |
+| **runner.run / start** | client.workflow.start()        | .apply_async()            | dag.run()             | Run a workflow (`runSafe` returns `{ data, error }`) |
+| **getStatus / handle** | client.workflow.query()        | AsyncResult               | get_task_instance()   | Query workflow state                             |
 
 ### Key architectural differences
 
@@ -33,8 +34,9 @@ Temporal:  Dedicated server (Go binary) + gRPC + workers
 Celery:    Broker (Redis/RabbitMQ) + result backend + workers
 Airflow:   Scheduler + metadata DB + executor + workers
 ─────────────────────────────────────────────────────────────
-Promin:    Postgres only. Coordinator + workers are Bun processes.
-           SKIP LOCKED = task queue. No broker, no gRPC, no scheduler binary.
+Promin:    A library. Storage + step queue on Postgres, Redis or SQLite;
+           coordinators and workers are your own processes.
+           No broker, no gRPC, no scheduler binary.
 ```
 
 ---
@@ -90,8 +92,8 @@ Promin:   TypeScript, lazy logical plan, pluggable executors (Array/DuckDB/Auto)
 | Promin             | Temporal                    | Celery                          | Airflow                 | What it replaces                         |
 | ------------------ | --------------------------- | ------------------------------- | ----------------------- | ---------------------------------------- |
 | **Postgres**       | Temporal Server + Cassandra | Redis/RabbitMQ + result backend | Metadata DB + scheduler | Everything — queue, state, coordination  |
-| **SKIP LOCKED**    | gRPC task dispatch          | AMQP/Redis BRPOP                | Executor queue          | Exactly-once task claiming               |
-| **Advisory locks** | Membership protocol         | —                               | HA scheduler            | Leader election                          |
+| **SKIP LOCKED**    | gRPC task dispatch          | AMQP/Redis BRPOP                | Executor queue          | One claimer per task, fenced by claim token (execution is at-least-once) |
+| **Leader leases**  | Membership protocol         | —                               | HA scheduler            | Leader election with epoch fencing       |
 | **Bun process**    | Worker (JVM/Node)           | Worker (Python)                 | Worker (Python)         | Runtime                                  |
 | **`bun:test`**     | Test framework              | pytest                          | pytest                  | Testing                                  |
 | **perfect**        | —                           | —                               | —                       | Typed errors, fibers, retry, concurrency |

@@ -25,7 +25,7 @@ Promin supports all three via opt-in primitives.
 | `onVersionMismatch: "strict"` (default)                   | Throws `WorkflowVersionMismatchError` on resume when stored version != current   | Safe default — makes drift impossible to miss        |
 | `onVersionMismatch: "drain"` + `previousVersions: [v1]`   | Delegates resume to the stored version's definition                              | Letting in-flight workflows finish on old code       |
 | `patches: ["X"]` + `ctx.patched("X")` in a journaled body | Inline branches in the same code file, keyed on the currently-running definition | Small code tweaks that don't need a full v1/v2 split |
-| `InMemoryWorkflowVersionRegistry.for(name)`               | Central place holding many versions of one workflow, with drain events           | Long-lived workflows with 3+ coexisting versions     |
+| `InMemoryWorkflowVersionRegistry` + `run({ name })`       | Central place holding many versions of workflows, with drain events              | Long-lived workflows with 3+ coexisting versions     |
 | `supportedVersions: ["1", "2"]` on `createWorker`         | Worker claims only tasks whose version is in the allow-list                      | Rolling distributed deploys                          |
 
 ## Pattern 1 — Strict policy (default)
@@ -34,13 +34,19 @@ Add `version` to your workflow config. Attempts to resume an older-version row
 fail loudly with `WorkflowVersionMismatchError`.
 
 ```typescript
-workflow({ name: "billing", storage, version: "1" }).step("charge", ({ input }) =>
-  succeed({ charged: input.amount }),
-);
+import { createWorkflowRunner, InMemoryWorkflowStorage, workflow } from "@promin/workflow";
+import { succeed } from "@spilne/perfect-core";
+
+const billing = workflow<{ amount: number }>({ name: "billing", version: "1" })
+  .step("charge", ({ input }) => succeed({ charged: input.amount }))
+  .build();
+
+const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+await runner.run({ workflow: billing, workflowId: "invoice-001", input: { amount: 100 } });
 ```
 
-If you deploy v2 and try to `.run({ workflowId })` on an existing v1 row,
-you get:
+If you deploy v2 and run it (`runner.run({ workflow: v2, workflowId })`) on an
+existing v1 row, you get:
 
 ```
 Workflow "invoice-001" was created with version "1" but current code is
@@ -64,51 +70,77 @@ For a 2-version deploy (the common case), v2's config lists v1 in
 definition while using v2's code for fresh workflows.
 
 ```typescript
-const v1 = workflow({ name: "billing", storage, version: "1" })
+import { workflow } from "@promin/workflow";
+import { succeed } from "@spilne/perfect-core";
+
+const v1 = workflow<{ amount: number }>({ name: "billing", version: "1" })
   .step("charge", ({ input }) => succeed({ charged: input.amount, v: "1" }))
   .build();
 
-const v2 = workflow({
+const v2 = workflow<{ amount: number }>({
   name: "billing",
-  storage,
   version: "2",
   onVersionMismatch: "drain",
   previousVersions: [v1],
-}).step("charge", ({ input }) => succeed({ charged: input.amount * 1.1, v: "2" }));
+})
+  .step("charge", ({ input }) => succeed({ charged: input.amount * 1.1, v: "2" }))
+  .build();
 
-// v2.run() against an existing v1 row → runs v1's code
-// v2.run() against a new workflowId   → runs v2's code
+// runner.run({ workflow: v2, ... }) against an existing v1 row → runs v1's code
+// runner.run({ workflow: v2, ... }) against a new workflowId   → runs v2's code
 ```
 
 v1's definition stays in the codebase until all v1 workflows complete. Use
-`InMemoryWorkflowVersionRegistry.countByVersion()` to monitor drain progress.
+a version registry's `countByVersion({ name, storage })` to monitor drain progress.
 
 **Full example**: [`examples/versioning/02-drain-inline.ts`](./examples/versioning/02-drain-inline.ts)
 
 ## Pattern 3 — Registry for 3+ coexisting versions
 
 When you have more than 2-3 coexisting versions, managing `previousVersions`
-arrays gets unwieldy. Use `InMemoryWorkflowVersionRegistry.for(name)` — a scoped
-fluent builder that holds all versions, resolves them on resume, and fires
-events when a version drains to zero.
+arrays gets unwieldy. Register every version in an
+`InMemoryWorkflowVersionRegistry` (or the Postgres-backed
+`PostgresWorkflowVersionRegistry`), give it to the runner, and run by name:
+the registry resolves fresh runs to the latest version and resumes to the
+stored one, and fires `onDrained` when a version's in-flight count reaches
+zero.
 
 ```typescript
-const registry = InMemoryWorkflowVersionRegistry.for("job", {
+import {
+  createWorkflowRunner,
+  InMemoryWorkflowStorage,
+  InMemoryWorkflowVersionRegistry,
+  ScopedWorkflowVersionRegistry,
+  workflow,
+} from "@promin/workflow";
+import { succeed } from "@spilne/perfect-core";
+
+const job = (version: string) =>
+  workflow<{ x: number }>({ name: "job", version })
+    .step("run", ({ input }) => succeed(`v${version}-${input.x}`))
+    .build();
+
+const registry = new InMemoryWorkflowVersionRegistry({
   autoDeregister: true,
-  onDrained: (_name, version) => {
-    console.log(`version "${version}" has drained`);
-  },
-})
-  .register(v1)
-  .register(v2)
-  .register(v3);
+  onDrained: (_name, version) => console.log(`version "${version}" has drained`),
+});
+await registry.register(job("1"));
+await registry.register(job("2"));
+await registry.register(job("3"));
+
+const storage = new InMemoryWorkflowStorage();
+const runner = createWorkflowRunner({ storage, registry });
 
 // New workflows use the latest (v3). Resumes delegate to the stored version.
-await registry.run({ workflowId: "j-42", input: { x: 1 } });
+await runner.run({ name: "job", workflowId: "j-42", input: { x: 1 } });
 
 // Operational monitoring:
-const counts = await registry.countByVersion({ storage });
+const counts = await registry.countByVersion({ name: "job", storage });
 // → Map<version, { running, completed, failed, tripwire }>
+
+// One workflow's versions only: a scoped view with a fluent register.
+const jobs = new ScopedWorkflowVersionRegistry({ registry, name: "job" });
+console.log(await jobs.versions(), counts);
 ```
 
 `autoDeregister: true` removes drained versions from the registry automatically,
@@ -126,29 +158,33 @@ output — you can keep one code file and branch on `ctx.patched()` inside
 a journaled step body.
 
 ```typescript
-const calculateTotal = function* (ctx, prev) {
+import { workflow, type JournaledStepBody } from "@promin/workflow";
+
+type Input = { amount: number };
+
+const calculateTotal: JournaledStepBody<Input, Input, number> = function* (ctx, prev) {
   const rate = yield* ctx.activity("fetch-rate", async () => 1.0);
   if (ctx.patched("new-pricing")) {
     return yield* ctx.activity("apply-new", async () => prev.amount * rate * 1.1);
-  } else {
-    return yield* ctx.activity("apply-legacy", async () => prev.amount * rate);
   }
+  return yield* ctx.activity("apply-legacy", async () => prev.amount * rate);
 };
 
 // v1 — patches empty, takes the legacy branch
-const v1 = workflow({ name: "billing", storage, version: "1", patches: [] })
+const v1 = workflow<Input>({ name: "billing", version: "1", patches: [] })
   .journaled("calculate", calculateTotal)
   .build();
 
-// v2 — patches active, takes the new branch
-const v2 = workflow({
+// v2 — patch active, takes the new branch; v1 rows drain on v1's definition
+const v2 = workflow<Input>({
   name: "billing",
-  storage,
   version: "2",
   onVersionMismatch: "drain",
   previousVersions: [v1],
   patches: ["new-pricing"],
-}).journaled("calculate", calculateTotal);
+})
+  .journaled("calculate", calculateTotal)
+  .build();
 ```
 
 ### How `ctx.patched()` decides
@@ -177,8 +213,7 @@ Rule of thumb:
 
 `ctx.patched("unkown-name")` returns `false` silently — this is load-bearing
 for the cross-version pattern (v1 with `patches: []` MUST return false for
-every patch name). If you want strict typo detection, an ESLint rule is
-planned but not yet shipped.
+every patch name). Keep patch names in shared constants to avoid typos.
 
 ### Escape hatch for custom comparison
 
@@ -186,8 +221,12 @@ planned but not yet shipped.
 semver or date-based comparison logic, build it in user space:
 
 ```typescript
-function semverPatched(ctx, patchName: string, introducedIn: string): boolean {
-  return ctx.workflowVersion != null && semver.gte(ctx.workflowVersion, introducedIn);
+import type { JournaledContext } from "@promin/workflow";
+
+declare const semver: { gte(a: string, b: string): boolean };
+
+function introducedIn(ctx: JournaledContext<unknown, unknown>, version: string): boolean {
+  return ctx.workflowVersion != null && semver.gte(ctx.workflowVersion, version);
 }
 ```
 
@@ -201,11 +240,16 @@ some both. Every task is tagged with its workflow's version; workers declare
 their `supportedVersions` allow-list.
 
 ```typescript
+import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { createWorker, InMemoryStepQueue, MapStepRegistry } from "@promin/workflow/distributed";
+
+const registry = new MapStepRegistry();
+registry.register({ stepName: "process", handler: async (ctx) => `handled ${ctx.workflowId}` });
+
 const worker = createWorker({
-  storage,
-  stepQueue,
+  storage: new InMemoryWorkflowStorage(),
+  stepQueue: new InMemoryStepQueue(),
   registry,
-  queues: ["default"],
   supportedVersions: ["1", "2"], // handle both during the drain window
 });
 void worker.start();
@@ -219,8 +263,9 @@ always accepted.
 
 1. Deploy v2 workers with `supportedVersions: ["1", "2"]`. They handle both
    in-flight v1 workflows and fresh v2 ones.
-2. Monitor `registry.countByVersion({ storage })` until v1 reports zero
-   running + zero suspended workflows.
+2. Monitor `registry.countByVersion({ name, storage })` until v1 reports
+   `running: 0` (pending, running, suspended and compensating runs all count
+   as running).
 3. Next deploy drops `supportedVersions` to `["2"]`. Any straggler v1 tasks
    stay pending (safe by construction) until you clean them up or they expire.
 
@@ -275,12 +320,12 @@ changes need a version split.
 
 Honest about limits:
 
-- **State machine versioning.** `StateMachineInstance` has a `version` field but no drain policy or patches equivalent. ([follow-up ticket `promin-ljin`](https://example.invalid/todo))
+- **State machine versioning.** `StateMachineInstance` has a `version` field but no drain policy or patches equivalent.
 - **Pluggable version comparison.** Equality only — the `patched()` design doesn't need comparison. Escape hatch: `ctx.workflowVersion` + user-space helper.
 - **Content-addressed version auto-derivation.** You set `version` explicitly; framework doesn't hash your code.
-- **Cross-workflow version pinning.** When a parent workflow calls `.subworkflow(child)`, which version of the child runs? Currently: whatever the resolver resolves. Not tied to the parent's version. ([follow-up in backlog](https://example.invalid/todo))
-- **Lint rule for `ctx.patched()` typos.** Unknown patch names return `false` silently (load-bearing for the pattern). ESLint rule is planned.
-- **Per-worker heartbeat of `supportedVersions`.** Coordinator can't detect "nobody claims v3 tasks" gaps. ([follow-up ticket `promin-17ze`](https://example.invalid/todo))
+- **Cross-workflow version pinning.** `.subworkflow(child)` runs the child definition the parent was built with (its `version` is stamped on the child row); an existing child row with another version follows the child's own `onVersionMismatch`. There is no separate pin between parent and child versions.
+- **Typo detection for `ctx.patched()`.** Unknown patch names return `false` silently (load-bearing for the pattern).
+- **Per-worker heartbeat of `supportedVersions`.** Coordinator can't detect "nobody claims v3 tasks" gaps.
 
 ## FAQ
 

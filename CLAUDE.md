@@ -11,11 +11,12 @@ Project-level instructions for AI agents working on this codebase.
 ```
 packages/
   workflow/            # Durable workflows, DAG steps, distributed workers, scheduler, state machines
+                       #   (subpaths: ./distributed ./scheduler ./discovery ./sql-models ./storage-kit ./testing ./dev)
   data/                # Lazy DataFrame, expression builder, data quality, profiling, diff
   duckdb/              # DuckDB executor for analytical queries
-  postgres/            # Postgres workflow storage, step queue, scheduler, change streams
-  redis/               # Redis workflow storage, step queue, scheduler
-  sqlite/              # SQLite backends for rate limiter, throttle and queue
+  postgres/            # Postgres workflow storage, step queue, scheduler, leader leases, registries
+  redis/               # Redis workflow storage, step queue, scheduler, state machines (Cluster-safe)
+  sqlite/              # SQLite workflow storage, step queue, scheduler, leases; rate limiter, throttle, queue
   container/           # Docker / Kubernetes step execution
   agent/               # Durable AI agent loops and tool orchestration
   evals/               # Agent evaluation framework
@@ -41,7 +42,11 @@ function searchVideos(params: { query: string; order: string; videoDuration?: st
 ### Naming Conventions
 
 - **Files**: kebab-case with suffix (`workflow-runner.ts`, `stream-pipeline.ts`)
-- **Classes**: PascalCase, prefix `Default` for implementations (`DefaultWorkflowRunner`)
+- **Classes**: PascalCase. Lifecycle services are interfaces built by a
+  `create*` factory (`createWorkflowRunner` returns a `WorkflowRunner`); their
+  `Default*` classes stay internal. Concrete stores, queues, registries and
+  schedulers are classes built with `new` (`InMemoryWorkflowStorage`,
+  `DurableScheduler`), with no parallel factory.
 - **Interfaces**: PascalCase, no `I` prefix (`WorkflowRunner`, not `IWorkflowRunner`)
 - **Functions**: camelCase, prefix `create` for factories
 - **Constants**: UPPER_SNAKE_CASE
@@ -84,7 +89,7 @@ export class Foo {
   }
 
   async run() {
-    const start = this.clock.currentTimeMs();  // NOT Date.now()
+    const start = this.clock.currentTimeMs(); // NOT Date.now()
     await something();
     const duration = this.clock.currentTimeMs() - start;
 
@@ -107,11 +112,18 @@ const clock = FakeWallClock.create(0);
 const foo = new Foo({ clock });
 const done = foo.run();
 
-// Hand off a microtask so async internals reach their scheduled callbacks.
-await Promise.resolve();
+// Wait until the code under test has parked on a clock timer, then advance.
+while (clock.pendingCount() === 0) await new Promise((r) => setTimeout(r, 0));
 clock.advance(500);
 await done;
 ```
+
+Never sleep a fixed amount of real time before `advance()`: under load the
+code may not have registered its timer yet, `advance()` fires nothing, and
+the test hangs or flakes. Wait on `clock.pendingCount()` or another
+observable condition (a storage row, a status) with event-loop yields, and
+bound the wait by an iteration count rather than by wall time. Real timers
+belong only in tests that are about real timers.
 
 When time sensitivity crosses a client/server boundary, compare
 timestamps from the same clock: a column the app stamps with its clock
@@ -119,7 +131,11 @@ timestamps from the same clock: a column the app stamps with its clock
 a column the database stamps (e.g. `created_at` defaulting to `NOW()`)
 must not be bounded by an app-side `new Date()` — the two clocks skew by
 milliseconds or more. When no bound is needed, leave the window open
-rather than picking either clock. See `PgStepQueue.metrics`.
+rather than picking either clock. See `PgStepQueue.metrics`. Expiry that
+several processes must agree on — workflow locks, state-machine locks,
+leader leases — is computed and compared on the database server (`NOW()`
+in Postgres, `PX` keys in Redis), never with an app-side `Date`; only the
+single-host stores (in-memory, SQLite) use the injected `WallClock` for it.
 
 ## Running Typecheck
 
@@ -132,11 +148,11 @@ bun nx run @promin/data:typecheck
 
 ## Key Libraries
 
-| Purpose | Library |
-|---------|---------|
-| Runtime | Bun |
-| Validation | Zod |
+| Purpose        | Library                          |
+| -------------- | -------------------------------- |
+| Runtime        | Bun                              |
+| Validation     | Zod                              |
 | FP/Concurrency | perfect (`@spilne/perfect-core`) |
-| Monorepo | Nx |
-| Linting | oxlint |
-| Formatting | oxfmt |
+| Monorepo       | Nx                               |
+| Linting        | oxlint                           |
+| Formatting     | oxfmt                            |

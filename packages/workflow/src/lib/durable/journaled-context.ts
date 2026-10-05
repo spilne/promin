@@ -161,8 +161,9 @@ export interface JournaledContext<Input, Prev> {
    * one running, so `ctx.patched` naturally reflects what the stored
    * version knew about.
    *
-   * Throws if `name` wasn't declared in the workflow's `patches` config —
-   * catches typos at runtime instead of silently returning false.
+   * A name no version declares returns `false` (a v1 definition with
+   * `patches: []` must answer `false` for every later patch name), so a
+   * typo is not caught at runtime.
    */
   patched(name: string): boolean;
 

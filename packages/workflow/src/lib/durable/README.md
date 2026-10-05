@@ -1,602 +1,695 @@
 # Durable Execution
 
-DAG-based workflows with checkpoint/resume, type-safe steps, and structural concurrency.
+A workflow is a DAG of named steps. Each step's result is checkpointed to a
+`WorkflowStorage`, so a run that crashes, is cancelled mid-way or is retried
+resumes from what is stored instead of starting over. Workflows are plain
+data: `workflow()` builds a `Workflow<Input, Output, E>`, and a
+`WorkflowRunner` runs it against a storage.
 
-## Quick Start
+```typescript
+import { createWorkflowRunner, InMemoryWorkflowStorage, workflow } from "@promin/workflow";
+import { succeed } from "@spilne/perfect-core";
 
-### `flow()` — non-durable (scripts, request handlers, compositions)
+const onboard = workflow<{ userId: string }>({ name: "onboard-user" })
+  .step("fetch", ({ input }) => succeed({ id: input.userId, email: `${input.userId}@example.com` }))
+  .stepAsync("provision", async ({ prev }) => ({ accountId: `acct-${prev.id}` }))
+  .step("welcome", ({ prev }) => succeed(`welcome ${prev.accountId}`))
+  .build();
 
-No storage, no workflowId. Same composition API as `workflow()`.
+const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+const message = await runner.run({
+  workflow: onboard,
+  workflowId: "onboard-u42",
+  input: { userId: "u42" },
+});
+```
+
+`message` is typed as `string`: the runner's result is the last step's output.
+Swap `InMemoryWorkflowStorage` for `PostgresWorkflowStorage`,
+`RedisWorkflowStorage`, `SqliteWorkflowStorage` or `RemoteWorkflowStorage` to
+make it survive a process restart (see [Storage](./storage/README.md)).
+
+For one-shot, non-durable use (scripts, request handlers) `flow()` builds the
+same chain and `.execute(input)` runs it on a throwaway in-memory storage:
 
 ```typescript
 import { flow } from "@promin/workflow";
 import { succeed } from "@spilne/perfect-core";
 
-// Simple linear chain
-const result = await flow<{ userId: string }>("process-user")
-  .step("fetch", ({ input }) => api.get(`/users/${input.userId}`, UserSchema))
-  .stepAsync("enrich", async ({ prev }) => enrichUser(prev))
-  .step("format", ({ prev }) => succeed(`${prev.name} (${prev.score})`))
-  .execute({ userId: "u_42" });
-
-// DAG with auto-parallel
-const report = await flow<{ text: string }>("analyze")
-  .step("parse", ({ input }) => succeed(input.text))
-  .step("summarize", { dependsOn: ["parse"] }, ({ deps }) => summarize(deps.parse))
-  .step("keywords", { dependsOn: ["parse"] }, ({ deps }) => extractKeywords(deps.parse))
-  .step("publish", { dependsOn: ["summarize", "keywords"] }, ({ deps }) =>
-    succeed({ summary: deps.summarize, keywords: deps.keywords }),
-  )
-  .execute({ text: "..." });
-
-// Error handling
-const { data, error } = await flow<{ url: string }>("fetch")
-  .step("download", ({ input }) => httpClient.get(input.url, Schema))
-  .executeSafe({ url: "https://example.com" });
+const total = await flow<{ prices: number[] }>("sum")
+  .step("sum", ({ input }) => succeed(input.prices.reduce((a, b) => a + b, 0)))
+  .execute({ prices: [1, 2, 3] });
 ```
 
-To make it durable later, change `flow("name")` to `workflow({ name }).bind(storage)` and `.execute(input)` to `.run({ workflowId, input })`.
+## Step bodies
 
-### `workflow()` — durable (survives crashes, resumes from checkpoints)
+`.step()` takes a function returning a perfect `Eff<A, Throws<E>>`
+(`StepEff<A, E>`). The typed failure `E` must be a tagged error; it is what
+`retry` and `onFailure` act on, and it is collected into the workflow's error
+type. Anything else that goes wrong (a throw, a rejected promise) is a
+**defect**: it fails the step without retry.
+
+| Method                                  | Body returns                  | Failure                                                         |
+| --------------------------------------- | ----------------------------- | --------------------------------------------------------------- |
+| `.step(name, fn, options?)`             | `Eff` (or a Promise of one)   | typed `E`; a throw is a defect                                  |
+| `.stepAsync(name, fn, options?)`        | `Promise<A>`                  | a rejection is a defect                                         |
+| `.mapOver` / `.mapOverAsync`            | `Eff` / `Promise` per element | as above, per element                                           |
+| `.dowhile` / `.dountil`                 | `Eff` per iteration           | typed `E`                                                       |
+| `.dowhileAsync` / `.dountilAsync`       | value or `Promise`            | a rejection is a defect                                         |
+| `.branch` / `.match` / `.parallelSteps` | `Eff` per branch / case       | typed `E`; a throw from `condition` / `on` / `when` is a defect |
+
+```typescript
+import { createWorkflowRunner, InMemoryWorkflowStorage, workflow } from "@promin/workflow";
+import { TaggedError, tryPromise } from "@spilne/perfect-core";
+
+class PaymentDeclined extends TaggedError("PaymentDeclined")<{
+  message: string;
+  retryable: boolean;
+}>() {}
+
+declare function chargeCard(orderId: string): Promise<{ chargeId: string }>;
+declare function sendReceipt(chargeId: string): Promise<void>;
+
+const checkout = workflow<{ orderId: string }>({ name: "checkout" })
+  .step(
+    "charge",
+    ({ input }) =>
+      tryPromise(
+        () => chargeCard(input.orderId),
+        (e) => new PaymentDeclined({ message: String(e), retryable: true }),
+      ),
+    { retry: { maxRetries: 3, when: (e) => e._tag === "PaymentDeclined" } },
+  )
+  .stepAsync("receipt", async ({ prev }) => {
+    await sendReceipt(prev.chargeId);
+    return prev.chargeId;
+  })
+  .build();
+
+const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+const { data, error } = await runner.runSafe({
+  workflow: checkout,
+  workflowId: "order-1",
+  input: { orderId: "1" },
+});
+if (error instanceof PaymentDeclined) console.log("declined", error.message);
+else console.log("charged", data);
+```
+
+## Composing steps
+
+### Linear and DAG steps
+
+A step without `dependsOn` follows the previous step and receives its result
+as `prev`. A step with `dependsOn` receives the named results as `deps`
+(its `prev` for option callbacks is the first dependency). Steps whose
+dependencies are all done run in the same wave, concurrently.
 
 ```typescript
 import { workflow } from "@promin/workflow";
 import { succeed } from "@spilne/perfect-core";
-import { migrate, PostgresWorkflowStorage } from "@promin/postgres";
 
-await migrate(db);
-const storage = await PostgresWorkflowStorage.create({ db });
-
-const result = await workflow<{ userId: string }>({
-  name: "onboard-user",
-  type: "onboarding",
-  metadata: { team: "growth" },
-})
-  .step("fetch", ({ input }) => api.get(`/users/${input.userId}`, UserSchema))
-  .step("provision", ({ prev }) => api.post("/accounts", AccountSchema, { json: prev }))
-  .stepAsync("notify", async ({ prev }) => {
-    await mailer.send(prev.email, "Welcome!");
-    return { notified: true };
-  })
-  .bind(storage)
-  .run({ workflowId: "onboard-123", input: { userId: "u_42" } });
-```
-
-## Features (implemented)
-
-### Linear & DAG Steps
-
-```typescript
-// Linear — each step depends on the previous
-.step("a", fn)
-.step("b", fn)  // b depends on a
-
-// DAG — explicit dependencies, auto-parallel
-.step("scrape", fn)
-.step("summarize", { dependsOn: ["scrape"] }, fn)
-.step("keywords", { dependsOn: ["scrape"] }, fn)    // runs parallel with summarize
-.step("publish", { dependsOn: ["summarize", "keywords"] }, fn)
-```
-
-### stepAsync — Promise convenience
-
-```typescript
-.stepAsync("fetch", async ({ input }) => {
-  const response = await fetch(`/api/users/${input.id}`);
-  return response.json();
-})
-```
-
-### mapOver — Fan-out with per-element retry
-
-```typescript
-.step("get-urls", ({ input }) => succeed(input.urls))
-.mapOver("fetch-all", { array: "get-urls", concurrency: 5 }, (url, ctx) =>
-  succeed(`Response from ${url}`),
-  { element: { retry: { maxRetries: 3 }, timeoutMs: 5_000 } }, // per element
-)
-```
-
-`element` options (codec, timeoutMs, retry) apply to each element on its own;
-the other options apply to the map step and its array result. Each completed
-element is saved as a task row, so when the map step runs again (a step or
-workflow retry, a resume after a crash) only the elements without a saved
-result run.
-
-### map — Pure transform of `prev`
-
-```typescript
-.step("load", ({ input }) => succeed({ id: input.id, total: 42 }))
-.map((order) => order.total) // the next step's prev is 42
-```
-
-`.map(fn)` adds a step `"<head>.map"` that applies `fn` to the head's result
-and checkpoints the mapped value with the workflow codec. The head step is
-unchanged: its row, codec, `compensate` and `dependsOn: ["load"]` see the
-unmapped value, and its `skipValue` / `onFailure` fallback are mapped too.
-
-### branch — Conditional paths
-
-```typescript
-.branch("classify", {
-  condition: (n) => n > 10,
-  ifTrue: ({ prev }) => succeed(`big: ${prev}`),
-  ifFalse: ({ prev }) => succeed(`small: ${prev}`),
-})
-```
-
-### sleep & waitForSignal — Durable timers & external events
-
-```typescript
-.sleep("wait-24h", 86_400_000)
-
-.waitForSignal<{ approved: boolean }>("approval", {
-  signalName: "manager-approved",
-  timeoutMs: 86_400_000,
-})
-
-// External system delivers signal:
-await storage.deliverSignal({
-  workflowId,
-  signalName: "manager-approved",
-  payload: { approved: true },
-});
-```
-
-- `.sleep()` passes its predecessor's value through: the step after it gets
-  the pre-sleep value as `prev`.
-- Wake time and signal timeout are computed once, on the step's first
-  execution, and stored. Resuming early (e.g. `handle.result()` polling) does
-  not move them.
-- A signal is a named value on the run, not a queued event. Re-delivering a
-  name replaces the payload (last wins), signals are cleared when a fresh run
-  starts, and they are not consumed: every `waitForSignal` on the same
-  `signalName` is satisfied by one delivery. Use distinct names (e.g.
-  `approve-1`, `approve-2`) to wait for distinct events.
-
-### build + trigger — Stream → Workflow
-
-```typescript
-import { workflow, trigger, WorkflowResult } from "@promin/workflow";
-
-const analyzeArticle = workflow<{ url: string }>({ name: "analyze" })
-  .step("scrape", ({ input }) => scraper.get(input.url))
-  .step("summarize", ({ prev }) => ai.summarize(prev))
-  .build()
-  .bind(storage);
-
-// Trigger from any perfect Stream — trigger() returns a Pipe
-await eventStream
-  .through(
-    trigger({
-      workflow: analyzeArticle,
-      runner,
-      storage,
-      toInput: (event) => ({ url: event.data }),
-      toWorkflowId: (event) => `analyze-${event.id}`,
-      concurrency: 5, // results stay in input order
-      onDuplicate: "skip",
-    }),
+const analyze = workflow<{ text: string }>({ name: "analyze" })
+  .step("parse", ({ input }) => succeed(input.text.split(" ")))
+  .step("count", { dependsOn: ["parse"] }, ({ deps }) => succeed(deps.parse.length))
+  .step("longest", { dependsOn: ["parse"] }, ({ deps }) =>
+    succeed(deps.parse.reduce((a, b) => (b.length > a.length ? b : a), "")),
   )
-  .filter(WorkflowResult.isCompleted)
-  .tap((r) => log(r.result))
-  .drain()
-  .run();
+  .step("report", { dependsOn: ["count", "longest"] }, ({ deps }) =>
+    succeed({ words: deps.count, longest: deps.longest }),
+  )
+  .build();
 ```
 
-### Step Failure Strategies
+`dependsOn` names are checked at compile time. `.map(fn)` adds a pure
+transform step `"<head>.map"`; the head step keeps its own (unmapped) row,
+codec and options.
 
-```typescript
-.step("fetch", fn, {
-  retry: { maxRetries: 3, baseDelayMs: 1000 },  // exponential backoff
-
-  onFailure: "fail",                              // default — fail the workflow
-  // OR
-  onFailure: "skip",                              // skip, continue with undefined
-  // OR
-  onFailure: { fallback: (error) => defaults },   // use fallback value
-})
-```
-
-Retry and `onFailure` handle typed failures only. A throw from a synchronous
-callback (`.branch()` `condition`, `.match()` `on`/`when`, `.subworkflow()`
-`input`/`workflowId`) is a defect and fails the step without them; return a
-failed `Eff` for a recoverable error. Suspension (sleep, signal waits) is never
-retried or skipped.
-
-Every step kind applies the options its options type accepts. `.step()`,
-`.branch()` and `.match()` accept all of them; `.mapOver()` adds per-element
-`element` options; `.parallelSteps()` takes block-wide defaults plus per-branch
-`branches` options; `.journaled()` and `.subworkflow()` have no `cache` or
-`timeoutMs`; loops have no `cache`; `.tripwire()` takes only `codec`. An option a
-kind cannot honour is a compile error.
-
-### Workflow-level Retry
-
-Re-runs from the failed step — completed steps are checkpointed and skipped.
-
-```typescript
-workflow<Input>({
-  name: "resilient",
-  retry: { maxRetries: 3, baseDelayMs: 5000 },
-})
-  .step("step-1", fn) // runs once, checkpointed
-  .step("step-2", fn) // if this fails, workflow retries from here
-  .bind(storage);
-```
-
-### Idempotency & Singleflight
-
-Prevent duplicate executions and control what happens when a workflow is called again.
+### mapOver — fan-out with per-element resume
 
 ```typescript
 import { workflow } from "@promin/workflow";
+import { succeed, tryPromise, TaggedError } from "@spilne/perfect-core";
 
-const processOrder = workflow<{ orderId: string }>({
-  name: "process-order",
+class FetchError extends TaggedError("FetchError")<{ message: string }>() {}
+
+const crawl = workflow<{ urls: string[] }>({ name: "crawl" })
+  .step("urls", ({ input }) => succeed(input.urls))
+  .mapOver(
+    "fetch-all",
+    { array: "urls", concurrency: 5 },
+    (url) =>
+      tryPromise(
+        () => fetch(url).then((r) => r.status),
+        (e) => new FetchError({ message: String(e) }),
+      ),
+    {
+      element: { retry: { maxRetries: 2 }, timeoutMs: 5_000 }, // each element on its own
+      retry: { maxRetries: 1 }, // the map step as a whole
+    },
+  )
+  .build();
+```
+
+Each finished element is saved as a task row (encoded with `element.codec`).
+When the map step runs again — a step retry, a workflow retry, a resume after
+a crash — only the elements without a saved result run. Element bodies are
+therefore at-least-once **per element**: an element that finished but was not
+yet saved when the process died runs again. A typed element failure past
+`element.retry` is written as a failed task row and fails the map step. The
+step-level options (`codec`, `onFailure`, `skipValue`, `compensate`, `cache`)
+apply to the `T[]` result.
+
+### parallelSteps, branch, match
+
+```typescript
+import { workflow } from "@promin/workflow";
+import { succeed } from "@spilne/perfect-core";
+
+const route = workflow<{ id: string; total: number; kind: "express" | "standard" }>({
+  name: "route",
 })
-  .step("charge", ({ input }) => payments.charge(input.orderId))
-  .step("fulfill", ({ prev }) => warehouse.ship(prev.chargeId))
-  .build({
-    idempotency: {
-      ttl: 60_000, // cache result for 60s — re-calls return cached result
-      onInFlight: "join", // concurrent calls join the running execution (singleflight)
-      onExpiry: "fresh-run", // after TTL: re-execute with fresh run counter
+  .parallelSteps(
+    "enrich",
+    {
+      user: ({ input }) => succeed({ userId: input.id }),
+      risk: ({ input }) => succeed(input.total > 1_000 ? 0.8 : 0.1),
+    },
+    { retry: { maxRetries: 2 }, branches: { risk: { onFailure: { fallback: () => 0.5 } } } },
+  )
+  .branch("review", {
+    condition: (e) => e.risk > 0.5,
+    ifTrue: ({ prev }) => succeed({ ...prev, reviewed: true }),
+    ifFalse: ({ prev }) => succeed({ ...prev, reviewed: false }),
+  })
+  .match("ship", {
+    on: (order) => (order.reviewed ? "manual" : "auto"),
+    cases: {
+      manual: () => succeed("queued for review"),
+      auto: () => succeed("shipped"),
     },
   })
-  .bind(storage);
-
-// First call — executes the workflow
-const result1 = await processOrder.run({ workflowId: "order-42", input: { orderId: "42" } });
-
-// Second call within TTL — returns cached result instantly (no re-execution)
-const result2 = await processOrder.run({ workflowId: "order-42", input: { orderId: "42" } });
-
-// Force re-execution regardless of TTL
-const result3 = await processOrder.run({
-  workflowId: "order-42",
-  input: { orderId: "42" },
-  force: true,
-});
+  .build();
 ```
 
-**TTL options:**
+- `parallelSteps` forks into one DAG step per branch (`"enrich.user"`,
+  `"enrich.risk"`), each retried, cached and distributed on its own, then
+  joins them into a keyed record. Block-level `timeoutMs` / `retry` /
+  `needs` / `priority` / `queue` / `cache` are defaults for every branch;
+  `branches` sets per-branch options; `codec` encodes the joined record.
+- `branch` and `match` are one DAG node each. A selector with no matching case
+  and no `default` fails with the typed `MatchError`. A throw from
+  `condition`, `on` or `when` is a defect.
 
-```typescript
-// Same TTL for success and failure
-idempotency: { ttl: 60_000 }
-
-// Different TTLs — cache success longer, retry failures sooner
-idempotency: { ttl: { success: 3_600_000, failure: 10_000 } }
-```
-
-**Behavior on concurrent calls (`onInFlight`):**
-
-- `"join"` (default) — caller waits for the in-flight execution to finish and gets the same result (singleflight pattern)
-- `"reject"` — throws `WorkflowLockError` immediately
-
-**Behavior after TTL expires (`onExpiry`):**
-
-- `"fresh-run"` (default) — increments the run counter and re-executes all steps from scratch. Previous run history is preserved.
-- `"replay"` — re-enters the engine and replays from checkpointed state (skips completed steps)
-
-### Saga Compensation
-
-When a step fails, automatically undo completed steps in reverse order.
-
-```typescript
-import { workflow } from "@promin/workflow";
-import { tryPromise } from "@spilne/perfect-core";
-
-workflow<{ from: string; to: string; amount: number }>({
-  name: "transfer",
-  retry: { maxRetries: 2, baseDelayMs: 5000 },
-  compensate: {
-    trigger: "after-retries", // compensate after all workflow retries exhausted (default)
-    // trigger: "immediate",      // compensate on first failure, skip workflow retries
-    retry: { maxRetries: 2 }, // retry failing compensation functions
-    onComplete: ({ input, error, compensatedSteps, failedCompensations }) =>
-      tryPromise(
-        () => audit.log("rollback", { compensatedSteps, error }),
-        (e) => e,
-      ),
-  },
-})
-  .step("debit", ({ input }) => bankClient.debit(input.from, input.amount), {
-    compensate: ({ result }) => bankClient.refund(result.txId),
-  })
-  .step("credit", ({ input }) => bankClient.credit(input.to, input.amount), {
-    compensate: ({ result }) => bankClient.reverseCredit(result.txId),
-  })
-  .step("notify", ({ prev }) => emailClient.send(prev.receipt))
-  .bind(storage)
-  .run({ workflowId: "transfer-1", input: { from: "A", to: "B", amount: 100 } });
-```
-
-**Full failure cascade:**
-
-```
-Step fails
-  → Step retries (exponential backoff)
-    → Exhausted → StepFailureStrategy ("fail" / "skip" / fallback)
-      → "fail" → Workflow fails
-        → Workflow retries (re-run from failed step)
-          → Exhausted → Compensation cascade (reverse order)
-            → compensate.onComplete callback
-              → Workflow marked failed
-```
-
-- `trigger: "immediate"` — skips workflow retries, compensates right away
-- `trigger: "after-retries"` (default) — retries the workflow first, compensates only as last resort
-- Compensation failures don't block other compensations
-- `compensate.retry` retries individual compensation functions
-- `onFailure: "skip"` or `{ fallback }` prevents compensation (workflow continues)
-
-**Retry defaults.** Every retry (step `retry`, workflow `retry`, activity `retry`,
-`compensate.retry`, the state machine's `retryMiddleware`, the distributed worker) runs on
-one loop (`retryAsync` / `retryWithPolicy` in `shared/retry-policy.ts`): 3 retries, 250ms
-base delay doubling per retry, no delay cap (`maxDelayMs: 0` is no cap), jitter off, the
-time budget measured from the first failure, all waits on the injected clock. Workflow-level
-and compensation retries only happen once a policy is set. The workflow-level retry never
-retries control flow, a spent deadline or a cancel, and retries defects only with
-`retryDefects: true`.
-
-**Run lifecycle.**
-
-- A run that already ended is not executed again: re-running a `completed` workflow returns
-  its result; a `failed`, cancelled or `tripwire` one rejects with `WorkflowFailedError`
-  (carrying the stored `errorTag`), `WorkflowCancelledError` or `WorkflowTripwireError`.
-  `force: true` archives the ended run and starts a fresh one; `runner.resume({ fromStep })`
-  re-drives a failed run from a step.
-- `handle.cancel()` during a run wins: the run stops at the next wave boundary and rejects with
-  `WorkflowCancelledError`; terminal writes are conditional, so a late completion never
-  overwrites the cancel. Completed steps are not compensated.
-- The `timeoutMs` deadline runs from the run's persisted start, across sleeps and signal waits.
-- Hooks are observers: a throwing hook is reported to `hooks.onHookError` (default
-  `console.error`) and never changes the outcome.
-- A durable write the run depends on (step checkpoint, terminal status) is retried; if it
-  still fails the run rejects with `CheckpointError` and stops as it stands (no compensation,
-  no `failWorkflow`). Recovery re-drives it later, so a step whose result was not saved runs
-  again (at-least-once). A lost lock stops the run at the next wave with
-  `WorkflowLockLostError`.
-
-### Observability
-
-```typescript
-// Lifecycle hooks
-workflow<Input>({
-  name,
-  hooks: {
-    onStepComplete: ({ stepName, result, durationMs }) => metrics.record(durationMs),
-    onStepFailure: ({ stepName, error }) => alerting.notify(error),
-    onWorkflowComplete: ({ workflowId, durationMs }) => log.info("done", { durationMs }),
-    onWorkflowFailure: ({ workflowId, error }) => log.error("failed", { error }),
-  },
-}).bind(storage);
-
-// Query workflows
-await storage.listWorkflows({ status: "failed", type: "onboarding", limit: 10 });
-await storage.cancelWorkflow({ workflowId });
-
-// DAG visualization
-const dag = builder.toJSON();
-const mermaid = dagToMermaid(dag); // graph LR ...
-const dot = dagToDot(dag); // digraph "name" { ... }
-```
-
-### Visual Editor Schema
-
-Compile JSON workflows from a node-based UI into executable WorkflowDefinitions:
-
-```typescript
-import { compileWorkflow, MapActivityRegistry } from "@promin/workflow";
-import { succeed, tryPromise } from "@spilne/perfect-core";
-
-const registry = new MapActivityRegistry({
-  "http.get": (config) => () => httpClient.get({ url: config?.url as string }),
-  "transform.uppercase": () => (ctx) => succeed(String(ctx.prev).toUpperCase()),
-  "db.insert": (config) => (ctx) => tryPromise(() => db.insert(config?.table, ctx.prev), toDbError),
-});
-
-const definition = compileWorkflow({
-  schema: {
-    version: 1,
-    name: "fetch-and-store",
-    steps: [
-      {
-        type: "step",
-        name: "fetch",
-        dependsOn: [],
-        activityRef: "http.get",
-        config: { url: "https://api.example.com" },
-      },
-      { type: "step", name: "transform", dependsOn: ["fetch"], activityRef: "transform.uppercase" },
-      {
-        type: "step",
-        name: "store",
-        dependsOn: ["transform"],
-        activityRef: "db.insert",
-        config: { table: "results" },
-      },
-    ],
-  },
-  storage,
-  registry,
-});
-
-await definition.run({ workflowId: "wf-1", input: {} });
-```
-
-Validate untrusted schema JSON from APIs:
-
-```typescript
-import { validateWorkflowSchema } from "@promin/workflow";
-
-const schema = validateWorkflowSchema(req.body); // throws ZodError on invalid
-```
-
-### Subworkflows
-
-Child workflow composition with parent-child tracking.
+### Loops
 
 ```typescript
 import { workflow } from "@promin/workflow";
 import { succeed } from "@spilne/perfect-core";
 
-const enrichUser = workflow<{ userId: string }>({ name: "enrich" })
-  .step("fetch", ({ input }) => api.get(`/profiles/${input.userId}`))
-  .build()
-  .bind(storage);
+declare function pollStatus(jobId: string): Promise<"pending" | "ready">;
 
-// .subworkflow() — builder sugar
-workflow<{ userId: string }>({ name: "onboard" })
-  .step("create", ({ input }) => api.post("/accounts", { json: input }))
-  .subworkflow("enrich", enrichUser, {
-    input: (prev) => ({ userId: prev.id }),
-    workflowId: (prev) => `enrich-${prev.id}`,
-  })
-  .step("notify", ({ prev }) => succeed(`Score: ${prev.score}`))
-  .bind(storage)
-  .run({ workflowId: "onboard-1", input: { userId: "u_42" } });
-
-// .invoke() — primitive for use inside any step
-.step("enrich", ({ prev }) =>
-  enrichUser.invoke({
-    workflowId: `enrich-${prev.id}`,
-    input: { userId: prev.id },
-  })
-)
-
-// Fan-out — mapOver + invoke
-.mapOver("process-all", { array: "get-items", concurrency: 10 }, (itemId) =>
-  processItem.invoke({ workflowId: `item-${itemId}`, input: { itemId } })
-)
-
-// Parent-child tracking
-const children = await storage.listWorkflows({ parentId: "onboard-1" });
-await storage.cancelWorkflow({ workflowId: "onboard-1", cascade: true }); // cancels children too
+const wait = workflow<{ jobId: string }>({ name: "wait-ready" })
+  .dowhile(
+    "drain",
+    (_ctx, iter) => succeed(iter * 10),
+    (processed) => processed < 30,
+  )
+  .dountilAsync(
+    "ready",
+    ({ input }) => pollStatus(input.jobId),
+    (s) => s === "ready",
+    {
+      maxIterations: 60,
+    },
+  )
+  .build();
 ```
 
-### Dead Letter Queue
+Each iteration is its own step row (`"<name>.iter.<n>"`); a resumed loop
+replays the stored iterations and continues with the first missing one.
+Exceeding `maxIterations` (default 100) fails with `LoopLimitExceededError`.
 
-Failed workflows (after all retries + compensation) are published to a configurable DLQ. Works with any `Sinkable<FailedWorkflowRecord>` — an object with a `codec` and `publish(record): Promise<void>`, e.g. an adapter over a perfect-postgres `PgQueue`.
+### guard and tripwire
+
+`.guard(name, predicate)` fails fast with `GuardError` (no retry).
+`.tripwire(name, { when, reason })` ends the run with status `tripwire` — a
+deliberate short-circuit, not a failure. `run()` rejects with
+`WorkflowTripwireError` and `handle.status()` reports the stored `reason`.
+
+## Step options
+
+Every step kind accepts the options it can honour, and an option it cannot
+honour is a compile error.
+
+| Option                       | step / stepAsync / branch / match | mapOver             | parallelSteps                | journaled | subworkflow | loops | tripwire |
+| ---------------------------- | --------------------------------- | ------------------- | ---------------------------- | --------- | ----------- | ----- | -------- |
+| `codec`                      | yes                               | array (+ `element`) | joined record (+ per branch) | yes       | yes         | yes   | yes      |
+| `retry`, `timeoutMs`         | yes                               | yes (+ `element`)   | default + per branch         | `retry`   | `retry`     | yes   | –        |
+| `onFailure`, `compensate`    | yes                               | yes                 | per branch                   | yes       | yes         | yes   | –        |
+| `skipWhen`, `skipValue`      | yes                               | yes                 | per branch                   | yes       | yes         | yes   | –        |
+| `needs`, `priority`, `queue` | yes                               | yes                 | default + per branch         | yes       | yes         | yes   | –        |
+| `cache`                      | yes                               | yes                 | default + per branch         | –         | –           | –     | –        |
+
+- `timeoutMs` is per attempt: the attempt is interrupted and fails with the
+  typed `StepTimeoutError`, so `retry` / `onFailure` see it. The timer runs on
+  the runner's `WallClock`.
+- `onFailure`: `"fail"` (default), `"skip"` (continue with `undefined`) or
+  `{ fallback: (error) => value }`. A skipped or fallen-back step is not
+  compensated.
+- `retry` and `onFailure` never act on engine control flow: suspension,
+  continue-as-new, tripwire, non-determinism, an ambiguous activity outcome or
+  a lost lock pass straight through.
+- `cache` keys entries as `${namespace}:${stepName}:${key(ctx)}`; a hit skips
+  the body. Cache errors fall through to a miss.
+- `needs`, `priority` and `queue` (concurrency key) only matter when a
+  `StepQueueExecutor` dispatches the step to workers. A dispatched step's
+  `retry`, `timeoutMs` and `onFailure` come from the worker's registration
+  instead (see [Distributed](../distributed/README.md#what-runs-where)).
+
+## Retry defaults
+
+Every retry in the package — step `retry`, `element.retry`, workflow `retry`,
+activity `retry`, `compensate.retry`, checkpoint writes, the state machine's
+retry middleware and the distributed worker — uses one policy
+(`RetryPolicy`, defaults in `RETRY_POLICY_DEFAULTS`):
+
+| Field          | Default                                                  |
+| -------------- | -------------------------------------------------------- |
+| `maxRetries`   | 3                                                        |
+| `baseDelayMs`  | 250, doubling per retry (`baseDelayMs * 2^retry`)        |
+| `maxDelayMs`   | no cap (`0` also means no cap)                           |
+| `jitter`       | off; `true` spreads each delay over `delay × (1 ± 0.25)` |
+| `timeBudgetMs` | none; measured from the **first failure**                |
+| `when`         | every typed failure                                      |
+
+Backoff waits run on the injected `WallClock`. The workflow-level retry and
+the compensation retry only exist once a policy is set; the workflow-level
+retry never retries control flow, a spent deadline (`WorkflowDeadlineError`)
+or a cancel, and retries defects only with `retryDefects: true`.
+
+## Running workflows
+
+`createWorkflowRunner({ storage, clock?, registry?, hooks?, stepExecutor?, executorId? })`
+returns a `WorkflowRunner`:
+
+| Method                                         | What it does                                                                               |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `run({ workflow, workflowId, input })`         | runs to the end; resolves with the output, rejects with `WorkflowRunError<E>`              |
+| `runSafe(...)`                                 | same, as `{ data, error }`                                                                 |
+| `start(...)`                                   | resolves once the run holds its lock; returns a `WorkflowHandle<Output, E>`                |
+| `handle(workflowId)`                           | a handle for a run driven elsewhere (`status`, `signal`, `result`, `cancel`, `events`)     |
+| `resume({ workflow, workflowId, fromStep })`   | rewinds a run to `fromStep` (and everything downstream) and continues                      |
+| `subscribe({ workflowId })` / `getStatus(...)` | live events (push when the storage has `runEvents`, polling otherwise) / a status snapshot |
+| `recover(strategy)`                            | startup sweep: terminate stale runs, resume orphaned ones (needs a `registry`)             |
+
+`run({ name, version?, ... })` resolves the definition through the runner's
+`registry` instead. `namespace`, `idempotencyKey` / `idempotencyKeyTTL` and
+`force` are accepted by every form.
+
+### Typed errors
+
+`build()` returns `Workflow<Input, Output, E>`, where `E` is the union of the
+typed failures the steps declared plus the kinds' own errors (`GuardError`,
+`MatchError`, `LoopLimitExceededError`, `StepError` for a failed child, …).
+Suspension is never part of `E`. `run()` rejects, and `runSafe()` returns as
+`error`, a `WorkflowRunError<E>` — one of `E` (the step's error, not a
+wrapper), an engine error, or a defect. Read `E` with `WorkflowErrorOf<typeof wf>`.
+
+A run may execute in another process, so `handle.result()` reads the failure
+back from storage: it rejects with `WorkflowFailedError` whose `errorTag` is
+the `_tag` of the error that failed the run, or with `WorkflowCancelledError`
+/ `WorkflowTripwireError`.
+
+### Run lifecycle
+
+- **Terminal gate.** A run that already ended is not executed again.
+  Re-running a `completed` run answers with its stored result; a `failed`,
+  cancelled or `tripwire` run rejects with `WorkflowFailedError` (carrying the
+  stored `errorTag`), `WorkflowCancelledError` or `WorkflowTripwireError`.
+  `force: true` archives the ended run and starts a fresh one under the same
+  id; `runner.resume({ fromStep })` re-drives it from one step.
+- **Cancel wins.** `handle.cancel()` (or `storage.cancelWorkflow`) marks the
+  run failed with `errorTag: "WorkflowCancelledError"`. The runner checks the
+  status between waves (and in the same write as each step checkpoint where
+  the storage has `stepCheckpoint`), stops, and rejects with
+  `WorkflowCancelledError`: no retry, no compensation. Terminal writes are
+  conditional, so a late completion never overwrites a cancel.
+- **Deadline.** `workflow({ timeoutMs })` runs from the persisted start time,
+  across sleeps, signal waits and resumes, and fails with
+  `WorkflowDeadlineError`.
+- **Locks.** A run is driven under a lease lock with a fence token (see
+  [Storage](./storage/README.md#fencing)); a second driver gets
+  `WorkflowLockError` (or joins the run, per `idempotency.onInFlight`). If
+  heartbeats are fenced out or none succeeds for a lock duration, the run
+  stops at the next wave with `WorkflowLockLostError`.
+- **Checkpoint failures.** Checkpoint and terminal writes are retried (3
+  retries, 250 ms base). One that still fails rejects with `CheckpointError`
+  and the run stops as it stands — no compensation, no `failWorkflow` — so
+  recovery picks it up later. The step whose result was not saved runs again:
+  step bodies are **at-least-once**.
+- **Hooks** (`onStepComplete`, `onStepFailure`, `onWorkflowComplete`,
+  `onWorkflowFailure`, `onWorkflowTripwire`) are observers. A throwing hook is
+  reported to `hooks.onHookError` (default `console.error`) and never changes
+  the outcome.
+- **Parallel failures.** Every step of a wave settles on its own. A failing
+  step gets its own failed row; its siblings finish, stay completed (and are
+  compensated if compensation runs) and are not re-run by a workflow retry.
+
+### Idempotency and singleflight
+
+```typescript
+import { createWorkflowRunner, InMemoryWorkflowStorage, workflow } from "@promin/workflow";
+import { succeed } from "@spilne/perfect-core";
+
+const processOrder = workflow<{ orderId: string }>({ name: "process-order" })
+  .step("charge", ({ input }) => succeed({ chargeId: `ch-${input.orderId}` }))
+  .build({
+    idempotency: {
+      ttl: { success: 3_600_000, failure: 10_000 }, // reuse the outcome this long
+      onInFlight: "join", // a concurrent start joins the running execution ("reject" throws WorkflowLockError)
+      onExpiry: "fresh-run", // after the TTL: a fresh run ("replay" re-enters the stored run)
+    },
+  });
+
+const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+await runner.run({ workflow: processOrder, workflowId: "order-42", input: { orderId: "42" } });
+// Within the TTL: answered from storage, nothing re-executes.
+await runner.run({ workflow: processOrder, workflowId: "order-42", input: { orderId: "42" } });
+```
+
+When the caller cannot derive a stable `workflowId`, pass `idempotencyKey`
+(with `idempotencyKeyTTL`): a live `(namespace, workflow name, key)` match
+redirects the call to that run.
+
+### Recovery at startup
+
+```typescript
+import {
+  createWorkflowRunner,
+  InMemoryWorkflowStorage,
+  InMemoryWorkflowVersionRegistry,
+  RecoveryStrategy,
+} from "@promin/workflow";
+
+const registry = new InMemoryWorkflowVersionRegistry();
+const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage(), registry });
+
+const { resumed, settled } = await runner.recover(
+  RecoveryStrategy.builder()
+    .failStale({ olderThanMs: 24 * 60 * 60 * 1000 })
+    .resumeRecent({ concurrent: 10 })
+    .build(),
+);
+await settled; // every resumed run has finished (or suspended again)
+console.log(`resumed ${resumed}`);
+```
+
+`resumeRecent` lists runs nobody is driving — `pending`, `running` and
+`compensating`, with a free or expired lock — keyset-paged through
+`listOrphanedRuns`, and resumes at most `concurrent` at once. A
+`compensating` run finishes its rollback.
+
+## Compensation (sagas)
 
 ```typescript
 import { workflow } from "@promin/workflow";
-import { PgQueue } from "@spilne/perfect-postgres";
+import { succeed } from "@spilne/perfect-core";
 
-const queue = await PgQueue.create<FailedWorkflowRecord>(db, "workflow-dlq");
-const dlq = { codec: queue.codec, publish: (record) => queue.publish(record).orDie().run() };
+declare const bank: {
+  debit(account: string, amount: number): Promise<{ txId: string }>;
+  credit(account: string, amount: number): Promise<{ txId: string }>;
+  refund(txId: string): Promise<void>;
+};
 
-workflow<{ orderId: string }>({
-  name: "process-order",
-  retry: { maxRetries: 3 },
-  dlq,
+const transfer = workflow<{ from: string; to: string; amount: number }>({
+  name: "transfer",
+  retry: { maxRetries: 2 },
+  compensate: {
+    trigger: "after-retries", // default; "immediate" skips the workflow retries
+    retry: { maxRetries: 2 },
+    onComplete: async ({ compensatedSteps, failedCompensations }) => {
+      console.log("rolled back", compensatedSteps, failedCompensations);
+    },
+  },
 })
-  .step("charge", fn)
-  .step("fulfill", fn)
-  .bind(storage)
-  .run({ workflowId: "order-1", input: { orderId: "ord_42" } });
+  .stepAsync("debit", ({ input }) => bank.debit(input.from, input.amount), {
+    compensate: ({ result }) => bank.refund(result.txId),
+  })
+  .stepAsync("credit", ({ input }) => bank.credit(input.to, input.amount))
+  .step("notify", ({ prev }) => succeed(prev.txId))
+  .build();
+```
 
-// Failed workflow record includes:
-// - workflowId, workflowName, input, error, failedAt
-// - step states (which steps completed, which failed)
-// - compensatedSteps, failedCompensations
-// - metadata
+When the run fails for good (after workflow retries, or at once with
+`trigger: "immediate"`), every completed step with a `compensate` is rolled
+back:
 
-// Replay from DLQ
-await dlq.subscribeAck().forEach(async (envelope) => {
-  const failed = envelope.value;
-  await processOrder.run({
-    workflowId: `${failed.workflowId}-retry`,
-    input: failed.input as { orderId: string },
-  });
-  await envelope.ack();
+- **Durable.** With a storage that has the `compensationLedger` capability
+  (every bundled backend), the run first moves to status `compensating`
+  (storing the failure), then records each step's rollback outcome as it
+  settles. A process that dies mid-rollback leaves the run `compensating`;
+  recovery (or the coordinator) finishes it, skipping steps already
+  ledgered, then fails the run with the stored error. A storage without the
+  capability compensates in memory only.
+- **Order.** Latest `completedAt` first, ties broken by definition order
+  (later first), and never before a completed dependent — the DAG wins over
+  clock skew.
+- `compensate` receives the step result decoded through the step's codec, the
+  workflow input and the `workflowId`. A failing compensation is retried per
+  `compensate.retry` and does not block the others; `onComplete` gets the
+  lists of compensated and failed steps.
+- Skipped steps, `onFailure` fallbacks, cancelled runs and runs stopped by a
+  `CheckpointError` or lost lock are not compensated.
+
+Inside a `.journaled()` step, `ActivityOptions.compensate` gives intra-step
+compensation: activities are rolled back in reverse when a later activity of
+the same body throws.
+
+## Journaled steps
+
+A `.journaled()` step's body is a generator. Every side effect goes through
+`yield* ctx.activity(name, fn)`, which journals its result; when the body runs
+again (resume after a sleep or signal, a crash, a retry) journaled activities
+return their recorded value without running.
+
+```typescript
+import { createWorkflowRunner, InMemoryWorkflowStorage, workflow } from "@promin/workflow";
+import { succeed } from "@spilne/perfect-core";
+
+declare const api: {
+  createUser(email: string): Promise<{ id: string }>;
+  deleteUser(id: string): Promise<void>;
+  sendEmail(id: string): Promise<void>;
+};
+
+const signup = workflow<{ email: string }>({ name: "signup" })
+  .step("normalize", ({ input }) => succeed(input.email.toLowerCase()))
+  .journaled("create", function* (ctx, email) {
+    const user = yield* ctx.activity("create-user", () => api.createUser(email), {
+      compensate: (u) => api.deleteUser(u.id),
+    });
+    yield* ctx.sleep(60_000); // durable; the run suspends here
+    const confirmed = yield* ctx.signal<boolean>("email-confirmed", { timeout: 86_400_000 });
+    if (!confirmed.ok) return { user, confirmed: false };
+    yield* ctx.activity("welcome", () => api.sendEmail(user.id), { idempotent: true });
+    return { user, confirmed: confirmed.value };
+  })
+  .build();
+
+const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+const handle = await runner.start({
+  workflow: signup,
+  workflowId: "signup-1",
+  input: { email: "A@x.io" },
 });
 ```
 
-### Version Registry
+The context also has `ctx.parallel([...])` (concurrent activities, nested
+parallels allowed), `ctx.child(workflow, { input, workflowId })`,
+`ctx.dowhile` / `ctx.dountil` (journaled iterations), `ctx.validatedSignal`
+/ `ctx.approval` (schema-checked signals), `ctx.proxy({...})` (bind a record
+of activity functions), `ctx.patched(name)` (see [Versioning](../../../versioning.md)),
+`ctx.metadata.set / merge`, `ctx.setQueryHandler` and `ctx.continueAsNew(input)`.
 
-Run multiple workflow versions simultaneously. New workflows use the latest version; existing workflows resume with the version they started on.
+Semantics:
+
+- **Ambiguous outcomes.** An activity journals a pending row, runs, then
+  completes the row. If the process dies in between, the engine cannot know
+  whether the side effect happened: by default the step fails with
+  `AmbiguousActivityOutcome` for an operator to inspect; `idempotent: true`
+  re-runs the activity instead.
+- **Failures.** An activity that fails past its own `retry` is journaled.
+  Inside the same step attempt, replay rethrows an error of the same kind
+  (engine errors as their class, other errors with their `_tag`, `name` and
+  fields). Once a failure escapes the body, the attempt's recorded failures and
+  the activities its compensations rolled back are discarded, so the next
+  attempt runs them again; successful activities that were not rolled back
+  replay and never run twice.
+- **Compensation unwind** runs only for genuine failures. Suspension,
+  continue-as-new, tripwire, `JournalNonDeterminismError`,
+  `AmbiguousActivityOutcome` and lock loss propagate untouched.
+- **Signal vs timeout.** A delivery and the timeout race for the same journal
+  entry; whichever completes it first wins, and the live run and every replay
+  take that outcome.
+- **Children.** `ctx.child` runs a separate durable workflow (default id
+  `"<parentId>.<step>.<slot>"`). A child that suspends parks the parent until
+  the child's own wake time or until the child ends, whichever is first (see
+  [child wake-up](#subworkflows-and-child-wake-up)).
+- **Determinism.** A replayed body must yield the same activities in the same
+  order; a mismatch throws `JournalNonDeterminismError`. Use
+  `workflow({ payloadHash: true })` with the 3-arg
+  `ctx.activity(name, input, fn)` form to also catch changed inputs.
+- `.journaled()` takes no `cache` and no `timeoutMs` (the body cannot be
+  interrupted); time out activities or the workflow instead.
+
+## Sleep and signals
 
 ```typescript
-import { workflow, InMemoryWorkflowVersionRegistry } from "@promin/workflow";
+import { createWorkflowRunner, InMemoryWorkflowStorage, workflow } from "@promin/workflow";
+import { succeed } from "@spilne/perfect-core";
 
-const registry = new InMemoryWorkflowVersionRegistry();
-
-// Register versioned definitions (must have a version)
-const v1 = workflow({ name: "order", version: "1" })
-  .step("validate", ({ input }) => validateV1(input))
-  .step("charge", ({ prev }) => chargeV1(prev))
+const approval = workflow<{ requestId: string }>({ name: "approval" })
+  .step("submit", ({ input }) => succeed(input.requestId))
+  .sleep("cool-off", 60_000)
+  .waitForSignal<{ approved: boolean }, "decision">("decision", {
+    signalName: "manager-decision",
+    timeoutMs: 86_400_000,
+  })
+  .step("apply", ({ prev }) => succeed(prev.approved ? "approved" : "rejected"))
   .build();
 
-const v2 = workflow({ name: "order", version: "2" })
-  .step("verify", ({ input }) => verifyV2(input))
-  .step("charge", ({ prev }) => chargeV2(prev))
-  .step("notify", ({ prev }) => notifyV2(prev))
+const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+const handle = await runner.start({
+  workflow: approval,
+  workflowId: "req-7",
+  input: { requestId: "7" },
+});
+await handle.signal({ signalName: "manager-decision", payload: { approved: true } });
+```
+
+- `.sleep()` passes its predecessor's value through. The wake time and a
+  signal's deadline are computed once, on the step's first execution, and
+  stored; resuming early never moves them. A signal wait past its deadline
+  fails with `WorkflowTimeoutError`.
+- **Signals are named values on the run, last delivery wins.** Delivering a
+  name again replaces the payload; a delivery before the wait is picked up at
+  once; reads never consume it, so every wait on one name is satisfied by one
+  delivery; a fresh run (`force`, continue-as-new) starts with none. Use
+  distinct names (`approve-1`, `approve-2`) for distinct events.
+- **Who resumes a suspended run?** Nothing, by itself: `handle.signal()` /
+  `storage.deliverSignal` only record the signal, and `handle.result()` only
+  polls storage. Run the sleep and signal scanners (`createSleepScanner`,
+  `createSignalScanner` from `@promin/workflow/distributed`), which resume due
+  sleeps and delivered signals from any process, or resume a run yourself by
+  running it again under the same `workflowId` (it continues from the
+  suspension; a sleep that is not yet due suspends again).
+
+## Subworkflows and child wake-up
+
+```typescript
+import { workflow } from "@promin/workflow";
+import { succeed } from "@spilne/perfect-core";
+
+const enrich = workflow<{ userId: string }>({ name: "enrich" })
+  .step("score", ({ input }) => succeed({ userId: input.userId, score: 42 }))
   .build();
 
-await registry.register(v1);
-await registry.register(v2);
+const onboard = workflow<{ userId: string }>({ name: "onboard" })
+  .step("create", ({ input }) => succeed({ id: input.userId }))
+  .subworkflow(
+    "enrich",
+    enrich,
+    { input: (prev) => ({ userId: prev.id }), workflowId: (prev) => `enrich-${prev.id}` },
+    { retry: { maxRetries: 1 } },
+  )
+  .step("notify", ({ prev }) => succeed(`score ${prev.score}`))
+  .build();
 ```
 
-**Running workflows through the registry:**
+- The child is its own durable run, created idempotently with the child's
+  `version` and `parentWorkflowId`, and driven with the parent runner's
+  storage, clock, step executor and hooks.
+- A failed child fails the step with a typed `StepError`, so `retry`
+  re-drives the child (a failed child is re-run fresh for a retried parent
+  step) and `onFailure` / `compensate` apply.
+- **Child wake-up.** When the child suspends, the parent step parks as a
+  signal wait on a reserved signal
+  `workflow.child-ended:<childId>#<childRun>`, with the child's earliest wake
+  time as its timeout. When the child run ends — completed, failed, tripwire
+  or cancelled — the runner delivers that signal after releasing the child's
+  lock, and the signal scanner resumes the parent. Both halves are ordinary
+  storage writes, so this works across processes on every backend. The wake
+  is best effort; the parent still wakes at the child's own wake time.
+- `storage.cancelWorkflow({ workflowId, cascade: true })` cancels children too;
+  `listWorkflows({ parentId })` lists them.
+
+## Time: `WallClock`
+
+Every piece of engine time math — step and workflow deadlines, retry backoff,
+lock heartbeats, sleeps and signal deadlines, poll loops, scheduler cadence —
+reads and schedules through a `WallClock` (`currentTimeMs`, `now`,
+`setTimeout`, `setInterval`). Runners, workers, coordinators, scanners,
+schedulers and the bundled storages take a `clock` option defaulting to
+`SystemWallClock`. Tests pass a `FakeWallClock` and drive time with
+`advance(ms)`, which fires due timers synchronously:
 
 ```typescript
-// New workflow -> uses latest (v2)
-await registry.run({ workflowId: "order-new", name: "order", input: { orderId: "42" } });
+import {
+  createWorkflowRunner,
+  FakeWallClock,
+  InMemoryWorkflowStorage,
+  workflow,
+} from "@promin/workflow";
+import { fail, succeed, TaggedError } from "@spilne/perfect-core";
 
-// Existing v1 workflow -> resumes with v1 definition
-await registry.run({ workflowId: "order-old", name: "order", input: { orderId: "7" } });
-```
+class NotYet extends TaggedError("NotYet")<{ message: string }>() {}
 
-The registry checks storage for the workflow's version, then resolves the matching definition. If the stored version is no longer registered, it throws with a clear error listing available versions.
+const clock = FakeWallClock.create(0);
+const storage = new InMemoryWorkflowStorage({ clock });
+const runner = createWorkflowRunner({ storage, clock });
 
-**Monitoring drain progress:**
+const wf = workflow<number>({ name: "retrying" })
+  .step(
+    "flaky",
+    ({ attempt }) => (attempt < 3 ? fail(new NotYet({ message: "not yet" })) : succeed(attempt)),
+    {
+      retry: { maxRetries: 3 }, // waits 250 ms, then 500 ms, on `clock`
+    },
+  )
+  .build();
 
-Before deregistering an old version, check that all its workflows have finished:
-
-```typescript
-const counts = await registry.countByVersion({ name: "order", storage });
-// Map { "1" => { running: 3, completed: 150, failed: 1, tripwire: 0 },
-//       "2" => { running: 12, completed: 40, failed: 0, tripwire: 2 } }
-
-if (counts.get("1")!.running === 0) {
-  // Safe to remove v1 from the registry
+let settled = false;
+const done = runner
+  .runSafe({ workflow: wf, workflowId: "w1", input: 0 })
+  .finally(() => (settled = true));
+while (!settled) {
+  // Advance only once the run has parked on a backoff timer.
+  if (clock.pendingCount() > 0) clock.advance(1_000);
+  await new Promise((r) => setTimeout(r, 0)); // yield to the engine
 }
+console.log(await done); // { data: 3, error: null }
 ```
 
-**Inspecting the registry:**
+Wait on `pendingCount()` (or another observable predicate) before each
+`advance()`; a fixed real-time sleep before advancing races the engine under
+load. Inside a step, read time from the activity's arguments or the step
+context, never from `Date.now()`, so replay stays deterministic.
 
-```typescript
-// Every `WorkflowVersionRegistry` method is async.
-await registry.names(); // ["order", "payment"]
-await registry.versions("order"); // ["1", "2"]
-await registry.latest("order"); // "2"
-await registry.resolve({ name: "order", version: "1" }); // Workflow for v1
-await registry.resolve({ name: "order" }); // Workflow for latest
-```
+## More
 
-### RRULE Support
-
-Complex calendar recurrence via iCalendar RRULE (RFC 5545). Three trigger types: `cron`, `rrule`, `intervalMs`.
-
-```typescript
-// Biweekly on Tuesday at 10am
-scheduler.register({
-  id: "biweekly-standup",
-  rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU;BYHOUR=10",
-});
-
-// Quarterly on the 1st at 9am
-scheduler.register({
-  id: "quarterly-review",
-  rrule: "FREQ=MONTHLY;INTERVAL=3;BYMONTHDAY=1;BYHOUR=9",
-});
-
-// Every second Monday
-scheduler.register({
-  id: "sprint-planning",
-  rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=MO;BYHOUR=9;BYMINUTE=30",
-});
-```
+- **Triggers.** `trigger({ workflow, runner, toInput, toWorkflowId, concurrency, onDuplicate })`
+  is a perfect `Pipe` from any `Stream` of events to `WorkflowResult`s;
+  `onDuplicate: "skip"` skips ids that already exist. `webhookTrigger` turns
+  HTTP requests (with optional HMAC verification) into runs.
+- **Dead-letter queue.** `workflow({ dlq })` publishes a `FailedWorkflowRecord`
+  to any `Sinkable` after retries and compensation.
+- **Visual editor schema.** `compileWorkflow({ schema, registry })` builds a
+  `Workflow` from JSON (validated with `validateWorkflowSchema`) and a
+  `MapActivityRegistry` of activity factories.
+- **DAG export.** `builder.toJSON()`, `dagToMermaid(dag)`, `dagToDot(dag)`.
+- **Versioning.** `version`, `onVersionMismatch: "drain"`, `patches` and the
+  version registry: see [Versioning](../../../versioning.md).
+- **Distributed execution** and the scanners: see
+  [Distributed](../distributed/README.md). **Schedules**: see
+  [Scheduler](../scheduler/README.md).

@@ -1,187 +1,236 @@
 # Scheduler
 
-Cron, RRULE, and interval scheduling for workflows. Non-blocking — sleeps on a fiber between ticks.
+`@promin/workflow/scheduler` fires named schedules — cron, iCalendar RRULE or a
+fixed interval — as a stream of `ScheduleTick`s that you feed into workflows.
 
-## Main Idea
+| Implementation      | Persistence                                                | Multi-instance                                             | Delivery                               |
+| ------------------- | ---------------------------------------------------------- | ---------------------------------------------------------- | -------------------------------------- |
+| `InMemoryScheduler` | none                                                       | no                                                         | best effort, no catch-up               |
+| `DurableScheduler`  | a `SchedulerStorage`: in-memory, Postgres, Redis or SQLite | yes: one fenced leader lease per namespace (and partition) | at least once, deduped by `tickNumber` |
 
-A scheduler manages named schedules and emits `ScheduleTick` events. Each tick contains the schedule ID, nominal fire time, actual fire time, and a monotonic tick number. The scheduler implements `Streamable<ScheduleTick>`: `stream()` and `subscribe()` return a perfect `Stream`, so ticks plug directly into stream operators and the `trigger()` pipe.
+Both implement `Scheduler`: `register`, `unregister`, `pause`, `resume`
+and `list` return promises (they reject on an invalid config or a storage
+error), and `stream(scheduleId?)` / `subscribe()` return a fresh perfect
+`Stream<ScheduleTick>` on every call. Stopping the consumer (`take(n)`,
+interruption, breaking out of `toAsyncIterable()`) clears pending timers.
+All time math — next fire times, `firedAt`, waits, backoff — runs on the
+injected `clock` (`WallClock`), so a `FakeWallClock` drives a scheduler in
+tests.
 
-Perfect streams are single-use, so every `stream()` / `subscribe()` call builds a fresh one. Stopping the consumer (`take(n)`, `interruptAfter`, breaking out of a `for await` over `toAsyncIterable()`) cancels pending timers and removes listeners.
-
-Management methods (`register`, `unregister`, `pause`, `resume`, `list`) are async on every implementation: they resolve once the change is applied and reject on an invalid config or a storage error.
-
-Two implementations:
-
-| Implementation      | Package            | Persistence                                                        | Multi-instance                                        |
-| ------------------- | ------------------ | ------------------------------------------------------------------ | ----------------------------------------------------- |
-| `InMemoryScheduler` | `@promin/workflow` | None                                                               | No                                                    |
-| `DurableScheduler`  | `@promin/workflow` | Pluggable (`SchedulerStorage`): in-memory, Postgres, Redis, SQLite | Yes (fenced leader lease per namespace and partition) |
-
-## ScheduleConfig
-
-Each schedule requires exactly one trigger type:
+## Schedules and ticks
 
 ```typescript
-interface ScheduleConfig {
-  id: string; // Unique identifier
-  name?: string; // Human-readable name
-  cron?: string; // Cron expression (5 or 6 field)
-  rrule?: string; // iCalendar RRULE (RFC 5545)
-  intervalMs?: number; // Fixed interval in milliseconds
-  timezone?: string; // IANA timezone (default: "UTC")
-  enabled?: boolean; // Active state (default: true)
-  startAt?: Date; // Don't fire before this time
-  endAt?: Date; // Stop firing after this time
-  jitterMs?: number; // Random [0, jitterMs) delay before each tick is emitted
-  metadata?: Record<string, unknown>; // Passed through to ScheduleTick
+import type { DurableScheduleConfig, ScheduleTick } from "@promin/workflow/scheduler";
+
+const nightly: DurableScheduleConfig = {
+  id: "nightly-report", // unique id
+  name: "Nightly report",
+  cron: "0 2 * * *", // exactly one of: cron (5 or 6 fields), rrule, intervalMs
+  timezone: "America/New_York", // IANA zone, default UTC
+  startAt: new Date("2026-01-01T00:00:00Z"), // optional window
+  jitterMs: 30_000, // delay each emission by a random [0, jitterMs)
+  maxCatchUp: 3, // durable only: fire at most the 3 newest missed occurrences
+  metadata: { team: "analytics" }, // copied onto every tick
+};
+
+function describe(tick: ScheduleTick): string {
+  // scheduledAt: nominal time; firedAt: actual emission; tickNumber: 0, 1, 2, ... (same on redelivery)
+  return `${tick.scheduleId}#${tick.tickNumber} due ${tick.scheduledAt.toISOString()} fired ${tick.firedAt.toISOString()}`;
 }
 ```
 
-## ScheduleTick
-
-Emitted when a schedule fires:
-
-```typescript
-interface ScheduleTick {
-  scheduleId: string; // Which schedule fired
-  scheduleName?: string; // Human-readable name
-  scheduledAt: Date; // Nominal fire time (cron-computed)
-  firedAt: Date; // When it was emitted (later than scheduledAt under jitter/load)
-  tickNumber: number; // Monotonic counter (0, 1, 2, ...); same on redelivery
-  metadata?: Record<string, unknown>;
-}
-```
+`validateScheduleConfig` (used by every `register`) rejects a missing or
+double trigger, an invalid cron / RRULE, a non-positive interval and negative
+`jitterMs` / `maxCatchUp`.
 
 ## InMemoryScheduler
 
-Non-blocking, in-process scheduler. No persistence, no multi-instance coordination. Good for development, single-process services, and tests.
-
 ```typescript
+import { createWorkflowRunner, InMemoryWorkflowStorage, trigger, workflow } from "@promin/workflow";
 import { InMemoryScheduler } from "@promin/workflow/scheduler";
+import { succeed } from "@spilne/perfect-core";
 
 const scheduler = new InMemoryScheduler();
-
-// Cron — every weekday at 9am EST
-await scheduler.register({
-  id: "morning-report",
-  cron: "0 9 * * MON-FRI",
-  timezone: "America/New_York",
-  metadata: { team: "analytics" },
-});
-
-// Fixed interval — every 30 seconds
 await scheduler.register({ id: "health-check", intervalMs: 30_000 });
+await scheduler.register({ id: "standup", rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU;BYHOUR=10" });
 
-// RRULE — biweekly on Tuesday at 10am
-await scheduler.register({
-  id: "standup",
-  rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU;BYHOUR=10",
-});
-```
+const storage = new InMemoryWorkflowStorage();
+const runner = createWorkflowRunner({ storage });
+const check = workflow<{ at: string }>({ name: "health-check" })
+  .step("ping", ({ input }) => succeed(`ok at ${input.at}`))
+  .build();
 
-### Streaming ticks
-
-```typescript
-import { trigger } from "@promin/workflow";
-
-// Stream a single schedule into a workflow trigger
 await scheduler
-  .stream("morning-report")
+  .stream("health-check")
+  .take(3)
   .through(
     trigger({
-      workflow: reportWorkflow,
+      workflow: check,
       runner,
       storage,
-      toInput: (tick) => ({ date: tick.scheduledAt.toISOString().split("T")[0] }),
-      toWorkflowId: (tick) => `report-${tick.scheduledAt.toISOString().split("T")[0]}`,
+      toInput: (tick) => ({ at: tick.scheduledAt.toISOString() }),
+      toWorkflowId: (tick) => `health-check-${tick.tickNumber}`,
+      onDuplicate: "skip",
     }),
   )
   .drain()
   .run();
 
-// Stream all schedules merged, including schedules registered later
-for await (const tick of scheduler.subscribe().toAsyncIterable()) {
-  console.log(`${tick.scheduleId} fired at ${tick.firedAt}`);
+await scheduler.pause("standup");
+await scheduler.unregister({ scheduleId: "standup", reason: "cancelled" });
+```
+
+A schedule paused, replaced or removed while a stream waits for its next fire
+emits nothing for that wait. There is no persistence and no catch-up: ticks
+that came due while nothing was consuming are not emitted later.
+
+## DurableScheduler
+
+`DurableScheduler` keeps schedules in a `SchedulerStorage` and polls it:
+
+```typescript
+import {
+  DurableScheduler,
+  InMemorySchedulerStorage,
+  scheduleTickRunId,
+} from "@promin/workflow/scheduler";
+
+const scheduler = new DurableScheduler({
+  storage: new InMemorySchedulerStorage(), // PgSchedulerStorage, RedisSchedulerStorage, SqliteSchedulerStorage
+  instanceId: "scheduler-a",
+  pollIntervalMs: 1_000,
+  namespace: "prod",
+  onError: (event) => console.error(event.phase, event.error),
+});
+
+await scheduler.register({ id: "daily-etl", cron: "0 2 * * *", maxCatchUp: 3 });
+
+for await (const tick of scheduler.stream().toAsyncIterable()) {
+  const runId = scheduleTickRunId({ scheduleId: tick.scheduleId, tickNumber: tick.tickNumber });
+  console.log("start", runId); // start the workflow under this id: a redelivery is a no-op
+  break;
 }
-```
 
-### Runtime control
-
-```typescript
-await scheduler.pause("health-check"); // Stops emitting, keeps config
-await scheduler.resume("health-check"); // Resumes emitting
-await scheduler.unregister({ scheduleId: "health-check" }); // Removes entirely, stream ends
-await scheduler.list(); // All registered ScheduleConfigs
-```
-
-A schedule paused, replaced or removed while a stream waits for its next fire time emits nothing for that wait. The in-memory scheduler has no persistence and no catch-up.
-
-## Durable Scheduler
-
-`DurableScheduler` polls a `SchedulerStorage`. It adds:
-
-- **Persistent schedules** in the storage backend
-- **Catch-up** for missed runs: when more than one occurrence was missed (the scheduler was down), the newest `max(1, maxCatchUp)` fire, oldest first — for cron, RRULE and interval schedules alike
-- **Leader election** with fenced leases per namespace (and per partition) so only one instance fires and a stale leader can't commit
-- **Jitter** (`jitterMs`) delays each next run by a random `[0, jitterMs)`, spreading schedules that share a boundary
-- **Backfill** to generate ticks for past time ranges
-
-### Delivery guarantee: at least once
-
-Each poll computes the due ticks, emits them, and commits the fire state only after the consumer has pulled past them; then it waits `pollIntervalMs` and polls again. A tick is acknowledged when the consumer pulls the next one. If the consumer stops early (`take(n)`, interruption, crash), schedules whose ticks were all acknowledged are committed and the rest stay due: the next poll emits them again with the **same `tickNumber`**. Derive run ids with `scheduleTickRunId({ scheduleId: tick.scheduleId, tickNumber: tick.tickNumber })` (or another id derived only from the tick, like `toWorkflowId` below) so a redelivered tick is a no-op. Zorya's scheduler loop gives the same guarantee: it dispatches a poll's ticks, then commits.
-
-Storage errors never end the stream. A failed poll is reported through `onError` and retried with exponential backoff (on the injected clock, capped by `maxErrorBackoffMs`); a failed commit is reported and its ticks are redelivered; a stored schedule that can't be evaluated (say, an invalid cron written straight to storage) is reported, disabled and skipped while the others keep firing. Paused schedules leave due-tracking (`nextRun = null`), so they never crowd active ones out of a poll batch.
-
-### Leader election and fencing
-
-Only the holder of a **leader lease** polls. There is one lease per namespace and, for a partitioned scheduler, per partition (`schedulerLeaderKey`), so the partitions of a namespace fire in parallel. Every `SchedulerStorage` is a `LeaderLeaseStore`:
-
-- `tryAcquireLeader({ key, instanceId, ttlMs })` acquires or refreshes the lease in one atomic step and returns it (or `null` while another instance holds it). Each lease carries an `epoch` that goes up whenever a new lease starts on the key; a refresh keeps it. Postgres (`wf_leader_leases`, migration `0049`) and Redis (Lua) measure the TTL on the server clock; in-memory and SQLite use the injected `WallClock`.
-- `releaseLeader({ lease })` gives it up. The scheduler releases when its last stream stops, so another instance takes over at its next poll instead of after the TTL.
-- `commitPoll({ updates, lease })` is **fenced**: it writes nothing and throws `StaleLeaseError` unless the lease's epoch is still current, checked in the same transaction (or Lua script) as the writes. A leader that paused past its TTL can still emit the ticks it had planned (they are redelivered under the same `tickNumber` by the new leader), but it can't commit stale fire state over the new leader's.
-
-Entries also carry a compare-and-set guard (`expectedTickCount`): a poll never commits over a fire that took its tick numbers in the meantime. `triggerNow` and `backfill` take their numbers the same way, so a manual fire never shares a `tickNumber` with another fire.
-
-The lease API is exported for other leader-elected loops: `PgLeaderLeaseStore` / `assertPgLeaseCurrent` (`@promin/postgres`), `RedisLeaderLeaseStore` (`@promin/redis`), `SqliteLeaderLeaseStore` (`@promin/sqlite`), `InMemoryLeaderLeases`, and `LeaseLeaderElection`, which wraps a store and key as a `tryAcquire()` / `release()` election that also exposes the current lease for fencing.
-
-### Postgres
-
-```typescript
-import { createDurableScheduler, migrate } from "@promin/postgres";
-
-await migrate(db);
-const scheduler = createDurableScheduler({ db });
-
-// Register persistent schedule
-await scheduler.register({
-  id: "daily-etl",
-  cron: "0 2 * * *",
-  timezone: "America/New_York",
-  maxCatchUp: 3,
-  jitterMs: 30_000,
-});
-
-// Trigger workflow from schedule
-await scheduler
-  .stream("daily-etl")
-  .through(
-    trigger({
-      workflow: etlWorkflow,
-      runner,
-      storage,
-      toInput: (tick) => ({ date: tick.scheduledAt.toISOString().split("T")[0] }),
-      toWorkflowId: (tick) => `etl-${tick.scheduledAt.toISOString().split("T")[0]}`,
-    }),
-  )
-  .drain()
-  .run();
-
-// Management
-const next5 = await scheduler.nextFireTimes({ scheduleId: "daily-etl", count: 5 });
+console.log(await scheduler.nextFireTimes({ scheduleId: "daily-etl", count: 5 }));
 await scheduler.triggerNow("daily-etl");
 await scheduler.backfill({
   scheduleId: "daily-etl",
   from: new Date("2026-03-01"),
-  to: new Date("2026-03-20"),
+  to: new Date("2026-03-03"),
 });
+await scheduler.update({ scheduleId: "daily-etl", patch: { cron: "0 3 * * *" } });
 ```
+
+The Postgres and Redis packages ship ready-made facades:
+`new DurableScheduler({ db })` from `@promin/postgres` and
+`new RedisDurableScheduler({ redis, prefix })` from `@promin/redis`.
+
+### Delivery guarantee: at least once
+
+A poll computes the due ticks **without writing anything**, emits them, and
+commits the schedules' fire state (`lastFired`, `tickCount`, `nextRun`) only
+after the consumer has pulled past them. A tick counts as acknowledged when
+the consumer pulls the next one. If the consumer stops early (`take(n)`,
+interruption, a crash), the stream's finalizer commits the schedules whose
+ticks were all acknowledged and leaves the rest due, so the next poll —
+here or on another instance — emits them again **with the same
+`tickNumber`**.
+
+So a tick may be delivered more than once, never skipped while a scheduler
+is running. Make the consumer idempotent by deriving the run id from the tick
+only: `scheduleTickRunId({ scheduleId, tickNumber })`, or a `toWorkflowId`
+built from `scheduleId` and `tickNumber` / `scheduledAt`, with
+`trigger({ onDuplicate: "skip" })` or the runner's terminal gate (a
+completed run is answered from storage, not run again).
+
+- **Catch-up.** When the scheduler was down across several occurrences, the
+  newest `max(1, maxCatchUp)` of them fire, oldest first — for cron, RRULE
+  and interval schedules alike.
+- **Jitter** pushes each next run back by a random `[0, jitterMs)`; `firedAt`
+  is the real emission time.
+- **Storage errors never end the stream.** A failed poll is reported through
+  `onError({ phase })` and retried with exponential backoff on the clock
+  (capped by `maxErrorBackoffMs`, default 30 s); a failed commit is reported
+  and its ticks are redelivered; a stored schedule that cannot be evaluated
+  (an invalid cron written straight to storage) is reported, disabled and
+  skipped while the others keep firing.
+- **Paused schedules** have `nextRun = null`, so they never crowd active ones
+  out of a poll batch; resuming seeds `nextRun` again.
+- **Manual fires.** `triggerNow` and `backfill` take their tick numbers with a
+  compare-and-set on `tickCount` and retry on conflict, so a manual fire never
+  shares a `tickNumber` with a scheduled one.
+
+### Leader election and fencing
+
+Only the holder of a **leader lease** polls. Every `SchedulerStorage` is a
+`LeaderLeaseStore`:
+
+- `tryAcquireLeader({ key, instanceId, ttlMs })` acquires or refreshes the
+  lease atomically and returns it (or `null` while another instance holds
+  it). A lease carries an `epoch` that increases whenever a new lease starts
+  on the key — takeover, expiry, release — and stays the same on refresh.
+  Postgres (`wf_leader_leases`, `NOW()`) and Redis (`PX` keys in Lua) measure
+  the TTL on the server clock; in-memory and SQLite on the injected
+  `WallClock`. The TTL is `leaderLockTtlMs` (default 3 × `pollIntervalMs`).
+- `releaseLeader({ lease })` gives it up. The scheduler releases when its
+  last stream stops, so another instance takes over at its next poll instead
+  of after the TTL.
+- `commitPoll({ updates, lease })` is **fenced**: in the same transaction (or
+  Lua script) as the writes, it checks that the lease's epoch is still
+  current, and otherwise writes nothing and throws `StaleLeaseError`. Each
+  entry also carries `expectedTickCount` (compare-and-set); entries that lost
+  come back as `conflicts`. A leader that paused past its TTL may still emit
+  the ticks it had planned — the new leader redelivers them under the same
+  `tickNumber` — but it can never commit stale fire state over the new
+  leader's, so tick numbers never regress or skip.
+
+The lease API is reusable by other leader-elected loops (the distributed
+coordinator and scanners use it): `InMemoryLeaderLeases`,
+`PgLeaderLeaseStore` / `assertPgLeaseCurrent` (`@promin/postgres`),
+`RedisLeaderLeaseStore` (`@promin/redis`), `SqliteLeaderLeaseStore`
+(`@promin/sqlite`), and `LeaseLeaderElection`, which wraps a store and key as
+a `tryAcquire()` / `release()` election exposing the current lease for
+fencing.
+
+```typescript
+import {
+  InMemoryLeaderLeases,
+  LeaseLeaderElection,
+  schedulerLeaderKey,
+} from "@promin/workflow/scheduler";
+
+const leases = new InMemoryLeaderLeases();
+const election = new LeaseLeaderElection({
+  store: leases,
+  key: schedulerLeaderKey({ namespace: "prod" }),
+  instanceId: "worker-1",
+  ttlMs: 5_000,
+});
+if (await election.tryAcquire()) {
+  console.log("leading with epoch", election.lease?.epoch);
+  await election.release();
+}
+```
+
+### Namespaces and partitions
+
+- `namespace` scopes a scheduler instance: `findDue`, `list` and the lease
+  are per namespace, so tenants poll independently.
+- `partition: { index, count }` splits one namespace's schedules by
+  `schedulePartition({ id, count })`. Each partition elects its own leader
+  (one lease per namespace and partition), so N partitions fire in parallel;
+  run one or more instances per partition. Run **every** partition: a
+  partition with no live instance leaves its due schedules at the head of the
+  due index, and a large enough backlog crowds the other partitions out of
+  each poll (`findDue` fetches `batchSize × count` ids before filtering).
+
+### Storage backends
+
+| Storage                    | Package            | Lease TTL clock  | Notes                                                                     |
+| -------------------------- | ------------------ | ---------------- | ------------------------------------------------------------------------- |
+| `InMemorySchedulerStorage` | `@promin/workflow` | `WallClock`      | single process                                                            |
+| `PgSchedulerStorage`       | `@promin/postgres` | server (`NOW()`) | fenced `commitPoll` checks the epoch under `FOR SHARE` in one transaction |
+| `RedisSchedulerStorage`    | `@promin/redis`    | server (`PX`)    | keys tagged `{<prefix>}` (one Cluster slot); one Lua script per commit    |
+| `SqliteSchedulerStorage`   | `@promin/sqlite`   | `WallClock`      | single-statement lease CAS; fence checked inside the commit transaction   |
+
+All of them run `schedulerStorageTestSuite` from `@promin/workflow/testing`.

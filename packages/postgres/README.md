@@ -1,225 +1,186 @@
 # @promin/postgres
 
-Postgres stores for promin: workflow storage, the distributed step queue, the durable scheduler, workflow start queue and advertisements, state machines, plus agent and eval stores. Built on [`@spilne/perfect-postgres`](https://www.npmjs.com/package/@spilne/perfect-postgres), which supplies the generic Postgres building blocks (`DrizzleDb`, `createPostgresDb`, `ensureTable`, `PgQueue`, `PgChangeStream`, `PgLeaderElection`, pgmq, rate limiting, and more).
+Postgres backends for `@promin/workflow` — workflow storage, the distributed step queue, the durable scheduler and leader leases, the worker registry, workflow advertisements and the start queue, the version registry, state machines — plus agent and eval stores. Built on [`@spilne/perfect-postgres`](https://www.npmjs.com/package/@spilne/perfect-postgres), which supplies the generic Postgres building blocks (`DrizzleDb`, `createPostgresDb`, `ensureTable`, `PgQueue`, `PgChangeStream`, rate limiting and more).
 
-## Install
+| Entrypoint                 | What                                                         |
+| -------------------------- | ------------------------------------------------------------ |
+| `@promin/postgres`         | the stores below, `migrate`, the Drizzle schema, lookups     |
+| `@promin/postgres/testing` | `PostgresTestContainer`, `postgresDescribe` (testcontainers) |
+
+Every store takes a `DrizzleDb`, so any Postgres driver Drizzle supports works (postgres-js, `bun:sql`, node-postgres).
+
+## What it implements
+
+| `@promin/workflow` contract     | Class                                             |
+| ------------------------------- | ------------------------------------------------- |
+| `WorkflowStorage`               | `PostgresWorkflowStorage`                         |
+| `StepQueue`                     | `PgStepQueue`                                     |
+| `SchedulerStorage` / scheduler  | `PgSchedulerStorage`, `DurableScheduler` (facade) |
+| `LeaderLeaseStore`              | `PgLeaderLeaseStore` (+ `assertPgLeaseCurrent`)   |
+| `WorkerRegistry`                | `PostgresWorkerRegistry`                          |
+| `WorkflowVersionRegistry`       | `PostgresWorkflowVersionRegistry`                 |
+| `WorkflowAdvertisementRegistry` | `PgWorkflowAdvertisementRegistry`                 |
+| `WorkflowStartQueue`            | `PgWorkflowStartQueue`                            |
+| `StateMachineStorage`           | `PgStateMachineStorage`                           |
+
+Workflow storage capabilities (see the [storage contract](../workflow/src/lib/durable/storage/README.md#capabilities)):
+
+| Capability               |                                                | Capability                                     |                      |
+| ------------------------ | :--------------------------------------------: | ---------------------------------------------- | :------------------: |
+| `journal`                |                      yes                       | `summaries`                                    |         yes          |
+| `stepAttempts`           | yes (rows written with `recordAttempts: true`) | `countWorkflows`                               |         yes          |
+| `stepCheckpoint`         |                      yes                       | `dueTimers` / `signalWakeups` / `orphanedRuns` |    yes (indexed)     |
+| `compensationLedger`     |                      yes                       | `runEvents` / `stepStartedEvents`              | – (the runner polls) |
+| `tripwire`, `resetSteps` |                      yes                       | `cancelStale`                                  |          –           |
+
+## Schema and migrations
 
 ```typescript
-import { migrate, PostgresWorkflowStorage } from "@promin/postgres";
+import { migrate } from "@promin/postgres";
 import { createPostgresDb } from "@spilne/perfect-postgres";
-import { postgresDescribe } from "@promin/postgres/testing";
-```
-
-Two entrypoints:
-
-| Entrypoint                 | What                                                                  |
-| -------------------------- | --------------------------------------------------------------------- |
-| `@promin/postgres`         | Workflow storage, step queue, scheduler, agent + eval stores, lookups |
-| `@promin/postgres/testing` | Test container helpers                                                |
-
-All stores accept a `DrizzleDb` (from `@spilne/perfect-postgres`), so any Postgres driver works (postgres-js, bun:sql, etc).
-
-## Workflow Storage
-
-Production-grade `WorkflowStorage` backed by Postgres. Integer lookup tables for status fields, row locks with fence tokens for distributed locking, configurable table prefix for multi-tenant DBs.
-
-```typescript
-import { createPostgresDb } from "@spilne/perfect-postgres";
-import { migrate, PostgresWorkflowStorage } from "@promin/postgres";
-import { workflow } from "@promin/workflow";
 
 const db = createPostgresDb(process.env.DATABASE_URL!);
 
-// Idempotent — safe on every startup
-await migrate(db);
-
-const storage = await PostgresWorkflowStorage.create({ db });
-
-// Use with workflows
-const result = await workflow<{ userId: string }>({ name: "onboard" })
-  .stepAsync("fetch", ({ input }) => api.getUser(input.userId))
-  .stepAsync("provision", ({ prev }) => api.createAccount(prev))
-  .bind(storage)
-  .run({ workflowId: `onboard-${userId}`, input: { userId } });
-```
-
-### Configuration
-
-```typescript
-PostgresWorkflowStorage.create({
-  db, // DrizzleDb instance (required)
-  instanceId: "node-1", // Lock ownership ID (default: random UUID)
-  defaultLockDurationMs: 30_000,
-  autoSeedLookups: true, // Auto-seed status enum tables (default: true)
-});
-```
-
-### Migrations
-
-```typescript
+// Idempotent — safe on every startup.
 await migrate(db, {
-  migrationsTable: "__drizzle_migrations_workflows", // Isolate for multi-app DBs
+  migrationsTable: "__drizzle_migrations_workflows", // isolate per app in a shared database
   logger: { info: console.log, error: console.error },
 });
 ```
 
-## Durable Scheduler
+The schema ships as **one baseline migration** (`drizzle/0000_baseline.sql`):
+every table, serial column, primary / unique / CHECK constraint, partial
+index, foreign key and lookup seed in its final shape. There is no upgrade
+chain from older layouts. `schema.ts` mirrors it and a drift test builds a
+database from the migration and compares every table, column, index, FK and
+named CHECK against it.
 
-Postgres-backed, distributed-safe cron scheduler. Persistent schedules, catch-up for missed runs, at-least-once tick delivery, leader election via fenced lease rows (`wf_leader_leases`, server-clock TTL), jitter, and backfill.
-
-Implements `Streamable<ScheduleTick>` — works with `trigger()` and all perfect `Stream` combinators.
+## Workflow storage
 
 ```typescript
-import { createDurableScheduler, migrate } from "@promin/postgres";
+import { createWorkflowRunner, workflow } from "@promin/workflow";
+import { migrate, PostgresWorkflowStorage } from "@promin/postgres";
+import { createPostgresDb } from "@spilne/perfect-postgres";
+import { succeed } from "@spilne/perfect-core";
 
+const db = createPostgresDb(process.env.DATABASE_URL!);
 await migrate(db);
-const scheduler = createDurableScheduler({ db });
 
-// Register persistent schedules
-await scheduler.register({
-  id: "daily-etl",
-  name: "Daily ETL Pipeline",
-  cron: "0 2 * * *",
-  timezone: "America/New_York",
-  maxCatchUp: 3,
-  jitterMs: 30_000,
-  metadata: { pipeline: "etl" },
+const storage = await PostgresWorkflowStorage.create({
+  db,
+  namespace: "prod", // optional tenant scope (default: none)
+  instanceId: "node-1", // lock owner id (default: random UUID)
+  defaultLockDurationMs: 30_000,
+  recordAttempts: true, // write step attempt rows (default: false)
 });
 
-await scheduler.register({
-  id: "heartbeat",
-  intervalMs: 30_000,
-});
+const onboard = workflow<{ userId: string }>({ name: "onboard" })
+  .step("provision", ({ input }) => succeed({ accountId: `acct-${input.userId}` }))
+  .build();
 
-// Stream ticks into workflows (stream() returns a perfect Stream)
-await scheduler
-  .stream("daily-etl")
-  .through(
-    trigger({
-      workflow: etlWorkflow,
-      runner,
-      storage,
-      toInput: (tick) => ({ date: tick.scheduledAt.toISOString().split("T")[0] }),
-      toWorkflowId: (tick) => `etl-${tick.scheduledAt.toISOString().split("T")[0]}`,
-    }),
-  )
-  .drain()
-  .run();
-
-// Management
-const next5 = await scheduler.nextFireTimes({ scheduleId: "daily-etl", count: 5 });
-await scheduler.triggerNow("daily-etl");
-await scheduler.backfill({
-  scheduleId: "daily-etl",
-  from: new Date("2026-03-01"),
-  to: new Date("2026-03-20"),
-});
-await scheduler.pause("daily-etl");
-await scheduler.resume("daily-etl");
+const runner = createWorkflowRunner({ storage });
+await runner.run({ workflow: onboard, workflowId: "onboard-u42", input: { userId: "u42" } });
 ```
 
-## Step Queue
+- **Locks** are lease rows in `wf_workflow_locks` with a `bigserial` fence
+  token. `tryLock` and `heartbeat` compute expiry with the server's `NOW()`,
+  so app-server clock skew never extends or shortens a lease.
+- **Fenced writes** are single statements: a `MATERIALIZED` CTE takes
+  `FOR SHARE` on the live lock row (token matches, `expires_at > NOW()`), and
+  every write in the statement is gated on it. A takeover cannot land between
+  the check and the write; a stale or expired token writes nothing and
+  rejects with `FenceTokenMismatchError`.
+- **One statement per hot-path write**: `checkpointStep`, step and task
+  results, suspend, terminal transitions, journal appends and completions.
+  `loadWorkflow` reads the run, its steps and tasks in one statement (one
+  snapshot).
+- `startFreshRun`, purge, cascade cancel (recursive CTE) and idempotency-key
+  reclaim each run in one transaction; stream appends serialize per stream
+  with `pg_advisory_xact_lock`.
 
-Postgres-backed distributed step queue for workflow workers. Uses `SELECT FOR UPDATE SKIP LOCKED` so each pending task is handed to exactly one claimer, with natural load balancing across workers. A task is only handed out again after `requeueStuck` returns it to pending (dead worker, or no heartbeat within the stale timeout), so execution is at-least-once across worker crashes: handlers must be idempotent, and `claimToken` fences every write so only the current claim can settle a task.
-
-### Setup
+## Step queue
 
 ```typescript
 import { PgStepQueue } from "@promin/postgres";
+import { createPostgresDb } from "@spilne/perfect-postgres";
 
-const queue = new PgStepQueue({
-  db, // DrizzleDb instance (required)
-  namespace: "prod", // Isolate tasks by namespace (default: null = unscoped)
-  maxDeliveries: 10, // Dead-letter a task after this many deliveries (default: 10)
-});
+const db = createPostgresDb(process.env.DATABASE_URL!);
+const queue = new PgStepQueue({ db, namespace: "prod", maxDeliveries: 10 });
 
-// Create the table (for dev/testing — prefer migrations for production)
-await queue.ensureTable();
-```
-
-For production migrations, include the Drizzle schema:
-
-```typescript
-import { PgStepQueue } from "@promin/postgres";
-export const stepQueue = PgStepQueue.schema;
-```
-
-### Enqueue tasks
-
-```typescript
-const taskId = await queue.enqueue({
-  workflowId: "order-123",
-  stepName: "charge",
-  needs: ["payments"], // Capabilities a worker must have (default: none)
-  input: { amount: 99.99 },
-  prevResults: { validate: { ok: true } },
-  priority: 8, // Higher = claimed first (default: 5)
-  attempt: 1, // The runner's attempt number (default: 1)
-});
-```
-
-Enqueue is idempotent on `(workflowId, stepName)` while a task for the pair is pending or running.
-
-### Claim and process tasks
-
-```typescript
 const tasks = await queue.claim({
-  workerId: "worker-1", // Recorded on each task; dead-worker reclaim uses it
+  workerId: "worker-1",
   limit: 10,
-  capabilities: ["payments"],
-  stepNames: ["charge", "refund"], // Only steps this worker hosts (default: any)
-  versions: ["2"], // Only these workflow versions; unversioned always pass (default: any)
+  capabilities: ["gpu"],
+  stepNames: ["transcribe"],
+  versions: ["2"],
 });
-
 for (const task of tasks) {
-  const start = Date.now();
-  const claim = { taskId: task.id, claimToken: task.claimToken };
-  try {
-    const result = await processStep(task);
-    await queue.complete({ ...claim, result, durationMs: Date.now() - start });
-  } catch (err) {
-    await queue.fail({ ...claim, error: String(err), durationMs: Date.now() - start });
-  }
+  await queue.complete({
+    taskId: task.id,
+    claimToken: task.claimToken,
+    result: { ok: true },
+    durationMs: 5,
+  });
 }
-
-// Give back a task you claimed but won't run (no delivery is counted):
-await queue.release({ taskId: task.id, claimToken: task.claimToken! });
 ```
 
-The step-name, version and capability filters run inside the claim query, so a worker never claims tasks it can't run and they never block the tasks behind them. Tasks are claimed highest priority first, FIFO within a priority. Tasks sharing a `(concurrencyScope, concurrencyKey)` are capped at `concurrencyLimit` running at once across every claimer: admission takes a transaction-scoped advisory lock per key and recounts the running tasks under it.
+The full contract — routing, `release`, deliveries and dead-lettering,
+`requeueStuck` modes, `get` / `purge` / `metrics` — is described in
+[Distributed execution](../workflow/src/lib/distributed/README.md#step-queue-contract-v2).
+Postgres specifics:
 
-### Requeue stuck tasks
+- `claim` is one transaction: it walks the pending-order partial index, locks
+  up to `limit` matching rows with `FOR UPDATE SKIP LOCKED` (repeating
+  `status = 'pending'` in the locking scan so a row claimed concurrently is
+  rejected on recheck), and stops after `limit` rows. Step-name, version and
+  capability filters are part of that query.
+- Concurrency keys: admission takes `pg_advisory_xact_lock` per
+  `(scope, key)` in hash order and recounts running tasks under the locks, so
+  concurrent claimers with disjoint capabilities cannot both admit past the
+  limit.
+- `requeueStuck({ lease })` checks the leader lease with
+  `assertPgLeaseCurrent` in the same transaction as the writes.
+- `metrics()` with no `until` applies no upper bound, so rows the app stamped
+  with its own clock are never dropped by a database-clock bound.
 
-Recover tasks claimed by crashed workers. A task that has already been delivered `maxDeliveries` times is dead-lettered instead — marked `failed` with `poisoned: exceeded N deliveries` — so a task that crashes every worker stops being redelivered.
+## Scheduler and leader leases
 
 ```typescript
-// Requeue tasks with no heartbeat for 5 minutes
-const { requeued, deadLettered } = await queue.requeueStuck({
-  mode: "stale",
-  olderThanMs: 300_000,
+import { DurableScheduler, migrate, PgLeaderLeaseStore } from "@promin/postgres";
+import { LeaseLeaderElection } from "@promin/workflow/scheduler";
+import { coordinatorLeaderKey } from "@promin/workflow/distributed";
+import { createPostgresDb } from "@spilne/perfect-postgres";
+
+const db = createPostgresDb(process.env.DATABASE_URL!);
+await migrate(db);
+
+const scheduler = new DurableScheduler({ db, pollIntervalMs: 1_000, namespace: "prod" });
+await scheduler.register({ id: "daily-etl", cron: "0 2 * * *", timezone: "America/New_York" });
+
+// The same lease table elects a distributed coordinator.
+const election = new LeaseLeaderElection({
+  store: new PgLeaderLeaseStore({ db }),
+  key: coordinatorLeaderKey({ namespace: "prod" }),
+  instanceId: "coordinator-a",
+  ttlMs: 10_000,
 });
-
-// Requeue every task claimed by a dead worker
-await queue.requeueStuck({ mode: "worker", workerId: "worker-3" });
 ```
 
-### Inspect and purge
+Leases live in `wf_leader_leases`; acquire and refresh are one
+`INSERT … ON CONFLICT DO UPDATE … WHERE` against `NOW()`, so the TTL runs on
+the server clock. `commitPoll` checks the lease epoch under `FOR SHARE` in
+the same transaction as its writes. Delivery semantics are described in the
+[Scheduler guide](../workflow/src/lib/scheduler/README.md).
 
-```typescript
-const task = await queue.get(taskId); // status, deliveries, claimedBy, result / error, …
+## Clocks
 
-// Delete completed / failed tasks older than a week
-await queue.purge({ completedBefore: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) });
-```
+Every store takes an optional `clock` (`WallClock`) for the timestamps it
+stamps on the app side. Workflow-lock, state-machine-lock and leader-lease
+expiry are computed and compared with the server's `NOW()`, so they never
+depend on app-server clock skew. Never bound a column the app stamps with
+`NOW()`, or a server-stamped column with an app `Date`.
 
-### Metrics
-
-```typescript
-const metrics = await queue.metrics({ since: new Date(Date.now() - 60 * 60 * 1000) });
-// { pending, running, completed, failed, avgWaitMs, avgExecMs, p95ExecMs }
-```
-
-## Running Tests
+## Running tests
 
 Requires Docker.
 
