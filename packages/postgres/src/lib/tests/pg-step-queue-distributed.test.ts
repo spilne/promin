@@ -67,7 +67,6 @@ describe("PgStepQueue — competing claims", () => {
       stepName: "process",
       needs: ["default"],
       input: { data: "hello" },
-      prevResults: {},
     });
 
     const tasks = await queue.claim({ workerId: "w-1", capabilities: ["default"], limit: 1 });
@@ -85,7 +84,6 @@ describe("PgStepQueue — competing claims", () => {
       stepName: "step-a",
       needs: ["default"],
       input: {},
-      prevResults: {},
     });
 
     const [t1, t2] = await Promise.all([
@@ -104,7 +102,6 @@ describe("PgStepQueue — competing claims", () => {
       stepName: "low",
       needs: ["default"],
       input: {},
-      prevResults: {},
       priority: 1,
     });
     await queue.enqueue({
@@ -112,7 +109,6 @@ describe("PgStepQueue — competing claims", () => {
       stepName: "high",
       needs: ["default"],
       input: {},
-      prevResults: {},
       priority: 10,
     });
 
@@ -131,7 +127,6 @@ describe("PgStepQueue — competing claims", () => {
       stepName: "s1",
       needs: ["default"],
       input: {},
-      prevResults: {},
     });
 
     const tasks = await queue.claim({ workerId: "w-1", capabilities: ["default"], limit: 1 });
@@ -149,7 +144,6 @@ describe("PgStepQueue — competing claims", () => {
         stepName: `step-${i}`,
         needs: ["default"],
         input: { index: i },
-        prevResults: {},
       });
     }
 
@@ -187,7 +181,6 @@ describe("PgStepQueue — competing claims", () => {
         stepName: "s",
         needs: ["default"],
         input: {},
-        prevResults: {},
       });
     }
 
@@ -282,7 +275,6 @@ describe("Distributed DAG workflow — video processing pipeline", () => {
     });
 
     const worker = createWorker({
-      storage,
       stepQueue: queue,
       registry,
       capabilities: ["default"],
@@ -363,7 +355,6 @@ describe("Distributed workers — competing task execution", () => {
         },
       });
       return createWorker({
-        storage,
         stepQueue: new PgStepQueue({ db: pg.db, workerId: `worker-${id}` }),
         registry,
         capabilities: ["default"],
@@ -414,7 +405,6 @@ describe("Dead worker detection — task recovery", () => {
       stepName: "process",
       needs: ["default"],
       input: {},
-      prevResults: {},
     });
 
     const w1Queue = new PgStepQueue({ db: pg.db });
@@ -473,7 +463,6 @@ describe("Priority queue — critical orders processed first", () => {
         stepName: "process",
         needs: ["default"],
         input: { priority: "low" },
-        prevResults: {},
         priority: 1,
       });
     }
@@ -483,7 +472,6 @@ describe("Priority queue — critical orders processed first", () => {
         stepName: "process",
         needs: ["default"],
         input: { priority: "high" },
-        prevResults: {},
         priority: 10,
       });
     }
@@ -539,7 +527,6 @@ describe("Queue routing — GPU vs CPU workers", () => {
       },
     });
     const gpuWorker = createWorker({
-      storage,
       stepQueue: new PgStepQueue({ db: pg.db }),
       registry: gpuRegistry,
       capabilities: ["gpu"],
@@ -564,7 +551,6 @@ describe("Queue routing — GPU vs CPU workers", () => {
       },
     });
     const cpuWorker = createWorker({
-      storage,
       stepQueue: new PgStepQueue({ db: pg.db }),
       registry: cpuRegistry,
       capabilities: ["cpu"],

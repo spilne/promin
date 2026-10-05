@@ -9,13 +9,12 @@ import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { trainModelHandler } from "./workflow.ts";
 
-const { storage, stepQueue, close } = await buildStack();
+const { stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
 registry.register({ stepName: "train-model", handler: trainModelHandler });
 
 const worker = createWorker({
-  storage,
   stepQueue,
   registry,
   capabilities: ["gpu"],

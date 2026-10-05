@@ -8,13 +8,12 @@ import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { reserveInventoryHandler } from "./workflow.ts";
 
-const { storage, stepQueue, close } = await buildStack();
+const { stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
 registry.register({ stepName: "reserve-inventory", handler: reserveInventoryHandler });
 
 const worker = createWorker({
-  storage,
   stepQueue,
   registry,
   capabilities: ["inventory"],

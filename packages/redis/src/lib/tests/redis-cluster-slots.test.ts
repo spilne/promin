@@ -294,7 +294,6 @@ redisDescribe("RedisStepQueue on Redis Cluster", (redis) => {
       workflowId: "wf",
       stepName,
       input: {},
-      prevResults: {},
       concurrencyScope: "send",
       concurrencyKey: "tenant",
       concurrencyLimit: 5,

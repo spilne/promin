@@ -1,6 +1,5 @@
 import { describe, it, expect } from "bun:test";
 import type { Eff } from "@spilne/perfect-core";
-import { InMemoryWorkflowStorage } from "@promin/workflow";
 import { MapStepRegistry, InMemoryStepQueue, createWorker } from "@promin/workflow/distributed";
 import { LocalProcessRuntime } from "../local-process-runtime.ts";
 import { containerStep } from "../container-step.ts";
@@ -158,7 +157,7 @@ describe("Local process runtime — run containerized steps as local processes f
 describe("Container step integration — run containerized commands as workflow steps", () => {
   it("container spec wrapped as an Eff step handler — returns parsed JSON output", async () => {
     const runtime = new LocalProcessRuntime();
-    const [handler] = containerStep({
+    const handler = containerStep({
       spec: {
         image: "",
         command: ["sh", "-c", 'echo \'{"msg":"from-container"}\' > $PIPELINE_OUTPUT_PATH'],
@@ -181,13 +180,12 @@ describe("Container step integration — run containerized commands as workflow 
     expect(result).toEqual({ msg: "from-container" });
   });
 
-  it("container step registered in worker — executes and checkpoints like any other step", async () => {
-    const storage = new InMemoryWorkflowStorage();
+  it("container step registered in worker — executes and settles its task like any other step", async () => {
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
     const runtime = new LocalProcessRuntime();
 
-    const [handler, options] = containerStep({
+    const handler = containerStep({
       spec: {
         image: "",
         command: [
@@ -200,22 +198,17 @@ describe("Container step integration — run containerized commands as workflow 
       runtime,
     });
 
-    registry.register({ stepName: "container-step", handler, ...options });
+    registry.register({ stepName: "container-step", handler });
 
-    await storage.createWorkflow({ workflowId: "cs-1", workflowName: "test", input: {} });
-    await queue.enqueue({
+    const taskId = await queue.enqueue({
       workflowId: "cs-1",
       stepName: "container-step",
-      queue: "default",
       input: {},
-      prevResults: {},
     });
 
     const worker = createWorker({
-      storage,
       stepQueue: queue,
       registry,
-      queues: ["default"],
       pollIntervalMs: 50,
     });
 
@@ -223,16 +216,13 @@ describe("Container step integration — run containerized commands as workflow 
     // The step spawns a real process, so wait on its outcome (bounded by a
     // deadline) rather than for a fixed time.
     const deadline = performance.now() + 10_000;
-    while (
-      (await storage.loadWorkflow("cs-1"))?.steps["container-step"]?.status !== "completed" &&
-      performance.now() < deadline
-    ) {
+    while ((await queue.get(taskId))?.status !== "completed" && performance.now() < deadline) {
       await new Promise((r) => setTimeout(r, 10));
     }
     await worker.stop();
 
-    const state = await storage.loadWorkflow("cs-1");
-    expect(state?.steps["container-step"]?.status).toBe("completed");
-    expect(state?.steps["container-step"]?.result).toEqual({ result: "container-ok" });
+    const task = await queue.get(taskId);
+    expect(task?.status).toBe("completed");
+    expect(task?.result).toEqual({ result: "container-ok" });
   });
 });

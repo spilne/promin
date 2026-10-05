@@ -18,6 +18,8 @@ export interface StepAttemptFailure {
   readonly error: string;
   readonly startedAt: Date;
   readonly durationMs: number;
+  /** Who ran the attempt, when not the runner itself (a worker id). */
+  readonly executorId?: string;
 }
 
 /** How a step body settled. `result` is codec-encoded. */

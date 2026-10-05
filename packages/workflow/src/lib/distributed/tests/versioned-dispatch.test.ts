@@ -41,7 +41,6 @@ describe("versioned dispatch", () => {
     registry.register({ stepName: "remote-step", handler: (ctx) => succeed(`done-${ctx.prev}`) });
 
     const worker = createWorker({
-      storage,
       stepQueue,
       registry,
       capabilities: [],
@@ -79,13 +78,11 @@ describe("versioned dispatch", () => {
       workflowId: "w-1",
       stepName: "known-step",
       input: { x: 1 },
-      prevResults: {},
     });
     await stepQueue.enqueue({
       workflowId: "w-2",
       stepName: "unknown-step",
       input: { y: 2 },
-      prevResults: {},
     });
 
     // Worker supports only "known-step".
@@ -123,7 +120,6 @@ describe("versioned dispatch", () => {
         workflowId: `v${v}-wf`,
         stepName: "s",
         input: {},
-        prevResults: {},
         version: v,
       });
     }
@@ -131,7 +127,6 @@ describe("versioned dispatch", () => {
       workflowId: "unversioned-wf",
       stepName: "s",
       input: {},
-      prevResults: {},
     });
 
     const registry = new MapStepRegistry();
@@ -166,7 +161,6 @@ describe("versioned dispatch", () => {
 
     // Worker declares it supports both versions during the rolling deploy.
     const worker = createWorker({
-      storage,
       stepQueue,
       registry: v2Registry,
       capabilities: [],
@@ -229,14 +223,12 @@ describe("versioned dispatch", () => {
       workflowId: "v1-orphan",
       stepName: "step-a",
       input: {},
-      prevResults: {},
       version: "1",
     });
     await stepQueue.enqueue({
       workflowId: "v2-fresh",
       stepName: "step-a",
       input: {},
-      prevResults: {},
       version: "2",
     });
 
@@ -245,7 +237,6 @@ describe("versioned dispatch", () => {
 
     // Worker only supports v2 — declares drain complete on its side.
     const worker = createWorker({
-      storage,
       stepQueue,
       registry: v2OnlyRegistry,
       capabilities: [],

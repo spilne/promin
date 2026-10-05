@@ -92,9 +92,90 @@ export function stepQueueTestSuite(
     workflowId: string,
     stepName: string,
     extra: Partial<StepQueueEnqueueParams> = {},
-  ): StepQueueEnqueueParams => ({ workflowId, stepName, input: {}, prevResults: {}, ...extra });
+  ): StepQueueEnqueueParams => ({ workflowId, stepName, input: {}, ...extra });
 
   describe("StepQueue conformance", () => {
+    // -------------------------------------------------------------------
+    // settled outcome — what the coordinator reads back with get()
+    // -------------------------------------------------------------------
+
+    describe("settled outcome", () => {
+      it("complete records the result, step metadata and the claimer", async () => {
+        const q = await getQueue();
+        const id = await q.enqueue(task("wf-out-ok", "s"));
+        const [claimed] = await q.claim({ workerId: "w-ok", limit: 1 });
+        const settled = await q.complete({
+          taskId: id,
+          claimToken: claimed!.claimToken!,
+          result: { v: 1 },
+          durationMs: 12,
+          stepMetadata: { matchCase: "a" },
+        });
+        expect(settled).toBe(true);
+        const record = await q.get(id);
+        expect(record!.status).toBe("completed");
+        expect(record!.result).toEqual({ v: 1 });
+        expect(record!.stepMetadata).toEqual({ matchCase: "a" });
+        expect(record!.claimedBy).toBe("w-ok");
+        expect(record!.durationMs).toBe(12);
+      });
+
+      it("fail records the error, its tag and step metadata", async () => {
+        const q = await getQueue();
+        const id = await q.enqueue(task("wf-out-fail", "s"));
+        const [claimed] = await q.claim({ workerId: "w-fail", limit: 1 });
+        const settled = await q.fail({
+          taskId: id,
+          claimToken: claimed!.claimToken!,
+          error: "declined",
+          errorTag: "PaymentDeclined",
+          durationMs: 3,
+          stepMetadata: { matchCase: "b" },
+        });
+        expect(settled).toBe(true);
+        const record = await q.get(id);
+        expect(record!.status).toBe("failed");
+        expect(record!.error).toBe("declined");
+        expect(record!.errorTag).toBe("PaymentDeclined");
+        expect(record!.stepMetadata).toEqual({ matchCase: "b" });
+      });
+
+      it("a stale claim cannot settle the task, and the current claim's outcome stands", async () => {
+        const q = await getQueue();
+        const id = await q.enqueue(task("wf-out-stale", "s"));
+        const [first] = await q.claim({ workerId: "w-a", limit: 1 });
+        await elapse(60);
+        await q.requeueStuck({ mode: "stale", olderThanMs: 50 });
+        const [second] = await q.claim({ workerId: "w-b", limit: 1 });
+        expect(second!.claimToken).not.toBe(first!.claimToken);
+
+        expect(
+          await q.complete({
+            taskId: id,
+            claimToken: second!.claimToken!,
+            result: "b",
+            durationMs: 1,
+          }),
+        ).toBe(true);
+        // The zombie's late outcome, either way, is rejected.
+        expect(
+          await q.complete({
+            taskId: id,
+            claimToken: first!.claimToken!,
+            result: "a",
+            durationMs: 1,
+          }),
+        ).toBe(false);
+        expect(
+          await q.fail({ taskId: id, claimToken: first!.claimToken!, error: "a", durationMs: 1 }),
+        ).toBe(false);
+        const record = await q.get(id);
+        expect(record!.status).toBe("completed");
+        expect(record!.result).toBe("b");
+        expect(record!.claimedBy).toBe("w-b");
+      });
+    });
+
     // -------------------------------------------------------------------
     // enqueue
     // -------------------------------------------------------------------
@@ -106,10 +187,35 @@ export function stepQueueTestSuite(
           workflowId: "wf-1",
           stepName: "step-a",
           input: { x: 1 },
-          prevResults: {},
         });
         expect(typeof id).toBe("string");
         expect(id.length).toBeGreaterThan(0);
+      });
+
+      it("carries deps, their declared order and the attempt timeout to the claim", async () => {
+        const q = await getQueue();
+        const id = await q.enqueue(
+          task("wf-deps", "join", {
+            deps: { zeta: { n: 1 }, alpha: "a" },
+            dependsOn: ["zeta", "alpha"],
+            timeoutMs: 2500,
+          }),
+        );
+        const [claimed] = await q.claim({ workerId: "w-1", limit: 1 });
+        expect(claimed!.deps).toEqual({ zeta: { n: 1 }, alpha: "a" });
+        expect(claimed!.dependsOn).toEqual(["zeta", "alpha"]);
+        expect(claimed!.timeoutMs).toBe(2500);
+        const record = await q.get(id);
+        expect(record!.dependsOn).toEqual(["zeta", "alpha"]);
+      });
+
+      it("defaults to no deps, no dependsOn and no timeout", async () => {
+        const q = await getQueue();
+        await q.enqueue(task("wf-nodeps", "root"));
+        const [claimed] = await q.claim({ workerId: "w-1", limit: 1 });
+        expect(claimed!.deps).toEqual({});
+        expect(claimed!.dependsOn).toEqual([]);
+        expect(claimed!.timeoutMs).toBeUndefined();
       });
 
       it("is idempotent on (workflowId, stepName) while a prior task is pending", async () => {
@@ -118,13 +224,11 @@ export function stepQueueTestSuite(
           workflowId: "wf-idempo",
           stepName: "charge",
           input: { amount: 100 },
-          prevResults: {},
         });
         const second = await q.enqueue({
           workflowId: "wf-idempo",
           stepName: "charge",
           input: { amount: 999 },
-          prevResults: {},
         });
         expect(second).toBe(first);
 
@@ -138,7 +242,6 @@ export function stepQueueTestSuite(
           workflowId: "wf-idempo-running",
           stepName: "charge",
           input: {},
-          prevResults: {},
         });
         await q.claim({ workerId: "w-1", limit: 10 });
 
@@ -146,27 +249,79 @@ export function stepQueueTestSuite(
           workflowId: "wf-idempo-running",
           stepName: "charge",
           input: {},
-          prevResults: {},
         });
         expect(second).toBe(first);
       });
 
-      it("allows a fresh enqueue after the prior task completes", async () => {
+      it("hands back a settled task until its outcome is consumed", async () => {
+        const q = await getQueue();
+        const first = await q.enqueue(task("wf-settled", "charge", { attempt: 1, run: 1 }));
+        const [claimed] = await q.claim({ workerId: "w-1", limit: 1 });
+        await q.complete({
+          taskId: claimed!.id,
+          claimToken: claimed!.claimToken!,
+          result: "ok",
+          durationMs: 10,
+        });
+
+        // Unconsumed: a coordinator that adopts the run gets the same task,
+        // and its outcome, back instead of dispatching again.
+        expect(await q.enqueue(task("wf-settled", "charge", { attempt: 1 }))).toBe(first);
+        const record = await q.get(first);
+        expect(record).toMatchObject({ status: "completed", result: "ok", attempt: 1, run: 1 });
+        expect(record!.consumedAt).toBeUndefined();
+        expect(await q.claim({ workerId: "w-1", limit: 10 })).toHaveLength(0);
+      });
+
+      it("consume releases the slot once, and only for a settled task", async () => {
+        const q = await getQueue();
+        const id = await q.enqueue(task("wf-consume", "s"));
+        // Pending and running tasks can't be consumed.
+        expect(await q.consume({ taskId: id })).toBe(false);
+        const [claimed] = await q.claim({ workerId: "w-1", limit: 1 });
+        expect(await q.consume({ taskId: id })).toBe(false);
+        await q.fail({ taskId: id, claimToken: claimed!.claimToken!, error: "x", durationMs: 1 });
+
+        expect(await q.consume({ taskId: id })).toBe(true);
+        expect(await q.consume({ taskId: id })).toBe(false);
+        expect((await q.get(id))!.consumedAt).toBeInstanceOf(Date);
+        expect(await q.consume({ taskId: "no-such-task" })).toBe(false);
+        expect(await q.enqueue(task("wf-consume", "s"))).not.toBe(id);
+      });
+
+      it("consumeSettled consumes the settled tasks of the named steps only", async () => {
+        const q = await getQueue();
+        const a = await q.enqueue(task("wf-cs", "a"));
+        const b = await q.enqueue(task("wf-cs", "b"));
+        const c = await q.enqueue(task("wf-cs", "c"));
+        for (const t of await q.claim({ workerId: "w-1", limit: 2, stepNames: ["a", "b"] })) {
+          await q.complete({ taskId: t.id, claimToken: t.claimToken!, result: 1, durationMs: 1 });
+        }
+
+        expect(await q.consumeSettled({ workflowId: "wf-cs", stepNames: ["a", "c"] })).toBe(1);
+        expect((await q.get(a))!.consumedAt).toBeInstanceOf(Date);
+        expect((await q.get(b))!.consumedAt).toBeUndefined();
+        // "c" is still pending: untouched.
+        expect((await q.get(c))!.status).toBe("pending");
+        expect(await q.enqueue(task("wf-cs", "a"))).not.toBe(a);
+        expect(await q.enqueue(task("wf-cs", "b"))).toBe(b);
+      });
+
+      it("allows a fresh enqueue after the prior task completes and is consumed", async () => {
         const q = await getQueue();
         const first = await q.enqueue({
           workflowId: "wf-after-complete",
           stepName: "charge",
           input: {},
-          prevResults: {},
         });
         const [claimed] = await q.claim({ workerId: "w-1", limit: 1 });
         await q.complete({ taskId: claimed!.id, result: "ok", durationMs: 10 });
+        await q.consume({ taskId: first });
 
         const second = await q.enqueue({
           workflowId: "wf-after-complete",
           stepName: "charge",
           input: {},
-          prevResults: {},
         });
         expect(second).not.toBe(first);
 
@@ -175,22 +330,21 @@ export function stepQueueTestSuite(
         expect(all[0]!.id).toBe(second);
       });
 
-      it("allows a fresh enqueue after the prior task fails", async () => {
+      it("allows a fresh enqueue after the prior task fails and is consumed", async () => {
         const q = await getQueue();
         const first = await q.enqueue({
           workflowId: "wf-after-fail",
           stepName: "charge",
           input: {},
-          prevResults: {},
         });
         const [claimed] = await q.claim({ workerId: "w-1", limit: 1 });
         await q.fail({ taskId: claimed!.id, error: "boom", durationMs: 5 });
+        await q.consume({ taskId: first });
 
         const second = await q.enqueue({
           workflowId: "wf-after-fail",
           stepName: "charge",
           input: {},
-          prevResults: {},
         });
         expect(second).not.toBe(first);
       });
@@ -201,19 +355,16 @@ export function stepQueueTestSuite(
           workflowId: "wf-scope",
           stepName: "charge",
           input: {},
-          prevResults: {},
         });
         const b = await q.enqueue({
           workflowId: "wf-scope",
           stepName: "ship",
           input: {},
-          prevResults: {},
         });
         const c = await q.enqueue({
           workflowId: "wf-other",
           stepName: "charge",
           input: {},
-          prevResults: {},
         });
         expect(new Set([a, b, c]).size).toBe(3);
       });
@@ -226,8 +377,8 @@ export function stepQueueTestSuite(
     describe("claim", () => {
       it("returns pending tasks and marks them running", async () => {
         const q = await getQueue();
-        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
-        await q.enqueue({ workflowId: "wf-1", stepName: "s2", input: {}, prevResults: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "s2", input: {} });
 
         const tasks = await q.claim({ workerId: "w-1", limit: 10 });
         expect(tasks).toHaveLength(2);
@@ -242,7 +393,6 @@ export function stepQueueTestSuite(
             workflowId: "wf-1",
             stepName: `s${i}`,
             input: {},
-            prevResults: {},
           });
         }
         const tasks = await q.claim({ workerId: "w-1", limit: 2 });
@@ -261,7 +411,6 @@ export function stepQueueTestSuite(
           workflowId: "wf-1",
           stepName: "transcode",
           input: {},
-          prevResults: {},
           needs: ["gpu"],
         });
         const tasks = await q.claim({ workerId: "w-1", capabilities: ["gpu"], limit: 10 });
@@ -275,7 +424,6 @@ export function stepQueueTestSuite(
           workflowId: "wf-1",
           stepName: "transcode",
           input: {},
-          prevResults: {},
           needs: ["gpu"],
         });
         const tasks = await q.claim({ workerId: "w-1", capabilities: ["cpu"], limit: 10 });
@@ -292,7 +440,6 @@ export function stepQueueTestSuite(
           workflowId: "wf-1",
           stepName: "transcode",
           input: {},
-          prevResults: {},
           needs: ["gpu"],
         });
         const tasks = await q.claim({
@@ -309,7 +456,6 @@ export function stepQueueTestSuite(
           workflowId: "wf-1",
           stepName: "decode",
           input: {},
-          prevResults: {},
         });
         const tasks = await q.claim({ workerId: "w-1", limit: 10 }); // no capabilities passed
         expect(tasks).toHaveLength(1);
@@ -321,7 +467,6 @@ export function stepQueueTestSuite(
           workflowId: "wf-1",
           stepName: "transcode",
           input: {},
-          prevResults: {},
           needs: ["gpu"],
         });
         const tasks = await q.claim({ workerId: "w-1", limit: 10 }); // no capabilities passed
@@ -334,7 +479,6 @@ export function stepQueueTestSuite(
           workflowId: "wf-1",
           stepName: "composite",
           input: {},
-          prevResults: {},
           needs: ["gpu", "nvme"],
         });
         // Only one of two → no claim.
@@ -357,7 +501,7 @@ export function stepQueueTestSuite(
     describe("complete / fail", () => {
       it("marks task as completed", async () => {
         const q = await getQueue();
-        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {} });
         const [task] = await q.claim({ workerId: "w-1", limit: 1 });
         await q.complete({ taskId: task!.id, result: "done", durationMs: 100 });
 
@@ -367,7 +511,7 @@ export function stepQueueTestSuite(
 
       it("marks task as failed", async () => {
         const q = await getQueue();
-        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {} });
         const [task] = await q.claim({ workerId: "w-1", limit: 1 });
         await q.fail({ taskId: task!.id, error: "boom", durationMs: 50 });
 
@@ -387,21 +531,18 @@ export function stepQueueTestSuite(
           workflowId: "wf-1",
           stepName: "low",
           input: {},
-          prevResults: {},
           priority: 1,
         });
         await q.enqueue({
           workflowId: "wf-1",
           stepName: "high",
           input: {},
-          prevResults: {},
           priority: 10,
         });
         await q.enqueue({
           workflowId: "wf-1",
           stepName: "mid",
           input: {},
-          prevResults: {},
           priority: 5,
         });
 
@@ -413,8 +554,8 @@ export function stepQueueTestSuite(
 
       it("FIFO within same priority", async () => {
         const q = await getQueue();
-        await q.enqueue({ workflowId: "wf-1", stepName: "first", input: {}, prevResults: {} });
-        await q.enqueue({ workflowId: "wf-1", stepName: "second", input: {}, prevResults: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "first", input: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "second", input: {} });
 
         const tasks = await q.claim({ workerId: "w-1", limit: 2 });
         expect(tasks[0]!.stepName).toBe("first");
@@ -429,7 +570,7 @@ export function stepQueueTestSuite(
     describe("requeueStuck", () => {
       it("requeues stale tasks by staleTimeoutMs", async () => {
         const q = await getQueue();
-        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {} });
         await q.claim({ workerId: "w-1", limit: 1 });
 
         await elapse(10);
@@ -443,7 +584,7 @@ export function stepQueueTestSuite(
 
       it("does not requeue tasks within timeout", async () => {
         const q = await getQueue();
-        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {} });
         await q.claim({ workerId: "w-1", limit: 1 });
 
         const { requeued } = await q.requeueStuck({ mode: "stale", olderThanMs: 600_000 });
@@ -452,7 +593,7 @@ export function stepQueueTestSuite(
 
       it("heartbeat prevents premature requeue", async () => {
         const q = await getQueue();
-        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {} });
         const [task] = await q.claim({ workerId: "w-1", limit: 1 });
 
         // Wait so claimedAt is in the past, then heartbeat to reset last-activity
@@ -466,7 +607,7 @@ export function stepQueueTestSuite(
 
       it("a re-claimed task starts a fresh lease (an earlier claim's heartbeat doesn't count)", async () => {
         const q = await getQueue();
-        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {} });
         const [first] = await q.claim({ workerId: "w-1", limit: 1 });
         await q.heartbeat({ taskId: first!.id, claimToken: first!.claimToken });
 
@@ -483,7 +624,7 @@ export function stepQueueTestSuite(
 
       it("rejects stale claim completion after requeue", async () => {
         const q = await getQueue();
-        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {} });
         const [first] = await q.claim({ workerId: "w-1", limit: 1 });
         expect(first?.claimToken).toBeDefined();
 
@@ -515,8 +656,8 @@ export function stepQueueTestSuite(
 
       it("does not requeue completed or failed tasks", async () => {
         const q = await getQueue();
-        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
-        await q.enqueue({ workflowId: "wf-1", stepName: "s2", input: {}, prevResults: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "s2", input: {} });
 
         const tasks = await q.claim({ workerId: "w-1", limit: 2 });
         await q.complete({ taskId: tasks[0]!.id, result: "ok", durationMs: 10 });
@@ -536,9 +677,9 @@ export function stepQueueTestSuite(
       it("returns counts scoped to the requested time window", async () => {
         const q = await getQueue();
         const windowStart = new Date(Date.now() - 60_000);
-        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
-        await q.enqueue({ workflowId: "wf-1", stepName: "s2", input: {}, prevResults: {} });
-        await q.enqueue({ workflowId: "wf-1", stepName: "s3", input: {}, prevResults: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "s2", input: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "s3", input: {} });
         await q.claim({ workerId: "w-1", limit: 1 });
 
         const m = await q.metrics({ since: windowStart });
@@ -549,8 +690,8 @@ export function stepQueueTestSuite(
       it("tracks completed and failed counts in the window", async () => {
         const q = await getQueue();
         const windowStart = new Date(Date.now() - 60_000);
-        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
-        await q.enqueue({ workflowId: "wf-1", stepName: "s2", input: {}, prevResults: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {} });
+        await q.enqueue({ workflowId: "wf-1", stepName: "s2", input: {} });
 
         const tasks = await q.claim({ workerId: "w-1", limit: 2 });
         await q.complete({ taskId: tasks[0]!.id, result: "ok", durationMs: 10 });
@@ -575,7 +716,6 @@ export function stepQueueTestSuite(
               workflowId: `wf-lat-${i}`,
               stepName: "s",
               input: {},
-              prevResults: {},
             }),
           );
         }
@@ -600,7 +740,7 @@ export function stepQueueTestSuite(
 
       it("excludes events outside the window", async () => {
         const q = await getQueue();
-        await q.enqueue({ workflowId: "wf-old", stepName: "s", input: {}, prevResults: {} });
+        await q.enqueue({ workflowId: "wf-old", stepName: "s", input: {} });
         const claimed = await q.claim({ workerId: "w-1", limit: 1 });
         await q.complete({ taskId: claimed[0]!.id, result: "ok", durationMs: 50 });
 
@@ -627,7 +767,6 @@ export function stepQueueTestSuite(
           workflowId: "wf-v",
           stepName: "s",
           input: {},
-          prevResults: {},
           version: "2",
         });
 
@@ -642,21 +781,18 @@ export function stepQueueTestSuite(
           workflowId: "f-1",
           stepName: "s",
           input: {},
-          prevResults: {},
           version: "1",
         });
         await q.enqueue({
           workflowId: "f-2",
           stepName: "s",
           input: {},
-          prevResults: {},
           version: "2",
         });
         await q.enqueue({
           workflowId: "f-3",
           stepName: "s",
           input: {},
-          prevResults: {},
           version: "3",
         });
 
@@ -676,7 +812,6 @@ export function stepQueueTestSuite(
           workflowId: "r-1",
           stepName: "s",
           input: {},
-          prevResults: {},
           version: "5",
         });
 
@@ -698,7 +833,7 @@ export function stepQueueTestSuite(
 
       it("unversioned tasks have undefined version", async () => {
         const q = await getQueue();
-        await q.enqueue({ workflowId: "u-1", stepName: "s", input: {}, prevResults: {} });
+        await q.enqueue({ workflowId: "u-1", stepName: "s", input: {} });
 
         const [task] = await q.claim({ workerId: "w-1", limit: 1 });
         expect(task).toBeDefined();
@@ -719,7 +854,6 @@ export function stepQueueTestSuite(
           workflowId: "m-1",
           stepName: "s",
           input: {},
-          prevResults: {},
           metadata: meta,
         });
 
@@ -730,7 +864,7 @@ export function stepQueueTestSuite(
 
       it("tasks without metadata have undefined metadata", async () => {
         const q = await getQueue();
-        await q.enqueue({ workflowId: "no-meta", stepName: "s", input: {}, prevResults: {} });
+        await q.enqueue({ workflowId: "no-meta", stepName: "s", input: {} });
 
         const [task] = await q.claim({ workerId: "w-1", limit: 1 });
         expect(task).toBeDefined();
@@ -743,7 +877,6 @@ export function stepQueueTestSuite(
           workflowId: "all-fields",
           stepName: "s",
           input: { x: 1 },
-          prevResults: {},
           namespace: "tenant-a",
           version: "2",
           needs: ["gpu"],
@@ -769,7 +902,6 @@ export function stepQueueTestSuite(
             workflowId: `wf-A-${i}`,
             stepName: "send",
             input: {},
-            prevResults: {},
             concurrencyKey: "tenant-A",
             concurrencyScope: "send-email",
             concurrencyLimit: 2,
@@ -780,7 +912,6 @@ export function stepQueueTestSuite(
             workflowId: `wf-B-${i}`,
             stepName: "send",
             input: {},
-            prevResults: {},
             concurrencyKey: "tenant-B",
             concurrencyScope: "send-email",
             concurrencyLimit: 1,
@@ -807,7 +938,6 @@ export function stepQueueTestSuite(
             workflowId: `wf-${i}`,
             stepName: "send",
             input: {},
-            prevResults: {},
             concurrencyKey: "shared",
             concurrencyScope: "send",
             concurrencyLimit: 1,
@@ -832,7 +962,6 @@ export function stepQueueTestSuite(
             workflowId: `wf-${i}`,
             stepName: "s",
             input: {},
-            prevResults: {},
           });
         }
         const claimed = await q.claim({ workerId: "w-1", limit: 100 });
@@ -846,7 +975,6 @@ export function stepQueueTestSuite(
           workflowId: "wf-1",
           stepName: "send-email",
           input: {},
-          prevResults: {},
           concurrencyKey: "X",
           concurrencyScope: "send-email",
           concurrencyLimit: 1,
@@ -855,7 +983,6 @@ export function stepQueueTestSuite(
           workflowId: "wf-2",
           stepName: "send-sms",
           input: {},
-          prevResults: {},
           concurrencyKey: "X",
           concurrencyScope: "send-sms",
           concurrencyLimit: 1,
@@ -874,7 +1001,6 @@ export function stepQueueTestSuite(
             workflowId: `wf-${i}`,
             stepName: "s",
             input: {},
-            prevResults: {},
             concurrencyKey: "single",
             concurrencyScope: "s",
             concurrencyLimit: 2,
@@ -1128,7 +1254,9 @@ export function stepQueueTestSuite(
         expect(record?.error).toBe(deadLetterError(2));
         expect(await q.claim({ workerId: "w-3", limit: 1 })).toHaveLength(0);
 
-        // Terminal: a fresh enqueue for the same step creates a new task.
+        // Terminal: once consumed, a fresh enqueue for the step makes a new task.
+        expect(await q.enqueue(task("poison", "s"))).toBe(id);
+        expect(await q.consume({ taskId: id })).toBe(true);
         const again = await q.enqueue(task("poison", "s"));
         expect(again).not.toBe(id);
       });

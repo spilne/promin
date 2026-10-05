@@ -461,6 +461,7 @@ async function runOneOrchestrationCycle(cycle: {
     workflowName: ctx.name,
     workflowQueue: ctx.queue,
     ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
+    ...(state && { run: state.run }),
     ...(ctx.version !== undefined && { workflowVersion: ctx.version }),
     ...(ctx.patches !== undefined && { patches: ctx.patches }),
     runChild: (child) =>

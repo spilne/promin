@@ -14,7 +14,7 @@ import {
   transformShardCHandler,
 } from "./workflow.ts";
 
-const { storage, stepQueue, close } = await buildStack();
+const { stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
 registry.register({ stepName: "transform-shard-a", handler: transformShardAHandler });
@@ -22,7 +22,6 @@ registry.register({ stepName: "transform-shard-b", handler: transformShardBHandl
 registry.register({ stepName: "transform-shard-c", handler: transformShardCHandler });
 
 const worker = createWorker({
-  storage,
   stepQueue,
   registry,
   capabilities: ["transform"],

@@ -40,7 +40,6 @@ redisDescribe("RedisStepQueue concurrency keys", (redis) => {
     workflowId: `wf-${i}`,
     stepName: "send",
     input: {},
-    prevResults: {},
     concurrencyKey: "tenant",
     concurrencyScope: "send",
     concurrencyLimit: limit,
@@ -132,7 +131,6 @@ redisDescribe("RedisStepQueue concurrency keys", (redis) => {
       workflowId: "other",
       stepName: "send",
       input: {},
-      prevResults: {},
       priority: 1,
     });
 
@@ -149,7 +147,6 @@ redisDescribe("RedisStepQueue concurrency keys", (redis) => {
         workflowId: "other",
         stepName: "send",
         input: {},
-        prevResults: {},
         priority: 1,
       });
 

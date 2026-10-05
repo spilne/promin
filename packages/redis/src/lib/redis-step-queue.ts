@@ -41,6 +41,8 @@ import {
   DEFAULT_MAX_DELIVERIES,
   type StepQueue,
   type StepQueueClaimParams,
+  type StepQueueCompleteParams,
+  type StepQueueFailParams,
   type StepQueueEnqueueParams,
   type StepQueueRequeueParams,
   type StepQueueRequeueResult,
@@ -77,9 +79,9 @@ end
  *
  * KEYS: [active_key, pending_key, counter_key]
  * ARGV: [task_key_prefix, workflowId, stepName, priority, inputJson,
- *        prevResultsJson, needsJson, createdAt, version, namespace,
+ *        depsJson, needsJson, createdAt, version, namespace,
  *        metadataJson, concurrencyKey, concurrencyScope, concurrencyLimit,
- *        attempt] — optional values are '' when unset
+ *        attempt, dependsOnJson, timeoutMs, run] — optional values are '' when unset
  */
 const ENQUEUE_LUA = `
 local active_key = KEYS[1]
@@ -99,9 +101,11 @@ local fields = {
   'stepName', ARGV[3],
   'priority', ARGV[4],
   'input', ARGV[5],
-  'prevResults', ARGV[6],
+  'deps', ARGV[6],
+  'dependsOn', ARGV[16],
   'needs', ARGV[7],
   'attempt', ARGV[15],
+  'run', ARGV[18],
   'deliveries', '0',
   'status', 'pending',
   'createdAt', ARGV[8],
@@ -109,6 +113,7 @@ local fields = {
 local optional = {
   {9, 'version'}, {10, 'namespace'}, {11, 'metadata'},
   {12, 'concurrencyKey'}, {13, 'concurrencyScope'}, {14, 'concurrencyLimit'},
+  {17, 'timeoutMs'},
 }
 for _, o in ipairs(optional) do
   if ARGV[o[1]] ~= '' then
@@ -279,7 +284,6 @@ if mode == 'requeue' and deliveries >= tonumber(ARGV[5]) then
     'completedAt', ARGV[7],
     'claimToken', '',
     'heartbeatAt', '')
-  redis.call('DEL', prefix .. ':active:' .. f[7] .. '::' .. f[8])
   redis.call('ZADD', done_key, tonumber(ARGV[8]), id)
   return 2
 end
@@ -299,11 +303,13 @@ return 1
 `;
 
 /**
- * Settle a running task as completed or failed.
+ * Settle a running task as completed or failed. The claim check and the
+ * write are one script, so a stale claim can never settle the task.
  *
  * KEYS: [task_key, running_key, done_key]
  * ARGV: [id, claim_token, status, value_field, value, duration_ms,
- *        completed_at_iso, prefix, completed_at_ms]
+ *        completed_at_iso, prefix, completed_at_ms, ...extra field/value
+ *        pairs] — an extra pair with an empty value is not written
  */
 const SETTLE_LUA =
   CONC_KEY_LUA +
@@ -325,10 +331,11 @@ redis.call('HSET', task_key,
   ARGV[4], ARGV[5],
   'durationMs', ARGV[6],
   'completedAt', ARGV[7])
-redis.call('SREM', running_key, id)
-if f[3] and f[4] then
-  redis.call('DEL', prefix .. ':active:' .. f[3] .. '::' .. f[4])
+for i = 10, #ARGV - 1, 2 do
+  if ARGV[i + 1] ~= '' then redis.call('HSET', task_key, ARGV[i], ARGV[i + 1]) end
 end
+redis.call('SREM', running_key, id)
+-- The task keeps its (workflowId, stepName) active slot until consumed.
 local conc = conc_key(prefix, f[5], f[6])
 if conc then redis.call('SREM', conc, id) end
 redis.call('ZADD', done_key, tonumber(ARGV[9]), id)
@@ -367,12 +374,36 @@ for _, id in ipairs(ids) do
   -- A task that left the terminal states isn't ours to delete; it is
   -- re-indexed when it settles again.
   if status == 'completed' or status == 'failed' or not status then
-    if status then purged = purged + 1 end
+    if status then
+      purged = purged + 1
+      local f = redis.call('HMGET', task_key, 'workflowId', 'stepName')
+      local active_key = prefix .. ':active:' .. tostring(f[1]) .. '::' .. tostring(f[2])
+      if redis.call('GET', active_key) == id then redis.call('DEL', active_key) end
+    end
     redis.call('DEL', task_key)
   end
   redis.call('ZREM', done_key, id)
 end
 return {purged, #ids}
+`;
+
+/**
+ * Consume a settled task: stamp `consumedAt` and free its active slot.
+ *
+ * KEYS: [task_key]
+ * ARGV: [id, prefix, consumed_at_iso]
+ * Returns 1 when consumed, 0 when missing, unsettled or already consumed.
+ */
+const CONSUME_LUA = `
+local task_key = KEYS[1]
+local id = ARGV[1]
+local f = redis.call('HMGET', task_key, 'status', 'consumedAt', 'workflowId', 'stepName')
+if f[1] ~= 'completed' and f[1] ~= 'failed' then return 0 end
+if f[2] and f[2] ~= '' then return 0 end
+redis.call('HSET', task_key, 'consumedAt', ARGV[3])
+local active_key = ARGV[2] .. ':active:' .. f[3] .. '::' .. f[4]
+if redis.call('GET', active_key) == id then redis.call('DEL', active_key) end
+return 1
 `;
 
 // -- Implementation ----------------------------------------------------------
@@ -481,7 +512,7 @@ export class RedisStepQueue implements StepQueue {
       params.stepName,
       String(priority),
       JSON.stringify(params.input),
-      JSON.stringify(params.prevResults),
+      JSON.stringify(params.deps ?? {}),
       JSON.stringify(needs),
       this.clock.now().toISOString(),
       params.version ?? "",
@@ -491,6 +522,9 @@ export class RedisStepQueue implements StepQueue {
       params.concurrencyScope ?? "",
       params.concurrencyLimit !== undefined ? String(params.concurrencyLimit) : "",
       String(params.attempt ?? 1),
+      JSON.stringify(params.dependsOn ?? []),
+      params.timeoutMs !== undefined ? String(params.timeoutMs) : "",
+      String(params.run ?? 1),
     )) as string;
     return String(id);
   }
@@ -539,12 +573,7 @@ export class RedisStepQueue implements StepQueue {
     return this.parseRecord(raw);
   }
 
-  async complete(params: {
-    taskId: string;
-    claimToken?: string;
-    result: unknown;
-    durationMs: number;
-  }): Promise<boolean> {
+  async complete(params: StepQueueCompleteParams): Promise<boolean> {
     return this.settle({
       taskId: params.taskId,
       claimToken: params.claimToken,
@@ -552,15 +581,14 @@ export class RedisStepQueue implements StepQueue {
       field: "result",
       value: JSON.stringify(params.result),
       durationMs: params.durationMs,
+      extra: [
+        "stepMetadata",
+        params.stepMetadata !== undefined ? JSON.stringify(params.stepMetadata) : "",
+      ],
     });
   }
 
-  async fail(params: {
-    taskId: string;
-    claimToken?: string;
-    error: string;
-    durationMs: number;
-  }): Promise<boolean> {
+  async fail(params: StepQueueFailParams): Promise<boolean> {
     return this.settle({
       taskId: params.taskId,
       claimToken: params.claimToken,
@@ -568,6 +596,12 @@ export class RedisStepQueue implements StepQueue {
       field: "error",
       value: params.error,
       durationMs: params.durationMs,
+      extra: [
+        "errorTag",
+        params.errorTag ?? "",
+        "stepMetadata",
+        params.stepMetadata !== undefined ? JSON.stringify(params.stepMetadata) : "",
+      ],
     });
   }
 
@@ -628,6 +662,30 @@ export class RedisStepQueue implements StepQueue {
     }
 
     return { requeued, deadLettered };
+  }
+
+  async consume(params: { taskId: string }): Promise<boolean> {
+    const ok = await this.redis.eval(
+      CONSUME_LUA,
+      1,
+      this.taskKey(params.taskId),
+      params.taskId,
+      this.base,
+      this.clock.now().toISOString(),
+    );
+    return Number(ok) === 1;
+  }
+
+  async consumeSettled(params: {
+    workflowId: string;
+    stepNames: readonly string[];
+  }): Promise<number> {
+    let consumed = 0;
+    for (const stepName of params.stepNames) {
+      const id = await this.redis.get(this.activeKey(params.workflowId, stepName));
+      if (id && (await this.consume({ taskId: String(id) }))) consumed++;
+    }
+    return consumed;
   }
 
   /**
@@ -738,6 +796,8 @@ export class RedisStepQueue implements StepQueue {
     field: "result" | "error";
     value: string;
     durationMs: number;
+    /** Extra `field, value` pairs; an empty value is not written. */
+    extra: readonly string[];
   }): Promise<boolean> {
     const now = this.clock.now();
     const ok = await this.redis.eval(
@@ -755,6 +815,7 @@ export class RedisStepQueue implements StepQueue {
       now.toISOString(),
       this.base,
       String(now.getTime()),
+      ...params.extra,
     );
     return ok === 1;
   }
@@ -814,8 +875,10 @@ export class RedisStepQueue implements StepQueue {
       needs: map.needs ? (JSON.parse(map.needs) as string[]) : [],
       priority: parseInt(map.priority ?? "5", 10),
       input: map.input ? JSON.parse(map.input) : {},
-      prevResults: map.prevResults ? JSON.parse(map.prevResults) : {},
+      deps: map.deps ? JSON.parse(map.deps) : {},
+      dependsOn: map.dependsOn ? (JSON.parse(map.dependsOn) as string[]) : [],
       attempt: parseInt(map.attempt || "1", 10),
+      run: parseInt(map.run || "1", 10),
       deliveries: parseInt(map.deliveries || "0", 10),
       status: (map.status ?? "pending") as StepTaskStatus,
       createdAt: new Date(map.createdAt ?? this.clock.currentTimeMs()),
@@ -826,13 +889,17 @@ export class RedisStepQueue implements StepQueue {
     if (opt("concurrencyKey")) record.concurrencyKey = map.concurrencyKey;
     if (opt("concurrencyScope")) record.concurrencyScope = map.concurrencyScope;
     if (opt("concurrencyLimit")) record.concurrencyLimit = Number(map.concurrencyLimit);
+    if (opt("timeoutMs")) record.timeoutMs = Number(map.timeoutMs);
     if (opt("claimedBy")) record.claimedBy = map.claimedBy;
     if (opt("claimedAt")) record.claimedAt = date("claimedAt");
     if (opt("heartbeatAt")) record.heartbeatAt = date("heartbeatAt");
     if (opt("completedAt")) record.completedAt = date("completedAt");
     if (opt("result")) record.result = json("result");
     if (opt("error")) record.error = map.error;
+    if (opt("errorTag")) record.errorTag = map.errorTag;
+    if (opt("stepMetadata")) record.stepMetadata = json("stepMetadata") as Record<string, unknown>;
     if (opt("durationMs")) record.durationMs = Number(map.durationMs);
+    if (opt("consumedAt")) record.consumedAt = date("consumedAt");
     return record;
   }
 }
@@ -852,7 +919,10 @@ function toTask(r: StepTaskRecord): StepTask {
     completedAt: _done,
     result: _res,
     error: _err,
+    errorTag: _tag,
+    stepMetadata: _meta,
     durationMs: _dur,
+    consumedAt: _consumed,
     ...task
   } = r;
   return task;

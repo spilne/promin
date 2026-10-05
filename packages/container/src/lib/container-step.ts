@@ -6,7 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { tryPromise } from "@spilne/perfect-core";
-import type { StepHandler, WorkerStepOptions } from "@promin/workflow/distributed";
+import type { StepHandler } from "@promin/workflow/distributed";
 import type { ContainerRuntime, ContainerSpec } from "./container-runtime.ts";
 
 export interface ContainerStepConfig {
@@ -14,23 +14,23 @@ export interface ContainerStepConfig {
   spec: ContainerSpec;
   /** Container runtime to use (Local, Docker, K8s). */
   runtime: ContainerRuntime;
-  /** Step-level options (retry, onFailure, compensate). */
-  options?: WorkerStepOptions;
 }
 
 /**
  * Create a step handler that executes inside a container.
  *
- * The handler serializes ctx.prev (or ctx.input for root steps) to JSON,
- * passes it to the container, and parses the output.
+ * The handler serializes the step context (`input`, `prev`, `deps`,
+ * `workflowId`, `stepName`, `attempt`) to JSON, passes it to the container,
+ * and parses the output. Retry, timeout and `onFailure` come from the step's
+ * definition, as for any queued step.
  *
  * @example
  * ```ts
  * const registry = new MapStepRegistry();
  *
- * registry.register(
- *   "train-model",
- *   ...containerStep({
+ * registry.register({
+ *   stepName: "train-model",
+ *   handler: containerStep({
  *     spec: {
  *       image: "my-ml-image:latest",
  *       command: ["python", "train.py"],
@@ -39,13 +39,11 @@ export interface ContainerStepConfig {
  *     },
  *     runtime: new DockerRuntime(),
  *   }),
- * );
+ * });
  * ```
  */
-export function containerStep(
-  config: ContainerStepConfig,
-): [StepHandler, WorkerStepOptions | undefined] {
-  const { spec, runtime, options } = config;
+export function containerStep(config: ContainerStepConfig): StepHandler {
+  const { spec, runtime } = config;
 
   const handler: StepHandler = (ctx) => {
     const inputJson = JSON.stringify({
@@ -85,5 +83,5 @@ export function containerStep(
     ).orDie();
   };
 
-  return [handler, options];
+  return handler;
 }

@@ -590,6 +590,9 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       }
     }
 
+    // Outcomes a queue still holds for these steps belong to the runs being
+    // reset: drop them so the re-run dispatches the steps again.
+    await this.stepExecutor?.discardSettled?.({ workflowId, stepNames: [...downstream] });
     await storage.resetSteps({ workflowId, stepNames: [...downstream] });
 
     // Re-run with `force: true` so idempotency caching doesn't

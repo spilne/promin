@@ -240,14 +240,12 @@ some both. Every task is tagged with its workflow's version; workers declare
 their `supportedVersions` allow-list.
 
 ```typescript
-import { InMemoryWorkflowStorage } from "@promin/workflow";
 import { createWorker, InMemoryStepQueue, MapStepRegistry } from "@promin/workflow/distributed";
 
 const registry = new MapStepRegistry();
 registry.register({ stepName: "process", handler: async (ctx) => `handled ${ctx.workflowId}` });
 
 const worker = createWorker({
-  storage: new InMemoryWorkflowStorage(),
   stepQueue: new InMemoryStepQueue(),
   registry,
   supportedVersions: ["1", "2"], // handle both during the drain window

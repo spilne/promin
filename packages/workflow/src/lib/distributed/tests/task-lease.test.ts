@@ -11,7 +11,6 @@ describe("task leasing race condition", () => {
       workflowId: "wf-1",
       stepName: "step-1",
       input: {},
-      prevResults: {},
     });
     const claimed = await queue.claim({ workerId: "crashed-worker", limit: 1 });
     expect(claimed).toHaveLength(1);
@@ -36,7 +35,6 @@ describe("task leasing race condition", () => {
       workflowId: "wf-1",
       stepName: "step-1",
       input: {},
-      prevResults: {},
     });
     await queue.claim({ workerId: "active-worker", limit: 1 });
 

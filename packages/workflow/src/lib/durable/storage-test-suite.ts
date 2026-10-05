@@ -52,6 +52,13 @@ export interface StorageTestSuiteOptions {
    */
   hasCompensationLedger?: boolean;
   /**
+   * Assert the step-attempt section: the storage reports the `stepAttempts`
+   * capability and keeps every attempt row written to it. Every bundled
+   * backend sets this; without it the attempt cases run only when the
+   * storage reports the capability.
+   */
+  hasStepAttempts?: boolean;
+  /**
    * Build a second storage instance over the same backend as `storage` —
    * what another process, pool client or worker would hold. Enables the
    * cross-instance lock-exclusion and fence-token cases. Omit for
@@ -301,6 +308,71 @@ export function storageTestSuite(
     });
 
     // -------------------------------------------------------------------
+    // step attempts (StepAttemptStore)
+    // -------------------------------------------------------------------
+
+    describe("step attempts", () => {
+      const at = new Date("2026-01-01T00:00:00.000Z");
+      const record = (params: {
+        workflowId: string;
+        stepName: string;
+        attempt: number;
+        status: "completed" | "failed";
+        executorId?: string;
+      }): StepAttemptRecord => ({
+        workflowId: params.workflowId,
+        stepName: params.stepName,
+        attempt: params.attempt,
+        type: "execution",
+        status: params.status,
+        ...(params.status === "completed" ? { result: { n: params.attempt } } : { error: "boom" }),
+        durationMs: 5,
+        startedAt: at,
+        completedAt: new Date(at.getTime() + 5),
+        ...(params.executorId !== undefined && { executorId: params.executorId }),
+      });
+
+      it("reports the stepAttempts capability", async () => {
+        if (!options.hasStepAttempts) return;
+        expect(hasCapability(await getStorage(), "stepAttempts")).toBe(true);
+      });
+
+      it("keeps every attempt row it is given, per step", async () => {
+        const s = await getStorage();
+        if (!options.hasStepAttempts && !hasCapability(s, "stepAttempts")) return;
+        if (!hasCapability(s, "stepAttempts")) throw new Error("stepAttempts expected");
+        await s.createWorkflow({ workflowId: "sa-1", workflowName: "t", input: {} });
+        await s.saveStepAttempt({
+          record: record({ workflowId: "sa-1", stepName: "a", attempt: 2, status: "completed" }),
+        });
+        await s.saveStepAttempt({
+          record: record({
+            workflowId: "sa-1",
+            stepName: "a",
+            attempt: 1,
+            status: "failed",
+            executorId: "worker-7",
+          }),
+        });
+        await s.saveStepAttempt({
+          record: record({ workflowId: "sa-1", stepName: "b", attempt: 1, status: "completed" }),
+        });
+
+        const forA = (await s.loadStepAttempts({ workflowId: "sa-1", stepName: "a" })).sort(
+          (x, y) => x.attempt - y.attempt,
+        );
+        expect(forA.map((a) => [a.attempt, a.status, a.executorId])).toEqual([
+          [1, "failed", "worker-7"],
+          [2, "completed", undefined],
+        ]);
+        expect(forA[0]!.error).toBe("boom");
+        expect(forA[1]!.result).toEqual({ n: 2 });
+        expect(forA[1]!.durationMs).toBe(5);
+        expect(await s.loadStepAttempts({ workflowId: "sa-1" })).toHaveLength(3);
+      });
+    });
+
+    // -------------------------------------------------------------------
     // checkpointStep (optional StepCheckpointStore)
     // -------------------------------------------------------------------
 
@@ -355,7 +427,7 @@ export function storageTestSuite(
         expect(state!.startedAt).toBeInstanceOf(Date);
         expect(rowOf(state, "s")).toEqual(rowOf(await s.loadWorkflow("ck-ok-split"), "s"));
         expect(state!.steps["s"]!.result).toEqual({ v: 1 });
-        if (await recordsAttempts(s)) {
+        if (hasCapability(s, "stepAttempts")) {
           const attempts = await attemptsOf(s).loadStepAttempts({
             workflowId: "ck-ok",
             stepName: "s",
@@ -1542,12 +1614,6 @@ export function storageTestSuite(
       startedAt: fenceAt,
       completedAt: fenceAt,
     });
-    /** Whether `s` records attempts: a probe write must land. */
-    async function recordsAttempts(s: WorkflowStorage): Promise<boolean> {
-      if (!hasCapability(s, "stepAttempts")) return false;
-      await s.saveStepAttempt({ record: attemptFor("fw-attempt-probe") });
-      return (await s.loadStepAttempts({ workflowId: "fw-attempt-probe" })).length > 0;
-    }
     /** Everything a fenced write can touch for workflow `id`. */
     async function fencedSnapshot(s: WorkflowStorage, id: string): Promise<unknown> {
       return {
@@ -1689,7 +1755,7 @@ export function storageTestSuite(
         },
         {
           name: "saveStepAttempt",
-          supported: recordsAttempts,
+          supported: (st) => hasCapability(st, "stepAttempts"),
           write: (s, id, g) => attemptsOf(s).saveStepAttempt({ record: attemptFor(id), guard: g }),
         },
         {
@@ -2000,7 +2066,7 @@ export function storageTestSuite(
             guard: aGuard,
           }),
         );
-        if (await recordsAttempts(s)) {
+        if (hasCapability(s, "stepAttempts")) {
           await rejectsStale(() =>
             attemptsOf(s).saveStepAttempt({ record: attemptFor(id), guard: aGuard }),
           );

@@ -61,6 +61,8 @@ export interface DagExecutionContext {
    * `WorkflowOrchestrationContext.executorId`.
    */
   readonly executorId?: string;
+  /** The run number (`WorkflowState.run`) being driven. */
+  readonly run?: number;
   /**
    * Version of the definition driving this run. Handed to steps
    * (`ExecuteParams.workflowVersion`) and stamped on executor requests
@@ -100,6 +102,7 @@ export function stepRuntimeFor(params: {
     ...(ctx.runChild !== undefined && { runChild: ctx.runChild }),
     ...(ctx.workflowVersion !== undefined && { workflowVersion: ctx.workflowVersion }),
     ...(ctx.patches !== undefined && { patches: ctx.patches }),
+    ...(ctx.run !== undefined && { run: ctx.run }),
   };
 }
 

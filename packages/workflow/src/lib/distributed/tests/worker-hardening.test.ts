@@ -1,18 +1,19 @@
 // ---------------------------------------------------------------------------
 // DefaultWorker robustness: the claim loop survives queue errors, nothing a
-// task does escapes as an unhandled rejection, outcomes are written to
-// storage before the queue settles, and a full batch re-claims at once.
-// All timing runs on FakeWallClock.
+// task does escapes as an unhandled rejection, the outcome reaches the queue
+// only through the claim-fenced `complete` / `fail` (the worker writes no
+// storage), and a full batch re-claims at once. All timing runs on
+// FakeWallClock.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, afterEach, beforeEach } from "bun:test";
+import { fail, TaggedError } from "@spilne/perfect-core";
 import { DefaultWorker, type WorkerErrorEvent } from "../worker.ts";
 import { InMemoryStepQueue } from "../in-memory-step-queue.ts";
 import { MapStepRegistry, type StepRegistry } from "../step-registry.ts";
 import type { StepQueue, StepTask } from "../step-queue.ts";
 import { StepQueueExecutor } from "../step-queue-executor.ts";
 import { InMemoryWorkflowStorage } from "../../durable/in-memory-storage.ts";
-import type { WorkflowStorage } from "../../durable/workflow-storage.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 /** Yield to the event loop until `predicate` holds (bounded). */
@@ -35,30 +36,14 @@ function wrapQueue(inner: InMemoryStepQueue, overrides: Partial<StepQueue>): Ste
     fail: (p) => inner.fail(p),
     heartbeat: (p) => inner.heartbeat(p),
     requeueStuck: (p) => inner.requeueStuck(p),
+    consume: (p) => inner.consume(p),
+    consumeSettled: (p) => inner.consumeSettled(p),
     metrics: (p) => inner.metrics(p),
     ...overrides,
   };
 }
 
-/** Storage whose `saveStepResult` fails the first `failures` times. */
-function flakyStepResultStorage(inner: InMemoryWorkflowStorage, failures: number): WorkflowStorage {
-  let left = failures;
-  return new Proxy(inner, {
-    get(target, prop, receiver) {
-      if (prop === "saveStepResult") {
-        return async (...args: Parameters<WorkflowStorage["saveStepResult"]>) => {
-          if (left > 0) {
-            left--;
-            throw new Error("storage blip");
-          }
-          return target.saveStepResult(...args);
-        };
-      }
-      const value = Reflect.get(target, prop, receiver);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
-}
+class CardDeclined extends TaggedError("CardDeclined")<{ readonly message: string }>() {}
 
 let unhandled: unknown[] = [];
 const onUnhandled = (reason: unknown) => {
@@ -86,13 +71,10 @@ describe("DefaultWorker — claim loop resilience", () => {
         return inner.claim(p);
       },
     });
-    const storage = new InMemoryWorkflowStorage({ clock });
-    await storage.createWorkflow({ workflowId: "wf", workflowName: "x", input: {} });
     const registry = new MapStepRegistry();
     registry.register({ stepName: "s", handler: async () => 42 });
     const errors: WorkerErrorEvent[] = [];
     const worker = new DefaultWorker({
-      storage,
       stepQueue: queue,
       registry,
       pollIntervalMs: 100,
@@ -109,13 +91,11 @@ describe("DefaultWorker — claim loop resilience", () => {
     expect((errors[0]!.error as Error).message).toBe("db blip");
 
     // Still polling: work enqueued after the failure gets done.
-    await inner.enqueue({ workflowId: "wf", stepName: "s", input: {}, prevResults: {} });
+    await inner.enqueue({ workflowId: "wf", stepName: "s", input: {} });
     clock.advance(100);
     await waitFor(() => claims >= 3);
-    await waitFor(
-      async () => (await storage.loadWorkflow("wf"))?.steps["s"]?.status === "completed",
-    );
-    expect(inner.getAllTasks()[0]!.status).toBe("completed");
+    await waitFor(() => inner.getAllTasks()[0]!.status === "completed");
+    expect(inner.getAllTasks()[0]!.result).toBe(42);
 
     await worker.stop();
     await running;
@@ -126,7 +106,7 @@ describe("DefaultWorker — claim loop resilience", () => {
   it("stop() waits for an in-flight claim and the tasks it returns", async () => {
     const clock = FakeWallClock.create(0);
     const inner = new InMemoryStepQueue({ clock });
-    await inner.enqueue({ workflowId: "wf", stepName: "s", input: {}, prevResults: {} });
+    await inner.enqueue({ workflowId: "wf", stepName: "s", input: {} });
     let releaseClaim!: () => void;
     const claimGate = new Promise<void>((r) => (releaseClaim = r));
     let claimStarted = false;
@@ -137,11 +117,9 @@ describe("DefaultWorker — claim loop resilience", () => {
         return inner.claim(p);
       },
     });
-    const storage = new InMemoryWorkflowStorage({ clock });
-    await storage.createWorkflow({ workflowId: "wf", workflowName: "x", input: {} });
     const registry = new MapStepRegistry();
     registry.register({ stepName: "s", handler: async () => "done" });
-    const worker = new DefaultWorker({ storage, stepQueue: queue, registry, clock });
+    const worker = new DefaultWorker({ stepQueue: queue, registry, clock });
 
     void worker.start();
     await waitFor(() => claimStarted);
@@ -154,37 +132,35 @@ describe("DefaultWorker — claim loop resilience", () => {
     await stopping;
     // The claimed task ran to completion before stop() resolved.
     expect(inner.getAllTasks()[0]!.status).toBe("completed");
-    expect((await storage.loadWorkflow("wf"))?.steps["s"]?.status).toBe("completed");
+    expect(inner.getAllTasks()[0]!.result).toBe("done");
   });
 });
 
 describe("DefaultWorker — no unhandled rejections", () => {
-  it("a fallback that throws fails the step instead of crashing the process", async () => {
+  it("a failing handler settles its task failed, with the error's tag", async () => {
     const clock = FakeWallClock.create(0);
     const queue = new InMemoryStepQueue({ clock });
-    await queue.enqueue({ workflowId: "wf", stepName: "s", input: {}, prevResults: {} });
-    const storage = new InMemoryWorkflowStorage({ clock });
-    await storage.createWorkflow({ workflowId: "wf", workflowName: "x", input: {} });
+    await queue.enqueue({ workflowId: "wf", stepName: "typed", input: {} });
+    await queue.enqueue({ workflowId: "wf", stepName: "thrown", input: {} });
     const registry = new MapStepRegistry();
     registry.register({
-      stepName: "s",
+      stepName: "typed",
+      handler: () => fail(new CardDeclined({ message: "card declined" })),
+    });
+    registry.register({
+      stepName: "thrown",
       handler: async () => {
         throw new Error("boom");
       },
-      onFailure: {
-        fallback: () => {
-          throw new Error("fallback threw");
-        },
-      },
     });
-    const worker = new DefaultWorker({ storage, stepQueue: queue, registry, clock });
+    const worker = new DefaultWorker({ stepQueue: queue, registry, concurrency: 2, clock });
 
     void worker.start();
-    await waitFor(() => queue.getAllTasks()[0]!.status === "failed");
-    const step = (await storage.loadWorkflow("wf"))?.steps["s"];
-    expect(step?.status).toBe("failed");
-    expect(step?.error).toContain("fallback threw");
-    expect(step?.error).toContain("boom");
+    await waitFor(() => queue.getAllTasks().every((t) => t.status === "failed"));
+    const [typed, thrown] = queue.getAllTasks();
+    expect(typed).toMatchObject({ error: "card declined", errorTag: "CardDeclined" });
+    expect(thrown!.error).toBe("boom");
+    expect(thrown!.errorTag).toBeUndefined();
 
     await worker.stop();
     expect(unhandled).toEqual([]);
@@ -193,8 +169,7 @@ describe("DefaultWorker — no unhandled rejections", () => {
   it("a rejection escaping a task is caught and reported through onError", async () => {
     const clock = FakeWallClock.create(0);
     const queue = new InMemoryStepQueue({ clock });
-    await queue.enqueue({ workflowId: "wf", stepName: "s", input: {}, prevResults: {} });
-    const storage = new InMemoryWorkflowStorage({ clock });
+    await queue.enqueue({ workflowId: "wf", stepName: "s", input: {} });
     const registry: StepRegistry = {
       register: () => {},
       has: () => true,
@@ -205,7 +180,6 @@ describe("DefaultWorker — no unhandled rejections", () => {
     };
     const errors: WorkerErrorEvent[] = [];
     const worker = new DefaultWorker({
-      storage,
       stepQueue: queue,
       registry,
       clock,
@@ -226,10 +200,8 @@ describe("DefaultWorker — no unhandled rejections", () => {
   it("throwing hooks are reported; the step outcome stands", async () => {
     const clock = FakeWallClock.create(0);
     const queue = new InMemoryStepQueue({ clock });
-    await queue.enqueue({ workflowId: "wf", stepName: "ok", input: {}, prevResults: {} });
-    await queue.enqueue({ workflowId: "wf", stepName: "bad", input: {}, prevResults: {} });
-    const storage = new InMemoryWorkflowStorage({ clock });
-    await storage.createWorkflow({ workflowId: "wf", workflowName: "x", input: {} });
+    await queue.enqueue({ workflowId: "wf", stepName: "ok", input: {} });
+    await queue.enqueue({ workflowId: "wf", stepName: "bad", input: {} });
     const registry = new MapStepRegistry();
     registry.register({ stepName: "ok", handler: async () => 1 });
     registry.register({
@@ -240,7 +212,6 @@ describe("DefaultWorker — no unhandled rejections", () => {
     });
     const errors: WorkerErrorEvent[] = [];
     const worker = new DefaultWorker({
-      storage,
       stepQueue: queue,
       registry,
       concurrency: 2,
@@ -259,9 +230,6 @@ describe("DefaultWorker — no unhandled rejections", () => {
     void worker.start();
     await waitFor(() => errors.length === 2);
     expect(errors.map((e) => e.phase)).toEqual(["hook", "hook"]);
-    const steps = (await storage.loadWorkflow("wf"))?.steps;
-    expect(steps?.["ok"]?.status).toBe("completed");
-    expect(steps?.["bad"]?.status).toBe("failed");
     expect(queue.getAllTasks().map((t) => t.status)).toEqual(["completed", "failed"]);
 
     await worker.stop();
@@ -269,13 +237,22 @@ describe("DefaultWorker — no unhandled rejections", () => {
   });
 });
 
-describe("DefaultWorker — storage first, then queue", () => {
-  it("a failed storage write leaves the task claimed; it is redelivered and the workflow step lands", async () => {
+describe("DefaultWorker — the queue is the only thing it writes", () => {
+  it("a failed complete() leaves the task claimed; it is redelivered and the step settles", async () => {
     const clock = FakeWallClock.create(0);
-    const queue = new InMemoryStepQueue({ clock });
-    const base = new InMemoryWorkflowStorage({ clock });
-    await base.createWorkflow({ workflowId: "wf", workflowName: "x", input: {} });
-    const storage = flakyStepResultStorage(base, 1);
+    const inner = new InMemoryStepQueue({ clock });
+    const storage = new InMemoryWorkflowStorage({ clock });
+    await storage.createWorkflow({ workflowId: "wf", workflowName: "x", input: {} });
+    let completeFailures = 1;
+    const queue = wrapQueue(inner, {
+      complete: async (p) => {
+        if (completeFailures > 0) {
+          completeFailures--;
+          throw new Error("queue blip");
+        }
+        return inner.complete(p);
+      },
+    });
     const registry = new MapStepRegistry();
     let runs = 0;
     registry.register({
@@ -287,17 +264,17 @@ describe("DefaultWorker — storage first, then queue", () => {
     });
     const errors: WorkerErrorEvent[] = [];
     const worker = new DefaultWorker({
-      storage,
       stepQueue: queue,
       registry,
       pollIntervalMs: 100,
       heartbeatIntervalMs: 1_000,
       clock,
+      workerId: "w-1",
       onError: (e) => errors.push(e),
     });
     const executor = new StepQueueExecutor({
-      stepQueue: queue,
-      storage: base,
+      stepQueue: inner,
+      storage,
       pollIntervalMs: 100,
       staleTimeoutMs: 5_000,
       clock,
@@ -311,21 +288,27 @@ describe("DefaultWorker — storage first, then queue", () => {
 
     await waitFor(() => errors.length === 1);
     expect(errors[0]!.phase).toBe("commit");
-    expect((errors[0]!.error as Error).message).toBe("storage blip");
-    // The queue must not claim success storage never recorded.
-    expect(queue.getAllTasks()[0]!.status).toBe("running");
-    expect((await base.loadWorkflow("wf"))?.steps["s"]).toBeUndefined();
+    expect((errors[0]!.error as Error).message).toBe("queue blip");
+    expect(inner.getAllTasks()[0]!.status).toBe("running");
+    // The worker wrote nothing to storage.
+    expect((await storage.loadWorkflow("wf"))?.steps["s"]).toBeUndefined();
 
     // The lease goes stale; the executor's sweep requeues the task and the
-    // worker runs it again — this time the write lands.
+    // worker runs it again — this time the outcome settles.
     for (let i = 0; i < 300 && result === undefined; i++) {
       clock.advance(100);
       await new Promise<void>((r) => setImmediate(r));
     }
     await executing;
-    expect(result).toEqual({ ok: true, result: 42, storageAlreadyCheckpointed: true });
+    expect(result).toEqual({
+      ok: true,
+      result: 42,
+      attempt: 1,
+      failedAttempts: [],
+      executorId: "w-1",
+    });
     expect(runs).toBe(2);
-    expect(queue.getAllTasks()[0]!.status).toBe("completed");
+    expect(inner.getAllTasks()[0]!.status).toBe("completed");
 
     await worker.stop();
     expect(unhandled).toEqual([]);
@@ -334,9 +317,7 @@ describe("DefaultWorker — storage first, then queue", () => {
   it("a lost claim skips the commit entirely", async () => {
     const clock = FakeWallClock.create(0);
     const queue = new InMemoryStepQueue({ clock });
-    await queue.enqueue({ workflowId: "wf", stepName: "s", input: {}, prevResults: {} });
-    const storage = new InMemoryWorkflowStorage({ clock });
-    await storage.createWorkflow({ workflowId: "wf", workflowName: "x", input: {} });
+    await queue.enqueue({ workflowId: "wf", stepName: "s", input: {} });
     const registry = new MapStepRegistry();
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
@@ -350,7 +331,6 @@ describe("DefaultWorker — storage first, then queue", () => {
       },
     });
     const worker = new DefaultWorker({
-      storage,
       stepQueue: queue,
       registry,
       clock,
@@ -367,45 +347,9 @@ describe("DefaultWorker — storage first, then queue", () => {
     release();
     await worker.stop();
 
-    expect(queue.getAllTasks()[0]!.status).toBe("pending");
-    expect((await storage.loadWorkflow("wf"))?.steps["s"]).toBeUndefined();
-  });
-
-  it("skip and fallback outcomes write attempt rows like success and failure do", async () => {
-    const clock = FakeWallClock.create(0);
-    const queue = new InMemoryStepQueue({ clock });
-    await queue.enqueue({ workflowId: "wf", stepName: "skipped", input: {}, prevResults: {} });
-    await queue.enqueue({ workflowId: "wf", stepName: "fellback", input: {}, prevResults: {} });
-    const storage = new InMemoryWorkflowStorage({ clock });
-    await storage.createWorkflow({ workflowId: "wf", workflowName: "x", input: {} });
-    const registry = new MapStepRegistry();
-    const boom = async () => {
-      throw new Error("boom");
-    };
-    registry.register({ stepName: "skipped", handler: boom, onFailure: "skip" });
-    registry.register({
-      stepName: "fellback",
-      handler: boom,
-      onFailure: { fallback: () => "plan b" },
-    });
-    const worker = new DefaultWorker({
-      storage,
-      stepQueue: queue,
-      registry,
-      concurrency: 2,
-      clock,
-    });
-
-    void worker.start();
-    await waitFor(() => queue.getAllTasks().every((t) => t.status === "completed"));
-    await worker.stop();
-
-    const attempts = await storage.loadStepAttempts({ workflowId: "wf" });
-    expect(attempts.map((a) => [a.stepName, a.status, a.result]).sort()).toEqual([
-      ["fellback", "completed", "plan b"],
-      ["skipped", "completed", undefined],
-    ]);
-    expect((await storage.loadWorkflow("wf"))?.steps["fellback"]?.result).toBe("plan b");
+    const [task] = queue.getAllTasks();
+    expect(task!.status).toBe("pending");
+    expect(task!.result).toBeUndefined();
   });
 });
 
@@ -413,11 +357,9 @@ describe("DefaultWorker — throughput", () => {
   it("a full batch re-claims as slots free up, without waiting out the poll interval", async () => {
     const clock = FakeWallClock.create(0);
     const queue = new InMemoryStepQueue({ clock });
-    const storage = new InMemoryWorkflowStorage({ clock });
     const N = 20;
     for (let i = 0; i < N; i++) {
-      await storage.createWorkflow({ workflowId: `wf-${i}`, workflowName: "x", input: {} });
-      await queue.enqueue({ workflowId: `wf-${i}`, stepName: "s", input: {}, prevResults: {} });
+      await queue.enqueue({ workflowId: `wf-${i}`, stepName: "s", input: {} });
     }
     const registry = new MapStepRegistry();
     registry.register({ stepName: "s", handler: async () => 1 });
@@ -429,7 +371,6 @@ describe("DefaultWorker — throughput", () => {
       },
     });
     const worker = new DefaultWorker({
-      storage,
       stepQueue: counting,
       registry,
       concurrency: 3,

@@ -45,7 +45,6 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
       stepName: "double",
       needs: ["default"],
       input: { n: 5 },
-      prevResults: {},
     });
 
     expect(id).toBeDefined();
@@ -67,7 +66,6 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
       stepName: "step-a",
       needs: ["default"],
       input: {},
-      prevResults: {},
     });
 
     const first = await queue.claim({ workerId: "w-1", capabilities: ["default"], limit: 10 });
@@ -87,14 +85,12 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
       stepName: "cpu-step",
       needs: ["cpu"],
       input: {},
-      prevResults: {},
     });
     await queue.enqueue({
       workflowId: "wf-3",
       stepName: "gpu-step",
       needs: ["gpu"],
       input: {},
-      prevResults: {},
     });
 
     const cpuTasks = await queue.claim({ workerId: "w-1", capabilities: ["cpu"], limit: 10 });
@@ -116,7 +112,6 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
         stepName: `step-${i}`,
         needs: ["batch"],
         input: {},
-        prevResults: {},
       });
     }
 
@@ -133,7 +128,6 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
       stepName: "complete-me",
       needs: ["test-complete"],
       input: {},
-      prevResults: {},
     });
 
     await queue.claim({ workerId: "w-1", capabilities: ["test-complete"], limit: 1 });
@@ -156,7 +150,6 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
       stepName: "s",
       needs: ["skew"],
       input: {},
-      prevResults: {},
     });
     await queue.claim({ workerId: "w-1", capabilities: ["skew"], limit: 1 });
     await queue.complete({ taskId: id, result: null, durationMs: 1 });
@@ -175,7 +168,6 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
         stepName,
         needs: [stepName],
         input: {},
-        prevResults: {},
       });
     }
     await queue.claim({ workerId: "w-1", capabilities: ["claimed"], limit: 1 });
@@ -194,7 +186,6 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
       stepName: "s",
       needs: ["until"],
       input: {},
-      prevResults: {},
     });
     await queue.claim({ workerId: "w-1", capabilities: ["until"], limit: 1 });
     clock.advance(10_000);
@@ -221,7 +212,6 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
       stepName: "fail-me",
       needs: ["test-fail"],
       input: {},
-      prevResults: {},
     });
 
     await queue.claim({ workerId: "w-1", capabilities: ["test-fail"], limit: 1 });
@@ -241,21 +231,18 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
       stepName: "a",
       needs: ["metrics-q1"],
       input: {},
-      prevResults: {},
     });
     await queue.enqueue({
       workflowId: "wf-7",
       stepName: "b",
       needs: ["metrics-q1"],
       input: {},
-      prevResults: {},
     });
     await queue.enqueue({
       workflowId: "wf-7",
       stepName: "c",
       needs: ["metrics-q2"],
       input: {},
-      prevResults: {},
     });
 
     const metrics = await queue.metrics({ since: new Date(Date.now() - 60_000) });
@@ -273,11 +260,16 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
       stepName: "with-deps",
       needs: ["deps-test"],
       input: { x: 1 },
-      prevResults: { "step-a": "result-a", "step-b": 42 },
+      deps: { "step-b": 42, "step-a": "result-a" },
+      dependsOn: ["step-b", "step-a"],
+      timeoutMs: 1500,
     });
 
     const tasks = await queue.claim({ workerId: "w-1", capabilities: ["deps-test"], limit: 1 });
-    expect(tasks[0]!.prevResults).toEqual({ "step-a": "result-a", "step-b": 42 });
+    expect(tasks[0]!.deps).toEqual({ "step-a": "result-a", "step-b": 42 });
+    // jsonb reorders keys; the declared order travels in `dependsOn`.
+    expect(tasks[0]!.dependsOn).toEqual(["step-b", "step-a"]);
+    expect(tasks[0]!.timeoutMs).toBe(1500);
   });
 
   it("first-enqueued task is claimed first — FIFO fairness guarantee", async () => {
@@ -289,7 +281,6 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
       stepName: "first",
       needs: ["fifo"],
       input: {},
-      prevResults: {},
     });
     await new Promise((r) => setTimeout(r, 10));
     await queue.enqueue({
@@ -297,7 +288,6 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
       stepName: "second",
       needs: ["fifo"],
       input: {},
-      prevResults: {},
     });
 
     const tasks = await queue.claim({ workerId: "w-1", capabilities: ["fifo"], limit: 1 });
@@ -313,7 +303,6 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
       stepName: "low",
       needs: ["prio"],
       input: {},
-      prevResults: {},
       priority: 1,
     });
     await queue.enqueue({
@@ -321,7 +310,6 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
       stepName: "high",
       needs: ["prio"],
       input: {},
-      prevResults: {},
       priority: 10,
     });
     await queue.enqueue({
@@ -329,7 +317,6 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
       stepName: "medium",
       needs: ["prio"],
       input: {},
-      prevResults: {},
       priority: 5,
     });
 
@@ -382,8 +369,8 @@ describe("Postgres step queue — claim under contention", () => {
 
   it("a worker reaches its task behind a higher-priority foreign step (limit 1)", async () => {
     const q = new PgStepQueue({ db: pg.db });
-    await q.enqueue({ workflowId: "a", stepName: "y", input: {}, prevResults: {}, priority: 9 });
-    await q.enqueue({ workflowId: "b", stepName: "x", input: {}, prevResults: {}, priority: 5 });
+    await q.enqueue({ workflowId: "a", stepName: "y", input: {}, priority: 9 });
+    await q.enqueue({ workflowId: "b", stepName: "x", input: {}, priority: 5 });
 
     let got = 0;
     for (let i = 0; i < 20; i++) {
@@ -403,7 +390,6 @@ describe("Postgres step queue — claim under contention", () => {
         stepName: "cpu-step",
         needs: ["cpu"],
         input: {},
-        prevResults: {},
         ...conc,
       });
       await e.enqueue({
@@ -411,7 +397,6 @@ describe("Postgres step queue — claim under contention", () => {
         stepName: "gpu-step",
         needs: ["gpu"],
         input: {},
-        prevResults: {},
         ...conc,
       });
       const a = new PgStepQueue({ db: pg.db });
@@ -435,7 +420,6 @@ describe("Postgres step queue — claim under contention", () => {
           stepName: `s${i % 3}`,
           needs: i % 2 === 0 ? ["cpu"] : ["gpu"],
           input: {},
-          prevResults: {},
           concurrencyKey: `key-${k}`,
           concurrencyScope: "race",
           concurrencyLimit: 2,
@@ -465,7 +449,6 @@ describe("Postgres step queue — claim under contention", () => {
       workflowId: "p",
       stepName: "s",
       input: {},
-      prevResults: {},
       attempt: 2,
     });
     const seen: string[] = [];
@@ -484,8 +467,8 @@ describe("Postgres step queue — claim under contention", () => {
 
   it("each task in one claim batch gets its own claim token", async () => {
     const q = new PgStepQueue({ db: pg.db });
-    await q.enqueue({ workflowId: "a", stepName: "s", input: {}, prevResults: {} });
-    await q.enqueue({ workflowId: "b", stepName: "s", input: {}, prevResults: {} });
+    await q.enqueue({ workflowId: "a", stepName: "s", input: {} });
+    await q.enqueue({ workflowId: "b", stepName: "s", input: {} });
     const claimed = await q.claim({ workerId: "w", limit: 2 });
     expect(new Set(claimed.map((t) => t.claimToken)).size).toBe(2);
   });

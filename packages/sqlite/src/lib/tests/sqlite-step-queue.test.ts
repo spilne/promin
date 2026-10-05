@@ -24,7 +24,6 @@ describe("SqliteStepQueue", () => {
       workflowId: "wf-1",
       stepName: "charge",
       input: { amount: 100 },
-      prevResults: {},
     });
 
     const q2 = SqliteStepQueue.make({ db });
@@ -38,7 +37,7 @@ describe("SqliteStepQueue", () => {
     const a = SqliteStepQueue.make({ db, table: "tasks_a" });
     const b = SqliteStepQueue.make({ db, table: "tasks_b" });
 
-    await a.enqueue({ workflowId: "wf", stepName: "s", input: {}, prevResults: {} });
+    await a.enqueue({ workflowId: "wf", stepName: "s", input: {} });
     const tasksA = await a.claim({ workerId: "w-1", limit: 10 });
     const tasksB = await b.claim({ workerId: "w-1", limit: 10 });
 
@@ -49,7 +48,7 @@ describe("SqliteStepQueue", () => {
   it("heartbeat resets the stale timeout", async () => {
     const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
     const q = SqliteStepQueue.make({ db: new Database(":memory:"), clock });
-    await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
+    await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {} });
     const [task] = await q.claim({ workerId: "w-1", limit: 1 });
 
     clock.advance(400);
@@ -82,7 +81,6 @@ describe("SqliteStepQueue", () => {
       workflowId: "wf-v",
       stepName: "s",
       input: {},
-      prevResults: {},
       version: "3",
     });
     const [task] = await q.claim({ workerId: "w-1", limit: 1 });
@@ -95,7 +93,6 @@ describe("SqliteStepQueue", () => {
       workflowId: "wf-n",
       stepName: "transcode",
       input: {},
-      prevResults: {},
       needs: ["gpu", "nvme"],
     });
     const [task] = await q.claim({ workerId: "w-1", capabilities: ["gpu", "nvme"], limit: 1 });

@@ -6,7 +6,6 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, beforeEach } from "bun:test";
-import { InMemoryWorkflowStorage } from "@promin/workflow";
 import { InMemoryStepQueue } from "@promin/workflow/distributed";
 import { createWorkerApiHandler } from "../worker-http-handler.ts";
 import { WORKER_WIRE_CODEC } from "../worker-wire.ts";
@@ -24,13 +23,11 @@ function post(handler: (r: Request) => Promise<Response>, method: string, params
 
 describe("createWorkerApiHandler", () => {
   let queue: InMemoryStepQueue;
-  let storage: InMemoryWorkflowStorage;
   let handler: (r: Request) => Promise<Response>;
 
   beforeEach(() => {
     queue = new InMemoryStepQueue();
-    storage = new InMemoryWorkflowStorage();
-    handler = createWorkerApiHandler({ stepQueue: queue, storage });
+    handler = createWorkerApiHandler({ stepQueue: queue });
   });
 
   it("rejects non-POST", async () => {
@@ -48,7 +45,7 @@ describe("createWorkerApiHandler", () => {
   });
 
   it("claim returns available tasks", async () => {
-    await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {}, prevResults: {} });
+    await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {} });
 
     const res = await post(handler, "claim", { workerId: "w-1", limit: 5 });
     expect(res.status).toBe(200);
@@ -60,7 +57,7 @@ describe("createWorkerApiHandler", () => {
   });
 
   it("complete marks task completed", async () => {
-    await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {}, prevResults: {} });
+    await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {} });
     const [task] = await queue.claim({ workerId: "w-1", limit: 1 });
 
     const res = await post(handler, "complete", {
@@ -74,7 +71,7 @@ describe("createWorkerApiHandler", () => {
   });
 
   it("fail marks task failed", async () => {
-    await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {}, prevResults: {} });
+    await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {} });
     const [task] = await queue.claim({ workerId: "w-1", limit: 1 });
 
     const res = await post(handler, "fail", {
@@ -87,7 +84,7 @@ describe("createWorkerApiHandler", () => {
   });
 
   it("heartbeat succeeds for a running task", async () => {
-    await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {}, prevResults: {} });
+    await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {} });
     const [task] = await queue.claim({ workerId: "w-1", limit: 1 });
 
     const res = await post(handler, "heartbeat", { taskId: task!.id });
@@ -101,14 +98,12 @@ describe("createWorkerApiHandler", () => {
       workflowId: "wf-1",
       stepName: "foreign",
       input: {},
-      prevResults: {},
       priority: 9,
     });
     await queue.enqueue({
       workflowId: "wf-2",
       stepName: "step-a",
       input: {},
-      prevResults: {},
       version: "1",
     });
 
@@ -135,7 +130,6 @@ describe("createWorkerApiHandler", () => {
       workflowId: "wf-1",
       stepName: "step-a",
       input: {},
-      prevResults: {},
     });
     const [task] = await queue.claim({ workerId: "w-1", limit: 1 });
 
@@ -151,45 +145,49 @@ describe("createWorkerApiHandler", () => {
     expect(res.status).toBe(404);
   });
 
-  it("saveStepResult writes to storage", async () => {
-    await storage.createWorkflow({
-      workflowId: "wf-1",
-      workflowName: "test",
-      input: {},
-      version: "1",
-    });
-
-    const res = await post(handler, "saveStepResult", {
-      workflowId: "wf-1",
-      stepName: "step-a",
-      result: { x: 1 },
-      durationMs: 10,
-      startedAt: new Date(),
-    });
-    expect(res.status).toBe(200);
-
-    const state = await storage.loadWorkflow("wf-1");
-    expect(state?.steps["step-a"]?.status).toBe("completed");
+  it("storage methods are not on the worker wire", async () => {
+    for (const method of ["saveStepResult", "saveStepFailure"]) {
+      const res = await post(handler, method, { workflowId: "wf-1", stepName: "step-a" });
+      expect(res.status).toBe(404);
+    }
   });
 
-  it("saveStepFailure writes to storage", async () => {
-    await storage.createWorkflow({
-      workflowId: "wf-1",
-      workflowName: "test",
-      input: {},
-      version: "1",
-    });
+  it("complete and fail carry the outcome fields the coordinator reads back", async () => {
+    await queue.enqueue({ workflowId: "wf-1", stepName: "ok", input: {} });
+    await queue.enqueue({ workflowId: "wf-2", stepName: "bad", input: {} });
+    const [ok, bad] = await queue.claim({ workerId: "w-1", limit: 2 });
 
-    const res = await post(handler, "saveStepFailure", {
-      workflowId: "wf-1",
-      stepName: "step-a",
-      error: "it broke",
-      durationMs: 5,
-      startedAt: new Date(),
+    await post(handler, "complete", {
+      taskId: ok!.id,
+      claimToken: ok!.claimToken,
+      result: 1,
+      durationMs: 1,
+      stepMetadata: { matchCase: "a" },
     });
-    expect(res.status).toBe(200);
+    await post(handler, "fail", {
+      taskId: bad!.id,
+      claimToken: bad!.claimToken,
+      error: "declined",
+      errorTag: "CardDeclined",
+      durationMs: 1,
+    });
+    expect(await queue.get(ok!.id)).toMatchObject({ stepMetadata: { matchCase: "a" } });
+    expect(await queue.get(bad!.id)).toMatchObject({ error: "declined", errorTag: "CardDeclined" });
+  });
 
-    const state = await storage.loadWorkflow("wf-1");
-    expect(state?.steps["step-a"]?.status).toBe("failed");
+  it("a stale claim token cannot settle the task", async () => {
+    const id = await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {} });
+    const [task] = await queue.claim({ workerId: "w-1", limit: 1 });
+    await queue.requeueStuck({ mode: "worker", workerId: "w-1" });
+    await queue.claim({ workerId: "w-2", limit: 1 });
+
+    const res = await post(handler, "complete", {
+      taskId: id,
+      claimToken: task!.claimToken,
+      result: "stale",
+      durationMs: 1,
+    });
+    expect(WORKER_WIRE_CODEC.decode((await res.json()).result)).toBe(false);
+    expect((await queue.get(id))?.status).toBe("running");
   });
 });

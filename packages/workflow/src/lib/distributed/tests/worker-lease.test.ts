@@ -11,7 +11,6 @@ import { InMemoryStepQueue } from "../in-memory-step-queue.ts";
 import { MapStepRegistry } from "../step-registry.ts";
 import { InMemoryWorkerRegistry } from "../worker-registry.ts";
 import { retryAsync } from "../../shared/retry-policy.ts";
-import { InMemoryWorkflowStorage } from "../../durable/in-memory-storage.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 async function waitFor(predicate: () => boolean | Promise<boolean>): Promise<void> {
@@ -39,28 +38,24 @@ function blockingHandler() {
 
 async function setup() {
   const clock = FakeWallClock.create(0);
-  const storage = new InMemoryWorkflowStorage({ clock });
   const queue = new InMemoryStepQueue({ clock });
-  await storage.createWorkflow({ workflowId: "wf", workflowName: "w", input: {} });
   const taskId = await queue.enqueue({
     workflowId: "wf",
     stepName: "slow",
     input: {},
-    prevResults: {},
   });
-  return { clock, storage, queue, taskId };
+  return { clock, queue, taskId };
 }
 
 describe("worker lease loss", () => {
   it("a lost claim aborts ctx.signal, fires onLeaseLost and writes nothing", async () => {
-    const { clock, storage, queue, taskId } = await setup();
+    const { clock, queue, taskId } = await setup();
     const slow = blockingHandler();
     const registry = new MapStepRegistry();
     registry.register({ stepName: "slow", handler: slow.handler });
     const lost: string[] = [];
     const worker = new DefaultWorker({
       workerId: "a",
-      storage,
       stepQueue: queue,
       registry,
       pollIntervalMs: 1_000,
@@ -86,12 +81,13 @@ describe("worker lease loss", () => {
     clock.advance(1_000);
     await stop;
     await running;
-    expect((await storage.loadWorkflow("wf"))?.steps["slow"]).toBeUndefined();
-    expect((await queue.get(taskId))?.status).toBe("pending");
+    const task = await queue.get(taskId);
+    expect(task?.status).toBe("pending");
+    expect(task?.result).toBeUndefined();
   });
 
   it("a failing heartbeat is reported but doesn't abort the task", async () => {
-    const { clock, storage, queue, taskId } = await setup();
+    const { clock, queue, taskId } = await setup();
     const slow = blockingHandler();
     const registry = new MapStepRegistry();
     registry.register({ stepName: "slow", handler: slow.handler });
@@ -103,7 +99,6 @@ describe("worker lease loss", () => {
       return heartbeat(p);
     };
     const worker = new DefaultWorker({
-      storage,
       stepQueue: queue,
       registry,
       heartbeatIntervalMs: 100,
@@ -119,7 +114,7 @@ describe("worker lease loss", () => {
     failHeartbeats = false;
     slow.release("ok");
     await waitFor(async () => (await queue.get(taskId))?.status === "completed");
-    expect((await storage.loadWorkflow("wf"))?.steps["slow"]?.result).toBe("ok");
+    expect((await queue.get(taskId))?.result).toBe("ok");
     const stop = worker.stop();
     clock.advance(1_000);
     await stop;
@@ -128,14 +123,13 @@ describe("worker lease loss", () => {
 
 describe("worker stop({ timeoutMs })", () => {
   it("gives unfinished tasks back to the queue, aborts their handlers and deregisters", async () => {
-    const { clock, storage, queue, taskId } = await setup();
+    const { clock, queue, taskId } = await setup();
     const slow = blockingHandler();
     const registry = new MapStepRegistry();
     registry.register({ stepName: "slow", handler: slow.handler });
     const workers = new InMemoryWorkerRegistry({ clock });
     const worker = new DefaultWorker({
       workerId: "a",
-      storage,
       stepQueue: queue,
       registry,
       workerRegistry: workers,
@@ -166,18 +160,19 @@ describe("worker stop({ timeoutMs })", () => {
     expect(task?.status).toBe("pending");
     expect((await workers.list()).map((w) => w.status)).toEqual(["retired"]);
 
-    // A late finish of the aborted handler writes nothing.
+    // A late finish of the aborted handler settles nothing.
     slow.release("too late");
     await new Promise<void>((r) => setImmediate(r));
-    expect((await storage.loadWorkflow("wf"))?.steps["slow"]).toBeUndefined();
+    expect((await queue.get(taskId))?.status).toBe("pending");
+    expect((await queue.get(taskId))?.result).toBeUndefined();
   });
 
   it("without a timeout, stop waits for the task to finish", async () => {
-    const { clock, storage, queue, taskId } = await setup();
+    const { clock, queue, taskId } = await setup();
     const slow = blockingHandler();
     const registry = new MapStepRegistry();
     registry.register({ stepName: "slow", handler: slow.handler });
-    const worker = new DefaultWorker({ storage, stepQueue: queue, registry, clock });
+    const worker = new DefaultWorker({ stepQueue: queue, registry, clock });
     void worker.start();
     await waitFor(() => slow.seen.signal !== undefined);
     let stopped = false;

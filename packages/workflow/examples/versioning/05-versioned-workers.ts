@@ -56,7 +56,6 @@ async function main(): Promise<void> {
   // After v1 drains (countByVersion shows 0 in-flight), update this to ["2"]
   // on the next deploy.
   const worker = createWorker({
-    storage,
     stepQueue,
     registry,
     // No `capabilities` declared — this worker is a generalist that can

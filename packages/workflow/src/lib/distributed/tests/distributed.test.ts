@@ -8,7 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { TaggedError, succeed, fail } from "@spilne/perfect-core";
+import { succeed } from "@spilne/perfect-core";
 import {
   workflow,
   InMemoryWorkflowStorage,
@@ -68,28 +68,30 @@ function setup() {
 }
 
 /**
- * `inner` as seen by a process that can crash: after `crash()` every call
- * hangs forever, like a coordinator that stopped mid-run.
+ * Storage and queue as seen by a process that can crash: after `crash()`
+ * every call hangs forever, like a coordinator that stopped mid-run.
  */
-function crashable(inner: InMemoryWorkflowStorage): {
+function crashable(inner: { storage: InMemoryWorkflowStorage; queue: InMemoryStepQueue }): {
   storage: InMemoryWorkflowStorage;
+  queue: InMemoryStepQueue;
   crash: () => void;
 } {
   let crashed = false;
-  const storage = new Proxy(inner, {
-    get(target, prop, receiver) {
-      const value = Reflect.get(target, prop, receiver);
-      if (typeof value !== "function") return value;
-      return (...args: unknown[]) =>
-        crashed ? new Promise<never>(() => {}) : value.apply(target, args);
-    },
-  });
-  return { storage, crash: () => (crashed = true) };
+  const view = <T extends object>(target: T): T =>
+    new Proxy(target, {
+      get(obj, prop, receiver) {
+        const value = Reflect.get(obj, prop, receiver);
+        if (typeof value !== "function") return value;
+        return (...args: unknown[]) =>
+          crashed ? new Promise<never>(() => {}) : value.apply(obj, args);
+      },
+    });
+  return {
+    storage: view(inner.storage),
+    queue: view(inner.queue),
+    crash: () => (crashed = true),
+  };
 }
-
-class TestError extends TaggedError("TestError")<{
-  readonly message: string;
-}>() {}
 
 // ---------------------------------------------------------------------------
 // StepRegistry
@@ -120,7 +122,6 @@ describe("Step queue — distribute tasks to available workers", () => {
       workflowId: "wf-1",
       stepName: "step-a",
       input: { n: 5 },
-      prevResults: {},
     });
 
     const tasks = await queue.claim({ workerId: "w-1", capabilities: [], limit: 10 });
@@ -136,14 +137,12 @@ describe("Step queue — distribute tasks to available workers", () => {
       workflowId: "wf-1",
       stepName: "a",
       input: {},
-      prevResults: {},
     });
     await queue.enqueue({
       workflowId: "wf-1",
       stepName: "b",
       needs: ["gpu"],
       input: {},
-      prevResults: {},
     });
 
     const defaultTasks = await queue.claim({ workerId: "w-1", capabilities: [], limit: 10 });
@@ -163,7 +162,6 @@ describe("Step queue — distribute tasks to available workers", () => {
         workflowId: "wf-1",
         stepName: `s-${i}`,
         input: {},
-        prevResults: {},
       });
     }
 
@@ -178,21 +176,18 @@ describe("Step queue — distribute tasks to available workers", () => {
       workflowId: "wf-p",
       stepName: "low",
       input: {},
-      prevResults: {},
       priority: 1,
     });
     await queue.enqueue({
       workflowId: "wf-p",
       stepName: "high",
       input: {},
-      prevResults: {},
       priority: 10,
     });
     await queue.enqueue({
       workflowId: "wf-p",
       stepName: "medium",
       input: {},
-      prevResults: {},
       priority: 5,
     });
 
@@ -207,7 +202,6 @@ describe("Step queue — distribute tasks to available workers", () => {
       workflowId: "wf-d",
       stepName: "default-prio",
       input: {},
-      prevResults: {},
     });
 
     const tasks = await queue.claim({ workerId: "w-1", capabilities: [], limit: 1 });
@@ -221,7 +215,6 @@ describe("Step queue — distribute tasks to available workers", () => {
       workflowId: "wf-1",
       stepName: "a",
       input: {},
-      prevResults: {},
     });
 
     const first = await queue.claim({ workerId: "w-1", capabilities: [], limit: 10 });
@@ -238,13 +231,11 @@ describe("Step queue — distribute tasks to available workers", () => {
       workflowId: "wf-1",
       stepName: "a",
       input: {},
-      prevResults: {},
     });
     const id2 = await queue.enqueue({
       workflowId: "wf-1",
       stepName: "b",
       input: {},
-      prevResults: {},
     });
 
     await queue.claim({ workerId: "w-1", capabilities: [], limit: 10 });
@@ -261,8 +252,8 @@ describe("Step queue — distribute tasks to available workers", () => {
 // Worker — step execution
 // ---------------------------------------------------------------------------
 
-describe("Worker — poll queue, execute steps, checkpoint results", () => {
-  it("worker picks up a 'double' task and saves the result", async () => {
+describe("Worker — poll queue, execute steps, settle the task", () => {
+  it("worker picks up a 'double' task and settles it with the result", async () => {
     const { clock, storage, queue } = setup();
     const registry = new MapStepRegistry();
     const completed: string[] = [];
@@ -275,11 +266,9 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
       workflowId: "wf-1",
       stepName: "double",
       input: { n: 5 },
-      prevResults: {},
     });
 
     const worker = createWorker({
-      storage,
       stepQueue: queue,
       registry,
       capabilities: [],
@@ -297,10 +286,11 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     await worker.stop();
 
     expect(completed).toEqual(["double"]);
-    const state = await storage.loadWorkflow("wf-1");
-    expect(state?.steps["double"]?.status).toBe("completed");
-    expect(state?.steps["double"]?.result).toBe(10); // 5 * 2
-    expect(queue.getAllTasks().map((t) => t.status)).toEqual(["completed"]);
+    const [task] = queue.getAllTasks();
+    expect(task?.status).toBe("completed");
+    expect(task?.result).toBe(10); // 5 * 2
+    // Step rows are the coordinator's to write; the worker writes none.
+    expect((await storage.loadWorkflow("wf-1"))?.steps["double"]).toBeUndefined();
   });
 
   it("step throws an error — worker records the failure and moves on", async () => {
@@ -320,11 +310,9 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
       workflowId: "wf-2",
       stepName: "fail-step",
       input: {},
-      prevResults: {},
     });
 
     const worker = createWorker({
-      storage,
       stepQueue: queue,
       registry,
       capabilities: [],
@@ -342,9 +330,8 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     await worker.stop();
 
     expect(failures).toEqual(["fail-step"]);
-    const state = await storage.loadWorkflow("wf-2");
-    expect(state?.steps["fail-step"]?.status).toBe("failed");
-    expect(state?.steps["fail-step"]?.error).toContain("step exploded");
+    expect(queue.getAllTasks()[0]?.error).toContain("step exploded");
+    expect((await storage.loadWorkflow("wf-2"))?.steps["fail-step"]).toBeUndefined();
   });
 
   it("unknown step name — worker leaves the task pending for a capable worker", async () => {
@@ -358,11 +345,9 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
       workflowId: "wf-3",
       stepName: "unknown-step",
       input: {},
-      prevResults: {},
     });
 
     const worker = createWorker({
-      storage,
       stepQueue: queue,
       registry,
       capabilities: [],
@@ -406,11 +391,11 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
       workflowId: "wf-4",
       stepName: "async-step",
       input: { n: 5 },
-      prevResults: { "prev-step": 42 },
+      deps: { "prev-step": 42 },
+      dependsOn: ["prev-step"],
     });
 
     const worker = createWorker({
-      storage,
       stepQueue: queue,
       registry,
       capabilities: [],
@@ -419,15 +404,11 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     });
 
     void worker.start();
-    await driveUntil({
-      clock,
-      done: async () => (await storage.loadWorkflow("wf-4"))?.steps["async-step"] !== undefined,
-    });
+    await driveUntil({ clock, done: () => queue.getAllTasks()[0]?.status === "completed" });
     await worker.stop();
 
-    const state = await storage.loadWorkflow("wf-4");
-    expect(state?.steps["async-step"]?.status).toBe("completed");
-    expect(state?.steps["async-step"]?.result).toBe(142); // 42 + 100
+    // `prev` is the first declared dependency's result.
+    expect(queue.getAllTasks()[0]?.result).toBe(142); // 42 + 100
     // The handler's own 10ms wait ran on the clock and is part of the duration.
     expect(queue.getAllTasks()[0]?.durationMs).toBeGreaterThanOrEqual(10);
   });
@@ -445,11 +426,9 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
       stepName: "gpu-step",
       needs: ["gpu"],
       input: {},
-      prevResults: {},
     });
 
     const worker = createWorker({
-      storage,
       stepQueue: queue,
       registry,
       capabilities: [],
@@ -500,7 +479,6 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
       clock,
     });
     const worker = createWorker({
-      storage,
       stepQueue: queue,
       registry,
       capabilities: [],
@@ -567,7 +545,6 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
       clock,
     });
     const cpuWorker = createWorker({
-      storage,
       stepQueue: queue,
       registry: registryFor("cpu"),
       capabilities: [],
@@ -575,7 +552,6 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
       clock,
     });
     const gpuWorker = createWorker({
-      storage,
       stepQueue: queue,
       registry: registryFor("gpu"),
       capabilities: ["gpu"],
@@ -634,7 +610,6 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
       clock,
     });
     const worker = createWorker({
-      storage,
       stepQueue: queue,
       registry: stepRegistry,
       capabilities: [],
@@ -719,7 +694,6 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
       clock,
     });
     const worker = createWorker({
-      storage,
       stepQueue: queue,
       registry: stepRegistry,
       capabilities: [],
@@ -749,10 +723,7 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
 // ---------------------------------------------------------------------------
 
 type Registration = Omit<Parameters<MapStepRegistry["register"]>[0], "stepName">;
-type WorkerExtras = Omit<
-  Parameters<typeof createWorker>[0],
-  "storage" | "stepQueue" | "registry" | "clock"
->;
+type WorkerExtras = Omit<Parameters<typeof createWorker>[0], "stepQueue" | "registry" | "clock">;
 
 /**
  * One "step-a" task on a fresh run and a worker over it. `register` and
@@ -776,10 +747,8 @@ async function singleTaskWorker(params: {
     workflowId: params.workflowId,
     stepName: "step-a",
     input: {},
-    prevResults: {},
   });
   const worker = createWorker({
-    storage,
     stepQueue: queue,
     registry,
     capabilities: [],
@@ -857,7 +826,7 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
   it("slow step exceeds 100ms timeout — middleware aborts it with a clear error", async () => {
     const failures: string[] = [];
     let startedAt: number | undefined;
-    const { clock, storage, queue, worker, settled } = await singleTaskWorker({
+    const { clock, queue, worker, settled } = await singleTaskWorker({
       workflowId: "mw-3",
       // Takes 5s of clock time — far past the middleware's 100ms.
       register: (clock) => ({
@@ -885,8 +854,7 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
     // Failed at the 100ms deadline, long before the handler's 5s.
     expect(startedAt).toBeDefined();
     expect(clock.currentTimeMs() - startedAt!).toBeLessThanOrEqual(110);
-    const state = await storage.loadWorkflow("mw-3");
-    expect(state?.steps["step-a"]?.status).toBe("failed");
+    expect(queue.getAllTasks()[0]?.error).toBe("Step timed out after 100ms");
 
     // Let the abandoned handler's 5s timer fire so stop() has nothing to wait on.
     clock.advance(5_000);
@@ -927,172 +895,6 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
 });
 
 // ---------------------------------------------------------------------------
-// Per-step options (retry, onFailure)
-// ---------------------------------------------------------------------------
-
-describe("Per-step options — retry, skip, and fallback at the step level", () => {
-  it("flaky API step retries with backoff on the clock until it succeeds", async () => {
-    const attemptAt: number[] = [];
-    const { clock, storage, worker, settled } = await singleTaskWorker({
-      workflowId: "retry-1",
-      register: (clock) => ({
-        handler: () => {
-          attemptAt.push(clock.currentTimeMs());
-          if (attemptAt.length < 3) throw new Error("transient");
-          return succeed("ok");
-        },
-        retry: { maxRetries: 5, baseDelayMs: 10 },
-      }),
-    });
-
-    void worker.start();
-    await driveUntil({ clock, done: settled, stepMs: 5 });
-    await worker.stop();
-
-    expect(attemptAt).toHaveLength(3);
-    // Doubling backoff from 10ms (jitter off): 10ms, then 20ms.
-    expect(attemptAt[1]! - attemptAt[0]!).toBeGreaterThanOrEqual(10);
-    expect(attemptAt[2]! - attemptAt[1]!).toBeGreaterThanOrEqual(20);
-    const state = await storage.loadWorkflow("retry-1");
-    expect(state?.steps["step-a"]?.status).toBe("completed");
-    expect(state?.steps["step-a"]?.result).toBe("ok");
-  });
-
-  it("permanent error skips retry — only transient errors are retried", async () => {
-    let attempts = 0;
-    const { clock, storage, worker, settled } = await singleTaskWorker({
-      workflowId: "when-1",
-      register: () => ({
-        handler: () => {
-          attempts++;
-          throw new TestError({ message: "permanent" });
-        },
-        retry: {
-          maxRetries: 5,
-          baseDelayMs: 10,
-          when: (err: any) => err._tag !== "TestError",
-        },
-      }),
-    });
-
-    void worker.start();
-    await driveUntil({ clock, done: settled });
-    // Give any (wrongly scheduled) retry ample clock time to show up.
-    await runFor({ clock, ms: 1_000 });
-    await worker.stop();
-
-    // TestError not retryable → only 1 attempt
-    expect(attempts).toBe(1);
-    const state = await storage.loadWorkflow("when-1");
-    expect(state?.steps["step-a"]?.status).toBe("failed");
-  });
-
-  it("optional enrichment step fails — skip it and continue the workflow", async () => {
-    const { clock, storage, worker, settled } = await singleTaskWorker({
-      workflowId: "skip-1",
-      register: () => ({
-        handler: () => {
-          throw new Error("fail");
-        },
-        onFailure: "skip",
-      }),
-    });
-
-    void worker.start();
-    await driveUntil({ clock, done: settled });
-    await worker.stop();
-
-    const state = await storage.loadWorkflow("skip-1");
-    // Step should be "completed" with undefined (skipped)
-    expect(state?.steps["step-a"]?.status).toBe("completed");
-    expect(state?.steps["step-a"]?.result).toBeUndefined();
-  });
-
-  it("risky step fails — use a safe default value instead of crashing", async () => {
-    const { clock, storage, worker, settled } = await singleTaskWorker({
-      workflowId: "fallback-1",
-      register: () => ({
-        handler: () => {
-          throw new Error("fail");
-        },
-        onFailure: { fallback: () => "default-value" },
-      }),
-    });
-
-    void worker.start();
-    await driveUntil({ clock, done: settled });
-    await worker.stop();
-
-    const state = await storage.loadWorkflow("fallback-1");
-    expect(state?.steps["step-a"]?.status).toBe("completed");
-    expect(state?.steps["step-a"]?.result).toBe("default-value");
-  });
-
-  it("step execution logged to attempt storage — audit trail for compliance", async () => {
-    const { clock, storage, worker, settled } = await singleTaskWorker({
-      workflowId: "attempt-1",
-      register: () => ({ handler: () => succeed("done") }),
-    });
-
-    void worker.start();
-    await driveUntil({ clock, done: settled });
-    await worker.stop();
-
-    const attempts = await storage.loadStepAttempts({ workflowId: "attempt-1" });
-    expect(attempts).toHaveLength(1);
-    expect(attempts[0]!.type).toBe("execution");
-    expect(attempts[0]!.status).toBe("completed");
-  });
-
-  it("attempt row carries the worker id that processed it — ops audit trail", async () => {
-    const { clock, storage, queue } = setup();
-    const registry = new MapStepRegistry();
-
-    registry.register({ stepName: "ok", handler: () => succeed("done") });
-    registry.register({ stepName: "boom", handler: () => fail(new Error("nope") as any) });
-
-    await storage.createWorkflow({ workflowId: "worker-trace", workflowName: "t", input: {} });
-    await queue.enqueue({
-      workflowId: "worker-trace",
-      stepName: "ok",
-      input: {},
-      prevResults: {},
-    });
-    await queue.enqueue({
-      workflowId: "worker-trace",
-      stepName: "boom",
-      input: {},
-      prevResults: {},
-    });
-
-    const worker = createWorker({
-      storage,
-      stepQueue: queue,
-      registry,
-      capabilities: [],
-      pollIntervalMs: POLL_MS,
-      clock,
-      workerId: "worker-alpha",
-    });
-
-    void worker.start();
-    await driveUntil({
-      clock,
-      done: () =>
-        queue.getAllTasks().every((t) => t.status === "completed" || t.status === "failed"),
-    });
-    await worker.stop();
-
-    const attempts = await storage.loadStepAttempts({ workflowId: "worker-trace" });
-    const okAttempt = attempts.find((a) => a.stepName === "ok");
-    const boomAttempt = attempts.find((a) => a.stepName === "boom");
-    expect(okAttempt?.executorId).toBe("worker-alpha");
-    expect(boomAttempt?.executorId).toBe("worker-alpha");
-    expect(queue.getAllTasks().map((t) => t.claimedBy)).toEqual(["worker-alpha", "worker-alpha"]);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Coordinator recovery — resume after restart
 // ---------------------------------------------------------------------------
 
@@ -1106,12 +908,12 @@ describe("Coordinator recovery — resume workflows after process restart", () =
       .step("step-2", ({ prev }) => succeed(prev + 100))
       .build();
 
-    // The first coordinator drives the run through a view of storage that
-    // stops answering when it crashes.
-    const first = crashable(storage);
+    // The first coordinator drives the run through views of storage and the
+    // queue that stop answering when it crashes.
+    const first = crashable({ storage, queue });
     const coord1 = createDistributedWorkflowRunner({
       storage: first.storage,
-      stepQueue: queue,
+      stepQueue: first.queue,
       pollIntervalMs: POLL_MS,
       stepPollIntervalMs: POLL_MS,
       clock,
@@ -1124,7 +926,6 @@ describe("Coordinator recovery — resume workflows after process restart", () =
       handler: (ctx) => (calls["step-1"]++, succeed((ctx.input as any).n * 2)),
     });
     const worker1 = createWorker({
-      storage,
       stepQueue: queue,
       registry: registry1,
       capabilities: [],
@@ -1153,27 +954,37 @@ describe("Coordinator recovery — resume workflows after process restart", () =
       handler: (ctx) => (calls["step-2"]++, succeed((ctx.prev as number) + 100)),
     });
     const worker2 = createWorker({
-      storage,
       stepQueue: queue,
       registry: registry2,
       capabilities: [],
       pollIntervalMs: POLL_MS,
       clock,
     });
+    // Count coord2's enqueues: adopting the run re-dispatches step-2, and
+    // the queue hands back the task coord1 left pending.
+    let adoptedEnqueues = 0;
+    const enqueue = queue.enqueue.bind(queue);
     const coord2 = createDistributedWorkflowRunner({
       storage,
-      stepQueue: queue,
+      stepQueue: Object.assign(Object.create(queue) as InMemoryStepQueue, {
+        enqueue: (p: Parameters<InMemoryStepQueue["enqueue"]>[0]) => (
+          adoptedEnqueues++, enqueue(p)
+        ),
+      }),
       pollIntervalMs: 1_000,
       stepPollIntervalMs: 1_000,
       orphanGraceMs: 1_000,
       recoveryIntervalMs: 5_000,
       clock,
     });
-    void worker2.start();
     void coord2.startLoop();
 
-    // The dead coordinator's run lock expires; coord2 adopts the run and
-    // finishes it. Completed steps are not run again.
+    // The dead coordinator's run lock expires and coord2 adopts the run.
+    await driveUntil({ clock, done: () => adoptedEnqueues > 0, stepMs: 1_000, maxMs: 600_000 });
+    expect(queue.getAllTasks().filter((t) => t.stepName === "step-2")).toHaveLength(1);
+    void worker2.start();
+
+    // coord2 finishes it. Completed steps are not run again.
     await driveUntil({
       clock,
       done: async () => (await storage.loadWorkflow("recover-1"))?.status === "completed",
@@ -1187,6 +998,75 @@ describe("Coordinator recovery — resume workflows after process restart", () =
     const finalState = await storage.loadWorkflow("recover-1");
     expect(finalState?.result).toBe(110);
     expect(calls).toEqual({ "step-1": 1, "step-2": 1 });
+  });
+
+  it("a task that settles while no coordinator waits on it is adopted, not run again", async () => {
+    const { clock, storage, queue } = setup();
+    let calls = 0;
+    const wf = workflow<number>({ name: "gap" })
+      .step("only", ({ input }) => succeed(input + 1))
+      .build();
+
+    const first = crashable({ storage, queue });
+    const coord1 = createDistributedWorkflowRunner({
+      storage: first.storage,
+      stepQueue: first.queue,
+      pollIntervalMs: POLL_MS,
+      stepPollIntervalMs: POLL_MS,
+      clock,
+    });
+    void coord1.startLoop();
+    void coord1.run({ workflow: wf, workflowId: "gap-1", input: 1 }).catch(() => {});
+    await driveUntil({ clock, done: () => queue.getAllTasks().length === 1 });
+    first.crash();
+
+    // A worker settles the task while no coordinator is waiting on it.
+    const registry = new MapStepRegistry();
+    registry.register({
+      stepName: "only",
+      handler: (ctx) => (calls++, succeed((ctx.input as number) + calls * 10)),
+    });
+    const worker = createWorker({
+      stepQueue: queue,
+      registry,
+      pollIntervalMs: POLL_MS,
+      clock,
+    });
+    void worker.start();
+    await driveUntil({ clock, done: () => queue.getAllTasks()[0]?.status === "completed" });
+    // Only a coordinator writes step rows, so the outcome is not in storage.
+    expect((await storage.loadWorkflow("gap-1"))?.steps["only"]).toBeUndefined();
+
+    const coord2 = createDistributedWorkflowRunner({
+      storage,
+      stepQueue: queue,
+      pollIntervalMs: 1_000,
+      stepPollIntervalMs: 1_000,
+      orphanGraceMs: 1_000,
+      recoveryIntervalMs: 5_000,
+      clock,
+    });
+    void coord2.startLoop();
+    await driveUntil({
+      clock,
+      done: async () => (await storage.loadWorkflow("gap-1"))?.status === "completed",
+      stepMs: 1_000,
+      maxMs: 600_000,
+    });
+    await coord2.stopLoop();
+    await worker.stop();
+
+    // The adopting coordinator took the settled task's outcome: the handler
+    // ran exactly once across the crash, and the row holds that outcome.
+    expect(calls).toBe(1);
+    const state = await storage.loadWorkflow("gap-1");
+    expect(state?.result).toBe(11);
+    expect(state?.steps["only"]?.result).toBe(11);
+    const [task] = queue.getAllTasks();
+    expect(queue.getAllTasks()).toHaveLength(1);
+    expect(task?.consumedAt).toBeInstanceOf(Date);
+    const attempts = await storage.loadStepAttempts({ workflowId: "gap-1" });
+    expect(attempts.map((a) => [a.attempt, a.status])).toEqual([[1, "completed"]]);
   });
 
   it("already-completed workflows are not re-processed after restart", async () => {
@@ -1210,7 +1090,6 @@ describe("Coordinator recovery — resume workflows after process restart", () =
       handler: (ctx) => (calls++, succeed((ctx.input as any) * 2)),
     });
     const worker = createWorker({
-      storage,
       stepQueue: queue,
       registry,
       capabilities: [],

@@ -843,7 +843,7 @@ export class PostgresWorkflowStorage
     const onConflict = completed
       ? sql`result = EXCLUDED.result`
       : sql`error = EXCLUDED.error, error_tag = EXCLUDED.error_tag`;
-    const attempts = this.config.recordAttempts ? params.checkpoint.attempts : [];
+    const attempts = params.checkpoint.attempts;
     const attemptRows =
       attempts.length === 0
         ? sql``
@@ -1929,11 +1929,10 @@ export class PostgresWorkflowStorage
   }
 
   // ---------------------------------------------------------------------------
-  // StepAttemptStore — attempt history (opt-in via recordAttempts config)
+  // StepAttemptStore — attempt history, one row per attempt
   // ---------------------------------------------------------------------------
 
   async saveStepAttempt({ record, guard }: SaveStepAttemptParams): Promise<void> {
-    if (!this.config.recordAttempts) return;
     await this.fenced({
       workflowId: record.workflowId,
       guard,

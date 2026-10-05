@@ -80,6 +80,15 @@ export class RoutingStepExecutor implements StepExecutor {
     });
   }
 
+  async discardSettled(params: {
+    readonly workflowId: string;
+    readonly stepNames: readonly string[];
+  }): Promise<void> {
+    const remoteSteps = params.stepNames.filter((name) => this.remoteSteps.has(name));
+    if (remoteSteps.length === 0) return;
+    await this.config.remote.discardSettled?.({ ...params, stepNames: remoteSteps });
+  }
+
   executeStep(req: StepExecutionRequest): Promise<StepExecutionResult> {
     if (this.remoteSteps.has(req.stepName)) return this.config.remote.executeStep(req);
     const local = this.config.local;

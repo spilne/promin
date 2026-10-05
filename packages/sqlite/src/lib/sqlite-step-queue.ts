@@ -4,6 +4,8 @@ import {
   DEFAULT_MAX_DELIVERIES,
   type StepQueue,
   type StepQueueClaimParams,
+  type StepQueueCompleteParams,
+  type StepQueueFailParams,
   type StepQueueEnqueueParams,
   type StepQueueRequeueParams,
   type StepQueueRequeueResult,
@@ -22,17 +24,17 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
  * dead-lettering, and purge.
  *
  * An `active_key` column with a partial unique index enforces the
- * single-active-task-per-(workflowId, stepName) invariant without a
- * separate lookup table.
+ * single-unconsumed-task-per-(workflowId, stepName) invariant without a
+ * separate lookup table: it is set on enqueue and cleared by `consume`.
  *
  * Schema (auto-created on first use):
  *   CREATE TABLE promin_step_tasks (
  *     id TEXT PRIMARY KEY, workflow_id, step_name, needs TEXT (JSON),
- *     priority, input TEXT (JSON), prev_results TEXT (JSON),
- *     attempt, deliveries, status, version, namespace, created_at,
- *     claimed_at, claimed_by, claim_token,
- *     completed_at, result TEXT (JSON), error, duration_ms,
- *     last_heartbeat, active_key TEXT UNIQUE WHERE NOT NULL
+ *     priority, input TEXT (JSON), deps TEXT (JSON), depends_on TEXT (JSON),
+ *     timeout_ms, attempt, deliveries, status, version, namespace, created_at,
+ *     claimed_at, claimed_by, claim_token, completed_at, result TEXT (JSON),
+ *     error, error_tag, step_metadata TEXT (JSON), duration_ms,
+ *     last_heartbeat, run, consumed_at, active_key TEXT UNIQUE WHERE NOT NULL
  *   )
  *
  * @example
@@ -40,7 +42,7 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
  * import { Database } from "bun:sqlite";
  * const db = new Database("tasks.db");
  * const queue = SqliteStepQueue.make({ db });
- * const id = await queue.enqueue({ workflowId: "wf-1", stepName: "charge", input: {}, prevResults: {} });
+ * const id = await queue.enqueue({ workflowId: "wf-1", stepName: "charge", input: {} });
  * const [task] = await queue.claim({ workerId: "w-1", limit: 1 });
  * await queue.complete({ taskId: task.id, claimToken: task.claimToken, result: "ok", durationMs: 50 });
  * ```
@@ -93,7 +95,9 @@ export class SqliteStepQueue implements StepQueue {
         needs          TEXT    NOT NULL DEFAULT '[]',
         priority       INTEGER NOT NULL DEFAULT 5,
         input          TEXT    NOT NULL,
-        prev_results   TEXT    NOT NULL DEFAULT '{}',
+        deps           TEXT    NOT NULL DEFAULT '{}',
+        depends_on     TEXT    NOT NULL DEFAULT '[]',
+        timeout_ms     INTEGER,
         attempt        INTEGER NOT NULL DEFAULT 1,
         status         TEXT    NOT NULL DEFAULT 'pending',
         version        TEXT,
@@ -105,6 +109,8 @@ export class SqliteStepQueue implements StepQueue {
         completed_at   INTEGER,
         result         TEXT,
         error          TEXT,
+        error_tag      TEXT,
+        step_metadata  TEXT,
         duration_ms    INTEGER,
         last_heartbeat INTEGER,
         active_key     TEXT,
@@ -112,7 +118,9 @@ export class SqliteStepQueue implements StepQueue {
         concurrency_scope TEXT,
         concurrency_limit INTEGER,
         claimed_by     TEXT,
-        deliveries     INTEGER NOT NULL DEFAULT 0
+        deliveries     INTEGER NOT NULL DEFAULT 0,
+        run            INTEGER NOT NULL DEFAULT 1,
+        consumed_at    INTEGER
       )
     `);
     this.db.run(
@@ -146,11 +154,11 @@ export class SqliteStepQueue implements StepQueue {
       this.db
         .query(
           `INSERT INTO ${this._table}
-           (id, workflow_id, step_name, needs, priority, input, prev_results,
-            attempt, deliveries, status, version, namespace, metadata,
+           (id, workflow_id, step_name, needs, priority, input, deps, depends_on, timeout_ms,
+            attempt, run, deliveries, status, version, namespace, metadata,
             concurrency_key, concurrency_scope, concurrency_limit,
             created_at, active_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -159,8 +167,11 @@ export class SqliteStepQueue implements StepQueue {
           JSON.stringify(params.needs ?? []),
           params.priority ?? 5,
           JSON.stringify(params.input),
-          JSON.stringify(params.prevResults),
+          JSON.stringify(params.deps ?? {}),
+          JSON.stringify(params.dependsOn ?? []),
+          params.timeoutMs ?? null,
           params.attempt ?? 1,
+          params.run ?? 1,
           params.version ?? null,
           params.namespace ?? null,
           params.metadata !== undefined ? JSON.stringify(params.metadata) : null,
@@ -267,23 +278,19 @@ export class SqliteStepQueue implements StepQueue {
     return row ? rowToRecord(row) : undefined;
   }
 
-  async complete(params: {
-    taskId: string;
-    claimToken?: string;
-    result: unknown;
-    durationMs: number;
-  }): Promise<boolean> {
+  async complete(params: StepQueueCompleteParams): Promise<boolean> {
     const now = this.clock.currentTimeMs();
     this.db
       .query(
         `UPDATE ${this._table}
-         SET status = 'completed', result = ?, duration_ms = ?,
-             completed_at = ?, active_key = NULL
+         SET status = 'completed', result = ?, step_metadata = ?, duration_ms = ?,
+             completed_at = ?
          WHERE id = ? AND status = 'running'
            AND (? IS NULL OR claim_token = ?)`,
       )
       .run(
-        JSON.stringify(params.result),
+        JSON.stringify(params.result) ?? null,
+        params.stepMetadata !== undefined ? JSON.stringify(params.stepMetadata) : null,
         params.durationMs,
         now,
         params.taskId,
@@ -293,23 +300,20 @@ export class SqliteStepQueue implements StepQueue {
     return this._changes() > 0;
   }
 
-  async fail(params: {
-    taskId: string;
-    claimToken?: string;
-    error: string;
-    durationMs: number;
-  }): Promise<boolean> {
+  async fail(params: StepQueueFailParams): Promise<boolean> {
     const now = this.clock.currentTimeMs();
     this.db
       .query(
         `UPDATE ${this._table}
-         SET status = 'failed', error = ?, duration_ms = ?,
-             completed_at = ?, active_key = NULL
+         SET status = 'failed', error = ?, error_tag = ?, step_metadata = ?, duration_ms = ?,
+             completed_at = ?
          WHERE id = ? AND status = 'running'
            AND (? IS NULL OR claim_token = ?)`,
       )
       .run(
         params.error,
+        params.errorTag ?? null,
+        params.stepMetadata !== undefined ? JSON.stringify(params.stepMetadata) : null,
         params.durationMs,
         now,
         params.taskId,
@@ -349,7 +353,7 @@ export class SqliteStepQueue implements StepQueue {
       this.db
         .query(
           `UPDATE ${t}
-           SET status = 'failed', error = ?, completed_at = ?, active_key = NULL,
+           SET status = 'failed', error = ?, completed_at = ?,
                claim_token = NULL, last_heartbeat = NULL
            WHERE status = 'running' AND ${match} AND deliveries >= ?`,
         )
@@ -366,6 +370,32 @@ export class SqliteStepQueue implements StepQueue {
         .run(arg);
       return { requeued: this._changes(), deadLettered };
     })();
+  }
+
+  async consume(params: { taskId: string }): Promise<boolean> {
+    this.db
+      .query(
+        `UPDATE ${this._table} SET consumed_at = ?, active_key = NULL
+         WHERE id = ? AND status IN ('completed', 'failed') AND consumed_at IS NULL`,
+      )
+      .run(this.clock.currentTimeMs(), params.taskId);
+    return this._changes() > 0;
+  }
+
+  async consumeSettled(params: {
+    workflowId: string;
+    stepNames: readonly string[];
+  }): Promise<number> {
+    if (params.stepNames.length === 0) return 0;
+    const keys = params.stepNames.map((stepName) => this._activeKey(params.workflowId, stepName));
+    this.db
+      .query(
+        `UPDATE ${this._table} SET consumed_at = ?, active_key = NULL
+         WHERE active_key IN (${keys.map(() => "?").join(", ")})
+           AND status IN ('completed', 'failed') AND consumed_at IS NULL`,
+      )
+      .run(this.clock.currentTimeMs(), ...keys);
+    return this._changes();
   }
 
   async purge(params: { completedBefore: Date }): Promise<number> {
@@ -478,8 +508,12 @@ interface TaskRow {
   needs: string;
   priority: number;
   input: string;
-  prev_results: string;
+  deps: string;
+  depends_on: string;
+  timeout_ms: number | null;
   attempt: number;
+  run: number;
+  consumed_at: number | null;
   deliveries: number;
   status: string;
   version: string | null;
@@ -495,6 +529,8 @@ interface TaskRow {
   completed_at: number | null;
   result: string | null;
   error: string | null;
+  error_tag: string | null;
+  step_metadata: string | null;
   duration_ms: number | null;
   last_heartbeat: number | null;
   active_key: string | null;
@@ -508,8 +544,11 @@ function rowToTask(row: TaskRow): StepTask {
     needs: JSON.parse(row.needs) as string[],
     priority: row.priority,
     input: JSON.parse(row.input),
-    prevResults: JSON.parse(row.prev_results),
+    deps: JSON.parse(row.deps) as Record<string, unknown>,
+    dependsOn: JSON.parse(row.depends_on) as string[],
+    ...(row.timeout_ms != null && { timeoutMs: row.timeout_ms }),
     attempt: row.attempt,
+    run: row.run,
     deliveries: row.deliveries,
     status: row.status as StepTask["status"],
     createdAt: new Date(row.created_at),
@@ -532,6 +571,12 @@ function rowToRecord(row: TaskRow): StepTaskRecord {
     completedAt: row.completed_at != null ? new Date(row.completed_at) : undefined,
     result: row.result != null ? JSON.parse(row.result) : undefined,
     error: row.error ?? undefined,
+    errorTag: row.error_tag ?? undefined,
+    stepMetadata:
+      row.step_metadata != null
+        ? (JSON.parse(row.step_metadata) as Record<string, unknown>)
+        : undefined,
     durationMs: row.duration_ms ?? undefined,
+    consumedAt: row.consumed_at != null ? new Date(row.consumed_at) : undefined,
   };
 }

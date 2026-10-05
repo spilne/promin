@@ -118,18 +118,24 @@ describe("StepQueueExecutor — wait deadline", () => {
     ).toBe(false);
   });
 
-  it("an outcome written at the deadline still wins", async () => {
-    const { clock, storage, box } = await setup({ stepWaitTimeoutMs: 300 });
+  it("an outcome settled at the deadline still wins", async () => {
+    const { clock, queue, box } = await setup({ stepWaitTimeoutMs: 300 });
     await advancePolls({ clock, done: () => box.result !== undefined, maxMs: 200 });
-    await storage.saveStepResult({
-      workflowId: "wf",
-      stepName: "s",
+    const [task] = await queue.claim({ workerId: "w-1", limit: 1 });
+    await queue.complete({
+      taskId: task!.id,
+      claimToken: task!.claimToken!,
       result: 7,
       durationMs: 1,
-      startedAt: clock.now(),
     });
     await advancePolls({ clock, done: () => box.result !== undefined, maxMs: 500 });
-    expect(box.result).toEqual({ ok: true, result: 7, storageAlreadyCheckpointed: true });
+    expect(box.result).toEqual({
+      ok: true,
+      result: 7,
+      attempt: 1,
+      failedAttempts: [],
+      executorId: "w-1",
+    });
   });
 
   it("waits indefinitely with stepWaitTimeoutMs: Infinity", async () => {

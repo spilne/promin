@@ -485,9 +485,9 @@ export class ZoryaWorker {
     });
     for (const task of tasks) {
       void this.executeStepTask(task).catch(() => {
-        // Failure already written to storage + queue inside executeStepTask;
-        // swallowing here keeps the poll loop alive on transient post-fail
-        // errors (RPC blip while writing the failure outcome itself).
+        // The outcome was settled on the queue inside executeStepTask (or
+        // the task is redelivered once its lease goes stale); swallowing
+        // here keeps the poll loop alive on a transient RPC blip.
       });
     }
   }
@@ -514,7 +514,7 @@ export class ZoryaWorker {
     const def = this.findWorkflowForStep(task);
     if (!def) {
       const error = `No advertised workflow contains step "${task.stepName}" on worker ${this.workerId}`;
-      await this.failStepTask(task, error, 0);
+      await this.failStepTask({ task, error, durationMs: 0 });
       return;
     }
 
@@ -527,16 +527,22 @@ export class ZoryaWorker {
     const cleanup = () => clearInterval(heartbeat);
     this.inFlightSteps.set(task.id, cleanup);
 
-    const startedAt = new Date();
     const startMs = Date.now();
     try {
-      const executor = new InProcessStepExecutor({ workflow: def, storage: this.client.storage });
+      // One attempt per task, under the step's timeout: the coordinator
+      // that enqueued it applies retry and `onFailure` across attempts.
+      const executor = new InProcessStepExecutor({
+        workflow: def,
+        storage: this.client.storage,
+        singleAttempt: true,
+      });
       const stepDef = def._definition.steps.find((s) => s.name === task.stepName)!;
       const result = await executor.executeStep({
         workflowId: task.workflowId,
         stepName: task.stepName,
         input: task.input,
-        prevResults: task.prevResults,
+        // The task carries the step's declared dependencies only.
+        prevResults: { ...task.deps },
         attempt: task.attempt,
         needs: stepDef.needs ?? task.needs,
         priority: stepDef.priority ?? task.priority,
@@ -545,24 +551,15 @@ export class ZoryaWorker {
       const durationMs = Date.now() - startMs;
 
       if (result.ok) {
-        // Write the encoded result to storage first so the coordinator's
-        // poll on workflow state sees the step terminal before the queue
-        // task is acknowledged. The runner also expects encoded values
-        // in storage and decodes them when building prevResults for the
-        // next step.
-        await this.client.storage.saveStepResult({
-          workflowId: task.workflowId,
-          stepName: task.stepName,
-          result: result.result,
-          durationMs,
-          startedAt,
-          metadata: result.metadata,
-        });
+        // Settle the task only: `complete` is fenced by the claim token, and
+        // the coordinator writes the step row (encoded result + audit
+        // metadata) from the settled task under its run lock.
         await this.client.stepQueue.complete({
           taskId: task.id,
           claimToken: task.claimToken,
           result: result.result,
           durationMs,
+          ...(result.metadata !== undefined && { stepMetadata: result.metadata }),
         });
       } else if (result.kind === "suspended") {
         // Journaled step suspended (sleep / signal). The journal entry was
@@ -572,14 +569,19 @@ export class ZoryaWorker {
         return;
       } else if (result.kind === "continue-as-new") {
         // A queued step cannot restart the run it belongs to.
-        await this.failStepTask(
+        await this.failStepTask({
           task,
-          result.message ?? `Step "${task.stepName}" requested continue-as-new`,
+          error: result.message ?? `Step "${task.stepName}" requested continue-as-new`,
           durationMs,
-          startedAt,
-        );
+        });
       } else {
-        await this.failStepTask(task, result.error, durationMs, startedAt);
+        await this.failStepTask({
+          task,
+          error: result.error,
+          ...(result.errorTag !== undefined && { errorTag: result.errorTag }),
+          ...(result.metadata !== undefined && { stepMetadata: result.metadata }),
+          durationMs,
+        });
       }
     } catch (err) {
       const durationMs = Date.now() - startMs;
@@ -594,7 +596,12 @@ export class ZoryaWorker {
         return;
       }
       const msg = err instanceof Error ? err.message : String(err);
-      await this.failStepTask(task, msg, durationMs, startedAt);
+      await this.failStepTask({
+        task,
+        error: msg,
+        ...(tag !== undefined && { errorTag: tag }),
+        durationMs,
+      });
     } finally {
       cleanup();
       this.inFlightSteps.delete(task.id);
@@ -620,23 +627,20 @@ export class ZoryaWorker {
     return undefined;
   }
 
-  private async failStepTask(
-    task: StepTask,
-    error: string,
-    durationMs: number,
-    startedAt: Date = new Date(),
-  ): Promise<void> {
-    await this.client.storage
-      .saveStepFailure({
-        workflowId: task.workflowId,
-        stepName: task.stepName,
-        error,
-        durationMs,
-        startedAt,
-      })
-      .catch(() => {});
+  /**
+   * Settle the task as failed. Fenced by the claim token; the coordinator
+   * writes the step's failure row from the settled task.
+   */
+  private async failStepTask(params: {
+    readonly task: StepTask;
+    readonly error: string;
+    readonly errorTag?: string;
+    readonly stepMetadata?: Record<string, unknown>;
+    readonly durationMs: number;
+  }): Promise<void> {
+    const { task, ...outcome } = params;
     await this.client.stepQueue
-      .fail({ taskId: task.id, claimToken: task.claimToken, error, durationMs })
+      .fail({ taskId: task.id, claimToken: task.claimToken, ...outcome })
       .catch(() => {});
   }
 

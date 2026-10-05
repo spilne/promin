@@ -11,6 +11,8 @@
 import type {
   StepQueue,
   StepQueueClaimParams,
+  StepQueueCompleteParams,
+  StepQueueFailParams,
   StepQueueRequeueResult,
   StepTask,
   StepTaskRecord,
@@ -70,6 +72,20 @@ export class RemoteStepQueue implements StepQueue {
     );
   }
 
+  // Consuming a settled outcome is the coordinator's step before it writes
+  // the step row; workers never consume.
+  consume(): Promise<boolean> {
+    throw new Error(
+      "RemoteStepQueue.consume is not exposed over the worker wire — the server-side coordinator consumes outcomes.",
+    );
+  }
+
+  consumeSettled(): Promise<number> {
+    throw new Error(
+      "RemoteStepQueue.consumeSettled is not exposed over the worker wire — the server-side coordinator consumes outcomes.",
+    );
+  }
+
   /**
    * Claim on the server's queue. `workerId`, `stepNames` and `versions`
    * travel with the call, so routing happens inside the server-side claim
@@ -102,21 +118,11 @@ export class RemoteStepQueue implements StepQueue {
     );
   }
 
-  complete(params: {
-    taskId: string;
-    claimToken?: string;
-    result: unknown;
-    durationMs: number;
-  }): Promise<boolean> {
+  complete(params: StepQueueCompleteParams): Promise<boolean> {
     return this.call("complete", params);
   }
 
-  fail(params: {
-    taskId: string;
-    claimToken?: string;
-    error: string;
-    durationMs: number;
-  }): Promise<boolean> {
+  fail(params: StepQueueFailParams): Promise<boolean> {
     return this.call("fail", params);
   }
 

@@ -22,8 +22,11 @@ const stepQueue = new InMemoryStepQueue();
 // bodies (they run when the same workflow is used in-process).
 const processVideo = workflow<{ videoId: string }>({ name: "process-video" })
   .step("download", ({ input }) => succeed({ path: `/tmp/${input.videoId}.mp4` }))
+  // Retry, timeout and onFailure live on the definition; the coordinator
+  // applies them to the queued step exactly as in-process.
   .step("transcribe", ({ prev }) => succeed({ text: `Transcription of ${prev.path}` }), {
     needs: ["gpu"],
+    retry: { maxRetries: 2 },
   })
   .step("summarize", ({ prev }) => succeed({ summary: prev.text.slice(0, 50) }), {
     needs: ["ai"],
@@ -40,7 +43,6 @@ defaultRegistry.register({
   handler: async (ctx) => ({ path: `/tmp/${(ctx.input as { videoId: string }).videoId}.mp4` }),
 });
 const defaultWorker = createWorker({
-  storage,
   stepQueue,
   registry: defaultRegistry,
   concurrency: 5,
@@ -50,15 +52,14 @@ const defaultWorker = createWorker({
 const gpuRegistry = new MapStepRegistry();
 gpuRegistry.register({
   stepName: "transcribe",
-  // `ctx.deps` holds every result the run has so far, by step name.
+  // `ctx.prev` / `ctx.deps` are what the inline body sees: the previous
+  // step's result, and the declared dependencies by name.
   handler: async (ctx) => {
-    const { path } = ctx.deps["download"] as { path: string };
+    const { path } = ctx.prev as { path: string };
     return { text: `Transcription of ${path}` };
   },
-  retry: { maxRetries: 2 },
 });
 const gpuWorker = createWorker({
-  storage,
   stepQueue,
   registry: gpuRegistry,
   capabilities: ["gpu"],
@@ -75,7 +76,6 @@ aiRegistry.register({
   },
 });
 const aiWorker = createWorker({
-  storage,
   stepQueue,
   registry: aiRegistry,
   capabilities: ["ai"],

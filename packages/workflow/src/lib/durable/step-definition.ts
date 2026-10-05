@@ -400,6 +400,12 @@ export interface StepRuntime {
   readonly runChild?: RunChildWorkflow;
   /** Version of the definition driving this run (`ctx.workflowVersion` in `.journaled()`). */
   readonly workflowVersion?: string;
+  /**
+   * The run number (`WorkflowState.run`) being driven. Queue-backed
+   * executors stamp it on dispatched tasks, so a settled task of an earlier
+   * run is never taken as this run's outcome.
+   */
+  readonly run?: number;
   /** Patch names active in the definition driving this run (`ctx.patched(name)`). */
   readonly patches?: readonly string[];
   /**

@@ -53,6 +53,8 @@ function wrapQueue(inner: StepQueue, overrides: Partial<StepQueue>): StepQueue {
     heartbeat: (p) => inner.heartbeat(p),
     metrics: (p) => inner.metrics(p),
     requeueStuck: (p) => inner.requeueStuck(p),
+    consume: (p) => inner.consume(p),
+    consumeSettled: (p) => inner.consumeSettled(p),
     ...overrides,
   };
 }
@@ -95,7 +97,6 @@ function workerFor(params: {
   });
   registry.register({ stepName: "after", handler: (ctx) => succeed(ctx.deps["wait"]) });
   return createWorker({
-    storage: params.storage,
     stepQueue: params.queue,
     registry,
     pollIntervalMs: 10,
@@ -123,7 +124,7 @@ describe("sleep and signal steps under the distributed runner", () => {
       stepName: "after",
       handler: (ctx) => succeed((ctx.deps["nap"] as number) + 1),
     });
-    const worker = createWorker({ storage, stepQueue: queue, registry, pollIntervalMs: 10, clock });
+    const worker = createWorker({ stepQueue: queue, registry, pollIntervalMs: 10, clock });
     void worker.start();
 
     await runner.submit({ workflow: sleepy, workflowId: "s", input: { n: 1 } });
@@ -560,7 +561,7 @@ describe("step waits", () => {
     });
     const registry = new MapStepRegistry();
     registry.register({ stepName: "root", handler: (ctx) => succeed(ctx.input) });
-    const worker = createWorker({ storage, stepQueue: queue, registry, pollIntervalMs: 10, clock });
+    const worker = createWorker({ stepQueue: queue, registry, pollIntervalMs: 10, clock });
     void worker.start();
 
     await runner.submit({ workflow: wf, workflowId: "f", input: 1 });

@@ -31,6 +31,8 @@ export type StepOutcome =
       readonly startedAt: Date;
       readonly durationMs: number;
       readonly attempt: number;
+      /** Who ran the last attempt, when not this runner (a worker id). */
+      readonly executorId?: string;
       /** `skipWhen` matched: the body never ran. */
       readonly skipped?: true;
     }
@@ -42,6 +44,8 @@ export type StepOutcome =
       readonly startedAt: Date;
       readonly durationMs: number;
       readonly attempt: number;
+      /** Who ran the last attempt, when not this runner (a worker id). */
+      readonly executorId?: string;
     }
   | { readonly kind: "suspended"; readonly name: string; readonly error: unknown }
   | { readonly kind: "continue-as-new"; readonly name: string; readonly error: unknown };
@@ -119,9 +123,6 @@ export interface CheckpointedStep {
  * `CheckpointError`. The step's outcome is never rewritten into a failure
  * because its checkpoint failed: the body's side effects happened, and
  * recovery re-drives the run from what was saved.
- *
- * `checkpointed` skips every write: the executor already persisted the step
- * (the step-queue worker writes the step row and its attempt row).
  */
 export async function checkpointStepOutcome(params: {
   readonly ctx: DagExecutionContext;
@@ -129,10 +130,8 @@ export async function checkpointStepOutcome(params: {
   readonly workflowId: string;
   readonly outcome: StepOutcome;
   readonly failedAttempts?: readonly StepAttemptFailure[];
-  readonly checkpointed?: boolean;
 }): Promise<CheckpointedStep> {
   const { ctx, clock, workflowId, outcome } = params;
-  if (params.checkpointed === true) return { outcome };
   if (outcome.kind === "suspended" || outcome.kind === "continue-as-new") return { outcome };
   const failedAttempts = params.failedAttempts ?? [];
   const lastAttemptRecorded = failedAttempts.some((a) => a.attempt === outcome.attempt);
@@ -152,7 +151,7 @@ export async function checkpointStepOutcome(params: {
     durationMs: outcome.durationMs,
     startedAt: outcome.startedAt,
     completedAt: clock.now(),
-    ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
+    ...executorOf({ ctx, executorId: outcome.executorId }),
   });
 
   const storage = ctx.storage;
@@ -243,8 +242,16 @@ function failedAttemptRecord(params: {
     durationMs: failed.durationMs,
     startedAt: failed.startedAt,
     completedAt: new Date(failed.startedAt.getTime() + failed.durationMs),
-    ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
+    ...executorOf({ ctx, executorId: failed.executorId }),
   };
+}
+
+/** The attempt row's `executorId`: who ran the attempt, else this runner. */
+function executorOf(params: { ctx: DagExecutionContext; executorId: string | undefined }): {
+  executorId?: string;
+} {
+  const executorId = params.executorId ?? params.ctx.executorId;
+  return executorId !== undefined ? { executorId } : {};
 }
 
 async function saveFailedAttempts(params: {

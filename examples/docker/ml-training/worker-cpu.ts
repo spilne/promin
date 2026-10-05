@@ -7,7 +7,7 @@ import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { prepareDataHandler, evaluateHandler, optimizeHandler } from "./workflow.ts";
 
-const { storage, stepQueue, close } = await buildStack();
+const { stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
 registry.register({ stepName: "prepare-data", handler: prepareDataHandler });
@@ -15,7 +15,6 @@ registry.register({ stepName: "evaluate", handler: evaluateHandler });
 registry.register({ stepName: "optimize", handler: optimizeHandler });
 
 const worker = createWorker({
-  storage,
   stepQueue,
   registry,
   capabilities: ["cpu"],

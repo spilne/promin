@@ -4,22 +4,24 @@
 **distributed runner** (the coordinator) drives each run exactly like the
 in-process runner — DAG waves, run lock, retries, compensation, deadlines —
 but hands step bodies to a **step queue**; **workers** claim tasks, run the
-handler they registered for the step, and write the outcome to the workflow
-storage. Sleep and signal waits are resumed by **scanners**.
+handler they registered for the step, and settle the task with its outcome.
+The coordinator reads the settled task and writes the step row itself. Sleep
+and signal waits are resumed by **scanners**.
 
 ```
-           ┌────────────────────────────┐
- run() ───►│ DistributedWorkflowRunner  │  holds the run lock, fenced writes,
-           │ (coordinator, any number)  │  sleep / signal / child steps in-process
-           └──────┬──────────────▲──────┘
-          enqueue │              │ step rows (storage)
-           ┌──────▼──────┐  ┌────┴─────────────┐
-           │  StepQueue  │  │ WorkflowStorage  │
-           └──────┬──────┘  └────▲─────────────┘
-            claim │              │ saveStepResult / saveStepFailure
+                                   step rows, attempt rows
+           ┌────────────────────────────┐  (fenced by the run lock)  ┌─────────────────┐
+ run() ───►│ DistributedWorkflowRunner  │───────────────────────────►│ WorkflowStorage │
+           │ (coordinator, any number)  │  sleep / signal / child    └─────────────────┘
+           └──────┬──────────────▲──────┘  steps in-process
+          enqueue │              │ get: the settled outcome
            ┌──────▼──────────────┴──┐
-           │ workers (createWorker) │  handlers by step name, capabilities, versions
-           └────────────────────────┘
+           │       StepQueue        │
+           └──────┬──────────────▲──┘
+            claim │              │ complete / fail (fenced by the claim token)
+           ┌──────▼──────────────┴──┐
+           │ workers (createWorker) │  handlers by step name, capabilities, versions;
+           └────────────────────────┘  no storage access
 ```
 
 ## Setup
@@ -39,10 +41,15 @@ const storage = new InMemoryWorkflowStorage();
 const stepQueue = new InMemoryStepQueue();
 
 // The definition. Under the distributed runner the step bodies here are not
-// called: each ordinary step becomes a queue task named after the step.
+// called: each ordinary step becomes a queue task named after the step. Its
+// options (`needs`, `retry`, `timeoutMs`, `onFailure`, ...) still apply.
 const processVideo = workflow<{ videoId: string }>({ name: "process-video", version: "1" })
   .step("download", ({ input }) => succeed({ path: `/tmp/${input.videoId}.mp4` }))
-  .step("transcribe", ({ prev }) => succeed({ text: `text of ${prev.path}` }), { needs: ["gpu"] })
+  .step("transcribe", ({ prev }) => succeed({ text: `text of ${prev.path}` }), {
+    needs: ["gpu"],
+    retry: { maxRetries: 2 },
+    timeoutMs: 600_000,
+  })
   .build();
 
 // Coordinator process.
@@ -57,11 +64,10 @@ registry.register({
 });
 registry.register({
   stepName: "transcribe",
-  handler: async (ctx) => ({ text: `text of ${(ctx.deps["download"] as { path: string }).path}` }),
-  retry: { maxRetries: 2 },
+  // ctx.prev / ctx.deps are what the inline body gets: here the "download" result.
+  handler: async (ctx) => ({ text: `text of ${(ctx.prev as { path: string }).path}` }),
 });
 const worker = createWorker({
-  storage,
   stepQueue,
   registry,
   capabilities: ["gpu"],
@@ -99,12 +105,28 @@ pass `stepExecutor: new RoutingStepExecutor({ remote: new StepQueueExecutor({ st
   transforms (`"<head>.map"`). The worker runs the handler registered under
   that name; a step with no registered handler on any worker stays pending
   until its wait times out.
-- **Step options split.** For a dispatched step, `retry`, `timeoutMs` and
-  `onFailure` come from the worker side — the registration
-  (`register({ retry, onFailure })`) and middleware (`timeoutMiddleware`) —
-  not from the definition's `StepOptions`. `needs`, `priority`, `queue`,
-  `skipWhen` and `compensate`, the workflow-level `retry` and the attempt
-  count stay with the coordinator.
+- **Step policies come from the definition, as inline.** A dispatched
+  step's `retry`, `timeoutMs` and `onFailure` behave as they do in-process.
+  Each attempt is one queue task carrying the runner's attempt number. The
+  worker enforces `timeoutMs` on the attempt: it fails it with
+  `StepTimeoutError` and aborts `ctx.signal`. The coordinator retries per
+  `retry` (backoff on its clock), then applies `onFailure` (`skip`,
+  `fallback`). As inline, both act on typed failures only. A handler error
+  with a `_tag` (an `Eff` failure, a tagged throw, the timeout) reaches
+  `retry.when` and `fallback` as a `QueuedStepError` with the same `_tag`
+  and message. An untagged throw or rejection, or a dead-lettered task, is
+  a defect: it fails the step without retry or `onFailure`, like a rejected
+  `.stepAsync()` body. Attempt rows record every attempt, with the worker's
+  id as `executorId`.
+- **Registrations have no policies.** `register({ stepName, handler })`
+  takes no `retry` / `onFailure`. Worker middleware (`retryMiddleware`,
+  `timeoutMiddleware`, your own) acts inside one attempt: what it retries or
+  times out is invisible to the coordinator, and the definition's
+  `timeoutMs` bounds the attempt, middleware included. `needs`, `priority`,
+  `queue`, `skipWhen`, `compensate` and the workflow-level `retry` stay with
+  the coordinator. A run adopted without its definition (the stub rebuilt
+  from the stored DAG) has no step policies, so register the definition in
+  `registry`.
 - **Routing** happens inside the queue's claim: a worker only claims tasks
   whose step name is in its registry, whose `needs` (from `StepOptions.needs`)
   are a subset of its `capabilities`, and whose workflow version is in its
@@ -117,18 +139,19 @@ pass `stepExecutor: new RoutingStepExecutor({ remote: new StepQueueExecutor({ st
 ## Delivery guarantees
 
 **Step bodies are executed at least once.** The queue hands a pending task to
-one claimer at a time, and every write a worker makes about a task is fenced
-by its claim token, but a handler can still run more than once for the same
-step:
+one claimer at a time, and a worker's only writes — the task's heartbeat and
+its `complete` / `fail` — are fenced by its claim token. A handler can still
+run more than once for the same step:
 
-| How a step runs twice                                                                                                            | Why                                                                                                                                                                                          |
-| -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| The worker crashes, stalls or is partitioned after the handler's side effect and before the outcome is written                   | The task has no fresh heartbeat for `workerTimeoutMs` (or its worker is declared dead); the coordinator's sweep requeues it and another worker runs it again.                                |
-| The handler is still running when the claim is lost                                                                              | The heartbeat returns `false`: the worker aborts `ctx.signal` (`TaskLeaseLostError`) and skips the commit — but work the handler already did stays done, and the new claimant does it again. |
-| The step row is written but the queue `complete()` fails                                                                         | The task stays claimed, goes stale and is redelivered; the step's row is already visible to the coordinator, but the handler runs again.                                                     |
-| `worker.stop({ timeoutMs })` gives unfinished tasks back                                                                         | They are `release()`d and claimed by another worker at once; their handlers are aborted, not undone.                                                                                         |
-| A worker-side retry (`register({ retry })`, `retryMiddleware`), a workflow retry, `force`, or a resume after a coordinator crash | The handler runs again (a workflow retry enqueues the step again with the next attempt number).                                                                                              |
-| A step wait times out while its task is still `pending`                                                                          | The step fails with `StepWaitTimeoutError`, but the task stays queued (a pending task can't be recalled) and may still run later.                                                            |
+| How a step runs twice                                                                                                        | Why                                                                                                                                                                                          |
+| ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The worker crashes, stalls or is partitioned after the handler's side effect and before it settles the task                  | The task has no fresh heartbeat for `workerTimeoutMs` (or its worker is declared dead); the coordinator's sweep requeues it and another worker runs it again.                                |
+| The handler is still running when the claim is lost                                                                          | The heartbeat returns `false`: the worker aborts `ctx.signal` (`TaskLeaseLostError`) and skips the commit — but work the handler already did stays done, and the new claimant does it again. |
+| The worker's `complete()` / `fail()` call fails (network, queue outage)                                                      | The task stays claimed, goes stale and is redelivered; the handler runs again.                                                                                                               |
+| `worker.stop({ timeoutMs })` gives unfinished tasks back                                                                     | They are `release()`d and claimed by another worker at once; their handlers are aborted, not undone.                                                                                         |
+| A step retry (the definition's `retry`, `retryMiddleware`), a workflow retry, `force`, or a resume after a coordinator crash | The handler runs again (each retry enqueues a new task with the next attempt number).                                                                                                        |
+| The coordinator crashes after taking a settled outcome (`consume`) and before writing the step row                           | The outcome is in neither storage nor an unconsumed task, so the coordinator that adopts the run dispatches the step again. A task that settles while no coordinator waits is not re-run.    |
+| A step wait times out while its task is still `pending`                                                                      | The step fails with `StepWaitTimeoutError`, but the task stays queued (a pending task can't be recalled) and may still run later.                                                            |
 
 Make handlers idempotent (an idempotency key derived from
 `ctx.workflowId` + `ctx.stepName`, an upsert, a check-before-write) and
@@ -139,17 +162,38 @@ What fencing does guarantee:
 - **One live claim per task.** `claim` hands a pending task to a single
   claimer and mints a fresh `claimToken`; `heartbeat`, `complete`, `fail` and
   `release` are rejected (return `false`) for any other token, so a stale
-  worker can't settle a task someone else now owns.
-- **No phantom completions.** A worker commits in the order fenced heartbeat
-  → storage write → queue `complete` / `fail`. The queue never says
-  `completed` while storage has nothing; a storage write that fails leaves
-  the task claimed, so it is redelivered once its lease goes stale.
-- **Narrow stale-write window.** The worker's step-row write itself is not
-  fenced by the run lock; it is guarded by the heartbeat immediately before
-  it. A worker that loses its claim between that heartbeat and the write can
-  still land one stale step row. The coordinator, which holds the run lock,
-  writes every run-level transition fenced (see
-  [Storage → Fencing](../durable/storage/README.md#fencing)).
+  worker can't settle a task someone else now owns. The token check and the
+  write are one atomic operation in every queue: one SQL `UPDATE`
+  (Postgres, SQLite), one Lua script (Redis), one synchronous step
+  (in-memory), and the same call on the server's queue for remote workers.
+- **A stale worker never lands a step row.** Workers write no storage — the
+  worker API (`createWorkerApiHandler`) has no storage methods either. The
+  coordinator that dispatched the attempt reads the settled task (`get`)
+  and writes the step row and attempt rows itself, fenced by its run lock
+  (see [Storage → Fencing](../durable/storage/README.md#fencing)). A worker
+  that lost its claim — reclaimed after a stall, given back on stop, failed
+  by the wait deadline — is rejected by the queue whether it commits before
+  or after the new claimant, so its outcome reaches neither the task nor a
+  row, and the current claimant's outcome stands. This holds for every
+  storage and queue combination (in-memory, Postgres, Redis, SQLite,
+  `@promin/workflow-remote`): the guarantee comes from the queue's fenced
+  settle plus the run lock, not from the storage knowing about claims.
+- **Storage and queue agree.** A step row is written only from a settled
+  task, with the outcome its last claimant reported, so storage never shows
+  an outcome the queue doesn't hold.
+- **Adoption takes a settled outcome instead of re-running.** A task keeps
+  its `(workflowId, stepName)` slot until the coordinator consumes its
+  outcome. When a coordinator crashes and the task settles before another
+  one adopts the run, the adopter's dispatch gets that task back from
+  `enqueue` and records its outcome, attempt number and worker, so the
+  handler runs once across the crash. Reuse is bounded to the dispatch it
+  belongs to: the coordinator consumes every outcome as it reads it, so
+  the next attempt of a retry gets a new task; a task carries its run
+  number, so a fresh run (`startFreshRun`, `force` on an ended run,
+  continue-as-new) never takes an earlier run's outcome; and
+  `runner.resume({ fromStep })` consumes the reset steps' leftover outcomes
+  first (`StepExecutor.discardSettled`), so they run again. Resetting steps
+  through storage directly (`resetSteps`) skips that last step.
 - **Poison tasks are dead-lettered.** Each claim counts a delivery
   (`release` does not). Once a task has been delivered `maxDeliveries` times
   (default 10), the next `requeueStuck` marks it failed with
@@ -162,8 +206,10 @@ What fencing does guarantee:
   stays queued). A deleted or terminal run ends the wait with
   `StepWaitAbandonedError`.
 - **Enqueue is idempotent** on `(workflowId, stepName)` while a task for the
-  pair is pending or running, so two coordinators that both decide a step is
-  ready create one task.
+  pair is unconsumed (pending, running, or settled and not consumed), so
+  two coordinators that both decide a step is ready create one task, and a
+  coordinator that adopts a run waits on the task its predecessor left —
+  or, if it already settled, takes its outcome.
 
 ## Step queue (contract v2)
 
@@ -176,7 +222,9 @@ await queue.enqueue({
   workflowId: "wf-1",
   stepName: "send-email",
   input: { to: "a@example.com" },
-  prevResults: {},
+  deps: { render: { html: "<p>hi</p>" } }, // the step's declared dependencies only
+  dependsOn: ["render"], // their order: ctx.prev is the first
+  timeoutMs: 30_000, // the definition's per-attempt timeout, enforced by the worker
   needs: ["smtp"],
   priority: 8,
   attempt: 1,
@@ -206,12 +254,13 @@ console.log(requeued, deadLettered, await queue.get("missing-id"));
 
 | Method                                                                                 | Semantics                                                                                                                                                                                                                |
 | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `enqueue(params)`                                                                      | Idempotent on `(workflowId, stepName)` while pending/running. Carries `attempt`, `needs`, `priority`, `version`, `metadata` and the concurrency key.                                                                     |
+| `enqueue(params)`                                                                      | Idempotent on `(workflowId, stepName)` until the task is consumed. Carries `deps` / `dependsOn`, `timeoutMs`, `attempt`, `run`, `needs`, `priority`, `version`, `metadata` and the concurrency key.                      |
+| `consume({ taskId })` / `consumeSettled({ workflowId, stepNames })`                    | Mark a settled task's outcome as taken (`consumedAt`), freeing its slot; `false` / not counted for a pending, running or already consumed task. Coordinator-side only.                                                   |
 | `claim({ workerId, limit, capabilities?, stepNames?, versions? })`                     | Routing runs inside the claim (SQL `WHERE`, Lua, or in-process). Each claimed task is `running`, has a fresh `claimToken`, `claimedBy = workerId` and `deliveries + 1`. Tasks whose concurrency key is full are skipped. |
-| `heartbeat` / `complete` / `fail`                                                      | Fenced by `claimToken`; return `false` when the claim is no longer current.                                                                                                                                              |
+| `heartbeat` / `complete` / `fail`                                                      | Fenced by `claimToken`, atomically; return `false` when the claim is no longer current. `complete` records the result (and `stepMetadata`), `fail` the message and the error's `errorTag`.                               |
 | `release({ taskId, claimToken })`                                                      | Back to `pending` in place, no delivery counted, concurrency slot freed.                                                                                                                                                 |
 | `requeueStuck({ mode: "worker", workerId } \| { mode: "stale", olderThanMs }, lease?)` | Returns `{ requeued, deadLettered }`. With a `lease`, the sweep rejects with `StaleLeaseError` (and changes nothing) unless the lease is still current, checked in the same transaction or script.                       |
-| `get(taskId)` / `purge({ completedBefore })` / `metrics({ since })`                    | Inspect one task (claim, outcome, dead-letter fields); delete terminal tasks; windowed counts and latency.                                                                                                               |
+| `get(taskId)` / `purge({ completedBefore })` / `metrics({ since })`                    | Read one task (claim, settled outcome, dead-letter fields) — how the coordinator learns an outcome; delete terminal tasks; windowed counts and latency.                                                                  |
 
 Implementations: `InMemoryStepQueue`, `PgStepQueue` (`@promin/postgres`),
 `RedisStepQueue` (`@promin/redis`), `SqliteStepQueue` (`@promin/sqlite`) and
@@ -229,26 +278,27 @@ from `@promin/workflow/testing`.
   wakes the loop to claim again at once. A failing claim is reported to
   `onError({ phase: "claim" })` and retried with capped exponential backoff
   (`maxErrorBackoffMs`, default 30 s); it never ends the loop.
-- **Handler context.** `ctx.input` is the workflow input; `ctx.deps` holds
-  the results of every step the run has completed so far, by step name (not
-  only the step's declared dependencies); `ctx.prev` is the one result when
-  exactly one step has completed, the input when none has, and otherwise the
-  same record as `ctx.deps` — so read dependencies by name from `ctx.deps`.
-  `ctx.attempt`, `ctx.workflowId`, `ctx.stepName` and `ctx.signal` complete it.
-- **Outcome, then commit.** The handler (with its `retry`, middleware and
-  `onFailure`) settles first; then the worker commits as described above.
-  Every outcome — completed, failed, skipped, fallback — writes an attempt row
-  when the storage has `stepAttempts`.
+- **Handler context — the inline one.** `ctx.input` is the workflow input.
+  `ctx.prev` is the result of the step's first declared dependency (the input
+  for a root step) and `ctx.deps` the results of its declared dependencies
+  only, by name — the `prev` and `deps` the inline body gets (a
+  `.parallelSteps()` join gets its branches as `"<block>.<label>"`). Only
+  those results travel on the task. `ctx.attempt` is the runner's attempt
+  number; `ctx.workflowId`, `ctx.stepName` and `ctx.signal` complete it.
+- **One attempt, then settle.** Each task is one attempt: the handler runs
+  through the middleware, bounded by the task's `timeoutMs`, and the worker
+  settles the task — `complete` with the value, or `fail` with the message
+  and the error's `_tag`. That is all it writes; it needs no storage.
 - **Heartbeats and lease loss.** Each running task is heartbeated every
   `heartbeatIntervalMs` (default 5 s). A heartbeat that returns `false` aborts
   `ctx.signal` with `TaskLeaseLostError`, stops heartbeating, fires
-  `hooks.onLeaseLost` and skips the commit. A heartbeat that throws is only
-  reported (`phase: "heartbeat"`); the next one may succeed.
+  `hooks.onLeaseLost` and skips settling the task. A heartbeat that throws
+  is only reported (`phase: "heartbeat"`); the next one may succeed.
 - **Graceful stop.** `stop()` stops claiming and waits for running tasks.
   `stop({ timeoutMs })` waits at most that long, then `release()`s the
   unfinished tasks (another worker claims them at once) and aborts their
-  handlers with `WorkerStoppingError`; their outcomes are not written.
-- **Errors never crash the process.** Commit, hook, release and task errors
+  handlers with `WorkerStoppingError`; their outcomes are dropped.
+- **Errors never crash the process.** Settle, hook, release and task errors
   are reported through `onError` (`phase`: `commit`, `hook`, `release`,
   `task`).
 - `taskFilter` is an extra post-claim check; rejected tasks are released.
@@ -256,7 +306,6 @@ from `@promin/workflow/testing`.
   inside the claim.
 
 ```typescript
-import { InMemoryWorkflowStorage } from "@promin/workflow";
 import {
   createWorker,
   InMemoryStepQueue,
@@ -271,9 +320,8 @@ declare function fetchReport(url: string, signal: AbortSignal): Promise<string>;
 const registry = new MapStepRegistry();
 registry.register({
   stepName: "fetch-report",
-  handler: (ctx) => fetchReport(String(ctx.input), ctx.signal), // abort on lease loss / stop
-  retry: { maxRetries: 3, baseDelayMs: 500 },
-  onFailure: { fallback: () => "" },
+  // ctx.signal aborts on the step's timeoutMs, lease loss and stop.
+  handler: (ctx) => fetchReport(String(ctx.input), ctx.signal),
 });
 
 const tracing: WorkerMiddleware = async ({ task, ctx, next }) => {
@@ -286,7 +334,6 @@ const tracing: WorkerMiddleware = async ({ task, ctx, next }) => {
 };
 
 const worker = createWorker({
-  storage: new InMemoryWorkflowStorage(),
   stepQueue: new InMemoryStepQueue(),
   registry,
   middleware: [timeoutMiddleware({ ms: 30_000 }), loggingMiddleware(), tracing],
@@ -301,10 +348,10 @@ process.on("SIGTERM", () => {
 
 Hooks (`beforeStep`, `afterStep`, `onError`, `onLeaseLost`) observe;
 middleware (`timeoutMiddleware`, `retryMiddleware`, `loggingMiddleware`,
-`metricsMiddleware`, your own) wraps the handler and may change the outcome;
-per-step `retry` / `onFailure` belong to one registration. Worker retries
-use the shared retry policy defaults (3 retries, 250 ms doubling, jitter off,
-budget from the first failure) on the worker's `clock`.
+`metricsMiddleware`, your own) wraps the handler inside one attempt and may
+change that attempt's outcome. The step's own `retry`, `timeoutMs` and
+`onFailure` come from its definition (see
+[What runs where](#what-runs-where)).
 
 ## The coordinator
 

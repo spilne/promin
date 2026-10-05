@@ -45,11 +45,7 @@ postgresDescribe("PostgresWorkflowStorage round trips", { migrate }, (pg) => {
   beforeEach(async () => {
     await pg.sql`TRUNCATE TABLE wf_workflow_step_tasks, wf_workflow_steps, wf_workflow_locks,
       wf_step_attempts, wf_activity_journal, wf_workflows RESTART IDENTITY CASCADE`;
-    storage = await PostgresWorkflowStorage.create({
-      db: counted,
-      autoSeedLookups: false,
-      recordAttempts: true,
-    });
+    storage = await PostgresWorkflowStorage.create({ db: counted, autoSeedLookups: false });
   });
 
   /** Statements `run` sends. */

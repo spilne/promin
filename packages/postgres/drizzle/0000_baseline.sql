@@ -337,11 +337,15 @@ CREATE TABLE wf_step_queue (
   workflow_id text NOT NULL,
   step_name text NOT NULL,
   input jsonb,
-  prev_results jsonb,
+  deps jsonb,
+  depends_on text[] DEFAULT '{}'::text[] NOT NULL,
+  timeout_ms integer,
   attempt integer DEFAULT 1 NOT NULL,
   status text DEFAULT 'pending'::text NOT NULL,
   result jsonb,
   error text,
+  error_tag text,
+  step_metadata jsonb,
   duration_ms bigint,
   claimed_by text,
   claimed_at timestamp with time zone,
@@ -358,6 +362,8 @@ CREATE TABLE wf_step_queue (
   concurrency_limit integer,
   claim_token text,
   deliveries integer DEFAULT 0 NOT NULL,
+  run integer DEFAULT 1 NOT NULL,
+  consumed_at timestamp with time zone,
   CONSTRAINT wf_step_queue_pkey PRIMARY KEY (id)
 );
 
@@ -615,7 +621,7 @@ CREATE UNIQUE INDEX wf_signals_workflow_signal_idx ON wf_workflow_signals (workf
 
 CREATE INDEX wf_step_attempts_workflow_idx ON wf_step_attempts (workflow_id);
 
-CREATE UNIQUE INDEX wf_step_queue_active_uniq ON wf_step_queue (workflow_id, step_name) WHERE (status = ANY (ARRAY['pending'::text, 'running'::text]));
+CREATE UNIQUE INDEX wf_step_queue_active_uniq ON wf_step_queue (workflow_id, step_name) WHERE (consumed_at IS NULL);
 
 CREATE INDEX wf_step_queue_concurrency_running_idx ON wf_step_queue (concurrency_scope, concurrency_key) WHERE ((status = 'running'::text) AND (concurrency_key IS NOT NULL));
 

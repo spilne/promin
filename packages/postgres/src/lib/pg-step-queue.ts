@@ -13,6 +13,8 @@ import {
   DEFAULT_MAX_DELIVERIES,
   type StepQueue,
   type StepQueueClaimParams,
+  type StepQueueCompleteParams,
+  type StepQueueFailParams,
   type StepQueueEnqueueParams,
   type StepQueueRequeueParams,
   type StepQueueRequeueResult,
@@ -53,10 +55,10 @@ function textArrayLiteral(arr: readonly string[]): string {
 const CONCURRENCY_LOCK_CLASS = sql.raw(`hashtext('promin.wf_step_queue.concurrency')`);
 
 const TASK_COLUMNS = sql.raw(
-  `id, workflow_id, step_name, needs, priority, input, prev_results, attempt, deliveries, ` +
-    `status, created_at, version, metadata, concurrency_key, concurrency_scope, ` +
-    `concurrency_limit, claim_token, claimed_by, claimed_at, heartbeat_at, completed_at, ` +
-    `result, error, duration_ms`,
+  `id, workflow_id, step_name, needs, priority, input, deps, depends_on, timeout_ms, ` +
+    `attempt, deliveries, status, created_at, version, metadata, concurrency_key, ` +
+    `concurrency_scope, concurrency_limit, claim_token, claimed_by, claimed_at, heartbeat_at, ` +
+    `completed_at, result, error, error_tag, step_metadata, duration_ms, run, consumed_at`,
 );
 
 export interface PgStepQueueConfig {
@@ -111,7 +113,8 @@ export class PgStepQueue implements StepQueue {
     const priority = params.priority ?? 5;
     const needs = params.needs ?? [];
     const inputJson = params.input === undefined ? null : JSON.stringify(params.input);
-    const prevResultsJson = JSON.stringify(params.prevResults);
+    const depsJson = JSON.stringify(params.deps ?? {});
+    const dependsOnLiteral = sql.raw(textArrayLiteral(params.dependsOn ?? []));
     const metadataJson = params.metadata === undefined ? null : JSON.stringify(params.metadata);
     const needsLiteral = sql.raw(textArrayLiteral(needs));
     // Idempotent on (workflow_id, step_name) via the partial unique index
@@ -122,8 +125,9 @@ export class PgStepQueue implements StepQueue {
       this.db,
       sql`
         INSERT INTO wf_step_queue (
-          workflow_id, step_name, namespace, needs, priority, input, prev_results, version,
-          metadata, attempt, concurrency_key, concurrency_scope, concurrency_limit
+          workflow_id, step_name, namespace, needs, priority, input, deps, depends_on,
+          timeout_ms, version, metadata, attempt, run, concurrency_key, concurrency_scope,
+          concurrency_limit
         )
         VALUES (
           ${params.workflowId},
@@ -132,15 +136,18 @@ export class PgStepQueue implements StepQueue {
           ${needsLiteral},
           ${priority},
           ${inputJson}::jsonb,
-          ${prevResultsJson}::jsonb,
+          ${depsJson}::jsonb,
+          ${dependsOnLiteral},
+          ${params.timeoutMs ?? null},
           ${params.version ?? null},
           ${metadataJson}::jsonb,
           ${params.attempt ?? 1},
+          ${params.run ?? 1},
           ${params.concurrencyKey ?? null},
           ${params.concurrencyScope ?? null},
           ${params.concurrencyLimit ?? null}
         )
-        ON CONFLICT (workflow_id, step_name) WHERE status IN ('pending', 'running')
+        ON CONFLICT (workflow_id, step_name) WHERE consumed_at IS NULL
         DO UPDATE SET workflow_id = wf_step_queue.workflow_id
         RETURNING id
       `,
@@ -322,18 +329,14 @@ export class PgStepQueue implements StepQueue {
     return rows[0] ? toRecord(rows[0]) : undefined;
   }
 
-  async complete(params: {
-    taskId: string;
-    claimToken?: string;
-    result: unknown;
-    durationMs: number;
-  }): Promise<boolean> {
+  async complete(params: StepQueueCompleteParams): Promise<boolean> {
     const now = this.clock.now();
     const rows = await this.db
       .update(stepQueue)
       .set({
         status: "completed",
         result: params.result,
+        stepMetadata: params.stepMetadata ?? null,
         durationMs: params.durationMs,
         completedAt: now,
       })
@@ -348,18 +351,15 @@ export class PgStepQueue implements StepQueue {
     return rows.length > 0;
   }
 
-  async fail(params: {
-    taskId: string;
-    claimToken?: string;
-    error: string;
-    durationMs: number;
-  }): Promise<boolean> {
+  async fail(params: StepQueueFailParams): Promise<boolean> {
     const now = this.clock.now();
     const rows = await this.db
       .update(stepQueue)
       .set({
         status: "failed",
         error: params.error,
+        errorTag: params.errorTag ?? null,
+        stepMetadata: params.stepMetadata ?? null,
         durationMs: params.durationMs,
         completedAt: now,
       })
@@ -435,6 +435,39 @@ export class PgStepQueue implements StepQueue {
     let deadLettered = 0;
     for (const r of rows) if (r.status === "failed") deadLettered++;
     return { requeued: rows.length - deadLettered, deadLettered };
+  }
+
+  async consume(params: { taskId: string }): Promise<boolean> {
+    const id = Number(params.taskId);
+    if (!Number.isSafeInteger(id)) return false;
+    const rows = await execRaw(
+      this.db,
+      sql`
+        UPDATE wf_step_queue SET consumed_at = ${this.clock.now().toISOString()}::timestamptz
+        WHERE id = ${id}
+          AND status IN ('completed', 'failed') AND consumed_at IS NULL
+        RETURNING id
+      `,
+    );
+    return rows.length > 0;
+  }
+
+  async consumeSettled(params: {
+    workflowId: string;
+    stepNames: readonly string[];
+  }): Promise<number> {
+    if (params.stepNames.length === 0) return 0;
+    const rows = await execRaw(
+      this.db,
+      sql`
+        UPDATE wf_step_queue SET consumed_at = ${this.clock.now().toISOString()}::timestamptz
+        WHERE workflow_id = ${params.workflowId}
+          AND step_name = ANY(${sql.raw(textArrayLiteral(params.stepNames))})
+          AND status IN ('completed', 'failed') AND consumed_at IS NULL
+        RETURNING id
+      `,
+    );
+    return rows.length;
   }
 
   async purge(params: { completedBefore: Date }): Promise<number> {
@@ -570,8 +603,11 @@ function toTask(r: Row): StepTask {
     needs: (r.needs as string[]) ?? [],
     priority: r.priority ?? 5,
     input: r.input,
-    prevResults: (r.prev_results as Record<string, unknown>) ?? {},
+    deps: (r.deps as Record<string, unknown> | null) ?? {},
+    dependsOn: (r.depends_on as string[] | null) ?? [],
+    ...(r.timeout_ms != null && { timeoutMs: Number(r.timeout_ms) }),
     attempt: Number(r.attempt),
+    run: Number(r.run ?? 1),
     deliveries: Number(r.deliveries),
     status: r.status,
     createdAt: toDate(r.created_at)!,
@@ -593,6 +629,9 @@ function toRecord(r: Row): StepTaskRecord {
     completedAt: toDate(r.completed_at),
     result: r.result ?? undefined,
     error: r.error ?? undefined,
+    errorTag: r.error_tag ?? undefined,
+    stepMetadata: (r.step_metadata as Record<string, unknown> | null) ?? undefined,
     durationMs: r.duration_ms != null ? Number(r.duration_ms) : undefined,
+    consumedAt: toDate(r.consumed_at),
   };
 }

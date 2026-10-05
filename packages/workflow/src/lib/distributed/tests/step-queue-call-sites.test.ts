@@ -34,14 +34,12 @@ describe("DefaultWorker — routing inside the claim", () => {
       workflowId: "a",
       stepName: "foreign",
       input: {},
-      prevResults: {},
       priority: 9,
     });
     const mine = await queue.enqueue({
       workflowId: "b",
       stepName: "mine",
       input: {},
-      prevResults: {},
       priority: 5,
     });
     const storage = new InMemoryWorkflowStorage({ clock });
@@ -49,7 +47,6 @@ describe("DefaultWorker — routing inside the claim", () => {
     const registry = new MapStepRegistry();
     registry.register({ stepName: "mine", handler: async () => "ran" });
     const worker = new DefaultWorker({
-      storage,
       stepQueue: queue,
       registry,
       clock,
@@ -73,7 +70,6 @@ describe("DefaultWorker — routing inside the claim", () => {
       workflowId: "a",
       stepName: "s",
       input: {},
-      prevResults: {},
       priority: 9,
       version: "3",
     });
@@ -81,7 +77,6 @@ describe("DefaultWorker — routing inside the claim", () => {
       workflowId: "b",
       stepName: "s",
       input: {},
-      prevResults: {},
       version: "1",
     });
     const storage = new InMemoryWorkflowStorage({ clock });
@@ -89,7 +84,6 @@ describe("DefaultWorker — routing inside the claim", () => {
     const registry = new MapStepRegistry();
     registry.register({ stepName: "s", handler: async () => "ran" });
     const worker = new DefaultWorker({
-      storage,
       stepQueue: queue,
       registry,
       clock,
@@ -109,7 +103,6 @@ describe("DefaultWorker — routing inside the claim", () => {
       workflowId: "a",
       stepName: "s",
       input: {},
-      prevResults: {},
       metadata: { tenant: "other" },
     });
     const registry = new MapStepRegistry();
@@ -122,7 +115,6 @@ describe("DefaultWorker — routing inside the claim", () => {
     });
     let filtered = 0;
     const worker = new DefaultWorker({
-      storage: new InMemoryWorkflowStorage({ clock }),
       stepQueue: queue,
       registry,
       clock,
@@ -189,7 +181,13 @@ describe("StepQueueExecutor", () => {
       await new Promise<void>((r) => setImmediate(r));
     }
 
-    expect(result).toEqual({ ok: false, kind: "failed", error: deadLetterError(1) });
+    expect(result).toMatchObject({
+      ok: false,
+      kind: "failed",
+      error: deadLetterError(1),
+      attempt: 1,
+      executorId: "w-crashy",
+    });
   });
 });
 
@@ -199,13 +197,12 @@ describe("DistributedWorkflowRunner — dead-worker sweep", () => {
     const queue = new InMemoryStepQueue({ clock });
     const workerRegistry = new InMemoryWorkerRegistry({ clock });
     await workerRegistry.register({ workerId: "w-dead", capabilities: [], concurrency: 1 });
-    const id = await queue.enqueue({ workflowId: "wf", stepName: "s", input: {}, prevResults: {} });
+    const id = await queue.enqueue({ workflowId: "wf", stepName: "s", input: {} });
     const [dead] = await queue.claim({ workerId: "w-dead", limit: 1 });
     const kept = await queue.enqueue({
       workflowId: "wf-2",
       stepName: "s",
       input: {},
-      prevResults: {},
     });
     const [alive] = await queue.claim({ workerId: "w-alive", limit: 1 });
 

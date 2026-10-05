@@ -47,7 +47,6 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
     });
 
     const gpuWorker = createWorker({
-      storage,
       stepQueue,
       registry: gpuRegistry,
       capabilities: ["gpu"],
@@ -142,7 +141,6 @@ describe("Hybrid dispatch — run simple steps locally, offload heavy steps to w
     });
 
     const worker = createWorker({
-      storage,
       stepQueue,
       registry,
       capabilities: ["remote"],

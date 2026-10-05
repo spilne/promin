@@ -10,13 +10,13 @@ bun add @promin/workflow-remote
 
 ## What's in the box
 
-| Export                                                            | Side   | What                                                                                             |
-| ----------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------ |
-| `createWorkflowStorageHandler(storage)`                           | server | `(Request) => Promise<Response>` over any `WorkflowStorage` (in-memory, Postgres, Redis, SQLite) |
-| `RemoteWorkflowStorage`                                           | client | a `WorkflowStorage` that forwards every call; plugs into any runner, worker or scanner           |
-| `createWorkerApiHandler({ stepQueue, storage, workerRegistry? })` | server | the worker RPC: `claim`, `release`, `complete`, `fail`, `heartbeat` (+ worker registry methods)  |
-| `RemoteStepQueue`                                                 | client | the worker subset of `StepQueue`                                                                 |
-| `RemoteWorkerRegistry`                                            | client | a `WorkerRegistry` over the worker RPC                                                           |
+| Export                                                   | Side   | What                                                                                                               |
+| -------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------ |
+| `createWorkflowStorageHandler(storage)`                  | server | `(Request) => Promise<Response>` over any `WorkflowStorage` (in-memory, Postgres, Redis, SQLite)                   |
+| `RemoteWorkflowStorage`                                  | client | a `WorkflowStorage` that forwards every call; plugs into any runner or scanner                                     |
+| `createWorkerApiHandler({ stepQueue, workerRegistry? })` | server | the worker RPC: `claim`, `release`, `complete`, `fail`, `heartbeat` (+ worker registry methods); no storage access |
+| `RemoteStepQueue`                                        | client | the worker subset of `StepQueue`                                                                                   |
+| `RemoteWorkerRegistry`                                   | client | a `WorkerRegistry` over the worker RPC                                                                             |
 
 ## Quick example
 
@@ -51,7 +51,7 @@ await runner.run({ workflow: greet, workflowId: "wf_1", input: { id: "u_42" } })
 ```typescript
 // Remote worker: claims from the coordinator's queue over HTTP.
 import { createWorker, MapStepRegistry } from "@promin/workflow/distributed";
-import { RemoteStepQueue, RemoteWorkflowStorage } from "@promin/workflow-remote";
+import { RemoteStepQueue } from "@promin/workflow-remote";
 
 const registry = new MapStepRegistry();
 registry.register({
@@ -59,8 +59,8 @@ registry.register({
   handler: async (ctx) => ({ text: String(ctx.input) }),
 });
 
+// No storage: the worker settles the task, the coordinator writes the step row.
 const worker = createWorker({
-  storage: new RemoteWorkflowStorage({ url: "http://coord:3001/storage" }),
   stepQueue: new RemoteStepQueue({ url: "http://coord:3001/workers" }),
   registry,
   capabilities: ["gpu"],
@@ -86,6 +86,10 @@ void worker.start();
   worker's `workerId`, `stepNames` and `versions`, and the handler rejects a
   claim without `workerId`, so the coordinator's dead-worker sweep can
   requeue a remote worker's tasks by id.
+- **Workers never write storage.** `complete` / `fail` are fenced by the
+  task's `claimToken` on the server's queue; the coordinator writes the step
+  row from the settled task, under its run lock. There is no storage method
+  on the worker wire.
 
 ## Capabilities and limits
 
@@ -106,7 +110,7 @@ void worker.start();
   a settled step's row, attempt rows and status check as separate calls (more
   round trips per step; same fencing).
 - **`RemoteStepQueue` is the worker subset.** `claim`, `release`,
-  `complete`, `fail` and `heartbeat` work; `enqueue`, `requeueStuck`, `get`
+  `complete`, `fail` and `heartbeat` work; `enqueue`, `consume`, `consumeSettled`, `requeueStuck`, `get`
   and `purge` throw, and `metrics` is not on the worker wire. Enqueueing and
   the dead-worker sweep belong to the coordinator, which uses the real queue
   next to the handler.

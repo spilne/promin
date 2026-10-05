@@ -1,13 +1,14 @@
 // ---------------------------------------------------------------------------
 // createWorkerApiHandler — server side of the distributed worker HTTP API.
 //
-// Wraps a StepQueue + WorkflowStorage into a fetch-compatible handler for
-// cross-language workers. The handler accepts a single POST with a
-// { method, params } body and dispatches to the matching queue / storage
+// Wraps a StepQueue (and optionally a WorkerRegistry) into a fetch-compatible
+// handler for cross-language workers. The handler accepts a single POST with
+// a { method, params } body and dispatches to the matching queue / registry
 // method. No routing, no middleware, no auth (put auth in front of it).
+// Workers get no storage access: the coordinator writes step rows from the
+// queue's claim-fenced outcome.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage } from "@promin/workflow";
 import type { StepQueue, WorkerRegistry } from "@promin/workflow/distributed";
 import {
   WORKER_WIRE_CODEC,
@@ -17,8 +18,8 @@ import {
 } from "./worker-wire.ts";
 
 /**
- * Build a fetch-style handler that exposes `stepQueue` and `storage` to
- * remote workers. The returned function matches the `(req: Request) =>
+ * Build a fetch-style handler that exposes `stepQueue` (and
+ * `workerRegistry`) to remote workers. The returned function matches the `(req: Request) =>
  * Promise<Response>` signature that `Bun.serve`, `Deno.serve`, and most
  * edge runtimes accept.
  *
@@ -26,13 +27,12 @@ import {
  * ```ts
  * Bun.serve({
  *   port: 4001,
- *   fetch: createWorkerApiHandler({ stepQueue, storage }),
+ *   fetch: createWorkerApiHandler({ stepQueue }),
  * });
  * ```
  */
 export function createWorkerApiHandler(config: {
   stepQueue: StepQueue;
-  storage: WorkflowStorage;
   /**
    * Optional WorkerRegistry. When provided, the handler dispatches
    * register/heartbeat/drain/deregister/list methods to it. Without one,
@@ -40,7 +40,7 @@ export function createWorkerApiHandler(config: {
    */
   workerRegistry?: WorkerRegistry;
 }): (req: Request) => Promise<Response> {
-  const { stepQueue, storage, workerRegistry } = config;
+  const { stepQueue, workerRegistry } = config;
 
   const requireRegistry = async <T>(fn: (r: WorkerRegistry) => Promise<T>): Promise<T> => {
     if (!workerRegistry) {
@@ -70,18 +70,18 @@ export function createWorkerApiHandler(config: {
         claimToken: p.claimToken,
         result: p.result,
         durationMs: p.durationMs,
+        ...(p.stepMetadata !== undefined && { stepMetadata: p.stepMetadata }),
       }),
     fail: (p) =>
       stepQueue.fail({
         taskId: p.taskId,
         claimToken: p.claimToken,
         error: p.error,
+        ...(p.errorTag !== undefined && { errorTag: p.errorTag }),
         durationMs: p.durationMs,
+        ...(p.stepMetadata !== undefined && { stepMetadata: p.stepMetadata }),
       }),
     heartbeat: (p) => stepQueue.heartbeat({ taskId: p.taskId, claimToken: p.claimToken }),
-    // Storage shortcuts
-    saveStepResult: (p) => storage.saveStepResult(p),
-    saveStepFailure: (p) => storage.saveStepFailure(p),
     // WorkerRegistry
     registerWorker: (p) =>
       requireRegistry((r) =>

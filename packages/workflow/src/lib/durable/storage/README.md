@@ -92,8 +92,9 @@ console.log(storageCapabilities(storage)); // { journal: true, stepAttempts: tru
 | `signalWakeups`      | indexed delivered-signal scan for the signal scanner                 |    yes    |   yes    |  yes  |  yes   |  yes   |
 | `orphanedRuns`       | keyset recovery scan for `recover()` and the distributed coordinator |    yes    |   yes    |  yes  |  yes   |  yes   |
 
-`PostgresWorkflowStorage` writes attempt rows only with `recordAttempts: true`.
-Without a scanner capability the scanners and recovery fall back to paging
+Every backend with `stepAttempts` writes one attempt row per step attempt,
+whether the step ran inline or on a worker (the runner writes them, with the
+worker's id as `executorId` for a queued attempt). Without a scanner capability the scanners and recovery fall back to paging
 `listWorkflows`; without `countWorkflows` callers count listed rows.
 
 ## Fencing
@@ -123,9 +124,15 @@ heartbeats the lock, and every write it makes carries the token in `guard`.
   newer holder's lock. So a driver that stalled past its lease learns it lost
   the run at its next write, and the runner stops with `WorkflowLockLostError`.
 - **Unfenced writes.** A write without a token is accepted. Operator actions,
-  `deliverSignal`, the scanners and the distributed worker's step-result
-  writes are unfenced (workers are fenced by their queue claim instead; see
-  [Distributed](../../distributed/README.md)).
+  `deliverSignal` and the scanners write unfenced.
+- **Distributed steps are fenced twice.** A distributed worker writes no
+  storage: it settles its queue task with `complete` / `fail`, which the
+  queue rejects unless the worker's claim token is still the current one
+  (checked atomically with the write). The coordinator then writes the step
+  row and its attempt rows from the settled task, fenced by its run lock like
+  any other step. A worker that lost its claim can't settle the task, so its
+  outcome never reaches a row (see
+  [Distributed → Delivery guarantees](../../distributed/README.md#delivery-guarantees)).
 
 Fencing limits what a stale driver can **write**; it cannot stop a stale
 driver's step body from running. Anything a step does outside storage can
@@ -175,7 +182,8 @@ entries so the next attempt re-runs them.
    status and journal enums, run-source codecs and the child-wake signal name.
 3. Run the conformance suites from `@promin/workflow/testing` under
    `bun:test`: `storageTestSuite` (CRUD, locks, fencing matrix, lifecycle,
-   signals, journal, capabilities), `journalReplayTestSuite`,
+   signals, journal, step attempts with `hasStepAttempts`, capabilities),
+   `journalReplayTestSuite`,
    `zombieWorkerTestSuite` (a stalled runner loses its lock and every later
    write fails), and, for the other stores, `stepQueueTestSuite`,
    `schedulerStorageTestSuite`, `stateMachineStorageTestSuite`,

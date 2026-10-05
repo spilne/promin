@@ -91,7 +91,6 @@ await queue.enqueue({
   workflowId: "wf-1",
   stepName: "sendEmail",
   input: { to: "alice@example.com" },
-  prevResults: {},
   needs: ["smtp"],
   priority: 8,
   // At most 2 running "send-email" tasks per tenant.

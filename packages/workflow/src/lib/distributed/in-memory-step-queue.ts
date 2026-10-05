@@ -8,7 +8,9 @@ import {
   percentileCont,
   type StepQueue,
   type StepQueueClaimParams,
+  type StepQueueCompleteParams,
   type StepQueueEnqueueParams,
+  type StepQueueFailParams,
   type StepQueueRequeueParams,
   type StepQueueRequeueResult,
   type StepTask,
@@ -43,10 +45,10 @@ export interface InMemoryStepQueueConfig {
 export class InMemoryStepQueue implements StepQueue {
   private tasks = new Map<string, MutableTask>();
   /**
-   * `${workflowId}::${stepName}` → active taskId. Drives the
+   * `${workflowId}::${stepName}` → unconsumed taskId. Drives the
    * idempotent-enqueue contract: while a prior task for the pair is
-   * pending/running, re-enqueue returns the existing id. Cleared when the
-   * task reaches a terminal state so retries + fresh runs can re-enqueue.
+   * pending, running or settled-but-unconsumed, re-enqueue returns the
+   * existing id. Cleared by `consume` (and when the task is purged).
    */
   private activeByKey = new Map<string, string>();
   private counter = 0;
@@ -77,8 +79,11 @@ export class InMemoryStepQueue implements StepQueue {
       needs: params.needs ?? [],
       priority: params.priority ?? 5,
       input: params.input,
-      prevResults: params.prevResults,
+      deps: params.deps ?? {},
+      dependsOn: params.dependsOn ?? [],
+      ...(params.timeoutMs !== undefined && { timeoutMs: params.timeoutMs }),
       attempt: params.attempt ?? 1,
+      run: params.run ?? 1,
       deliveries: 0,
       status: "pending",
       createdAt: this.clock.now(),
@@ -162,19 +167,14 @@ export class InMemoryStepQueue implements StepQueue {
     return { ...record };
   }
 
-  async complete(params: {
-    taskId: string;
-    claimToken?: string;
-    result: unknown;
-    durationMs: number;
-  }): Promise<boolean> {
+  async complete(params: StepQueueCompleteParams): Promise<boolean> {
     const task = this.tasks.get(params.taskId);
     if (!this.isCurrentClaim(task, params.claimToken)) return false;
     task.status = "completed";
     task.result = params.result;
+    task.stepMetadata = params.stepMetadata;
     task.durationMs = params.durationMs;
     task.completedAt = this.clock.now();
-    this.activeByKey.delete(this.activeKey(task.workflowId, task.stepName));
     return true;
   }
 
@@ -185,19 +185,15 @@ export class InMemoryStepQueue implements StepQueue {
     return true;
   }
 
-  async fail(params: {
-    taskId: string;
-    claimToken?: string;
-    error: string;
-    durationMs: number;
-  }): Promise<boolean> {
+  async fail(params: StepQueueFailParams): Promise<boolean> {
     const task = this.tasks.get(params.taskId);
     if (!this.isCurrentClaim(task, params.claimToken)) return false;
     task.status = "failed";
     task.error = params.error;
+    task.errorTag = params.errorTag;
+    task.stepMetadata = params.stepMetadata;
     task.durationMs = params.durationMs;
     task.completedAt = this.clock.now();
-    this.activeByKey.delete(this.activeKey(task.workflowId, task.stepName));
     return true;
   }
 
@@ -224,7 +220,6 @@ export class InMemoryStepQueue implements StepQueue {
         task.error = deadLetterError(this.maxDeliveries);
         task.completedAt = this.clock.now();
         task.claimToken = undefined;
-        this.activeByKey.delete(this.activeKey(task.workflowId, task.stepName));
         deadLettered++;
       } else {
         this.backToPending(task);
@@ -241,6 +236,7 @@ export class InMemoryStepQueue implements StepQueue {
       if (task.status !== "completed" && task.status !== "failed") continue;
       if (!task.completedAt || task.completedAt.getTime() >= cutoff) continue;
       this.tasks.delete(id);
+      this.freeSlot(task);
       purged++;
     }
     return purged;
@@ -306,12 +302,39 @@ export class InMemoryStepQueue implements StepQueue {
     };
   }
 
+  async consume(params: { taskId: string }): Promise<boolean> {
+    const task = this.tasks.get(params.taskId);
+    if (!task || task.consumedAt !== undefined) return false;
+    if (task.status !== "completed" && task.status !== "failed") return false;
+    task.consumedAt = this.clock.now();
+    this.freeSlot(task);
+    return true;
+  }
+
+  async consumeSettled(params: {
+    workflowId: string;
+    stepNames: readonly string[];
+  }): Promise<number> {
+    let consumed = 0;
+    for (const stepName of params.stepNames) {
+      const id = this.activeByKey.get(this.activeKey(params.workflowId, stepName));
+      if (id !== undefined && (await this.consume({ taskId: id }))) consumed++;
+    }
+    return consumed;
+  }
+
   /** Test helper: get all tasks. */
   getAllTasks(): StepTaskRecord[] {
     return [...this.tasks.values()].map((t) => {
       const { namespace: _ns, ...record } = t;
       return { ...record };
     });
+  }
+
+  /** Give up the task's `(workflowId, stepName)` slot, if it holds it. */
+  private freeSlot(task: MutableTask): void {
+    const key = this.activeKey(task.workflowId, task.stepName);
+    if (this.activeByKey.get(key) === task.id) this.activeByKey.delete(key);
   }
 
   private backToPending(task: MutableTask): void {
@@ -330,8 +353,11 @@ export class InMemoryStepQueue implements StepQueue {
       needs: task.needs,
       priority: task.priority,
       input: task.input,
-      prevResults: task.prevResults,
+      deps: task.deps,
+      dependsOn: task.dependsOn,
+      ...(task.timeoutMs !== undefined && { timeoutMs: task.timeoutMs }),
       attempt: task.attempt,
+      run: task.run,
       deliveries: task.deliveries,
       status: task.status,
       createdAt: task.createdAt,

@@ -38,6 +38,7 @@ storageTestSuite(
     hasJournaledSuspend: true,
     hasScannerQueries: true,
     hasCompensationLedger: true,
+    hasStepAttempts: true,
     createPeer: (storage) =>
       new RemoteWorkflowStorage({
         url: "http://test.local/storage",

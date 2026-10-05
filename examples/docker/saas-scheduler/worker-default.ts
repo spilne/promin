@@ -14,7 +14,7 @@ import {
   notifyWebhookHandler,
 } from "./workflow.ts";
 
-const { storage, stepQueue, close } = await buildStack();
+const { stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
 registry.register({ stepName: "validate-job", handler: validateJobHandler });
@@ -23,7 +23,6 @@ registry.register({ stepName: "store-result", handler: storeResultHandler });
 registry.register({ stepName: "notify-webhook", handler: notifyWebhookHandler });
 
 const worker = createWorker({
-  storage,
   stepQueue,
   registry,
   capabilities: [],

@@ -21,7 +21,6 @@ await queue.enqueue({
   workflowId: "order-premium-1",
   stepName: "process",
   input: { customer: "premium" },
-  prevResults: {},
   priority: 10, // highest priority
 });
 
@@ -31,7 +30,6 @@ for (let i = 0; i < 5; i++) {
     workflowId: `order-standard-${i}`,
     stepName: "process",
     input: { customer: "standard" },
-    prevResults: {},
     priority: 5, // default priority
   });
 }
@@ -41,7 +39,6 @@ await queue.enqueue({
   workflowId: "cleanup-1",
   stepName: "gc",
   input: {},
-  prevResults: {},
   priority: 1, // lowest priority
 });
 
@@ -77,7 +74,6 @@ for (let i = 0; i < 6; i++) {
     workflowId: `email-${i}`,
     stepName: "send",
     input: {},
-    prevResults: {},
     concurrencyKey: "tenant-a",
     concurrencyScope: "send-email",
     concurrencyLimit: 2,

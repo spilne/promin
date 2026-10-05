@@ -72,7 +72,7 @@ describe("subworkflow steps under the distributed runner", () => {
       stepName: "after",
       handler: (ctx) => succeed((ctx.deps["enrich"] as number) + 1),
     });
-    const worker = createWorker({ storage, stepQueue: queue, registry, pollIntervalMs: 10, clock });
+    const worker = createWorker({ stepQueue: queue, registry, pollIntervalMs: 10, clock });
     void worker.start();
 
     await runner.submit({ workflow: parent, workflowId: "p", input: { n: 3 } });
@@ -154,7 +154,7 @@ describe("subworkflow steps under the distributed runner", () => {
       stepName: "after",
       handler: (ctx) => succeed((ctx.deps["enrich"] as number) + 1),
     });
-    const worker = createWorker({ storage, stepQueue: queue, registry, pollIntervalMs: 10, clock });
+    const worker = createWorker({ stepQueue: queue, registry, pollIntervalMs: 10, clock });
     void worker.start();
 
     await runner.submit({ workflow: gatedParent, workflowId: "gp", input: { n: 3 } });

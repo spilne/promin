@@ -14,8 +14,6 @@ export {
   type WorkerStepContext,
   type StepRegistration,
   type RegisterStepParams,
-  type WorkerStepOptions,
-  type WorkerStepFailureStrategy,
   MapStepRegistry,
 } from "./lib/distributed/step-registry.ts";
 export {
@@ -24,6 +22,8 @@ export {
   type StepTaskStatus,
   type StepTaskRecord,
   type StepQueueEnqueueParams,
+  type StepQueueCompleteParams,
+  type StepQueueFailParams,
   type StepQueueClaimParams,
   type StepQueueRequeueParams,
   type StepQueueRequeueResult,
@@ -85,6 +85,7 @@ export {
   StepQueueExecutor,
   type StepQueueExecutorConfig,
   StepWaitTimeoutError,
+  QueuedStepError,
   StepWaitAbandonedError,
   DEFAULT_STEP_WAIT_TIMEOUT_MS,
 } from "./lib/distributed/step-queue-executor.ts";

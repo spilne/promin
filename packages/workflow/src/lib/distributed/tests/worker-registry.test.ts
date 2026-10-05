@@ -54,11 +54,10 @@ describe("InMemoryWorkerRegistry — conformance", () => {
 
 describe("Worker + registry integration — automatic lifecycle management", () => {
   it("worker auto-registers on start and auto-deregisters on stop", async () => {
-    const { clock, storage, queue, stepRegistry, workerRegistry } = setup();
+    const { clock, queue, stepRegistry, workerRegistry } = setup();
 
     const worker = createWorker({
       clock,
-      storage,
       stepQueue: queue,
       registry: stepRegistry,
       capabilities: ["default", "gpu"],
@@ -91,11 +90,10 @@ describe("Worker + registry integration — automatic lifecycle management", () 
   });
 
   it("worker sends periodic heartbeats — registry knows it is healthy", async () => {
-    const { clock, storage, queue, stepRegistry, workerRegistry } = setup();
+    const { clock, queue, stepRegistry, workerRegistry } = setup();
 
     const worker = createWorker({
       clock,
-      storage,
       stepQueue: queue,
       registry: stepRegistry,
       capabilities: [],
@@ -138,12 +136,10 @@ describe("Worker + registry integration — automatic lifecycle management", () 
       workflowId: "drain-1",
       stepName: "slow",
       input: {},
-      prevResults: {},
     });
 
     const worker = createWorker({
       clock,
-      storage,
       stepQueue: queue,
       registry: stepRegistry,
       capabilities: [],
@@ -167,7 +163,7 @@ describe("Worker + registry integration — automatic lifecycle management", () 
     clock.advance(300);
     await stopPromise;
     expect(queue.getAllTasks()[0]?.status).toBe("completed");
-    expect((await storage.loadWorkflow("drain-1"))?.steps["slow"]?.result).toBe("done");
+    expect(queue.getAllTasks()[0]?.result).toBe("done");
 
     // After stop — retired (row kept), no longer active.
     expect(await workerRegistry.list({ status: "active" })).toHaveLength(0);
@@ -187,7 +183,6 @@ describe("Dead worker recovery — requeue stuck tasks after a worker crash", ()
       workflowId: "wf-1",
       stepName: "stuck-step",
       input: {},
-      prevResults: {},
     });
 
     // Claim — sets claimedBy to "dead-worker"

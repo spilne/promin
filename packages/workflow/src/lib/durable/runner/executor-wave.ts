@@ -2,7 +2,8 @@
 // Executor wave — runs one wave of ready steps through the configured
 // `StepExecutor`, concurrently. The runner keeps `skipWhen`, attempt
 // counting, concurrency resolution and the per-step checkpoint; the
-// executor runs the body.
+// executor runs the body. Every step's rows are written here, by the runner
+// that holds the run lock, whichever executor ran the body.
 // ---------------------------------------------------------------------------
 
 import {
@@ -19,8 +20,8 @@ import { settleWave, skippedOutcome } from "./wave.ts";
 
 /**
  * Run `readySteps` through `ctx.stepExecutor` and wait for every one of
- * them. Each step is checkpointed as soon as its executor reports, unless
- * the executor says it already persisted the step. The wave's
+ * them. Each step is checkpointed (fenced by the run lock) as soon as its
+ * executor reports. The wave's
  * `AbortSignal` is aborted when the first step fails, or when the run's
  * lock is lost (`ctx.signal`).
  */
@@ -76,6 +77,7 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
           // The run's results map, not a copy: it only grows between waves,
           // after every step of this one has reported.
           prevResults: results,
+          definition: stepDef,
           attempt: currentAttempt,
           needs: stepDef.needs,
           priority: stepDef.priority,
@@ -116,6 +118,7 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
           startedAt,
           durationMs: clock.currentTimeMs() - startedAt.getTime(),
           attempt: reported?.attempt ?? currentAttempt,
+          executorId: reported?.executorId,
         });
         if (outcome.kind === "failed") abort.abort(outcome.error);
 
@@ -125,7 +128,6 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
           workflowId,
           outcome,
           failedAttempts: reported?.failedAttempts ?? [],
-          checkpointed: reported?.storageAlreadyCheckpointed === true,
         });
       },
     });
@@ -176,8 +178,9 @@ function outcomeOfResult(params: {
   startedAt: Date;
   durationMs: number;
   attempt: number;
+  executorId: string | undefined;
 }): StepOutcome {
-  const { workflowId, name, res, startedAt, durationMs, attempt } = params;
+  const { workflowId, name, res, startedAt, durationMs, attempt, executorId } = params;
   if (res.ok) {
     return {
       kind: "completed",
@@ -187,6 +190,7 @@ function outcomeOfResult(params: {
       startedAt,
       durationMs,
       attempt,
+      ...(executorId !== undefined && { executorId }),
     };
   }
   if (res.kind === "suspended") {
@@ -231,5 +235,6 @@ function outcomeOfResult(params: {
     startedAt,
     durationMs,
     attempt,
+    ...(executorId !== undefined && { executorId }),
   };
 }

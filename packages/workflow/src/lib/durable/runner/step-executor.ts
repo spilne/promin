@@ -21,8 +21,23 @@ export interface StepExecutionRequest {
   readonly workflowId: string;
   readonly stepName: string;
   readonly input: unknown;
+  /**
+   * The run's results so far, by step name (codec-encoded). In-process
+   * executors hand it to the step's body; an executor that ships the step
+   * elsewhere sends only the step's declared dependencies (`dependsOn` of
+   * `definition`).
+   */
   readonly prevResults: Record<string, unknown>;
   readonly attempt: number;
+  /**
+   * The step's definition, as the runner drives it: its `dependsOn`, its
+   * `codec` and its `timeoutMs` / `retry` / `onFailure` policies. Set by the
+   * runner; never serialized. Executors that run the step body elsewhere
+   * (the step queue) apply the policies around their remote attempts, so
+   * a step behaves as it does inline. `InProcessStepExecutor` uses the
+   * definition it is bound to.
+   */
+  readonly definition?: StepDefinition;
   /** Capabilities the step requires — forwarded to capability-aware workers. */
   readonly needs?: readonly string[];
   readonly priority?: number;
@@ -64,10 +79,10 @@ export interface StepExecutionRequest {
 interface StepExecutionReport {
   readonly metadata?: Record<string, unknown>;
   /**
-   * The executor already persisted this step (its row and its attempt
-   * rows), so the runner writes nothing for it.
+   * Who ran the last attempt (a worker id), for its attempt row. Default:
+   * the runner's own `executorId`.
    */
-  readonly storageAlreadyCheckpointed?: boolean;
+  readonly executorId?: string;
   /** Attempt number of the last invocation. Default: the request's `attempt`. */
   readonly attempt?: number;
   /** Attempts that failed before the last one (or including it, when `onFailure` absorbed it), oldest first. */
@@ -123,7 +138,8 @@ export interface StepExecutor {
   /**
    * Run a single step body and return its terminal result. Implementations
    * are responsible for applying step-level retry (since the policy is owned
-   * by the step definition), per-step timeout, and onFailure strategy —
+   * by the step definition, which `req.definition` carries), per-step
+   * timeout, and onFailure strategy, with the inline semantics —
    * the runner only decides *when* to invoke `executeStep` based on the DAG
    * ready-set, workflow-level retry, compensation, etc.
    *
@@ -142,6 +158,17 @@ export interface StepExecutor {
    * executors (queue-backed) leave it out and are reused as-is.
    */
   forWorkflow?(workflow: Workflow<unknown, unknown>): StepExecutor;
+  /**
+   * Forget any outcome the executor holds for `stepNames` of `workflowId`
+   * but has not reported yet. The runner calls it before resetting those
+   * steps (`resume({ fromStep })`), so a re-run dispatches them afresh
+   * instead of taking an outcome from before the reset. Queue-backed
+   * executors consume the steps' settled, unconsumed tasks.
+   */
+  discardSettled?(params: {
+    readonly workflowId: string;
+    readonly stepNames: readonly string[];
+  }): Promise<void>;
 }
 
 /**
@@ -163,6 +190,7 @@ export class InProcessStepExecutor implements StepExecutor {
   private readonly workflow: Workflow<unknown, unknown>;
   private readonly storage: WorkflowStorage;
   private readonly clock: WallClock;
+  private readonly singleAttempt: boolean;
   /** The workflow's steps by name, built on first use. */
   private stepsByName: Map<string, StepDefinition> | undefined;
 
@@ -171,21 +199,34 @@ export class InProcessStepExecutor implements StepExecutor {
     storage: WorkflowStorage;
     /** Time source for step retry backoff. Default: `SystemWallClock`. */
     clock?: WallClock;
+    /**
+     * Run exactly one attempt per request, under the step's `timeoutMs`
+     * only: no `retry`, no `onFailure`. For a queue worker that runs a
+     * claimed task's attempt while the coordinator that enqueued it applies
+     * retry and `onFailure` across attempts. Default: false.
+     */
+    singleAttempt?: boolean;
   }) {
     this.workflow = config.workflow;
     this.storage = config.storage;
     this.clock = config.clock ?? SystemWallClock;
+    this.singleAttempt = config.singleAttempt ?? false;
   }
 
   forWorkflow(workflow: Workflow<unknown, unknown>): StepExecutor {
     if (workflow === this.workflow) return this;
-    return new InProcessStepExecutor({ workflow, storage: this.storage, clock: this.clock });
+    return new InProcessStepExecutor({
+      workflow,
+      storage: this.storage,
+      clock: this.clock,
+      singleAttempt: this.singleAttempt,
+    });
   }
 
   async executeStep(req: StepExecutionRequest): Promise<StepExecutionResult> {
     this.stepsByName ??= new Map(this.workflow._definition.steps.map((s) => [s.name, s]));
-    const stepDef = this.stepsByName.get(req.stepName);
-    if (!stepDef) {
+    const bound = this.stepsByName.get(req.stepName);
+    if (!bound) {
       return {
         ok: false,
         kind: "failed",
@@ -193,6 +234,9 @@ export class InProcessStepExecutor implements StepExecutor {
       };
     }
 
+    const stepDef: StepDefinition = this.singleAttempt
+      ? { ...bound, retry: undefined, onFailure: undefined }
+      : bound;
     const runtime = this.runtimeFor(req);
     const clock = runtime.clock ?? this.clock;
     const body = await runStepBody({

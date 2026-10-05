@@ -1,21 +1,18 @@
 // ---------------------------------------------------------------------------
-// WorkflowWorker — polls step queue, executes steps, checkpoints results
-//
-// Supports both:
-// - Per-step options (retry, onFailure) via StepRegistry
-// - Global middleware + hooks on the worker itself
+// WorkflowWorker — claims step tasks, runs one attempt of each (middleware +
+// handler, under the step's `timeoutMs`) and settles the task with a
+// claim-fenced `complete` / `fail`. Workers never write workflow storage:
+// the coordinator writes step rows from the settled task, under its run lock.
 // ---------------------------------------------------------------------------
 
 import { runHookValue } from "../shared/eff.ts";
 import { SystemWallClock, type WallClock, type TimerHandle } from "../shared/wall-clock.ts";
 import { PollLoop, type PollTickResult } from "../shared/poll-loop.ts";
-import type { WorkflowStorage } from "../durable/workflow-storage.ts";
-import { hasCapability } from "../durable/workflow-storage.ts";
+import { StepTimeoutError } from "../durable/durable-pipeline-error.ts";
 import type { StepRegistry, WorkerStepContext, StepRegistration } from "./step-registry.ts";
 import type { StepQueue, StepTask } from "./step-queue.ts";
 import type { WorkerMiddleware } from "./middleware.ts";
 import type { WorkerRegistry } from "./worker-registry.ts";
-import { retryAsync, type RetryPolicy } from "../shared/retry-policy.ts";
 
 // ---------------------------------------------------------------------------
 // Hooks
@@ -28,7 +25,7 @@ export interface WorkerHooks {
   /**
    * The worker lost its claim on a running task: a heartbeat found it
    * reclaimed (this worker stalled past the stale timeout) or gone. The
-   * handler's `ctx.signal` is aborted and its outcome will not be written.
+   * handler's `ctx.signal` is aborted and its outcome is dropped.
    */
   onLeaseLost?: (task: StepTask) => void | Promise<void>;
 }
@@ -38,7 +35,10 @@ export interface WorkerHooks {
 // ---------------------------------------------------------------------------
 
 export interface WorkerConfig {
-  storage: WorkflowStorage;
+  /**
+   * The queue to claim from. The worker settles tasks there and writes
+   * nothing else: it needs no workflow storage.
+   */
   stepQueue: StepQueue;
   registry: StepRegistry;
   /**
@@ -89,13 +89,13 @@ export interface WorkerConfig {
   taskFilter?: (task: StepTask) => boolean;
   /**
    * Time source. Drives the poll-loop cadence, heartbeat interval, step
-   * duration tracking, retry backoff, and per-attempt timestamps.
+   * duration tracking and the per-attempt `timeoutMs`.
    * Default: `SystemWallClock`.
    */
   clock?: WallClock;
   /**
    * Called for failures that don't belong to a step body: a failed claim,
-   * a failed outcome write (the task is then redelivered), a throwing
+   * a failed `complete` / `fail` (the task is then redelivered), a throwing
    * hook. Nothing reported here stops the worker. Default: `console.error`.
    */
   onError?: (event: WorkerErrorEvent) => void;
@@ -111,8 +111,8 @@ export type WorkerErrorPhase =
   /** Claiming from the queue failed; the loop backs off and retries. */
   | "claim"
   /**
-   * Writing a step outcome failed (storage or queue). The queue task stays
-   * claimed and is redelivered once its lease goes stale.
+   * Settling the task (`complete` / `fail`) failed. The task stays claimed
+   * and is redelivered once its lease goes stale.
    */
   | "commit"
   /** A `WorkerHooks` callback threw; the step outcome is unaffected. */
@@ -154,17 +154,14 @@ export interface WorkflowWorker {
    * finish, then deregister. With `timeoutMs`, tasks still running after
    * that long are given back to the queue (`release`, so another worker
    * claims them at once instead of after the stale timeout) and their
-   * handlers' `ctx.signal` is aborted; their outcomes are not written.
+   * handlers' `ctx.signal` is aborted; their outcomes are dropped.
    * Without it, stop waits for every task.
    */
   stop(params?: { readonly timeoutMs?: number }): Promise<void>;
   readonly workerId: string;
 }
 
-/**
- * What a step run produced, before anything is written. `completed` covers
- * the handler's value as well as the `skip` / `fallback` strategies.
- */
+/** What one attempt produced, before the task is settled. */
 type StepOutcome =
   | { readonly kind: "completed"; readonly value: unknown; readonly durationMs: number }
   | {
@@ -180,7 +177,6 @@ type StepOutcome =
 
 export class DefaultWorker implements WorkflowWorker {
   readonly workerId: string;
-  private readonly storage: WorkflowStorage;
   private readonly stepQueue: StepQueue;
   private readonly registry: StepRegistry;
   private readonly capabilities: readonly string[];
@@ -207,7 +203,6 @@ export class DefaultWorker implements WorkflowWorker {
 
   constructor(config: WorkerConfig) {
     this.workerId = config.workerId ?? crypto.randomUUID();
-    this.storage = config.storage;
     this.stepQueue = config.stepQueue;
     this.registry = config.registry;
     this.capabilities = config.capabilities ?? [];
@@ -383,9 +378,9 @@ export class DefaultWorker implements WorkflowWorker {
   }
 
   /**
-   * Run one task: compute its outcome (handler + retry + middleware +
-   * `onFailure` strategy), then commit it. Nothing is written until the
-   * outcome is known, so a throwing strategy can't half-commit.
+   * Run one task: one attempt (middleware + handler, under the step's
+   * `timeoutMs`), then settle the task with its outcome. Retry and
+   * `onFailure` are the coordinator's: it reads the settled task.
    */
   private async executeTask(task: StepTask, controller: AbortController): Promise<void> {
     const startTime = this.clock.currentTimeMs();
@@ -397,7 +392,7 @@ export class DefaultWorker implements WorkflowWorker {
       const outcome = await this.computeOutcome({ task, startTime, signal: controller.signal });
       // Lease lost or given back on stop: the task belongs to someone else.
       if (controller.signal.aborted) return;
-      await this.commit(task, outcome, startTime);
+      await this.commit(task, outcome);
     } finally {
       taskHeartbeatTimer.clear();
     }
@@ -438,7 +433,7 @@ export class DefaultWorker implements WorkflowWorker {
     readonly startTime: number;
     readonly signal: AbortSignal;
   }): Promise<StepOutcome> {
-    const { task, startTime, signal } = params;
+    const { task, startTime } = params;
     const elapsed = () => this.clock.currentTimeMs() - startTime;
     const registration = this.registry.resolve(task.stepName);
 
@@ -447,115 +442,91 @@ export class DefaultWorker implements WorkflowWorker {
       return { kind: "failed", error, cause: new Error(error), durationMs: elapsed() };
     }
 
+    // The attempt's own signal: aborted with the task's (lease lost, stop)
+    // or by the step's `timeoutMs`.
+    const attempt = new AbortController();
+    const onTaskAbort = (): void => attempt.abort(params.signal.reason);
+    if (params.signal.aborted) onTaskAbort();
+    else params.signal.addEventListener("abort", onTaskAbort, { once: true });
+
+    // The inline step context: `deps` are the declared dependencies only,
+    // `prev` the first of them (the workflow input for a root step).
+    const first = task.dependsOn[0];
     const ctx: WorkerStepContext = {
       input: task.input,
-      prev: this.computePrev(task),
-      deps: task.prevResults,
+      prev: first !== undefined ? task.deps[first] : task.input,
+      deps: task.deps,
       workflowId: task.workflowId,
       stepName: task.stepName,
       attempt: task.attempt,
-      signal,
+      signal: attempt.signal,
     };
 
+    let timer: TimerHandle | undefined;
     try {
       await this.hooks.beforeStep?.(task);
-      const chain = this.buildChain(task, registration);
-      const value = await chain(ctx);
+      const run = this.buildChain(task, registration)(ctx);
+      const timeoutMs = task.timeoutMs;
+      const value =
+        timeoutMs === undefined
+          ? await run
+          : await Promise.race([
+              run,
+              new Promise<never>((_, reject) => {
+                timer = this.clock.setTimeout(() => {
+                  const error = new StepTimeoutError({
+                    workflowId: task.workflowId,
+                    stepName: task.stepName,
+                    timeoutMs,
+                    message: `Step "${task.stepName}" timed out after ${timeoutMs}ms`,
+                  });
+                  attempt.abort(error);
+                  reject(error);
+                }, timeoutMs);
+              }),
+            ]);
       return { kind: "completed", value, durationMs: elapsed() };
     } catch (err) {
-      const durationMs = elapsed();
-      const strategy = registration.options?.onFailure ?? "fail";
-      if (strategy === "skip") {
-        return { kind: "completed", value: undefined, durationMs };
-      }
-      if (typeof strategy === "object" && "fallback" in strategy) {
-        try {
-          return { kind: "completed", value: strategy.fallback(err), durationMs };
-        } catch (fallbackErr) {
-          return {
-            kind: "failed",
-            error: `fallback threw: ${errorMessage(fallbackErr)} (step error: ${errorMessage(err)})`,
-            cause: fallbackErr,
-            durationMs,
-          };
-        }
-      }
-      return { kind: "failed", error: errorMessage(err), cause: err, durationMs };
+      return { kind: "failed", error: errorMessage(err), cause: err, durationMs: elapsed() };
+    } finally {
+      timer?.clear();
+      params.signal.removeEventListener("abort", onTaskAbort);
     }
   }
 
   /**
-   * Commit an outcome: (1) check the claim is still ours, (2) write
-   * storage, (3) settle the queue task. Storage goes first so the queue
-   * never says `completed` / `failed` while storage has nothing — the
-   * executor waits on storage, so that state would hang the workflow. If
-   * the storage write fails, the queue task is left claimed; its lease goes
-   * stale and it is redelivered (at-least-once). If the queue write fails
-   * after storage succeeded, the step is already visible and the task is
-   * redelivered and re-run, so handlers must be idempotent.
+   * Settle the task with its outcome. `complete` / `fail` check the claim
+   * token and write in one atomic queue operation, so a worker whose claim
+   * was lost (reclaimed after a stall, failed by the coordinator's wait
+   * deadline, given back on stop) is rejected and its outcome dropped. The
+   * worker writes nothing else: the coordinator reads the settled task and
+   * writes the step row and its attempt rows under its run lock. A failed
+   * queue write leaves the task claimed; its lease goes stale and it is
+   * redelivered (at-least-once), so handlers must be idempotent.
    */
-  private async commit(task: StepTask, outcome: StepOutcome, startTime: number): Promise<void> {
-    const claim = { taskId: task.id, claimToken: task.claimToken };
-    const startedAt = new Date(startTime);
+  private async commit(task: StepTask, outcome: StepOutcome): Promise<void> {
+    const claimToken = task.claimToken;
     const { durationMs } = outcome;
-
-    try {
-      // Fence: a reclaimed task belongs to another worker now; writing our
-      // outcome over theirs would race them.
-      if (!(await this.stepQueue.heartbeat(claim))) return;
-
-      if (outcome.kind === "completed") {
-        await this.storage.saveStepResult({
-          workflowId: task.workflowId,
-          stepName: task.stepName,
-          result: outcome.value,
-          durationMs,
-          startedAt,
-        });
-      } else {
-        await this.storage.saveStepFailure({
-          workflowId: task.workflowId,
-          stepName: task.stepName,
-          error: outcome.error,
-          durationMs,
-          startedAt,
-        });
-      }
-    } catch (error) {
+    if (claimToken === undefined) {
+      const error = new Error(`task ${task.id} was claimed without a claim token`);
       this.report({ phase: "commit", error, task });
       return;
     }
-
-    if (hasCapability(this.storage, "stepAttempts")) {
-      try {
-        await this.storage.saveStepAttempt({
-          record: {
-            workflowId: task.workflowId,
-            stepName: task.stepName,
-            attempt: task.attempt,
-            type: "execution",
-            status: outcome.kind,
-            ...(outcome.kind === "completed"
-              ? { result: outcome.value }
-              : { error: outcome.error }),
-            durationMs,
-            startedAt,
-            completedAt: this.clock.now(),
-            executorId: this.workerId,
-          },
-        });
-      } catch (error) {
-        // The audit row is secondary: the step row is written, so carry on.
-        this.report({ phase: "commit", error, task });
-      }
-    }
+    const claim = { taskId: task.id, claimToken };
 
     let settled: boolean;
     try {
-      settled =
-        outcome.kind === "completed"
-          ? await this.stepQueue.complete({ ...claim, result: outcome.value, durationMs })
-          : await this.stepQueue.fail({ ...claim, error: outcome.error, durationMs });
+      if (outcome.kind === "completed") {
+        settled = await this.stepQueue.complete({ ...claim, result: outcome.value, durationMs });
+      } else {
+        const errorTag = tagOf(outcome.cause);
+        settled = await this.stepQueue.fail({
+          ...claim,
+          error: outcome.error,
+          ...(errorTag !== undefined && { errorTag }),
+          durationMs,
+        });
+      }
     } catch (error) {
       this.report({ phase: "commit", error, task });
       return;
@@ -577,39 +548,13 @@ export class DefaultWorker implements WorkflowWorker {
     task: StepTask,
     registration: StepRegistration,
   ): (ctx: WorkerStepContext) => Promise<unknown> {
-    const { handler, options } = registration;
-
-    // Base: resolve handler result + apply step-level retry
-    let base = async (ctx: WorkerStepContext): Promise<unknown> => {
-      return runHookValue(handler(ctx));
-    };
-
-    // Wrap with step-level retry (from StepOptions)
-    if (options?.retry) {
-      const policy = options.retry as RetryPolicy<unknown>;
-      const innerBase = base;
-      base = (ctx: WorkerStepContext): Promise<unknown> =>
-        retryAsync({
-          policy,
-          clock: this.clock,
-          signal: ctx.signal,
-          run: (retry) => innerBase({ ...ctx, attempt: ctx.attempt + retry }),
-        });
-    }
-
-    // Wrap with global middleware (right to left)
+    const { handler } = registration;
+    const base = async (ctx: WorkerStepContext): Promise<unknown> => runHookValue(handler(ctx));
+    // Global middleware, outermost first.
     return this.middleware.reduceRight<(ctx: WorkerStepContext) => Promise<unknown>>(
       (next, mw) => (ctx) => mw({ task, ctx, next }),
       base,
     );
-  }
-
-  private computePrev(task: StepTask): unknown {
-    const results = task.prevResults;
-    const keys = Object.keys(results);
-    if (keys.length === 1) return results[keys[0]!];
-    if (keys.length === 0) return task.input;
-    return results;
   }
 }
 
@@ -625,6 +570,12 @@ export class WorkerStoppingError extends Error {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** The error's `_tag`, for the coordinator's retry `when` and the step row. */
+function tagOf(err: unknown): string | undefined {
+  const tag = (err as { _tag?: unknown } | null | undefined)?._tag;
+  return typeof tag === "string" ? tag : undefined;
 }
 
 function defaultOnError(event: WorkerErrorEvent): void {

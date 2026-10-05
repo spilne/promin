@@ -44,12 +44,8 @@ await migrate(db);
 let counter = 0;
 const nextId = (): string => `bench-${++counter}`;
 
-async function storage(params?: { recordAttempts?: boolean }): Promise<PostgresWorkflowStorage> {
-  return PostgresWorkflowStorage.create({
-    db,
-    autoSeedLookups: false,
-    recordAttempts: params?.recordAttempts ?? false,
-  });
+async function storage(): Promise<PostgresWorkflowStorage> {
+  return PostgresWorkflowStorage.create({ db, autoSeedLookups: false });
 }
 
 /** Median wall time and round trips per run of `run`, after one warm-up run. */
@@ -80,10 +76,10 @@ function chain(n: number): Workflow<number, number> {
   return b.build();
 }
 
-for (const recordAttempts of [false, true]) {
-  const s = await storage({ recordAttempts });
+{
+  const s = await storage();
   const wf = chain(100);
-  await measure(`chain 100${recordAttempts ? " + attempt rows" : ""}`, () =>
+  await measure("chain 100 (with attempt rows)", () =>
     createWorkflowRunner({ storage: s }).run({ workflow: wf, workflowId: nextId(), input: 0 }),
   );
 }

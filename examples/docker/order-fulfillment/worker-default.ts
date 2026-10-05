@@ -8,14 +8,13 @@ import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { notifyWarehouseHandler, markDeliveredHandler } from "./workflow.ts";
 
-const { storage, stepQueue, close } = await buildStack();
+const { stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
 registry.register({ stepName: "notify-warehouse", handler: notifyWarehouseHandler });
 registry.register({ stepName: "mark-delivered", handler: markDeliveredHandler });
 
 const worker = createWorker({
-  storage,
   stepQueue,
   registry,
   // No capabilities — claims tasks with empty `needs` only.

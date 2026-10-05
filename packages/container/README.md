@@ -14,12 +14,11 @@ Three runtimes, same interface:
 
 ```typescript
 import { containerStep, LocalProcessRuntime } from "@promin/container";
-import { InMemoryWorkflowStorage } from "@promin/workflow";
 import { createWorker, InMemoryStepQueue, MapStepRegistry } from "@promin/workflow/distributed";
 
 const runtime = new LocalProcessRuntime();
 
-const [handler, options] = containerStep({
+const handler = containerStep({
   spec: {
     image: "my-ml-image:latest",
     command: ["python", "train.py"],
@@ -29,10 +28,9 @@ const [handler, options] = containerStep({
   runtime,
 });
 const registry = new MapStepRegistry();
-registry.register({ stepName: "train-model", handler, ...options });
+registry.register({ stepName: "train-model", handler });
 
 const worker = createWorker({
-  storage: new InMemoryWorkflowStorage(), // the shared workflow storage in production
   stepQueue: new InMemoryStepQueue(), // the shared step queue
   registry,
   capabilities: ["gpu"], // claims steps declared with { needs: ["gpu"] }
@@ -116,7 +114,7 @@ const runtime = new DockerRuntime({
   extraArgs: ["--gpus", "all"], // pass-through args
 });
 
-const [handler, options] = containerStep({
+const handler = containerStep({
   spec: {
     image: "openai/whisper:latest",
     command: ["python", "-m", "whisper", "--input", "/pipeline/input.json"],
@@ -127,7 +125,7 @@ const [handler, options] = containerStep({
   runtime,
 });
 const registry = new MapStepRegistry();
-registry.register({ stepName: "transcribe", handler, ...options });
+registry.register({ stepName: "transcribe", handler });
 ```
 
 ### K8sRuntime
@@ -146,7 +144,10 @@ const runtime = new K8sRuntime({
   ttlAfterFinished: 3600,
 });
 
-const [handler, options] = containerStep({
+// Retry, timeout and onFailure belong to the step's definition
+// (`.step("train-model", fn, { retry, onFailure })`); the coordinator applies
+// them to the container step exactly as to an in-process one.
+const handler = containerStep({
   spec: {
     image: "my-registry.com/ml-trainer:v2",
     command: ["python", "train.py"],
@@ -156,13 +157,9 @@ const [handler, options] = containerStep({
     timeoutMs: 3600_000,
   },
   runtime,
-  options: {
-    retry: { maxRetries: 2 },
-    onFailure: { fallback: () => ({ status: "failed", model: null }) },
-  },
 });
 const registry = new MapStepRegistry();
-registry.register({ stepName: "train-model", handler, ...options });
+registry.register({ stepName: "train-model", handler });
 ```
 
 ## Mixed Workflow — In-Process + Container Steps
@@ -205,14 +202,13 @@ const runner = createWorkflowRunner({
 });
 
 // GPU worker runs the container step.
-const [handler, options] = containerStep({
+const handler = containerStep({
   spec: { image: "openai/whisper:latest", command: ["python", "-m", "whisper"] },
   runtime: new DockerRuntime(),
 });
 const gpuRegistry = new MapStepRegistry();
-gpuRegistry.register({ stepName: "transcribe", handler, ...options });
+gpuRegistry.register({ stepName: "transcribe", handler });
 const gpuWorker = createWorker({
-  storage,
   stepQueue,
   registry: gpuRegistry,
   capabilities: ["gpu"],

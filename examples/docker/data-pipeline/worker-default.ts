@@ -7,13 +7,12 @@ import { MapStepRegistry, createWorker } from "@promin/workflow/distributed";
 import { buildStack } from "./shared.ts";
 import { publishReportHandler } from "./workflow.ts";
 
-const { storage, stepQueue, close } = await buildStack();
+const { stepQueue, close } = await buildStack();
 
 const registry = new MapStepRegistry();
 registry.register({ stepName: "publish-report", handler: publishReportHandler });
 
 const worker = createWorker({
-  storage,
   stepQueue,
   registry,
   concurrency: 4,

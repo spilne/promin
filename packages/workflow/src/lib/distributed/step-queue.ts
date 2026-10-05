@@ -24,13 +24,34 @@ export interface StepTask {
   readonly needs: readonly string[];
   readonly priority: number;
   readonly input: unknown;
-  readonly prevResults: Record<string, unknown>;
+  /**
+   * Results of the step's declared dependencies (`dependsOn`), by step
+   * name — not the whole run's results. Codec-encoded, as stored.
+   */
+  readonly deps: Readonly<Record<string, unknown>>;
+  /**
+   * The step's declared dependencies, in declaration order. The first one
+   * is what the step receives as `prev` (the workflow input when empty).
+   */
+  readonly dependsOn: readonly string[];
+  /**
+   * The step definition's per-attempt `timeoutMs`. The worker fails an
+   * attempt that has not settled within it with `StepTimeoutError` and
+   * aborts the handler's `ctx.signal`. Undefined = no timeout.
+   */
+  readonly timeoutMs?: number;
   /**
    * The runner's attempt number for this step (1 for the first run, 2 for
    * the first retry, …), as passed to `enqueue`. Redelivery of the same
    * task does not change it — see `deliveries` for that.
    */
   readonly attempt: number;
+  /**
+   * The workflow run (`WorkflowState.run`) the task was enqueued for. A
+   * settled task from an earlier run (before a `startFreshRun`) is never
+   * taken as the outcome of the current one.
+   */
+  readonly run: number;
   /**
    * How many times this task has been handed to a worker and not given
    * back with `release()`. 1 on the first claim; each claim after a
@@ -88,7 +109,19 @@ export interface StepTaskRecord extends StepTask {
   readonly result?: unknown;
   /** Failure message, including the dead-letter reason for poisoned tasks. */
   readonly error?: string;
+  /** `_tag` of the error the step failed with, when it had one. */
+  readonly errorTag?: string;
+  /**
+   * Step audit metadata reported with the outcome (`.match()` writes its
+   * chosen case here); the coordinator copies it onto the step row.
+   */
+  readonly stepMetadata?: Record<string, unknown>;
   readonly durationMs?: number;
+  /**
+   * When the coordinator took this settled task's outcome (`consume`).
+   * Until then the task keeps its `(workflowId, stepName)` slot.
+   */
+  readonly consumedAt?: Date;
 }
 
 /** Parameters for `StepQueue.enqueue`. */
@@ -96,7 +129,12 @@ export interface StepQueueEnqueueParams {
   workflowId: string;
   stepName: string;
   input: unknown;
-  prevResults: Record<string, unknown>;
+  /** Results of the step's declared dependencies, by step name. Default: `{}`. */
+  deps?: Readonly<Record<string, unknown>>;
+  /** The step's declared dependencies, in order (`prev` is the first). Default: `[]`. */
+  dependsOn?: readonly string[];
+  /** Per-attempt timeout the worker applies (the definition's `timeoutMs`). */
+  timeoutMs?: number;
   /**
    * Capabilities this task requires. Empty / omitted = any worker can
    * claim it.
@@ -113,6 +151,8 @@ export interface StepQueueEnqueueParams {
   version?: string;
   /** The runner's attempt number for this step. Default: 1. */
   attempt?: number;
+  /** The workflow run the step belongs to (`WorkflowState.run`). Default: 1. */
+  run?: number;
   /**
    * Arbitrary search-attribute payload — mirrors `wf_workflows.metadata`.
    * The platform never reads keys here for control flow; it's a generic
@@ -135,6 +175,30 @@ export interface StepQueueEnqueueParams {
   concurrencyKey?: string;
   concurrencyScope?: string;
   concurrencyLimit?: number;
+}
+
+/** Parameters for `StepQueue.complete`. */
+export interface StepQueueCompleteParams {
+  taskId: string;
+  /** The claim settling the task. Omitted = settle whoever holds it (operator use). */
+  claimToken?: string;
+  result: unknown;
+  durationMs: number;
+  /** Step audit metadata for the step row (see `StepTaskRecord.stepMetadata`). */
+  stepMetadata?: Record<string, unknown>;
+}
+
+/** Parameters for `StepQueue.fail`. */
+export interface StepQueueFailParams {
+  taskId: string;
+  /** The claim settling the task. Omitted = settle whoever holds it (operator use). */
+  claimToken?: string;
+  error: string;
+  /** `_tag` of the error, so the coordinator's retry / `onFailure` see it. */
+  errorTag?: string;
+  durationMs: number;
+  /** Step audit metadata for the step row (see `StepTaskRecord.stepMetadata`). */
+  stepMetadata?: Record<string, unknown>;
 }
 
 /** Parameters for `StepQueue.claim`. */
@@ -212,17 +276,35 @@ export interface StepQueue {
    * Enqueue a step for execution.
    *
    * **Idempotent on `(workflowId, stepName)`.** While a prior task for the
-   * pair is still `pending` or `running`, re-calling `enqueue()` is a
-   * no-op: it returns the existing task's id instead of creating a second
-   * row. Workflow ids are globally unique, so the namespace is not part of
-   * the key. Keeps things sane when multiple coordinators (or a
-   * coordinator + an SDK client) both conclude the step is ready.
+   * pair is unconsumed — `pending`, `running`, or settled (`completed` /
+   * `failed`) but not yet `consume`d — re-calling `enqueue()` is a no-op:
+   * it returns the existing task's id instead of creating a second row.
+   * Workflow ids are globally unique, so the namespace is not part of the
+   * key. Two coordinators that both decide a step is ready create one task,
+   * and a coordinator that adopts a run after its predecessor crashed gets
+   * back the task the predecessor dispatched — settled or not — instead of
+   * dispatching the step again.
    *
-   * Once the prior task reaches `completed` or `failed`, the next
-   * `enqueue()` IS allowed to create a fresh pending task (needed for
-   * step-level retry and `startFreshRun()`'s per-step re-execution).
+   * Once the prior task is consumed, the next `enqueue()` creates a fresh
+   * pending task (a step retry, a workflow retry, a fresh run).
    */
   enqueue(params: StepQueueEnqueueParams): Promise<string>;
+
+  /**
+   * Mark a settled task's outcome as taken: the coordinator has read it and
+   * is about to record it, so the task gives up its `(workflowId,
+   * stepName)` slot and the next `enqueue()` for the pair creates a new
+   * task. Returns false (and changes nothing) for a task that is missing,
+   * still `pending` / `running`, or already consumed.
+   */
+  consume(params: { taskId: string }): Promise<boolean>;
+
+  /**
+   * Consume every settled, unconsumed task of `stepNames` in `workflowId`,
+   * so their outcomes are not taken by a later dispatch (the runner calls
+   * it before resetting steps). Returns how many tasks it consumed.
+   */
+  consumeSettled(params: { workflowId: string; stepNames: readonly string[] }): Promise<number>;
 
   /**
    * Claim up to `limit` pending tasks the worker can run — matching
@@ -246,26 +328,19 @@ export interface StepQueue {
   get(taskId: string): Promise<StepTaskRecord | undefined>;
 
   /**
-   * Mark a task as completed with a result. Returns false when the task is no
-   * longer held by this claim, letting workers skip stale workflow checkpoints.
+   * Mark a task as completed with a result. Returns false when the task is
+   * no longer held by this claim; the check and the write are one atomic
+   * operation, so a worker that lost its claim can never settle the task.
+   * The coordinator reads the settled outcome back with `get` and writes
+   * the step row from it.
    */
-  complete(params: {
-    taskId: string;
-    claimToken?: string;
-    result: unknown;
-    durationMs: number;
-  }): Promise<boolean>;
+  complete(params: StepQueueCompleteParams): Promise<boolean>;
 
   /**
    * Mark a task as failed with an error. Returns false when the task is no
-   * longer held by this claim.
+   * longer held by this claim (atomically, as for `complete`).
    */
-  fail(params: {
-    taskId: string;
-    claimToken?: string;
-    error: string;
-    durationMs: number;
-  }): Promise<boolean>;
+  fail(params: StepQueueFailParams): Promise<boolean>;
 
   /**
    * Extend the running lease on a task. Workers call this periodically while

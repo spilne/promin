@@ -768,7 +768,6 @@ export class ZoryaServer {
         remoteDeps.workerRegistry ?? new InMemoryWorkerRegistry({ clock: this.clock });
       const workerHandler = createWorkerApiHandler({
         stepQueue: stepQueueForRpc,
-        storage,
         workerRegistry: workerRegistryForRpc,
       });
       this.router.post("/rpc/worker", (req) => workerHandler(req));

@@ -271,15 +271,29 @@ export const stepQueue = pgTable(
     needs: text("needs").array().notNull().default([]),
     priority: integer("priority").notNull().default(5),
     input: jsonb("input"),
-    prevResults: jsonb("prev_results"),
+    // Results of the step's declared dependencies only, and their order
+    // (the first is the step's `prev`).
+    deps: jsonb("deps"),
+    dependsOn: text("depends_on").array().notNull().default([]),
+    // The definition's per-attempt timeout, enforced by the worker.
+    timeoutMs: integer("timeout_ms"),
     // The runner's attempt number, forwarded on enqueue.
     attempt: integer("attempt").notNull().default(1),
     // Claims not given back with release(); requeueStuck dead-letters a
     // task once this reaches the queue's maxDeliveries.
     deliveries: integer("deliveries").notNull().default(0),
+    // The workflow run the task belongs to; a settled task of an earlier
+    // run is never taken as the current run's outcome.
+    run: integer("run").notNull().default(1),
+    // When the coordinator took the settled outcome (consume). Until then
+    // the task keeps its (workflow_id, step_name) slot.
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
     status: text("status").notNull().default("pending"),
     result: jsonb("result"),
     error: text("error"),
+    errorTag: text("error_tag"),
+    // Step audit metadata reported with the outcome, for the step row.
+    stepMetadata: jsonb("step_metadata"),
     durationMs: bigint("duration_ms", { mode: "number" }),
     claimedBy: text("claimed_by"),
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
@@ -305,12 +319,12 @@ export const stepQueue = pgTable(
     index("wf_step_queue_workflow_idx").on(t.workflowId),
     index("wf_step_queue_namespace_idx").on(t.namespace),
     // Partial unique index — enqueue dedupes on (workflow_id, step_name)
-    // while a prior task is still pending or running. Terminal rows stay
-    // outside the predicate so step retries + startFreshRun() keep
-    // working. `ensureTable` and migration 0019 both create this.
+    // while a prior task is unconsumed (pending, running, or settled and
+    // not yet consumed). Consumed rows stay outside the predicate so step
+    // retries and fresh runs enqueue new tasks.
     uniqueIndex("wf_step_queue_active_uniq")
       .on(t.workflowId, t.stepName)
-      .where(sql`${t.status} IN ('pending', 'running')`),
+      .where(sql`${t.consumedAt} IS NULL`),
     // GIN index powers `needs <@ capabilities` subset filter on claim.
     // Partial on status='pending' — claim only reads pending rows.
     index("wf_step_queue_needs_idx")

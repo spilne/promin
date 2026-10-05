@@ -25,13 +25,13 @@ Every store takes a `DrizzleDb`, so any Postgres driver Drizzle supports works (
 
 Workflow storage capabilities (see the [storage contract](../workflow/src/lib/durable/storage/README.md#capabilities)):
 
-| Capability               |                                                | Capability                                     |                      |
-| ------------------------ | :--------------------------------------------: | ---------------------------------------------- | :------------------: |
-| `journal`                |                      yes                       | `summaries`                                    |         yes          |
-| `stepAttempts`           | yes (rows written with `recordAttempts: true`) | `countWorkflows`                               |         yes          |
-| `stepCheckpoint`         |                      yes                       | `dueTimers` / `signalWakeups` / `orphanedRuns` |    yes (indexed)     |
-| `compensationLedger`     |                      yes                       | `runEvents` / `stepStartedEvents`              | – (the runner polls) |
-| `tripwire`, `resetSteps` |                      yes                       | `cancelStale`                                  |          –           |
+| Capability               |     | Capability                                     |                      |
+| ------------------------ | :-: | ---------------------------------------------- | :------------------: |
+| `journal`                | yes | `summaries`                                    |         yes          |
+| `stepAttempts`           | yes | `countWorkflows`                               |         yes          |
+| `stepCheckpoint`         | yes | `dueTimers` / `signalWakeups` / `orphanedRuns` |    yes (indexed)     |
+| `compensationLedger`     | yes | `runEvents` / `stepStartedEvents`              | – (the runner polls) |
+| `tripwire`, `resetSteps` | yes | `cancelStale`                                  |          –           |
 
 ## Schema and migrations
 
@@ -71,7 +71,6 @@ const storage = await PostgresWorkflowStorage.create({
   namespace: "prod", // optional tenant scope (default: none)
   instanceId: "node-1", // lock owner id (default: random UUID)
   defaultLockDurationMs: 30_000,
-  recordAttempts: true, // write step attempt rows (default: false)
 });
 
 const onboard = workflow<{ userId: string }>({ name: "onboard" })

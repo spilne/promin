@@ -6,7 +6,7 @@ describe("InMemoryStepQueue — leases across a reclaim", () => {
   it("a re-claimed task isn't requeued by the next sweep because of the old claim's heartbeat", async () => {
     const clock = FakeWallClock.create(0);
     const q = new InMemoryStepQueue({ clock });
-    await q.enqueue({ workflowId: "wf", stepName: "s", input: {}, prevResults: {} });
+    await q.enqueue({ workflowId: "wf", stepName: "s", input: {} });
 
     const [a] = await q.claim({ workerId: "w", limit: 1 });
     clock.advance(1_000);
