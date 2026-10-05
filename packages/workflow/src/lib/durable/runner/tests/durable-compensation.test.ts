@@ -286,22 +286,27 @@ describe("durable compensation", () => {
   });
 
   it("parallel branches roll back in reverse completion order", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
     const calls: string[] = [];
     const undo = (name: string) => ({
       compensate: async () => {
         calls.push(name);
       },
     });
-    const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+    let slowArmed = false;
     const wf = workflow({ name: "parallel-rollback" })
       .stepAsync("root", async () => "root", undo("root"))
       .stepAsync(
         "slow",
         { dependsOn: ["root"] },
         async () => {
-          await delay(30);
+          // 30ms of clock time: "slow" completes after "fast" on the clock,
+          // although it is defined first.
+          const waited = new Promise<void>((r) => clock.setTimeout(r, 30));
+          slowArmed = true;
+          await waited;
           return "slow";
         },
         undo("slow"),
@@ -312,7 +317,17 @@ describe("durable compensation", () => {
       })
       .build();
 
-    await runner.runSafe({ workflow: wf, workflowId: "par-1", input: undefined });
+    const running = runner.runSafe({ workflow: wf, workflowId: "par-1", input: undefined });
+    // Advance only once `slow` waits on the clock and `fast` is checkpointed
+    // at the current time; advancing earlier would stamp both at +30ms.
+    const fastSaved = async () =>
+      (await storage.loadWorkflow("par-1"))?.steps["fast"]?.status === "completed";
+    for (let i = 0; i < 2_000 && !(slowArmed && (await fastSaved())); i++) {
+      await new Promise<void>((r) => setImmediate(r));
+    }
+    expect(slowArmed && (await fastSaved())).toBe(true);
+    clock.advance(30);
+    await running;
     // `slow` finished last, so it is undone first, then `fast`, then `root`.
     expect(calls).toEqual(["slow", "fast", "root"]);
   });

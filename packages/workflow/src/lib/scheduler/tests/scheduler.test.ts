@@ -1,6 +1,35 @@
 import { describe, it, expect } from "bun:test";
 import { InMemoryScheduler } from "../in-memory-scheduler.ts";
 import { scheduleTickRunId } from "../types.ts";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
+
+const T0 = Date.parse("2026-01-01T00:00:00Z");
+
+/**
+ * Await `promise` (a stream run) while moving `clock` forward `stepMs` at
+ * a time, each time after the scheduler has parked on a timer, so the
+ * stream's waits complete on clock time. Fails after `maxSteps` steps.
+ */
+async function drive<T>(params: {
+  clock: FakeWallClock;
+  promise: Promise<T>;
+  stepMs: number;
+  maxSteps?: number;
+}): Promise<T> {
+  const { clock, stepMs, maxSteps = 1_000 } = params;
+  let settled = false;
+  const tracked = params.promise.finally(() => (settled = true));
+  tracked.catch(() => {});
+  for (let step = 0; step < maxSteps && !settled; step++) {
+    for (let i = 0; i < 2_000 && !settled && clock.pendingCount() === 0; i++) {
+      await new Promise<void>((r) => setImmediate(r));
+    }
+    if (!settled) clock.advance(stepMs);
+    await new Promise<void>((r) => setImmediate(r));
+  }
+  expect(settled).toBe(true);
+  return tracked;
+}
 
 // ---------------------------------------------------------------------------
 // scheduleTickRunId — shared id format
@@ -179,14 +208,19 @@ describe("InMemoryScheduler", () => {
     });
 
     it("respects timing between ticks", async () => {
-      const scheduler = new InMemoryScheduler();
+      const clock = FakeWallClock.create(T0);
+      const scheduler = new InMemoryScheduler({ clock });
       await scheduler.register({ id: "timed", intervalMs: 100 });
 
-      const start = Date.now();
-      await scheduler.stream("timed").take(3).toArray().run();
-      const elapsed = Date.now() - start;
+      const ticks = await drive({
+        clock,
+        promise: scheduler.stream("timed").take(3).toArray().run(),
+        stepMs: 10,
+      });
 
-      expect(elapsed).toBeGreaterThanOrEqual(250); // 3 ticks * ~100ms
+      // One tick every 100ms of clock time.
+      expect(ticks.map((t) => t.scheduledAt.getTime() - T0)).toEqual([100, 200, 300]);
+      expect(clock.currentTimeMs() - T0).toBe(300);
     });
   });
 
@@ -332,27 +366,38 @@ describe("InMemoryScheduler", () => {
 
   describe("startAt / endAt", () => {
     it("startAt delays first tick until the specified time", async () => {
-      const scheduler = new InMemoryScheduler();
-      const startAt = new Date(Date.now() + 200);
+      const clock = FakeWallClock.create(T0);
+      const scheduler = new InMemoryScheduler({ clock });
+      const startAt = new Date(T0 + 200);
       await scheduler.register({ id: "delayed", intervalMs: 50, startAt });
 
-      const before = Date.now();
-      const [tick] = await scheduler.stream("delayed").take(1).toArray().run();
-      const elapsed = Date.now() - before;
+      const [tick] = await drive({
+        clock,
+        promise: scheduler.stream("delayed").take(1).toArray().run(),
+        stepMs: 10,
+      });
 
-      expect(elapsed).toBeGreaterThanOrEqual(150);
       expect(tick!.scheduleId).toBe("delayed");
+      expect(tick!.scheduledAt.getTime()).toBeGreaterThanOrEqual(startAt.getTime());
+      expect(tick!.firedAt.getTime()).toBeGreaterThanOrEqual(startAt.getTime());
     });
 
     it("endAt stops the stream after the specified time", async () => {
-      const scheduler = new InMemoryScheduler();
-      const endAt = new Date(Date.now() + 200);
+      const clock = FakeWallClock.create(T0);
+      const scheduler = new InMemoryScheduler({ clock });
+      const endAt = new Date(T0 + 200);
       await scheduler.register({ id: "expiring", intervalMs: 50, endAt });
 
-      const ticks = await scheduler.stream("expiring").toArray().run();
+      const ticks = await drive({
+        clock,
+        promise: scheduler.stream("expiring").toArray().run(),
+        stepMs: 10,
+      });
 
+      // Every 50ms up to endAt, then the stream ends on its own.
       expect(ticks.length).toBeGreaterThanOrEqual(1);
-      expect(ticks.length).toBeLessThan(10);
+      expect(ticks.every((t) => t.scheduledAt.getTime() <= endAt.getTime())).toBe(true);
+      expect(ticks.map((t) => t.tickNumber)).toEqual(ticks.map((_t, i) => i));
     });
 
     it("endAt in the past produces no ticks", async () => {
@@ -368,22 +413,26 @@ describe("InMemoryScheduler", () => {
     });
 
     it("startAt + endAt together define a window", async () => {
-      const scheduler = new InMemoryScheduler();
-      const now = Date.now();
+      const clock = FakeWallClock.create(T0);
+      const scheduler = new InMemoryScheduler({ clock });
       await scheduler.register({
         id: "windowed",
         intervalMs: 50,
-        startAt: new Date(now + 100),
-        endAt: new Date(now + 400),
+        startAt: new Date(T0 + 100),
+        endAt: new Date(T0 + 400),
       });
 
-      const before = Date.now();
-      const ticks = await scheduler.stream("windowed").toArray().run();
-      const elapsed = Date.now() - before;
+      const ticks = await drive({
+        clock,
+        promise: scheduler.stream("windowed").toArray().run(),
+        stepMs: 10,
+      });
 
-      expect(elapsed).toBeGreaterThanOrEqual(100);
+      // Every tick falls inside the window, 50ms apart.
       expect(ticks.length).toBeGreaterThanOrEqual(1);
-      expect(ticks.length).toBeLessThan(10);
+      const at = ticks.map((t) => t.scheduledAt.getTime() - T0);
+      expect(at.every((ms) => ms >= 100 && ms <= 400)).toBe(true);
+      expect(at.slice(1).map((ms, i) => ms - at[i]!)).toEqual(at.slice(1).map(() => 50));
     });
   });
 
@@ -393,17 +442,21 @@ describe("InMemoryScheduler", () => {
 
   describe("unregister ends stream", () => {
     it("stream ends when schedule is unregistered", async () => {
-      const scheduler = new InMemoryScheduler();
+      const clock = FakeWallClock.create(T0);
+      const scheduler = new InMemoryScheduler({ clock });
       await scheduler.register({ id: "temp", intervalMs: 50 });
 
-      // Unregister after a short delay
-      setTimeout(() => void scheduler.unregister({ scheduleId: "temp" }), 200);
+      // Unregister 175ms of clock time in, between two fire times.
+      clock.setTimeout(() => void scheduler.unregister({ scheduleId: "temp" }), 175);
 
-      const ticks = await scheduler.stream("temp").toArray().run();
+      const ticks = await drive({
+        clock,
+        promise: scheduler.stream("temp").toArray().run(),
+        stepMs: 25,
+      });
 
-      // Should have collected some ticks before ending
-      expect(ticks.length).toBeGreaterThanOrEqual(1);
-      expect(ticks.length).toBeLessThan(100);
+      // The ticks at 50, 100 and 150ms, then the stream ended.
+      expect(ticks.map((t) => t.scheduledAt.getTime() - T0)).toEqual([50, 100, 150]);
     });
   });
 

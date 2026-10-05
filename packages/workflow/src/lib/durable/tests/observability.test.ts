@@ -4,6 +4,7 @@ import { workflow } from "../workflow-builder.ts";
 import { dagToMermaid, dagToDot } from "../workflow-dag-viz.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 // ---------------------------------------------------------------------------
 // Test error types
@@ -238,8 +239,10 @@ describe("WorkflowHooks", () => {
   });
 
   it("onWorkflowComplete includes durationMs", async () => {
-    const storage = new InMemoryWorkflowStorage();
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const storage = new InMemoryWorkflowStorage({ clock });
     let durationMs = -1;
+    let armed = false;
 
     const wf = workflow<{}>({
       name: "hooks-duration",
@@ -250,14 +253,22 @@ describe("WorkflowHooks", () => {
       },
     })
       .stepAsync("wait", async () => {
-        await new Promise((r) => setTimeout(r, 10));
+        const waited = new Promise<void>((r) => clock.setTimeout(r, 10));
+        armed = true;
+        await waited;
         return "done";
       })
       .build();
-    const runner = createWorkflowRunner({ storage });
-    await runner.run({ workflow: wf, workflowId: "wf-hooks-5", input: {} });
+    const runner = createWorkflowRunner({ storage, clock });
+    const running = runner.run({ workflow: wf, workflowId: "wf-hooks-5", input: {} });
+    // The step's 10ms of clock time pass once it is parked on its timer.
+    for (let i = 0; i < 2_000 && !armed; i++) {
+      await new Promise<void>((r) => setImmediate(r));
+    }
+    clock.advance(10);
+    await running;
 
-    expect(durationMs).toBeGreaterThanOrEqual(5);
+    expect(durationMs).toBe(10);
   });
 
   it("hooks are async-safe", async () => {

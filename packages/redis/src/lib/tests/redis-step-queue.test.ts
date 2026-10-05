@@ -6,9 +6,15 @@ import { redisDescribe, uniquePrefix, type RedisTestContext } from "./redis-test
 
 redisDescribe("RedisStepQueue conformance", (redis) => {
   stepQueueTestSuite(
-    ({ maxDeliveries }) =>
-      new RedisStepQueue({ redis: redis.client(), prefix: uniquePrefix("sq"), maxDeliveries }),
+    ({ maxDeliveries, clock }) =>
+      new RedisStepQueue({
+        redis: redis.client(),
+        prefix: uniquePrefix("sq"),
+        maxDeliveries,
+        clock,
+      }),
     {
+      fakeClock: true,
       leaseFenced: () => {
         const client = redis.client();
         const prefix = uniquePrefix("sq");

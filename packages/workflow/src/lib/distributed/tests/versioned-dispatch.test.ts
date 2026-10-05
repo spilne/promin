@@ -12,6 +12,7 @@ import { InMemoryStepQueue } from "../in-memory-step-queue.ts";
 import { createWorker } from "../worker.ts";
 import { StepQueueExecutor } from "../step-queue-executor.ts";
 import { RoutingStepExecutor } from "../../durable/runner/routing-step-executor.ts";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 /** A runner that sends `remoteSteps` to workers over `stepQueue`. */
 function routedRunner(params: {
@@ -217,16 +218,26 @@ describe("versioned dispatch", () => {
   });
 
   it("rolling deploy — worker with supportedVersions=['2'] skips v1 tasks (they stay pending)", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const stepQueue = new InMemoryStepQueue();
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const stepQueue = new InMemoryStepQueue({ clock });
 
-    // Seed a v1 task directly (no worker picks it up).
+    // Seed a v1 task (no worker should pick it up) ahead of a v2 task (the
+    // worker should run it), so the v1 task sits at the head of the queue.
+    await storage.createWorkflow({ workflowId: "v2-fresh", workflowName: "x", input: {} });
     await stepQueue.enqueue({
       workflowId: "v1-orphan",
       stepName: "step-a",
       input: {},
       prevResults: {},
       version: "1",
+    });
+    await stepQueue.enqueue({
+      workflowId: "v2-fresh",
+      stepName: "step-a",
+      input: {},
+      prevResults: {},
+      version: "2",
     });
 
     const v2OnlyRegistry = new MapStepRegistry();
@@ -240,16 +251,26 @@ describe("versioned dispatch", () => {
       capabilities: [],
       pollIntervalMs: 25,
       supportedVersions: ["2"],
+      clock,
     });
     void worker.start();
 
-    // Give the worker a chance to (not) claim the v1 task.
-    await new Promise((r) => setTimeout(r, 100));
+    // Run the worker until the v2 task is done, then for ten more polls.
+    const byWorkflow = (id: string) => stepQueue.getAllTasks().find((t) => t.workflowId === id)!;
+    for (let i = 0; i < 200 && byWorkflow("v2-fresh").status !== "completed"; i++) {
+      for (let j = 0; j < 20; j++) await new Promise<void>((r) => setImmediate(r));
+      clock.advance(25);
+    }
+    expect(byWorkflow("v2-fresh").status).toBe("completed");
+    for (let i = 0; i < 10; i++) {
+      for (let j = 0; j < 20; j++) await new Promise<void>((r) => setImmediate(r));
+      clock.advance(25);
+    }
     await worker.stop();
 
-    // v1 task should still be pending — worker correctly skipped it.
-    const metrics = await stepQueue.metrics({ since: new Date(Date.now() - 60_000) });
-    expect(metrics.pending).toBeGreaterThanOrEqual(1);
-    expect(metrics.completed).toBe(0);
+    // The v1 task is still pending and was never even claimed: the version
+    // filter runs inside the claim.
+    expect(byWorkflow("v1-orphan").status).toBe("pending");
+    expect(byWorkflow("v1-orphan").deliveries).toBe(0);
   });
 });

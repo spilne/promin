@@ -7,6 +7,32 @@ import { createWorker } from "../worker.ts";
 import { workerRegistryConformance } from "../worker-registry-conformance.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
 
+/** Yield to the event loop until `predicate` holds (bounded). */
+async function waitFor(predicate: () => boolean | Promise<boolean>): Promise<void> {
+  for (let i = 0; i < 2_000; i++) {
+    if (await predicate()) return;
+    await new Promise<void>((r) => setImmediate(r));
+  }
+  expect(await predicate()).toBe(true);
+}
+
+/** Let in-flight async work settle: a bounded number of macrotask turns. */
+async function flush(): Promise<void> {
+  for (let i = 0; i < 20; i++) await new Promise<void>((r) => setImmediate(r));
+}
+
+/** Storage, queue and worker registry on one fake clock. */
+function setup() {
+  const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+  return {
+    clock,
+    storage: new InMemoryWorkflowStorage({ clock }),
+    queue: new InMemoryStepQueue({ clock }),
+    stepRegistry: new MapStepRegistry(),
+    workerRegistry: new InMemoryWorkerRegistry({ clock }),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // WorkerRegistry semantics — conformance suite
 //
@@ -18,7 +44,7 @@ import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 describe("InMemoryWorkerRegistry — conformance", () => {
   workerRegistryConformance({
-    factory: async () => new InMemoryWorkerRegistry(),
+    factory: async ({ clock }) => new InMemoryWorkerRegistry({ clock }),
   });
 });
 
@@ -28,12 +54,10 @@ describe("InMemoryWorkerRegistry — conformance", () => {
 
 describe("Worker + registry integration — automatic lifecycle management", () => {
   it("worker auto-registers on start and auto-deregisters on stop", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const queue = new InMemoryStepQueue();
-    const stepRegistry = new MapStepRegistry();
-    const workerRegistry = new InMemoryWorkerRegistry();
+    const { clock, storage, queue, stepRegistry, workerRegistry } = setup();
 
     const worker = createWorker({
+      clock,
       storage,
       stepQueue: queue,
       registry: stepRegistry,
@@ -46,7 +70,7 @@ describe("Worker + registry integration — automatic lifecycle management", () 
     });
 
     void worker.start();
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(async () => (await workerRegistry.list({ status: "active" })).length > 0);
 
     // Worker should be registered
     const active = await workerRegistry.list({ status: "active" });
@@ -63,16 +87,14 @@ describe("Worker + registry integration — automatic lifecycle management", () 
     const retired = await workerRegistry.list({ status: "retired" });
     expect(retired).toHaveLength(1);
     expect(retired[0]!.workerId).toBe(worker.workerId);
-    expect(retired[0]!.retiredAt).toBeInstanceOf(Date);
+    expect(retired[0]!.retiredAt?.getTime()).toBe(clock.currentTimeMs());
   });
 
   it("worker sends periodic heartbeats — registry knows it is healthy", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const queue = new InMemoryStepQueue();
-    const stepRegistry = new MapStepRegistry();
-    const workerRegistry = new InMemoryWorkerRegistry();
+    const { clock, storage, queue, stepRegistry, workerRegistry } = setup();
 
     const worker = createWorker({
+      clock,
       storage,
       stepQueue: queue,
       registry: stepRegistry,
@@ -82,27 +104,31 @@ describe("Worker + registry integration — automatic lifecycle management", () 
       heartbeatIntervalMs: 50,
     });
 
+    const startedAt = clock.currentTimeMs();
     void worker.start();
-    await new Promise((r) => setTimeout(r, 200));
+    await waitFor(async () => (await workerRegistry.list()).length > 0);
+    expect((await workerRegistry.list())[0]!.lastHeartbeat.getTime()).toBe(startedAt);
 
-    // Heartbeat should have been updated
-    const workers = await workerRegistry.list();
-    const timeSinceHeartbeat = Date.now() - workers[0]!.lastHeartbeat.getTime();
-    expect(timeSinceHeartbeat).toBeLessThan(150); // recent heartbeat
+    // Each heartbeat interval moves lastHeartbeat to the beat's clock time.
+    for (let beat = 1; beat <= 4; beat++) {
+      clock.advance(50);
+      await flush();
+      const [info] = await workerRegistry.list();
+      expect(info!.lastHeartbeat.getTime()).toBe(startedAt + beat * 50);
+    }
+    // A healthy worker is not reported dead.
+    expect(await workerRegistry.detectDead(100)).toEqual([]);
 
     await worker.stop();
   });
 
   it("worker drains in-flight tasks before fully stopping", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const queue = new InMemoryStepQueue();
-    const stepRegistry = new MapStepRegistry();
-    const workerRegistry = new InMemoryWorkerRegistry();
+    const { clock, storage, queue, stepRegistry, workerRegistry } = setup();
 
     stepRegistry.register({
       stepName: "slow",
       handler: async () => {
-        await new Promise((r) => setTimeout(r, 300));
+        await new Promise<void>((r) => clock.setTimeout(r, 300));
         return "done";
       },
     });
@@ -116,6 +142,7 @@ describe("Worker + registry integration — automatic lifecycle management", () 
     });
 
     const worker = createWorker({
+      clock,
       storage,
       stepQueue: queue,
       registry: stepRegistry,
@@ -126,17 +153,21 @@ describe("Worker + registry integration — automatic lifecycle management", () 
     });
 
     void worker.start();
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(() => queue.getAllTasks()[0]?.status === "running");
 
-    // Start stopping — should be draining while task finishes
-    const stopPromise = worker.stop();
+    // Start stopping — the worker drains while the task finishes.
+    let stopped = false;
+    const stopPromise = worker.stop().then(() => (stopped = true));
+    await waitFor(async () => (await workerRegistry.list({ status: "draining" })).length === 1);
+    await flush();
+    expect(stopped).toBe(false);
+    expect(queue.getAllTasks()[0]?.status).toBe("running");
 
-    // Check draining status
-    await new Promise((r) => setTimeout(r, 50));
-    // May or may not catch the draining state depending on timing
-    void workerRegistry.list({ status: "draining" });
-
+    // The task's 300ms of clock time pass; it completes and stop() resolves.
+    clock.advance(300);
     await stopPromise;
+    expect(queue.getAllTasks()[0]?.status).toBe("completed");
+    expect((await storage.loadWorkflow("drain-1"))?.steps["slow"]?.result).toBe("done");
 
     // After stop — retired (row kept), no longer active.
     expect(await workerRegistry.list({ status: "active" })).toHaveLength(0);

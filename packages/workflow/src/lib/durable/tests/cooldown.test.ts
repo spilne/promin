@@ -2,11 +2,15 @@ import { describe, it, expect } from "bun:test";
 import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
+
+const T0 = "2026-01-01T00:00:00Z";
 
 describe("workflow idempotency TTL", () => {
   it("returns cached result within TTL", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
     let runCount = 0;
 
     const wf = workflow({ name: "ttl-test" })
@@ -26,15 +30,16 @@ describe("workflow idempotency TTL", () => {
   });
 
   it("re-enters engine when TTL expires", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
 
     const wf = workflow({ name: "ttl-expire" })
       .stepAsync("compute", async () => ({ value: 1 }))
       .build({ idempotency: { ttl: 1 } });
 
     await runner.run({ workflow: wf, workflowId: "cd-2", input: {} });
-    await new Promise((r) => setTimeout(r, 10));
+    clock.advance(10);
 
     // TTL expired — enters engine, steps replay from storage
     const result = await runner.run({ workflow: wf, workflowId: "cd-2", input: {} });
@@ -42,8 +47,9 @@ describe("workflow idempotency TTL", () => {
   });
 
   it("separate TTL for success and failure", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
 
     const wf = workflow({ name: "split-ttl" })
       .stepAsync("compute", async () => ({ value: 1 }))
@@ -62,8 +68,9 @@ describe("workflow idempotency TTL", () => {
   });
 
   it("force bypasses idempotency", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
 
     const wf = workflow({ name: "force-test" })
       .stepAsync("compute", async () => ({ value: 1 }))
@@ -77,8 +84,9 @@ describe("workflow idempotency TTL", () => {
   });
 
   it("works with runSafe", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
     let runCount = 0;
 
     const wf = workflow({ name: "ttl-safe" })
@@ -97,8 +105,9 @@ describe("workflow idempotency TTL", () => {
   });
 
   it("no idempotency — no TTL caching", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
     let runCount = 0;
 
     const wf = workflow({ name: "no-ttl" })

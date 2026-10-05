@@ -7,7 +7,7 @@ import { SqliteWorkerRegistry } from "../sqlite-worker-registry.ts";
 // isolation so the shared conformance suite (which expects a clean slate)
 // works without TRUNCATE.
 workerRegistryConformance({
-  factory: async () => SqliteWorkerRegistry.make({ db: new Database(":memory:") }),
+  factory: async ({ clock }) => SqliteWorkerRegistry.make({ db: new Database(":memory:"), clock }),
 });
 
 // ---- SQLite-specific tests ----

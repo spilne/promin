@@ -20,12 +20,15 @@ describe("MemoryCache — fast in-process key-value store", () => {
   });
 
   it("expired entries return undefined", async () => {
-    const cache = new MemoryCache<string, string>({ ttlMs: 10 });
+    const clock = FakeWallClock.create(0);
+    const cache = new MemoryCache<string, string>({ ttlMs: 10, clock });
 
     await cache.set("key", "value");
     expect(await cache.get("key")).toBe("value");
 
-    await new Promise((r) => setTimeout(r, 20));
+    clock.advance(10);
+    expect(await cache.get("key")).toBe("value"); // valid through its TTL
+    clock.advance(1);
     expect(await cache.get("key")).toBeUndefined();
   });
 
@@ -84,12 +87,13 @@ describe("MemoryCache — fast in-process key-value store", () => {
   });
 
   it("custom TTL per entry overrides default", async () => {
-    const cache = new MemoryCache<string, string>({ ttlMs: 60_000 });
+    const clock = FakeWallClock.create(0);
+    const cache = new MemoryCache<string, string>({ ttlMs: 60_000, clock });
 
     await cache.set("short", "value", 10); // 10ms TTL
     await cache.set("long", "value", 60_000);
 
-    await new Promise((r) => setTimeout(r, 20));
+    clock.advance(20);
 
     expect(await cache.get("short")).toBeUndefined();
     expect(await cache.get("long")).toBe("value");

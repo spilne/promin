@@ -372,15 +372,25 @@ describe("ZoryaServer scheduling — embedded ZoryaScheduler", () => {
     }
 
     const tickPromise = scheduler.tickOnce();
-    await new Promise<void>((r) => setTimeout(r, 25));
-    while (release.length > 0 || inFlight > 0) {
-      release.shift()?.();
-      await new Promise<void>((r) => setTimeout(r, 1));
+    const turn = () => new Promise<void>((r) => setImmediate(r));
+    // Every fire parks until released: the fan-out fills its three slots
+    // and then waits; nothing else starts while they are held.
+    for (let i = 0; i < 2_000 && inFlight < 3; i++) await turn();
+    for (let i = 0; i < 20; i++) await turn();
+    expect(inFlight).toBe(3);
+    // Release one fire at a time; each frees exactly one slot for the next.
+    let fires = 0;
+    for (let i = 0; i < 20_000 && (release.length > 0 || inFlight > 0); i++) {
+      if (release.length > 0) {
+        release.shift()!();
+        fires++;
+      }
+      await turn();
     }
     await tickPromise;
 
-    expect(peakInFlight).toBeLessThanOrEqual(3);
-    expect(peakInFlight).toBeGreaterThanOrEqual(2);
+    expect(fires).toBe(12);
+    expect(peakInFlight).toBe(3);
 
     await server.stop();
   });

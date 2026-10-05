@@ -11,6 +11,9 @@ import { createWorkflowRunner } from "../workflow-runner.ts";
 import { runJournaledStep, completeSignal, completeDueSleeps } from "../journaled-step.ts";
 import type { JournaledContext } from "../journaled-step.ts";
 import { WorkflowSuspendedError } from "../durable-pipeline-error.ts";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
+
+const T0 = "2026-01-01T00:00:00Z";
 
 describe("ctx.sleep — durable mid-step sleep", () => {
   let storage: InMemoryWorkflowStorage;
@@ -19,6 +22,7 @@ describe("ctx.sleep — durable mid-step sleep", () => {
   });
 
   it("first run suspends with WorkflowSuspendedError and writes a pending sleep entry", async () => {
+    const clock = FakeWallClock.create(T0);
     const body = function* (ctx: JournaledContext<unknown, unknown>) {
       yield* ctx.sleep(60_000); // 60s — doesn't actually block; we suspend first
       return "done";
@@ -32,6 +36,7 @@ describe("ctx.sleep — durable mid-step sleep", () => {
         stepName: "wait",
         storage,
         body,
+        clock,
       }),
     ).rejects.toBeInstanceOf(WorkflowSuspendedError);
 
@@ -40,13 +45,12 @@ describe("ctx.sleep — durable mid-step sleep", () => {
     expect(journal[0]!.stepType).toBe("sleep");
     expect(journal[0]!.phase).toBe("pending");
     expect(journal[0]!.wakeAt).toBeInstanceOf(Date);
-    // wakeAt should be ~now + 60s, within a tolerance.
-    const deltaMs = journal[0]!.wakeAt!.getTime() - Date.now();
-    expect(deltaMs).toBeGreaterThan(50_000);
-    expect(deltaMs).toBeLessThan(65_000);
+    // wakeAt is exactly the clock's now + 60s.
+    expect(journal[0]!.wakeAt!.getTime()).toBe(clock.currentTimeMs() + 60_000);
   });
 
   it("replay after completion returns wake time and continues the step", async () => {
+    const clock = FakeWallClock.create(T0);
     let postSleepCalls = 0;
     const body = function* (ctx: JournaledContext<unknown, unknown>) {
       const wokeAt = yield* ctx.sleep(10_000);
@@ -67,17 +71,18 @@ describe("ctx.sleep — durable mid-step sleep", () => {
         stepName: "s",
         storage,
         body,
+        clock,
       }),
     ).rejects.toBeInstanceOf(WorkflowSuspendedError);
     expect(postSleepCalls).toBe(0); // post-sleep activity didn't run yet
 
-    // Simulate scanner firing 10s later: complete all due sleeps.
-    // (FakeWallClock isn't wired in here yet; we fast-forward by completing
-    // manually. In production the sleep scanner does this automatically.)
-    const future = new Date(Date.now() + 60_000);
-    const completed = await completeDueSleeps({ storage, now: future, limit: 10 });
+    // The scanner fires 10s later and completes every due sleep (in
+    // production the sleep scanner does this on its own clock).
+    clock.advance(10_000);
+    const completed = await completeDueSleeps({ storage, now: clock.now(), limit: 10 });
     expect(completed).toHaveLength(1);
     expect(completed[0]!.workflowId).toBe("wf-sleep-2");
+    expect(completed[0]!.wakeAt.getTime()).toBe(clock.currentTimeMs());
 
     // Replay — generator fast-forwards through the completed sleep, runs
     // post-sleep activity, returns.
@@ -88,6 +93,7 @@ describe("ctx.sleep — durable mid-step sleep", () => {
       stepName: "s",
       storage,
       body,
+      clock,
     });
     expect(postSleepCalls).toBe(1);
     expect((result as { msg: string }).msg).toBe("done");
@@ -95,6 +101,7 @@ describe("ctx.sleep — durable mid-step sleep", () => {
   });
 
   it("sleep before wake time stays suspended; completeDueSleeps is a no-op", async () => {
+    const clock = FakeWallClock.create(T0);
     const body = function* (ctx: JournaledContext<unknown, unknown>) {
       yield* ctx.sleep(60_000);
       return "done";
@@ -108,14 +115,15 @@ describe("ctx.sleep — durable mid-step sleep", () => {
         stepName: "s",
         storage,
         body,
+        clock,
       }),
     ).rejects.toBeInstanceOf(WorkflowSuspendedError);
 
-    // "Now" is only 1s past registration — sleep wasn't due.
-    const slightlyLater = new Date(Date.now() + 1_000);
+    // 1ms short of the wake time — the sleep isn't due yet.
+    clock.advance(59_999);
     const completed = await completeDueSleeps({
       storage,
-      now: slightlyLater,
+      now: clock.now(),
       limit: 10,
     });
     expect(completed).toHaveLength(0);
@@ -129,6 +137,7 @@ describe("ctx.sleep — durable mid-step sleep", () => {
         stepName: "s",
         storage,
         body,
+        clock,
       }),
     ).rejects.toBeInstanceOf(WorkflowSuspendedError);
   });
@@ -303,7 +312,8 @@ describe("DefaultSleepScanner integration with journaled sleeps", () => {
         .build();
 
     const wf = buildWorkflow();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const runner = createWorkflowRunner({ storage, clock });
 
     // Kick off — suspends at sleep. ctx.sleep also calls suspendWorkflow,
     // so the workflow's step.wakeAt is set for the scanner.
@@ -317,10 +327,17 @@ describe("DefaultSleepScanner integration with journaled sleeps", () => {
     expect(suspendedState?.status).toBe("suspended");
     const sleepStep = suspendedState?.steps["wait-then-do"];
     expect(sleepStep?.status).toBe("sleeping");
-    expect(sleepStep?.wakeAt).toBeInstanceOf(Date);
+    expect(sleepStep?.wakeAt?.getTime()).toBe(clock.currentTimeMs() + 50);
 
-    // Wait past the sleep duration.
-    await new Promise((r) => setTimeout(r, 80));
+    // A re-run before the wake time stays suspended.
+    clock.advance(49);
+    await expect(
+      runner.run({ workflow: buildWorkflow(), workflowId: "scan-1", input: { id: "a" } }),
+    ).rejects.toThrow(/sleeping until/);
+    expect(postSleepCalls).toBe(0);
+
+    // Move past the sleep duration.
+    clock.advance(1);
 
     // Re-run the workflow (simulating what DefaultSleepScanner does).
     // ctx.sleep auto-completes the pending journal entry since now >= wakeAt,
@@ -365,7 +382,8 @@ describe("end-to-end workflow with suspend/resume", () => {
       })
       .build();
 
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const runner = createWorkflowRunner({ storage, clock });
 
     // Kick off — suspends at sleep. `run()` rejects with the plain
     // WorkflowSuspendedError; match on its human-readable message.
@@ -374,9 +392,11 @@ describe("end-to-end workflow with suspend/resume", () => {
     ).rejects.toThrow(/sleeping until/);
     expect(activityCalls).toEqual({ create: 1, check: 0, finalize: 0 });
 
-    // Advance time past sleep, complete due sleeps.
-    const future = new Date(Date.now() + 1_000);
-    await completeDueSleeps({ storage, now: future, limit: 10 });
+    // Not due 1ms before the review window ends; due at its end.
+    clock.advance(99);
+    expect(await completeDueSleeps({ storage, now: clock.now(), limit: 10 })).toHaveLength(0);
+    clock.advance(1);
+    expect(await completeDueSleeps({ storage, now: clock.now(), limit: 10 })).toHaveLength(1);
 
     // Resume — suspends at signal this time.
     // A fresh builder is needed because the previous .run() returned; but the
@@ -487,12 +507,13 @@ describe("ctx.signal({ timeout }) — bounded suspend", () => {
   it("self-completes with timeout outcome on replay after timeout has passed", async () => {
     type Decision = { approved: boolean };
     const body = function* (ctx: JournaledContext<unknown, unknown>) {
-      const result = yield* ctx.signal<Decision>("approve", { timeout: 1 }); // 1ms — expires immediately
+      const result = yield* ctx.signal<Decision>("approve", { timeout: 1_000 });
       return result;
     };
+    const clock = FakeWallClock.create(T0);
 
-    // First run suspends — even a 1ms timeout writes the pending journal
-    // entry first; wakeAt is in the past by the time the body re-runs.
+    // First run suspends and writes the pending journal entry with its
+    // deadline: the clock's now + 1s.
     await expect(
       runJournaledStep({
         input: {},
@@ -501,12 +522,29 @@ describe("ctx.signal({ timeout }) — bounded suspend", () => {
         stepName: "wait",
         storage,
         body,
+        clock,
+      }),
+    ).rejects.toBeInstanceOf(WorkflowSuspendedError);
+    const pending = await storage.loadJournal({ workflowId: "wf-tsig-2", stepName: "wait" });
+    expect(pending[0]!.phase).toBe("pending");
+    expect(pending[0]!.wakeAt!.getTime()).toBe(clock.currentTimeMs() + 1_000);
+
+    // A re-run 1ms before the deadline still suspends.
+    clock.advance(999);
+    await expect(
+      runJournaledStep({
+        input: {},
+        prev: {},
+        workflowId: "wf-tsig-2",
+        stepName: "wait",
+        storage,
+        body,
+        clock,
       }),
     ).rejects.toBeInstanceOf(WorkflowSuspendedError);
 
-    // Wait so wakeAt is unambiguously in the past, then re-run.
-    await new Promise((r) => setTimeout(r, 10));
-
+    // At the deadline the re-run completes the entry with the timeout.
+    clock.advance(1);
     const result = await runJournaledStep({
       input: {},
       prev: {},
@@ -514,6 +552,7 @@ describe("ctx.signal({ timeout }) — bounded suspend", () => {
       stepName: "wait",
       storage,
       body,
+      clock,
     });
     expect(result).toEqual({ ok: false, error: "timeout" });
 

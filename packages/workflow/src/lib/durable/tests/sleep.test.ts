@@ -2,6 +2,9 @@ import { describe, it, expect } from "bun:test";
 import { TaggedError, succeed, fail } from "@spilne/perfect-core";
 import { workflow, WorkflowSuspendedError, InMemoryWorkflowStorage } from "../../../index.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
+
+const T0 = "2026-01-01T00:00:00Z";
 
 class TestError extends TaggedError("TestError")<{
   readonly message: string;
@@ -13,8 +16,9 @@ class TestError extends TaggedError("TestError")<{
 
 describe("Durable sleep — pause a workflow and resume it later", () => {
   it("email campaign waits 60s before sending — workflow suspends at the delay", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
     const log: string[] = [];
 
     const wf = workflow<string>({ name: "basic-sleep" })
@@ -44,8 +48,9 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
   });
 
   it("delay expires and workflow picks up where it left off — prior results preserved", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
     const log: string[] = [];
 
     const buildWf = () =>
@@ -67,7 +72,7 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
     expect(log).toEqual(["double"]);
 
     // Wait for sleep to expire
-    await new Promise((r) => setTimeout(r, 10));
+    clock.advance(10);
 
     // Resume: completes
     const result = await runner.run({ workflow: buildWf(), workflowId: "s-2", input: 5 });
@@ -82,8 +87,9 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
   });
 
   it("multi-stage drip campaign — pause between each email send", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
     const log: string[] = [];
 
     const buildWf = () =>
@@ -113,7 +119,7 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
     expect((e1 as WorkflowSuspendedError).stepName).toBe("sleep-1");
     expect(log).toEqual(["step-1"]);
 
-    await new Promise((r) => setTimeout(r, 10));
+    clock.advance(10);
 
     // Run 2: resumes, executes step-2, suspends at sleep-2
     const { error: e2 } = await runner.runSafe({
@@ -124,7 +130,7 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
     expect((e2 as WorkflowSuspendedError).stepName).toBe("sleep-2");
     expect(log).toEqual(["step-1", "step-2"]);
 
-    await new Promise((r) => setTimeout(r, 10));
+    clock.advance(10);
 
     // Run 3: resumes, executes step-3, completes
     const result = await runner.run({ workflow: buildWf(), workflowId: "s-3", input: "start" });
@@ -133,8 +139,9 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
   });
 
   it("already-expired sleep completes immediately — no double suspension", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
 
     const buildWf = () =>
       workflow<string>({ name: "no-re-suspend" })
@@ -145,7 +152,7 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
 
     // Suspend
     await runner.runSafe({ workflow: buildWf(), workflowId: "s-4", input: "x" });
-    await new Promise((r) => setTimeout(r, 10));
+    clock.advance(10);
 
     // Resume — should complete without re-suspending
     const result = await runner.run({ workflow: buildWf(), workflowId: "s-4", input: "x" });
@@ -157,8 +164,9 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
   });
 
   it("expensive API call before sleep is not repeated on resume — checkpointed", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
     let step1Calls = 0;
 
     const buildWf = () =>
@@ -174,7 +182,7 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
     await runner.runSafe({ workflow: buildWf(), workflowId: "s-5", input: 5 });
     expect(step1Calls).toBe(1);
 
-    await new Promise((r) => setTimeout(r, 10));
+    clock.advance(10);
 
     await runner.run({ workflow: buildWf(), workflowId: "s-5", input: 5 });
     expect(step1Calls).toBe(1); // NOT re-executed
@@ -187,8 +195,9 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
 
 describe("Sleep + compensation — rollback pre-sleep work if post-sleep step fails", () => {
   it("resource provisioned before delay, usage fails after — resource is cleaned up", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
     const log: string[] = [];
 
     const buildWf = () =>
@@ -217,7 +226,7 @@ describe("Sleep + compensation — rollback pre-sleep work if post-sleep step fa
     await runner.runSafe({ workflow: buildWf(), workflowId: "sc-1", input: "x" });
     expect(log).toEqual(["create"]);
 
-    await new Promise((r) => setTimeout(r, 10));
+    clock.advance(10);
 
     // Resume — "use" fails → compensate "create"
     const { error } = await runner.runSafe({ workflow: buildWf(), workflowId: "sc-1", input: "x" });
@@ -233,8 +242,9 @@ describe("Sleep + compensation — rollback pre-sleep work if post-sleep step fa
 
 describe("Sleep + workflow retry — resume from where the workflow left off", () => {
   it("flaky step after sleep retries without re-sleeping — delay already elapsed", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
     const log: string[] = [];
     let step2Calls = 0;
 
@@ -260,10 +270,20 @@ describe("Sleep + workflow retry — resume from where the workflow left off", (
 
     // Suspend
     await runner.runSafe({ workflow: buildWf(), workflowId: "sr-1", input: "x" });
-    await new Promise((r) => setTimeout(r, 10));
+    clock.advance(10);
 
-    // Resume — flaky fails once, workflow retries, flaky succeeds
-    const result = await runner.run({ workflow: buildWf(), workflowId: "sr-1", input: "x" });
+    // Resume — flaky fails once, workflow retries after its 10ms backoff
+    // (on the clock), flaky succeeds.
+    const box: { result?: unknown } = {};
+    const running = runner
+      .run({ workflow: buildWf(), workflowId: "sr-1", input: "x" })
+      .then((r) => (box.result = r));
+    for (let i = 0; i < 2_000 && box.result === undefined; i++) {
+      await new Promise<void>((r) => setImmediate(r));
+      if (step2Calls === 1) clock.advance(1);
+    }
+    await running;
+    const result = box.result;
     expect(result).toBe("recovered");
     expect(step2Calls).toBe(2);
 
@@ -278,9 +298,10 @@ describe("Sleep + workflow retry — resume from where the workflow left off", (
 
 describe("Long sleep durations — schedule workflows days or months in the future", () => {
   it("30-day trial expiry reminder — wake-at timestamp is accurate", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
-    const before = Date.now();
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
+    const before = clock.currentTimeMs();
 
     const wf = workflow<string>({ name: "long-sleep" })
       .step("start", () => succeed("ok"))
@@ -293,17 +314,15 @@ describe("Long sleep durations — schedule workflows days or months in the futu
     const wakeAt = state?.steps["30-days"]?.wakeAt;
     expect(wakeAt).toBeInstanceOf(Date);
 
-    // wakeAt should be ~30 days from now
-    const expectedMs = 30 * 24 * 60 * 60 * 1000;
-    const actualMs = wakeAt!.getTime() - before;
-    expect(actualMs).toBeGreaterThan(expectedMs - 1000);
-    expect(actualMs).toBeLessThan(expectedMs + 1000);
+    // wakeAt is exactly 30 days after the run's clock time
+    expect(wakeAt!.getTime() - before).toBe(30 * 24 * 60 * 60 * 1000);
   });
 
   it("annual contract renewal in 1 year — wake-at timestamp is accurate", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
-    const before = Date.now();
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
+    const before = clock.currentTimeMs();
 
     const wf = workflow<string>({ name: "year-sleep" })
       .step("start", () => succeed("ok"))
@@ -316,9 +335,6 @@ describe("Long sleep durations — schedule workflows days or months in the futu
     const wakeAt = state?.steps["1-year"]?.wakeAt;
     expect(wakeAt).toBeInstanceOf(Date);
 
-    const expectedMs = 365 * 24 * 60 * 60 * 1000;
-    const actualMs = wakeAt!.getTime() - before;
-    expect(actualMs).toBeGreaterThan(expectedMs - 1000);
-    expect(actualMs).toBeLessThan(expectedMs + 1000);
+    expect(wakeAt!.getTime() - before).toBe(365 * 24 * 60 * 60 * 1000);
   });
 });

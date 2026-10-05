@@ -1,15 +1,18 @@
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
+import { FakeWallClock, type WallClock } from "@promin/workflow";
 import { stepQueueTestSuite } from "@promin/workflow/testing";
 import { SqliteStepQueue } from "../sqlite-step-queue.ts";
 
-function makeQueue(options: { maxDeliveries?: number } = {}) {
+function makeQueue(options: { maxDeliveries?: number; clock?: WallClock } = {}) {
   return SqliteStepQueue.make({ db: new Database(":memory:"), ...options });
 }
 
 // ---- conformance suite ----
 
-stepQueueTestSuite(({ maxDeliveries }) => makeQueue({ maxDeliveries }));
+stepQueueTestSuite(({ maxDeliveries, clock }) => makeQueue({ maxDeliveries, clock }), {
+  fakeClock: true,
+});
 
 // ---- SQLite-specific tests ----
 
@@ -44,16 +47,21 @@ describe("SqliteStepQueue", () => {
   });
 
   it("heartbeat resets the stale timeout", async () => {
-    const q = makeQueue();
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const q = SqliteStepQueue.make({ db: new Database(":memory:"), clock });
     await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
     const [task] = await q.claim({ workerId: "w-1", limit: 1 });
 
-    await new Promise((r) => setTimeout(r, 20));
-    await q.heartbeat({ taskId: task!.id });
+    clock.advance(400);
+    expect(await q.heartbeat({ taskId: task!.id, claimToken: task!.claimToken })).toBe(true);
 
-    // Cutoff = 500ms ago — heartbeat was <500ms ago, should NOT requeue
-    const { requeued } = await q.requeueStuck({ mode: "stale", olderThanMs: 500 });
-    expect(requeued).toBe(0);
+    // 800ms after the claim but 400ms after the heartbeat: not stale at 500ms.
+    clock.advance(400);
+    expect((await q.requeueStuck({ mode: "stale", olderThanMs: 500 })).requeued).toBe(0);
+
+    // Once the heartbeat itself is more than 500ms old, the task is requeued.
+    clock.advance(101);
+    expect((await q.requeueStuck({ mode: "stale", olderThanMs: 500 })).requeued).toBe(1);
   });
 
   it("metrics returns zero counts for empty queue", async () => {

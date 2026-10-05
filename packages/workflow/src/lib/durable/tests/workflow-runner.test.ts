@@ -12,6 +12,21 @@ import { InMemoryWorkflowVersionRegistry } from "../workflow-version-registry.ts
 
 class TestError extends TaggedError("TestError")<{ readonly message: string }>() {}
 
+/** A promise the test resolves by hand. */
+function gate(): { promise: Promise<void>; open: () => void } {
+  let open!: () => void;
+  const promise = new Promise<void>((r) => (open = r));
+  return { promise, open };
+}
+
+/** Yield to the event loop until `predicate` holds (bounded). */
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let i = 0; i < 2_000 && !predicate(); i++) {
+    await new Promise<void>((r) => setImmediate(r));
+  }
+  expect(predicate()).toBe(true);
+}
+
 describe("WorkflowRunner", () => {
   it("run({ workflow }) drives a pure Workflow through the runner's storage", async () => {
     const storage = new InMemoryWorkflowStorage();
@@ -132,82 +147,78 @@ describe("WorkflowRunner", () => {
 
   describe("eager save", () => {
     /**
-     * Storage decorator that records the wall-clock time of every step
-     * checkpoint (`checkpointStep` or `saveStepResult`). Lets the timing
-     * tests assert that fast steps persisted long before slow siblings in
-     * their wave.
+     * Storage decorator that records the order of step checkpoints
+     * (`checkpointStep` or `saveStepResult`), so a test can see a fast
+     * step persisted while its slow sibling is still running.
      */
     class RecordingStorage extends InMemoryWorkflowStorage {
-      readonly saves: Array<{ stepName: string; at: number }> = [];
+      readonly saves: string[] = [];
       override async saveStepResult(
         ...args: Parameters<InMemoryWorkflowStorage["saveStepResult"]>
       ): Promise<void> {
-        this.saves.push({ stepName: args[0].stepName, at: Date.now() });
+        this.saves.push(args[0].stepName);
         return super.saveStepResult(...args);
       }
       override async checkpointStep(
         ...args: Parameters<InMemoryWorkflowStorage["checkpointStep"]>
       ): ReturnType<InMemoryWorkflowStorage["checkpointStep"]> {
-        this.saves.push({ stepName: args[0].stepName, at: Date.now() });
+        this.saves.push(args[0].stepName);
         return super.checkpointStep(...args);
       }
     }
 
-    it("in-process path: a fast parallel step persists before its slow sibling finishes", async () => {
-      const storage = new RecordingStorage();
-      const wf = workflow<void>({ name: "eager-in-process" })
-        // Two parallel roots (no dependsOn) → same wave.
-        .stepAsync("fast", async () => {
-          // ~immediate
-          return "fast-done";
+    /** Two parallel roots: "fast" settles at once, "slow" waits for `release`. */
+    const eagerWorkflow = (name: string, release: Promise<void>) =>
+      workflow<void>({ name })
+        .stepAsync("fast", async () => "fast-done")
+        // `{ dependsOn: [] }` as the config makes "slow" a second root.
+        .stepAsync("slow", { dependsOn: [] }, async () => {
+          await release;
+          return "slow-done";
         })
-        .stepAsync(
-          "slow",
-          async () => {
-            await new Promise((r) => setTimeout(r, 200));
-            return "slow-done";
-          },
-          { dependsOn: [] },
-        )
         .build();
 
-      const runner = createWorkflowRunner({ storage });
-      await runner.run({ workflow: wf, workflowId: "eager-in-process-1", input: undefined });
+    it("in-process path: a fast parallel step persists before its slow sibling finishes", async () => {
+      const storage = new RecordingStorage();
+      const slow = gate();
+      const wf = eagerWorkflow("eager-in-process", slow.promise);
 
-      const fastSave = storage.saves.find((s) => s.stepName === "fast");
-      const slowSave = storage.saves.find((s) => s.stepName === "slow");
-      expect(fastSave).toBeDefined();
-      expect(slowSave).toBeDefined();
-      // The whole point of eager save: fast lands well before slow.
-      // Pre-eager, both timestamps would cluster within a few ms of each
-      // other (post-wave serial loop). 100ms gives ample margin against
-      // the 200ms slow body without flaking on slow CI.
-      expect(slowSave!.at - fastSave!.at).toBeGreaterThan(100);
+      const runner = createWorkflowRunner({ storage });
+      const running = runner.run({
+        workflow: wf,
+        workflowId: "eager-in-process-1",
+        input: undefined,
+      });
+
+      // The whole point of eager save: "fast" is checkpointed while "slow"
+      // is still parked, not after the wave.
+      await waitFor(() => storage.saves.includes("fast"));
+      expect(storage.saves).toEqual(["fast"]);
+
+      slow.open();
+      await running;
+      expect(storage.saves).toEqual(["fast", "slow"]);
     });
 
     it("executor path: a fast parallel step persists before its slow sibling finishes", async () => {
       const storage = new RecordingStorage();
-      const wf = workflow<void>({ name: "eager-executor" })
-        .stepAsync("fast", async () => "fast-done")
-        .stepAsync(
-          "slow",
-          async () => {
-            await new Promise((r) => setTimeout(r, 200));
-            return "slow-done";
-          },
-          { dependsOn: [] },
-        )
-        .build();
+      const slow = gate();
+      const wf = eagerWorkflow("eager-executor", slow.promise);
 
       const executor = new InProcessStepExecutor({ workflow: wf, storage });
       const runner = createWorkflowRunner({ storage, stepExecutor: executor });
-      await runner.run({ workflow: wf, workflowId: "eager-executor-1", input: undefined });
+      const running = runner.run({
+        workflow: wf,
+        workflowId: "eager-executor-1",
+        input: undefined,
+      });
 
-      const fastSave = storage.saves.find((s) => s.stepName === "fast");
-      const slowSave = storage.saves.find((s) => s.stepName === "slow");
-      expect(fastSave).toBeDefined();
-      expect(slowSave).toBeDefined();
-      expect(slowSave!.at - fastSave!.at).toBeGreaterThan(100);
+      await waitFor(() => storage.saves.includes("fast"));
+      expect(storage.saves).toEqual(["fast"]);
+
+      slow.open();
+      await running;
+      expect(storage.saves).toEqual(["fast", "slow"]);
     });
 
     it("partial-wave failure: a sibling that already completed has its row in storage", async () => {
@@ -217,16 +228,12 @@ describe("WorkflowRunner", () => {
       const storage = new RecordingStorage();
       const wf = workflow<void>({ name: "eager-partial" })
         .stepAsync("ok", async () => "yay")
-        .stepAsync(
-          "boom",
-          async () => {
-            // Tiny stagger so "ok" completes (and its eager save fires)
-            // before this throws.
-            await new Promise((r) => setTimeout(r, 20));
-            throw new Error("kaboom");
-          },
-          { dependsOn: [] },
-        )
+        // A second root, so "ok" and "boom" share a wave. No ordering help:
+        // the wave waits for every sibling and persists each outcome,
+        // whichever settles first.
+        .stepAsync("boom", { dependsOn: [] }, async (): Promise<string> => {
+          throw new Error("kaboom");
+        })
         .build();
 
       const runner = createWorkflowRunner({ storage });
@@ -259,8 +266,7 @@ describe("WorkflowRunner", () => {
 
       // Exactly one save call for the step — eager save fires it once,
       // post-wave loop sees `storageAlreadyCheckpointed: true` and skips.
-      const onceSaves = storage.saves.filter((s) => s.stepName === "once");
-      expect(onceSaves).toHaveLength(1);
+      expect(storage.saves).toEqual(["once"]);
     });
   });
 });

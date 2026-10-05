@@ -18,6 +18,31 @@ import { topologicalSort, computeReadySet } from "../workflow-dag.ts";
 // Test error types
 // ---------------------------------------------------------------------------
 
+const T0 = "2026-01-01T00:00:00Z";
+
+/**
+ * Await `promise` while advancing `clock` by `stepMs` between bounded
+ * rounds of macrotask turns, so step bodies and timers that wait on the
+ * fake clock make progress. Fails if it hasn't settled within `maxMs`.
+ */
+async function drive<T>(params: {
+  clock: FakeWallClock;
+  promise: Promise<T>;
+  stepMs?: number;
+  maxMs?: number;
+}): Promise<T> {
+  const { clock, stepMs = 10, maxMs = 10_000 } = params;
+  let settled = false;
+  const tracked = params.promise.finally(() => (settled = true));
+  tracked.catch(() => {});
+  for (let elapsed = 0; elapsed <= maxMs && !settled; elapsed += stepMs) {
+    for (let i = 0; i < 20 && !settled; i++) await new Promise<void>((r) => setImmediate(r));
+    if (!settled) clock.advance(stepMs);
+  }
+  expect(settled).toBe(true);
+  return tracked;
+}
+
 class FetchError extends TaggedError("FetchError")<{
   readonly message: string;
 }>() {}
@@ -948,11 +973,12 @@ describe("WorkflowBuilder", () => {
     });
 
     it("resumes after wake time passes", async () => {
-      const storage = new InMemoryWorkflowStorage();
-      const runner = createWorkflowRunner({ storage });
+      const clock = FakeWallClock.create(T0);
+      const storage = new InMemoryWorkflowStorage({ clock });
+      const runner = createWorkflowRunner({ storage, clock });
       const wf = workflow<{}>({ name: "sleep-resume" })
         .step("before", () => succeed("ready"))
-        .sleep("wait", 1) // 1ms sleep
+        .sleep("wait", 1_000)
         .step("after", ({ prev }) => succeed(`done: ${prev}`))
         .build();
 
@@ -964,10 +990,17 @@ describe("WorkflowBuilder", () => {
       });
       expect((error as WorkflowSuspendedError)._tag).toBe("WorkflowSuspendedError");
 
-      // Wait for the sleep to expire
-      await new Promise((r) => setTimeout(r, 10));
+      // A resume 1ms before the wake time suspends again.
+      clock.advance(999);
+      const early = await runner.runSafe({
+        workflow: wf,
+        workflowId: "wf-sleep-resume",
+        input: {},
+      });
+      expect((early.error as WorkflowSuspendedError)._tag).toBe("WorkflowSuspendedError");
 
-      // Resume: should complete
+      // Resume at the wake time: should complete
+      clock.advance(1);
       const result = await runner.run({ workflow: wf, workflowId: "wf-sleep-resume", input: {} });
       expect(result).toBe("done: ready");
     });
@@ -1028,20 +1061,33 @@ describe("WorkflowBuilder", () => {
     });
 
     it("times out if signal not delivered", async () => {
-      const storage = new InMemoryWorkflowStorage();
-      const runner = createWorkflowRunner({ storage });
+      const clock = FakeWallClock.create(T0);
+      const storage = new InMemoryWorkflowStorage({ clock });
+      const runner = createWorkflowRunner({ storage, clock });
       const wf = workflow<{}>({ name: "signal-timeout" })
         .step("before", () => succeed("ready"))
-        .waitForSignal("approval", { signalName: "never-comes", timeoutMs: 1 })
+        .waitForSignal("approval", { signalName: "never-comes", timeoutMs: 1_000 })
         .build();
 
       // First run: suspends
-      await runner.runSafe({ workflow: wf, workflowId: "wf-signal-timeout", input: {} });
+      const first = await runner.runSafe({
+        workflow: wf,
+        workflowId: "wf-signal-timeout",
+        input: {},
+      });
+      expect((first.error as WorkflowSuspendedError)._tag).toBe("WorkflowSuspendedError");
 
-      // Wait for timeout
-      await new Promise((r) => setTimeout(r, 10));
+      // 1ms before the deadline it is still waiting.
+      clock.advance(999);
+      const early = await runner.runSafe({
+        workflow: wf,
+        workflowId: "wf-signal-timeout",
+        input: {},
+      });
+      expect((early.error as WorkflowSuspendedError)._tag).toBe("WorkflowSuspendedError");
 
-      // Resume: should timeout
+      // Resume at the deadline: should timeout
+      clock.advance(1);
       const { error } = await runner.runSafe({
         workflow: wf,
         workflowId: "wf-signal-timeout",
@@ -2180,24 +2226,27 @@ describe("Step failure strategies", () => {
 
 describe("Per-step activity timeout", () => {
   it("step times out after timeoutMs", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
     const wf = workflow<{}>({ name: "step-timeout" })
       .stepAsync(
         "slow",
         async () => {
-          await new Promise((r) => setTimeout(r, 500));
+          await new Promise<void>((r) => clock.setTimeout(r, 500));
           return "done";
         },
         { timeoutMs: 30 },
       )
       .build();
 
-    const { error } = await runner.runSafe({
-      workflow: wf,
-      workflowId: "t-step-timeout",
-      input: {},
+    const startedAt = clock.currentTimeMs();
+    const { error } = await drive({
+      clock,
+      promise: runner.runSafe({ workflow: wf, workflowId: "t-step-timeout", input: {} }),
     });
+    // Failed at the 30ms timeout, long before the body's 500ms.
+    expect(clock.currentTimeMs() - startedAt).toBeLessThan(500);
     expect(error).not.toBeNull();
     expect((error as StepTimeoutError)._tag).toBe("StepTimeoutError");
     expect((error as StepTimeoutError).stepName).toBe("slow");
@@ -2234,15 +2283,16 @@ describe("Per-step activity timeout", () => {
   });
 
   it("Eff-returning step times out", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
     const wf = workflow<{}>({ name: "pipeline-step-timeout" })
       .step(
         "slow-pipeline",
         () =>
           tryPromise(
             async () => {
-              await new Promise((r) => setTimeout(r, 500));
+              await new Promise<void>((r) => clock.setTimeout(r, 500));
               return "done";
             },
             (e) => e,
@@ -2251,11 +2301,12 @@ describe("Per-step activity timeout", () => {
       )
       .build();
 
-    const { error } = await runner.runSafe({
-      workflow: wf,
-      workflowId: "t-pipeline-timeout",
-      input: {},
+    const startedAt = clock.currentTimeMs();
+    const { error } = await drive({
+      clock,
+      promise: runner.runSafe({ workflow: wf, workflowId: "t-pipeline-timeout", input: {} }),
     });
+    expect(clock.currentTimeMs() - startedAt).toBeLessThan(500);
     expect(error).not.toBeNull();
     expect((error as StepTimeoutError)._tag).toBe("StepTimeoutError");
     expect((error as StepTimeoutError).stepName).toBe("slow-pipeline");
@@ -2268,27 +2319,29 @@ describe("Per-step activity timeout", () => {
 
 describe("Workflow global deadline", () => {
   it("workflow times out after global deadline", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
-    // 3 steps each taking 30ms = ~90ms total, deadline at 50ms
-    // After step1 completes (~30ms < 50ms), step2 starts.
-    // After step2 completes (~60ms > 50ms), deadline check triggers before step3.
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
+    // 3 steps each taking 30ms of clock time = 90ms total, deadline at 50ms.
+    // step1 completes at 30ms (< 50ms), so step2 starts; step2 completes at
+    // 60ms (> 50ms), so the deadline check stops the run before step3.
+    const ran: string[] = [];
+    const slowStep = (name: string) => async () => {
+      ran.push(name);
+      await new Promise<void>((r) => clock.setTimeout(r, 30));
+      return name;
+    };
     const wf = workflow<{}>({ name: "deadline-test", timeoutMs: 50 })
-      .stepAsync("step1", async () => {
-        await new Promise((r) => setTimeout(r, 30));
-        return "a";
-      })
-      .stepAsync("step2", async () => {
-        await new Promise((r) => setTimeout(r, 30));
-        return "b";
-      })
-      .stepAsync("step3", async () => {
-        await new Promise((r) => setTimeout(r, 30));
-        return "c";
-      })
+      .stepAsync("step1", slowStep("step1"))
+      .stepAsync("step2", slowStep("step2"))
+      .stepAsync("step3", slowStep("step3"))
       .build();
 
-    const { error } = await runner.runSafe({ workflow: wf, workflowId: "t-deadline", input: {} });
+    const { error } = await drive({
+      clock,
+      promise: runner.runSafe({ workflow: wf, workflowId: "t-deadline", input: {} }),
+    });
+    expect(ran).toEqual(["step1", "step2"]);
     expect(error).not.toBeNull();
     expect((error as WorkflowDeadlineError)._tag).toBe("WorkflowDeadlineError");
     expect((error as WorkflowDeadlineError).timeoutMs).toBe(50);

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
 import { storageTestSuite } from "@promin/workflow/testing";
-import type { WorkflowStorage } from "@promin/workflow";
+import { FakeWallClock, type WorkflowStorage } from "@promin/workflow";
 import { SqliteWorkflowStorage } from "../sqlite-workflow-storage.ts";
 
 function makeStorage() {
@@ -103,9 +103,10 @@ describe("SqliteWorkflowStorage", () => {
   });
 
   it("purgeCompleted removes signals and run history", async () => {
-    const s = makeStorage();
-    const before = new Date();
-    await new Promise((r) => setTimeout(r, 10));
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const s = SqliteWorkflowStorage.make({ db: new Database(":memory:"), clock });
+    const before = clock.now();
+    clock.advance(10);
     await s.createWorkflow({ workflowId: "purge-sqlite", workflowName: "test", input: {} });
     await s.deliverSignal({
       workflowId: "purge-sqlite",
@@ -113,8 +114,8 @@ describe("SqliteWorkflowStorage", () => {
       payload: { ok: true },
     });
     await s.completeWorkflow({ workflowId: "purge-sqlite", result: "result" });
-    await new Promise((r) => setTimeout(r, 10));
-    const after = new Date();
+    clock.advance(10);
+    const after = clock.now();
 
     await s.purgeCompleted({ from: before, to: after, limit: 100 });
 
@@ -159,14 +160,15 @@ describe("SqliteWorkflowStorage", () => {
   });
 
   it("cancelStaleWorkflows bulk-fails runs older than the cutoff", async () => {
-    const s = makeStorage();
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const s = SqliteWorkflowStorage.make({ db: new Database(":memory:"), clock });
     await s.createWorkflow({ workflowId: "stale-1", workflowName: "wf", input: {} });
     await s.createWorkflow({ workflowId: "stale-2", workflowName: "wf", input: {} });
     await s.createWorkflow({ workflowId: "stale-3", workflowName: "wf", input: {} });
     await s.completeWorkflow({ workflowId: "stale-3", result: "done" });
 
-    // Wait a tick so created_at is clearly in the past, then cancel with 0ms cutoff.
-    await new Promise((r) => setTimeout(r, 5));
+    // Move the clock so created_at is in the past, then cancel with 0ms cutoff.
+    clock.advance(5);
     const cancelled = s.cancelStaleWorkflows({ olderThanMs: 0, statuses: ["pending"] });
 
     expect(cancelled).toBe(2); // stale-1 and stale-2 (not stale-3, already completed)

@@ -10,6 +10,7 @@
 
 import { describe, it, expect } from "bun:test";
 import type { WorkerRegistry } from "./worker-registry.ts";
+import { FakeWallClock } from "../shared/wall-clock.ts";
 
 /**
  * Invoke this inside a describe block (or at the top level) to run the
@@ -20,20 +21,42 @@ import type { WorkerRegistry } from "./worker-registry.ts";
  * `postgresDescribe` which gives a clean schema per test).
  */
 export function workerRegistryConformance(params: {
-  /** Fresh registry per test. Called inside `it`, so async setup is fine. */
-  factory: () => Promise<WorkerRegistry>;
   /**
-   * Tolerance for heartbeat-timestamp assertions. In-memory uses Date.now()
-   * so 50ms is plenty; Postgres tests may want more if the connection is
-   * slow. Default: 50ms.
+   * Fresh registry per test, on the test's `clock`. Called inside `it`, so
+   * async setup is fine. Pass `clock` to the registry so the suite moves
+   * time with `clock.advance()` instead of waiting.
+   */
+  factory: (params: { clock: FakeWallClock }) => Promise<WorkerRegistry>;
+  /**
+   * The registry stamps and compares times on its own clock (Postgres uses
+   * the server's `NOW()`) and ignores `clock`. The suite then waits real
+   * time where it would advance the clock. Default: false.
+   */
+  serverClock?: boolean;
+  /**
+   * With `serverClock`: how long to wait for a heartbeat timestamp to move
+   * past the registration's. Default: 50ms.
    */
   heartbeatToleranceMs?: number;
 }): void {
   const tolerance = params.heartbeatToleranceMs ?? 50;
 
+  /** A fresh registry and a way to let `ms` pass for it. */
+  const fresh = async (): Promise<{
+    registry: WorkerRegistry;
+    elapse: (ms: number) => Promise<void>;
+  }> => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const registry = await params.factory({ clock });
+    const elapse = params.serverClock
+      ? (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+      : async (ms: number) => clock.advance(ms);
+    return { registry, elapse };
+  };
+
   describe("register + list", () => {
     it("new worker lands with its capabilities, concurrency, metadata", async () => {
-      const registry = await params.factory();
+      const { registry } = await fresh();
       await registry.register({
         workerId: "w-1",
         capabilities: ["default"],
@@ -50,7 +73,7 @@ export function workerRegistryConformance(params: {
     });
 
     it("re-registering the same workerId replaces the prior row", async () => {
-      const registry = await params.factory();
+      const { registry } = await fresh();
       await registry.register({
         workerId: "w-1",
         capabilities: ["old"],
@@ -70,17 +93,17 @@ export function workerRegistryConformance(params: {
 
   describe("heartbeat", () => {
     it("advances the lastHeartbeat timestamp", async () => {
-      const registry = await params.factory();
+      const { registry, elapse } = await fresh();
       await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
       const before = (await registry.list())[0]!.lastHeartbeat;
-      await wait(tolerance + 10);
+      await elapse(tolerance + 10);
       await registry.heartbeat("w-1");
       const after = (await registry.list())[0]!.lastHeartbeat;
       expect(after.getTime()).toBeGreaterThan(before.getTime());
     });
 
     it("silently no-ops on unknown worker", async () => {
-      const registry = await params.factory();
+      const { registry } = await fresh();
       await registry.heartbeat("nobody");
       expect(await registry.list()).toHaveLength(0);
     });
@@ -88,7 +111,7 @@ export function workerRegistryConformance(params: {
 
   describe("drain", () => {
     it("transitions the worker to status=draining", async () => {
-      const registry = await params.factory();
+      const { registry } = await fresh();
       await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
       await registry.drain("w-1");
       const draining = await registry.list({ status: "draining" });
@@ -97,7 +120,7 @@ export function workerRegistryConformance(params: {
     });
 
     it("silently no-ops on unknown worker", async () => {
-      const registry = await params.factory();
+      const { registry } = await fresh();
       await registry.drain("nobody");
       expect(await registry.list()).toHaveLength(0);
     });
@@ -105,7 +128,7 @@ export function workerRegistryConformance(params: {
 
   describe("deregister", () => {
     it("retires the worker — keeps the row, sets status=retired + retiredAt", async () => {
-      const registry = await params.factory();
+      const { registry } = await fresh();
       await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
       await registry.deregister("w-1");
 
@@ -119,7 +142,7 @@ export function workerRegistryConformance(params: {
     });
 
     it("silently no-ops on unknown worker", async () => {
-      const registry = await params.factory();
+      const { registry } = await fresh();
       await registry.deregister("nobody");
       expect(await registry.list()).toHaveLength(0);
     });
@@ -127,7 +150,7 @@ export function workerRegistryConformance(params: {
 
   describe("list", () => {
     it("filters by status", async () => {
-      const registry = await params.factory();
+      const { registry } = await fresh();
       await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
       await registry.register({ workerId: "w-2", capabilities: ["gpu"], concurrency: 2 });
       await registry.drain("w-2");
@@ -140,7 +163,7 @@ export function workerRegistryConformance(params: {
     });
 
     it("returns all workers regardless of status when no filter", async () => {
-      const registry = await params.factory();
+      const { registry } = await fresh();
       await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
       await registry.register({ workerId: "w-2", capabilities: [], concurrency: 1 });
       await registry.drain("w-2");
@@ -151,9 +174,9 @@ export function workerRegistryConformance(params: {
 
   describe("detectDead", () => {
     it("marks stale workers as dead and returns them", async () => {
-      const registry = await params.factory();
+      const { registry, elapse } = await fresh();
       await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
-      await wait(120);
+      await elapse(120);
 
       const dead = await registry.detectDead(50);
       expect(dead).toHaveLength(1);
@@ -165,7 +188,7 @@ export function workerRegistryConformance(params: {
     });
 
     it("leaves fresh workers alone", async () => {
-      const registry = await params.factory();
+      const { registry } = await fresh();
       await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
       const dead = await registry.detectDead(60_000);
       expect(dead).toHaveLength(0);
@@ -174,9 +197,9 @@ export function workerRegistryConformance(params: {
     });
 
     it("is idempotent — running twice does not re-mark already-dead workers", async () => {
-      const registry = await params.factory();
+      const { registry, elapse } = await fresh();
       await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
-      await wait(120);
+      await elapse(120);
 
       const first = await registry.detectDead(50);
       expect(first).toHaveLength(1);
@@ -186,10 +209,10 @@ export function workerRegistryConformance(params: {
     });
 
     it("also catches draining workers that stopped heartbeating", async () => {
-      const registry = await params.factory();
+      const { registry, elapse } = await fresh();
       await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
       await registry.drain("w-1");
-      await wait(120);
+      await elapse(120);
 
       const dead = await registry.detectDead(50);
       expect(dead).toHaveLength(1);
@@ -198,10 +221,10 @@ export function workerRegistryConformance(params: {
     });
 
     it("never relabels a retired worker as dead", async () => {
-      const registry = await params.factory();
+      const { registry, elapse } = await fresh();
       await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
       await registry.deregister("w-1"); // graceful retire
-      await wait(120);
+      await elapse(120);
 
       // A retired worker's heartbeat is stale, but it stopped on purpose.
       const dead = await registry.detectDead(50);
@@ -213,10 +236,10 @@ export function workerRegistryConformance(params: {
 
   describe("gc", () => {
     it("reaps a retired worker once retiredAt is older than retainMs", async () => {
-      const registry = await params.factory();
+      const { registry, elapse } = await fresh();
       await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
       await registry.deregister("w-1");
-      await wait(120);
+      await elapse(120);
 
       const reaped = await registry.gc({ retainMs: 50 });
       expect(reaped).toBe(1);
@@ -224,7 +247,7 @@ export function workerRegistryConformance(params: {
     });
 
     it("keeps a retired worker still inside the retention window", async () => {
-      const registry = await params.factory();
+      const { registry } = await fresh();
       await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
       await registry.deregister("w-1");
 
@@ -234,9 +257,9 @@ export function workerRegistryConformance(params: {
     });
 
     it("reaps a dead worker whose heartbeat is older than retainMs", async () => {
-      const registry = await params.factory();
+      const { registry, elapse } = await fresh();
       await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
-      await wait(120);
+      await elapse(120);
       await registry.detectDead(50); // → dead
 
       const reaped = await registry.gc({ retainMs: 50 });
@@ -245,7 +268,7 @@ export function workerRegistryConformance(params: {
     });
 
     it("keeps a worker with a fresh heartbeat", async () => {
-      const registry = await params.factory();
+      const { registry } = await fresh();
       await registry.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
 
       const reaped = await registry.gc({ retainMs: 60_000 });
@@ -253,8 +276,4 @@ export function workerRegistryConformance(params: {
       expect(await registry.list()).toHaveLength(1);
     });
   });
-}
-
-async function wait(ms: number): Promise<void> {
-  await new Promise((r) => setTimeout(r, ms));
 }

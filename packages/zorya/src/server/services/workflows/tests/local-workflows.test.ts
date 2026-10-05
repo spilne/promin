@@ -36,7 +36,7 @@ describe("LocalWorkflows.trigger", () => {
     expect(r.workflowId).toBeDefined();
 
     // Wait for completion (fire-and-forget runner)
-    await new Promise((res) => setTimeout(res, 100));
+    await waitFor(async () => (await storage.loadWorkflow(r.workflowId))?.status === "completed");
     const state = await storage.loadWorkflow(r.workflowId);
     expect(state?.status).toBe("completed");
     expect(state?.result).toBe(10);
@@ -110,13 +110,17 @@ describe("LocalWorkflows.rerun", () => {
     });
 
     const { workflowId } = await workflows.trigger("double", { n: 4 });
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(async () => (await storage.loadWorkflow(workflowId))?.status === "completed");
 
     const before = await storage.loadWorkflow(workflowId);
     expect(before?.status).toBe("completed");
 
+    // A rerun starts a fresh run (run counter + 1) and executes it again.
     await workflows.rerun(workflowId);
-    await new Promise((r) => setTimeout(r, 100));
+    await waitFor(async () => {
+      const s = await storage.loadWorkflow(workflowId);
+      return s?.run === before!.run + 1 && s.status === "completed";
+    });
 
     const after = await storage.loadWorkflow(workflowId);
     expect(after?.status).toBe("completed");

@@ -3,6 +3,7 @@ import { TaggedError, succeed, fail, tryPromise } from "@spilne/perfect-core";
 import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 class BranchFailed extends TaggedError("BranchFailed")<{ readonly message: string }>() {}
 
@@ -198,42 +199,44 @@ describe("parallel", () => {
     expect(leftNode.dependsOn).toEqual(["start"]);
   });
 
-  it("runs branches concurrently (timing observable)", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
+  it("runs branches concurrently", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
+    const started: string[] = [];
 
+    // Each branch takes 40ms of clock time.
+    const branch = (name: string) => () =>
+      tryPromise(
+        async () => {
+          started.push(name);
+          await new Promise<void>((r) => clock.setTimeout(r, 40));
+          return name;
+        },
+        (e) => e,
+      ).orDie();
     const wf = workflow<number>({ name: "par-concurrent" })
-      .parallelSteps("sleep", {
-        a: () =>
-          tryPromise(
-            async () => {
-              await new Promise((r) => setTimeout(r, 40));
-              return "a";
-            },
-            (e) => e,
-          ).orDie(),
-        b: () =>
-          tryPromise(
-            async () => {
-              await new Promise((r) => setTimeout(r, 40));
-              return "b";
-            },
-            (e) => e,
-          ).orDie(),
-      })
+      .parallelSteps("sleep", { a: branch("a"), b: branch("b") })
       .build();
 
-    const t0 = Date.now();
-    const result = await runner.run({
-      workflow: wf,
-      workflowId: "wf-conc-1",
-      input: 0,
-    });
-    const elapsed = Date.now() - t0;
+    const t0 = clock.currentTimeMs();
+    let result: unknown;
+    const running = runner
+      .run({ workflow: wf, workflowId: "wf-conc-1", input: 0 })
+      .then((r) => (result = r));
 
+    // Both branches are in flight before any clock time has passed; run
+    // one after the other, "b" could only start 40ms later.
+    for (let i = 0; i < 2_000 && started.length < 2; i++) {
+      await new Promise<void>((r) => setImmediate(r));
+    }
+    expect(started.sort()).toEqual(["a", "b"]);
+    expect(clock.currentTimeMs()).toBe(t0);
+
+    // One 40ms advance finishes both.
+    clock.advance(40);
+    await running;
     expect(result).toEqual({ a: "a", b: "b" });
-    // If they ran sequentially this would be ≥ 80ms. Allow generous headroom
-    // for CI noise but still gate on concurrency.
-    expect(elapsed).toBeLessThan(75);
+    expect(clock.currentTimeMs() - t0).toBe(40);
   });
 });

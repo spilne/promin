@@ -12,6 +12,7 @@ import { describe, it, expect, beforeEach } from "bun:test";
 import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 describe("ctx.run({ idempotencyKey })", () => {
   let storage: InMemoryWorkflowStorage;
@@ -102,7 +103,9 @@ describe("ctx.run({ idempotencyKey })", () => {
       .step("multiply", ({ input }) => succeed(input.n * 2))
       .build();
 
-    const runner = createWorkflowRunner({ storage });
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    storage = new InMemoryWorkflowStorage({ clock });
+    const runner = createWorkflowRunner({ storage, clock });
 
     const id1 = crypto.randomUUID();
     await runner.run({
@@ -110,11 +113,11 @@ describe("ctx.run({ idempotencyKey })", () => {
       workflowId: id1,
       input: { n: 1 },
       idempotencyKey: "ephemeral",
-      idempotencyKeyTTL: 1, // 1ms — expires immediately
+      idempotencyKeyTTL: 1_000,
     });
 
-    // Wait so the key is unambiguously past expiry.
-    await new Promise((r) => setTimeout(r, 5));
+    // Move the clock past the key's expiry.
+    clock.advance(1_000);
 
     const id2 = crypto.randomUUID();
     await runner.run({
@@ -133,7 +136,7 @@ describe("ctx.run({ idempotencyKey })", () => {
     const hit = await storage.findWorkflowByIdempotencyKey({
       workflowName: "compute",
       idempotencyKey: "ephemeral",
-      now: new Date(),
+      now: clock.now(),
     });
     expect(hit?.workflowId).toBe(id2);
   });

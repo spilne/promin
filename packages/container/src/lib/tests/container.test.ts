@@ -220,7 +220,15 @@ describe("Container step integration — run containerized commands as workflow 
     });
 
     void worker.start();
-    await new Promise((r) => setTimeout(r, 500));
+    // The step spawns a real process, so wait on its outcome (bounded by a
+    // deadline) rather than for a fixed time.
+    const deadline = performance.now() + 10_000;
+    while (
+      (await storage.loadWorkflow("cs-1"))?.steps["container-step"]?.status !== "completed" &&
+      performance.now() < deadline
+    ) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
     await worker.stop();
 
     const state = await storage.loadWorkflow("cs-1");

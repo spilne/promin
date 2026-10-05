@@ -67,47 +67,68 @@ describe("stream() — concurrency contract", () => {
   it("AbortSignal aborts mid-stream without hanging", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
-    const session = await agentLoop({
-      llm: makeStreamingLLM({
-        chunks: ["one ", "two ", "three ", "four ", "five"],
-        perChunkDelayMs: 20,
-      }),
-    }).session({ runner, sessionId: "stream-abort" });
+    // Two chunks, then the LLM stalls until its request is aborted: the
+    // stream can only end through the caller's abort, so no timing is
+    // involved in telling "abort propagated" from "hung".
+    const llm = {
+      chat: async () => {
+        throw new Error("non-streaming chat not used in this test");
+      },
+      chatStream: async function* (params: LLMChatParams): AsyncIterable<LLMChatStreamChunk> {
+        yield { delta: "one " };
+        yield { delta: "two " };
+        await new Promise<void>((resolve) => {
+          if (params.signal?.aborted) return resolve();
+          params.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        // Match real provider behaviour — abort ends the stream.
+      },
+    } as unknown as LLMProvider;
+    const session = await agentLoop({ llm }).session({ runner, sessionId: "stream-abort" });
 
     const ac = new AbortController();
     const collected: string[] = [];
     let chunkCount = 0;
-    const startedAt = Date.now();
     for await (const chunk of session.stream("count", { signal: ac.signal })) {
       collected.push(chunk);
       chunkCount++;
       if (chunkCount === 2) ac.abort();
     }
-    const elapsed = Date.now() - startedAt;
 
-    // Should exit before all 5 chunks emit (otherwise abort didn't propagate).
-    expect(collected.length).toBeLessThan(5);
-    // And shouldn't hang for the full delay sequence.
-    expect(elapsed).toBeLessThan(200);
+    // The iteration ended after the abort, with the chunks seen before it.
+    expect(collected).toEqual(["one ", "two "]);
     await session.close();
   });
 
   it("session.close() during streaming ends the iteration without hanging", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
-    const session = await agentLoop({
-      llm: makeStreamingLLM({
-        chunks: ["a ", "b ", "c ", "d ", "e"],
-        perChunkDelayMs: 20,
-      }),
-    }).session({ runner, sessionId: "stream-close" });
+    // The LLM streams one chunk and then stalls until the request is
+    // aborted, so only close() can end the iteration — no timing involved.
+    const llm = {
+      chat: async () => {
+        throw new Error("non-streaming chat not used in this test");
+      },
+      chatStream: async function* (params: LLMChatParams): AsyncIterable<LLMChatStreamChunk> {
+        yield { delta: "a " };
+        await new Promise<void>((resolve) => {
+          if (params.signal?.aborted) return resolve();
+          params.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+      },
+    } as unknown as LLMProvider;
+    const session = await agentLoop({ llm }).session({ runner, sessionId: "stream-close" });
 
     const collected: string[] = [];
-    setTimeout(() => session.close(), 30);
-    const startedAt = Date.now();
+    let closed = false;
     try {
       for await (const chunk of session.stream("go")) {
         collected.push(chunk);
+        // Close mid-stream, while the LLM is stalled on the next chunk.
+        if (!closed) {
+          closed = true;
+          void session.close();
+        }
       }
     } catch (err) {
       // close() rejects the answerPromise with "Session closed"; either a
@@ -115,10 +136,9 @@ describe("stream() — concurrency contract", () => {
       // guarding against is HANGING, not erroring.
       expect((err as Error).message).toMatch(/Session closed/i);
     }
-    const elapsed = Date.now() - startedAt;
-    // Full chunk sequence would be 5 × 20ms = 100ms. Close at 30ms must
-    // unblock the iterator before then.
-    expect(elapsed).toBeLessThan(120);
+    // We got here: the iteration ended although the LLM never finished.
+    expect(closed).toBe(true);
+    expect(collected).toEqual(["a "]);
   });
 
   it("LLM error AFTER chunks have streamed surfaces from the for-await (no hang, no swallow)", async () => {

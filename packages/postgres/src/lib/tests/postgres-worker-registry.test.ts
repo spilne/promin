@@ -10,14 +10,17 @@ import { postgresDescribe } from "../test-utils.ts";
 // factory to give each `it` the same fresh-registry semantics InMemory
 // gets for free.
 //
-// heartbeatToleranceMs bumped vs InMemory — Postgres timestamps round-trip
-// through the network + driver so a 50ms window flakes on slow CI.
+// The registry stamps and compares times with the server's NOW(), so the
+// suite can't move its time with a fake clock (`serverClock`) and waits
+// real time instead; heartbeatToleranceMs is bumped vs the 50ms default
+// because timestamps round-trip through the network + driver.
 postgresDescribe("PostgresWorkerRegistry conformance", { migrate }, (pg) => {
   workerRegistryConformance({
     factory: async () => {
       await pg.db.execute(sql`TRUNCATE TABLE wf_worker_registry`);
       return PostgresWorkerRegistry.create({ db: pg.db });
     },
+    serverClock: true,
     heartbeatToleranceMs: 150,
   });
 });

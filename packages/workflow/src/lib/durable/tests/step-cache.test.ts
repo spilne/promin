@@ -18,6 +18,7 @@ import { MemoryCache, type CacheStore } from "../../shared/cache-store.ts";
 import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -136,7 +137,8 @@ describe("step cache — hit / miss / TTL", () => {
   });
 
   it("expired entry triggers re-execution", async () => {
-    const cache = new MemoryCache<string, unknown>({ ttlMs: 1 });
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const cache = new MemoryCache<string, unknown>({ ttlMs: 1_000, clock });
     const c = counter();
 
     const storage = new InMemoryWorkflowStorage();
@@ -152,7 +154,7 @@ describe("step cache — hit / miss / TTL", () => {
         {
           cache: {
             key: () => "k",
-            ttlMs: 1, // 1ms — effectively "immediately stale"
+            ttlMs: 1_000,
             store: cache,
           },
         },
@@ -160,11 +162,14 @@ describe("step cache — hit / miss / TTL", () => {
       .build();
 
     const r1 = await runner.run({ workflow: wf, workflowId: "w1", input: {} });
-    await new Promise((r) => setTimeout(r, 20));
+    clock.advance(1_000);
     const r2 = await runner.run({ workflow: wf, workflowId: "w2", input: {} });
+    clock.advance(1);
+    const r3 = await runner.run({ workflow: wf, workflowId: "w3", input: {} });
 
     expect(r1).toBe(1);
-    expect(r2).toBe(2); // fresh run after expiry
+    expect(r2).toBe(1); // still cached at the TTL boundary
+    expect(r3).toBe(2); // fresh run once the entry expired
     expect(c.box.value).toBe(2);
   });
 

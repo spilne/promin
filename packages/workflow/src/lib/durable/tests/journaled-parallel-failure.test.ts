@@ -22,6 +22,10 @@ describe("ctx.parallel — failure semantics", () => {
   it("first branch failure rejects the parallel; other branches still complete", async () => {
     const storage = new InMemoryWorkflowStorage();
     const ranOther = { value: false };
+    // The other branch is still running when the failure rejects the
+    // parallel; it finishes only once the test lets it.
+    let release!: () => void;
+    const released = new Promise<void>((r) => (release = r));
 
     await expect(
       runJournaledStep<unknown, unknown, unknown>({
@@ -36,7 +40,7 @@ describe("ctx.parallel — failure semantics", () => {
               throw new Error("boom");
             }),
             ctx.activity("slower", async () => {
-              await new Promise((r) => setTimeout(r, 30));
+              await released;
               ranOther.value = true;
               return "ok";
             }),
@@ -45,11 +49,19 @@ describe("ctx.parallel — failure semantics", () => {
       }),
     ).rejects.toThrow("boom");
 
-    // Let the straggler settle so its journal write lands before we inspect.
-    await new Promise((r) => setTimeout(r, 50));
+    expect(ranOther.value).toBe(false);
+
+    // Let the straggler finish; its journal write still lands.
+    release();
+    const slowerEntry = async () =>
+      (await storage.loadJournal({ workflowId: "wf-first-fail", stepName: "s" })).find(
+        (e) => e.activityName === "slower" && e.phase === "completed",
+      );
+    for (let i = 0; i < 2_000 && !(await slowerEntry()); i++) {
+      await new Promise<void>((r) => setImmediate(r));
+    }
     expect(ranOther.value).toBe(true);
-    const journal = await storage.loadJournal({ workflowId: "wf-first-fail", stepName: "s" });
-    const slower = journal.find((e) => e.activityName === "slower");
+    const slower = await slowerEntry();
     expect(slower).toBeDefined();
     expect(slower!.exit?.tag).toBe("Success");
   });

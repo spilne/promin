@@ -1498,9 +1498,12 @@ describe("StateMachine", () => {
       expect((await m.getState("t-3"))!.current).toBe("timedOut");
     });
 
-    it("auto-scheduled timeout fires via setTimeout in real time", async () => {
-      // Use a very short timeout (10ms) and real timers for the in-process path.
-      const m = stateMachine<ApprovalStates>({ name: "approval-auto", storage })
+    it("auto-scheduled timeout fires on its own timer at the deadline", async () => {
+      // The in-process path schedules the timeout as a timer on the
+      // machine's clock; advancing the clock fires it.
+      const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+      storage = new InMemoryStateMachineStorage({ clock });
+      const m = stateMachine<ApprovalStates>({ name: "approval-auto", storage, clock })
         .state("pending", { timeout: { ms: 10, target: "timedOut" } })
         .state("approved", { terminal: true })
         .state("timedOut", { terminal: true })
@@ -1511,8 +1514,14 @@ describe("StateMachine", () => {
       await m.start({ id: "t-4", context: { item: "x" } });
       expect((await m.getState("t-4"))!.current).toBe("pending");
 
-      await new Promise((r) => setTimeout(r, 40));
+      clock.advance(9);
+      await new Promise<void>((r) => setImmediate(r));
+      expect((await m.getState("t-4"))!.current).toBe("pending");
 
+      clock.advance(1);
+      for (let i = 0; i < 2_000 && (await m.getState("t-4"))!.current !== "timedOut"; i++) {
+        await new Promise<void>((r) => setImmediate(r));
+      }
       expect((await m.getState("t-4"))!.current).toBe("timedOut");
       m.cancelAllTimeouts();
     });

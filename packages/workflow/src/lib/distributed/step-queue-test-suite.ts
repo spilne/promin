@@ -3,10 +3,17 @@
 //
 // Usage:
 //   import { stepQueueTestSuite } from "@promin/workflow/testing";
-//   stepQueueTestSuite(({ maxDeliveries }) => new InMemoryStepQueue({ maxDeliveries }));
+//   stepQueueTestSuite(
+//     ({ maxDeliveries, clock }) => new InMemoryStepQueue({ maxDeliveries, clock }),
+//     { fakeClock: true },
+//   );
 //
-// The factory receives the queue options a case needs (`maxDeliveries`);
-// a factory that ignores them only fails the dead-letter cases.
+// The factory receives the queue options a case needs (`maxDeliveries`)
+// and the case's clock; a factory that ignores `maxDeliveries` only fails
+// the dead-letter cases. With `fakeClock`, the queue must take every time
+// it compares from `clock` (claim, heartbeat and stale cutoffs), and the
+// suite advances it instead of waiting; without it the suite waits real
+// time and the queue may ignore `clock`.
 //
 // Lease fencing of `requeueStuck` is opt-in: pass `leaseFenced`, a factory
 // for a queue wired to a lease store, plus that store:
@@ -26,11 +33,17 @@
 import { describe, it, expect } from "bun:test";
 import { deadLetterError, type StepQueue, type StepQueueEnqueueParams } from "./step-queue.ts";
 import { isStaleLeaseError, type LeaderLeaseStore } from "../scheduler/leader-lease.ts";
+import { FakeWallClock } from "../shared/wall-clock.ts";
 
 /** Queue options a conformance case asks the factory for. */
 export interface StepQueueTestOptions {
   /** Deliveries before `requeueStuck` dead-letters a task. */
   maxDeliveries?: number;
+  /**
+   * The case's clock. Pass it to the queue when the suite runs with
+   * `fakeClock`; the suite then moves time with `clock.advance()`.
+   */
+  clock: FakeWallClock;
 }
 
 /** A queue that fences `requeueStuck({ lease })` against `leases`. */
@@ -47,6 +60,13 @@ export interface StepQueueTestSuiteOptions {
    * per case, so the lease store may be shared.
    */
   leaseFenced?: () => LeaseFencedStepQueue | Promise<LeaseFencedStepQueue>;
+  /**
+   * The factory's queue takes all its time math from `options.clock`, so
+   * cases that need time to pass advance that clock instead of waiting
+   * real time. Leave unset for a queue that compares times with another
+   * clock (e.g. a database's `NOW()`). Default: false.
+   */
+  fakeClock?: boolean;
 }
 
 export function stepQueueTestSuite(
@@ -54,10 +74,18 @@ export function stepQueueTestSuite(
   suiteOptions: StepQueueTestSuiteOptions = {},
 ) {
   let queue: StepQueue;
+  let clock = FakeWallClock.create(Date.now());
 
-  async function getQueue(options: StepQueueTestOptions = {}): Promise<StepQueue> {
-    queue = await factory(options);
+  async function getQueue(options: Omit<StepQueueTestOptions, "clock"> = {}): Promise<StepQueue> {
+    clock = FakeWallClock.create(Date.now());
+    queue = await factory({ ...options, clock });
     return queue;
+  }
+
+  /** Let `ms` pass for the current queue: on its clock, or in real time. */
+  async function elapse(ms: number): Promise<void> {
+    if (suiteOptions.fakeClock) clock.advance(ms);
+    else await new Promise((r) => setTimeout(r, ms));
   }
 
   const task = (
@@ -404,7 +432,7 @@ export function stepQueueTestSuite(
         await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
         await q.claim({ workerId: "w-1", limit: 1 });
 
-        await new Promise((r) => setTimeout(r, 10));
+        await elapse(10);
         const { requeued } = await q.requeueStuck({ mode: "stale", olderThanMs: 1 });
         expect(requeued).toBe(1);
 
@@ -428,7 +456,7 @@ export function stepQueueTestSuite(
         const [task] = await q.claim({ workerId: "w-1", limit: 1 });
 
         // Wait so claimedAt is in the past, then heartbeat to reset last-activity
-        await new Promise((r) => setTimeout(r, 20));
+        await elapse(20);
         await q.heartbeat({ taskId: task!.id });
 
         // staleTimeoutMs: 500 — heartbeat was < 500ms ago, so should not requeue
@@ -443,7 +471,7 @@ export function stepQueueTestSuite(
         await q.heartbeat({ taskId: first!.id, claimToken: first!.claimToken });
 
         // The first claimant goes silent until its heartbeat is stale.
-        await new Promise((r) => setTimeout(r, 300));
+        await elapse(300);
         expect((await q.requeueStuck({ mode: "stale", olderThanMs: 250 })).requeued).toBe(1);
 
         const [second] = await q.claim({ workerId: "w-1", limit: 1 });
@@ -459,7 +487,7 @@ export function stepQueueTestSuite(
         const [first] = await q.claim({ workerId: "w-1", limit: 1 });
         expect(first?.claimToken).toBeDefined();
 
-        await new Promise((r) => setTimeout(r, 10));
+        await elapse(10);
         expect((await q.requeueStuck({ mode: "stale", olderThanMs: 1 })).requeued).toBe(1);
 
         const [second] = await q.claim({ workerId: "w-1", limit: 1 });
@@ -494,7 +522,7 @@ export function stepQueueTestSuite(
         await q.complete({ taskId: tasks[0]!.id, result: "ok", durationMs: 10 });
         await q.fail({ taskId: tasks[1]!.id, error: "err", durationMs: 10 });
 
-        await new Promise((r) => setTimeout(r, 10));
+        await elapse(10);
         const { requeued } = await q.requeueStuck({ mode: "stale", olderThanMs: 0 });
         expect(requeued).toBe(0);
       });
@@ -551,8 +579,8 @@ export function stepQueueTestSuite(
             }),
           );
         }
-        // Small delay so claimed_at - created_at > 0 in Postgres-resolution time.
-        await new Promise((r) => setTimeout(r, 10));
+        // Let time pass so claimed_at - created_at > 0 (also at Postgres resolution).
+        await elapse(10);
         const claimed = await q.claim({ workerId: "w-1", limit: 3 });
         expect(claimed).toHaveLength(3);
 
@@ -941,7 +969,7 @@ export function stepQueueTestSuite(
         await q.enqueue(task("a", "s"));
         const [first] = await q.claim({ workerId: "w-dead", limit: 1 });
         await q.heartbeat({ taskId: first!.id, claimToken: first!.claimToken });
-        await new Promise((r) => setTimeout(r, 300));
+        await elapse(300);
 
         expect((await q.requeueStuck({ mode: "worker", workerId: "w-dead" })).requeued).toBe(1);
         const [second] = await q.claim({ workerId: "w-new", limit: 1 });
@@ -1109,7 +1137,7 @@ export function stepQueueTestSuite(
         const q = await getQueue({ maxDeliveries: 1 });
         const id = await q.enqueue(task("poison", "s"));
         await q.claim({ workerId: "w-1", limit: 1 });
-        await new Promise((r) => setTimeout(r, 10));
+        await elapse(10);
         expect(await q.requeueStuck({ mode: "stale", olderThanMs: 1 })).toEqual({
           requeued: 0,
           deadLettered: 1,

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from "bun:test";
 import { TaggedError, succeed, fail } from "@spilne/perfect-core";
-import { workflow, createWorkflowRunner } from "@promin/workflow";
+import { workflow, createWorkflowRunner, FakeWallClock } from "@promin/workflow";
 import { PostgresWorkflowStorage } from "../postgres-workflow-storage.ts";
 import { migrate } from "../migrate.ts";
 import { postgresDescribe } from "../test-utils.ts";
@@ -568,7 +568,10 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
           return { ok: true };
         })
         .build();
-    const runner = createWorkflowRunner({ storage });
+    // The runner's clock decides the wake time and when the sleep is due;
+    // it starts at the real time so app-stamped rows look ordinary.
+    const clock = FakeWallClock.create(Date.now());
+    const runner = createWorkflowRunner({ storage, clock });
 
     // Kick off — suspends at sleep.
     await expect(
@@ -584,12 +587,19 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
     expect(pending).toHaveLength(1);
     expect(pending[0]!.stepType).toBe("sleep");
     expect(pending[0]!.phase).toBe("pending");
-    expect(pending[0]!.wakeAt).toBeInstanceOf(Date);
+    expect(pending[0]!.wakeAt!.getTime()).toBe(clock.currentTimeMs() + 50);
 
-    // Simulate the scanner firing after wake: re-run the workflow. ctx.sleep
-    // replay sees the pending entry and now >= wakeAt, auto-completes, and
-    // the step continues.
-    await new Promise((r) => setTimeout(r, 80));
+    // A re-run before the wake time stays suspended.
+    clock.advance(49);
+    await expect(
+      runner.run({ workflow: buildWorkflow(), workflowId: "pg-sleep-1", input: { id: "a" } }),
+    ).rejects.toThrow(/sleeping until/);
+    expect(postSleepCalls).toBe(0);
+
+    // Simulate the scanner firing at the wake time: re-run the workflow.
+    // ctx.sleep replay sees the pending entry and now >= wakeAt,
+    // auto-completes, and the step continues.
+    clock.advance(1);
     const result = await runner.run({
       workflow: buildWorkflow(),
       workflowId: "pg-sleep-1",

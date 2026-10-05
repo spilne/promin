@@ -14,6 +14,22 @@ import { StepTimeoutError } from "../durable-pipeline-error.ts";
 
 class PaymentError extends TaggedError("PaymentError")<{ readonly message: string }>() {}
 
+/**
+ * Await `promise` while moving `clock` forward 1ms at a time between
+ * bounded rounds of macrotask turns. Fails if it hasn't settled in `maxMs`.
+ */
+async function drive<T>(clock: FakeWallClock, promise: Promise<T>, maxMs = 1_000): Promise<T> {
+  let settled = false;
+  const tracked = promise.finally(() => (settled = true));
+  tracked.catch(() => {});
+  for (let elapsed = 0; elapsed <= maxMs && !settled; elapsed++) {
+    for (let i = 0; i < 10 && !settled; i++) await new Promise<void>((r) => setImmediate(r));
+    if (!settled) clock.advance(1);
+  }
+  expect(settled).toBe(true);
+  return tracked;
+}
+
 const settle = () => new Promise((r) => setTimeout(r, 0));
 
 describe("step Eff — rejection shape", () => {
@@ -102,7 +118,8 @@ describe("step Eff — non-Eff returns", () => {
 
 describe("step Eff — timeout and retry", () => {
   it("each retry attempt gets its own timeout", async () => {
-    const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+    const clock = FakeWallClock.create(0);
+    const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage({ clock }), clock });
     let attempts = 0;
     const wf = workflow<number>({ name: "timeout-retry" })
       .step(
@@ -111,7 +128,7 @@ describe("step Eff — timeout and retry", () => {
           tryPromise(
             () =>
               new Promise<string>((resolve) =>
-                ++attempts === 1 ? setTimeout(() => resolve("late"), 200) : resolve("fast"),
+                ++attempts === 1 ? clock.setTimeout(() => resolve("late"), 200) : resolve("fast"),
               ),
             (e) => e,
           ).orDie(),
@@ -122,12 +139,17 @@ describe("step Eff — timeout and retry", () => {
       )
       .build();
 
-    expect(await runner.run({ workflow: wf, workflowId: "to-1", input: 0 })).toBe("fast");
+    expect(await drive(clock, runner.run({ workflow: wf, workflowId: "to-1", input: 0 }))).toBe(
+      "fast",
+    );
     expect(attempts).toBe(2);
+    // Attempt 1 was cut off at its 20ms timeout (+1ms backoff), not after 200ms.
+    expect(clock.currentTimeMs()).toBeLessThan(200);
   });
 
   it("a step that never settles fails with StepTimeoutError", async () => {
-    const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+    const clock = FakeWallClock.create(0);
+    const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage({ clock }), clock });
     const wf = workflow<number>({ name: "never" })
       .step(
         "hang",
@@ -139,8 +161,13 @@ describe("step Eff — timeout and retry", () => {
         { timeoutMs: 20 },
       )
       .build();
-    const { error } = await runner.runSafe({ workflow: wf, workflowId: "to-2", input: 0 });
+    const { error } = await drive(
+      clock,
+      runner.runSafe({ workflow: wf, workflowId: "to-2", input: 0 }),
+    );
     expect(error).toBeInstanceOf(StepTimeoutError);
+    expect(clock.currentTimeMs()).toBeGreaterThanOrEqual(20);
+    expect(clock.currentTimeMs()).toBeLessThanOrEqual(21);
   });
 
   it("step retry backoff runs on the runner's WallClock", async () => {
