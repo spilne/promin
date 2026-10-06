@@ -15,7 +15,8 @@
 // ---------------------------------------------------------------------------
 
 import { sql } from "drizzle-orm";
-import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
+import { execRaw } from "./exec-raw.ts";
 import { StepTypeIds } from "./workflow-lookups.ts";
 
 // ---------------------------------------------------------------------------

@@ -4,7 +4,8 @@
 
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
-import { PostgresWorkflowStorage, PgStepQueue, migrate, type DrizzleDb } from "@promin/postgres";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
+import { PostgresWorkflowStorage, PgStepQueue, migrate } from "@promin/postgres";
 
 export const DATABASE_URL =
   process.env["DATABASE_URL"] ?? "postgres://promin:promin@localhost:5432/promin";

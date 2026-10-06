@@ -4,7 +4,7 @@
 
 import { pgTable, integer, text } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import type { DrizzleDb } from "./drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import type { LookupEntry } from "./lookup.ts";
 
 // ---------------------------------------------------------------------------

@@ -6,7 +6,7 @@
 
 import { eq } from "drizzle-orm";
 import type { FragmentStore } from "@promin/agent";
-import type { DrizzleDb } from "../drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { fragmentStore } from "../schema.ts";
 
 export interface PostgresFragmentStoreConfig {

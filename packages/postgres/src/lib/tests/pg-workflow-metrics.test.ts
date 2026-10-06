@@ -4,7 +4,7 @@ import { migrate } from "../migrate.ts";
 import { PgWorkflowMetrics } from "../pg-workflow-metrics.ts";
 import { StepTypeIds, StepStatusIds } from "../workflow-lookups.ts";
 import { sql } from "drizzle-orm";
-import type { DrizzleDb } from "../drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 
 // All timestamps are anchored to created_at to avoid wall-clock race conditions.
 

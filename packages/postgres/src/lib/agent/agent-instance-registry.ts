@@ -18,7 +18,7 @@ import {
   type ListAgentInstancesParams,
   type UpdateAgentInstancePatch,
 } from "@promin/agent";
-import type { DrizzleDb } from "../drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { agentInstance } from "../schema.ts";
 
 export interface PostgresAgentInstanceRegistryConfig {

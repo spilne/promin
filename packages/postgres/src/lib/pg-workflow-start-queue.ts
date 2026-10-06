@@ -21,9 +21,8 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { WorkerWorkflowSpec, WorkflowStartQueue, WorkflowStartRecord } from "@promin/workflow";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
-import type { DrizzleDb } from "./drizzle-db.ts";
+import { type DrizzleDb, ensureTable as ensureTableFromSchema } from "@spilne/perfect-postgres";
 import { workflowStarts } from "./schema.ts";
-import { ensureTable as ensureTableFromSchema } from "./schema-utils.ts";
 
 export interface PgWorkflowStartQueueConfig {
   db: DrizzleDb;

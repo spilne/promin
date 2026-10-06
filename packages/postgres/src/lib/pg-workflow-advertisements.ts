@@ -26,9 +26,8 @@ import type {
   AdvertisementEntry,
   WorkflowAdvertisementRegistry,
 } from "@promin/workflow";
-import type { DrizzleDb } from "./drizzle-db.ts";
+import { type DrizzleDb, ensureTable as ensureTableFromSchema } from "@spilne/perfect-postgres";
 import { workflowAdvertisements } from "./schema.ts";
-import { ensureTable as ensureTableFromSchema } from "./schema-utils.ts";
 
 export interface PgWorkflowAdvertisementRegistryConfig {
   db: DrizzleDb;

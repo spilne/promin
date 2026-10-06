@@ -7,7 +7,7 @@
 
 import { asc, eq } from "drizzle-orm";
 import type { EvalCase, EvalDatasetStore } from "@promin/evals";
-import type { DrizzleDb } from "../drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { evalDataset } from "../schema.ts";
 
 export interface PostgresEvalDatasetStoreConfig {

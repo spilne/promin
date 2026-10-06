@@ -2,7 +2,7 @@
 // PostgresWorkflowStorage configuration
 // ---------------------------------------------------------------------------
 
-import type { DrizzleDb } from "./drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 
 export interface PostgresStorageConfig {

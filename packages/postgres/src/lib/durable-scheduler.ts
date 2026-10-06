@@ -12,7 +12,7 @@ import {
   type DurableSchedulerConfig as GenericConfig,
 } from "@promin/workflow";
 import { PgSchedulerStorage } from "./pg-scheduler-storage.ts";
-import type { DrizzleDb } from "./drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 
 export type { DurableScheduleConfig } from "@promin/workflow";
 

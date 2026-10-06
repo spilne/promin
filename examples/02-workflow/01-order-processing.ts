@@ -5,8 +5,9 @@
 
 import { workflow, createWorkflowRunner } from "@promin/workflow";
 import { PostgresWorkflowStorage, migrate } from "@promin/postgres";
+import { createPostgresDb } from "@spilne/perfect-postgres";
 
-declare const db: any;
+const db = createPostgresDb(process.env["DATABASE_URL"] ?? "postgres://localhost:5432/promin");
 
 await migrate(db);
 const storage = await PostgresWorkflowStorage.create({ db });

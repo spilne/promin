@@ -20,7 +20,7 @@ import type {
   RoleRegistry,
 } from "@promin/agent";
 import { DEFAULT_ROLE_VERSION } from "@promin/agent";
-import type { DrizzleDb } from "../drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { roleRegistry } from "../schema.ts";
 
 export interface PostgresRoleRegistryConfig {

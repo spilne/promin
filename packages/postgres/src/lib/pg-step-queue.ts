@@ -8,9 +8,9 @@
 
 import { eq, and, sql } from "drizzle-orm";
 import type { StepQueue, StepTask, FairnessPolicy } from "@promin/workflow";
-import { type DrizzleDb, execRaw } from "./drizzle-db.ts";
+import { type DrizzleDb, ensureTable as ensureTableFromSchema } from "@spilne/perfect-postgres";
+import { execRaw } from "./exec-raw.ts";
 import { stepQueue } from "./schema.ts";
-import { ensureTable as ensureTableFromSchema } from "./schema-utils.ts";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 
 /**
@@ -183,6 +183,15 @@ export class PgStepQueue implements StepQueue {
     // window functions"). We materialize candidate IDs first, then do the
     // SKIP LOCKED scan over the base table.
     //
+    // The locking scan must repeat `q.status = 'pending'` itself. The
+    // `candidates` CTE reads a statement-start snapshot, so a row another
+    // worker claimed (or even completed) after that snapshot still shows up
+    // as a candidate. When `FOR UPDATE` reaches such a row it waits for /
+    // follows the committed update and re-evaluates only the quals on `q`
+    // against the newest row version (READ COMMITTED EvalPlanQual). Without
+    // a status predicate on `q`, the recheck passes and the already-claimed
+    // task is claimed a second time.
+    //
     // The partial index `wf_step_queue_concurrency_running_idx` keeps the
     // running_count subquery cheap; the GIN index on `needs` covers the
     // capability filter.
@@ -226,8 +235,9 @@ export class PgStepQueue implements StepQueue {
                   q.priority, q.created_at
                 FROM wf_step_queue q
                 JOIN candidates c ON c.id = q.id
-                WHERE c.concurrency_limit IS NULL
-                   OR (c.pos + c.running_count) < c.concurrency_limit
+                WHERE q.status = 'pending'
+                  AND (c.concurrency_limit IS NULL
+                   OR (c.pos + c.running_count) < c.concurrency_limit)
                 FOR UPDATE OF q SKIP LOCKED
               ) ranked
               ORDER BY ${orderBy}
@@ -242,8 +252,9 @@ export class PgStepQueue implements StepQueue {
             WHERE id IN (
               SELECT q.id FROM wf_step_queue q
               JOIN candidates c ON c.id = q.id
-              WHERE c.concurrency_limit IS NULL
-                 OR (c.pos + c.running_count) < c.concurrency_limit
+              WHERE q.status = 'pending'
+                AND (c.concurrency_limit IS NULL
+                 OR (c.pos + c.running_count) < c.concurrency_limit)
               ORDER BY ${orderBy}
               LIMIT ${limit}
               FOR UPDATE OF q SKIP LOCKED

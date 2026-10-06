@@ -1,9 +1,8 @@
 {
   "name": "@promin/postgres",
   "version": "0.1.0",
-  "description": "Postgres backends for promin — workflow storage, step queue, change streams, and scheduling.",
+  "description": "Postgres stores for promin — workflow storage, step queue, scheduling, agent and eval stores.",
   "keywords": [
-    "change-stream",
     "postgres",
     "scheduler",
     "step-queue",
@@ -35,12 +34,6 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
-    "./pgmq": {
-      "types": "./dist/pgmq/index.d.ts",
-      "@promin/source": "./src/pgmq/index.ts",
-      "import": "./dist/pgmq/index.js",
-      "default": "./dist/pgmq/index.js"
-    },
     "./testing": {
       "types": "./dist/testing.d.ts",
       "@promin/source": "./src/testing.ts",
@@ -58,7 +51,8 @@
     "@promin/evals": "workspace:*",
     "@promin/workflow": "workspace:*",
     "@spilne/perfect-core": "catalog:",
-    "drizzle-orm": "^0.44.0",
+    "@spilne/perfect-postgres": "catalog:",
+    "drizzle-orm": "0.45.2",
     "postgres": "^3.4.5",
     "rrule": "^2.8.1"
   },

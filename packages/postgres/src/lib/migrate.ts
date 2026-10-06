@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { migrate as drizzleMigrate } from "drizzle-orm/postgres-js/migrator";
-import type { DrizzleDb } from "./drizzle-db.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { seedLookupEnums } from "./lookup-table.ts";
 import { LOOKUP_BINDINGS } from "./schema.ts";
 

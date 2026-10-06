@@ -1,38 +1,34 @@
 # @promin/postgres
 
-Postgres infrastructure for the pipeline platform. Workflow storage, message queues (pgmq + SKIP LOCKED), durable scheduler, and change data capture — all backed by Postgres.
+Postgres stores for promin: workflow storage, the distributed step queue, the durable scheduler, workflow start queue and advertisements, state machines, plus agent and eval stores. Built on [`@spilne/perfect-postgres`](https://www.npmjs.com/package/@spilne/perfect-postgres), which supplies the generic Postgres building blocks (`DrizzleDb`, `createPostgresDb`, `ensureTable`, `PgQueue`, `PgChangeStream`, `PgLeaderElection`, pgmq, rate limiting, and more).
 
 ## Install
 
 ```typescript
 import { migrate, PostgresWorkflowStorage } from "@promin/postgres";
-import { PgmqQueue } from "@promin/postgres/pgmq";
+import { createPostgresDb } from "@spilne/perfect-postgres";
 import { postgresDescribe } from "@promin/postgres/testing";
 ```
 
-Three entrypoints:
+Two entrypoints:
 
-| Entrypoint                 | What                                                     |
-| -------------------------- | -------------------------------------------------------- |
-| `@promin/postgres`         | Workflow storage, scheduler, PgQueue, CDC, lookups       |
-| `@promin/postgres/pgmq`    | pgmq extension queues (requires `CREATE EXTENSION pgmq`) |
-| `@promin/postgres/testing` | Test container helpers                                   |
+| Entrypoint                 | What                                                                  |
+| -------------------------- | --------------------------------------------------------------------- |
+| `@promin/postgres`         | Workflow storage, step queue, scheduler, agent + eval stores, lookups |
+| `@promin/postgres/testing` | Test container helpers                                                |
 
-All accept a `DrizzleDb` instance — works with any Postgres driver (postgres-js, bun:sql, etc).
+All stores accept a `DrizzleDb` (from `@spilne/perfect-postgres`), so any Postgres driver works (postgres-js, bun:sql, etc).
 
 ## Workflow Storage
 
 Production-grade `WorkflowStorage` backed by Postgres. Integer lookup tables for status fields, `pg_advisory_lock` for distributed locking, configurable table prefix for multi-tenant DBs.
 
 ```typescript
-import { drizzle } from "drizzle-orm/postgres-js";
-import postgres from "postgres";
+import { createPostgresDb } from "@spilne/perfect-postgres";
 import { migrate, PostgresWorkflowStorage } from "@promin/postgres";
 import { workflow } from "@promin/workflow";
-import { Pipeline } from "@promin/core";
 
-const sql = postgres(process.env.DATABASE_URL!);
-const db = drizzle(sql);
+const db = createPostgresDb(process.env.DATABASE_URL!);
 
 // Idempotent — safe on every startup
 await migrate(db);
@@ -41,8 +37,8 @@ const storage = await PostgresWorkflowStorage.create({ db });
 
 // Use with workflows
 const result = await workflow<{ userId: string }>({ name: "onboard" })
-  .step("fetch", ({ input }) => api.get(`/users/${input.userId}`, UserSchema))
-  .step("provision", ({ prev }) => api.post("/accounts", AccountSchema, { json: prev }))
+  .stepAsync("fetch", ({ input }) => api.getUser(input.userId))
+  .stepAsync("provision", ({ prev }) => api.createAccount(prev))
   .bind(storage)
   .run({ workflowId: `onboard-${userId}`, input: { userId } });
 ```
@@ -67,84 +63,6 @@ await migrate(db, {
   migrationsTable: "__drizzle_migrations_workflows", // Isolate for multi-app DBs
   logger: { info: console.log, error: console.error },
 });
-```
-
-## PgQueue — SKIP LOCKED Queue
-
-Message queue using plain Postgres tables. No extensions required — works with any Postgres 9.5+. Implements `Streamable<T>`, `Sinkable<T>`, and `Acknowledgeable<T>`.
-
-```typescript
-import { PgQueue } from "@promin/postgres";
-
-const queue = await PgQueue.create<{ userId: string }>(db, "jobs");
-
-// Publish
-await queue.publish({ userId: "u_42" });
-await queue.publish({ userId: "u_43" }, { delay: 60, headers: { "x-priority": "high" } });
-
-// Subscribe (auto-ack — pop on read)
-await queue
-  .subscribe()
-  .take(10)
-  .forEach((msg) => console.log(msg.userId));
-
-// Subscribe with manual ack/nack
-await queue.subscribeAck({ vtSeconds: 30 }).forEach(async (envelope) => {
-  await processUser(envelope.value);
-  await envelope.ack(); // or envelope.nack() to retry
-});
-
-// Queue management
-const stats = await queue.metrics(); // { pending, processing, completed, total }
-await queue.requeueDead(); // Requeue stuck messages
-await queue.purge(); // Clear all messages
-```
-
-## PgmqQueue — pgmq Extension Queue
-
-High-level typed queue backed by the [pgmq](https://github.com/pgmq/pgmq) extension. SQS-like semantics with visibility timeout, archiving, and batch operations.
-
-Requires `CREATE EXTENSION pgmq` on your database.
-
-```typescript
-import { PgmqQueue, ReadMode } from "@promin/postgres/pgmq";
-
-const queue = await PgmqQueue.create<{ orderId: string }>(db, "orders");
-
-// Publish
-await queue.publish({ orderId: "ord_1" });
-await queue.publishBatch([{ orderId: "ord_2" }, { orderId: "ord_3" }]);
-
-// Subscribe (auto-ack via pop)
-await queue.subscribe().forEach((msg) => console.log(msg.orderId));
-
-// Subscribe with manual ack + archive mode
-await queue
-  .subscribeAck({
-    readMode: ReadMode.standard({ vt: 30, qty: 10 }),
-    ackMode: "archive",
-  })
-  .forEach(async (envelope) => {
-    await processOrder(envelope.value);
-    await envelope.ack();
-  });
-
-// LISTEN/NOTIFY for instant wakeup (instead of polling)
-await queue.enableNotify();
-```
-
-### Low-level pgmq functions
-
-For full control, use the raw SQL functions directly:
-
-```typescript
-import * as pgmq from "@promin/postgres/pgmq";
-
-await pgmq.createQueue(db, "my-queue");
-const msgId = await pgmq.send(db, "my-queue", { data: { hello: "world" } });
-const records = await pgmq.read(db, "my-queue", ReadMode.standard({ vt: 30, qty: 10 }));
-await pgmq.deleteMessage(db, "my-queue", msgId);
-await pgmq.archive(db, "my-queue", msgId);
 ```
 
 ## Durable Scheduler
@@ -200,7 +118,7 @@ scheduler.resume("daily-etl");
 
 ## Step Queue
 
-Postgres-backed distributed step queue for workflow workers. Uses `SELECT FOR UPDATE SKIP LOCKED` for exactly-once delivery and natural load balancing across workers.
+Postgres-backed distributed step queue for workflow workers. Uses `SELECT FOR UPDATE SKIP LOCKED` so each pending task is handed to exactly one claimer, with natural load balancing across workers. A task is only handed out again after `requeueStuck` returns it to pending (dead worker, or no heartbeat within the stale timeout), so execution is at-least-once across worker crashes.
 
 ### Setup
 
@@ -302,40 +220,6 @@ const requeued = await queue.requeueStuck({ claimedBy: "worker-3" });
 const metrics = await queue.metrics();
 // { "payments": { pending: 12, running: 3, completed: 450, failed: 2 },
 //   "notifications": { pending: 0, running: 1, completed: 89, failed: 0 } }
-```
-
-## PgChangeStream — LISTEN/NOTIFY CDC
-
-Real-time change data capture using LISTEN/NOTIFY with a poll-based fallback for at-least-once delivery. Implements `Streamable<T>` and `Replayable<T>`.
-
-```typescript
-import { PgChangeStream } from "@promin/postgres";
-
-const stream = new PgChangeStream<{ userId: string }>({
-  db,
-  sql, // Raw postgres-js client (for LISTEN)
-  channel: "user_changes",
-  table: "users",
-  payloadColumn: "payload",
-  pollIntervalMs: 5000,
-});
-
-// Install auto-NOTIFY trigger on INSERT
-await stream.installTrigger();
-
-// Subscribe — merges LISTEN (low latency) + poll (reliability)
-await stream.subscribe().forEach((change) => console.log("User changed:", change.userId));
-
-// Replay from a point in time
-await stream
-  .subscribeFrom({ offset: { type: "timestamp", value: Date.now() - 3600_000 } })
-  .forEach(handleChange);
-
-// Manual notify (for producers)
-await stream.notify({ userId: "u_42" });
-
-// Cleanup
-await stream.removeTrigger();
 ```
 
 ## Running Tests
