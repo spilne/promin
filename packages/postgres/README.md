@@ -175,17 +175,20 @@ await scheduler.registerAsync({
   intervalMs: 30_000,
 });
 
-// Stream ticks into workflows
-scheduler
+// Stream ticks into workflows (stream() returns a perfect Stream)
+await scheduler
   .stream("daily-etl")
   .through(
     trigger({
       workflow: etlWorkflow,
+      runner,
+      storage,
       toInput: (tick) => ({ date: tick.scheduledAt.toISOString().split("T")[0] }),
       toWorkflowId: (tick) => `etl-${tick.scheduledAt.toISOString().split("T")[0]}`,
     }),
   )
-  .drain();
+  .drain()
+  .run();
 
 // Management
 const next5 = await scheduler.nextFireTimes("daily-etl", 5);

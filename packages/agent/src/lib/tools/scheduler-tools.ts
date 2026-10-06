@@ -39,11 +39,14 @@ export interface SchedulerToolsConfig {
  */
 export function createSchedulerTools(config: SchedulerToolsConfig) {
   // Subscribe once — the scheduler delivers ticks for all schedules, including those
-  // registered after this call (InMemoryScheduler uses a poll loop; DurableScheduler polls storage).
-  config.scheduler.subscribe().forEach((tick) => {
-    const task = tick.metadata?.task;
-    if (typeof task === "string") config.onTick(task, tick);
-  });
+  // registered after this call (InMemoryScheduler merges new schedules in; DurableScheduler
+  // polls storage). Runs in the background for the scheduler's lifetime.
+  void (async () => {
+    for await (const tick of config.scheduler.subscribe().toAsyncIterable()) {
+      const task = tick.metadata?.task;
+      if (typeof task === "string") config.onTick(task, tick);
+    }
+  })();
 
   return {
     scheduleTask: tool({

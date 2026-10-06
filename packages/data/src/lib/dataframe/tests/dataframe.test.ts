@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { DataFrame } from "../dataframe.ts";
-import { StreamPipeline } from "@promin/core";
+import { Stream } from "@spilne/perfect-core";
 
 // ---------------------------------------------------------------------------
 // Test data
@@ -71,7 +71,7 @@ describe("Loading data — ingest from arrays, iterables, and streams", () => {
   });
 
   it("real-time event stream materialized into a DataFrame for batch analysis", async () => {
-    const stream = StreamPipeline.fromIterable([
+    const stream = Stream.fromIterable([
       { name: "Alice", age: 30 },
       { name: "Bob", age: 25 },
     ]);
@@ -79,6 +79,11 @@ describe("Loading data — ingest from arrays, iterables, and streams", () => {
     const result = await df.filter((r) => r.age > 27).collect();
     expect(result).toHaveLength(1);
     expect(result[0]!.name).toBe("Alice");
+  });
+
+  it("a failing event stream rejects fromStream with the stream's error", async () => {
+    const stream = Stream.fromIterable([{ n: 1 }]).concat(Stream.fail(new Error("feed dropped")));
+    await expect(DataFrame.fromStream(stream)).rejects.toThrow("feed dropped");
   });
 });
 

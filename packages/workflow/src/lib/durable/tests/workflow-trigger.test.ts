@@ -1,7 +1,6 @@
 import { describe, it, expect } from "bun:test";
-import { TaggedError } from "@spilne/perfect-core";
+import { Stream, TaggedError } from "@spilne/perfect-core";
 import { Pipeline } from "@promin/core";
-import { StreamPipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { trigger, WorkflowResult } from "../workflow-trigger.ts";
@@ -111,7 +110,7 @@ describe("trigger", () => {
       .step("double", ({ input }) => Pipeline.succeed(input.value * 2))
       .build();
 
-    const results = await StreamPipeline.fromIterable([1, 2, 3])
+    const results = await Stream.fromIterable([1, 2, 3])
       .through(
         trigger({
           workflow: def,
@@ -121,7 +120,8 @@ describe("trigger", () => {
           toWorkflowId: (n) => `wf-${n}`,
         }),
       )
-      .collect();
+      .toArray()
+      .run();
 
     expect(results).toHaveLength(3);
     expect(results.every(WorkflowResult.isCompleted)).toBe(true);
@@ -137,7 +137,7 @@ describe("trigger", () => {
       .step("boom", () => Pipeline.fail(new ProcessError({ message: "fail" })))
       .build();
 
-    const results = await StreamPipeline.fromIterable([1])
+    const results = await Stream.fromIterable([1])
       .through(
         trigger({
           workflow: def,
@@ -147,7 +147,8 @@ describe("trigger", () => {
           toWorkflowId: (n) => `wf-fail-${n}`,
         }),
       )
-      .collect();
+      .toArray()
+      .run();
 
     expect(results).toHaveLength(1);
     const r = results[0]!;
@@ -168,7 +169,7 @@ describe("trigger", () => {
     await runner.run({ workflow: def, workflowId: "dedup-1", input: { n: 1 } });
 
     // Trigger with same ID — should skip
-    const results = await StreamPipeline.fromIterable([1])
+    const results = await Stream.fromIterable([1])
       .through(
         trigger({
           workflow: def,
@@ -179,7 +180,8 @@ describe("trigger", () => {
           onDuplicate: "skip",
         }),
       )
-      .collect();
+      .toArray()
+      .run();
 
     expect(results).toHaveLength(1);
     expect(WorkflowResult.isSkipped(results[0]!)).toBe(true);
@@ -202,7 +204,7 @@ describe("trigger", () => {
       })
       .build();
 
-    const results = await StreamPipeline.fromIterable([1, 2, 3, 4])
+    const results = await Stream.fromIterable([1, 2, 3, 4])
       .through(
         trigger({
           workflow: def,
@@ -213,11 +215,40 @@ describe("trigger", () => {
           concurrency: 2,
         }),
       )
-      .collect();
+      .toArray()
+      .run();
 
     expect(results).toHaveLength(4);
     expect(results.every(WorkflowResult.isCompleted)).toBe(true);
     expect(maxConcurrent).toBeLessThanOrEqual(2);
+  });
+
+  it("emits results in input order even when later items finish first", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const def = workflow<{ n: number }>({ name: "ordered-trigger" })
+      .stepAsync("slow", async ({ input }) => {
+        await new Promise((r) => setTimeout(r, input.n * 10));
+        return input.n;
+      })
+      .build();
+
+    const results = await Stream.fromIterable([3, 2, 1])
+      .through(
+        trigger({
+          workflow: def,
+          runner,
+          storage,
+          toInput: (n) => ({ n }),
+          toWorkflowId: (n) => `ordered-${n}`,
+          concurrency: 3,
+        }),
+      )
+      .map((r) => (r as WorkflowResult.Completed<number>).result)
+      .toArray()
+      .run();
+
+    expect(results).toEqual([3, 2, 1]);
   });
 
   it("tracks durationMs", async () => {
@@ -230,7 +261,7 @@ describe("trigger", () => {
       })
       .build();
 
-    const results = await StreamPipeline.fromIterable([1])
+    const results = await Stream.fromIterable([1])
       .through(
         trigger({
           workflow: def,
@@ -240,7 +271,8 @@ describe("trigger", () => {
           toWorkflowId: (n) => `dur-${n}`,
         }),
       )
-      .collect();
+      .toArray()
+      .run();
 
     const r = results[0]!;
     expect(r._tag).toBe("completed");
@@ -257,7 +289,7 @@ describe("trigger", () => {
       .build();
 
     // filter + trigger + filter completed + map result
-    const results = await StreamPipeline.fromIterable([1, 2, 3, 4, 5])
+    const results = await Stream.fromIterable([1, 2, 3, 4, 5])
       .filter((n) => n % 2 === 0)
       .through(
         trigger({
@@ -270,7 +302,8 @@ describe("trigger", () => {
       )
       .filter(WorkflowResult.isCompleted)
       .map((r) => (r as WorkflowResult.Completed<number>).result)
-      .collect();
+      .toArray()
+      .run();
 
     expect(results).toEqual([4, 8]); // only evens (2, 4) doubled
   });
@@ -287,8 +320,10 @@ describe("trigger", () => {
       })
       .build();
 
-    await StreamPipeline.tick(10)
+    await Stream.tick(10)
       .take(3)
+      .zipWithIndex()
+      .map(([, tick]) => tick)
       .through(
         trigger({
           workflow: def,
@@ -298,7 +333,8 @@ describe("trigger", () => {
           toWorkflowId: (tick) => `cron-${tick}`,
         }),
       )
-      .drain();
+      .drain()
+      .run();
 
     expect(runCount).toBe(3);
   });

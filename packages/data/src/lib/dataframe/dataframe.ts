@@ -5,9 +5,8 @@
 // terminal (.collect(), .first(), etc.) is called.
 // ---------------------------------------------------------------------------
 
-import { Effect, Stream, Chunk } from "effect";
+import { Stream, type Throws } from "@spilne/perfect-core";
 import type { Frameable } from "./frameable.ts";
-import { StreamPipeline } from "@promin/core";
 import type { LogicalPlan, WindowFn, AggFn, RollingFn } from "./logical-plan.ts";
 import { executeChunked } from "./chunked-executor.ts";
 import type { FileSourceDescriptor } from "./file-source.ts";
@@ -75,8 +74,12 @@ export class DataFrame<T> {
     return new DataFrame<T>({ _tag: "Source", data: Array.from(data) });
   }
 
-  static async fromStream<T>(stream: StreamPipeline<T, any>): Promise<DataFrame<T>> {
-    const data = await stream.collect();
+  /**
+   * Materialize a perfect `Stream` into a DataFrame by running it to
+   * completion. A typed stream failure rejects the returned promise.
+   */
+  static async fromStream<T>(stream: Stream<T, Throws<unknown>>): Promise<DataFrame<T>> {
+    const data = await stream.toArray().orDie().run();
     return new DataFrame<T>({ _tag: "Source", data });
   }
 
@@ -954,32 +957,31 @@ export class DataFrame<T> {
   // =========================================================================
 
   /**
-   * Execute the plan in streaming mode — returns a StreamPipeline that yields rows.
+   * Execute the plan in streaming mode — returns a perfect `Stream` that yields rows.
    *
    * For streamable plans (filter, map, select, withColumn, etc.), processes the
-   * source data in fixed-size chunks with constant memory.
+   * source data in fixed-size chunks with constant memory: each chunk is
+   * executed only when the consumer pulls for it.
    *
    * For materializing plans (sort, groupBy, join, etc.), falls back to full
    * execution and emits all rows at once.
    *
+   * Every call builds a fresh stream; execution starts on the first pull.
+   * Execution errors are defects (they reject `run()`), not typed failures.
+   *
    * @param options.chunkSize - Number of source rows per chunk (default 10,000)
    */
-  stream(options?: { chunkSize?: number }): StreamPipeline<T, never> {
+  stream(options?: { chunkSize?: number }): Stream<T> {
     const chunkSize = options?.chunkSize ?? 10_000;
     const plan = this._plan;
 
-    // Resolve chunks eagerly, then stream via native Chunk path.
-    // Stream.fromChunks is 56x faster than fromAsyncIterable for batch data.
-    const s = Stream.unwrap(
-      Effect.promise(async () => {
-        const allChunks: Chunk.Chunk<T>[] = [];
-        for await (const chunk of executeChunked<T>({ plan, chunkSize })) {
-          allChunks.push(Chunk.fromIterable(chunk));
-        }
-        return Stream.fromChunks(...allChunks);
-      }),
-    );
-    return StreamPipeline.from(s);
+    // One stream element per executed chunk, then each chunk's rows are
+    // emitted as a single perfect Chunk — one async step per chunk, not per row.
+    return Stream.suspend(() =>
+      Stream.fromAsyncIterable(executeChunked<T>({ plan, chunkSize }), (e) => e),
+    )
+      .orDie()
+      .flatMap((rows) => Stream.fromArray(rows));
   }
 
   async collect(): Promise<T[]> {

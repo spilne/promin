@@ -5,10 +5,9 @@
 // Backends implement `SchedulerStorage` and plug in via the constructor.
 // ---------------------------------------------------------------------------
 
-import { Effect, Stream, Duration, Schedule } from "effect";
 import { Cron } from "croner";
 import { RRule } from "rrule";
-import { StreamPipeline } from "@promin/core";
+import { Stream, async, succeed, tryPromise, type Eff } from "@spilne/perfect-core";
 import { SystemWallClock } from "../shared/wall-clock.ts";
 import { JsonCodec } from "@spilne/perfect-core/connect";
 import type { WallClock } from "../shared/wall-clock.ts";
@@ -281,90 +280,112 @@ export class DurableScheduler implements Scheduler {
   // Streamable — leader-elected polling loop
   // -------------------------------------------------------------------------
 
-  stream(scheduleId?: string): StreamPipeline<ScheduleTick, never> {
-    const self = this;
-
-    const s = Stream.repeatEffect(
-      Effect.promise(async () => {
-        const isLeader = await self.storage.tryAcquireLeader({
-          instanceId: self.instanceId,
-          namespace: self.namespace,
-          ttlMs: self.leaderLockTtlMs,
-        });
-        if (!isLeader) return [] as ScheduleTick[];
-
-        const dueIds = await self.storage.findDue({
-          now: this.clock.now(),
-          limit: self.batchSize,
-          namespace: self.namespace,
-        });
-
-        // Apply partitioning + scheduleId filter in the shell so storage
-        // backends don't need partition awareness.
-        const targetIds = dueIds.filter((id) => {
-          if (scheduleId && id !== scheduleId) return false;
-          if (self.partition && hashCode(id) % self.partition.count !== self.partition.index) {
-            return false;
-          }
-          return true;
-        });
-
-        if (targetIds.length === 0) return [] as ScheduleTick[];
-
-        // Bulk load — TWO storage round-trips for ALL due schedules instead
-        // of 2N. Storage backends collapse this into one IN/pipeline call.
-        const [configs, states] = await Promise.all([
-          self.storage.loadSchedules(targetIds),
-          self.storage.loadScheduleStates(targetIds),
-        ]);
-
-        // Compute ticks + commit-batch entries in pure code (no I/O).
-        const ticks: ScheduleTick[] = [];
-        const updates: Array<{
-          id: string;
-          firedAt?: Date;
-          tickIncrement?: number;
-          nextRun: Date | null;
-        }> = [];
-
-        for (const id of targetIds) {
-          const config = configs.get(id);
-          if (!config) {
-            // Schedule was deleted between findDue and now — drop from due-tracking.
-            updates.push({ id, nextRun: null });
-            continue;
-          }
-          if (config.enabled === false) continue;
-
-          const state = states.get(id) ?? { lastFired: null, tickCount: 0 };
-          const due = computeDueTicks(config, state.lastFired, state.tickCount);
-          ticks.push(...due);
-
-          updates.push({
-            id,
-            firedAt: due.length > 0 ? due[due.length - 1]!.firedAt : undefined,
-            tickIncrement: due.length > 0 ? due.length : undefined,
-            nextRun: computeNextRun(config),
-          });
-        }
-
-        // ONE round-trip writes back state for every fired/rescheduled id.
-        if (updates.length > 0) {
-          await self.storage.commitPoll(updates);
-        }
-        return ticks;
-      }),
-    ).pipe(
-      Stream.schedule(Schedule.spaced(Duration.millis(this.pollIntervalMs))),
-      Stream.flatMap((ticks) => Stream.fromIterable(ticks)),
+  /**
+   * Poll loop: poll storage, wait `pollIntervalMs` on the configured
+   * `WallClock`, emit that poll's ticks, then poll again once the consumer
+   * pulls for more. The first poll runs as soon as the stream is pulled; its
+   * ticks are delivered one interval later.
+   *
+   * Every call builds a fresh stream. Stopping the consumer cancels the
+   * pending interval timer.
+   */
+  stream(scheduleId?: string): Stream<ScheduleTick> {
+    const poll = tryPromise(
+      () => this.pollOnce(scheduleId),
+      (e) => e,
+    ).orDie();
+    const pollThenWait = poll.flatMap((ticks) =>
+      wallClockSleep({ clock: this.clock, ms: this.pollIntervalMs }).map(() => ticks),
     );
-
-    return StreamPipeline.from(s) as StreamPipeline<ScheduleTick, never>;
+    return Stream.repeat(pollThenWait).flatMap((ticks) => Stream.fromArray(ticks));
   }
 
-  subscribe(_params?: { group?: string }): StreamPipeline<ScheduleTick, never> {
+  subscribe(_params?: { group?: string }): Stream<ScheduleTick> {
     return this.stream();
   }
+
+  /** One leader-gated poll: claim due schedules, compute ticks, commit state. */
+  private async pollOnce(scheduleId: string | undefined): Promise<ScheduleTick[]> {
+    const isLeader = await this.storage.tryAcquireLeader({
+      instanceId: this.instanceId,
+      namespace: this.namespace,
+      ttlMs: this.leaderLockTtlMs,
+    });
+    if (!isLeader) return [] as ScheduleTick[];
+
+    const dueIds = await this.storage.findDue({
+      now: this.clock.now(),
+      limit: this.batchSize,
+      namespace: this.namespace,
+    });
+
+    // Apply partitioning + scheduleId filter in the shell so storage
+    // backends don't need partition awareness.
+    const targetIds = dueIds.filter((id) => {
+      if (scheduleId && id !== scheduleId) return false;
+      if (this.partition && hashCode(id) % this.partition.count !== this.partition.index) {
+        return false;
+      }
+      return true;
+    });
+
+    if (targetIds.length === 0) return [] as ScheduleTick[];
+
+    // Bulk load — TWO storage round-trips for ALL due schedules instead
+    // of 2N. Storage backends collapse this into one IN/pipeline call.
+    const [configs, states] = await Promise.all([
+      this.storage.loadSchedules(targetIds),
+      this.storage.loadScheduleStates(targetIds),
+    ]);
+
+    // Compute ticks + commit-batch entries in pure code (no I/O).
+    const ticks: ScheduleTick[] = [];
+    const updates: Array<{
+      id: string;
+      firedAt?: Date;
+      tickIncrement?: number;
+      nextRun: Date | null;
+    }> = [];
+
+    for (const id of targetIds) {
+      const config = configs.get(id);
+      if (!config) {
+        // Schedule was deleted between findDue and now — drop from due-tracking.
+        updates.push({ id, nextRun: null });
+        continue;
+      }
+      if (config.enabled === false) continue;
+
+      const state = states.get(id) ?? { lastFired: null, tickCount: 0 };
+      const due = computeDueTicks(config, state.lastFired, state.tickCount);
+      ticks.push(...due);
+
+      updates.push({
+        id,
+        firedAt: due.length > 0 ? due[due.length - 1]!.firedAt : undefined,
+        tickIncrement: due.length > 0 ? due.length : undefined,
+        nextRun: computeNextRun(config),
+      });
+    }
+
+    // ONE round-trip writes back state for every fired/rescheduled id.
+    if (updates.length > 0) {
+      await this.storage.commitPoll(updates);
+    }
+    return ticks;
+  }
+}
+
+/**
+ * Sleep on a `WallClock` rather than perfect's `Clock` service, so the poll
+ * cadence follows the scheduler's injected clock (`FakeWallClock.advance`
+ * drives it in tests). Interruption clears the timer.
+ */
+function wallClockSleep(params: { clock: WallClock; ms: number }): Eff<void> {
+  return async<void>((resume) => {
+    const handle = params.clock.setTimeout(() => resume(succeed(undefined)), params.ms);
+    return () => handle.clear();
+  }).orDie();
 }
 
 // ---------------------------------------------------------------------------
