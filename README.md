@@ -22,7 +22,7 @@ All of these compose. A workflow step can use a Pipeline with retry. A DataFrame
 | **[@promin/data](./packages/data/)** | DataFrame, data quality, profiling, diff, contracts |
 | **[@promin/duckdb](./packages/duckdb/)** | DuckDB executor for DataFrame — SQL compilation, file sources |
 | **[@promin/postgres](./packages/postgres/)** | Postgres workflow storage, step queue (SKIP LOCKED), durable scheduler |
-| **[@promin/redis](./packages/redis/)** | Redis stream transport adapter |
+| **[@promin/redis](./packages/redis/)** | Redis workflow storage, step queue, scheduler |
 | **[@promin/container](./packages/container/)** | Container step executor (Docker, K8s, local process) |
 
 HTTP client, Kafka transport, and stateful stream topology live in [perfect](https://github.com/spilne/perfect): `@spilne/perfect-http`, `@spilne/perfect-kafka`, `@spilne/perfect-topology`.
@@ -88,8 +88,7 @@ bun run bench:all    # all benchmark suites
 
 | Command | Description |
 |---|---|
-| `bun run test` | Unit tests (core, workflow, data, postgres) |
-| `bun run test:integration` | Integration tests (Redis, Postgres) |
+| `bun run test` | Tests (core, workflow, data, postgres, redis; store tests use testcontainers) |
 | `bun run bench` | Cross-language benchmarks (Promin vs Pandas vs Polars) |
 | `bun run bench:all` | All benchmarks (stream, pipeline, dataframe, workflow, cross-language) |
 | `bun nx run-many -t typecheck` | Typecheck all packages |
@@ -111,7 +110,7 @@ bun run bench:all    # all benchmark suites
   AutoExecutor           — smart routing: Array for small, DuckDB for large
 
 @promin/redis, @promin/postgres
-  Transport adapters implementing Streamable/Sinkable/Partitionable
+  Workflow storage, step queue and scheduler backends
 ```
 
 ## Technology Stack

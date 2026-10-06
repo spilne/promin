@@ -1,294 +1,25 @@
 # @promin/redis
 
-Redis Streams transport adapter. Consumer groups, manual ack, dead consumer reclaim — same API as any other transport.
+Redis backends for `@promin/workflow`: workflow storage, the distributed step queue, the durable scheduler, and state machine storage.
 
-## Usage
+Generic distributed primitives (refs, semaphores, latches, rate limiters, cache store, streams, pub/sub, queues) live in [`@spilne/perfect-redis`](https://www.npmjs.com/package/@spilne/perfect-redis). One connection can back both.
 
-```typescript
-import Redis from "ioredis";
-import { RedisStream } from "@promin/redis";
-const redis = new Redis("redis://localhost:6379");
+## Client
 
-const events = new RedisStream<UserEvent>({
-  redis,
-  stream: "user-events",
-  group: "event-processor",
-});
+Every store takes a `RedisStoreClient`: perfect-redis's driver-agnostic `RedisClient` plus the sorted-set, set and pipeline commands the stores use for their indexes (`zadd`, `zrem`, `zrangebyscore`, `zcard`, `sadd`, `srem`, `smembers`, `scard`, `sinter`, `pipeline`).
 
-// Create consumer group (idempotent)
-await events.ensureGroup();
-
-// Subscribe — auto-ack after processing
-await events
-  .subscribe()
-  .filter((e) => e.type === "signup")
-  .forEach(handleSignup);
-
-// Manual ack — for at-least-once processing
-await events.subscribeAck().forEach(async (envelope) => {
-  await processEvent(envelope.value);
-  await envelope.ack();
-  // If you don't ack, the message stays in the PEL (pending entries list)
-  // and can be reclaimed by another consumer
-});
-
-// Publish
-await events.publish({ type: "signup", userId: "u_42" });
-
-// Keyed publish
-await events.publish(event, { key: event.userId });
-
-// Reclaim messages from dead consumers
-const stale = await events.claimPending({ minIdleMs: 30_000, count: 100 });
-for (const msg of stale) {
-  await processEvent(msg.value);
-  await redis.xack("user-events", "event-processor", msg.id);
-}
-
-// Stream info
-const info = await events.info();
-console.log(`Stream length: ${info.length}, groups: ${info.groups}`);
-```
-
-## Typeclasses Implemented
-
-| Typeclass       | Methods                                                 |
-| --------------- | ------------------------------------------------------- |
-| Streamable      | `subscribe()` — auto-ack via XREADGROUP                 |
-| Sinkable        | `publish(value)` — XADD                                 |
-| KeyedSinkable   | `publish(value, { key })` — XADD with key field         |
-| Acknowledgeable | `subscribeAck()` → `envelope.ack()` — XREADGROUP + XACK |
-
-## Configuration
-
-The `RedisClient` interface is driver-agnostic. Pass any Redis client that satisfies the interface — ioredis, node-redis, or Bun.RedisClient all work.
+ioredis implements all of them. Its overloads don't line up with the variadic signatures, so cast once:
 
 ```typescript
-import Redis from "ioredis";
-import type { RedisClient } from "@promin/redis";
+import { Redis } from "ioredis";
+import type { RedisStoreClient } from "@promin/redis";
 
-// ioredis
-const redis: RedisClient = new Redis("redis://localhost:6379");
-
-// node-redis
-import { createClient } from "redis";
-const nodeRedis = createClient({ url: "redis://localhost:6379" });
-await nodeRedis.connect();
-const redis: RedisClient = nodeRedis as unknown as RedisClient;
+const redis = new Redis("redis://localhost:6379") as unknown as RedisStoreClient;
 ```
 
-The interface covers key/value, lists, hashes, sorted sets, streams, pub/sub, scripting (eval), pipelines, and connection management (duplicate/disconnect/close). Only commands actually used by the library are included.
+## RedisWorkflowStorage
 
-## Distributed Primitives
-
-### RedisRef
-
-Distributed atomic reference. Stores a JSON value under a single Redis key with get/set/update semantics.
-
-```typescript
-import { RedisRef } from "@promin/redis";
-
-const counter = RedisRef.make({ redis, key: "my:counter", initial: 0 });
-await counter.setAsync(42);
-const value = await counter.getAsync(); // 42
-await counter.updateAsync((n) => n + 1); // 43
-```
-
-Note: `updateAsync` uses read-modify-write without WATCH/MULTI, so it is not atomic across multiple processes.
-
-### RedisSignal
-
-Distributed shared mutable value. Same API as RedisRef (get/set/update) but implements the `Signal<T>` interface.
-
-```typescript
-import { RedisSignal } from "@promin/redis";
-
-const config = RedisSignal.make({ redis, key: "app:config", initial: { maxRetries: 3 } });
-await config.setAsync({ maxRetries: 5 });
-const current = await config.getAsync();
-await config.updateAsync((c) => ({ ...c, maxRetries: c.maxRetries + 1 }));
-```
-
-### RedisSemaphore
-
-Distributed counting semaphore. Limits concurrent access to a shared resource across processes. Uses BRPOP on a dedicated connection for blocking acquire.
-
-```typescript
-import { RedisSemaphore } from "@promin/redis";
-
-const sem = await RedisSemaphore.make({ redis, key: "db:pool", permits: 5, timeoutMs: 10_000 });
-await sem.acquire();
-try {
-  await queryDatabase();
-} finally {
-  await sem.release();
-}
-
-// Or use the convenience wrapper:
-await sem.withPermitAsync(() => queryDatabase());
-```
-
-### RedisChannel
-
-Bounded distributed channel with capacity backpressure. Uses Lua scripts for atomic send operations.
-
-```typescript
-import { RedisChannel } from "@promin/redis";
-
-const ch = RedisChannel.make<string>({ redis, key: "work:chan", capacity: 32 });
-await ch.sendAsync("task-1");
-await ch.sendAsync("task-2");
-// Throws "Channel is full" when at capacity
-// Throws "Channel is closed" after closeAsync()
-await ch.closeAsync();
-```
-
-### RedisQueue
-
-Distributed bounded FIFO queue with backpressure. Items are pushed left (LPUSH) and popped right (BRPOP) for FIFO order. `takeAsync` blocks on a dedicated connection.
-
-```typescript
-import { RedisQueue } from "@promin/redis";
-
-const jobs = RedisQueue.make<{ id: string }>({
-  redis,
-  key: "work:jobs",
-  capacity: 100,
-  timeoutMs: 30_000,
-});
-await jobs.offerAsync({ id: "j-1" });
-const next = await jobs.takeAsync(); // blocks until available
-const size = await jobs.sizeAsync();
-await jobs.shutdownAsync();
-```
-
-### RedisDeferred
-
-Distributed one-shot synchronization. One process waits, another resolves or rejects. Multiple concurrent awaiters are supported.
-
-```typescript
-import { RedisDeferred } from "@promin/redis";
-
-const gate = RedisDeferred.make<{ host: string }>({ redis, key: "init:config", timeoutMs: 30_000 });
-
-// Process A (waiter):
-const config = await gate.awaitAsync(); // blocks until resolved
-
-// Process B (resolver):
-await gate.succeedAsync({ host: "db.internal" });
-
-// Or fail it:
-await gate.failAsync(new Error("config unavailable"));
-const done = await gate.isDoneAsync(); // true
-```
-
-### RedisLatch
-
-Distributed countdown latch. Multiple processes count down; waiters unblock when the count reaches zero.
-
-```typescript
-import { RedisLatch } from "@promin/redis";
-
-const latch = await RedisLatch.make({ redis, key: "init:latch", count: 3 });
-
-// Workers call countDown when ready:
-await latch.countDownAsync();
-
-// Coordinator waits for all workers:
-await latch.awaitAsync(); // unblocks when count hits 0
-const remaining = await latch.remainingAsync();
-```
-
-### RedisBarrier
-
-Distributed barrier. All parties call `awaitAsync`; the last one to arrive unblocks all others.
-
-```typescript
-import { RedisBarrier } from "@promin/redis";
-
-const barrier = RedisBarrier.make({ redis, key: "sync:barrier", parties: 4 });
-
-// Each process calls awaitAsync — blocks until all 4 have arrived
-await barrier.awaitAsync();
-const arrived = await barrier.arrivedAsync();
-```
-
-### RedisSingleflight
-
-Distributed singleflight / request coalescing. When multiple processes call `doAsync` with the same key, only one executes the function. The rest block and receive the same result.
-
-```typescript
-import { RedisSingleflight } from "@promin/redis";
-
-const sf = RedisSingleflight.make({ redis, prefix: "sf", timeoutMs: 10_000 });
-
-// Both calls resolve to the same result; fetchUser is called once
-const [a, b] = await Promise.all([
-  sf.doAsync("user:1", () => fetchUser(1)),
-  sf.doAsync("user:1", () => fetchUser(1)),
-]);
-```
-
-### RedisThrottle
-
-Distributed sliding-window throttle. Allows N operations per time window using atomic Lua scripts with sorted sets. Automatically waits when the window is full.
-
-```typescript
-import { RedisThrottle } from "@promin/redis";
-
-const throttle = RedisThrottle.make({ redis, key: "api:github", permits: 60, windowMs: 60_000 });
-await throttle.acquireAsync(); // blocks until a slot opens
-const ok = await throttle.tryAcquireAsync(); // non-blocking, returns false if full
-
-// Per-resource throttling:
-await throttle.acquireAsync("user:42");
-await throttle.withPermitAsync(() => callApi(), "user:42");
-```
-
-### RedisRateLimiter
-
-Distributed sliding-window rate limiter. Unlike RedisThrottle, it throws `RateLimitExceeded` immediately instead of waiting.
-
-```typescript
-import { RedisRateLimiter } from "@promin/redis";
-
-const limiter = RedisRateLimiter.make({ redis, key: "api:limit", limit: 100, windowMs: 60_000 });
-try {
-  await limiter.acquireAsync(); // throws RateLimitExceeded if over limit
-} catch (e) {
-  console.log(`Retry after ${e.retryAfterMs}ms`);
-}
-const ok = await limiter.tryAcquireAsync(); // returns false instead of throwing
-const remaining = await limiter.remainingAsync(); // slots left in current window
-```
-
-## Caching
-
-### RedisCacheStore
-
-Key-value cache with TTL, key prefix namespacing, and bulk operations.
-
-```typescript
-import { RedisCacheStore } from "@promin/redis";
-
-const cache = new RedisCacheStore<User>({ redis, prefix: "users:", ttlMs: 300_000 });
-
-await cache.set("u_42", { name: "Alice" });
-await cache.set("u_43", { name: "Bob" }, 60_000); // override TTL per entry
-
-const user = await cache.get("u_42"); // User | undefined
-const exists = await cache.has("u_42"); // boolean
-await cache.delete("u_42");
-
-const count = await cache.size();
-await cache.clear(); // deletes all keys with the prefix
-```
-
-## Workflow Storage
-
-### RedisWorkflowStorage
-
-Full `WorkflowStorage` and `StepAttemptStorage` implementation for the `@promin/workflow` engine. Stores workflow state, step results, task tracking, signals, and lock management in Redis hashes and sorted sets.
+Full `WorkflowStorage` (including the activity journal and journaled suspend) for the `@promin/workflow` engine. Workflow state, step results, signals, sleeps and fenced locks live in hashes and sorted sets.
 
 ```typescript
 import { RedisWorkflowStorage } from "@promin/redis";
@@ -304,92 +35,87 @@ const storage = new RedisWorkflowStorage({
 });
 ```
 
-Supports: `createWorkflow`, `loadWorkflow`, `updateStep`, `completeWorkflow`, `failWorkflow`, `cancelWorkflow`, `listWorkflows`, `sendSignal`, `consumeSignal`, lock acquisition with heartbeat, and step attempt recording.
+## RedisStepQueue
 
-### RedisStepQueue
-
-Distributed step dispatch queue with priority scheduling. Uses sorted sets for pending tasks (higher priority = dequeued first, FIFO within same priority) and Lua scripts for atomic claim operations.
+Distributed `StepQueue`. Pending tasks sit in a priority-ordered sorted set (higher priority first, FIFO within a priority); enqueue, claim, complete, fail and requeue are Lua scripts, so each is atomic.
 
 ```typescript
 import { RedisStepQueue } from "@promin/redis";
 
-const queue = new RedisStepQueue(redis, { prefix: "sq", workerId: "worker-1" });
+const queue = new RedisStepQueue({ redis, prefix: "sq", workerId: "worker-1" });
 
-const taskId = await queue.enqueue({
+await queue.enqueue({
   workflowId: "wf-1",
   stepName: "sendEmail",
-  queue: "email",
   input: { to: "alice@example.com" },
   prevResults: {},
+  needs: ["smtp"],
   priority: 8,
+  // At most 2 running "send-email" tasks per tenant.
+  concurrencyScope: "send-email",
+  concurrencyKey: "tenant-42",
+  concurrencyLimit: 2,
 });
 
-const tasks = await queue.claim({ queues: ["email"], limit: 10 });
-await queue.complete({ taskId, result: { sent: true }, durationMs: 120 });
-// Or: await queue.fail({ taskId, error: "SMTP timeout", durationMs: 5000 });
+const [task] = await queue.claim({ capabilities: ["smtp"], limit: 10 });
+await queue.complete({
+  taskId: task.id,
+  claimToken: task.claimToken,
+  result: { sent: true },
+  durationMs: 120,
+});
+// Or: await queue.fail({ taskId: task.id, claimToken: task.claimToken, error: "SMTP timeout", durationMs: 5000 });
 
-const stuck = await queue.requeueStuck({ staleTimeoutMs: 60_000 });
-const stats = await queue.metrics(); // { email: { pending, running, completed, failed } }
+await queue.requeueStuck({ staleTimeoutMs: 60_000 });
 ```
 
-### RedisStateMachineStorage
+- **Routing**: a worker claims a task only when the task's `needs` are a subset of its `capabilities`.
+- **Concurrency keys**: tasks sharing `(concurrencyScope, concurrencyKey)` are capped at `concurrencyLimit` running at once, across all workers. The running count is a Redis set updated in the same script as the claim, and the slot is released on complete, fail, requeue, and when a claim `filter` rejects the task.
+- **Claim scan**: one `claim()` examines at most `claimScanLimit` (default 1000) pending tasks while skipping ones it can't take, which bounds how long a backlog of blocked tasks can hold Redis.
+- **Idempotent enqueue**: while a task for `(workflowId, stepName)` is pending or running, `enqueue()` returns its id instead of adding another.
 
-State machine persistence with transition history, optimistic locking, and TTL for terminal/stuck states.
+## RedisDurableScheduler
+
+The `@promin/workflow` `DurableScheduler` (cron, rrule, intervals, catch-up, jitter, leader election) on `RedisSchedulerStorage`. Swapping it for the Postgres scheduler is a one-line change.
 
 ```typescript
+import { RedisDurableScheduler } from "@promin/redis";
+
+const scheduler = new RedisDurableScheduler({ redis, prefix: "sched", pollIntervalMs: 1000 });
+
+await scheduler.registerAsync({ id: "nightly-report", cron: "0 2 * * *", timezone: "UTC" });
+```
+
+`RedisSchedulerStorage` can also be passed to the generic `DurableScheduler` directly. Schedules are hashes; each namespace has its own due-time sorted set and leader lock, so tenants poll independently.
+
+## RedisStateMachineStorage
+
+State machine persistence with transition history and TTLs for terminal or abandoned machines.
+
+```typescript
+import { stateMachine } from "@promin/workflow";
 import { RedisStateMachineStorage } from "@promin/redis";
 
-const storage = new RedisStateMachineStorage(redis, {
+const storage = new RedisStateMachineStorage({
+  redis,
   prefix: "sm",
-  terminalTtlMs: 24 * 60 * 60 * 1000, // expire terminal states after 1 day
-  activeTtlMs: 60 * 60 * 1000, // expire stuck machines after 1 hour
+  terminalTtlMs: 24 * 60 * 60 * 1000, // expire terminal machines after 1 day
+  activeTtlMs: 60 * 60 * 1000, // expire machines idle in a non-terminal state for 1 hour
 });
-storage.registerTerminalStates(["completed", "failed", "cancelled"]);
 
-await storage.create({ id: "order-1", name: "order", initial: "pending", context: {} });
-await storage.transition({
-  id: "order-1",
-  from: "pending",
-  to: "paid",
-  event: "payment",
-  context: { amount: 99 },
-});
-const state = await storage.load("order-1");
-const events = await storage.loadEvents("order-1");
-
-// Optimistic locking for concurrent transitions:
-const locked = await storage.tryLock("order-1", 5000);
-await storage.releaseLock("order-1");
+const order = stateMachine<OrderStates>({ name: "order", storage })
+  // ...states and transitions
+  .build();
 ```
 
-## Error Handling
+- `transition()` is compare-and-set: it applies only while the machine is still in `from`, and the snapshot update and history append happen together. Otherwise it throws.
+- `tryLock()` / `releaseLock()` use a per-holder token, so releasing never frees a lock another instance acquired after yours expired.
+- Terminal states registered by the state machine builder switch the keys to `terminalTtlMs`.
 
-All Redis primitives propagate errors from the underlying driver. Common failure modes:
+## Errors and connections
 
-- **Connection lost**: Operations reject with the driver's connection error. Reconnection behavior depends on your driver (ioredis auto-reconnects by default; node-redis does not).
-- **Timeout on blocking operations**: `RedisSemaphore.acquire()`, `RedisDeferred.awaitAsync()`, `RedisQueue.takeAsync()`, and `RedisLatch.awaitAsync()` all use BRPOP with a timeout. They throw a descriptive timeout error (e.g., `"Semaphore acquire timeout after 30000ms"`).
-- **Capacity exceeded**: `RedisChannel.sendAsync()` throws `"Channel is full"` and `RedisQueue.offerAsync()` throws `"Queue is full"` when at capacity.
-- **Rate limiting**: `RedisRateLimiter.acquireAsync()` throws `RateLimitExceeded` with a `retryAfterMs` field.
-- **State conflicts**: `RedisStateMachineStorage.transition()` throws when the current state does not match the expected `from` state.
-
-## Cleanup
-
-Primitives that use `duplicate()` for blocking operations (semaphore, deferred, queue, latch, barrier, singleflight) automatically close the duplicated connection when the operation completes.
-
-For the top-level Redis connection, call either `disconnect()` or `close()` depending on your driver:
+Stores pass driver errors through unchanged. Reconnection is up to the driver (ioredis reconnects by default). The stores never close the connection you pass in. Close it yourself on shutdown:
 
 ```typescript
-// ioredis
-redis.disconnect();
-
-// node-redis / Bun
-redis.close();
-```
-
-For workflow and stream resources, call their own disconnect/shutdown methods before closing the Redis connection:
-
-```typescript
-await events.disconnect?.(); // RedisStream — if applicable
-await queue.shutdownAsync(); // RedisQueue
-redis.disconnect();
+redis.disconnect(); // ioredis
 ```

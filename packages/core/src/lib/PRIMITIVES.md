@@ -1,6 +1,6 @@
 # Concurrency Primitives
 
-In-process concurrency building blocks. All have distributed Redis-backed equivalents in `@promin/redis`.
+In-process concurrency building blocks. Distributed Redis-backed equivalents live in `@spilne/perfect-redis`.
 
 ## Synchronization
 

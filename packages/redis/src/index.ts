@@ -1,22 +1,7 @@
-export type { RedisClient, RedisPipeline } from "./lib/index.ts";
-export { RedisStream, type RedisStreamConfig } from "./lib/index.ts";
-export { RedisCacheStore, type RedisCacheStoreConfig } from "./lib/index.ts";
-export { RedisStateBackend, type RedisStateBackendConfig } from "./lib/index.ts";
-export { RedisPubSub, type RedisPubSubConfig } from "./lib/index.ts";
-export { RedisRef } from "./lib/index.ts";
-export { RedisSingleflight } from "./lib/index.ts";
-export { RedisThrottle } from "./lib/index.ts";
-export { RedisRateLimiter } from "./lib/index.ts";
-export { RedisChannel } from "./lib/index.ts";
-export { RedisSemaphore } from "./lib/index.ts";
-export { RedisLatch } from "./lib/index.ts";
-export { RedisBarrier } from "./lib/index.ts";
-export { RedisDeferred } from "./lib/index.ts";
-export { RedisSignal } from "./lib/index.ts";
-export { RedisQueue } from "./lib/index.ts";
-export { RedisStateMachineStorage } from "./lib/index.ts";
+export type { RedisStoreClient, RedisStorePipeline } from "./lib/index.ts";
+export { RedisStateMachineStorage, type RedisStateMachineStorageConfig } from "./lib/index.ts";
 export { RedisWorkflowStorage, type RedisWorkflowStorageConfig } from "./lib/index.ts";
-export { RedisStepQueue } from "./lib/index.ts";
+export { RedisStepQueue, type RedisStepQueueConfig } from "./lib/index.ts";
 export {
   RedisDurableScheduler,
   createRedisDurableScheduler,

@@ -14,12 +14,12 @@ import {
   RedisSchedulerStorage,
   type RedisSchedulerStorageConfig,
 } from "./redis-scheduler-storage.ts";
-import type { RedisClient } from "./redis-client.ts";
+import type { RedisStoreClient } from "./redis-client.ts";
 
 export type { DurableScheduleConfig } from "@promin/workflow";
 
 export interface RedisDurableSchedulerConfig {
-  redis: RedisClient;
+  redis: RedisStoreClient;
   /** Key prefix for all scheduler keys. Default: "sched". */
   prefix?: string;
   /** Instance ID for leader election. Default: random UUID. */

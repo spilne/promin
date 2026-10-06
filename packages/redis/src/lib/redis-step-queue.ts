@@ -12,14 +12,32 @@
 //   {prefix}:active:{wf}::{step}                   → taskId of the active
 //                                                    (pending/running) task
 //                                                    — drives idempotent
-//                                                    enqueue (promin-k6mk)
+//                                                    enqueue
+//   {prefix}:conc:{len(scope)}:{scope}:{key}       → Set of running task IDs
+//                                                    sharing a (concurrency
+//                                                    scope, key) — SCARD is
+//                                                    the running count that
+//                                                    claim checks against
+//                                                    the task's limit
 // ---------------------------------------------------------------------------
 
 import type { StepQueue, StepTask, FairnessPolicy } from "@promin/workflow";
-import type { RedisClient } from "./redis-client.ts";
+import type { RedisStoreClient } from "./redis-client.ts";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 
 // -- Lua scripts -------------------------------------------------------------
+
+/**
+ * Lua helper shared by the scripts below: the running-set key for a task's
+ * (concurrency scope, concurrency key), or nil when the task isn't keyed.
+ * The scope is length-prefixed so `a:b` + `c` can't collide with `a` + `b:c`.
+ */
+const CONC_KEY_LUA = `
+local function conc_key(prefix, scope, key)
+  if not scope or scope == '' or not key or key == '' then return nil end
+  return prefix .. ':conc:' .. #scope .. ':' .. scope .. ':' .. key
+end
+`;
 
 /**
  * Atomically enqueue a task with idempotency on (workflow_id, step_name).
@@ -72,6 +90,19 @@ if ARGV[11] ~= '' then
   table.insert(fields, 'metadata')
   table.insert(fields, ARGV[11])
 end
+-- ARGV[12..14] = concurrency key / scope / limit (empty when unset)
+if ARGV[12] ~= '' then
+  table.insert(fields, 'concurrencyKey')
+  table.insert(fields, ARGV[12])
+end
+if ARGV[13] ~= '' then
+  table.insert(fields, 'concurrencyScope')
+  table.insert(fields, ARGV[13])
+end
+if ARGV[14] ~= '' then
+  table.insert(fields, 'concurrencyLimit')
+  table.insert(fields, ARGV[14])
+end
 redis.call('HSET', task_key, unpack(fields))
 
 local priority = tonumber(ARGV[4])
@@ -83,17 +114,23 @@ return id
 `;
 
 /**
- * Claim up to `limit` pending tasks whose needs ⊆ capabilities. ZREVRANGE
- * the pending zset (priority-ordered), parse each candidate's needs, skip
- * tasks the worker can't handle, and move qualifying ones to running.
+ * Claim up to `limit` pending tasks whose needs ⊆ capabilities, honouring
+ * per-(concurrency scope, key) limits. Walks the pending zset in priority
+ * order a page at a time, skipping tasks the worker can't handle and tasks
+ * whose (scope, key) already has `concurrencyLimit` running, and moves the
+ * rest to running. Every claimed keyed task joins its (scope, key) running
+ * set inside the same script, so the cap holds within one call and across
+ * concurrent claimers.
  *
- * `caps_json` is a JSON array of the worker's capabilities; we decode it
- * once at the top and use a set-membership check per need.
+ * At most `scan_budget` pending entries are examined per call so a large
+ * backlog of blocked tasks can't stall Redis.
  *
  * KEYS: [pending_key, running_key]
- * ARGV: [worker_id, now, limit, task_key_prefix, caps_json]
+ * ARGV: [worker_id, now, limit, prefix, caps_json, scan_budget]
  */
-const CLAIM_LUA = `
+const CLAIM_LUA =
+  CONC_KEY_LUA +
+  `
 local pending_key = KEYS[1]
 local running_key = KEYS[2]
 local worker_id = ARGV[1]
@@ -101,47 +138,103 @@ local now = ARGV[2]
 local limit = tonumber(ARGV[3])
 local prefix = ARGV[4]
 local caps = cjson.decode(ARGV[5])
+local scan_budget = tonumber(ARGV[6])
 
 local caps_set = {}
 for _, c in ipairs(caps) do caps_set[c] = true end
 
--- Scan more than limit so we can skip tasks whose needs aren't met.
--- Scan size grows linearly with limit — fine for the typical load where
--- needs mismatches are a minority.
-local scan = limit * 4
-if scan < 16 then scan = 16 end
+local page = limit * 4
+if page < 16 then page = 16 end
 
-local candidates = redis.call('ZREVRANGE', pending_key, 0, scan - 1)
 local results = {}
+local start = 0
+local examined = 0
 
-for _, id in ipairs(candidates) do
-  if #results >= limit then break end
-  local task_key = prefix .. ':task:' .. id
-  local needs_json = redis.call('HGET', task_key, 'needs')
-  local ok = true
-  if needs_json and needs_json ~= '' and needs_json ~= '[]' then
-    local needs = cjson.decode(needs_json)
-    for _, n in ipairs(needs) do
-      if not caps_set[n] then
-        ok = false
-        break
+while #results < limit and examined < scan_budget do
+  local candidates = redis.call('ZREVRANGE', pending_key, start, start + page - 1)
+  if #candidates == 0 then break end
+  local claimed_in_page = 0
+
+  for _, id in ipairs(candidates) do
+    if #results >= limit or examined >= scan_budget then break end
+    examined = examined + 1
+    local task_key = prefix .. ':task:' .. id
+    local f = redis.call('HMGET', task_key, 'needs', 'concurrencyKey', 'concurrencyScope', 'concurrencyLimit')
+    local needs_json, c_key, c_scope, c_limit = f[1], f[2], f[3], f[4]
+
+    local ok = true
+    if needs_json and needs_json ~= '' and needs_json ~= '[]' then
+      for _, n in ipairs(cjson.decode(needs_json)) do
+        if not caps_set[n] then
+          ok = false
+          break
+        end
       end
     end
+
+    local conc = conc_key(prefix, c_scope, c_key)
+    if ok and conc and c_limit then
+      if redis.call('SCARD', conc) >= tonumber(c_limit) then ok = false end
+    end
+
+    if ok then
+      local claim_token = worker_id .. ':' .. id .. ':' .. now
+      redis.call('ZREM', pending_key, id)
+      redis.call('SADD', running_key, id)
+      if conc then redis.call('SADD', conc, id) end
+      redis.call('HSET', task_key, 'status', 'running', 'claimedBy', worker_id, 'claimedAt', now, 'claimToken', claim_token)
+      table.insert(results, redis.call('HGETALL', task_key))
+      claimed_in_page = claimed_in_page + 1
+    end
   end
-  if ok then
-    local claim_token = worker_id .. ':' .. id .. ':' .. now
-    redis.call('ZREM', pending_key, id)
-    redis.call('SADD', running_key, id)
-    redis.call('HSET', task_key, 'status', 'running', 'claimedBy', worker_id, 'claimedAt', now, 'claimToken', claim_token)
-    local task = redis.call('HGETALL', task_key)
-    table.insert(results, task)
-  end
+
+  -- Claimed entries left the zset, shifting later ranks down.
+  start = start + #candidates - claimed_in_page
 end
 
 return results
 `;
 
-const COMPLETE_LUA = `
+/**
+ * Put a running task back on the pending zset and free its concurrency
+ * slot. No-op unless the task is still running under `claim_token` (empty
+ * token skips that check), so a racing complete/fail wins.
+ *
+ * KEYS: [task_key, running_key, pending_key]
+ * ARGV: [id, prefix, claim_token]
+ */
+const REQUEUE_LUA =
+  CONC_KEY_LUA +
+  `
+local task_key = KEYS[1]
+local running_key = KEYS[2]
+local pending_key = KEYS[3]
+local id = ARGV[1]
+local prefix = ARGV[2]
+local claim_token = ARGV[3]
+
+local f = redis.call('HMGET', task_key, 'status', 'claimToken', 'priority', 'concurrencyKey', 'concurrencyScope')
+if f[1] ~= 'running' then return 0 end
+if claim_token ~= '' and f[2] ~= claim_token then return 0 end
+
+redis.call('HSET', task_key,
+  'status', 'pending',
+  'claimedBy', '',
+  'claimedAt', '',
+  'claimToken', '',
+  'heartbeatAt', '')
+redis.call('SREM', running_key, id)
+local conc = conc_key(prefix, f[5], f[4])
+if conc then redis.call('SREM', conc, id) end
+
+local priority = tonumber(f[3]) or 5
+redis.call('ZADD', pending_key, priority * 1e12 + (1e12 - tonumber(id)), id)
+return 1
+`;
+
+const COMPLETE_LUA =
+  CONC_KEY_LUA +
+  `
 local task_key = KEYS[1]
 local running_key = KEYS[2]
 local active_key_prefix = KEYS[3]
@@ -168,10 +261,14 @@ local step_name = redis.call('HGET', task_key, 'stepName')
 if workflow_id and step_name then
   redis.call('DEL', active_key_prefix .. workflow_id .. '::' .. step_name)
 end
+local conc = conc_key(ARGV[6], redis.call('HGET', task_key, 'concurrencyScope'), redis.call('HGET', task_key, 'concurrencyKey'))
+if conc then redis.call('SREM', conc, id) end
 return 1
 `;
 
-const FAIL_LUA = `
+const FAIL_LUA =
+  CONC_KEY_LUA +
+  `
 local task_key = KEYS[1]
 local running_key = KEYS[2]
 local active_key_prefix = KEYS[3]
@@ -198,6 +295,8 @@ local step_name = redis.call('HGET', task_key, 'stepName')
 if workflow_id and step_name then
   redis.call('DEL', active_key_prefix .. workflow_id .. '::' .. step_name)
 end
+local conc = conc_key(ARGV[6], redis.call('HGET', task_key, 'concurrencyScope'), redis.call('HGET', task_key, 'concurrencyKey'))
+if conc then redis.call('SREM', conc, id) end
 return 1
 `;
 
@@ -217,23 +316,35 @@ return 1
 
 // -- Implementation ----------------------------------------------------------
 
+export interface RedisStepQueueConfig {
+  redis: RedisStoreClient;
+  /** Key prefix for all queue keys. Default: "sq". */
+  prefix?: string;
+  /** Identity recorded on claimed tasks. Default: random UUID. */
+  workerId?: string;
+  /**
+   * Upper bound on pending entries one `claim()` examines while skipping
+   * tasks the worker can't take (unmet `needs`, full concurrency key).
+   * Default: 1000.
+   */
+  claimScanLimit?: number;
+  /** Time source for client-side timestamps. Default: `SystemWallClock`. */
+  clock?: WallClock;
+}
+
 export class RedisStepQueue implements StepQueue {
+  private readonly redis: RedisStoreClient;
   private readonly prefix: string;
   private readonly workerId: string;
+  private readonly claimScanLimit: number;
   private readonly clock: WallClock;
 
-  constructor(
-    private readonly redis: RedisClient,
-    config?: {
-      prefix?: string;
-      workerId?: string;
-      /** Time source for client-side timestamps. Default: `SystemWallClock`. */
-      clock?: WallClock;
-    },
-  ) {
-    this.prefix = config?.prefix ?? "sq";
-    this.workerId = config?.workerId ?? crypto.randomUUID();
-    this.clock = config?.clock ?? SystemWallClock;
+  constructor(config: RedisStepQueueConfig) {
+    this.redis = config.redis;
+    this.prefix = config.prefix ?? "sq";
+    this.workerId = config.workerId ?? crypto.randomUUID();
+    this.claimScanLimit = config.claimScanLimit ?? 1000;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   // -- Key helpers -----------------------------------------------------------
@@ -271,6 +382,9 @@ export class RedisStepQueue implements StepQueue {
     namespace?: string;
     version?: string;
     metadata?: Record<string, unknown>;
+    concurrencyKey?: string;
+    concurrencyScope?: string;
+    concurrencyLimit?: number;
   }): Promise<string> {
     const priority = params.priority ?? 5;
     const needs = params.needs ?? [];
@@ -292,6 +406,9 @@ export class RedisStepQueue implements StepQueue {
       params.version ?? "",
       params.namespace ?? "",
       params.metadata !== undefined ? JSON.stringify(params.metadata) : "",
+      params.concurrencyKey ?? "",
+      params.concurrencyScope ?? "",
+      params.concurrencyLimit !== undefined ? String(params.concurrencyLimit) : "",
     )) as string;
     return id;
   }
@@ -320,6 +437,7 @@ export class RedisStepQueue implements StepQueue {
       String(limit),
       this.prefix,
       JSON.stringify(caps),
+      String(Math.max(limit, this.claimScanLimit)),
     )) as string[][];
 
     const claimed: StepTask[] = [];
@@ -337,14 +455,7 @@ export class RedisStepQueue implements StepQueue {
           accepted.push(t);
           continue;
         }
-        await this.redis.srem(this.runningKey(), t.id);
-        await this.redis.hset(this.taskKey(t.id), {
-          status: "pending",
-          claimedBy: "",
-          claimedAt: "",
-        });
-        const score = t.priority * 1e12 + (1e12 - Number(t.id));
-        await this.redis.zadd(this.pendingKey, score, t.id);
+        await this.requeue({ id: t.id, claimToken: t.claimToken ?? "" });
       }
       return accepted;
     }
@@ -368,6 +479,7 @@ export class RedisStepQueue implements StepQueue {
       JSON.stringify(params.result),
       String(params.durationMs),
       this.clock.now().toISOString(),
+      this.prefix,
     );
     return ok === 1;
   }
@@ -389,6 +501,7 @@ export class RedisStepQueue implements StepQueue {
       params.error,
       String(params.durationMs),
       this.clock.now().toISOString(),
+      this.prefix,
     );
     return ok === 1;
   }
@@ -414,24 +527,15 @@ export class RedisStepQueue implements StepQueue {
 
       if (params.claimedBy && raw.claimedBy !== params.claimedBy) continue;
       if (params.staleTimeoutMs) {
-        const lastActivity = raw.heartbeatAt ?? raw.claimedAt;
+        const lastActivity = raw.heartbeatAt || raw.claimedAt;
         if (!lastActivity) continue;
         const lastActivityMs = new Date(lastActivity).getTime();
         if (this.clock.currentTimeMs() - lastActivityMs < params.staleTimeoutMs) continue;
       }
 
-      const priority = parseInt(raw.priority ?? "5", 10);
-      const score = priority * 1e12 + (1e12 - Number(id));
-      await this.redis.hset(this.taskKey(id), {
-        status: "pending",
-        claimedBy: "",
-        claimedAt: "",
-        claimToken: "",
-        heartbeatAt: "",
-      });
-      await this.redis.srem(this.runningKey(), id);
-      await this.redis.zadd(this.pendingKey, score, id);
-      count++;
+      // Token-guarded, so a task completed between the read above and the
+      // requeue stays completed.
+      if (await this.requeue({ id, claimToken: raw.claimToken ?? "" })) count++;
     }
 
     return count;
@@ -509,6 +613,20 @@ export class RedisStepQueue implements StepQueue {
 
   // -- Internal helpers ------------------------------------------------------
 
+  private async requeue(params: { id: string; claimToken: string }): Promise<boolean> {
+    const ok = await this.redis.eval(
+      REQUEUE_LUA,
+      3,
+      this.taskKey(params.id),
+      this.runningKey(),
+      this.pendingKey,
+      params.id,
+      this.prefix,
+      params.claimToken,
+    );
+    return ok === 1;
+  }
+
   private parseHashArray(arr: string[]): StepTask | null {
     const map: Record<string, string> = {};
     for (let i = 0; i < arr.length; i += 2) {
@@ -535,6 +653,15 @@ export class RedisStepQueue implements StepQueue {
     if (map.claimToken) (task as { claimToken?: string }).claimToken = map.claimToken;
     if (map.metadata) {
       (task as { metadata?: Record<string, unknown> }).metadata = JSON.parse(map.metadata);
+    }
+    if (map.concurrencyKey) {
+      (task as { concurrencyKey?: string }).concurrencyKey = map.concurrencyKey;
+    }
+    if (map.concurrencyScope) {
+      (task as { concurrencyScope?: string }).concurrencyScope = map.concurrencyScope;
+    }
+    if (map.concurrencyLimit) {
+      (task as { concurrencyLimit?: number }).concurrencyLimit = Number(map.concurrencyLimit);
     }
     return task;
   }

@@ -1,22 +1,10 @@
-export type { RedisClient, RedisPipeline } from "./redis-client.ts";
-export { RedisStream, type RedisStreamConfig } from "./redis-stream.ts";
-export { RedisCacheStore, type RedisCacheStoreConfig } from "./redis-cache-store.ts";
-export { RedisStateBackend, type RedisStateBackendConfig } from "./redis-state-backend.ts";
-export { RedisPubSub, type RedisPubSubConfig } from "./redis-pubsub.ts";
-export { RedisRef } from "./redis-ref.ts";
-export { RedisSingleflight } from "./redis-singleflight.ts";
-export { RedisThrottle } from "./redis-throttle.ts";
-export { RedisRateLimiter } from "./redis-rate-limiter.ts";
-export { RedisChannel } from "./redis-channel.ts";
-export { RedisSemaphore } from "./redis-semaphore.ts";
-export { RedisLatch } from "./redis-latch.ts";
-export { RedisBarrier } from "./redis-barrier.ts";
-export { RedisDeferred } from "./redis-deferred.ts";
-export { RedisSignal } from "./redis-signal.ts";
-export { RedisQueue } from "./redis-queue.ts";
-export { RedisStateMachineStorage } from "./redis-state-machine-storage.ts";
+export type { RedisStoreClient, RedisStorePipeline } from "./redis-client.ts";
+export {
+  RedisStateMachineStorage,
+  type RedisStateMachineStorageConfig,
+} from "./redis-state-machine-storage.ts";
 export { RedisWorkflowStorage, type RedisWorkflowStorageConfig } from "./redis-workflow-storage.ts";
-export { RedisStepQueue } from "./redis-step-queue.ts";
+export { RedisStepQueue, type RedisStepQueueConfig } from "./redis-step-queue.ts";
 export {
   RedisDurableScheduler,
   createRedisDurableScheduler,
