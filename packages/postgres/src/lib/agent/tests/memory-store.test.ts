@@ -35,6 +35,25 @@ describe("PostgresMemoryStore — Postgres-specific", () => {
     expect(facts.map((f) => f.text)).toEqual(["shared-fact"]);
   });
 
+  it("facts sharing a createdAt list in append order", async () => {
+    const s = new PostgresMemoryStore({ db: pg.db, now: () => 1_000 });
+    const texts = Array.from({ length: 20 }, (_, i) => `fact-${i}`);
+    await s.createThread({ namespaceId: "acme", threadId: "t-1" });
+    for (const text of texts) {
+      await s.appendNamespaceFact("acme", text);
+      await s.appendResourceFact({ namespaceId: "acme", resourceId: "r-1" }, text);
+      await s.appendThreadFact({ namespaceId: "acme", threadId: "t-1" }, text);
+    }
+
+    expect((await s.listNamespaceFacts("acme")).map((f) => f.text)).toEqual(texts);
+    expect(
+      (await s.listResourceFacts({ namespaceId: "acme", resourceId: "r-1" })).map((f) => f.text),
+    ).toEqual(texts);
+    expect(
+      (await s.listThreadFacts({ namespaceId: "acme", threadId: "t-1" })).map((f) => f.text),
+    ).toEqual(texts);
+  });
+
   it("messages roundtrip JSONB payloads with nested structures", async () => {
     const s = new PostgresMemoryStore({ db: pg.db });
     await s.createThread({ namespaceId: "acme", threadId: "t-1" });
