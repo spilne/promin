@@ -88,7 +88,7 @@ service (env var, milliseconds).
 ## Swapping the stubs for real logic
 
 Step handlers live in `workflow.ts` (`decodeHandler`, `transcodeHandler`,
-etc). Each handler is a `StepHandler` — `(ctx) => Pipeline`. Replace the
+etc). Each handler is a `StepHandler` — `(ctx) => Eff`. Replace the
 `sleep()` calls with real ffmpeg/S3/DB work and the wiring stays the same;
 workers will just take longer to finish each task. A real GPU worker would
 mount `/dev/dri` (or `--gpus all` on nvidia-docker) onto `worker-gpu` and

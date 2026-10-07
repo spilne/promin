@@ -4,8 +4,8 @@
 // against the in-memory registry.
 // ---------------------------------------------------------------------------
 
+import { succeed } from "@spilne/perfect-core";
 import { beforeEach, describe, expect, it } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { workflow, WorkflowVersionRegistry } from "@promin/workflow";
 import {
   getActiveWorkflowVersion,
@@ -24,7 +24,7 @@ const jsonReq = (body: unknown) =>
 
 function makeWf(version: string) {
   return workflow<{ n: number }>({ name: "compute", version })
-    .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
+    .step("double", ({ input }) => succeed(input.n * 2))
     .build();
 }
 

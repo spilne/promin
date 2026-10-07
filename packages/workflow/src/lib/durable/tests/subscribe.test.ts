@@ -1,6 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { TaggedError } from "@spilne/perfect-core";
-import { Pipeline } from "@promin/core";
+import { TaggedError, succeed, fail } from "@spilne/perfect-core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
@@ -27,8 +26,8 @@ describe("subscribe — run-scoped event stream", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "sub-started" })
-      .step("a", ({ input }) => Pipeline.succeed(input + 1))
-      .step("b", ({ prev }) => Pipeline.succeed(prev * 2))
+      .step("a", ({ input }) => succeed(input + 1))
+      .step("b", ({ prev }) => succeed(prev * 2))
       .build();
 
     const eventsP = collect(runner.subscribe("sub-started-1"));
@@ -51,8 +50,8 @@ describe("subscribe — run-scoped event stream", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "sub-ok" })
-      .step("a", ({ input }) => Pipeline.succeed(input + 1))
-      .step("b", ({ prev }) => Pipeline.succeed(prev * 2))
+      .step("a", ({ input }) => succeed(input + 1))
+      .step("b", ({ prev }) => succeed(prev * 2))
       .build();
 
     const eventsP = collect(runner.subscribe("sub-ok-1"));
@@ -87,7 +86,7 @@ describe("subscribe — run-scoped event stream", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "sub-fail" })
-      .step("boom", () => Pipeline.fail(new StepBoom({ message: "bang" })))
+      .step("boom", () => fail(new StepBoom({ message: "bang" })))
       .build();
 
     const eventsP = collect(runner.subscribe("sub-fail-1"));
@@ -147,7 +146,7 @@ describe("subscribe — run-scoped event stream", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "sub-close" })
-      .step("x", ({ input }) => Pipeline.succeed(input))
+      .step("x", ({ input }) => succeed(input))
       .build();
 
     const it = runner.subscribe("sub-close-1")[Symbol.asyncIterator]();
@@ -176,8 +175,8 @@ describe("subscribe — run-scoped event stream", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "sub-multi" })
-      .step("a", ({ input }) => Pipeline.succeed(input))
-      .step("b", ({ prev }) => Pipeline.succeed(prev + 1))
+      .step("a", ({ input }) => succeed(input))
+      .step("b", ({ prev }) => succeed(prev + 1))
       .build();
 
     const a = collect(runner.subscribe("sub-multi-1"));
@@ -216,7 +215,7 @@ describe("subscribe — run-scoped event stream", () => {
         await new Promise((r) => setTimeout(r, 0));
         return input + 1;
       })
-      .step("b", ({ prev }) => Pipeline.succeed(prev * 2))
+      .step("b", ({ prev }) => succeed(prev * 2))
       .build();
 
     const runP = runner.run({ workflow: wf, workflowId: "sub-late-1", input: 5 });
@@ -237,8 +236,8 @@ describe("subscribe — run-scoped event stream", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "sub-poll" })
-      .step("a", ({ input }) => Pipeline.succeed(input + 1))
-      .step("b", ({ prev }) => Pipeline.succeed(prev * 2))
+      .step("a", ({ input }) => succeed(input + 1))
+      .step("b", ({ prev }) => succeed(prev * 2))
       .build();
 
     // Fast poll so the test finishes quickly but still goes through the
@@ -261,7 +260,7 @@ describe("subscribe — run-scoped event stream", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "sub-poll-fail" })
-      .step("boom", () => Pipeline.fail(new StepBoom({ message: "x" })))
+      .step("boom", () => fail(new StepBoom({ message: "x" })))
       .build();
 
     const eventsP = collect(runner.subscribe("sub-poll-fail-1", { pollIntervalMs: 20 }));

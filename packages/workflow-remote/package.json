@@ -45,7 +45,6 @@
     "@spilne/perfect-core": "catalog:"
   },
   "devDependencies": {
-    "@promin/core": "workspace:*",
     "@types/bun": "catalog:"
   },
   "nx": {

@@ -7,9 +7,6 @@
       "path": "../workflow"
     },
     {
-      "path": "../core"
-    },
-    {
       "path": "./tsconfig.lib.json"
     }
   ]

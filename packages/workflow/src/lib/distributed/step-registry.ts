@@ -1,11 +1,11 @@
 // ---------------------------------------------------------------------------
-// StepRegistry — maps step names to Pipeline implementations on workers
+// StepRegistry — maps step names to step handlers on workers
 //
 // Workers register the steps they can execute. The coordinator dispatches
 // steps by name; workers resolve them from their local registry.
 // ---------------------------------------------------------------------------
 
-import type { Pipeline } from "@promin/core";
+import type { Eff, Throws } from "@spilne/perfect-core";
 import type { TaggedError } from "../shared/tagged-error.ts";
 import type { RetryPolicy } from "../shared/retry-policy.ts";
 
@@ -18,7 +18,13 @@ export interface StepContext {
   readonly attempt: number;
 }
 
-export type StepHandler = (ctx: StepContext) => Pipeline<unknown, TaggedError> | Promise<unknown>;
+/**
+ * A worker step body. Return an `Eff` (typed failures are what step retry
+ * sees) or a Promise.
+ */
+export type StepHandler = (
+  ctx: StepContext,
+) => Eff<unknown, Throws<TaggedError>> | Promise<unknown>;
 
 export type StepFailureStrategy = "fail" | "skip" | { fallback: (error: unknown) => unknown };
 
@@ -32,7 +38,7 @@ export interface WorkerStepOptions {
     result: unknown;
     input: unknown;
     workflowId: string;
-  }) => Pipeline<void, any> | Promise<void>;
+  }) => Eff<unknown, Throws<unknown>> | Promise<void>;
 }
 
 export interface StepRegistration {

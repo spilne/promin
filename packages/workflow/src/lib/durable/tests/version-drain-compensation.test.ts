@@ -22,8 +22,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { TaggedError } from "@spilne/perfect-core";
-import { Pipeline } from "@promin/core";
+import { TaggedError, succeed, fail } from "@spilne/perfect-core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
@@ -42,15 +41,13 @@ describe("versioning drain — compensation uses the stored version's code", () 
     const v2Log: string[] = [];
 
     const v1 = workflow<{ n: number }>({ name: "pay", version: "1" })
-      .step("charge", ({ input }) => Pipeline.succeed(input.n * 10), {
+      .step("charge", ({ input }) => succeed(input.n * 10), {
         compensate: () => {
           v1Log.push("v1:refund");
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       })
-      .step("ship", () =>
-        Pipeline.fail(new BoomError({ stepName: "ship", message: "v1 ship failed" })),
-      )
+      .step("ship", () => fail(new BoomError({ stepName: "ship", message: "v1 ship failed" })))
       .build();
 
     const v2 = workflow<{ n: number }>({
@@ -59,15 +56,13 @@ describe("versioning drain — compensation uses the stored version's code", () 
       onVersionMismatch: "drain",
       previousVersions: [v1],
     })
-      .step("charge", ({ input }) => Pipeline.succeed(input.n * 100), {
+      .step("charge", ({ input }) => succeed(input.n * 100), {
         compensate: () => {
           v2Log.push("v2:refund");
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       })
-      .step("ship", () =>
-        Pipeline.fail(new BoomError({ stepName: "ship", message: "v2 ship failed" })),
-      )
+      .step("ship", () => fail(new BoomError({ stepName: "ship", message: "v2 ship failed" })))
       .build();
 
     // Seed a pending workflow with stored version=1 — simulates an
@@ -102,27 +97,23 @@ describe("versioning drain — compensation uses the stored version's code", () 
     const registry = createWorkflowVersionRegistry();
 
     const v1 = workflow<{ n: number }>({ name: "pay", version: "1" })
-      .step("charge", ({ input }) => Pipeline.succeed(input.n * 10), {
+      .step("charge", ({ input }) => succeed(input.n * 10), {
         compensate: () => {
           v1Log.push("v1:refund");
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       })
-      .step("ship", () =>
-        Pipeline.fail(new BoomError({ stepName: "ship", message: "v1 ship failed" })),
-      )
+      .step("ship", () => fail(new BoomError({ stepName: "ship", message: "v1 ship failed" })))
       .build();
 
     const v2 = workflow<{ n: number }>({ name: "pay", version: "2" })
-      .step("charge", ({ input }) => Pipeline.succeed(input.n * 100), {
+      .step("charge", ({ input }) => succeed(input.n * 100), {
         compensate: () => {
           v2Log.push("v2:refund");
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       })
-      .step("ship", () =>
-        Pipeline.fail(new BoomError({ stepName: "ship", message: "v2 ship failed" })),
-      )
+      .step("ship", () => fail(new BoomError({ stepName: "ship", message: "v2 ship failed" })))
       .build();
 
     registry.register(v1);
@@ -158,15 +149,13 @@ describe("versioning drain — compensation uses the stored version's code", () 
     const v2Log: string[] = [];
 
     const v2 = workflow<{ n: number }>({ name: "pay-fresh", version: "2" })
-      .step("charge", ({ input }) => Pipeline.succeed(input.n * 100), {
+      .step("charge", ({ input }) => succeed(input.n * 100), {
         compensate: () => {
           v2Log.push("v2:refund");
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       })
-      .step("ship", () =>
-        Pipeline.fail(new BoomError({ stepName: "ship", message: "fresh v2 fail" })),
-      )
+      .step("ship", () => fail(new BoomError({ stepName: "ship", message: "fresh v2 fail" })))
       .build();
 
     const { error } = await runner.runSafe({

@@ -13,7 +13,7 @@
 // Run: bun run packages/workflow/examples/versioning/02-drain-inline.ts
 // ---------------------------------------------------------------------------
 
-import { Pipeline } from "@promin/core";
+import { succeed } from "@spilne/perfect-core";
 import { workflow, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 
 async function main(): Promise<void> {
@@ -22,7 +22,7 @@ async function main(): Promise<void> {
 
   // Build v1 and keep the `.build()` result as a reference we can pass later.
   const v1 = workflow<{ amount: number }>({ name: "billing", version: "1" })
-    .step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount, v: "1" }))
+    .step("charge", ({ input }) => succeed({ charged: input.amount, v: "1" }))
     .build();
 
   // Start a v1 workflow. This row is stamped `version: "1"` and runs v1 code.
@@ -36,7 +36,7 @@ async function main(): Promise<void> {
     onVersionMismatch: "drain",
     previousVersions: [v1],
   })
-    .step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount * 1.1, v: "2" }))
+    .step("charge", ({ input }) => succeed({ charged: input.amount * 1.1, v: "2" }))
     .build();
 
   // Re-running the v1 workflow under v2 code — drain delegates to v1.

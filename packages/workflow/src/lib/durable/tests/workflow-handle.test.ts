@@ -1,5 +1,4 @@
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";

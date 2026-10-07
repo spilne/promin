@@ -1,8 +1,7 @@
 import { describe, it, expect } from "bun:test";
 // Aliased: `TaggedError` is also the name of the structural `{ _tag }`
 // constraint imported from `shared/tagged-error.ts` below.
-import { TaggedError as PerfectTaggedError } from "@spilne/perfect-core";
-import { Pipeline } from "@promin/core";
+import { TaggedError as PerfectTaggedError, succeed, fail } from "@spilne/perfect-core";
 import type { TaggedError } from "../../shared/tagged-error.ts";
 import { workflow, InMemoryWorkflowStorage } from "../../durable/index.ts";
 import { createWorkflowRunner } from "../../durable/workflow-runner.ts";
@@ -21,12 +20,12 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
     const wfDef = workflow<{ msg: string }>({ name: "sleepy" })
       .step("before", ({ input }) => {
         log.push("before");
-        return Pipeline.succeed(input.msg);
+        return succeed(input.msg);
       })
       .sleep("nap", 1) // 1ms sleep — expires immediately
       .step("after", ({ prev }) => {
         log.push("after");
-        return Pipeline.succeed(`woke: ${prev}`);
+        return succeed(`woke: ${prev}`);
       })
       .build();
 
@@ -68,9 +67,9 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
     const runner = createWorkflowRunner({ storage });
 
     const wfDef = workflow<string>({ name: "long-sleep" })
-      .step("before", () => Pipeline.succeed("ok"))
+      .step("before", () => succeed("ok"))
       .sleep("nap", 999_999_999) // ~31 years
-      .step("after", () => Pipeline.succeed("done"))
+      .step("after", () => succeed("done"))
       .build();
 
     await runner.runSafe({ workflow: wfDef, workflowId: "sleep-2", input: "x" });
@@ -100,9 +99,9 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
     const runner = createWorkflowRunner({ storage });
 
     const wfDef = workflow<string>({ name: "unknown-wf" })
-      .step("before", () => Pipeline.succeed("ok"))
+      .step("before", () => succeed("ok"))
       .sleep("nap", 1)
-      .step("after", () => Pipeline.succeed("done"))
+      .step("after", () => succeed("done"))
       .build();
 
     await runner.runSafe({ workflow: wfDef, workflowId: "sleep-3", input: "x" });
@@ -130,9 +129,9 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
     const runner = createWorkflowRunner({ storage });
 
     const wfDef = workflow<string>({ name: "multi" })
-      .step("before", ({ input }) => Pipeline.succeed(input))
+      .step("before", ({ input }) => succeed(input))
       .sleep("nap", 1)
-      .step("after", ({ prev }) => Pipeline.succeed(`done: ${prev}`))
+      .step("after", ({ prev }) => succeed(`done: ${prev}`))
       .build();
 
     await runner.runSafe({ workflow: wfDef, workflowId: "sleep-a", input: "a" });
@@ -168,11 +167,9 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
     // A workflow whose post-sleep step always fails — triggers the scanner's
     // onError path during resumption.
     const broken = workflow<string>({ name: "broken" })
-      .step("before", () => Pipeline.succeed("ok"))
+      .step("before", () => succeed("ok"))
       .sleep("nap", 1)
-      .step("boom", () =>
-        Pipeline.fail(new ResumeFailure({ message: "resume failed" }) as TaggedError),
-      )
+      .step("boom", () => fail(new ResumeFailure({ message: "resume failed" }) as TaggedError))
       .build();
 
     // Kick it off so storage has a row sleeping on "nap"; wait for wake.

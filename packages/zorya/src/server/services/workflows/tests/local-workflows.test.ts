@@ -2,6 +2,7 @@
 // LocalWorkflows tests — trigger, rerun, recovery wiring.
 // ---------------------------------------------------------------------------
 
+import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
 import {
   InMemoryWorkflowStorage,
@@ -9,12 +10,11 @@ import {
   createWorkflowRunner,
   RecoveryStrategy,
 } from "@promin/workflow";
-import { Pipeline } from "@promin/core";
 import { LocalWorkflows } from "../index.ts";
 
 const makeWorkflow = () =>
   workflow<{ n: number }>({ name: "double" })
-    .step("doIt", ({ input }) => Pipeline.succeed(input.n * 2))
+    .step("doIt", ({ input }) => succeed(input.n * 2))
     .build();
 
 describe("LocalWorkflows.trigger", () => {

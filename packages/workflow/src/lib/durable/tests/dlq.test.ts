@@ -1,6 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { TaggedError } from "@spilne/perfect-core";
-import { Pipeline } from "@promin/core";
+import { TaggedError, succeed, fail } from "@spilne/perfect-core";
 import { JsonCodec } from "@spilne/perfect-core/connect";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
@@ -44,8 +43,8 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
       name: "dlq-basic",
       dlq,
     })
-      .step("step-1", ({ input }) => Pipeline.succeed(input.userId))
-      .step("step-2", () => Pipeline.fail(new TestError({ message: "boom" })))
+      .step("step-1", ({ input }) => succeed(input.userId))
+      .step("step-2", () => fail(new TestError({ message: "boom" })))
       .build();
 
     await runner.runSafe({ workflow: wf, workflowId: "dlq-1", input: { userId: "u_42" } });
@@ -68,8 +67,8 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
       name: "dlq-steps",
       dlq,
     })
-      .step("ok-step", () => Pipeline.succeed("done"))
-      .step("fail-step", () => Pipeline.fail(new TestError({ message: "fail" })))
+      .step("ok-step", () => succeed("done"))
+      .step("fail-step", () => fail(new TestError({ message: "fail" })))
       .build();
 
     await runner.runSafe({ workflow: wf, workflowId: "dlq-2", input: "x" });
@@ -90,15 +89,15 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
       name: "dlq-comp",
       dlq,
     })
-      .step("step-1", () => Pipeline.succeed("ok"), {
-        compensate: () => Pipeline.succeed(undefined as void),
+      .step("step-1", () => succeed("ok"), {
+        compensate: () => succeed(undefined as void),
       })
-      .step("step-2", () => Pipeline.succeed("ok"), {
+      .step("step-2", () => succeed("ok"), {
         compensate: () => {
           throw new Error("comp-failed");
         },
       })
-      .step("fail", () => Pipeline.fail(new TestError({ message: "boom" })))
+      .step("fail", () => fail(new TestError({ message: "boom" })))
       .build();
 
     await runner.runSafe({ workflow: wf, workflowId: "dlq-3", input: "x" });
@@ -120,7 +119,7 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
       dlq,
       metadata: { team: "growth", priority: "high" },
     })
-      .step("fail", () => Pipeline.fail(new TestError({ message: "fail" })))
+      .step("fail", () => fail(new TestError({ message: "fail" })))
       .build();
 
     await runner.runSafe({ workflow: wf, workflowId: "dlq-4", input: "x" });
@@ -138,7 +137,7 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
       name: "dlq-success",
       dlq,
     })
-      .step("ok", ({ input }) => Pipeline.succeed(input * 2))
+      .step("ok", ({ input }) => succeed(input * 2))
       .build();
 
     await runner.run({ workflow: wf, workflowId: "dlq-5", input: 5 });
@@ -159,7 +158,7 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
     })
       .step("fail", () => {
         attempts++;
-        return Pipeline.fail(new TestError({ message: `fail-${attempts}` }));
+        return fail(new TestError({ message: `fail-${attempts}` }));
       })
       .build();
 
@@ -184,7 +183,7 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
       name: "dlq-fail",
       dlq: failingDlq,
     })
-      .step("fail", () => Pipeline.fail(new TestError({ message: "original" })))
+      .step("fail", () => fail(new TestError({ message: "original" })))
       .build();
 
     const { error } = await runner.runSafe({ workflow: wf, workflowId: "dlq-7", input: "x" });
@@ -199,7 +198,7 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
 
     // No dlq option — should work fine
     const wf = workflow<string>({ name: "no-dlq" })
-      .step("fail", () => Pipeline.fail(new TestError({ message: "fail" })))
+      .step("fail", () => fail(new TestError({ message: "fail" })))
       .build();
 
     const { error } = await runner.runSafe({ workflow: wf, workflowId: "no-dlq-1", input: "x" });
@@ -216,7 +215,7 @@ describe("Dead-letter queue — capture failed workflows for investigation", () 
       name: "dlq-build",
       dlq,
     })
-      .step("fail", () => Pipeline.fail(new TestError({ message: "fail" })))
+      .step("fail", () => fail(new TestError({ message: "fail" })))
       .build();
 
     await runner.runSafe({ workflow: definition, workflowId: "dlq-8", input: "x" });
@@ -241,8 +240,8 @@ describe("DLQ replay — re-process failed workflows after fixing the root cause
       dlq,
     })
       .step("process", ({ input }) => {
-        if (shouldFail) return Pipeline.fail(new TestError({ message: "transient" }));
-        return Pipeline.succeed(input.n * 2);
+        if (shouldFail) return fail(new TestError({ message: "transient" }));
+        return succeed(input.n * 2);
       })
       .build();
 

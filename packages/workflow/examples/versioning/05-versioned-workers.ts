@@ -15,7 +15,7 @@
 // Run: bun run packages/workflow/examples/versioning/05-versioned-workers.ts
 // ---------------------------------------------------------------------------
 
-import { Pipeline } from "@promin/core";
+import { succeed } from "@spilne/perfect-core";
 import {
   workflow,
   InMemoryWorkflowStorage,
@@ -34,9 +34,7 @@ async function main(): Promise<void> {
   // the same for v1 and v2 — real deployments might have version-specific
   // handlers, or use ctx.patched inside journaled steps.
   const registry = new MapStepRegistry();
-  registry.register("process", ({ input }) =>
-    Pipeline.succeed(`handled-${(input as { id: string }).id}`),
-  );
+  registry.register("process", ({ input }) => succeed(`handled-${(input as { id: string }).id}`));
 
   // Rolling-deploy window: this worker declares it handles v1 and v2.
   // After v1 drains (countByVersion shows 0 in-flight), update this to ["2"]
@@ -59,7 +57,7 @@ async function main(): Promise<void> {
     version: "1",
     dispatch: { stepQueue, remoteSteps: ["process"], pollIntervalMs: 25 },
   })
-    .step("process", ({ input }) => Pipeline.succeed(`v1-${input.id}`))
+    .step("process", ({ input }) => succeed(`v1-${input.id}`))
     .build();
   await runner.run({ workflow: v1Wf, workflowId: "order-A", input: { id: "abc" } });
 
@@ -69,7 +67,7 @@ async function main(): Promise<void> {
     version: "2",
     dispatch: { stepQueue, remoteSteps: ["process"], pollIntervalMs: 25 },
   })
-    .step("process", ({ input }) => Pipeline.succeed(`v2-${input.id}`))
+    .step("process", ({ input }) => succeed(`v2-${input.id}`))
     .build();
   await runner.run({ workflow: v2Wf, workflowId: "order-B", input: { id: "def" } });
 

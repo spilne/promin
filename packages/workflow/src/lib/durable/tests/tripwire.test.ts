@@ -1,5 +1,5 @@
+import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
@@ -11,12 +11,12 @@ describe("tripwire", () => {
       const storage = new InMemoryWorkflowStorage();
       const runner = createWorkflowRunner({ storage });
       const wf = workflow<{ riskScore: number }>({ name: "fraud-stop" })
-        .step("load", ({ input }) => Pipeline.succeed(input))
+        .step("load", ({ input }) => succeed(input))
         .tripwire("fraud-check", {
           when: (order) => order.riskScore > 0.9,
           reason: (order) => ({ code: "fraud", score: order.riskScore }),
         })
-        .step("charge", ({ prev }) => Pipeline.succeed(`charged:${prev.riskScore}`))
+        .step("charge", ({ prev }) => succeed(`charged:${prev.riskScore}`))
         .build();
 
       const promise = runner.run({
@@ -32,7 +32,7 @@ describe("tripwire", () => {
       const storage = new InMemoryWorkflowStorage();
       const runner = createWorkflowRunner({ storage });
       const wf = workflow<{ n: number }>({ name: "trip-state" })
-        .step("load", ({ input }) => Pipeline.succeed(input))
+        .step("load", ({ input }) => succeed(input))
         .tripwire("gate", {
           when: (x) => x.n > 100,
           reason: (x) => ({ limit: 100, actual: x.n }),
@@ -79,7 +79,7 @@ describe("tripwire", () => {
           when: (x) => !x.allow,
           reason: () => ({ denied: true }),
         })
-        .step("proceed", ({ prev }) => Pipeline.succeed(prev))
+        .step("proceed", ({ prev }) => succeed(prev))
         .build();
 
       const result = await runner.runSafe({
@@ -99,14 +99,14 @@ describe("tripwire", () => {
       let downstreamRan = false;
 
       const wf = workflow<{ x: number }>({ name: "trip-stop-dag" })
-        .step("load", ({ input }) => Pipeline.succeed(input))
+        .step("load", ({ input }) => succeed(input))
         .tripwire("gate", {
           when: (v) => v.x === 0,
           reason: () => "zero-input",
         })
         .step("after", ({ prev }) => {
           downstreamRan = true;
-          return Pipeline.succeed(prev);
+          return succeed(prev);
         })
         .build();
 
@@ -151,12 +151,12 @@ describe("tripwire", () => {
       const storage = new InMemoryWorkflowStorage();
       const runner = createWorkflowRunner({ storage });
       const wf = workflow<{ amount: number }>({ name: "trip-pass" })
-        .step("load", ({ input }) => Pipeline.succeed(input))
+        .step("load", ({ input }) => succeed(input))
         .tripwire("cap", {
           when: (x) => x.amount > 1_000_000,
           reason: () => "over-cap",
         })
-        .step("bill", ({ prev }) => Pipeline.succeed(`billed:${prev.amount}`))
+        .step("bill", ({ prev }) => succeed(`billed:${prev.amount}`))
         .build();
 
       const result = await runner.run({
@@ -183,7 +183,7 @@ describe("tripwire", () => {
             return { bad: v.n };
           },
         })
-        .step("out", ({ prev }) => Pipeline.succeed(prev))
+        .step("out", ({ prev }) => succeed(prev))
         .build();
 
       await runner.run({ workflow: wf, workflowId: "wf-lazy-1", input: { n: 5 } });
@@ -243,7 +243,7 @@ describe("tripwire", () => {
       let compensated = false;
 
       const wf = workflow<{ stop: boolean }>({ name: "trip-no-comp" })
-        .step("reserve", ({ input }) => Pipeline.succeed(input), {
+        .step("reserve", ({ input }) => succeed(input), {
           compensate: () => {
             compensated = true;
           },

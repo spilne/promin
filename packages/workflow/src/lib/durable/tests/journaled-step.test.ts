@@ -1,5 +1,5 @@
+import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect, beforeEach } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
@@ -35,7 +35,7 @@ describe("journaled step", () => {
       let notifyCalls = 0;
 
       const wf = workflow<{ user: string }>({ name: "signup" })
-        .step("load", ({ input }) => Pipeline.succeed(input))
+        .step("load", ({ input }) => succeed(input))
         .journaled("setup", function* (ctx, prev) {
           const created = yield* ctx.activity("create", async () => {
             createCalls++;
@@ -85,7 +85,7 @@ describe("journaled step", () => {
 
       // Seed the journal by running once through a workflow.
       const seedWf = workflow<{ msg: string }>({ name: "echo" })
-        .step("load", ({ input }) => Pipeline.succeed(input))
+        .step("load", ({ input }) => succeed(input))
         .journaled("body", body as any)
         .build();
       const seedRunner = createWorkflowRunner({ storage });
@@ -489,7 +489,7 @@ describe("journaled step", () => {
         version: "1",
         patches: [], // patch off
       })
-        .step("load", ({ input }) => Pipeline.succeed(input))
+        .step("load", ({ input }) => succeed(input))
         .journaled("calc", body)
         .build();
 
@@ -504,7 +504,7 @@ describe("journaled step", () => {
         previousVersions: [v1],
         patches: ["new-pricing"], // patch on
       })
-        .step("load", ({ input }) => Pipeline.succeed(input))
+        .step("load", ({ input }) => succeed(input))
         .journaled("calc", body)
         .build();
 
@@ -531,13 +531,13 @@ describe("journaled step", () => {
   describe("composition", () => {
     it("chains with .step() before and after", async () => {
       const wf = workflow<{ n: number }>({ name: "mixed" })
-        .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
+        .step("double", ({ input }) => succeed(input.n * 2))
         .journaled("plus-one-twice", function* (ctx, prev) {
           const a = yield* ctx.activity("a", async () => prev + 1);
           const b = yield* ctx.activity("b", async () => a + 1);
           return b;
         })
-        .step("stringify", ({ prev }) => Pipeline.succeed(`result: ${prev}`))
+        .step("stringify", ({ prev }) => succeed(`result: ${prev}`))
         .build();
       const runner = createWorkflowRunner({ storage });
       const result = await runner.run({

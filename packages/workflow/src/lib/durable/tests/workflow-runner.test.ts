@@ -4,8 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { TaggedError } from "@spilne/perfect-core";
-import { Pipeline } from "@promin/core";
+import { TaggedError, succeed, fail } from "@spilne/perfect-core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { InProcessStepExecutor, createWorkflowRunner } from "../workflow-runner.ts";
@@ -17,7 +16,7 @@ describe("WorkflowRunner", () => {
   it("run({ workflow }) drives a pure Workflow through the runner's storage", async () => {
     const storage = new InMemoryWorkflowStorage();
     const wf = workflow<{ n: number }>({ name: "runner-run-direct" })
-      .step("triple", ({ input }) => Pipeline.succeed(input.n * 3))
+      .step("triple", ({ input }) => succeed(input.n * 3))
       .build();
 
     const runner = createWorkflowRunner({ storage });
@@ -34,7 +33,7 @@ describe("WorkflowRunner", () => {
   it("runSafe({ workflow }) returns { data, error } for failures", async () => {
     const storage = new InMemoryWorkflowStorage();
     const wf = workflow<void>({ name: "runner-run-fail" })
-      .step("boom", () => Pipeline.fail(new TestError({ message: "nope" })))
+      .step("boom", () => fail(new TestError({ message: "nope" })))
       .build();
 
     const runner = createWorkflowRunner({ storage });
@@ -50,10 +49,10 @@ describe("WorkflowRunner", () => {
   it("run({ name }) resolves the latest version via the registry", async () => {
     const storage = new InMemoryWorkflowStorage();
     const v1 = workflow<{ n: number }>({ name: "by-name", version: "1" })
-      .step("bump", ({ input }) => Pipeline.succeed(input.n + 1))
+      .step("bump", ({ input }) => succeed(input.n + 1))
       .build();
     const v2 = workflow<{ n: number }>({ name: "by-name", version: "2" })
-      .step("bump", ({ input }) => Pipeline.succeed(input.n + 100))
+      .step("bump", ({ input }) => succeed(input.n + 100))
       .build();
 
     const registry = new WorkflowVersionRegistry();
@@ -72,10 +71,10 @@ describe("WorkflowRunner", () => {
   it("run({ name }) drains an in-flight workflow on the version it was created under", async () => {
     const storage = new InMemoryWorkflowStorage();
     const v1 = workflow<{ n: number }>({ name: "drain", version: "1" })
-      .step("bump", ({ input }) => Pipeline.succeed(input.n + 1))
+      .step("bump", ({ input }) => succeed(input.n + 1))
       .build();
     const v2 = workflow<{ n: number }>({ name: "drain", version: "2" })
-      .step("bump", ({ input }) => Pipeline.succeed(input.n + 100))
+      .step("bump", ({ input }) => succeed(input.n + 100))
       .build();
 
     // Seed storage with a row under v1 so the name-based resume must drain.
@@ -110,7 +109,7 @@ describe("WorkflowRunner", () => {
   it("InProcessStepExecutor runs a step body and returns the encoded result", async () => {
     const storage = new InMemoryWorkflowStorage();
     const wf = workflow<{ n: number }>({ name: "executor-test" })
-      .step("double", ({ input }) => Pipeline.succeed((input as { n: number }).n * 2))
+      .step("double", ({ input }) => succeed((input as { n: number }).n * 2))
       .build();
 
     const executor = new InProcessStepExecutor(wf, { storage });
@@ -128,7 +127,7 @@ describe("WorkflowRunner", () => {
   // ---------------------------------------------------------------------------
   // Eager save — saveStepResult fires when each step's body resolves, not
   // after the slowest sibling in the wave finishes. Both runner paths
-  // (legacy Pipeline.all + executor) carry the behavior.
+  // (inline + executor) carry the behavior.
   // ---------------------------------------------------------------------------
 
   describe("eager save", () => {
@@ -241,7 +240,7 @@ describe("WorkflowRunner", () => {
     it("post-wave loop doesn't double-save (storageAlreadyCheckpointed honored)", async () => {
       const storage = new RecordingStorage();
       const wf = workflow<{ n: number }>({ name: "eager-no-double" })
-        .step("once", ({ input }) => Pipeline.succeed(input.n + 1))
+        .step("once", ({ input }) => succeed(input.n + 1))
         .build();
 
       const runner = createWorkflowRunner({ storage });

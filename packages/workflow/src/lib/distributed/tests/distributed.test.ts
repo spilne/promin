@@ -1,5 +1,4 @@
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { workflow, InMemoryWorkflowStorage, WorkflowVersionRegistry } from "../../durable/index.ts";
 import { MapStepRegistry } from "../step-registry.ts";
 import { InMemoryStepQueue } from "../in-memory-step-queue.ts";
@@ -13,7 +12,7 @@ import { createWorker } from "../worker.ts";
 describe("Step registry — register reusable step handlers by name", () => {
   it("register a 'double' handler and look it up by name at runtime", () => {
     const registry = new MapStepRegistry();
-    registry.register("double", (ctx) => Pipeline.succeed((ctx.prev as number) * 2));
+    registry.register("double", (ctx) => succeed((ctx.prev as number) * 2));
 
     expect(registry.has("double")).toBe(true);
     expect(registry.has("missing")).toBe(false);
@@ -183,7 +182,7 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     const registry = new MapStepRegistry();
     const completed: string[] = [];
 
-    registry.register("double", (ctx) => Pipeline.succeed((ctx.input as any).n * 2));
+    registry.register("double", (ctx) => succeed((ctx.input as any).n * 2));
 
     // Create workflow and enqueue a task
     await storage.createWorkflow({ workflowId: "wf-1", workflowName: "test", input: { n: 5 } });
@@ -340,7 +339,7 @@ describe("Worker — poll queue, execute steps, checkpoint results", () => {
     const registry = new MapStepRegistry();
     const completed: string[] = [];
 
-    registry.register("gpu-step", (ctx) => Pipeline.succeed("gpu-result"));
+    registry.register("gpu-step", (ctx) => succeed("gpu-result"));
 
     await storage.createWorkflow({ workflowId: "wf-5", workflowName: "test", input: {} });
     await queue.enqueue({
@@ -385,14 +384,14 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
 
     // Define workflow
     const wf = workflow<{ n: number }>({ name: "distributed-test" })
-      .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
-      .step("add-ten", ({ prev }) => Pipeline.succeed(prev + 10))
+      .step("double", ({ input }) => succeed(input.n * 2))
+      .step("add-ten", ({ prev }) => succeed(prev + 10))
       .build();
 
     // Register step implementations on the worker
     const registry = new MapStepRegistry();
-    registry.register("double", (ctx) => Pipeline.succeed((ctx.input as any).n * 2));
-    registry.register("add-ten", (ctx) => Pipeline.succeed((ctx.prev as number) + 10));
+    registry.register("double", (ctx) => succeed((ctx.input as any).n * 2));
+    registry.register("add-ten", (ctx) => succeed((ctx.prev as number) + 10));
 
     const coordinator = createCoordinator({
       storage,
@@ -431,20 +430,20 @@ describe("Coordinator + Worker end-to-end — orchestrate a distributed workflow
     const queue = new InMemoryStepQueue();
 
     const wf = workflow<{ text: string }>({ name: "routed" })
-      .step("preprocess", ({ input }) => Pipeline.succeed(input.text))
+      .step("preprocess", ({ input }) => succeed(input.text))
       .step(
         "transcribe",
         { dependsOn: ["preprocess"] },
-        ({ deps }) => Pipeline.succeed(`transcribed: ${deps.preprocess}`),
+        ({ deps }) => succeed(`transcribed: ${deps.preprocess}`),
         { needs: ["gpu"] },
       )
       .build();
 
     const defaultRegistry = new MapStepRegistry();
-    defaultRegistry.register("preprocess", (ctx) => Pipeline.succeed((ctx.input as any).text));
+    defaultRegistry.register("preprocess", (ctx) => succeed((ctx.input as any).text));
 
     const gpuRegistry = new MapStepRegistry();
-    gpuRegistry.register("transcribe", (ctx) => Pipeline.succeed(`transcribed: ${ctx.prev}`));
+    gpuRegistry.register("transcribe", (ctx) => succeed(`transcribed: ${ctx.prev}`));
 
     const coordinator = createCoordinator({
       storage,
@@ -494,14 +493,14 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
     const queue = new InMemoryStepQueue();
 
     const wf = workflow<{ n: number }>({ name: "named-wf", version: "1" })
-      .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
+      .step("double", ({ input }) => succeed(input.n * 2))
       .build();
 
     const registry = new WorkflowVersionRegistry();
     registry.register(wf as any);
 
     const stepRegistry = new MapStepRegistry();
-    stepRegistry.register("double", (ctx) => Pipeline.succeed((ctx.input as any).n * 2));
+    stepRegistry.register("double", (ctx) => succeed((ctx.input as any).n * 2));
 
     const coordinator = createCoordinator({ storage, stepQueue: queue, registry });
     const worker = createWorker({
@@ -531,7 +530,7 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
     const queue = new InMemoryStepQueue();
 
     const wf = workflow<number>({ name: "known", version: "1" })
-      .step("only", ({ input }) => Pipeline.succeed(input))
+      .step("only", ({ input }) => succeed(input))
       .build();
 
     const registry = new WorkflowVersionRegistry();
@@ -561,17 +560,17 @@ describe("Coordinator registry-keyed submit — submit by name, not by object", 
 
     // Registry has one workflow — but we can still submit a different def directly.
     const registered = workflow<number>({ name: "registered", version: "1" })
-      .step("a", ({ input }) => Pipeline.succeed(input))
+      .step("a", ({ input }) => succeed(input))
       .build();
     const registry = new WorkflowVersionRegistry();
     registry.register(registered as any);
 
     const direct = workflow<number>({ name: "direct" })
-      .step("only", ({ input }) => Pipeline.succeed(input + 1))
+      .step("only", ({ input }) => succeed(input + 1))
       .build();
 
     const stepRegistry = new MapStepRegistry();
-    stepRegistry.register("only", (ctx) => Pipeline.succeed((ctx.input as number) + 1));
+    stepRegistry.register("only", (ctx) => succeed((ctx.input as number) + 1));
 
     const coordinator = createCoordinator({ storage, stepQueue: queue, registry });
     const worker = createWorker({
@@ -607,7 +606,7 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
     const registry = new MapStepRegistry();
     const log: string[] = [];
 
-    registry.register("step-a", (ctx) => Pipeline.succeed("result"));
+    registry.register("step-a", (ctx) => succeed("result"));
 
     await storage.createWorkflow({ workflowId: "mw-1", workflowName: "test", input: {} });
     await queue.enqueue({
@@ -648,7 +647,7 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
 
     registry.register("step-a", () => {
       log.push("handler");
-      return Pipeline.succeed("ok");
+      return succeed("ok");
     });
 
     await storage.createWorkflow({ workflowId: "mw-2", workflowName: "test", input: {} });
@@ -737,7 +736,7 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
     const registry = new MapStepRegistry();
     const log: string[] = [];
 
-    registry.register("step-a", () => Pipeline.succeed("ok"));
+    registry.register("step-a", () => succeed("ok"));
 
     await storage.createWorkflow({ workflowId: "mw-4", workflowName: "test", input: {} });
     await queue.enqueue({
@@ -783,7 +782,7 @@ describe("Worker middleware — add logging, metrics, or timeouts around step ex
 // Per-step options (retry, onFailure, compensate)
 // ---------------------------------------------------------------------------
 
-import { TaggedError } from "@spilne/perfect-core";
+import { TaggedError, succeed, fail } from "@spilne/perfect-core";
 
 class TestError extends TaggedError("TestError")<{
   readonly message: string;
@@ -801,7 +800,7 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
       (ctx) => {
         attempts++;
         if (attempts < 3) throw new Error("transient");
-        return Pipeline.succeed("ok");
+        return succeed("ok");
       },
       { retry: { maxRetries: 5, baseDelayMs: 10 } },
     );
@@ -959,7 +958,7 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
 
-    registry.register("tracked", () => Pipeline.succeed("done"));
+    registry.register("tracked", () => succeed("done"));
 
     await storage.createWorkflow({ workflowId: "attempt-1", workflowName: "test", input: {} });
     await queue.enqueue({
@@ -992,8 +991,8 @@ describe("Per-step options — retry, skip, and fallback at the step level", () 
     const queue = new InMemoryStepQueue();
     const registry = new MapStepRegistry();
 
-    registry.register("ok", () => Pipeline.succeed("done"));
-    registry.register("boom", () => Pipeline.fail(new Error("nope") as any));
+    registry.register("ok", () => succeed("done"));
+    registry.register("boom", () => fail(new Error("nope") as any));
 
     await storage.createWorkflow({ workflowId: "worker-trace", workflowName: "t", input: {} });
     await queue.enqueue({
@@ -1040,8 +1039,8 @@ describe("Coordinator recovery — resume workflows after process restart", () =
     const queue = new InMemoryStepQueue();
 
     const wf = workflow<{ n: number }>({ name: "recoverable" })
-      .step("step-1", ({ input }) => Pipeline.succeed(input.n * 2))
-      .step("step-2", ({ prev }) => Pipeline.succeed(prev + 100))
+      .step("step-1", ({ input }) => succeed(input.n * 2))
+      .step("step-2", ({ prev }) => succeed(prev + 100))
       .build();
 
     // First coordinator — submits workflow and processes step-1
@@ -1049,8 +1048,8 @@ describe("Coordinator recovery — resume workflows after process restart", () =
     await coord1.submit({ workflow: wf, workflowId: "recover-1", input: { n: 5 } });
 
     const registry = new MapStepRegistry();
-    registry.register("step-1", (ctx) => Pipeline.succeed((ctx.input as any).n * 2));
-    registry.register("step-2", (ctx) => Pipeline.succeed((ctx.prev as number) + 100));
+    registry.register("step-1", (ctx) => succeed((ctx.input as any).n * 2));
+    registry.register("step-2", (ctx) => succeed((ctx.prev as number) + 100));
 
     const worker = createWorker({
       storage,
@@ -1089,7 +1088,7 @@ describe("Coordinator recovery — resume workflows after process restart", () =
     const queue = new InMemoryStepQueue();
 
     const wf = workflow<number>({ name: "done-wf" })
-      .step("only", ({ input }) => Pipeline.succeed(input * 2))
+      .step("only", ({ input }) => succeed(input * 2))
       .build();
 
     // Submit and complete
@@ -1097,7 +1096,7 @@ describe("Coordinator recovery — resume workflows after process restart", () =
     await coord1.submit({ workflow: wf, workflowId: "done-1", input: 5 });
 
     const registry = new MapStepRegistry();
-    registry.register("only", (ctx) => Pipeline.succeed((ctx.input as any) * 2));
+    registry.register("only", (ctx) => succeed((ctx.input as any) * 2));
 
     const worker = createWorker({
       storage,

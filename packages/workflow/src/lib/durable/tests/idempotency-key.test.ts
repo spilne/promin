@@ -7,8 +7,8 @@
 // repeats land on the same run while the key is unexpired.
 // ---------------------------------------------------------------------------
 
+import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect, beforeEach } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
@@ -25,7 +25,7 @@ describe("ctx.run({ idempotencyKey })", () => {
     const wf = workflow<{ n: number }>({ name: "compute" })
       .step("multiply", ({ input }) => {
         calls++;
-        return Pipeline.succeed(input.n * 2);
+        return succeed(input.n * 2);
       })
       .build();
 
@@ -70,7 +70,7 @@ describe("ctx.run({ idempotencyKey })", () => {
 
   it("distinct keys map to distinct workflowIds", async () => {
     const wf = workflow<{ n: number }>({ name: "compute" })
-      .step("multiply", ({ input }) => Pipeline.succeed(input.n * 2))
+      .step("multiply", ({ input }) => succeed(input.n * 2))
       .build();
 
     const runner = createWorkflowRunner({ storage });
@@ -99,7 +99,7 @@ describe("ctx.run({ idempotencyKey })", () => {
 
   it("expired key allows a new claim with a different workflowId", async () => {
     const wf = workflow<{ n: number }>({ name: "compute" })
-      .step("multiply", ({ input }) => Pipeline.succeed(input.n * 2))
+      .step("multiply", ({ input }) => succeed(input.n * 2))
       .build();
 
     const runner = createWorkflowRunner({ storage });
@@ -140,7 +140,7 @@ describe("ctx.run({ idempotencyKey })", () => {
 
   it("rejects calls with a key but no TTL", async () => {
     const wf = workflow<{ n: number }>({ name: "compute" })
-      .step("multiply", ({ input }) => Pipeline.succeed(input.n * 2))
+      .step("multiply", ({ input }) => succeed(input.n * 2))
       .build();
 
     const runner = createWorkflowRunner({ storage });
@@ -158,10 +158,10 @@ describe("ctx.run({ idempotencyKey })", () => {
 
   it("workflows with the same key but different names don't collide", async () => {
     const wfA = workflow<{ n: number }>({ name: "A" })
-      .step("multiply", ({ input }) => Pipeline.succeed(input.n * 2))
+      .step("multiply", ({ input }) => succeed(input.n * 2))
       .build();
     const wfB = workflow<{ n: number }>({ name: "B" })
-      .step("triple", ({ input }) => Pipeline.succeed(input.n * 3))
+      .step("triple", ({ input }) => succeed(input.n * 3))
       .build();
 
     const runner = createWorkflowRunner({ storage });
@@ -195,7 +195,7 @@ describe("ctx.run({ idempotencyKey })", () => {
     const wf = workflow<{ n: number }>({ name: "compute" })
       .step("multiply", ({ input }) => {
         calls++;
-        return Pipeline.succeed(input.n * 2);
+        return succeed(input.n * 2);
       })
       .build();
 
@@ -243,7 +243,7 @@ describe("ctx.run({ idempotencyKey })", () => {
     const wf = workflow<{ n: number }>({ name: "compute" })
       .step("multiply", ({ input }) => {
         calls++;
-        return Pipeline.succeed(input.n * 2);
+        return succeed(input.n * 2);
       })
       .build({ idempotency: { ttl: 60_000, onInFlight: "join" } });
 

@@ -73,7 +73,7 @@ export class WorkflowCompilationError extends Error {
  *
  * @example
  * ```ts
- * import { Pipeline } from "@promin/core";
+ * import { succeed } from "@spilne/perfect-core";
  * import { compileWorkflow, MapActivityRegistry } from "@promin/workflow";
  * import { PostgresWorkflowStorage, migrate } from "@promin/postgres";
  *
@@ -83,7 +83,7 @@ export class WorkflowCompilationError extends Error {
  *   "http.get": (config) => () =>
  *     httpClient.get({ url: config?.url as string }),
  *   "transform.uppercase": () => (ctx) =>
- *     Pipeline.succeed(String(ctx.prev).toUpperCase()),
+ *     succeed(String(ctx.prev).toUpperCase()),
  * });
  *
  * // 2. Compile schema from UI/API

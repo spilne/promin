@@ -10,22 +10,22 @@ No storage, no workflowId. Same composition API as `workflow()`.
 
 ```typescript
 import { flow } from "@promin/workflow";
-import { Pipeline } from "@promin/core";
+import { succeed } from "@spilne/perfect-core";
 
 // Simple linear chain
 const result = await flow<{ userId: string }>("process-user")
   .step("fetch", ({ input }) => api.get(`/users/${input.userId}`, UserSchema))
   .stepAsync("enrich", async ({ prev }) => enrichUser(prev))
-  .step("format", ({ prev }) => Pipeline.succeed(`${prev.name} (${prev.score})`))
+  .step("format", ({ prev }) => succeed(`${prev.name} (${prev.score})`))
   .execute({ userId: "u_42" });
 
 // DAG with auto-parallel
 const report = await flow<{ text: string }>("analyze")
-  .step("parse", ({ input }) => Pipeline.succeed(input.text))
+  .step("parse", ({ input }) => succeed(input.text))
   .step("summarize", { dependsOn: ["parse"] }, ({ deps }) => summarize(deps.parse))
   .step("keywords", { dependsOn: ["parse"] }, ({ deps }) => extractKeywords(deps.parse))
   .step("publish", { dependsOn: ["summarize", "keywords"] }, ({ deps }) =>
-    Pipeline.succeed({ summary: deps.summarize, keywords: deps.keywords }),
+    succeed({ summary: deps.summarize, keywords: deps.keywords }),
   )
   .execute({ text: "..." });
 
@@ -41,7 +41,7 @@ To make it durable later, change `flow("name")` to `workflow({ name }).bind(stor
 
 ```typescript
 import { workflow } from "@promin/workflow";
-import { Pipeline } from "@promin/core";
+import { succeed } from "@spilne/perfect-core";
 import { migrate, PostgresWorkflowStorage } from "@promin/postgres";
 
 await migrate(db);
@@ -90,9 +90,9 @@ const result = await workflow<{ userId: string }>({
 ### mapOver — Fan-out with per-element retry
 
 ```typescript
-.step("get-urls", ({ input }) => Pipeline.succeed(input.urls))
+.step("get-urls", ({ input }) => succeed(input.urls))
 .mapOver("fetch-all", { array: "get-urls", concurrency: 5 }, (url, ctx) =>
-  Pipeline.succeed(`Response from ${url}`)
+  succeed(`Response from ${url}`)
 )
 ```
 
@@ -101,8 +101,8 @@ const result = await workflow<{ userId: string }>({
 ```typescript
 .branch("classify", {
   condition: (n) => n > 10,
-  ifTrue: ({ prev }) => Pipeline.succeed(`big: ${prev}`),
-  ifFalse: ({ prev }) => Pipeline.succeed(`small: ${prev}`),
+  ifTrue: ({ prev }) => succeed(`big: ${prev}`),
+  ifFalse: ({ prev }) => succeed(`small: ${prev}`),
 })
 ```
 
@@ -241,7 +241,7 @@ When a step fails, automatically undo completed steps in reverse order.
 
 ```typescript
 import { workflow } from "@promin/workflow";
-import { Pipeline } from "@promin/core";
+import { tryPromise } from "@spilne/perfect-core";
 
 workflow<{ from: string; to: string; amount: number }>({
   name: "transfer",
@@ -251,7 +251,10 @@ workflow<{ from: string; to: string; amount: number }>({
     // trigger: "immediate",      // compensate on first failure, skip workflow retries
     retry: { maxRetries: 2 }, // retry failing compensation functions
     onComplete: ({ input, error, compensatedSteps, failedCompensations }) =>
-      Pipeline.fromPromise(() => audit.log("rollback", { compensatedSteps, error })),
+      tryPromise(
+        () => audit.log("rollback", { compensatedSteps, error }),
+        (e) => e,
+      ),
   },
 })
   .step("debit", ({ input }) => bankClient.debit(input.from, input.amount), {
@@ -314,12 +317,12 @@ Compile JSON workflows from a node-based UI into executable WorkflowDefinitions:
 
 ```typescript
 import { compileWorkflow, MapActivityRegistry } from "@promin/workflow";
-import { Pipeline } from "@promin/core";
+import { succeed, tryPromise } from "@spilne/perfect-core";
 
 const registry = new MapActivityRegistry({
   "http.get": (config) => () => httpClient.get({ url: config?.url as string }),
-  "transform.uppercase": () => (ctx) => Pipeline.succeed(String(ctx.prev).toUpperCase()),
-  "db.insert": (config) => (ctx) => Pipeline.fromPromise(() => db.insert(config?.table, ctx.prev)),
+  "transform.uppercase": () => (ctx) => succeed(String(ctx.prev).toUpperCase()),
+  "db.insert": (config) => (ctx) => tryPromise(() => db.insert(config?.table, ctx.prev), toDbError),
 });
 
 const definition = compileWorkflow({
@@ -365,7 +368,7 @@ Child workflow composition with parent-child tracking.
 
 ```typescript
 import { workflow } from "@promin/workflow";
-import { Pipeline } from "@promin/core";
+import { succeed } from "@spilne/perfect-core";
 
 const enrichUser = workflow<{ userId: string }>({ name: "enrich" })
   .step("fetch", ({ input }) => api.get(`/profiles/${input.userId}`))
@@ -379,7 +382,7 @@ workflow<{ userId: string }>({ name: "onboard" })
     input: (prev) => ({ userId: prev.id }),
     workflowId: (prev) => `enrich-${prev.id}`,
   })
-  .step("notify", ({ prev }) => Pipeline.succeed(`Score: ${prev.score}`))
+  .step("notify", ({ prev }) => succeed(`Score: ${prev.score}`))
   .bind(storage)
   .run({ workflowId: "onboard-1", input: { userId: "u_42" } });
 

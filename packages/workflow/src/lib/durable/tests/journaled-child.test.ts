@@ -1,5 +1,5 @@
+import { succeed, tryPromise } from "@spilne/perfect-core";
 import { describe, it, expect, beforeEach } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
@@ -28,10 +28,13 @@ describe("ctx.child", () => {
 
     const enrichWorkflow = workflow<{ userId: string }>({ name: "enrich" })
       .step("fetch", ({ input }) =>
-        Pipeline.fromPromise(async () => {
-          enrichCalls++;
-          return { userId: input.userId, tags: ["vip"] };
-        }),
+        tryPromise(
+          async () => {
+            enrichCalls++;
+            return { userId: input.userId, tags: ["vip"] };
+          },
+          (e) => e,
+        ).orDie(),
       )
       .build();
 
@@ -71,7 +74,7 @@ describe("ctx.child", () => {
 
   it("child workflow row is created with parentWorkflowId", async () => {
     const childWf = workflow<{ x: number }>({ name: "child-wf" })
-      .step("double", ({ input }) => Pipeline.succeed(input.x * 2))
+      .step("double", ({ input }) => succeed(input.x * 2))
       .build();
 
     const parent = workflow<{ n: number }>({ name: "parent-wf" })
@@ -94,7 +97,7 @@ describe("ctx.child", () => {
 
   it("uses deterministic default workflowId when none provided", async () => {
     const childWf = workflow<{ v: number }>({ name: "det-child" })
-      .step("id", ({ input }) => Pipeline.succeed(input.v))
+      .step("id", ({ input }) => succeed(input.v))
       .build();
 
     const parent = workflow<{ v: number }>({ name: "det-parent" })
@@ -114,7 +117,12 @@ describe("ctx.child", () => {
 
   it("journals child failure and rethrows on replay", async () => {
     const failingChild = workflow<void>({ name: "fail-child" })
-      .step("boom", () => Pipeline.fromPromise(() => Promise.reject(new Error("child exploded"))))
+      .step("boom", () =>
+        tryPromise(
+          () => Promise.reject(new Error("child exploded")),
+          (e) => e,
+        ).orDie(),
+      )
       .build();
 
     const parent = workflow<void>({ name: "fail-parent" })
@@ -136,7 +144,7 @@ describe("ctx.child", () => {
 
   it("throws if runChild callback is not provided", async () => {
     const childWf = workflow<{ x: number }>({ name: "no-runner-child" })
-      .step("id", ({ input }) => Pipeline.succeed(input.x))
+      .step("id", ({ input }) => succeed(input.x))
       .build();
 
     // Drive runJournaledStep directly without runChild

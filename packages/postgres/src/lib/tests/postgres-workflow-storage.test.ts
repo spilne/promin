@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeAll } from "bun:test";
-import { TaggedError } from "@spilne/perfect-core";
-import { Pipeline } from "@promin/core";
+import { TaggedError, succeed, fail } from "@spilne/perfect-core";
 import { workflow, createWorkflowRunner } from "@promin/workflow";
 import { PostgresWorkflowStorage } from "../postgres-workflow-storage.ts";
 import { migrate } from "../migrate.ts";
@@ -291,8 +290,8 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
 
   it("runs a linear workflow", async () => {
     const wf = workflow<{ n: number }>({ name: "e2e-linear" })
-      .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
-      .step("add-one", ({ prev }) => Pipeline.succeed(prev + 1))
+      .step("double", ({ input }) => succeed(input.n * 2))
+      .step("add-one", ({ prev }) => succeed(prev + 1))
       .build();
     const runner = createWorkflowRunner({ storage });
     const result = await runner.run({ workflow: wf, workflowId: "e2e-1", input: { n: 5 } });
@@ -303,11 +302,11 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
 
   it("runs a DAG workflow", async () => {
     const wf = workflow<{ text: string }>({ name: "e2e-dag" })
-      .step("parse", ({ input }) => Pipeline.succeed(input.text.split(" ")))
-      .step("count", { dependsOn: ["parse"] }, ({ deps }) => Pipeline.succeed(deps.parse.length))
-      .step("join", { dependsOn: ["parse"] }, ({ deps }) => Pipeline.succeed(deps.parse.join("-")))
+      .step("parse", ({ input }) => succeed(input.text.split(" ")))
+      .step("count", { dependsOn: ["parse"] }, ({ deps }) => succeed(deps.parse.length))
+      .step("join", { dependsOn: ["parse"] }, ({ deps }) => succeed(deps.parse.join("-")))
       .step("combine", { dependsOn: ["count", "join"] }, ({ deps }) =>
-        Pipeline.succeed(`${deps.join} (${deps.count})`),
+        succeed(`${deps.join} (${deps.count})`),
       )
       .build();
     const runner = createWorkflowRunner({ storage });
@@ -338,9 +337,9 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
     const wf = workflow<{ n: number }>({ name: "e2e-resume" })
       .step("step-1", ({ input }) => {
         step1Called = true;
-        return Pipeline.succeed(input.n * 2);
+        return succeed(input.n * 2);
       })
-      .step("step-2", ({ prev }) => Pipeline.succeed(prev + 100))
+      .step("step-2", ({ prev }) => succeed(prev + 100))
       .build();
     const runner = createWorkflowRunner({ storage });
     const result = await runner.run({
@@ -355,7 +354,7 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
 
   it("handles step failure", async () => {
     const wf = workflow<{}>({ name: "e2e-fail" })
-      .step("boom", () => Pipeline.fail(new TestError({ message: "test error" })))
+      .step("boom", () => fail(new TestError({ message: "test error" })))
       .build();
     const runner = createWorkflowRunner({ storage });
     const { error } = await runner.runSafe({
@@ -390,7 +389,7 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
       type: "onboarding",
       metadata: { team: "growth", region: "us-east", priority: "high" },
     })
-      .step("fetch", ({ input }) => Pipeline.succeed({ name: `User ${input.userId}` }))
+      .step("fetch", ({ input }) => succeed({ name: `User ${input.userId}` }))
       .stepAsync("provision", async ({ prev }) => ({ accountId: `acc-${prev.name}` }))
       .build();
     await runner.run({
@@ -404,7 +403,7 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
       type: "report",
       metadata: { team: "data", schedule: "daily" },
     })
-      .step("generate", ({ input }) => Pipeline.succeed(`Report for ${input.date}`))
+      .step("generate", ({ input }) => succeed(`Report for ${input.date}`))
       .build();
     await runner.run({
       workflow: reportWf,
@@ -417,8 +416,8 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
       type: "etl",
       metadata: { team: "data", source: "clickhouse", destination: "postgres" },
     })
-      .step("extract", () => Pipeline.succeed([1, 2, 3]))
-      .step("load", ({ prev }) => Pipeline.succeed({ loaded: prev.length }))
+      .step("extract", () => succeed([1, 2, 3]))
+      .step("load", ({ prev }) => succeed({ loaded: prev.length }))
       .build();
     await runner.run({
       workflow: etlWf,
@@ -462,7 +461,7 @@ postgresDescribe("journaled step with Postgres storage", { migrate }, (pg) => {
     let notifyCalls = 0;
 
     const wf = workflow<{ user: string }>({ name: "signup-pg" })
-      .step("load", ({ input }) => Pipeline.succeed(input))
+      .step("load", ({ input }) => succeed(input))
       .journaled("setup", function* (ctx, prev) {
         const created = yield* ctx.activity("create", async () => {
           createCalls++;

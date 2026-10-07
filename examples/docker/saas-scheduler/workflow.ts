@@ -33,7 +33,7 @@
 // standard work.
 // ---------------------------------------------------------------------------
 
-import { Pipeline } from "@promin/core";
+import { tryPromise } from "@spilne/perfect-core";
 import { workflow, type StepHandler } from "@promin/workflow";
 
 export interface TenantJob {
@@ -138,63 +138,82 @@ export function buildStandardJobWorkflow() {
 // ---------------------------------------------------------------------------
 
 export const validateJobHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const { tenantId, jobId, tier } = ctx.input as TenantJob;
-    console.log(`[validate-job] ${ctx.workflowId} — tenant=${tenantId} job=${jobId} tier=${tier}`);
-    await sleep(50);
-    return { valid: true, tenantId } satisfies ValidationResult;
-  });
+  tryPromise(
+    async () => {
+      const { tenantId, jobId, tier } = ctx.input as TenantJob;
+      console.log(
+        `[validate-job] ${ctx.workflowId} — tenant=${tenantId} job=${jobId} tier=${tier}`,
+      );
+      await sleep(50);
+      return { valid: true, tenantId } satisfies ValidationResult;
+    },
+    (e) => e,
+  ).orDie();
 
 export const executePremiumJobHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const { tenantId, jobId } = ctx.input as TenantJob;
-    const start = Date.now();
-    console.log(`[execute-premium] ${ctx.workflowId} — [PREMIUM] tenant=${tenantId} job=${jobId}`);
-    // Premium: fast dedicated worker, ~500ms execution
-    await sleep(500);
-    const durationMs = Date.now() - start;
-    console.log(`[execute-premium] ${ctx.workflowId} — done in ${durationMs}ms`);
-    return {
-      jobId,
-      output: `premium-result-${jobId}`,
-      durationMs,
-    } satisfies ExecutionResult;
-  });
+  tryPromise(
+    async () => {
+      const { tenantId, jobId } = ctx.input as TenantJob;
+      const start = Date.now();
+      console.log(
+        `[execute-premium] ${ctx.workflowId} — [PREMIUM] tenant=${tenantId} job=${jobId}`,
+      );
+      // Premium: fast dedicated worker, ~500ms execution
+      await sleep(500);
+      const durationMs = Date.now() - start;
+      console.log(`[execute-premium] ${ctx.workflowId} — done in ${durationMs}ms`);
+      return {
+        jobId,
+        output: `premium-result-${jobId}`,
+        durationMs,
+      } satisfies ExecutionResult;
+    },
+    (e) => e,
+  ).orDie();
 
 export const executeStandardJobHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const { tenantId, jobId } = ctx.input as TenantJob;
-    const start = Date.now();
-    console.log(
-      `[execute-standard] ${ctx.workflowId} — [standard] tenant=${tenantId} job=${jobId}`,
-    );
-    // Standard: shared worker pool, ~1.5s execution
-    await sleep(1_500);
-    const durationMs = Date.now() - start;
-    console.log(`[execute-standard] ${ctx.workflowId} — done in ${durationMs}ms`);
-    return {
-      jobId,
-      output: `standard-result-${jobId}`,
-      durationMs,
-    } satisfies ExecutionResult;
-  });
+  tryPromise(
+    async () => {
+      const { tenantId, jobId } = ctx.input as TenantJob;
+      const start = Date.now();
+      console.log(
+        `[execute-standard] ${ctx.workflowId} — [standard] tenant=${tenantId} job=${jobId}`,
+      );
+      // Standard: shared worker pool, ~1.5s execution
+      await sleep(1_500);
+      const durationMs = Date.now() - start;
+      console.log(`[execute-standard] ${ctx.workflowId} — done in ${durationMs}ms`);
+      return {
+        jobId,
+        output: `standard-result-${jobId}`,
+        durationMs,
+      } satisfies ExecutionResult;
+    },
+    (e) => e,
+  ).orDie();
 
 export const storeResultHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const { tenantId, jobId } = ctx.input as TenantJob;
-    const storedAt = new Date().toISOString();
-    const resultKey = `results/${tenantId}/${jobId}`;
-    console.log(`[store-result] ${ctx.workflowId} — stored at ${resultKey}`);
-    await sleep(80);
-    return { storedAt, resultKey } satisfies StoreResult;
-  });
+  tryPromise(
+    async () => {
+      const { tenantId, jobId } = ctx.input as TenantJob;
+      const storedAt = new Date().toISOString();
+      const resultKey = `results/${tenantId}/${jobId}`;
+      console.log(`[store-result] ${ctx.workflowId} — stored at ${resultKey}`);
+      await sleep(80);
+      return { storedAt, resultKey } satisfies StoreResult;
+    },
+    (e) => e,
+  ).orDie();
 
 export const notifyWebhookHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const { tenantId, jobId } = ctx.input as TenantJob;
-    const notifiedAt = new Date().toISOString();
-    const webhookUrl = `https://webhooks.example.com/${tenantId}/jobs/${jobId}`;
-    console.log(`[notify-webhook] ${ctx.workflowId} — POST ${webhookUrl}`);
-    await sleep(60);
-    return { notifiedAt, webhookUrl } satisfies WebhookResult;
-  });
+  tryPromise(
+    async () => {
+      const { tenantId, jobId } = ctx.input as TenantJob;
+      const notifiedAt = new Date().toISOString();
+      const webhookUrl = `https://webhooks.example.com/${tenantId}/jobs/${jobId}`;
+      console.log(`[notify-webhook] ${ctx.workflowId} — POST ${webhookUrl}`);
+      await sleep(60);
+      return { notifiedAt, webhookUrl } satisfies WebhookResult;
+    },
+    (e) => e,
+  ).orDie();

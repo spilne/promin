@@ -27,7 +27,7 @@
 // whichever version is dispatched without needing to know the version.
 // ---------------------------------------------------------------------------
 
-import { Pipeline } from "@promin/core";
+import { tryPromise } from "@spilne/perfect-core";
 import { workflow, type StepHandler } from "@promin/workflow";
 
 export interface ModelInput {
@@ -113,67 +113,79 @@ export function buildModelWorkflow(version: "1" | "2") {
 // ---------------------------------------------------------------------------
 
 export const prepareDataHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const { datasetPath, epochs } = ctx.input as ModelInput;
-    console.log(`[prepare-data] ${ctx.workflowId} — loading ${datasetPath} for ${epochs} epochs`);
-    await sleep(400);
-    const total = 10_000;
-    const trainSize = Math.floor(total * 0.8);
-    return {
-      trainSize,
-      testSize: total - trainSize,
-      featureCount: 128,
-    } satisfies PreparedData;
-  });
+  tryPromise(
+    async () => {
+      const { datasetPath, epochs } = ctx.input as ModelInput;
+      console.log(`[prepare-data] ${ctx.workflowId} — loading ${datasetPath} for ${epochs} epochs`);
+      await sleep(400);
+      const total = 10_000;
+      const trainSize = Math.floor(total * 0.8);
+      return {
+        trainSize,
+        testSize: total - trainSize,
+        featureCount: 128,
+      } satisfies PreparedData;
+    },
+    (e) => e,
+  ).orDie();
 
 export const trainModelHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const { experimentId, epochs } = ctx.input as ModelInput;
-    const prep = (ctx.deps as { "prepare-data"?: PreparedData })["prepare-data"];
-    console.log(
-      `[train-model] ${ctx.workflowId} — training ${experimentId} ` +
-        `(${epochs} epochs, ${prep?.trainSize} samples, ${prep?.featureCount} features)`,
-    );
-    // Simulate epoch-by-epoch training with progress logs
-    for (let e = 1; e <= epochs; e++) {
-      await sleep(200);
-      const loss = +(1.0 / e).toFixed(3);
-      console.log(`[train-model] ${ctx.workflowId} — epoch ${e}/${epochs} loss=${loss}`);
-    }
-    const modelId = `model-${experimentId}-${Date.now()}`;
-    return {
-      modelId,
-      trainAccuracy: 0.85 + Math.random() * 0.1,
-      epochsCompleted: epochs,
-    } satisfies TrainedModel;
-  });
+  tryPromise(
+    async () => {
+      const { experimentId, epochs } = ctx.input as ModelInput;
+      const prep = (ctx.deps as { "prepare-data"?: PreparedData })["prepare-data"];
+      console.log(
+        `[train-model] ${ctx.workflowId} — training ${experimentId} ` +
+          `(${epochs} epochs, ${prep?.trainSize} samples, ${prep?.featureCount} features)`,
+      );
+      // Simulate epoch-by-epoch training with progress logs
+      for (let e = 1; e <= epochs; e++) {
+        await sleep(200);
+        const loss = +(1.0 / e).toFixed(3);
+        console.log(`[train-model] ${ctx.workflowId} — epoch ${e}/${epochs} loss=${loss}`);
+      }
+      const modelId = `model-${experimentId}-${Date.now()}`;
+      return {
+        modelId,
+        trainAccuracy: 0.85 + Math.random() * 0.1,
+        epochsCompleted: epochs,
+      } satisfies TrainedModel;
+    },
+    (e) => e,
+  ).orDie();
 
 export const evaluateHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const trained = (ctx.deps as { "train-model"?: TrainedModel })["train-model"];
-    console.log(`[evaluate] ${ctx.workflowId} — evaluating model ${trained?.modelId}`);
-    await sleep(300);
-    const testAccuracy = (trained?.trainAccuracy ?? 0.8) - 0.02 + Math.random() * 0.04;
-    const passed = testAccuracy >= 0.8;
-    console.log(
-      `[evaluate] ${ctx.workflowId} — accuracy=${testAccuracy.toFixed(3)} passed=${passed}`,
-    );
-    return {
-      modelId: trained?.modelId ?? "unknown",
-      testAccuracy,
-      passed,
-    } satisfies EvalResult;
-  });
+  tryPromise(
+    async () => {
+      const trained = (ctx.deps as { "train-model"?: TrainedModel })["train-model"];
+      console.log(`[evaluate] ${ctx.workflowId} — evaluating model ${trained?.modelId}`);
+      await sleep(300);
+      const testAccuracy = (trained?.trainAccuracy ?? 0.8) - 0.02 + Math.random() * 0.04;
+      const passed = testAccuracy >= 0.8;
+      console.log(
+        `[evaluate] ${ctx.workflowId} — accuracy=${testAccuracy.toFixed(3)} passed=${passed}`,
+      );
+      return {
+        modelId: trained?.modelId ?? "unknown",
+        testAccuracy,
+        passed,
+      } satisfies EvalResult;
+    },
+    (e) => e,
+  ).orDie();
 
 export const optimizeHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const evaled = (ctx.deps as { evaluate?: EvalResult })["evaluate"];
-    console.log(`[optimize] ${ctx.workflowId} — tuning hyperparams for ${evaled?.modelId}`);
-    await sleep(250);
-    const bestLearningRate = 0.001 * (1 + Math.random());
-    const bestAccuracy = (evaled?.testAccuracy ?? 0.8) + 0.01;
-    console.log(
-      `[optimize] ${ctx.workflowId} — best lr=${bestLearningRate.toFixed(5)} acc=${bestAccuracy.toFixed(3)}`,
-    );
-    return { bestLearningRate, bestAccuracy } satisfies OptimizeResult;
-  });
+  tryPromise(
+    async () => {
+      const evaled = (ctx.deps as { evaluate?: EvalResult })["evaluate"];
+      console.log(`[optimize] ${ctx.workflowId} — tuning hyperparams for ${evaled?.modelId}`);
+      await sleep(250);
+      const bestLearningRate = 0.001 * (1 + Math.random());
+      const bestAccuracy = (evaled?.testAccuracy ?? 0.8) + 0.01;
+      console.log(
+        `[optimize] ${ctx.workflowId} — best lr=${bestLearningRate.toFixed(5)} acc=${bestAccuracy.toFixed(3)}`,
+      );
+      return { bestLearningRate, bestAccuracy } satisfies OptimizeResult;
+    },
+    (e) => e,
+  ).orDie();

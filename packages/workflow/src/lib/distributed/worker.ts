@@ -6,7 +6,7 @@
 // - Global middleware + hooks on the worker itself
 // ---------------------------------------------------------------------------
 
-import { Pipeline } from "@promin/core";
+import { runHookValue } from "../shared/eff.ts";
 import type { TaggedError } from "../shared/tagged-error.ts";
 import { SystemWallClock, type WallClock, type TimerHandle } from "../shared/wall-clock.ts";
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
@@ -330,10 +330,7 @@ export class DefaultWorker implements WorkflowWorker {
 
     // Base: resolve handler result + apply step-level retry
     let base = async (ctx: StepContext): Promise<unknown> => {
-      const result = handler(ctx);
-      if (result instanceof Pipeline) return result.runPromise();
-      if (result && typeof (result as Promise<unknown>).then === "function") return result;
-      return result;
+      return runHookValue(handler(ctx));
     };
 
     // Wrap with step-level retry (from StepOptions)

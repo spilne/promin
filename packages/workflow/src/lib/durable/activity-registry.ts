@@ -1,12 +1,12 @@
 // ---------------------------------------------------------------------------
-// ActivityRegistry — maps activity names to Pipeline step implementations
+// ActivityRegistry — maps activity names to step implementations
 //
 // The visual editor can't embed TypeScript lambdas. Instead, steps reference
 // activities by name (activityRef). The registry resolves names to functions
 // at compile time.
 // ---------------------------------------------------------------------------
 
-import type { Pipeline } from "@promin/core";
+import type { Eff, Throws } from "@spilne/perfect-core";
 import type { TaggedError } from "../shared/tagged-error.ts";
 
 // ---------------------------------------------------------------------------
@@ -23,17 +23,17 @@ import type { TaggedError } from "../shared/tagged-error.ts";
  * ```ts
  * // In a linear chain: ctx.prev is the previous step's result
  * const uppercase: ActivityFactory = () => (ctx) =>
- *   Pipeline.succeed(String(ctx.prev).toUpperCase());
+ *   succeed(String(ctx.prev).toUpperCase());
  *
  * // In a DAG: ctx.deps has named results from dependencies
  * const combine: ActivityFactory = () => (ctx) => {
  *   const { summary, keywords } = ctx.deps as { summary: string; keywords: string[] };
- *   return Pipeline.succeed({ summary, keywords });
+ *   return succeed({ summary, keywords });
  * };
  *
  * // Access workflow input (always available)
  * const greet: ActivityFactory = () => (ctx) =>
- *   Pipeline.succeed(`Hello, ${(ctx.input as { name: string }).name}!`);
+ *   succeed(`Hello, ${(ctx.input as { name: string }).name}!`);
  * ```
  */
 export interface ActivityContext {
@@ -56,7 +56,7 @@ export interface ActivityContext {
 
 /**
  * An activity factory — receives static config from the schema and returns
- * a step function that takes `ActivityContext` and returns a `Pipeline`.
+ * a step function that takes `ActivityContext` and returns an `Eff`.
  *
  * The two-level function allows config to be "baked in" at compile time
  * while the step function runs at execution time with runtime context.
@@ -65,7 +65,7 @@ export interface ActivityContext {
  * ```ts
  * // Simple transform (no config)
  * const uppercase: ActivityFactory = () => (ctx) =>
- *   Pipeline.succeed(String(ctx.prev).toUpperCase());
+ *   succeed(String(ctx.prev).toUpperCase());
  *
  * // HTTP call with config
  * const httpGet: ActivityFactory = (config) => (ctx) =>
@@ -73,7 +73,7 @@ export interface ActivityContext {
  *
  * // DB insert with table from config
  * const dbInsert: ActivityFactory = (config) => (ctx) =>
- *   Pipeline.fromPromise(() => db.insert(config?.table as string, ctx.prev));
+ *   tryPromise(() => db.insert(config?.table as string, ctx.prev), toDbError);
  *
  * // AI call with model from config
  * const aiSummarize: ActivityFactory = (config) => (ctx) =>
@@ -85,7 +85,7 @@ export interface ActivityContext {
  */
 export type ActivityFactory = (
   config?: Record<string, unknown>,
-) => (ctx: ActivityContext) => Pipeline<unknown, TaggedError>;
+) => (ctx: ActivityContext) => Eff<unknown, Throws<TaggedError>>;
 
 // ---------------------------------------------------------------------------
 // ActivityRegistry interface
@@ -118,7 +118,7 @@ export interface ActivityRegistry {
   resolve(
     ref: string,
     config?: Record<string, unknown>,
-  ): (ctx: ActivityContext) => Pipeline<unknown, TaggedError>;
+  ): (ctx: ActivityContext) => Eff<unknown, Throws<TaggedError>>;
 
   /** Check if an activity reference exists in the registry. */
   has(ref: string): boolean;
@@ -133,20 +133,20 @@ export interface ActivityRegistry {
 
 /**
  * A simple Map-based activity registry. The default implementation for
- * wiring activity names to their Pipeline implementations.
+ * wiring activity names to their implementations.
  *
  * Pass a record of `{ name: factory }` pairs to the constructor.
  * Activities can also be added at runtime via `register()`.
  *
  * @example
  * ```ts
- * import { Pipeline } from "@promin/core";
+ * import { succeed, tryPromise } from "@spilne/perfect-core";
  * import { MapActivityRegistry } from "@promin/workflow";
  *
  * const registry = new MapActivityRegistry({
  *   // Simple transform
  *   "transform.uppercase": () => (ctx) =>
- *     Pipeline.succeed(String(ctx.prev).toUpperCase()),
+ *     succeed(String(ctx.prev).toUpperCase()),
  *
  *   // HTTP call with config
  *   "http.get": (config) => (ctx) =>
@@ -154,12 +154,13 @@ export interface ActivityRegistry {
  *
  *   // DB insert with table from config
  *   "db.insert": (config) => (ctx) =>
- *     Pipeline.fromPromise(() => db.insert(config?.table as string, ctx.prev)),
+ *     tryPromise(() => db.insert(config?.table as string, ctx.prev), toDbError),
  *
  *   // Fan-out element processor
  *   "email.send": (config) => (ctx) =>
- *     Pipeline.fromPromise(() =>
- *       mailer.send({ template: config?.template as string, to: ctx.prev }),
+ *     tryPromise(
+ *       () => mailer.send({ template: config?.template as string, to: ctx.prev }),
+ *       toMailError,
  *     ),
  * });
  *
@@ -168,7 +169,7 @@ export interface ActivityRegistry {
  *
  * // Add activities at runtime (e.g., from plugins)
  * registry.register("custom.activity", (config) => (ctx) =>
- *   Pipeline.succeed({ custom: true }),
+ *   succeed({ custom: true }),
  * );
  * ```
  */
@@ -182,7 +183,7 @@ export class MapActivityRegistry implements ActivityRegistry {
   resolve(
     ref: string,
     config?: Record<string, unknown>,
-  ): (ctx: ActivityContext) => Pipeline<unknown, TaggedError> {
+  ): (ctx: ActivityContext) => Eff<unknown, Throws<TaggedError>> {
     const factory = this.activities.get(ref);
     if (!factory) {
       throw new Error(
@@ -206,8 +207,9 @@ export class MapActivityRegistry implements ActivityRegistry {
    * @example
    * ```ts
    * registry.register("slack.send", (config) => (ctx) =>
-   *   Pipeline.fromPromise(() =>
-   *     slack.postMessage({ channel: config?.channel as string, text: String(ctx.prev) }),
+   *   tryPromise(
+   *     () => slack.postMessage({ channel: config?.channel as string, text: String(ctx.prev) }),
+   *     toSlackError,
    *   ),
    * );
    * ```

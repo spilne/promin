@@ -14,18 +14,28 @@
 // used by Effect, Zod, and RxJS for heterogeneous collections.
 // ---------------------------------------------------------------------------
 
-import { Effect } from "effect";
 // Aliased: `TaggedError` is also the name of the structural `{ _tag }`
 // constraint imported from `shared/tagged-error.ts` below.
-import { TaggedError as PerfectTaggedError } from "@spilne/perfect-core";
+import {
+  TaggedError as PerfectTaggedError,
+  die,
+  eff,
+  fail,
+  forEachPar,
+  succeed,
+  tryPromise,
+  type Eff,
+  type ErrorsOf,
+  type Throws,
+} from "@spilne/perfect-core";
 import { isActivityJournalStorage, type ActivityJournalStorage } from "./activity-journal.ts";
 import {
   runJournaledStep,
   JournalStorageMissingError,
   type JournaledStepBody,
 } from "./journaled-step.ts";
-import { Pipeline } from "@promin/core";
 import type { TaggedError } from "../shared/tagged-error.ts";
+import { isEff, isThenable, promiseOrDie } from "../shared/eff.ts";
 import type { RetryPolicy } from "../shared/retry-policy.ts";
 import type { CacheStore } from "../shared/cache-store.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
@@ -93,17 +103,43 @@ export interface LoopOptions<T> {
   readonly priority?: number;
 }
 
+/**
+ * What a step body returns: an `Eff` producing `A` whose typed failures are
+ * `E`. Steps must not leave service requirements (`Needs`) unprovided.
+ */
+export type StepEff<A, E extends TaggedError = never> = Eff<A, Throws<E>>;
+
 /** Extract the success type from a parallel branch function. */
-export type BranchOutput<B> = B extends (ctx: any) => Pipeline<infer T, any> ? T : never;
+export type BranchOutput<B> = B extends (ctx: any) => Eff<infer T, any> ? T : never;
 
 /** Union of all branch error types — flows into the builder's typed Error channel. */
 export type BranchError<Branches extends Record<string, unknown>> = {
-  [K in keyof Branches]: Branches[K] extends (ctx: any) => Pipeline<any, infer E>
-    ? E extends TaggedError
-      ? E
+  [K in keyof Branches]: Branches[K] extends (ctx: any) => Eff<any, infer S>
+    ? ErrorsOf<S> extends infer E
+      ? E extends TaggedError
+        ? E
+        : never
       : never
     : never;
 }[keyof Branches];
+
+/**
+ * Normalise what a user step function returned into the `Eff` the runner
+ * executes. An `Eff` passes through. A Promise (e.g. an `async` function
+ * handed to `.step()`) is awaited with `.stepAsync()` semantics — its
+ * rejection is a defect. Note that a Promise resolving to an `Eff` has
+ * already run it, since `Eff` is thenable. Anything else is a defect.
+ */
+function asStepEff(result: unknown, stepName: string): StepEff<unknown, TaggedError> {
+  if (isEff(result)) return result as StepEff<unknown, TaggedError>;
+  if (isThenable(result)) return promiseOrDie(() => result);
+  return die(
+    new TypeError(
+      `Step "${stepName}" must return an Eff (got ${result === null ? "null" : typeof result}); ` +
+        `use .stepAsync() for Promise-returning functions`,
+    ),
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Queue concurrency config
@@ -349,7 +385,7 @@ export interface StepOptions<T> {
   readonly codec?: Codec<T>;
   readonly show?: Show<T>;
   readonly timeoutMs?: number;
-  /** Retry the entire step at the workflow layer. Same RetryPolicy as Pipeline.retry(). */
+  /** Retry the step on typed failures. Default delays: 250ms base, doubling, 3 retries. */
   readonly retry?: RetryPolicy<TaggedError>;
   /** What to do when the step fails (after retries exhausted). Default: "fail". */
   readonly onFailure?: StepFailureStrategy<T>;
@@ -362,7 +398,7 @@ export interface StepOptions<T> {
     result: T;
     input: unknown;
     workflowId: string;
-  }) => Pipeline<void, any> | Promise<void>;
+  }) => Eff<unknown, Throws<unknown>> | Promise<void>;
   /** Skip this step when the predicate returns true. Skipped steps are recorded as 'skipped' and do not trigger compensation. */
   readonly skipWhen?: (prev: unknown) => boolean;
   /** Value to pass to the next step when this step is skipped. Defaults to prev. */
@@ -441,7 +477,7 @@ export interface CompensateConfig {
     error: unknown;
     compensatedSteps: string[];
     failedCompensations: { stepName: string; error: unknown }[];
-  }) => Pipeline<void, any> | Promise<void>;
+  }) => Eff<unknown, Throws<unknown>> | Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -485,7 +521,7 @@ export class MatchError extends PerfectTaggedError("MatchError")<{
 
 type MatchCaseFn<Input, Current, Output, E extends TaggedError> = (
   ctx: StepContext<Input, Current>,
-) => Pipeline<Output, E>;
+) => StepEff<Output, E>;
 
 /**
  * Two-mode params for `.match()`:
@@ -610,7 +646,7 @@ export interface StepDefinition {
   readonly name: string;
   readonly dependsOn: string[];
   readonly kind: StepKind;
-  readonly execute: (params: ExecuteParams) => Pipeline<unknown, TaggedError>;
+  readonly execute: (params: ExecuteParams) => StepEff<unknown, TaggedError>;
   readonly codec: Codec<unknown>;
   readonly timeoutMs?: number;
   readonly retry?: RetryPolicy<TaggedError>;
@@ -619,7 +655,7 @@ export interface StepDefinition {
     result: unknown;
     input: unknown;
     workflowId: string;
-  }) => Pipeline<void, any> | Promise<void>;
+  }) => Eff<unknown, Throws<unknown>> | Promise<void>;
   readonly skipWhen?: (prev: unknown) => boolean;
   readonly skipValue?: (prev: unknown) => unknown;
   /** Capability requirements copied onto the dispatched task by the coordinator. */
@@ -716,7 +752,7 @@ export class WorkflowBuilder<
      */
     private readonly _patches?: readonly string[],
     /**
-     * Pipeline-level default codec. Used when a step or activity doesn't
+     * Workflow-level default codec. Used when a step or activity doesn't
      * supply its own `options.codec`. Falls back to `LosslessJsonCodec` when
      * unset, so every boundary is lossless by default — but callers who want
      * a custom serializer (superjson, Zod schema, etc.) can set it once here
@@ -724,7 +760,7 @@ export class WorkflowBuilder<
      */
     private readonly _defaultCodec?: Codec<unknown>,
     /**
-     * Pipeline-level default for `ActivityOptions.payloadHash`. When `true`,
+     * Workflow-level default for `ActivityOptions.payloadHash`. When `true`,
      * every 3-arg `ctx.activity(name, input, fn)` in every journaled step
      * hashes its input by default. Per-activity `payloadHash: false` still
      * wins locally. Off by default — payload hashing is optional and costs
@@ -770,17 +806,17 @@ export class WorkflowBuilder<
   }
 
   // ---------------------------------------------------------------------------
-  // Linear step — Pipeline-returning
+  // Linear step — Eff-returning
   // ---------------------------------------------------------------------------
 
   step<Name extends string, Output, E2 extends TaggedError = never>(
     name: Name,
-    fn: (ctx: StepContext<Input, Current>) => Pipeline<Output, E2>,
+    fn: (ctx: StepContext<Input, Current>) => StepEff<Output, E2>,
     options?: StepOptions<Output>,
   ): WorkflowBuilder<Input, Steps & Record<Name, Output>, Output, Error | E2>;
 
   // ---------------------------------------------------------------------------
-  // DAG step — Pipeline-returning
+  // DAG step — Eff-returning
   // ---------------------------------------------------------------------------
 
   step<
@@ -791,7 +827,7 @@ export class WorkflowBuilder<
   >(
     name: Name,
     config: { dependsOn: [...DependsOn] },
-    fn: (ctx: DagStepContext<Input, Pick<Steps, DependsOn[number]>>) => Pipeline<Output, E2>,
+    fn: (ctx: DagStepContext<Input, Pick<Steps, DependsOn[number]>>) => StepEff<Output, E2>,
     options?: StepOptions<Output>,
   ): WorkflowBuilder<Input, Steps & Record<Name, Output>, Output, Error | E2>;
 
@@ -801,12 +837,12 @@ export class WorkflowBuilder<
 
   step(
     name: string,
-    fnOrConfig: ((ctx: any) => Pipeline<unknown, any>) | { dependsOn: string[] },
-    fnOrOptions?: ((ctx: any) => Pipeline<unknown, any>) | StepOptions<unknown>,
+    fnOrConfig: ((ctx: any) => StepEff<unknown, any>) | { dependsOn: string[] },
+    fnOrOptions?: ((ctx: any) => StepEff<unknown, any>) | StepOptions<unknown>,
     maybeOptions?: StepOptions<unknown>,
   ): WorkflowBuilder<Input, any, any, any> {
     let dependsOn: string[];
-    let fn: (ctx: any) => Pipeline<unknown, any>;
+    let fn: (ctx: any) => StepEff<unknown, any>;
     let options: StepOptions<unknown> | undefined;
 
     if (typeof fnOrConfig === "function") {
@@ -815,7 +851,7 @@ export class WorkflowBuilder<
       options = fnOrOptions as StepOptions<unknown> | undefined;
     } else {
       dependsOn = fnOrConfig.dependsOn;
-      fn = fnOrOptions as (ctx: any) => Pipeline<unknown, any>;
+      fn = fnOrOptions as (ctx: any) => StepEff<unknown, any>;
       options = maybeOptions;
     }
 
@@ -874,7 +910,7 @@ export class WorkflowBuilder<
       options = maybeOptions;
     }
 
-    const wrappedFn = (ctx: any) => Pipeline.fromPromise(() => asyncFn(ctx));
+    const wrappedFn = (ctx: any) => promiseOrDie(() => asyncFn(ctx));
     return this._addStep({
       name,
       dependsOn,
@@ -900,7 +936,7 @@ export class WorkflowBuilder<
     fn: (
       element: Steps[ArrayStep] extends readonly (infer U)[] ? U : never,
       ctx: MapStepContext<Input>,
-    ) => Pipeline<Output, E2>,
+    ) => StepEff<Output, E2>,
     options?: StepOptions<Output>,
   ): WorkflowBuilder<Input, Steps & Record<Name, Output[]>, Output[], Error | E2> {
     this._validateName(name);
@@ -916,35 +952,37 @@ export class WorkflowBuilder<
       execute: (params) => {
         const sourceArray = params.results[config.array] as unknown[];
         if (!Array.isArray(sourceArray)) {
-          return Pipeline.fail(
+          return fail(
             new StepError({
               workflowId: params.workflowId,
               stepName: name,
               message: `mapOver source "${config.array}" is not an array`,
             }),
-          ) as Pipeline<unknown, TaggedError>;
+          );
         }
 
-        return Pipeline.forEach(
-          sourceArray.map((element, taskIndex) => ({ element, taskIndex })),
-          (item) => {
+        return forEachPar(
+          sourceArray,
+          (element, taskIndex) => {
             const ctx: MapStepContext<unknown> = {
               input: params.input,
               workflowId: params.workflowId,
-              taskIndex: item.taskIndex,
+              taskIndex,
               attempt: 1,
             };
-            return (fn as any)(item.element, ctx).tap(async (result: unknown) => {
-              await params.storage.saveTaskResult({
-                workflowId: params.workflowId,
-                stepName: name,
-                taskIndex: item.taskIndex,
-                result: codec.encode(result),
-              });
-            });
+            return asStepEff((fn as any)(element, ctx), name).flatMap((result) =>
+              promiseOrDie(() =>
+                params.storage.saveTaskResult({
+                  workflowId: params.workflowId,
+                  stepName: name,
+                  taskIndex,
+                  result: codec.encode(result),
+                }),
+              ).as(result),
+            );
           },
-          { concurrency },
-        ) as Pipeline<unknown, TaggedError>;
+          { concurrency: Number.isFinite(concurrency) ? concurrency : "unbounded" },
+        );
       },
     };
 
@@ -965,7 +1003,7 @@ export class WorkflowBuilder<
     options?: StepOptions<Output>,
   ): WorkflowBuilder<Input, Steps & Record<Name, Output[]>, Output[], Error> {
     const wrappedFn = (element: any, ctx: MapStepContext<Input>) =>
-      Pipeline.fromPromise(() => fn(element, ctx));
+      promiseOrDie(() => fn(element, ctx));
     return this.mapOver(name, config, wrappedFn as any, options) as any;
   }
 
@@ -991,9 +1029,9 @@ export class WorkflowBuilder<
         const prevStepName = dependsOn[0];
         const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
         if (predicate(prev as Current)) {
-          return Pipeline.succeed(prev);
+          return succeed(prev);
         }
-        return Pipeline.fail(
+        return fail(
           new GuardError({
             workflowId: execParams.workflowId,
             stepName: name,
@@ -1026,7 +1064,7 @@ export class WorkflowBuilder<
    *
    * ```typescript
    * workflow({ name: "charge", storage })
-   *   .step("load", ({ input }) => Pipeline.succeed(input))
+   *   .step("load", ({ input }) => succeed(input))
    *   .tripwire("fraud-check", {
    *     when: (order) => order.riskScore > 0.9,
    *     reason: (order) => ({ code: "fraud", score: order.riskScore }),
@@ -1065,9 +1103,9 @@ export class WorkflowBuilder<
           // Signal the runner: workflow should terminate with tripwire status.
           // Runner reads this off `metadataRef.current` after execute returns.
           execParams.metadataRef.current = { tripwireFired: true, reason };
-          return Pipeline.succeed(reason);
+          return succeed(reason);
         }
-        return Pipeline.succeed(prev);
+        return succeed(prev);
       },
     };
 
@@ -1192,84 +1230,57 @@ export class WorkflowBuilder<
         // row (`<name>.iter.<n>`) via saveStepResult so the DAG view,
         // onStepComplete hook, and step-attempt history all see the
         // iteration. Failing iterations propagate as typed errors via
-        // Pipeline.tryPromise so the runner's saveStepFailure path
-        // applies normally — unlike .journaled which routes throws as
-        // defects.
+        // tryPromise so the runner's saveStepFailure path applies normally.
         const storage = execParams.storage;
         const storageAttempts = isStepAttemptStorage(storage) ? storage : undefined;
-        return Pipeline.from(
-          Effect.tryPromise({
-            try: async (): Promise<T> => {
-              let result: T = undefined as unknown as T;
-              let iter = 0;
+        return tryPromise(
+          async (): Promise<T> => {
+            let result: T = undefined as unknown as T;
+            let iter = 0;
 
-              // Crash resume: look for completed `<name>.iter.<n>` rows
-              // in storage and replay loop state from them. Walk
-              // iter=0,1,2,... decoding each persisted result,
-              // re-evaluating the condition, and resuming from the first
-              // missing iteration. Cheap (O(iters) reads) and avoids
-              // re-running already-completed iterations on restart.
-              const state = await storage.loadWorkflow(execParams.workflowId);
-              if (state) {
-                while (iter < maxIterations) {
-                  const replayName = `${name}.iter.${iter}`;
-                  const row = state.steps[replayName];
-                  if (!row || row.status !== "completed") break;
-                  result = iterCodec.decode(row.result) as T;
-                  iter++;
-                  // If the replayed condition would have exited here, the
-                  // previous run already decided to stop — return without
-                  // touching storage or the body.
-                  if (!condition(result, iter - 1)) return result;
-                }
+            // Crash resume: look for completed `<name>.iter.<n>` rows
+            // in storage and replay loop state from them. Walk
+            // iter=0,1,2,... decoding each persisted result,
+            // re-evaluating the condition, and resuming from the first
+            // missing iteration. Cheap (O(iters) reads) and avoids
+            // re-running already-completed iterations on restart.
+            const state = await storage.loadWorkflow(execParams.workflowId);
+            if (state) {
+              while (iter < maxIterations) {
+                const replayName = `${name}.iter.${iter}`;
+                const row = state.steps[replayName];
+                if (!row || row.status !== "completed") break;
+                result = iterCodec.decode(row.result) as T;
+                iter++;
+                // If the replayed condition would have exited here, the
+                // previous run already decided to stop — return without
+                // touching storage or the body.
+                if (!condition(result, iter - 1)) return result;
               }
+            }
 
-              while (true) {
-                if (iter >= maxIterations) {
-                  throw new LoopLimitExceededError({
-                    workflowId: execParams.workflowId,
-                    stepName: name,
-                    maxIterations,
-                    message: `Loop "${name}" exceeded ${maxIterations} iterations without converging`,
-                  });
-                }
-                const iterName = `${name}.iter.${iter}`;
-                const startedAt = new Date();
-                const iterStart = Date.now();
-                const currentIter = iter;
-                try {
-                  result = await body(stepCtx as StepContext<Input, Current>, currentIter);
-                } catch (err) {
-                  const durationMs = Date.now() - iterStart;
-                  const message = err instanceof Error ? err.message : String(err);
-                  await storage.saveStepFailure({
-                    workflowId: execParams.workflowId,
-                    stepName: iterName,
-                    error: message,
-                    durationMs,
-                    startedAt,
-                  });
-                  if (storageAttempts) {
-                    await storageAttempts.saveStepAttempt({
-                      workflowId: execParams.workflowId,
-                      stepName: iterName,
-                      attempt: 1,
-                      type: "execution",
-                      status: "failed",
-                      error: message,
-                      durationMs,
-                      startedAt,
-                      completedAt: new Date(),
-                    });
-                  }
-                  throw err;
-                }
+            while (true) {
+              if (iter >= maxIterations) {
+                throw new LoopLimitExceededError({
+                  workflowId: execParams.workflowId,
+                  stepName: name,
+                  maxIterations,
+                  message: `Loop "${name}" exceeded ${maxIterations} iterations without converging`,
+                });
+              }
+              const iterName = `${name}.iter.${iter}`;
+              const startedAt = new Date();
+              const iterStart = Date.now();
+              const currentIter = iter;
+              try {
+                result = await body(stepCtx as StepContext<Input, Current>, currentIter);
+              } catch (err) {
                 const durationMs = Date.now() - iterStart;
-                const encoded = iterCodec.encode(result);
-                await storage.saveStepResult({
+                const message = err instanceof Error ? err.message : String(err);
+                await storage.saveStepFailure({
                   workflowId: execParams.workflowId,
                   stepName: iterName,
-                  result: encoded,
+                  error: message,
                   durationMs,
                   startedAt,
                 });
@@ -1279,21 +1290,44 @@ export class WorkflowBuilder<
                     stepName: iterName,
                     attempt: 1,
                     type: "execution",
-                    status: "completed",
-                    result: encoded,
+                    status: "failed",
+                    error: message,
                     durationMs,
                     startedAt,
                     completedAt: new Date(),
                   });
                 }
-                iter++;
-                if (!condition(result, currentIter)) break;
+                throw err;
               }
-              return result;
-            },
-            catch: (err) => err as TaggedError,
-          }),
-        ) as Pipeline<unknown, TaggedError>;
+              const durationMs = Date.now() - iterStart;
+              const encoded = iterCodec.encode(result);
+              await storage.saveStepResult({
+                workflowId: execParams.workflowId,
+                stepName: iterName,
+                result: encoded,
+                durationMs,
+                startedAt,
+              });
+              if (storageAttempts) {
+                await storageAttempts.saveStepAttempt({
+                  workflowId: execParams.workflowId,
+                  stepName: iterName,
+                  attempt: 1,
+                  type: "execution",
+                  status: "completed",
+                  result: encoded,
+                  durationMs,
+                  startedAt,
+                  completedAt: new Date(),
+                });
+              }
+              iter++;
+              if (!condition(result, currentIter)) break;
+            }
+            return result;
+          },
+          (err) => err as TaggedError,
+        );
       },
     };
 
@@ -1329,12 +1363,12 @@ export class WorkflowBuilder<
    *
    * ```typescript
    * workflow({ name: "signup", storage })
-   *   .step("load", ({ input }) => Pipeline.succeed(input))
+   *   .step("load", ({ input }) => succeed(input))
    *   .parallelSteps("enrich", {
-   *     user: ({ prev }) => Pipeline.fromPromise(() => fetchUser(prev)),
-   *     perms: ({ prev }) => Pipeline.fromPromise(() => fetchPerms(prev)),
+   *     user: ({ prev }) => tryPromise(() => fetchUser(prev), toShipError),
+   *     perms: ({ prev }) => tryPromise(() => fetchPerms(prev), toShipError),
    *   })
-   *   .step("join", ({ prev }) => Pipeline.succeed({ ...prev.user, ...prev.perms }))
+   *   .step("join", ({ prev }) => succeed({ ...prev.user, ...prev.perms }))
    * ```
    *
    * Semantics match the existing DAG executor: branches run concurrently
@@ -1346,7 +1380,7 @@ export class WorkflowBuilder<
     Name extends string,
     Branches extends Record<
       string,
-      (ctx: StepContext<Input, Current>) => Pipeline<unknown, TaggedError>
+      (ctx: StepContext<Input, Current>) => StepEff<unknown, TaggedError>
     >,
   >(
     name: Name,
@@ -1393,7 +1427,7 @@ export class WorkflowBuilder<
 
       const branchFn = branches[key] as (
         ctx: StepContext<Input, Current>,
-      ) => Pipeline<unknown, TaggedError>;
+      ) => StepEff<unknown, TaggedError>;
 
       branchSteps.push({
         name: scopedName,
@@ -1415,11 +1449,12 @@ export class WorkflowBuilder<
             attempt: execParams.attemptRef.current,
           };
           const cacheOption = options?.cache;
-          if (!cacheOption) return branchFn(ctx as StepContext<Input, Current>);
+          if (!cacheOption)
+            return asStepEff(branchFn(ctx as StepContext<Input, Current>), scopedName);
           return wrapWithStepCache(
             cacheOption,
             ctx as StepContext<unknown, unknown>,
-            () => branchFn(ctx as StepContext<Input, Current>),
+            () => asStepEff(branchFn(ctx as StepContext<Input, Current>), scopedName),
             cacheOption.namespace ?? workflowName,
           );
         },
@@ -1441,7 +1476,7 @@ export class WorkflowBuilder<
         for (let i = 0; i < branchKeys.length; i++) {
           out[branchKeys[i]!] = execParams.results[scopedNames[i]!];
         }
-        return Pipeline.succeed(out);
+        return succeed(out);
       },
     };
 
@@ -1456,8 +1491,8 @@ export class WorkflowBuilder<
     name: Name,
     params: {
       condition: (value: Current) => boolean;
-      ifTrue: (ctx: StepContext<Input, Current>) => Pipeline<Output, E2>;
-      ifFalse: (ctx: StepContext<Input, Current>) => Pipeline<Output, E2>;
+      ifTrue: (ctx: StepContext<Input, Current>) => StepEff<Output, E2>;
+      ifFalse: (ctx: StepContext<Input, Current>) => StepEff<Output, E2>;
     },
     options?: StepOptions<Output>,
   ): WorkflowBuilder<Input, Steps & Record<Name, Output>, Output, Error | E2> {
@@ -1481,7 +1516,7 @@ export class WorkflowBuilder<
           attempt: 1,
         };
         const branch = params.condition(prev as Current) ? params.ifTrue : params.ifFalse;
-        return branch(ctx as any) as Pipeline<unknown, TaggedError>;
+        return asStepEff(branch(ctx as any), name);
       },
     };
 
@@ -1504,7 +1539,7 @@ export class WorkflowBuilder<
    *
    * ```typescript
    * workflow({ name: "signup", storage })
-   *   .step("load", ({ input }) => Pipeline.succeed(input))
+   *   .step("load", ({ input }) => succeed(input))
    *   .journaled("create-and-notify", function*(ctx, prev) {
    *     const user = yield* ctx.activity("create", () => createUser(prev))
    *     const email = yield* ctx.activity("send-email", () => sendEmail(user))
@@ -1555,72 +1590,70 @@ export class WorkflowBuilder<
         const builderVersion = this._version;
         const builderPatches = this._patches;
         const runtimeStorage = execParams.storage;
-        // Use Effect.tryPromise (not Pipeline.fromPromise/Effect.promise)
-        // so any `throw` from the generator body surfaces as a TYPED
-        // pipeline failure. Without this, thrown TaggedErrors like
-        // WorkflowSuspendedError or LoopLimitExceededError land as
-        // Die-tagged defects; `pipeline.runSafe()` (no catchAll) rejects
-        // instead of returning, and the runner's saveStepFailure path
-        // never fires — workflows hang in "pending". `catch: err => err`
-        // preserves the original error instance so downstream tag checks
+        // Use tryPromise (not a defect-raising promise lift) so any `throw`
+        // from the generator body surfaces as a TYPED step failure.
+        // Without this, thrown TaggedErrors like WorkflowSuspendedError or
+        // LoopLimitExceededError land as defects, which the distributed
+        // executor rethrows instead of recording a step failure. The
+        // `async` thunk turns synchronous throws (a missing journal
+        // storage) into rejections, and `err => err` preserves the
+        // original error instance so downstream tag checks
         // (WorkflowSuspendedError handling, etc.) keep working.
-        return Pipeline.from(
-          Effect.tryPromise({
-            try: () =>
-              runJournaledStep<Input, Current, Output>({
-                input: execParams.input as Input,
-                prev: prev as Current,
-                workflowId: execParams.workflowId,
-                stepName: name,
-                storage: getJournalStorage(runtimeStorage),
-                workflowStorage: runtimeStorage,
-                workflowVersion: builderVersion,
-                patches: builderPatches,
-                codec,
-                payloadHash: this._defaultPayloadHash,
-                runChild: async ({
-                  workflow: childWorkflow,
-                  workflowId: childId,
-                  input: childInput,
-                }) => {
-                  const childDef = (childWorkflow as any)._definition as any;
-                  await runtimeStorage
-                    .createWorkflow({
-                      workflowId: childId,
-                      workflowName: childWorkflow.name,
-                      input: childInput,
-                      parentWorkflowId: execParams.workflowId,
-                      version: childWorkflow.version,
-                      workflowType: childDef.type,
-                      metadata: childDef.metadata,
-                    })
-                    .catch(() => undefined); // no-op on conflict (idempotent re-run)
-                  return runWorkflowOrchestration(
-                    {
-                      storage: runtimeStorage,
-                      name: childWorkflow.name,
-                      version: childWorkflow.version,
-                      idempotency: childWorkflow.idempotency,
-                      type: childDef.type,
-                      metadata: childDef.metadata,
-                      steps: childDef.steps,
-                      retry: childDef.retry,
-                      compensateConfig: childDef.compensateConfig,
-                      dlq: childDef.dlq,
-                      dispatch: childDef.dispatch,
-                      timeoutMs: childDef.timeoutMs,
-                      onVersionMismatch: childDef.onVersionMismatch,
-                      previousVersions: childDef.previousVersions,
-                      hooks: childDef.hooks,
-                    },
-                    { workflowId: childId, input: childInput },
-                  );
-                },
-                body,
-              }),
-            catch: (err) => err as TaggedError,
-          }),
-        ) as Pipeline<unknown, TaggedError>;
+        return tryPromise(
+          async () =>
+            runJournaledStep<Input, Current, Output>({
+              input: execParams.input as Input,
+              prev: prev as Current,
+              workflowId: execParams.workflowId,
+              stepName: name,
+              storage: getJournalStorage(runtimeStorage),
+              workflowStorage: runtimeStorage,
+              workflowVersion: builderVersion,
+              patches: builderPatches,
+              codec,
+              payloadHash: this._defaultPayloadHash,
+              runChild: async ({
+                workflow: childWorkflow,
+                workflowId: childId,
+                input: childInput,
+              }) => {
+                const childDef = (childWorkflow as any)._definition as any;
+                await runtimeStorage
+                  .createWorkflow({
+                    workflowId: childId,
+                    workflowName: childWorkflow.name,
+                    input: childInput,
+                    parentWorkflowId: execParams.workflowId,
+                    version: childWorkflow.version,
+                    workflowType: childDef.type,
+                    metadata: childDef.metadata,
+                  })
+                  .catch(() => undefined); // no-op on conflict (idempotent re-run)
+                return runWorkflowOrchestration(
+                  {
+                    storage: runtimeStorage,
+                    name: childWorkflow.name,
+                    version: childWorkflow.version,
+                    idempotency: childWorkflow.idempotency,
+                    type: childDef.type,
+                    metadata: childDef.metadata,
+                    steps: childDef.steps,
+                    retry: childDef.retry,
+                    compensateConfig: childDef.compensateConfig,
+                    dlq: childDef.dlq,
+                    dispatch: childDef.dispatch,
+                    timeoutMs: childDef.timeoutMs,
+                    onVersionMismatch: childDef.onVersionMismatch,
+                    previousVersions: childDef.previousVersions,
+                    hooks: childDef.hooks,
+                  },
+                  { workflowId: childId, input: childInput },
+                );
+              },
+              body,
+            }),
+          (err) => err as TaggedError,
+        );
       },
     };
 
@@ -1641,11 +1674,11 @@ export class WorkflowBuilder<
    * .match("route", {
    *   on: (order) => order.type,
    *   cases: {
-   *     express: ({ prev }) => Pipeline.fromPromise(() => expressShip(prev)),
-   *     standard: ({ prev }) => Pipeline.fromPromise(() => standardShip(prev)),
-   *     freight: ({ prev }) => Pipeline.fromPromise(() => freightShip(prev)),
+   *     express: ({ prev }) => tryPromise(() => expressShip(prev), toShipError),
+   *     standard: ({ prev }) => tryPromise(() => standardShip(prev), toShipError),
+   *     freight: ({ prev }) => tryPromise(() => freightShip(prev), toShipError),
    *   },
-   *   default: ({ prev }) => Pipeline.fromPromise(() => standardShip(prev)),
+   *   default: ({ prev }) => tryPromise(() => standardShip(prev), toShipError),
    * })
    * ```
    *
@@ -1655,14 +1688,14 @@ export class WorkflowBuilder<
    * ```typescript
    * .match("route", {
    *   cases: [
-   *     { when: (o) => o.total > 10_000, then: ({ prev }) => Pipeline.fromPromise(() => vipProcess(prev)) },
-   *     { when: (o) => o.type === "express", then: ({ prev }) => Pipeline.fromPromise(() => expressShip(prev)) },
+   *     { when: (o) => o.total > 10_000, then: ({ prev }) => tryPromise(() => vipProcess(prev), toShipError) },
+   *     { when: (o) => o.type === "express", then: ({ prev }) => tryPromise(() => expressShip(prev), toShipError) },
    *   ],
-   *   default: ({ prev }) => Pipeline.fromPromise(() => standardShip(prev)),
+   *   default: ({ prev }) => tryPromise(() => standardShip(prev), toShipError),
    * })
    * ```
    *
-   * Output type is inferred as the union of all case Pipeline outputs (or the
+   * Output type is inferred as the union of all case outputs (or the
    * common type when they all match). Match contributes one node to the DAG;
    * deterministic from `prev` so replay re-runs the same case.
    */
@@ -1698,7 +1731,7 @@ export class WorkflowBuilder<
           matchCase: picked.label,
           matchMode: picked.mode,
         };
-        return picked.fn(ctx as any) as Pipeline<unknown, TaggedError>;
+        return asStepEff(picked.fn(ctx as any), name);
       },
       viz: matchVizMeta(params),
     };
@@ -1752,7 +1785,7 @@ export class WorkflowBuilder<
         const parentWorkflowId = execParams.workflowId;
         const storage = execParams.storage;
 
-        return Pipeline.fromPromise(async () => {
+        return promiseOrDie(async () => {
           // Seed the child row with the parent pointer before handing it to
           // the runner so downstream `listWorkflows({ parentId })` queries
           // and the coordinator's recovery see the relationship.
@@ -1787,7 +1820,7 @@ export class WorkflowBuilder<
             },
             { workflowId: childWorkflowId, input: childInput },
           );
-        }) as Pipeline<unknown, TaggedError>;
+        });
       },
     };
 
@@ -1812,15 +1845,15 @@ export class WorkflowBuilder<
       kind: "sleep",
       codec: this._codec(),
       execute: (params) => {
-        const eff = Effect.gen(function* () {
-          const state = yield* Effect.promise(() => params.storage.loadWorkflow(params.workflowId));
+        const program = eff(function* () {
+          const state = yield* promiseOrDie(() => params.storage.loadWorkflow(params.workflowId));
           const stepState = state?.steps[name];
 
           if (stepState?.status === "sleeping" && stepState.wakeAt) {
             if (new Date() >= stepState.wakeAt) {
               return undefined;
             }
-            return yield* Effect.fail(
+            return yield* fail(
               new WorkflowSuspendedError({
                 workflowId: params.workflowId,
                 stepName: name,
@@ -1831,14 +1864,14 @@ export class WorkflowBuilder<
           }
 
           const wakeAt = new Date(Date.now() + ms);
-          yield* Effect.promise(() =>
+          yield* promiseOrDie(() =>
             params.storage.suspendWorkflow(params.workflowId, name, {
               status: "sleeping",
               stepType: "sleep",
               wakeAt,
             }),
           );
-          return yield* Effect.fail(
+          return yield* fail(
             new WorkflowSuspendedError({
               workflowId: params.workflowId,
               stepName: name,
@@ -1847,7 +1880,7 @@ export class WorkflowBuilder<
             }),
           );
         });
-        return Pipeline.from(eff) as Pipeline<unknown, TaggedError>;
+        return program;
       },
     };
 
@@ -1884,9 +1917,9 @@ export class WorkflowBuilder<
       kind: "signal",
       codec,
       execute: (execParams) => {
-        const eff = Effect.gen(function* () {
+        const program = eff(function* () {
           // Check if signal has been delivered
-          const signals = yield* Effect.promise(() =>
+          const signals = yield* promiseOrDie(() =>
             execParams.storage.loadSignals(execParams.workflowId),
           );
           const signal = signals.find((s) => s.signalName === signalName);
@@ -1896,14 +1929,14 @@ export class WorkflowBuilder<
           }
 
           // Check if this is a re-entry with timeout
-          const state = yield* Effect.promise(() =>
+          const state = yield* promiseOrDie(() =>
             execParams.storage.loadWorkflow(execParams.workflowId),
           );
           const stepState = state?.steps[name];
 
           if (stepState?.status === "waiting_for_signal" && stepState.signalTimeoutAt) {
             if (new Date() >= stepState.signalTimeoutAt) {
-              return yield* Effect.fail(
+              return yield* fail(
                 new WorkflowTimeoutError({
                   workflowId: execParams.workflowId,
                   stepName: name,
@@ -1915,7 +1948,7 @@ export class WorkflowBuilder<
 
           // First execution or still waiting — suspend
           const signalTimeoutAt = timeoutMs != null ? new Date(Date.now() + timeoutMs) : undefined;
-          yield* Effect.promise(() =>
+          yield* promiseOrDie(() =>
             execParams.storage.suspendWorkflow(execParams.workflowId, name, {
               status: "waiting_for_signal",
               stepType: "signal",
@@ -1923,7 +1956,7 @@ export class WorkflowBuilder<
               signalTimeoutAt,
             }),
           );
-          return yield* Effect.fail(
+          return yield* fail(
             new WorkflowSuspendedError({
               workflowId: execParams.workflowId,
               stepName: name,
@@ -1932,7 +1965,7 @@ export class WorkflowBuilder<
             }),
           );
         });
-        return Pipeline.from(eff) as Pipeline<unknown, TaggedError>;
+        return program;
       },
     };
 
@@ -2131,7 +2164,7 @@ export class WorkflowBuilder<
   private _addStep(params: {
     name: string;
     dependsOn: string[];
-    fn: (ctx: any) => Pipeline<unknown, any>;
+    fn: (ctx: any) => StepEff<unknown, any>;
     isLinear: boolean;
     kind: StepKind;
     options?: StepOptions<unknown>;
@@ -2178,11 +2211,11 @@ export class WorkflowBuilder<
         }
 
         const cacheOption = params.options?.cache;
-        if (!cacheOption) return params.fn(ctx);
+        if (!cacheOption) return asStepEff(params.fn(ctx), params.name);
         return wrapWithStepCache(
           cacheOption,
           ctx as StepContext<unknown, unknown>,
-          () => params.fn(ctx),
+          () => asStepEff(params.fn(ctx), params.name),
           cacheOption.namespace ?? workflowName,
         );
       },
@@ -2200,16 +2233,16 @@ export class WorkflowBuilder<
 function wrapWithStepCache(
   cache: StepCacheOption,
   ctx: StepContext<unknown, unknown>,
-  runBody: () => Pipeline<unknown, TaggedError>,
+  runBody: () => StepEff<unknown, TaggedError>,
   namespace: string,
-): Pipeline<unknown, TaggedError> {
+): StepEff<unknown, TaggedError> {
   const cacheKey = `${namespace}:${cache.key(ctx)}`;
 
-  // Lookup is expressed as a Pipeline so we can keep everything inside the
+  // Lookup is expressed as an Eff so we can keep everything inside the
   // caller's error channel. A sentinel object marks "miss" so `undefined`
   // cached values are distinguishable from misses.
   const miss = Symbol("cache-miss");
-  const lookup = Pipeline.fromPromise(async () => {
+  const lookup = promiseOrDie(async () => {
     try {
       const hit = await cache.store.get(cacheKey);
       return hit === undefined ? miss : hit;
@@ -2218,18 +2251,20 @@ function wrapWithStepCache(
     }
   });
 
-  return lookup.flatMap((value) => {
-    if (value !== miss) return Pipeline.succeed(value);
-    // Miss — run the body, then write to cache on success. tapAsync blocks
-    // until the write completes (so tests see cache state deterministically),
-    // and we swallow write errors so cache backends can never fail a step.
-    return runBody().tapAsync(async (result) => {
-      try {
-        await cache.store.set(cacheKey, result, cache.ttlMs);
-      } catch {
-        /* ignore cache write failures — ticket contract */
-      }
-    });
+  return lookup.flatMap((value): StepEff<unknown, TaggedError> => {
+    if (value !== miss) return succeed(value);
+    // Miss — run the body, then write to cache on success. The write is
+    // awaited (so tests see cache state deterministically), and write
+    // errors are swallowed so cache backends can never fail a step.
+    return runBody().tap((result) =>
+      promiseOrDie(async () => {
+        try {
+          await cache.store.set(cacheKey, result, cache.ttlMs);
+        } catch {
+          /* ignore cache write failures — ticket contract */
+        }
+      }),
+    );
   });
 }
 

@@ -35,7 +35,7 @@ fail loudly with `WorkflowVersionMismatchError`.
 
 ```typescript
 workflow({ name: "billing", storage, version: "1" }).step("charge", ({ input }) =>
-  Pipeline.succeed({ charged: input.amount }),
+  succeed({ charged: input.amount }),
 );
 ```
 
@@ -65,7 +65,7 @@ definition while using v2's code for fresh workflows.
 
 ```typescript
 const v1 = workflow({ name: "billing", storage, version: "1" })
-  .step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount, v: "1" }))
+  .step("charge", ({ input }) => succeed({ charged: input.amount, v: "1" }))
   .build();
 
 const v2 = workflow({
@@ -74,7 +74,7 @@ const v2 = workflow({
   version: "2",
   onVersionMismatch: "drain",
   previousVersions: [v1],
-}).step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount * 1.1, v: "2" }));
+}).step("charge", ({ input }) => succeed({ charged: input.amount * 1.1, v: "2" }));
 
 // v2.run() against an existing v1 row → runs v1's code
 // v2.run() against a new workflowId   → runs v2's code

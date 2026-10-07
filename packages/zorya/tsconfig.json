@@ -11,9 +11,6 @@
       "path": "../workflow-remote"
     },
     {
-      "path": "../core"
-    },
-    {
       "path": "../zorya-client"
     },
     {

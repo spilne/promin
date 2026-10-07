@@ -29,7 +29,7 @@
 // compensation on the cascaded failure path.
 // ---------------------------------------------------------------------------
 
-import { Pipeline } from "@promin/core";
+import { tryPromise } from "@spilne/perfect-core";
 import { workflow, type StepHandler } from "@promin/workflow";
 
 export interface OrderInput {
@@ -141,14 +141,19 @@ export function buildOrderWorkflow() {
 // ---------------------------------------------------------------------------
 
 export const reserveInventoryHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const { orderId, items } = ctx.input as OrderInput;
-    console.log(`[inventory] ${ctx.workflowId} — reserving ${items.length} line(s) for ${orderId}`);
-    await sleep(200);
-    return {
-      reservationId: `res-${orderId}-${Math.random().toString(36).slice(2, 8)}`,
-    } satisfies InventoryResult;
-  });
+  tryPromise(
+    async () => {
+      const { orderId, items } = ctx.input as OrderInput;
+      console.log(
+        `[inventory] ${ctx.workflowId} — reserving ${items.length} line(s) for ${orderId}`,
+      );
+      await sleep(200);
+      return {
+        reservationId: `res-${orderId}-${Math.random().toString(36).slice(2, 8)}`,
+      } satisfies InventoryResult;
+    },
+    (e) => e,
+  ).orDie();
 
 /**
  * Payment handler with simulated flakiness — fails the first attempt,
@@ -156,48 +161,62 @@ export const reserveInventoryHandler: StepHandler = (ctx) =>
  * the step. Remove the random-fail for deterministic demo output.
  */
 export const chargePaymentHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const { orderId, amountCents } = ctx.input as OrderInput;
-    console.log(`[payment] ${ctx.workflowId} — charging ${amountCents}¢ (attempt ${ctx.attempt})`);
-    await sleep(300);
-    // First attempt fails for demo purposes — retry-with-backoff kicks in.
-    if (ctx.attempt === 1) {
-      throw new Error("transient: payment gateway 503");
-    }
-    return {
-      transactionId: `tx-${orderId}-${Math.random().toString(36).slice(2, 8)}`,
-      amountCents,
-    } satisfies PaymentResult;
-  });
+  tryPromise(
+    async () => {
+      const { orderId, amountCents } = ctx.input as OrderInput;
+      console.log(
+        `[payment] ${ctx.workflowId} — charging ${amountCents}¢ (attempt ${ctx.attempt})`,
+      );
+      await sleep(300);
+      // First attempt fails for demo purposes — retry-with-backoff kicks in.
+      if (ctx.attempt === 1) {
+        throw new Error("transient: payment gateway 503");
+      }
+      return {
+        transactionId: `tx-${orderId}-${Math.random().toString(36).slice(2, 8)}`,
+        amountCents,
+      } satisfies PaymentResult;
+    },
+    (e) => e,
+  ).orDie();
 
 export const generateLabelHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const { orderId } = ctx.input as OrderInput;
-    console.log(`[shipping] ${ctx.workflowId} — generating label for ${orderId}`);
-    await sleep(150);
-    return {
-      trackingNumber: `1Z${orderId.replace(/[^A-Z0-9]/gi, "").toUpperCase()}`,
-      carrier: "DEMO",
-    } satisfies LabelResult;
-  });
+  tryPromise(
+    async () => {
+      const { orderId } = ctx.input as OrderInput;
+      console.log(`[shipping] ${ctx.workflowId} — generating label for ${orderId}`);
+      await sleep(150);
+      return {
+        trackingNumber: `1Z${orderId.replace(/[^A-Z0-9]/gi, "").toUpperCase()}`,
+        carrier: "DEMO",
+      } satisfies LabelResult;
+    },
+    (e) => e,
+  ).orDie();
 
 export const notifyWarehouseHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const { orderId } = ctx.input as OrderInput;
-    console.log(`[notify] ${ctx.workflowId} — warehouse notified for ${orderId}`);
-    await sleep(80);
-  });
+  tryPromise(
+    async () => {
+      const { orderId } = ctx.input as OrderInput;
+      console.log(`[notify] ${ctx.workflowId} — warehouse notified for ${orderId}`);
+      await sleep(80);
+    },
+    (e) => e,
+  ).orDie();
 
 export const markDeliveredHandler: StepHandler = (ctx) =>
-  Pipeline.fromPromise(async () => {
-    const { orderId } = ctx.input as OrderInput;
-    const shipped = (ctx.deps as { "wait-for-shipped"?: ShippedSignal })["wait-for-shipped"];
-    console.log(
-      `[delivered] ${ctx.workflowId} — order ${orderId} shipped via ${shipped?.trackingNumber ?? "(no tracking)"}`,
-    );
-    await sleep(50);
-    return {
-      orderId,
-      deliveredAt: new Date().toISOString(),
-    } satisfies DeliveredResult;
-  });
+  tryPromise(
+    async () => {
+      const { orderId } = ctx.input as OrderInput;
+      const shipped = (ctx.deps as { "wait-for-shipped"?: ShippedSignal })["wait-for-shipped"];
+      console.log(
+        `[delivered] ${ctx.workflowId} — order ${orderId} shipped via ${shipped?.trackingNumber ?? "(no tracking)"}`,
+      );
+      await sleep(50);
+      return {
+        orderId,
+        deliveredAt: new Date().toISOString(),
+      } satisfies DeliveredResult;
+    },
+    (e) => e,
+  ).orDie();

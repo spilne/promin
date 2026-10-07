@@ -9,8 +9,8 @@
 // without silently regressing the fallback.
 // ---------------------------------------------------------------------------
 
+import { succeed, fail } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "@promin/core";
 import {
   InMemoryWorkflowStorage,
   createWorkflowRunner,
@@ -37,8 +37,8 @@ describe("RemoteWorkflowStorage — polling subscribe fallback", () => {
     const runner = createWorkflowRunner({ storage: remote });
 
     const wf = workflow<number>({ name: "remote-sub" })
-      .step("a", ({ input }) => Pipeline.succeed(input + 1))
-      .step("b", ({ prev }) => Pipeline.succeed(prev * 2))
+      .step("a", ({ input }) => succeed(input + 1))
+      .step("b", ({ prev }) => succeed(prev * 2))
       .build();
 
     // Subscribe before run() so the poller is already ticking by the time
@@ -79,7 +79,7 @@ describe("RemoteWorkflowStorage — polling subscribe fallback", () => {
     const runner = createWorkflowRunner({ storage: remote });
 
     const wf = workflow<number>({ name: "remote-sub-fail" })
-      .step("boom", () => Pipeline.fail(new Error("kaboom") as never))
+      .step("boom", () => fail(new Error("kaboom") as never))
       .build();
 
     const events: WorkflowRunEvent[] = [];

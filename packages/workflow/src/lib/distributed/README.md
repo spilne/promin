@@ -184,7 +184,6 @@ await coordinator.submit({ workflow: processVideo, workflowId: "v1", input: { vi
 
 ```typescript
 import { createCoordinator, createWorker, MapStepRegistry } from "@promin/workflow";
-import { Pipeline } from "@promin/core";
 import { PgStepQueue, PostgresWorkflowStorage, migrate } from "@promin/postgres";
 
 // --- Shared setup (all processes) ---
@@ -218,9 +217,7 @@ coordinator.start(); // runs forever, enqueuing ready steps
 // --- Default worker process ---
 
 const defaultRegistry = new MapStepRegistry();
-defaultRegistry.register("download", (ctx) =>
-  Pipeline.fromPromise(() => downloadVideo((ctx.input as any).videoId)),
-);
+defaultRegistry.register("download", (ctx) => downloadVideo((ctx.input as any).videoId));
 
 const defaultWorker = createWorker({
   storage,
@@ -235,9 +232,7 @@ defaultWorker.start();
 // --- GPU worker process (different machine, has GPU) ---
 
 const gpuRegistry = new MapStepRegistry();
-gpuRegistry.register("transcribe", (ctx) =>
-  Pipeline.fromPromise(() => whisperTranscribe(ctx.prev as Buffer)),
-);
+gpuRegistry.register("transcribe", (ctx) => whisperTranscribe(ctx.prev as Buffer));
 
 const gpuWorker = createWorker({
   storage,
@@ -252,9 +247,7 @@ gpuWorker.start();
 // --- AI worker process ---
 
 const aiRegistry = new MapStepRegistry();
-aiRegistry.register("summarize", (ctx) =>
-  Pipeline.fromPromise(() => llmSummarize(ctx.prev as string)),
-);
+aiRegistry.register("summarize", (ctx) => llmSummarize(ctx.prev as string));
 
 const aiWorker = createWorker({
   storage,
@@ -324,7 +317,6 @@ Steps registered on workers support the same resilience features as the in-proce
 
 ```typescript
 import { MapStepRegistry } from "@promin/workflow";
-import { Pipeline } from "@promin/core";
 
 const registry = new MapStepRegistry();
 
@@ -349,7 +341,7 @@ registry.register("load-config", (ctx) => loadFromRemote(), {
 
 // Compensation — undo side effects during saga rollback
 registry.register("charge-payment", (ctx) => chargeCard(ctx.prev), {
-  compensate: ({ result }) => Pipeline.fromPromise(() => refundPayment(result.paymentId)),
+  compensate: ({ result }) => refundPayment(result.paymentId),
 });
 ```
 
@@ -488,7 +480,7 @@ const worker = createWorker({
 | Purpose       | Worker step execution           | Visual editor compilation           |
 | Used by       | WorkflowWorker                  | compileWorkflow()                   |
 | Context       | StepContext (input, prev, deps) | ActivityContext (input, prev, deps) |
-| Returns       | Pipeline or Promise             | Pipeline                            |
+| Returns       | Eff or Promise                  | Eff                                 |
 | Registration  | By step name + options          | By activity ref + config            |
 | Retry/Failure | WorkerStepOptions               | N/A (handled by engine)             |
 

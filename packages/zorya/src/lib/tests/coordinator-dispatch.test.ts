@@ -13,8 +13,8 @@
 // reflects per-step + workflow completion.
 // ---------------------------------------------------------------------------
 
+import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "@promin/core";
 import {
   InMemoryStepQueue,
   InMemoryWorkerRegistry,
@@ -63,9 +63,9 @@ describe("Coordinator-driven step dispatch (promin-2c29)", () => {
     // Workflow with three independent steps so the coordinator schedules
     // them in parallel and each can land on a different worker.
     const wf = workflow<{ id: number }>({ name: "fan-out" })
-      .step("a", ({ input }) => Pipeline.succeed(`a:${input.id}`))
-      .step("b", ({ input }) => Pipeline.succeed(`b:${input.id}`))
-      .step("c", ({ input }) => Pipeline.succeed(`c:${input.id}`))
+      .step("a", ({ input }) => succeed(`a:${input.id}`))
+      .step("b", ({ input }) => succeed(`b:${input.id}`))
+      .step("c", ({ input }) => succeed(`c:${input.id}`))
       .build();
 
     const w1 = new ZoryaWorker({
@@ -132,11 +132,11 @@ describe("Coordinator-driven step dispatch (promin-2c29)", () => {
     // to the queue's atomic claim semantics, so two workers running in
     // parallel can drain them without double execution.
     const wf = workflow<number>({ name: "split" })
-      .step("s1", () => Pipeline.succeed(1))
-      .step("s2", () => Pipeline.succeed(2))
-      .step("s3", () => Pipeline.succeed(3))
-      .step("s4", () => Pipeline.succeed(4))
-      .step("s5", () => Pipeline.succeed(5))
+      .step("s1", () => succeed(1))
+      .step("s2", () => succeed(2))
+      .step("s3", () => succeed(3))
+      .step("s4", () => succeed(4))
+      .step("s5", () => succeed(5))
       .build();
 
     const mkWorker = (id: string) =>

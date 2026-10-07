@@ -11,6 +11,7 @@
 //   5. Multi-namespace scaling proof.
 // ---------------------------------------------------------------------------
 
+import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
 import {
   InMemorySchedulerStorage,
@@ -20,7 +21,6 @@ import {
   workflow,
   createWorkflowRunner,
 } from "@promin/workflow";
-import { Pipeline } from "@promin/core";
 import { ZoryaClient, ZoryaWorker } from "@promin/zorya-client";
 import { ZoryaServer } from "../../server/server.ts";
 import { DistributedWorkflows, LocalWorkflows, ZoryaScheduler } from "../../index.ts";
@@ -72,7 +72,7 @@ describe("ZoryaServer scheduling — embedded ZoryaScheduler", () => {
     const client = new ZoryaClient({ url: "http://test.local", fetch });
 
     const wf = workflow<{ id: number }>({ name: "scheduled-wf" })
-      .step("a", ({ input }) => Pipeline.succeed(`run-${input.id}`))
+      .step("a", ({ input }) => succeed(`run-${input.id}`))
       .build();
 
     const worker = new ZoryaWorker({

@@ -5,7 +5,7 @@
 // Input is serialized via JSON, sent to the container, output parsed back.
 // ---------------------------------------------------------------------------
 
-import { Pipeline } from "@promin/core";
+import { tryPromise } from "@spilne/perfect-core";
 import type { StepHandler, WorkerStepOptions } from "@promin/workflow";
 import type { ContainerRuntime, ContainerSpec } from "./container-runtime.ts";
 
@@ -57,29 +57,32 @@ export function containerStep(
       attempt: ctx.attempt,
     });
 
-    return Pipeline.fromPromise(async () => {
-      const result = await runtime.run({
-        spec,
-        input: inputJson,
-        stepName: ctx.stepName,
-        workflowId: ctx.workflowId,
-      });
+    return tryPromise(
+      async () => {
+        const result = await runtime.run({
+          spec,
+          input: inputJson,
+          stepName: ctx.stepName,
+          workflowId: ctx.workflowId,
+        });
 
-      if (result.exitCode !== 0) {
-        throw new Error(
-          `Container step "${ctx.stepName}" failed (exit ${result.exitCode}): ${result.stderr || result.stdout}`,
-        );
-      }
+        if (result.exitCode !== 0) {
+          throw new Error(
+            `Container step "${ctx.stepName}" failed (exit ${result.exitCode}): ${result.stderr || result.stdout}`,
+          );
+        }
 
-      // Try to parse output JSON, fall back to stdout
-      if (result.output !== undefined) return result.output;
+        // Try to parse output JSON, fall back to stdout
+        if (result.output !== undefined) return result.output;
 
-      try {
-        return JSON.parse(result.stdout);
-      } catch {
-        return result.stdout.trim();
-      }
-    });
+        try {
+          return JSON.parse(result.stdout);
+        } catch {
+          return result.stdout.trim();
+        }
+      },
+      (e) => e,
+    ).orDie();
   };
 
   return [handler, options];

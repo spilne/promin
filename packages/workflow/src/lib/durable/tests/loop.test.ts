@@ -1,5 +1,5 @@
+import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "@promin/core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
@@ -12,7 +12,7 @@ describe("dowhile / dountil", () => {
       const runner = createWorkflowRunner({ storage });
 
       const wf = workflow<{ start: number }>({ name: "w-count" })
-        .step("load", ({ input }) => Pipeline.succeed(input.start))
+        .step("load", ({ input }) => succeed(input.start))
         .dowhile(
           "inc",
           (ctx, iter) => (ctx.prev as number) + iter + 1,
@@ -206,7 +206,7 @@ describe("dowhile / dountil", () => {
           (_ctx, iter) => iter,
           (result) => result < 3,
         )
-        .step("format", ({ prev }) => Pipeline.succeed(`iterations-done:${prev}`))
+        .step("format", ({ prev }) => succeed(`iterations-done:${prev}`))
         .build();
 
       const result = await runner.run({
@@ -222,7 +222,7 @@ describe("dowhile / dountil", () => {
       const runner = createWorkflowRunner({ storage });
 
       const wf = workflow<{ n: number }>({ name: "w-after" })
-        .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
+        .step("double", ({ input }) => succeed(input.n * 2))
         .dowhile(
           "inc",
           // ctx.prev is the step-level prev (fixed across iterations).

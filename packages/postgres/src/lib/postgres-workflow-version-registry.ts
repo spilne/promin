@@ -11,8 +11,8 @@
 // mode); they never call the stub execute bodies.
 // ---------------------------------------------------------------------------
 
+import { fail } from "@spilne/perfect-core";
 import { eq, and, desc } from "drizzle-orm";
-import { Pipeline } from "@promin/core";
 import type { TaggedError } from "@promin/workflow";
 import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
 import type {
@@ -278,7 +278,7 @@ function rowToWorkflow(row: {
     needs: s.needs,
     priority: s.priority,
     execute: () =>
-      Pipeline.fail({
+      fail({
         _tag: "StepError",
         message:
           `Step "${s.name}" of workflow "${dag.name}" cannot be executed via a registry-fetched stub. ` +

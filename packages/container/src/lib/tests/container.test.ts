@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { Pipeline } from "@promin/core";
+import type { Eff } from "@spilne/perfect-core";
 import {
   MapStepRegistry,
   InMemoryWorkflowStorage,
@@ -160,7 +160,7 @@ describe("Local process runtime — run containerized steps as local processes f
 // ---------------------------------------------------------------------------
 
 describe("Container step integration — run containerized commands as workflow steps", () => {
-  it("container spec wrapped as a Pipeline step handler — returns parsed JSON output", async () => {
+  it("container spec wrapped as an Eff step handler — returns parsed JSON output", async () => {
     const runtime = new LocalProcessRuntime();
     const [handler] = containerStep({
       spec: {
@@ -178,8 +178,8 @@ describe("Container step integration — run containerized commands as workflow 
         workflowId: "wf-cs-1",
         stepName: "test",
         attempt: 1,
-      }) as Pipeline<unknown, any>
-    ).runPromise();
+      }) as Eff<unknown, never>
+    ).run();
 
     expect(result).toEqual({ msg: "from-container" });
   });

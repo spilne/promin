@@ -30,6 +30,7 @@ Bun.serve({ port: 3001, fetch: handler });
 
 ```ts
 // Client (worker / SDK process)
+import { succeed } from "@spilne/perfect-core";
 import { createWorkflowRunner, workflow } from "@promin/workflow";
 import { RemoteWorkflowStorage } from "@promin/workflow-remote";
 
@@ -37,7 +38,7 @@ const storage = new RemoteWorkflowStorage({ url: "http://coord:3001/storage" });
 const runner = createWorkflowRunner({ storage });
 
 const wf = workflow<{ id: string }>({ name: "greet" })
-  .step("hello", ({ input }) => Pipeline.succeed(`hi ${input.id}`))
+  .step("hello", ({ input }) => succeed(`hi ${input.id}`))
   .build();
 
 await runner.run({ workflow: wf, workflowId: "wf_1", input: { id: "u_42" } });

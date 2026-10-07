@@ -1,6 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { TaggedError } from "@spilne/perfect-core";
-import { Pipeline } from "@promin/core";
+import { TaggedError, succeed, fail } from "@spilne/perfect-core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
@@ -23,7 +22,7 @@ describe("Step audit log — track every execution attempt for observability", (
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<string>({ name: "record-success" })
-      .step("step-1", ({ input }) => Pipeline.succeed(input.toUpperCase()))
+      .step("step-1", ({ input }) => succeed(input.toUpperCase()))
       .build();
 
     await runner.run({ workflow: wf, workflowId: "rec-1", input: "hello" });
@@ -44,7 +43,7 @@ describe("Step audit log — track every execution attempt for observability", (
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<string>({ name: "record-fail" })
-      .step("step-1", () => Pipeline.fail(new TestError({ message: "boom" })))
+      .step("step-1", () => fail(new TestError({ message: "boom" })))
       .build();
 
     await runner.runSafe({ workflow: wf, workflowId: "rec-2", input: "x" });
@@ -66,8 +65,8 @@ describe("Step audit log — track every execution attempt for observability", (
         "flaky",
         () => {
           calls++;
-          if (calls < 3) return Pipeline.fail(new TestError({ message: `fail-${calls}` }));
-          return Pipeline.succeed("ok");
+          if (calls < 3) return fail(new TestError({ message: `fail-${calls}` }));
+          return succeed("ok");
         },
         {
           retry: { maxRetries: 5 },
@@ -93,11 +92,11 @@ describe("Step audit log — track every execution attempt for observability", (
       name: "record-wf-retries",
       retry: { maxRetries: 2, baseDelayMs: 10 },
     })
-      .step("step-1", () => Pipeline.succeed("ok"))
+      .step("step-1", () => succeed("ok"))
       .step("step-2", () => {
         calls++;
-        if (calls < 3) return Pipeline.fail(new TestError({ message: `fail-${calls}` }));
-        return Pipeline.succeed("done");
+        if (calls < 3) return fail(new TestError({ message: `fail-${calls}` }));
+        return succeed("done");
       })
       .build();
 
@@ -121,8 +120,8 @@ describe("Step audit log — track every execution attempt for observability", (
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<string>({ name: "filter-step" })
-      .step("a", () => Pipeline.succeed("A"))
-      .step("b", () => Pipeline.succeed("B"))
+      .step("a", () => succeed("A"))
+      .step("b", () => succeed("B"))
       .build();
 
     await runner.run({ workflow: wf, workflowId: "rec-5", input: "x" });
@@ -140,11 +139,11 @@ describe("Step audit log — track every execution attempt for observability", (
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<string>({ name: "dag-attempts" })
-      .step("root", ({ input }) => Pipeline.succeed(input))
-      .step("left", { dependsOn: ["root"] }, () => Pipeline.succeed("L"))
-      .step("right", { dependsOn: ["root"] }, () => Pipeline.succeed("R"))
+      .step("root", ({ input }) => succeed(input))
+      .step("left", { dependsOn: ["root"] }, () => succeed("L"))
+      .step("right", { dependsOn: ["root"] }, () => succeed("R"))
       .step("join", { dependsOn: ["left", "right"] }, ({ deps }) =>
-        Pipeline.succeed(`${deps.left}-${deps.right}`),
+        succeed(`${deps.left}-${deps.right}`),
       )
       .build();
 
@@ -168,10 +167,10 @@ describe("Compensation audit log — track rollback attempts for compliance", ()
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<string>({ name: "comp-record" })
-      .step("step-1", () => Pipeline.succeed("done"), {
-        compensate: () => Pipeline.succeed(undefined as void),
+      .step("step-1", () => succeed("done"), {
+        compensate: () => succeed(undefined as void),
       })
-      .step("fail", () => Pipeline.fail(new TestError({ message: "boom" })))
+      .step("fail", () => fail(new TestError({ message: "boom" })))
       .build();
 
     await runner.runSafe({ workflow: wf, workflowId: "comp-rec-1", input: "x" });
@@ -188,12 +187,12 @@ describe("Compensation audit log — track rollback attempts for compliance", ()
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<string>({ name: "comp-fail-record" })
-      .step("step-1", () => Pipeline.succeed("done"), {
+      .step("step-1", () => succeed("done"), {
         compensate: () => {
           throw new Error("comp-failed");
         },
       })
-      .step("fail", () => Pipeline.fail(new TestError({ message: "boom" })))
+      .step("fail", () => fail(new TestError({ message: "boom" })))
       .build();
 
     await runner.runSafe({ workflow: wf, workflowId: "comp-rec-2", input: "x" });
@@ -216,14 +215,14 @@ describe("Compensation audit log — track rollback attempts for compliance", ()
         retry: { maxRetries: 2, baseDelayMs: 10 },
       },
     })
-      .step("step-1", () => Pipeline.succeed("done"), {
+      .step("step-1", () => succeed("done"), {
         compensate: () => {
           compCalls++;
           if (compCalls < 3) throw new Error(`comp-fail-${compCalls}`);
-          return Pipeline.succeed(undefined as void);
+          return succeed(undefined as void);
         },
       })
-      .step("fail", () => Pipeline.fail(new TestError({ message: "boom" })))
+      .step("fail", () => fail(new TestError({ message: "boom" })))
       .build();
 
     await runner.runSafe({ workflow: wf, workflowId: "comp-rec-3", input: "x" });
@@ -243,13 +242,13 @@ describe("Compensation audit log — track rollback attempts for compliance", ()
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<string>({ name: "both-types" })
-      .step("step-1", () => Pipeline.succeed("ok"), {
-        compensate: () => Pipeline.succeed(undefined as void),
+      .step("step-1", () => succeed("ok"), {
+        compensate: () => succeed(undefined as void),
       })
-      .step("step-2", () => Pipeline.succeed("ok"), {
-        compensate: () => Pipeline.succeed(undefined as void),
+      .step("step-2", () => succeed("ok"), {
+        compensate: () => succeed(undefined as void),
       })
-      .step("fail", () => Pipeline.fail(new TestError({ message: "boom" })))
+      .step("fail", () => fail(new TestError({ message: "boom" })))
       .build();
 
     await runner.runSafe({ workflow: wf, workflowId: "comp-rec-4", input: "x" });
@@ -295,7 +294,7 @@ describe("Graceful degradation — audit logging is optional", () => {
     };
 
     const wf = workflow<number>({ name: "no-attempts" })
-      .step("double", ({ input }) => Pipeline.succeed(input * 2))
+      .step("double", ({ input }) => succeed(input * 2))
       .build();
 
     const runner = createWorkflowRunner({ storage: minimalStorage });

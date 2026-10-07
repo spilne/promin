@@ -1,6 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { Stream, TaggedError } from "@spilne/perfect-core";
-import { Pipeline } from "@promin/core";
+import { Stream, TaggedError, succeed, fail } from "@spilne/perfect-core";
 import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { trigger, WorkflowResult } from "../workflow-trigger.ts";
@@ -63,7 +62,7 @@ describe("WorkflowBuilder.build", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const def = workflow<{ n: number }>({ name: "buildable" })
-      .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
+      .step("double", ({ input }) => succeed(input.n * 2))
       .build();
 
     expect(def.name).toBe("buildable");
@@ -76,7 +75,7 @@ describe("WorkflowBuilder.build", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const def = workflow<{}>({ name: "safe-build" })
-      .step("fail", () => Pipeline.fail(new ProcessError({ message: "oops" })))
+      .step("fail", () => fail(new ProcessError({ message: "oops" })))
       .build();
 
     const { data, error } = await runner.runSafe({ workflow: def, workflowId: "b-2", input: {} });
@@ -88,7 +87,7 @@ describe("WorkflowBuilder.build", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const def = workflow<{ n: number }>({ name: "reusable" })
-      .step("inc", ({ input }) => Pipeline.succeed(input.n + 1))
+      .step("inc", ({ input }) => succeed(input.n + 1))
       .build();
 
     const r1 = await runner.run({ workflow: def, workflowId: "r-1", input: { n: 10 } });
@@ -107,7 +106,7 @@ describe("trigger", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const def = workflow<{ value: number }>({ name: "triggered" })
-      .step("double", ({ input }) => Pipeline.succeed(input.value * 2))
+      .step("double", ({ input }) => succeed(input.value * 2))
       .build();
 
     const results = await Stream.fromIterable([1, 2, 3])
@@ -134,7 +133,7 @@ describe("trigger", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const def = workflow<{ n: number }>({ name: "failing-trigger" })
-      .step("boom", () => Pipeline.fail(new ProcessError({ message: "fail" })))
+      .step("boom", () => fail(new ProcessError({ message: "fail" })))
       .build();
 
     const results = await Stream.fromIterable([1])
@@ -162,7 +161,7 @@ describe("trigger", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const def = workflow<{ n: number }>({ name: "dedup-trigger" })
-      .step("compute", ({ input }) => Pipeline.succeed(input.n * 10))
+      .step("compute", ({ input }) => succeed(input.n * 10))
       .build();
 
     // First run creates the workflow
@@ -285,7 +284,7 @@ describe("trigger", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const def = workflow<{ n: number }>({ name: "compose-trigger" })
-      .step("double", ({ input }) => Pipeline.succeed(input.n * 2))
+      .step("double", ({ input }) => succeed(input.n * 2))
       .build();
 
     // filter + trigger + filter completed + map result

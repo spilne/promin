@@ -9,7 +9,7 @@
 // Run: bun run packages/workflow/examples/versioning/01-strict-policy.ts
 // ---------------------------------------------------------------------------
 
-import { Pipeline } from "@promin/core";
+import { succeed } from "@spilne/perfect-core";
 import {
   workflow,
   InMemoryWorkflowStorage,
@@ -23,7 +23,7 @@ async function main(): Promise<void> {
 
   // v1 of the workflow — stamps new rows with version "1".
   const v1 = workflow<{ amount: number }>({ name: "billing", version: "1" })
-    .step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount }))
+    .step("charge", ({ input }) => succeed({ charged: input.amount }))
     .build();
 
   // Start a v1 workflow — succeeds.
@@ -37,7 +37,7 @@ async function main(): Promise<void> {
   // Now "deploy" v2 of the workflow — same workflowId, different definition.
   // Strict policy (the default) refuses to resume.
   const v2 = workflow<{ amount: number }>({ name: "billing", version: "2" })
-    .step("charge", ({ input }) => Pipeline.succeed({ charged: input.amount * 1.1, v: "2" }))
+    .step("charge", ({ input }) => succeed({ charged: input.amount * 1.1, v: "2" }))
     .build();
 
   try {
