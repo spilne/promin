@@ -10,6 +10,7 @@
 import {
   DurableScheduler as GenericDurableScheduler,
   type DurableSchedulerConfig as GenericConfig,
+  type WallClock,
 } from "@promin/workflow";
 import { PgSchedulerStorage } from "./pg-scheduler-storage.ts";
 import type { DrizzleDb } from "@spilne/perfect-postgres";
@@ -28,6 +29,11 @@ export interface DurableSchedulerConfig {
   namespace?: string;
   /** Max schedules claimed per poll cycle. Default: 100. */
   batchSize?: number;
+  /**
+   * Time source for both the scheduler (due ticks, next runs, poll cadence)
+   * and its storage. Default: `SystemWallClock`.
+   */
+  clock?: WallClock;
 }
 
 /**
@@ -43,6 +49,7 @@ export class DurableScheduler extends GenericDurableScheduler {
     const storage = new PgSchedulerStorage({
       db: config.db,
       leaderLockId: config.leaderLockId,
+      clock: config.clock,
     });
     const cfg: GenericConfig = {
       storage,
@@ -50,6 +57,7 @@ export class DurableScheduler extends GenericDurableScheduler {
       pollIntervalMs: config.pollIntervalMs,
       namespace: config.namespace,
       batchSize: config.batchSize,
+      clock: config.clock,
     };
     super(cfg);
   }

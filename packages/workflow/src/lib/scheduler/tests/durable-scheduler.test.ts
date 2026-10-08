@@ -7,9 +7,10 @@
 
 import { describe, it, expect } from "bun:test";
 import { schedulerTestSuite } from "../scheduler-test-suite.ts";
-import { DurableScheduler } from "../durable-scheduler.ts";
+import { DurableScheduler, computeDueTicks, computeNextRun } from "../durable-scheduler.ts";
 import { InMemorySchedulerStorage } from "../in-memory-scheduler-storage.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
+import type { ScheduleTick } from "../types.ts";
 
 schedulerTestSuite("DurableScheduler+InMemoryStorage", () => {
   const storage = new InMemorySchedulerStorage();
@@ -335,5 +336,145 @@ describe("DurableScheduler poll cadence", () => {
     expect(await consumed).toEqual(["a"]);
     expect(polls()).toBe(1);
     expect(clock.pendingCount()).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Due-time math — which ticks fire, and when next, follow the injected clock
+// ---------------------------------------------------------------------------
+
+describe("DurableScheduler due-time math follows the injected WallClock", () => {
+  // Fixed in the past, so anything that reads the real clock instead of the
+  // fake one sees every schedule as long overdue (or never due again).
+  const T0 = Date.parse("2026-01-01T00:00:00Z");
+
+  /**
+   * Wait (in real time) until the scheduler is parked on a fake-clock timer,
+   * i.e. it has finished the previous poll/delivery and is waiting for time
+   * to move. Advancing before that point would fire nothing and leave the
+   * stream waiting forever, which is what a fixed real-time sleep raced on.
+   */
+  async function untilWaiting(clock: FakeWallClock): Promise<void> {
+    const deadline = Date.now() + 4_000;
+    while (clock.pendingCount() === 0) {
+      if (Date.now() > deadline) throw new Error("scheduler never waited on the fake clock");
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+  }
+
+  /** Consume `take` ticks in the background, exposing what has arrived so far. */
+  function collect(params: { scheduler: DurableScheduler; take: number }) {
+    const seen: ScheduleTick[] = [];
+    const done = (async () => {
+      for await (const tick of params.scheduler.stream().take(params.take).toAsyncIterable()) {
+        seen.push(tick);
+      }
+    })();
+    return { seen, done };
+  }
+
+  /** Advance the fake clock one poll interval at a time, each once the scheduler waits. */
+  async function advancePolls(params: { clock: FakeWallClock; ms: number; polls: number }) {
+    for (let i = 0; i < params.polls; i++) {
+      await untilWaiting(params.clock);
+      params.clock.advance(params.ms);
+    }
+  }
+
+  it("an interval tick becomes due exactly when the fake clock passes the interval", async () => {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemorySchedulerStorage({ clock });
+    const scheduler = new DurableScheduler({ storage, pollIntervalMs: 1_000, clock });
+    await scheduler.registerAsync({ id: "every-10s", intervalMs: 10_000 });
+
+    const { seen, done } = collect({ scheduler, take: 2 });
+    await untilWaiting(clock);
+
+    // Poll at T0 fires the bootstrap tick, delivered one poll interval later.
+    // Polls at T0+1s … T0+9s find nothing due.
+    await advancePolls({ clock, ms: 1_000, polls: 10 });
+    await untilWaiting(clock);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.scheduledAt.getTime()).toBe(T0);
+    expect(seen[0]!.firedAt.getTime()).toBe(T0);
+
+    // The poll at T0+10s finds the next tick due; delivered at T0+11s.
+    await advancePolls({ clock, ms: 1_000, polls: 1 });
+    await done;
+    expect(seen).toHaveLength(2);
+    expect(seen[1]!.scheduledAt.getTime()).toBe(T0 + 10_000);
+    expect(seen[1]!.firedAt.getTime()).toBe(T0 + 10_000);
+    expect(seen[1]!.tickNumber).toBe(1);
+
+    const state = await storage.loadScheduleState("every-10s");
+    expect(state).toEqual({ lastFired: new Date(T0 + 10_000), tickCount: 2 });
+  });
+
+  it("a cron tick becomes due when the fake clock reaches the next occurrence", async () => {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemorySchedulerStorage({ clock });
+    const scheduler = new DurableScheduler({ storage, pollIntervalMs: 60_000, clock });
+    await scheduler.registerAsync({ id: "every-5m", cron: "*/5 * * * *" });
+
+    const { seen, done } = collect({ scheduler, take: 2 });
+    await untilWaiting(clock);
+
+    // Bootstrap tick at 00:00, then polls at 00:01 … 00:04 find nothing.
+    await advancePolls({ clock, ms: 60_000, polls: 5 });
+    await untilWaiting(clock);
+    expect(seen.map((t) => t.scheduledAt.getTime())).toEqual([T0]);
+
+    // Poll at 00:05 fires the 00:05 occurrence.
+    await advancePolls({ clock, ms: 60_000, polls: 1 });
+    await done;
+    expect(seen.map((t) => t.scheduledAt.getTime())).toEqual([T0, T0 + 5 * 60_000]);
+  });
+
+  it("nextRun written by a poll and by updateAsync is computed on the fake clock", async () => {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemorySchedulerStorage({ clock });
+    const scheduler = new DurableScheduler({ storage, pollIntervalMs: 1_000, clock });
+    await scheduler.registerAsync({ id: "nr", intervalMs: 10_000 });
+
+    const { done } = collect({ scheduler, take: 1 });
+    await untilWaiting(clock);
+    await advancePolls({ clock, ms: 1_000, polls: 1 });
+    await done;
+
+    // Polled at T0 → nextRun = T0 + 10s.
+    expect(await storage.findDue({ now: new Date(T0 + 9_999), limit: 10 })).toEqual([]);
+    expect(await storage.findDue({ now: new Date(T0 + 10_000), limit: 10 })).toEqual(["nr"]);
+
+    // Updated at T0 + 1s → nextRun = T0 + 1s + 3s.
+    await scheduler.updateAsync("nr", { intervalMs: 3_000 });
+    expect(await storage.findDue({ now: new Date(T0 + 3_999), limit: 10 })).toEqual([]);
+    expect(await storage.findDue({ now: new Date(T0 + 4_000), limit: 10 })).toEqual(["nr"]);
+  });
+
+  it("computeDueTicks and computeNextRun read the clock they are given", () => {
+    const config = { id: "pure", intervalMs: 1_000 };
+    const lastFired = new Date(T0);
+
+    expect(computeDueTicks(config, lastFired, 1, FakeWallClock.create(T0 + 999))).toEqual([]);
+    const due = computeDueTicks(config, lastFired, 1, FakeWallClock.create(T0 + 1_500));
+    expect(due.map((t) => [t.scheduledAt.getTime(), t.firedAt.getTime()])).toEqual([
+      [T0 + 1_000, T0 + 1_500],
+    ]);
+
+    expect(computeNextRun(config, FakeWallClock.create(T0))!.getTime()).toBe(T0 + 1_000);
+  });
+
+  it("InMemorySchedulerStorage seeds nextRun and leader-lock expiry from its clock", async () => {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemorySchedulerStorage({ clock });
+    await storage.upsertSchedule({ id: "seeded", intervalMs: 1_000 });
+    expect(await storage.findDue({ now: new Date(T0 - 1), limit: 10 })).toEqual([]);
+    expect(await storage.findDue({ now: new Date(T0), limit: 10 })).toEqual(["seeded"]);
+
+    expect(await storage.tryAcquireLeader({ instanceId: "a", ttlMs: 1_000 })).toBe(true);
+    clock.advance(999);
+    expect(await storage.tryAcquireLeader({ instanceId: "b", ttlMs: 1_000 })).toBe(false);
+    clock.advance(2);
+    expect(await storage.tryAcquireLeader({ instanceId: "b", ttlMs: 1_000 })).toBe(true);
   });
 });

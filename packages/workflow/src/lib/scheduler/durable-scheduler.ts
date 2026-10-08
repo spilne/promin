@@ -45,9 +45,9 @@ export interface DurableSchedulerConfig {
    */
   partition?: { index: number; count: number };
   /**
-   * Time source. Drives nextRun seeding, due-computation cursor advances,
-   * leader-lock acquisition timestamps, jitter `firedAt`, and the poll-
-   * loop tick cadence. Default: `SystemWallClock`.
+   * Time source. Drives nextRun seeding, which ticks are due, each tick's
+   * `firedAt`, the next-run computation, and the poll-loop tick cadence.
+   * Default: `SystemWallClock`.
    */
   clock?: WallClock;
 }
@@ -143,7 +143,7 @@ export class DurableScheduler implements Scheduler {
 
     // Any change to trigger/timezone/startAt/endAt can alter when the next fire
     // should be. Recompute and push into due-tracking so the next poll sees it.
-    const next = computeNextRun(merged);
+    const next = computeNextRun(merged, this.clock);
     await this.storage.setNextRun(scheduleId, next);
   }
 
@@ -357,14 +357,14 @@ export class DurableScheduler implements Scheduler {
       if (config.enabled === false) continue;
 
       const state = states.get(id) ?? { lastFired: null, tickCount: 0 };
-      const due = computeDueTicks(config, state.lastFired, state.tickCount);
+      const due = computeDueTicks(config, state.lastFired, state.tickCount, this.clock);
       ticks.push(...due);
 
       updates.push({
         id,
         firedAt: due.length > 0 ? due[due.length - 1]!.firedAt : undefined,
         tickIncrement: due.length > 0 ? due.length : undefined,
-        nextRun: computeNextRun(config),
+        nextRun: computeNextRun(config, this.clock),
       });
     }
 
@@ -418,7 +418,8 @@ export function validateScheduleConfig(config: ScheduleConfig | DurableScheduleC
 
 /**
  * Compute the ticks that should fire NOW for a given schedule and its
- * lastFired state. Pure function — no I/O. Caller persists the results.
+ * lastFired state. No I/O — "now" and each tick's `firedAt` come from
+ * `clock` (default: `SystemWallClock`). Caller persists the results.
  */
 export function computeDueTicks(
   config: DurableScheduleConfig,
@@ -430,18 +431,23 @@ export function computeDueTicks(
   if (config.startAt && now < config.startAt) return [];
   if (config.endAt && now > config.endAt) return [];
 
-  if (config.cron) return computeCronDue(config, now, lastFired, tickCount);
-  if (config.rrule) return computeRruleDue(config, now, lastFired, tickCount);
-  if (config.intervalMs !== undefined) return computeIntervalDue(config, now, lastFired, tickCount);
+  const params = { config, now, lastFired, startTickNumber: tickCount, clock };
+  if (config.cron) return computeCronDue(params);
+  if (config.rrule) return computeRruleDue(params);
+  if (config.intervalMs !== undefined) return computeIntervalDue(params);
   return [];
 }
 
-function computeCronDue(
-  config: DurableScheduleConfig,
-  now: Date,
-  lastFired: Date | null,
-  startTickNumber: number,
-): ScheduleTick[] {
+interface DueParams {
+  config: DurableScheduleConfig;
+  now: Date;
+  lastFired: Date | null;
+  startTickNumber: number;
+  clock: WallClock;
+}
+
+function computeCronDue(params: DueParams): ScheduleTick[] {
+  const { config, now, lastFired, startTickNumber, clock } = params;
   const cron = new Cron(config.cron!, { timezone: config.timezone ?? "UTC" });
   const ticks: ScheduleTick[] = [];
   const maxCatchUp = config.maxCatchUp ?? 0;
@@ -451,7 +457,7 @@ function computeCronDue(
   // never produce a tick (cron.nextRun(now-1) returns the next FUTURE
   // occurrence, which fails the `next > now` guard). Fire one immediate tick.
   if (!lastFired) {
-    return [makeTick(config, now, jitterMs, startTickNumber)];
+    return [makeTick({ config, scheduledAt: now, jitterMs, tickNumber: startTickNumber, clock })];
   }
 
   // Fast path: no catch-up wanted — just fire the single most-recent missed
@@ -459,7 +465,7 @@ function computeCronDue(
   if (maxCatchUp === 0) {
     const next = cron.nextRun(new Date(lastFired.getTime() + 1));
     if (!next || next > now) return [];
-    return [makeTick(config, next, jitterMs, startTickNumber)];
+    return [makeTick({ config, scheduledAt: next, jitterMs, tickNumber: startTickNumber, clock })];
   }
 
   let cursor = new Date(lastFired.getTime() + 1);
@@ -473,7 +479,7 @@ function computeCronDue(
       cursor = new Date(next.getTime() + 1);
       continue;
     }
-    ticks.push(makeTick(config, next, jitterMs, tickNumber));
+    ticks.push(makeTick({ config, scheduledAt: next, jitterMs, tickNumber, clock }));
     cursor = new Date(next.getTime() + 1);
     tickNumber++;
     catchUpCount++;
@@ -481,19 +487,15 @@ function computeCronDue(
   return ticks;
 }
 
-function computeRruleDue(
-  config: DurableScheduleConfig,
-  now: Date,
-  lastFired: Date | null,
-  startTickNumber: number,
-): ScheduleTick[] {
+function computeRruleDue(params: DueParams): ScheduleTick[] {
+  const { config, now, lastFired, startTickNumber, clock } = params;
   const rule = RRule.fromString(config.rrule!);
   const ticks: ScheduleTick[] = [];
   const maxCatchUp = config.maxCatchUp ?? 0;
   const jitterMs = config.jitterMs ?? 0;
 
   if (!lastFired) {
-    return [makeTick(config, now, jitterMs, startTickNumber)];
+    return [makeTick({ config, scheduledAt: now, jitterMs, tickNumber: startTickNumber, clock })];
   }
 
   const after = new Date(lastFired.getTime() + 1);
@@ -501,39 +503,38 @@ function computeRruleDue(
   if (maxCatchUp === 0) {
     const first = rule.after(after, true);
     if (!first || first > now) return [];
-    return [makeTick(config, first, jitterMs, startTickNumber)];
+    return [makeTick({ config, scheduledAt: first, jitterMs, tickNumber: startTickNumber, clock })];
   }
   const occurrences = rule.between(after, now, true);
   const limited = occurrences.length > maxCatchUp ? occurrences.slice(-maxCatchUp) : occurrences;
 
   let tickNumber = startTickNumber;
   for (const scheduledAt of limited) {
-    ticks.push(makeTick(config, scheduledAt, jitterMs, tickNumber));
+    ticks.push(makeTick({ config, scheduledAt, jitterMs, tickNumber, clock }));
     tickNumber++;
   }
   return ticks;
 }
 
-function computeIntervalDue(
-  config: DurableScheduleConfig,
-  now: Date,
-  lastFired: Date | null,
-  startTickNumber: number,
-): ScheduleTick[] {
+function computeIntervalDue(params: DueParams): ScheduleTick[] {
+  const { config, now, lastFired, startTickNumber, clock } = params;
   const intervalMs = config.intervalMs!;
   const nextFireTime = lastFired ? new Date(lastFired.getTime() + intervalMs) : now;
   if (nextFireTime > now) return [];
   const jitterMs = config.jitterMs ?? 0;
-  return [makeTick(config, nextFireTime, jitterMs, startTickNumber)];
+  return [
+    makeTick({ config, scheduledAt: nextFireTime, jitterMs, tickNumber: startTickNumber, clock }),
+  ];
 }
 
-function makeTick(
-  config: DurableScheduleConfig,
-  scheduledAt: Date,
-  jitterMs: number,
-  tickNumber: number,
-  clock: WallClock = SystemWallClock,
-): ScheduleTick {
+function makeTick(params: {
+  config: DurableScheduleConfig;
+  scheduledAt: Date;
+  jitterMs: number;
+  tickNumber: number;
+  clock: WallClock;
+}): ScheduleTick {
+  const { config, scheduledAt, jitterMs, tickNumber, clock } = params;
   const jitter = jitterMs > 0 ? Math.random() * jitterMs : 0;
   return {
     scheduleId: config.id,
@@ -545,7 +546,10 @@ function makeTick(
   };
 }
 
-/** Compute the next time a schedule will fire — used to update the due index. */
+/**
+ * Compute the next time a schedule will fire — used to update the due index.
+ * "Now" comes from `clock` (default: `SystemWallClock`).
+ */
 export function computeNextRun(
   config: DurableScheduleConfig,
   clock: WallClock = SystemWallClock,
