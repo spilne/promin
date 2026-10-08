@@ -7,18 +7,16 @@
     "typecheck": "bunx nx run-many -t typecheck",
     "lint": "bunx nx run-many -t lint",
     "lci": "bunx nx affected -t ci --base=origin/main",
-    "test": "bun --conditions=@promin/source test packages/core packages/workflow packages/data packages/postgres packages/redis",
+    "test": "bun --conditions=@promin/source test packages/workflow packages/data packages/postgres packages/redis",
     "test:all": "bun --conditions=@promin/source test packages/",
     "fmt": "bunx nx run-many -t format",
     "ff": "bun run fmt",
     "format": "bun run fmt",
     "bench": "bun run benchmarks/cross-language/run-all.ts",
     "bench:promin": "bun run benchmarks/cross-language/bench-promin.ts",
-    "bench:stream": "bun run packages/core/src/lib/stream-pipeline.bench.ts",
-    "bench:pipeline": "bun run packages/core/src/lib/pipeline.bench.ts",
     "bench:dataframe": "bun run packages/data/src/lib/dataframe/dataframe.bench.ts",
     "bench:workflow": "bun --conditions=@promin/source run packages/workflow/src/lib/durable/journaled-step.bench.ts",
-    "bench:all": "bun run bench:stream && bun run bench:pipeline && bun run bench:dataframe && bun run bench:workflow && bun run bench",
+    "bench:all": "bun run bench:dataframe && bun run bench:workflow && bun run bench",
     "zorya": "bun --conditions=@promin/source run packages/zorya/scripts/dev.ts",
     "zorya:build": "bun --conditions=@promin/source run packages/zorya/scripts/build-ui.ts",
     "demo": "bun --conditions=@promin/source run packages/zorya/examples/start-all.ts",
@@ -52,7 +50,6 @@
       "@spilne/perfect-postgres": "^0.2.0",
       "@spilne/perfect-redis": "^0.2.0",
       "@types/bun": "^1.3.3",
-      "effect": "^3.19.10",
       "zod": "^3.24.1"
     }
   }

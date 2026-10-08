@@ -133,7 +133,7 @@ export function createWorkflowStorageHandler(
       return jsonResponse({ ok: true, result: WIRE_CODEC.encode(result) }, 200);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      // Preserve Effect tagged-error shape so the client can rebuild
+      // Preserve tagged-error shape so the client can rebuild
       // `{ _tag, ...fields }` objects — the conformance suite relies on
       // `.toMatchObject({ _tag: "FenceTokenMismatchError" })` passing over
       // the wire the same way it does in-process.

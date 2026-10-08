@@ -2,16 +2,7 @@
 
 Ordered from fundamentals to advanced. Each file is a real-world scenario — not a feature demo.
 
-## 01-pipeline — Async actions with resilience
-
-| File                | Scenario                                                     |
-| ------------------- | ------------------------------------------------------------ |
-| 01-fetch-with-retry | Fetch user from unreliable API — retry, timeout, safe result |
-| 02-parallel-fetches | Dashboard from 3 APIs — parallel with per-branch resilience  |
-| 03-circuit-breaker  | Payment API — stop calling a dead service                    |
-| 04-race-providers   | 3 AI providers race — fastest wins, fallback if all fail     |
-| 05-stream-etl       | Webhook queue → enrich → batch → bulk insert                 |
-| 06-bulk-migration   | 100K users from legacy API — rate-limited, progress tracking |
+Resilient async actions (retry, timeout, circuit breaker, race, cache), stream composition and concurrency primitives come from [perfect](https://github.com/spilne/perfect) (`@spilne/perfect-core`) — see its examples for those patterns.
 
 ## 02-workflow — Durable execution
 
@@ -49,11 +40,3 @@ Ordered from fundamentals to advanced. Each file is a real-world scenario — no
 | File            | Scenario                                                       |
 | --------------- | -------------------------------------------------------------- |
 | 01-workflow-api | REST endpoints: start KYC, poll status, receive webhook signal |
-
-## 08-patterns — Advanced composition
-
-| File                  | Scenario                                                                        |
-| --------------------- | ------------------------------------------------------------------------------- |
-| 01-resilience         | Fan-out with per-branch fallbacks, competitive AI race, hedged multi-region     |
-| 02-stream-composition | broadcastThrough fan-out, channel worker pools, pausable streams                |
-| 03-data-pipelines     | Rate-limited migration with progress, parallel validation, supervised consumers |

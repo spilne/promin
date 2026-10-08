@@ -77,7 +77,7 @@ describe("Step audit log — track every execution attempt for observability", (
     await runner.run({ workflow: wf, workflowId: "rec-3", input: "x" });
 
     // Only the final successful attempt is recorded via saveStepResult
-    // Step-level retries happen inside Effect, only the outcome is checkpointed
+    // Step-level retries happen inside the step, only the outcome is checkpointed
     const attempts = await storage.loadStepAttempts("rec-3");
     expect(attempts.length).toBeGreaterThanOrEqual(1);
     expect(attempts.some((a) => a.status === "completed")).toBe(true);

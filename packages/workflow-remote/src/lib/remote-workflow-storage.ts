@@ -80,7 +80,7 @@ export class RemoteWorkflowStorage
     }
 
     if (!envelope.ok) {
-      // Rehydrate Effect tagged errors — the server packs `_tag` + public
+      // Rehydrate tagged errors — the server packs `_tag` + public
       // fields into the envelope so `.toMatchObject({ _tag: "..." })` and
       // downstream `err._tag === "FenceTokenMismatchError"` branches work
       // the same way they would for an in-process storage.

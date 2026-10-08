@@ -32,7 +32,7 @@ export const ORG_KNOWLEDGE_BASE: ReadonlyMap<string, KnowledgeDoc> = new Map<str
 ## Stack
 - Runtime: Bun
 - Language: TypeScript (strict)
-- Framework: Effect for FP/concurrency, Zod for validation
+- Framework: perfect for FP/concurrency, Zod for validation
 - Linting: oxlint, formatting: oxfmt
 - Monorepo: Nx
 

@@ -9,7 +9,7 @@
  *   bun run benchmarks/cross-language/run-all.ts >> $GITHUB_STEP_SUMMARY
  */
 
-import { DataFrame, CsvFile, col } from "@promin/core";
+import { DataFrame, CsvFile, col } from "@promin/data";
 import { writeFileSync } from "fs";
 import { execSync } from "child_process";
 

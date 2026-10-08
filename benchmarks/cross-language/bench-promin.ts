@@ -3,7 +3,7 @@
  * Compare with bench-pandas-polars.py for the same operations.
  */
 
-import { DataFrame, CsvFile, col } from "@promin/core";
+import { DataFrame, CsvFile, col } from "@promin/data";
 
 const CSV_PATH = "/tmp/benchmark_1m.csv";
 const WARMUP = 1;
@@ -88,7 +88,7 @@ await bench("df.select.distinct", () =>
 
 // --- DuckDB executor ---
 try {
-  const { DuckDBExecutor } = await import("../../../duckdb/src/lib/duckdb-executor.ts");
+  const { DuckDBExecutor } = await import("@promin/duckdb");
   const duckdb = new DuckDBExecutor();
 
   console.log();
@@ -97,7 +97,7 @@ try {
   console.log("=".repeat(60));
 
   // Load from file — DuckDB reads CSV natively
-  const ddf = DataFrame.fromFile(CsvFile(CSV_PATH)).withExecutor(duckdb);
+  const ddf = DataFrame.fromFile<any>(CsvFile(CSV_PATH)).withExecutor(duckdb);
 
   console.log("\n--- CSV Load (native read_csv_auto) ---");
   await bench("duckdb read_csv + collect", () =>
