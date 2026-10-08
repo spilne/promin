@@ -320,11 +320,21 @@ describe("Distributed workers — competing task execution", () => {
       });
     }
 
+    // Step bodies park until a second worker has started one. A worker
+    // holds at most `concurrency` (5) tasks, so the other 45 stay claimable
+    // and load sharing is guaranteed rather than left to poll timing — a
+    // loaded machine can otherwise let the first worker drain everything.
+    const workersSeen = new Set<string>();
+    let openGate!: () => void;
+    const gate = new Promise<void>((resolve) => (openGate = resolve));
+
     const workers = [1, 2, 3].map((id) => {
       const registry = new MapStepRegistry();
       registry.register("fulfill", async (stepCtx) => {
         processed.push({ worker: `worker-${id}`, workflowId: stepCtx.workflowId });
-        await new Promise((resolve) => setTimeout(resolve, Math.random() * 10));
+        workersSeen.add(`worker-${id}`);
+        if (workersSeen.size >= 2) openGate();
+        await gate;
         return { fulfilled: true };
       });
       return new DefaultWorker({

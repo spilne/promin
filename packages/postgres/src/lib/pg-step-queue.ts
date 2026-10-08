@@ -38,8 +38,8 @@ export interface PgStepQueueConfig {
   /**
    * Time source for client-side timestamps — claimedAt on claim, completedAt
    * on complete/fail, staleTimeoutMs cutoff on requeue. Default: `SystemWallClock`.
-   * The `metrics()` default `until` stays server-side (`NOW()` in SQL) so it
-   * remains skew-immune independent of this clock.
+   * `metrics()` without `until` applies no upper bound, so app-vs-DB clock
+   * skew can't drop just-stamped rows from the window.
    */
   clock?: WallClock;
 }
@@ -429,12 +429,22 @@ export class PgStepQueue implements StepQueue {
     // postgres-js refuses to bind Date directly against an untyped
     // parameter; pass ISO strings and let Postgres cast via ::timestamptz.
     const since = params.since.toISOString();
-    // When caller omits `until`, use the DB's `NOW()` inside the query
-    // instead of an app-side `this.clock.now()`. Rows are inserted with the
-    // DB's own `created_at` — pulling `until` from the same clock
-    // avoids the app-vs-DB skew that previously dropped just-inserted
-    // rows out of the BETWEEN filter (the 5s buffer this replaces).
-    const untilExpr = params.until ? sql`${params.until.toISOString()}::timestamptz` : sql`NOW()`;
+    // Default `until` ("now") is left unbounded rather than pinned to
+    // either clock. Row stamps come from two sources: `created_at` is the
+    // DB's `NOW()` (column default), while `claimed_at` / `completed_at` are
+    // written from the app-side `clock`. Bounding by the app clock drops
+    // just-inserted rows when the DB clock runs ahead; bounding by the DB's
+    // `NOW()` drops just-completed rows when the app clock runs ahead (a
+    // Docker VM clock lags the host by a few ms under load). Nothing can be
+    // stamped after the query runs, so "no upper bound" is exactly "up to
+    // now" on both clocks.
+    const until = params.until?.toISOString();
+    const inWindow = (column: "created_at" | "claimed_at" | "completed_at") => {
+      const col = sql.raw(column);
+      return until === undefined
+        ? sql`${col} >= ${since}::timestamptz`
+        : sql`${col} BETWEEN ${since}::timestamptz AND ${until}::timestamptz`;
+    };
     // Status uses the column that defines membership-in-window: createdAt
     // for pending, claimedAt for running, completedAt for terminal. A
     // single window-aware query per status keeps Postgres-side work minimal.
@@ -448,9 +458,9 @@ export class PgStepQueue implements StepQueue {
           SELECT status, COUNT(*) as count
           FROM wf_step_queue
           WHERE (
-            (status = 'pending'   AND created_at   BETWEEN ${since}::timestamptz AND ${untilExpr}) OR
-            (status = 'running'   AND claimed_at   BETWEEN ${since}::timestamptz AND ${untilExpr}) OR
-            (status IN ('completed', 'failed') AND completed_at BETWEEN ${since}::timestamptz AND ${untilExpr})
+            (status = 'pending'   AND ${inWindow("created_at")}) OR
+            (status = 'running'   AND ${inWindow("claimed_at")}) OR
+            (status IN ('completed', 'failed') AND ${inWindow("completed_at")})
           )${nsFilter}
           GROUP BY status
         `,
@@ -468,7 +478,7 @@ export class PgStepQueue implements StepQueue {
             PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms)  AS p95_exec_ms
           FROM wf_step_queue
           WHERE status IN ('completed', 'failed')
-            AND completed_at BETWEEN ${since}::timestamptz AND ${untilExpr}
+            AND ${inWindow("completed_at")}
             ${nsFilter}
         `,
       ),
