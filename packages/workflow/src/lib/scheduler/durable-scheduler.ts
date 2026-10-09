@@ -7,8 +7,9 @@
 
 import { Cron } from "croner";
 import { RRule } from "rrule";
-import { Stream, async, succeed, tryPromise, type Eff } from "@spilne/perfect-core";
+import { Stream, tryPromise } from "@spilne/perfect-core";
 import { SystemWallClock } from "../shared/wall-clock.ts";
+import { wallClockSleep } from "./wall-clock-sleep.ts";
 import { JsonCodec } from "@spilne/perfect-core/connect";
 import type { WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
@@ -374,18 +375,6 @@ export class DurableScheduler implements Scheduler {
     }
     return ticks;
   }
-}
-
-/**
- * Sleep on a `WallClock` rather than perfect's `Clock` service, so the poll
- * cadence follows the scheduler's injected clock (`FakeWallClock.advance`
- * drives it in tests). Interruption clears the timer.
- */
-function wallClockSleep(params: { clock: WallClock; ms: number }): Eff<void> {
-  return async<void>((resume) => {
-    const handle = params.clock.setTimeout(() => resume(succeed(undefined)), params.ms);
-    return () => handle.clear();
-  }).orDie();
 }
 
 // ---------------------------------------------------------------------------

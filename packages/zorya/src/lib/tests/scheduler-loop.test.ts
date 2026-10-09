@@ -14,6 +14,7 @@
 import { succeed } from "@spilne/perfect-core";
 import { describe, it, expect } from "bun:test";
 import {
+  FakeWallClock,
   InMemorySchedulerStorage,
   InMemoryStepQueue,
   InMemoryWorkerRegistry,
@@ -21,8 +22,10 @@ import {
   workflow,
   createWorkflowRunner,
 } from "@promin/workflow";
+import type { ScheduleTick } from "@promin/workflow";
 import { ZoryaClient, ZoryaWorker } from "@promin/zorya-client";
 import { ZoryaServer } from "../../server/server.ts";
+import { SchedulerLoop } from "../../server/services/scheduler-loop.ts";
 import { DistributedWorkflows, LocalWorkflows, ZoryaScheduler } from "../../index.ts";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -396,5 +399,139 @@ describe("ZoryaServer scheduling — embedded ZoryaScheduler", () => {
           namespaces: "all",
         }),
     ).toThrow(/namespace|namespaces/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SchedulerLoop on an injected WallClock — due ticks, nextRun, fireOnce
+// stamps and the poll cadence all follow the clock.
+// ---------------------------------------------------------------------------
+
+describe("SchedulerLoop — injected WallClock", () => {
+  const T0 = Date.parse("2026-01-01T00:00:00Z");
+
+  /** Loop + clock-aware storage, recording dispatched ticks and poll attempts. */
+  function setup(params: { pollIntervalMs?: number } = {}) {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemorySchedulerStorage({ clock });
+    let polls = 0;
+    const acquire = storage.tryAcquireLeader.bind(storage);
+    storage.tryAcquireLeader = (p) => {
+      polls++;
+      return acquire(p);
+    };
+    const fired: ScheduleTick[] = [];
+    const loop = new SchedulerLoop({
+      storage,
+      clock,
+      pollIntervalMs: params.pollIntervalMs ?? 1_000,
+      fire: async (tick) => {
+        fired.push(tick);
+      },
+    });
+    return { clock, storage, loop, fired, polls: () => polls };
+  }
+
+  /**
+   * Wait (in real time) until the loop is parked on its fake-clock poll
+   * timer with `polls` polls done. Advancing earlier would fire nothing.
+   */
+  async function untilWaiting(params: {
+    clock: FakeWallClock;
+    polls: () => number;
+    count: number;
+  }): Promise<void> {
+    const deadline = Date.now() + 4_000;
+    while (params.clock.pendingCount() === 0 || params.polls() < params.count) {
+      if (Date.now() > deadline) throw new Error("loop never waited on the fake clock");
+      await sleep(1);
+    }
+  }
+
+  it("tickOnce: due ticks, firedAt and nextRun come from the clock", async () => {
+    const { clock, storage, loop } = setup();
+    await storage.upsertSchedule({ id: "iv", intervalMs: 1_000 });
+
+    const first = await loop.tickOnce();
+    expect(first.map((t) => [t.scheduledAt.getTime(), t.firedAt.getTime(), t.tickNumber])).toEqual([
+      [T0, T0, 0],
+    ]);
+
+    // nextRun = T0 + 1000 on the clock: not due a millisecond earlier.
+    clock.advance(999);
+    expect(await loop.tickOnce()).toEqual([]);
+
+    clock.advance(1);
+    const second = await loop.tickOnce();
+    expect(second.map((t) => [t.scheduledAt.getTime(), t.firedAt.getTime(), t.tickNumber])).toEqual(
+      [[T0 + 1_000, T0 + 1_000, 1]],
+    );
+  });
+
+  it("tickOnce: multi-namespace mode reads now from the clock", async () => {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemorySchedulerStorage({ clock });
+    const loop = new SchedulerLoop({ storage, clock, namespaces: "all", fire: async () => {} });
+    await storage.upsertSchedule({ id: "a", intervalMs: 5_000, namespace: "tenant-a" });
+
+    expect((await loop.tickOnce()).map((t) => t.firedAt.getTime())).toEqual([T0]);
+    clock.advance(4_999);
+    expect(await loop.tickOnce()).toEqual([]);
+    clock.advance(1);
+    expect((await loop.tickOnce()).map((t) => t.scheduledAt.getTime())).toEqual([T0 + 5_000]);
+  });
+
+  it("fireOnce stamps the tick and slides nextRun on the clock", async () => {
+    const { clock, storage, loop, fired } = setup();
+    await storage.upsertSchedule({ id: "iv", intervalMs: 1_000 });
+    await loop.tickOnce(); // first fire at T0
+
+    clock.advance(400);
+    const manual = await loop.fireOnce("iv");
+    expect(manual!.firedAt.getTime()).toBe(T0 + 400);
+    expect(manual!.scheduledAt.getTime()).toBe(T0 + 400);
+    expect(fired.map((t) => t.tickNumber)).toEqual([0, 1]);
+
+    // Cadence resumes from the manual fire: T0 + 400 + 1000.
+    clock.advance(999);
+    expect(await loop.tickOnce()).toEqual([]);
+    clock.advance(1);
+    expect((await loop.tickOnce()).map((t) => t.scheduledAt.getTime())).toEqual([T0 + 1_400]);
+  });
+
+  it("start(): polls once per pollIntervalMs on the clock and stop() clears the timer", async () => {
+    const { clock, storage, loop, fired, polls } = setup({ pollIntervalMs: 500 });
+    await storage.upsertSchedule({ id: "iv", intervalMs: 1_000 });
+
+    loop.start();
+    await untilWaiting({ clock, polls, count: 1 });
+    expect(fired.map((t) => t.scheduledAt.getTime())).toEqual([T0]);
+
+    clock.advance(499);
+    await sleep(10);
+    expect(polls()).toBe(1);
+
+    clock.advance(1); // T0 + 500: poll, nothing due yet
+    await untilWaiting({ clock, polls, count: 2 });
+    expect(fired).toHaveLength(1);
+
+    clock.advance(500); // T0 + 1000: poll, interval due
+    await untilWaiting({ clock, polls, count: 3 });
+    expect(fired.map((t) => t.scheduledAt.getTime())).toEqual([T0, T0 + 1_000]);
+
+    await loop.stop();
+    expect(clock.pendingCount()).toBe(0);
+    expect(polls()).toBe(3);
+  });
+
+  it("stop() returns without waiting out the poll interval", async () => {
+    const { clock, loop, polls } = setup({ pollIntervalMs: 60_000 });
+    loop.start();
+    await untilWaiting({ clock, polls, count: 1 });
+
+    // The fake clock never advances: stop() must cut the wait itself.
+    await loop.stop();
+    expect(clock.pendingCount()).toBe(0);
+    expect(polls()).toBe(1);
   });
 });

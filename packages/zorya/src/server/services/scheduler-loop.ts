@@ -24,7 +24,13 @@
 // ---------------------------------------------------------------------------
 
 import type { SchedulerStorage, ScheduleTick, DurableScheduleConfig } from "@promin/workflow";
-import { computeDueTicks, computeNextRun, scheduleTickRunId } from "@promin/workflow";
+import type { WallClock } from "@promin/workflow";
+import {
+  SystemWallClock,
+  computeDueTicks,
+  computeNextRun,
+  scheduleTickRunId,
+} from "@promin/workflow";
 import type { RunTrigger } from "../routes/runs.ts";
 
 export interface SchedulerLoopConfig {
@@ -94,6 +100,12 @@ export interface SchedulerLoopConfig {
    * partition's ticks. Default: undefined (single partition).
    */
   partition?: { index: number; count: number };
+  /**
+   * Time source. Drives `findDue`'s "now", which ticks are due and their
+   * `firedAt`, the next-run computation, `fireOnce` stamps, and the wait
+   * between polls. Default: `SystemWallClock`. Tests pass a `FakeWallClock`.
+   */
+  clock?: WallClock;
 }
 
 export class SchedulerLoop {
@@ -108,8 +120,11 @@ export class SchedulerLoop {
   private readonly batchSize: number;
   private readonly dispatchConcurrency: number;
   private readonly partition?: { index: number; count: number };
+  private readonly clock: WallClock;
   private running = false;
   private loopPromise?: Promise<void>;
+  /** Cuts the current between-poll wait short; set only while waiting. */
+  private wakeUp?: () => void;
 
   constructor(config: SchedulerLoopConfig) {
     if (config.namespace !== undefined && config.namespaces !== undefined) {
@@ -125,6 +140,7 @@ export class SchedulerLoop {
     this.namespacesMode = config.namespaces;
     this.batchSize = config.batchSize ?? 100;
     this.dispatchConcurrency = config.dispatchConcurrency ?? 10;
+    this.clock = config.clock ?? SystemWallClock;
     if (config.partition) {
       const { index, count } = config.partition;
       if (count < 1 || index < 0 || index >= count) {
@@ -142,6 +158,9 @@ export class SchedulerLoop {
 
   async stop(): Promise<void> {
     this.running = false;
+    // Cancel the pending poll wait so stop() doesn't sit out the interval
+    // and no timer is left behind on the clock.
+    this.wakeUp?.();
     if (this.loopPromise) await this.loopPromise.catch(() => {});
     this.loopPromise = undefined;
   }
@@ -189,7 +208,7 @@ export class SchedulerLoop {
 
     const state = await this.storage.loadScheduleState(scheduleId);
     const tickNumber = state?.tickCount ?? 0;
-    const now = new Date();
+    const now = this.clock.now();
     const tick: ScheduleTick = {
       scheduleId,
       scheduleName: config.name,
@@ -204,7 +223,7 @@ export class SchedulerLoop {
         id: scheduleId,
         firedAt: now,
         tickIncrement: 1,
-        nextRun: computeNextRun(config),
+        nextRun: computeNextRun(config, this.clock),
         ticks: [tick],
       },
     ]);
@@ -228,7 +247,7 @@ export class SchedulerLoop {
     if (!isLeader) return [];
 
     const dueIds = await this.storage.findDue({
-      now: new Date(),
+      now: this.clock.now(),
       limit: this.batchSize,
       namespace,
     });
@@ -241,7 +260,7 @@ export class SchedulerLoop {
     // whether 0 or 10000 tenants are configured. Empty namespaces never
     // appear here so they cost nothing.
     const due = await this.storage.findDueAcross({
-      now: new Date(),
+      now: this.clock.now(),
       limit: this.batchSize,
       namespaces: filter,
     });
@@ -314,13 +333,13 @@ export class SchedulerLoop {
       }
       if (config.enabled === false) continue;
       const state = states.get(id) ?? { lastFired: null, tickCount: 0 };
-      const due = computeDueTicks(config, state.lastFired, state.tickCount);
+      const due = computeDueTicks(config, state.lastFired, state.tickCount, this.clock);
       ticks.push(...due);
       updates.push({
         id,
         firedAt: due.length > 0 ? due[due.length - 1]!.firedAt : undefined,
         tickIncrement: due.length > 0 ? due.length : undefined,
-        nextRun: computeNextRun(config),
+        nextRun: computeNextRun(config, this.clock),
         // Hand the individual fired ticks to commitPoll so backends with a
         // tick log persist them in the SAME transaction as the state
         // advance — `tickCount` and the count of logged rows can never
@@ -422,8 +441,23 @@ export class SchedulerLoop {
         // kill the loop; log surface lives with the storage / trigger.
       }
       if (!this.running) break;
-      await new Promise<void>((r) => setTimeout(r, this.pollIntervalMs));
+      await this.waitForNextPoll();
     }
+  }
+
+  /** Wait `pollIntervalMs` on the clock; `stop()` cuts the wait short. */
+  private waitForNextPoll(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const handle = this.clock.setTimeout(() => {
+        this.wakeUp = undefined;
+        resolve();
+      }, this.pollIntervalMs);
+      this.wakeUp = () => {
+        this.wakeUp = undefined;
+        handle.clear();
+        resolve();
+      };
+    });
   }
 }
 

@@ -35,6 +35,7 @@ export {
   type WorkerStatus,
   type WorkerRegistry,
   InMemoryWorkerRegistry,
+  type InMemoryWorkerRegistryConfig,
 } from "./worker-registry.ts";
 export { type LeaderElection, SingleLeader } from "./leader-election.ts";
 export {
