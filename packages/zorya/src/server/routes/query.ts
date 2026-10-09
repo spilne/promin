@@ -16,6 +16,7 @@
 // ---------------------------------------------------------------------------
 
 import type { WorkerWebSocketServer } from "../services/worker-ws-server.ts";
+import { SystemWallClock, type TimerHandle, type WallClock } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
 interface QueryRequestBody {
@@ -24,7 +25,15 @@ interface QueryRequestBody {
   timeoutMs?: number;
 }
 
-export function queryRun(workerWs: WorkerWebSocketServer) {
+export interface QueryRouteDeps {
+  readonly workerWs: WorkerWebSocketServer;
+  /** Time source for the overall query timeout. Default: `SystemWallClock`. */
+  readonly clock?: WallClock;
+}
+
+export function queryRun(deps: QueryRouteDeps) {
+  const { workerWs } = deps;
+  const clock = deps.clock ?? SystemWallClock;
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const workflowId = params.id;
     if (!workflowId) return jsonError(400, "missing_id");
@@ -50,6 +59,7 @@ export function queryRun(workerWs: WorkerWebSocketServer) {
     let result: unknown;
     let error: Error | undefined;
     let notHostedCount = 0;
+    let timeoutHandle: TimerHandle | undefined;
 
     await Promise.race([
       new Promise<void>((resolve) => {
@@ -84,12 +94,13 @@ export function queryRun(workerWs: WorkerWebSocketServer) {
             });
         }
       }),
-      new Promise<void>((resolve) =>
-        setTimeout(() => {
+      new Promise<void>((resolve) => {
+        timeoutHandle = clock.setTimeout(() => {
           if (!resolved) resolve();
-        }, timeoutMs),
-      ),
+        }, timeoutMs);
+      }),
     ]);
+    timeoutHandle?.clear();
 
     if (resolved) {
       return json(200, { result });

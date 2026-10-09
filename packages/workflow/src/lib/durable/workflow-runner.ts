@@ -2023,6 +2023,7 @@ export async function executeWorkflowDag(
                 storage: ctx.storage,
                 attemptRef: { current: currentAttempt },
                 metadataRef,
+                clock,
               });
               // Kinds that set metadata synchronously in their execute (e.g.
               // `.match()` after selector resolution) surface it here BEFORE
@@ -2562,6 +2563,7 @@ export class InProcessStepExecutor implements StepExecutor {
           storage: this.storage,
           attemptRef: { current: currentAttempt },
           metadataRef,
+          clock: this.clock,
         });
       },
     });

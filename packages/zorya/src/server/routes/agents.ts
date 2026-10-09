@@ -55,7 +55,7 @@ import {
   SecretScope,
   TurnInProgressError,
 } from "@promin/agent";
-import { WorkflowSuspendedError } from "@promin/workflow";
+import { SystemWallClock, WorkflowSuspendedError, type WallClock } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 import { isDraftId } from "./agent-drafts.ts";
 
@@ -172,6 +172,11 @@ export interface AgentGatewayDeps {
    * they were rejected silently — TODO: 400 in a future commit).
    */
   readonly secrets?: SecretsStorage;
+  /**
+   * Time source for the distill rate-limit `retry-after` and the default
+   * thread `archivedAt` stamp. Default: `SystemWallClock`.
+   */
+  readonly clock?: WallClock;
 }
 
 /**
@@ -1398,7 +1403,7 @@ export function distillThread(deps: AgentGatewayDeps) {
       return json(200, { episode });
     } catch (err) {
       if (err instanceof ConsolidatorRateLimitError) {
-        const retryAfter = err.retryAfterSeconds(Date.now());
+        const retryAfter = err.retryAfterSeconds((deps.clock ?? SystemWallClock).currentTimeMs());
         return new Response(
           JSON.stringify({
             error: "distill_rate_limited",
@@ -1469,7 +1474,7 @@ export function compactThread(deps: AgentGatewayDeps) {
 interface ArchiveThreadRequest {
   readonly namespaceId?: unknown;
   readonly resourceId?: unknown;
-  /** Unix ms timestamp to archive at, or null to restore. Defaults to Date.now() when omitted. */
+  /** Unix ms timestamp to archive at, or null to restore. Defaults to the gateway clock's now when omitted. */
   readonly archivedAt?: unknown;
 }
 
@@ -1489,7 +1494,7 @@ export function archiveAgentThread(deps: AgentGatewayDeps) {
         ? null
         : typeof body.archivedAt === "number"
           ? body.archivedAt
-          : Date.now();
+          : (deps.clock ?? SystemWallClock).currentTimeMs();
 
     const recipe = await deps.registry.get(id);
     if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);

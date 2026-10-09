@@ -38,6 +38,7 @@ import type { WorkerRegistry } from "./worker-registry.ts";
 import type { LeaderElection } from "./leader-election.ts";
 import { SingleLeader } from "./leader-election.ts";
 import { StepQueueExecutor } from "./step-queue-executor.ts";
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 
 export interface DistributedRunnerConfig {
   /** Workflow storage for state persistence. */
@@ -70,6 +71,12 @@ export interface DistributedRunnerConfig {
    * to complete. Default: 500ms.
    */
   stepPollIntervalMs?: number;
+  /**
+   * Time source for the sweep-loop cadence, the step executor's polls and
+   * the inner runner's timestamps. Default: `SystemWallClock`. Tests pass a
+   * `FakeWallClock`.
+   */
+  clock?: WallClock;
 }
 
 /** @deprecated Use DistributedRunnerConfig */
@@ -93,6 +100,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
   /** Dead-worker sweep counter — drives the throttled `gc()` cadence. */
   private workerSweepCount = 0;
   private readonly leaderElection: LeaderElection;
+  private readonly clock: WallClock;
   private running = false;
   private isLeader = false;
   private runningWorkflows = new Map<string, Promise<unknown>>();
@@ -109,18 +117,21 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     this.workerTimeoutMs = config.workerTimeoutMs ?? 30_000;
     this.workerRetentionMs = config.workerRetentionMs ?? 7 * 24 * 60 * 60 * 1000;
     this.leaderElection = config.leaderElection ?? new SingleLeader();
+    this.clock = config.clock ?? SystemWallClock;
 
     const executor = new StepQueueExecutor({
       stepQueue: config.stepQueue,
       storage: config.storage,
       pollIntervalMs: config.stepPollIntervalMs ?? config.pollIntervalMs ?? 500,
       staleTimeoutMs: config.workerTimeoutMs ?? 30_000,
+      clock: this.clock,
     });
 
     this.innerRunner = createWorkflowRunner({
       storage: config.storage,
       registry: config.registry,
       stepExecutor: executor,
+      clock: this.clock,
     });
   }
 
@@ -222,7 +233,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
         await this._tickDeadWorkers();
       }
 
-      await new Promise((r) => setTimeout(r, this.pollIntervalMs));
+      await new Promise<void>((r) => this.clock.setTimeout(() => r(), this.pollIntervalMs));
     }
 
     if (this.isLeader) {

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { MemoryCache } from "../cache-store.ts";
+import { FakeWallClock } from "../wall-clock.ts";
 
 // ---------------------------------------------------------------------------
 // MemoryCache — in-memory key-value with TTL and LRU
@@ -92,5 +93,29 @@ describe("MemoryCache — fast in-process key-value store", () => {
 
     expect(await cache.get("short")).toBeUndefined();
     expect(await cache.get("long")).toBe("value");
+  });
+});
+
+describe("MemoryCache — expiry on an injected clock", () => {
+  it("get / has / size expire entries by the clock, not wall time", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const cache = new MemoryCache<string, string>({ ttlMs: 1_000, clock });
+
+    await cache.set("default", "a");
+    await cache.set("custom", "b", 5_000);
+
+    // Exactly at the TTL boundary the entry is still live (strict `>`).
+    clock.advance(1_000);
+    expect(await cache.has("default")).toBe(true);
+    expect(await cache.get("default")).toBe("a");
+
+    clock.advance(1);
+    expect(await cache.has("default")).toBe(false);
+    expect(await cache.get("default")).toBeUndefined();
+    expect(await cache.size()).toBe(1);
+
+    clock.advance(4_000);
+    expect(await cache.get("custom")).toBeUndefined();
+    expect(await cache.size()).toBe(0);
   });
 });

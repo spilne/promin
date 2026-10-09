@@ -38,6 +38,7 @@ import type { TaggedError } from "../shared/tagged-error.ts";
 import { isEff, isThenable, promiseOrDie } from "../shared/eff.ts";
 import type { RetryPolicy } from "../shared/retry-policy.ts";
 import type { CacheStore } from "../shared/cache-store.ts";
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
 import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
 import type { Show } from "@spilne/perfect-core";
@@ -699,6 +700,11 @@ export interface ExecuteParams {
    * Stays `undefined` for step kinds that don't produce audit data.
    */
   readonly metadataRef: { current?: Record<string, unknown> };
+  /**
+   * The runner's time source. Drives sleep / signal-timeout deadlines and
+   * loop-iteration timing. Default: `SystemWallClock`.
+   */
+  readonly clock?: WallClock;
 }
 
 // ---------------------------------------------------------------------------
@@ -1233,6 +1239,7 @@ export class WorkflowBuilder<
         // tryPromise so the runner's saveStepFailure path applies normally.
         const storage = execParams.storage;
         const storageAttempts = isStepAttemptStorage(storage) ? storage : undefined;
+        const clock = execParams.clock ?? SystemWallClock;
         return tryPromise(
           async (): Promise<T> => {
             let result: T = undefined as unknown as T;
@@ -1269,13 +1276,13 @@ export class WorkflowBuilder<
                 });
               }
               const iterName = `${name}.iter.${iter}`;
-              const startedAt = new Date();
-              const iterStart = Date.now();
+              const startedAt = clock.now();
+              const iterStart = startedAt.getTime();
               const currentIter = iter;
               try {
                 result = await body(stepCtx as StepContext<Input, Current>, currentIter);
               } catch (err) {
-                const durationMs = Date.now() - iterStart;
+                const durationMs = clock.currentTimeMs() - iterStart;
                 const message = err instanceof Error ? err.message : String(err);
                 await storage.saveStepFailure({
                   workflowId: execParams.workflowId,
@@ -1294,12 +1301,12 @@ export class WorkflowBuilder<
                     error: message,
                     durationMs,
                     startedAt,
-                    completedAt: new Date(),
+                    completedAt: clock.now(),
                   });
                 }
                 throw err;
               }
-              const durationMs = Date.now() - iterStart;
+              const durationMs = clock.currentTimeMs() - iterStart;
               const encoded = iterCodec.encode(result);
               await storage.saveStepResult({
                 workflowId: execParams.workflowId,
@@ -1318,7 +1325,7 @@ export class WorkflowBuilder<
                   result: encoded,
                   durationMs,
                   startedAt,
-                  completedAt: new Date(),
+                  completedAt: clock.now(),
                 });
               }
               iter++;
@@ -1612,6 +1619,7 @@ export class WorkflowBuilder<
               patches: builderPatches,
               codec,
               payloadHash: this._defaultPayloadHash,
+              ...(execParams.clock !== undefined && { clock: execParams.clock }),
               runChild: async ({
                 workflow: childWorkflow,
                 workflowId: childId,
@@ -1646,6 +1654,7 @@ export class WorkflowBuilder<
                     onVersionMismatch: childDef.onVersionMismatch,
                     previousVersions: childDef.previousVersions,
                     hooks: childDef.hooks,
+                    ...(execParams.clock !== undefined && { clock: execParams.clock }),
                   },
                   { workflowId: childId, input: childInput },
                 );
@@ -1845,12 +1854,13 @@ export class WorkflowBuilder<
       kind: "sleep",
       codec: this._codec(),
       execute: (params) => {
+        const clock = params.clock ?? SystemWallClock;
         const program = eff(function* () {
           const state = yield* promiseOrDie(() => params.storage.loadWorkflow(params.workflowId));
           const stepState = state?.steps[name];
 
           if (stepState?.status === "sleeping" && stepState.wakeAt) {
-            if (new Date() >= stepState.wakeAt) {
+            if (clock.now() >= stepState.wakeAt) {
               return undefined;
             }
             return yield* fail(
@@ -1863,7 +1873,7 @@ export class WorkflowBuilder<
             );
           }
 
-          const wakeAt = new Date(Date.now() + ms);
+          const wakeAt = new Date(clock.currentTimeMs() + ms);
           yield* promiseOrDie(() =>
             params.storage.suspendWorkflow(params.workflowId, name, {
               status: "sleeping",
@@ -1917,6 +1927,7 @@ export class WorkflowBuilder<
       kind: "signal",
       codec,
       execute: (execParams) => {
+        const clock = execParams.clock ?? SystemWallClock;
         const program = eff(function* () {
           // Check if signal has been delivered
           const signals = yield* promiseOrDie(() =>
@@ -1935,7 +1946,7 @@ export class WorkflowBuilder<
           const stepState = state?.steps[name];
 
           if (stepState?.status === "waiting_for_signal" && stepState.signalTimeoutAt) {
-            if (new Date() >= stepState.signalTimeoutAt) {
+            if (clock.now() >= stepState.signalTimeoutAt) {
               return yield* fail(
                 new WorkflowTimeoutError({
                   workflowId: execParams.workflowId,
@@ -1947,7 +1958,8 @@ export class WorkflowBuilder<
           }
 
           // First execution or still waiting — suspend
-          const signalTimeoutAt = timeoutMs != null ? new Date(Date.now() + timeoutMs) : undefined;
+          const signalTimeoutAt =
+            timeoutMs != null ? new Date(clock.currentTimeMs() + timeoutMs) : undefined;
           yield* promiseOrDie(() =>
             execParams.storage.suspendWorkflow(execParams.workflowId, name, {
               status: "waiting_for_signal",

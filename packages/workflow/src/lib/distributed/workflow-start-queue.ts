@@ -12,6 +12,8 @@
 // connected stays pending until one shows up.
 // ---------------------------------------------------------------------------
 
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
+
 export interface WorkflowStartRecord {
   /** Queue-local id (used for `complete`). Distinct from `workflowId`. */
   readonly id: string;
@@ -61,12 +63,23 @@ export interface WorkflowStartQueue {
   list(): Promise<WorkflowStartRecord[]>;
 }
 
+export interface InMemoryWorkflowStartQueueConfig {
+  /** Worker stuck mid-execution: re-claimable after this many ms. Default 60s. */
+  reclaimAfterMs?: number;
+  /** Time source for enqueue / claim stamps and the reclaim cutoff. Default: `SystemWallClock`. */
+  clock?: WallClock;
+}
+
 export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
   private readonly pending: WorkflowStartRecord[] = [];
   private readonly inflight = new Map<string, WorkflowStartRecord>();
+  private readonly reclaimAfterMs: number;
+  private readonly clock: WallClock;
 
-  /** Worker stuck mid-execution: re-claimable after this many ms. Default 60s. */
-  constructor(private readonly reclaimAfterMs = 60_000) {}
+  constructor(config: InMemoryWorkflowStartQueueConfig = {}) {
+    this.reclaimAfterMs = config.reclaimAfterMs ?? 60_000;
+    this.clock = config.clock ?? SystemWallClock;
+  }
 
   async enqueue(params: {
     workflowId: string;
@@ -75,7 +88,8 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
     metadata?: Record<string, unknown>;
     version?: string;
   }): Promise<{ id: string }> {
-    const id = `start-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const now = this.clock.currentTimeMs();
+    const id = `start-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     this.pending.push({
       id,
       workflowId: params.workflowId,
@@ -83,7 +97,7 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
       input: params.input,
       ...(params.metadata !== undefined && { metadata: params.metadata }),
       ...(params.version !== undefined && { version: params.version }),
-      enqueuedAt: Date.now(),
+      enqueuedAt: now,
     });
     return { id };
   }
@@ -114,7 +128,7 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
       this.pending.splice(i, 1);
       const stamped: WorkflowStartRecord = {
         ...rec,
-        claimedAt: Date.now(),
+        claimedAt: this.clock.currentTimeMs(),
         ...(params.workerId !== undefined && { claimedBy: params.workerId }),
       };
       this.inflight.set(rec.id, stamped);
@@ -134,7 +148,7 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
 
   /** Move stale claims back to pending so a dead worker doesn't strand a start. */
   private reclaimStale(): void {
-    const cutoff = Date.now() - this.reclaimAfterMs;
+    const cutoff = this.clock.currentTimeMs() - this.reclaimAfterMs;
     for (const [id, rec] of this.inflight) {
       if ((rec.claimedAt ?? 0) < cutoff) {
         this.inflight.delete(id);

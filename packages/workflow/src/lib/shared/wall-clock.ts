@@ -16,6 +16,12 @@
 /** Handle returned by `setInterval` / `setTimeout` — call `clear()` to cancel. */
 export interface TimerHandle {
   clear(): void;
+  /**
+   * Stop the pending timer from keeping the process alive. Optional —
+   * `SystemWallClock` forwards to the runtime timer's `unref()`; fake
+   * clocks never hold the process open, so they omit it.
+   */
+  unref?(): void;
 }
 
 /**
@@ -39,11 +45,17 @@ export const SystemWallClock: WallClock = {
   currentTimeMs: () => Date.now(),
   setTimeout: (fn, ms) => {
     const id = globalThis.setTimeout(fn, ms);
-    return { clear: () => globalThis.clearTimeout(id) };
+    return {
+      clear: () => globalThis.clearTimeout(id),
+      unref: () => (id as { unref?: () => void }).unref?.(),
+    };
   },
   setInterval: (fn, ms) => {
     const id = globalThis.setInterval(fn, ms);
-    return { clear: () => globalThis.clearInterval(id) };
+    return {
+      clear: () => globalThis.clearInterval(id),
+      unref: () => (id as { unref?: () => void }).unref?.(),
+    };
   },
 };
 

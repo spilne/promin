@@ -32,6 +32,7 @@
 // ---------------------------------------------------------------------------
 
 import type { ServerWebSocket, WebSocketHandler } from "bun";
+import { SystemWallClock, type TimerHandle, type WallClock } from "@promin/workflow";
 
 export type WorkerWsInbound =
   | { kind: "identify"; workerId: string; capabilities?: readonly string[] }
@@ -76,6 +77,11 @@ export interface WorkerWebSocketServerConfig {
    * `/rpc/worker`. When omitted, the upgrade is open.
    */
   authorize?: (req: Request) => boolean;
+  /**
+   * Time source for pong / last-seen stamps, the heartbeat cadence and
+   * request reply timeouts. Default: `SystemWallClock`.
+   */
+  clock?: WallClock;
 }
 
 export interface WorkerCommandRequest {
@@ -102,13 +108,15 @@ export class WorkerWebSocketServer {
   private readonly pingIntervalMs: number;
   private readonly pongTimeoutMs: number;
   private readonly authorize?: (req: Request) => boolean;
-  private heartbeatTimer?: ReturnType<typeof setInterval>;
+  private readonly clock: WallClock;
+  private heartbeatTimer?: TimerHandle;
   private nextRequestId = 1;
 
   constructor(config: WorkerWebSocketServerConfig = {}) {
     this.pingIntervalMs = config.pingIntervalMs ?? 10_000;
     this.pongTimeoutMs = config.pongTimeoutMs ?? 30_000;
     this.authorize = config.authorize;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   /**
@@ -127,8 +135,8 @@ export class WorkerWebSocketServer {
       return new Response("unauthorized_worker", { status: 401 });
     }
     const data: WorkerWsData = {
-      lastPongAt: Date.now(),
-      lastSeenAt: Date.now(),
+      lastPongAt: this.clock.currentTimeMs(),
+      lastSeenAt: this.clock.currentTimeMs(),
     };
     const upgraded = server.upgrade(req, { data });
     if (!upgraded) return new Response("upgrade_failed", { status: 400 });
@@ -141,8 +149,8 @@ export class WorkerWebSocketServer {
         // Wait for identify before adding to the workers map. Until then
         // the socket exists but isn't routable; it gets dropped on close
         // if identify never arrives.
-        ws.data.lastPongAt = Date.now();
-        ws.data.lastSeenAt = Date.now();
+        ws.data.lastPongAt = this.clock.currentTimeMs();
+        ws.data.lastSeenAt = this.clock.currentTimeMs();
       },
       message: (ws, raw) => {
         const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
@@ -154,7 +162,7 @@ export class WorkerWebSocketServer {
           // crash the server.
           return;
         }
-        ws.data.lastSeenAt = Date.now();
+        ws.data.lastSeenAt = this.clock.currentTimeMs();
         this.handleInbound(ws, msg);
       },
       close: (ws) => {
@@ -179,12 +187,12 @@ export class WorkerWebSocketServer {
 
   start(): void {
     if (this.heartbeatTimer) return;
-    this.heartbeatTimer = setInterval(() => this.tickHeartbeat(), this.pingIntervalMs);
+    this.heartbeatTimer = this.clock.setInterval(() => this.tickHeartbeat(), this.pingIntervalMs);
   }
 
   stop(): void {
     if (this.heartbeatTimer) {
-      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer.clear();
       this.heartbeatTimer = undefined;
     }
     // Close all open sockets so workers reconnect when the server comes
@@ -217,18 +225,18 @@ export class WorkerWebSocketServer {
     const requestId = `r-${this.nextRequestId++}`;
     const timeoutMs = req.timeoutMs ?? 30_000;
     const promise = new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const timer = this.clock.setTimeout(() => {
         if (this.pending.delete(requestId)) {
           reject(new Error(`Worker "${req.workerId}" request "${req.cmd}" timed out`));
         }
       }, timeoutMs);
       this.pending.set(requestId, {
         resolve: (result) => {
-          clearTimeout(timer);
+          timer.clear();
           resolve(result as T);
         },
         reject: (err) => {
-          clearTimeout(timer);
+          timer.clear();
           reject(err);
         },
       });
@@ -315,7 +323,7 @@ export class WorkerWebSocketServer {
         return;
       }
       case "pong":
-        ws.data.lastPongAt = Date.now();
+        ws.data.lastPongAt = this.clock.currentTimeMs();
         return;
       case "frame": {
         if (!ws.data.workerId) return; // unidentified frame — ignore
@@ -340,7 +348,7 @@ export class WorkerWebSocketServer {
   }
 
   private tickHeartbeat(): void {
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     const ping: WorkerWsOutbound = { kind: "ping" };
     for (const ws of [...this.workers.values()]) {
       if (now - ws.data.lastPongAt > this.pongTimeoutMs) {

@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { DurableScheduleConfig } from "../scheduler/types.ts";
 import type { SchedulerStorage } from "../scheduler/scheduler-storage.ts";
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 
 export interface ScheduleScannerOptions {
   extensions?: ReadonlyArray<string>;
@@ -161,6 +162,12 @@ export interface ApplyDiscoveredSchedulesOptions {
   kickstart?: boolean;
   /** Restrict the operation to a single namespace. */
   namespace?: string;
+  /**
+   * Time source for the `kickstart` nextRun stamp. Pass the scheduler's
+   * clock so the seeded time lines up with its due checks. Default:
+   * `SystemWallClock`.
+   */
+  clock?: WallClock;
 }
 
 export interface ApplyDiscoveredSchedulesResult {
@@ -186,7 +193,7 @@ export async function applyDiscoveredSchedules(
       : [];
   const existingIds = new Set(existing.map((s) => s.id));
 
-  const now = new Date();
+  const now = (options.clock ?? SystemWallClock).now();
   for (const config of schedules) {
     if (options.namespace !== undefined && config.namespace !== options.namespace) continue;
     const wasExisting = existingIds.has(config.id);

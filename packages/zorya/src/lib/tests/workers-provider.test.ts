@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { InMemoryWorkerRegistry } from "@promin/workflow";
+import { FakeWallClock, InMemoryWorkerRegistry } from "@promin/workflow";
 import { RegistryBackedWorkersProvider } from "../../server/routes/workers.ts";
 
 describe("RegistryBackedWorkersProvider", () => {
@@ -36,5 +36,22 @@ describe("RegistryBackedWorkersProvider", () => {
     const [dto] = await new RegistryBackedWorkersProvider(reg, 0).listWorkers();
     expect(dto?.status).toBe("offline");
     expect(dto?.retiredAt).toBeUndefined();
+  });
+
+  it("measures heartbeat age against the injected clock", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const reg = new InMemoryWorkerRegistry({ clock });
+    await reg.register({ workerId: "w-1", capabilities: [], concurrency: 1 });
+    const provider = new RegistryBackedWorkersProvider(reg, { offlineAfterMs: 30_000, clock });
+
+    clock.advance(29_999);
+    expect((await provider.listWorkers())[0]?.status).toBe("online");
+
+    clock.advance(1);
+    expect((await provider.listWorkers())[0]?.status).toBe("offline");
+
+    // A heartbeat on the same clock brings it back.
+    await reg.heartbeat("w-1");
+    expect((await provider.listWorkers())[0]?.status).toBe("online");
   });
 });

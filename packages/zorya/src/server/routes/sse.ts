@@ -6,7 +6,8 @@
 // until the run reaches a terminal state.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage } from "@promin/workflow";
+import type { TimerHandle, WallClock, WorkflowStorage } from "@promin/workflow";
+import { SystemWallClock } from "@promin/workflow";
 import { jsonError } from "../router.ts";
 import { RunEventBus } from "../run-event-bus.ts";
 import { RunPollWatcher } from "../run-poll-watcher.ts";
@@ -17,6 +18,8 @@ export interface SseDeps {
   bus: RunEventBus;
   /** Watcher poll interval in ms. Default 1000. */
   pollIntervalMs?: number;
+  /** Time source for the watcher poll and the SSE heartbeat. Default: `SystemWallClock`. */
+  clock?: WallClock;
 }
 
 export function streamRunEvents(deps: SseDeps) {
@@ -32,11 +35,13 @@ export function streamRunEvents(deps: SseDeps) {
       bus: deps.bus,
       workflowId: id,
       intervalMs: deps.pollIntervalMs ?? 1000,
+      ...(deps.clock !== undefined && { clock: deps.clock }),
     });
 
     const encoder = new TextEncoder();
     let unsub: (() => void) | undefined;
-    let heartbeatHandle: ReturnType<typeof setInterval> | undefined;
+    const clock = deps.clock ?? SystemWallClock;
+    let heartbeatHandle: TimerHandle | undefined;
 
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
@@ -57,7 +62,7 @@ export function streamRunEvents(deps: SseDeps) {
         };
         unsub = deps.bus.subscribe(id, send);
         void watcher.start();
-        heartbeatHandle = setInterval(() => {
+        heartbeatHandle = clock.setInterval(() => {
           try {
             controller.enqueue(encoder.encode(`: heartbeat\n\n`));
           } catch {
@@ -75,7 +80,7 @@ export function streamRunEvents(deps: SseDeps) {
       unsub = undefined;
       watcher.stop();
       if (heartbeatHandle !== undefined) {
-        clearInterval(heartbeatHandle);
+        heartbeatHandle.clear();
         heartbeatHandle = undefined;
       }
     }

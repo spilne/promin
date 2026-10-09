@@ -20,6 +20,7 @@
 // ---------------------------------------------------------------------------
 
 import type { RetryPolicy } from "../shared/retry-policy.ts";
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
 import { LosslessJsonCodec, payloadHash as hashPayload } from "@spilne/perfect-core/connect";
 import {
@@ -649,6 +650,8 @@ function makeCtx<Input, Prev>(params: {
    * updated as a side effect of those writes via `workflowStorage`.
    */
   initialMetadata?: Record<string, unknown>;
+  /** Time source for sleep / signal deadlines and activity retry backoff. */
+  clock?: WallClock;
 }): { ctx: JournaledContext<Input, Prev>; unwind: (bodyError: unknown) => Promise<void> } {
   const {
     input,
@@ -665,6 +668,7 @@ function makeCtx<Input, Prev>(params: {
     runChild,
     initialMetadata,
   } = params;
+  const clock = params.clock ?? SystemWallClock;
   const stepCodec = defaultCodec ?? LosslessJsonCodec;
   const patchSet = new Set(patches ?? []);
   // Single counter for every journal slot — activities, sleeps, signals, and
@@ -894,7 +898,9 @@ function makeCtx<Input, Prev>(params: {
         journaledBodyScope.exit(async () => (await Promise.resolve(fn())) as T);
       let value: T;
       try {
-        value = options?.retry ? await runWithRetry(runOnce, options.retry) : await runOnce();
+        value = options?.retry
+          ? await runWithRetry({ fn: runOnce, policy: options.retry, clock })
+          : await runOnce();
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         const failureExit = { tag: "Failure", error: message } as const;
@@ -1001,7 +1007,8 @@ function makeCtx<Input, Prev>(params: {
       // Use the recorded wakeAt when replaying a pending entry so time isn't
       // re-computed (which would drift on every replay).
       const wakeAt =
-        recorded?.wakeAt ?? (duration instanceof Date ? duration : new Date(Date.now() + duration));
+        recorded?.wakeAt ??
+        (duration instanceof Date ? duration : new Date(clock.currentTimeMs() + duration));
 
       if (!recorded) {
         await suspendStorage.appendPendingEntry({
@@ -1018,7 +1025,7 @@ function makeCtx<Input, Prev>(params: {
       // passed, complete the entry here (no external completion needed) and
       // return. The DefaultSleepScanner's existing "run workflow on wake"
       // loop works unchanged — ctx.sleep does its own time check.
-      if (Date.now() >= wakeAt.getTime()) {
+      if (clock.currentTimeMs() >= wakeAt.getTime()) {
         await suspendStorage.completePendingEntry({
           workflowId,
           stepName,
@@ -1131,7 +1138,7 @@ function makeCtx<Input, Prev>(params: {
         : options?.timeout !== undefined
           ? options.timeout instanceof Date
             ? options.timeout
-            : new Date(Date.now() + options.timeout)
+            : new Date(clock.currentTimeMs() + options.timeout)
           : undefined;
 
       if (!recorded) {
@@ -1149,7 +1156,7 @@ function makeCtx<Input, Prev>(params: {
       // passed without a delivery, complete the entry with the timeout
       // outcome and return. Mirrors `ctx.sleep` — the scanner wakes us, the
       // body decides what to do.
-      if (wakeAt && Date.now() >= wakeAt.getTime()) {
+      if (wakeAt && clock.currentTimeMs() >= wakeAt.getTime()) {
         await suspendStorage.completePendingEntry({
           workflowId,
           stepName,
@@ -1818,6 +1825,11 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     workflowId: string;
     input: unknown;
   }) => Promise<unknown>;
+  /**
+   * Time source for `ctx.sleep` / `ctx.signal` deadlines and activity retry
+   * backoff. Wired from the runner's clock; default `SystemWallClock`.
+   */
+  clock?: WallClock;
   body: JournaledStepBody<Input, Prev, Output>;
 }): Promise<Output> {
   const {
@@ -1832,6 +1844,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     codec,
     payloadHash,
     runChild,
+    clock,
     body,
   } = params;
 
@@ -1853,6 +1866,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     defaultCodec: codec,
     defaultPayloadHash: payloadHash,
     runChild,
+    ...(clock !== undefined && { clock }),
     ...(wfState?.metadata !== undefined && { initialMetadata: wfState.metadata }),
   });
   const gen = body(ctx, prev);
@@ -1897,7 +1911,12 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
 // Local retry runner — intentionally small.
 // ---------------------------------------------------------------------------
 
-async function runWithRetry<T>(fn: () => Promise<T>, policy: RetryPolicy<unknown>): Promise<T> {
+async function runWithRetry<T>(params: {
+  fn: () => Promise<T>;
+  policy: RetryPolicy<unknown>;
+  clock: WallClock;
+}): Promise<T> {
+  const { fn, policy, clock } = params;
   const maxRetries = policy.maxRetries ?? 3;
   const baseDelay = policy.baseDelayMs ?? 100;
   const maxDelay = policy.maxDelayMs ?? Infinity;
@@ -1916,7 +1935,7 @@ async function runWithRetry<T>(fn: () => Promise<T>, policy: RetryPolicy<unknown
       if (attempt >= maxRetries) throw err;
       let delay = Math.min(baseDelay * 2 ** attempt, maxDelay);
       if (jitter) delay *= 0.75 + Math.random() * 0.5;
-      await new Promise((r) => setTimeout(r, delay));
+      await new Promise<void>((r) => clock.setTimeout(() => r(), delay));
     }
   }
   throw new Error("unreachable");

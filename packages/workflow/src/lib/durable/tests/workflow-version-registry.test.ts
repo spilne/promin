@@ -6,6 +6,7 @@ import {
   WorkflowVersionRegistry,
 } from "../workflow-version-registry.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 describe("WorkflowVersionRegistry", () => {
   it("registers and resolves versioned workflows", () => {
@@ -577,5 +578,36 @@ describe("WorkflowVersionRegistry", () => {
       await runner.run({ name: "compute", workflowId: "r4b", input: { n: 5 } });
       expect(v1Calls).toBe(1);
     });
+  });
+});
+
+describe("WorkflowVersionRegistry — lifecycle stamps on an injected clock", () => {
+  it("stamps registeredAt / activeAt / archivedAt from the clock and orders listRecords by it", () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const registry = new WorkflowVersionRegistry({ clock });
+    const v1 = workflow({ name: "stamped", version: "1" })
+      .stepAsync("a", async () => 1)
+      .build();
+    const v2 = workflow({ name: "stamped", version: "2" })
+      .stepAsync("b", async () => 2)
+      .build();
+
+    registry.register(v1);
+    clock.advance(1_000);
+    registry.register(v2);
+
+    const records = registry.listRecords("stamped");
+    expect(records.map((r) => r.version)).toEqual(["2", "1"]);
+    expect(records[0]!.registeredAt.toISOString()).toBe("2026-01-01T00:00:01.000Z");
+    expect(records[1]!.registeredAt.toISOString()).toBe("2026-01-01T00:00:00.000Z");
+
+    clock.advance(1_000);
+    const promoted = registry.promote("stamped", "2");
+    expect(promoted.activeAt?.toISOString()).toBe("2026-01-01T00:00:02.000Z");
+
+    clock.advance(1_000);
+    const { previous, active } = registry.rollback({ name: "stamped", toVersion: "1" });
+    expect(previous.archivedAt?.toISOString()).toBe("2026-01-01T00:00:03.000Z");
+    expect(active.activeAt?.toISOString()).toBe("2026-01-01T00:00:03.000Z");
   });
 });

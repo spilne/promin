@@ -7,13 +7,15 @@
 
 import { describe, expect, it } from "bun:test";
 import { InMemoryAgentRegistry, InMemoryRemoteDeploymentRegistry } from "@promin/agent";
-import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
+import { FakeWallClock, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { LocalWorkflows, ZoryaAgents } from "../../../index.ts";
 import { ZoryaServer } from "../../server.ts";
 
 interface BootOpts {
   /** Inject a clock so tests can fast-forward across the TTL window. */
   now?: () => number;
+  /** Server clock — drives the lazy sweep's "now" in listDeployments. */
+  clock?: FakeWallClock;
 }
 
 async function bootGateway(opts: BootOpts = {}) {
@@ -41,6 +43,7 @@ async function bootGateway(opts: BootOpts = {}) {
     workflows,
     agents,
     remoteDeployments,
+    ...(opts.clock !== undefined && { clock: opts.clock }),
   });
   return { server, agentRegistry, remoteDeployments };
 }
@@ -241,6 +244,35 @@ describe("remote-deployments — list + lazy sweep", () => {
     const body = (await res.json()) as { deployments: unknown[] };
     expect(body.deployments).toEqual([]);
     // Recipe was cleaned up by the lazy sweep.
+    expect(await agentRegistry.get("a")).toBeNull();
+  });
+
+  it("the lazy sweep reads 'now' from the server clock", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const { server, agentRegistry } = await bootGateway({
+      clock,
+      now: () => clock.currentTimeMs(),
+    });
+    await server.handle(
+      new Request("http://test/api/remote-deployments/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ endpoint: "https://x", agents: ["a"], ttlMs: 5_000 }),
+      }),
+    );
+    const list = async () =>
+      (
+        (await (
+          await server.handle(new Request("http://test/api/remote-deployments", { method: "GET" }))
+        ).json()) as { deployments: Array<{ endpoint: string }> }
+      ).deployments;
+
+    clock.advance(4_000);
+    expect((await list()).map((d) => d.endpoint)).toEqual(["https://x"]);
+    expect(await agentRegistry.get("a")).not.toBeNull();
+
+    clock.advance(10_000);
+    expect(await list()).toEqual([]);
     expect(await agentRegistry.get("a")).toBeNull();
   });
 });

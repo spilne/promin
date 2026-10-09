@@ -16,6 +16,8 @@
 //     reconnect); persistent backends (SQLite, Postgres) survive restarts
 // ---------------------------------------------------------------------------
 
+import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
+
 export interface AdvertisedWorkflow {
   name: string;
   version?: string;
@@ -55,11 +57,21 @@ export interface WorkflowAdvertisementRegistry {
   distinct(): Promise<AdvertisedWorkflow[]>;
 }
 
+export interface InMemoryWorkflowAdvertisementRegistryConfig {
+  /** Time source for `advertisedAt`. Default: `SystemWallClock`. */
+  clock?: WallClock;
+}
+
 export class InMemoryWorkflowAdvertisementRegistry implements WorkflowAdvertisementRegistry {
   private readonly byWorker = new Map<string, AdvertisementEntry>();
+  private readonly clock: WallClock;
+
+  constructor(config: InMemoryWorkflowAdvertisementRegistryConfig = {}) {
+    this.clock = config.clock ?? SystemWallClock;
+  }
 
   async upsert(workerId: string, workflows: AdvertisedWorkflow[]): Promise<void> {
-    this.byWorker.set(workerId, { workerId, workflows, advertisedAt: new Date() });
+    this.byWorker.set(workerId, { workerId, workflows, advertisedAt: this.clock.now() });
   }
 
   async remove(workerId: string): Promise<void> {

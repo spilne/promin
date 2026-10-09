@@ -15,7 +15,7 @@
 
 import { parseApprovalSignal } from "@promin/agent";
 import type { SignalPayloadSchema, SignalTokenRecord, WorkflowStorage } from "@promin/workflow";
-import { validate } from "@promin/workflow";
+import { SystemWallClock, validate, type WallClock } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
 export interface SignalTokenRoutesDeps {
@@ -26,6 +26,8 @@ export interface SignalTokenRoutesDeps {
    * caller composes one. Useful for tests that don't care about URLs.
    */
   publicBaseUrl?: string;
+  /** Time source for minted expiry and the completion expiry check. Default: `SystemWallClock`. */
+  clock?: WallClock;
 }
 
 export interface MintTokenRequest {
@@ -105,7 +107,7 @@ export function mintSignalToken(deps: SignalTokenRoutesDeps) {
 
     const tokenId = randomToken(16);
     const bearer = randomToken(32);
-    const expiresAt = new Date(Date.now() + body.expiresInMs);
+    const expiresAt = new Date((deps.clock ?? SystemWallClock).currentTimeMs() + body.expiresInMs);
 
     const { record, isCached } = await deps.storage.createSignalToken({
       tokenId,
@@ -163,7 +165,7 @@ export function completeSignalToken(deps: SignalTokenRoutesDeps) {
       return json(200, { ok: true, value: token.completedValue, alreadyCompleted: true });
     }
 
-    const now = new Date();
+    const now = (deps.clock ?? SystemWallClock).now();
     if (token.expiresAt.getTime() <= now.getTime()) {
       return jsonError(408, "token_expired");
     }
