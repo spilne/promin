@@ -178,30 +178,30 @@ needs.
 
 `new ZoryaServer(config: ZoryaServerConfig)`:
 
-| Field                         | Default                 | Meaning                                                                                                                                                                                              |
-| ----------------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `workflows`                   | required                | The `ZoryaWorkflows` chain (`LocalWorkflows`, `QueuedWorkflows`). Its storage backs every run route. The version registry, advertisements, definitions and cluster are found on the chain.           |
-| `apiKeys`                     | none                    | Operator keys for `/api`. Required unless `insecure`.                                                                                                                                                |
-| `insecure`                    | `false`                 | Allow planes without keys. Local development only.                                                                                                                                                   |
-| `remoteWorkers`               | not mounted             | Mounts the worker plane. `apiKeys`: worker keys. `workerRegistry`: the registry workers register into (default: the queued layer's, else in-memory).                                                 |
-| `scheduler`                   | none                    | `ZoryaScheduler`: schedule CRUD, tick loop, emit-now. Without it `GET /api/schedules` answers `configured: false`.                                                                                   |
-| `agents`                      | none                    | `ZoryaAgents`: the agent gateway, plus memory, instances and roles when their stores are set.                                                                                                        |
-| `skills`, `fragments`, `dags` | none                    | Registry services with CRUD routes.                                                                                                                                                                  |
-| `secrets`                     | none                    | `SecretsStorage` for `/api/secrets` and BYOK credential resolution.                                                                                                                                  |
-| `webhooks`                    | none                    | `{ sources, deliveries? }`: signed webhook ingress into agents. Mounted only when `agents` is set. `deliveries` (replay dedup) defaults to a store on the workflow storage, shared across instances. |
-| `remoteDeployments`           | none                    | `{ registry, endpointPolicy?, sweepIntervalMs? }`: other Zorya servers register their agents here. Mounted only when `agents` is set.                                                                |
-| `metrics`                     | storage-backed          | `MetricsProvider` for `/api/metrics`.                                                                                                                                                                |
-| `workers`                     | registry-backed         | `WorkersProvider` for the Workers page.                                                                                                                                                              |
-| `sampleInput`                 | none                    | Sample input for the dashboard trigger form, by workflow name.                                                                                                                                       |
-| `uiDir`                       | none                    | Directory of the built dashboard. Unset: no UI is served.                                                                                                                                            |
-| `publicBaseUrl`               | none                    | Public URL used to build signal-token completion URLs.                                                                                                                                               |
-| `signalTokenMaxTtlMs`         | 90 days                 | Longest validity a signal token may request.                                                                                                                                                         |
-| `sseIntervalMs`               | 1000                    | Poll interval behind run event streams.                                                                                                                                                              |
-| `readinessTimeoutMs`          | 2000                    | Bound on the `/api/ready` storage probe.                                                                                                                                                             |
-| `shutdownTimeoutMs`           | 10000                   | How long `stop()` waits for in-flight requests.                                                                                                                                                      |
-| `startRetry`                  | 500 ms doubling to 30 s | Backoff for a service whose `start()` failed.                                                                                                                                                        |
-| `clock`                       | `SystemWallClock`       | Time source for the server's own timers. Tests pass a `FakeWallClock`.                                                                                                                               |
-| `logger`                      | `console`               | `{ log, warn, error }`.                                                                                                                                                                              |
+| Field                         | Default                 | Meaning                                                                                                                                                                                                                                                                          |
+| ----------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `workflows`                   | required                | The `ZoryaWorkflows` chain (`LocalWorkflows`, `QueuedWorkflows`). Its storage backs every run route. The version registry, advertisements, definitions and cluster are found on the chain.                                                                                       |
+| `apiKeys`                     | none                    | Operator keys for `/api`. Required unless `insecure`.                                                                                                                                                                                                                            |
+| `insecure`                    | `false`                 | Allow planes without keys. Local development only.                                                                                                                                                                                                                               |
+| `remoteWorkers`               | not mounted             | Mounts the worker plane. `apiKeys`: worker keys. `workerRegistry`: the registry workers register into (default: the queued layer's, else in-memory). `wakeups`: "work available" messages to connected workers (`false` off; `{ coalesceMs, followUpMs }`, defaults 20 and 250). |
+| `scheduler`                   | none                    | `ZoryaScheduler`: schedule CRUD, tick loop, emit-now. Without it `GET /api/schedules` answers `configured: false`.                                                                                                                                                               |
+| `agents`                      | none                    | `ZoryaAgents`: the agent gateway, plus memory, instances and roles when their stores are set.                                                                                                                                                                                    |
+| `skills`, `fragments`, `dags` | none                    | Registry services with CRUD routes.                                                                                                                                                                                                                                              |
+| `secrets`                     | none                    | `SecretsStorage` for `/api/secrets` and BYOK credential resolution.                                                                                                                                                                                                              |
+| `webhooks`                    | none                    | `{ sources, deliveries? }`: signed webhook ingress into agents. Mounted only when `agents` is set. `deliveries` (replay dedup) defaults to a store on the workflow storage, shared across instances.                                                                             |
+| `remoteDeployments`           | none                    | `{ registry, endpointPolicy?, sweepIntervalMs? }`: other Zorya servers register their agents here. Mounted only when `agents` is set.                                                                                                                                            |
+| `metrics`                     | storage-backed          | `MetricsProvider` for `/api/metrics`.                                                                                                                                                                                                                                            |
+| `workers`                     | registry-backed         | `WorkersProvider` for the Workers page.                                                                                                                                                                                                                                          |
+| `sampleInput`                 | none                    | Sample input for the dashboard trigger form, by workflow name.                                                                                                                                                                                                                   |
+| `uiDir`                       | none                    | Directory of the built dashboard. Unset: no UI is served.                                                                                                                                                                                                                        |
+| `publicBaseUrl`               | none                    | Public URL used to build signal-token completion URLs.                                                                                                                                                                                                                           |
+| `signalTokenMaxTtlMs`         | 90 days                 | Longest validity a signal token may request.                                                                                                                                                                                                                                     |
+| `sseIntervalMs`               | 1000                    | Poll interval behind run event streams.                                                                                                                                                                                                                                          |
+| `readinessTimeoutMs`          | 2000                    | Bound on the `/api/ready` storage probe.                                                                                                                                                                                                                                         |
+| `shutdownTimeoutMs`           | 10000                   | How long `stop()` waits for in-flight requests.                                                                                                                                                                                                                                  |
+| `startRetry`                  | 500 ms doubling to 30 s | Backoff for a service whose `start()` failed.                                                                                                                                                                                                                                    |
+| `clock`                       | `SystemWallClock`       | Time source for the server's own timers. Tests pass a `FakeWallClock`.                                                                                                                                                                                                           |
+| `logger`                      | `console`               | `{ log, warn, error }`.                                                                                                                                                                                                                                                          |
 
 `server.listen(options: ListenOptions)`:
 
@@ -308,9 +308,23 @@ What the worker does:
 
 - registers and heartbeats in the worker registry (`/rpc/worker`), and
   advertises the workflows and versions it hosts;
-- polls the start queue for those workflows, claims at most as many starts
-  as it has free slots, and drives each run with the engine against
-  Zorya's storage, fenced by the run lock;
+- claims starts of those workflows as soon as Zorya makes them claimable:
+  Zorya sends a small "work available" message over the `/ws/worker`
+  control socket to about as many connected workers as there are new
+  starts (round-robin among those that host the run's workflow and
+  version; a burst is coalesced into a few messages), and they claim at
+  once. A start still unclaimed 250 ms later (the woken workers were busy)
+  wakes every matching worker. A claim takes at most as many starts as the
+  worker has free slots and claims again at once while batches come back
+  full; a worker with every slot busy ignores the message, since a freed
+  slot claims anyway. Polling stays the fallback for a lost message or a
+  start queued on another Zorya instance: every 5 s (±20% jitter) while
+  the control socket is open, every 1 s while it is not (not yet
+  connected, dropped, refused — reported once per outage) or with
+  `controlSocket: false`;
+- drives each claimed run with the engine against Zorya's storage, fenced
+  by the run lock. A start names the run, not its input: the run is driven
+  with the input stored on it, so a large input is stored and sent once;
 - completes a claim when its run ended or suspended, and releases it when
   the run stopped short, so another worker picks it up;
 - retries start-up and every protocol call with backoff, so it can start

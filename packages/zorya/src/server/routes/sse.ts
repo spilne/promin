@@ -24,6 +24,23 @@ export interface SseDeps {
 /** Keep-alive comment cadence (ms). */
 const HEARTBEAT_MS = 15_000;
 
+const encoder = new TextEncoder();
+
+/**
+ * One event's SSE frame. A watcher publishes the same event object to
+ * every viewer of a run, so it is serialized and encoded once, not once per
+ * viewer; the cache entry goes with the event.
+ */
+const frames = new WeakMap<RunEvent, Uint8Array>();
+function encodeEvent(ev: RunEvent): Uint8Array {
+  let frame = frames.get(ev);
+  if (!frame) {
+    frame = encoder.encode(`data: ${JSON.stringify(ev)}\n\n`);
+    frames.set(ev, frame);
+  }
+  return frame;
+}
+
 export function streamRunEvents(deps: SseDeps) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
@@ -32,7 +49,6 @@ export function streamRunEvents(deps: SseDeps) {
     const state = await deps.storage.loadWorkflow(id);
     if (!state) return jsonError(404, "not_found");
 
-    const encoder = new TextEncoder();
     let unsub: (() => void) | undefined;
     const clock = deps.clock ?? SystemWallClock;
     let heartbeatHandle: TimerHandle | undefined;
@@ -51,7 +67,7 @@ export function streamRunEvents(deps: SseDeps) {
         const send = (ev: RunEvent): void => {
           if (closed) return;
           try {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
+            controller.enqueue(encodeEvent(ev));
           } catch {
             // Controller closed.
             teardown();

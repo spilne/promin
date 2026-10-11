@@ -464,11 +464,14 @@ async function isShuttingDown(res: Response): Promise<boolean> {
   }
 }
 
+/**
+ * A claimed start. It names the run, not its input: the worker drives the
+ * stored run with the input stored on it.
+ */
 export interface WorkflowStartClaim {
   readonly id: string;
   readonly workflowId: string;
   readonly workflowName: string;
-  readonly input: unknown;
   readonly metadata?: Record<string, unknown>;
   readonly version?: string;
   readonly enqueuedAt: number;

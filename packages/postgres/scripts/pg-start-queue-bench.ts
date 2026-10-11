@@ -52,7 +52,6 @@ async function reset(): Promise<void> {
     await q.enqueue({
       workflowId: `wf-${i}`,
       workflowName: "bench",
-      input: { i },
     });
   }
   const dt = performance.now() - t0;
@@ -70,7 +69,6 @@ async function reset(): Promise<void> {
       q.enqueue({
         workflowId: `wf-${batch + j}`,
         workflowName: "bench",
-        input: { i: batch + j },
       }),
     );
     await Promise.all(tasks);
@@ -84,7 +82,7 @@ async function reset(): Promise<void> {
   // Set up 1000 enqueued.
   await reset();
   for (let i = 0; i < 1000; i++) {
-    await q.enqueue({ workflowId: `wf-${i}`, workflowName: "bench", input: { i } });
+    await q.enqueue({ workflowId: `wf-${i}`, workflowName: "bench" });
   }
   let drained = 0;
   const t0 = performance.now();
@@ -107,7 +105,7 @@ async function reset(): Promise<void> {
   await reset();
   const N = 1000;
   for (let i = 0; i < N; i++) {
-    await q.enqueue({ workflowId: `wf-${i}`, workflowName: "bench", input: { i } });
+    await q.enqueue({ workflowId: `wf-${i}`, workflowName: "bench" });
   }
   const concurrentWorkers = 10;
   let totalClaimed = 0;
@@ -140,7 +138,6 @@ async function reset(): Promise<void> {
     await q.enqueue({
       workflowId: `wf-${i}`,
       workflowName: "bench",
-      input: { i },
       version: i % 2 === 0 ? "1" : "2",
     });
   }
@@ -173,7 +170,7 @@ async function reset(): Promise<void> {
   const N = 500;
   const t0 = performance.now();
   for (let i = 0; i < N; i++) {
-    await q.enqueue({ workflowId: `wf-${i}`, workflowName: "bench", input: { i } });
+    await q.enqueue({ workflowId: `wf-${i}`, workflowName: "bench" });
     const [c] = await q.claim({
       workflowSpecs: [{ name: "bench", versions: [] }],
       workerId: "e2e",

@@ -44,6 +44,18 @@ export interface RemoteWorkersConfig {
    * in-memory one.
    */
   workerRegistry?: WorkerRegistry;
+  /**
+   * "Work available" messages over `/ws/worker`: when the queued layer
+   * makes a start claimable, about as many connected workers as there are
+   * starts (round-robin among those that advertise the workflow and
+   * version) are told to claim now instead of at their next poll. Notices
+   * within `coalesceMs` (default 20) of a send are merged into one; a start
+   * still unclaimed `followUpMs` (default 250) after its wake-up wakes
+   * every matching worker. Only workers connected to this instance are
+   * told; in a cluster the others find the start at their next poll.
+   * `false` turns it off. Default: on.
+   */
+  wakeups?: false | { coalesceMs?: number; followUpMs?: number };
 }
 
 /** Thrown by the ZoryaServer constructor when a plane has no keys and `insecure` is off. */

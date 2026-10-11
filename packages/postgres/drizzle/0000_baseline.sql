@@ -467,7 +467,6 @@ CREATE TABLE wf_workflow_starts (
   workflow_id text NOT NULL,
   workflow_name text NOT NULL,
   version text,
-  input jsonb NOT NULL,
   metadata jsonb,
   enqueued_at timestamp with time zone DEFAULT now() NOT NULL,
   available_at timestamp with time zone,

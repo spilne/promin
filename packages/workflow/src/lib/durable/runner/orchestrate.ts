@@ -16,6 +16,7 @@ import {
   WorkflowError,
   WorkflowLockError,
   WorkflowTripwireError,
+  WorkflowRunNotFoundError,
   WorkflowVersionMismatchError,
   type WorkflowContinueAsNewError,
 } from "../durable-pipeline-error.ts";
@@ -96,6 +97,8 @@ interface RunParams {
    * run in flight for another driver.
    */
   readonly signal?: AbortSignal;
+  /** Drive the stored run with its stored input; no stored run → `WorkflowRunNotFoundError`. */
+  readonly useStoredInput?: boolean;
 }
 
 /** Statuses `rejectInFlight` treats as a run still in flight. */
@@ -149,6 +152,7 @@ export async function runWorkflowOrchestration(
       ...(params.onLocked !== undefined && { onLocked: params.onLocked }),
       ...(params.rejectInFlight === true && { rejectInFlight: true }),
       ...(params.signal !== undefined && { signal: params.signal }),
+      ...(params.useStoredInput === true && { useStoredInput: true }),
     });
   }
 
@@ -276,13 +280,17 @@ async function runChain(params: {
       });
     } catch (err) {
       if (errorTag(err) !== "WorkflowContinueAsNewError") throw err;
+      const nextInput = (err as WorkflowContinueAsNewError).nextInput;
+      // The next run's input is stored on the run, so a driver that resumes
+      // it later (another worker, recovery) reads this input, not the first.
       await ctx.storage.startFreshRun({
         workflowId,
         guard: lock.fenceToken ? { fenceToken: lock.fenceToken } : undefined,
         ...(loaded.state?.run !== undefined && { expectedRun: loaded.state.run }),
+        nextInput: { value: nextInput },
       });
       params.queries.reset();
-      input = (err as WorkflowContinueAsNewError).nextInput;
+      input = nextInput;
     }
   }
   throw new Error(
@@ -350,7 +358,8 @@ async function runOneOrchestrationCycle(cycle: {
   preloaded?: WorkflowState | null;
 }): Promise<unknown> {
   const { ctx, lock, clock, loaded } = cycle;
-  const { workflowId, input, force, namespace } = cycle.params;
+  const { workflowId, force, namespace } = cycle.params;
+  let input = cycle.params.input;
   const workflowStartTime = clock.currentTimeMs();
   const idempotency = force ? undefined : ctx.idempotency;
   const guard = lock.fenceToken ? { fenceToken: lock.fenceToken } : undefined;
@@ -369,6 +378,14 @@ async function runOneOrchestrationCycle(cycle: {
       await ctx.storage.startFreshRun({ workflowId, guard, expectedRun: state.run });
       state = await ctx.storage.loadWorkflow(workflowId);
     }
+  }
+
+  // A driver of runs created elsewhere has no input to create one with.
+  if (!state && cycle.params.useStoredInput === true) {
+    throw new WorkflowRunNotFoundError({
+      workflowId,
+      message: `Workflow "${workflowId}" has no stored run to drive (useStoredInput)`,
+    });
   }
 
   // 2. Create the run, or check the stored version of an existing one.
@@ -414,6 +431,9 @@ async function runOneOrchestrationCycle(cycle: {
       });
     }
   }
+
+  // A stored run resumed for a driver that doesn't carry the input.
+  if (cycle.params.useStoredInput === true && state) input = state.input;
 
   // 3. Entry gate — an ended run is not executed again: a completed run
   // answers with its result, decoded as a replay would; any other ended run

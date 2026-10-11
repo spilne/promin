@@ -73,6 +73,7 @@ describe("ZoryaServer scheduling — embedded ZoryaScheduler", () => {
     const worker = new ZoryaWorker({
       client,
       workflows: [wf],
+      controlSocket: false,
       pollWorkflowStarts: { intervalMs: 25 },
       heartbeatIntervalMs: 1_000,
     });

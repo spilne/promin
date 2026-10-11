@@ -56,6 +56,15 @@ export interface PollLoopConfig {
   readonly maxBackoffMs?: number;
   /** Time source for every wait. Default: `SystemWallClock`. */
   readonly clock?: WallClock;
+  /**
+   * Spread of the idle wait, as a fraction of `intervalMs`: each idle wait
+   * is drawn uniformly from `intervalMs × [1 - jitter, 1 + jitter]`, so many
+   * loops started together don't poll in lockstep. Backoff waits after a
+   * failure are not jittered. Default 0; clamped to [0, 1].
+   */
+  readonly jitter?: number;
+  /** Random source in [0, 1) for the jitter. Default: `Math.random`. */
+  readonly random?: () => number;
 }
 
 /**
@@ -70,11 +79,13 @@ export interface PollLoopConfig {
  */
 export class PollLoop {
   private readonly name: string;
-  private readonly intervalMs: number;
+  private intervalMs: number;
   private readonly tick: () => Promise<PollTickResult>;
   private readonly onError: (error: unknown, info: PollLoopErrorInfo) => void;
   private readonly maxBackoffMs: number;
   private readonly clock: WallClock;
+  private readonly jitter: number;
+  private readonly random: () => number;
 
   private stopping = false;
   private wakeRequested = false;
@@ -89,6 +100,8 @@ export class PollLoop {
     this.onError = config.onError ?? defaultOnError;
     this.maxBackoffMs = config.maxBackoffMs ?? Math.max(30_000, config.intervalMs);
     this.clock = config.clock ?? SystemWallClock;
+    this.jitter = Math.min(1, Math.max(0, config.jitter ?? 0));
+    this.random = config.random ?? Math.random;
   }
 
   /** True between `start()` and the loop's exit. */
@@ -122,6 +135,11 @@ export class PollLoop {
     await this.loopPromise;
   }
 
+  /** Change the idle wait (`intervalMs`) from the next wait on. */
+  setIntervalMs(intervalMs: number): void {
+    this.intervalMs = intervalMs;
+  }
+
   /** Run the next iteration now instead of after the current wait. */
   wake(): void {
     if (this.sleepResolve) this.cancelSleep();
@@ -131,7 +149,7 @@ export class PollLoop {
   private async run(): Promise<void> {
     let consecutiveFailures = 0;
     while (!this.stopping) {
-      let delayMs = this.intervalMs;
+      let delayMs = this.idleDelayMs();
       try {
         const result = await this.tick();
         consecutiveFailures = 0;
@@ -149,6 +167,13 @@ export class PollLoop {
       if (this.stopping) return;
       await this.sleep(delayMs);
     }
+  }
+
+  /** The wait after an iteration that did not fail, jittered. */
+  private idleDelayMs(): number {
+    if (this.jitter === 0) return this.intervalMs;
+    const spread = this.intervalMs * this.jitter;
+    return Math.max(0, Math.round(this.intervalMs - spread + 2 * spread * this.random()));
   }
 
   private sleep(ms: number): Promise<void> {

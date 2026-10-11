@@ -21,6 +21,15 @@
 //   - start-up, advertising and every protocol call retry with backoff: a
 //     worker started before Zorya, or across a Zorya restart, recovers on
 //     its own and re-advertises
+//   - new work is claimed at once: Zorya sends a "work available" message
+//     over the control socket when it queues a start this worker can run,
+//     and the worker claims (unless every slot is busy — a freed slot
+//     claims anyway). A claim that fills every free slot claims again at
+//     once. Polling stays the fallback for a lost message or a start
+//     queued on another Zorya instance, at a slower, jittered cadence
+//   - a start released with a delay (a sleep due soon, a run locked
+//     elsewhere) is claimed again when the delay is up, not at the next poll
+//   - a claim carries no input: the run is driven with its stored input
 //   - every timer runs on the injected `WallClock`
 //
 // Step bodies are at-least-once: a run resumed after a crash re-runs the
@@ -36,6 +45,7 @@ import {
   listQueryHandlers,
   workflowClosure,
   type RunLockOptions,
+  type TimerHandle,
   type WallClock,
   type Workflow,
   type WorkflowRunner,
@@ -45,7 +55,15 @@ import type { WorkflowStartClaim, ZoryaClient } from "./zorya-client.ts";
 import { WorkerControlSocket } from "./worker-control-socket.ts";
 
 /** Which part of the worker a reported error came from. */
-export type ZoryaWorkerErrorPhase = "advertise" | "claim" | "heartbeat" | "settle" | "run" | "stop";
+export type ZoryaWorkerErrorPhase =
+  | "advertise"
+  | "claim"
+  | "heartbeat"
+  | "settle"
+  | "run"
+  | "stop"
+  /** The control socket could not connect, or dropped: no wake-ups until it is back. */
+  | "control";
 
 export interface ZoryaWorkerErrorEvent {
   readonly phase: ZoryaWorkerErrorPhase;
@@ -73,14 +91,31 @@ export interface ZoryaWorkerConfig {
    */
   heartbeatIntervalMs?: number;
   /**
-   * Start-queue polling. `intervalMs` (default 1000) is the idle poll
-   * cadence; a claim that filled every free slot polls again at once.
+   * Start-queue polling, the fallback to wake-ups. `intervalMs` is the idle
+   * poll cadence: default `DEFAULT_POLL_INTERVAL_MS` (5 s) while the control
+   * socket is open (wake-ups arrive), `DEFAULT_POLL_INTERVAL_WITHOUT_WAKEUPS_MS`
+   * (1 s) without the socket, or while it is not open (see
+   * `disconnectedIntervalMs`). `jitter` (default 0.2) spreads each idle wait over
+   * `intervalMs × [1 - jitter, 1 + jitter]` so a fleet doesn't poll in
+   * lockstep. A claim that filled every free slot claims again at once.
    * `claimHeartbeatMs` (default 30_000) keeps each claim alive; keep it well
    * under the server queue's reclaim window (120 s by default). `false`
    * disables claiming (the worker only advertises and serves control
    * commands).
    */
-  pollWorkflowStarts?: false | { intervalMs?: number; claimHeartbeatMs?: number };
+  pollWorkflowStarts?:
+    | false
+    | {
+        intervalMs?: number;
+        /**
+         * Poll cadence while the control socket is not open (not yet
+         * connected, dropped, refused): wake-ups can't arrive then. Default
+         * `DEFAULT_POLL_INTERVAL_WITHOUT_WAKEUPS_MS`, never above `intervalMs`.
+         */
+        disconnectedIntervalMs?: number;
+        jitter?: number;
+        claimHeartbeatMs?: number;
+      };
   /**
    * How long a start whose run is locked elsewhere waits before it can be
    * claimed again (ms). Default 5_000.
@@ -112,9 +147,10 @@ export interface ZoryaWorkerConfig {
    */
   metadata?: Record<string, unknown>;
   /**
-   * Opt in to the persistent worker → server WebSocket (`worker.control`),
-   * used for agent event streaming and workflow query handlers. Default:
-   * false.
+   * The persistent worker → server WebSocket (`worker.control`): Zorya's
+   * "work available" wake-ups, agent event streaming and workflow query
+   * handlers. Default: on. `false` leaves the worker on polling alone (at
+   * the faster default cadence).
    */
   controlSocket?:
     | boolean
@@ -123,6 +159,8 @@ export interface ZoryaWorkerConfig {
         reconnectDelayMs?: number;
         /** Max reconnect delay. Default 30_000ms. */
         maxReconnectDelayMs?: number;
+        /** WebSocket constructor. Default: the global `WebSocket`. Tests pass a fake. */
+        WebSocketImpl?: typeof WebSocket;
       };
   /** Background failures. Default: logs (network blips tersely). */
   onError?: (event: ZoryaWorkerErrorEvent) => void;
@@ -160,6 +198,32 @@ interface InFlightRun {
 function runIsAtRest(status: string): boolean {
   return status === "suspended" || isTerminalWorkflowStatus(status as never);
 }
+
+/** Idle poll cadence when Zorya's wake-ups reach the worker (control socket on). */
+export const DEFAULT_POLL_INTERVAL_MS = 5_000;
+/** Idle poll cadence without the control socket: polling is all there is. */
+export const DEFAULT_POLL_INTERVAL_WITHOUT_WAKEUPS_MS = 1_000;
+/** Default spread of the idle poll wait (fraction of the interval). */
+export const DEFAULT_POLL_JITTER = 0.2;
+
+/** Counters of the claim path (`ZoryaWorker.stats`). */
+export interface ZoryaWorkerStats {
+  /** Claim requests sent. */
+  readonly claimCalls: number;
+  /** Starts claimed. */
+  readonly claimed: number;
+  /** "Work available" messages received. */
+  readonly wakeups: number;
+  /** Of those, how many arrived with every slot busy and were ignored. */
+  readonly wakeupsIgnored: number;
+  /** Whether the control socket is open now (wake-ups can arrive). */
+  readonly controlSocketOpen: boolean;
+  /** Failed or dropped control-socket connections. */
+  readonly controlSocketFailures: number;
+}
+
+/** Pending claim wake-ups for released starts; past it the poll covers them. */
+const MAX_RELEASE_WAKEUPS = 1_024;
 
 const SETTLE_RETRIES = 5;
 /**
@@ -221,6 +285,21 @@ export class ZoryaWorker {
     at: string;
   }> = [];
   private readonly RECENT_RUNS_CAP = 20;
+  private readonly counters = {
+    claimCalls: 0,
+    claimed: 0,
+    wakeups: 0,
+    wakeupsIgnored: 0,
+    controlSocketFailures: 0,
+  };
+  private readonly pollOpenMs: number;
+  private readonly pollFallbackMs: number;
+  private controlOpen = false;
+  /** A control-socket failure was reported since it was last open. */
+  private controlFailureReported = false;
+  /** Due times (ms, ascending) at which a released start becomes claimable again. */
+  private releaseWakeups: number[] = [];
+  private releaseWakeTimer?: { handle: TimerHandle; dueAt: number };
 
   constructor(config: ZoryaWorkerConfig) {
     this.config = config;
@@ -255,10 +334,24 @@ export class ZoryaWorker {
         }
       },
     });
+    const controlSocket = config.controlSocket ?? true;
+    // With the control socket, the slow cadence applies only while it is
+    // open (wake-ups arrive); until it opens, and whenever it drops, the
+    // worker polls at the short cadence.
+    this.pollOpenMs =
+      poll?.intervalMs ??
+      (controlSocket ? DEFAULT_POLL_INTERVAL_MS : DEFAULT_POLL_INTERVAL_WITHOUT_WAKEUPS_MS);
+    this.pollFallbackMs = controlSocket
+      ? Math.min(
+          this.pollOpenMs,
+          poll?.disconnectedIntervalMs ?? DEFAULT_POLL_INTERVAL_WITHOUT_WAKEUPS_MS,
+        )
+      : this.pollOpenMs;
     if (poll) {
       this.claims = new PollLoop({
         name: `zorya-worker ${this.workerId} claims`,
-        intervalMs: poll.intervalMs ?? 1_000,
+        intervalMs: this.pollFallbackMs,
+        jitter: poll.jitter ?? DEFAULT_POLL_JITTER,
         clock: this.clock,
         maxBackoffMs: 5_000,
         tick: () => this.claimTick(),
@@ -273,8 +366,8 @@ export class ZoryaWorker {
       });
     }
 
-    if (config.controlSocket) {
-      const csCfg = typeof config.controlSocket === "object" ? config.controlSocket : {};
+    if (controlSocket) {
+      const csCfg = typeof controlSocket === "object" ? controlSocket : {};
       this.control = new WorkerControlSocket({
         url: this.client.url,
         workerId: this.workerId,
@@ -282,8 +375,11 @@ export class ZoryaWorker {
         apiKey: this.client.apiKey,
         reconnectDelayMs: csCfg.reconnectDelayMs,
         maxReconnectDelayMs: csCfg.maxReconnectDelayMs,
+        ...(csCfg.WebSocketImpl !== undefined && { WebSocketImpl: csCfg.WebSocketImpl }),
         clock: this.clock,
+        onConnectionChange: (state) => this.onControlState(state),
       });
+      this.control.onWork(() => this.onWorkAvailable({ counted: true }));
       this.bindControlCommands(this.control);
     }
   }
@@ -311,6 +407,7 @@ export class ZoryaWorker {
     if (this.started) return;
     this.started = true;
     this.stopping = false;
+    this.controlFailureReported = false;
     this.control?.start();
     this.presenceTask = this.presence.start();
     this.claimTask = this.claims?.start();
@@ -327,6 +424,11 @@ export class ZoryaWorker {
     return this.inFlight.size;
   }
 
+  /** Claim-path counters since construction. */
+  get stats(): ZoryaWorkerStats {
+    return { ...this.counters, controlSocketOpen: this.controlOpen };
+  }
+
   /**
    * Stop claiming, wait for the runs in flight, deregister and unadvertise.
    * With `timeoutMs`, runs still going after that long are abandoned: each
@@ -338,6 +440,9 @@ export class ZoryaWorker {
     if (!this.started) return;
     this.started = false;
     this.stopping = true;
+    this.releaseWakeTimer?.handle.clear();
+    this.releaseWakeTimer = undefined;
+    this.releaseWakeups = [];
     await this.claims?.stop();
     await this.claimTask;
 
@@ -363,6 +468,8 @@ export class ZoryaWorker {
     await this.presence.stop();
     await this.presenceTask;
     await this.control?.stop();
+    this.controlOpen = false;
+    this.claims?.setIntervalMs(this.pollFallbackMs);
     await this.client.workerRegistry.deregister(this.workerId).catch((error: unknown) => {
       this.report({ phase: "stop", error });
     });
@@ -428,16 +535,103 @@ export class ZoryaWorker {
       this.presence.wake();
       return "idle";
     }
+    // Claim as many as there are free slots (the protocol caps one claim
+    // at 100); a full batch claims again at once, so a backlog drains at
+    // the worker's concurrency, not one batch per poll.
     const free = this.concurrency - this.inFlight.size;
     if (free <= 0) return "idle";
     const limit = Math.min(free, 100);
+    this.counters.claimCalls++;
     const claims = await this.client.claimWorkflowStarts({
       workflowSpecs: this.workflowSpecs(),
       workerId: this.workerId,
       limit,
     });
+    this.counters.claimed += claims.length;
     for (const claim of claims) this.launch(claim);
     return claims.length === limit ? "again" : "idle";
+  }
+
+  /**
+   * Zorya queued work this worker can run (or the control socket just
+   * connected): claim now instead of at the next poll. With every slot
+   * busy the notice is ignored — the slot that frees claims anyway.
+   */
+  private onWorkAvailable(params: { counted: boolean }): void {
+    if (params.counted) this.counters.wakeups++;
+    if (!this.started || this.stopping || !this.claims) return;
+    if (this.inFlight.size >= this.concurrency) {
+      if (params.counted) this.counters.wakeupsIgnored++;
+      return;
+    }
+    this.claims.wake();
+  }
+
+  /**
+   * The control socket opened, dropped, or failed to connect. While it is
+   * not open no wake-up can arrive, so the claim loop polls at the short
+   * cadence; a failure is reported once per outage (a refused upgrade, a
+   * proxy without WebSocket support and an auth mismatch all look alike).
+   */
+  private onControlState(state: "open" | "closed" | "reconnecting"): void {
+    if (state === "open") {
+      this.controlOpen = true;
+      this.controlFailureReported = false;
+      this.claims?.setIntervalMs(this.pollOpenMs);
+      // Wake-ups sent while the socket was down are lost: claim now.
+      this.onWorkAvailable({ counted: false });
+      return;
+    }
+    const wasOpen = this.controlOpen;
+    this.controlOpen = false;
+    this.claims?.setIntervalMs(this.pollFallbackMs);
+    if (state === "reconnecting") this.counters.controlSocketFailures++;
+    if (wasOpen) this.onWorkAvailable({ counted: false });
+    if (!this.controlFailureReported && this.started && !this.stopping) {
+      this.controlFailureReported = true;
+      this.report({
+        phase: "control",
+        error: new Error(
+          `control socket to ${this.client.url}/ws/worker is not connected; ` +
+            `no wake-ups, polling every ${this.pollFallbackMs} ms until it reconnects`,
+        ),
+      });
+    }
+  }
+
+  /**
+   * A start released with `delayMs` is claimable again then: claim at that
+   * time rather than at the next poll. One timer, for the earliest due
+   * time; bounded (past the bound the poll covers it).
+   */
+  private wakeClaimsAfter(delayMs: number): void {
+    if (!this.claims || this.stopping || delayMs <= 0) return;
+    if (this.releaseWakeups.length >= MAX_RELEASE_WAKEUPS) return;
+    const dueAt = this.clock.currentTimeMs() + delayMs;
+    const at = this.releaseWakeups.findIndex((t) => t > dueAt);
+    if (at === -1) this.releaseWakeups.push(dueAt);
+    else this.releaseWakeups.splice(at, 0, dueAt);
+    this.armReleaseWakeTimer();
+  }
+
+  private armReleaseWakeTimer(): void {
+    const next = this.releaseWakeups[0];
+    if (next === undefined || this.stopping) return;
+    if (this.releaseWakeTimer && this.releaseWakeTimer.dueAt <= next) return;
+    this.releaseWakeTimer?.handle.clear();
+    const handle = this.clock.setTimeout(
+      () => {
+        this.releaseWakeTimer = undefined;
+        const now = this.clock.currentTimeMs();
+        let due = 0;
+        while (due < this.releaseWakeups.length && this.releaseWakeups[due]! <= now) due++;
+        this.releaseWakeups.splice(0, due);
+        this.onWorkAvailable({ counted: false });
+        this.armReleaseWakeTimer();
+      },
+      Math.max(0, next - this.clock.currentTimeMs()),
+    );
+    this.releaseWakeTimer = { handle, dueAt: next };
   }
 
   private launch(claim: WorkflowStartClaim): void {
@@ -494,10 +688,13 @@ export class ZoryaWorker {
         workflowId: claim.workflowId,
         workflowName: claim.workflowName,
         run: () =>
+          // The start carries no input: Zorya created the run with it, and
+          // the runner reads it with the run's state under the lock.
           this.runner.run({
             workflow: def,
             workflowId: claim.workflowId,
-            input: claim.input,
+            input: undefined,
+            useStoredInput: true,
             signal: abort.signal,
           }),
       });
@@ -508,7 +705,18 @@ export class ZoryaWorker {
     }
     if (entry.settled) return; // claim lost: the new claimant owns the start
 
-    const rest = await this.loadRest(claim.workflowId);
+    // The run returned its result: it completed, nothing to read back.
+    if (!outcome) {
+      await this.settle({ entry, action: "complete" });
+      return;
+    }
+    // The run is gone (deleted while queued): nothing to drive; drop the start.
+    if ((outcome.error as { _tag?: string } | undefined)?._tag === "WorkflowRunNotFoundError") {
+      this.report({ phase: "run", workflowId: claim.workflowId, error: outcome.error });
+      await this.settle({ entry, action: "complete" });
+      return;
+    }
+    const rest = await this.loadRest({ workflowId: claim.workflowId, error: outcome.error });
     if (rest !== undefined && runIsAtRest(rest.status)) {
       // Suspended on a sleep due soon (by this worker's clock): keep the
       // start, claimable at the wake time. Zorya's scan, on its own clock,
@@ -519,7 +727,8 @@ export class ZoryaWorker {
           ? rest.nextWakeAt - this.clock.currentTimeMs()
           : undefined;
       if (dueInMs !== undefined && dueInMs > 0 && dueInMs <= HOLD_SUSPENDED_START_MS) {
-        await this.settle({ entry, action: "release", delayMs: Math.ceil(dueInMs) });
+        const delayMs = Math.ceil(dueInMs);
+        if (await this.settle({ entry, action: "release", delayMs })) this.wakeClaimsAfter(delayMs);
         return;
       }
       await this.settle({ entry, action: "complete" });
@@ -527,24 +736,35 @@ export class ZoryaWorker {
     }
     // The run stopped short: its lock is held elsewhere, the lock was lost,
     // a checkpoint failed, or this worker abandoned it. Give the start back.
-    const tag = (outcome?.error as { _tag?: string } | undefined)?._tag;
-    if (tag !== "WorkflowLockError" && tag !== "WorkflowLockLostError" && outcome) {
+    const tag = (outcome.error as { _tag?: string } | undefined)?._tag;
+    if (tag !== "WorkflowLockError" && tag !== "WorkflowLockLostError") {
       this.report({ phase: "run", workflowId: claim.workflowId, error: outcome.error });
     }
     const delayMs =
       tag === "WorkflowLockError" ? this.lockedRetryDelayMs : this.stopping ? 0 : 1_000;
-    await this.settle({ entry, action: "release", delayMs });
+    if (await this.settle({ entry, action: "release", delayMs })) this.wakeClaimsAfter(delayMs);
   }
 
   /**
    * The run's status and, when it is parked on sleeps only, the earliest
-   * wake time, retried with backoff; undefined when it can't be read.
+   * wake time, retried with backoff; undefined when it can't be read. Reads
+   * the status alone unless the run is suspended on something other than a
+   * signal: only then are its steps (and their results) loaded, for the
+   * sleeps' wake times.
    */
-  private async loadRest(
-    workflowId: string,
-  ): Promise<{ status: string; nextWakeAt?: number } | undefined> {
+  private async loadRest(params: {
+    workflowId: string;
+    error: unknown;
+  }): Promise<{ status: string; nextWakeAt?: number } | undefined> {
+    const { workflowId } = params;
+    const suspension = params.error as { _tag?: string; reason?: string } | undefined;
+    const onSignal =
+      suspension?._tag === "WorkflowSuspendedError" && suspension.reason === "signal";
     for (let attempt = 0; attempt < SETTLE_RETRIES; attempt++) {
       try {
+        const status = await this.client.storage.loadWorkflowStatus(workflowId);
+        if (!status) return undefined;
+        if (status.status !== "suspended" || onSignal) return { status: status.status };
         const state = await this.client.storage.loadWorkflow(workflowId);
         if (!state) return undefined;
         // Only a run parked on sleeps alone: a signal can arrive any time.
@@ -579,28 +799,29 @@ export class ZoryaWorker {
     entry: InFlightRun;
     action: "complete" | "release";
     delayMs?: number;
-  }): Promise<void> {
+  }): Promise<boolean> {
     const { entry, action } = params;
     const ref = { id: entry.claim.id, claimToken: entry.claim.claimToken };
     for (let attempt = 0; attempt < SETTLE_RETRIES && !entry.settled; attempt++) {
       try {
-        if (action === "complete") await this.client.completeWorkflowStart(ref);
-        else {
-          await this.client.releaseWorkflowStart({
-            ...ref,
-            ...(params.delayMs !== undefined && { delayMs: params.delayMs }),
-          });
-        }
+        const current =
+          action === "complete"
+            ? await this.client.completeWorkflowStart(ref)
+            : await this.client.releaseWorkflowStart({
+                ...ref,
+                ...(params.delayMs !== undefined && { delayMs: params.delayMs }),
+              });
         entry.settled = true;
-        return;
+        return current;
       } catch (error) {
         if (attempt === SETTLE_RETRIES - 1) {
           this.report({ phase: "settle", workflowId: entry.claim.workflowId, error });
-          return;
+          return false;
         }
         await this.sleep(250 * 2 ** attempt);
       }
     }
+    return false;
   }
 
   /** Release a run's start at once (stop timeout); the run unwinds on its own. */
@@ -678,7 +899,8 @@ export class ZoryaWorker {
       if (
         tag !== "WorkflowSuspendedError" &&
         tag !== "WorkflowLockError" &&
-        tag !== "WorkflowLockLostError"
+        tag !== "WorkflowLockLostError" &&
+        tag !== "WorkflowRunNotFoundError"
       ) {
         this.failedCount += 1;
         this.recordRecent({ ...params, status: "failed", startedAt });
@@ -842,6 +1064,10 @@ function defaultOnError(params: { workerId: string; event: ZoryaWorkerErrorEvent
     console.warn(
       `[zorya-worker ${workerId}] ${event.phase}${where}: server unreachable, retrying — ${describeError(event.error)}`,
     );
+    return;
+  }
+  if (event.phase === "control") {
+    console.warn(`[zorya-worker ${workerId}] ${describeError(event.error)}`);
     return;
   }
   console.error(`[zorya-worker ${workerId}] ${event.phase} failed${where}:`, event.error);

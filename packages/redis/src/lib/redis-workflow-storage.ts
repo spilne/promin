@@ -2099,7 +2099,12 @@ export class RedisWorkflowStorage
     };
   }
 
-  async startFreshRun({ workflowId, guard, expectedRun }: StartFreshRunParams): Promise<number> {
+  async startFreshRun({
+    workflowId,
+    guard,
+    expectedRun,
+    nextInput,
+  }: StartFreshRunParams): Promise<number> {
     const state = await this.loadWorkflow(workflowId);
     if (!state) throw new Error(`Workflow ${workflowId} not found`);
     if (expectedRun !== undefined && state.run !== expectedRun) return state.run;
@@ -2126,6 +2131,8 @@ export class RedisWorkflowStorage
         String(this.maxRunsPerWorkflow),
         this.serializeDate(this.clock.now()),
         this.keys.journalBase(workflowId),
+        nextInput ? "1" : "",
+        nextInput ? JSON.stringify(nextInput.value ?? null) : "",
       ],
     })) as [number, string[]?, IndexSnapshot?];
     const newRun = Number(reply[0]);
@@ -2136,6 +2143,7 @@ export class RedisWorkflowStorage
         workflowId,
         guard,
         ...(expectedRun !== undefined && { expectedRun }),
+        ...(nextInput && { nextInput }),
       });
     }
     await Promise.all([

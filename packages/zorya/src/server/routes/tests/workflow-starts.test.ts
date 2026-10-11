@@ -17,7 +17,7 @@ function post(body?: unknown): Request {
 }
 
 async function claimOne(queue: InMemoryWorkflowStartQueue) {
-  await queue.enqueue({ workflowId: "wf-1", workflowName: "wf", input: {} });
+  await queue.enqueue({ workflowId: "wf-1", workflowName: "wf" });
   const [rec] = await queue.claim({ workflowSpecs: [{ name: "wf", versions: [] }], limit: 1 });
   return rec!;
 }
@@ -94,7 +94,7 @@ describe("worker-protocol start routes", () => {
     await expect(claim(post({ workflowSpecs: [], limit: 1_000 }))).rejects.toMatchObject({
       status: 400,
     });
-    await queue.enqueue({ workflowId: "a", workflowName: "wf", input: {}, version: "2" });
+    await queue.enqueue({ workflowId: "a", workflowName: "wf", version: "2" });
     const res = await claim(
       post({ workflowSpecs: [{ name: "wf", versions: ["1"] }], workerId: "w1", limit: 5 }),
     );

@@ -156,6 +156,15 @@ export class WorkflowVersionMismatchError extends TaggedError("WorkflowVersionMi
   readonly message: string;
 }>() {}
 
+/**
+ * `run({ useStoredInput: true })` found no stored run to drive: the caller
+ * drives runs created elsewhere and never creates one (it has no input).
+ */
+export class WorkflowRunNotFoundError extends TaggedError("WorkflowRunNotFoundError")<{
+  readonly workflowId: string;
+  readonly message: string;
+}>() {}
+
 /** A guard precondition failed — the step should not execute. */
 export class GuardError extends TaggedError("GuardError")<{
   readonly workflowId: string;

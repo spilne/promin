@@ -206,6 +206,7 @@ export {
   StepTimeoutError,
   WorkflowDeadlineError,
   WorkflowVersionMismatchError,
+  WorkflowRunNotFoundError,
   FenceTokenMismatchError,
   GuardError,
   WorkflowTripwireError,

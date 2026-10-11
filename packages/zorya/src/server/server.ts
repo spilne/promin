@@ -45,6 +45,7 @@ import type { ZoryaDags } from "./services/dags/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
 import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
+import { WorkerWakeups } from "./services/worker-wakeups.ts";
 import { WorkerWebSocketServer } from "./services/worker-ws-server.ts";
 import {
   QueuedWorkflows,
@@ -100,6 +101,13 @@ export class ZoryaServer {
    * `/api/runs/:id/agent-stream`. Always present.
    */
   readonly agentStreamHub: AgentStreamHub;
+  /**
+   * "Work available" messages to connected workers when the chain's
+   * `QueuedWorkflows` queues a start they can run. Present with
+   * `remoteWorkers` and a queued layer, unless `remoteWorkers.wakeups` is
+   * false.
+   */
+  readonly workerWakeups?: WorkerWakeups;
   /** Optional secrets vault — populated when ZoryaServerConfig provides one. */
   readonly secrets?: SecretsStorage;
 
@@ -115,6 +123,7 @@ export class ZoryaServer {
   private readonly logger: Logger;
   private remoteDeploymentSweeper?: RemoteDeploymentSweeper;
   private bunServer?: ListeningServer;
+  private unsubscribeWakeups?: () => void;
 
   constructor(config: ZoryaServerConfig) {
     this.workflows = config.workflows;
@@ -156,6 +165,19 @@ export class ZoryaServer {
       onError: (message, err) => this.logger.error(message, err),
     });
     this.agentStreamHub = new AgentStreamHub(this.workerWs);
+    const wakeups = config.remoteWorkers?.wakeups;
+    if (queued && config.remoteWorkers && wakeups !== false) {
+      const workerWakeups = new WorkerWakeups({
+        sockets: this.workerWs,
+        advertisements: queued.advertisements,
+        clock,
+        ...(wakeups?.coalesceMs !== undefined && { coalesceMs: wakeups.coalesceMs }),
+        ...(wakeups?.followUpMs !== undefined && { followUpMs: wakeups.followUpMs }),
+        onError: (err) => this.logger.error("[zorya] worker wake-up failed", err),
+      });
+      this.workerWakeups = workerWakeups;
+      this.unsubscribeWakeups = queued.onStartQueued((notice) => workerWakeups.notify(notice));
+    }
     this.lifecycle = new ServiceLifecycle({
       services: managedServices({
         workflows: this.workflows,
@@ -268,6 +290,10 @@ export class ZoryaServer {
         advertisements,
         workflowStarts: queued?.workflowStarts,
         storageCaller: (req) => this.planes.storageCaller(req),
+        ...(this.workerWakeups && {
+          onStartsClaimed: (starts: ReadonlyArray<{ readonly workflowId: string }>) =>
+            this.workerWakeups?.claimed(starts),
+        }),
       });
     }
     if (config.uiDir) mountStatic({ router, uiDir: config.uiDir });
@@ -355,6 +381,8 @@ export class ZoryaServer {
 
     this.liveStreams.closeAll();
     this.agentStreamHub.stop();
+    this.unsubscribeWakeups?.();
+    this.workerWakeups?.stop();
     this.workerWs.stop();
     this.remoteDeploymentSweeper?.stop();
 

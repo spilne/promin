@@ -29,7 +29,7 @@ describe("SqliteWorkflowStartQueue — persistence", () => {
   it("pending starts survive a fresh queue instance over the same db", async () => {
     const db = new Database(":memory:");
     const q1 = SqliteWorkflowStartQueue.make({ db });
-    await q1.enqueue({ workflowId: "wf-1", workflowName: "hello", input: { n: 1 } });
+    await q1.enqueue({ workflowId: "wf-1", workflowName: "hello" });
 
     // New instance pointed at the same db → existing pending start
     // must still be claimable. This is the shape that matters: a
@@ -49,7 +49,7 @@ describe("SqliteWorkflowStartQueue — persistence", () => {
     const db = new Database(":memory:");
     const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
     const q = SqliteWorkflowStartQueue.make({ db, reclaimAfterMs: 50, clock });
-    await q.enqueue({ workflowId: "a", workflowName: "wf", input: {} });
+    await q.enqueue({ workflowId: "a", workflowName: "wf" });
     const first = await q.claim({
       workflowSpecs: [{ name: "wf", versions: [] }],
       workerId: "dead-worker",

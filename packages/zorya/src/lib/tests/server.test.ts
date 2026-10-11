@@ -138,7 +138,9 @@ describe("ZoryaServer", () => {
       const enqueued = await queue.list();
       expect(enqueued.length).toBe(1);
       expect(enqueued[0]?.workflowName).toBe("order");
-      expect(enqueued[0]?.input).toEqual({ a: 1 });
+      // The start names the run; its input is kept once, on the run.
+      expect(enqueued[0] && "input" in enqueued[0]).toBe(false);
+      expect((await storage.loadWorkflow(body.workflowId))?.input).toEqual({ a: 1 });
     });
   });
 

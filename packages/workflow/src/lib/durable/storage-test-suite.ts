@@ -2248,6 +2248,30 @@ export function storageTestSuite(
         expect(state!.startedAt).toBeUndefined();
       });
 
+      it("nextInput replaces the stored input; without it the input stays", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "fresh-input",
+          workflowName: "test",
+          input: { count: 0 },
+        });
+        await s.startFreshRun({ workflowId: "fresh-input" });
+        expect((await s.loadWorkflow("fresh-input"))!.input).toEqual({ count: 0 });
+
+        await s.startFreshRun({ workflowId: "fresh-input", nextInput: { value: { count: 1 } } });
+        const state = await s.loadWorkflow("fresh-input");
+        expect(state!.run).toBe(3);
+        expect(state!.input).toEqual({ count: 1 });
+
+        // A repeat with a stale expectedRun changes nothing, the input included.
+        await s.startFreshRun({
+          workflowId: "fresh-input",
+          expectedRun: 2,
+          nextInput: { value: { count: 99 } },
+        });
+        expect((await s.loadWorkflow("fresh-input"))!.input).toEqual({ count: 1 });
+      });
+
       it("old run steps are not loaded", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "fresh-2", workflowName: "test", input: {} });

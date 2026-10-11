@@ -26,11 +26,13 @@ import { and, asc, eq, or, sql, type SQL } from "drizzle-orm";
 import {
   DEFAULT_START_RECLAIM_AFTER_MS,
   claimTokenFor,
+  startListLimit,
   type WorkerWorkflowSpec,
   type WorkflowStartClaimParams,
   type WorkflowStartClaimRef,
   type WorkflowStartEnqueueParams,
   type WorkflowStartEnqueueResult,
+  type WorkflowStartListParams,
   type WorkflowStartQueue,
   type WorkflowStartRecord,
   type WorkflowStartReleaseParams,
@@ -81,20 +83,34 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
       ? sql`wf_workflow_starts.available_at`
       : sql`CASE WHEN wf_workflow_starts.status = 'pending' THEN NULL
                  ELSE wf_workflow_starts.available_at END`;
+    // `prev` reads the record as it was before this statement, so the
+    // answer can say whether this enqueue made the start claimable.
     const [row] = (await this.db.execute(sql`
+      WITH prev AS (
+        SELECT status = 'pending' AND (available_at IS NULL OR available_at <= NOW()) AS claimable
+        FROM wf_workflow_starts WHERE workflow_id = ${params.workflowId}
+      )
       INSERT INTO wf_workflow_starts
-        (id, workflow_id, workflow_name, version, input, metadata, enqueued_at, status)
+        (id, workflow_id, workflow_name, version, metadata, enqueued_at, status)
       VALUES (${id}, ${params.workflowId}, ${params.workflowName}, ${params.version ?? null},
-        ${JSON.stringify(params.input ?? null)}::jsonb,
         ${params.metadata !== undefined ? JSON.stringify(params.metadata) : null}::jsonb,
         NOW(), 'pending')
       ON CONFLICT (workflow_id) DO UPDATE SET
         requeued = wf_workflow_starts.status = 'claimed',
         available_at = ${availableAt}
-      RETURNING id
-    `)) as unknown as Array<{ id: string }>;
+      RETURNING id,
+        (wf_workflow_starts.status = 'pending' AND (wf_workflow_starts.available_at IS NULL
+          OR wf_workflow_starts.available_at <= NOW())) AS claimable_now,
+        (SELECT claimable FROM prev) AS was_claimable
+    `)) as unknown as Array<{
+      id: string;
+      claimable_now: boolean;
+      was_claimable: boolean | null;
+    }>;
     const stored = row?.id ?? id;
-    return { id: stored, created: stored === id };
+    const created = stored === id;
+    const claimable = row?.claimable_now === true && (created || row.was_claimable === false);
+    return { id: stored, created, claimable };
   }
 
   async claim(params: WorkflowStartClaimParams): Promise<WorkflowStartRecord[]> {
@@ -234,7 +250,7 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
     return rows.length > 0;
   }
 
-  async list(): Promise<WorkflowStartRecord[]> {
+  async list(params?: WorkflowStartListParams): Promise<WorkflowStartRecord[]> {
     // Sweep stale claims first so the snapshot reflects the current
     // claimable set, matching the in-memory + Sqlite impls.
     await this.sweepStale(this.db);
@@ -242,7 +258,8 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
     const rows = await this.db
       .select()
       .from(workflowStarts)
-      .orderBy(asc(workflowStarts.enqueuedAt), asc(workflowStarts.id));
+      .orderBy(asc(workflowStarts.enqueuedAt), asc(workflowStarts.id))
+      .limit(startListLimit(params));
     return rows.map(rowToRecord);
   }
 
@@ -306,7 +323,6 @@ function rowToRecord(r: StartRow): WorkflowStartRecord {
     id: r.id,
     workflowId: r.workflowId,
     workflowName: r.workflowName,
-    input: r.input,
     enqueuedAt: r.enqueuedAt.getTime(),
     ...(r.version !== null && { version: r.version }),
     ...(r.metadata !== null &&
@@ -326,7 +342,6 @@ interface RawStartRow {
   workflow_id: string;
   workflow_name: string;
   version: string | null;
-  input: unknown;
   metadata: unknown;
   enqueued_at: Date | string;
   available_at: Date | string | null;
@@ -344,7 +359,6 @@ function rawToRecord(r: RawStartRow): WorkflowStartRecord {
     workflowId: r.workflow_id,
     workflowName: r.workflow_name,
     version: r.version,
-    input: typeof r.input === "string" ? JSON.parse(r.input) : r.input,
     metadata: typeof r.metadata === "string" ? JSON.parse(r.metadata) : r.metadata,
     enqueuedAt: new Date(r.enqueued_at),
     availableAt: time(r.available_at),

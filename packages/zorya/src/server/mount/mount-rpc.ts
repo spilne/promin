@@ -41,6 +41,8 @@ export function mountRpc(params: {
   readonly workflowStarts: WorkflowStartQueue | undefined;
   /** Who is calling `/rpc/storage` (see `AuthPlanes.storageCaller`). */
   readonly storageCaller: (req: Request) => StorageCaller | undefined;
+  /** Hears claimed starts (the worker wake-ups). */
+  readonly onStartsClaimed?: (starts: ReadonlyArray<{ readonly workflowId: string }>) => void;
 }): void {
   const { router, advertisements, workflowStarts, storageCaller } = params;
 
@@ -66,7 +68,10 @@ export function mountRpc(params: {
 
   if (workflowStarts) {
     router
-      .post("/api/worker-protocol/claim-starts", claimWorkflowStarts(workflowStarts))
+      .post(
+        "/api/worker-protocol/claim-starts",
+        claimWorkflowStarts(workflowStarts, params.onStartsClaimed),
+      )
       .post("/api/worker-protocol/heartbeat-start/:id", heartbeatWorkflowStart(workflowStarts))
       .post("/api/worker-protocol/complete-start/:id", completeWorkflowStart(workflowStarts))
       .post("/api/worker-protocol/release-start/:id", releaseWorkflowStart(workflowStarts))

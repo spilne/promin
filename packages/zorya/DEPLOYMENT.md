@@ -211,6 +211,25 @@ share.
   agent streaming), or accept that these two features answer only for
   workers on the same instance. Everything else is unaffected.
 
+- **Worker wake-ups are per instance; polling covers the rest.** When an
+  instance queues a start (a trigger, a schedule tick, a sleep or signal
+  wake-up, a recovery sweep, a resume), it sends "work available" over
+  `/ws/worker` only to the workers connected to _that_ instance. A worker
+  connected elsewhere finds the start at its next fallback poll (default
+  5 s ±20%), so in a cluster start latency is a few milliseconds for
+  workers on the enqueuing instance and up to one poll interval for the
+  others. To tighten it, lower `pollWorkflowStarts.intervalMs` on the
+  workers (each poll is one claim query), or route triggers and workers to
+  the same instance. There is no shared notification bus between
+  instances yet (a Postgres `LISTEN/NOTIFY` or Redis pub/sub fan-out would
+  close this gap). The follow-up wake-up of an unclaimed start only knows
+  about claims made on its own instance, so in a cluster it may wake that
+  instance's workers once more for a start claimed elsewhere (a wasted
+  claim, never a lost start). A worker whose `/ws/worker` upgrade fails
+  (a proxy without WebSocket support, a key mismatch) reports it once and
+  polls every second until the socket opens. `remoteWorkers.wakeups: false`
+  turns the messages off.
+
 - Agent threads: set a `turnGate` on `ZoryaAgents` (an `AgentTurnGate`
   over `PostgresLeaseStore`) so two instances never run the same
   conversation turn at once.

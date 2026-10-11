@@ -25,7 +25,8 @@ const worker = new ZoryaWorker({
   concurrency: env("CONCURRENCY", 10),
   heartbeatIntervalMs: env("HEARTBEAT_MS", 10_000),
   pollWorkflowStarts: {
-    intervalMs: env("POLL_MS", 1_000),
+    // Unset: the worker's default (a slow fallback poll; wake-ups claim new work).
+    ...(process.env.POLL_MS !== undefined && { intervalMs: env("POLL_MS", 0) }),
     claimHeartbeatMs: env("CLAIM_HEARTBEAT_MS", 30_000),
   },
   lockedRetryDelayMs: env("LOCKED_RETRY_MS", 5_000),

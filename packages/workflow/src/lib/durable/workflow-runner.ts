@@ -168,6 +168,13 @@ export type WorkflowRunnerRunParams =
        * already did stays done.
        */
       readonly signal?: AbortSignal;
+      /**
+       * Drive the stored run with the input stored on it; `input` is
+       * ignored. For a driver of runs created elsewhere (a worker claiming
+       * a queued start), so it needn't carry the input. Never creates a
+       * run: with none stored it rejects with `WorkflowRunNotFoundError`.
+       */
+      readonly useStoredInput?: boolean;
     }
   | {
       readonly name: string;
@@ -186,6 +193,8 @@ export type WorkflowRunnerRunParams =
       readonly idempotencyKeyTTL?: number;
       /** See the `{ workflow }` shape. */
       readonly signal?: AbortSignal;
+      /** See the `{ workflow }` shape. */
+      readonly useStoredInput?: boolean;
     };
 
 /**
@@ -510,6 +519,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       ...(gate !== undefined && { onLocked: gate.onLocked }),
       ...(namespace !== undefined && { namespace }),
       ...(params.signal !== undefined && { signal: params.signal }),
+      ...(params.useStoredInput === true && { useStoredInput: true }),
       ...(idempotencyKey && idempotencyExpiresAt ? { idempotencyKey, idempotencyExpiresAt } : {}),
     });
   }
@@ -679,6 +689,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     /** Set by `start`: leave an in-flight run alone, and report taking the lock. */
     onLocked?: () => void;
     signal?: AbortSignal;
+    useStoredInput?: boolean;
   }): Promise<unknown> {
     const ctx = orchestrationContextFor({
       workflow: params.workflow,
@@ -698,6 +709,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       namespace: params.namespace,
       ...(params.onLocked !== undefined && { onLocked: params.onLocked, rejectInFlight: true }),
       ...(params.signal !== undefined && { signal: params.signal }),
+      ...(params.useStoredInput === true && { useStoredInput: true }),
       ...(params.idempotencyKey && params.idempotencyExpiresAt
         ? {
             idempotencyKey: params.idempotencyKey,

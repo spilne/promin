@@ -171,7 +171,9 @@ function deploy(params: { reclaimAfterMs?: number } = {}): Deployment {
         clock,
         concurrency: concurrency ?? 10,
         heartbeatIntervalMs: 1_000,
-        pollWorkflowStarts: { intervalMs: 100, claimHeartbeatMs: 2_000 },
+        // No sockets here: the workers find work by polling alone.
+        controlSocket: false,
+        pollWorkflowStarts: { intervalMs: 100, jitter: 0, claimHeartbeatMs: 2_000 },
         lockedRetryDelayMs: 500,
         lock: { durationMs: 6_000, heartbeatIntervalMs: 2_000 },
         onError: (e) => errors?.push(e),
@@ -482,6 +484,46 @@ describe("worker-driven runs", () => {
       done: async () => (await dep.storage.loadWorkflowStatus("nap-1"))?.status === "completed",
     });
     expect(await dep.workflowStarts.list()).toHaveLength(0);
+  });
+
+  it("a continued-as-new run resumed by another worker gets the continued input", async () => {
+    const dep = deploy();
+    const finals: Array<{ worker: string; count: number }> = [];
+    const chained = (worker: string) =>
+      workflow<{ count: number }>({ name: "chained" })
+        .journaled("loop", function* (ctx) {
+          const count = yield* ctx.activity("read", () => ctx.input.count);
+          if (count < 1) ctx.continueAsNew({ count: count + 1 });
+          return count;
+        })
+        .sleep("nap", 2_000)
+        .step("final", ({ input }) => {
+          finals.push({ worker, count: input.count });
+          return succeed(input.count);
+        })
+        .build();
+    const first = dep.worker({ workflows: asDefs(chained("first")), workerId: "first" });
+    await elapse({ clock: dep.clock, ms: 100 });
+    await first.ready();
+    await dep.queued.trigger("chained", { count: 0 }, { workflowId: "can-1" });
+    await driveUntil({
+      clock: dep.clock,
+      done: async () => (await dep.storage.loadWorkflowStatus("can-1"))?.status === "suspended",
+    });
+    expect((await dep.storage.loadWorkflow("can-1"))?.run).toBe(2);
+    // The first worker goes away while the run sleeps; another resumes it.
+    let stopped = false;
+    const stopping = first.stop({ timeoutMs: 0 }).then(() => (stopped = true));
+    await driveUntil({ clock: dep.clock, done: () => stopped });
+    await stopping;
+    dep.worker({ workflows: asDefs(chained("second")), workerId: "second" });
+
+    await driveUntil({
+      clock: dep.clock,
+      done: async () => (await dep.storage.loadWorkflowStatus("can-1"))?.status === "completed",
+    });
+    expect(finals).toEqual([{ worker: "second", count: 1 }]);
+    expect((await dep.storage.loadWorkflow("can-1"))?.result).toBe(1);
   });
 
   it("the Workers page lists the workers registered over /rpc/worker", async () => {

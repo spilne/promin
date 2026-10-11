@@ -17,6 +17,7 @@
     "bench:promin": "bun run benchmarks/cross-language/bench-promin.ts",
     "bench:dataframe": "bun run packages/data/src/lib/dataframe/dataframe.bench.ts",
     "bench:workflow": "bun --conditions=@promin/source run packages/workflow/src/lib/durable/journaled-step.bench.ts && bun --conditions=@promin/source run packages/workflow/src/lib/durable/workflow-builder.bench.ts && bun --conditions=@promin/source run packages/workflow/src/lib/durable/runner/runner.bench.ts && bun --conditions=@promin/source run packages/workflow/src/lib/durable/steps/map-over-step.bench.ts",
+    "bench:zorya": "bun --conditions=@promin/source run packages/zorya/src/lib/worker-throughput.bench.ts",
     "bench:all": "bun run bench:dataframe && bun run bench:workflow && bun run bench",
     "zorya": "bun --conditions=@promin/source run packages/zorya/scripts/dev.ts",
     "build:ui": "bun packages/zorya/scripts/build-ui.ts",

@@ -65,7 +65,7 @@ describe("SqliteWorkflowStartQueue on a FakeWallClock", () => {
       clock,
     });
     const specs = [{ name: "n", versions: [] }];
-    await queue.enqueue({ workflowId: "wf", workflowName: "n", input: {} });
+    await queue.enqueue({ workflowId: "wf", workflowName: "n" });
 
     expect(await queue.claim({ workflowSpecs: specs, workerId: "a", limit: 1 })).toHaveLength(1);
     clock.advance(500);

@@ -7,6 +7,9 @@
 // engine against shared storage, and completes the start once the run has
 // ended or suspended. Wake-ups (a due sleep, a delivered signal), resumes and
 // orphan recovery enqueue the run again; the queue keeps one record per run.
+// A record names the run, not its input: the run row holds the input, and
+// the worker drives the stored run with it (`useStoredInput`), so a large
+// input is stored, sent and parsed once.
 //
 // Persistence: in-memory dies with the process. SQLite/Postgres backends
 // survive restarts, so a trigger from the dashboard with no worker
@@ -20,7 +23,6 @@ export interface WorkflowStartRecord {
   readonly id: string;
   readonly workflowId: string;
   readonly workflowName: string;
-  readonly input: unknown;
   readonly metadata?: Record<string, unknown>;
   /** Workflow version of the run, if any. */
   readonly version?: string;
@@ -66,7 +68,6 @@ export interface WorkflowStartReleaseParams extends WorkflowStartClaimRef {
 export interface WorkflowStartEnqueueParams {
   readonly workflowId: string;
   readonly workflowName: string;
-  readonly input: unknown;
   readonly metadata?: Record<string, unknown>;
   readonly version?: string;
   /**
@@ -85,6 +86,15 @@ export interface WorkflowStartEnqueueResult {
   readonly id: string;
   /** False when a record for the `workflowId` already existed and nothing was added. */
   readonly created: boolean;
+  /**
+   * True when this enqueue left a start claimable now that was not before:
+   * a new record, or a pending record whose release delay it cleared. False
+   * for a record that was already claimable, one a worker holds (it is
+   * marked `requeued` and goes back to pending when that claim ends), and
+   * one still delayed (`keepAvailableAt`). Workers need telling only when
+   * it is true.
+   */
+  readonly claimable: boolean;
 }
 
 /** Params of `WorkflowStartQueue.claim`. */
@@ -100,6 +110,15 @@ export interface WorkflowStartClaimParams {
    */
   readonly claimId?: string;
 }
+
+/** Params of `WorkflowStartQueue.list`. */
+export interface WorkflowStartListParams {
+  /** Most records returned. Default: `DEFAULT_START_LIST_LIMIT`. */
+  readonly limit?: number;
+}
+
+/** Default page size of `WorkflowStartQueue.list`. */
+export const DEFAULT_START_LIST_LIMIT = 100;
 
 /** Per-name set of versions a worker can run. */
 export interface WorkerWorkflowSpec {
@@ -169,8 +188,12 @@ export interface WorkflowStartQueue {
    * enqueued again during the claim (`requeued`). Fenced like `complete`.
    */
   release(params: WorkflowStartReleaseParams): Promise<boolean>;
-  /** Snapshot, oldest first — used by `GET /api/worker-protocol/starts` for debugging. */
-  list(): Promise<WorkflowStartRecord[]>;
+  /**
+   * Snapshot of the oldest `limit` records (default
+   * `DEFAULT_START_LIST_LIMIT`) — used by `GET /api/worker-protocol/starts`
+   * for debugging.
+   */
+  list(params?: WorkflowStartListParams): Promise<WorkflowStartRecord[]>;
 }
 
 export interface InMemoryWorkflowStartQueueConfig {
@@ -190,6 +213,12 @@ export function startMatchesSpec(params: {
 }): boolean {
   const { version, spec } = params;
   return !version || spec.versions.length === 0 || spec.versions.includes(version);
+}
+
+/** The page size `list` uses: `limit`, floored at 0, or the default. */
+export function startListLimit(params: WorkflowStartListParams | undefined): number {
+  const limit = params?.limit ?? DEFAULT_START_LIST_LIMIT;
+  return Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : DEFAULT_START_LIST_LIMIT;
 }
 
 /** The claim token of the `index`-th start claimed under `claimId` (or a random one). */
@@ -227,12 +256,14 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
     const existing = this.byWorkflowId.get(params.workflowId);
     if (existing !== undefined) {
       const rec = this.records.get(existing)!;
+      let claimable = false;
       if (rec.claimToken !== undefined) {
         this.records.set(existing, { ...rec, requeued: true });
       } else if (rec.availableAt !== undefined && !params.keepAvailableAt) {
+        claimable = rec.availableAt > this.clock.currentTimeMs();
         this.records.set(existing, unclaimed(rec));
       }
-      return { id: existing, created: false };
+      return { id: existing, created: false, claimable };
     }
     const now = this.clock.currentTimeMs();
     this.seq += 1;
@@ -241,13 +272,12 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
       id,
       workflowId: params.workflowId,
       workflowName: params.workflowName,
-      input: params.input,
       ...(params.metadata !== undefined && { metadata: params.metadata }),
       ...(params.version !== undefined && { version: params.version }),
       enqueuedAt: now,
     });
     this.byWorkflowId.set(params.workflowId, id);
-    return { id, created: true };
+    return { id, created: true, claimable: true };
   }
 
   async claim(params: WorkflowStartClaimParams): Promise<WorkflowStartRecord[]> {
@@ -320,9 +350,15 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
     return true;
   }
 
-  async list(): Promise<WorkflowStartRecord[]> {
+  async list(params: WorkflowStartListParams = {}): Promise<WorkflowStartRecord[]> {
     this.reclaimStale();
-    return [...this.records.values()];
+    const limit = startListLimit(params);
+    const out: WorkflowStartRecord[] = [];
+    for (const rec of this.records.values()) {
+      if (out.length >= limit) break;
+      out.push(rec);
+    }
+    return out;
   }
 
   /** The record, if `ref` is its current claim. */
@@ -347,7 +383,6 @@ function unclaimed(rec: WorkflowStartRecord): WorkflowStartRecord {
     id: rec.id,
     workflowId: rec.workflowId,
     workflowName: rec.workflowName,
-    input: rec.input,
     enqueuedAt: rec.enqueuedAt,
     ...(rec.metadata !== undefined && { metadata: rec.metadata }),
     ...(rec.version !== undefined && { version: rec.version }),

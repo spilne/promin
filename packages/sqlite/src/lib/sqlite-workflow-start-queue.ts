@@ -26,7 +26,6 @@
 //     workflow_id   TEXT NOT NULL UNIQUE,
 //     workflow_name TEXT NOT NULL,
 //     version       TEXT,
-//     input         TEXT NOT NULL,
 //     metadata      TEXT,
 //     enqueued_at   INTEGER NOT NULL,
 //     available_at  INTEGER,
@@ -43,12 +42,14 @@ import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
   DEFAULT_START_RECLAIM_AFTER_MS,
   claimTokenFor,
+  startListLimit,
   startMatchesSpec,
   type WorkerWorkflowSpec,
   type WorkflowStartClaimParams,
   type WorkflowStartClaimRef,
   type WorkflowStartEnqueueParams,
   type WorkflowStartEnqueueResult,
+  type WorkflowStartListParams,
   type WorkflowStartQueue,
   type WorkflowStartRecord,
   type WorkflowStartReleaseParams,
@@ -60,7 +61,6 @@ interface Row {
   workflow_id: string;
   workflow_name: string;
   version: string | null;
-  input: string;
   metadata: string | null;
   enqueued_at: number;
   available_at: number | null;
@@ -119,7 +119,6 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
         workflow_id   TEXT NOT NULL UNIQUE,
         workflow_name TEXT NOT NULL,
         version       TEXT,
-        input         TEXT NOT NULL,
         metadata      TEXT,
         enqueued_at   INTEGER NOT NULL,
         available_at  INTEGER,
@@ -150,27 +149,38 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
     const availableAt = params.keepAvailableAt
       ? "available_at"
       : "CASE WHEN status = 'pending' THEN NULL ELSE available_at END";
-    const row = this.db
-      .query<{ id: string }>(
-        `INSERT INTO ${this._t}
-           (id, workflow_id, workflow_name, version, input, metadata, enqueued_at, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
-         ON CONFLICT (workflow_id) DO UPDATE SET
-           requeued = (status = 'claimed'),
-           available_at = ${availableAt}
-         RETURNING id`,
-      )
-      .get(
-        id,
-        params.workflowId,
-        params.workflowName,
-        params.version ?? null,
-        JSON.stringify(params.input),
-        params.metadata !== undefined ? JSON.stringify(params.metadata) : null,
-        now,
-      );
-    const stored = row?.id ?? id;
-    return { id: stored, created: stored === id };
+    const claimableNow = (r: { status: string; available_at: number | null } | null) =>
+      r !== null && r.status === "pending" && (r.available_at === null || r.available_at <= now);
+    return this.db.transaction((): WorkflowStartEnqueueResult => {
+      // The record before this enqueue: did it make the start claimable?
+      const prev = this.db
+        .query<{ status: string; available_at: number | null }>(
+          `SELECT status, available_at FROM ${this._t} WHERE workflow_id = ?`,
+        )
+        .get(params.workflowId);
+      const row = this.db
+        .query<{ id: string; status: string; available_at: number | null }>(
+          `INSERT INTO ${this._t}
+             (id, workflow_id, workflow_name, version, metadata, enqueued_at, status)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending')
+           ON CONFLICT (workflow_id) DO UPDATE SET
+             requeued = (status = 'claimed'),
+             available_at = ${availableAt}
+           RETURNING id, status, available_at`,
+        )
+        .get(
+          id,
+          params.workflowId,
+          params.workflowName,
+          params.version ?? null,
+          params.metadata !== undefined ? JSON.stringify(params.metadata) : null,
+          now,
+        );
+      const stored = row?.id ?? id;
+      const created = stored === id;
+      const claimable = claimableNow(row ?? null) && (created || !claimableNow(prev ?? null));
+      return { id: stored, created, claimable };
+    })();
   }
 
   async claim(params: WorkflowStartClaimParams): Promise<WorkflowStartRecord[]> {
@@ -323,14 +333,14 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
     return this._changes() > 0;
   }
 
-  async list(): Promise<WorkflowStartRecord[]> {
+  async list(params?: WorkflowStartListParams): Promise<WorkflowStartRecord[]> {
     // Sweep stale claims first so the snapshot reflects the current
     // claimable set, matching the in-memory impl's behaviour.
     this._sweepStale(this.clock.currentTimeMs());
 
     const rows = this.db
-      .query<Row>(`SELECT * FROM ${this._t} ORDER BY enqueued_at ASC, id ASC`)
-      .all();
+      .query<Row>(`SELECT * FROM ${this._t} ORDER BY enqueued_at ASC, id ASC LIMIT ?`)
+      .all(startListLimit(params));
     return rows.map(rowToRecord);
   }
 
@@ -357,7 +367,6 @@ function rowToRecord(r: Row): WorkflowStartRecord {
     id: r.id,
     workflowId: r.workflow_id,
     workflowName: r.workflow_name,
-    input: JSON.parse(r.input),
     enqueuedAt: r.enqueued_at,
     ...(r.version !== null && { version: r.version }),
     ...(r.metadata !== null && { metadata: JSON.parse(r.metadata) as Record<string, unknown> }),

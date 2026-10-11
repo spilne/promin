@@ -4,9 +4,10 @@
 //
 // Mirrors the server-side WorkerWebSocketServer protocol. Workers open this
 // socket alongside their HTTP-RPC client; it's the channel the server
-// pushes commands over (start agent stream, run query handler, drain),
-// and the channel the worker pushes asynchronous frames back through
-// (token deltas, structured agent events).
+// pushes commands over (start agent stream, run query handler, drain) and
+// "work available" notices (starts this worker can run were queued), and
+// the channel the worker pushes asynchronous frames back through (token
+// deltas, structured agent events).
 //
 // Lifecycle: open → identify → ping/pong → close → reconnect with
 // exponential backoff (250ms → 30s capped). The reconnect is bounded so a
@@ -22,7 +23,9 @@ import { SystemWallClock, type TimerHandle, type WallClock } from "@promin/workf
 
 export type ServerToWorker =
   | { kind: "ping" }
-  | { kind: "cmd"; requestId: string; cmd: string; args?: unknown };
+  | { kind: "cmd"; requestId: string; cmd: string; args?: unknown }
+  /** Starts this worker can run were queued: claim now (`onWork`). */
+  | { kind: "work" };
 
 export type WorkerToServer =
   | { kind: "identify"; workerId: string; capabilities?: readonly string[] }
@@ -80,6 +83,7 @@ export class WorkerControlSocket {
   private readonly WebSocketImpl: typeof WebSocket;
   private readonly onConnectionChange?: (state: "open" | "closed" | "reconnecting") => void;
   private readonly handlers = new Map<string, CommandHandler>();
+  private readonly workListeners = new Set<() => void>();
   private currentDelayMs: number;
   private reconnectTimer?: TimerHandle;
   private readonly clock: WallClock;
@@ -119,6 +123,17 @@ export class WorkerControlSocket {
   }
 
   /**
+   * Listen for "work available" messages: the server queued starts this
+   * worker can run. Returns the unsubscribe function.
+   */
+  onWork(listener: () => void): () => void {
+    this.workListeners.add(listener);
+    return () => {
+      this.workListeners.delete(listener);
+    };
+  }
+
+  /**
    * Push a frame to the server. Returns `true` when the message was
    * dispatched on an open socket; `false` when the socket is closed
    * (caller decides whether to buffer / drop). No queuing here — agent
@@ -128,9 +143,14 @@ export class WorkerControlSocket {
     return this.send({ kind: "frame", streamId, payload });
   }
 
-  /** Open the socket. Idempotent — calling twice is a no-op. */
+  /**
+   * Open the socket. Idempotent — calling twice is a no-op. After `stop()`
+   * it opens the socket again (a restarted worker).
+   */
   start(): void {
-    if (this.stopped || this.state !== "closed") return;
+    this.stopped = false;
+    if (this.state !== "closed") return;
+    this.currentDelayMs = this.initialDelayMs;
     this.connect();
   }
 
@@ -180,6 +200,7 @@ export class WorkerControlSocket {
     }
     this.ws = ws;
     ws.addEventListener("open", () => {
+      if (this.ws !== ws) return; // a socket replaced by stop() and a restart
       // Identify before anything else.
       this.send({
         kind: "identify",
@@ -191,6 +212,7 @@ export class WorkerControlSocket {
       this.onConnectionChange?.("open");
     });
     ws.addEventListener("message", (event: MessageEvent) => {
+      if (this.ws !== ws) return;
       let msg: ServerToWorker;
       try {
         const text =
@@ -202,6 +224,7 @@ export class WorkerControlSocket {
       this.handleInbound(msg);
     });
     ws.addEventListener("close", () => {
+      if (this.ws !== ws) return;
       this.ws = undefined;
       const wasOpen = this.state === "open";
       if (wasOpen) this.onConnectionChange?.("closed");
@@ -236,6 +259,15 @@ export class WorkerControlSocket {
         return;
       case "cmd":
         void this.dispatchCommand(msg);
+        return;
+      case "work":
+        for (const listener of this.workListeners) {
+          try {
+            listener();
+          } catch {
+            /* a throwing listener must not break the socket */
+          }
+        }
         return;
     }
   }

@@ -522,7 +522,7 @@ return {0, ARGV[1]}
 // atomic script. The dropped sleeps are returned for the caller to take off
 // the cross-workflow sleep schedule.
 // KEYS: [wfKey, runsKey, signalsKey, journalStepsKey, attemptsKey]
-// ARGV: [expectedRun, summaryJson, maxRuns, nowIso, journalBase]
+// ARGV: [expectedRun, summaryJson, maxRuns, nowIso, journalBase, hasNextInput ('1'|''), nextInputJson]
 // Returns {newRun, {"<step>::<idx>|<path>" ...}, snapshot}, or {-1} when
 // the run moved on since the caller read it.
 export const START_FRESH_RUN_LUA = `
@@ -533,6 +533,7 @@ redis.call('RPUSH', KEYS[2], ARGV[2])
 redis.call('LTRIM', KEYS[2], -tonumber(ARGV[3]), -1)
 local newRun = tonumber(run) + 1
 redis.call('HSET', KEYS[1], 'run', tostring(newRun), 'status', 'pending', 'updatedAt', ARGV[4])
+if ARGV[6] == '1' then redis.call('HSET', KEYS[1], 'input', ARGV[7]) end
 redis.call('HDEL', KEYS[1], 'result', 'error', 'errorTag', 'tripwire', 'startedAt', 'completedAt')
 redis.call('HINCRBY', KEYS[1], 'iv', 1)
 redis.call('PERSIST', KEYS[1])

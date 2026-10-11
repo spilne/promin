@@ -19,6 +19,7 @@
 //   Server → Worker
 //     { kind: "ping" }
 //     { kind: "cmd", requestId, cmd, args? }   // request/reply
+//     { kind: "work" }                         // starts the worker can run were queued
 //     { kind: "error", error, message? }       // protocol violation; socket closes
 //
 // Every inbound frame is validated against `WorkerWsInboundSchema`. A frame
@@ -85,6 +86,8 @@ export type WorkerWsInbound = z.infer<typeof WorkerWsInboundSchema>;
 export type WorkerWsOutbound =
   | { kind: "ping" }
   | { kind: "cmd"; requestId: string; cmd: string; args?: unknown }
+  /** Work available: claim now instead of at the next poll (`WorkerWakeups`). */
+  | { kind: "work" }
   | { kind: "error"; error: "protocol_error" | "frame_too_large"; message?: string };
 
 /** Close codes the server uses on worker sockets. */
@@ -367,6 +370,11 @@ export class WorkerWebSocketServer {
   /** Snapshot of currently connected worker ids. */
   connectedWorkers(): string[] {
     return [...this.workers.keys()];
+  }
+
+  /** Number of identified worker sockets. */
+  connectedCount(): number {
+    return this.workers.size;
   }
 
   // -------------------------------------------------------------------------

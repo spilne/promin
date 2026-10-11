@@ -17,6 +17,12 @@
 //     retried trigger for a run already queued changes nothing
 //   - advertisements expire unless workers refresh them; workers the
 //     registry declares dead lose theirs at once
+//   - a start names the run, not its input: the worker drives the stored
+//     run with the stored input, so a large input is kept once
+//   - every start made claimable is reported to `onStartQueued`; the
+//     server turns those into "work available" messages to the workers
+//     that can run it (`WorkerWakeups`), and workers keep polling as the
+//     fallback
 //
 // Owns the start queue, the advertisement registry and the worker
 // registry; ZoryaServer mounts the worker protocol over them and shows the
@@ -46,6 +52,7 @@ import {
   InMemoryWorkflowAdvertisementRegistry,
   type WorkflowAdvertisementRegistry,
 } from "@promin/workflow/distributed";
+import type { QueuedStartNotice } from "../worker-wakeups.ts";
 import { RunCancelledError, UnknownWorkflowVersionError } from "./errors.ts";
 import { assertSharedStores, leaderElectionFor, type ZoryaCluster } from "./cluster.ts";
 import { LeaderLoop, forEachOrphanedRun, redeliverChildEndedSignals } from "./run-maintenance.ts";
@@ -163,6 +170,7 @@ export class QueuedWorkflows extends ZoryaWorkflows {
   /** The last maintenance sweep's outcome (tests, diagnostics). */
   lastMaintenance?: QueuedMaintenanceReport;
   private lastChildWakeCheck = Number.NEGATIVE_INFINITY;
+  private readonly startListeners = new Set<(notice: QueuedStartNotice) => void>();
 
   constructor(config: QueuedWorkflowsConfig) {
     const advertisements = config.advertisements ?? new InMemoryWorkflowAdvertisementRegistry();
@@ -292,7 +300,6 @@ export class QueuedWorkflows extends ZoryaWorkflows {
       run: {
         workflowId,
         workflowName: name,
-        input,
         ...(opts?.metadata !== undefined && { metadata: opts.metadata }),
         ...(version !== undefined && { version }),
       },
@@ -408,26 +415,58 @@ export class QueuedWorkflows extends ZoryaWorkflows {
     ]);
   }
 
-  /** Queue a start for `run`; true when a new record was created. */
+  /**
+   * Listen for starts that became claimable: called after an enqueue
+   * (trigger, rerun, resume, wake-up, recovery) that left a start claimable
+   * now that was not before, with the run, its workflow and version, so
+   * connected workers can be told to claim now (`WorkerWakeups`). Returns
+   * the unsubscribe function.
+   */
+  onStartQueued(listener: (notice: QueuedStartNotice) => void): () => void {
+    this.startListeners.add(listener);
+    return () => {
+      this.startListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Queue a start for `run`; true when a new record was created. The start
+   * names the run only: the worker drives it with the stored input.
+   */
   private async enqueue(params: {
     readonly run: {
       readonly workflowId: string;
       readonly workflowName: string;
-      readonly input: unknown;
       readonly version?: string;
       readonly metadata?: Record<string, unknown>;
     };
     readonly keepAvailableAt?: boolean;
   }): Promise<boolean> {
     const { run } = params;
-    const { created } = await this.workflowStarts.enqueue({
+    const { created, claimable } = await this.workflowStarts.enqueue({
       workflowId: run.workflowId,
       workflowName: run.workflowName,
-      input: run.input,
       ...(run.metadata !== undefined && { metadata: run.metadata }),
       ...(run.version !== undefined && { version: run.version }),
       ...(params.keepAvailableAt && { keepAvailableAt: true }),
     });
+    // Only a start claimable now is worth a wake-up: a requeued one goes
+    // back to pending when its claim ends (that worker claims again at
+    // once), and a delayed one is claimed when its delay is up (the
+    // releasing worker's timer) or at a poll.
+    if (!claimable) return created;
+    const notice: QueuedStartNotice = {
+      workflowId: run.workflowId,
+      workflowName: run.workflowName,
+      ...(run.version !== undefined && { version: run.version }),
+    };
+    for (const listener of this.startListeners) {
+      try {
+        listener(notice);
+      } catch {
+        // A throwing listener must not fail the enqueue.
+      }
+    }
     return created;
   }
 
@@ -435,7 +474,6 @@ export class QueuedWorkflows extends ZoryaWorkflows {
   private async wake(run: {
     readonly workflowId: string;
     readonly workflowName: string;
-    readonly input: unknown;
     readonly version?: string;
     readonly reason: "sleep" | "signal-timeout" | "signal";
   }): Promise<void> {

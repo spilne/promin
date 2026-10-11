@@ -531,7 +531,12 @@ export class InMemoryWorkflowStorage
     wf.updatedAt = this.clock.now();
   }
 
-  async startFreshRun({ workflowId, guard, expectedRun }: StartFreshRunParams): Promise<number> {
+  async startFreshRun({
+    workflowId,
+    guard,
+    expectedRun,
+    nextInput,
+  }: StartFreshRunParams): Promise<number> {
     this.checkFence({ workflowId, guard });
     const wf = this.workflows.get(workflowId);
     if (!wf) throw new Error(`Workflow ${workflowId} not found`);
@@ -543,6 +548,7 @@ export class InMemoryWorkflowStorage
     this.runHistory.set(workflowId, runs);
 
     wf.run++;
+    if (nextInput) wf.input = nextInput.value;
     wf.status = "pending";
     wf.result = undefined;
     wf.error = undefined;

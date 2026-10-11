@@ -37,7 +37,6 @@ postgresDescribe("PgWorkflowStartQueue conformance", (pg) => {
         await q.enqueue({
           workflowId: `wf-${i}`,
           workflowName: "race",
-          input: { i },
         });
       }
       // Fire 10 concurrent claimers each asking for 10 records.
@@ -81,7 +80,6 @@ postgresDescribe("PgWorkflowStartQueue conformance", (pg) => {
         await q.enqueue({
           workflowId: `wf-${i}`,
           workflowName: "race",
-          input: { i },
           version: versions[i]!,
         });
       }
@@ -156,7 +154,7 @@ postgresDescribe("PgWorkflowStartQueue conformance", (pg) => {
       const b = new PgWorkflowStartQueue({ db: pg.db });
 
       // Enqueue from queue A; claim from queue B — must see A's enqueue.
-      await a.enqueue({ workflowId: "wf-1", workflowName: "shared", input: {} });
+      await a.enqueue({ workflowId: "wf-1", workflowName: "shared" });
       const claimed = await b.claim({
         workflowSpecs: [{ name: "shared", versions: [] }],
         workerId: "worker-b",
@@ -184,7 +182,7 @@ postgresDescribe("PgWorkflowStartQueue conformance", (pg) => {
         const ids = Array.from({ length: runs }, (_, i) => `race-${round}-${i}`);
         const refs = await Promise.all(
           ids.map(async (workflowId) => {
-            await q.enqueue({ workflowId, workflowName: workflowId, input: {} });
+            await q.enqueue({ workflowId, workflowName: workflowId });
             const [rec] = await q.claim({
               workflowSpecs: [{ name: workflowId, versions: [] }],
               limit: 1,
@@ -195,7 +193,7 @@ postgresDescribe("PgWorkflowStartQueue conformance", (pg) => {
         await Promise.all(
           ids.flatMap((workflowId, i) => [
             q.complete(refs[i]!),
-            q.enqueue({ workflowId, workflowName: workflowId, input: {} }),
+            q.enqueue({ workflowId, workflowName: workflowId }),
           ]),
         );
         const left = await q.list();
@@ -212,7 +210,7 @@ postgresDescribe("PgWorkflowStartQueue conformance", (pg) => {
 
     it("stale claims drop back to pending after reclaimAfterMs (database clock)", async () => {
       const q = new PgWorkflowStartQueue({ db: pg.db, reclaimAfterMs: 300 });
-      await q.enqueue({ workflowId: "stuck-1", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "stuck-1", workflowName: "wf" });
       const [first] = await q.claim({
         workflowSpecs: [{ name: "wf", versions: [] }],
         workerId: "worker-a",
@@ -234,7 +232,7 @@ postgresDescribe("PgWorkflowStartQueue conformance", (pg) => {
 
     it("a heartbeat keeps a claim past the window; release with a delay hides it until due", async () => {
       const q = new PgWorkflowStartQueue({ db: pg.db, reclaimAfterMs: 400 });
-      await q.enqueue({ workflowId: "hb-1", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "hb-1", workflowName: "wf" });
       const specs = [{ name: "wf", versions: [] as string[] }];
       const [rec] = await q.claim({ workflowSpecs: specs, limit: 1 });
       const ref = { id: rec!.id, claimToken: rec!.claimToken! };

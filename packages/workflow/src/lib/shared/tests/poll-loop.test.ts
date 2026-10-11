@@ -226,4 +226,41 @@ describe("PollLoop", () => {
     await loop.stop();
     expect(clock.pendingCount()).toBe(0);
   });
+
+  it("jitter draws each idle wait from intervalMs × [1 - jitter, 1 + jitter]", async () => {
+    const clock = FakeWallClock.create(0);
+    const draws = [0, 0.5, 0.999];
+    let ticks = 0;
+    const loop = new PollLoop({
+      name: "jittered",
+      intervalMs: 1_000,
+      jitter: 0.2,
+      random: () => draws[(ticks - 1) % draws.length]!,
+      clock,
+      tick: async () => {
+        ticks++;
+      },
+    });
+
+    void loop.start();
+    // random 0 → 800 ms.
+    await waitFor(() => ticks === 1 && clock.pendingCount() === 1);
+    clock.advance(799);
+    expect(ticks).toBe(1);
+    clock.advance(1);
+    // random 0.5 → 1000 ms.
+    await waitFor(() => ticks === 2 && clock.pendingCount() === 1);
+    clock.advance(999);
+    expect(ticks).toBe(2);
+    clock.advance(1);
+    // random 0.999 → 1200 ms (rounded).
+    await waitFor(() => ticks === 3 && clock.pendingCount() === 1);
+    clock.advance(1_197);
+    expect(ticks).toBe(3);
+    clock.advance(3);
+    await waitFor(() => ticks === 4);
+
+    await loop.stop();
+    expect(clock.pendingCount()).toBe(0);
+  });
 });

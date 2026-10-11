@@ -14,7 +14,7 @@ describe("InMemoryWorkflowStartQueue — stamps and reclaim on an injected clock
     const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
     const queue = new InMemoryWorkflowStartQueue({ clock });
 
-    await queue.enqueue({ workflowId: "w-1", workflowName: "wf", input: {} });
+    await queue.enqueue({ workflowId: "w-1", workflowName: "wf" });
     clock.advance(250);
     const [claimed] = await queue.claim({ workflowSpecs: specs, workerId: "a", limit: 1 });
 
@@ -27,7 +27,7 @@ describe("InMemoryWorkflowStartQueue — stamps and reclaim on an injected clock
     const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
     const queue = new InMemoryWorkflowStartQueue({ reclaimAfterMs: 1_000, clock });
 
-    await queue.enqueue({ workflowId: "w-2", workflowName: "wf", input: {} });
+    await queue.enqueue({ workflowId: "w-2", workflowName: "wf" });
     const first = await queue.claim({ workflowSpecs: specs, workerId: "a", limit: 1 });
     expect(first).toHaveLength(1);
 

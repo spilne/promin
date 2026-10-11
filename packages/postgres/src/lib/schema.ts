@@ -543,7 +543,6 @@ export const workflowStarts = pgTable(
     workflowId: text("workflow_id").notNull(),
     workflowName: text("workflow_name").notNull(),
     version: text("version"),
-    input: jsonb("input").notNull(),
     metadata: jsonb("metadata"),
     enqueuedAt: timestamp("enqueued_at", { withTimezone: true }).notNull().defaultNow(),
     // A released start (`release({ delayMs })`) is not claimable before

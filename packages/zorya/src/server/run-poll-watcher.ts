@@ -59,7 +59,11 @@ export class RunPollWatcher {
   private readonly onStop?: () => void;
   private readonly clock: WallClock;
   private handle?: TimerHandle;
-  private lastSteps = new Map<string, StepDto>();
+  /**
+   * Each step's last published change signature — not the step itself, so
+   * a watched run's step results are not held between polls.
+   */
+  private lastSteps = new Map<string, string>();
   private lastStatus?: string;
   private failures = 0;
   private running = false;
@@ -86,7 +90,7 @@ export class RunPollWatcher {
   start(baseline: RunDto): void {
     if (this.running || this.stopped) return;
     this.running = true;
-    for (const s of baseline.steps) this.lastSteps.set(s.stepName, s);
+    for (const s of baseline.steps) this.lastSteps.set(s.stepName, stepSignature(s));
     this.lastStatus = baseline.status;
     this.schedule(this.intervalMs);
   }
@@ -150,10 +154,10 @@ export class RunPollWatcher {
   private publishDiff(state: WorkflowState): void {
     for (const s of Object.values(state.steps)) {
       const dto = stepToDto(s);
-      const prev = this.lastSteps.get(dto.stepName);
-      if (!prev || !stepEqual(prev, dto)) {
+      const signature = stepSignature(dto);
+      if (this.lastSteps.get(dto.stepName) !== signature) {
         this.publish({ type: "step", stepName: dto.stepName, step: dto });
-        this.lastSteps.set(dto.stepName, dto);
+        this.lastSteps.set(dto.stepName, signature);
       }
     }
     if (state.status !== this.lastStatus) {
@@ -247,13 +251,7 @@ export class RunWatcherPool {
   }
 }
 
-function stepEqual(a: StepDto, b: StepDto): boolean {
-  return (
-    a.status === b.status &&
-    a.attempt === b.attempt &&
-    a.durationMs === b.durationMs &&
-    a.completedAt === b.completedAt &&
-    a.wakeAt === b.wakeAt &&
-    a.signalName === b.signalName
-  );
+/** The fields whose change publishes a step event, as one comparable string. */
+function stepSignature(s: StepDto): string {
+  return JSON.stringify([s.status, s.attempt, s.durationMs, s.completedAt, s.wakeAt, s.signalName]);
 }

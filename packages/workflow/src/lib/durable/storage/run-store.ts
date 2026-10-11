@@ -161,6 +161,11 @@ export interface StartFreshRunParams extends FencedWrite {
    * of a call whose answer was lost harmless: it answers like the first.
    */
   readonly expectedRun?: number;
+  /**
+   * The fresh run's input (continue-as-new hands the next run a new one),
+   * stored in place of the current input. Absent: the input stays.
+   */
+  readonly nextInput?: { readonly value: unknown };
 }
 
 /** Params of `resetSteps`. */

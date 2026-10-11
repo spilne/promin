@@ -9,20 +9,32 @@
 //   POST /api/worker-protocol/heartbeat-start/:id     { claimToken }           → { ok }
 //   POST /api/worker-protocol/complete-start/:id      { claimToken }           → { ok }
 //   POST /api/worker-protocol/release-start/:id       { claimToken, delayMs? } → { ok }
-//   GET  /api/worker-protocol/starts                  (debugging)
+//   GET  /api/worker-protocol/starts?limit=           (debugging; oldest first, ≤ 500)
+//
+// A start names the run, not its input: the worker drives the stored run
+// with the input stored on it.
 // ---------------------------------------------------------------------------
 
+import { z } from "zod";
 import { json } from "../router.ts";
-import { parseBody, parseParams } from "../request-validation.ts";
+import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
 import {
   ClaimStartsRequestSchema,
+  limitQuery,
   ReleaseStartRequestSchema,
   StartClaimRequestSchema,
   StartParamsSchema,
 } from "../api-types.ts";
 import type { WorkflowStartClaimRef, WorkflowStartQueue } from "@promin/workflow/distributed";
 
-export function claimWorkflowStarts(queue: WorkflowStartQueue) {
+/**
+ * `POST /api/worker-protocol/claim-starts`. `onClaimed` hears every claimed
+ * start (the wake-ups stop following up on it).
+ */
+export function claimWorkflowStarts(
+  queue: WorkflowStartQueue,
+  onClaimed?: (starts: ReadonlyArray<{ readonly workflowId: string }>) => void,
+) {
   return async (req: Request): Promise<Response> => {
     const { workflowSpecs, workerId, limit, claimId } = await parseBody({
       req,
@@ -35,6 +47,7 @@ export function claimWorkflowStarts(queue: WorkflowStartQueue) {
       ...(claimId !== undefined && { claimId }),
       limit: limit ?? 10,
     });
+    if (starts.length > 0) onClaimed?.(starts);
     return json(200, { starts });
   };
 }
@@ -76,9 +89,13 @@ async function readClaimRef(args: {
   return { id, claimToken };
 }
 
+const ListStartsQuerySchema = z.object({ limit: limitQuery({ fallback: 100 }) });
+
+/** `GET /api/worker-protocol/starts?limit=` — the oldest `limit` starts (default 100, max 500). */
 export function listWorkflowStarts(queue: WorkflowStartQueue) {
-  return async (): Promise<Response> => {
-    const starts = await queue.list();
+  return async (req: Request): Promise<Response> => {
+    const { limit } = parseQuery({ req, schema: ListStartsQuerySchema });
+    const starts = await queue.list({ limit });
     return json(200, { starts });
   };
 }

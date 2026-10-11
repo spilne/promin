@@ -1485,7 +1485,12 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async startFreshRun({ workflowId, guard, expectedRun }: StartFreshRunParams): Promise<number> {
+  async startFreshRun({
+    workflowId,
+    guard,
+    expectedRun,
+    nextInput,
+  }: StartFreshRunParams): Promise<number> {
     const now = this.config.clock.now();
     const token = this.fenceTokenOf(guard);
 
@@ -1530,6 +1535,7 @@ export class PostgresWorkflowStorage
           startedAt: null,
           completedAt: null,
           updatedAt: now,
+          ...(nextInput && { input: nextInput.value ?? null }),
         })
         .where(eq(workflows.workflowId, workflowId))
         .returning({ run: workflows.run });

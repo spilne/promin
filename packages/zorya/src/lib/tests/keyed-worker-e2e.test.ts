@@ -54,12 +54,16 @@ describe("keyed workflow-mode worker", () => {
     const worker = new ZoryaWorker({
       client: new ZoryaClient({ url, apiKey: WORKER_KEY }),
       workflows: [wf],
-      pollWorkflowStarts: { intervalMs: 10 },
+      // A poll this slow never fires during the test: the start is claimed
+      // on the server's "work available" message over the real socket.
+      pollWorkflowStarts: { intervalMs: 600_000 },
       controlSocket: { reconnectDelayMs: 10 },
     });
     worker.start();
     cleanups.push(() => worker.stop());
     await worker.ready();
+    await until(() => server.workerWs.connectedWorkers().length === 1);
+    await until(() => worker.stats.claimCalls > 0);
 
     // A worker key cannot trigger: /api is the operator plane.
     await expect(

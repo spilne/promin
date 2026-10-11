@@ -1542,7 +1542,12 @@ export class SqliteWorkflowStorage
   // WorkflowStorage — run history
   // ---------------------------------------------------------------------------
 
-  async startFreshRun({ workflowId, guard, expectedRun }: StartFreshRunParams): Promise<number> {
+  async startFreshRun({
+    workflowId,
+    guard,
+    expectedRun,
+    nextInput,
+  }: StartFreshRunParams): Promise<number> {
     return this.db.transaction((): number => {
       this._checkFence({ workflowId, guard });
       const row = this.db
@@ -1581,6 +1586,11 @@ export class SqliteWorkflowStorage
            WHERE workflow_id = ?`,
         )
         .run(newRun, now, workflowId);
+      if (nextInput) {
+        this.db
+          .query(`UPDATE ${this._t} SET input = ? WHERE workflow_id = ?`)
+          .run(JSON.stringify(nextInput.value ?? null), workflowId);
+      }
       // The new run replays from nothing: drop the old run's journal and
       // its delivered signals in the same transaction as the run bump.
       this.db.query(`DELETE FROM ${this._t}_journal WHERE workflow_id = ?`).run(workflowId);

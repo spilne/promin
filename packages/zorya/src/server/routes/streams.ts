@@ -3,7 +3,7 @@
 //
 //   GET  /api/runs/:id/streams/:streamId           — SSE replay + live tail.
 //   POST /api/runs/:id/streams/:streamId           — append (input streams).
-//   GET  /api/runs/:id/streams/:streamId/chunks    — JSON snapshot (no SSE).
+//   GET  /api/runs/:id/streams/:streamId/chunks    — JSON page (no SSE), `?since=&limit=`.
 //
 // The SSE handler polls storage at a configurable interval; production
 // backends will eventually layer LISTEN/NOTIFY (Postgres) or Redis pub/sub
@@ -19,7 +19,7 @@ import { SystemWallClock, isTerminalWorkflowStatus } from "@promin/workflow";
 import type { RunWatcherPool } from "../run-poll-watcher.ts";
 import { z } from "zod";
 import { json, jsonError } from "../router.ts";
-import { IdSchema, StreamAppendRequestSchema } from "../api-types.ts";
+import { IdSchema, StreamAppendRequestSchema, limitQuery } from "../api-types.ts";
 import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
 import { requireRun } from "./run-extras.ts";
 
@@ -31,6 +31,14 @@ export const StreamChunksQuerySchema = z.object({
     (v) => (v === "" ? undefined : v),
     z.coerce.number().int().min(-1).max(Number.MAX_SAFE_INTEGER).optional(),
   ),
+});
+
+/** Most chunks one read takes: a JSON page, or one SSE replay step. */
+export const STREAM_PAGE_SIZE = 500;
+
+/** `?since=&limit=` for the JSON snapshot. */
+const StreamChunkPageQuerySchema = StreamChunksQuerySchema.extend({
+  limit: limitQuery({ fallback: STREAM_PAGE_SIZE, max: STREAM_PAGE_SIZE }),
 });
 
 export interface StreamsRoutesDeps {
@@ -89,18 +97,21 @@ export function sendStreamChunk(deps: StreamsRoutesDeps) {
 }
 
 /**
- * Snapshot read — returns all chunks (or chunks > `since`) as a single
- * JSON array. Used by tests + clients that don't want SSE.
+ * Snapshot read — chunks after `since`, oldest first, at most `limit`
+ * (default and cap `STREAM_PAGE_SIZE`) as one JSON array. Page on with
+ * `since` = the last `chunkIndex`. Used by tests + clients that don't want
+ * SSE.
  */
 export function getStreamChunks(deps: StreamsRoutesDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const { id, streamId } = parseParams({ params, schema: StreamParamsSchema });
-    const { since } = parseQuery({ req, schema: StreamChunksQuerySchema });
+    const { since, limit } = parseQuery({ req, schema: StreamChunkPageQuerySchema });
     await requireRun({ storage: deps.storage, workflowId: id });
     const chunks = await deps.storage.readStreamChunks({
       workflowId: id,
       streamId,
       ...(since !== undefined && since >= 0 && { since }),
+      limit,
     });
     return json(200, { chunks: chunks.map(toDto) });
   };
@@ -192,10 +203,12 @@ export function streamChunks(deps: StreamSseDeps) {
             // Read after noting the end, so the last read sees every chunk
             // the run wrote before it ended.
             const finalRead = runEnded;
+            // Page by page, so a long backlog is never read into memory at once.
             const chunks = await deps.storage.readStreamChunks({
               workflowId: id,
               streamId,
               since: since >= 0 ? since : undefined,
+              limit: STREAM_PAGE_SIZE,
             });
             for (const chunk of chunks) {
               if (closed) break;
@@ -204,6 +217,8 @@ export function streamChunks(deps: StreamSseDeps) {
               since = chunk.chunkIndex;
             }
             if (closed) break;
+            // A full page: more may be waiting, read on before waiting or ending.
+            if (chunks.length === STREAM_PAGE_SIZE) continue;
             if (finalRead) {
               send(`event: end\ndata: {}\n\n`);
               break;

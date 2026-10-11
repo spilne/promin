@@ -32,6 +32,14 @@ export {
   type TriggerResult,
 } from "./server/services/workflows/index.ts";
 export {
+  WorkerWakeups,
+  DEFAULT_WAKEUP_COALESCE_MS,
+  DEFAULT_WAKEUP_FOLLOW_UP_MS,
+  type WakeupSockets,
+  type QueuedStartNotice,
+  type WorkerWakeupsConfig,
+} from "./server/services/worker-wakeups.ts";
+export {
   ZoryaScheduler,
   type ZoryaSchedulerConfig,
   type AgentScheduleDispatcher,

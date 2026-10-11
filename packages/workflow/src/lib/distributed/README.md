@@ -519,6 +519,12 @@ advance — never on a fixed real-time sleep.
   lease) goes back to pending; Postgres stamps and expires claims on the
   database clock. Complete a start only once its run has ended or
   suspended; release it when the run stopped short (its lock is held
-  elsewhere, the worker is stopping).
+  elsewhere, the worker is stopping). A start names the run, not its input:
+  the worker drives it with `run({ useStoredInput: true })`, which reads
+  the input stored on the run, so a large input is kept and sent once.
+  `list({ limit })` returns the oldest `limit` records (default 100).
+  `enqueue` answers `claimable: true` only when it left a start claimable
+  now that was not before (a new record, or a delay it cleared) — the cue
+  for telling workers.
 - `StepQueueExecutor` / `RoutingStepExecutor`: queue-backed steps from an
   in-process runner.

@@ -64,7 +64,6 @@ export function workflowStartQueueTestSuite(
       const { id } = await q.enqueue({
         workflowId: "wf-1",
         workflowName: "hello",
-        input: { name: "world" },
       });
       expect(typeof id).toBe("string");
       const claimed = await q.claim({
@@ -75,7 +74,6 @@ export function workflowStartQueueTestSuite(
       expect(claimed.length).toBe(1);
       expect(claimed[0]?.workflowId).toBe("wf-1");
       expect(claimed[0]?.workflowName).toBe("hello");
-      expect(claimed[0]?.input).toEqual({ name: "world" });
       expect(claimed[0]?.claimedBy).toBe("w1");
       expect(typeof claimed[0]?.claimedAt).toBe("number");
     });
@@ -83,7 +81,7 @@ export function workflowStartQueueTestSuite(
     it("claim respects the limit", async () => {
       const q = await make();
       for (let i = 0; i < 5; i++) {
-        await q.enqueue({ workflowId: `wf-${i}`, workflowName: "hello", input: {} });
+        await q.enqueue({ workflowId: `wf-${i}`, workflowName: "hello" });
       }
       const claimed = await q.claim({
         workflowSpecs: [{ name: "hello", versions: ANY_VERSION }],
@@ -94,8 +92,8 @@ export function workflowStartQueueTestSuite(
 
     it("claim only returns starts the worker can run by name", async () => {
       const q = await make();
-      await q.enqueue({ workflowId: "a", workflowName: "alpha", input: {} });
-      await q.enqueue({ workflowId: "b", workflowName: "beta", input: {} });
+      await q.enqueue({ workflowId: "a", workflowName: "alpha" });
+      await q.enqueue({ workflowId: "b", workflowName: "beta" });
       const claimed = await q.claim({
         workflowSpecs: [{ name: "alpha", versions: ANY_VERSION }],
         limit: 10,
@@ -109,13 +107,11 @@ export function workflowStartQueueTestSuite(
       await q.enqueue({
         workflowId: "v1",
         workflowName: "wf",
-        input: {},
         version: "1",
       });
       await q.enqueue({
         workflowId: "v2",
         workflowName: "wf",
-        input: {},
         version: "2",
       });
       const claimed = await q.claim({
@@ -128,7 +124,7 @@ export function workflowStartQueueTestSuite(
 
     it("versionless start matches any worker advertising the name", async () => {
       const q = await make();
-      await q.enqueue({ workflowId: "x", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "x", workflowName: "wf" });
       const claimed = await q.claim({
         workflowSpecs: [{ name: "wf", versions: ["3"] }],
         limit: 10,
@@ -139,7 +135,7 @@ export function workflowStartQueueTestSuite(
 
     it("claimed records do not appear in subsequent claim calls", async () => {
       const q = await make();
-      await q.enqueue({ workflowId: "a", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "a", workflowName: "wf" });
       const first = await q.claim({
         workflowSpecs: [{ name: "wf", versions: ANY_VERSION }],
         limit: 10,
@@ -154,7 +150,7 @@ export function workflowStartQueueTestSuite(
 
     it("complete removes a claimed record", async () => {
       const q = await make();
-      await q.enqueue({ workflowId: "a", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "a", workflowName: "wf" });
       const claimed = await q.claim({
         workflowSpecs: [{ name: "wf", versions: ANY_VERSION }],
         limit: 10,
@@ -172,8 +168,8 @@ export function workflowStartQueueTestSuite(
 
     clockIt("claim stamps a claim token and the first heartbeat", async () => {
       const { q, clock } = await makeWithClock();
-      await q.enqueue({ workflowId: "a", workflowName: "wf", input: {} });
-      await q.enqueue({ workflowId: "b", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "a", workflowName: "wf" });
+      await q.enqueue({ workflowId: "b", workflowName: "wf" });
       const claimed = await q.claim({
         workflowSpecs: [{ name: "wf", versions: ANY_VERSION }],
         limit: 10,
@@ -189,7 +185,7 @@ export function workflowStartQueueTestSuite(
 
     it("heartbeat returns true for the current claim and false for a wrong token", async () => {
       const q = await make();
-      await q.enqueue({ workflowId: "a", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "a", workflowName: "wf" });
       const [rec] = await q.claim({
         workflowSpecs: [{ name: "wf", versions: ANY_VERSION }],
         limit: 1,
@@ -201,7 +197,7 @@ export function workflowStartQueueTestSuite(
 
     it("complete with a stale token returns false and leaves the record", async () => {
       const q = await make();
-      await q.enqueue({ workflowId: "a", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "a", workflowName: "wf" });
       const [rec] = await q.claim({
         workflowSpecs: [{ name: "wf", versions: ANY_VERSION }],
         limit: 1,
@@ -218,7 +214,7 @@ export function workflowStartQueueTestSuite(
       "a stale claim is reclaimed under a new token; the old token is fenced out",
       async () => {
         const { q, clock } = await makeWithClock();
-        await q.enqueue({ workflowId: "a", workflowName: "wf", input: {} });
+        await q.enqueue({ workflowId: "a", workflowName: "wf" });
         const [first] = await q.claim({
           workflowSpecs: [{ name: "wf", versions: ANY_VERSION }],
           workerId: "w1",
@@ -249,7 +245,7 @@ export function workflowStartQueueTestSuite(
 
     clockIt("a heartbeating claim is not reclaimed past the original window", async () => {
       const { q, clock } = await makeWithClock();
-      await q.enqueue({ workflowId: "a", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "a", workflowName: "wf" });
       const [rec] = await q.claim({
         workflowSpecs: [{ name: "wf", versions: ANY_VERSION }],
         workerId: "w1",
@@ -285,7 +281,6 @@ export function workflowStartQueueTestSuite(
       await q.enqueue({
         workflowId: "a",
         workflowName: "wf",
-        input: {},
         metadata: { source: "test", n: 42 },
       });
       const claimed = await q.claim({
@@ -297,10 +292,11 @@ export function workflowStartQueueTestSuite(
 
     it("enqueue is idempotent on workflowId while a record exists", async () => {
       const q = await make();
-      const first = await q.enqueue({ workflowId: "a", workflowName: "wf", input: { n: 1 } });
+      const first = await q.enqueue({ workflowId: "a", workflowName: "wf" });
       expect(first.created).toBe(true);
-      const again = await q.enqueue({ workflowId: "a", workflowName: "wf", input: { n: 2 } });
-      expect(again).toEqual({ id: first.id, created: false });
+      expect(first.claimable).toBe(true);
+      const again = await q.enqueue({ workflowId: "a", workflowName: "wf" });
+      expect(again).toEqual({ id: first.id, created: false, claimable: false });
       expect((await q.list()).length).toBe(1);
 
       // Still one record while it is claimed.
@@ -308,9 +304,8 @@ export function workflowStartQueueTestSuite(
         workflowSpecs: [{ name: "wf", versions: ANY_VERSION }],
         limit: 1,
       });
-      expect(rec?.input).toEqual({ n: 1 });
-      const whileClaimed = await q.enqueue({ workflowId: "a", workflowName: "wf", input: {} });
-      expect(whileClaimed).toEqual({ id: first.id, created: false });
+      const whileClaimed = await q.enqueue({ workflowId: "a", workflowName: "wf" });
+      expect(whileClaimed).toEqual({ id: first.id, created: false, claimable: false });
       expect((await q.list()).length).toBe(1);
 
       // Enqueued again while claimed: completing the claim puts the start
@@ -326,14 +321,14 @@ export function workflowStartQueueTestSuite(
       expect(await q.list()).toHaveLength(0);
 
       // Once completed with no enqueue in between, the run can be queued afresh.
-      const next = await q.enqueue({ workflowId: "a", workflowName: "wf", input: {} });
+      const next = await q.enqueue({ workflowId: "a", workflowName: "wf" });
       expect(next.created).toBe(true);
       expect(next.id).not.toBe(first.id);
     });
 
     it("release gives the start back under a new claim; the old token is fenced out", async () => {
       const q = await make();
-      await q.enqueue({ workflowId: "a", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "a", workflowName: "wf" });
       const [first] = await q.claim({
         workflowSpecs: [{ name: "wf", versions: ANY_VERSION }],
         workerId: "w1",
@@ -358,9 +353,9 @@ export function workflowStartQueueTestSuite(
 
     clockIt("release with a delay hides the start until it is due", async () => {
       const { q, clock } = await makeWithClock();
-      await q.enqueue({ workflowId: "a", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "a", workflowName: "wf" });
       clock.advance(1);
-      await q.enqueue({ workflowId: "b", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "b", workflowName: "wf" });
       const [first] = await q.claim({
         workflowSpecs: [{ name: "wf", versions: ANY_VERSION }],
         limit: 1,
@@ -392,7 +387,7 @@ export function workflowStartQueueTestSuite(
     it("claims oldest first", async () => {
       const { q, clock } = await makeWithClock();
       for (const id of ["a", "b", "c"]) {
-        await q.enqueue({ workflowId: id, workflowName: "wf", input: {} });
+        await q.enqueue({ workflowId: id, workflowName: "wf" });
         clock.advance(1);
       }
       const claimed = await q.claim({
@@ -405,9 +400,9 @@ export function workflowStartQueueTestSuite(
     it("a version-filtered claim skips starts it cannot run without starving them", async () => {
       const q = await make();
       for (let i = 0; i < 5; i++) {
-        await q.enqueue({ workflowId: `v1-${i}`, workflowName: "wf", input: {}, version: "1" });
+        await q.enqueue({ workflowId: `v1-${i}`, workflowName: "wf", version: "1" });
       }
-      await q.enqueue({ workflowId: "v2", workflowName: "wf", input: {}, version: "2" });
+      await q.enqueue({ workflowId: "v2", workflowName: "wf", version: "2" });
       const v2 = await q.claim({ workflowSpecs: [{ name: "wf", versions: ["2"] }], limit: 1 });
       expect(v2.map((r) => r.workflowId)).toEqual(["v2"]);
       const v1 = await q.claim({ workflowSpecs: [{ name: "wf", versions: ["1"] }], limit: 10 });
@@ -416,13 +411,13 @@ export function workflowStartQueueTestSuite(
 
     it("an enqueue while claimed survives the claim's complete (resume, wake-up)", async () => {
       const q = await make();
-      await q.enqueue({ workflowId: "r", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "r", workflowName: "wf" });
       const [rec] = await q.claim({
         workflowSpecs: [{ name: "wf", versions: ANY_VERSION }],
         limit: 1,
       });
       // The worker finishes its drive; meanwhile a resume enqueues the run.
-      await q.enqueue({ workflowId: "r", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "r", workflowName: "wf" });
       expect((await q.list())[0]?.requeued).toBe(true);
       expect(await q.complete({ id: rec!.id, claimToken: rec!.claimToken! })).toBe(true);
       const listed = await q.list();
@@ -436,19 +431,22 @@ export function workflowStartQueueTestSuite(
     it("an enqueue makes a delayed pending start claimable at once, unless it keeps the delay", async () => {
       const q = await make();
       const specs = [{ name: "wf", versions: ANY_VERSION }];
-      await q.enqueue({ workflowId: "d", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "d", workflowName: "wf" });
       const [rec] = await q.claim({ workflowSpecs: specs, limit: 1 });
       await q.release({ id: rec!.id, claimToken: rec!.claimToken!, delayMs: 3_600_000 });
       expect(await q.claim({ workflowSpecs: specs, limit: 1 })).toHaveLength(0);
 
-      // A scheduled wake-up keeps the worker's delay.
-      await q.enqueue({ workflowId: "d", workflowName: "wf", input: {}, keepAvailableAt: true });
+      // A scheduled wake-up keeps the worker's delay: not claimable.
+      expect(
+        (await q.enqueue({ workflowId: "d", workflowName: "wf", keepAvailableAt: true })).claimable,
+      ).toBe(false);
       expect(await q.claim({ workflowSpecs: specs, limit: 1 })).toHaveLength(0);
 
       // A resume, rerun or signal makes it claimable now.
-      expect(await q.enqueue({ workflowId: "d", workflowName: "wf", input: {} })).toEqual({
+      expect(await q.enqueue({ workflowId: "d", workflowName: "wf" })).toEqual({
         id: rec!.id,
         created: false,
+        claimable: true,
       });
       const [now] = await q.claim({ workflowSpecs: specs, limit: 1 });
       expect(now?.id).toBe(rec!.id);
@@ -457,11 +455,11 @@ export function workflowStartQueueTestSuite(
     it("a delayed release of a start enqueued again during its claim is claimable at once", async () => {
       const q = await make();
       const specs = [{ name: "wf", versions: ANY_VERSION }];
-      await q.enqueue({ workflowId: "h", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "h", workflowName: "wf" });
       const [rec] = await q.claim({ workflowSpecs: specs, limit: 1 });
       // A resume enqueues the run while the worker still holds it; the worker
       // then releases with a delay chosen from the state it read before.
-      await q.enqueue({ workflowId: "h", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "h", workflowName: "wf" });
       expect(
         await q.release({ id: rec!.id, claimToken: rec!.claimToken!, delayMs: 3_600_000 }),
       ).toBe(true);
@@ -474,7 +472,7 @@ export function workflowStartQueueTestSuite(
     it("a claim retried with the same claimId gets the same starts back", async () => {
       const q = await make();
       for (const id of ["a", "b", "c"]) {
-        await q.enqueue({ workflowId: id, workflowName: "wf", input: {} });
+        await q.enqueue({ workflowId: id, workflowName: "wf" });
       }
       const params = {
         workflowSpecs: [{ name: "wf", versions: ANY_VERSION }],
@@ -495,14 +493,36 @@ export function workflowStartQueueTestSuite(
 
     it("list returns both pending and inflight records", async () => {
       const q = await make();
-      await q.enqueue({ workflowId: "a", workflowName: "wf", input: {} });
-      await q.enqueue({ workflowId: "b", workflowName: "wf", input: {} });
+      await q.enqueue({ workflowId: "a", workflowName: "wf" });
+      await q.enqueue({ workflowId: "b", workflowName: "wf" });
       await q.claim({
         workflowSpecs: [{ name: "wf", versions: ANY_VERSION }],
         limit: 1,
       });
       const all = await q.list();
       expect(all.length).toBe(2);
+    });
+
+    it("list returns at most `limit` records, oldest first", async () => {
+      const { q, clock } = await makeWithClock();
+      for (const id of ["a", "b", "c"]) {
+        await q.enqueue({ workflowId: id, workflowName: "wf" });
+        clock.advance(1);
+      }
+      expect((await q.list({ limit: 2 })).map((r) => r.workflowId)).toEqual(["a", "b"]);
+      expect(await q.list({ limit: 0 })).toEqual([]);
+      expect((await q.list()).map((r) => r.workflowId)).toEqual(["a", "b", "c"]);
+    });
+
+    it("a record carries no run input", async () => {
+      const q = await make();
+      await q.enqueue({ workflowId: "a", workflowName: "wf" });
+      const [rec] = await q.claim({
+        workflowSpecs: [{ name: "wf", versions: ANY_VERSION }],
+        limit: 1,
+      });
+      expect(rec).toBeDefined();
+      expect("input" in rec!).toBe(false);
     });
   });
 }
