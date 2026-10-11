@@ -1,11 +1,5 @@
 export { agentAction, MaxStepsError, StructuredOutputParseError } from "./agent-action.ts";
-export type {
-  AgentActionConfig,
-  AgentActionMemoryConfig,
-  AgentInput,
-  AgentResult,
-  StepContext,
-} from "./agent-action.ts";
+export type { AgentActionConfig, AgentInput, AgentResult, StepContext } from "./agent-action.ts";
 
 export { agentTool } from "./agent-tool.ts";
 export type { AgentToolConfig } from "./agent-tool.ts";
@@ -18,7 +12,6 @@ export type {
   AgentStatus,
   StreamOptions,
   ContextConfig,
-  MemoryConfig,
   HooksConfig,
   HooksTurnParams,
   HooksAfterTurnParams,
@@ -28,8 +21,7 @@ export type {
 export { InMemorySessionLogger, SessionEventBus } from "./session-logger.ts";
 export type { SessionLogger, SessionEvent, LogUsage } from "./session-logger.ts";
 
-export { InMemoryMemoryIndex } from "./memory-index.ts";
-export type { MemoryIndex, MemoryEntry, MemoryScope, EmbeddingProvider } from "./memory-index.ts";
+export type { EmbeddingProvider } from "./embedding-provider.ts";
 
 export type {
   MemoryStore,
@@ -51,10 +43,8 @@ export type {
   MessageRange,
   TokenBudget,
   ResolvedContext,
-  RecallHit,
-  SemanticRecall,
 } from "./memory/types.ts";
-export { isSemanticRecall, PROMPT_CACHE_BOUNDARY } from "./memory/types.ts";
+export { PROMPT_CACHE_BOUNDARY } from "./memory/types.ts";
 
 export { DefaultConsolidator } from "./memory/consolidator.ts";
 export type {
@@ -75,49 +65,24 @@ export type {
   ConsolidatorRateLimitScope,
 } from "./memory/rate-limited-consolidator.ts";
 
-export {
-  CompactionStrategy,
-  between,
-  days,
-  eq,
-  gt,
-  gte,
-  hours,
-  lt,
-  lte,
-  minutes,
-  olderThan,
-  seconds,
-  within,
-} from "./memory/compaction-strategy.ts";
-export type { NumberComparator, TimeComparator } from "./memory/compaction-strategy.ts";
-
 export { InMemoryMemoryStore } from "./memory/in-memory-memory-store.ts";
 export type { InMemoryMemoryStoreConfig } from "./memory/in-memory-memory-store.ts";
 
 export { resolveContext } from "./memory/resolve-context.ts";
 export type { ResolveContextInput } from "./memory/resolve-context.ts";
 
-// RAG — retrievers, chunking, composition, the retriever tool and registry.
+// RAG — retrievers, chunking, the retriever tool and registry.
 export {
-  CombinedRetriever,
   DEFAULT_RETRIEVER_TOOL_NAME,
-  FallbackRetriever,
   FlatTextChunker,
   InMemoryKnowledgeBaseStore,
   InMemoryRetriever,
   InMemoryRetrieverRegistry,
-  RerankingRetriever,
-  RouterRetriever,
   createRetrieverTool,
   formatRetrievedChunks,
   retrieverToolName,
 } from "./rag/index.ts";
 export type {
-  CombinedRetrieverConfig,
-  CombinedRetrieverSource,
-  FallbackRetrieverConfig,
-  FallbackRetrieverSource,
   FlatTextChunkerConfig,
   InMemoryRetrieverConfig,
   IngestibleRetriever,
@@ -132,19 +97,15 @@ export type {
   ListRetrieversParams,
   RegisteredRetriever,
   RegisterRetrieverInput,
-  RerankingRetrieverConfig,
   RetrieveRequest,
   RetrieveResult,
-  RetrieveReranker,
   Retriever,
   RetrieverFilter,
   RetrieverRegistry,
-  RetrieverRoute,
   RetrieverToolConfig,
   RetrieverToolInput,
   RetrieverToolOutput,
   RetrieverToolSource,
-  RouterRetrieverConfig,
   StoredKnowledgeBase,
 } from "./rag/index.ts";
 
@@ -223,7 +184,7 @@ export { resolveLocalAgent, resolveCredentialRef } from "./registry/resolve-loca
 export type { ResolveLocalAgentDeps } from "./registry/resolve-local-agent.ts";
 export { RemoteAgent } from "./registry/remote-agent.ts";
 export { resolveRemoteAgent } from "./registry/resolve-remote-agent.ts";
-export type { RemoteAgentBackend, CursorAgentBackend } from "./registry/types.ts";
+export type { RemoteAgentBackend } from "./registry/types.ts";
 
 export { InMemoryModelCatalog } from "./registry/model-catalog.ts";
 export type {
@@ -249,12 +210,7 @@ export type {
   ListSkillsParams,
 } from "./skills/types.ts";
 export { DEFAULT_SKILL_VERSION, DEFAULT_SKILL_METADATA } from "./skills/types.ts";
-export {
-  InMemorySkillRegistry,
-  mergeSkillMetadata,
-  matchesSkillFilter,
-  sortSkills,
-} from "./skills/in-memory-skill-registry.ts";
+export { InMemorySkillRegistry } from "./skills/in-memory-skill-registry.ts";
 export type { InMemorySkillRegistryConfig } from "./skills/in-memory-skill-registry.ts";
 export {
   resolveSkillCatalog,
@@ -275,51 +231,10 @@ export type { LoadSkillToolConfig, LoadSkillOutput } from "./skills/load-skill-t
 // dep (FragmentRegistry).
 export type { FragmentRegistry, FragmentStore } from "./fragments/types.ts";
 export { InMemoryFragmentRegistry } from "./fragments/in-memory-fragment-registry.ts";
-export { InMemoryFragmentStore } from "./fragments/in-memory-fragment-store.ts";
 export { resolveSystemPrompt } from "./fragments/resolve-prompt.ts";
 export type { ResolveSystemPromptParams } from "./fragments/resolve-prompt.ts";
 export { parseMarkdownSkill, slugify } from "./skills/parse-markdown-skill.ts";
 export type { ParseMarkdownSkillParams } from "./skills/parse-markdown-skill.ts";
-
-// Cursor backend — drives the Cursor CLI (`agent -p`) over its
-// stream-json NDJSON output. Two surfaces share the same session engine:
-// the registry-resolved `CursorAgent` (for whole-conversation routing)
-// and `createCursorCodingTool` (for inline delegation from another agent).
-export {
-  CursorAgent,
-  resolveCursorAgent,
-  runCursorSession,
-  buildCursorArgs,
-  defaultCursorTransport,
-  NdJsonLineParser,
-  classifyFrame,
-  assistantFrameText,
-} from "./cursor/index.ts";
-export type {
-  CursorAgentConfig,
-  ResolveCursorAgentDeps,
-  CursorEvent,
-  CursorSessionRequest,
-  CursorSessionResult,
-  CursorTransport,
-  CursorChild,
-  TransportSpawnOptions,
-  CursorFrame,
-  CursorAssistantFrame,
-  CursorResultFrame,
-  CursorSystemInitFrame,
-  CursorToolCallFrame,
-  CursorUnknownFrame,
-  CursorUserFrame,
-  CursorTextContent,
-} from "./cursor/index.ts";
-export { createCursorCodingTool } from "./tools/cursor-coding-tool.ts";
-export type {
-  CursorCodingToolDeps,
-  CursorCodingToolResult,
-  CursorCodingToolResultOk,
-  CursorCodingToolResultError,
-} from "./tools/cursor-coding-tool.ts";
 
 // Metrics — pluggable telemetry sink (Counter / Histogram). Default
 // no-op so instrumentation has zero cost when unconfigured. Hosts wire
@@ -445,19 +360,8 @@ export {
   type AgentTurnLease,
   type RunParams as AgentTurnRunParams,
   TurnInProgressError,
-  QueuedPolicyNotImplementedError,
   DEFAULT_TURN_LEASE_TTL_MS,
 } from "./lease/agent-turn-gate.ts";
-
-// Federation — host-side allowlist gating remote-backend recipe
-// registration. Composable as a wrapper around any AgentRegistry impl.
-export type { FederationManifest } from "./federation/types.ts";
-export {
-  StaticFederationManifest,
-  AllowAllFederationManifest,
-  FederationManifestError,
-} from "./federation/types.ts";
-export { FederatedAgentRegistry } from "./federation/federated-agent-registry.ts";
 
 // RemoteDeploymentRegistry — tracks live remote Zorya deployments that
 // have self-registered to expose RemoteAgentBackend recipes here.
@@ -474,9 +378,8 @@ export {
   type InMemoryRemoteDeploymentRegistryConfig,
 } from "./remote-deployments/in-memory-remote-deployment-registry.ts";
 
-// SecretsStorage — scoped secret storage (global / namespace / resource).
-// Distinct from the flat SecretStore in secret-store.ts; this surface
-// supports the multi-tenant SaaS path (BYOK, MCP credentialRef, etc.).
+// SecretsStorage — scoped secret storage (global / namespace / resource)
+// for the multi-tenant path (BYOK, MCP credentialRef, etc.).
 // `SecretScope` is exported as both a type AND a const (with builders)
 // — the single `export {}` carries both.
 export type { SecretsStorage, ResolvedSecret } from "./secrets/types.ts";
@@ -531,9 +434,6 @@ export type {
   ToolWriter,
 } from "./tool.ts";
 
-export { multiTool, command } from "./multi-tool.ts";
-export type { CommandDef } from "./multi-tool.ts";
-
 export { buildToolDefs, createFileToolRegistry } from "./tool-registry.ts";
 export type { ToolRegistry, FileToolRegistryConfig } from "./tool-registry.ts";
 
@@ -577,45 +477,12 @@ export type { ProcessorsConfig, ProcessorContext } from "./processors.ts";
 export { createWriteToolTool } from "./tools/write-tool.ts";
 export type { WriteToolConfig } from "./tools/write-tool.ts";
 
-export { createRequireSecretTool } from "./tools/require-secret-tool.ts";
-export type { RequireSecretToolConfig } from "./tools/require-secret-tool.ts";
-
-export { createApiKeyBootstrap } from "./api-key-bootstrap.ts";
-export type { ApiKeyBootstrapConfig } from "./api-key-bootstrap.ts";
-
-export { createGetSecretTool, createSetSecretTool } from "./tools/secret-tools.ts";
-
-export {
-  createSearchMemoryTool,
-  createSaveMemoryTool,
-  createMemoryTools,
-  createMemoryTool,
-} from "./tools/memory-tools.ts";
-export type { MemoryToolConfig } from "./tools/memory-tools.ts";
-
 export { createLayeredMemoryTool } from "./tools/layered-memory-tools.ts";
 export type { LayeredMemoryToolConfig } from "./tools/layered-memory-tools.ts";
-
-export { InMemoryKnowledgeGraph } from "./knowledge-graph.ts";
-export type {
-  KnowledgeGraph,
-  KnowledgeGraphNode,
-  KnowledgeGraphEdge,
-  QueryOptions,
-  SearchResult,
-} from "./knowledge-graph.ts";
-
-export { createKnowledgeGraphTool } from "./tools/knowledge-graph-tools.ts";
-export type { KnowledgeGraphToolsConfig } from "./tools/knowledge-graph-tools.ts";
 
 // Durable scheduler tool — agents create cron / interval schedules that
 // re-fire the agent (or a peer) when they trigger. Pairs with the
 // dispatchAgentSchedule helper for the host's scheduler-loop fireOverride.
-export { listPendingApprovals } from "./approvals/list-pending-approvals.ts";
-export type {
-  PendingApproval,
-  ListPendingApprovalsParams,
-} from "./approvals/list-pending-approvals.ts";
 export { listPendingSignals } from "./approvals/list-pending-signals.ts";
 export type { PendingSignal, ListPendingSignalsParams } from "./approvals/list-pending-signals.ts";
 export {
@@ -625,10 +492,7 @@ export {
   parseApprovalSignal,
 } from "./approvals/approve-signal.ts";
 
-export {
-  createDurableSchedulerTool,
-  createDurableSchedulerTools,
-} from "./tools/durable-scheduler-tool.ts";
+export { createDurableSchedulerTools } from "./tools/durable-scheduler-tool.ts";
 export type {
   DurableSchedulerToolDeps,
   DurableSchedulerTools,
@@ -657,7 +521,6 @@ export type {
 
 export { createLlmTool } from "./tools/llm-tool.ts";
 export type { LlmToolConfig } from "./tools/llm-tool.ts";
-export type { SecretToolConfig, SetSecretToolConfig } from "./tools/secret-tools.ts";
 
 export {
   createFilesystemTools,
@@ -672,39 +535,11 @@ export type { FilesystemToolsConfig, FilesystemTools } from "./tools/filesystem-
 export { createShellTool } from "./tools/shell-tool.ts";
 export type { ShellToolConfig } from "./tools/shell-tool.ts";
 
-export { createSchedulerTools } from "./tools/scheduler-tools.ts";
-export type { SchedulerToolsConfig } from "./tools/scheduler-tools.ts";
-
 export { createAgentTool } from "./tools/agent-tool-factory.ts";
 export type { AgentToolFactoryConfig } from "./tools/agent-tool-factory.ts";
 
-export { createChatGptAgentTool } from "./tools/chatgpt-agent-tool.ts";
-export type { ChatGptAgentToolConfig } from "./tools/chatgpt-agent-tool.ts";
-
-export { Terminal, isDumbTerminal, PROMPT, PLAIN_PROMPT } from "./terminal/terminal.ts";
-export type { TreeNode, AgentUIRenderer } from "./terminal/terminal.ts";
-
-export { TerminalIO } from "./terminal/terminal-io.ts";
-
-export { MarkdownRenderer, osc8 } from "./terminal/terminal-markdown.ts";
-export type { MarkdownRendererConfig } from "./terminal/terminal-markdown.ts";
-
-export { ChatTerminal } from "./terminal/chat-terminal.ts";
-export type { ChatTerminalConfig } from "./terminal/chat-terminal.ts";
-
-export { ConsoleRunner, abortable } from "./terminal/console-runner.ts";
-export type { RunTurnOptions, RunTurnResult, TurnTracker } from "./terminal/console-runner.ts";
-
 export { createFetchUrlTool, createWebSearchTool, fetchUrl, webSearch } from "./tools/web-tools.ts";
 export type { WebToolsConfig } from "./tools/web-tools.ts";
-
-export {
-  InMemorySecretStore,
-  EnvSecretStore,
-  FileSecretStore,
-  CompositeSecretStore,
-} from "./secret-store.ts";
-export type { SecretStore } from "./secret-store.ts";
 
 export type {
   LLMProvider,
@@ -742,11 +577,10 @@ export type { OpenAIEmbeddingOptions } from "./adapters/openai-embedding.ts";
 export { voyageEmbedding } from "./adapters/voyage-embedding.ts";
 export type { VoyageEmbeddingOptions } from "./adapters/voyage-embedding.ts";
 
-export { routerLLM } from "./adapters/router-llm.ts";
-export type { LLMRoute } from "./adapters/router-llm.ts";
+export { routerLLM, twoSpeedLLM, isToolResultStep } from "./adapters/router-llm.ts";
+export type { LLMRoute, TwoSpeedLLMConfig } from "./adapters/router-llm.ts";
 
-export { fallbackLLM } from "./adapters/fallback-llm.ts";
-export { resilientLLM } from "./adapters/resilient-llm.ts";
+export { resilientLLM, ALL_LLM_ERROR_CLASSES } from "./adapters/resilient-llm.ts";
 export type { ResilientLLMPolicy } from "./adapters/resilient-llm.ts";
 export { classifyLLMError } from "./adapters/llm-error-classification.ts";
 export type { LLMErrorClass } from "./adapters/llm-error-classification.ts";
@@ -763,33 +597,12 @@ export type { OllamaOptions } from "./adapters/ollama.ts";
 export { llamacpp } from "./adapters/llamacpp.ts";
 export type { LlamaCppOptions } from "./adapters/llamacpp.ts";
 
-export { twoSpeedLLM } from "./adapters/two-speed-llm.ts";
-export type { TwoSpeedLLMConfig } from "./adapters/two-speed-llm.ts";
-
 export { SystemWallClock, FakeWallClock } from "@promin/workflow";
 export type { WallClock, TimerHandle } from "@promin/workflow";
 export type { RateLimiter } from "./agent-shared.ts";
 
-export { broadcast } from "./broadcast.ts";
-
 export { compact, DEFAULT_SUMMARY_PROMPT, RECAP_SUMMARY_PROMPT } from "./agent-loop-compaction.ts";
 export type { CompactionConfig, CompactionResult } from "./agent-loop-compaction.ts";
-
-export { agentNetwork } from "./agent-network.ts";
-export type { AgentSpec, AgentNetworkConfig, AgentNetwork } from "./agent-network.ts";
-
-export { createAgentTown } from "./agent-town.ts";
-export type { AgentDefinition, AgentTownConfig, AgentTown } from "./agent-town.ts";
-
-export { runCouncil, createCouncilTool, formatCouncilResult } from "./council.ts";
-export type {
-  Councilor,
-  CouncilConfig,
-  CouncilContribution,
-  CouncilRound,
-  CouncilResult,
-  CouncilToolConfig,
-} from "./council.ts";
 
 // Agent run trace — turn-structured tree from stored messages.
 export { buildAgentTrace } from "./trace.ts";
@@ -805,20 +618,14 @@ export type {
 } from "./trace.ts";
 
 // Agentic DAG — operator-authored multi-agent execution graph.
-export { executeDag, pickPath, createRegistryResolver } from "./dag/executor.ts";
-export type {
-  DagExecuteParams,
-  DagExecutionEvent,
-  DagExecutionResult,
-  AgentResolver,
-} from "./dag/executor.ts";
+export { pickPath } from "./dag/dag-helpers.ts";
 export { validateDag, topologicalOrder } from "./dag/validate.ts";
 export { DagValidationError } from "./dag/types.ts";
 export type {
+  AgentResolver,
   AgenticDagRecipe,
   DagNode,
   DagEdge,
-  DagRunState,
   NodeInputSource,
 } from "./dag/types.ts";
 export { createDagWorkflow } from "./dag/durable-executor.ts";

@@ -111,7 +111,6 @@ async function waitForApproval(
   // need the side-effect of "wait until visible".
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    // biome-ignore lint/suspicious/noExplicitAny: test introspection
     const storage = (agent as any).config.runner.storage as InMemoryWorkflowStorage;
     const list = await storage.listWorkflows({ status: "suspended", limit: 50 });
     const hit = list.find(

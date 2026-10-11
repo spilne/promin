@@ -92,16 +92,12 @@ describe("reconcileToolReferences", () => {
     expect(report.orphans[0]?.recipes.map((r) => r.id).sort()).toEqual(["bot-a", "bot-b"]);
   });
 
-  it("skips non-local backends (remote / cursor have their own tool model)", async () => {
+  it("skips non-local backends (remote has its own tool model)", async () => {
     const catalog = new DefaultAgentToolCatalog({ inProcess: { search } });
     const registry = new InMemoryAgentRegistry();
     await registry.register({
       id: "remote-bot",
       backend: { type: "remote", endpoint: "https://x", remoteAgentId: "remote-bot" },
-    });
-    await registry.register({
-      id: "cursor-bot",
-      backend: { type: "cursor" },
     });
     const report = await reconcileToolReferences({ catalog, registry });
     expect(report.recipes).toEqual([]);

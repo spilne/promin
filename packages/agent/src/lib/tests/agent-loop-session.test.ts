@@ -3,7 +3,6 @@ import { z } from "zod";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { agentLoop } from "../agent-loop.ts";
 import { tool } from "../tool.ts";
-import { InMemoryMemoryIndex } from "../memory-index.ts";
 import type { LLMProvider, LLMResponse } from "../llm-provider.ts";
 
 function mockLLM(responses: LLMResponse[]): LLMProvider {
@@ -275,108 +274,6 @@ describe("agentLoop session", () => {
     });
   });
 
-  describe("memory integration", () => {
-    it("injects memories from store at session start", async () => {
-      const store = new InMemoryMemoryIndex();
-      await store.save({ content: "user prefers concise answers" });
-
-      let firstCallMessages: unknown[] = [];
-
-      const session = await makeSession({
-        name: "memory-inject-test",
-        llm: {
-          chat: async (params) => {
-            if (firstCallMessages.length === 0) firstCallMessages = params.messages;
-            return { content: "ok", finishReason: "stop" };
-          },
-        },
-        memory: { store, injectLimit: 5, searchQuery: "user preferences" },
-      });
-
-      await session.send("hello");
-
-      const hasMemory = firstCallMessages.some(
-        (m: any) => m.role === "system" && m.content?.includes("user prefers concise answers"),
-      );
-      expect(hasMemory).toBe(true);
-      session.close();
-    });
-
-    it("skips memory injection when store is empty", async () => {
-      const store = new InMemoryMemoryIndex();
-      let callCount = 0;
-
-      const session = await makeSession({
-        name: "empty-memory-test",
-        llm: {
-          chat: async () => {
-            callCount++;
-            return { content: "ok", finishReason: "stop" };
-          },
-        },
-        memory: { store, injectLimit: 5 },
-      });
-
-      await session.send("hello");
-      // Only the chat call should happen — no extra LLM call for memory search
-      expect(callCount).toBe(1);
-      session.close();
-    });
-
-    it("saves compaction summary to memory store", async () => {
-      const store = new InMemoryMemoryIndex();
-
-      const session = await makeSession({
-        name: "memory-save-test",
-        llm: {
-          chat: async (params) => {
-            const isCompaction = params.messages.some(
-              (m: any) => m.role === "system" && m.content?.includes("Summarize the following"),
-            );
-            if (isCompaction) return { content: "compaction summary text", finishReason: "stop" };
-            return { content: "reply", finishReason: "stop" };
-          },
-        },
-        context: { maxMessages: 4, keepMessages: 2, summarize: true },
-        memory: { store, saveOnCompact: true },
-      });
-
-      await session.send("turn 1");
-      await session.send("turn 2");
-      await session.send("turn 3"); // triggers compaction + save
-
-      const memories = await store.list();
-      expect(memories.some((m) => m.content === "compaction summary text")).toBe(true);
-      session.close();
-    });
-
-    it("does not save when saveOnCompact is false", async () => {
-      const store = new InMemoryMemoryIndex();
-
-      const session = await makeSession({
-        name: "no-save-test",
-        llm: {
-          chat: async (params) => {
-            const isCompaction = params.messages.some(
-              (m: any) => m.role === "system" && m.content?.includes("Summarize the following"),
-            );
-            if (isCompaction) return { content: "summary", finishReason: "stop" };
-            return { content: "reply", finishReason: "stop" };
-          },
-        },
-        context: { maxMessages: 4, keepMessages: 2, summarize: true },
-        memory: { store, saveOnCompact: false },
-      });
-
-      await session.send("turn 1");
-      await session.send("turn 2");
-      await session.send("turn 3");
-
-      expect(await store.list()).toHaveLength(0);
-      session.close();
-    });
-  });
-
   describe("token-based RECAP compaction", () => {
     // Use compactionLlm as a separate mock so we can verify it was called
     // independently of the main LLM. keepMessages=1 ensures messages from
@@ -385,8 +282,6 @@ describe("agentLoop session", () => {
       name: string;
       mainTokens: number;
       compactionCalls: string[];
-      store?: InMemoryMemoryIndex;
-      saveOnCompact?: boolean;
     }) {
       const { name, mainTokens, compactionCalls } = opts;
       return makeSession({
@@ -405,10 +300,6 @@ describe("agentLoop session", () => {
           },
         },
         context: { contextLimit: 1000, compressAt: 0.6, maxMessages: 100, keepMessages: 1 },
-        memory:
-          opts.store !== undefined
-            ? { store: opts.store, saveOnCompact: opts.saveOnCompact ?? true }
-            : undefined,
       });
     }
 
@@ -472,47 +363,6 @@ describe("agentLoop session", () => {
       await session.send("turn 3");
 
       expect(compactionCalls).toHaveLength(0);
-      session.close();
-    });
-
-    it("saves recap summary to memory store when saveOnCompact is true", async () => {
-      const store = new InMemoryMemoryIndex();
-      const compactionCalls: string[] = [];
-      const session = await makeRecapSession({
-        name: "recap-memory",
-        mainTokens: 700,
-        compactionCalls,
-        store,
-        saveOnCompact: true,
-      });
-
-      await session.send("turn 1");
-      await session.send("turn 2");
-      await session.send("turn 3");
-
-      const memories = await store.list();
-      const recap = memories.find((m) => m.content === "recap summary text");
-      expect(recap).toBeDefined();
-      expect(recap!.metadata?.type).toBe("recap-summary");
-      session.close();
-    });
-
-    it("does not save to memory when saveOnCompact is false", async () => {
-      const store = new InMemoryMemoryIndex();
-      const compactionCalls: string[] = [];
-      const session = await makeRecapSession({
-        name: "recap-no-save",
-        mainTokens: 700,
-        compactionCalls,
-        store,
-        saveOnCompact: false,
-      });
-
-      await session.send("turn 1");
-      await session.send("turn 2");
-      await session.send("turn 3");
-
-      expect(await store.list()).toHaveLength(0);
       session.close();
     });
 

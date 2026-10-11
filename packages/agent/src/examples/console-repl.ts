@@ -62,7 +62,6 @@ export async function executeDirectCall(
 
   try {
     const parsed = toolDef.parameters.parse(toolInput);
-    // biome-ignore lint/suspicious/noExplicitAny: dynamic tool input
     const result = await toolDef.execute(parsed as any);
     const output = typeof result === "string" ? result : JSON.stringify(result, null, 2);
     return {

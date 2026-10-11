@@ -25,13 +25,12 @@
 //
 // `DefaultConsolidator` ships an LLM-driven reference implementation: it
 // prompts the model with the messages, parses a small JSON envelope back
-// out, and writes the resulting episode (optionally with an embedding).
+// out, and writes the resulting episode.
 // Heuristics are deliberately simple — start there, layer salience tweaks
 // only when retrieval quality regresses.
 // ---------------------------------------------------------------------------
 
 import type { LLMProvider } from "../llm-provider.ts";
-import type { EmbeddingProvider } from "../memory-index.ts";
 import type { Message } from "../message.ts";
 import type { EpisodicRecord, MemoryStore, ScopedKey, StoredMessage, ThreadKey } from "./types.ts";
 
@@ -129,8 +128,6 @@ export interface DefaultConsolidatorConfig {
   readonly store: MemoryStore;
   /** Used for the distillation prompt. Often a cheaper model than the chat LLM. */
   readonly llm: LLMProvider;
-  /** Optional — when set, every written episode carries an embedding. */
-  readonly embeddings?: EmbeddingProvider;
   /** Override the system prompt sent to the distillation LLM. */
   readonly distillPrompt?: string;
   /** Override the salience score derivation. Default uses heuristics + modelSalience. */
@@ -199,7 +196,6 @@ export class NothingToConsolidateError extends Error {
 export class DefaultConsolidator implements Consolidator {
   private readonly store: MemoryStore;
   private readonly llm: LLMProvider;
-  private readonly embeddings?: EmbeddingProvider;
   private readonly distillPrompt: string;
   private readonly salienceFn: (signals: ConsolidationSignals) => number;
   private readonly defaultKeepRecent: number;
@@ -210,7 +206,6 @@ export class DefaultConsolidator implements Consolidator {
   constructor(config: DefaultConsolidatorConfig) {
     this.store = config.store;
     this.llm = config.llm;
-    this.embeddings = config.embeddings;
     this.distillPrompt = config.distillPrompt ?? DEFAULT_DISTILL_PROMPT;
     this.salienceFn = config.salienceFn ?? defaultSalience;
     this.defaultKeepRecent = config.defaultKeepRecent ?? 10;
@@ -237,7 +232,6 @@ export class DefaultConsolidator implements Consolidator {
       summary: distilled.summary,
       outcome: distilled.outcome,
       salience: distilled.salience,
-      embedding: distilled.embedding,
       sourceThreadId: key.threadId,
       sourceMessageRange: { fromSeq, toSeq },
       metadata: { kind: "compact" },
@@ -311,7 +305,6 @@ export class DefaultConsolidator implements Consolidator {
       summary: distilled.summary,
       outcome: distilled.outcome,
       salience: distilled.salience,
-      embedding: distilled.embedding,
       sourceThreadId: key.threadId,
       sourceMessageRange: { fromSeq, toSeq },
       metadata: { kind: "distill", factCount: distilled.facts.length },
@@ -357,7 +350,6 @@ export class DefaultConsolidator implements Consolidator {
     outcome: string | null;
     salience: number;
     facts: string[];
-    embedding?: number[];
   }> {
     const transcript = formatTranscript(messages, this.triggerTurnHandling);
     const llmMessages: Message[] = [
@@ -379,13 +371,11 @@ export class DefaultConsolidator implements Consolidator {
       summary: parsed.summary,
     };
     const salience = clamp01(this.salienceFn(signals));
-    const embedding = this.embeddings ? await this.embeddings.embed(parsed.summary) : undefined;
     return {
       summary: parsed.summary,
       outcome: parsed.outcome,
       salience,
       facts: parsed.facts,
-      embedding,
     };
   }
 }

@@ -217,7 +217,6 @@ describe("resolveLocalAgent", () => {
 
   it("rejects non-local backends", () => {
     const row = baseRow();
-    // biome-ignore lint/suspicious/noExplicitAny: forging a future backend type
     const futureRow: RegisteredAgent = { ...row, backend: { type: "acp" as any } as any };
     expect(() =>
       resolveLocalAgent(futureRow, {
@@ -268,7 +267,6 @@ function recipeWith(capabilities: string[], toolNames: string[]): RegisteredAgen
 /** Resolve + run one turn, return the tool names the LLM was offered. */
 async function offeredTools(
   recipe: RegisteredAgent,
-  // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary shapes
   tools: Record<string, any>,
 ): Promise<string[]> {
   let observed: string[] = [];
@@ -328,7 +326,6 @@ describe("resolveLocalAgent — role binding", () => {
   /** Resolve + run one turn, return { system, tools } the LLM saw. */
   async function runWith(
     recipe: RegisteredAgent,
-    // biome-ignore lint/suspicious/noExplicitAny: tool shapes vary
     tools: Record<string, any>,
     extraDeps: Partial<Parameters<typeof resolveLocalAgent>[1]> = {},
   ): Promise<{ system: string | undefined; tools: string[] }> {

@@ -7,13 +7,10 @@
 // upserts.
 //
 // Before running a turn, the agent runtime claims a lease on the
-// (namespace, thread) tuple. One owner at a time. Two policies on top
-// of this primitive (see AgentTurnGate):
-//
-//   strict — try-acquire; held → reject (HTTP 409 with current owner).
-//            Matches OpenAI Assistants semantics. Implemented in Phase 1.
-//   queued — wait or async-dispatch until free. Tracked separately and
-//            returns NotImplementedError today.
+// (namespace, thread) tuple. One owner at a time. AgentTurnGate puts
+// the `strict` policy on top of this primitive: try-acquire; held →
+// reject (HTTP 409 with current owner), matching OpenAI Assistants
+// semantics.
 //
 // The lease is purely advisory — the underlying tables don't reject
 // writes from non-leaseholders. Discipline is enforced at the agent-

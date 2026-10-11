@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// createDagWorkflow — durable wrapper around executeDag.
+// createDagWorkflow — durable DAG executor.
 // Pinned cases:
 //   1. Linear DAG runs end-to-end through the runner; output matches the
 //      pure executor's output
@@ -15,8 +15,7 @@ import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import type { Agent, AgentRunOutput } from "../../agent/types.ts";
 import { createDagWorkflow } from "../durable-executor.ts";
-import type { AgentResolver } from "../executor.ts";
-import type { AgenticDagRecipe } from "../types.ts";
+import type { AgentResolver, AgenticDagRecipe } from "../types.ts";
 
 function textOnly(text: string): AgentRunOutput<unknown> {
   return {

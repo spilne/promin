@@ -93,7 +93,6 @@ describe("LocalAgent — retriever bindings", () => {
     await agent.invoke({ task: "returns" });
 
     expect(calls[0]?.tools).toEqual(["search_docs"]);
-    // biome-ignore lint/suspicious/noExplicitAny: test introspection of the built tool kit
     const built = (agent as any).buildTools({ namespaceId: "acme" });
     expect(built.search_docs.description).toBe("host-owned search");
   });

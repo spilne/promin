@@ -3,12 +3,11 @@
 // convention lives.
 //
 // `agentLoop` registers a `ctx.signal("approve:<toolCallId>")` wait when a
-// tool with `requireApproval: true` is invoked. listPendingApprovals
-// filters on this prefix; listPendingSignals tags rows as approvals via
-// the same parse; the dashboard's /signals UI keys its shortcut Approve /
-// Reject buttons off the result; the agent loop's resume path constructs
-// the name. Five callers, one string — centralised here so a rename is a
-// one-file change.
+// tool with `requireApproval: true` is invoked. listPendingSignals tags
+// rows as approvals via this parse; the dashboard's /signals UI keys its
+// shortcut Approve / Reject buttons off the result; the agent loop's
+// resume path constructs the name. One string, centralised here so a
+// rename is a one-file change.
 // ---------------------------------------------------------------------------
 
 /** Wire-format prefix every tool-call approval signal name starts with. */

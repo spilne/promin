@@ -1,19 +1,17 @@
 // ---------------------------------------------------------------------------
 // `resilientLLM` — LLM wrapper that recovers from transient stream
-// errors and downshifts to a fallback model on quota / context overflow.
+// errors and fails over along a chain of fallback providers.
 //
-// The existing `fallbackLLM` chains providers on any failure — too
-// coarse: it can't distinguish "we should keep retrying the primary"
-// from "primary is rate-limited, swap to backup" from "the prompt is
-// too long, only a bigger-window model will help".
-//
-// `resilientLLM` adds:
+// It distinguishes "keep retrying the primary" from "primary is
+// rate-limited, swap to a backup" from "the prompt is too long, only a
+// bigger-window model will help":
 //   - configurable retry count + backoff for transient errors
 //   - explicit policy for partial-stream errors (retry replays from
 //     scratch — risky because the caller may have already consumed
 //     deltas; default off for that reason)
-//   - quota / context-overflow detection → switch to a fallback
-//     provider once and replay the call
+//   - a fallback chain, entered on the error classes in `fallbackOn`
+//     (quota / context overflow by default; every class for a plain
+//     "try each provider in order" chain)
 //   - metric hooks so the wrapper's recovery is visible
 //
 // Replay-safety
@@ -38,6 +36,7 @@
 import type { LLMChatParams, LLMProvider, LLMResponse, LLMStreamChunk } from "../llm-provider.ts";
 import type { AgentMetrics } from "../metrics/types.ts";
 import { classifyLLMError, type LLMErrorClass } from "./llm-error-classification.ts";
+import { streamChat } from "./stream-chat.ts";
 
 export interface ResilientLLMPolicy {
   /**
@@ -62,12 +61,23 @@ export interface ResilientLLMPolicy {
    */
   readonly retryAfterPartial?: boolean;
   /**
-   * Fallback provider used on rate_limit / context_overflow when the
-   * primary's retries are exhausted. The wrapper switches once and
-   * replays the call against the fallback — does NOT chain further
-   * fallbacks. Stack `resilientLLM` instances if you want multi-tier.
+   * Fallback providers, tried in order. The call moves to the next one
+   * when the active provider fails with an error class listed in
+   * `fallbackOn` — immediately for `context_overflow` / `permanent`,
+   * after its retry budget is spent for `transient` / `rate_limit`.
+   * Each fallback starts with a fresh retry budget. A single provider
+   * is a one-element chain.
    */
-  readonly fallback?: LLMProvider;
+  readonly fallback?: LLMProvider | ReadonlyArray<LLMProvider>;
+  /**
+   * Error classes that fail over to the next fallback provider.
+   * Default: `["rate_limit", "context_overflow"]` — a different model
+   * often has independent quota or a bigger window, while transient
+   * burns suggest an outage a fallback can't fix. Pass every class
+   * (`ALL_LLM_ERROR_CLASSES`) for a plain "try each provider in order"
+   * chain.
+   */
+  readonly fallbackOn?: ReadonlyArray<LLMErrorClass>;
   /**
    * Optional telemetry. Emits `llm.retries` (counter, labeled by
    * reason: transient | rate_limit | context_overflow | partial) and
@@ -78,6 +88,15 @@ export interface ResilientLLMPolicy {
   readonly metricLabels?: Readonly<Record<string, string>>;
 }
 
+/** Every `LLMErrorClass` — pass as `fallbackOn` to fail over on any error. */
+export const ALL_LLM_ERROR_CLASSES: ReadonlyArray<LLMErrorClass> = [
+  "transient",
+  "rate_limit",
+  "context_overflow",
+  "permanent",
+];
+
+const DEFAULT_FALLBACK_ON: ReadonlyArray<LLMErrorClass> = ["rate_limit", "context_overflow"];
 const DEFAULT_TRANSIENT_RETRIES = 3;
 const MAX_BACKOFF_MS = 30_000;
 
@@ -106,14 +125,36 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
- * Wrap an LLMProvider with retry + downshift behaviour. Call-shape is
+ * Wrap an LLMProvider with retry + fallback behaviour. Call-shape is
  * identical to the inner provider — a drop-in replacement that adds
  * resilience.
+ *
+ * @example
+ * ```ts
+ * // Retry the primary, fail over to a backup on quota / context overflow.
+ * const llm = resilientLLM(primary, { fallback: backup });
+ *
+ * // Plain fallback chain: try each provider once, in order, on any error.
+ * const chain = resilientLLM(primary, {
+ *   transientRetries: 0,
+ *   rateLimitRetries: 0,
+ *   fallback: [backup, lastResort],
+ *   fallbackOn: ALL_LLM_ERROR_CLASSES,
+ * });
+ * ```
  */
 export function resilientLLM(inner: LLMProvider, policy: ResilientLLMPolicy = {}): LLMProvider {
   const transientRetries = policy.transientRetries ?? DEFAULT_TRANSIENT_RETRIES;
   const rateLimitRetries = policy.rateLimitRetries ?? transientRetries;
   const backoff = policy.backoffMs ?? defaultBackoff;
+  const fallbackOn = new Set(policy.fallbackOn ?? DEFAULT_FALLBACK_ON);
+  const fallbacks: ReadonlyArray<LLMProvider> =
+    policy.fallback === undefined
+      ? []
+      : "chat" in policy.fallback
+        ? [policy.fallback]
+        : policy.fallback;
+  const chain: ReadonlyArray<LLMProvider> = [inner, ...fallbacks];
 
   function recordRetry(reason: LLMErrorClass | "partial"): void {
     if (!policy.metrics) return;
@@ -125,158 +166,85 @@ export function resilientLLM(inner: LLMProvider, policy: ResilientLLMPolicy = {}
     policy.metrics.counter("llm.fallback.switches").inc(1, { reason, ...policy.metricLabels });
   }
 
+  /**
+   * One failure's outcome on the provider at `chain[index]`. Per-class
+   * attempt counters, so a sustained rate-limit doesn't burn the
+   * transient budget and vice versa.
+   */
+  function decide(args: {
+    err: unknown;
+    attempts: Record<"transient" | "rate_limit", number>;
+    index: number;
+    signal: AbortSignal | undefined;
+  }):
+    | { kind: "retry"; cls: "transient" | "rate_limit" }
+    | { kind: "fallback" }
+    | { kind: "throw" } {
+    if (args.signal?.aborted) return { kind: "throw" };
+    const cls = classifyLLMError(args.err);
+    if (cls === "transient" || cls === "rate_limit") {
+      const limit = cls === "rate_limit" ? rateLimitRetries : transientRetries;
+      args.attempts[cls] += 1;
+      if (args.attempts[cls] <= limit) return { kind: "retry", cls };
+    }
+    if (fallbackOn.has(cls) && args.index + 1 < chain.length) {
+      recordFallback(cls);
+      return { kind: "fallback" };
+    }
+    return { kind: "throw" };
+  }
+
   return {
     async chat(params: LLMChatParams): Promise<LLMResponse> {
-      // Per-class attempt counters — a sustained rate-limit shouldn't
-      // burn the transient budget and vice versa.
-      const attempts: Record<"transient" | "rate_limit", number> = {
-        transient: 0,
-        rate_limit: 0,
-      };
+      let index = 0;
+      let attempts = { transient: 0, rate_limit: 0 };
       while (true) {
         try {
-          return await inner.chat(params);
+          return await chain[index]!.chat(params);
         } catch (err) {
-          const cls = classifyLLMError(err);
-
-          if (cls === "permanent") throw err;
-
-          if (cls === "context_overflow") {
-            // Retrying the same model won't help — only a bigger-window
-            // fallback can.
-            if (policy.fallback) {
-              recordFallback(cls);
-              return await policy.fallback.chat(params);
-            }
-            throw err;
+          const next = decide({ err, attempts, index, signal: params.signal });
+          if (next.kind === "throw") throw err;
+          if (next.kind === "fallback") {
+            index += 1;
+            attempts = { transient: 0, rate_limit: 0 };
+            continue;
           }
-
-          const limit = cls === "rate_limit" ? rateLimitRetries : transientRetries;
-          attempts[cls] += 1;
-          if (attempts[cls] > limit) {
-            // Retry budget for this class exhausted. Fall back on rate-
-            // limit (different model often has independent quota);
-            // transient burns suggest a real outage that fallback can't fix.
-            if (cls === "rate_limit" && policy.fallback) {
-              recordFallback(cls);
-              return await policy.fallback.chat(params);
-            }
-            throw err;
-          }
-
-          recordRetry(cls);
-          await sleep(backoff(attempts[cls]), params.signal);
+          recordRetry(next.cls);
+          await sleep(backoff(attempts[next.cls]), params.signal);
         }
       }
     },
 
-    chatStream(params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
-      // Top-level stream wrapper — handles retries on the OUTER iterator.
-      // The inner stream may be torn down + replayed from scratch on a
-      // recoverable error, hidden from the caller.
-      return resilientStream(inner, params, policy, {
-        transientRetries,
-        rateLimitRetries,
-        backoff,
-        recordRetry,
-        recordFallback,
-      });
+    async *chatStream(params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
+      // Retries happen on the OUTER iterator: the inner stream may be torn
+      // down + replayed from scratch on a recoverable error, hidden from
+      // the caller as long as nothing was yielded yet.
+      let index = 0;
+      let attempts = { transient: 0, rate_limit: 0 };
+      while (true) {
+        let yieldedAny = false;
+        try {
+          for await (const chunk of streamChat({ provider: chain[index]!, params })) {
+            yieldedAny = true;
+            yield chunk;
+          }
+          return;
+        } catch (err) {
+          // Caller has already received deltas; replaying would cause
+          // duplicate output. Surface the error so the caller decides.
+          if (yieldedAny && !policy.retryAfterPartial) throw err;
+          const next = decide({ err, attempts, index, signal: params.signal });
+          if (next.kind === "throw") throw err;
+          if (yieldedAny) recordRetry("partial");
+          if (next.kind === "fallback") {
+            index += 1;
+            attempts = { transient: 0, rate_limit: 0 };
+            continue;
+          }
+          recordRetry(next.cls);
+          await sleep(backoff(attempts[next.cls]), params.signal);
+        }
+      }
     },
   };
-}
-
-interface StreamCtx {
-  readonly transientRetries: number;
-  readonly rateLimitRetries: number;
-  readonly backoff: (attempt: number) => number;
-  readonly recordRetry: (reason: LLMErrorClass | "partial") => void;
-  readonly recordFallback: (reason: LLMErrorClass) => void;
-}
-
-async function* resilientStream(
-  inner: LLMProvider,
-  params: LLMChatParams,
-  policy: ResilientLLMPolicy,
-  ctx: StreamCtx,
-): AsyncIterable<LLMStreamChunk> {
-  const attempts: Record<"transient" | "rate_limit", number> = {
-    transient: 0,
-    rate_limit: 0,
-  };
-  let activeProvider: LLMProvider = inner;
-  // Tracks whether any chunk has been yielded to the caller. After the
-  // first chunk leaves this generator, retrying replays from scratch —
-  // only allowed if `retryAfterPartial`.
-  while (true) {
-    let yieldedAny = false;
-    try {
-      const stream = await openStream(activeProvider, params);
-      for await (const chunk of stream) {
-        yieldedAny = true;
-        yield chunk;
-      }
-      return;
-    } catch (err) {
-      const cls = classifyLLMError(err);
-
-      if (cls === "permanent") throw err;
-
-      if (cls === "context_overflow") {
-        if (yieldedAny && !policy.retryAfterPartial) throw err;
-        if (policy.fallback) {
-          ctx.recordFallback(cls);
-          activeProvider = policy.fallback;
-          if (yieldedAny) ctx.recordRetry("partial");
-          continue;
-        }
-        throw err;
-      }
-
-      if (yieldedAny && !policy.retryAfterPartial) {
-        // Caller has already received deltas; replaying would cause
-        // duplicate output. Surface the error so the caller decides.
-        throw err;
-      }
-      if (yieldedAny) ctx.recordRetry("partial");
-
-      const limit = cls === "rate_limit" ? ctx.rateLimitRetries : ctx.transientRetries;
-      attempts[cls] += 1;
-      if (attempts[cls] > limit) {
-        if (cls === "rate_limit" && policy.fallback) {
-          ctx.recordFallback(cls);
-          activeProvider = policy.fallback;
-          attempts.transient = 0;
-          attempts.rate_limit = 0; // fresh budget on the fallback
-          continue;
-        }
-        throw err;
-      }
-
-      ctx.recordRetry(cls);
-      await sleep(ctx.backoff(attempts[cls]), params.signal);
-    }
-  }
-}
-
-async function openStream(
-  provider: LLMProvider,
-  params: LLMChatParams,
-): Promise<AsyncIterable<LLMStreamChunk>> {
-  if (provider.chatStream) {
-    return provider.chatStream(params);
-  }
-  // Fall back to chat() and synthesize a single-chunk stream so
-  // resilientLLM works against providers that only implement chat.
-  const r = await provider.chat(params);
-  async function* once(): AsyncIterable<LLMStreamChunk> {
-    if (r.content) yield { delta: r.content };
-    yield {
-      delta: "",
-      finishReason: r.finishReason,
-      ...(r.toolCalls && { toolCalls: r.toolCalls }),
-      ...(r.usage && { usage: r.usage }),
-      ...(r.thinkingBlocks && { thinkingBlocks: r.thinkingBlocks }),
-    };
-  }
-  return once();
 }

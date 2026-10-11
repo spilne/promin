@@ -129,7 +129,7 @@ export interface ListSkillsParams {
  * Versioned registry of skill manifests. Sibling of `AgentRegistry`.
  * Implementations:
  *   - `InMemorySkillRegistry` (reference, in this package)
- *   - future Postgres parity (cf. the agent-registry Postgres ticket)
+ *   - `SqliteSkillRegistry` (`@promin/sqlite`), `PostgresSkillRegistry` (`@promin/postgres`)
  *
  * Every implementation must pass `skillRegistryTestSuite`.
  */

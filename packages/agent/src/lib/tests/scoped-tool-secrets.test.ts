@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// createScopedTool — declarative secret auto-injection (3gjv Phase 1).
+// createScopedTool — declarative secret auto-injection.
 // Pinned cases:
 //   1. No secrets declared → ctx.secrets is empty record
 //   2. Declared + resolvable → ctx.secrets.<name> = stored value

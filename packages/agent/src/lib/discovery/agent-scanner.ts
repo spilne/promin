@@ -28,10 +28,6 @@ function backendRequiredEnv(backend: AgentBackend): ReadonlyArray<string> {
   switch (backend.type) {
     case "local":
       return backend.requiredEnv ?? [];
-    case "cursor":
-      // Default mirrors `resolveCursorAgent`'s default — `CURSOR_API_KEY`
-      // unless the recipe overrides.
-      return backend.requiredEnv ?? ["CURSOR_API_KEY"];
     case "remote":
       // Bearer-token auth lives on the recipe itself, not in env.
       return [];

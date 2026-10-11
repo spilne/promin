@@ -150,7 +150,6 @@ describe("skills end-to-end", () => {
       workflowId: "wf-skill-replay",
       stepName: "body",
       storage,
-      // biome-ignore lint/suspicious/noExplicitAny: generator body typing in test
       body: body as any,
     })) as LoadSkillOutput;
     expect(first.version).toBe("v1");
@@ -168,7 +167,6 @@ describe("skills end-to-end", () => {
       workflowId: "wf-skill-replay",
       stepName: "body",
       storage,
-      // biome-ignore lint/suspicious/noExplicitAny: generator body typing in test
       body: body as any,
     })) as LoadSkillOutput;
     expect(replayed).toEqual(first);

@@ -8,7 +8,6 @@ import type { AgentTool, AutoApprove, ApprovalDecision } from "./tool.ts";
 import { shouldAutoApprove } from "./tool.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
 import { buildToolDefs } from "./tool-registry.ts";
-import type { MemoryIndex, MemoryScope } from "./memory-index.ts";
 import type { ProcessorsConfig } from "./processors.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
 import {
@@ -16,7 +15,6 @@ import {
   runLlmCall,
   nonSystemMsgs,
   resolveTools,
-  searchRelevantMemories,
   surfaceAgentError,
 } from "./agent-shared.ts";
 import type { SessionLogger, SessionEvent } from "./session-logger.ts";
@@ -116,9 +114,8 @@ export interface HooksConfig {
    * approve/reject result IS durable. But the CALLBACK ITSELF is skipped
    * on replay — any side effects (audit-log write, Slack notification,
    * rate-limit counter) do NOT re-fire on replay. For durable audit
-   * trails of who approved what, use the persistent approval-storage
-   * primitive (promin-2nh2 — under construction) which records decisions
-   * outside the activity and survives replay correctly.
+   * trails of who approved what, read the journaled decision back from
+   * workflow storage, which survives replay correctly.
    */
   onApprovalRequired?: (call: ToolCall) => Promise<{ approved: boolean; reason?: string }>;
 }
@@ -176,35 +173,9 @@ export interface ContextConfig {
   redactPriorThinking?: boolean;
 }
 
-export interface MemoryConfig {
-  store: MemoryIndex;
-  /**
-   * Scope for all read and write operations on this store.
-   * Omit for the global namespace (same as pre-scoping behaviour).
-   * Example: { namespaceId: orgId, sessionId: sessionId }
-   */
-  scope?: MemoryScope;
-  /**
-   * Save compaction summaries to the memory store so they are retrievable
-   * in future sessions. Default: true.
-   */
-  saveOnCompact?: boolean;
-  /**
-   * How many memories to retrieve and inject at session start.
-   * Set to 0 to disable injection. Default: 5.
-   */
-  injectLimit?: number;
-  /**
-   * Query used to retrieve relevant memories at session start.
-   * Defaults to the system prompt, or "general context" if no system prompt.
-   */
-  searchQuery?: string;
-}
-
 export interface AgentLoopConfig {
   name: string;
   llm: LLMProvider;
-  // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
   tools?: Record<string, AgentTool<any, any>>;
   toolRegistry?: ToolRegistry;
   autoApprove?: AutoApprove;
@@ -213,7 +184,6 @@ export interface AgentLoopConfig {
   maxStepsPerTurn?: number;
   rateLimiter?: RateLimiter;
   context?: ContextConfig;
-  memory?: MemoryConfig;
   hooks?: HooksConfig;
   processors?: ProcessorsConfig;
   /**
@@ -529,7 +499,6 @@ interface SessionState {
  * - **Multi-turn**: one session, many user turns.
  * - **Streaming**: `session.stream(task)` yields token deltas in real time.
  * - **Context management**: auto-compacts when message count exceeds `context.maxMessages`.
- * - **Memory**: retrieves relevant memories at session start; saves compaction summaries.
  * - **Approval gate**: tools with `requireApproval: true` pause the turn until
  *   `session.approve(toolCallId)` or `session.reject(toolCallId)` is called.
  * - **Idle hook**: `hooks.onIdle` fires after the session sits quiet for `idleTimeoutMs`.
@@ -551,7 +520,6 @@ interface SessionState {
  *   llm: anthropic("claude-sonnet-4-6", { apiKey }),
  *   tools: { search: webSearchTool },
  *   systemPrompt: "You are a helpful assistant.",
- *   memory: { store: memoryIndex },
  * });
  *
  * const session = await loop.session({ runner, sessionId: "s1" });
@@ -588,8 +556,8 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
       // Multi-subscriber event bus. `config.logger` (if provided) is wired
       // in as one subscriber, which backs `session.eventLog()`. Other
       // subscribers attach via `session.subscribe`
-      // — used by cross-process forwarders (the WS relay in promin-o8dj /
-      // promin-yxxk) and any other live observer.
+      // — used by cross-process forwarders (e.g. a WebSocket relay) and
+      // any other live observer.
       const eventBus = new SessionEventBus();
       const sessionLogger = config.logger ?? null;
       if (sessionLogger) {
@@ -700,14 +668,6 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           let messages: Message[] = config.systemPrompt
             ? [{ role: "system" as const, content: config.systemPrompt }]
             : [];
-
-          // Inject relevant memories from previous sessions
-          if (config.memory && (config.memory.injectLimit ?? 5) > 0) {
-            const memMsgs = yield* ctx.activity("inject-memories", () =>
-              searchRelevantMemories(config.memory!, config.systemPrompt ?? "general context"),
-            );
-            messages = [...messages, ...memMsgs];
-          }
 
           for (let turn = 0; turn < maxTurns; turn++) {
             const { task, compactedMessages } = yield* ctx.signal<{
@@ -838,21 +798,6 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                     return r;
                   });
                   messages = recapResult.messages;
-                  if (
-                    recapResult.summary &&
-                    config.memory?.saveOnCompact !== false &&
-                    config.memory?.store
-                  ) {
-                    yield* ctx.activity(`save-memory-recap-${turn}-${step}`, () =>
-                      config.memory!.store.save(
-                        {
-                          content: recapResult.summary!,
-                          metadata: { sessionId, turn, step, type: "recap-summary" },
-                        },
-                        config.memory!.scope,
-                      ),
-                    );
-                  }
                 }
               }
 
@@ -871,10 +816,9 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               }
 
               const toolResultMsgs: ToolResultMessage[] = [];
-              // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
               const toExecute: Array<{ call: ToolCall; toolDef: AgentTool<any, any> }> = [];
 
-              // Phase 1: resolve approvals sequentially (each may need a user signal)
+              // First pass: resolve approvals sequentially (each may need a user signal)
               for (const call of response.toolCalls) {
                 const toolDef = toolMap[call.name];
                 if (!toolDef) {
@@ -912,7 +856,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                     );
                     logDecision(decision.approved);
                   } else {
-                    // Activity result is journaled — listPendingApprovals
+                    // Activity result is journaled — listPendingSignals
                     // reads `{ toolName, toolInput }` from the matching
                     // `lc-*-approval-<callId>-start` step to surface the
                     // pending request without re-running anything.
@@ -955,7 +899,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                 toExecute.push({ call, toolDef });
               }
 
-              // Phase 2: run all approved tools in parallel, each individually journaled
+              // Second pass: run all approved tools in parallel, each individually journaled
               if (toExecute.length > 0) {
                 const results = yield* ctx.parallel(
                   toExecute.map(({ call, toolDef }) =>
@@ -1097,22 +1041,6 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                 return r;
               });
               messages = result.messages;
-
-              if (
-                result.summary &&
-                config.memory?.saveOnCompact !== false &&
-                config.memory?.store
-              ) {
-                yield* ctx.activity(`save-memory-${turn}`, () =>
-                  config.memory!.store.save(
-                    {
-                      content: result.summary!,
-                      metadata: { sessionId, turn, type: "compaction-summary" },
-                    },
-                    config.memory!.scope,
-                  ),
-                );
-              }
             }
           }
         },
@@ -1399,12 +1327,6 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
           const after = nonSystemMsgs(result.messages).length;
           _pendingCompact = result.messages;
           state.latestMessages = result.messages;
-          if (result.summary && config.memory?.saveOnCompact !== false && config.memory?.store) {
-            await config.memory.store.save(
-              { content: result.summary, metadata: { sessionId, type: "compaction-summary" } },
-              config.memory.scope,
-            );
-          }
           return { kept: after, dropped: before - after, summary: result.summary };
         },
 

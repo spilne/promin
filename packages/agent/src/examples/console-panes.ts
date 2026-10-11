@@ -1,10 +1,9 @@
 import type { AgentSession } from "../lib/agent-loop.ts";
-import type { MemoryIndex } from "../lib/memory-index.ts";
-import type { TreeNode } from "../lib/terminal/terminal.ts";
+import type { Fact, MemoryStore, ThreadKey } from "../lib/memory/types.ts";
+import type { CommandDef, TreeNode } from "../terminal.ts";
 import type { InMemoryWorkflowStorage, WorkflowRunner } from "@promin/workflow";
 import type { InMemoryScheduler } from "@promin/workflow/scheduler";
 
-import type { CommandDef } from "../lib/terminal/chat-terminal.ts";
 export type { CommandDef };
 
 export function buildHelp(
@@ -164,12 +163,26 @@ export async function buildStepsTree(
   );
 }
 
-export async function buildMemories(store: MemoryIndex, query?: string): Promise<string[]> {
-  const entries = query ? await store.search(query, 10) : await store.list(50);
-  if (!entries.length) return [query ? `(no memories matching "${query}")` : "(no memories yet)"];
-  return entries.map(
-    (e) =>
-      `  \x1b[2m[${e.createdAt.toLocaleTimeString()}] ${e.id.slice(0, 8)}\x1b[0m  ${e.content}`,
+/** Resource + thread facts for `key`, newest first, optionally filtered by a substring. */
+export async function buildMemories(params: {
+  store: MemoryStore;
+  key: ThreadKey;
+  query?: string;
+}): Promise<string[]> {
+  const { store, key, query } = params;
+  const resourceFacts = key.resourceId
+    ? await store.listResourceFacts({ namespaceId: key.namespaceId, resourceId: key.resourceId })
+    : [];
+  const threadFacts = await store.listThreadFacts(key);
+  const needle = query?.toLowerCase();
+  const facts: Fact[] = [...resourceFacts, ...threadFacts]
+    .filter((f) => !needle || f.text.toLowerCase().includes(needle))
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, 50);
+  if (!facts.length) return [query ? `(no memories matching "${query}")` : "(no memories yet)"];
+  return facts.map(
+    (f) =>
+      `  \x1b[2m[${new Date(f.createdAt).toLocaleTimeString()}] ${f.id.slice(0, 8)}\x1b[0m  ${f.text}`,
   );
 }
 

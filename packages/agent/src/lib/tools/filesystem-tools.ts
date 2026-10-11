@@ -153,7 +153,6 @@ export function createStatTool(config: FilesystemToolsConfig) {
 // ---- bundle ----
 
 export interface FilesystemTools {
-  // biome-ignore lint/suspicious/noExplicitAny: tool inputs validated at runtime
   readFile: ReturnType<typeof createReadFileTool>;
   writeFile: ReturnType<typeof createWriteFileTool>;
   listDir: ReturnType<typeof createListDirTool>;

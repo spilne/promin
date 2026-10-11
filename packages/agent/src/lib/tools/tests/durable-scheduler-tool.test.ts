@@ -13,10 +13,7 @@
 import { describe, expect, it } from "bun:test";
 import { InMemorySchedulerStorage } from "@promin/workflow/scheduler";
 import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
-import {
-  createDurableSchedulerTool,
-  createDurableSchedulerTools,
-} from "../durable-scheduler-tool.ts";
+import { createDurableSchedulerTools } from "../durable-scheduler-tool.ts";
 import { dispatchAgentSchedule, isAgentSchedule } from "../dispatch-agent-schedule.ts";
 import { inProcessSchedulerClient } from "../scheduler-client.ts";
 import type { Agent, AgentInput, AgentRunOutput } from "../../agent/types.ts";
@@ -231,7 +228,6 @@ describe("dispatchAgentSchedule", () => {
       cancel: async () => {},
     };
     const agent: Agent = {
-      // biome-ignore lint/suspicious/noExplicitAny: test stub
       withScope: () => agent as any,
       invoke: async (input: AgentInput) => {
         captures.push({ task: input.task, source: input.source });
@@ -428,54 +424,5 @@ describe("isAgentSchedule", () => {
         metadata: { agentTrigger: true, agentId: "writer" }, // missing task + namespaceId
       }),
     ).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Unified `createDurableSchedulerTool` — same behaviour, single tool surface
-// ---------------------------------------------------------------------------
-
-describe("createDurableSchedulerTool — unified shape (delegates to shared handlers)", () => {
-  function unifiedToolWith(storage: InMemorySchedulerStorage) {
-    return createDurableSchedulerTool({
-      getClient: (scope) => inProcessSchedulerClient({ storage, scope }),
-    });
-  }
-
-  it("create / list / cancel route through the same handlers as the split tools", async () => {
-    const storage = new InMemorySchedulerStorage();
-    const tool = unifiedToolWith(storage);
-
-    // create
-    const created = await tool.execute({ command: "create", task: "ping", cron: "0 * * * *" }, CTX);
-    expect(created.ok).toBe(true);
-    if (!("id" in created)) throw new Error("expected create result");
-
-    // Same metadata shape as the split-tool test asserted above — proves
-    // the unified surface delegates to handleCreate, no parallel impl.
-    const stored = await storage.loadSchedule(created.id);
-    expect(stored?.metadata).toMatchObject({
-      agentTrigger: true,
-      agentId: "writer",
-      task: "ping",
-      namespaceId: "acme",
-    });
-
-    // list
-    const listed = await tool.execute({ command: "list" }, CTX);
-    if (!("schedules" in listed)) throw new Error("expected list result");
-    expect(listed.schedules.map((s) => s.id)).toContain(created.id);
-
-    // cancel
-    const cancelled = await tool.execute({ command: "cancel", id: created.id }, CTX);
-    expect(cancelled.ok).toBe(true);
-    expect(await storage.loadSchedule(created.id)).toBeNull();
-  });
-
-  it("rejects a create with no trigger — same error as the split shape", async () => {
-    const tool = unifiedToolWith(new InMemorySchedulerStorage());
-    const result = await tool.execute({ command: "create", task: "x" }, CTX);
-    expect(result.ok).toBe(false);
-    if ("error" in result) expect(result.error).toMatch(/exactly one/);
   });
 });

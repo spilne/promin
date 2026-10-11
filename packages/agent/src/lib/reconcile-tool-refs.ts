@@ -114,8 +114,8 @@ export async function reconcileToolReferences(
 
 /**
  * Returns the recipe's declared tool list when the backend is local and
- * binds an INLINE role; null otherwise (caller skips the recipe). Remote /
- * cursor backends don't pull from the host's tool catalog, and a `ref`-bound
+ * binds an INLINE role; null otherwise (caller skips the recipe). Remote
+ * backends don't pull from the host's tool catalog, and a `ref`-bound
  * role's tools live in the RoleRegistry — out of reach for this sync,
  * catalog-only reconciliation (a role-aware pass is future work).
  */

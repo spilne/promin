@@ -1,11 +1,10 @@
 // ---------------------------------------------------------------------------
 // Portable `FragmentStore` conformance suite. Every implementation
-// (in-memory, SQLite, future Postgres) must pass. Mirrors
-// `skillRegistryTestSuite`.
+// (SQLite, Postgres) must pass. Mirrors `skillRegistryTestSuite`.
 //
 // Usage:
 //   import { fragmentStoreTestSuite } from "@promin/agent/testing";
-//   fragmentStoreTestSuite(() => new InMemoryFragmentStore());
+//   fragmentStoreTestSuite(() => SqliteFragmentStore.make({ db }));
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";

@@ -17,7 +17,6 @@ import type { WorkflowRunner } from "@promin/workflow";
 import { LocalAgent, type LocalAgentConfig } from "../agent/local-agent.ts";
 import type { LLMProvider } from "../llm-provider.ts";
 import type { MemoryStore } from "../memory/types.ts";
-// biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
 import type { AgentTool } from "../tool.ts";
 import type { Consolidator } from "../memory/consolidator.ts";
 import type { AutoCompactConfig, AutoDistillConfig } from "../agent/local-agent.ts";
@@ -68,7 +67,6 @@ export interface ResolveLocalAgentDeps {
    * Tool name → implementation. Tool names referenced by the recipe but
    * absent from this map cause a clear error (see `onUnknownTool`).
    */
-  // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
   readonly tools: Readonly<Record<string, AgentTool<any, any>>>;
   /**
    * Optional default namespace baked into the resolved agent. Multi-tenant
@@ -327,12 +325,9 @@ function effectiveDefinition(agent: RegisteredAgent, preResolved?: RoleDefinitio
 
 function pickTools(
   names: ReadonlyArray<string>,
-  // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
   available: Readonly<Record<string, AgentTool<any, any>>>,
   onUnknown: "throw" | "skip",
-  // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
 ): Record<string, AgentTool<any, any>> {
-  // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
   const out: Record<string, AgentTool<any, any>> = {};
   for (const name of names) {
     const tool = available[name];

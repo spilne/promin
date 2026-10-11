@@ -1,6 +1,6 @@
 # @promin/agent
 
-Agent loop, multi-agent orchestration, LLM adapters, tools, memory, and terminal UI for building interactive AI applications.
+Agent loop, LLM adapters, tools, memory, retrieval, and a terminal UI for building interactive AI applications.
 
 ---
 
@@ -11,21 +11,17 @@ Agent loop, multi-agent orchestration, LLM adapters, tools, memory, and terminal
 - [agentAction — single-shot workflows](#agentaction--single-shot-workflows)
 - [Tools](#tools)
   - [tool()](#tool)
-  - [multiTool()](#multitool)
+  - [Multi-command tools](#multi-command-tools)
   - [Built-in tools](#built-in-tools)
 - [Memory](#memory)
 - [Retrieval (RAG)](#retrieval-rag)
 - [Context compaction](#context-compaction)
-- [Multi-agent patterns](#multi-agent-patterns)
-  - [agentNetwork — hub-and-spoke](#agentnetwork--hub-and-spoke)
-  - [createAgentTown — message-passing mesh](#createagenttown--message-passing-mesh)
-  - [runCouncil — multi-model deliberation](#runcouncil--multi-model-deliberation)
 - [LLM adapters](#llm-adapters)
   - [anthropic](#anthropic)
   - [openai / gemini / ollama / llamacpp](#openai--gemini--ollama--llamacpp)
   - [routerLLM](#routerllm)
-  - [fallbackLLM](#fallbackllm)
-  - [twoSpeedLLM](#twospeedllm)
+  - [resilientLLM](#resilientllm)
+  - [rotatingLLM](#rotatingllm)
 - [Evals](#evals)
 - [Terminal UI](#terminal-ui)
 - [Session logging](#session-logging)
@@ -63,7 +59,6 @@ const loop = agentLoop({
   llm: anthropic("claude-sonnet-4-6", { apiKey }),
   tools: { search: webSearchTool },
   systemPrompt: "You are a helpful assistant.",
-  memory: { store: memoryStore },
 });
 
 const session = await loop.session({ runner, sessionId: "s1" });
@@ -111,11 +106,6 @@ agentLoop({
     contextLimit, // token-based compaction threshold
     compressAt: 0.7, // compact at 70% of contextLimit
   },
-  memory: {
-    store: memoryStore,
-    injectLimit: 5, // inject N relevant memories at session start
-    saveOnCompact: true,
-  },
   hooks: {
     beforeTurn, // inject context before the LLM loop
     afterTurn, // analytics, logging
@@ -147,7 +137,7 @@ agentAction({
 
 The semantics: `isReplay` is `true` when the wrapping workflow body is executing on top of pre-existing journal entries (worker restart, signal-resume). For hooks that fire only when their wrapping `ctx.activity` is fresh (everything except `onStep`), the flag tells you whether the BODY containing this activity has been re-started — useful when you want side effects keyed to body restarts, but not required for replay safety. For `onStep`, gate non-idempotent side effects on `!isReplay`.
 
-For durable audit trails of approval decisions, prefer the persistent approval-storage primitive over relying on `onApprovalRequired` side effects — the storage records decisions outside the activity boundary so they survive replay correctly.
+For durable audit trails of approval decisions, read the journaled decision back from workflow storage instead of relying on `onApprovalRequired` side effects — the journal survives replay correctly.
 
 ---
 
@@ -200,64 +190,79 @@ const calculator = tool({
 });
 ```
 
-### multiTool()
+### Multi-command tools
 
-Group multiple operations under one LLM tool call to keep the tool list short:
+Group related operations under one tool with a `z.discriminatedUnion` on `command`. The JSON-schema converter flattens a top-level discriminated union into one object with a required `command` enum (provider tool APIs reject a top-level `anyOf`), and Zod still validates each branch's required fields:
 
 ```ts
-import { multiTool, command } from "@promin/agent";
+import { tool } from "@promin/agent";
+import { z } from "zod";
 
-const memory = multiTool({
-  name: "memory",
-  description: "Read and write long-term memory.",
-  commands: {
-    search: command({
-      description: "Find relevant memories",
-      parameters: z.object({ query: z.string(), limit: z.number().optional() }),
-      execute: async ({ query, limit }) => store.search(query, limit),
-    }),
-    save: command({
-      description: "Persist a new memory",
-      parameters: z.object({ content: z.string() }),
-      execute: async ({ content }) => store.save({ content }),
-    }),
+const notes = tool({
+  name: "notes",
+  description: "Read and write notes.\n\nCommands:\n  search: find notes\n  save: persist a note",
+  parameters: z.discriminatedUnion("command", [
+    z.object({ command: z.literal("search"), query: z.string(), limit: z.number().default(5) }),
+    z.object({ command: z.literal("save"), content: z.string() }),
+  ]),
+  execute: async (input) => {
+    switch (input.command) {
+      case "search":
+        return store.search(input.query, input.limit);
+      case "save":
+        return store.save(input.content);
+    }
   },
 });
 ```
 
+Approval is per tool (`requireApproval`), not per command.
+
 ### Built-in tools
 
-| Factory                                      | Description                                                     |
-| -------------------------------------------- | --------------------------------------------------------------- |
-| `createFilesystemTools()`                    | `readFile`, `writeFile`, `listDir`, `statFile`                  |
-| `createShellTool()`                          | Execute shell commands in a workspace                           |
-| `createMemoryTools()` / `createMemoryTool()` | `searchMemory`, `saveMemory` (or a combined `memory` multiTool) |
-| `createLlmTool()`                            | One-shot LLM call from inside the agent                         |
-| `createAgentTool()`                          | Delegate to a child agentLoop session                           |
-| `createFetchUrlTool()`                       | Fetch a URL                                                     |
-| `createWebSearchTool()`                      | Web search                                                      |
-| `createSchedulerTools()`                     | `scheduleTask`, `listSchedules`, `cancelSchedule`               |
-| `createWriteToolTool()`                      | Let the agent write and hot-load new tools at runtime           |
-| `createRequireSecretTool()`                  | Prompt the user for an API key via a secure channel             |
+| Factory                         | Description                                                               |
+| ------------------------------- | ------------------------------------------------------------------------- |
+| `createFilesystemTools()`       | `readFile`, `writeFile`, `listDir`, `statFile`                            |
+| `createShellTool()`             | Execute shell commands in a workspace                                     |
+| `createLayeredMemoryTool()`     | `memory` tool over a `MemoryStore`: `set`, `setWorking`, `recall`         |
+| `createLlmTool()`               | One-shot LLM call from inside the agent                                   |
+| `createAgentTool()`             | Delegate to a child agentLoop session                                     |
+| `createFetchUrlTool()`          | Fetch a URL                                                               |
+| `createWebSearchTool()`         | Web search                                                                |
+| `createDurableSchedulerTools()` | `schedulerCreate`, `schedulerList`, `schedulerCancel` (durable schedules) |
+| `createWriteToolTool()`         | Let the agent write and hot-load new tools at runtime                     |
 
 ---
 
 ## Memory
 
-`MemoryStore` provides scoped long-term memory. The bundled `InMemoryMemoryStore` is suitable for development; wire in a vector-backed store (e.g. Postgres with `pgvector`) for production.
+`MemoryStore` is the agent's durable state, in three scopes (namespace → resource → thread): facts, a markdown working-memory scratchpad, episodes (distilled summaries) and the thread's messages. `resolveContext` merges the scopes into the system prompt every turn. `InMemoryMemoryStore` is the reference implementation; `PgMemoryStore` (`@promin/postgres`) and `SqliteMemoryStore` (`@promin/sqlite`) persist it.
 
 ```ts
-import { InMemoryMemoryStore } from "@promin/agent";
+import { InMemoryMemoryStore, LocalAgent, createLayeredMemoryTool } from "@promin/agent";
 
-const store = new InMemoryMemoryStore({
-  embeddings: myEmbeddingProvider, // optional: enables semantic search
+const memory = new InMemoryMemoryStore();
+await memory.appendResourceFact({ namespaceId: "acme", resourceId: "alice" }, "Prefers dark mode.");
+
+// LocalAgent wires the memory cascade (and, by default, the `memory` tool) for you:
+const agent = new LocalAgent({
+  agent: { name: "support", llm },
+  runner,
+  memory,
+  namespaceId: "acme",
+  resourceId: "alice",
 });
 
-const id = await store.save({ content: "User prefers dark mode." });
-const results = await store.search("UI preferences", 5);
+// Or give any agent loop the model-facing tool directly:
+const memoryTool = createLayeredMemoryTool({
+  store: memory,
+  namespaceId: "acme",
+  resourceId: "alice",
+  threadId: "t-1",
+});
 ```
 
-Inject into `agentLoop` via `memory.store` — the loop automatically retrieves relevant memories at session start and saves compaction summaries.
+The `memory` tool exposes `set` (a durable fact at thread or resource scope), `setWorking` (replace the scratchpad) and `recall` (keyword search over facts and episodes, ranked with episode salience). `DefaultConsolidator` distills threads into episodes and resource facts.
 
 ---
 
@@ -272,10 +277,6 @@ Higher scores are more relevant; the scale is retriever-specific.
 | `FlatTextChunker`                        | Paragraph chunker (`maxSize` 1000, `overlap` 100 chars). Implements `KnowledgeChunker`.                                                                |
 | `InMemoryRetriever`                      | In-process store: cosine similarity with an `EmbeddingProvider`, keyword overlap without one. `addDocument`, `addChunks`, `deleteSource`.              |
 | `PgVectorRetriever` (`@promin/postgres`) | pgvector table: `ensureSchema({ createExtension?, index? })`, `addDocument`, `addChunks` (upsert by chunk id), `deleteSource`, cosine search.          |
-| `RerankingRetriever`                     | Fetches `topK * candidateMultiplier` candidates, lets `rerank({ request, results })` reorder them, cuts back to `topK`.                                |
-| `RouterRetriever`                        | Fans out to the routes whose `when` passes, else whose `tags` match `filter.tags`, else all; merges by best score per chunk id.                        |
-| `CombinedRetriever`                      | Queries every source, scales each source's scores by its `weight`, merges by best score per chunk id.                                                  |
-| `FallbackRetriever`                      | Tries sources in order; returns the first result set that meets the source's `minResults` / `minScore`.                                                |
 | `createRetrieverTool`                    | Wraps a retriever as an agent tool (default name `search_knowledge_base`). Sources land in the model text and in the tool result's `sources` metadata. |
 | `InMemoryRetrieverRegistry`              | `RetrieverRegistry` of live retrievers keyed by id, with description / tags / metadata for catalogs.                                                   |
 
@@ -335,91 +336,6 @@ When `summarize: true` (the default), dropped turns are summarized by the LLM an
 
 ---
 
-## Multi-agent patterns
-
-### agentNetwork — hub-and-spoke
-
-Each specialist is an `agentAction` workflow. The orchestrator calls them as tools.
-
-```ts
-import { agentNetwork, agentAction, agentLoop } from "@promin/agent";
-
-const network = agentNetwork({
-  runner,
-  agents: {
-    researcher: {
-      workflow: agentAction({ llm, tools: { search }, systemPrompt: "Research topics." }),
-      description: "Searches the web and returns a summary.",
-    },
-    coder: {
-      workflow: agentAction({ llm, tools: { shell }, systemPrompt: "Write and run code." }),
-      description: "Writes and executes code. Returns output or file path.",
-    },
-  },
-});
-
-const orchestrator = agentLoop({
-  llm,
-  tools: network.handoffTools(),
-  systemPrompt: "Orchestrate tasks using the specialist agents.",
-});
-```
-
-Each handoff starts a new durable workflow — fully journaled and observable.
-
-### createAgentTown — message-passing mesh
-
-Agents communicate asynchronously via inboxes. The Mayor is the human-facing entry point; all others are background daemons.
-
-```ts
-import { createAgentTown } from "@promin/agent";
-
-const town = createAgentTown({
-  runner,
-  mayor: "coordinator",
-  agents: {
-    coordinator: { llm, prompt: "Delegate subtasks to peers." },
-    researcher: { llm, tools: { search }, prompt: "Research topics on request." },
-    coder: { llm, tools: { shell }, prompt: "Write code on request." },
-  },
-  sharedMemory: sharedStore,
-});
-
-for await (const chunk of town.stream("Research PRPH2 and write a summary.")) {
-  process.stdout.write(chunk);
-}
-await town.close();
-```
-
-Every agent automatically gets `sendMessage` and (for the mayor) `readInbox` tools. Each agent's LLM turns are individually journaled.
-
-| Dimension           | agentNetwork       | createAgentTown       |
-| ------------------- | ------------------ | --------------------- |
-| Specialist lifetime | Ephemeral per call | Persistent session    |
-| Communication       | Sync tool call     | Async message-passing |
-| Topology            | Hub-and-spoke      | Mesh (any-to-any)     |
-| Best for            | Stateless subtasks | Long-running agents   |
-
-### runCouncil — multi-model deliberation
-
-```ts
-import { runCouncil } from "@promin/agent";
-
-const result = await runCouncil("Should we adopt microservices?", {
-  councilors: [
-    { name: "Alice", llm: claude, role: "advocate — argue for the proposal" },
-    { name: "Bob", llm: gpt4, role: "skeptic — find risks and failure modes" },
-  ],
-  synthesizer: claude,
-  rounds: 2,
-});
-console.log(result.verdict);
-```
-
-All councilor calls in each round run in parallel. Use `createCouncilTool()` to expose it as an `AgentTool` inside an agent.
-
----
-
 ## LLM adapters
 
 All adapters implement `LLMProvider` and are interchangeable.
@@ -461,17 +377,40 @@ const llm = routerLLM([
 ]);
 ```
 
-### fallbackLLM
-
-Try providers in order; move to the next on any error:
+`twoSpeedLLM` is the cost-optimizing preset: a cheap/fast model for synthesis steps, a capable one for reasoning. It is `routerLLM([{ when: isToolResultStep, use: fast }, { when: () => true, use: capable }])`:
 
 ```ts
-import { fallbackLLM } from "@promin/agent";
+import { twoSpeedLLM } from "@promin/agent";
 
-const llm = fallbackLLM([primaryProvider, backupProvider]);
+const llm = twoSpeedLLM({
+  capable: anthropic("claude-opus-4-7", { apiKey }),
+  fast: anthropic("claude-haiku-4-5-20251001", { apiKey }),
+  // Optional override (true → fast). Default: isToolResultStep — the last
+  // non-system message is a tool result.
+  when: (p) => false,
+});
 ```
 
-**Note**: mid-stream fallback in `chatStream()` delivers partial interleaved output. Use `chat()` if that is unacceptable.
+### resilientLLM
+
+Retry transient errors with backoff, then fail over along a fallback chain:
+
+```ts
+import { resilientLLM, ALL_LLM_ERROR_CLASSES } from "@promin/agent";
+
+// Retry the primary; on quota exhaustion or context overflow switch to the backup.
+const llm = resilientLLM(primary, { fallback: backup });
+
+// Plain fallback chain: try each provider once, in order, on any error.
+const chain = resilientLLM(primary, {
+  transientRetries: 0,
+  rateLimitRetries: 0,
+  fallback: [backup, lastResort],
+  fallbackOn: ALL_LLM_ERROR_CLASSES,
+});
+```
+
+`fallbackOn` (default `["rate_limit", "context_overflow"]`) lists the error classes that move the call to the next provider; each fallback starts with a fresh retry budget. A stream that already yielded chunks is not replayed unless `retryAfterPartial` is set, since the caller would see duplicate output.
 
 ### rotatingLLM
 
@@ -500,23 +439,6 @@ const llm = rotatingLLM(slots, {
   exhaustionTokenThreshold: 5_000,
 });
 ```
-
-### twoSpeedLLM
-
-Automatically routes to a cheap/fast model for synthesis steps and a capable model for reasoning:
-
-```ts
-import { twoSpeedLLM } from "@promin/agent";
-
-const llm = twoSpeedLLM({
-  capable: anthropic("claude-opus-4-7", { apiKey }),
-  fast: anthropic("claude-haiku-4-5-20251001", { apiKey }),
-  // Optional override:
-  when: (p) => /* true → fast */ false,
-});
-```
-
-Default heuristic: if the last non-system message is a tool result → `fast`; otherwise → `capable`.
 
 ### ModelCatalog
 
@@ -584,10 +506,10 @@ for (const r of results) {
 
 ## Terminal UI
 
-For building interactive console applications:
+For building interactive console applications. The Node TTY kit lives on its own subpath so server and library consumers don't load it:
 
 ```ts
-import { Terminal, ChatTerminal, ConsoleRunner, MarkdownRenderer } from "@promin/agent";
+import { Terminal, ChatTerminal, ConsoleRunner, MarkdownRenderer } from "@promin/agent/terminal";
 ```
 
 | Class              | Description                                                                                   |

@@ -27,13 +27,8 @@
 // fresh turn, agent does its thing, the result posts back wherever the
 // host wired it.
 //
-// vs `createSchedulerTools` (sibling file)
-// ----------------------------------------
-// `createSchedulerTools` is for in-process reminders that re-enter the
-// SAME agent session via an onTick callback — fine for single-pod chat
-// REPLs but not durable across restarts. This tool is the durable
-// counterpart: schedules live in SchedulerStorage, survive restart,
-// and dispatch via the host's scheduler-loop.
+// Schedules live in SchedulerStorage, survive restart, and dispatch via
+// the host's scheduler-loop.
 //
 // Talks to a `SchedulerClient` (interface in `./scheduler-client.ts`) —
 // `inProcessSchedulerClient` for demos / single-process REPLs, or
@@ -230,75 +225,6 @@ export function createDurableSchedulerTools(deps: DurableSchedulerToolDeps): Dur
   });
 
   return { schedulerCreate, schedulerList, schedulerCancel };
-}
-
-// ---------------------------------------------------------------------------
-// Unified `scheduler` tool — same handlers, different surface
-// ---------------------------------------------------------------------------
-//
-// Big tool-tuned models (Claude, GPT-4) handle a 3-way discriminated union
-// fine, and one tool name is a few hundred bytes lighter in the system
-// prompt than three. For agents with already-large tool registries that's
-// a real cost. This unified variant exists for those callers.
-//
-// Implementation note: this builds on the SAME `handleCreate` / `handleList`
-// / `handleCancel` helpers as the split version. Adding a new command
-// (e.g. `pause`) lands in one place — the handler — and both surfaces pick
-// it up. No drift risk between the two API shapes.
-
-const UNIFIED_CREATE_SCHEMA = CREATE_SCHEMA.extend({
-  command: z.literal("create"),
-});
-const UNIFIED_LIST_SCHEMA = z.object({ command: z.literal("list") });
-const UNIFIED_CANCEL_SCHEMA = CANCEL_SCHEMA.extend({
-  command: z.literal("cancel"),
-});
-
-type UnifiedSchedulerInput =
-  | z.infer<typeof UNIFIED_CREATE_SCHEMA>
-  | z.infer<typeof UNIFIED_LIST_SCHEMA>
-  | z.infer<typeof UNIFIED_CANCEL_SCHEMA>;
-type UnifiedSchedulerOutput = CreateOk | ListOk | ToolError | { ok: true };
-
-/**
- * Build a single `scheduler` tool that takes a `command` discriminator.
- * Prefer `createDurableSchedulerTools()` for small models — the unified
- * shape trips up sub-7B models on the discriminator pick.
- */
-export function createDurableSchedulerTool(
-  deps: DurableSchedulerToolDeps,
-): AgentTool<UnifiedSchedulerInput, UnifiedSchedulerOutput> {
-  const maxPerThread = deps.maxPerThread ?? DEFAULT_MAX_PER_THREAD;
-  const generateIdFor = (scope: SchedulerClientScope) =>
-    deps.generateId ?? (() => `${scope.threadId ?? scope.agentId}-${randomUUID().slice(0, 8)}`);
-
-  return tool({
-    name: "scheduler",
-    description:
-      "Create / list / cancel durable scheduled agent invocations. Pick `command`:\n" +
-      "  - create({ task, cron|intervalMs|rrule, agentId?, name?, timezone?, startAt?, endAt? }) — schedule a recurring fire\n" +
-      "  - list() — your schedules in this conversation\n" +
-      "  - cancel({ id }) — delete a schedule\n\n" +
-      "Pick exactly one of cron / intervalMs / rrule. Cron is most common ('0 9 * * MON' = Monday 9am UTC; pass `timezone` for other zones). Defaults to firing the SAME agent — pass `agentId` only to delegate to a peer.",
-    parameters: z.discriminatedUnion("command", [
-      UNIFIED_CREATE_SCHEMA,
-      UNIFIED_LIST_SCHEMA,
-      UNIFIED_CANCEL_SCHEMA,
-    ]),
-    execute: async (input, ctx): Promise<UnifiedSchedulerOutput> => {
-      const scope = resolveSchedulerScope(ctx?.scope);
-      if ("error" in scope) return scope;
-      const client = deps.getClient(scope);
-      switch (input.command) {
-        case "create":
-          return handleCreate(input, client, scope, generateIdFor(scope), maxPerThread);
-        case "list":
-          return handleList(client);
-        case "cancel":
-          return handleCancel(input, client);
-      }
-    },
-  });
 }
 
 /**

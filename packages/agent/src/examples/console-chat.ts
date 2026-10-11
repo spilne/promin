@@ -20,10 +20,10 @@ import {
 import { anthropic } from "../lib/adapters/anthropic.ts";
 import type { RateLimiter } from "../lib/agent-shared.ts";
 import { agentLoop } from "../lib/agent-loop.ts";
-import { InMemoryMemoryIndex } from "../lib/memory-index.ts";
-import { CompositeSecretStore, EnvSecretStore, InMemorySecretStore } from "../lib/secret-store.ts";
-import { ChatTerminal } from "../lib/terminal/chat-terminal.ts";
-import { ConsoleRunner } from "../lib/terminal/console-runner.ts";
+import { InMemoryMemoryStore } from "../lib/memory/in-memory-memory-store.ts";
+import type { ThreadKey } from "../lib/memory/types.ts";
+import { InMemorySecretsStorage } from "../lib/secrets/in-memory-secrets-storage.ts";
+import { ChatTerminal, ConsoleRunner } from "../terminal.ts";
 import { UsageTracker, fmtN } from "./console-usage.ts";
 import { InMemorySessionLogger } from "../lib/session-logger.ts";
 import { createSpinnerTracker, abbrevInput } from "./console-spinner.ts";
@@ -104,7 +104,7 @@ const COMMANDS: ReplCommand[] = [
       const q = input.slice("/memories".length).trim();
       await term.showPane(
         `memories${q ? ` · "${q}"` : ""}`,
-        await buildMemories(memoryIndex, q || undefined),
+        await buildMemories({ store: memoryStore, key: memoryKey, query: q || undefined }),
       );
     },
   },
@@ -115,8 +115,11 @@ const COMMANDS: ReplCommand[] = [
     handle: async (input) => {
       const text = input.slice("/remember ".length).trim();
       if (text) {
-        const id = await memoryIndex.save({ content: text });
-        console.log(`\n\x1b[2mSaved ${id.slice(0, 8)}: "${text}"\x1b[0m\n`);
+        const fact = await memoryStore.appendResourceFact(
+          { namespaceId: memoryKey.namespaceId, resourceId: memoryKey.resourceId! },
+          text,
+        );
+        console.log(`\n\x1b[2mSaved ${fact.id.slice(0, 8)}: "${text}"\x1b[0m\n`);
       }
     },
   },
@@ -198,9 +201,15 @@ const chatTerm = new ChatTerminal({ commands: COMMANDS, workspace });
 const { term, rl } = chatTerm;
 
 // ---- infrastructure ----
-const memoryIndex = new InMemoryMemoryIndex();
-// Env vars checked first; user-provided secrets (via requireSecret or key prompts) go to in-memory.
-const secrets = new CompositeSecretStore([new EnvSecretStore(), new InMemorySecretStore()]);
+const memoryStore = new InMemoryMemoryStore();
+// Resource-scoped facts follow the user across sessions; the thread holds this console's notes.
+const memoryKey: ThreadKey = {
+  namespaceId: "console",
+  resourceId: "local-user",
+  threadId: "console",
+};
+// Env vars are checked first; keys typed at a prompt land here.
+const secrets = new InMemorySecretsStorage();
 const storage = new InMemoryWorkflowStorage();
 const runner = createWorkflowRunner({ storage });
 
@@ -238,7 +247,7 @@ const sessionLogger = new InMemorySessionLogger();
 
 const { registry, scheduler, activeTicks } = await createToolRegistry({
   workspace,
-  memoryIndex,
+  memory: { store: memoryStore, key: memoryKey },
   secrets,
   apiKey,
   ask: (q) => term.ask(q),
@@ -267,13 +276,11 @@ const agentMachine = stateMachine<AgentStates>({
 })
   .state("idle")
   .state("thinking")
-  // biome-ignore lint/suspicious/noExplicitAny: state machine action context is dynamically typed
   .on("message", {
     from: "idle",
     to: "thinking",
     action: (ctx: any, d: any) => ({ turns: ctx.turns, turn: d.turn, task: d.task }),
   })
-  // biome-ignore lint/suspicious/noExplicitAny: state machine action context is dynamically typed
   .on("done", { from: "thinking", to: "idle", action: (ctx: any) => ({ turns: ctx.turns + 1 }) })
   .initial("idle")
   .build();
@@ -285,15 +292,15 @@ const SYSTEM_PROMPT = [
   "reply confirming what was done. Never end a turn silently — the user cannot see tool results.",
   `Workspace: ${workspace}`,
   "Tools: readFile, writeFile, listDir, statFile (filesystem), shell (run commands),",
-  "       memory (long-term memory — commands: search, save),",
+  "       memory (long-term memory — commands: set, setWorking, recall),",
   "       sessionDebug (diagnose failures — commands: errors, calls, status, log),",
   "       chatGPT (one-shot GPT-4o query for a quick second opinion),",
   "       claudeAgent (parallel Claude sub-agent with filesystem/shell/memory/chatGPT access),",
   "       gptAgent (parallel GPT-4o sub-agent with filesystem/shell/memory/chatGPT access),",
   "       scheduleTask, listSchedules, cancelSchedule (recurring tasks),",
-  "       writeTool (create new tools at runtime), requireSecret (prompt user for API keys).",
+  "       writeTool (create new tools at runtime).",
   "Use claudeAgent or gptAgent to parallelise independent subtasks or get a different perspective.",
-  "Never ask for secrets in chat — always use requireSecret.",
+  "Never ask for secrets in chat — tools that need an API key prompt for it themselves.",
 ].join("\n");
 
 let sessionIdSeq = 0;
@@ -306,7 +313,6 @@ const loop = agentLoop({
   toolRegistry: spinner.withStatusTracking(registry),
   rateLimiter,
   systemPrompt: SYSTEM_PROMPT,
-  memory: { store: memoryIndex },
   hooks: {
     onApprovalRequired: async (call) => {
       if (autoApproveRef.value) return { approved: true };
@@ -328,7 +334,6 @@ const loop = agentLoop({
   onLifecycle: (e) => {
     if (e.event === "message") {
       agentMachine
-        // biome-ignore lint/suspicious/noExplicitAny: lifecycle context is dynamically typed
         .send({ id: e.sessionId, event: "message", data: e.context as any })
         .catch(() => {});
     } else if (e.event === "done") {

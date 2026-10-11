@@ -7,6 +7,7 @@ import type {
 } from "../llm-provider.ts";
 import { classifyLLMError } from "./llm-error-classification.ts";
 import { InMemoryCapacityStore, type CapacityStore } from "./capacity-store.ts";
+import { streamChat } from "./stream-chat.ts";
 
 export type RotatingLLMStrategy = "round-robin" | "least-remaining";
 
@@ -233,26 +234,6 @@ export function rotatingLLM(slots: LLMProvider[], opts: RotatingLLMOptions = {})
     throw lastErr ?? new Error("rotatingLLM: all slots exhausted");
   }
 
-  async function* providerStream(
-    provider: LLMProvider,
-    params: LLMChatParams,
-  ): AsyncIterable<LLMStreamChunk> {
-    if (provider.chatStream) {
-      yield* provider.chatStream(params);
-      return;
-    }
-    const response = await provider.chat(params);
-    if (response.content) yield { delta: response.content };
-    yield {
-      delta: "",
-      finishReason: response.finishReason,
-      toolCalls: response.toolCalls,
-      thinkingBlocks: response.thinkingBlocks,
-      usage: response.usage,
-      ...(response.rateLimitHint ? { rateLimitHint: response.rateLimitHint } : {}),
-    };
-  }
-
   async function* chatStream(params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
     const tried = new Set<string>();
     let lastErr: unknown;
@@ -265,11 +246,11 @@ export function rotatingLLM(slots: LLMProvider[], opts: RotatingLLMOptions = {})
       // pre-stream when the rate limit is hit. We only fail over BEFORE
       // the first chunk; once the model started streaming, the caller
       // already saw partial output and a switch would interleave two
-      // partial responses (same constraint as fallbackLLM). After-first-
+      // partial responses (same constraint as resilientLLM). After-first-
       // chunk failures rethrow.
       let yielded = false;
       try {
-        for await (const chunk of providerStream(slot.provider, params)) {
+        for await (const chunk of streamChat({ provider: slot.provider, params })) {
           yielded = true;
           if (chunk.finishReason && chunk.rateLimitHint) {
             applyHint(slot, chunk.rateLimitHint);

@@ -32,7 +32,7 @@ export interface SdkMcpClientConfig {
   /**
    * Resolver that turns a `credentialRef` into a concrete bearer token
    * at connect time. Optional — when omitted, only configs with an
-   * inline `authToken` work. Forward-compat with promin-an9l.
+   * inline `authToken` work.
    */
   readonly resolveCredential?: (ref: string) => Promise<string>;
 }

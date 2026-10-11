@@ -61,17 +61,6 @@ describe("PostgresAgentRegistry — Postgres-specific", () => {
         timeoutMs: 5_000,
       },
     });
-    await r.register({
-      id: "cursor-bot",
-      backend: {
-        type: "cursor",
-        model: "auto",
-        workspace: "/tmp/wk",
-        worktree: true,
-        sandbox: "enabled",
-        extraArgs: ["--debug"],
-      },
-    });
 
     const remote = await r.get("remote-bot");
     expect(remote?.backend.type).toBe("remote");
@@ -79,12 +68,6 @@ describe("PostgresAgentRegistry — Postgres-specific", () => {
       expect(remote.backend.endpoint).toBe("https://other.example.com");
       expect(remote.backend.auth?.token).toBe("secret");
       expect(remote.backend.timeoutMs).toBe(5_000);
-    }
-
-    const cursor = await r.get("cursor-bot");
-    if (cursor?.backend.type === "cursor") {
-      expect(cursor.backend.workspace).toBe("/tmp/wk");
-      expect(cursor.backend.extraArgs).toEqual(["--debug"]);
     }
   });
 

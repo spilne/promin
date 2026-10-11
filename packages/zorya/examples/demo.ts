@@ -64,7 +64,6 @@ import {
   inProcessSchedulerClient,
   InMemoryFragmentRegistry,
   InMemoryModelCatalog,
-  resolveCursorAgent,
   DefaultAgentToolCatalog,
   type FragmentStore,
   type KnowledgeBaseStore,
@@ -593,7 +592,6 @@ async function resolveAgent(
   scope?: { readonly namespaceId?: string; readonly resourceId?: string },
 ): Promise<Agent> {
   if (recipe.backend.type === "remote") return resolveRemoteAgent(recipe);
-  if (recipe.backend.type === "cursor") return resolveCursorAgent(recipe);
   // BYOK: resolve credentialRef from secrets vault before constructing
   // the LLM. Throws clearly when a ref is set but no value exists at
   // any scope; falls through to undefined (host default) when unset.
@@ -1336,7 +1334,6 @@ console.log(`                  + queued fallback for any workflow advertised by 
 console.log(`  - Agents:       ${agentScan.agents.map((a) => a.id).join(", ") || "(none)"}`);
 console.log(`                  • local backends (echo-bot, support-bot, ollama-bot, …)`);
 console.log(`                  • remote backend (remote-bot — federation proxy)`);
-console.log(`                  • cursor backend (cursor-bot — Cursor CLI 'agent -p')`);
 console.log(`  - Dashboard:    http://${host}:${actualPort}/`);
 console.log(`  - Agents tab:   http://${host}:${actualPort}/#/agents`);
 console.log(``);

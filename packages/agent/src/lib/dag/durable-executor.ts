@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
-// Durable DAG executor — wraps the in-process executeDag walker in a
-// journaled workflow so each node call becomes a checkpoint.
+// Durable DAG executor — walks an AgenticDagRecipe inside a journaled
+// workflow so each node call becomes a checkpoint.
 //
 // Replay semantics:
 //   - The generator body runs from the top on every attempt.
@@ -16,14 +16,8 @@
 // ---------------------------------------------------------------------------
 
 import { workflow, type Workflow } from "@promin/workflow";
-import type { AgentResolver } from "./executor.ts";
-import { pickPath } from "./executor.ts";
-import {
-  type AgenticDagRecipe,
-  type DagEdge,
-  type DagNode,
-  type NodeInputSource,
-} from "./types.ts";
+import { checkBlockers, pickPath, resolveNodeInputs, stringifyTask } from "./dag-helpers.ts";
+import type { AgentResolver, AgenticDagRecipe, DagEdge, DagNode } from "./types.ts";
 import { topologicalOrder, validateDag } from "./validate.ts";
 
 export interface DurableDagInput {
@@ -96,7 +90,7 @@ export function createDagWorkflow(
 
         let nodeInput: Record<string, unknown>;
         try {
-          nodeInput = resolveInputs(node, input.initialInput, outputs);
+          nodeInput = resolveNodeInputs({ node, initial: input.initialInput, outputs });
         } catch (err) {
           errors[nodeId] = err instanceof Error ? err.message : String(err);
           if ((node.onError ?? "abort") === "abort") {
@@ -156,74 +150,4 @@ export function createDagWorkflow(
       };
     })
     .build();
-}
-
-// ---------------------------------------------------------------------------
-// helpers — duplicated from executor.ts intentionally; the durable path
-// must stay free of side-effects between yields, and re-using the
-// executor's helpers (which are pure) is fine but importing them keeps
-// this file's boundary clear.
-// ---------------------------------------------------------------------------
-
-function checkBlockers(args: {
-  incomingEdges: DagEdge[];
-  outputs: Record<string, unknown>;
-  errors: Record<string, string>;
-  skipped: Set<string>;
-}): string | null {
-  for (const e of args.incomingEdges) {
-    if (args.skipped.has(e.from)) {
-      return `upstream node ${e.from} was skipped`;
-    }
-    if (e.from in args.errors && !(e.from in args.outputs)) {
-      return `upstream node ${e.from} failed`;
-    }
-    if (e.condition) {
-      const sourceOut = args.outputs[e.from];
-      const observed = pickPath(sourceOut, e.condition.path);
-      if (observed !== e.condition.value) {
-        return `edge condition not met from ${e.from}`;
-      }
-    }
-  }
-  return null;
-}
-
-function resolveInputs(
-  node: DagNode,
-  initial: Readonly<Record<string, unknown>>,
-  outputs: Readonly<Record<string, unknown>>,
-): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [field, src] of Object.entries(node.inputs)) {
-    out[field] = resolveSource(src, initial, outputs);
-  }
-  return out;
-}
-
-function resolveSource(
-  src: NodeInputSource,
-  initial: Readonly<Record<string, unknown>>,
-  outputs: Readonly<Record<string, unknown>>,
-): unknown {
-  switch (src.kind) {
-    case "initial":
-      return pickPath(initial, src.path);
-    case "node": {
-      if (!(src.nodeId in outputs)) {
-        throw new Error(`Upstream node "${src.nodeId}" has no output yet`);
-      }
-      return pickPath(outputs[src.nodeId], src.path);
-    }
-    case "literal":
-      return src.value;
-  }
-}
-
-function stringifyTask(input: Record<string, unknown>): string {
-  const entries = Object.entries(input);
-  if (entries.length === 1 && typeof entries[0]![1] === "string") {
-    return entries[0]![1] as string;
-  }
-  return JSON.stringify(input, null, 2);
 }

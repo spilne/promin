@@ -2,7 +2,6 @@ import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { agentLoop } from "../agent-loop.ts";
-import { broadcast } from "../broadcast.ts";
 import { tool } from "../tool.ts";
 import type { LLMProvider, LLMResponse, LLMStreamChunk, LLMFinishReason } from "../llm-provider.ts";
 import type { ToolCall, ThinkingBlock } from "../message.ts";
@@ -240,65 +239,5 @@ describe("session.stream() — extended thinking", () => {
     await session.close();
 
     expect(chunks).toEqual(["ok"]);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// broadcast()
-// ---------------------------------------------------------------------------
-
-describe("broadcast()", () => {
-  async function* makeSource(items: string[]): AsyncIterable<string> {
-    for (const item of items) {
-      yield item;
-    }
-  }
-
-  it("single subscriber receives all items", async () => {
-    const hub = broadcast(makeSource(["a", "b", "c"]));
-    const result = await collectStream(hub.subscribe());
-    expect(result).toEqual(["a", "b", "c"]);
-  });
-
-  it("two concurrent subscribers each receive the full sequence", async () => {
-    const hub = broadcast(makeSource(["x", "y", "z"]));
-    const [r1, r2] = await Promise.all([
-      collectStream(hub.subscribe()),
-      collectStream(hub.subscribe()),
-    ]);
-    expect(r1).toEqual(["x", "y", "z"]);
-    expect(r2).toEqual(["x", "y", "z"]);
-  });
-
-  it("late subscriber receives all buffered items from the start", async () => {
-    const hub = broadcast(makeSource(["p", "q", "r"]));
-
-    // First subscriber consumes entirely — this drains the source
-    const first = await collectStream(hub.subscribe());
-
-    // Late subscriber subscribes after source is done; must still get all items
-    const late = await collectStream(hub.subscribe());
-
-    expect(first).toEqual(["p", "q", "r"]);
-    expect(late).toEqual(["p", "q", "r"]);
-  });
-
-  it("source that ends early: subscribers terminate cleanly after all items", async () => {
-    // Verifies that once the source iterator signals done, every subscriber
-    // also terminates — even one that subscribes after the source finished.
-    const hub = broadcast(makeSource(["only", "these"]));
-
-    // First subscriber — concurrently with second
-    const [r1, r2] = await Promise.all([
-      collectStream(hub.subscribe()),
-      collectStream(hub.subscribe()),
-    ]);
-
-    // Third subscriber added well after source done
-    const r3 = await collectStream(hub.subscribe());
-
-    expect(r1).toEqual(["only", "these"]);
-    expect(r2).toEqual(["only", "these"]);
-    expect(r3).toEqual(["only", "these"]);
   });
 });

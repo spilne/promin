@@ -50,10 +50,7 @@
 // This is the most important cross-scope safety primitive (modeled on
 // ChatGPT's project-only-memory mode shipped Aug 2025).
 //
-// `MemoryStore` is the canonical durable agent state. It is distinct
-// from `MemoryIndex` (the flat semantic-recall index over `MemoryEntry`
-// rows in this same package) — `MemoryIndex` is what an optional
-// `SemanticRecall` capability sits over.
+// `MemoryStore` is the canonical durable agent state.
 // ---------------------------------------------------------------------------
 
 import type { Message } from "../message.ts";
@@ -114,9 +111,8 @@ export type StoredMessage = Message & {
  * and I work on last week?"). Per-namespace episodes are rare but
  * supported for org-wide events.
  *
- * The base store treats episodes as plain rows. `SemanticRecall`
- * adapters index `summary` + `embedding` for similarity retrieval;
- * the base store sorts by `salience` or `createdAt` only.
+ * The base store treats episodes as plain rows and sorts them by
+ * `salience` or `createdAt` only.
  */
 export interface EpisodicRecord {
   readonly id: string;
@@ -327,24 +323,10 @@ export interface TokenBudget {
  *   - thread.workingMemory
  *
  * `messages` is the trimmed thread tail (oldest-first within budget).
- *
- * `recallHits` is reserved for an optional `SemanticRecall` capability;
- * the base store always returns `undefined`.
  */
 export interface ResolvedContext {
   readonly systemPrompt: string;
   readonly messages: StoredMessage[];
-  readonly recallHits?: ReadonlyArray<RecallHit>;
-}
-
-/** Optional semantic recall result. Reserved; not produced by the base store. */
-export interface RecallHit {
-  readonly source: "fact" | "message" | "episode";
-  readonly scope: "namespace" | "resource" | "thread";
-  readonly id: string;
-  readonly text: string;
-  readonly score: number;
-  readonly createdAt: number;
 }
 
 /**
@@ -421,29 +403,6 @@ export interface MemoryStore {
    * `inheritFromParent` severance and trims messages to fit `budget`.
    */
   resolveContext(key: ThreadKey, budget: TokenBudget): Promise<ResolvedContext>;
-}
-
-/**
- * Optional semantic recall capability. A `MemoryStore` MAY also
- * implement this — adapters that index facts and messages can be
- * layered on top of any base store. Use `isSemanticRecall` to detect.
- */
-export interface SemanticRecall {
-  readonly hasSemanticRecall: true;
-  recall(
-    key: ThreadKey,
-    query: string,
-    opts?: { limit?: number; sources?: ReadonlyArray<"fact" | "message" | "episode"> },
-  ): Promise<RecallHit[]>;
-}
-
-/** Type guard. */
-export function isSemanticRecall(s: unknown): s is SemanticRecall {
-  return (
-    typeof s === "object" &&
-    s !== null &&
-    (s as { hasSemanticRecall?: unknown }).hasSemanticRecall === true
-  );
 }
 
 /**

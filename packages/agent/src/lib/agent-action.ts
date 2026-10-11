@@ -9,15 +9,9 @@ import { shouldAutoApprove } from "./tool.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
 import { buildToolDefs } from "./tool-registry.ts";
 import { zodToJsonSchema } from "./zod-to-json-schema.ts";
-import type { MemoryIndex, MemoryScope } from "./memory-index.ts";
 import type { ProcessorsConfig } from "./processors.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
-import {
-  executeToolCall,
-  runLlmCall,
-  resolveTools,
-  searchRelevantMemories,
-} from "./agent-shared.ts";
+import { executeToolCall, runLlmCall, resolveTools } from "./agent-shared.ts";
 import type { SessionEventBus } from "./session-logger.ts";
 
 export interface AgentInput {
@@ -53,33 +47,9 @@ export interface StepContext {
   isReplay: boolean;
 }
 
-export interface AgentActionMemoryConfig {
-  store: MemoryIndex;
-  /**
-   * Scope for all read and write operations on this store.
-   * Omit for the global namespace (same as pre-scoping behaviour).
-   */
-  scope?: MemoryScope;
-  /**
-   * How many memories to retrieve and inject before the first think step.
-   * Default: 5. Set to 0 to disable injection.
-   */
-  injectLimit?: number;
-  /**
-   * Query for memory retrieval. Defaults to the task text.
-   */
-  searchQuery?: string;
-  /**
-   * Save the final answer as a memory entry. Default: false.
-   */
-  saveOnComplete?: boolean;
-}
-
-// biome-ignore lint/suspicious/noExplicitAny: outputSchema generic
 export interface AgentActionConfig<TOutput = any> {
   name: string;
   llm: LLMProvider;
-  // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
   tools?: Record<string, AgentTool<any, any>>;
   toolRegistry?: ToolRegistry;
   autoApprove?: AutoApprove;
@@ -91,15 +61,14 @@ export interface AgentActionConfig<TOutput = any> {
    * The decision is awaited inside a journaled activity — the approve/reject
    * RESULT survives replay. The CALLBACK ITSELF is skipped on replay, so
    * side effects (audit logs, notifications) do NOT re-fire. For durable
-   * audit trails, use the persistent approval-storage primitive
-   * (promin-2nh2) instead of relying on side effects in this callback.
+   * audit trails, read the journaled decision back from workflow storage
+   * instead of relying on side effects in this callback.
    */
   onApprovalRequired?: (call: ToolCall) => Promise<ApprovalDecision>;
   maxSteps?: number;
   systemPrompt?: string;
   rateLimiter?: RateLimiter;
   clock?: WallClock;
-  memory?: AgentActionMemoryConfig;
   /**
    * When set, forces the LLM to return a structured response matching this Zod schema.
    * Uses tool-calling under the hood for maximum compatibility across providers.
@@ -241,10 +210,7 @@ export function agentAction<TOutput>(
 export function agentAction(
   config: AgentActionConfig<never> & { outputSchema?: undefined },
 ): Workflow<AgentInput, AgentResult>;
-export function agentAction(
-  // biome-ignore lint/suspicious/noExplicitAny: overload implementation accepts both forms
-  config: AgentActionConfig<any>,
-): Workflow<AgentInput, AgentResult> {
+export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput, AgentResult> {
   const maxSteps = config.maxSteps ?? 20;
 
   const bus = config.bus;
@@ -272,14 +238,6 @@ export function agentAction(
         ];
       }
 
-      // Inject relevant memories before the first think step
-      if (config.memory && (config.memory.injectLimit ?? 5) > 0) {
-        const memMsgs = yield* ctx.activity("inject-memories", () =>
-          searchRelevantMemories(config.memory!, input.task),
-        );
-        messages = [...messages, ...memMsgs];
-      }
-
       messages = [...messages, { role: "user" as const, content: input.task }];
 
       let totalInputTokens = 0;
@@ -287,17 +245,6 @@ export function agentAction(
       let totalCacheReadTokens = 0;
       let totalCacheWriteTokens = 0;
       let structuredOutput: unknown;
-
-      function* maybeSaveMemory(answer: string) {
-        if (config.memory?.saveOnComplete) {
-          yield* ctx.activity("save-memory", () =>
-            config.memory!.store.save(
-              { content: answer, metadata: { task: input.task } },
-              config.memory!.scope,
-            ),
-          );
-        }
-      }
 
       for (let step = 0; step < maxSteps; step++) {
         // Resolve tools fresh each step so a toolRegistry update is visible immediately
@@ -366,7 +313,6 @@ export function agentAction(
               ...messages,
               { role: "assistant" as const, content: null, toolCalls: response.toolCalls },
             ];
-            yield* maybeSaveMemory(answer);
             bus?.emit({
               type: "turn.end",
               turn: 0,
@@ -408,7 +354,6 @@ export function agentAction(
           });
           if (decision && !decision.continue) {
             const answer = response.content ?? "";
-            yield* maybeSaveMemory(answer);
             bus?.emit({
               type: "turn.end",
               turn: 0,
@@ -439,7 +384,6 @@ export function agentAction(
           response.toolCalls.length === 0
         ) {
           const answer = response.content ?? "";
-          yield* maybeSaveMemory(answer);
           bus?.emit({
             type: "turn.end",
             turn: 0,
@@ -464,10 +408,9 @@ export function agentAction(
         }
 
         const toolResultMsgs: ToolResultMessage[] = [];
-        // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
         const toExecute: Array<{ call: ToolCall; toolDef: AgentTool<any, any> }> = [];
 
-        // Phase 1: resolve approvals sequentially (each may need a user signal)
+        // First pass: resolve approvals sequentially (each may need a user signal)
         for (const call of response.toolCalls) {
           config.onToolCall?.(call);
 
@@ -515,7 +458,7 @@ export function agentAction(
           toExecute.push({ call, toolDef });
         }
 
-        // Phase 2: run all approved tools in parallel, each individually journaled
+        // Second pass: run all approved tools in parallel, each individually journaled
         if (toExecute.length > 0) {
           const results = yield* ctx.parallel(
             toExecute.map(({ call, toolDef }) =>

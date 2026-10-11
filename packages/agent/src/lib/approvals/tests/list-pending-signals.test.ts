@@ -1,8 +1,9 @@
 // ---------------------------------------------------------------------------
-// listPendingApprovals tests — combine an integration spec that drives the
+// listPendingSignals tests — combine an integration spec that drives the
 // real agent loop until it suspends on `approve:<id>` (verifies the helper
-// reads what the loop actually writes) with fixture-based specs for the
-// filter / shape edges (namespace scoping, non-approval signals, limits).
+// reads the tool metadata the loop actually writes) with fixture-based
+// specs for the filter / shape edges (namespace scoping, non-approval
+// signals, limits).
 // Fixtures use `createWorkflow` + `saveStepResult` + `suspendWorkflow`
 // directly so we can exercise namespace + non-approval cases without
 // plumbing them through agent-loop config.
@@ -13,7 +14,7 @@ import { z } from "zod";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { agentLoop } from "../../agent-loop.ts";
 import { tool } from "../../tool.ts";
-import { listPendingApprovals } from "../list-pending-approvals.ts";
+import { listPendingSignals } from "../list-pending-signals.ts";
 import type { AgentSession } from "../../agent-loop.ts";
 import type { LLMResponse } from "../../llm-provider.ts";
 
@@ -84,7 +85,7 @@ async function fixturePending(opts: {
   });
 }
 
-describe("listPendingApprovals — integration with the real agent loop", () => {
+describe("listPendingSignals — integration with the real agent loop", () => {
   it("surfaces a session that's actually suspended on an approval gate", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
@@ -104,7 +105,7 @@ describe("listPendingApprovals — integration with the real agent loop", () => 
     void session.send("call the guarded tool please");
     await waitForStatus(session, "waiting_approval");
 
-    const pending = await listPendingApprovals(storage);
+    const pending = await listPendingSignals(storage);
     expect(pending).toHaveLength(1);
     expect(pending[0]).toMatchObject({
       workflowId: "wf-real",
@@ -112,17 +113,21 @@ describe("listPendingApprovals — integration with the real agent loop", () => 
       toolName: "guarded",
       toolInput: { x: "hello" },
       workflowName: "approval-test",
+      isApproval: true,
+      signalName: "approve:tc-real",
     });
     expect(pending[0]!.suspendedAt).toBeInstanceOf(Date);
 
-    // Approving resolves the suspension — helper drops the row.
+    // Approving resolves the approval suspension; the session then waits
+    // on its next task signal, which is not an approval.
     await session.approve("tc-real");
-    expect(await listPendingApprovals(storage)).toEqual([]);
+    const after = await listPendingSignals(storage);
+    expect(after.filter((p) => p.isApproval)).toEqual([]);
     await session.close();
   });
 });
 
-describe("listPendingApprovals — fixture coverage", () => {
+describe("listPendingSignals — fixture coverage", () => {
   it("filters by namespace", async () => {
     const storage = new InMemoryWorkflowStorage();
     await fixturePending({
@@ -142,17 +147,17 @@ describe("listPendingApprovals — fixture coverage", () => {
       namespace: "globex",
     });
 
-    const acme = await listPendingApprovals(storage, { namespace: "acme" });
+    const acme = await listPendingSignals(storage, { namespace: "acme" });
     expect(acme.map((p) => p.workflowId)).toEqual(["wf-acme"]);
     expect(acme[0]?.namespace).toBe("acme");
 
-    const globex = await listPendingApprovals(storage, { namespace: "globex" });
+    const globex = await listPendingSignals(storage, { namespace: "globex" });
     expect(globex.map((p) => p.workflowId)).toEqual(["wf-globex"]);
   });
 
-  it("ignores suspended workflows whose signal isn't an approval", async () => {
+  it("lists non-approval suspensions too, flagged isApproval: false", async () => {
     const storage = new InMemoryWorkflowStorage();
-    // Real approval — should appear.
+    // Approval suspension.
     await fixturePending({
       storage,
       workflowId: "wf-yes",
@@ -177,13 +182,21 @@ describe("listPendingApprovals — fixture coverage", () => {
       },
     });
 
-    const pending = await listPendingApprovals(storage);
-    expect(pending.map((p) => p.workflowId)).toEqual(["wf-yes"]);
+    const pending = await listPendingSignals(storage);
+    const byId = new Map(pending.map((p) => [p.workflowId, p]));
+    expect([...byId.keys()].sort()).toEqual(["wf-other", "wf-yes"]);
+    expect(byId.get("wf-yes")).toMatchObject({ isApproval: true, toolCallId: "tc-y" });
+    expect(byId.get("wf-other")).toMatchObject({
+      isApproval: false,
+      signalName: "ext:custom-thing",
+      stepName: "wait-for-thing",
+    });
+    expect(byId.get("wf-other")?.toolCallId).toBeUndefined();
   });
 
   it("returns empty when no workflows are suspended", async () => {
     const storage = new InMemoryWorkflowStorage();
-    expect(await listPendingApprovals(storage)).toEqual([]);
+    expect(await listPendingSignals(storage)).toEqual([]);
   });
 
   it("falls back to undefined toolName/toolInput when the lc-start step is missing", async () => {
@@ -207,14 +220,15 @@ describe("listPendingApprovals — fixture coverage", () => {
       },
     });
 
-    const pending = await listPendingApprovals(storage);
+    const pending = await listPendingSignals(storage);
     expect(pending).toHaveLength(1);
     expect(pending[0]).toMatchObject({
       workflowId: "wf-bare",
       toolCallId: "tc-bare",
-      toolName: undefined,
-      toolInput: undefined,
+      isApproval: true,
     });
+    expect(pending[0]!.toolName).toBeUndefined();
+    expect(pending[0]!.toolInput).toBeUndefined();
   });
 
   it("respects the limit parameter", async () => {
@@ -234,7 +248,7 @@ describe("listPendingApprovals — fixture coverage", () => {
       toolInput: {},
     });
 
-    const limited = await listPendingApprovals(storage, { limit: 1 });
+    const limited = await listPendingSignals(storage, { limit: 1 });
     expect(limited).toHaveLength(1);
   });
 });

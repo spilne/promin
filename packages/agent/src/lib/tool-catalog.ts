@@ -13,7 +13,6 @@
 // catalog never stores or returns executable functions, just metadata.
 // ---------------------------------------------------------------------------
 
-// biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
 import type { AgentTool } from "./tool.ts";
 import { zodToJsonSchema } from "./zod-to-json-schema.ts";
 import type { McpClientPool } from "./mcp/mcp-client-pool.ts";
@@ -67,14 +66,12 @@ export interface DefaultAgentToolCatalogConfig {
    * Host-wired tool map (the same one passed to resolveLocalAgent
    * via deps.tools). Reported as `source: { kind: 'in-process' }`.
    */
-  // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
   readonly inProcess?: Readonly<Record<string, AgentTool<any, any>>>;
   /**
    * File-discovered tools. Same shape as `inProcess` but reported
    * with `source: { kind: 'file' }`. Pass the result of
    * `createFileToolRegistry(...).getTools()`.
    */
-  // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
   readonly file?: Readonly<Record<string, AgentTool<any, any>>>;
   /**
    * MCP server pool + the list of servers to enumerate. The catalog
@@ -156,7 +153,6 @@ export class DefaultAgentToolCatalog implements AgentToolCatalog {
   }
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
 function toEntry(
   name: string,
   tool: AgentTool<any, any>,

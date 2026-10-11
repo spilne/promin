@@ -21,7 +21,6 @@ export interface AgentToolFactoryConfig {
    */
   systemPrompt?: string;
   /** Tools the sub-agent is allowed to call. */
-  // biome-ignore lint/suspicious/noExplicitAny: tool inputs validated at runtime via Zod
   tools?: Record<string, AgentTool<any, any>>;
   /** Maximum think/tool steps per invocation. Default: 20. */
   maxSteps?: number;
@@ -33,7 +32,6 @@ export interface AgentToolFactoryConfig {
    * If `ask` is provided instead, the factory builds a standard interactive handler
    * that shows the tool name + abbreviated params and supports [y/n/always].
    */
-  // biome-ignore lint/suspicious/noExplicitAny: ToolCall input is validated by Zod at runtime
   onRequiresApproval?: (call: {
     id: string;
     name: string;
@@ -74,7 +72,6 @@ export interface AgentToolFactoryConfig {
  * base system prompt. This makes the sub-agent aware of what tools it has
  * available without relying solely on the LLM schema definitions.
  */
-// biome-ignore lint/suspicious/noExplicitAny: tool inputs validated at runtime via Zod
 function buildSystemPrompt(base: string, tools: Record<string, AgentTool<any, any>>): string {
   const entries = Object.values(tools);
   if (entries.length === 0) return base;
@@ -119,7 +116,6 @@ function buildSystemPrompt(base: string, tools: Record<string, AgentTool<any, an
  *     tools: { gpt_researcher: gptAgent, summariser: llamaAgent },
  *   });
  */
-// biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
 function abbrevParam(input: Record<string, unknown> | any): string {
   const raw = (input as Record<string, unknown>) ?? {};
   for (const v of Object.values(raw)) {
@@ -132,7 +128,6 @@ function buildApprovalHandler(
   name: string,
   ask: (q: string) => Promise<string>,
   autoApproveRef?: { value: boolean },
-  // biome-ignore lint/suspicious/noExplicitAny: ToolCall input is validated by Zod at runtime
 ): (call: { id: string; name: string; input: any }) => Promise<{ approved: boolean }> {
   return async (call) => {
     if (autoApproveRef?.value) return { approved: true };
@@ -146,7 +141,6 @@ function buildApprovalHandler(
 
 export function createAgentTool(
   config: AgentToolFactoryConfig,
-  // biome-ignore lint/suspicious/noExplicitAny: tool inputs validated at runtime via Zod
 ): AgentTool<{ task: string }, string> {
   const name = config.name ?? "agent";
   const tools = config.tools ?? {};
@@ -194,14 +188,12 @@ export function createAgentTool(
       })();
 
       // Wrap tools with step tracking if onStep is provided.
-      // biome-ignore lint/suspicious/noExplicitAny: tool inputs validated at runtime via Zod
       const trackedTools: Record<string, AgentTool<any, any>> = config.onStep
         ? Object.fromEntries(
             Object.entries(tools).map(([k, t]) => [
               k,
               {
                 ...t,
-                // biome-ignore lint/suspicious/noExplicitAny: tool inputs validated at runtime via Zod
                 execute: async (input: any) => {
                   const start = Date.now();
                   let failed = false;

@@ -129,9 +129,8 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
   readonly kind?: "scoped" | "elevated";
   /**
    * For elevated tools: the agent capability needed to expose this tool.
-   * `buildTools` should filter out elevated tools whose `requires` is
-   * not in the agent's `metadata.capabilities`. Capability filtering is
-   * not yet wired in; tracked as a follow-up to `promin-3paw`.
+   * `filterToolsByCapability` drops elevated tools whose `requires` is
+   * not in the agent's `metadata.capabilities`.
    */
   readonly requires?: string;
   /**
@@ -273,7 +272,7 @@ export interface ElevatedToolContext extends ScopedToolContext {
 export interface ScopedToolSecretsConfig {
   /** SecretsStorage instance the host wires in at construction time. */
   readonly storage: import("./secrets/types.ts").SecretsStorage;
-  /** Map: ctx.secrets.<name> → secret-store key + required-ness. */
+  /** Map: ctx.secrets.<name> → SecretsStorage key + required-ness. */
   readonly refs: Readonly<Record<string, { readonly ref: string; readonly required?: boolean }>>;
 }
 
@@ -552,7 +551,7 @@ function buildScopedMemory(
 }
 
 /**
- * The secret-store keys a tool must have to run — the `ref` of every
+ * The SecretsStorage keys a tool must have to run — the `ref` of every
  * non-optional entry in its `secrets` config. Drives the catalog's
  * `requiredSecrets`. Optional refs (`required: false`) are excluded:
  * the tool runs without them.
@@ -627,13 +626,11 @@ export interface ApprovalDecision {
   reason?: string;
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
 export type AutoApprove =
   | boolean
   | string[]
   | ((call: { id: string; name: string; input: unknown }, tool: AgentTool<any, any>) => boolean);
 
-// biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
 export function shouldAutoApprove(
   policy: AutoApprove | undefined,
   call: { id: string; name: string; input: unknown },
@@ -661,12 +658,9 @@ export const IMPLICIT_ELEVATED_CAPABILITY = "elevated";
  * elevated-tool concern only.
  */
 export function filterToolsByCapability(
-  // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
   tools: Record<string, AgentTool<any, any>>,
   capabilities: ReadonlyArray<string>,
-  // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
 ): Record<string, AgentTool<any, any>> {
-  // biome-ignore lint/suspicious/noExplicitAny: tools accept arbitrary input/output shapes
   const out: Record<string, AgentTool<any, any>> = {};
   for (const [name, t] of Object.entries(tools)) {
     if (t.kind === "elevated") {

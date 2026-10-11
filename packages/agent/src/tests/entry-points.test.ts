@@ -20,6 +20,7 @@ const ENTRIES: Record<string, string> = {
   ".": "index.ts",
   "./testing": "testing.ts",
   "./browser": "browser.ts",
+  "./terminal": "terminal.ts",
 };
 
 const NODE_BUILTINS = new Set(builtinModules);

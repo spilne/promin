@@ -238,7 +238,7 @@ export async function openOwnedThread(params: {
     if (err instanceof ThreadNotFoundError) return threadNotFound();
     throw err;
   }
-  // Remote and cursor backends own their thread storage; the agent stamp
+  // Remote backends own their thread storage; the agent stamp
   // lives with local (memory-store) threads only.
   if (scoped.recipe.backend.type === "local" && !thread.isNew) {
     const metadata = await thread.metadata();

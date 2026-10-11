@@ -1,6 +1,5 @@
-import type { EmbeddingProvider } from "../memory-index.ts";
+import type { EmbeddingProvider } from "../embedding-provider.ts";
 import { FlatTextChunker } from "./chunking.ts";
-import { truncateChunk } from "./result-utils.ts";
 import type {
   IngestibleRetriever,
   KnowledgeChunk,
@@ -163,4 +162,11 @@ function tokenize(text: string): Set<string> {
       .split(/\W+/)
       .filter((word) => word.length > 2),
   );
+}
+
+/** Trim a chunk's text to `max` characters; returns the chunk as-is when it fits. */
+function truncateChunk(params: { chunk: KnowledgeChunk; max: number | undefined }): KnowledgeChunk {
+  const { chunk, max } = params;
+  if (max === undefined || chunk.text.length <= max) return chunk;
+  return { ...chunk, text: chunk.text.slice(0, Math.max(0, max)).trimEnd() };
 }

@@ -1,13 +1,14 @@
 // ---------------------------------------------------------------------------
-// listPendingSignals — broader sibling of `listPendingApprovals`. Surfaces
-// EVERY workflow currently suspended on `waiting_for_signal`, not just the
-// agent loop's `approve:<callId>` pattern.
+// listPendingSignals — read-only helper over WorkflowStorage primitives
+// that surfaces EVERY workflow currently suspended on `waiting_for_signal`,
+// for an "everything pending external delivery" inbox the dashboard can
+// show. No parallel side-table: the workflow journal is authoritative.
 //
-// `listPendingApprovals` is for the agent-tool inbox specifically; this
-// helper is for an "everything pending external delivery" inbox the
-// dashboard can show. When the signal happens to be `approve:<id>` the
-// tool metadata (toolName / toolInput) is still surfaced — those rows
-// are a strict superset of `listPendingApprovals`.
+// When the signal is the agent loop's `approve:<callId>` tool-approval
+// gate, the tool metadata (toolName / toolInput) is read back from the
+// `lc-*-approval-<callId>-start` activity the loop journals right before
+// suspending. That needs the storage's `journal` capability; without it
+// the row is still listed, with toolName / toolInput undefined.
 // ---------------------------------------------------------------------------
 
 import type { JournalStore, JournalEntry, WorkflowStorage } from "@promin/workflow";

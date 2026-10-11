@@ -297,7 +297,6 @@ describe("LocalAgent — auto-injected memory tool", () => {
       name: "memory",
       description: "custom",
       parameters: { _def: { typeName: "ZodObject" } } as never,
-      // biome-ignore lint/suspicious/noExplicitAny: test stub
       execute: async () => {
         sawCustomTool = true;
         return "custom-result";

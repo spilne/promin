@@ -2,10 +2,8 @@
 // PostgresSecretsStorage — encrypted scoped secret vault on Postgres.
 //
 // Encryption: AES-256-GCM, key derived from a host-supplied passphrase
-// via scrypt. Mirrors the FileSecretStore pattern from @promin/agent so
-// the security primitives are already battle-tested. Secrets-at-rest
-// stay opaque without the passphrase; a DB-only leak doesn't expose
-// values.
+// via scrypt. Secrets-at-rest stay opaque without the passphrase; a
+// DB-only leak doesn't expose values.
 //
 // Three scopes (global / namespace / resource) share one table — the
 // `scope_kind` column discriminates. Empty-string defaults on
@@ -44,9 +42,9 @@ export class PostgresSecretsStorage implements SecretsStorage {
   constructor(config: PostgresSecretsStorageConfig) {
     this.db = config.db;
     this.clock = config.now ?? (() => Date.now());
-    // Same salt as FileSecretStore — a passphrase set under the file
-    // store reads under the PG store and vice versa, so operators can
-    // migrate without re-collecting passwords from users.
+    // Same salt as SqliteSecretsStorage — a passphrase set under the
+    // SQLite store reads under the PG store and vice versa, so operators
+    // can migrate without re-collecting passwords from users.
     this.key = scryptSync(config.passphrase, "promin-agent-secrets-v1", 32);
   }
 

@@ -7,7 +7,7 @@ import { z } from "zod";
 import type { LLMResponse } from "../llm-provider.ts";
 
 // ---------------------------------------------------------------------------
-// promin-sxri — resolveTools refuses ambiguous config
+// resolveTools refuses ambiguous config
 // ---------------------------------------------------------------------------
 
 describe("resolveTools — ambiguous config", () => {
@@ -65,7 +65,7 @@ describe("resolveTools — ambiguous config", () => {
 });
 
 // ---------------------------------------------------------------------------
-// promin-8on6 — turn.end durationMs > 0 even when replayed after a crash
+// turn.end durationMs > 0 even when replayed after a crash
 //
 // We can't easily simulate "crash between lc-${turn}-message and emit-${turn}"
 // without a workflow-level harness. Instead we assert the invariant that
@@ -141,7 +141,7 @@ describe("turn durationMs — journaled start time", () => {
 });
 
 // ---------------------------------------------------------------------------
-// promin-b3bu — onApprovalRequired hook side effects don't re-fire on replay
+// onApprovalRequired hook side effects don't re-fire on replay
 //
 // Mechanism: the hook runs inside `ctx.activity(approval-${callId}, ...)`,
 // so the journaled return value (the ApprovalDecision) is what hydrates on

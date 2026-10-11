@@ -4,21 +4,18 @@ import { openai } from "../lib/adapters/openai.ts";
 import { anthropic } from "../lib/adapters/anthropic.ts";
 import { gemini } from "../lib/adapters/gemini.ts";
 import { tool } from "../lib/tool.ts";
-import type { SecretStore } from "../lib/secret-store.ts";
+import { SecretScope, type SecretsStorage } from "../lib/secrets/types.ts";
 import { createWriteToolTool } from "../lib/tools/write-tool.ts";
-import { createRequireSecretTool } from "../lib/tools/require-secret-tool.ts";
 import { createFilesystemTools } from "../lib/tools/filesystem-tools.ts";
 import { createShellTool } from "../lib/tools/shell-tool.ts";
-import { multiTool, command } from "../lib/multi-tool.ts";
 import { createLlmTool } from "../lib/tools/llm-tool.ts";
-import { createSchedulerTools } from "../lib/tools/scheduler-tools.ts";
 import { createAgentTool } from "../lib/tools/agent-tool-factory.ts";
-import { createMemoryTool } from "../lib/tools/memory-tools.ts";
+import { createLayeredMemoryTool } from "../lib/tools/layered-memory-tools.ts";
 import { createFileToolRegistry } from "../lib/tool-registry.ts";
 import { hasCapability } from "@promin/workflow";
-import { InMemoryScheduler } from "@promin/workflow/scheduler";
+import { InMemoryScheduler, type ScheduleTick } from "@promin/workflow/scheduler";
 import type { WorkflowRunner } from "@promin/workflow";
-import type { MemoryIndex } from "../lib/memory-index.ts";
+import type { MemoryStore, ThreadKey } from "../lib/memory/types.ts";
 import type { ToolRegistry } from "../lib/tool-registry.ts";
 import type { AgentTool } from "../lib/tool.ts";
 import type { LLMProvider } from "../lib/llm-provider.ts";
@@ -30,9 +27,10 @@ import { z } from "zod";
 
 export interface ToolDeps {
   workspace: string;
-  memoryIndex: MemoryIndex;
-  /** Shared secret store — checked env-first via CompositeSecretStore. */
-  secrets: SecretStore;
+  /** Long-term memory the `memory` tool reads and writes. */
+  memory: { store: MemoryStore; key: ThreadKey };
+  /** Keys the user typed in at a prompt. Env vars are checked first. */
+  secrets: SecretsStorage;
   apiKey: string;
   ask: (question: string) => Promise<string>;
   runner: WorkflowRunner;
@@ -55,159 +53,275 @@ export interface ToolSetup {
   activeTicks: Set<string>;
 }
 
+const SessionDebugInputSchema = z.discriminatedUnion("command", [
+  z.object({
+    command: z.literal("errors"),
+    limit: z.number().int().min(1).max(50).default(20).describe("Max failures to return"),
+  }),
+  z.object({
+    command: z.literal("calls"),
+    limit: z.number().int().min(1).max(30).default(10).describe("Max calls to return"),
+    errorsOnly: z.boolean().default(false).describe("Show only failed calls"),
+  }),
+  z.object({ command: z.literal("status") }),
+  z.object({
+    command: z.literal("log"),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(200)
+      .default(100)
+      .describe("Max events to return (most recent first)"),
+    type: z.string().optional().describe("Filter by event type prefix, e.g. 'tool' or 'turn'"),
+    turn: z.number().int().optional().describe("Filter to a specific turn number"),
+  }),
+]);
+
 export function createSessionDebugTool(
   sessionRef: { current: AgentSession | undefined },
   sessionIdRef: { current: string },
   runner: WorkflowRunner,
   logger?: SessionLogger,
 ) {
-  return multiTool({
-    name: "sessionDebug",
-    description: "Inspect the current agent session to diagnose failures and errors.",
-    commands: {
-      errors: command({
-        description:
-          "List activity failures from the workflow journal (survives context compaction)",
-        parameters: z.object({
-          limit: z.number().int().min(1).max(50).default(20).describe("Max failures to return"),
-        }),
-        execute: async ({ limit }) => {
-          const storage = runner.storage;
-          if (!hasCapability(storage, "journal")) return "Journal storage not available.";
-          const entries = await storage.loadJournal({
-            workflowId: sessionIdRef.current,
-            stepName: "conversation",
-          });
-          const failures = entries.filter((e) => e.exit?.tag === "Failure");
-          if (failures.length === 0) return "No errors recorded in current session.";
-          return failures
-            .slice(-limit)
-            .map((e, i) => {
-              const t = e.createdAt.toLocaleTimeString();
-              return `${i + 1}. [${t}] ${e.activityName}\n   ${(e.exit as { tag: "Failure"; error: string }).error}`;
-            })
-            .join("\n");
-        },
-      }),
-      calls: command({
-        description: "Show recent tool calls with their results (from current context window)",
-        parameters: z.object({
-          limit: z.number().int().min(1).max(30).default(10).describe("Max calls to return"),
-          errorsOnly: z.boolean().default(false).describe("Show only failed calls"),
-        }),
-        execute: async ({ limit, errorsOnly }) => {
-          const session = sessionRef.current;
-          if (!session) return "No active session.";
-          const messages = session.messages();
-          type Pair = { name: string; input: unknown; result: string; failed: boolean };
-          const pairs: Pair[] = [];
-          for (const msg of messages) {
-            if (msg.role !== "assistant" || !msg.toolCalls?.length) continue;
-            for (const call of msg.toolCalls) {
-              const resultMsg = messages.find(
-                (m): m is { role: "tool"; toolCallId: string; content: string } =>
-                  m.role === "tool" && (m as any).toolCallId === call.id,
-              );
-              if (!resultMsg) continue;
-              const content = resultMsg.content;
-              const failed =
-                content.startsWith("Tool execution failed") ||
-                content.startsWith("Invalid input") ||
-                content.startsWith("Error:");
-              if (errorsOnly && !failed) continue;
-              pairs.push({ name: call.name, input: call.input, result: content, failed });
+  async function errors({ limit }: { limit: number }): Promise<string> {
+    const storage = runner.storage;
+    if (!hasCapability(storage, "journal")) return "Journal storage not available.";
+    const entries = await storage.loadJournal({
+      workflowId: sessionIdRef.current,
+      stepName: "conversation",
+    });
+    const failures = entries.filter((e) => e.exit?.tag === "Failure");
+    if (failures.length === 0) return "No errors recorded in current session.";
+    return failures
+      .slice(-limit)
+      .map((e, i) => {
+        const t = e.createdAt.toLocaleTimeString();
+        return `${i + 1}. [${t}] ${e.activityName}\n   ${(e.exit as { tag: "Failure"; error: string }).error}`;
+      })
+      .join("\n");
+  }
+
+  async function calls({
+    limit,
+    errorsOnly,
+  }: {
+    limit: number;
+    errorsOnly: boolean;
+  }): Promise<string> {
+    const session = sessionRef.current;
+    if (!session) return "No active session.";
+    const messages = session.messages();
+    type Pair = { name: string; input: unknown; result: string; failed: boolean };
+    const pairs: Pair[] = [];
+    for (const msg of messages) {
+      if (msg.role !== "assistant" || !msg.toolCalls?.length) continue;
+      for (const call of msg.toolCalls) {
+        const resultMsg = messages.find(
+          (m): m is { role: "tool"; toolCallId: string; content: string } =>
+            m.role === "tool" && (m as any).toolCallId === call.id,
+        );
+        if (!resultMsg) continue;
+        const content = resultMsg.content;
+        const failed =
+          content.startsWith("Tool execution failed") ||
+          content.startsWith("Invalid input") ||
+          content.startsWith("Error:");
+        if (errorsOnly && !failed) continue;
+        pairs.push({ name: call.name, input: call.input, result: content, failed });
+      }
+    }
+    if (pairs.length === 0)
+      return errorsOnly ? "No failed tool calls in current context." : "No tool calls found.";
+    return pairs
+      .slice(-limit)
+      .map((p, i) => {
+        const marker = p.failed ? "✗" : "✓";
+        const param = abbrevInput((p.input as Record<string, unknown>) ?? {});
+        const preview = p.result.length > 200 ? `${p.result.slice(0, 197)}…` : p.result;
+        return `${i + 1}. ${marker} ${p.name}${param ? `  ${param}` : ""}\n   ${preview}`;
+      })
+      .join("\n\n");
+  }
+
+  async function status(): Promise<string> {
+    const session = sessionRef.current;
+    if (!session) return "No active session.";
+    const agentStatus = await session.status();
+    const usage = session.usage();
+    const lc = session.lifecycleState();
+    return [
+      `Status:    ${agentStatus}`,
+      `Tokens:    ${usage.inputTokens.toLocaleString()} in / ${usage.outputTokens.toLocaleString()} out`,
+      `Lifecycle: ${lc.current}`,
+    ].join("\n");
+  }
+
+  async function log({
+    limit,
+    type: typeFilter,
+    turn: turnFilter,
+  }: {
+    limit: number;
+    type?: string;
+    turn?: number;
+  }): Promise<string> {
+    const session = sessionRef.current;
+    const events = session ? session.eventLog() : (logger?.events() ?? []);
+    if (events.length === 0) return "No session events recorded yet.";
+    let filtered = events;
+    if (typeFilter) filtered = filtered.filter((e) => e.type.startsWith(typeFilter));
+    if (turnFilter !== undefined) {
+      filtered = filtered.filter((e) => "turn" in e && (e as { turn: number }).turn === turnFilter);
+    }
+    if (filtered.length === 0) return "No events match the filter.";
+    const shown = filtered.slice(-limit).reverse();
+    return shown
+      .map((e) => {
+        const t = new Date(e.ts).toLocaleTimeString();
+        const rest = { ...e } as Record<string, unknown>;
+        delete rest.type;
+        delete rest.ts;
+        const detail = Object.entries(rest)
+          .map(([k, v]) => {
+            if (k === "task" || k === "answer") {
+              const s = String(v);
+              return `${k}=${s.length > 60 ? `${s.slice(0, 57)}…` : s}`;
             }
-          }
-          if (pairs.length === 0)
-            return errorsOnly ? "No failed tool calls in current context." : "No tool calls found.";
-          return pairs
-            .slice(-limit)
-            .map((p, i) => {
-              const marker = p.failed ? "✗" : "✓";
-              const param = abbrevInput((p.input as Record<string, unknown>) ?? {});
-              const preview = p.result.length > 200 ? `${p.result.slice(0, 197)}…` : p.result;
-              return `${i + 1}. ${marker} ${p.name}${param ? `  ${param}` : ""}\n   ${preview}`;
-            })
-            .join("\n\n");
-        },
-      }),
-      status: command({
-        description: "Current session status, cumulative token usage, and lifecycle state",
-        parameters: z.object({}),
-        execute: async () => {
-          const session = sessionRef.current;
-          if (!session) return "No active session.";
-          const agentStatus = await session.status();
-          const usage = session.usage();
-          const lc = session.lifecycleState();
-          return [
-            `Status:    ${agentStatus}`,
-            `Tokens:    ${usage.inputTokens.toLocaleString()} in / ${usage.outputTokens.toLocaleString()} out`,
-            `Lifecycle: ${lc.current}`,
-          ].join("\n");
-        },
-      }),
-      log: command({
-        description:
-          "Show the structured session event log (turn, llm.call, tool, compact, approval events)",
-        parameters: z.object({
-          limit: z
-            .number()
-            .int()
-            .min(1)
-            .max(200)
-            .default(100)
-            .describe("Max events to return (most recent first)"),
-          type: z
-            .string()
-            .optional()
-            .describe("Filter by event type prefix, e.g. 'tool' or 'turn'"),
-          turn: z.number().int().optional().describe("Filter to a specific turn number"),
-        }),
-        execute: async ({ limit, type: typeFilter, turn: turnFilter }) => {
-          const session = sessionRef.current;
-          const events = session ? session.eventLog() : (logger?.events() ?? []);
-          if (events.length === 0) return "No session events recorded yet.";
-          let filtered = events;
-          if (typeFilter) filtered = filtered.filter((e) => e.type.startsWith(typeFilter));
-          if (turnFilter !== undefined) {
-            filtered = filtered.filter(
-              (e) => "turn" in e && (e as { turn: number }).turn === turnFilter,
-            );
-          }
-          if (filtered.length === 0) return "No events match the filter.";
-          const shown = filtered.slice(-limit).reverse();
-          return shown
-            .map((e) => {
-              const t = new Date(e.ts).toLocaleTimeString();
-              const rest = { ...e } as Record<string, unknown>;
-              delete rest.type;
-              delete rest.ts;
-              const detail = Object.entries(rest)
-                .map(([k, v]) => {
-                  if (k === "task" || k === "answer") {
-                    const s = String(v);
-                    return `${k}=${s.length > 60 ? `${s.slice(0, 57)}…` : s}`;
-                  }
-                  if (k === "input" && typeof v === "object" && v !== null) {
-                    return `input=${abbrevInput(v as Record<string, unknown>) || JSON.stringify(v).slice(0, 40)}`;
-                  }
-                  return `${k}=${JSON.stringify(v)}`;
-                })
-                .join("  ");
-              return `[${t}] ${e.type}  ${detail}`;
-            })
-            .join("\n");
-        },
-      }),
+            if (k === "input" && typeof v === "object" && v !== null) {
+              return `input=${abbrevInput(v as Record<string, unknown>) || JSON.stringify(v).slice(0, 40)}`;
+            }
+            return `${k}=${JSON.stringify(v)}`;
+          })
+          .join("  ");
+        return `[${t}] ${e.type}  ${detail}`;
+      })
+      .join("\n");
+  }
+
+  return tool({
+    name: "sessionDebug",
+    description:
+      "Inspect the current agent session to diagnose failures and errors.\n\nCommands:\n" +
+      "  errors: List activity failures from the workflow journal (survives context compaction)\n" +
+      "  calls: Show recent tool calls with their results (from current context window)\n" +
+      "  status: Current session status, cumulative token usage, and lifecycle state\n" +
+      "  log: Show the structured session event log (turn, llm.call, tool, compact, approval events)",
+    parameters: SessionDebugInputSchema,
+    execute: async (input) => {
+      switch (input.command) {
+        case "errors":
+          return errors(input);
+        case "calls":
+          return calls(input);
+        case "status":
+          return status();
+        case "log":
+          return log(input);
+      }
     },
   });
+}
+
+/**
+ * In-process `scheduleTask` / `listSchedules` / `cancelSchedule` tools over
+ * an `InMemoryScheduler`. Each tick replays its task into the live session
+ * through `onTick`. Console-only: schedules die with the process. Durable
+ * agents use `createDurableSchedulerTools` instead.
+ */
+function createConsoleSchedulerTools(config: {
+  scheduler: InMemoryScheduler;
+  onTick: (task: string, tick: ScheduleTick) => void;
+}) {
+  void (async () => {
+    for await (const tick of config.scheduler.subscribe().toAsyncIterable()) {
+      const task = tick.metadata?.task;
+      if (typeof task === "string") config.onTick(task, tick);
+    }
+  })();
+
+  return {
+    scheduleTask: tool({
+      name: "scheduleTask",
+      description:
+        "Schedule a recurring task. Use a cron expression for calendar-based schedules " +
+        "(e.g. '0 9 * * *' for daily at 9am), or intervalMs for fixed intervals " +
+        "(e.g. 60000 for every minute). The task string is replayed back to you when " +
+        "the schedule fires.",
+      parameters: z
+        .object({
+          id: z
+            .string()
+            .describe("Unique schedule ID — use a short descriptive name, e.g. 'daily-report'"),
+          task: z
+            .string()
+            .describe("The task to run when the schedule fires (replayed as a new message)"),
+          cron: z.string().optional().describe("Cron expression, e.g. '0 9 * * *' (daily 9am UTC)"),
+          intervalMs: z
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe("Fixed interval in milliseconds"),
+          timezone: z
+            .string()
+            .optional()
+            .describe("IANA timezone for cron evaluation, e.g. 'America/New_York'"),
+        })
+        .refine((v) => v.cron !== undefined || v.intervalMs !== undefined, {
+          message: "Provide either cron or intervalMs",
+        }),
+      execute: async ({ id, task, cron, intervalMs, timezone }) => {
+        await config.scheduler.register({
+          id,
+          ...(cron ? { cron } : {}),
+          ...(intervalMs ? { intervalMs } : {}),
+          ...(timezone ? { timezone } : {}),
+          metadata: { task },
+        });
+        const schedule = cron
+          ? `cron(${cron}${timezone ? ` ${timezone}` : ""})`
+          : `every ${intervalMs}ms`;
+        return `Scheduled "${id}": ${schedule}`;
+      },
+    }),
+
+    listSchedules: tool({
+      name: "listSchedules",
+      description: "List all registered schedules and their configurations.",
+      parameters: z.object({}),
+      execute: async () => {
+        const schedules = await config.scheduler.list();
+        if (!schedules.length) return "No schedules registered.";
+        return schedules
+          .map((s) => {
+            const trigger = s.cron ?? (s.intervalMs ? `every ${s.intervalMs}ms` : "unknown");
+            const status = s.enabled === false ? " [paused]" : "";
+            const task = s.metadata?.task ?? "(no task)";
+            return `${s.id}${status}: ${trigger} → "${task}"`;
+          })
+          .join("\n");
+      },
+    }),
+
+    cancelSchedule: tool({
+      name: "cancelSchedule",
+      description: "Cancel and remove a scheduled task by its ID.",
+      parameters: z.object({
+        id: z.string().describe("The schedule ID to cancel"),
+      }),
+      execute: async ({ id }) => {
+        await config.scheduler.unregister({ scheduleId: id });
+        return `Cancelled schedule "${id}".`;
+      },
+    }),
+  };
 }
 
 export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
   const {
     workspace,
-    memoryIndex,
+    memory,
     secrets,
     apiKey,
     ask,
@@ -264,15 +378,25 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     return result;
   }
 
-  /** Resolve a secret: CompositeSecretStore checks env first, then in-memory. Prompt once if absent. */
+  /** Resolve a secret: env first, then the secrets storage. Prompt once if absent. */
   async function getSecret(envKey: string, toolName: string): Promise<string> {
-    let value = await secrets.get(envKey);
+    const fromEnv = process.env[envKey];
+    if (fromEnv) return fromEnv;
+    const scope = SecretScope.global();
+    let value = await secrets.get({ scope, key: envKey });
     if (!value) {
       value = await serialAsk(`[${toolName}] Enter ${envKey}`);
-      await secrets.set(envKey, value);
+      await secrets.set({ scope, key: envKey, value });
     }
     return value;
   }
+
+  const memoryTool = createLayeredMemoryTool({
+    store: memory.store,
+    namespaceId: memory.key.namespaceId,
+    ...(memory.key.resourceId !== undefined && { resourceId: memory.key.resourceId }),
+    threadId: memory.key.threadId,
+  });
 
   // One-shot GPT-4o tool shared by main agent and sub-agents.
   const chatGptOneShotTool = createLlmTool(
@@ -291,7 +415,6 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
   const scheduler = new InMemoryScheduler();
   const activeTicks = new Set<string>();
 
-  // biome-ignore lint/suspicious/noExplicitAny: tool registry uses runtime Zod validation
   const staticTools: Record<string, AgentTool<any, any>> = {
     calculator: tool({
       name: "calculator",
@@ -299,7 +422,6 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
       parameters: z.object({ expression: z.string() }),
       execute: async ({ expression }) => {
         try {
-          // biome-ignore lint/security/noEval: example only
           // eslint-disable-next-line no-eval
           return String(eval(expression));
         } catch {
@@ -321,11 +443,6 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
       toolImportPath: "../../lib/index.ts",
     }),
 
-    requireSecret: createRequireSecretTool({
-      readSecret: (prompt) => ask(`[secret] ${prompt}`),
-      store: (key, value) => secrets.set(key, value),
-    }),
-
     ...createFilesystemTools({ rootDir: workspace }),
 
     shell: createShellTool({
@@ -333,13 +450,13 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
       allowedCommands: ["bun", "git", "ls", "cat", "find", "grep", "npm", "npx"],
     }),
 
-    memory: createMemoryTool(memoryIndex),
+    memory: memoryTool,
 
     sessionDebug: createSessionDebugTool(sessionRef, sessionIdRef, runner, logger),
 
     chatGPT: chatGptOneShotTool,
 
-    ...createSchedulerTools({
+    ...createConsoleSchedulerTools({
       scheduler,
       onTick: (task, tick) => {
         if (activeTicks.has(tick.scheduleId)) return;
@@ -374,7 +491,7 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
       cwd: workspace,
       allowedCommands: ["bun", "git", "ls", "cat", "find", "grep", "npm", "npx"],
     }),
-    memory: createMemoryTool(memoryIndex),
+    memory: memoryTool,
     chatGPT: chatGptOneShotTool,
   };
 

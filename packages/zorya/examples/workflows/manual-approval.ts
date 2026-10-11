@@ -3,8 +3,8 @@
 //
 // Same shape as approval-flow (submit -> review-with-signal -> apply), but
 // the signal name uses the `approve:` prefix that the dashboard's
-// /approvals inbox filters on (listPendingApprovals matches
-// signalName.startsWith("approve:")) — so each suspended run shows up in
+// /approvals inbox filters on (listPendingSignals flags
+// `approve:<id>` signal names as approvals) — so each suspended run shows up in
 // the operator's approval inbox. The auto-signaler in demo.ts is
 // hardcoded to `name: "approval-flow"`, so this workflow's suspensions
 // are NOT auto-resolved.

@@ -1,8 +1,6 @@
 // ---------------------------------------------------------------------------
-// Scoped secrets storage — distinct from the flat `SecretStore` in
-// secret-store.ts (which exists for in-process bootstrap utilities).
-// `SecretsStorage` adds the namespace / resource scoping that the
-// multi-tenant SaaS direction needs:
+// Scoped secrets storage — the one secrets system. `SecretsStorage`
+// carries the namespace / resource scoping that multi-tenant hosts need:
 //
 //   global       — host-wide defaults (e.g. platform's pooled API key)
 //   namespace    — team / workspace scope; one tier per tenant
@@ -84,8 +82,8 @@ export interface SecretsStorage {
 
   /**
    * Write to the exact scope. Replaces existing value. Encrypted at
-   * rest by implementations that persist (FileSecret pattern is
-   * AES-256-GCM with scrypt-stretched passphrase).
+   * rest by implementations that persist (the SQL backends use
+   * AES-256-GCM with a scrypt-stretched passphrase).
    */
   set(params: {
     readonly scope: SecretScope;

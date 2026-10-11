@@ -98,10 +98,10 @@ export class InMemorySkillRegistry implements SkillRegistry {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers exported to share with PostgreSQL-style adapters.
+// Helpers
 // ---------------------------------------------------------------------------
 
-export function mergeSkillMetadata(patch?: Partial<SkillMetadata>): SkillMetadata {
+function mergeSkillMetadata(patch?: Partial<SkillMetadata>): SkillMetadata {
   return {
     capabilities: patch?.capabilities
       ? [...patch.capabilities]
@@ -116,7 +116,7 @@ export function mergeSkillMetadata(patch?: Partial<SkillMetadata>): SkillMetadat
   };
 }
 
-export function matchesSkillFilter(row: RegisteredSkill, params: ListSkillsParams): boolean {
+function matchesSkillFilter(row: RegisteredSkill, params: ListSkillsParams): boolean {
   if (params.capability !== undefined && !row.metadata.capabilities.includes(params.capability)) {
     return false;
   }
@@ -124,7 +124,7 @@ export function matchesSkillFilter(row: RegisteredSkill, params: ListSkillsParam
   return true;
 }
 
-export function sortSkills(
+function sortSkills(
   rows: RegisteredSkill[],
   order: NonNullable<ListSkillsParams["order"]>,
 ): RegisteredSkill[] {

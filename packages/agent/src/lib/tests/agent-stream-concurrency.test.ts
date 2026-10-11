@@ -9,7 +9,7 @@ import type {
 } from "../llm-provider.ts";
 
 // ---------------------------------------------------------------------------
-// promin-hhqq — streaming + abort + close concurrency tests
+// streaming + abort + close concurrency tests
 //
 // stream() composes runner.runSafe (the workflow side) with a ChunkQueue
 // (the producer-consumer queue feeding tokens to the for-await caller).
@@ -170,7 +170,7 @@ describe("stream() — concurrency contract", () => {
 });
 
 // ---------------------------------------------------------------------------
-// promin-3eh5 — approval-gate race tests
+// approval-gate race tests
 //
 // session.approve() / .reject() deliver workflow signals via
 // completeSignal. The retry loop inside deliverApprovalSignal handles the
@@ -217,7 +217,6 @@ describe("approve()/reject() — early-call race", () => {
           requireApproval: true,
           execute: async () => "tool output",
         },
-        // biome-ignore lint/suspicious/noExplicitAny: simplified test stub
       } as any,
     }).session({ runner, sessionId: "approve-early" });
 
@@ -251,7 +250,6 @@ describe("approve()/reject() — early-call race", () => {
           requireApproval: true,
           execute: async () => "should not run",
         },
-        // biome-ignore lint/suspicious/noExplicitAny: simplified test stub
       } as any,
     }).session({ runner, sessionId: "reject-early" });
 

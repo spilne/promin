@@ -2,17 +2,11 @@
 // AgentTurnGate — high-level API on top of LeaseStore. Wraps
 // acquire / extend / release into a single `run({ policy, ... })` call.
 //
-// Two policies:
+// Policy:
 //
 //   strict  — try-acquire once. Held → throw `TurnInProgress`. Caller
 //             surfaces 409 with the current owner. Matches OpenAI
-//             Assistants API semantics. Implemented in Phase 1.
-//
-//   queued  — wait for the lease to free, then run. Tracked separately
-//             (xywa Phase 3); throws `NotImplementedError` today. Two
-//             possible impls (held HTTP connection with backoff, or
-//             async dispatch through pg-step-queue) — pick when the
-//             ticket is picked up.
+//             Assistants API semantics.
 //
 // Failures inside the gated callback are propagated unchanged AFTER
 // release; the lease is always released, even on error, so a crashed
@@ -22,7 +16,7 @@
 
 import type { LeaseStore, ThreadLease, ThreadLeaseKey } from "./types.ts";
 
-export type AgentTurnPolicy = "strict" | "queued";
+export type AgentTurnPolicy = "strict";
 
 /**
  * Default lease TTL when caller doesn't specify. 5 minutes is a
@@ -44,18 +38,6 @@ export class TurnInProgressError extends Error {
     );
     this.currentLease = currentLease;
     this.name = "TurnInProgressError";
-  }
-}
-
-export class QueuedPolicyNotImplementedError extends Error {
-  readonly _tag = "QueuedPolicyNotImplemented";
-  constructor() {
-    super(
-      "AgentTurnGate policy 'queued' is not yet implemented. " +
-        "Tracked as xywa Phase 3 — see promin-872n. Use policy 'strict' " +
-        "or fall back to single-replica deployment for now.",
-    );
-    this.name = "QueuedPolicyNotImplementedError";
   }
 }
 
@@ -97,9 +79,6 @@ export class AgentTurnGate {
   }
 
   async run<T>(params: RunParams<T>): Promise<T> {
-    if (params.policy === "queued") {
-      throw new QueuedPolicyNotImplementedError();
-    }
     return this.runStrict(params);
   }
 
@@ -108,8 +87,7 @@ export class AgentTurnGate {
    * routes where the request returns immediately and the lease must
    * outlive the synchronous handler. Caller MUST call `release()` (or
    * lease will expire on its own at TTL). Same `policy` semantics as
-   * `run()`: 'strict' throws TurnInProgressError on contention,
-   * 'queued' throws NotImplementedError.
+   * `run()`: 'strict' throws TurnInProgressError on contention.
    */
   async acquire(params: {
     readonly key: ThreadLeaseKey;
@@ -117,9 +95,6 @@ export class AgentTurnGate {
     readonly ttlMs?: number;
     readonly policy: AgentTurnPolicy;
   }): Promise<AgentTurnLease> {
-    if (params.policy === "queued") {
-      throw new QueuedPolicyNotImplementedError();
-    }
     const ttlMs = params.ttlMs ?? this.defaultTtlMs;
     const result = await this.leaseStore.acquire({
       key: params.key,

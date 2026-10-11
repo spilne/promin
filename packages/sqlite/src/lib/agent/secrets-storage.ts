@@ -2,9 +2,9 @@
 // SqliteSecretsStorage — encrypted scoped secret vault on SQLite.
 //
 // Mirror of PostgresSecretsStorage; same encryption (AES-256-GCM with
-// scrypt-stretched passphrase, same scrypt salt as FileSecretStore so
-// passphrases interop) so all three backends round-trip plaintext
-// identically through the conformance suite.
+// scrypt-stretched passphrase, same scrypt salt so passphrases interop)
+// so the backends round-trip plaintext identically through the
+// conformance suite.
 //
 // Schema (auto-created on first use): one table for all three scopes,
 // scope_kind discriminator + empty-string defaults on namespace_id /
@@ -20,8 +20,8 @@ export interface SqliteSecretsStorageConfig {
   readonly db: SqliteDatabase;
   /**
    * Host-supplied passphrase. Stretched via scrypt to a 32-byte AES
-   * key on construction. Same salt as FileSecretStore, so the two stores
-   * derive the same key from one passphrase.
+   * key on construction. Same salt as PostgresSecretsStorage, so the two
+   * stores derive the same key from one passphrase.
    */
   readonly passphrase: string;
   /** Override the table name (default: `promin_secrets`). */

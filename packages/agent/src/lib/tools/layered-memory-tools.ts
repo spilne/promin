@@ -4,8 +4,7 @@
 // Three operations the model needs:
 //   - set         → append a fact at thread or resource scope
 //   - setWorking  → overwrite the markdown scratchpad at thread or resource
-//   - recall      → search facts + episodes by keyword (or via SemanticRecall
-//                   capability if the store implements it)
+//   - recall      → search facts + episodes by keyword
 //
 // Reads beyond `recall` happen automatically via `MemoryStore.resolveContext`
 // at prompt build — facts, working memory, and (opt-in) episodes are
@@ -22,16 +21,8 @@
 // ---------------------------------------------------------------------------
 
 import { z } from "zod";
-import { multiTool, command } from "../multi-tool.ts";
-import {
-  isSemanticRecall,
-  type EpisodicRecord,
-  type Fact,
-  type MemoryStore,
-  type RecallHit,
-  type ScopedKey,
-  type ThreadKey,
-} from "../memory/types.ts";
+import { tool, type AgentTool } from "../tool.ts";
+import type { EpisodicRecord, Fact, MemoryStore, ScopedKey, ThreadKey } from "../memory/types.ts";
 import { THREAD_AGENT_METADATA_KEY } from "../agent/types.ts";
 
 export interface LayeredMemoryToolConfig {
@@ -57,6 +48,79 @@ const ModelScope = z.enum(["thread", "resource"]);
 const RecallScope = z.enum(["thread", "resource", "namespace"]);
 const RecallSource = z.enum(["fact", "episode", "message"]);
 
+const SET_DESCRIPTION =
+  "Save a small, durable claim that should survive this conversation. " +
+  "One line, atomic, true.\n\n" +
+  "Use scope='thread' (default) for facts about THIS conversation only:\n" +
+  "  - 'we decided to use Postgres for the audit log'\n" +
+  "  - 'the bug only happens on staging'\n\n" +
+  "Use scope='resource' for facts that should follow the user across ALL " +
+  "their conversations:\n" +
+  "  - 'the user lives in PST'\n" +
+  "  - 'the user is allergic to peanuts'\n" +
+  "  - 'the user prefers terse answers'\n\n" +
+  "DO NOT use this for current state, in-progress reasoning, or anything " +
+  "that will change soon — that's what `setWorking` is for. Don't repeat " +
+  "facts that are already saved.";
+
+const SET_WORKING_DESCRIPTION =
+  "Replace the markdown scratchpad with current state. Use this for " +
+  "things that change frequently and aren't worth saving as durable " +
+  "facts:\n" +
+  "  - 'currently debugging the login flow, blocked on token refresh'\n" +
+  "  - 'next step: write the schema migration, then the rollback test'\n" +
+  "  - 'open questions: do we need pgvector or is FTS enough?'\n\n" +
+  "The scratchpad is injected into the system prompt every turn, so " +
+  "keep it SHORT (a few lines) and CURRENT. Each call REPLACES the " +
+  "previous scratchpad — it's not append. To remember something " +
+  "permanently, use `set` instead.";
+
+const RECALL_DESCRIPTION =
+  "Search durable memory for things you don't already see in your " +
+  "context. Use this when the user references something from a past " +
+  "conversation:\n" +
+  "  - 'remember that thing about my partner's allergies?'\n" +
+  "  - 'what did we decide about the database last month?'\n" +
+  "  - 'didn't we already talk about this somewhere?'\n\n" +
+  "Returns the top matching facts and past-session summaries " +
+  "(episodes) ranked by relevance + salience. Don't use this for " +
+  "things already injected into your system prompt — those are " +
+  "already visible to you.";
+
+/**
+ * Input of the `memory` tool: one branch per command, discriminated by
+ * `command`. The JSON-schema converter flattens it into a single object
+ * with a required `command` enum, which is what provider tool APIs accept.
+ */
+export const LayeredMemoryToolInputSchema = z.discriminatedUnion("command", [
+  z.object({
+    command: z.literal("set"),
+    scope: ModelScope.default("thread").describe(
+      "thread = this conversation only. resource = this user, all conversations.",
+    ),
+    text: z.string().min(1).describe("The fact, in one line."),
+  }),
+  z.object({
+    command: z.literal("setWorking"),
+    scope: ModelScope.default("thread").describe(
+      "thread = this conversation. resource = persists across this user's conversations.",
+    ),
+    markdown: z.string().describe("New scratchpad content. Replaces whatever was there."),
+  }),
+  z.object({
+    command: z.literal("recall"),
+    query: z.string().min(1).describe("Natural-language search query."),
+    scopes: z
+      .array(RecallScope)
+      .optional()
+      .describe("Layers to search. Default: thread + resource."),
+    sources: z.array(RecallSource).optional().describe("Source types. Default: fact + episode."),
+    limit: z.number().int().min(1).max(20).default(5),
+  }),
+]);
+
+export type LayeredMemoryToolInput = z.infer<typeof LayeredMemoryToolInputSchema>;
+
 /**
  * `memory.set` / `memory.setWorking` / `memory.recall` bundled into one tool
  * so agents use a single tool slot. Pass the result into your tool map:
@@ -66,7 +130,9 @@ const RecallSource = z.enum(["fact", "episode", "message"]);
  *   });
  *   agentLoop({ tools: { memory } });
  */
-export function createLayeredMemoryTool(config: LayeredMemoryToolConfig) {
+export function createLayeredMemoryTool(
+  config: LayeredMemoryToolConfig,
+): AgentTool<LayeredMemoryToolInput, string> {
   const threadKey: ThreadKey = {
     namespaceId: config.namespaceId,
     resourceId: config.resourceId,
@@ -77,7 +143,7 @@ export function createLayeredMemoryTool(config: LayeredMemoryToolConfig) {
     : null;
   const defaultSources = config.defaultRecallSources ?? ["fact", "episode"];
 
-  return multiTool({
+  return tool({
     name: "memory",
     description:
       "Read and write durable agent memory. Pick the right command for the kind " +
@@ -85,66 +151,31 @@ export function createLayeredMemoryTool(config: LayeredMemoryToolConfig) {
       "  - `set`: a small, lasting fact about the user or this conversation\n" +
       "  - `setWorking`: current state / focus / scratch — overwrites in place\n" +
       "  - `recall`: search past facts and session summaries that aren't already " +
-      "in your context.",
-    commands: {
-      set: command({
-        description:
-          "Save a small, durable claim that should survive this conversation. " +
-          "One line, atomic, true.\n\n" +
-          "Use scope='thread' (default) for facts about THIS conversation only:\n" +
-          "  - 'we decided to use Postgres for the audit log'\n" +
-          "  - 'the bug only happens on staging'\n\n" +
-          "Use scope='resource' for facts that should follow the user across ALL " +
-          "their conversations:\n" +
-          "  - 'the user lives in PST'\n" +
-          "  - 'the user is allergic to peanuts'\n" +
-          "  - 'the user prefers terse answers'\n\n" +
-          "DO NOT use this for current state, in-progress reasoning, or anything " +
-          "that will change soon — that's what `setWorking` is for. Don't repeat " +
-          "facts that are already saved.",
-        parameters: z.object({
-          scope: ModelScope.default("thread").describe(
-            "thread = this conversation only. resource = this user, all conversations.",
-          ),
-          text: z.string().min(1).describe("The fact, in one line."),
-        }),
-        execute: async ({ scope, text }) => {
-          if (scope === "resource") {
+      "in your context.\n\n" +
+      "Commands:\n" +
+      `  set: ${SET_DESCRIPTION}\n` +
+      `  setWorking: ${SET_WORKING_DESCRIPTION}\n` +
+      `  recall: ${RECALL_DESCRIPTION}`,
+    parameters: LayeredMemoryToolInputSchema,
+    execute: async (input) => {
+      switch (input.command) {
+        case "set": {
+          if (input.scope === "resource") {
             if (!resourceKey) {
               return "Cannot write resource-scope memory: no resourceId is bound to this task.";
             }
-            const f = await config.store.appendResourceFact(resourceKey, text);
+            const f = await config.store.appendResourceFact(resourceKey, input.text);
             return `Saved to resource memory (id: ${shortId(f.id)}).`;
           }
-          const f = await config.store.appendThreadFact(threadKey, text);
+          const f = await config.store.appendThreadFact(threadKey, input.text);
           return `Saved to thread memory (id: ${shortId(f.id)}).`;
-        },
-      }),
-
-      setWorking: command({
-        description:
-          "Replace the markdown scratchpad with current state. Use this for " +
-          "things that change frequently and aren't worth saving as durable " +
-          "facts:\n" +
-          "  - 'currently debugging the login flow, blocked on token refresh'\n" +
-          "  - 'next step: write the schema migration, then the rollback test'\n" +
-          "  - 'open questions: do we need pgvector or is FTS enough?'\n\n" +
-          "The scratchpad is injected into the system prompt every turn, so " +
-          "keep it SHORT (a few lines) and CURRENT. Each call REPLACES the " +
-          "previous scratchpad — it's not append. To remember something " +
-          "permanently, use `set` instead.",
-        parameters: z.object({
-          scope: ModelScope.default("thread").describe(
-            "thread = this conversation. resource = persists across this user's conversations.",
-          ),
-          markdown: z.string().describe("New scratchpad content. Replaces whatever was there."),
-        }),
-        execute: async ({ scope, markdown }) => {
-          if (scope === "resource") {
+        }
+        case "setWorking": {
+          if (input.scope === "resource") {
             if (!resourceKey) {
               return "Cannot write resource-scope working memory: no resourceId is bound.";
             }
-            await config.store.upsertResource(resourceKey, { workingMemory: markdown });
+            await config.store.upsertResource(resourceKey, { workingMemory: input.markdown });
             return "Updated resource working memory.";
           }
           // Auto-create the thread if it doesn't exist yet — symmetric with
@@ -157,68 +188,39 @@ export function createLayeredMemoryTool(config: LayeredMemoryToolConfig) {
                 : {},
             );
           }
-          await config.store.setThreadWorking(threadKey, markdown);
+          await config.store.setThreadWorking(threadKey, input.markdown);
           return "Updated thread working memory.";
-        },
-      }),
-
-      recall: command({
-        description:
-          "Search durable memory for things you don't already see in your " +
-          "context. Use this when the user references something from a past " +
-          "conversation:\n" +
-          "  - 'remember that thing about my partner's allergies?'\n" +
-          "  - 'what did we decide about the database last month?'\n" +
-          "  - 'didn't we already talk about this somewhere?'\n\n" +
-          "Returns the top matching facts and past-session summaries " +
-          "(episodes) ranked by relevance + salience. Don't use this for " +
-          "things already injected into your system prompt — those are " +
-          "already visible to you.",
-        parameters: z.object({
-          query: z.string().min(1).describe("Natural-language search query."),
-          scopes: z
-            .array(RecallScope)
-            .optional()
-            .describe("Layers to search. Default: thread + resource."),
-          sources: z
-            .array(RecallSource)
-            .optional()
-            .describe("Source types. Default: fact + episode."),
-          limit: z.number().int().min(1).max(20).default(5),
-        }),
-        execute: async ({ query, scopes, sources, limit }) => {
-          const wantScopes = scopes ?? defaultSearchScopes(resourceKey != null);
-          const wantSources = sources ?? [...defaultSources];
-
-          // If the store implements SemanticRecall, prefer it.
-          if (isSemanticRecall(config.store)) {
-            const hits = await config.store.recall(threadKey, query, {
-              limit,
-              sources: wantSources,
-            });
-            return formatHits(hits, query);
-          }
-
-          // Fallback: keyword scan over facts + episodes at the requested scopes.
+        }
+        case "recall": {
           const hits = await keywordSearch({
             store: config.store,
             namespaceId: config.namespaceId,
             resourceKey,
             threadKey,
-            query,
-            scopes: wantScopes,
-            sources: wantSources,
-            limit,
+            query: input.query,
+            scopes: input.scopes ?? defaultSearchScopes(resourceKey != null),
+            sources: input.sources ?? [...defaultSources],
+            limit: input.limit,
           });
-          return formatHits(hits, query);
-        },
-      }),
+          return formatHits(hits, input.query);
+        }
+      }
     },
   });
 }
 
 function defaultSearchScopes(hasResource: boolean): Array<"thread" | "resource" | "namespace"> {
   return hasResource ? ["thread", "resource"] : ["thread"];
+}
+
+/** One ranked `recall` match. */
+interface MemoryHit {
+  readonly source: "fact" | "episode";
+  readonly scope: "namespace" | "resource" | "thread";
+  readonly id: string;
+  readonly text: string;
+  readonly score: number;
+  readonly createdAt: number;
 }
 
 interface KeywordSearchInput {
@@ -232,9 +234,9 @@ interface KeywordSearchInput {
   readonly limit: number;
 }
 
-async function keywordSearch(input: KeywordSearchInput): Promise<RecallHit[]> {
+async function keywordSearch(input: KeywordSearchInput): Promise<MemoryHit[]> {
   const q = input.query.toLowerCase();
-  const out: RecallHit[] = [];
+  const out: MemoryHit[] = [];
 
   const wantFacts = input.sources.includes("fact");
   const wantEpisodes = input.sources.includes("episode");
@@ -279,9 +281,9 @@ async function keywordSearch(input: KeywordSearchInput): Promise<RecallHit[]> {
 
 function factsToHits(
   facts: ReadonlyArray<Fact>,
-  scope: RecallHit["scope"],
+  scope: MemoryHit["scope"],
   q: string,
-): RecallHit[] {
+): MemoryHit[] {
   return facts.flatMap((f) => {
     const score = keywordScore(q, f.text);
     if (score <= 0) return [];
@@ -300,9 +302,9 @@ function factsToHits(
 
 function episodesToHits(
   eps: ReadonlyArray<EpisodicRecord>,
-  scope: RecallHit["scope"],
+  scope: MemoryHit["scope"],
   q: string,
-): RecallHit[] {
+): MemoryHit[] {
   return eps.flatMap((e) => {
     const haystack = e.summary + (e.outcome ? ` ${e.outcome}` : "");
     const overlap = keywordScore(q, haystack);
@@ -322,10 +324,7 @@ function episodesToHits(
   });
 }
 
-/**
- * Token-level overlap score, 0..1. Identical to the heuristic in
- * `memory-index.ts` so the two recall paths feel similar to the model.
- */
+/** Token-level overlap score, 0..1: share of query words (3+ chars) found in `content`. */
 function keywordScore(query: string, content: string): number {
   const words = (s: string) =>
     new Set(
@@ -342,7 +341,7 @@ function keywordScore(query: string, content: string): number {
   return matches / queryWords.size;
 }
 
-function formatHits(hits: ReadonlyArray<RecallHit>, query: string): string {
+function formatHits(hits: ReadonlyArray<MemoryHit>, query: string): string {
   if (hits.length === 0) return `No memories matched "${query}".`;
   return hits
     .map((h, i) => `${i + 1}. [${h.scope}/${h.source}] (${h.score.toFixed(2)}) ${h.text}`)

@@ -1,3 +1,5 @@
+import type { Agent } from "../agent/types.ts";
+
 // ---------------------------------------------------------------------------
 // Agentic DAG — a planned multi-agent execution graph.
 //
@@ -86,15 +88,12 @@ export interface AgenticDagRecipe {
   };
 }
 
-/** Per-run state tracked by the executor. */
-export interface DagRunState {
-  /** Outputs from completed nodes, keyed by node id. */
-  readonly outputs: Readonly<Record<string, unknown>>;
-  /** Errors from failed nodes, keyed by node id. */
-  readonly errors: Readonly<Record<string, string>>;
-  /** Set of node ids that have started (kept off `outputs` until completion). */
-  readonly started: ReadonlyArray<string>;
-}
+/**
+ * Strategy for resolving a node's `agentId` to an Agent instance. The
+ * host supplies this so the executor doesn't bake in one resolution path
+ * (a registry, a local cache, a remote lookup, etc).
+ */
+export type AgentResolver = (agentId: string, version?: string) => Promise<Agent>;
 
 /** Surfaced when the DAG can't be statically validated. */
 export class DagValidationError extends Error {

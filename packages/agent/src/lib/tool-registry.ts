@@ -34,7 +34,6 @@ const TOOL_EXTENSIONS = new Set([".ts", ".js"]);
  * Builds LLMToolDefinition[] from a tool map, enriching the description
  * with usage guidance and examples when present.
  */
-// biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
 export function buildToolDefs(tools: Record<string, AgentTool<any, any>>): LLMToolDefinition[] {
   return Object.entries(tools).map(([key, t]) => ({
     name: key,
@@ -43,7 +42,6 @@ export function buildToolDefs(tools: Record<string, AgentTool<any, any>>): LLMTo
   }));
 }
 
-// biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
 function enrichDescription(t: AgentTool<any, any>): string {
   let desc = t.description;
   if (t.usage) desc += `\n\nUsage: ${t.usage}`;
@@ -76,7 +74,6 @@ function enrichDescription(t: AgentTool<any, any>): string {
 export async function createFileToolRegistry(
   config: FileToolRegistryConfig,
 ): Promise<ToolRegistry> {
-  // biome-ignore lint/suspicious/noExplicitAny: tool inputs are validated at runtime via Zod
   const tools = new Map<string, AgentTool<any, any>>();
   const fileToName = new Map<string, string>();
   const recursive = config.recursive !== false;
@@ -92,7 +89,6 @@ export async function createFileToolRegistry(
     try {
       const url = `${pathToFileURL(filePath).href}?t=${Date.now()}`;
       const mod = await import(url);
-      // biome-ignore lint/suspicious/noExplicitAny: validated below
       const t = mod.default as AgentTool<any, any>;
       if (!t?.name || typeof t.execute !== "function") {
         config.onError?.(

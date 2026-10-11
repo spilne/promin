@@ -83,7 +83,6 @@ import type {
   UsageStats,
 } from "./types.ts";
 
-// biome-ignore lint/suspicious/noExplicitAny: outputSchema generic carries through
 export interface LocalAgentConfig<TOutput = any> {
   /** Underlying agent config — same shape used by `agentAction` / `agentLoop`. */
   readonly agent: AgentLoopConfig & {
@@ -132,7 +131,7 @@ export interface LocalAgentConfig<TOutput = any> {
    * Optional — when omitted AND `memory` is provided, LocalAgent auto-
    * builds a `DefaultConsolidator` over this agent's `memory` and the
    * LLM picked from `consolidatorLlm ?? agent.llm`. Pass your own to
-   * override the prompt / salience / embeddings, or to plug in a
+   * override the prompt / salience, or to plug in a
    * non-LLM implementation.
    */
   readonly consolidator?: Consolidator;
@@ -1291,8 +1290,9 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
    * checks whether the configured rule fires, and dispatches the
    * compactThread call in either background or blocking mode.
    *
-   * Phase 1 only writes the episode; resolveContext consumption of
-   * those episodes lands in promin-37qn.
+   * Writes a thread episode only; `resolveContext` does not render
+   * per-thread episodes into the prompt (the memory tool's `recall`
+   * searches them on demand).
    */
   private async maybeAutoCompact(): Promise<void> {
     const cfg = this.deps.autoCompact;

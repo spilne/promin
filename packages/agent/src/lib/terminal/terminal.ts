@@ -182,7 +182,6 @@ export class Terminal implements AgentUIRenderer {
 
     this._sync(() => {
       if (this.inPrompt) {
-        // biome-ignore lint/suspicious/noExplicitAny: readline.line is public but not in @types
         const typed = (this._rl as any).line ?? "";
         process.stdout.write("\r\x1b[K");
         for (const line of lines) process.stdout.write(`${line}\n`);
@@ -642,9 +641,7 @@ export class Terminal implements AgentUIRenderer {
   private _redrawPrompt(): void {
     if (!this.inPrompt) return;
     const frame = PROMPT_FRAMES[this._promptFrame];
-    // biome-ignore lint/suspicious/noExplicitAny: readline internals
     const typed = (this._rl as any).line ?? "";
-    // biome-ignore lint/suspicious/noExplicitAny: readline internals
     const cursorPos = (this._rl as any).cursor ?? typed.length;
     const cols = process.stdout.columns ?? 80;
     // Visible width of "❯❯ " (the frame + space prefix).

@@ -195,25 +195,10 @@ const RemoteBackendSchema = z
   })
   .strict();
 
-const CursorBackendSchema = z
-  .object({
-    type: z.literal("cursor"),
-    command: z.string().optional(),
-    model: z.string().optional(),
-    workspace: z.string().optional(),
-    worktree: z.boolean().optional(),
-    trust: z.boolean().optional(),
-    sandbox: z.enum(["enabled", "disabled"]).optional(),
-    extraArgs: z.array(z.string()).optional(),
-    requiredEnv: z.array(z.string()).optional(),
-  })
-  .strict();
-
 /** Every recipe backend a client may submit. */
 export const AgentBackendSchema = z.discriminatedUnion("type", [
   LocalBackendSchema,
   RemoteBackendSchema,
-  CursorBackendSchema,
 ]);
 
 /** Recipe metadata as a client may submit it: every field optional. */

@@ -1,4 +1,4 @@
-import type { Terminal } from "../lib/terminal/terminal.ts";
+import type { Terminal } from "../terminal.ts";
 import type { ToolRegistry } from "../lib/tool-registry.ts";
 import type { AgentTool } from "../lib/tool.ts";
 
@@ -83,7 +83,6 @@ export function createSpinnerTracker(term: Terminal): SpinnerTracker {
               name,
               {
                 ...t,
-                // biome-ignore lint/suspicious/noExplicitAny: runtime-validated by Zod in agentAction
                 execute: async (input: any) => {
                   const abbrev = abbrevInput(input ?? {});
                   const abbrevDim = abbrev ? `  \x1b[2m${abbrev}\x1b[0m` : "";

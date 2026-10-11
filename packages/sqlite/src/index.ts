@@ -5,7 +5,6 @@ export { SqliteQueue } from "./lib/sqlite-queue.ts";
 export { RateLimitExceeded, type RateLimiter } from "./lib/rate-limiter.ts";
 export type { Throttle } from "./lib/throttle.ts";
 export type { AsyncQueue } from "./lib/async-queue.ts";
-export { SqliteMemoryIndex } from "./lib/agent/memory-index.ts";
 export { SqliteMemoryStore } from "./lib/agent/memory-store.ts";
 export type { SqliteMemoryStoreConfig } from "./lib/agent/memory-store.ts";
 export { SqliteAgentRegistry } from "./lib/agent/agent-registry.ts";

@@ -37,8 +37,7 @@ export interface BaseMcpServerConfig {
   /**
    * Optional credential lookup name. When set, the host resolves the
    * value from a secrets store at connect time. Lets recipes ship the
-   * server config without embedding API tokens. Forward-compat with
-   * promin-an9l (BYOK credentialRef).
+   * server config without embedding API tokens (BYOK).
    */
   readonly credentialRef?: string;
   /** Per-call timeout in milliseconds. Default: no timeout. */

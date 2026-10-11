@@ -177,7 +177,6 @@ export class ConsoleRunner {
           opts.onExit();
         } else {
           this._lastCtrlC = now;
-          // biome-ignore lint/suspicious/noExplicitAny: readline internals
           this._savedPlaceholder = (rl as any).line ?? "";
           process.stdout.write("\n\x1b[2m(Ctrl+C again to exit)\x1b[0m\n");
           opts.onIdleHint?.();

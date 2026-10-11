@@ -11,10 +11,11 @@
 //   - chatStream: error before first chunk → invisible retry
 //   - chatStream: error after partial → throws by default; retries when retryAfterPartial set
 //   - metrics: llm.retries + llm.fallback.switches counters fire
+//   - fallback chain: ordered, fresh budgets, `fallbackOn` widens the trigger
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { resilientLLM } from "../resilient-llm.ts";
+import { ALL_LLM_ERROR_CLASSES, resilientLLM } from "../resilient-llm.ts";
 import { classifyLLMError } from "../llm-error-classification.ts";
 import { InMemoryAgentMetrics } from "../../metrics/types.ts";
 import type {
@@ -240,5 +241,94 @@ describe("resilientLLM.chatStream — partial-stream semantics", () => {
       }
     }).toThrow("invalid api key");
     expect(p.attempts()).toBe(1);
+  });
+});
+
+describe("resilientLLM — fallback chain", () => {
+  const rateLimit = () => new Error("HTTP 429 rate limit");
+  const permanent = () => new Error("invalid api key");
+
+  function failing(err: () => Error): LLMProvider & { calls: () => number } {
+    let n = 0;
+    return {
+      chat: async () => {
+        n += 1;
+        throw err();
+      },
+      calls: () => n,
+    };
+  }
+
+  it("walks the chain in order, each fallback with a fresh retry budget", async () => {
+    const primary = failing(rateLimit);
+    const second = failing(rateLimit);
+    const third: LLMProvider = { chat: async () => ({ content: "third", finishReason: "stop" }) };
+    const wrapped = resilientLLM(primary, {
+      rateLimitRetries: 1,
+      fallback: [second, third],
+      backoffMs: () => 0,
+    });
+    const r = await wrapped.chat({ messages: [] });
+    expect(r.content).toBe("third");
+    expect(primary.calls()).toBe(2);
+    expect(second.calls()).toBe(2);
+  });
+
+  it("does not fail over on permanent errors by default", async () => {
+    const primary = failing(permanent);
+    const backup: LLMProvider = { chat: async () => OK };
+    const wrapped = resilientLLM(primary, { fallback: backup, backoffMs: () => 0 });
+    await expect(wrapped.chat({ messages: [] })).rejects.toThrow("invalid api key");
+  });
+
+  it("fallbackOn: ALL_LLM_ERROR_CLASSES fails over on any error", async () => {
+    const primary = failing(permanent);
+    const backup: LLMProvider = {
+      chat: async () => ({ content: "backup", finishReason: "stop" }),
+    };
+    const wrapped = resilientLLM(primary, {
+      transientRetries: 0,
+      fallback: [backup],
+      fallbackOn: ALL_LLM_ERROR_CLASSES,
+    });
+    const r = await wrapped.chat({ messages: [] });
+    expect(r.content).toBe("backup");
+    expect(primary.calls()).toBe(1);
+  });
+
+  it("throws the last error once the chain is exhausted", async () => {
+    const wrapped = resilientLLM(failing(permanent), {
+      fallback: [failing(() => new Error("backup down"))],
+      fallbackOn: ALL_LLM_ERROR_CLASSES,
+      transientRetries: 0,
+    });
+    await expect(wrapped.chat({ messages: [] })).rejects.toThrow("backup down");
+  });
+
+  it("streams through a chat-only fallback, keeping thinking blocks", async () => {
+    const primary: LLMProvider = {
+      chat: async () => OK,
+      // oxlint-disable-next-line require-yield -- fails before the first chunk
+      chatStream: async function* () {
+        throw rateLimit();
+      },
+    };
+    const backup: LLMProvider = {
+      chat: async () => ({
+        content: "from backup",
+        finishReason: "stop",
+        thinkingBlocks: [{ thinking: "hmm", signature: "sig" }],
+      }),
+    };
+    const wrapped = resilientLLM(primary, {
+      rateLimitRetries: 0,
+      fallback: backup,
+      backoffMs: () => 0,
+    });
+    const chunks: LLMStreamChunk[] = [];
+    for await (const c of wrapped.chatStream!({ messages: [] })) chunks.push(c);
+    expect(chunks.map((c) => c.delta).join("")).toBe("from backup");
+    expect(chunks.at(-1)?.thinkingBlocks).toEqual([{ thinking: "hmm", signature: "sig" }]);
+    expect(chunks.at(-1)?.finishReason).toBe("stop");
   });
 });

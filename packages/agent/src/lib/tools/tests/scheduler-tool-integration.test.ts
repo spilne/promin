@@ -269,7 +269,6 @@ function makeCapturingAgent(
     textStream: { async *[Symbol.asyncIterator]() {} },
     cancel: async () => {},
   } as unknown as Awaited<ReturnType<LocalAgent["invoke"]>>;
-  // biome-ignore lint/suspicious/noExplicitAny: minimal stub
   const agent: any = {
     withScope: () => agent,
     invoke: async (input: AgentInput, opts?: { runId?: string }) => {

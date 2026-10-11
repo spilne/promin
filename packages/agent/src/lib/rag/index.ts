@@ -2,17 +2,6 @@ export { FlatTextChunker } from "./chunking.ts";
 export type { FlatTextChunkerConfig } from "./chunking.ts";
 export { InMemoryRetriever } from "./in-memory-retriever.ts";
 export type { InMemoryRetrieverConfig } from "./in-memory-retriever.ts";
-export { CombinedRetriever, FallbackRetriever } from "./composed-retriever.ts";
-export type {
-  CombinedRetrieverConfig,
-  CombinedRetrieverSource,
-  FallbackRetrieverConfig,
-  FallbackRetrieverSource,
-} from "./composed-retriever.ts";
-export { RerankingRetriever } from "./reranking-retriever.ts";
-export type { RerankingRetrieverConfig, RetrieveReranker } from "./reranking-retriever.ts";
-export { RouterRetriever } from "./router-retriever.ts";
-export type { RouterRetrieverConfig, RetrieverRoute } from "./router-retriever.ts";
 export { InMemoryRetrieverRegistry } from "./retriever-registry.ts";
 export { InMemoryKnowledgeBaseStore } from "./knowledge-base-store.ts";
 export type {

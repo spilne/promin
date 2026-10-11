@@ -12,7 +12,6 @@ import type { ThinkingBlock } from "./message.ts";
 import type { ProcessorsConfig, ProcessorContext } from "./processors.ts";
 import { recordChat } from "./metrics/instrument.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
-import type { MemoryIndex, MemoryScope } from "./memory-index.ts";
 
 // ---- message utilities ----
 
@@ -26,18 +25,9 @@ export function nonSystemMsgs(messages: Message[]): Message[] {
 
 // ---- tool resolution ----
 
-export interface MemoryInjectionConfig {
-  store: MemoryIndex;
-  scope?: MemoryScope;
-  injectLimit?: number;
-  searchQuery?: string;
-}
-
-// biome-ignore lint/suspicious/noExplicitAny: tool registry uses runtime Zod validation
 export function resolveTools(config: {
   toolRegistry?: ToolRegistry;
   tools?: Record<string, AgentTool<any, any>>;
-  // biome-ignore lint/suspicious/noExplicitAny: tool registry uses runtime Zod validation
 }): Record<string, AgentTool<any, any>> {
   // Reject ambiguous config: specifying both sources silently shadowed the
   // inline `tools` map before, which turned "why isn't my tool firing?"
@@ -50,24 +40,6 @@ export function resolveTools(config: {
     );
   }
   return config.toolRegistry?.getTools() ?? config.tools ?? {};
-}
-
-// ---- memory injection ----
-
-export async function searchRelevantMemories(
-  memory: MemoryInjectionConfig,
-  defaultQuery: string,
-): Promise<Message[]> {
-  const limit = memory.injectLimit ?? 5;
-  if (limit <= 0) return [];
-  const results = await memory.store.search(
-    memory.searchQuery ?? defaultQuery,
-    limit,
-    memory.scope,
-  );
-  if (results.length === 0) return [];
-  const block = results.map((r) => `- ${r.content}`).join("\n");
-  return [{ role: "system" as const, content: `Relevant context from memory:\n${block}` }];
 }
 
 // ---- agent error surfacing ----
@@ -150,7 +122,6 @@ export function formatToolError(err: unknown): string {
 // from blowing up the LLM context window.
 const MAX_TOOL_CONTENT_CHARS = 200_000;
 
-// biome-ignore lint/suspicious/noExplicitAny: tool registry uses runtime Zod validation
 export async function executeToolCall(
   call: ToolCall,
   toolDef: AgentTool<any, any>,
@@ -188,7 +159,6 @@ export async function executeToolCall(
     };
   }
   try {
-    // biome-ignore lint/suspicious/noExplicitAny: Zod validates input at runtime
     const ctx =
       onProgress || scope || toolAuditLogger
         ? {

@@ -35,7 +35,7 @@ export interface McpClientPool {
 export interface DefaultMcpClientPoolConfig {
   /**
    * Resolver that turns a `credentialRef` into a concrete bearer
-   * token at connect time. Forward-compat with promin-an9l (BYOK).
+   * token at connect time (BYOK).
    * Optional — when omitted, only configs with an inline `authToken`
    * (or stdio with env-baked creds) work.
    */

@@ -1,15 +1,10 @@
 // ---------------------------------------------------------------------------
-// AgentTurnGate — covers strict policy (acquire/run/release lifecycle,
-// reject on contention, lease release on body errors) and the queued
-// policy stub (NotImplementedError).
+// AgentTurnGate — covers the strict policy (acquire/run/release lifecycle,
+// reject on contention, lease release on body errors).
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import {
-  AgentTurnGate,
-  QueuedPolicyNotImplementedError,
-  TurnInProgressError,
-} from "../agent-turn-gate.ts";
+import { AgentTurnGate, TurnInProgressError } from "../agent-turn-gate.ts";
 import { InMemoryLeaseStore } from "../in-memory-lease-store.ts";
 
 describe("AgentTurnGate — strict policy", () => {
@@ -112,23 +107,5 @@ describe("AgentTurnGate — strict policy", () => {
     });
     expect(seenExpires).toHaveLength(2);
     expect(seenExpires[1]!).toBe(seenExpires[0]! + 20_000);
-  });
-});
-
-describe("AgentTurnGate — queued policy", () => {
-  it("throws QueuedPolicyNotImplementedError (Phase 3 work)", async () => {
-    const gate = new AgentTurnGate({ leaseStore: new InMemoryLeaseStore() });
-    let caught: unknown = null;
-    try {
-      await gate.run({
-        key: { namespaceId: "acme", threadId: "t-1" },
-        ownerId: "worker-A",
-        policy: "queued",
-        run: async () => "should not reach",
-      });
-    } catch (err) {
-      caught = err;
-    }
-    expect(caught).toBeInstanceOf(QueuedPolicyNotImplementedError);
   });
 });

@@ -54,8 +54,8 @@ export interface ResolveContextInput {
   /**
    * Resource-scope episodes (L2) — pre-sorted by the caller. Rendered
    * only when `budget.maxEpisodeTokens` is set; otherwise ignored.
-   * Per-thread and per-namespace episodes are not auto-rendered; they
-   * are storage-only unless a `SemanticRecall` capability surfaces them.
+   * Per-thread and per-namespace episodes are not auto-rendered; the
+   * memory tool's `recall` command searches them on demand.
    */
   readonly resourceEpisodes?: ReadonlyArray<EpisodicRecord>;
   /** Thread row — required, since `resolveContext` is keyed on a thread. */
