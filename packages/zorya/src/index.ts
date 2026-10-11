@@ -17,6 +17,7 @@ export {
   DistributedWorkflows,
   QueuedWorkflows,
   UnknownWorkflowError,
+  WorkflowIdConflictError,
   type LocalWorkflowsConfig,
   type DistributedWorkflowsConfig,
   type QueuedWorkflowsConfig,
@@ -27,7 +28,14 @@ export {
   ZoryaScheduler,
   type ZoryaSchedulerConfig,
   type AgentScheduleDispatcher,
+  type AgentScheduleStart,
 } from "./server/services/scheduler/index.ts";
+export {
+  ScheduleDispatchError,
+  ScheduleDispatchTimeoutError,
+  type SchedulerLoopErrorEvent,
+  type SchedulerLoopErrorPhase,
+} from "./server/services/scheduler-loop.ts";
 export {
   ZoryaAgents,
   type ZoryaAgentsConfig,

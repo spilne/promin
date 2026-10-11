@@ -586,11 +586,16 @@ export type {
   InProcessSchedulerClientConfig,
   HttpSchedulerClientConfig,
 } from "./tools/scheduler-client.ts";
-export { dispatchAgentSchedule, isAgentSchedule } from "./tools/dispatch-agent-schedule.ts";
+export {
+  dispatchAgentSchedule,
+  isAgentSchedule,
+  startAgentSchedule,
+} from "./tools/dispatch-agent-schedule.ts";
 export type {
   AgentScheduleMetadata,
   DispatchAgentScheduleDeps,
   DispatchAgentScheduleResult,
+  StartedAgentSchedule,
   ScheduleFireContext,
 } from "./tools/dispatch-agent-schedule.ts";
 

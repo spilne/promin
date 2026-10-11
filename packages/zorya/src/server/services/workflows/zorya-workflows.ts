@@ -15,9 +15,9 @@
 // cascade through the fallback.
 // ---------------------------------------------------------------------------
 
-import type { Workflow, WorkflowStorage, RunSource } from "@promin/workflow";
+import type { CreateWorkflowResult, Workflow, WorkflowStorage, RunSource } from "@promin/workflow";
 import type { WorkflowAdvertisementRegistry } from "../../workflow-advertisements.ts";
-import { UnknownWorkflowError } from "./errors.ts";
+import { UnknownWorkflowError, WorkflowIdConflictError } from "./errors.ts";
 
 export interface TriggerOptions {
   readonly workflowId?: string;
@@ -31,6 +31,47 @@ export interface TriggerOptions {
 
 export interface TriggerResult {
   readonly workflowId: string;
+  /**
+   * True when a run with this `workflowId` already existed: the trigger
+   * started nothing and answers with that run (any status). Re-running an
+   * ended run is an explicit `rerun`.
+   */
+  readonly existing?: boolean;
+}
+
+/**
+ * Own-property lookup of a workflow definition by name, so prototype keys
+ * (`constructor`, `toString`, ...) never resolve to a definition.
+ */
+export function findDefinition(
+  definitions: Readonly<Record<string, Workflow<unknown, unknown>>> | undefined,
+  name: string,
+): Workflow<unknown, unknown> | undefined {
+  return definitions && Object.hasOwn(definitions, name) ? definitions[name] : undefined;
+}
+
+/**
+ * Interpret `createWorkflow`'s result for a trigger. `undefined` means the
+ * row was created and the caller starts it. An existing run of the same
+ * workflow is answered as-is (`existing: true`) — a redelivered schedule
+ * tick or a retried trigger with the same id must not run the body again.
+ * An existing run of another workflow throws `WorkflowIdConflictError`.
+ */
+export function existingRunResult(params: {
+  workflowName: string;
+  workflowId: string;
+  created: CreateWorkflowResult;
+}): TriggerResult | undefined {
+  const { created } = params;
+  if (created.created) return undefined;
+  if (created.existing.workflowName !== params.workflowName) {
+    throw new WorkflowIdConflictError({
+      workflowId: params.workflowId,
+      existingWorkflowName: created.existing.workflowName,
+      requestedWorkflowName: params.workflowName,
+    });
+  }
+  return { workflowId: params.workflowId, existing: true };
 }
 
 export interface ZoryaWorkflowsBaseConfig {
@@ -70,7 +111,10 @@ export abstract class ZoryaWorkflows {
     opts?: TriggerOptions,
   ): Promise<TriggerResult>;
 
-  /** Re-run an existing workflow by id. Default: not supported. */
+  /**
+   * Start a fresh run of an ended workflow under the same id. Callers check
+   * that the run exists and has ended. Default: not supported.
+   */
   async rerun(workflowId: string): Promise<void> {
     if (this.fallback) return this.fallback.rerun(workflowId);
     throw new Error(

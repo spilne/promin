@@ -17,7 +17,12 @@ import {
   InMemoryWorkflowAdvertisementRegistry,
   type WorkflowAdvertisementRegistry,
 } from "../../workflow-advertisements.ts";
-import { ZoryaWorkflows, type TriggerOptions, type TriggerResult } from "./zorya-workflows.ts";
+import {
+  ZoryaWorkflows,
+  existingRunResult,
+  type TriggerOptions,
+  type TriggerResult,
+} from "./zorya-workflows.ts";
 
 export interface QueuedWorkflowsConfig {
   storage: WorkflowStorage;
@@ -62,7 +67,7 @@ export class QueuedWorkflows extends ZoryaWorkflows {
 
   protected async canHandle(name: string): Promise<boolean> {
     if (this.acceptAny) return true;
-    if (this.definitions && name in this.definitions) return true;
+    if (this.definitions && Object.hasOwn(this.definitions, name)) return true;
     const distinct = await this.advertisements.distinct();
     return distinct.some((a) => a.name === name);
   }
@@ -75,7 +80,7 @@ export class QueuedWorkflows extends ZoryaWorkflows {
     const workflowId = opts?.workflowId ?? crypto.randomUUID();
     const version = opts?.version ?? (await this.resolveDefaultVersion(name));
 
-    await this.storage.createWorkflow({
+    const created = await this.storage.createWorkflow({
       workflowId,
       workflowName: name,
       input,
@@ -86,6 +91,9 @@ export class QueuedWorkflows extends ZoryaWorkflows {
       ...(opts?.runSourceId !== undefined && { runSourceId: opts.runSourceId }),
       ...(version !== undefined && { version }),
     });
+    // An existing run is answered as-is, not enqueued again.
+    const existing = existingRunResult({ workflowName: name, workflowId, created });
+    if (existing) return existing;
 
     await this.workflowStarts.enqueue({
       workflowId,

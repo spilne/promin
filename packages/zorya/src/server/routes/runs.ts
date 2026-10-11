@@ -10,10 +10,11 @@ import type {
   SignalPayloadSchema,
   Workflow,
   WorkflowOrderBy,
+  WorkflowState,
   WorkflowStatus,
   WorkflowStorage,
 } from "@promin/workflow";
-import { validate } from "@promin/workflow";
+import { isTerminalWorkflowStatus, validate } from "@promin/workflow";
 import { json, jsonError, parseIntParam, readJson } from "../router.ts";
 import type {
   RunListQuery,
@@ -22,7 +23,8 @@ import type {
   TriggerRunResponse,
 } from "../api-types.ts";
 import type { WorkflowAdvertisementRegistry } from "../workflow-advertisements.ts";
-import { RunsService } from "../services/runs-service.ts";
+import { RunsService, type RunActionResult } from "../services/runs-service.ts";
+import { WorkflowIdConflictError } from "../services/workflows/errors.ts";
 
 export interface RunTrigger {
   (
@@ -40,7 +42,7 @@ export interface RunTrigger {
       /** Producer id corresponding to `runSource` (e.g. `scheduleId`). */
       runSourceId?: string;
     },
-  ): Promise<{ workflowId: string }>;
+  ): Promise<{ workflowId: string; existing?: boolean }>;
 }
 
 export interface RunRoutesDeps {
@@ -127,9 +129,15 @@ export function triggerRun(deps: RunRoutesDeps) {
         runSource: body.runSource ?? "manual",
         runSourceId: body.runSourceId,
       });
-      const response: TriggerRunResponse = { workflowId: result.workflowId };
+      const response: TriggerRunResponse = {
+        workflowId: result.workflowId,
+        ...(result.existing === true && { existing: true }),
+      };
       return json(200, response);
     } catch (err) {
+      if (err instanceof WorkflowIdConflictError) {
+        return jsonError(409, "workflow_id_conflict", err.message);
+      }
       return jsonError(400, "trigger_failed", err instanceof Error ? err.message : String(err));
     }
   };
@@ -141,12 +149,26 @@ export function cancelRun(deps: RunRoutesDeps) {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
     try {
-      await service.cancel(id);
-      return json(200, { ok: true });
+      return runActionResponse(await service.cancel(id));
     } catch (err) {
       return jsonError(400, "cancel_failed", err instanceof Error ? err.message : String(err));
     }
   };
+}
+
+/**
+ * Map an operator action's outcome to a response: 200 when it ended the
+ * run, 404 for an unknown run, 409 when the run had already ended.
+ */
+export function runActionResponse(result: RunActionResult): Response {
+  switch (result.outcome) {
+    case "ok":
+      return json(200, { ok: true });
+    case "not_found":
+      return jsonError(404, "not_found");
+    case "ended":
+      return jsonError(409, "run_ended", `Run has already ended (status: ${result.status})`);
+  }
 }
 
 export function listWorkflowNames(deps: RunRoutesDeps) {
@@ -165,17 +187,23 @@ export function sendSignal(deps: RunRoutesDeps) {
     const body = await readJson<SignalRequest>(req);
     if (!body || !body.signalName) return jsonError(400, "missing_signal_name");
 
+    // A signal is only meaningful for a run that can still consume it.
+    const run = await deps.storage.loadWorkflow(id);
+    if (!run) return jsonError(404, "not_found");
+    if (isTerminalWorkflowStatus(run.status)) {
+      return jsonError(409, "run_ended", `Run has already ended (status: ${run.status})`);
+    }
+
     // Schema check — when the suspend point was set up via
     // `ctx.validatedSignal` / `ctx.approval`, the schema snapshot lives on
     // the StepState. Reject mismatching payloads before delivery so the
     // workflow never resumes with junk. Plain `ctx.signal` suspends carry
     // no schema; the validator's absence-path is pass-through.
-    const mismatch = await checkSignalSchema(
-      deps.storage,
-      id,
-      body.signalName,
-      body.payload ?? null,
-    );
+    const mismatch = checkSignalSchema({
+      run,
+      signalName: body.signalName,
+      payload: body.payload ?? null,
+    });
     if (mismatch) return mismatch;
 
     try {
@@ -198,15 +226,13 @@ export function sendSignal(deps: RunRoutesDeps) {
  * schema (pass-through) or no matching step (let deliverSignal handle —
  * it queues the value for whenever the suspend lands).
  */
-async function checkSignalSchema(
-  storage: RunRoutesDeps["storage"],
-  workflowId: string,
-  signalName: string,
-  payload: unknown,
-): Promise<Response | null> {
-  const wf = await storage.loadWorkflow(workflowId);
-  if (!wf) return null;
-  for (const step of Object.values(wf.steps)) {
+function checkSignalSchema(params: {
+  run: WorkflowState;
+  signalName: string;
+  payload: unknown;
+}): Response | null {
+  const { run, signalName, payload } = params;
+  for (const step of Object.values(run.steps)) {
     if (step.status === "waiting_for_signal" && step.signalName === signalName) {
       const schema = step.signalJsonSchema;
       if (schema === undefined || schema === null) return null;

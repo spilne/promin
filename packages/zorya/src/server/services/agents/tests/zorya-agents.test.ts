@@ -70,6 +70,62 @@ describe("ZoryaAgents.dispatchSchedule", () => {
   });
 });
 
+describe("ZoryaAgents.dispatchSchedule — starts the turn, doesn't await it", () => {
+  const schedule: DurableScheduleConfig = {
+    id: "digest",
+    name: "digest",
+    intervalMs: 60_000,
+    enabled: true,
+    metadata: {
+      agentTrigger: true,
+      agentId: "slow-bot",
+      task: "summarise",
+      namespaceId: "tenant-a",
+      createdByAgent: "slow-bot",
+    },
+  };
+  const tick: ScheduleTick = {
+    scheduleId: "digest",
+    scheduleName: "digest",
+    scheduledAt: new Date(0),
+    firedAt: new Date(0),
+    tickNumber: 3,
+    metadata: schedule.metadata,
+  };
+
+  it("resolves while the model is still answering, under the tick's run id", async () => {
+    const registry = new InMemoryAgentRegistry();
+    await registry.register({
+      id: "slow-bot",
+      backend: { type: "local", llm: { provider: "echo" } },
+    } as unknown as Parameters<typeof registry.register>[0]);
+    const runIds: Array<string | undefined> = [];
+    let answer!: (text: string) => void;
+    const agent = {
+      withScope: () => agent,
+      invoke: (_input: unknown, opts?: { runId?: string }) => {
+        runIds.push(opts?.runId);
+        return new Promise((r) => (answer = (text) => r({ text: Promise.resolve(text) })));
+      },
+    } as unknown as Agent;
+    const agents = new ZoryaAgents({ registry, resolve: () => agent });
+
+    const started = await agents.dispatchSchedule(tick, schedule);
+    expect(runIds).toEqual(["digest.3"]);
+
+    answer("done");
+    expect(await started.done).toEqual({ ok: true, text: "done" });
+  });
+
+  it("rejects when the recipe is gone, so the tick is delivered again", async () => {
+    const agents = new ZoryaAgents({
+      registry: new InMemoryAgentRegistry(),
+      resolve: () => makeAgent(),
+    });
+    await expect(agents.dispatchSchedule(tick, schedule)).rejects.toThrow("slow-bot");
+  });
+});
+
 describe("ZoryaAgents lifecycle", () => {
   it("start/stop with no scan config is a no-op", async () => {
     const registry = new InMemoryAgentRegistry();

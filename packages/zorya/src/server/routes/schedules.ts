@@ -413,7 +413,13 @@ export function emitScheduleNow(
         "Embedded scheduler is not running on this server — set scheduling.enabled to use emit-now.",
       );
     }
-    await fire(id);
+    try {
+      await fire(id);
+    } catch (err) {
+      // The tick was recorded but its run did not start: say so instead of
+      // reporting a fire that never happened.
+      return jsonError(502, "dispatch_failed", err instanceof Error ? err.message : String(err));
+    }
     return json(200, { ok: true });
   };
 }

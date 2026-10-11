@@ -15,7 +15,12 @@
 
 import { parseApprovalSignal } from "@promin/agent";
 import type { SignalPayloadSchema, SignalTokenRecord, WorkflowStorage } from "@promin/workflow";
-import { SystemWallClock, validate, type WallClock } from "@promin/workflow";
+import {
+  SystemWallClock,
+  isTerminalWorkflowStatus,
+  validate,
+  type WallClock,
+} from "@promin/workflow";
 import { isoOrNull, json, jsonError, readJson } from "../router.ts";
 
 /** Default cap on a minted token's validity window: 90 days. */
@@ -174,8 +179,9 @@ export function mintSignalToken(deps: SignalTokenRoutesDeps) {
  *   201 — first delivery, signal resumed
  *   200 — re-submission with the same bearer; same value returned
  *   401 — missing or wrong bearer
- *   404 — unknown token id
+ *   404 — unknown token id, or its run no longer exists
  *   408 — token expired before completion
+ *   409 — the run has already ended
  *   410 — token already consumed by something other than this bearer
  */
 export function completeSignalToken(deps: SignalTokenRoutesDeps) {
@@ -214,24 +220,27 @@ export function completeSignalToken(deps: SignalTokenRoutesDeps) {
     // or share-link recipient can't smuggle the wrong shape through. Plain
     // `ctx.signal` suspends leave the schema undefined → pass-through.
     const wf = await deps.storage.loadWorkflow(token.workflowId);
-    if (wf) {
-      for (const step of Object.values(wf.steps)) {
-        if (step.status === "waiting_for_signal" && step.signalName === token.signalName) {
-          const schema = step.signalJsonSchema;
-          if (schema !== undefined && schema !== null) {
-            const result = validate(body.value, schema as SignalPayloadSchema);
-            if (!result.ok) {
-              return jsonError(
-                400,
-                "schema_mismatch",
-                result.errors
-                  .map((e) => (e.path === "" ? e.message : `${e.path}: ${e.message}`))
-                  .join("; "),
-              );
-            }
+    if (!wf) return jsonError(404, "workflow_not_found");
+    // An ended run can't consume the signal; leave the token unclaimed.
+    if (isTerminalWorkflowStatus(wf.status)) {
+      return jsonError(409, "run_ended", `Run has already ended (status: ${wf.status})`);
+    }
+    for (const step of Object.values(wf.steps)) {
+      if (step.status === "waiting_for_signal" && step.signalName === token.signalName) {
+        const schema = step.signalJsonSchema;
+        if (schema !== undefined && schema !== null) {
+          const result = validate(body.value, schema as SignalPayloadSchema);
+          if (!result.ok) {
+            return jsonError(
+              400,
+              "schema_mismatch",
+              result.errors
+                .map((e) => (e.path === "" ? e.message : `${e.path}: ${e.message}`))
+                .join("; "),
+            );
           }
-          break;
         }
+        break;
       }
     }
 

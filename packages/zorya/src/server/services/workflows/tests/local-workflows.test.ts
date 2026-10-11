@@ -97,6 +97,44 @@ describe("LocalWorkflows.trigger", () => {
   });
 });
 
+describe("LocalWorkflows.trigger — existing workflowId", () => {
+  const settle = async () => {
+    for (let i = 0; i < 50; i++) await new Promise((r) => setTimeout(r, 0));
+  };
+
+  for (const runSource of ["schedule", "manual", undefined] as const) {
+    it(`a second trigger of a completed id doesn't run the body again (runSource ${runSource})`, async () => {
+      let executions = 0;
+      const wf = workflow<unknown>({ name: "w" })
+        .step("a", () => succeed(++executions))
+        .build();
+      const storage = new InMemoryWorkflowStorage();
+      const workflows = new LocalWorkflows({
+        storage,
+        runner: createWorkflowRunner({ storage }),
+        definitions: { w: wf as never },
+        sleepScanIntervalMs: 0,
+        signalScanIntervalMs: 0,
+      });
+      const opts = {
+        workflowId: "sched-1.7",
+        ...(runSource !== undefined && { runSource, runSourceId: "sched-1" }),
+      };
+
+      expect(await workflows.trigger("w", {}, opts)).toEqual({ workflowId: "sched-1.7" });
+      await settle();
+      expect(await workflows.trigger("w", {}, opts)).toEqual({
+        workflowId: "sched-1.7",
+        existing: true,
+      });
+      await settle();
+
+      const run = await storage.loadWorkflow("sched-1.7");
+      expect([executions, run?.run, run?.status]).toEqual([1, 1, "completed"]);
+    });
+  }
+});
+
 describe("LocalWorkflows.rerun", () => {
   it("resets the row and re-executes", async () => {
     const storage = new InMemoryWorkflowStorage();

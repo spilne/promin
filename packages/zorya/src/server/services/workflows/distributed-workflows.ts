@@ -23,7 +23,13 @@ import {
   type AdvertisedWorkflow,
   type WorkflowAdvertisementRegistry,
 } from "../../workflow-advertisements.ts";
-import { ZoryaWorkflows, type TriggerOptions, type TriggerResult } from "./zorya-workflows.ts";
+import {
+  ZoryaWorkflows,
+  existingRunResult,
+  findDefinition,
+  type TriggerOptions,
+  type TriggerResult,
+} from "./zorya-workflows.ts";
 
 export interface DistributedWorkflowsConfig {
   storage: WorkflowStorage;
@@ -78,7 +84,7 @@ export class DistributedWorkflows extends ZoryaWorkflows {
   }
 
   protected async canHandle(name: string): Promise<boolean> {
-    if (this.definitions && name in this.definitions) return true;
+    if (findDefinition(this.definitions, name)) return true;
     const adv = await this.findAdvertised(name);
     return adv !== undefined;
   }
@@ -89,22 +95,55 @@ export class DistributedWorkflows extends ZoryaWorkflows {
     opts?: TriggerOptions,
   ): Promise<TriggerResult> {
     const workflowId = opts?.workflowId ?? crypto.randomUUID();
+    const { workflow, version: resolvedVersion } = await this.resolveWorkflow({
+      name,
+      version: opts?.version,
+    });
 
-    // Prefer in-process definition when present (rare in distributed mode);
-    // otherwise resolve from advertisements + build a stub.
-    const localDef = this.definitions?.[name];
+    // Pre-create the storage row so typed fields land (namespace, metadata,
+    // runSource) and the dashboard sees a `pending` row immediately. An
+    // existing run is answered as-is, not submitted again.
+    const created = await this.storage.createWorkflow({
+      workflowId,
+      workflowName: name,
+      input,
+      ...(opts?.workflowType !== undefined && { workflowType: opts.workflowType }),
+      ...(opts?.namespace !== undefined && { namespace: opts.namespace }),
+      ...(opts?.metadata !== undefined && { metadata: opts.metadata }),
+      ...(opts?.runSource !== undefined && { runSource: opts.runSource }),
+      ...(opts?.runSourceId !== undefined && { runSourceId: opts.runSourceId }),
+      ...(resolvedVersion !== undefined && { version: resolvedVersion }),
+    });
+    const existing = existingRunResult({ workflowName: name, workflowId, created });
+    if (existing) return existing;
+
+    await this.runner.submit({ workflow, workflowId, input });
+    return { workflowId };
+  }
+
+  /**
+   * The definition to drive `name` with: the in-process one when present
+   * (rare in distributed mode), otherwise a stub built from the advertised
+   * DAG.
+   */
+  private async resolveWorkflow(params: {
+    name: string;
+    version: string | undefined;
+  }): Promise<{ workflow: Workflow<unknown, unknown>; version: string | undefined }> {
+    const { name, version } = params;
+    const localDef = findDefinition(this.definitions, name);
     let workflow: Workflow<unknown, unknown>;
-    let resolvedVersion = opts?.version;
+    let resolvedVersion = version;
 
     if (localDef) {
       workflow = localDef;
       if (resolvedVersion === undefined) resolvedVersion = localDef.version;
     } else {
-      const advertised = await this.findAdvertised(name, opts?.version);
+      const advertised = await this.findAdvertised(name, version);
       if (!advertised) {
         throw new Error(
           `DistributedWorkflows: no advertisement for "${name}"${
-            opts?.version ? ` version "${opts.version}"` : ""
+            version ? ` version "${version}"` : ""
           } — at least one worker must advertise the DAG`,
         );
       }
@@ -121,23 +160,7 @@ export class DistributedWorkflows extends ZoryaWorkflows {
       if (resolvedVersion === undefined) resolvedVersion = advertised.version;
       workflow = buildStubWorkflow({ dag, name: advertised.name, version: resolvedVersion });
     }
-
-    // Pre-create the storage row so typed fields land (namespace, metadata,
-    // runSource) and the dashboard sees a `pending` row immediately.
-    await this.storage.createWorkflow({
-      workflowId,
-      workflowName: name,
-      input,
-      ...(opts?.workflowType !== undefined && { workflowType: opts.workflowType }),
-      ...(opts?.namespace !== undefined && { namespace: opts.namespace }),
-      ...(opts?.metadata !== undefined && { metadata: opts.metadata }),
-      ...(opts?.runSource !== undefined && { runSource: opts.runSource }),
-      ...(opts?.runSourceId !== undefined && { runSourceId: opts.runSourceId }),
-      ...(resolvedVersion !== undefined && { version: resolvedVersion }),
-    });
-
-    await this.runner.submit({ workflow, workflowId, input });
-    return { workflowId };
+    return { workflow, version: resolvedVersion };
   }
 
   override async rerun(workflowId: string): Promise<void> {
@@ -146,13 +169,14 @@ export class DistributedWorkflows extends ZoryaWorkflows {
       if (this.fallback) return this.fallback.rerun(workflowId);
       throw new Error(`rerun: workflow "${workflowId}" not found`);
     }
-    await this.storage.startFreshRun({ workflowId });
-    // Re-dispatch with the same id; runner.submit is idempotent on workflowId
-    // (it sees the existing row and resumes).
-    await this.dispatch(state.workflowName, state.input, {
-      workflowId,
-      ...(state.version !== undefined && { version: state.version }),
+    const { workflow } = await this.resolveWorkflow({
+      name: state.workflowName,
+      version: state.version,
     });
+    await this.storage.startFreshRun({ workflowId });
+    // Submit the fresh run under the same id; the coordinator drives the
+    // existing (now pending) row.
+    await this.runner.submit({ workflow, workflowId, input: state.input });
   }
 
   protected override async onStart(): Promise<void> {

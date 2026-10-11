@@ -6,9 +6,27 @@ import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage } from "@promin/workflow";
 import { InMemoryWorkflowAdvertisementRegistry } from "../../../workflow-advertisements.ts";
 import { InMemoryWorkflowStartQueue } from "../../../workflow-starts.ts";
-import { QueuedWorkflows, UnknownWorkflowError } from "../index.ts";
+import { QueuedWorkflows, UnknownWorkflowError, WorkflowIdConflictError } from "../index.ts";
 
 describe("QueuedWorkflows.trigger", () => {
+  it("an existing workflowId is answered, not enqueued again; another workflow's id conflicts", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const queue = new InMemoryWorkflowStartQueue();
+    const workflows = new QueuedWorkflows({ storage, workflowStarts: queue, acceptAny: true });
+
+    expect(await workflows.trigger("video", {}, { workflowId: "v-1" })).toEqual({
+      workflowId: "v-1",
+    });
+    expect(await workflows.trigger("video", {}, { workflowId: "v-1" })).toEqual({
+      workflowId: "v-1",
+      existing: true,
+    });
+    await expect(workflows.trigger("audio", {}, { workflowId: "v-1" })).rejects.toBeInstanceOf(
+      WorkflowIdConflictError,
+    );
+    expect((await queue.list()).map((r) => r.workflowId)).toEqual(["v-1"]);
+  });
+
   it("rejects unknown workflows when no advertisement and acceptAny is false", async () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryWorkflowStartQueue();

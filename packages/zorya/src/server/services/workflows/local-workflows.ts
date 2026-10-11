@@ -26,8 +26,14 @@ import {
   type SignalScanner,
   type SleepScanner,
 } from "@promin/workflow/distributed";
-import { SystemWallClock, isTerminalWorkflowStatus, recoverWorkflows } from "@promin/workflow";
-import { ZoryaWorkflows, type TriggerOptions, type TriggerResult } from "./zorya-workflows.ts";
+import { SystemWallClock, recoverWorkflows } from "@promin/workflow";
+import {
+  ZoryaWorkflows,
+  existingRunResult,
+  findDefinition,
+  type TriggerOptions,
+  type TriggerResult,
+} from "./zorya-workflows.ts";
 
 export interface LocalWorkflowsConfig {
   storage: WorkflowStorage;
@@ -81,7 +87,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
         storage: this.storage,
         runner: this.runner,
         scanIntervalMs,
-        resolveWorkflow: (name) => this.definitions[name],
+        resolveWorkflow: (name) => findDefinition(this.definitions, name),
       });
     }
 
@@ -96,7 +102,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
         storage: this.storage,
         runner: this.runner,
         scanIntervalMs: signalIntervalMs,
-        resolveWorkflow: (name) => this.definitions[name],
+        resolveWorkflow: (name) => findDefinition(this.definitions, name),
       });
     }
   }
@@ -114,11 +120,11 @@ export class LocalWorkflows extends ZoryaWorkflows {
         if (resolved) return resolved;
       }
     }
-    return this.definitions[name];
+    return findDefinition(this.definitions, name);
   }
 
   protected canHandle(name: string): boolean {
-    return name in this.definitions;
+    return Object.hasOwn(this.definitions, name);
   }
 
   protected async dispatch(
@@ -130,29 +136,29 @@ export class LocalWorkflows extends ZoryaWorkflows {
     if (!def) throw new Error(`LocalWorkflows.dispatch: missing definition for "${name}"`);
 
     const workflowId = opts?.workflowId ?? crypto.randomUUID();
+    const version = opts?.version ?? def.version;
+    // The definition's own type and metadata, as the runner would record them.
+    const workflowType = opts?.workflowType ?? def._definition.type;
+    const metadata = opts?.metadata ?? def._definition.metadata;
 
-    // Pre-create the row when the caller wants typed fields
-    // (namespace / metadata / runSource) to land — without this they're
-    // lost since runner.run's internal createWorkflow doesn't get them.
-    if (opts?.namespace || opts?.metadata || opts?.runSource || opts?.workflowType) {
-      const result = await this.storage.createWorkflow({
-        workflowId,
-        workflowName: name,
-        input,
-        ...(opts.workflowType !== undefined && { workflowType: opts.workflowType }),
-        ...(opts.namespace !== undefined && { namespace: opts.namespace }),
-        ...(opts.metadata !== undefined && { metadata: opts.metadata }),
-        ...(opts.runSource !== undefined && { runSource: opts.runSource }),
-        ...(opts.runSourceId !== undefined && { runSourceId: opts.runSourceId }),
-        version: opts.version ?? def.version,
-      });
-      // Cross-boot collision: deterministic ids (e.g. scheduler ticks) can
-      // hit a terminal-state row. Reset so this fresh fire reports its own
-      // latency instead of inheriting the prior run's timestamps.
-      if (!result.created && isTerminalWorkflowStatus(result.existing.status)) {
-        await this.storage.startFreshRun({ workflowId });
-      }
-    }
+    // Create the row first, with the typed fields (namespace, metadata,
+    // runSource) the runner's own create doesn't take. An id that already
+    // exists is answered from storage: a redelivered schedule tick or a
+    // retried trigger never runs the body again, and an id of another
+    // workflow is a conflict. A fresh run of an ended one is `rerun`.
+    const created = await this.storage.createWorkflow({
+      workflowId,
+      workflowName: name,
+      input,
+      ...(workflowType !== undefined && { workflowType }),
+      ...(opts?.namespace !== undefined && { namespace: opts.namespace }),
+      ...(metadata !== undefined && { metadata }),
+      ...(opts?.runSource !== undefined && { runSource: opts.runSource }),
+      ...(opts?.runSourceId !== undefined && { runSourceId: opts.runSourceId }),
+      ...(version !== undefined && { version }),
+    });
+    const existing = existingRunResult({ workflowName: name, workflowId, created });
+    if (existing) return existing;
 
     void this.runner.runSafe({ workflow: def, workflowId, input });
     return { workflowId };
@@ -164,20 +170,18 @@ export class LocalWorkflows extends ZoryaWorkflows {
       if (this.fallback) return this.fallback.rerun(workflowId);
       throw new Error(`rerun: workflow "${workflowId}" not found`);
     }
-    const def = this.definitions[state.workflowName];
+    const def = findDefinition(this.definitions, state.workflowName);
     if (!def) {
       if (this.fallback) return this.fallback.rerun(workflowId);
       throw new Error(
         `rerun: no in-process definition for "${state.workflowName}" (run ${workflowId})`,
       );
     }
-    await this.storage.startFreshRun({ workflowId });
-    void this.runner.runSafe({
-      workflow: def,
-      workflowId,
-      input: state.input,
-      force: true,
-    });
+    // `force` makes the runner archive the ended run and start a fresh one
+    // under the run's lock — one run-number bump, fenced against any other
+    // driver. Resolves once the run holds the lock; it goes on in the
+    // background.
+    await this.runner.start({ workflow: def, workflowId, input: state.input, force: true });
   }
 
   protected override async onStart(): Promise<void> {

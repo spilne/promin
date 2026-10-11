@@ -106,6 +106,7 @@ import {
   rerunRun,
 } from "./routes/run-extras.ts";
 import { listSignals } from "./routes/signals.ts";
+import { RunsService } from "./services/runs-service.ts";
 import {
   completeSignalToken,
   describeSignalToken,
@@ -503,6 +504,8 @@ export class ZoryaServer {
       ...(advertisements !== undefined && { advertisements }),
     };
 
+    const runActions = new RunsService({ storage });
+
     this.runWatchers = new RunWatcherPool({
       storage,
       bus: this.bus,
@@ -526,12 +529,9 @@ export class ZoryaServer {
       .get("/api/runs/:id/children", getRunChildren(storage))
       .get("/api/runs/:id/journal/:stepName", getRunStepJournal(storage))
       .get("/api/signals", listSignals(storage))
-      .post("/api/runs/:id/mark-success", markRunSuccess(storage))
-      .post("/api/runs/:id/mark-failed", markRunFailed(storage))
-      .post(
-        "/api/runs/:id/rerun",
-        rerunRun(storage, (id) => this.workflows.rerun(id)),
-      )
+      .post("/api/runs/:id/mark-success", markRunSuccess(runActions))
+      .post("/api/runs/:id/mark-failed", markRunFailed(runActions))
+      .post("/api/runs/:id/rerun", rerunRun({ storage, rerun: (id) => this.workflows.rerun(id) }))
       .get("/api/workflows/sparklines", getSparklines(storage))
       .get(
         "/api/workflows/definitions",

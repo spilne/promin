@@ -229,6 +229,12 @@ export interface TriggerRunRequest {
 
 export interface TriggerRunResponse {
   workflowId: string;
+  /**
+   * Set when a run with this `workflowId` already existed: nothing was
+   * started and the response names that run. Re-run an ended run with
+   * `POST /api/runs/:id/rerun`.
+   */
+  existing?: true;
 }
 
 export interface SignalRequest {

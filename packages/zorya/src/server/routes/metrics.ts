@@ -18,7 +18,8 @@ import { json } from "../router.ts";
 import type { MetricsDto } from "../api-types.ts";
 
 export interface MetricsProvider {
-  getMetrics(): Promise<MetricsDto>;
+  /** Metrics over every run, or over one namespace's runs. */
+  getMetrics(params?: { namespace?: string }): Promise<MetricsDto>;
 }
 
 const ALL_STATUSES = WORKFLOW_STATUSES;
@@ -38,7 +39,9 @@ export class StorageMetricsProvider implements MetricsProvider {
       : storage.listWorkflows.bind(storage);
   }
 
-  async getMetrics(): Promise<MetricsDto> {
+  async getMetrics(params?: { namespace?: string }): Promise<MetricsDto> {
+    const namespace = params?.namespace;
+    const scope = namespace !== undefined ? { namespace } : {};
     const byStatus: Record<WorkflowStatus, number> = {
       pending: 0,
       running: 0,
@@ -53,7 +56,7 @@ export class StorageMetricsProvider implements MetricsProvider {
     if (hasCapability(storage, "countWorkflows")) {
       // Fast path: one COUNT(*) query per status, each hitting the status index.
       const counts = await Promise.all(
-        ALL_STATUSES.map((s) => storage.countWorkflows({ status: s })),
+        ALL_STATUSES.map((s) => storage.countWorkflows({ ...scope, status: s })),
       );
       for (let i = 0; i < ALL_STATUSES.length; i++) {
         byStatus[ALL_STATUSES[i]] = counts[i];
@@ -63,7 +66,7 @@ export class StorageMetricsProvider implements MetricsProvider {
       const lister = this.summaryLister();
       let offset = 0;
       while (true) {
-        const page = await lister({ limit: 500, offset });
+        const page = await lister({ ...scope, limit: 500, offset });
         if (page.length === 0) break;
         for (const w of page) byStatus[w.status] = (byStatus[w.status] ?? 0) + 1;
         if (page.length < 500) break;
@@ -76,10 +79,12 @@ export class StorageMetricsProvider implements MetricsProvider {
 
     // Duration percentiles: lean scan of completed rows only, no blob columns.
     const lister = this.summaryLister();
-    const completedPage = await lister({ status: "completed", limit: 2000 });
+    // Anchored on `startedAt`: a re-run keeps the row's `createdAt` from
+    // its first run, which would count the gap between runs as duration.
+    const completedPage = await lister({ ...scope, status: "completed", limit: 2000 });
     const durations = completedPage
       .filter((w) => w.completedAt != null)
-      .map((w) => w.completedAt!.getTime() - w.createdAt.getTime());
+      .map((w) => w.completedAt!.getTime() - (w.startedAt ?? w.createdAt).getTime());
 
     return {
       total,
@@ -92,8 +97,9 @@ export class StorageMetricsProvider implements MetricsProvider {
 }
 
 export function getMetrics(provider: MetricsProvider) {
-  return async (): Promise<Response> => {
-    const m = await provider.getMetrics();
+  return async (req: Request): Promise<Response> => {
+    const namespace = new URL(req.url).searchParams.get("namespace") ?? undefined;
+    const m = await provider.getMetrics(namespace !== undefined ? { namespace } : undefined);
     return json(200, m);
   };
 }

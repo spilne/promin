@@ -20,9 +20,9 @@ import type {
   RoleRegistry,
   ToolHistoryStore,
 } from "@promin/agent";
-import { dispatchAgentSchedule, startAgentScanLoop } from "@promin/agent";
+import { startAgentSchedule, startAgentScanLoop } from "@promin/agent";
 import type { DurableScheduleConfig, ScheduleTick } from "@promin/workflow/scheduler";
-import type { AgentScheduleDispatcher } from "../scheduler/index.ts";
+import type { AgentScheduleDispatcher, AgentScheduleStart } from "../scheduler/index.ts";
 
 export interface ZoryaAgentsScanConfig {
   /** Filesystem root to scan for agent recipe modules. */
@@ -151,15 +151,26 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   }
 
   /**
-   * Called by ZoryaScheduler when isAgentSchedule(schedule) is true. Thin
-   * wrapper around dispatchAgentSchedule that hides the deps the helper
-   * needs (registry + resolve) so the scheduler interface stays minimal.
+   * Called by ZoryaScheduler when isAgentSchedule(schedule) is true. Starts
+   * the turn through `startAgentSchedule` and returns once it is under way;
+   * the turn's outcome arrives in `done`. A missing recipe rejects, so the
+   * tick is delivered again (after backoff) instead of being dropped.
    */
-  async dispatchSchedule(tick: ScheduleTick, schedule: DurableScheduleConfig): Promise<void> {
-    await dispatchAgentSchedule(tick, schedule, {
+  async dispatchSchedule(
+    tick: ScheduleTick,
+    schedule: DurableScheduleConfig,
+  ): Promise<AgentScheduleStart> {
+    const started = await startAgentSchedule(tick, schedule, {
       registry: this.registry,
       resolve: this.resolve,
     });
+    if ("done" in started) return { done: started.done };
+    if (started.skipped === "recipe_not_found" || started.skipped === "not_agent_schedule") {
+      throw new Error(
+        `agent schedule "${tick.scheduleId}" was not started: ${started.error ?? started.skipped}`,
+      );
+    }
+    return { done: Promise.resolve(started) };
   }
 
   /** Agent ids currently managed by a recipe file on disk. */

@@ -178,17 +178,21 @@ export function getSparklines(storage: WorkflowStorage) {
       1,
       Math.min(50, Number.parseInt(url.searchParams.get("limit") ?? "14", 10) || 14),
     );
-    // One scan, grouped client-side. Uses the lean summary path when the
-    // storage supports it — sparklines only need name/status/createdAt.
-    const rows = storage.listWorkflowSummaries
-      ? await storage.listWorkflowSummaries({ limit: 500 })
-      : await storage.listWorkflows({ limit: 500 });
+    const namespace = url.searchParams.get("namespace") ?? undefined;
+    // The latest `limit` runs of each workflow, so a rarely-run workflow
+    // still gets its sparkline next to busy ones. Uses the lean summary
+    // path when the storage supports it — sparklines only need
+    // status/createdAt.
+    const names = await storage.distinctWorkflowNames({ namespace });
+    const list = (name: string) =>
+      storage.listWorkflowSummaries
+        ? storage.listWorkflowSummaries({ name, namespace, limit })
+        : storage.listWorkflows({ name, namespace, limit });
+    const perName = await Promise.all(names.map(async (name) => [name, await list(name)] as const));
     const bucket: Record<string, Array<{ status: WorkflowStatus; createdAt: string }>> = {};
-    for (const w of rows) {
-      const list = (bucket[w.workflowName] = bucket[w.workflowName] ?? []);
-      if (list.length < limit) {
-        list.push({ status: w.status, createdAt: w.createdAt.toISOString() });
-      }
+    for (const [name, rows] of perName) {
+      if (rows.length === 0) continue;
+      bucket[name] = rows.map((w) => ({ status: w.status, createdAt: w.createdAt.toISOString() }));
     }
     return json(200, bucket as SparklinesResponse);
   };

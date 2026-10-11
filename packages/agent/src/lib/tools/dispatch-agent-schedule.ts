@@ -1,7 +1,8 @@
 // ---------------------------------------------------------------------------
-// `dispatchAgentSchedule` — reference dispatch for tick events written by
-// `createDurableSchedulerTools`. Wire this from the host's scheduler-loop
-// `fireOverride` so agent-targeted ticks become fresh agent invocations.
+// `startAgentSchedule` / `dispatchAgentSchedule` — reference dispatch for
+// tick events written by `createDurableSchedulerTools`. Wire
+// `startAgentSchedule` from the host's scheduler-loop dispatch so
+// agent-targeted ticks become fresh agent invocations.
 //
 // Contract
 // --------
@@ -17,9 +18,11 @@
 //     createdByAgent: string,
 //   }
 //
-// This helper reads those fields, resolves the recipe, and runs one
-// turn — into the original thread when `threadId` is present, or as a
-// one-shot `agent.invoke` otherwise.
+// `startAgentSchedule` reads those fields, resolves the recipe, and
+// starts one turn — into the original thread when `threadId` is present,
+// or as a one-shot `agent.invoke` otherwise — returning once the turn is
+// under way; a scheduler loop uses it so a poll never waits on the model.
+// `dispatchAgentSchedule` does the same and awaits the turn.
 //
 // Task source UX
 // --------------
@@ -104,11 +107,32 @@ export interface DispatchAgentScheduleResult {
   readonly error?: string;
 }
 
-export async function dispatchAgentSchedule(
+/**
+ * A started schedule turn. `done` settles when the turn ends and never
+ * rejects: a failed turn resolves `{ ok: false, error }`.
+ */
+export interface StartedAgentSchedule {
+  readonly ok: true;
+  readonly runId: string;
+  readonly done: Promise<DispatchAgentScheduleResult>;
+}
+
+/**
+ * Start the agent turn for a schedule tick and return once it is under
+ * way, without waiting for the model. Use it from a scheduler loop: the
+ * poll must not hold its lease across an LLM turn.
+ *
+ * Resolves `{ ok: false, skipped }` when the schedule is not an agent
+ * schedule, the recipe is gone or `beforeFire` declined; rejects when the
+ * recipe can't be resolved to an agent or its thread can't be opened —
+ * the caller can then deliver the tick again. The turn runs under the
+ * deterministic `scheduleTickRunId` run id.
+ */
+export async function startAgentSchedule(
   tick: ScheduleTick,
   schedule: DurableScheduleConfig,
   deps: DispatchAgentScheduleDeps,
-): Promise<DispatchAgentScheduleResult> {
+): Promise<StartedAgentSchedule | DispatchAgentScheduleResult> {
   if (!isAgentSchedule(schedule)) {
     return { ok: false, skipped: "not_agent_schedule" };
   }
@@ -148,28 +172,42 @@ export async function dispatchAgentSchedule(
   // Deterministic run id — same `${scheduleId}.${tickNumber}` shape used
   // by the workflow-trigger path. Two effects: (1) the schedule history
   // route's join `wf_workflows.workflow_id = scheduleTickRunId(...)` finds
-  // the agent's run row directly, no special-case needed; (2) a leader
-  // race that fires the same tick twice lands on the same workflow row
-  // (createWorkflow is idempotent) instead of double-billing the model.
+  // the agent's run row directly, no special-case needed; (2) a
+  // redelivered tick lands on the same workflow row, and the runner's
+  // terminal gate answers a finished turn from storage instead of
+  // billing the model again.
   const runId = scheduleTickRunId({ scheduleId: tick.scheduleId, tickNumber: tick.tickNumber });
 
-  try {
-    let text: string;
-    if (meta.threadId) {
-      const thread = await agent.thread(meta.threadId);
-      const out = await thread.send(input, { runId });
-      text = await out.text;
-    } else {
-      const out = await agent.invoke(input, { runId });
-      text = await out.text;
+  const thread = meta.threadId ? await agent.thread(meta.threadId) : undefined;
+  // Kick the turn off; only its outcome is awaited, in `done`.
+  const turn = Promise.resolve(
+    thread ? thread.send(input, { runId }) : agent.invoke(input, { runId }),
+  );
+  const done = (async (): Promise<DispatchAgentScheduleResult> => {
+    let result: { ok: true; text: string } | { ok: false; error: string };
+    try {
+      const out = await turn;
+      result = { ok: true, text: await out.text };
+    } catch (err) {
+      result = { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
-    const result = { ok: true as const, text };
-    await deps.afterFire?.(ctx, result);
+    try {
+      await deps.afterFire?.(ctx, result);
+    } catch {
+      // An observer hook does not change the turn's outcome.
+    }
     return result;
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    const result = { ok: false as const, error };
-    await deps.afterFire?.(ctx, result);
-    return result;
-  }
+  })();
+  return { ok: true, runId, done };
+}
+
+/** Run one schedule turn to the end: `startAgentSchedule`, then await it. */
+export async function dispatchAgentSchedule(
+  tick: ScheduleTick,
+  schedule: DurableScheduleConfig,
+  deps: DispatchAgentScheduleDeps,
+): Promise<DispatchAgentScheduleResult> {
+  const started = await startAgentSchedule(tick, schedule, deps);
+  if (!("done" in started)) return started;
+  return await started.done;
 }

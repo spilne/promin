@@ -7,6 +7,7 @@
 import type { Workflow } from "@promin/workflow";
 import { json, jsonError } from "../router.ts";
 import type { WorkflowAdvertisementRegistry } from "../workflow-advertisements.ts";
+import { findDefinition } from "../services/workflows/zorya-workflows.ts";
 
 export interface WorkflowStepDefDto {
   name: string;
@@ -112,7 +113,7 @@ export function getWorkflowDef(deps: WorkflowDefsDeps) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
     const name = params.name;
     if (!name) return jsonError(400, "missing_name");
-    const wf = deps.workflows?.[name];
+    const wf = findDefinition(deps.workflows, name);
     if (wf) return json(200, toDto(name, wf, deps.sampleInput?.(name)));
 
     // Fall back to remote advertisements.

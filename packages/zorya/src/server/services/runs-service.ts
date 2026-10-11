@@ -7,8 +7,9 @@
 // / RPC layer.
 // ---------------------------------------------------------------------------
 
-import type { Workflow, WorkflowState, WorkflowStorage } from "@promin/workflow";
-import { wakeParentOfEndedRun } from "@promin/workflow";
+import type { Workflow, WorkflowState, WorkflowStatus, WorkflowStorage } from "@promin/workflow";
+import { isCancelledRun, isTerminalWorkflowStatus, wakeParentOfEndedRun } from "@promin/workflow";
+import { findDefinition } from "./workflows/zorya-workflows.ts";
 import { runToDto, runToSummaryDto } from "../serialize.ts";
 import type { RunDto, RunListQuery, RunListResponse, StepDto } from "../api-types.ts";
 import type { WorkflowAdvertisementRegistry } from "../workflow-advertisements.ts";
@@ -27,6 +28,16 @@ export interface RunsServiceDeps {
   /** Worker-advertised step defs — used when `workflows` doesn't have the def. */
   advertisements?: WorkflowAdvertisementRegistry;
 }
+
+/**
+ * Outcome of an operator action on a run: `ok` when this call ended it,
+ * `not_found` for an unknown id, `ended` when the run had already ended
+ * (the action changed nothing).
+ */
+export type RunActionResult =
+  | { readonly outcome: "ok" }
+  | { readonly outcome: "not_found" }
+  | { readonly outcome: "ended"; readonly status: WorkflowStatus };
 
 export class RunsService {
   constructor(private readonly deps: RunsServiceDeps) {}
@@ -66,12 +77,59 @@ export class RunsService {
     return dto;
   }
 
-  /** Cancel a running or suspended workflow. */
-  async cancel(id: string): Promise<void> {
-    await this.deps.storage.cancelWorkflow({ workflowId: id });
-    // A cancelled child wakes a parent parked on it.
-    const state = await this.deps.storage.loadWorkflow(id);
-    if (state) await wakeParentOfEndedRun({ storage: this.deps.storage, state });
+  /** Cancel a pending, running or suspended workflow. */
+  async cancel(id: string): Promise<RunActionResult> {
+    return this.endRun({
+      workflowId: id,
+      expect: (state) => isCancelledRun(state),
+      write: () => this.deps.storage.cancelWorkflow({ workflowId: id }),
+    });
+  }
+
+  /** Operator override: end an in-flight run as completed (result `null`). */
+  async markSuccess(id: string): Promise<RunActionResult> {
+    return this.endRun({
+      workflowId: id,
+      expect: (state) => state.status === "completed",
+      write: () => this.deps.storage.completeWorkflow({ workflowId: id, result: null }),
+    });
+  }
+
+  /** Operator override: end an in-flight run as failed with `reason`. */
+  async markFailed(params: { id: string; reason: string }): Promise<RunActionResult> {
+    const { id, reason } = params;
+    return this.endRun({
+      workflowId: id,
+      expect: (state) => state.status === "failed" && state.error === reason,
+      write: () => this.deps.storage.failWorkflow({ workflowId: id, error: reason }),
+    });
+  }
+
+  /**
+   * Apply a terminal write to an in-flight run, then wake a parent parked
+   * on it (a child that ends by operator action wakes its parent exactly
+   * like one that ends by itself). Terminal writes are conditional in
+   * storage, so a run that ended first — by itself or by a concurrent
+   * action — keeps its outcome and the call reports `ended`.
+   */
+  private async endRun(params: {
+    workflowId: string;
+    expect: (state: WorkflowState) => boolean;
+    write: () => Promise<void>;
+  }): Promise<RunActionResult> {
+    const { storage } = this.deps;
+    const before = await storage.loadWorkflow(params.workflowId);
+    if (!before) return { outcome: "not_found" };
+    if (isTerminalWorkflowStatus(before.status)) {
+      return { outcome: "ended", status: before.status };
+    }
+    await params.write();
+    const after = await storage.loadWorkflow(params.workflowId);
+    if (!after) return { outcome: "not_found" };
+    // Lost to a run that ended first: its own end already woke the parent.
+    if (!params.expect(after)) return { outcome: "ended", status: after.status };
+    await wakeParentOfEndedRun({ storage, state: after });
+    return { outcome: "ok" };
   }
 
   /**
@@ -105,7 +163,7 @@ export class RunsService {
    * falling back to worker advertisements. Empty array if nothing matches.
    */
   private async resolveStepDefs(name: string): Promise<readonly StepDefLike[]> {
-    const def = this.deps.workflows?.[name];
+    const def = findDefinition(this.deps.workflows, name);
     if (def) return def.dag.steps;
     if (this.deps.advertisements) {
       const distinct = await this.deps.advertisements.distinct();

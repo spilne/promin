@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { FakeWallClock, InMemoryWorkflowStorage } from "@promin/workflow";
 import {
   InMemorySchedulerStorage,
   type DurableScheduleConfig,
@@ -11,6 +11,7 @@ import {
 } from "@promin/workflow/scheduler";
 import { QueuedWorkflows } from "../../workflows/index.ts";
 import { ZoryaScheduler, type AgentScheduleDispatcher } from "../index.ts";
+import type { SchedulerLoopErrorEvent } from "../../scheduler-loop.ts";
 
 async function seedSchedule(
   storage: InMemorySchedulerStorage,
@@ -58,6 +59,7 @@ describe("ZoryaScheduler.fireOnce", () => {
     const agents: AgentScheduleDispatcher = {
       dispatchSchedule: async (tick, schedule) => {
         dispatched.push({ tick, schedule });
+        return { done: Promise.resolve({ ok: true }) };
       },
     };
 
@@ -147,5 +149,142 @@ describe("ZoryaScheduler lifecycle", () => {
 
     await scheduler.start();
     await scheduler.stop();
+  });
+});
+
+describe("ZoryaScheduler — agent ticks start turns, they don't wait for them", () => {
+  const T0 = Date.parse("2026-01-01T00:00:00Z");
+  const agentMetadata = {
+    agentTrigger: true,
+    agentId: "digest-bot",
+    task: "write the digest",
+    namespaceId: "tenant-a",
+    createdByAgent: "digest-bot",
+  };
+
+  function setup(params: { turn: Promise<{ ok: boolean; error?: string }> }) {
+    const clock = FakeWallClock.create(T0);
+    const schedStorage = new InMemorySchedulerStorage({ clock });
+    const wfStorage = new InMemoryWorkflowStorage();
+    const workflows = new QueuedWorkflows({ storage: wfStorage, acceptAny: true });
+    const started: string[] = [];
+    const errors: SchedulerLoopErrorEvent[] = [];
+    const agents: AgentScheduleDispatcher = {
+      dispatchSchedule: async (tick) => {
+        started.push(`${tick.scheduleId}.${tick.tickNumber}`);
+        return { done: params.turn };
+      },
+    };
+    const scheduler = new ZoryaScheduler({
+      storage: schedStorage,
+      workflows,
+      agents,
+      clock,
+      onError: (e) => void errors.push(e),
+    });
+    return { clock, schedStorage, wfStorage, scheduler, started, errors };
+  }
+
+  it("a poll returns while the agent turn runs, and the other schedules keep firing", async () => {
+    const turn = new Promise<{ ok: boolean }>(() => {}); // an LLM turn that never ends here
+    const { clock, schedStorage, wfStorage, scheduler, started } = setup({ turn });
+    await schedStorage.upsertSchedule({
+      id: "digest",
+      intervalMs: 3_600_000,
+      metadata: agentMetadata,
+    });
+    await schedStorage.upsertSchedule({
+      id: "heartbeat",
+      intervalMs: 1_000,
+      metadata: { workflowName: "hb" },
+    });
+
+    const first = await scheduler.tickOnce();
+    expect(first.map((t) => t.scheduleId).sort()).toEqual(["digest", "heartbeat"]);
+    for (let s = 1; s <= 5; s++) {
+      clock.advance(1_000);
+      expect((await scheduler.tickOnce()).map((t) => `${t.scheduleId}.${t.tickNumber}`)).toEqual([
+        `heartbeat.${s}`,
+      ]);
+    }
+
+    expect(started).toEqual(["digest.0"]);
+    expect((await schedStorage.loadScheduleState("digest"))?.tickCount).toBe(1);
+    expect(await wfStorage.listWorkflows({ name: "hb", limit: 10 })).toHaveLength(6);
+  });
+
+  it("a tick redelivered while its turn still runs doesn't start a second turn", async () => {
+    let finish!: (r: { ok: boolean }) => void;
+    const turn = new Promise<{ ok: boolean }>((r) => (finish = r));
+    const { schedStorage, scheduler, started, errors } = setup({ turn });
+    await schedStorage.upsertSchedule({
+      id: "digest",
+      intervalMs: 3_600_000,
+      metadata: agentMetadata,
+    });
+    const commit = schedStorage.commitPoll.bind(schedStorage);
+    let failCommit = true;
+    schedStorage.commitPoll = async (p) => {
+      if (failCommit) {
+        failCommit = false;
+        throw new Error("commit blip");
+      }
+      return commit(p);
+    };
+
+    await scheduler.tickOnce();
+    await scheduler.tickOnce(); // the same tick, delivered again
+
+    expect(started).toEqual(["digest.0"]);
+    expect(errors.map((e) => e.phase)).toEqual(["commit"]);
+    expect((await schedStorage.loadScheduleState("digest"))?.tickCount).toBe(1);
+    finish({ ok: true });
+  });
+
+  it("a failed turn is reported after the fact", async () => {
+    const { schedStorage, scheduler, errors } = setup({
+      turn: Promise.resolve({ ok: false, error: "model unavailable" }),
+    });
+    await schedStorage.upsertSchedule({
+      id: "digest",
+      intervalMs: 3_600_000,
+      metadata: agentMetadata,
+    });
+
+    await scheduler.tickOnce();
+    for (let i = 0; i < 2_000 && errors.length === 0; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+
+    expect(errors.map((e) => [e.phase, e.scheduleId, e.tickNumber])).toEqual([
+      ["turn", "digest", 0],
+    ]);
+    expect((errors[0]!.error as Error).message).toBe("model unavailable");
+  });
+
+  it("an agent tick that could not start stays due", async () => {
+    const clock = FakeWallClock.create(T0);
+    const schedStorage = new InMemorySchedulerStorage({ clock });
+    const errors: SchedulerLoopErrorEvent[] = [];
+    const scheduler = new ZoryaScheduler({
+      storage: schedStorage,
+      workflows: new QueuedWorkflows({ storage: new InMemoryWorkflowStorage(), acceptAny: true }),
+      agents: {
+        dispatchSchedule: async () => {
+          throw new Error('recipe "digest-bot" not found');
+        },
+      },
+      clock,
+      onError: (e) => void errors.push(e),
+    });
+    await schedStorage.upsertSchedule({
+      id: "digest",
+      intervalMs: 3_600_000,
+      metadata: agentMetadata,
+    });
+
+    expect(await scheduler.tickOnce()).toEqual([]);
+    expect(errors.map((e) => [e.phase, e.scheduleId])).toEqual([["dispatch", "digest"]]);
+    expect((await schedStorage.loadScheduleState("digest"))?.tickCount).toBe(0);
   });
 });

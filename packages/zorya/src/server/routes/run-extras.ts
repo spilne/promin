@@ -11,10 +11,12 @@ import type {
   WorkflowRunSummary,
   JournalEntry,
 } from "@promin/workflow";
-import { hasCapability } from "@promin/workflow";
+import { WorkflowLockError, hasCapability, isTerminalWorkflowStatus } from "@promin/workflow";
 import { json, jsonError } from "../router.ts";
 import { runToSummaryDto } from "../serialize.ts";
 import type { RunSummaryDto } from "../api-types.ts";
+import type { RunsService } from "../services/runs-service.ts";
+import { runActionResponse } from "./runs.ts";
 
 export interface SignalDto {
   signalName: string;
@@ -225,13 +227,12 @@ function journalEntryToDto(e: JournalEntry): JournalEntryDto {
 // Admin actions — mark success / failed / rerun
 // ---------------------------------------------------------------------------
 
-export function markRunSuccess(storage: WorkflowStorage) {
+export function markRunSuccess(runs: RunsService) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
     try {
-      await storage.completeWorkflow({ workflowId: id, result: null });
-      return json(200, { ok: true });
+      return runActionResponse(await runs.markSuccess(id));
     } catch (err) {
       return jsonError(
         400,
@@ -242,20 +243,19 @@ export function markRunSuccess(storage: WorkflowStorage) {
   };
 }
 
-export function markRunFailed(storage: WorkflowStorage) {
+export function markRunFailed(runs: RunsService) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
     let reason = "marked failed";
     try {
       const body = (await req.json().catch(() => null)) as { reason?: string } | null;
-      if (body?.reason) reason = body.reason;
+      if (typeof body?.reason === "string" && body.reason !== "") reason = body.reason;
     } catch {
       // body is optional
     }
     try {
-      await storage.failWorkflow({ workflowId: id, error: reason });
-      return json(200, { ok: true });
+      return runActionResponse(await runs.markFailed({ id, reason }));
     } catch (err) {
       return jsonError(400, "mark_failed_failed", err instanceof Error ? err.message : String(err));
     }
@@ -263,19 +263,35 @@ export function markRunFailed(storage: WorkflowStorage) {
 }
 
 /**
- * Reset a completed/failed run for a fresh execution. Requires a trigger
- * function because re-running a workflow definition needs the runner; the
- * server never owns workflow code itself.
+ * Start a fresh run of an ended run under the same id. Only ended runs
+ * re-run (409 `run_not_terminal` otherwise — resetting a live run would
+ * race its driver). The workflow service owns the reset, so the run number
+ * goes up exactly once.
  */
-export function rerunRun(storage: WorkflowStorage, trigger?: (id: string) => Promise<void>) {
-  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
+export function rerunRun(params: {
+  storage: WorkflowStorage;
+  rerun: (workflowId: string) => Promise<void>;
+}) {
+  const { storage, rerun } = params;
+  return async (_req: Request, routeParams: Record<string, string>): Promise<Response> => {
+    const id = routeParams.id;
     if (!id) return jsonError(400, "missing_id");
+    const state = await storage.loadWorkflow(id);
+    if (!state) return jsonError(404, "not_found");
+    if (!isTerminalWorkflowStatus(state.status)) {
+      return jsonError(
+        409,
+        "run_not_terminal",
+        `Only an ended run can be re-run (status: ${state.status})`,
+      );
+    }
     try {
-      await storage.startFreshRun({ workflowId: id });
-      if (trigger) await trigger(id);
+      await rerun(id);
       return json(200, { ok: true });
     } catch (err) {
+      if (err instanceof WorkflowLockError) {
+        return jsonError(409, "run_in_flight", err.message);
+      }
       return jsonError(400, "rerun_failed", err instanceof Error ? err.message : String(err));
     }
   };
