@@ -1,13 +1,12 @@
 import { openai } from "./openai.ts";
 import type { LLMProvider } from "../llm-provider.ts";
+import type { LLMHttpOptions } from "./llm-http.ts";
 
-export interface LlamaCppOptions {
+export interface LlamaCppOptions extends LLMHttpOptions {
   /** Default: "local" (llama.cpp ignores this; it serves whatever model was loaded at startup) */
   model?: string;
-  /** Default: http://localhost:8080 */
+  /** Server root. Default: http://localhost:8080 */
   baseURL?: string;
-  temperature?: number;
-  maxTokens?: number;
   defaultHeaders?: Record<string, string>;
 }
 
@@ -24,9 +23,11 @@ export interface LlamaCppOptions {
  *   agentLoop({ llm: llamacpp({ baseURL: "http://localhost:8080" }), ... })
  */
 export function llamacpp(options: LlamaCppOptions = {}): LLMProvider {
-  return openai(options.model ?? "local", {
-    baseUrl: options.baseURL ?? "http://localhost:8080",
+  const { model, baseURL, ...rest } = options;
+  return openai(model ?? "local", {
+    ...rest,
+    baseUrl: `${(baseURL ?? "http://localhost:8080").replace(/\/$/, "")}/v1`,
     apiKey: "no-key",
-    ...(options.defaultHeaders ? { defaultHeaders: options.defaultHeaders } : {}),
+    providerName: "llamacpp",
   });
 }

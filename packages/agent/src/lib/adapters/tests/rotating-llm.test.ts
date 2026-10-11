@@ -19,6 +19,7 @@
 import { describe, it, expect } from "bun:test";
 import { rotatingLLM } from "../rotating-llm.ts";
 import { InMemoryCapacityStore } from "../capacity-store.ts";
+import { LLMHttpError } from "../llm-http.ts";
 import type { CapacityStore } from "../capacity-store.ts";
 import type {
   LLMProvider,
@@ -81,11 +82,12 @@ function scriptedSlot(label: string, defaultResponse?: LLMResponse): ScriptedSlo
 }
 
 function rateLimit429(retryAfterSec = 1): Error {
-  const err = new Error("HTTP 429 Too Many Requests");
-  (err as unknown as { headers: Record<string, string> }).headers = {
-    "retry-after": String(retryAfterSec),
-  };
-  return err;
+  return new LLMHttpError({
+    status: 429,
+    provider: "anthropic",
+    body: "rate_limit_error",
+    retryAfterMs: retryAfterSec * 1000,
+  });
 }
 
 const TASK: LLMChatParams = { messages: [{ role: "user", content: "hi" }] };

@@ -6,6 +6,7 @@ import type {
   RateLimitHint,
 } from "../llm-provider.ts";
 import { classifyLLMError } from "./llm-error-classification.ts";
+import { LLMHttpError } from "./llm-http.ts";
 import { InMemoryCapacityStore, type CapacityStore } from "./capacity-store.ts";
 import { streamChat } from "./stream-chat.ts";
 
@@ -169,40 +170,14 @@ export function rotatingLLM(slots: LLMProvider[], opts: RotatingLLMOptions = {})
   }
 
   /**
-   * Parse `Retry-After` either from the error's enriched `headers` /
-   * `retryAfter` properties (when the adapter exposes them) or from the
-   * error message as a last resort. Returns a unix-ms timestamp by which
-   * the caller should not retry. Falls back to `now + 60s` when nothing
-   * is parseable so the slot still cools down briefly.
+   * Unix-ms timestamp until which a rate-limited slot cools down: the
+   * server's `Retry-After` (`LLMHttpError.retryAfterMs`) when it sent one,
+   * otherwise 60s.
    */
   function deriveCooldownFromError(err: unknown): number {
     const now = Date.now();
-    if (err && typeof err === "object") {
-      const e = err as {
-        retryAfter?: unknown;
-        headers?: { get?: (k: string) => string | null } | Record<string, string>;
-      };
-      if (typeof e.retryAfter === "number" && Number.isFinite(e.retryAfter)) {
-        return now + e.retryAfter * 1000;
-      }
-      if (e.headers) {
-        const get = (k: string): string | null => {
-          if (typeof (e.headers as { get?: unknown }).get === "function") {
-            return (e.headers as { get: (k: string) => string | null }).get(k);
-          }
-          return ((e.headers as Record<string, string>)[k] ?? null) as string | null;
-        };
-        const ra = get("retry-after") ?? get("Retry-After");
-        if (ra) {
-          const n = Number.parseInt(ra, 10);
-          if (Number.isFinite(n)) return now + n * 1000;
-          const t = Date.parse(ra);
-          if (Number.isFinite(t)) return t;
-        }
-      }
-      const message = err instanceof Error ? err.message : "";
-      const match = /retry[- ]after[: ]+(\d+)/i.exec(message);
-      if (match?.[1]) return now + Number.parseInt(match[1], 10) * 1000;
+    if (err instanceof LLMHttpError && err.retryAfterMs !== undefined) {
+      return now + err.retryAfterMs;
     }
     return now + 60_000;
   }

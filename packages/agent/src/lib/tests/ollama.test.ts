@@ -126,7 +126,7 @@ describe("ollama — chat()", () => {
     mockFetch("bad request", 400);
     await expect(
       ollama({ model: "llama3.2" }).chat({ messages: [{ role: "user", content: "hi" }] }),
-    ).rejects.toThrow("Ollama API error 400");
+    ).rejects.toThrow("ollama API error 400");
   });
 
   it("sends model name and messages to /api/chat", async () => {
@@ -242,6 +242,6 @@ describe("ollama — chatStream()", () => {
         /* empty */
       }
     }
-    await expect(drain()).rejects.toThrow("Ollama API error 503");
+    await expect(drain()).rejects.toThrow("ollama API error 503");
   });
 });

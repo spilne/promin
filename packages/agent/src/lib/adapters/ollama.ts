@@ -6,6 +6,16 @@ import type {
   LLMFinishReason,
 } from "../llm-provider.ts";
 import type { Message, ToolCall } from "../message.ts";
+import {
+  LLMHttpError,
+  httpErrorFromResponse,
+  parseToolArguments,
+  resolveHttpOptions,
+  startLLMRequest,
+  type LLMHttpOptions,
+} from "./llm-http.ts";
+
+const PROVIDER = "ollama";
 
 // ---- wire types ----
 
@@ -22,11 +32,12 @@ interface OllamaChunk {
   done_reason?: string;
   prompt_eval_count?: number;
   eval_count?: number;
+  error?: unknown;
 }
 
 // ---- public API ----
 
-export interface OllamaOptions {
+export interface OllamaOptions extends LLMHttpOptions {
   model: string;
   /** Default: http://localhost:11434 */
   baseURL?: string;
@@ -46,6 +57,7 @@ export interface OllamaOptions {
 
 export function ollama(options: OllamaOptions): LLMProvider {
   const baseURL = (options.baseURL ?? "http://localhost:11434").replace(/\/$/, "");
+  const http = resolveHttpOptions(options);
 
   function buildBody(params: LLMChatParams, stream: boolean): Record<string, unknown> {
     const ollamaOptions: Record<string, unknown> = {};
@@ -78,61 +90,97 @@ export function ollama(options: OllamaOptions): LLMProvider {
 
   return {
     async chat(params: LLMChatParams): Promise<LLMResponse> {
-      const resp = await fetch(`${baseURL}/api/chat`, {
-        method: "POST",
-        headers: requestHeaders(),
-        body: JSON.stringify(buildBody(params, false)),
+      const request = startLLMRequest({
+        provider: PROVIDER,
         signal: params.signal,
+        timeoutMs: http.timeoutMs,
+        clock: http.clock,
       });
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(`Ollama API error ${resp.status}: ${text}`);
+      try {
+        const resp = await http.fetch(`${baseURL}/api/chat`, {
+          method: "POST",
+          headers: requestHeaders(),
+          body: JSON.stringify(buildBody(params, false)),
+          signal: request.signal,
+        });
+        if (!resp.ok) {
+          throw await httpErrorFromResponse({
+            provider: PROVIDER,
+            response: resp,
+            clock: http.clock,
+          });
+        }
+        const data = (await resp.json()) as OllamaChunk;
+        return ollamaChunkToResponse(data);
+      } catch (err) {
+        throw request.mapError(err);
+      } finally {
+        request.dispose();
       }
-      const data = (await resp.json()) as OllamaChunk;
-      return ollamaChunkToResponse(data);
     },
 
     async *chatStream(params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
-      const resp = await fetch(`${baseURL}/api/chat`, {
-        method: "POST",
-        headers: requestHeaders(),
-        body: JSON.stringify(buildBody(params, true)),
+      const request = startLLMRequest({
+        provider: PROVIDER,
         signal: params.signal,
+        timeoutMs: http.timeoutMs,
+        clock: http.clock,
       });
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(`Ollama API error ${resp.status}: ${text}`);
+      try {
+        yield* streamChat(params, request.signal);
+      } catch (err) {
+        throw request.mapError(err);
+      } finally {
+        request.dispose();
       }
-
-      const rawToolCalls: Array<{ function: { name: string; arguments: unknown } }> = [];
-      let finishReason: LLMFinishReason = "stop";
-      let usage: LLMResponse["usage"] | undefined;
-
-      for await (const chunk of parseNDJSON(resp.body!)) {
-        if (chunk.message?.tool_calls) {
-          rawToolCalls.push(...chunk.message.tool_calls);
-        }
-        if (!chunk.done) {
-          const content = chunk.message?.content;
-          if (content) yield { delta: content };
-        } else {
-          if (chunk.prompt_eval_count !== undefined) {
-            usage = { inputTokens: chunk.prompt_eval_count, outputTokens: chunk.eval_count ?? 0 };
-          }
-          finishReason =
-            rawToolCalls.length > 0 ? "tool_calls" : mapFinishReason(chunk.done_reason);
-        }
-      }
-
-      const toolCalls = assembleToolCalls(rawToolCalls);
-      yield {
-        delta: "",
-        finishReason,
-        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-        usage,
-      };
     },
   };
+
+  async function* streamChat(
+    params: LLMChatParams,
+    signal: AbortSignal,
+  ): AsyncIterable<LLMStreamChunk> {
+    const resp = await http.fetch(`${baseURL}/api/chat`, {
+      method: "POST",
+      headers: requestHeaders(),
+      body: JSON.stringify(buildBody(params, true)),
+      signal,
+    });
+    if (!resp.ok) {
+      throw await httpErrorFromResponse({ provider: PROVIDER, response: resp, clock: http.clock });
+    }
+
+    const rawToolCalls: Array<{ function: { name: string; arguments: unknown } }> = [];
+    let finishReason: LLMFinishReason = "stop";
+    let usage: LLMResponse["usage"] | undefined;
+
+    for await (const chunk of parseNDJSON(resp.body!)) {
+      if (chunk.error !== undefined) {
+        // Ollama reports a failure after the 200 as an `{"error": ...}` line.
+        throw new LLMHttpError({ status: 500, provider: PROVIDER, body: JSON.stringify(chunk) });
+      }
+      if (chunk.message?.tool_calls) {
+        rawToolCalls.push(...chunk.message.tool_calls);
+      }
+      if (!chunk.done) {
+        const content = chunk.message?.content;
+        if (content) yield { delta: content };
+      } else {
+        if (chunk.prompt_eval_count !== undefined) {
+          usage = { inputTokens: chunk.prompt_eval_count, outputTokens: chunk.eval_count ?? 0 };
+        }
+        finishReason = rawToolCalls.length > 0 ? "tool_calls" : mapFinishReason(chunk.done_reason);
+      }
+    }
+
+    const toolCalls = assembleToolCalls(rawToolCalls);
+    yield {
+      delta: "",
+      finishReason,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      usage,
+    };
+  }
 }
 
 // ---- helpers ----
@@ -158,10 +206,9 @@ function assembleToolCalls(
     // Ollama does not return call IDs — generate a stable index-based one
     id: `call_${i}`,
     name: c.function.name,
-    input:
-      typeof c.function.arguments === "string"
-        ? (JSON.parse(c.function.arguments) as unknown)
-        : c.function.arguments,
+    ...(typeof c.function.arguments === "string"
+      ? parseToolArguments({ json: c.function.arguments })
+      : { input: c.function.arguments }),
   }));
 }
 
@@ -171,21 +218,29 @@ function mapFinishReason(reason?: string): LLMFinishReason {
 }
 
 function toOllamaMessages(messages: Message[]): OllamaMessage[] {
-  return messages.map((msg): OllamaMessage => {
-    if (msg.role === "system") return { role: "system", content: msg.content };
-    if (msg.role === "user") return { role: "user", content: msg.content };
-    if (msg.role === "tool") {
-      return { role: "tool", tool_call_id: msg.toolCallId, content: msg.content };
+  const result: OllamaMessage[] = [];
+  for (const msg of messages) {
+    if (msg.role === "system") {
+      result.push({ role: "system", content: msg.content });
+    } else if (msg.role === "user") {
+      result.push({ role: "user", content: msg.content });
+    } else if (msg.role === "tool") {
+      result.push({ role: "tool", tool_call_id: msg.toolCallId, content: msg.content });
+    } else {
+      // Leave out an assistant turn with neither text nor tool calls (an
+      // aborted or empty reply).
+      const text = msg.content?.trim() ? msg.content : null;
+      if (text === null && !msg.toolCalls?.length) continue;
+      const out: OllamaMessage = { role: "assistant", content: text ?? "" };
+      if (msg.toolCalls && msg.toolCalls.length > 0) {
+        out.tool_calls = msg.toolCalls.map((tc) => ({
+          function: { name: tc.name, arguments: tc.input },
+        }));
+      }
+      result.push(out);
     }
-    // assistant
-    const out: OllamaMessage = { role: "assistant", content: msg.content };
-    if (msg.toolCalls && msg.toolCalls.length > 0) {
-      out.tool_calls = msg.toolCalls.map((tc) => ({
-        function: { name: tc.name, arguments: tc.input },
-      }));
-    }
-    return out;
-  });
+  }
+  return result;
 }
 
 async function* parseNDJSON(body: ReadableStream<Uint8Array>): AsyncIterable<OllamaChunk> {

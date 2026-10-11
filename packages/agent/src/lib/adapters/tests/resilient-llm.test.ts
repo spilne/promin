@@ -17,6 +17,8 @@
 import { describe, expect, it } from "bun:test";
 import { ALL_LLM_ERROR_CLASSES, resilientLLM } from "../resilient-llm.ts";
 import { classifyLLMError } from "../llm-error-classification.ts";
+import { LLMHttpError, LLMStreamInterruptedError, LLMTimeoutError } from "../llm-http.ts";
+import { FakeWallClock } from "@promin/workflow";
 import { InMemoryAgentMetrics } from "../../metrics/types.ts";
 import type {
   LLMChatParams,
@@ -330,5 +332,72 @@ describe("resilientLLM — fallback chain", () => {
     expect(chunks.map((c) => c.delta).join("")).toBe("from backup");
     expect(chunks.at(-1)?.thinkingBlocks).toEqual([{ thinking: "hmm", signature: "sig" }]);
     expect(chunks.at(-1)?.finishReason).toBe("stop");
+  });
+});
+
+describe("classifyLLMError — typed adapter errors", () => {
+  const http = (status: number, body = "") =>
+    new LLMHttpError({ status, provider: "anthropic", body });
+
+  it("classifies by status: 429 rate limit, 5xx/529 transient, auth and validation permanent", () => {
+    expect(classifyLLMError(http(429))).toBe("rate_limit");
+    expect(classifyLLMError(http(500, '{"error":{"type":"api_error"}}'))).toBe("transient");
+    expect(classifyLLMError(http(503))).toBe("transient");
+    expect(classifyLLMError(http(529))).toBe("transient");
+    expect(classifyLLMError(http(401))).toBe("permanent");
+    expect(classifyLLMError(http(403))).toBe("permanent");
+    expect(classifyLLMError(http(400, "invalid_request_error: bad schema"))).toBe("permanent");
+    expect(classifyLLMError(http(400, "prompt is too long: 300000 tokens"))).toBe(
+      "context_overflow",
+    );
+  });
+
+  it("does not read rate-limit wording into a permanent status", () => {
+    // A 400 whose body mentions a quota must not be retried as a rate limit.
+    expect(classifyLLMError(http(400, "quota field is invalid"))).toBe("permanent");
+  });
+
+  it("treats timeouts and interrupted streams as transient", () => {
+    expect(classifyLLMError(new LLMTimeoutError({ provider: "openai", timeoutMs: 1 }))).toBe(
+      "transient",
+    );
+    expect(
+      classifyLLMError(new LLMStreamInterruptedError({ provider: "openai", detail: "eof" })),
+    ).toBe("transient");
+  });
+
+  it("reads the status from an untyped 'API error 500' message", () => {
+    expect(classifyLLMError(new Error('Some API error 500: {"type":"api_error"}'))).toBe(
+      "transient",
+    );
+  });
+});
+
+describe("resilientLLM — Retry-After", () => {
+  const limited = (retryAfterMs: number) =>
+    new LLMHttpError({ status: 429, provider: "openai", body: "", retryAfterMs });
+
+  it("waits the server-requested delay instead of the backoff", async () => {
+    const clock = FakeWallClock.create(0);
+    const { llm, callCount } = llmThatThrows(limited(5_000), undefined);
+    const wrapped = resilientLLM(llm, { backoffMs: () => 10, clock });
+    const pending = wrapped.chat({ messages: [] });
+    for (let i = 0; i < 1_000 && clock.pendingCount() === 0; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    clock.advance(4_999);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(callCount()).toBe(1);
+    clock.advance(1);
+    expect((await pending).content).toBe("ok");
+    expect(callCount()).toBe(2);
+  });
+
+  it("fails over instead of waiting longer than maxRetryAfterMs", async () => {
+    const { llm, callCount } = llmThatThrows(limited(120_000), undefined);
+    const backup: LLMProvider = { chat: async () => ({ content: "backup", finishReason: "stop" }) };
+    const wrapped = resilientLLM(llm, { fallback: backup, maxRetryAfterMs: 60_000 });
+    expect((await wrapped.chat({ messages: [] })).content).toBe("backup");
+    expect(callCount()).toBe(1);
   });
 });

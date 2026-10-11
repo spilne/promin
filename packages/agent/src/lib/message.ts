@@ -14,6 +14,12 @@ export interface ToolCall {
   id: string;
   name: string;
   input: unknown;
+  /**
+   * Set by the adapter when the model's tool arguments could not be parsed
+   * (malformed or truncated JSON); `input` is then `{}`. The tool is not
+   * run: the agent returns this message to the model as the tool result.
+   */
+  inputError?: string;
 }
 
 export interface ThinkingBlock {

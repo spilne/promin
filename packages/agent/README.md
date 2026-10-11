@@ -358,11 +358,13 @@ Automatically enables prompt caching (system + tools prefix is cached). Extended
 ```ts
 import { openai, gemini, ollama, llamacpp } from "@promin/agent";
 
-const gpt4 = openai("gpt-4o", { apiKey: openaiKey });
-const gemini = gemini("gemini-1.5-pro", { apiKey: geminiKey });
-const local = ollama("llama3", { baseUrl: "http://localhost:11434" });
-const cpp = llamacpp("my-model", { baseUrl: "http://localhost:8080" });
+const gpt = openai("gpt-4o", { apiKey: openaiKey }); // any compatible server: baseUrl "https://host/v1"
+const flash = gemini("gemini-2.5-flash", { apiKey: geminiKey });
+const local = ollama({ model: "llama3", baseURL: "http://localhost:11434" });
+const cpp = llamacpp({ baseURL: "http://localhost:8080" });
 ```
+
+Every HTTP adapter accepts `timeoutMs` (default 10 minutes, covering the whole request including the stream), `clock` and `fetch`; the request also aborts on `LLMChatParams.signal`. Failures are typed: `LLMHttpError` (`status`, `retryAfterMs`, `provider`, `body` excerpt) for HTTP errors and errors streamed after a 200, `LLMTimeoutError`, and `LLMStreamInterruptedError` when a stream ends early. Tool arguments the model sent as malformed or truncated JSON arrive as `ToolCall.inputError`; the agent returns it to the model as the tool result instead of running the tool.
 
 ### routerLLM
 
@@ -410,7 +412,7 @@ const chain = resilientLLM(primary, {
 });
 ```
 
-`fallbackOn` (default `["rate_limit", "context_overflow"]`) lists the error classes that move the call to the next provider; each fallback starts with a fresh retry budget. A stream that already yielded chunks is not replayed unless `retryAfterPartial` is set, since the caller would see duplicate output.
+Errors are classified by `classifyLLMError`: 429 is `rate_limit`; 408, 409, 5xx (incl. Anthropic's 529), timeouts and interrupted streams are `transient`; 413 and "prompt too long" 4xx are `context_overflow`; other 4xx are `permanent`. A retry waits the server's `Retry-After` when it sent one (up to `maxRetryAfterMs`, default 60s — longer and the call fails over or throws), otherwise `backoffMs`. `fallbackOn` (default `["rate_limit", "context_overflow"]`) lists the error classes that move the call to the next provider; each fallback starts with a fresh retry budget. A stream that already yielded chunks is not replayed unless `retryAfterPartial` is set, since the caller would see duplicate output.
 
 ### rotatingLLM
 

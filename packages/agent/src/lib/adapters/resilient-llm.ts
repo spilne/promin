@@ -33,9 +33,11 @@
 //      renders only on completion).
 // ---------------------------------------------------------------------------
 
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { LLMChatParams, LLMProvider, LLMResponse, LLMStreamChunk } from "../llm-provider.ts";
 import type { AgentMetrics } from "../metrics/types.ts";
 import { classifyLLMError, type LLMErrorClass } from "./llm-error-classification.ts";
+import { LLMHttpError } from "./llm-http.ts";
 import { streamChat } from "./stream-chat.ts";
 
 export interface ResilientLLMPolicy {
@@ -54,6 +56,15 @@ export interface ResilientLLMPolicy {
    * 200, 400, 800, 1600 capped at 30s, plus 0–25% jitter.
    */
   readonly backoffMs?: (attempt: number) => number;
+  /**
+   * Longest server-requested wait (`LLMHttpError.retryAfterMs`, from the
+   * `Retry-After` headers) honored before a retry. A retryable error asking
+   * for longer is not retried on that provider: the call fails over, or
+   * throws. Default: 60s.
+   */
+  readonly maxRetryAfterMs?: number;
+  /** Time source for retry waits. Default: `SystemWallClock`. */
+  readonly clock?: WallClock;
   /**
    * Allow replaying a stream from scratch after partial chunks were
    * already emitted. Default: false. Enable only when the caller
@@ -98,6 +109,7 @@ export const ALL_LLM_ERROR_CLASSES: ReadonlyArray<LLMErrorClass> = [
 
 const DEFAULT_FALLBACK_ON: ReadonlyArray<LLMErrorClass> = ["rate_limit", "context_overflow"];
 const DEFAULT_TRANSIENT_RETRIES = 3;
+const DEFAULT_MAX_RETRY_AFTER_MS = 60_000;
 const MAX_BACKOFF_MS = 30_000;
 
 function defaultBackoff(attempt: number): number {
@@ -106,21 +118,22 @@ function defaultBackoff(attempt: number): number {
   return base + Math.random() * (base * 0.25);
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+function sleep(args: { ms: number; clock: WallClock; signal?: AbortSignal }): Promise<void> {
+  const { ms, clock, signal } = args;
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new Error("aborted"));
       return;
     }
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(t);
-        reject(new Error("aborted"));
-      },
-      { once: true },
-    );
+    const onAbort = () => {
+      timer.clear();
+      reject(new Error("aborted"));
+    };
+    const timer = clock.setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -147,6 +160,8 @@ export function resilientLLM(inner: LLMProvider, policy: ResilientLLMPolicy = {}
   const transientRetries = policy.transientRetries ?? DEFAULT_TRANSIENT_RETRIES;
   const rateLimitRetries = policy.rateLimitRetries ?? transientRetries;
   const backoff = policy.backoffMs ?? defaultBackoff;
+  const maxRetryAfterMs = policy.maxRetryAfterMs ?? DEFAULT_MAX_RETRY_AFTER_MS;
+  const clock = policy.clock ?? SystemWallClock;
   const fallbackOn = new Set(policy.fallbackOn ?? DEFAULT_FALLBACK_ON);
   const fallbacks: ReadonlyArray<LLMProvider> =
     policy.fallback === undefined
@@ -177,7 +192,7 @@ export function resilientLLM(inner: LLMProvider, policy: ResilientLLMPolicy = {}
     index: number;
     signal: AbortSignal | undefined;
   }):
-    | { kind: "retry"; cls: "transient" | "rate_limit" }
+    | { kind: "retry"; cls: "transient" | "rate_limit"; delayMs: number }
     | { kind: "fallback" }
     | { kind: "throw" } {
     if (args.signal?.aborted) return { kind: "throw" };
@@ -185,7 +200,12 @@ export function resilientLLM(inner: LLMProvider, policy: ResilientLLMPolicy = {}
     if (cls === "transient" || cls === "rate_limit") {
       const limit = cls === "rate_limit" ? rateLimitRetries : transientRetries;
       args.attempts[cls] += 1;
-      if (args.attempts[cls] <= limit) return { kind: "retry", cls };
+      const retryAfterMs = args.err instanceof LLMHttpError ? args.err.retryAfterMs : undefined;
+      // The server named its wait: honor it, unless it is longer than this
+      // call should block — then this provider is done for now.
+      if (args.attempts[cls] <= limit && (retryAfterMs ?? 0) <= maxRetryAfterMs) {
+        return { kind: "retry", cls, delayMs: retryAfterMs ?? backoff(args.attempts[cls]) };
+      }
     }
     if (fallbackOn.has(cls) && args.index + 1 < chain.length) {
       recordFallback(cls);
@@ -210,7 +230,7 @@ export function resilientLLM(inner: LLMProvider, policy: ResilientLLMPolicy = {}
             continue;
           }
           recordRetry(next.cls);
-          await sleep(backoff(attempts[next.cls]), params.signal);
+          await sleep({ ms: next.delayMs, clock, signal: params.signal });
         }
       }
     },
@@ -242,7 +262,7 @@ export function resilientLLM(inner: LLMProvider, policy: ResilientLLMPolicy = {}
             continue;
           }
           recordRetry(next.cls);
-          await sleep(backoff(attempts[next.cls]), params.signal);
+          await sleep({ ms: next.delayMs, clock, signal: params.signal });
         }
       }
     },

@@ -25,10 +25,18 @@
 // recoverable.
 // ---------------------------------------------------------------------------
 
+import { LLMHttpError, LLMStreamInterruptedError, LLMTimeoutError } from "./llm-http.ts";
+
 export type LLMErrorClass = "transient" | "rate_limit" | "context_overflow" | "permanent";
 
 export function classifyLLMError(err: unknown): LLMErrorClass {
   if (err === null || err === undefined) return "permanent";
+
+  // Typed adapter errors carry the facts — no message heuristics needed.
+  if (err instanceof LLMTimeoutError || err instanceof LLMStreamInterruptedError) {
+    return "transient";
+  }
+  if (err instanceof LLMHttpError) return classifyHttpStatus(err);
 
   // Native fetch / undici / AbortError surfaces — these are typically
   // network-level and almost always recoverable.
@@ -71,16 +79,7 @@ export function classifyLLMError(err: unknown): LLMErrorClass {
 
   // Context-length signals — Anthropic + OpenAI both phrase this slightly
   // differently. Match conservatively.
-  if (
-    lower.includes("context length") ||
-    lower.includes("context_length") ||
-    lower.includes("maximum context") ||
-    lower.includes("prompt is too long") ||
-    lower.includes("too many tokens") ||
-    lower.includes("input is too long")
-  ) {
-    return "context_overflow";
-  }
+  if (isContextOverflowMessage(lower)) return "context_overflow";
 
   // Service-level transient signals
   if (
@@ -100,6 +99,33 @@ export function classifyLLMError(err: unknown): LLMErrorClass {
 }
 
 /**
+ * Classify a provider's HTTP status: 429 is a rate limit; 408, 409, 5xx
+ * (incl. Anthropic's 529 overloaded) are transient; 413 and any 4xx whose
+ * body says the prompt is too long are context overflow; every other 4xx
+ * (auth, permission, validation, not found) is permanent.
+ */
+function classifyHttpStatus(err: LLMHttpError): LLMErrorClass {
+  const { status } = err;
+  if (status === 429) return "rate_limit";
+  if (status === 408 || status === 409 || status >= 500) return "transient";
+  if (status === 413 || isContextOverflowMessage(err.body.toLowerCase())) {
+    return "context_overflow";
+  }
+  return "permanent";
+}
+
+function isContextOverflowMessage(lower: string): boolean {
+  return (
+    lower.includes("context length") ||
+    lower.includes("context_length") ||
+    lower.includes("maximum context") ||
+    lower.includes("prompt is too long") ||
+    lower.includes("too many tokens") ||
+    lower.includes("input is too long")
+  );
+}
+
+/**
  * Best-effort status-code extraction. Providers attach the status in
  * different places — this looks at the obvious property names first,
  * then falls back to a regex over the message.
@@ -115,7 +141,9 @@ function extractStatusCode(err: unknown, lowerMsg: string): number | undefined {
   // Common phrasings — the message often embeds the status directly.
   // Match the standalone 3-digit code; avoid matching every number.
   const m =
-    lowerMsg.match(/\bhttp\s*(\d{3})\b/i) ?? lowerMsg.match(/\bstatus\s*[:=]?\s*(\d{3})\b/i);
+    lowerMsg.match(/\bhttp\s*(\d{3})\b/i) ??
+    lowerMsg.match(/\bstatus\s*[:=]?\s*(\d{3})\b/i) ??
+    lowerMsg.match(/\berror\s+(\d{3})\b/i);
   if (m) {
     const n = Number.parseInt(m[1]!, 10);
     if (n >= 100 && n < 600) return n;

@@ -6,6 +6,15 @@ import type {
   LLMFinishReason,
 } from "../llm-provider.ts";
 import type { Message, ToolCall } from "../message.ts";
+import {
+  LLMHttpError,
+  LLMStreamInterruptedError,
+  httpErrorFromResponse,
+  parseToolArguments,
+  resolveHttpOptions,
+  startLLMRequest,
+  type LLMHttpOptions,
+} from "./llm-http.ts";
 
 interface OpenAIMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -31,15 +40,33 @@ interface OpenAIResponse {
   usage: { prompt_tokens: number; completion_tokens: number };
 }
 
-export interface OpenAIOptions {
+export interface OpenAIOptions extends LLMHttpOptions {
   apiKey?: string;
+  /**
+   * API root including the version segment; requests go to
+   * `${baseUrl}/chat/completions`. Default: `https://api.openai.com/v1`.
+   */
   baseUrl?: string;
   defaultHeaders?: Record<string, string>;
+  /** Provider name on errors and metrics. Default: `"openai"`. */
+  providerName?: string;
 }
 
+/**
+ * Create an `LLMProvider` for the OpenAI Chat Completions API, or any
+ * server compatible with it (`baseUrl`).
+ *
+ * Failures throw `LLMHttpError` (HTTP errors and streamed error chunks),
+ * `LLMTimeoutError` (after `timeoutMs`) or `LLMStreamInterruptedError`
+ * (stream ended without a finish reason). Tool arguments that are not
+ * valid JSON become a `ToolCall.inputError` the model sees as the tool
+ * result.
+ */
 export function openai(model: string, options: OpenAIOptions = {}): LLMProvider {
   const apiKey = options.apiKey ?? process.env["OPENAI_API_KEY"];
-  const baseUrl = options.baseUrl ?? "https://api.openai.com";
+  const baseUrl = (options.baseUrl ?? "https://api.openai.com/v1").replace(/\/$/, "");
+  const provider = options.providerName ?? "openai";
+  const http = resolveHttpOptions(options);
 
   function buildBody(params: LLMChatParams, stream?: boolean): Record<string, unknown> {
     return {
@@ -70,113 +97,160 @@ export function openai(model: string, options: OpenAIOptions = {}): LLMProvider 
 
   return {
     async chat(params: LLMChatParams): Promise<LLMResponse> {
-      const resp = await fetch(`${baseUrl}/v1/chat/completions`, {
-        method: "POST",
-        headers: headers(),
-        body: JSON.stringify(buildBody(params)),
+      const request = startLLMRequest({
+        provider,
         signal: params.signal,
+        timeoutMs: http.timeoutMs,
+        clock: http.clock,
       });
-
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(`OpenAI API error ${resp.status}: ${text}`);
+      try {
+        const resp = await http.fetch(`${baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify(buildBody(params)),
+          signal: request.signal,
+        });
+        if (!resp.ok) {
+          throw await httpErrorFromResponse({ provider, response: resp, clock: http.clock });
+        }
+        const data = (await resp.json()) as OpenAIResponse;
+        return parseOpenAIResponse({ data, provider });
+      } catch (err) {
+        throw request.mapError(err);
+      } finally {
+        request.dispose();
       }
-
-      const data = (await resp.json()) as OpenAIResponse;
-      return parseOpenAIResponse(data);
     },
 
     async *chatStream(params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
-      const resp = await fetch(`${baseUrl}/v1/chat/completions`, {
-        method: "POST",
-        headers: headers(),
-        body: JSON.stringify(buildBody(params, true)),
+      const request = startLLMRequest({
+        provider,
         signal: params.signal,
+        timeoutMs: http.timeoutMs,
+        clock: http.clock,
       });
-
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(`OpenAI API error ${resp.status}: ${text}`);
+      try {
+        yield* streamCompletions(params, request.signal);
+      } catch (err) {
+        throw request.mapError(err);
+      } finally {
+        request.dispose();
       }
-
-      // Accumulate tool call deltas keyed by index
-      const toolAcc = new Map<number, { id: string; name: string; argsJson: string }>();
-      let finishReason: LLMFinishReason = "stop";
-      let inputTokens = 0;
-      let outputTokens = 0;
-
-      for await (const chunk of parseSSE(resp.body!)) {
-        const choice = (
-          chunk.choices as Array<{
-            delta: {
-              content?: string | null;
-              tool_calls?: Array<{
-                index: number;
-                id?: string;
-                function?: { name?: string; arguments?: string };
-              }>;
-            };
-            finish_reason?: string | null;
-          }>
-        )?.[0];
-
-        if (!choice) {
-          // usage-only chunk (stream_options: include_usage)
-          const usage = chunk.usage as
-            | { prompt_tokens?: number; completion_tokens?: number }
-            | undefined;
-          if (usage) {
-            inputTokens = usage.prompt_tokens ?? 0;
-            outputTokens = usage.completion_tokens ?? 0;
-          }
-          continue;
-        }
-
-        if (choice.finish_reason) {
-          finishReason =
-            choice.finish_reason === "stop"
-              ? "stop"
-              : choice.finish_reason === "tool_calls"
-                ? "tool_calls"
-                : choice.finish_reason === "length"
-                  ? "length"
-                  : "stop";
-        }
-
-        const { delta } = choice;
-
-        if (delta.content) {
-          yield { delta: delta.content };
-        }
-
-        for (const tc of delta.tool_calls ?? []) {
-          const acc = toolAcc.get(tc.index);
-          if (!acc) {
-            toolAcc.set(tc.index, {
-              id: tc.id ?? "",
-              name: tc.function?.name ?? "",
-              argsJson: tc.function?.arguments ?? "",
-            });
-          } else {
-            acc.argsJson += tc.function?.arguments ?? "";
-          }
-        }
-      }
-
-      const toolCalls: ToolCall[] = [...toolAcc.values()].map(({ id, name, argsJson }) => ({
-        id,
-        name,
-        input: JSON.parse(argsJson || "{}") as unknown,
-      }));
-
-      yield {
-        delta: "",
-        finishReason,
-        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-        usage: { inputTokens, outputTokens },
-      };
     },
   };
+
+  async function* streamCompletions(
+    params: LLMChatParams,
+    signal: AbortSignal,
+  ): AsyncIterable<LLMStreamChunk> {
+    const resp = await http.fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify(buildBody(params, true)),
+      signal,
+    });
+
+    if (!resp.ok) {
+      throw await httpErrorFromResponse({ provider, response: resp, clock: http.clock });
+    }
+
+    // Accumulate tool call deltas keyed by index
+    const toolAcc = new Map<number, { id: string; name: string; argsJson: string }>();
+    let finishReason: LLMFinishReason | undefined;
+    let inputTokens = 0;
+    let outputTokens = 0;
+
+    for await (const chunk of parseSSE(resp.body!)) {
+      if (chunk.error) {
+        // Compatible servers report a failure after the 200 as an error chunk.
+        throw new LLMHttpError({
+          status: streamErrorStatus(chunk.error),
+          provider,
+          body: JSON.stringify(chunk),
+        });
+      }
+      const choice = (
+        chunk.choices as Array<{
+          delta: {
+            content?: string | null;
+            tool_calls?: Array<{
+              index: number;
+              id?: string;
+              function?: { name?: string; arguments?: string };
+            }>;
+          };
+          finish_reason?: string | null;
+        }>
+      )?.[0];
+
+      if (!choice) {
+        // usage-only chunk (stream_options: include_usage)
+        const usage = chunk.usage as
+          | { prompt_tokens?: number; completion_tokens?: number }
+          | undefined;
+        if (usage) {
+          inputTokens = usage.prompt_tokens ?? 0;
+          outputTokens = usage.completion_tokens ?? 0;
+        }
+        continue;
+      }
+
+      if (choice.finish_reason) finishReason = mapFinishReason(choice.finish_reason);
+
+      const { delta } = choice;
+
+      if (delta.content) {
+        yield { delta: delta.content };
+      }
+
+      for (const tc of delta.tool_calls ?? []) {
+        const acc = toolAcc.get(tc.index);
+        if (!acc) {
+          toolAcc.set(tc.index, {
+            id: tc.id ?? "",
+            name: tc.function?.name ?? "",
+            argsJson: tc.function?.arguments ?? "",
+          });
+        } else {
+          acc.argsJson += tc.function?.arguments ?? "";
+        }
+      }
+    }
+
+    if (finishReason === undefined) {
+      throw new LLMStreamInterruptedError({
+        provider,
+        detail: "the stream ended without a finish_reason",
+      });
+    }
+
+    const truncated = finishReason === "length";
+    const toolCalls: ToolCall[] = [...toolAcc.values()].map(({ id, name, argsJson }) => ({
+      id,
+      name,
+      ...parseToolArguments({ json: argsJson, truncated }),
+    }));
+
+    yield {
+      delta: "",
+      finishReason,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      usage: { inputTokens, outputTokens },
+    };
+  }
+}
+
+function mapFinishReason(reason: string): LLMFinishReason {
+  if (reason === "tool_calls") return "tool_calls";
+  if (reason === "length") return "length";
+  return "stop";
+}
+
+/** HTTP status for a streamed error chunk: its numeric `code`, else 500. */
+function streamErrorStatus(error: unknown): number {
+  const code = (error as { code?: unknown } | null)?.code;
+  const n = typeof code === "number" ? code : Number(code);
+  return Number.isInteger(n) && n >= 400 && n < 600 ? n : 500;
 }
 
 async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable<Record<string, unknown>> {
@@ -208,45 +282,44 @@ async function* parseSSE(body: ReadableStream<Uint8Array>): AsyncIterable<Record
 }
 
 function toOpenAIMessages(messages: Message[]): OpenAIMessage[] {
-  return messages.map((msg) => {
-    if (msg.role === "system") return { role: "system", content: msg.content };
-    if (msg.role === "user") return { role: "user", content: msg.content };
-    if (msg.role === "tool") {
-      return { role: "tool", tool_call_id: msg.toolCallId, content: msg.content };
+  const result: OpenAIMessage[] = [];
+  for (const msg of messages) {
+    if (msg.role === "system") {
+      result.push({ role: "system", content: msg.content });
+    } else if (msg.role === "user") {
+      result.push({ role: "user", content: msg.content });
+    } else if (msg.role === "tool") {
+      result.push({ role: "tool", tool_call_id: msg.toolCallId, content: msg.content });
+    } else {
+      // An assistant turn without text or tool calls (an aborted or empty
+      // reply) is rejected by the API; leave it out of the request.
+      const text = msg.content?.trim() ? msg.content : null;
+      if (text === null && !msg.toolCalls?.length) continue;
+      const openaiMsg: OpenAIMessage = { role: "assistant", content: text };
+      if (msg.toolCalls && msg.toolCalls.length > 0) {
+        openaiMsg.tool_calls = msg.toolCalls.map((tc) => ({
+          id: tc.id,
+          type: "function",
+          function: { name: tc.name, arguments: JSON.stringify(tc.input) },
+        }));
+      }
+      result.push(openaiMsg);
     }
-    const openaiMsg: OpenAIMessage = {
-      role: "assistant",
-      content: msg.content,
-    };
-    if (msg.toolCalls && msg.toolCalls.length > 0) {
-      openaiMsg.tool_calls = msg.toolCalls.map((tc) => ({
-        id: tc.id,
-        type: "function",
-        function: { name: tc.name, arguments: JSON.stringify(tc.input) },
-      }));
-    }
-    return openaiMsg;
-  });
+  }
+  return result;
 }
 
-function parseOpenAIResponse(data: OpenAIResponse): LLMResponse {
+function parseOpenAIResponse(args: { data: OpenAIResponse; provider: string }): LLMResponse {
+  const { data, provider } = args;
   const choice = data.choices[0];
-  if (!choice) throw new Error("OpenAI returned no choices");
+  if (!choice) throw new Error(`${provider} returned no choices`);
 
+  const finishReason = mapFinishReason(choice.finish_reason);
   const toolCalls: ToolCall[] = (choice.message.tool_calls ?? []).map((tc) => ({
     id: tc.id,
     name: tc.function.name,
-    input: JSON.parse(tc.function.arguments) as unknown,
+    ...parseToolArguments({ json: tc.function.arguments, truncated: finishReason === "length" }),
   }));
-
-  const finishReason =
-    choice.finish_reason === "stop"
-      ? "stop"
-      : choice.finish_reason === "tool_calls"
-        ? "tool_calls"
-        : choice.finish_reason === "length"
-          ? "length"
-          : "stop";
 
   return {
     content: choice.message.content,

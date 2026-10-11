@@ -584,6 +584,13 @@ export { resilientLLM, ALL_LLM_ERROR_CLASSES } from "./adapters/resilient-llm.ts
 export type { ResilientLLMPolicy } from "./adapters/resilient-llm.ts";
 export { classifyLLMError } from "./adapters/llm-error-classification.ts";
 export type { LLMErrorClass } from "./adapters/llm-error-classification.ts";
+export {
+  LLMHttpError,
+  LLMTimeoutError,
+  LLMStreamInterruptedError,
+  DEFAULT_LLM_REQUEST_TIMEOUT_MS,
+} from "./adapters/llm-http.ts";
+export type { LLMHttpOptions, LLMFetch } from "./adapters/llm-http.ts";
 
 export { rotatingLLM } from "./adapters/rotating-llm.ts";
 export type { RotatingLLMOptions, RotatingLLMStrategy } from "./adapters/rotating-llm.ts";

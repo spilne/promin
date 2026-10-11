@@ -147,6 +147,13 @@ export async function executeToolCall(
    */
   toolAuditLogger?: import("./tool-audit/types.ts").ToolAuditLogger,
 ): Promise<ToolResultMessage> {
+  if (call.inputError !== undefined) {
+    return {
+      role: "tool",
+      toolCallId: call.id,
+      content: `Invalid input: ${call.inputError}`,
+    };
+  }
   let parsed: unknown;
   try {
     parsed = toolDef.parameters.parse(call.input);
@@ -267,11 +274,12 @@ export async function runLlmCall({
   };
 
   let raw: LLMResponse;
+  // Text streamed so far — kept as the answer when the call is aborted mid-stream.
+  let content = "";
   try {
     if (onChunk && llm.chatStream) {
       const startStream = () => Promise.resolve(llm.chatStream!(chatParams));
       const stream = await (rateLimiter ? rateLimiter.withLimitAsync(startStream) : startStream());
-      let content = "";
       let finishReason: LLMFinishReason = "stop";
       let usage: LLMUsage | undefined;
       const toolCalls: ToolCall[] = [];
@@ -303,9 +311,16 @@ export async function runLlmCall({
       if (onChunk && raw.content) onChunk(raw.content);
     }
   } catch (err) {
-    // Treat abort as a clean stop so conversation history stays consistent.
+    // Treat abort as a clean stop so conversation history stays consistent:
+    // keep the text already streamed to the caller, drop half-built tool
+    // calls. `content` stays null when nothing was streamed, so no empty
+    // assistant text reaches the next request.
     if (signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
-      return { content: null, toolCalls: undefined, finishReason: "stop" };
+      return {
+        content: content.trim() ? content : null,
+        toolCalls: undefined,
+        finishReason: "stop",
+      };
     }
     throw err;
   }

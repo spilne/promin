@@ -7,6 +7,15 @@ import type {
   RateLimitHint,
 } from "../llm-provider.ts";
 import type { Message, ToolCall, ThinkingBlock } from "../message.ts";
+import {
+  LLMHttpError,
+  LLMStreamInterruptedError,
+  httpErrorFromResponse,
+  parseToolArguments,
+  resolveHttpOptions,
+  startLLMRequest,
+  type LLMHttpOptions,
+} from "./llm-http.ts";
 
 interface AnthropicContentBlock {
   type: string;
@@ -70,19 +79,47 @@ interface SSEMessageDelta {
   delta: { stop_reason: string };
   usage: { output_tokens: number };
 }
+interface SSEError {
+  type: "error";
+  error: { type: string; message: string };
+}
 type SSEEvent =
+  | SSEError
   | SSEMessageStart
   | SSEContentBlockStart
   | SSEContentBlockDelta
   | SSEMessageDelta
   | { type: string };
 
-export interface AnthropicOptions {
+export interface AnthropicOptions extends LLMHttpOptions {
   apiKey?: string;
   baseUrl?: string;
+  /**
+   * Default `max_tokens` when a call sets none. Default: 4096. With extended
+   * thinking, a resolved value at or below the thinking budget is raised to
+   * `thinkingBudgetTokens + 4096` — Anthropic requires `max_tokens` above it.
+   */
   maxTokens?: number;
   defaultHeaders?: Record<string, string>;
 }
+
+const PROVIDER = "anthropic";
+const DEFAULT_MAX_TOKENS = 4096;
+
+/**
+ * Status Anthropic sends for each error type — streamed `error` events
+ * carry only the type, so map it back for classification.
+ */
+const ERROR_TYPE_STATUS: Record<string, number> = {
+  invalid_request_error: 400,
+  authentication_error: 401,
+  permission_error: 403,
+  not_found_error: 404,
+  request_too_large: 413,
+  rate_limit_error: 429,
+  api_error: 500,
+  overloaded_error: 529,
+};
 
 /**
  * Create an `LLMProvider` backed by the Anthropic Messages API.
@@ -93,6 +130,10 @@ export interface AnthropicOptions {
  * so the combined system + tools prefix is cached across turns.
  * Extended thinking is enabled when `params.thinkingBudgetTokens` is set.
  *
+ * Failures throw `LLMHttpError` (HTTP errors and streamed `error` events),
+ * `LLMTimeoutError` (after `timeoutMs`) or `LLMStreamInterruptedError`
+ * (stream ended before `message_stop`).
+ *
  * @example
  * ```ts
  * const llm = anthropic("claude-sonnet-4-6", { apiKey: process.env.ANTHROPIC_API_KEY });
@@ -102,15 +143,21 @@ export interface AnthropicOptions {
 export function anthropic(model: string, options: AnthropicOptions = {}): LLMProvider {
   const apiKey = options.apiKey ?? process.env["ANTHROPIC_API_KEY"];
   const baseUrl = options.baseUrl ?? "https://api.anthropic.com";
+  const http = resolveHttpOptions(options);
 
   function buildBody(params: LLMChatParams, stream?: boolean): Record<string, unknown> {
     const systemBlocks = extractSystemBlocks(params.messages);
     const thinking = params.thinkingBudgetTokens
       ? { type: "enabled", budget_tokens: params.thinkingBudgetTokens }
       : undefined;
+    const requested = params.maxTokens ?? options.maxTokens ?? DEFAULT_MAX_TOKENS;
+    const maxTokens =
+      thinking && requested <= thinking.budget_tokens
+        ? thinking.budget_tokens + DEFAULT_MAX_TOKENS
+        : requested;
     return {
       model,
-      max_tokens: params.maxTokens ?? options.maxTokens ?? 4096,
+      max_tokens: maxTokens,
       messages: toAnthropicMessages(params.messages),
       // All system messages are collected into blocks. The last block gets
       // cache_control so the entire system prefix (including memory injections,
@@ -150,127 +197,171 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
 
   return {
     async chat(params: LLMChatParams): Promise<LLMResponse> {
-      const resp = await fetch(`${baseUrl}/v1/messages`, {
-        method: "POST",
-        headers: headers(params),
-        body: JSON.stringify(buildBody(params)),
+      const request = startLLMRequest({
+        provider: PROVIDER,
         signal: params.signal,
+        timeoutMs: http.timeoutMs,
+        clock: http.clock,
       });
-
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(`Anthropic API error ${resp.status}: ${text}`);
+      try {
+        const resp = await http.fetch(`${baseUrl}/v1/messages`, {
+          method: "POST",
+          headers: headers(params),
+          body: JSON.stringify(buildBody(params)),
+          signal: request.signal,
+        });
+        if (!resp.ok) {
+          throw await httpErrorFromResponse({
+            provider: PROVIDER,
+            response: resp,
+            clock: http.clock,
+          });
+        }
+        const data = (await resp.json()) as AnthropicResponse;
+        const parsed = parseAnthropicResponse(data);
+        const rateLimitHint = parseRateLimitHeaders(resp.headers);
+        return rateLimitHint ? { ...parsed, rateLimitHint } : parsed;
+      } catch (err) {
+        throw request.mapError(err);
+      } finally {
+        request.dispose();
       }
-
-      const data = (await resp.json()) as AnthropicResponse;
-      const parsed = parseAnthropicResponse(data);
-      const rateLimitHint = parseRateLimitHeaders(resp.headers);
-      return rateLimitHint ? { ...parsed, rateLimitHint } : parsed;
     },
 
     async *chatStream(params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
-      const resp = await fetch(`${baseUrl}/v1/messages`, {
-        method: "POST",
-        headers: headers(params),
-        body: JSON.stringify(buildBody(params, true)),
+      const request = startLLMRequest({
+        provider: PROVIDER,
         signal: params.signal,
+        timeoutMs: http.timeoutMs,
+        clock: http.clock,
       });
-
-      if (!resp.ok) {
-        const text = await resp.text();
-        throw new Error(`Anthropic API error ${resp.status}: ${text}`);
+      try {
+        yield* streamMessages(params, request.signal);
+      } catch (err) {
+        throw request.mapError(err);
+      } finally {
+        request.dispose();
       }
-
-      // Stream headers arrive on the response itself, before the first
-      // SSE event. Capture once so the final chunk can carry the hint.
-      const rateLimitHint = parseRateLimitHeaders(resp.headers);
-
-      // Accumulate per-block state keyed by block index
-      const textBlocks = new Map<number, string>();
-      const toolBlocks = new Map<number, { id: string; name: string; inputJson: string }>();
-      const thinkingBlocks = new Map<number, { thinking: string; signature: string }>();
-      let inputTokens = 0;
-      let outputTokens = 0;
-      let cacheReadTokens = 0;
-      let cacheWriteTokens = 0;
-      let finishReason: LLMFinishReason = "stop";
-
-      for await (const event of parseSSE(resp.body!)) {
-        if (event.type === "message_start") {
-          const u = (event as SSEMessageStart).message.usage;
-          inputTokens = u.input_tokens;
-          cacheReadTokens = u.cache_read_input_tokens ?? 0;
-          cacheWriteTokens = u.cache_creation_input_tokens ?? 0;
-        } else if (event.type === "content_block_start") {
-          const e = event as SSEContentBlockStart;
-          if (e.content_block.type === "text") {
-            textBlocks.set(e.index, "");
-          } else if (e.content_block.type === "thinking") {
-            thinkingBlocks.set(e.index, { thinking: "", signature: "" });
-          } else if (e.content_block.type === "tool_use") {
-            toolBlocks.set(e.index, {
-              id: e.content_block.id,
-              name: e.content_block.name,
-              inputJson: "",
-            });
-          }
-        } else if (event.type === "content_block_delta") {
-          const e = event as SSEContentBlockDelta;
-          if (e.delta.type === "text_delta") {
-            textBlocks.set(e.index, (textBlocks.get(e.index) ?? "") + e.delta.text);
-            yield { delta: e.delta.text };
-          } else if (e.delta.type === "thinking_delta") {
-            const block = thinkingBlocks.get(e.index);
-            if (block) block.thinking += e.delta.thinking;
-            yield { delta: "", thinkingDelta: e.delta.thinking };
-          } else if (e.delta.type === "signature_delta") {
-            const block = thinkingBlocks.get(e.index);
-            if (block) block.signature = e.delta.signature;
-          } else if (e.delta.type === "input_json_delta") {
-            const block = toolBlocks.get(e.index);
-            if (block) block.inputJson += e.delta.partial_json;
-          }
-        } else if (event.type === "message_delta") {
-          const e = event as SSEMessageDelta;
-          outputTokens = e.usage.output_tokens;
-          finishReason =
-            e.delta.stop_reason === "end_turn"
-              ? "stop"
-              : e.delta.stop_reason === "tool_use"
-                ? "tool_calls"
-                : e.delta.stop_reason === "max_tokens"
-                  ? "length"
-                  : "stop";
-        }
-      }
-
-      const toolCalls: ToolCall[] = [...toolBlocks.values()].map(({ id, name, inputJson }) => {
-        let input: unknown;
-        try {
-          input = JSON.parse(inputJson || "{}");
-        } catch {
-          // Truncated stream (e.g. max_tokens hit mid-JSON) — fall back to empty object so
-          // Zod validation in executeToolCall returns a clean "Invalid input" to the agent
-          // rather than crashing the workflow with a permanent journal failure.
-          input = {};
-        }
-        return { id, name, input };
-      });
-
-      const completedThinkingBlocks: ThinkingBlock[] = [...thinkingBlocks.values()].filter(
-        (b) => b.signature,
-      );
-
-      yield {
-        delta: "",
-        finishReason,
-        toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
-        thinkingBlocks: completedThinkingBlocks.length > 0 ? completedThinkingBlocks : undefined,
-        usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
-        ...(rateLimitHint ? { rateLimitHint } : {}),
-      };
     },
   };
+
+  async function* streamMessages(
+    params: LLMChatParams,
+    signal: AbortSignal,
+  ): AsyncIterable<LLMStreamChunk> {
+    const resp = await http.fetch(`${baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: headers(params),
+      body: JSON.stringify(buildBody(params, true)),
+      signal,
+    });
+
+    if (!resp.ok) {
+      throw await httpErrorFromResponse({ provider: PROVIDER, response: resp, clock: http.clock });
+    }
+
+    // Stream headers arrive on the response itself, before the first
+    // SSE event. Capture once so the final chunk can carry the hint.
+    const rateLimitHint = parseRateLimitHeaders(resp.headers);
+
+    // Accumulate per-block state keyed by block index
+    const textBlocks = new Map<number, string>();
+    const toolBlocks = new Map<number, { id: string; name: string; inputJson: string }>();
+    const thinkingBlocks = new Map<number, { thinking: string; signature: string }>();
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cacheReadTokens = 0;
+    let cacheWriteTokens = 0;
+    let finishReason: LLMFinishReason = "stop";
+    let stopped = false;
+
+    for await (const event of parseSSE(resp.body!)) {
+      if (event.type === "error") {
+        // A failure after the 200 (e.g. overloaded mid-stream) — surface
+        // it with the status the same failure gets as an HTTP response.
+        const { error } = event as SSEError;
+        throw new LLMHttpError({
+          status: ERROR_TYPE_STATUS[error.type] ?? 500,
+          provider: PROVIDER,
+          body: JSON.stringify(event),
+        });
+      } else if (event.type === "message_stop") {
+        stopped = true;
+      } else if (event.type === "message_start") {
+        const u = (event as SSEMessageStart).message.usage;
+        inputTokens = u.input_tokens;
+        cacheReadTokens = u.cache_read_input_tokens ?? 0;
+        cacheWriteTokens = u.cache_creation_input_tokens ?? 0;
+      } else if (event.type === "content_block_start") {
+        const e = event as SSEContentBlockStart;
+        if (e.content_block.type === "text") {
+          textBlocks.set(e.index, "");
+        } else if (e.content_block.type === "thinking") {
+          thinkingBlocks.set(e.index, { thinking: "", signature: "" });
+        } else if (e.content_block.type === "tool_use") {
+          toolBlocks.set(e.index, {
+            id: e.content_block.id,
+            name: e.content_block.name,
+            inputJson: "",
+          });
+        }
+      } else if (event.type === "content_block_delta") {
+        const e = event as SSEContentBlockDelta;
+        if (e.delta.type === "text_delta") {
+          textBlocks.set(e.index, (textBlocks.get(e.index) ?? "") + e.delta.text);
+          yield { delta: e.delta.text };
+        } else if (e.delta.type === "thinking_delta") {
+          const block = thinkingBlocks.get(e.index);
+          if (block) block.thinking += e.delta.thinking;
+          yield { delta: "", thinkingDelta: e.delta.thinking };
+        } else if (e.delta.type === "signature_delta") {
+          const block = thinkingBlocks.get(e.index);
+          if (block) block.signature = e.delta.signature;
+        } else if (e.delta.type === "input_json_delta") {
+          const block = toolBlocks.get(e.index);
+          if (block) block.inputJson += e.delta.partial_json;
+        }
+      } else if (event.type === "message_delta") {
+        const e = event as SSEMessageDelta;
+        outputTokens = e.usage.output_tokens;
+        finishReason = mapStopReason(e.delta.stop_reason);
+      }
+    }
+
+    if (!stopped) {
+      throw new LLMStreamInterruptedError({
+        provider: PROVIDER,
+        detail: "the stream ended before message_stop",
+      });
+    }
+
+    // Unparseable arguments (max_tokens hit mid-JSON) reach the model as
+    // a tool error instead of running the tool with made-up input.
+    const toolCalls: ToolCall[] = [...toolBlocks.values()].map(({ id, name, inputJson }) => ({
+      id,
+      name,
+      ...parseToolArguments({ json: inputJson, truncated: finishReason === "length" }),
+    }));
+
+    const completedThinkingBlocks: ThinkingBlock[] = [...thinkingBlocks.values()].filter(
+      (b) => b.signature,
+    );
+
+    yield {
+      delta: "",
+      finishReason,
+      toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      thinkingBlocks: completedThinkingBlocks.length > 0 ? completedThinkingBlocks : undefined,
+      usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens },
+      ...(rateLimitHint ? { rateLimitHint } : {}),
+    };
+  }
+}
+
+function mapStopReason(reason: string | undefined): LLMFinishReason {
+  if (reason === "tool_use") return "tool_calls";
+  if (reason === "max_tokens") return "length";
+  return "stop";
 }
 
 /**
@@ -390,12 +481,16 @@ function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
     }
 
     if (msg.role === "assistant") {
+      // Anthropic rejects an assistant turn without text or tool use (an
+      // aborted or empty reply); leave it out of the request.
+      const text = msg.content?.trim() ? msg.content : undefined;
+      if (text === undefined && !msg.toolCalls?.length) continue;
       const content: AnthropicContentBlock[] = [];
       // Thinking blocks must precede text/tool blocks and be replayed verbatim.
       for (const tb of msg.thinkingBlocks ?? []) {
         content.push({ type: "thinking", thinking: tb.thinking, signature: tb.signature });
       }
-      if (msg.content) content.push({ type: "text", text: msg.content });
+      if (text !== undefined) content.push({ type: "text", text });
       for (const tc of msg.toolCalls ?? []) {
         content.push({ type: "tool_use", id: tc.id, name: tc.name, input: tc.input });
       }
@@ -423,7 +518,7 @@ function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
 }
 
 function parseAnthropicResponse(data: AnthropicResponse): LLMResponse {
-  let content: string | null = null;
+  let text = "";
   const toolCalls: ToolCall[] = [];
   const thinkingBlocks: ThinkingBlock[] = [];
 
@@ -431,26 +526,19 @@ function parseAnthropicResponse(data: AnthropicResponse): LLMResponse {
     if (block.type === "thinking" && block.thinking && block.signature) {
       thinkingBlocks.push({ thinking: block.thinking, signature: block.signature });
     } else if (block.type === "text" && block.text) {
-      content = block.text;
+      // A reply can split its text across several blocks (e.g. around
+      // citations or tool use) — keep all of it.
+      text += block.text;
     } else if (block.type === "tool_use" && block.id && block.name) {
       toolCalls.push({ id: block.id, name: block.name, input: block.input });
     }
   }
 
-  const finishReason =
-    data.stop_reason === "end_turn"
-      ? "stop"
-      : data.stop_reason === "tool_use"
-        ? "tool_calls"
-        : data.stop_reason === "max_tokens"
-          ? "length"
-          : "stop";
-
   return {
-    content,
+    content: text === "" ? null : text,
     toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
     thinkingBlocks: thinkingBlocks.length > 0 ? thinkingBlocks : undefined,
-    finishReason,
+    finishReason: mapStopReason(data.stop_reason),
     usage: {
       inputTokens: data.usage.input_tokens,
       outputTokens: data.usage.output_tokens,
