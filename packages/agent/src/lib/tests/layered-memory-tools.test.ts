@@ -13,7 +13,7 @@
 import { describe, it, expect } from "bun:test";
 import { createLayeredMemoryTool } from "../tools/layered-memory-tools.ts";
 import { InMemoryMemoryStore } from "../memory/in-memory-memory-store.ts";
-import { zodToJsonSchema } from "../zod-to-json-schema.ts";
+import { zodToToolJsonSchema } from "../tool-json-schema.ts";
 import type { MemoryStore } from "../memory/types.ts";
 
 const NS = "acme";
@@ -159,7 +159,7 @@ describe("layered memory tool — name + shape", () => {
 
   it("flattens the command union into one object schema with a command enum", () => {
     const { tool } = makeTool();
-    const schema = zodToJsonSchema(tool.parameters) as {
+    const schema = zodToToolJsonSchema(tool.parameters) as {
       type: string;
       required: string[];
       properties: Record<string, { enum?: string[] }>;

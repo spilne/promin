@@ -83,7 +83,7 @@ describe("DefaultAgentToolCatalog", () => {
     const [entry] = await cat.listAll();
     expect(entry?.parameters).toBeDefined();
     expect(typeof entry?.parameters).toBe("object");
-    // Light shape pin — zodToJsonSchema returns objects with a `properties` field for z.object
+    // Light shape pin — agentToolJsonSchema returns objects with a `properties` field for z.object
     expect(JSON.stringify(entry?.parameters)).toContain("query");
   });
 

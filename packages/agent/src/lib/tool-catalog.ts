@@ -14,7 +14,7 @@
 // ---------------------------------------------------------------------------
 
 import type { AgentTool } from "./tool.ts";
-import { zodToJsonSchema } from "./zod-to-json-schema.ts";
+import { agentToolJsonSchema } from "./tool-json-schema.ts";
 import type { McpClientPool } from "./mcp/mcp-client-pool.ts";
 import type { McpServerConfig } from "./mcp/types.ts";
 
@@ -161,7 +161,7 @@ function toEntry(
   return {
     name,
     description: tool.description,
-    parameters: zodToJsonSchema(tool.parameters),
+    parameters: agentToolJsonSchema(tool),
     source,
     enabled: tool.enabled !== false,
     requiredSecrets: tool.requiredSecrets ?? [],

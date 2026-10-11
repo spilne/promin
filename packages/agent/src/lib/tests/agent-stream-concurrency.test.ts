@@ -1,4 +1,5 @@
 import { describe, it, expect } from "bun:test";
+import { z } from "zod";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { agentLoop } from "../agent-loop.ts";
 import type {
@@ -213,7 +214,7 @@ describe("approve()/reject() — early-call race", () => {
         doit: {
           name: "doit",
           description: "",
-          parameters: { parse: () => ({}) } as never,
+          parameters: z.object({}),
           requireApproval: true,
           execute: async () => "tool output",
         },
@@ -246,7 +247,7 @@ describe("approve()/reject() — early-call race", () => {
         doit: {
           name: "doit",
           description: "",
-          parameters: { parse: () => ({}) } as never,
+          parameters: z.object({}),
           requireApproval: true,
           execute: async () => "should not run",
         },

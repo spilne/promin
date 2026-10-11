@@ -4,7 +4,7 @@ import { join, extname, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AgentTool } from "./tool.ts";
 import type { LLMToolDefinition } from "./llm-provider.ts";
-import { zodToJsonSchema } from "./zod-to-json-schema.ts";
+import { agentToolJsonSchema } from "./tool-json-schema.ts";
 
 export interface ToolRegistry {
   /** Returns a snapshot of the currently loaded tools, keyed by tool name. */
@@ -38,7 +38,7 @@ export function buildToolDefs(tools: Record<string, AgentTool<any, any>>): LLMTo
   return Object.entries(tools).map(([key, t]) => ({
     name: key,
     description: enrichDescription(t),
-    parameters: zodToJsonSchema(t.parameters),
+    parameters: agentToolJsonSchema(t),
   }));
 }
 

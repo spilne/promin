@@ -100,6 +100,15 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
   examples?: Array<{ input: TInput; output: string }>;
   parameters: z.ZodType<TInput>;
   /**
+   * Raw JSON Schema advertised to the LLM instead of one derived from
+   * `parameters` — for tools whose schema already exists as JSON Schema
+   * (an MCP server's `inputSchema`). Sent as-is apart from the top-level
+   * guards every provider needs (`type: "object"`, no top-level
+   * `oneOf`/`anyOf`/`allOf`, no `$schema`). `parameters` still validates
+   * the call's input at runtime.
+   */
+  jsonSchema?: Readonly<Record<string, unknown>>;
+  /**
    * Run the tool. The optional `ctx` carries per-call wiring like a
    * progress writer; a tool that needs none of it takes only `input`.
    */
@@ -315,6 +324,8 @@ export interface ScopedToolConfig<TInput, TOutput> {
   usage?: string;
   examples?: Array<{ input: TInput; output: string }>;
   parameters: z.ZodType<TInput>;
+  /** Raw JSON Schema advertised to the LLM; see `AgentTool.jsonSchema`. */
+  jsonSchema?: Readonly<Record<string, unknown>>;
   requireApproval?: boolean;
   toModelOutput?: (output: TOutput) => string;
   /**

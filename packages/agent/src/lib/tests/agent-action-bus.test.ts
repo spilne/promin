@@ -84,8 +84,8 @@ describe("agentAction — SessionEventBus integration", () => {
     const greetTool = tool({
       name: "greet",
       description: "Returns a greeting",
-      input: z.object({ name: z.string() }),
-      run: async ({ name }) => `hello ${name}`,
+      parameters: z.object({ name: z.string() }),
+      execute: async ({ name }) => `hello ${name}`,
     });
 
     const action = agentAction({

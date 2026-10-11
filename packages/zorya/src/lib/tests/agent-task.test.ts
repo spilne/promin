@@ -70,8 +70,8 @@ describe("runAgentTask — wraps agentAction with worker.streams registration", 
     const greetTool = tool({
       name: "greet",
       description: "Returns a greeting",
-      input: z.object({ name: z.string() }),
-      run: async ({ name }) => `hello ${name}`,
+      parameters: z.object({ name: z.string() }),
+      execute: async ({ name }) => `hello ${name}`,
     });
 
     // Race: the moment runAgentTask is called it registers the stream

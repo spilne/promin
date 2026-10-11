@@ -8,7 +8,7 @@ import type { AgentTool, ApprovalDecision, AutoApprove } from "./tool.ts";
 import { shouldAutoApprove } from "./tool.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
 import { buildToolDefs } from "./tool-registry.ts";
-import { zodToJsonSchema } from "./zod-to-json-schema.ts";
+import { zodToToolJsonSchema } from "./tool-json-schema.ts";
 import type { ProcessorsConfig } from "./processors.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
 import { executeToolCall, runLlmCall, resolveTools } from "./agent-shared.ts";
@@ -257,7 +257,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
             name: "_respond",
             description:
               "Provide your final structured response. Call this when you have all the information needed.",
-            parameters: zodToJsonSchema(config.outputSchema),
+            parameters: zodToToolJsonSchema(config.outputSchema),
           });
         }
 
