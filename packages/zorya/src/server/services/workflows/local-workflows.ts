@@ -26,7 +26,7 @@ import {
   type SignalScanner,
   type SleepScanner,
 } from "@promin/workflow/distributed";
-import { SystemWallClock, recoverWorkflows } from "@promin/workflow";
+import { SystemWallClock, isTerminalWorkflowStatus, recoverWorkflows } from "@promin/workflow";
 import { ZoryaWorkflows, type TriggerOptions, type TriggerResult } from "./zorya-workflows.ts";
 
 export interface LocalWorkflowsConfig {
@@ -149,7 +149,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
       // Cross-boot collision: deterministic ids (e.g. scheduler ticks) can
       // hit a terminal-state row. Reset so this fresh fire reports its own
       // latency instead of inheriting the prior run's timestamps.
-      if (!result.created && isTerminal(result.existing.status)) {
+      if (!result.created && isTerminalWorkflowStatus(result.existing.status)) {
         await this.storage.startFreshRun({ workflowId });
       }
     }
@@ -238,8 +238,4 @@ function definitionsRegistry(
     register: readOnly,
     deregister: readOnly,
   };
-}
-
-function isTerminal(status: string): boolean {
-  return status === "completed" || status === "failed" || status === "tripwire";
 }

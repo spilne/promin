@@ -246,4 +246,5 @@ export type RunEvent =
   | { type: "snapshot"; run: RunDto }
   | { type: "step"; stepName: string; step: StepDto }
   | { type: "status"; status: WorkflowStatus }
+  | { type: "error"; error: string }
   | { type: "end" };

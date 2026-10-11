@@ -42,8 +42,22 @@ export {
 export { ZoryaDags, type ZoryaDagsConfig } from "./server/services/dags/index.ts";
 export { Auth, type AuthConfig } from "./server/auth.ts";
 export { RunEventBus } from "./server/run-event-bus.ts";
-export { RunPollWatcher, isTerminalStatus } from "./server/run-poll-watcher.ts";
-export { Router, json, jsonError, readJson, type Handler } from "./server/router.ts";
+export { RunPollWatcher, RunWatcherPool } from "./server/run-poll-watcher.ts";
+export {
+  HttpError,
+  Router,
+  badRequest,
+  conflict,
+  created,
+  internal,
+  json,
+  jsonError,
+  noContent,
+  notFound,
+  ok,
+  readJson,
+  type Handler,
+} from "./server/router.ts";
 export { runToDto, runToSummaryDto, stepToDto } from "./server/serialize.ts";
 export { StorageMetricsProvider, type MetricsProvider } from "./server/routes/metrics.ts";
 export {

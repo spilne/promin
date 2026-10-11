@@ -14,7 +14,7 @@ import type {
   WorkflowStorage,
 } from "@promin/workflow";
 import { validate } from "@promin/workflow";
-import { json, jsonError, readJson } from "../router.ts";
+import { json, jsonError, parseIntParam, readJson } from "../router.ts";
 import type {
   RunListQuery,
   SignalRequest,
@@ -76,8 +76,13 @@ export function listRuns(deps: RunRoutesDeps) {
         (url.searchParams.get("runSource") as RunListQuery["runSource"] | null) ?? undefined,
       runSourceId: url.searchParams.get("runSourceId") ?? undefined,
       metadata: parseMetadataParam(url.searchParams.get("metadata")),
-      limit: parseIntParam(url.searchParams.get("limit")) ?? 50,
-      offset: parseIntParam(url.searchParams.get("offset")) ?? 0,
+      limit: parseLimitParam(url.searchParams.get("limit")) ?? 50,
+      offset:
+        parseIntParam({
+          raw: url.searchParams.get("offset"),
+          min: 0,
+          max: Number.MAX_SAFE_INTEGER,
+        }) ?? 0,
       orderBy: sort?.orderBy,
       orderDir: sort?.orderDir,
     };
@@ -219,10 +224,9 @@ function formatValidationErrors(errors: ReadonlyArray<{ path: string; message: s
   return errors.map((e) => (e.path === "" ? e.message : `${e.path}: ${e.message}`)).join("; ");
 }
 
-function parseIntParam(s: string | null): number | undefined {
-  if (s === null) return undefined;
-  const n = Number.parseInt(s, 10);
-  return Number.isFinite(n) ? n : undefined;
+/** Limit-style query parameter: an integer clamped to [1, 1000]. */
+function parseLimitParam(raw: string | null): number | undefined {
+  return parseIntParam({ raw, min: 1, max: 1_000 });
 }
 
 const VALID_ORDER_BY: ReadonlyArray<WorkflowOrderBy> = [

@@ -6,6 +6,7 @@
 import { describe, expect, it } from "bun:test";
 import { FakeWallClock, InMemoryWorkflowStorage } from "@promin/workflow";
 import { RunEventBus } from "../../run-event-bus.ts";
+import { RunWatcherPool } from "../../run-poll-watcher.ts";
 import { streamRunEvents } from "../sse.ts";
 
 /** Yield to the event loop until `predicate` holds (bounded). */
@@ -24,9 +25,8 @@ describe("streamRunEvents — heartbeat on an injected clock", () => {
 
     const handler = streamRunEvents({
       storage,
-      bus: new RunEventBus(),
+      watchers: new RunWatcherPool({ storage, bus: new RunEventBus(), clock, intervalMs: 60_000 }),
       clock,
-      pollIntervalMs: 60_000,
     });
     const res = await handler(new Request("http://x/api/runs/wf-1/events"), { id: "wf-1" });
     expect(res.status).toBe(200);

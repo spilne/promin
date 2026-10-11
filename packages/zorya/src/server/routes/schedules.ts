@@ -15,7 +15,8 @@ import {
   validateScheduleConfig,
 } from "@promin/workflow/scheduler";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
-import { json, jsonError, readJson } from "../router.ts";
+import { z } from "zod";
+import { isoOrNull, json, jsonError, parseIntParam, readJson } from "../router.ts";
 
 export interface ScheduleDto {
   id: string;
@@ -99,28 +100,57 @@ export interface SchedulePatchRequest {
   enabled?: boolean;
 }
 
-export interface ScheduleCreateRequest {
-  id: string;
-  name?: string;
-  namespace?: string;
-  cron?: string;
-  rrule?: string;
-  intervalMs?: number;
-  timezone?: string;
-  enabled?: boolean;
-  startAt?: string;
-  endAt?: string;
-  jitterMs?: number;
-  maxCatchUp?: number;
-  /** Optional workflow name to link. Stored in metadata.workflowName. */
-  workflowName?: string;
-  /** Optional input payload for triggered runs. Stored in metadata.input. */
-  input?: unknown;
-  metadata?: Record<string, unknown>;
+/** `null` and `""` mean "not set" — the dashboard form sends either. */
+function optional<T extends z.ZodTypeAny>(schema: T) {
+  return z.preprocess((v) => (v === null || v === "" ? undefined : v), schema.optional());
 }
 
+const IsoDateSchema = z
+  .string()
+  .max(64)
+  .refine((v) => Number.isFinite(Date.parse(v)), { message: "must be an ISO-8601 date" });
+
+const TimezoneSchema = z
+  .string()
+  .max(64)
+  .refine(
+    (tz) => {
+      try {
+        new Intl.DateTimeFormat("en-US", { timeZone: tz });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    { message: "must be an IANA time zone" },
+  );
+
+/** Body of `POST /api/schedules`. Validated before anything is stored. */
+export const ScheduleCreateRequestSchema = z.object({
+  id: z.string().min(1).max(256),
+  name: optional(z.string().max(256)),
+  namespace: optional(z.string().max(256)),
+  cron: optional(z.string().max(256)),
+  rrule: optional(z.string().max(4096)),
+  intervalMs: optional(z.number().finite().positive().max(Number.MAX_SAFE_INTEGER)),
+  timezone: optional(TimezoneSchema),
+  enabled: optional(z.boolean()),
+  startAt: optional(IsoDateSchema),
+  endAt: optional(IsoDateSchema),
+  jitterMs: optional(z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER)),
+  maxCatchUp: optional(z.number().int().nonnegative().max(100_000)),
+  /** Optional workflow name to link. Stored in metadata.workflowName. */
+  workflowName: optional(z.string().max(256)),
+  /** Optional input payload for triggered runs. Stored in metadata.input. */
+  input: z.unknown().optional(),
+  metadata: optional(z.record(z.unknown())),
+});
+
+export type ScheduleCreateRequest = z.infer<typeof ScheduleCreateRequestSchema>;
+
+/** ISO string, or `undefined` for a missing or unreadable stored date. */
 function iso(d?: Date | null): string | undefined {
-  return d ? d.toISOString() : undefined;
+  return isoOrNull(d) ?? undefined;
 }
 
 /**
@@ -197,8 +227,9 @@ export function listSchedules(deps: ScheduleRoutesDeps) {
     const url = new URL(req.url);
     const enabled = parseBool(url.searchParams.get("enabled"));
     const namespace = url.searchParams.get("namespace") ?? undefined;
-    const limit = parseInt10(url.searchParams.get("limit")) ?? 100;
-    const offset = parseInt10(url.searchParams.get("offset")) ?? 0;
+    const limit = parseIntParam({ raw: url.searchParams.get("limit"), min: 1, max: 1_000 }) ?? 100;
+    const offset =
+      parseIntParam({ raw: url.searchParams.get("offset"), min: 0, max: 1_000_000 }) ?? 0;
     // Metadata filter — JSON-encoded for nested-path queries (the chat
     // per-thread drawer sends `{ agentTrigger: true, threadId: "..." }`,
     // the dashboard's "kind = agent" chip sends `{ agentTrigger: true }`).
@@ -249,8 +280,22 @@ export function createSchedule(deps: ScheduleRoutesDeps) {
   const { storage } = deps;
   const clock = deps.clock ?? SystemWallClock;
   return async (req: Request): Promise<Response> => {
-    const body = await readJson<ScheduleCreateRequest>(req);
-    if (!body || !body.id) return jsonError(400, "missing_id");
+    const raw = await readJson<unknown>(req);
+    if (!raw || typeof raw !== "object" || !(raw as { id?: unknown }).id) {
+      return jsonError(400, "missing_id");
+    }
+    const parsed = ScheduleCreateRequestSchema.safeParse(raw);
+    if (!parsed.success) {
+      return jsonError(
+        400,
+        "invalid_schedule",
+        parsed.error.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; "),
+      );
+    }
+    const body = parsed.data;
+    if (body.startAt && body.endAt && Date.parse(body.startAt) > Date.parse(body.endAt)) {
+      return jsonError(400, "invalid_schedule", "startAt must not be after endAt");
+    }
 
     const triggerCount =
       (body.cron ? 1 : 0) + (body.rrule ? 1 : 0) + (body.intervalMs !== undefined ? 1 : 0);
@@ -396,8 +441,9 @@ export function getScheduleHistory(
     if (!config) return jsonError(404, "not_found");
 
     const url = new URL(req.url);
-    const limit = parseInt10(url.searchParams.get("limit")) ?? 20;
-    const offset = parseInt10(url.searchParams.get("offset")) ?? 0;
+    const limit = parseIntParam({ raw: url.searchParams.get("limit"), min: 1, max: 500 }) ?? 20;
+    const offset =
+      parseIntParam({ raw: url.searchParams.get("offset"), min: 0, max: 1_000_000 }) ?? 0;
 
     // Primary path: scheduler-side tick log. Authoritative — written in the
     // same transaction as the tickCount advance, so the history is always
@@ -459,8 +505,8 @@ export function getScheduleHistory(
           workflowName: wf?.workflowName ?? fallbackName,
           status: wf?.status ?? "pending",
           kind,
-          firedAt: t.firedAt.toISOString(),
-          scheduledAt: t.scheduledAt.toISOString(),
+          firedAt: iso(t.firedAt),
+          scheduledAt: iso(t.scheduledAt),
           startedAt: iso(wf?.startedAt),
           completedAt: iso(wf?.completedAt),
           lagMs,
@@ -537,7 +583,7 @@ export function getScheduleUpcoming(deps: ScheduleRoutesDeps) {
     if (!config) return jsonError(404, "not_found");
 
     const url = new URL(req.url);
-    const count = Math.max(1, Math.min(parseInt10(url.searchParams.get("count")) ?? 10, 100));
+    const count = parseIntParam({ raw: url.searchParams.get("count"), min: 1, max: 100 }) ?? 10;
 
     // Disabled schedules have no upcoming fires by definition; surface the
     // empty list with `exhausted: false` so the UI distinguishes "nothing
@@ -553,8 +599,14 @@ export function getScheduleUpcoming(deps: ScheduleRoutesDeps) {
     let cursor = clock.now();
     let exhausted = false;
     for (let i = 0; i < count; i++) {
-      const next = computeNextRun({ config, clock: frozenClockAt({ when: cursor, base: clock }) });
-      if (!next) {
+      let next: Date | null;
+      try {
+        next = computeNextRun({ config, clock: frozenClockAt({ when: cursor, base: clock }) });
+      } catch {
+        // A stored config the scheduler can't evaluate has no upcoming fires.
+        next = null;
+      }
+      if (!next || !Number.isFinite(next.getTime())) {
         exhausted = true;
         break;
       }
@@ -575,10 +627,4 @@ function parseBool(s: string | null): boolean | undefined {
   if (s === "true" || s === "1") return true;
   if (s === "false" || s === "0") return false;
   return undefined;
-}
-
-function parseInt10(s: string | null): number | undefined {
-  if (s === null) return undefined;
-  const n = Number.parseInt(s, 10);
-  return Number.isFinite(n) ? n : undefined;
 }

@@ -20,7 +20,14 @@ import { SystemWallClock, InMemoryWorkflowVersionRegistry } from "@promin/workfl
 import { InMemoryStepQueue, InMemoryWorkerRegistry } from "@promin/workflow/distributed";
 import { createWorkerApiHandler, createWorkflowStorageHandler } from "@promin/workflow-remote";
 import { Auth, type AuthConfig } from "./auth.ts";
-import { Router, jsonError } from "./router.ts";
+import { Router, errorResponse, jsonError } from "./router.ts";
+import {
+  DEFAULT_IDLE_TIMEOUT_SECONDS,
+  DEFAULT_MAX_REQUEST_BODY_BYTES,
+  DEFAULT_MAX_WEBHOOK_BODY_BYTES,
+  bodyLimitFor,
+  limitRequestBody,
+} from "./request-limits.ts";
 import type { WorkflowStartQueue } from "./workflow-starts.ts";
 import { WorkerWebSocketServer } from "./services/worker-ws-server.ts";
 import {
@@ -35,6 +42,7 @@ import {
   listWorkflowStarts,
 } from "./routes/workflow-starts.ts";
 import { RunEventBus } from "./run-event-bus.ts";
+import { RunWatcherPool } from "./run-poll-watcher.ts";
 import {
   cancelRun,
   getRun,
@@ -253,6 +261,11 @@ export interface ZoryaServerConfig extends AuthConfig {
   /** SSE poll interval in ms. Default 1000. */
   sseIntervalMs?: number;
   /**
+   * Longest validity a minted signal token may ask for (`expiresInMs`).
+   * Default: `DEFAULT_MAX_SIGNAL_TOKEN_TTL_MS` (90 days).
+   */
+  signalTokenMaxTtlMs?: number;
+  /**
    * Workflow version registry. Drives `/api/workflows/:name/versions/*`
    * (promote/rollback, findActive, list-records). Defaults to a fresh
    * in-memory `WorkflowVersionRegistry`; production deployments should
@@ -306,6 +319,20 @@ export interface ZoryaServerConfig extends AuthConfig {
 export interface ListenOptions {
   port?: number;
   hostname?: string;
+  /**
+   * Largest request body accepted outside `/webhooks/*`, in bytes; larger
+   * bodies get a JSON 413. Default: 1 MiB.
+   */
+  maxRequestBodySize?: number;
+  /** Largest `/webhooks/*` request body, in bytes. Default: 25 MiB. */
+  maxWebhookBodySize?: number;
+  /** Seconds a connection may sit idle before Bun closes it. Default: 60 (max 255). */
+  idleTimeout?: number;
+  /**
+   * Bun development mode (verbose error pages with stacks and source).
+   * Default: false. Errors are always answered with JSON by the router.
+   */
+  development?: boolean;
 }
 
 export class ZoryaServer {
@@ -333,6 +360,7 @@ export class ZoryaServer {
   private readonly auth: Auth;
   private readonly workerAuth: Auth;
   private readonly bus: RunEventBus;
+  private readonly runWatchers: RunWatcherPool;
   private readonly router: Router;
   private readonly logger: Logger;
   private readonly clock: WallClock;
@@ -357,6 +385,7 @@ export class ZoryaServer {
     this.workerWs = new WorkerWebSocketServer({
       authorize: (req) => this.workerAuth.check(req),
       clock,
+      onError: (message, err) => this.logger.error(message, err),
     });
     this.agentStreamHub = new AgentStreamHub(this.workerWs);
 
@@ -390,7 +419,16 @@ export class ZoryaServer {
       ...(advertisements !== undefined && { advertisements }),
     };
 
-    this.router = new Router()
+    this.runWatchers = new RunWatcherPool({
+      storage,
+      bus: this.bus,
+      clock,
+      onError: ({ workflowId, error }) =>
+        this.logger.error(`[zorya] run watch ${workflowId}: storage poll failed`, error),
+      ...(config.sseIntervalMs !== undefined && { intervalMs: config.sseIntervalMs }),
+    });
+
+    this.router = new Router({ logger: this.logger })
       .get(
         "/api/health",
         () =>
@@ -444,6 +482,9 @@ export class ZoryaServer {
         mintSignalToken({
           storage,
           clock,
+          ...(config.signalTokenMaxTtlMs !== undefined && {
+            maxTtlMs: config.signalTokenMaxTtlMs,
+          }),
           ...(config.publicBaseUrl !== undefined && { publicBaseUrl: config.publicBaseUrl }),
         }),
       )
@@ -479,15 +520,7 @@ export class ZoryaServer {
       )
       .get("/api/runs/:id/streams/:streamId/chunks", getStreamChunks({ storage }))
       .post("/api/runs/:id/streams/:streamId", sendStreamChunk({ storage }))
-      .get(
-        "/api/runs/:id/events",
-        streamRunEvents({
-          storage,
-          bus: this.bus,
-          clock,
-          ...(config.sseIntervalMs !== undefined && { pollIntervalMs: config.sseIntervalMs }),
-        }),
-      )
+      .get("/api/runs/:id/events", streamRunEvents({ storage, watchers: this.runWatchers, clock }))
       .get("/api/runs/:id/agent-stream", streamAgentEvents(this.agentStreamHub))
       .post("/api/runs/:id/query", queryRun({ workerWs: this.workerWs, clock }))
       .get("/api/workers", listWorkers(workers))
@@ -828,16 +861,38 @@ export class ZoryaServer {
       throw new Error("ZoryaServer.listen requires Bun runtime");
     }
     const wsHandlers = this.workerWs.websocketHandlers();
+    const maxRequestBodySize = opts.maxRequestBodySize ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
+    const maxWebhookBodySize = opts.maxWebhookBodySize ?? DEFAULT_MAX_WEBHOOK_BODY_BYTES;
+    const logger = this.logger;
     const srv = BunGlobal.serve({
       port,
       hostname,
-      fetch: (req, server) => {
-        const upgradeResult = this.workerWs.upgradeIfWorkerWs(req, server);
-        if (upgradeResult !== undefined) return upgradeResult;
-        const url = new URL(req.url);
-        if (url.pathname === "/ws/worker") return undefined;
-        return handle(req);
+      development: opts.development ?? false,
+      idleTimeout: opts.idleTimeout ?? DEFAULT_IDLE_TIMEOUT_SECONDS,
+      // Transport ceiling above the per-path limits so those can answer
+      // with a JSON 413 (Bun's own 413 has no body).
+      maxRequestBodySize: 2 * Math.max(maxRequestBodySize, maxWebhookBodySize),
+      fetch: async (req, server) => {
+        try {
+          const upgradeResult = this.workerWs.upgradeIfWorkerWs(req, server);
+          if (upgradeResult !== undefined) return upgradeResult;
+          const url = new URL(req.url);
+          if (url.pathname === "/ws/worker") return undefined;
+          const limited = await limitRequestBody({
+            req,
+            maxBytes: bodyLimitFor({
+              path: url.pathname,
+              maxRequestBodySize,
+              maxWebhookBodySize,
+            }),
+          });
+          if (limited instanceof Response) return limited;
+          return await handle(limited);
+        } catch (err) {
+          return errorResponse({ err, req, logger });
+        }
       },
+      error: (err) => errorResponse({ err, logger }),
       websocket: wsHandlers,
     });
     const resolvedPort = typeof srv.port === "number" ? srv.port : port;
@@ -923,6 +978,8 @@ export class ZoryaServer {
   private buildStaticHandler(dir: string) {
     return async (req: Request): Promise<Response> => {
       const url = new URL(req.url);
+      // API-shaped paths never fall back to the SPA.
+      if (/^\/(api|rpc|webhooks)(\/|$)/.test(url.pathname)) return jsonError(404, "not_found");
       const path = url.pathname === "/" ? "/index.html" : url.pathname;
       const file = Bun.file(`${dir}${path}`);
       if (await file.exists()) return new Response(file);

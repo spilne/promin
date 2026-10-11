@@ -1,74 +1,77 @@
 // ---------------------------------------------------------------------------
 // SSE route — /api/runs/:id/events
 //
-// Opens a Server-Sent Events stream for a single workflow. Starts a
-// RunPollWatcher that emits a snapshot followed by per-step / status diffs
-// until the run reaches a terminal state.
+// Opens a Server-Sent Events stream for a single workflow: a snapshot, then
+// per-step / status diffs from the run's shared watcher (`RunWatcherPool`),
+// until the run reaches a terminal state, disappears, or the watcher gives
+// up after repeated storage failures (an `error` event, then `end`).
 // ---------------------------------------------------------------------------
 
 import type { TimerHandle, WallClock, WorkflowStorage } from "@promin/workflow";
 import { SystemWallClock } from "@promin/workflow";
 import { jsonError } from "../router.ts";
-import { RunEventBus } from "../run-event-bus.ts";
-import { RunPollWatcher } from "../run-poll-watcher.ts";
+import type { RunWatcherPool } from "../run-poll-watcher.ts";
 import type { RunEvent } from "../api-types.ts";
 
 export interface SseDeps {
   storage: WorkflowStorage;
-  bus: RunEventBus;
-  /** Watcher poll interval in ms. Default 1000. */
-  pollIntervalMs?: number;
-  /** Time source for the watcher poll and the SSE heartbeat. Default: `SystemWallClock`. */
+  /** Shared per-run watchers. */
+  watchers: RunWatcherPool;
+  /** Time source for the SSE heartbeat. Default: `SystemWallClock`. */
   clock?: WallClock;
 }
+
+/** Keep-alive comment cadence (ms). */
+const HEARTBEAT_MS = 15_000;
 
 export function streamRunEvents(deps: SseDeps) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
 
-    const exists = await deps.storage.loadWorkflow(id);
-    if (!exists) return jsonError(404, "not_found");
-
-    const watcher = new RunPollWatcher({
-      storage: deps.storage,
-      bus: deps.bus,
-      workflowId: id,
-      intervalMs: deps.pollIntervalMs ?? 1000,
-      ...(deps.clock !== undefined && { clock: deps.clock }),
-    });
+    const state = await deps.storage.loadWorkflow(id);
+    if (!state) return jsonError(404, "not_found");
 
     const encoder = new TextEncoder();
     let unsub: (() => void) | undefined;
     const clock = deps.clock ?? SystemWallClock;
     let heartbeatHandle: TimerHandle | undefined;
+    let closed = false;
 
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        const send = (ev: RunEvent) => {
+        const close = (): void => {
+          teardown();
+          try {
+            controller.close();
+          } catch {
+            // already closed
+          }
+        };
+        const send = (ev: RunEvent): void => {
+          if (closed) return;
           try {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify(ev)}\n\n`));
           } catch {
             // Controller closed.
-          }
-          if (ev.type === "end") {
             teardown();
-            try {
-              controller.close();
-            } catch {
-              // already closed
-            }
+            return;
           }
+          if (ev.type === "end") close();
         };
-        unsub = deps.bus.subscribe(id, send);
-        void watcher.start();
+        unsub = deps.watchers.subscribe({ state, listener: send });
+        if (closed) {
+          // Terminal run: `end` arrived during subscribe.
+          unsub();
+          return;
+        }
         heartbeatHandle = clock.setInterval(() => {
           try {
             controller.enqueue(encoder.encode(`: heartbeat\n\n`));
           } catch {
             teardown();
           }
-        }, 15_000);
+        }, HEARTBEAT_MS);
       },
       cancel() {
         teardown();
@@ -76,9 +79,9 @@ export function streamRunEvents(deps: SseDeps) {
     });
 
     function teardown(): void {
+      closed = true;
       unsub?.();
       unsub = undefined;
-      watcher.stop();
       if (heartbeatHandle !== undefined) {
         heartbeatHandle.clear();
         heartbeatHandle = undefined;

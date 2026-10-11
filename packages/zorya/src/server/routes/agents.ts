@@ -56,7 +56,7 @@ import {
   TurnInProgressError,
 } from "@promin/agent";
 import { SystemWallClock, WorkflowSuspendedError, type WallClock } from "@promin/workflow";
-import { json, jsonError, readJson } from "../router.ts";
+import { json, jsonError, parseIntParam, readJson } from "../router.ts";
 import { isDraftId } from "./agent-drafts.ts";
 
 // ---------------------------------------------------------------------------
@@ -372,7 +372,7 @@ export function listAgents(deps: AgentGatewayDeps) {
     const url = new URL(req.url);
     const capability = url.searchParams.get("capability") ?? undefined;
     const tag = url.searchParams.get("tag") ?? undefined;
-    const limit = parseIntParam(url.searchParams.get("limit"));
+    const limit = parseLimitParam(url.searchParams.get("limit"));
     const cursor = url.searchParams.get("cursor") ?? undefined;
     const agents = await deps.registry.list({ capability, tag, limit, cursor });
     // Hide ephemeral Designer drafts — they're not real recipes and
@@ -1213,7 +1213,7 @@ export function listAgentThreads(deps: AgentGatewayDeps) {
     }
 
     try {
-      const limit = parseIntParam(url.searchParams.get("limit"));
+      const limit = parseLimitParam(url.searchParams.get("limit"));
       const cursor = url.searchParams.get("cursor") ?? undefined;
       const q = url.searchParams.get("q") ?? undefined;
       const threads = await agent.listThreads({ resourceId, limit, cursor, q });
@@ -1293,9 +1293,17 @@ export function listThreadMessages(deps: AgentGatewayDeps) {
 
     try {
       const thread = await agent.thread(threadId, { createIfMissing: false });
-      const limit = parseIntParam(url.searchParams.get("limit"));
-      const fromSeq = parseIntParam(url.searchParams.get("fromSeq"));
-      const toSeq = parseIntParam(url.searchParams.get("toSeq"));
+      const limit = parseLimitParam(url.searchParams.get("limit"));
+      const fromSeq = parseIntParam({
+        raw: url.searchParams.get("fromSeq"),
+        min: 0,
+        max: Number.MAX_SAFE_INTEGER,
+      });
+      const toSeq = parseIntParam({
+        raw: url.searchParams.get("toSeq"),
+        min: 0,
+        max: Number.MAX_SAFE_INTEGER,
+      });
       const messages = await thread.messages({ limit, fromSeq, toSeq });
       return json(200, { threadId: thread.id, messages });
     } catch (err) {
@@ -1524,10 +1532,9 @@ export function archiveAgentThread(deps: AgentGatewayDeps) {
 
 // ---------------------------------------------------------------------------
 
-function parseIntParam(s: string | null): number | undefined {
-  if (s === null) return undefined;
-  const n = Number.parseInt(s, 10);
-  return Number.isFinite(n) ? n : undefined;
+/** Limit-style query parameter: an integer clamped to [1, 1000]. */
+function parseLimitParam(raw: string | null): number | undefined {
+  return parseIntParam({ raw, min: 1, max: 1_000 });
 }
 
 function asMessage(err: unknown): string {

@@ -52,7 +52,7 @@ export function SharedSignalPage({ tokenId, bearer }: Props) {
         if (m.completedAt) {
           setResolvedAs("previously");
           setPhase("delivered");
-        } else if (new Date(m.expiresAt).getTime() <= Date.now()) {
+        } else if (m.expiresAt === null || new Date(m.expiresAt).getTime() <= Date.now()) {
           // Pre-empt the 408 the complete endpoint would return — the user
           // shouldn't have to click Approve only to discover the link's dead.
           setPhase("expired");
@@ -206,7 +206,8 @@ export function SharedSignalPage({ tokenId, bearer }: Props) {
           )}
 
           <div class="text-[10px] text-base-content/40">
-            Expires {new Date(meta.expiresAt).toLocaleString()}.
+            Expires{" "}
+            {meta.expiresAt ? new Date(meta.expiresAt).toLocaleString() : "at an unknown time"}.
           </div>
 
           {error !== null && <div class="alert alert-error text-xs">{error}</div>}
@@ -231,7 +232,7 @@ export function SharedSignalPage({ tokenId, bearer }: Props) {
               <div>
                 Signal <span class="font-mono">{meta.signalName}</span> on workflow{" "}
                 <span class="font-mono">{meta.workflowName}</span> was reachable through this link
-                until {new Date(meta.expiresAt).toLocaleString()}.
+                until {meta.expiresAt ? new Date(meta.expiresAt).toLocaleString() : "it expired"}.
               </div>
             )}
             <div>

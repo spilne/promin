@@ -20,6 +20,12 @@
 //   Server → Worker
 //     { kind: "ping" }
 //     { kind: "cmd", requestId, cmd, args? }   // request/reply
+//     { kind: "error", error, message? }       // protocol violation; socket closes
+//
+// Every inbound frame is validated against `WorkerWsInboundSchema`. A frame
+// that is too large, not JSON, or not a known message is answered with
+// `{ kind: "error" }` and the socket is closed. Replies are accepted only
+// from the socket the command was sent to.
 //
 // Heartbeat: server pings every `pingIntervalMs` (default 10s); worker is
 // expected to pong within `pongTimeoutMs` (default 30s, three missed
@@ -32,28 +38,56 @@
 // ---------------------------------------------------------------------------
 
 import type { ServerWebSocket, WebSocketHandler } from "bun";
+import { z } from "zod";
 import { SystemWallClock, type TimerHandle, type WallClock } from "@promin/workflow";
 
-export type WorkerWsInbound =
-  | { kind: "identify"; workerId: string; capabilities?: readonly string[] }
-  | { kind: "pong" }
-  | { kind: "frame"; streamId: string; payload: unknown }
-  | {
-      kind: "reply";
-      requestId: string;
-      ok: true;
-      result?: unknown;
-    }
-  | {
-      kind: "reply";
-      requestId: string;
-      ok: false;
-      error: string;
-    };
+/** Default cap on one inbound frame (bytes). */
+export const DEFAULT_MAX_WORKER_FRAME_BYTES = 1_048_576;
+
+const IdSchema = z.string().min(1).max(256);
+
+/**
+ * Every frame a worker may send. Anything else (non-JSON, a non-object, an
+ * unknown `kind`, a missing or mistyped field) is a protocol error: the
+ * server answers with `{ kind: "error" }` and closes the socket.
+ */
+export const WorkerWsInboundSchema = z.union([
+  z.object({
+    kind: z.literal("identify"),
+    workerId: IdSchema,
+    capabilities: z.array(z.string().max(256)).max(256).optional(),
+  }),
+  z.object({ kind: z.literal("pong") }),
+  z.object({
+    kind: z.literal("frame"),
+    streamId: z.string().min(1).max(1024),
+    payload: z.unknown(),
+  }),
+  z.object({
+    kind: z.literal("reply"),
+    requestId: IdSchema,
+    ok: z.literal(true),
+    result: z.unknown().optional(),
+  }),
+  z.object({
+    kind: z.literal("reply"),
+    requestId: IdSchema,
+    ok: z.literal(false),
+    error: z.string().max(65_536),
+  }),
+]);
+
+export type WorkerWsInbound = z.infer<typeof WorkerWsInboundSchema>;
 
 export type WorkerWsOutbound =
   | { kind: "ping" }
-  | { kind: "cmd"; requestId: string; cmd: string; args?: unknown };
+  | { kind: "cmd"; requestId: string; cmd: string; args?: unknown }
+  | { kind: "error"; error: "protocol_error" | "frame_too_large"; message?: string };
+
+/** Close codes the server uses on worker sockets. */
+const CLOSE_POLICY_VIOLATION = 1008;
+const CLOSE_MESSAGE_TOO_BIG = 1009;
+const CLOSE_INTERNAL_ERROR = 1011;
 
 interface WorkerWsData {
   workerId?: string;
@@ -82,6 +116,14 @@ export interface WorkerWebSocketServerConfig {
    * request reply timeouts. Default: `SystemWallClock`.
    */
   clock?: WallClock;
+  /**
+   * Largest inbound frame accepted, in bytes. Bun drops larger frames at
+   * the transport (`maxPayloadLength`); the handler re-checks. Default:
+   * `DEFAULT_MAX_WORKER_FRAME_BYTES` (1 MiB).
+   */
+  maxFrameBytes?: number;
+  /** Reports errors the socket handlers caught. Default: `console.error`. */
+  onError?: (message: string, err: unknown) => void;
 }
 
 export interface WorkerCommandRequest {
@@ -99,7 +141,12 @@ export class WorkerWebSocketServer {
   /** Pending request/reply futures keyed by requestId. */
   private pending = new Map<
     string,
-    { resolve: (result: unknown) => void; reject: (err: Error) => void }
+    {
+      /** Socket the command went to; only it may answer. */
+      ws: ServerWebSocket<WorkerWsData>;
+      resolve: (result: unknown) => void;
+      reject: (err: Error) => void;
+    }
   >();
   /** Subscribers that want every inbound `frame` from any worker. */
   private frameSubs = new Set<(workerId: string, streamId: string, payload: unknown) => void>();
@@ -109,6 +156,8 @@ export class WorkerWebSocketServer {
   private readonly pongTimeoutMs: number;
   private readonly authorize?: (req: Request) => boolean;
   private readonly clock: WallClock;
+  private readonly maxFrameBytes: number;
+  private readonly onError: (message: string, err: unknown) => void;
   private heartbeatTimer?: TimerHandle;
   private nextRequestId = 1;
 
@@ -117,6 +166,8 @@ export class WorkerWebSocketServer {
     this.pongTimeoutMs = config.pongTimeoutMs ?? 30_000;
     this.authorize = config.authorize;
     this.clock = config.clock ?? SystemWallClock;
+    this.maxFrameBytes = config.maxFrameBytes ?? DEFAULT_MAX_WORKER_FRAME_BYTES;
+    this.onError = config.onError ?? ((message, err) => console.error(message, err));
   }
 
   /**
@@ -132,19 +183,25 @@ export class WorkerWebSocketServer {
     const url = new URL(req.url);
     if (url.pathname !== "/ws/worker") return undefined;
     if (this.authorize && !this.authorize(req)) {
-      return new Response("unauthorized_worker", { status: 401 });
+      return Response.json({ error: "unauthorized_worker" }, { status: 401 });
     }
     const data: WorkerWsData = {
       lastPongAt: this.clock.currentTimeMs(),
       lastSeenAt: this.clock.currentTimeMs(),
     };
     const upgraded = server.upgrade(req, { data });
-    if (!upgraded) return new Response("upgrade_failed", { status: 400 });
+    if (!upgraded) return Response.json({ error: "upgrade_failed" }, { status: 400 });
     return undefined;
   }
 
+  /**
+   * Bun websocket handlers. Each one is a crash barrier: nothing a worker
+   * sends can throw out of them (Bun exits the process on a throw in a
+   * websocket handler).
+   */
   websocketHandlers(): WebSocketHandler<WorkerWsData> {
     return {
+      maxPayloadLength: this.maxFrameBytes,
       open: (ws) => {
         // Wait for identify before adding to the workers map. Until then
         // the socket exists but isn't routable; it gets dropped on close
@@ -153,33 +210,18 @@ export class WorkerWebSocketServer {
         ws.data.lastSeenAt = this.clock.currentTimeMs();
       },
       message: (ws, raw) => {
-        const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
-        let msg: WorkerWsInbound;
         try {
-          msg = JSON.parse(text) as WorkerWsInbound;
-        } catch {
-          // Malformed frame — drop silently. Worker-side bug shouldn't
-          // crash the server.
-          return;
+          this.handleRaw(ws, raw);
+        } catch (err) {
+          this.report("[zorya] worker socket message handler failed", err);
+          this.closeQuietly(ws, CLOSE_INTERNAL_ERROR, "internal_error");
         }
-        ws.data.lastSeenAt = this.clock.currentTimeMs();
-        this.handleInbound(ws, msg);
       },
       close: (ws) => {
-        if (ws.data.workerId) {
-          // Only evict if the entry is still pointing at THIS socket — a
-          // reconnect that beats the close event shouldn't get evicted.
-          const existing = this.workers.get(ws.data.workerId);
-          if (existing === ws) {
-            this.workers.delete(ws.data.workerId);
-            for (const sub of this.connectionSubs) {
-              try {
-                sub({ workerId: ws.data.workerId, connected: false });
-              } catch {
-                /* swallow */
-              }
-            }
-          }
+        try {
+          this.handleClose(ws);
+        } catch (err) {
+          this.report("[zorya] worker socket close handler failed", err);
         }
       },
     };
@@ -231,6 +273,7 @@ export class WorkerWebSocketServer {
         }
       }, timeoutMs);
       this.pending.set(requestId, {
+        ws,
         resolve: (result) => {
           timer.clear();
           resolve(result as T);
@@ -297,6 +340,89 @@ export class WorkerWebSocketServer {
   // Internal
   // -------------------------------------------------------------------------
 
+  private handleRaw(ws: ServerWebSocket<WorkerWsData>, raw: string | Buffer): void {
+    const size = typeof raw === "string" ? Buffer.byteLength(raw, "utf8") : raw.byteLength;
+    if (size > this.maxFrameBytes) {
+      this.reject(ws, {
+        error: "frame_too_large",
+        code: CLOSE_MESSAGE_TOO_BIG,
+        message: `Frame exceeds ${this.maxFrameBytes} bytes`,
+      });
+      return;
+    }
+    const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(text);
+    } catch {
+      this.reject(ws, { error: "protocol_error", message: "Frame is not valid JSON" });
+      return;
+    }
+    const parsed = WorkerWsInboundSchema.safeParse(decoded);
+    if (!parsed.success) {
+      this.reject(ws, { error: "protocol_error", message: "Unrecognized worker message" });
+      return;
+    }
+    ws.data.lastSeenAt = this.clock.currentTimeMs();
+    this.handleInbound(ws, parsed.data);
+  }
+
+  /** Tell the worker why, then close its socket. */
+  private reject(
+    ws: ServerWebSocket<WorkerWsData>,
+    params: {
+      error: "protocol_error" | "frame_too_large";
+      message: string;
+      code?: number;
+    },
+  ): void {
+    const out: WorkerWsOutbound = { kind: "error", error: params.error, message: params.message };
+    try {
+      ws.send(JSON.stringify(out));
+    } catch {
+      /* socket already gone */
+    }
+    this.closeQuietly(ws, params.code ?? CLOSE_POLICY_VIOLATION, params.error);
+  }
+
+  private closeQuietly(ws: ServerWebSocket<WorkerWsData>, code: number, reason: string): void {
+    try {
+      ws.close(code, reason);
+    } catch {
+      /* already closed */
+    }
+  }
+
+  private report(message: string, err: unknown): void {
+    try {
+      this.onError(message, err);
+    } catch {
+      /* a broken reporter must not break the barrier */
+    }
+  }
+
+  private handleClose(ws: ServerWebSocket<WorkerWsData>): void {
+    // Commands in flight on this socket can no longer be answered.
+    for (const [requestId, entry] of this.pending) {
+      if (entry.ws !== ws) continue;
+      this.pending.delete(requestId);
+      entry.reject(new Error(`Worker "${ws.data.workerId ?? "unidentified"}" disconnected`));
+    }
+    if (!ws.data.workerId) return;
+    // Only evict if the entry is still pointing at THIS socket — a
+    // reconnect that beats the close event shouldn't get evicted.
+    const existing = this.workers.get(ws.data.workerId);
+    if (existing !== ws) return;
+    this.workers.delete(ws.data.workerId);
+    for (const sub of this.connectionSubs) {
+      try {
+        sub({ workerId: ws.data.workerId, connected: false });
+      } catch {
+        /* swallow */
+      }
+    }
+  }
+
   private handleInbound(ws: ServerWebSocket<WorkerWsData>, msg: WorkerWsInbound): void {
     switch (msg.kind) {
       case "identify": {
@@ -338,7 +464,8 @@ export class WorkerWebSocketServer {
       }
       case "reply": {
         const pending = this.pending.get(msg.requestId);
-        if (!pending) return; // stale or unknown — drop
+        // Stale, unknown, or answered by a socket the command didn't go to.
+        if (!pending || pending.ws !== ws) return;
         this.pending.delete(msg.requestId);
         if (msg.ok) pending.resolve(msg.result);
         else pending.reject(new Error(msg.error));

@@ -22,7 +22,7 @@ import type {
   RoleDefinition,
   RoleRegistry,
 } from "@promin/agent";
-import { json, jsonError, readJson } from "../router.ts";
+import { json, jsonError, parseIntParam, readJson } from "../router.ts";
 
 // Re-export so the UI bundle types responses without importing @promin/agent
 // directly (matches agents.ts / skills.ts).
@@ -44,10 +44,9 @@ function asMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-function parseIntParam(v: string | null): number | undefined {
-  if (v === null) return undefined;
-  const n = Number.parseInt(v, 10);
-  return Number.isFinite(n) ? n : undefined;
+/** Limit-style query parameter: an integer clamped to [1, 1000]. */
+function parseLimitParam(raw: string | null): number | undefined {
+  return parseIntParam({ raw, min: 1, max: 1_000 });
 }
 
 // ---------------------------------------------------------------------------
@@ -59,7 +58,7 @@ export function listRoles(deps: RoleGatewayDeps) {
     const url = new URL(req.url);
     const capability = url.searchParams.get("capability") ?? undefined;
     const tag = url.searchParams.get("tag") ?? undefined;
-    const limit = parseIntParam(url.searchParams.get("limit"));
+    const limit = parseLimitParam(url.searchParams.get("limit"));
     const cursor = url.searchParams.get("cursor") ?? undefined;
     const roles = await deps.registry.list({ capability, tag, limit, cursor });
     return json(200, { roles } satisfies RolesListResponse);

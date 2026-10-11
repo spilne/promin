@@ -18,7 +18,13 @@ export class RunEventBus {
   publish(workflowId: string, event: RunEvent): void {
     const set = this.listeners.get(workflowId);
     if (!set) return;
-    for (const l of set) l(event);
+    for (const l of set) {
+      try {
+        l(event);
+      } catch {
+        // One broken subscriber must not starve the others.
+      }
+    }
   }
 
   subscribe(workflowId: string, listener: Listener): () => void {

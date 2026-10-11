@@ -49,7 +49,8 @@
     "@promin/agent": "workspace:*",
     "@promin/workflow": "workspace:*",
     "@promin/workflow-remote": "workspace:*",
-    "marked": "^18.0.2"
+    "marked": "^18.0.2",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@promin/postgres": "workspace:*",

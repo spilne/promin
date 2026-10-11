@@ -16,7 +16,10 @@
 import { parseApprovalSignal } from "@promin/agent";
 import type { SignalPayloadSchema, SignalTokenRecord, WorkflowStorage } from "@promin/workflow";
 import { SystemWallClock, validate, type WallClock } from "@promin/workflow";
-import { json, jsonError, readJson } from "../router.ts";
+import { isoOrNull, json, jsonError, readJson } from "../router.ts";
+
+/** Default cap on a minted token's validity window: 90 days. */
+export const DEFAULT_MAX_SIGNAL_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 
 export interface SignalTokenRoutesDeps {
   storage: WorkflowStorage;
@@ -28,6 +31,8 @@ export interface SignalTokenRoutesDeps {
   publicBaseUrl?: string;
   /** Time source for minted expiry and the completion expiry check. Default: `SystemWallClock`. */
   clock?: WallClock;
+  /** Largest `expiresInMs` a mint may request. Default: `DEFAULT_MAX_SIGNAL_TOKEN_TTL_MS`. */
+  maxTtlMs?: number;
 }
 
 export interface MintTokenRequest {
@@ -59,7 +64,8 @@ export interface DescribeSignalTokenResponse {
   signalName: string;
   /** True when the signal follows the `approve:<callId>` convention. */
   isApproval: boolean;
-  expiresAt: string;
+  /** Null when the stored expiry is unreadable; such a token is treated as expired. */
+  expiresAt: string | null;
   completedAt: string | null;
   /** True when the workflow is still suspended on this signal. */
   pending: boolean;
@@ -78,9 +84,10 @@ export interface SignalTokenDto {
   signalName: string;
   tags: string[];
   idempotencyKey: string | null;
-  expiresAt: string;
+  /** Null when the stored date is unreadable. */
+  expiresAt: string | null;
   completedAt: string | null;
-  createdAt: string;
+  createdAt: string | null;
 }
 
 /**
@@ -96,8 +103,32 @@ export function mintSignalToken(deps: SignalTokenRoutesDeps) {
     if (!signalName) return jsonError(400, "missing_signal_name");
 
     const body = await readJson<MintTokenRequest>(req);
-    if (!body || typeof body.expiresInMs !== "number" || body.expiresInMs <= 0) {
+    if (!body || typeof body !== "object" || body.expiresInMs === undefined) {
       return jsonError(400, "missing_expires_in_ms");
+    }
+    const maxTtlMs = deps.maxTtlMs ?? DEFAULT_MAX_SIGNAL_TOKEN_TTL_MS;
+    const ttl = body.expiresInMs;
+    if (typeof ttl !== "number" || !Number.isInteger(ttl) || ttl <= 0 || ttl > maxTtlMs) {
+      return jsonError(
+        400,
+        "invalid_expires_in_ms",
+        `expiresInMs must be an integer in [1, ${maxTtlMs}]`,
+      );
+    }
+    if (
+      body.tags !== undefined &&
+      (!Array.isArray(body.tags) ||
+        body.tags.length > 64 ||
+        !body.tags.every((t) => typeof t === "string" && t.length <= 256))
+    ) {
+      return jsonError(400, "invalid_tags", "tags must be at most 64 strings of <= 256 chars");
+    }
+    if (
+      body.idempotencyKey !== undefined &&
+      body.idempotencyKey !== null &&
+      (typeof body.idempotencyKey !== "string" || body.idempotencyKey.length > 256)
+    ) {
+      return jsonError(400, "invalid_idempotency_key", "idempotencyKey must be a string <= 256");
     }
 
     // Verify the workflow exists — failing fast at mint time prevents
@@ -107,7 +138,7 @@ export function mintSignalToken(deps: SignalTokenRoutesDeps) {
 
     const tokenId = randomToken(16);
     const bearer = randomToken(32);
-    const expiresAt = new Date((deps.clock ?? SystemWallClock).currentTimeMs() + body.expiresInMs);
+    const expiresAt = new Date((deps.clock ?? SystemWallClock).currentTimeMs() + ttl);
 
     const { record, isCached } = await deps.storage.createSignalToken({
       tokenId,
@@ -125,7 +156,9 @@ export function mintSignalToken(deps: SignalTokenRoutesDeps) {
         ? `${deps.publicBaseUrl}/api/signal-tokens/${record.tokenId}/complete`
         : null,
       bearer: record.bearer,
-      expiresAt: record.expiresAt.toISOString(),
+      // A cached record minted before validation existed may hold an
+      // unreadable expiry; report it as already expired.
+      expiresAt: isoOrNull(record.expiresAt) ?? new Date(0).toISOString(),
       isCached,
     };
     return json(isCached ? 200 : 201, response);
@@ -166,7 +199,7 @@ export function completeSignalToken(deps: SignalTokenRoutesDeps) {
     }
 
     const now = (deps.clock ?? SystemWallClock).now();
-    if (token.expiresAt.getTime() <= now.getTime()) {
+    if (isExpired({ expiresAt: token.expiresAt, now })) {
       return jsonError(408, "token_expired");
     }
 
@@ -276,8 +309,8 @@ export function describeSignalToken(deps: SignalTokenRoutesDeps) {
       workflowName: wf.workflowName,
       signalName: token.signalName,
       isApproval: parseApprovalSignal(token.signalName) !== null,
-      expiresAt: token.expiresAt.toISOString(),
-      completedAt: token.completedAt ? token.completedAt.toISOString() : null,
+      expiresAt: isoOrNull(token.expiresAt),
+      completedAt: isoOrNull(token.completedAt),
       pending,
       ...(jsonSchema !== undefined && { jsonSchema }),
     };
@@ -306,10 +339,16 @@ function toDto(record: SignalTokenRecord): SignalTokenDto {
     signalName: record.signalName,
     tags: [...record.tags],
     idempotencyKey: record.idempotencyKey,
-    expiresAt: record.expiresAt.toISOString(),
-    completedAt: record.completedAt ? record.completedAt.toISOString() : null,
-    createdAt: record.createdAt.toISOString(),
+    expiresAt: isoOrNull(record.expiresAt),
+    completedAt: isoOrNull(record.completedAt),
+    createdAt: isoOrNull(record.createdAt),
   };
+}
+
+/** An unreadable expiry counts as expired, never as "valid forever". */
+function isExpired(params: { expiresAt: Date; now: Date }): boolean {
+  const t = params.expiresAt.getTime();
+  return !Number.isFinite(t) || t <= params.now.getTime();
 }
 
 function extractBearer(req: Request): string | null {
