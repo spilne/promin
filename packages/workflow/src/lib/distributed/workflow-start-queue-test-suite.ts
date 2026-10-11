@@ -454,6 +454,23 @@ export function workflowStartQueueTestSuite(
       expect(now?.id).toBe(rec!.id);
     });
 
+    it("a delayed release of a start enqueued again during its claim is claimable at once", async () => {
+      const q = await make();
+      const specs = [{ name: "wf", versions: ANY_VERSION }];
+      await q.enqueue({ workflowId: "h", workflowName: "wf", input: {} });
+      const [rec] = await q.claim({ workflowSpecs: specs, limit: 1 });
+      // A resume enqueues the run while the worker still holds it; the worker
+      // then releases with a delay chosen from the state it read before.
+      await q.enqueue({ workflowId: "h", workflowName: "wf", input: {} });
+      expect(
+        await q.release({ id: rec!.id, claimToken: rec!.claimToken!, delayMs: 3_600_000 }),
+      ).toBe(true);
+
+      const [again] = await q.claim({ workflowSpecs: specs, limit: 1 });
+      expect(again?.id).toBe(rec!.id);
+      expect(again?.requeued).toBeFalsy();
+    });
+
     it("a claim retried with the same claimId gets the same starts back", async () => {
       const q = await make();
       for (const id of ["a", "b", "c"]) {

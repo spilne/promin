@@ -309,10 +309,13 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
   async release(params: WorkflowStartReleaseParams): Promise<boolean> {
     const delayMs = Math.max(0, params.delayMs ?? 0);
     const availableAt = delayMs > 0 ? this.clock.currentTimeMs() + delayMs : null;
+    // A run enqueued again during the claim (`requeued`) is claimable at
+    // once: the delay was chosen from the state before that enqueue.
     this.db
       .query(
         `UPDATE ${this._t}
-           SET status = 'pending', requeued = 0, available_at = ?, claimed_at = NULL,
+           SET status = 'pending', requeued = 0,
+               available_at = CASE WHEN requeued = 1 THEN NULL ELSE ? END, claimed_at = NULL,
                claimed_by = NULL, claim_token = NULL, heartbeat_at = NULL
          WHERE id = ? AND status = 'claimed' AND claim_token = ?`,
       )

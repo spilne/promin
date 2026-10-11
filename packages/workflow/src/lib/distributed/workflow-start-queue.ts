@@ -165,7 +165,8 @@ export interface WorkflowStartQueue {
   complete(params: WorkflowStartClaimRef): Promise<boolean>;
   /**
    * Give a claimed start back without completing it: it is pending again
-   * and claimable once `delayMs` has passed. Fenced like `complete`.
+   * and claimable once `delayMs` has passed — or at once when the run was
+   * enqueued again during the claim (`requeued`). Fenced like `complete`.
    */
   release(params: WorkflowStartReleaseParams): Promise<boolean>;
   /** Snapshot, oldest first — used by `GET /api/worker-protocol/starts` for debugging. */
@@ -309,7 +310,9 @@ export class InMemoryWorkflowStartQueue implements WorkflowStartQueue {
   async release(params: WorkflowStartReleaseParams): Promise<boolean> {
     const rec = this.current(params);
     if (!rec) return false;
-    const delayMs = Math.max(0, params.delayMs ?? 0);
+    // A run enqueued again during the claim (`requeued`) is claimable at
+    // once: the delay was chosen from the state before that enqueue.
+    const delayMs = rec.requeued ? 0 : Math.max(0, params.delayMs ?? 0);
     this.records.set(params.id, {
       ...unclaimed(rec),
       ...(delayMs > 0 && { availableAt: this.clock.currentTimeMs() + delayMs }),

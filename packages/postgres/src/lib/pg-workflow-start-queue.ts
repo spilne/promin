@@ -214,7 +214,15 @@ export class PgWorkflowStartQueue implements WorkflowStartQueue {
     const delayMs = Math.max(0, Math.round(params.delayMs ?? 0));
     const rows = await this.db
       .update(workflowStarts)
-      .set(pendingAgain(delayMs > 0 ? sql`NOW() + ${intervalMs(delayMs)}` : null))
+      // A run enqueued again during the claim (`requeued`) is claimable at
+      // once: the delay was chosen from the state before that enqueue.
+      .set(
+        pendingAgain(
+          delayMs > 0
+            ? sql`CASE WHEN ${workflowStarts.requeued} THEN NULL ELSE NOW() + ${intervalMs(delayMs)} END`
+            : null,
+        ),
+      )
       .where(
         and(
           eq(workflowStarts.id, params.id),
