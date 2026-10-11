@@ -27,6 +27,7 @@ import {
   SqliteSkillRegistry,
   SqliteWorkerRegistry,
   SqliteWorkflowAdvertisementRegistry,
+  SqliteWorkflowSchemaStore,
   SqliteWorkflowStartQueue,
   SqliteWorkflowStorage,
 } from "@promin/sqlite";
@@ -72,6 +73,8 @@ export interface SqliteZoryaStack {
   readonly knowledgeBaseStore: SqliteKnowledgeBaseStore;
   readonly memoryStore: SqliteMemoryStore;
   readonly dagRegistry: SqliteDagRegistry;
+  /** Drafts and published versions of builder workflows (`ZoryaWorkflowBuilder`). */
+  readonly workflowSchemaStore: SqliteWorkflowSchemaStore;
   /** Present when `secretsPassphrase` was given. */
   readonly secretsStorage?: SqliteSecretsStorage;
 }
@@ -132,6 +135,7 @@ export function createSqliteZoryaStack(config: SqliteZoryaStackConfig): SqliteZo
     knowledgeBaseStore: SqliteKnowledgeBaseStore.make({ db: sqlite }),
     memoryStore: SqliteMemoryStore.make({ db: sqlite, now }),
     dagRegistry: SqliteDagRegistry.make({ db: sqlite, now }),
+    workflowSchemaStore: SqliteWorkflowSchemaStore.make({ db: sqlite }),
     ...(config.secretsPassphrase !== undefined && {
       secretsStorage: SqliteSecretsStorage.make({
         db: sqlite,

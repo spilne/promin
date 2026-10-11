@@ -43,6 +43,9 @@ import {
   createUrlKnowledgeSourceAdapter,
 } from "../src/index.ts";
 import { researchSynthesisRecipe } from "./dags/research-synthesis.ts";
+import { MapActivityCatalog } from "@promin/workflow";
+import { ZoryaWorkflowBuilder } from "../src/index.ts";
+import { demoActivities } from "./workflow-steps/index.ts";
 import { createPostgresDb } from "@spilne/perfect-postgres";
 import {
   migrate as migratePostgres,
@@ -1081,6 +1084,16 @@ const workflows = new LocalWorkflows({
   }),
 });
 
+// Visual workflow builder (Builder page): drafts and published versions live
+// in the stack's SQLite store; steps pick from the activity library in
+// examples/workflow-steps. Published workflows run on `workflows` above and
+// version through its registry.
+const workflowBuilder = new ZoryaWorkflowBuilder({
+  workflows,
+  activities: new MapActivityCatalog(demoActivities()),
+  store: stack.workflowSchemaStore,
+});
+
 // Tool catalog drives GET /api/agents/_catalog/tools (Designer's tool
 // multi-select). Aggregates the host's static tools (the same map
 // resolveLocalAgent picks from) + the file-discovered registry. MCP
@@ -1277,6 +1290,7 @@ const server = ZoryaServer.builder()
   .fragments(fragments)
   .dags(dags)
   .knowledgeBases(knowledgeBases)
+  .workflowBuilder(workflowBuilder)
   // BYOK / per-tenant API keys / MCP credentials live here. Exposes
   // /api/secrets HTTP CRUD + the dashboard's Secrets page; the agent
   // resolver wiring (in `agents.resolve` above) reads model.credentialRef

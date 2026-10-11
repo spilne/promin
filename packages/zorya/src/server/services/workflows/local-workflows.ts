@@ -118,7 +118,9 @@ export class LocalWorkflows extends ZoryaWorkflows {
 
   constructor(config: LocalWorkflowsConfig) {
     super({
-      definitions: config.definitions,
+      // Own copy: `define` / `undefine` change it in place, so every reader
+      // holding `definitions` (routes, the run service) sees the change.
+      definitions: { ...config.definitions },
       ...(config.versionRegistry && { versionRegistry: config.versionRegistry }),
       ...(config.fallback && { fallback: config.fallback }),
       ...(config.cluster && { cluster: config.cluster }),
@@ -206,6 +208,24 @@ export class LocalWorkflows extends ZoryaWorkflows {
 
   protected canHandle(name: string): boolean {
     return Object.hasOwn(this.definitions, name);
+  }
+
+  /**
+   * Add or replace the in-process definition of `workflow.name` at runtime
+   * (the workflow builder publishes this way). New runs start with it, or
+   * with the promoted version; runs of other versions resolve through the
+   * version registry, so register every version a run may need there.
+   */
+  define(workflow: Workflow<unknown, unknown>): void {
+    (this.definitions as Record<string, Workflow<unknown, unknown>>)[workflow.name] = workflow;
+  }
+
+  /**
+   * Remove a definition. Runs of it that are still in flight are no longer
+   * driven by this layer, so callers check there are none first.
+   */
+  undefine(name: string): void {
+    delete (this.definitions as Record<string, Workflow<unknown, unknown>>)[name];
   }
 
   protected async dispatch(

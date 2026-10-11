@@ -27,6 +27,8 @@ interface WorkflowDetailProps {
   name: string;
   onBack: () => void;
   onOpenRun: (id: string) => void;
+  /** Open a builder-authored workflow in the workflow builder. */
+  onOpenBuilder?: () => void;
   /** Navigate to the runs list pre-filtered by `(name, version)`. */
   onOpenVersionRuns?: (version: string) => void;
 }
@@ -35,6 +37,7 @@ export function WorkflowDetail({
   name,
   onBack,
   onOpenRun,
+  onOpenBuilder,
   onOpenVersionRuns,
 }: WorkflowDetailProps) {
   const [triggering, setTriggering] = useState(false);
@@ -99,6 +102,11 @@ export function WorkflowDetail({
         </span>
         <div class="flex-1" />
         <Sparkline runs={sparkline} />
+        {def.type === "builder" && onOpenBuilder && (
+          <button class="btn btn-sm btn-ghost" onClick={onOpenBuilder}>
+            Edit in builder
+          </button>
+        )}
         <button class="btn btn-sm btn-primary" onClick={() => setTriggering(true)}>
           Trigger
         </button>

@@ -85,6 +85,15 @@ import type {
   KnowledgeSourcesResponse,
   KnowledgeSourceSummary,
 } from "../../server/routes/knowledge-bases.ts";
+import type {
+  BuilderActivitiesResponse,
+  BuilderValidateResponse,
+  BuilderWorkflow,
+  BuilderWorkflowPublishRequest,
+  BuilderWorkflowSaveRequest,
+  BuilderWorkflowsResponse,
+  PublishResult,
+} from "../../server/routes/workflow-builder.ts";
 import type { SignalsResponse } from "../../server/routes/signals.ts";
 import type {
   CompleteTokenResponse,
@@ -763,6 +772,58 @@ export const api = {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
+    });
+  },
+
+  // ---------------------------------------------------------------------
+  // Workflow builder — workflows authored as JSON on the Builder page
+  // ---------------------------------------------------------------------
+  listBuilderActivities(): Promise<BuilderActivitiesResponse> {
+    return req<BuilderActivitiesResponse>(`/api/workflow-builder/activities`);
+  },
+  validateBuilderWorkflow(schema: unknown): Promise<BuilderValidateResponse> {
+    return req<BuilderValidateResponse>(`/api/workflow-builder/validate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ schema }),
+    });
+  },
+  listBuilderWorkflows(): Promise<BuilderWorkflowsResponse> {
+    return req<BuilderWorkflowsResponse>(`/api/workflow-builder/workflows`);
+  },
+  getBuilderWorkflow(name: string): Promise<BuilderWorkflow> {
+    return req<BuilderWorkflow>(`/api/workflow-builder/workflows/${encodeURIComponent(name)}`);
+  },
+  createBuilderWorkflow(schema: unknown): Promise<BuilderWorkflow> {
+    return req<BuilderWorkflow>(`/api/workflow-builder/workflows`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ schema }),
+    });
+  },
+  saveBuilderWorkflow(name: string, body: BuilderWorkflowSaveRequest): Promise<BuilderWorkflow> {
+    return req<BuilderWorkflow>(`/api/workflow-builder/workflows/${encodeURIComponent(name)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  publishBuilderWorkflow(
+    name: string,
+    body: BuilderWorkflowPublishRequest = {},
+  ): Promise<PublishResult> {
+    return req<PublishResult>(
+      `/api/workflow-builder/workflows/${encodeURIComponent(name)}/publish`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+  },
+  deleteBuilderWorkflow(name: string): Promise<void> {
+    return req<void>(`/api/workflow-builder/workflows/${encodeURIComponent(name)}`, {
+      method: "DELETE",
     });
   },
   listSkillSources(): Promise<SkillSourcesResponse> {

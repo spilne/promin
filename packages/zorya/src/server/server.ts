@@ -46,6 +46,7 @@ import type { ZoryaFragments } from "./services/fragments/index.ts";
 import type { ZoryaKnowledgeBases } from "./services/knowledge/index.ts";
 import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
+import type { ZoryaWorkflowBuilder } from "./services/workflow-builder/index.ts";
 import { WorkerWakeups } from "./services/worker-wakeups.ts";
 import { WorkerWebSocketServer } from "./services/worker-ws-server.ts";
 import { RunRetention } from "./services/workflows/run-retention.ts";
@@ -77,6 +78,7 @@ import { mountRpc } from "./mount/mount-rpc.ts";
 import { mountRuns } from "./mount/mount-runs.ts";
 import { mountSchedules } from "./mount/mount-schedules.ts";
 import { mountStatic } from "./mount/mount-static.ts";
+import { mountWorkflowBuilder } from "./mount/mount-workflow-builder.ts";
 import { ZoryaServerBuilder } from "./server-builder.ts";
 
 export class ZoryaServer {
@@ -87,6 +89,8 @@ export class ZoryaServer {
   readonly fragments?: ZoryaFragments;
   readonly dags?: ZoryaDags;
   readonly knowledgeBases?: ZoryaKnowledgeBases;
+  /** The visual workflow builder, when configured (`/api/workflow-builder/*`). */
+  readonly workflowBuilder?: ZoryaWorkflowBuilder;
   /**
    * The workflows layer's version registry (`LocalWorkflowsConfig.versionRegistry`),
    * which `/api/workflows/:name/versions/*` manage. One registry: a promote
@@ -157,6 +161,7 @@ export class ZoryaServer {
     if (config.fragments) this.fragments = config.fragments;
     if (config.dags) this.dags = config.dags;
     if (config.knowledgeBases) this.knowledgeBases = config.knowledgeBases;
+    if (config.workflowBuilder) this.workflowBuilder = config.workflowBuilder;
     if (config.secrets) this.secrets = config.secrets;
     if (config.namespaces) this.namespaces = config.namespaces;
     const namespaces = this.namespaces;
@@ -173,6 +178,11 @@ export class ZoryaServer {
     const advertisements = firstInChain((l) => l.advertisements);
     const definitions = firstInChain((l) => l.definitions);
     const queued = layers.find((l): l is QueuedWorkflows => l instanceof QueuedWorkflows);
+    if (this.workflowBuilder && !layers.includes(this.workflowBuilder.workflows)) {
+      throw new Error(
+        "ZoryaServer: the workflowBuilder's LocalWorkflows layer is not part of `workflows` — builder workflows would never run",
+      );
+    }
 
     this.logger = config.logger ?? console;
     this.planes = new AuthPlanes({
@@ -227,6 +237,7 @@ export class ZoryaServer {
         skills: this.skills,
         fragments: this.fragments,
         knowledgeBases: this.knowledgeBases,
+        workflowBuilder: this.workflowBuilder,
         retention: this.retention,
         namespaces: namespaces && {
           start: async () => {
@@ -303,7 +314,10 @@ export class ZoryaServer {
       // One registry behind /rpc/worker and the Workers page, in every mode.
       workers: config.workers ?? new RegistryBackedWorkersProvider(this.workerRegistry, { clock }),
       metrics: config.metrics ?? new StorageMetricsProvider(storage),
-      sampleInput: config.sampleInput,
+      sampleInput: sampleInputWithBuilder({
+        sampleInput: config.sampleInput,
+        builder: this.workflowBuilder,
+      }),
       sseIntervalMs: config.sseIntervalMs,
       signalTokenMaxTtlMs: config.signalTokenMaxTtlMs,
       publicBaseUrl: config.publicBaseUrl,
@@ -367,6 +381,7 @@ export class ZoryaServer {
         }),
       });
     }
+    if (this.workflowBuilder) mountWorkflowBuilder({ router, builder: this.workflowBuilder });
     if (config.uiDir) mountStatic({ router, uiDir: config.uiDir });
   }
 
@@ -387,7 +402,7 @@ export class ZoryaServer {
 
   /**
    * Start the background services (workflows, scheduler, agents, skills,
-   * fragments, knowledge bases) and the worker socket. A service whose start fails is retried
+   * fragments, knowledge bases, workflow builder) and the worker socket. A service whose start fails is retried
    * with backoff; `/api/ready` and `ready()` reflect progress. `listen()`
    * calls this. Idempotent.
    */
@@ -466,4 +481,14 @@ export class ZoryaServer {
       this.logger.error("[zorya] closing connections failed", err);
     }
   }
+}
+
+/** The host's sample inputs, falling back to the builder's inferred ones. */
+function sampleInputWithBuilder(params: {
+  readonly sampleInput: ((workflowName: string) => unknown) | undefined;
+  readonly builder: ZoryaWorkflowBuilder | undefined;
+}): ((workflowName: string) => unknown) | undefined {
+  const { sampleInput, builder } = params;
+  if (!builder) return sampleInput;
+  return (name) => sampleInput?.(name) ?? builder.sampleInput(name);
 }

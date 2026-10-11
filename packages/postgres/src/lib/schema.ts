@@ -462,6 +462,37 @@ export const workflowRegistry = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Workflows authored as JSON (`WorkflowSchema`) in a visual editor: one
+// mutable draft per name, fenced by `revision`, plus immutable published
+// versions whose compiled workflows the version registry above serves.
+// Timestamps are millisecond epochs (BIGINT), as in the SQLite store.
+// ---------------------------------------------------------------------------
+
+export const workflowSchemaDraft = pgTable("wf_workflow_schema_draft", {
+  name: text("name").primaryKey(),
+  schema: jsonb("schema").$type<Record<string, unknown>>().notNull(),
+  revision: integer("revision").notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+});
+
+export const workflowSchemaVersion = pgTable(
+  "wf_workflow_schema_version",
+  {
+    name: text("name").notNull(),
+    version: text("version").notNull(),
+    sequence: integer("sequence").notNull(),
+    schema: jsonb("schema").$type<Record<string, unknown>>().notNull(),
+    contentHash: text("content_hash").notNull(),
+    publishedAt: bigint("published_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.name, t.version] }),
+    uniqueIndex("wf_workflow_schema_version_sequence_uniq").on(t.name, t.sequence),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Worker registry — persisted view of active workers across the fleet so a
 // horizontally-scaled Zorya (or any other observer) sees the same worker
 // set from every instance. Workers heartbeat into the same table; readers

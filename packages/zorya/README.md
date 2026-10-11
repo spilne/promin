@@ -268,6 +268,7 @@ const server = ZoryaServer.builder()
 | `scheduler`                   | none                    | `ZoryaScheduler`: schedule CRUD, tick loop, emit-now. Without it `GET /api/schedules` answers `configured: false`.                                                                                                                                                               |
 | `agents`                      | none                    | `ZoryaAgents`: the agent gateway, plus memory, instances and roles when their stores are set.                                                                                                                                                                                    |
 | `skills`, `fragments`, `dags` | none                    | Registry services with CRUD routes.                                                                                                                                                                                                                                              |
+| `workflowBuilder`             | none                    | `ZoryaWorkflowBuilder`: the Builder page and `/api/workflow-builder/*`. Its `LocalWorkflows` layer must be in `workflows`. See [Workflow builder](#workflow-builder).                                                                                                            |
 | `secrets`                     | none                    | `SecretsStorage` for `/api/secrets` and BYOK credential resolution.                                                                                                                                                                                                              |
 | `namespaces`                  | free-form namespaces    | `NamespaceRegistry` for `/api/namespaces`; new runs, schedules and agent state then need a registered, active namespace (see [Namespaces](#namespaces)).                                                                                                                         |
 | `webhooks`                    | none                    | `{ sources, deliveries? }`: signed webhook ingress into agents. Mounted only when `agents` is set. `deliveries` (replay dedup) defaults to a store on the workflow storage, shared across instances.                                                                             |
@@ -310,7 +311,7 @@ returns every store a single-process Zorya uses on it: workflow `storage`
 and a `runner` over it, `schedulerStorage`, the worker protocol's
 `workflowStarts`, `advertisements` and `workerRegistry`, the
 `namespaceRegistry`, the agent
-registries and stores, and `secretsStorage` — only when a
+registries and stores, the builder's `workflowSchemaStore`, and `secretsStorage` — only when a
 `secretsPassphrase` is given; there is no default passphrase. Larger
 deployments build stores themselves, or replace some of these (the demo
 moves agent state to Postgres with `ZORYA_PG_URL`).
@@ -345,6 +346,7 @@ line; internal detail never reaches the caller.
 | Runs         | `GET /api/runs`, `GET /api/runs/:id`, `.../signals`, `.../attempts`, `.../history`, `.../children`, `.../journal/:stepName`; `POST /api/runs/:id/{cancel,signal,rerun,resume,mark-success,mark-failed}`                     |
 | Triggering   | `POST /api/workflows/:name/runs` (`{ input, workflowId?, version?, namespace?, metadata? }`); a repeated `workflowId` for the same workflow answers with the existing run; for another workflow, `409 workflow_id_conflict` |
 | Workflows    | `GET /api/workflows`, `.../definitions`, `.../sparklines`, `/api/workflows/:name/{definition,grid,history}`                                                                                                                 |
+| Builder      | `/api/workflow-builder/*` (see [Workflow builder](#workflow-builder))                                                                                                                                                       |
 | Versions     | `GET /api/workflows/:name/versions`, `.../versions/active`; `POST .../versions/:version/promote`, `POST .../rollback`                                                                                                       |
 | Signals      | `GET /api/signals`; signal tokens: `POST /api/runs/:id/signals/:name/token`, `GET /api/runs/:id/signal-tokens`, public `describe` / `complete`                                                                              |
 | Live data    | `GET /api/runs/:id/events` (SSE), `GET /api/runs/:id/streams/:streamId` (SSE), `.../chunks`, `POST /api/runs/:id/streams/:streamId`, `GET /api/runs/:id/agent-stream` (SSE), `POST /api/runs/:id/query`                     |
@@ -469,6 +471,98 @@ under `root` only. Implement `KnowledgeSourceAdapter` for other sources.
 The service reads the store once at start, so replicas sharing a store see
 each other's new bases after a restart; serve the Knowledge page from one
 replica, and use a durable retriever so searches agree across replicas.
+
+### Workflow builder
+
+The dashboard's **Builder** page composes workflows on a canvas from
+activities the host registers, publishes them as versions and runs them like
+any other workflow. A builder workflow is a JSON `WorkflowSchema` (the
+workflow package's visual-editor IR, compiled by `compileWorkflow`), so every
+schema node kind is available: activity steps, branch (a boolean condition
+activity picks one of two activities), parallel, map, sleep, signal and
+approval.
+
+```ts
+import { succeed } from "@spilne/perfect-core";
+import { MapActivityCatalog } from "@promin/workflow";
+import { ZoryaWorkflowBuilder } from "@promin/zorya";
+
+const activities = new MapActivityCatalog([
+  {
+    id: "text.uppercase",
+    title: "Uppercase text",
+    category: "Text",
+    inputSchema: { type: "string" },
+    outputSchema: { type: "string" },
+    factory: () => (ctx) => succeed(String(ctx.prev).toUpperCase()),
+  },
+]);
+const workflowBuilder = new ZoryaWorkflowBuilder({
+  workflows, // the LocalWorkflows layer; it needs a versionRegistry
+  activities,
+  store: stack.workflowSchemaStore, // or PostgresWorkflowSchemaStore; default in memory
+});
+ZoryaServer.builder().workflows(workflows).workflowBuilder(workflowBuilder);
+```
+
+The catalog's metadata (title, category, description, JSON Schemas for
+config, input and output, default config) feeds the palette, the config forms
+and the input inference; activities with a boolean output are offered as
+branch conditions. The demo's library is in `examples/workflow-steps/`.
+
+How a workflow moves from the canvas to runs:
+
+- **Draft.** Each workflow has one draft. Every save is validated with
+  `validateWorkflowSchema` and compiled against the catalog, so cycles,
+  dangling dependencies, unknown activities and config an activity factory
+  rejects answer `400 invalid_workflow` with one issue per problem. A
+  workflow has at most `maxSteps` steps (default 200); request bodies are
+  bounded by `maxRequestBodySize`.
+- **Publish.** Publishing compiles the draft as the next version (`1`, `2`,
+  …), registers it in the `LocalWorkflows` layer's version registry, makes it
+  the layer's in-process definition and promotes it (unless `promote:
+false`). Publishing unchanged content (canvas positions do not count)
+  creates nothing. New runs start on the promoted version through the
+  ordinary trigger path (`POST /api/workflows/:name/runs`, schedules, the
+  Workflows page — including its namespace checks); runs started on an older
+  version resolve it through the registry and finish on it. Versions appear
+  on the workflow's Versions panel, where they can be promoted or rolled
+  back like any other.
+- **Test run.** The builder publishes when the draft has unpublished changes,
+  then starts a normal run with the test input and opens it.
+- **Concurrent edits.** Saves and publishes carry the draft `revision` they
+  were made from; a stale one answers `409 revision_conflict` with the
+  current revision, and the editor offers to reload or overwrite. Edits are
+  never merged silently.
+- **Rename and delete.** A workflow's name is its identity (runs, schedules
+  and versions refer to it), so renaming is "Save as": a new workflow, the
+  old one and its runs untouched. Delete removes the draft and every version
+  and stops serving the workflow; it answers `409 workflow_in_use` while any
+  run of it has not ended. Names that a code-defined or host-registered
+  workflow uses are refused (`409 workflow_name_reserved`).
+- **Restarts.** `start()` recompiles every stored version, registers it again
+  and defines the newest. A version that no longer compiles (an activity was
+  removed) is skipped and reported as the workflow's `loadError`. Each
+  replica defines what it loaded at start or published itself; in a cluster,
+  publish from one replica or restart the others.
+
+The trigger form of a builder workflow is pre-filled from its declared
+`inputSchema`, else from the input schema of the activity its first root step
+reads (`sampleInput` from the host still wins).
+
+| Route                                                  |                                                                              |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `GET /api/workflow-builder/activities`                 | the activity palette                                                         |
+| `POST /api/workflow-builder/validate`                  | `{ schema }` → the issues a save would refuse it for                         |
+| `GET/POST /api/workflow-builder/workflows`             | list; create `{ schema }` (409 `workflow_exists` / `workflow_name_reserved`) |
+| `GET/PUT/DELETE /api/workflow-builder/workflows/:name` | draft and versions; save `{ schema, revision }`; delete                      |
+| `POST /api/workflow-builder/workflows/:name/publish`   | `{ revision?, promote? }` → `{ workflow, version, created }` (201 when new)  |
+
+Stores: `InMemoryWorkflowSchemaStore` (`@promin/workflow`),
+`SqliteWorkflowSchemaStore` (`@promin/sqlite`, also `stack.workflowSchemaStore`)
+and `PostgresWorkflowSchemaStore` (`@promin/postgres`, tables
+`wf_workflow_schema_draft` and `wf_workflow_schema_version`) all pass
+`workflowSchemaStoreTestSuite` from `@promin/workflow/testing`.
 
 ## Writing and running a worker
 
@@ -597,12 +691,14 @@ src/server/
     mount-runs.ts      runs, workflows, versions, signals, streams, workers, metrics
     mount-agents.ts    agent gateway, memory, instances, roles
     mount-registries.ts skills, fragments, secrets, DAGs
+    mount-workflow-builder.ts the workflow builder API
     mount-ingress.ts   webhooks, remote deployments
     mount-schedules.ts schedules
     mount-rpc.ts       /rpc/storage, /rpc/worker, advertisements, start queue
     mount-static.ts    dashboard assets
   routes/              route handlers (routes/agents/ split by concern)
   services/            ZoryaWorkflows layers, scheduler, agents, worker socket
+src/shared/            pure code the server and the dashboard share (input inference)
 src/ui/                dashboard (Preact), built by scripts/build-ui.ts
 examples/              the demo server, its workflows, agents and tools
 e2e/                   multi-process Postgres end-to-end tests

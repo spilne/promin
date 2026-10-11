@@ -124,6 +124,13 @@ export class WorkflowCompilationError extends Error {
 export function compileWorkflow<Input = unknown>(params: {
   schema: WorkflowSchema;
   registry: ActivityRegistry;
+  /**
+   * Version tag of the compiled workflow (`workflow({ version })`), needed to
+   * register it in a `WorkflowVersionRegistry`. Unset by default.
+   */
+  version?: string;
+  /** Workflow type recorded on its runs (`workflow({ type })`). */
+  type?: string;
 }): Workflow<Input, unknown> {
   const { schema, registry } = params;
 
@@ -149,7 +156,11 @@ export function compileWorkflow<Input = unknown>(params: {
 
   // 4. Build WorkflowBuilder chain
   // Use `any` for the builder — generics can't be tracked across a dynamic loop
-  let builder: any = workflow<Input>({ name: schema.name });
+  let builder: any = workflow<Input>({
+    name: schema.name,
+    ...(params.version !== undefined && { version: params.version }),
+    ...(params.type !== undefined && { type: params.type }),
+  });
 
   for (const stepName of sorted) {
     const step = stepsByName.get(stepName)!;
@@ -414,5 +425,40 @@ function validateDag(schema: WorkflowSchema, registry: ActivityRegistry): string
     }
   }
 
+  const cycle = cycleSteps(schema);
+  if (cycle.length > 0) {
+    issues.push(`Dependency cycle between steps: ${cycle.map((name) => `"${name}"`).join(", ")}`);
+  }
+
   return issues;
+}
+
+/**
+ * Steps that sit on or downstream of a dependency cycle (empty when the
+ * graph is acyclic). Dependencies on missing steps are ignored here; the
+ * caller reports them separately.
+ */
+function cycleSteps(schema: WorkflowSchema): string[] {
+  const names = new Set(schema.steps.map((s) => s.name));
+  const remaining = new Map(
+    schema.steps.map((s) => [s.name, stepDependsOn(s).filter((d) => names.has(d)).length]),
+  );
+  const dependents = new Map<string, string[]>();
+  for (const step of schema.steps) {
+    for (const dep of stepDependsOn(step)) {
+      if (!names.has(dep)) continue;
+      dependents.set(dep, [...(dependents.get(dep) ?? []), step.name]);
+    }
+  }
+  const ready = [...remaining].filter(([, n]) => n === 0).map(([name]) => name);
+  while (ready.length > 0) {
+    const name = ready.pop()!;
+    remaining.delete(name);
+    for (const next of dependents.get(name) ?? []) {
+      const n = remaining.get(next)! - 1;
+      remaining.set(next, n);
+      if (n === 0) ready.push(next);
+    }
+  }
+  return [...remaining.keys()].sort();
 }

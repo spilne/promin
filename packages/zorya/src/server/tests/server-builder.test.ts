@@ -17,6 +17,7 @@ import type { ZoryaKnowledgeBases } from "../services/knowledge/index.ts";
 import type { ZoryaFragments } from "../services/fragments/index.ts";
 import type { ZoryaScheduler } from "../services/scheduler/index.ts";
 import type { ZoryaSkills } from "../services/skills/index.ts";
+import type { ZoryaWorkflowBuilder } from "../services/workflow-builder/index.ts";
 import { LocalWorkflows } from "../services/workflows/local-workflows.ts";
 
 const quietLogger: Logger = { log() {}, warn() {}, error() {} };
@@ -74,6 +75,7 @@ describe("ZoryaServer.builder()", () => {
       secrets: stub<SecretsStorage>("secrets"),
       knowledgeBases: stub<ZoryaKnowledgeBases>("knowledgeBases"),
       namespaces: new InMemoryNamespaceRegistry(),
+      workflowBuilder: stub<ZoryaWorkflowBuilder>("workflowBuilder"),
       webhooks: { sources: { github: stub("github-source") } },
       remoteDeployments: { registry: stub("registry"), sweepIntervalMs: 1_000 },
       retention: { maxAgeMs: 86_400_000, intervalMs: 60_000, batchSize: 100 },
@@ -104,6 +106,7 @@ describe("ZoryaServer.builder()", () => {
       .secrets(expected.secrets)
       .knowledgeBases(expected.knowledgeBases)
       .namespaces(expected.namespaces)
+      .workflowBuilder(expected.workflowBuilder)
       .webhooks(expected.webhooks)
       .remoteDeployments(expected.remoteDeployments)
       .retention(expected.retention)

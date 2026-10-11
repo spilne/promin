@@ -495,6 +495,25 @@ CREATE TABLE wf_workflow_runs (
   CONSTRAINT wf_workflow_runs_pkey PRIMARY KEY (workflow_id, run)
 );
 
+CREATE TABLE wf_workflow_schema_draft (
+  name text NOT NULL,
+  schema jsonb NOT NULL,
+  revision integer NOT NULL,
+  created_at bigint NOT NULL,
+  updated_at bigint NOT NULL,
+  CONSTRAINT wf_workflow_schema_draft_pkey PRIMARY KEY (name)
+);
+
+CREATE TABLE wf_workflow_schema_version (
+  name text NOT NULL,
+  version text NOT NULL,
+  sequence integer NOT NULL,
+  schema jsonb NOT NULL,
+  content_hash text NOT NULL,
+  published_at bigint NOT NULL,
+  CONSTRAINT wf_workflow_schema_version_pkey PRIMARY KEY (name, version)
+);
+
 CREATE TABLE wf_workflow_signals (
   workflow_id text NOT NULL,
   signal_name text NOT NULL,
@@ -704,6 +723,8 @@ CREATE UNIQUE INDEX wf_workflow_registry_active_uniq ON wf_workflow_registry (na
 CREATE UNIQUE INDEX wf_workflow_registry_content_hash_uniq ON wf_workflow_registry (name, content_hash) WHERE (content_hash IS NOT NULL);
 
 CREATE INDEX wf_workflow_registry_name_idx ON wf_workflow_registry (name);
+
+CREATE UNIQUE INDEX wf_workflow_schema_version_sequence_uniq ON wf_workflow_schema_version (name, sequence);
 
 CREATE INDEX wf_workflow_starts_heartbeat_idx ON wf_workflow_starts (heartbeat_at) WHERE (status = 'claimed'::text);
 

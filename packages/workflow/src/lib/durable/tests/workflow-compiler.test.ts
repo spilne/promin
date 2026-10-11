@@ -599,6 +599,49 @@ describe("compileWorkflow", () => {
         expect(err.issues.some((i) => i.includes("missing"))).toBe(true);
       }
     });
+
+    it("reports a dependency cycle as a compilation issue naming its steps", () => {
+      try {
+        compileWorkflow({
+          schema: {
+            version: 1,
+            name: "cyclic",
+            steps: [
+              { type: "step", name: "root", dependsOn: [], activityRef: "transform.uppercase" },
+              {
+                type: "step",
+                name: "a",
+                dependsOn: ["root", "b"],
+                activityRef: "transform.exclaim",
+              },
+              { type: "step", name: "b", dependsOn: ["a"], activityRef: "transform.exclaim" },
+            ],
+          },
+          registry,
+        });
+        expect(true).toBe(false); // should not reach
+      } catch (e) {
+        expect(e).toBeInstanceOf(WorkflowCompilationError);
+        expect((e as WorkflowCompilationError).issues).toEqual([
+          'Dependency cycle between steps: "a", "b"',
+        ]);
+      }
+    });
+
+    it("reports a self-dependency as a cycle", () => {
+      expect(() =>
+        compileWorkflow({
+          schema: {
+            version: 1,
+            name: "self-cycle",
+            steps: [
+              { type: "step", name: "a", dependsOn: ["a"], activityRef: "transform.exclaim" },
+            ],
+          },
+          registry,
+        }),
+      ).toThrow(/Dependency cycle between steps: "a"/);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -617,6 +660,22 @@ describe("compileWorkflow", () => {
       });
 
       expect(definition.name).toBe("named-wf");
+    });
+
+    it("carries the version and type it was compiled with", () => {
+      const definition = compileWorkflow({
+        schema: {
+          version: 1,
+          name: "versioned-wf",
+          steps: [{ type: "step", name: "a", dependsOn: [], activityRef: "transform.uppercase" }],
+        },
+        registry,
+        version: "v3",
+        type: "builder",
+      });
+
+      expect(definition.version).toBe("v3");
+      expect(definition._definition.type).toBe("builder");
     });
 
     it("runSafe returns data on success", async () => {

@@ -73,6 +73,7 @@ COPY packages/workflow/src packages/workflow/src
 COPY packages/workflow-remote/src packages/workflow-remote/src
 COPY packages/zorya/src/index.ts packages/zorya/src/sqlite.ts packages/zorya/src/
 COPY packages/zorya/src/server packages/zorya/src/server
+COPY packages/zorya/src/shared packages/zorya/src/shared
 COPY packages/zorya/examples packages/zorya/examples
 RUN find packages -type d -name tests -prune -exec rm -rf {} + \
  && find packages \( -name '*.bench.ts' -o -name '*.type-fixture.ts' \) -delete

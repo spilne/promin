@@ -20,6 +20,7 @@ import type { ZoryaFragments } from "./services/fragments/index.ts";
 import type { ZoryaKnowledgeBases } from "./services/knowledge/index.ts";
 import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
+import type { ZoryaWorkflowBuilder } from "./services/workflow-builder/index.ts";
 import type { RunRetentionConfig, ZoryaWorkflows } from "./services/workflows/index.ts";
 
 /**
@@ -136,6 +137,11 @@ export class ZoryaServerBuilder {
   /** Managed knowledge bases: `/api/knowledge-bases/*` and the dashboard's Knowledge page. */
   knowledgeBases(knowledgeBases: ZoryaKnowledgeBases): this {
     return this.set({ knowledgeBases });
+  }
+
+  /** The visual workflow builder: `/api/workflow-builder/*` and the dashboard's Builder page. */
+  workflowBuilder(workflowBuilder: ZoryaWorkflowBuilder): this {
+    return this.set({ workflowBuilder });
   }
 
   /** Secrets vault: `/api/secrets` CRUD and agent credential resolution. */

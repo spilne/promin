@@ -346,6 +346,19 @@ export {
   MapActivityRegistry,
 } from "./lib/durable/activity-registry.ts";
 export { compileWorkflow, WorkflowCompilationError } from "./lib/durable/workflow-compiler.ts";
+export {
+  MapActivityCatalog,
+  type ActivityCatalog,
+  type ActivityDefinition,
+  type ActivityDescriptor,
+} from "./lib/durable/activity-catalog.ts";
+export {
+  InMemoryWorkflowSchemaStore,
+  type StoredWorkflowSchema,
+  type WorkflowSchemaDraft,
+  type WorkflowSchemaStore,
+  type WorkflowSchemaVersion,
+} from "./lib/durable/workflow-schema-store.ts";
 
 // State machines
 export {

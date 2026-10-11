@@ -37,6 +37,10 @@ export type {
 export { SqliteToolHistoryStore } from "./lib/agent/tool-history-store.ts";
 export type { SqliteToolHistoryStoreConfig } from "./lib/agent/tool-history-store.ts";
 export { SqliteWorkflowStorage } from "./lib/sqlite-workflow-storage.ts";
+export {
+  SqliteWorkflowSchemaStore,
+  type SqliteWorkflowSchemaStoreConfig,
+} from "./lib/sqlite-workflow-schema-store.ts";
 export { SqliteStepQueue } from "./lib/sqlite-step-queue.ts";
 export { SqliteWorkerRegistry } from "./lib/sqlite-worker-registry.ts";
 export { SqliteNamespaceRegistry } from "./lib/sqlite-namespace-registry.ts";

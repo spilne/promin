@@ -1,4 +1,5 @@
 export { storageTestSuite } from "./lib/durable/storage-test-suite.ts";
+export { workflowSchemaStoreTestSuite } from "./lib/durable/workflow-schema-store-test-suite.ts";
 export {
   zombieWorkerTestSuite,
   type ZombieWorkerTestSuiteOptions,

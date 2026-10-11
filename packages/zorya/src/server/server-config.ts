@@ -15,6 +15,7 @@ import type { ZoryaAgents } from "./services/agents/index.ts";
 import type { ZoryaDags } from "./services/dags/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
 import type { ZoryaKnowledgeBases } from "./services/knowledge/index.ts";
+import type { ZoryaWorkflowBuilder } from "./services/workflow-builder/index.ts";
 import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
 import type { ZoryaWorkflows } from "./services/workflows/index.ts";
@@ -109,6 +110,13 @@ export interface ZoryaServerConfig extends AuthConfig {
    */
   knowledgeBases?: ZoryaKnowledgeBases;
   /**
+   * Optional visual workflow builder. Mounts /api/workflow-builder/* (the
+   * dashboard's Builder page) and starts with the server, which recompiles
+   * and serves every published builder workflow. Its `workflows` layer must
+   * be part of `workflows`.
+   */
+  workflowBuilder?: ZoryaWorkflowBuilder;
+  /**
    * Mount the remote-worker HTTP surface. Pulls stepQueue / workerRegistry /
    * advertisements / workflowStarts from the workflows service.
    */
@@ -121,7 +129,11 @@ export interface ZoryaServerConfig extends AuthConfig {
    * registry remote workers register into (`workerRegistry`).
    */
   workers?: WorkersProvider;
-  /** Sample input for the dashboard's trigger form, by workflow name. */
+  /**
+   * Sample input for the dashboard's trigger form, by workflow name. For
+   * builder workflows it is inferred from their input schema when this
+   * returns `undefined`.
+   */
   sampleInput?: (workflowName: string) => unknown;
   /** Custom logger. Default: console. */
   logger?: Logger;

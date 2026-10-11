@@ -98,6 +98,9 @@ export class Router {
   patch(pattern: string, handler: Handler): this {
     return this.add("PATCH", pattern, handler);
   }
+  put(pattern: string, handler: Handler): this {
+    return this.add("PUT", pattern, handler);
+  }
 
   /** Fallback handler when no route matches (e.g. to serve static UI). */
   setStatic(handler: Handler): this {

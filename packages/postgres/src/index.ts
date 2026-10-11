@@ -1,6 +1,10 @@
 // Storage
 export { PostgresWorkflowStorage } from "./lib/postgres-workflow-storage.ts";
 export { PostgresWorkflowVersionRegistry } from "./lib/postgres-workflow-version-registry.ts";
+export {
+  PostgresWorkflowSchemaStore,
+  type PostgresWorkflowSchemaStoreConfig,
+} from "./lib/postgres-workflow-schema-store.ts";
 export { PostgresWorkerRegistry } from "./lib/postgres-worker-registry.ts";
 export {
   PostgresNamespaceRegistry,

@@ -19,6 +19,8 @@ import { FragmentsPage } from "./components/fragments/fragments-page.tsx";
 import { RolesPage } from "./components/roles/roles-page.tsx";
 import { DagsPage } from "./components/dags/dags-page.tsx";
 import { KnowledgeBasesPage } from "./components/knowledge/knowledge-bases-page.tsx";
+import { BuilderListPage } from "./components/builder/builder-list-page.tsx";
+import { BuilderEditorPage } from "./components/builder/builder-editor-page.tsx";
 import { DialogHost, ToastHost } from "./components/ui/dialog-host.tsx";
 
 export function App() {
@@ -103,6 +105,29 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   if (path === "/knowledge") {
     return <KnowledgeBasesPage />;
   }
+  if (path === "/builder") {
+    return (
+      <BuilderListPage
+        onOpen={(name) => navigate(`/builder/${encodeURIComponent(name)}`)}
+        onOpenRuns={(name) => navigate(`/?name=${encodeURIComponent(name)}`)}
+      />
+    );
+  }
+  const builderMatch = /^\/builder\/([^/]+)$/.exec(path ?? "");
+  if (builderMatch) {
+    // The route names the workflow: reloads and links open the same editor.
+    const builderName = decodeURIComponent(builderMatch[1]!);
+    return (
+      <BuilderEditorPage
+        key={builderName}
+        name={builderName}
+        onBack={() => navigate("/builder")}
+        onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)}
+        onOpenWorkflow={(name) => navigate(`/workflows/${encodeURIComponent(name)}`)}
+        onOpenBuilder={(name) => navigate(`/builder/${encodeURIComponent(name)}`)}
+      />
+    );
+  }
   const scheduleMatch = /^\/schedules\/([^/]+)$/.exec(path ?? "");
   if (scheduleMatch) {
     return (
@@ -146,6 +171,7 @@ function renderRoute(route: string, navigate: (p: string) => void) {
         name={workflowName}
         onBack={() => navigate("/workflows")}
         onOpenRun={(id) => navigate(`/runs/${encodeURIComponent(id)}`)}
+        onOpenBuilder={() => navigate(`/builder/${encodeURIComponent(workflowName)}`)}
         onOpenVersionRuns={(version) =>
           navigate(
             `/?name=${encodeURIComponent(workflowName)}&version=${encodeURIComponent(version)}`,

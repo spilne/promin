@@ -98,6 +98,24 @@ export {
   type UrlKnowledgeSourceAdapterConfig,
   type ZoryaKnowledgeBasesConfig,
 } from "./server/services/knowledge/index.ts";
+export {
+  BUILDER_WORKFLOW_NAME_PATTERN,
+  BUILDER_WORKFLOW_TYPE,
+  BuilderWorkflowConflictError,
+  BuilderWorkflowInUseError,
+  BuilderWorkflowNameTakenError,
+  BuilderWorkflowNotFoundError,
+  DEFAULT_MAX_BUILDER_STEPS,
+  InvalidBuilderWorkflowError,
+  ZoryaWorkflowBuilder,
+  hashWorkflowContent,
+  type BuilderWorkflow,
+  type BuilderWorkflowSummary,
+  type BuilderWorkflowVersion,
+  type PublishResult,
+  type WorkflowIssue,
+  type ZoryaWorkflowBuilderConfig,
+} from "./server/services/workflow-builder/index.ts";
 export { Auth, bearerToken, type AuthConfig } from "./server/auth.ts";
 export { RunEventBus } from "./server/run-event-bus.ts";
 export { RunPollWatcher, RunWatcherPool } from "./server/run-poll-watcher.ts";
