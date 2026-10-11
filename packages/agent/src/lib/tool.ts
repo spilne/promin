@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { SubAgentDelegation } from "./delegation/types.ts";
 import type { ToolAuditEntry, ToolAuditLogger } from "./tool-audit/types.ts";
 import type {
   EpisodeInput,
@@ -152,6 +153,12 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
    */
   timeoutMs?: number;
   toModelOutput?: (output: TOutput) => string;
+  /**
+   * Set by `subAgentTool`: the agent engines run each call of this tool as
+   * a journaled child workflow of the turn (see `SubAgentDelegation`) and
+   * never call `execute`.
+   */
+  readonly delegation?: SubAgentDelegation;
   /**
    * Extract structured side-channel data from the tool's output to
    * persist on the result message's `metadata`. Unlike `toModelOutput`,

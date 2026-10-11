@@ -10,7 +10,13 @@ import type { Workflow } from "./durable-pipeline.ts";
 import { WorkflowSuspendedError } from "./durable-pipeline-error.ts";
 import { errorTag, rehydrateFailure } from "./journal-exit.ts";
 import { journaledBodyScope } from "./journaled-body-scope.ts";
-import type { ActivityYield, JournaledContext, JournaledCtxEnv } from "./journaled-context.ts";
+import { isTerminalWorkflowStatus } from "./workflow-state.ts";
+import type {
+  ActivityYield,
+  JournaledContext,
+  JournaledCtxEnv,
+  LazyChildWorkflow,
+} from "./journaled-context.ts";
 
 /** Build `ctx.child` for one body run. */
 export function makeChild(env: JournaledCtxEnv): JournaledContext<unknown, unknown>["child"] {
@@ -48,7 +54,7 @@ export function makeChild(env: JournaledCtxEnv): JournaledContext<unknown, unkno
   }
 
   return function* child<Output>(
-    workflow: Workflow<unknown, Output>,
+    workflow: Workflow<unknown, Output> | LazyChildWorkflow<Output>,
     options?: { readonly input?: unknown; readonly workflowId?: string },
   ): Generator<ActivityYield, Output, Output> {
     const slot = cursor.allocateSlot();
@@ -61,6 +67,26 @@ export function makeChild(env: JournaledCtxEnv): JournaledContext<unknown, unkno
       `${workflowId}.${stepName}.${activityIndex}${branchPath.replaceAll("/", "~")}`;
     const childInput = options?.input;
     const activityName = workflow.name;
+    /**
+     * The child's definition. A lazy child that cannot be loaded fails as
+     * the child's outcome; a run of it left in flight (a re-attach whose
+     * definition is gone or changed) is cancelled with its descendants, so
+     * no orphan keeps waiting for a driver that will never come.
+     */
+    const definition = async (): Promise<Workflow<unknown, Output>> => {
+      if (!("load" in workflow)) return workflow;
+      try {
+        return await workflow.load();
+      } catch (err) {
+        if (workflowStorage) {
+          const orphan = await workflowStorage.loadWorkflow(childWorkflowId);
+          if (orphan && !isTerminalWorkflowStatus(orphan.status)) {
+            await workflowStorage.cancelWorkflow({ workflowId: childWorkflowId, cascade: true });
+          }
+        }
+        throw err;
+      }
+    };
 
     /** Value of a completed exit: a failure rethrows, a success decodes. */
     const settle = (exit: JournalExit): Output => {
@@ -102,7 +128,7 @@ export function makeChild(env: JournaledCtxEnv): JournaledContext<unknown, unkno
         run: async () =>
           (await journaledBodyScope.exit(async () =>
             runChild({
-              workflow: workflow as Workflow<unknown, unknown>,
+              workflow: (await definition()) as Workflow<unknown, unknown>,
               workflowId: childWorkflowId,
               input: childInput,
             }),

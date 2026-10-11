@@ -213,6 +213,10 @@ export function openai(model: string, options: OpenAIOptions = {}): LLMProvider 
             argsJson: tc.function?.arguments ?? "",
           });
         } else {
+          // Some OpenAI-compatible servers send the id or name on a later
+          // delta than the first one of the call.
+          if (!acc.id && tc.id) acc.id = tc.id;
+          if (!acc.name && tc.function?.name) acc.name = tc.function.name;
           acc.argsJson += tc.function?.arguments ?? "";
         }
       }

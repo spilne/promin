@@ -39,6 +39,12 @@ export interface TriggerOptions {
   readonly version?: string;
   readonly runSource?: RunSource;
   readonly runSourceId?: string;
+  /**
+   * Start an internal workflow (`LocalWorkflows.define(wf, { internal:
+   * true })`). Only the service that owns it passes this; without it an
+   * internal workflow answers as unknown.
+   */
+  readonly internal?: boolean;
 }
 
 export interface TriggerResult {
@@ -176,6 +182,8 @@ export abstract class ZoryaWorkflows {
 
   /** The layer whose fallback this is, if any. */
   private outer?: ZoryaWorkflows;
+  /** Names of this layer's internal workflows (see `isInternal`). */
+  protected readonly internalNames = new Set<string>();
   private started = false;
 
   constructor(config: ZoryaWorkflowsBaseConfig = {}) {
@@ -272,11 +280,23 @@ export abstract class ZoryaWorkflows {
   }
 
   /**
+   * Whether `name` is an internal workflow of any layer of the chain: one a
+   * service starts itself (with `TriggerOptions.internal`) after its own
+   * checks, never through the generic trigger routes, schedules or the
+   * dashboard's trigger form, and not listed among the definitions.
+   */
+  isInternal(name: string): boolean {
+    return this.chain().some((layer) => layer.internalNames.has(name));
+  }
+
+  /**
    * Start a workflow by name. Walks the fallback chain when this layer
    * doesn't know the workflow. Final on the base — subclasses override
-   * `canHandle` / `dispatch` instead.
+   * `canHandle` / `dispatch` instead. An internal workflow answers as
+   * unknown unless `opts.internal` is set.
    */
   async trigger(name: string, input: unknown, opts?: TriggerOptions): Promise<TriggerResult> {
+    if (opts?.internal !== true && this.isInternal(name)) throw new UnknownWorkflowError(name);
     if (await this.canHandle(name)) {
       return this.dispatch(name, input, opts);
     }

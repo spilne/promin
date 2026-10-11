@@ -114,6 +114,37 @@ describe("openai — tool arguments", () => {
   });
 });
 
+describe("openai — streamed tool-call ids", () => {
+  it("takes an id and name that arrive after the call's first delta", async () => {
+    const { fetch } = fakeFetch(() =>
+      sseResponse(
+        [
+          {
+            choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"q":' } }] } }],
+          },
+          {
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    { index: 0, id: "c9", function: { name: "search", arguments: '"x"}' } },
+                  ],
+                },
+              },
+            ],
+          },
+          { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+        ],
+        { done: true },
+      ),
+    );
+    const chunks = await collect(
+      openai("gpt", { apiKey: "k", fetch }).chatStream!({ messages: [USER] }),
+    );
+    expect(chunks.at(-1)!.toolCalls).toEqual([{ id: "c9", name: "search", input: { q: "x" } }]);
+  });
+});
+
 describe("openai — errors", () => {
   it("throws LLMHttpError with retry-after-ms on a 429", async () => {
     const { fetch } = fakeFetch(() =>

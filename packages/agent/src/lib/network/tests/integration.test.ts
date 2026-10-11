@@ -1,9 +1,10 @@
 // ---------------------------------------------------------------------------
 // End-to-end: a coordinator agent uses findAgent + callAgent to discover
 // and delegate to a specialist. Exercises the full path:
-//   recipe.backend.network → resolver auto-attaches tools → tool reads
-//   ALS depth → registry lookup → policy check → resolve callee →
-//   withScope(propagate owner) → invoke → return assistant text.
+//   recipe.backend.network → resolver auto-attaches tools → callAgent
+//   routes the call (registry lookup, policy check, resolve callee,
+//   withScope(propagate owner)) → the callee's turn runs as a child
+//   workflow of the coordinator's → its answer is the tool result.
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
@@ -118,7 +119,7 @@ async function bootNetwork(opts: {
     reviewer: reviewerCapture.llm,
   };
 
-  function resolve(recipe: RegisteredAgent): Agent {
+  async function resolve(recipe: RegisteredAgent): Promise<Agent> {
     return resolveLocalAgent(recipe, {
       runner,
       memory,
@@ -174,7 +175,7 @@ describe("agents network — discovery", () => {
       ],
       writerResponse: { content: "x", finishReason: "stop" },
     });
-    const agent = resolve(coordinator).withScope({ namespaceId: "acme" });
+    const agent = (await resolve(coordinator)).withScope({ namespaceId: "acme" });
     const out = await agent.invoke({ task: "list peers" });
     expect(await out.text).toBe("found peers");
   });
@@ -204,7 +205,7 @@ describe("agents network — discovery", () => {
     });
 
     const coordinator = (await registry.get("coordinator"))!;
-    const agent = resolve(coordinator).withScope({ namespaceId: "acme" });
+    const agent = (await resolve(coordinator)).withScope({ namespaceId: "acme" });
 
     // We can't easily intercept the tool result, but if billing-bot were
     // visible the policy logic would let callAgent through too — which
@@ -217,7 +218,7 @@ describe("agents network — discovery", () => {
 
 describe("agents network — delegation", () => {
   it("callAgent invokes the callee and returns its assistant text", async () => {
-    const { coordinator, resolve, captures } = await bootNetwork({
+    const { coordinator, resolve, captures, storage } = await bootNetwork({
       coordinatorScript: [
         {
           content: null,
@@ -234,11 +235,17 @@ describe("agents network — delegation", () => {
       ],
       writerResponse: { content: "writer's haiku", finishReason: "stop" },
     });
-    const agent = resolve(coordinator).withScope({ namespaceId: "acme" });
-    const out = await agent.invoke({ task: "ask the writer" });
+    const agent = (await resolve(coordinator)).withScope({ namespaceId: "acme" });
+    const out = await agent.invoke({ task: "ask the writer" }, { runId: "coord-1" });
     expect(await out.text).toBe("delegated and got back: ok");
     // Writer was actually invoked — its LLM saw exactly one chat call.
     expect(captures.writer.calls.length).toBe(1);
+    // ...as a child run of the coordinator's turn, with a deterministic id.
+    const child = await storage.loadWorkflow("coord-1.0.t1");
+    expect(child?.parentWorkflowId).toBe("coord-1");
+    expect(child?.status).toBe("completed");
+    const toolResult = (await out.messages).find((m) => m.role === "tool");
+    expect(toolResult?.content).toBe("writer's haiku");
     // Writer's prompt was the delegate prompt, not the coordinator's task.
     const writerMessages = captures.writer.calls[0]!.messages;
     const writerUser = writerMessages.find((m) => m.role === "user");
@@ -259,7 +266,7 @@ describe("agents network — delegation", () => {
       ],
       writerResponse: { content: "writer's haiku", finishReason: "stop" },
     });
-    const agent = resolve(coordinator).withScope({ namespaceId: "acme" });
+    const agent = (await resolve(coordinator)).withScope({ namespaceId: "acme" });
     const out = await agent.invoke({ task: "ask the writer" });
     const messages = await out.messages;
 
@@ -305,11 +312,14 @@ describe("agents network — delegation", () => {
         },
       },
     });
-    const agent = resolve(coordinator).withScope({ namespaceId: "acme" });
+    const agent = (await resolve(coordinator)).withScope({ namespaceId: "acme" });
     const out = await agent.invoke({ task: "try reviewer" });
     // The coordinator's LLM still reaches the final turn; the tool
-    // returned a structured error rather than throwing.
+    // returned an error result rather than throwing.
     expect(await out.text).toBe("denied gracefully");
+    const toolResult = (await out.messages).find((m) => m.role === "tool");
+    expect(toolResult?.isError).toBe(true);
+    expect(toolResult?.content).toContain("cannot call reviewer");
   });
 
   it("callAgent propagates ownerId to the callee's instance when one is configured", async () => {
@@ -335,7 +345,7 @@ describe("agents network — delegation", () => {
     // Caller scoped under coordinator's instance for alice; the owner is
     // bound explicitly, as an authorizing gateway does.
     const callerResourceId = "acme::coordinator::alice";
-    const agent = resolve(coordinator).withScope({
+    const agent = (await resolve(coordinator)).withScope({
       namespaceId: "acme",
       resourceId: callerResourceId,
       ownerId: "alice",
@@ -363,7 +373,7 @@ describe("agents network — delegation", () => {
       withInstances: true,
     });
     // A resource shaped like alice's instance id, but no owner bound.
-    const agent = resolve(coordinator).withScope({
+    const agent = (await resolve(coordinator)).withScope({
       namespaceId: "acme",
       resourceId: "acme::coordinator::alice",
     });
@@ -384,7 +394,7 @@ describe("agents network — delegation", () => {
       writerResponse: { content: "writer-out", finishReason: "stop" },
       withInstances: true,
     });
-    const agent = resolve(coordinator)
+    const agent = (await resolve(coordinator))
       .withScope({ namespaceId: "acme", resourceId: "acme::coordinator::alice", ownerId: "alice" })
       .withScope({ resourceId: "shared" });
     await agent.invoke({ task: "delegate" });
@@ -416,10 +426,13 @@ describe("agents network — delegation", () => {
       },
     });
     const coordinator = (await registry.get("coordinator"))!;
-    const agent = resolve(coordinator).withScope({ namespaceId: "acme" });
+    const agent = (await resolve(coordinator)).withScope({ namespaceId: "acme" });
     const out = await agent.invoke({ task: "delegate" });
     // Coordinator's LLM gets the tool error result and emits the final text.
     expect(await out.text).toBe("done");
+    const toolResult = (await out.messages).find((m) => m.role === "tool");
+    expect(toolResult?.isError).toBe(true);
+    expect(toolResult?.content).toContain("exceeds the limit of 0");
   });
 
   it("callAgent against an unknown peer returns agent_not_found", async () => {
@@ -434,7 +447,7 @@ describe("agents network — delegation", () => {
       ],
       writerResponse: { content: "x", finishReason: "stop" },
     });
-    const agent = resolve(coordinator).withScope({ namespaceId: "acme" });
+    const agent = (await resolve(coordinator)).withScope({ namespaceId: "acme" });
     const out = await agent.invoke({ task: "call ghost" });
     expect(await out.text).toBe("handled");
   });

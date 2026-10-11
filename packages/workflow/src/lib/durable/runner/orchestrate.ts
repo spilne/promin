@@ -320,6 +320,8 @@ export async function runChildWorkflow(params: {
   readonly workflow: Workflow<unknown, unknown>;
   readonly workflowId: string;
   readonly input: unknown;
+  /** The parent's namespace; a child created here is stored under it. */
+  readonly namespace?: string;
   /** The parent's lock signal: the child stops when the parent loses (or abandons) its run. */
   readonly signal?: AbortSignal;
 }): Promise<unknown> {
@@ -331,6 +333,7 @@ export async function runChildWorkflow(params: {
     input,
     workflowType: def.type,
     parentWorkflowId: params.parentWorkflowId,
+    ...(params.namespace !== undefined && { namespace: params.namespace }),
     metadata: def.metadata,
     version: workflow.version,
     guard: params.parentGuard,
@@ -514,6 +517,9 @@ async function runOneOrchestrationCycle(cycle: {
         runtime: runtimeOf(ctx),
         parentWorkflowId: workflowId,
         ...(guard !== undefined && { parentGuard: guard }),
+        ...((state?.namespace ?? namespace) !== undefined && {
+          namespace: state?.namespace ?? namespace,
+        }),
         signal: lock.signal,
         ...child,
       }),

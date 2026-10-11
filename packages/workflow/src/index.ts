@@ -307,6 +307,7 @@ export {
   type JournaledStepBody,
   type ActivityYield,
   type ActivityOptions,
+  type LazyChildWorkflow,
 } from "./lib/durable/journaled-step.ts";
 export { wakeParentOfEndedRun } from "./lib/durable/child-wake.ts";
 export {

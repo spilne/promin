@@ -1,7 +1,9 @@
 // ---------------------------------------------------------------------------
 // findAgent / callAgent guards, exercised on the tools directly: disabled
 // peers, cycles on the call chain, the host's authorizeCall hook, and the
-// scope (namespace, resource, owner) a callee runs in.
+// scope (namespace, resource, owner) a callee runs in. callAgent's guards
+// live in its route step (`delegation.route`), which the engine runs once
+// per call with the frame the callee would run in.
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
@@ -10,7 +12,7 @@ import { InMemoryAgentInstanceRegistry } from "../../instance/in-memory-agent-in
 import { composeAgentInstanceId } from "../../instance/types.ts";
 import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
 import type { RegisteredAgent } from "../../registry/types.ts";
-import { runInCallContext } from "../depth.ts";
+import type { DelegationFrame, SubAgentRouteResult } from "../../delegation/types.ts";
 import {
   createCallAgentTool,
   createFindAgentTool,
@@ -65,7 +67,7 @@ async function setup(opts?: {
   const instanceRegistry = opts?.instances ? new InMemoryAgentInstanceRegistry() : undefined;
   const deps = {
     registry,
-    resolve: (recipe: RegisteredAgent) => {
+    resolve: async (recipe: RegisteredAgent) => {
       resolved.push(recipe.id);
       return recordingAgent(scopes);
     },
@@ -74,11 +76,22 @@ async function setup(opts?: {
   };
   const network =
     coordinator.backend.type === "local" ? coordinator.backend.network! : (undefined as never);
-  const tools = (scope: NetworkCallerScope) => ({
-    find: createFindAgentTool({ deps, scope, callerRecipe: coordinator, network }),
-    call: createCallAgentTool({ deps, scope, callerRecipe: coordinator, network }),
-  });
+  const tools = (scope: NetworkCallerScope) => {
+    const call = createCallAgentTool({ deps, scope, callerRecipe: coordinator, network });
+    return {
+      find: createFindAgentTool({ deps, scope, callerRecipe: coordinator, network }),
+      /** Route one call as the engine would, from a turn in `frame` (default: top level). */
+      call: (
+        input: { id: string; prompt: string },
+        frame: DelegationFrame = { depth: 1, chain: ["coordinator"] },
+      ): Promise<SubAgentRouteResult> => call.delegation!.route({ input, frame }),
+    };
+  };
   return { tools, scopes, resolved, instanceRegistry };
+}
+
+function errorOf(result: SubAgentRouteResult): string | undefined {
+  return result.ok ? undefined : result.error;
 }
 
 describe("findAgent", () => {
@@ -92,38 +105,37 @@ describe("findAgent", () => {
 describe("callAgent", () => {
   it("refuses a disabled callee without running it", async () => {
     const { tools, resolved } = await setup({ disabled: ["writer"] });
-    const out = await tools({ namespaceId: "acme" }).call.execute({ id: "writer", prompt: "hi" });
-    expect(out.ok).toBe(false);
-    expect(out.error).toContain("agent_disabled");
+    const out = await tools({ namespaceId: "acme" }).call({ id: "writer", prompt: "hi" });
+    expect(errorOf(out)).toContain("agent_disabled");
     expect(resolved).toEqual([]);
   });
 
   it("refuses to call itself", async () => {
     const { tools, resolved } = await setup();
-    const out = await tools({ namespaceId: "acme" }).call.execute({
+    const out = await tools({ namespaceId: "acme" }).call({
       id: "coordinator",
       prompt: "hi",
     });
-    expect(out.ok).toBe(false);
-    expect(out.error).toContain("cycle");
+    expect(errorOf(out)).toContain("cycle");
     expect(resolved).toEqual([]);
   });
 
   it("refuses a callee already waiting on the call chain", async () => {
     const { tools, resolved } = await setup();
     // writer → coordinator is in flight; coordinator calling writer loops.
-    const out = await runInCallContext({ depth: 1, chain: ["writer"] }, () =>
-      tools({ namespaceId: "acme" }).call.execute({ id: "writer", prompt: "hi" }),
+    const out = await tools({ namespaceId: "acme" }).call(
+      { id: "writer", prompt: "hi" },
+      { depth: 2, chain: ["writer", "coordinator"] },
     );
-    expect(out.ok).toBe(false);
-    expect(out.error).toContain("cycle");
+    expect(errorOf(out)).toContain("cycle");
     expect(resolved).toEqual([]);
   });
 
   it("still calls a peer that is not on the chain", async () => {
     const { tools, resolved } = await setup();
-    const out = await runInCallContext({ depth: 1, chain: ["writer"] }, () =>
-      tools({ namespaceId: "acme" }).call.execute({ id: "reviewer", prompt: "hi" }),
+    const out = await tools({ namespaceId: "acme" }).call(
+      { id: "reviewer", prompt: "hi" },
+      { depth: 2, chain: ["writer", "coordinator"] },
     );
     expect(out.ok).toBe(true);
     expect(resolved).toEqual(["reviewer"]);
@@ -138,10 +150,9 @@ describe("callAgent", () => {
       },
     });
     const scope = { namespaceId: "acme", resourceId: "r-1", ownerId: "alice" };
-    const denied = await tools(scope).call.execute({ id: "reviewer", prompt: "hi" });
-    expect(denied.ok).toBe(false);
-    expect(denied.error).toContain("refused by the host");
-    const allowed = await tools(scope).call.execute({ id: "writer", prompt: "hi" });
+    const denied = await tools(scope).call({ id: "reviewer", prompt: "hi" });
+    expect(errorOf(denied)).toContain("refused by the host");
+    const allowed = await tools(scope).call({ id: "writer", prompt: "hi" });
     expect(allowed.ok).toBe(true);
     expect(resolved).toEqual(["writer"]);
     expect(seen[0]).toEqual({
@@ -163,13 +174,15 @@ describe("callAgent", () => {
       namespaceId: "acme",
       resourceId: callerResource,
       ownerId: "alice",
-    }).call.execute({ id: "writer", prompt: "hi" });
+    }).call({ id: "writer", prompt: "hi" });
     const writerInstance = composeAgentInstanceId({
       namespaceId: "acme",
       registeredAgentId: "writer",
       ownerId: "alice",
     });
-    expect(out.resolvedResourceId).toBe(writerInstance);
+    expect(out.ok && out.route.data).toMatchObject({
+      scope: { namespaceId: "acme", resourceId: writerInstance, ownerId: "alice" },
+    });
     expect(scopes).toEqual([{ namespaceId: "acme", resourceId: writerInstance, ownerId: "alice" }]);
     expect((await instanceRegistry!.get(writerInstance))?.ownerId).toBe("alice");
   });
@@ -180,7 +193,7 @@ describe("callAgent", () => {
     const out = await tools({
       namespaceId: "acme",
       resourceId: "acme::coordinator::bob",
-    }).call.execute({ id: "writer", prompt: "hi" });
+    }).call({ id: "writer", prompt: "hi" });
     expect(out.ok).toBe(true);
     expect(scopes).toEqual([{ namespaceId: "acme", resourceId: "acme::coordinator::bob" }]);
     expect(await instanceRegistry!.list()).toEqual([]);

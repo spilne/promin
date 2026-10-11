@@ -552,7 +552,11 @@ Semantics:
 - **Children.** `ctx.child` runs a separate durable workflow (default id
   `"<parentId>.<step>.<slot>"`). A child that suspends parks the parent until
   the child's own wake time or until the child ends, whichever is first (see
-  [child wake-up](#subworkflows-and-child-wake-up)).
+  [child wake-up](#subworkflows-and-child-wake-up)). Pass
+  `{ name, load }` (`LazyChildWorkflow`) instead of a workflow when building
+  the child takes async work: `load` runs only when the child has to run (first
+  run, or re-attaching to a child left in flight), never on a replay of its
+  journaled outcome.
 - **Determinism.** A replayed body must yield the same activities in the same
   order; a mismatch throws `JournalNonDeterminismError`. Use
   `workflow({ payloadHash: true })` with the 3-arg

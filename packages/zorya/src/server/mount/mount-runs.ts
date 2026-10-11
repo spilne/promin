@@ -106,6 +106,7 @@ export function mountRuns(params: MountRunsParams): void {
   const resume: RunResumer = (p) => workflows.resume(p);
   const defDeps = {
     ...(definitions !== undefined && { workflows: definitions }),
+    isInternal: (name: string) => workflows.isInternal(name),
     ...(sampleInput !== undefined && { sampleInput }),
     ...(advertisements !== undefined && { advertisements }),
   };

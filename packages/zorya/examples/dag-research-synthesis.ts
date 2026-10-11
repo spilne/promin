@@ -212,14 +212,19 @@ async function main() {
   console.log(`  ${dag.nodes.length} nodes, ${dag.edges.length} edges`);
   console.log(`  entry: ${dag.entry.join(",")}  terminals: ${dag.terminals.join(",")}\n`);
 
-  const wf = createDagWorkflow({ resolver, name: "research-synthesis-dag" });
+  const wf = createDagWorkflow({ registry: dagRegistry, resolver });
 
   console.log("Running…\n");
   const start = Date.now();
   const result = await runner.run({
     workflow: wf,
     workflowId: `research-${Date.now()}`,
-    input: { dag, initialInput: { topic }, scope: { namespaceId: "demo", resourceId: "cli" } },
+    input: {
+      dagId: dag.id,
+      version: dag.version,
+      initialInput: { topic },
+      scope: { namespaceId: "demo", resourceId: "cli" },
+    },
   });
   const elapsed = Date.now() - start;
 

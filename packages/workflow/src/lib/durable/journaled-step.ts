@@ -68,6 +68,7 @@ export type {
   ActivityYield,
   JournaledContext,
   JournaledStepBody,
+  LazyChildWorkflow,
 } from "./journaled-context.ts";
 export { JournalNonDeterminismError, JournalStorageMissingError } from "./journal-errors.ts";
 export { completeDueSleeps, completeSignal } from "./journal-wakeups.ts";

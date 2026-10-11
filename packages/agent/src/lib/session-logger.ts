@@ -44,14 +44,6 @@ type SessionEventBody =
       failed: boolean;
     }
   | { type: "tool.parse_error"; turn: number; step: number; name: string; error: string }
-  | { type: "subagent.start"; name: string; workflowId: string; task: string }
-  | {
-      type: "subagent.end";
-      name: string;
-      workflowId: string;
-      durationMs: number;
-      timedOut: boolean;
-    }
   | {
       type: "compact";
       turn: number;

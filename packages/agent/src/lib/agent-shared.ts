@@ -123,7 +123,57 @@ export function formatToolError(err: unknown): string {
 
 // Hard cap on any single tool result — prevents a runaway listing or read
 // from blowing up the LLM context window.
-const MAX_TOOL_CONTENT_CHARS = 200_000;
+export const MAX_TOOL_CONTENT_CHARS = 200_000;
+
+/** `content` capped at `MAX_TOOL_CONTENT_CHARS`, with a note when cut. */
+export function truncateToolContent(content: string): string {
+  if (content.length <= MAX_TOOL_CONTENT_CHARS) return content;
+  return (
+    content.slice(0, MAX_TOOL_CONTENT_CHARS) +
+    `\n\n[Output truncated: ${content.length.toLocaleString()} chars total. Use a more specific query to avoid truncation.]`
+  );
+}
+
+/**
+ * `calls` with every id non-empty and unique within the conversation:
+ * an empty id, or one already used by `earlier` messages or an earlier
+ * call of the same response, becomes `<prefix>-<index>` (suffixed further
+ * if even that is taken). Ids name journal entries, approvals and child
+ * runs, so they must not collide; call this inside the journaled step that
+ * produced the calls so replays see the same ids.
+ */
+export function uniqueToolCallIds(params: {
+  readonly calls: ReadonlyArray<ToolCall>;
+  readonly earlier: ReadonlyArray<Message>;
+  readonly prefix: string;
+}): ToolCall[] {
+  const seen = new Set<string>();
+  for (const m of params.earlier) {
+    if (m.role === "assistant") for (const c of m.toolCalls ?? []) seen.add(c.id);
+  }
+  return params.calls.map((call, index) => {
+    let id = call.id;
+    if (!id || seen.has(id)) {
+      id = `${params.prefix}-${index}`;
+      for (let n = 1; seen.has(id); n++) id = `${params.prefix}-${index}-${n}`;
+    }
+    seen.add(id);
+    return id === call.id ? call : { ...call, id };
+  });
+}
+
+/**
+ * Engine control flow (suspension, continue-as-new, lock loss, journal
+ * drift, ambiguous outcome) passes through a turn untouched: it is not a
+ * failed turn.
+ */
+export function isEngineControl(err: unknown): boolean {
+  const tag = (err as { _tag?: unknown } | null)?._tag;
+  return (
+    typeof tag === "string" &&
+    /^(Workflow|Journal|FenceToken|AmbiguousActivityOutcome|Storage|Checkpoint)/.test(tag)
+  );
+}
 
 const TOOL_CANCELLED_MESSAGE = "Tool cancelled: the turn was cancelled before the tool finished.";
 
@@ -210,19 +260,16 @@ export async function executeToolCall(options: ExecuteToolCallOptions): Promise<
     running.catch(() => {});
     const output = await Promise.race([running, aborted]);
     options.onResult?.(call, output);
-    let content = tool.toModelOutput
-      ? tool.toModelOutput(output)
-      : typeof output === "string"
-        ? output
-        : JSON.stringify(output);
-    if (content.length > MAX_TOOL_CONTENT_CHARS) {
-      content =
-        content.slice(0, MAX_TOOL_CONTENT_CHARS) +
-        `\n\n[Output truncated: ${content.length.toLocaleString()} chars total. Use a more specific query to avoid truncation.]`;
-    }
+    const content = truncateToolContent(
+      tool.toModelOutput
+        ? tool.toModelOutput(output)
+        : typeof output === "string"
+          ? output
+          : JSON.stringify(output),
+    );
     // Structured side-channel metadata — persisted with the message but
-    // never shown to the LLM. `callAgent` uses it to carry the sub-run
-    // trace; most tools declare no `toResultMetadata` and emit none.
+    // never shown to the LLM; most tools declare no `toResultMetadata`
+    // and emit none.
     const metadata = tool.toResultMetadata?.(output);
     return { role: "tool", toolCallId: call.id, content, ...(metadata && { metadata }) };
   } catch (err) {

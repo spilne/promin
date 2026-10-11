@@ -105,14 +105,32 @@ export interface DagRunScope {
  * this so the executor doesn't bake in one resolution path (a registry, a
  * local cache, a remote lookup, etc). `scope` is the scope the node will
  * run in — the executor binds the returned agent to it with `withScope`.
- * Throw to refuse a node (unknown or disabled agent); the node then fails
- * under its `onError` policy. `createRegistryAgentResolver` is the
- * registry-backed resolver that refuses disabled recipes.
+ * Throw `AgentRefusedError` to refuse a node (unknown or disabled agent);
+ * the node then fails under its `onError` policy. Any other error is not a
+ * refusal: it fails the DAG step, which retries like any step failure.
+ * `createRegistryAgentResolver` is the registry-backed resolver that
+ * refuses unknown and disabled recipes.
  */
 export type AgentResolver = (params: {
   readonly agentId: string;
   readonly scope: AgentScope;
 }) => Promise<Agent>;
+
+/** An agent resolver refused a node: the agent is unknown or disabled. */
+export class AgentRefusedError extends Error {
+  readonly _tag = "AgentRefusedError";
+  constructor(
+    readonly code: "agent_not_found" | "agent_disabled",
+    message: string,
+  ) {
+    super(`${code}: ${message}`);
+  }
+}
+
+/** Whether `err` is an `AgentRefusedError`, also across module copies. */
+export function isAgentRefusal(err: unknown): err is AgentRefusedError {
+  return (err as { _tag?: unknown } | null)?._tag === "AgentRefusedError";
+}
 
 /** Surfaced when the DAG can't be statically validated. */
 export class DagValidationError extends Error {

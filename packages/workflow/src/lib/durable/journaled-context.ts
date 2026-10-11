@@ -26,6 +26,16 @@ export interface ActivityYield {
   readonly promise: Promise<unknown>;
 }
 
+/**
+ * A child workflow whose definition is loaded on demand (`ctx.child`).
+ * `name` labels the journal entry and must stay the same across replays;
+ * `load` runs only when the child must actually run.
+ */
+export interface LazyChildWorkflow<Output> {
+  readonly name: string;
+  readonly load: () => Promise<Workflow<unknown, Output>>;
+}
+
 /** Per-activity configuration. */
 export interface ActivityOptions<T = unknown> {
   readonly retry?: RetryPolicy<unknown>;
@@ -343,12 +353,20 @@ export interface JournaledContext<Input, Prev> {
    * })
    * ```
    *
+   * `workflow` may also be a `LazyChildWorkflow`: a name plus a loader the
+   * engine calls only when the child has to run (first run, or re-attaching
+   * to a child a crashed run left in flight) — never when the journal
+   * already holds the child's outcome. Use it when building the child's
+   * definition takes async work (a registry lookup, credentials). When
+   * `load` throws, the call fails with that error and a run of the child
+   * still in flight is cancelled (with its descendants).
+   *
    * Requires the runner to supply a `runChild` callback to `runJournaledStep`.
    * Throws a clear error if invoked without one (e.g. in a unit test that
    * drives `runJournaledStep` directly without the callback).
    */
   child<Output>(
-    workflow: Workflow<unknown, Output>,
+    workflow: Workflow<unknown, Output> | LazyChildWorkflow<Output>,
     options?: { readonly input?: unknown; readonly workflowId?: string },
   ): Generator<ActivityYield, Output, Output>;
 

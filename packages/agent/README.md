@@ -14,6 +14,7 @@ Agent loop, LLM adapters, tools, memory, retrieval, and a terminal UI for buildi
   - [tool()](#tool)
   - [Multi-command tools](#multi-command-tools)
   - [Built-in tools](#built-in-tools)
+  - [Sub-agents](#sub-agents)
 - [Memory](#memory)
 - [Retrieval (RAG)](#retrieval-rag)
 - [Context compaction](#context-compaction)
@@ -272,11 +273,59 @@ yourself and connects to the address it checked, which defeats DNS rebinding.
 | `createShellTool()`             | Run an allowlisted program with argv (no shell), scrubbed env, group-kill on timeout                  |
 | `createLayeredMemoryTool()`     | `memory` tool over a `MemoryStore`: `set`, `setWorking`, `recall`                                     |
 | `createLlmTool()`               | One-shot LLM call from inside the agent                                                               |
-| `createAgentTool()`             | Delegate to a child agentLoop session                                                                 |
+| `subAgentTool()`                | Delegate to a sub-agent; each call runs as a child workflow (see [Sub-agents](#sub-agents))           |
 | `createFetchUrlTool()`          | Fetch a public http(s) URL (SSRF policy, pinned DNS, size cap, approval)                              |
 | `createWebSearchTool()`         | Web search                                                                                            |
 | `createDurableSchedulerTools()` | `schedulerCreate` (approval, min interval, atomic per-thread cap), `schedulerList`, `schedulerCancel` |
 | `createWriteToolTool()`         | Let the agent write and hot-load new tools at runtime                                                 |
+
+### Sub-agents
+
+`subAgentTool()` is the one way an agent hands a task to another agent. Each
+call runs the sub-agent's turn as a journaled child workflow of the calling
+turn, with id `<caller workflow id>.<step>.<toolCallId>` and
+`parentWorkflowId` set, so the runs list shows it under its caller (the engines
+give tool calls without an id, or with a repeated one, a deterministic id). A
+crash or replay of the caller re-attaches to the same child run instead of
+starting a second one, and the child's own journal keeps finished steps from
+running again. Cancelling the caller's turn or running past `timeoutMs` (counted
+from the call's journaled start, suspended time included) stops the child; a
+failed, refused or cancelled child comes back to the caller's model as a tool
+error. Depth and the call chain travel in the child's workflow input (a
+malformed frame fails the run): a call deeper than `maxDepth` (default 3) or
+back into an agent already waiting on the chain is refused.
+
+A sub-agent tool that needs approval is carried up to the root turn: in a
+`LocalAgent` thread the approval is indexed under the thread with the id
+`<child workflow id>:<toolCallId>`, shows in `thread.pendingApprovals()`, blocks
+new turns, and its events reach the root turn's stream. `thread.resume(id)`
+delivers the decision to the child and re-runs the root turn, which re-attaches
+the child; the root commits its transcript once.
+
+```ts
+const researcher = subAgentTool({
+  name: "researcher",
+  description: "Research a question with web search and return a short report.",
+  agent: { name: "researcher", llm, tools: { search }, systemPrompt: "You research." },
+  timeoutMs: 120_000,
+});
+const lead = agentAction({ name: "lead", llm, tools: { researcher } });
+```
+
+`agent` is an `agentAction` config or an `Agent` (`LocalAgent` runs its turn as
+the child; other agents are invoked inside it). A routed sub-agent picks its
+callee per call with `route` / `load`: the agents network's `callAgent`
+(recipes with `backend.network`) is one, resolving peers through the host's
+async, scope-aware resolver. The tool runs only inside the durable engines
+(`agentAction`, `agentLoop`, `LocalAgent`).
+
+Agentic DAGs (`createDagWorkflow`) run each node the same way, as a child run
+`<dag run>.node-<id>`. A run names a registered DAG (`{ dagId, version,
+initialInput, scope }`) and reads the recipe from the `DagRegistry` in its first
+journaled step. A node starts as soon as its own upstream nodes have settled; a
+node failing with `onError: "abort"` stops the running nodes and starts no new
+ones. Register the DAG workflow once at boot under its fixed name
+(`DAG_WORKFLOW_NAME`) so recovery resumes a run after a restart.
 
 ---
 
@@ -592,4 +641,4 @@ const events = logger.events();
 // [{ type: "turn.start", turn: 0, task: "Hello", ts: 1714000000000 }, ...]
 ```
 
-Event types: `turn.start`, `turn.end`, `turn.aborted`, `llm.call`, `tool.start`, `tool.end`, `tool.parse_error`, `compact`, `approval.requested`, `approval.decision`, `step_limit.hit`, `subagent.start`, `subagent.end`.
+Event types: `turn.start`, `turn.end`, `turn.aborted`, `llm.call`, `tool.start`, `tool.end`, `tool.parse_error`, `compact`, `approval.requested`, `approval.decision`, `step_limit.hit`.
