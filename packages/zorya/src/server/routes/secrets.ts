@@ -17,6 +17,7 @@
 
 import type { SecretScope, SecretsStorage } from "@promin/agent";
 import { json, jsonError, readJson } from "../router.ts";
+import { internalError } from "./agent-gateway-kit.ts";
 
 export interface SecretsGatewayDeps {
   readonly secrets: SecretsStorage;
@@ -28,8 +29,9 @@ interface CreateSecretRequest {
   readonly value?: unknown;
 }
 
-const KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_\-.]{0,127}$/;
-const MAX_VALUE_BYTES = 1_048_576; // 1 MB
+/** Allowed secret key shape — shared with the clone route. */
+export const SECRET_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_\-.]{0,127}$/;
+export const SECRET_MAX_VALUE_BYTES = 1_048_576; // 1 MB
 
 /**
  * Parse a wire-format scope into a SecretScope. Accepts the discriminated
@@ -100,21 +102,25 @@ export function createSecret(deps: SecretsGatewayDeps) {
     if (!body) return jsonError(400, "missing_body");
     const scope = parseScopeFromBody(body.scope);
     if ("error" in scope) return jsonError(400, scope.error);
-    if (typeof body.key !== "string" || !KEY_PATTERN.test(body.key)) {
+    if (typeof body.key !== "string" || !SECRET_KEY_PATTERN.test(body.key)) {
       return jsonError(400, "invalid_key", "Key must match [A-Za-z][A-Za-z0-9_\\-.]{0,127}.");
     }
     if (typeof body.value !== "string" || body.value.length === 0) {
       return jsonError(400, "missing_value");
     }
-    if (Buffer.byteLength(body.value, "utf8") > MAX_VALUE_BYTES) {
-      return jsonError(413, "value_too_large", `Secret value exceeds ${MAX_VALUE_BYTES} bytes.`);
+    if (Buffer.byteLength(body.value, "utf8") > SECRET_MAX_VALUE_BYTES) {
+      return jsonError(
+        413,
+        "value_too_large",
+        `Secret value exceeds ${SECRET_MAX_VALUE_BYTES} bytes.`,
+      );
     }
     try {
       await deps.secrets.set({ scope, key: body.key, value: body.value });
       const response: CreateSecretResponse = { scope, key: body.key };
       return json(201, response);
     } catch (err) {
-      return jsonError(500, "set_failed", err instanceof Error ? err.message : String(err));
+      return internalError({ code: "set_failed", err });
     }
   };
 }
@@ -129,7 +135,7 @@ export function listSecrets(deps: SecretsGatewayDeps) {
       const response: ListSecretsResponse = { scope, keys };
       return json(200, response);
     } catch (err) {
-      return jsonError(500, "list_failed", err instanceof Error ? err.message : String(err));
+      return internalError({ code: "list_failed", err });
     }
   };
 }
@@ -145,7 +151,7 @@ export function deleteSecret(deps: SecretsGatewayDeps) {
       await deps.secrets.delete({ scope, key });
       return new Response(null, { status: 204 });
     } catch (err) {
-      return jsonError(500, "delete_failed", err instanceof Error ? err.message : String(err));
+      return internalError({ code: "delete_failed", err });
     }
   };
 }

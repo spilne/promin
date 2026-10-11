@@ -2,42 +2,59 @@
 // Remote-deployment self-registration routes — POST/heartbeat/DELETE/list.
 //
 // External Zorya deployments call POST /register at startup to expose
-// their RemoteAgentBackend recipes on this host's AgentRegistry.
-// Heartbeat extends the TTL; DELETE is graceful unregister; a periodic
-// sweep prunes stale registrations.
+// their agents on this host's AgentRegistry as RemoteAgentBackend recipes.
+// Heartbeat extends the TTL; DELETE is graceful unregister; expired
+// registrations are swept on a clock-driven timer (and on every route
+// call), removing their recipes.
 //
-// Side-effects on AgentRegistry:
-//   - register   → upsert RemoteAgentBackend recipe per declared agent id
-//   - unregister → delete those recipes
-//   - sweep      → delete the recipes of expired registrations
+// Ownership:
+//   Every recipe a deployment writes is tagged `remote-deployment:<id>`.
+//   Register refuses (409 `agent_id_conflict`) an agent id that already
+//   belongs to anything else — a hand-authored or file-scanned recipe, or
+//   a live deployment at a different endpoint — so a registration can
+//   never shadow or hijack an existing agent. A live deployment at the
+//   SAME endpoint (the remote restarted) and an expired one hand the id
+//   over. Unregister and expiry delete only the recipe versions still
+//   tagged with that deployment.
 //
-// Phase 1 scope: in-memory registry default; sweep runs on each list()
-// call (lazy GC) so a real production deploy can layer a periodic loop
-// on top via the existing scheduler pattern. Persistent backends
-// (Sqlite / Postgres) and an explicit sweep loop are tracked as
-// follow-ups.
+// Outbound safety:
+//   The endpoint must pass the `RemoteEndpointPolicy` (public http(s)
+//   hosts only by default). Bearer tokens are stored but never returned:
+//   every response redacts them.
 // ---------------------------------------------------------------------------
 
 import type {
   AgentRegistry,
   RegisterDeploymentInput,
+  RegisteredAgent,
   RegisteredDeployment,
   RemoteDeploymentRegistry,
 } from "@promin/agent";
-import { SystemWallClock, type WallClock } from "@promin/workflow";
+import { SystemWallClock, type TimerHandle, type WallClock } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
+import { redactDeployment } from "./agent-gateway-kit.ts";
+import { checkRemoteEndpoint, type RemoteEndpointPolicy } from "./remote-endpoint-policy.ts";
+
+export type { RemoteEndpointPolicy } from "./remote-endpoint-policy.ts";
+
+/** Tag prefix marking a recipe as written by a remote deployment. */
+export const REMOTE_DEPLOYMENT_TAG_PREFIX = "remote-deployment:";
+
+/** Accepted `ttlMs` range on register. */
+export const MIN_DEPLOYMENT_TTL_MS = 1_000;
+export const MAX_DEPLOYMENT_TTL_MS = 60 * 60 * 1_000;
+
+/** Most agents one deployment may register. */
+const MAX_AGENTS_PER_DEPLOYMENT = 100;
+
+/** Agent ids a deployment may claim: no reserved `_` prefix, URL-safe. */
+const AGENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 
 export interface RemoteDeploymentsGatewayDeps {
   readonly registry: RemoteDeploymentRegistry;
   readonly agents: AgentRegistry;
-  /**
-   * Time source for the lazy stale-registration sweep. Pass the deployment
-   * registry's clock so heartbeat stamps and the cutoff share one axis.
-   * Default: `SystemWallClock`.
-   */
-  readonly clock?: WallClock;
-  /** Explicit "now" override; takes precedence over `clock`. */
-  readonly now?: () => number;
+  /** Outbound endpoint policy. Default: public http(s) hosts only. */
+  readonly endpointPolicy?: RemoteEndpointPolicy;
 }
 
 interface RegisterRequest {
@@ -49,7 +66,7 @@ interface RegisterRequest {
 
 function parseRegisterBody(
   body: RegisterRequest | null,
-): RegisterDeploymentInput | { error: string } {
+): RegisterDeploymentInput | { error: string; message?: string } {
   if (!body) return { error: "missing_body" };
   if (typeof body.endpoint !== "string" || body.endpoint.length === 0) {
     return { error: "missing_endpoint" };
@@ -57,10 +74,13 @@ function parseRegisterBody(
   if (!Array.isArray(body.agents) || body.agents.length === 0) {
     return { error: "missing_agents" };
   }
-  const agents: string[] = [];
+  if (body.agents.length > MAX_AGENTS_PER_DEPLOYMENT) {
+    return { error: "too_many_agents", message: `At most ${MAX_AGENTS_PER_DEPLOYMENT} agents.` };
+  }
+  const agents = new Set<string>();
   for (const a of body.agents) {
-    if (typeof a !== "string" || a.length === 0) return { error: "invalid_agent_id" };
-    agents.push(a);
+    if (typeof a !== "string" || !AGENT_ID_PATTERN.test(a)) return { error: "invalid_agent_id" };
+    agents.add(a);
   }
   let auth: RegisterDeploymentInput["auth"] | undefined;
   if (body.auth !== undefined && body.auth !== null) {
@@ -75,20 +95,67 @@ function parseRegisterBody(
     }
     auth = { kind: "bearer", token: authObj.token };
   }
-  const ttlMs = typeof body.ttlMs === "number" && body.ttlMs > 0 ? body.ttlMs : undefined;
+  let ttlMs: number | undefined;
+  if (body.ttlMs !== undefined) {
+    if (
+      typeof body.ttlMs !== "number" ||
+      !Number.isInteger(body.ttlMs) ||
+      body.ttlMs < MIN_DEPLOYMENT_TTL_MS ||
+      body.ttlMs > MAX_DEPLOYMENT_TTL_MS
+    ) {
+      return {
+        error: "invalid_ttlMs",
+        message: `ttlMs must be an integer in [${MIN_DEPLOYMENT_TTL_MS}, ${MAX_DEPLOYMENT_TTL_MS}].`,
+      };
+    }
+    ttlMs = body.ttlMs;
+  }
   return {
     endpoint: body.endpoint,
-    agents,
+    agents: [...agents],
     ...(auth !== undefined && { auth }),
     ...(ttlMs !== undefined && { ttlMs }),
   };
 }
 
+function ownerTag(deploymentId: string): string {
+  return `${REMOTE_DEPLOYMENT_TAG_PREFIX}${deploymentId}`;
+}
+
+/** The deployment that wrote `recipe`, or null for any other recipe. */
+function recipeOwner(recipe: RegisteredAgent): string | null {
+  if (recipe.backend.type !== "remote") return null;
+  const tag = recipe.metadata.tags.find((t) => t.startsWith(REMOTE_DEPLOYMENT_TAG_PREFIX));
+  return tag ? tag.slice(REMOTE_DEPLOYMENT_TAG_PREFIX.length) : null;
+}
+
 /**
- * Upsert a RemoteAgentBackend recipe for each declared agent id,
- * pointing at this deployment's endpoint. Idempotent — the AgentRegistry
- * register() upserts on (id, version) so re-running is a no-op.
+ * Agent ids `input` may not claim: ids with a version not written by a
+ * deployment, or owned by a live deployment at another endpoint.
  */
+async function conflictingIds(
+  deps: RemoteDeploymentsGatewayDeps,
+  input: RegisterDeploymentInput,
+): Promise<string[]> {
+  const conflicts: string[] = [];
+  for (const agentId of input.agents) {
+    for (const version of await deps.agents.versions(agentId)) {
+      const owner = recipeOwner(version);
+      if (owner === null) {
+        conflicts.push(agentId);
+        break;
+      }
+      const live = await deps.registry.get(owner);
+      if (live && live.endpoint !== input.endpoint) {
+        conflicts.push(agentId);
+        break;
+      }
+    }
+  }
+  return conflicts;
+}
+
+/** Write a RemoteAgentBackend recipe per declared agent, tagged with its owner. */
 async function upsertRecipes(
   agents: AgentRegistry,
   deployment: RegisteredDeployment,
@@ -105,23 +172,31 @@ async function upsertRecipes(
       metadata: {
         description: `Auto-registered from ${deployment.endpoint} (deployment ${deployment.deploymentId})`,
         capabilities: [],
-        tags: ["remote", "auto-registered"],
+        tags: ["remote", "auto-registered", ownerTag(deployment.deploymentId)],
       },
     });
   }
 }
 
-/**
- * Delete the recipes that were created for a deployment. Best-effort —
- * a missing recipe (already deleted, manually unregistered) is fine.
- */
-async function deleteRecipes(
+/** Delete the recipe versions `deployment` still owns; others are left alone. */
+async function deleteOwnedRecipes(
   agents: AgentRegistry,
   deployment: RegisteredDeployment,
 ): Promise<void> {
   for (const agentId of deployment.agents) {
-    await agents.unregister(agentId).catch(() => {});
+    for (const version of await agents.versions(agentId)) {
+      if (recipeOwner(version) === deployment.deploymentId) {
+        await agents.unregister(agentId, version.version);
+      }
+    }
   }
+}
+
+/** Expire stale registrations and remove their recipes. */
+export async function sweepExpiredDeployments(deps: RemoteDeploymentsGatewayDeps): Promise<number> {
+  const expired = await deps.registry.expireStale();
+  for (const dep of expired) await deleteOwnedRecipes(deps.agents, dep);
+  return expired.length;
 }
 
 export interface RegisterDeploymentResponse {
@@ -133,23 +208,42 @@ export interface RegisterDeploymentResponse {
 
 export function registerDeployment(deps: RemoteDeploymentsGatewayDeps) {
   return async (req: Request): Promise<Response> => {
-    const body = await readJson<RegisterRequest>(req);
-    const parsed = parseRegisterBody(body);
-    if ("error" in parsed) return jsonError(400, parsed.error);
+    const parsed = parseRegisterBody(await readJson<RegisterRequest>(req));
+    if ("error" in parsed) return jsonError(400, parsed.error, parsed.message);
 
-    try {
-      const deployment = await deps.registry.register(parsed);
-      await upsertRecipes(deps.agents, deployment);
-      const response: RegisterDeploymentResponse = {
-        deploymentId: deployment.deploymentId,
-        ttlMs: deployment.ttlMs,
-        heartbeatPath: `/api/remote-deployments/${encodeURIComponent(deployment.deploymentId)}/heartbeat`,
-        unregisterPath: `/api/remote-deployments/${encodeURIComponent(deployment.deploymentId)}`,
-      };
-      return json(201, response);
-    } catch (err) {
-      return jsonError(500, "register_failed", err instanceof Error ? err.message : String(err));
+    const endpoint = await checkRemoteEndpoint({
+      raw: parsed.endpoint,
+      ...(deps.endpointPolicy !== undefined && { policy: deps.endpointPolicy }),
+    });
+    if (!endpoint.ok) return jsonError(400, endpoint.error, endpoint.message);
+    const input: RegisterDeploymentInput = { ...parsed, endpoint: endpoint.url };
+
+    await sweepExpiredDeployments(deps);
+    const conflicts = await conflictingIds(deps, input);
+    if (conflicts.length > 0) {
+      return json(409, {
+        error: "agent_id_conflict",
+        message: "These agent ids already belong to another agent or deployment.",
+        agents: conflicts,
+      });
     }
+
+    const deployment = await deps.registry.register(input);
+    try {
+      await upsertRecipes(deps.agents, deployment);
+    } catch (err) {
+      await deps.registry.unregister(deployment.deploymentId).catch(() => {});
+      await deleteOwnedRecipes(deps.agents, deployment).catch(() => {});
+      throw err;
+    }
+    const id = encodeURIComponent(deployment.deploymentId);
+    const response: RegisterDeploymentResponse = {
+      deploymentId: deployment.deploymentId,
+      ttlMs: deployment.ttlMs,
+      heartbeatPath: `/api/remote-deployments/${id}/heartbeat`,
+      unregisterPath: `/api/remote-deployments/${id}`,
+    };
+    return json(201, response);
   };
 }
 
@@ -157,25 +251,23 @@ export function heartbeatDeployment(deps: RemoteDeploymentsGatewayDeps) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
     const deploymentId = params.deploymentId;
     if (!deploymentId) return jsonError(400, "missing_deploymentId");
-    try {
-      const updated = await deps.registry.heartbeat(deploymentId);
-      if (!updated) {
-        // Caller should re-register. Surface 410 Gone so the client
-        // distinguishes 'unknown id' from a transient 5xx.
-        return jsonError(
-          410,
-          "deployment_not_found",
-          `Deployment ${deploymentId} is unknown — re-register.`,
-        );
-      }
-      return json(200, {
-        deploymentId: updated.deploymentId,
-        ttlMs: updated.ttlMs,
-        lastHeartbeat: updated.lastHeartbeat,
-      });
-    } catch (err) {
-      return jsonError(500, "heartbeat_failed", err instanceof Error ? err.message : String(err));
+    // Sweep first: an expired registration is removed (with its recipes)
+    // rather than revived.
+    await sweepExpiredDeployments(deps);
+    const updated = await deps.registry.heartbeat(deploymentId);
+    if (!updated) {
+      // 410 Gone so the client distinguishes "re-register" from a transient 5xx.
+      return jsonError(
+        410,
+        "deployment_not_found",
+        `Deployment ${deploymentId} is unknown or expired — re-register.`,
+      );
     }
+    return json(200, {
+      deploymentId: updated.deploymentId,
+      ttlMs: updated.ttlMs,
+      lastHeartbeat: updated.lastHeartbeat,
+    });
   };
 }
 
@@ -183,40 +275,81 @@ export function unregisterDeployment(deps: RemoteDeploymentsGatewayDeps) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
     const deploymentId = params.deploymentId;
     if (!deploymentId) return jsonError(400, "missing_deploymentId");
-    try {
-      const removed = await deps.registry.unregister(deploymentId);
-      if (removed) {
-        await deleteRecipes(deps.agents, removed);
-      }
-      // Idempotent — 204 even when the deployment was already gone.
-      return new Response(null, { status: 204 });
-    } catch (err) {
-      return jsonError(500, "unregister_failed", err instanceof Error ? err.message : String(err));
-    }
+    const removed = await deps.registry.unregister(deploymentId);
+    if (removed) await deleteOwnedRecipes(deps.agents, removed);
+    // Idempotent — 204 even when the deployment was already gone.
+    return new Response(null, { status: 204 });
   };
 }
 
 export interface ListDeploymentsResponse {
+  /** Live deployments; `auth.token` is always redacted. */
   readonly deployments: ReadonlyArray<RegisteredDeployment>;
 }
 
 export function listDeployments(deps: RemoteDeploymentsGatewayDeps) {
   return async (): Promise<Response> => {
-    try {
-      // Lazy sweep: every list() call expires stale registrations and
-      // cleans up their recipes. A periodic loop in production
-      // deployments would replace this; for Phase 1 single-process
-      // demos, lazy GC is enough.
-      const now = deps.now ? deps.now() : (deps.clock ?? SystemWallClock).currentTimeMs();
-      const expired = await deps.registry.expireStale({ now });
-      for (const dep of expired) {
-        await deleteRecipes(deps.agents, dep);
-      }
-      const deployments = await deps.registry.list();
-      const response: ListDeploymentsResponse = { deployments };
-      return json(200, response);
-    } catch (err) {
-      return jsonError(500, "list_failed", err instanceof Error ? err.message : String(err));
-    }
+    await sweepExpiredDeployments(deps);
+    const deployments = (await deps.registry.list()).map(redactDeployment);
+    return json(200, { deployments } satisfies ListDeploymentsResponse);
   };
+}
+
+// ---------------------------------------------------------------------------
+// Expiry sweep loop
+// ---------------------------------------------------------------------------
+
+export interface RemoteDeploymentSweeperConfig extends RemoteDeploymentsGatewayDeps {
+  /** Sweep period. Default: 15s. */
+  readonly intervalMs?: number;
+  /** Timer source. Default: `SystemWallClock`. */
+  readonly clock?: WallClock;
+  /** Sweep failures land here. Default: console. */
+  readonly onError?: (err: unknown) => void;
+}
+
+/**
+ * Periodic expiry of stale deployments, so a remote that died without
+ * unregistering stops receiving traffic within one sweep period even
+ * when nobody opens the deployments page.
+ */
+export class RemoteDeploymentSweeper {
+  private readonly deps: RemoteDeploymentsGatewayDeps;
+  private readonly intervalMs: number;
+  private readonly clock: WallClock;
+  private readonly onError: (err: unknown) => void;
+  private timer: TimerHandle | null = null;
+  private running = false;
+
+  constructor(config: RemoteDeploymentSweeperConfig) {
+    this.deps = config;
+    this.intervalMs = config.intervalMs ?? 15_000;
+    this.clock = config.clock ?? SystemWallClock;
+    this.onError =
+      config.onError ?? ((err) => console.error("[zorya] remote-deployment sweep failed", err));
+  }
+
+  start(): void {
+    if (this.timer) return;
+    this.timer = this.clock.setInterval(() => void this.tick(), this.intervalMs);
+    this.timer.unref?.();
+  }
+
+  stop(): void {
+    this.timer?.clear();
+    this.timer = null;
+  }
+
+  /** One sweep; overlapping ticks are skipped. */
+  async tick(): Promise<void> {
+    if (this.running) return;
+    this.running = true;
+    try {
+      await sweepExpiredDeployments(this.deps);
+    } catch (err) {
+      this.onError(err);
+    } finally {
+      this.running = false;
+    }
+  }
 }

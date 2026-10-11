@@ -65,6 +65,7 @@ export type {
   ConsolidationSignals,
   DefaultConsolidatorConfig,
 } from "./memory/consolidator.ts";
+export { NothingToConsolidateError } from "./memory/consolidator.ts";
 export {
   RateLimitedConsolidator,
   ConsolidatorRateLimitError,
@@ -126,6 +127,7 @@ export type {
 } from "./agent/types.ts";
 
 export { LocalAgent } from "./agent/local-agent.ts";
+export { ThreadNotFoundError } from "./agent/errors.ts";
 export type { LocalAgentConfig } from "./agent/local-agent.ts";
 
 export { frameTask } from "./agent/frame-task.ts";

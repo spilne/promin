@@ -27,6 +27,19 @@ function makeServer() {
   const memory = new InMemoryMemoryStore();
   const storage = new InMemoryWorkflowStorage();
   const runner = createWorkflowRunner({ storage });
+  const agentRegistry = new InMemoryAgentRegistry();
+  // Instances can only be created for registered agents. The in-memory
+  // registry writes synchronously, so no await is needed here.
+  for (const id of ["writer", "reviewer"]) {
+    void agentRegistry.register({
+      id,
+      backend: {
+        type: "local",
+        model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+        role: { inline: { systemPrompt: "x", tools: [] } },
+      },
+    });
+  }
   const server = new ZoryaServer({
     insecure: true,
     workflows: new LocalWorkflows({
@@ -36,7 +49,7 @@ function makeServer() {
       sleepScanIntervalMs: 0,
     }),
     agents: new ZoryaAgents({
-      registry: new InMemoryAgentRegistry(),
+      registry: agentRegistry,
       resolve: () => {
         throw new Error("instances test should not resolve agents");
       },

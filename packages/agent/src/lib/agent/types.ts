@@ -320,6 +320,12 @@ export interface AgentThread<Input = AgentInput, Output = unknown> {
     decision: { approved: boolean; reason?: string },
     opts?: AgentInvokeOpts,
   ): Promise<AgentRunOutput<Output>>;
+  /**
+   * True when a turn on this thread is suspended waiting for the approval
+   * of `callId` — lets a gateway answer "unknown approval" before it
+   * starts streaming a resume. Backends without approvals omit it.
+   */
+  hasPendingApproval?(callId: string): Promise<boolean>;
   /** Streaming variant of `resume`. */
   resumeStream?(
     callId: string,

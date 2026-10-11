@@ -4,36 +4,42 @@
 //
 // Routes:
 //   GET  /api/agents                          — list registered agents
-//   GET  /api/agents/:id                      — get one (latest version)
+//   GET  /api/agents/:id                      — get one (active version)
 //   POST /api/agents/:id/invoke               — one-shot invocation
 //   POST /api/agents/:id/stream               — one-shot, SSE response
 //   POST /api/agents/:id/threads/:threadId    — conversational turn (one-shot per call)
 //   POST /api/agents/:id/threads/:threadId/stream — conversational, SSE
-//   GET  /api/agents/:id/threads              — list threads (requires namespaceId query)
+//   GET  /api/agents/:id/threads              — list the caller's threads
 //   GET  /api/agents/:id/threads/:threadId/messages — read message history
 //
 // Scope binding:
-//   Every invocation requires `namespaceId` AND ONE OF `resourceId | ownerId`
-//   in the body — cross-scope leak is prevented by-construction, not by
-//   policy. `resourceId` = raw scope key; `ownerId` = "resolve via
+//   Every invocation AND every thread route requires `namespaceId` and
+//   exactly ONE OF `resourceId | ownerId` (body for POST/PATCH, query for
+//   GET). `resourceId` = raw scope key; `ownerId` = "resolve via
 //   AgentInstance, use its id as the scope key". Both at once is rejected
 //   (`conflicting_identity`); neither is rejected (`missing_scope_identity`).
 //   Use the exported `AgentInvokeBody` discriminated-union type to get the
 //   constraint enforced at compile time.
 //
-//   The (namespaceId, resourceId) tuple flows through `agent.withScope()`
-//   per request — the resolved agent template is shared across requests
-//   but each call sees its own scope.
-//
-//   Note on naming: today `namespaceId` acts as the outermost scope (think
-//   "team" / "workspace" within a single trusted operator). Promin doesn't
-//   yet model multi-tenant org-level isolation; if/when it does, a
-//   separate `tenantId` axis will be added above `namespaceId`.
+// Thread ownership:
+//   A thread belongs to the (namespace, resource, agent) that created it.
+//   The resource half is enforced by the agent backend (`LocalAgent.thread`
+//   refuses a thread owned by another resource); the agent half by the
+//   gateway, which stamps `metadata.agentId` when a thread is created and
+//   only lists / opens threads carrying its own agent id. A thread owned by
+//   someone else answers exactly like a missing one (404), so ids can't be
+//   probed. Hosts that authenticate end users bind the requested scope to
+//   the caller with `authorizeScope` (403 on mismatch).
 //
 // Resolver injection:
 //   The route doesn't know how to construct an Agent from a recipe — that's
 //   the host's job. Pass `resolve(recipe) → Agent` in `AgentGatewayDeps`.
 //   For LocalAgent backends, that's `(r) => resolveLocalAgent(r, deps)`.
+//
+// Errors:
+//   Expected outcomes map to 4xx with a stable `error` code. Unexpected
+//   failures answer `{ error: <code>, requestId }` with status 500; the
+//   detail is logged under the request id and never sent to the caller.
 // ---------------------------------------------------------------------------
 
 import type {
@@ -41,6 +47,7 @@ import type {
   AgentInstanceRegistry,
   AgentRegistry,
   AgentRunOutput,
+  AgentThread,
   AgentThreadSummary,
   AgentTurnGate,
   AgentTurnPolicy,
@@ -51,13 +58,26 @@ import type {
 } from "@promin/agent";
 import {
   buildAgentTrace,
+  composeAgentInstanceId,
   ConsolidatorRateLimitError,
+  NothingToConsolidateError,
   SecretScope,
+  ThreadNotFoundError,
   TurnInProgressError,
 } from "@promin/agent";
 import { SystemWallClock, WorkflowSuspendedError, type WallClock } from "@promin/workflow";
 import { json, jsonError, parseIntParam, readJson } from "../router.ts";
+import {
+  internalError,
+  mergeAgentMetadata,
+  parseBackend,
+  parseMetadataPatch,
+  redactRecipe,
+  restoreRedactedSecrets,
+  type ScopeAuthorizer,
+} from "./agent-gateway-kit.ts";
 import { isDraftId } from "./agent-drafts.ts";
+import { SECRET_KEY_PATTERN, SECRET_MAX_VALUE_BYTES } from "./secrets.ts";
 
 // ---------------------------------------------------------------------------
 // Response DTOs — UI imports these for typing API responses. Re-export the
@@ -82,6 +102,12 @@ export interface ThreadMessagesResponse {
   messages: Message[];
 }
 
+export interface RenameThreadResponse {
+  threadId: string;
+  title: string | null;
+  metadata: Record<string, unknown>;
+}
+
 export interface InvokeResponse {
   text: string;
   finishReason: string;
@@ -100,6 +126,13 @@ export interface ThreadInvokeResponse extends InvokeResponse {
   isNew: boolean;
 }
 
+/**
+ * Thread-metadata key the gateway stamps with the owning agent's id when
+ * it creates a thread. Listing filters on it and every thread route
+ * checks it, so one agent's threads are never reachable through another.
+ */
+export const THREAD_AGENT_METADATA_KEY = "agentId";
+
 export interface AgentGatewayDeps {
   readonly registry: AgentRegistry;
   /**
@@ -116,9 +149,7 @@ export interface AgentGatewayDeps {
    *
    * Optional `scope` carries the per-request namespace + resource so
    * the host can resolve recipe-level credentialRefs (BYOK) at this
-   * boundary. Hosts that don't care about BYOK ignore the second
-   * argument; existing callbacks signed `(recipe) => Agent` continue
-   * to work unchanged via TS parameter contravariance.
+   * boundary.
    *
    * Returns `Agent` synchronously OR `Promise<Agent>` when the host
    * does async secret resolution (the typical BYOK case).
@@ -129,9 +160,9 @@ export interface AgentGatewayDeps {
   ) => Agent | Promise<Agent>;
   /**
    * Optional. When set, callers may pass `ownerId` instead of
-   * `resourceId` in the invoke body. The gateway resolves-or-creates an
-   * AgentInstance via this registry and uses `instance.id` as the
-   * resourceId for the cascade. The response carries the resolved
+   * `resourceId`. The gateway resolves-or-creates an AgentInstance via
+   * this registry (read routes only compute its id) and uses
+   * `instance.id` as the resourceId. The response carries the resolved
    * `instanceId` so clients can skip the lookup on subsequent calls.
    *
    * When unset, `ownerId` in the body is rejected — the server can't
@@ -144,6 +175,8 @@ export interface AgentGatewayDeps {
    * `POST /threads/:threadId/approve`) so two replicas processing the
    * same conversation atomically: only one runs the turn at a time;
    * concurrent attempts are rejected with 409 Conflict + current owner.
+   * The lease is extended on the gateway clock while a turn runs and
+   * released when it ends, fails, or the client disconnects.
    *
    * When unset, no coordination is enforced — fine for single-process
    * deployments. Multi-replica deployments (sharing a PgMemoryStore)
@@ -153,37 +186,43 @@ export interface AgentGatewayDeps {
   /**
    * Identifier for THIS gateway process. Used as `ownerId` when the
    * gate acquires a lease, so 409 responses can name which replica
-   * holds the conversation. Default: a random hex string per process.
+   * holds the conversation. Default: `"gateway"`.
    */
   readonly workerId?: string;
   /**
    * Default policy when contention happens. Today only 'strict' is
-   * implemented (queued throws NotImplementedError; tracked as
-   * promin-872n). Default: 'strict'.
+   * implemented. Default: 'strict'.
    */
   readonly defaultTurnPolicy?: AgentTurnPolicy;
   /**
    * Optional scoped secrets vault. When set, the clone endpoint
    * persists secrets supplied in the request body at the requested
    * scope; agent invocations resolve `model.credentialRef` against
-   * this vault (BYOK). Without it, recipes that declare credentialRefs
-   * will fail at resolve time, and clone requests with a `secrets`
-   * body persist nothing (still echo the keys back so callers know
-   * they were rejected silently — TODO: 400 in a future commit).
+   * this vault (BYOK). Without it, a clone request carrying secrets is
+   * rejected with 400 `secrets_unsupported`.
    */
   readonly secrets?: SecretsStorage;
   /**
-   * Time source for the distill rate-limit `retry-after` and the default
-   * thread `archivedAt` stamp. Default: `SystemWallClock`.
+   * Agent ids backed by a recipe file on disk. Edits and deletes of
+   * those ids are refused (409 `file_managed`): the next scan tick would
+   * silently overwrite them.
+   */
+  readonly fileManagedIds?: () => ReadonlyArray<string>;
+  /** Binds a request's scope to its authenticated caller. See `ScopeAuthorizer`. */
+  readonly authorizeScope?: ScopeAuthorizer;
+  /**
+   * Time source for the distill rate-limit `retry-after`, the default
+   * thread `archivedAt` stamp and turn-lease extension.
+   * Default: `SystemWallClock`.
    */
   readonly clock?: WallClock;
 }
 
 /**
- * Reject invocations on disabled recipes with 410 Gone. Read / edit
- * routes (list threads, update metadata, list versions, clone, etc.)
- * still work on disabled agents — operators need to re-enable them
- * after fixing whatever drove the kill-switch.
+ * Reject invocations on disabled recipes with 410 Gone. Read and
+ * housekeeping routes (list threads, messages, trace, rename, archive,
+ * metadata edits, versions, clone) still work on disabled agents —
+ * operators inspect and re-enable a kill-switched agent.
  */
 function disabled410(recipe: RegisteredAgent): Response | null {
   if (recipe.metadata.enabled === false) {
@@ -194,6 +233,14 @@ function disabled410(recipe: RegisteredAgent): Response | null {
     );
   }
   return null;
+}
+
+function agentNotFound(id: string): Response {
+  return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+}
+
+function threadNotFound(): Response {
+  return jsonError(404, "thread_not_found");
 }
 
 /**
@@ -221,11 +268,8 @@ interface InvokeRequest {
   readonly metadata?: unknown;
 }
 
-interface ParsedInvoke {
+interface ParsedInvoke extends ScopeFields {
   readonly task: string;
-  readonly namespaceId: string;
-  readonly resourceId?: string;
-  readonly ownerId?: string;
 }
 
 /**
@@ -267,10 +311,10 @@ interface ScopeFields {
 
 /**
  * Parse + validate the `(namespaceId, resourceId | ownerId)` scope
- * triple from any agent-invocation body. Cross-tenant leak prevention is
- * by-construction: the parser rejects bodies that omit the user-scope
- * field, so a caller can never accidentally invoke "as namespace acme"
- * without saying "for which user" — there's no implicit "default user."
+ * triple from any agent-invocation body or thread-route query. The parser
+ * rejects input that omits the user-scope field, so a caller can never
+ * act "as namespace acme" without saying "for which user" — there's no
+ * implicit "default user."
  *
  * Errors:
  *   missing_namespaceId        — namespaceId absent or empty.
@@ -291,13 +335,9 @@ export function parseScopeFields(body: {
     typeof body.resourceId === "string" && body.resourceId.length > 0 ? body.resourceId : undefined;
   const ownerId =
     typeof body.ownerId === "string" && body.ownerId.length > 0 ? body.ownerId : undefined;
-  // Both unset — by-construction tenancy means we never let a caller invoke
-  // "as namespace X" without naming the user. resourceId = raw scope key,
-  // ownerId = resolved-via-AgentInstance.
   if (resourceId === undefined && ownerId === undefined) {
     return { error: "missing_scope_identity" };
   }
-  // Conflicting identity signals — caller has to pick one model.
   if (resourceId !== undefined && ownerId !== undefined) {
     return { error: "conflicting_identity" };
   }
@@ -318,32 +358,175 @@ function parseInvokeBody(body: InvokeRequest | null): ParsedInvoke | { error: st
   return { task: body.task, ...scope };
 }
 
-/**
- * Resolve the effective `resourceId` for the agent scope:
- *   - If `parsed.ownerId` is set, look up (or create) the AgentInstance
- *     and use `instance.id`. Fail if the gateway has no registry.
- *   - Otherwise, pass through `parsed.resourceId` (today's behaviour).
- *
- * Returns either `{ resourceId, instanceId? }` for the success path or
- * `{ error }` for the structured error.
- */
-async function resolveScope(
+/** Scope fields from a GET route's query string. */
+function scopeFromQuery(url: URL): ScopeFields | { error: string } {
+  return parseScopeFields({
+    namespaceId: url.searchParams.get("namespaceId") ?? undefined,
+    resourceId: url.searchParams.get("resourceId") ?? undefined,
+    ownerId: url.searchParams.get("ownerId") ?? undefined,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// loadScopedAgent — the one place a request turns into a scoped Agent:
+// recipe lookup, kill switch, caller authorization, instance resolution,
+// resolve + withScope.
+// ---------------------------------------------------------------------------
+
+interface ScopedAgent {
+  readonly recipe: RegisteredAgent;
+  readonly agent: Agent;
+  readonly namespaceId: string;
+  readonly resourceId: string;
+  /** Set when the scope was resolved from `ownerId`. */
+  readonly instanceId?: string;
+}
+
+async function loadScopedAgent(
   deps: AgentGatewayDeps,
-  registeredAgentId: string,
-  parsed: ParsedInvoke,
-): Promise<{ resourceId?: string; instanceId?: string } | { error: string }> {
-  if (parsed.ownerId !== undefined) {
-    if (!deps.instanceRegistry) {
-      return { error: "ownerId_unsupported" };
-    }
-    const instance = await deps.instanceRegistry.resolveOrCreate({
-      registeredAgentId,
-      namespaceId: parsed.namespaceId,
-      ownerId: parsed.ownerId,
-    });
-    return { resourceId: instance.id, instanceId: instance.id };
+  params: {
+    readonly req: Request;
+    readonly id: string;
+    readonly scope: ScopeFields;
+    /** Invocation routes reject a disabled recipe with 410. */
+    readonly invoking: boolean;
+  },
+): Promise<ScopedAgent | Response> {
+  const { req, id, scope, invoking } = params;
+  const recipe = await deps.registry.get(id);
+  if (!recipe) return agentNotFound(id);
+  if (invoking) {
+    const disabled = disabled410(recipe);
+    if (disabled) return disabled;
   }
-  return { resourceId: parsed.resourceId };
+  if (deps.authorizeScope) {
+    const allowed = await deps.authorizeScope({ req, scope: { ...scope, agentId: id } });
+    if (!allowed) return jsonError(403, "scope_forbidden");
+  }
+
+  let resourceId: string;
+  let instanceId: string | undefined;
+  if (scope.ownerId !== undefined) {
+    if (!deps.instanceRegistry) return jsonError(400, "ownerId_unsupported");
+    if (invoking) {
+      const instance = await deps.instanceRegistry.resolveOrCreate({
+        registeredAgentId: id,
+        namespaceId: scope.namespaceId,
+        ownerId: scope.ownerId,
+      });
+      instanceId = instance.id;
+    } else {
+      // Read routes never create an instance row: the deterministic id
+      // is enough to address the owner's threads (none, if it has none).
+      instanceId = composeAgentInstanceId({
+        namespaceId: scope.namespaceId,
+        registeredAgentId: id,
+        ownerId: scope.ownerId,
+      });
+    }
+    resourceId = instanceId;
+  } else {
+    resourceId = scope.resourceId!;
+  }
+
+  let agent: Agent;
+  try {
+    const resolved = await deps.resolve(recipe, { namespaceId: scope.namespaceId, resourceId });
+    agent = resolved.withScope({ namespaceId: scope.namespaceId, resourceId });
+  } catch (err) {
+    return internalError({ code: "resolve_failed", err });
+  }
+  return {
+    recipe,
+    agent,
+    namespaceId: scope.namespaceId,
+    resourceId,
+    ...(instanceId !== undefined && { instanceId }),
+  };
+}
+
+/**
+ * Open a thread the caller owns. `create: true` creates a missing thread
+ * (stamped with this agent's id); `false` requires it to exist. A thread
+ * owned by another resource or agent answers like a missing one.
+ */
+async function openOwnedThread(params: {
+  readonly scoped: ScopedAgent;
+  readonly threadId: string;
+  readonly create: boolean;
+}): Promise<AgentThread | Response> {
+  const { scoped, threadId, create } = params;
+  const agentId = scoped.recipe.id;
+  let thread: AgentThread;
+  try {
+    thread = await scoped.agent.thread(
+      threadId,
+      create ? { metadata: { [THREAD_AGENT_METADATA_KEY]: agentId } } : { createIfMissing: false },
+    );
+  } catch (err) {
+    if (err instanceof ThreadNotFoundError) return threadNotFound();
+    throw err;
+  }
+  // Remote and cursor backends own their thread storage; the agent stamp
+  // lives with local (memory-store) threads only.
+  if (scoped.recipe.backend.type === "local" && !thread.isNew) {
+    const metadata = await thread.metadata();
+    if (metadata[THREAD_AGENT_METADATA_KEY] !== agentId) return threadNotFound();
+  }
+  return thread;
+}
+
+// ---------------------------------------------------------------------------
+// Turn leases
+// ---------------------------------------------------------------------------
+
+interface HeldTurnLease {
+  /** Release the lease (idempotent) and stop extending it. */
+  release(): Promise<void>;
+}
+
+/**
+ * Take the thread's turn lease when a gate is configured. While held,
+ * the lease is extended on the gateway clock every half TTL so a long
+ * turn (or stream) never loses it mid-flight. Returns a 409 response on
+ * contention.
+ */
+async function acquireTurnLease(
+  deps: AgentGatewayDeps,
+  key: { readonly namespaceId: string; readonly threadId: string },
+): Promise<HeldTurnLease | Response> {
+  const gate = deps.turnGate;
+  if (!gate) return { release: async () => {} };
+  let lease: Awaited<ReturnType<AgentTurnGate["acquire"]>>;
+  try {
+    lease = await gate.acquire({
+      key,
+      ownerId: deps.workerId ?? "gateway",
+      policy: deps.defaultTurnPolicy ?? "strict",
+    });
+  } catch (err) {
+    const conflict = turnInProgress409(err);
+    if (conflict) return conflict;
+    throw err;
+  }
+  const clock = deps.clock ?? SystemWallClock;
+  const ttlMs = Math.max(1, lease.expiresAt - lease.acquiredAt);
+  const periodMs = Math.max(1, Math.floor(ttlMs / 2));
+  const timer = clock.setInterval(() => {
+    // A failed extend means the lease already expired or was stolen;
+    // the store reports it and the turn simply finishes without it.
+    lease.extend(periodMs).catch(() => {});
+  }, periodMs);
+  timer.unref?.();
+  let released = false;
+  return {
+    release: async () => {
+      if (released) return;
+      released = true;
+      timer.clear();
+      await gate.release(lease.leaseId);
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -358,8 +541,7 @@ export interface AgentSourcesResponse {
 /**
  * Report which agent recipes are file-managed (scanned from disk) vs
  * operator-authored. The editor uses this to disable in-place Save on a
- * file-scanned recipe so the next scan tick doesn't silently overwrite the
- * change. Mirror of `listSkillSources` from routes/skills.ts.
+ * file-scanned recipe; the server refuses such edits as well.
  */
 export function listAgentSources(deps: { readonly fileManagedIds: () => string[] }) {
   return async (): Promise<Response> => {
@@ -377,8 +559,21 @@ export function listAgents(deps: AgentGatewayDeps) {
     const agents = await deps.registry.list({ capability, tag, limit, cursor });
     // Hide ephemeral Designer drafts — they're not real recipes and
     // shouldn't clutter the agent list.
-    return json(200, { agents: agents.filter((a) => !isDraftId(a.id)) });
+    return json(200, {
+      agents: agents.filter((a) => !isDraftId(a.id)).map(redactRecipe),
+    } satisfies AgentsListResponse);
   };
+}
+
+/** Weak ETag for a recipe row — its `updatedAt`. */
+function recipeEtag(recipe: RegisteredAgent): string {
+  return `W/"${recipe.version}:${recipe.updatedAt}"`;
+}
+
+function recipeResponse(status: number, recipe: RegisteredAgent): Response {
+  const res = json(status, redactRecipe(recipe));
+  res.headers.set("etag", recipeEtag(recipe));
+  return res;
 }
 
 export function getAgent(deps: AgentGatewayDeps) {
@@ -388,19 +583,23 @@ export function getAgent(deps: AgentGatewayDeps) {
     const url = new URL(req.url);
     const version = url.searchParams.get("version") ?? undefined;
     const recipe = await deps.registry.get(id, version);
-    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
-    return json(200, recipe);
+    if (!recipe) return agentNotFound(id);
+    return recipeResponse(200, recipe);
   };
 }
 
 // ---------------------------------------------------------------------------
-// Recipe CRUD — author / edit / clone agents through HTTP. The dashboard
-// designer UI calls these; programmatic callers (e.g. infra-as-code) can
-// also POST recipes here.
+// Recipe CRUD — author / edit / clone agents through HTTP.
 //
-// Permission gradient is currently coarse — anyone with dashboard auth
-// can author. Tightening (per-namespace ACLs, role gating) is tracked
-// separately as part of the multi-tenant SaaS direction.
+// Semantics:
+//   - POST /api/agents is create-only: 409 when (id, version) exists.
+//     Publishing a new version of an existing id is a POST with a new
+//     `version`; that version becomes the active one.
+//   - PATCH edits the active version in place. Editing an older version
+//     is refused (409 `version_not_active`) so an edit can never change
+//     which version is live. Metadata merges field by field; `If-Match`
+//     (the GET `etag`) makes the edit conditional (412 on mismatch).
+//   - Clone is create-only on the target id.
 // ---------------------------------------------------------------------------
 
 interface CreateAgentRequest {
@@ -411,35 +610,45 @@ interface CreateAgentRequest {
 }
 
 interface UpdateAgentRequest {
-  readonly version?: unknown; // version to update; default = latest
-  readonly backend?: unknown; // partial replacement; only set fields update
-  readonly metadata?: unknown; // partial replacement; only set fields update
+  readonly version?: unknown; // version to update; must be the active one
+  readonly backend?: unknown; // replaced wholesale when present
+  readonly metadata?: unknown; // merged field by field when present
 }
 
 interface CloneAgentRequest {
   readonly targetId?: unknown;
   readonly targetVersion?: unknown;
   /**
-   * Optional secrets to provision alongside the clone. When provided
-   * and `deps.secrets` is configured, the clone endpoint stores each
-   * (key, value) pair in SecretsStorage at the requested scope. The
-   * cloned recipe's `model.credentialRef` then resolves to the stored
-   * value at agent-invocation time (BYOK end-to-end).
-   *
-   * Without `deps.secrets` configured, the values are accepted but
-   * NOT persisted (the response still echoes back the key names so
-   * forward-compatible clients know what was passed).
+   * Optional secrets to provision alongside the clone, stored in
+   * SecretsStorage at `secretsScope`. Keys follow the `/api/secrets`
+   * rules. Requires a configured SecretsStorage (else 400).
    */
-  readonly secrets?: Record<string, string>;
+  readonly secrets?: unknown;
   /**
    * Where to store the supplied `secrets`. Three shapes match
    * SecretScope:
    *   { kind: 'global' }                            — host-wide
    *   { kind: 'namespace', namespaceId }            — tenant-scope
    *   { kind: 'resource', namespaceId, resourceId } — per-user
-   * Default: global (matches the simplest single-tenant story).
+   * Default: global.
    */
   readonly secretsScope?: unknown;
+}
+
+function isFileManaged(deps: AgentGatewayDeps, id: string): boolean {
+  return deps.fileManagedIds?.().includes(id) ?? false;
+}
+
+function fileManaged409(id: string): Response {
+  return jsonError(
+    409,
+    "file_managed",
+    `Agent "${id}" is managed by a recipe file; edit the file instead.`,
+  );
+}
+
+function optionalString(raw: unknown): string | undefined {
+  return typeof raw === "string" && raw.length > 0 ? raw : undefined;
 }
 
 export function createAgent(deps: AgentGatewayDeps) {
@@ -454,25 +663,34 @@ export function createAgent(deps: AgentGatewayDeps) {
       // would shadow it once the route has the recipe in registry.
       return jsonError(400, "reserved_id_prefix", "Agent ids starting with `_` are reserved.");
     }
-    if (typeof body.backend !== "object" || body.backend === null) {
+    if (isFileManaged(deps, body.id)) return fileManaged409(body.id);
+    if (body.backend === undefined || body.backend === null) {
       return jsonError(400, "missing_backend");
     }
-    const version =
-      typeof body.version === "string" && body.version.length > 0 ? body.version : undefined;
-    try {
-      const recipe = await deps.registry.register({
-        id: body.id,
-        ...(version !== undefined && { version }),
-        backend: body.backend as RegisteredAgent["backend"],
-        ...(typeof body.metadata === "object" &&
-          body.metadata !== null && {
-            metadata: body.metadata as Partial<RegisteredAgent["metadata"]>,
-          }),
+    const backend = parseBackend(body.backend);
+    if ("error" in backend) return jsonError(400, backend.error, backend.message);
+    const restored = restoreRedactedSecrets({ next: backend.backend });
+    if ("error" in restored) return jsonError(400, restored.error);
+    let metadata: ReturnType<typeof mergeAgentMetadata> | undefined;
+    if (body.metadata !== undefined && body.metadata !== null) {
+      const patch = parseMetadataPatch(body.metadata);
+      if ("error" in patch) return jsonError(400, patch.error, patch.message);
+      metadata = mergeAgentMetadata({
+        existing: { description: null, capabilities: [], tags: [] },
+        patch: patch.metadata,
       });
-      return json(201, recipe);
-    } catch (err) {
-      return jsonError(500, "create_failed", asMessage(err));
     }
+    const version = optionalString(body.version) ?? "v1";
+    if (await deps.registry.get(body.id, version)) {
+      return jsonError(409, "agent_exists", `Agent "${body.id}@${version}" already exists.`);
+    }
+    const recipe = await deps.registry.register({
+      id: body.id,
+      version,
+      backend: restored,
+      ...(metadata !== undefined && { metadata }),
+    });
+    return recipeResponse(201, recipe);
   };
 }
 
@@ -480,40 +698,47 @@ export function updateAgent(deps: AgentGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
+    if (isFileManaged(deps, id)) return fileManaged409(id);
     const body = await readJson<UpdateAgentRequest>(req);
     if (!body) return jsonError(400, "missing_body");
 
-    const version =
-      typeof body.version === "string" && body.version.length > 0 ? body.version : undefined;
-    const existing = await deps.registry.get(id, version);
-    if (!existing) {
-      return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
+    const active = await deps.registry.get(id);
+    if (!active) return agentNotFound(id);
+    const version = optionalString(body.version);
+    if (version !== undefined && version !== active.version) {
+      if (!(await deps.registry.get(id, version))) return agentNotFound(id);
+      return jsonError(
+        409,
+        "version_not_active",
+        `Only the active version (${active.version}) can be edited; publish a new version instead.`,
+      );
+    }
+    const ifMatch = req.headers.get("if-match");
+    if (ifMatch !== null && ifMatch !== "*" && ifMatch !== recipeEtag(active)) {
+      return jsonError(412, "precondition_failed", "The recipe changed since it was read.");
     }
 
-    // Partial-replace: only fields present in the body are touched.
-    // backend is replaced wholesale because LocalAgentBackend's shape
-    // (model / systemPrompt / tools / etc.) doesn't have a clean per-
-    // field merge story. metadata is also wholesale-replaced; the
-    // designer is expected to round-trip the full object.
-    const nextBackend =
-      typeof body.backend === "object" && body.backend !== null
-        ? (body.backend as RegisteredAgent["backend"])
-        : existing.backend;
-    const nextMetadata =
-      typeof body.metadata === "object" && body.metadata !== null
-        ? (body.metadata as Partial<RegisteredAgent["metadata"]>)
-        : existing.metadata;
-    try {
-      const updated = await deps.registry.register({
-        id,
-        version: existing.version,
-        backend: nextBackend,
-        metadata: nextMetadata,
-      });
-      return json(200, updated);
-    } catch (err) {
-      return jsonError(500, "update_failed", asMessage(err));
+    let nextBackend = active.backend;
+    if (body.backend !== undefined && body.backend !== null) {
+      const parsed = parseBackend(body.backend);
+      if ("error" in parsed) return jsonError(400, parsed.error, parsed.message);
+      const restored = restoreRedactedSecrets({ next: parsed.backend, existing: active.backend });
+      if ("error" in restored) return jsonError(400, restored.error);
+      nextBackend = restored;
     }
+    let nextMetadata = active.metadata;
+    if (body.metadata !== undefined && body.metadata !== null) {
+      const patch = parseMetadataPatch(body.metadata);
+      if ("error" in patch) return jsonError(400, patch.error, patch.message);
+      nextMetadata = mergeAgentMetadata({ existing: active.metadata, patch: patch.metadata });
+    }
+    const updated = await deps.registry.register({
+      id,
+      version: active.version,
+      backend: nextBackend,
+      metadata: nextMetadata,
+    });
+    return recipeResponse(200, updated);
   };
 }
 
@@ -521,30 +746,22 @@ export function deleteAgent(deps: AgentGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
+    if (isFileManaged(deps, id)) return fileManaged409(id);
     const url = new URL(req.url);
     const version = url.searchParams.get("version") ?? undefined;
-    try {
-      await deps.registry.unregister(id, version);
-      return new Response(null, { status: 204 });
-    } catch (err) {
-      return jsonError(500, "delete_failed", asMessage(err));
-    }
+    if (!(await deps.registry.get(id, version))) return agentNotFound(id);
+    await deps.registry.unregister(id, version);
+    return new Response(null, { status: 204 });
   };
 }
 
 export function listAgentVersions(deps: AgentGatewayDeps) {
-  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
     const versions = await deps.registry.versions(id);
-    if (versions.length === 0) {
-      // 404 when the id has never been registered, vs an empty array.
-      // The registry contract returns [] for both — the route surfaces
-      // 404 to keep "doesn't exist" distinct from "no versions yet"
-      // (which can't happen given register() always writes one row).
-      return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
-    }
-    return json(200, { versions });
+    if (versions.length === 0) return agentNotFound(id);
+    return json(200, { versions: versions.map(redactRecipe) });
   };
 }
 
@@ -564,54 +781,72 @@ export function cloneAgent(deps: AgentGatewayDeps) {
     const url = new URL(req.url);
     const sourceVersion = url.searchParams.get("version") ?? undefined;
     const source = await deps.registry.get(sourceId, sourceVersion);
-    if (!source) {
-      return jsonError(404, "agent_not_found", `Agent "${sourceId}" is not registered.`);
-    }
+    if (!source) return agentNotFound(sourceId);
 
-    // Resolve the secrets scope upfront — the post-register writes need it.
-    // Fail fast on a bad shape. Default scope is 'global' for the simplest case.
     const secretsScope = parseCloneSecretsScope(body.secretsScope);
     if ("error" in secretsScope) return jsonError(400, secretsScope.error);
-
-    const provided = body.secrets ?? {};
-
-    const targetVersion =
-      typeof body.targetVersion === "string" && body.targetVersion.length > 0
-        ? body.targetVersion
-        : undefined;
-
-    const clonedMetadata: Partial<RegisteredAgent["metadata"]> = {
-      description: source.metadata.description,
-      capabilities: [...source.metadata.capabilities],
-      tags: [...source.metadata.tags],
-    };
-
-    try {
-      const clone = await deps.registry.register({
-        id: body.targetId,
-        ...(targetVersion !== undefined && { version: targetVersion }),
-        backend: source.backend,
-        metadata: clonedMetadata,
-      });
-      // Persist supplied secrets at the requested scope when SecretsStorage
-      // is configured. Without it, values are silently ignored (the
-      // acceptedSecrets echo lets callers see the disconnect).
-      if (deps.secrets && Object.keys(provided).length > 0) {
-        for (const [key, value] of Object.entries(provided)) {
-          await deps.secrets.set({ scope: secretsScope, key, value });
-        }
-      }
-      // `acceptedSecrets` echoes back the keys the caller supplied. Values
-      // are NEVER echoed — they're either persisted in the vault or
-      // silently dropped (when secrets storage is unconfigured).
-      return json(201, {
-        recipe: clone,
-        acceptedSecrets: Object.keys(provided),
-      });
-    } catch (err) {
-      return jsonError(500, "clone_failed", asMessage(err));
+    const secrets = parseCloneSecrets(body.secrets);
+    if ("error" in secrets) return jsonError(400, secrets.error, secrets.message);
+    const provided = Object.entries(secrets.secrets);
+    if (provided.length > 0 && !deps.secrets) {
+      return jsonError(400, "secrets_unsupported", "This server has no secrets storage wired.");
     }
+
+    if (await deps.registry.get(body.targetId)) {
+      return jsonError(409, "agent_exists", `Agent "${body.targetId}" already exists.`);
+    }
+
+    const targetVersion = optionalString(body.targetVersion);
+    const clone = await deps.registry.register({
+      id: body.targetId,
+      ...(targetVersion !== undefined && { version: targetVersion }),
+      backend: source.backend,
+      metadata: {
+        description: source.metadata.description,
+        capabilities: [...source.metadata.capabilities],
+        tags: [...source.metadata.tags],
+      },
+    });
+    for (const [key, value] of provided) {
+      await deps.secrets!.set({ scope: secretsScope, key, value });
+    }
+    // `acceptedSecrets` echoes back the stored key names; values are never echoed.
+    return json(201, {
+      recipe: redactRecipe(clone),
+      acceptedSecrets: provided.map(([key]) => key),
+    });
   };
+}
+
+/**
+ * Validate the clone `secrets` map with the same rules as `/api/secrets`:
+ * an object of `key → non-empty string`, keys matching the key pattern,
+ * values within the size cap.
+ */
+function parseCloneSecrets(
+  raw: unknown,
+): { secrets: Record<string, string> } | { error: string; message: string } {
+  if (raw === undefined || raw === null) return { secrets: {} };
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    return { error: "invalid_secrets", message: "secrets must be an object of key → value." };
+  }
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (!SECRET_KEY_PATTERN.test(key)) {
+      return {
+        error: "invalid_key",
+        message: "Secret keys must match [A-Za-z][A-Za-z0-9_\\-.]{0,127}.",
+      };
+    }
+    if (typeof value !== "string" || value.length === 0) {
+      return { error: "invalid_secrets", message: `Secret "${key}" must be a non-empty string.` };
+    }
+    if (Buffer.byteLength(value, "utf8") > SECRET_MAX_VALUE_BYTES) {
+      return { error: "value_too_large", message: `Secret "${key}" is too large.` };
+    }
+    out[key] = value;
+  }
+  return { secrets: out };
 }
 
 /**
@@ -642,10 +877,10 @@ function parseCloneSecretsScope(raw: unknown): SecretScope | { error: string } {
 }
 
 // ---------------------------------------------------------------------------
-// Extract role — "Save as role". Lifts an agent's INLINE role into the
-// RoleRegistry under a new id, then rebinds the agent to a `ref` so the two
-// share a live link. The agent's own version is preserved (this edits the
-// behavioral binding in place, it doesn't cut a new agent version).
+// Extract role — "Save as role". Lifts the active version's INLINE role
+// into the RoleRegistry under a NEW role id, then rebinds the agent to a
+// `ref` so the two share a live link. Create-only on the role; if the
+// rebind fails the freshly written role is removed again.
 // ---------------------------------------------------------------------------
 
 interface ExtractRoleRequest {
@@ -661,6 +896,8 @@ export function extractRole(deps: AgentGatewayDeps) {
     if (!deps.roles) {
       return jsonError(501, "roles_not_configured", "This server has no role registry wired.");
     }
+    const roles = deps.roles;
+    if (isFileManaged(deps, agentId)) return fileManaged409(agentId);
     const body = await readJson<ExtractRoleRequest>(req);
     if (!body) return jsonError(400, "missing_body");
     if (typeof body.roleId !== "string" || body.roleId.length === 0) {
@@ -671,7 +908,7 @@ export function extractRole(deps: AgentGatewayDeps) {
     }
 
     const recipe = await deps.registry.get(agentId);
-    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${agentId}" is not registered.`);
+    if (!recipe) return agentNotFound(agentId);
     if (recipe.backend.type !== "local" || !("inline" in recipe.backend.role)) {
       return jsonError(
         400,
@@ -679,34 +916,35 @@ export function extractRole(deps: AgentGatewayDeps) {
         "Only an agent that carries an inline role can be extracted.",
       );
     }
+    if ((await roles.versions(body.roleId)).length > 0) {
+      return jsonError(409, "role_exists", `Role "${body.roleId}" already exists.`);
+    }
 
-    const roleVersion =
-      typeof body.roleVersion === "string" && body.roleVersion.length > 0
-        ? body.roleVersion
-        : undefined;
+    const roleVersion = optionalString(body.roleVersion);
     const metadata =
       typeof body.metadata === "object" && body.metadata !== null
         ? (body.metadata as { description?: string | null; tags?: string[] })
         : undefined;
 
+    const role = await roles.register({
+      id: body.roleId,
+      ...(roleVersion !== undefined && { version: roleVersion }),
+      definition: recipe.backend.role.inline,
+      ...(metadata !== undefined && { metadata }),
+    });
     try {
-      const role = await deps.roles.register({
-        id: body.roleId,
-        ...(roleVersion !== undefined && { version: roleVersion }),
-        definition: recipe.backend.role.inline,
-        ...(metadata !== undefined && { metadata }),
-      });
       // Rebind the agent to a ref at the same agent version. Pin the role
-      // version we just wrote so the link is reproducible.
+      // version just written so the link is reproducible.
       const agent = await deps.registry.register({
         id: recipe.id,
         version: recipe.version,
         backend: { ...recipe.backend, role: { ref: { id: role.id, version: role.version } } },
         metadata: recipe.metadata,
       });
-      return json(201, { role, agent });
+      return json(201, { role, agent: redactRecipe(agent) });
     } catch (err) {
-      return jsonError(500, "extract_failed", asMessage(err));
+      await roles.unregister(role.id, role.version).catch(() => {});
+      throw err;
     }
   };
 }
@@ -720,43 +958,22 @@ export function invokeAgent(deps: AgentGatewayDeps) {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
 
-    const recipe = await deps.registry.get(id);
-    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
-    const disabled = disabled410(recipe);
-    if (disabled) return disabled;
-
-    const body = await readJson<InvokeRequest>(req);
-    const parsed = parseInvokeBody(body);
+    const parsed = parseInvokeBody(await readJson<InvokeRequest>(req));
     if ("error" in parsed) return jsonError(400, parsed.error);
-
-    const scope = await resolveScope(deps, id, parsed);
-    if ("error" in scope) return jsonError(400, scope.error);
-
-    let agent: Agent;
-    try {
-      const resolved = await deps.resolve(recipe, {
-        namespaceId: parsed.namespaceId,
-        ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
-      });
-      agent = resolved.withScope({
-        namespaceId: parsed.namespaceId,
-        resourceId: scope.resourceId,
-      });
-    } catch (err) {
-      return jsonError(500, "resolve_failed", asMessage(err));
-    }
+    const scoped = await loadScopedAgent(deps, { req, id, scope: parsed, invoking: true });
+    if (scoped instanceof Response) return scoped;
 
     try {
-      const out = await agent.invoke({ task: parsed.task });
+      const out = await scoped.agent.invoke({ task: parsed.task });
       const response: InvokeResponse = {
         text: await out.text,
         finishReason: await out.finishReason,
         usage: await out.usage,
       };
-      if (scope.instanceId !== undefined) response.instanceId = scope.instanceId;
+      if (scoped.instanceId !== undefined) response.instanceId = scoped.instanceId;
       return json(200, response);
     } catch (err) {
-      return jsonError(500, "invoke_failed", asMessage(err));
+      return internalError({ code: "invoke_failed", err });
     }
   };
 }
@@ -766,69 +983,43 @@ export function streamAgent(deps: AgentGatewayDeps) {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
 
-    const recipe = await deps.registry.get(id);
-    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
-    const disabled = disabled410(recipe);
-    if (disabled) return disabled;
-
-    const body = await readJson<InvokeRequest>(req);
-    const parsed = parseInvokeBody(body);
+    const parsed = parseInvokeBody(await readJson<InvokeRequest>(req));
     if ("error" in parsed) return jsonError(400, parsed.error);
+    const scoped = await loadScopedAgent(deps, { req, id, scope: parsed, invoking: true });
+    if (scoped instanceof Response) return scoped;
 
-    const scope = await resolveScope(deps, id, parsed);
-    if ("error" in scope) return jsonError(400, scope.error);
-
-    let agent: Agent;
-    try {
-      const resolved = await deps.resolve(recipe, {
-        namespaceId: parsed.namespaceId,
-        ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
-      });
-      agent = resolved.withScope({
-        namespaceId: parsed.namespaceId,
-        resourceId: scope.resourceId,
-      });
-    } catch (err) {
-      return jsonError(500, "resolve_failed", asMessage(err));
-    }
-
-    const out = agent.stream({ task: parsed.task });
+    const out = scoped.agent.stream({ task: parsed.task });
+    silenceOutput(out);
+    const sse = createSseChannel();
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
-        const enc = new TextEncoder();
+        sse.attach(controller);
         try {
           for await (const delta of out.textStream) {
-            controller.enqueue(enc.encode(`data: ${JSON.stringify({ delta })}\n\n`));
+            if (sse.closed) break;
+            sse.send(null, { delta });
           }
-          const text = await out.text;
-          const finishReason = await out.finishReason;
-          const usage = await out.usage;
-          const finishPayload: Record<string, unknown> = { text, finishReason, usage };
-          if (scope.instanceId !== undefined) finishPayload.instanceId = scope.instanceId;
-          controller.enqueue(
-            enc.encode(`event: finish\ndata: ${JSON.stringify(finishPayload)}\n\n`),
-          );
+          if (!sse.closed) {
+            const finishPayload: Record<string, unknown> = {
+              text: await out.text,
+              finishReason: await out.finishReason,
+              usage: await out.usage,
+            };
+            if (scoped.instanceId !== undefined) finishPayload.instanceId = scoped.instanceId;
+            sse.send("finish", finishPayload);
+          }
         } catch (err) {
-          controller.enqueue(
-            enc.encode(`event: error\ndata: ${JSON.stringify({ message: asMessage(err) })}\n\n`),
-          );
+          sse.send("error", streamErrorPayload(err));
         } finally {
-          controller.close();
+          sse.close();
         }
       },
       cancel: async () => {
+        sse.markClosed();
         await out.cancel().catch(() => {});
       },
     });
-
-    return new Response(stream, {
-      status: 200,
-      headers: {
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache, no-transform",
-        connection: "keep-alive",
-      },
-    });
+    return sseResponse(stream);
   };
 }
 
@@ -843,37 +1034,16 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
     if (!id) return jsonError(400, "missing_id");
     if (!threadId) return jsonError(400, "missing_threadId");
 
-    const recipe = await deps.registry.get(id);
-    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
-    const disabled = disabled410(recipe);
-    if (disabled) return disabled;
-
-    const body = await readJson<InvokeRequest>(req);
-    const parsed = parseInvokeBody(body);
+    const parsed = parseInvokeBody(await readJson<InvokeRequest>(req));
     if ("error" in parsed) return jsonError(400, parsed.error);
+    const scoped = await loadScopedAgent(deps, { req, id, scope: parsed, invoking: true });
+    if (scoped instanceof Response) return scoped;
 
-    const scope = await resolveScope(deps, id, parsed);
-    if ("error" in scope) return jsonError(400, scope.error);
-
-    let agent: Agent;
+    const lease = await acquireTurnLease(deps, { namespaceId: scoped.namespaceId, threadId });
+    if (lease instanceof Response) return lease;
     try {
-      const resolved = await deps.resolve(recipe, {
-        namespaceId: parsed.namespaceId,
-        ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
-      });
-      agent = resolved.withScope({
-        namespaceId: parsed.namespaceId,
-        resourceId: scope.resourceId,
-      });
-    } catch (err) {
-      return jsonError(500, "resolve_failed", asMessage(err));
-    }
-
-    const policy = deps.defaultTurnPolicy ?? "strict";
-    const ownerId = deps.workerId ?? "gateway";
-
-    const runTurn = async (): Promise<ThreadInvokeResponse> => {
-      const thread = await agent.thread(threadId);
+      const thread = await openOwnedThread({ scoped, threadId, create: true });
+      if (thread instanceof Response) return thread;
       const out = await thread.send({ task: parsed.task });
       const response: ThreadInvokeResponse = {
         threadId: thread.id,
@@ -882,24 +1052,12 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
         finishReason: await out.finishReason,
         usage: await out.usage,
       };
-      if (scope.instanceId !== undefined) response.instanceId = scope.instanceId;
-      return response;
-    };
-
-    try {
-      const response = deps.turnGate
-        ? await deps.turnGate.run({
-            key: { namespaceId: parsed.namespaceId, threadId },
-            ownerId,
-            policy,
-            run: async () => runTurn(),
-          })
-        : await runTurn();
+      if (scoped.instanceId !== undefined) response.instanceId = scoped.instanceId;
       return json(200, response);
     } catch (err) {
-      const conflict = turnInProgress409(err);
-      if (conflict) return conflict;
-      return jsonError(500, "send_failed", asMessage(err));
+      return internalError({ code: "send_failed", err });
+    } finally {
+      await lease.release();
     }
   };
 }
@@ -911,77 +1069,53 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
     if (!id) return jsonError(400, "missing_id");
     if (!threadId) return jsonError(400, "missing_threadId");
 
-    const recipe = await deps.registry.get(id);
-    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
-    const disabled = disabled410(recipe);
-    if (disabled) return disabled;
-
-    const body = await readJson<InvokeRequest>(req);
-    const parsed = parseInvokeBody(body);
+    const parsed = parseInvokeBody(await readJson<InvokeRequest>(req));
     if ("error" in parsed) return jsonError(400, parsed.error);
+    const scoped = await loadScopedAgent(deps, { req, id, scope: parsed, invoking: true });
+    if (scoped instanceof Response) return scoped;
 
-    const scope = await resolveScope(deps, id, parsed);
-    if ("error" in scope) return jsonError(400, scope.error);
-
-    let agent: Agent;
+    // The lease outlives this handler: the stream is consumed after the
+    // response returns. Every exit before the stream takes ownership of
+    // the lease releases it here; afterwards the stream releases it when
+    // it finishes, fails or the client disconnects.
+    const lease = await acquireTurnLease(deps, { namespaceId: scoped.namespaceId, threadId });
+    if (lease instanceof Response) return lease;
     try {
-      const resolved = await deps.resolve(recipe, {
-        namespaceId: parsed.namespaceId,
-        ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
-      });
-      agent = resolved.withScope({
-        namespaceId: parsed.namespaceId,
-        resourceId: scope.resourceId,
+      const thread = await openOwnedThread({ scoped, threadId, create: true });
+      if (thread instanceof Response) {
+        await lease.release();
+        return thread;
+      }
+      const out = thread.stream({ task: parsed.task });
+      return streamAgentRunResponse({
+        out,
+        threadMeta: threadMetaOf(thread, scoped),
+        onClose: () => lease.release(),
       });
     } catch (err) {
-      return jsonError(500, "resolve_failed", asMessage(err));
+      await lease.release();
+      return internalError({ code: "stream_failed", err });
     }
+  };
+}
 
-    // Acquire the turn lease BEFORE starting the stream — the lease
-    // must outlive the synchronous handler since the stream is consumed
-    // asynchronously. Release happens when the stream closes (success,
-    // error, or client cancel) via the `onClose` hook.
-    let leaseId: string | null = null;
-    if (deps.turnGate) {
-      try {
-        const lease = await deps.turnGate.acquire({
-          key: { namespaceId: parsed.namespaceId, threadId },
-          ownerId: deps.workerId ?? "gateway",
-          policy: deps.defaultTurnPolicy ?? "strict",
-        });
-        leaseId = lease.leaseId;
-      } catch (err) {
-        const conflict = turnInProgress409(err);
-        if (conflict) return conflict;
-        return jsonError(500, "acquire_failed", asMessage(err));
-      }
-    }
-
-    const thread = await agent.thread(threadId);
-    const out = thread.stream({ task: parsed.task });
-    const threadMeta = {
-      threadId: thread.id,
-      isNew: thread.isNew,
-      ...(scope.instanceId !== undefined && { instanceId: scope.instanceId }),
-    };
-    const onClose =
-      leaseId !== null && deps.turnGate
-        ? async () => {
-            await deps.turnGate!.release(leaseId!);
-          }
-        : undefined;
-    return streamAgentRunResponse(out, threadMeta, onClose);
+function threadMetaOf(thread: AgentThread, scoped: ScopedAgent): Record<string, unknown> {
+  return {
+    threadId: thread.id,
+    isNew: thread.isNew,
+    ...(scoped.instanceId !== undefined && { instanceId: scoped.instanceId }),
   };
 }
 
 /**
  * Continue a turn that suspended on `approve:<callId>`. Body shape:
- *   { toolCallId: string, approved: boolean, reason?: string }
+ *   { toolCallId: string, approved: boolean, reason?: string,
+ *     namespaceId, resourceId | ownerId }
  *
- * Resumes via `LocalAgentThread.resume` (or any backend that exposes it),
- * then streams the resumed turn's events back in the same SSE shape as
- * the user-task stream — so the chat client can splice the resumed
- * deltas into the same conversation panel.
+ * Takes the thread's turn lease like a send (so an approve can't race a
+ * new turn), answers 404 when the thread or the suspended approval is
+ * unknown, then streams the resumed turn's events in the same SSE shape
+ * as the user-task stream.
  */
 export function streamThreadApproval(deps: AgentGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
@@ -990,61 +1124,44 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
     if (!id) return jsonError(400, "missing_id");
     if (!threadId) return jsonError(400, "missing_threadId");
 
-    const recipe = await deps.registry.get(id);
-    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
-    const disabled = disabled410(recipe);
-    if (disabled) return disabled;
-
-    const body = await readJson<ApprovalRequest>(req);
-    const parsed = parseApprovalBody(body);
+    const parsed = parseApprovalBody(await readJson<ApprovalRequest>(req));
     if ("error" in parsed) return jsonError(400, parsed.error);
+    const scoped = await loadScopedAgent(deps, { req, id, scope: parsed, invoking: true });
+    if (scoped instanceof Response) return scoped;
 
-    const scope = await resolveScope(deps, id, {
-      task: "_resume",
-      namespaceId: parsed.namespaceId,
-      ...(parsed.resourceId !== undefined && { resourceId: parsed.resourceId }),
-      ...(parsed.ownerId !== undefined && { ownerId: parsed.ownerId }),
-    });
-    if ("error" in scope) return jsonError(400, scope.error);
-
-    let agent: Agent;
+    const lease = await acquireTurnLease(deps, { namespaceId: scoped.namespaceId, threadId });
+    if (lease instanceof Response) return lease;
     try {
-      const resolved = await deps.resolve(recipe, {
-        namespaceId: parsed.namespaceId,
-        ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
-      });
-      agent = resolved.withScope({
-        namespaceId: parsed.namespaceId,
-        resourceId: scope.resourceId,
-      });
-    } catch (err) {
-      return jsonError(500, "resolve_failed", asMessage(err));
-    }
-
-    const thread = await agent.thread(threadId);
-    if (!thread.resumeStream) {
-      return jsonError(
-        500,
-        "resume_unsupported",
-        "This agent backend doesn't support approval resume.",
-      );
-    }
-    let out: AgentRunOutput;
-    try {
-      out = thread.resumeStream(parsed.toolCallId, {
+      const thread = await openOwnedThread({ scoped, threadId, create: false });
+      if (thread instanceof Response) {
+        await lease.release();
+        return thread;
+      }
+      if (!thread.resumeStream) {
+        await lease.release();
+        return jsonError(
+          501,
+          "resume_unsupported",
+          "This agent backend doesn't support approval resume.",
+        );
+      }
+      if (thread.hasPendingApproval && !(await thread.hasPendingApproval(parsed.toolCallId))) {
+        await lease.release();
+        return jsonError(404, "approval_not_found");
+      }
+      const out = thread.resumeStream(parsed.toolCallId, {
         approved: parsed.approved,
         ...(parsed.reason !== undefined && { reason: parsed.reason }),
       });
+      return streamAgentRunResponse({
+        out,
+        threadMeta: threadMetaOf(thread, scoped),
+        onClose: () => lease.release(),
+      });
     } catch (err) {
-      return jsonError(404, "resume_failed", asMessage(err));
+      await lease.release();
+      return internalError({ code: "resume_failed", err });
     }
-
-    const threadMeta = {
-      threadId: thread.id,
-      isNew: thread.isNew,
-      ...(scope.instanceId !== undefined && { instanceId: scope.instanceId }),
-    };
-    return streamAgentRunResponse(out, threadMeta);
   };
 }
 
@@ -1057,13 +1174,10 @@ interface ApprovalRequest {
   readonly ownerId?: unknown;
 }
 
-interface ParsedApproval {
+interface ParsedApproval extends ScopeFields {
   readonly toolCallId: string;
   readonly approved: boolean;
   readonly reason?: string;
-  readonly namespaceId: string;
-  readonly resourceId?: string;
-  readonly ownerId?: string;
 }
 
 function parseApprovalBody(body: ApprovalRequest | null): ParsedApproval | { error: string } {
@@ -1083,6 +1197,82 @@ function parseApprovalBody(body: ApprovalRequest | null): ParsedApproval | { err
   };
 }
 
+// ---------------------------------------------------------------------------
+// SSE plumbing
+// ---------------------------------------------------------------------------
+
+const SSE_HEADERS = {
+  "content-type": "text/event-stream",
+  "cache-control": "no-cache, no-transform",
+  connection: "keep-alive",
+} as const;
+
+function sseResponse(stream: ReadableStream<Uint8Array>): Response {
+  return new Response(stream, { status: 200, headers: SSE_HEADERS });
+}
+
+/**
+ * Guarded SSE writer: after the client disconnects (or the stream is
+ * closed) every send is a no-op instead of a throw.
+ */
+function createSseChannel() {
+  const enc = new TextEncoder();
+  let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+  let closed = false;
+  return {
+    get closed() {
+      return closed;
+    },
+    attach(c: ReadableStreamDefaultController<Uint8Array>) {
+      controller = c;
+    },
+    send(event: string | null, data: unknown) {
+      if (closed || !controller) return;
+      const prefix = event ? `event: ${event}\n` : "";
+      try {
+        controller.enqueue(enc.encode(`${prefix}data: ${JSON.stringify(data)}\n\n`));
+      } catch {
+        closed = true;
+      }
+    },
+    markClosed() {
+      closed = true;
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      try {
+        controller?.close();
+      } catch {
+        // already closed
+      }
+    },
+  };
+}
+
+/**
+ * Attach a no-op rejection handler to every promise on a run output so
+ * a failed run that nobody awaits (the client went away, or the stream
+ * reported the failure through `fullStream`) never surfaces as an
+ * unhandled rejection.
+ */
+function silenceOutput(out: AgentRunOutput): void {
+  for (const value of Object.values(out)) {
+    if (value instanceof Promise) value.catch(() => {});
+  }
+}
+
+/** An `event: error` payload: a request id, never the error's text. */
+function streamErrorPayload(err: unknown): { error: string; requestId: string } {
+  const requestId = crypto.randomUUID();
+  try {
+    console.error(`[zorya] agent stream failed requestId=${requestId}`, err);
+  } catch {
+    // ignore
+  }
+  return { error: "stream_failed", requestId };
+}
+
 /**
  * Shared SSE writer for thread.stream / thread.resumeStream — fans the
  * agent's `fullStream` into typed SSE events so the client sees text
@@ -1094,275 +1284,220 @@ function parseApprovalBody(body: ApprovalRequest | null): ParsedApproval | { err
  * we map the rejection to a clean `event: suspended` and let the client
  * react (render the approval banner). Any other error becomes
  * `event: error`.
+ *
+ * `onClose` runs exactly once, when the run has settled (completed,
+ * failed or suspended) — also when the client disconnected earlier: the
+ * run keeps writing to the thread until it settles, so the turn lease is
+ * held until then.
  */
-function streamAgentRunResponse(
-  out: AgentRunOutput,
-  threadMeta: Record<string, unknown>,
-  onClose?: () => Promise<void>,
-): Response {
+function streamAgentRunResponse(params: {
+  out: AgentRunOutput;
+  threadMeta: Record<string, unknown>;
+  onClose?: () => Promise<void>;
+}): Response {
+  const { out, threadMeta, onClose } = params;
+  silenceOutput(out);
+  const runSettled = Promise.allSettled([out.text]);
+  let cleaned = false;
   const cleanup = async () => {
-    if (onClose) {
-      await onClose().catch(() => {});
-    }
+    if (cleaned) return;
+    cleaned = true;
+    await onClose?.().catch(() => {});
   };
+  const cleanupWhenSettled = () => {
+    void runSettled.then(cleanup);
+  };
+  const sse = createSseChannel();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const enc = new TextEncoder();
-      const send = (event: string | null, data: unknown) => {
-        const prefix = event ? `event: ${event}\n` : "";
-        try {
-          controller.enqueue(enc.encode(`${prefix}data: ${JSON.stringify(data)}\n\n`));
-        } catch {
-          // Controller already closed — best-effort.
-        }
-      };
-
-      send("thread", threadMeta);
+      sse.attach(controller);
+      sse.send("thread", threadMeta);
 
       let suspended: { toolCallId: string; toolName: string } | null = null;
       try {
         for await (const event of out.fullStream) {
+          if (sse.closed) break;
           switch (event.type) {
             case "text-delta":
-              send(null, { delta: event.delta });
+              sse.send(null, { delta: event.delta });
               break;
             case "approval-requested":
               suspended = { toolCallId: event.toolCallId, toolName: event.toolName };
-              send("approval-requested", suspended);
-              break;
-            case "finish":
-              // `finish` lands when the workflow runs to completion.
-              // We surface usage + reason in the dedicated `finish`
-              // SSE event after the loop in case downstream code needs
-              // post-loop work; nothing to do here.
+              sse.send("approval-requested", suspended);
               break;
             case "error":
-              send("error", { message: event.error.message });
+              sse.send("error", { message: event.error.message });
               break;
             default:
               break;
           }
         }
-        // No suspension — workflow completed normally.
-        if (!suspended) {
+        if (sse.closed) {
+          // Client went away mid-run; nothing left to report.
+        } else if (!suspended) {
           const text = await out.text;
           const finishReason = await out.finishReason;
           const usage = await out.usage;
-          send("finish", { ...threadMeta, text, finishReason, usage });
+          sse.send("finish", { ...threadMeta, text, finishReason, usage });
         } else {
-          // The workflow suspended at the approval gate. The runner
-          // rejects out.text with WorkflowSuspendedError — swallow it,
-          // signal the suspension cleanly so the client renders the
-          // banner instead of an error.
-          out.text.catch(() => {});
-          send("suspended", { ...threadMeta, ...suspended });
+          sse.send("suspended", { ...threadMeta, ...suspended });
         }
       } catch (err) {
-        // Suspension shows up here too if it propagated through
-        // fullStream's settle path before we caught it.
         if (err instanceof WorkflowSuspendedError) {
-          send("suspended", { ...threadMeta, ...(suspended ?? {}) });
+          sse.send("suspended", { ...threadMeta, ...suspended });
         } else {
-          send("error", { message: asMessage(err) });
+          sse.send("error", streamErrorPayload(err));
         }
       } finally {
-        controller.close();
-        await cleanup();
+        sse.close();
+        cleanupWhenSettled();
       }
     },
     cancel: async () => {
+      sse.markClosed();
       await out.cancel().catch(() => {});
-      await cleanup();
+      cleanupWhenSettled();
     },
   });
-
-  return new Response(stream, {
-    status: 200,
-    headers: {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache, no-transform",
-      connection: "keep-alive",
-    },
-  });
+  return sseResponse(stream);
 }
+
+// ---------------------------------------------------------------------------
+// Thread reads + housekeeping. Allowed on a disabled agent.
+// ---------------------------------------------------------------------------
 
 export function listAgentThreads(deps: AgentGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
-
     const url = new URL(req.url);
-    const namespaceId = url.searchParams.get("namespaceId") ?? undefined;
-    const resourceId = url.searchParams.get("resourceId") ?? undefined;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const scope = scopeFromQuery(url);
+    if ("error" in scope) return jsonError(400, scope.error);
+    const scoped = await loadScopedAgent(deps, { req, id, scope, invoking: false });
+    if (scoped instanceof Response) return scoped;
 
-    const recipe = await deps.registry.get(id);
-    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
-    const disabled = disabled410(recipe);
-    if (disabled) return disabled;
-
-    let agent: Agent;
-    try {
-      const resolved = await deps.resolve(recipe, {
-        namespaceId,
-        ...(resourceId !== undefined && { resourceId }),
-      });
-      agent = resolved.withScope({ namespaceId, resourceId });
-    } catch (err) {
-      return jsonError(500, "resolve_failed", asMessage(err));
-    }
-
-    try {
-      const limit = parseLimitParam(url.searchParams.get("limit"));
-      const cursor = url.searchParams.get("cursor") ?? undefined;
-      const q = url.searchParams.get("q") ?? undefined;
-      const threads = await agent.listThreads({ resourceId, limit, cursor, q });
-      return json(200, { threads });
-    } catch (err) {
-      return jsonError(500, "list_threads_failed", asMessage(err));
-    }
+    const threads = await scoped.agent.listThreads({
+      resourceId: scoped.resourceId,
+      ...(scoped.recipe.backend.type === "local" && {
+        metadataFilter: { [THREAD_AGENT_METADATA_KEY]: id },
+      }),
+      limit: parseLimitParam(url.searchParams.get("limit")),
+      cursor: url.searchParams.get("cursor") ?? undefined,
+      q: url.searchParams.get("q") ?? undefined,
+    });
+    return json(200, { threads } satisfies AgentThreadsResponse);
   };
+}
+
+/** Load the scoped agent and the caller's thread for a read route (query scope). */
+async function openThreadFromQuery(
+  deps: AgentGatewayDeps,
+  req: Request,
+  params: Record<string, string>,
+): Promise<{ thread: AgentThread; url: URL } | Response> {
+  const id = params.id;
+  const threadId = params.threadId;
+  if (!id) return jsonError(400, "missing_id");
+  if (!threadId) return jsonError(400, "missing_threadId");
+  const url = new URL(req.url);
+  const scope = scopeFromQuery(url);
+  if ("error" in scope) return jsonError(400, scope.error);
+  const scoped = await loadScopedAgent(deps, { req, id, scope, invoking: false });
+  if (scoped instanceof Response) return scoped;
+  const thread = await openOwnedThread({ scoped, threadId, create: false });
+  if (thread instanceof Response) return thread;
+  return { thread, url };
 }
 
 export function getThreadTrace(deps: AgentGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    const threadId = params.threadId;
-    if (!id) return jsonError(400, "missing_id");
-    if (!threadId) return jsonError(400, "missing_threadId");
-
-    const url = new URL(req.url);
-    const namespaceId = url.searchParams.get("namespaceId") ?? undefined;
-    const resourceId = url.searchParams.get("resourceId") ?? undefined;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
-
-    const recipe = await deps.registry.get(id);
-    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
-    const disabled = disabled410(recipe);
-    if (disabled) return disabled;
-
-    let agent: Agent;
-    try {
-      const resolved = await deps.resolve(recipe, {
-        namespaceId,
-        ...(resourceId !== undefined && { resourceId }),
-      });
-      agent = resolved.withScope({ namespaceId, resourceId });
-    } catch (err) {
-      return jsonError(500, "resolve_failed", asMessage(err));
-    }
-
-    try {
-      const thread = await agent.thread(threadId, { createIfMissing: false });
-      const messages = await thread.messages();
-      const trace = buildAgentTrace(messages);
-      return json(200, { threadId: thread.id, trace });
-    } catch (err) {
-      return jsonError(404, "thread_not_found", asMessage(err));
-    }
+    const opened = await openThreadFromQuery(deps, req, params);
+    if (opened instanceof Response) return opened;
+    const messages = await opened.thread.messages({ limit: TRACE_MESSAGE_LIMIT, order: "desc" });
+    const trace = buildAgentTrace([...messages].reverse());
+    return json(200, { threadId: opened.thread.id, trace });
   };
 }
+
+/** Newest messages a trace is built from. */
+const TRACE_MESSAGE_LIMIT = 1_000;
 
 export function listThreadMessages(deps: AgentGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    const threadId = params.threadId;
-    if (!id) return jsonError(400, "missing_id");
-    if (!threadId) return jsonError(400, "missing_threadId");
-
-    const url = new URL(req.url);
-    const namespaceId = url.searchParams.get("namespaceId") ?? undefined;
-    const resourceId = url.searchParams.get("resourceId") ?? undefined;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
-
-    const recipe = await deps.registry.get(id);
-    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
-    const disabled = disabled410(recipe);
-    if (disabled) return disabled;
-
-    let agent: Agent;
-    try {
-      const resolved = await deps.resolve(recipe, {
-        namespaceId,
-        ...(resourceId !== undefined && { resourceId }),
-      });
-      agent = resolved.withScope({ namespaceId, resourceId });
-    } catch (err) {
-      return jsonError(500, "resolve_failed", asMessage(err));
-    }
-
-    try {
-      const thread = await agent.thread(threadId, { createIfMissing: false });
-      const limit = parseLimitParam(url.searchParams.get("limit"));
-      const fromSeq = parseIntParam({
-        raw: url.searchParams.get("fromSeq"),
-        min: 0,
-        max: Number.MAX_SAFE_INTEGER,
-      });
-      const toSeq = parseIntParam({
-        raw: url.searchParams.get("toSeq"),
-        min: 0,
-        max: Number.MAX_SAFE_INTEGER,
-      });
-      const messages = await thread.messages({ limit, fromSeq, toSeq });
-      return json(200, { threadId: thread.id, messages });
-    } catch (err) {
-      return jsonError(404, "thread_not_found", asMessage(err));
-    }
+    const opened = await openThreadFromQuery(deps, req, params);
+    if (opened instanceof Response) return opened;
+    const { thread, url } = opened;
+    const limit = parseLimitParam(url.searchParams.get("limit"));
+    const fromSeq = parseIntParam({
+      raw: url.searchParams.get("fromSeq"),
+      min: 0,
+      max: Number.MAX_SAFE_INTEGER,
+    });
+    const toSeq = parseIntParam({
+      raw: url.searchParams.get("toSeq"),
+      min: 0,
+      max: Number.MAX_SAFE_INTEGER,
+    });
+    const messages = await thread.messages({ limit, fromSeq, toSeq });
+    return json(200, { threadId: thread.id, messages } satisfies ThreadMessagesResponse);
   };
 }
 
+/** Scope + thread for a body-scoped route (rename / archive / distill / compact). */
+async function openThreadFromBody(
+  deps: AgentGatewayDeps,
+  req: Request,
+  params: Record<string, string>,
+  body: {
+    readonly namespaceId?: unknown;
+    readonly resourceId?: unknown;
+    readonly ownerId?: unknown;
+  },
+): Promise<{ thread: AgentThread; scoped: ScopedAgent } | Response> {
+  const id = params.id;
+  const threadId = params.threadId;
+  if (!id) return jsonError(400, "missing_id");
+  if (!threadId) return jsonError(400, "missing_threadId");
+  const scope = parseScopeFields(body);
+  if ("error" in scope) return jsonError(400, scope.error);
+  const scoped = await loadScopedAgent(deps, { req, id, scope, invoking: false });
+  if (scoped instanceof Response) return scoped;
+  const thread = await openOwnedThread({ scoped, threadId, create: false });
+  if (thread instanceof Response) return thread;
+  return { thread, scoped };
+}
+
 // ---------------------------------------------------------------------------
-// Rename thread — stash a display title in the thread's metadata bag so
-// the dashboard can show it in place of the opaque threadId. We
-// read-modify-write the metadata so existing keys (working-memory hints,
-// app-specific tags) survive the rename.
+// Rename thread — sets the thread's first-class display title. The
+// response carries the thread's metadata bag, which the title doesn't touch.
 // ---------------------------------------------------------------------------
 
 interface RenameThreadRequest {
   readonly namespaceId?: unknown;
   readonly resourceId?: unknown;
+  readonly ownerId?: unknown;
   readonly title?: unknown;
 }
 
 export function renameAgentThread(deps: AgentGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    const threadId = params.threadId;
-    if (!id) return jsonError(400, "missing_id");
-    if (!threadId) return jsonError(400, "missing_threadId");
-
-    const body = (await readJson<RenameThreadRequest>(req)) ?? {};
-    const namespaceId = typeof body.namespaceId === "string" ? body.namespaceId : undefined;
-    const resourceId = typeof body.resourceId === "string" ? body.resourceId : undefined;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
-    // Empty / undefined title clears the rename — back to the threadId default.
+    const body = await readJson<RenameThreadRequest>(req);
+    if (!body) return jsonError(400, "missing_body");
+    if (body.title !== undefined && body.title !== null && typeof body.title !== "string") {
+      return jsonError(400, "invalid_title");
+    }
+    // Empty / null title clears the rename — back to the threadId default.
     const title =
       typeof body.title === "string" && body.title.trim().length > 0 ? body.title.trim() : null;
-
-    const recipe = await deps.registry.get(id);
-    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
-    const disabled = disabled410(recipe);
-    if (disabled) return disabled;
-
-    let agent: Agent;
-    try {
-      const resolved = await deps.resolve(recipe, {
-        namespaceId,
-        ...(resourceId !== undefined && { resourceId }),
-      });
-      agent = resolved.withScope({ namespaceId, resourceId });
-    } catch (err) {
-      return jsonError(500, "resolve_failed", asMessage(err));
-    }
-
-    try {
-      const thread = await agent.thread(threadId, { createIfMissing: false });
-      await thread.setTitle(title);
-      return json(200, { threadId: thread.id, title });
-    } catch (err) {
-      return jsonError(404, "thread_not_found", asMessage(err));
-    }
+    const opened = await openThreadFromBody(deps, req, params, body);
+    if (opened instanceof Response) return opened;
+    await opened.thread.setTitle(title);
+    const metadata = { ...(await opened.thread.metadata()) };
+    return json(200, {
+      threadId: opened.thread.id,
+      title,
+      metadata,
+    } satisfies RenameThreadResponse);
   };
 }
 
@@ -1373,41 +1508,31 @@ export function renameAgentThread(deps: AgentGatewayDeps) {
 interface ConsolidateRequest {
   readonly namespaceId?: unknown;
   readonly resourceId?: unknown;
+  readonly ownerId?: unknown;
   readonly force?: unknown;
+  readonly keepRecent?: unknown;
+}
+
+function nothingToConsolidate409(err: unknown): Response | null {
+  if (err instanceof NothingToConsolidateError) {
+    return json(409, {
+      error: err.operation === "compact" ? "nothing_to_compact" : "nothing_to_distill",
+      messageCount: err.messageCount,
+    });
+  }
+  return null;
 }
 
 export function distillThread(deps: AgentGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    const threadId = params.threadId;
-    if (!id) return jsonError(400, "missing_id");
-    if (!threadId) return jsonError(400, "missing_threadId");
+    const body = (await readJson<ConsolidateRequest>(req)) ?? {};
+    const opened = await openThreadFromBody(deps, req, params, body);
+    if (opened instanceof Response) return opened;
 
-    const body = await readJson<ConsolidateRequest>(req);
-    const namespaceId = typeof body?.namespaceId === "string" ? body.namespaceId : undefined;
-    const resourceId = typeof body?.resourceId === "string" ? body.resourceId : undefined;
-    const force = body?.force === true;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
-    if (!resourceId) return jsonError(400, "missing_resourceId");
-
-    const recipe = await deps.registry.get(id);
-    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
-    const disabled = disabled410(recipe);
-    if (disabled) return disabled;
-
-    let agent: Agent;
     try {
-      const resolved = await deps.resolve(recipe, {
-        namespaceId,
-        ...(resourceId !== undefined && { resourceId }),
+      const episode = await opened.scoped.agent.distillThread(opened.thread.id, {
+        force: body.force === true,
       });
-      agent = resolved.withScope({ namespaceId, resourceId });
-    } catch (err) {
-      return jsonError(500, "resolve_failed", asMessage(err));
-    }
-
-    try {
-      const episode = await agent.distillThread(threadId, { force });
       return json(200, { episode });
     } catch (err) {
       if (err instanceof ConsolidatorRateLimitError) {
@@ -1431,45 +1556,37 @@ export function distillThread(deps: AgentGatewayDeps) {
           },
         );
       }
-      return jsonError(500, "distill_failed", asMessage(err));
+      const nothing = nothingToConsolidate409(err);
+      if (nothing) return nothing;
+      return internalError({ code: "distill_failed", err });
     }
   };
 }
 
 export function compactThread(deps: AgentGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    const threadId = params.threadId;
-    if (!id) return jsonError(400, "missing_id");
-    if (!threadId) return jsonError(400, "missing_threadId");
-
-    const body = await readJson<ConsolidateRequest & { keepRecent?: unknown }>(req);
-    const namespaceId = typeof body?.namespaceId === "string" ? body.namespaceId : undefined;
-    const resourceId = typeof body?.resourceId === "string" ? body.resourceId : undefined;
-    const keepRecent = typeof body?.keepRecent === "number" ? body.keepRecent : undefined;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
-
-    const recipe = await deps.registry.get(id);
-    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
-    const disabled = disabled410(recipe);
-    if (disabled) return disabled;
-
-    let agent: Agent;
-    try {
-      const resolved = await deps.resolve(recipe, {
-        namespaceId,
-        ...(resourceId !== undefined && { resourceId }),
-      });
-      agent = resolved.withScope({ namespaceId, resourceId });
-    } catch (err) {
-      return jsonError(500, "resolve_failed", asMessage(err));
+    const body = (await readJson<ConsolidateRequest>(req)) ?? {};
+    let keepRecent: number | undefined;
+    if (body.keepRecent !== undefined) {
+      if (
+        typeof body.keepRecent !== "number" ||
+        !Number.isInteger(body.keepRecent) ||
+        body.keepRecent < 0
+      ) {
+        return jsonError(400, "invalid_keepRecent", "keepRecent must be a non-negative integer.");
+      }
+      keepRecent = body.keepRecent;
     }
+    const opened = await openThreadFromBody(deps, req, params, body);
+    if (opened instanceof Response) return opened;
 
     try {
-      const episode = await agent.compactThread(threadId, { keepRecent });
+      const episode = await opened.scoped.agent.compactThread(opened.thread.id, { keepRecent });
       return json(200, { episode });
     } catch (err) {
-      return jsonError(500, "compact_failed", asMessage(err));
+      const nothing = nothingToConsolidate409(err);
+      if (nothing) return nothing;
+      return internalError({ code: "compact_failed", err });
     }
   };
 }
@@ -1482,51 +1599,36 @@ export function compactThread(deps: AgentGatewayDeps) {
 interface ArchiveThreadRequest {
   readonly namespaceId?: unknown;
   readonly resourceId?: unknown;
+  readonly ownerId?: unknown;
   /** Unix ms timestamp to archive at, or null to restore. Defaults to the gateway clock's now when omitted. */
   readonly archivedAt?: unknown;
 }
 
 export function archiveAgentThread(deps: AgentGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    const threadId = params.threadId;
-    if (!id) return jsonError(400, "missing_id");
-    if (!threadId) return jsonError(400, "missing_threadId");
-
     const body = (await readJson<ArchiveThreadRequest>(req)) ?? {};
-    const namespaceId = typeof body.namespaceId === "string" ? body.namespaceId : undefined;
-    const resourceId = typeof body.resourceId === "string" ? body.resourceId : undefined;
-    if (!namespaceId) return jsonError(400, "missing_namespaceId");
-    const archivedAt =
-      body.archivedAt === null
-        ? null
-        : typeof body.archivedAt === "number"
-          ? body.archivedAt
-          : (deps.clock ?? SystemWallClock).currentTimeMs();
-
-    const recipe = await deps.registry.get(id);
-    if (!recipe) return jsonError(404, "agent_not_found", `Agent "${id}" is not registered.`);
-    const disabled = disabled410(recipe);
-    if (disabled) return disabled;
-
-    let agent: Agent;
-    try {
-      const resolved = await deps.resolve(recipe, {
-        namespaceId,
-        ...(resourceId !== undefined && { resourceId }),
-      });
-      agent = resolved.withScope({ namespaceId, resourceId });
-    } catch (err) {
-      return jsonError(500, "resolve_failed", asMessage(err));
+    let archivedAt: number | null;
+    if (body.archivedAt === null) {
+      archivedAt = null;
+    } else if (body.archivedAt === undefined) {
+      archivedAt = (deps.clock ?? SystemWallClock).currentTimeMs();
+    } else if (
+      typeof body.archivedAt === "number" &&
+      Number.isSafeInteger(body.archivedAt) &&
+      body.archivedAt >= 0
+    ) {
+      archivedAt = body.archivedAt;
+    } else {
+      return jsonError(
+        400,
+        "invalid_archivedAt",
+        "archivedAt must be a unix-ms timestamp, null, or omitted.",
+      );
     }
-
-    try {
-      const thread = await agent.thread(threadId, { createIfMissing: false });
-      await thread.setArchived(archivedAt);
-      return json(200, { threadId: thread.id, archivedAt });
-    } catch (err) {
-      return jsonError(404, "thread_not_found", asMessage(err));
-    }
+    const opened = await openThreadFromBody(deps, req, params, body);
+    if (opened instanceof Response) return opened;
+    await opened.thread.setArchived(archivedAt);
+    return json(200, { threadId: opened.thread.id, archivedAt });
   };
 }
 
@@ -1535,8 +1637,4 @@ export function archiveAgentThread(deps: AgentGatewayDeps) {
 /** Limit-style query parameter: an integer clamped to [1, 1000]. */
 function parseLimitParam(raw: string | null): number | undefined {
   return parseIntParam({ raw, min: 1, max: 1_000 });
-}
-
-function asMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

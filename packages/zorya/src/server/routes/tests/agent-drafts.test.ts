@@ -9,6 +9,7 @@ import { FakeWallClock } from "@promin/workflow";
 import { createDraft } from "../agent-drafts.ts";
 
 const HOUR_MS = 60 * 60 * 1000;
+const SWEEP_INTERVAL_MS = 60 * 1000;
 
 const draftBackend = {
   type: "local" as const,
@@ -29,11 +30,40 @@ async function postDraft(handler: ReturnType<typeof createDraft>, sourceId: stri
 }
 
 describe("createDraft — TTL sweep on an injected clock", () => {
-  it("stamps the draft id from the clock", async () => {
+  it("stamps the draft id from the clock plus a random suffix", async () => {
     const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
     const registry = new InMemoryAgentRegistry({ clock });
-    const id = await postDraft(createDraft({ registry, clock }), "support");
-    expect(id).toBe(`__draft__${clock.currentTimeMs().toString(36)}__support`);
+    const handler = createDraft({ registry, clock });
+    const a = await postDraft(handler, "support");
+    const b = await postDraft(handler, "support");
+    const ts = clock.currentTimeMs().toString(36);
+    expect(a).toMatch(new RegExp(`^__draft__${ts}[0-9a-f]{12}__support$`));
+    // Same millisecond, same source — still two distinct drafts.
+    expect(b).not.toBe(a);
+    expect(await registry.get(a)).not.toBeNull();
+    expect(await registry.get(b)).not.toBeNull();
+  });
+
+  it("strips unsafe characters from the source id", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const registry = new InMemoryAgentRegistry({ clock });
+    const id = await postDraft(createDraft({ registry, clock }), "../evil/<x> y");
+    expect(id).toMatch(/__\.\.evilxy$/);
+  });
+
+  it("rejects an invalid backend with 400", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const registry = new InMemoryAgentRegistry({ clock });
+    const res = await createDraft({ registry, clock })(
+      new Request("http://test/api/agents/_draft", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ backend: { type: "local" } }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toBe("invalid_backend");
+    expect(await registry.list({})).toEqual([]);
   });
 
   it("reaps a draft only once it is older than the TTL by the clock", async () => {
@@ -48,7 +78,8 @@ describe("createDraft — TTL sweep on an injected clock", () => {
     const second = await postDraft(handler, "b");
     expect(await registry.get(first)).not.toBeNull();
 
-    clock.advance(1);
+    // Sweeps run at most once a minute; the next one reaps the first draft.
+    clock.advance(SWEEP_INTERVAL_MS);
     const third = await postDraft(handler, "c");
     expect(await registry.get(first)).toBeNull();
     expect(await registry.get(second)).not.toBeNull();

@@ -11,14 +11,21 @@
 //   POST   /api/agents/_draft        — register a draft, returns the recipe
 //   DELETE /api/agents/_draft/:id    — delete a draft (id must be a draft)
 //
-// `createDraft` also opportunistically sweeps drafts older than the TTL,
-// so a browser that closes mid-session leaves no permanent orphan — no
-// background loop required.
+// `createDraft` also opportunistically sweeps drafts older than the TTL
+// (at most once a minute), so a browser that closes mid-session leaves no
+// permanent orphan — no background loop required.
 // ---------------------------------------------------------------------------
 
-import type { AgentRegistry, RegisteredAgent } from "@promin/agent";
+import type { AgentRegistry } from "@promin/agent";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
+import {
+  parseBackend,
+  parseMetadataPatch,
+  redactRecipe,
+  restoreRedactedSecrets,
+  type AgentMetadataPatch,
+} from "./agent-gateway-kit.ts";
 
 /** Reserved id prefix marking a recipe as an ephemeral Designer draft. */
 export const DRAFT_PREFIX = "__draft__";
@@ -44,38 +51,57 @@ interface CreateDraftRequest {
   readonly sourceId?: unknown;
 }
 
-const asMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+/** Shortest gap between two opportunistic draft sweeps. */
+const SWEEP_MIN_INTERVAL_MS = 60 * 1000;
+
+/** Characters kept from `sourceId` when it is folded into a draft id. */
+const SOURCE_ID_UNSAFE = /[^A-Za-z0-9_.-]/g;
 
 export function createDraft(deps: AgentDraftsDeps) {
+  const clock = deps.clock ?? SystemWallClock;
+  let lastSweepMs = Number.NEGATIVE_INFINITY;
   return async (req: Request): Promise<Response> => {
     const body = await readJson<CreateDraftRequest>(req);
     if (!body) return jsonError(400, "missing_body");
-    if (typeof body.backend !== "object" || body.backend === null) {
+    if (body.backend === undefined || body.backend === null) {
       return jsonError(400, "missing_backend");
     }
-
-    // Opportunistic TTL sweep — reap drafts orphaned by a closed browser
-    // before adding another. Best-effort; never fails the create.
-    const clock = deps.clock ?? SystemWallClock;
-    await sweepStaleDrafts({ registry: deps.registry, clock });
-
-    const sourceId =
-      typeof body.sourceId === "string" && body.sourceId.length > 0 ? body.sourceId : "agent";
-    const id = `${DRAFT_PREFIX}${clock.currentTimeMs().toString(36)}__${sourceId}`;
-    const metadata =
-      typeof body.metadata === "object" && body.metadata !== null
-        ? (body.metadata as Partial<RegisteredAgent["metadata"]>)
-        : undefined;
-    try {
-      const recipe = await deps.registry.register({
-        id,
-        backend: body.backend as RegisteredAgent["backend"],
-        ...(metadata !== undefined && { metadata }),
-      });
-      return json(201, { recipe });
-    } catch (err) {
-      return jsonError(500, "draft_create_failed", asMessage(err));
+    const parsed = parseBackend(body.backend);
+    if ("error" in parsed) return jsonError(400, parsed.error, parsed.message);
+    let metadata: AgentMetadataPatch | undefined;
+    if (body.metadata !== undefined && body.metadata !== null) {
+      const patch = parseMetadataPatch(body.metadata);
+      if ("error" in patch) return jsonError(400, patch.error, patch.message);
+      metadata = patch.metadata;
     }
+
+    const rawSourceId = typeof body.sourceId === "string" ? body.sourceId : "";
+    // A draft of a remote agent round-trips the redacted token; restore the
+    // source recipe's stored one so the draft can actually call out.
+    const source = rawSourceId.length > 0 ? await deps.registry.get(rawSourceId) : null;
+    const backend = restoreRedactedSecrets({
+      next: parsed.backend,
+      ...(source !== null && { existing: source.backend }),
+    });
+    if ("error" in backend) return jsonError(400, backend.error);
+
+    // Opportunistic TTL sweep — reap drafts orphaned by a closed browser.
+    // Throttled so a burst of creates doesn't list the registry each time.
+    const now = clock.currentTimeMs();
+    if (now - lastSweepMs >= SWEEP_MIN_INTERVAL_MS) {
+      lastSweepMs = now;
+      await sweepStaleDrafts({ registry: deps.registry, clock });
+    }
+
+    const sourceId = rawSourceId.replace(SOURCE_ID_UNSAFE, "").slice(0, 64) || "agent";
+    const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
+    const id = `${DRAFT_PREFIX}${now.toString(36)}${suffix}__${sourceId}`;
+    const recipe = await deps.registry.register({
+      id,
+      backend,
+      ...(metadata !== undefined && { metadata }),
+    });
+    return json(201, { recipe: redactRecipe(recipe) });
   };
 }
 
@@ -90,12 +116,8 @@ export function deleteDraft(deps: AgentDraftsDeps) {
         "Only `__draft__`-prefixed draft recipes can be deleted here.",
       );
     }
-    try {
-      await deps.registry.unregister(id);
-      return new Response(null, { status: 204 });
-    } catch (err) {
-      return jsonError(500, "draft_delete_failed", asMessage(err));
-    }
+    await deps.registry.unregister(id);
+    return new Response(null, { status: 204 });
   };
 }
 

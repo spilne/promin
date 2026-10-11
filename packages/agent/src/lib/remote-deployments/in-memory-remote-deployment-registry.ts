@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from "node:crypto";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
   DEFAULT_DEPLOYMENT_TTL_MS,
   type RegisterDeploymentInput,
@@ -13,20 +14,20 @@ import {
 } from "./types.ts";
 
 export interface InMemoryRemoteDeploymentRegistryConfig {
-  /** Optional clock override for tests. Defaults to `Date.now()`. */
-  readonly now?: () => number;
+  /** Time source for heartbeat stamps and expiry. Default: `SystemWallClock`. */
+  readonly clock?: WallClock;
 }
 
 export class InMemoryRemoteDeploymentRegistry implements RemoteDeploymentRegistry {
-  private readonly clock: () => number;
+  private readonly clock: WallClock;
   private readonly rows = new Map<string, RegisteredDeployment>();
 
   constructor(config: InMemoryRemoteDeploymentRegistryConfig = {}) {
-    this.clock = config.now ?? (() => Date.now());
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   async register(input: RegisterDeploymentInput): Promise<RegisteredDeployment> {
-    const now = this.clock();
+    const now = this.clock.currentTimeMs();
     const deployment: RegisteredDeployment = {
       deploymentId: randomUUID(),
       endpoint: input.endpoint,
@@ -43,11 +44,11 @@ export class InMemoryRemoteDeploymentRegistry implements RemoteDeploymentRegistr
   async heartbeat(deploymentId: string): Promise<RegisteredDeployment | null> {
     const existing = this.rows.get(deploymentId);
     if (!existing) return null;
-    const now = this.clock();
-    // Caller might be heartbeating a deployment that's already past
-    // its TTL but hasn't been swept yet — refresh anyway. The sweep
-    // loop is independent; if it has run, the row is gone and we
-    // returned null above.
+    const now = this.clock.currentTimeMs();
+    // An expired registration is dead even before the sweep removes it:
+    // its recipes are about to be deleted, so reviving it would leave a
+    // live deployment with no recipes. The caller re-registers instead.
+    if (existing.lastHeartbeat + existing.ttlMs <= now) return null;
     const updated: RegisteredDeployment = { ...existing, lastHeartbeat: now };
     this.rows.set(deploymentId, updated);
     return updated;
@@ -68,10 +69,11 @@ export class InMemoryRemoteDeploymentRegistry implements RemoteDeploymentRegistr
     return [...this.rows.values()];
   }
 
-  async expireStale(params: { now: number }): Promise<RegisteredDeployment[]> {
+  async expireStale(): Promise<RegisteredDeployment[]> {
+    const now = this.clock.currentTimeMs();
     const expired: RegisteredDeployment[] = [];
     for (const [id, row] of this.rows.entries()) {
-      if (row.lastHeartbeat + row.ttlMs <= params.now) {
+      if (row.lastHeartbeat + row.ttlMs <= now) {
         expired.push(row);
         this.rows.delete(id);
       }

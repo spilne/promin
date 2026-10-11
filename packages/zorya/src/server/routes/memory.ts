@@ -37,14 +37,23 @@ import type {
   RegisteredAgent,
   ResourceRow,
   ResolvedContext,
+  RoleDefinition,
+  RoleRegistry,
   StoredMessage,
   ThreadRow,
 } from "@promin/agent";
 import { inlineRoleDefinition, resolveSystemPrompt } from "@promin/agent";
+import { z } from "zod";
 import { json, jsonError } from "../router.ts";
+import { internalError, type ScopeAuthorizer } from "./agent-gateway-kit.ts";
+import { THREAD_AGENT_METADATA_KEY } from "./agents.ts";
 
 export interface MemoryInspectorDeps {
   readonly memory: MemoryStore;
+  /** Role registry — resolves the persona of an agent bound to a role by `ref`. */
+  readonly roles?: RoleRegistry;
+  /** Binds the inspected scope to the caller. See `ScopeAuthorizer`. */
+  readonly authorizeScope?: ScopeAuthorizer;
   /**
    * Recipe store. When set (and the request carries `agentId`), the
    * inspector resolves the agent's persona — its role system prompt — so
@@ -135,26 +144,48 @@ const DEFAULT_INSPECT_BUDGET = {
   maxEpisodeTokens: 8_000,
 };
 
+/** Newest thread messages the inspector returns. */
+const INSPECT_MESSAGE_LIMIT = 500;
+
 export function inspectMemory(deps: MemoryInspectorDeps) {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
-    const namespaceId = url.searchParams.get("namespaceId") ?? undefined;
-    const resourceId = url.searchParams.get("resourceId") ?? undefined;
-    const threadId = url.searchParams.get("threadId") ?? undefined;
-    const agentId = url.searchParams.get("agentId") ?? undefined;
+    const namespaceId = url.searchParams.get("namespaceId") || undefined;
+    const resourceId = url.searchParams.get("resourceId") || undefined;
+    const threadId = url.searchParams.get("threadId") || undefined;
+    const agentId = url.searchParams.get("agentId") || undefined;
     if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    if (deps.authorizeScope) {
+      const allowed = await deps.authorizeScope({
+        req,
+        scope: {
+          namespaceId,
+          ...(resourceId !== undefined && { resourceId }),
+          ...(agentId !== undefined && { agentId }),
+        },
+      });
+      if (!allowed) return jsonError(403, "scope_forbidden");
+    }
 
     try {
       const namespace = await loadNamespaceSnapshot(deps.memory, namespaceId);
       const resource = resourceId
         ? await loadResourceSnapshot(deps.memory, { namespaceId, resourceId })
         : null;
+      // A thread is shown only through the resource (and agent, when one is
+      // named) that owns it; anyone else sees it as absent.
+      const ownsThread = threadId
+        ? await callerOwnsThread(deps.memory, { namespaceId, resourceId, threadId, agentId })
+        : false;
       const thread = threadId
-        ? await loadThreadSnapshot(deps.memory, { namespaceId, resourceId, threadId })
+        ? ownsThread
+          ? await loadThreadSnapshot(deps.memory, { namespaceId, resourceId, threadId })
+          : { row: null, facts: [], episodes: [], messages: [] }
         : null;
-      const resolved = threadId
-        ? await loadResolvedSummary(deps.memory, { namespaceId, resourceId, threadId })
-        : null;
+      const resolved =
+        threadId && ownsThread
+          ? await loadResolvedSummary(deps.memory, { namespaceId, resourceId, threadId })
+          : null;
       const persona = agentId ? await loadPersona(deps, agentId) : null;
 
       const response: MemoryInspectResponse = {
@@ -169,9 +200,22 @@ export function inspectMemory(deps: MemoryInspectorDeps) {
       };
       return json(200, response);
     } catch (err) {
-      return jsonError(500, "inspect_failed", err instanceof Error ? err.message : String(err));
+      return internalError({ code: "inspect_failed", err });
     }
   };
+}
+
+async function callerOwnsThread(
+  store: MemoryStore,
+  params: { namespaceId: string; resourceId?: string; threadId: string; agentId?: string },
+): Promise<boolean> {
+  const row = await store.getThread({ namespaceId: params.namespaceId, threadId: params.threadId });
+  if (!row) return false;
+  if (row.resourceId !== (params.resourceId ?? null)) return false;
+  if (params.agentId !== undefined && row.metadata[THREAD_AGENT_METADATA_KEY] !== params.agentId) {
+    return false;
+  }
+  return true;
 }
 
 async function loadNamespaceSnapshot(
@@ -202,13 +246,13 @@ async function loadThreadSnapshot(
   store: MemoryStore,
   key: { namespaceId: string; resourceId?: string; threadId: string },
 ): Promise<ThreadSnapshot> {
-  const [row, facts, episodes, messages] = await Promise.all([
+  const [row, facts, episodes, newest] = await Promise.all([
     store.getThread(key),
     store.listThreadFacts(key).catch(() => []),
     store.listThreadEpisodes(key, { order: "createdDesc" }).catch(() => []),
-    store.getMessages(key, { order: "asc" }).catch(() => []),
+    store.getMessages(key, { order: "desc", limit: INSPECT_MESSAGE_LIMIT }).catch(() => []),
   ]);
-  return { row, facts, episodes, messages };
+  return { row, facts, episodes, messages: [...newest].reverse() };
 }
 
 // ---------------------------------------------------------------------------
@@ -217,29 +261,38 @@ async function loadThreadSnapshot(
 // individual user state, so it gets a separate gate.
 // ---------------------------------------------------------------------------
 
+const NamespacePatchSchema = z
+  .object({
+    staticRules: z.string().nullable().optional(),
+    workingMemory: z.string().nullable().optional(),
+  })
+  .strict();
+
+/** Largest namespace fact accepted, in characters. */
+const MAX_FACT_LENGTH = 10_000;
+
 export function patchNamespace(deps: MemoryInspectorDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const namespaceId = params.namespaceId;
     if (!namespaceId) return jsonError(400, "missing_namespaceId");
-    const body = (await req.json().catch(() => null)) as {
-      staticRules?: string | null;
-      workingMemory?: string | null;
-    } | null;
-    if (!body) return jsonError(400, "invalid_body");
+    const parsed = NamespacePatchSchema.safeParse(await req.json().catch(() => null));
+    if (!parsed.success) {
+      return jsonError(
+        400,
+        "invalid_body",
+        "Expected { staticRules?: string | null, workingMemory?: string | null }.",
+      );
+    }
 
     // Pass through only the fields the caller actually set, so omitting
     // workingMemory in the payload doesn't accidentally clear it.
     const patch: { staticRules?: string | null; workingMemory?: string | null } = {};
-    if ("staticRules" in body) patch.staticRules = body.staticRules ?? null;
-    if ("workingMemory" in body) patch.workingMemory = body.workingMemory ?? null;
+    if (parsed.data.staticRules !== undefined) patch.staticRules = parsed.data.staticRules;
+    if (parsed.data.workingMemory !== undefined) patch.workingMemory = parsed.data.workingMemory;
     if (Object.keys(patch).length === 0) return jsonError(400, "empty_patch");
 
-    try {
-      const row = await deps.memory.upsertNamespace(namespaceId, patch);
-      return json(200, { row });
-    } catch (err) {
-      return jsonError(500, "patch_failed", err instanceof Error ? err.message : String(err));
-    }
+    const row = await deps.memory.upsertNamespace(namespaceId, patch);
+    return json(200, { row });
   };
 }
 
@@ -250,13 +303,11 @@ export function addNamespaceFact(deps: MemoryInspectorDeps) {
     const body = (await req.json().catch(() => null)) as { text?: unknown } | null;
     const text = typeof body?.text === "string" ? body.text.trim() : "";
     if (!text) return jsonError(400, "missing_text");
-
-    try {
-      const fact = await deps.memory.appendNamespaceFact(namespaceId, text);
-      return json(201, { fact });
-    } catch (err) {
-      return jsonError(500, "add_failed", err instanceof Error ? err.message : String(err));
+    if (text.length > MAX_FACT_LENGTH) {
+      return jsonError(400, "text_too_long", `A fact is at most ${MAX_FACT_LENGTH} characters.`);
     }
+    const fact = await deps.memory.appendNamespaceFact(namespaceId, text);
+    return json(201, { fact });
   };
 }
 
@@ -266,35 +317,33 @@ export function deleteNamespaceFact(deps: MemoryInspectorDeps) {
     const factId = params.factId;
     if (!namespaceId) return jsonError(400, "missing_namespaceId");
     if (!factId) return jsonError(400, "missing_factId");
-
-    try {
-      await deps.memory.deleteNamespaceFact(namespaceId, factId);
-      return json(200, { ok: true });
-    } catch (err) {
-      return jsonError(500, "delete_failed", err instanceof Error ? err.message : String(err));
-    }
+    const facts = await deps.memory.listNamespaceFacts(namespaceId);
+    if (!facts.some((f) => f.id === factId)) return jsonError(404, "fact_not_found");
+    await deps.memory.deleteNamespaceFact(namespaceId, factId);
+    return json(200, { ok: true });
   };
 }
 
 /**
  * Resolve an agent's persona (role system prompt) the same way the runtime
- * does in `resolveLocalAgent` — flattening the plain-string / layered /
- * null shapes through the fragment registry. Only the role prompt: the
- * skill-catalog block appended at run time is intentionally left out (it's
- * auto-generated boilerplate and resolving it needs the async skill
- * catalog, which the inspector doesn't carry). Returns `null` when the
- * agent can't be resolved to a persona, so a missing recipe degrades
- * gracefully rather than failing the whole inspection.
+ * does in `resolveLocalAgent` — an inline role directly, a `ref` role
+ * through the role registry, then the plain-string / layered / null
+ * prompt shapes through the fragment registry. Only the role prompt: the
+ * skill-catalog block appended at run time is intentionally left out.
+ * Returns `null` when the agent can't be resolved to a persona, so a
+ * missing recipe degrades gracefully rather than failing the inspection.
  */
 async function loadPersona(deps: MemoryInspectorDeps, agentId: string): Promise<string | null> {
   if (!deps.registry) return null;
   try {
     const recipe: RegisteredAgent | null = await deps.registry.get(agentId);
     if (!recipe || recipe.backend.type !== "local") return null;
-    // Behavioral fields live on the role binding. A `ref` binding resolves
-    // to undefined here (no I/O) → null persona for now; a follow-up will
-    // resolve refs.
-    const def = inlineRoleDefinition(recipe.backend.role);
+    const binding = recipe.backend.role;
+    let def: RoleDefinition | undefined = inlineRoleDefinition(binding);
+    if (!def && "ref" in binding && deps.roles) {
+      const role = await deps.roles.get(binding.ref.id, binding.ref.version);
+      def = role?.definition;
+    }
     const persona = resolveSystemPrompt({
       systemPrompt: def?.systemPrompt ?? null,
       ...(deps.fragments !== undefined && { fragments: deps.fragments }),
@@ -316,9 +365,8 @@ async function loadResolvedSummary(
       messageCount: ctx.messages.length,
     };
   } catch {
-    // Thread doesn't exist or store rejected the call — surface as null
-    // rather than failing the whole inspection (the per-scope panes still
-    // give useful info).
+    // Store rejected the call — surface as null rather than failing the
+    // whole inspection (the per-scope panes still give useful info).
     return null;
   }
 }

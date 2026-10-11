@@ -23,7 +23,8 @@ import type {
   ToolRefReport,
 } from "@promin/agent";
 import { reconcileToolReferences } from "@promin/agent";
-import { json, jsonError } from "../router.ts";
+import { json } from "../router.ts";
+import { internalError } from "./agent-gateway-kit.ts";
 
 export interface ModelsCatalogResponse {
   models: SerializedModelCatalogItem[];
@@ -79,7 +80,7 @@ export function listCatalogTools(deps: AgentToolCatalogDeps) {
       const body: ToolsCatalogResponse = { tools };
       return json(200, body);
     } catch (err) {
-      return jsonError(500, "list_failed", err instanceof Error ? err.message : String(err));
+      return internalError({ code: "list_failed", err });
     }
   };
 }
@@ -113,7 +114,7 @@ export function listCatalogFragments(deps: AgentFragmentCatalogDeps) {
       const fragments = deps.fragments.list().map((f) => ({ key: f.key, content: f.content }));
       return json(200, { fragments } satisfies FragmentsCatalogResponse);
     } catch (err) {
-      return jsonError(500, "list_failed", err instanceof Error ? err.message : String(err));
+      return internalError({ code: "list_failed", err });
     }
   };
 }
@@ -143,7 +144,7 @@ export function listCatalogSkills(deps: AgentSkillCatalogDeps) {
         }));
       return json(200, { skills } satisfies SkillsCatalogResponse);
     } catch (err) {
-      return jsonError(500, "list_failed", err instanceof Error ? err.message : String(err));
+      return internalError({ code: "list_failed", err });
     }
   };
 }
@@ -164,7 +165,7 @@ export function getToolCatalogHealth(deps: ToolCatalogHealthDeps) {
       });
       return json(200, report);
     } catch (err) {
-      return jsonError(500, "health_failed", err instanceof Error ? err.message : String(err));
+      return internalError({ code: "health_failed", err });
     }
   };
 }
@@ -213,7 +214,7 @@ export function listToolHistory(deps: ToolHistoryDeps) {
       const body: ToolHistoryResponse = { history };
       return json(200, body);
     } catch (err) {
-      return jsonError(500, "history_failed", err instanceof Error ? err.message : String(err));
+      return internalError({ code: "history_failed", err });
     }
   };
 }

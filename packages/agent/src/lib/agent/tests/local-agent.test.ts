@@ -14,6 +14,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
+import { ThreadNotFoundError } from "../errors.ts";
 import { LocalAgent } from "../local-agent.ts";
 import { InMemoryMemoryStore } from "../../memory/in-memory-memory-store.ts";
 import type { LLMProvider, LLMResponse } from "../../llm-provider.ts";
@@ -178,7 +179,34 @@ describe("LocalAgent — threads (with MemoryStore)", () => {
       memory,
       namespaceId: "acme",
     });
-    await expect(agent.thread("never-existed", { createIfMissing: false })).rejects.toThrow();
+    await expect(agent.thread("never-existed", { createIfMissing: false })).rejects.toThrow(
+      ThreadNotFoundError,
+    );
+  });
+
+  it("a thread is invisible to a caller scoped to another resource", async () => {
+    const { runner } = makeRunner();
+    const memory = new InMemoryMemoryStore();
+    const agent = new LocalAgent({
+      agent: { name: "talker", llm: mockLLM([]) },
+      runner,
+      memory,
+      namespaceId: "acme",
+    });
+    await agent.withScope({ resourceId: "alice" }).thread("t-1");
+
+    const bob = agent.withScope({ resourceId: "bob" });
+    await expect(bob.thread("t-1")).rejects.toThrow(ThreadNotFoundError);
+    await expect(bob.thread("t-1", { createIfMissing: false })).rejects.toThrow(
+      ThreadNotFoundError,
+    );
+    // Bob's failed attempt neither re-owned nor touched the row.
+    const row = await memory.getThread({ namespaceId: "acme", threadId: "t-1" });
+    expect(row?.resourceId).toBe("alice");
+
+    // The owner and an unscoped (namespace-wide) caller still reach it.
+    expect((await agent.withScope({ resourceId: "alice" }).thread("t-1")).isNew).toBe(false);
+    expect((await agent.thread("t-1")).isNew).toBe(false);
   });
 
   it("listThreads returns memory-store summaries", async () => {

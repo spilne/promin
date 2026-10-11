@@ -64,8 +64,9 @@ export interface RemoteDeploymentRegistry {
 
   /**
    * Extend the TTL for `deploymentId`. Returns the updated row, or
-   * null when the id is unknown (e.g. expired and swept by the host's
-   * sweep loop). A null return signals the caller should re-register.
+   * null when the id is unknown or its TTL has already passed (an
+   * expired registration is never revived, even before the sweep
+   * removes it). A null return signals the caller should re-register.
    */
   heartbeat(deploymentId: string): Promise<RegisteredDeployment | null>;
 
@@ -82,11 +83,12 @@ export interface RemoteDeploymentRegistry {
 
   /**
    * Sweep step — remove every registration whose
-   * `lastHeartbeat + ttlMs <= now`. Returns the removed rows so the
-   * route layer can clean up the corresponding RemoteAgentBackend
-   * recipes. Idempotent.
+   * `lastHeartbeat + ttlMs <= now`, with `now` read from the registry's
+   * own clock (the one that stamped the heartbeats). Returns the removed
+   * rows so the route layer can clean up the corresponding
+   * RemoteAgentBackend recipes. Idempotent.
    */
-  expireStale(params: { readonly now: number }): Promise<RegisteredDeployment[]>;
+  expireStale(): Promise<RegisteredDeployment[]>;
 }
 
 /** Default TTL when register() doesn't specify. 60 seconds, same shape as WorkerRegistry. */

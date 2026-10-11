@@ -54,6 +54,7 @@ import { createLayeredMemoryTool } from "../tools/layered-memory-tools.ts";
 import { createCallAgentTool, createFindAgentTool } from "../network/runtime.ts";
 import { frameTask } from "./frame-task.ts";
 import { completeSignal, hasCapability } from "@promin/workflow";
+import { ThreadNotFoundError } from "./errors.ts";
 import type { ApprovalDecision } from "../tool.ts";
 import { filterToolsByCapability } from "../tool.ts";
 import { resolveLocalAgent } from "../registry/resolve-local-agent.ts";
@@ -486,7 +487,15 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     if (this.config.memory) {
       const existing = await this.config.memory.getThread(key);
       if (!existing && opts.createIfMissing === false) {
-        throw new Error(`Thread not found: ${namespaceId}/${threadId}`);
+        throw new ThreadNotFoundError({ namespaceId, threadId });
+      }
+      // A thread belongs to the resource that created it. A caller scoped
+      // to a different resource must not read or extend it: treat the
+      // thread as absent for them (same error as a missing thread, so ids
+      // of other resources' threads can't be probed). An unscoped caller
+      // (no resourceId) keeps namespace-wide access.
+      if (existing && resourceId !== undefined && existing.resourceId !== resourceId) {
+        throw new ThreadNotFoundError({ namespaceId, threadId });
       }
       if (!existing) {
         await this.config.memory.createThread(key, {
@@ -854,6 +863,31 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     return liveOutput<TOutput>(promise, undefined, capture);
   }
 
+  async hasPendingApproval(callId: string): Promise<boolean> {
+    return (await this.findSuspendedApproval(`approve:${callId}`)) !== null;
+  }
+
+  /**
+   * Find the suspended workflow for this thread waiting on `signalName`.
+   * Each chat turn creates its own workflow id prefixed by threadId, so
+   * the search is scoped to this thread alone.
+   */
+  private async findSuspendedApproval(signalName: string) {
+    const suspended = await this.deps.runner.storage.listWorkflows({
+      status: "suspended",
+      limit: 100,
+    });
+    return (
+      suspended.find(
+        (w) =>
+          w.workflowId.startsWith(`${this.deps.key.threadId}-`) &&
+          Object.values(w.steps).some(
+            (s) => s.status === "waiting_for_signal" && s.signalName === signalName,
+          ),
+      ) ?? null
+    );
+  }
+
   /**
    * Continue a turn that suspended on `approve:<callId>`. Finds the
    * suspended workflow for this thread, delivers the approval decision
@@ -881,18 +915,8 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       );
     }
 
-    // Find the suspended workflow for this thread waiting on approve:<callId>.
-    // Each chat turn creates its own workflow id prefixed by threadId, so we
-    // can scope the search to this thread alone.
     const signalName = `approve:${callId}`;
-    const suspended = await storage.listWorkflows({ status: "suspended", limit: 100 });
-    const wf = suspended.find(
-      (w) =>
-        w.workflowId.startsWith(`${this.deps.key.threadId}-`) &&
-        Object.values(w.steps).some(
-          (s) => s.status === "waiting_for_signal" && s.signalName === signalName,
-        ),
-    );
+    const wf = await this.findSuspendedApproval(signalName);
     if (!wf) {
       throw new Error(
         `No suspended approval "${signalName}" found for thread "${this.deps.key.threadId}".`,

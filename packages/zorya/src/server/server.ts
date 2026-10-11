@@ -183,6 +183,8 @@ import { createSecret, deleteSecret, listSecrets } from "./routes/secrets.ts";
 import { createDraft, deleteDraft } from "./routes/agent-drafts.ts";
 import {
   ingestWebhook,
+  WorkflowStorageWebhookDeliveryStore,
+  type WebhookDeliveryStore,
   type WebhookSourceConfig,
   type WebhookGatewayDeps,
 } from "./routes/webhooks.ts";
@@ -190,8 +192,10 @@ import {
   heartbeatDeployment,
   listDeployments,
   registerDeployment,
+  RemoteDeploymentSweeper,
   unregisterDeployment,
   type RemoteDeploymentsGatewayDeps,
+  type RemoteEndpointPolicy,
 } from "./routes/remote-deployments.ts";
 import {
   addNamespaceFact,
@@ -342,22 +346,29 @@ export interface ZoryaServerConfig extends AuthConfig {
   secrets?: SecretsStorage;
   /**
    * Optional webhook ingress — POST /webhooks/:source/:agentId routes
-   * external events (Slack / GitHub / Stripe / custom) into a registered
-   * agent after HMAC signature verification + replay dedup. Each source
-   * declares its secret + signature scheme. Without `agents` configured
-   * this is a no-op (no agent to dispatch to). Phase 1 supports
-   * 'sha256-hex' (GitHub-style) signatures; Stripe/Slack variants land
-   * later.
+   * external events into a registered agent after `zorya-v1` signature
+   * verification (HMAC over timestamp, delivery id, scope and body) and
+   * durable replay dedup. `deliveries` defaults to a store on the
+   * workflow storage, shared by every instance on the same backend.
+   * Without `agents` configured the routes are not mounted.
    */
-  webhooks?: { sources: Readonly<Record<string, WebhookSourceConfig>> };
+  webhooks?: {
+    sources: Readonly<Record<string, WebhookSourceConfig>>;
+    deliveries?: WebhookDeliveryStore;
+  };
   /**
-   * Optional remote-deployment registry. When set, exposes
-   * /api/remote-deployments/* — external Zorya servers self-register
-   * here at startup, exposing their RemoteAgentBackend recipes via
-   * heartbeated TTL. Without it (and without `agents`), the routes
-   * are not mounted. See promin-21g5 for the design.
+   * Optional remote-deployment self-registration. When set (with
+   * `agents`), exposes /api/remote-deployments/* — external Zorya
+   * servers register their agents here and keep them alive with
+   * heartbeats; expired registrations are swept every `sweepIntervalMs`
+   * (default 15s). `endpointPolicy` decides which endpoints this server
+   * will call (default: public http(s) hosts only).
    */
-  remoteDeployments?: RemoteDeploymentRegistry;
+  remoteDeployments?: {
+    registry: RemoteDeploymentRegistry;
+    endpointPolicy?: RemoteEndpointPolicy;
+    sweepIntervalMs?: number;
+  };
   /**
    * Time source for the server's own time math: signal-token expiry, draft
    * TTL sweep, worker online cutoff, worker-socket heartbeats, SSE / stream
@@ -435,6 +446,7 @@ export class ZoryaServer {
   private readonly router: Router;
   private readonly logger: Logger;
   private readonly clock: WallClock;
+  private remoteDeploymentSweeper?: RemoteDeploymentSweeper;
   private bunServer?: { stop(closeActiveConnections?: boolean): Promise<void> | void };
 
   constructor(config: ZoryaServerConfig) {
@@ -616,6 +628,10 @@ export class ZoryaServer {
         ...(this.agents.turnGate !== undefined && { turnGate: this.agents.turnGate }),
         ...(this.agents.workerId !== undefined && { workerId: this.agents.workerId }),
         ...(this.secrets !== undefined && { secrets: this.secrets }),
+        ...(this.agents.authorizeScope !== undefined && {
+          authorizeScope: this.agents.authorizeScope,
+        }),
+        fileManagedIds: () => this.agents!.fileManagedIds(),
         clock,
       };
       this.router
@@ -722,6 +738,10 @@ export class ZoryaServer {
           ...((this.fragments?.registry ?? this.agents.fragments) && {
             fragments: this.fragments?.registry ?? this.agents.fragments,
           }),
+          ...(this.agents.roles !== undefined && { roles: this.agents.roles }),
+          ...(this.agents.authorizeScope !== undefined && {
+            authorizeScope: this.agents.authorizeScope,
+          }),
         };
         this.router
           .get("/api/memory/inspect", inspectMemory(mem))
@@ -731,7 +751,14 @@ export class ZoryaServer {
       }
 
       if (this.agents.instances && this.agents.memory) {
-        const inDeps = { registry: this.agents.instances, memory: this.agents.memory };
+        const inDeps = {
+          registry: this.agents.instances,
+          memory: this.agents.memory,
+          agents: this.agents.registry,
+          ...(this.agents.authorizeScope !== undefined && {
+            authorizeScope: this.agents.authorizeScope,
+          }),
+        };
         this.router
           .get("/api/agents/:id/instances", listAgentInstances(inDeps))
           .post("/api/agents/:id/instances", resolveAgentInstance(inDeps))
@@ -742,7 +769,7 @@ export class ZoryaServer {
       }
 
       if (this.agents.roles) {
-        const roleDeps = { registry: this.agents.roles };
+        const roleDeps = { registry: this.agents.roles, agents: this.agents.registry };
         this.router
           .get("/api/roles", listRoles(roleDeps))
           .post("/api/roles", createRole(roleDeps))
@@ -755,7 +782,12 @@ export class ZoryaServer {
 
     if (this.skills) {
       const skills = this.skills;
-      const skillDeps = { registry: skills.registry };
+      const skillDeps = {
+        registry: skills.registry,
+        fileManagedIds: () => skills.fileManagedIds(),
+        ...(this.agents !== undefined && { agents: this.agents.registry }),
+        ...(this.agents?.roles !== undefined && { roles: this.agents.roles }),
+      };
       this.router
         .get("/api/skills", listSkills(skillDeps))
         .post("/api/skills", createSkill(skillDeps))
@@ -808,16 +840,29 @@ export class ZoryaServer {
         // webhook deps narrow to only the methods it uses.
         resolve: this.agents.resolve as unknown as WebhookGatewayDeps["resolve"],
         sources: config.webhooks.sources,
+        deliveries:
+          config.webhooks.deliveries ?? new WorkflowStorageWebhookDeliveryStore({ storage }),
+        clock,
       };
       this.router.post("/webhooks/:source/:agentId", ingestWebhook(webhookDeps));
     }
 
     if (config.remoteDeployments && this.agents) {
       const remoteDeps: RemoteDeploymentsGatewayDeps = {
-        registry: config.remoteDeployments,
+        registry: config.remoteDeployments.registry,
         agents: this.agents.registry,
-        clock,
+        ...(config.remoteDeployments.endpointPolicy !== undefined && {
+          endpointPolicy: config.remoteDeployments.endpointPolicy,
+        }),
       };
+      this.remoteDeploymentSweeper = new RemoteDeploymentSweeper({
+        ...remoteDeps,
+        clock,
+        ...(config.remoteDeployments.sweepIntervalMs !== undefined && {
+          intervalMs: config.remoteDeployments.sweepIntervalMs,
+        }),
+        onError: (err) => this.logger.error("[zorya] remote-deployment sweep failed", err),
+      });
       this.router
         .post("/api/remote-deployments/register", registerDeployment(remoteDeps))
         .post("/api/remote-deployments/:deploymentId/heartbeat", heartbeatDeployment(remoteDeps))
@@ -941,6 +986,7 @@ export class ZoryaServer {
     if (this.stopping) return;
     this.workerWs.start();
     this.agentStreamHub.start();
+    this.remoteDeploymentSweeper?.start();
     this.lifecycle.start();
   }
 
@@ -1041,6 +1087,7 @@ export class ZoryaServer {
     this.liveStreams.clear();
     this.agentStreamHub.stop();
     this.workerWs.stop();
+    this.remoteDeploymentSweeper?.stop();
 
     await this.waitForInFlight();
     await this.lifecycle.stop();

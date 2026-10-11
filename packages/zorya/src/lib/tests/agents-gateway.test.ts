@@ -191,7 +191,7 @@ describe("agent gateway — invoke", () => {
       new Request("http://test/api/agents/missing/invoke", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ task: "hi", namespaceId: "acme" }),
+        body: JSON.stringify({ task: "hi", namespaceId: "acme", resourceId: "alice" }),
       }),
     );
     expect(res.status).toBe(404);
@@ -295,7 +295,7 @@ describe("agent gateway — threads", () => {
     const { server } = await bootGateway();
     const res = await server.handle(
       new Request(
-        "http://test/api/agents/support/threads/never-existed/messages?namespaceId=acme",
+        "http://test/api/agents/support/threads/never-existed/messages?namespaceId=acme&resourceId=alice",
         { method: "GET" },
       ),
     );
@@ -686,11 +686,8 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
       expect(res.status).toBe(404);
     });
 
-    it("echoes back accepted secret names without storing values when no SecretsStorage configured", async () => {
-      // Without `secrets` on the gateway deps, supplied values are
-      // silently dropped. The acceptedSecrets echo lets callers see
-      // their values were received but not persisted.
-      const { server } = await bootGateway();
+    it("rejects secrets with 400 when no SecretsStorage is configured (nothing is cloned)", async () => {
+      const { server, registry } = await bootGateway();
       const res = await server.handle(
         new Request("http://test/api/agents/support/clone", {
           method: "POST",
@@ -701,13 +698,9 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
           }),
         }),
       );
-      expect(res.status).toBe(201);
-      const body = (await res.json()) as {
-        recipe: { id: string };
-        acceptedSecrets: string[];
-      };
-      expect(body.recipe.id).toBe("support-fork");
-      expect(body.acceptedSecrets.sort()).toEqual(["anthropic_api_key", "openai_key"]);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe("secrets_unsupported");
+      expect(await registry.get("support-fork")).toBeNull();
     });
 
     it("clone-with-secrets persists supplied secrets at the requested scope", async () => {
@@ -1119,6 +1112,12 @@ describe("agent gateway — distill rate limit (429)", () => {
 
     // Pre-seed enough distill episodes to hit the cap.
     const SCOPE = { namespaceId: "acme", resourceId: "alice" };
+    // The caller's own thread, as the gateway creates it (stamped with
+    // the owning agent).
+    await memory.createThread(
+      { ...SCOPE, threadId: "t-now" },
+      { resourceId: "alice", metadata: { agentId: "support" } },
+    );
     await memory.appendResourceEpisode(SCOPE, {
       summary: "old distill",
       sourceThreadId: "earlier",

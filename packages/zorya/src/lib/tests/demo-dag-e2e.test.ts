@@ -312,16 +312,38 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
       expect(body.versions.length).toBeGreaterThanOrEqual(1);
     });
 
+    it("refuses in-place edits of a file-managed recipe (the next scan would undo them)", async () => {
+      const patch = await fetch(`${baseUrl}/api/agents/echo-bot`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ metadata: { tags: ["e2e-touched"] } }),
+      });
+      expect(patch.status).toBe(409);
+      expect(((await patch.json()) as { error: string }).error).toBe("file_managed");
+    });
+
     it("PATCH /api/agents/:id replaces in-place (same version) and POST publishes a new version", async () => {
-      // Snapshot the current version count.
-      const before = (await (await fetch(`${baseUrl}/api/agents/echo-bot/versions`)).json()) as {
-        versions: ReadonlyArray<{ version: string }>;
+      const backend = {
+        type: "local",
+        model: { provider: "mock", id: "echo-v1" },
+        role: { inline: { systemPrompt: "Echo bot, e2e variant.", tools: [] } },
       };
-      const beforeCount = before.versions.length;
-      const beforeVersion = before.versions[0]!.version;
+      const created = await fetch(`${baseUrl}/api/agents`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ id: "e2e-echo", backend, metadata: { tags: ["e2e"] } }),
+      });
+      expect(created.status).toBe(201);
+      const versionsOf = async () =>
+        (
+          (await (await fetch(`${baseUrl}/api/agents/e2e-echo/versions`)).json()) as {
+            versions: ReadonlyArray<{ version: string }>;
+          }
+        ).versions;
+      const beforeCount = (await versionsOf()).length;
 
       // PATCH replaces in-place — no new row.
-      const patch = await fetch(`${baseUrl}/api/agents/echo-bot`, {
+      const patch = await fetch(`${baseUrl}/api/agents/e2e-echo`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -335,39 +357,23 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
       expect(patch.status).toBe(200);
       const patched = (await patch.json()) as { metadata: { tags: ReadonlyArray<string> } };
       expect(patched.metadata.tags).toContain("e2e-touched");
-
-      const afterPatch = (await (
-        await fetch(`${baseUrl}/api/agents/echo-bot/versions`)
-      ).json()) as { versions: ReadonlyArray<{ version: string }> };
-      expect(afterPatch.versions.length).toBe(beforeCount);
+      expect((await versionsOf()).length).toBe(beforeCount);
 
       // POST registers a brand-new version — row count grows by 1.
-      const nextVersion = `${beforeVersion}-e2e`;
       const post = await fetch(`${baseUrl}/api/agents`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          id: "echo-bot",
-          version: nextVersion,
-          backend: {
-            type: "local",
-            model: { provider: "mock", id: "echo-v1" },
-            role: { inline: { systemPrompt: "Echo bot, e2e-published variant.", tools: [] } },
-          },
-          metadata: {
-            description: "Echo — e2e published version.",
-            capabilities: ["chat"],
-            tags: ["e2e-published"],
-          },
+          id: "e2e-echo",
+          version: "v2",
+          backend,
+          metadata: { description: "Echo — e2e published version.", tags: ["e2e-published"] },
         }),
       });
       expect(post.status).toBe(201);
-
-      const afterPost = (await (await fetch(`${baseUrl}/api/agents/echo-bot/versions`)).json()) as {
-        versions: ReadonlyArray<{ version: string }>;
-      };
-      expect(afterPost.versions.length).toBe(beforeCount + 1);
-      expect(afterPost.versions.map((v) => v.version)).toContain(nextVersion);
+      const after = await versionsOf();
+      expect(after.length).toBe(beforeCount + 1);
+      expect(after.map((v) => v.version)).toContain("v2");
     });
   });
 });

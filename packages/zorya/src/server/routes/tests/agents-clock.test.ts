@@ -33,6 +33,8 @@ async function setup(clock: FakeWallClock) {
     },
     thread: async (id: string) => ({
       id,
+      isNew: false,
+      metadata: async () => ({ agentId: "bot" }),
       setArchived: async (at: number | null) => {
         archived.push(at);
       },
@@ -72,7 +74,7 @@ describe("agent gateway — time on an injected clock", () => {
     const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
     const { deps, archived } = await setup(clock);
 
-    const res = await archiveAgentThread(deps)(post({ namespaceId: "ns" }), {
+    const res = await archiveAgentThread(deps)(post({ namespaceId: "ns", resourceId: "r-1" }), {
       id: "bot",
       threadId: "t-1",
     });

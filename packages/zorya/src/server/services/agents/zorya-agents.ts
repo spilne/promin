@@ -22,6 +22,7 @@ import type {
 } from "@promin/agent";
 import { startAgentSchedule, startAgentScanLoop } from "@promin/agent";
 import type { DurableScheduleConfig, ScheduleTick } from "@promin/workflow/scheduler";
+import type { ScopeAuthorizer } from "../../routes/agent-gateway-kit.ts";
 import type { AgentScheduleDispatcher, AgentScheduleStart } from "../scheduler/index.ts";
 
 export interface ZoryaAgentsScanConfig {
@@ -110,6 +111,13 @@ export interface ZoryaAgentsConfig {
    * to a random hex string.
    */
   workerId?: string;
+  /**
+   * Binds the `(namespaceId, resourceId | ownerId)` a request names to its
+   * authenticated caller; `false` answers 403. Without it, any caller the
+   * server's auth admits may act in any scope it names (thread ownership
+   * by resource and agent is enforced either way).
+   */
+  authorizeScope?: ScopeAuthorizer;
 }
 
 export class ZoryaAgents implements AgentScheduleDispatcher {
@@ -127,6 +135,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly toolHistory?: ToolHistoryStore;
   readonly turnGate?: AgentTurnGate;
   readonly workerId?: string;
+  readonly authorizeScope?: ScopeAuthorizer;
   private readonly scanConfig?: ZoryaAgentsScanConfig;
   private scanHandle?: { stop(): void; tick(): Promise<unknown> };
   // Agent ids currently backed by a recipe file on disk (rebuilt each scan
@@ -148,6 +157,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     if (config.scan) this.scanConfig = config.scan;
     if (config.turnGate) this.turnGate = config.turnGate;
     if (config.workerId) this.workerId = config.workerId;
+    if (config.authorizeScope) this.authorizeScope = config.authorizeScope;
   }
 
   /**

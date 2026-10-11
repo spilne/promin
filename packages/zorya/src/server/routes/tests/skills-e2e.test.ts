@@ -184,9 +184,15 @@ describe("skills e2e — create → catalog → attach → resolve → run → d
     const toolMsg = seen.secondTurn.find((m) => m.role === "tool");
     expect(toolMsg?.content).toContain("1. Reproduce. 2. Bisect");
 
-    // 6. Delete the skill — catalog empties.
-    const del = await server.handle(
+    // 6. Delete the skill. The agent still references it, so a plain
+    //    delete is refused; a forced one goes through and the catalog empties.
+    const refused = await server.handle(
       new Request("http://t/api/skills/structured-debugging", { method: "DELETE" }),
+    );
+    expect(refused.status).toBe(409);
+    expect(((await refused.json()) as { agents: string[] }).agents).toEqual(["skilled-bot"]);
+    const del = await server.handle(
+      new Request("http://t/api/skills/structured-debugging?force=true", { method: "DELETE" }),
     );
     expect(del.status).toBe(204);
     const after = await jsonOf<{ skills: unknown[] }>(

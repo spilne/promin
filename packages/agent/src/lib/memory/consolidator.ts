@@ -178,6 +178,24 @@ Rules:
 
 Do not invent facts. If a turn was inconclusive, return a low salience and an empty facts list.`;
 
+/**
+ * A compact / distill request found too little history to work on (an
+ * empty or short thread). Distinct from a failure: nothing was written,
+ * and the same call succeeds once the thread has grown.
+ */
+export class NothingToConsolidateError extends Error {
+  readonly _tag = "NothingToConsolidate";
+  readonly operation: "compact" | "distill";
+  readonly messageCount: number;
+
+  constructor(params: { operation: "compact" | "distill"; messageCount: number; detail: string }) {
+    super(params.detail);
+    this.name = "NothingToConsolidateError";
+    this.operation = params.operation;
+    this.messageCount = params.messageCount;
+  }
+}
+
 export class DefaultConsolidator implements Consolidator {
   private readonly store: MemoryStore;
   private readonly llm: LLMProvider;
@@ -205,9 +223,11 @@ export class DefaultConsolidator implements Consolidator {
     const keepRecent = opts.keepRecent ?? this.defaultKeepRecent;
     const messages = await this.store.getMessages(key, { order: "asc" });
     if (messages.length <= keepRecent) {
-      throw new Error(
-        `compactThread: thread has ${messages.length} messages, ≤ keepRecent=${keepRecent}; nothing to compact`,
-      );
+      throw new NothingToConsolidateError({
+        operation: "compact",
+        messageCount: messages.length,
+        detail: `compactThread: thread has ${messages.length} messages, ≤ keepRecent=${keepRecent}; nothing to compact`,
+      });
     }
     const toCompact = messages.slice(0, messages.length - keepRecent);
     const distilled = await this.distill(toCompact);
@@ -238,9 +258,11 @@ export class DefaultConsolidator implements Consolidator {
 
     const messages = await this.store.getMessages(key, { order: "asc" });
     if (messages.length < this.minDistillMessages) {
-      throw new Error(
-        `distillThread: thread has ${messages.length} messages, < minDistillMessages=${this.minDistillMessages}`,
-      );
+      throw new NothingToConsolidateError({
+        operation: "distill",
+        messageCount: messages.length,
+        detail: `distillThread: thread has ${messages.length} messages, < minDistillMessages=${this.minDistillMessages}`,
+      });
     }
     const distilled = await this.distill(messages);
 

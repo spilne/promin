@@ -63,7 +63,9 @@ export class InMemoryAgentRegistry implements AgentRegistry {
     let latest: RegisteredAgent | null = null;
     for (const row of this.rows.values()) {
       if (row.id !== id) continue;
-      if (!latest || row.updatedAt > latest.updatedAt) latest = row;
+      // Ties go to the row registered last (Map order), so a version published
+      // in the same millisecond as its predecessor still becomes the active one.
+      if (!latest || row.updatedAt >= latest.updatedAt) latest = row;
     }
     return latest;
   }
