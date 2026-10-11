@@ -11,11 +11,9 @@
 //                       agentAction seeded with stored messages
 //
 // Why stateless thread turns: multi-tenant gateways resolve a fresh
-// `LocalAgent` per request. A long-lived `agentLoop` session keyed on
-// threadId would conflict ("workflow already running") because the
-// session's underlying workflow id is reserved across requests. Stateless
-// turns sidestep this entirely — the thread's "memory" lives in the
-// `MemoryStore`, not the in-process session map.
+// `LocalAgent` per request. Each turn is its own workflow, so no session
+// workflow id is reserved across requests — the thread's "memory" lives in
+// the `MemoryStore`, not in an in-process session map.
 //
 // `MemoryStore` integration:
 //   - thread.send / thread.stream load history → run agentAction → persist
@@ -32,8 +30,13 @@
 import { randomUUID } from "node:crypto";
 import type { WorkflowRunner } from "@promin/workflow";
 import type { z } from "zod";
-import { agentAction, type AgentActionConfig, type AgentResult } from "../agent-action.ts";
-import { agentLoop, type AgentLoopConfig } from "../agent-loop.ts";
+import {
+  agentAction,
+  type AgentActionConfig,
+  type AgentEngineConfig,
+  type AgentResult,
+} from "../agent-action.ts";
+import type { ToolRegistry } from "../tool-registry.ts";
 import type { Message, ToolCall } from "../message.ts";
 import { SessionEventBus, type SessionEvent } from "../session-logger.ts";
 import type {
@@ -62,10 +65,10 @@ import { retrieverToolName } from "../rag/retriever-tool-name.ts";
 import type { Retriever, RetrieverFilter } from "../rag/types.ts";
 import type { AgentKnowledgeMode } from "../registry/types.ts";
 import { frameTask } from "./frame-task.ts";
-import { completeSignal, hasCapability } from "@promin/workflow";
+import { SystemWallClock, completeSignal, hasCapability } from "@promin/workflow";
 import { ThreadNotFoundError } from "./errors.ts";
 import { THREAD_AGENT_METADATA_KEY } from "./types.ts";
-import type { ApprovalDecision } from "../tool.ts";
+import type { AgentTool, ApprovalDecision } from "../tool.ts";
 import { filterToolsByCapability } from "../tool.ts";
 import { resolveLocalAgent } from "../registry/resolve-local-agent.ts";
 import type { ResolveLocalAgentDeps } from "../registry/resolve-local-agent.ts";
@@ -90,8 +93,13 @@ import type {
 } from "./types.ts";
 
 export interface LocalAgentConfig<TOutput = any> {
-  /** Underlying agent config — same shape used by `agentAction` / `agentLoop`. */
-  readonly agent: AgentLoopConfig & {
+  /**
+   * Engine settings every turn runs with — the `agentAction` config minus
+   * the per-run wiring (`bus`, `scope`, `signal`), which LocalAgent
+   * supplies. Every field is honored on every path (invoke, stream,
+   * thread send / stream / resume).
+   */
+  readonly agent: AgentEngineConfig<TOutput> & {
     readonly outputSchema?: z.ZodType<TOutput>;
   };
   /** Workflow runner used to drive both one-shot and conversational paths. */
@@ -292,8 +300,6 @@ export interface AutoCompactConfig {
   /**
    * Model context window in tokens. When combined with `compressAt`,
    * the effective token gate becomes `contextLimit * compressAt`.
-   * Mirrors the same-named field on `agentLoop`'s `ContextConfig` so
-   * operators familiar with the loop pattern recognise the knob.
    *
    * Examples: 200_000 for current Anthropic models. Wins over
    * `tokenThreshold` when both are set.
@@ -302,7 +308,6 @@ export interface AutoCompactConfig {
   /**
    * Fraction of `contextLimit` at which to compact. Default 0.70 —
    * leaves the model 30% headroom for the assistant's reply.
-   * Same default and meaning as `agent-loop.ContextConfig.compressAt`.
    * Ignored when `contextLimit` isn't set.
    */
   readonly compressAt?: number;
@@ -454,9 +459,6 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
 
   constructor(config: LocalAgentConfig<TOutput>) {
     this.config = config;
-    // Note: agentLoop is built fresh per-thread so the auto-injected
-    // `memory` tool can bind the right `threadId`. One-shot paths build
-    // agentAction inline.
   }
 
   /**
@@ -574,28 +576,23 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       created = true;
     }
 
-    // Build a per-thread agentLoop config (with the auto-injected `memory`
-    // tool bound to this threadId). Each conversational turn is run as a
-    // FRESH agentAction workflow seeded with the persisted message history,
-    // so multi-tenant gateways can resolve a new LocalAgent per request
-    // without the "workflow already running" conflict that long-lived
-    // agentLoop sessions cause. The `loop` field is kept for the
-    // structural shape but isn't actually used for thread send/stream.
-    const loopConfig: AgentLoopConfig = {
+    // Per-thread engine config (with the auto-injected `memory` tool bound
+    // to this threadId). Each conversational turn runs as a FRESH
+    // agentAction workflow seeded with the persisted message history, so
+    // multi-tenant gateways can resolve a new LocalAgent per request.
+    const engine: AgentEngineConfig<TOutput> = {
       ...this.config.agent,
-      tools: this.buildTools({
+      ...this.buildTools({
         namespaceId: key.namespaceId,
         resourceId: key.resourceId,
         threadId: key.threadId,
       }),
     };
-    const loop = agentLoop(loopConfig);
 
     return new LocalAgentThread<TOutput>({
       id: threadId,
       key,
-      loop,
-      loopConfig,
+      engine,
       runner: this.config.runner,
       memory: this.config.memory,
       created,
@@ -609,24 +606,40 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
   }
 
   /**
-   * Build the per-thread tools map. Auto-injects `memory` when a store is
-   * configured and `autoMemoryTool` is not explicitly disabled. User-supplied
-   * tools win on key collision (so callers can override with their own).
-   */
-  /**
-   * Build the per-turn tool kit. Used by both the conversational
+   * Build the per-turn tool source. Used by both the conversational
    * (`thread.send`) path with a full ThreadKey AND the one-shot
    * (`invoke` / `stream`) path with just the scope. The memory tool
    * attaches only when threadId is known; the network tools attach
-   * whenever the recipe opted in and a namespaceId is resolved.
+   * whenever the recipe opted in and a namespaceId is resolved. Host
+   * tools win on key collision.
+   *
+   * An agent configured with a `toolRegistry` keeps a live registry: the
+   * auto-attached tools are merged into every `getTools()` read, so
+   * hot-reloaded tools still show up on the next step.
    */
-  private buildTools(scope: {
-    namespaceId?: string;
-    resourceId?: string;
-    threadId?: string;
-  }): AgentLoopConfig["tools"] {
-    const userTools = this.config.agent.tools;
-    let tools: AgentLoopConfig["tools"] = userTools;
+  private buildTools(scope: { namespaceId?: string; resourceId?: string; threadId?: string }): {
+    tools?: Record<string, AgentTool<any, any>>;
+    toolRegistry?: ToolRegistry;
+  } {
+    const registry = this.config.agent.toolRegistry;
+    if (registry) {
+      return {
+        tools: undefined,
+        toolRegistry: {
+          getTools: () => this.withAutoTools({ scope, userTools: registry.getTools() }),
+          close: () => registry.close(),
+        },
+      };
+    }
+    return { tools: this.withAutoTools({ scope, userTools: this.config.agent.tools ?? {} }) };
+  }
+
+  private withAutoTools(params: {
+    scope: { namespaceId?: string; resourceId?: string; threadId?: string };
+    userTools: Record<string, AgentTool<any, any>>;
+  }): Record<string, AgentTool<any, any>> {
+    const { scope, userTools } = params;
+    let tools: Record<string, AgentTool<any, any>> = userTools;
 
     // Auto-attached memory tool — needs a threadId, only the thread path
     // has one. One-shot invoke is stateless by design.
@@ -635,7 +648,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       scope.namespaceId &&
       this.config.memory &&
       this.config.autoMemoryTool !== false &&
-      !(userTools && "memory" in userTools)
+      !("memory" in userTools)
     ) {
       const memoryTool = createLayeredMemoryTool({
         store: this.config.memory,
@@ -678,7 +691,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
           network: networkRecipe,
         });
         // Don't shadow user-supplied tools of the same name — host wins.
-        const merged: NonNullable<typeof tools> = { ...tools };
+        const merged = { ...tools };
         if (!("findAgent" in merged)) merged.findAgent = findAgent;
         if (!("callAgent" in merged)) merged.callAgent = callAgent;
         tools = merged;
@@ -688,7 +701,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     // Retriever tools — one search tool per binding whose mode includes
     // `tool`. Host / recipe tools of the same name win.
     if (this.config.retrievers) {
-      const merged: NonNullable<typeof tools> = { ...tools };
+      const merged = { ...tools };
       for (const binding of retrieverBindings(this.config.retrievers)) {
         if (binding.mode === "context") continue;
         if (binding.toolName in merged) continue;
@@ -712,7 +725,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     // recipe's `capabilities` grant its `requires`. Applied last so the
     // auto-attached memory / network tools are gated too (they aren't
     // elevated today, so they pass through unchanged).
-    return tools ? filterToolsByCapability(tools, this.config.capabilities ?? []) : tools;
+    return filterToolsByCapability(tools, this.config.capabilities ?? []);
   }
 
   /**
@@ -807,49 +820,37 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     promise: Promise<AgentResult>;
     capture: RunCapture;
   } {
-    const capture = makeCapture();
-    if (bus) bus.subscribe((e) => recordEvent(capture, e));
+    const capture = makeCapture(opts?.signal);
+    const runBus = bus ?? new SessionEventBus();
+    runBus.subscribe((e) => recordEvent(capture, e));
 
-    // Re-build agentAction with an injected bus when streaming. We can't
-    // mutate the AgentLoopConfig that was used to build `this.loop`, so
-    // one-shot uses an inline action.
-    //
     // Tools come from buildTools so the network tools auto-attach for
-    // one-shot invoke too — the thread path used to be the only caller.
-    // No threadId here (one-shot is stateless), so the layered memory
-    // tool stays opt-out for invoke.
+    // one-shot invoke too. No threadId here (one-shot is stateless), so
+    // the layered memory tool stays off for invoke.
     const namespaceId = opts?.namespaceId ?? this.config.namespaceId;
     const resourceId = this.config.resourceId;
-    const agent = {
+    const engine: AgentEngineConfig<TOutput> = {
       ...this.config.agent,
-      tools: this.buildTools({
+      ...this.buildTools({
         ...(namespaceId !== undefined && { namespaceId }),
         ...(resourceId !== undefined && { resourceId }),
       }),
     };
-    // Pass everything except agentLoop-specific knobs into agentAction.
-    const actionConfig = toActionConfig(agent, bus, {
-      ...(namespaceId !== undefined && { namespaceId }),
-      ...(resourceId !== undefined && { resourceId }),
-      agentId: this.agentId(),
+    const wf = buildTurnWorkflow<TOutput>({
+      engine,
+      bus: runBus,
+      scope: {
+        ...(namespaceId !== undefined && { namespaceId }),
+        ...(resourceId !== undefined && { resourceId }),
+        agentId: this.agentId(),
+      },
+      signal: capture.abort.signal,
     });
-    const wf = (agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>)(
-      actionConfig as AgentActionConfig<TOutput>,
-    );
     // Honor caller-provided `runId` so a schedule tick (or any deterministic
     // caller) lands on the same workflow row across retries. Falls back to
     // a fresh random id for plain interactive invocations.
     const workflowId =
-      opts?.runId ?? `${this.config.invokeIdPrefix ?? agent.name}-${randomUUID().slice(0, 8)}`;
-
-    // Best-effort cancel: when caller's signal aborts, the underlying
-    // runner.run currently has no abort hook, so we just record and
-    // surface "cancelled" if it fires before completion.
-    if (opts?.signal) {
-      opts.signal.addEventListener("abort", () => {
-        capture.cancelled = true;
-      });
-    }
+      opts?.runId ?? `${this.config.invokeIdPrefix ?? engine.name}-${randomUUID().slice(0, 8)}`;
 
     // Context-mode retrievers search with the task before the run starts;
     // the hits ride in the workflow input as a fenced reference-data
@@ -877,11 +878,11 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
 // Thread
 // ---------------------------------------------------------------------------
 
-interface LocalAgentThreadDeps {
+interface LocalAgentThreadDeps<TOutput> {
   readonly id: string;
   readonly key: ThreadKey;
-  readonly loop: ReturnType<typeof agentLoop>;
-  readonly loopConfig: AgentLoopConfig;
+  /** Engine config for this thread's turns, with the thread's tools. */
+  readonly engine: AgentEngineConfig<TOutput>;
   readonly runner: WorkflowRunner;
   readonly memory?: MemoryStore;
   readonly created: boolean;
@@ -918,11 +919,11 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
   readonly id: string;
   readonly resourceId: string | null;
   readonly isNew: boolean;
-  private readonly deps: LocalAgentThreadDeps;
+  private readonly deps: LocalAgentThreadDeps<TOutput>;
   /** In-memory transcript used when no MemoryStore is configured. */
   private inMemoryMessages: Message[] = [];
 
-  constructor(deps: LocalAgentThreadDeps) {
+  constructor(deps: LocalAgentThreadDeps<TOutput>) {
     this.deps = deps;
     this.id = deps.id;
     this.resourceId = deps.key.resourceId ?? null;
@@ -946,7 +947,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
   }
 
   stream(input: AgentInput, opts?: AgentInvokeOpts): AgentRunOutput<TOutput> {
-    const capture = makeCapture();
+    const capture = makeCapture(opts?.signal);
     const promise = this.runTurn(input, opts, capture).then(({ promise }) => promise);
     return liveOutput<TOutput>(promise, undefined, capture);
   }
@@ -966,7 +967,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     decision: ApprovalDecision,
     opts?: AgentInvokeOpts,
   ): AgentRunOutput<TOutput> {
-    const capture = makeCapture();
+    const capture = makeCapture(opts?.signal);
     const promise = this.resumeTurn(callId, decision, opts, capture).then(({ promise }) => promise);
     return liveOutput<TOutput>(promise, undefined, capture);
   }
@@ -1005,9 +1006,9 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
    * next suspension).
    *
    * The rebuilt workflow definition must be replay-equivalent to the
-   * original turn's. agent-action is deterministic on the same
-   * AgentLoopConfig, so as long as the recipe + persona haven't
-   * changed mid-turn this is safe.
+   * original turn's. agentAction's control flow reads only journaled
+   * values (tool-set snapshots included), so a recipe edited mid-turn
+   * changes later steps only.
    */
   private async resumeTurn(
     callId: string,
@@ -1034,27 +1035,20 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       (s) => s.status === "waiting_for_signal" && s.signalName === signalName,
     )!.stepName;
 
-    const capture = captureIn ?? makeCapture();
+    const capture = captureIn ?? makeCapture(opts?.signal);
     const bus = new SessionEventBus();
     bus.subscribe((e) => recordEvent(capture, e));
-    if (opts?.signal) {
-      opts.signal.addEventListener("abort", () => {
-        capture.cancelled = true;
-      });
-    }
 
     // Rebuild the workflow definition. The journal drives replay so we
     // don't need to recompute the seed messages — the runner reads input
     // from storage when resuming an existing workflow row.
     const { persona } = await this.loadContext();
-    const actionConfig = toActionConfig(
-      { ...this.deps.loopConfig, systemPrompt: persona },
+    const builtWorkflow = buildTurnWorkflow<TOutput>({
+      engine: { ...this.deps.engine, systemPrompt: persona },
       bus,
-      this.toolScope(),
-    );
-    const builtWorkflow = (
-      agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>
-    )(actionConfig as AgentActionConfig<TOutput>);
+      scope: this.toolScope(),
+      signal: capture.abort.signal,
+    });
 
     // Deliver the signal — completes the journal entry the suspended step
     // is waiting on. False means the entry was already completed (race
@@ -1084,11 +1078,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       })
       .then(async (raw) => {
         const r = raw as AgentResult;
-        await this.persistResumedTurn({
-          turnHadSystemPrompt: !!persona,
-          seedLen: seedLength(persistedInput),
-          result: r,
-        });
+        await this.persistTurn({ result: r });
         return r;
       });
 
@@ -1096,58 +1086,18 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
   }
 
   /**
-   * After a resumed turn completes, append any messages that aren't
-   * already in the thread's persisted history. The original `send()`
-   * call never reached `persistTurn` because the workflow suspended
-   * before the runner returned, so the entire turn — user task,
-   * tool calls, tool results, assistant response — needs to land here.
-   *
-   * The turn's seed (memory, retrieved knowledge, history) is skipped by
-   * its length in the persisted workflow input; the persisted history
-   * length is only a fallback, since it misses the seed's injected blocks
-   * (those are also dropped by role / reference-data marker).
-   */
-  private async persistResumedTurn(params: {
-    turnHadSystemPrompt: boolean;
-    seedLen: number | undefined;
-    result: AgentResult;
-  }): Promise<void> {
-    const { turnHadSystemPrompt, result } = params;
-    const seedLen = params.seedLen ?? (await this.loadContext()).messages.length;
-    const skip = (turnHadSystemPrompt ? 1 : 0) + seedLen;
-    const newTail = result.messages.slice(skip).filter(isTranscriptMessage);
-    if (newTail.length === 0) return;
-
-    if (this.deps.memory) {
-      await this.ensureThreadRow();
-      await this.deps.memory.appendMessages(this.deps.key, newTail);
-      await this.maybeAutoCompact();
-      await this.maybeAutoDistill();
-    } else {
-      this.inMemoryMessages.push(...newTail);
-    }
-  }
-
-  /**
    * Run one conversational turn as a fresh `agentAction` workflow seeded
    * with the thread's persisted message history. Stateless per call —
-   * lets the gateway resolve a new `LocalAgent` per request without the
-   * "workflow already running" conflict that `agentLoop.session` causes.
+   * lets the gateway resolve a new `LocalAgent` per request.
    */
   private async runTurn(
     input: AgentInput,
     opts?: AgentInvokeOpts,
     captureIn?: RunCapture,
   ): Promise<{ promise: Promise<AgentResult>; capture: RunCapture }> {
-    const capture = captureIn ?? makeCapture();
+    const capture = captureIn ?? makeCapture(opts?.signal);
     const bus = new SessionEventBus();
     bus.subscribe((e) => recordEvent(capture, e));
-
-    if (opts?.signal) {
-      opts.signal.addEventListener("abort", () => {
-        capture.cancelled = true;
-      });
-    }
 
     // resolveContext-driven prompt assembly, ordered stable → volatile so
     // the prompt-cache prefix survives as far as possible:
@@ -1164,8 +1114,8 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     //
     // Memory and knowledge are untrusted (written by users, tools, the
     // model), so they are reference-data messages, never system ones.
-    // Neither is persisted — persistTurn slices the seed off and drops
-    // reference-data messages.
+    // Neither is persisted — persistTurn stores only the turn's own
+    // messages (`turnMessages`).
     const { persona, instructions, reference, messages: history } = await this.loadContext();
     const knowledge = await buildRetrieverContext({
       retrievers: this.deps.retrievers,
@@ -1178,21 +1128,18 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     if (input.messages) seed.push(...input.messages);
     if (knowledge) seed.push(referenceDataMessage(knowledge));
 
-    const actionConfig = toActionConfig(
-      { ...this.deps.loopConfig, systemPrompt: persona },
+    const wf = buildTurnWorkflow<TOutput>({
+      engine: { ...this.deps.engine, systemPrompt: persona },
       bus,
-      this.toolScope(),
-    );
-    const wf = (agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>)(
-      actionConfig as AgentActionConfig<TOutput>,
-    );
+      scope: this.toolScope(),
+      signal: capture.abort.signal,
+    });
     // Honor caller-provided `runId` so a deterministic caller (e.g. a
     // schedule tick using `scheduleTickRunId`) lands on the same workflow
     // row across retries. Falls back to a thread-prefixed random id so
     // `resumeTurn`'s thread-scoped suspended-workflow search still works.
     const workflowId = opts?.runId ?? `${this.deps.key.threadId}-${randomUUID().slice(0, 8)}`;
 
-    const seedLen = seed.length;
     const source = input.source;
     const promise = this.deps.runner
       .run({
@@ -1202,7 +1149,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       })
       .then(async (raw) => {
         const r = raw as AgentResult;
-        await this.persistTurn(seedLen, !!persona, r, source);
+        await this.persistTurn({ result: r, ...(source !== undefined && { source }) });
         return r;
       });
 
@@ -1227,7 +1174,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     reference: string | undefined;
     messages: Message[];
   }> {
-    const persona = this.deps.loopConfig.systemPrompt?.trim() || undefined;
+    const persona = this.deps.engine.systemPrompt?.trim() || undefined;
 
     if (!this.deps.memory) {
       return {
@@ -1263,27 +1210,18 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
   }
 
   /**
-   * Persist the new turn — the slice of `result.messages` AFTER the seeded
-   * history. `agentAction` returns:
-   *
-   *     [systemPrompt?, ...seed, userTask, assistant, ...maybeTools, finalAssistant]
-   *
-   * so the new tail starts at `seedLen + (hasSystemPrompt ? 1 : 0)` and
-   * already includes the user message + assistant response (and any tool
-   * messages in between).
+   * Persist the new turn: the engine's `turnMessages` (user task, then the
+   * assistant and tool messages the turn produced). It excludes the seed
+   * and anything a `beforeTurn` hook did to it, so a hook that trims or
+   * injects context can't shift what gets stored. Used after a fresh turn
+   * and after a resumed one alike — a suspended turn never reached here.
    */
-  private async persistTurn(
-    seedLen: number,
-    turnHadSystemPrompt: boolean,
-    result: AgentResult,
-    source?: AgentInputSource,
-  ): Promise<void> {
-    // Use the per-turn flag, not the static loopConfig.systemPrompt:
-    // resolveContext can produce non-empty memory blocks even when the
-    // agent's static prompt is unset. Slicing on the static field
-    // would mis-attribute a memory block as the first user message.
-    const skip = seedLen + (turnHadSystemPrompt ? 1 : 0);
-    let newTail = result.messages.slice(skip).filter(isTranscriptMessage);
+  private async persistTurn(params: {
+    result: AgentResult;
+    source?: AgentInputSource;
+  }): Promise<void> {
+    const { result, source } = params;
+    let newTail = result.turnMessages.filter(isTranscriptMessage);
 
     if (newTail.length === 0) return;
 
@@ -1427,7 +1365,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     const newMessages = messages.filter((m) => m.seq > lastDistilledSeq);
     const turnsSinceLastDistill = newMessages.length;
     const tokensSinceLastDistill = newMessages.reduce((s, m) => s + estimateTokens(m), 0);
-    const now = this.deps.loopConfig.clock?.currentTimeMs() ?? Date.now();
+    const now = (this.deps.engine.clock ?? SystemWallClock).currentTimeMs();
     const msSinceLastDistill = lastDistilledAt ? now - lastDistilledAt : Number.POSITIVE_INFINITY;
 
     // Walk back from the end to find the most recent USER message —
@@ -1572,24 +1510,28 @@ interface RunCapture {
   readonly toolCalls: ToolCall[];
   readonly toolResults: ToolResult[];
   readonly steps: Step[];
-  cancelled: boolean;
+  /** Aborts the run: `cancel()` and the caller's `signal` both feed it. */
+  readonly abort: AbortController;
   finishReason: FinishReason | null;
   usage: UsageStats;
-  llmStartByStep: Map<number, number>;
-  toolStartByCallId: Map<string, { name: string; ts: number; step: number }>;
+  toolStartByCallId: Map<string, { input: unknown }>;
 }
 
-function makeCapture(): RunCapture {
+function makeCapture(signal?: AbortSignal): RunCapture {
+  const abort = new AbortController();
+  if (signal) {
+    if (signal.aborted) abort.abort(signal.reason);
+    else signal.addEventListener("abort", () => abort.abort(signal.reason), { once: true });
+  }
   return {
     queue: new ChunkQueue(),
     events: [],
     toolCalls: [],
     toolResults: [],
     steps: [],
-    cancelled: false,
+    abort,
     finishReason: null,
     usage: { inputTokens: 0, outputTokens: 0 },
-    llmStartByStep: new Map(),
     toolStartByCallId: new Map(),
   };
 }
@@ -1601,22 +1543,16 @@ function recordEvent(capture: RunCapture, e: SessionEvent): void {
       capture.events.push({ type: "text-delta", delta: e.delta });
       break;
     case "tool.start": {
-      capture.toolStartByCallId.set(callKeyForStart(e), {
-        name: e.name,
-        ts: e.ts,
-        step: e.step,
-      });
+      capture.toolStartByCallId.set(e.toolCallId, { input: e.input });
       break;
     }
     case "tool.end": {
-      // We don't have the tool call id on this event in the existing bus
-      // shape — best-effort: record a step entry without input/output.
       const step: Step = {
         type: "tool",
         index: capture.steps.length,
         name: e.name,
-        toolCallId: "",
-        input: undefined,
+        toolCallId: e.toolCallId,
+        input: capture.toolStartByCallId.get(e.toolCallId)?.input,
         failed: e.failed,
         durationMs: e.durationMs,
       };
@@ -1638,10 +1574,14 @@ function recordEvent(capture: RunCapture, e: SessionEvent): void {
         type: "approval-requested",
         toolCallId: e.toolCallId,
         toolName: e.toolName,
+        input: e.input,
       });
       break;
     case "step_limit.hit":
       capture.finishReason = "max_steps";
+      break;
+    case "stall.detected":
+      capture.finishReason = "stalled";
       break;
     case "turn.end":
       capture.usage = sumUsage(capture.usage, e.tokens);
@@ -1659,16 +1599,6 @@ function recordEvent(capture: RunCapture, e: SessionEvent): void {
     default:
       break;
   }
-}
-
-function callKeyForStart(e: SessionEvent & { type: "tool.start" }): string {
-  // No call id on tool.start either; key by (turn, step) instead.
-  return `${e.turn}:${e.step}`;
-}
-
-function deriveFinishReason(capture: RunCapture): FinishReason {
-  if (capture.cancelled) return "cancelled";
-  return capture.finishReason ?? "stop";
 }
 
 /** Build an AgentRunOutput where every promise is already resolved. */
@@ -1693,8 +1623,9 @@ function resolvedOutput<TOutput>(
     toolResults: Promise.resolve(toolResults),
     steps: Promise.resolve([]),
     usage: Promise.resolve(usage),
-    finishReason: Promise.resolve("stop"),
+    finishReason: Promise.resolve(result.finishReason),
     messages: Promise.resolve([...result.messages]),
+    // Already finished: nothing left to cancel.
     cancel: async () => {},
   };
 }
@@ -1721,35 +1652,35 @@ function liveOutput<TOutput>(
       cacheReadTokens: r.usage?.cacheReadTokens,
       cacheWriteTokens: r.usage?.cacheWriteTokens,
     })),
-    finishReason: settled.then(() => deriveFinishReason(capture)),
+    finishReason: settled.then((r) => r.finishReason),
     messages: settled.then((r) => [...r.messages]),
     cancel: async () => {
-      capture.cancelled = true;
+      capture.abort.abort();
     },
   };
 }
 
-/** Build an agentAction config from an agentLoop config. */
-function toActionConfig(
-  loopConfig: AgentLoopConfig,
-  bus?: SessionEventBus,
-  scope?: import("../tool.ts").ToolScope,
-): AgentActionConfig {
-  return {
-    name: loopConfig.name,
-    llm: loopConfig.llm,
-    tools: loopConfig.tools,
-    toolRegistry: loopConfig.toolRegistry,
-    autoApprove: loopConfig.autoApprove,
-    systemPrompt: loopConfig.systemPrompt,
-    maxSteps: loopConfig.maxStepsPerTurn,
-    rateLimiter: loopConfig.rateLimiter,
-    clock: loopConfig.clock,
-    processors: loopConfig.processors,
-    bus,
-    ...(scope && { scope }),
-    ...(loopConfig.toolAuditLogger && { toolAuditLogger: loopConfig.toolAuditLogger }),
+/**
+ * Build one turn's workflow: the agent's engine config plus this run's
+ * bus, tool scope and cancellation signal. Nothing in `engine` is dropped.
+ */
+function buildTurnWorkflow<TOutput>(params: {
+  engine: AgentEngineConfig<TOutput>;
+  bus: SessionEventBus;
+  scope: import("../tool.ts").ToolScope;
+  signal: AbortSignal;
+}): ReturnType<typeof agentAction> {
+  const config: AgentActionConfig<TOutput> = {
+    ...params.engine,
+    bus: params.bus,
+    scope: params.scope,
+    signal: params.signal,
   };
+  // The overloads split on `outputSchema`'s presence; this config may or
+  // may not carry one.
+  return (agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>)(
+    config,
+  );
 }
 
 function extractToolCalls(messages: ReadonlyArray<Message>): ToolCall[] {
@@ -1848,13 +1779,6 @@ function serializeSource(
     case "agent":
       return { kind: "agent", callerAgentId: source.callerAgentId };
   }
-}
-
-/** Length of `messages` in a persisted agent-turn workflow input, if present. */
-function seedLength(input: unknown): number | undefined {
-  if (typeof input !== "object" || input === null) return undefined;
-  const messages = (input as { messages?: unknown }).messages;
-  return Array.isArray(messages) ? messages.length : undefined;
 }
 
 interface NormalizedRetrieverBinding extends AgentRetrieverBinding {

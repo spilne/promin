@@ -67,14 +67,15 @@ export function ollama(options: OllamaOptions): LLMProvider {
     if (maxTokens !== undefined) ollamaOptions.num_predict = maxTokens;
     // num_ctx defaults to 8192 — see OllamaOptions.numCtx for rationale.
     ollamaOptions.num_ctx = options.numCtx ?? 8192;
+    const tools = ollamaTools(params);
 
     return {
       model: options.model,
       messages: toOllamaMessages(params.messages),
       stream,
-      ...(params.tools && params.tools.length > 0
+      ...(tools.length > 0
         ? {
-            tools: params.tools.map((t) => ({
+            tools: tools.map((t) => ({
               type: "function",
               function: { name: t.name, description: t.description, parameters: t.parameters },
             })),
@@ -203,8 +204,10 @@ function assembleToolCalls(
   calls: Array<{ function: { name: string; arguments: unknown } }>,
 ): ToolCall[] {
   return calls.map((c, i) => ({
-    // Ollama does not return call IDs — generate a stable index-based one
-    id: `call_${i}`,
+    // Ollama returns no call ids. Generate one unique per call: the agent
+    // engine keys approvals (`approve:<id>`) and tool results on the id,
+    // so an index-based id would repeat across the steps of a turn.
+    id: `call_${i}_${crypto.randomUUID()}`,
     name: c.function.name,
     ...(typeof c.function.arguments === "string"
       ? parseToolArguments({ json: c.function.arguments })
@@ -241,6 +244,20 @@ function toOllamaMessages(messages: Message[]): OllamaMessage[] {
     }
   }
   return result;
+}
+
+/**
+ * Ollama has no tool_choice: a forced tool is approximated by sending only
+ * that tool, `"none"` by sending no tools.
+ */
+function ollamaTools(params: LLMChatParams): NonNullable<LLMChatParams["tools"]> {
+  const tools = params.tools ?? [];
+  const choice = params.toolChoice;
+  if (choice === "none") return [];
+  if (choice !== undefined && typeof choice === "object") {
+    return tools.filter((t) => t.name === choice.name);
+  }
+  return tools;
 }
 
 async function* parseNDJSON(body: ReadableStream<Uint8Array>): AsyncIterable<OllamaChunk> {

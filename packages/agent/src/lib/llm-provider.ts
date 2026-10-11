@@ -6,9 +6,26 @@ export interface LLMToolDefinition {
   parameters: Record<string, unknown>;
 }
 
+/**
+ * Which tool the model may or must call:
+ * - `"auto"` (default) — the model decides.
+ * - `"required"` — the model must call some tool.
+ * - `"none"` — the model must answer in text. `tools` are still sent, so a
+ *   transcript that holds earlier tool calls stays valid.
+ * - `{ name }` — the model must call that tool.
+ *
+ * Anthropic rejects a forced choice (`"required"` / `{ name }`) while
+ * extended thinking is on; the agent engine turns thinking off for the
+ * rounds it forces. Ollama has no tool_choice: the adapter sends only the
+ * named tool for `{ name }` and no tools for `"none"`.
+ */
+export type LLMToolChoice = "auto" | "required" | "none" | { readonly name: string };
+
 export interface LLMChatParams {
   messages: Message[];
   tools?: LLMToolDefinition[];
+  /** Tool-use constraint for this call. Ignored when `tools` is empty. Default `"auto"`. */
+  toolChoice?: LLMToolChoice;
   temperature?: number;
   maxTokens?: number;
   signal?: AbortSignal;

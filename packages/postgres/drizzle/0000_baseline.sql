@@ -12,6 +12,9 @@ CREATE TABLE agent_audit_log (
   action text NOT NULL,
   target text,
   meta jsonb,
+  tool_call_id text,
+  phase text NOT NULL,
+  error text,
   recorded_at bigint NOT NULL,
   CONSTRAINT agent_audit_log_pkey PRIMARY KEY (id)
 );

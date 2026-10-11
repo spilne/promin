@@ -101,7 +101,7 @@ describe("ollama — chat()", () => {
     expect(result.toolCalls).toHaveLength(1);
     expect(result.toolCalls![0].name).toBe("get_weather");
     expect(result.toolCalls![0].input).toEqual({ city: "Paris" });
-    expect(result.toolCalls![0].id).toBe("call_0");
+    expect(result.toolCalls![0].id).toMatch(/^call_0_/);
   });
 
   it("handles tool arguments as JSON string (defensive)", async () => {

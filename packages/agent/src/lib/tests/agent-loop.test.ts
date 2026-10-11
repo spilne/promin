@@ -1,7 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
-import { agentAction } from "../agent-action.ts";
+import { agentAction, STEP_LIMIT_ANSWER } from "../agent-action.ts";
 import { tool } from "../tool.ts";
 import type { LLMProvider, LLMResponse } from "../llm-provider.ts";
 import type { LLMChatParams } from "../llm-provider.ts";
@@ -143,7 +143,7 @@ describe("agentAction", () => {
     expect(toolMsg?.content).toContain("unknown tool");
   });
 
-  it("throws MaxStepsError when loop exceeds limit", async () => {
+  it("ends with the step-limit sentinel when the loop exceeds the limit", async () => {
     const infiniteResponses: LLMResponse[] = Array.from({ length: 5 }, (_, i) => ({
       content: null,
       finishReason: "tool_calls" as const,
@@ -162,17 +162,23 @@ describe("agentAction", () => {
       llm: mockLLM(infiniteResponses),
       tools: { search: searchTool },
       maxSteps: 3,
+      stall: false,
     });
 
     const { runner } = makeRunner();
-    const { data, error } = await runner.runSafe({
+    const result = await runner.run({
       workflow: agent,
       workflowId: "w-5",
       input: { task: "loop forever" },
     });
 
-    expect(data).toBeNull();
-    expect(String(error)).toContain("maximum steps");
+    expect(result.finishReason).toBe("max_steps");
+    expect(result.answer).toBe(STEP_LIMIT_ANSWER);
+    expect(result.steps).toBe(3);
+    // The transcript stays consistent: every tool call has its result and
+    // the last message is the sentinel assistant answer.
+    expect(result.messages.at(-1)).toEqual({ role: "assistant", content: STEP_LIMIT_ANSWER });
+    expect(result.messages.filter((m) => m.role === "tool")).toHaveLength(3);
   });
 
   it("stops early via onStep hook", async () => {

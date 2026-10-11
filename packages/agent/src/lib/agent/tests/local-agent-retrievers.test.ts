@@ -97,7 +97,7 @@ describe("LocalAgent — retriever bindings", () => {
 
     expect(calls[0]?.tools).toEqual(["search_docs"]);
     const built = (agent as any).buildTools({ namespaceId: "acme" });
-    expect(built.search_docs.description).toBe("host-owned search");
+    expect(built.tools.search_docs.description).toBe("host-owned search");
   });
 
   it("injects context-mode results as fenced reference data on one-shot runs", async () => {

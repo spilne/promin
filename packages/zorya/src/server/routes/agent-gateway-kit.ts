@@ -170,7 +170,6 @@ const LocalBackendSchema = z
     mcpServers: z.array(z.object({}).passthrough()).optional(),
     knowledge: KnowledgeSchema.optional(),
     maxStepsPerTurn: PositiveInt.optional(),
-    maxTurns: PositiveInt.optional(),
     autoCompact: z.union([z.literal(false), z.object({}).passthrough()]).optional(),
     autoDistill: z.union([z.literal(false), z.object({}).passthrough()]).optional(),
     contextBudget: z

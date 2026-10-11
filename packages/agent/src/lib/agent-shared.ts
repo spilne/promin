@@ -1,4 +1,6 @@
-import type { AgentTool } from "./tool.ts";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
+import type { AgentTool, ToolExecuteContext, ToolScope } from "./tool.ts";
+import type { ToolAuditLogger } from "./tool-audit/types.ts";
 import type { ToolCall, ToolResultMessage, Message } from "./message.ts";
 import type {
   LLMProvider,
@@ -6,12 +8,15 @@ import type {
   LLMResponse,
   LLMFinishReason,
   LLMUsage,
+  LLMToolChoice,
   LLMToolDefinition,
 } from "./llm-provider.ts";
 import type { ThinkingBlock } from "./message.ts";
 import type { ProcessorsConfig, ProcessorContext } from "./processors.ts";
 import { recordChat } from "./metrics/instrument.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
+import { LLMHttpError } from "./adapters/llm-http.ts";
+import { classifyLLMError, type LLMErrorClass } from "./adapters/llm-error-classification.ts";
 
 // ---- message utilities ----
 
@@ -57,14 +62,12 @@ export function isWorkflowSuspension(error: unknown): boolean {
  * Classification produced by `surfaceAgentError`.
  * - `suspended`: WorkflowSuspendedError — the body is waiting on a signal
  *   or sleep. Not a failure.
- * - `step-limit`: MaxStepsError from `agentAction` (the step loop ran out
- *   without a final answer).
  * - `user-error`: thrown by user code, a tool, a hook, or
  *   `TerminalError` — won't succeed on retry.
  * - `infra-error`: framework / transient failures
  *   (`RetryableError`, a thrown non-Error value, etc.).
  */
-export type SurfacedAgentErrorKind = "suspended" | "step-limit" | "user-error" | "infra-error";
+export type SurfacedAgentErrorKind = "suspended" | "user-error" | "infra-error";
 
 export interface SurfacedAgentError {
   readonly kind: SurfacedAgentErrorKind;
@@ -83,19 +86,17 @@ function toError(err: unknown): Error {
 }
 
 /**
- * Classify an error from any agent primitive (agentLoop / agentAction /
- * agentTown). The workflow runner rejects with the original thrown value,
- * so this only tags the kind — call sites can branch (suspend vs surface to
- * user vs infra-retry) without re-implementing the same `instanceof` chain.
+ * Classify an error from any agent primitive (agentLoop / agentAction).
+ * The workflow runner rejects with the original thrown value, so this only
+ * tags the kind — call sites can branch (suspend vs surface to user vs
+ * infra-retry) without re-implementing the same `instanceof` chain.
  *
- * Preserves tagged-error metadata: a `TerminalError` keeps its `_tag`, the
- * underlying `MaxStepsError` keeps its `maxSteps`. The returned `error.name`
- * matches the original constructor when one is present.
+ * Preserves tagged-error metadata: a `TerminalError` keeps its `_tag`. The
+ * returned `error.name` matches the original constructor when one is present.
  */
 export function surfaceAgentError(err: unknown): SurfacedAgentError {
   if (isWorkflowSuspension(err)) return { kind: "suspended", error: toError(err) };
   const tag = (err as { _tag?: string } | null | undefined)?._tag;
-  if (tag === "MaxStepsError") return { kind: "step-limit", error: toError(err) };
   if (tag === "TerminalError") return { kind: "user-error", error: toError(err) };
   if (tag === "RetryableError") return { kind: "infra-error", error: toError(err) };
   if (err instanceof Error) return { kind: "user-error", error: err };
@@ -118,66 +119,99 @@ export function formatToolError(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+// ---- tool execution ----
+
 // Hard cap on any single tool result — prevents a runaway listing or read
 // from blowing up the LLM context window.
 const MAX_TOOL_CONTENT_CHARS = 200_000;
 
-export async function executeToolCall(
-  call: ToolCall,
-  toolDef: AgentTool<any, any>,
-  onResult?: (call: ToolCall, output: unknown) => void,
-  /**
-   * Optional progress sink. When passed, executeToolCall builds a
-   * ToolWriter that forwards each `write(payload)` call to this
-   * callback. The agent loop wires the callback to emit a
-   * `tool.progress` SessionEvent labeled with turn / step / toolCallId.
-   */
-  onProgress?: (payload: unknown) => void,
-  /**
-   * Optional caller scope (namespace, resource, thread, agentId).
-   * Populated by the agent runtime per-call so scope-aware tools
-   * (durable scheduler, secrets, audit) can act on behalf of the
-   * live caller. Surfaced on `ctx.scope`.
-   */
-  scope?: import("./tool.ts").ToolScope,
-  /**
-   * Optional audit sink. Populated by the agent runtime from the agent
-   * config; surfaced on `ctx.toolAuditLogger` so elevated tools emit an
-   * audit record per `ctx.audit()` call.
-   */
-  toolAuditLogger?: import("./tool-audit/types.ts").ToolAuditLogger,
-): Promise<ToolResultMessage> {
-  if (call.inputError !== undefined) {
-    return {
-      role: "tool",
-      toolCallId: call.id,
-      content: `Invalid input: ${call.inputError}`,
-    };
-  }
+const TOOL_CANCELLED_MESSAGE = "Tool cancelled: the turn was cancelled before the tool finished.";
+
+export interface ExecuteToolCallOptions {
+  readonly call: ToolCall;
+  readonly tool: AgentTool<any, any>;
+  /** Caller scope surfaced on `ctx.scope` (namespace, resource, thread, agent). */
+  readonly scope?: ToolScope;
+  /** Audit sink surfaced on `ctx.toolAuditLogger` for elevated tools. */
+  readonly toolAuditLogger?: ToolAuditLogger;
+  /** Turn cancellation. Aborting it aborts `ctx.signal` and fails the call. */
+  readonly signal?: AbortSignal;
+  /** Time limit for this call. Unset or `0`: none. */
+  readonly timeoutMs?: number;
+  /** Time source for the timeout. Default: `SystemWallClock`. */
+  readonly clock?: WallClock;
+  /** Progress sink; becomes `ctx.writer`. */
+  readonly onProgress?: (payload: unknown) => void;
+  /** Called with the raw output when the tool succeeds. */
+  readonly onResult?: (call: ToolCall, output: unknown) => void;
+}
+
+/**
+ * Validate a tool call's input, run the tool and turn the outcome into the
+ * tool-result message the model sees. Never throws: invalid input, a
+ * thrown error, a timeout and a cancellation all come back as a result
+ * with `isError: true`.
+ *
+ * The tool gets a `ToolExecuteContext` carrying `toolCallId`, `signal`,
+ * `timeoutMs`, `scope`, `toolAuditLogger` and (with `onProgress`) a
+ * `writer`. The engine stops waiting when `signal` aborts or the timeout
+ * fires, whether or not the tool honors the signal.
+ */
+export async function executeToolCall(options: ExecuteToolCallOptions): Promise<ToolResultMessage> {
+  const { call, tool, signal } = options;
+  const errorResult = (content: string): ToolResultMessage => ({
+    role: "tool",
+    toolCallId: call.id,
+    content,
+    isError: true,
+  });
+  if (call.inputError !== undefined) return errorResult(`Invalid input: ${call.inputError}`);
   let parsed: unknown;
   try {
-    parsed = toolDef.parameters.parse(call.input);
+    parsed = tool.parameters.parse(call.input);
   } catch (err) {
     const received = JSON.stringify(call.input ?? null);
-    return {
-      role: "tool",
-      toolCallId: call.id,
-      content: `Invalid input: ${formatToolError(err)}\nReceived: ${received}`,
-    };
+    return errorResult(`Invalid input: ${formatToolError(err)}\nReceived: ${received}`);
   }
+  if (signal?.aborted) return errorResult(TOOL_CANCELLED_MESSAGE);
+
+  const clock = options.clock ?? SystemWallClock;
+  const timeoutMs =
+    options.timeoutMs !== undefined && options.timeoutMs > 0 ? options.timeoutMs : 0;
+  const controller = new AbortController();
+  const onParentAbort = () => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", onParentAbort, { once: true });
+  let timedOut = false;
+  const timer =
+    timeoutMs > 0
+      ? clock.setTimeout(() => {
+          timedOut = true;
+          controller.abort(new Error(`tool timed out after ${timeoutMs}ms`));
+        }, timeoutMs)
+      : undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    controller.signal.addEventListener("abort", () => reject(controller.signal.reason), {
+      once: true,
+    });
+  });
+  aborted.catch(() => {});
+
+  const ctx: ToolExecuteContext = {
+    toolCallId: call.id,
+    signal: controller.signal,
+    ...(timeoutMs > 0 && { timeoutMs }),
+    ...(options.onProgress && { writer: { write: options.onProgress } }),
+    ...(options.scope && { scope: options.scope }),
+    ...(options.toolAuditLogger && { toolAuditLogger: options.toolAuditLogger }),
+  };
   try {
-    const ctx =
-      onProgress || scope || toolAuditLogger
-        ? {
-            ...(onProgress && { writer: { write: onProgress } }),
-            ...(scope && { scope }),
-            ...(toolAuditLogger && { toolAuditLogger }),
-          }
-        : undefined;
-    const output = await toolDef.execute(parsed as any, ctx);
-    onResult?.(call, output);
-    let content = toolDef.toModelOutput
-      ? toolDef.toModelOutput(output)
+    const running = Promise.resolve().then(() => tool.execute(parsed as any, ctx));
+    // The tool may outlive a timeout / cancel; its late rejection is moot.
+    running.catch(() => {});
+    const output = await Promise.race([running, aborted]);
+    options.onResult?.(call, output);
+    let content = tool.toModelOutput
+      ? tool.toModelOutput(output)
       : typeof output === "string"
         ? output
         : JSON.stringify(output);
@@ -189,14 +223,15 @@ export async function executeToolCall(
     // Structured side-channel metadata — persisted with the message but
     // never shown to the LLM. `callAgent` uses it to carry the sub-run
     // trace; most tools declare no `toResultMetadata` and emit none.
-    const metadata = toolDef.toResultMetadata?.(output);
+    const metadata = tool.toResultMetadata?.(output);
     return { role: "tool", toolCallId: call.id, content, ...(metadata && { metadata }) };
   } catch (err) {
-    return {
-      role: "tool",
-      toolCallId: call.id,
-      content: `Tool execution failed: ${formatToolError(err)}`,
-    };
+    if (timedOut) return errorResult(`Tool timed out after ${timeoutMs}ms.`);
+    if (controller.signal.aborted) return errorResult(TOOL_CANCELLED_MESSAGE);
+    return errorResult(`Tool execution failed: ${formatToolError(err)}`);
+  } finally {
+    timer?.clear();
+    signal?.removeEventListener("abort", onParentAbort);
   }
 }
 
@@ -214,6 +249,8 @@ export interface RunLlmCallParams {
   llm: LLMProvider;
   messages: Message[];
   tools?: LLMToolDefinition[];
+  /** Tool-use constraint, forwarded as-is. */
+  toolChoice?: LLMToolChoice;
   rateLimiter?: RateLimiter;
   processors?: ProcessorsConfig;
   processorCtx: ProcessorContext;
@@ -223,7 +260,11 @@ export interface RunLlmCallParams {
   onThinking?: (delta: string) => void;
   /** Token budget for extended thinking. Forwarded to the LLM as-is. */
   thinkingBudgetTokens?: number;
+  /** Output token cap. Forwarded to the LLM as-is. */
+  maxTokens?: number;
   signal?: AbortSignal;
+  /** Time source for the latency metric. Default: `SystemWallClock`. */
+  clock?: WallClock;
   /**
    * Optional telemetry sink. When set, records llm.calls / llm.tokens.*
    * / llm.latency.ms / llm.cost.usd per call. Defaults to no-op.
@@ -239,6 +280,15 @@ export interface RunLlmCallParams {
   metricLabels?: Readonly<Record<string, string>>;
 }
 
+/** `runLlmCall`'s result: the response, flagged when `signal` cut it short. */
+export interface RunLlmCallResult extends LLMResponse {
+  /**
+   * `true` when the call was aborted through `signal`. The response then
+   * holds the text streamed so far and no tool calls.
+   */
+  aborted?: true;
+}
+
 /**
  * Execute a single LLM call with optional streaming, rate limiting, and processor pipeline.
  * Handles the beforeLLM → (streaming|non-streaming) → afterLLM lifecycle.
@@ -248,20 +298,23 @@ export async function runLlmCall({
   llm,
   messages,
   tools,
+  toolChoice,
   rateLimiter,
   processors,
   processorCtx,
   onChunk,
   onThinking,
   thinkingBudgetTokens,
+  maxTokens,
   signal,
+  clock = SystemWallClock,
   metrics,
   costs,
   provider,
   model,
   metricLabels,
-}: RunLlmCallParams): Promise<LLMResponse> {
-  const callStart = metrics ? Date.now() : 0;
+}: RunLlmCallParams): Promise<RunLlmCallResult> {
+  const callStart = clock.currentTimeMs();
   const processedMessages = processors?.beforeLLM
     ? await processors.beforeLLM(messages, processorCtx)
     : messages;
@@ -269,8 +322,10 @@ export async function runLlmCall({
   const chatParams: LLMChatParams = {
     messages: processedMessages,
     tools,
+    ...(toolChoice !== undefined && { toolChoice }),
     signal,
     thinkingBudgetTokens,
+    ...(maxTokens !== undefined && { maxTokens }),
   };
 
   let raw: LLMResponse;
@@ -320,6 +375,7 @@ export async function runLlmCall({
         content: content.trim() ? content : null,
         toolCalls: undefined,
         finishReason: "stop",
+        aborted: true,
       };
     }
     throw err;
@@ -337,10 +393,170 @@ export async function runLlmCall({
       provider,
       model,
       response: finalResponse,
-      durationMs: Date.now() - callStart,
+      durationMs: clock.currentTimeMs() - callStart,
       ...(metricLabels && { extraLabels: metricLabels }),
     });
   }
 
   return finalResponse;
+}
+
+// ---- LLM retry ----
+
+/**
+ * Retry policy for an agent's LLM calls. Failures are classified with
+ * `classifyLLMError`: `transient` and `rate_limit` are retried with
+ * exponential backoff, or after the server's `Retry-After` when it sent
+ * one; `context_overflow` and `permanent` fail at once, as does a
+ * cancelled call.
+ */
+export interface LlmRetryOptions {
+  /** Retries after the first attempt. Default 3. */
+  readonly maxRetries?: number;
+  /** First backoff delay in ms; doubles per retry. Default 1_000. */
+  readonly baseDelayMs?: number;
+  /** Cap on one backoff delay in ms. Default 30_000. */
+  readonly maxDelayMs?: number;
+  /**
+   * Longest server-requested wait (`LLMHttpError.retryAfterMs`) honored,
+   * in ms. A longer one fails the call instead of parking the turn.
+   * Default 60_000.
+   */
+  readonly maxRetryAfterMs?: number;
+}
+
+/** What a retry looks like to `onRetry` observers. */
+export interface LlmRetryInfo {
+  /** Retry number, 1 for the first retry. */
+  readonly attempt: number;
+  readonly delayMs: number;
+  readonly errorClass: LLMErrorClass;
+  readonly error: unknown;
+}
+
+const LLM_RETRY_DEFAULTS = {
+  maxRetries: 3,
+  baseDelayMs: 1_000,
+  maxDelayMs: 30_000,
+  maxRetryAfterMs: 60_000,
+} as const;
+
+/**
+ * Run `run` and retry it per `retry` (see `LlmRetryOptions`). Waits run on
+ * `clock`; an aborted `signal` ends a wait at once and stops retrying
+ * (returning `onAborted()` when given).
+ * `retry: false` runs once.
+ */
+export async function callLlmWithRetry<T>(params: {
+  readonly run: () => Promise<T>;
+  readonly retry: LlmRetryOptions | false;
+  readonly clock: WallClock;
+  readonly signal?: AbortSignal;
+  readonly onRetry?: (info: LlmRetryInfo) => void;
+  /**
+   * Result to return when `signal` aborts during a backoff wait — the
+   * cancel wins over the error being retried. Without it the error is
+   * rethrown.
+   */
+  readonly onAborted?: () => T;
+}): Promise<T> {
+  const { run, retry, clock, signal } = params;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await run();
+    } catch (error) {
+      if (retry === false || signal?.aborted) throw error;
+      const delayMs = llmRetryDelayMs({ error, attempt, retry });
+      if (delayMs === undefined) throw error;
+      params.onRetry?.({
+        attempt: attempt + 1,
+        delayMs,
+        errorClass: classifyLLMError(error),
+        error,
+      });
+      await waitOn({ clock, ms: delayMs, signal });
+      if (signal?.aborted) {
+        if (params.onAborted) return params.onAborted();
+        throw error;
+      }
+    }
+  }
+}
+
+/** Delay before retrying after `error`, or `undefined` to give up. */
+function llmRetryDelayMs(params: {
+  error: unknown;
+  attempt: number;
+  retry: LlmRetryOptions;
+}): number | undefined {
+  const { error, attempt, retry } = params;
+  const maxRetries = retry.maxRetries ?? LLM_RETRY_DEFAULTS.maxRetries;
+  if (attempt >= maxRetries) return undefined;
+  const cls = classifyLLMError(error);
+  if (cls !== "transient" && cls !== "rate_limit") return undefined;
+  const retryAfterMs = error instanceof LLMHttpError ? error.retryAfterMs : undefined;
+  if (retryAfterMs !== undefined) {
+    const cap = retry.maxRetryAfterMs ?? LLM_RETRY_DEFAULTS.maxRetryAfterMs;
+    return retryAfterMs <= cap ? retryAfterMs : undefined;
+  }
+  const base = retry.baseDelayMs ?? LLM_RETRY_DEFAULTS.baseDelayMs;
+  const max = retry.maxDelayMs ?? LLM_RETRY_DEFAULTS.maxDelayMs;
+  return Math.min(base * 2 ** attempt, max);
+}
+
+function waitOn(params: { clock: WallClock; ms: number; signal?: AbortSignal }): Promise<void> {
+  const { clock, ms, signal } = params;
+  return new Promise<void>((resolve) => {
+    if (signal?.aborted || ms <= 0) {
+      resolve();
+      return;
+    }
+    const onAbort = () => {
+      handle.clear();
+      resolve();
+    };
+    const handle = clock.setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+// ---- thinking redaction ----
+
+/**
+ * Strip extended-thinking blocks from assistant messages older than the
+ * most recent user turn. Thinking is per-turn ephemeral state — useful
+ * to the model while it picked the prior step, dead weight on the next
+ * turn. Cuts input-token cost for any extended-thinking-enabled agent
+ * (typically 10–30% on long sessions) without affecting reasoning
+ * quality.
+ *
+ * Boundary: walk back from the end, find the most recent user message,
+ * drop `thinkingBlocks` from every assistant message older than it.
+ * The current turn's thinking is preserved so the model can see its
+ * own reasoning while it plans the next step within the turn.
+ *
+ * Pure — returns a new array. Messages without thinkingBlocks are
+ * shared by reference (no allocation when nothing to redact).
+ */
+export function redactPriorThinkingBlocks(messages: ReadonlyArray<Message>): Message[] {
+  let mostRecentUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === "user") {
+      mostRecentUserIdx = i;
+      break;
+    }
+  }
+  // No user message yet (e.g. system-only) → nothing to redact.
+  if (mostRecentUserIdx <= 0) return [...messages];
+
+  return messages.map((m, i) => {
+    if (i >= mostRecentUserIdx) return m;
+    if (m.role !== "assistant") return m;
+    if (!m.thinkingBlocks || m.thinkingBlocks.length === 0) return m;
+    const { thinkingBlocks: _, ...rest } = m;
+    return rest as Message;
+  });
 }

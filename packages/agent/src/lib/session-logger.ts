@@ -9,12 +9,36 @@ type SessionEventBody =
   | { type: "turn.start"; turn: number; task: string }
   | { type: "turn.end"; turn: number; answer: string; durationMs: number; tokens: LogUsage }
   | { type: "turn.aborted"; turn: number; reason: "signal" | "close" }
+  | {
+      /** The turn threw (a permanent LLM error, a hook, invalid structured output). */
+      type: "turn.failed";
+      turn: number;
+      error: string;
+    }
   | { type: "llm.call"; turn: number; step: number; durationMs: number; tokens?: LogUsage }
-  | { type: "tool.start"; turn: number; step: number; name: string; input: unknown }
+  | {
+      /** A failed LLM call is retried after `delayMs` (see `LlmRetryOptions`). */
+      type: "llm.retry";
+      turn: number;
+      step: number;
+      attempt: number;
+      delayMs: number;
+      errorClass: string;
+      error: string;
+    }
+  | {
+      type: "tool.start";
+      turn: number;
+      step: number;
+      toolCallId: string;
+      name: string;
+      input: unknown;
+    }
   | {
       type: "tool.end";
       turn: number;
       step: number;
+      toolCallId: string;
       name: string;
       durationMs: number;
       failed: boolean;
@@ -35,9 +59,28 @@ type SessionEventBody =
       kept: number;
       dropped: number;
     }
-  | { type: "approval.requested"; turn: number; toolCallId: string; toolName: string }
+  | {
+      type: "approval.requested";
+      turn: number;
+      toolCallId: string;
+      toolName: string;
+      /** The tool call's input, so an approval UI can show what will run. */
+      input: unknown;
+    }
   | { type: "approval.decision"; turn: number; toolCallId: string; approved: boolean }
   | { type: "step_limit.hit"; turn: number; maxSteps: number }
+  | {
+      /**
+       * The stall detector saw no progress — the same tool calls repeated
+       * with no new text, or one tool called too often — and forced a
+       * final answer.
+       */
+      type: "stall.detected";
+      turn: number;
+      step: number;
+      reason: "repeated_calls" | "tool_budget";
+      toolName: string;
+    }
   // ---- High-frequency / streaming events (transient by default) -------------
   | {
       /**

@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { redactPriorThinkingBlocks } from "../agent-loop.ts";
+import { redactPriorThinkingBlocks } from "../agent-shared.ts";
 import type { Message } from "../message.ts";
 
 describe("redactPriorThinkingBlocks", () => {

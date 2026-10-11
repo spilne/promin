@@ -232,8 +232,7 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
       llm,
       tools,
       systemPrompt,
-      maxStepsPerTurn: backend.maxStepsPerTurn,
-      maxTurns: backend.maxTurns,
+      maxSteps: backend.maxStepsPerTurn,
     },
     // Threads this agent creates carry the recipe id as their owner stamp.
     agentId: agent.id,

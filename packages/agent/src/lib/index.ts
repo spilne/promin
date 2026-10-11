@@ -1,5 +1,24 @@
-export { agentAction, MaxStepsError, StructuredOutputParseError } from "./agent-action.ts";
-export type { AgentActionConfig, AgentInput, AgentResult, StepContext } from "./agent-action.ts";
+export {
+  agentAction,
+  CANCELLED_ANSWER,
+  RESPOND_TOOL_NAME,
+  STALLED_ANSWER,
+  STEP_LIMIT_ANSWER,
+  StructuredOutputParseError,
+} from "./agent-action.ts";
+export type {
+  AgentActionConfig,
+  AgentEngineConfig,
+  AgentFinishReason,
+  AgentInput,
+  AgentResult,
+  AgentTurnHooks,
+  AgentTurnLifecycleEvent,
+  AgentTurnState,
+  StepContext,
+} from "./agent-action.ts";
+export { StallDetector } from "./stall-detector.ts";
+export type { StallDetectorOptions, StallVerdict } from "./stall-detector.ts";
 
 export { agentTool } from "./agent-tool.ts";
 export type { AgentToolConfig } from "./agent-tool.ts";
@@ -269,7 +288,7 @@ export type {
   ModelCostRegistry,
 } from "./metrics/types.ts";
 export { recordChat, recordTool, recordApproval } from "./metrics/instrument.ts";
-export type { RecordChatArgs, RecordToolArgs } from "./metrics/instrument.ts";
+export type { RecordApprovalArgs, RecordChatArgs, RecordToolArgs } from "./metrics/instrument.ts";
 
 // Network — peer discovery + delegation (findAgent, callAgent). Opt-in
 // per recipe via `backend.network`. See packages/agent/src/lib/network/types.ts.
@@ -407,7 +426,12 @@ export { SecretScope } from "./secrets/types.ts";
 export { InMemorySecretsStorage } from "./secrets/in-memory-secrets-storage.ts";
 
 // Audit log — durable record of elevated (cross-scope) tool calls.
-export type { ToolAuditEntry, ToolAuditRecord, ToolAuditLogger } from "./tool-audit/types.ts";
+export type {
+  ToolAuditEntry,
+  ToolAuditPhase,
+  ToolAuditRecord,
+  ToolAuditLogger,
+} from "./tool-audit/types.ts";
 export {
   InMemoryToolAuditLogger,
   type InMemoryToolAuditLoggerConfig,
@@ -584,6 +608,7 @@ export type {
 export type {
   LLMProvider,
   LLMChatParams,
+  LLMToolChoice,
   LLMResponse,
   LLMStreamChunk,
   LLMToolDefinition,
@@ -646,7 +671,13 @@ export type { LlamaCppOptions } from "./adapters/llamacpp.ts";
 
 export { SystemWallClock, FakeWallClock } from "@promin/workflow";
 export type { WallClock, TimerHandle } from "@promin/workflow";
-export type { RateLimiter } from "./agent-shared.ts";
+export { executeToolCall, redactPriorThinkingBlocks } from "./agent-shared.ts";
+export type {
+  ExecuteToolCallOptions,
+  LlmRetryInfo,
+  LlmRetryOptions,
+  RateLimiter,
+} from "./agent-shared.ts";
 
 export { compact, DEFAULT_SUMMARY_PROMPT, RECAP_SUMMARY_PROMPT } from "./agent-loop-compaction.ts";
 export type { CompactionConfig, CompactionResult } from "./agent-loop-compaction.ts";

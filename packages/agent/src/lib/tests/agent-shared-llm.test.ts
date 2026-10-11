@@ -24,13 +24,19 @@ describe("executeToolCall — inputError", () => {
         return "results";
       },
     };
-    const result = await executeToolCall(
-      { id: "c1", name: "search", input: {}, inputError: "tool arguments are not valid JSON" },
-      search,
-    );
+    const result = await executeToolCall({
+      call: {
+        id: "c1",
+        name: "search",
+        input: {},
+        inputError: "tool arguments are not valid JSON",
+      },
+      tool: search,
+    });
     expect(ran).toBe(false);
     expect(result.toolCallId).toBe("c1");
     expect(result.content).toBe("Invalid input: tool arguments are not valid JSON");
+    expect(result.isError).toBe(true);
   });
 });
 

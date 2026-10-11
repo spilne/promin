@@ -88,8 +88,9 @@ export function streamErrorPayload(err: unknown): { error: string; requestId: st
  * the underlying `out.text` promise rejects with `WorkflowSuspendedError`.
  * The `approval-requested` event already fired through `fullStream`, so
  * we map the rejection to a clean `event: suspended` and let the client
- * react (render the approval banner). Any other error becomes
- * `event: error`.
+ * react (render the approval banner). A resumed turn replays its journal
+ * without re-emitting that request, so it ends with `event: finish` (or
+ * the next `suspended`). Any other error becomes `event: error`.
  *
  * `onClose` runs exactly once, when the run has settled (completed,
  * failed or suspended) — also when the client disconnected earlier: the
@@ -119,7 +120,8 @@ export function streamAgentRunResponse(params: {
       sse.attach(controller);
       sse.send("thread", threadMeta);
 
-      let suspended: { toolCallId: string; toolName: string } | null = null;
+      // The last approval the run asked for — reported if the run suspends.
+      let pendingApproval: { toolCallId: string; toolName: string } | null = null;
       try {
         for await (const event of out.fullStream) {
           if (sse.closed) break;
@@ -128,8 +130,8 @@ export function streamAgentRunResponse(params: {
               sse.send(null, { delta: event.delta });
               break;
             case "approval-requested":
-              suspended = { toolCallId: event.toolCallId, toolName: event.toolName };
-              sse.send("approval-requested", suspended);
+              pendingApproval = { toolCallId: event.toolCallId, toolName: event.toolName };
+              sse.send("approval-requested", { ...pendingApproval, input: event.input });
               break;
             case "error":
               sse.send("error", { message: event.error.message });
@@ -138,19 +140,19 @@ export function streamAgentRunResponse(params: {
               break;
           }
         }
-        if (sse.closed) {
-          // Client went away mid-run; nothing left to report.
-        } else if (!suspended) {
+        // A closed channel means the client went away mid-run; nothing
+        // left to report. Otherwise the run's outcome decides the frame:
+        // an approval request alone doesn't mean the run suspended (an
+        // inline `onApprovalRequired` hook answers it in-process).
+        if (!sse.closed) {
           const text = await out.text;
           const finishReason = await out.finishReason;
           const usage = await out.usage;
           sse.send("finish", { ...threadMeta, text, finishReason, usage });
-        } else {
-          sse.send("suspended", { ...threadMeta, ...suspended });
         }
       } catch (err) {
         if (err instanceof WorkflowSuspendedError) {
-          sse.send("suspended", { ...threadMeta, ...suspended });
+          sse.send("suspended", { ...threadMeta, ...pendingApproval });
         } else {
           sse.send("error", streamErrorPayload(err));
         }

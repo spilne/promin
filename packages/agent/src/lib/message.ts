@@ -41,6 +41,14 @@ export interface ToolResultMessage {
   toolCallId: string;
   content: string;
   /**
+   * `true` when `content` reports a failure instead of the tool's output:
+   * invalid input, a thrown error, a timeout, a cancellation, a rejected
+   * approval, an unknown tool or an outcome lost to a crash. Adapters that
+   * support it forward the flag to the model (Anthropic `is_error`);
+   * consumers branch on it instead of sniffing the content text.
+   */
+  isError?: boolean;
+  /**
    * Structured side-channel data, persisted with the message but NOT
    * shown to the LLM (only `content` reaches the model). A tool emits it
    * via `AgentTool.toResultMetadata`. Used by `callAgent` to carry the

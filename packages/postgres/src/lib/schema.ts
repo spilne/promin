@@ -1094,7 +1094,8 @@ export const agentSecret = pgTable(
 // ---------------------------------------------------------------------------
 // Agent audit log — append-only record of elevated (cross-scope) tool
 // calls. Every elevated tool must call `ctx.audit()` per invocation;
-// each such call lands here as one row a security review can read.
+// each call lands here as an `intent` row before the action and an
+// outcome row (`completed` / `failed`) after it.
 //
 // `recorded_at` is owned by the database clock (server-side NOW()), not
 // the caller — an audit trail must not be back-datable by a skewed or
@@ -1117,6 +1118,12 @@ export const agentAuditLog = pgTable(
     target: text("target"),
     /** Optional structured detail, tool-defined. */
     meta: jsonb("meta"),
+    /** Model tool-call id; links an `intent` row to its outcome row. */
+    toolCallId: text("tool_call_id"),
+    /** `intent` (before the action), `completed` or `failed`. */
+    phase: text("phase").notNull(),
+    /** Error message of a `failed` outcome. */
+    error: text("error"),
     /** Epoch ms, assigned by the database clock at insert time. */
     recordedAt: bigint("recorded_at", { mode: "number" }).notNull(),
   },

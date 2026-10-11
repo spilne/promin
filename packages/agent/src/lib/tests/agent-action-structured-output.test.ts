@@ -68,17 +68,19 @@ describe("agentAction structured output", () => {
     });
 
     const result = await runAction(action, "give me count and label");
-    // TypeScript should infer result.output as { count: number; label: string }
+    // TypeScript infers result.output as { count: number; label: string } | undefined
+    // (undefined when the turn ends without a valid `_respond`).
     const output = result.output;
-    expect(output.count).toBe(42);
-    expect(output.label).toBe("hello");
+    expect(output?.count).toBe(42);
+    expect(output?.label).toBe("hello");
   });
 
-  it("throws StructuredOutputParseError when LLM returns invalid data", async () => {
+  it("throws StructuredOutputParseError when invalid data outlasts the repair budget", async () => {
     const StrictSchema = z.object({ required: z.string() });
 
     const action = agentAction({
       name: "parse-error-test",
+      structuredOutputRepairs: 0,
       llm: mockLLM([
         {
           content: null,

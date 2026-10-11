@@ -1291,7 +1291,7 @@ export interface AgentStreamHandlers {
   onThread?: (info: { threadId: string; isNew: boolean; instanceId?: string }) => void;
   onDelta: (delta: string) => void;
   /** Workflow suspended on an approval gate — banner should render. */
-  onApprovalRequested?: (info: { toolCallId: string; toolName: string }) => void;
+  onApprovalRequested?: (info: { toolCallId: string; toolName: string; input?: unknown }) => void;
   /** Convenience: equivalent to `onSuspended` but typed for the resume side. */
   onSuspended?: (info: { toolCallId?: string; toolName?: string }) => void;
   onFinish?: (info: {

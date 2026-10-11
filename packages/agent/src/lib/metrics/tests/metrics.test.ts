@@ -214,10 +214,10 @@ describe("recordTool", () => {
 describe("recordApproval", () => {
   it("requested → approval.requests; decision → approval.decisions with outcome label", () => {
     const m = new InMemoryAgentMetrics();
-    recordApproval(m, "requested");
-    recordApproval(m, "approved");
-    recordApproval(m, "rejected");
-    recordApproval(m, "timeout");
+    recordApproval({ metrics: m, outcome: "requested" });
+    recordApproval({ metrics: m, outcome: "approved" });
+    recordApproval({ metrics: m, outcome: "rejected" });
+    recordApproval({ metrics: m, outcome: "timeout" });
     expect(m.counterTotal("approval.requests")).toBe(1);
     expect(m.counterTotal("approval.decisions")).toBe(3);
     const outcomes = m.counterSamples("approval.decisions").map((s) => s.labels.outcome);

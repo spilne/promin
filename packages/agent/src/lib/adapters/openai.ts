@@ -4,6 +4,7 @@ import type {
   LLMResponse,
   LLMStreamChunk,
   LLMFinishReason,
+  LLMToolChoice,
 } from "../llm-provider.ts";
 import type { Message, ToolCall } from "../message.ts";
 import {
@@ -80,7 +81,7 @@ export function openai(model: string, options: OpenAIOptions = {}): LLMProvider 
               type: "function",
               function: { name: t.name, description: t.description, parameters: t.parameters },
             })),
-            tool_choice: "auto",
+            tool_choice: toOpenAIToolChoice(params.toolChoice ?? "auto"),
           }
         : {}),
       ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
@@ -238,6 +239,11 @@ export function openai(model: string, options: OpenAIOptions = {}): LLMProvider 
       usage: { inputTokens, outputTokens },
     };
   }
+}
+
+function toOpenAIToolChoice(choice: LLMToolChoice): unknown {
+  if (typeof choice === "string") return choice;
+  return { type: "function", function: { name: choice.name } };
 }
 
 function mapFinishReason(reason: string): LLMFinishReason {

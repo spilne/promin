@@ -6,8 +6,9 @@
 // SQLite-backed host has no audit trail surviving a restart.
 //
 // `createElevatedTool` enforces that every elevated tool calls
-// `ctx.audit()` per invocation and emits one `record()` per call; this
-// turns each into an append-only row a security review can read.
+// `ctx.audit()` per invocation and records an `intent` per call plus an
+// outcome per intent; this turns each into an append-only row a security
+// review can read.
 //
 // `recorded_at` is logger-assigned, never carried on the `ToolAuditEntry` —
 // an audit trail must not be back-datable by the caller. SQLite is
@@ -21,7 +22,12 @@
 // ---------------------------------------------------------------------------
 
 import { SystemWallClock, type WallClock } from "@promin/workflow";
-import type { ToolAuditEntry, ToolAuditLogger, ToolAuditRecord } from "@promin/agent";
+import type {
+  ToolAuditEntry,
+  ToolAuditLogger,
+  ToolAuditPhase,
+  ToolAuditRecord,
+} from "@promin/agent";
 import type { SqliteDatabase } from "../sqlite-database.ts";
 
 export interface SqliteToolAuditLoggerConfig {
@@ -55,6 +61,9 @@ interface DbRow {
   action: string;
   target: string | null;
   meta: string | null;
+  tool_call_id: string | null;
+  phase: string;
+  error: string | null;
   recorded_at: number;
 }
 
@@ -85,6 +94,9 @@ export class SqliteToolAuditLogger implements ToolAuditLogger {
         action       TEXT NOT NULL,
         target       TEXT,
         meta         TEXT,
+        tool_call_id TEXT,
+        phase        TEXT NOT NULL,
+        error        TEXT,
         recorded_at  INTEGER NOT NULL
       )
     `);
@@ -97,8 +109,9 @@ export class SqliteToolAuditLogger implements ToolAuditLogger {
     this.db
       .query(
         `INSERT INTO ${this.table}
-           (namespace_id, resource_id, agent_id, tool_name, action, target, meta, recorded_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (namespace_id, resource_id, agent_id, tool_name, action, target, meta,
+            tool_call_id, phase, error, recorded_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         entry.namespaceId,
@@ -108,6 +121,9 @@ export class SqliteToolAuditLogger implements ToolAuditLogger {
         entry.action,
         entry.target ?? null,
         entry.meta !== undefined ? JSON.stringify(entry.meta) : null,
+        entry.toolCallId ?? null,
+        entry.phase,
+        entry.error ?? null,
         this.clock.currentTimeMs(),
       );
   }
@@ -162,6 +178,9 @@ function rowToRecord(row: DbRow): ToolAuditRecord {
     ...(row.meta !== null
       ? { meta: JSON.parse(row.meta) as Readonly<Record<string, unknown>> }
       : {}),
+    ...(row.tool_call_id !== null ? { toolCallId: row.tool_call_id } : {}),
+    phase: row.phase as ToolAuditPhase,
+    ...(row.error !== null ? { error: row.error } : {}),
     timestamp: row.recorded_at,
   };
 }

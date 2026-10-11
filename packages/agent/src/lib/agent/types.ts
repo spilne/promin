@@ -92,7 +92,14 @@ export interface UsageStats {
   readonly cacheWriteTokens?: number;
 }
 
-export type FinishReason = "stop" | "tool_use" | "length" | "max_steps" | "cancelled" | "error";
+export type FinishReason =
+  | "stop"
+  | "tool_use"
+  | "length"
+  | "max_steps"
+  | "stalled"
+  | "cancelled"
+  | "error";
 
 /**
  * Streamed events. Discriminated union mirroring the runtime's session
@@ -107,6 +114,8 @@ export type AgentEvent =
       readonly type: "approval-requested";
       readonly toolCallId: string;
       readonly toolName: string;
+      /** The tool call's input, so an approval UI can show what will run. */
+      readonly input: unknown;
     }
   | { readonly type: "step-start"; readonly step: Step }
   | { readonly type: "step-end"; readonly step: Step }

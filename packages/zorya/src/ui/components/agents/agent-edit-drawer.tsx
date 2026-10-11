@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // AgentEditDrawer — operator-facing edit form for recipe fields:
 // description, system prompt, model, credential ref, capabilities,
-// tags, advanced limits (maxStepsPerTurn / maxTurns), and knowledge /
+// tags, advanced limits (maxStepsPerTurn), and knowledge /
 // RAG retriever bindings (picked from GET /api/agents/_catalog/retrievers).
 //
 // Model dropdown is sourced from GET /api/agents/_catalog/models when
@@ -126,9 +126,6 @@ export function AgentEditDrawer({
       ? String(agent.backend.maxStepsPerTurn)
       : "",
   );
-  const [maxTurns, setMaxTurns] = useState<string>(
-    isLocal && agent.backend.maxTurns !== undefined ? String(agent.backend.maxTurns) : "",
-  );
 
   // Memory & compaction (local backends only).
   const [autoCompact, setAutoCompact] = useState<AutoCompactForm>(() =>
@@ -217,7 +214,6 @@ export function AgentEditDrawer({
     const [provider, modelId] = modelKey.split("::");
     const trimmedCred = credentialRef.trim();
     const steps = parseLimit(maxStepsPerTurn);
-    const turns = parseLimit(maxTurns);
     // `undefined` → omit the field (inherit host default); `false` →
     // explicitly disabled; object → recipe-level config.
     const autoCompactValue = buildAutoCompact(autoCompact);
@@ -226,7 +222,6 @@ export function AgentEditDrawer({
     const knowledgeValue = buildKnowledge(knowledge);
     const {
       maxStepsPerTurn: _stripSteps,
-      maxTurns: _stripTurns,
       autoCompact: _stripAutoCompact,
       autoDistill: _stripAutoDistill,
       contextBudget: _stripContextBudget,
@@ -263,7 +258,6 @@ export function AgentEditDrawer({
         ...(trimmedCred && { credentialRef: trimmedCred }),
       },
       ...(steps !== undefined ? { maxStepsPerTurn: steps } : {}),
-      ...(turns !== undefined ? { maxTurns: turns } : {}),
       ...(autoCompactValue !== undefined ? { autoCompact: autoCompactValue } : {}),
       ...(autoDistillValue !== undefined ? { autoDistill: autoDistillValue } : {}),
       ...(contextBudgetValue !== undefined ? { contextBudget: contextBudgetValue } : {}),
@@ -617,17 +611,6 @@ export function AgentEditDrawer({
                       placeholder="(host default)"
                       value={maxStepsPerTurn}
                       onInput={(e) => setMaxStepsPerTurn((e.target as HTMLInputElement).value)}
-                    />
-                  </label>
-                  <label class="form-control">
-                    <span class="text-[10px] text-base-content/50 mb-1">Max turns</span>
-                    <input
-                      class="input input-bordered input-sm font-mono"
-                      type="number"
-                      min="1"
-                      placeholder="(unbounded)"
-                      value={maxTurns}
-                      onInput={(e) => setMaxTurns((e.target as HTMLInputElement).value)}
                     />
                   </label>
                 </div>

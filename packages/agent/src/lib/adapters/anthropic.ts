@@ -4,6 +4,7 @@ import type {
   LLMResponse,
   LLMStreamChunk,
   LLMFinishReason,
+  LLMToolChoice,
   RateLimitHint,
 } from "../llm-provider.ts";
 import type { Message, ToolCall, ThinkingBlock } from "../message.ts";
@@ -27,6 +28,7 @@ interface AnthropicContentBlock {
   name?: string;
   input?: unknown;
   content?: string;
+  is_error?: boolean;
   cache_control?: { type: "ephemeral" };
 }
 
@@ -158,7 +160,10 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
     return {
       model,
       max_tokens: maxTokens,
-      messages: toAnthropicMessages(params.messages),
+      messages: withoutForbiddenPrefill({
+        messages: toAnthropicMessages(params.messages),
+        forbidden: thinking !== undefined || isForcedToolChoice(params.toolChoice),
+      }),
       // All system messages are collected into blocks. The last block gets
       // cache_control so the entire system prefix (including memory injections,
       // tool descriptions, etc.) is cached as one unit.
@@ -176,6 +181,9 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
                 ? { cache_control: { type: "ephemeral" } }
                 : {}),
             })),
+            ...(params.toolChoice !== undefined && {
+              tool_choice: toAnthropicToolChoice(params.toolChoice),
+            }),
           }
         : {}),
       ...(thinking ? { thinking } : {}),
@@ -358,6 +366,31 @@ export function anthropic(model: string, options: AnthropicOptions = {}): LLMPro
   }
 }
 
+/**
+ * A request ending on an assistant turn is a prefill, which Anthropic
+ * rejects with extended thinking on or a forced tool choice. In those
+ * cases close the conversation with a user turn instead of failing.
+ */
+function withoutForbiddenPrefill(params: {
+  messages: AnthropicMessage[];
+  forbidden: boolean;
+}): AnthropicMessage[] {
+  const { messages, forbidden } = params;
+  if (!forbidden || messages[messages.length - 1]?.role !== "assistant") return messages;
+  return [...messages, { role: "user", content: "Continue." }];
+}
+
+function isForcedToolChoice(choice: LLMToolChoice | undefined): boolean {
+  return choice !== undefined && choice !== "auto" && choice !== "none";
+}
+
+function toAnthropicToolChoice(choice: LLMToolChoice): Record<string, string> {
+  if (choice === "auto") return { type: "auto" };
+  if (choice === "required") return { type: "any" };
+  if (choice === "none") return { type: "none" };
+  return { type: "tool", name: choice.name };
+}
+
 function mapStopReason(reason: string | undefined): LLMFinishReason {
   if (reason === "tool_use") return "tool_calls";
   if (reason === "max_tokens") return "length";
@@ -504,6 +537,7 @@ function toAnthropicMessages(messages: Message[]): AnthropicMessage[] {
         type: "tool_result",
         tool_use_id: msg.toolCallId,
         content: msg.content,
+        ...(msg.isError === true && { is_error: true }),
       };
 
       if (last?.role === "user" && Array.isArray(last.content)) {

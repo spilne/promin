@@ -4,10 +4,10 @@
 // for an "everything pending external delivery" inbox the dashboard can
 // show. No parallel side-table: the workflow journal is authoritative.
 //
-// When the signal is the agent loop's `approve:<callId>` tool-approval
-// gate, the tool metadata (toolName / toolInput) is read back from the
-// `lc-*-approval-<callId>-start` activity the loop journals right before
-// suspending. That needs the storage's `journal` capability; without it
+// When the signal is an agent's `approve:<callId>` tool-approval gate, the
+// tool metadata (toolName / toolInput) is read back from the
+// `*-approval-<callId>-start` activity the agent journals right before
+// suspending (`step-<n>-approval-<callId>-start` in agentAction). That needs the storage's `journal` capability; without it
 // the row is still listed, with toolName / toolInput undefined.
 // ---------------------------------------------------------------------------
 
@@ -138,7 +138,9 @@ async function readApprovalStartMetadata(
     return { toolName: undefined, toolInput: undefined };
   }
   const startName = `-approval-${toolCallId}${APPROVAL_START_SUFFIX}`;
-  const entry = entries.find(
+  // The latest matching record: the step that is suspended now is the
+  // last one to have asked for this approval.
+  const entry = entries.findLast(
     (e) => e.activityName.endsWith(startName) && e.phase !== "pending" && e.exit?.tag === "Success",
   );
   const value = entry?.exit && "value" in entry.exit ? entry.exit.value : undefined;

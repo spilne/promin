@@ -8,10 +8,22 @@
 // ---------------------------------------------------------------------------
 
 /**
+ * Stage of an audited action:
+ * - `intent` — written when the tool calls `ctx.audit()`, before it acts.
+ * - `completed` — the tool body returned.
+ * - `failed` — the tool body threw (`error` carries the message).
+ *
+ * An `intent` with no outcome record means the process died mid-action:
+ * the action may or may not have happened.
+ */
+export type ToolAuditPhase = "intent" | "completed" | "failed";
+
+/**
  * One audit record describing a cross-scope action taken by an elevated
- * tool. Emitted once per `ctx.audit()` call inside the tool's `execute`
- * body — `action` / `target` / `meta` come from that call, the scope
- * fields and `toolName` are filled by the factory.
+ * tool. Each `ctx.audit()` call writes an `intent` record at once and an
+ * outcome record (`completed` / `failed`) when the body settles —
+ * `action` / `target` / `meta` come from that call, the scope fields,
+ * `toolName` and `toolCallId` are filled by the factory.
  */
 export interface ToolAuditEntry {
   /** Caller namespace the elevated tool ran under. */
@@ -28,6 +40,11 @@ export interface ToolAuditEntry {
   readonly target?: string;
   /** Optional structured detail. */
   readonly meta?: Readonly<Record<string, unknown>>;
+  /** Model tool-call id the action ran for; links intent and outcome records. */
+  readonly toolCallId?: string;
+  readonly phase: ToolAuditPhase;
+  /** Error message of a `failed` outcome. */
+  readonly error?: string;
 }
 
 /** A persisted audit entry — `ToolAuditEntry` plus the logger-assigned timestamp. */
@@ -38,9 +55,10 @@ export interface ToolAuditRecord extends ToolAuditEntry {
 
 /**
  * Sink for elevated-tool audit entries. Injected on the agent config;
- * `createElevatedTool` emits one `record()` per `ctx.audit()` call once
- * the tool body completes. A `record()` rejection fails the tool call —
- * an unrecorded cross-scope action is a compliance gap, not a silent skip.
+ * `createElevatedTool` records an `intent` per `ctx.audit()` call before
+ * the action and an outcome record per intent after the body. A
+ * `record()` rejection fails the tool call — an unrecorded cross-scope
+ * action is a compliance gap, not a silent skip.
  */
 export interface ToolAuditLogger {
   record(entry: ToolAuditEntry): Promise<void>;

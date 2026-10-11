@@ -48,7 +48,7 @@ describe("exportRecipeAsTs", () => {
         type: "local",
         model: { provider: "anthropic", id: "claude-sonnet-4-6" },
         role: { inline: { systemPrompt: null, tools: [] } },
-        // maxTurns intentionally omitted → must not appear as `"maxTurns": undefined`
+        // maxStepsPerTurn intentionally omitted → must not appear as `"maxStepsPerTurn": undefined`
       },
     });
     const out = exportRecipeAsTs(agent);

@@ -14,6 +14,7 @@ import {
   executeToolCall,
   runLlmCall,
   nonSystemMsgs,
+  redactPriorThinkingBlocks,
   resolveTools,
   surfaceAgentError,
 } from "./agent-shared.ts";
@@ -392,44 +393,6 @@ export interface AgentSession {
 
 export interface AgentLoop {
   session(params: { runner: WorkflowRunner; sessionId: string }): Promise<AgentSession>;
-}
-
-/**
- * Strip extended-thinking blocks from assistant messages older than the
- * most recent user turn. Thinking is per-turn ephemeral state — useful
- * to the model while it picked the prior step, dead weight on the next
- * turn. Cuts input-token cost for any extended-thinking-enabled agent
- * (typically 10–30% on long sessions) without affecting reasoning
- * quality.
- *
- * Boundary: walk back from the end, find the most recent user message,
- * drop `thinkingBlocks` from every assistant message older than it.
- * The current turn's thinking is preserved so the model can see its
- * own reasoning while it plans the next step within the turn.
- *
- * Pure — returns a new array. Messages without thinkingBlocks are
- * shared by reference (no allocation when nothing to redact).
- */
-export function redactPriorThinkingBlocks(messages: ReadonlyArray<Message>): Message[] {
-  // Find the index of the most recent user message — anything before it
-  // is "prior turn" by definition.
-  let mostRecentUserIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]!.role === "user") {
-      mostRecentUserIdx = i;
-      break;
-    }
-  }
-  // No user message yet (e.g. system-only) → nothing to redact.
-  if (mostRecentUserIdx <= 0) return [...messages];
-
-  return messages.map((m, i) => {
-    if (i >= mostRecentUserIdx) return m;
-    if (m.role !== "assistant") return m;
-    if (!m.thinkingBlocks || m.thinkingBlocks.length === 0) return m;
-    const { thinkingBlocks: _, ...rest } = m;
-    return rest as Message;
-  });
 }
 
 // ---- ChunkQueue ----
@@ -826,6 +789,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                     role: "tool",
                     toolCallId: call.id,
                     content: `Error: unknown tool "${call.name}"`,
+                    isError: true,
                   });
                   continue;
                 }
@@ -839,6 +803,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                       turn,
                       toolCallId: call.id,
                       toolName: call.name,
+                      input: call.input,
                     });
                   const logDecision = (approved: boolean) =>
                     eventBus.emit({
@@ -892,6 +857,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                       role: "tool",
                       toolCallId: call.id,
                       content: `Rejected: ${decision.reason ?? "user rejected"}`,
+                      isError: true,
                     });
                     continue;
                   }
@@ -908,6 +874,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                         type: "tool.start",
                         turn,
                         step,
+                        toolCallId: call.id,
                         name: call.name,
                         input: call.input,
                       });
@@ -916,20 +883,25 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                       // event labeled with the current turn/step/callId.
                       // Tools that don't write progress get no events;
                       // the writer is opt-in on the tool author's side.
-                      const result = await executeToolCall(call, toolDef, undefined, (payload) =>
-                        eventBus.emit({
-                          type: "tool.progress",
-                          turn,
-                          step,
-                          toolCallId: call.id,
-                          name: call.name,
-                          payload,
-                        }),
-                      );
+                      const result = await executeToolCall({
+                        call,
+                        tool: toolDef,
+                        signal: pendingSignals.get(turn),
+                        clock,
+                        ...(config.toolAuditLogger && { toolAuditLogger: config.toolAuditLogger }),
+                        onProgress: (payload) =>
+                          eventBus.emit({
+                            type: "tool.progress",
+                            turn,
+                            step,
+                            toolCallId: call.id,
+                            name: call.name,
+                            payload,
+                          }),
+                      });
                       const durationMs = Date.now() - toolStart;
-                      const isParseError = result.content.startsWith("Invalid input");
-                      const failed =
-                        isParseError || result.content.startsWith("Tool execution failed");
+                      const failed = result.isError === true;
+                      const isParseError = failed && result.content.startsWith("Invalid input");
                       if (isParseError) {
                         eventBus.emit({
                           type: "tool.parse_error",
@@ -943,6 +915,7 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                         type: "tool.end",
                         turn,
                         step,
+                        toolCallId: call.id,
                         name: call.name,
                         durationMs,
                         failed,

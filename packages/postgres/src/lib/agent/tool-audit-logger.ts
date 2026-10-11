@@ -2,8 +2,8 @@
 // PostgresToolAuditLogger — durable backend for the elevated-tool audit log.
 //
 // `createElevatedTool` already enforces that every elevated tool calls
-// `ctx.audit()` per invocation and emits one `ToolAuditLogger.record()` per
-// call. The in-memory logger covers tests and single-process use; this
+// `ctx.audit()` per invocation and records an `intent` before the action
+// plus an outcome after it. The in-memory logger covers tests and single-process use; this
 // one persists to Postgres so a compliance review survives a restart
 // and spans every replica.
 //
@@ -13,7 +13,12 @@
 // ---------------------------------------------------------------------------
 
 import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
-import type { ToolAuditEntry, ToolAuditLogger, ToolAuditRecord } from "@promin/agent";
+import type {
+  ToolAuditEntry,
+  ToolAuditLogger,
+  ToolAuditPhase,
+  ToolAuditRecord,
+} from "@promin/agent";
 import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { agentAuditLog } from "../schema.ts";
 
@@ -51,6 +56,9 @@ export class PostgresToolAuditLogger implements ToolAuditLogger {
       action: entry.action,
       target: entry.target ?? null,
       meta: entry.meta ?? null,
+      toolCallId: entry.toolCallId ?? null,
+      phase: entry.phase,
+      error: entry.error ?? null,
       // Server clock owns the timestamp — `extract(epoch ...)` yields
       // seconds, ×1000 lands the epoch-ms BIGINT the column expects.
       recordedAt: sql`(extract(epoch from now()) * 1000)::bigint`,
@@ -100,6 +108,9 @@ function rowToRecord(row: typeof agentAuditLog.$inferSelect): ToolAuditRecord {
     action: row.action,
     ...(row.target !== null ? { target: row.target } : {}),
     ...(row.meta !== null ? { meta: row.meta as Readonly<Record<string, unknown>> } : {}),
+    ...(row.toolCallId !== null ? { toolCallId: row.toolCallId } : {}),
+    phase: row.phase as ToolAuditPhase,
+    ...(row.error !== null ? { error: row.error } : {}),
     timestamp: row.recordedAt,
   };
 }

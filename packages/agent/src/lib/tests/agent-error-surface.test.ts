@@ -8,7 +8,6 @@ import {
   type Workflow,
 } from "@promin/workflow";
 import { surfaceAgentError } from "../agent-shared.ts";
-import { MaxStepsError } from "../agent-action.ts";
 
 // `@promin/workflow` doesn't re-export TerminalError / RetryableError
 // publicly. surfaceAgentError discriminates by the `_tag` shape tagged
@@ -63,14 +62,6 @@ describe("surfaceAgentError — classifies thrown values", () => {
     );
     expect(err).toBeInstanceOf(WorkflowSuspendedError);
     expect(surfaceAgentError(err).kind).toBe("suspended");
-  });
-
-  it("classifies MaxStepsError as 'step-limit' and preserves the tag", () => {
-    const err = new MaxStepsError(20);
-    const result = surfaceAgentError(err);
-    expect(result.kind).toBe("step-limit");
-    expect((result.error as { _tag?: string })._tag).toBe("MaxStepsError");
-    expect(result.error.message).toContain("20");
   });
 
   it("classifies TerminalError as 'user-error' and preserves the tag", () => {

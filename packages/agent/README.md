@@ -8,7 +8,8 @@ Agent loop, LLM adapters, tools, memory, retrieval, and a terminal UI for buildi
 
 - [Core concepts](#core-concepts)
 - [agentLoop — persistent sessions](#agentloop--persistent-sessions)
-- [agentAction — single-shot workflows](#agentaction--single-shot-workflows)
+- [agentAction — the durable turn engine](#agentaction--the-durable-turn-engine)
+  - [Engine contract](#engine-contract)
 - [Tools](#tools)
   - [tool()](#tool)
   - [Multi-command tools](#multi-command-tools)
@@ -30,15 +31,15 @@ Agent loop, LLM adapters, tools, memory, retrieval, and a terminal UI for buildi
 
 ## Core concepts
 
-| Concept          | What it is                                                                        |
-| ---------------- | --------------------------------------------------------------------------------- |
-| `AgentLoop`      | Factory for long-lived interactive sessions. One loop, many sessions.             |
-| `AgentSession`   | A single conversation: accumulates message history, can stream, can be compacted. |
-| `agentAction`    | One-shot agent workflow (journaled, no session state between calls).              |
-| `AgentTool`      | A Zod-validated tool the LLM can call.                                            |
-| `LLMProvider`    | Uniform interface across Anthropic, OpenAI, Gemini, Ollama, etc.                  |
-| `MemoryStore`    | Cross-session long-term memory.                                                   |
-| `WorkflowRunner` | Durable execution engine from `@promin/workflow` — makes agents crash-safe.       |
+| Concept          | What it is                                                                            |
+| ---------------- | ------------------------------------------------------------------------------------- |
+| `AgentLoop`      | Factory for long-lived interactive sessions. One loop, many sessions.                 |
+| `AgentSession`   | A single conversation: accumulates message history, can stream, can be compacted.     |
+| `agentAction`    | The durable turn engine: one journaled agent turn (LocalAgent runs every turn on it). |
+| `AgentTool`      | A Zod-validated tool the LLM can call.                                                |
+| `LLMProvider`    | Uniform interface across Anthropic, OpenAI, Gemini, Ollama, etc.                      |
+| `MemoryStore`    | Cross-session long-term memory.                                                       |
+| `WorkflowRunner` | Durable execution engine from `@promin/workflow` — makes agents crash-safe.           |
 
 ---
 
@@ -121,29 +122,19 @@ agentLoop({
 
 ### Side effects in hooks
 
-Most agent hooks (`beforeTurn`, `afterTurn`, `onLifecycle`, `onApprovalRequired`, `processors.beforeLLM` / `afterLLM`) run inside journaled activities. The journal short-circuits the callback on replay — the activity's recorded return value is read directly without re-invoking the hook. This is the right default for replay safety: a worker restart mid-turn won't re-prompt the user for approval, won't double-write to your audit log, won't double-bump a rate-limit counter.
+Every agent hook (`beforeTurn`, `afterTurn`, `onLifecycle`, `onApprovalRequired`, `onStep`, `processors.beforeLLM` / `afterLLM`) runs inside a journaled activity. The journal short-circuits the callback on replay — the activity's recorded return value is read directly without re-invoking the hook. A worker restart after a hook finished won't re-prompt the user for approval, won't double-write to your audit log, won't double-bump a rate-limit counter.
 
-`agentAction`'s `onStep` is the exception. It runs BETWEEN journaled activities, so the workflow body re-runs the callback on every recovery pass. To gate non-idempotent side effects, every hook context now carries a boolean `isReplay` flag plumbed from `ctx.isReplay` on the workflow body:
+A crash _while_ a hook runs is the exception: the hook's activity is idempotent, so recovery runs it again rather than halting the turn. Hooks (and the events and lifecycle callbacks the engine emits) are therefore at-least-once across a crash — make them idempotent.
 
-```ts
-agentAction({
-  // ...
-  onStep: ({ step, isReplay }) => {
-    if (isReplay) return; // skip metrics on replay
-    metrics.record("agent.step", { step });
-  },
-});
-```
-
-The semantics: `isReplay` is `true` when the wrapping workflow body is executing on top of pre-existing journal entries (worker restart, signal-resume). For hooks that fire only when their wrapping `ctx.activity` is fresh (everything except `onStep`), the flag tells you whether the BODY containing this activity has been re-started — useful when you want side effects keyed to body restarts, but not required for replay safety. For `onStep`, gate non-idempotent side effects on `!isReplay`.
+`isReplay` on a hook's context is `true` when the workflow body containing the activity has been re-started (worker restart, signal-resume) — useful when you want side effects keyed to body restarts, not needed for replay safety.
 
 For durable audit trails of approval decisions, read the journaled decision back from workflow storage instead of relying on `onApprovalRequired` side effects — the journal survives replay correctly.
 
 ---
 
-## agentAction — single-shot workflows
+## agentAction — the durable turn engine
 
-Use `agentAction` when you need a one-shot agent run that is fully durable and replayable.
+`agentAction` builds one agent turn as a durable workflow: think → (approve) → tools → think … until the model answers. `LocalAgent` runs every turn (`invoke`, `stream`, `thread.send` / `stream` / `resume`) through it, so this is the one engine and the contract below holds everywhere.
 
 ```ts
 import { agentAction } from "@promin/agent";
@@ -160,15 +151,49 @@ const classifier = agentAction({
   maxSteps: 5,
 });
 
-const { output } = await runner.run({
+const { output, finishReason } = await runner.run({
   workflow: classifier,
   workflowId: "c1",
   input: { task: "I love this product!" },
 });
-// output: { sentiment: "positive", confidence: 0.97 }
+// output: { sentiment: "positive", confidence: 0.97 }, finishReason: "stop"
 ```
 
-`outputSchema` uses tool-calling under the hood — the agent calls `_respond({ ... })` when ready, which is then Zod-parsed.
+### Engine contract
+
+**Journal.** Each side effect is one activity: `turn-start`, `before-turn`, then per step `tools-<n>` (tool-set snapshot), `think-<n>` (the LLM call), `step-<n>-hook` (`onStep`), `step-<n>-approvals` (the `autoApprove` verdicts), `step-<n>-approval-<id>-start` / `-end` around the decision, `tool-<name>-<n>-<id>` (each tool call, in parallel), `stall-<n>`; then `after-turn` and `turn-end` (or `turn-failed` when the turn throws). Control flow between activities reads only the input and journaled values, so a replay takes the recorded path — a tool or `autoApprove` policy edited while a turn is suspended doesn't change it. Time comes from the injected `clock` (a `WallClock`), inside activities only. Every activity except a non-idempotent tool call is idempotent: a crash inside one re-runs it on recovery.
+
+**Events.** Every bus event (`turn.start`, `llm.call`, `llm.retry`, `token.delta`, `tool.start` / `tool.progress` / `tool.end`, `approval.requested` / `approval.decision`, `stall.detected`, `step_limit.hit`, `turn.end` / `turn.aborted` / `turn.failed`) is emitted by the activity that produced it, so a replay never re-emits an event for a recorded activity. An approval resume streams only what happens after the resume. `approval.requested` carries the tool name and input; tool events carry the `toolCallId`.
+
+**LLM calls** are idempotent activities: a crash mid-call re-runs the call on recovery. Failures are classified with `classifyLLMError`: `transient` and `rate_limit` are retried per `llmRetry` (exponential backoff, or the server's `Retry-After` up to `maxRetryAfterMs`); `context_overflow` and `permanent` fail the turn. If the provider is already a `resilientLLM`, set `llmRetry: false`.
+
+**Tool calls run once.** A crash between starting a tool and recording its result leaves the outcome unknown:
+
+- a tool with `idempotent: true` runs again with the same `ctx.toolCallId` — use it as the idempotency key you pass downstream (payment `Idempotency-Key`, upsert key, message dedupe id);
+- any other tool is not re-run: the model gets an error result saying the outcome is unknown and should be checked before retrying.
+
+Every tool gets `ctx.toolCallId`, `ctx.signal` (aborted on cancel or timeout) and `ctx.timeoutMs` (from the tool's `timeoutMs`, else the agent's `toolTimeoutMs`). Tool failures come back as results with `isError: true` (invalid input, a throw, a timeout, a cancellation, a rejected approval, an unknown tool); Anthropic receives the flag as `is_error`.
+
+**Tool-set snapshot.** Tools are re-read every step (a `toolRegistry` hot-reloads), and each step journals the names, `requireApproval` and `idempotent` it saw, so a tool edited while a turn is suspended doesn't change the path the replay takes.
+
+**Approvals.** A `requireApproval` tool not covered by `autoApprove` asks `onApprovalRequired` (journaled) or suspends on the `approve:<toolCallId>` signal (`ctx.approval`). The `-start` record carries the tool name and input, which `listPendingSignals` reads.
+
+**Ending a turn.** `result.finishReason` says why the turn ended, and the transcript always ends with an assistant message and has a result for every tool call. `result.turnMessages` is what the turn adds to a conversation (the task, then the assistant and tool messages it produced — no seed, nothing a `beforeTurn` hook did, no engine guidance); `LocalAgent` persists exactly that. A turn that throws emits `turn.failed` and an `onLifecycle` `failed` transition.
+
+| `finishReason` | When                                                        | `answer`                               |
+| -------------- | ----------------------------------------------------------- | -------------------------------------- |
+| `stop`         | the model answered (or `onStep` returned `continue: false`) | the model's text                       |
+| `max_steps`    | `maxSteps` think steps ran without an answer                | `STEP_LIMIT_ANSWER`                    |
+| `stalled`      | the stall detector forced a final answer                    | the forced answer, or `STALLED_ANSWER` |
+| `cancelled`    | `signal` aborted                                            | streamed text, or `CANCELLED_ANSWER`   |
+
+**Cancellation.** `signal` is threaded into every LLM call and tool (and ends an LLM retry wait). The engine records the cancellation at the next think step, so a replay ends the turn at the same point.
+
+**Stall detection.** `stall` (default on) watches for rounds that repeat earlier tool calls with no new text (`maxRepeatRounds`, default 3) and for one tool called more than `maxCallsPerTool` (default 15) times; either forces one more round with `tool_choice: "none"` (or a forced `_respond` with `outputSchema`).
+
+**Structured output.** With `outputSchema`, the engine offers a `_respond` tool and forces it through `tool_choice` once the model is ready to answer (from the first step when the agent has no other tools, after a prose answer otherwise — the forced round gets a user nudge, so a request never ends on the assistant's prose; extended thinking is off for a forced round, which Anthropic requires). Other tool calls in a `_respond` response are answered as not run. A payload that fails the schema goes back to the model with the validation errors, up to `structuredOutputRepairs` (default 2) times, then the turn fails with `StructuredOutputParseError`; the repair round keeps the agent's tools available, so the model can re-issue a skipped call.
+
+**Settings.** `thinkingBudgetTokens`, `maxTokens`, `redactPriorThinking`, `metrics` (+ `costs`, `llmProvider`, `llmModel`, `metricLabels`: `llm.*`, `tool.*`, `approval.*`), `hooks.beforeTurn` / `hooks.afterTurn`, `onLifecycle`, `onStep` (with `feedback`), `onToolCall`, `onToolResult`, `onChunk`, `onThinking`, `processors`, `rateLimiter`, `scope`, `toolAuditLogger`. `LocalAgent`'s `agent` field is `AgentEngineConfig` — this config minus the per-run `bus` / `scope` / `signal` it supplies — and every field reaches every turn.
 
 ---
 
@@ -189,6 +214,10 @@ const calculator = tool({
   execute: async ({ expression }) => eval(expression), // illustrative
 });
 ```
+
+`execute(input, ctx)` gets `ctx.toolCallId`, `ctx.signal` and `ctx.timeoutMs` from the engine (see [Engine contract](#engine-contract)). Mark a tool `idempotent: true` when running it twice for the same `toolCallId` is safe, and give it a `timeoutMs` to bound one call.
+
+Elevated tools (`createElevatedTool`) must `await ctx.audit({ action, target })` before acting: it writes an `intent` record to the `ToolAuditLogger` at once, and the factory writes a `completed` / `failed` record when the body settles.
 
 ### Multi-command tools
 

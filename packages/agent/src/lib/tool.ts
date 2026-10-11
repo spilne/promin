@@ -87,6 +87,23 @@ export interface ToolExecuteContext {
    * calls are still enforced but not persisted.
    */
   readonly toolAuditLogger?: ToolAuditLogger;
+  /**
+   * Id of the model's tool call this execution answers. Stable across
+   * crash recovery: a tool marked `idempotent` that the engine re-runs
+   * after a crash sees the same id, so a side-effecting tool can pass it
+   * downstream as an idempotency key (payment `Idempotency-Key`, upsert
+   * key, message dedupe id). Always set by the agent engine.
+   */
+  readonly toolCallId?: string;
+  /**
+   * Aborted when the turn is cancelled or the call exceeds its timeout.
+   * Pass it to `fetch` / child processes so the work stops; the engine
+   * stops waiting on abort either way and reports the call as failed.
+   * Always set by the agent engine.
+   */
+  readonly signal?: AbortSignal;
+  /** Time limit the engine enforces on this call, when one applies. */
+  readonly timeoutMs?: number;
 }
 
 export interface AgentTool<TInput = unknown, TOutput = unknown> {
@@ -114,6 +131,26 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
    */
   execute: (input: TInput, ctx?: ToolExecuteContext) => Promise<TOutput>;
   requireApproval?: boolean;
+  /**
+   * Whether the engine may run this tool again for the same call after a
+   * crash. A crash between starting a tool and recording its result leaves
+   * the outcome unknown:
+   *
+   * - `true` — the engine re-runs the call with the same
+   *   `ctx.toolCallId`. Set it for reads and for tools that dedupe on
+   *   `ctx.toolCallId`.
+   * - `false` / unset (default) — the engine does not re-run it; the model
+   *   gets an error result saying the outcome is unknown and should be
+   *   checked before retrying. Side-effecting tools that can't dedupe
+   *   stay here, so a crash never repeats a payment or an email.
+   */
+  idempotent?: boolean;
+  /**
+   * Per-call time limit in ms. Overrides the agent's `toolTimeoutMs`.
+   * On expiry `ctx.signal` aborts and the call fails with a timeout error
+   * result. Unset: the agent's default (none unless configured).
+   */
+  timeoutMs?: number;
   toModelOutput?: (output: TOutput) => string;
   /**
    * Extract structured side-channel data from the tool's output to
@@ -236,6 +273,10 @@ export interface ScopedToolContext {
   readonly writer?: ToolWriter;
   readonly secrets: Readonly<Record<string, string>>;
   readonly memory?: ScopedMemory;
+  /** See `ToolExecuteContext.toolCallId`. */
+  readonly toolCallId?: string;
+  /** See `ToolExecuteContext.signal`. */
+  readonly signal?: AbortSignal;
 }
 
 /**
@@ -247,14 +288,18 @@ export interface ScopedToolContext {
  */
 export interface ElevatedToolContext extends ScopedToolContext {
   /**
-   * Audit hook — call once per invocation describing what cross-scope
-   * action was taken. Missing audit fails the tool call.
+   * Record the cross-scope action the tool is ABOUT to take. Call it, and
+   * await it, before the side effect: it writes an `intent` record to the
+   * audit log right away, so a crash mid-action still leaves a trace.
+   * When the body returns or throws, the factory writes a `completed` /
+   * `failed` record for every intent. A rejected write rejects here —
+   * don't take the action. Missing audit fails the tool call.
    */
   audit(entry: {
     readonly action: string;
     readonly target?: string;
     readonly meta?: Readonly<Record<string, unknown>>;
-  }): void;
+  }): Promise<void>;
 }
 
 /**
@@ -429,41 +474,77 @@ export function createElevatedTool<TInput, TOutput>(
           `Elevated tool '${config.name}' invoked without complete (namespaceId, resourceId) scope.`,
         );
       }
-      let auditCalled = false;
-      const auditEntries: ToolAuditEntry[] = [];
+      // Intent records are written as `ctx.audit()` is called — before the
+      // side effect — and each gets an outcome record once the body
+      // settles. A logger rejection fails the call: an unrecorded
+      // cross-scope action is a compliance gap, not a silent skip. No-op
+      // when no logger is wired (audit is still enforced below).
+      const toolAuditLogger = ctx?.toolAuditLogger;
+      const intents: ToolAuditEntry[] = [];
+      const intentWrites: Promise<void>[] = [];
       const audit: ElevatedToolContext["audit"] = (entry) => {
-        auditCalled = true;
-        auditEntries.push({
+        const intent: ToolAuditEntry = {
           namespaceId: scoped.namespaceId,
           resourceId: scoped.resourceId,
           ...(scoped.agentId !== undefined && { agentId: scoped.agentId }),
           toolName: config.name,
+          ...(ctx?.toolCallId !== undefined && { toolCallId: ctx.toolCallId }),
           action: entry.action,
           ...(entry.target !== undefined && { target: entry.target }),
           ...(entry.meta !== undefined && { meta: entry.meta }),
-        });
+          phase: "intent",
+        };
+        intents.push(intent);
+        const write = toolAuditLogger ? toolAuditLogger.record(intent) : Promise.resolve();
+        // Tracked so an un-awaited audit() still fails the call below
+        // instead of surfacing as an unhandled rejection.
+        intentWrites.push(write);
+        write.catch(() => {});
+        return write;
       };
       const elevated: ElevatedToolContext = { ...scoped, audit };
-      const output = await userExecute(input, elevated);
-      if (!auditCalled) {
+      let output: TOutput;
+      try {
+        output = await userExecute(input, elevated);
+      } catch (err) {
+        await Promise.allSettled(intentWrites);
+        await recordOutcomes({
+          logger: toolAuditLogger,
+          intents,
+          phase: "failed",
+          error: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
+      }
+      await Promise.all(intentWrites);
+      if (intents.length === 0) {
         throw new Error(
           `Elevated tool '${config.name}' completed without calling ctx.audit(). ` +
             "Every elevated invocation must record an audit entry.",
         );
       }
-      // Persist the audit trail once the body succeeds. A logger
-      // rejection fails the call — an unrecorded cross-scope action is
-      // a compliance gap, not a silent skip. No-op when no logger is
-      // wired (audit is still enforced above).
-      const toolAuditLogger = ctx?.toolAuditLogger;
-      if (toolAuditLogger) {
-        for (const entry of auditEntries) {
-          await toolAuditLogger.record(entry);
-        }
-      }
+      await recordOutcomes({ logger: toolAuditLogger, intents, phase: "completed" });
       return output;
     },
   };
+}
+
+/** Write one outcome record per intent, in order. */
+async function recordOutcomes(params: {
+  logger: ToolAuditLogger | undefined;
+  intents: ReadonlyArray<ToolAuditEntry>;
+  phase: "completed" | "failed";
+  error?: string;
+}): Promise<void> {
+  const { logger } = params;
+  if (!logger) return;
+  for (const intent of params.intents) {
+    await logger.record({
+      ...intent,
+      phase: params.phase,
+      ...(params.error !== undefined && { error: params.error }),
+    });
+  }
 }
 
 async function scopedContextFrom(
@@ -496,6 +577,8 @@ async function scopedContextFrom(
     ...(scope.threadId !== undefined && { threadId: scope.threadId }),
     ...(scope.agentId !== undefined && { agentId: scope.agentId }),
     ...(ctx?.writer !== undefined && { writer: ctx.writer }),
+    ...(ctx?.toolCallId !== undefined && { toolCallId: ctx.toolCallId }),
+    ...(ctx?.signal !== undefined && { signal: ctx.signal }),
     secrets,
     ...(memory !== undefined && { memory }),
   };

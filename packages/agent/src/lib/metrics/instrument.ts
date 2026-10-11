@@ -100,14 +100,17 @@ export function recordTool(args: RecordToolArgs): void {
 // we keep it generic — the host attaches outcome labels.
 // ---------------------------------------------------------------------------
 
-export function recordApproval(
-  metrics: AgentMetrics,
-  outcome: "requested" | "approved" | "rejected" | "timeout",
-  extraLabels: Readonly<Record<string, string>> = {},
-): void {
-  if (outcome === "requested") {
-    metrics.counter("approval.requests").inc(1, extraLabels);
+export interface RecordApprovalArgs {
+  readonly metrics: AgentMetrics;
+  readonly outcome: "requested" | "approved" | "rejected" | "timeout";
+  readonly extraLabels?: Readonly<Record<string, string>>;
+}
+
+export function recordApproval(args: RecordApprovalArgs): void {
+  const extraLabels = args.extraLabels ?? {};
+  if (args.outcome === "requested") {
+    args.metrics.counter("approval.requests").inc(1, extraLabels);
     return;
   }
-  metrics.counter("approval.decisions").inc(1, { ...extraLabels, outcome });
+  args.metrics.counter("approval.decisions").inc(1, { ...extraLabels, outcome: args.outcome });
 }

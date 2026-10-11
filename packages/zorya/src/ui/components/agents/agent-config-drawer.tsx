@@ -305,9 +305,6 @@ function RecipeBody({
           {local.maxStepsPerTurn !== undefined && (
             <KV k="maxStepsPerTurn" v={<span class="font-mono">{local.maxStepsPerTurn}</span>} />
           )}
-          {local.maxTurns !== undefined && (
-            <KV k="maxTurns" v={<span class="font-mono">{local.maxTurns}</span>} />
-          )}
         </Section>
       )}
 

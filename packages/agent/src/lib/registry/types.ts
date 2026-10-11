@@ -112,8 +112,6 @@ export interface LocalAgentBackend {
   readonly knowledge?: ReadonlyArray<AgentKnowledgeRecipe>;
   /** Per-turn step cap. Optional, runtime default applies when unset. */
   readonly maxStepsPerTurn?: number;
-  /** Max user turns per session before the loop terminates. */
-  readonly maxTurns?: number;
   /**
    * Recipe-level auto-compaction config. JSON-serialisable subset of
    * the runtime `AutoCompactConfig` (no `when` predicate — closures

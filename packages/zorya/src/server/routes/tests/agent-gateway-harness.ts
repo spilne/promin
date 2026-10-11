@@ -13,6 +13,7 @@ import {
   InMemoryRoleRegistry,
   InMemorySecretsStorage,
   resolveLocalAgent,
+  type ResolveLocalAgentDeps,
   type LLMProvider,
   type RegisteredAgent,
 } from "@promin/agent";
@@ -35,6 +36,10 @@ export const localBackend = {
 export interface HarnessOpts {
   /** Reply text; a function makes the LLM throw / vary per call. */
   reply?: () => string;
+  /** Replaces the reply-based LLM entirely. */
+  llm?: LLMProvider;
+  /** Host tools recipes may pick by name. */
+  tools?: ResolveLocalAgentDeps["tools"];
   turnGate?: boolean;
   secrets?: boolean;
   authorizeScope?: ScopeAuthorizer;
@@ -65,7 +70,7 @@ export async function bootAgents(opts: HarnessOpts = {}) {
     metadata: { description: "d", capabilities: ["chat"], tags: ["beta"] },
   });
   await registry.register({ id: "other", backend: localBackend });
-  const llm: LLMProvider = {
+  const llm: LLMProvider = opts.llm ?? {
     chat: async () => ({ content: opts.reply ? opts.reply() : "ok", finishReason: "stop" }),
   };
   const workflows = new LocalWorkflows({
@@ -77,7 +82,12 @@ export async function bootAgents(opts: HarnessOpts = {}) {
   const agents = new ZoryaAgents({
     registry,
     resolve: (recipe: RegisteredAgent) => {
-      const agent = resolveLocalAgent(recipe, { runner, memory, llm: () => llm, tools: {} });
+      const agent = resolveLocalAgent(recipe, {
+        runner,
+        memory,
+        llm: () => llm,
+        tools: opts.tools ?? {},
+      });
       return (opts.wrapAgent ? opts.wrapAgent(agent) : agent) as never;
     },
     memory,
