@@ -8,11 +8,14 @@
 // `{ kind: "work" }` over the `/ws/worker` control socket to workers that
 // can run it. The worker then runs a claim.
 //
-//   - who: a connected worker matches when its advertisement covers the
+//   - who: only workers whose socket identified as claiming starts (a
+//     socket opened for agent or query work, or a worker with claiming
+//     off, is never woken). One matches when its advertisement covers the
 //     run's (name, version) — the claim filter's rule (`startMatchesSpec`).
-//     A connected worker the advertisement index doesn't know yet (it
+//     A claiming worker the advertisement index doesn't know yet (it
 //     advertised after the last read, or the registry forgot it) matches
-//     too, and the index is re-read on the next send
+//     too, and the index is re-read on the next send — once per newly
+//     unknown worker, not on every send
 //   - how many: each send wakes about as many matching workers as it has
 //     starts (plus `WAKE_MARGIN`), taken round-robin, not every matching
 //     worker — a fleet of idle workers would otherwise answer every trigger
@@ -25,7 +28,7 @@
 //     `MAX_TRACKED_STARTS` await their claim; past either, every matching
 //     worker is woken instead. The advertisements are read at most once per
 //     `advertisementCacheMs`, into a compact worker → (name, versions) index
-//   - a worker that connects (identifies) is woken at once: a start queued
+//   - a claiming worker that connects (identifies) is woken at once: a start queued
 //     while its socket was not yet registered was told to nobody
 //   - best effort: a socket on another Zorya instance or a failed
 //     advertisement read only delays the claim to the worker's poll
@@ -38,7 +41,7 @@ import {
   type WorkerWorkflowSpec,
   type WorkflowAdvertisementRegistry,
 } from "@promin/workflow/distributed";
-import type { WorkerWsOutbound } from "./worker-ws-server.ts";
+import type { WorkerConnectionEvent, WorkerWsOutbound } from "./worker-ws-server.ts";
 
 /** A start that became claimable, as far as routing a wake-up goes. */
 export interface QueuedStartNotice {
@@ -50,11 +53,11 @@ export interface QueuedStartNotice {
 
 /** The parts of `WorkerWebSocketServer` the wake-ups use. */
 export interface WakeupSockets {
-  connectedWorkers(): string[];
-  connectedCount(): number;
+  /** Connected workers that identified as claiming queued starts. */
+  claimingWorkers(): string[];
   send(params: { workerId: string; message: WorkerWsOutbound }): boolean;
   /** Connect / disconnect of identified workers. */
-  onConnection(handler: (event: { workerId: string; connected: boolean }) => void): () => void;
+  onConnection(handler: (event: WorkerConnectionEvent) => void): () => void;
 }
 
 export interface WorkerWakeupsConfig {
@@ -126,7 +129,14 @@ export class WorkerWakeups {
   private timer?: TimerHandle;
   private flushing?: Promise<void>;
   private lastSendAt = Number.NEGATIVE_INFINITY;
-  private coverage?: { readonly at: number; readonly byWorker: Map<string, WorkerCoverage> };
+  private coverage?: {
+    readonly at: number;
+    readonly byWorker: Map<string, WorkerCoverage>;
+    /** Claiming workers the read did not cover: no re-read on their account. */
+    readonly unknown: ReadonlySet<string>;
+  };
+  /** The advertisement read in progress: concurrent callers share it. */
+  private reading?: Promise<Map<string, WorkerCoverage>>;
   /** Woken starts not claimed yet, by workflow id, in wake order. */
   private readonly tracked = new Map<string, TrackedStart>();
   private followUpTimer?: { readonly handle: TimerHandle; readonly dueAt: number };
@@ -147,14 +157,14 @@ export class WorkerWakeups {
       config.onError ?? ((error) => console.error("[zorya] worker wake-up failed:", error));
     // A worker that just identified missed whatever was told before it
     // was registered: wake it once.
-    this.unsubscribe = this.sockets.onConnection(({ workerId, connected }) => {
-      if (connected && !this.stopped) this.wake(workerId);
+    this.unsubscribe = this.sockets.onConnection(({ workerId, connected, claimsStarts }) => {
+      if (connected && claimsStarts && !this.stopped) this.wake(workerId);
     });
   }
 
   /** A start became claimable: wake workers that can run it. */
   notify(notice: QueuedStartNotice): void {
-    if (this.stopped || this.sockets.connectedCount() === 0) return;
+    if (this.stopped || this.sockets.claimingWorkers().length === 0) return;
     if (!this.overflow) {
       if (this.pendingStarts >= MAX_PENDING_STARTS) {
         this.overflow = true;
@@ -231,7 +241,7 @@ export class WorkerWakeups {
     groups: readonly PendingGroup[];
     everyone: boolean;
   }): Promise<void> {
-    const connected = this.sockets.connectedWorkers();
+    const connected = this.sockets.claimingWorkers();
     if (connected.length === 0) return;
     if (params.everyone) {
       for (const workerId of connected) this.wake(workerId);
@@ -304,7 +314,7 @@ export class WorkerWakeups {
     }
     try {
       if (due.length > 0) {
-        const connected = this.sockets.connectedWorkers();
+        const connected = this.sockets.claimingWorkers();
         const byWorker = await this.coverageByWorker();
         if (this.stopped) return;
         for (const workerId of connected) {
@@ -325,17 +335,30 @@ export class WorkerWakeups {
 
   /**
    * Worker id → the (name, versions) it advertises, read at most once per
-   * cache window — sooner when a connected worker is missing from it.
+   * cache window — sooner when a claiming worker the last read did not
+   * cover shows up. A worker still missing after a re-read (it never
+   * advertises, or the registry dropped it) costs no further reads until
+   * the window ends.
    */
   private async coverageByWorker(): Promise<Map<string, WorkerCoverage>> {
     const now = this.clock.currentTimeMs();
+    const claiming = this.sockets.claimingWorkers();
     if (this.coverage && now - this.coverage.at < this.cacheMs) {
-      const known = this.coverage.byWorker;
-      // A miss re-reads, but not more than once per MISS_REREAD_MS: a
-      // connected worker that never advertises must not cost a read per send.
+      const { byWorker: known, unknown } = this.coverage;
       const fresh = now - this.coverage.at < Math.min(this.cacheMs, MISS_REREAD_MS);
-      if (fresh || this.sockets.connectedWorkers().every((id) => known.has(id))) return known;
+      const newMiss = claiming.some((id) => !known.has(id) && !unknown.has(id));
+      if (fresh || !newMiss) return known;
     }
+    this.reading ??= this.readCoverage({ at: now, claiming }).finally(() => {
+      this.reading = undefined;
+    });
+    return this.reading;
+  }
+
+  private async readCoverage(params: {
+    at: number;
+    claiming: readonly string[];
+  }): Promise<Map<string, WorkerCoverage>> {
     const entries = await this.advertisements.list();
     const byWorker = new Map<string, WorkerCoverage>();
     for (const entry of entries) {
@@ -359,7 +382,8 @@ export class WorkerWakeups {
         ),
       );
     }
-    this.coverage = { at: now, byWorker };
+    const unknown = new Set(params.claiming.filter((id) => !byWorker.has(id)));
+    this.coverage = { at: params.at, byWorker, unknown };
     return byWorker;
   }
 

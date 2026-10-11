@@ -280,7 +280,10 @@ async function runChain(params: {
       });
     } catch (err) {
       if (errorTag(err) !== "WorkflowContinueAsNewError") throw err;
-      const nextInput = (err as WorkflowContinueAsNewError).nextInput;
+      // An absent input continues as `null`: JSON stores keep no
+      // `undefined`, and the next run must see what a later resume of it
+      // reads back.
+      const nextInput = (err as WorkflowContinueAsNewError).nextInput ?? null;
       // The next run's input is stored on the run, so a driver that resumes
       // it later (another worker, recovery) reads this input, not the first.
       await ctx.storage.startFreshRun({

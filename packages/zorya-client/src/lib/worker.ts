@@ -372,6 +372,7 @@ export class ZoryaWorker {
         url: this.client.url,
         workerId: this.workerId,
         capabilities: this.config.capabilities,
+        claimsStarts: this.claims !== undefined,
         apiKey: this.client.apiKey,
         reconnectDelayMs: csCfg.reconnectDelayMs,
         maxReconnectDelayMs: csCfg.maxReconnectDelayMs,

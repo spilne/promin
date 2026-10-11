@@ -53,6 +53,25 @@ describe("ctx.continueAsNew", () => {
     expect(runs.length).toBeGreaterThanOrEqual(3);
   });
 
+  it("an absent input continues as null — what a resumed run reads back from any store", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const seen: unknown[] = [];
+
+    const wf = workflow<{ start: true } | null>({ name: "no-input" })
+      .journaled("loop", function* (ctx) {
+        seen.push(ctx.input);
+        if (ctx.input === null) return "done";
+        ctx.continueAsNew(undefined);
+      })
+      .build();
+
+    await runner.run({ workflow: wf, workflowId: "cnt-null", input: { start: true } });
+
+    expect(seen).toEqual([{ start: true }, null]);
+    expect((await storage.loadWorkflow("cnt-null"))?.input).toBeNull();
+  });
+
   it("replay-safe — restarting against a continued-as-new row resumes the LATEST run, not the chain", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });

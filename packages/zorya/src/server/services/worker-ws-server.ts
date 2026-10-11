@@ -60,6 +60,8 @@ export const WorkerWsInboundSchema = z.union([
     kind: z.literal("identify"),
     workerId: IdSchema,
     capabilities: z.array(z.string().max(256)).max(256).optional(),
+    /** The worker claims queued starts, so work-available wake-ups concern it. */
+    claimsStarts: z.boolean().optional(),
   }),
   z.object({ kind: z.literal("pong") }),
   z.object({
@@ -97,11 +99,21 @@ const CLOSE_INTERNAL_ERROR = 1011;
 const CLOSE_GOING_AWAY = 1001;
 const CLOSE_IDENTIFY_TIMEOUT = 4002;
 
+/** A worker socket identified (`connected: true`) or went away. */
+export interface WorkerConnectionEvent {
+  readonly workerId: string;
+  readonly connected: boolean;
+  /** The worker claims queued starts (said so on identify). */
+  readonly claimsStarts: boolean;
+}
+
 /** Default time a socket has to send `identify` after the upgrade (ms). */
 export const DEFAULT_WORKER_IDENTIFY_TIMEOUT_MS = 10_000;
 
 interface WorkerWsData {
   workerId?: string;
+  /** Identified as claiming queued starts (wake-up target). */
+  claimsStarts?: boolean;
   /** Last `pong` arrival time (ms). Updated on pong; checked by heartbeat tick. */
   lastPongAt: number;
   /** Closes the socket if `identify` does not arrive in time. */
@@ -169,7 +181,7 @@ export class WorkerWebSocketServer {
   /** Subscribers that want every inbound `frame` from any worker. */
   private frameSubs = new Set<(workerId: string, streamId: string, payload: unknown) => void>();
   /** Subscribers that want connect / disconnect lifecycle events. */
-  private connectionSubs = new Set<(event: { workerId: string; connected: boolean }) => void>();
+  private connectionSubs = new Set<(event: WorkerConnectionEvent) => void>();
   private readonly pingIntervalMs: number;
   private readonly pongTimeoutMs: number;
   private readonly identifyTimeoutMs: number;
@@ -350,7 +362,7 @@ export class WorkerWebSocketServer {
   }
 
   /** Subscribe to worker connect / disconnect transitions. */
-  onConnection(handler: (event: { workerId: string; connected: boolean }) => void): () => void {
+  onConnection(handler: (event: WorkerConnectionEvent) => void): () => void {
     this.connectionSubs.add(handler);
     return () => {
       this.connectionSubs.delete(handler);
@@ -375,6 +387,13 @@ export class WorkerWebSocketServer {
   /** Number of identified worker sockets. */
   connectedCount(): number {
     return this.workers.size;
+  }
+
+  /** Connected workers that identified as claiming queued starts. */
+  claimingWorkers(): string[] {
+    const out: string[] = [];
+    for (const [workerId, ws] of this.workers) if (ws.data.claimsStarts) out.push(workerId);
+    return out;
   }
 
   // -------------------------------------------------------------------------
@@ -463,7 +482,11 @@ export class WorkerWebSocketServer {
     this.workers.delete(ws.data.workerId);
     for (const sub of this.connectionSubs) {
       try {
-        sub({ workerId: ws.data.workerId, connected: false });
+        sub({
+          workerId: ws.data.workerId,
+          connected: false,
+          claimsStarts: ws.data.claimsStarts === true,
+        });
       } catch {
         /* swallow */
       }
@@ -476,6 +499,7 @@ export class WorkerWebSocketServer {
         this.clearIdentifyTimer(ws);
         this.unidentified.delete(ws);
         ws.data.workerId = msg.workerId;
+        ws.data.claimsStarts = msg.claimsStarts === true;
         // Replace any prior socket for the same workerId. Old sockets will
         // hit their close handler later but won't evict the new entry
         // because the close handler checks `existing === ws`.
@@ -490,7 +514,11 @@ export class WorkerWebSocketServer {
         this.workers.set(msg.workerId, ws);
         for (const sub of this.connectionSubs) {
           try {
-            sub({ workerId: msg.workerId, connected: true });
+            sub({
+              workerId: msg.workerId,
+              connected: true,
+              claimsStarts: msg.claimsStarts === true,
+            });
           } catch {
             /* swallow */
           }

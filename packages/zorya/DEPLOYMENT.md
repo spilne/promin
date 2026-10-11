@@ -228,7 +228,12 @@ share.
   claim, never a lost start). A worker whose `/ws/worker` upgrade fails
   (a proxy without WebSocket support, a key mismatch) reports it once and
   polls every second until the socket opens. `remoteWorkers.wakeups: false`
-  turns the messages off.
+  turns the messages off; workers then still poll at the 5 s
+  socket-open interval, so lower `pollWorkflowStarts.intervalMs` (to 1 s,
+  say) when you disable them. Only workers that claim starts are woken: a
+  socket opened for queries or agent streams, or a worker with
+  `pollWorkflowStarts: false`, identifies as not claiming and gets no
+  "work available" messages.
 
 - Agent threads: set a `turnGate` on `ZoryaAgents` (an `AgentTurnGate`
   over `PostgresLeaseStore`) so two instances never run the same

@@ -94,6 +94,20 @@ describe("WorkerWebSocketServer — inbound validation", () => {
     expect(server.isConnected("w-1")).toBe(true);
   });
 
+  it("lists as claiming only sockets that identified with claimsStarts", () => {
+    const server = new WorkerWebSocketServer({ clock: FakeWallClock.create(0) });
+    const events: unknown[] = [];
+    server.onConnection((e) => events.push(e));
+    raw(server, open(server), '{"kind":"identify","workerId":"claimer","claimsStarts":true}');
+    raw(server, open(server), '{"kind":"identify","workerId":"agent-only"}');
+    expect(server.connectedWorkers().sort()).toEqual(["agent-only", "claimer"]);
+    expect(server.claimingWorkers()).toEqual(["claimer"]);
+    expect(events).toEqual([
+      { workerId: "claimer", connected: true, claimsStarts: true },
+      { workerId: "agent-only", connected: true, claimsStarts: false },
+    ]);
+  });
+
   it("contains a throwing subscriber and reports nothing fatal", () => {
     const errors: unknown[] = [];
     const server = new WorkerWebSocketServer({

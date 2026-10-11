@@ -28,7 +28,12 @@ export type ServerToWorker =
   | { kind: "work" };
 
 export type WorkerToServer =
-  | { kind: "identify"; workerId: string; capabilities?: readonly string[] }
+  | {
+      kind: "identify";
+      workerId: string;
+      capabilities?: readonly string[];
+      claimsStarts?: boolean;
+    }
   | { kind: "pong" }
   | { kind: "frame"; streamId: string; payload: unknown }
   | { kind: "reply"; requestId: string; ok: true; result?: unknown }
@@ -49,6 +54,12 @@ export interface WorkerControlSocketConfig {
   workerId: string;
   /** Capabilities reported on identify. */
   capabilities?: readonly string[];
+  /**
+   * The worker claims queued starts, so the server sends it work-available
+   * wake-ups. Default false: a socket used only for control commands,
+   * queries or agent streams is never woken for work.
+   */
+  claimsStarts?: boolean;
   /** Worker API key, sent as `Authorization: Bearer ...` on the upgrade request. */
   apiKey?: string;
   /**
@@ -77,6 +88,7 @@ export class WorkerControlSocket {
   private readonly url: string;
   private readonly workerId: string;
   private readonly capabilities?: readonly string[];
+  private readonly claimsStarts: boolean;
   private readonly apiKey?: string;
   private readonly initialDelayMs: number;
   private readonly maxDelayMs: number;
@@ -97,6 +109,7 @@ export class WorkerControlSocket {
       config.url.replace(/^http:\/\//, "ws://").replace(/^https:\/\//, "wss://") + "/ws/worker";
     this.workerId = config.workerId;
     this.capabilities = config.capabilities;
+    this.claimsStarts = config.claimsStarts ?? false;
     this.apiKey = config.apiKey;
     this.initialDelayMs = config.reconnectDelayMs ?? 250;
     this.maxDelayMs = config.maxReconnectDelayMs ?? 30_000;
@@ -206,6 +219,7 @@ export class WorkerControlSocket {
         kind: "identify",
         workerId: this.workerId,
         capabilities: this.capabilities,
+        claimsStarts: this.claimsStarts,
       });
       this.state = "open";
       this.currentDelayMs = this.initialDelayMs;

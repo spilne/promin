@@ -12,31 +12,34 @@ import {
   type WorkflowAdvertisementRegistry,
 } from "@promin/workflow/distributed";
 import { WorkerWakeups, type WakeupSockets } from "../worker-wakeups.ts";
-import type { WorkerWsOutbound } from "../worker-ws-server.ts";
+import type { WorkerConnectionEvent, WorkerWsOutbound } from "../worker-ws-server.ts";
 
 class SocketsDouble implements WakeupSockets {
+  /** Connected workers that claim starts. */
   readonly connected = new Set<string>();
+  /** Connected sockets that never claim (agent, query or control-only). */
+  readonly nonClaiming = new Set<string>();
   readonly sent: Array<{ workerId: string; message: WorkerWsOutbound }> = [];
-  private readonly handlers = new Set<(e: { workerId: string; connected: boolean }) => void>();
-  connectedWorkers(): string[] {
+  private readonly handlers = new Set<(e: WorkerConnectionEvent) => void>();
+  claimingWorkers(): string[] {
     return [...this.connected];
   }
-  connectedCount(): number {
-    return this.connected.size;
-  }
   send(params: { workerId: string; message: WorkerWsOutbound }): boolean {
-    if (!this.connected.has(params.workerId)) return false;
+    if (!this.connected.has(params.workerId) && !this.nonClaiming.has(params.workerId)) {
+      return false;
+    }
     this.sent.push(params);
     return true;
   }
-  onConnection(handler: (e: { workerId: string; connected: boolean }) => void): () => void {
+  onConnection(handler: (e: WorkerConnectionEvent) => void): () => void {
     this.handlers.add(handler);
     return () => this.handlers.delete(handler);
   }
   /** Simulate a worker identifying on its socket. */
-  identify(workerId: string): void {
-    this.connected.add(workerId);
-    for (const h of this.handlers) h({ workerId, connected: true });
+  identify(workerId: string, params: { claimsStarts?: boolean } = {}): void {
+    const claimsStarts = params.claimsStarts ?? true;
+    (claimsStarts ? this.connected : this.nonClaiming).add(workerId);
+    for (const h of this.handlers) h({ workerId, connected: true, claimsStarts });
   }
   /** Work messages per worker. */
   counts(): Record<string, number> {
@@ -163,9 +166,44 @@ describe("WorkerWakeups — who is woken", () => {
     wakeups.stop();
   });
 
+  it("never wakes a socket that does not claim starts, nor counts it in the rotation", async () => {
+    const { sockets, connect, wakeups, notifyApart } = setup({ cacheMs: 60_000 });
+    sockets.identify("agent-only", { claimsStarts: false });
+    await connect("w1", [ad("x")]);
+    await connect("w2", [ad("x")]);
+    for (let i = 0; i < 4; i++) {
+      const s = start("x");
+      await notifyApart(s);
+      wakeups.claimed([s]);
+    }
+    expect(sockets.counts()["agent-only"]).toBeUndefined();
+    // Every send woke two claiming workers (one start plus the margin).
+    expect(sockets.counts()).toEqual({ w1: 4, w2: 4 });
+    wakeups.stop();
+  });
+
+  it("a claiming worker still unknown after a re-read costs no further reads", async () => {
+    const { sockets, connect, wakeups, notifyApart, reads } = setup({ cacheMs: 60_000 });
+    await connect("known", [ad("x")]);
+    await notifyApart(start("x"));
+    expect(reads.reads).toBe(1);
+
+    sockets.connected.add("never-advertises");
+    for (let i = 0; i < 5; i++) await notifyApart(start("x"));
+    // One re-read for the new miss, then the window holds.
+    expect(reads.reads).toBe(2);
+
+    sockets.connected.add("another");
+    await notifyApart(start("x"));
+    expect(reads.reads).toBe(3);
+    wakeups.stop();
+  });
+
   it("wakes a worker as soon as it identifies", async () => {
     const { sockets, wakeups } = setup();
     sockets.identify("w1");
+    expect(sockets.counts()).toEqual({ w1: 1 });
+    sockets.identify("agent-only", { claimsStarts: false });
     expect(sockets.counts()).toEqual({ w1: 1 });
     wakeups.stop();
     sockets.identify("w2");
