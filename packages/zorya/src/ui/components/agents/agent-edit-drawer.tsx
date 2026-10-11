@@ -19,6 +19,8 @@ import type { RegisteredAgent } from "../../../server/routes/agents/agent-gatewa
 import type { SkillCatalogEntry } from "../../../server/routes/agent-catalog.ts";
 import { systemToolsFor, SystemToolsSection } from "./system-tools.tsx";
 import { KnowledgePicker } from "./knowledge-picker.tsx";
+import { McpServersPicker } from "./mcp-servers-picker.tsx";
+import { buildMcpServers, initMcpServers, type McpServerForm } from "../../lib/recipe-mcp-form.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { DraftTestModal } from "./agent-draft-test-modal.tsx";
 import type { Tenant } from "./agent-detail.tsx";
@@ -143,6 +145,11 @@ export function AgentEditDrawer({
     initKnowledge(isLocal ? agent.backend.knowledge : undefined),
   );
 
+  // MCP servers (local backends only) — `backend.mcpServers`.
+  const [mcpServers, setMcpServers] = useState<ReadonlyArray<McpServerForm>>(() =>
+    initMcpServers(isLocal ? agent.backend.mcpServers : undefined),
+  );
+
   // Tool selection (local backends only).
   const [selectedTools, setSelectedTools] = useState<ReadonlySet<string>>(
     new Set(roleDef?.tools ?? []),
@@ -165,6 +172,9 @@ export function AgentEditDrawer({
   const models = useMemo(() => modelsData?.models ?? [], [modelsData]);
   const { data: toolsData } = useFetch(() => api.listCatalogTools(), [], 0);
   const tools = useMemo(() => toolsData?.tools ?? [], [toolsData]);
+  // MCP tools reach an agent through its attached servers, not the role's tool list.
+  const pickableTools = useMemo(() => tools.filter((t) => t.source.kind !== "mcp"), [tools]);
+  const { data: mcpCatalog } = useFetch(() => api.listCatalogMcpServers(), [], 0);
   const { data: skillsData } = useFetch(() => api.listCatalogSkills(), [], 0);
   const catalogSkills = useMemo(() => skillsData?.skills ?? [], [skillsData]);
   const { data: retrieversData } = useFetch(() => api.listCatalogRetrievers(), [], 0);
@@ -220,12 +230,14 @@ export function AgentEditDrawer({
     const autoDistillValue = buildAutoDistill(autoDistill);
     const contextBudgetValue = buildContextBudget(contextBudget);
     const knowledgeValue = buildKnowledge(knowledge);
+    const mcpServersValue = buildMcpServers(mcpServers);
     const {
       maxStepsPerTurn: _stripSteps,
       autoCompact: _stripAutoCompact,
       autoDistill: _stripAutoDistill,
       contextBudget: _stripContextBudget,
       knowledge: _stripKnowledge,
+      mcpServers: _stripMcpServers,
       role: _stripRole,
       ...backendBase
     } = agent.backend;
@@ -262,6 +274,7 @@ export function AgentEditDrawer({
       ...(autoDistillValue !== undefined ? { autoDistill: autoDistillValue } : {}),
       ...(contextBudgetValue !== undefined ? { contextBudget: contextBudgetValue } : {}),
       ...(knowledgeValue.length > 0 ? { knowledge: knowledgeValue } : {}),
+      ...(mcpServersValue.length > 0 ? { mcpServers: mcpServersValue } : {}),
     } as typeof agent.backend;
     return { backend, metadata };
   };
@@ -517,7 +530,11 @@ export function AgentEditDrawer({
           )}
 
           {isLocal && (
-            <ToolPicker tools={tools} selected={selectedTools} onChange={setSelectedTools} />
+            <ToolPicker
+              tools={pickableTools}
+              selected={selectedTools}
+              onChange={setSelectedTools}
+            />
           )}
 
           {isLocal && (
@@ -533,6 +550,15 @@ export function AgentEditDrawer({
               retrievers={catalogRetrievers}
               bindings={knowledge}
               onChange={setKnowledge}
+            />
+          )}
+
+          {isLocal && (
+            <McpServersPicker
+              catalog={mcpCatalog}
+              tools={tools}
+              rows={mcpServers}
+              onChange={setMcpServers}
             />
           )}
 

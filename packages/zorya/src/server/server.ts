@@ -45,6 +45,7 @@ import type { ZoryaAgents } from "./services/agents/index.ts";
 import type { ZoryaDags } from "./services/dags/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
 import type { ZoryaKnowledgeBases } from "./services/knowledge/index.ts";
+import type { ZoryaMcpServers } from "./services/mcp/index.ts";
 import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
 import type { ZoryaWorkflowBuilder } from "./services/workflow-builder/index.ts";
@@ -91,6 +92,8 @@ export class ZoryaServer {
   readonly fragments?: ZoryaFragments;
   readonly dags?: ZoryaDags;
   readonly knowledgeBases?: ZoryaKnowledgeBases;
+  /** The operator's MCP allowlist and client pool (`ZoryaServerConfig.mcp`). */
+  readonly mcp?: ZoryaMcpServers;
   /** The visual workflow builder, when configured (`/api/workflow-builder/*`). */
   readonly workflowBuilder?: ZoryaWorkflowBuilder;
   /**
@@ -164,6 +167,7 @@ export class ZoryaServer {
     if (config.fragments) this.fragments = config.fragments;
     if (config.dags) this.dags = config.dags;
     if (config.knowledgeBases) this.knowledgeBases = config.knowledgeBases;
+    if (config.mcp) this.mcp = config.mcp;
     if (config.workflowBuilder) this.workflowBuilder = config.workflowBuilder;
     if (config.secrets) this.secrets = config.secrets;
     if (config.namespaces) this.namespaces = config.namespaces;
@@ -240,6 +244,7 @@ export class ZoryaServer {
         skills: this.skills,
         fragments: this.fragments,
         knowledgeBases: this.knowledgeBases,
+        mcp: this.mcp,
         workflowBuilder: this.workflowBuilder,
         retention: this.retention,
         namespaces: namespaces && {
@@ -347,6 +352,7 @@ export class ZoryaServer {
         skills: this.skills,
         fragments: this.fragments,
         secrets: this.secrets,
+        mcp: this.mcp,
         namespaces,
         clock,
       });

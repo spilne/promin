@@ -1,77 +1,141 @@
 // ---------------------------------------------------------------------------
-// MCP integration — connect promin agents to Model Context Protocol servers.
+// MCP integration — connect agents to Model Context Protocol servers.
 //
-// Customer-side data integration: customer runs MCP servers (Confluence,
-// GitHub, Postgres, Slack, Notion, Linear, etc.) inside their network
-// with their own creds; agents call those servers as tools. Data stays
-// customer-side; only the per-call slice the agent needs flows out.
+// Two layers of config, with different trust:
 //
-// Why an abstract `McpClient` rather than direct SDK imports everywhere:
-//   1. Tests can use a fake client without spinning up a real MCP server.
-//   2. Future transports / mock servers / record-replay implementations
-//      slot in without touching `createMcpTools`.
-//   3. The SDK API is JS-side rich; this interface narrows it to what
-//      the agent layer actually needs (list + call + close).
+//   McpServerConfig  — operator-defined (host code, server config). Says how
+//                      to reach a server (a stdio command, an http URL), the
+//                      credential it gets, and how far to trust it (approval,
+//                      idempotency, timeout, concurrency, tool cap). Never
+//                      comes from a recipe.
+//   McpServerRecipe  — what a recipe (tenant-editable data) may say: attach
+//                      an operator-defined server by name, or — when the
+//                      operator opts in — name an http endpoint that the
+//                      outbound policy then vets. A recipe can never supply a
+//                      command, env, cwd, header or credential.
 //
-// `createMcpTools(client)` adapts the four `listTools` / `callTool`
-// methods into AgentTools the agent loop already understands. The agent
-// loop sees them as ordinary tools — no MCP awareness required.
+// `loadMcpToolsFromRecipe` turns the recipe entries into configs against
+// the operator's allowlist, opens clients through a `McpClientPool` and
+// adapts each server tool into an `AgentTool` (`createMcpTools`).
 // ---------------------------------------------------------------------------
 
-/**
- * Declarative MCP server connection config. The `transport` field
- * discriminates how the client talks to the server:
- *
- *   stdio — spawn a local process (typical for CLI MCP servers)
- *   http  — connect to a remote MCP server over HTTP (Streamable HTTP)
- *   sse   — connect to a remote MCP server over Server-Sent Events
- *
- * `auth` is currently bearer-only; richer auth (OAuth, mTLS) lands
- * with later transport / cloud needs.
- */
-export type McpServerConfig = StdioMcpServerConfig | HttpMcpServerConfig | SseMcpServerConfig;
+/** Operator-defined MCP server: how to reach it and how far to trust it. */
+export type McpServerConfig = StdioMcpServerConfig | HttpMcpServerConfig;
 
 export interface BaseMcpServerConfig {
-  /** Logical id for this server. Tools mount under `<name>:<toolName>`. */
-  readonly name: string;
   /**
-   * Optional credential lookup name. When set, the host resolves the
-   * value from a secrets store at connect time. Lets recipes ship the
-   * server config without embedding API tokens (BYOK).
+   * Logical id. Prefixes the server's tools (`<name>__<tool>`) and names
+   * the server in the catalog. Recipes attach allowlisted servers by it.
+   */
+  readonly name: string;
+  /** What the server is for. Shown in the catalog and the agent editor. */
+  readonly description?: string;
+  /**
+   * `SecretsStorage` key of the credential the server needs. Resolved at
+   * connect time at the caller's scope (resource → namespace → global), so a
+   * tenant can supply its own. An http server sends it as a bearer token to
+   * its own `url` only (redirects are not followed), a stdio server receives
+   * it in the environment variable `credentialEnv`. Only operator-defined
+   * servers carry credentials.
    */
   readonly credentialRef?: string;
-  /** Per-call timeout in milliseconds. Default: no timeout. */
+  /** Per-call time limit (ms), also the deadline for listing tools. Default `DEFAULT_MCP_TIMEOUT_MS`. */
   readonly timeoutMs?: number;
+  /**
+   * Calls one client runs at once; further calls wait their turn.
+   * Default `DEFAULT_MCP_MAX_CONCURRENT_CALLS`.
+   */
+  readonly maxConcurrentCalls?: number;
+  /**
+   * Whether every call waits for a human approval. Default `true`: an MCP
+   * server is third-party code whose tools may act on the outside world.
+   * Only the operator can turn it off.
+   */
+  readonly requireApproval?: boolean;
+  /**
+   * Whether the engine may re-run a call whose outcome a crash left
+   * unknown (see `AgentTool.idempotent`). Default `false`.
+   */
+  readonly idempotent?: boolean;
+  /** Expose only these MCP tool names. Default: every tool the server lists. */
+  readonly tools?: ReadonlyArray<string>;
+  /**
+   * Most tools exposed from this server; the rest are skipped and reported.
+   * Default `DEFAULT_MCP_MAX_TOOLS`.
+   */
+  readonly maxTools?: number;
 }
 
 export interface StdioMcpServerConfig extends BaseMcpServerConfig {
   readonly transport: "stdio";
-  /** Executable to spawn, e.g. `["uvx", "mcp-server-postgres"]`. */
-  readonly command: ReadonlyArray<string>;
-  /** Extra environment variables for the spawned process. */
+  /** Executable to spawn, e.g. `"uvx"`. */
+  readonly command: string;
+  readonly args?: ReadonlyArray<string>;
+  /**
+   * Extra environment variables. The process otherwise gets only the MCP
+   * SDK's safe default set (`PATH`, `HOME`, `USER`, …), never the host's
+   * own environment.
+   */
   readonly env?: Readonly<Record<string, string>>;
   /** Working directory for the spawned process. */
   readonly cwd?: string;
+  /** Environment variable that receives the resolved `credentialRef`. */
+  readonly credentialEnv?: string;
 }
 
 export interface HttpMcpServerConfig extends BaseMcpServerConfig {
+  /** Streamable HTTP transport. */
   readonly transport: "http";
   readonly url: string;
-  /** Optional bearer token. Use `credentialRef` instead for BYOK. */
-  readonly authToken?: string;
-}
-
-export interface SseMcpServerConfig extends BaseMcpServerConfig {
-  readonly transport: "sse";
-  readonly url: string;
-  readonly authToken?: string;
+  /** Static request headers (never the credential: use `credentialRef`). */
+  readonly headers?: Readonly<Record<string, string>>;
+  /**
+   * Let this server live on a private, loopback or link-local address.
+   * Default `false`: like any outbound call, the URL must resolve to public
+   * addresses. Set it for an in-cluster server the operator runs.
+   */
+  readonly allowPrivateNetwork?: boolean;
 }
 
 /**
- * One tool advertised by an MCP server. Mirrors the MCP spec's tool
- * descriptor. `inputSchema` is JSON Schema (the spec's canonical form);
- * `createMcpTools` keeps it as JSON Schema so MCP servers stay the
- * source of truth for parameter validation.
+ * A recipe's MCP entry. Either attaches an operator-defined server by name
+ * (`{ server }`), or names an http endpoint (`{ name, transport: "http",
+ * url }`) — accepted only when the host opts in — that the outbound policy
+ * vets and that always requires approval. `tools` narrows the server's
+ * tools; it can never widen them. A recipe carries no credential: recipes
+ * are not owned by the tenants that invoke them, so a recipe-chosen URL
+ * must never receive a tenant's secret.
+ */
+export type McpServerRecipe = McpServerRefRecipe | McpHttpServerRecipe;
+
+export interface McpServerRefRecipe {
+  /** Name of an operator-defined server. */
+  readonly server: string;
+  readonly tools?: ReadonlyArray<string>;
+}
+
+export interface McpHttpServerRecipe {
+  readonly name: string;
+  readonly transport: "http";
+  readonly url: string;
+  readonly tools?: ReadonlyArray<string>;
+}
+
+/** Names MCP servers may have (operator-defined and recipe-supplied alike). */
+export const MCP_RECIPE_SERVER_NAME = /^[A-Za-z0-9_-]{1,48}$/;
+
+/** Default per-call time limit for MCP tools (ms). */
+export const DEFAULT_MCP_TIMEOUT_MS = 60_000;
+/** Default bound on concurrent calls through one MCP client. */
+export const DEFAULT_MCP_MAX_CONCURRENT_CALLS = 4;
+/** Default bound on the tools one server exposes. */
+export const DEFAULT_MCP_MAX_TOOLS = 128;
+/** Bound on the tools a recipe-supplied http server exposes. */
+export const RECIPE_MCP_MAX_TOOLS = 32;
+
+/**
+ * One tool advertised by an MCP server. `inputSchema` is the JSON Schema of
+ * its arguments, as the server sent it.
  */
 export interface McpToolDefinition {
   readonly name: string;
@@ -79,13 +143,7 @@ export interface McpToolDefinition {
   readonly inputSchema: Readonly<Record<string, unknown>>;
 }
 
-/**
- * Result of one `callTool` invocation. MCP returns content blocks
- * (text, images, resources, etc.); for the agent loop we surface a
- * unified textual representation. Callers that need richer media
- * routing can extend the adapter to forward through the agent loop's
- * `tool.progress` channel.
- */
+/** Result of one `callTool`: MCP content blocks plus the server's error flag. */
 export interface McpToolResult {
   readonly isError?: boolean;
   readonly content: ReadonlyArray<McpContentBlock>;
@@ -103,21 +161,40 @@ export type McpContentBlock =
       };
     };
 
+/** Per-call options for `McpClient.callTool` / `listTools`. */
+export interface McpCallOptions {
+  /** Aborts the request; the server is told to cancel it. */
+  readonly signal?: AbortSignal;
+  /** Time limit for the request (ms); for `listTools`, for all its pages together. */
+  readonly timeoutMs?: number;
+}
+
 /**
- * Abstract MCP client. The SDK-backed implementation lives in
- * `mcp-client.ts`; tests use a fake client that returns canned
- * responses without spawning a server.
+ * One connection to an MCP server. The SDK-backed implementation lives in
+ * `mcp-client.ts`.
  */
 export interface McpClient {
-  /** Logical name (matches the config) — surfaces in tool prefixes. */
-  readonly name: string;
-  /** Probe the server for its tool list. Cached by callers as needed. */
-  listTools(): Promise<McpToolDefinition[]>;
-  /** Invoke a tool by name with arbitrary JSON arguments. */
+  /**
+   * True once the connection is gone for good: the transport closed (a
+   * stdio server exited) or a request failed below the protocol (a
+   * network error). A pool drops a closed client and connects anew.
+   */
+  readonly closed: boolean;
+  listTools(options?: McpCallOptions): Promise<McpToolDefinition[]>;
   callTool(params: {
     readonly name: string;
     readonly arguments: Readonly<Record<string, unknown>>;
+    readonly options?: McpCallOptions;
   }): Promise<McpToolResult>;
-  /** Tear down the connection / spawn. Idempotent. */
+  /** Tear down the connection / process. Idempotent. */
   close(): Promise<void>;
+}
+
+/**
+ * Where an MCP-backed `AgentTool` came from: the server and the tool's
+ * original MCP name (the agent-facing name is sanitized).
+ */
+export interface McpToolOrigin {
+  readonly server: string;
+  readonly tool: string;
 }

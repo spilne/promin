@@ -1,7 +1,8 @@
 // ---------------------------------------------------------------------------
 // ToolsPage — read-only catalog of every tool the host has wired in.
-// Shows tool name, description, source (in-process / file / MCP), and
-// an expandable JSON Schema view for parameters.
+// Shows tool name, description, source (in-process / file / MCP), trust
+// (approval, idempotency, untrusted MCP output), an expandable JSON Schema
+// view for parameters, and the MCP servers the catalog could not list.
 //
 // Drives nothing today — this is the operator-facing 'what tools does
 // this deployment have?' surface. The Designer's tool multi-select can
@@ -14,6 +15,7 @@ import { useFetch } from "../../hooks/use-fetch.ts";
 import {
   api,
   type ToolCatalogEntryDto,
+  type ToolCatalogErrorDto,
   type ToolCatalogHealthDto,
   type ToolCatalogSourceDto,
 } from "../../api/client.ts";
@@ -31,6 +33,7 @@ export function ToolsPage() {
   const [sourceFilter, setSourceFilter] = useState<"all" | "in-process" | "file" | "mcp">("all");
 
   const tools = data?.tools ?? [];
+  const catalogErrors = data?.errors ?? [];
   const orphans = health?.orphans ?? [];
 
   const filtered = useMemo(() => {
@@ -96,6 +99,7 @@ export function ToolsPage() {
         }
       />
 
+      {catalogErrors.length > 0 && <CatalogErrorsPanel errors={catalogErrors} />}
       {orphans.length > 0 && <OrphansPanel orphans={orphans} />}
 
       {tools.length > 0 && (
@@ -129,15 +133,16 @@ export function ToolsPage() {
                 <th class="w-1/4">Name</th>
                 <th>Description</th>
                 <th class="w-32">Source</th>
+                <th class="w-40">Trust</th>
                 <th class="w-24 text-right">Params</th>
               </tr>
             </thead>
             <tbody>
               {loading && !data ? (
-                <SkeletonRows rows={4} cols={4} />
+                <SkeletonRows rows={4} cols={5} />
               ) : filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={4} class="text-center text-base-content/50 py-8">
+                  <td colSpan={5} class="text-center text-base-content/50 py-8">
                     {tools.length === 0
                       ? "No tools registered. Wire AgentToolCatalog into ZoryaAgents config."
                       : `No tools match "${query}"${sourceFilter !== "all" ? ` in ${sourceFilter}` : ""}.`}
@@ -171,6 +176,9 @@ function ToolRow({ tool }: { tool: ToolCatalogEntryDto }) {
         <td>
           <SourceBadge source={tool.source} />
         </td>
+        <td>
+          <TrustBadges tool={tool} />
+        </td>
         <td class="text-right">
           <button class="btn btn-xs btn-ghost" onClick={() => setExpanded((v) => !v)}>
             {expanded ? "Hide" : "Show"}
@@ -179,7 +187,7 @@ function ToolRow({ tool }: { tool: ToolCatalogEntryDto }) {
       </tr>
       {expanded && (
         <tr>
-          <td colSpan={4} class="bg-base-200">
+          <td colSpan={5} class="bg-base-200">
             <pre class="text-[11px] font-mono p-2 whitespace-pre-wrap break-words">
               {JSON.stringify(tool.parameters, null, 2)}
             </pre>
@@ -187,6 +195,57 @@ function ToolRow({ tool }: { tool: ToolCatalogEntryDto }) {
         </tr>
       )}
     </>
+  );
+}
+
+function TrustBadges({ tool }: { tool: ToolCatalogEntryDto }) {
+  return (
+    <div class="flex gap-1 flex-wrap">
+      {tool.requireApproval && (
+        <span
+          class="badge badge-xs badge-warning badge-outline"
+          title="Each call waits for approval"
+        >
+          approval
+        </span>
+      )}
+      {tool.idempotent && (
+        <span class="badge badge-xs badge-outline" title="Re-run after a crash">
+          idempotent
+        </span>
+      )}
+      {tool.source.kind === "mcp" && (
+        <span
+          class="badge badge-xs badge-error badge-outline"
+          title="Description and output come from the MCP server and are treated as untrusted data"
+        >
+          untrusted output
+        </span>
+      )}
+    </div>
+  );
+}
+
+function CatalogErrorsPanel({ errors }: { errors: ToolCatalogErrorDto[] }) {
+  return (
+    <div class="card bg-error/10 border border-error/30 shadow-sm">
+      <div class="card-body p-4 space-y-2">
+        <div class="flex items-center gap-2">
+          <span class="text-error">⚠</span>
+          <h3 class="text-sm font-semibold">MCP servers or tools that could not be listed</h3>
+          <span class="badge badge-sm badge-error badge-outline">{errors.length}</span>
+        </div>
+        <ul class="text-xs space-y-1">
+          {errors.map((e) => (
+            <li class="font-mono">
+              <span class="font-semibold">{e.server}</span>
+              {e.tool !== undefined && <span class="opacity-70">/{e.tool}</span>}:{" "}
+              <span class="text-base-content/70">{e.message}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
   );
 }
 
@@ -250,7 +309,7 @@ function SourceBadge({ source }: { source: ToolCatalogSourceDto }) {
   return (
     <span
       class="badge badge-sm badge-outline badge-secondary font-mono text-xs"
-      title={`MCP server: ${source.server}`}
+      title={`MCP server: ${source.server} (${source.transport}), tool '${source.tool}'`}
     >
       mcp:{source.server}
     </span>

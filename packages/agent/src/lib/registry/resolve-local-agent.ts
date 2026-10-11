@@ -168,6 +168,13 @@ export interface ResolveLocalAgentDeps {
    * the catalog from the role's `skills` when a role is bound).
    */
   readonly role?: RoleDefinition;
+  /**
+   * Tools of the recipe's `backend.mcpServers`, pre-resolved by
+   * `loadMcpToolsFromRecipe` (async: it connects) before calling this
+   * resolver. Every one is attached to the agent. A recipe that declares
+   * MCP servers without this throws, so they are never silently dropped.
+   */
+  readonly mcpTools?: Readonly<Record<string, AgentTool<any, any>>>;
 }
 
 /**
@@ -191,6 +198,7 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
   const effective = effectiveDefinition(agent, deps.role);
 
   const tools = pickTools(effective.tools, deps.tools, deps.onUnknownTool ?? "throw");
+  attachMcpTools({ agent, backend, tools, mcpTools: deps.mcpTools });
 
   // Skills: when the recipe declares a catalog AND the host pre-resolved it
   // (deps.skillCatalog, via resolveSkillCatalog) we (a) append the catalog
@@ -267,6 +275,34 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
   };
 
   return new LocalAgent(config);
+}
+
+/**
+ * Add the recipe's pre-resolved MCP tools to `tools`. Throws when the
+ * recipe declares MCP servers the host did not resolve, or when an MCP
+ * tool name collides with a tool the role already picked.
+ */
+function attachMcpTools(params: {
+  agent: RegisteredAgent;
+  backend: LocalAgentBackend;
+  tools: Record<string, AgentTool<any, any>>;
+  mcpTools: ResolveLocalAgentDeps["mcpTools"];
+}): void {
+  const { agent, backend, tools, mcpTools } = params;
+  if ((backend.mcpServers?.length ?? 0) > 0 && mcpTools === undefined) {
+    throw new Error(
+      `resolveLocalAgent: recipe "${agent.id}" attaches MCP servers but deps.mcpTools is ` +
+        "unset. Load them with loadMcpToolsFromRecipe() and pass the result.",
+    );
+  }
+  for (const [name, tool] of Object.entries(mcpTools ?? {})) {
+    if (tools[name] !== undefined) {
+      throw new Error(
+        `resolveLocalAgent: MCP tool "${name}" collides with a tool of the same name.`,
+      );
+    }
+    tools[name] = tool;
+  }
 }
 
 /**

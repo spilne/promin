@@ -1,180 +1,246 @@
 // ---------------------------------------------------------------------------
-// McpClientPool tests — InMemoryMcpClientPool covers the lifecycle
-// semantics; DefaultMcpClientPool is exercised indirectly via the
-// caching contract (without spinning up real MCP servers, which would
-// turn this into an integration test).
+// McpClientPool against real in-process MCP servers: client reuse and
+// isolation by (config, namespace, credential), dead-client eviction,
+// bounded concurrency, abort and timeout.
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { InMemoryMcpClientPool } from "../mcp-client-pool.ts";
-import { loadMcpToolsFromRecipe } from "../load-mcp-tools-from-recipe.ts";
-import type { McpClient, McpServerConfig, McpToolDefinition, McpToolResult } from "../types.ts";
-import type { RegisteredAgent } from "../../registry/types.ts";
+import { McpClientPool } from "../mcp-client-pool.ts";
+import type { McpServerConfig } from "../types.ts";
+import {
+  createTestMcpServer,
+  inMemoryConnect,
+  text,
+  textResult,
+  until,
+} from "./mcp-test-server.ts";
 
-class FakeMcpClient implements McpClient {
-  public closed = false;
-  public callLog: Array<{ name: string }> = [];
-  constructor(
-    public readonly name: string,
-    private readonly tools: McpToolDefinition[],
-  ) {}
-  async listTools() {
-    return this.tools;
-  }
-  async callTool(params: {
-    name: string;
-    arguments: Readonly<Record<string, unknown>>;
-  }): Promise<McpToolResult> {
-    this.callLog.push({ name: params.name });
-    return { content: [{ type: "text", text: `${this.name}:${params.name}` }] };
-  }
-  async close() {
-    this.closed = true;
-  }
+const ECHO_SCHEMA = { type: "object", properties: { v: { type: "string" } } } as const;
+
+function echoServer() {
+  return createTestMcpServer({
+    tools: [
+      {
+        name: "echo",
+        inputSchema: ECHO_SCHEMA,
+        handler: ({ arguments: args }) => text(String(args["v"])),
+      },
+    ],
+  });
 }
 
-function recipe(servers: McpServerConfig[]): RegisteredAgent {
-  return {
-    id: "test-agent",
-    version: "v1",
-    backend: {
-      type: "local",
-      model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-      role: { inline: { systemPrompt: null, tools: [] } },
-      mcpServers: servers,
-    },
-    metadata: { description: null, capabilities: [], tags: [] },
-    createdAt: 0,
-    updatedAt: 0,
-  };
-}
+const github: McpServerConfig = { name: "github", transport: "stdio", command: "gh-mcp" };
 
-describe("InMemoryMcpClientPool", () => {
-  it("returns the registered factory's client on first get", async () => {
-    const pool = new InMemoryMcpClientPool();
-    const client = new FakeMcpClient("github", [{ name: "list_repos", inputSchema: {} }]);
-    pool.register("github", () => client);
-    const got = await pool.get({ name: "github", transport: "stdio", command: ["x"] });
-    expect(got).toBe(client);
-  });
-
-  it("caches clients across get() calls — second get reuses first", async () => {
-    const pool = new InMemoryMcpClientPool();
-    let factoryCalls = 0;
-    pool.register("fs", () => {
-      factoryCalls += 1;
-      return new FakeMcpClient("fs", [{ name: "read", inputSchema: {} }]);
-    });
-    const a = await pool.get({ name: "fs", transport: "stdio", command: ["x"] });
-    const b = await pool.get({ name: "fs", transport: "stdio", command: ["y"] }); // different args, same name
-    expect(a).toBe(b);
-    expect(factoryCalls).toBe(1);
-  });
-
-  it("throws clearly when no factory is registered for a server name", async () => {
-    const pool = new InMemoryMcpClientPool();
-    expect(pool.get({ name: "missing", transport: "stdio", command: ["x"] })).rejects.toThrow(
-      /no factory registered/,
-    );
-  });
-
-  it("closeAll closes every cached client", async () => {
-    const pool = new InMemoryMcpClientPool();
-    const a = new FakeMcpClient("a", []);
-    const b = new FakeMcpClient("b", []);
-    pool.register("a", () => a);
-    pool.register("b", () => b);
-    await pool.get({ name: "a", transport: "stdio", command: ["x"] });
-    await pool.get({ name: "b", transport: "stdio", command: ["x"] });
+describe("McpClientPool — keys", () => {
+  it("reuses one client for the same config, namespace and credential", async () => {
+    const { connect, connections } = inMemoryConnect(() => echoServer());
+    const pool = new McpClientPool({ connect });
+    const a = pool.server({ server: github, namespaceId: "acme" });
+    const b = pool.server({ server: { ...github }, namespaceId: "acme" });
+    expect(a.key).toBe(b.key);
+    await a.callTool({ name: "echo", arguments: { v: "1" } });
+    await b.callTool({ name: "echo", arguments: { v: "2" } });
+    expect(connections).toHaveLength(1);
     await pool.closeAll();
-    expect(a.closed).toBe(true);
-    expect(b.closed).toBe(true);
   });
 
-  it("closeAll resets the cache — next get() opens fresh", async () => {
-    const pool = new InMemoryMcpClientPool();
-    let factoryCalls = 0;
-    pool.register("fs", () => {
-      factoryCalls += 1;
-      return new FakeMcpClient("fs", []);
-    });
-    await pool.get({ name: "fs", transport: "stdio", command: ["x"] });
+  it("isolates tenants: the same server under two namespaces gets two clients", async () => {
+    const { connect, connections } = inMemoryConnect(() => echoServer());
+    const pool = new McpClientPool({ connect });
+    const acme = pool.server({ server: github, namespaceId: "acme" });
+    const globex = pool.server({ server: github, namespaceId: "globex" });
+    expect(acme.key).not.toBe(globex.key);
+    await acme.callTool({ name: "echo", arguments: { v: "x" } });
+    await globex.callTool({ name: "echo", arguments: { v: "y" } });
+    expect(connections).toHaveLength(2);
+    expect(pool.size).toBe(2);
     await pool.closeAll();
-    await pool.get({ name: "fs", transport: "stdio", command: ["x"] });
-    expect(factoryCalls).toBe(2);
+  });
+
+  it("never shares a client between two configs that share a name", async () => {
+    const { connect, connections } = inMemoryConnect(() => echoServer());
+    const pool = new McpClientPool({ connect });
+    const one = pool.server({ server: { ...github, args: ["--org", "a"] }, namespaceId: "acme" });
+    const two = pool.server({ server: { ...github, args: ["--org", "b"] }, namespaceId: "acme" });
+    await one.callTool({ name: "echo", arguments: { v: "x" } });
+    await two.callTool({ name: "echo", arguments: { v: "y" } });
+    expect(connections.map((c) => c.server)).toEqual([
+      { ...github, args: ["--org", "a"] },
+      { ...github, args: ["--org", "b"] },
+    ]);
+    await pool.closeAll();
+  });
+
+  it("keys by credential: each credential reaches only its own connection", async () => {
+    const { connect, connections } = inMemoryConnect(() => echoServer());
+    const pool = new McpClientPool({ connect });
+    await pool
+      .server({ server: github, namespaceId: "acme", credential: "tok-a" })
+      .callTool({ name: "echo", arguments: { v: "x" } });
+    await pool
+      .server({ server: github, namespaceId: "acme", credential: "tok-b" })
+      .callTool({ name: "echo", arguments: { v: "y" } });
+    expect(connections.map((c) => c.credential)).toEqual(["tok-a", "tok-b"]);
+    await pool.closeAll();
+  });
+
+  it("closes the least recently used idle clients beyond maxClients", async () => {
+    const { connect, connections } = inMemoryConnect(() => echoServer());
+    const pool = new McpClientPool({ connect, maxClients: 2 });
+    for (const ns of ["a", "b", "c"]) {
+      await pool.server({ server: github, namespaceId: ns }).listTools();
+    }
+    expect(pool.size).toBe(2);
+    // The first client was closed and dropped; using it again reconnects.
+    await pool.server({ server: github, namespaceId: "a" }).listTools();
+    expect(connections).toHaveLength(4);
+    await pool.closeAll();
   });
 });
 
-describe("loadMcpToolsFromRecipe", () => {
-  it("returns empty record when recipe has no mcpServers", async () => {
-    const pool = new InMemoryMcpClientPool();
-    const r: RegisteredAgent = {
-      id: "test",
-      version: "v1",
-      backend: {
-        type: "local",
-        model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        role: { inline: { systemPrompt: null, tools: [] } },
+describe("McpClientPool — dead clients", () => {
+  it("drops a client whose transport closed and reconnects on the next call", async () => {
+    const { connect, connections } = inMemoryConnect(() => echoServer());
+    const pool = new McpClientPool({ connect });
+    const handle = pool.server({ server: github, namespaceId: "acme" });
+    expect(await handle.callTool({ name: "echo", arguments: { v: "1" } })).toEqual(textResult("1"));
+
+    await connections[0]!.mcpServer.close(); // the server went away
+    expect(await handle.callTool({ name: "echo", arguments: { v: "2" } })).toEqual(textResult("2"));
+    expect(connections).toHaveLength(2);
+    await pool.closeAll();
+  });
+
+  it("retries the connect after a failed one", async () => {
+    let attempts = 0;
+    const inner = inMemoryConnect(() => echoServer());
+    const pool = new McpClientPool({
+      connect: async (params) => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("spawn failed");
+        return inner.connect(params);
       },
-      metadata: { description: null, capabilities: [], tags: [] },
-      createdAt: 0,
-      updatedAt: 0,
-    };
-    const tools = await loadMcpToolsFromRecipe({ recipe: r, pool });
-    expect(tools).toEqual({});
+    });
+    const handle = pool.server({ server: github });
+    await expect(handle.listTools()).rejects.toThrow("spawn failed");
+    expect((await handle.listTools()).map((t) => t.name)).toEqual(["echo"]);
+    await pool.closeAll();
+  });
+});
+
+describe("McpClientPool — calls", () => {
+  function gatedServer(state: { inFlight: number; peak: number; gates: Array<() => void> }) {
+    return createTestMcpServer({
+      tools: [
+        {
+          name: "slow",
+          inputSchema: { type: "object" },
+          handler: async () => {
+            state.inFlight += 1;
+            state.peak = Math.max(state.peak, state.inFlight);
+            await new Promise<void>((resolve) => state.gates.push(resolve));
+            state.inFlight -= 1;
+            return text("done");
+          },
+        },
+      ],
+    });
+  }
+
+  it("bounds concurrent calls per client by maxConcurrentCalls", async () => {
+    const state = { inFlight: 0, peak: 0, gates: [] as Array<() => void> };
+    const { connect } = inMemoryConnect(() => gatedServer(state));
+    const pool = new McpClientPool({ connect });
+    const handle = pool.server({ server: { ...github, maxConcurrentCalls: 2 } });
+    const calls = Array.from({ length: 5 }, () => handle.callTool({ name: "slow", arguments: {} }));
+    await until(() => state.gates.length === 2);
+    expect(state.inFlight).toBe(2);
+    while (state.gates.length > 0 || state.inFlight > 0) {
+      state.gates.shift()?.();
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    expect(await Promise.all(calls)).toHaveLength(5);
+    expect(state.peak).toBe(2);
+    await pool.closeAll();
   });
 
-  it("returns empty record for non-local backends", async () => {
-    const pool = new InMemoryMcpClientPool();
-    const r: RegisteredAgent = {
-      id: "remote",
-      version: "v1",
-      backend: { type: "remote", endpoint: "https://x", remoteAgentId: "x" },
-      metadata: { description: null, capabilities: [], tags: [] },
-      createdAt: 0,
-      updatedAt: 0,
-    };
-    const tools = await loadMcpToolsFromRecipe({ recipe: r, pool });
-    expect(tools).toEqual({});
+  it("a call aborted while queued leaves the queue without taking a slot", async () => {
+    const state = { inFlight: 0, peak: 0, gates: [] as Array<() => void> };
+    const { connect } = inMemoryConnect(() => gatedServer(state));
+    const pool = new McpClientPool({ connect });
+    const handle = pool.server({ server: { ...github, maxConcurrentCalls: 1 } });
+    const first = handle.callTool({ name: "slow", arguments: {} });
+    await until(() => state.gates.length === 1);
+    const controller = new AbortController();
+    const queued = handle.callTool({
+      name: "slow",
+      arguments: {},
+      options: { signal: controller.signal },
+    });
+    controller.abort(new Error("cancelled by caller"));
+    await expect(queued).rejects.toThrow("cancelled by caller");
+    state.gates.shift()!();
+    await first;
+    // The slot is free again: the next call runs.
+    const next = handle.callTool({ name: "slow", arguments: {} });
+    await until(() => state.gates.length === 1);
+    state.gates.shift()!();
+    expect(await next).toEqual(textResult("done"));
+    await pool.closeAll();
   });
 
-  it("merges tools from multiple servers, mounted as <server>:<tool>", async () => {
-    const pool = new InMemoryMcpClientPool();
-    pool.register(
-      "github",
-      () =>
-        new FakeMcpClient("github", [
-          { name: "list_repos", description: "list repos", inputSchema: {} },
-          { name: "get_issue", description: "fetch issue", inputSchema: {} },
-        ]),
+  it("aborting an in-flight call cancels it on the server and keeps the client", async () => {
+    let serverSignal: AbortSignal | undefined;
+    const { connect, connections } = inMemoryConnect(() =>
+      createTestMcpServer({
+        tools: [
+          {
+            name: "hang",
+            inputSchema: { type: "object" },
+            handler: ({ signal }) => {
+              serverSignal = signal;
+              return new Promise(() => {});
+            },
+          },
+          { name: "echo", inputSchema: ECHO_SCHEMA, handler: () => text("still here") },
+        ],
+      }),
     );
-    pool.register(
-      "wiki",
-      () =>
-        new FakeMcpClient("wiki", [{ name: "fetch", description: "fetch doc", inputSchema: {} }]),
+    const pool = new McpClientPool({ connect });
+    const handle = pool.server({ server: github });
+    const controller = new AbortController();
+    const call = handle.callTool({
+      name: "hang",
+      arguments: {},
+      options: { signal: controller.signal },
+    });
+    await until(() => serverSignal !== undefined);
+    controller.abort(new Error("turn cancelled"));
+    await expect(call).rejects.toThrow("turn cancelled");
+    await until(() => serverSignal?.aborted === true);
+    expect(await handle.callTool({ name: "echo", arguments: {} })).toEqual(
+      textResult("still here"),
     );
-    const r = recipe([
-      { name: "github", transport: "stdio", command: ["mcp-github"] },
-      { name: "wiki", transport: "http", url: "https://wiki.example.com" },
-    ]);
-    const tools = await loadMcpToolsFromRecipe({ recipe: r, pool });
-    expect(Object.keys(tools).sort()).toEqual([
-      "github:get_issue",
-      "github:list_repos",
-      "wiki:fetch",
-    ]);
+    expect(connections).toHaveLength(1);
+    await pool.closeAll();
   });
 
-  it("throws on tool-name collision across servers (same server name twice in recipe)", async () => {
-    const pool = new InMemoryMcpClientPool();
-    pool.register("dup", () => new FakeMcpClient("dup", [{ name: "tool1", inputSchema: {} }]));
-    // Recipe lists the same server twice (same name) — pool returns the
-    // cached client both times, but loadMcpToolsFromRecipe walks both
-    // entries and tries to insert dup:tool1 twice → collision.
-    const r = recipe([
-      { name: "dup", transport: "stdio", command: ["x"] },
-      { name: "dup", transport: "stdio", command: ["x"] },
-    ]);
-    expect(loadMcpToolsFromRecipe({ recipe: r, pool })).rejects.toThrow(/tool name collision/);
+  it("enforces timeoutMs on the request and keeps the client", async () => {
+    const { connect, connections } = inMemoryConnect(() =>
+      createTestMcpServer({
+        tools: [
+          { name: "hang", inputSchema: { type: "object" }, handler: () => new Promise(() => {}) },
+          { name: "echo", inputSchema: ECHO_SCHEMA, handler: () => text("ok") },
+        ],
+      }),
+    );
+    const pool = new McpClientPool({ connect });
+    const handle = pool.server({ server: github });
+    await expect(
+      handle.callTool({ name: "hang", arguments: {}, options: { timeoutMs: 20 } }),
+    ).rejects.toThrow(/timed out/i);
+    expect(await handle.callTool({ name: "echo", arguments: {} })).toEqual(textResult("ok"));
+    expect(connections).toHaveLength(1);
+    await pool.closeAll();
   });
 });

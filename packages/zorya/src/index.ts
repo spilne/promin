@@ -74,6 +74,16 @@ export {
 } from "./server/services/fragments/index.ts";
 export { ZoryaDags, type ZoryaDagsConfig } from "./server/services/dags/index.ts";
 export {
+  McpServerConfigSchema,
+  McpServersConfigSchema,
+  parseMcpServersConfig,
+  DEFAULT_MCP_LOAD_TIMEOUT_MS,
+  ZoryaMcpServers,
+  type McpServerSummary,
+  type McpServersCatalogResponse,
+  type ZoryaMcpServersConfig,
+} from "./server/services/mcp/index.ts";
+export {
   DEFAULT_MAX_SOURCE_BYTES,
   DEFAULT_MAX_SOURCE_CHARACTERS,
   KNOWLEDGE_BASE_ID_PATTERN,

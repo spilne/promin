@@ -14,6 +14,7 @@ import { ZoryaServer } from "../server.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaDags } from "../services/dags/index.ts";
 import type { ZoryaKnowledgeBases } from "../services/knowledge/index.ts";
+import type { ZoryaMcpServers } from "../services/mcp/index.ts";
 import type { ZoryaFragments } from "../services/fragments/index.ts";
 import type { ZoryaScheduler } from "../services/scheduler/index.ts";
 import type { ZoryaSkills } from "../services/skills/index.ts";
@@ -74,6 +75,7 @@ describe("ZoryaServer.builder()", () => {
       publicBaseUrl: "https://zorya.example.com",
       secrets: stub<SecretsStorage>("secrets"),
       knowledgeBases: stub<ZoryaKnowledgeBases>("knowledgeBases"),
+      mcp: stub<ZoryaMcpServers>("mcp"),
       namespaces: new InMemoryNamespaceRegistry(),
       workflowBuilder: stub<ZoryaWorkflowBuilder>("workflowBuilder"),
       webhooks: { sources: { github: stub("github-source") } },
@@ -105,6 +107,7 @@ describe("ZoryaServer.builder()", () => {
       .publicBaseUrl(expected.publicBaseUrl)
       .secrets(expected.secrets)
       .knowledgeBases(expected.knowledgeBases)
+      .mcp(expected.mcp)
       .namespaces(expected.namespaces)
       .workflowBuilder(expected.workflowBuilder)
       .webhooks(expected.webhooks)

@@ -207,6 +207,11 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
    * scope-bound `ctx.memory`). Set by the scoped/elevated factories.
    */
   readonly usesMemory?: boolean;
+  /**
+   * Set on tools backed by an MCP server (`createMcpTools`): the server
+   * and the tool's original MCP name, which `name` sanitizes.
+   */
+  readonly mcp?: import("./mcp/types.ts").McpToolOrigin;
 }
 
 // ---- scoped + elevated tool factories ----------------------------------

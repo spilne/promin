@@ -40,7 +40,9 @@ import {
   ZoryaFragments,
   ZoryaDags,
   ZoryaKnowledgeBases,
+  ZoryaMcpServers,
   createUrlKnowledgeSourceAdapter,
+  parseMcpServersConfig,
 } from "../src/index.ts";
 import { researchSynthesisRecipe } from "./dags/research-synthesis.ts";
 import { MapActivityCatalog } from "@promin/workflow";
@@ -228,6 +230,20 @@ const instanceRegistry = stack.instanceRegistry;
 // dashboard's /secrets page; agent resolver fetches model.credentialRef from
 // here at request time (BYOK).
 const secretsStorage = stack.secretsStorage;
+
+// MCP: the operator's allowlist of MCP servers recipes may attach by name
+// (stdio commands can only come from here), read from the JSON file named
+// by ZORYA_MCP_SERVERS_FILE. Recipes may also name public http endpoints
+// when ZORYA_MCP_RECIPE_HTTP=1. Credentials resolve from the vault.
+//   ZORYA_MCP_SERVERS_FILE=/etc/zorya/mcp-servers.json
+const mcpServersFile = process.env.ZORYA_MCP_SERVERS_FILE;
+const mcp = new ZoryaMcpServers({
+  servers: mcpServersFile
+    ? parseMcpServersConfig(JSON.parse(await Bun.file(mcpServersFile).text()))
+    : [],
+  recipeHttpServers: process.env.ZORYA_MCP_RECIPE_HTTP === "1",
+  secrets: secretsStorage,
+});
 
 // ---------------------------------------------------------------------------
 // Agents — auto-discovered from ./agents (mirrors the workflow scanner).
@@ -632,7 +648,11 @@ async function resolveAgent(
     ...(roleDef.capabilities !== undefined && { capabilities: roleDef.capabilities }),
     onMissing: "skip",
   });
+  // MCP: open (or reuse, per tenant namespace) the recipe's MCP servers
+  // against the operator allowlist and hand their tools to the resolver.
+  const mcpTools = await mcp.loadTools({ recipe, scope });
   return resolveLocalAgent(recipe, {
+    mcpTools,
     runner,
     memory: memoryStore,
     approvals: approvalStore,
@@ -1107,9 +1127,8 @@ const workflowBuilder = new ZoryaWorkflowBuilder({
 
 // Tool catalog drives GET /api/agents/_catalog/tools (Designer's tool
 // multi-select). Aggregates the host's static tools (the same map
-// resolveLocalAgent picks from) + the file-discovered registry. MCP
-// tool enumeration is opt-in via the catalog's mcp config — left out
-// here since the demo doesn't declare MCP servers.
+// resolveLocalAgent picks from) + the file-discovered registry. The
+// allowlisted MCP servers' tools are added by the server (`.mcp(mcp)`).
 const agentToolCatalog = new DefaultAgentToolCatalog({
   inProcess: {
     listWorkflows: listWorkflowsTool,
@@ -1303,6 +1322,9 @@ const server = ZoryaServer.builder()
   // resolver wiring (in `agents.resolve` above) reads model.credentialRef
   // from this vault at request time.
   .secrets(secretsStorage)
+  // MCP allowlist: recipe writes are checked against it, the tool catalog
+  // and the agent editor's MCP picker list it, stop() closes its clients.
+  .mcp(mcp)
   // /api/namespaces, and the namespace checks on new work (seeded above).
   .namespaces(stack.namespaceRegistry)
   // Operator key for /api; worker key for /rpc/storage, /rpc/worker,

@@ -25,6 +25,7 @@ import {
   redactRecipe,
   restoreRedactedSecrets,
   type AgentMetadataPatch,
+  type McpRecipeChecker,
 } from "./agent-gateway-kit.ts";
 
 /** Reserved id prefix marking a recipe as an ephemeral Designer draft. */
@@ -40,6 +41,8 @@ export function isDraftId(id: string): boolean {
 
 export interface AgentDraftsDeps {
   readonly registry: AgentRegistry;
+  /** MCP allowlist a draft's `mcpServers` are checked against. */
+  readonly mcp?: McpRecipeChecker;
   /** Time source for draft ids and the stale-draft TTL cutoff. Default: `SystemWallClock`. */
   readonly clock?: WallClock;
 }
@@ -66,7 +69,7 @@ export function createDraft(deps: AgentDraftsDeps) {
     if (body.backend === undefined || body.backend === null) {
       return jsonError(400, "missing_backend");
     }
-    const parsed = parseBackend(body.backend);
+    const parsed = parseBackend({ raw: body.backend, mcp: deps.mcp });
     if ("error" in parsed) return jsonError(400, parsed.error, parsed.message);
     let metadata: AgentMetadataPatch | undefined;
     if (body.metadata !== undefined && body.metadata !== null) {

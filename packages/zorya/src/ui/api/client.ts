@@ -71,6 +71,9 @@ import type {
   SkillsCatalogResponse,
 } from "../../server/routes/agent-catalog.ts";
 import type { MemoryInspectResponse } from "../../server/routes/memory.ts";
+import type { McpServersCatalogResponse } from "../../server/services/mcp/zorya-mcp-servers.ts";
+
+export type { McpServersCatalogResponse };
 import type {
   KnowledgeBase,
   KnowledgeBaseCreateRequest,
@@ -626,8 +629,12 @@ export const api = {
   deleteDraft(id: string): Promise<void> {
     return req<void>(`/api/agents/_draft/${encodeURIComponent(id)}`, { method: "DELETE" });
   },
-  listCatalogTools(): Promise<{ tools: ToolCatalogEntryDto[] }> {
-    return req<{ tools: ToolCatalogEntryDto[] }>(`/api/agents/_catalog/tools`);
+  listCatalogTools(): Promise<ToolCatalogDto> {
+    return req<ToolCatalogDto>(`/api/agents/_catalog/tools`);
+  },
+  /** The operator's MCP allowlist for the agent editor's MCP picker. */
+  listCatalogMcpServers(): Promise<McpServersCatalogResponse> {
+    return req<McpServersCatalogResponse>(`/api/agents/_catalog/mcp-servers`);
   },
   listAgentSources(): Promise<AgentSourcesResponse> {
     return req<AgentSourcesResponse>(`/api/agents/_sources`);
@@ -1115,7 +1122,7 @@ export const api = {
 export type ToolCatalogSourceDto =
   | { kind: "in-process" }
   | { kind: "file"; path?: string }
-  | { kind: "mcp"; server: string };
+  | { kind: "mcp"; server: string; tool: string; transport: "stdio" | "http" };
 
 export interface ToolCatalogEntryDto {
   name: string;
@@ -1123,10 +1130,30 @@ export interface ToolCatalogEntryDto {
   parameters: Record<string, unknown>;
   source: ToolCatalogSourceDto;
   enabled: boolean;
+  /** Whether each call waits for a human approval. */
+  requireApproval: boolean;
+  /** Whether the engine may re-run the call after a crash. */
+  idempotent: boolean;
   /** Secret-store keys the tool needs to run. Empty when none declared. */
   requiredSecrets: string[];
   /** True when the tool declares scoped memory. */
   usesMemory: boolean;
+}
+
+/** A tool source the catalog could not (fully) list, e.g. an unreachable MCP server. */
+export interface ToolCatalogErrorDto {
+  kind: "mcp";
+  server: string;
+  tool?: string;
+  /** Stable reason code; the detail stays in the server log. */
+  code: string;
+  message: string;
+}
+
+/** Wire shape for /api/agents/_catalog/tools. */
+export interface ToolCatalogDto {
+  tools: ToolCatalogEntryDto[];
+  errors: ToolCatalogErrorDto[];
 }
 
 /** Wire shape for /api/agents/_catalog/tools/health. */

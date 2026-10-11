@@ -8,7 +8,7 @@ import { FakeWallClock } from "@promin/workflow";
 import { toolHistoryStoreTestSuite } from "../tool-history/tool-history-store-test-suite.ts";
 import { InMemoryToolHistoryStore } from "../tool-history/in-memory-tool-history-store.ts";
 import { AgentToolCatalogHistory } from "../tool-history/agent-tool-catalog-history.ts";
-import type { AgentToolCatalog, ToolCatalogEntry } from "../tool-catalog.ts";
+import type { AgentToolCatalog, ToolCatalogEntry, ToolCatalogListing } from "../tool-catalog.ts";
 
 toolHistoryStoreTestSuite(() => new InMemoryToolHistoryStore());
 
@@ -54,6 +54,8 @@ function entry(over: Partial<ToolCatalogEntry> = {}): ToolCatalogEntry {
     parameters: { type: "object", properties: { q: { type: "string" } } },
     source: { kind: "in-process" },
     enabled: true,
+    requireApproval: false,
+    idempotent: false,
     requiredSecrets: [],
     usesMemory: false,
     ...over,
@@ -63,8 +65,8 @@ function entry(over: Partial<ToolCatalogEntry> = {}): ToolCatalogEntry {
 /** Mutable fake catalog — tests swap `entries` between snapshots. */
 class FakeCatalog implements AgentToolCatalog {
   entries: ToolCatalogEntry[] = [];
-  async listAll(): Promise<ToolCatalogEntry[]> {
-    return this.entries;
+  async list(): Promise<ToolCatalogListing> {
+    return { tools: this.entries, errors: [] };
   }
 }
 
@@ -84,7 +86,10 @@ describe("AgentToolCatalogHistory", () => {
     const catalog = new FakeCatalog();
     catalog.entries = [
       entry({ name: "lint", source: { kind: "file", path: "/tools/lint.ts" } }),
-      entry({ name: "web:search", source: { kind: "mcp", server: "web" } }),
+      entry({
+        name: "web__search",
+        source: { kind: "mcp", server: "web", tool: "search", transport: "http" },
+      }),
     ];
     const store = new InMemoryToolHistoryStore();
     await new AgentToolCatalogHistory({ catalog, store }).snapshot();
@@ -94,7 +99,7 @@ describe("AgentToolCatalogHistory", () => {
       sourceKind: "file",
       sourceDetail: "/tools/lint.ts",
     });
-    expect(byName.get("web:search")).toMatchObject({
+    expect(byName.get("web__search")).toMatchObject({
       sourceKind: "mcp",
       sourceDetail: "web",
     });

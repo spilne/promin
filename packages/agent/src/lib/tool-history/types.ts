@@ -3,7 +3,7 @@
 // exposed over time.
 //
 // The live `AgentToolCatalog` is intentionally ephemeral: every
-// `listAll()` walks live sources. This store is the opt-in persistence
+// `list()` walks live sources. This store is the opt-in persistence
 // layer over it — `AgentToolCatalogHistory` snapshots the catalog
 // periodically and upserts here, so a compliance / forensic query can
 // answer "what tools could an agent invoke between date X and Y" and

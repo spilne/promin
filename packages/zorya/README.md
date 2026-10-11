@@ -270,6 +270,7 @@ const server = ZoryaServer.builder()
 | `skills`, `fragments`, `dags` | none                    | Registry services with CRUD routes.                                                                                                                                                                                                                                                                                                    |
 | `workflowBuilder`             | none                    | `ZoryaWorkflowBuilder`: the Builder page and `/api/workflow-builder/*`. Its `LocalWorkflows` layer must be in `workflows`. See [Workflow builder](#workflow-builder).                                                                                                                                                                  |
 | `secrets`                     | none                    | `SecretsStorage` for `/api/secrets` and BYOK credential resolution.                                                                                                                                                                                                                                                                    |
+| `mcp`                         | none                    | `ZoryaMcpServers`: the MCP server allowlist recipes attach from, recipe http endpoints on or off, and the shared client pool. Without it recipes cannot attach MCP servers. See [Agent MCP servers](#agent-mcp-servers).                                                                                                               |
 | `namespaces`                  | free-form namespaces    | `NamespaceRegistry` for `/api/namespaces`; new runs, schedules and agent state then need a registered, active namespace (see [Namespaces](#namespaces)).                                                                                                                                                                               |
 | `webhooks`                    | none                    | `{ sources, deliveries?, recoveryIntervalMs? }`: signed webhook ingress into agents. Mounted only when `agents` is set. `deliveries` (replay dedup, durable delivery record) defaults to a store on the workflow storage, shared across instances. See [Agent threads, approvals and webhooks](#agent-threads-approvals-and-webhooks). |
 | `remoteDeployments`           | none                    | `{ registry, endpointPolicy?, sweepIntervalMs? }`: other Zorya servers register their agents here. Mounted only when `agents` is set.                                                                                                                                                                                                  |
@@ -320,19 +321,21 @@ moves agent state to Postgres with `ZORYA_PG_URL`).
 
 `examples/demo.ts` (and the Docker image) read:
 
-| Variable                                                                                             | Default                                             | Meaning                                                                                                          |
-| ---------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `ZORYA_API_KEY`                                                                                      | none                                                | Operator key. Required unless `ZORYA_INSECURE=1`.                                                                |
-| `ZORYA_WORKER_API_KEY`                                                                               | none                                                | Worker key. Required unless `ZORYA_INSECURE=1`.                                                                  |
-| `ZORYA_INSECURE`                                                                                     | unset                                               | `1` runs without keys.                                                                                           |
-| `PORT`                                                                                               | 4100                                                | HTTP port.                                                                                                       |
-| `ZORYA_DB`                                                                                           | `./target/zorya.db` (`/data/zorya.db` in the image) | SQLite file for runs, schedules, the start queue and registries. `:memory:` for a throwaway database.            |
-| `ZORYA_PG_URL`                                                                                       | unset                                               | Puts agent, skill, fragment and memory stores on Postgres (migrated on boot). Runs and schedules stay on SQLite. |
-| `ZORYA_UI_DIR`                                                                                       | `packages/zorya/dist/public`                        | Built dashboard assets.                                                                                          |
-| `ZORYA_RETENTION_DAYS`                                                                               | 1                                                   | Ended runs older than this are deleted (`retention.maxAgeMs`).                                                   |
-| `ZORYA_RETENTION_INTERVAL_MS`                                                                        | 3600000                                             | Delay between retention sweeps.                                                                                  |
-| `PROMIN_SECRETS_PASSPHRASE`                                                                          | a demo value                                        | Encrypts the secrets vault. Set it for anything but a demo.                                                      |
-| `ANTHROPIC_API_KEY`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_CONSOLIDATOR_MODEL`, `ZORYA_CONSOLIDATOR` | unset                                               | LLM backends for the demo agents. Without them the agents fall back to Ollama or an echo model.                  |
+| Variable                                                                                             | Default                                             | Meaning                                                                                                             |
+| ---------------------------------------------------------------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `ZORYA_API_KEY`                                                                                      | none                                                | Operator key. Required unless `ZORYA_INSECURE=1`.                                                                   |
+| `ZORYA_WORKER_API_KEY`                                                                               | none                                                | Worker key. Required unless `ZORYA_INSECURE=1`.                                                                     |
+| `ZORYA_INSECURE`                                                                                     | unset                                               | `1` runs without keys.                                                                                              |
+| `PORT`                                                                                               | 4100                                                | HTTP port.                                                                                                          |
+| `ZORYA_DB`                                                                                           | `./target/zorya.db` (`/data/zorya.db` in the image) | SQLite file for runs, schedules, the start queue and registries. `:memory:` for a throwaway database.               |
+| `ZORYA_PG_URL`                                                                                       | unset                                               | Puts agent, skill, fragment and memory stores on Postgres (migrated on boot). Runs and schedules stay on SQLite.    |
+| `ZORYA_UI_DIR`                                                                                       | `packages/zorya/dist/public`                        | Built dashboard assets.                                                                                             |
+| `ZORYA_RETENTION_DAYS`                                                                               | 1                                                   | Ended runs older than this are deleted (`retention.maxAgeMs`).                                                      |
+| `ZORYA_RETENTION_INTERVAL_MS`                                                                        | 3600000                                             | Delay between retention sweeps.                                                                                     |
+| `PROMIN_SECRETS_PASSPHRASE`                                                                          | a demo value                                        | Encrypts the secrets vault. Set it for anything but a demo.                                                         |
+| `ZORYA_MCP_SERVERS_FILE`                                                                             | unset                                               | JSON file with the MCP server allowlist (`parseMcpServersConfig`). Unset: recipes can attach no allowlisted server. |
+| `ZORYA_MCP_RECIPE_HTTP`                                                                              | unset                                               | `1` lets recipes name their own http MCP endpoints (no credentials, always approval).                               |
+| `ANTHROPIC_API_KEY`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_CONSOLIDATOR_MODEL`, `ZORYA_CONSOLIDATOR` | unset                                               | LLM backends for the demo agents. Without them the agents fall back to Ollama or an echo model.                     |
 
 ## HTTP API overview
 
@@ -435,6 +438,60 @@ whether sources and scores are shown, and warns about ids the catalog does not
 list. The search tools a binding adds appear among the agent's system tools.
 Recipe writes validate `backend.knowledge`: unique ids, a known mode, and a
 tool name of letters, digits, `_` or `-`.
+
+### Agent MCP servers
+
+The operator defines the MCP servers recipes may attach with
+`ZoryaMcpServers` (`ZoryaServerConfig.mcp`, builder `.mcp()`); stdio servers
+can come only from this allowlist, since their command, args, env and cwd run
+on the host. Use the same instance's `loadTools` in `agents.resolve`:
+
+```ts
+import { ZoryaMcpServers, parseMcpServersConfig } from "@promin/zorya";
+
+const mcp = new ZoryaMcpServers({
+  servers: parseMcpServersConfig(JSON.parse(await Bun.file("mcp-servers.json").text())),
+  recipeHttpServers: false, // default; true lets recipes name public http endpoints
+  secrets, // allowlisted servers' credentialRefs resolve here, per tenant
+});
+const agents = new ZoryaAgents({
+  registry,
+  resolve: async (recipe, scope) =>
+    resolveLocalAgent(recipe, {
+      runner,
+      llm,
+      tools,
+      mcpTools: await mcp.loadTools({ recipe, scope }),
+    }),
+});
+const server = ZoryaServer.builder().workflows(workflows).agents(agents).mcp(mcp).build();
+```
+
+A recipe's `backend.mcpServers` holds `{ server: "<allowlisted name>", tools? }`
+or — when `recipeHttpServers` is on — `{ name, transport: "http", url, tools? }`
+entries and nothing else: a command, env, header or credential is a 400
+`invalid_backend`, a name outside the allowlist, a recipe http entry the host
+doesn't accept (or any entry when `mcp` is not configured) a 400
+`invalid_mcp_servers`. Only allowlisted servers get credentials: a recipe is
+not owned by the tenants that invoke it, so a URL it chose never receives
+their secrets. Every tool of an attached server joins the agent as
+`<server>__<tool>`; `tools` narrows them. MCP tools ask for approval unless
+the operator set `requireApproval: false` on that server (recipe http
+endpoints always ask), and their output reaches the model as untrusted
+reference data. Http servers go through the outbound policy (public addresses,
+pinned DNS, capped responses). Clients are pooled per server config, tenant
+namespace and credential, replaced when they die, and closed on `stop()`.
+`loadTools` refuses a call without a scope and gives up after `loadTimeoutMs`
+(default 30 s).
+
+`GET /api/agents/_catalog/tools` lists the allowlisted servers' tools (source,
+MCP tool name, transport, approval, idempotency) and reports servers it could
+not list in `errors` as a code and a fixed message (the detail goes to the
+server log); the Tools page shows both. `GET /api/agents/_catalog/mcp-servers`
+lists the allowlist for the agent editor's **MCP servers** section (name,
+description, transport, trust, tools — never the command, args, env, url,
+headers or credential name). See [DEPLOYMENT.md](./DEPLOYMENT.md#mcp-servers)
+for the allowlist file.
 
 ### Managed knowledge bases
 

@@ -13,10 +13,12 @@ import type { NamespaceRegistry, WallClock } from "@promin/workflow";
 import { json, type Router } from "../router.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaFragments } from "../services/fragments/index.ts";
+import type { ZoryaMcpServers } from "../services/mcp/index.ts";
 import type { ZoryaSkills } from "../services/skills/index.ts";
 import {
   getToolCatalogHealth,
   listCatalogFragments,
+  listCatalogMcpServers,
   listCatalogModels,
   listCatalogRetrievers,
   listCatalogSkills,
@@ -78,6 +80,8 @@ export function mountAgents(params: {
   readonly skills: ZoryaSkills | undefined;
   readonly fragments: ZoryaFragments | undefined;
   readonly secrets: SecretsStorage | undefined;
+  /** MCP allowlist recipe writes are checked against; its tools join the catalog. */
+  readonly mcp: ZoryaMcpServers | undefined;
   /** Registry the namespace of agent writes is checked against. */
   readonly namespaces: NamespaceRegistry | undefined;
   readonly clock: WallClock;
@@ -92,6 +96,7 @@ export function mountAgents(params: {
     ...(agents.turnGate !== undefined && { turnGate: agents.turnGate }),
     ...(agents.workerId !== undefined && { workerId: agents.workerId }),
     ...(params.secrets !== undefined && { secrets: params.secrets }),
+    ...(params.mcp !== undefined && { mcp: params.mcp }),
     ...(agents.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
     ...namespaced,
     fileManagedIds: () => agents.fileManagedIds(),
@@ -112,10 +117,13 @@ export function mountAgents(params: {
     )
     .get(
       "/api/agents/_catalog/tools",
-      agents.toolCatalog
-        ? listCatalogTools({ tools: agents.toolCatalog })
-        : async () => json(200, { tools: [] }),
+      listCatalogTools({
+        ...(agents.toolCatalog !== undefined && { tools: agents.toolCatalog }),
+        ...(params.mcp !== undefined && { mcp: params.mcp }),
+      }),
     )
+    // The agent editor's MCP picker: the operator's allowlisted servers.
+    .get("/api/agents/_catalog/mcp-servers", listCatalogMcpServers({ mcp: params.mcp }))
     // Reconciliation health: which recipe tool refs don't resolve? A pure
     // query at view time — no persistence, no audit trail.
     .get(
@@ -160,7 +168,14 @@ export function mountAgents(params: {
       listAgentSources({ fileManagedIds: () => agents.fileManagedIds() }),
     )
     // Draft recipes — test a recipe edit before committing it.
-    .post("/api/agents/_draft", createDraft({ registry: agents.registry, clock }))
+    .post(
+      "/api/agents/_draft",
+      createDraft({
+        registry: agents.registry,
+        clock,
+        ...(params.mcp !== undefined && { mcp: params.mcp }),
+      }),
+    )
     .delete("/api/agents/_draft/:id", deleteDraft({ registry: agents.registry }))
     // Recipe CRUD — author, edit and clone agents over HTTP.
     .post("/api/agents", createAgent(agentDeps))

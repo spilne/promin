@@ -94,15 +94,15 @@ export interface LocalAgentBackend {
    */
   readonly role: RoleBinding;
   /**
-   * Optional MCP servers to attach. The host opens (or reuses) an
-   * `McpClient` per server via `McpClientPool` at resolve time, lists
-   * each server's tools, and merges them into the agent's tool list
-   * keyed as `<serverName>:<toolName>`. The role's `tools` list picks
-   * which of those to actually expose to the LLM (alongside in-process
-   * tools). MCP connection config is a deployment concern, so it stays
-   * on the agent, not the role.
+   * MCP servers to attach: operator-configured servers by name
+   * (`{ server }`), or http endpoints the host vets with its outbound
+   * policy. The host resolves them with `loadMcpToolsFromRecipe` against
+   * its allowlist and passes the tools as `resolveLocalAgent`'s
+   * `deps.mcpTools`; every tool of an attached server (narrowed by the
+   * entry's `tools`) is exposed as `<server>__<tool>`. MCP servers are a
+   * deployment concern, so they stay on the agent, not the role.
    */
-  readonly mcpServers?: ReadonlyArray<import("../mcp/types.ts").McpServerConfig>;
+  readonly mcpServers?: ReadonlyArray<import("../mcp/types.ts").McpServerRecipe>;
   /**
    * RAG bindings. Each entry names a retriever the host supplies through
    * `resolveLocalAgent({ retrievers })` and says whether it is exposed as a

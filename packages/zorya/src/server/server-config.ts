@@ -14,6 +14,7 @@ import type { ZoryaAgents } from "./services/agents/index.ts";
 import type { ZoryaDags } from "./services/dags/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
 import type { ZoryaKnowledgeBases } from "./services/knowledge/index.ts";
+import type { ZoryaMcpServers } from "./services/mcp/index.ts";
 import type { ZoryaWorkflowBuilder } from "./services/workflow-builder/index.ts";
 import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
@@ -100,6 +101,16 @@ export interface ZoryaServerConfig extends AuthConfig {
    * When set, takes precedence over `config.agents.fragments`.
    */
   fragments?: ZoryaFragments;
+  /**
+   * Optional MCP configuration: the allowlist of MCP servers recipes may
+   * attach by name (stdio servers can only come from here), whether recipes
+   * may name their own http endpoints, and the shared client pool. Recipe
+   * writes are checked against it, `/api/agents/_catalog/tools` lists the
+   * allowlisted servers' tools and `/api/agents/_catalog/mcp-servers` the
+   * servers. Use the same instance's `loadTools` in `agents.resolve`. The
+   * server closes its clients on `stop()`.
+   */
+  mcp?: ZoryaMcpServers;
   /** Optional DAG gateway service. Mounts /api/dags/* routes. */
   dags?: ZoryaDags;
   /**

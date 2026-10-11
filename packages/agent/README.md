@@ -14,6 +14,7 @@ Agent loop, LLM adapters, tools, memory, retrieval, and a terminal UI for buildi
   - [tool()](#tool)
   - [Multi-command tools](#multi-command-tools)
   - [Built-in tools](#built-in-tools)
+  - [MCP servers](#mcp-servers)
 - [Memory](#memory)
 - [Retrieval (RAG)](#retrieval-rag)
 - [Context compaction](#context-compaction)
@@ -277,6 +278,96 @@ yourself and connects to the address it checked, which defeats DNS rebinding.
 | `createWebSearchTool()`         | Web search                                                                                            |
 | `createDurableSchedulerTools()` | `schedulerCreate` (approval, min interval, atomic per-thread cap), `schedulerList`, `schedulerCancel` |
 | `createWriteToolTool()`         | Let the agent write and hot-load new tools at runtime                                                 |
+
+### MCP servers
+
+Tools from [Model Context Protocol](https://modelcontextprotocol.io) servers
+become ordinary `AgentTool`s. The operator defines the servers
+(`McpServerConfig`: a stdio `command` / `args` / `env` / `cwd`, or a Streamable
+HTTP `url`); a recipe attaches them by name or names an http endpoint, never a
+command:
+
+```ts
+import {
+  McpClientPool,
+  loadMcpToolsFromRecipe,
+  resolveLocalAgent,
+  type McpServerConfig,
+} from "@promin/agent";
+
+const servers: McpServerConfig[] = [
+  {
+    name: "github",
+    transport: "stdio",
+    command: "github-mcp-server",
+    args: ["stdio"],
+    credentialRef: "GITHUB_TOKEN", // SecretsStorage key, resolved per tenant
+    credentialEnv: "GITHUB_PERSONAL_ACCESS_TOKEN",
+    tools: ["search_issues", "get_issue"], // optional narrowing
+  },
+];
+const pool = new McpClientPool(); // shared; closeAll() on shutdown
+
+// recipe.backend.mcpServers = [{ server: "github" }]
+const mcpTools = await loadMcpToolsFromRecipe({ recipe, servers, pool, secrets, scope });
+const agent = resolveLocalAgent(recipe, { ...deps, mcpTools });
+```
+
+- **Names**: `<server>__<tool>`, valid for every provider
+  (`^[a-zA-Z0-9_-]{1,64}$`); a name with other characters or over 64 gets a
+  hash suffix. `tool.mcp` keeps the server and original MCP tool name.
+- **Schemas**: the server's `inputSchema` is advertised as-is
+  (`AgentTool.jsonSchema`) and input is validated against it with Ajv (the MCP
+  SDK's validator) before the call — with a private Ajv instance per server
+  and tenant, on a copy that keeps only structural keywords (types, bounds,
+  `required`, `enum`/`const`, subschemas). `pattern`, `patternProperties` and
+  `format` compile to backtracking regexes a hostile server could use to
+  block the event loop, and no linear-time regex engine is available without
+  a native build, so the server validates them itself; `$id`, `default`,
+  `examples`, `x-*` and unknown keywords are dropped too. A `$ref` must be a
+  JSON pointer that walks only through subschema keywords; any other `$ref`
+  (external, or into data such as `#/default`) turns validation off for that
+  tool. Output schemas are never compiled (agents read content blocks, not
+  `structuredContent`).
+- **Trust**: MCP tools require approval and are not idempotent unless the
+  operator sets `requireApproval: false` / `idempotent: true` on the server.
+  Tool names over 128 characters or with control characters are skipped;
+  names and descriptions shown to the model are flattened, capped (description
+  1 024 characters) and labelled; results reach the model fenced as untrusted
+  reference data. A server exposes at most `maxTools` tools (default 128) and
+  256 KB of schema; `tools/list` stops after 16 pages / 1 024 tools and runs
+  under one `timeoutMs` deadline.
+- **Pool**: clients are keyed by a hash of the server config, the tenant
+  namespace and the resolved credential, so two tenants (or two configs that
+  share a name) never share a connection, a process, a token or a validator;
+  a new credential for the same server, namespace and credential scope (the
+  resource or namespace it was found at) retires the old client, and tools
+  loaded with the old credential fail with `McpCredentialRotatedError`
+  instead of reconnecting with it. A client whose transport closed (a stdio
+  server exited) or whose request failed below the protocol is replaced on
+  the next call; for http servers a timed-out or aborted request does the
+  same, which is what closes its response stream. Each call honors
+  `timeoutMs` (default 60 s) and the engine's abort signal (the server is told
+  to cancel); at most `maxConcurrentCalls` (default 4) run per client. Idle
+  clients over `maxClients` are closed; after `closeAll()` the pool refuses
+  new work.
+- **stdio**: the server gets the MCP SDK's safe environment (`PATH`, `HOME`,
+  …) plus its `env`, never the host's own; it runs in its own process group,
+  which is killed when the client closes; its stderr goes to `onServerLog`.
+- **HTTP**: every request (the POSTs and the SSE stream) goes through
+  `createOutboundFetch`: public addresses only, pinned DNS, no redirects,
+  responses capped at `maxResponseBytes` (8 MB), unless the operator sets
+  `allowPrivateNetwork` on that server or passes an `outboundPolicy`.
+- **Recipe endpoints**: `{ name, transport: "http", url, tools? }` entries are
+  refused unless the host passes `recipeHttpServers: true`; they always
+  require approval, expose at most 32 tools and never get a credential (a
+  recipe isn't owned by the tenants that invoke it, so its URL must not
+  receive their secrets).
+- `loadMcpToolsFromRecipe` needs the caller's `scope`. `resolveLocalAgent`
+  throws when a recipe attaches MCP servers but `deps.mcpTools` was not
+  passed. `DefaultAgentToolCatalog({ mcp })` lists the servers' tools and
+  reports the ones it could not list in `errors` as a code (the detail goes to
+  `onError`).
 
 ---
 

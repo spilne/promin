@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // AgentToolCatalogHistory — persistence loop over a live `AgentToolCatalog`.
 //
-// The catalog itself is ephemeral (every `listAll()` walks live sources).
+// The catalog itself is ephemeral (every `list()` walks live sources).
 // This wraps a catalog + a `ToolHistoryStore`: `snapshot()` lists the
 // catalog once and upserts every entry; `start()` runs that on an
 // interval so the store accumulates a durable audit trail.
@@ -60,7 +60,7 @@ export class AgentToolCatalogHistory {
 
   /** List the live catalog once and persist every entry. */
   async snapshot(): Promise<void> {
-    const entries = await this.catalog.listAll();
+    const { tools: entries } = await this.catalog.list();
     await this.store.recordSnapshot(entries.map(toObservation));
   }
 

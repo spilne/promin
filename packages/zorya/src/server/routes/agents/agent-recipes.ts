@@ -175,7 +175,7 @@ export function createAgent(deps: AgentGatewayDeps) {
     if (body.backend === undefined || body.backend === null) {
       return jsonError(400, "missing_backend");
     }
-    const backend = parseBackend(body.backend);
+    const backend = parseBackend({ raw: body.backend, mcp: deps.mcp });
     if ("error" in backend) return jsonError(400, backend.error, backend.message);
     const restored = restoreRedactedSecrets({ next: backend.backend });
     if ("error" in restored) return jsonError(400, restored.error);
@@ -228,7 +228,7 @@ export function updateAgent(deps: AgentGatewayDeps) {
 
     let nextBackend = active.backend;
     if (body.backend !== undefined && body.backend !== null) {
-      const parsed = parseBackend(body.backend);
+      const parsed = parseBackend({ raw: body.backend, mcp: deps.mcp });
       if ("error" in parsed) return jsonError(400, parsed.error, parsed.message);
       const restored = restoreRedactedSecrets({ next: parsed.backend, existing: active.backend });
       if ("error" in restored) return jsonError(400, restored.error);

@@ -75,6 +75,8 @@ export function managedServices(params: {
   readonly skills: Lifecycled | undefined;
   readonly fragments: Lifecycled | undefined;
   readonly knowledgeBases: Lifecycled | undefined;
+  /** MCP client pool: stopping closes every client (stdio processes exit). */
+  readonly mcp: Lifecycled | undefined;
   readonly workflowBuilder: Lifecycled | undefined;
   readonly retention: Lifecycled | undefined;
   /** One-shot adoption of stored namespaces into the registry. */
@@ -89,6 +91,7 @@ export function managedServices(params: {
   if (params.knowledgeBases) {
     out.push({ name: "knowledgeBases", ...bindLifecycle(params.knowledgeBases) });
   }
+  if (params.mcp) out.push({ name: "mcp", ...bindLifecycle(params.mcp) });
   if (params.workflowBuilder) {
     out.push({ name: "workflowBuilder", ...bindLifecycle(params.workflowBuilder) });
   }

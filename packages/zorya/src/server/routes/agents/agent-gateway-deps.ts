@@ -66,7 +66,7 @@ import type {
   SecretsStorage,
 } from "@promin/agent";
 import type { NamespaceRegistry, WallClock } from "@promin/workflow";
-import type { ScopeAuthorizer } from "../agent-gateway-kit.ts";
+import type { McpRecipeChecker, ScopeAuthorizer } from "../agent-gateway-kit.ts";
 
 // ---------------------------------------------------------------------------
 // Response DTOs — UI imports these for typing API responses. Re-export the
@@ -230,6 +230,12 @@ export interface AgentGatewayDeps {
    * rejected with 400 `secrets_unsupported`.
    */
   readonly secrets?: SecretsStorage;
+  /**
+   * The operator's MCP allowlist (`ZoryaServerConfig.mcp`). A created or
+   * edited recipe may attach only the servers it allows (400
+   * `invalid_mcp_servers` otherwise); without it, no MCP servers at all.
+   */
+  readonly mcp?: McpRecipeChecker;
   /**
    * Optional namespace registry. When set, invocations (and the clone
    * endpoint's namespace- or resource-scoped secrets) need a registered,

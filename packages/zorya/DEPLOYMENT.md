@@ -8,6 +8,7 @@ explains the architecture and the configuration fields used below.
 - [Production with Postgres](#production-with-postgres)
 - [Redis-backed parts and their limits](#redis-backed-parts-and-their-limits)
 - [Docker image](#docker-image)
+- [MCP servers](#mcp-servers)
 - [Health and readiness probes](#health-and-readiness-probes)
 - [Graceful shutdown](#graceful-shutdown)
 - [Checklist](#checklist)
@@ -327,6 +328,79 @@ The image runs the demo host (`examples/demo.ts`) on SQLite. For a
 Postgres cluster, build your own host module (as above) and use the same
 Dockerfile stages with a different `ENTRYPOINT`.
 
+## MCP servers
+
+Agents reach MCP servers only through the operator's allowlist
+(`ZoryaMcpServers`, see [README](./README.md#agent-mcp-servers)). A stdio
+server is a process this host spawns, so its command, args, env and cwd are
+defined here and nowhere else; a recipe attaches it by name. The demo host
+and the image read the allowlist from the JSON file named by
+`ZORYA_MCP_SERVERS_FILE`, validated with `parseMcpServersConfig` (unknown
+fields fail the boot):
+
+```json
+[
+  {
+    "name": "github",
+    "description": "GitHub issues and PRs",
+    "transport": "stdio",
+    "command": "/usr/local/bin/github-mcp-server",
+    "args": ["stdio", "--read-only"],
+    "env": { "GITHUB_HOST": "github.com" },
+    "credentialRef": "GITHUB_TOKEN",
+    "credentialEnv": "GITHUB_PERSONAL_ACCESS_TOKEN",
+    "tools": ["search_issues", "get_issue"],
+    "timeoutMs": 30000,
+    "maxConcurrentCalls": 4
+  },
+  {
+    "name": "docs",
+    "transport": "http",
+    "url": "http://docs-mcp.platform.svc:8080/mcp",
+    "allowPrivateNetwork": true,
+    "requireApproval": false,
+    "idempotent": true
+  }
+]
+```
+
+| Field                 | Default  | Meaning                                                                                                                    |
+| --------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `name`                | required | `[A-Za-z0-9_-]{1,48}`, unique. Recipes attach the server by it; its tools are named `<name>__<tool>`.                      |
+| `transport`           | required | `stdio` (`command`, `args`, `env`, `cwd`) or `http` (`url`, `headers`, Streamable HTTP).                                   |
+| `credentialRef`       | none     | Secrets-vault key, resolved per call scope (resource → namespace → global), so tenants can bring their own token.          |
+| `credentialEnv`       | none     | stdio: the environment variable that receives the credential. http servers get `Authorization: Bearer <credential>`.       |
+| `requireApproval`     | `true`   | `false` lets calls run without a human approval. Recipes cannot change it.                                                 |
+| `idempotent`          | `false`  | `true` lets the engine re-run a call whose outcome a crash left unknown.                                                   |
+| `tools`               | all      | Expose only these MCP tool names. Recipes can narrow further, never widen.                                                 |
+| `timeoutMs`           | 60000    | Per-call limit; the call is cancelled on the server when it expires or the turn is cancelled.                              |
+| `maxConcurrentCalls`  | 4        | Calls one client runs at once; more wait.                                                                                  |
+| `maxTools`            | 128      | Most tools exposed from the server; the rest are skipped and reported in the catalog.                                      |
+| `allowPrivateNetwork` | `false`  | http: allow a private, loopback or link-local address (an in-cluster server). Otherwise only public addresses, pinned DNS. |
+
+A stdio process inherits only the MCP SDK's safe environment (`PATH`, `HOME`,
+`USER`, …) plus `env` and the credential, never the server's own secrets
+such as `ZORYA_API_KEY`. It runs in its own process group, which is killed
+when its client closes, and its stderr goes to the server log prefixed with
+`[mcp:<name>]`. Install the server binaries in the image (or use an http
+server next to Zorya), and keep the file read-only. An http server's
+credential is sent only to its own `url` (redirects are not followed);
+responses are capped at 8 MB.
+
+Credentials belong to allowlisted servers only. Recipes may name their own
+Streamable HTTP endpoints only when `ZORYA_MCP_RECIPE_HTTP=1`
+(`recipeHttpServers: true`); those never receive a credential, always ask for
+approval, expose at most 32 tools and reach public addresses only (the
+`outboundPolicy` can narrow it to an `allowedHosts` list).
+
+Each instance keeps its own pool of MCP clients (at most `maxClients`, default
+64, idle ones closed first), one per server config, tenant namespace and
+credential. Clients are replaced when their process exits or their
+connection breaks, and closed on shutdown. A stdio server therefore runs once
+per instance per tenant that uses it; size the host accordingly. The catalog
+reports a server it can't list by name and a fixed reason; the detail
+(commands, hosts, server output) is only logged.
+
 ## Health and readiness probes
 
 | Probe             | Answers                                                                                                                                                                                                                                                                                                                                        | Use for                                   |
@@ -392,3 +466,6 @@ instance, or on this one after it restarts. Workers stopped with
 - `retention` set to how long ended runs must stay visible, so run history
   stays bounded.
 - Readiness probe on `/api/ready`; grace period above `shutdownTimeoutMs`.
+- MCP allowlist reviewed: only servers you trust to run on the host, approval
+  left on for servers whose tools change things, `ZORYA_MCP_RECIPE_HTTP`
+  left unset unless tenants need their own endpoints.

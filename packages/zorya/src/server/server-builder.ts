@@ -18,6 +18,7 @@ import type { ZoryaAgents } from "./services/agents/index.ts";
 import type { ZoryaDags } from "./services/dags/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
 import type { ZoryaKnowledgeBases } from "./services/knowledge/index.ts";
+import type { ZoryaMcpServers } from "./services/mcp/index.ts";
 import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
 import type { ZoryaWorkflowBuilder } from "./services/workflow-builder/index.ts";
@@ -142,6 +143,11 @@ export class ZoryaServerBuilder {
   /** The visual workflow builder: `/api/workflow-builder/*` and the dashboard's Builder page. */
   workflowBuilder(workflowBuilder: ZoryaWorkflowBuilder): this {
     return this.set({ workflowBuilder });
+  }
+
+  /** MCP allowlist and client pool recipes attach servers from. */
+  mcp(mcp: ZoryaMcpServers): this {
+    return this.set({ mcp });
   }
 
   /** Secrets vault: `/api/secrets` CRUD and agent credential resolution. */

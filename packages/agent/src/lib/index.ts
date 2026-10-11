@@ -442,26 +442,73 @@ export {
 
 // MCP integration — connect agents to Model Context Protocol servers.
 export type {
+  BaseMcpServerConfig,
+  McpCallOptions,
   McpClient,
+  McpContentBlock,
+  McpHttpServerRecipe,
   McpServerConfig,
+  McpServerRecipe,
+  McpServerRefRecipe,
+  McpToolDefinition,
+  McpToolOrigin,
+  McpToolResult,
   StdioMcpServerConfig,
   HttpMcpServerConfig,
-  SseMcpServerConfig,
-  McpToolDefinition,
-  McpToolResult,
-  McpContentBlock,
 } from "./mcp/types.ts";
-export { createMcpTools } from "./mcp/mcp-tools.ts";
-export { createSdkMcpClient, type SdkMcpClientConfig } from "./mcp/mcp-client.ts";
 export {
-  DefaultMcpClientPool,
-  InMemoryMcpClientPool,
-  type McpClientPool,
-  type DefaultMcpClientPoolConfig,
+  DEFAULT_MCP_MAX_CONCURRENT_CALLS,
+  DEFAULT_MCP_MAX_TOOLS,
+  DEFAULT_MCP_TIMEOUT_MS,
+  MCP_RECIPE_SERVER_NAME,
+  RECIPE_MCP_MAX_TOOLS,
+} from "./mcp/types.ts";
+export {
+  createMcpTools,
+  displayToolName,
+  MAX_MCP_DESCRIPTION_CHARS,
+  MAX_MCP_RESULT_CHARS,
+  MAX_MCP_SCHEMA_CHARS,
+  MAX_MCP_SERVER_SCHEMA_CHARS,
+  MAX_MCP_TOOL_NAME_CHARS,
+  type McpSkipCode,
+  type McpToolSet,
+  type SkippedMcpTool,
+} from "./mcp/mcp-tools.ts";
+export { mcpToolName, PROVIDER_TOOL_NAME } from "./mcp/mcp-tool-name.ts";
+export {
+  connectMcpClient,
+  createMcpTransport,
+  DEFAULT_MCP_MAX_RESPONSE_BYTES,
+  MAX_LISTED_TOOLS,
+  MAX_TOOL_LIST_PAGES,
+  McpResponseTooLargeError,
+} from "./mcp/mcp-client.ts";
+export {
+  MAX_STDIO_MESSAGE_BYTES,
+  ProcessGroupStdioTransport,
+  type ProcessGroupStdioTransportConfig,
+} from "./mcp/mcp-stdio-transport.ts";
+export { McpInputValidators, sanitizeValidationSchema } from "./mcp/mcp-schema-validator.ts";
+export {
+  McpClientPool,
+  McpCredentialRotatedError,
+  McpPoolClosedError,
+  mcpPoolKey,
+  type McpClientPoolConfig,
+  type McpConnect,
+  type McpServerHandle,
 } from "./mcp/mcp-client-pool.ts";
 export {
   loadMcpToolsFromRecipe,
+  mcpRecipeProblems,
+  McpRecipeError,
+  resolveMcpCredential,
+  resolveMcpServerRecipes,
   type LoadMcpToolsFromRecipeParams,
+  type McpCallerScope,
+  type McpRecipePolicy,
+  type ResolvedMcpCredential,
 } from "./mcp/load-mcp-tools-from-recipe.ts";
 
 export { tool, createScopedTool, createElevatedTool, filterToolsByCapability } from "./tool.ts";
@@ -486,8 +533,13 @@ export type { ToolRegistry, FileToolRegistryConfig } from "./tool-registry.ts";
 
 export {
   DefaultAgentToolCatalog,
+  listMcpToolCatalog,
   type AgentToolCatalog,
+  type McpCatalogSource,
   type ToolCatalogEntry,
+  type ToolCatalogError,
+  type ToolCatalogErrorCode,
+  type ToolCatalogListing,
   type ToolCatalogSource,
   type DefaultAgentToolCatalogConfig,
 } from "./tool-catalog.ts";

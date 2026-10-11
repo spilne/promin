@@ -18,6 +18,7 @@ import type {
   SerializedModelCatalogItem,
   SkillRegistry,
   ToolCatalogEntry,
+  ToolCatalogError,
   ToolHistoryQuery,
   ToolHistoryRecord,
   ToolHistorySourceKind,
@@ -26,6 +27,7 @@ import type {
 } from "@promin/agent";
 import { reconcileToolReferences } from "@promin/agent";
 import { json } from "../router.ts";
+import type { McpServersCatalogResponse, ZoryaMcpServers } from "../services/mcp/index.ts";
 import { internalError } from "./agent-gateway-kit.ts";
 
 export interface ModelsCatalogResponse {
@@ -34,6 +36,8 @@ export interface ModelsCatalogResponse {
 
 export interface ToolsCatalogResponse {
   tools: ToolCatalogEntry[];
+  /** Sources that could not be (fully) listed: an unreachable MCP server, an unusable tool. */
+  errors: ToolCatalogError[];
 }
 
 /**
@@ -68,6 +72,13 @@ export interface AgentToolCatalogDeps {
   readonly tools: AgentToolCatalog;
 }
 
+export interface CatalogToolsDeps {
+  /** The host's tool catalog (in-process / file tools). */
+  readonly tools?: AgentToolCatalog;
+  /** The operator's MCP servers, whose tools are listed alongside. */
+  readonly mcp?: ZoryaMcpServers;
+}
+
 /**
  * Catalog entry for the agent editor's knowledge picker — a registered
  * retriever's id and descriptive metadata. The live `Retriever` never
@@ -95,15 +106,40 @@ export function listCatalogModels(deps: AgentCatalogDeps) {
   };
 }
 
-export function listCatalogTools(deps: AgentToolCatalogDeps) {
+/**
+ * The tool picker's source: the host catalog's tools plus the allowlisted
+ * MCP servers' tools. A server that can't be listed is reported in
+ * `errors` instead of silently missing.
+ */
+export function listCatalogTools(deps: CatalogToolsDeps) {
   return async (): Promise<Response> => {
     try {
-      const tools = await deps.tools.listAll();
-      const body: ToolsCatalogResponse = { tools };
+      const [host, mcp] = await Promise.all([deps.tools?.list(), deps.mcp?.catalog()]);
+      const taken = new Set(host?.tools.map((t) => t.name));
+      const tools = [
+        ...(host?.tools ?? []),
+        ...(mcp?.tools ?? []).filter((t) => !taken.has(t.name)),
+      ].sort((a, b) => a.name.localeCompare(b.name));
+      const body: ToolsCatalogResponse = {
+        tools,
+        errors: [...(host?.errors ?? []), ...(mcp?.errors ?? [])],
+      };
       return json(200, body);
     } catch (err) {
       return internalError({ code: "list_failed", err });
     }
+  };
+}
+
+/** The agent editor's MCP picker: allowlisted servers (never their command or env). */
+export function listCatalogMcpServers(deps: { readonly mcp?: ZoryaMcpServers }) {
+  return async (): Promise<Response> => {
+    const body: McpServersCatalogResponse = deps.mcp?.describe() ?? {
+      configured: false,
+      servers: [],
+      recipeHttpServers: false,
+    };
+    return json(200, body);
   };
 }
 

@@ -15,7 +15,7 @@
 // (if any) wouldn't be checked against the live catalog anyway.
 //
 // No persistence. The check is computed at view time from live data:
-// catalog.listAll() + registry.list(). If we ever need an audit trail
+// catalog.list() + registry.list(). If we ever need an audit trail
 // (which tools EVER existed on this deployment), that's a separate
 // system — see promin tracking note in the catalog page docs.
 // ---------------------------------------------------------------------------
@@ -51,7 +51,7 @@ export interface ReconcileToolReferencesDeps {
 export async function reconcileToolReferences(
   deps: ReconcileToolReferencesDeps,
 ): Promise<ToolRefReport> {
-  const liveTools = await deps.catalog.listAll();
+  const { tools: liveTools } = await deps.catalog.list();
   // Disabled tools are reported by the catalog (so operators can see
   // them) but treated as NOT live for reconciliation — a recipe
   // referencing a disabled tool can't actually invoke it, so it's

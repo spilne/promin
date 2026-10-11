@@ -73,7 +73,11 @@ export function RoleEditDrawer({ role, mode = "edit", onClose, onSaved }: Props)
   const [error, setError] = useState<string | null>(null);
 
   const { data: toolsData } = useFetch(() => api.listCatalogTools(), [], 0);
-  const tools = useMemo(() => toolsData?.tools ?? [], [toolsData]);
+  // MCP tools reach an agent through its attached MCP servers, not a role.
+  const tools = useMemo(
+    () => (toolsData?.tools ?? []).filter((t) => t.source.kind !== "mcp"),
+    [toolsData],
+  );
   const { data: skillsData } = useFetch(() => api.listCatalogSkills(), [], 0);
   const catalogSkills = useMemo(() => skillsData?.skills ?? [], [skillsData]);
   const { data: fragmentsData } = useFetch(() => api.listCatalogFragments(), [], 0);

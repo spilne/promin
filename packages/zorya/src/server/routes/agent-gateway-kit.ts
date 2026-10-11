@@ -14,11 +14,12 @@
 //     `(namespaceId, resourceId | ownerId)` to its authenticated caller.
 // ---------------------------------------------------------------------------
 
-import type {
-  AgentBackend,
-  AgentMetadata,
-  RegisteredAgent,
-  RegisteredDeployment,
+import {
+  MCP_RECIPE_SERVER_NAME,
+  type AgentBackend,
+  type AgentMetadata,
+  type RegisteredAgent,
+  type RegisteredDeployment,
 } from "@promin/agent";
 import { z } from "zod";
 import { json } from "../router.ts";
@@ -158,6 +159,25 @@ export const HttpUrlSchema = z.string().refine(
   { message: "must be an http(s) URL without credentials" },
 );
 
+const McpToolNamesSchema = z.array(NonEmptyString).optional();
+
+/**
+ * A recipe's MCP entry: an operator-configured server by name, or an http
+ * endpoint. Strict, so a recipe can't carry a command, env, cwd, headers
+ * or inline token.
+ */
+const McpServerRecipeSchema = z.union([
+  z.object({ server: NonEmptyString, tools: McpToolNamesSchema }).strict(),
+  z
+    .object({
+      name: z.string().regex(MCP_RECIPE_SERVER_NAME, "must be 1-48 of [A-Za-z0-9_-]"),
+      transport: z.literal("http"),
+      url: HttpUrlSchema,
+      tools: McpToolNamesSchema,
+    })
+    .strict(),
+]);
+
 const LocalBackendSchema = z
   .object({
     type: z.literal("local"),
@@ -167,7 +187,7 @@ const LocalBackendSchema = z
       credentialRef: z.string().optional(),
     }),
     role: RoleBindingSchema,
-    mcpServers: z.array(z.object({}).passthrough()).optional(),
+    mcpServers: z.array(McpServerRecipeSchema).optional(),
     knowledge: KnowledgeSchema.optional(),
     maxStepsPerTurn: PositiveInt.optional(),
     autoCompact: z.union([z.literal(false), z.object({}).passthrough()]).optional(),
@@ -212,13 +232,29 @@ export const AgentMetadataPatchSchema = z
 
 export type AgentMetadataPatch = z.infer<typeof AgentMetadataPatchSchema>;
 
-/** Validate a submitted backend; `null` input means "absent". */
-export function parseBackend(
-  raw: unknown,
-): { backend: AgentBackend } | { error: string; message: string } {
-  const parsed = AgentBackendSchema.safeParse(raw);
+/** Checks a backend's MCP entries against the host's allowlist (`ZoryaMcpServers`). */
+export interface McpRecipeChecker {
+  recipeProblems(backend: AgentBackend): string | undefined;
+}
+
+/**
+ * Validate a submitted backend. Its MCP entries must be allowed by `mcp`;
+ * without one, a backend that attaches MCP servers is refused.
+ */
+export function parseBackend(params: {
+  readonly raw: unknown;
+  readonly mcp?: McpRecipeChecker | undefined;
+}): { backend: AgentBackend } | { error: string; message: string } {
+  const parsed = AgentBackendSchema.safeParse(params.raw);
   if (!parsed.success) return { error: "invalid_backend", message: describeIssues(parsed.error) };
-  return { backend: parsed.data as AgentBackend };
+  const backend = parsed.data as AgentBackend;
+  if (backend.type === "local" && (backend.mcpServers?.length ?? 0) > 0) {
+    const problem = params.mcp
+      ? params.mcp.recipeProblems(backend)
+      : "This server has no MCP configuration, so a recipe cannot attach MCP servers.";
+    if (problem !== undefined) return { error: "invalid_mcp_servers", message: problem };
+  }
+  return { backend };
 }
 
 /** Validate submitted metadata. */

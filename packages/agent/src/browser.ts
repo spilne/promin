@@ -20,3 +20,5 @@ export {
 export type { FactSource } from "./lib/memory/types.ts";
 export { DEFAULT_RETRIEVER_TOOL_NAME, retrieverToolName } from "./lib/rag/retriever-tool-name.ts";
 export type { AgentKnowledgeMode, AgentKnowledgeRecipe } from "./lib/registry/types.ts";
+export { MCP_RECIPE_SERVER_NAME } from "./lib/mcp/types.ts";
+export type { McpHttpServerRecipe, McpServerRecipe, McpServerRefRecipe } from "./lib/mcp/types.ts";

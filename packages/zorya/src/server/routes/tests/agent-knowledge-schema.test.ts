@@ -31,7 +31,7 @@ describe("parseBackend — knowledge bindings", () => {
         mode: "tool-and-context",
       },
     ];
-    const parsed = parseBackend(backend(knowledge));
+    const parsed = parseBackend({ raw: backend(knowledge) });
     if (!("backend" in parsed) || parsed.backend.type !== "local") {
       throw new Error(`expected a local backend, got ${JSON.stringify(parsed)}`);
     }
@@ -46,7 +46,7 @@ describe("parseBackend — knowledge bindings", () => {
     ["duplicate ids", [{ id: "docs" }, { id: "docs", mode: "context" }]],
     ["an unknown field", [{ id: "docs", retriever: {} }]],
   ])("rejects %s", (_label, knowledge) => {
-    const parsed = parseBackend(backend(knowledge));
+    const parsed = parseBackend({ raw: backend(knowledge) });
     expect("error" in parsed && parsed.error).toBe("invalid_backend");
   });
 });
