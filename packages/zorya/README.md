@@ -281,6 +281,34 @@ line; internal detail never reaches the caller.
 The wire types live in `src/server/api-types.ts` and are exported from the
 package root.
 
+### Agent knowledge (RAG)
+
+Local agent recipes bind retrievers by id in `backend.knowledge` (see
+[Retrieval in `@promin/agent`](../agent/README.md#retrieval-rag)). The host
+owns the retrievers: pass a `RetrieverRegistry` as `ZoryaAgents.retrievers`
+and the same registry to `resolveLocalAgent({ retrievers })` in `resolve`.
+
+```ts
+const retrievers = new InMemoryRetrieverRegistry([
+  { id: "docs", retriever: docsRetriever, description: "Product docs", tags: ["public"] },
+]);
+const agents = new ZoryaAgents({
+  registry,
+  retrievers,
+  resolve: (recipe) => resolveLocalAgent(recipe, { runner, llm, tools, retrievers }),
+});
+```
+
+`GET /api/agents/_catalog/retrievers` lists the registry's ids, descriptions,
+tags and metadata (never the retriever) and answers an empty list without a
+registry. The agent editor's **Knowledge / RAG** section adds bindings from
+that catalog (or by manual id), sets each binding's mode (`tool`, `context`,
+`tool + context`), tool name and description, top K, chunk-size cap and
+whether sources and scores are shown, and warns about ids the catalog does not
+list. The search tools a binding adds appear among the agent's system tools.
+Recipe writes validate `backend.knowledge`: unique ids, a known mode, and a
+tool name of letters, digits, `_` or `-`.
+
 ## Writing and running a worker
 
 A worker hosts workflow code and drives runs for a `QueuedWorkflows`

@@ -16,6 +16,8 @@ import { LocalAgent } from "../../agent/local-agent.ts";
 import type { LLMProvider, LLMResponse } from "../../llm-provider.ts";
 import type { RegisteredAgent } from "../types.ts";
 import { createElevatedTool, tool } from "../../tool.ts";
+import { InMemoryRetriever } from "../../rag/in-memory-retriever.ts";
+import { InMemoryRetrieverRegistry } from "../../rag/retriever-registry.ts";
 import { z } from "zod";
 
 function mockLLM(responses: LLMResponse[]): LLMProvider {
@@ -485,5 +487,98 @@ describe("LocalAgent.fromRegistry", () => {
     await expect(
       LocalAgent.fromRegistry(registry, row.id, okDeps(), { version: "v99" }),
     ).rejects.toThrow(/version "v99"/);
+  });
+});
+
+describe("resolveLocalAgent — knowledge bindings", () => {
+  const docs = () =>
+    new InMemoryRetriever({
+      documents: [{ id: "returns", text: "Return unopened items within 30 days." }],
+    });
+  const withKnowledge = (
+    knowledge: NonNullable<Extract<RegisteredAgent["backend"], { type: "local" }>["knowledge"]>,
+  ): RegisteredAgent => {
+    const row = baseRow();
+    return { ...row, backend: { ...row.backend, knowledge } as RegisteredAgent["backend"] };
+  };
+  const recordingLLM = () => {
+    const seen: { tools: string[]; system: string[] } = { tools: [], system: [] };
+    const llm: LLMProvider = {
+      chat: async (params) => {
+        seen.tools = (params.tools ?? []).map((t) => t.name);
+        seen.system = params.messages
+          .filter((m) => m.role === "system")
+          .map((m) => String(m.content));
+        return { content: "ok", finishReason: "stop" };
+      },
+    };
+    return { llm, seen };
+  };
+
+  it("resolves recipe knowledge bindings from a retriever map", async () => {
+    const { llm, seen } = recordingLLM();
+    const agent = resolveLocalAgent(withKnowledge([{ id: "docs" }]), {
+      runner: makeRunner(),
+      llm: () => llm,
+      tools: { search: searchTool },
+      namespaceId: "acme",
+      retrievers: { docs: docs() },
+    });
+    await agent.invoke({ task: "return items" });
+
+    expect(seen.tools).toEqual(["search", "search_docs"]);
+  });
+
+  it("resolves recipe knowledge bindings from a RetrieverRegistry", async () => {
+    const { llm, seen } = recordingLLM();
+    const agent = resolveLocalAgent(
+      withKnowledge([{ id: "docs", name: "lookup_policy", mode: "tool-and-context" }]),
+      {
+        runner: makeRunner(),
+        llm: () => llm,
+        tools: { search: searchTool },
+        namespaceId: "acme",
+        retrievers: new InMemoryRetrieverRegistry([{ id: "docs", retriever: docs() }]),
+      },
+    );
+    await agent.invoke({ task: "return items" });
+
+    expect(seen.tools).toEqual(["search", "lookup_policy"]);
+    expect(seen.system.some((s) => s.includes("Return unopened items"))).toBe(true);
+  });
+
+  it("context-only bindings add no tool", async () => {
+    const { llm, seen } = recordingLLM();
+    const agent = resolveLocalAgent(withKnowledge([{ id: "docs", mode: "context" }]), {
+      runner: makeRunner(),
+      llm: () => llm,
+      tools: { search: searchTool },
+      namespaceId: "acme",
+      retrievers: { docs: docs() },
+    });
+    await agent.invoke({ task: "return items" });
+
+    expect(seen.tools).toEqual(["search"]);
+    expect(seen.system.some((s) => s.includes("Knowledge results from docs"))).toBe(true);
+  });
+
+  it("throws when recipe knowledge references an unwired retriever", () => {
+    expect(() =>
+      resolveLocalAgent(withKnowledge([{ id: "docs" }]), {
+        runner: makeRunner(),
+        llm: () => mockLLM([]),
+        tools: { search: searchTool },
+        namespaceId: "acme",
+      }),
+    ).toThrow(/knowledge retriever "docs"/);
+    expect(() =>
+      resolveLocalAgent(withKnowledge([{ id: "toString" }]), {
+        runner: makeRunner(),
+        llm: () => mockLLM([]),
+        tools: { search: searchTool },
+        namespaceId: "acme",
+        retrievers: { docs: docs() },
+      }),
+    ).toThrow(/knowledge retriever "toString"/);
   });
 });

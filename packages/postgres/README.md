@@ -171,6 +171,34 @@ the server clock. `commitPoll` checks the lease epoch under `FOR SHARE` in
 the same transaction as its writes. Delivery semantics are described in the
 [Scheduler guide](../workflow/src/lib/scheduler/README.md).
 
+## pgvector retriever
+
+`PgVectorRetriever` implements `@promin/agent`'s `Retriever` over a table of
+embedded knowledge chunks. Its table is not part of the baseline migration,
+because it needs the `vector` extension and a fixed embedding dimension;
+`ensureSchema()` creates it (idempotently) instead.
+
+```typescript
+import { PgVectorRetriever } from "@promin/postgres";
+
+const docs = new PgVectorRetriever({
+  db,
+  embeddings, // EmbeddingProvider; vectors must have `dimensions` entries
+  dimensions: 1536,
+  tableName: "kb.docs_chunks", // optional, default `agent_knowledge_chunk`
+});
+await docs.ensureSchema({ createExtension: true, index: "hnsw" }); // or "ivfflat" / false
+await docs.addDocument({ id: "handbook", title: "Handbook", text: markdown, tags: ["hr"] });
+const hits = await docs.retrieve({ query: "parental leave", topK: 5, filter: { tags: ["hr"] } });
+```
+
+Search orders by cosine distance and scores `1 - distance`. Tag filters use
+array containment; metadata filters match the source metadata merged with the
+chunk metadata. `createExtension` needs a role allowed to create extensions;
+on managed Postgres enable `vector` once and leave it off. Values are always
+bound parameters; the table name is validated as a (schema-qualified)
+identifier and quoted. Its tests run on the `pgvector/pgvector:pg17` image.
+
 ## Clocks
 
 Every store takes an optional `clock` (`WallClock`) for the timestamps it

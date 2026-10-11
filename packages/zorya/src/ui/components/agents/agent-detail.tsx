@@ -123,6 +123,7 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
                   <SystemToolChips
                     tools={systemToolsFor({
                       skillCount: inlineRoleDefinition(agent.backend.role)?.skills?.length ?? 0,
+                      knowledge: agent.backend.knowledge ?? [],
                       hasNetwork: agent.backend.network !== undefined,
                     })}
                   />

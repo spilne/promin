@@ -1,9 +1,11 @@
 // ---------------------------------------------------------------------------
 // GET /api/agents/_catalog/models — designer UI's model dropdown source.
+// GET /api/agents/_catalog/retrievers — the agent editor's knowledge picker.
 //
 // Pins:
 //   - returns the catalog's serialize() projection (no llm field on the wire)
-//   - empty array when no catalog is wired
+//   - retriever rows carry metadata only, never the retriever object
+//   - empty arrays when no catalog / registry is wired
 //   - JSON-safe round-trip
 // ---------------------------------------------------------------------------
 
@@ -11,6 +13,7 @@ import { describe, expect, it } from "bun:test";
 import {
   InMemoryAgentRegistry,
   InMemoryModelCatalog,
+  InMemoryRetrieverRegistry,
   type LLMProvider,
   type ModelCatalogItem,
 } from "@promin/agent";
@@ -22,7 +25,10 @@ const stubLLM = (label: string): LLMProvider => ({
   chat: async () => ({ content: label, finishReason: "stop" }),
 });
 
-function makeServer(items: ModelCatalogItem[] | null) {
+function makeServer(
+  items: ModelCatalogItem[] | null,
+  retrievers: InMemoryRetrieverRegistry | null = null,
+) {
   const storage = new InMemoryWorkflowStorage();
   const runner = createWorkflowRunner({ storage });
   return new ZoryaServer({
@@ -39,6 +45,7 @@ function makeServer(items: ModelCatalogItem[] | null) {
         throw new Error("catalog test should not resolve agents");
       },
       ...(items !== null && { models: new InMemoryModelCatalog(items) }),
+      ...(retrievers !== null && { retrievers }),
     }),
   });
 }
@@ -100,5 +107,44 @@ describe("GET /api/agents/_catalog/models", () => {
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error?: string };
     expect(body.error).toBe("agent_not_found");
+  });
+});
+
+describe("GET /api/agents/_catalog/retrievers", () => {
+  it("returns retriever metadata without the live retriever object", async () => {
+    const server = makeServer(
+      [],
+      new InMemoryRetrieverRegistry([
+        {
+          id: "docs",
+          retriever: { retrieve: async () => [] },
+          description: "Company docs",
+          tags: ["policy", "engineering"],
+          metadata: { owner: "platform", chunkCount: 42 },
+        },
+        { id: "faq", retriever: { retrieve: async () => [] } },
+      ]),
+    );
+
+    const res = await server.handle(new Request("http://test/api/agents/_catalog/retrievers"));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { retrievers: Array<Record<string, unknown>> };
+    expect(body.retrievers).toEqual([
+      {
+        id: "docs",
+        description: "Company docs",
+        tags: ["policy", "engineering"],
+        metadata: { owner: "platform", chunkCount: 42 },
+      },
+      { id: "faq", tags: [], metadata: {} },
+    ]);
+    expect(body.retrievers.some((r) => "retriever" in r)).toBe(false);
+  });
+
+  it("returns an empty list when no retriever registry is wired", async () => {
+    const server = makeServer([]);
+    const res = await server.handle(new Request("http://test/api/agents/_catalog/retrievers"));
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { retrievers: unknown[] }).retrievers).toEqual([]);
   });
 });

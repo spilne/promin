@@ -52,6 +52,10 @@ import {
 } from "../memory/consolidator.ts";
 import { createLayeredMemoryTool } from "../tools/layered-memory-tools.ts";
 import { createCallAgentTool, createFindAgentTool } from "../network/runtime.ts";
+import { createRetrieverTool, formatRetrievedChunks } from "../rag/retriever-tool.ts";
+import { retrieverToolName } from "../rag/retriever-tool-name.ts";
+import type { Retriever, RetrieverFilter } from "../rag/types.ts";
+import type { AgentKnowledgeMode } from "../registry/types.ts";
 import { frameTask } from "./frame-task.ts";
 import { completeSignal, hasCapability } from "@promin/workflow";
 import { ThreadNotFoundError } from "./errors.ts";
@@ -208,6 +212,14 @@ export interface LocalAgentConfig<TOutput = any> {
     readonly recipe: import("../registry/types.ts").RegisteredAgent;
   };
   /**
+   * RAG bindings, keyed by binding id. A bare `Retriever` is exposed as a
+   * search tool named `retrieverToolName(id)`; an `AgentRetrieverBinding`
+   * can instead (or also) inject retrieved context before every turn —
+   * see `AgentRetrieverBinding.mode`. A tool never shadows a same-named
+   * tool already on the agent.
+   */
+  readonly retrievers?: Readonly<Record<string, Retriever | AgentRetrieverBinding>>;
+  /**
    * Recipe id surfaced as `ctx.scope.agentId` to scope-aware tools
    * (the durable scheduler stamps this in schedule metadata so
    * `dispatchAgentSchedule` can look the recipe up later). Decoupled
@@ -216,6 +228,31 @@ export interface LocalAgentConfig<TOutput = any> {
    * to `agent.name`.
    */
   readonly agentId?: string;
+}
+
+/** A retriever plus how it is exposed to the model. */
+export interface AgentRetrieverBinding {
+  readonly retriever: Retriever;
+  /** LLM-facing tool name. Default `retrieverToolName(id)`. */
+  readonly name?: string;
+  /** LLM-facing tool description. */
+  readonly description?: string;
+  /** Results per search. Default: the retriever's own default. */
+  readonly topK?: number;
+  /** Include source metadata in tool output. Default true. */
+  readonly includeSources?: boolean;
+  /** Include relevance scores in the model-visible tool output. Default false. */
+  readonly includeScores?: boolean;
+  /** Truncate each returned chunk to this many characters. */
+  readonly maxChunkCharacters?: number;
+  /** Filter applied to every search (tool calls and context injection). */
+  readonly filter?: RetrieverFilter;
+  /**
+   * `tool` (default) exposes a search tool; `context` searches with the
+   * turn's task before every turn and injects the hits as a system message;
+   * `tool-and-context` does both.
+   */
+  readonly mode?: AgentKnowledgeMode;
 }
 
 export interface AutoCompactConfig {
@@ -547,6 +584,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       autoDistill: this.config.autoDistill === false ? undefined : this.config.autoDistill,
       consolidator: () => this.resolveConsolidator(),
       contextBudget: this.config.contextBudget,
+      ...(this.config.retrievers !== undefined && { retrievers: this.config.retrievers }),
     });
   }
 
@@ -620,6 +658,29 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
         if (!("callAgent" in merged)) merged.callAgent = callAgent;
         tools = merged;
       }
+    }
+
+    // Retriever tools — one search tool per binding whose mode includes
+    // `tool`. Host / recipe tools of the same name win.
+    if (this.config.retrievers) {
+      const merged: NonNullable<typeof tools> = { ...tools };
+      for (const binding of retrieverBindings(this.config.retrievers)) {
+        if (binding.mode === "context") continue;
+        if (binding.toolName in merged) continue;
+        merged[binding.toolName] = createRetrieverTool({
+          retriever: binding.retriever,
+          name: binding.toolName,
+          ...(binding.description !== undefined && { description: binding.description }),
+          ...(binding.topK !== undefined && { topK: binding.topK }),
+          ...(binding.includeSources !== undefined && { includeSources: binding.includeSources }),
+          ...(binding.includeScores !== undefined && { includeScores: binding.includeScores }),
+          ...(binding.maxChunkCharacters !== undefined && {
+            maxChunkCharacters: binding.maxChunkCharacters,
+          }),
+          ...(binding.filter !== undefined && { filter: binding.filter }),
+        });
+      }
+      tools = merged;
     }
 
     // Capability gate — an elevated tool is exposed only when the
@@ -765,13 +826,24 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       });
     }
 
-    const promise = this.config.runner
-      .run({
+    // Context-mode retrievers search with the task before the run starts;
+    // the hits ride in the workflow input as a system message, so a replay
+    // sees the same context without searching again.
+    const promise = (async () => {
+      const knowledge = await buildRetrieverContext({
+        retrievers: this.config.retrievers,
+        query: input.task,
+      });
+      const messages: Message[] = [];
+      if (knowledge) messages.push({ role: "system", content: knowledge });
+      messages.push(...(input.messages ?? []));
+      const r = await this.config.runner.run({
         workflow: wf,
         workflowId,
-        input: { task: frameTask(input), messages: [...(input.messages ?? [])] },
-      })
-      .then((r) => r as AgentResult);
+        input: { task: frameTask(input), messages },
+      });
+      return r as AgentResult;
+    })();
     return { promise, capture };
   }
 }
@@ -798,6 +870,8 @@ interface LocalAgentThreadDeps {
   readonly consolidator?: () => Consolidator;
   /** Token budget for resolveContext. Default DEFAULT_CONTEXT_BUDGET. */
   readonly contextBudget?: TokenBudget;
+  /** Retriever bindings; context-mode ones are searched before every turn. */
+  readonly retrievers?: LocalAgentConfig["retrievers"];
 }
 
 /**
@@ -985,7 +1059,11 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       })
       .then(async (raw) => {
         const r = raw as AgentResult;
-        await this.persistResumedTurn(!!persona, r);
+        await this.persistResumedTurn({
+          turnHadSystemPrompt: !!persona,
+          seedLen: seedLength(persistedInput),
+          result: r,
+        });
         return r;
       });
 
@@ -998,13 +1076,19 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
    * call never reached `persistTurn` because the workflow suspended
    * before the runner returned, so the entire turn — user task,
    * tool calls, tool results, assistant response — needs to land here.
+   *
+   * The turn's seed (cascade, retrieved knowledge, history) is skipped by
+   * its length in the persisted workflow input; the persisted history
+   * length is only a fallback, since it misses the seed's system blocks.
    */
-  private async persistResumedTurn(
-    turnHadSystemPrompt: boolean,
-    result: AgentResult,
-  ): Promise<void> {
-    const persisted = (await this.loadContext()).messages;
-    const skip = (turnHadSystemPrompt ? 1 : 0) + persisted.length;
+  private async persistResumedTurn(params: {
+    turnHadSystemPrompt: boolean;
+    seedLen: number | undefined;
+    result: AgentResult;
+  }): Promise<void> {
+    const { turnHadSystemPrompt, result } = params;
+    const seedLen = params.seedLen ?? (await this.loadContext()).messages.length;
+    const skip = (turnHadSystemPrompt ? 1 : 0) + seedLen;
     const newTail = result.messages.slice(skip).filter((m) => m.role !== "system");
     if (newTail.length === 0) return;
 
@@ -1045,9 +1129,18 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     // FRONT of the seed as a second system message. Two distinct system
     // blocks → two cache breakpoints at the Anthropic adapter, so the
     // persona prefix stays cached when the cascade changes mid-session.
+    // Retrieved knowledge (context-mode retrievers) is a third system block
+    // after the cascade: it changes every turn, so it goes last among the
+    // system blocks to keep the persona and cascade prefixes cacheable. It
+    // is never persisted — persistTurn drops system messages.
     const { persona, cascade, messages: history } = await this.loadContext();
+    const knowledge = await buildRetrieverContext({
+      retrievers: this.deps.retrievers,
+      query: input.task,
+    });
     const seed: Message[] = [];
     if (cascade) seed.push({ role: "system", content: cascade });
+    if (knowledge) seed.push({ role: "system", content: knowledge });
     seed.push(...history);
     if (input.messages) seed.push(...input.messages);
 
@@ -1728,6 +1821,78 @@ function serializeSource(
     case "agent":
       return { kind: "agent", callerAgentId: source.callerAgentId };
   }
+}
+
+/** Length of `messages` in a persisted agent-turn workflow input, if present. */
+function seedLength(input: unknown): number | undefined {
+  if (typeof input !== "object" || input === null) return undefined;
+  const messages = (input as { messages?: unknown }).messages;
+  return Array.isArray(messages) ? messages.length : undefined;
+}
+
+interface NormalizedRetrieverBinding extends AgentRetrieverBinding {
+  readonly id: string;
+  readonly toolName: string;
+  readonly mode: AgentKnowledgeMode;
+}
+
+function retrieverBindings(
+  retrievers: NonNullable<LocalAgentConfig["retrievers"]>,
+): NormalizedRetrieverBinding[] {
+  return Object.entries(retrievers).map(([id, bindingLike]) => {
+    const binding: AgentRetrieverBinding =
+      "retrieve" in bindingLike ? { retriever: bindingLike } : bindingLike;
+    return {
+      ...binding,
+      id,
+      toolName: binding.name ?? retrieverToolName(id),
+      mode: binding.mode ?? "tool",
+    };
+  });
+}
+
+/**
+ * Search every context-mode binding with `query` and render the hits as
+ * one system-message block. Returns `undefined` when no binding is in
+ * context mode or nothing matched.
+ */
+async function buildRetrieverContext(params: {
+  retrievers: LocalAgentConfig["retrievers"];
+  query: string;
+}): Promise<string | undefined> {
+  if (!params.retrievers) return undefined;
+  const contextBindings = retrieverBindings(params.retrievers).filter((b) => b.mode !== "tool");
+  if (contextBindings.length === 0) return undefined;
+  const batches = await Promise.all(
+    contextBindings.map(async (binding) => ({
+      binding,
+      results: await binding.retriever.retrieve({
+        query: params.query,
+        ...(binding.topK !== undefined && { topK: binding.topK }),
+        ...(binding.filter !== undefined && { filter: binding.filter }),
+        ...(binding.maxChunkCharacters !== undefined && {
+          maxChunkCharacters: binding.maxChunkCharacters,
+        }),
+      }),
+    })),
+  );
+  const blocks = batches
+    .filter(({ results }) => results.length > 0)
+    .map(({ binding, results }) =>
+      [
+        `Knowledge results from ${binding.id}:`,
+        formatRetrievedChunks({
+          results: results.map((r) => ({
+            text: r.chunk.text,
+            score: r.score,
+            ...(binding.includeSources !== false && { source: r.chunk.source }),
+          })),
+          ...(binding.includeScores !== undefined && { includeScores: binding.includeScores }),
+        }),
+      ].join("\n\n"),
+    );
+  if (blocks.length === 0) return undefined;
+  return `Use the following retrieved knowledge when relevant.\n\n${blocks.join("\n\n")}`;
 }
 
 function stripStorageMeta(m: Message & { seq?: number; createdAt?: number }): Message {

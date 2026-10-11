@@ -14,6 +14,7 @@ Agent loop, multi-agent orchestration, LLM adapters, tools, memory, and terminal
   - [multiTool()](#multitool)
   - [Built-in tools](#built-in-tools)
 - [Memory](#memory)
+- [Retrieval (RAG)](#retrieval-rag)
 - [Context compaction](#context-compaction)
 - [Multi-agent patterns](#multi-agent-patterns)
   - [agentNetwork — hub-and-spoke](#agentnetwork--hub-and-spoke)
@@ -257,6 +258,68 @@ const results = await store.search("UI preferences", 5);
 ```
 
 Inject into `agentLoop` via `memory.store` — the loop automatically retrieves relevant memories at session start and saves compaction summaries.
+
+---
+
+## Retrieval (RAG)
+
+A `Retriever` answers `retrieve({ query, topK?, filter?, maxChunkCharacters? })` with
+scored, source-bearing chunks (`{ chunk: { id, text, index, source: { id, title?, uri?, tags?, metadata? } }, score }`).
+Higher scores are more relevant; the scale is retriever-specific.
+
+| Export                                   | What it does                                                                                                                                           |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `FlatTextChunker`                        | Paragraph chunker (`maxSize` 1000, `overlap` 100 chars). Implements `KnowledgeChunker`.                                                                |
+| `InMemoryRetriever`                      | In-process store: cosine similarity with an `EmbeddingProvider`, keyword overlap without one. `addDocument`, `addChunks`, `deleteSource`.              |
+| `PgVectorRetriever` (`@promin/postgres`) | pgvector table: `ensureSchema({ createExtension?, index? })`, `addDocument`, `addChunks` (upsert by chunk id), `deleteSource`, cosine search.          |
+| `RerankingRetriever`                     | Fetches `topK * candidateMultiplier` candidates, lets `rerank({ request, results })` reorder them, cuts back to `topK`.                                |
+| `RouterRetriever`                        | Fans out to the routes whose `when` passes, else whose `tags` match `filter.tags`, else all; merges by best score per chunk id.                        |
+| `CombinedRetriever`                      | Queries every source, scales each source's scores by its `weight`, merges by best score per chunk id.                                                  |
+| `FallbackRetriever`                      | Tries sources in order; returns the first result set that meets the source's `minResults` / `minScore`.                                                |
+| `createRetrieverTool`                    | Wraps a retriever as an agent tool (default name `search_knowledge_base`). Sources land in the model text and in the tool result's `sources` metadata. |
+| `InMemoryRetrieverRegistry`              | `RetrieverRegistry` of live retrievers keyed by id, with description / tags / metadata for catalogs.                                                   |
+
+```ts
+import { InMemoryRetriever, LocalAgent } from "@promin/agent";
+
+const docs = new InMemoryRetriever({ embeddings: myEmbeddingProvider });
+await docs.addDocument({ id: "returns", title: "Returns", text: returnsPolicyMarkdown });
+
+const agent = new LocalAgent({
+  agent: { name: "support", llm },
+  runner,
+  retrievers: {
+    // A bare retriever becomes a `search_docs` tool the model calls on demand.
+    docs,
+    // A binding can instead inject results as context before every turn, or both.
+    policy: {
+      retriever: policyRetriever,
+      mode: "tool-and-context",
+      topK: 4,
+      filter: { tags: ["public"] },
+    },
+  },
+});
+```
+
+Binding modes (`AgentRetrieverBinding.mode`):
+
+- `tool` (default) — a search tool named `name ?? retrieverToolName(id)` (`search_<id>`; the id `default` maps to `search_knowledge_base`). A tool already on the agent with the same name wins.
+- `context` — the turn's task is searched before every turn (one-shot and thread) and the hits are added as a system message after the persona and memory cascade. It rides in the workflow input, so replays see the same context, and it is never persisted to the thread history.
+- `tool-and-context` — both.
+
+`topK`, `filter`, `maxChunkCharacters`, `includeSources` and `includeScores` apply to both paths. The binding's `filter` is merged over a filter the model passes to the tool: tags are combined and the binding's metadata keys win, so the model cannot widen a tenant scope.
+
+Recipes reference retrievers by id in `backend.knowledge` (`AgentKnowledgeRecipe`: `id` plus the binding options above). `resolveLocalAgent` looks each id up in `deps.retrievers`, a plain `{ id: Retriever }` map or a `RetrieverRegistry`, and throws when one is missing:
+
+```ts
+const retrievers = new InMemoryRetrieverRegistry([
+  { id: "docs", retriever: docs, description: "Product docs", tags: ["public"] },
+]);
+const agent = resolveLocalAgent(recipe, { runner, llm, tools, retrievers });
+```
+
+`retrieverRegistryTestSuite` (from `@promin/agent/testing`) checks a custom `RetrieverRegistry`.
 
 ---
 

@@ -1,7 +1,8 @@
 // ---------------------------------------------------------------------------
 // System (auto-injected) tools — the tools the resolver attaches to a live
 // agent that DON'T live in `backend.tools`: `loadSkill` (when the agent has
-// skills) and `findAgent` / `callAgent` (when `backend.network` is set).
+// skills), one search tool per `backend.knowledge` binding exposed as a tool,
+// and `findAgent` / `callAgent` (when `backend.network` is set).
 //
 // These are per-agent and conditional, so they're a computed view of the
 // recipe / form state — not entries in the host-wide tool catalog. Surfaced
@@ -9,13 +10,23 @@
 // toggle them (the resolver owns them).
 // ---------------------------------------------------------------------------
 
+import { retrieverToolName, type AgentKnowledgeMode } from "@promin/agent/browser";
+
 export interface SystemTool {
   readonly name: string;
   readonly reason: string;
 }
 
+/** The parts of a knowledge binding that decide its search tool. */
+export interface KnowledgeToolBinding {
+  readonly id: string;
+  readonly name?: string;
+  readonly mode?: AgentKnowledgeMode;
+}
+
 export function systemToolsFor(opts: {
   readonly skillCount: number;
+  readonly knowledge?: ReadonlyArray<KnowledgeToolBinding>;
   readonly hasNetwork: boolean;
 }): SystemTool[] {
   const out: SystemTool[] = [];
@@ -25,6 +36,14 @@ export function systemToolsFor(opts: {
       reason: `Auto-injected because this agent has ${opts.skillCount} skill${
         opts.skillCount === 1 ? "" : "s"
       }. The model calls it to load a skill's instructions on demand.`,
+    });
+  }
+  for (const binding of opts.knowledge ?? []) {
+    const id = binding.id.trim();
+    if (!id || binding.mode === "context") continue;
+    out.push({
+      name: binding.name?.trim() || retrieverToolName(id),
+      reason: `Auto-injected because knowledge binding "${id}" is exposed as a search tool.`,
     });
   }
   if (opts.hasNetwork) {

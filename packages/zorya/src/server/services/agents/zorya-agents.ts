@@ -17,6 +17,7 @@ import type {
   MemoryStore,
   ModelCatalog,
   RegisteredAgent,
+  RetrieverRegistry,
   RoleRegistry,
   ToolHistoryStore,
 } from "@promin/agent";
@@ -71,6 +72,14 @@ export interface ZoryaAgentsConfig {
    * Without it, the route is not mounted.
    */
   toolCatalog?: AgentToolCatalog;
+  /**
+   * Optional retriever registry. When set, `GET /api/agents/_catalog/retrievers`
+   * lists its rows (id, description, tags, metadata — never the retriever)
+   * for the agent editor's knowledge picker. Pass the same registry to
+   * `resolveLocalAgent({ retrievers })` in `resolve` so the ids recipes
+   * bind actually resolve. Without it, the catalog answers an empty list.
+   */
+  retrievers?: RetrieverRegistry;
   /**
    * Optional fragment registry. When set, the server exposes
    * `GET /api/agents/_catalog/fragments` so the agent editor's
@@ -130,6 +139,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly instances?: AgentInstanceRegistry;
   readonly models?: ModelCatalog;
   readonly toolCatalog?: AgentToolCatalog;
+  readonly retrievers?: RetrieverRegistry;
   readonly fragments?: FragmentRegistry;
   readonly roles?: RoleRegistry;
   readonly toolHistory?: ToolHistoryStore;
@@ -151,6 +161,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     if (config.instances) this.instances = config.instances;
     if (config.models) this.models = config.models;
     if (config.toolCatalog) this.toolCatalog = config.toolCatalog;
+    if (config.retrievers) this.retrievers = config.retrievers;
     if (config.fragments) this.fragments = config.fragments;
     if (config.roles) this.roles = config.roles;
     if (config.toolHistory) this.toolHistory = config.toolHistory;

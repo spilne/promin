@@ -39,6 +39,9 @@ import { LOAD_SKILL_TOOL_NAME, createLoadSkillTool } from "../skills/load-skill-
 import { resolveSystemPrompt } from "../fragments/resolve-prompt.ts";
 import type { FragmentRegistry } from "../fragments/types.ts";
 import type { RoleDefinition } from "../role/types.ts";
+import type { AgentRetrieverBinding } from "../agent/local-agent.ts";
+import type { RetrieverRegistry } from "../rag/retriever-registry.ts";
+import type { Retriever } from "../rag/types.ts";
 
 /** Caller-supplied runtime injectables. */
 export interface ResolveLocalAgentDeps {
@@ -118,6 +121,12 @@ export interface ResolveLocalAgentDeps {
    * opted into the network surface.
    */
   readonly network?: import("../network/runtime.ts").NetworkRuntimeDeps;
+  /**
+   * Retrievers the recipe's `backend.knowledge[].id` entries resolve
+   * against — a plain id → `Retriever` map or a `RetrieverRegistry`. A
+   * recipe naming an id that isn't here throws, like an unknown tool.
+   */
+  readonly retrievers?: Readonly<Record<string, Retriever>> | RetrieverRegistry;
   /**
    * Skill registry the auto-attached `loadSkill` tool reads bodies from.
    * Required for skills to work: a recipe's `backend.skills` is ignored
@@ -214,6 +223,10 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
   const autoCompact = mergeAutoCompact(backend.autoCompact, deps.autoCompact);
   const autoDistill = mergeAutoDistill(backend.autoDistill, deps.autoDistill);
   const contextBudget = mergeContextBudget(backend.contextBudget, deps.contextBudget);
+  const retrievers = resolveKnowledgeBindings({
+    knowledge: backend.knowledge,
+    available: deps.retrievers,
+  });
 
   const config: LocalAgentConfig = {
     agent: {
@@ -238,6 +251,7 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
     autoCompact,
     autoDistill,
     contextBudget,
+    ...(retrievers !== undefined && { retrievers }),
     // Auto-attach findAgent / callAgent only when both sides opt in:
     // the recipe declares `backend.network` AND the host wired runtime
     // deps. Recipe alone or deps alone is a no-op.
@@ -245,6 +259,51 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
   };
 
   return new LocalAgent(config);
+}
+
+/**
+ * Turn the recipe's `backend.knowledge` entries into live retriever
+ * bindings, looking each id up in the host's retrievers.
+ */
+function resolveKnowledgeBindings(params: {
+  knowledge: LocalAgentBackend["knowledge"];
+  available: ResolveLocalAgentDeps["retrievers"];
+}): Record<string, AgentRetrieverBinding> | undefined {
+  const { knowledge, available } = params;
+  if (!knowledge || knowledge.length === 0) return undefined;
+  const out: Record<string, AgentRetrieverBinding> = {};
+  for (const { id, ...options } of knowledge) {
+    const retriever = lookupRetriever({ available, id });
+    if (!retriever) {
+      throw new Error(
+        `resolveLocalAgent: knowledge retriever "${id}" referenced by the recipe but not ` +
+          "provided in deps.retrievers.",
+      );
+    }
+    out[id] = { ...options, retriever };
+  }
+  return out;
+}
+
+function lookupRetriever(params: {
+  available: ResolveLocalAgentDeps["retrievers"];
+  id: string;
+}): Retriever | undefined {
+  const { available, id } = params;
+  if (!available) return undefined;
+  if (isRetrieverRegistry(available)) return available.get(id)?.retriever;
+  return Object.hasOwn(available, id) ? available[id] : undefined;
+}
+
+function isRetrieverRegistry(
+  value: NonNullable<ResolveLocalAgentDeps["retrievers"]>,
+): value is RetrieverRegistry {
+  const candidate = value as Partial<RetrieverRegistry>;
+  return (
+    typeof candidate.get === "function" &&
+    typeof candidate.list === "function" &&
+    typeof candidate.register === "function"
+  );
 }
 
 /**

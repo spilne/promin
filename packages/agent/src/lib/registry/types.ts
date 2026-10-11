@@ -103,6 +103,13 @@ export interface LocalAgentBackend {
    * on the agent, not the role.
    */
   readonly mcpServers?: ReadonlyArray<import("../mcp/types.ts").McpServerConfig>;
+  /**
+   * RAG bindings. Each entry names a retriever the host supplies through
+   * `resolveLocalAgent({ retrievers })` and says whether it is exposed as a
+   * search tool, injected as context before every turn, or both. Like MCP
+   * servers, retrievers are a deployment concern, so they stay on the agent.
+   */
+  readonly knowledge?: ReadonlyArray<AgentKnowledgeRecipe>;
   /** Per-turn step cap. Optional, runtime default applies when unset. */
   readonly maxStepsPerTurn?: number;
   /** Max user turns per session before the loop terminates. */
@@ -238,6 +245,40 @@ export interface AutoDistillRecipe {
 export interface ContextBudgetRecipe {
   readonly maxMessageTokens: number;
   readonly maxEpisodeTokens?: number;
+}
+
+/**
+ * How a knowledge binding reaches the model:
+ *   - `tool`             — exposed as a search tool the model calls on demand
+ *   - `context`          — searched with the turn's task before every turn and
+ *                          injected as a system message
+ *   - `tool-and-context` — both
+ */
+export type AgentKnowledgeMode = "tool" | "context" | "tool-and-context";
+
+/** JSON-serialisable retriever binding on a recipe (`backend.knowledge[]`). */
+export interface AgentKnowledgeRecipe {
+  /** Key into `ResolveLocalAgentDeps.retrievers`. */
+  readonly id: string;
+  /** LLM-facing tool name. Default `retrieverToolName(id)` (`search_<id>`). */
+  readonly name?: string;
+  /** LLM-facing tool description. */
+  readonly description?: string;
+  /** Results per search. Default: the retriever's own default. */
+  readonly topK?: number;
+  /** Include source metadata in tool output. Default true. */
+  readonly includeSources?: boolean;
+  /** Include relevance scores in the model-visible tool output. Default false. */
+  readonly includeScores?: boolean;
+  /** Truncate each returned chunk to this many characters. */
+  readonly maxChunkCharacters?: number;
+  /** Filter applied to every search through this binding. */
+  readonly filter?: {
+    readonly tags?: ReadonlyArray<string>;
+    readonly metadata?: Readonly<Record<string, string | number | boolean>>;
+  };
+  /** Default `tool`. */
+  readonly mode?: AgentKnowledgeMode;
 }
 
 /**

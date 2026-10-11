@@ -5,7 +5,8 @@
 // stripped of the runtime `llm` field — JSON-safe wire shape that powers
 // the designer's model dropdown. The `_catalog` URL prefix signals that
 // these are metadata reads, not agent invocations (the `_` keeps them
-// from colliding with a real agent id).
+// from colliding with a real agent id). Sibling catalogs list tools,
+// skills, fragments and retrievers for the agent editor's pickers.
 // ---------------------------------------------------------------------------
 
 import type {
@@ -13,6 +14,7 @@ import type {
   AgentToolCatalog,
   FragmentRegistry,
   ModelCatalog,
+  RetrieverRegistry,
   SerializedModelCatalogItem,
   SkillRegistry,
   ToolCatalogEntry,
@@ -66,6 +68,26 @@ export interface AgentToolCatalogDeps {
   readonly tools: AgentToolCatalog;
 }
 
+/**
+ * Catalog entry for the agent editor's knowledge picker — a registered
+ * retriever's id and descriptive metadata. The live `Retriever` never
+ * crosses the wire; recipes store only the id plus per-binding options.
+ */
+export interface RetrieverCatalogEntry {
+  readonly id: string;
+  readonly description?: string;
+  readonly tags: ReadonlyArray<string>;
+  readonly metadata: Readonly<Record<string, unknown>>;
+}
+
+export interface RetrieversCatalogResponse {
+  retrievers: RetrieverCatalogEntry[];
+}
+
+export interface AgentRetrieverCatalogDeps {
+  readonly retrievers: RetrieverRegistry;
+}
+
 export function listCatalogModels(deps: AgentCatalogDeps) {
   return async (): Promise<Response> => {
     const body: ModelsCatalogResponse = { models: deps.models.serialize() };
@@ -79,6 +101,23 @@ export function listCatalogTools(deps: AgentToolCatalogDeps) {
       const tools = await deps.tools.listAll();
       const body: ToolsCatalogResponse = { tools };
       return json(200, body);
+    } catch (err) {
+      return internalError({ code: "list_failed", err });
+    }
+  };
+}
+
+/** List host-wired retrievers (sans the retriever object) for the knowledge picker. */
+export function listCatalogRetrievers(deps: AgentRetrieverCatalogDeps) {
+  return async (): Promise<Response> => {
+    try {
+      const retrievers: RetrieverCatalogEntry[] = deps.retrievers.list().map((r) => ({
+        id: r.id,
+        ...(r.description !== undefined && { description: r.description }),
+        tags: r.tags,
+        metadata: r.metadata,
+      }));
+      return json(200, { retrievers } satisfies RetrieversCatalogResponse);
     } catch (err) {
       return internalError({ code: "list_failed", err });
     }

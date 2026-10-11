@@ -98,12 +98,56 @@ export type { InMemoryMemoryStoreConfig } from "./memory/in-memory-memory-store.
 export { resolveContext } from "./memory/resolve-context.ts";
 export type { ResolveContextInput } from "./memory/resolve-context.ts";
 
+// RAG — retrievers, chunking, composition, the retriever tool and registry.
+export {
+  CombinedRetriever,
+  DEFAULT_RETRIEVER_TOOL_NAME,
+  FallbackRetriever,
+  FlatTextChunker,
+  InMemoryRetriever,
+  InMemoryRetrieverRegistry,
+  RerankingRetriever,
+  RouterRetriever,
+  createRetrieverTool,
+  formatRetrievedChunks,
+  retrieverToolName,
+} from "./rag/index.ts";
+export type {
+  CombinedRetrieverConfig,
+  CombinedRetrieverSource,
+  FallbackRetrieverConfig,
+  FallbackRetrieverSource,
+  FlatTextChunkerConfig,
+  InMemoryRetrieverConfig,
+  KnowledgeChunk,
+  KnowledgeChunker,
+  KnowledgeIngestDocument,
+  KnowledgeSource,
+  ListRetrieversParams,
+  RegisteredRetriever,
+  RegisterRetrieverInput,
+  RerankingRetrieverConfig,
+  RetrieveRequest,
+  RetrieveResult,
+  RetrieveReranker,
+  Retriever,
+  RetrieverFilter,
+  RetrieverRegistry,
+  RetrieverRoute,
+  RetrieverToolConfig,
+  RetrieverToolInput,
+  RetrieverToolOutput,
+  RetrieverToolSource,
+  RouterRetrieverConfig,
+} from "./rag/index.ts";
+
 // Auto-compaction + auto-distillation config — exposed alongside Consolidator for demos that wire them.
 export type {
   AutoCompactConfig,
   AutoCompactSignals,
   AutoDistillConfig,
   AutoDistillSignals,
+  AgentRetrieverBinding,
 } from "./agent/local-agent.ts";
 
 // Universal Agent interface + LocalAgent backend.
@@ -145,6 +189,8 @@ export type {
   AutoCompactRecipe,
   AutoDistillRecipe,
   ContextBudgetRecipe,
+  AgentKnowledgeRecipe,
+  AgentKnowledgeMode,
 } from "./registry/types.ts";
 export { DEFAULT_AGENT_VERSION, DEFAULT_AGENT_METADATA } from "./registry/types.ts";
 export { InMemoryAgentRegistry } from "./registry/in-memory-agent-registry.ts";

@@ -64,6 +64,8 @@ import type {
 } from "../../server/routes/roles.ts";
 import type {
   FragmentsCatalogResponse,
+  RetrieverCatalogEntry,
+  RetrieversCatalogResponse,
   SkillsCatalogResponse,
 } from "../../server/routes/agent-catalog.ts";
 import type { MemoryInspectResponse } from "../../server/routes/memory.ts";
@@ -568,6 +570,10 @@ export const api = {
   listCatalogModels(): Promise<{ models: ModelCatalogEntryDto[] }> {
     return req<{ models: ModelCatalogEntryDto[] }>(`/api/agents/_catalog/models`);
   },
+  /** Host-wired retrievers for the agent editor's knowledge picker. */
+  listCatalogRetrievers(): Promise<RetrieversCatalogResponse> {
+    return req<RetrieversCatalogResponse>(`/api/agents/_catalog/retrievers`);
+  },
 
   // ---------------------------------------------------------------------
   // Skills — registry CRUD + the agent editor's picker catalog
@@ -1021,6 +1027,9 @@ export interface ModelCatalogEntryDto {
   capabilities?: string[];
   costTier?: string;
 }
+
+/** Wire shape for /api/agents/_catalog/retrievers — retriever metadata, never the retriever. */
+export type RetrieverCatalogEntryDto = RetrieverCatalogEntry;
 
 export type SecretScopeWire =
   | { kind: "global" }

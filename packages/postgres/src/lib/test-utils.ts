@@ -11,6 +11,8 @@ import type { DrizzleDb } from "@spilne/perfect-postgres";
 const POSTGRES_IMAGE = "postgres:17-alpine";
 
 export interface PostgresContainerConfig {
+  /** Docker image. Default `postgres:17-alpine`; extension tests pass e.g. a pgvector image. */
+  image?: string;
   user?: string;
   password?: string;
   database?: string;
@@ -23,12 +25,14 @@ export class PostgresTestContainer {
   private _db?: DrizzleDb;
   private _url?: string;
 
+  private readonly image: string;
   private readonly user: string;
   private readonly password: string;
   private readonly database: string;
   private readonly startupTimeout: number;
 
   constructor(config?: PostgresContainerConfig) {
+    this.image = config?.image ?? POSTGRES_IMAGE;
     this.user = config?.user ?? "test";
     this.password = config?.password ?? "test";
     this.database = config?.database ?? "test";
@@ -36,7 +40,7 @@ export class PostgresTestContainer {
   }
 
   async start(): Promise<void> {
-    this.container = await new GenericContainer(POSTGRES_IMAGE)
+    this.container = await new GenericContainer(this.image)
       .withExposedPorts(5432)
       .withEnvironment({
         POSTGRES_USER: this.user,

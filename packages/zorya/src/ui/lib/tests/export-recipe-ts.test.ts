@@ -79,6 +79,39 @@ describe("exportRecipeAsTs", () => {
     expect(sysIdx).toBeLessThan(toolsIdx);
   });
 
+  it("keeps knowledge bindings after the role, each led by id, name and mode", () => {
+    const out = exportRecipeAsTs(
+      makeAgent({
+        backend: {
+          type: "local",
+          model: { provider: "anthropic", id: "claude-sonnet-4-6" },
+          role: { inline: { systemPrompt: "Helpful", tools: ["search"] } },
+          knowledge: [
+            {
+              includeScores: true,
+              topK: 4,
+              mode: "tool-and-context",
+              name: "search_docs",
+              id: "docs",
+            },
+          ],
+        },
+      }),
+    );
+    const toolsIdx = out.indexOf('"tools"');
+    const knowledgeIdx = out.indexOf('"knowledge"');
+    const idIdx = out.indexOf('"id": "docs"');
+    const nameIdx = out.indexOf('"name"');
+    const modeIdx = out.indexOf('"mode"');
+    const topKIdx = out.indexOf('"topK"');
+    expect(toolsIdx).toBeLessThan(knowledgeIdx);
+    expect(knowledgeIdx).toBeLessThan(idIdx);
+    expect(idIdx).toBeLessThan(nameIdx);
+    expect(nameIdx).toBeLessThan(modeIdx);
+    expect(modeIdx).toBeLessThan(topKIdx);
+    expect(out).toContain('"includeScores": true');
+  });
+
   it("strips server-assigned fields (createdAt, updatedAt)", () => {
     const out = exportRecipeAsTs(makeAgent());
     expect(out).not.toContain("createdAt");

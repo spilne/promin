@@ -109,6 +109,37 @@ const RoleBindingSchema = z.union([
 
 const PositiveInt = z.number().int().positive();
 
+/** One `backend.knowledge[]` retriever binding. */
+const KnowledgeBindingSchema = z
+  .object({
+    id: NonEmptyString,
+    // An LLM tool name: providers accept letters, digits, `_` and `-`.
+    name: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]{1,64}$/, "must be 1-64 letters, digits, '_' or '-'")
+      .optional(),
+    description: z.string().optional(),
+    topK: PositiveInt.optional(),
+    includeSources: z.boolean().optional(),
+    includeScores: z.boolean().optional(),
+    maxChunkCharacters: PositiveInt.optional(),
+    filter: z
+      .object({
+        tags: z.array(z.string()).optional(),
+        metadata: z.record(z.string(), z.union([z.string(), z.number(), z.boolean()])).optional(),
+      })
+      .strict()
+      .optional(),
+    mode: z.enum(["tool", "context", "tool-and-context"]).optional(),
+  })
+  .strict();
+
+const KnowledgeSchema = z
+  .array(KnowledgeBindingSchema)
+  .refine((bindings) => new Set(bindings.map((b) => b.id)).size === bindings.length, {
+    message: "retriever ids must be unique",
+  });
+
 /** `http(s)://` URL with a host and no embedded credentials. */
 export const HttpUrlSchema = z.string().refine(
   (raw) => {
@@ -137,6 +168,7 @@ const LocalBackendSchema = z
     }),
     role: RoleBindingSchema,
     mcpServers: z.array(z.object({}).passthrough()).optional(),
+    knowledge: KnowledgeSchema.optional(),
     maxStepsPerTurn: PositiveInt.optional(),
     maxTurns: PositiveInt.optional(),
     autoCompact: z.union([z.literal(false), z.object({}).passthrough()]).optional(),

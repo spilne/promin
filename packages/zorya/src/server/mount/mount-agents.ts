@@ -18,6 +18,7 @@ import {
   getToolCatalogHealth,
   listCatalogFragments,
   listCatalogModels,
+  listCatalogRetrievers,
   listCatalogSkills,
   listCatalogTools,
   listToolHistory,
@@ -139,6 +140,13 @@ export function mountAgents(params: {
       fragmentRegistry
         ? listCatalogFragments({ fragments: fragmentRegistry })
         : async () => json(200, { fragments: [] }),
+    )
+    // The agent editor's knowledge picker: host-wired retrievers.
+    .get(
+      "/api/agents/_catalog/retrievers",
+      agents.retrievers
+        ? listCatalogRetrievers({ retrievers: agents.retrievers })
+        : async () => json(200, { retrievers: [] }),
     )
     // Which recipes are backed by a file on disk (the editor disables
     // in-place Save for them and the list badges them).

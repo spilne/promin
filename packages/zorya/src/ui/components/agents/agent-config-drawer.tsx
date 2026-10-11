@@ -17,7 +17,7 @@
 import type * as preact from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
 import type { RegisteredAgent } from "../../../server/routes/agents/agent-gateway-deps.ts";
-import { inlineRoleDefinition } from "@promin/agent/browser";
+import { inlineRoleDefinition, retrieverToolName } from "@promin/agent/browser";
 import { exportRecipeAsTs } from "../../lib/export-recipe-ts.ts";
 import { prompt, toast } from "../../lib/dialogs.ts";
 import { api } from "../../api/client.ts";
@@ -242,6 +242,7 @@ function RecipeBody({
   const sp = roleDef?.systemPrompt ?? null;
   const systemPromptText = sp === null ? null : typeof sp === "string" ? sp : sp.base;
   const tools = roleDef?.tools ?? [];
+  const knowledge = local?.knowledge ?? [];
   // Binding shape — `ref` is a shared live link; `inline` is one-off and can
   // be lifted into the registry via "Save as role" (extract-role).
   const binding = local?.role;
@@ -368,6 +369,50 @@ function RecipeBody({
           <div class="text-[10px] text-base-content/40 mt-2">
             Tool implementations are wired by the host (resolver), not stored on the recipe. Names
             listed here must match a key in the host's tool map.
+          </div>
+        </Section>
+      )}
+
+      {local && (
+        <Section label={`Knowledge / RAG (${knowledge.length})`}>
+          {knowledge.length === 0 ? (
+            <div class="text-xs text-base-content/40 italic">(none)</div>
+          ) : (
+            <div class="space-y-2">
+              {knowledge.map((k) => (
+                <div class="rounded border border-base-300 bg-base-200/60 p-2 text-xs">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span class="font-mono">{k.id}</span>
+                    <span class="badge badge-xs badge-outline">{k.mode ?? "tool"}</span>
+                    {k.mode !== "context" && (
+                      <span class="badge badge-xs badge-ghost font-mono">
+                        {k.name ?? retrieverToolName(k.id)}
+                      </span>
+                    )}
+                    {k.topK !== undefined && (
+                      <span class="badge badge-xs badge-ghost font-mono">topK {k.topK}</span>
+                    )}
+                    {k.includeSources === false && (
+                      <span class="badge badge-xs badge-warning badge-outline">no sources</span>
+                    )}
+                    {k.includeScores && <span class="badge badge-xs badge-ghost">scores</span>}
+                    {k.maxChunkCharacters !== undefined && (
+                      <span class="badge badge-xs badge-ghost font-mono">
+                        max {k.maxChunkCharacters} chars
+                      </span>
+                    )}
+                    {k.filter && <span class="badge badge-xs badge-ghost">filtered</span>}
+                  </div>
+                  {k.description && (
+                    <div class="text-[10px] text-base-content/50 mt-1">{k.description}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          <div class="text-[10px] text-base-content/40 mt-2">
+            The recipe stores retriever ids and per-binding options. The retrievers themselves are
+            wired by the host (resolver).
           </div>
         </Section>
       )}

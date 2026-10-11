@@ -13,3 +13,5 @@ export type {
   RegisteredRole,
 } from "./lib/role/types.ts";
 export { PROMPT_CACHE_BOUNDARY } from "./lib/memory/types.ts";
+export { DEFAULT_RETRIEVER_TOOL_NAME, retrieverToolName } from "./lib/rag/retriever-tool-name.ts";
+export type { AgentKnowledgeMode, AgentKnowledgeRecipe } from "./lib/registry/types.ts";

@@ -1,7 +1,8 @@
 // ---------------------------------------------------------------------------
 // AgentEditDrawer — operator-facing edit form for recipe fields:
 // description, system prompt, model, credential ref, capabilities,
-// tags, advanced limits (maxStepsPerTurn / maxTurns).
+// tags, advanced limits (maxStepsPerTurn / maxTurns), and knowledge /
+// RAG retriever bindings (picked from GET /api/agents/_catalog/retrievers).
 //
 // Model dropdown is sourced from GET /api/agents/_catalog/models when
 // the host wires a `ModelCatalog`; falls back to a free-form
@@ -17,6 +18,7 @@ import { api, type ModelCatalogEntryDto, type ToolCatalogEntryDto } from "../../
 import type { RegisteredAgent } from "../../../server/routes/agents/agent-gateway-deps.ts";
 import type { SkillCatalogEntry } from "../../../server/routes/agent-catalog.ts";
 import { systemToolsFor, SystemToolsSection } from "./system-tools.tsx";
+import { KnowledgePicker } from "./knowledge-picker.tsx";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { DraftTestModal } from "./agent-draft-test-modal.tsx";
 import type { Tenant } from "./agent-detail.tsx";
@@ -33,6 +35,11 @@ import {
   type ContextBudgetForm,
   type RunMode,
 } from "../../lib/recipe-memory-form.ts";
+import {
+  buildKnowledge,
+  initKnowledge,
+  type KnowledgeForm,
+} from "../../lib/recipe-knowledge-form.ts";
 
 interface Props {
   agent: RegisteredAgent;
@@ -134,6 +141,10 @@ export function AgentEditDrawer({
     initContextBudget(isLocal ? agent.backend.contextBudget : undefined),
   );
   const [showMemory, setShowMemory] = useState(false);
+  // Retriever bindings (local backends only) — `backend.knowledge`.
+  const [knowledge, setKnowledge] = useState<ReadonlyArray<KnowledgeForm>>(() =>
+    initKnowledge(isLocal ? agent.backend.knowledge : undefined),
+  );
 
   // Tool selection (local backends only).
   const [selectedTools, setSelectedTools] = useState<ReadonlySet<string>>(
@@ -159,6 +170,8 @@ export function AgentEditDrawer({
   const tools = useMemo(() => toolsData?.tools ?? [], [toolsData]);
   const { data: skillsData } = useFetch(() => api.listCatalogSkills(), [], 0);
   const catalogSkills = useMemo(() => skillsData?.skills ?? [], [skillsData]);
+  const { data: retrieversData } = useFetch(() => api.listCatalogRetrievers(), [], 0);
+  const catalogRetrievers = useMemo(() => retrieversData?.retrievers ?? [], [retrieversData]);
   // Self-fetch which agent recipes are file-managed. When THIS one is, Save
   // would be silently overwritten by the next scan tick — show a warning +
   // disable Save (Publish stays enabled; a new version is operator-managed
@@ -210,12 +223,14 @@ export function AgentEditDrawer({
     const autoCompactValue = buildAutoCompact(autoCompact);
     const autoDistillValue = buildAutoDistill(autoDistill);
     const contextBudgetValue = buildContextBudget(contextBudget);
+    const knowledgeValue = buildKnowledge(knowledge);
     const {
       maxStepsPerTurn: _stripSteps,
       maxTurns: _stripTurns,
       autoCompact: _stripAutoCompact,
       autoDistill: _stripAutoDistill,
       contextBudget: _stripContextBudget,
+      knowledge: _stripKnowledge,
       role: _stripRole,
       ...backendBase
     } = agent.backend;
@@ -252,6 +267,7 @@ export function AgentEditDrawer({
       ...(autoCompactValue !== undefined ? { autoCompact: autoCompactValue } : {}),
       ...(autoDistillValue !== undefined ? { autoDistill: autoDistillValue } : {}),
       ...(contextBudgetValue !== undefined ? { contextBudget: contextBudgetValue } : {}),
+      ...(knowledgeValue.length > 0 ? { knowledge: knowledgeValue } : {}),
     } as typeof agent.backend;
     return { backend, metadata };
   };
@@ -519,9 +535,18 @@ export function AgentEditDrawer({
           )}
 
           {isLocal && (
+            <KnowledgePicker
+              retrievers={catalogRetrievers}
+              bindings={knowledge}
+              onChange={setKnowledge}
+            />
+          )}
+
+          {isLocal && (
             <SystemToolsSection
               tools={systemToolsFor({
                 skillCount: selectedSkills.size,
+                knowledge,
                 hasNetwork: agent.backend.type === "local" && agent.backend.network !== undefined,
               })}
             />
