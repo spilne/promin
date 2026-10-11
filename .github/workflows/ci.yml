@@ -48,6 +48,9 @@ jobs:
       - name: Lint
         run: bunx nx run-many -t lint
 
+      - name: Format check
+        run: bunx nx run-many -t format-check
+
   # Every package's tests: one nx task per package, in parallel, resolving
   # workspace packages to their sources (Postgres/Redis store tests use
   # testcontainers).
@@ -125,7 +128,7 @@ jobs:
         if: always()
         run: docker logs zorya-ci || true
 
-  # Benchmarks: runs in parallel with unit
+  # Benchmarks: runs in parallel with the other jobs
   benchmarks:
     runs-on: ubuntu-latest
     steps:
@@ -146,13 +149,15 @@ jobs:
 
       - run: bun install
 
-      - name: Stream benchmarks
+      - name: DataFrame benchmarks
         run: |
+          set -o pipefail
           mkdir -p .target/reports
-          bun run bench:stream 2>&1 | tee .target/reports/stream-bench.txt
+          bun run bench:dataframe 2>&1 | tee .target/reports/dataframe-bench.txt
 
       - name: Workflow benchmarks
         run: |
+          set -o pipefail
           mkdir -p .target/reports
           bun run bench:workflow 2>&1 | tee .target/reports/workflow-bench.txt
 
@@ -167,10 +172,10 @@ jobs:
       - name: Publish benchmark report
         if: always()
         run: |
-          # Stream benchmarks → job summary
-          echo '## Stream Benchmark Report' >> $GITHUB_STEP_SUMMARY
+          # DataFrame benchmarks → job summary
+          echo '## DataFrame Benchmark Report' >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-          sed 's/\x1b\[[0-9;]*m//g' .target/reports/stream-bench.txt >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
+          sed 's/\x1b\[[0-9;]*m//g' .target/reports/dataframe-bench.txt >> $GITHUB_STEP_SUMMARY 2>/dev/null || true
           echo '```' >> $GITHUB_STEP_SUMMARY
           echo '' >> $GITHUB_STEP_SUMMARY
           # Workflow benchmarks → job summary
