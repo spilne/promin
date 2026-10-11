@@ -149,7 +149,7 @@ const LocalBackendSchema = z
       .optional(),
     network: z.object({}).passthrough().optional(),
     requiredEnv: z.array(z.string()).optional(),
-    extra: z.record(z.unknown()).optional(),
+    extra: z.record(z.string(), z.unknown()).optional(),
   })
   .passthrough();
 

@@ -41,7 +41,7 @@ export function createKnowledgeGraphTool(config: KnowledgeGraphToolsConfig): Age
             .describe("Relationship type (e.g. 'worked_with', 'reported_by', 'owns')"),
           to: z.string().describe("Target entity (e.g. 'bob')"),
           metadata: z
-            .record(z.unknown())
+            .record(z.string(), z.unknown())
             .optional()
             .describe("Optional metadata (e.g. {project: 'X', year: 2024})"),
         }),

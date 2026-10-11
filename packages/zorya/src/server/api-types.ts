@@ -359,7 +359,7 @@ export const TriggerRunRequestSchema = z
     input: z.unknown().optional(),
     workflowType: Name.optional(),
     namespace: Name.optional(),
-    metadata: z.record(z.unknown()).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
     /**
      * Explicit run id. Default: a generated UUID. When a run with this id
      * already exists nothing starts: the response names it (`existing:

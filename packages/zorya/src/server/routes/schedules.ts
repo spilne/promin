@@ -182,7 +182,7 @@ export const ScheduleCreateRequestSchema = z
     workflowName: optional(z.string().min(1).max(256)),
     /** Input for triggered runs. Stored in metadata.input. */
     input: z.unknown().optional(),
-    metadata: optional(z.record(z.unknown())),
+    metadata: optional(z.record(z.string(), z.unknown())),
   })
   .strict();
 
@@ -209,7 +209,7 @@ export const SchedulePatchRequestSchema = z
     maxCatchUp: MaxCatchUp.nullable().optional(),
     workflowName: z.string().min(1).max(256).nullable().optional(),
     input: z.unknown().optional(),
-    metadata: z.record(z.unknown()).optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
   })
   .strict()
   .refine(
