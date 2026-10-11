@@ -212,26 +212,28 @@ describe("DuckDBExecutor", () => {
   });
 
   describe("table caching (load once, query many)", () => {
-    it("second query on same source is faster (cached)", async () => {
+    it("second query on the same source reuses the cached table", async () => {
+      // A dedicated executor so the load count belongs to this test alone.
+      // Counting loads is deterministic; comparing wall-clock durations is not.
+      const executor = new DuckDBExecutor();
+      const loads = () => (executor as unknown as { cacheCounter: number }).cacheCounter;
       const data = Array.from({ length: 10_000 }, (_, i) => ({
         id: i,
         region: ["north", "south", "east", "west"][i % 4]!,
         revenue: i * 10,
       }));
-      const base = df(data);
+      const base = DataFrame.fromArray(data).withExecutor(executor);
 
-      // First query — loads data
-      const start1 = performance.now();
-      await base.groupBy("region").agg({ revenue: "sum" }).collect();
-      const first = performance.now() - start1;
+      try {
+        await base.groupBy("region").agg({ revenue: "sum" }).collect();
+        expect(loads()).toBe(1);
 
-      // Second query — should reuse cached table
-      const start2 = performance.now();
-      await base.sort("revenue", "desc").limit(5).collect();
-      const second = performance.now() - start2;
-
-      // Second should be noticeably faster (no data loading)
-      expect(second).toBeLessThan(first);
+        const top = await base.sort("revenue", "desc").limit(5).collect();
+        expect(loads()).toBe(1);
+        expect(top.map((r) => r.id)).toEqual([9999, 9998, 9997, 9996, 9995]);
+      } finally {
+        await executor.close();
+      }
     });
 
     it("different sources get different tables", async () => {
