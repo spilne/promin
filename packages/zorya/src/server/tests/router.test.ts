@@ -9,7 +9,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { LocalWorkflows } from "../services/workflows/local-workflows.ts";
-import { ZoryaServer, type Logger } from "../server.ts";
+import { ZoryaServer } from "../server.ts";
+import type { Logger } from "../server-config.ts";
 import { HttpError, Router, isoOrNull, parseIntParam } from "../router.ts";
 
 class RecordingLogger implements Logger {

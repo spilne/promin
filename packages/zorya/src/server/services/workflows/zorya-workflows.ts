@@ -27,7 +27,7 @@ import type {
   WorkflowStorage,
   WorkflowVersionRegistry,
 } from "@promin/workflow";
-import type { WorkflowAdvertisementRegistry } from "../../workflow-advertisements.ts";
+import type { WorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
 import { UnknownWorkflowError, WorkflowIdConflictError } from "./errors.ts";
 import { ZoryaClusterConfigError, type ZoryaCluster } from "./cluster.ts";
 
@@ -148,6 +148,7 @@ export interface ZoryaWorkflowsBaseConfig {
   advertisements?: WorkflowAdvertisementRegistry;
   versionRegistry?: WorkflowVersionRegistry;
   fallback?: ZoryaWorkflows;
+  cluster?: ZoryaCluster;
 }
 
 export abstract class ZoryaWorkflows {
@@ -170,6 +171,9 @@ export abstract class ZoryaWorkflows {
   /** Optional fallback layer. trigger() walks here when this layer can't handle. */
   readonly fallback?: ZoryaWorkflows;
 
+  /** Set when this layer runs clustered: several instances share its stores. */
+  readonly cluster?: ZoryaCluster;
+
   /** The layer whose fallback this is, if any. */
   private outer?: ZoryaWorkflows;
   private started = false;
@@ -178,6 +182,7 @@ export abstract class ZoryaWorkflows {
     if (config.definitions) this.definitions = config.definitions;
     if (config.advertisements) this.advertisements = config.advertisements;
     if (config.versionRegistry) this.versionRegistry = config.versionRegistry;
+    if (config.cluster) this.cluster = config.cluster;
     if (config.fallback) {
       if (config.fallback.outer) {
         throw new Error("ZoryaWorkflows: a layer can be the fallback of one layer only");
@@ -213,7 +218,7 @@ export abstract class ZoryaWorkflows {
    * constructor.
    */
   protected assertOneCluster(): void {
-    const clusters = this.layers().map((l) => (l as { cluster?: ZoryaCluster }).cluster);
+    const clusters = this.layers().map((l) => l.cluster);
     const first = clusters[0];
     const same = clusters.every(
       (c) => c?.instanceId === first?.instanceId && c?.leases === first?.leases,

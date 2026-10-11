@@ -8,7 +8,7 @@ import type { Workflow } from "@promin/workflow";
 import { json, jsonError } from "../router.ts";
 import { parseParams } from "../request-validation.ts";
 import { WorkflowParamsSchema } from "./runs.ts";
-import type { WorkflowAdvertisementRegistry } from "../workflow-advertisements.ts";
+import type { WorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
 import { findDefinition } from "../services/workflows/zorya-workflows.ts";
 
 export interface WorkflowStepDefDto {

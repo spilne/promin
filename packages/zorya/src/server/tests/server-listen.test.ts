@@ -9,7 +9,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { LocalWorkflows } from "../services/workflows/local-workflows.ts";
-import { ZoryaServer, type ListenOptions, type Logger } from "../server.ts";
+import { ZoryaServer } from "../server.ts";
+import type { ListenOptions, Logger } from "../server-config.ts";
 
 const quietLogger: Logger = { log() {}, warn() {}, error() {} };
 

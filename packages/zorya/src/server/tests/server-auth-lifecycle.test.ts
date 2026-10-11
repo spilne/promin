@@ -13,12 +13,8 @@ import {
 import { WorkerControlSocket } from "@promin/zorya-client";
 import { QueuedWorkflows } from "../services/workflows/queued-workflows.ts";
 import { ZoryaWorkflows, type TriggerResult } from "../services/workflows/zorya-workflows.ts";
-import {
-  ZoryaInsecureConfigError,
-  ZoryaServer,
-  type Logger,
-  type ZoryaServerConfig,
-} from "../server.ts";
+import { ZoryaServer } from "../server.ts";
+import { ZoryaInsecureConfigError, type Logger, type ZoryaServerConfig } from "../server-config.ts";
 import { readSse, SseHttpError, type SseMessage } from "../../ui/api/sse.ts";
 
 const OPERATOR_KEY = "operator-key-0123456789";

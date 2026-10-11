@@ -41,11 +41,11 @@ import {
   type SleepScanner,
   type WorkerRegistry,
 } from "@promin/workflow/distributed";
-import { InMemoryWorkflowStartQueue, type WorkflowStartQueue } from "../../workflow-starts.ts";
+import { InMemoryWorkflowStartQueue, type WorkflowStartQueue } from "@promin/workflow/distributed";
 import {
   InMemoryWorkflowAdvertisementRegistry,
   type WorkflowAdvertisementRegistry,
-} from "../../workflow-advertisements.ts";
+} from "@promin/workflow/distributed";
 import { RunCancelledError, UnknownWorkflowVersionError } from "./errors.ts";
 import { assertSharedStores, leaderElectionFor, type ZoryaCluster } from "./cluster.ts";
 import { LeaderLoop, forEachOrphanedRun, redeliverChildEndedSignals } from "./run-maintenance.ts";
@@ -152,7 +152,6 @@ export class QueuedWorkflows extends ZoryaWorkflows {
   readonly workflowStarts: WorkflowStartQueue;
   override readonly advertisements: WorkflowAdvertisementRegistry;
   readonly workerRegistry: WorkerRegistry;
-  readonly cluster?: ZoryaCluster;
   private readonly acceptAny: boolean;
   private readonly clock: WallClock;
   private readonly onError: (event: QueuedWorkflowsErrorEvent) => void;
@@ -172,6 +171,7 @@ export class QueuedWorkflows extends ZoryaWorkflows {
       ...(config.versionRegistry && { versionRegistry: config.versionRegistry }),
       ...(config.definitions && { definitions: config.definitions }),
       ...(config.fallback && { fallback: config.fallback }),
+      ...(config.cluster && { cluster: config.cluster }),
     });
     this.storage = config.storage;
     this.clock = config.clock ?? SystemWallClock;
@@ -194,7 +194,6 @@ export class QueuedWorkflows extends ZoryaWorkflows {
           leases: config.cluster.leases,
         },
       });
-      this.cluster = config.cluster;
     }
     this.assertOneCluster();
 

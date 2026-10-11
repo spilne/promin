@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // ZoryaServer — HTTP server that wraps a ZoryaWorkflows service (plus
-// optional scheduler / agents).
+// optional scheduler / agents / registries).
 //
 // Usage:
 // ```ts
@@ -15,403 +15,58 @@
 // process.on("SIGTERM", () => void server.stop().then(() => process.exit(0)));
 // ```
 //
-// Auth model (every plane is authenticated; `insecure: true` is the only way
-// to run a plane without keys):
-//   - /api/*                    operator keys (`apiKeys`), except the public
-//                               routes below
-//   - GET /api/health, /api/ready  public (liveness / readiness probes)
-//   - /api/signal-tokens/:id/describe, /complete
-//                               public; the route checks the token bearer
-//   - /ws/worker, /rpc/worker, /api/advertisements, /api/worker-protocol/*
-//                               worker keys (`remoteWorkers.apiKeys`)
-//   - /rpc/storage              worker keys, scoped to `RUNNER_STORAGE_METHODS`;
-//                               operator keys get the full storage contract
-//   - /webhooks/*               per-source HMAC signature
-// Keys travel only in `Authorization: Bearer <key>` (the worker WebSocket
-// upgrade included) and are compared in constant time.
+// The constructor resolves the stores the workflows chain carries, then
+// mounts each surface from `./mount/`: probes, runs and workflows, agents,
+// registries, ingress, schedules, the worker RPC plane and the static UI.
+// Which credentials each path needs is decided in `mount/mount-auth.ts`.
 // ---------------------------------------------------------------------------
 
-import type { RemoteDeploymentRegistry, SecretsStorage } from "@promin/agent";
-import type { WorkflowVersionRegistry, WallClock, WorkflowStorage } from "@promin/workflow";
-import type { WorkerRegistry } from "@promin/workflow/distributed";
+import type { SecretsStorage } from "@promin/agent";
+import type { WallClock, WorkflowVersionRegistry } from "@promin/workflow";
 import { SystemWallClock } from "@promin/workflow";
-import { InMemoryWorkerRegistry } from "@promin/workflow/distributed";
-import {
-  RUNNER_STORAGE_METHODS,
-  createWorkerApiHandler,
-  createWorkflowStorageHandler,
-} from "@promin/workflow-remote";
-import { Auth, bearerToken, type AuthConfig } from "./auth.ts";
-import { ServiceLifecycle, type ManagedService, type ServiceStatus } from "./service-lifecycle.ts";
-import { Router, errorResponse, json, jsonError } from "./router.ts";
-import {
-  DEFAULT_IDLE_TIMEOUT_SECONDS,
-  DEFAULT_MAX_REQUEST_BODY_BYTES,
-  DEFAULT_MAX_WEBHOOK_BODY_BYTES,
-  bodyLimitFor,
-  limitRequestBody,
-} from "./request-limits.ts";
-import { WorkerWebSocketServer } from "./services/worker-ws-server.ts";
-import {
-  listAdvertisements,
-  removeAdvertisements,
-  upsertAdvertisements,
-} from "./routes/advertisements.ts";
-import {
-  claimWorkflowStarts,
-  completeWorkflowStart,
-  heartbeatWorkflowStart,
-  listWorkflowStarts,
-  releaseWorkflowStart,
-} from "./routes/workflow-starts.ts";
+import { InMemoryWorkerRegistry, type WorkerRegistry } from "@promin/workflow/distributed";
+import { Router, jsonError } from "./router.ts";
 import { RunEventBus } from "./run-event-bus.ts";
 import { RunWatcherPool } from "./run-poll-watcher.ts";
 import {
-  cancelRun,
-  getRun,
-  listRuns,
-  listWorkflowNames,
-  markRunFailed,
-  markRunSuccess,
-  sendSignal,
-  triggerRun,
-} from "./routes/runs.ts";
-import { streamRunEvents } from "./routes/sse.ts";
-import { streamAgentEvents } from "./routes/agent-stream.ts";
+  DEFAULT_READINESS_TIMEOUT_MS,
+  DEFAULT_SHUTDOWN_TIMEOUT_MS,
+  type ListenOptions,
+  type Logger,
+  type ZoryaServerConfig,
+} from "./server-config.ts";
+import { ServiceLifecycle, type ServiceStatus } from "./service-lifecycle.ts";
+import { StorageMetricsProvider } from "./routes/metrics.ts";
+import type { RemoteDeploymentSweeper } from "./routes/remote-deployments.ts";
+import { RegistryBackedWorkersProvider } from "./routes/workers.ts";
 import { AgentStreamHub } from "./services/agent-stream-hub.ts";
-import { queryRun } from "./routes/query.ts";
-import { getMetrics, StorageMetricsProvider, type MetricsProvider } from "./routes/metrics.ts";
+import type { ZoryaAgents } from "./services/agents/index.ts";
+import type { ZoryaDags } from "./services/dags/index.ts";
+import type { ZoryaFragments } from "./services/fragments/index.ts";
+import type { ZoryaScheduler } from "./services/scheduler/index.ts";
+import type { ZoryaSkills } from "./services/skills/index.ts";
+import { WorkerWebSocketServer } from "./services/worker-ws-server.ts";
 import {
-  RegistryBackedWorkersProvider,
-  listWorkers,
-  type WorkersProvider,
-} from "./routes/workers.ts";
-import {
-  createSchedule,
-  deleteSchedule,
-  emitScheduleNow,
-  getSchedule,
-  getScheduleHistory,
-  getScheduleUpcoming,
-  listSchedules,
-  patchSchedule,
-} from "./routes/schedules.ts";
-import {
-  getRunAttempts,
-  getRunChildren,
-  getRunHistory,
-  getRunSignals,
-  getRunStepJournal,
-  rerunRun,
-  resumeRun,
-  type RunResumer,
-} from "./routes/run-extras.ts";
-import { listSignals } from "./routes/signals.ts";
-import { RunsService } from "./services/runs-service.ts";
-import {
-  completeSignalToken,
-  describeSignalToken,
-  listSignalTokensForRun,
-  mintSignalToken,
-} from "./routes/signal-tokens.ts";
-import {
-  createVersionSeeder,
-  getActiveWorkflowVersion,
-  listWorkflowVersions,
-  promoteWorkflowVersion,
-  rollbackWorkflow,
-  type WorkflowVersionsRoutesDeps,
-} from "./routes/workflow-versions.ts";
-import { getStreamChunks, sendStreamChunk, streamChunks } from "./routes/streams.ts";
-import { getSparklines, getWorkflowGrid, getWorkflowHistory } from "./routes/grid.ts";
-import { getWorkflowDef, listWorkflowDefs } from "./routes/workflow-defs.ts";
-import {
-  cloneAgent,
-  compactThread,
-  archiveAgentThread,
-  createAgent,
-  deleteAgent,
-  distillThread,
-  extractRole,
-  getAgent,
-  invokeAgent,
-  listAgentSources,
-  listAgentThreads,
-  listAgentVersions,
-  listAgents,
-  getThreadTrace,
-  listThreadMessages,
-  renameAgentThread,
-  sendThreadMessage,
-  streamAgent,
-  streamThreadApproval,
-  streamThreadMessage,
-  updateAgent,
-  type AgentGatewayDeps,
-} from "./routes/agents.ts";
-import {
-  getToolCatalogHealth,
-  listCatalogFragments,
-  listCatalogModels,
-  listCatalogSkills,
-  listCatalogTools,
-  listToolHistory,
-} from "./routes/agent-catalog.ts";
-import {
-  createSkill,
-  deleteSkill,
-  getSkill,
-  listSkillSources,
-  listSkillVersions,
-  listSkills,
-  updateSkill,
-} from "./routes/skills.ts";
-import {
-  createRole,
-  deleteRole,
-  getRole,
-  listRoleVersions,
-  listRoles,
-  updateRole,
-} from "./routes/roles.ts";
-import {
-  createFragment,
-  deleteFragment,
-  getFragment,
-  listFragmentSources,
-  listFragments,
-  updateFragment,
-} from "./routes/fragments.ts";
-import { createSecret, deleteSecret, listSecrets } from "./routes/secrets.ts";
-import { createDraft, deleteDraft } from "./routes/agent-drafts.ts";
-import {
-  ingestWebhook,
-  WorkflowStorageWebhookDeliveryStore,
-  type WebhookDeliveryStore,
-  type WebhookSourceConfig,
-  type WebhookGatewayDeps,
-} from "./routes/webhooks.ts";
-import {
-  heartbeatDeployment,
-  listDeployments,
-  registerDeployment,
-  RemoteDeploymentSweeper,
-  unregisterDeployment,
-  type RemoteDeploymentsGatewayDeps,
-  type RemoteEndpointPolicy,
-} from "./routes/remote-deployments.ts";
-import {
-  addNamespaceFact,
-  deleteNamespaceFact,
-  inspectMemory,
-  patchNamespace,
-} from "./routes/memory.ts";
-import {
-  deleteAgentInstance,
-  getAgentInstance,
-  listAgentInstances,
-  listInstancesAcrossAgents,
-  resolveAgentInstance,
-  updateAgentInstance,
-} from "./routes/instances.ts";
-import {
-  ZoryaWorkflows,
   QueuedWorkflows,
+  ZoryaWorkflows,
   assertSharedStores,
   type ZoryaCluster,
 } from "./services/workflows/index.ts";
-import { ZoryaScheduler } from "./services/scheduler/index.ts";
-import { ZoryaAgents } from "./services/agents/index.ts";
-import { ZoryaSkills } from "./services/skills/index.ts";
-import { ZoryaFragments } from "./services/fragments/index.ts";
-import { ZoryaDags } from "./services/dags/index.ts";
+import { mountAgents } from "./mount/mount-agents.ts";
+import { AuthPlanes, isProbePath } from "./mount/mount-auth.ts";
+import { mountRemoteDeployments, mountWebhooks } from "./mount/mount-ingress.ts";
 import {
-  createDag,
-  deleteDag,
-  getDag,
-  listDagVersions,
-  listDags,
-  runDag,
-  type DagGatewayDeps,
-} from "./routes/dags.ts";
-
-export interface Logger {
-  log(message: string, ...args: unknown[]): void;
-  warn(message: string, ...args: unknown[]): void;
-  error(message: string, ...args: unknown[]): void;
-}
-
-/**
- * Mounts the remote-worker surface: `/rpc/storage` (the runner's storage
- * methods, for workers that drive runs), `/rpc/worker` (the worker
- * registry), and — when the workflows chain has a `QueuedWorkflows` —
- * `/api/advertisements` and `/api/worker-protocol/*` over its
- * advertisements and start queue.
- */
-export interface RemoteWorkersConfig {
-  /**
-   * Worker API keys for `/ws/worker`, `/rpc/worker`, `/rpc/storage` (scoped
-   * to what a runner needs), `/api/advertisements` and
-   * `/api/worker-protocol/*`. Required unless the server is `insecure`.
-   */
-  apiKeys?: ReadonlyArray<string>;
-  /**
-   * The worker registry `/rpc/worker` writes and the Workers page reads.
-   * Default: the chain's `QueuedWorkflows.workerRegistry`, else an
-   * in-memory one.
-   */
-  workerRegistry?: WorkerRegistry;
-}
-
-/** Thrown by the ZoryaServer constructor when a plane has no keys and `insecure` is off. */
-export class ZoryaInsecureConfigError extends Error {
-  readonly _tag = "ZoryaInsecureConfigError";
-  constructor(message: string) {
-    super(message);
-    this.name = "ZoryaInsecureConfigError";
-  }
-}
-
-/** Default bound on the readiness storage probe (ms). */
-export const DEFAULT_READINESS_TIMEOUT_MS = 2_000;
-/** Default bound on waiting for in-flight requests during `stop()` (ms). */
-export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
-
-/** Workflow id the readiness probe looks up; it never exists. */
-const READINESS_PROBE_WORKFLOW_ID = "__zorya_readiness_probe__";
-
-export interface ZoryaServerConfig extends AuthConfig {
-  /**
-   * Allow running without keys. Without it the constructor throws
-   * `ZoryaInsecureConfigError` when `apiKeys` is empty, or when
-   * `remoteWorkers` is set without `remoteWorkers.apiKeys`. With it, each
-   * plane that has no keys is open to anyone who can reach the port, and
-   * the server logs a warning. Local development only.
-   */
-  insecure?: boolean;
-  /** Workflow execution + state. Required. */
-  workflows: ZoryaWorkflows;
-  /** Optional scheduler service (CRUD + tick loop + emit-now). */
-  scheduler?: ZoryaScheduler;
-  /** Optional agent gateway service. */
-  agents?: ZoryaAgents;
-  /**
-   * Optional skill registry service. Mounts /api/skills/* CRUD and
-   * /api/agents/_catalog/skills (the agent editor's skill picker source).
-   */
-  skills?: ZoryaSkills;
-  /**
-   * Optional fragment registry service. Mounts /api/fragments/* CRUD and
-   * backs /api/agents/_catalog/fragments (the layered-prompt editor source).
-   * When set, takes precedence over `config.agents.fragments`.
-   */
-  fragments?: ZoryaFragments;
-  /** Optional DAG gateway service. Mounts /api/dags/* routes. */
-  dags?: ZoryaDags;
-  /**
-   * Mount the remote-worker HTTP surface. Pulls stepQueue / workerRegistry /
-   * advertisements / workflowStarts from the workflows service.
-   */
-  remoteWorkers?: RemoteWorkersConfig;
-
-  /** Override metrics provider. Default: StorageMetricsProvider(workflows.storage). */
-  metrics?: MetricsProvider;
-  /**
-   * Plug a workers provider for the Workers page. Default: the worker
-   * registry remote workers register into (`workerRegistry`).
-   */
-  workers?: WorkersProvider;
-  /** Sample input for the dashboard's trigger form, by workflow name. */
-  sampleInput?: (workflowName: string) => unknown;
-  /** Custom logger. Default: console. */
-  logger?: Logger;
-  /** Static-asset directory (compiled UI). */
-  uiDir?: string;
-  /** SSE poll interval in ms. Default 1000. */
-  sseIntervalMs?: number;
-  /**
-   * Longest validity a minted signal token may ask for (`expiresInMs`).
-   * Default: `DEFAULT_MAX_SIGNAL_TOKEN_TTL_MS` (90 days).
-   */
-  signalTokenMaxTtlMs?: number;
-  /**
-   * Public-facing base URL for token completion callbacks. When set, the
-   * `POST /api/runs/:id/signals/:name/token` mint route returns
-   * `url: "<publicBaseUrl>/api/signal-tokens/:tokenId/complete"` so external
-   * completers don't have to compose it themselves. Absent → `url: null`.
-   */
-  publicBaseUrl?: string;
-  /**
-   * Optional scoped SecretsStorage (BYOK / MCP credentialRef / per-tenant
-   * LLM keys). When set, exposes `/api/secrets/*` HTTP CRUD and is
-   * available to the agent gateway for setup-time credential resolution
-   * (Option A from promin-0p2i). When unset, the secrets surface is not
-   * mounted — fine for single-tenant deployments using env vars.
-   */
-  secrets?: SecretsStorage;
-  /**
-   * Optional webhook ingress — POST /webhooks/:source/:agentId routes
-   * external events into a registered agent after `zorya-v1` signature
-   * verification (HMAC over timestamp, delivery id, scope and body) and
-   * durable replay dedup. `deliveries` defaults to a store on the
-   * workflow storage, shared by every instance on the same backend.
-   * Without `agents` configured the routes are not mounted.
-   */
-  webhooks?: {
-    sources: Readonly<Record<string, WebhookSourceConfig>>;
-    deliveries?: WebhookDeliveryStore;
-  };
-  /**
-   * Optional remote-deployment self-registration. When set (with
-   * `agents`), exposes /api/remote-deployments/* — external Zorya
-   * servers register their agents here and keep them alive with
-   * heartbeats; expired registrations are swept every `sweepIntervalMs`
-   * (default 15s). `endpointPolicy` decides which endpoints this server
-   * will call (default: public http(s) hosts only).
-   */
-  remoteDeployments?: {
-    registry: RemoteDeploymentRegistry;
-    endpointPolicy?: RemoteEndpointPolicy;
-    sweepIntervalMs?: number;
-  };
-  /**
-   * Time source for the server's own time math: signal-token expiry, draft
-   * TTL sweep, worker online cutoff, worker-socket heartbeats, SSE / stream
-   * polls, query timeouts, schedule next-run projections, and the defaults
-   * it builds (version registry, fallback worker registry). Services passed
-   * in (scheduler, workflows, agents) keep their own clocks. Default:
-   * `SystemWallClock`. Tests pass a `FakeWallClock`.
-   */
-  clock?: WallClock;
-  /** Bound on the `/api/ready` storage probe (ms). Default: 2000. */
-  readinessTimeoutMs?: number;
-  /**
-   * How long `stop()` waits for in-flight requests before closing the
-   * remaining connections (ms). Default: 10_000.
-   */
-  shutdownTimeoutMs?: number;
-  /** Backoff for retrying a service whose `start()` failed. Default: 500ms doubling to 30s. */
-  startRetry?: { initialDelayMs?: number; maxDelayMs?: number };
-}
-
-export interface ListenOptions {
-  port?: number;
-  hostname?: string;
-  /**
-   * Largest request body accepted outside `/webhooks/*`, in bytes; larger
-   * bodies get a JSON 413. Default: 1 MiB.
-   */
-  maxRequestBodySize?: number;
-  /** Largest `/webhooks/*` request body, in bytes. Default: 25 MiB. */
-  maxWebhookBodySize?: number;
-  /** Seconds a connection may sit idle before Bun closes it. Default: 60 (max 255). */
-  idleTimeout?: number;
-  /**
-   * Bun development mode (verbose error pages with stacks and source).
-   * Default: false. Errors are always answered with JSON by the router.
-   */
-  development?: boolean;
-}
+  InFlightRequests,
+  LiveStreams,
+  managedServices,
+  mountProbes,
+} from "./mount/mount-lifecycle.ts";
+import { serveListener, type ListeningServer } from "./mount/mount-listener.ts";
+import { mountDags, mountFragments, mountSecrets, mountSkills } from "./mount/mount-registries.ts";
+import { mountRpc } from "./mount/mount-rpc.ts";
+import { mountRuns } from "./mount/mount-runs.ts";
+import { mountSchedules } from "./mount/mount-schedules.ts";
+import { mountStatic } from "./mount/mount-static.ts";
 
 export class ZoryaServer {
   readonly workflows: ZoryaWorkflows;
@@ -448,24 +103,18 @@ export class ZoryaServer {
   /** Optional secrets vault — populated when ZoryaServerConfig provides one. */
   readonly secrets?: SecretsStorage;
 
-  private readonly auth: Auth;
-  private readonly workerAuth: Auth;
+  private readonly planes: AuthPlanes;
   private readonly lifecycle: ServiceLifecycle;
-  private readonly readinessTimeoutMs: number;
   private readonly shutdownTimeoutMs: number;
-  /** Event-stream responses still open; closed by `stop()`. */
-  private readonly liveStreams = new Set<{ close(): void }>();
-  private inFlight = 0;
-  private readonly idleWaiters = new Set<() => void>();
+  private readonly liveStreams = new LiveStreams();
+  private readonly inFlight: InFlightRequests;
   private stopping = false;
   private stopPromise?: Promise<void>;
-  private readonly bus: RunEventBus;
   private readonly runWatchers: RunWatcherPool;
   private readonly router: Router;
   private readonly logger: Logger;
-  private readonly clock: WallClock;
   private remoteDeploymentSweeper?: RemoteDeploymentSweeper;
-  private bunServer?: { stop(closeActiveConnections?: boolean): Promise<void> | void };
+  private bunServer?: ListeningServer;
 
   constructor(config: ZoryaServerConfig) {
     this.workflows = config.workflows;
@@ -475,26 +124,46 @@ export class ZoryaServer {
     if (config.fragments) this.fragments = config.fragments;
     if (config.dags) this.dags = config.dags;
     if (config.secrets) this.secrets = config.secrets;
-    this.clock = config.clock ?? SystemWallClock;
-    const clock = this.clock;
-    const versionRegistry = walkChainFor(this.workflows, (l) => l.versionRegistry);
+    const clock: WallClock = config.clock ?? SystemWallClock;
+    this.inFlight = new InFlightRequests(clock);
+
+    // The workflows chain (top → fallback) carries the stores: the outer
+    // layer may not own advertisements or definitions while a fallback does.
+    const layers = this.workflows.layers();
+    const firstInChain = <T>(pick: (layer: ZoryaWorkflows) => T | undefined): T | undefined =>
+      layers.map(pick).find((v) => v !== undefined);
+    const versionRegistry = firstInChain((l) => l.versionRegistry);
     if (versionRegistry) this.versionRegistry = versionRegistry;
+    const advertisements = firstInChain((l) => l.advertisements);
+    const definitions = firstInChain((l) => l.definitions);
+    const queued = layers.find((l): l is QueuedWorkflows => l instanceof QueuedWorkflows);
 
     this.logger = config.logger ?? console;
-    this.auth = new Auth(config);
-    this.workerAuth = new Auth({ apiKeys: config.remoteWorkers?.apiKeys });
-    this.checkAuthConfigured(config);
-    this.readinessTimeoutMs = config.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
+    this.planes = new AuthPlanes({
+      apiKeys: config.apiKeys,
+      workerApiKeys: config.remoteWorkers?.apiKeys,
+    });
+    this.planes.assertConfigured({
+      remoteWorkers: config.remoteWorkers !== undefined,
+      insecure: config.insecure === true,
+      logger: this.logger,
+    });
+    const readinessTimeoutMs = config.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
     this.shutdownTimeoutMs = config.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
-    this.bus = new RunEventBus();
     this.workerWs = new WorkerWebSocketServer({
-      authorize: (req) => this.workerAuth.check(req),
+      authorize: (req) => this.planes.worker.check(req),
       clock,
       onError: (message, err) => this.logger.error(message, err),
     });
     this.agentStreamHub = new AgentStreamHub(this.workerWs);
     this.lifecycle = new ServiceLifecycle({
-      services: this.managedServices(),
+      services: managedServices({
+        workflows: this.workflows,
+        scheduler: this.scheduler,
+        agents: this.agents,
+        skills: this.skills,
+        fragments: this.fragments,
+      }),
       clock,
       onError: (message, err) => this.logger.error(message, err),
       ...(config.startRetry?.initialDelayMs !== undefined && {
@@ -505,496 +174,103 @@ export class ZoryaServer {
       }),
     });
 
-    const storage: WorkflowStorage = this.workflows.storage;
-    // Walk the workflows chain to find an advertisements registry. The
-    // top layer (LocalWorkflows) doesn't expose one, but a Queued or
-    // Distributed fallback does — and that's the one workers actually
-    // upsert into. Without this, /api/advertisements never mounted and
-    // worker registrations silently hit the SPA fallback.
-    const advertisements = walkChainFor(this.workflows, (l) => l.advertisements);
-    const definitions = walkChainFor(this.workflows, (l) => l.definitions);
-    const queued = this.workflows
-      .layers()
-      .find((l): l is QueuedWorkflows => l instanceof QueuedWorkflows);
+    const storage = this.workflows.storage;
     this.workerRegistry =
       config.remoteWorkers?.workerRegistry ??
       queued?.workerRegistry ??
       new InMemoryWorkerRegistry({ clock });
-    const cluster = walkChainFor(this.workflows, (l) => (l as { cluster?: ZoryaCluster }).cluster);
+    const cluster = firstInChain((l) => l.cluster);
     if (cluster) {
       this.cluster = cluster;
-      this.checkClusterStores(config);
+      // A clustered deployment needs every store this server holds shared
+      // too: the version registry (a promote on one instance routes starts
+      // on all), the worker registry (every instance shows and routes to
+      // the same workers) and the scheduler's storage.
+      assertSharedStores({
+        owner: "ZoryaServer",
+        stores: {
+          versionRegistry: this.versionRegistry,
+          workerRegistry: this.workerRegistry,
+          schedulerStorage: config.scheduler?.storage,
+        },
+      });
     }
-
-    const metrics = config.metrics ?? new StorageMetricsProvider(storage);
-    // One registry behind /rpc/worker and the Workers page, in every mode.
-    const workers =
-      config.workers ?? new RegistryBackedWorkersProvider(this.workerRegistry, { clock });
-
-    const trigger = (
-      name: string,
-      input: unknown,
-      opts?: Parameters<typeof this.workflows.trigger>[2],
-    ) => this.workflows.trigger(name, input, opts);
-
-    const deps = {
-      storage,
-      trigger,
-      ...(definitions !== undefined && { workflows: definitions }),
-      ...(advertisements !== undefined && { advertisements }),
-    };
-
-    const runActions = new RunsService({
-      storage,
-      ...(definitions !== undefined && { workflows: definitions }),
-      ...(advertisements !== undefined && { advertisements }),
-    });
-    const resume: RunResumer = (params) => this.workflows.resume(params);
-
-    // The version routes manage the registry the workflows layer dispatches
-    // through. Its versioned definitions are registered on first use, so a
-    // version the server runs can be promoted without a separate step.
-    const versionDeps: WorkflowVersionsRoutesDeps = this.versionRegistry
-      ? {
-          registry: this.versionRegistry,
-          prepare: createVersionSeeder({
-            registry: this.versionRegistry,
-            definitions: Object.values(definitions ?? {}),
-          }),
-        }
-      : {};
 
     this.runWatchers = new RunWatcherPool({
       storage,
-      bus: this.bus,
+      bus: new RunEventBus(),
       clock,
       onError: ({ workflowId, error }) =>
         this.logger.error(`[zorya] run watch ${workflowId}: storage poll failed`, error),
       ...(config.sseIntervalMs !== undefined && { intervalMs: config.sseIntervalMs }),
     });
 
-    this.router = new Router({ logger: this.logger })
-      // Liveness: the process answers. Public and touches nothing.
-      .get("/api/health", () => Response.json({ ok: true }))
-      // Readiness: storage answers and every background service started.
-      .get("/api/ready", () => this.readiness())
-      .get("/api/runs", listRuns(deps))
-      .get("/api/workflows", listWorkflowNames(deps))
-      .get("/api/runs/:id", getRun(deps))
-      .get("/api/runs/:id/signals", getRunSignals(storage))
-      .get("/api/runs/:id/attempts", getRunAttempts(storage))
-      .get("/api/runs/:id/history", getRunHistory(storage))
-      .get("/api/runs/:id/children", getRunChildren(storage))
-      .get("/api/runs/:id/journal/:stepName", getRunStepJournal(storage))
-      .get("/api/signals", listSignals(storage))
-      .post("/api/runs/:id/mark-success", markRunSuccess(runActions))
-      .post("/api/runs/:id/mark-failed", markRunFailed(runActions))
-      .post("/api/runs/:id/rerun", rerunRun({ storage, rerun: (id) => this.workflows.rerun(id) }))
-      .post(
-        "/api/runs/:id/resume",
-        resumeRun({ storage, runs: runActions, ...(resume !== undefined && { resume }) }),
-      )
-      // Start a run. Under the workflow (not `/api/runs/...`) so no workflow
-      // name can collide with a run action.
-      .post("/api/workflows/:name/runs", triggerRun(deps))
-      .get("/api/workflows/sparklines", getSparklines(storage))
-      .get(
-        "/api/workflows/definitions",
-        listWorkflowDefs({
-          ...(definitions !== undefined && { workflows: definitions }),
-          ...(config.sampleInput !== undefined && { sampleInput: config.sampleInput }),
-          ...(advertisements !== undefined && { advertisements }),
-        }),
-      )
-      .get("/api/workflows/:name/grid", getWorkflowGrid(storage))
-      .get("/api/workflows/:name/history", getWorkflowHistory(storage))
-      .get(
-        "/api/workflows/:name/definition",
-        getWorkflowDef({
-          ...(definitions !== undefined && { workflows: definitions }),
-          ...(config.sampleInput !== undefined && { sampleInput: config.sampleInput }),
-          ...(advertisements !== undefined && { advertisements }),
-        }),
-      )
-      .post("/api/runs/:id/cancel", cancelRun(deps))
-      .post("/api/runs/:id/signal", sendSignal(deps))
-      // Signal tokens — public-bearer auth for deliverSignal.
-      // Mint and list are auth-gated through the regular /api auth layer;
-      // /describe and /complete are reachable without Zorya credentials and
-      // validate the token bearer themselves.
-      .post(
-        "/api/runs/:id/signals/:name/token",
-        mintSignalToken({
-          storage,
-          clock,
-          ...(config.signalTokenMaxTtlMs !== undefined && {
-            maxTtlMs: config.signalTokenMaxTtlMs,
-          }),
-          ...(config.publicBaseUrl !== undefined && { publicBaseUrl: config.publicBaseUrl }),
-        }),
-      )
-      .get("/api/runs/:id/signal-tokens", listSignalTokensForRun({ storage }))
-      .get("/api/signal-tokens/:tokenId/describe", describeSignalToken({ storage, clock }))
-      .post("/api/signal-tokens/:tokenId/complete", completeSignalToken({ storage, clock }))
-      // Workflow versions — thin layer over WorkflowVersionRegistry's
-      // lifecycle methods. Versions are a property of a workflow, so the
-      // routes nest under /api/workflows/:name/...
-      .get("/api/workflows/:name/versions", listWorkflowVersions(versionDeps))
-      .get("/api/workflows/:name/versions/active", getActiveWorkflowVersion(versionDeps))
-      .post("/api/workflows/:name/versions/:version/promote", promoteWorkflowVersion(versionDeps))
-      .post("/api/workflows/:name/rollback", rollbackWorkflow(versionDeps))
-      // Streams — generic typed channels per workflow. Output (workflow →
-      // subscribers) reads via the SSE handler; input (subscribers →
-      // workflow) appends via the POST handler.
-      .get(
-        "/api/runs/:id/streams/:streamId",
-        streamChunks({
-          storage,
-          clock,
-          watchers: this.runWatchers,
-          ...(config.sseIntervalMs !== undefined && { pollIntervalMs: config.sseIntervalMs }),
-        }),
-      )
-      .get("/api/runs/:id/streams/:streamId/chunks", getStreamChunks({ storage }))
-      .post("/api/runs/:id/streams/:streamId", sendStreamChunk({ storage }))
-      .get("/api/runs/:id/events", streamRunEvents({ storage, watchers: this.runWatchers, clock }))
-      .get("/api/runs/:id/agent-stream", streamAgentEvents(this.agentStreamHub))
-      .post("/api/runs/:id/query", queryRun({ workerWs: this.workerWs, clock }))
-      .get("/api/workers", listWorkers(workers))
-      .get("/api/metrics", getMetrics(metrics));
-
+    const router = (this.router = new Router({ logger: this.logger }));
+    mountProbes({
+      router,
+      storage,
+      lifecycle: this.lifecycle,
+      clock,
+      readinessTimeoutMs,
+      isStopping: () => this.stopping,
+    });
+    mountRuns({
+      router,
+      workflows: this.workflows,
+      storage,
+      clock,
+      definitions,
+      advertisements,
+      versionRegistry: this.versionRegistry,
+      runWatchers: this.runWatchers,
+      agentStreamHub: this.agentStreamHub,
+      workerWs: this.workerWs,
+      // One registry behind /rpc/worker and the Workers page, in every mode.
+      workers: config.workers ?? new RegistryBackedWorkersProvider(this.workerRegistry, { clock }),
+      metrics: config.metrics ?? new StorageMetricsProvider(storage),
+      sampleInput: config.sampleInput,
+      sseIntervalMs: config.sseIntervalMs,
+      signalTokenMaxTtlMs: config.signalTokenMaxTtlMs,
+      publicBaseUrl: config.publicBaseUrl,
+    });
     if (this.agents) {
-      const agentDeps: AgentGatewayDeps = {
-        registry: this.agents.registry,
-        resolve: this.agents.resolve,
-        ...(this.agents.instances !== undefined && { instanceRegistry: this.agents.instances }),
-        ...(this.agents.roles !== undefined && { roles: this.agents.roles }),
-        ...(this.agents.turnGate !== undefined && { turnGate: this.agents.turnGate }),
-        ...(this.agents.workerId !== undefined && { workerId: this.agents.workerId }),
-        ...(this.secrets !== undefined && { secrets: this.secrets }),
-        ...(this.agents.authorizeScope !== undefined && {
-          authorizeScope: this.agents.authorizeScope,
-        }),
-        fileManagedIds: () => this.agents!.fileManagedIds(),
+      mountAgents({
+        router,
+        agents: this.agents,
+        skills: this.skills,
+        fragments: this.fragments,
+        secrets: this.secrets,
         clock,
-      };
-      this.router
-        .get("/api/agents", listAgents(agentDeps))
-        // Read-only metadata route — designer UI's model dropdown source.
-        // Mounted before /api/agents/:id so the literal `_catalog` segment
-        // can't be shadowed by an agent that happens to be named `_catalog`
-        // (`_` prefix is reserved for catalog routes).
-        .get(
-          "/api/agents/_catalog/models",
-          this.agents.models
-            ? listCatalogModels({ models: this.agents.models })
-            : async () => json(200, { models: [] }),
-        )
-        .get(
-          "/api/agents/_catalog/tools",
-          this.agents.toolCatalog
-            ? listCatalogTools({ tools: this.agents.toolCatalog })
-            : async () => json(200, { tools: [] }),
-        )
-        // Reconciliation health: which recipe tool refs don't resolve?
-        // Pure query at view time — no persistence, no audit trail.
-        .get(
-          "/api/agents/_catalog/tools/health",
-          this.agents.toolCatalog
-            ? getToolCatalogHealth({
-                tools: this.agents.toolCatalog,
-                agents: this.agents.registry,
-              })
-            : async () => json(200, { recipes: [], orphans: [] }),
-        )
-        // Tool catalog history: durable audit trail of exposed tools over
-        // time. Mounted only when a tool-history store is wired.
-        .get(
-          "/api/agents/_catalog/tools/history",
-          this.agents.toolHistory
-            ? listToolHistory({ history: this.agents.toolHistory })
-            : async () => json(200, { history: [] }),
-        )
-        // Skill catalog — the agent editor's skill picker source. Mounted
-        // here (under the agents block) so the `_catalog` prefix groups with
-        // the model/tool catalogs; backed by the skills service registry.
-        .get(
-          "/api/agents/_catalog/skills",
-          this.skills
-            ? listCatalogSkills({ skills: this.skills.registry })
-            : async () => json(200, { skills: [] }),
-        )
-        // Fragment catalog — the agent editor's layered-prompt editor source.
-        // Prefers the dedicated ZoryaFragments service (which the manager UI
-        // also writes through), else the registry passed on ZoryaAgents.
-        .get(
-          "/api/agents/_catalog/fragments",
-          this.fragments
-            ? listCatalogFragments({ fragments: this.fragments.registry })
-            : this.agents.fragments
-              ? listCatalogFragments({ fragments: this.agents.fragments })
-              : async () => json(200, { fragments: [] }),
-        )
-        // File-managed agent sources — which recipes are backed by a file on
-        // disk (so the editor can disable in-place Save and the list can
-        // badge them). Mounted before /api/agents/:id so `_sources` isn't
-        // shadowed by an agent named `_sources` (`_`-prefix is reserved).
-        .get(
-          "/api/agents/_sources",
-          listAgentSources({ fileManagedIds: () => this.agents!.fileManagedIds() }),
-        )
-        // Draft recipes — test a recipe edit before committing it.
-        // Mounted before /api/agents/:id so the literal `_draft` segment
-        // isn't shadowed by an agent that happens to be named `_draft`.
-        .post("/api/agents/_draft", createDraft({ registry: this.agents.registry, clock }))
-        .delete("/api/agents/_draft/:id", deleteDraft({ registry: this.agents.registry }))
-        // Recipe CRUD — gsze Phase 1. Author/edit/clone agents over HTTP.
-        .post("/api/agents", createAgent(agentDeps))
-        .get("/api/agents/:id", getAgent(agentDeps))
-        .patch("/api/agents/:id", updateAgent(agentDeps))
-        .delete("/api/agents/:id", deleteAgent(agentDeps))
-        .get("/api/agents/:id/versions", listAgentVersions(agentDeps))
-        .post("/api/agents/:id/clone", cloneAgent(agentDeps))
-        .post("/api/agents/:id/extract-role", extractRole(agentDeps))
-        .post("/api/agents/:id/invoke", invokeAgent(agentDeps))
-        .post("/api/agents/:id/stream", streamAgent(agentDeps))
-        .get("/api/agents/:id/threads", listAgentThreads(agentDeps))
-        .patch("/api/agents/:id/threads/:threadId", renameAgentThread(agentDeps))
-        .post("/api/agents/:id/threads/:threadId", sendThreadMessage(agentDeps))
-        .post("/api/agents/:id/threads/:threadId/stream", streamThreadMessage(agentDeps))
-        .post("/api/agents/:id/threads/:threadId/approve", streamThreadApproval(agentDeps))
-        .get("/api/agents/:id/threads/:threadId/messages", listThreadMessages(agentDeps))
-        .get("/api/agents/:id/threads/:threadId/trace", getThreadTrace(agentDeps))
-        .post("/api/agents/:id/threads/:threadId/distill", distillThread(agentDeps))
-        .post("/api/agents/:id/threads/:threadId/compact", compactThread(agentDeps))
-        .post("/api/agents/:id/threads/:threadId/archive", archiveAgentThread(agentDeps));
-
-      if (this.agents.memory) {
-        // Persona resolution piggybacks on the recipe store + fragment
-        // registry the agents gateway already carries, so the Prompt tab
-        // can show the role prompt alongside the memory cascade. The
-        // standalone `this.fragments` service wins over the agents-config
-        // registry, matching the /api/agents/_catalog/fragments precedence.
-        const mem = {
-          memory: this.agents.memory,
-          registry: this.agents.registry,
-          ...((this.fragments?.registry ?? this.agents.fragments) && {
-            fragments: this.fragments?.registry ?? this.agents.fragments,
-          }),
-          ...(this.agents.roles !== undefined && { roles: this.agents.roles }),
-          ...(this.agents.authorizeScope !== undefined && {
-            authorizeScope: this.agents.authorizeScope,
-          }),
-        };
-        this.router
-          .get("/api/memory/inspect", inspectMemory(mem))
-          .patch("/api/memory/namespace/:namespaceId", patchNamespace(mem))
-          .post("/api/memory/namespace/:namespaceId/facts", addNamespaceFact(mem))
-          .delete("/api/memory/namespace/:namespaceId/facts/:factId", deleteNamespaceFact(mem));
-      }
-
-      if (this.agents.instances && this.agents.memory) {
-        const inDeps = {
-          registry: this.agents.instances,
-          memory: this.agents.memory,
-          agents: this.agents.registry,
-          ...(this.agents.authorizeScope !== undefined && {
-            authorizeScope: this.agents.authorizeScope,
-          }),
-        };
-        this.router
-          .get("/api/agents/:id/instances", listAgentInstances(inDeps))
-          .post("/api/agents/:id/instances", resolveAgentInstance(inDeps))
-          .get("/api/agents/:id/instances/:instanceId", getAgentInstance(inDeps))
-          .patch("/api/agents/:id/instances/:instanceId", updateAgentInstance(inDeps))
-          .delete("/api/agents/:id/instances/:instanceId", deleteAgentInstance(inDeps))
-          .get("/api/instances", listInstancesAcrossAgents(inDeps));
-      }
-
-      if (this.agents.roles) {
-        const roleDeps = { registry: this.agents.roles, agents: this.agents.registry };
-        this.router
-          .get("/api/roles", listRoles(roleDeps))
-          .post("/api/roles", createRole(roleDeps))
-          .get("/api/roles/:id", getRole(roleDeps))
-          .patch("/api/roles/:id", updateRole(roleDeps))
-          .delete("/api/roles/:id", deleteRole(roleDeps))
-          .get("/api/roles/:id/versions", listRoleVersions(roleDeps));
-      }
+      });
     }
-
-    if (this.skills) {
-      const skills = this.skills;
-      const skillDeps = {
-        registry: skills.registry,
-        fileManagedIds: () => skills.fileManagedIds(),
-        ...(this.agents !== undefined && { agents: this.agents.registry }),
-        ...(this.agents?.roles !== undefined && { roles: this.agents.roles }),
-      };
-      this.router
-        .get("/api/skills", listSkills(skillDeps))
-        .post("/api/skills", createSkill(skillDeps))
-        // `_sources` before `:id` so the literal segment isn't shadowed
-        // (skill ids starting with `_` are rejected at create time).
-        .get(
-          "/api/skills/_sources",
-          listSkillSources({ fileManagedIds: () => skills.fileManagedIds() }),
-        )
-        .get("/api/skills/:id", getSkill(skillDeps))
-        .patch("/api/skills/:id", updateSkill(skillDeps))
-        .delete("/api/skills/:id", deleteSkill(skillDeps))
-        .get("/api/skills/:id/versions", listSkillVersions(skillDeps));
-    }
-
-    if (this.fragments) {
-      const fragments = this.fragments;
-      const fragmentDeps = {
-        registry: fragments.registry,
-        setFragment: (key: string, content: string) => fragments.setFragment(key, content),
-        deleteFragment: (key: string) => fragments.deleteFragment(key),
-        ...(this.agents !== undefined && { agents: this.agents.registry }),
-        ...(this.agents?.roles !== undefined && { roles: this.agents.roles }),
-      };
-      this.router
-        .get("/api/fragments", listFragments(fragmentDeps))
-        .post("/api/fragments", createFragment(fragmentDeps))
-        // `_sources` before `:key` so the literal segment isn't shadowed
-        // (operator-supplied fragment keys starting with `_` are rejected).
-        .get(
-          "/api/fragments/_sources",
-          listFragmentSources({ fileManagedIds: () => fragments.fileManagedIds() }),
-        )
-        .get("/api/fragments/:key", getFragment(fragmentDeps))
-        .patch("/api/fragments/:key", updateFragment(fragmentDeps))
-        .delete("/api/fragments/:key", deleteFragment(fragmentDeps));
-    }
-
-    if (this.secrets) {
-      const sec = { secrets: this.secrets };
-      this.router
-        .post("/api/secrets", createSecret(sec))
-        .get("/api/secrets", listSecrets(sec))
-        .delete("/api/secrets/:key", deleteSecret(sec));
-    }
-
+    if (this.skills) mountSkills({ router, skills: this.skills, agents: this.agents });
+    if (this.fragments) mountFragments({ router, fragments: this.fragments, agents: this.agents });
+    if (this.secrets) mountSecrets({ router, secrets: this.secrets });
     if (config.webhooks && this.agents) {
-      const webhookDeps: WebhookGatewayDeps = {
-        registry: this.agents.registry,
-        // Cast through `unknown` — the resolve signature is structurally
-        // compatible (returns Agent which has invoke + withScope) but the
-        // webhook deps narrow to only the methods it uses.
-        resolve: this.agents.resolve as unknown as WebhookGatewayDeps["resolve"],
-        sources: config.webhooks.sources,
-        deliveries:
-          config.webhooks.deliveries ?? new WorkflowStorageWebhookDeliveryStore({ storage }),
-        clock,
-      };
-      this.router.post("/webhooks/:source/:agentId", ingestWebhook(webhookDeps));
+      mountWebhooks({ router, webhooks: config.webhooks, agents: this.agents, storage, clock });
     }
-
     if (config.remoteDeployments && this.agents) {
-      const remoteDeps: RemoteDeploymentsGatewayDeps = {
-        registry: config.remoteDeployments.registry,
-        agents: this.agents.registry,
-        ...(config.remoteDeployments.endpointPolicy !== undefined && {
-          endpointPolicy: config.remoteDeployments.endpointPolicy,
-        }),
-      };
-      this.remoteDeploymentSweeper = new RemoteDeploymentSweeper({
-        ...remoteDeps,
+      this.remoteDeploymentSweeper = mountRemoteDeployments({
+        router,
+        remoteDeployments: config.remoteDeployments,
+        agents: this.agents,
         clock,
-        ...(config.remoteDeployments.sweepIntervalMs !== undefined && {
-          intervalMs: config.remoteDeployments.sweepIntervalMs,
-        }),
-        onError: (err) => this.logger.error("[zorya] remote-deployment sweep failed", err),
+        logger: this.logger,
       });
-      this.router
-        .post("/api/remote-deployments/register", registerDeployment(remoteDeps))
-        .post("/api/remote-deployments/:deploymentId/heartbeat", heartbeatDeployment(remoteDeps))
-        .delete("/api/remote-deployments/:deploymentId", unregisterDeployment(remoteDeps))
-        .get("/api/remote-deployments", listDeployments(remoteDeps));
     }
-
-    if (this.dags) {
-      const dagDeps: DagGatewayDeps = {
-        registry: this.dags.registry,
-        resolver: this.dags.resolver,
-        runner: this.dags.runner,
-      };
-      this.router
-        .get("/api/dags", listDags(dagDeps))
-        .post("/api/dags", createDag(dagDeps))
-        .get("/api/dags/:id", getDag(dagDeps))
-        .delete("/api/dags/:id", deleteDag(dagDeps))
-        .get("/api/dags/:id/versions", listDagVersions(dagDeps))
-        .post("/api/dags/:id/run", runDag(dagDeps));
-    }
-
-    if (this.scheduler) {
-      const sch = this.scheduler.storage;
-      const sched = this.scheduler;
-      const scheduleDeps = {
-        storage: sch,
-        clock,
-        servesNamespace: (ns: string | undefined) => sched.servesNamespace(ns),
-        ...(sched.defaultNamespace !== undefined && {
-          defaultNamespace: sched.defaultNamespace,
-        }),
-      };
-      this.router
-        .get("/api/schedules", listSchedules(scheduleDeps))
-        .post("/api/schedules", createSchedule(scheduleDeps))
-        .get("/api/schedules/:id", getSchedule(scheduleDeps))
-        .patch("/api/schedules/:id", patchSchedule(scheduleDeps))
-        .delete("/api/schedules/:id", deleteSchedule(sch))
-        .get("/api/schedules/:id/history", getScheduleHistory(sch, storage))
-        .get("/api/schedules/:id/upcoming", getScheduleUpcoming(scheduleDeps))
-        .post(
-          "/api/schedules/:id/emit",
-          emitScheduleNow(sch, (id) => sched.fireOnce(id)),
-        );
-    } else {
-      // Stub so the UI can tell "scheduler not configured" from "configured but empty".
-      this.router.get("/api/schedules", () =>
-        json(200, { schedules: [], total: 0, configured: false }),
-      );
-    }
-
+    if (this.dags) mountDags({ router, dags: this.dags });
+    mountSchedules({ router, scheduler: this.scheduler, storage, clock });
     if (config.remoteWorkers) {
-      // Worker keys reach only what a runner needs; operator keys get the
-      // whole contract (signal-token records, which carry bearers, included).
-      const storageHandler = createWorkflowStorageHandler(storage, {
-        allow: ({ method, req }) =>
-          this.storageCaller(req) === "operator" || RUNNER_STORAGE_METHODS.has(method),
+      mountRpc({
+        router,
+        storage,
+        workerRegistry: this.workerRegistry,
+        advertisements,
+        workflowStarts: queued?.workflowStarts,
+        storageCaller: (req) => this.planes.storageCaller(req),
       });
-      this.router.post("/rpc/storage", (req) => storageHandler(req));
-
-      // Every worker registers and heartbeats here, whatever it runs; the
-      // Workers page reads the same registry.
-      const workerHandler = createWorkerApiHandler({ workerRegistry: this.workerRegistry });
-      this.router.post("/rpc/worker", (req) => workerHandler(req));
-
-      if (advertisements) {
-        this.router
-          .post("/api/advertisements", upsertAdvertisements(advertisements))
-          .delete("/api/advertisements/:workerId", removeAdvertisements(advertisements))
-          .get("/api/advertisements", listAdvertisements(advertisements));
-      }
-
-      if (queued) {
-        const wfs = queued.workflowStarts;
-        this.router
-          .post("/api/worker-protocol/claim-starts", claimWorkflowStarts(wfs))
-          .post("/api/worker-protocol/heartbeat-start/:id", heartbeatWorkflowStart(wfs))
-          .post("/api/worker-protocol/complete-start/:id", completeWorkflowStart(wfs))
-          .post("/api/worker-protocol/release-start/:id", releaseWorkflowStart(wfs))
-          .get("/api/worker-protocol/starts", listWorkflowStarts(wfs));
-      }
     }
-
-    if (config.uiDir) {
-      this.router.setStatic(this.buildStaticHandler(config.uiDir));
-    }
+    if (config.uiDir) mountStatic({ router, uiDir: config.uiDir });
   }
 
   /**
@@ -1003,16 +279,13 @@ export class ZoryaServer {
    * through this; embedders and tests call it directly.
    */
   async handle(req: Request): Promise<Response> {
-    const url = new URL(req.url);
-    const path = url.pathname;
-
+    const path = new URL(req.url).pathname;
     if (this.stopping && !isProbePath(path)) return jsonError(503, "shutting_down");
 
-    const denied = this.authenticate({ req, path });
+    const denied = this.planes.authenticate({ req, path });
     if (denied) return denied;
 
-    const res = await this.router.handle(req);
-    return isEventStream(res) ? this.trackStream(res) : res;
+    return this.liveStreams.track(await this.router.handle(req));
   }
 
   /**
@@ -1044,62 +317,20 @@ export class ZoryaServer {
     hostname: string;
     stop: () => Promise<void>;
   } {
-    const port = opts.port ?? 4000;
-    const hostname = opts.hostname ?? "0.0.0.0";
-    const BunGlobal = (globalThis as { Bun?: { serve: typeof Bun.serve } }).Bun;
-    if (!BunGlobal) {
+    if (!(globalThis as { Bun?: unknown }).Bun) {
       throw new Error("ZoryaServer.listen requires Bun runtime");
     }
     if (this.stopping) throw new Error("ZoryaServer.listen: the server was stopped");
-    const wsHandlers = this.workerWs.websocketHandlers();
-    const maxRequestBodySize = opts.maxRequestBodySize ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
-    const maxWebhookBodySize = opts.maxWebhookBodySize ?? DEFAULT_MAX_WEBHOOK_BODY_BYTES;
-    const logger = this.logger;
-    const srv = BunGlobal.serve({
-      port,
-      hostname,
-      development: opts.development ?? false,
-      idleTimeout: opts.idleTimeout ?? DEFAULT_IDLE_TIMEOUT_SECONDS,
-      // Transport ceiling above the per-path limits so those can answer
-      // with a JSON 413 (Bun's own 413 has no body).
-      maxRequestBodySize: 2 * Math.max(maxRequestBodySize, maxWebhookBodySize),
-      fetch: async (req, server) => {
-        this.inFlight += 1;
-        try {
-          const upgradeResult = this.workerWs.upgradeIfWorkerWs(req, server);
-          if (upgradeResult !== undefined) return upgradeResult;
-          const url = new URL(req.url);
-          if (url.pathname === "/ws/worker") return undefined;
-          const limited = await limitRequestBody({
-            req,
-            maxBytes: bodyLimitFor({
-              path: url.pathname,
-              maxRequestBodySize,
-              maxWebhookBodySize,
-            }),
-          });
-          if (limited instanceof Response) return limited;
-          return await this.handle(limited);
-        } catch (err) {
-          return errorResponse({ err, req, logger });
-        } finally {
-          this.inFlight -= 1;
-          if (this.inFlight === 0) {
-            for (const wake of this.idleWaiters) wake();
-            this.idleWaiters.clear();
-          }
-        }
-      },
-      error: (err) => errorResponse({ err, logger }),
-      websocket: wsHandlers,
+    const srv = serveListener({
+      options: opts,
+      workerWs: this.workerWs,
+      inFlight: this.inFlight,
+      handle: (req) => this.handle(req),
+      logger: this.logger,
     });
     this.bunServer = srv;
-    const resolvedPort = typeof srv.port === "number" ? srv.port : port;
-    const resolvedHost = typeof srv.hostname === "string" ? srv.hostname : hostname;
-
     this.start();
-
-    return { port: resolvedPort, hostname: resolvedHost, stop: () => this.stop() };
+    return { port: srv.port, hostname: srv.hostname, stop: () => this.stop() };
   }
 
   /**
@@ -1122,13 +353,12 @@ export class ZoryaServer {
     // Stop accepting; Bun lets open connections finish.
     void Promise.resolve(srv?.stop(false)).catch(() => {});
 
-    for (const stream of Array.from(this.liveStreams)) stream.close();
-    this.liveStreams.clear();
+    this.liveStreams.closeAll();
     this.agentStreamHub.stop();
     this.workerWs.stop();
     this.remoteDeploymentSweeper?.stop();
 
-    await this.waitForInFlight();
+    await this.inFlight.waitForIdle(this.shutdownTimeoutMs);
     await this.lifecycle.stop();
 
     try {
@@ -1137,262 +367,4 @@ export class ZoryaServer {
       this.logger.error("[zorya] closing connections failed", err);
     }
   }
-
-  /** Resolve when no request is in flight, or after `shutdownTimeoutMs`. */
-  private async waitForInFlight(): Promise<void> {
-    if (this.inFlight === 0) return;
-    await new Promise<void>((resolve) => {
-      const done = (): void => {
-        timer.clear();
-        this.idleWaiters.delete(done);
-        resolve();
-      };
-      const timer = this.clock.setTimeout(done, this.shutdownTimeoutMs);
-      this.idleWaiters.add(done);
-    });
-  }
-
-  /** `/api/ready`: 200 when storage answers and every service started, else 503. */
-  private async readiness(): Promise<Response> {
-    const services = this.lifecycle.statuses();
-    if (this.stopping) {
-      return Response.json({ ready: false, reason: "stopping", services }, { status: 503 });
-    }
-    const storage = await this.probeStorage();
-    const ready = storage.ok && this.lifecycle.isReady;
-    return Response.json({ ready, storage, services }, { status: ready ? 200 : 503 });
-  }
-
-  /** One cheap storage read, bounded by `readinessTimeoutMs`. */
-  private async probeStorage(): Promise<{ ok: boolean; error?: string }> {
-    let timer: { clear(): void } | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = this.clock.setTimeout(
-        () => reject(new Error(`storage did not answer within ${this.readinessTimeoutMs}ms`)),
-        this.readinessTimeoutMs,
-      );
-    });
-    try {
-      await Promise.race([
-        this.workflows.storage.loadWorkflowStatus(READINESS_PROBE_WORKFLOW_ID),
-        timeout,
-      ]);
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
-    } finally {
-      timer?.clear();
-    }
-  }
-
-  /**
-   * The 401 for a request that lacks the credentials its plane requires,
-   * or undefined when it may proceed.
-   */
-  private authenticate(params: { req: Request; path: string }): Response | undefined {
-    const { req, path } = params;
-    if (isPublicRoute({ method: req.method, path })) return undefined;
-    if (path === "/rpc/storage") {
-      return this.storageCaller(req) ? undefined : jsonError(401, "unauthorized_worker");
-    }
-    if (isWorkerPath(path)) {
-      return this.workerAuth.check(req) ? undefined : jsonError(401, "unauthorized_worker");
-    }
-    if (path.startsWith("/api/")) {
-      return this.auth.check(req) ? undefined : jsonError(401, "unauthorized");
-    }
-    return undefined;
-  }
-
-  /**
-   * Who is calling `/rpc/storage`: an operator (full contract), a worker
-   * (runner methods only), or nobody allowed (undefined).
-   */
-  private storageCaller(req: Request): "operator" | "worker" | undefined {
-    const token = bearerToken(req);
-    if (this.auth.matches(token)) return "operator";
-    if (this.workerAuth.isEnabled) return this.workerAuth.matches(token) ? "worker" : undefined;
-    // Insecure: the worker plane is open. Everything is open when the
-    // operator plane is too; otherwise anonymous callers get worker scope.
-    return this.auth.isEnabled ? "worker" : "operator";
-  }
-
-  /** Throw unless every mounted plane has keys or the operator opted into insecure mode. */
-  private checkAuthConfigured(config: ZoryaServerConfig): void {
-    const open: string[] = [];
-    if (!this.auth.isEnabled) open.push("/api (apiKeys)");
-    if (config.remoteWorkers && !this.workerAuth.isEnabled) {
-      open.push("worker planes /ws/worker, /rpc/* (remoteWorkers.apiKeys)");
-    }
-    if (open.length === 0) return;
-    if (!config.insecure) {
-      throw new ZoryaInsecureConfigError(
-        `ZoryaServer: no API keys configured for ${open.join(" and ")}. ` +
-          "Configure keys, or pass `insecure: true` (ZORYA_INSECURE=1 for the bundled server) " +
-          "to run unauthenticated for local development.",
-      );
-    }
-    this.logger.warn(
-      "[zorya] WARNING: INSECURE MODE. These planes accept requests without credentials: " +
-        `${open.join(", ")}. Anyone who can reach this port can read and change every run. ` +
-        "Never expose this server outside local development.",
-    );
-  }
-
-  /** The background services, in start order. */
-  private managedServices(): ManagedService[] {
-    const out: ManagedService[] = [{ name: "workflows", ...bindLifecycle(this.workflows) }];
-    if (this.scheduler) out.push({ name: "scheduler", ...bindLifecycle(this.scheduler) });
-    if (this.agents) out.push({ name: "agents", ...bindLifecycle(this.agents) });
-    if (this.skills) out.push({ name: "skills", ...bindLifecycle(this.skills) });
-    if (this.fragments) out.push({ name: "fragments", ...bindLifecycle(this.fragments) });
-    return out;
-  }
-
-  /**
-   * Re-wrap an event-stream response so `stop()` can end it: closing
-   * cancels the route's stream (running its teardown) and ends the body the
-   * client reads.
-   */
-  private trackStream(res: Response): Response {
-    const source = res.body;
-    if (!source) return res;
-    const reader = source.getReader();
-    let entry: { close(): void } | undefined;
-    const forget = (): void => {
-      if (entry) this.liveStreams.delete(entry);
-    };
-    const body = new ReadableStream<Uint8Array>({
-      start: (controller) => {
-        entry = {
-          close: () => {
-            forget();
-            reader.cancel("server_shutdown").catch(() => {});
-            try {
-              controller.close();
-            } catch {
-              /* already closed */
-            }
-          },
-        };
-        this.liveStreams.add(entry);
-      },
-      pull: async (controller) => {
-        try {
-          const { value, done } = await reader.read();
-          if (done) {
-            forget();
-            try {
-              controller.close();
-            } catch {
-              /* closed by stop() */
-            }
-            return;
-          }
-          controller.enqueue(value);
-        } catch (err) {
-          forget();
-          try {
-            controller.error(err);
-          } catch {
-            /* closed by stop() */
-          }
-        }
-      },
-      cancel: async (reason) => {
-        forget();
-        await reader.cancel(reason).catch(() => {});
-      },
-    });
-    return new Response(body, {
-      status: res.status,
-      statusText: res.statusText,
-      headers: res.headers,
-    });
-  }
-
-  /**
-   * A clustered deployment (a workflows layer has `cluster`) needs every
-   * store this server holds to be shared too: the version registry (so a
-   * promote on one instance routes starts on all), the worker registry (so
-   * every instance shows and routes to the same workers) and the
-   * scheduler's storage.
-   */
-  private checkClusterStores(config: ZoryaServerConfig): void {
-    assertSharedStores({
-      owner: "ZoryaServer",
-      stores: {
-        versionRegistry: this.versionRegistry,
-        workerRegistry: this.workerRegistry,
-        schedulerStorage: config.scheduler?.storage,
-      },
-    });
-  }
-
-  private buildStaticHandler(dir: string) {
-    return async (req: Request): Promise<Response> => {
-      const url = new URL(req.url);
-      // API-shaped paths never fall back to the SPA.
-      if (/^\/(api|rpc|webhooks)(\/|$)/.test(url.pathname)) return jsonError(404, "not_found");
-      const path = url.pathname === "/" ? "/index.html" : url.pathname;
-      const file = Bun.file(`${dir}${path}`);
-      if (await file.exists()) return new Response(file);
-      const indexFile = Bun.file(`${dir}/index.html`);
-      if (await indexFile.exists()) return new Response(indexFile);
-      return new Response("Not Found", { status: 404 });
-    };
-  }
-}
-
-/**
- * Walk the workflows chain (top → fallback) returning the first non-undefined
- * value the picker yields. Used to surface fields like advertisements /
- * definitions that the outer layer might not own but a fallback layer does.
- */
-function walkChainFor<T>(
-  start: ZoryaWorkflows,
-  pick: (layer: ZoryaWorkflows) => T | undefined,
-): T | undefined {
-  let layer: ZoryaWorkflows | undefined = start;
-  while (layer) {
-    const v = pick(layer);
-    if (v !== undefined) return v;
-    layer = layer.fallback;
-  }
-  return undefined;
-}
-
-/** Liveness and readiness probes: public, and answered while shutting down. */
-function isProbePath(path: string): boolean {
-  return path === "/api/health" || path === "/api/ready";
-}
-
-/** Routes that need no Zorya key: the probes and the bearer-checked signal-token routes. */
-function isPublicRoute(params: { method: string; path: string }): boolean {
-  const { method, path } = params;
-  if (method === "GET" && isProbePath(path)) return true;
-  if (method === "GET" && /^\/api\/signal-tokens\/[^/]+\/describe$/.test(path)) return true;
-  if (method === "POST" && /^\/api\/signal-tokens\/[^/]+\/complete$/.test(path)) return true;
-  return false;
-}
-
-/** Paths on the worker plane, gated by worker keys (`/rpc/storage` is handled separately). */
-function isWorkerPath(path: string): boolean {
-  return (
-    path.startsWith("/rpc/") ||
-    path === "/api/advertisements" ||
-    path.startsWith("/api/advertisements/") ||
-    path.startsWith("/api/worker-protocol/")
-  );
-}
-
-function isEventStream(res: Response): boolean {
-  return (res.headers.get("content-type") ?? "").startsWith("text/event-stream");
-}
-
-function bindLifecycle(service: { start(): Promise<void>; stop(): Promise<void> }): {
-  start(): Promise<void>;
-  stop(): Promise<void>;
-} {
-  return { start: () => service.start(), stop: () => service.stop() };
 }

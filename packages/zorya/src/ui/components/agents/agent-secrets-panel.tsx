@@ -13,7 +13,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { secretsApi, type SecretScopeWire } from "../../api/client.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
-import type { RegisteredAgent } from "../../../server/routes/agents.ts";
+import type { RegisteredAgent } from "../../../server/routes/agents/agent-gateway-deps.ts";
 
 interface Props {
   source: RegisteredAgent;

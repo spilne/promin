@@ -14,7 +14,7 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { inlineRoleDefinition } from "@promin/agent/browser";
 import { api, type ModelCatalogEntryDto, type ToolCatalogEntryDto } from "../../api/client.ts";
-import type { RegisteredAgent } from "../../../server/routes/agents.ts";
+import type { RegisteredAgent } from "../../../server/routes/agents/agent-gateway-deps.ts";
 import type { SkillCatalogEntry } from "../../../server/routes/agent-catalog.ts";
 import { systemToolsFor, SystemToolsSection } from "./system-tools.tsx";
 import { useFetch } from "../../hooks/use-fetch.ts";
@@ -88,7 +88,7 @@ export function AgentEditDrawer({
   const idValid = trimmedId.length > 0 && !trimmedId.startsWith("_");
   const [description, setDescription] = useState(agent.metadata.description ?? "");
   // `systemPrompt` on the recipe can be either a plain string OR the layered
-  // `{ base, layers }` form (promin-kx26). The drawer edits both: the
+  // `{ base, layers }` form. The drawer edits both: the
   // textarea drives `base`, the LayersSection drives `layers`. Save emits
   // the layered form when layers are non-empty, plain string otherwise.
   const initialSystemPrompt = (() => {

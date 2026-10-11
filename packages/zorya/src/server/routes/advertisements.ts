@@ -11,7 +11,7 @@
 import { json } from "../router.ts";
 import { parseBody, parseParams } from "../request-validation.ts";
 import { UpsertAdvertisementsRequestSchema, WorkerParamsSchema } from "../api-types.ts";
-import type { WorkflowAdvertisementRegistry } from "../workflow-advertisements.ts";
+import type { WorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
 
 export function upsertAdvertisements(registry: WorkflowAdvertisementRegistry) {
   return async (req: Request): Promise<Response> => {

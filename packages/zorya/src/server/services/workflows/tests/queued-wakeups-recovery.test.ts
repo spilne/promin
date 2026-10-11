@@ -25,8 +25,8 @@ import {
 } from "@promin/workflow";
 import { InMemoryWorkerRegistry } from "@promin/workflow/distributed";
 import { InMemoryLeaderLeases } from "@promin/workflow/scheduler";
-import { InMemoryWorkflowAdvertisementRegistry } from "../../../workflow-advertisements.ts";
-import { InMemoryWorkflowStartQueue } from "../../../workflow-starts.ts";
+import { InMemoryWorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
+import { InMemoryWorkflowStartQueue } from "@promin/workflow/distributed";
 import { childEndedSignalName } from "@promin/workflow/storage-kit";
 import {
   LocalWorkflows,

@@ -8,10 +8,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { InMemoryWorkflowStorage, workflow } from "@promin/workflow";
 import { ZoryaClient, ZoryaWorker } from "@promin/zorya-client";
-import { ZoryaServer, type Logger } from "../../server/server.ts";
+import { ZoryaServer } from "../../server/server.ts";
+import type { Logger } from "../../server/server-config.ts";
 import { QueuedWorkflows } from "../../server/services/workflows/index.ts";
-import { InMemoryWorkflowAdvertisementRegistry } from "../../server/workflow-advertisements.ts";
-import { InMemoryWorkflowStartQueue } from "../../server/workflow-starts.ts";
+import { InMemoryWorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
+import { InMemoryWorkflowStartQueue } from "@promin/workflow/distributed";
 
 const OPERATOR_KEY = "op-key-e2e";
 const WORKER_KEY = "worker-key-e2e";

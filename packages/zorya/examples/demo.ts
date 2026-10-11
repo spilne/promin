@@ -1,7 +1,9 @@
 // ---------------------------------------------------------------------------
 // Demo server — runs real workflows on an in-memory engine and serves the
-// dashboard. Run with:
-//   bun run packages/zorya/examples/demo.ts
+// dashboard. Run from the repo root with:
+//   bun run demo:server
+// (= bun --conditions=@promin/source run packages/zorya/examples/demo.ts;
+// the condition resolves workspace packages to their sources)
 
 // Prepend HH:MM:SS timestamps to every console line for easier debugging.
 // Guard against double-patching on hot-reload (Bun re-executes top-level code).
@@ -1274,11 +1276,9 @@ const server = new ZoryaServer({
   remoteWorkers: ZORYA_WORKER_API_KEY !== undefined ? { apiKeys: [ZORYA_WORKER_API_KEY] } : {},
   insecure: ZORYA_INSECURE,
   sampleInput: (name) => inputFor(name),
+  // The Deployments page (#/deployments) manages the version registry
+  // passed to LocalWorkflows above; the server finds it on the chain.
   uiDir,
-  // Drives the Deployments page (#/deployments) — promote/rollback
-  // mutates this registry and the runner's `findActive` lookup respects
-  // the active pointer for new starts.
-  versionRegistry,
 });
 
 const port = Number(process.env.PORT ?? 4100);

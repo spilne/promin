@@ -76,6 +76,3 @@ export class DurableScheduler extends GenericDurableScheduler {
 export function createDurableScheduler(config: DurableSchedulerConfig): DurableScheduler {
   return new DurableScheduler(config);
 }
-
-// Re-export the storage adapter for callers wiring it into the generic shell directly.
-export { PgSchedulerStorage };

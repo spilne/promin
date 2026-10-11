@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import type { AgentListEntry, AgentsListResponse, AgentVersionsResponse } from "../agents.ts";
+import type { AgentListEntry, AgentsListResponse, AgentVersionsResponse } from "../agents/index.ts";
 import { bootAgents, jsonOf, localBackend, req } from "./agent-gateway-harness.ts";
 
 async function list(server: { handle(r: Request): Promise<Response> }, query = "") {

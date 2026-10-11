@@ -5,7 +5,7 @@
 // The "AgentWorker" pattern: a worker hosts an agent task, the agent's
 // SessionEventBus is registered on `worker.streams[workflowId]` for the
 // duration, and dashboard SSE clients receive token deltas + tool events
-// via the WS relay built in promin-yxxk + promin-o8dj.
+// via the worker WebSocket relay (AgentStreamHub on the server).
 //
 // Implemented as a free function rather than a new class because:
 //   - The wiring is three lines (bus + register + run + cleanup).

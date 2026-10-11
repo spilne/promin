@@ -19,7 +19,7 @@ import { api } from "../../api/client.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { formatRelative } from "../../lib/format.ts";
 import { inlineRoleDefinition } from "@promin/agent/browser";
-import type { RegisteredAgent } from "../../../server/routes/agents.ts";
+import type { RegisteredAgent } from "../../../server/routes/agents/agent-gateway-deps.ts";
 
 interface Props {
   agentId: string;
@@ -199,7 +199,7 @@ function ModelDiff({ left, right }: { left: RegisteredAgent; right: RegisteredAg
 }
 
 function SystemPromptDiff({ left, right }: { left: RegisteredAgent; right: RegisteredAgent }) {
-  // systemPrompt can be plain-string or layered `{ base, layers }` (kx26).
+  // systemPrompt can be plain-string or layered `{ base, layers }`.
   // Diff the `base` only; layer diffing is future polish.
   const extractPrompt = (a: typeof left): string => {
     if (a.backend.type !== "local") return "";

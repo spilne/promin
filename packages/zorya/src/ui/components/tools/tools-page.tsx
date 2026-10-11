@@ -4,9 +4,9 @@
 // an expandable JSON Schema view for parameters.
 //
 // Drives nothing today — this is the operator-facing 'what tools does
-// this deployment have?' surface. The Designer's tool multi-select
-// (khmz Phase 2) will reuse the same /api/agents/_catalog/tools
-// endpoint with a different UI shape.
+// this deployment have?' surface. The Designer's tool multi-select can
+// reuse the same /api/agents/_catalog/tools endpoint with a different UI
+// shape.
 // ---------------------------------------------------------------------------
 
 import { useMemo, useState } from "preact/hooks";

@@ -19,7 +19,7 @@ import {
 import { findDefinition } from "./workflows/zorya-workflows.ts";
 import { runToDto, runToSummaryDto } from "../serialize.ts";
 import type { RunDto, RunListQuery, RunListResponse, StepDto } from "../api-types.ts";
-import type { WorkflowAdvertisementRegistry } from "../workflow-advertisements.ts";
+import type { WorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
 
 /** Minimal step-shape — same fields on Workflow.dag.steps and AdvertisedWorkflow.steps. */
 interface StepDefLike {

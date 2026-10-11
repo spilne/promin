@@ -14,7 +14,7 @@
 // into any async setup function unchanged.
 // ---------------------------------------------------------------------------
 
-import type { RegisteredAgent } from "../../server/routes/agents.ts";
+import type { RegisteredAgent } from "../../server/routes/agents/agent-gateway-deps.ts";
 
 export function exportRecipeAsTs(agent: RegisteredAgent): string {
   // Strip server-assigned + non-stable fields. Keep the recipe shape

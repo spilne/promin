@@ -8,7 +8,7 @@
 
 import { useEffect, useState } from "preact/hooks";
 import { api } from "../../api/client.ts";
-import type { RegisteredAgent } from "../../../server/routes/agents.ts";
+import type { RegisteredAgent } from "../../../server/routes/agents/agent-gateway-deps.ts";
 
 interface Props {
   /** The recipe being forked. */

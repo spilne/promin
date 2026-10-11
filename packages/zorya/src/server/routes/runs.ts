@@ -30,7 +30,7 @@ import {
   type TriggerRunResponse,
 } from "../api-types.ts";
 import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
-import type { WorkflowAdvertisementRegistry } from "../workflow-advertisements.ts";
+import type { WorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
 import { RunsService, type RunActionResult } from "../services/runs-service.ts";
 import { UnknownWorkflowError, WorkflowIdConflictError } from "../services/workflows/errors.ts";
 

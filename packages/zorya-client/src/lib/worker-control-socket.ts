@@ -15,7 +15,7 @@
 //
 // Wire shape mirrors `WorkerWsInbound` / `WorkerWsOutbound` in the server
 // module verbatim. Frame payloads are unknown — callers serialize their
-// own typed wire schema (e.g. SessionEvent for promin-o8dj).
+// own typed wire schema (e.g. SessionEvent for agent streams).
 // ---------------------------------------------------------------------------
 
 import { SystemWallClock, type TimerHandle, type WallClock } from "@promin/workflow";

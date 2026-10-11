@@ -74,6 +74,9 @@ export {
   type DurableScheduleConfig,
   type DurableSchedulerConfig,
 } from "./lib/durable-scheduler.ts";
+// Scheduler storage on its own — for hosts that drive schedules with their
+// own loop (e.g. Zorya's `ZoryaScheduler`) instead of `DurableScheduler`.
+export { PgSchedulerStorage, type PgSchedulerStorageConfig } from "./lib/pg-scheduler-storage.ts";
 export { durableSchedules, durableScheduleTicks, leaderLeases } from "./lib/scheduler-schema.ts";
 
 // Leader leases (fenced, server-clock TTL) — reusable beyond the scheduler

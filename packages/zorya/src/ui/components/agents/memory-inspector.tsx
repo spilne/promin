@@ -29,7 +29,7 @@ import type {
   MemoryInspectResponse,
   StoredMessage,
 } from "../../../server/routes/memory.ts";
-import type { ThreadSummary } from "../../../server/routes/agents.ts";
+import type { ThreadSummary } from "../../../server/routes/agents/agent-gateway-deps.ts";
 import { Skeleton } from "../ui/skeleton.tsx";
 import { JsonBlock } from "../ui/json-block.tsx";
 import { formatRelative } from "../../lib/format.ts";

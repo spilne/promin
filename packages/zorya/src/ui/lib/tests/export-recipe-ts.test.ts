@@ -11,7 +11,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { exportRecipeAsTs } from "../export-recipe-ts.ts";
-import type { RegisteredAgent } from "../../../server/routes/agents.ts";
+import type { RegisteredAgent } from "../../../server/routes/agents/agent-gateway-deps.ts";
 
 function makeAgent(overrides: Partial<RegisteredAgent> = {}): RegisteredAgent {
   return {

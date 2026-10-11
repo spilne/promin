@@ -17,10 +17,11 @@ import { succeed, tryPromise } from "@spilne/perfect-core";
 import { FakeWallClock, InMemoryWorkflowStorage, workflow, type Workflow } from "@promin/workflow";
 import { InMemoryWorkerRegistry } from "@promin/workflow/distributed";
 import { ZoryaClient, ZoryaWorker, type ZoryaWorkerErrorEvent } from "@promin/zorya-client";
-import { ZoryaServer, type Logger } from "../../server/server.ts";
+import { ZoryaServer } from "../../server/server.ts";
+import type { Logger } from "../../server/server-config.ts";
 import { QueuedWorkflows } from "../../server/services/workflows/index.ts";
-import { InMemoryWorkflowAdvertisementRegistry } from "../../server/workflow-advertisements.ts";
-import { InMemoryWorkflowStartQueue } from "../../server/workflow-starts.ts";
+import { InMemoryWorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
+import { InMemoryWorkflowStartQueue } from "@promin/workflow/distributed";
 
 const quietLogger: Logger = { log() {}, warn() {}, error() {} };
 const cleanups: Array<() => Promise<void>> = [];

@@ -2,12 +2,11 @@
 // WorkerWebSocketServer — persistent server-side multiplexer for worker
 // control sockets.
 //
-// Foundation for the agentic chain:
-//   - promin-o8dj — agent event streaming (worker → server frames per
-//     workflowId, fanned out to dashboard SSE clients)
-//   - promin-i0wi — workflow query handlers (server → worker request/reply
-//     for in-memory state queries)
-//   - promin-eg0d — AgentWorker (uses both)
+// Carries two things:
+//   - agent event streaming: worker → server frames per workflowId, fanned
+//     out to dashboard SSE clients (AgentStreamHub)
+//   - workflow query handlers: server → worker request/reply for in-memory
+//     state queries (`POST /api/runs/:id/query`)
 //
 // Wire shape (JSON over a single WebSocket per worker):
 //
@@ -35,10 +34,10 @@
 // expected to pong within `pongTimeoutMs` (default 30s, three missed
 // pings). On timeout the server closes the socket; the worker reconnects.
 //
-// Multi-server: workers identify with a workerId. Each server tracks the
-// sockets it has accepted; cross-server routing (when the workflow lives
-// on a worker connected to a different server) is the same problem space
-// as promin-bor and is out of scope for this layer.
+// Multi-server: workers identify with a workerId. Each server tracks only
+// the sockets it has accepted; a query or agent stream for a worker
+// connected to another instance is not routed across instances (run the
+// instances behind sticky routing, see DEPLOYMENT.md).
 // ---------------------------------------------------------------------------
 
 import type { ServerWebSocket, WebSocketHandler } from "bun";
@@ -102,8 +101,6 @@ interface WorkerWsData {
   workerId?: string;
   /** Last `pong` arrival time (ms). Updated on pong; checked by heartbeat tick. */
   lastPongAt: number;
-  /** Last `frame` / `reply` arrival time. Used to break ties on duplicate workerId. */
-  lastSeenAt: number;
   /** Closes the socket if `identify` does not arrive in time. */
   identifyTimer?: TimerHandle;
 }
@@ -201,17 +198,15 @@ export class WorkerWebSocketServer {
   // type would force this method to be generic too. Loosen to `any` —
   // `server.upgrade` is the only call site and it's a thin pass-through.
   // biome-ignore lint/suspicious/noExplicitAny: see comment above
-  upgradeIfWorkerWs(req: Request, server: any): Response | undefined {
+  upgradeIfWorkerWs(params: { req: Request; server: any }): Response | undefined {
+    const { req, server } = params;
     const url = new URL(req.url);
     if (url.pathname !== "/ws/worker") return undefined;
     if (this.stopped) return Response.json({ error: "shutting_down" }, { status: 503 });
     if (this.authorize && !this.authorize(req)) {
       return Response.json({ error: "unauthorized_worker" }, { status: 401 });
     }
-    const data: WorkerWsData = {
-      lastPongAt: this.clock.currentTimeMs(),
-      lastSeenAt: this.clock.currentTimeMs(),
-    };
+    const data: WorkerWsData = { lastPongAt: this.clock.currentTimeMs() };
     const upgraded = server.upgrade(req, { data });
     if (!upgraded) return Response.json({ error: "upgrade_failed" }, { status: 400 });
     return undefined;
@@ -230,7 +225,6 @@ export class WorkerWebSocketServer {
         // the socket exists but isn't routable; it gets dropped on close
         // if identify never arrives.
         ws.data.lastPongAt = this.clock.currentTimeMs();
-        ws.data.lastSeenAt = this.clock.currentTimeMs();
         if (this.stopped) {
           this.closeQuietly(ws, CLOSE_GOING_AWAY, "server_shutdown");
           return;
@@ -332,7 +326,8 @@ export class WorkerWebSocketServer {
    * isn't connected. Used by callers that don't need a reply (heartbeats,
    * shutdown signals, stream-stop notices).
    */
-  send(workerId: string, message: WorkerWsOutbound): boolean {
+  send(params: { workerId: string; message: WorkerWsOutbound }): boolean {
+    const { workerId, message } = params;
     const ws = this.workers.get(workerId);
     if (!ws) return false;
     try {
@@ -401,7 +396,6 @@ export class WorkerWebSocketServer {
       this.reject(ws, { error: "protocol_error", message: "Unrecognized worker message" });
       return;
     }
-    ws.data.lastSeenAt = this.clock.currentTimeMs();
     this.handleInbound(ws, parsed.data);
   }
 

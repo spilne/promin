@@ -127,8 +127,7 @@ export function SignalModal({ run, onClose, onSent }: SignalModalProps) {
 }
 
 function findWaitingStep(run: RunDto): StepDto | undefined {
-  // Engine writes status="waiting_for_signal" (matching the declared
-  // StepStatus union — promin-1hzk fixed the prior typo).
+  // Engine writes status="waiting_for_signal" (the declared StepStatus union).
   return run.steps.find((s) => s.signalName !== undefined && s.status === "waiting_for_signal");
 }
 

@@ -1,13 +1,17 @@
 // ---------------------------------------------------------------------------
-// Generic typed streams — `defineStream<T>` + `defineInputStream<T>` factories
-// + `ctx.streams.*` runtime API.
+// Generic typed streams — `defineStream<T>` + `defineInputStream<T>`
+// descriptor factories and the storage helpers that read and write them.
 //
-// Output streams: workflow appends, external subscribers read.
-// Input streams: external subscribers append, workflow peeks/waits.
+// Output streams: workflow code appends, external subscribers read.
+// Input streams: external callers append, workflow code peeks.
 // Same storage table backs both — direction is purely a phantom-type +
-// API-level convention. The `kind` field on the descriptor lets us add
-// runtime guards if we want to (e.g. ctx.streams.append rejects input
-// descriptors, ctx.streams.peek rejects output descriptors).
+// API-level convention.
+//
+// There is no `ctx.streams` on the step context: the helpers below take
+// the `WorkflowStorage` explicitly, so workflow code that writes or reads a
+// stream closes over the storage it runs against. Zorya serves the same
+// table over HTTP (`GET /api/runs/:id/streams/:streamId` as SSE,
+// `.../chunks` as a page, `POST` to append as an external caller).
 //
 // Subscribers don't know the workflow's chosen `T`; they cast on read.
 // The phantom type is for the workflow author's authoring ergonomics —
@@ -20,9 +24,9 @@ import type { FenceGuard, WorkflowStorage, StreamChunk } from "./workflow-storag
 export type StreamKind = "output" | "input";
 
 /**
- * A stream descriptor. Pass to `ctx.streams.append` / `peek` / `wait` to
+ * A stream descriptor. Pass to `appendStreamChunk` / `peekStreamChunk` to
  * scope reads/writes by stream id; the phantom `__T` is preserved so
- * the runtime API can type-check payloads at call sites.
+ * those helpers type-check payloads at call sites.
  */
 export interface StreamDescriptor<T, K extends StreamKind = "output"> {
   readonly id: string;
@@ -36,16 +40,22 @@ export interface DefineStreamOptions {
 }
 
 /**
- * Declare an output stream descriptor. Workflow body calls
- * `ctx.streams.append(stream, payload)` to write; external subscribers
- * read via `streams.read(stream, runId, ...)` (Phase 2 SDK helper) or
- * the SSE route directly.
+ * Declare an output stream descriptor. Workflow code writes with
+ * `appendStreamChunk`; external subscribers read through storage
+ * (`readStreamChunks`) or Zorya's stream routes.
  *
  * ```ts
  * const progressStream = defineStream<{ percent: number; note?: string }>({
  *   id: "progress",
  * });
- * yield* ctx.streams.append(progressStream, { percent: 25, note: "loading" });
+ * // inside a step, with the storage the workflow runs against:
+ * await appendStreamChunk({
+ *   storage,
+ *   workflowId: ctx.workflowId,
+ *   stream: progressStream,
+ *   payload: { percent: 25, note: "loading" },
+ *   guard, // the step's fence guard (`StepRuntime.guard`)
+ * });
  * ```
  */
 export function defineStream<T>(opts: DefineStreamOptions): StreamDescriptor<T, "output"> {
@@ -53,13 +63,15 @@ export function defineStream<T>(opts: DefineStreamOptions): StreamDescriptor<T, 
 }
 
 /**
- * Declare an input stream descriptor. External callers append via the
- * `POST /api/runs/:id/streams/:streamId` route; the workflow body
- * peeks/waits via `ctx.streams.peek(stream)` / `ctx.streams.wait(stream)`.
+ * Declare an input stream descriptor. External callers append via
+ * `appendExternalStreamChunk` (Zorya: `POST /api/runs/:id/streams/:streamId`);
+ * workflow code polls with `peekStreamChunk`. There is no blocking wait on
+ * a stream: a workflow that must park until outside input arrives uses a
+ * signal (`waitForSignal`) instead.
  *
  * ```ts
  * const cancelSignal = defineInputStream<{ reason?: string }>({ id: "cancel" });
- * const cancelled = yield* ctx.streams.peek(cancelSignal);
+ * const cancelled = await peekStreamChunk({ storage, workflowId, stream: cancelSignal });
  * if (cancelled) abort();
  * ```
  */
@@ -68,8 +80,7 @@ export function defineInputStream<T>(opts: DefineStreamOptions): StreamDescripto
 }
 
 // ---------------------------------------------------------------------------
-// Implementation helpers — used by the journaled-step `ctx.streams` shim
-// and by the standalone `streamWriter` factory.
+// Storage helpers
 // ---------------------------------------------------------------------------
 
 /**
@@ -115,8 +126,8 @@ export async function appendExternalStreamChunk(params: {
 
 /**
  * Non-blocking read of the most-recent chunk on a stream — returns
- * undefined when no chunks exist. Powers `ctx.streams.peek` for input
- * streams (poll-style "did anyone send a cancel signal?").
+ * undefined when no chunks exist. Poll-style reads of input streams ("did
+ * anyone send a cancel signal?").
  */
 export async function peekStreamChunk<T>(params: {
   storage: WorkflowStorage;

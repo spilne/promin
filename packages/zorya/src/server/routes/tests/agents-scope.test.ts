@@ -11,7 +11,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { parseScopeFields } from "../agents.ts";
+import { parseScopeFields } from "../agents/index.ts";
 
 describe("parseScopeFields — cross-scope leak prevention", () => {
   it("accepts namespaceId + resourceId", () => {

@@ -11,7 +11,7 @@
 //     └─ assistant: "I found..."
 //   Turn 2 — ...
 //
-// v0 indented tree only. Real graph layout (react-flow) is Phase 2 of dxnf.
+// Rendered as an indented tree (no graph layout).
 // ---------------------------------------------------------------------------
 
 import { useEffect, useMemo, useState } from "preact/hooks";

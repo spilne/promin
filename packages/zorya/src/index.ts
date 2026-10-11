@@ -1,7 +1,7 @@
 // Public API exports
 
+export { ZoryaServer } from "./server/server.ts";
 export {
-  ZoryaServer,
   type ZoryaServerConfig,
   type ListenOptions,
   type Logger,
@@ -9,7 +9,7 @@ export {
   ZoryaInsecureConfigError,
   DEFAULT_READINESS_TIMEOUT_MS,
   DEFAULT_SHUTDOWN_TIMEOUT_MS,
-} from "./server/server.ts";
+} from "./server/server-config.ts";
 export type { ServiceState, ServiceStatus } from "./server/service-lifecycle.ts";
 export {
   ZoryaWorkflows,
@@ -106,19 +106,6 @@ export {
 } from "./server/routes/workers.ts";
 export type { RunTrigger } from "./server/routes/runs.ts";
 export type { ScheduleDto, SchedulesResponse } from "./server/routes/schedules.ts";
-export {
-  InMemoryWorkflowAdvertisementRegistry,
-  type WorkflowAdvertisementRegistry,
-  type AdvertisedWorkflow,
-  type AdvertisementEntry,
-} from "./server/workflow-advertisements.ts";
-export {
-  InMemoryWorkflowStartQueue,
-  type WorkflowStartQueue,
-  type WorkflowStartRecord,
-  type WorkflowStartClaimRef,
-  type WorkerWorkflowSpec,
-} from "./server/workflow-starts.ts";
 export { RunsService, mergePlannedSteps, type RunsServiceDeps } from "./server/services/index.ts";
 export type {
   SignalDto,

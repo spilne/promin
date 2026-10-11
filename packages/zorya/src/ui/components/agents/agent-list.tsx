@@ -1,7 +1,10 @@
 import { useMemo, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
-import type { AgentListEntry, RegisteredAgent } from "../../../server/routes/agents.ts";
+import type {
+  AgentListEntry,
+  RegisteredAgent,
+} from "../../../server/routes/agents/agent-gateway-deps.ts";
 import { Page } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { formatRelative } from "../../lib/format.ts";

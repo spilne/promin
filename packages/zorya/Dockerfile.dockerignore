@@ -7,6 +7,7 @@
 **/dist
 **/.nx
 **/.target
+packages/zorya/target
 **/.tsbuildinfo
 **/*.tsbuildinfo
 

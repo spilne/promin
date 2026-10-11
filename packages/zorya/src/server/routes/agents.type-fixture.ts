@@ -7,7 +7,7 @@
 // regression.
 // ---------------------------------------------------------------------------
 
-import type { AgentInvokeBody } from "./agents.ts";
+import type { AgentInvokeBody } from "./agents/index.ts";
 
 // ✓ resourceId set, ownerId absent — accepted.
 const _ok1: AgentInvokeBody = {

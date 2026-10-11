@@ -103,7 +103,6 @@ const CHILD_WAKE_CHECK_MS = 30_000;
 export class LocalWorkflows extends ZoryaWorkflows {
   readonly storage: WorkflowStorage;
   declare readonly definitions: Readonly<Record<string, Workflow<unknown, unknown>>>;
-  readonly cluster?: ZoryaCluster;
   private readonly runner: WorkflowRunner;
   private readonly recovery?: RecoveryStrategy;
   private readonly sleepScanner?: SleepScanner;
@@ -122,6 +121,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
       definitions: config.definitions,
       ...(config.versionRegistry && { versionRegistry: config.versionRegistry }),
       ...(config.fallback && { fallback: config.fallback }),
+      ...(config.cluster && { cluster: config.cluster }),
     });
     this.storage = config.storage;
     this.runner = config.runner;
@@ -137,7 +137,6 @@ export class LocalWorkflows extends ZoryaWorkflows {
           leases: config.cluster.leases,
         },
       });
-      this.cluster = config.cluster;
     }
     this.assertOneCluster();
     // Scanners resume only the runs this layer owns: in a chain the same

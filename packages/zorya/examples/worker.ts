@@ -2,9 +2,9 @@
 // worker.ts — remote worker that joins the demo server.
 //
 // Run after the demo is up:
-//   bun run packages/zorya/examples/demo.ts
+//   bun run demo:server
 //   # in another terminal:
-//   bun run packages/zorya/examples/worker.ts
+//   bun run demo:worker
 //
 // What this demonstrates:
 //   1. A worker process advertising workflows the demo's in-process map

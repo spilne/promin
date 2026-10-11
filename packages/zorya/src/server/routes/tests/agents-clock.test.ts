@@ -7,7 +7,7 @@
 import { describe, expect, it } from "bun:test";
 import { ConsolidatorRateLimitError, InMemoryAgentRegistry } from "@promin/agent";
 import { FakeWallClock } from "@promin/workflow";
-import { archiveAgentThread, distillThread, type AgentGatewayDeps } from "../agents.ts";
+import { archiveAgentThread, distillThread, type AgentGatewayDeps } from "../agents/index.ts";
 
 const backend = {
   type: "local" as const,

@@ -118,9 +118,7 @@ describe("ZoryaServer", () => {
     it("invokes trigger and returns workflow id", async () => {
       // QueuedWorkflows.acceptAny lets us trigger without a definition;
       // the enqueued record is the spy.
-      const queue = new (
-        await import("../../server/workflow-starts.ts")
-      ).InMemoryWorkflowStartQueue();
+      const queue = new (await import("@promin/workflow/distributed")).InMemoryWorkflowStartQueue();
       const workflows = new QueuedWorkflows({
         storage,
         workflowStarts: queue,

@@ -20,7 +20,7 @@ import {
   StartClaimRequestSchema,
   StartParamsSchema,
 } from "../api-types.ts";
-import type { WorkflowStartClaimRef, WorkflowStartQueue } from "../workflow-starts.ts";
+import type { WorkflowStartClaimRef, WorkflowStartQueue } from "@promin/workflow/distributed";
 
 export function claimWorkflowStarts(queue: WorkflowStartQueue) {
   return async (req: Request): Promise<Response> => {

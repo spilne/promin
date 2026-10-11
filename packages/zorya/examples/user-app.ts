@@ -2,8 +2,8 @@
 // user-app.ts — what a real application looks like when it uses Zorya.
 //
 // Run alongside the demo:
-//   # terminal 1: bun run packages/zorya/examples/demo.ts
-//   # terminal 2: bun --conditions=@promin/source run packages/zorya/examples/user-app.ts
+//   # terminal 1: bun run demo:server
+//   # terminal 2: bun run demo:user-app
 //
 // Two patterns shown, both useful, both backed by Zorya's storage + dashboard:
 //
@@ -28,7 +28,7 @@
 // (The third pattern, `ZoryaWorker`, is the right choice when the workflow
 //  uses `ctx.sleep` and must resume after this process exits, or when you
 //  want the dashboard's Trigger button to dispatch into your process.
-//  See examples/split/worker.ts.)
+//  See examples/worker.ts.)
 // ---------------------------------------------------------------------------
 
 import { workflow } from "@promin/workflow";

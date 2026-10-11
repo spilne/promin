@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// SecretsPage — operator UI for managing scoped secrets (h1st Phase 3).
+// SecretsPage — operator UI for managing scoped secrets.
 //
 // Three tabs (Global / Namespace / Resource). Each tab:
 //   - List of stored keys at that scope (values never shown)

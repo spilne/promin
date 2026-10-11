@@ -11,10 +11,9 @@
 //   3. Render Approve / Reject (isApproval) or a JSON editor (custom).
 //   4. POST to the existing complete endpoint via api.completeSignalToken.
 //
-// Phase 1 reuses the dashboard sidebar layout — pixel-polish ("standalone
-// page, no sidebar") is tracked as polish in the parent bead. Functionally
-// the page works end-to-end without dashboard auth (the complete + describe
-// endpoints are bearer-authed only).
+// The page reuses the dashboard sidebar layout. It works end-to-end
+// without dashboard auth (the complete + describe endpoints are
+// bearer-authed only).
 // ---------------------------------------------------------------------------
 
 import { useEffect, useState } from "preact/hooks";

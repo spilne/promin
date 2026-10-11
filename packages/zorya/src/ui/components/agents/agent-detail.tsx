@@ -3,7 +3,11 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { useNamespace } from "../../hooks/use-namespace.ts";
 import { api, instancesApi, type AgentInstanceDto } from "../../api/client.ts";
-import type { Message, RegisteredAgent, ThreadSummary } from "../../../server/routes/agents.ts";
+import type {
+  Message,
+  RegisteredAgent,
+  ThreadSummary,
+} from "../../../server/routes/agents/agent-gateway-deps.ts";
 import { Page } from "../ui/page.tsx";
 import { Skeleton } from "../ui/skeleton.tsx";
 import { formatRelative } from "../../lib/format.ts";

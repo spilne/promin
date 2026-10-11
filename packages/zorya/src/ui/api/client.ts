@@ -44,7 +44,7 @@ import type {
   RegisteredAgent,
   ThreadInvokeResponse,
   ThreadMessagesResponse,
-} from "../../server/routes/agents.ts";
+} from "../../server/routes/agents/agent-gateway-deps.ts";
 import type {
   RegisteredSkill,
   SkillsListResponse,
@@ -483,7 +483,7 @@ export const api = {
   getAgent(id: string): Promise<RegisteredAgent> {
     return req<RegisteredAgent>(`/api/agents/${encodeURIComponent(id)}`);
   },
-  // Recipe CRUD — gsze Phase 2 (Designer UI wiring)
+  // Recipe CRUD (Designer UI wiring)
   createAgent(body: {
     id: string;
     version?: string;
@@ -711,7 +711,7 @@ export const api = {
     });
   },
 
-  // Agentic DAG endpoints (promin-li95)
+  // Agentic DAG endpoints
   listDags(params?: { tag?: string }): Promise<{ dags: DagDto[] }> {
     const qp = new URLSearchParams();
     if (params?.tag) qp.set("tag", params.tag);
@@ -877,7 +877,7 @@ export const api = {
 };
 
 // ---------------------------------------------------------------------------
-// Secrets API — scoped vault CRUD (h1st Phase 2/3)
+// Secrets API — scoped vault CRUD
 // ---------------------------------------------------------------------------
 
 // Wire shape for /api/agents/_catalog/tools. Keep loose-typed so the
@@ -963,7 +963,7 @@ export interface TraceToolCallDto {
 }
 
 // ---------------------------------------------------------------------------
-// Agentic DAG wire shapes (promin-li95). Loose-typed at the boundary so
+// Agentic DAG wire shapes. Loose-typed at the boundary so
 // the UI doesn't import @promin/agent.
 // ---------------------------------------------------------------------------
 

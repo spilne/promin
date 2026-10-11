@@ -16,8 +16,8 @@ import {
 } from "@promin/workflow";
 import { ZoryaServer } from "../../server.ts";
 import { LocalWorkflows, QueuedWorkflows } from "../../services/workflows/index.ts";
-import { InMemoryWorkflowAdvertisementRegistry } from "../../workflow-advertisements.ts";
-import { InMemoryWorkflowStartQueue } from "../../workflow-starts.ts";
+import { InMemoryWorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
+import { InMemoryWorkflowStartQueue } from "@promin/workflow/distributed";
 
 /** Yield to the event loop until `predicate` holds, bounded by iterations. */
 async function until(predicate: () => boolean | Promise<boolean>): Promise<void> {

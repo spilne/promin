@@ -3,21 +3,20 @@
 //
 // Tabs (icon · label):
 //   ◎ View      — read-only recipe overview (identity, model, tools, ...)
-//   ✎ Edit      — opens the dedicated AgentEditDrawer (Phase 2: embed)
-//   ⧉ Clone     — opens the dedicated AgentCloneDialog (Phase 2: embed)
+//   ✎ Edit      — opens the dedicated AgentEditDrawer
+//   ⧉ Clone     — opens the dedicated AgentCloneDialog
 //   ✚ Secrets   — embedded AgentSecretsPanel (no flicker)
-//   ≡ Versions  — opens the dedicated AgentVersionsModal (Phase 2: embed)
+//   ≡ Versions  — opens the dedicated AgentVersionsModal
 //   ↓ Export TS — embedded snippet view + copy (no flicker)
 //
-// Phase 1 ships View / Secrets / Export embedded inline; Edit / Clone /
-// Versions still launch their standalone dedicated surfaces from the tab
-// (the embed-mode prop pattern shipped on AgentSecretsPanel is the
-// template for embedding those in a follow-up).
+// View / Secrets / Export are embedded inline; Edit / Clone / Versions
+// launch their standalone dedicated surfaces from the tab (the embed-mode
+// prop pattern on AgentSecretsPanel is the template for embedding them).
 // ---------------------------------------------------------------------------
 
 import type * as preact from "preact";
 import { useEffect, useMemo, useState } from "preact/hooks";
-import type { RegisteredAgent } from "../../../server/routes/agents.ts";
+import type { RegisteredAgent } from "../../../server/routes/agents/agent-gateway-deps.ts";
 import { inlineRoleDefinition } from "@promin/agent/browser";
 import { exportRecipeAsTs } from "../../lib/export-recipe-ts.ts";
 import { prompt, toast } from "../../lib/dialogs.ts";

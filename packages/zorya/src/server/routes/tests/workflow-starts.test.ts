@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { FakeWallClock } from "@promin/workflow";
-import { InMemoryWorkflowStartQueue } from "../../workflow-starts.ts";
+import { InMemoryWorkflowStartQueue } from "@promin/workflow/distributed";
 import {
   claimWorkflowStarts,
   completeWorkflowStart,

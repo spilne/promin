@@ -50,7 +50,7 @@ export function streamAgentEvents(hub: AgentStreamHub) {
         // headers waiting for the first real event.
         push({ type: "ready", data: { workflowId } });
 
-        unsubscribe = hub.subscribe(workflowId, { push, close });
+        unsubscribe = hub.subscribe({ workflowId, sink: { push, close } });
       },
       cancel() {
         unsubscribe?.();

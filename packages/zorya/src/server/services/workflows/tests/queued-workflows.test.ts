@@ -4,8 +4,8 @@
 
 import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage } from "@promin/workflow";
-import { InMemoryWorkflowAdvertisementRegistry } from "../../../workflow-advertisements.ts";
-import { InMemoryWorkflowStartQueue } from "../../../workflow-starts.ts";
+import { InMemoryWorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
+import { InMemoryWorkflowStartQueue } from "@promin/workflow/distributed";
 import { QueuedWorkflows, UnknownWorkflowError, WorkflowIdConflictError } from "../index.ts";
 
 describe("QueuedWorkflows.trigger", () => {

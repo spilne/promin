@@ -93,7 +93,8 @@ export class AgentStreamHub {
    * broadcasts a stream-start command to all workers; subsequent
    * subscribers reuse the existing stream.
    */
-  subscribe(workflowId: string, sink: StreamSink): () => void {
+  subscribe(params: { workflowId: string; sink: StreamSink }): () => void {
+    const { workflowId, sink } = params;
     const streamId = this.findExistingStreamId(workflowId) ?? this.openStream(workflowId);
     let subs = this.sinks.get(streamId);
     if (!subs) {
@@ -149,7 +150,7 @@ export class AgentStreamHub {
 
   private broadcast(message: { kind: "cmd"; requestId: string; cmd: string; args: unknown }): void {
     for (const workerId of this.workerWs.connectedWorkers()) {
-      this.workerWs.send(workerId, message);
+      this.workerWs.send({ workerId, message });
     }
   }
 }
