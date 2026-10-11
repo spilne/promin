@@ -32,6 +32,7 @@ await runner.run({ workflow: hello, workflowId: "hello-1", input: { name: "ada" 
 | `SchedulerStorage`              | `SqliteSchedulerStorage`              |
 | `LeaderLeaseStore`              | `SqliteLeaderLeaseStore`              |
 | `WorkerRegistry`                | `SqliteWorkerRegistry`                |
+| `NamespaceRegistry`             | `SqliteNamespaceRegistry`             |
 | `WorkflowAdvertisementRegistry` | `SqliteWorkflowAdvertisementRegistry` |
 | `WorkflowStartQueue`            | `SqliteWorkflowStartQueue`            |
 

@@ -6,7 +6,7 @@
 // their InMemorySchedulerStorage / PgSchedulerStorage / etc.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage } from "@promin/workflow";
+import type { NamespaceRegistry, WorkflowStorage } from "@promin/workflow";
 import type {
   DurableScheduleConfig,
   ScheduleState,
@@ -22,7 +22,14 @@ import {
 import { SystemWallClock, hasCapability, type WallClock } from "@promin/workflow";
 import { z } from "zod";
 import { accepted, isoOrNull, json, jsonError, noContent } from "../router.ts";
-import { BooleanQuery, MetadataQuery, OffsetQuery, limitQuery } from "../api-types.ts";
+import {
+  BooleanQuery,
+  MetadataQuery,
+  NamespaceIdSchema,
+  OffsetQuery,
+  limitQuery,
+} from "../api-types.ts";
+import { requireActiveNamespace } from "../namespace-guard.ts";
 import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
 import { assertIfMatch, contentEtag, withEtag } from "../preconditions.ts";
 import { runLocation } from "./runs.ts";
@@ -168,7 +175,7 @@ export const ScheduleCreateRequestSchema = z
   .object({
     id: z.string().min(1).max(256),
     name: optional(ScheduleName),
-    namespace: optional(z.string().min(1).max(256)),
+    namespace: optional(NamespaceIdSchema),
     cron: optional(Cron),
     rrule: optional(RRule),
     intervalMs: optional(IntervalMs),
@@ -226,7 +233,7 @@ export type SchedulePatchRequest = z.infer<typeof SchedulePatchRequestSchema>;
 /** Query of `GET /api/schedules`. */
 export const ScheduleListQuerySchema = z.object({
   enabled: BooleanQuery,
-  namespace: z.preprocess((v) => (v === "" ? undefined : v), z.string().max(256).optional()),
+  namespace: z.preprocess((v) => (v === "" ? undefined : v), NamespaceIdSchema.optional()),
   /**
    * Containment filter, JSON-encoded. The chat per-thread drawer sends
    * `{ agentTrigger: true, threadId }`, the "kind = agent" chip
@@ -274,6 +281,11 @@ export interface ScheduleRoutesDeps {
   readonly servesNamespace?: (namespace: string | undefined) => boolean;
   /** Namespace of a schedule created without one. Default: global. */
   readonly defaultNamespace?: string;
+  /**
+   * When set, a schedule can only be created in a namespace registered
+   * here and active (404 `namespace_not_found`, 409 `namespace_archived`).
+   */
+  readonly namespaces?: NamespaceRegistry;
 }
 
 /** A clock frozen at `when` — `computeNextRun` only reads the time. */
@@ -395,7 +407,9 @@ export function getSchedule(deps: ScheduleRoutesDeps) {
  * POST /api/schedules — create a schedule: 201 + the schedule. Create-only:
  * an existing id is a 409 `schedule_exists` (change it with PATCH). The
  * namespace must be one this server's scheduler polls (400
- * `namespace_not_served`), so every created schedule can fire.
+ * `namespace_not_served`), so every created schedule can fire, and — with
+ * a namespace registry — registered and active (404 `namespace_not_found`,
+ * 409 `namespace_archived`).
  */
 export function createSchedule(deps: ScheduleRoutesDeps) {
   const { storage } = deps;
@@ -404,6 +418,7 @@ export function createSchedule(deps: ScheduleRoutesDeps) {
   return async (req: Request): Promise<Response> => {
     const body = await parseBody({ req, schema: ScheduleCreateRequestSchema });
     const namespace = body.namespace ?? deps.defaultNamespace;
+    await requireActiveNamespace({ registry: deps.namespaces, namespace });
     if (!serves(namespace)) {
       return jsonError(
         400,

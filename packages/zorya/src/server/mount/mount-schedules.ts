@@ -3,7 +3,7 @@
 // `configured: false`, so the UI can tell "not configured" from "empty".
 // ---------------------------------------------------------------------------
 
-import type { WallClock, WorkflowStorage } from "@promin/workflow";
+import type { NamespaceRegistry, WallClock, WorkflowStorage } from "@promin/workflow";
 import { json, type Router } from "../router.ts";
 import type { ZoryaScheduler } from "../services/scheduler/index.ts";
 import {
@@ -22,6 +22,8 @@ export function mountSchedules(params: {
   readonly scheduler: ZoryaScheduler | undefined;
   readonly storage: WorkflowStorage;
   readonly clock: WallClock;
+  /** Registry a new schedule's namespace is checked against. */
+  readonly namespaces: NamespaceRegistry | undefined;
 }): void {
   const { router, scheduler } = params;
   if (!scheduler) {
@@ -36,6 +38,7 @@ export function mountSchedules(params: {
     ...(scheduler.defaultNamespace !== undefined && {
       defaultNamespace: scheduler.defaultNamespace,
     }),
+    ...(params.namespaces !== undefined && { namespaces: params.namespaces }),
   };
   router
     .get("/api/schedules", listSchedules(scheduleDeps))

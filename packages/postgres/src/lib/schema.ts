@@ -494,6 +494,34 @@ export const workerRegistry = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Namespace registry — the authoritative list of namespaces, with lifecycle
+// status and a capability policy (PostgresNamespaceRegistry).
+// ---------------------------------------------------------------------------
+
+export const namespaceRegistry = pgTable(
+  "wf_namespace_registry",
+  {
+    id: text("id").primaryKey(),
+    displayName: text("display_name").notNull(),
+    description: text("description"),
+    status: text("status").notNull().default("active"), // active | archived
+    capabilities: jsonb("capabilities")
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    metadata: jsonb("metadata")
+      .notNull()
+      .default(sql`'{}'::jsonb`),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    check("wf_namespace_registry_status_check", sql`${t.status} IN ('active', 'archived')`),
+    // Status-filtered list() queries, ordered by id.
+    index("wf_namespace_registry_status_idx").on(t.status, t.id),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Workflow advertisements — workers publish their workflow definitions
 // (name, version, DAG steps, optional sample input) on connect.
 // Postgres-backed so multi-replica deployments share one catalog;

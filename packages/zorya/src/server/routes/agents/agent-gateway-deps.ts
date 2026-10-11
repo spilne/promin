@@ -56,7 +56,7 @@ import type {
   RoleRegistry,
   SecretsStorage,
 } from "@promin/agent";
-import type { WallClock } from "@promin/workflow";
+import type { NamespaceRegistry, WallClock } from "@promin/workflow";
 import type { ScopeAuthorizer } from "../agent-gateway-kit.ts";
 
 // ---------------------------------------------------------------------------
@@ -193,6 +193,13 @@ export interface AgentGatewayDeps {
    * rejected with 400 `secrets_unsupported`.
    */
   readonly secrets?: SecretsStorage;
+  /**
+   * Optional namespace registry. When set, invocations (and the clone
+   * endpoint's namespace- or resource-scoped secrets) need a registered,
+   * active `namespaceId`: 404 `namespace_not_found`, 409
+   * `namespace_archived`. Read routes are not checked.
+   */
+  readonly namespaces?: NamespaceRegistry;
   /**
    * Agent ids backed by a recipe file on disk. Edits and deletes of
    * those ids are refused (409 `file_managed`): the next scan tick would

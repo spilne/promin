@@ -5,9 +5,10 @@
 // shares, for anyone writing another one: the status, run-source and
 // journal codecs, `setWorkflowMetadata` / `listWorkflows` semantics,
 // capability detection, fallbacks for the round-trip-saving methods, the
-// child-wake signal name, schedule metadata filters and the step-queue
-// dead-letter / percentile helpers. The contracts themselves come from
-// `@promin/workflow` (`WorkflowStorage`), `@promin/workflow/scheduler`
+// child-wake signal name, schedule metadata filters, the step-queue
+// dead-letter / percentile helpers and the namespace-registry input
+// validation. The contracts themselves come from `@promin/workflow`
+// (`WorkflowStorage`, `NamespaceRegistry`), `@promin/workflow/scheduler`
 // (`SchedulerStorage`) and `@promin/workflow/distributed` (`StepQueue`).
 // ---------------------------------------------------------------------------
 
@@ -50,3 +51,10 @@ export {
   deadLetterError,
   percentileCont,
 } from "./lib/distributed/step-queue.ts";
+export {
+  normalizeNamespaceCreate,
+  normalizeNamespacePatch,
+  normalizeNamespaceCapabilities,
+  parseNamespaceStatus,
+  type NormalizedNamespaceCreate,
+} from "./lib/namespaces/namespace-registry.ts";

@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import type { RemoteDeploymentRegistry, SecretsStorage } from "@promin/agent";
-import type { WallClock } from "@promin/workflow";
+import type { NamespaceRegistry, WallClock } from "@promin/workflow";
 import type { WorkerRegistry } from "@promin/workflow/distributed";
 import type { AuthConfig } from "./auth.ts";
 import type { MetricsProvider } from "./routes/metrics.ts";
@@ -149,6 +149,20 @@ export interface ZoryaServerConfig extends AuthConfig {
    * single-tenant deployments using env vars.
    */
   secrets?: SecretsStorage;
+  /**
+   * Optional namespace registry (`SqliteNamespaceRegistry`,
+   * `PostgresNamespaceRegistry`, `InMemoryNamespaceRegistry`). When set,
+   * `/api/namespaces` manages it, and namespaces stop being free-form:
+   * triggering a run, creating a schedule, invoking an agent, writing
+   * namespace memory, secrets or agent instances, and accepting a webhook
+   * delivery in a namespace that is not registered answer 404
+   * `namespace_not_found`, in an archived one 409 `namespace_archived`.
+   * Reads are unaffected, and work without a namespace (the global
+   * namespace) is always allowed. At start the server registers the
+   * namespaces stored runs already use. Without it, any well-formed
+   * namespace is accepted and `/api/namespaces` reports `configured: false`.
+   */
+  namespaces?: NamespaceRegistry;
   /**
    * Optional webhook ingress — POST /webhooks/:source/:agentId routes
    * external events into a registered agent after `zorya-v1` signature

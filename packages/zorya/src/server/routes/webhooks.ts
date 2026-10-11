@@ -40,10 +40,12 @@ import type { AgentRegistry, RegisteredAgent } from "@promin/agent";
 import {
   SystemWallClock,
   type FenceToken,
+  type NamespaceRegistry,
   type WallClock,
   type WorkflowStorage,
 } from "@promin/workflow";
 import { json, jsonError } from "../router.ts";
+import { requireActiveNamespace } from "../namespace-guard.ts";
 import { internalError } from "./agent-gateway-kit.ts";
 
 export type WebhookSignatureScheme = "zorya-v1";
@@ -357,6 +359,12 @@ export interface WebhookGatewayDeps {
   readonly clock?: WallClock;
   /** How long a dispatch may hold its claim between renewals. Default: 2 minutes. */
   readonly claimLeaseMs?: number;
+  /**
+   * When set, a delivery's namespace must be registered and active (404
+   * `namespace_not_found`, 409 `namespace_archived`), checked before the
+   * delivery is claimed so the sender's retry runs once it is.
+   */
+  readonly namespaces?: NamespaceRegistry;
 }
 
 export interface WebhookAcceptedResponse {
@@ -435,6 +443,7 @@ export function ingestWebhook(deps: WebhookGatewayDeps) {
     if (recipe.metadata.enabled === false) {
       return jsonError(410, "agent_disabled", `Agent "${agentId}" is disabled.`);
     }
+    await requireActiveNamespace({ registry: deps.namespaces, namespace: delivery.namespaceId });
 
     const key = JSON.stringify([
       source,

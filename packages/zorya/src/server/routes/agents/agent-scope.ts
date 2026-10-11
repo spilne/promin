@@ -13,6 +13,7 @@ import {
 } from "@promin/agent";
 import { SystemWallClock } from "@promin/workflow";
 import { json, jsonError, parseIntParam } from "../../router.ts";
+import { requireActiveNamespace } from "../../namespace-guard.ts";
 import { internalError } from "../agent-gateway-kit.ts";
 import type { AgentGatewayDeps } from "./agent-gateway-deps.ts";
 
@@ -167,6 +168,11 @@ export async function loadScopedAgent(params: {
   if (deps.authorizeScope) {
     const allowed = await deps.authorizeScope({ req, scope: { ...scope, agentId: id } });
     if (!allowed) return jsonError(403, "scope_forbidden");
+  }
+  // Invocations write into the namespace (threads, memory, instances);
+  // reads of an unknown or archived namespace just find nothing new.
+  if (invoking) {
+    await requireActiveNamespace({ registry: deps.namespaces, namespace: scope.namespaceId });
   }
 
   let resourceId: string;

@@ -148,6 +148,47 @@ const server = new ZoryaServer({
 });
 ```
 
+### Namespaces
+
+Runs, schedules, agent memory, instances and secrets carry a namespace: an
+id of 1–128 letters, digits and `_ . : -`, starting with a letter or digit
+(`NAMESPACE_ID_PATTERN`). Every route that takes a namespace validates it so.
+Without further configuration any well-formed namespace is accepted, and work
+without one lands in the global namespace.
+
+Give the server a `NamespaceRegistry` (`namespaces`; `SqliteNamespaceRegistry`
+from the SQLite stack, `PostgresNamespaceRegistry`, or the in-memory one for
+tests) to make namespaces explicit entities. `/api/namespaces` then manages
+them: each has a display name, description, free-form metadata, a status
+(`active` or `archived`) and a capability policy (`ai`, `agents`,
+`workflows`, `tools` limits) that is validated and stored for hosts to read;
+Zorya does not enforce it. Routes that put new work into a namespace check
+it: triggering a run, creating a schedule, invoking an agent, writing
+namespace memory, an agent instance or a namespace- or resource-scoped secret,
+and accepting a webhook delivery answer `404 namespace_not_found` for an
+unregistered namespace and `409 namespace_archived` for an archived one. Reads
+and filters are not checked (an unknown namespace matches nothing; archived
+data stays readable and deletable), and the global namespace needs no entry.
+Schedules already in a namespace keep firing after it is archived; disable
+them first. The dashboard's agent chat uses the namespace `default` when no
+namespace is selected, so register it if you use the chat.
+
+A namespace is deleted in two steps: archive it (`PATCH { "status":
+"archived" }`), then `DELETE` it, which answers `409 namespace_in_use` while
+runs or schedules still name it. At start, the server registers (as active)
+every well-formed namespace its stored runs already use, so adding a
+registry to an existing deployment keeps its tenants working.
+
+```ts
+const stack = createSqliteZoryaStack({ path: "./data/zorya.db" });
+await stack.namespaceRegistry.create({ id: "acme", displayName: "Acme" });
+const server = ZoryaServer.builder()
+  .workflows(workflows)
+  .namespaces(stack.namespaceRegistry)
+  .apiKeys([process.env.ZORYA_API_KEY!])
+  .build();
+```
+
 ### Clustering
 
 Several Zorya instances can share one set of stores. Pass the same
@@ -159,14 +200,16 @@ on one host).
 
 A clustered layer refuses in-memory stores (`ZoryaClusterConfigError`),
 because each instance would hold its own copy. The server applies the same
-check to its version registry, worker registry and scheduler storage. The
+check to its version registry, worker registry, scheduler storage and
+namespace registry. The
 scheduler elects its own leader through its storage, so give each instance
 a distinct `ZoryaScheduler.instanceId`.
 
 ### Background services and lifecycle
 
 `listen()` starts the background services (workflows, scheduler, agents,
-skills, fragments, retention) and the worker WebSocket. A service whose
+skills, fragments, retention, and the one-shot namespace adoption) and the
+worker WebSocket. A service whose
 `start()` fails (storage down at boot, for example) is retried with backoff.
 `/api/ready` answers 200 only once storage responds and every service has
 started. `stop()` drains the server gracefully (see
@@ -226,6 +269,7 @@ const server = ZoryaServer.builder()
 | `agents`                      | none                    | `ZoryaAgents`: the agent gateway, plus memory, instances and roles when their stores are set.                                                                                                                                                                                    |
 | `skills`, `fragments`, `dags` | none                    | Registry services with CRUD routes.                                                                                                                                                                                                                                              |
 | `secrets`                     | none                    | `SecretsStorage` for `/api/secrets` and BYOK credential resolution.                                                                                                                                                                                                              |
+| `namespaces`                  | free-form namespaces    | `NamespaceRegistry` for `/api/namespaces`; new runs, schedules and agent state then need a registered, active namespace (see [Namespaces](#namespaces)).                                                                                                                         |
 | `webhooks`                    | none                    | `{ sources, deliveries? }`: signed webhook ingress into agents. Mounted only when `agents` is set. `deliveries` (replay dedup) defaults to a store on the workflow storage, shared across instances.                                                                             |
 | `remoteDeployments`           | none                    | `{ registry, endpointPolicy?, sweepIntervalMs? }`: other Zorya servers register their agents here. Mounted only when `agents` is set.                                                                                                                                            |
 | `retention`                   | keep forever            | `{ maxAgeMs, intervalMs?, batchSize? }`: delete ended runs (completed, failed, tripwire) older than `maxAgeMs` with all their records, on one leader, every `intervalMs` (default 1 h, the first one interval after start), in batches of `batchSize` (default 500).             |
@@ -264,7 +308,8 @@ maintenance cadence, `cluster`, `clock`, `onError`). See
 database (WAL, foreign keys on; `":memory:"` for an ephemeral one) and
 returns every store a single-process Zorya uses on it: workflow `storage`
 and a `runner` over it, `schedulerStorage`, the worker protocol's
-`workflowStarts`, `advertisements` and `workerRegistry`, the agent
+`workflowStarts`, `advertisements` and `workerRegistry`, the
+`namespaceRegistry`, the agent
 registries and stores, and `secretsStorage` — only when a
 `secretsPassphrase` is given; there is no default passphrase. Larger
 deployments build stores themselves, or replace some of these (the demo
@@ -305,6 +350,7 @@ line; internal detail never reaches the caller.
 | Live data    | `GET /api/runs/:id/events` (SSE), `GET /api/runs/:id/streams/:streamId` (SSE), `.../chunks`, `POST /api/runs/:id/streams/:streamId`, `GET /api/runs/:id/agent-stream` (SSE), `POST /api/runs/:id/query`                     |
 | Fleet        | `GET /api/workers`, `GET /api/metrics`                                                                                                                                                                                      |
 | Schedules    | `GET/POST /api/schedules`, `GET/PATCH/DELETE /api/schedules/:id`, `.../history`, `.../upcoming`, `POST .../emit`                                                                                                            |
+| Namespaces   | `GET/POST /api/namespaces` (`?status=active\|archived`), `GET/PATCH/DELETE /api/namespaces/:id`; without a registry only `GET`, with `configured: false`                                                                    |
 | Agents       | `/api/agents` CRUD, `/api/agents/_catalog/*`, `_sources`, `_draft`, `/api/agents/:id/{versions,clone,extract-role,invoke,stream,threads,...}`                                                                               |
 | Agent data   | `/api/memory/*`, `/api/instances`, `/api/agents/:id/instances/*`, `/api/roles/*`, `/api/skills/*`, `/api/fragments/*`, `/api/secrets/*`, `/api/dags/*`, `/api/remote-deployments/*`                                         |
 | Worker plane | `/ws/worker`, `POST /rpc/storage`, `POST /rpc/worker`, `/api/advertisements`, `/api/worker-protocol/{claim-starts,heartbeat-start/:id,complete-start/:id,release-start/:id,starts}`                                         |

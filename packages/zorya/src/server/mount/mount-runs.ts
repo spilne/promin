@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import type {
+  NamespaceRegistry,
   Workflow,
   WallClock,
   WorkflowStorage,
@@ -82,6 +83,8 @@ export interface MountRunsParams {
   readonly sseIntervalMs: number | undefined;
   readonly signalTokenMaxTtlMs: number | undefined;
   readonly publicBaseUrl: string | undefined;
+  /** Registry an explicit run namespace is checked against. */
+  readonly namespaces: NamespaceRegistry | undefined;
 }
 
 export function mountRuns(params: MountRunsParams): void {
@@ -93,6 +96,7 @@ export function mountRuns(params: MountRunsParams): void {
     trigger: (name, input, opts) => workflows.trigger(name, input, opts),
     ...(definitions !== undefined && { workflows: definitions }),
     ...(advertisements !== undefined && { advertisements }),
+    ...(params.namespaces !== undefined && { namespaces: params.namespaces }),
   };
   const runActions = new RunsService({
     storage,

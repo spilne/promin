@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import type { SecretsStorage } from "@promin/agent";
-import { FakeWallClock, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
+import {
+  FakeWallClock,
+  InMemoryNamespaceRegistry,
+  InMemoryWorkflowStorage,
+  createWorkflowRunner,
+} from "@promin/workflow";
 import type { MetricsProvider } from "../routes/metrics.ts";
 import type { WorkersProvider } from "../routes/workers.ts";
 import { ZoryaServerBuilder } from "../server-builder.ts";
@@ -68,6 +73,7 @@ describe("ZoryaServer.builder()", () => {
       publicBaseUrl: "https://zorya.example.com",
       secrets: stub<SecretsStorage>("secrets"),
       knowledgeBases: stub<ZoryaKnowledgeBases>("knowledgeBases"),
+      namespaces: new InMemoryNamespaceRegistry(),
       webhooks: { sources: { github: stub("github-source") } },
       remoteDeployments: { registry: stub("registry"), sweepIntervalMs: 1_000 },
       retention: { maxAgeMs: 86_400_000, intervalMs: 60_000, batchSize: 100 },
@@ -97,6 +103,7 @@ describe("ZoryaServer.builder()", () => {
       .publicBaseUrl(expected.publicBaseUrl)
       .secrets(expected.secrets)
       .knowledgeBases(expected.knowledgeBases)
+      .namespaces(expected.namespaces)
       .webhooks(expected.webhooks)
       .remoteDeployments(expected.remoteDeployments)
       .retention(expected.retention)

@@ -36,3 +36,8 @@ export {
   type StateMachineStorageTestSuiteOptions,
 } from "./lib/durable/state-machine-storage-test-suite.ts";
 export { clearQueryHandlers } from "./lib/durable/query-registry.ts";
+export {
+  namespaceRegistryTestSuite,
+  type NamespaceRegistrySuiteFactoryParams,
+  type NamespaceRegistryTestSuiteOptions,
+} from "./lib/namespaces/namespace-registry-test-suite.ts";

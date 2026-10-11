@@ -145,6 +145,7 @@ export {
 } from "./server/routes/workers.ts";
 export type { RunTrigger } from "./server/routes/runs.ts";
 export type { ScheduleDto, SchedulesResponse } from "./server/routes/schedules.ts";
+export type { NamespaceDto, NamespacesResponse } from "./server/routes/namespaces.ts";
 export { RunsService, mergePlannedSteps, type RunsServiceDeps } from "./server/services/index.ts";
 export type {
   SignalDto,

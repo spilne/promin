@@ -3,6 +3,10 @@ export { PostgresWorkflowStorage } from "./lib/postgres-workflow-storage.ts";
 export { PostgresWorkflowVersionRegistry } from "./lib/postgres-workflow-version-registry.ts";
 export { PostgresWorkerRegistry } from "./lib/postgres-worker-registry.ts";
 export {
+  PostgresNamespaceRegistry,
+  type PostgresNamespaceRegistryConfig,
+} from "./lib/postgres-namespace-registry.ts";
+export {
   PostgresAgentRegistry,
   type PostgresAgentRegistryConfig,
 } from "./lib/agent/agent-registry.ts";
@@ -128,6 +132,7 @@ export {
   stepAttempts,
   attemptTypeTable,
   workerRegistry,
+  namespaceRegistry,
   machines,
   machineEvents,
   LOOKUP_BINDINGS,

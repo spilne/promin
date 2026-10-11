@@ -15,13 +15,22 @@
 // ---------------------------------------------------------------------------
 
 import type { SecretScope, SecretsStorage } from "@promin/agent";
+import type { NamespaceRegistry } from "@promin/workflow";
 import { z } from "zod";
 import { json, jsonError, noContent } from "../router.ts";
 import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
+import { requireActiveNamespace, secretScopeNamespace } from "../namespace-guard.ts";
 import { internalError } from "./agent-gateway-kit.ts";
 
 export interface SecretsGatewayDeps {
   readonly secrets: SecretsStorage;
+  /**
+   * When set, storing a namespace- or resource-scoped secret needs a
+   * registered, active namespace (404 `namespace_not_found`, 409
+   * `namespace_archived`). Listing and deleting are not checked, so an
+   * archived namespace's secrets can still be cleaned up.
+   */
+  readonly namespaces?: NamespaceRegistry;
 }
 
 /** Allowed secret key shape — shared with the clone route. */
@@ -94,6 +103,10 @@ export function createSecret(deps: SecretsGatewayDeps) {
         `Secret value exceeds ${SECRET_MAX_VALUE_BYTES} bytes.`,
       );
     }
+    await requireActiveNamespace({
+      registry: deps.namespaces,
+      namespace: secretScopeNamespace(scope),
+    });
     try {
       await deps.secrets.set({ scope, key: body.key, value: body.value });
       const response: CreateSecretResponse = { scope, key: body.key };

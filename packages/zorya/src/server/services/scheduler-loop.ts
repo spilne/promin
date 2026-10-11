@@ -708,7 +708,10 @@ export class SchedulerLoop {
     const workflowId = scheduleTickRunId(tick);
     await this.trigger(workflowName, meta.input, {
       workflowId,
-      namespace: meta.namespace ?? schedule.namespace,
+      // The schedule's own namespace (what storage polls and the routes
+      // validated) wins; `metadata.namespace` only fills in for a schedule
+      // in the global namespace.
+      namespace: schedule.namespace ?? meta.namespace,
       workflowType: meta.workflowType,
       version: meta.version,
       // First-class link back to the schedule. Survives across replays /

@@ -48,7 +48,9 @@ import {
   THREAD_AGENT_METADATA_KEY,
 } from "@promin/agent";
 import { z } from "zod";
+import type { NamespaceRegistry } from "@promin/workflow";
 import { json, jsonError } from "../router.ts";
+import { requireActiveNamespace } from "../namespace-guard.ts";
 import { internalError, type ScopeAuthorizer } from "./agent-gateway-kit.ts";
 
 export interface MemoryInspectorDeps {
@@ -70,6 +72,12 @@ export interface MemoryInspectorDeps {
    * using the plain-string form resolve without it.
    */
   readonly fragments?: FragmentRegistry;
+  /**
+   * When set, namespace memory writes (PATCH, new facts) need a
+   * registered, active namespace (404 `namespace_not_found`, 409
+   * `namespace_archived`). Inspecting and deleting facts are not checked.
+   */
+  readonly namespaces?: NamespaceRegistry;
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +301,7 @@ export function patchNamespace(deps: MemoryInspectorDeps) {
     if (parsed.data.staticRules !== undefined) patch.staticRules = parsed.data.staticRules;
     if (parsed.data.workingMemory !== undefined) patch.workingMemory = parsed.data.workingMemory;
     if (Object.keys(patch).length === 0) return jsonError(400, "empty_patch");
+    await requireActiveNamespace({ registry: deps.namespaces, namespace: namespaceId });
 
     const row = await deps.memory.upsertNamespace(namespaceId, patch);
     return json(200, { row });
@@ -309,6 +318,7 @@ export function addNamespaceFact(deps: MemoryInspectorDeps) {
     if (text.length > MAX_FACT_LENGTH) {
       return jsonError(400, "text_too_long", `A fact is at most ${MAX_FACT_LENGTH} characters.`);
     }
+    await requireActiveNamespace({ registry: deps.namespaces, namespace: namespaceId });
     const fact = await deps.memory.appendNamespaceFact(namespaceId, text);
     return json(201, { fact });
   };

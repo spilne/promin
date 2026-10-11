@@ -299,6 +299,19 @@ CREATE TABLE wf_leader_leases (
   CONSTRAINT wf_leader_leases_pkey PRIMARY KEY (lease_key)
 );
 
+CREATE TABLE wf_namespace_registry (
+  id text NOT NULL,
+  display_name text NOT NULL,
+  description text,
+  status text DEFAULT 'active'::text NOT NULL,
+  capabilities jsonb DEFAULT '{}'::jsonb NOT NULL,
+  metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
+  created_at timestamp with time zone DEFAULT now() NOT NULL,
+  updated_at timestamp with time zone DEFAULT now() NOT NULL,
+  CONSTRAINT wf_namespace_registry_status_check CHECK ((status = ANY (ARRAY['active'::text, 'archived'::text]))),
+  CONSTRAINT wf_namespace_registry_pkey PRIMARY KEY (id)
+);
+
 CREATE TABLE wf_schedule_ticks (
   schedule_id text NOT NULL,
   scheduled_at timestamp with time zone NOT NULL,
@@ -635,6 +648,8 @@ CREATE INDEX sm_machines_type_idx ON sm_machines (machine_type);
 CREATE INDEX wf_activity_journal_due_sleeps_idx ON wf_activity_journal (wake_at) WHERE ((step_type = 'sleep'::text) AND (phase = 'pending'::text));
 
 CREATE INDEX wf_activity_journal_pending_signals_idx ON wf_activity_journal (workflow_id, step_name, activity_name) WHERE ((step_type = 'signal'::text) AND (phase = 'pending'::text));
+
+CREATE INDEX wf_namespace_registry_status_idx ON wf_namespace_registry (status, id);
 
 CREATE INDEX wf_schedule_ticks_schedule_idx ON wf_schedule_ticks (schedule_id);
 

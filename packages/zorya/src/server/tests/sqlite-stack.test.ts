@@ -48,6 +48,18 @@ describe("createSqliteZoryaStack", () => {
     await expect(secrets!.get({ scope, key: "api-key" })).resolves.toBe("s3cret");
   });
 
+  it("keeps namespaces in the shared database", async () => {
+    const clock = FakeWallClock.create(1_700_000_000_000);
+    const stack = open({ path: ":memory:", clock });
+    const created = await stack.namespaceRegistry.create({ id: "acme", displayName: "Acme" });
+    expect(created.createdAt.getTime()).toBe(1_700_000_000_000);
+    const tables = stack.db
+      .query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'")
+      .all()
+      .map((r) => r.name);
+    expect(tables).toContain("promin_wf_namespaces");
+  });
+
   it("creates the database file's directory and shares one database", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "zorya-stack-"));
     dirs.push(dir);

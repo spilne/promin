@@ -23,6 +23,7 @@ import type {
   ScheduleHistoryResponse,
   ScheduleUpcomingResponse,
 } from "../../server/routes/schedules.ts";
+import type { NamespacesResponse } from "../../server/routes/namespaces.ts";
 import type {
   SignalHistoryResponse,
   AttemptsResponse,
@@ -310,6 +311,11 @@ export const api = {
     if (params.namespace) qp.set("namespace", params.namespace);
     const qs = qp.toString();
     return req(`/api/workflows${qs ? `?${qs}` : ""}`);
+  },
+  /** The namespace registry; `configured: false` when the server has none. */
+  listNamespaces(params: { status?: "active" | "archived" } = {}): Promise<NamespacesResponse> {
+    const qs = params.status ? `?status=${params.status}` : "";
+    return req(`/api/namespaces${qs}`);
   },
   listWorkflowVersions(name: string): Promise<{ versions: WorkflowVersionDto[] }> {
     return req(`/api/workflows/${encodeURIComponent(name)}/versions`);

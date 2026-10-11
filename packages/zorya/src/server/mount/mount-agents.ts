@@ -9,7 +9,7 @@
 // ---------------------------------------------------------------------------
 
 import type { SecretsStorage } from "@promin/agent";
-import type { WallClock } from "@promin/workflow";
+import type { NamespaceRegistry, WallClock } from "@promin/workflow";
 import { json, type Router } from "../router.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaFragments } from "../services/fragments/index.ts";
@@ -77,9 +77,12 @@ export function mountAgents(params: {
   readonly skills: ZoryaSkills | undefined;
   readonly fragments: ZoryaFragments | undefined;
   readonly secrets: SecretsStorage | undefined;
+  /** Registry the namespace of agent writes is checked against. */
+  readonly namespaces: NamespaceRegistry | undefined;
   readonly clock: WallClock;
 }): void {
   const { router, agents, skills, fragments, clock } = params;
+  const namespaced = params.namespaces !== undefined ? { namespaces: params.namespaces } : {};
   const agentDeps: AgentGatewayDeps = {
     registry: agents.registry,
     resolve: agents.resolve,
@@ -89,6 +92,7 @@ export function mountAgents(params: {
     ...(agents.workerId !== undefined && { workerId: agents.workerId }),
     ...(params.secrets !== undefined && { secrets: params.secrets }),
     ...(agents.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
+    ...namespaced,
     fileManagedIds: () => agents.fileManagedIds(),
     clock,
   };
@@ -188,6 +192,7 @@ export function mountAgents(params: {
       ...(fragmentRegistry && { fragments: fragmentRegistry }),
       ...(agents.roles !== undefined && { roles: agents.roles }),
       ...(agents.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
+      ...namespaced,
     };
     router
       .get("/api/memory/inspect", inspectMemory(mem))
@@ -202,6 +207,7 @@ export function mountAgents(params: {
       memory: agents.memory,
       agents: agents.registry,
       ...(agents.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
+      ...namespaced,
     };
     router
       .get("/api/agents/:id/instances", listAgentInstances(inDeps))

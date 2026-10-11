@@ -14,7 +14,9 @@ import { InMemoryAgentRegistry } from "@promin/agent";
 import {
   FakeWallClock,
   InMemoryWorkflowStorage,
+  InMemoryNamespaceRegistry,
   createWorkflowRunner,
+  type NamespaceRegistry,
   type WorkflowStorage,
 } from "@promin/workflow";
 import { LocalWorkflows, ZoryaAgents } from "../../../index.ts";
@@ -44,6 +46,7 @@ interface BootOpts {
   deliveries?: WebhookDeliveryStore;
   sources?: Record<string, WebhookSourceConfig>;
   register?: boolean;
+  namespaces?: NamespaceRegistry;
 }
 
 async function boot(opts: BootOpts = {}) {
@@ -86,6 +89,7 @@ async function boot(opts: BootOpts = {}) {
       sources: opts.sources ?? { github: { secret: SECRET } },
       ...(opts.deliveries !== undefined && { deliveries: opts.deliveries }),
     },
+    ...(opts.namespaces !== undefined && { namespaces: opts.namespaces }),
   });
   return { server, registry, dispatched, clock, storage };
 }
@@ -183,6 +187,25 @@ describe("webhook ingress — signature", () => {
     );
     expect(agent.status).toBe(401);
     expect(dispatched).toEqual([]);
+  });
+
+  it("with a namespace registry, refuses unknown and archived namespaces before claiming", async () => {
+    const namespaces = new InMemoryNamespaceRegistry();
+    const { server, dispatched } = await boot({ namespaces });
+    const unknown = await server.handle(delivery());
+    expect(unknown.status).toBe(404);
+    expect(((await unknown.json()) as { error: string }).error).toBe("namespace_not_found");
+
+    // Not claimed: the sender's retry runs once the namespace exists.
+    await namespaces.create({ id: "acme" });
+    expect((await server.handle(delivery())).status).toBe(200);
+    expect(dispatched).toHaveLength(1);
+
+    await namespaces.update({ id: "acme", patch: { status: "archived" } });
+    const archived = await server.handle(delivery({ deliveryId: "d-2" }));
+    expect(archived.status).toBe(409);
+    expect(((await archived.json()) as { error: string }).error).toBe("namespace_archived");
+    expect(dispatched).toHaveLength(1);
   });
 
   it("rejects deliveries outside the tolerance window on the server clock", async () => {

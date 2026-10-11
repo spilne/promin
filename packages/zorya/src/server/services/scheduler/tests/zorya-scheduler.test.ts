@@ -50,6 +50,32 @@ describe("ZoryaScheduler.fireOnce", () => {
     expect(runs[0]?.runSourceId).toBe("wf-sched");
   });
 
+  it("runs in the schedule's namespace, not metadata.namespace", async () => {
+    const wfStorage = new InMemoryWorkflowStorage();
+    const schedStorage = new InMemorySchedulerStorage();
+    const workflows = new QueuedWorkflows({ storage: wfStorage, acceptAny: true });
+    const scheduler = new ZoryaScheduler({ storage: schedStorage, workflows, namespaces: "all" });
+
+    await seedSchedule(schedStorage, {
+      id: "wf-tenant",
+      namespace: "tenant-a",
+      metadata: { workflowName: "my-wf", namespace: "other-tenant" },
+    });
+    await seedSchedule(schedStorage, {
+      id: "wf-global",
+      metadata: { workflowName: "my-wf", namespace: "tenant-b" },
+    });
+
+    await scheduler.fireOnce("wf-tenant");
+    await scheduler.fireOnce("wf-global");
+
+    const runs = await wfStorage.listWorkflows({ limit: 10 });
+    const bySchedule = new Map(runs.map((r) => [r.runSourceId, r.namespace]));
+    expect(bySchedule.get("wf-tenant")).toBe("tenant-a");
+    // A schedule in the global namespace still honours metadata.namespace.
+    expect(bySchedule.get("wf-global")).toBe("tenant-b");
+  });
+
   it("routes agent schedules through AgentScheduleDispatcher", async () => {
     const wfStorage = new InMemoryWorkflowStorage();
     const schedStorage = new InMemorySchedulerStorage();

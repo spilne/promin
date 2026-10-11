@@ -20,6 +20,7 @@
 
 import { z } from "zod";
 import {
+  NAMESPACE_ID_PATTERN,
   WORKFLOW_STATUSES,
   type RunSource,
   type WorkflowStatus,
@@ -51,12 +52,21 @@ export const RUN_ORDER_BY = [
 /** Largest `limit` any list route accepts. */
 export const MAX_LIST_LIMIT = 500;
 
-/** A name: workflow, signal, version, namespace. */
+/** A name: workflow, signal, version. */
 export const NameSchema = z.string().min(1).max(256);
 const Name = NameSchema;
 /** An id: run, schedule, token, stream. */
 export const IdSchema = z.string().min(1).max(512);
 const Id = IdSchema;
+/**
+ * A namespace id (`NAMESPACE_ID_PATTERN`: 1–128 letters, digits and
+ * `_ . : -`, starting with a letter or digit). Every route that takes a
+ * namespace — runs, schedules, the namespace registry — validates it so.
+ */
+export const NamespaceIdSchema = z.string().regex(NAMESPACE_ID_PATTERN, {
+  message: "must be 1-128 letters, digits or _ . : -, starting with a letter or digit",
+});
+const NamespaceId = NamespaceIdSchema;
 
 /** `""` counts as absent on the query string. */
 function optionalQuery<T extends z.ZodTypeAny>(schema: T) {
@@ -115,7 +125,7 @@ export const AgentListQuerySchema = z.object({
 });
 
 /** `?namespace=` alone. */
-export const NamespaceQuerySchema = z.object({ namespace: optionalQuery(Name) });
+export const NamespaceQuerySchema = z.object({ namespace: optionalQuery(NamespaceId) });
 
 export interface StepTaskDto {
   taskIndex: number;
@@ -239,7 +249,7 @@ export const RunListQuerySchema = z.object({
   ),
   name: optionalQuery(Name),
   type: optionalQuery(Name),
-  namespace: optionalQuery(Name),
+  namespace: optionalQuery(NamespaceId),
   /** Workflow version the run was created with. */
   version: optionalQuery(Name),
   /** What kicked the run off (`"schedule"`, `"manual"`, `"api"`, …). */
@@ -358,7 +368,7 @@ export const TriggerRunRequestSchema = z
   .object({
     input: z.unknown().optional(),
     workflowType: Name.optional(),
-    namespace: Name.optional(),
+    namespace: NamespaceId.optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
     /**
      * Explicit run id. Default: a generated UUID. When a run with this id

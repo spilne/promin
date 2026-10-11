@@ -13,7 +13,11 @@
 // reaching a worker attached to another).
 // ---------------------------------------------------------------------------
 
-import { InMemoryWorkflowStorage, InMemoryWorkflowVersionRegistry } from "@promin/workflow";
+import {
+  InMemoryNamespaceRegistry,
+  InMemoryWorkflowStorage,
+  InMemoryWorkflowVersionRegistry,
+} from "@promin/workflow";
 import {
   InMemoryWorkerRegistry,
   InMemoryWorkflowAdvertisementRegistry,
@@ -76,6 +80,7 @@ const IN_MEMORY_STORES: ReadonlyArray<
   ["InMemoryWorkflowVersionRegistry", InMemoryWorkflowVersionRegistry],
   ["InMemoryLeaderLeases", InMemoryLeaderLeases],
   ["InMemorySchedulerStorage", InMemorySchedulerStorage],
+  ["InMemoryNamespaceRegistry", InMemoryNamespaceRegistry],
 ];
 
 /**

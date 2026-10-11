@@ -4,6 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import type { SecretsStorage } from "@promin/agent";
+import type { NamespaceRegistry } from "@promin/workflow";
 import type { Router } from "../router.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaDags } from "../services/dags/index.ts";
@@ -111,8 +112,13 @@ export function mountFragments(params: {
 export function mountSecrets(params: {
   readonly router: Router;
   readonly secrets: SecretsStorage;
+  /** Registry a stored secret's namespace is checked against. */
+  readonly namespaces: NamespaceRegistry | undefined;
 }): void {
-  const sec = { secrets: params.secrets };
+  const sec = {
+    secrets: params.secrets,
+    ...(params.namespaces !== undefined && { namespaces: params.namespaces }),
+  };
   params.router
     .post("/api/secrets", createSecret(sec))
     .get("/api/secrets", listSecrets(sec))

@@ -76,8 +76,11 @@ export function managedServices(params: {
   readonly fragments: Lifecycled | undefined;
   readonly knowledgeBases: Lifecycled | undefined;
   readonly retention: Lifecycled | undefined;
+  /** One-shot adoption of stored namespaces into the registry. */
+  readonly namespaces: Lifecycled | undefined;
 }): ManagedService[] {
   const out: ManagedService[] = [{ name: "workflows", ...bindLifecycle(params.workflows) }];
+  if (params.namespaces) out.push({ name: "namespaces", ...bindLifecycle(params.namespaces) });
   if (params.scheduler) out.push({ name: "scheduler", ...bindLifecycle(params.scheduler) });
   if (params.agents) out.push({ name: "agents", ...bindLifecycle(params.agents) });
   if (params.skills) out.push({ name: "skills", ...bindLifecycle(params.skills) });

@@ -6,6 +6,7 @@
 import type { RegisteredAgent } from "@promin/agent";
 import { SecretScope } from "@promin/agent";
 import { json, jsonError, readJson } from "../../router.ts";
+import { requireActiveNamespace, secretScopeNamespace } from "../../namespace-guard.ts";
 import { AgentListQuerySchema } from "../../api-types.ts";
 import { assertIfMatch, contentEtag, withEtag } from "../../preconditions.ts";
 import { parseQuery } from "../../request-validation.ts";
@@ -300,6 +301,12 @@ export function cloneAgent(deps: AgentGatewayDeps) {
     const provided = Object.entries(secrets.secrets);
     if (provided.length > 0 && !deps.secrets) {
       return jsonError(400, "secrets_unsupported", "This server has no secrets storage wired.");
+    }
+    if (provided.length > 0) {
+      await requireActiveNamespace({
+        registry: deps.namespaces,
+        namespace: secretScopeNamespace(secretsScope),
+      });
     }
 
     if (await deps.registry.get(body.targetId)) {

@@ -11,6 +11,19 @@ import { useNamespace } from "../../hooks/use-namespace.ts";
 
 const ALL_LABEL = "All namespaces";
 
+/**
+ * The active namespaces of the server's registry, or — without one — the
+ * namespaces runs have used.
+ */
+async function loadNamespaces(): Promise<{ ids: string[]; registered: boolean }> {
+  const registry = await api.listNamespaces({ status: "active" });
+  if (registry.configured) {
+    return { ids: registry.namespaces.map((ns) => ns.id), registered: true };
+  }
+  const seen = await api.listWorkflowNames();
+  return { ids: seen.namespaces ?? [], registered: false };
+}
+
 export function NamespaceSwitcher() {
   const [current, setCurrent] = useNamespace();
   const [namespaces, setNamespaces] = useState<string[]>([]);
@@ -18,17 +31,22 @@ export function NamespaceSwitcher() {
   const [query, setQuery] = useState("");
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const loaded = useRef(false);
 
   // Refresh the namespace list whenever the dropdown opens — cheap, and it
-  // picks up newly-triggered runs without requiring a full page reload.
+  // picks up new namespaces without requiring a full page reload. Also
+  // seed it on mount so the trigger shows a valid "current" before the user
+  // opens the panel.
   useEffect(() => {
-    if (!open) return;
+    if (!open && loaded.current) return;
+    loaded.current = true;
     let cancelled = false;
-    api
-      .listWorkflowNames()
-      .then((r) => {
+    loadNamespaces()
+      .then(({ ids, registered }) => {
         if (cancelled) return;
-        setNamespaces(r.namespaces ?? []);
+        setNamespaces(ids);
+        // A registered scope that was archived or deleted falls back to all.
+        if (registered && current && !ids.includes(current)) setCurrent("");
       })
       .catch(() => {
         // Ignore — show whatever we have and let the user try again.
@@ -37,15 +55,6 @@ export function NamespaceSwitcher() {
       cancelled = true;
     };
   }, [open]);
-
-  // Also seed the list on mount so the trigger shows a valid "current" even
-  // before the user opens the panel.
-  useEffect(() => {
-    api
-      .listWorkflowNames()
-      .then((r) => setNamespaces(r.namespaces ?? []))
-      .catch(() => {});
-  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -134,7 +143,7 @@ export function NamespaceSwitcher() {
               />
             ))}
             {namespaces.length === 0 && (
-              <li class="px-3 py-2 text-xs text-base-content/50 italic">No namespaces seen yet</li>
+              <li class="px-3 py-2 text-xs text-base-content/50 italic">No namespaces yet</li>
             )}
           </ul>
         </div>

@@ -30,7 +30,9 @@ import {
   type AgentRegistry,
   type MemoryStore,
 } from "@promin/agent";
+import type { NamespaceRegistry } from "@promin/workflow";
 import { json, jsonError } from "../router.ts";
+import { requireActiveNamespace } from "../namespace-guard.ts";
 import { internalError, type ScopeAuthorizer } from "./agent-gateway-kit.ts";
 
 export interface InstanceDeps {
@@ -40,6 +42,11 @@ export interface InstanceDeps {
   readonly agents: AgentRegistry;
   /** Binds the requested (namespace, owner) to the caller. See `ScopeAuthorizer`. */
   readonly authorizeScope?: ScopeAuthorizer;
+  /**
+   * When set, creating an instance needs a registered, active namespace
+   * (404 `namespace_not_found`, 409 `namespace_archived`).
+   */
+  readonly namespaces?: NamespaceRegistry;
 }
 
 interface ResolveBody {
@@ -139,6 +146,7 @@ export function resolveAgentInstance(deps: InstanceDeps) {
       instance: { namespaceId: body.namespaceId, ownerId: body.ownerId, registeredAgentId },
     });
     if (denied) return denied;
+    await requireActiveNamespace({ registry: deps.namespaces, namespace: body.namespaceId });
     const instance = await deps.registry.resolveOrCreate({
       registeredAgentId,
       namespaceId: body.namespaceId,

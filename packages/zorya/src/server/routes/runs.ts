@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import type {
+  NamespaceRegistry,
   SignalPayloadSchema,
   Workflow,
   WorkflowState,
@@ -30,6 +31,7 @@ import {
   type TriggerRunResponse,
 } from "../api-types.ts";
 import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
+import { requireActiveNamespace } from "../namespace-guard.ts";
 import type { WorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
 import { RunsService, type RunActionResult } from "../services/runs-service.ts";
 import { UnknownWorkflowError, WorkflowIdConflictError } from "../services/workflows/errors.ts";
@@ -61,6 +63,8 @@ export interface RunRoutesDeps {
   workflows?: Readonly<Record<string, Workflow<unknown, unknown>>>;
   /** Worker-advertised step defs — fallback when `workflows` doesn't have the def. */
   advertisements?: WorkflowAdvertisementRegistry;
+  /** When set, a run can only be triggered in a registered, active namespace. */
+  namespaces?: NamespaceRegistry;
 }
 
 /** `:id` of a run route. */
@@ -104,7 +108,9 @@ export function getRun(deps: RunRoutesDeps) {
  * POST /api/workflows/:name/runs — start a run. 202 + `Location` when a run
  * started; 200 `{ existing: true }` when the requested `workflowId` already
  * names a run of this workflow; 404 for an unknown workflow; 409 when the
- * `workflowId` belongs to another workflow's run.
+ * `workflowId` belongs to another workflow's run. With a namespace registry,
+ * an explicit `namespace` must be registered (404 `namespace_not_found`) and
+ * active (409 `namespace_archived`).
  */
 export function triggerRun(deps: RunRoutesDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
@@ -117,6 +123,7 @@ export function triggerRun(deps: RunRoutesDeps) {
     }
     const { name } = parseParams({ params, schema: WorkflowParamsSchema });
     const body = (await parseBody({ req, schema: TriggerRunRequestSchema.optional() })) ?? {};
+    await requireActiveNamespace({ registry: deps.namespaces, namespace: body.namespace });
     let result: { workflowId: string; existing?: boolean };
     try {
       result = await deps.trigger(name, body.input, {

@@ -20,6 +20,7 @@ import {
   SqliteFragmentStore,
   SqliteKnowledgeBaseStore,
   SqliteMemoryStore,
+  SqliteNamespaceRegistry,
   SqliteRoleRegistry,
   SqliteSchedulerStorage,
   SqliteSecretsStorage,
@@ -61,6 +62,8 @@ export interface SqliteZoryaStack {
   readonly advertisements: SqliteWorkflowAdvertisementRegistry;
   /** Remote workers' registrations and heartbeats (`QueuedWorkflows`). */
   readonly workerRegistry: SqliteWorkerRegistry;
+  /** The namespace registry (`ZoryaServerConfig.namespaces`). */
+  readonly namespaceRegistry: SqliteNamespaceRegistry;
   readonly agentRegistry: SqliteAgentRegistry;
   readonly instanceRegistry: SqliteAgentInstanceRegistry;
   readonly roleRegistry: SqliteRoleRegistry;
@@ -75,7 +78,7 @@ export interface SqliteZoryaStack {
 
 /**
  * Open (or create) one SQLite database with WAL and foreign keys on, and
- * build the workflow, scheduler, worker-protocol, agent and secrets stores
+ * build the workflow, scheduler, worker-protocol, namespace, agent and secrets stores
  * on it, plus a runner over the workflow storage. For local apps, demos,
  * tests and small single-process deployments; larger ones build each store
  * themselves (or replace some of these, e.g. agent state on Postgres).
@@ -120,6 +123,7 @@ export function createSqliteZoryaStack(config: SqliteZoryaStackConfig): SqliteZo
     workflowStarts: SqliteWorkflowStartQueue.make({ db: sqlite, clock }),
     advertisements: SqliteWorkflowAdvertisementRegistry.make({ db: sqlite, clock }),
     workerRegistry: SqliteWorkerRegistry.make({ db: sqlite, clock }),
+    namespaceRegistry: SqliteNamespaceRegistry.make({ db: sqlite, clock }),
     agentRegistry: SqliteAgentRegistry.make({ db: sqlite, now }),
     instanceRegistry: SqliteAgentInstanceRegistry.make({ db: sqlite, now }),
     roleRegistry: SqliteRoleRegistry.make({ db: sqlite, now }),

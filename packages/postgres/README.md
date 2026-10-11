@@ -18,6 +18,7 @@ Every store takes a `DrizzleDb`, so any Postgres driver Drizzle supports works (
 | `SchedulerStorage` / scheduler  | `PgSchedulerStorage`, `DurableScheduler` (facade) |
 | `LeaderLeaseStore`              | `PgLeaderLeaseStore` (+ `assertPgLeaseCurrent`)   |
 | `WorkerRegistry`                | `PostgresWorkerRegistry`                          |
+| `NamespaceRegistry`             | `PostgresNamespaceRegistry`                       |
 | `WorkflowVersionRegistry`       | `PostgresWorkflowVersionRegistry`                 |
 | `WorkflowAdvertisementRegistry` | `PgWorkflowAdvertisementRegistry`                 |
 | `WorkflowStartQueue`            | `PgWorkflowStartQueue`                            |

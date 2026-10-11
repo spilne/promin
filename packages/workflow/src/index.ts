@@ -195,6 +195,27 @@ export {
   type VersionStatus,
 } from "./lib/durable/workflow-version-registry.ts";
 
+// Namespace registry
+export {
+  type NamespaceRegistry,
+  type NamespaceRecord,
+  type NamespaceStatus,
+  type NamespaceCapabilities,
+  type NamespacePatch,
+  type NamespaceField,
+  type CreateNamespaceInput,
+  type InMemoryNamespaceRegistryConfig,
+  InMemoryNamespaceRegistry,
+  NamespaceNotFoundError,
+  NamespaceExistsError,
+  InvalidNamespaceError,
+  NAMESPACE_STATUSES,
+  NAMESPACE_ID_PATTERN,
+  MAX_NAMESPACE_DISPLAY_NAME_LENGTH,
+  MAX_NAMESPACE_DESCRIPTION_LENGTH,
+  isValidNamespaceId,
+} from "./lib/namespaces/namespace-registry.ts";
+
 // Errors
 export {
   WorkflowError,

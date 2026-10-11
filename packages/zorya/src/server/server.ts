@@ -22,7 +22,7 @@
 // ---------------------------------------------------------------------------
 
 import type { SecretsStorage } from "@promin/agent";
-import type { WallClock, WorkflowVersionRegistry } from "@promin/workflow";
+import type { NamespaceRegistry, WallClock, WorkflowVersionRegistry } from "@promin/workflow";
 import { SystemWallClock } from "@promin/workflow";
 import { InMemoryWorkerRegistry, type WorkerRegistry } from "@promin/workflow/distributed";
 import { Router, jsonError } from "./router.ts";
@@ -72,6 +72,7 @@ import {
   mountSecrets,
   mountSkills,
 } from "./mount/mount-registries.ts";
+import { adoptStoredNamespaces, mountNamespaces } from "./mount/mount-namespaces.ts";
 import { mountRpc } from "./mount/mount-rpc.ts";
 import { mountRuns } from "./mount/mount-runs.ts";
 import { mountSchedules } from "./mount/mount-schedules.ts";
@@ -120,6 +121,12 @@ export class ZoryaServer {
   readonly workerWakeups?: WorkerWakeups;
   /** Optional secrets vault — populated when ZoryaServerConfig provides one. */
   readonly secrets?: SecretsStorage;
+  /**
+   * The namespace registry (`ZoryaServerConfig.namespaces`). When set, new
+   * runs, schedules and agent state can only land in namespaces registered
+   * here and active.
+   */
+  readonly namespaces?: NamespaceRegistry;
   /** Deletes ended runs past their retention age. Present with `config.retention`. */
   readonly retention?: RunRetention;
 
@@ -151,6 +158,8 @@ export class ZoryaServer {
     if (config.dags) this.dags = config.dags;
     if (config.knowledgeBases) this.knowledgeBases = config.knowledgeBases;
     if (config.secrets) this.secrets = config.secrets;
+    if (config.namespaces) this.namespaces = config.namespaces;
+    const namespaces = this.namespaces;
     const clock: WallClock = config.clock ?? SystemWallClock;
     this.inFlight = new InFlightRequests(clock);
 
@@ -219,6 +228,17 @@ export class ZoryaServer {
         fragments: this.fragments,
         knowledgeBases: this.knowledgeBases,
         retention: this.retention,
+        namespaces: namespaces && {
+          start: async () => {
+            const adopted = await adoptStoredNamespaces({ registry: namespaces, storage });
+            if (adopted.length > 0) {
+              this.logger.log(
+                `[zorya] namespaces: registered ${adopted.join(", ")} from stored runs`,
+              );
+            }
+          },
+          stop: async () => {},
+        },
       }),
       clock,
       onError: (message, err) => this.logger.error(message, err),
@@ -246,6 +266,7 @@ export class ZoryaServer {
           versionRegistry: this.versionRegistry,
           workerRegistry: this.workerRegistry,
           schedulerStorage: config.scheduler?.storage,
+          namespaceRegistry: namespaces,
         },
       });
     }
@@ -286,6 +307,13 @@ export class ZoryaServer {
       sseIntervalMs: config.sseIntervalMs,
       signalTokenMaxTtlMs: config.signalTokenMaxTtlMs,
       publicBaseUrl: config.publicBaseUrl,
+      namespaces,
+    });
+    mountNamespaces({
+      router,
+      registry: namespaces,
+      storage,
+      schedulerStorage: this.scheduler?.storage,
     });
     if (this.agents) {
       mountAgents({
@@ -294,14 +322,22 @@ export class ZoryaServer {
         skills: this.skills,
         fragments: this.fragments,
         secrets: this.secrets,
+        namespaces,
         clock,
       });
     }
     if (this.skills) mountSkills({ router, skills: this.skills, agents: this.agents });
     if (this.fragments) mountFragments({ router, fragments: this.fragments, agents: this.agents });
-    if (this.secrets) mountSecrets({ router, secrets: this.secrets });
+    if (this.secrets) mountSecrets({ router, secrets: this.secrets, namespaces });
     if (config.webhooks && this.agents) {
-      mountWebhooks({ router, webhooks: config.webhooks, agents: this.agents, storage, clock });
+      mountWebhooks({
+        router,
+        webhooks: config.webhooks,
+        agents: this.agents,
+        storage,
+        clock,
+        namespaces,
+      });
     }
     if (config.remoteDeployments && this.agents) {
       this.remoteDeploymentSweeper = mountRemoteDeployments({
@@ -316,7 +352,7 @@ export class ZoryaServer {
     if (this.knowledgeBases) {
       mountKnowledgeBases({ router, knowledgeBases: this.knowledgeBases, agents: this.agents });
     }
-    mountSchedules({ router, scheduler: this.scheduler, storage, clock });
+    mountSchedules({ router, scheduler: this.scheduler, storage, clock, namespaces });
     if (config.remoteWorkers) {
       mountRpc({
         router,

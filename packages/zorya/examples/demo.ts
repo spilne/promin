@@ -1027,6 +1027,13 @@ async function startApprovalAutoSignaler(): Promise<void> {
 // ---------------------------------------------------------------------------
 // Boot
 
+// Namespace registry (SQLite, in the stack's db): with it configured, new
+// runs, schedules and agent state only land in registered namespaces.
+// Register the demo's tenants and "default", the agent chat's scope when
+// no namespace is selected in the dashboard.
+for (const id of ["default", "acme", "tenant-a", "tenant-b"]) {
+  if (!(await stack.namespaceRegistry.get(id))) await stack.namespaceRegistry.create({ id });
+}
 await seedSchedules();
 await seedAgents();
 await seedNamespaceMemory();
@@ -1275,6 +1282,8 @@ const server = ZoryaServer.builder()
   // resolver wiring (in `agents.resolve` above) reads model.credentialRef
   // from this vault at request time.
   .secrets(secretsStorage)
+  // /api/namespaces, and the namespace checks on new work (seeded above).
+  .namespaces(stack.namespaceRegistry)
   // Operator key for /api; worker key for /rpc/storage, /rpc/worker,
   // /ws/worker, /api/advertisements and /api/worker-protocol/* — the surface
   // external workers connect to. Without keys only ZORYA_INSECURE=1 boots.

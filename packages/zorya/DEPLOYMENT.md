@@ -87,8 +87,8 @@ a load balancer and share the work.
 
 `@promin/postgres` ships one Drizzle migration set covering workflow runs,
 steps, signals, signal tokens, streams, locks, the step queue, the start
-queue, advertisements, the worker registry, the version registry,
-schedules, leader leases, and the agent stores. Apply it before the first
+queue, advertisements, the worker registry, the version registry, the
+namespace registry, schedules, leader leases, and the agent stores. Apply it before the first
 instance starts, and again on each upgrade:
 
 ```ts
@@ -168,7 +168,9 @@ Agents, skills, fragments, roles, secrets and memory have Postgres stores
 too (`PostgresAgentRegistry`, `PostgresSkillRegistry`,
 `PostgresFragmentStore`, `PostgresRoleRegistry`, `PostgresSecretsStorage`,
 `PostgresMemoryStore`, all from `@promin/postgres`); pass them to the
-corresponding Zorya services.
+corresponding Zorya services. For registered namespaces (see the README's
+Namespaces section) pass `namespaces: new PostgresNamespaceRegistry({ db })`;
+every instance then sees the same namespaces and archive states.
 
 ### Leases and clustering
 
@@ -192,7 +194,7 @@ the shared workflow storage.
 
 A clustered layer refuses in-memory stores at construction
 (`ZoryaClusterConfigError`), including the server's worker registry,
-version registry and scheduler storage. That catches a store you forgot to
+version registry, scheduler storage and namespace registry. That catches a store you forgot to
 share.
 
 ### Multiple instances behind a load balancer

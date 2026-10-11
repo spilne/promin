@@ -3,7 +3,7 @@
 // remote-deployment self-registration.
 // ---------------------------------------------------------------------------
 
-import type { WallClock, WorkflowStorage } from "@promin/workflow";
+import type { NamespaceRegistry, WallClock, WorkflowStorage } from "@promin/workflow";
 import type { Router } from "../router.ts";
 import type { Logger, ZoryaServerConfig } from "../server-config.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
@@ -28,6 +28,8 @@ export function mountWebhooks(params: {
   readonly agents: ZoryaAgents;
   readonly storage: WorkflowStorage;
   readonly clock: WallClock;
+  /** Registry a delivery's namespace is checked against. */
+  readonly namespaces: NamespaceRegistry | undefined;
 }): void {
   const { webhooks, agents } = params;
   const webhookDeps: WebhookGatewayDeps = {
@@ -40,6 +42,7 @@ export function mountWebhooks(params: {
     deliveries:
       webhooks.deliveries ?? new WorkflowStorageWebhookDeliveryStore({ storage: params.storage }),
     clock: params.clock,
+    ...(params.namespaces !== undefined && { namespaces: params.namespaces }),
   };
   params.router.post("/webhooks/:source/:agentId", ingestWebhook(webhookDeps));
 }

@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import type { SecretsStorage } from "@promin/agent";
-import type { WallClock } from "@promin/workflow";
+import type { NamespaceRegistry, WallClock } from "@promin/workflow";
 import type { MetricsProvider } from "./routes/metrics.ts";
 import type { WorkersProvider } from "./routes/workers.ts";
 import { ZoryaServer } from "./server.ts";
@@ -141,6 +141,11 @@ export class ZoryaServerBuilder {
   /** Secrets vault: `/api/secrets` CRUD and agent credential resolution. */
   secrets(secrets: SecretsStorage): this {
     return this.set({ secrets });
+  }
+
+  /** Namespace registry: `/api/namespaces`, and only registered, active namespaces take new work. */
+  namespaces(namespaces: NamespaceRegistry): this {
+    return this.set({ namespaces });
   }
 
   /** Webhook ingress into agents (needs `agents()`). */
