@@ -92,7 +92,7 @@ function boot() {
 
   const agents = new ZoryaAgents({ registry: agentRegistry, resolve });
   const skills = new ZoryaSkills({ registry: skillRegistry });
-  const server = new ZoryaServer({ workflows, agents, skills });
+  const server = new ZoryaServer({ insecure: true, workflows, agents, skills });
   return { server, seen };
 }
 

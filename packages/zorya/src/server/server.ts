@@ -7,10 +7,28 @@
 // const workflows = new LocalWorkflows({ storage, runner, definitions });
 // const server = new ZoryaServer({
 //   workflows,
-//   apiKeys: ["secret"],
+//   apiKeys: [process.env.ZORYA_API_KEY!],
+//   remoteWorkers: { apiKeys: [process.env.ZORYA_WORKER_API_KEY!] },
 // });
 // server.listen({ port: 4000 });
+// await server.ready();
+// process.on("SIGTERM", () => void server.stop().then(() => process.exit(0)));
 // ```
+//
+// Auth model (every plane is authenticated; `insecure: true` is the only way
+// to run a plane without keys):
+//   - /api/*                    operator keys (`apiKeys`), except the public
+//                               routes below
+//   - GET /api/health, /api/ready  public (liveness / readiness probes)
+//   - /api/signal-tokens/:id/describe, /complete
+//                               public; the route checks the token bearer
+//   - /ws/worker, /rpc/worker, /api/advertisements, /api/worker-protocol/*
+//                               worker keys (`remoteWorkers.apiKeys`)
+//   - /rpc/storage              worker keys, scoped to `RUNNER_STORAGE_METHODS`;
+//                               operator keys get the full storage contract
+//   - /webhooks/*               per-source HMAC signature
+// Keys travel only in `Authorization: Bearer <key>` (the worker WebSocket
+// upgrade included) and are compared in constant time.
 // ---------------------------------------------------------------------------
 
 import type { RemoteDeploymentRegistry, SecretsStorage } from "@promin/agent";
@@ -18,8 +36,13 @@ import type { WorkflowVersionRegistry, WallClock, WorkflowStorage } from "@promi
 import type { StepQueue, WorkerRegistry } from "@promin/workflow/distributed";
 import { SystemWallClock, InMemoryWorkflowVersionRegistry } from "@promin/workflow";
 import { InMemoryStepQueue, InMemoryWorkerRegistry } from "@promin/workflow/distributed";
-import { createWorkerApiHandler, createWorkflowStorageHandler } from "@promin/workflow-remote";
-import { Auth, type AuthConfig } from "./auth.ts";
+import {
+  RUNNER_STORAGE_METHODS,
+  createWorkerApiHandler,
+  createWorkflowStorageHandler,
+} from "@promin/workflow-remote";
+import { Auth, bearerToken, type AuthConfig } from "./auth.ts";
+import { ServiceLifecycle, type ManagedService, type ServiceStatus } from "./service-lifecycle.ts";
 import { Router, errorResponse, jsonError } from "./router.ts";
 import {
   DEFAULT_IDLE_TIMEOUT_SECONDS,
@@ -218,11 +241,40 @@ export interface Logger {
  * service doesn't expose what's needed.
  */
 export interface RemoteWorkersConfig {
-  /** API keys gating access to the worker-protocol endpoints. Open when omitted. */
+  /**
+   * Worker API keys for `/ws/worker`, `/rpc/worker`, `/rpc/storage` (scoped
+   * to what a runner needs), `/api/advertisements` and
+   * `/api/worker-protocol/*`. Required unless the server is `insecure`.
+   */
   apiKeys?: ReadonlyArray<string>;
 }
 
+/** Thrown by the ZoryaServer constructor when a plane has no keys and `insecure` is off. */
+export class ZoryaInsecureConfigError extends Error {
+  readonly _tag = "ZoryaInsecureConfigError";
+  constructor(message: string) {
+    super(message);
+    this.name = "ZoryaInsecureConfigError";
+  }
+}
+
+/** Default bound on the readiness storage probe (ms). */
+export const DEFAULT_READINESS_TIMEOUT_MS = 2_000;
+/** Default bound on waiting for in-flight requests during `stop()` (ms). */
+export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
+
+/** Workflow id the readiness probe looks up; it never exists. */
+const READINESS_PROBE_WORKFLOW_ID = "__zorya_readiness_probe__";
+
 export interface ZoryaServerConfig extends AuthConfig {
+  /**
+   * Allow running without keys. Without it the constructor throws
+   * `ZoryaInsecureConfigError` when `apiKeys` is empty, or when
+   * `remoteWorkers` is set without `remoteWorkers.apiKeys`. With it, each
+   * plane that has no keys is open to anyone who can reach the port, and
+   * the server logs a warning. Local development only.
+   */
+  insecure?: boolean;
   /** Workflow execution + state. Required. */
   workflows: ZoryaWorkflows;
   /** Optional scheduler service (CRUD + tick loop + emit-now). */
@@ -314,6 +366,15 @@ export interface ZoryaServerConfig extends AuthConfig {
    * `SystemWallClock`. Tests pass a `FakeWallClock`.
    */
   clock?: WallClock;
+  /** Bound on the `/api/ready` storage probe (ms). Default: 2000. */
+  readinessTimeoutMs?: number;
+  /**
+   * How long `stop()` waits for in-flight requests before closing the
+   * remaining connections (ms). Default: 10_000.
+   */
+  shutdownTimeoutMs?: number;
+  /** Backoff for retrying a service whose `start()` failed. Default: 500ms doubling to 30s. */
+  startRetry?: { initialDelayMs?: number; maxDelayMs?: number };
 }
 
 export interface ListenOptions {
@@ -359,12 +420,21 @@ export class ZoryaServer {
 
   private readonly auth: Auth;
   private readonly workerAuth: Auth;
+  private readonly lifecycle: ServiceLifecycle;
+  private readonly readinessTimeoutMs: number;
+  private readonly shutdownTimeoutMs: number;
+  /** Event-stream responses still open; closed by `stop()`. */
+  private readonly liveStreams = new Set<{ close(): void }>();
+  private inFlight = 0;
+  private readonly idleWaiters = new Set<() => void>();
+  private stopping = false;
+  private stopPromise?: Promise<void>;
   private readonly bus: RunEventBus;
   private readonly runWatchers: RunWatcherPool;
   private readonly router: Router;
   private readonly logger: Logger;
   private readonly clock: WallClock;
-  private serverHandle?: { stop(): void; port: number; hostname: string };
+  private bunServer?: { stop(closeActiveConnections?: boolean): Promise<void> | void };
 
   constructor(config: ZoryaServerConfig) {
     this.workflows = config.workflows;
@@ -381,6 +451,9 @@ export class ZoryaServer {
     this.logger = config.logger ?? console;
     this.auth = new Auth(config);
     this.workerAuth = new Auth({ apiKeys: config.remoteWorkers?.apiKeys });
+    this.checkAuthConfigured(config);
+    this.readinessTimeoutMs = config.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
+    this.shutdownTimeoutMs = config.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
     this.bus = new RunEventBus();
     this.workerWs = new WorkerWebSocketServer({
       authorize: (req) => this.workerAuth.check(req),
@@ -388,6 +461,17 @@ export class ZoryaServer {
       onError: (message, err) => this.logger.error(message, err),
     });
     this.agentStreamHub = new AgentStreamHub(this.workerWs);
+    this.lifecycle = new ServiceLifecycle({
+      services: this.managedServices(),
+      clock,
+      onError: (message, err) => this.logger.error(message, err),
+      ...(config.startRetry?.initialDelayMs !== undefined && {
+        initialRetryDelayMs: config.startRetry.initialDelayMs,
+      }),
+      ...(config.startRetry?.maxDelayMs !== undefined && {
+        maxRetryDelayMs: config.startRetry.maxDelayMs,
+      }),
+    });
 
     const storage: WorkflowStorage = this.workflows.storage;
     // Walk the workflows chain to find an advertisements registry. The
@@ -429,13 +513,10 @@ export class ZoryaServer {
     });
 
     this.router = new Router({ logger: this.logger })
-      .get(
-        "/api/health",
-        () =>
-          new Response(JSON.stringify({ ok: true }), {
-            headers: { "content-type": "application/json" },
-          }),
-      )
+      // Liveness: the process answers. Public and touches nothing.
+      .get("/api/health", () => Response.json({ ok: true }))
+      // Readiness: storage answers and every background service started.
+      .get("/api/ready", () => this.readiness())
       .get("/api/runs", listRuns(deps))
       .get("/api/workflows", listWorkflowNames(deps))
       .get("/api/runs/:id", getRun(deps))
@@ -475,8 +556,8 @@ export class ZoryaServer {
       .post("/api/runs/:id/signal", sendSignal(deps))
       // Signal tokens — public-bearer auth for deliverSignal.
       // Mint and list are auth-gated through the regular /api auth layer;
-      // /complete is reachable without Zorya credentials and validates the
-      // bearer itself.
+      // /describe and /complete are reachable without Zorya credentials and
+      // validate the token bearer themselves.
       .post(
         "/api/runs/:id/signals/:name/token",
         mintSignalToken({
@@ -787,7 +868,12 @@ export class ZoryaServer {
 
     if (config.remoteWorkers) {
       const remoteDeps = this.extractRemoteWorkerDeps();
-      const storageHandler = createWorkflowStorageHandler(storage);
+      // Worker keys reach only what a runner needs; operator keys get the
+      // whole contract (signal-token records, which carry bearers, included).
+      const storageHandler = createWorkflowStorageHandler(storage, {
+        allow: ({ method, req }) =>
+          this.storageCaller(req) === "operator" || RUNNER_STORAGE_METHODS.has(method),
+      });
       this.router.post("/rpc/storage", (req) => storageHandler(req));
 
       // /rpc/worker covers BOTH the step-queue claim path (DistributedWorkflows)
@@ -827,39 +913,59 @@ export class ZoryaServer {
     }
   }
 
-  /** Expose the router for tests or embedding. */
+  /**
+   * Answer one request: authenticate it for its plane, route it, and track
+   * event-stream responses so `stop()` can close them. `listen()` serves
+   * through this; embedders and tests call it directly.
+   */
   async handle(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname;
 
-    const isWorkerPath =
-      path.startsWith("/rpc/") ||
-      path.startsWith("/api/advertisements") ||
-      path.startsWith("/api/worker-protocol/");
+    if (this.stopping && !isProbePath(path)) return jsonError(503, "shutting_down");
 
-    // Public-bearer signal token completion — bearer-validated by the
-    // route itself, no Zorya API key needed. Skip the global auth gate
-    // for the consume endpoint only; mint + list stay auth-gated.
-    const isPublicSignalTokenComplete =
-      req.method === "POST" && /^\/api\/signal-tokens\/[^/]+\/complete$/.test(path);
+    const denied = this.authenticate({ req, path });
+    if (denied) return denied;
 
-    if (isWorkerPath) {
-      if (!this.workerAuth.check(req)) return jsonError(401, "unauthorized_worker");
-    } else if (path.startsWith("/api/") && !isPublicSignalTokenComplete) {
-      if (!this.auth.check(req)) return jsonError(401, "unauthorized");
-    }
-
-    return this.router.handle(req);
+    const res = await this.router.handle(req);
+    return isEventStream(res) ? this.trackStream(res) : res;
   }
 
-  listen(opts: ListenOptions = {}): { port: number; hostname: string; stop: () => void } {
+  /**
+   * Start the background services (workflows, scheduler, agents, skills,
+   * fragments) and the worker socket. A service whose start fails is retried
+   * with backoff; `/api/ready` and `ready()` reflect progress. `listen()`
+   * calls this. Idempotent.
+   */
+  start(): void {
+    if (this.stopping) return;
+    this.workerWs.start();
+    this.agentStreamHub.start();
+    this.lifecycle.start();
+  }
+
+  /** Resolves once every background service has started; rejects if the server stops first. */
+  ready(): Promise<void> {
+    return this.lifecycle.ready();
+  }
+
+  /** Start state of each background service. */
+  serviceStatuses(): ServiceStatus[] {
+    return this.lifecycle.statuses();
+  }
+
+  listen(opts: ListenOptions = {}): {
+    port: number;
+    hostname: string;
+    stop: () => Promise<void>;
+  } {
     const port = opts.port ?? 4000;
     const hostname = opts.hostname ?? "0.0.0.0";
-    const handle = this.handle.bind(this);
     const BunGlobal = (globalThis as { Bun?: { serve: typeof Bun.serve } }).Bun;
     if (!BunGlobal) {
       throw new Error("ZoryaServer.listen requires Bun runtime");
     }
+    if (this.stopping) throw new Error("ZoryaServer.listen: the server was stopped");
     const wsHandlers = this.workerWs.websocketHandlers();
     const maxRequestBodySize = opts.maxRequestBodySize ?? DEFAULT_MAX_REQUEST_BODY_BYTES;
     const maxWebhookBodySize = opts.maxWebhookBodySize ?? DEFAULT_MAX_WEBHOOK_BODY_BYTES;
@@ -873,6 +979,7 @@ export class ZoryaServer {
       // with a JSON 413 (Bun's own 413 has no body).
       maxRequestBodySize: 2 * Math.max(maxRequestBodySize, maxWebhookBodySize),
       fetch: async (req, server) => {
+        this.inFlight += 1;
         try {
           const upgradeResult = this.workerWs.upgradeIfWorkerWs(req, server);
           if (upgradeResult !== undefined) return upgradeResult;
@@ -887,51 +994,235 @@ export class ZoryaServer {
             }),
           });
           if (limited instanceof Response) return limited;
-          return await handle(limited);
+          return await this.handle(limited);
         } catch (err) {
           return errorResponse({ err, req, logger });
+        } finally {
+          this.inFlight -= 1;
+          if (this.inFlight === 0) {
+            for (const wake of this.idleWaiters) wake();
+            this.idleWaiters.clear();
+          }
         }
       },
       error: (err) => errorResponse({ err, logger }),
       websocket: wsHandlers,
     });
+    this.bunServer = srv;
     const resolvedPort = typeof srv.port === "number" ? srv.port : port;
     const resolvedHost = typeof srv.hostname === "string" ? srv.hostname : hostname;
-    this.serverHandle = { stop: () => srv.stop(), port: resolvedPort, hostname: resolvedHost };
 
-    this.workerWs.start();
-    this.agentStreamHub.start();
+    this.start();
 
-    // Fire and forget — services own their own logging on errors.
-    void Promise.all([
-      this.workflows.start(),
-      this.scheduler?.start(),
-      this.agents?.start(),
-      this.skills?.start(),
-      this.fragments?.start(),
-    ]).catch((err) => this.logger.error("[zorya] service start error:", err));
-
-    return {
-      port: resolvedPort,
-      hostname: resolvedHost,
-      stop: () => {
-        this.stop();
-      },
-    };
+    return { port: resolvedPort, hostname: resolvedHost, stop: () => this.stop() };
   }
 
-  async stop(): Promise<void> {
-    this.serverHandle?.stop();
-    this.serverHandle = undefined;
+  /**
+   * Graceful shutdown: refuse new requests (503, probes excepted), stop
+   * accepting connections, close worker sockets and open event streams,
+   * wait up to `shutdownTimeoutMs` for in-flight requests, stop the
+   * background services (which release their locks and leases), then close
+   * whatever connections remain. Idempotent; concurrent calls share one
+   * shutdown.
+   */
+  stop(): Promise<void> {
+    this.stopPromise ??= this.shutdown();
+    return this.stopPromise;
+  }
+
+  private async shutdown(): Promise<void> {
+    this.stopping = true;
+    const srv = this.bunServer;
+    this.bunServer = undefined;
+    // Stop accepting; Bun lets open connections finish.
+    void Promise.resolve(srv?.stop(false)).catch(() => {});
+
+    for (const stream of Array.from(this.liveStreams)) stream.close();
+    this.liveStreams.clear();
     this.agentStreamHub.stop();
     this.workerWs.stop();
-    await Promise.all([
-      this.workflows.stop(),
-      this.scheduler?.stop(),
-      this.agents?.stop(),
-      this.skills?.stop(),
-      this.fragments?.stop(),
-    ]).catch(() => {});
+
+    await this.waitForInFlight();
+    await this.lifecycle.stop();
+
+    try {
+      await srv?.stop(true);
+    } catch (err) {
+      this.logger.error("[zorya] closing connections failed", err);
+    }
+  }
+
+  /** Resolve when no request is in flight, or after `shutdownTimeoutMs`. */
+  private async waitForInFlight(): Promise<void> {
+    if (this.inFlight === 0) return;
+    await new Promise<void>((resolve) => {
+      const done = (): void => {
+        timer.clear();
+        this.idleWaiters.delete(done);
+        resolve();
+      };
+      const timer = this.clock.setTimeout(done, this.shutdownTimeoutMs);
+      this.idleWaiters.add(done);
+    });
+  }
+
+  /** `/api/ready`: 200 when storage answers and every service started, else 503. */
+  private async readiness(): Promise<Response> {
+    const services = this.lifecycle.statuses();
+    if (this.stopping) {
+      return Response.json({ ready: false, reason: "stopping", services }, { status: 503 });
+    }
+    const storage = await this.probeStorage();
+    const ready = storage.ok && this.lifecycle.isReady;
+    return Response.json({ ready, storage, services }, { status: ready ? 200 : 503 });
+  }
+
+  /** One cheap storage read, bounded by `readinessTimeoutMs`. */
+  private async probeStorage(): Promise<{ ok: boolean; error?: string }> {
+    let timer: { clear(): void } | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = this.clock.setTimeout(
+        () => reject(new Error(`storage did not answer within ${this.readinessTimeoutMs}ms`)),
+        this.readinessTimeoutMs,
+      );
+    });
+    try {
+      await Promise.race([
+        this.workflows.storage.loadWorkflowStatus(READINESS_PROBE_WORKFLOW_ID),
+        timeout,
+      ]);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      timer?.clear();
+    }
+  }
+
+  /**
+   * The 401 for a request that lacks the credentials its plane requires,
+   * or undefined when it may proceed.
+   */
+  private authenticate(params: { req: Request; path: string }): Response | undefined {
+    const { req, path } = params;
+    if (isPublicRoute({ method: req.method, path })) return undefined;
+    if (path === "/rpc/storage") {
+      return this.storageCaller(req) ? undefined : jsonError(401, "unauthorized_worker");
+    }
+    if (isWorkerPath(path)) {
+      return this.workerAuth.check(req) ? undefined : jsonError(401, "unauthorized_worker");
+    }
+    if (path.startsWith("/api/")) {
+      return this.auth.check(req) ? undefined : jsonError(401, "unauthorized");
+    }
+    return undefined;
+  }
+
+  /**
+   * Who is calling `/rpc/storage`: an operator (full contract), a worker
+   * (runner methods only), or nobody allowed (undefined).
+   */
+  private storageCaller(req: Request): "operator" | "worker" | undefined {
+    const token = bearerToken(req);
+    if (this.auth.matches(token)) return "operator";
+    if (this.workerAuth.isEnabled) return this.workerAuth.matches(token) ? "worker" : undefined;
+    // Insecure: the worker plane is open. Everything is open when the
+    // operator plane is too; otherwise anonymous callers get worker scope.
+    return this.auth.isEnabled ? "worker" : "operator";
+  }
+
+  /** Throw unless every mounted plane has keys or the operator opted into insecure mode. */
+  private checkAuthConfigured(config: ZoryaServerConfig): void {
+    const open: string[] = [];
+    if (!this.auth.isEnabled) open.push("/api (apiKeys)");
+    if (config.remoteWorkers && !this.workerAuth.isEnabled) {
+      open.push("worker planes /ws/worker, /rpc/* (remoteWorkers.apiKeys)");
+    }
+    if (open.length === 0) return;
+    if (!config.insecure) {
+      throw new ZoryaInsecureConfigError(
+        `ZoryaServer: no API keys configured for ${open.join(" and ")}. ` +
+          "Configure keys, or pass `insecure: true` (ZORYA_INSECURE=1 for the bundled server) " +
+          "to run unauthenticated for local development.",
+      );
+    }
+    this.logger.warn(
+      "[zorya] WARNING: INSECURE MODE. These planes accept requests without credentials: " +
+        `${open.join(", ")}. Anyone who can reach this port can read and change every run. ` +
+        "Never expose this server outside local development.",
+    );
+  }
+
+  /** The background services, in start order. */
+  private managedServices(): ManagedService[] {
+    const out: ManagedService[] = [{ name: "workflows", ...bindLifecycle(this.workflows) }];
+    if (this.scheduler) out.push({ name: "scheduler", ...bindLifecycle(this.scheduler) });
+    if (this.agents) out.push({ name: "agents", ...bindLifecycle(this.agents) });
+    if (this.skills) out.push({ name: "skills", ...bindLifecycle(this.skills) });
+    if (this.fragments) out.push({ name: "fragments", ...bindLifecycle(this.fragments) });
+    return out;
+  }
+
+  /**
+   * Re-wrap an event-stream response so `stop()` can end it: closing
+   * cancels the route's stream (running its teardown) and ends the body the
+   * client reads.
+   */
+  private trackStream(res: Response): Response {
+    const source = res.body;
+    if (!source) return res;
+    const reader = source.getReader();
+    let entry: { close(): void } | undefined;
+    const forget = (): void => {
+      if (entry) this.liveStreams.delete(entry);
+    };
+    const body = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        entry = {
+          close: () => {
+            forget();
+            reader.cancel("server_shutdown").catch(() => {});
+            try {
+              controller.close();
+            } catch {
+              /* already closed */
+            }
+          },
+        };
+        this.liveStreams.add(entry);
+      },
+      pull: async (controller) => {
+        try {
+          const { value, done } = await reader.read();
+          if (done) {
+            forget();
+            try {
+              controller.close();
+            } catch {
+              /* closed by stop() */
+            }
+            return;
+          }
+          controller.enqueue(value);
+        } catch (err) {
+          forget();
+          try {
+            controller.error(err);
+          } catch {
+            /* closed by stop() */
+          }
+        }
+      },
+      cancel: async (reason) => {
+        forget();
+        await reader.cancel(reason).catch(() => {});
+      },
+    });
+    return new Response(body, {
+      status: res.status,
+      statusText: res.statusText,
+      headers: res.headers,
+    });
   }
 
   /**
@@ -1006,4 +1297,39 @@ function walkChainFor<T>(
     layer = (layer as unknown as { fallback?: ZoryaWorkflows }).fallback;
   }
   return undefined;
+}
+
+/** Liveness and readiness probes: public, and answered while shutting down. */
+function isProbePath(path: string): boolean {
+  return path === "/api/health" || path === "/api/ready";
+}
+
+/** Routes that need no Zorya key: the probes and the bearer-checked signal-token routes. */
+function isPublicRoute(params: { method: string; path: string }): boolean {
+  const { method, path } = params;
+  if (method === "GET" && isProbePath(path)) return true;
+  if (method === "GET" && /^\/api\/signal-tokens\/[^/]+\/describe$/.test(path)) return true;
+  if (method === "POST" && /^\/api\/signal-tokens\/[^/]+\/complete$/.test(path)) return true;
+  return false;
+}
+
+/** Paths on the worker plane, gated by worker keys (`/rpc/storage` is handled separately). */
+function isWorkerPath(path: string): boolean {
+  return (
+    path.startsWith("/rpc/") ||
+    path === "/api/advertisements" ||
+    path.startsWith("/api/advertisements/") ||
+    path.startsWith("/api/worker-protocol/")
+  );
+}
+
+function isEventStream(res: Response): boolean {
+  return (res.headers.get("content-type") ?? "").startsWith("text/event-stream");
+}
+
+function bindLifecycle(service: { start(): Promise<void>; stop(): Promise<void> }): {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+} {
+  return { start: () => service.start(), stop: () => service.stop() };
 }

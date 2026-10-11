@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { api } from "../../api/client.ts";
-import { useSse } from "../../hooks/use-sse.ts";
+import { useRunEvents } from "../../hooks/use-sse.ts";
 import type { RunDto, RunEvent, StepDto } from "../../../server/api-types.ts";
 import { StatusBadge } from "../ui/status-badge.tsx";
 import { RunSourceBadge } from "./run-source-badge.tsx";
@@ -87,7 +87,7 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
     };
   }, [id]);
 
-  useSse<RunEvent>(api.eventsUrl(id), (ev) => {
+  useRunEvents<RunEvent>(id, (ev) => {
     setRun((prev) => applyEvent(prev, ev));
   });
 

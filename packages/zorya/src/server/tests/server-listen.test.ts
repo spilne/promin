@@ -41,7 +41,12 @@ function start(params: { storage?: InMemoryWorkflowStorage; listen?: ListenOptio
     sleepScanIntervalMs: 0,
     signalScanIntervalMs: 0,
   });
-  const server = new ZoryaServer({ workflows, logger: quietLogger, sseIntervalMs: 10 });
+  const server = new ZoryaServer({
+    insecure: true,
+    workflows,
+    logger: quietLogger,
+    sseIntervalMs: 10,
+  });
   const handle = server.listen({ port: 0, hostname: "127.0.0.1", ...params.listen });
   running = { server, stop: handle.stop };
   return { base: `http://127.0.0.1:${handle.port}`, storage };

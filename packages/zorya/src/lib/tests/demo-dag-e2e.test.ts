@@ -86,6 +86,7 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
         ...process.env,
         PORT: String(port),
         ZORYA_DB: ":memory:",
+        ZORYA_INSECURE: "1",
         // Unreachable Ollama URL — the demo only calls it lazily on a
         // chat turn, so this is safe and avoids hanging on real probes.
         OLLAMA_URL: "http://127.0.0.1:1",

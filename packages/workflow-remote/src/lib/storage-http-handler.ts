@@ -8,13 +8,71 @@
 // The handler accepts a single JSON-encoded RpcRequest on any POST path and
 // dispatches to the matching storage method. Non-POSTs and malformed bodies
 // get a 400; unknown methods get a 404; method throws become 500 with the
-// error message. No routing, no middleware, no OpenAPI. If you want auth,
-// put it in front of this handler.
+// error message. No routing, no middleware, no OpenAPI. Authenticate in
+// front of this handler; `allow` then scopes which methods a caller may use
+// (`RUNNER_STORAGE_METHODS` is what a remote runner or worker needs).
 // ---------------------------------------------------------------------------
 
 import type { WorkflowStorage } from "@promin/workflow";
 import { hasCapability, type StorageCapability, type StorageCapabilityMap } from "@promin/workflow";
 import { WIRE_CODEC, type RpcRequest, type RpcResponse, type StorageMethod } from "./wire.ts";
+
+/**
+ * The storage methods a remote runner or worker uses to execute runs: run
+ * and step state, fenced locks, the journal, step attempts, compensation,
+ * streams, child wake-ups (`deliverSignal`) and the sleep scanner's queries.
+ *
+ * Left out, for operators only: cancel, reset, purge, the dashboard's
+ * distinct-value queries, the coordinator's orphan and signal-wakeup scans,
+ * and every signal-token method (a token record carries its bearer).
+ */
+export const RUNNER_STORAGE_METHODS: ReadonlySet<StorageMethod> = new Set<StorageMethod>([
+  "loadWorkflow",
+  "loadWorkflowStatus",
+  "listWorkflows",
+  "createWorkflow",
+  "findWorkflowByIdempotencyKey",
+  "saveStepResult",
+  "batchSaveStepResults",
+  "saveStepFailure",
+  "saveTaskResult",
+  "saveTaskFailure",
+  "completeWorkflow",
+  "failWorkflow",
+  "tripwireWorkflow",
+  "suspendWorkflow",
+  "deliverSignal",
+  "loadSignals",
+  "setWorkflowMetadata",
+  "tryLock",
+  "tryLockAndLoad",
+  "releaseLock",
+  "heartbeat",
+  "startFreshRun",
+  "loadRunHistory",
+  "listDueTimers",
+  "loadJournal",
+  "appendEntry",
+  "appendPendingEntry",
+  "completePendingEntry",
+  "discardJournalEntries",
+  "findDueSleeps",
+  "findPendingSignal",
+  "saveStepAttempt",
+  "loadStepAttempts",
+  "beginCompensation",
+  "saveStepCompensation",
+  "appendStreamChunk",
+  "readStreamChunks",
+]);
+
+export interface WorkflowStorageHandlerOptions {
+  /**
+   * Whether this request may call `method`. A refused call answers 403
+   * without touching storage. Default: every method is allowed.
+   */
+  allow?: (params: { method: StorageMethod; req: Request }) => boolean;
+}
 
 /**
  * Build a fetch-style handler backed by `storage`. The returned function
@@ -23,6 +81,7 @@ import { WIRE_CODEC, type RpcRequest, type RpcResponse, type StorageMethod } fro
  */
 export function createWorkflowStorageHandler(
   storage: WorkflowStorage,
+  options: WorkflowStorageHandlerOptions = {},
 ): (req: Request) => Promise<Response> {
   // The RPC params of a method are its storage params object, `guard`
   // included, so the dispatchers hand them straight through.
@@ -104,9 +163,17 @@ export function createWorkflowStorageHandler(
       );
     }
 
-    const fn = dispatchers[envelope.method];
+    const fn = Object.hasOwn(dispatchers, envelope.method)
+      ? dispatchers[envelope.method]
+      : undefined;
     if (!fn) {
       return jsonResponse({ ok: false, error: `Unknown method "${envelope.method}"` }, 404);
+    }
+    if (options.allow && !options.allow({ method: envelope.method, req })) {
+      return jsonResponse(
+        { ok: false, error: `Method "${envelope.method}" is not allowed for this caller` },
+        403,
+      );
     }
 
     try {

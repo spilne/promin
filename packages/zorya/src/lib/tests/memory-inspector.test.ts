@@ -20,6 +20,7 @@ function makeServer(memory: InMemoryMemoryStore, registry = new InMemoryAgentReg
   const storage = new InMemoryWorkflowStorage();
   const runner = createWorkflowRunner({ storage });
   return new ZoryaServer({
+    insecure: true,
     workflows: new LocalWorkflows({
       storage,
       runner,

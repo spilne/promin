@@ -1,20 +1,17 @@
 import { useEffect } from "preact/hooks";
+import { api } from "../api/client.ts";
 
-export function useSse<T = unknown>(url: string | undefined, onEvent: (ev: T) => void): void {
+/**
+ * Live events for one run. Reads the SSE stream through `fetch` so the
+ * dashboard's API key is sent (`EventSource` cannot send headers).
+ */
+export function useRunEvents<T extends { type?: string } = { type?: string }>(
+  runId: string | undefined,
+  onEvent: (ev: T) => void,
+): void {
   useEffect(() => {
-    if (!url) return;
-    const es = new EventSource(url);
-    es.onmessage = (e) => {
-      try {
-        onEvent(JSON.parse(e.data) as T);
-      } catch {
-        // ignore malformed frame
-      }
-    };
-    es.onerror = () => {
-      // Let browser retry automatically; close on permanent errors after short delay.
-    };
-    return () => es.close();
+    if (!runId) return;
+    return api.subscribeRunEvents<T>(runId, onEvent);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [url]);
+  }, [runId]);
 }

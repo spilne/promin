@@ -109,11 +109,14 @@ jobs:
 
       - name: Serve the dashboard
         run: |
-          docker run -d --name zorya-ci -p 4100:4100 zorya:ci
+          docker run -d --name zorya-ci -p 4100:4100 -e ZORYA_API_KEY=ci-operator-key -e ZORYA_WORKER_API_KEY=ci-worker-key zorya:ci
           for i in $(seq 1 60); do
             curl -sf -o /dev/null http://127.0.0.1:4100/api/health && break
             sleep 1
           done
+          curl -sf -o /dev/null http://127.0.0.1:4100/api/ready
+          curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4100/api/runs | grep -q 401
+          curl -sf -o /dev/null -H 'authorization: Bearer ci-operator-key' http://127.0.0.1:4100/api/runs
           curl -sf http://127.0.0.1:4100/ | grep -q '<div id="app">'
           curl -sf -o /dev/null http://127.0.0.1:4100/app.js
           curl -sf -o /dev/null http://127.0.0.1:4100/app.css

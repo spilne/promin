@@ -25,7 +25,7 @@ function bootServerWithSkills() {
   });
   const registry = new InMemorySkillRegistry();
   const skills = new ZoryaSkills({ registry });
-  const server = new ZoryaServer({ workflows, skills });
+  const server = new ZoryaServer({ insecure: true, workflows, skills });
   return { server, registry };
 }
 
@@ -137,7 +137,7 @@ describe("GET /api/skills/_sources — file-managed tracking", () => {
       });
       const registry = new InMemorySkillRegistry();
       const skills = new ZoryaSkills({ registry, scan: { root, intervalMs: 60_000 } });
-      const server = new ZoryaServer({ workflows, skills });
+      const server = new ZoryaServer({ insecure: true, workflows, skills });
       await skills.start(); // runs an immediate scan tick
 
       // An operator-authored skill that has no file behind it.

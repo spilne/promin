@@ -16,6 +16,7 @@ function makeServer(
     workerRegistry: new InMemoryWorkerRegistry(),
   });
   return new ZoryaServer({
+    insecure: true,
     workflows,
     ...(opts.dashboardKeys && { apiKeys: opts.dashboardKeys }),
     remoteWorkers: opts.workerKeys ? { apiKeys: opts.workerKeys } : {},
@@ -23,7 +24,7 @@ function makeServer(
 }
 
 describe("ZoryaServer worker-protocol auth", () => {
-  it("allows worker endpoints when no keys set", async () => {
+  it("allows worker endpoints without keys in insecure mode", async () => {
     const server = makeServer();
     const res = await server.handle(
       new Request("http://x/rpc/worker", {

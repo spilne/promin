@@ -30,7 +30,7 @@ function boot(scanRoot?: string) {
     resolve: () => stub as never,
     ...(scanRoot !== undefined && { scan: { root: scanRoot, intervalMs: 60_000 } }),
   });
-  const server = new ZoryaServer({ workflows, agents });
+  const server = new ZoryaServer({ insecure: true, workflows, agents });
   return { server, agents, registry };
 }
 

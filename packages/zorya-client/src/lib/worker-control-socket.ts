@@ -29,6 +29,12 @@ export type WorkerToServer =
   | { kind: "reply"; requestId: string; ok: true; result?: unknown }
   | { kind: "reply"; requestId: string; ok: false; error: string };
 
+/** The Bun / Node `WebSocket` constructor form that sends upgrade headers. */
+type WebSocketWithHeaders = new (
+  url: string,
+  options: { headers: Record<string, string> },
+) => WebSocket;
+
 export type CommandHandler = (args: unknown) => Promise<unknown> | unknown;
 
 export interface WorkerControlSocketConfig {
@@ -38,7 +44,7 @@ export interface WorkerControlSocketConfig {
   workerId: string;
   /** Capabilities reported on identify. */
   capabilities?: readonly string[];
-  /** Optional bearer token, sent as `Authorization: Bearer ...` on the upgrade. */
+  /** Worker API key, sent as `Authorization: Bearer ...` on the upgrade request. */
   apiKey?: string;
   /**
    * Initial reconnect delay in ms. Doubles on each consecutive failure up
@@ -151,19 +157,18 @@ export class WorkerControlSocket {
 
   private connect(): void {
     this.state = "connecting";
-    const headers: Record<string, string> = {};
-    if (this.apiKey) headers["Authorization"] = `Bearer ${this.apiKey}`;
     let ws: WebSocket;
     try {
-      // Bun + browser: WebSocket constructor doesn't accept headers
-      // directly. The Bun-specific 3rd-arg form does, but we keep this
-      // portable. apiKey is also sent in the URL search params as a
-      // fallback — server-side `authorize(req)` reads either.
-      const urlWithKey = this.apiKey
-        ? `${this.url}?apiKey=${encodeURIComponent(this.apiKey)}`
-        : this.url;
-      ws = new this.WebSocketImpl(urlWithKey);
-    } catch (err) {
+      // The key goes in the upgrade's `Authorization` header, never the URL
+      // (URLs land in access logs). Bun's and Node's WebSocket accept
+      // `{ headers }` as the second argument; the server reads only the
+      // header.
+      ws = this.apiKey
+        ? new (this.WebSocketImpl as unknown as WebSocketWithHeaders)(this.url, {
+            headers: { authorization: `Bearer ${this.apiKey}` },
+          })
+        : new this.WebSocketImpl(this.url);
+    } catch {
       this.scheduleReconnect();
       return;
     }

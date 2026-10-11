@@ -20,6 +20,7 @@ import { LocalWorkflows } from "../../index.ts";
 function listenServer(): { server: ZoryaServer; url: string; close: () => void } {
   const storage = new InMemoryWorkflowStorage();
   const server = new ZoryaServer({
+    insecure: true,
     workflows: new LocalWorkflows({
       storage,
       runner: createWorkflowRunner({ storage }),

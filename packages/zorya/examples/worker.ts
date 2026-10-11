@@ -101,7 +101,7 @@ function sampleInputFor(name: string): unknown {
   }
 }
 
-const client = new ZoryaClient({ url });
+const client = new ZoryaClient({ url, apiKey: process.env["ZORYA_WORKER_API_KEY"] });
 const worker = new ZoryaWorker({
   client,
   workflows: workflows as unknown as ReadonlyArray<

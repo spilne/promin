@@ -38,7 +38,7 @@ describe("signal-token mint bounds", () => {
       definitions: {},
       sleepScanIntervalMs: 0,
     });
-    server = new ZoryaServer({ workflows, clock, signalTokenMaxTtlMs: 60_000 });
+    server = new ZoryaServer({ insecure: true, workflows, clock, signalTokenMaxTtlMs: 60_000 });
   });
 
   const mint = (body: string) => server.handle(post(`/api/runs/${WF}/signals/go/token`, body));
@@ -131,7 +131,7 @@ describe("schedule create validation", () => {
       sleepScanIntervalMs: 0,
     });
     const scheduler = new ZoryaScheduler({ storage: schedStorage, workflows });
-    server = new ZoryaServer({ workflows, scheduler });
+    server = new ZoryaServer({ insecure: true, workflows, scheduler });
   });
 
   const create = (body: unknown) => server.handle(post("/api/schedules", JSON.stringify(body)));

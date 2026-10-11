@@ -117,7 +117,12 @@ const researchTopic = workflow<{ topic: string }>({
 // remote-storage variant: workflow runs HERE, Zorya stores everything.
 
 const url = process.env["ZORYA_URL"] ?? "http://localhost:4100";
-const client = new ZoryaClient({ url, apiKey: process.env["ZORYA_API_KEY"] });
+// Worker key for the storage plane; operator key for `startByName` (/api).
+const client = new ZoryaClient({
+  url,
+  apiKey: process.env["ZORYA_WORKER_API_KEY"],
+  operatorApiKey: process.env["ZORYA_API_KEY"],
+});
 const runner = new ZoryaRunner({ client });
 
 console.log(`[app] connected to ${url}`);

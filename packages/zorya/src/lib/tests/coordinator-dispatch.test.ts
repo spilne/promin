@@ -48,7 +48,7 @@ describe("Coordinator-driven step dispatch (promin-2c29)", () => {
       workerRegistry,
       pollIntervalMs: 50,
     });
-    const server = new ZoryaServer({ workflows, remoteWorkers: {} });
+    const server = new ZoryaServer({ insecure: true, workflows, remoteWorkers: {} });
     expect(server.workflows).toBeDefined();
     await workflows.start();
 
@@ -118,7 +118,7 @@ describe("Coordinator-driven step dispatch (promin-2c29)", () => {
       workerRegistry,
       pollIntervalMs: 25,
     });
-    const server = new ZoryaServer({ workflows, remoteWorkers: {} });
+    const server = new ZoryaServer({ insecure: true, workflows, remoteWorkers: {} });
     await workflows.start();
 
     const fetch = (req: Request) => server.handle(req);
@@ -178,6 +178,8 @@ describe("Coordinator-driven step dispatch (promin-2c29)", () => {
       definitions: {},
       sleepScanIntervalMs: 0,
     });
-    expect(() => new ZoryaServer({ workflows, remoteWorkers: {} })).toThrow(/DistributedWorkflows/);
+    expect(() => new ZoryaServer({ insecure: true, workflows, remoteWorkers: {} })).toThrow(
+      /DistributedWorkflows/,
+    );
   });
 });

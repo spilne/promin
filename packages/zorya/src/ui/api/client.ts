@@ -61,21 +61,31 @@ import type {
   MintTokenResponse,
 } from "../../server/routes/signal-tokens.ts";
 import type { WorkflowVersionDto } from "../../server/routes/workflow-versions.ts";
+import { parseSseFrame, subscribeSse } from "./sse.ts";
 
 const BASE = ""; // served from same origin
 
-function authHeader(): HeadersInit {
+/** The dashboard's stored operator key as an `authorization` header, if any. */
+export function authHeader(): Record<string, string> {
   const k = localStorage.getItem("zorya_api_key");
   return k ? { authorization: `Bearer ${k}` } : {};
 }
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
-    ...init,
-    headers: { ...(init?.headers ?? {}), ...authHeader() },
-  });
+/**
+ * Fetch JSON from the API. The stored operator key is sent unless the
+ * caller passes its own `authorization` (the signal-token routes send the
+ * token's bearer, which an operator key must never replace). 204 and empty
+ * bodies resolve to `undefined`.
+ */
+export async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(authHeader());
+  new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
+  const res = await fetch(`${BASE}${path}`, { ...init, headers });
   if (!res.ok) throw new ApiError(res.status, await res.text());
-  return (await res.json()) as T;
+  if (res.status === 204) return undefined as T;
+  const text = await res.text();
+  if (text.length === 0) return undefined as T;
+  return JSON.parse(text) as T;
 }
 
 export class ApiError extends Error {
@@ -131,6 +141,32 @@ export const api = {
   },
   eventsUrl(id: string): string {
     return `${BASE}/api/runs/${encodeURIComponent(id)}/events`;
+  },
+  /**
+   * Live run events over fetch-based SSE (carries the operator key, which
+   * `EventSource` cannot). Reconnects until the run's `end` event or until
+   * the returned function is called.
+   */
+  subscribeRunEvents<T extends { type?: string }>(
+    id: string,
+    onEvent: (ev: T) => void,
+  ): () => void {
+    let ended = false;
+    return subscribeSse({
+      url: api.eventsUrl(id),
+      headers: authHeader,
+      shouldReconnect: () => !ended,
+      onMessage: (message) => {
+        let ev: T;
+        try {
+          ev = JSON.parse(message.data) as T;
+        } catch {
+          return; // malformed frame
+        }
+        if (ev.type === "end") ended = true;
+        onEvent(ev);
+      },
+    });
   },
   getRunSignals(id: string): Promise<SignalHistoryResponse> {
     return req(`/api/runs/${encodeURIComponent(id)}/signals`);
@@ -1165,15 +1201,3 @@ export const instancesApi = {
     );
   },
 };
-
-function parseSseFrame(frame: string): { event: string; data: string } | null {
-  let event = "message";
-  const dataLines: string[] = [];
-  for (const line of frame.split("\n")) {
-    if (line.startsWith(":")) continue; // comment
-    if (line.startsWith("event:")) event = line.slice(6).trim();
-    else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^ /, ""));
-  }
-  if (dataLines.length === 0) return null;
-  return { event, data: dataLines.join("\n") };
-}

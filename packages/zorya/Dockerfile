@@ -10,8 +10,20 @@
 #
 # Build:
 #   docker build -f packages/zorya/Dockerfile -t zorya:latest .
-# Run:
-#   docker run --rm -p 4100:4100 -v zorya-data:/data zorya:latest
+# Run (the server refuses to start without both keys):
+#   docker run --rm -p 4100:4100 -v zorya-data:/data \
+#     -e ZORYA_API_KEY="$(openssl rand -hex 32)" \
+#     -e ZORYA_WORKER_API_KEY="$(openssl rand -hex 32)" \
+#     zorya:latest
+#
+#   ZORYA_API_KEY         operator key for the dashboard and /api
+#                         (sent as `Authorization: Bearer <key>`)
+#   ZORYA_WORKER_API_KEY  worker key for /ws/worker, /rpc/* and the
+#                         worker-protocol routes (ZoryaClient `apiKey`)
+#   ZORYA_INSECURE=1      run without keys — local development only
+#
+# HEALTHCHECK probes /api/ready (public): healthy once storage answers and
+# every background service has started. /api/health is plain liveness.
 # ---------------------------------------------------------------------------
 
 FROM oven/bun:1.3.12-alpine
@@ -36,6 +48,7 @@ RUN mkdir -p /data && chown bun:bun /data
 
 USER bun
 
+# ZORYA_API_KEY and ZORYA_WORKER_API_KEY are required at run time (see top).
 ENV ZORYA_DB=/data/zorya.db \
     ZORYA_UI_DIR=/app/packages/zorya/dist/public \
     PORT=4100
@@ -43,8 +56,8 @@ ENV ZORYA_DB=/data/zorya.db \
 EXPOSE 4100
 VOLUME ["/data"]
 
-HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget -qO- --tries=1 --timeout=2 http://127.0.0.1:${PORT:-4100}/api/health \
+HEALTHCHECK --interval=15s --timeout=4s --start-period=10s --retries=3 \
+  CMD wget -qO- --tries=1 --timeout=3 http://127.0.0.1:${PORT:-4100}/api/ready \
       || exit 1
 
 ENTRYPOINT ["bun", "--conditions=@promin/source", "packages/zorya/examples/demo.ts"]

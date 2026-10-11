@@ -126,6 +126,23 @@ import { mkdirSync } from "node:fs";
 // locally. Workflow storage / scheduler stay on the SQLite db above.
 //   ZORYA_PG_URL=postgres://localhost/zorya  bun run zorya
 
+// Auth. The server refuses to start without keys:
+//   ZORYA_API_KEY         operator key: dashboard + /api (Authorization: Bearer …)
+//   ZORYA_WORKER_API_KEY  worker key: /ws/worker, /rpc/*, advertisements and
+//                         worker-protocol routes (examples/worker.ts and
+//                         examples/user-app.ts read the same variable)
+//   ZORYA_INSECURE=1      local development only: run without keys
+const ZORYA_INSECURE = process.env.ZORYA_INSECURE === "1";
+const ZORYA_API_KEY = process.env.ZORYA_API_KEY || undefined;
+const ZORYA_WORKER_API_KEY = process.env.ZORYA_WORKER_API_KEY || undefined;
+if (!ZORYA_INSECURE && (!ZORYA_API_KEY || !ZORYA_WORKER_API_KEY)) {
+  console.error(
+    "[zorya] refusing to start: set ZORYA_API_KEY and ZORYA_WORKER_API_KEY, " +
+      "or ZORYA_INSECURE=1 to run without auth (local development only).",
+  );
+  process.exit(1);
+}
+
 const dbPath = process.env.ZORYA_DB ?? "./target/zorya.db";
 if (dbPath !== ":memory:") {
   // mkdir -p the parent so first-time runs don't crash on a missing dir.
@@ -762,8 +779,6 @@ const heartbeatHandle = setInterval(() => {
     void workerRegistry.heartbeat(w.workerId);
   }
 }, 5_000);
-process.on("SIGINT", () => clearInterval(heartbeatHandle));
-process.on("SIGTERM", () => clearInterval(heartbeatHandle));
 
 // Registry so trigger-by-name works.
 // Auto-discover workflows by scanning ./workflows. Every .ts module under
@@ -1302,9 +1317,12 @@ const server = new ZoryaServer({
   // resolver wiring (in `agents.resolve` above) reads model.credentialRef
   // from this vault at request time.
   secrets: secretsStorage,
-  // Mounts /rpc/storage, /rpc/worker, /api/advertisements,
-  // /api/worker-protocol/* — the surface external workers connect to.
-  remoteWorkers: {},
+  // Operator key for /api; worker key for /rpc/storage, /rpc/worker,
+  // /ws/worker, /api/advertisements and /api/worker-protocol/* — the surface
+  // external workers connect to. Without keys only ZORYA_INSECURE=1 boots.
+  ...(ZORYA_API_KEY !== undefined && { apiKeys: [ZORYA_API_KEY] }),
+  remoteWorkers: ZORYA_WORKER_API_KEY !== undefined ? { apiKeys: [ZORYA_WORKER_API_KEY] } : {},
+  insecure: ZORYA_INSECURE,
   sampleInput: (name) => inputFor(name),
   uiDir,
   // Surfaces the demo's mock workers on /api/workers. (Distributed mode
@@ -1319,6 +1337,12 @@ const server = new ZoryaServer({
 
 const port = Number(process.env.PORT ?? 4100);
 const { port: actualPort, hostname } = server.listen({ port });
+// Services start in the background (and retry with backoff if storage is
+// down); GET /api/ready reports when they are all up.
+void server.ready().then(
+  () => console.log("[zorya] all services started"),
+  () => {},
+);
 const host = hostname === "0.0.0.0" ? "localhost" : hostname;
 console.log(`Zorya demo server on http://${host}:${actualPort}`);
 console.log(`  - Storage:      sqlite (${dbPath})`);
@@ -1337,30 +1361,37 @@ console.log(`  1. Remote worker — joins the server, advertises workflows the i
 console.log(`     map doesn't have (hello-world, fan-out-demo). Triggers from the`);
 console.log(`     dashboard route through the QueuedWorkflows fallback to the worker.`);
 console.log(
-  `       ZORYA_URL=http://${host}:${actualPort} \\\n` +
+  `       ZORYA_URL=http://${host}:${actualPort} ZORYA_WORKER_API_KEY=… \\\n` +
     `         bun --conditions=@promin/source run packages/zorya/examples/worker.ts`,
 );
 console.log(``);
 console.log(`  2. User app — runs your own workflow code in-process while writing storage`);
 console.log(`     to this server (Temporal-style). See examples/user-app.ts.`);
 console.log(
-  `       ZORYA_URL=http://${host}:${actualPort} \\\n` +
+  `       ZORYA_URL=http://${host}:${actualPort} ZORYA_WORKER_API_KEY=… \\\n` +
     `         bun --conditions=@promin/source run packages/zorya/examples/user-app.ts`,
 );
 
-// Graceful shutdown. Registering ANY `process.on("SIGINT")` handler in Bun
-// overrides the default exit-on-Ctrl+C — the heartbeat-cleanup handlers
-// above kept the process alive, so the listening socket stayed bound and
-// the next boot hit EADDRINUSE. We now stop the server (releases the port
-// and tears down the coordinator + scheduler loops) and exit explicitly.
-const shutdown = (signal: string) => {
+// Graceful shutdown: server.stop() stops accepting, closes worker sockets
+// and open event streams, waits for in-flight requests, stops the
+// background services (releasing their locks and leases) and frees the
+// port. A second signal exits immediately.
+let shuttingDown = false;
+const shutdown = async (signal: string): Promise<void> => {
+  if (shuttingDown) {
+    console.log(`[zorya] ${signal} received again — exiting now`);
+    process.exit(1);
+  }
+  shuttingDown = true;
   console.log(`\n[zorya] ${signal} received — shutting down`);
+  clearInterval(heartbeatHandle);
   try {
-    server.stop();
+    await server.stop();
   } catch (e) {
     console.error("[zorya] server.stop failed:", e);
+    process.exit(1);
   }
   process.exit(0);
 };
-process.on("SIGINT", () => shutdown("SIGINT"));
-process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));

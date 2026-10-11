@@ -27,6 +27,10 @@
 // `{ kind: "error" }` and the socket is closed. Replies are accepted only
 // from the socket the command was sent to.
 //
+// Auth: the upgrade request must carry `Authorization: Bearer <worker key>`
+// when worker keys are configured (`authorize`). A socket that does not
+// identify within `identifyTimeoutMs` (default 10s) is closed with 4002.
+//
 // Heartbeat: server pings every `pingIntervalMs` (default 10s); worker is
 // expected to pong within `pongTimeoutMs` (default 30s, three missed
 // pings). On timeout the server closes the socket; the worker reconnects.
@@ -88,6 +92,11 @@ export type WorkerWsOutbound =
 const CLOSE_POLICY_VIOLATION = 1008;
 const CLOSE_MESSAGE_TOO_BIG = 1009;
 const CLOSE_INTERNAL_ERROR = 1011;
+const CLOSE_GOING_AWAY = 1001;
+const CLOSE_IDENTIFY_TIMEOUT = 4002;
+
+/** Default time a socket has to send `identify` after the upgrade (ms). */
+export const DEFAULT_WORKER_IDENTIFY_TIMEOUT_MS = 10_000;
 
 interface WorkerWsData {
   workerId?: string;
@@ -95,6 +104,8 @@ interface WorkerWsData {
   lastPongAt: number;
   /** Last `frame` / `reply` arrival time. Used to break ties on duplicate workerId. */
   lastSeenAt: number;
+  /** Closes the socket if `identify` does not arrive in time. */
+  identifyTimer?: TimerHandle;
 }
 
 export interface WorkerWebSocketServerConfig {
@@ -105,6 +116,11 @@ export interface WorkerWebSocketServerConfig {
    * 30_000 (three missed pings at the default cadence). Lower for tests.
    */
   pongTimeoutMs?: number;
+  /**
+   * Time a socket has to send `identify` after the upgrade before the server
+   * closes it (code 4002). Default: `DEFAULT_WORKER_IDENTIFY_TIMEOUT_MS`.
+   */
+  identifyTimeoutMs?: number;
   /**
    * Optional auth check on the upgrade request. Returns true to allow the
    * upgrade. Pair with the server's `workerAuth` keys for parity with
@@ -138,6 +154,8 @@ export class WorkerWebSocketServer {
   /** workerId → socket. Last-write-wins on duplicate ids — matches the
    * worker-registry's "I crashed and reconnected" pattern. */
   private workers = new Map<string, ServerWebSocket<WorkerWsData>>();
+  /** Open sockets that have not identified yet. */
+  private unidentified = new Set<ServerWebSocket<WorkerWsData>>();
   /** Pending request/reply futures keyed by requestId. */
   private pending = new Map<
     string,
@@ -154,16 +172,20 @@ export class WorkerWebSocketServer {
   private connectionSubs = new Set<(event: { workerId: string; connected: boolean }) => void>();
   private readonly pingIntervalMs: number;
   private readonly pongTimeoutMs: number;
+  private readonly identifyTimeoutMs: number;
   private readonly authorize?: (req: Request) => boolean;
   private readonly clock: WallClock;
   private readonly maxFrameBytes: number;
   private readonly onError: (message: string, err: unknown) => void;
   private heartbeatTimer?: TimerHandle;
   private nextRequestId = 1;
+  /** Set by `stop()`: new upgrades are refused until `start()`. */
+  private stopped = false;
 
   constructor(config: WorkerWebSocketServerConfig = {}) {
     this.pingIntervalMs = config.pingIntervalMs ?? 10_000;
     this.pongTimeoutMs = config.pongTimeoutMs ?? 30_000;
+    this.identifyTimeoutMs = config.identifyTimeoutMs ?? DEFAULT_WORKER_IDENTIFY_TIMEOUT_MS;
     this.authorize = config.authorize;
     this.clock = config.clock ?? SystemWallClock;
     this.maxFrameBytes = config.maxFrameBytes ?? DEFAULT_MAX_WORKER_FRAME_BYTES;
@@ -182,6 +204,7 @@ export class WorkerWebSocketServer {
   upgradeIfWorkerWs(req: Request, server: any): Response | undefined {
     const url = new URL(req.url);
     if (url.pathname !== "/ws/worker") return undefined;
+    if (this.stopped) return Response.json({ error: "shutting_down" }, { status: 503 });
     if (this.authorize && !this.authorize(req)) {
       return Response.json({ error: "unauthorized_worker" }, { status: 401 });
     }
@@ -208,6 +231,16 @@ export class WorkerWebSocketServer {
         // if identify never arrives.
         ws.data.lastPongAt = this.clock.currentTimeMs();
         ws.data.lastSeenAt = this.clock.currentTimeMs();
+        if (this.stopped) {
+          this.closeQuietly(ws, CLOSE_GOING_AWAY, "server_shutdown");
+          return;
+        }
+        this.unidentified.add(ws);
+        ws.data.identifyTimer = this.clock.setTimeout(() => {
+          ws.data.identifyTimer = undefined;
+          if (!this.unidentified.delete(ws)) return;
+          this.closeQuietly(ws, CLOSE_IDENTIFY_TIMEOUT, "identify_timeout");
+        }, this.identifyTimeoutMs);
       },
       message: (ws, raw) => {
         try {
@@ -228,11 +261,13 @@ export class WorkerWebSocketServer {
   }
 
   start(): void {
+    this.stopped = false;
     if (this.heartbeatTimer) return;
     this.heartbeatTimer = this.clock.setInterval(() => this.tickHeartbeat(), this.pingIntervalMs);
   }
 
   stop(): void {
+    this.stopped = true;
     if (this.heartbeatTimer) {
       this.heartbeatTimer.clear();
       this.heartbeatTimer = undefined;
@@ -240,14 +275,12 @@ export class WorkerWebSocketServer {
     // Close all open sockets so workers reconnect when the server comes
     // back. Iterating a copy because close → close handler → workers.delete
     // would mutate the map mid-iteration.
-    for (const ws of [...this.workers.values()]) {
-      try {
-        ws.close(1001, "server_shutdown");
-      } catch {
-        /* swallow */
-      }
+    for (const ws of [...this.workers.values(), ...this.unidentified]) {
+      this.clearIdentifyTimer(ws);
+      this.closeQuietly(ws, CLOSE_GOING_AWAY, "server_shutdown");
     }
     this.workers.clear();
+    this.unidentified.clear();
     for (const { reject } of this.pending.values()) reject(new Error("server_shutdown"));
     this.pending.clear();
   }
@@ -326,6 +359,11 @@ export class WorkerWebSocketServer {
     };
   }
 
+  /** Open sockets, identified or not. */
+  openSocketCount(): number {
+    return this.workers.size + this.unidentified.size;
+  }
+
   /** Whether the server has a live socket for this worker. */
   isConnected(workerId: string): boolean {
     return this.workers.has(workerId);
@@ -401,7 +439,14 @@ export class WorkerWebSocketServer {
     }
   }
 
+  private clearIdentifyTimer(ws: ServerWebSocket<WorkerWsData>): void {
+    ws.data.identifyTimer?.clear();
+    ws.data.identifyTimer = undefined;
+  }
+
   private handleClose(ws: ServerWebSocket<WorkerWsData>): void {
+    this.clearIdentifyTimer(ws);
+    this.unidentified.delete(ws);
     // Commands in flight on this socket can no longer be answered.
     for (const [requestId, entry] of this.pending) {
       if (entry.ws !== ws) continue;
@@ -426,6 +471,8 @@ export class WorkerWebSocketServer {
   private handleInbound(ws: ServerWebSocket<WorkerWsData>, msg: WorkerWsInbound): void {
     switch (msg.kind) {
       case "identify": {
+        this.clearIdentifyTimer(ws);
+        this.unidentified.delete(ws);
         ws.data.workerId = msg.workerId;
         // Replace any prior socket for the same workerId. Old sockets will
         // hit their close handler later but won't evict the new entry

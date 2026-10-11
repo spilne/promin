@@ -33,7 +33,7 @@ function boot() {
     },
     roles,
   });
-  const server = new ZoryaServer({ workflows, agents });
+  const server = new ZoryaServer({ insecure: true, workflows, agents });
   return { server, roles, registry };
 }
 

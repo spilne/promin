@@ -6,7 +6,11 @@ export {
   type ListenOptions,
   type Logger,
   type RemoteWorkersConfig,
+  ZoryaInsecureConfigError,
+  DEFAULT_READINESS_TIMEOUT_MS,
+  DEFAULT_SHUTDOWN_TIMEOUT_MS,
 } from "./server/server.ts";
+export type { ServiceState, ServiceStatus } from "./server/service-lifecycle.ts";
 export {
   ZoryaWorkflows,
   LocalWorkflows,
@@ -40,7 +44,7 @@ export {
   type ZoryaFragmentsScanConfig,
 } from "./server/services/fragments/index.ts";
 export { ZoryaDags, type ZoryaDagsConfig } from "./server/services/dags/index.ts";
-export { Auth, type AuthConfig } from "./server/auth.ts";
+export { Auth, bearerToken, type AuthConfig } from "./server/auth.ts";
 export { RunEventBus } from "./server/run-event-bus.ts";
 export { RunPollWatcher, RunWatcherPool } from "./server/run-poll-watcher.ts";
 export {

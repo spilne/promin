@@ -28,7 +28,7 @@ function bootServer(scanRoot?: string) {
     registry,
     ...(scanRoot !== undefined && { scan: { root: scanRoot, intervalMs: 60_000 } }),
   });
-  const server = new ZoryaServer({ workflows, fragments });
+  const server = new ZoryaServer({ insecure: true, workflows, fragments });
   return { server, fragments, registry };
 }
 

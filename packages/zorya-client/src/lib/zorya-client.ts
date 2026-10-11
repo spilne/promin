@@ -22,8 +22,18 @@ export interface ZoryaClientConfig {
    * as needed.
    */
   url: string;
-  /** Bearer token for the server's auth layer. Optional. */
+  /**
+   * Worker API key (one of the server's `remoteWorkers.apiKeys`). Sent as
+   * `Authorization: Bearer …` on `/rpc/*`, the advertisement and
+   * worker-protocol routes, and the `/ws/worker` upgrade.
+   */
   apiKey?: string;
+  /**
+   * Operator API key (one of the server's `apiKeys`) for the `/api` calls
+   * `start` and `startByName` make. Default: `apiKey`, which works when the
+   * server lists the same key on both planes.
+   */
+  operatorApiKey?: string;
   /** Custom fetch (for tests or in-process wiring). Defaults to globalThis.fetch. */
   fetch?: FetchLike;
 }
@@ -41,6 +51,7 @@ export class ZoryaClient {
   readonly workerRegistry: WorkerRegistry;
   private readonly fetch: FetchLike;
   private readonly headers: Record<string, string>;
+  private readonly operatorHeaders: Record<string, string>;
   // Built lazily on first start() / startByName() call. The runner is just
   // a thin wrapper around storage for handle construction — no orchestration
   // happens client-side; the server's worker fleet runs the workflow.
@@ -54,6 +65,11 @@ export class ZoryaClient {
     this.headers = {
       "content-type": "application/json",
       ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}),
+    };
+    const operatorKey = config.operatorApiKey ?? config.apiKey;
+    this.operatorHeaders = {
+      "content-type": "application/json",
+      ...(operatorKey ? { authorization: `Bearer ${operatorKey}` } : {}),
     };
     this.storage = new RemoteWorkflowStorage({
       url: `${base}/rpc/storage`,
@@ -219,7 +235,7 @@ export class ZoryaClient {
   ): Promise<{ workflowId: string }> {
     const req = new Request(`${this.url}/api/runs/trigger/${encodeURIComponent(name)}`, {
       method: "POST",
-      headers: this.headers,
+      headers: this.operatorHeaders,
       body: JSON.stringify(body),
     });
     const res = await this.fetch(req);

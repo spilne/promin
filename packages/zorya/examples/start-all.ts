@@ -125,7 +125,8 @@ children.push(
   start(
     "demo",
     ["bun", "--hot", "--conditions=@promin/source", ZORYA_DEV_PATHS.demoScript],
-    { PORT, ZORYA_DEV_RELOAD: "1" },
+    // Local dev launcher: run the demo without keys (it logs a warning).
+    { PORT, ZORYA_DEV_RELOAD: "1", ZORYA_INSECURE: "1" },
     COLOURS.demo,
   ),
 );

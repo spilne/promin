@@ -104,6 +104,7 @@ async function bootGateway(opts?: {
   });
   const secrets = opts?.withSecrets ? new InMemorySecretsStorage() : undefined;
   const server = new ZoryaServer({
+    insecure: true,
     workflows,
     agents,
     ...(secrets !== undefined && { secrets }),
@@ -1151,7 +1152,7 @@ describe("agent gateway — distill rate limit (429)", () => {
         }),
       memory,
     });
-    const server = new ZoryaServer({ workflows, agents });
+    const server = new ZoryaServer({ insecure: true, workflows, agents });
 
     const res = await server.handle(
       new Request("http://test/api/agents/support/threads/t-now/distill", {

@@ -41,6 +41,7 @@ function makeServer(params: {
     sleepScanIntervalMs: 0,
   });
   return new ZoryaServer({
+    insecure: true,
     workflows,
     ...(params.logger !== undefined && { logger: params.logger }),
     ...(params.uiDir !== undefined && { uiDir: params.uiDir }),

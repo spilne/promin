@@ -28,6 +28,7 @@ function makeServer() {
   const storage = new InMemoryWorkflowStorage();
   const runner = createWorkflowRunner({ storage });
   const server = new ZoryaServer({
+    insecure: true,
     workflows: new LocalWorkflows({
       storage,
       runner,

@@ -40,6 +40,7 @@ async function bootGateway(opts: BootOpts = {}) {
     opts.now !== undefined ? { now: opts.now } : {},
   );
   const server = new ZoryaServer({
+    insecure: true,
     workflows,
     agents,
     remoteDeployments,
@@ -287,7 +288,7 @@ describe("remote-deployments — when not configured", () => {
       definitions: {},
       sleepScanIntervalMs: 0,
     });
-    const server = new ZoryaServer({ workflows }); // no remoteDeployments
+    const server = new ZoryaServer({ insecure: true, workflows }); // no remoteDeployments
     const res = await server.handle(
       new Request("http://test/api/remote-deployments/register", {
         method: "POST",

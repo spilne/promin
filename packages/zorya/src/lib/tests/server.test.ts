@@ -39,7 +39,7 @@ describe("ZoryaServer", () => {
 
   beforeEach(() => {
     storage = new InMemoryWorkflowStorage();
-    server = new ZoryaServer({ workflows: makeWorkflows(storage) });
+    server = new ZoryaServer({ insecure: true, workflows: makeWorkflows(storage) });
   });
 
   describe("GET /api/health", () => {
@@ -126,7 +126,7 @@ describe("ZoryaServer", () => {
         workflowStarts: queue,
         acceptAny: true,
       });
-      const s = new ZoryaServer({ workflows });
+      const s = new ZoryaServer({ insecure: true, workflows });
       const res = await s.handle(
         new Request("http://x/api/runs/trigger/order", {
           method: "POST",
@@ -191,6 +191,7 @@ describe("ZoryaServer", () => {
 
     it("uses configured provider", async () => {
       const s = new ZoryaServer({
+        insecure: true,
         workflows: makeWorkflows(storage),
         workers: {
           listWorkers: async () => [
@@ -213,13 +214,21 @@ describe("ZoryaServer", () => {
 
   describe("auth", () => {
     it("rejects /api requests with no key when auth enabled", async () => {
-      const s = new ZoryaServer({ workflows: makeWorkflows(storage), apiKeys: ["secret"] });
+      const s = new ZoryaServer({
+        insecure: true,
+        workflows: makeWorkflows(storage),
+        apiKeys: ["secret"],
+      });
       const res = await s.handle(new Request("http://x/api/runs"));
       expect(res.status).toBe(401);
     });
 
     it("accepts request with valid bearer token", async () => {
-      const s = new ZoryaServer({ workflows: makeWorkflows(storage), apiKeys: ["secret"] });
+      const s = new ZoryaServer({
+        insecure: true,
+        workflows: makeWorkflows(storage),
+        apiKeys: ["secret"],
+      });
       const res = await s.handle(
         new Request("http://x/api/runs", {
           headers: { authorization: "Bearer secret" },
@@ -229,7 +238,11 @@ describe("ZoryaServer", () => {
     });
 
     it("rejects invalid bearer token", async () => {
-      const s = new ZoryaServer({ workflows: makeWorkflows(storage), apiKeys: ["secret"] });
+      const s = new ZoryaServer({
+        insecure: true,
+        workflows: makeWorkflows(storage),
+        apiKeys: ["secret"],
+      });
       const res = await s.handle(
         new Request("http://x/api/runs", {
           headers: { authorization: "Bearer wrong" },

@@ -66,11 +66,7 @@ describe("ZoryaServer scheduling — embedded ZoryaScheduler", () => {
       leaderLockTtlMs: 1_000,
     });
 
-    const server = new ZoryaServer({
-      workflows,
-      scheduler,
-      remoteWorkers: {},
-    });
+    const server = new ZoryaServer({ insecure: true, workflows, scheduler, remoteWorkers: {} });
     expect(server.scheduler).toBeDefined();
     await workflows.start();
 
@@ -142,7 +138,7 @@ describe("ZoryaServer scheduling — embedded ZoryaScheduler", () => {
         instanceId,
         fire: trackFire,
       });
-      return { server: new ZoryaServer({ workflows, scheduler }), scheduler };
+      return { server: new ZoryaServer({ insecure: true, workflows, scheduler }), scheduler };
     };
 
     const a = mkServer("server-a");
@@ -189,7 +185,7 @@ describe("ZoryaServer scheduling — embedded ZoryaScheduler", () => {
         fired.push({ id: tick.scheduleId, tick: tick.tickNumber });
       },
     });
-    const server = new ZoryaServer({ workflows, scheduler });
+    const server = new ZoryaServer({ insecure: true, workflows, scheduler });
 
     await schedStore.upsertSchedule({
       id: "custom",
@@ -226,7 +222,7 @@ describe("ZoryaServer scheduling — embedded ZoryaScheduler", () => {
         fired.push({ id: tick.scheduleId, ns: sched.namespace });
       },
     });
-    const server = new ZoryaServer({ workflows, scheduler });
+    const server = new ZoryaServer({ insecure: true, workflows, scheduler });
 
     const seed = async (id: string, namespace: string | undefined) => {
       await schedStore.upsertSchedule({
@@ -288,7 +284,7 @@ describe("ZoryaServer scheduling — embedded ZoryaScheduler", () => {
         fired.push(tick.scheduleId);
       },
     });
-    const server = new ZoryaServer({ workflows, scheduler });
+    const server = new ZoryaServer({ insecure: true, workflows, scheduler });
 
     for (let i = 0; i < 1000; i++) {
       await inner.upsertSchedule({
@@ -358,7 +354,7 @@ describe("ZoryaServer scheduling — embedded ZoryaScheduler", () => {
         inFlight--;
       },
     });
-    const server = new ZoryaServer({ workflows, scheduler });
+    const server = new ZoryaServer({ insecure: true, workflows, scheduler });
 
     for (let i = 0; i < 12; i++) {
       await schedStore.upsertSchedule({

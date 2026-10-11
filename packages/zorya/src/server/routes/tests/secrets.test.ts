@@ -20,7 +20,7 @@ async function bootServerWithSecrets() {
     sleepScanIntervalMs: 0,
   });
   const secrets = new InMemorySecretsStorage();
-  const server = new ZoryaServer({ workflows, secrets });
+  const server = new ZoryaServer({ insecure: true, workflows, secrets });
   return { server, secrets };
 }
 
@@ -227,7 +227,7 @@ describe("secrets HTTP routes — when no secrets configured", () => {
       definitions: {},
       sleepScanIntervalMs: 0,
     });
-    const server = new ZoryaServer({ workflows }); // no `secrets`
+    const server = new ZoryaServer({ insecure: true, workflows }); // no `secrets`
     const res = await server.handle(
       new Request("http://test/api/secrets", {
         method: "POST",

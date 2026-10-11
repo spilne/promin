@@ -57,6 +57,7 @@ async function bootGateway(opts: BootOpts = {}) {
     resolve: () => stubAgent as never,
   });
   const server = new ZoryaServer({
+    insecure: true,
     workflows,
     agents,
     webhooks: {
@@ -227,7 +228,7 @@ describe("webhook ingress — POST /webhooks/:source/:agentId", () => {
       definitions: {},
       sleepScanIntervalMs: 0,
     });
-    const server = new ZoryaServer({ workflows }); // no webhooks
+    const server = new ZoryaServer({ insecure: true, workflows }); // no webhooks
     const res = await server.handle(
       new Request("http://test/webhooks/github/x?namespaceId=acme&resourceId=alice", {
         method: "POST",

@@ -17,6 +17,7 @@ function makeServer(history: InMemoryToolHistoryStore | null) {
   const storage = new InMemoryWorkflowStorage();
   const runner = createWorkflowRunner({ storage });
   return new ZoryaServer({
+    insecure: true,
     workflows: new LocalWorkflows({ storage, runner, definitions: {}, sleepScanIntervalMs: 0 }),
     agents: new ZoryaAgents({
       registry: new InMemoryAgentRegistry(),

@@ -44,7 +44,11 @@ describe("SSE /api/runs/:id/events", () => {
   it("emits a snapshot on subscribe", async () => {
     const storage = new InMemoryWorkflowStorage();
     await storage.createWorkflow({ workflowId: "wf-1", workflowName: "order", input: { a: 1 } });
-    const server = new ZoryaServer({ workflows: makeWorkflows(storage), sseIntervalMs: 50 });
+    const server = new ZoryaServer({
+      insecure: true,
+      workflows: makeWorkflows(storage),
+      sseIntervalMs: 50,
+    });
 
     const res = await server.handle(new Request("http://x/api/runs/wf-1/events"));
     expect(res.status).toBe(200);
@@ -65,7 +69,7 @@ describe("SSE /api/runs/:id/events", () => {
 
   it("returns 404 for missing workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const server = new ZoryaServer({ workflows: makeWorkflows(storage) });
+    const server = new ZoryaServer({ insecure: true, workflows: makeWorkflows(storage) });
     const res = await server.handle(new Request("http://x/api/runs/missing/events"));
     expect(res.status).toBe(404);
   });
