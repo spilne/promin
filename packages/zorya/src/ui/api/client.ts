@@ -938,7 +938,13 @@ export const api = {
   },
   runDag(
     id: string,
-    body: { version?: string; initialInput?: Record<string, unknown>; workflowId?: string },
+    body: {
+      namespaceId: string;
+      resourceId: string;
+      version?: string;
+      initialInput?: Record<string, unknown>;
+      workflowId?: string;
+    },
   ): Promise<DagRunResultDto> {
     return req<DagRunResultDto>(`/api/dags/${encodeURIComponent(id)}/run`, {
       method: "POST",

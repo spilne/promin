@@ -187,7 +187,7 @@ const agents: Record<string, Agent> = {
   ),
 };
 
-const resolver: AgentResolver = async (agentId) => {
+const resolver: AgentResolver = async ({ agentId }) => {
   const a = agents[agentId];
   if (!a) throw new Error(`unknown agent in DAG: ${agentId}`);
   return a;
@@ -219,7 +219,7 @@ async function main() {
   const result = await runner.run({
     workflow: wf,
     workflowId: `research-${Date.now()}`,
-    input: { dag, initialInput: { topic } },
+    input: { dag, initialInput: { topic }, scope: { namespaceId: "demo", resourceId: "cli" } },
   });
   const elapsed = Date.now() - start;
 

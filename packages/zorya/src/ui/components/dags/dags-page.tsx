@@ -11,6 +11,7 @@
 
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
+import { useNamespace } from "../../hooks/use-namespace.ts";
 import { api, type DagDto, type DagRunResultDto } from "../../api/client.ts";
 import { Page, PageHeader } from "../ui/page.tsx";
 
@@ -105,6 +106,11 @@ export function DagsPage() {
 }
 
 function DagDetail({ dag }: { dag: DagDto | null }) {
+  // A run acts in a tenant scope like an agent chat: the sidebar's
+  // namespace ("default" when none is selected) and a resource.
+  const [globalNamespace] = useNamespace();
+  const namespaceId = globalNamespace || "default";
+  const [resourceId, setResourceId] = useState("dashboard");
   const [running, setRunning] = useState(false);
   const [topic, setTopic] = useState("what makes a good engineering team");
   const [extraJson, setExtraJson] = useState("");
@@ -126,7 +132,7 @@ function DagDetail({ dag }: { dag: DagDto | null }) {
         const parsed = JSON.parse(extraJson) as Record<string, unknown>;
         initialInput = { ...initialInput, ...parsed };
       }
-      const res = await api.runDag(dag.id, { initialInput });
+      const res = await api.runDag(dag.id, { namespaceId, resourceId, initialInput });
       setResult(res);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -173,6 +179,16 @@ function DagDetail({ dag }: { dag: DagDto | null }) {
             onInput={(e) => setTopic((e.target as HTMLInputElement).value)}
           />
         </label>
+        <label class="form-control">
+          <span class="text-[10px] text-base-content/50 mb-1">
+            Resource (runs in namespace <span class="font-mono">{namespaceId}</span>)
+          </span>
+          <input
+            class="input input-bordered input-sm font-mono"
+            value={resourceId}
+            onInput={(e) => setResourceId((e.target as HTMLInputElement).value)}
+          />
+        </label>
         <button
           type="button"
           class="text-[10px] text-base-content/50 uppercase tracking-wider hover:text-base-content"
@@ -194,7 +210,11 @@ function DagDetail({ dag }: { dag: DagDto | null }) {
             />
           </label>
         )}
-        <button class="btn btn-sm btn-primary self-start" disabled={running} onClick={trigger}>
+        <button
+          class="btn btn-sm btn-primary self-start"
+          disabled={running || resourceId.trim().length === 0}
+          onClick={trigger}
+        >
           {running ? "Running…" : "▶ Run"}
         </button>
       </div>

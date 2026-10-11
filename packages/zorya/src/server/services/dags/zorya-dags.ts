@@ -1,13 +1,15 @@
 // ---------------------------------------------------------------------------
 // ZoryaDags — owns DagRegistry + agent resolver wiring for the DAG
 // gateway. Composes with ZoryaAgents: each DAG node references an
-// agentId, and the DAG executor resolves it via this service's
-// resolveAgent — typically delegating to ZoryaAgents.resolve under
-// the hood.
+// agentId, resolved through the agents service's registry and `resolve`
+// (refusing disabled recipes), so DAG nodes run with the same
+// credentials, tools and memory as direct invocations — and under the
+// same scope authorization.
 // ---------------------------------------------------------------------------
 
-import type { Agent, AgentResolver, DagRegistry } from "@promin/agent";
+import { createRegistryAgentResolver, type AgentResolver, type DagRegistry } from "@promin/agent";
 import type { WorkflowRunner } from "@promin/workflow";
+import type { ZoryaAgents } from "../agents/zorya-agents.ts";
 
 export interface ZoryaDagsConfig {
   registry: DagRegistry;
@@ -18,22 +20,26 @@ export interface ZoryaDagsConfig {
    */
   runner: WorkflowRunner;
   /**
-   * Resolve a node's `agentId` (and optional version) to an Agent
-   * instance. Hosts typically build this by closing over
-   * `ZoryaAgents.registry.get(id, version)` + `ZoryaAgents.resolve(recipe)`
-   * so the DAG layer doesn't need to know about agent recipe shapes.
+   * The agents service DAG nodes run through: its registry and `resolve`
+   * materialize each node, its instance registry places owner-scoped
+   * runs, and its `authorizeScope` decides who may start a run.
    */
-  resolveAgent: (agentId: string, version?: string) => Promise<Agent>;
+  agents: ZoryaAgents;
 }
 
 export class ZoryaDags {
   readonly registry: DagRegistry;
   readonly runner: WorkflowRunner;
+  readonly agents: ZoryaAgents;
   readonly resolver: AgentResolver;
 
   constructor(config: ZoryaDagsConfig) {
     this.registry = config.registry;
     this.runner = config.runner;
-    this.resolver = config.resolveAgent;
+    this.agents = config.agents;
+    this.resolver = createRegistryAgentResolver({
+      registry: config.agents.registry,
+      resolve: config.agents.resolve,
+    });
   }
 }

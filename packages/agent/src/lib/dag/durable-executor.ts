@@ -10,19 +10,54 @@
 //     the agent call, so a worker crash mid-DAG resumes from the last
 //     completed node.
 //
+// Every node runs bound to the run's `scope` (namespace + resource, or the
+// owner's instance of the node's agent), never unscoped. The host checks
+// who may start a run in that scope before starting it.
+//
 // The host wires its AgentResolver into createDagWorkflow at boot; the
 // resolver is closure-captured so it doesn't need to round-trip through
 // JSON (which it can't — Agent instances aren't serializable).
 // ---------------------------------------------------------------------------
 
 import { workflow, type Workflow } from "@promin/workflow";
+import type { AgentScope } from "../agent/types.ts";
+import { composeAgentInstanceId, type AgentInstanceRegistry } from "../instance/types.ts";
 import { checkBlockers, pickPath, resolveNodeInputs, stringifyTask } from "./dag-helpers.ts";
-import type { AgentResolver, AgenticDagRecipe, DagEdge, DagNode } from "./types.ts";
+import type { AgentResolver, AgenticDagRecipe, DagEdge, DagNode, DagRunScope } from "./types.ts";
 import { topologicalOrder, validateDag } from "./validate.ts";
+
+/**
+ * The scope one node runs in: the run's scope, with an owner-scoped run
+ * placed at the owner's instance of the node's agent.
+ */
+async function nodeScope(params: {
+  readonly runScope: DagRunScope;
+  readonly agentId: string;
+  readonly instances: AgentInstanceRegistry | undefined;
+}): Promise<AgentScope> {
+  const { runScope, agentId, instances } = params;
+  if (runScope.ownerId === undefined) {
+    return {
+      namespaceId: runScope.namespaceId,
+      ...(runScope.resourceId !== undefined && { resourceId: runScope.resourceId }),
+    };
+  }
+  const key = {
+    namespaceId: runScope.namespaceId,
+    registeredAgentId: agentId,
+    ownerId: runScope.ownerId,
+  };
+  const resourceId = instances
+    ? (await instances.resolveOrCreate(key)).id
+    : composeAgentInstanceId(key);
+  return { namespaceId: runScope.namespaceId, resourceId, ownerId: runScope.ownerId };
+}
 
 export interface DurableDagInput {
   readonly dag: AgenticDagRecipe;
   readonly initialInput: Readonly<Record<string, unknown>>;
+  /** Tenant scope every node runs in. See `DagRunScope`. */
+  readonly scope: DagRunScope;
 }
 
 export interface DurableDagOutput {
@@ -40,6 +75,13 @@ export interface DurableDagOutput {
 
 export interface CreateDagWorkflowConfig {
   readonly resolver: AgentResolver;
+  /**
+   * Instance registry. With it, a run scoped by `ownerId` resolves (or
+   * creates) the owner's instance of each node's agent and runs the node
+   * there; without it the node runs at the composed instance id without
+   * recording an instance row.
+   */
+  readonly instances?: AgentInstanceRegistry;
   /** Workflow name. Default `"agentic-dag"`. */
   readonly name?: string;
   /** Workflow type tag — surfaces in the dashboard. Default `"agentic-dag"`. */
@@ -55,7 +97,7 @@ export interface CreateDagWorkflowConfig {
 export function createDagWorkflow(
   config: CreateDagWorkflowConfig,
 ): Workflow<DurableDagInput, DurableDagOutput> {
-  const { resolver, name = "agentic-dag", type = "agentic-dag" } = config;
+  const { resolver, instances, name = "agentic-dag", type = "agentic-dag" } = config;
 
   return workflow<DurableDagInput>({ name, type })
     .journaled("execute-dag", function* (ctx, input) {
@@ -107,7 +149,13 @@ export function createDagWorkflow(
           const output = yield* ctx.activity(
             `node-${nodeId}`,
             async () => {
-              const agent = await resolver(node.agentId);
+              const scope = await nodeScope({
+                runScope: input.scope,
+                agentId: node.agentId,
+                instances,
+              });
+              const resolved = await resolver({ agentId: node.agentId, scope });
+              const agent = resolved.withScope(scope);
               const run = await agent.invoke({ task: stringifyTask(nodeInput) });
               const text = await run.text;
               return node.outputPath !== undefined

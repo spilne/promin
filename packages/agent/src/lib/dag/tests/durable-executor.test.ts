@@ -13,8 +13,12 @@
 
 import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
-import type { Agent, AgentRunOutput } from "../../agent/types.ts";
+import type { Agent, AgentRunOutput, AgentScope } from "../../agent/types.ts";
+import { InMemoryAgentInstanceRegistry } from "../../instance/in-memory-agent-instance-registry.ts";
+import { composeAgentInstanceId } from "../../instance/types.ts";
+import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
 import { createDagWorkflow } from "../durable-executor.ts";
+import { createRegistryAgentResolver } from "../registry-agent-resolver.ts";
 import type { AgentResolver, AgenticDagRecipe } from "../types.ts";
 
 function textOnly(text: string): AgentRunOutput<unknown> {
@@ -36,16 +40,21 @@ function stubAgent(transform: (s: string) => string = (s) => s): Agent {
       throw new Error("stub: thread");
     },
     listThreads: async () => [],
+    withScope() {
+      return this;
+    },
   } as unknown as Agent;
 }
 
 function makeResolver(byId: Record<string, Agent>): AgentResolver {
-  return async (id) => {
+  return async ({ agentId: id }) => {
     const a = byId[id];
     if (!a) throw new Error(`unknown agent: ${id}`);
     return a;
   };
 }
+
+const SCOPE = { namespaceId: "acme", resourceId: "r-1" } as const;
 
 const linear: AgenticDagRecipe = {
   id: "linear",
@@ -79,7 +88,7 @@ describe("createDagWorkflow — basic", () => {
     const result = await runner.run({
       workflow: wf,
       workflowId: "dag-1",
-      input: { dag: linear, initialInput: { task: "hello" } },
+      input: { dag: linear, initialInput: { task: "hello" }, scope: SCOPE },
     });
 
     expect(result.ok).toBe(true);
@@ -126,7 +135,7 @@ describe("createDagWorkflow — basic", () => {
     const result = await runner.run({
       workflow: wf,
       workflowId: "dag-skip-1",
-      input: { dag, initialInput: { task: "x" } },
+      input: { dag, initialInput: { task: "x" }, scope: SCOPE },
     });
 
     expect(result.ok).toBe(true);
@@ -148,7 +157,7 @@ describe("createDagWorkflow — replay safety", () => {
     let callsN1 = 0;
     let callsN2 = 0;
     let callsN3 = 0;
-    const resolver: AgentResolver = async (id) => {
+    const resolver: AgentResolver = async ({ agentId: id }) => {
       if (id === "upper") {
         return {
           ...stubAgent((s) => s.toUpperCase()),
@@ -181,7 +190,7 @@ describe("createDagWorkflow — replay safety", () => {
     const r1 = await runner1.run({
       workflow: wf,
       workflowId: "dag-replay-1",
-      input: { dag: linear, initialInput: { task: "hi" } },
+      input: { dag: linear, initialInput: { task: "hi" }, scope: SCOPE },
     });
     expect(r1.outputs.n3).toBe("<<HI!>>");
     expect(callsN1).toBe(1);
@@ -194,12 +203,107 @@ describe("createDagWorkflow — replay safety", () => {
     const r2 = await runner2.run({
       workflow: wf,
       workflowId: "dag-replay-1",
-      input: { dag: linear, initialInput: { task: "hi" } },
+      input: { dag: linear, initialInput: { task: "hi" }, scope: SCOPE },
     });
     expect(r2.outputs.n3).toBe("<<HI!>>");
     // Critical: counters didn't increment.
     expect(callsN1).toBe(1);
     expect(callsN2).toBe(1);
     expect(callsN3).toBe(1);
+  });
+});
+
+describe("createDagWorkflow — scope", () => {
+  /** An agent that records the scope it was bound to before each invoke. */
+  function scopeRecorder(bound: AgentScope[]): Agent {
+    const make = (scope: AgentScope | undefined): Agent =>
+      ({
+        ...stubAgent(),
+        invoke: async (input: { task: string }) => {
+          bound.push(scope ?? {});
+          return textOnly(input.task);
+        },
+        withScope: (next: AgentScope) => make(next),
+      }) as unknown as Agent;
+    return make(undefined);
+  }
+
+  const single: AgenticDagRecipe = {
+    id: "single",
+    version: "v1",
+    nodes: [{ id: "n1", agentId: "writer", inputs: { task: { kind: "initial", path: "task" } } }],
+    edges: [],
+    entry: ["n1"],
+    terminals: ["n1"],
+  };
+
+  it("binds every node to the run's namespace and resource", async () => {
+    const bound: AgentScope[] = [];
+    const wf = createDagWorkflow({
+      resolver: async () => scopeRecorder(bound),
+      name: "test-dag-scope",
+    });
+    const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+    const result = await runner.run({
+      workflow: wf,
+      workflowId: "dag-scope-1",
+      input: { dag: linear, initialInput: { task: "x" }, scope: SCOPE },
+    });
+    expect(result.ok).toBe(true);
+    expect(bound).toEqual([SCOPE, SCOPE, SCOPE]);
+  });
+
+  it("runs an owner-scoped node at the owner's instance of the node's agent", async () => {
+    const bound: AgentScope[] = [];
+    const instances = new InMemoryAgentInstanceRegistry();
+    const wf = createDagWorkflow({
+      resolver: async () => scopeRecorder(bound),
+      instances,
+      name: "test-dag-owner",
+    });
+    const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+    await runner.run({
+      workflow: wf,
+      workflowId: "dag-owner-1",
+      input: {
+        dag: single,
+        initialInput: { task: "x" },
+        scope: { namespaceId: "acme", ownerId: "alice" },
+      },
+    });
+    const instanceId = composeAgentInstanceId({
+      namespaceId: "acme",
+      registeredAgentId: "writer",
+      ownerId: "alice",
+    });
+    expect(bound).toEqual([{ namespaceId: "acme", resourceId: instanceId, ownerId: "alice" }]);
+    expect((await instances.get(instanceId))?.ownerId).toBe("alice");
+  });
+
+  it("the registry resolver fails a node whose agent is disabled", async () => {
+    const registry = new InMemoryAgentRegistry();
+    await registry.register({
+      id: "writer",
+      backend: {
+        type: "local",
+        model: { provider: "test", id: "m" },
+        role: { inline: { systemPrompt: null, tools: [] } },
+      },
+      metadata: { capabilities: [], tags: [], enabled: false },
+    });
+    const bound: AgentScope[] = [];
+    const wf = createDagWorkflow({
+      resolver: createRegistryAgentResolver({ registry, resolve: () => scopeRecorder(bound) }),
+      name: "test-dag-disabled",
+    });
+    const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+    const result = await runner.run({
+      workflow: wf,
+      workflowId: "dag-disabled-1",
+      input: { dag: single, initialInput: { task: "x" }, scope: SCOPE },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.errors.n1).toContain("agent_disabled");
+    expect(bound).toEqual([]);
   });
 });

@@ -342,7 +342,14 @@ export class ZoryaServer {
     }
     if (this.skills) mountSkills({ router, skills: this.skills, agents: this.agents });
     if (this.fragments) mountFragments({ router, fragments: this.fragments, agents: this.agents });
-    if (this.secrets) mountSecrets({ router, secrets: this.secrets, namespaces });
+    if (this.secrets) {
+      mountSecrets({
+        router,
+        secrets: this.secrets,
+        namespaces,
+        authorizeScope: this.agents?.authorizeScope,
+      });
+    }
     if (config.webhooks && this.agents) {
       mountWebhooks({
         router,
@@ -362,7 +369,7 @@ export class ZoryaServer {
         logger: this.logger,
       });
     }
-    if (this.dags) mountDags({ router, dags: this.dags });
+    if (this.dags) mountDags({ router, dags: this.dags, namespaces });
     if (this.knowledgeBases) {
       mountKnowledgeBases({ router, knowledgeBases: this.knowledgeBases, agents: this.agents });
     }

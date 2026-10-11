@@ -72,6 +72,7 @@ import type {
   AgentInputSource,
   AgentInvokeOpts,
   AgentRunOutput,
+  AgentScope,
   AgentThread,
   FinishReason,
   ListThreadsParams,
@@ -102,6 +103,13 @@ export interface LocalAgentConfig<TOutput = any> {
   readonly namespaceId?: string;
   /** Default user / persona key. Per-thread override via `ThreadOptions`. */
   readonly resourceId?: string;
+  /**
+   * Owner the `resourceId` belongs to, when the caller resolved it from an
+   * agent instance. Set by the authorizing gateway through
+   * `withScope({ ownerId })`; `callAgent` uses it to run a peer under the
+   * same owner's instance of that peer. Never derived from `resourceId`.
+   */
+  readonly ownerId?: string;
   /**
    * Agent capabilities, from the recipe's `metadata.capabilities`.
    * Gates elevated tools: an elevated tool whose `requires` capability
@@ -496,11 +504,18 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
    * `withScope()` is cheap — just constructs a new `LocalAgent` carrying the same
    * underlying config plus the new defaults.
    */
-  withScope(scope: { namespaceId?: string; resourceId?: string }): LocalAgent<TOutput> {
+  withScope(scope: AgentScope): LocalAgent<TOutput> {
+    const resourceId = scope.resourceId ?? this.config.resourceId;
+    // The owner travels with the resource it was resolved for: a new
+    // resource without an owner drops the old owner.
+    const ownerId =
+      scope.ownerId ?? (scope.resourceId === undefined ? this.config.ownerId : undefined);
+    const { ownerId: _previousOwner, ...rest } = this.config;
     return new LocalAgent<TOutput>({
-      ...this.config,
+      ...rest,
       namespaceId: scope.namespaceId ?? this.config.namespaceId,
-      resourceId: scope.resourceId ?? this.config.resourceId,
+      resourceId,
+      ...(ownerId !== undefined && { ownerId }),
     });
   }
 
@@ -633,11 +648,16 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       const recipe = this.config.network.recipe;
       const networkRecipe = recipe.backend.type === "local" ? recipe.backend.network : undefined;
       if (networkRecipe) {
-        const inferred = inferOwnerId(scope.resourceId);
+        // The owner is the one the gateway bound with `withScope`, and only
+        // while the turn runs at the resource it was bound for.
+        const ownerId =
+          this.config.ownerId !== undefined && scope.resourceId === this.config.resourceId
+            ? this.config.ownerId
+            : undefined;
         const callerScope: import("../network/runtime.ts").NetworkCallerScope = {
           namespaceId: scope.namespaceId,
           ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
-          ...(inferred !== undefined && { ownerId: inferred }),
+          ...(ownerId !== undefined && { ownerId }),
         };
         const findAgent = createFindAgentTool({
           deps: this.config.network.deps,
@@ -1898,20 +1918,6 @@ async function buildRetrieverContext(params: {
 function stripStorageMeta(m: Message & { seq?: number; createdAt?: number }): Message {
   const { seq: _seq, createdAt: _createdAt, ...rest } = m as Record<string, unknown> & Message;
   return rest as Message;
-}
-
-/**
- * Recover the `ownerId` from a composed AgentInstance id of the form
- * `${namespaceId}::${registeredAgentId}::${ownerId}`. Returns undefined
- * for resourceIds that don't match the convention so `callAgent` can
- * fall through to non-instance behaviour.
- */
-function inferOwnerId(resourceId: string | undefined): string | undefined {
-  if (!resourceId) return undefined;
-  const parts = resourceId.split("::");
-  if (parts.length !== 3) return undefined;
-  const owner = parts[2];
-  return owner && owner.length > 0 ? owner : undefined;
 }
 
 // ---- ChunkQueue (single-consumer async queue, ported from agent-loop) ----

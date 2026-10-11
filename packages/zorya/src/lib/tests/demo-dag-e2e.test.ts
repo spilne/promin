@@ -246,7 +246,11 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
       const run = await fetch(`${baseUrl}/api/dags/${dagId}/run`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ initialInput: { topic: "hello dag" } }),
+        body: JSON.stringify({
+          namespaceId: "default",
+          resourceId: "e2e",
+          initialInput: { topic: "hello dag" },
+        }),
       });
       expect(run.status).toBe(200);
       const body = (await run.json()) as {

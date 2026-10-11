@@ -242,10 +242,18 @@ export type {
 } from "../memory/consolidator.ts";
 export type { EpisodicRecord } from "../memory/types.ts";
 
-/** Tenant binding for `Agent.bind()`. */
+/** Tenant binding for `Agent.withScope()`. */
 export interface AgentScope {
   readonly namespaceId?: string;
   readonly resourceId?: string;
+  /**
+   * Owner of `resourceId`, when the caller resolved the resource from an
+   * agent instance of that owner. Set it from the authorized caller, never
+   * by parsing a resource id: peer delegation (`callAgent`) runs the
+   * callee under this owner's instance of the callee. Backends without
+   * peer delegation ignore it.
+   */
+  readonly ownerId?: string;
 }
 
 /**

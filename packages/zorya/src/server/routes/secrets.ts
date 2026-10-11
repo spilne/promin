@@ -11,7 +11,10 @@
 // outside of in-process resolve() calls by the agent runtime.
 //
 // Permission gradient: coarse — anyone with dashboard auth can read/write
-// at any scope.
+// at any scope, unless an `authorizeScope` hook is wired: then listing,
+// storing or deleting a namespace- or resource-scoped secret needs the
+// caller to be allowed that (namespace, resource?) — 403 `scope_forbidden`.
+// The global scope is not a tenant scope and stays behind server auth only.
 // ---------------------------------------------------------------------------
 
 import type { SecretScope, SecretsStorage } from "@promin/agent";
@@ -20,10 +23,12 @@ import { z } from "zod";
 import { json, jsonError, noContent } from "../router.ts";
 import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
 import { requireActiveNamespace, secretScopeNamespace } from "../namespace-guard.ts";
-import { internalError } from "./agent-gateway-kit.ts";
+import { internalError, type ScopeAuthorizer } from "./agent-gateway-kit.ts";
 
 export interface SecretsGatewayDeps {
   readonly secrets: SecretsStorage;
+  /** Binds a namespace- or resource-scoped secret to the caller. See `ScopeAuthorizer`. */
+  readonly authorizeScope?: ScopeAuthorizer;
   /**
    * When set, storing a namespace- or resource-scoped secret needs a
    * registered, active namespace (404 `namespace_not_found`, 409
@@ -82,6 +87,27 @@ export const SecretScopeQuerySchema = z
 
 const SecretParamsSchema = z.object({ key: SecretKeySchema });
 
+/**
+ * 403 `scope_forbidden` unless the caller may act in the secret scope's
+ * namespace (and resource). Global scopes are not checked.
+ */
+export async function forbidSecretScope(params: {
+  readonly authorizeScope: ScopeAuthorizer | undefined;
+  readonly req: Request;
+  readonly scope: SecretScope;
+}): Promise<Response | null> {
+  const { authorizeScope, req, scope } = params;
+  if (!authorizeScope || scope.kind === "global") return null;
+  const allowed = await authorizeScope({
+    req,
+    scope: {
+      namespaceId: scope.namespaceId,
+      ...(scope.kind === "resource" && { resourceId: scope.resourceId }),
+    },
+  });
+  return allowed ? null : jsonError(403, "scope_forbidden");
+}
+
 export interface CreateSecretResponse {
   readonly scope: SecretScope;
   readonly key: string;
@@ -96,6 +122,8 @@ export function createSecret(deps: SecretsGatewayDeps) {
   return async (req: Request): Promise<Response> => {
     const body = await parseBody({ req, schema: CreateSecretRequestSchema });
     const scope: SecretScope = body.scope ?? { kind: "global" };
+    const forbidden = await forbidSecretScope({ authorizeScope: deps.authorizeScope, req, scope });
+    if (forbidden) return forbidden;
     if (Buffer.byteLength(body.value, "utf8") > SECRET_MAX_VALUE_BYTES) {
       return jsonError(
         413,
@@ -120,6 +148,8 @@ export function createSecret(deps: SecretsGatewayDeps) {
 export function listSecrets(deps: SecretsGatewayDeps) {
   return async (req: Request): Promise<Response> => {
     const scope = parseQuery({ req, schema: SecretScopeQuerySchema });
+    const forbidden = await forbidSecretScope({ authorizeScope: deps.authorizeScope, req, scope });
+    if (forbidden) return forbidden;
     try {
       const keys = await deps.secrets.list({ scope });
       const response: ListSecretsResponse = { scope, keys };
@@ -134,6 +164,8 @@ export function deleteSecret(deps: SecretsGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const { key } = parseParams({ params, schema: SecretParamsSchema });
     const scope = parseQuery({ req, schema: SecretScopeQuerySchema });
+    const forbidden = await forbidSecretScope({ authorizeScope: deps.authorizeScope, req, scope });
+    if (forbidden) return forbidden;
     try {
       const keys = await deps.secrets.list({ scope });
       if (!keys.includes(key)) return jsonError(404, "not_found");

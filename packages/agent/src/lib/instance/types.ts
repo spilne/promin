@@ -43,8 +43,8 @@
 //       createdAt
 //     }
 //
-// `id` is just `${namespaceId}::${registeredAgentId}::${ownerId}` (see
-// `composeAgentInstanceId`). Deterministic — you can compute it from the
+// `id` is `${namespaceId}::${registeredAgentId}::${ownerId}` with each part
+// escaped (see `composeAgentInstanceId`). Deterministic — you can compute it from the
 // inputs without round-tripping through the registry.
 //
 //
@@ -150,8 +150,8 @@
 
 export interface AgentInstance {
   /**
-   * Stable opaque id. Convention: `${namespaceId}::${registeredAgentId}::${ownerId}`
-   * (see `composeAgentInstanceId`) so the id is deterministic from the
+   * Stable opaque id. Convention: `${namespaceId}::${registeredAgentId}::${ownerId}`,
+   * each part escaped (see `composeAgentInstanceId`), so the id is deterministic from the
    * create input — but treat it as opaque, since alternative
    * implementations may pick different formats.
    *
@@ -235,13 +235,22 @@ export interface AgentInstanceRegistry {
  * the same agent recipe don't collide on the registry row — multi-tenant
  * is the default, not an opt-in.
  *
- * Delimiter `::` was chosen to avoid collision with characters that
- * commonly appear in agent ids (`/`, `-`, `:`, alphanumerics).
+ * The parts are joined with `::`. Each part is escaped first (`%` becomes
+ * `%25`, `:` becomes `%3A`), so no part can contain the separator and two
+ * different triples never compose to the same id — `("a::b", "c", "d")`
+ * and `("a", "b::c", "d")` stay distinct. Parts without `%` or `:` are
+ * kept as is.
  */
 export function composeAgentInstanceId(input: {
   readonly namespaceId: string;
   readonly registeredAgentId: string;
   readonly ownerId: string;
 }): string {
-  return `${input.namespaceId}::${input.registeredAgentId}::${input.ownerId}`;
+  return [input.namespaceId, input.registeredAgentId, input.ownerId]
+    .map(escapeInstanceIdPart)
+    .join("::");
+}
+
+function escapeInstanceIdPart(part: string): string {
+  return part.replaceAll("%", "%25").replaceAll(":", "%3A");
 }

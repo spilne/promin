@@ -1262,18 +1262,10 @@ for (const r of dagAgentRecipes) {
 }
 await dagRegistry.register(researchSynthesisRecipe);
 
-// DAG resolver: agentId → Agent. Reuses the existing agentRegistry +
-// resolveAgent so DAG runs share the same credential / tool / memory
-// machinery as direct chat invocations.
-const dags = new ZoryaDags({
-  registry: dagRegistry,
-  runner,
-  resolveAgent: async (agentId, version) => {
-    const recipe = await agentRegistry.get(agentId, version);
-    if (!recipe) throw new Error(`DAG node references unknown agent: ${agentId}`);
-    return resolveAgent(recipe);
-  },
-});
+// DAG nodes resolve through the agents service, so DAG runs share the same
+// credential / tool / memory machinery (and scope checks) as direct chat
+// invocations.
+const dags = new ZoryaDags({ registry: dagRegistry, runner, agents });
 
 console.log(
   `[zorya] DAG registered: ${researchSynthesisRecipe.id}@${researchSynthesisRecipe.version ?? "v1"} ` +

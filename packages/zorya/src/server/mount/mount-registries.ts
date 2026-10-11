@@ -6,6 +6,7 @@
 import type { SecretsStorage } from "@promin/agent";
 import type { NamespaceRegistry } from "@promin/workflow";
 import type { Router } from "../router.ts";
+import type { ScopeAuthorizer } from "../routes/agent-gateway-kit.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaDags } from "../services/dags/index.ts";
 import type { ZoryaFragments } from "../services/fragments/index.ts";
@@ -114,10 +115,13 @@ export function mountSecrets(params: {
   readonly secrets: SecretsStorage;
   /** Registry a stored secret's namespace is checked against. */
   readonly namespaces: NamespaceRegistry | undefined;
+  /** The agents service's scope authorizer, applied to tenant-scoped secrets. */
+  readonly authorizeScope: ScopeAuthorizer | undefined;
 }): void {
   const sec = {
     secrets: params.secrets,
     ...(params.namespaces !== undefined && { namespaces: params.namespaces }),
+    ...(params.authorizeScope !== undefined && { authorizeScope: params.authorizeScope }),
   };
   params.router
     .post("/api/secrets", createSecret(sec))
@@ -125,12 +129,22 @@ export function mountSecrets(params: {
     .delete("/api/secrets/:key", deleteSecret(sec));
 }
 
-export function mountDags(params: { readonly router: Router; readonly dags: ZoryaDags }): void {
+export function mountDags(params: {
+  readonly router: Router;
+  readonly dags: ZoryaDags;
+  /** Registry a run's namespace is checked against. */
+  readonly namespaces: NamespaceRegistry | undefined;
+}): void {
   const { dags } = params;
+  const { agents } = dags;
   const dagDeps: DagGatewayDeps = {
     registry: dags.registry,
     resolver: dags.resolver,
     runner: dags.runner,
+    agents: agents.registry,
+    ...(agents.instances !== undefined && { instances: agents.instances }),
+    ...(agents.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
+    ...(params.namespaces !== undefined && { namespaces: params.namespaces }),
   };
   params.router
     .get("/api/dags", listDags(dagDeps))

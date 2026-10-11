@@ -332,11 +332,13 @@ describe("agents network — delegation", () => {
       withInstances: true,
     });
 
-    // Caller scoped under coordinator's instance for alice.
+    // Caller scoped under coordinator's instance for alice; the owner is
+    // bound explicitly, as an authorizing gateway does.
     const callerResourceId = "acme::coordinator::alice";
     const agent = resolve(coordinator).withScope({
       namespaceId: "acme",
       resourceId: callerResourceId,
+      ownerId: "alice",
     });
     await agent.invoke({ task: "delegate" });
 
@@ -345,6 +347,48 @@ describe("agents network — delegation", () => {
     expect(writerInstance).not.toBeNull();
     expect(writerInstance?.ownerId).toBe("alice");
     expect(writerInstance?.registeredAgentId).toBe("writer");
+  });
+
+  it("callAgent never parses an owner out of the caller's resourceId", async () => {
+    const { coordinator, resolve, instanceRegistry } = await bootNetwork({
+      coordinatorScript: [
+        {
+          content: null,
+          finishReason: "tool_use",
+          toolCalls: [{ id: "t1", name: "callAgent", input: { id: "writer", prompt: "draft" } }],
+        },
+        { content: "ok", finishReason: "stop" },
+      ],
+      writerResponse: { content: "writer-out", finishReason: "stop" },
+      withInstances: true,
+    });
+    // A resource shaped like alice's instance id, but no owner bound.
+    const agent = resolve(coordinator).withScope({
+      namespaceId: "acme",
+      resourceId: "acme::coordinator::alice",
+    });
+    await agent.invoke({ task: "delegate" });
+    expect(await instanceRegistry!.list()).toEqual([]);
+  });
+
+  it("an owner bound with withScope is dropped when the resource changes", async () => {
+    const { coordinator, resolve, instanceRegistry } = await bootNetwork({
+      coordinatorScript: [
+        {
+          content: null,
+          finishReason: "tool_use",
+          toolCalls: [{ id: "t1", name: "callAgent", input: { id: "writer", prompt: "draft" } }],
+        },
+        { content: "ok", finishReason: "stop" },
+      ],
+      writerResponse: { content: "writer-out", finishReason: "stop" },
+      withInstances: true,
+    });
+    const agent = resolve(coordinator)
+      .withScope({ namespaceId: "acme", resourceId: "acme::coordinator::alice", ownerId: "alice" })
+      .withScope({ resourceId: "shared" });
+    await agent.invoke({ task: "delegate" });
+    expect(await instanceRegistry!.list()).toEqual([]);
   });
 
   it("maxDepth blocks runaway A→B→A cycles", async () => {

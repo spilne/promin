@@ -203,7 +203,13 @@ export async function loadScopedAgent(params: {
   let agent: Agent;
   try {
     const resolved = await deps.resolve(recipe, { namespaceId: scope.namespaceId, resourceId });
-    agent = resolved.withScope({ namespaceId: scope.namespaceId, resourceId });
+    // The owner comes from the authorized request, never from parsing
+    // the instance id, so peer delegation runs under the same owner.
+    agent = resolved.withScope({
+      namespaceId: scope.namespaceId,
+      resourceId,
+      ...(scope.ownerId !== undefined && { ownerId: scope.ownerId }),
+    });
   } catch (err) {
     return internalError({ code: "resolve_failed", err });
   }

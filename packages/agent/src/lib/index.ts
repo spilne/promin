@@ -261,6 +261,7 @@ export type { RecordChatArgs, RecordToolArgs } from "./metrics/instrument.ts";
 export {
   DEFAULT_NETWORK,
   DEFAULT_MAX_DEPTH,
+  NetworkCycleError,
   NetworkMaxDepthError,
   NetworkPermissionError,
   matchesNetworkScope,
@@ -268,7 +269,11 @@ export {
   peerVisible,
 } from "./network/types.ts";
 export type { NetworkRecipe, NetworkScope, NetworkScopeObject, PeerView } from "./network/types.ts";
-export type { NetworkRuntimeDeps, NetworkCallerScope } from "./network/runtime.ts";
+export type {
+  NetworkCallAuthorizer,
+  NetworkCallerScope,
+  NetworkRuntimeDeps,
+} from "./network/runtime.ts";
 export { createFindAgentTool, createCallAgentTool } from "./network/runtime.ts";
 export { currentCallContext, nextCallFrame, runInCallContext } from "./network/depth.ts";
 export type { NetworkCallContext } from "./network/depth.ts";
@@ -628,9 +633,11 @@ export type {
 export { pickPath } from "./dag/dag-helpers.ts";
 export { validateDag, topologicalOrder } from "./dag/validate.ts";
 export { DagValidationError } from "./dag/types.ts";
+export { createRegistryAgentResolver } from "./dag/registry-agent-resolver.ts";
 export type {
   AgentResolver,
   AgenticDagRecipe,
+  DagRunScope,
   DagNode,
   DagEdge,
   NodeInputSource,

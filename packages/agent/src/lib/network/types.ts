@@ -13,8 +13,11 @@
 //      instance, so `alice → coordinator → writer` reuses
 //      `acme::writer::alice` instead of creating a fresh untracked
 //      resourceId.
-//   3. A depth counter (AsyncLocalStorage) blocks cycles past `maxDepth`.
-//   4. Each callee runs with its OWN tool kit per its recipe — caller's
+//   3. The call chain (AsyncLocalStorage) refuses a callee already on it
+//      (a cycle) and caps the chain at `maxDepth`.
+//   4. A disabled callee is neither listed nor callable; the host's
+//      `authorizeCall` hook gets the last word on every delegation.
+//   5. Each callee runs with its OWN tool kit per its recipe — caller's
 //      tools never leak.
 //
 // Two-layer access control
@@ -152,8 +155,8 @@ export function peerVisible(args: {
 }
 
 /**
- * Structured error thrown by `callAgent` when the cycle / depth guard
- * trips. Surfaces the chain so the caller's LLM can decide what to do.
+ * Structured error reported by `callAgent` when the depth guard trips.
+ * Surfaces the chain so the caller's LLM can decide what to do.
  */
 export class NetworkMaxDepthError extends Error {
   readonly code = "network_max_depth_exceeded";
@@ -163,7 +166,24 @@ export class NetworkMaxDepthError extends Error {
     readonly chain: ReadonlyArray<string>,
   ) {
     super(
-      `callAgent: cycle / depth guard tripped at depth ${attemptedDepth} (max ${maxDepth}). Chain: ${chain.join(" → ")}`,
+      `callAgent: depth guard tripped at depth ${attemptedDepth} (max ${maxDepth}). Chain: ${chain.join(" → ")}`,
+    );
+  }
+}
+
+/**
+ * Structured error reported by `callAgent` when the callee is already on
+ * the call chain: calling it would loop back into an agent that is
+ * waiting on this very call.
+ */
+export class NetworkCycleError extends Error {
+  readonly code = "network_cycle";
+  constructor(
+    readonly peerId: string,
+    readonly chain: ReadonlyArray<string>,
+  ) {
+    super(
+      `callAgent: calling ${peerId} would create a cycle. Chain: ${[...chain, peerId].join(" → ")}`,
     );
   }
 }

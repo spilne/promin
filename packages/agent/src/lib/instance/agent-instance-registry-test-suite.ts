@@ -72,6 +72,24 @@ export function agentInstanceRegistryTestSuite(
       expect(await reg.list()).toHaveLength(2);
     });
 
+    it("triples whose parts contain the separator never share an instance", async () => {
+      const reg = await make();
+      const a = await reg.resolveOrCreate({
+        namespaceId: "acme::writer",
+        registeredAgentId: "alice",
+        ownerId: "bob",
+      });
+      const b = await reg.resolveOrCreate({
+        namespaceId: "acme",
+        registeredAgentId: "writer::alice",
+        ownerId: "bob",
+      });
+      expect(a.id).not.toBe(b.id);
+      expect(b.namespaceId).toBe("acme");
+      expect(b.registeredAgentId).toBe("writer::alice");
+      expect(await reg.list()).toHaveLength(2);
+    });
+
     it("displayName + metadata from the input apply only on creation", async () => {
       const reg = await make();
       await reg.resolveOrCreate({

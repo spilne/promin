@@ -7,6 +7,7 @@ import {
   AgentTurnGate,
   InMemoryAgentInstanceRegistry,
   InMemoryAgentRegistry,
+  InMemoryDagRegistry,
   InMemoryLeaseStore,
   InMemoryMemoryStore,
   InMemoryRoleRegistry,
@@ -21,7 +22,7 @@ import {
   createWorkflowRunner,
   type NamespaceRegistry,
 } from "@promin/workflow";
-import { LocalWorkflows, ZoryaAgents } from "../../../index.ts";
+import { LocalWorkflows, ZoryaAgents, ZoryaDags } from "../../../index.ts";
 import { ZoryaServer } from "../../server.ts";
 import type { ScopeAuthorizer } from "../agent-gateway-kit.ts";
 
@@ -39,6 +40,8 @@ export interface HarnessOpts {
   authorizeScope?: ScopeAuthorizer;
   /** Wrap the resolved agent (e.g. to make `thread()` throw). */
   wrapAgent?: (agent: ReturnType<typeof resolveLocalAgent>) => unknown;
+  /** Mount the DAG gateway over the same agents. */
+  dags?: boolean;
   /** Namespace registry the server checks agent writes against. */
   namespaces?: NamespaceRegistry;
 }
@@ -83,15 +86,19 @@ export async function bootAgents(opts: HarnessOpts = {}) {
     ...(turnGate && { turnGate, workerId: "w-1" }),
     ...(opts.authorizeScope && { authorizeScope: opts.authorizeScope }),
   });
+  const dags = opts.dags
+    ? new ZoryaDags({ registry: new InMemoryDagRegistry({ clock }), runner, agents })
+    : undefined;
   const server = new ZoryaServer({
     insecure: true,
     workflows,
     agents,
     clock,
     ...(secrets && { secrets }),
+    ...(dags && { dags }),
     ...(opts.namespaces && { namespaces: opts.namespaces }),
   });
-  return { server, registry, memory, instances, roles, secrets, leaseStore, clock, storage };
+  return { server, registry, memory, instances, roles, secrets, dags, leaseStore, clock, storage };
 }
 
 export function req(

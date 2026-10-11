@@ -18,7 +18,7 @@ import {
   restoreRedactedSecrets,
 } from "../agent-gateway-kit.ts";
 import { isDraftId } from "../agent-drafts.ts";
-import { SECRET_KEY_PATTERN, SECRET_MAX_VALUE_BYTES } from "../secrets.ts";
+import { forbidSecretScope, SECRET_KEY_PATTERN, SECRET_MAX_VALUE_BYTES } from "../secrets.ts";
 import type {
   AgentGatewayDeps,
   AgentSourcesResponse,
@@ -303,6 +303,12 @@ export function cloneAgent(deps: AgentGatewayDeps) {
       return jsonError(400, "secrets_unsupported", "This server has no secrets storage wired.");
     }
     if (provided.length > 0) {
+      const forbidden = await forbidSecretScope({
+        authorizeScope: deps.authorizeScope,
+        req,
+        scope: secretsScope,
+      });
+      if (forbidden) return forbidden;
       await requireActiveNamespace({
         registry: deps.namespaces,
         namespace: secretScopeNamespace(secretsScope),

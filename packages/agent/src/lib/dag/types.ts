@@ -1,4 +1,4 @@
-import type { Agent } from "../agent/types.ts";
+import type { Agent, AgentScope } from "../agent/types.ts";
 
 // ---------------------------------------------------------------------------
 // Agentic DAG — a planned multi-agent execution graph.
@@ -89,11 +89,30 @@ export interface AgenticDagRecipe {
 }
 
 /**
- * Strategy for resolving a node's `agentId` to an Agent instance. The
- * host supplies this so the executor doesn't bake in one resolution path
- * (a registry, a local cache, a remote lookup, etc).
+ * The tenant scope a DAG run acts in. Every node runs bound to it: in
+ * `namespaceId`, at `resourceId` — or, with `ownerId`, at that owner's
+ * instance of the node's agent (see `composeAgentInstanceId`). Set it
+ * from the authorized caller that started the run.
  */
-export type AgentResolver = (agentId: string, version?: string) => Promise<Agent>;
+export interface DagRunScope {
+  readonly namespaceId: string;
+  readonly resourceId?: string;
+  readonly ownerId?: string;
+}
+
+/**
+ * Strategy for resolving a node's `agentId` to an Agent. The host supplies
+ * this so the executor doesn't bake in one resolution path (a registry, a
+ * local cache, a remote lookup, etc). `scope` is the scope the node will
+ * run in — the executor binds the returned agent to it with `withScope`.
+ * Throw to refuse a node (unknown or disabled agent); the node then fails
+ * under its `onError` policy. `createRegistryAgentResolver` is the
+ * registry-backed resolver that refuses disabled recipes.
+ */
+export type AgentResolver = (params: {
+  readonly agentId: string;
+  readonly scope: AgentScope;
+}) => Promise<Agent>;
 
 /** Surfaced when the DAG can't be statically validated. */
 export class DagValidationError extends Error {

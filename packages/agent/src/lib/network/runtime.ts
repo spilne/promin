@@ -22,13 +22,14 @@ import { inlineRoleDefinition } from "../role/resolve-role.ts";
 import type { NetworkRecipe, NetworkScope, NetworkScopeObject, PeerView } from "./types.ts";
 import {
   DEFAULT_MAX_DEPTH,
+  NetworkCycleError,
   NetworkMaxDepthError,
   NetworkPermissionError,
   matchesNetworkScope,
   networksOverlap,
   peerVisible,
 } from "./types.ts";
-import { currentCallContext, nextCallFrame, runInCallContext } from "./depth.ts";
+import { nextCallFrame, runInCallContext } from "./depth.ts";
 
 /**
  * Resolver-supplied wiring that lets `findAgent` / `callAgent` reach
@@ -55,17 +56,34 @@ export interface NetworkRuntimeDeps {
    * production.
    */
   readonly instanceRegistry?: AgentInstanceRegistry;
+  /**
+   * Optional host check run before every delegation, after the recipe
+   * policy passed. Return `false` to refuse the call. Use it to bind
+   * delegation to the same rules the host applies to direct invocations
+   * (e.g. which agents a tenant may run).
+   */
+  readonly authorizeCall?: NetworkCallAuthorizer;
 }
+
+/** Host hook deciding whether one agent may delegate to another in a scope. */
+export type NetworkCallAuthorizer = (params: {
+  readonly callerAgentId: string;
+  readonly calleeAgentId: string;
+  /** The scope the callee will run in — the caller's own. */
+  readonly scope: NetworkCallerScope;
+  /** Agents waiting on this call, oldest first; ends with the caller. */
+  readonly chain: ReadonlyArray<string>;
+}) => boolean | Promise<boolean>;
 
 /** Per-turn scope that the tools close over. Built by LocalAgent.buildTools. */
 export interface NetworkCallerScope {
   readonly namespaceId: string;
   readonly resourceId?: string;
   /**
-   * Owner inferred from `resourceId`. Used to propagate ownership to
-   * callees via the instance registry. When the resourceId isn't a
-   * composed instance id, owner stays undefined and the callee runs at
-   * the same raw resourceId.
+   * Owner the caller's `resourceId` was resolved for, as bound by the
+   * authorizing gateway (`withScope({ ownerId })`). Used to run callees
+   * under the same owner's instance. Without it the callee runs at the
+   * caller's raw resourceId.
    */
   readonly ownerId?: string;
 }
@@ -148,6 +166,8 @@ export function createFindAgentTool(args: {
 
       const visible = all.filter((p) => {
         if (p.id === callerRecipe.id) return false; // never list self
+        // A disabled (kill-switched) agent can't be called, so don't offer it.
+        if (p.metadata.enabled === false) return false;
         return peerVisible({
           callerNamespaceId: scope.namespaceId,
           callerNetworks: network.networks,
@@ -233,8 +253,12 @@ export function createCallAgentTool(args: {
     execute: async (input): Promise<CallAgentOutput> => {
       // Cycle / depth guard. nextCallFrame reads the current ALS frame
       // and returns what the next one would be — which is what we open
-      // around the callee's invoke().
+      // around the callee's invoke(). Its chain ends with the caller, so
+      // a callee already on it (the caller itself included) is a cycle.
       const nextFrame = nextCallFrame(callerRecipe.id);
+      if (nextFrame.chain.includes(input.id)) {
+        return { ok: false, error: new NetworkCycleError(input.id, nextFrame.chain).message };
+      }
       if (nextFrame.depth > maxDepth) {
         const err = new NetworkMaxDepthError(maxDepth, nextFrame.depth, nextFrame.chain);
         return { ok: false, error: err.message };
@@ -243,6 +267,9 @@ export function createCallAgentTool(args: {
       const calleeRecipe = await deps.registry.get(input.id);
       if (!calleeRecipe) {
         return { ok: false, error: `agent_not_found: no recipe registered as "${input.id}"` };
+      }
+      if (calleeRecipe.metadata.enabled === false) {
+        return { ok: false, error: `agent_disabled: "${calleeRecipe.id}" is disabled` };
       }
 
       const peerView = asPeerView(calleeRecipe, scope.namespaceId);
@@ -253,15 +280,31 @@ export function createCallAgentTool(args: {
         peer: peerView,
       });
       if (!allowed) {
-        const reason = explainDenial(network, peerView, currentCallContext());
+        const reason = explainDenial({ network, peer: peerView });
         const err = new NetworkPermissionError(callerRecipe.id, calleeRecipe.id, reason);
         return { ok: false, error: err.message };
       }
+      if (deps.authorizeCall) {
+        const authorized = await deps.authorizeCall({
+          callerAgentId: callerRecipe.id,
+          calleeAgentId: calleeRecipe.id,
+          scope,
+          chain: nextFrame.chain,
+        });
+        if (!authorized) {
+          const err = new NetworkPermissionError(
+            callerRecipe.id,
+            calleeRecipe.id,
+            "refused by the host",
+          );
+          return { ok: false, error: err.message };
+        }
+      }
 
       // Owner propagation: if we have an instance registry AND the caller
-      // has an inferred owner, resolve the callee's instance under the
-      // caller's owner. Otherwise, the callee runs at the same raw
-      // resourceId the caller had (fine for tests / non-instance flows).
+      // was bound to an owner, resolve the callee's instance under that
+      // owner. Otherwise, the callee runs at the same raw resourceId the
+      // caller had (fine for tests / non-instance flows).
       let calleeResourceId: string | undefined = scope.resourceId;
       if (deps.instanceRegistry && scope.ownerId !== undefined) {
         const instance = await deps.instanceRegistry.resolveOrCreate({
@@ -278,7 +321,8 @@ export function createCallAgentTool(args: {
       const calleeAgent = deps.resolve(calleeRecipe);
       const scoped = calleeAgent.withScope({
         namespaceId: scope.namespaceId,
-        resourceId: calleeResourceId,
+        ...(calleeResourceId !== undefined && { resourceId: calleeResourceId }),
+        ...(scope.ownerId !== undefined && { ownerId: scope.ownerId }),
       });
 
       try {
@@ -318,11 +362,8 @@ export function createCallAgentTool(args: {
   });
 }
 
-function explainDenial(
-  network: NetworkRecipe,
-  peer: PeerView,
-  ctx: { chain: ReadonlyArray<string> } | undefined,
-): string {
+function explainDenial(params: { network: NetworkRecipe; peer: PeerView }): string {
+  const { network, peer } = params;
   if (network.canCall === undefined || network.canCall === false) {
     return "your recipe does not declare canCall";
   }
@@ -331,9 +372,6 @@ function explainDenial(
   }
   if (!matchesNetworkScope(network.canCall, peer)) {
     return `peer does not match canCall policy (${describeScope(network.canCall)})`;
-  }
-  if (ctx && ctx.chain.includes(peer.id)) {
-    return "would create a cycle";
   }
   return "denied";
 }

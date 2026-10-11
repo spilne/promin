@@ -21,6 +21,11 @@
 // Every `/api/agents/:id/instances/:instanceId` route answers 404 for an
 // instance that belongs to a different agent, so the path's agent id can
 // never be used to read, edit or wipe another agent's instance.
+//
+// With an `authorizeScope` hook every route is authorized: single-instance
+// routes against the instance's (namespace, owner, agent), lists against
+// the (namespace, owner?, agent?) they filter by — and a list must then
+// name its namespace.
 // ---------------------------------------------------------------------------
 
 import {
@@ -81,6 +86,31 @@ async function authorize(params: {
   return allowed ? null : jsonError(403, "scope_forbidden");
 }
 
+/**
+ * Authorize a list query. With an authorizer, a list must name its
+ * namespace (400 `missing_namespaceId`) — an unscoped list would span every
+ * tenant — and the caller must be allowed the (namespace, owner?, agent?)
+ * it filters by; a list without `ownerId` asks for the whole namespace.
+ */
+async function authorizeList(params: {
+  deps: InstanceDeps;
+  req: Request;
+  filter: { namespaceId?: string; ownerId?: string; agentId?: string };
+}): Promise<Response | null> {
+  const { deps, req, filter } = params;
+  if (!deps.authorizeScope) return null;
+  if (filter.namespaceId === undefined) return jsonError(400, "missing_namespaceId");
+  const allowed = await deps.authorizeScope({
+    req,
+    scope: {
+      namespaceId: filter.namespaceId,
+      ...(filter.ownerId !== undefined && { ownerId: filter.ownerId }),
+      ...(filter.agentId !== undefined && { agentId: filter.agentId }),
+    },
+  });
+  return allowed ? null : jsonError(403, "scope_forbidden");
+}
+
 /** The path's instance, when it belongs to the path's agent and the caller may see it. */
 async function loadOwnedInstance(params: {
   deps: InstanceDeps;
@@ -103,9 +133,19 @@ export function listAgentInstances(deps: InstanceDeps) {
     const registeredAgentId = params.id;
     if (!registeredAgentId) return jsonError(400, "missing_agent_id");
     const url = new URL(req.url);
-    const namespaceId = url.searchParams.get("namespaceId") ?? undefined;
-    const ownerId = url.searchParams.get("ownerId") ?? undefined;
+    const namespaceId = url.searchParams.get("namespaceId") || undefined;
+    const ownerId = url.searchParams.get("ownerId") || undefined;
     const limit = parseLimit(url.searchParams.get("limit"));
+    const denied = await authorizeList({
+      deps,
+      req,
+      filter: {
+        ...(namespaceId !== undefined && { namespaceId }),
+        ...(ownerId !== undefined && { ownerId }),
+        agentId: registeredAgentId,
+      },
+    });
+    if (denied) return denied;
     const list = await deps.registry.list({
       registeredAgentId,
       ...(namespaceId !== undefined ? { namespaceId } : {}),
@@ -219,9 +259,18 @@ export function deleteAgentInstance(deps: InstanceDeps) {
 export function listInstancesAcrossAgents(deps: InstanceDeps) {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
-    const namespaceId = url.searchParams.get("namespaceId") ?? undefined;
-    const ownerId = url.searchParams.get("ownerId") ?? undefined;
+    const namespaceId = url.searchParams.get("namespaceId") || undefined;
+    const ownerId = url.searchParams.get("ownerId") || undefined;
     const limit = parseLimit(url.searchParams.get("limit"));
+    const denied = await authorizeList({
+      deps,
+      req,
+      filter: {
+        ...(namespaceId !== undefined && { namespaceId }),
+        ...(ownerId !== undefined && { ownerId }),
+      },
+    });
+    if (denied) return denied;
     const list = await deps.registry.list({
       ...(namespaceId !== undefined ? { namespaceId } : {}),
       ...(ownerId !== undefined ? { ownerId } : {}),

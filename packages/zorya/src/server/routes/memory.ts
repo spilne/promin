@@ -21,6 +21,10 @@
 // layer in. `threadId` opts the thread layer in (and unlocks resolveContext
 // since the cascade is thread-rooted). `agentId` opts the persona in.
 //
+// With an `authorizeScope` hook, inspection is authorized against the
+// (namespace, resource?, agent?) it reads and every namespace mutation
+// against its namespace.
+//
 // Namespace mutations are operator-only — the agent-side memory tool does
 // not expose namespace writes. Episodes stay read-only here because they're
 // LLM-generated artefacts of distillation; hand-writing them would defeat
@@ -57,7 +61,10 @@ export interface MemoryInspectorDeps {
   readonly memory: MemoryStore;
   /** Role registry — resolves the persona of an agent bound to a role by `ref`. */
   readonly roles?: RoleRegistry;
-  /** Binds the inspected scope to the caller. See `ScopeAuthorizer`. */
+  /**
+   * Binds the inspected scope — and the namespace of every namespace
+   * memory write — to the caller. See `ScopeAuthorizer`.
+   */
   readonly authorizeScope?: ScopeAuthorizer;
   /**
    * Recipe store. When set (and the request carries `agentId`), the
@@ -282,10 +289,28 @@ const NamespacePatchSchema = z
 /** Largest namespace fact accepted, in characters. */
 const MAX_FACT_LENGTH = 10_000;
 
+/**
+ * 403 `scope_forbidden` unless the caller may act on the whole namespace.
+ * The scope names no resource, so the authorizer sees a namespace-wide
+ * request — namespace memory reaches every resource's turns.
+ */
+async function forbidNamespace(params: {
+  readonly deps: MemoryInspectorDeps;
+  readonly req: Request;
+  readonly namespaceId: string;
+}): Promise<Response | null> {
+  const { deps, req, namespaceId } = params;
+  if (!deps.authorizeScope) return null;
+  const allowed = await deps.authorizeScope({ req, scope: { namespaceId } });
+  return allowed ? null : jsonError(403, "scope_forbidden");
+}
+
 export function patchNamespace(deps: MemoryInspectorDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const namespaceId = params.namespaceId;
     if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const forbidden = await forbidNamespace({ deps, req, namespaceId });
+    if (forbidden) return forbidden;
     const parsed = NamespacePatchSchema.safeParse(await req.json().catch(() => null));
     if (!parsed.success) {
       return jsonError(
@@ -312,6 +337,8 @@ export function addNamespaceFact(deps: MemoryInspectorDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const namespaceId = params.namespaceId;
     if (!namespaceId) return jsonError(400, "missing_namespaceId");
+    const forbidden = await forbidNamespace({ deps, req, namespaceId });
+    if (forbidden) return forbidden;
     const body = (await req.json().catch(() => null)) as { text?: unknown } | null;
     const text = typeof body?.text === "string" ? body.text.trim() : "";
     if (!text) return jsonError(400, "missing_text");
@@ -325,11 +352,13 @@ export function addNamespaceFact(deps: MemoryInspectorDeps) {
 }
 
 export function deleteNamespaceFact(deps: MemoryInspectorDeps) {
-  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const namespaceId = params.namespaceId;
     const factId = params.factId;
     if (!namespaceId) return jsonError(400, "missing_namespaceId");
     if (!factId) return jsonError(400, "missing_factId");
+    const forbidden = await forbidNamespace({ deps, req, namespaceId });
+    if (forbidden) return forbidden;
     const facts = await deps.memory.listNamespaceFacts(namespaceId);
     if (!facts.some((f) => f.id === factId)) return jsonError(404, "fact_not_found");
     await deps.memory.deleteNamespaceFact(namespaceId, factId);
