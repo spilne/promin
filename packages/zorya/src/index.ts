@@ -142,10 +142,13 @@ export {
 } from "./server/routes/agent-gateway-kit.ts";
 export {
   InMemoryWebhookDeliveryStore,
+  WebhookDeliveryRecovery,
   WorkflowStorageWebhookDeliveryStore,
   signWebhookDelivery,
+  webhookRunId,
   webhookSigningPayload,
   type WebhookClaim,
+  type WebhookDelivery,
   type WebhookDeliveryScope,
   type WebhookDeliveryStore,
   type WebhookSourceConfig,

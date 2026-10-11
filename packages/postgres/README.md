@@ -24,6 +24,14 @@ Every store takes a `DrizzleDb`, so any Postgres driver Drizzle supports works (
 | `WorkflowStartQueue`            | `PgWorkflowStartQueue`                            |
 | `StateMachineStorage`           | `PgStateMachineStorage`                           |
 
+Agent stores (`@promin/agent` contracts) include `PostgresMemoryStore`
+(`appendMessages` takes an `idempotencyKey`, so a re-run thread turn never
+duplicates history), `PostgresLeaseStore` and `PostgresPendingApprovalStore`
+— the durable index of tool-call approvals thread turns are suspended on,
+keyed by (namespace, thread, tool call), with the decision and approver
+recorded on the row. Its request, expiry and decision times come from the
+database server's clock, so every replica agrees on expiry.
+
 Workflow storage capabilities (see the [storage contract](../workflow/src/lib/durable/storage/README.md#capabilities)):
 
 | Capability               |     | Capability                                     |                      |

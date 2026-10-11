@@ -11,6 +11,15 @@
 //   POST /api/agents/:id/threads/:threadId/stream — conversational, SSE
 //   GET  /api/agents/:id/threads              — list the caller's threads
 //   GET  /api/agents/:id/threads/:threadId/messages — read message history
+//   POST /api/agents/:id/threads/:threadId/approve  — decide a pending approval, SSE
+//   GET  /api/agents/:id/threads/:threadId/approvals — the thread's pending approvals
+//
+// Thread turns:
+//   A send may carry `turnKey` (body) or `Idempotency-Key` (header): the
+//   same key on the same thread is the same turn, answered from (or
+//   continuing) the first attempt. A send on a thread whose turn waits for
+//   an approval answers 409 `approval_pending` — decide the approval first,
+//   so the suspended turn's output lands before the next message.
 //
 // Scope binding:
 //   Every invocation AND every thread route requires `namespaceId` and
@@ -122,6 +131,34 @@ export interface InvokeResponse {
 export interface ThreadInvokeResponse extends InvokeResponse {
   threadId: string;
   isNew: boolean;
+}
+
+/** A tool approval a thread's turn is suspended on. */
+export interface PendingApprovalDto {
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+  /** Unix ms. */
+  requestedAt: number;
+  /** Unix ms; null when it never expires. */
+  expiresAt: number | null;
+  /**
+   * `pending`, or the decision (`approved` / `rejected` / `expired`) when it
+   * is recorded but has not reached the turn yet — approve again to finish.
+   */
+  status: "pending" | "approved" | "rejected" | "expired";
+}
+
+/** 202 of a thread send whose turn suspended on a tool approval. */
+export interface ThreadSuspendedResponse {
+  threadId: string;
+  suspended: true;
+  approvals: PendingApprovalDto[];
+  instanceId?: string;
+}
+
+export interface ThreadApprovalsResponse {
+  approvals: PendingApprovalDto[];
 }
 
 export interface AgentGatewayDeps {

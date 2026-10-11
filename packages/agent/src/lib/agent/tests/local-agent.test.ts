@@ -461,7 +461,7 @@ describe("LocalAgent — autoCompact", () => {
   async function driveTurns(thread: Awaited<ReturnType<LocalAgent["thread"]>>, n: number) {
     for (let i = 0; i < n; i++) {
       const out = await thread.send({ task: `turn ${i}` });
-      await out.text; // ensure persistTurn ran
+      await out.text; // the turn has committed its output
     }
   }
 

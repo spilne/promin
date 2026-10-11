@@ -43,6 +43,7 @@ import type {
   AgentSourcesResponse,
   AgentThreadsResponse,
   RegisteredAgent,
+  ThreadApprovalsResponse,
   ThreadInvokeResponse,
   ThreadMessagesResponse,
 } from "../../server/routes/agents/agent-gateway-deps.ts";
@@ -1008,6 +1009,18 @@ export const api = {
     if (params.limit !== undefined) qp.set("limit", String(params.limit));
     return req<ThreadMessagesResponse>(
       `/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/messages?${qp}`,
+    );
+  },
+  /** Tool approvals the thread's turns are suspended on (the pending-approval index). */
+  listAgentThreadApprovals(
+    id: string,
+    threadId: string,
+    params: { namespaceId: string; resourceId?: string },
+  ): Promise<ThreadApprovalsResponse> {
+    const qp = new URLSearchParams({ namespaceId: params.namespaceId });
+    if (params.resourceId) qp.set("resourceId", params.resourceId);
+    return req<ThreadApprovalsResponse>(
+      `/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/approvals?${qp}`,
     );
   },
   distillAgentThread(

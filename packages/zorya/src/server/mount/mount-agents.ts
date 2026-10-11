@@ -39,6 +39,7 @@ import {
   listAgentThreads,
   listAgentVersions,
   listAgents,
+  listThreadApprovals,
   listThreadMessages,
   renameAgentThread,
   sendThreadMessage,
@@ -176,6 +177,7 @@ export function mountAgents(params: {
     .post("/api/agents/:id/threads/:threadId", sendThreadMessage(agentDeps))
     .post("/api/agents/:id/threads/:threadId/stream", streamThreadMessage(agentDeps))
     .post("/api/agents/:id/threads/:threadId/approve", streamThreadApproval(agentDeps))
+    .get("/api/agents/:id/threads/:threadId/approvals", listThreadApprovals(agentDeps))
     .get("/api/agents/:id/threads/:threadId/messages", listThreadMessages(agentDeps))
     .get("/api/agents/:id/threads/:threadId/trace", getThreadTrace(agentDeps))
     .post("/api/agents/:id/threads/:threadId/distill", distillThread(agentDeps))

@@ -20,6 +20,7 @@
 import { randomUUID } from "node:crypto";
 import { resolveContext } from "@promin/agent";
 import type {
+  AppendMessagesOptions,
   EpisodeInput,
   EpisodeListParams,
   EpisodicRecord,
@@ -180,9 +181,15 @@ export class SqliteMemoryStore implements MemoryStore {
         seq          INTEGER NOT NULL,
         payload      TEXT NOT NULL,
         created_at   INTEGER NOT NULL,
+        append_key   TEXT,
+        append_index INTEGER,
         PRIMARY KEY (namespace_id, thread_id, seq)
       )
     `);
+    this.db.run(
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${p}_message_append ON ${p}_message
+         (namespace_id, thread_id, append_key, append_index) WHERE append_key IS NOT NULL`,
+    );
   }
 
   // --- Namespace -------------------------------------------------------
@@ -679,35 +686,55 @@ export class SqliteMemoryStore implements MemoryStore {
       .run(SCOPE_THR, key.namespaceId, key.threadId, factId);
   }
 
-  async appendMessages(key: ThreadKey, msgs: ReadonlyArray<Message>): Promise<StoredMessage[]> {
+  async appendMessages(
+    key: ThreadKey,
+    msgs: ReadonlyArray<Message>,
+    opts?: AppendMessagesOptions,
+  ): Promise<StoredMessage[]> {
     if (!(await this.getThread(key))) {
       await this.createThread(key);
     }
+    const appendKey = opts?.idempotencyKey ?? null;
     const now = this.clock();
-    const lastSeq =
-      this.db
-        .query<{ s: number | null }>(
-          `SELECT MAX(seq) AS s FROM ${this.prefix}_message
-           WHERE namespace_id = ? AND thread_id = ?`,
-        )
-        .get(key.namespaceId, key.threadId)?.s ?? 0;
-
-    const stored: StoredMessage[] = [];
     const insert = this.db.query(
-      `INSERT INTO ${this.prefix}_message (namespace_id, thread_id, seq, payload, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO ${this.prefix}_message
+         (namespace_id, thread_id, seq, payload, created_at, append_key, append_index)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     );
 
-    const tx = this.db.transaction(() => {
-      let seq = lastSeq;
-      for (const m of msgs) {
-        seq += 1;
-        const sm: StoredMessage = { ...m, seq, createdAt: now } as StoredMessage;
-        insert.run(key.namespaceId, key.threadId, seq, JSON.stringify(m), now);
-        stored.push(sm);
+    // Read-check-insert in one synchronous transaction: an earlier append
+    // with the same key wins and is returned instead.
+    const tx = this.db.transaction((): { stored: StoredMessage[]; appended: boolean } => {
+      if (appendKey !== null) {
+        const existing = this.messagesByAppendKey({ key, appendKey });
+        if (existing.length > 0) return { stored: existing, appended: false };
       }
+      const lastSeq =
+        this.db
+          .query<{ s: number | null }>(
+            `SELECT MAX(seq) AS s FROM ${this.prefix}_message
+             WHERE namespace_id = ? AND thread_id = ?`,
+          )
+          .get(key.namespaceId, key.threadId)?.s ?? 0;
+      const stored: StoredMessage[] = [];
+      let seq = lastSeq;
+      msgs.forEach((m, index) => {
+        seq += 1;
+        insert.run(
+          key.namespaceId,
+          key.threadId,
+          seq,
+          JSON.stringify(m),
+          now,
+          appendKey,
+          appendKey !== null ? index : null,
+        );
+        stored.push({ ...m, seq, createdAt: now } as StoredMessage);
+      });
+      return { stored, appended: true };
     });
-    tx();
+    const { stored, appended } = tx();
+    if (!appended) return stored;
 
     // Touch updated_at on the thread row so listThreads ranks by activity.
     this.db
@@ -718,6 +745,20 @@ export class SqliteMemoryStore implements MemoryStore {
       .run(now, key.namespaceId, key.threadId);
 
     return stored;
+  }
+
+  private messagesByAppendKey(params: { key: ThreadKey; appendKey: string }): StoredMessage[] {
+    return this.db
+      .query<DbMessageRow>(
+        `SELECT seq, payload, created_at FROM ${this.prefix}_message
+         WHERE namespace_id = ? AND thread_id = ? AND append_key = ?
+         ORDER BY seq ASC`,
+      )
+      .all(params.key.namespaceId, params.key.threadId, params.appendKey)
+      .map((r) => {
+        const m = JSON.parse(r.payload) as Message;
+        return { ...m, seq: r.seq, createdAt: r.created_at } as StoredMessage;
+      });
   }
 
   async getMessages(key: ThreadKey, range?: MessageRange): Promise<StoredMessage[]> {

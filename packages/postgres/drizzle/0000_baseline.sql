@@ -78,6 +78,8 @@ CREATE TABLE agent_message (
   seq integer NOT NULL,
   payload jsonb NOT NULL,
   created_at bigint NOT NULL,
+  append_key text,
+  append_index integer,
   CONSTRAINT agent_message_pkey PRIMARY KEY (namespace_id, thread_id, seq)
 );
 
@@ -140,6 +142,25 @@ CREATE TABLE agent_thread (
   created_at bigint NOT NULL,
   updated_at bigint NOT NULL,
   CONSTRAINT agent_thread_pkey PRIMARY KEY (namespace_id, thread_id)
+);
+
+CREATE TABLE agent_pending_approval (
+  namespace_id text NOT NULL,
+  thread_id text NOT NULL,
+  tool_call_id text NOT NULL,
+  resource_id text,
+  agent_id text,
+  workflow_id text NOT NULL,
+  tool_name text NOT NULL,
+  input jsonb,
+  requested_at bigint NOT NULL,
+  expires_at bigint,
+  status text NOT NULL,
+  decided_by text,
+  decided_at bigint,
+  reason text,
+  delivered_at bigint,
+  CONSTRAINT agent_pending_approval_pkey PRIMARY KEY (namespace_id, thread_id, tool_call_id)
 );
 
 CREATE TABLE agent_thread_lease (
@@ -643,6 +664,14 @@ CREATE INDEX agent_registry_backend_type_idx ON agent_registry (backend_type);
 CREATE INDEX agent_registry_id_updated_idx ON agent_registry (agent_id, updated_at);
 
 CREATE INDEX agent_secret_scope_idx ON agent_secret (scope_kind, namespace_id, resource_id);
+
+CREATE UNIQUE INDEX agent_message_append_idx ON agent_message (namespace_id, thread_id, append_key, append_index) WHERE append_key IS NOT NULL;
+
+CREATE INDEX agent_pending_approval_ns_status_idx ON agent_pending_approval (namespace_id, status, requested_at);
+
+CREATE INDEX agent_pending_approval_thread_status_idx ON agent_pending_approval (namespace_id, thread_id, status);
+
+CREATE INDEX agent_pending_approval_thread_open_idx ON agent_pending_approval (namespace_id, thread_id, delivered_at);
 
 CREATE INDEX agent_thread_lease_expires_idx ON agent_thread_lease (expires_at);
 

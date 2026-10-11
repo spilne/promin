@@ -309,6 +309,17 @@ export interface ListThreadsParams {
   readonly archived?: boolean;
 }
 
+/** Options of `MemoryStore.appendMessages`. */
+export interface AppendMessagesOptions {
+  /**
+   * Makes the append idempotent per thread: the first append with this key
+   * stores the messages; any later one returns them instead of appending
+   * again. Thread turns pass one key per turn phase, so a turn re-run after
+   * a crash never duplicates history.
+   */
+  readonly idempotencyKey?: string;
+}
+
 /** Range for `getMessages`. Defaults to "last `limit` messages, oldest first". */
 export interface MessageRange {
   /** Inclusive lower bound (sequence number). */
@@ -430,7 +441,17 @@ export interface MemoryStore {
   appendThreadFact(key: ThreadKey, fact: FactInput): Promise<Fact>;
   listThreadFacts(key: ThreadKey): Promise<Fact[]>;
   deleteThreadFact(key: ThreadKey, factId: string): Promise<void>;
-  appendMessages(key: ThreadKey, msgs: ReadonlyArray<Message>): Promise<StoredMessage[]>;
+  /**
+   * Append messages to the thread's transcript (creating the thread row
+   * when missing). With `opts.idempotencyKey`, the append happens at most
+   * once per thread: a later call with the same key appends nothing and
+   * returns the messages the first call stored.
+   */
+  appendMessages(
+    key: ThreadKey,
+    msgs: ReadonlyArray<Message>,
+    opts?: AppendMessagesOptions,
+  ): Promise<StoredMessage[]>;
   getMessages(key: ThreadKey, range?: MessageRange): Promise<StoredMessage[]>;
   appendThreadEpisode(key: ThreadKey, input: EpisodeInput): Promise<EpisodicRecord>;
   listThreadEpisodes(key: ThreadKey, params?: EpisodeListParams): Promise<EpisodicRecord[]>;

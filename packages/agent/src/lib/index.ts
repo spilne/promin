@@ -16,6 +16,8 @@ export type {
   AgentTurnLifecycleEvent,
   AgentTurnState,
   StepContext,
+  TurnApprovalIndex,
+  TurnTranscript,
 } from "./agent-action.ts";
 export { StallDetector } from "./stall-detector.ts";
 export type { StallDetectorOptions, StallVerdict } from "./stall-detector.ts";
@@ -64,6 +66,7 @@ export type {
   MessageRange,
   TokenBudget,
   ResolvedContext,
+  AppendMessagesOptions,
 } from "./memory/types.ts";
 export {
   MAX_FACT_CHARS,
@@ -174,7 +177,7 @@ export type {
 
 export { LocalAgent } from "./agent/local-agent.ts";
 export { THREAD_AGENT_METADATA_KEY } from "./agent/types.ts";
-export { ThreadNotFoundError } from "./agent/errors.ts";
+export { ThreadNotFoundError, TurnKeyConflictError } from "./agent/errors.ts";
 export type { LocalAgentConfig } from "./agent/local-agent.ts";
 
 export { frameTask } from "./agent/frame-task.ts";
@@ -527,14 +530,41 @@ export type { LayeredMemoryToolConfig } from "./tools/layered-memory-tools.ts";
 // Durable scheduler tool — agents create cron / interval schedules that
 // re-fire the agent (or a peer) when they trigger. Pairs with the
 // dispatchAgentSchedule helper for the host's scheduler-loop fireOverride.
-export { listPendingSignals } from "./approvals/list-pending-signals.ts";
-export type { PendingSignal, ListPendingSignalsParams } from "./approvals/list-pending-signals.ts";
+export { findAgentApprovalThread, listPendingSignals } from "./approvals/list-pending-signals.ts";
+export type {
+  AgentApprovalThread,
+  PendingSignal,
+  ListPendingSignalsParams,
+} from "./approvals/list-pending-signals.ts";
 export {
   APPROVE_SIGNAL_PREFIX,
   isApprovalSignal,
   composeApprovalSignal,
   parseApprovalSignal,
 } from "./approvals/approve-signal.ts";
+// Pending-approval index — thread turns suspended on a tool approval,
+// keyed by (namespace, thread, tool call).
+export type {
+  PendingApprovalStore,
+  PendingApproval,
+  PendingApprovalKey,
+  PendingApprovalStatus,
+  RecordPendingApprovalParams,
+  DecidePendingApprovalParams,
+  DecidePendingApprovalResult,
+  ListPendingApprovalsParams,
+} from "./approvals/pending-approval-store.ts";
+export {
+  ApprovalNotFoundError,
+  ApprovalNotReadyError,
+  ApprovalAlreadyDecidedError,
+  ApprovalExpiredError,
+  ThreadAwaitingApprovalError,
+} from "./approvals/pending-approval-store.ts";
+export {
+  InMemoryPendingApprovalStore,
+  type InMemoryPendingApprovalStoreConfig,
+} from "./approvals/in-memory-pending-approval-store.ts";
 
 export { createDurableSchedulerTools } from "./tools/durable-scheduler-tool.ts";
 export type {

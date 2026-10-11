@@ -227,6 +227,69 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
         expect(stored.every((m) => typeof m.createdAt === "number")).toBe(true);
       });
 
+      it("appendMessages with an idempotency key appends at most once per thread", async () => {
+        const s = await make();
+        const key = { namespaceId: NS, threadId: T_DEFAULT };
+        const first = await s.appendMessages(key, [userMsg("q"), assistantMsg("a")], {
+          idempotencyKey: "turn-1:commit",
+        });
+        await s.appendMessages(key, [userMsg("next")]);
+        const again = await s.appendMessages(key, [userMsg("q"), assistantMsg("a")], {
+          idempotencyKey: "turn-1:commit",
+        });
+        expect(again.map((m) => [m.seq, m.content])).toEqual(first.map((m) => [m.seq, m.content]));
+        const all = await s.getMessages(key);
+        expect(all.map((m) => m.content)).toEqual(["q", "a", "next"]);
+
+        // The same key on another thread (or another namespace) is independent.
+        const other = { namespaceId: NS, threadId: `${T_DEFAULT}-1` };
+        await s.appendMessages(other, [userMsg("q")], { idempotencyKey: "turn-1:commit" });
+        const otherNs = { namespaceId: `${NS}-2`, threadId: T_DEFAULT };
+        await s.appendMessages(otherNs, [userMsg("q")], { idempotencyKey: "turn-1:commit" });
+        expect(await s.getMessages(other)).toHaveLength(1);
+        expect(await s.getMessages(otherNs)).toHaveLength(1);
+      });
+
+      it("concurrent appends with one idempotency key store the messages once", async () => {
+        const s = await make();
+        const key = { namespaceId: NS, threadId: T_DEFAULT };
+        await s.createThread(key);
+        await Promise.all(
+          [1, 2, 3].map(() =>
+            s.appendMessages(key, [userMsg("once")], { idempotencyKey: "k" }).catch(() => []),
+          ),
+        );
+        // A loser may reject (the caller retries); none may append twice.
+        const retry = await s.appendMessages(key, [userMsg("once")], { idempotencyKey: "k" });
+        expect(retry.map((m) => m.content)).toEqual(["once"]);
+        expect((await s.getMessages(key)).map((m) => m.content)).toEqual(["once"]);
+      });
+
+      it("concurrent appends to one thread all land, each with its own seq", async () => {
+        const s = await make();
+        const key = { namespaceId: NS, threadId: T_DEFAULT };
+        await s.createThread(key);
+        await Promise.all(
+          [1, 2, 3, 4, 5].map((n) =>
+            s.appendMessages(key, [userMsg(`m${n}`), assistantMsg(`a${n}`)], {
+              idempotencyKey: `turn-${n}`,
+            }),
+          ),
+        );
+        const all = await s.getMessages(key);
+        expect(all).toHaveLength(10);
+        expect(new Set(all.map((m) => m.seq)).size).toBe(10);
+      });
+
+      it("deleting a thread forgets its idempotency keys", async () => {
+        const s = await make();
+        const key = { namespaceId: NS, threadId: T_DEFAULT };
+        await s.appendMessages(key, [userMsg("a")], { idempotencyKey: "k" });
+        await s.deleteThread(key);
+        await s.appendMessages(key, [userMsg("b")], { idempotencyKey: "k" });
+        expect((await s.getMessages(key)).map((m) => m.content)).toEqual(["b"]);
+      });
+
       it("appendMessages auto-creates the thread", async () => {
         const s = await make();
         const key = { namespaceId: NS, threadId: "auto-thread" };

@@ -45,6 +45,20 @@ export interface PendingSignal {
   readonly toolName?: string;
   /** Tool input (only set for `approve:` signals where the agent loop wrote it). */
   readonly toolInput?: unknown;
+  /**
+   * Set when the approval belongs to an agent thread turn. Decide it through
+   * the agent (`thread.resume`, the gateway's approve route), which records
+   * it in the pending-approval index and continues the turn — never by
+   * delivering the signal directly.
+   */
+  readonly agentThread?: AgentApprovalThread;
+}
+
+/** The thread an agent turn's approval belongs to. */
+export interface AgentApprovalThread {
+  readonly namespaceId: string;
+  readonly threadId: string;
+  readonly agentId?: string;
 }
 
 export interface ListPendingSignalsParams {
@@ -104,7 +118,7 @@ export async function listPendingSignals(
             waiting.stepName,
             parsed.toolCallId,
           )
-        : { toolName: undefined, toolInput: undefined };
+        : { toolName: undefined, toolInput: undefined, agentThread: undefined };
 
     out.push({
       workflowId: wf.workflowId,
@@ -120,9 +134,37 @@ export async function listPendingSignals(
       ...(parsed && { toolCallId: parsed.toolCallId }),
       ...(meta.toolName !== undefined && { toolName: meta.toolName }),
       ...(meta.toolInput !== undefined && { toolInput: meta.toolInput }),
+      ...(meta.agentThread !== undefined && { agentThread: meta.agentThread }),
     });
   }
   return out;
+}
+
+/**
+ * The agent thread an `approve:<callId>` signal of `workflowId` belongs to,
+ * or null when the run is not an agent thread turn (or the storage keeps no
+ * journal). Signal-delivery routes use it to send agent approvals through
+ * the agent instead of delivering the signal directly.
+ */
+export async function findAgentApprovalThread(params: {
+  readonly storage: WorkflowStorage;
+  readonly workflowId: string;
+  readonly signalName: string;
+}): Promise<AgentApprovalThread | null> {
+  const parsed = parseApprovalSignal(params.signalName);
+  if (!parsed || !hasCapability(params.storage, "journal")) return null;
+  const wf = await params.storage.loadWorkflow(params.workflowId);
+  if (!wf) return null;
+  for (const step of Object.values(wf.steps)) {
+    const meta = await readApprovalStartMetadata(
+      params.storage,
+      params.workflowId,
+      step.stepName,
+      parsed.toolCallId,
+    );
+    if (meta.agentThread) return meta.agentThread;
+  }
+  return null;
 }
 
 async function readApprovalStartMetadata(
@@ -130,12 +172,16 @@ async function readApprovalStartMetadata(
   workflowId: string,
   stepName: string,
   toolCallId: string,
-): Promise<{ toolName: string | undefined; toolInput: unknown }> {
+): Promise<{
+  toolName: string | undefined;
+  toolInput: unknown;
+  agentThread: AgentApprovalThread | undefined;
+}> {
   let entries: JournalEntry[];
   try {
     entries = await storage.loadJournal({ workflowId, stepName });
   } catch {
-    return { toolName: undefined, toolInput: undefined };
+    return { toolName: undefined, toolInput: undefined, agentThread: undefined };
   }
   const startName = `-approval-${toolCallId}${APPROVAL_START_SUFFIX}`;
   // The latest matching record: the step that is suspended now is the
@@ -145,11 +191,24 @@ async function readApprovalStartMetadata(
   );
   const value = entry?.exit && "value" in entry.exit ? entry.exit.value : undefined;
   if (!value || typeof value !== "object") {
-    return { toolName: undefined, toolInput: undefined };
+    return { toolName: undefined, toolInput: undefined, agentThread: undefined };
   }
-  const { toolName, toolInput } = value as { toolName?: unknown; toolInput?: unknown };
+  const { toolName, toolInput, thread } = value as {
+    toolName?: unknown;
+    toolInput?: unknown;
+    thread?: { namespaceId?: unknown; threadId?: unknown; agentId?: unknown };
+  };
+  const agentThread =
+    thread && typeof thread.namespaceId === "string" && typeof thread.threadId === "string"
+      ? {
+          namespaceId: thread.namespaceId,
+          threadId: thread.threadId,
+          ...(typeof thread.agentId === "string" && { agentId: thread.agentId }),
+        }
+      : undefined;
   return {
     toolName: typeof toolName === "string" ? toolName : undefined,
     toolInput,
+    agentThread,
   };
 }

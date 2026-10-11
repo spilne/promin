@@ -4,7 +4,14 @@
 // a request id instead of the error text.
 // ---------------------------------------------------------------------------
 
-import type { AgentRunOutput } from "@promin/agent";
+import {
+  ApprovalAlreadyDecidedError,
+  ApprovalExpiredError,
+  ApprovalNotFoundError,
+  ApprovalNotReadyError,
+  TurnKeyConflictError,
+  type AgentRunOutput,
+} from "@promin/agent";
 import { WorkflowSuspendedError } from "@promin/workflow";
 
 const SSE_HEADERS = {
@@ -153,6 +160,16 @@ export function streamAgentRunResponse(params: {
       } catch (err) {
         if (err instanceof WorkflowSuspendedError) {
           sse.send("suspended", { ...threadMeta, ...pendingApproval });
+        } else if (err instanceof ApprovalNotFoundError) {
+          sse.send("error", { error: "approval_not_found" });
+        } else if (err instanceof ApprovalAlreadyDecidedError) {
+          sse.send("error", { error: "approval_already_decided" });
+        } else if (err instanceof ApprovalExpiredError) {
+          sse.send("error", { error: "approval_expired" });
+        } else if (err instanceof ApprovalNotReadyError) {
+          sse.send("error", { error: "approval_not_ready" });
+        } else if (err instanceof TurnKeyConflictError) {
+          sse.send("error", { error: "idempotency_key_mismatch" });
         } else {
           sse.send("error", streamErrorPayload(err));
         }

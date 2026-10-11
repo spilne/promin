@@ -672,6 +672,23 @@ export function ChatPane({
     toolCallId: string;
     toolName: string;
   } | null>(null);
+  // A turn suspended on an approval outlives this page: on open (and
+  // reopen), ask the pending-approval index so the banner comes back.
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listAgentThreadApprovals(agentId, threadId, tenant)
+      .then(({ approvals }) => {
+        const first = approvals[0];
+        if (cancelled || !first) return;
+        setPendingApproval({ toolCallId: first.toolCallId, toolName: first.toolName });
+      })
+      // A brand-new thread answers 404 — nothing pending.
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId, threadId, tenant.namespaceId, tenant.resourceId]);
   // Drawer for the per-thread schedule list. Lives at the ChatPane
   // level so the Schedules button in the header can flip it.
   const [schedulesOpen, setSchedulesOpen] = useState(false);

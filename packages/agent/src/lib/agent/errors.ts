@@ -21,3 +21,21 @@ export class ThreadNotFoundError extends Error {
     this.threadId = params.threadId;
   }
 }
+
+/**
+ * A turn key (or run id) was reused for a different task. The key names one
+ * turn: a retry must send the same task, a new message needs a new key.
+ */
+export class TurnKeyConflictError extends Error {
+  readonly _tag = "TurnKeyConflict";
+  readonly workflowId: string;
+
+  constructor(params: { workflowId: string }) {
+    super(
+      `Turn "${params.workflowId}" already ran with a different task; ` +
+        "use a new turn key (or run id) for a new message.",
+    );
+    this.name = "TurnKeyConflictError";
+    this.workflowId = params.workflowId;
+  }
+}

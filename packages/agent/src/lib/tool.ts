@@ -721,6 +721,8 @@ export function tool<TInput, TOutput>(
 export interface ApprovalDecision {
   approved: boolean;
   reason?: string;
+  /** Who decided — recorded with the decision (the approval signal's `by`). */
+  by?: string;
 }
 
 export type AutoApprove =

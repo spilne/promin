@@ -61,6 +61,8 @@ function turnInProgress409(err: unknown): Response | null {
 /** Body shape for invoke / stream / thread send. */
 export interface InvokeRequest {
   readonly task?: unknown;
+  /** Thread sends only: idempotency key of the turn (see `parseTurnKey`). */
+  readonly turnKey?: unknown;
   readonly namespaceId?: unknown;
   readonly resourceId?: unknown;
   readonly ownerId?: unknown;
@@ -124,6 +126,28 @@ export function parseInvokeBody(body: InvokeRequest | null): ParsedInvoke | { er
   const scope = parseScopeFields(body);
   if ("error" in scope) return scope;
   return { task: body.task, ...scope };
+}
+
+/** Longest accepted turn key. */
+const MAX_TURN_KEY_LENGTH = 200;
+
+/**
+ * Idempotency key of a thread turn: the body's `turnKey`, else the
+ * `Idempotency-Key` header. A send retried with the same key on the same
+ * thread is the same turn — answered from (or continuing) the first
+ * attempt instead of running the model again. Empty when neither is set
+ * (every send is a new turn).
+ */
+export function parseTurnKey(params: {
+  readonly req: Request;
+  readonly body: { readonly turnKey?: unknown } | null;
+}): { turnKey?: string } | { error: string } {
+  const raw = params.body?.turnKey ?? params.req.headers.get("idempotency-key") ?? undefined;
+  if (raw === undefined) return {};
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_TURN_KEY_LENGTH) {
+    return { error: "invalid_turnKey" };
+  }
+  return { turnKey: raw };
 }
 
 /** Scope fields from a GET route's query string. */

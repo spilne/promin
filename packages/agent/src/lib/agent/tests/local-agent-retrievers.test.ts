@@ -276,12 +276,9 @@ describe("LocalAgent — retriever bindings", () => {
     await thread.send({ task: "hi about returns" });
     await expect(thread.send({ task: "run it for returns" })).rejects.toThrow(/suspended|signal/i);
 
-    // Bounded by iterations, not wall time: the suspended row is written
-    // before send() rejects, so this normally passes on the first check.
-    for (let i = 0; i < 100 && !(await thread.hasPendingApproval!("tc-1")); i++) {
-      await new Promise((r) => setTimeout(r, 0));
-    }
-    expect(await thread.hasPendingApproval!("tc-1")).toBe(true);
+    // The index row is written before the turn suspends.
+    const pending = await thread.pendingApprovals!();
+    expect(pending.map((p) => p.toolCallId)).toEqual(["tc-1"]);
     expect(await storage.listWorkflows({ status: "suspended", limit: 10 })).toHaveLength(1);
 
     const out = await thread.resume!("tc-1", { approved: true });

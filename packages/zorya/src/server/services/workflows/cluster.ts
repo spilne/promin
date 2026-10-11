@@ -13,6 +13,7 @@
 // reaching a worker attached to another).
 // ---------------------------------------------------------------------------
 
+import { InMemoryMemoryStore } from "@promin/agent";
 import {
   InMemoryNamespaceRegistry,
   InMemoryWorkflowStorage,
@@ -81,6 +82,7 @@ const IN_MEMORY_STORES: ReadonlyArray<
   ["InMemoryLeaderLeases", InMemoryLeaderLeases],
   ["InMemorySchedulerStorage", InMemorySchedulerStorage],
   ["InMemoryNamespaceRegistry", InMemoryNamespaceRegistry],
+  ["InMemoryMemoryStore", InMemoryMemoryStore],
 ];
 
 /**

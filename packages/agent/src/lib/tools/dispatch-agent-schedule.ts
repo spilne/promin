@@ -36,7 +36,9 @@
 
 import type { ScheduleTick, DurableScheduleConfig } from "@promin/workflow/scheduler";
 import { scheduleTickRunId } from "@promin/workflow/scheduler";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { THREAD_AGENT_METADATA_KEY, type Agent } from "../agent/types.ts";
+import type { AgentTurnGate, AgentTurnLease } from "../lease/agent-turn-gate.ts";
 import type { AgentRegistry, RegisteredAgent } from "../registry/types.ts";
 
 export interface AgentScheduleMetadata {
@@ -92,6 +94,17 @@ export interface DispatchAgentScheduleDeps {
     ctx: ScheduleFireContext,
     result: { ok: true; text: string } | { ok: false; error: string },
   ) => Promise<void> | void;
+  /**
+   * The thread turn gate the host's gateway holds. A tick into a thread
+   * takes the thread's turn lease for the whole turn, so it never runs
+   * beside a live conversation turn; a busy thread rejects with
+   * `TurnInProgressError` (the scheduler delivers the tick again later).
+   */
+  readonly turnGate?: AgentTurnGate;
+  /** Lease owner id. Default `"scheduler"`. */
+  readonly ownerId?: string;
+  /** Extends the held lease. Default: `SystemWallClock`. */
+  readonly clock?: WallClock;
 }
 
 export interface ScheduleFireContext {
@@ -178,17 +191,28 @@ export async function startAgentSchedule(
   // billing the model again.
   const runId = scheduleTickRunId(tick);
 
-  // A thread this tick creates is stamped with the recipe it runs, so the
-  // agent's gateway can list and open it like any other of its threads.
-  const thread = meta.threadId
-    ? await agent.thread(meta.threadId, {
-        metadata: { [THREAD_AGENT_METADATA_KEY]: recipe.id },
+  // A turn into a thread holds the thread's turn lease until it settles.
+  const release = meta.threadId
+    ? await holdTurnLease({
+        deps,
+        key: { namespaceId: meta.namespaceId, threadId: meta.threadId },
       })
-    : undefined;
-  // Kick the turn off; only its outcome is awaited, in `done`.
-  const turn = Promise.resolve(
-    thread ? thread.send(input, { runId }) : agent.invoke(input, { runId }),
-  );
+    : async () => {};
+  let turn: Promise<{ text: Promise<string> }>;
+  try {
+    // A thread this tick creates is stamped with the recipe it runs, so the
+    // agent's gateway can list and open it like any other of its threads.
+    const thread = meta.threadId
+      ? await agent.thread(meta.threadId, {
+          metadata: { [THREAD_AGENT_METADATA_KEY]: recipe.id },
+        })
+      : undefined;
+    // Kick the turn off; only its outcome is awaited, in `done`.
+    turn = Promise.resolve(thread ? thread.send(input, { runId }) : agent.invoke(input, { runId }));
+  } catch (err) {
+    await release();
+    throw err;
+  }
   const done = (async (): Promise<DispatchAgentScheduleResult> => {
     let result: { ok: true; text: string } | { ok: false; error: string };
     try {
@@ -197,6 +221,7 @@ export async function startAgentSchedule(
     } catch (err) {
       result = { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
+    await release();
     try {
       await deps.afterFire?.(ctx, result);
     } catch {
@@ -205,6 +230,36 @@ export async function startAgentSchedule(
     return result;
   })();
   return { ok: true, runId, done };
+}
+
+/**
+ * Take the thread's turn lease when a gate is configured and keep it
+ * extended (every half TTL) until the returned release is called.
+ */
+async function holdTurnLease(params: {
+  deps: DispatchAgentScheduleDeps;
+  key: { namespaceId: string; threadId: string };
+}): Promise<() => Promise<void>> {
+  const gate = params.deps.turnGate;
+  if (!gate) return async () => {};
+  const lease: AgentTurnLease = await gate.acquire({
+    key: params.key,
+    ownerId: params.deps.ownerId ?? "scheduler",
+    policy: "strict",
+  });
+  const clock = params.deps.clock ?? SystemWallClock;
+  const periodMs = Math.max(1, Math.floor((lease.expiresAt - lease.acquiredAt) / 2));
+  const timer = clock.setInterval(() => {
+    lease.extend(periodMs).catch(() => {});
+  }, periodMs);
+  timer.unref?.();
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
+    timer.clear();
+    await gate.release(lease.leaseId);
+  };
 }
 
 /** Run one schedule turn to the end: `startAgentSchedule`, then await it. */

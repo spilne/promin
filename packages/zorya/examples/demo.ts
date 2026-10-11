@@ -54,6 +54,8 @@ import {
   PostgresFragmentStore,
   PostgresKnowledgeBaseStore,
   PostgresMemoryStore,
+  PostgresLeaseStore,
+  PostgresPendingApprovalStore,
 } from "@promin/postgres";
 import {
   anthropic,
@@ -83,6 +85,8 @@ import {
   type AgentRegistry,
   type MemoryStore,
   type ModelCatalogItem,
+  type PendingApprovalStore,
+  AgentTurnGate,
   type RegisteredAgent,
   type SkillRegistry,
   AgentScanner,
@@ -153,6 +157,13 @@ let skillRegistry: SkillRegistry;
 let fragmentStore: FragmentStore;
 let knowledgeBaseStore: KnowledgeBaseStore;
 let memoryStore: MemoryStore;
+// Pending-approval index: thread turns record the tool approvals they
+// suspend on here, and the approve route finds them here — on the same
+// backend as the memory store, so approvals survive restarts.
+let approvalStore: PendingApprovalStore;
+// Thread turn gate: ZoryaAgents' default (in-process) gate serializes turns
+// in one process; replicas sharing Postgres share the gate's leases too.
+let turnGate: AgentTurnGate | undefined;
 if (pgUrl) {
   const pgDb = createPostgresDb(pgUrl);
   await migratePostgres(pgDb);
@@ -161,6 +172,8 @@ if (pgUrl) {
   fragmentStore = new PostgresFragmentStore({ db: pgDb });
   knowledgeBaseStore = new PostgresKnowledgeBaseStore({ db: pgDb });
   memoryStore = new PostgresMemoryStore({ db: pgDb });
+  approvalStore = new PostgresPendingApprovalStore({ db: pgDb });
+  turnGate = new AgentTurnGate({ leaseStore: new PostgresLeaseStore({ db: pgDb }) });
   console.log(
     "[zorya] agent + skill registries + fragment, knowledge-base and memory stores → Postgres (ZORYA_PG_URL)",
   );
@@ -170,6 +183,7 @@ if (pgUrl) {
   fragmentStore = stack.fragmentStore;
   knowledgeBaseStore = stack.knowledgeBaseStore;
   memoryStore = stack.memoryStore;
+  approvalStore = stack.pendingApprovalStore;
 }
 
 // Managed knowledge bases — the dashboard's Knowledge page. Bases and their
@@ -621,6 +635,7 @@ async function resolveAgent(
   return resolveLocalAgent(recipe, {
     runner,
     memory: memoryStore,
+    approvals: approvalStore,
     // `backend.knowledge` bindings resolve against the managed knowledge bases.
     retrievers: knowledgeBases.registry,
     skills: skillRegistry,
@@ -1107,6 +1122,7 @@ const agents = new ZoryaAgents({
   registry: agentRegistry,
   resolve: resolveAgent,
   memory: memoryStore,
+  ...(turnGate !== undefined && { turnGate }),
   instances: instanceRegistry,
   models: modelCatalog,
   toolCatalog: agentToolCatalog,

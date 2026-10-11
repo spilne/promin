@@ -17,11 +17,16 @@ import {
 } from "../routes/remote-deployments.ts";
 import {
   ingestWebhook,
+  WebhookDeliveryRecovery,
   WorkflowStorageWebhookDeliveryStore,
   type WebhookGatewayDeps,
 } from "../routes/webhooks.ts";
 
-/** `POST /webhooks/:source/:agentId`. */
+/**
+ * `POST /webhooks/:source/:agentId`. Returns the recovery loop that
+ * finishes deliveries a crashed dispatcher left unfinished; the server
+ * starts and stops it with itself.
+ */
 export function mountWebhooks(params: {
   readonly router: Router;
   readonly webhooks: NonNullable<ZoryaServerConfig["webhooks"]>;
@@ -30,7 +35,8 @@ export function mountWebhooks(params: {
   readonly clock: WallClock;
   /** Registry a delivery's namespace is checked against. */
   readonly namespaces: NamespaceRegistry | undefined;
-}): void {
+  readonly logger: Logger;
+}): WebhookDeliveryRecovery {
   const { webhooks, agents } = params;
   const webhookDeps: WebhookGatewayDeps = {
     registry: agents.registry,
@@ -45,6 +51,13 @@ export function mountWebhooks(params: {
     ...(params.namespaces !== undefined && { namespaces: params.namespaces }),
   };
   params.router.post("/webhooks/:source/:agentId", ingestWebhook(webhookDeps));
+  return new WebhookDeliveryRecovery({
+    ...webhookDeps,
+    ...(params.webhooks.recoveryIntervalMs !== undefined && {
+      intervalMs: params.webhooks.recoveryIntervalMs,
+    }),
+    onError: (err) => params.logger.error("[zorya] webhook delivery recovery failed", err),
+  });
 }
 
 /**

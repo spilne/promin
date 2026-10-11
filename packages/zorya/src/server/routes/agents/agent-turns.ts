@@ -4,20 +4,35 @@
 // thread's turn lease while they run.
 // ---------------------------------------------------------------------------
 
-import type { AgentThread } from "@promin/agent";
+import {
+  ApprovalAlreadyDecidedError,
+  ApprovalExpiredError,
+  ApprovalNotFoundError,
+  ApprovalNotReadyError,
+  ThreadAwaitingApprovalError,
+  TurnKeyConflictError,
+  type AgentThread,
+  type PendingApproval,
+} from "@promin/agent";
+import { WorkflowSuspendedError } from "@promin/workflow";
 import { json, jsonError, readJson } from "../../router.ts";
 import { internalError } from "../agent-gateway-kit.ts";
 import type {
   AgentGatewayDeps,
   InvokeResponse,
+  PendingApprovalDto,
+  ThreadApprovalsResponse,
   ThreadInvokeResponse,
+  ThreadSuspendedResponse,
 } from "./agent-gateway-deps.ts";
 import {
   acquireTurnLease,
   loadScopedAgent,
   openOwnedThread,
+  openThreadFromQuery,
   parseInvokeBody,
   parseScopeFields,
+  parseTurnKey,
   type InvokeRequest,
   type ScopeFields,
   type ScopedAgent,
@@ -115,8 +130,11 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
     if (!id) return jsonError(400, "missing_id");
     if (!threadId) return jsonError(400, "missing_threadId");
 
-    const parsed = parseInvokeBody(await readJson<InvokeRequest>(req));
+    const body = await readJson<InvokeRequest>(req);
+    const parsed = parseInvokeBody(body);
     if ("error" in parsed) return jsonError(400, parsed.error);
+    const turn = parseTurnKey({ req, body });
+    if ("error" in turn) return jsonError(400, turn.error);
     const scoped = await loadScopedAgent({ deps, req, id, scope: parsed, invoking: true });
     if (scoped instanceof Response) return scoped;
 
@@ -128,7 +146,7 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
     try {
       const thread = await openOwnedThread({ scoped, threadId, create: true });
       if (thread instanceof Response) return thread;
-      const out = await thread.send({ task: parsed.task });
+      const out = await thread.send({ task: parsed.task }, turn);
       const response: ThreadInvokeResponse = {
         threadId: thread.id,
         isNew: thread.isNew,
@@ -139,7 +157,20 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
       if (scoped.instanceId !== undefined) response.instanceId = scoped.instanceId;
       return json(200, response);
     } catch (err) {
-      return internalError({ code: "send_failed", err });
+      if (err instanceof WorkflowSuspendedError) {
+        // The turn suspended on a tool approval: like the stream's
+        // `suspended` frame, answer with what it waits for.
+        const thread = await openOwnedThread({ scoped, threadId, create: false });
+        const pending = thread instanceof Response ? [] : await thread.pendingApprovals?.();
+        const suspended: ThreadSuspendedResponse = {
+          threadId,
+          suspended: true,
+          approvals: (pending ?? []).map(toPendingApprovalDto),
+          ...(scoped.instanceId !== undefined && { instanceId: scoped.instanceId }),
+        };
+        return json(202, suspended);
+      }
+      return approvalError(err) ?? internalError({ code: "send_failed", err });
     } finally {
       await lease.release();
     }
@@ -153,8 +184,11 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
     if (!id) return jsonError(400, "missing_id");
     if (!threadId) return jsonError(400, "missing_threadId");
 
-    const parsed = parseInvokeBody(await readJson<InvokeRequest>(req));
+    const body = await readJson<InvokeRequest>(req);
+    const parsed = parseInvokeBody(body);
     if ("error" in parsed) return jsonError(400, parsed.error);
+    const turn = parseTurnKey({ req, body });
+    if ("error" in turn) return jsonError(400, turn.error);
     const scoped = await loadScopedAgent({ deps, req, id, scope: parsed, invoking: true });
     if (scoped instanceof Response) return scoped;
 
@@ -173,7 +207,18 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
         await lease.release();
         return thread;
       }
-      const out = thread.stream({ task: parsed.task });
+      // A turn waiting for approval blocks the thread: answer before
+      // streaming. `prepareTurn` is the backend's own check (it also closes
+      // approvals whose turn ended and finishes expired ones).
+      try {
+        await thread.prepareTurn?.();
+      } catch (err) {
+        await lease.release();
+        const refused = approvalError(err);
+        if (refused) return refused;
+        throw err;
+      }
+      const out = thread.stream({ task: parsed.task }, turn);
       return streamAgentRunResponse({
         out,
         threadMeta: threadMetaOf({ thread, scoped }),
@@ -204,9 +249,13 @@ function threadMetaOf(params: {
  *     namespaceId, resourceId | ownerId }
  *
  * Takes the thread's turn lease like a send (so an approve can't race a
- * new turn), answers 404 when the thread or the suspended approval is
- * unknown, then streams the resumed turn's events in the same SSE shape
- * as the user-task stream.
+ * new turn), answers 404 when the thread or the pending approval (looked
+ * up in the pending-approval index by exact thread + call) is unknown,
+ * then streams the resumed turn's events in the same SSE shape as the
+ * user-task stream; an approval decided meanwhile, or approved after it
+ * expired, ends the stream with an `error` frame naming why. The decision
+ * is recorded with the identity the request was authorized as
+ * (`ownerId`, else `resourceId`).
  */
 export function streamThreadApproval(deps: AgentGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
@@ -239,12 +288,16 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
           "This agent backend doesn't support approval resume.",
         );
       }
-      if (thread.hasPendingApproval && !(await thread.hasPendingApproval(parsed.toolCallId))) {
-        await lease.release();
-        return jsonError(404, "approval_not_found");
+      if (thread.pendingApprovals) {
+        const pending = await thread.pendingApprovals();
+        if (!pending.some((p) => p.toolCallId === parsed.toolCallId)) {
+          await lease.release();
+          return jsonError(404, "approval_not_found");
+        }
       }
       const out = thread.resumeStream(parsed.toolCallId, {
         approved: parsed.approved,
+        by: parsed.ownerId ?? scoped.resourceId,
         ...(parsed.reason !== undefined && { reason: parsed.reason }),
       });
       return streamAgentRunResponse({
@@ -289,4 +342,57 @@ function parseApprovalBody(body: ApprovalRequest | null): ParsedApproval | { err
     ...scope,
     ...(reason !== undefined && { reason }),
   };
+}
+
+/**
+ * `GET /api/agents/:id/threads/:threadId/approvals` — the approvals the
+ * thread's turns are suspended on (from the pending-approval index), so a
+ * client that reconnects can show the approval prompt again.
+ */
+export function listThreadApprovals(deps: AgentGatewayDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const opened = await openThreadFromQuery({ deps, req, params });
+    if (opened instanceof Response) return opened;
+    const pending = (await opened.thread.pendingApprovals?.()) ?? [];
+    const body: ThreadApprovalsResponse = { approvals: pending.map(toPendingApprovalDto) };
+    return json(200, body);
+  };
+}
+
+function toPendingApprovalDto(p: PendingApproval): PendingApprovalDto {
+  return {
+    toolCallId: p.toolCallId,
+    toolName: p.toolName,
+    input: p.input,
+    requestedAt: p.requestedAt,
+    expiresAt: p.expiresAt,
+    status: p.status,
+  };
+}
+
+function awaitingApproval409(pending: ReadonlyArray<PendingApproval>): Response {
+  return json(409, {
+    error: "approval_pending",
+    message: "A turn on this thread is waiting for approval; approve or reject it first.",
+    approvals: pending.map(toPendingApprovalDto),
+  });
+}
+
+/** The answer for an approval-flow error, or null for any other error. */
+function approvalError(err: unknown): Response | null {
+  if (err instanceof ThreadAwaitingApprovalError) return awaitingApproval409(err.pending);
+  if (err instanceof ApprovalNotFoundError) return jsonError(404, "approval_not_found");
+  if (err instanceof ApprovalAlreadyDecidedError) return jsonError(409, "approval_already_decided");
+  if (err instanceof ApprovalExpiredError) return jsonError(410, "approval_expired");
+  if (err instanceof ApprovalNotReadyError) {
+    return jsonError(409, "approval_not_ready", "The turn is not ready for a decision yet; retry.");
+  }
+  if (err instanceof TurnKeyConflictError) {
+    return jsonError(
+      422,
+      "idempotency_key_mismatch",
+      "This turn key was already used for a different message.",
+    );
+  }
+  return null;
 }

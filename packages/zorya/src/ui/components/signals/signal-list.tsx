@@ -280,7 +280,15 @@ export function SignalList({ onOpenRun }: Props) {
                     </td>
                     <td class="text-right">
                       <div class="inline-flex gap-1">
-                        {s.isApproval && (
+                        {s.agentThread && (
+                          <span
+                            class="text-xs text-base-content/60"
+                            title="Agent approvals are decided in the agent chat, which keeps the thread's turns in order"
+                          >
+                            Decide in agent chat ({s.agentThread.threadId})
+                          </span>
+                        )}
+                        {s.isApproval && !s.agentThread && (
                           <>
                             <button
                               type="button"

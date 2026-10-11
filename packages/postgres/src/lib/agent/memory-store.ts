@@ -19,6 +19,7 @@ import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { resolveContext } from "@promin/agent";
 import type {
+  AppendMessagesOptions,
   EpisodeInput,
   EpisodeListParams,
   EpisodicRecord,
@@ -592,14 +593,30 @@ export class PostgresMemoryStore implements MemoryStore {
       );
   }
 
-  async appendMessages(key: ThreadKey, msgs: ReadonlyArray<Message>): Promise<StoredMessage[]> {
+  async appendMessages(
+    key: ThreadKey,
+    msgs: ReadonlyArray<Message>,
+    opts?: AppendMessagesOptions,
+  ): Promise<StoredMessage[]> {
     if (!(await this.getThread(key))) {
       await this.createThread(key);
     }
+    const appendKey = opts?.idempotencyKey;
     const now = this.clock();
     const stored: StoredMessage[] = [];
+    let existing: StoredMessage[] = [];
 
+    // Appends to one thread are serialized by a transaction-scoped advisory
+    // lock: concurrent appends (any keys) take the next seq in turn instead
+    // of colliding on it, and the idempotency check below is atomic.
     await this.db.transaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([key.namespaceId, key.threadId])}, 0))`,
+      );
+      if (appendKey !== undefined) {
+        existing = await this.messagesByAppendKey({ key, appendKey, db: tx });
+        if (existing.length > 0) return;
+      }
       const lastSeqRows = await tx
         .select({ s: sql<number | null>`MAX(${agentMessage.seq})` })
         .from(agentMessage)
@@ -611,7 +628,7 @@ export class PostgresMemoryStore implements MemoryStore {
         );
       let seq = lastSeqRows[0]?.s ?? 0;
 
-      const values = msgs.map((m) => {
+      const values = msgs.map((m, index) => {
         seq += 1;
         const sm: StoredMessage = { ...m, seq, createdAt: now } as StoredMessage;
         stored.push(sm);
@@ -621,6 +638,8 @@ export class PostgresMemoryStore implements MemoryStore {
           seq,
           payload: m as unknown as Record<string, unknown>,
           createdAt: now,
+          appendKey: appendKey ?? null,
+          appendIndex: appendKey !== undefined ? index : null,
         };
       });
       if (values.length > 0) {
@@ -636,7 +655,33 @@ export class PostgresMemoryStore implements MemoryStore {
         );
     });
 
-    return stored;
+    return existing.length > 0 ? existing : stored;
+  }
+
+  private async messagesByAppendKey(params: {
+    key: ThreadKey;
+    appendKey: string;
+    db: Pick<DrizzleDb, "select">;
+  }): Promise<StoredMessage[]> {
+    const rows = await params.db
+      .select()
+      .from(agentMessage)
+      .where(
+        and(
+          eq(agentMessage.namespaceId, params.key.namespaceId),
+          eq(agentMessage.threadId, params.key.threadId),
+          eq(agentMessage.appendKey, params.appendKey),
+        ),
+      )
+      .orderBy(asc(agentMessage.seq));
+    return rows.map(
+      (r) =>
+        ({
+          ...(r.payload as unknown as Message),
+          seq: r.seq,
+          createdAt: Number(r.createdAt),
+        }) as StoredMessage,
+    );
   }
 
   async getMessages(key: ThreadKey, range?: MessageRange): Promise<StoredMessage[]> {

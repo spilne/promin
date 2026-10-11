@@ -185,6 +185,11 @@ export interface ZoryaServerConfig extends AuthConfig {
   webhooks?: {
     sources: Readonly<Record<string, WebhookSourceConfig>>;
     deliveries?: WebhookDeliveryStore;
+    /**
+     * How often the server looks for deliveries a crashed dispatcher left
+     * unfinished and runs them again (also once at start). Default 60 s.
+     */
+    recoveryIntervalMs?: number;
   };
   /**
    * Optional remote-deployment self-registration. When set (with

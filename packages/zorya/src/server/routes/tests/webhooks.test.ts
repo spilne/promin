@@ -6,6 +6,9 @@
 //   - dedup is durable (the server's WorkflowStorage by default), keyed per
 //     agent, and marks a delivery done only after a successful dispatch —
 //     a failed delivery is retried, not answered as a replay.
+//   - the agent turn runs under a run id per (delivery, attempt); a
+//     delivery whose dispatcher died mid-turn is finished by
+//     `WebhookDeliveryRecovery` under the same run id.
 //   - disabled agents answer 410; the replay window reads the WallClock.
 // ---------------------------------------------------------------------------
 
@@ -24,9 +27,13 @@ import { ZoryaServer } from "../../server.ts";
 import {
   InMemoryWebhookDeliveryStore,
   WEBHOOK_DELIVERY_WORKFLOW,
+  WebhookDeliveryRecovery,
   WorkflowStorageWebhookDeliveryStore,
   signWebhookDelivery,
+  webhookRunId,
+  type WebhookDelivery,
   type WebhookDeliveryStore,
+  type WebhookGatewayDeps,
   type WebhookSourceConfig,
 } from "../webhooks.ts";
 
@@ -64,12 +71,12 @@ async function boot(opts: BootOpts = {}) {
     definitions: {},
     sleepScanIntervalMs: 0,
   });
-  const dispatched: Array<{ agentId: string; task: string; scope: unknown }> = [];
+  const dispatched: Array<{ agentId: string; task: string; scope: unknown; runId?: string }> = [];
   const makeAgent = (agentId: string, scope?: unknown) => {
     const agent = {
-      invoke: async (input: { task: string }) => {
+      invoke: async (input: { task: string }, invokeOpts?: { runId?: string }) => {
         if (opts.failInvoke?.()) throw new Error("db password=hunter2 leaked in error");
-        dispatched.push({ agentId, task: input.task, scope });
+        dispatched.push({ agentId, task: input.task, scope, runId: invokeOpts?.runId });
         return { text: Promise.resolve("ok") };
       },
       withScope: (s: unknown) => makeAgent(agentId, s),
@@ -337,7 +344,7 @@ describe("webhook ingress — dedup and retry semantics", () => {
       deliveryId: "d-1",
       timestamp: T0,
     };
-    const held = await other.claim({ key, scope, leaseMs: 60_000 });
+    const held = await other.claim({ delivery: { key, scope, task: "t" }, leaseMs: 60_000 });
     expect(held.outcome).toBe("claimed");
 
     const { server, dispatched } = await boot({ storage });
@@ -355,31 +362,41 @@ describe("webhook ingress — dedup and retry semantics", () => {
     expect(dispatched).toHaveLength(1);
   });
 
-  it("the in-memory store marks done only on complete and forgets a failed claim", async () => {
+  it("the in-memory store marks done only on complete and retries a failed claim", async () => {
     const clock = FakeWallClock.create(T0);
     const store: WebhookDeliveryStore = new InMemoryWebhookDeliveryStore({
       clock,
       retainMs: 1_000,
     });
-    const scope = {
-      source: "s",
-      agentId: "a",
-      namespaceId: "n",
-      deliveryId: "d",
-      timestamp: T0,
+    const delivery: WebhookDelivery = {
+      key: "k",
+      task: "t",
+      scope: { source: "s", agentId: "a", namespaceId: "n", deliveryId: "d", timestamp: T0 },
     };
-    expect((await store.claim({ key: "k", scope, leaseMs: 100 })).outcome).toBe("claimed");
-    expect((await store.claim({ key: "k", scope, leaseMs: 100 })).outcome).toBe("in_flight");
+    expect(await store.claim({ delivery, leaseMs: 100 })).toEqual({
+      outcome: "claimed",
+      attempt: 1,
+    });
+    expect((await store.claim({ delivery, leaseMs: 100 })).outcome).toBe("in_flight");
+    expect(await store.listUnfinished({ limit: 10 })).toEqual([delivery]);
     await store.fail({ key: "k", error: "x" });
-    expect((await store.claim({ key: "k", scope, leaseMs: 100 })).outcome).toBe("claimed");
+    expect(await store.listUnfinished({ limit: 10 })).toEqual([]);
+    // A failed dispatch is retried as the next attempt.
+    expect(await store.claim({ delivery, leaseMs: 100 })).toEqual({
+      outcome: "claimed",
+      attempt: 2,
+    });
+    // An abandoned claim lapses after its lease and continues its attempt.
+    clock.advance(100);
+    expect(await store.claim({ delivery, leaseMs: 100 })).toEqual({
+      outcome: "claimed",
+      attempt: 2,
+    });
     await store.complete({ key: "k" });
-    expect((await store.claim({ key: "k", scope, leaseMs: 100 })).outcome).toBe("duplicate");
+    expect((await store.claim({ delivery, leaseMs: 100 })).outcome).toBe("duplicate");
     // The processed-delivery memory expires on the clock.
     clock.advance(1_000);
-    expect((await store.claim({ key: "k", scope, leaseMs: 100 })).outcome).toBe("claimed");
-    // An abandoned claim lapses after its lease.
-    clock.advance(100);
-    expect((await store.claim({ key: "k", scope, leaseMs: 100 })).outcome).toBe("claimed");
+    expect((await store.claim({ delivery, leaseMs: 100 })).outcome).toBe("claimed");
   });
 
   it("is not mounted without a webhooks config", async () => {
@@ -396,5 +413,154 @@ describe("webhook ingress — dedup and retry semantics", () => {
       }),
     });
     expect((await server.handle(delivery())).status).toBe(404);
+  });
+});
+
+describe("webhook ingress — durable dispatch", () => {
+  const key = JSON.stringify(["github", "echo-bot", "acme", null, "d-1"]);
+
+  it("runs the agent turn under a run id per delivery attempt", async () => {
+    let failing = true;
+    const { server, dispatched } = await boot({ failInvoke: () => failing });
+    expect((await server.handle(delivery())).status).toBe(500);
+    failing = false;
+    expect((await server.handle(delivery())).status).toBe(200);
+    // The first (failed) attempt never reached the agent's record; the
+    // retry ran as attempt 2.
+    expect(dispatched.map((d) => d.runId)).toEqual([webhookRunId({ key, attempt: 2 })]);
+    expect(webhookRunId({ key, attempt: 1 })).not.toBe(webhookRunId({ key, attempt: 2 }));
+  });
+
+  it("finishes a delivery whose dispatcher died, under the same run id, exactly once", async () => {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const deliveries = new WorkflowStorageWebhookDeliveryStore({ storage });
+    const registry = new InMemoryAgentRegistry();
+    await registry.register({ id: "echo-bot", backend });
+    const runIds: Array<string | undefined> = [];
+    const agent = {
+      invoke: async (_input: { task: string }, opts?: { runId?: string }) => {
+        runIds.push(opts?.runId);
+        return { text: Promise.resolve("ok") };
+      },
+      withScope: () => agent,
+    };
+    const deps: WebhookGatewayDeps = {
+      registry,
+      resolve: async () => agent,
+      sources: { github: { secret: SECRET } },
+      deliveries,
+      clock,
+      claimLeaseMs: 60_000,
+    };
+    const recorded: WebhookDelivery = {
+      key,
+      task: "Incoming webhook from github:\n{}",
+      scope: {
+        source: "github",
+        agentId: "echo-bot",
+        namespaceId: "acme",
+        deliveryId: "d-1",
+        timestamp: T0,
+      },
+    };
+    // A dispatcher claims the delivery and dies before finishing it.
+    const crashed = await deliveries.claim({ delivery: recorded, leaseMs: 60_000 });
+    expect(crashed).toMatchObject({ outcome: "claimed", attempt: 1 });
+
+    const recovery = new WebhookDeliveryRecovery(deps);
+    await recovery.tick();
+    expect(runIds).toEqual([]); // its claim is still live
+
+    clock.advance(60_001);
+    await recovery.tick();
+    expect(runIds).toEqual([webhookRunId({ key, attempt: 1 })]);
+    expect(await deliveries.listUnfinished({ limit: 10 })).toEqual([]);
+
+    await recovery.tick();
+    expect(runIds).toHaveLength(1);
+    expect((await deliveries.claim({ delivery: recorded, leaseMs: 1 })).outcome).toBe("duplicate");
+  });
+});
+
+describe("webhook recovery — busy turns and paging", () => {
+  async function setup(invoke: (runId: string | undefined) => Promise<void>) {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const deliveries = new WorkflowStorageWebhookDeliveryStore({ storage });
+    const registry = new InMemoryAgentRegistry();
+    await registry.register({ id: "echo-bot", backend });
+    const agent = {
+      invoke: async (_input: { task: string }, opts?: { runId?: string }) => {
+        await invoke(opts?.runId);
+        return { text: Promise.resolve("ok") };
+      },
+      withScope: () => agent,
+    };
+    const deps: WebhookGatewayDeps = {
+      registry,
+      resolve: async () => agent,
+      sources: { github: { secret: SECRET } },
+      deliveries,
+      clock,
+      claimLeaseMs: 60_000,
+    };
+    return { clock, deliveries, deps };
+  }
+
+  function recorded(deliveryId: string): WebhookDelivery {
+    return {
+      key: JSON.stringify(["github", "echo-bot", "acme", null, deliveryId]),
+      task: "t",
+      scope: {
+        source: "github",
+        agentId: "echo-bot",
+        namespaceId: "acme",
+        deliveryId,
+        timestamp: T0,
+      },
+    };
+  }
+
+  it("leaves a delivery whose turn is still locked elsewhere unfinished, not failed", async () => {
+    let locked = true;
+    const runs: Array<string | undefined> = [];
+    const { clock, deliveries, deps } = await setup(async (runId) => {
+      if (locked) throw Object.assign(new Error("locked"), { _tag: "WorkflowLockError" });
+      runs.push(runId);
+    });
+    const d = recorded("d-busy");
+    await deliveries.claim({ delivery: d, leaseMs: 60_000 });
+    clock.advance(60_001);
+
+    const errors: unknown[] = [];
+    const recovery = new WebhookDeliveryRecovery({ ...deps, onError: (e) => errors.push(e) });
+    await recovery.tick();
+    expect(errors).toEqual([]);
+    expect((await deliveries.listUnfinished({ limit: 10 })).map((u) => u.key)).toEqual([d.key]);
+
+    locked = false;
+    clock.advance(60_001);
+    await recovery.tick();
+    expect(runs).toEqual([webhookRunId({ key: d.key, attempt: 1 })]);
+    expect(await deliveries.listUnfinished({ limit: 10 })).toEqual([]);
+  });
+
+  it("reaches a lapsed delivery behind a full page of live ones", async () => {
+    const runs: Array<string | undefined> = [];
+    const { clock, deliveries, deps } = await setup(async (runId) => {
+      runs.push(runId);
+    });
+    // Live claims first (long leases), the crashed one last.
+    for (const id of ["live-1", "live-2", "live-3"]) {
+      await deliveries.claim({ delivery: recorded(id), leaseMs: 10 * 60_000 });
+      clock.advance(1);
+    }
+    const lapsed = recorded("crashed");
+    await deliveries.claim({ delivery: lapsed, leaseMs: 1_000 });
+    clock.advance(2_000);
+
+    await new WebhookDeliveryRecovery({ ...deps, batch: 2 }).tick();
+    expect(runs).toEqual([webhookRunId({ key: lapsed.key, attempt: 1 })]);
   });
 });

@@ -33,6 +33,10 @@ export {
 export { PostgresMemoryStore, type PostgresMemoryStoreConfig } from "./lib/agent/memory-store.ts";
 export { PostgresLeaseStore, type PostgresLeaseStoreConfig } from "./lib/agent/lease-store.ts";
 export {
+  PostgresPendingApprovalStore,
+  type PostgresPendingApprovalStoreConfig,
+} from "./lib/agent/pending-approval-store.ts";
+export {
   PostgresSecretsStorage,
   type PostgresSecretsStorageConfig,
 } from "./lib/agent/secrets-storage.ts";

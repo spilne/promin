@@ -15,6 +15,7 @@ import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { Message } from "../message.ts";
 import { resolveContext } from "./resolve-context.ts";
 import type {
+  AppendMessagesOptions,
   EpisodeInput,
   EpisodeListParams,
   EpisodicRecord,
@@ -52,6 +53,8 @@ export class InMemoryMemoryStore implements MemoryStore {
   private readonly threadFacts = new Map<string, Fact[]>();
   private readonly messages = new Map<string, StoredMessage[]>();
   private readonly seqByThread = new Map<string, number>();
+  /** Idempotent appends per thread: idempotency key → the messages stored. */
+  private readonly appendsByThread = new Map<string, Map<string, StoredMessage[]>>();
   private readonly lastActiveByThread = new Map<string, number>();
   private readonly namespaceEpisodes = new Map<string, EpisodicRecord[]>();
   private readonly resourceEpisodes = new Map<string, EpisodicRecord[]>();
@@ -415,11 +418,20 @@ export class InMemoryMemoryStore implements MemoryStore {
     );
   }
 
-  async appendMessages(key: ThreadKey, msgs: ReadonlyArray<Message>): Promise<StoredMessage[]> {
+  async appendMessages(
+    key: ThreadKey,
+    msgs: ReadonlyArray<Message>,
+    opts?: AppendMessagesOptions,
+  ): Promise<StoredMessage[]> {
     if (!this.threads.has(this.threadK(key))) {
       await this.createThread(key);
     }
     const k = this.threadK(key);
+    const idempotencyKey = opts?.idempotencyKey;
+    if (idempotencyKey !== undefined) {
+      const done = this.appendsByThread.get(k)?.get(idempotencyKey);
+      if (done) return done;
+    }
     const now = this.now();
     let seq = this.seqByThread.get(k) ?? 0;
     const stored: StoredMessage[] = msgs.map((m) => {
@@ -431,6 +443,11 @@ export class InMemoryMemoryStore implements MemoryStore {
     this.messages.set(k, list);
     this.seqByThread.set(k, seq);
     this.lastActiveByThread.set(k, now);
+    if (idempotencyKey !== undefined) {
+      const appends = this.appendsByThread.get(k) ?? new Map<string, StoredMessage[]>();
+      appends.set(idempotencyKey, stored);
+      this.appendsByThread.set(k, appends);
+    }
     return stored;
   }
 
@@ -487,6 +504,7 @@ export class InMemoryMemoryStore implements MemoryStore {
     this.threadEpisodes.delete(k);
     this.messages.delete(k);
     this.seqByThread.delete(k);
+    this.appendsByThread.delete(k);
     this.lastActiveByThread.delete(k);
   }
 

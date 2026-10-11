@@ -24,6 +24,7 @@ import { CompleteSignalTokenRequestSchema, IdSchema, NameSchema } from "../api-t
 import { parseBody, parseParams } from "../request-validation.ts";
 import { requireRun } from "./run-extras.ts";
 import { RunParamsSchema, signalSchemaMismatch } from "./runs.ts";
+import { agentApprovalRefusal } from "./signals.ts";
 
 /** Default cap on a minted token's validity window: 90 days. */
 export const DEFAULT_MAX_SIGNAL_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
@@ -143,6 +144,12 @@ export function mintSignalToken(deps: SignalTokenRoutesDeps) {
     if (isTerminalWorkflowStatus(status.status)) {
       return jsonError(409, "run_ended", `Run has already ended (status: ${status.status})`);
     }
+    const agentApproval = await agentApprovalRefusal({
+      storage: deps.storage,
+      workflowId,
+      signalName,
+    });
+    if (agentApproval) return agentApproval;
 
     const tokenId = randomToken(16);
     const bearer = randomToken(32);

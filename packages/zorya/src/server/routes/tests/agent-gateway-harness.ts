@@ -10,6 +10,7 @@ import {
   InMemoryDagRegistry,
   InMemoryLeaseStore,
   InMemoryMemoryStore,
+  InMemoryPendingApprovalStore,
   InMemoryRoleRegistry,
   InMemorySecretsStorage,
   resolveLocalAgent,
@@ -56,6 +57,7 @@ export async function bootAgents(opts: HarnessOpts = {}) {
   const storage = new InMemoryWorkflowStorage();
   const runner = createWorkflowRunner({ storage });
   const memory = new InMemoryMemoryStore();
+  const approvals = new InMemoryPendingApprovalStore({ clock });
   const registry = new InMemoryAgentRegistry({ clock });
   const instances = new InMemoryAgentInstanceRegistry();
   const roles = new InMemoryRoleRegistry();
@@ -85,6 +87,7 @@ export async function bootAgents(opts: HarnessOpts = {}) {
       const agent = resolveLocalAgent(recipe, {
         runner,
         memory,
+        approvals,
         llm: () => llm,
         tools: opts.tools ?? {},
       });
@@ -108,7 +111,19 @@ export async function bootAgents(opts: HarnessOpts = {}) {
     ...(dags && { dags }),
     ...(opts.namespaces && { namespaces: opts.namespaces }),
   });
-  return { server, registry, memory, instances, roles, secrets, dags, leaseStore, clock, storage };
+  return {
+    server,
+    registry,
+    memory,
+    approvals,
+    instances,
+    roles,
+    secrets,
+    dags,
+    leaseStore,
+    clock,
+    storage,
+  };
 }
 
 export function req(

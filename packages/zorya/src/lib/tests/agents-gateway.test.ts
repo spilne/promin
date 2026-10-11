@@ -1077,10 +1077,10 @@ describe("agent gateway — turn gate (per-thread coordination)", () => {
     expect(body.error).toBe("turn_in_progress");
   });
 
-  it("without a turnGate configured, contention is not enforced (single-process default)", async () => {
+  it("a lone turn succeeds under the default turn gate", async () => {
     const { server } = await bootGateway({
       responses: [{ content: "ok", finishReason: "stop" }],
-      // withTurnGate omitted — gate is undefined
+      // withTurnGate omitted — ZoryaAgents builds its default in-process gate
     });
     const res = await server.handle(
       new Request("http://test/api/agents/support/threads/t-1", {

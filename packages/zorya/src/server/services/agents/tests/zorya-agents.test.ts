@@ -3,7 +3,12 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { InMemoryAgentRegistry, InMemoryMemoryStore, type Agent } from "@promin/agent";
+import {
+  InMemoryAgentRegistry,
+  InMemoryMemoryStore,
+  TurnInProgressError,
+  type Agent,
+} from "@promin/agent";
 import type { DurableScheduleConfig, ScheduleTick } from "@promin/workflow/scheduler";
 import { ZoryaAgents } from "../index.ts";
 
@@ -145,5 +150,88 @@ describe("ZoryaAgents lifecycle", () => {
     await agents.start(); // no-op (no scan config)
     await agents.stop();
     await agents.stop();
+  });
+});
+
+describe("ZoryaAgents.turnGate", () => {
+  const key = { namespaceId: "acme", threadId: "t-1" };
+
+  it("is on by default: a second turn on a busy thread is refused", async () => {
+    const agents = new ZoryaAgents({
+      registry: new InMemoryAgentRegistry(),
+      resolve: () => makeAgent(),
+      memory: new InMemoryMemoryStore(),
+    });
+    const gate = agents.turnGate!;
+    await gate.acquire({ key, ownerId: "w-1", policy: "strict" });
+    await expect(gate.acquire({ key, ownerId: "w-2", policy: "strict" })).rejects.toBeInstanceOf(
+      TurnInProgressError,
+    );
+  });
+
+  it("`turnGate: false` turns it off", () => {
+    const agents = new ZoryaAgents({
+      registry: new InMemoryAgentRegistry(),
+      resolve: () => makeAgent(),
+      turnGate: false,
+    });
+    expect(agents.turnGate).toBeUndefined();
+  });
+});
+
+describe("ZoryaAgents.dispatchSchedule — thread turns take the turn gate", () => {
+  const schedule: DurableScheduleConfig = {
+    id: "nudge",
+    name: "nudge",
+    intervalMs: 60_000,
+    enabled: true,
+    metadata: {
+      agentTrigger: true,
+      agentId: "thread-bot",
+      task: "follow up",
+      namespaceId: "acme",
+      threadId: "t-1",
+      createdByAgent: "thread-bot",
+    },
+  };
+  const tick: ScheduleTick = {
+    scheduleId: "nudge",
+    scheduleName: "nudge",
+    scheduledAt: new Date(0),
+    firedAt: new Date(0),
+    incarnation: "inc1",
+    tickNumber: 1,
+    metadata: schedule.metadata,
+  };
+
+  it("is refused while a turn holds the thread, and holds the lease while it runs", async () => {
+    const registry = new InMemoryAgentRegistry();
+    await registry.register({
+      id: "thread-bot",
+      backend: { type: "local", llm: { provider: "echo" } },
+    } as unknown as Parameters<typeof registry.register>[0]);
+    let answer!: () => void;
+    const thread = {
+      send: () => new Promise((r) => (answer = () => r({ text: Promise.resolve("done") }))),
+    };
+    const agent = { withScope: () => agent, thread: async () => thread };
+    const agents = new ZoryaAgents({ registry, resolve: () => agent as unknown as Agent });
+    const gate = agents.turnGate!;
+    const key = { namespaceId: "acme", threadId: "t-1" };
+
+    const live = await gate.acquire({ key, ownerId: "gateway", policy: "strict" });
+    await expect(agents.dispatchSchedule(tick, schedule)).rejects.toBeInstanceOf(
+      TurnInProgressError,
+    );
+    await gate.release(live.leaseId);
+
+    const started = await agents.dispatchSchedule(tick, schedule);
+    await expect(
+      gate.acquire({ key, ownerId: "gateway", policy: "strict" }),
+    ).rejects.toBeInstanceOf(TurnInProgressError);
+    answer();
+    await started.done;
+    const after = await gate.acquire({ key, ownerId: "gateway", policy: "strict" });
+    await gate.release(after.leaseId);
   });
 });

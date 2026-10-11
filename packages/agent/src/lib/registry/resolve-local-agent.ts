@@ -17,6 +17,7 @@ import type { WorkflowRunner } from "@promin/workflow";
 import { LocalAgent, type LocalAgentConfig } from "../agent/local-agent.ts";
 import type { LLMProvider } from "../llm-provider.ts";
 import type { MemoryStore } from "../memory/types.ts";
+import type { PendingApprovalStore } from "../approvals/pending-approval-store.ts";
 import type { AgentTool } from "../tool.ts";
 import type { Consolidator } from "../memory/consolidator.ts";
 import type { AutoCompactConfig, AutoDistillConfig } from "../agent/local-agent.ts";
@@ -46,6 +47,14 @@ import type { Retriever } from "../rag/types.ts";
 export interface ResolveLocalAgentDeps {
   readonly runner: WorkflowRunner;
   readonly memory?: MemoryStore;
+  /**
+   * Pending-approval index the agent's thread turns record into and resume
+   * from — see `LocalAgentConfig.approvals`. Pass the host's shared, durable
+   * store; omitted, agents over the same runner share an in-memory one.
+   */
+  readonly approvals?: PendingApprovalStore;
+  /** See `LocalAgentConfig.approvalTtlMs`. */
+  readonly approvalTtlMs?: number;
   /**
    * Resolve `(provider, modelId, apiKey?)` → `LLMProvider`. The host
    * typically builds this from a config map of API keys + provider
@@ -238,6 +247,8 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
     agentId: agent.id,
     runner: deps.runner,
     memory: deps.memory,
+    ...(deps.approvals !== undefined && { approvals: deps.approvals }),
+    ...(deps.approvalTtlMs !== undefined && { approvalTtlMs: deps.approvalTtlMs }),
     namespaceId: deps.namespaceId,
     resourceId: deps.resourceId,
     // Capabilities gate elevated tools — see filterToolsByCapability. Sourced

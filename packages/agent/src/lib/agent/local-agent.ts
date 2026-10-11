@@ -15,9 +15,25 @@
 // workflow id is reserved across requests — the thread's "memory" lives in
 // the `MemoryStore`, not in an in-process session map.
 //
+// A thread turn is one durable unit:
+//   - its workflow id is deterministic — `opts.runId`, else a digest of
+//     (namespace, thread, `opts.turnKey`) — so a retried send with the same
+//     turn key reaches the same workflow instead of running the model and
+//     tools again;
+//   - the user message is recorded by the workflow's `transcript-open`
+//     step and the produced messages by its `transcript-commit` step, each
+//     an idempotent append keyed by the workflow id, so a crash, a retry or
+//     a recovery on another worker never loses or duplicates history; a
+//     failed or suspended turn has still recorded its user message;
+//   - an approval the turn suspends on is recorded in the pending-approval
+//     index (`PendingApprovalStore`), which `resume` reads by exact key;
+//   - a new turn is refused while an earlier one waits for an approval
+//     (`ThreadAwaitingApprovalError`), so a resumed turn's output always
+//     lands right after its own user message.
+//
 // `MemoryStore` integration:
-//   - thread.send / thread.stream load history → run agentAction → persist
-//     the new tail (user task + assistant + any tool messages)
+//   - thread.send / thread.stream load history → run agentAction, which
+//     appends the turn's messages through the transcript steps
 //   - thread.workingMemory / setWorkingMemory / setMetadata delegate to the
 //     store directly
 //   - thread.delete cascades through MemoryStore.deleteThread
@@ -27,15 +43,29 @@
 // and single-process REPLs but not multi-tenant gateways.
 // ---------------------------------------------------------------------------
 
-import { randomUUID } from "node:crypto";
-import type { WorkflowRunner } from "@promin/workflow";
+import { createHash, randomUUID } from "node:crypto";
+import type { WorkflowRunner, WorkflowState, WorkflowStatus } from "@promin/workflow";
 import type { z } from "zod";
 import {
   agentAction,
   type AgentActionConfig,
   type AgentEngineConfig,
   type AgentResult,
+  type TurnApprovalIndex,
+  type TurnTranscript,
 } from "../agent-action.ts";
+import { composeApprovalSignal } from "../approvals/approve-signal.ts";
+import { InMemoryPendingApprovalStore } from "../approvals/in-memory-pending-approval-store.ts";
+import {
+  ApprovalAlreadyDecidedError,
+  ApprovalExpiredError,
+  ApprovalNotFoundError,
+  ApprovalNotReadyError,
+  ThreadAwaitingApprovalError,
+  type PendingApproval,
+  type PendingApprovalKey,
+  type PendingApprovalStore,
+} from "../approvals/pending-approval-store.ts";
 import type { ToolRegistry } from "../tool-registry.ts";
 import type { Message, ToolCall } from "../message.ts";
 import { SessionEventBus, type SessionEvent } from "../session-logger.ts";
@@ -65,8 +95,13 @@ import { retrieverToolName } from "../rag/retriever-tool-name.ts";
 import type { Retriever, RetrieverFilter } from "../rag/types.ts";
 import type { AgentKnowledgeMode } from "../registry/types.ts";
 import { frameTask } from "./frame-task.ts";
-import { SystemWallClock, completeSignal, hasCapability } from "@promin/workflow";
-import { ThreadNotFoundError } from "./errors.ts";
+import {
+  InMemoryWorkflowStorage,
+  SystemWallClock,
+  completeSignal,
+  hasCapability,
+} from "@promin/workflow";
+import { ThreadNotFoundError, TurnKeyConflictError } from "./errors.ts";
 import { THREAD_AGENT_METADATA_KEY } from "./types.ts";
 import type { AgentTool, ApprovalDecision } from "../tool.ts";
 import { filterToolsByCapability } from "../tool.ts";
@@ -106,6 +141,22 @@ export interface LocalAgentConfig<TOutput = any> {
   readonly runner: WorkflowRunner;
   /** Optional layered memory. When set, thread state persists across processes. */
   readonly memory?: MemoryStore;
+  /**
+   * Index of the tool approvals thread turns are suspended on. Approve /
+   * reject (`thread.resume`) looks the suspended turn up here by exact
+   * (namespace, thread, tool call) key. Default: an
+   * `InMemoryPendingApprovalStore` shared by every LocalAgent over the same
+   * `runner` in this process. It is lost on restart, so a host whose
+   * workflow storage is durable passes a durable store
+   * (`SqlitePendingApprovalStore`, `PostgresPendingApprovalStore`) shared
+   * by all its processes.
+   */
+  readonly approvals?: PendingApprovalStore;
+  /**
+   * Expire a pending approval this long after it is requested: an expired
+   * approval can only be rejected. Default: approvals never expire.
+   */
+  readonly approvalTtlMs?: number;
   /**
    * Default tenant key. Optional — multi-tenant gateways leave this unset and
    * pass `namespaceId` per call (`agent.thread(id, { namespaceId })`,
@@ -458,7 +509,15 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
   private readonly config: LocalAgentConfig<TOutput>;
 
   constructor(config: LocalAgentConfig<TOutput>) {
-    this.config = config;
+    this.config = {
+      ...config,
+      approvals: config.approvals ?? defaultApprovalStore(config),
+    };
+  }
+
+  /** The pending-approval index (configured, or the in-memory default). */
+  private approvalStore(): PendingApprovalStore {
+    return this.config.approvals!;
   }
 
   /**
@@ -490,15 +549,17 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
   // --- One-shot ---------------------------------------------------------
 
   async invoke(input: AgentInput, opts?: AgentInvokeOpts): Promise<AgentRunOutput<TOutput>> {
-    const { promise, capture } = this.runOnce(input, opts);
-    const result = await promise;
-    return resolvedOutput<TOutput>(result, capture.events);
+    const capture = makeCapture(opts?.signal);
+    const result = await this.runOnce({ input, ...(opts && { opts }), capture });
+    return resolvedOutput<TOutput>({ result, capture });
   }
 
   stream(input: AgentInput, opts?: AgentInvokeOpts): AgentRunOutput<TOutput> {
-    const bus = new SessionEventBus();
-    const { promise, capture } = this.runOnce(input, opts, bus);
-    return liveOutput<TOutput>(promise, bus, capture);
+    const capture = makeCapture(opts?.signal);
+    return liveOutput<TOutput>({
+      promise: this.runOnce({ input, ...(opts && { opts }), capture }),
+      capture,
+    });
   }
 
   /**
@@ -595,6 +656,8 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       engine,
       runner: this.config.runner,
       memory: this.config.memory,
+      approvals: this.approvalStore(),
+      ...(this.config.approvalTtlMs !== undefined && { approvalTtlMs: this.config.approvalTtlMs }),
       created,
       agentId: this.agentId(),
       autoCompact: this.config.autoCompact === false ? undefined : this.config.autoCompact,
@@ -812,17 +875,14 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
 
   // --- internal: one-shot runner ----------------------------------------
 
-  private runOnce(
-    input: AgentInput,
-    opts?: AgentInvokeOpts,
-    bus?: SessionEventBus,
-  ): {
-    promise: Promise<AgentResult>;
+  private async runOnce(params: {
+    input: AgentInput;
+    opts?: AgentInvokeOpts;
     capture: RunCapture;
-  } {
-    const capture = makeCapture(opts?.signal);
-    const runBus = bus ?? new SessionEventBus();
-    runBus.subscribe((e) => recordEvent(capture, e));
+  }): Promise<AgentResult> {
+    const { input, opts, capture } = params;
+    const bus = new SessionEventBus();
+    bus.subscribe((e) => recordEvent(capture, e));
 
     // Tools come from buildTools so the network tools auto-attach for
     // one-shot invoke too. No threadId here (one-shot is stateless), so
@@ -838,7 +898,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     };
     const wf = buildTurnWorkflow<TOutput>({
       engine,
-      bus: runBus,
+      bus,
       scope: {
         ...(namespaceId !== undefined && { namespaceId }),
         ...(resourceId !== undefined && { resourceId }),
@@ -852,26 +912,56 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     const workflowId =
       opts?.runId ?? `${this.config.invokeIdPrefix ?? engine.name}-${randomUUID().slice(0, 8)}`;
 
+    // A retried run keeps its first input; replay reads the journal.
+    const existing = await this.config.runner.storage.loadWorkflow(workflowId);
+    if (existing) {
+      assertSameTask({ workflowId, input: existing.input, task: frameTask(input) });
+      return (await this.config.runner.run({
+        workflow: wf,
+        workflowId,
+        input: existing.input,
+      })) as AgentResult;
+    }
+
     // Context-mode retrievers search with the task before the run starts;
     // the hits ride in the workflow input as a fenced reference-data
     // message right before the task, so a replay sees the same context
     // without searching again.
-    const promise = (async () => {
-      const knowledge = await buildRetrieverContext({
-        retrievers: this.config.retrievers,
-        query: input.task,
-      });
-      const messages: Message[] = [...(input.messages ?? [])];
-      if (knowledge) messages.push(referenceDataMessage(knowledge));
-      const r = await this.config.runner.run({
-        workflow: wf,
-        workflowId,
-        input: { task: frameTask(input), messages },
-      });
-      return r as AgentResult;
-    })();
-    return { promise, capture };
+    const knowledge = await buildRetrieverContext({
+      retrievers: this.config.retrievers,
+      query: input.task,
+    });
+    const messages: Message[] = [...(input.messages ?? [])];
+    if (knowledge) messages.push(referenceDataMessage(knowledge));
+    return (await this.config.runner.run({
+      workflow: wf,
+      workflowId,
+      input: { task: frameTask(input), messages },
+    })) as AgentResult;
   }
+}
+
+/** Default pending-approval index per runner, shared by agents over it. */
+const DEFAULT_APPROVAL_STORES = new WeakMap<WorkflowRunner, PendingApprovalStore>();
+
+function defaultApprovalStore(config: LocalAgentConfig<any>): PendingApprovalStore {
+  let store = DEFAULT_APPROVAL_STORES.get(config.runner);
+  if (!store) {
+    if (!(config.runner.storage instanceof InMemoryWorkflowStorage)) {
+      // Durable turns with an index that dies with the process: a restart
+      // loses every pending approval (the turns stay suspended).
+      console.warn(
+        "[LocalAgent] no `approvals` store configured: pending approvals are kept in memory " +
+          "while the workflow storage is durable. Pass a durable PendingApprovalStore " +
+          "(SqlitePendingApprovalStore, PostgresPendingApprovalStore) shared by every process.",
+      );
+    }
+    store = new InMemoryPendingApprovalStore({
+      ...(config.agent.clock !== undefined && { clock: config.agent.clock }),
+    });
+    DEFAULT_APPROVAL_STORES.set(config.runner, store);
+  }
+  return store;
 }
 
 // ---------------------------------------------------------------------------
@@ -885,6 +975,10 @@ interface LocalAgentThreadDeps<TOutput> {
   readonly engine: AgentEngineConfig<TOutput>;
   readonly runner: WorkflowRunner;
   readonly memory?: MemoryStore;
+  /** Pending-approval index the thread's turns record into and resume from. */
+  readonly approvals: PendingApprovalStore;
+  /** Expiry of a pending approval; omitted: never. */
+  readonly approvalTtlMs?: number;
   readonly created: boolean;
   /** Recipe id surfaced as `ctx.scope.agentId` to scope-aware tools. */
   readonly agentId: string;
@@ -922,6 +1016,8 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
   private readonly deps: LocalAgentThreadDeps<TOutput>;
   /** In-memory transcript used when no MemoryStore is configured. */
   private inMemoryMessages: Message[] = [];
+  /** Idempotency keys of the in-memory transcript's appends. */
+  private readonly inMemoryAppends = new Set<string>();
 
   constructor(deps: LocalAgentThreadDeps<TOutput>) {
     this.deps = deps;
@@ -941,15 +1037,17 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
   }
 
   async send(input: AgentInput, opts?: AgentInvokeOpts): Promise<AgentRunOutput<TOutput>> {
-    const { promise, capture } = await this.runTurn(input, opts);
-    const result = await promise;
-    return resolvedOutput<TOutput>(result, capture.events);
+    const capture = makeCapture(opts?.signal);
+    const result = await this.runTurn({ input, ...(opts && { opts }), capture });
+    return resolvedOutput<TOutput>({ result, capture });
   }
 
   stream(input: AgentInput, opts?: AgentInvokeOpts): AgentRunOutput<TOutput> {
     const capture = makeCapture(opts?.signal);
-    const promise = this.runTurn(input, opts, capture).then(({ promise }) => promise);
-    return liveOutput<TOutput>(promise, undefined, capture);
+    return liveOutput<TOutput>({
+      promise: this.runTurn({ input, ...(opts && { opts }), capture }),
+      capture,
+    });
   }
 
   async resume(
@@ -957,9 +1055,9 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     decision: ApprovalDecision,
     opts?: AgentInvokeOpts,
   ): Promise<AgentRunOutput<TOutput>> {
-    const { promise, capture } = await this.resumeTurn(callId, decision, opts);
-    const result = await promise;
-    return resolvedOutput<TOutput>(result, capture.events);
+    const capture = makeCapture(opts?.signal);
+    const result = await this.resumeTurn({ callId, decision, capture });
+    return resolvedOutput<TOutput>({ result, capture });
   }
 
   resumeStream(
@@ -968,54 +1066,138 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     opts?: AgentInvokeOpts,
   ): AgentRunOutput<TOutput> {
     const capture = makeCapture(opts?.signal);
-    const promise = this.resumeTurn(callId, decision, opts, capture).then(({ promise }) => promise);
-    return liveOutput<TOutput>(promise, undefined, capture);
-  }
-
-  async hasPendingApproval(callId: string): Promise<boolean> {
-    return (await this.findSuspendedApproval(`approve:${callId}`)) !== null;
-  }
-
-  /**
-   * Find the suspended workflow for this thread waiting on `signalName`.
-   * Each chat turn creates its own workflow id prefixed by threadId, so
-   * the search is scoped to this thread alone.
-   */
-  private async findSuspendedApproval(signalName: string) {
-    const suspended = await this.deps.runner.storage.listWorkflows({
-      status: "suspended",
-      limit: 100,
+    return liveOutput<TOutput>({
+      promise: this.resumeTurn({ callId, decision, capture }),
+      capture,
     });
-    return (
-      suspended.find(
-        (w) =>
-          w.workflowId.startsWith(`${this.deps.key.threadId}-`) &&
-          Object.values(w.steps).some(
-            (s) => s.status === "waiting_for_signal" && s.signalName === signalName,
-          ),
-      ) ?? null
-    );
   }
 
   /**
-   * Continue a turn that suspended on `approve:<callId>`. Finds the
-   * suspended workflow for this thread, delivers the approval decision
-   * to its journal, then re-runs the workflow definition under the
-   * SAME workflowId — the runner replays from the journal, consumes
-   * the now-completed signal, and continues to completion (or the
-   * next suspension).
+   * Open approvals of this thread's turns, from the pending-approval index
+   * (exact namespace + thread match), oldest first: approvals waiting for
+   * a decision, and decided ones whose decision has not reached the turn
+   * yet (a resume interrupted between the two — resume again to finish it).
+   */
+  async pendingApprovals(): Promise<PendingApproval[]> {
+    return this.deps.approvals.list({
+      namespaceId: this.deps.key.namespaceId,
+      threadId: this.deps.key.threadId,
+      open: true,
+    });
+  }
+
+  /**
+   * Make the thread ready for a new turn, or throw
+   * `ThreadAwaitingApprovalError`. Turns run one at a time per thread, in
+   * order: a new turn is refused while an earlier one waits for an
+   * approval (or for a recorded decision to reach it), so that turn's
+   * output lands in the transcript before the next turn's user message.
+   *
+   * On the way it settles what it can:
+   *   - an approval whose turn has ended (completed / failed out of band)
+   *     or is gone is closed, as rejected when it was still pending;
+   *   - an expired approval is closed as `expired` and its turn finished
+   *     with the rejection, so the thread moves on.
+   * A turn that is still running — including one between recording its
+   * approval and suspending on it — always blocks.
+   */
+  async prepareTurn(): Promise<void> {
+    const blocking: PendingApproval[] = [];
+    for (const row of await this.pendingApprovals()) {
+      const key = {
+        namespaceId: row.namespaceId,
+        threadId: row.threadId,
+        toolCallId: row.toolCallId,
+      };
+      const wf = await this.deps.runner.storage.loadWorkflow(row.workflowId);
+      if (!wf || isTerminal(wf.status)) {
+        await this.closeEndedApproval(row);
+        continue;
+      }
+      let current = row;
+      if (current.status === "pending") {
+        const expired = await this.deps.approvals.decide({
+          ...key,
+          approved: false,
+          decidedBy: SYSTEM_DECIDER,
+          reason: "approval expired",
+          onlyIfExpired: true,
+        });
+        if (expired.outcome !== "decided") {
+          blocking.push(current);
+          continue;
+        }
+        current = expired.approval;
+      }
+      if (current.status === "expired") {
+        // Finish the turn with the rejection before the new turn starts.
+        await this.resumeTurn({
+          callId: current.toolCallId,
+          decision: {
+            approved: false,
+            by: current.decidedBy ?? SYSTEM_DECIDER,
+            reason: "approval expired",
+          },
+          capture: makeCapture(),
+        }).catch((err: unknown) => {
+          // Not yet suspended on it: the turn still blocks this send (below).
+          if (err instanceof ApprovalNotReadyError) return;
+          if (!isSuspension(err)) throw err;
+        });
+        const after = await this.deps.approvals.get(key);
+        if (after && after.deliveredAt === null) blocking.push(after);
+        continue;
+      }
+      blocking.push(current);
+    }
+    if (blocking.length > 0) throw new ThreadAwaitingApprovalError(blocking);
+  }
+
+  /** Close an approval whose turn ended or vanished without its decision. */
+  private async closeEndedApproval(row: PendingApproval): Promise<void> {
+    const key = {
+      namespaceId: row.namespaceId,
+      threadId: row.threadId,
+      toolCallId: row.toolCallId,
+    };
+    if (row.status === "pending") {
+      await this.deps.approvals.decide({
+        ...key,
+        approved: false,
+        decidedBy: SYSTEM_DECIDER,
+        reason: "the turn ended without this approval",
+      });
+    }
+    await this.deps.approvals.markDelivered(key);
+  }
+
+  /**
+   * Continue a turn that suspended on `approve:<callId>`. The pending-
+   * approval index names the turn's workflow exactly; the decision is
+   * recorded there first (atomically — of concurrent deciders one wins),
+   * then delivered to the workflow's journal, and the workflow re-runs
+   * under the SAME workflowId: the runner replays from the journal,
+   * consumes the signal and continues to completion (or the next
+   * suspension). The turn's output is committed by the workflow's own
+   * `transcript-commit` step; the row is closed once the run settles.
+   *
+   * A decision that arrives while the turn is still on its way to the
+   * suspension (the approval is recorded just before it) waits for the
+   * suspension, up to `RESUME_WAIT_MS`, then throws
+   * `ApprovalNotReadyError`. A resume interrupted after recording the
+   * decision is finished by resuming again with the same decision.
    *
    * The rebuilt workflow definition must be replay-equivalent to the
    * original turn's. agentAction's control flow reads only journaled
    * values (tool-set snapshots included), so a recipe edited mid-turn
    * changes later steps only.
    */
-  private async resumeTurn(
-    callId: string,
-    decision: ApprovalDecision,
-    opts?: AgentInvokeOpts,
-    captureIn?: RunCapture,
-  ): Promise<{ promise: Promise<AgentResult>; capture: RunCapture }> {
+  private async resumeTurn(params: {
+    callId: string;
+    decision: ApprovalDecision;
+    capture: RunCapture;
+  }): Promise<AgentResult> {
+    const { callId, decision, capture } = params;
     const storage = this.deps.runner.storage;
     if (!hasCapability(storage, "journal")) {
       throw new Error(
@@ -1024,80 +1206,171 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       );
     }
 
-    const signalName = `approve:${callId}`;
-    const wf = await this.findSuspendedApproval(signalName);
-    if (!wf) {
-      throw new Error(
-        `No suspended approval "${signalName}" found for thread "${this.deps.key.threadId}".`,
-      );
-    }
-    const stepName = Object.values(wf.steps).find(
-      (s) => s.status === "waiting_for_signal" && s.signalName === signalName,
-    )!.stepName;
+    const key = {
+      namespaceId: this.deps.key.namespaceId,
+      threadId: this.deps.key.threadId,
+      toolCallId: callId,
+    };
+    let entry = await this.deps.approvals.get(key);
+    if (!entry) throw new ApprovalNotFoundError(key);
+    // The decision reached the turn already; the turn has moved on.
+    if (entry.deliveredAt !== null) throw new ApprovalAlreadyDecidedError(entry);
+    const signalName = composeApprovalSignal(callId);
 
-    const capture = captureIn ?? makeCapture(opts?.signal);
-    const bus = new SessionEventBus();
-    bus.subscribe((e) => recordEvent(capture, e));
-
-    // Rebuild the workflow definition. The journal drives replay so we
-    // don't need to recompute the seed messages — the runner reads input
-    // from storage when resuming an existing workflow row.
-    const { persona } = await this.loadContext();
-    const builtWorkflow = buildTurnWorkflow<TOutput>({
-      engine: { ...this.deps.engine, systemPrompt: persona },
-      bus,
-      scope: this.toolScope(),
-      signal: capture.abort.signal,
-    });
-
-    // Deliver the signal — completes the journal entry the suspended step
-    // is waiting on. False means the entry was already completed (race
-    // with another resume call) — surface it loudly so the gateway can
-    // tell the caller their decision lost the race.
-    const delivered = await completeSignal({
-      storage,
-      workflowId: wf.workflowId,
-      stepName,
+    const wf = await this.awaitSignalWait({
+      workflowId: entry.workflowId,
       signalName,
-      value: decision,
+      key,
+      pending: entry.status === "pending",
     });
-    if (!delivered) {
-      throw new Error(`Approval "${signalName}" already resolved on workflow "${wf.workflowId}".`);
+    if (!wf) {
+      await this.closeEndedApproval(entry);
+      throw new ApprovalNotFoundError(key);
     }
 
-    // Re-run the workflow. The runner uses the `input` we pass directly
-    // (it doesn't fall back to `state.input`), so on resume we feed the
-    // ORIGINAL persisted input back in. Replay reads activities from the
-    // journal — the function-body itself is deterministic on input.
-    const persistedInput = wf.input;
-    const promise = this.deps.runner
-      .run({
-        workflow: builtWorkflow,
-        workflowId: wf.workflowId,
-        input: persistedInput,
-      })
-      .then(async (raw) => {
-        const r = raw as AgentResult;
-        await this.persistTurn({ result: r });
-        return r;
+    if (entry.status === "pending") {
+      const decided = await this.deps.approvals.decide({
+        ...key,
+        approved: decision.approved,
+        ...(decision.by !== undefined && { decidedBy: decision.by }),
+        ...(decision.reason !== undefined && { reason: decision.reason }),
       });
+      if (decided.outcome === "not_found") throw new ApprovalNotFoundError(key);
+      if (decided.outcome === "expired") throw new ApprovalExpiredError(decided.approval);
+      if (decided.outcome !== "decided") {
+        throw new ApprovalAlreadyDecidedError(decided.approval);
+      }
+      entry = decided.approval;
+    } else {
+      // Decided, not delivered: finish only the decision that was recorded.
+      const recordedApproval = entry.status === "approved";
+      if (recordedApproval !== decision.approved) {
+        if (entry.status === "expired" && decision.approved) {
+          throw new ApprovalExpiredError(entry);
+        }
+        throw new ApprovalAlreadyDecidedError(entry);
+      }
+    }
 
-    return { promise, capture };
+    // Deliver the recorded decision when the turn is still waiting on it.
+    // A completed entry (an interrupted resume being finished) needs none:
+    // the journal holds it either way.
+    const recorded: ApprovalDecision = {
+      approved: entry.status === "approved",
+      ...(entry.reason !== null && { reason: entry.reason }),
+      ...(entry.decidedBy !== null && { by: entry.decidedBy }),
+    };
+    const waiting = waitingStep({ wf, signalName });
+    if (waiting) {
+      await completeSignal({
+        storage,
+        workflowId: entry.workflowId,
+        stepName: waiting.stepName,
+        signalName,
+        value: recorded,
+      });
+    }
+
+    // Rebuild the workflow definition and re-run it on its persisted
+    // input; replay reads every recorded activity from the journal.
+    const { persona } = await this.loadContext();
+    let result: AgentResult;
+    try {
+      result = await this.runWorkflow({
+        workflowId: entry.workflowId,
+        input: wf.input as AgentRunInput,
+        persona,
+        capture,
+      });
+    } catch (err) {
+      // Another process is running the turn: the decision is recorded and
+      // delivered, that process carries it on.
+      if (errorTag(err) === "WorkflowLockError") throw new ApprovalNotReadyError(key);
+      // The run may have failed before the turn consumed the decision (a
+      // transient storage error, say): then the turn is still suspended on
+      // this signal and the row stays open, so the next resume or send
+      // delivers it again instead of orphaning the turn.
+      const after = await storage.loadWorkflow(entry.workflowId).catch(() => undefined);
+      if (!after || isTerminal(after.status) || !waitingStep({ wf: after, signalName })) {
+        await this.deps.approvals.markDelivered(key);
+      }
+      throw err;
+    }
+    await this.deps.approvals.markDelivered(key);
+    await this.afterTurn();
+    return result;
   }
 
   /**
-   * Run one conversational turn as a fresh `agentAction` workflow seeded
-   * with the thread's persisted message history. Stateless per call —
-   * lets the gateway resolve a new `LocalAgent` per request.
+   * The turn's workflow when a decision can be delivered to it. For a
+   * pending approval that is once the turn is suspended on `signalName`:
+   * while the turn is still on its way there (the approval is recorded just
+   * before it suspends), polls on the engine clock up to `RESUME_WAIT_MS`,
+   * then throws `ApprovalNotReadyError`. A decided approval only needs the
+   * turn not to have ended. Null when the turn ended or is gone.
    */
-  private async runTurn(
-    input: AgentInput,
-    opts?: AgentInvokeOpts,
-    captureIn?: RunCapture,
-  ): Promise<{ promise: Promise<AgentResult>; capture: RunCapture }> {
-    const capture = captureIn ?? makeCapture(opts?.signal);
-    const bus = new SessionEventBus();
-    bus.subscribe((e) => recordEvent(capture, e));
+  private async awaitSignalWait(params: {
+    workflowId: string;
+    signalName: string;
+    key: PendingApprovalKey;
+    pending: boolean;
+  }): Promise<WorkflowState | null> {
+    const { workflowId, signalName, key, pending } = params;
+    const clock = this.deps.engine.clock ?? SystemWallClock;
+    const deadline = clock.currentTimeMs() + RESUME_WAIT_MS;
+    for (;;) {
+      const wf = await this.deps.runner.storage.loadWorkflow(workflowId);
+      if (!wf || isTerminal(wf.status)) return null;
+      if (!pending) return wf;
+      if (wf.status === "suspended") return waitingStep({ wf, signalName }) ? wf : null;
+      if (clock.currentTimeMs() >= deadline) throw new ApprovalNotReadyError(key);
+      await new Promise<void>((resolve) => clock.setTimeout(resolve, RESUME_POLL_MS));
+    }
+  }
+
+  /**
+   * Run one conversational turn as an `agentAction` workflow seeded with
+   * the thread's persisted message history. Stateless per call — lets the
+   * gateway resolve a new `LocalAgent` per request.
+   *
+   * The workflow id is deterministic: `opts.runId` when given, else derived
+   * from (namespace, thread, `opts.turnKey`). A retried send with the same
+   * turn key lands on the same workflow, which the runner answers from the
+   * journal (a finished turn returns its stored result) instead of running
+   * the model and tools again.
+   */
+  private async runTurn(params: {
+    input: AgentInput;
+    opts?: AgentInvokeOpts;
+    capture: RunCapture;
+  }): Promise<AgentResult> {
+    const { input, opts, capture } = params;
+    const workflowId =
+      opts?.runId ??
+      threadTurnWorkflowId({
+        namespaceId: this.deps.key.namespaceId,
+        threadId: this.deps.key.threadId,
+        turnKey: opts?.turnKey ?? randomUUID(),
+      });
+
+    const existing = await this.deps.runner.storage.loadWorkflow(workflowId);
+    if (existing) {
+      // A retry of a turn that already started: its input is fixed, and
+      // must be for the same task.
+      assertSameTask({ workflowId, input: existing.input, task: frameTask(input) });
+      const { persona } = await this.loadContext();
+      const result = await this.runWorkflow({
+        workflowId,
+        input: existing.input as AgentRunInput,
+        persona,
+        capture,
+        ...(input.source !== undefined && { source: input.source }),
+      });
+      await this.afterTurn();
+      return result;
+    }
+
+    await this.prepareTurn();
 
     // resolveContext-driven prompt assembly, ordered stable → volatile so
     // the prompt-cache prefix survives as far as possible:
@@ -1114,8 +1387,8 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     //
     // Memory and knowledge are untrusted (written by users, tools, the
     // model), so they are reference-data messages, never system ones.
-    // Neither is persisted — persistTurn stores only the turn's own
-    // messages (`turnMessages`).
+    // Neither is persisted — the transcript records only the turn's own
+    // messages.
     const { persona, instructions, reference, messages: history } = await this.loadContext();
     const knowledge = await buildRetrieverContext({
       retrievers: this.deps.retrievers,
@@ -1128,32 +1401,108 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     if (input.messages) seed.push(...input.messages);
     if (knowledge) seed.push(referenceDataMessage(knowledge));
 
+    const result = await this.runWorkflow({
+      workflowId,
+      input: { task: frameTask(input), messages: seed },
+      persona,
+      capture,
+      ...(input.source !== undefined && { source: input.source }),
+    });
+    await this.afterTurn();
+    return result;
+  }
+
+  /** Build this thread's turn workflow and run it under `workflowId`. */
+  private async runWorkflow(params: {
+    workflowId: string;
+    input: AgentRunInput;
+    persona: string | undefined;
+    capture: RunCapture;
+    source?: AgentInputSource;
+  }): Promise<AgentResult> {
+    const { workflowId, input, persona, capture, source } = params;
+    const bus = new SessionEventBus();
+    bus.subscribe((e) => recordEvent(capture, e));
     const wf = buildTurnWorkflow<TOutput>({
       engine: { ...this.deps.engine, systemPrompt: persona },
       bus,
       scope: this.toolScope(),
       signal: capture.abort.signal,
+      transcript: this.transcript(source),
+      approvalIndex: this.approvalIndex(),
     });
-    // Honor caller-provided `runId` so a deterministic caller (e.g. a
-    // schedule tick using `scheduleTickRunId`) lands on the same workflow
-    // row across retries. Falls back to a thread-prefixed random id so
-    // `resumeTurn`'s thread-scoped suspended-workflow search still works.
-    const workflowId = opts?.runId ?? `${this.deps.key.threadId}-${randomUUID().slice(0, 8)}`;
+    return (await this.deps.runner.run({ workflow: wf, workflowId, input })) as AgentResult;
+  }
 
-    const source = input.source;
-    const promise = this.deps.runner
-      .run({
-        workflow: wf,
-        workflowId,
-        input: { task: frameTask(input), messages: seed },
-      })
-      .then(async (raw) => {
-        const r = raw as AgentResult;
-        await this.persistTurn({ result: r, ...(source !== undefined && { source }) });
-        return r;
-      });
+  /**
+   * The turn's durable transcript: the user message at turn start, the
+   * produced messages once the turn has its answer. Each append carries an
+   * idempotency key of the turn's workflow id, so a step re-run after a
+   * crash (or on another worker) never duplicates history.
+   */
+  private transcript(source: AgentInputSource | undefined): TurnTranscript {
+    return {
+      open: async ({ workflowId, message }) => {
+        // Stamp non-interactive sources onto the user message so the UI can
+        // render scheduled / webhook / agent triggers differently from chat.
+        const stamped: Message =
+          source && source.kind !== "user" && message.role === "user"
+            ? { ...message, metadata: { source: serializeSource(source) } }
+            : message;
+        await this.appendTranscript({ workflowId, phase: "open", messages: [stamped] });
+      },
+      commit: async ({ workflowId, messages }) => {
+        await this.appendTranscript({
+          workflowId,
+          phase: "commit",
+          messages: messages.filter(isTranscriptMessage),
+        });
+      },
+    };
+  }
 
-    return { promise, capture };
+  private async appendTranscript(params: {
+    workflowId: string;
+    phase: "open" | "commit";
+    messages: Message[];
+  }): Promise<void> {
+    const { workflowId, phase, messages } = params;
+    if (messages.length === 0) return;
+    const idempotencyKey = `${workflowId}:${phase}`;
+    if (this.deps.memory) {
+      await this.ensureThreadRow();
+      await this.deps.memory.appendMessages(this.deps.key, messages, { idempotencyKey });
+      return;
+    }
+    if (this.inMemoryAppends.has(idempotencyKey)) return;
+    this.inMemoryAppends.add(idempotencyKey);
+    this.inMemoryMessages.push(...messages);
+  }
+
+  /** Records each approval a turn suspends on in the pending-approval index. */
+  private approvalIndex(): TurnApprovalIndex {
+    return {
+      requested: async ({ workflowId, call }) => {
+        await this.deps.approvals.record({
+          namespaceId: this.deps.key.namespaceId,
+          threadId: this.deps.key.threadId,
+          toolCallId: call.id,
+          ...(this.deps.key.resourceId !== undefined && { resourceId: this.deps.key.resourceId }),
+          agentId: this.deps.agentId,
+          workflowId,
+          toolName: call.name,
+          input: call.input,
+          ...(this.deps.approvalTtlMs !== undefined && { ttlMs: this.deps.approvalTtlMs }),
+        });
+      },
+    };
+  }
+
+  /** Best-effort memory consolidation once a turn has finished. */
+  private async afterTurn(): Promise<void> {
+    if (!this.deps.memory) return;
+    await this.maybeAutoCompact();
+    await this.maybeAutoDistill();
   }
 
   /**
@@ -1207,46 +1556,6 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       reference: resolved.reference.trim() || undefined,
       messages: resolved.messages.map((m) => stripStorageMeta(m)),
     };
-  }
-
-  /**
-   * Persist the new turn: the engine's `turnMessages` (user task, then the
-   * assistant and tool messages the turn produced). It excludes the seed
-   * and anything a `beforeTurn` hook did to it, so a hook that trims or
-   * injects context can't shift what gets stored. Used after a fresh turn
-   * and after a resumed one alike — a suspended turn never reached here.
-   */
-  private async persistTurn(params: {
-    result: AgentResult;
-    source?: AgentInputSource;
-  }): Promise<void> {
-    const { result, source } = params;
-    let newTail = result.turnMessages.filter(isTranscriptMessage);
-
-    if (newTail.length === 0) return;
-
-    // Stamp non-interactive sources onto the first user message so the UI
-    // can render scheduled/webhook/agent triggers differently from live chat.
-    if (source && source.kind !== "user") {
-      const firstUserIdx = newTail.findIndex((m) => m.role === "user");
-      const firstUser = firstUserIdx !== -1 ? newTail[firstUserIdx] : undefined;
-      if (firstUser?.role === "user") {
-        newTail = [
-          ...newTail.slice(0, firstUserIdx),
-          { ...firstUser, metadata: { source: serializeSource(source) } },
-          ...newTail.slice(firstUserIdx + 1),
-        ];
-      }
-    }
-
-    if (this.deps.memory) {
-      await this.ensureThreadRow();
-      await this.deps.memory.appendMessages(this.deps.key, newTail);
-      await this.maybeAutoCompact();
-      await this.maybeAutoDistill();
-    } else {
-      this.inMemoryMessages.push(...newTail);
-    }
   }
 
   /**
@@ -1369,7 +1678,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     const msSinceLastDistill = lastDistilledAt ? now - lastDistilledAt : Number.POSITIVE_INFINITY;
 
     // Walk back from the end to find the most recent USER message —
-    // after persistTurn the assistant turn (and any tool messages)
+    // after the turn's commit the assistant turn (and any tool messages)
     // are at the tail; the user's input sits before them.
     let lastUserMessage: string | undefined;
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -1496,7 +1805,12 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     if (this.deps.memory) {
       await this.deps.memory.deleteThread(this.deps.key);
     }
+    await this.deps.approvals.deleteThread({
+      namespaceId: this.deps.key.namespaceId,
+      threadId: this.deps.key.threadId,
+    });
     this.inMemoryMessages = [];
+    this.inMemoryAppends.clear();
   }
 }
 
@@ -1504,11 +1818,60 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
 // Helpers — capture, conversion, output assembly
 // ---------------------------------------------------------------------------
 
+/** What one turn's workflow runs on: the (framed) task and its seed. */
+type AgentRunInput = { task: string; messages: Message[] };
+
+/** `decidedBy` of an approval the agent closed itself (expired, or its turn ended). */
+const SYSTEM_DECIDER = "system";
+
+/** How long a resume waits for a turn to reach its approval suspension. */
+const RESUME_WAIT_MS = 5_000;
+const RESUME_POLL_MS = 25;
+
+function isTerminal(status: WorkflowStatus): boolean {
+  return status === "completed" || status === "failed" || status === "tripwire";
+}
+
+/** The step of `wf` suspended on `signalName`, if any. */
+function waitingStep(params: { wf: WorkflowState; signalName: string }) {
+  return Object.values(params.wf.steps).find(
+    (s) => s.status === "waiting_for_signal" && s.signalName === params.signalName,
+  );
+}
+
+/** A run id / turn key names one task: refuse a retry that carries another. */
+function assertSameTask(params: { workflowId: string; input: unknown; task: string }): void {
+  const stored = (params.input as { task?: unknown } | null)?.task;
+  if (stored !== params.task) throw new TurnKeyConflictError({ workflowId: params.workflowId });
+}
+
+function errorTag(err: unknown): unknown {
+  return (err as { _tag?: unknown } | null)?._tag;
+}
+
+function isSuspension(err: unknown): boolean {
+  return errorTag(err) === "WorkflowSuspendedError";
+}
+
+/**
+ * Workflow id of a thread turn: a digest of (namespace, thread, turn key),
+ * so the same send retried with the same key reaches the same workflow,
+ * and no thread or namespace can collide with another by prefix.
+ */
+export function threadTurnWorkflowId(params: {
+  readonly namespaceId: string;
+  readonly threadId: string;
+  readonly turnKey: string;
+}): string {
+  const digest = createHash("sha256")
+    .update(JSON.stringify([params.namespaceId, params.threadId, params.turnKey]))
+    .digest("hex");
+  return `thread-turn-${digest.slice(0, 40)}`;
+}
+
 interface RunCapture {
-  readonly queue: ChunkQueue;
-  readonly events: AgentEvent[];
-  readonly toolCalls: ToolCall[];
-  readonly toolResults: ToolResult[];
+  readonly text: PushChannel<string>;
+  readonly events: PushChannel<AgentEvent>;
   readonly steps: Step[];
   /** Aborts the run: `cancel()` and the caller's `signal` both feed it. */
   readonly abort: AbortController;
@@ -1524,10 +1887,8 @@ function makeCapture(signal?: AbortSignal): RunCapture {
     else signal.addEventListener("abort", () => abort.abort(signal.reason), { once: true });
   }
   return {
-    queue: new ChunkQueue(),
-    events: [],
-    toolCalls: [],
-    toolResults: [],
+    text: new PushChannel<string>(),
+    events: new PushChannel<AgentEvent>(),
     steps: [],
     abort,
     finishReason: null,
@@ -1539,11 +1900,15 @@ function makeCapture(signal?: AbortSignal): RunCapture {
 function recordEvent(capture: RunCapture, e: SessionEvent): void {
   switch (e.type) {
     case "token.delta":
-      capture.queue.push(e.delta);
+      capture.text.push(e.delta);
       capture.events.push({ type: "text-delta", delta: e.delta });
       break;
     case "tool.start": {
       capture.toolStartByCallId.set(e.toolCallId, { input: e.input });
+      capture.events.push({
+        type: "tool-call",
+        call: { id: e.toolCallId, name: e.name, input: e.input },
+      });
       break;
     }
     case "tool.end": {
@@ -1584,7 +1949,6 @@ function recordEvent(capture: RunCapture, e: SessionEvent): void {
       capture.finishReason = "stalled";
       break;
     case "turn.end":
-      capture.usage = sumUsage(capture.usage, e.tokens);
       if (capture.finishReason === null) capture.finishReason = "stop";
       capture.events.push({ type: "finish", reason: capture.finishReason, usage: capture.usage });
       break;
@@ -1601,28 +1965,37 @@ function recordEvent(capture: RunCapture, e: SessionEvent): void {
   }
 }
 
-/** Build an AgentRunOutput where every promise is already resolved. */
-function resolvedOutput<TOutput>(
-  result: AgentResult,
-  events: AgentEvent[],
-): AgentRunOutput<TOutput> {
-  const toolCalls = extractToolCalls(result.messages);
-  const toolResults = extractToolResults(result.messages);
-  const usage: UsageStats = {
+/** Usage of a finished turn, from the engine's result. */
+function usageOf(result: AgentResult): UsageStats {
+  return {
     inputTokens: result.usage?.inputTokens ?? 0,
     outputTokens: result.usage?.outputTokens ?? 0,
-    cacheReadTokens: result.usage?.cacheReadTokens,
-    cacheWriteTokens: result.usage?.cacheWriteTokens,
+    ...(result.usage?.cacheReadTokens !== undefined && {
+      cacheReadTokens: result.usage.cacheReadTokens,
+    }),
+    ...(result.usage?.cacheWriteTokens !== undefined && {
+      cacheWriteTokens: result.usage.cacheWriteTokens,
+    }),
   };
+}
+
+/** Build an AgentRunOutput where every promise is already resolved. */
+function resolvedOutput<TOutput>(params: {
+  result: AgentResult;
+  capture: RunCapture;
+}): AgentRunOutput<TOutput> {
+  const { result, capture } = params;
+  capture.text.close();
+  capture.events.close();
   return {
-    textStream: emptyAsyncIterable<string>(),
-    fullStream: arrayAsAsyncIterable(events),
+    textStream: capture.text,
+    fullStream: capture.events,
     text: Promise.resolve(result.answer),
     output: Promise.resolve(result.output as TOutput | undefined),
-    toolCalls: Promise.resolve(toolCalls),
-    toolResults: Promise.resolve(toolResults),
-    steps: Promise.resolve([]),
-    usage: Promise.resolve(usage),
+    toolCalls: Promise.resolve(extractToolCalls(result.turnMessages)),
+    toolResults: Promise.resolve(extractToolResults(result.turnMessages)),
+    steps: Promise.resolve(capture.steps.slice()),
+    usage: Promise.resolve(usageOf(result)),
     finishReason: Promise.resolve(result.finishReason),
     messages: Promise.resolve([...result.messages]),
     // Already finished: nothing left to cancel.
@@ -1630,51 +2003,60 @@ function resolvedOutput<TOutput>(
   };
 }
 
-function liveOutput<TOutput>(
-  promise: Promise<AgentResult>,
-  _bus: SessionEventBus | undefined,
-  capture: RunCapture,
-): AgentRunOutput<TOutput> {
-  // Close the queue when the underlying run completes.
-  const settled = promise.finally(() => capture.queue.close());
-
+function liveOutput<TOutput>(params: {
+  promise: Promise<AgentResult>;
+  capture: RunCapture;
+}): AgentRunOutput<TOutput> {
+  const { promise, capture } = params;
+  // Both streams end when the run settles, however it ends.
+  const settled = promise.finally(() => {
+    capture.text.close();
+    capture.events.close();
+  });
   return {
-    textStream: capture.queue,
-    fullStream: makeFullStream(capture),
+    textStream: capture.text,
+    fullStream: capture.events,
     text: settled.then((r) => r.answer),
     output: settled.then((r) => r.output as TOutput | undefined),
-    toolCalls: settled.then((r) => extractToolCalls(r.messages)),
-    toolResults: settled.then((r) => extractToolResults(r.messages)),
+    toolCalls: settled.then((r) => extractToolCalls(r.turnMessages)),
+    toolResults: settled.then((r) => extractToolResults(r.turnMessages)),
     steps: settled.then(() => capture.steps.slice()),
-    usage: settled.then((r) => ({
-      inputTokens: r.usage?.inputTokens ?? 0,
-      outputTokens: r.usage?.outputTokens ?? 0,
-      cacheReadTokens: r.usage?.cacheReadTokens,
-      cacheWriteTokens: r.usage?.cacheWriteTokens,
-    })),
+    usage: settled.then(usageOf),
     finishReason: settled.then((r) => r.finishReason),
     messages: settled.then((r) => [...r.messages]),
+    // Abort the run (LLM calls and tools see the signal; the engine ends
+    // the turn as `cancelled` at its next step) and wait until it has
+    // actually stopped.
     cancel: async () => {
       capture.abort.abort();
+      await settled.then(
+        () => undefined,
+        () => undefined,
+      );
     },
   };
 }
 
 /**
  * Build one turn's workflow: the agent's engine config plus this run's
- * bus, tool scope and cancellation signal. Nothing in `engine` is dropped.
+ * bus, tool scope, cancellation signal and (for thread turns) durable
+ * transcript and approval index. Nothing in `engine` is dropped.
  */
 function buildTurnWorkflow<TOutput>(params: {
   engine: AgentEngineConfig<TOutput>;
   bus: SessionEventBus;
   scope: import("../tool.ts").ToolScope;
   signal: AbortSignal;
+  transcript?: TurnTranscript;
+  approvalIndex?: TurnApprovalIndex;
 }): ReturnType<typeof agentAction> {
   const config: AgentActionConfig<TOutput> = {
     ...params.engine,
     bus: params.bus,
     scope: params.scope,
     signal: params.signal,
+    ...(params.transcript && { transcript: params.transcript }),
+    ...(params.approvalIndex && { approvalIndex: params.approvalIndex }),
   };
   // The overloads split on `outputSchema`'s presence; this config may or
   // may not carry one.
@@ -1693,15 +2075,17 @@ function extractToolCalls(messages: ReadonlyArray<Message>): ToolCall[] {
   return calls;
 }
 
+/** Tool results, each paired with its call's tool name. */
 function extractToolResults(messages: ReadonlyArray<Message>): ToolResult[] {
+  const names = new Map(extractToolCalls(messages).map((c) => [c.id, c.name]));
   const out: ToolResult[] = [];
   for (const m of messages) {
     if (m.role === "tool") {
       out.push({
         toolCallId: m.toolCallId,
-        name: "",
+        name: names.get(m.toolCallId) ?? "",
         content: m.content,
-        failed: false,
+        failed: m.isError === true,
       });
     }
   }
@@ -1858,70 +2242,48 @@ function stripStorageMeta(m: Message & { seq?: number; createdAt?: number }): Me
   return rest as Message;
 }
 
-// ---- ChunkQueue (single-consumer async queue, ported from agent-loop) ----
+// ---- PushChannel: buffered, push-based async stream ----
 
-class ChunkQueue implements AsyncIterable<string> {
-  private readonly _buf: string[] = [];
-  private _closed = false;
-  private _notify: (() => void) | null = null;
+/**
+ * An async stream fed by `push` and ended by `close`. Every iterator reads
+ * the whole stream from the start (late subscribers miss nothing) and
+ * parks on a promise until the next push or close — no polling.
+ */
+class PushChannel<T> implements AsyncIterable<T> {
+  private readonly items: T[] = [];
+  private closed = false;
+  private waiters: Array<() => void> = [];
 
-  push(chunk: string): void {
-    this._buf.push(chunk);
-    this._notify?.();
-    this._notify = null;
+  push(item: T): void {
+    if (this.closed) return;
+    this.items.push(item);
+    this.wake();
   }
 
   close(): void {
-    this._closed = true;
-    this._notify?.();
-    this._notify = null;
+    if (this.closed) return;
+    this.closed = true;
+    this.wake();
   }
 
-  [Symbol.asyncIterator](): AsyncIterator<string> {
+  private wake(): void {
+    const waiters = this.waiters;
+    this.waiters = [];
+    for (const w of waiters) w();
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<T> {
+    let i = 0;
     return {
       next: async () => {
-        while (this._buf.length === 0 && !this._closed) {
-          await new Promise<void>((resolve) => {
-            this._notify = resolve;
-          });
+        while (i >= this.items.length && !this.closed) {
+          await new Promise<void>((resolve) => this.waiters.push(resolve));
         }
-        if (this._buf.length > 0) {
-          return { value: this._buf.shift()!, done: false };
-        }
-        return { value: undefined as never, done: true };
+        if (i < this.items.length) return { value: this.items[i++]!, done: false };
+        return { value: undefined, done: true };
       },
     };
   }
-}
-
-async function* emptyAsyncIterable<T>(): AsyncIterable<T> {
-  // intentionally empty
-}
-
-async function* arrayAsAsyncIterable<T>(arr: ReadonlyArray<T>): AsyncIterable<T> {
-  for (const x of arr) yield x;
-}
-
-function makeFullStream(capture: RunCapture): AsyncIterable<AgentEvent> {
-  // Snapshot events as they accumulate. Single-consumer: re-iterating yields
-  // the events captured up to that point (no push-based hooks needed for the
-  // first cut — keeps the surface honest about what we actually capture).
-  return {
-    [Symbol.asyncIterator]() {
-      let i = 0;
-      return {
-        next: async () => {
-          while (i >= capture.events.length && !capture.queue["_closed"]) {
-            await new Promise<void>((r) => setTimeout(r, 5));
-          }
-          if (i < capture.events.length) {
-            return { value: capture.events[i++]!, done: false };
-          }
-          return { value: undefined as never, done: true };
-        },
-      };
-    },
-  };
 }
 
 // Re-export `ThreadRow` so callers can introspect downcast types if needed.

@@ -32,6 +32,7 @@ import {
 } from "../api-types.ts";
 import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
 import { requireActiveNamespace } from "../namespace-guard.ts";
+import { agentApprovalRefusal } from "./signals.ts";
 import type { WorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
 import { RunsService, type RunActionResult } from "../services/runs-service.ts";
 import { UnknownWorkflowError, WorkflowIdConflictError } from "../services/workflows/errors.ts";
@@ -242,6 +243,13 @@ export function sendSignal(deps: RunRoutesDeps) {
     if (isTerminalWorkflowStatus(run.status)) {
       return jsonError(409, "run_ended", `Run has already ended (status: ${run.status})`);
     }
+
+    const agentApproval = await agentApprovalRefusal({
+      storage: deps.storage,
+      workflowId: id,
+      signalName: body.signalName,
+    });
+    if (agentApproval) return agentApproval;
 
     const mismatch = signalSchemaMismatch({ run, signalName: body.signalName, payload });
     if (mismatch !== undefined) return jsonError(400, "schema_mismatch", mismatch);

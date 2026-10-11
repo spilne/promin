@@ -24,6 +24,8 @@
 // ---------------------------------------------------------------------------
 
 import type { Message, ToolCall } from "../message.ts";
+import type { PendingApproval } from "../approvals/pending-approval-store.ts";
+import type { ApprovalDecision } from "../tool.ts";
 import type { CompactThreadOptions, DistillThreadOptions } from "../memory/consolidator.ts";
 import type { EpisodicRecord } from "../memory/types.ts";
 
@@ -142,6 +144,15 @@ export interface AgentInvokeOpts {
    * one. Omitted: backend generates a fresh id.
    */
   readonly runId?: string;
+  /**
+   * Idempotency key of a thread turn (`send` / `stream`), e.g. a client's
+   * `Idempotency-Key`. A turn sent again with the same key on the same
+   * thread is the same turn: durable backends answer it from the first
+   * attempt (or continue that attempt) instead of running it twice. Scoped
+   * to the thread, so clients can't collide across threads or tenants.
+   * Ignored when `runId` is set. Omitted: every send is a new turn.
+   */
+  readonly turnKey?: string;
 }
 
 /**
@@ -336,31 +347,43 @@ export interface AgentThread<Input = AgentInput, Output = unknown> {
   stream(input: Input, opts?: AgentInvokeOpts): AgentRunOutput<Output>;
 
   /**
-   * Resolve a tool-call approval that suspended this thread. Finds the
-   * suspended workflow waiting on `approve:<callId>`, delivers the
-   * decision to its journal, and continues the turn. Returns the
-   * resumed turn's `AgentRunOutput` like `send`.
+   * Resolve a tool-call approval that suspended this thread. Looks the
+   * suspended turn up in the pending-approval index, records the decision
+   * (with `decision.by`, the approver), delivers it to the turn's journal
+   * and continues the turn. Returns the resumed turn's `AgentRunOutput`
+   * like `send`.
    *
-   * Backends may throw when:
-   *   - no suspended workflow matches the (thread, callId) pair
-   *   - the storage doesn't support journaled signal delivery
-   *   - the approval was already resolved by a concurrent caller
+   * Backends may throw:
+   *   - `ApprovalNotFoundError` — the thread is not waiting on `callId`
+   *   - `ApprovalAlreadyDecidedError` — decided already (e.g. concurrently)
+   *   - `ApprovalExpiredError` — expired; it can only be rejected
+   *   - `ApprovalNotReadyError` — the turn has not reached the approval
+   *     suspension yet (or another process runs it); retry shortly
+   *   - when the storage doesn't support journaled signal delivery
    */
   resume?(
     callId: string,
-    decision: { approved: boolean; reason?: string },
+    decision: ApprovalDecision,
     opts?: AgentInvokeOpts,
   ): Promise<AgentRunOutput<Output>>;
   /**
-   * True when a turn on this thread is suspended waiting for the approval
-   * of `callId` — lets a gateway answer "unknown approval" before it
-   * starts streaming a resume. Backends without approvals omit it.
+   * Approvals this thread's turns are suspended on, oldest first — lets a
+   * gateway list them, or answer "unknown approval" before it streams a
+   * resume. Backends without approvals omit it.
    */
-  hasPendingApproval?(callId: string): Promise<boolean>;
+  pendingApprovals?(): Promise<PendingApproval[]>;
+  /**
+   * Make the thread ready for a new turn, or throw
+   * `ThreadAwaitingApprovalError` when an earlier turn still waits for an
+   * approval. Settles approvals whose turn ended and finishes expired ones
+   * first. `send` / `stream` do this themselves; a gateway calls it to
+   * answer before it starts streaming. Backends without approvals omit it.
+   */
+  prepareTurn?(): Promise<void>;
   /** Streaming variant of `resume`. */
   resumeStream?(
     callId: string,
-    decision: { approved: boolean; reason?: string },
+    decision: ApprovalDecision,
     opts?: AgentInvokeOpts,
   ): AgentRunOutput<Output>;
 

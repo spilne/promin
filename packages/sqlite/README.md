@@ -39,6 +39,13 @@ await runner.run({ workflow: hello, workflowId: "hello-1", input: { name: "ada" 
 There is no SQLite state-machine storage or version registry; use the
 in-memory ones or Postgres / Redis.
 
+Agent stores (`@promin/agent` contracts) include `SqliteMemoryStore`
+(`appendMessages` takes an `idempotencyKey`, so a re-run thread turn never
+duplicates history) and `SqlitePendingApprovalStore`, the durable index of
+tool-call approvals thread turns are suspended on, keyed by
+(namespace, thread, tool call), with the decision and approver recorded on
+the row.
+
 Workflow storage capabilities: `journal`, `stepAttempts`, `stepCheckpoint`,
 `compensationLedger`, `resetSteps`, `summaries`, `countWorkflows`,
 `cancelStale` (one-statement stale termination for `recover()`),

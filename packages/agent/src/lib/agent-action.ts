@@ -7,17 +7,20 @@
 // Journal layout of one turn (activity names):
 //
 //   turn-start                         start time; emits turn.start
+//   transcript-open                    transcript.open (the turn's user message)
 //   before-turn                        hooks.beforeTurn
 //   tools-<step>                       tool-set snapshot (name, requireApproval, idempotent)
 //   think-<step>                       one LLM call, retried per llmRetry
 //   step-<step>-hook                   onStep decision
 //   step-<step>-approvals              which calls need approval (autoApprove verdicts)
-//   step-<step>-approval-<id>-start    emits approval.requested (tool name + input)
+//   step-<step>-approval-<id>-start    approvalIndex.requested; emits approval.requested
+//                                      (tool name + input)
 //   step-<step>-approval-<id>          onApprovalRequired decision (or the approve:<id> signal)
 //   step-<step>-approval-<id>-end      emits approval.decision
 //   tool-<name>-<step>-<id>            one tool call, inside ctx.parallel
 //   stall-<step>                       emits stall.detected
 //   after-turn                         hooks.afterTurn
+//   transcript-commit                  transcript.commit (what the turn produced)
 //   turn-end                           emits turn.end / turn.aborted / step_limit.hit
 //   turn-failed                        emits turn.failed (only when the turn throws)
 //
@@ -158,6 +161,38 @@ export interface AgentTurnHooks {
   }) => Promise<void>;
 }
 
+/**
+ * Durable transcript of one thread turn. The engine calls `open` with the
+ * turn's user message right after the turn starts, and `commit` with the
+ * assistant and tool messages the turn produced once it has its answer —
+ * each inside its own journaled activity, so a turn that suspends on an
+ * approval or fails has still recorded its user message, and a resumed
+ * turn commits its output once.
+ *
+ * Both run again when a crash interrupts them: implementations must be
+ * idempotent per `workflowId` (e.g. `MemoryStore.appendMessages` with an
+ * idempotency key).
+ */
+export interface TurnTranscript {
+  open(params: { readonly workflowId: string; readonly message: Message }): Promise<void>;
+  commit(params: {
+    readonly workflowId: string;
+    readonly messages: ReadonlyArray<Message>;
+  }): Promise<void>;
+}
+
+/**
+ * Index of the approvals a turn suspends on. `requested` runs inside the
+ * journaled activity that precedes the `approve:<toolCallId>` suspension
+ * (only when no `onApprovalRequired` callback decides instead), so the
+ * index row exists before anyone can see the turn suspended. It runs again
+ * when a crash interrupts that activity: make it idempotent per
+ * `(workflowId, call.id)`.
+ */
+export interface TurnApprovalIndex {
+  requested(params: { readonly workflowId: string; readonly call: ToolCall }): Promise<void>;
+}
+
 export interface AgentActionConfig<TOutput = any> {
   name: string;
   llm: LLMProvider;
@@ -248,6 +283,10 @@ export interface AgentActionConfig<TOutput = any> {
   bus?: SessionEventBus;
   /** Caller scope, surfaced on every tool's `ctx.scope`. */
   scope?: ToolScope;
+  /** Durable transcript sink — see `TurnTranscript`. Thread turns set it. */
+  transcript?: TurnTranscript;
+  /** Pending-approval index — see `TurnApprovalIndex`. Thread turns set it. */
+  approvalIndex?: TurnApprovalIndex;
   /** Audit sink for elevated tools, surfaced on `ctx.toolAuditLogger`. */
   toolAuditLogger?: ToolAuditLogger;
   /**
@@ -270,11 +309,12 @@ export interface AgentActionConfig<TOutput = any> {
 
 /**
  * Engine settings a long-lived agent applies to every turn —
- * `AgentActionConfig` minus the per-run wiring (`bus`, `scope`, `signal`).
+ * `AgentActionConfig` minus the per-run wiring (`bus`, `scope`, `signal`,
+ * `transcript`, `approvalIndex`).
  */
 export type AgentEngineConfig<TOutput = any> = Omit<
   AgentActionConfig<TOutput>,
-  "bus" | "scope" | "signal"
+  "bus" | "scope" | "signal" | "transcript" | "approvalIndex"
 >;
 
 export class StructuredOutputParseError extends Error {
@@ -445,6 +485,14 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
       }
 
       function* turnBody(): Generator<ActivityYield, AgentResult, any> {
+        const transcript = config.transcript;
+        if (transcript) {
+          yield* ctx.activity(
+            "transcript-open",
+            () => transcript.open({ workflowId, message: { role: "user", content: input.task } }),
+            { idempotent: true },
+          );
+        }
         let messages: Message[] = [
           ...(config.systemPrompt
             ? [{ role: "system" as const, content: config.systemPrompt }]
@@ -753,6 +801,16 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
           );
         }
 
+        if (transcript) {
+          // Everything after the user message `transcript-open` recorded.
+          const output = produced.slice(1);
+          yield* ctx.activity(
+            "transcript-commit",
+            () => transcript.commit({ workflowId, messages: output }),
+            { idempotent: true },
+          );
+        }
+
         const tokens = {
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
@@ -810,9 +868,12 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
         const prefix = `step-${step}-approval-${call.id}`;
         // The `-start` record carries the tool name + input:
         // `listPendingSignals` reads it to describe the pending approval.
+        const onApprovalRequired = config.onApprovalRequired;
+        const approvalIndex = onApprovalRequired ? undefined : config.approvalIndex;
         yield* ctx.activity(
           `${prefix}-start`,
           async () => {
+            await approvalIndex?.requested({ workflowId, call });
             emit({
               type: "approval.requested",
               turn: 0,
@@ -834,11 +895,21 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
               to: "waiting_approval",
               toolCallId: call.id,
             });
-            return { toolName: call.name, toolInput: call.input };
+            // A thread turn names its thread, so signal routes can tell an
+            // agent approval (decided through the agent) from a plain one.
+            const scope = config.scope;
+            const thread =
+              approvalIndex && scope?.namespaceId !== undefined && scope.threadId !== undefined
+                ? {
+                    namespaceId: scope.namespaceId,
+                    threadId: scope.threadId,
+                    ...(scope.agentId !== undefined && { agentId: scope.agentId }),
+                  }
+                : undefined;
+            return { toolName: call.name, toolInput: call.input, ...(thread && { thread }) };
           },
           { idempotent: true },
         );
-        const onApprovalRequired = config.onApprovalRequired;
         const decision: ApprovalDecision = onApprovalRequired
           ? yield* ctx.activity(prefix, () => onApprovalRequired(call), { idempotent: true })
           : yield* ctx.approval(call.id);

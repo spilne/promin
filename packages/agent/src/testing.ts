@@ -8,6 +8,11 @@ export { fragmentStoreTestSuite } from "./lib/fragments/fragment-store-test-suit
 export { agentInstanceRegistryTestSuite } from "./lib/instance/agent-instance-registry-test-suite.ts";
 export { dagRegistryTestSuite } from "./lib/dag/dag-registry-test-suite.ts";
 export { leaseStoreTestSuite, type LeaseStoreFactory } from "./lib/lease/lease-store-test-suite.ts";
+export {
+  pendingApprovalStoreTestSuite,
+  type PendingApprovalStoreFactory,
+  type PendingApprovalStoreHarness,
+} from "./lib/approvals/pending-approval-store-test-suite.ts";
 export { secretsStorageTestSuite } from "./lib/secrets/secrets-storage-test-suite.ts";
 export { toolHistoryStoreTestSuite } from "./lib/tool-history/tool-history-store-test-suite.ts";
 export { remoteDeploymentRegistryTestSuite } from "./lib/remote-deployments/remote-deployment-registry-test-suite.ts";

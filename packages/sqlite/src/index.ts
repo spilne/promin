@@ -7,6 +7,8 @@ export type { Throttle } from "./lib/throttle.ts";
 export type { AsyncQueue } from "./lib/async-queue.ts";
 export { SqliteMemoryStore } from "./lib/agent/memory-store.ts";
 export type { SqliteMemoryStoreConfig } from "./lib/agent/memory-store.ts";
+export { SqlitePendingApprovalStore } from "./lib/agent/pending-approval-store.ts";
+export type { SqlitePendingApprovalStoreConfig } from "./lib/agent/pending-approval-store.ts";
 export { SqliteAgentRegistry } from "./lib/agent/agent-registry.ts";
 export type { SqliteAgentRegistryConfig } from "./lib/agent/agent-registry.ts";
 export { SqliteRoleRegistry } from "./lib/agent/role-registry.ts";

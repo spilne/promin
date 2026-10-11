@@ -9,12 +9,20 @@
 //
 // Decisions still flow through `WorkflowStorage.deliverSignal` (or the
 // agent loop's `approve` / `reject` shortcuts). This view is the inbox.
+//
+// An agent thread turn's approval is the exception: it is decided through
+// the agent's approve route (`POST /api/agents/:id/threads/:threadId/
+// approve`), which records the decision and its approver in the pending-
+// approval index, keeps the thread's turns in order and continues the turn
+// — an agent turn is no registered workflow, so a plain signal delivery
+// would never resume it. Rows carry `agentThread`, and the signal delivery
+// routes refuse such signals (`agentApprovalRefusal`).
 // ---------------------------------------------------------------------------
 
-import { listPendingSignals } from "@promin/agent";
+import { findAgentApprovalThread, listPendingSignals } from "@promin/agent";
 import type { WorkflowStorage } from "@promin/workflow";
 import { z } from "zod";
-import { json } from "../router.ts";
+import { json, jsonError } from "../router.ts";
 import { NameSchema, limitQuery } from "../api-types.ts";
 import { parseQuery } from "../request-validation.ts";
 
@@ -49,6 +57,11 @@ export interface SignalDto {
   toolName?: string;
   /** Tool input (only populated when the agent loop wrote it). */
   toolInput?: unknown;
+  /**
+   * Set when the approval belongs to an agent thread turn: decide it in the
+   * agent chat / `POST /api/agents/:agentId/threads/:threadId/approve`.
+   */
+  agentThread?: { namespaceId: string; threadId: string; agentId?: string };
   /**
    * ISO time a value for this signal was delivered and is waiting to be
    * consumed — the run resumes on the signal scanner's next pass. Absent
@@ -100,10 +113,35 @@ export function listSignals(storage: WorkflowStorage) {
       ...(p.toolCallId !== undefined && { toolCallId: p.toolCallId }),
       ...(p.toolName !== undefined && { toolName: p.toolName }),
       ...(p.toolInput !== undefined && { toolInput: p.toolInput }),
+      ...(p.agentThread !== undefined && { agentThread: p.agentThread }),
       ...(delivered[i] !== undefined && { deliveredAt: delivered[i]!.toISOString() }),
     }));
 
     const body: SignalsResponse = { signals, total: signals.length };
     return json(200, body);
   };
+}
+
+/**
+ * 409 `agent_approval` when `signalName` is an agent thread turn's tool
+ * approval, which must be decided through the agent's approve route (see
+ * the header); null for any other signal.
+ */
+export async function agentApprovalRefusal(params: {
+  readonly storage: WorkflowStorage;
+  readonly workflowId: string;
+  readonly signalName: string;
+}): Promise<Response | null> {
+  const thread = await findAgentApprovalThread(params);
+  if (!thread) return null;
+  const route =
+    thread.agentId !== undefined
+      ? `POST /api/agents/${thread.agentId}/threads/${thread.threadId}/approve`
+      : "the agent's approve route";
+  return jsonError(
+    409,
+    "agent_approval",
+    `This approval belongs to agent thread "${thread.threadId}" (namespace ` +
+      `"${thread.namespaceId}"); decide it through ${route}.`,
+  );
 }

@@ -21,6 +21,7 @@ import {
   SqliteKnowledgeBaseStore,
   SqliteMemoryStore,
   SqliteNamespaceRegistry,
+  SqlitePendingApprovalStore,
   SqliteRoleRegistry,
   SqliteSchedulerStorage,
   SqliteSecretsStorage,
@@ -72,6 +73,11 @@ export interface SqliteZoryaStack {
   readonly fragmentStore: SqliteFragmentStore;
   readonly knowledgeBaseStore: SqliteKnowledgeBaseStore;
   readonly memoryStore: SqliteMemoryStore;
+  /**
+   * The pending-approval index thread turns record into and resume from
+   * (`resolveLocalAgent({ approvals })`).
+   */
+  readonly pendingApprovalStore: SqlitePendingApprovalStore;
   readonly dagRegistry: SqliteDagRegistry;
   /** Drafts and published versions of builder workflows (`ZoryaWorkflowBuilder`). */
   readonly workflowSchemaStore: SqliteWorkflowSchemaStore;
@@ -131,6 +137,7 @@ export function createSqliteZoryaStack(config: SqliteZoryaStackConfig): SqliteZo
     fragmentStore: SqliteFragmentStore.make({ db: sqlite, now }),
     knowledgeBaseStore: SqliteKnowledgeBaseStore.make({ db: sqlite }),
     memoryStore: SqliteMemoryStore.make({ db: sqlite, now }),
+    pendingApprovalStore: SqlitePendingApprovalStore.make({ db: sqlite, clock }),
     dagRegistry: SqliteDagRegistry.make({ db: sqlite, now }),
     workflowSchemaStore: SqliteWorkflowSchemaStore.make({ db: sqlite }),
     ...(config.secretsPassphrase !== undefined && {

@@ -38,6 +38,7 @@ import {
 import { ServiceLifecycle, type ServiceStatus } from "./service-lifecycle.ts";
 import { StorageMetricsProvider } from "./routes/metrics.ts";
 import type { RemoteDeploymentSweeper } from "./routes/remote-deployments.ts";
+import type { WebhookDeliveryRecovery } from "./routes/webhooks.ts";
 import { RegistryBackedWorkersProvider } from "./routes/workers.ts";
 import { AgentStreamHub } from "./services/agent-stream-hub.ts";
 import type { ZoryaAgents } from "./services/agents/index.ts";
@@ -54,6 +55,7 @@ import {
   QueuedWorkflows,
   ZoryaWorkflows,
   assertSharedStores,
+  ZoryaClusterConfigError,
   type ZoryaCluster,
 } from "./services/workflows/index.ts";
 import { mountAgents } from "./mount/mount-agents.ts";
@@ -145,6 +147,7 @@ export class ZoryaServer {
   private readonly router: Router;
   private readonly logger: Logger;
   private remoteDeploymentSweeper?: RemoteDeploymentSweeper;
+  private webhookRecovery?: WebhookDeliveryRecovery;
   private bunServer?: ListeningServer;
   private unsubscribeWakeups?: () => void;
 
@@ -278,8 +281,16 @@ export class ZoryaServer {
           workerRegistry: this.workerRegistry,
           schedulerStorage: config.scheduler?.storage,
           namespaceRegistry: namespaces,
+          agentMemory: config.agents?.memory,
         },
       });
+      // Turns on one thread can reach any instance: they need a shared gate.
+      if (config.agents?.turnGateInProcess) {
+        throw new ZoryaClusterConfigError(
+          "ZoryaServer: `cluster` is set, but ZoryaAgents uses its default in-process turn " +
+            "gate. Pass `turnGate` over a shared lease store (PostgresLeaseStore).",
+        );
+      }
     }
 
     this.runWatchers = new RunWatcherPool({
@@ -351,13 +362,14 @@ export class ZoryaServer {
       });
     }
     if (config.webhooks && this.agents) {
-      mountWebhooks({
+      this.webhookRecovery = mountWebhooks({
         router,
         webhooks: config.webhooks,
         agents: this.agents,
         storage,
         clock,
         namespaces,
+        logger: this.logger,
       });
     }
     if (config.remoteDeployments && this.agents) {
@@ -418,6 +430,7 @@ export class ZoryaServer {
     this.workerWs.start();
     this.agentStreamHub.start();
     this.remoteDeploymentSweeper?.start();
+    this.webhookRecovery?.start();
     this.lifecycle.start();
   }
 
@@ -478,6 +491,7 @@ export class ZoryaServer {
     this.workerWakeups?.stop();
     this.workerWs.stop();
     this.remoteDeploymentSweeper?.stop();
+    this.webhookRecovery?.stop();
 
     await this.inFlight.waitForIdle(this.shutdownTimeoutMs);
     await this.lifecycle.stop();

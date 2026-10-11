@@ -1022,8 +1022,17 @@ export const agentMessage = pgTable(
     seq: integer("seq").notNull(),
     payload: jsonb("payload").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    /** Idempotency key of the append that stored the row (`appendMessages` opts). */
+    appendKey: text("append_key"),
+    /** Position of the row within its idempotent append. */
+    appendIndex: integer("append_index"),
   },
-  (t) => [primaryKey({ columns: [t.namespaceId, t.threadId, t.seq] })],
+  (t) => [
+    primaryKey({ columns: [t.namespaceId, t.threadId, t.seq] }),
+    uniqueIndex("agent_message_append_idx")
+      .on(t.namespaceId, t.threadId, t.appendKey, t.appendIndex)
+      .where(sql`${t.appendKey} IS NOT NULL`),
+  ],
 );
 
 // ---------------------------------------------------------------------------
@@ -1048,6 +1057,40 @@ export const agentThreadLease = pgTable(
     primaryKey({ columns: [t.namespaceId, t.threadId] }),
     // Hot-path index for stealing expired leases on the next acquire.
     index("agent_thread_lease_expires_idx").on(t.expiresAt),
+  ],
+);
+
+// ---------------------------------------------------------------------------
+// Agent pending approval — the durable index of tool-call approvals that
+// thread turns are suspended on, keyed by (namespace, thread, tool call).
+// The decision (status, decided_by, decided_at, reason) is recorded on the
+// row. Times are millisecond epochs stamped by the database server's clock.
+// ---------------------------------------------------------------------------
+
+export const agentPendingApproval = pgTable(
+  "agent_pending_approval",
+  {
+    namespaceId: text("namespace_id").notNull(),
+    threadId: text("thread_id").notNull(),
+    toolCallId: text("tool_call_id").notNull(),
+    resourceId: text("resource_id"),
+    agentId: text("agent_id"),
+    workflowId: text("workflow_id").notNull(),
+    toolName: text("tool_name").notNull(),
+    input: jsonb("input"),
+    requestedAt: bigint("requested_at", { mode: "number" }).notNull(),
+    expiresAt: bigint("expires_at", { mode: "number" }),
+    status: text("status").notNull(),
+    decidedBy: text("decided_by"),
+    decidedAt: bigint("decided_at", { mode: "number" }),
+    reason: text("reason"),
+    deliveredAt: bigint("delivered_at", { mode: "number" }),
+  },
+  (t) => [
+    primaryKey({ columns: [t.namespaceId, t.threadId, t.toolCallId] }),
+    index("agent_pending_approval_ns_status_idx").on(t.namespaceId, t.status, t.requestedAt),
+    index("agent_pending_approval_thread_status_idx").on(t.namespaceId, t.threadId, t.status),
+    index("agent_pending_approval_thread_open_idx").on(t.namespaceId, t.threadId, t.deliveredAt),
   ],
 );
 

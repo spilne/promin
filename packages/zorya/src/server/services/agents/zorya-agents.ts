@@ -12,7 +12,6 @@ import type {
   AgentInstanceRegistry,
   AgentRegistry,
   AgentToolCatalog,
-  AgentTurnGate,
   FragmentRegistry,
   MemoryStore,
   ModelCatalog,
@@ -21,7 +20,13 @@ import type {
   RoleRegistry,
   ToolHistoryStore,
 } from "@promin/agent";
-import { startAgentSchedule, startAgentScanLoop } from "@promin/agent";
+import {
+  AgentTurnGate,
+  InMemoryLeaseStore,
+  InMemoryMemoryStore,
+  startAgentSchedule,
+  startAgentScanLoop,
+} from "@promin/agent";
 import type { DurableScheduleConfig, ScheduleTick } from "@promin/workflow/scheduler";
 import type { ScopeAuthorizer } from "../../routes/agent-gateway-kit.ts";
 import type { AgentScheduleDispatcher, AgentScheduleStart } from "../scheduler/index.ts";
@@ -107,13 +112,16 @@ export interface ZoryaAgentsConfig {
   /** Filesystem hot-reload scan loop. Omit to disable. */
   scan?: ZoryaAgentsScanConfig;
   /**
-   * Per-thread turn gate. When set, the gateway serializes thread-bound
-   * routes (POST /threads/:threadId, /stream, /approve) so two replicas
-   * cannot run a turn on the same conversation concurrently. Required
-   * for multi-replica deployments sharing a Postgres memory store; safe
-   * to omit for single-process deployments.
+   * Per-thread turn gate: the gateway serializes thread-bound routes
+   * (POST /threads/:threadId, /stream, /approve), so two turns never run
+   * on one conversation at once — they would interleave its history.
+   *
+   * On by default, with an in-process lease store: enough for a single
+   * process. Several processes sharing a durable memory store must pass a
+   * gate over a shared lease store (`PostgresLeaseStore`). `false` turns
+   * the gate off (only for hosts that serialize turns themselves).
    */
-  turnGate?: AgentTurnGate;
+  turnGate?: AgentTurnGate | false;
   /**
    * Identifier for THIS process — used as the lease ownerId so 409
    * responses can name which replica holds the conversation. Defaults
@@ -143,7 +151,13 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly fragments?: FragmentRegistry;
   readonly roles?: RoleRegistry;
   readonly toolHistory?: ToolHistoryStore;
+  /** The gate thread-bound routes and scheduled thread turns hold; unset only with `turnGate: false`. */
   readonly turnGate?: AgentTurnGate;
+  /**
+   * True when `turnGate` is the default one over an in-process lease store:
+   * it serializes turns in this process only. A clustered server refuses it.
+   */
+  readonly turnGateInProcess: boolean;
   readonly workerId?: string;
   readonly authorizeScope?: ScopeAuthorizer;
   private readonly scanConfig?: ZoryaAgentsScanConfig;
@@ -166,7 +180,24 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     if (config.roles) this.roles = config.roles;
     if (config.toolHistory) this.toolHistory = config.toolHistory;
     if (config.scan) this.scanConfig = config.scan;
-    if (config.turnGate) this.turnGate = config.turnGate;
+    this.turnGateInProcess = config.turnGate === undefined;
+    if (config.turnGate !== false) {
+      this.turnGate =
+        config.turnGate ?? new AgentTurnGate({ leaseStore: new InMemoryLeaseStore() });
+    }
+    if (
+      this.turnGateInProcess &&
+      config.memory &&
+      !(config.memory instanceof InMemoryMemoryStore)
+    ) {
+      // Durable memory usually means several processes can reach a thread;
+      // the default gate only serializes turns inside this one.
+      console.warn(
+        "[zorya] ZoryaAgents: durable memory store with the default in-process turn gate. " +
+          "If more than one process serves agents, pass `turnGate: new AgentTurnGate({ " +
+          "leaseStore: new PostgresLeaseStore({ db }) })` so turns on a thread never interleave.",
+      );
+    }
     if (config.workerId) this.workerId = config.workerId;
     if (config.authorizeScope) this.authorizeScope = config.authorizeScope;
   }
@@ -184,6 +215,10 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     const started = await startAgentSchedule(tick, schedule, {
       registry: this.registry,
       resolve: this.resolve,
+      // A scheduled turn on a thread takes the thread's turn lease like a
+      // gateway send, so it never interleaves with a live conversation.
+      ...(this.turnGate !== undefined && { turnGate: this.turnGate }),
+      ...(this.workerId !== undefined && { ownerId: this.workerId }),
     });
     if ("done" in started) return { done: started.done };
     if (started.skipped === "recipe_not_found" || started.skipped === "not_agent_schedule") {
