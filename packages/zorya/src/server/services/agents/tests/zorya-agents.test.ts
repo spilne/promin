@@ -3,14 +3,8 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import {
-  InMemoryAgentRegistry,
-  InMemoryMemoryStore,
-  type Agent,
-  type DurableScheduleConfig,
-  type RegisteredAgent,
-} from "@promin/agent";
-import type { ScheduleTick } from "@promin/workflow/scheduler";
+import { InMemoryAgentRegistry, InMemoryMemoryStore, type Agent } from "@promin/agent";
+import type { DurableScheduleConfig, ScheduleTick } from "@promin/workflow/scheduler";
 import { ZoryaAgents } from "../index.ts";
 
 function makeAgent(): Agent & { calls: string[] } {
@@ -18,9 +12,9 @@ function makeAgent(): Agent & { calls: string[] } {
   const agent: Agent & { calls: string[] } = {
     calls,
     withScope: () => agent,
-    invoke: (input: { task: string }) => {
+    invoke: async (input: { task: string }) => {
       calls.push(input.task);
-      return { text: Promise.resolve("ok") } as ReturnType<Agent["invoke"]>;
+      return { text: Promise.resolve("ok") };
     },
   } as unknown as Agent & { calls: string[] };
   return agent;
@@ -116,7 +110,9 @@ describe("ZoryaAgents.dispatchSchedule — starts the turn, doesn't await it", (
     expect(runIds).toEqual(["digest.inc1.3"]);
 
     answer("done");
-    expect(await started.done).toEqual({ ok: true, text: "done" });
+    // `AgentScheduleStart.done` declares only `ok`/`error`; the turn's text
+    // rides along at runtime.
+    expect<unknown>(await started.done).toEqual({ ok: true, text: "done" });
   });
 
   it("rejects when the recipe is gone, so the tick is delivered again", async () => {

@@ -111,7 +111,7 @@ postgresDescribe("PostgresWorkflowStorage store correctness", { migrate }, (pg) 
             return ctx.input.count;
           });
           if (seen >= 2) return { final: seen };
-          ctx.continueAsNew({ count: ctx.input.count + 1 });
+          return ctx.continueAsNew({ count: ctx.input.count + 1 });
         })
         .build();
 

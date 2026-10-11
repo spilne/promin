@@ -270,7 +270,7 @@ describe("createAgentTool", () => {
         name: "faulty",
         description: "throws",
         parameters: z.object({ x: z.string() }),
-        execute: async () => {
+        execute: async (): Promise<string> => {
           throw new Error("boom");
         },
       });

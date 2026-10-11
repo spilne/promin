@@ -58,6 +58,7 @@ async function bootSession(opts: { llm: LLMProvider; heartbeatMs?: number }) {
   const runner = createWorkflowRunner({ storage });
   const events: SessionEvent[] = [];
   const session = await agentLoop({
+    name: "test",
     llm: opts.llm,
     clock,
     ...(opts.heartbeatMs !== undefined ? { heartbeatMs: opts.heartbeatMs } : {}),

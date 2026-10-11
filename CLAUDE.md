@@ -146,6 +146,14 @@ bun nx run @promin/workflow:typecheck
 bun nx run @promin/data:typecheck
 ```
 
+A package's `typecheck` (`tsc --build` on its `tsconfig.json`) covers
+`tsconfig.lib.json` (published source), `tsconfig.spec.json` (tests,
+`tests/` helpers, benches, type fixtures, scripts) and, where the package
+has them, `tsconfig.examples.json`; zorya adds its dashboard and e2e
+configs. The root `examples/` project also checks `benchmarks/`. Test and
+example files are type-checked like source: no `any` or blanket casts to
+get them through.
+
 ## Running Tests
 
 Tests run from source: workspace packages resolve to their `src/` through

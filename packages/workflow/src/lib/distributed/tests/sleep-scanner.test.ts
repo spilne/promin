@@ -288,9 +288,7 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
     const errors: { id: string; err: unknown }[] = [];
     const scanner = createSleepScanner({
       storage: fakeStorage,
-      runner: { run: async () => undefined } as unknown as Parameters<
-        typeof createSleepScanner
-      >[0]["runner"],
+      runner: createWorkflowRunner({ storage: new InMemoryWorkflowStorage({ clock }), clock }),
       scanIntervalMs: 10,
       clock,
       resolveWorkflow: () => undefined,

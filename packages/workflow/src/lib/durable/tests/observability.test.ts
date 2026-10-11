@@ -305,7 +305,6 @@ describe("WorkflowHooks", () => {
 describe("DAG visualization", () => {
   describe("toJSON", () => {
     it("exports the DAG structure", () => {
-      const storage = new InMemoryWorkflowStorage();
       const dag = workflow<{}>({ name: "my-wf" })
         .step("a", () => succeed(1))
         .step("b", { dependsOn: ["a"] }, () => succeed(2))
@@ -320,7 +319,6 @@ describe("DAG visualization", () => {
 
   describe("dagToMermaid", () => {
     it("generates Mermaid for linear chain", () => {
-      const storage = new InMemoryWorkflowStorage();
       const dag = workflow<{}>({ name: "linear" })
         .step("fetch", () => succeed(1))
         .step("process", () => succeed(2))
@@ -335,7 +333,6 @@ describe("DAG visualization", () => {
     });
 
     it("generates Mermaid for DAG", () => {
-      const storage = new InMemoryWorkflowStorage();
       const dag = workflow<{}>({ name: "dag" })
         .step("scrape", () => succeed("html"))
         .step("summarize", { dependsOn: ["scrape"] }, () => succeed("summary"))
@@ -351,7 +348,6 @@ describe("DAG visualization", () => {
     });
 
     it("handles step names with special characters", () => {
-      const storage = new InMemoryWorkflowStorage();
       const dag = workflow<{}>({ name: "special" })
         .step("fetch-data", () => succeed(1))
         .step("process_result", () => succeed(2))
@@ -365,7 +361,6 @@ describe("DAG visualization", () => {
 
   describe("dagToDot", () => {
     it("generates DOT for DAG", () => {
-      const storage = new InMemoryWorkflowStorage();
       const dag = workflow<{}>({ name: "my-workflow" })
         .step("a", () => succeed(1))
         .step("b", { dependsOn: ["a"] }, () => succeed(2))
@@ -387,7 +382,6 @@ describe("DAG visualization", () => {
     type Order = { type: string; total: number };
 
     it("toJSON exposes case labels for selector-mode match", () => {
-      const storage = new InMemoryWorkflowStorage();
       const dag = workflow<Order>({ name: "shipping" })
         .step("load", ({ input }) => succeed(input))
         .match("route", {
@@ -408,7 +402,6 @@ describe("DAG visualization", () => {
     });
 
     it("toJSON exposes labels for predicate-mode match (uses provided labels)", () => {
-      const storage = new InMemoryWorkflowStorage();
       const dag = workflow<Order>({ name: "shipping-pred" })
         .step("load", ({ input }) => succeed(input))
         .match("route", {
@@ -429,7 +422,6 @@ describe("DAG visualization", () => {
     });
 
     it("toJSON falls back to case[N] for unlabeled predicate cases", () => {
-      const storage = new InMemoryWorkflowStorage();
       const dag = workflow<Order>({ name: "shipping-unlabeled" })
         .step("load", ({ input }) => succeed(input))
         .match("route", {
@@ -445,7 +437,6 @@ describe("DAG visualization", () => {
     });
 
     it("dagToMermaid renders match as decision node with labeled outgoing edges", () => {
-      const storage = new InMemoryWorkflowStorage();
       const dag = workflow<Order>({ name: "viz-mermaid" })
         .step("load", ({ input }) => succeed(input))
         .match("route", {
@@ -470,7 +461,6 @@ describe("DAG visualization", () => {
     });
 
     it("dagToDot renders match as diamond with labeled edges", () => {
-      const storage = new InMemoryWorkflowStorage();
       const dag = workflow<Order>({ name: "viz-dot" })
         .step("load", ({ input }) => succeed(input))
         .match("route", {
@@ -490,7 +480,6 @@ describe("DAG visualization", () => {
     });
 
     it("non-match steps render as plain rectangles, not diamonds", () => {
-      const storage = new InMemoryWorkflowStorage();
       const dag = workflow<{}>({ name: "no-match" })
         .step("a", () => succeed(1))
         .step("b", () => succeed(2))

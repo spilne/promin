@@ -61,7 +61,6 @@ async function seedDistillEpisode(
     summary: "seed",
     sourceThreadId: threadId,
     salience: 0.5,
-    facts: [],
     metadata: { kind: "distill" },
   });
 }
@@ -201,14 +200,12 @@ describe("RateLimitedConsolidator", () => {
       summary: "manual upload",
       sourceThreadId: null,
       salience: 0.5,
-      facts: [],
       metadata: { kind: "manual" },
     });
     await memory.appendResourceEpisode(SCOPE, {
       summary: "no kind",
       sourceThreadId: null,
       salience: 0.5,
-      facts: [],
     });
 
     await rl.distillThread(KEY); // first distill ever for resource → allowed

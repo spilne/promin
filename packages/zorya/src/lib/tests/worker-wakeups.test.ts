@@ -11,7 +11,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import type { ServerWebSocket } from "bun";
-import { succeed, tryPromise } from "@spilne/perfect-core";
+import { succeed } from "@spilne/perfect-core";
 import { FakeWallClock, InMemoryWorkflowStorage, workflow, type Workflow } from "@promin/workflow";
 import {
   InMemoryWorkerRegistry,
@@ -320,12 +320,10 @@ describe("worker wake-ups", () => {
     const dep = deploy();
     const gates: Array<() => void> = [];
     const gated = workflow<number>({ name: "gated" })
-      .step("wait", () =>
-        tryPromise(async () => {
-          await new Promise<void>((r) => gates.push(r));
-          return "ok";
-        }),
-      )
+      .step("wait", async () => {
+        await new Promise<void>((r) => gates.push(r));
+        return "ok";
+      })
       .build();
     const w = dep.worker({ workflows: asDefs(gated), workerId: "w1", concurrency: 1 });
     await dep.ready([w]);
@@ -378,12 +376,10 @@ describe("worker wake-ups", () => {
     const dep = deploy();
     const gates: Array<() => void> = [];
     const gated = workflow<number>({ name: "gated" })
-      .step("wait", ({ input }) =>
-        tryPromise(async () => {
-          if (input !== 0) await new Promise<void>((r) => gates.push(r));
-          return "ok";
-        }),
-      )
+      .step("wait", async ({ input }) => {
+        if (input !== 0) await new Promise<void>((r) => gates.push(r));
+        return "ok";
+      })
       .build();
     const workers = ["a", "b", "c"].map((id) =>
       dep.worker({ workflows: asDefs(gated), workerId: id, concurrency: 1 }),

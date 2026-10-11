@@ -112,10 +112,7 @@ export function createSqliteZoryaStack(config: SqliteZoryaStackConfig): SqliteZo
   const db = new Database(config.path);
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
-  // bun:sqlite types `all()` as `(T | undefined)[]` where the stores' driver
-  // interface has `T[]`; the runtime shape is the same (see the
-  // @promin/sqlite README).
-  const sqlite = db as unknown as SqliteDatabase;
+  const sqlite: SqliteDatabase = db;
 
   const storage = SqliteWorkflowStorage.make({ db: sqlite, clock });
   return {

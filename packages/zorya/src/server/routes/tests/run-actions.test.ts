@@ -484,7 +484,13 @@ describe("POST /api/runs/:id/resume", () => {
         limit: 1,
       });
       expect(start).toBeDefined();
-      await runner.runSafe({ workflow: p.wf, workflowId: start!.workflowId, input: start!.input });
+      // A start carries no input: the runner reads the stored one, as a worker does.
+      await runner.runSafe({
+        workflow: p.wf,
+        workflowId: start!.workflowId,
+        input: undefined,
+        useStoredInput: true,
+      });
       await workflowStarts.complete({ id: start!.id, claimToken: start!.claimToken! });
     };
 

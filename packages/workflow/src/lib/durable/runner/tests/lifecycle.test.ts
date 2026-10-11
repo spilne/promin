@@ -122,23 +122,15 @@ describe("cancel during a run", () => {
     const ran: string[] = [];
     const wf = workflow<number>({ name: "cancel-between-siblings" })
       .step("fast", async ({ input }) => input)
-      .step(
-        "slow",
-        async ({ input }) => {
-          await firstSaved.promise;
-          await storage.cancelWorkflow({ workflowId: "c-sib" });
-          return input;
-        },
-        { dependsOn: [] },
-      )
-      .step(
-        "after",
-        async ({ input }) => {
-          ran.push("after");
-          return input;
-        },
-        { dependsOn: ["fast", "slow"] },
-      )
+      .step("slow", { dependsOn: [] }, async ({ input }) => {
+        await firstSaved.promise;
+        await storage.cancelWorkflow({ workflowId: "c-sib" });
+        return input;
+      })
+      .step("after", { dependsOn: ["fast", "slow"] }, async ({ input }) => {
+        ran.push("after");
+        return input;
+      })
       .build();
 
     const run = runner.runSafe({ workflow: wf, workflowId: "c-sib", input: 1 });
@@ -593,7 +585,7 @@ describe("continue-as-new under the lock", () => {
       .journaled("loop", function* (ctx) {
         yield* ctx.activity("tick", async () => ctx.input.n);
         if (ctx.input.n >= 2) return ctx.input.n;
-        ctx.continueAsNew({ n: ctx.input.n + 1 });
+        return ctx.continueAsNew({ n: ctx.input.n + 1 });
       })
       .build();
 

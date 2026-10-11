@@ -3,6 +3,7 @@
 # compiled output
 dist
 dist-examples
+dist-spec
 tmp
 out-tsc
 *.tsbuildinfo

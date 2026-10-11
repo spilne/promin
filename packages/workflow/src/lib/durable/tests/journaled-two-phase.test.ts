@@ -13,7 +13,7 @@ import { describe, it, expect } from "bun:test";
 import { JournalStorageMissingError, runJournaledStep } from "../journaled-step.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { AmbiguousActivityOutcome } from "../durable-pipeline-error.ts";
-import type { JournalEntry, JournalStore } from "../activity-journal.ts";
+import type { CompletePendingResult, JournalEntry, JournalStore } from "../activity-journal.ts";
 import type { LoadJournalParams } from "../workflow-storage.ts";
 
 // ---------------------------------------------------------------------------
@@ -31,12 +31,12 @@ class CrashBetweenPhasesStorage extends InMemoryWorkflowStorage {
     this.crashOnCompletion.add(`${stepName}\x00${activityIndex}`);
   }
 
-  async completePendingEntry(params: {
+  override async completePendingEntry(params: {
     workflowId: string;
     stepName: string;
     activityIndex: number;
     exit: NonNullable<JournalEntry["exit"]>;
-  }): Promise<void> {
+  }): Promise<CompletePendingResult> {
     const key = `${params.stepName}\x00${params.activityIndex}`;
     if (this.crashOnCompletion.has(key)) {
       this.crashOnCompletion.delete(key);
@@ -343,7 +343,7 @@ describe("journaled activity — failure during first phase", () => {
         stepName: "step",
         storage,
         body: function* (ctx) {
-          return yield* ctx.activity("will-throw", async () => {
+          return yield* ctx.activity<number>("will-throw", async () => {
             throw new Error("business rule violated");
           });
         },

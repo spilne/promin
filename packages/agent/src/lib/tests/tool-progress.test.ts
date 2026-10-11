@@ -40,11 +40,12 @@ describe("tool-progress writer", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const session = await agentLoop({
+      name: "test",
       heartbeatMs: 0,
       llm: scriptedLLM(
         {
           content: null,
-          finishReason: "tool_use",
+          finishReason: "tool_calls",
           toolCalls: [{ id: "t1", name: "download", input: { url: "x" } }],
         },
         { content: "done", finishReason: "stop" },
@@ -88,11 +89,12 @@ describe("tool-progress writer", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const session = await agentLoop({
+      name: "test",
       heartbeatMs: 0,
       llm: scriptedLLM(
         {
           content: null,
-          finishReason: "tool_use",
+          finishReason: "tool_calls",
           toolCalls: [{ id: "t1", name: "noProgress", input: { x: 5 } }],
         },
         { content: "ok", finishReason: "stop" },
@@ -124,11 +126,12 @@ describe("tool-progress writer", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const session = await agentLoop({
+      name: "test",
       heartbeatMs: 0,
       llm: scriptedLLM(
         {
           content: null,
-          finishReason: "tool_use",
+          finishReason: "tool_calls",
           toolCalls: [
             { id: "a", name: "ping", input: {} },
             { id: "b", name: "ping", input: {} },

@@ -63,7 +63,11 @@ type TransitionHelper = <Target extends string>(
   context: unknown,
 ) => TransitionTo<any, any>;
 
-/** Context passed to middleware — describes the transition about to happen. */
+/**
+ * Context passed to middleware — describes the transition about to happen.
+ * Middleware may rewrite `to`, `context` and `metadata`; the transition
+ * persists what they hold when `next()` runs.
+ */
 export interface TransitionContext {
   readonly machineId: string;
   readonly machineName: string;
@@ -72,7 +76,7 @@ export interface TransitionContext {
   to: string;
   context: unknown;
   readonly eventData?: unknown;
-  readonly metadata?: unknown;
+  metadata?: unknown;
 }
 
 /** Middleware function — call next() to proceed, or throw to abort. */

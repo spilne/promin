@@ -129,7 +129,7 @@ describe("agentLoop session", () => {
       name: "faulty",
       description: "Always throws",
       parameters: z.object({ x: z.string() }),
-      execute: async () => {
+      execute: async (): Promise<string> => {
         throw new Error("upstream service unavailable");
       },
     });

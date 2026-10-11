@@ -107,8 +107,7 @@ describe("webhookTrigger", () => {
 
       const second = await handler(postJson({ orderId: "dup-1", total: 2 }));
       expect(second.status).toBe(409);
-      const body = await second.json();
-      expect(body.workflowId).toBe("dup-1");
+      expect(await second.json()).toMatchObject({ workflowId: "dup-1" });
     });
   });
 
@@ -307,8 +306,7 @@ describe("webhookTrigger", () => {
 
       const res = await handler(postJson({ orderId: "x", total: 1 }));
       expect(res.status).toBe(422);
-      const body = await res.json();
-      expect(body.custom).toContain("missing id");
+      expect(await res.json()).toMatchObject({ custom: expect.stringContaining("missing id") });
     });
   });
 });

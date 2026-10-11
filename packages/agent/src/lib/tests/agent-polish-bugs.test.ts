@@ -3,6 +3,8 @@ import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow"
 import { agentLoop } from "../agent-loop.ts";
 import { resolveTools } from "../agent-shared.ts";
 import { tool } from "../tool.ts";
+import type { ToolRegistry } from "../tool-registry.ts";
+import { InMemorySessionLogger } from "../session-logger.ts";
 import { z } from "zod";
 import type { LLMResponse } from "../llm-provider.ts";
 
@@ -31,7 +33,8 @@ describe("resolveTools — ambiguous config", () => {
   });
 
   it("returns toolRegistry tools when only registry is set", () => {
-    const fakeRegistry = {
+    const fakeRegistry: ToolRegistry = {
+      close: () => {},
       getTools: () => ({
         bar: tool({
           name: "bar",
@@ -40,7 +43,7 @@ describe("resolveTools — ambiguous config", () => {
           execute: async () => "r",
         }),
       }),
-    } as Parameters<typeof resolveTools>[0]["toolRegistry"];
+    };
     const result = resolveTools({ toolRegistry: fakeRegistry });
     expect(Object.keys(result)).toEqual(["bar"]);
   });
@@ -87,21 +90,22 @@ function mockLLM(responses: LLMResponse[]) {
 
 describe("turn durationMs — journaled start time", () => {
   it("turn.end event carries a non-zero durationMs on fresh run", async () => {
-    const events: Array<{ type: string; durationMs?: number }> = [];
+    const logger = new InMemorySessionLogger();
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const session = agentLoop({
+      name: "test",
       llm: mockLLM([{ content: "done", finishReason: "stop" }]),
-      logger: { emit: (e) => events.push(e) },
+      logger,
     }).session({ runner, sessionId: "dur-1" });
 
     await (await session).send("hi");
     await (await session).close();
 
-    const end = events.find((e) => e.type === "turn.end");
-    expect(end).toBeDefined();
-    expect(typeof end!.durationMs).toBe("number");
-    expect(end!.durationMs!).toBeGreaterThanOrEqual(0);
+    const end = logger.events().find((e) => e.type === "turn.end");
+    if (end?.type !== "turn.end") throw new Error("no turn.end event");
+    expect(typeof end.durationMs).toBe("number");
+    expect(end.durationMs).toBeGreaterThanOrEqual(0);
     // If the turn-start timestamp were lost (old bug), durationMs would be 0.
     // This isn't ironclad — the fix is really about replay, which needs the
     // next test — but it asserts the happy path still works.
@@ -119,6 +123,7 @@ describe("turn durationMs — journaled start time", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const session = await agentLoop({
+      name: "test",
       llm: mockLLM([{ content: "ok", finishReason: "stop" }]),
     }).session({ runner, sessionId: "dur-2" });
     await session.send("hello");
@@ -172,10 +177,11 @@ describe("onApprovalRequired hook — journaled-activity contract", () => {
     });
 
     const session = await agentLoop({
+      name: "test",
       llm: mockLLM([
         {
           content: null,
-          finishReason: "tool_use",
+          finishReason: "tool_calls",
           toolCalls: [{ id: "call-1", name: "danger", input: {} }],
         },
         { content: "all clear", finishReason: "stop" },

@@ -61,8 +61,10 @@ postgresDescribe("migrate", { migrate }, (pg) => {
     // priced out so the plan shows which index can serve filter and order.
     const plan = (orderBy: "started_at" | "completed_at") =>
       pg.sql.begin(async (tx) => {
-        await tx`SET LOCAL enable_seqscan = off`;
-        await tx`SET LOCAL enable_sort = off`;
+        // postgres.js types `TransactionSql` without its tagged-template
+        // call signature, so plain statements go through `unsafe`.
+        await tx.unsafe("SET LOCAL enable_seqscan = off");
+        await tx.unsafe("SET LOCAL enable_sort = off");
         const rows = await tx.unsafe(
           `EXPLAIN SELECT workflow_id FROM wf_workflows
            WHERE status_id = ${WorkflowStatusIds.id.completed}

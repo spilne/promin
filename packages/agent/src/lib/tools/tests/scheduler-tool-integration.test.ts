@@ -69,7 +69,7 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
       agent: {
         name: "writer",
         llm: mockLLM(llmResponses),
-        tools: schedulerTools,
+        tools: { ...schedulerTools },
       },
     });
 

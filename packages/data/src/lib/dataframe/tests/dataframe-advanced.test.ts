@@ -510,7 +510,7 @@ describe("End-to-end analytics — realistic multi-step e-commerce reporting", (
     // Top spender per region — join, groupBy, window, filter
     const spenders = await DataFrame.fromArray(orders)
       .join(DataFrame.fromArray(users), { on: "userId", type: "inner" })
-      .groupBy("region" as any, "name" as any)
+      .groupBy("region", "name")
       .agg({ revenue: "sum" })
       .withWindowColumn("rank", {
         partitionBy: "region" as any,

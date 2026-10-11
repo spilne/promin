@@ -357,7 +357,10 @@ describe("webhook ingress — dedup and retry semantics", () => {
 
   it("the in-memory store marks done only on complete and forgets a failed claim", async () => {
     const clock = FakeWallClock.create(T0);
-    const store = new InMemoryWebhookDeliveryStore({ clock, retainMs: 1_000 });
+    const store: WebhookDeliveryStore = new InMemoryWebhookDeliveryStore({
+      clock,
+      retainMs: 1_000,
+    });
     const scope = {
       source: "s",
       agentId: "a",

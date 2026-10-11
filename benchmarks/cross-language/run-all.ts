@@ -78,7 +78,7 @@ try {
   const adf = DataFrame.fromArray(data).withExecutor(auto);
   const adfFile = DataFrame.fromFile(CsvFile(CSV_PATH)).withExecutor(auto);
 
-  autoResults.push(await bench("CSV Load (file)", () => DataFrame.fromFile(CsvFile(CSV_PATH)).withExecutor(new (require("@promin/duckdb").AutoExecutor)()).collect()));
+  autoResults.push(await bench("CSV Load (file)", () => adfFile.collect()));
   autoResults.push(await bench("Filter (revenue > 5000)", () => adf.filter(col("revenue").gt(5000)).collect()));
   autoResults.push(await bench("GroupBy + Sum", () => adf.groupBy("region" as any).agg({ revenue: "sum" } as any).collect()));
   autoResults.push(await bench("Sort (full)", () => adf.sort("revenue" as any, "desc").collect()));

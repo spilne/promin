@@ -1,0 +1,28 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "rootDir": ".",
+    "emitDeclarationOnly": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": false,
+    "outDir": "dist-spec",
+    "tsBuildInfoFile": "dist-spec/tsconfig.spec.tsbuildinfo",
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node", "@types/bun"]
+  },
+  "include": [
+    "src/**/tests/**/*.ts",
+    "src/**/*.test.ts",
+    "src/**/*.bench.ts",
+    "src/**/*.type-fixture.ts"
+  ],
+  "references": [
+    {
+      "path": "./tsconfig.lib.json"
+    },
+    {
+      "path": "../workflow/tsconfig.lib.json"
+    }
+  ]
+}

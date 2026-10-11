@@ -26,6 +26,8 @@ export const KNOWLEDGE_BOT: RegisterAgentInput = {
           "save it via the memory tool with scope='resource' so it persists across sessions.\n\n" +
           "Tone: concise, factual, link-style citations. Avoid fluff. If the user asks something the KB " +
           "doesn't cover, admit it.",
+        // searchOrgKnowledge comes from `knowledge` below; nothing else to wire.
+        tools: [],
       },
     },
     knowledge: [

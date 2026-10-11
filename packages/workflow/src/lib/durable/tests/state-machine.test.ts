@@ -6,7 +6,6 @@ import {
   composeMachineMiddleware,
   retryMiddleware,
   EventDataValidationError,
-  StateMachineVersionMismatchError,
   TIMEOUT_EVENT,
   type StateMachineInstance,
   type MachineMiddleware,
@@ -763,7 +762,7 @@ describe("StateMachine", () => {
     const machine = stateMachine<TrafficLight>({ name: "mw-modify", storage })
       .use(async (ctx, next) => {
         // Inject extra metadata
-        ctx.metadata = { ...(ctx.metadata as any), injected: true };
+        ctx.metadata = { ...(ctx.metadata as Record<string, unknown> | undefined), injected: true };
         await next();
       })
       .state("red")

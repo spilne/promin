@@ -13,6 +13,11 @@ import { InMemoryWorkflowStorage } from "../../in-memory-storage.ts";
 import type { SuspendWorkflowParams } from "../../workflow-storage.ts";
 import { FakeWallClock } from "../../../shared/wall-clock.ts";
 import {
+  FenceTokenMismatchError,
+  StepTimeoutError,
+  WorkflowSuspendedError,
+} from "../../durable-pipeline-error.ts";
+import {
   createWorkflowRunner,
   InProcessStepExecutor,
   type StepExecutionRequest,
@@ -84,7 +89,7 @@ describe("version drain — keeps the runner's executor and clock", () => {
 
     const { clock, storage, runner, seen } = setup(v1 as Workflow<unknown, unknown>);
     const first = await runner.runSafe({ workflow: v1, workflowId: "d-1", input: 1 });
-    expect(first.error?._tag).toBe("WorkflowSuspendedError");
+    expect(first.error).toBeInstanceOf(WorkflowSuspendedError);
     const asleep = await storage.loadWorkflow("d-1");
     expect(asleep?.steps["nap"]?.wakeAt?.toISOString()).toBe("2026-01-01T00:01:00.000Z");
 
@@ -221,7 +226,7 @@ describe("step timeouts — run on the injected WallClock", () => {
     await settle();
     clock.advance(1);
     const res = await run;
-    expect(res.error?._tag).toBe("StepTimeoutError");
+    expect(res.error).toBeInstanceOf(StepTimeoutError);
   });
 
   it("a step that settles first clears its timeout timer", async () => {
@@ -272,7 +277,7 @@ describe("step timeouts — run on the injected WallClock", () => {
     clock.advance(5_000);
     const res = await pending;
     expect(res.ok).toBe(false);
-    expect(res.ok === false && res.error).toContain("timed out after 5000ms");
+    expect("error" in res ? res.error : undefined).toContain("timed out after 5000ms");
   });
 });
 
@@ -333,7 +338,7 @@ describe("fenced step-side writes — a stale lease cannot suspend the run", () 
       .build();
 
     const { res, state } = await runStale(wf, "fs-1");
-    expect(res.error?._tag).toBe("FenceTokenMismatchError");
+    expect(res.error).toBeInstanceOf(FenceTokenMismatchError);
     expect(state?.status).not.toBe("suspended");
     expect(state?.steps["nap"]?.status).not.toBe("sleeping");
   });
@@ -345,7 +350,7 @@ describe("fenced step-side writes — a stale lease cannot suspend the run", () 
       .build();
 
     const { res, state } = await runStale(wf, "fsig-1");
-    expect(res.error?._tag).toBe("FenceTokenMismatchError");
+    expect(res.error).toBeInstanceOf(FenceTokenMismatchError);
     expect(state?.status).not.toBe("suspended");
     expect(state?.steps["approval"]?.status).not.toBe("waiting_for_signal");
   });
@@ -360,7 +365,7 @@ describe("fenced step-side writes — a stale lease cannot suspend the run", () 
 
     const { res, state } = await runStale(wf, "fj-1");
     expect(res.error).not.toBeNull();
-    expect(res.error?._tag).not.toBe("WorkflowSuspendedError");
+    expect(res.error).not.toBeInstanceOf(WorkflowSuspendedError);
     expect(state?.status).not.toBe("suspended");
     expect(state?.steps["wait"]?.status).not.toBe("sleeping");
   });
@@ -374,7 +379,7 @@ describe("fenced step-side writes — a stale lease cannot suspend the run", () 
       .build();
 
     const res = await runner.runSafe({ workflow: wf, workflowId: "fo-1", input: 1 });
-    expect(res.error?._tag).toBe("WorkflowSuspendedError");
+    expect(res.error).toBeInstanceOf(WorkflowSuspendedError);
     expect((await storage.loadWorkflow("fo-1"))?.steps["nap"]?.status).toBe("sleeping");
   });
 });

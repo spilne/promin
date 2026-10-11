@@ -97,8 +97,10 @@ postgresDescribe("PgWorkflowAdvertisementRegistry conformance", (pg) => {
       expect((await b.list()).map((e) => e.workerId)).toEqual(["live"]);
 
       expect(await b.prune()).toBe(1);
-      const rows = await pg.db.execute(sql`SELECT worker_id FROM wf_workflow_advertisements`);
-      expect([...rows].map((r) => (r as { worker_id: string }).worker_id)).toEqual(["live"]);
+      const rows = await pg.sql<
+        { worker_id: string }[]
+      >`SELECT worker_id FROM wf_workflow_advertisements`;
+      expect(rows.map((r) => r.worker_id)).toEqual(["live"]);
     });
   });
 });

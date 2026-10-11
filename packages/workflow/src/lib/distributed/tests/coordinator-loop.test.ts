@@ -46,6 +46,8 @@ describe("DistributedWorkflowRunner sweep loop", () => {
       fail: (p) => inner.fail(p),
       heartbeat: (p) => inner.heartbeat(p),
       metrics: (p) => inner.metrics(p),
+      consume: (p) => inner.consume(p),
+      consumeSettled: (p) => inner.consumeSettled(p),
       requeueStuck: async (p) => {
         sweeps++;
         if (sweeps <= 2) throw new Error("queue blip");
@@ -101,6 +103,8 @@ describe("DistributedWorkflowRunner sweep loop", () => {
       fail: (p) => inner.fail(p),
       heartbeat: (p) => inner.heartbeat(p),
       metrics: (p) => inner.metrics(p),
+      consume: (p) => inner.consume(p),
+      consumeSettled: (p) => inner.consumeSettled(p),
       requeueStuck: async (p) => {
         sweepStarted = true;
         await gate;

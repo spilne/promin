@@ -161,7 +161,7 @@ describe("agents network — discovery", () => {
       coordinatorScript: [
         {
           content: null,
-          finishReason: "tool_use",
+          finishReason: "tool_calls",
           toolCalls: [
             {
               id: "t1",
@@ -184,7 +184,7 @@ describe("agents network — discovery", () => {
       coordinatorScript: [
         {
           content: null,
-          finishReason: "tool_use",
+          finishReason: "tool_calls",
           toolCalls: [{ id: "t1", name: "findAgent", input: {} }],
         },
         { content: "done", finishReason: "stop" },
@@ -221,7 +221,7 @@ describe("agents network — delegation", () => {
       coordinatorScript: [
         {
           content: null,
-          finishReason: "tool_use",
+          finishReason: "tool_calls",
           toolCalls: [
             {
               id: "t1",
@@ -250,7 +250,7 @@ describe("agents network — delegation", () => {
       coordinatorScript: [
         {
           content: null,
-          finishReason: "tool_use",
+          finishReason: "tool_calls",
           toolCalls: [
             { id: "t1", name: "callAgent", input: { id: "writer", prompt: "draft a haiku" } },
           ],
@@ -284,7 +284,7 @@ describe("agents network — delegation", () => {
       coordinatorScript: [
         {
           content: null,
-          finishReason: "tool_use",
+          finishReason: "tool_calls",
           toolCalls: [
             {
               id: "t1",
@@ -317,7 +317,7 @@ describe("agents network — delegation", () => {
       coordinatorScript: [
         {
           content: null,
-          finishReason: "tool_use",
+          finishReason: "tool_calls",
           toolCalls: [
             {
               id: "t1",
@@ -354,7 +354,7 @@ describe("agents network — delegation", () => {
       coordinatorScript: [
         {
           content: null,
-          finishReason: "tool_use",
+          finishReason: "tool_calls",
           toolCalls: [{ id: "t1", name: "callAgent", input: { id: "writer", prompt: "draft" } }],
         },
         { content: "ok", finishReason: "stop" },
@@ -376,7 +376,7 @@ describe("agents network — delegation", () => {
       coordinatorScript: [
         {
           content: null,
-          finishReason: "tool_use",
+          finishReason: "tool_calls",
           toolCalls: [{ id: "t1", name: "callAgent", input: { id: "writer", prompt: "draft" } }],
         },
         { content: "ok", finishReason: "stop" },
@@ -400,7 +400,7 @@ describe("agents network — delegation", () => {
       coordinatorScript: [
         {
           content: null,
-          finishReason: "tool_use",
+          finishReason: "tool_calls",
           toolCalls: [{ id: "t1", name: "callAgent", input: { id: "writer", prompt: "hi" } }],
         },
         { content: "done", finishReason: "stop" },
@@ -427,7 +427,7 @@ describe("agents network — delegation", () => {
       coordinatorScript: [
         {
           content: null,
-          finishReason: "tool_use",
+          finishReason: "tool_calls",
           toolCalls: [{ id: "t1", name: "callAgent", input: { id: "ghost", prompt: "?" } }],
         },
         { content: "handled", finishReason: "stop" },

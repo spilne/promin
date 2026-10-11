@@ -195,7 +195,7 @@ describe("agentAction", () => {
         }),
       },
       onStep: ({ step }) => {
-        if (step === 0) return { continue: false };
+        return step === 0 ? { continue: false } : undefined;
       },
     });
 

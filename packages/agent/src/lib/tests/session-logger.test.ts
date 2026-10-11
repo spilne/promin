@@ -224,7 +224,7 @@ describe("agentLoop — session event log", () => {
       name: "faulty",
       description: "always throws",
       parameters: z.object({ x: z.string() }),
-      execute: async () => {
+      execute: async (): Promise<string> => {
         throw new Error("boom");
       },
     });

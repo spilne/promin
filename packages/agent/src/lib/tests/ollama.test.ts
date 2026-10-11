@@ -1,20 +1,20 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { ollama } from "../adapters/ollama.ts";
+import { describe, it, expect } from "bun:test";
+import { ollama as createOllama, type OllamaOptions } from "../adapters/ollama.ts";
+import type { LLMFetch } from "../adapters/llm-http.ts";
 
 // ---- fetch mock helpers ----
 
-type FetchFn = typeof fetch;
-let originalFetch: FetchFn;
+// The fetch the provider under test calls; each test installs its own.
+let fetchImpl: LLMFetch = async () => {
+  throw new Error("no fetch mock installed");
+};
 
-beforeEach(() => {
-  originalFetch = globalThis.fetch;
-});
-afterEach(() => {
-  globalThis.fetch = originalFetch;
-});
+function ollama(options: OllamaOptions) {
+  return createOllama({ ...options, fetch: (url, init) => fetchImpl(url, init) });
+}
 
 function mockFetch(body: string, status = 200) {
-  globalThis.fetch = async (_url: string, _init?: RequestInit) => {
+  fetchImpl = async (_url: string, _init?: RequestInit) => {
     return new Response(body, {
       status,
       headers: { "content-type": "application/json" },
@@ -23,7 +23,7 @@ function mockFetch(body: string, status = 200) {
 }
 
 function mockStreamFetch(lines: string[]) {
-  globalThis.fetch = async (_url: string, _init?: RequestInit) => {
+  fetchImpl = async (_url: string, _init?: RequestInit) => {
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       start(controller) {
@@ -131,7 +131,7 @@ describe("ollama — chat()", () => {
 
   it("sends model name and messages to /api/chat", async () => {
     let capturedBody: Record<string, unknown> | undefined;
-    globalThis.fetch = async (_url: string, init?: RequestInit) => {
+    fetchImpl = async (_url: string, init?: RequestInit) => {
       capturedBody = JSON.parse(init?.body as string);
       return new Response(
         JSON.stringify({ message: { role: "assistant", content: "ok" }, done: true }),
@@ -145,7 +145,7 @@ describe("ollama — chat()", () => {
 
   it("sends temperature and maxTokens in options object", async () => {
     let capturedBody: Record<string, unknown> | undefined;
-    globalThis.fetch = async (_url: string, init?: RequestInit) => {
+    fetchImpl = async (_url: string, init?: RequestInit) => {
       capturedBody = JSON.parse(init?.body as string);
       return new Response(
         JSON.stringify({ message: { role: "assistant", content: "ok" }, done: true }),

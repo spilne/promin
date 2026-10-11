@@ -13,7 +13,7 @@
 import { describe, it, expect } from "bun:test";
 import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
-import type { StepCheckpoint } from "../workflow-storage.ts";
+import type { SaveStepResultParams, StepCheckpoint } from "../workflow-storage.ts";
 import type { WorkflowStatusSnapshot } from "../workflow-state.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 import { JsonCodec } from "@spilne/perfect-core/connect";
@@ -25,18 +25,14 @@ import { JsonCodec } from "@spilne/perfect-core/connect";
  * identical to the fresh-run shape.
  */
 class JsonRoundTripStorage extends InMemoryWorkflowStorage {
-  async saveStepResult(params: {
-    workflowId: string;
-    stepName: string;
-    result: unknown;
-    durationMs: number;
-    startedAt?: Date;
-  }): Promise<void> {
+  override async saveStepResult(params: SaveStepResultParams): Promise<void> {
     const roundTripped = JSON.parse(JSON.stringify(params.result));
     await super.saveStepResult({ ...params, result: roundTripped });
   }
 
-  async checkpointStep(checkpoint: StepCheckpoint): Promise<WorkflowStatusSnapshot | null> {
+  override async checkpointStep(
+    checkpoint: StepCheckpoint,
+  ): Promise<WorkflowStatusSnapshot | null> {
     const { outcome } = checkpoint;
     if (outcome.kind !== "completed") return super.checkpointStep(checkpoint);
     const result = JSON.parse(JSON.stringify(outcome.result));
@@ -134,7 +130,7 @@ describe("workflow — step result codec round-trip on replay", () => {
       }))
       .build();
 
-    const r2 = (await runner.run({ workflow: wf, workflowId: "special-1", input: {} })) as any;
+    await runner.run({ workflow: wf, workflowId: "special-1", input: {} });
     await runner.run({ workflow: wf, workflowId: "special-1", input: {} }); // trigger replay path
     const r3 = (await runner.run({ workflow: wf, workflowId: "special-1", input: {} })) as any;
 

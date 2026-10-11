@@ -62,15 +62,10 @@ export const approvalFlowWorkflow = workflow<ApprovalFlowInput>({
 
     return { requestId: previous.requestId, approved: approval.approved, by: approval.by };
   })
-  .step(
-    "apply",
-    ({ prev }) => {
-      const approved = (prev as { approved: boolean }).approved;
-      return pSleep(delay(800, 2_500)).map(() => ({
-        applied: approved,
-        at: new Date().toISOString(),
-      }));
-    },
-    { dependsOn: ["review"] },
+  .step("apply", ({ prev }) =>
+    pSleep(delay(800, 2_500)).map(() => ({
+      applied: prev.approved,
+      at: new Date().toISOString(),
+    })),
   )
   .build();

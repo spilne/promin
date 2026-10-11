@@ -1,0 +1,47 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "rootDir": ".",
+    "emitDeclarationOnly": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": false,
+    "outDir": "dist-spec",
+    "tsBuildInfoFile": "dist-spec/tsconfig.spec.tsbuildinfo",
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node", "@types/bun"],
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact"
+  },
+  "include": [
+    "src/**/tests/**/*.ts",
+    "src/**/*.test.ts",
+    "src/**/*.bench.ts",
+    "src/**/*.type-fixture.ts",
+    "src/ui/api/sse.ts"
+  ],
+  "exclude": ["src/ui/**/tests/**"],
+  "references": [
+    {
+      "path": "./tsconfig.lib.json"
+    },
+    {
+      "path": "../workflow-remote/tsconfig.lib.json"
+    },
+    {
+      "path": "../zorya-client/tsconfig.lib.json"
+    },
+    {
+      "path": "../postgres/tsconfig.lib.json"
+    },
+    {
+      "path": "../sqlite/tsconfig.lib.json"
+    },
+    {
+      "path": "../workflow/tsconfig.lib.json"
+    },
+    {
+      "path": "../agent/tsconfig.lib.json"
+    }
+  ]
+}

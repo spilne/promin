@@ -714,6 +714,7 @@ describe("computeDueTicks catch-up", () => {
           config: cron,
           lastFired,
           tickCount: 0,
+          incarnation: "i",
           clock: at("2026-01-01T02:30:00Z"),
         }),
       ),

@@ -1,0 +1,24 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "rootDir": ".",
+    "emitDeclarationOnly": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": false,
+    "outDir": "dist-examples",
+    "tsBuildInfoFile": "dist-examples/tsconfig.examples.tsbuildinfo",
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node", "@types/bun"]
+  },
+  "include": ["examples/**/*.ts", "scripts/**/*.ts"],
+  "references": [
+    { "path": "./tsconfig.lib.json" },
+    { "path": "../workflow-remote/tsconfig.lib.json" },
+    { "path": "../zorya-client/tsconfig.lib.json" },
+    { "path": "../postgres/tsconfig.lib.json" },
+    { "path": "../sqlite/tsconfig.lib.json" },
+    { "path": "../workflow/tsconfig.lib.json" },
+    { "path": "../agent/tsconfig.lib.json" }
+  ]
+}

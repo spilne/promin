@@ -291,7 +291,8 @@ describe("custom aggregation edge cases", () => {
       { g: "a", v: 3 },
     ]);
     const result = await df.groupBy("g").agg({ v: "mode" }).collect();
-    expect([1, 2, 3]).toContain(result[0]!.v);
+    const values: unknown[] = [1, 2, 3];
+    expect(values).toContain(result[0]!.v);
   });
 
   it("custom reducer with finalize", async () => {

@@ -4,7 +4,7 @@
     "noEmit": true,
     "types": ["bun"]
   },
-  "include": ["**/*.ts"],
+  "include": ["**/*.ts", "../benchmarks/**/*.ts"],
   "references": [
     {
       "path": "../packages/redis"

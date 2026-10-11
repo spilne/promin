@@ -3,11 +3,7 @@ import { describe, it, expect, beforeEach } from "bun:test";
 import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
-import {
-  runJournaledStep,
-  JournalNonDeterminismError,
-  JournalStorageMissingError,
-} from "../journaled-step.ts";
+import { runJournaledStep, JournalNonDeterminismError } from "../journaled-step.ts";
 import type { JournaledContext } from "../journaled-step.ts";
 
 // ---------------------------------------------------------------------------
@@ -273,7 +269,7 @@ describe("journaled step", () => {
       const body = function* (ctx: JournaledContext<unknown, unknown>) {
         let outcome: string;
         try {
-          outcome = yield* ctx.activity("may-fail", async () => {
+          outcome = yield* ctx.activity<string>("may-fail", async () => {
             calls++;
             throw new Error("boom");
           });
@@ -337,7 +333,7 @@ describe("journaled step", () => {
     it("try/catch inside the body handles activity failures", async () => {
       const body = function* (ctx: JournaledContext<unknown, unknown>) {
         try {
-          yield* ctx.activity("will-throw", async () => {
+          yield* ctx.activity<unknown>("will-throw", async () => {
             throw new Error("planned");
           });
           return "not reached";

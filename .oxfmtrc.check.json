@@ -1,5 +1,5 @@
 {
     "$schema": "./node_modules/oxfmt/configuration_schema.json",
-    "ignorePatterns": ["**/node_modules/**", "**/drizzle/meta/**", "**/dist/**", "**/dist-examples/**", "**/package.json", "**/bun.lockb", "**/tsconfig.json", "**/tsconfig.*.json", "**/README.md"]
+    "ignorePatterns": ["**/node_modules/**", "**/drizzle/meta/**", "**/dist/**", "**/dist-examples/**", "**/dist-spec/**", "**/package.json", "**/bun.lockb", "**/tsconfig.json", "**/tsconfig.*.json", "**/README.md"]
   }
   

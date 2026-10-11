@@ -175,12 +175,10 @@ describe("sleep scanner at scale", () => {
 describe("signal scanner and repeated signal names", () => {
   const twoWaits = workflow<number>({ name: "two-waits" })
     .step("start", ({ input }) => succeed(input))
-    .waitForSignal<number>("first", { signalName: "go" })
-    .waitForSignal<number>("second", { signalName: "go" })
+    .waitForSignal<number, "first">("first", { signalName: "go" })
+    .waitForSignal<number, "second">("second", { signalName: "go" })
     .step("sum", { dependsOn: ["first", "second"] }, ({ deps }) =>
-      succeed(
-        (deps as Record<string, number>)["first"]! + (deps as Record<string, number>)["second"]!,
-      ),
+      succeed(deps.first + deps.second),
     )
     .build();
 

@@ -1,7 +1,8 @@
 import { succeed } from "@spilne/perfect-core";
+import type { ActivityDefinition } from "@promin/workflow";
 import type { ActivityLibrary } from "./types.ts";
 
-export const jsonActivities: ActivityLibrary = () => [
+export const jsonActivities: ActivityLibrary = (): ReadonlyArray<ActivityDefinition> => [
   {
     id: "json.pick",
     title: "Pick path",

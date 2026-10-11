@@ -19,7 +19,7 @@ import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow"
 import { agentAction } from "../agent-action.ts";
 import { SessionEventBus, type SessionEvent } from "../session-logger.ts";
 import { tool } from "../tool.ts";
-import type { LLMResponse } from "../llm-provider.ts";
+import type { LLMProvider, LLMResponse } from "../llm-provider.ts";
 
 async function runAction(workflow: ReturnType<typeof agentAction>, task: string) {
   const storage = new InMemoryWorkflowStorage();
@@ -42,15 +42,12 @@ function mockLLM(responses: LLMResponse[]) {
   };
 }
 
-function mockStreamingLLM(deltas: string[], answer: string) {
+function mockStreamingLLM(deltas: string[], answer: string): LLMProvider {
   return {
-    chat: async () => ({ content: answer, finishReason: "stop" as const }),
-    chatStream: async function* (_params: unknown, opts?: { onChunk?: (d: string) => void }) {
-      for (const d of deltas) {
-        opts?.onChunk?.(d);
-        yield d;
-      }
-      return { content: answer, finishReason: "stop" as const };
+    chat: async () => ({ content: answer, finishReason: "stop" }),
+    chatStream: async function* () {
+      for (const delta of deltas) yield { delta };
+      yield { delta: "", finishReason: "stop" };
     },
   };
 }

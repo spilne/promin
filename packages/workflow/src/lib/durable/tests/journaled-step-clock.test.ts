@@ -133,7 +133,7 @@ describe("ctx.activity retry — backoff waits on the injected clock", () => {
     const storage = new InMemoryWorkflowStorage({ clock });
     const at: number[] = [];
     const body = function* (ctx: JournaledContext<unknown, unknown>) {
-      return yield* ctx.activity(
+      return yield* ctx.activity<unknown>(
         "flaky",
         async () => {
           at.push(clock.currentTimeMs() - Date.parse(T0));

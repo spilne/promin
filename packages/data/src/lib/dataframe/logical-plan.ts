@@ -131,8 +131,10 @@ export interface GroupByPlan {
 export interface CustomAgg<Acc = unknown, Result = unknown> {
   readonly _tag: "custom";
   readonly init: Acc;
-  readonly accumulate: (acc: Acc, value: unknown) => Acc;
-  readonly finalize: (acc: Acc) => Result;
+  // Method syntax (bivariant parameters) so a `CustomAgg<number[], number>`
+  // such as `percentile()` is assignable to `AggFn`'s `CustomAgg<unknown>`.
+  accumulate(acc: Acc, value: unknown): Acc;
+  finalize(acc: Acc): Result;
 }
 
 export interface ExprAgg {

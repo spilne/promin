@@ -22,9 +22,8 @@ interface DbColumn {
   data_type: string;
 }
 
-const tables = [...Object.values(schema), ...Object.values(schedulerSchema)].filter(
-  (v): v is PgTable => v instanceof PgTable,
-);
+const exported: unknown[] = [...Object.values(schema), ...Object.values(schedulerSchema)];
+const tables = exported.filter((v): v is PgTable => v instanceof PgTable);
 
 /** Normalise a drizzle SQL type to information_schema.columns.data_type. */
 function expectedDataType(sqlType: string): string {

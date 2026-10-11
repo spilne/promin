@@ -177,7 +177,7 @@ describe("ctx.parallel — sub-generator branches with multiple yields", () => {
       body: function* (ctx) {
         const multiStep = (function* () {
           yield* ctx.activity("m0", async () => "first");
-          yield* ctx.activity("m1", async () => "second");
+          return yield* ctx.activity("m1", async () => "second");
         })();
         yield* ctx.parallel([multiStep, ctx.activity("solo", async () => "c")]);
         return null;

@@ -101,7 +101,7 @@ describe(".match() — no match is a typed failure", () => {
     });
 
     expect(result.ok).toBe(false);
-    expect(result.ok ? undefined : result.error).toMatch(/no case for selector key "zzz"/);
+    expect("error" in result ? result.error : undefined).toMatch(/no case for selector key "zzz"/);
   });
 
   it("a workflow retry predicate on MatchError re-runs the step", async () => {

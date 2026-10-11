@@ -6,9 +6,9 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, beforeEach } from "bun:test";
-import { InMemoryStepQueue } from "@promin/workflow/distributed";
+import { InMemoryStepQueue, type StepTask } from "@promin/workflow/distributed";
 import { createWorkerApiHandler } from "../worker-http-handler.ts";
-import { WORKER_WIRE_CODEC } from "../worker-wire.ts";
+import { WORKER_WIRE_CODEC, type WorkerRpcResponse } from "../worker-wire.ts";
 
 function post(handler: (r: Request) => Promise<Response>, method: string, params: unknown) {
   const body = JSON.stringify({ method, params: WORKER_WIRE_CODEC.encode(params) });
@@ -19,6 +19,18 @@ function post(handler: (r: Request) => Promise<Response>, method: string, params
       body,
     }),
   );
+}
+
+/** The handler's JSON reply, which is a worker wire response. */
+async function reply(res: Response): Promise<WorkerRpcResponse> {
+  return (await res.json()) as WorkerRpcResponse;
+}
+
+/** The decoded `result` of a successful reply. */
+async function resultOf(res: Response): Promise<unknown> {
+  const body = await reply(res);
+  if (!body.ok) throw new Error(`worker RPC failed: ${body.error}`);
+  return WORKER_WIRE_CODEC.decode(body.result);
 }
 
 describe("createWorkerApiHandler", () => {
@@ -33,15 +45,13 @@ describe("createWorkerApiHandler", () => {
   it("rejects non-POST", async () => {
     const res = await handler(new Request("http://test.local/worker", { method: "GET" }));
     expect(res.status).toBe(405);
-    const body = await res.json();
-    expect(body.ok).toBe(false);
+    expect((await reply(res)).ok).toBe(false);
   });
 
   it("returns 404 for unknown method", async () => {
     const res = await post(handler, "nonexistent", {});
     expect(res.status).toBe(404);
-    const body = await res.json();
-    expect(body.ok).toBe(false);
+    expect((await reply(res)).ok).toBe(false);
   });
 
   it("claim returns available tasks", async () => {
@@ -49,11 +59,9 @@ describe("createWorkerApiHandler", () => {
 
     const res = await post(handler, "claim", { workerId: "w-1", limit: 5 });
     expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.ok).toBe(true);
-    const tasks = WORKER_WIRE_CODEC.decode(body.result) as any[];
+    const tasks = (await resultOf(res)) as StepTask[];
     expect(tasks).toHaveLength(1);
-    expect(tasks[0].stepName).toBe("step-a");
+    expect(tasks[0]!.stepName).toBe("step-a");
   });
 
   it("complete marks task completed", async () => {
@@ -88,8 +96,7 @@ describe("createWorkerApiHandler", () => {
     const [task] = await queue.claim({ workerId: "w-1", limit: 1 });
 
     const res = await post(handler, "heartbeat", { taskId: task!.id });
-    const body = await res.json();
-    expect(body.ok).toBe(true);
+    expect((await reply(res)).ok).toBe(true);
     expect(res.status).toBe(200);
   });
 
@@ -113,16 +120,16 @@ describe("createWorkerApiHandler", () => {
       stepNames: ["step-a"],
       versions: ["1"],
     });
-    const tasks = WORKER_WIRE_CODEC.decode((await res.json()).result) as any[];
+    const tasks = (await resultOf(res)) as StepTask[];
     expect(tasks.map((t) => t.stepName)).toEqual(["step-a"]);
-    expect((await queue.get(tasks[0].id))?.claimedBy).toBe("remote-7");
+    expect((await queue.get(tasks[0]!.id))?.claimedBy).toBe("remote-7");
     expect((await queue.requeueStuck({ mode: "worker", workerId: "remote-7" })).requeued).toBe(1);
   });
 
   it("claim without a workerId is rejected", async () => {
     const res = await post(handler, "claim", { limit: 5 });
     expect(res.status).toBe(500);
-    expect((await res.json()).ok).toBe(false);
+    expect((await reply(res)).ok).toBe(false);
   });
 
   it("release gives a claimed task back", async () => {
@@ -134,7 +141,7 @@ describe("createWorkerApiHandler", () => {
     const [task] = await queue.claim({ workerId: "w-1", limit: 1 });
 
     const res = await post(handler, "release", { taskId: id, claimToken: task!.claimToken });
-    expect(WORKER_WIRE_CODEC.decode((await res.json()).result)).toBe(true);
+    expect(await resultOf(res)).toBe(true);
     const record = await queue.get(id);
     expect(record?.status).toBe("pending");
     expect(record?.deliveries).toBe(0);
@@ -187,7 +194,7 @@ describe("createWorkerApiHandler", () => {
       result: "stale",
       durationMs: 1,
     });
-    expect(WORKER_WIRE_CODEC.decode((await res.json()).result)).toBe(false);
+    expect(await resultOf(res)).toBe(false);
     expect((await queue.get(id))?.status).toBe("running");
   });
 });

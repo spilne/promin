@@ -130,7 +130,7 @@ describe("combineProcessors", () => {
     };
     const combined = combineProcessors(p1, p2);
 
-    await combined.beforeLLM!([], { step: 0, turn: 0, workflowId: "w" });
+    await combined.beforeLLM!([], { step: 0, turn: 0, workflowId: "w", isReplay: false });
     expect(order).toEqual(["p1", "p2"]);
   });
 
@@ -152,7 +152,7 @@ describe("combineProcessors", () => {
     };
     const combined = combineProcessors(p1, p2);
 
-    await combined.afterLLM!(resp, { step: 0, turn: 0, workflowId: "w" });
+    await combined.afterLLM!(resp, { step: 0, turn: 0, workflowId: "w", isReplay: false });
     expect(order).toEqual(["p1", "p2"]);
   });
 });

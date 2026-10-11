@@ -35,6 +35,7 @@ async function pickFreePort(): Promise<number> {
   const s = Bun.serve({ port: 0, fetch: () => new Response() });
   const port = s.port;
   s.stop(true);
+  if (port === undefined) throw new Error("Bun.serve({ port: 0 }) bound no TCP port");
   return port;
 }
 

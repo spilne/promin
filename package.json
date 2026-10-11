@@ -2,6 +2,7 @@
   "name": "@promin/source",
   "version": "0.0.0",
   "license": "MIT",
+  "type": "module",
   "scripts": {
     "build": "bunx nx run-many -t build",
     "typecheck": "bunx nx run-many -t typecheck",
@@ -29,7 +30,7 @@
     "docs": "bun run --filter @promin/docs build",
     "docs:dev": "bun run --filter @promin/docs dev",
     "docs:serve": "bunx serve .target/docs -p 4002",
-    "clean": "rm -rf node_modules packages/*/node_modules .nx/cache .nx/workspace-data .target packages/*/dist documentation/generator/.next documentation/generator/node_modules",
+    "clean": "rm -rf node_modules packages/*/node_modules .nx/cache .nx/workspace-data .target packages/*/dist packages/*/dist-examples packages/*/dist-spec documentation/generator/.next documentation/generator/node_modules",
     "prepare": "git config core.hooksPath .githooks || true"
   },
   "private": true,

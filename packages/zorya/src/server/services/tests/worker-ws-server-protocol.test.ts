@@ -35,7 +35,11 @@ function open(server: WorkerWebSocketServer): SocketDouble {
   return ws;
 }
 
-function raw(server: WorkerWebSocketServer, ws: SocketDouble, frame: string | Buffer): void {
+function raw(
+  server: WorkerWebSocketServer,
+  ws: SocketDouble,
+  frame: string | Buffer<ArrayBuffer>,
+): void {
   server.websocketHandlers().message(asBun(ws), frame);
 }
 

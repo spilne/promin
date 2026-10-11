@@ -122,7 +122,6 @@ describe("Workflow query handlers — ctx.setQueryHandler + POST /api/runs/:id/q
 
       // Wait until the body has progressed past step-1 + registered
       // handlers — observable via the registry helper.
-      const { hasQueryHandlers } = await import("@promin/workflow");
       await waitFor(
         () => hasQueryHandlers("qh-1"),
         (b) => b === true,

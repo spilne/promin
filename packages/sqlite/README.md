@@ -2,15 +2,15 @@
 
 SQLite backends for `@promin/workflow` — workflow storage, step queue, scheduler storage and leader leases, worker registry, workflow advertisements and the start queue — plus agent and eval stores and a few local primitives (`SqliteQueue`, `SqliteRateLimiter`, `SqliteThrottle`). For single-node services, desktop and edge apps, CLIs and tests: one file, no server.
 
-Every store takes a `SqliteDatabase`: any driver with `run`, `query(...).get/all/run` and `transaction`. `bun:sqlite`'s `Database` works as is at runtime; its generic `query` signature does not unify with `SqliteDatabase` under current `bun-types`, so cast it once. Stores are built with `Store.make({ db, ... })`, which creates their tables in their final shape (`CREATE TABLE IF NOT EXISTS`); there are no migrations.
+Every store takes a `SqliteDatabase`: any driver with `run`, `query(...).get/all/run` and `transaction`. `bun:sqlite`'s `Database` satisfies it as is. Stores are built with `Store.make({ db, ... })`, which creates their tables in their final shape (`CREATE TABLE IF NOT EXISTS`); there are no migrations.
 
 ```typescript
 import { Database } from "bun:sqlite";
 import { createWorkflowRunner, workflow } from "@promin/workflow";
-import { SqliteWorkflowStorage, type SqliteDatabase } from "@promin/sqlite";
+import { SqliteWorkflowStorage } from "@promin/sqlite";
 import { succeed } from "@spilne/perfect-core";
 
-const db = new Database("workflows.db") as unknown as SqliteDatabase;
+const db = new Database("workflows.db");
 db.run("PRAGMA journal_mode = WAL");
 
 const storage = SqliteWorkflowStorage.make({ db });
@@ -70,10 +70,10 @@ event capabilities (`runEvents`, `stepStartedEvents`; the runner polls).
 
 ```typescript
 import { Database } from "bun:sqlite";
-import { SqliteSchedulerStorage, SqliteStepQueue, type SqliteDatabase } from "@promin/sqlite";
+import { SqliteSchedulerStorage, SqliteStepQueue } from "@promin/sqlite";
 import { DurableScheduler } from "@promin/workflow/scheduler";
 
-const db = new Database("app.db") as unknown as SqliteDatabase;
+const db = new Database("app.db");
 const stepQueue = SqliteStepQueue.make({ db, maxDeliveries: 5 });
 const scheduler = new DurableScheduler({ storage: SqliteSchedulerStorage.make({ db }) });
 await scheduler.register({ id: "hourly", cron: "0 * * * *" });

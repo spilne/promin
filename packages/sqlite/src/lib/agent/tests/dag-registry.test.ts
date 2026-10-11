@@ -46,7 +46,7 @@ describe("SqliteDagRegistry — persistence", () => {
       terminals: ["a"],
     });
     const exists = db
-      .query<{ name: string }>(
+      .query<{ name: string }, []>(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='my_dag_table'",
       )
       .get();

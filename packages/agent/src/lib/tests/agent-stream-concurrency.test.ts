@@ -2,12 +2,7 @@ import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { agentLoop } from "../agent-loop.ts";
-import type {
-  LLMProvider,
-  LLMResponse,
-  LLMChatStreamChunk,
-  LLMChatParams,
-} from "../llm-provider.ts";
+import type { LLMProvider, LLMResponse, LLMStreamChunk, LLMChatParams } from "../llm-provider.ts";
 
 // ---------------------------------------------------------------------------
 // streaming + abort + close concurrency tests
@@ -34,7 +29,7 @@ function makeStreamingLLM(opts: {
     chat: async () => {
       throw new Error("non-streaming chat not used in this test");
     },
-    chatStream: async function* (params: LLMChatParams): AsyncIterable<LLMChatStreamChunk> {
+    chatStream: async function* (params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
       for (const chunk of opts.chunks) {
         if (params.signal?.aborted) {
           // Match real provider behaviour — abort yields a stop finish.
@@ -44,7 +39,7 @@ function makeStreamingLLM(opts: {
         yield { delta: chunk };
       }
       if (opts.throwAfter) throw opts.throwAfter;
-      yield { finishReason: "stop" };
+      yield { delta: "", finishReason: "stop" };
     },
   } as unknown as LLMProvider;
 }
@@ -54,6 +49,7 @@ describe("stream() — concurrency contract", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const session = await agentLoop({
+      name: "test",
       llm: makeStreamingLLM({ chunks: ["hel", "lo, ", "world"] }),
     }).session({ runner, sessionId: "stream-1" });
 
@@ -75,7 +71,7 @@ describe("stream() — concurrency contract", () => {
       chat: async () => {
         throw new Error("non-streaming chat not used in this test");
       },
-      chatStream: async function* (params: LLMChatParams): AsyncIterable<LLMChatStreamChunk> {
+      chatStream: async function* (params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
         yield { delta: "one " };
         yield { delta: "two " };
         await new Promise<void>((resolve) => {
@@ -85,7 +81,10 @@ describe("stream() — concurrency contract", () => {
         // Match real provider behaviour — abort ends the stream.
       },
     } as unknown as LLMProvider;
-    const session = await agentLoop({ llm }).session({ runner, sessionId: "stream-abort" });
+    const session = await agentLoop({ name: "test", llm }).session({
+      runner,
+      sessionId: "stream-abort",
+    });
 
     const ac = new AbortController();
     const collected: string[] = [];
@@ -110,7 +109,7 @@ describe("stream() — concurrency contract", () => {
       chat: async () => {
         throw new Error("non-streaming chat not used in this test");
       },
-      chatStream: async function* (params: LLMChatParams): AsyncIterable<LLMChatStreamChunk> {
+      chatStream: async function* (params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
         yield { delta: "a " };
         await new Promise<void>((resolve) => {
           if (params.signal?.aborted) return resolve();
@@ -118,7 +117,10 @@ describe("stream() — concurrency contract", () => {
         });
       },
     } as unknown as LLMProvider;
-    const session = await agentLoop({ llm }).session({ runner, sessionId: "stream-close" });
+    const session = await agentLoop({ name: "test", llm }).session({
+      runner,
+      sessionId: "stream-close",
+    });
 
     const collected: string[] = [];
     let closed = false;
@@ -146,6 +148,7 @@ describe("stream() — concurrency contract", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const session = await agentLoop({
+      name: "test",
       llm: makeStreamingLLM({
         chunks: ["partial ", "answer "],
         throwAfter: new Error("upstream-fail"),
@@ -200,12 +203,13 @@ describe("approve()/reject() — early-call race", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const session = await agentLoop({
+      name: "test",
       llm: nonStreamingLLM([
         // First response: ask to use a tool
         {
           content: null,
           toolCalls: [{ id: "call-1", name: "doit", input: {} }],
-          finishReason: "tool_use",
+          finishReason: "tool_calls",
         },
         // After approval + tool result: final answer
         { content: "done", finishReason: "stop" },
@@ -235,11 +239,12 @@ describe("approve()/reject() — early-call race", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const session = await agentLoop({
+      name: "test",
       llm: nonStreamingLLM([
         {
           content: null,
           toolCalls: [{ id: "call-1", name: "doit", input: {} }],
-          finishReason: "tool_use",
+          finishReason: "tool_calls",
         },
         { content: "rejected, here's what i can do instead", finishReason: "stop" },
       ]),

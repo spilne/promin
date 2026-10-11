@@ -8,7 +8,7 @@ import {
   FakeWallClock,
   InMemoryWorkflowStorage,
   type WorkflowStorage,
-  type WorkflowStatus,
+  type WorkflowStatusSnapshot,
 } from "@promin/workflow";
 import { WorkerControlSocket } from "@promin/zorya-client";
 import { QueuedWorkflows } from "../services/workflows/queued-workflows.ts";
@@ -25,7 +25,7 @@ const quietLogger: Logger = { log() {}, warn() {}, error() {} };
 /** Storage whose reads fail while `down` is set. */
 class FlakyStorage extends InMemoryWorkflowStorage {
   down = false;
-  override async loadWorkflowStatus(workflowId: string): Promise<WorkflowStatus | null> {
+  override async loadWorkflowStatus(workflowId: string): Promise<WorkflowStatusSnapshot | null> {
     if (this.down) throw new Error("connection refused");
     return super.loadWorkflowStatus(workflowId);
   }

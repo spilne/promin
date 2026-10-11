@@ -341,12 +341,16 @@ describe("dispatchAgentSchedule", () => {
       finishReason: Promise.resolve("stop"),
       usage: Promise.resolve({ inputTokens: 0, outputTokens: 0 }),
       messages: Promise.resolve([]),
-      events: { async *[Symbol.asyncIterator]() {} },
+      fullStream: { async *[Symbol.asyncIterator]() {} },
+      output: Promise.resolve(undefined),
+      toolCalls: Promise.resolve([]),
+      toolResults: Promise.resolve([]),
+      steps: Promise.resolve([]),
       textStream: { async *[Symbol.asyncIterator]() {} },
       cancel: async () => {},
     };
     const agent: Agent = {
-      withScope: () => agent as any,
+      withScope: () => agent,
       invoke: async (input: AgentInput) => {
         captures.push({ task: input.task, source: input.source });
         return noopOutput;

@@ -10,6 +10,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
+import type { CompletePendingResult } from "../activity-journal.ts";
 import { JournalNonDeterminismError, runJournaledStep } from "../journaled-step.ts";
 import {
   AmbiguousActivityOutcome,
@@ -154,7 +155,7 @@ describe("unwind policy — engine-integrity exits do not compensate", () => {
     class FencedStorage extends InMemoryWorkflowStorage {
       override async completePendingEntry(
         params: Parameters<InMemoryWorkflowStorage["completePendingEntry"]>[0],
-      ): Promise<void> {
+      ): Promise<CompletePendingResult> {
         if (params.activityIndex === 2) {
           throw new FenceTokenMismatchError({
             workflowId: params.workflowId,

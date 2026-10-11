@@ -693,6 +693,10 @@ async function resolveAgent(
     // resolver so the chain stays in lockstep with the host's config.
     network: {
       registry: agentRegistry,
+      // resolveAgent is async (it loads roles and credentials from the
+      // registries) but network.resolve is sync; network.resolve must become
+      // async to accept it.
+      // @ts-expect-error network.resolve must become async
       resolve: resolveAgent,
       instanceRegistry,
     },
@@ -796,12 +800,6 @@ function inputFor(name: string): unknown {
     default:
       return {};
   }
-}
-
-let idCounter = 0;
-function nextId(name: string): string {
-  idCounter += 1;
-  return `${name}-${Date.now().toString(36)}-${idCounter}`;
 }
 
 // Shared workflow-start queue — used by QueuedWorkflows fallback below

@@ -46,14 +46,14 @@ function captureStdout(fn: () => void): string[] {
 describe("Terminal.ask()", () => {
   it("passes the question text to rl.question", async () => {
     let capturedPrompt = "";
-    let capturedCb: QuestionCallback | null = null;
+    const question: { cb?: QuestionCallback } = {};
     const rl = {
       rawListeners: () => [],
       removeListener: () => {},
       on: () => {},
       question: (prompt: string, cb: QuestionCallback) => {
         capturedPrompt = prompt;
-        capturedCb = cb;
+        question.cb = cb;
       },
     } as unknown as Interface;
     const term = new Terminal(rl);
@@ -65,7 +65,7 @@ describe("Terminal.ask()", () => {
     };
 
     const p = term.ask("Enter API key");
-    capturedCb?.("sk-test");
+    question.cb?.("sk-test");
     await p;
 
     const orig = process.stdout.write.bind(process.stdout);

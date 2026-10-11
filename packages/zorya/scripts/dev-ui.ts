@@ -17,7 +17,7 @@
 
 import { $ } from "bun";
 import path from "node:path";
-import { existsSync, statSync, watch } from "node:fs";
+import { type Dirent, existsSync, statSync, watch } from "node:fs";
 import { readdir, writeFile } from "node:fs/promises";
 
 const pkgRoot = path.resolve(import.meta.dir, "..");
@@ -99,7 +99,7 @@ async function isUiSourceNewerThanDist(): Promise<boolean> {
   const stack: string[] = [ZORYA_DEV_PATHS.uiSrc];
   while (stack.length > 0) {
     const dir = stack.pop()!;
-    let entries: Awaited<ReturnType<typeof readdir>>;
+    let entries: Dirent[];
     try {
       entries = await readdir(dir, { withFileTypes: true });
     } catch {

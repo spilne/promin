@@ -52,7 +52,7 @@ describe("activity retry — default (no classification)", () => {
         stepName: "s",
         storage,
         body: function* (ctx) {
-          return yield* ctx.activity(
+          return yield* ctx.activity<number>(
             "flaky",
             async () => {
               a.bump();
@@ -85,7 +85,7 @@ describe("activity retry — TerminalError", () => {
         stepName: "s",
         storage,
         body: function* (ctx) {
-          return yield* ctx.activity(
+          return yield* ctx.activity<number>(
             "validate",
             async () => {
               a.bump();
@@ -112,7 +112,7 @@ describe("activity retry — TerminalError", () => {
         stepName: "s",
         storage,
         body: function* (ctx) {
-          return yield* ctx.activity(
+          return yield* ctx.activity<number>(
             "validate",
             async () => {
               a.bump();
@@ -150,7 +150,7 @@ describe("activity retry — RetryableError", () => {
         stepName: "s",
         storage,
         body: function* (ctx) {
-          return yield* ctx.activity(
+          return yield* ctx.activity<number>(
             "fetch",
             async () => {
               a.bump();
@@ -229,7 +229,7 @@ describe("activity retry — retry.when predicate", () => {
         stepName: "s",
         storage,
         body: function* (ctx) {
-          return yield* ctx.activity(
+          return yield* ctx.activity<number>(
             "charge",
             async () => {
               a.bump();
@@ -261,7 +261,7 @@ describe("activity retry — retry.when predicate", () => {
         stepName: "s",
         storage,
         body: function* (ctx) {
-          return yield* ctx.activity(
+          return yield* ctx.activity<number>(
             "charge",
             async () => {
               a.bump();
@@ -293,7 +293,7 @@ describe("activity retry — retry.when predicate", () => {
         stepName: "s",
         storage,
         body: function* (ctx) {
-          return yield* ctx.activity("charge", async () => {
+          return yield* ctx.activity<number>("charge", async () => {
             a.bump();
             throw new Error("boom");
           });
@@ -329,7 +329,7 @@ describe("activity retry — journal Failure after exhausting retries", () => {
         stepName: "s",
         storage,
         body: function* (ctx) {
-          return yield* ctx.activity(
+          return yield* ctx.activity<number>(
             "validate",
             async () => {
               throw new TerminalError({ message: "forbidden" });

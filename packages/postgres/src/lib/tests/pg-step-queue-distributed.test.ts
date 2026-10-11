@@ -215,7 +215,7 @@ describe("Distributed DAG workflow — video processing pipeline", () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new PgStepQueue({ db: pg.db });
 
-    const videoPipeline = workflow<{ videoUrl: string }>({ name: "video-processing", storage })
+    const videoPipeline = workflow<{ videoUrl: string }>({ name: "video-processing" })
       .step("upload", async (ctx) => ({ url: ctx.input.videoUrl, size: 1024 }))
       .step("transcribe", { dependsOn: ["upload"] }, async (ctx) => ({
         text: `Transcript of ${ctx.deps.upload.url}`,
@@ -316,7 +316,7 @@ describe("Distributed workers — competing task execution", () => {
     const queue = new PgStepQueue({ db: pg.db });
     const processed: { worker: string; workflowId: string }[] = [];
 
-    const orderWorkflow = workflow<{ orderId: string }>({ name: "order-fulfillment", storage })
+    const orderWorkflow = workflow<{ orderId: string }>({ name: "order-fulfillment" })
       .step("fulfill", async (ctx) => ({ fulfilled: true, orderId: ctx.input.orderId }))
       .build();
 
@@ -355,7 +355,7 @@ describe("Distributed workers — competing task execution", () => {
         },
       });
       return createWorker({
-        stepQueue: new PgStepQueue({ db: pg.db, workerId: `worker-${id}` }),
+        stepQueue: new PgStepQueue({ db: pg.db }),
         registry,
         capabilities: ["default"],
         concurrency: 5,
@@ -499,7 +499,7 @@ describe("Queue routing — GPU vs CPU workers", () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new PgStepQueue({ db: pg.db });
 
-    const mlPipeline = workflow<{ imageUrl: string }>({ name: "ml-pipeline", storage })
+    const mlPipeline = workflow<{ imageUrl: string }>({ name: "ml-pipeline" })
       .step("preprocess", async (ctx) => ({ processed: ctx.input.imageUrl }), {
         needs: ["cpu"],
       })

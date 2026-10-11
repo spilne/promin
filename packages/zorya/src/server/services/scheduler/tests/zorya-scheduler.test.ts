@@ -18,7 +18,6 @@ async function seedSchedule(
   cfg: Partial<DurableScheduleConfig> & { id: string },
 ): Promise<void> {
   await storage.upsertSchedule({
-    id: cfg.id,
     name: cfg.name ?? cfg.id,
     intervalMs: 60_000,
     enabled: true,

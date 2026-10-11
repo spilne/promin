@@ -32,7 +32,7 @@ describe("ctx.continueAsNew", () => {
         if (ctx.input.count >= 3) {
           return { final: ctx.input.count };
         }
-        ctx.continueAsNew({ count: ctx.input.count + 1 });
+        return ctx.continueAsNew({ count: ctx.input.count + 1 });
       })
       .build();
 
@@ -62,7 +62,7 @@ describe("ctx.continueAsNew", () => {
       .journaled("loop", function* (ctx) {
         seen.push(ctx.input);
         if (ctx.input === null) return "done";
-        ctx.continueAsNew(undefined);
+        return ctx.continueAsNew(undefined);
       })
       .build();
 
@@ -116,12 +116,12 @@ describe("ctx.continueAsNew", () => {
 
     const wf = workflow<{ count: number }>({ name: "act-counter" })
       .journaled("loop", function* (ctx) {
-        const _ = yield* ctx.activity("work", async () => {
+        yield* ctx.activity("work", async () => {
           activityCalls++;
           return ctx.input.count;
         });
         if (ctx.input.count >= 2) return { final: ctx.input.count };
-        ctx.continueAsNew({ count: ctx.input.count + 1 });
+        return ctx.continueAsNew({ count: ctx.input.count + 1 });
       })
       .build();
 

@@ -149,17 +149,12 @@ function chain(n: number): Workflow<number, number> {
     });
     await s.completeWorkflow({ workflowId, result: { payload: "y".repeat(2_048) } });
   }
-  const lister = (
-    s as { listWorkflowSummaries?: PostgresWorkflowStorage["listWorkflows"] }
-  ).listWorkflowSummaries?.bind(s);
   await measure("listWorkflows completed, limit 2000", () =>
     s.listWorkflows({ status: "completed", limit: 2_000 }),
   );
-  if (lister) {
-    await measure("listWorkflowSummaries completed, limit 2000", () =>
-      lister({ status: "completed", limit: 2_000 }),
-    );
-  }
+  await measure("listWorkflowSummaries completed, limit 2000", () =>
+    s.listWorkflowSummaries({ status: "completed", limit: 2_000 }),
+  );
   await measure("countWorkflows x 7 statuses", () =>
     Promise.all(
       ["pending", "running", "suspended", "completed", "failed", "compensating", "tripwire"].map(

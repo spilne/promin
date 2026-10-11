@@ -153,18 +153,22 @@ postgresDescribe("PostgresWorkflowStorage round trips", { migrate }, (pg) => {
     it("a rejected token still writes nothing (one statement, then the error read)", async () => {
       const guard = await locked("rt-stale");
       await storage.releaseLock({ workflowId: "rt-stale", guard });
+      let rejection: unknown;
       const n = await count(() =>
-        expect(
-          storage.saveStepResult({
+        storage
+          .saveStepResult({
             workflowId: "rt-stale",
             stepName: "a",
             result: 1,
             durationMs: 1,
             startedAt: at,
             guard,
+          })
+          .catch((e: unknown) => {
+            rejection = e;
           }),
-        ).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" }),
       );
+      expect(rejection).toMatchObject({ _tag: "FenceTokenMismatchError" });
       expect(n).toBe(2);
       expect((await storage.loadWorkflow("rt-stale"))!.steps).toEqual({});
     });
@@ -377,6 +381,6 @@ postgresDescribe("PostgresWorkflowStorage round trips", { migrate }, (pg) => {
         }) => header,
       ),
     );
-    expect((lean[0] as Record<string, unknown>)["input"]).toBeUndefined();
+    expect(Object.keys(lean[0]!)).not.toContain("input");
   });
 });

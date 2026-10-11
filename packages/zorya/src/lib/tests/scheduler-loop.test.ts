@@ -25,10 +25,13 @@ import {
   schedulePartition,
   scheduleTickRunId,
 } from "@promin/workflow/scheduler";
-import type { ScheduleTick, SchedulerErrorEvent } from "@promin/workflow/scheduler";
+import type { ScheduleTick } from "@promin/workflow/scheduler";
 import { ZoryaClient, ZoryaWorker } from "@promin/zorya-client";
 import { ZoryaServer } from "../../server/server.ts";
-import { SchedulerLoop } from "../../server/services/scheduler-loop.ts";
+import {
+  SchedulerLoop,
+  type SchedulerLoopErrorEvent,
+} from "../../server/services/scheduler-loop.ts";
 import { LocalWorkflows, QueuedWorkflows, ZoryaScheduler } from "../../index.ts";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -547,7 +550,7 @@ describe("SchedulerLoop — delivery and isolation", () => {
     const clock = FakeWallClock.create(T0);
     const storage = new InMemorySchedulerStorage({ clock });
     const fired: ScheduleTick[] = [];
-    const errors: SchedulerErrorEvent[] = [];
+    const errors: SchedulerLoopErrorEvent[] = [];
     const loop = new SchedulerLoop({
       storage,
       clock,
@@ -631,7 +634,7 @@ describe("SchedulerLoop — leader leases", () => {
     clock: FakeWallClock;
     instanceId: string;
     partition?: { index: number; count: number };
-    onError?: (e: SchedulerErrorEvent) => void;
+    onError?: (e: SchedulerLoopErrorEvent) => void;
   }) {
     const fired: ScheduleTick[] = [];
     const loop = new SchedulerLoop({
@@ -690,7 +693,7 @@ describe("SchedulerLoop — leader leases", () => {
   it("a loop whose lease was taken over can't commit the poll it dispatched", async () => {
     const clock = FakeWallClock.create(T0);
     const storage = new InMemorySchedulerStorage({ clock });
-    const errors: SchedulerErrorEvent[] = [];
+    const errors: SchedulerLoopErrorEvent[] = [];
     await storage.upsertSchedule({ id: "x", intervalMs: 60_000 });
     let b: ReturnType<typeof loopOn> | undefined;
     const fired: ScheduleTick[] = [];

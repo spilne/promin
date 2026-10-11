@@ -58,7 +58,7 @@ describe("InMemoryModelCatalog", () => {
     // Round-trip must be JSON-safe — no runtime closure leaked.
     expect(() => JSON.stringify(serialized)).not.toThrow();
     expect(JSON.parse(JSON.stringify(serialized))[0]).toEqual(serialized[0]!);
-    expect("llm" in (serialized[0] as Record<string, unknown>)).toBe(false);
+    expect(Object.keys(serialized[0]!)).not.toContain("llm");
   });
 
   it("rejects duplicate (provider, id) pairs at construction time", () => {

@@ -75,8 +75,6 @@ describe("run({ useStoredInput })", () => {
     await storage.createWorkflow({ workflowId: "s-3", workflowName: "echo", input: { n: 1 } });
     const seen: unknown[] = [];
 
-    expect(
-      await runner.run({ workflow: echo(seen) as never, workflowId: "s-3", input: { n: 2 } }),
-    ).toBe(2);
+    expect(await runner.run({ workflow: echo(seen), workflowId: "s-3", input: { n: 2 } })).toBe(2);
   });
 });

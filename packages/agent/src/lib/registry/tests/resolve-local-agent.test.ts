@@ -14,7 +14,7 @@ import { resolveLocalAgent } from "../resolve-local-agent.ts";
 import { InMemoryAgentRegistry } from "../in-memory-agent-registry.ts";
 import { LocalAgent } from "../../agent/local-agent.ts";
 import type { LLMProvider, LLMResponse } from "../../llm-provider.ts";
-import type { RegisteredAgent } from "../types.ts";
+import type { LocalAgentBackend, RegisteredAgent } from "../types.ts";
 import { createElevatedTool, tool } from "../../tool.ts";
 import { InMemoryRetriever } from "../../rag/in-memory-retriever.ts";
 import { InMemoryRetrieverRegistry } from "../../rag/retriever-registry.ts";
@@ -36,7 +36,10 @@ function makeRunner() {
   return createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
 }
 
-const baseRow = (): RegisteredAgent => ({
+/** A recipe whose backend is known to be local, so tests can spread and override it. */
+type LocalRecipe = RegisteredAgent & { readonly backend: LocalAgentBackend };
+
+const baseRow = (): LocalRecipe => ({
   id: "support",
   version: "v1",
   backend: {

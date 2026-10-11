@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { succeed, tryPromise } from "@spilne/perfect-core";
+import { succeed } from "@spilne/perfect-core";
 import { workflow, InMemoryWorkflowStorage, RecoveryStrategy } from "../../../index.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
@@ -26,7 +26,7 @@ describe("WorkflowRunnerConfig.lock", () => {
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
     const wf = workflow<string>({ name: "held" })
-      .step("wait", () => tryPromise(() => gate.then(() => "ok")))
+      .step("wait", () => gate.then(() => "ok"))
       .build();
     const done = runner.run({ workflow: wf, workflowId: "h-1", input: "x" });
     for (let i = 0; i < 50 && clock.pendingCount() === 0; i++) await flush();

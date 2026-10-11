@@ -19,6 +19,7 @@ import { LocalAgent } from "../local-agent.ts";
 import { InMemoryMemoryStore } from "../../memory/in-memory-memory-store.ts";
 import { isReferenceDataMessage } from "../../reference-data.ts";
 import type { LLMProvider, LLMResponse } from "../../llm-provider.ts";
+import type { Message } from "../../message.ts";
 
 function mockLLM(responses: LLMResponse[]): LLMProvider {
   let i = 0;
@@ -261,7 +262,7 @@ describe("LocalAgent — auto-injected memory tool", () => {
     const responses: LLMResponse[] = [
       {
         content: null,
-        finishReason: "tool_use",
+        finishReason: "tool_calls",
         toolCalls: [
           {
             id: "call-1",
@@ -886,7 +887,6 @@ describe("LocalAgent — autoDistill", () => {
         summary: "seed",
         sourceThreadId: "earlier",
         salience: 0.5,
-        facts: [],
         metadata: { kind: "distill" },
       },
     );

@@ -13,7 +13,7 @@
 // ---------------------------------------------------------------------------
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { succeed, tryPromise } from "@spilne/perfect-core";
+import { succeed } from "@spilne/perfect-core";
 import { FakeWallClock, InMemoryWorkflowStorage, workflow, type Workflow } from "@promin/workflow";
 import { InMemoryWorkerRegistry } from "@promin/workflow/distributed";
 import { ZoryaClient, ZoryaWorker, type ZoryaWorkerErrorEvent } from "@promin/zorya-client";
@@ -202,15 +202,13 @@ describe("worker-driven runs", () => {
     let peak = 0;
     const gates: Array<() => void> = [];
     const slow = workflow<number>({ name: "slow" })
-      .step("work", () =>
-        tryPromise(async () => {
-          active++;
-          peak = Math.max(peak, active);
-          await new Promise<void>((r) => gates.push(r));
-          active--;
-          return "ok";
-        }),
-      )
+      .step("work", async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise<void>((r) => gates.push(r));
+        active--;
+        return "ok";
+      })
       .build();
     const worker = dep.worker({ workflows: asDefs(slow), workerId: "w1", concurrency: 2 });
     await driveUntil({ clock: dep.clock, done: () => worker.activeCount === 0 && true });
@@ -332,14 +330,12 @@ describe("worker-driven runs", () => {
         ran.push("first");
         return succeed(1);
       })
-      .step("second", () =>
-        tryPromise(async () => {
-          ran.push("second");
-          // The first worker "dies" here: its promise never settles.
-          if (hang) await new Promise(() => {});
-          return 2;
-        }),
-      )
+      .step("second", async () => {
+        ran.push("second");
+        // The first worker "dies" here: its promise never settles.
+        if (hang) await new Promise(() => {});
+        return 2;
+      })
       .build();
     const dying = dep.worker({ workflows: asDefs(wf), workerId: "dying" });
     await driveUntil({ clock: dep.clock, done: async () => true, maxSteps: 5 });
@@ -365,12 +361,10 @@ describe("worker-driven runs", () => {
     const dep = deploy();
     let hold = true;
     const wf = workflow<string>({ name: "long" })
-      .step("a", () =>
-        tryPromise(async () => {
-          while (hold) await new Promise<void>((r) => setImmediate(r));
-          return 1;
-        }),
-      )
+      .step("a", async () => {
+        while (hold) await new Promise<void>((r) => setImmediate(r));
+        return 1;
+      })
       .step("b", () => succeed(2))
       .build();
     const first = dep.worker({ workflows: asDefs(wf), workerId: "first" });

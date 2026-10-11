@@ -13,5 +13,12 @@ export interface PostgresQueryClient {
   queryJson(sql: string): Promise<unknown>;
 }
 
-/** One file's activities, given the host's dependencies. */
+/**
+ * One file's activities, given the host's dependencies.
+ *
+ * An arrow returning an array literal whose `configSchema`s differ in shape
+ * needs an explicit `ReadonlyArray<ActivityDefinition>` return type: an
+ * inferred return type widens each object literal with the other elements'
+ * properties as `?: undefined`, which `JsonSchema.properties` rejects.
+ */
 export type ActivityLibrary = (deps: ActivityLibraryDeps) => ReadonlyArray<ActivityDefinition>;

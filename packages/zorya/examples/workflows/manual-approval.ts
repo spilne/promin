@@ -60,15 +60,10 @@ export const manualApprovalWorkflow = workflow<ManualApprovalInput>({
 
     return { requestId: previous.requestId, approved: decision.approved, by: decision.by };
   })
-  .step(
-    "apply",
-    ({ prev }) => {
-      const approved = (prev as { approved: boolean }).approved;
-      return pSleep(300).map(() => ({
-        applied: approved,
-        at: new Date().toISOString(),
-      }));
-    },
-    { dependsOn: ["review"] },
+  .step("apply", ({ prev }) =>
+    pSleep(300).map(() => ({
+      applied: prev.approved,
+      at: new Date().toISOString(),
+    })),
   )
   .build();

@@ -188,8 +188,6 @@ describe("SQL model orchestration — build analytics tables from raw data", () 
   });
 
   it("workflow name reflects the analytics project — useful for monitoring", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
     const db = createMockDb();
 
     const project: SqlProject = {

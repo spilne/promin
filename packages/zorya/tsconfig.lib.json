@@ -11,7 +11,13 @@
     "types": ["node", "@types/bun"]
   },
   "include": ["src/**/*.ts", "src/**/*.tsx"],
-  "exclude": ["src/**/*.test.ts", "src/**/*.bench.ts", "src/ui/**/*"],
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.bench.ts",
+    "src/**/tests/**",
+    "src/**/*.type-fixture.ts",
+    "src/ui/**/*"
+  ],
   "references": [
     {
       "path": "../workflow-remote/tsconfig.lib.json"

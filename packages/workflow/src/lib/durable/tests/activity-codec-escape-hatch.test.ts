@@ -12,7 +12,7 @@ import { describe, it, expect } from "bun:test";
 import type { Codec } from "@spilne/perfect-core/connect";
 import { runJournaledStep } from "../journaled-step.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
-import type { CompletePendingResult, JournalStore, JournalEntry } from "../activity-journal.ts";
+import type { CompletePendingResult, JournalEntry } from "../activity-journal.ts";
 
 // ---------------------------------------------------------------------------
 // A user-defined class — the kind of thing LosslessJsonCodec can't revive
@@ -43,7 +43,7 @@ const moneyCodec: Codec<Money> = {
  * in-memory one.
  */
 class JsonJournalStorage extends InMemoryWorkflowStorage {
-  async appendEntry(entry: {
+  override async appendEntry(entry: {
     workflowId: string;
     stepName: string;
     activityIndex: number;
@@ -53,7 +53,7 @@ class JsonJournalStorage extends InMemoryWorkflowStorage {
     const cloned = JSON.parse(JSON.stringify(entry));
     await super.appendEntry(cloned);
   }
-  async completePendingEntry(params: {
+  override async completePendingEntry(params: {
     workflowId: string;
     stepName: string;
     activityIndex: number;

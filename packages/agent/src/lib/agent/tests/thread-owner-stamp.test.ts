@@ -116,6 +116,7 @@ describe("LocalAgent — thread owner stamp", () => {
         scheduleId: "s-1",
         scheduledAt: new Date("2026-04-28T14:00:00Z"),
         firedAt: new Date("2026-04-28T14:00:01Z"),
+        incarnation: "inc1",
         tickNumber: 0,
       },
       {

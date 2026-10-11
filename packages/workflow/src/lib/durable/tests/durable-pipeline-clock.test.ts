@@ -10,6 +10,7 @@ import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
+import { WorkflowSuspendedError, WorkflowTimeoutError } from "../durable-pipeline-error.ts";
 
 const T0 = "2026-01-01T00:00:00.000Z";
 
@@ -30,14 +31,14 @@ describe(".sleep() — wake time follows the runner clock", () => {
         .build();
 
     const first = await runner.runSafe({ workflow: build(), workflowId: "cs-1", input: 1 });
-    expect(first.error?._tag).toBe("WorkflowSuspendedError");
+    expect(first.error).toBeInstanceOf(WorkflowSuspendedError);
     const state = await storage.loadWorkflow("cs-1");
     expect(state?.steps["nap"]?.wakeAt?.toISOString()).toBe("2026-01-01T00:01:00.000Z");
 
     // One ms short of the wake time — still sleeping.
     clock.advance(59_999);
     const early = await runner.runSafe({ workflow: build(), workflowId: "cs-1", input: 1 });
-    expect(early.error?._tag).toBe("WorkflowSuspendedError");
+    expect(early.error).toBeInstanceOf(WorkflowSuspendedError);
 
     clock.advance(1);
     const done = await runner.runSafe({ workflow: build(), workflowId: "cs-1", input: 1 });
@@ -55,7 +56,7 @@ describe(".waitForSignal() — timeout follows the runner clock", () => {
         .build();
 
     const first = await runner.runSafe({ workflow: build(), workflowId: "csig-1", input: 1 });
-    expect(first.error?._tag).toBe("WorkflowSuspendedError");
+    expect(first.error).toBeInstanceOf(WorkflowSuspendedError);
     const state = await storage.loadWorkflow("csig-1");
     expect(state?.steps["approval"]?.signalTimeoutAt?.toISOString()).toBe(
       "2026-01-01T00:00:05.000Z",
@@ -64,7 +65,7 @@ describe(".waitForSignal() — timeout follows the runner clock", () => {
     // Re-entry before the deadline keeps it (see wait-for-signal.test.ts).
     clock.advance(5_000);
     const late = await runner.runSafe({ workflow: build(), workflowId: "csig-1", input: 1 });
-    expect(late.error?._tag).toBe("WorkflowTimeoutError");
+    expect(late.error).toBeInstanceOf(WorkflowTimeoutError);
   });
 });
 

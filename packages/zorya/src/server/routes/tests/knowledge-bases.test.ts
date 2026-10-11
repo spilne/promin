@@ -152,7 +152,7 @@ describe("knowledge-base routes — CRUD", () => {
       backend: {
         type: "local",
         model: { provider: "anthropic", id: "claude" },
-        role: { inline: { systemPrompt: "Help." } },
+        role: { inline: { systemPrompt: "Help.", tools: [] } },
         knowledge: [{ id: "handbook" }],
       },
     });

@@ -1122,7 +1122,6 @@ describe("agent gateway — distill rate limit (429)", () => {
       summary: "old distill",
       sourceThreadId: "earlier",
       salience: 0.5,
-      facts: [],
       metadata: { kind: "distill" },
     });
 

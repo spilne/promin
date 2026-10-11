@@ -8,7 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { composeAgentInstanceId, type AgentScope } from "@promin/agent";
+import { composeAgentInstanceId, type AgentScope, type RegisterDagInput } from "@promin/agent";
 import type { ScopeAuthorizer } from "../agent-gateway-kit.ts";
 import {
   bootAgents,
@@ -209,7 +209,7 @@ describe("owner binding", () => {
 });
 
 describe("DAG runs", () => {
-  const dagOf = (agentId: string) => ({
+  const dagOf = (agentId: string): RegisterDagInput => ({
     id: `dag-${agentId}`,
     version: "v1",
     nodes: [{ id: "n1", agentId, inputs: { task: { kind: "initial", path: "task" } } }],

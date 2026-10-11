@@ -1,9 +1,10 @@
 import { succeed } from "@spilne/perfect-core";
+import type { ActivityDefinition } from "@promin/workflow";
 import type { ActivityLibrary } from "./types.ts";
 
 // Activities with a boolean output: the builder offers them as the
 // condition of a branch node.
-export const predicateActivities: ActivityLibrary = () => [
+export const predicateActivities: ActivityLibrary = (): ReadonlyArray<ActivityDefinition> => [
   {
     id: "predicate.long",
     title: "Is long text",

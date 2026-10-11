@@ -9,9 +9,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, beforeEach } from "bun:test";
-import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
-import { createWorkflowRunner } from "../workflow-runner.ts";
 import { runJournaledStep, completeSignal } from "../journaled-step.ts";
 import type { JournaledContext } from "../journaled-step.ts";
 import { WorkflowSuspendedError } from "../durable-pipeline-error.ts";
@@ -32,16 +30,7 @@ describe("ctx.validatedSignal — typed signal wait", () => {
   beforeEach(async () => {
     storage = new InMemoryWorkflowStorage();
     // Need a workflow record before signalImpl can call suspendWorkflow.
-    const wf = workflow({ name: "vs-test", inputSchema: undefined }).journaled(
-      "gate",
-      function* () {
-        return undefined;
-      },
-    );
-    const runner = createWorkflowRunner({ storage });
     await storage.createWorkflow({ workflowId: "wf-vs-1", workflowName: "vs-test", input: {} });
-    void runner;
-    void wf;
   });
 
   it("first run suspends and writes the schema snapshot onto the step", async () => {

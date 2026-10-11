@@ -13,7 +13,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
-import type { Agent, AgentRunOutput, AgentScope } from "../../agent/types.ts";
+import type { Agent, AgentInput, AgentRunOutput, AgentScope } from "../../agent/types.ts";
 import { InMemoryAgentInstanceRegistry } from "../../instance/in-memory-agent-instance-registry.ts";
 import { composeAgentInstanceId } from "../../instance/types.ts";
 import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
@@ -34,7 +34,7 @@ function textOnly(text: string): AgentRunOutput<unknown> {
 
 function stubAgent(transform: (s: string) => string = (s) => s): Agent {
   return {
-    invoke: async (input) => textOnly(transform((input as { task: string }).task)),
+    invoke: async (input: AgentInput) => textOnly(transform(input.task)),
     stream: () => textOnly("not used"),
     thread: async () => {
       throw new Error("stub: thread");
@@ -161,26 +161,26 @@ describe("createDagWorkflow — replay safety", () => {
       if (id === "upper") {
         return {
           ...stubAgent((s) => s.toUpperCase()),
-          invoke: async (input) => {
+          invoke: async (input: AgentInput) => {
             callsN1 += 1;
-            return textOnly((input as { task: string }).task.toUpperCase());
+            return textOnly(input.task.toUpperCase());
           },
         } as unknown as Agent;
       }
       if (id === "exclaim") {
         return {
           ...stubAgent((s) => `${s}!`),
-          invoke: async (input) => {
+          invoke: async (input: AgentInput) => {
             callsN2 += 1;
-            return textOnly(`${(input as { task: string }).task}!`);
+            return textOnly(`${input.task}!`);
           },
         } as unknown as Agent;
       }
       return {
         ...stubAgent((s) => `<<${s}>>`),
-        invoke: async (input) => {
+        invoke: async (input: AgentInput) => {
           callsN3 += 1;
-          return textOnly(`<<${(input as { task: string }).task}>>`);
+          return textOnly(`<<${input.task}>>`);
         },
       } as unknown as Agent;
     };

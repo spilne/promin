@@ -1,11 +1,11 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
-import { agentAction } from "../agent-action.ts";
+import { InMemoryWorkflowStorage, createWorkflowRunner, type Workflow } from "@promin/workflow";
+import { agentAction, type AgentInput } from "../agent-action.ts";
 import type { LLMResponse } from "../llm-provider.ts";
 
-async function runAction(
-  workflow: ReturnType<typeof agentAction>,
+async function runAction<TOutput>(
+  workflow: Workflow<AgentInput, TOutput>,
   task: string,
   workflowId = "so-wf-1",
 ) {

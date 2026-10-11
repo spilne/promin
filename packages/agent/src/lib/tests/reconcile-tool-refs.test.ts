@@ -64,7 +64,7 @@ describe("reconcileToolReferences", () => {
     const b = report.recipes.find((r) => r.recipeId === "bot-b");
     expect(a?.resolved).toEqual(["search"]);
     expect(a?.missing).toEqual([]);
-    expect(b?.resolved.sort()).toEqual(["memory", "search"]);
+    expect([...(b?.resolved ?? [])].sort()).toEqual(["memory", "search"]);
     expect(b?.missing).toEqual([]);
   });
 

@@ -27,6 +27,12 @@
     },
     {
       "path": "./tsconfig.lib.json"
+    },
+    {
+      "path": "./tsconfig.spec.json"
+    },
+    {
+      "path": "./tsconfig.examples.json"
     }
   ]
 }

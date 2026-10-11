@@ -65,7 +65,10 @@
         "{projectRoot}/dist/*.tsbuildinfo",
         "{projectRoot}/dist-examples/**/*.d.ts",
         "{projectRoot}/dist-examples/**/*.d.ts.map",
-        "{projectRoot}/dist-examples/*.tsbuildinfo"
+        "{projectRoot}/dist-examples/*.tsbuildinfo",
+        "{projectRoot}/dist-spec/**/*.d.ts",
+        "{projectRoot}/dist-spec/**/*.d.ts.map",
+        "{projectRoot}/dist-spec/*.tsbuildinfo"
       ]
     },
     "test": {

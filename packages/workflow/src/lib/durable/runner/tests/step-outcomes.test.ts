@@ -314,7 +314,7 @@ describe("executor path", () => {
       // oxlint-disable-next-line require-yield -- continue-as-new needs no activity
       .journaled("loop", function* (ctx) {
         if (ctx.input.count >= 2) return { final: ctx.input.count };
-        ctx.continueAsNew({ count: ctx.input.count + 1 });
+        return ctx.continueAsNew({ count: ctx.input.count + 1 });
       })
       .build();
     const runner = createWorkflowRunner({

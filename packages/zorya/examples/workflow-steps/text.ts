@@ -1,7 +1,8 @@
 import { succeed } from "@spilne/perfect-core";
+import type { ActivityDefinition } from "@promin/workflow";
 import type { ActivityLibrary } from "./types.ts";
 
-export const textActivities: ActivityLibrary = () => [
+export const textActivities: ActivityLibrary = (): ReadonlyArray<ActivityDefinition> => [
   {
     id: "text.identity",
     title: "Identity",

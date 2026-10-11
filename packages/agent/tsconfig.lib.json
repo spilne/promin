@@ -9,6 +9,12 @@
     "types": ["node", "@types/bun"]
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts", "src/**/*.bench.ts", "src/examples/tools/**"],
+  "exclude": [
+    "src/**/*.test.ts",
+    "src/**/*.bench.ts",
+    "src/**/tests/**",
+    "src/**/*.type-fixture.ts",
+    "src/examples/tools/**"
+  ],
   "references": [{ "path": "../workflow/tsconfig.lib.json" }]
 }

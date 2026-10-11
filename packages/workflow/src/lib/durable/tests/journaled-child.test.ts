@@ -127,7 +127,7 @@ describe("ctx.child", () => {
 
     const parent = workflow<void>({ name: "fail-parent" })
       .journaled("run", function* (ctx) {
-        return yield* ctx.child(failingChild, { workflowId: "fail-child-1" });
+        return yield* ctx.child<unknown>(failingChild, { workflowId: "fail-child-1" });
       })
       .build();
 

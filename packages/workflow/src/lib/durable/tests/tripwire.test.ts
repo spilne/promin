@@ -122,12 +122,12 @@ describe("tripwire", () => {
 
     it("fires the onWorkflowTripwire hook", async () => {
       const storage = new InMemoryWorkflowStorage();
-      let hookSeen: { stepName: string; reason: unknown } | null = null;
+      const hookSeen: { stepName: string; reason: unknown }[] = [];
       const runner = createWorkflowRunner({
         storage,
         hooks: {
           onWorkflowTripwire: (p) => {
-            hookSeen = { stepName: p.stepName, reason: p.reason };
+            hookSeen.push({ stepName: p.stepName, reason: p.reason });
           },
         },
       });
@@ -142,7 +142,7 @@ describe("tripwire", () => {
         .run({ workflow: wf, workflowId: "wf-hook-1", input: { ok: false } })
         .catch(() => undefined);
 
-      expect(hookSeen).toEqual({ stepName: "gate", reason: "blocked" });
+      expect(hookSeen).toEqual([{ stepName: "gate", reason: "blocked" }]);
     });
   });
 
@@ -244,7 +244,7 @@ describe("tripwire", () => {
 
       const wf = workflow<{ stop: boolean }>({ name: "trip-no-comp" })
         .step("reserve", ({ input }) => succeed(input), {
-          compensate: () => {
+          compensate: async () => {
             compensated = true;
           },
         })

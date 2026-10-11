@@ -1318,7 +1318,6 @@ describe("WorkflowBuilder", () => {
 
   describe("duplicate step names", () => {
     it("throws on duplicate step name", () => {
-      const storage = new InMemoryWorkflowStorage();
       expect(() =>
         workflow<{}>({ name: "dup" })
           .step("same", () => succeed(1))
@@ -2462,7 +2461,9 @@ describe("skipWhen", () => {
     const result = await runner.run({ workflow: wf, workflowId: "s-1", input: { n: 0 } });
 
     expect(stepRan).toBe(false);
-    expect(result).toEqual({ n: 0 });
+    // Without `skipValue` a skipped step passes `prev` through, which its
+    // declared output type (`number`) does not describe.
+    expect<unknown>(result).toEqual({ n: 0 });
   });
 
   it("runs step when predicate returns false", async () => {

@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
+import type { AgentKnowledgeRecipe } from "@promin/agent";
 import { parseBackend } from "../agent-gateway-kit.ts";
 
 const backend = (knowledge: unknown) => ({
@@ -16,7 +17,7 @@ const backend = (knowledge: unknown) => ({
 
 describe("parseBackend — knowledge bindings", () => {
   it("accepts well-formed bindings", () => {
-    const knowledge = [
+    const knowledge: AgentKnowledgeRecipe[] = [
       { id: "docs" },
       {
         id: "faq",

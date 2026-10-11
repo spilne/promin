@@ -39,6 +39,7 @@
       "dependencies": {
         "@promin/container": "workspace:*",
         "@promin/data": "workspace:*",
+        "@promin/duckdb": "workspace:*",
         "@promin/postgres": "workspace:*",
         "@promin/redis": "workspace:*",
         "@promin/workflow": "workspace:*",

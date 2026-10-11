@@ -16,7 +16,6 @@
 import { describe, it, expect } from "bun:test";
 import { runJournaledStep } from "../journaled-step.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
-import type { JournalEntry } from "../activity-journal.ts";
 
 // (replay behaviour is tested by running the step body twice — see below —
 // rather than by injecting storage errors mid-unwind, which is fragile.)
@@ -100,7 +99,7 @@ describe("ctx.activity.compensate — failure path", () => {
               events.push("comp:c");
             },
           });
-          yield* ctx.activity("d", async () => {
+          yield* ctx.activity<unknown>("d", async () => {
             throw new Error("boom");
           });
           return "unreached";
@@ -130,7 +129,7 @@ describe("ctx.activity.compensate — failure path", () => {
               cancellations.push(order.id);
             },
           });
-          yield* ctx.activity("fail", async () => {
+          yield* ctx.activity<unknown>("fail", async () => {
             throw new Error("stop");
           });
         },
@@ -157,7 +156,7 @@ describe("ctx.activity.compensate — failure path", () => {
               events.push("comp:a");
             },
           });
-          yield* ctx.activity(
+          yield* ctx.activity<unknown>(
             "b",
             async () => {
               throw new Error("boom");
@@ -194,7 +193,7 @@ describe("ctx.activity.compensate — journal entries", () => {
         body: function* (ctx) {
           yield* ctx.activity("a", async () => 1, { compensate: () => undefined });
           yield* ctx.activity("b", async () => 2, { compensate: () => undefined });
-          yield* ctx.activity("fail", async () => {
+          yield* ctx.activity<unknown>("fail", async () => {
             throw new Error("boom");
           });
         },
@@ -336,7 +335,7 @@ describe("ctx.activity.compensate — compensation failure", () => {
               throw new Error("compensation failed");
             },
           });
-          yield* ctx.activity("fail", async () => {
+          yield* ctx.activity<unknown>("fail", async () => {
             throw new Error("body failed");
           });
         },
