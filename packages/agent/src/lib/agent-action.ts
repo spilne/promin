@@ -17,7 +17,9 @@
 //                                      (tool name + input)
 //   step-<step>-approval-<id>          onApprovalRequired decision (or the approve:<id> signal)
 //   step-<step>-approval-<id>-end      emits approval.decision
-//   tool-<name>-<step>-<id>            one tool call, inside ctx.parallel
+//   tool-<name>-<step>-<id>            one tool call, inside ctx.parallel; a sub-agent
+//                                      call is a child workflow plus -route / -end
+//                                      entries (see delegation/run-delegated-call.ts)
 //   stall-<step>                       emits stall.detected
 //   after-turn                         hooks.afterTurn
 //   transcript-commit                  transcript.commit (what the turn produced)
@@ -44,7 +46,9 @@ import {
   callLlmWithRetry,
   executeToolCall,
   formatToolError,
+  isEngineControl,
   redactPriorThinkingBlocks,
+  uniqueToolCallIds,
   resolveTools,
   runLlmCall,
 } from "./agent-shared.ts";
@@ -57,6 +61,8 @@ import type { SessionEventBus } from "./session-logger.ts";
 import { StallDetector, type StallDetectorOptions } from "./stall-detector.ts";
 import type { ToolAuditLogger } from "./tool-audit/types.ts";
 import { zodToToolJsonSchema } from "./tool-json-schema.ts";
+import { delegatedRunId, runDelegatedCall } from "./delegation/run-delegated-call.ts";
+import { parseDelegationFrame, ROOT_FRAME, type DelegationFrame } from "./delegation/types.ts";
 import type { AgentTool, ApprovalDecision, AutoApprove, ToolScope } from "./tool.ts";
 import { shouldAutoApprove } from "./tool.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
@@ -65,6 +71,11 @@ import { buildToolDefs } from "./tool-registry.ts";
 export interface AgentInput {
   task: string;
   messages?: Message[];
+  /**
+   * Where this turn sits in a delegation chain; set by the engine on a
+   * sub-agent's turn (`subAgentTool`). Absent: a turn nobody delegated to.
+   */
+  delegation?: DelegationFrame;
 }
 
 /**
@@ -191,6 +202,16 @@ export interface TurnTranscript {
  */
 export interface TurnApprovalIndex {
   requested(params: { readonly workflowId: string; readonly call: ToolCall }): Promise<void>;
+  /**
+   * The agent thread the indexed approvals belong to — recorded with each
+   * approval's start entry so signal routes can send a decider to the
+   * agent. Unset: derived from the turn's `scope`.
+   */
+  readonly thread?: {
+    readonly namespaceId: string;
+    readonly threadId: string;
+    readonly agentId?: string;
+  };
 }
 
 export interface AgentActionConfig<TOutput = any> {
@@ -345,19 +366,6 @@ const STALL_INSTRUCTION =
 
 const RESPOND_NUDGE = `Call the \`${RESPOND_TOOL_NAME}\` tool with your final answer.`;
 
-/**
- * Engine control flow (suspension, continue-as-new, lock loss, journal
- * drift, ambiguous outcome) passes through a turn untouched: it is not a
- * failed turn.
- */
-function isEngineControl(err: unknown): boolean {
-  const tag = (err as { _tag?: unknown } | null)?._tag;
-  return (
-    typeof tag === "string" &&
-    /^(Workflow|Journal|FenceToken|AmbiguousActivityOutcome|Storage|Checkpoint)/.test(tag)
-  );
-}
-
 const OUTCOME_UNKNOWN_MESSAGE =
   "Tool outcome unknown: the process stopped while this tool was running, and the tool is " +
   "not marked idempotent, so it was not run again. It may or may not have taken effect — " +
@@ -368,6 +376,8 @@ interface ToolSnapshotEntry {
   readonly name: string;
   readonly requireApproval: boolean;
   readonly idempotent: boolean;
+  /** A sub-agent tool: its calls run as child workflows. */
+  readonly delegated: boolean;
 }
 
 type RoundMode = "normal" | "force-respond" | "force-answer";
@@ -454,6 +464,10 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
   return workflow<AgentInput>({ name: config.name })
     .journaled("agent", function* (ctx, input) {
       const workflowId = ctx.workflowId;
+      // The frame arrives in the run's input, which a caller may forge:
+      // a malformed one fails the run before anything happens.
+      const frame: DelegationFrame =
+        input.delegation === undefined ? ROOT_FRAME : parseDelegationFrame(input.delegation);
       const startedAt = yield* ctx.activity(
         "turn-start",
         async () => {
@@ -538,6 +552,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
                   name,
                   requireApproval: t.requireApproval === true,
                   idempotent: t.idempotent === true,
+                  delegated: t.delegation !== undefined,
                 }),
               ),
             { idempotent: true },
@@ -899,13 +914,14 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
             // agent approval (decided through the agent) from a plain one.
             const scope = config.scope;
             const thread =
-              approvalIndex && scope?.namespaceId !== undefined && scope.threadId !== undefined
+              approvalIndex?.thread ??
+              (approvalIndex && scope?.namespaceId !== undefined && scope.threadId !== undefined
                 ? {
                     namespaceId: scope.namespaceId,
                     threadId: scope.threadId,
                     ...(scope.agentId !== undefined && { agentId: scope.agentId }),
                   }
-                : undefined;
+                : undefined);
             return { toolName: call.name, toolInput: call.input, ...(thread && { thread }) };
           },
           { idempotent: true },
@@ -948,6 +964,29 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
         entry: ToolSnapshotEntry;
       }): Generator<ActivityYield, ToolResultMessage, ToolResultMessage> {
         const { step, call, entry } = params;
+        if (entry.delegated) {
+          const timeoutMs = timeoutFor(call);
+          return yield* runDelegatedCall({
+            ctx,
+            name: `tool-${call.name}-${step}-${call.id}`,
+            call,
+            tools: () => resolveTools(config),
+            frame,
+            callerId: config.scope?.agentId ?? config.name,
+            childWorkflowId: delegatedRunId({ workflowId, step, toolCallId: call.id }),
+            ...(config.bus && { bus: config.bus }),
+            ...(config.approvalIndex && { approvalIndex: config.approvalIndex }),
+            ...(config.scope && { scope: config.scope }),
+            ...(config.signal && { signal: config.signal }),
+            ...(timeoutMs !== undefined && { timeoutMs }),
+            clock,
+            onStart: () => toolStarted({ step, call }),
+            onEnd: ({ result, output, durationMs }) => {
+              if (output !== undefined) config.onToolResult?.(call, output);
+              toolEnded({ step, call, durationMs, failed: result.isError === true });
+            },
+          });
+        }
         try {
           return yield* ctx.activity(
             `tool-${call.name}-${step}-${call.id}`,
@@ -1059,13 +1098,31 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
       durationMs: clock.currentTimeMs() - start,
       ...(result.usage && { tokens: result.usage }),
     });
-    if (!result.aborted) {
-      for (const call of result.toolCalls ?? []) config.onToolCall?.(call);
+    // Tool-call ids name journal entries, approvals and child runs: a
+    // provider that sends none or repeats them gets deterministic ones here,
+    // inside the journaled think step.
+    const normalized: RunLlmCallResult = result.toolCalls
+      ? {
+          ...result,
+          toolCalls: uniqueToolCallIds({
+            calls: result.toolCalls,
+            earlier: params.messages,
+            prefix: `call-${step}`,
+          }),
+        }
+      : result;
+    if (!normalized.aborted) {
+      for (const call of normalized.toolCalls ?? []) config.onToolCall?.(call);
     }
-    return result;
+    return normalized;
   }
 
-  async function executeTool(params: { step: number; call: ToolCall }): Promise<ToolResultMessage> {
+  /** Per-call time limit: the tool's own, else the agent's default. */
+  function timeoutFor(call: ToolCall): number | undefined {
+    return resolveTools(config)[call.name]?.timeoutMs ?? config.toolTimeoutMs;
+  }
+
+  function toolStarted(params: { step: number; call: ToolCall }): void {
     const { step, call } = params;
     emit({
       type: "tool.start",
@@ -1075,34 +1132,15 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
       name: call.name,
       input: call.input,
     });
-    const start = clock.currentTimeMs();
-    // The live tool at execution time: a hot-reloaded tool runs its new code.
-    const tool = resolveTools(config)[call.name];
-    const result = tool
-      ? await executeToolCall({
-          call,
-          tool,
-          ...(config.scope && { scope: config.scope }),
-          ...(config.toolAuditLogger && { toolAuditLogger: config.toolAuditLogger }),
-          ...(config.signal && { signal: config.signal }),
-          ...((tool.timeoutMs ?? config.toolTimeoutMs) !== undefined && {
-            timeoutMs: tool.timeoutMs ?? config.toolTimeoutMs,
-          }),
-          clock,
-          onProgress: (payload) =>
-            emit({
-              type: "tool.progress",
-              turn: 0,
-              step,
-              toolCallId: call.id,
-              name: call.name,
-              payload,
-            }),
-          ...(config.onToolResult && { onResult: config.onToolResult }),
-        })
-      : errorResult(call, `Error: tool "${call.name}" is no longer available`);
-    const durationMs = clock.currentTimeMs() - start;
-    const failed = result.isError === true;
+  }
+
+  function toolEnded(params: {
+    step: number;
+    call: ToolCall;
+    durationMs: number;
+    failed: boolean;
+  }): void {
+    const { step, call, durationMs, failed } = params;
     if (config.metrics) {
       recordTool({
         metrics: config.metrics,
@@ -1120,6 +1158,41 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
       name: call.name,
       durationMs,
       failed,
+    });
+  }
+
+  async function executeTool(params: { step: number; call: ToolCall }): Promise<ToolResultMessage> {
+    const { step, call } = params;
+    toolStarted({ step, call });
+    const start = clock.currentTimeMs();
+    // The live tool at execution time: a hot-reloaded tool runs its new code.
+    const tool = resolveTools(config)[call.name];
+    const result = tool
+      ? await executeToolCall({
+          call,
+          tool,
+          ...(config.scope && { scope: config.scope }),
+          ...(config.toolAuditLogger && { toolAuditLogger: config.toolAuditLogger }),
+          ...(config.signal && { signal: config.signal }),
+          ...(timeoutFor(call) !== undefined && { timeoutMs: timeoutFor(call) }),
+          clock,
+          onProgress: (payload) =>
+            emit({
+              type: "tool.progress",
+              turn: 0,
+              step,
+              toolCallId: call.id,
+              name: call.name,
+              payload,
+            }),
+          ...(config.onToolResult && { onResult: config.onToolResult }),
+        })
+      : errorResult(call, `Error: tool "${call.name}" is no longer available`);
+    toolEnded({
+      step,
+      call,
+      durationMs: clock.currentTimeMs() - start,
+      failed: result.isError === true,
     });
     return result;
   }

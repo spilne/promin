@@ -51,7 +51,7 @@ function buildTool(config: LlmToolConfig) {
  *   createLlmTool(openai("o3"), { name: "deepReason", description: "Hard math and logic." })
  *
  * The main LLM writes the prompt; the sub-LLM responds in one turn.
- * For multi-step sub-tasks that need their own tools, use agentTool() instead.
+ * For multi-step sub-tasks that need their own tools, use subAgentTool() instead.
  */
 export function createLlmTool(
   llm: LLMProvider,

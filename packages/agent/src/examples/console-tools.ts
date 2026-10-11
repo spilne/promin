@@ -9,7 +9,9 @@ import { createWriteToolTool } from "../lib/tools/write-tool.ts";
 import { createFilesystemTools } from "../lib/tools/filesystem-tools.ts";
 import { createShellTool } from "../lib/tools/shell-tool.ts";
 import { createLlmTool } from "../lib/tools/llm-tool.ts";
-import { createAgentTool } from "../lib/tools/agent-tool-factory.ts";
+import { subAgentTool } from "../lib/delegation/sub-agent-tool.ts";
+import { SessionEventBus } from "../lib/session-logger.ts";
+import type { ToolCall } from "../lib/message.ts";
 import { createLayeredMemoryTool } from "../lib/tools/layered-memory-tools.ts";
 import { createFileToolRegistry } from "../lib/tool-registry.ts";
 import { hasCapability } from "@promin/workflow";
@@ -17,7 +19,7 @@ import { InMemoryScheduler, type ScheduleTick } from "@promin/workflow/scheduler
 import type { WorkflowRunner } from "@promin/workflow";
 import type { MemoryStore, ThreadKey } from "../lib/memory/types.ts";
 import type { ToolRegistry } from "../lib/tool-registry.ts";
-import type { AgentTool } from "../lib/tool.ts";
+import type { AgentTool, ApprovalDecision } from "../lib/tool.ts";
 import type { LLMProvider } from "../lib/llm-provider.ts";
 import type { UsageTracker } from "./console-usage.ts";
 import type { AgentSession } from "../lib/agent-loop.ts";
@@ -43,7 +45,7 @@ export interface ToolDeps {
   autoApproveRef: { value: boolean };
   /** Print a line above the current spinner/prompt — used to surface sub-agent activity. */
   printAbove: (...lines: string[]) => void;
-  /** Session event logger — used by sessionDebug and sub-agent tracking. */
+  /** Session event logger — used by sessionDebug. */
   logger?: SessionLogger;
 }
 
@@ -495,43 +497,64 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     chatGPT: chatGptOneShotTool,
   };
 
-  const subagentSystemPrompt = `You are a focused sub-agent. Be concise and task-focused.\nWorkspace: ${workspace}`;
+  const subagentSystemPrompt =
+    `You are a focused sub-agent. Be concise and task-focused.\nWorkspace: ${workspace}\n\n` +
+    `You have access to these tools: ${Object.keys(subagentTools).join(", ")}. ` +
+    "Always use tools when they are relevant to the task rather than relying on your own knowledge.";
 
-  const makeOnStep =
-    (prefix: string) =>
-    ({
-      tool,
-      param,
-      durationMs,
-      failed,
-    }: {
-      tool: string;
-      param: string;
-      durationMs: number;
-      failed: boolean;
-    }) => {
-      const elapsed = durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)}s` : `${durationMs}ms`;
-      const hint = param ? `  \x1b[2m${param}\x1b[0m` : "";
-      if (failed) {
-        printAbove(`\x1b[31m✗ ${prefix} ${tool}${hint}  failed  (${elapsed})\x1b[0m`);
-      } else {
-        printAbove(`\x1b[2m✓ ${prefix} ${tool}${hint}  (${elapsed})\x1b[0m`);
+  // A sub-agent's tool calls print above the prompt; its approvals go
+  // through the same [y/n/always] prompt as the main agent's.
+  const subagentBus = (prefix: string): SessionEventBus => {
+    const bus = new SessionEventBus();
+    const inputs = new Map<string, Record<string, unknown>>();
+    bus.subscribe((event) => {
+      if (event.type === "tool.start") {
+        inputs.set(event.toolCallId, (event.input ?? {}) as Record<string, unknown>);
+        return;
       }
+      if (event.type !== "tool.end") return;
+      const param = abbrevInput(inputs.get(event.toolCallId) ?? {});
+      inputs.delete(event.toolCallId);
+      const elapsed =
+        event.durationMs >= 1000
+          ? `${(event.durationMs / 1000).toFixed(1)}s`
+          : `${event.durationMs}ms`;
+      const hint = param ? `  \x1b[2m${param}\x1b[0m` : "";
+      printAbove(
+        event.failed
+          ? `\x1b[31m✗ ${prefix} ${event.name}${hint}  failed  (${elapsed})\x1b[0m`
+          : `\x1b[2m✓ ${prefix} ${event.name}${hint}  (${elapsed})\x1b[0m`,
+      );
+    });
+    return bus;
+  };
+  const subagentApproval =
+    (name: string) =>
+    async (call: ToolCall): Promise<ApprovalDecision> => {
+      if (autoApproveRef.value) return { approved: true };
+      const param = abbrevInput((call.input ?? {}) as Record<string, unknown>);
+      const hint = param ? `  \x1b[2m${param}\x1b[0m` : "";
+      const answer = (
+        await serialAsk(`[${name}] Allow tool "${call.name}"${hint}? [y/n/always]`)
+      ).toLowerCase();
+      if (answer === "always") autoApproveRef.value = true;
+      return { approved: answer.startsWith("y") || answer === "always" };
     };
 
-  staticTools.claudeAgent = createAgentTool({
-    runner,
-    llm: usage.withTracking(anthropic("claude-sonnet-4-6", { apiKey }), "claude-sonnet-4-6"),
+  staticTools.claudeAgent = subAgentTool({
     name: "claudeAgent",
     description:
       "Delegate a task to a parallel Claude (Sonnet) sub-agent with filesystem, shell, memory, and chatGPT access. Use to parallelise independent subtasks or run deep research alongside the main thread.",
-    tools: subagentTools,
-    systemPrompt: subagentSystemPrompt,
-    ask,
-    autoApproveRef,
-    onStep: makeOnStep("[claudeAgent]"),
-    onSubagentStart: (p) => logger?.emit({ type: "subagent.start", name: "claudeAgent", ...p }),
-    onSubagentEnd: (p) => logger?.emit({ type: "subagent.end", name: "claudeAgent", ...p }),
+    timeoutMs: 120_000,
+    agent: {
+      name: "claudeAgent",
+      llm: usage.withTracking(anthropic("claude-sonnet-4-6", { apiKey }), "claude-sonnet-4-6"),
+      tools: subagentTools,
+      systemPrompt: subagentSystemPrompt,
+      maxSteps: 20,
+      onApprovalRequired: subagentApproval("claudeAgent"),
+      bus: subagentBus("[claudeAgent]"),
+    },
   });
 
   const lazyOpenAI: LLMProvider = {
@@ -545,19 +568,20 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     },
   };
 
-  staticTools.gptAgent = createAgentTool({
-    runner,
-    llm: usage.withTracking(lazyOpenAI, "gpt-4o"),
+  staticTools.gptAgent = subAgentTool({
     name: "gptAgent",
     description:
       "Delegate a task to a parallel GPT-4o sub-agent with filesystem, shell, memory, and chatGPT access. Use for a second opinion, different reasoning style, or to parallelise work.",
-    tools: subagentTools,
-    systemPrompt: subagentSystemPrompt,
-    ask,
-    autoApproveRef,
-    onStep: makeOnStep("[gptAgent]"),
-    onSubagentStart: (p) => logger?.emit({ type: "subagent.start", name: "gptAgent", ...p }),
-    onSubagentEnd: (p) => logger?.emit({ type: "subagent.end", name: "gptAgent", ...p }),
+    timeoutMs: 120_000,
+    agent: {
+      name: "gptAgent",
+      llm: usage.withTracking(lazyOpenAI, "gpt-4o"),
+      tools: subagentTools,
+      systemPrompt: subagentSystemPrompt,
+      maxSteps: 20,
+      onApprovalRequired: subagentApproval("gptAgent"),
+      bus: subagentBus("[gptAgent]"),
+    },
   });
 
   staticTools.chatGemini = createLlmTool(

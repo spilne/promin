@@ -22,8 +22,31 @@ export type {
 export { StallDetector } from "./stall-detector.ts";
 export type { StallDetectorOptions, StallVerdict } from "./stall-detector.ts";
 
-export { agentTool } from "./agent-tool.ts";
-export type { AgentToolConfig } from "./agent-tool.ts";
+// Delegation — one sub-agent tool; each call runs as a child workflow.
+export { agentTurnWorkflow, subAgentTool } from "./delegation/sub-agent-tool.ts";
+export type {
+  FixedSubAgentToolConfig,
+  RoutedSubAgentToolConfig,
+} from "./delegation/sub-agent-tool.ts";
+export { delegatedRunId } from "./delegation/run-delegated-call.ts";
+export { childToolCallId, delegatedApprovalId } from "./delegation/child-wiring.ts";
+export type { ChildTurnWiring } from "./delegation/child-wiring.ts";
+export {
+  DEFAULT_MAX_DEPTH,
+  DelegationCycleError,
+  DelegationDepthError,
+  ROOT_FRAME,
+  isDelegableAgent,
+  parseDelegationFrame,
+} from "./delegation/types.ts";
+export type {
+  DelegableAgent,
+  DelegationFrame,
+  PreparedTurn,
+  SubAgentDelegation,
+  SubAgentRoute,
+  SubAgentRouteResult,
+} from "./delegation/types.ts";
 
 export { agentLoop } from "./agent-loop.ts";
 export type {
@@ -297,9 +320,6 @@ export type { RecordApprovalArgs, RecordChatArgs, RecordToolArgs } from "./metri
 // per recipe via `backend.network`. See packages/agent/src/lib/network/types.ts.
 export {
   DEFAULT_NETWORK,
-  DEFAULT_MAX_DEPTH,
-  NetworkCycleError,
-  NetworkMaxDepthError,
   NetworkPermissionError,
   matchesNetworkScope,
   networksOverlap,
@@ -312,8 +332,6 @@ export type {
   NetworkRuntimeDeps,
 } from "./network/runtime.ts";
 export { createFindAgentTool, createCallAgentTool } from "./network/runtime.ts";
-export { currentCallContext, nextCallFrame, runInCallContext } from "./network/depth.ts";
-export type { NetworkCallContext } from "./network/depth.ts";
 
 // Instance — long-lived agent instances keyed by (registeredAgentId, namespace, ownerId).
 // Class/instance: RegisteredAgent is the recipe, AgentInstance is the live
@@ -662,9 +680,6 @@ export type { FilesystemToolsConfig, FilesystemTools } from "./tools/filesystem-
 export { createShellTool, DEFAULT_INHERITED_ENV } from "./tools/shell-tool.ts";
 export type { ShellToolConfig } from "./tools/shell-tool.ts";
 
-export { createAgentTool } from "./tools/agent-tool-factory.ts";
-export type { AgentToolFactoryConfig } from "./tools/agent-tool-factory.ts";
-
 export { createFetchUrlTool, createWebSearchTool, fetchUrl, webSearch } from "./tools/web-tools.ts";
 export type { FetchUrlToolConfig, WebToolsConfig } from "./tools/web-tools.ts";
 
@@ -780,7 +795,7 @@ export type {
 // Agentic DAG — operator-authored multi-agent execution graph.
 export { pickPath } from "./dag/dag-helpers.ts";
 export { validateDag, topologicalOrder } from "./dag/validate.ts";
-export { DagValidationError } from "./dag/types.ts";
+export { AgentRefusedError, DagValidationError, isAgentRefusal } from "./dag/types.ts";
 export { createRegistryAgentResolver } from "./dag/registry-agent-resolver.ts";
 export type {
   AgentResolver,
@@ -790,7 +805,7 @@ export type {
   DagEdge,
   NodeInputSource,
 } from "./dag/types.ts";
-export { createDagWorkflow } from "./dag/durable-executor.ts";
+export { createDagWorkflow, DAG_WORKFLOW_NAME, dagNodeRunId } from "./dag/durable-executor.ts";
 export type {
   DurableDagInput,
   DurableDagOutput,

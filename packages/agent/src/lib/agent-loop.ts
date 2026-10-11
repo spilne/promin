@@ -17,11 +17,14 @@ import {
   redactPriorThinkingBlocks,
   resolveTools,
   surfaceAgentError,
+  uniqueToolCallIds,
 } from "./agent-shared.ts";
 import type { SessionLogger, SessionEvent } from "./session-logger.ts";
 import { SessionEventBus } from "./session-logger.ts";
 import { compact, RECAP_SUMMARY_PROMPT } from "./agent-loop-compaction.ts";
 import type { CompactionConfig } from "./agent-loop-compaction.ts";
+import { delegatedRunId, runDelegatedCall } from "./delegation/run-delegated-call.ts";
+import { ROOT_FRAME } from "./delegation/types.ts";
 
 // ---- hooks ----
 
@@ -728,7 +731,18 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
                   durationMs: Date.now() - llmStart,
                   tokens: result.usage,
                 });
-                return result;
+                // Unique, non-empty tool-call ids, fixed inside the journaled
+                // step: they name journal entries, approvals and child runs.
+                return result.toolCalls
+                  ? {
+                      ...result,
+                      toolCalls: uniqueToolCallIds({
+                        calls: result.toolCalls,
+                        earlier: messages,
+                        prefix: `call-${turn}-${step}`,
+                      }),
+                    }
+                  : result;
               });
 
               if (response.usage) {
@@ -869,59 +883,100 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
               if (toExecute.length > 0) {
                 const results = yield* ctx.parallel(
                   toExecute.map(({ call, toolDef }) =>
-                    ctx.activity(`tool-${call.name}-${turn}-${step}-${call.id}`, async () => {
-                      eventBus.emit({
-                        type: "tool.start",
-                        turn,
-                        step,
-                        toolCallId: call.id,
-                        name: call.name,
-                        input: call.input,
-                      });
-                      const toolStart = Date.now();
-                      // Bridge tool.write(payload) into a tool.progress
-                      // event labeled with the current turn/step/callId.
-                      // Tools that don't write progress get no events;
-                      // the writer is opt-in on the tool author's side.
-                      const result = await executeToolCall({
-                        call,
-                        tool: toolDef,
-                        signal: pendingSignals.get(turn),
-                        clock,
-                        ...(config.toolAuditLogger && { toolAuditLogger: config.toolAuditLogger }),
-                        onProgress: (payload) =>
+                    toolDef.delegation
+                      ? runDelegatedCall({
+                          ctx,
+                          name: `tool-${call.name}-${turn}-${step}-${call.id}`,
+                          call,
+                          tools: () => toolMap,
+                          frame: ROOT_FRAME,
+                          callerId: config.name,
+                          // One session runs many turns: the turn keeps the
+                          // child id unique across them.
+                          childWorkflowId: delegatedRunId({
+                            workflowId: `${ctx.workflowId}.${turn}`,
+                            step,
+                            toolCallId: call.id,
+                          }),
+                          bus: eventBus,
+                          ...(pendingSignals.get(turn) && { signal: pendingSignals.get(turn) }),
+                          ...(toolDef.timeoutMs !== undefined && { timeoutMs: toolDef.timeoutMs }),
+                          clock,
+                          onStart: () =>
+                            eventBus.emit({
+                              type: "tool.start",
+                              turn,
+                              step,
+                              toolCallId: call.id,
+                              name: call.name,
+                              input: call.input,
+                            }),
+                          onEnd: ({ result, durationMs }) =>
+                            eventBus.emit({
+                              type: "tool.end",
+                              turn,
+                              step,
+                              toolCallId: call.id,
+                              name: call.name,
+                              durationMs,
+                              failed: result.isError === true,
+                            }),
+                        })
+                      : ctx.activity(`tool-${call.name}-${turn}-${step}-${call.id}`, async () => {
                           eventBus.emit({
-                            type: "tool.progress",
+                            type: "tool.start",
                             turn,
                             step,
                             toolCallId: call.id,
                             name: call.name,
-                            payload,
-                          }),
-                      });
-                      const durationMs = Date.now() - toolStart;
-                      const failed = result.isError === true;
-                      const isParseError = failed && result.content.startsWith("Invalid input");
-                      if (isParseError) {
-                        eventBus.emit({
-                          type: "tool.parse_error",
-                          turn,
-                          step,
-                          name: call.name,
-                          error: result.content,
-                        });
-                      }
-                      eventBus.emit({
-                        type: "tool.end",
-                        turn,
-                        step,
-                        toolCallId: call.id,
-                        name: call.name,
-                        durationMs,
-                        failed,
-                      });
-                      return result;
-                    }),
+                            input: call.input,
+                          });
+                          const toolStart = Date.now();
+                          // Bridge tool.write(payload) into a tool.progress
+                          // event labeled with the current turn/step/callId.
+                          // Tools that don't write progress get no events;
+                          // the writer is opt-in on the tool author's side.
+                          const result = await executeToolCall({
+                            call,
+                            tool: toolDef,
+                            signal: pendingSignals.get(turn),
+                            clock,
+                            ...(config.toolAuditLogger && {
+                              toolAuditLogger: config.toolAuditLogger,
+                            }),
+                            onProgress: (payload) =>
+                              eventBus.emit({
+                                type: "tool.progress",
+                                turn,
+                                step,
+                                toolCallId: call.id,
+                                name: call.name,
+                                payload,
+                              }),
+                          });
+                          const durationMs = Date.now() - toolStart;
+                          const failed = result.isError === true;
+                          const isParseError = failed && result.content.startsWith("Invalid input");
+                          if (isParseError) {
+                            eventBus.emit({
+                              type: "tool.parse_error",
+                              turn,
+                              step,
+                              name: call.name,
+                              error: result.content,
+                            });
+                          }
+                          eventBus.emit({
+                            type: "tool.end",
+                            turn,
+                            step,
+                            toolCallId: call.id,
+                            name: call.name,
+                            durationMs,
+                            failed,
+                          });
+                          return result;
+                        }),
                   ),
                 );
                 toolResultMsgs.push(...results);

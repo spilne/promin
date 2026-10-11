@@ -139,10 +139,9 @@ export function mountDags(params: {
   const { agents } = dags;
   const dagDeps: DagGatewayDeps = {
     registry: dags.registry,
-    resolver: dags.resolver,
-    runner: dags.runner,
+    workflows: dags.workflows,
+    workflowName: dags.workflow.name,
     agents: agents.registry,
-    ...(agents.instances !== undefined && { instances: agents.instances }),
     ...(agents.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
     ...(params.namespaces !== undefined && { namespaces: params.namespaces }),
   };

@@ -1,5 +1,16 @@
 import { TaggedError } from "@spilne/perfect-core";
 
+/**
+ * A lazy child's `load` (`LazyChildWorkflow`) answers that the child's
+ * definition is gone for good — its version was removed, its backend
+ * changed, it was disabled. The call fails with it and a run of the child
+ * left in flight is cancelled. Any other error from `load` is taken as
+ * transient: nothing is journaled and the parent retries later.
+ */
+export class ChildWorkflowGoneError extends TaggedError("ChildWorkflowGoneError")<{
+  readonly message: string;
+}>() {}
+
 /** A workflow-level error (e.g., cycle detected, invalid DAG). */
 export class WorkflowError extends TaggedError("WorkflowError")<{
   readonly workflowId: string;

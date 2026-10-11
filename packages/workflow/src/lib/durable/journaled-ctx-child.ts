@@ -10,11 +10,31 @@ import type { Workflow } from "./durable-pipeline.ts";
 import { WorkflowSuspendedError } from "./durable-pipeline-error.ts";
 import { errorTag, rehydrateFailure } from "./journal-exit.ts";
 import { journaledBodyScope } from "./journaled-body-scope.ts";
-import type { ActivityYield, JournaledContext, JournaledCtxEnv } from "./journaled-context.ts";
+import { isTerminalWorkflowStatus } from "./workflow-state.ts";
+import type {
+  ActivityYield,
+  JournaledContext,
+  JournaledCtxEnv,
+  LazyChildWorkflow,
+} from "./journaled-context.ts";
+
+/** How long a parent waits before loading a lazy child again after a transient error. */
+export const CHILD_LOAD_RETRY_MS = 5_000;
+
+/** A transient `LazyChildWorkflow.load` failure, kept out of the journal. */
+class ChildLoadDeferred extends Error {
+  constructor(override readonly cause: unknown) {
+    super(describe(cause));
+  }
+}
+
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 /** Build `ctx.child` for one body run. */
 export function makeChild(env: JournaledCtxEnv): JournaledContext<unknown, unknown>["child"] {
-  const { workflowId, stepName, cursor, workflowStorage, guard, stepCodec, runChild } = env;
+  const { workflowId, stepName, cursor, workflowStorage, guard, stepCodec, runChild, clock } = env;
 
   /**
    * The child workflow suspended. Suspend this step too, as a wait that
@@ -26,6 +46,8 @@ export function makeChild(env: JournaledCtxEnv): JournaledContext<unknown, unkno
   async function suspendForChild(params: {
     childWorkflowId: string;
     childError: unknown;
+    retryAt?: Date;
+    detail?: string;
   }): Promise<WorkflowSuspendedError> {
     const { childWorkflowId, childError } = params;
     if (workflowStorage) {
@@ -36,6 +58,8 @@ export function makeChild(env: JournaledCtxEnv): JournaledContext<unknown, unkno
         childWorkflowId,
         childError,
         guard,
+        ...(params.retryAt && { retryAt: params.retryAt }),
+        ...(params.detail && { detail: params.detail }),
       });
     }
     const reason = (childError as { reason?: unknown }).reason === "sleep" ? "sleep" : "signal";
@@ -48,7 +72,7 @@ export function makeChild(env: JournaledCtxEnv): JournaledContext<unknown, unkno
   }
 
   return function* child<Output>(
-    workflow: Workflow<unknown, Output>,
+    workflow: Workflow<unknown, Output> | LazyChildWorkflow<Output>,
     options?: { readonly input?: unknown; readonly workflowId?: string },
   ): Generator<ActivityYield, Output, Output> {
     const slot = cursor.allocateSlot();
@@ -61,6 +85,30 @@ export function makeChild(env: JournaledCtxEnv): JournaledContext<unknown, unkno
       `${workflowId}.${stepName}.${activityIndex}${branchPath.replaceAll("/", "~")}`;
     const childInput = options?.input;
     const activityName = workflow.name;
+    /**
+     * The child's definition. A lazy child whose definition is gone for
+     * good (`ChildWorkflowGoneError`) fails as the child's outcome, and a
+     * run of it left in flight is cancelled with its descendants, so no
+     * orphan keeps waiting for a driver that will never come. Any other
+     * load error is transient: it is not journaled, and this step parks on
+     * the child until `CHILD_LOAD_RETRY_MS` later, when the next run of the
+     * parent loads it again and re-attaches.
+     */
+    const definition = async (): Promise<Workflow<unknown, Output>> => {
+      if (!("load" in workflow)) return workflow;
+      try {
+        return await workflow.load();
+      } catch (err) {
+        if (errorTag(err) !== "ChildWorkflowGoneError") throw new ChildLoadDeferred(err);
+        if (workflowStorage) {
+          const orphan = await workflowStorage.loadWorkflow(childWorkflowId);
+          if (orphan && !isTerminalWorkflowStatus(orphan.status)) {
+            await workflowStorage.cancelWorkflow({ workflowId: childWorkflowId, cascade: true });
+          }
+        }
+        throw err;
+      }
+    };
 
     /** Value of a completed exit: a failure rethrows, a success decodes. */
     const settle = (exit: JournalExit): Output => {
@@ -102,13 +150,24 @@ export function makeChild(env: JournaledCtxEnv): JournaledContext<unknown, unkno
         run: async () =>
           (await journaledBodyScope.exit(async () =>
             runChild({
-              workflow: workflow as Workflow<unknown, unknown>,
+              workflow: (await definition()) as Workflow<unknown, unknown>,
               workflowId: childWorkflowId,
               input: childInput,
             }),
           )) as Output,
         encode: (result) => stepCodec.encode(result),
         passThrough: async (err) => {
+          if (err instanceof ChildLoadDeferred) {
+            // Not an outcome: the entry stays pending and the parent parks
+            // until the retry time (or until the child ends).
+            if (!workflowStorage) throw err.cause;
+            throw await suspendForChild({
+              childWorkflowId,
+              childError: { reason: "sleep" },
+              retryAt: new Date(clock.currentTimeMs() + CHILD_LOAD_RETRY_MS),
+              detail: `its definition could not be loaded (${describe(err.cause)}); retrying`,
+            });
+          }
           const tag = errorTag(err);
           if (tag === "WorkflowSuspendedError") {
             // The child is parked on a sleep or signal: not an outcome. The

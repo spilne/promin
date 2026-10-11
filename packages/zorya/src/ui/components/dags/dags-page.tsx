@@ -3,16 +3,17 @@
 //
 // Lists registered DAGs (latest-per-id). Click → detail panel showing
 // the graph structure (indented adjacency view), version history, and
-// a Run button that POSTs to /api/dags/:id/run.
-//
-// Live graph canvas with running-node highlight is a future slice; v0
-// gives the operator the trigger surface + post-run result drill-down.
+// a Run button that POSTs to /api/dags/:id/run. The POST answers with
+// the run's id at once; the page follows the run like any other (its
+// event stream, then the stored result) and links to its run page,
+// where each node shows as a child run.
 // ---------------------------------------------------------------------------
 
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { useNamespace } from "../../hooks/use-namespace.ts";
 import { api, type DagDto, type DagRunResultDto } from "../../api/client.ts";
+import { useRunEvents } from "../../hooks/use-sse.ts";
 import { Page, PageHeader } from "../ui/page.tsx";
 
 export function DagsPage() {
@@ -117,6 +118,32 @@ function DagDetail({ dag }: { dag: DagDto | null }) {
   const [result, setResult] = useState<DagRunResultDto | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [runId, setRunId] = useState<string | undefined>(undefined);
+
+  // Read the run; once it has ended, show its result or error.
+  const checkRun = async (id: string) => {
+    try {
+      const run = await api.getRun(id);
+      if (run.status === "completed") {
+        setResult({ workflowId: id, result: run.result as DagRunResultDto["result"] });
+        setRunning(false);
+      } else if (run.status === "failed") {
+        setError(run.error ?? "DAG run failed");
+        setRunning(false);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setRunning(false);
+    }
+  };
+  // A run that ended before the stream opened is caught by the first read.
+  useEffect(() => {
+    if (runId) void checkRun(runId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runId]);
+  useRunEvents(runId, (ev) => {
+    if (runId && ev.type === "end") void checkRun(runId);
+  });
 
   if (!dag) {
     return <div class="p-8 text-center text-base-content/40">Loading…</div>;
@@ -126,17 +153,18 @@ function DagDetail({ dag }: { dag: DagDto | null }) {
     setRunning(true);
     setError(null);
     setResult(null);
+    setRunId(undefined);
     try {
       let initialInput: Record<string, unknown> = { topic };
       if (showAdvanced && extraJson.trim()) {
         const parsed = JSON.parse(extraJson) as Record<string, unknown>;
         initialInput = { ...initialInput, ...parsed };
       }
-      const res = await api.runDag(dag.id, { namespaceId, resourceId, initialInput });
-      setResult(res);
+      const started = await api.runDag(dag.id, { namespaceId, resourceId, initialInput });
+      // Followed by the run's event stream until it ends.
+      setRunId(started.workflowId);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-    } finally {
       setRunning(false);
     }
   };
@@ -218,6 +246,16 @@ function DagDetail({ dag }: { dag: DagDto | null }) {
           {running ? "Running…" : "▶ Run"}
         </button>
       </div>
+
+      {runId && (
+        <div class="text-xs text-base-content/60">
+          {running ? "Running as " : "Run "}
+          <a class="link font-mono" href={`#/runs/${encodeURIComponent(runId)}`}>
+            {runId}
+          </a>
+          {running && " — nodes appear as its child runs."}
+        </div>
+      )}
 
       {error && <div class="alert alert-error text-xs">{error}</div>}
 

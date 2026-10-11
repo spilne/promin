@@ -39,6 +39,8 @@ export interface WorkflowDefsResponse {
 
 export interface WorkflowDefsDeps {
   workflows?: Readonly<Record<string, Workflow<unknown, unknown>>>;
+  /** Internal workflows (started by their own service only) are not listed. */
+  isInternal?: (name: string) => boolean;
   /**
    * Returns a sample input for a given workflow name. Used by the UI to
    * pre-fill trigger forms with plausible defaults so users don't have to
@@ -67,6 +69,7 @@ export function listWorkflowDefs(deps: WorkflowDefsDeps) {
   return async (): Promise<Response> => {
     const byName = new Map<string, WorkflowDefDto>();
     for (const [name, wf] of Object.entries(deps.workflows ?? {})) {
+      if (deps.isInternal?.(name)) continue;
       byName.set(name, toDto(name, wf, deps.sampleInput?.(name)));
     }
     // Merge in remote advertisements — static wins on conflict (embedded

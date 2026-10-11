@@ -9,6 +9,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { composeAgentInstanceId, type AgentScope, type RegisterDagInput } from "@promin/agent";
+import type { WorkflowState, WorkflowStorage } from "@promin/workflow";
 import type { ScopeAuthorizer } from "../agent-gateway-kit.ts";
 import {
   bootAgents,
@@ -44,6 +45,19 @@ async function boot(opts: HarnessOpts = {}) {
     ...opts,
   });
   return { ...h, bound };
+}
+
+/** Wait (bounded by event-loop turns) until the run has ended. */
+async function settledRun(params: {
+  storage: WorkflowStorage;
+  workflowId: string;
+}): Promise<WorkflowState> {
+  for (let i = 0; i < 5_000; i++) {
+    const state = await params.storage.loadWorkflow(params.workflowId);
+    if (state && (state.status === "completed" || state.status === "failed")) return state;
+    await new Promise((r) => setTimeout(r, 0));
+  }
+  throw new Error(`run ${params.workflowId} never ended`);
 }
 
 async function errorOf(res: Response): Promise<string> {
@@ -259,12 +273,56 @@ describe("DAG runs", () => {
     expect(bound).toEqual([]);
   });
 
-  it("runs every node bound to the caller's scope", async () => {
-    const { server, bound } = await bootDags();
+  it("starts a run and answers with its id; every node runs bound to the caller's scope", async () => {
+    const { server, bound, storage } = await bootDags();
     const res = await server.handle(run("support", { namespaceId: "acme", resourceId: "alice" }));
-    expect(res.status).toBe(200);
-    const body = await jsonOf<{ result: { ok: boolean; outputs: Record<string, unknown> } }>(res);
-    expect(body.result.ok).toBe(true);
-    expect(bound).toEqual([{ namespaceId: "acme", resourceId: "alice" }]);
+    expect(res.status).toBe(202);
+    const { workflowId } = await jsonOf<{ workflowId: string }>(res);
+    const done = await settledRun({ storage, workflowId });
+    expect(done.status).toBe("completed");
+    expect((done.result as { ok: boolean }).ok).toBe(true);
+    // Bound once to route the node and once to run its turn.
+    const alice = { namespaceId: "acme", resourceId: "alice" };
+    expect(bound).toEqual([alice, alice]);
+  });
+
+  it("runs in the scope's namespace and refuses a run id taken by another DAG run", async () => {
+    const { server, storage } = await bootDags();
+    const body = { namespaceId: "acme", resourceId: "alice", workflowId: "dag-run-1" };
+    const first = await server.handle(run("support", body));
+    expect(first.status).toBe(202);
+    const done = await settledRun({ storage, workflowId: "dag-run-1" });
+    expect(done.namespace).toBe("acme");
+    const [node] = await storage.listWorkflows({ parentId: "dag-run-1" });
+    expect(node?.namespace).toBe("acme");
+
+    // The same request again answers with the same run.
+    const again = await server.handle(run("support", body));
+    expect(again.status).toBe(202);
+    expect(await jsonOf<{ existing?: boolean }>(again)).toMatchObject({ existing: true });
+
+    // Another scope or DAG under that id is a conflict, not that run.
+    const otherScope = await server.handle(run("support", { ...body, resourceId: "bob" }));
+    expect(otherScope.status).toBe(409);
+    expect(await errorOf(otherScope)).toBe("workflow_id_conflict");
+  });
+
+  it("the DAG workflow can't be started through the generic trigger route", async () => {
+    const { server, storage } = await bootDags();
+    const res = await server.handle(
+      req("POST", "/api/workflows/agentic-dag/runs", {
+        input: {
+          dagId: "dag-support",
+          version: "v1",
+          initialInput: { task: "hi" },
+          scope: { namespaceId: "globex", resourceId: "mallory" },
+        },
+      }),
+    );
+    expect(res.status).toBe(404);
+    expect(await storage.listWorkflows({ limit: 10 })).toEqual([]);
+    const defs = await server.handle(req("GET", "/api/workflows/definitions"));
+    const { workflows } = await jsonOf<{ workflows: Array<{ name: string }> }>(defs);
+    expect(workflows.map((w) => w.name)).not.toContain("agentic-dag");
   });
 });

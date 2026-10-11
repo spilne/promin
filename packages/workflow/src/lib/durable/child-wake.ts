@@ -46,12 +46,18 @@ export async function suspendOnChild(params: {
   /** The child's `WorkflowSuspendedError`. */
   readonly childError: unknown;
   readonly guard?: FenceGuard | undefined;
+  /** Wake the parent no later than this (a retry of a child that could not be loaded). */
+  readonly retryAt?: Date;
+  /** Appended to the suspension's message. */
+  readonly detail?: string;
 }): Promise<WorkflowSuspendedError> {
-  const { storage, workflowId, stepName, childWorkflowId, guard } = params;
+  const { storage, workflowId, stepName, childWorkflowId, guard, retryAt } = params;
   const reason =
     (params.childError as { reason?: unknown }).reason === "sleep" ? "sleep" : "signal";
   const child = await storage.loadWorkflow(childWorkflowId);
-  const wakeAt = child ? earliestWakeOf(child) : undefined;
+  const childWake = child ? earliestWakeOf(child) : undefined;
+  const wakeAt =
+    retryAt && (!childWake || retryAt.getTime() < childWake.getTime()) ? retryAt : childWake;
   await storage.suspendWorkflow({
     workflowId,
     stepName,
@@ -68,7 +74,8 @@ export async function suspendOnChild(params: {
     reason,
     message:
       `waiting for child workflow "${childWorkflowId}"` +
-      (wakeAt ? ` (wakes at ${wakeAt.toISOString()})` : ""),
+      (wakeAt ? ` (wakes at ${wakeAt.toISOString()})` : "") +
+      (params.detail ? `: ${params.detail}` : ""),
   });
 }
 

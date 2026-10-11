@@ -50,6 +50,7 @@ import {
   agentAction,
   type AgentActionConfig,
   type AgentEngineConfig,
+  type AgentInput as TurnInput,
   type AgentResult,
   type TurnApprovalIndex,
   type TurnTranscript,
@@ -66,6 +67,8 @@ import {
   type PendingApprovalKey,
   type PendingApprovalStore,
 } from "../approvals/pending-approval-store.ts";
+import { childToolCallId } from "../delegation/child-wiring.ts";
+import type { DelegableAgent, PreparedTurn } from "../delegation/types.ts";
 import type { ToolRegistry } from "../tool-registry.ts";
 import type { Message, ToolCall } from "../message.ts";
 import { SessionEventBus, type SessionEvent } from "../session-logger.ts";
@@ -505,7 +508,7 @@ export interface AutoDistillSignals {
   readonly threadKey: ThreadKey;
 }
 
-export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput> {
+export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>, DelegableAgent {
   private readonly config: LocalAgentConfig<TOutput>;
 
   constructor(config: LocalAgentConfig<TOutput>) {
@@ -873,7 +876,88 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     }));
   }
 
+  // --- Delegation (DelegableAgent) ---------------------------------------
+
+  /**
+   * Prepare a turn of this agent for a delegating caller: its agent id and
+   * the turn input (framed task plus retrieved context). The caller
+   * journals the result, so the retrievers run once per delegated call.
+   */
+  async prepareTurn(input: AgentInput): Promise<PreparedTurn> {
+    return { agentId: this.agentId(), input: await this.turnInput(input) };
+  }
+
+  /**
+   * This agent's one-shot turn as a workflow, bound to its scope and
+   * stopped by `signal`. A delegating turn runs it as its child workflow,
+   * wiring its approvals and events to the root turn (`bus`,
+   * `approvalIndex`).
+   */
+  turnWorkflow(params: {
+    readonly signal: AbortSignal;
+    readonly bus?: SessionEventBus;
+    readonly approvalIndex?: TurnApprovalIndex;
+    readonly onApprovalRequired?: (call: ToolCall) => Promise<ApprovalDecision>;
+  }): ReturnType<typeof agentAction> {
+    return this.oneShotWorkflow({
+      namespaceId: this.config.namespaceId,
+      bus: params.bus ?? new SessionEventBus(),
+      signal: params.signal,
+      ...(params.approvalIndex && { approvalIndex: params.approvalIndex }),
+      ...(params.onApprovalRequired && { onApprovalRequired: params.onApprovalRequired }),
+    });
+  }
+
   // --- internal: one-shot runner ----------------------------------------
+
+  private oneShotWorkflow(params: {
+    namespaceId: string | undefined;
+    bus: SessionEventBus;
+    signal: AbortSignal;
+    approvalIndex?: TurnApprovalIndex;
+    onApprovalRequired?: (call: ToolCall) => Promise<ApprovalDecision>;
+  }): ReturnType<typeof agentAction> {
+    // Tools come from buildTools so the network tools auto-attach for
+    // one-shot invoke too. No threadId here (one-shot is stateless), so
+    // the layered memory tool stays off for invoke.
+    const { namespaceId } = params;
+    const resourceId = this.config.resourceId;
+    const engine: AgentEngineConfig<TOutput> = {
+      ...this.config.agent,
+      ...this.buildTools({
+        ...(namespaceId !== undefined && { namespaceId }),
+        ...(resourceId !== undefined && { resourceId }),
+      }),
+      ...(params.onApprovalRequired && { onApprovalRequired: params.onApprovalRequired }),
+    };
+    return buildTurnWorkflow<TOutput>({
+      engine,
+      bus: params.bus,
+      scope: {
+        ...(namespaceId !== undefined && { namespaceId }),
+        ...(resourceId !== undefined && { resourceId }),
+        agentId: this.agentId(),
+      },
+      signal: params.signal,
+      ...(params.approvalIndex && { approvalIndex: params.approvalIndex }),
+    });
+  }
+
+  /**
+   * The engine input of a one-shot turn. Context-mode retrievers search
+   * with the task before the run starts; the hits ride in the workflow
+   * input as a fenced reference-data message right before the task, so a
+   * replay sees the same context without searching again.
+   */
+  private async turnInput(input: AgentInput): Promise<TurnInput> {
+    const knowledge = await buildRetrieverContext({
+      retrievers: this.config.retrievers,
+      query: input.task,
+    });
+    const messages: Message[] = [...(input.messages ?? [])];
+    if (knowledge) messages.push(referenceDataMessage(knowledge));
+    return { task: frameTask(input), messages };
+  }
 
   private async runOnce(params: {
     input: AgentInput;
@@ -884,33 +968,16 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     const bus = new SessionEventBus();
     bus.subscribe((e) => recordEvent(capture, e));
 
-    // Tools come from buildTools so the network tools auto-attach for
-    // one-shot invoke too. No threadId here (one-shot is stateless), so
-    // the layered memory tool stays off for invoke.
-    const namespaceId = opts?.namespaceId ?? this.config.namespaceId;
-    const resourceId = this.config.resourceId;
-    const engine: AgentEngineConfig<TOutput> = {
-      ...this.config.agent,
-      ...this.buildTools({
-        ...(namespaceId !== undefined && { namespaceId }),
-        ...(resourceId !== undefined && { resourceId }),
-      }),
-    };
-    const wf = buildTurnWorkflow<TOutput>({
-      engine,
+    const wf = this.oneShotWorkflow({
+      namespaceId: opts?.namespaceId ?? this.config.namespaceId,
       bus,
-      scope: {
-        ...(namespaceId !== undefined && { namespaceId }),
-        ...(resourceId !== undefined && { resourceId }),
-        agentId: this.agentId(),
-      },
       signal: capture.abort.signal,
     });
     // Honor caller-provided `runId` so a schedule tick (or any deterministic
     // caller) lands on the same workflow row across retries. Falls back to
     // a fresh random id for plain interactive invocations.
     const workflowId =
-      opts?.runId ?? `${this.config.invokeIdPrefix ?? engine.name}-${randomUUID().slice(0, 8)}`;
+      opts?.runId ?? `${this.config.invokeIdPrefix ?? wf.name}-${randomUUID().slice(0, 8)}`;
 
     // A retried run keeps its first input; replay reads the journal.
     const existing = await this.config.runner.storage.loadWorkflow(workflowId);
@@ -922,21 +989,10 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
         input: existing.input,
       })) as AgentResult;
     }
-
-    // Context-mode retrievers search with the task before the run starts;
-    // the hits ride in the workflow input as a fenced reference-data
-    // message right before the task, so a replay sees the same context
-    // without searching again.
-    const knowledge = await buildRetrieverContext({
-      retrievers: this.config.retrievers,
-      query: input.task,
-    });
-    const messages: Message[] = [...(input.messages ?? [])];
-    if (knowledge) messages.push(referenceDataMessage(knowledge));
     return (await this.config.runner.run({
       workflow: wf,
       workflowId,
-      input: { task: frameTask(input), messages },
+      input: await this.turnInput(input),
     })) as AgentResult;
   }
 }
@@ -1109,9 +1165,24 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
         threadId: row.threadId,
         toolCallId: row.toolCallId,
       };
-      const wf = await this.deps.runner.storage.loadWorkflow(row.workflowId);
-      if (!wf || isTerminal(wf.status)) {
-        await this.closeEndedApproval(row);
+      // Judged by the ROOT turn: an approval carried up from a sub-agent
+      // names the child's run, which may end while the root goes on.
+      const { run, root } = await this.rowRuns(row);
+      if (!root || isTerminal(root.status)) {
+        await this.closeEndedApproval({ row, run });
+        continue;
+      }
+      if (run && isTerminal(run.status)) {
+        // The child ended under a live root. A root parked on that child is
+        // finished first; a root someone is running blocks this send.
+        if (root.status === "suspended") {
+          const after = await this.rerunRoot(root);
+          if (!after || isTerminal(after.status)) {
+            await this.closeEndedApproval({ row, run });
+            continue;
+          }
+        }
+        blocking.push(row);
         continue;
       }
       let current = row;
@@ -1153,8 +1224,68 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     if (blocking.length > 0) throw new ThreadAwaitingApprovalError(blocking);
   }
 
-  /** Close an approval whose turn ended or vanished without its decision. */
-  private async closeEndedApproval(row: PendingApproval): Promise<void> {
+  /**
+   * The run an approval row names and the root turn above it (through
+   * `parentWorkflowId`) — the same run for a turn's own approval. Null
+   * when the row's run is gone.
+   */
+  private async rowRuns(row: PendingApproval): Promise<{
+    run: WorkflowState | null;
+    root: WorkflowState | null;
+  }> {
+    const storage = this.deps.runner.storage;
+    const run = await storage.loadWorkflow(row.workflowId);
+    if (!run) return { run: null, root: null };
+    return { run, root: await rootRun({ storage, run }) };
+  }
+
+  /**
+   * Re-run a root turn parked on a sub-agent that ended, so it reads the
+   * child's outcome and goes on; its state afterwards. A root that
+   * suspends again or is driven elsewhere stays as it is.
+   */
+  private async rerunRoot(root: WorkflowState): Promise<WorkflowState | null> {
+    const { persona } = await this.loadContext();
+    try {
+      await this.runWorkflow({
+        workflowId: root.workflowId,
+        input: root.input as AgentRunInput,
+        persona,
+        capture: makeCapture(),
+      });
+      await this.afterTurn();
+    } catch {
+      // Suspended again, driven elsewhere, or failed: its state says which.
+    }
+    return this.deps.runner.storage.loadWorkflow(root.workflowId);
+  }
+
+  /** Close every open approval of the ended root turn `rootId` (siblings included). */
+  private async closeRowsOfRoot(rootId: string): Promise<void> {
+    for (const row of await this.pendingApprovals()) {
+      const { run, root } = await this.rowRuns(row);
+      if (root && root.workflowId !== rootId) continue;
+      if (root && !isTerminal(root.status)) continue;
+      await this.closeEndedApproval({ row, run });
+    }
+  }
+
+  /**
+   * Close an approval whose turn ended or vanished without its decision
+   * reaching it (rejected, when it was still pending), and cancel the
+   * sub-agent runs it was waiting in, when the root turn ended without
+   * them: nothing would ever drive them again.
+   */
+  private async closeEndedApproval(params: {
+    row: PendingApproval;
+    run?: WorkflowState | null;
+  }): Promise<void> {
+    const { row } = params;
+    const run = params.run === undefined ? null : params.run;
+    if (run && !isTerminal(run.status) && run.parentWorkflowId !== undefined) {
+      const top = await topLiveDescendant({ storage: this.deps.runner.storage, run });
+      await this.deps.runner.storage.cancelWorkflow({ workflowId: top.workflowId, cascade: true });
+    }
     const key = {
       namespaceId: row.namespaceId,
       threadId: row.threadId,
@@ -1215,7 +1346,18 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     if (!entry) throw new ApprovalNotFoundError(key);
     // The decision reached the turn already; the turn has moved on.
     if (entry.deliveredAt !== null) throw new ApprovalAlreadyDecidedError(entry);
-    const signalName = composeApprovalSignal(callId);
+    // An approval carried up from a sub-agent names the child's run and a
+    // call id scoped to it; the child waits on its own call id.
+    const signalName = composeApprovalSignal(
+      childToolCallId({ approvalId: callId, workflowId: entry.workflowId }),
+    );
+    // The root turn ended (cancelled, marked failed or done out of band)
+    // while this approval waited: nothing will consume a decision.
+    const { run: before, root: rootBefore } = await this.rowRuns(entry);
+    if (!rootBefore || isTerminal(rootBefore.status)) {
+      await this.closeEndedApproval({ row: entry, run: before });
+      throw new ApprovalNotFoundError(key);
+    }
 
     const wf = await this.awaitSignalWait({
       workflowId: entry.workflowId,
@@ -1224,7 +1366,12 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       pending: entry.status === "pending",
     });
     if (!wf) {
-      await this.closeEndedApproval(entry);
+      // The sub-agent run ended under a live root: let the root read its
+      // outcome (or block while someone else runs it), then close the row.
+      const root = await storage.loadWorkflow(rootBefore.workflowId);
+      if (root && root.status === "suspended") await this.rerunRoot(root);
+      else if (root && !isTerminal(root.status)) throw new ApprovalNotReadyError(key);
+      await this.closeEndedApproval({ row: entry, run: before });
       throw new ApprovalNotFoundError(key);
     }
 
@@ -1271,14 +1418,18 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       });
     }
 
-    // Rebuild the workflow definition and re-run it on its persisted
-    // input; replay reads every recorded activity from the journal.
+    // Rebuild the turn's workflow definition and re-run it on its persisted
+    // input; replay reads every recorded activity from the journal. For an
+    // approval of a sub-agent that is the ROOT turn: its replay re-attaches
+    // to the child (and the child to its own children), which consumes the
+    // decision, so the whole chain finishes and the root commits once.
+    const turn = await rootRun({ storage, run: wf });
     const { persona } = await this.loadContext();
     let result: AgentResult;
     try {
       result = await this.runWorkflow({
-        workflowId: entry.workflowId,
-        input: wf.input as AgentRunInput,
+        workflowId: turn.workflowId,
+        input: turn.input as AgentRunInput,
         persona,
         capture,
       });
@@ -1291,12 +1442,18 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       // this signal and the row stays open, so the next resume or send
       // delivers it again instead of orphaning the turn.
       const after = await storage.loadWorkflow(entry.workflowId).catch(() => undefined);
-      if (!after || isTerminal(after.status) || !waitingStep({ wf: after, signalName })) {
+      const rootAfter = await storage.loadWorkflow(turn.workflowId).catch(() => undefined);
+      if (rootAfter && isTerminal(rootAfter.status)) {
+        await this.closeRowsOfRoot(turn.workflowId);
+      } else if (!after || isTerminal(after.status) || !waitingStep({ wf: after, signalName })) {
         await this.deps.approvals.markDelivered(key);
       }
       throw err;
     }
     await this.deps.approvals.markDelivered(key);
+    // Sibling approvals of the same root (parallel sub-agents, a concurrent
+    // resume that lost the race) are settled with it.
+    await this.closeRowsOfRoot(turn.workflowId);
     await this.afterTurn();
     return result;
   }
@@ -1479,9 +1636,17 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     this.inMemoryMessages.push(...messages);
   }
 
-  /** Records each approval a turn suspends on in the pending-approval index. */
+  /**
+   * Records each approval a turn — or a sub-agent it delegated to — suspends
+   * on in the pending-approval index, under this thread.
+   */
   private approvalIndex(): TurnApprovalIndex {
     return {
+      thread: {
+        namespaceId: this.deps.key.namespaceId,
+        threadId: this.deps.key.threadId,
+        agentId: this.deps.agentId,
+      },
       requested: async ({ workflowId, call }) => {
         await this.deps.approvals.record({
           namespaceId: this.deps.key.namespaceId,
@@ -1830,6 +1995,45 @@ const RESUME_POLL_MS = 25;
 
 function isTerminal(status: WorkflowStatus): boolean {
   return status === "completed" || status === "failed" || status === "tripwire";
+}
+
+/**
+ * The highest run above `run` (itself included) still in flight below its
+ * ended root — cancelling it with cascade stops every orphaned sub-agent
+ * of the chain.
+ */
+async function topLiveDescendant(params: {
+  storage: WorkflowRunner["storage"];
+  run: WorkflowState;
+}): Promise<WorkflowState> {
+  let current = params.run;
+  const seen = new Set<string>([current.workflowId]);
+  while (current.parentWorkflowId !== undefined && !seen.has(current.parentWorkflowId)) {
+    const parent = await params.storage.loadWorkflow(current.parentWorkflowId);
+    if (!parent || isTerminal(parent.status)) break;
+    seen.add(parent.workflowId);
+    current = parent;
+  }
+  return current;
+}
+
+/**
+ * The top of `run`'s delegation chain: the run itself, or the turn that
+ * (through its sub-agents) started it, found through `parentWorkflowId`.
+ */
+async function rootRun(params: {
+  storage: WorkflowRunner["storage"];
+  run: WorkflowState;
+}): Promise<WorkflowState> {
+  let current = params.run;
+  const seen = new Set<string>([current.workflowId]);
+  while (current.parentWorkflowId !== undefined && !seen.has(current.parentWorkflowId)) {
+    const parent = await params.storage.loadWorkflow(current.parentWorkflowId);
+    if (!parent) break;
+    seen.add(parent.workflowId);
+    current = parent;
+  }
+  return current;
 }
 
 /** The step of `wf` suspended on `signalName`, if any. */

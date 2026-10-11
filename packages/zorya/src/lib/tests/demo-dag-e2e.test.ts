@@ -222,7 +222,7 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
       expect((body.issues ?? []).length).toBeGreaterThan(0);
     });
 
-    it("POST /api/dags/:id/run executes a 1-node echo DAG end-to-end", async () => {
+    it("POST /api/dags/:id/run starts a 1-node echo DAG run that completes", async () => {
       const dagId = `e2e-run-${Date.now()}`;
       const create = await fetch(`${baseUrl}/api/dags`, {
         method: "POST",
@@ -253,14 +253,19 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
           initialInput: { topic: "hello dag" },
         }),
       });
-      expect(run.status).toBe(200);
-      const body = (await run.json()) as {
-        workflowId: string;
-        result: { ok: boolean; outputs: Record<string, unknown> };
+      // The run starts in the background; follow it like any other run.
+      expect(run.status).toBe(202);
+      const { workflowId } = (await run.json()) as { workflowId: string };
+      let ended: { status: string; result?: { ok: boolean; outputs: Record<string, unknown> } } = {
+        status: "pending",
       };
-      expect(body.workflowId).toContain(dagId);
-      expect(body.result.ok).toBe(true);
-      const echoOutput = String(body.result.outputs["echo"] ?? "");
+      for (let i = 0; i < 200 && ended.status !== "completed" && ended.status !== "failed"; i++) {
+        await Bun.sleep(50);
+        ended = (await (await fetch(`${baseUrl}/api/runs/${workflowId}`)).json()) as typeof ended;
+      }
+      expect(ended.status).toBe("completed");
+      expect(ended.result?.ok).toBe(true);
+      const echoOutput = String(ended.result?.outputs["echo"] ?? "");
       // demo.ts's echo-bot template: "echo-bot says: I heard '{task}' (turn #{n})"
       expect(echoOutput).toContain("echo-bot says");
       expect(echoOutput).toContain("hello dag");

@@ -100,7 +100,7 @@ export async function bootAgents(opts: HarnessOpts = {}) {
     ...(opts.authorizeScope && { authorizeScope: opts.authorizeScope }),
   });
   const dags = opts.dags
-    ? new ZoryaDags({ registry: new InMemoryDagRegistry({ clock }), runner, agents })
+    ? new ZoryaDags({ registry: new InMemoryDagRegistry({ clock }), workflows, agents })
     : undefined;
   const server = new ZoryaServer({
     insecure: true,
@@ -120,6 +120,7 @@ export async function bootAgents(opts: HarnessOpts = {}) {
     roles,
     secrets,
     dags,
+    workflows,
     leaseStore,
     clock,
     storage,

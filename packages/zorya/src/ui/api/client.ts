@@ -953,8 +953,8 @@ export const api = {
       initialInput?: Record<string, unknown>;
       workflowId?: string;
     },
-  ): Promise<DagRunResultDto> {
-    return req<DagRunResultDto>(`/api/dags/${encodeURIComponent(id)}/run`, {
+  ): Promise<DagRunStartedDto> {
+    return req<DagRunStartedDto>(`/api/dags/${encodeURIComponent(id)}/run`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -1258,6 +1258,13 @@ export interface DagDto {
   updatedAt: number;
 }
 
+/** Answer of POST /api/dags/:id/run: the run it started (or found under `workflowId`). */
+export interface DagRunStartedDto {
+  workflowId: string;
+  existing?: boolean;
+}
+
+/** A finished DAG run: its id and the DAG workflow's result. */
 export interface DagRunResultDto {
   workflowId: string;
   result: {

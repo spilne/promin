@@ -724,14 +724,11 @@ async function resolveAgent(
       maxEpisodeTokens: 4_000,
     },
     // Agents-network wiring: gives recipes that declared backend.network
-    // access to findAgent + callAgent. Recursive — callees use the same
-    // resolver so the chain stays in lockstep with the host's config.
+    // access to findAgent + callAgent. Recursive — callees resolve through
+    // this same function (roles, credentials) for the scope they run in,
+    // and each callAgent call runs the callee's turn as a child run.
     network: {
       registry: agentRegistry,
-      // resolveAgent is async (it loads roles and credentials from the
-      // registries) but network.resolve is sync; network.resolve must become
-      // async to accept it.
-      // @ts-expect-error network.resolve must become async
       resolve: resolveAgent,
       instanceRegistry,
     },
@@ -1301,7 +1298,7 @@ await dagRegistry.register(researchSynthesisRecipe);
 // DAG nodes resolve through the agents service, so DAG runs share the same
 // credential / tool / memory machinery (and scope checks) as direct chat
 // invocations.
-const dags = new ZoryaDags({ registry: dagRegistry, runner, agents });
+const dags = new ZoryaDags({ registry: dagRegistry, workflows, agents });
 
 console.log(
   `[zorya] DAG registered: ${researchSynthesisRecipe.id}@${researchSynthesisRecipe.version ?? "v1"} ` +
