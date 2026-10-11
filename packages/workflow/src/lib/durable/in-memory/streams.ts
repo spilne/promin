@@ -12,6 +12,8 @@ function streamKey(params: { workflowId: string; streamId: string }): string {
 export class InMemoryStreams {
   /** Chunks keyed by `streamKey`, in `chunkIndex` order. */
   private readonly chunks = new Map<string, StreamChunk[]>();
+  /** `chunkIndex` by `streamKey` + chunk id, for repeated appends. */
+  private readonly byChunkId = new Map<string, number>();
 
   constructor(private readonly clock: WallClock) {}
 
@@ -21,10 +23,15 @@ export class InMemoryStreams {
     streamId: string;
     payload: unknown;
     appendedBy: "workflow" | "external";
+    chunkId?: string;
   }): { chunkIndex: number } {
     const key = streamKey(params);
+    const idKey = params.chunkId !== undefined ? `${key}::${params.chunkId}` : undefined;
+    const seen = idKey !== undefined ? this.byChunkId.get(idKey) : undefined;
+    if (seen !== undefined) return { chunkIndex: seen };
     const existing = this.chunks.get(key) ?? [];
     const chunkIndex = existing.length;
+    if (idKey !== undefined) this.byChunkId.set(idKey, chunkIndex);
     existing.push({
       chunkIndex,
       payload: params.payload,
@@ -48,9 +55,13 @@ export class InMemoryStreams {
     for (const key of this.chunks.keys()) {
       if (key.startsWith(prefix)) this.chunks.delete(key);
     }
+    for (const key of this.byChunkId.keys()) {
+      if (key.startsWith(prefix)) this.byChunkId.delete(key);
+    }
   }
 
   clear(): void {
     this.chunks.clear();
+    this.byChunkId.clear();
   }
 }

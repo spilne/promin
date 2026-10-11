@@ -46,6 +46,8 @@ import type {
   JournalStore,
   ListDueTimersParams,
   ListOrphanedRunsParams,
+  ListChildEndedWaitsParams,
+  ChildEndedWaits,
   ListSignalWakeupsParams,
   ListWorkflowsParams,
   LoadJournalParams,
@@ -83,6 +85,7 @@ import type {
   WorkflowWakeup,
 } from "./workflow-storage.ts";
 import { applyMetadataPatch } from "./storage/metadata.ts";
+import { CHILD_ENDED_SIGNAL_PREFIX } from "./child-wake.ts";
 import { sortWorkflowRows } from "./storage/ordering.ts";
 import {
   CANCELLED_ERROR,
@@ -131,7 +134,10 @@ export class InMemoryWorkflowStorage
   private readonly streams: InMemoryStreams;
   private readonly events = new InMemoryRunEvents();
   private signals = new Map<string, SignalState[]>();
-  private attempts = new Map<string, StepAttemptRecord[]>();
+  private attempts = new Map<
+    string,
+    Array<{ key: string; run: number; record: StepAttemptRecord }>
+  >();
   private runHistory = new Map<string, WorkflowRunSummary[]>();
   /** Workflow id by `idempotencyIndexKey`, for the run that last claimed the key. */
   private idempotencyIndex = new Map<string, string>();
@@ -525,10 +531,11 @@ export class InMemoryWorkflowStorage
     wf.updatedAt = this.clock.now();
   }
 
-  async startFreshRun({ workflowId, guard }: StartFreshRunParams): Promise<number> {
+  async startFreshRun({ workflowId, guard, expectedRun }: StartFreshRunParams): Promise<number> {
     this.checkFence({ workflowId, guard });
     const wf = this.workflows.get(workflowId);
     if (!wf) throw new Error(`Workflow ${workflowId} not found`);
+    if (expectedRun !== undefined && wf.run !== expectedRun) return wf.run;
 
     // Archive the current run.
     const runs = this.runHistory.get(workflowId) ?? [];
@@ -824,6 +831,30 @@ export class InMemoryWorkflowStorage
     });
   }
 
+  async listChildEndedWaits(params: ListChildEndedWaitsParams): Promise<ChildEndedWaits[]> {
+    return this.scanWorkflows<ChildEndedWaits>({
+      limit: params.limit,
+      afterWorkflowId: params.afterWorkflowId,
+      pick: (wf) => {
+        if (wf.status !== "suspended") return undefined;
+        const delivered = this.signals.get(wf.workflowId) ?? [];
+        const waits: Array<{ stepName: string; signalName: string }> = [];
+        for (const step of stepsByName(wf)) {
+          const name = step.signalName;
+          if (
+            step.status !== "waiting_for_signal" ||
+            !name?.startsWith(CHILD_ENDED_SIGNAL_PREFIX)
+          ) {
+            continue;
+          }
+          if (delivered.some((s) => s.signalName === name)) continue;
+          waits.push({ stepName: step.stepName, signalName: name });
+        }
+        return waits.length > 0 ? { workflowId: wf.workflowId, waits } : undefined;
+      },
+    });
+  }
+
   async listOrphanedRuns(params: ListOrphanedRunsParams): Promise<OrphanedRun[]> {
     const nowMs = params.now.getTime();
     const beforeMs = params.updatedBefore.getTime();
@@ -883,8 +914,9 @@ export class InMemoryWorkflowStorage
 
   async completeSignalToken(params: CompleteSignalTokenParams): Promise<CompleteSignalTokenResult> {
     // One synchronous block: the claim and the delivery land together.
+    const before = this.signalTokens.findById(params.tokenId);
     const result = this.signalTokens.markCompleted(params);
-    if (result.outcome === "delivered") {
+    if (result.outcome === "delivered" && before?.completedAt === null) {
       this.putSignal({
         workflowId: result.record.workflowId,
         signalName: result.record.signalName,
@@ -940,9 +972,18 @@ export class InMemoryWorkflowStorage
     this.appendAttempt(record);
   }
 
+  /**
+   * Upsert an attempt row of the run's current number: a retried write
+   * replaces itself, and a rerun or continue-as-new keeps earlier runs'
+   * rows apart (the key the networked stores use).
+   */
   private appendAttempt(record: StepAttemptRecord): void {
+    const run = this.workflows.get(record.workflowId)?.run ?? 1;
+    const key = `${run}|${record.attempt}|${record.type}|${record.stepName}`;
     const existing = this.attempts.get(record.workflowId) ?? [];
-    existing.push(record);
+    const at = existing.findIndex((e) => e.key === key);
+    if (at >= 0) existing[at] = { key, run, record };
+    else existing.push({ key, run, record });
     this.attempts.set(record.workflowId, existing);
   }
 
@@ -950,7 +991,7 @@ export class InMemoryWorkflowStorage
     workflowId,
     stepName,
   }: LoadStepAttemptsParams): Promise<StepAttemptRecord[]> {
-    const all = this.attempts.get(workflowId) ?? [];
+    const all = (this.attempts.get(workflowId) ?? []).map((e) => e.record);
     return stepName ? all.filter((a) => a.stepName === stepName) : all;
   }
 

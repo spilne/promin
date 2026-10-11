@@ -170,7 +170,8 @@ describe("subworkflow steps under the distributed runner", () => {
       [gated.name, gated],
       [gatedParent.name, gatedParent],
     ]);
-    const resolveWorkflow = (name: string) => definitions.get(name) as never;
+    const resolveWorkflow = ({ workflowName: name }: { workflowName: string }) =>
+      definitions.get(name) as never;
     const sleepScanner = createSleepScanner({
       storage,
       runner,

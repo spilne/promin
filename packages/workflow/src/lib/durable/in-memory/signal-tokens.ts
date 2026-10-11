@@ -9,6 +9,7 @@ import type {
   SignalTokenRecord,
 } from "../storage/signal-store.ts";
 import type { WallClock } from "../../shared/wall-clock.ts";
+import { sameSignalTokenCreate, sameStoredValue } from "../storage/same-value.ts";
 
 interface MutableSignalToken {
   tokenId: string;
@@ -46,6 +47,13 @@ export class InMemorySignalTokens {
   constructor(private readonly clock: WallClock) {}
 
   create(params: CreateSignalTokenParams): { record: SignalTokenRecord; isCached: boolean } {
+    const taken = this.tokens.get(params.tokenId);
+    if (taken) {
+      if (sameSignalTokenCreate({ existing: taken, requested: params })) {
+        return { record: snapshot(taken), isCached: false };
+      }
+      throw new Error(`createSignalToken: token id ${params.tokenId} already exists`);
+    }
     if (params.idempotencyKey) {
       for (const t of this.tokens.values()) {
         if (t.workflowId === params.workflowId && t.idempotencyKey === params.idempotencyKey) {
@@ -80,7 +88,9 @@ export class InMemorySignalTokens {
       throw new Error(`signal token ${params.tokenId} not found`);
     }
     if (t.completedAt !== null) {
-      return { outcome: "already_completed", record: snapshot(t) };
+      // A repeat of the completion that won answers like the first call.
+      const again = sameStoredValue({ stored: t.completedValue, requested: params.value });
+      return { outcome: again ? "delivered" : "already_completed", record: snapshot(t) };
     }
     t.completedAt = params.now;
     t.completedValue = params.value;

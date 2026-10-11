@@ -13,3 +13,4 @@ export { createWorkerApiHandler } from "./lib/index.ts";
 export { type WorkerMethod, type WorkerRpcRequest, type WorkerRpcResponse } from "./lib/index.ts";
 export { RemoteStepQueue, type RemoteStepQueueConfig } from "./lib/index.ts";
 export { RemoteWorkerRegistry, type RemoteWorkerRegistryConfig } from "./lib/index.ts";
+export { isRetrySafeStorageCall, isRetrySafeWorkerCall } from "./lib/index.ts";

@@ -10,6 +10,13 @@ export interface TryLockParams {
   readonly workflowId: string;
   /** Lease length; the lock expires this long after the acquire. */
   readonly lockDurationMs: number;
+  /**
+   * An id for this acquire attempt. A repeat of the call with the same id
+   * while the lock it took is still held answers `acquired: true` with that
+   * lock's token, so a retry of a call whose answer was lost doesn't lock
+   * its own caller out. Remote storage clients stamp one on every call.
+   */
+  readonly attemptId?: string;
 }
 
 /** Answer of `tryLock`. */

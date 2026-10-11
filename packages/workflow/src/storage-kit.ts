@@ -24,6 +24,7 @@ export {
 } from "./lib/durable/workflow-state.ts";
 export { JOURNAL_STEP_TYPES } from "./lib/durable/activity-journal.ts";
 export { workflowMetadataMatches, applyMetadataPatch } from "./lib/durable/storage/metadata.ts";
+export { sameStoredValue, sameSignalTokenCreate } from "./lib/durable/storage/same-value.ts";
 export {
   sortWorkflowRows,
   workflowSortKey,

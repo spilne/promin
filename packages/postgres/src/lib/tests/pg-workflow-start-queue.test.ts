@@ -6,7 +6,6 @@
 
 import { beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { sql } from "drizzle-orm";
-import { FakeWallClock } from "@promin/workflow";
 import {
   workflowStartQueueTestSuite,
   type WorkflowStartQueueSuiteFactoryParams,
@@ -23,13 +22,11 @@ postgresDescribe("PgWorkflowStartQueue conformance", (pg) => {
   });
 
   const factory = async (params: WorkflowStartQueueSuiteFactoryParams) =>
-    new PgWorkflowStartQueue({
-      db: pg.db,
-      clock: params.clock,
-      reclaimAfterMs: params.reclaimAfterMs,
-    });
+    new PgWorkflowStartQueue({ db: pg.db, reclaimAfterMs: params.reclaimAfterMs });
 
-  workflowStartQueueTestSuite(factory);
+  // Claims are stamped and expired on the database clock (NOW()): the
+  // FakeWallClock-driven cases are covered against real time below.
+  workflowStartQueueTestSuite(factory, { serverClock: true });
 
   describe("PgWorkflowStartQueue — Pg-specific", () => {
     it("100 concurrent claims race for 100 starts → exactly 100 claims, no double-claims (SKIP LOCKED)", async () => {
@@ -175,32 +172,85 @@ postgresDescribe("PgWorkflowStartQueue conformance", (pg) => {
       expect(remaining).toHaveLength(0);
     });
 
-    it("stale claims drop back to pending after reclaimAfterMs and another worker can pick them up", async () => {
-      const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
-      const q = new PgWorkflowStartQueue({ db: pg.db, reclaimAfterMs: 50, clock });
-      await q.ensureTable();
-      await q.enqueue({ workflowId: "stuck-1", workflowName: "wf", input: {} });
+    it("an enqueue racing the claimant's complete never loses the run", async () => {
+      // The enqueue lands while the run is claimed (requeue mark, then the
+      // complete flips it back to pending) or after the complete deleted
+      // it (a fresh record). Either way exactly one pending start remains;
+      // neither interleaving may leave the run unqueued.
+      const q = new PgWorkflowStartQueue({ db: pg.db });
+      const runs = 40;
+      for (let round = 0; round < 5; round++) {
+        await pg.db.execute(sql`TRUNCATE TABLE wf_workflow_starts`);
+        const ids = Array.from({ length: runs }, (_, i) => `race-${round}-${i}`);
+        const refs = await Promise.all(
+          ids.map(async (workflowId) => {
+            await q.enqueue({ workflowId, workflowName: workflowId, input: {} });
+            const [rec] = await q.claim({
+              workflowSpecs: [{ name: workflowId, versions: [] }],
+              limit: 1,
+            });
+            return { id: rec!.id, claimToken: rec!.claimToken! };
+          }),
+        );
+        await Promise.all(
+          ids.flatMap((workflowId, i) => [
+            q.complete(refs[i]!),
+            q.enqueue({ workflowId, workflowName: workflowId, input: {} }),
+          ]),
+        );
+        const left = await q.list();
+        expect(left.map((r) => r.workflowId).sort()).toEqual([...ids].sort());
+        for (const rec of left) {
+          expect(rec.claimToken).toBeUndefined();
+          expect(rec.requeued ?? false).toBe(false);
+        }
+      }
+    });
 
-      // Worker A claims, then "dies" (never calls complete).
-      const firstClaim = await q.claim({
+    // These are about the database clock, so they use real time.
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    it("stale claims drop back to pending after reclaimAfterMs (database clock)", async () => {
+      const q = new PgWorkflowStartQueue({ db: pg.db, reclaimAfterMs: 300 });
+      await q.enqueue({ workflowId: "stuck-1", workflowName: "wf", input: {} });
+      const [first] = await q.claim({
         workflowSpecs: [{ name: "wf", versions: [] }],
         workerId: "worker-a",
         limit: 1,
       });
-      expect(firstClaim).toHaveLength(1);
-
-      // Move past the reclaim window.
-      clock.advance(80);
-
-      // Worker B re-claims the stale row.
-      const secondClaim = await q.claim({
+      expect(first).toBeDefined();
+      await sleep(400);
+      const ref = { id: first!.id, claimToken: first!.claimToken! };
+      expect(await q.heartbeat(ref)).toBe(false);
+      const [second] = await q.claim({
         workflowSpecs: [{ name: "wf", versions: [] }],
         workerId: "worker-b",
         limit: 1,
       });
-      expect(secondClaim).toHaveLength(1);
-      expect(secondClaim[0]!.id).toBe(firstClaim[0]!.id);
-      expect(secondClaim[0]!.claimedBy).toBe("worker-b");
+      expect(second?.id).toBe(first!.id);
+      expect(second?.claimedBy).toBe("worker-b");
+      expect(await q.complete(ref)).toBe(false);
+    });
+
+    it("a heartbeat keeps a claim past the window; release with a delay hides it until due", async () => {
+      const q = new PgWorkflowStartQueue({ db: pg.db, reclaimAfterMs: 400 });
+      await q.enqueue({ workflowId: "hb-1", workflowName: "wf", input: {} });
+      const specs = [{ name: "wf", versions: [] as string[] }];
+      const [rec] = await q.claim({ workflowSpecs: specs, limit: 1 });
+      const ref = { id: rec!.id, claimToken: rec!.claimToken! };
+      for (let i = 0; i < 4; i++) {
+        await sleep(150);
+        expect(await q.heartbeat(ref)).toBe(true);
+      }
+      expect(await q.claim({ workflowSpecs: specs, limit: 1 })).toHaveLength(0);
+
+      expect(await q.release({ ...ref, delayMs: 300 })).toBe(true);
+      const listed = (await q.list())[0]!;
+      expect(listed.claimToken).toBeUndefined();
+      expect(listed.availableAt).toBeGreaterThan(listed.enqueuedAt);
+      expect(await q.claim({ workflowSpecs: specs, limit: 1 })).toHaveLength(0);
+      await sleep(400);
+      expect(await q.claim({ workflowSpecs: specs, limit: 1 })).toHaveLength(1);
     });
   });
 });

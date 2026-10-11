@@ -150,6 +150,9 @@ describe("recover()", () => {
       cancelWorkflow: async () => {
         cancels++;
       },
+      // Nobody drives these runs: every lock is free.
+      tryLock: async () => ({ acquired: true, token: "t" }),
+      releaseLock: async () => {},
     } as unknown as WorkflowStorage;
 
     const result = await recoverWorkflows({

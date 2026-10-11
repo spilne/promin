@@ -102,8 +102,14 @@ import {
   decodeRunSource,
   withoutCompensationLedger,
 } from "@promin/workflow/storage-kit";
-import { applyMetadataPatch, sortWorkflowRows } from "@promin/workflow/storage-kit";
+import {
+  applyMetadataPatch,
+  sameSignalTokenCreate,
+  sameStoredValue,
+  sortWorkflowRows,
+} from "@promin/workflow/storage-kit";
 import type { RedisStoreClient } from "./redis-client.ts";
+import { CHILD_ENDED_SIGNAL_PREFIX } from "@promin/workflow/storage-kit";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { RedisWorkflowKeys } from "./redis-workflow-keys.ts";
 import {
@@ -123,6 +129,8 @@ import {
   INTER_CARD_LUA,
   LOAD_RUN_LUA,
   LRANGE_ALL_LUA,
+  SAVE_ATTEMPT_LUA,
+  APPEND_STREAM_CHUNK_LUA,
   PTTL_LUA,
   PURGE_WORKFLOW_LUA,
   READ_FOR_WRITE_LUA,
@@ -159,6 +167,8 @@ export interface RedisWorkflowStorageConfig {
 // Fenced variants of every script a lock holder writes through.
 const FENCED_CHECK_LUA = fencedLua("return 1");
 const FENCED_CHECKPOINT_STEP_LUA = fencedLua(CHECKPOINT_STEP_LUA);
+const FENCED_SAVE_ATTEMPT_LUA = fencedLua(SAVE_ATTEMPT_LUA);
+const FENCED_APPEND_STREAM_CHUNK_LUA = fencedLua(APPEND_STREAM_CHUNK_LUA);
 const FENCED_TRANSITION_STATUS_LUA = fencedLua(TRANSITION_STATUS_LUA);
 const FENCED_HASH_FIELD_CAS_LUA = fencedLua(HASH_FIELD_CAS_LUA);
 const FENCED_START_FRESH_RUN_LUA = fencedLua(START_FRESH_RUN_LUA);
@@ -1198,7 +1208,10 @@ export class RedisWorkflowStorage
     const now = this.clock.now();
     const nowIso = this.serializeDate(now);
     const wfKey = this.keys.wf(workflowId);
-    const attempts = checkpoint.attempts.map((record) => this.serializeAttempt(record));
+    const attempts = checkpoint.attempts.flatMap((record) => [
+      attemptFieldSuffix(record),
+      this.serializeAttempt(record),
+    ]);
     let expected: string | null = null;
     for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
       const existing: Partial<StepState> = expected === null ? {} : JSON.parse(expected);
@@ -1533,6 +1546,13 @@ export class RedisWorkflowStorage
     idempotencyKey?: string | null;
     expiresAt: Date;
   }): Promise<{ record: SignalTokenRecord; isCached: boolean }> {
+    const taken = await this.findSignalTokenById(params.tokenId);
+    if (taken) {
+      if (sameSignalTokenCreate({ existing: taken, requested: params })) {
+        return { record: taken, isCached: false };
+      }
+      throw new Error(`createSignalToken: token id ${params.tokenId} already exists`);
+    }
     const record: SignalTokenRecord = {
       tokenId: params.tokenId,
       workflowId: params.workflowId,
@@ -1587,7 +1607,9 @@ export class RedisWorkflowStorage
       if (!raw) throw new Error(`signal token ${params.tokenId} not found`);
       const current = deserializeSignalToken(raw);
       if (current.completedAt !== null) {
-        return { outcome: "already_completed", record: current };
+        // A repeat of the completion that won answers like the first call.
+        const again = sameStoredValue({ stored: current.completedValue, requested: params.value });
+        return { outcome: again ? "delivered" : "already_completed", record: current };
       }
       const updated: SignalTokenRecord = {
         ...current,
@@ -1626,24 +1648,26 @@ export class RedisWorkflowStorage
     guard,
     ...params
   }: AppendStreamChunkParams): Promise<{ chunkIndex: number }> {
-    const { last } = await this.writeOps({
+    const index = await this.evalFenced({
+      script: FENCED_APPEND_STREAM_CHUNK_LUA,
       workflowId: params.workflowId,
       guard,
-      ops: [
-        ["SADD", this.keys.streamIds(params.workflowId), params.streamId],
-        [
-          "RPUSH",
-          this.keys.stream(params.workflowId, params.streamId),
-          JSON.stringify({
-            payload: params.payload,
-            appendedBy: params.appendedBy,
-            appendedAt: this.serializeDate(this.clock.now()),
-          }),
-        ],
+      keys: [
+        this.keys.streamIds(params.workflowId),
+        this.keys.stream(params.workflowId, params.streamId),
+        this.keys.streamChunkIds(params.workflowId, params.streamId),
+      ],
+      args: [
+        params.streamId,
+        JSON.stringify({
+          payload: params.payload,
+          appendedBy: params.appendedBy,
+          appendedAt: this.serializeDate(this.clock.now()),
+        }),
+        params.chunkId ?? "",
       ],
     });
-    // RPUSH returns the new list length; chunkIndex is length - 1.
-    return { chunkIndex: Number(last) - 1 };
+    return { chunkIndex: Number(index) };
   }
 
   async readStreamChunks(params: {
@@ -1672,6 +1696,7 @@ export class RedisWorkflowStorage
   async tryLock({
     workflowId,
     lockDurationMs,
+    attemptId,
   }: TryLockParams): Promise<{ acquired: boolean; token?: string }> {
     const [acquired, token] = (await this.redis.eval(
       TRY_LOCK_LUA,
@@ -1680,6 +1705,7 @@ export class RedisWorkflowStorage
       this.keys.fence(workflowId),
       this.instanceId,
       lockDurationMs.toString(),
+      attemptId ?? "",
     )) as [number, string];
     if (acquired !== 1) return { acquired: false };
     return { acquired: true, token };
@@ -1688,6 +1714,7 @@ export class RedisWorkflowStorage
   async tryLockAndLoad({
     workflowId,
     lockDurationMs,
+    attemptId,
   }: TryLockParams): Promise<{ locked: boolean; token?: string; state: WorkflowState | null }> {
     // One script: the state is read as of the moment the lock was taken.
     const wfKey = this.keys.wf(workflowId);
@@ -1700,6 +1727,7 @@ export class RedisWorkflowStorage
       this.instanceId,
       lockDurationMs.toString(),
       wfKey,
+      attemptId ?? "",
     )) as [number, string, unknown];
     const state = await this.settledState({ workflowId, reply: load });
     return acquired === 1 ? { locked: true, token, state } : { locked: false, state };
@@ -1972,6 +2000,34 @@ export class RedisWorkflowStorage
     });
   }
 
+  async listChildEndedWaits(params: {
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<
+    Array<{ workflowId: string; waits: Array<{ stepName: string; signalName: string }> }>
+  > {
+    return this.scanStatusIndex({
+      statuses: ["suspended"],
+      limit: params.limit,
+      afterWorkflowId: params.afterWorkflowId,
+      pick: async (workflowId) => {
+        const loaded = await this.loadSuspended(workflowId);
+        if (!loaded) return undefined;
+        const parked = loaded.steps.filter(
+          (step) =>
+            step.status === "waiting_for_signal" &&
+            step.signalName?.startsWith(CHILD_ENDED_SIGNAL_PREFIX),
+        );
+        if (parked.length === 0) return undefined;
+        const signals = await this.redis.hgetall(this.keys.signals(workflowId));
+        const waits = parked
+          .filter((step) => signals?.[step.signalName!] === undefined)
+          .map((step) => ({ stepName: step.stepName, signalName: step.signalName! }));
+        return waits.length > 0 ? { workflowId, waits } : undefined;
+      },
+    });
+  }
+
   /**
    * Locks are keys with a server-side TTL, so a lock that expired is
    * already gone; a live lock counts as expired at `now` when its
@@ -2043,9 +2099,10 @@ export class RedisWorkflowStorage
     };
   }
 
-  async startFreshRun({ workflowId, guard }: StartFreshRunParams): Promise<number> {
+  async startFreshRun({ workflowId, guard, expectedRun }: StartFreshRunParams): Promise<number> {
     const state = await this.loadWorkflow(workflowId);
     if (!state) throw new Error(`Workflow ${workflowId} not found`);
+    if (expectedRun !== undefined && state.run !== expectedRun) return state.run;
     const summaryJson = JSON.stringify(this.currentRunSummary(state), (_, v) =>
       v instanceof Date ? v.toISOString() : v,
     );
@@ -2075,7 +2132,11 @@ export class RedisWorkflowStorage
     if (newRun === -1) {
       // A concurrent fresh run moved the counter between our read and the
       // script — start over against the new run.
-      return this.startFreshRun({ workflowId, guard });
+      return this.startFreshRun({
+        workflowId,
+        guard,
+        ...(expectedRun !== undefined && { expectedRun }),
+      });
     }
     await Promise.all([
       this.unscheduleSleeps({ workflowId, members: reply[1] ?? [] }),
@@ -2269,10 +2330,14 @@ export class RedisWorkflowStorage
   // -- StepAttemptStore ---------------------------------------------------
 
   async saveStepAttempt({ record, guard }: SaveStepAttemptParams): Promise<void> {
-    await this.writeOps({
+    // A hash field per (run, attempt, type, step): a retried write replaces
+    // itself, and a rerun or continue-as-new keeps earlier runs' rows apart.
+    await this.evalFenced({
+      script: FENCED_SAVE_ATTEMPT_LUA,
       workflowId: record.workflowId,
       guard,
-      ops: [["RPUSH", this.keys.attempts(record.workflowId), this.serializeAttempt(record)]],
+      keys: [this.keys.wf(record.workflowId), this.keys.attempts(record.workflowId)],
+      args: [attemptFieldSuffix(record), this.serializeAttempt(record)],
     });
   }
 
@@ -2288,18 +2353,30 @@ export class RedisWorkflowStorage
     workflowId,
     stepName,
   }: LoadStepAttemptsParams): Promise<StepAttemptRecord[]> {
-    const raw = (await this.redis.eval(LRANGE_ALL_LUA, 1, this.keys.attempts(workflowId))) as
-      | string[]
-      | null;
-    const items = (raw ?? []).map((json) => {
+    const raw = (await this.redis.hgetall(this.keys.attempts(workflowId))) as Record<
+      string,
+      string
+    >;
+    const items = Object.entries(raw ?? {}).map(([field, json]) => {
       const r = JSON.parse(json);
       return {
-        ...r,
-        startedAt: new Date(r.startedAt),
-        completedAt: new Date(r.completedAt),
-      } as StepAttemptRecord;
+        run: Number(field.slice(0, field.indexOf("|"))),
+        record: {
+          ...r,
+          startedAt: new Date(r.startedAt),
+          completedAt: new Date(r.completedAt),
+        } as StepAttemptRecord,
+      };
     });
-    return stepName ? items.filter((a) => a.stepName === stepName) : items;
+    items.sort(
+      (a, b) =>
+        a.record.stepName.localeCompare(b.record.stepName) ||
+        a.run - b.run ||
+        a.record.attempt - b.record.attempt ||
+        a.record.type.localeCompare(b.record.type),
+    );
+    const records = items.map((i) => i.record);
+    return stepName ? records.filter((a) => a.stepName === stepName) : records;
   }
 
   // -- CompensationLedgerStore --------------------------------------------
@@ -2496,9 +2573,11 @@ export class RedisWorkflowStorage
       );
     }
     if (Number(won) === 1) return { completed: true, exit: params.exit };
+    const stored = storedExit ? (JSON.parse(storedExit) as JournalExit) : undefined;
+    // A repeat of the winning completion reports what the first call did.
     return {
-      completed: false,
-      exit: storedExit ? (JSON.parse(storedExit) as JournalExit) : undefined,
+      completed: stored !== undefined && sameStoredValue({ stored, requested: params.exit }),
+      exit: stored,
     };
   }
 
@@ -2765,4 +2844,9 @@ function deserializeSignalToken(raw: string): SignalTokenRecord {
     completedValue: parsed.completedValue,
     createdAt: new Date(parsed.createdAt),
   };
+}
+
+/** Hash field of an attempt row after its run number: `<attempt>|<type>|<stepName>`. */
+function attemptFieldSuffix(record: StepAttemptRecord): string {
+  return `${record.attempt}|${record.type}|${record.stepName}`;
 }

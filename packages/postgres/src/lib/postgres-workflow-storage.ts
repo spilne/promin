@@ -71,6 +71,8 @@ import {
   CANCELLED_ERROR_TAG,
   encodeRunSource,
   decodeRunSource,
+  sameSignalTokenCreate,
+  sameStoredValue,
 } from "@promin/workflow/storage-kit";
 import {
   workflows,
@@ -97,6 +99,7 @@ import type { PostgresStorageConfig } from "./config.ts";
 import { resolveConfig } from "./config.ts";
 import { hashToInt32, type DrizzleDb } from "@spilne/perfect-postgres";
 import { execRaw } from "./exec-raw.ts";
+import { CHILD_ENDED_SIGNAL_PREFIX } from "@promin/workflow/storage-kit";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -850,9 +853,11 @@ export class PostgresWorkflowStorage
       attempts.length === 0
         ? sql``
         : sql`, attempts AS (
-            INSERT INTO wf_step_attempts (workflow_id, step_name, attempt, attempt_type_id,
+            INSERT INTO wf_step_attempts (workflow_id, step_name, run, attempt, attempt_type_id,
               status_id, result, error, duration_ms, started_at, completed_at, executor_id)
-            SELECT v.* FROM (VALUES ${sql.join(
+            SELECT v.workflow_id, v.step_name, wf.run, v.attempt, v.attempt_type_id, v.status_id,
+              v.result, v.error, v.duration_ms, v.started_at, v.completed_at, v.executor_id
+            FROM (VALUES ${sql.join(
               attempts.map(
                 (a) => sql`(${a.workflowId}::text, ${a.stepName}::text, ${a.attempt}::int,
                   ${AttemptTypeIds.toId(a.type)}::int,
@@ -862,8 +867,9 @@ export class PostgresWorkflowStorage
                   ${a.executorId ?? null}::text)`,
               ),
               sql`, `,
-            )}) AS v
-            WHERE EXISTS (SELECT 1 FROM wf)
+            )}) AS v(workflow_id, step_name, attempt, attempt_type_id, status_id, result, error,
+              duration_ms, started_at, completed_at, executor_id)
+            CROSS JOIN wf
             ON CONFLICT (workflow_id, step_name, run, attempt, attempt_type_id) DO UPDATE SET
               status_id = EXCLUDED.status_id, result = EXCLUDED.result, error = EXCLUDED.error,
               duration_ms = EXCLUDED.duration_ms, started_at = EXCLUDED.started_at,
@@ -1215,12 +1221,15 @@ export class PostgresWorkflowStorage
     signalName,
     payload,
   }: DeliverSignalParams & { db: DrizzleDb }): Promise<void> {
+    // A null payload (a child-ended wake-up carries none) is stored as JSON
+    // null: a bare null would be SQL NULL in the NOT NULL column.
+    const json = sql`${JSON.stringify(payload ?? null)}::jsonb`;
     await db
       .insert(workflowSignals)
-      .values({ workflowId, signalName, payload })
+      .values({ workflowId, signalName, payload: json })
       .onConflictDoUpdate({
         target: [workflowSignals.workflowId, workflowSignals.signalName],
-        set: { payload, deliveredAt: this.config.clock.now() },
+        set: { payload: json, deliveredAt: this.config.clock.now() },
       });
   }
 
@@ -1279,24 +1288,30 @@ export class PostgresWorkflowStorage
   async tryLock({
     workflowId,
     lockDurationMs,
+    attemptId,
   }: TryLockParams): Promise<{ acquired: boolean; token?: string }> {
     // Row locks live in wf_workflow_locks with a server-side lease expiry
     // and carry the bigserial fence_token, so they exclude every other
     // caller (any pool connection, any process) and fenced writes reject a
     // stale holder.
-    return this.tryRowLock(workflowId, lockDurationMs);
+    return this.tryRowLock({ workflowId, lockDurationMs, attemptId });
   }
 
   async tryLockAndLoad({
     workflowId,
     lockDurationMs,
+    attemptId,
   }: TryLockParams): Promise<{ locked: boolean; token?: string; state: WorkflowState | null }> {
     // Sequenced lock then load (not one transaction): collapses two HTTP
     // round-trips when this storage is fronted by the workflow-remote RPC.
     // The load can observe writes committed after the lock was taken —
     // good enough for the "are we joining an in-flight run?" question the
     // coordinator actually asks.
-    const { acquired, token } = await this.tryLock({ workflowId, lockDurationMs });
+    const { acquired, token } = await this.tryLock({
+      workflowId,
+      lockDurationMs,
+      ...(attemptId !== undefined && { attemptId }),
+    });
     const state = await this.loadWorkflow(workflowId);
     return { locked: acquired, token, state };
   }
@@ -1470,7 +1485,7 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async startFreshRun({ workflowId, guard }: StartFreshRunParams): Promise<number> {
+  async startFreshRun({ workflowId, guard, expectedRun }: StartFreshRunParams): Promise<number> {
     const now = this.config.clock.now();
     const token = this.fenceTokenOf(guard);
 
@@ -1486,6 +1501,7 @@ export class PostgresWorkflowStorage
         .where(eq(workflows.workflowId, workflowId))
         .for("update");
       if (!current) throw new Error(`Workflow ${workflowId} not found`);
+      if (expectedRun !== undefined && current.run !== expectedRun) return current.run;
 
       await tx
         .insert(workflowRuns)
@@ -1716,6 +1732,50 @@ export class PostgresWorkflowStorage
     }));
   }
 
+  async listChildEndedWaits(params: {
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<
+    Array<{ workflowId: string; waits: Array<{ stepName: string; signalName: string }> }>
+  > {
+    const after =
+      params.afterWorkflowId !== undefined
+        ? sql` AND s.workflow_id > ${params.afterWorkflowId}`
+        : sql``;
+    // Waiting steps (partial index on (workflow_id, signal_name)) under the
+    // reserved child-ended prefix, of the workflow's current, suspended run,
+    // with no signal delivered under the name. The first `limit` runs, then
+    // every such wait of each.
+    const waiting = sql`
+      FROM wf_workflow_steps s
+      JOIN wf_workflows w
+        ON w.workflow_id = s.workflow_id
+       AND w.run = s.run
+       AND w.status_id = ${WorkflowStatusIds.id.suspended}${this.namespaceScope()}
+      WHERE s.status_id = ${StepStatusIds.id.waiting_for_signal}
+        AND s.signal_name LIKE ${`${CHILD_ENDED_SIGNAL_PREFIX}%`}
+        AND NOT EXISTS (
+          SELECT 1 FROM wf_workflow_signals g
+          WHERE g.workflow_id = s.workflow_id AND g.signal_name = s.signal_name
+        )`;
+    const rows = await execRaw(
+      this.db,
+      sql`
+      WITH runs AS (
+        SELECT DISTINCT s.workflow_id ${waiting}${after}
+        ORDER BY s.workflow_id
+        LIMIT ${Math.max(0, Math.trunc(params.limit))}
+      )
+      SELECT s.workflow_id, s.step_name, s.signal_name ${waiting}
+        AND s.workflow_id IN (SELECT workflow_id FROM runs)
+      ORDER BY s.workflow_id, s.step_name
+    `,
+    );
+    return groupChildEndedWaits(
+      rows as Array<{ workflow_id: string; step_name: string; signal_name: string }>,
+    );
+  }
+
   /** Lock state comes from `wf_workflow_locks`. */
   async listOrphanedRuns(params: {
     now: Date;
@@ -1738,7 +1798,8 @@ export class PostgresWorkflowStorage
         AND NOT EXISTS (
           SELECT 1 FROM wf_workflow_locks l
           WHERE l.workflow_id = w.workflow_id
-            AND l.expires_at > ${params.now.toISOString()}::timestamptz
+            -- Lock expiry is the database's: every instance agrees on it.
+            AND l.expires_at > NOW()
         )
       ORDER BY w.workflow_id
       LIMIT ${Math.max(0, Math.trunc(params.limit))}
@@ -1907,10 +1968,22 @@ export class PostgresWorkflowStorage
     return ids.length;
   }
 
-  private async tryRowLock(
-    workflowId: string,
-    lockDurationMs: number,
-  ): Promise<{ acquired: boolean; token?: string }> {
+  private async tryRowLock(params: {
+    workflowId: string;
+    lockDurationMs: number;
+    attemptId: string | undefined;
+  }): Promise<{ acquired: boolean; token?: string }> {
+    const { workflowId, lockDurationMs, attemptId } = params;
+    // A repeat of an acquire that took the lock gets that lock back.
+    if (attemptId !== undefined) {
+      const [mine] = await execRaw(
+        this.db,
+        sql`SELECT fence_token::text AS token FROM wf_workflow_locks
+            WHERE workflow_id = ${workflowId} AND attempt_id = ${attemptId}
+              AND expires_at > NOW()`,
+      );
+      if (mine) return { acquired: true, token: String((mine as { token: string }).token) };
+    }
     // Timestamps come from the server clock (`NOW()`), never bound from the
     // client: every holder judges lease expiry against the same clock, and
     // there's no JS Date for the driver to choke on. On fresh insert the
@@ -1924,12 +1997,13 @@ export class PostgresWorkflowStorage
     const [result] = await execRaw(
       this.db,
       sql`
-      INSERT INTO wf_workflow_locks (workflow_id, locked_at, expires_at, locked_by)
-      VALUES (${workflowId}, NOW(), ${expiresAt}, ${this.config.instanceId})
+      INSERT INTO wf_workflow_locks (workflow_id, locked_at, expires_at, locked_by, attempt_id)
+      VALUES (${workflowId}, NOW(), ${expiresAt}, ${this.config.instanceId}, ${attemptId ?? null})
       ON CONFLICT (workflow_id) DO UPDATE
         SET locked_at = NOW(),
             expires_at = ${expiresAt},
             locked_by = ${this.config.instanceId},
+            attempt_id = EXCLUDED.attempt_id,
             fence_token = nextval(pg_get_serial_sequence('wf_workflow_locks', 'fence_token'))
         WHERE wf_workflow_locks.expires_at < NOW()
       RETURNING fence_token
@@ -1948,20 +2022,25 @@ export class PostgresWorkflowStorage
     await this.fenced({
       workflowId: record.workflowId,
       guard,
+      // Stamped with the run's current number and idempotent on
+      // (run, attempt, type): a retried write, a rerun, a resume or a
+      // continue-as-new never collides with an earlier attempt row.
       write: async (db) => {
-        await db.insert(stepAttempts).values({
-          workflowId: record.workflowId,
-          stepName: record.stepName,
-          attempt: record.attempt,
-          attemptTypeId: AttemptTypeIds.toId(record.type),
-          statusId: StepStatusIds.toId(record.status === "completed" ? "completed" : "failed"),
-          result: record.result,
-          error: record.error,
-          durationMs: record.durationMs,
-          startedAt: record.startedAt,
-          completedAt: record.completedAt,
-          executorId: record.executorId,
-        });
+        await db.execute(sql`
+          INSERT INTO wf_step_attempts (workflow_id, step_name, run, attempt, attempt_type_id,
+            status_id, result, error, duration_ms, started_at, completed_at, executor_id)
+          SELECT ${record.workflowId}::text, ${record.stepName}::text, w.run,
+            ${record.attempt}::int, ${AttemptTypeIds.toId(record.type)}::int,
+            ${StepStatusIds.toId(record.status === "completed" ? "completed" : "failed")}::int,
+            ${jsonbParam(record.result)}, ${record.error ?? null}::text,
+            ${record.durationMs}::bigint, ${timestampParam(record.startedAt)},
+            ${timestampParam(record.completedAt)}, ${record.executorId ?? null}::text
+          FROM wf_workflows w WHERE w.workflow_id = ${record.workflowId}
+          ON CONFLICT (workflow_id, step_name, run, attempt, attempt_type_id) DO UPDATE SET
+            status_id = EXCLUDED.status_id, result = EXCLUDED.result, error = EXCLUDED.error,
+            duration_ms = EXCLUDED.duration_ms, started_at = EXCLUDED.started_at,
+            completed_at = EXCLUDED.completed_at, executor_id = EXCLUDED.executor_id
+        `);
       },
     });
   }
@@ -1978,7 +2057,7 @@ export class PostgresWorkflowStorage
     } else {
       query.where(eq(stepAttempts.workflowId, workflowId));
     }
-    query.orderBy(stepAttempts.stepName, stepAttempts.attempt);
+    query.orderBy(stepAttempts.stepName, stepAttempts.run, stepAttempts.attempt);
 
     const rows = await query;
     return rows.map((r: any) => ({
@@ -2161,7 +2240,12 @@ export class PostgresWorkflowStorage
       .from(activityJournal)
       .where(slot)
       .limit(1);
-    return { completed: false, exit: (stored?.exit ?? undefined) as JournalExit | undefined };
+    const exit = (stored?.exit ?? undefined) as JournalExit | undefined;
+    // A repeat of the winning completion reports what the first call did.
+    return {
+      completed: exit !== undefined && sameStoredValue({ stored: exit, requested: params.exit }),
+      exit,
+    };
   }
 
   async discardJournalEntries({ guard, ...params }: DiscardJournalEntriesParams): Promise<void> {
@@ -2305,6 +2389,10 @@ export class PostgresWorkflowStorage
         .limit(1);
       if (winner) return { record: rowToSignalToken(winner), isCached: true };
     }
+    const taken = await this.findSignalTokenById(params.tokenId);
+    if (taken && sameSignalTokenCreate({ existing: taken, requested: params })) {
+      return { record: taken, isCached: false };
+    }
     throw new Error(`createSignalToken: token id ${params.tokenId} already exists`);
   }
 
@@ -2344,7 +2432,9 @@ export class PostgresWorkflowStorage
     if (!current) {
       throw new Error(`signal token ${params.tokenId} not found`);
     }
-    return { outcome: "already_completed", record: current };
+    // A repeat of the completion that won answers like the first call.
+    const again = sameStoredValue({ stored: current.completedValue, requested: params.value });
+    return { outcome: again ? "delivered" : "already_completed", record: current };
   }
 
   async listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>> {
@@ -2381,10 +2471,19 @@ export class PostgresWorkflowStorage
       await tx.execute(
         sql`SELECT pg_advisory_xact_lock(${hashToInt32(`wf_streams:${params.workflowId}:${params.streamId}`)})`,
       );
+      if (params.chunkId !== undefined) {
+        const seen = await execRaw(
+          tx as unknown as typeof this.db,
+          sql`SELECT chunk_index FROM wf_streams
+              WHERE workflow_id = ${params.workflowId} AND stream_id = ${params.streamId}
+                AND chunk_id = ${params.chunkId}`,
+        );
+        if (seen.length > 0) return seen;
+      }
       return execRaw(
         tx as unknown as typeof this.db,
         sql`
-        INSERT INTO wf_streams (workflow_id, stream_id, chunk_index, payload, appended_by)
+        INSERT INTO wf_streams (workflow_id, stream_id, chunk_index, payload, appended_by, chunk_id)
         VALUES (
           ${params.workflowId},
           ${params.streamId},
@@ -2394,7 +2493,8 @@ export class PostgresWorkflowStorage
             0
           ),
           ${JSON.stringify(params.payload)}::jsonb,
-          ${params.appendedBy}
+          ${params.appendedBy},
+          ${params.chunkId ?? null}
         )
         RETURNING chunk_index
       `,
@@ -2513,4 +2613,19 @@ function rowToSignalToken(row: {
     completedValue: row.completedValue,
     createdAt: row.createdAt,
   };
+}
+
+/** Rows of (workflowId, stepName, signalName), ordered by run, as one entry per run. */
+function groupChildEndedWaits(
+  rows: ReadonlyArray<{ workflow_id: string; step_name: string; signal_name: string }>,
+): Array<{ workflowId: string; waits: Array<{ stepName: string; signalName: string }> }> {
+  const out: Array<{ workflowId: string; waits: Array<{ stepName: string; signalName: string }> }> =
+    [];
+  for (const r of rows) {
+    const last = out[out.length - 1];
+    const wait = { stepName: r.step_name, signalName: r.signal_name };
+    if (last?.workflowId === r.workflow_id) last.waits.push(wait);
+    else out.push({ workflowId: r.workflow_id, waits: [wait] });
+  }
+  return out;
 }

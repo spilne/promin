@@ -63,9 +63,11 @@ describe("storage RPC envelope", () => {
     const { token } = await remote.tryLock({ workflowId: "wf", lockDurationMs: 60_000 });
     await remote.completeWorkflow({ workflowId: "wf", result: 7, guard: { fenceToken: token } });
 
+    // The client stamps an attempt id, so a resend gets the same lock back.
     expect(bodies.find((b) => b.method === "tryLock")?.params).toEqual({
       workflowId: "wf",
       lockDurationMs: 60_000,
+      attemptId: expect.any(String),
     });
     expect(bodies.find((b) => b.method === "completeWorkflow")?.params).toEqual({
       workflowId: "wf",

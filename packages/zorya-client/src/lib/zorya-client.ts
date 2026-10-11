@@ -1,17 +1,38 @@
 // ---------------------------------------------------------------------------
 // ZoryaClient — connects a worker process / admin tool to a remote Zorya
-// server. Wraps RemoteWorkflowStorage + RemoteStepQueue + RemoteWorkerRegistry
-// behind a single ergonomic object, and knows how to advertise workflow
-// definitions to the server on connect.
+// server. Wraps RemoteWorkflowStorage + RemoteWorkerRegistry behind a single
+// ergonomic object, knows how to advertise workflow definitions, and speaks
+// the start-queue worker protocol.
+//
+// Requests are retried, with capped backoff, while the server can't be
+// reached (connection refused) or answers that it is shutting down (503):
+// neither reached a route, so nothing was applied. A request whose
+// connection dropped mid-flight (the server died while answering) may have
+// been applied, so it is resent only when applying it twice is proven
+// harmless — durably, by the store's contract, not by a response cache:
+// storage calls per `isRetrySafeStorageCall` (`RemoteWorkflowStorage`
+// stamps the attempt / chunk ids that make locks and appends repeatable),
+// registry heartbeats, the start-queue protocol (claims carry a `claimId`),
+// advertisements, and triggers with a `workflowId` (fixed before sending).
+// A worker's writes therefore ride out a Zorya restart instead of failing
+// the run.
 // ---------------------------------------------------------------------------
 
-import type { Workflow, WorkflowStorage, WorkflowHandle, WorkflowRunner } from "@promin/workflow";
-import type { StepQueue, WorkerRegistry } from "@promin/workflow/distributed";
-import { createWorkflowRunner } from "@promin/workflow";
 import {
-  RemoteStepQueue,
+  SystemWallClock,
+  createWorkflowRunner,
+  type WallClock,
+  type Workflow,
+  type WorkflowHandle,
+  type WorkflowRunner,
+  type WorkflowStorage,
+} from "@promin/workflow";
+import type { WorkerRegistry } from "@promin/workflow/distributed";
+import {
   RemoteWorkerRegistry,
   RemoteWorkflowStorage,
+  isRetrySafeStorageCall,
+  isRetrySafeWorkerCall,
   type FetchLike,
 } from "@promin/workflow-remote";
 
@@ -36,6 +57,14 @@ export interface ZoryaClientConfig {
   operatorApiKey?: string;
   /** Custom fetch (for tests or in-process wiring). Defaults to globalThis.fetch. */
   fetch?: FetchLike;
+  /**
+   * Retry of requests cut off by a server outage (connection refused or
+   * dropped, 503 while shutting down). Default: up to 30 s in total, 100 ms
+   * doubling to 2 s between attempts. `{ maxElapsedMs: 0 }` disables it.
+   */
+  retry?: { maxElapsedMs?: number; initialDelayMs?: number; maxDelayMs?: number };
+  /** Time source for the retry backoff. Default: `SystemWallClock`. */
+  clock?: WallClock;
 }
 
 export class ZoryaClient {
@@ -47,7 +76,6 @@ export class ZoryaClient {
    */
   readonly apiKey?: string;
   readonly storage: WorkflowStorage;
-  readonly stepQueue: StepQueue;
   readonly workerRegistry: WorkerRegistry;
   private readonly fetch: FetchLike;
   private readonly headers: Record<string, string>;
@@ -61,7 +89,13 @@ export class ZoryaClient {
     const base = config.url.replace(/\/$/, "");
     this.url = base;
     this.apiKey = config.apiKey;
-    this.fetch = config.fetch ?? ((req) => globalThis.fetch(req));
+    this.fetch = retryingFetch({
+      fetch: config.fetch ?? ((req) => globalThis.fetch(req)),
+      clock: config.clock ?? SystemWallClock,
+      maxElapsedMs: config.retry?.maxElapsedMs ?? 30_000,
+      initialDelayMs: config.retry?.initialDelayMs ?? 100,
+      maxDelayMs: config.retry?.maxDelayMs ?? 2_000,
+    });
     this.headers = {
       "content-type": "application/json",
       ...(config.apiKey ? { authorization: `Bearer ${config.apiKey}` } : {}),
@@ -76,11 +110,6 @@ export class ZoryaClient {
       fetch: this.fetch,
       headers: this.headers,
     });
-    this.stepQueue = new RemoteStepQueue({
-      url: `${base}/rpc/worker`,
-      fetch: this.fetch,
-      headers: this.headers,
-    });
     this.workerRegistry = new RemoteWorkerRegistry({
       url: `${base}/rpc/worker`,
       fetch: this.fetch,
@@ -89,19 +118,19 @@ export class ZoryaClient {
   }
 
   /**
-   * Register this worker's workflow definitions with the server so they show
-   * up in the dashboard's Workflows page. Idempotent — re-calling replaces
-   * the prior advertisement for the same workerId.
+   * Advertise the workflow definitions (and versions) this worker hosts:
+   * the server routes starts by them and the dashboard's Workflows page
+   * lists them. Idempotent — re-calling replaces the prior advertisement
+   * for the same workerId and refreshes its TTL, so a worker re-advertises
+   * periodically. Pass every definition the worker can run (see
+   * `workflowClosure`).
    */
-  async advertise(
-    workerId: string,
-    workflows: ReadonlyArray<Workflow<unknown, unknown>>,
-    sampleInput?: (workflowName: string) => unknown,
-  ): Promise<void> {
-    // Advertise the primary definition for each workflow plus every
-    // previousVersions entry the worker can still serve. Without this the
-    // dashboard only sees the active version and the trigger modal's
-    // version dropdown is missing the old ones.
+  async advertise(params: {
+    workerId: string;
+    workflows: ReadonlyArray<Workflow<unknown, unknown>>;
+    sampleInput?: (workflowName: string) => unknown;
+  }): Promise<void> {
+    const { workerId, workflows, sampleInput } = params;
     const entries: Array<{
       name: string;
       version?: string;
@@ -122,10 +151,6 @@ export class ZoryaClient {
       entries.push({
         name: wf.name,
         version: wf.version,
-        // Forward `needs` / `priority` so the server can build a faithful
-        // stub workflow when running coordinator-driven step dispatch —
-        // without these the coordinator can't route dispatched tasks to
-        // capability-matched workers.
         steps: wf.dag.steps.map((s) => ({
           name: s.name,
           kind: s.kind,
@@ -136,10 +161,7 @@ export class ZoryaClient {
         sampleInput: sampleInput?.(wf.name),
       });
     };
-    for (const wf of workflows) {
-      add(wf);
-      for (const prev of wf._definition.previousVersions ?? []) add(prev);
-    }
+    for (const wf of workflows) add(wf);
     const body = { workerId, workflows: entries };
     const req = new Request(`${this.url}/api/advertisements`, {
       method: "POST",
@@ -234,11 +256,14 @@ export class ZoryaClient {
     },
   ): Promise<{ workflowId: string }> {
     // 202 when the run started, 200 when `workflowId` names an existing run
-    // of this workflow; either way the body names the run.
+    // of this workflow; either way the body names the run. The id is fixed
+    // here, before the request, so a retry of a request cut off mid-flight
+    // answers with the same run instead of starting a second one.
+    const workflowId = body.workflowId ?? crypto.randomUUID();
     const req = new Request(`${this.url}/api/workflows/${encodeURIComponent(name)}/runs`, {
       method: "POST",
       headers: this.operatorHeaders,
-      body: JSON.stringify({ ...body, runSource: "api" }),
+      body: JSON.stringify({ ...body, workflowId, runSource: "api" }),
     });
     const res = await this.fetch(req);
     const text = await res.text();
@@ -267,6 +292,8 @@ export class ZoryaClient {
         })),
         workerId: params.workerId,
         limit: params.limit ?? 10,
+        // A resend of this call (its answer lost) gets the same starts back.
+        claimId: crypto.randomUUID(),
       }),
     });
     const res = await this.fetch(req);
@@ -294,17 +321,34 @@ export class ZoryaClient {
     return this.postStartClaim({ action: "complete-start", ...params });
   }
 
-  private async postStartClaim(params: {
-    action: "heartbeat-start" | "complete-start";
+  /**
+   * Give a claimed workflow-start back without completing it: claimable
+   * again once `delayMs` has passed. Returns false when the claim token is
+   * stale.
+   */
+  async releaseWorkflowStart(params: {
     id: string;
     claimToken: string;
+    delayMs?: number;
+  }): Promise<boolean> {
+    return this.postStartClaim({ action: "release-start", ...params });
+  }
+
+  private async postStartClaim(params: {
+    action: "heartbeat-start" | "complete-start" | "release-start";
+    id: string;
+    claimToken: string;
+    delayMs?: number;
   }): Promise<boolean> {
     const req = new Request(
       `${this.url}/api/worker-protocol/${params.action}/${encodeURIComponent(params.id)}`,
       {
         method: "POST",
         headers: this.headers,
-        body: JSON.stringify({ claimToken: params.claimToken }),
+        body: JSON.stringify({
+          claimToken: params.claimToken,
+          ...(params.delayMs !== undefined && { delayMs: params.delayMs }),
+        }),
       },
     );
     const res = await this.fetch(req);
@@ -312,6 +356,111 @@ export class ZoryaClient {
     if (!res.ok) throw new Error(`${params.action} failed: ${res.status} ${text}`);
     const body = JSON.parse(text) as { ok?: boolean };
     return body.ok === true;
+  }
+}
+
+/**
+ * Wrap `fetch` so a request the server never handled — the connection was
+ * refused, or the server answered 503 while shutting down — is sent again
+ * with capped exponential backoff, for at most `maxElapsedMs` in total. A
+ * request cut off mid-flight is resent only when `isRetrySafeRequest`
+ * holds for it.
+ */
+function retryingFetch(params: {
+  fetch: FetchLike;
+  clock: WallClock;
+  maxElapsedMs: number;
+  initialDelayMs: number;
+  maxDelayMs: number;
+}): FetchLike {
+  const { fetch, clock, maxElapsedMs, initialDelayMs, maxDelayMs } = params;
+  if (maxElapsedMs <= 0) return fetch;
+  return async (req) => {
+    const startedAt = clock.currentTimeMs();
+    let delayMs = initialDelayMs;
+    let midFlightSafe: boolean | undefined;
+    for (;;) {
+      const attempt = req.clone() as Request;
+      let res: Response | undefined;
+      let error: unknown;
+      try {
+        res = await fetch(attempt);
+      } catch (err) {
+        if (isConnectRefused(err)) {
+          error = err;
+        } else if (isDroppedMidFlight(err)) {
+          midFlightSafe ??= await isRetrySafeRequest(req.clone() as Request);
+          if (!midFlightSafe) throw err;
+          error = err;
+        } else {
+          throw err;
+        }
+      }
+      if (res && !(res.status === 503 && (await isShuttingDown(res)))) return res;
+      const elapsed = clock.currentTimeMs() - startedAt;
+      if (elapsed + delayMs > maxElapsedMs) {
+        if (res) return res;
+        throw error;
+      }
+      await new Promise<void>((resolve) => clock.setTimeout(resolve, delayMs));
+      delayMs = Math.min(delayMs * 2, maxDelayMs);
+    }
+  };
+}
+
+/** The connection was refused: the request never reached the server. */
+function isConnectRefused(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (code === "ConnectionRefused" || code === "ECONNREFUSED") return true;
+  const message = (err as { message?: unknown } | null)?.message;
+  return typeof message === "string" && /unable to connect|connection refused/i.test(message);
+}
+
+/** The connection dropped mid-request: the server may have applied it. */
+function isDroppedMidFlight(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (code === "ECONNRESET" || code === "ConnectionClosed") return true;
+  const message = (err as { message?: unknown } | null)?.message;
+  return (
+    typeof message === "string" && /socket connection was closed|connection reset/i.test(message)
+  );
+}
+
+/** Paths of the start-queue protocol: every call is idempotent (see the route). */
+const START_PROTOCOL_PATH =
+  /\/api\/worker-protocol\/(heartbeat-start|complete-start|release-start)\//;
+
+/**
+ * True when resending `req` after it may already have been applied is
+ * harmless (see the header).
+ */
+async function isRetrySafeRequest(req: Request): Promise<boolean> {
+  const path = new URL(req.url).pathname;
+  let body: Record<string, unknown> = {};
+  try {
+    const text = await req.text();
+    body = text ? (JSON.parse(text) as Record<string, unknown>) : {};
+  } catch {
+    return false;
+  }
+  if (path.endsWith("/rpc/storage")) {
+    return isRetrySafeStorageCall({ method: String(body.method), params: body.params });
+  }
+  if (path.endsWith("/rpc/worker")) return isRetrySafeWorkerCall({ method: String(body.method) });
+  if (path.endsWith("/api/worker-protocol/claim-starts")) return typeof body.claimId === "string";
+  if (START_PROTOCOL_PATH.test(path)) return true;
+  if (path.endsWith("/api/advertisements") || path.includes("/api/advertisements/")) return true;
+  if (/\/api\/workflows\/[^/]+\/runs$/.test(path)) return typeof body.workflowId === "string";
+  return false;
+}
+
+/** True for Zorya's own 503 while it stops (no route ran). */
+async function isShuttingDown(res: Response): Promise<boolean> {
+  try {
+    const body = (await res.clone().json()) as { error?: unknown };
+    return body.error === "shutting_down";
+  } catch {
+    return false;
   }
 }
 

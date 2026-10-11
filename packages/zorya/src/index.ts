@@ -14,13 +14,20 @@ export type { ServiceState, ServiceStatus } from "./server/service-lifecycle.ts"
 export {
   ZoryaWorkflows,
   LocalWorkflows,
-  DistributedWorkflows,
   QueuedWorkflows,
   UnknownWorkflowError,
+  UnknownWorkflowVersionError,
+  RunCancelledError,
   WorkflowIdConflictError,
+  ZoryaClusterConfigError,
+  type ZoryaCluster,
   type LocalWorkflowsConfig,
-  type DistributedWorkflowsConfig,
+  type LocalWorkflowsErrorEvent,
+  type LocalWorkflowsErrorSource,
   type QueuedWorkflowsConfig,
+  type QueuedWorkflowsErrorEvent,
+  type QueuedWorkflowsErrorSource,
+  type QueuedMaintenanceReport,
   type TriggerOptions,
   type TriggerResult,
 } from "./server/services/workflows/index.ts";
@@ -112,13 +119,7 @@ export {
   type WorkflowStartClaimRef,
   type WorkerWorkflowSpec,
 } from "./server/workflow-starts.ts";
-export {
-  RunsService,
-  TriggerService,
-  mergePlannedSteps,
-  type RunsServiceDeps,
-  type TriggerServiceDeps,
-} from "./server/services/index.ts";
+export { RunsService, mergePlannedSteps, type RunsServiceDeps } from "./server/services/index.ts";
 export type {
   SignalDto,
   SignalHistoryResponse,

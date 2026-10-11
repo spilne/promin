@@ -290,7 +290,7 @@ or a cancel, and retries defects only with `retryDefects: true`.
 
 ## Running workflows
 
-`createWorkflowRunner({ storage, clock?, registry?, hooks?, stepExecutor?, executorId? })`
+`createWorkflowRunner({ storage, clock?, registry?, hooks?, stepExecutor?, executorId?, lock? })`
 returns a `WorkflowRunner`:
 
 | Method                                         | What it does                                                                               |
@@ -342,7 +342,15 @@ the `_tag` of the error that failed the run, or with `WorkflowCancelledError`
   [Storage](./storage/README.md#fencing)); a second driver gets
   `WorkflowLockError` (or joins the run, per `idempotency.onInFlight`). If
   heartbeats are fenced out or none succeeds for a lock duration, the run
-  stops at the next wave with `WorkflowLockLostError`.
+  stops at the next wave with `WorkflowLockLostError`. The lease is
+  `lock: { durationMs, heartbeatIntervalMs }` on the runner (default 120 s /
+  30 s): a dead driver's run is free for another driver that long after its
+  last heartbeat. `run({ signal })` abandons a run: once the signal aborts,
+  it stops at its next safe point the same way, releases the lock and stays
+  in flight for another driver.
+- **Children held elsewhere.** A parent step whose child run is locked by
+  another driver (a wake-up resumed the child on its own) parks on the
+  child like on a suspended one; the child's end wakes it.
 - **Checkpoint failures.** Checkpoint and terminal writes are retried (3
   retries, 250 ms base). One that still fails rejects with `CheckpointError`
   and the run stops as it stands — no compensation, no `failWorkflow` — so

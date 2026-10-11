@@ -15,7 +15,9 @@ import {
   type WorkflowRunner,
 } from "@promin/workflow";
 import { ZoryaServer } from "../../server.ts";
-import { LocalWorkflows } from "../../services/workflows/index.ts";
+import { LocalWorkflows, QueuedWorkflows } from "../../services/workflows/index.ts";
+import { InMemoryWorkflowAdvertisementRegistry } from "../../workflow-advertisements.ts";
+import { InMemoryWorkflowStartQueue } from "../../workflow-starts.ts";
 
 /** Yield to the event loop until `predicate` holds, bounded by iterations. */
 async function until(predicate: () => boolean | Promise<boolean>): Promise<void> {
@@ -327,31 +329,6 @@ describe("POST /api/runs/:id/cancel — cascade", () => {
   });
 });
 
-/** A local layer that can resume a run from a step, as `WorkflowRunner.resume` does. */
-class ResumableLocalWorkflows extends LocalWorkflows {
-  constructor(
-    private readonly resumable: {
-      storage: InMemoryWorkflowStorage;
-      runner: WorkflowRunner;
-      definitions: Record<string, Workflow<unknown, unknown>>;
-    },
-  ) {
-    super({
-      storage: resumable.storage,
-      runner: resumable.runner,
-      definitions: resumable.definitions,
-      sleepScanIntervalMs: 0,
-      signalScanIntervalMs: 0,
-    });
-  }
-
-  async resume(params: { workflowId: string; fromStep: string }): Promise<void> {
-    const state = await this.resumable.storage.loadWorkflow(params.workflowId);
-    const workflow = this.resumable.definitions[state!.workflowName]!;
-    void this.resumable.runner.resume({ workflow, ...params }).catch(() => {});
-  }
-}
-
 describe("POST /api/runs/:id/resume", () => {
   function pipeline() {
     const runs = { load: 0, transform: 0, publish: 0 };
@@ -379,7 +356,13 @@ describe("POST /api/runs/:id/resume", () => {
   function resumableSetup(definitions: Record<string, Workflow<unknown, unknown>>) {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
-    const workflows = new ResumableLocalWorkflows({ storage, runner, definitions });
+    const workflows = new LocalWorkflows({
+      storage,
+      runner,
+      definitions,
+      sleepScanIntervalMs: 0,
+      signalScanIntervalMs: 0,
+    });
     const server = new ZoryaServer({ workflows, insecure: true });
     const post = (path: string, body?: unknown) =>
       server.handle(
@@ -443,19 +426,80 @@ describe("POST /api/runs/:id/resume", () => {
     expect((await storage.loadWorkflow("w-1"))?.steps.wait?.status).toBe("waiting_for_signal");
   });
 
+  it("is a 409 for a cancelled run, which stays cancelled", async () => {
+    const p = pipeline();
+    const { post, status, storage } = resumableSetup({ pipeline: p.wf });
+    await storage.createWorkflow({ workflowId: "rc-1", workflowName: "pipeline", input: {} });
+    await storage.cancelWorkflow({ workflowId: "rc-1" });
+    const res = await post("/api/runs/rc-1/resume", { fromStep: "load" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe("run_cancelled");
+    expect(await status("rc-1")).toBe("failed");
+  });
+
   it("is a 400 without fromStep", async () => {
     const { post } = resumableSetup({});
     expect((await post("/api/runs/x/resume", {})).status).toBe(400);
   });
 
-  it("is a 501 when the workflows layer cannot resume", async () => {
+  it("queues a worker-driven run for a hosting worker, which continues it from the step", async () => {
     const p = pipeline();
-    const { post, status } = setup({ pipeline: p.wf });
-    await post("/api/workflows/pipeline/runs", { workflowId: "r-3" });
-    await until(async () => (await status("r-3")) === "failed");
-    const res = await post("/api/runs/r-3/resume", { fromStep: "publish" });
-    expect(res.status).toBe(501);
-    expect(await status("r-3")).toBe("failed");
+    const storage = new InMemoryWorkflowStorage();
+    const workflowStarts = new InMemoryWorkflowStartQueue();
+    const advertisements = new InMemoryWorkflowAdvertisementRegistry();
+    await advertisements.upsert({
+      workerId: "w1",
+      workflows: [
+        {
+          name: "pipeline",
+          steps: p.wf.dag.steps.map((st) => ({
+            name: st.name,
+            kind: st.kind,
+            dependsOn: [...st.dependsOn],
+          })),
+        },
+      ],
+    });
+    const workflows = new QueuedWorkflows({
+      storage,
+      workflowStarts,
+      advertisements,
+      wakeups: { sleepScanIntervalMs: 0, signalScanIntervalMs: 0 },
+      maintenance: false,
+    });
+    const server = new ZoryaServer({ workflows, insecure: true });
+    const post = (path: string, body?: unknown) =>
+      server.handle(
+        new Request(`http://x${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          ...(body !== undefined && { body: JSON.stringify(body) }),
+        }),
+      );
+    // The hosting worker: claims each start and drives the run.
+    const runner = createWorkflowRunner({ storage });
+    const drive = async () => {
+      const [start] = await workflowStarts.claim({
+        workflowSpecs: [{ name: "pipeline", versions: [] }],
+        limit: 1,
+      });
+      expect(start).toBeDefined();
+      await runner.runSafe({ workflow: p.wf, workflowId: start!.workflowId, input: start!.input });
+      await workflowStarts.complete({ id: start!.id, claimToken: start!.claimToken! });
+    };
+
+    await post("/api/workflows/pipeline/runs", { workflowId: "q-1" });
+    await drive();
+    expect((await storage.loadWorkflow("q-1"))?.status).toBe("failed");
+
+    p.heal();
+    const res = await post("/api/runs/q-1/resume", { fromStep: "publish" });
+    expect(res.status).toBe(202);
+    await drive();
+    const run = await storage.loadWorkflow("q-1");
+    expect(run?.status).toBe("completed");
+    expect(run?.run).toBe(1);
+    expect(p.runs).toEqual({ load: 1, transform: 1, publish: 2 });
   });
 });
 

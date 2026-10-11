@@ -23,7 +23,7 @@ postgresDescribe("PgWorkflowAdvertisementRegistry conformance", (pg) => {
 
   const factory = async () => new PgWorkflowAdvertisementRegistry({ db: pg.db });
 
-  workflowAdvertisementRegistryTestSuite(factory);
+  workflowAdvertisementRegistryTestSuite(factory, { serverClock: true });
 
   describe("PgWorkflowAdvertisementRegistry — Pg-specific", () => {
     it("two registry instances on the same DB share state — multi-replica catalog", async () => {
@@ -79,6 +79,26 @@ postgresDescribe("PgWorkflowAdvertisementRegistry conformance", (pg) => {
       // Original row still there.
       const distinct = await reg.distinct();
       expect(distinct.map((w) => w.name)).toEqual(["stable"]);
+    });
+
+    it("expires advertisements on the database clock: every replica agrees, prune deletes them", async () => {
+      // Expiry is about the server's NOW(), so this test uses real time.
+      const ttlMs = 300;
+      const a = new PgWorkflowAdvertisementRegistry({ db: pg.db, ttlMs });
+      const b = new PgWorkflowAdvertisementRegistry({ db: pg.db, ttlMs });
+      await a.ensureTable();
+      const steps = [{ name: "s", kind: "single", dependsOn: [] }];
+      await a.upsert({ workerId: "dead", workflows: [{ name: "gone", steps }] });
+      expect((await b.distinct()).map((w) => w.name)).toEqual(["gone"]);
+
+      await new Promise((r) => setTimeout(r, ttlMs + 100));
+      await a.upsert({ workerId: "live", workflows: [{ name: "here", steps }] });
+      expect((await a.distinct()).map((w) => w.name)).toEqual(["here"]);
+      expect((await b.list()).map((e) => e.workerId)).toEqual(["live"]);
+
+      expect(await b.prune()).toBe(1);
+      const rows = await pg.db.execute(sql`SELECT worker_id FROM wf_workflow_advertisements`);
+      expect([...rows].map((r) => (r as { worker_id: string }).worker_id)).toEqual(["live"]);
     });
   });
 });

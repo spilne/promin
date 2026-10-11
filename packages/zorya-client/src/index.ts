@@ -1,5 +1,12 @@
-export { ZoryaClient, type ZoryaClientConfig } from "./lib/index.ts";
-export { ZoryaWorker, type ZoryaWorkerConfig } from "./lib/index.ts";
+export { ZoryaClient, type ZoryaClientConfig, type WorkflowStartClaim } from "./lib/index.ts";
+export {
+  ZoryaWorker,
+  StartClaimLostError,
+  ZoryaWorkerStoppingError,
+  type ZoryaWorkerConfig,
+  type ZoryaWorkerErrorEvent,
+  type ZoryaWorkerErrorPhase,
+} from "./lib/index.ts";
 export { ZoryaRunner, type ZoryaRunnerConfig, type ZoryaRunOptions } from "./lib/index.ts";
 export {
   WorkerControlSocket,

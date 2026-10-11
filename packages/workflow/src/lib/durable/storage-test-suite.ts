@@ -370,6 +370,67 @@ export function storageTestSuite(
         expect(forA[1]!.durationMs).toBe(5);
         expect(await s.loadStepAttempts({ workflowId: "sa-1" })).toHaveLength(3);
       });
+
+      it("saving the same attempt twice keeps one row (a retried write is idempotent)", async () => {
+        const s = await getStorage();
+        if (!options.hasStepAttempts && !hasCapability(s, "stepAttempts")) return;
+        if (!hasCapability(s, "stepAttempts")) throw new Error("stepAttempts expected");
+        await s.createWorkflow({ workflowId: "sa-dup", workflowName: "t", input: {} });
+        const failed = record({
+          workflowId: "sa-dup",
+          stepName: "a",
+          attempt: 1,
+          status: "failed",
+        });
+        await s.saveStepAttempt({ record: failed });
+        await s.saveStepAttempt({ record: failed });
+        expect(await s.loadStepAttempts({ workflowId: "sa-dup" })).toHaveLength(1);
+        if (hasCapability(s, "stepCheckpoint")) {
+          const checkpoint = {
+            workflowId: "sa-dup",
+            stepName: "b",
+            outcome: { kind: "completed" as const, result: 1, durationMs: 1, startedAt: at },
+            attempts: [
+              record({ workflowId: "sa-dup", stepName: "b", attempt: 1, status: "completed" }),
+            ],
+          };
+          await s.checkpointStep(checkpoint);
+          await s.checkpointStep(checkpoint);
+          expect(await s.loadStepAttempts({ workflowId: "sa-dup", stepName: "b" })).toHaveLength(1);
+        }
+      });
+
+      it("attempts of a fresh run and of reset steps never collide with earlier ones", async () => {
+        const s = await getStorage();
+        if (!options.hasStepAttempts && !hasCapability(s, "stepAttempts")) return;
+        if (!hasCapability(s, "stepAttempts")) throw new Error("stepAttempts expected");
+        await s.createWorkflow({ workflowId: "sa-runs", workflowName: "t", input: {} });
+        const one = (status: "completed" | "failed") =>
+          record({ workflowId: "sa-runs", stepName: "a", attempt: 1, status });
+        await s.saveStepAttempt({ record: one("failed") });
+        await s.saveStepResult({
+          workflowId: "sa-runs",
+          stepName: "a",
+          result: 1,
+          durationMs: 1,
+          startedAt: at,
+        });
+        await s.completeWorkflow({ workflowId: "sa-runs", result: 1 });
+
+        // A fresh run (rerun, continue-as-new): attempt 1 again, run 2.
+        await s.startFreshRun({ workflowId: "sa-runs" });
+        await s.saveStepAttempt({ record: one("completed") });
+        const afterFresh = await s.loadStepAttempts({ workflowId: "sa-runs", stepName: "a" });
+        expect(afterFresh.map((a) => a.status)).toEqual(["failed", "completed"]);
+
+        // Reset steps (resume): the run's attempt 1 is written again, no error.
+        if (s.resetSteps) {
+          await s.resetSteps({ workflowId: "sa-runs", stepNames: ["a"] });
+          await s.saveStepAttempt({ record: one("failed") });
+          const afterReset = await s.loadStepAttempts({ workflowId: "sa-runs", stepName: "a" });
+          expect(afterReset).toHaveLength(2);
+        }
+      });
     });
 
     // -------------------------------------------------------------------
@@ -1287,6 +1348,16 @@ export function storageTestSuite(
         expect(signals).toHaveLength(1);
         expect(signals[0]!.signalName).toBe("approval");
         expect(signals[0]!.payload).toEqual({ approved: true });
+      });
+
+      it("delivers a null payload (a child-ended wake-up), again under the same name", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "sig-null", workflowName: "test", input: {} });
+        await s.deliverSignal({ workflowId: "sig-null", signalName: "ended", payload: null });
+        await s.deliverSignal({ workflowId: "sig-null", signalName: "ended", payload: null });
+
+        const signals = await s.loadSignals("sig-null");
+        expect(signals.map((g) => [g.signalName, g.payload])).toEqual([["ended", null]]);
       });
     });
 
@@ -3342,6 +3413,134 @@ export function storageTestSuite(
     // streams
     // -------------------------------------------------------------------
 
+    // -------------------------------------------------------------------
+    // Repeated calls — a resend of a call whose answer was lost (a remote
+    // client retrying after a dropped connection) answers like the first
+    // and changes nothing more.
+    // -------------------------------------------------------------------
+
+    describe("repeated calls answer like the first", () => {
+      it("tryLock / tryLockAndLoad with the same attemptId get the same lock", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "rep-lock", workflowName: "t", input: {} });
+        const params = { workflowId: "rep-lock", lockDurationMs: 60_000, attemptId: "att-1" };
+        const first = await s.tryLock(params);
+        const again = await s.tryLock(params);
+        expect(first.acquired).toBe(true);
+        expect(again).toEqual(first);
+        // Another attempt is still locked out.
+        expect((await s.tryLock({ ...params, attemptId: "att-2" })).acquired).toBe(false);
+        expect((await s.tryLock({ workflowId: "rep-lock", lockDurationMs: 1 })).acquired).toBe(
+          false,
+        );
+
+        await s.createWorkflow({ workflowId: "rep-lock-load", workflowName: "t", input: {} });
+        const load = { workflowId: "rep-lock-load", lockDurationMs: 60_000, attemptId: "att-3" };
+        const loaded = await s.tryLockAndLoad(load);
+        const loadedAgain = await s.tryLockAndLoad(load);
+        expect(loaded.locked).toBe(true);
+        expect(loadedAgain.locked).toBe(true);
+        expect(loadedAgain.token).toBe(loaded.token!);
+      });
+
+      it("startFreshRun with expectedRun bumps the run once", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "rep-fresh", workflowName: "t", input: {} });
+        await s.completeWorkflow({ workflowId: "rep-fresh", result: 1 });
+        const first = await s.startFreshRun({ workflowId: "rep-fresh", expectedRun: 1 });
+        const history = (await s.loadRunHistory({ workflowId: "rep-fresh" })).length;
+        const again = await s.startFreshRun({ workflowId: "rep-fresh", expectedRun: 1 });
+        expect(first).toBe(2);
+        expect(again).toBe(2);
+        expect((await s.loadWorkflow("rep-fresh"))?.run).toBe(2);
+        expect(await s.loadRunHistory({ workflowId: "rep-fresh" })).toHaveLength(history);
+      });
+
+      it("appendStreamChunk with the same chunkId appends once", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "rep-chunk", workflowName: "t", input: {} });
+        const params = {
+          workflowId: "rep-chunk",
+          streamId: "out",
+          payload: { n: 1 },
+          appendedBy: "workflow" as const,
+          chunkId: "c-1",
+        };
+        const first = await s.appendStreamChunk(params);
+        const again = await s.appendStreamChunk(params);
+        expect(again).toEqual(first);
+        const next = await s.appendStreamChunk({ ...params, chunkId: "c-2" });
+        expect(next.chunkIndex).toBe(first.chunkIndex + 1);
+        expect(await s.readStreamChunks({ workflowId: "rep-chunk", streamId: "out" })).toHaveLength(
+          2,
+        );
+      });
+
+      it("createSignalToken without an idempotency key, same tokenId, answers the same token", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "rep-tok", workflowName: "t", input: {} });
+        const params = {
+          tokenId: "rep-tk-1",
+          workflowId: "rep-tok",
+          signalName: "approve",
+          bearer: "b1",
+          tags: [],
+          expiresAt: new Date(Date.now() + 60_000),
+        };
+        const first = await s.createSignalToken(params);
+        const again = await s.createSignalToken(params);
+        expect(again.isCached).toBe(first.isCached);
+        expect(again.record).toEqual(first.record);
+        await expect(s.createSignalToken({ ...params, bearer: "other" })).rejects.toThrow();
+      });
+
+      it("completeSignalToken with the same value answers delivered again, delivering once", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "rep-done", workflowName: "t", input: {} });
+        await s.createSignalToken({
+          tokenId: "rep-tk-2",
+          workflowId: "rep-done",
+          signalName: "approve",
+          bearer: "b",
+          tags: [],
+          expiresAt: new Date(Date.now() + 60_000),
+        });
+        const params = { tokenId: "rep-tk-2", value: { ok: true }, now: new Date() };
+        const first = await s.completeSignalToken(params);
+        const again = await s.completeSignalToken(params);
+        expect(first.outcome).toBe("delivered");
+        expect(again.outcome).toBe("delivered");
+        expect(again.record.completedValue).toEqual(first.record.completedValue);
+        const other = await s.completeSignalToken({ ...params, value: { ok: false } });
+        expect(other.outcome).toBe("already_completed");
+        expect(await s.loadSignals("rep-done")).toHaveLength(1);
+      });
+
+      it("completePendingEntry with the same exit answers completed again", async () => {
+        const s = await getStorage();
+        if (!hasCapability(s, "journal")) return;
+        await s.createWorkflow({ workflowId: "rep-entry", workflowName: "t", input: {} });
+        await s.appendPendingEntry({
+          workflowId: "rep-entry",
+          stepName: "s",
+          activityIndex: 0,
+          activityName: "go",
+          stepType: "signal",
+        });
+        const exit = { tag: "Success" as const, value: { $signal: "delivered", value: 1 } };
+        const params = { workflowId: "rep-entry", stepName: "s", activityIndex: 0, exit };
+        const first = await s.completePendingEntry(params);
+        const again = await s.completePendingEntry(params);
+        expect(first).toEqual({ completed: true, exit });
+        expect(again).toEqual(first);
+        const other = await s.completePendingEntry({
+          ...params,
+          exit: { tag: "Success", value: { $signal: "timeout" } },
+        });
+        expect(other).toEqual({ completed: false, exit });
+      });
+    });
+
     describe("streams", () => {
       it("concurrent appends get distinct, gap-free indices", async () => {
         const s = await getStorage();
@@ -3485,22 +3684,31 @@ export function storageTestSuite(
 
     // -------------------------------------------------------------------
     // scanner queries (opt-in) — listDueTimers / listSignalWakeups /
-    // listOrphanedRuns
+    // listOrphanedRuns / listChildEndedWaits
     // -------------------------------------------------------------------
 
     if (options.hasScannerQueries) {
       describe("scanner queries", () => {
         type ScannerStorage = WorkflowStorage &
           Required<
-            Pick<WorkflowStorage, "listDueTimers" | "listSignalWakeups" | "listOrphanedRuns">
+            Pick<
+              WorkflowStorage,
+              "listDueTimers" | "listSignalWakeups" | "listOrphanedRuns" | "listChildEndedWaits"
+            >
           >;
 
         async function getScannerStorage(): Promise<ScannerStorage> {
           const s = await getStorage();
-          if (!s.listDueTimers || !s.listSignalWakeups || !s.listOrphanedRuns) {
+          if (
+            !s.listDueTimers ||
+            !s.listSignalWakeups ||
+            !s.listOrphanedRuns ||
+            !s.listChildEndedWaits
+          ) {
             throw new Error(
               "storageTestSuite was invoked with hasScannerQueries: true, but the factory " +
-                "returned a storage without listDueTimers / listSignalWakeups / listOrphanedRuns.",
+                "returned a storage without listDueTimers / listSignalWakeups / " +
+                "listOrphanedRuns / listChildEndedWaits.",
             );
           }
           return s as ScannerStorage;
@@ -3781,6 +3989,71 @@ export function storageTestSuite(
             for (;;) {
               const page = await s.listSignalWakeups({ limit: 2, afterWorkflowId: after });
               if (page.length === 0) break;
+              seen.push(...page.map((r) => r.workflowId));
+              after = page.at(-1)!.workflowId;
+            }
+            expect(seen).toEqual(ids);
+          });
+        });
+
+        describe("listChildEndedWaits", () => {
+          const childWake = (child: string, run = 1): string =>
+            `workflow.child-ended:${child}#${run}`;
+
+          it("returns suspended runs parked on an undelivered child wake-up, with every such wait", async () => {
+            const s = await getScannerStorage();
+            await createWaiting({
+              s,
+              workflowId: "cw-parent",
+              signalName: childWake("kid-b"),
+              stepName: "b",
+            });
+            await s.suspendWorkflow({
+              workflowId: "cw-parent",
+              stepName: "a",
+              stepUpdate: {
+                status: "waiting_for_signal",
+                stepType: "signal",
+                signalName: childWake("kid-a", 2),
+              },
+            });
+            // An ordinary signal wait is not a child wait.
+            await createWaiting({ s, workflowId: "cw-plain", signalName: "approval" });
+            // Delivered already: nothing lost.
+            await createWaiting({ s, workflowId: "cw-delivered", signalName: childWake("kid-c") });
+            await s.deliverSignal({
+              workflowId: "cw-delivered",
+              signalName: childWake("kid-c"),
+              payload: {},
+            });
+            // Not suspended.
+            await createWaiting({ s, workflowId: "cw-done", signalName: childWake("kid-d") });
+            await s.completeWorkflow({ workflowId: "cw-done", result: "ok" });
+
+            expect(await s.listChildEndedWaits({ limit: 10 })).toEqual([
+              {
+                workflowId: "cw-parent",
+                waits: [
+                  { stepName: "a", signalName: childWake("kid-a", 2) },
+                  { stepName: "b", signalName: childWake("kid-b") },
+                ],
+              },
+            ]);
+          });
+
+          it("keyset-paginates by run in workflowId order", async () => {
+            const s = await getScannerStorage();
+            const ids = Array.from({ length: 5 }, (_, i) => `cw-page-${i}`);
+            for (const id of ids) {
+              await createWaiting({ s, workflowId: id, signalName: childWake(`${id}-kid`) });
+            }
+
+            const seen: string[] = [];
+            let after: string | undefined;
+            for (;;) {
+              const page = await s.listChildEndedWaits({ limit: 2, afterWorkflowId: after });
+              if (page.length === 0) break;
+              expect(page.length).toBeLessThanOrEqual(2);
               seen.push(...page.map((r) => r.workflowId));
               after = page.at(-1)!.workflowId;
             }

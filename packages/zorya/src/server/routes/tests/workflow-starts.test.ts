@@ -1,7 +1,12 @@
 import { describe, it, expect } from "bun:test";
 import { FakeWallClock } from "@promin/workflow";
 import { InMemoryWorkflowStartQueue } from "../../workflow-starts.ts";
-import { completeWorkflowStart, heartbeatWorkflowStart } from "../workflow-starts.ts";
+import {
+  claimWorkflowStarts,
+  completeWorkflowStart,
+  heartbeatWorkflowStart,
+  releaseWorkflowStart,
+} from "../workflow-starts.ts";
 
 function post(body?: unknown): Request {
   return new Request("http://x/", {
@@ -63,11 +68,51 @@ describe("worker-protocol start routes", () => {
     expect(remaining[0]?.claimToken).toBe(second!.claimToken);
   });
 
+  it("release-start gives the start back after the delay, fenced by the claim token", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const queue = new InMemoryWorkflowStartQueue({ clock });
+    const rec = await claimOne(queue);
+    const handler = releaseWorkflowStart(queue);
+
+    const stale = await handler(post({ claimToken: "stale", delayMs: 1_000 }), { id: rec.id });
+    expect(await stale.json()).toEqual({ ok: false });
+    const ok = await handler(post({ claimToken: rec.claimToken, delayMs: 1_000 }), {
+      id: rec.id,
+    });
+    expect(await ok.json()).toEqual({ ok: true });
+
+    const specs = [{ name: "wf", versions: [] }];
+    expect(await queue.claim({ workflowSpecs: specs, limit: 1 })).toHaveLength(0);
+    clock.advance(1_000);
+    expect(await queue.claim({ workflowSpecs: specs, limit: 1 })).toHaveLength(1);
+  });
+
+  it("claim-starts validates its body and caps the batch", async () => {
+    const queue = new InMemoryWorkflowStartQueue();
+    const claim = claimWorkflowStarts(queue);
+    await expect(claim(post({ workflowSpecs: "nope" }))).rejects.toMatchObject({ status: 400 });
+    await expect(claim(post({ workflowSpecs: [], limit: 1_000 }))).rejects.toMatchObject({
+      status: 400,
+    });
+    await queue.enqueue({ workflowId: "a", workflowName: "wf", input: {}, version: "2" });
+    const res = await claim(
+      post({ workflowSpecs: [{ name: "wf", versions: ["1"] }], workerId: "w1", limit: 5 }),
+    );
+    expect(((await res.json()) as { starts: unknown[] }).starts).toEqual([]);
+    const res2 = await claim(
+      post({ workflowSpecs: [{ name: "wf", versions: ["2"] }], workerId: "w1", limit: 5 }),
+    );
+    const { starts } = (await res2.json()) as { starts: Array<{ claimedBy?: string }> };
+    expect(starts.map((s) => s.claimedBy)).toEqual(["w1"]);
+  });
+
   it("rejects a request without a claim token", async () => {
     const queue = new InMemoryWorkflowStartQueue();
     const rec = await claimOne(queue);
-    const res = await completeWorkflowStart(queue)(post({}), { id: rec.id });
-    expect(res.status).toBe(400);
+    await expect(completeWorkflowStart(queue)(post({}), { id: rec.id })).rejects.toMatchObject({
+      status: 400,
+      code: "invalid_request",
+    });
     expect(await queue.list()).toHaveLength(1);
   });
 });

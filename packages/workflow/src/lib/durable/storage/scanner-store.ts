@@ -43,6 +43,26 @@ export interface OrphanedRun {
   readonly metadata?: Record<string, unknown>;
 }
 
+/**
+ * A suspended run parked on one or more children, returned by
+ * `listChildEndedWaits`: its `waiting_for_signal` steps whose signal is a
+ * reserved child-ended wake-up (`workflow.child-ended:<childId>#<run>`)
+ * that has not been delivered.
+ */
+export interface ChildEndedWaits {
+  readonly workflowId: string;
+  /** The undelivered child-ended waits, by step name. */
+  readonly waits: ReadonlyArray<{ readonly stepName: string; readonly signalName: string }>;
+}
+
+/** Params of `listChildEndedWaits`. */
+export interface ListChildEndedWaitsParams {
+  /** At most this many runs. */
+  readonly limit: number;
+  /** Keyset cursor: the last row's `workflowId` of the previous page. */
+  readonly afterWorkflowId?: string;
+}
+
 /** Params of `listDueTimers`. */
 export interface ListDueTimersParams {
   readonly now: Date;
@@ -69,7 +89,7 @@ export interface ListOrphanedRunsParams {
 
 /**
  * Scanner and recovery queries. Every member is optional (capabilities
- * `dueTimers`, `signalWakeups`, `orphanedRuns`): without one, its scanner
+ * `dueTimers`, `signalWakeups`, `orphanedRuns`, `childEndedWaits`): without one, its scanner
  * pages through `listWorkflows` instead. All three are scoped to the
  * storage's namespace, like `listWorkflows`, and keyset-paginated on
  * `workflowId`, so resuming rows between pages never makes a later page
@@ -103,4 +123,13 @@ export interface WorkflowScannerStore {
    * runs: the scanners own those. Ordered by `workflowId` ascending.
    */
   listOrphanedRuns?(params: ListOrphanedRunsParams): Promise<OrphanedRun[]>;
+
+  /**
+   * Suspended runs (current run only) waiting on a child-ended wake-up
+   * that has not been delivered — the candidates for re-delivering a
+   * wake-up lost when the child's driver died. One row per run with every
+   * such wait, ordered by `workflowId` ascending, at most `limit` runs.
+   * Whether each child has actually ended is for the caller to check.
+   */
+  listChildEndedWaits?(params: ListChildEndedWaitsParams): Promise<ChildEndedWaits[]>;
 }

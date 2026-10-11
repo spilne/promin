@@ -66,13 +66,21 @@ export {
 export {
   type SleepScanner,
   type SleepScannerConfig,
+  type SleepScannerOptions,
   createSleepScanner,
 } from "./lib/distributed/sleep-scanner.ts";
 export {
   type SignalScanner,
   type SignalScannerConfig,
+  type SignalScannerOptions,
   createSignalScanner,
 } from "./lib/distributed/signal-scanner.ts";
+export {
+  type ScannerTarget,
+  type RunnerScannerTarget,
+  type WakeScannerTarget,
+  type ScannedRunRef,
+} from "./lib/distributed/resume-scanner.ts";
 export {
   type WorkerMiddleware,
   type NextFn,
@@ -94,6 +102,7 @@ export {
   type AdvertisedWorkflow,
   type AdvertisementEntry,
   InMemoryWorkflowAdvertisementRegistry,
+  DEFAULT_ADVERTISEMENT_TTL_MS,
   type InMemoryWorkflowAdvertisementRegistryConfig,
 } from "./lib/distributed/workflow-advertisements.ts";
 export {
@@ -101,6 +110,23 @@ export {
   type WorkflowStartRecord,
   type WorkerWorkflowSpec,
   type WorkflowStartClaimRef,
+  type WorkflowStartClaimParams,
+  type WorkflowStartEnqueueParams,
+  type WorkflowStartEnqueueResult,
+  type WorkflowStartReleaseParams,
+  DEFAULT_START_RECLAIM_AFTER_MS,
+  CLAIM_ID_PATTERN,
+  claimTokenFor,
+  isTokenOfClaim,
+  startMatchesSpec,
   InMemoryWorkflowStartQueue,
   type InMemoryWorkflowStartQueueConfig,
 } from "./lib/distributed/workflow-start-queue.ts";
+export {
+  PollLoop,
+  type PollLoopConfig,
+  type PollLoopErrorInfo,
+  type PollTickResult,
+  isNetworkError,
+  describeError,
+} from "./lib/shared/poll-loop.ts";

@@ -69,8 +69,31 @@
       "typecheck": {
         "dependsOn": [
           "^typecheck",
-          "typecheck-ui"
+          "typecheck-ui",
+          "typecheck-e2e"
         ]
+      },
+      "typecheck-e2e": {
+        "executor": "nx:run-commands",
+        "dependsOn": [
+          "^typecheck"
+        ],
+        "options": {
+          "command": "bunx tsc -p tsconfig.e2e.json --noEmit",
+          "cwd": "{projectRoot}"
+        },
+        "cache": true,
+        "inputs": [
+          "default",
+          "^production",
+          "{workspaceRoot}/tsconfig.base.json",
+          "{workspaceRoot}/bun.lock",
+          {
+            "dependentTasksOutputFiles": "**/*.d.ts",
+            "transitive": true
+          }
+        ],
+        "outputs": []
       },
       "typecheck-ui": {
         "executor": "nx:run-commands",
@@ -95,6 +118,13 @@
         "outputs": []
       },
       "test": {},
+      "e2e": {
+        "executor": "nx:run-commands",
+        "options": {
+          "command": "bun --conditions=@promin/source test ./e2e/worker-runs.e2e.ts",
+          "cwd": "{projectRoot}"
+        }
+      },
       "lint": {},
       "format": {},
       "format-check": {},

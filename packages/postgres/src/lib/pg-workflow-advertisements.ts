@@ -11,26 +11,36 @@
 // Lifecycle:
 //   - upsert({ workerId, workflows }) replaces the worker's row set atomically
 //     (a worker that re-advertises with a smaller set drops the workflows
-//     it no longer hosts)
+//     it no longer hosts), stamped with the server clock (`NOW()`)
 //   - remove(workerId) deletes everything for that worker (graceful shutdown)
-//   - readers (`list`, `distinct`) return the union across all workers
+//   - readers (`list`, `distinct`) return the union across all workers of
+//     advertisements refreshed within `ttlMs`, compared on the server clock
+//     so every replica agrees on which workers are live; `prune` deletes
+//     the expired ones
 //
 // Schema lives in `schema.ts` (`workflowAdvertisements`); call
 // `ensureTable()` for quick bootstrap or include it in your migration
 // pipeline.
 // ---------------------------------------------------------------------------
 
-import { eq, sql } from "drizzle-orm";
-import type {
-  AdvertisedWorkflow,
-  AdvertisementEntry,
-  WorkflowAdvertisementRegistry,
+import { eq, sql, type SQL } from "drizzle-orm";
+import {
+  DEFAULT_ADVERTISEMENT_TTL_MS,
+  type AdvertisedWorkflow,
+  type AdvertisementEntry,
+  type WorkflowAdvertisementRegistry,
 } from "@promin/workflow/distributed";
 import { type DrizzleDb, ensureTable as ensureTableFromSchema } from "@spilne/perfect-postgres";
 import { workflowAdvertisements } from "./schema.ts";
 
 export interface PgWorkflowAdvertisementRegistryConfig {
   db: DrizzleDb;
+  /**
+   * An advertisement not refreshed for this long (by the database clock)
+   * expires. Default: `DEFAULT_ADVERTISEMENT_TTL_MS`; `Infinity` keeps them
+   * until `remove`.
+   */
+  ttlMs?: number;
 }
 
 export class PgWorkflowAdvertisementRegistry implements WorkflowAdvertisementRegistry {
@@ -38,9 +48,11 @@ export class PgWorkflowAdvertisementRegistry implements WorkflowAdvertisementReg
   static readonly schema = workflowAdvertisements;
 
   private readonly db: DrizzleDb;
+  private readonly ttlMs: number;
 
   constructor(config: PgWorkflowAdvertisementRegistryConfig) {
     this.db = config.db;
+    this.ttlMs = config.ttlMs ?? DEFAULT_ADVERTISEMENT_TTL_MS;
   }
 
   /**
@@ -84,6 +96,7 @@ export class PgWorkflowAdvertisementRegistry implements WorkflowAdvertisementReg
     const rows = await this.db
       .select()
       .from(workflowAdvertisements)
+      .where(this.live())
       .orderBy(workflowAdvertisements.workerId, workflowAdvertisements.workflowName);
     const byWorker = new Map<string, AdvertisementEntry>();
     for (const r of rows) {
@@ -109,6 +122,7 @@ export class PgWorkflowAdvertisementRegistry implements WorkflowAdvertisementReg
     const rows = await this.db
       .select()
       .from(workflowAdvertisements)
+      .where(this.live())
       .orderBy(
         workflowAdvertisements.workflowName,
         // COALESCE so NULL versions sort with empty-string versions
@@ -123,6 +137,25 @@ export class PgWorkflowAdvertisementRegistry implements WorkflowAdvertisementReg
       if (!byKey.has(key)) byKey.set(key, rowToAdvertisedWorkflow(r));
     }
     return [...byKey.values()];
+  }
+
+  async prune(): Promise<number> {
+    if (!Number.isFinite(this.ttlMs)) return 0;
+    const rows = await this.db
+      .delete(workflowAdvertisements)
+      .where(sql`${workflowAdvertisements.advertisedAt} <= ${this.cutoff()}`)
+      .returning({ workerId: workflowAdvertisements.workerId });
+    return new Set(rows.map((r) => r.workerId)).size;
+  }
+
+  /** Advertisements refreshed within the TTL, by the database clock. */
+  private live(): SQL {
+    if (!Number.isFinite(this.ttlMs)) return sql`TRUE`;
+    return sql`${workflowAdvertisements.advertisedAt} > ${this.cutoff()}`;
+  }
+
+  private cutoff(): SQL {
+    return sql`NOW() - (${Math.max(0, Math.round(this.ttlMs))}::double precision * INTERVAL '1 millisecond')`;
   }
 }
 

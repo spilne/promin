@@ -33,9 +33,9 @@
 
 import type { RemoteDeploymentRegistry, SecretsStorage } from "@promin/agent";
 import type { WorkflowVersionRegistry, WallClock, WorkflowStorage } from "@promin/workflow";
-import type { StepQueue, WorkerRegistry } from "@promin/workflow/distributed";
+import type { WorkerRegistry } from "@promin/workflow/distributed";
 import { SystemWallClock } from "@promin/workflow";
-import { InMemoryStepQueue, InMemoryWorkerRegistry } from "@promin/workflow/distributed";
+import { InMemoryWorkerRegistry } from "@promin/workflow/distributed";
 import {
   RUNNER_STORAGE_METHODS,
   createWorkerApiHandler,
@@ -51,7 +51,6 @@ import {
   bodyLimitFor,
   limitRequestBody,
 } from "./request-limits.ts";
-import type { WorkflowStartQueue } from "./workflow-starts.ts";
 import { WorkerWebSocketServer } from "./services/worker-ws-server.ts";
 import {
   listAdvertisements,
@@ -63,6 +62,7 @@ import {
   completeWorkflowStart,
   heartbeatWorkflowStart,
   listWorkflowStarts,
+  releaseWorkflowStart,
 } from "./routes/workflow-starts.ts";
 import { RunEventBus } from "./run-event-bus.ts";
 import { RunWatcherPool } from "./run-poll-watcher.ts";
@@ -83,7 +83,6 @@ import { queryRun } from "./routes/query.ts";
 import { getMetrics, StorageMetricsProvider, type MetricsProvider } from "./routes/metrics.ts";
 import {
   RegistryBackedWorkersProvider,
-  emptyWorkersProvider,
   listWorkers,
   type WorkersProvider,
 } from "./routes/workers.ts";
@@ -217,8 +216,9 @@ import {
 } from "./routes/instances.ts";
 import {
   ZoryaWorkflows,
-  DistributedWorkflows,
   QueuedWorkflows,
+  assertSharedStores,
+  type ZoryaCluster,
 } from "./services/workflows/index.ts";
 import { ZoryaScheduler } from "./services/scheduler/index.ts";
 import { ZoryaAgents } from "./services/agents/index.ts";
@@ -242,12 +242,11 @@ export interface Logger {
 }
 
 /**
- * Mounts the remote-worker RPC surface (`/rpc/storage`, `/rpc/worker`,
- * `/api/advertisements`, `/api/worker-protocol/*`). The `stepQueue`,
- * `workerRegistry`, `advertisements`, and `workflowStarts` are pulled from
- * the configured WorkflowsService (typed as DistributedWorkflows or
- * QueuedWorkflows). An error is thrown at construction if the configured
- * service doesn't expose what's needed.
+ * Mounts the remote-worker surface: `/rpc/storage` (the runner's storage
+ * methods, for workers that drive runs), `/rpc/worker` (the worker
+ * registry), and — when the workflows chain has a `QueuedWorkflows` —
+ * `/api/advertisements` and `/api/worker-protocol/*` over its
+ * advertisements and start queue.
  */
 export interface RemoteWorkersConfig {
   /**
@@ -256,6 +255,12 @@ export interface RemoteWorkersConfig {
    * `/api/worker-protocol/*`. Required unless the server is `insecure`.
    */
   apiKeys?: ReadonlyArray<string>;
+  /**
+   * The worker registry `/rpc/worker` writes and the Workers page reads.
+   * Default: the chain's `QueuedWorkflows.workerRegistry`, else an
+   * in-memory one.
+   */
+  workerRegistry?: WorkerRegistry;
 }
 
 /** Thrown by the ZoryaServer constructor when a plane has no keys and `insecure` is off. */
@@ -311,7 +316,10 @@ export interface ZoryaServerConfig extends AuthConfig {
 
   /** Override metrics provider. Default: StorageMetricsProvider(workflows.storage). */
   metrics?: MetricsProvider;
-  /** Plug a workers provider. Default: derived from workflows when distributed. */
+  /**
+   * Plug a workers provider for the Workers page. Default: the worker
+   * registry remote workers register into (`workerRegistry`).
+   */
   workers?: WorkersProvider;
   /** Sample input for the dashboard's trigger form, by workflow name. */
   sampleInput?: (workflowName: string) => unknown;
@@ -420,6 +428,13 @@ export class ZoryaServer {
    */
   readonly versionRegistry?: WorkflowVersionRegistry;
   /**
+   * The one worker registry: remote workers register and heartbeat into it
+   * over `/rpc/worker`, and the Workers page lists it.
+   */
+  readonly workerRegistry: WorkerRegistry;
+  /** Set when the workflows chain runs clustered: several instances share the stores. */
+  readonly cluster?: ZoryaCluster;
+  /**
    * Worker → server WebSocket multiplexer. Always present — workers in
    * step / agent mode connect on `/ws/worker` to receive server-pushed
    * commands and push frames back.
@@ -462,7 +477,7 @@ export class ZoryaServer {
     if (config.secrets) this.secrets = config.secrets;
     this.clock = config.clock ?? SystemWallClock;
     const clock = this.clock;
-    const versionRegistry = walkChainFor(this.workflows, versionRegistryOf);
+    const versionRegistry = walkChainFor(this.workflows, (l) => l.versionRegistry);
     if (versionRegistry) this.versionRegistry = versionRegistry;
 
     this.logger = config.logger ?? console;
@@ -498,14 +513,23 @@ export class ZoryaServer {
     // worker registrations silently hit the SPA fallback.
     const advertisements = walkChainFor(this.workflows, (l) => l.advertisements);
     const definitions = walkChainFor(this.workflows, (l) => l.definitions);
+    const queued = this.workflows
+      .layers()
+      .find((l): l is QueuedWorkflows => l instanceof QueuedWorkflows);
+    this.workerRegistry =
+      config.remoteWorkers?.workerRegistry ??
+      queued?.workerRegistry ??
+      new InMemoryWorkerRegistry({ clock });
+    const cluster = walkChainFor(this.workflows, (l) => (l as { cluster?: ZoryaCluster }).cluster);
+    if (cluster) {
+      this.cluster = cluster;
+      this.checkClusterStores(config);
+    }
 
     const metrics = config.metrics ?? new StorageMetricsProvider(storage);
-    // Workers provider: explicit > derived from DistributedWorkflows.workerRegistry > empty
+    // One registry behind /rpc/worker and the Workers page, in every mode.
     const workers =
-      config.workers ??
-      (this.workflows instanceof DistributedWorkflows && this.workflows.workerRegistry
-        ? new RegistryBackedWorkersProvider(this.workflows.workerRegistry, { clock })
-        : emptyWorkersProvider);
+      config.workers ?? new RegistryBackedWorkersProvider(this.workerRegistry, { clock });
 
     const trigger = (
       name: string,
@@ -525,7 +549,7 @@ export class ZoryaServer {
       ...(definitions !== undefined && { workflows: definitions }),
       ...(advertisements !== undefined && { advertisements }),
     });
-    const resume = resumerOf(this.workflows);
+    const resume: RunResumer = (params) => this.workflows.resume(params);
 
     // The version routes manage the registry the workflows layer dispatches
     // through. Its versioned definitions are registered on first use, so a
@@ -937,7 +961,6 @@ export class ZoryaServer {
     }
 
     if (config.remoteWorkers) {
-      const remoteDeps = this.extractRemoteWorkerDeps();
       // Worker keys reach only what a runner needs; operator keys get the
       // whole contract (signal-token records, which carry bearers, included).
       const storageHandler = createWorkflowStorageHandler(storage, {
@@ -946,19 +969,9 @@ export class ZoryaServer {
       });
       this.router.post("/rpc/storage", (req) => storageHandler(req));
 
-      // /rpc/worker covers BOTH the step-queue claim path (DistributedWorkflows)
-      // AND the worker-registry / heartbeat path used by every connected
-      // worker regardless of mode. Always mount it; supply an in-memory
-      // step queue when the workflows chain doesn't expose one (workflow-mode
-      // workers don't poll it but their heartbeats / list calls still need
-      // a working endpoint).
-      const stepQueueForRpc = remoteDeps.stepQueue ?? new InMemoryStepQueue();
-      const workerRegistryForRpc =
-        remoteDeps.workerRegistry ?? new InMemoryWorkerRegistry({ clock: this.clock });
-      const workerHandler = createWorkerApiHandler({
-        stepQueue: stepQueueForRpc,
-        workerRegistry: workerRegistryForRpc,
-      });
+      // Every worker registers and heartbeats here, whatever it runs; the
+      // Workers page reads the same registry.
+      const workerHandler = createWorkerApiHandler({ workerRegistry: this.workerRegistry });
       this.router.post("/rpc/worker", (req) => workerHandler(req));
 
       if (advertisements) {
@@ -968,12 +981,13 @@ export class ZoryaServer {
           .get("/api/advertisements", listAdvertisements(advertisements));
       }
 
-      if (remoteDeps.workflowStarts) {
-        const wfs = remoteDeps.workflowStarts;
+      if (queued) {
+        const wfs = queued.workflowStarts;
         this.router
           .post("/api/worker-protocol/claim-starts", claimWorkflowStarts(wfs))
           .post("/api/worker-protocol/heartbeat-start/:id", heartbeatWorkflowStart(wfs))
           .post("/api/worker-protocol/complete-start/:id", completeWorkflowStart(wfs))
+          .post("/api/worker-protocol/release-start/:id", releaseWorkflowStart(wfs))
           .get("/api/worker-protocol/starts", listWorkflowStarts(wfs));
       }
     }
@@ -1298,44 +1312,21 @@ export class ZoryaServer {
   }
 
   /**
-   * Pull the remote-worker deps from the configured workflows service.
-   * DistributedWorkflows exposes stepQueue + workerRegistry for /rpc/worker;
-   * QueuedWorkflows exposes workflowStarts for /api/worker-protocol/*. Either
-   * mode (or both, in a chain) is valid; LocalWorkflows alone is not.
+   * A clustered deployment (a workflows layer has `cluster`) needs every
+   * store this server holds to be shared too: the version registry (so a
+   * promote on one instance routes starts on all), the worker registry (so
+   * every instance shows and routes to the same workers) and the
+   * scheduler's storage.
    */
-  private extractRemoteWorkerDeps(): {
-    stepQueue?: StepQueue;
-    workerRegistry?: WorkerRegistry;
-    workflowStarts?: WorkflowStartQueue;
-  } {
-    const out: {
-      stepQueue?: StepQueue;
-      workerRegistry?: WorkerRegistry;
-      workflowStarts?: WorkflowStartQueue;
-    } = {};
-
-    // Walk the chain so a Local + Queued fallback exposes the queue.
-    let layer: ZoryaWorkflows | undefined = this.workflows;
-    while (layer) {
-      if (layer instanceof DistributedWorkflows) {
-        if (out.stepQueue === undefined) out.stepQueue = layer.stepQueue;
-        if (out.workerRegistry === undefined && layer.workerRegistry !== undefined) {
-          out.workerRegistry = layer.workerRegistry;
-        }
-      }
-      if (layer instanceof QueuedWorkflows) {
-        if (out.workflowStarts === undefined) out.workflowStarts = layer.workflowStarts;
-      }
-      layer = (layer as unknown as { fallback?: ZoryaWorkflows }).fallback;
-    }
-
-    if (!out.stepQueue && !out.workflowStarts) {
-      throw new Error(
-        "ZoryaServer: remoteWorkers requires the workflows chain to include " +
-          "DistributedWorkflows (for stepQueue) or QueuedWorkflows (for workflowStarts)",
-      );
-    }
-    return out;
+  private checkClusterStores(config: ZoryaServerConfig): void {
+    assertSharedStores({
+      owner: "ZoryaServer",
+      stores: {
+        versionRegistry: this.versionRegistry,
+        workerRegistry: this.workerRegistry,
+        schedulerStorage: config.scheduler?.storage,
+      },
+    });
   }
 
   private buildStaticHandler(dir: string) {
@@ -1366,29 +1357,9 @@ function walkChainFor<T>(
   while (layer) {
     const v = pick(layer);
     if (v !== undefined) return v;
-    layer = (layer as unknown as { fallback?: ZoryaWorkflows }).fallback;
+    layer = layer.fallback;
   }
   return undefined;
-}
-
-/**
- * A layer's version registry. `LocalWorkflows` keeps the one it dispatches
- * through private; reading it here keeps the server and the runner on one
- * registry instead of a second, disconnected one.
- */
-function versionRegistryOf(layer: ZoryaWorkflows): WorkflowVersionRegistry | undefined {
-  return (layer as unknown as { versionRegistry?: WorkflowVersionRegistry }).versionRegistry;
-}
-
-/**
- * The workflows layer's `resume({ workflowId, fromStep })`, when the layer
- * has one: the layer that drives a run is the one that continues it from a
- * step (`WorkflowRunner.resume` semantics). Without it the resume route
- * answers 501.
- */
-function resumerOf(layer: ZoryaWorkflows): RunResumer | undefined {
-  const resume = (layer as { resume?: RunResumer }).resume;
-  return typeof resume === "function" ? (params) => resume.call(layer, params) : undefined;
 }
 
 /** Liveness and readiness probes: public, and answered while shutting down. */

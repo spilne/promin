@@ -1,8 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage } from "@promin/workflow";
-import { InMemoryStepQueue, InMemoryWorkerRegistry } from "@promin/workflow/distributed";
 import { ZoryaServer } from "../../server/server.ts";
-import { DistributedWorkflows } from "../../index.ts";
+import { QueuedWorkflows } from "../../index.ts";
 
 function makeServer(
   opts: {
@@ -10,11 +9,7 @@ function makeServer(
     workerKeys?: ReadonlyArray<string>;
   } = {},
 ): ZoryaServer {
-  const workflows = new DistributedWorkflows({
-    storage: new InMemoryWorkflowStorage(),
-    stepQueue: new InMemoryStepQueue(),
-    workerRegistry: new InMemoryWorkerRegistry(),
-  });
+  const workflows = new QueuedWorkflows({ storage: new InMemoryWorkflowStorage() });
   return new ZoryaServer({
     insecure: true,
     workflows,

@@ -155,6 +155,12 @@ export interface SetWorkflowMetadataParams extends FencedWrite {
 /** Params of `startFreshRun`. */
 export interface StartFreshRunParams extends FencedWrite {
   readonly workflowId: string;
+  /**
+   * Start the fresh run only while the run's number is still this one;
+   * otherwise change nothing and answer the current number. Makes a retry
+   * of a call whose answer was lost harmless: it answers like the first.
+   */
+  readonly expectedRun?: number;
 }
 
 /** Params of `resetSteps`. */

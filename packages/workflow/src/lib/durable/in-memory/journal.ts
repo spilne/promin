@@ -15,6 +15,7 @@ import type {
   JournalStepType,
 } from "../activity-journal.ts";
 import type { DueSleep } from "../storage/journal-store.ts";
+import { sameStoredValue } from "../storage/same-value.ts";
 import type { WallClock } from "../../shared/wall-clock.ts";
 
 /** One step's activity journal: entries in write order, positions by slot. */
@@ -130,7 +131,13 @@ export class InMemoryJournal {
     const at = slots?.position.get(slotKey({ activityIndex: params.activityIndex, branchPath }));
     if (slots === undefined || at === undefined) return { completed: false, exit: undefined };
     const existing = slots.entries[at]!;
-    if (existing.phase !== "pending") return { completed: false, exit: existing.exit };
+    if (existing.phase !== "pending") {
+      // A repeat of the winning completion reports what the first call did.
+      const again =
+        existing.exit !== undefined &&
+        sameStoredValue({ stored: existing.exit, requested: params.exit });
+      return { completed: again, exit: existing.exit };
+    }
     putEntry({ slots, entry: { ...existing, phase: "completed", exit: params.exit } });
     return { completed: true, exit: params.exit };
   }

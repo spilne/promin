@@ -33,6 +33,7 @@ export const RUNNER_STORAGE_METHODS: ReadonlySet<StorageMethod> = new Set<Storag
   "createWorkflow",
   "findWorkflowByIdempotencyKey",
   "saveStepResult",
+  "checkpointStep",
   "batchSaveStepResults",
   "saveStepFailure",
   "saveTaskResult",
@@ -114,11 +115,14 @@ export function createWorkflowStorageHandler(
     startFreshRun: (p) => storage.startFreshRun(p),
     loadRunHistory: (p) => storage.loadRunHistory(p),
     resetSteps: (p) => requireCapability(storage, "resetSteps").resetSteps(p),
+    checkpointStep: (p) => requireCapability(storage, "stepCheckpoint").checkpointStep(p),
     purgeCompleted: (p) => storage.purgeCompleted(p),
     // -- Scanner / recovery queries.
     listDueTimers: (p) => requireCapability(storage, "dueTimers").listDueTimers(p),
     listSignalWakeups: (p) => requireCapability(storage, "signalWakeups").listSignalWakeups(p),
     listOrphanedRuns: (p) => requireCapability(storage, "orphanedRuns").listOrphanedRuns(p),
+    listChildEndedWaits: (p) =>
+      requireCapability(storage, "childEndedWaits").listChildEndedWaits(p),
     // -- Journal.
     loadJournal: (p) => requireCapability(storage, "journal").loadJournal(p),
     appendEntry: (p) => requireCapability(storage, "journal").appendEntry(p),
@@ -234,6 +238,7 @@ const MISSING_CAPABILITY: Record<StorageCapability, string> = {
   dueTimers: "storage does not implement listDueTimers",
   signalWakeups: "storage does not implement listSignalWakeups",
   orphanedRuns: "storage does not implement listOrphanedRuns",
+  childEndedWaits: "storage does not implement listChildEndedWaits",
 };
 
 /** `storage` narrowed to `capability`, or a clear error when it lacks it. */

@@ -27,6 +27,12 @@ export interface AppendStreamChunkParams extends FencedWrite {
   readonly streamId: string;
   readonly payload: unknown;
   readonly appendedBy: "workflow" | "external";
+  /**
+   * An id for this append. A repeat with the same id answers the index the
+   * first append got and appends nothing, so a retry of a call whose answer
+   * was lost doesn't duplicate the chunk.
+   */
+  readonly chunkId?: string;
 }
 
 /** Params of `readStreamChunks`. */

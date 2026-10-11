@@ -12,10 +12,14 @@
 //   2. The demo's `LocalWorkflows + QueuedWorkflows-fallback` chain
 //      handles trigger requests for those names: not in definitions →
 //      falls through → enqueued to workflowStarts → this worker claims
-//      and runs them.
+//      the start (only of a version it hosts) and drives the whole run.
 //   3. Worker writes storage (run state, step results, journal entries)
-//      back to the demo's SQLite via the /rpc/storage proxy.
-//   4. Same dashboard, single source of truth, two processes.
+//      back to the demo's SQLite via the /rpc/storage proxy, fenced by
+//      the run lock.
+//   4. Sleeps, signals and orphaned runs come back through the same
+//      queue: Zorya wakes and recovers them, a hosting worker drives them.
+//   5. Start this before the server, or restart the server: the worker
+//      retries and re-advertises on its own.
 //
 // Triggering: open the dashboard's Workflows page — `hello-world` and
 // `fan-out-demo` show up because this worker advertised them. Click
@@ -110,7 +114,8 @@ const worker = new ZoryaWorker({
   sampleInput: sampleInputFor,
 });
 
-await worker.start();
+worker.start();
+await worker.ready();
 
 console.log(`Worker ${worker.workerId} connected to ${url}`);
 console.log(`  Advertised: ${workflows.map((w) => `${w.name}@${w.version ?? "—"}`).join(", ")}`);
@@ -119,11 +124,11 @@ console.log(
   `    curl -X POST ${url}/api/workflows/hello-world/runs \\\n      -H 'content-type: application/json' -d '{"input":{"name":"curl"}}'`,
 );
 
-// Graceful shutdown — unregisters the worker so the demo's Workers page
-// doesn't show stale entries.
+// Graceful shutdown — waits up to 10s for runs in flight, gives the rest
+// back to the queue, and unregisters the worker.
 const stop = async () => {
   console.log("Stopping worker…");
-  await worker.stop();
+  await worker.stop({ timeoutMs: 10_000 });
   process.exit(0);
 };
 process.on("SIGINT", stop);

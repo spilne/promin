@@ -28,6 +28,11 @@ export type {
   WorkflowHooks,
   CompensateConfig,
 } from "./lib/durable/workflow-types.ts";
+export { workflowClosure } from "./lib/durable/workflow-closure.ts";
+export {
+  compareWorkflowVersions,
+  latestWorkflowVersion,
+} from "./lib/durable/workflow-version-order.ts";
 export { type WorkflowDAG, dagToMermaid, dagToDot } from "./lib/durable/workflow-dag-viz.ts";
 export type {
   StepContext,
@@ -101,6 +106,8 @@ export {
   type ListDueTimersParams,
   type ListSignalWakeupsParams,
   type ListOrphanedRunsParams,
+  type ChildEndedWaits,
+  type ListChildEndedWaitsParams,
   type DeliverSignalParams,
   type SignalTokenRecord,
   type CreateSignalTokenParams,
@@ -216,6 +223,7 @@ export {
   recoverWorkflows,
   type WorkflowRunner,
   type WorkflowRunnerConfig,
+  type RunLockOptions,
   type WorkflowRunnerRunParams,
   type WorkflowRunnerStartParams,
   type WorkflowRunSafeError,

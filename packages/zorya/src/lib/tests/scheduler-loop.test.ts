@@ -19,7 +19,6 @@ import {
   workflow,
   createWorkflowRunner,
 } from "@promin/workflow";
-import { InMemoryStepQueue, InMemoryWorkerRegistry } from "@promin/workflow/distributed";
 import {
   InMemorySchedulerStorage,
   isStaleLeaseError,
@@ -30,7 +29,7 @@ import type { ScheduleTick, SchedulerErrorEvent } from "@promin/workflow/schedul
 import { ZoryaClient, ZoryaWorker } from "@promin/zorya-client";
 import { ZoryaServer } from "../../server/server.ts";
 import { SchedulerLoop } from "../../server/services/scheduler-loop.ts";
-import { DistributedWorkflows, LocalWorkflows, ZoryaScheduler } from "../../index.ts";
+import { LocalWorkflows, QueuedWorkflows, ZoryaScheduler } from "../../index.ts";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -50,16 +49,9 @@ async function pollUntil(
 describe("ZoryaServer scheduling — embedded ZoryaScheduler", () => {
   it("tickOnce fires due schedules through the configured trigger", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const stepQueue = new InMemoryStepQueue();
-    const workerRegistry = new InMemoryWorkerRegistry();
     const schedStore = new InMemorySchedulerStorage();
 
-    const workflows = new DistributedWorkflows({
-      storage,
-      stepQueue,
-      workerRegistry,
-      pollIntervalMs: 25,
-    });
+    const workflows = new QueuedWorkflows({ storage, maintenance: false });
     const scheduler = new ZoryaScheduler({
       storage: schedStore,
       workflows,
@@ -81,11 +73,11 @@ describe("ZoryaServer scheduling — embedded ZoryaScheduler", () => {
     const worker = new ZoryaWorker({
       client,
       workflows: [wf],
-      mode: "step",
-      stepPolling: { intervalMs: 25, heartbeatMs: 1_000 },
+      pollWorkflowStarts: { intervalMs: 25 },
       heartbeatIntervalMs: 1_000,
     });
-    await worker.start();
+    worker.start();
+    await worker.ready();
 
     await schedStore.upsertSchedule({
       id: "every-second",
@@ -113,6 +105,7 @@ describe("ZoryaServer scheduling — embedded ZoryaScheduler", () => {
 
     await worker.stop();
     await server.stop();
+    await workflows.stop();
   });
 
   it("two leaders contending on the same scheduler storage never double-fire", async () => {

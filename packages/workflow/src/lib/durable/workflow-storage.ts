@@ -77,6 +77,8 @@ export type {
   ListDueTimersParams,
   ListSignalWakeupsParams,
   ListOrphanedRunsParams,
+  ChildEndedWaits,
+  ListChildEndedWaitsParams,
 } from "./storage/scanner-store.ts";
 export type {
   SignalStore,

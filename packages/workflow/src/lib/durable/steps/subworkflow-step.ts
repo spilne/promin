@@ -27,6 +27,7 @@ export function createSubworkflowStep(params: {
     name,
     dependsOn,
     kind: "child",
+    child,
     codec: params.codec,
     ...toStepPolicy(params.options),
     execute: (execParams) => {
@@ -54,8 +55,10 @@ export function createSubworkflowStep(params: {
       // retry (which re-drives the same child run) and `onFailure` apply.
       // A child that suspends parks this step as a wait on the child (see
       // `suspendOnChild`), so the parent is re-driven at the child's wake
-      // time or once the child ends. Other engine control flow from the
-      // child (a lost lock) propagates unchanged.
+      // time or once the child ends. A child another driver holds (a
+      // wake-up resumed it on its own) parks this step the same way: its
+      // end wakes the parent. Other engine control flow from the child (a
+      // lost lock) propagates unchanged.
       return tryPromise(
         () =>
           runChild({
@@ -63,7 +66,8 @@ export function createSubworkflowStep(params: {
             workflowId: childWorkflowId,
             input: childInput,
           }).catch(async (err: unknown) => {
-            if ((err as { _tag?: unknown } | null)?._tag !== "WorkflowSuspendedError") throw err;
+            const tag = (err as { _tag?: unknown } | null)?._tag;
+            if (tag !== "WorkflowSuspendedError" && tag !== "WorkflowLockError") throw err;
             throw await suspendOnChild({
               storage: execParams.storage,
               workflowId: execParams.workflowId,

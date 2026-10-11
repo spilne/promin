@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "jsx": "react-jsx",
+    "jsxImportSource": "preact",
+    "lib": ["es2023", "dom", "dom.iterable", "dom.asynciterable"],
+    "types": ["node", "@types/bun"]
+  },
+  "include": ["e2e/**/*.ts"]
+}

@@ -18,6 +18,8 @@
 // own typed wire schema (e.g. SessionEvent for promin-o8dj).
 // ---------------------------------------------------------------------------
 
+import { SystemWallClock, type TimerHandle, type WallClock } from "@promin/workflow";
+
 export type ServerToWorker =
   | { kind: "ping" }
   | { kind: "cmd"; requestId: string; cmd: string; args?: unknown };
@@ -58,6 +60,8 @@ export interface WorkerControlSocketConfig {
    * `WebSocket` (Bun + browser + Node 22+). Tests pass a fake.
    */
   WebSocketImpl?: typeof WebSocket;
+  /** Time source for reconnect backoff. Default: `SystemWallClock`. */
+  clock?: WallClock;
   /**
    * Hook fired on connection state transitions — useful for surfacing
    * "disconnected from server" in the dashboard worker registry.
@@ -77,7 +81,8 @@ export class WorkerControlSocket {
   private readonly onConnectionChange?: (state: "open" | "closed" | "reconnecting") => void;
   private readonly handlers = new Map<string, CommandHandler>();
   private currentDelayMs: number;
-  private reconnectTimer?: ReturnType<typeof setTimeout>;
+  private reconnectTimer?: TimerHandle;
+  private readonly clock: WallClock;
   private stopped = false;
   private state: "closed" | "connecting" | "open" = "closed";
 
@@ -93,6 +98,7 @@ export class WorkerControlSocket {
     this.maxDelayMs = config.maxReconnectDelayMs ?? 30_000;
     this.currentDelayMs = this.initialDelayMs;
     this.WebSocketImpl = config.WebSocketImpl ?? globalThis.WebSocket;
+    this.clock = config.clock ?? SystemWallClock;
     this.onConnectionChange = config.onConnectionChange;
   }
 
@@ -132,7 +138,7 @@ export class WorkerControlSocket {
   async stop(): Promise<void> {
     this.stopped = true;
     if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer.clear();
       this.reconnectTimer = undefined;
     }
     if (this.ws) {
@@ -216,7 +222,7 @@ export class WorkerControlSocket {
     this.state = "closed";
     this.onConnectionChange?.("reconnecting");
     const delay = this.currentDelayMs + Math.floor(Math.random() * this.currentDelayMs * 0.25);
-    this.reconnectTimer = setTimeout(() => {
+    this.reconnectTimer = this.clock.setTimeout(() => {
       this.reconnectTimer = undefined;
       this.connect();
     }, delay);

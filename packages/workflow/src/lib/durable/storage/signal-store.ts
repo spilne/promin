@@ -102,7 +102,10 @@ export interface SignalTokenStore {
    * Insert a signal token or return the existing row when an idempotency
    * key matches. `isCached: true` indicates the caller hit a dedup —
    * the original `(tokenId, bearer)` pair is reused so retries see the
-   * same credentials.
+   * same credentials. A repeat of the same create (same `tokenId`,
+   * workflow, signal and bearer — a retry of a call whose answer was lost)
+   * answers the stored row like the first call (`isCached: false`); a
+   * different create under a taken `tokenId` throws.
    */
   createSignalToken(
     params: CreateSignalTokenParams,
@@ -117,6 +120,9 @@ export interface SignalTokenStore {
    * `value` is delivered to the token's `(workflowId, signalName)` exactly
    * as `deliverSignal` would. Either both land or neither does, so a
    * failed call leaves the token pending and completable again.
+   *
+   * A repeat of the completion that won — the same value again — answers
+   * `delivered` like the first call, without delivering twice.
    *
    * Of concurrent completions of one token exactly one answers
    * `delivered`; the others answer `already_completed` with the winning

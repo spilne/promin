@@ -21,6 +21,7 @@ export class PostgresTestContainer {
   private container?: StartedTestContainer;
   private _sql?: ReturnType<typeof postgres>;
   private _db?: DrizzleDb;
+  private _url?: string;
 
   private readonly user: string;
   private readonly password: string;
@@ -48,6 +49,7 @@ export class PostgresTestContainer {
       .start();
 
     const connectionString = `postgres://${this.user}:${this.password}@${this.container.getHost()}:${this.container.getMappedPort(5432)}/${this.database}`;
+    this._url = connectionString;
     this._sql = postgres(connectionString);
     this._db = drizzle(this._sql);
   }
@@ -63,6 +65,12 @@ export class PostgresTestContainer {
   get db(): DrizzleDb {
     if (!this._db) throw new Error("Container not started. Call start() first.");
     return this._db;
+  }
+
+  /** Connection string, for processes the test spawns. */
+  get url(): string {
+    if (!this._url) throw new Error("Container not started. Call start() first.");
+    return this._url;
   }
 
   get sql(): ReturnType<typeof postgres> {

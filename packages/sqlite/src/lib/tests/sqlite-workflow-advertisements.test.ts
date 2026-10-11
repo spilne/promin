@@ -22,7 +22,7 @@ function freshRegistry(
   return SqliteWorkflowAdvertisementRegistry.make({
     db,
     tableName: `promin_workflow_advertisements_${++counter}`,
-    ...(params && { clock: params.clock }),
+    ...(params && { clock: params.clock, ttlMs: params.ttlMs }),
   });
 }
 

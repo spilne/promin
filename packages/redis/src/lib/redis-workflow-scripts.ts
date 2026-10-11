@@ -66,15 +66,21 @@ end
 // same id. INCR's reply is read back with GET: a Lua number would print
 // large values in exponent form.
 const TRY_LOCK_FN = `
-local function tryLock(lockKey, fenceKey, instanceId, ms)
-  if redis.call('EXISTS', lockKey) == 1 then return {0, ''} end
+local function tryLock(lockKey, fenceKey, instanceId, ms, attemptId)
+  if redis.call('EXISTS', lockKey) == 1 then
+    -- A repeat of the acquire that took the lock gets it back.
+    if attemptId ~= '' and redis.call('HGET', lockKey, 'attempt') == attemptId then
+      return {1, redis.call('HGET', lockKey, 'token')}
+    end
+    return {0, ''}
+  end
   if redis.call('EXISTS', fenceKey) == 0 then
     local t = redis.call('TIME')
     redis.call('SET', fenceKey, t[1] .. string.format('%06d', tonumber(t[2])))
   end
   redis.call('INCR', fenceKey)
   local token = redis.call('GET', fenceKey)
-  redis.call('HSET', lockKey, 'lockedBy', instanceId, 'token', token)
+  redis.call('HSET', lockKey, 'lockedBy', instanceId, 'token', token, 'attempt', attemptId)
   redis.call('PEXPIRE', lockKey, ms)
   return {1, token}
 end
@@ -107,21 +113,21 @@ end
 `;
 
 // KEYS: [lockKey, fenceKey]
-// ARGV: [instanceId, lockDurationMs]
+// ARGV: [instanceId, lockDurationMs, attemptId ('' for none)]
 // Returns: [acquired (0/1), token ('' on miss)]
 export const TRY_LOCK_LUA = `
 ${TRY_LOCK_FN}
-return tryLock(KEYS[1], KEYS[2], ARGV[1], ARGV[2])
+return tryLock(KEYS[1], KEYS[2], ARGV[1], ARGV[2], ARGV[3])
 `;
 
 // Lock and load in one script: the state is the one the lock was taken on.
 // KEYS: [lockKey, fenceKey, wfKey]
-// ARGV: [instanceId, lockDurationMs, wfKey (base)]
+// ARGV: [instanceId, lockDurationMs, wfKey (base), attemptId|'']
 // Returns: [acquired, token, loadRun reply]
 export const TRY_LOCK_AND_LOAD_LUA = `
 ${TRY_LOCK_FN}
 ${LOAD_RUN_FN}
-local lock = tryLock(KEYS[1], KEYS[2], ARGV[1], ARGV[2])
+local lock = tryLock(KEYS[1], KEYS[2], ARGV[1], ARGV[2], ARGV[4])
 return {lock[1], lock[2], loadRun(KEYS[3], ARGV[3])}
 `;
 
@@ -142,6 +148,33 @@ export const HMGET_LUA = `return redis.call('HMGET', KEYS[1], unpack(ARGV))`;
 // LRANGE 0 -1 of one list.
 // KEYS: [list]
 export const LRANGE_ALL_LUA = `return redis.call('LRANGE', KEYS[1], 0, -1)`;
+
+// APPEND_STREAM_CHUNK: push one chunk; with a chunk id, a repeat answers
+// the index the first push got instead of pushing again.
+// KEYS: [streamIdsKey, streamKey, chunkIdsKey]
+// ARGV: [streamId, chunkJson, chunkId|'']
+// Returns: the chunk's index
+export const APPEND_STREAM_CHUNK_LUA = `
+if ARGV[3] ~= '' then
+  local seen = redis.call('HGET', KEYS[3], ARGV[3])
+  if seen then return tonumber(seen) end
+end
+redis.call('SADD', KEYS[1], ARGV[1])
+local index = redis.call('RPUSH', KEYS[2], ARGV[2]) - 1
+if ARGV[3] ~= '' then redis.call('HSET', KEYS[3], ARGV[3], index) end
+return index
+`;
+
+// SAVE_ATTEMPT: one step-attempt row, keyed by the run's current number,
+// so a retried write replaces itself and earlier runs' attempts stay apart.
+// KEYS: [wfKey, attemptsKey]
+// ARGV: [fieldSuffix ('<attempt>|<type>|<stepName>'), attemptJson]
+export const SAVE_ATTEMPT_LUA = `
+local run = redis.call('HGET', KEYS[1], 'run')
+if not run then return 0 end
+redis.call('HSET', KEYS[2], run .. '|' .. ARGV[1], ARGV[2])
+return 1
+`;
 
 // RELEASE_LOCK: honor the fence token when provided, else fall back to
 // the instanceId check.
@@ -363,7 +396,7 @@ elseif existing ~= ARGV[4] then
   return {0, existing}
 end
 redis.call('HSET', stepsKey, ARGV[2], '{"run":' .. h[2] .. ',' .. string.sub(ARGV[5], 2))
-for i = 7, #ARGV do redis.call('RPUSH', KEYS[2], ARGV[i]) end
+for i = 7, #ARGV, 2 do redis.call('HSET', KEYS[2], h[2] .. '|' .. ARGV[i], ARGV[i + 1]) end
 local snap = false
 if h[3] == 'pending' then
   redis.call('HSET', KEYS[1], 'status', 'running', 'startedAt', ARGV[6])
@@ -603,7 +636,7 @@ for r = 1, tonumber(h[3]) do
 end
 local tokenIds = redis.call('HKEYS', b .. ':signal_tokens')
 for _, sid in ipairs(redis.call('SMEMBERS', b .. ':stream-ids')) do
-  redis.call('DEL', b .. ':streams:' .. sid)
+  redis.call('DEL', b .. ':streams:' .. sid, b .. ':stream-chunk-ids:' .. sid)
 end
 local sleeps = {}
 local journalSteps = b .. ':journal:steps'

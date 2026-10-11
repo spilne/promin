@@ -78,7 +78,8 @@ describe("SqliteWorkflowStorage — ctx.child with a suspending child", () => {
       })
       .build();
     const definitions: Record<string, unknown> = { approval, "approval-parent": parent };
-    const resolveWorkflow = (name: string) => definitions[name] as never;
+    const resolveWorkflow = ({ workflowName: name }: { workflowName: string }) =>
+      definitions[name] as never;
 
     const runner = createWorkflowRunner({ storage, clock });
     await runner

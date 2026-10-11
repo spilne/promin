@@ -56,8 +56,9 @@ describe("keyed workflow-mode worker", () => {
       pollWorkflowStarts: { intervalMs: 10 },
       controlSocket: { reconnectDelayMs: 10 },
     });
-    await worker.start();
+    worker.start();
     cleanups.push(() => worker.stop());
+    await worker.ready();
 
     // A worker key cannot trigger: /api is the operator plane.
     await expect(

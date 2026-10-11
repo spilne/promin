@@ -16,7 +16,7 @@ others).
 | `WorkflowRunStore`     | `loadWorkflow`, `loadWorkflowStatus`, `createWorkflow`, `findWorkflowByIdempotencyKey`, `saveStepResult`, `batchSaveStepResults`, `saveStepFailure`, `saveTaskResult`, `saveTaskFailure`, `completeWorkflow`, `failWorkflow`, `cancelWorkflow`, `suspendWorkflow`, `setWorkflowMetadata`, `startFreshRun`, `tripwireWorkflow?`, `resetSteps?` |
 | `WorkflowLockStore`    | `tryLock`, `tryLockAndLoad`, `releaseLock`, `heartbeat`                                                                                                                                                                                                                                                                                       |
 | `WorkflowQueryStore`   | `listWorkflows`, `distinctWorkflowNames`, `distinctWorkflowTypes`, `distinctNamespaces`, `loadRunHistory`, `purgeCompleted`, `listWorkflowSummaries?`, `countWorkflows?`, `cancelStaleWorkflows?`                                                                                                                                             |
-| `WorkflowScannerStore` | `listDueTimers?`, `listSignalWakeups?`, `listOrphanedRuns?`                                                                                                                                                                                                                                                                                   |
+| `WorkflowScannerStore` | `listDueTimers?`, `listSignalWakeups?`, `listOrphanedRuns?`, `listChildEndedWaits?`                                                                                                                                                                                                                                                           |
 | `SignalStore`          | `deliverSignal`, `loadSignals`                                                                                                                                                                                                                                                                                                                |
 | `SignalTokenStore`     | `createSignalToken`, `findSignalTokenById`, `completeSignalToken`, `listSignalTokensForWorkflow`                                                                                                                                                                                                                                              |
 | `StreamStore`          | `appendStreamChunk`, `readStreamChunks`                                                                                                                                                                                                                                                                                                       |
@@ -91,6 +91,7 @@ console.log(storageCapabilities(storage)); // { journal: true, stepAttempts: tru
 | `dueTimers`          | indexed sleep / signal-timeout scan for the sleep scanner            |    yes    |   yes    |  yes  |  yes   |  yes   |
 | `signalWakeups`      | indexed delivered-signal scan for the signal scanner                 |    yes    |   yes    |  yes  |  yes   |  yes   |
 | `orphanedRuns`       | keyset recovery scan for `recover()` and the distributed coordinator |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `childEndedWaits`    | keyset scan for parents parked on an undelivered child wake-up       |    yes    |   yes    |  yes  |  yes   |  yes   |
 
 Every backend with `stepAttempts` writes one attempt row per step attempt,
 whether the step ran inline or on a worker (the runner writes them, with the
@@ -137,6 +138,30 @@ heartbeats the lock, and every write it makes carries the token in `guard`.
 Fencing limits what a stale driver can **write**; it cannot stop a stale
 driver's step body from running. Anything a step does outside storage can
 happen twice.
+
+## Repeated calls
+
+A remote client may resend a call whose answer was lost (the connection
+dropped mid-request). Every store makes these calls answer the resend like
+the first, durably — by its own data, not a response cache:
+
+- `tryLock` / `tryLockAndLoad` with an `attemptId`: a repeat while the lock
+  it took is held gets that lock (and token) back.
+- `startFreshRun` with `expectedRun`: only bumps a run still at that
+  number; a repeat changes nothing and answers the current number.
+- `appendStreamChunk` with a `chunkId`: a repeat answers the first index.
+- `createSignalToken` repeated with the same `tokenId`, workflow, signal
+  and bearer answers the stored token; `completeSignalToken` and
+  `completePendingEntry` repeated with the winning value answer like the
+  winning call (`delivered` / `completed: true`) without writing again.
+- `saveStepAttempt` and `checkpointStep` attempt rows are upserts keyed by
+  `(workflow, step, run, attempt, type)` — the run's current number is
+  stamped by the store, so reruns, resumes and continue-as-new never
+  collide with earlier rows.
+
+`RemoteWorkflowStorage` stamps `attemptId` and `chunkId` on every call;
+`isRetrySafeStorageCall` (`@promin/workflow-remote`) says which calls a
+client may resend after a mid-request disconnect.
 
 ## Lifecycle semantics
 

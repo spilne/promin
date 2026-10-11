@@ -1,43 +1,100 @@
 // ---------------------------------------------------------------------------
-// ZoryaWorker — worker process that advertises its workflow definitions to
-// the Zorya server and runs them locally with storage writes going over
-// the remote wire.
+// ZoryaWorker — a process that hosts workflow code and drives whole runs.
 //
-// This is the "workflow worker" shape — each assignment drives the whole
-// workflow orchestration in the worker's own process. Storage is remote
-// so the server dashboard always sees current state, but step bodies
-// execute with access to the worker's local runtime (native libs,
-// filesystem, secrets, etc.).
+// The worker advertises the workflows (and versions) it hosts, claims their
+// starts from Zorya's start queue — only starts of a version it hosts — and
+// drives each claimed run end to end with the engine (`createWorkflowRunner`)
+// against Zorya's storage over `/rpc/storage`, fenced by the run lock. Zorya
+// queues new runs, wake-ups (a due sleep, a delivered signal, a child run's
+// end) and orphans for recovery; the worker just drives what it claims.
 //
-// Task-level step dispatch (server pushes individual steps to workers) is a
-// future layer on top — see promin-32k2.
+// Guarantees:
+//   - at most `concurrency` runs are driven at once; a claim never takes
+//     more starts than there are free slots
+//   - a start is completed only once its run has ended or suspended; a run
+//     that stopped short (its lock held elsewhere, a lost lock, a storage
+//     outage) is released back to the queue, so it is driven again
+//   - each claim is heartbeated; a lost claim aborts the run at its next
+//     safe point (`run({ signal })`), so two workers never keep driving it
+//   - `stop({ timeoutMs })` stops claiming, waits for runs in flight, then
+//     abandons the rest and releases their starts for another worker
+//   - start-up, advertising and every protocol call retry with backoff: a
+//     worker started before Zorya, or across a Zorya restart, recovers on
+//     its own and re-advertises
+//   - every timer runs on the injected `WallClock`
+//
+// Step bodies are at-least-once: a run resumed after a crash re-runs the
+// step that was in flight. Make them idempotent.
 // ---------------------------------------------------------------------------
 
 import {
+  SystemWallClock,
   createWorkflowRunner,
   hasQueryHandlers,
-  InProcessStepExecutor,
   invokeQueryHandler,
+  isTerminalWorkflowStatus,
   listQueryHandlers,
+  workflowClosure,
+  type RunLockOptions,
+  type WallClock,
   type Workflow,
   type WorkflowRunner,
 } from "@promin/workflow";
-import { createSleepScanner, type SleepScanner, type StepTask } from "@promin/workflow/distributed";
-import type { ZoryaClient } from "./zorya-client.ts";
+import { PollLoop, describeError, isNetworkError } from "@promin/workflow/distributed";
+import type { WorkflowStartClaim, ZoryaClient } from "./zorya-client.ts";
 import { WorkerControlSocket } from "./worker-control-socket.ts";
+
+/** Which part of the worker a reported error came from. */
+export type ZoryaWorkerErrorPhase = "advertise" | "claim" | "heartbeat" | "settle" | "run" | "stop";
+
+export interface ZoryaWorkerErrorEvent {
+  readonly phase: ZoryaWorkerErrorPhase;
+  readonly error: unknown;
+  /** The run concerned, when there is one. */
+  readonly workflowId?: string;
+}
 
 export interface ZoryaWorkerConfig {
   client: ZoryaClient;
-  /** Workflow definitions this worker will execute. Advertised on start. */
+  /**
+   * Workflow definitions this worker hosts. Their `previousVersions` and the
+   * children of their `.subworkflow()` steps are hosted too.
+   */
   workflows: ReadonlyArray<Workflow<unknown, unknown>>;
   /** Stable worker id. Default: random UUID. */
   workerId?: string;
-  /** Capability tags — server routes tasks whose `needs ⊆ capabilities`. */
+  /** Capability tags, recorded in the worker registry. */
   capabilities?: readonly string[];
-  /** Max concurrent runs — advisory metadata today. Default 10. */
+  /** Most runs driven at once; claims never exceed the free slots. Default 10. */
   concurrency?: number;
-  /** Heartbeat interval in ms. Default 5_000. */
+  /**
+   * Registry heartbeat and re-advertise cadence (ms). Keep it well under the
+   * server's advertisement TTL (60 s by default). Default 10_000.
+   */
   heartbeatIntervalMs?: number;
+  /**
+   * Start-queue polling. `intervalMs` (default 1000) is the idle poll
+   * cadence; a claim that filled every free slot polls again at once.
+   * `claimHeartbeatMs` (default 30_000) keeps each claim alive; keep it well
+   * under the server queue's reclaim window (120 s by default). `false`
+   * disables claiming (the worker only advertises and serves control
+   * commands).
+   */
+  pollWorkflowStarts?: false | { intervalMs?: number; claimHeartbeatMs?: number };
+  /**
+   * How long a start whose run is locked elsewhere waits before it can be
+   * claimed again (ms). Default 5_000.
+   */
+  lockedRetryDelayMs?: number;
+  /**
+   * The run lock's lease (`WorkflowRunnerConfig.lock`). A run this worker
+   * was driving when it died is recovered once the lease expires; keep the
+   * server's start reclaim window at least this long. Default: the
+   * runner's (120 s lease, 30 s heartbeat).
+   */
+  lock?: RunLockOptions;
+  /** Time source for every timer. Default: `SystemWallClock`. */
+  clock?: WallClock;
   /** Optional sample-input lookup for dashboard trigger forms. */
   sampleInput?: (workflowName: string) => unknown;
   /**
@@ -45,15 +102,9 @@ export interface ZoryaWorkerConfig {
    * spot stragglers during a rolling deploy.
    */
   version?: string;
-  /**
-   * Free-form labels surfaced on the Workers page. Use for routing
-   * ("region=us-east"), ownership ("team=payments"), deployment tags, etc.
-   */
+  /** Free-form labels surfaced on the Workers page. */
   labels?: Record<string, string>;
-  /**
-   * Namespaces this worker serves. Servers running multi-tenant can scope
-   * task dispatch to matching workers.
-   */
+  /** Namespaces this worker serves (informational). */
   namespaces?: readonly string[];
   /**
    * Raw metadata — merged with auto-detected fields (hostname, pid,
@@ -61,68 +112,9 @@ export interface ZoryaWorkerConfig {
    */
   metadata?: Record<string, unknown>;
   /**
-   * When true (default), the worker starts a SleepScanner so ctx.sleep
-   * inside journaled steps actually resumes.
-   */
-  resumeSuspendedRuns?: boolean;
-  /**
-   * When true (default), the worker polls the server for pending
-   * workflow-start requests (e.g. dashboard "Trigger" button) and runs
-   * any whose workflowName is in this worker's advertised list. Disable
-   * for workers that should never act on dashboard-issued starts.
-   */
-  pollWorkflowStarts?:
-    | boolean
-    | {
-        /** Poll interval in ms. Default 1_000. */
-        intervalMs?: number;
-        /** Max claims per poll. Default 10. */
-        limit?: number;
-        /**
-         * Heartbeat cadence for each running start, in ms. Keep it well
-         * under the server's reclaim window (60s by default) or a long
-         * run is handed to another worker. Default 10_000.
-         */
-        heartbeatMs?: number;
-      };
-  /**
-   * Dispatch mode:
-   * - `"workflow"` (default) — claim whole workflow runs from the server's
-   *   workflow-start queue and execute the entire orchestration locally.
-   *   Pairs with a server in default (non-coordinator) mode.
-   * - `"step"` — claim individual step tasks from the server's step queue
-   *   and execute one step body per claim. Pairs with a server running
-   *   `coordination: { enabled: true }`. The coordinator owns the workflow
-   *   state machine and dispatches ready steps; this worker only runs the
-   *   step bodies it claims.
-   *
-   * Step-mode workers do NOT poll the workflow-start queue and do NOT run
-   * the SleepScanner — both are coordinator-side concerns. Mix-and-match
-   * (workflow-mode + step-mode workers against the same server) is not
-   * supported in v1: the trigger flow chooses one path.
-   */
-  mode?: "workflow" | "step";
-  /**
-   * Step-mode poll cadence + claim batch.
-   */
-  stepPolling?: {
-    /** Poll interval when no tasks available. Default 250ms. */
-    intervalMs?: number;
-    /** Max claims per poll. Default 5. */
-    limit?: number;
-    /** Heartbeat cadence per running step. Default 5_000ms. */
-    heartbeatMs?: number;
-  };
-  /**
-   * Opt in to the persistent worker → server WebSocket. When enabled the
-   * worker keeps a long-lived connection to `${url}/ws/worker` and exposes
-   * `worker.control` for downstream features:
-   *   - agent event streaming (promin-o8dj)
-   *   - workflow query handlers (promin-i0wi)
-   *   - server-pushed step dispatch (future)
-   *
-   * Defaults to `false`: workers that don't need any of those features
-   * stay HTTP-only.
+   * Opt in to the persistent worker → server WebSocket (`worker.control`),
+   * used for agent event streaming and workflow query handlers. Default:
+   * false.
    */
   controlSocket?:
     | boolean
@@ -132,7 +124,49 @@ export interface ZoryaWorkerConfig {
         /** Max reconnect delay. Default 30_000ms. */
         maxReconnectDelayMs?: number;
       };
+  /** Background failures. Default: logs (network blips tersely). */
+  onError?: (event: ZoryaWorkerErrorEvent) => void;
 }
+
+/** Abort reason for a run whose start claim was lost. */
+export class StartClaimLostError extends Error {
+  readonly _tag = "StartClaimLostError";
+  constructor(workflowId: string) {
+    super(`Lost the start claim of run "${workflowId}"; another worker owns it now`);
+    this.name = "StartClaimLostError";
+  }
+}
+
+/** Abort reason for runs abandoned by `stop({ timeoutMs })`. */
+export class ZoryaWorkerStoppingError extends Error {
+  readonly _tag = "ZoryaWorkerStoppingError";
+  constructor() {
+    super("The worker is stopping");
+    this.name = "ZoryaWorkerStoppingError";
+  }
+}
+
+/** A run this worker is driving. */
+interface InFlightRun {
+  readonly claim: WorkflowStartClaim;
+  readonly abort: AbortController;
+  /** Settles once the run stopped and its start was completed or released. */
+  readonly done: Promise<void>;
+  /** Set once the start must not be completed or released by the settle path. */
+  settled: boolean;
+}
+
+/** Statuses a start is done for: the run ended or waits for a wake-up. */
+function runIsAtRest(status: string): boolean {
+  return status === "suspended" || isTerminalWorkflowStatus(status as never);
+}
+
+const SETTLE_RETRIES = 5;
+/**
+ * A run suspended on a sleep due within this long keeps its start until the
+ * wake time instead of completing it (see `drive`).
+ */
+const HOLD_SUSPENDED_START_MS = 60_000;
 
 export class ZoryaWorker {
   readonly workerId: string;
@@ -141,49 +175,44 @@ export class ZoryaWorker {
   /**
    * Persistent WS to the Zorya server. Defined when `config.controlSocket`
    * is truthy. Public so feature integrations (agent streaming, query
-   * handlers) can register command handlers + send frames without
-   * subclassing the worker.
+   * handlers) can register command handlers + send frames.
    */
   readonly control?: WorkerControlSocket;
   /**
-   * Active agent streams hosted on this worker. Keyed by workflowId. The
-   * value is a subscribe function — the WS relay calls it to fan events
-   * out as `frame { streamId, payload }`. Populated by AgentWorker
-   * (promin-eg0d) before agent execution begins; cleared on completion.
-   *
-   * Protocol: handler is called with an observer; returns an unsubscribe
-   * function. Lets multiple browser tabs subscribe to the same workflow
-   * without each one running its own agent — the worker fans the bus
-   * across N WS frames keyed by streamId.
+   * Active agent streams hosted on this worker, keyed by workflowId. The
+   * value subscribes an observer and returns an unsubscribe function.
    */
   readonly streams = new Map<string, (observer: (event: unknown) => void) => () => void>();
   /** streamId → unsubscribe handle for an active server-pushed agent stream. */
   private readonly activeStreams = new Map<string, () => void>();
   private readonly config: ZoryaWorkerConfig;
-  /** name → primary Workflow (the one passed in `config.workflows`). */
-  private readonly byName: Map<string, Workflow<unknown, unknown>>;
-  /**
-   * name → (version → Workflow). Includes each primary def's
-   * previousVersions. The `versionless` sentinel covers defs built
-   * without an explicit `version` (the runtime treats those as
-   * "no version mismatch check" rather than version "1").
-   */
+  private readonly clock: WallClock;
+  private readonly concurrency: number;
+  private readonly claimHeartbeatMs: number;
+  private readonly lockedRetryDelayMs: number;
+  /** Every definition hosted (workflows, previous versions, children). */
+  private readonly hosted: Workflow<unknown, unknown>[];
+  /** name → version → definition (`VERSIONLESS` for definitions without one). */
   private readonly byNameAndVersion: Map<
     string,
     Map<string | typeof VERSIONLESS, Workflow<unknown, unknown>>
   >;
-  private heartbeatHandle?: ReturnType<typeof setInterval>;
-  private startsPollHandle?: ReturnType<typeof setInterval>;
-  private stepPollHandle?: ReturnType<typeof setInterval>;
-  private sleepScanner?: SleepScanner;
+  /** name → the definition passed in `config.workflows` (new runs without a version). */
+  private readonly primary: Map<string, Workflow<unknown, unknown>>;
+  private readonly presence: PollLoop;
+  private readonly claims?: PollLoop;
+  private readonly inFlight = new Map<string, InFlightRun>();
   private started = false;
-  /** taskId → cleanup for an in-flight step heartbeat timer. */
-  private readonly inFlightSteps = new Map<string, () => void>();
-  // Activity tracked so the dashboard can show what each worker is doing.
+  private stopping = false;
+  private presenceTask?: Promise<void>;
+  private claimTask?: Promise<void>;
+  private advertised = false;
+  private readyWaiters: Array<() => void> = [];
+  private readonly startedAt: string;
+  // Activity shown on the Workers page.
   private readonly activeRuns = new Map<string, { workflowName: string; startedAt: number }>();
   private completedCount = 0;
   private failedCount = 0;
-  /** Last terminal run outcomes — bounded ring buffer fed into metadata. */
   private readonly recentRuns: Array<{
     workflowId: string;
     workflowName: string;
@@ -196,13 +225,54 @@ export class ZoryaWorker {
   constructor(config: ZoryaWorkerConfig) {
     this.config = config;
     this.client = config.client;
+    this.clock = config.clock ?? SystemWallClock;
     this.workerId = config.workerId ?? crypto.randomUUID();
-    this.byName = new Map(config.workflows.map((w) => [w.name, w]));
-    this.byNameAndVersion = buildVersionIndex(config.workflows);
+    this.concurrency = Math.max(1, Math.floor(config.concurrency ?? 10));
+    const poll =
+      config.pollWorkflowStarts === false ? undefined : (config.pollWorkflowStarts ?? {});
+    this.claimHeartbeatMs = poll?.claimHeartbeatMs ?? 30_000;
+    this.lockedRetryDelayMs = config.lockedRetryDelayMs ?? 5_000;
+    this.hosted = workflowClosure(config.workflows);
+    this.byNameAndVersion = buildVersionIndex(this.hosted);
+    this.primary = new Map(config.workflows.map((w) => [w.name, w]));
+    this.startedAt = this.clock.now().toISOString();
     this.runner = createWorkflowRunner({
       storage: config.client.storage,
       executorId: this.workerId,
+      clock: this.clock,
+      ...(config.lock !== undefined && { lock: config.lock }),
     });
+
+    this.presence = new PollLoop({
+      name: `zorya-worker ${this.workerId} presence`,
+      intervalMs: config.heartbeatIntervalMs ?? 10_000,
+      clock: this.clock,
+      maxBackoffMs: 5_000,
+      tick: () => this.refreshPresence(),
+      onError: (error, info) => {
+        if (info.consecutiveFailures === 1 || !isNetworkError(error)) {
+          this.report({ phase: "advertise", error });
+        }
+      },
+    });
+    if (poll) {
+      this.claims = new PollLoop({
+        name: `zorya-worker ${this.workerId} claims`,
+        intervalMs: poll.intervalMs ?? 1_000,
+        clock: this.clock,
+        maxBackoffMs: 5_000,
+        tick: () => this.claimTick(),
+        onError: (error, info) => {
+          // The server is down: re-advertise as soon as it is back, since
+          // a restarted server with in-memory stores forgot this worker.
+          if (isNetworkError(error)) this.advertised = false;
+          if (info.consecutiveFailures === 1 || !isNetworkError(error)) {
+            this.report({ phase: "claim", error });
+          }
+        },
+      });
+    }
+
     if (config.controlSocket) {
       const csCfg = typeof config.controlSocket === "object" ? config.controlSocket : {};
       this.control = new WorkerControlSocket({
@@ -212,70 +282,15 @@ export class ZoryaWorker {
         apiKey: this.client.apiKey,
         reconnectDelayMs: csCfg.reconnectDelayMs,
         maxReconnectDelayMs: csCfg.maxReconnectDelayMs,
+        clock: this.clock,
       });
-      // Bind the agent-stream wire — the server's AgentStreamHub broadcasts
-      // these commands when a dashboard SSE client subscribes / unsubscribes.
-      // Workers that aren't hosting the workflow ignore the start command
-      // (no streams entry); the one that is begins forwarding frames.
-      this.control.onCommand("agent-stream-start", (args) => {
-        const { streamId, workflowId } = args as { streamId: string; workflowId: string };
-        const subscribe = this.streams.get(workflowId);
-        if (!subscribe) return { hosted: false };
-        // Replace any prior subscription on the same streamId so reconnecting
-        // dashboard tabs stay clean. Realistically only happens if start
-        // arrives twice — defensive.
-        this.activeStreams.get(streamId)?.();
-        const unsub = subscribe((event) => {
-          this.control?.sendFrame(streamId, event);
-        });
-        this.activeStreams.set(streamId, unsub);
-        return { hosted: true };
-      });
-      this.control.onCommand("agent-stream-stop", (args) => {
-        const { streamId } = args as { streamId: string };
-        const unsub = this.activeStreams.get(streamId);
-        if (unsub) {
-          unsub();
-          this.activeStreams.delete(streamId);
-        }
-        return { ok: true };
-      });
-      // Query handlers — looks up an in-memory query handler registered
-      // by the workflow body via ctx.setQueryHandler. Replies with
-      // { hosted: false } when this worker isn't running the workflow,
-      // so the server's broadcast-and-pick-first pattern finds the
-      // hosting worker. NoHandlerForQuery / WorkflowNotRunning surface
-      // as { ok: false, error } via the standard reply path.
-      this.control.onCommand("query", async (args) => {
-        const {
-          workflowId,
-          name,
-          args: queryArgs,
-        } = args as {
-          workflowId: string;
-          name: string;
-          args?: unknown;
-        };
-        if (!hasQueryHandlers(workflowId)) {
-          return { hosted: false };
-        }
-        const result = await invokeQueryHandler({ workflowId, name, args: queryArgs });
-        return { hosted: true, result };
-      });
-      this.control.onCommand("query-list", (args) => {
-        const { workflowId } = args as { workflowId: string };
-        if (!hasQueryHandlers(workflowId)) return { hosted: false };
-        return { hosted: true, handlers: listQueryHandlers(workflowId) };
-      });
+      this.bindControlCommands(this.control);
     }
   }
 
   /**
    * Register a live event stream for a workflow this worker is hosting.
-   * The `subscribe` fn binds an observer to the underlying source (e.g. an
-   * agent's SessionEventBus) and returns an unsubscribe function. Used by
-   * AgentWorker (promin-eg0d) at agent-task start; unregistered on
-   * completion via the returned cleanup.
+   * Returns the cleanup that unregisters it.
    */
   registerStream(
     workflowId: string,
@@ -284,138 +299,328 @@ export class ZoryaWorker {
     this.streams.set(workflowId, subscribe);
     return () => {
       if (this.streams.get(workflowId) === subscribe) this.streams.delete(workflowId);
-      // Tear down any active server-pushed stream that was bound to this
-      // workflowId — the SSE clients will reconnect / replay if the
-      // workflow comes back.
-      for (const [streamId, unsub] of this.activeStreams) {
-        // We can't tell from here which streamId belongs to this
-        // workflowId without a reverse index — for v1 it's fine to
-        // leave them; the next agent-stream-stop from the server cleans
-        // up. Adding a reverse index when this becomes a hot path.
-        void streamId;
-        void unsub;
-      }
     };
   }
 
-  async start(): Promise<void> {
+  /**
+   * Start advertising and claiming. Returns at once: a server that is not
+   * up yet is retried in the background (`ready()` resolves once the
+   * worker has registered and advertised).
+   */
+  start(): void {
     if (this.started) return;
     this.started = true;
-
-    // Open the persistent control socket first so any feature wiring done
-    // before start() (a downstream caller registering a command handler)
-    // is in place when the server's first ping arrives.
+    this.stopping = false;
     this.control?.start();
+    this.presenceTask = this.presence.start();
+    this.claimTask = this.claims?.start();
+  }
 
-    await this.client.advertise(this.workerId, this.config.workflows, this.config.sampleInput);
+  /** Resolves once the worker has registered and advertised at least once since `start()`. */
+  ready(): Promise<void> {
+    if (this.advertised) return Promise.resolve();
+    return new Promise<void>((resolve) => this.readyWaiters.push(resolve));
+  }
+
+  /** Runs being driven right now. */
+  get activeCount(): number {
+    return this.inFlight.size;
+  }
+
+  /**
+   * Stop claiming, wait for the runs in flight, deregister and unadvertise.
+   * With `timeoutMs`, runs still going after that long are abandoned: each
+   * stops at its next safe point and its start is released at once for
+   * another worker (a step already running finishes; its result is kept
+   * only if it lands before the run stops).
+   */
+  async stop(params: { timeoutMs?: number } = {}): Promise<void> {
+    if (!this.started) return;
+    this.started = false;
+    this.stopping = true;
+    await this.claims?.stop();
+    await this.claimTask;
+
+    const running = [...this.inFlight.values()].map((r) => r.done);
+    if (running.length > 0) {
+      if (params.timeoutMs === undefined) {
+        await Promise.all(running);
+      } else {
+        await this.waitFor({ promises: running, timeoutMs: params.timeoutMs });
+        for (const run of this.inFlight.values()) run.abort.abort(new ZoryaWorkerStoppingError());
+        // Abandoned runs unwind at their next safe point and release their
+        // starts; don't wait on a step that never ends.
+        await this.waitFor({
+          promises: [...this.inFlight.values()].map((r) => r.done),
+          timeoutMs: params.timeoutMs,
+        });
+        await Promise.all(
+          [...this.inFlight.values()].map((run) => this.releaseNow(run).catch(() => {})),
+        );
+      }
+    }
+
+    await this.presence.stop();
+    await this.presenceTask;
+    await this.control?.stop();
+    await this.client.workerRegistry.deregister(this.workerId).catch((error: unknown) => {
+      this.report({ phase: "stop", error });
+    });
+    await this.client.unadvertise(this.workerId).catch((error: unknown) => {
+      this.report({ phase: "stop", error });
+    });
+    this.advertised = false;
+  }
+
+  /**
+   * Run one workflow instance in this process with this worker's runner
+   * (outside the start queue). Tracked on the Workers page.
+   */
+  async run(params: {
+    workflow: string | Workflow<unknown, unknown>;
+    workflowId?: string;
+    input?: unknown;
+  }): Promise<unknown> {
+    const def =
+      typeof params.workflow === "string" ? this.primary.get(params.workflow) : params.workflow;
+    if (!def) throw new Error(`Unknown workflow "${String(params.workflow)}"`);
+    const id = params.workflowId ?? `${def.name}-${this.clock.currentTimeMs().toString(36)}`;
+    return this.tracked({
+      workflowId: id,
+      workflowName: def.name,
+      run: () => this.runner.run({ workflow: def, workflowId: id, input: params.input }),
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Presence: register + advertise, retried until it works, then periodic.
+  // -------------------------------------------------------------------------
+
+  private async refreshPresence(): Promise<void> {
     await this.client.workerRegistry.register({
       workerId: this.workerId,
       capabilities: this.config.capabilities ?? [],
-      concurrency: this.config.concurrency ?? 10,
+      concurrency: this.concurrency,
       metadata: this.buildMetadata(),
     });
-
-    const hbMs = this.config.heartbeatIntervalMs ?? 5_000;
-    this.heartbeatHandle = setInterval(() => {
-      // Re-register rather than plain heartbeat so activity counters +
-      // active-run list refresh on every tick. register() is idempotent
-      // at the storage level; it replaces the entry.
-      this.client.workerRegistry
-        .register({
-          workerId: this.workerId,
-          capabilities: this.config.capabilities ?? [],
-          concurrency: this.config.concurrency ?? 10,
-          metadata: this.buildMetadata(),
-        })
-        .catch(() => {
-          // Transient errors: worker stays up and retries next interval.
-        });
-    }, hbMs);
-
-    const stepMode = this.config.mode === "step";
-
-    // SleepScanner is a workflow-mode concern: in step-mode the coordinator
-    // owns workflow-level orchestration so the worker shouldn't be poking
-    // the same storage with a competing scanner.
-    if (!stepMode && this.config.resumeSuspendedRuns !== false) {
-      this.sleepScanner = createSleepScanner({
-        storage: this.client.storage,
-        runner: this.runner,
-        scanIntervalMs: 2_000,
-        resolveWorkflow: (name) => this.byName.get(name),
-      });
-      void this.sleepScanner.start();
-    }
-
-    if (stepMode) {
-      const cfg = this.config.stepPolling ?? {};
-      const intervalMs = cfg.intervalMs ?? 250;
-      const limit = cfg.limit ?? 5;
-      this.stepPollHandle = setInterval(() => {
-        void this.drainPendingStepTasks(limit).catch(() => {
-          // Transient — next tick retries.
-        });
-      }, intervalMs);
-    } else {
-      const poll = this.config.pollWorkflowStarts;
-      if (poll !== false) {
-        const intervalMs = (typeof poll === "object" && poll?.intervalMs) || 1_000;
-        const limit = (typeof poll === "object" && poll?.limit) || 10;
-        const heartbeatMs = (typeof poll === "object" && poll?.heartbeatMs) || 10_000;
-        this.startsPollHandle = setInterval(() => {
-          void this.drainPendingStarts({ limit, heartbeatMs }).catch(() => {
-            // Transient — next tick retries.
-          });
-        }, intervalMs);
-      }
-    }
-  }
-
-  /**
-   * Claim any pending workflow-starts the server has queued for workflows
-   * we advertise, run them, and ack each on completion (success or
-   * failure — the storage row carries the actual outcome). While a start
-   * runs it is heartbeated so the server doesn't hand it to another worker.
-   */
-  private async drainPendingStarts(params: { limit: number; heartbeatMs: number }): Promise<void> {
-    const specs = this.workflowSpecs();
-    if (specs.length === 0) return;
-    const claims = await this.client.claimWorkflowStarts({
-      workflowSpecs: specs,
+    await this.client.advertise({
       workerId: this.workerId,
-      limit: params.limit,
+      workflows: this.hosted,
+      ...(this.config.sampleInput !== undefined && { sampleInput: this.config.sampleInput }),
     });
-    for (const claim of claims) {
-      const ref = { id: claim.id, claimToken: claim.claimToken };
-      const def = this.resolveWorkflow(claim.workflowName, claim.version);
-      if (!def) {
-        // Server thought we could serve this name+version but our local
-        // index disagrees. Ack so we don't loop, but don't pretend we ran.
-        await this.client.completeWorkflowStart(ref).catch(() => {});
-        continue;
-      }
-      const heartbeat = setInterval(() => {
-        void this.client.heartbeatWorkflowStart(ref).catch(() => {
-          // Transient — next tick retries; a lost claim shows up as false.
-        });
-      }, params.heartbeatMs);
-      // Fire-and-forget: don't block the poll loop on a long workflow.
-      void this.run({ workflow: def, workflowId: claim.workflowId, input: claim.input })
-        .catch(() => {
-          // Failure is recorded in storage by the runner.
-        })
-        .finally(() => {
-          clearInterval(heartbeat);
-          void this.client.completeWorkflowStart(ref).catch(() => {});
-        });
+    if (!this.advertised) {
+      this.advertised = true;
+      const waiters = this.readyWaiters;
+      this.readyWaiters = [];
+      for (const wake of waiters) wake();
+      this.claims?.wake();
     }
   }
 
+  // -------------------------------------------------------------------------
+  // Claims
+  // -------------------------------------------------------------------------
+
+  private async claimTick(): Promise<"again" | "idle"> {
+    if (this.stopping) return "idle";
+    if (!this.advertised) {
+      // Re-advertise first (start-up, or the server came back).
+      this.presence.wake();
+      return "idle";
+    }
+    const free = this.concurrency - this.inFlight.size;
+    if (free <= 0) return "idle";
+    const limit = Math.min(free, 100);
+    const claims = await this.client.claimWorkflowStarts({
+      workflowSpecs: this.workflowSpecs(),
+      workerId: this.workerId,
+      limit,
+    });
+    for (const claim of claims) this.launch(claim);
+    return claims.length === limit ? "again" : "idle";
+  }
+
+  private launch(claim: WorkflowStartClaim): void {
+    const abort = new AbortController();
+    const entry: InFlightRun = {
+      claim,
+      abort,
+      settled: false,
+      done: Promise.resolve(),
+    };
+    (entry as { done: Promise<void> }).done = this.drive(entry).finally(() => {
+      this.inFlight.delete(claim.id);
+      // A slot is free: claim again now instead of after the idle wait.
+      this.claims?.wake();
+    });
+    this.inFlight.set(claim.id, entry);
+  }
+
+  /** Drive one claimed run, then complete or release its start. */
+  private async drive(entry: InFlightRun): Promise<void> {
+    const { claim, abort } = entry;
+    const ref = { id: claim.id, claimToken: claim.claimToken };
+    const def = this.resolveWorkflow({ name: claim.workflowName, version: claim.version });
+    if (!def) {
+      // The claim filter should never hand out a start this worker can't
+      // run; give it back for a worker that can.
+      this.report({
+        phase: "run",
+        workflowId: claim.workflowId,
+        error: new Error(
+          `no hosted definition for "${claim.workflowName}"` +
+            (claim.version !== undefined ? ` version "${claim.version}"` : ""),
+        ),
+      });
+      await this.settle({ entry, action: "release", delayMs: this.lockedRetryDelayMs });
+      return;
+    }
+
+    const heartbeat = this.clock.setInterval(() => {
+      void this.client.heartbeatWorkflowStart(ref).then(
+        (current) => {
+          if (current || abort.signal.aborted) return;
+          entry.settled = true;
+          abort.abort(new StartClaimLostError(claim.workflowId));
+        },
+        (error: unknown) =>
+          this.report({ phase: "heartbeat", workflowId: claim.workflowId, error }),
+      );
+    }, this.claimHeartbeatMs);
+
+    let outcome: { error: unknown } | undefined;
+    try {
+      await this.tracked({
+        workflowId: claim.workflowId,
+        workflowName: claim.workflowName,
+        run: () =>
+          this.runner.run({
+            workflow: def,
+            workflowId: claim.workflowId,
+            input: claim.input,
+            signal: abort.signal,
+          }),
+      });
+    } catch (error) {
+      outcome = { error };
+    } finally {
+      heartbeat.clear();
+    }
+    if (entry.settled) return; // claim lost: the new claimant owns the start
+
+    const rest = await this.loadRest(claim.workflowId);
+    if (rest !== undefined && runIsAtRest(rest.status)) {
+      // Suspended on a sleep due soon (by this worker's clock): keep the
+      // start, claimable at the wake time. Zorya's scan, on its own clock,
+      // may already find the sleep due; completing would have it enqueue
+      // the run again and again until this worker's clock agrees.
+      const dueInMs =
+        rest.status === "suspended" && rest.nextWakeAt !== undefined
+          ? rest.nextWakeAt - this.clock.currentTimeMs()
+          : undefined;
+      if (dueInMs !== undefined && dueInMs > 0 && dueInMs <= HOLD_SUSPENDED_START_MS) {
+        await this.settle({ entry, action: "release", delayMs: Math.ceil(dueInMs) });
+        return;
+      }
+      await this.settle({ entry, action: "complete" });
+      return;
+    }
+    // The run stopped short: its lock is held elsewhere, the lock was lost,
+    // a checkpoint failed, or this worker abandoned it. Give the start back.
+    const tag = (outcome?.error as { _tag?: string } | undefined)?._tag;
+    if (tag !== "WorkflowLockError" && tag !== "WorkflowLockLostError" && outcome) {
+      this.report({ phase: "run", workflowId: claim.workflowId, error: outcome.error });
+    }
+    const delayMs =
+      tag === "WorkflowLockError" ? this.lockedRetryDelayMs : this.stopping ? 0 : 1_000;
+    await this.settle({ entry, action: "release", delayMs });
+  }
+
   /**
-   * (name, versions) tuples this worker advertises for the claim filter.
-   * A workflow that was built without an explicit `version` advertises
-   * `versions: []` — the runtime skips the version-mismatch check for
-   * those, so they can run any pinned-version start.
+   * The run's status and, when it is parked on sleeps only, the earliest
+   * wake time, retried with backoff; undefined when it can't be read.
+   */
+  private async loadRest(
+    workflowId: string,
+  ): Promise<{ status: string; nextWakeAt?: number } | undefined> {
+    for (let attempt = 0; attempt < SETTLE_RETRIES; attempt++) {
+      try {
+        const state = await this.client.storage.loadWorkflow(workflowId);
+        if (!state) return undefined;
+        // Only a run parked on sleeps alone: a signal can arrive any time.
+        const steps = Object.values(state.steps);
+        let nextWakeAt: number | undefined;
+        if (!steps.some((step) => step.status === "waiting_for_signal")) {
+          for (const step of steps) {
+            const at = step.status === "sleeping" ? step.wakeAt : undefined;
+            if (at && (nextWakeAt === undefined || at.getTime() < nextWakeAt)) {
+              nextWakeAt = at.getTime();
+            }
+          }
+        }
+        return { status: state.status, ...(nextWakeAt !== undefined && { nextWakeAt }) };
+      } catch (error) {
+        if (attempt === SETTLE_RETRIES - 1) {
+          this.report({ phase: "settle", workflowId, error });
+          return undefined;
+        }
+        await this.sleep(250 * 2 ** attempt);
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Complete or release the start, retried with backoff. A start that still
+   * can't be settled is left to the server: its claim goes stale, and the
+   * start is claimed again.
+   */
+  private async settle(params: {
+    entry: InFlightRun;
+    action: "complete" | "release";
+    delayMs?: number;
+  }): Promise<void> {
+    const { entry, action } = params;
+    const ref = { id: entry.claim.id, claimToken: entry.claim.claimToken };
+    for (let attempt = 0; attempt < SETTLE_RETRIES && !entry.settled; attempt++) {
+      try {
+        if (action === "complete") await this.client.completeWorkflowStart(ref);
+        else {
+          await this.client.releaseWorkflowStart({
+            ...ref,
+            ...(params.delayMs !== undefined && { delayMs: params.delayMs }),
+          });
+        }
+        entry.settled = true;
+        return;
+      } catch (error) {
+        if (attempt === SETTLE_RETRIES - 1) {
+          this.report({ phase: "settle", workflowId: entry.claim.workflowId, error });
+          return;
+        }
+        await this.sleep(250 * 2 ** attempt);
+      }
+    }
+  }
+
+  /** Release a run's start at once (stop timeout); the run unwinds on its own. */
+  private async releaseNow(entry: InFlightRun): Promise<void> {
+    if (entry.settled) return;
+    entry.settled = true;
+    await this.client.releaseWorkflowStart({
+      id: entry.claim.id,
+      claimToken: entry.claim.claimToken,
+      delayMs: 0,
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Definitions and versions
+  // -------------------------------------------------------------------------
+
+  /**
+   * The (name, versions) the claim filter routes by. A workflow hosted
+   * without an explicit version serves any version (`versions: []`).
    */
   private workflowSpecs(): Array<{ name: string; versions: readonly string[] }> {
     const out: Array<{ name: string; versions: readonly string[] }> = [];
@@ -426,243 +631,120 @@ export class ZoryaWorker {
         if (key === VERSIONLESS) hasVersionless = true;
         else explicit.push(key);
       }
-      // Versionless trumps explicit versions: the worker has a def that
-      // skips the version check entirely, so the queue can hand it any
-      // version-pinned start without mismatch.
       out.push({ name, versions: hasVersionless ? [] : explicit });
     }
     return out;
   }
 
   /**
-   * Pick the right Workflow def for a claim. Prefer an exact version match;
-   * fall back to a versionless def, then the primary registration.
+   * The definition for a run of `name` at `version`: exactly that version,
+   * else a versionless definition; a run without a version gets the
+   * primary definition. Never a definition picked by step name.
    */
-  private resolveWorkflow(
-    name: string,
-    version: string | undefined,
-  ): Workflow<unknown, unknown> | undefined {
-    const byVersion = this.byNameAndVersion.get(name);
+  private resolveWorkflow(params: {
+    name: string;
+    version: string | undefined;
+  }): Workflow<unknown, unknown> | undefined {
+    const byVersion = this.byNameAndVersion.get(params.name);
     if (!byVersion) return undefined;
-    if (version) {
-      const exact = byVersion.get(version);
-      if (exact) return exact;
+    if (params.version !== undefined) {
+      return byVersion.get(params.version) ?? byVersion.get(VERSIONLESS);
     }
-    return byVersion.get(VERSIONLESS) ?? this.byName.get(name);
+    return (
+      this.primary.get(params.name) ?? byVersion.get(VERSIONLESS) ?? [...byVersion.values()][0]
+    );
   }
 
-  async stop(): Promise<void> {
-    if (!this.started) return;
-    this.started = false;
-    if (this.heartbeatHandle !== undefined) clearInterval(this.heartbeatHandle);
-    this.heartbeatHandle = undefined;
-    if (this.startsPollHandle !== undefined) clearInterval(this.startsPollHandle);
-    this.startsPollHandle = undefined;
-    if (this.stepPollHandle !== undefined) clearInterval(this.stepPollHandle);
-    this.stepPollHandle = undefined;
-    for (const cleanup of this.inFlightSteps.values()) cleanup();
-    this.inFlightSteps.clear();
-    await this.sleepScanner?.stop();
-    await this.control?.stop();
-    await this.client.workerRegistry.deregister(this.workerId).catch(() => {});
-    await this.client.unadvertise(this.workerId).catch(() => {});
-  }
+  // -------------------------------------------------------------------------
+  // Helpers
+  // -------------------------------------------------------------------------
 
-  /**
-   * Claim individual step tasks from the server's step queue and execute
-   * them locally. Used in `mode: "step"` against a server running with
-   * `coordination: { enabled: true }`.
-   */
-  private async drainPendingStepTasks(limit: number): Promise<void> {
-    // Routing runs inside the server-side claim: only steps of an
-    // advertised workflow are handed out, so foreign steps never block ours
-    // and none are claimed only to be dropped.
-    const tasks = await this.client.stepQueue.claim({
-      workerId: this.workerId,
-      limit,
-      capabilities: this.config.capabilities ?? [],
-      stepNames: this.advertisedStepNames(),
-    });
-    for (const task of tasks) {
-      void this.executeStepTask(task).catch(() => {
-        // The outcome was settled on the queue inside executeStepTask (or
-        // the task is redelivered once its lease goes stale); swallowing
-        // here keeps the poll loop alive on a transient RPC blip.
-      });
-    }
-  }
-
-  /**
-   * Every step name across the advertised workflows. StepTask doesn't carry
-   * a workflow name, so step-name presence is what decides whether this
-   * worker can run a task.
-   */
-  private advertisedStepNames(): string[] {
-    const names = new Set<string>();
-    for (const wf of this.byName.values()) {
-      for (const s of wf._definition.steps) names.add(s.name);
-    }
-    for (const [, byVersion] of this.byNameAndVersion) {
-      for (const wf of byVersion.values()) {
-        for (const s of wf._definition.steps) names.add(s.name);
-      }
-    }
-    return [...names];
-  }
-
-  private async executeStepTask(task: StepTask): Promise<void> {
-    const def = this.findWorkflowForStep(task);
-    if (!def) {
-      const error = `No advertised workflow contains step "${task.stepName}" on worker ${this.workerId}`;
-      await this.failStepTask({ task, error, durationMs: 0 });
-      return;
-    }
-
-    const heartbeatMs = this.config.stepPolling?.heartbeatMs ?? 5_000;
-    const heartbeat = setInterval(() => {
-      void this.client.stepQueue
-        .heartbeat({ taskId: task.id, claimToken: task.claimToken })
-        .catch(() => {});
-    }, heartbeatMs);
-    const cleanup = () => clearInterval(heartbeat);
-    this.inFlightSteps.set(task.id, cleanup);
-
-    const startMs = Date.now();
+  /** Run `run`, tracking it on the Workers page and in the outcome counters. */
+  private async tracked<T>(params: {
+    workflowId: string;
+    workflowName: string;
+    run: () => Promise<T>;
+  }): Promise<T> {
+    const startedAt = this.clock.currentTimeMs();
+    this.activeRuns.set(params.workflowId, { workflowName: params.workflowName, startedAt });
     try {
-      // One attempt per task, under the step's timeout: the coordinator
-      // that enqueued it applies retry and `onFailure` across attempts.
-      const executor = new InProcessStepExecutor({
-        workflow: def,
-        storage: this.client.storage,
-        singleAttempt: true,
-      });
-      const stepDef = def._definition.steps.find((s) => s.name === task.stepName)!;
-      const result = await executor.executeStep({
-        workflowId: task.workflowId,
-        stepName: task.stepName,
-        input: task.input,
-        // The task carries the step's declared dependencies only.
-        prevResults: { ...task.deps },
-        attempt: task.attempt,
-        needs: stepDef.needs ?? task.needs,
-        priority: stepDef.priority ?? task.priority,
-        version: def.version,
-      });
-      const durationMs = Date.now() - startMs;
-
-      if (result.ok) {
-        // Settle the task only: `complete` is fenced by the claim token, and
-        // the coordinator writes the step row (encoded result + audit
-        // metadata) from the settled task under its run lock.
-        await this.client.stepQueue.complete({
-          taskId: task.id,
-          claimToken: task.claimToken,
-          result: result.result,
-          durationMs,
-          ...(result.metadata !== undefined && { stepMetadata: result.metadata }),
-        });
-      } else if (result.kind === "suspended") {
-        // Journaled step suspended (sleep / signal). The journal entry was
-        // already written to storage by `runJournaledStep`; don't fail or
-        // complete the queue task — let its lease expire so it gets
-        // requeued when the journal entry resumes.
-        return;
-      } else if (result.kind === "continue-as-new") {
-        // A queued step cannot restart the run it belongs to.
-        await this.failStepTask({
-          task,
-          error: result.message ?? `Step "${task.stepName}" requested continue-as-new`,
-          durationMs,
-        });
-      } else {
-        await this.failStepTask({
-          task,
-          error: result.error,
-          ...(result.errorTag !== undefined && { errorTag: result.errorTag }),
-          ...(result.metadata !== undefined && { stepMetadata: result.metadata }),
-          durationMs,
-        });
-      }
+      const result = await params.run();
+      this.completedCount += 1;
+      this.recordRecent({ ...params, status: "completed", startedAt });
+      return result;
     } catch (err) {
-      const durationMs = Date.now() - startMs;
       const tag = (err as { _tag?: string } | undefined)?._tag;
-      if (tag === "WorkflowSuspendedError") {
-        // Journaled step suspended (sleep / signal). The journal entry was
-        // already written to storage by `runJournaledStep`; don't fail or
-        // complete the queue task — let its lease expire so it gets
-        // requeued when the journal entry resumes. The coordinator's
-        // SleepScanner-equivalent (or signal delivery) will trigger the
-        // resume.
-        return;
+      // A suspension, a lock held elsewhere or an abandoned run is not a failure.
+      if (
+        tag !== "WorkflowSuspendedError" &&
+        tag !== "WorkflowLockError" &&
+        tag !== "WorkflowLockLostError"
+      ) {
+        this.failedCount += 1;
+        this.recordRecent({ ...params, status: "failed", startedAt });
       }
-      const msg = err instanceof Error ? err.message : String(err);
-      await this.failStepTask({
-        task,
-        error: msg,
-        ...(tag !== undefined && { errorTag: tag }),
-        durationMs,
-      });
+      throw err;
     } finally {
-      cleanup();
-      this.inFlightSteps.delete(task.id);
+      this.activeRuns.delete(params.workflowId);
     }
   }
 
-  private findWorkflowForStep(task: StepTask): Workflow<unknown, unknown> | undefined {
-    // Prefer an exact-version match across all advertised defs that
-    // contain this step name; fall back to versionless / primary.
-    for (const [, byVersion] of this.byNameAndVersion) {
-      if (task.version) {
-        const exact = byVersion.get(task.version);
-        if (exact && exact._definition.steps.some((s) => s.name === task.stepName)) return exact;
-      }
-      const versionless = byVersion.get(VERSIONLESS);
-      if (versionless && versionless._definition.steps.some((s) => s.name === task.stepName)) {
-        return versionless;
-      }
+  private recordRecent(params: {
+    workflowId: string;
+    workflowName: string;
+    status: "completed" | "failed";
+    startedAt: number;
+  }): void {
+    this.recentRuns.unshift({
+      workflowId: params.workflowId,
+      workflowName: params.workflowName,
+      status: params.status,
+      durationMs: this.clock.currentTimeMs() - params.startedAt,
+      at: this.clock.now().toISOString(),
+    });
+    if (this.recentRuns.length > this.RECENT_RUNS_CAP) {
+      this.recentRuns.length = this.RECENT_RUNS_CAP;
     }
-    for (const wf of this.byName.values()) {
-      if (wf._definition.steps.some((s) => s.name === task.stepName)) return wf;
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise<void>((resolve) => this.clock.setTimeout(resolve, ms));
+  }
+
+  /** Wait for all `promises`, or `timeoutMs`, whichever comes first. */
+  private async waitFor(params: { promises: Promise<void>[]; timeoutMs: number }): Promise<void> {
+    let timer: { clear(): void } | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = this.clock.setTimeout(resolve, params.timeoutMs);
+    });
+    await Promise.race([Promise.all(params.promises).then(() => undefined), timeout]);
+    timer?.clear();
+  }
+
+  private report(event: ZoryaWorkerErrorEvent): void {
+    try {
+      if (this.config.onError) this.config.onError(event);
+      else defaultOnError({ workerId: this.workerId, event });
+    } catch {
+      // A throwing error hook must not take a loop down.
     }
-    return undefined;
   }
 
   /**
-   * Settle the task as failed. Fenced by the claim token; the coordinator
-   * writes the step's failure row from the settled task.
-   */
-  private async failStepTask(params: {
-    readonly task: StepTask;
-    readonly error: string;
-    readonly errorTag?: string;
-    readonly stepMetadata?: Record<string, unknown>;
-    readonly durationMs: number;
-  }): Promise<void> {
-    const { task, ...outcome } = params;
-    await this.client.stepQueue
-      .fail({ taskId: task.id, claimToken: task.claimToken, ...outcome })
-      .catch(() => {});
-  }
-
-  /**
-   * Assemble the metadata record sent on register. Combines user-provided
-   * fields with auto-detected runtime info (hostname, pid, runtime
-   * version). User-supplied metadata wins on key collisions.
+   * The metadata record sent on register: auto-detected runtime info plus
+   * live activity, overridden by user-supplied metadata on key collisions.
    */
   private buildMetadata(): Record<string, unknown> {
     const cfg = this.config;
     const auto: Record<string, unknown> = {
-      workflowNames: cfg.workflows.map((w) => w.name),
-      workflowVersions: Array.from(
-        new Set(cfg.workflows.map((w) => w.version).filter((v): v is string => !!v)),
-      ),
+      workflowNames: [...new Set(this.hosted.map((w) => w.name))],
+      workflowVersions: [
+        ...new Set(this.hosted.map((w) => w.version).filter((v): v is string => !!v)),
+      ],
       capabilities: cfg.capabilities ?? [],
-      concurrency: cfg.concurrency ?? 10,
-      startedAt: new Date().toISOString(),
+      concurrency: this.concurrency,
+      startedAt: this.startedAt,
       runtime: detectRuntime(),
-      // Live activity counters — refreshed on every register() call from
-      // the heartbeat tick. Gives the dashboard "what is this worker doing
-      // right now" without attributing runs to workers in storage.
       activeRuns: [...this.activeRuns.entries()].map(([id, rec]) => ({
         workflowId: id,
         workflowName: rec.workflowName,
@@ -681,99 +763,88 @@ export class ZoryaWorker {
     if (cfg.version) auto.version = cfg.version;
     if (cfg.labels && Object.keys(cfg.labels).length > 0) auto.labels = cfg.labels;
     if (cfg.namespaces && cfg.namespaces.length > 0) auto.namespaces = [...cfg.namespaces];
-    return { ...auto, ...(cfg.metadata ?? {}) };
+    return { ...auto, ...cfg.metadata };
   }
 
-  /**
-   * Run one workflow instance using this worker's runner. Storage writes
-   * go over the wire so server dashboards see progress live. Tracks the
-   * run in `activeRuns` so the dashboard's Workers page shows what each
-   * worker is doing right now.
-   */
-  async run(params: {
-    workflow: string | Workflow<unknown, unknown>;
-    workflowId?: string;
-    input?: unknown;
-  }): Promise<unknown> {
-    const def =
-      typeof params.workflow === "string" ? this.byName.get(params.workflow) : params.workflow;
-    if (!def) {
-      throw new Error(`Unknown workflow "${String(params.workflow)}"`);
-    }
-    const id = params.workflowId ?? `${def.name}-${Date.now().toString(36)}-${randomSuffix()}`;
-    this.activeRuns.set(id, { workflowName: def.name, startedAt: Date.now() });
-    const startedAt = Date.now();
-    try {
-      const result = await this.runner.run({ workflow: def, workflowId: id, input: params.input });
-      this.completedCount += 1;
-      this.recordRecent(id, def.name, "completed", Date.now() - startedAt);
-      return result;
-    } catch (err) {
-      this.failedCount += 1;
-      this.recordRecent(id, def.name, "failed", Date.now() - startedAt);
-      throw err;
-    } finally {
-      this.activeRuns.delete(id);
-    }
-  }
-
-  private recordRecent(
-    workflowId: string,
-    workflowName: string,
-    status: "completed" | "failed",
-    durationMs: number,
-  ): void {
-    this.recentRuns.unshift({
-      workflowId,
-      workflowName,
-      status,
-      durationMs,
-      at: new Date().toISOString(),
+  private bindControlCommands(control: WorkerControlSocket): void {
+    // Agent streams: the server's AgentStreamHub broadcasts these when a
+    // dashboard SSE client subscribes / unsubscribes. Workers that aren't
+    // hosting the workflow answer `{ hosted: false }`.
+    control.onCommand("agent-stream-start", (args) => {
+      const { streamId, workflowId } = args as { streamId: string; workflowId: string };
+      const subscribe = this.streams.get(workflowId);
+      if (!subscribe) return { hosted: false };
+      this.activeStreams.get(streamId)?.();
+      const unsub = subscribe((event) => {
+        this.control?.sendFrame(streamId, event);
+      });
+      this.activeStreams.set(streamId, unsub);
+      return { hosted: true };
     });
-    if (this.recentRuns.length > this.RECENT_RUNS_CAP) {
-      this.recentRuns.length = this.RECENT_RUNS_CAP;
-    }
+    control.onCommand("agent-stream-stop", (args) => {
+      const { streamId } = args as { streamId: string };
+      const unsub = this.activeStreams.get(streamId);
+      if (unsub) {
+        unsub();
+        this.activeStreams.delete(streamId);
+      }
+      return { ok: true };
+    });
+    // Query handlers registered by a run this worker drives
+    // (`ctx.setQueryHandler`). `{ hosted: false }` lets the server's
+    // broadcast find the worker that drives the run.
+    control.onCommand("query", async (args) => {
+      const {
+        workflowId,
+        name,
+        args: queryArgs,
+      } = args as { workflowId: string; name: string; args?: unknown };
+      if (!hasQueryHandlers(workflowId)) return { hosted: false };
+      const result = await invokeQueryHandler({ workflowId, name, args: queryArgs });
+      return { hosted: true, result };
+    });
+    control.onCommand("query-list", (args) => {
+      const { workflowId } = args as { workflowId: string };
+      if (!hasQueryHandlers(workflowId)) return { hosted: false };
+      return { hosted: true, handlers: listQueryHandlers(workflowId) };
+    });
   }
-}
-
-function randomSuffix(): string {
-  return Math.random().toString(36).slice(2, 8);
 }
 
 /**
  * Sentinel for workflows built without an explicit `version`. The runtime
- * doesn't substitute a default — it simply skips the version-mismatch
- * check — so we keep these in their own bucket rather than pretending
- * they're version "1".
+ * doesn't substitute a default — it skips the version-mismatch check — so
+ * these keep their own bucket rather than pretending to be version "1".
  */
 const VERSIONLESS = Symbol("versionless");
 
-/**
- * Walk every advertised workflow + its previousVersions and build a
- * `name → version → def` lookup.
- */
+/** `name → version → definition` over every hosted definition. */
 function buildVersionIndex(
   workflows: ReadonlyArray<Workflow<unknown, unknown>>,
 ): Map<string, Map<string | typeof VERSIONLESS, Workflow<unknown, unknown>>> {
   const out = new Map<string, Map<string | typeof VERSIONLESS, Workflow<unknown, unknown>>>();
-  const add = (def: Workflow<unknown, unknown>) => {
+  for (const def of workflows) {
     let inner = out.get(def.name);
     if (!inner) {
       inner = new Map();
       out.set(def.name, inner);
     }
-    inner.set(def.version ?? VERSIONLESS, def);
-  };
-  for (const wf of workflows) {
-    add(wf);
-    // previousVersions live on `_definition` (runtime internals), not on
-    // the public Workflow shape — that's where the runner reads them too.
-    const prev = wf._definition.previousVersions;
-    if (prev) {
-      for (const p of prev) add(p);
-    }
+    const key = def.version ?? VERSIONLESS;
+    if (!inner.has(key)) inner.set(key, def);
   }
   return out;
+}
+
+function defaultOnError(params: { workerId: string; event: ZoryaWorkerErrorEvent }): void {
+  const { workerId, event } = params;
+  const where = event.workflowId ? ` (run ${event.workflowId})` : "";
+  if (isNetworkError(event.error)) {
+    console.warn(
+      `[zorya-worker ${workerId}] ${event.phase}${where}: server unreachable, retrying — ${describeError(event.error)}`,
+    );
+    return;
+  }
+  console.error(`[zorya-worker ${workerId}] ${event.phase} failed${where}:`, event.error);
 }
 
 function detectRuntime(): string {
@@ -787,8 +858,7 @@ function detectRuntime(): string {
 
 function tryGetHostname(): string | undefined {
   try {
-    // Dynamic import kept in a try/catch so browser builds that bundle this
-    // module don't blow up at load time.
+    // Required lazily so browser bundles that include this module don't fail at load.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const os = require("node:os") as { hostname?: () => string };
     return os.hostname?.();

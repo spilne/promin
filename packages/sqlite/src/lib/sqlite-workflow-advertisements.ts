@@ -3,11 +3,11 @@
 // over SQLite.
 //
 // Workers advertise their workflow definitions on connect (`upsert`) and
-// the dashboard reads `distinct()` to populate the Workflows page. The
-// in-memory impl loses everything on restart; this Sqlite impl persists
-// across boots so workers don't have to re-advertise on every reconnect
-// and the dashboard's Workflows tab keeps showing the catalog while
-// workers are momentarily disconnected.
+// re-advertise periodically; the server reads `distinct()` to route starts
+// and populate the Workflows page. This Sqlite impl persists across boots,
+// so a server restart keeps the catalog of live workers. An advertisement
+// not refreshed within `ttlMs` is left out of `list` / `distinct` and
+// deleted by `prune`.
 //
 // Schema (auto-created on first use):
 //
@@ -24,6 +24,7 @@
 
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
+  DEFAULT_ADVERTISEMENT_TTL_MS,
   type AdvertisedWorkflow,
   type AdvertisementEntry,
   type WorkflowAdvertisementRegistry,
@@ -43,21 +44,29 @@ export interface SqliteWorkflowAdvertisementRegistryOptions {
   db: SqliteDatabase;
   /** Override the table name (default: `promin_workflow_advertisements`). */
   tableName?: string;
-  /** Time source for `advertisedAt`. Default: `SystemWallClock`. */
+  /** Time source for `advertisedAt` and expiry. Default: `SystemWallClock`. */
   clock?: WallClock;
+  /**
+   * An advertisement not refreshed for this long expires. Default:
+   * `DEFAULT_ADVERTISEMENT_TTL_MS`; `Infinity` keeps them until `remove`.
+   */
+  ttlMs?: number;
 }
 
 export class SqliteWorkflowAdvertisementRegistry implements WorkflowAdvertisementRegistry {
   private readonly _t: string;
   private readonly clock: WallClock;
+  private readonly ttlMs: number;
 
   private constructor(
     private readonly db: SqliteDatabase,
     table: string,
     clock: WallClock,
+    ttlMs: number,
   ) {
     this._t = table;
     this.clock = clock;
+    this.ttlMs = ttlMs;
     this._setup();
   }
 
@@ -68,6 +77,7 @@ export class SqliteWorkflowAdvertisementRegistry implements WorkflowAdvertisemen
       opts.db,
       opts.tableName ?? "promin_workflow_advertisements",
       opts.clock ?? SystemWallClock,
+      opts.ttlMs ?? DEFAULT_ADVERTISEMENT_TTL_MS,
     );
   }
 
@@ -127,8 +137,10 @@ export class SqliteWorkflowAdvertisementRegistry implements WorkflowAdvertisemen
 
   async list(): Promise<AdvertisementEntry[]> {
     const rows = this.db
-      .query<Row>(`SELECT * FROM ${this._t} ORDER BY worker_id, workflow_name`)
-      .all();
+      .query<Row>(
+        `SELECT * FROM ${this._t} WHERE advertised_at > ? ORDER BY worker_id, workflow_name`,
+      )
+      .all(this.cutoff());
     const byWorker = new Map<string, AdvertisementEntry>();
     for (const r of rows) {
       let entry = byWorker.get(r.worker_id);
@@ -155,9 +167,10 @@ export class SqliteWorkflowAdvertisementRegistry implements WorkflowAdvertisemen
     const rows = this.db
       .query<Row>(
         `SELECT * FROM ${this._t}
+         WHERE advertised_at > ?
          ORDER BY workflow_name ASC, COALESCE(version, '') ASC, advertised_at DESC`,
       )
-      .all();
+      .all(this.cutoff());
     const byKey = new Map<string, AdvertisedWorkflow>();
     for (const r of rows) {
       const key = `${r.workflow_name}@${r.version ?? ""}`;
@@ -165,6 +178,25 @@ export class SqliteWorkflowAdvertisementRegistry implements WorkflowAdvertisemen
       if (!byKey.has(key)) byKey.set(key, rowToAdvertisedWorkflow(r));
     }
     return [...byKey.values()];
+  }
+
+  async prune(): Promise<number> {
+    const t = this._t;
+    const cutoff = this.cutoff();
+    const workers = this.db
+      .query<{ c: number }>(
+        `SELECT COUNT(DISTINCT worker_id) AS c FROM ${t} WHERE advertised_at <= ?`,
+      )
+      .get(cutoff);
+    this.db.query(`DELETE FROM ${t} WHERE advertised_at <= ?`).run(cutoff);
+    return Number(workers?.c ?? 0);
+  }
+
+  /** Advertisements stamped at or before this epoch ms have expired. */
+  private cutoff(): number {
+    return Number.isFinite(this.ttlMs)
+      ? this.clock.currentTimeMs() - this.ttlMs
+      : Number.MIN_SAFE_INTEGER;
   }
 }
 

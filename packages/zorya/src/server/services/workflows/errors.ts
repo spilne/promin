@@ -6,6 +6,41 @@ export class UnknownWorkflowError extends Error {
 }
 
 /**
+ * A trigger asked for a version of a workflow that no live worker (or
+ * in-process definition) can run. Nothing was created.
+ */
+export class UnknownWorkflowVersionError extends Error {
+  override readonly name = "UnknownWorkflowVersionError";
+  readonly workflowName: string;
+  readonly version: string;
+  readonly available: readonly string[];
+  constructor(params: { workflowName: string; version: string; available: readonly string[] }) {
+    super(
+      `Unknown version "${params.version}" of workflow "${params.workflowName}"` +
+        (params.available.length > 0
+          ? ` — available: ${params.available.join(", ")}`
+          : " — no versioned definition is available"),
+    );
+    this.workflowName = params.workflowName;
+    this.version = params.version;
+    this.available = params.available;
+  }
+}
+
+/**
+ * Resume refused: the run was cancelled. A cancelled run stays cancelled;
+ * start a fresh run (`rerun`) to run it again.
+ */
+export class RunCancelledError extends Error {
+  override readonly name = "RunCancelledError";
+  readonly workflowId: string;
+  constructor(workflowId: string) {
+    super(`Run "${workflowId}" was cancelled; rerun it to start it again`);
+    this.workflowId = workflowId;
+  }
+}
+
+/**
  * A trigger named a `workflowId` that already belongs to a run of a
  * different workflow. The existing run is left untouched.
  */

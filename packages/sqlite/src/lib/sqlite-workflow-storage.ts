@@ -21,6 +21,7 @@ import {
   decodeRunSource,
   withoutCompensationLedger,
 } from "@promin/workflow/storage-kit";
+import { CHILD_ENDED_SIGNAL_PREFIX } from "@promin/workflow/storage-kit";
 import type {
   WorkflowState,
   WorkflowStatusSnapshot,
@@ -73,7 +74,11 @@ import type {
   StepAttemptType,
   StepCheckpointStore,
 } from "@promin/workflow";
-import { applyMetadataPatch } from "@promin/workflow/storage-kit";
+import {
+  applyMetadataPatch,
+  sameSignalTokenCreate,
+  sameStoredValue,
+} from "@promin/workflow/storage-kit";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
 /**
@@ -204,7 +209,8 @@ export class SqliteWorkflowStorage
       CREATE TABLE IF NOT EXISTS ${t}_locks (
         workflow_id TEXT    NOT NULL PRIMARY KEY,
         expires_at  INTEGER NOT NULL,
-        token       TEXT    NOT NULL
+        token       TEXT    NOT NULL,
+        attempt_id  TEXT
       )
     `);
     // Fence tokens come from one shared counter row so every storage
@@ -252,12 +258,14 @@ export class SqliteWorkflowStorage
     );
     // Step attempt history — append-only audit log of every execution +
     // compensation attempt. Surfaces "which worker ran this?" + retry
-    // analysis on the dashboard. (PRIMARY KEY (workflow_id, step_name,
-    // attempt, type) makes saveStepAttempt naturally idempotent on retry.)
+    // analysis on the dashboard. (PRIMARY KEY (workflow_id, step_name, run,
+    // attempt, type) makes saveStepAttempt idempotent on retry, and keeps
+    // the attempts of earlier runs — rerun, continue-as-new — apart.)
     this.db.run(`
       CREATE TABLE IF NOT EXISTS ${t}_attempts (
         workflow_id  TEXT    NOT NULL,
         step_name    TEXT    NOT NULL,
+        run          INTEGER NOT NULL DEFAULT 1,
         attempt      INTEGER NOT NULL,
         type         TEXT    NOT NULL,            -- 'execution' | 'compensation'
         status       TEXT    NOT NULL,            -- 'completed' | 'failed'
@@ -267,7 +275,7 @@ export class SqliteWorkflowStorage
         started_at   INTEGER NOT NULL,
         completed_at INTEGER NOT NULL,
         executor_id  TEXT,
-        PRIMARY KEY (workflow_id, step_name, attempt, type)
+        PRIMARY KEY (workflow_id, step_name, run, attempt, type)
       )
     `);
     // Public-bearer signal tokens — authz sidecar for deliverSignal. Tokens
@@ -302,9 +310,13 @@ export class SqliteWorkflowStorage
         payload      TEXT    NOT NULL,
         appended_by  TEXT    NOT NULL,
         appended_at  INTEGER NOT NULL,
+        chunk_id     TEXT,
         PRIMARY KEY (workflow_id, stream_id, chunk_index)
       )
     `);
+    this.db.run(
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${t}_streams_chunk_id ON ${t}_streams (workflow_id, stream_id, chunk_id) WHERE chunk_id IS NOT NULL`,
+    );
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_streams_wfid ON ${t}_streams (workflow_id, stream_id, chunk_index)`,
     );
@@ -725,8 +737,9 @@ export class SqliteWorkflowStorage
 
   /**
    * Bulk-fail all pending/running/suspended workflows whose `created_at` is
-   * older than `olderThanMs` milliseconds. Returns the number of rows updated.
-   * Single UPDATE statement — safe to call at startup even against large DBs.
+   * older than `olderThanMs` milliseconds, except runs whose lock is live
+   * (someone is driving them). Returns the number of rows updated. Single
+   * UPDATE statement — safe to call at startup even against large DBs.
    */
   cancelStaleWorkflows(params: {
     olderThanMs: number;
@@ -737,22 +750,24 @@ export class SqliteWorkflowStorage
     const statuses = params.statuses ?? ["pending", "running", "suspended"];
     const placeholders = statuses.map(() => "?").join(", ");
     const now = this.clock.currentTimeMs();
+    const unlocked = `NOT EXISTS (SELECT 1 FROM ${this._t}_locks l
+                        WHERE l.workflow_id = ${this._t}.workflow_id AND l.expires_at > ?)`;
     // Count first (the interface's run() returns void, not a changes count).
     const before = this.db
       .query<{ c: number }>(
         `SELECT COUNT(*) AS c FROM ${this._t}
-         WHERE status IN (${placeholders}) AND created_at < ?`,
+         WHERE status IN (${placeholders}) AND created_at < ? AND ${unlocked}`,
       )
-      .get(...statuses, cutoff);
+      .get(...statuses, cutoff, now);
     const count = Number(before?.c ?? 0);
     if (count === 0) return 0;
     this.db
       .query(
         `UPDATE ${this._t}
          SET status = 'failed', error = ?, completed_at = ?, updated_at = ?
-         WHERE status IN (${placeholders}) AND created_at < ?`,
+         WHERE status IN (${placeholders}) AND created_at < ? AND ${unlocked}`,
       )
-      .run(params.error ?? "Stale run cancelled on restart", now, now, ...statuses, cutoff);
+      .run(params.error ?? "Stale run cancelled on restart", now, now, ...statuses, cutoff, now);
     return count;
   }
 
@@ -1261,6 +1276,16 @@ export class SqliteWorkflowStorage
     expiresAt: Date;
   }): Promise<{ record: SignalTokenRecord; isCached: boolean }> {
     return this.db.transaction((): { record: SignalTokenRecord; isCached: boolean } => {
+      const taken = this.db
+        .query<SignalTokenRow>(`SELECT * FROM ${this._t}_signal_tokens WHERE token_id = ?`)
+        .get(params.tokenId);
+      if (taken) {
+        const record = rowToSignalToken(taken);
+        if (sameSignalTokenCreate({ existing: record, requested: params })) {
+          return { record, isCached: false };
+        }
+        throw new Error(`createSignalToken: token id ${params.tokenId} already exists`);
+      }
       if (params.idempotencyKey) {
         const existing = this.db
           .query<SignalTokenRow>(
@@ -1311,7 +1336,10 @@ export class SqliteWorkflowStorage
         .get(params.tokenId);
       if (!row) throw new Error(`signal token ${params.tokenId} not found`);
       if (row.completed_at !== null) {
-        return { outcome: "already_completed", record: rowToSignalToken(row) };
+        // A repeat of the completion that won answers like the first call.
+        const record = rowToSignalToken(row);
+        const again = sameStoredValue({ stored: record.completedValue, requested: params.value });
+        return { outcome: again ? "delivered" : "already_completed", record };
       }
       const updated = this.db
         .query<SignalTokenRow>(
@@ -1350,6 +1378,15 @@ export class SqliteWorkflowStorage
   }: AppendStreamChunkParams): Promise<{ chunkIndex: number }> {
     return this.db.transaction((): { chunkIndex: number } => {
       this._checkFence({ workflowId: params.workflowId, guard });
+      if (params.chunkId !== undefined) {
+        const seen = this.db
+          .query<{ chunk_index: number }>(
+            `SELECT chunk_index FROM ${this._t}_streams
+             WHERE workflow_id = ? AND stream_id = ? AND chunk_id = ?`,
+          )
+          .get(params.workflowId, params.streamId, params.chunkId);
+        if (seen) return { chunkIndex: seen.chunk_index };
+      }
       const row = this.db
         .query<{ next: number | null }>(
           `SELECT MAX(chunk_index) AS next FROM ${this._t}_streams
@@ -1359,8 +1396,8 @@ export class SqliteWorkflowStorage
       const chunkIndex = row?.next == null ? 0 : row.next + 1;
       this.db
         .query(
-          `INSERT INTO ${this._t}_streams (workflow_id, stream_id, chunk_index, payload, appended_by, appended_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO ${this._t}_streams (workflow_id, stream_id, chunk_index, payload, appended_by, appended_at, chunk_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           params.workflowId,
@@ -1369,6 +1406,7 @@ export class SqliteWorkflowStorage
           JSON.stringify(params.payload),
           params.appendedBy,
           this.clock.currentTimeMs(),
+          params.chunkId ?? null,
         );
       return { chunkIndex };
     })();
@@ -1415,28 +1453,39 @@ export class SqliteWorkflowStorage
   async tryLock({
     workflowId,
     lockDurationMs,
+    attemptId,
   }: TryLockParams): Promise<{ acquired: boolean; token?: FenceToken }> {
     return this.db.transaction((): { acquired: boolean; token?: FenceToken } => {
       const now = this.clock.currentTimeMs();
       const existing = this.db
-        .query<{ expires_at: number; token: string }>(
-          `SELECT expires_at, token FROM ${this._t}_locks WHERE workflow_id = ?`,
+        .query<{ expires_at: number; token: string; attempt_id: string | null }>(
+          `SELECT expires_at, token, attempt_id FROM ${this._t}_locks WHERE workflow_id = ?`,
         )
         .get(workflowId);
 
-      if (existing && existing.expires_at > now) return { acquired: false };
+      if (existing && existing.expires_at > now) {
+        // A repeat of the acquire that took the lock gets it back.
+        if (attemptId !== undefined && existing.attempt_id === attemptId) {
+          return { acquired: true, token: existing.token };
+        }
+        return { acquired: false };
+      }
 
       const token = this._nextFenceToken();
       const expiresAt = now + lockDurationMs;
 
       if (existing) {
         this.db
-          .query(`UPDATE ${this._t}_locks SET expires_at = ?, token = ? WHERE workflow_id = ?`)
-          .run(expiresAt, token, workflowId);
+          .query(
+            `UPDATE ${this._t}_locks SET expires_at = ?, token = ?, attempt_id = ? WHERE workflow_id = ?`,
+          )
+          .run(expiresAt, token, attemptId ?? null, workflowId);
       } else {
         this.db
-          .query(`INSERT INTO ${this._t}_locks (workflow_id, expires_at, token) VALUES (?, ?, ?)`)
-          .run(workflowId, expiresAt, token);
+          .query(
+            `INSERT INTO ${this._t}_locks (workflow_id, expires_at, token, attempt_id) VALUES (?, ?, ?, ?)`,
+          )
+          .run(workflowId, expiresAt, token, attemptId ?? null);
       }
       return { acquired: true, token };
     })();
@@ -1445,8 +1494,13 @@ export class SqliteWorkflowStorage
   async tryLockAndLoad({
     workflowId,
     lockDurationMs,
+    attemptId,
   }: TryLockParams): Promise<{ locked: boolean; token?: FenceToken; state: WorkflowState | null }> {
-    const { acquired, token } = await this.tryLock({ workflowId, lockDurationMs });
+    const { acquired, token } = await this.tryLock({
+      workflowId,
+      lockDurationMs,
+      ...(attemptId !== undefined && { attemptId }),
+    });
     const state = await this.loadWorkflow(workflowId);
     return { locked: acquired, token, state };
   }
@@ -1488,13 +1542,14 @@ export class SqliteWorkflowStorage
   // WorkflowStorage — run history
   // ---------------------------------------------------------------------------
 
-  async startFreshRun({ workflowId, guard }: StartFreshRunParams): Promise<number> {
+  async startFreshRun({ workflowId, guard, expectedRun }: StartFreshRunParams): Promise<number> {
     return this.db.transaction((): number => {
       this._checkFence({ workflowId, guard });
       const row = this.db
         .query<WfRow>(`SELECT * FROM ${this._t} WHERE workflow_id = ?`)
         .get(workflowId);
       if (!row) throw new Error(`Workflow ${workflowId} not found`);
+      if (expectedRun !== undefined && row.run !== expectedRun) return row.run;
 
       // Archive current run
       this.db
@@ -1685,6 +1740,48 @@ export class SqliteWorkflowStorage
       signalName: r.signal_name!,
       signalPayload: JSON.parse(r.payload),
     }));
+  }
+
+  async listChildEndedWaits(params: {
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<
+    Array<{ workflowId: string; waits: Array<{ stepName: string; signalName: string }> }>
+  > {
+    const after = params.afterWorkflowId !== undefined ? "AND w.workflow_id > ?" : "";
+    const waiting = `
+           FROM ${this._t} w, json_each(w.steps) j
+           WHERE w.status = 'suspended' __AFTER__
+             AND json_extract(j.value, '$.status') = 'waiting_for_signal'
+             AND substr(json_extract(j.value, '$.signalName'), 1, ?) = ?
+             AND NOT EXISTS (
+               SELECT 1 FROM ${this._t}_signals g
+               WHERE g.workflow_id = w.workflow_id
+                 AND g.signal_name = json_extract(j.value, '$.signalName')
+             )`;
+    const prefix = [CHILD_ENDED_SIGNAL_PREFIX.length, CHILD_ENDED_SIGNAL_PREFIX];
+    // Placeholders in order: the outer filter, then the inner one and its limit.
+    const args: unknown[] = [
+      ...prefix,
+      ...(params.afterWorkflowId !== undefined ? [params.afterWorkflowId] : []),
+      ...prefix,
+      Math.max(0, Math.trunc(params.limit)),
+    ];
+    // The first `limit` runs with such a wait, then every such wait of each.
+    const rows = this.db
+      .query<{ workflow_id: string; step_name: string; signal_name: string }>(
+        `SELECT w.workflow_id, j.key AS step_name,
+           json_extract(j.value, '$.signalName') AS signal_name
+         ${waiting.replace("__AFTER__", "")}
+           AND w.workflow_id IN (
+             SELECT DISTINCT w.workflow_id ${waiting.replace("__AFTER__", after)}
+             ORDER BY w.workflow_id
+             LIMIT ?
+           )
+         ORDER BY w.workflow_id, j.key`,
+      )
+      .all(...(args as Array<string | number>));
+    return groupChildEndedWaits(rows);
   }
 
   async listOrphanedRuns(params: {
@@ -1967,9 +2064,11 @@ export class SqliteWorkflowStorage
          WHERE workflow_id = ? AND step_name = ? AND activity_index = ? AND branch_path = ?`,
       )
       .get(params.workflowId, params.stepName, params.activityIndex, branchPath);
+    const stored = row?.exit ? (JSON.parse(row.exit) as JournalExit) : undefined;
+    // A repeat of the winning completion reports what the first call did.
     return {
-      completed: false,
-      exit: row?.exit ? (JSON.parse(row.exit) as JournalExit) : undefined,
+      completed: stored !== undefined && sameStoredValue({ stored, requested: params.exit }),
+      exit: stored,
     };
   }
 
@@ -2094,10 +2193,11 @@ export class SqliteWorkflowStorage
     this.db
       .query(
         `INSERT INTO ${this._t}_attempts
-           (workflow_id, step_name, attempt, type, status, result, error,
+           (workflow_id, step_name, run, attempt, type, status, result, error,
             duration_ms, started_at, completed_at, executor_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (workflow_id, step_name, attempt, type) DO UPDATE SET
+         VALUES (?, ?, COALESCE((SELECT run FROM ${this._t} WHERE workflow_id = ?), 1),
+                 ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (workflow_id, step_name, run, attempt, type) DO UPDATE SET
            status       = excluded.status,
            result       = excluded.result,
            error        = excluded.error,
@@ -2109,6 +2209,7 @@ export class SqliteWorkflowStorage
       .run(
         record.workflowId,
         record.stepName,
+        record.workflowId,
         record.attempt,
         record.type,
         record.status,
@@ -2143,14 +2244,14 @@ export class SqliteWorkflowStorage
           .query<Row>(
             `SELECT * FROM ${this._t}_attempts
              WHERE workflow_id = ? AND step_name = ?
-             ORDER BY attempt ASC, type ASC`,
+             ORDER BY run ASC, attempt ASC, type ASC`,
           )
           .all(workflowId, stepName)
       : this.db
           .query<Row>(
             `SELECT * FROM ${this._t}_attempts
              WHERE workflow_id = ?
-             ORDER BY step_name ASC, attempt ASC, type ASC`,
+             ORDER BY step_name ASC, run ASC, attempt ASC, type ASC`,
           )
           .all(workflowId);
     return rows.map((r) => {
@@ -2417,4 +2518,19 @@ function rowToSignalToken(row: SignalTokenRow): SignalTokenRecord {
     completedValue: row.completed_value != null ? JSON.parse(row.completed_value) : null,
     createdAt: new Date(row.created_at),
   };
+}
+
+/** Rows of (workflowId, stepName, signalName), ordered by run, as one entry per run. */
+function groupChildEndedWaits(
+  rows: ReadonlyArray<{ workflow_id: string; step_name: string; signal_name: string }>,
+): Array<{ workflowId: string; waits: Array<{ stepName: string; signalName: string }> }> {
+  const out: Array<{ workflowId: string; waits: Array<{ stepName: string; signalName: string }> }> =
+    [];
+  for (const r of rows) {
+    const last = out[out.length - 1];
+    const wait = { stepName: r.step_name, signalName: r.signal_name };
+    if (last?.workflowId === r.workflow_id) last.waits.push(wait);
+    else out.push({ workflowId: r.workflow_id, waits: [wait] });
+  }
+  return out;
 }

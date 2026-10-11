@@ -116,9 +116,13 @@ export function makeChild(env: JournaledCtxEnv): JournaledContext<unknown, unkno
             // again, which resumes the child.
             throw await suspendForChild({ childWorkflowId, childError: err });
           }
-          // Another worker holds the child: nothing happened that the journal
-          // should remember.
-          if (tag === "WorkflowLockError" || tag === "FenceTokenMismatchError") throw err;
+          // Another driver holds the child (a wake-up resumed it on its
+          // own): park on it like on a suspended child — its end wakes
+          // this run. Nothing happened that the journal should remember.
+          if (tag === "WorkflowLockError") {
+            throw await suspendForChild({ childWorkflowId, childError: err });
+          }
+          if (tag === "FenceTokenMismatchError") throw err;
         },
       });
       if (outcome.kind === "failed") throw outcome.error;

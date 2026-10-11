@@ -20,6 +20,8 @@ import type {
   CompletePendingResult,
   StepAttemptStore,
   StepAttemptRecord,
+  StepCheckpointStore,
+  CheckpointStepParams,
   CompensationLedgerStore,
   SignalTokenRecord,
   StreamChunk,
@@ -46,6 +48,8 @@ import type {
   HeartbeatParams,
   ListDueTimersParams,
   ListOrphanedRunsParams,
+  ListChildEndedWaitsParams,
+  ChildEndedWaits,
   ListSignalWakeupsParams,
   ListWorkflowsParams,
   LoadJournalParams,
@@ -93,7 +97,12 @@ export interface RemoteWorkflowStorageConfig {
 }
 
 export class RemoteWorkflowStorage
-  implements WorkflowStorage, JournalStore, StepAttemptStore, CompensationLedgerStore
+  implements
+    WorkflowStorage,
+    JournalStore,
+    StepAttemptStore,
+    StepCheckpointStore,
+    CompensationLedgerStore
 {
   private readonly url: string;
   private readonly fetch: FetchLike;
@@ -262,19 +271,23 @@ export class RemoteWorkflowStorage
   }
 
   appendStreamChunk(params: AppendStreamChunkParams): Promise<{ chunkIndex: number }> {
-    return this.call("appendStreamChunk", params);
+    // A chunk id per call makes a resend after a dropped connection
+    // answer the first append instead of appending twice.
+    return this.call("appendStreamChunk", { chunkId: crypto.randomUUID(), ...params });
   }
 
   readStreamChunks(params: ReadStreamChunksParams): Promise<ReadonlyArray<StreamChunk>> {
     return this.call("readStreamChunks", params);
   }
 
+  // An attempt id per call makes a resend after a dropped connection get
+  // the lock the first call took instead of finding it held.
   tryLock(params: TryLockParams): Promise<TryLockResult> {
-    return this.call("tryLock", params);
+    return this.call("tryLock", { attemptId: crypto.randomUUID(), ...params });
   }
 
   tryLockAndLoad(params: TryLockParams): Promise<TryLockAndLoadResult> {
-    return this.call("tryLockAndLoad", params);
+    return this.call("tryLockAndLoad", { attemptId: crypto.randomUUID(), ...params });
   }
 
   releaseLock(params: ReleaseLockParams): Promise<void> {
@@ -291,6 +304,15 @@ export class RemoteWorkflowStorage
 
   loadRunHistory(params: LoadRunHistoryParams): Promise<WorkflowRunSummary[]> {
     return this.call("loadRunHistory", params);
+  }
+
+  /**
+   * A settled step's row and its attempt rows in one fenced write on the
+   * server (one round trip instead of one per attempt). Every bundled
+   * storage implements it.
+   */
+  checkpointStep(params: CheckpointStepParams): Promise<WorkflowStatusSnapshot | null> {
+    return this.call("checkpointStep", params);
   }
 
   /**
@@ -311,7 +333,7 @@ export class RemoteWorkflowStorage
   // signal scanners and coordinator recovery run the backend's indexed
   // queries instead of paging `listWorkflows`. The server feature-detects on
   // the backing storage and surfaces a clear error if it lacks one (every
-  // bundled backend implements all three).
+  // bundled backend implements them all).
   // -------------------------------------------------------------------------
 
   listDueTimers(params: ListDueTimersParams): Promise<WorkflowWakeup[]> {
@@ -324,6 +346,10 @@ export class RemoteWorkflowStorage
 
   listOrphanedRuns(params: ListOrphanedRunsParams): Promise<OrphanedRun[]> {
     return this.call("listOrphanedRuns", params);
+  }
+
+  listChildEndedWaits(params: ListChildEndedWaitsParams): Promise<ChildEndedWaits[]> {
+    return this.call("listChildEndedWaits", params);
   }
 
   // -------------------------------------------------------------------------

@@ -125,7 +125,9 @@ export interface JournalStore {
    * by `completeSignal` (for signal entries, exit carries the delivered
    * value) and by the step body itself (activity results, sleep and signal
    * timeouts). First writer wins: if the entry is already completed the call
-   * changes nothing.
+   * changes nothing. A repeat of the completion that won — the same exit
+   * again, e.g. a retry of a call whose answer was lost — reports
+   * `completed: true` like the first call did.
    *
    * The check and the write must be one atomic step, and the result must
    * report who won (see `CompletePendingResult`). A signal delivery and the

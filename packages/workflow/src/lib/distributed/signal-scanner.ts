@@ -31,27 +31,25 @@
 
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import { hasCapability } from "../durable/storage/capabilities.ts";
-import type { Workflow } from "../durable/durable-pipeline.ts";
 import { completeSignal } from "../durable/journaled-step.ts";
-import type { WorkflowRunner } from "../durable/workflow-runner.ts";
 import type { WorkflowStorage, WorkflowWakeup } from "../durable/workflow-storage.ts";
 import type { LeaderElection } from "./leader-election.ts";
-import { ResumeScanner } from "./resume-scanner.ts";
+import { ResumeScanner, scannerTargetOf, type ScannerTarget } from "./resume-scanner.ts";
 
-export interface SignalScannerConfig {
+/**
+ * Signal scanner config: the common knobs plus what to do with a run whose
+ * signal arrived — `{ runner, resolveWorkflow }` resumes it in this
+ * process, `{ wake }` hands it over (e.g. enqueues it for a worker that
+ * hosts the workflow). A journaled signal wait's pending entry is completed
+ * before either.
+ */
+export type SignalScannerConfig = SignalScannerOptions & ScannerTarget;
+
+export interface SignalScannerOptions {
   /** Workflow storage to scan. */
   readonly storage: WorkflowStorage;
-  /** Runner used to resume workflows whose signal has been delivered. */
-  readonly runner: WorkflowRunner;
   /** How often to scan (ms). Default 5_000 (5 seconds). */
   readonly scanIntervalMs?: number;
-  /**
-   * Resolve a pure `Workflow` definition by name. Passed back to the runner
-   * for resumption; the scanner doesn't bind storage itself. A name it
-   * can't resolve is reported once through `onError` and its runs are
-   * skipped.
-   */
-  readonly resolveWorkflow: (workflowName: string) => Workflow<unknown, unknown> | undefined;
   readonly onResume?: (workflowId: string) => void;
   readonly onError?: (workflowId: string, error: unknown) => void;
   /** Time source. Default `SystemWallClock`. Tests pass `FakeWallClock`. */
@@ -80,6 +78,8 @@ export interface SignalScanner {
    * started have finished, and leadership (if any) has been released.
    */
   stop(): Promise<void>;
+  /** Scan now instead of after the current wait (e.g. right after a delivery). */
+  wake(): void;
 }
 
 export class DefaultSignalScanner implements SignalScanner {
@@ -92,10 +92,9 @@ export class DefaultSignalScanner implements SignalScanner {
 
     this.scanner = new ResumeScanner<WorkflowWakeup>({
       name: "signal-scanner",
-      runner: config.runner,
+      target: scannerTargetOf(config),
       intervalMs: config.scanIntervalMs ?? 5_000,
       clock: config.clock ?? SystemWallClock,
-      resolveWorkflow: config.resolveWorkflow,
       onResume: config.onResume,
       onError: config.onError,
       leaderElection: config.leaderElection,
@@ -134,6 +133,10 @@ export class DefaultSignalScanner implements SignalScanner {
 
   stop(): Promise<void> {
     return this.scanner.stop();
+  }
+
+  wake(): void {
+    this.scanner.wake();
   }
 }
 

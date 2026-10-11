@@ -343,6 +343,12 @@ export interface StepDefinition {
    */
   readonly queue?: StepQueueOption;
   /**
+   * `.subworkflow()` steps: the child workflow the step runs. Lets a host
+   * that drives runs by name (a worker resuming a child run on its own)
+   * find every definition reachable from the ones it registered.
+   */
+  readonly child?: Workflow<unknown, unknown>;
+  /**
    * Static metadata for visualization/documentation. Currently set by `.match()`
    * to expose its case labels so the DAG can render decision branches; future
    * step kinds (e.g. branch with named arms) can populate it too. Runtime

@@ -2,10 +2,12 @@
 // Portable WorkflowAdvertisementRegistry conformance suite. Every
 // implementation (in-memory, SQLite, Postgres) must pass.
 //
-// The factory receives a `FakeWallClock`; a registry that stamps
-// `advertisedAt` from an injected clock should use it so the suite can
-// order advertisements deterministically. A registry that stamps from a
-// server clock (Postgres `NOW()`) may ignore it: upserts run in sequence.
+// The factory receives a `FakeWallClock` and a TTL; a registry that stamps
+// `advertisedAt` from an injected clock should use both so the suite can
+// order and expire advertisements deterministically. A registry that
+// stamps from a server clock (Postgres `NOW()`) may ignore the clock —
+// upserts run in sequence — and passes `{ serverClock: true }`, which
+// skips the expiry tests (cover those against the real clock).
 //
 // Usage:
 //   import { workflowAdvertisementRegistryTestSuite } from "@promin/workflow/testing";
@@ -30,22 +32,34 @@ function adv(name: string, patch?: Partial<AdvertisedWorkflow>): AdvertisedWorkf
 }
 
 export interface WorkflowAdvertisementRegistrySuiteFactoryParams {
-  /** Time source for `advertisedAt`. */
+  /** Time source for `advertisedAt` and expiry. */
   readonly clock: FakeWallClock;
+  /** Advertisement lifetime the registry must be configured with. */
+  readonly ttlMs: number;
 }
+
+export interface WorkflowAdvertisementRegistrySuiteOptions {
+  /** The registry stamps and expires on a server clock: skip the clock-driven expiry tests. */
+  readonly serverClock?: boolean;
+}
+
+/** TTL the suite configures registries with. */
+const SUITE_TTL_MS = 60_000;
 
 export function workflowAdvertisementRegistryTestSuite(
   factory: (
     params: WorkflowAdvertisementRegistrySuiteFactoryParams,
   ) => WorkflowAdvertisementRegistry | Promise<WorkflowAdvertisementRegistry>,
+  options: WorkflowAdvertisementRegistrySuiteOptions = {},
 ): void {
   async function makeWithClock(): Promise<{
     r: WorkflowAdvertisementRegistry;
     clock: FakeWallClock;
   }> {
     const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
-    return { r: await factory({ clock }), clock };
+    return { r: await factory({ clock, ttlMs: SUITE_TTL_MS }), clock };
   }
+  const expiryIt = options.serverClock ? it.skip : it;
 
   async function make(): Promise<WorkflowAdvertisementRegistry> {
     return (await makeWithClock()).r;
@@ -163,6 +177,38 @@ export function workflowAdvertisementRegistryTestSuite(
       await r.upsert({ workerId: "w1", workflows: [adv("a")] });
       await r.remove("never-existed");
       expect((await r.list()).length).toBe(1);
+    });
+
+    expiryIt(
+      "an advertisement not refreshed within the TTL expires; re-advertising revives it",
+      async () => {
+        const { r, clock } = await makeWithClock();
+        await r.upsert({ workerId: "w-dead", workflows: [adv("a")] });
+        clock.advance(SUITE_TTL_MS / 2);
+        await r.upsert({ workerId: "w-live", workflows: [adv("b")] });
+        clock.advance(SUITE_TTL_MS / 2);
+
+        // w-dead's advertisement is exactly TTL old: expired.
+        expect((await r.list()).map((e) => e.workerId)).toEqual(["w-live"]);
+        expect((await r.distinct()).map((w) => w.name)).toEqual(["b"]);
+
+        await r.upsert({ workerId: "w-dead", workflows: [adv("a")] });
+        expect((await r.distinct()).map((w) => w.name)).toEqual(["a", "b"]);
+      },
+    );
+
+    expiryIt("prune deletes expired advertisements and counts their workers", async () => {
+      const { r, clock } = await makeWithClock();
+      await r.upsert({ workerId: "w1", workflows: [adv("a"), adv("b")] });
+      await r.upsert({ workerId: "w2", workflows: [adv("c")] });
+      clock.advance(SUITE_TTL_MS / 2);
+      await r.upsert({ workerId: "w3", workflows: [adv("d")] });
+      expect(await r.prune()).toBe(0);
+
+      clock.advance(SUITE_TTL_MS / 2);
+      expect(await r.prune()).toBe(2);
+      expect((await r.list()).map((e) => e.workerId)).toEqual(["w3"]);
+      expect(await r.prune()).toBe(0);
     });
 
     it("round-trips steps, version, sampleInput intact", async () => {

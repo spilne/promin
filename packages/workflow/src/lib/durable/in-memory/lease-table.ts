@@ -14,6 +14,8 @@ interface Lease {
   readonly expiresAt: number;
   readonly lockedBy: string;
   readonly token: FenceToken;
+  /** The acquire attempt that took the lease: a repeat of it gets the lease back. */
+  readonly attemptId?: string;
 }
 
 export class InMemoryLeaseTable {
@@ -34,18 +36,24 @@ export class InMemoryLeaseTable {
   ) {}
 
   /** Acquire the lease when it is free or expired. */
-  tryAcquire(params: { workflowId: string; lockDurationMs: number }): {
+  tryAcquire(params: { workflowId: string; lockDurationMs: number; attemptId?: string }): {
     acquired: boolean;
     token?: FenceToken;
   } {
     const lease = this.leases.get(params.workflowId);
     const now = this.config.clock.currentTimeMs();
-    if (lease !== undefined && lease.expiresAt > now) return { acquired: false };
+    if (lease !== undefined && lease.expiresAt > now) {
+      if (params.attemptId !== undefined && lease.attemptId === params.attemptId) {
+        return { acquired: true, token: lease.token };
+      }
+      return { acquired: false };
+    }
     const token = String(this.nextFenceToken++);
     this.leases.set(params.workflowId, {
       expiresAt: now + params.lockDurationMs,
       lockedBy: this.config.instanceId,
       token,
+      ...(params.attemptId !== undefined && { attemptId: params.attemptId }),
     });
     return { acquired: true, token };
   }
@@ -77,9 +85,8 @@ export class InMemoryLeaseTable {
     if (!lease) return;
     if (!guard?.fenceToken && lease.lockedBy !== this.config.instanceId) return;
     this.leases.set(workflowId, {
+      ...lease,
       expiresAt: this.config.clock.currentTimeMs() + params.lockDurationMs,
-      lockedBy: lease.lockedBy,
-      token: lease.token,
     });
   }
 

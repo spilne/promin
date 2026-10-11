@@ -12,7 +12,12 @@ import type {
   WorkflowRunSummary,
   JournalEntry,
 } from "@promin/workflow";
-import { WorkflowLockError, hasCapability, isTerminalWorkflowStatus } from "@promin/workflow";
+import {
+  WorkflowLockError,
+  hasCapability,
+  isCancelledRun,
+  isTerminalWorkflowStatus,
+} from "@promin/workflow";
 import { z } from "zod";
 import { HttpError, accepted, json, jsonError } from "../router.ts";
 import { runToSummaryDto } from "../serialize.ts";
@@ -28,6 +33,7 @@ import {
 } from "../api-types.ts";
 import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
 import type { RunsService } from "../services/runs-service.ts";
+import { RunCancelledError } from "../services/workflows/errors.ts";
 import { RunParamsSchema, runLocation } from "./runs.ts";
 
 export interface SignalDto {
@@ -352,6 +358,10 @@ export function resumeRun(params: {
         `Only an ended run can be resumed (status: ${state.status})`,
       );
     }
+    // A cancelled run stays cancelled: rerun starts it afresh.
+    if (isCancelledRun(state)) {
+      return jsonError(409, "run_cancelled", new RunCancelledError(id).message);
+    }
     const defs = await runs.resolveStepDefs(state.workflowName);
     const known = defs.length > 0 ? defs.map((d) => d.name) : Object.keys(state.steps);
     if (!known.includes(fromStep)) {
@@ -374,6 +384,7 @@ export function resumeRun(params: {
       if (err instanceof WorkflowLockError) {
         return jsonError(409, "run_in_flight", err.message);
       }
+      if (err instanceof RunCancelledError) return jsonError(409, "run_cancelled", err.message);
       throw err;
     }
     const response: ResumeRunResponse = { workflowId: id, fromStep };

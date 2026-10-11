@@ -10,9 +10,8 @@ import {
   type WorkflowStorage,
   type WorkflowStatus,
 } from "@promin/workflow";
-import { InMemoryStepQueue, InMemoryWorkerRegistry } from "@promin/workflow/distributed";
 import { WorkerControlSocket } from "@promin/zorya-client";
-import { DistributedWorkflows } from "../services/workflows/distributed-workflows.ts";
+import { QueuedWorkflows } from "../services/workflows/queued-workflows.ts";
 import { ZoryaWorkflows, type TriggerResult } from "../services/workflows/zorya-workflows.ts";
 import {
   ZoryaInsecureConfigError,
@@ -69,18 +68,13 @@ class ProbeWorkflows extends ZoryaWorkflows {
   }
 }
 
-function distributed(storage: WorkflowStorage = new InMemoryWorkflowStorage()) {
-  return new DistributedWorkflows({
-    storage,
-    stepQueue: new InMemoryStepQueue(),
-    workerRegistry: new InMemoryWorkerRegistry(),
-    pollIntervalMs: 50,
-  });
+function queued(storage: WorkflowStorage = new InMemoryWorkflowStorage()) {
+  return new QueuedWorkflows({ storage });
 }
 
 function keyedServer(overrides: Partial<ZoryaServerConfig> = {}): ZoryaServer {
   return new ZoryaServer({
-    workflows: distributed(),
+    workflows: queued(),
     apiKeys: [OPERATOR_KEY],
     remoteWorkers: { apiKeys: [WORKER_KEY] },
     logger: quietLogger,
@@ -122,7 +116,7 @@ function listen(server: ZoryaServer): string {
 
 describe("secure by default", () => {
   it("refuses to construct without operator keys", () => {
-    expect(() => new ZoryaServer({ workflows: distributed(), logger: quietLogger })).toThrow(
+    expect(() => new ZoryaServer({ workflows: queued(), logger: quietLogger })).toThrow(
       ZoryaInsecureConfigError,
     );
   });
@@ -131,7 +125,7 @@ describe("secure by default", () => {
     expect(
       () =>
         new ZoryaServer({
-          workflows: distributed(),
+          workflows: queued(),
           apiKeys: [OPERATOR_KEY],
           remoteWorkers: {},
           logger: quietLogger,
@@ -142,7 +136,7 @@ describe("secure by default", () => {
   it("starts without keys only with insecure, and warns loudly", () => {
     const warnings: string[] = [];
     new ZoryaServer({
-      workflows: distributed(),
+      workflows: queued(),
       remoteWorkers: {},
       insecure: true,
       logger: { ...quietLogger, warn: (m) => warnings.push(m) },
@@ -154,7 +148,7 @@ describe("secure by default", () => {
   it("never puts a key in the insecure warning or the refusal", () => {
     const warnings: string[] = [];
     new ZoryaServer({
-      workflows: distributed(),
+      workflows: queued(),
       apiKeys: [OPERATOR_KEY],
       remoteWorkers: {},
       insecure: true,
@@ -260,7 +254,7 @@ describe("/rpc/storage scoping", () => {
       idempotencyKey: null,
       expiresAt: new Date(Date.UTC(2100, 0, 1)),
     });
-    const server = keyedServer({ workflows: distributed(storage) });
+    const server = keyedServer({ workflows: queued(storage) });
     const asWorker = await call(server, "findSignalTokenById", { tokenId: "tok-1" }, WORKER_KEY);
     expect(asWorker.status).toBe(403);
     expect(await asWorker.text()).not.toContain("secret-bearer");

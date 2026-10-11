@@ -38,7 +38,8 @@ function startScanners(params: {
 }): { stop: () => Promise<void> } {
   const { storage, runner, clock } = params;
   const byName = new Map(params.definitions.map((d) => [d.name, d]));
-  const resolveWorkflow = (name: string) => byName.get(name) as Workflow<unknown, unknown>;
+  const resolveWorkflow = ({ workflowName: name }: { workflowName: string }) =>
+    byName.get(name) as Workflow<unknown, unknown>;
   const sleep = createSleepScanner({
     storage,
     runner,
@@ -355,4 +356,56 @@ describe("a child that ends wakes its parked parent", () => {
     expect(after?.steps.nap?.wakeAt).toEqual(before?.steps.nap?.wakeAt);
     await scanners.stop();
   });
+});
+
+describe("a parent resumed while another driver holds its child", () => {
+  for (const shape of ["subworkflow", "journaled"] as const) {
+    it(`${shape}: parks on the child instead of failing, and the child's end wakes it`, async () => {
+      const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+      const storage = new InMemoryWorkflowStorage({ clock });
+      const runner = createWorkflowRunner({ storage, clock });
+      const kid = workflow<{ v: number }>({ name: "kid" })
+        .step("double", ({ input }) => succeed(input.v * 2))
+        .build();
+      const parent =
+        shape === "subworkflow"
+          ? workflow<{ v: number }>({ name: "locked-parent" })
+              .subworkflow("kid", kid, { input: (prev) => prev, workflowId: () => "kid-1" })
+              .build()
+          : workflow<{ v: number }>({ name: "locked-parent" })
+              .journaled("run", function* (ctx, input) {
+                return yield* ctx.child(kid, { input, workflowId: "kid-1" });
+              })
+              .build();
+
+      // A wake-up already drives the child elsewhere: it holds the child's lock.
+      await storage.createWorkflow({
+        workflowId: "kid-1",
+        workflowName: "kid",
+        input: { v: 21 },
+        parentWorkflowId: "par-1",
+      });
+      const held = await storage.tryLock({ workflowId: "kid-1", lockDurationMs: 60_000 });
+      const { error } = await runner.runSafe({
+        workflow: parent as Workflow<unknown, unknown>,
+        workflowId: "par-1",
+        input: { v: 21 },
+      });
+      expect((error as { _tag?: string })._tag).toBe("WorkflowSuspendedError");
+      expect((await storage.loadWorkflowStatus("par-1"))?.status).toBe("suspended");
+
+      // That driver lets go; the child runs to its end and wakes the parent.
+      await storage.releaseLock({ workflowId: "kid-1", guard: { fenceToken: held.token! } });
+      await runner.run({ workflow: kid, workflowId: "kid-1", input: { v: 21 } });
+      const scanners = startScanners({
+        storage,
+        runner,
+        clock,
+        definitions: [kid, parent] as never,
+      });
+      await driveUntil({ storage, clock, workflowId: "par-1", status: "completed" });
+      await scanners.stop();
+      expect((await storage.loadWorkflow("par-1"))?.result).toBe(42);
+    });
+  }
 });

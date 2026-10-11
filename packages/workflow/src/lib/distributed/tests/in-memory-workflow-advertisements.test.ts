@@ -4,7 +4,7 @@ import { workflowAdvertisementRegistryTestSuite } from "../workflow-advertisemen
 import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 workflowAdvertisementRegistryTestSuite(
-  ({ clock }) => new InMemoryWorkflowAdvertisementRegistry({ clock }),
+  ({ clock, ttlMs }) => new InMemoryWorkflowAdvertisementRegistry({ clock, ttlMs }),
 );
 
 describe("InMemoryWorkflowAdvertisementRegistry — advertisedAt on an injected clock", () => {

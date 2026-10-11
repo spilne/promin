@@ -45,7 +45,7 @@ import type { WorkflowVersionRegistry } from "./workflow-version-registry.ts";
 import type { StepExecutor } from "./runner/step-executor.ts";
 import { recoverWorkflows, type RecoveryResult, type RecoveryStrategy } from "./runner/recovery.ts";
 import { resolveRunDefinition } from "./runner/definition-resolver.ts";
-import { orchestrationContextFor } from "./runner/orchestration-context.ts";
+import { orchestrationContextFor, type RunLockOptions } from "./runner/orchestration-context.ts";
 import { runWorkflowOrchestration } from "./runner/orchestrate.ts";
 import {
   createWorkflowHandle,
@@ -74,6 +74,7 @@ export {
 export {
   orchestrationContextFor,
   type OrchestrationRuntime,
+  type RunLockOptions,
   type WorkflowOrchestrationContext,
 } from "./runner/orchestration-context.ts";
 export { runWorkflowOrchestration } from "./runner/orchestrate.ts";
@@ -160,6 +161,13 @@ export type WorkflowRunnerRunParams =
        * only the `(name, key)` mapping lapses).
        */
       readonly idempotencyKeyTTL?: number;
+      /**
+       * Abandon the run: once aborted, it stops at its next safe point as on
+       * a lost lock (rejecting with `WorkflowLockLostError`) and releases the
+       * run lock, leaving the run in flight for another driver. Work a step
+       * already did stays done.
+       */
+      readonly signal?: AbortSignal;
     }
   | {
       readonly name: string;
@@ -176,6 +184,8 @@ export type WorkflowRunnerRunParams =
       readonly namespace?: string;
       readonly idempotencyKey?: string;
       readonly idempotencyKeyTTL?: number;
+      /** See the `{ workflow }` shape. */
+      readonly signal?: AbortSignal;
     };
 
 /**
@@ -250,6 +260,14 @@ export interface WorkflowRunnerConfig {
    * the field stays empty in the audit trail.
    */
   readonly executorId?: string;
+  /**
+   * The run lock's lease. A driver that dies keeps its runs locked for up
+   * to `durationMs` (default 120 s) after its last heartbeat (every
+   * `heartbeatIntervalMs`, default 30 s); shorter leases hand orphaned runs
+   * to another driver sooner at the cost of more heartbeat writes. Child
+   * runs and version drains use the same lease.
+   */
+  readonly lock?: RunLockOptions;
 }
 
 /** What `WorkflowRunner.subscribe` takes. */
@@ -416,6 +434,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   private readonly stepExecutor?: StepExecutor;
   private readonly clock: WallClock;
   private readonly executorId?: string;
+  private readonly lock?: RunLockOptions;
 
   constructor(config: WorkflowRunnerConfig) {
     this.storage = config.storage;
@@ -424,6 +443,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     this.stepExecutor = config.stepExecutor;
     this.clock = config.clock ?? SystemWallClock;
     if (config.executorId !== undefined) this.executorId = config.executorId;
+    if (config.lock !== undefined) this.lock = config.lock;
   }
 
   run<Output, E extends TaggedError = never>(
@@ -489,6 +509,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       force,
       ...(gate !== undefined && { onLocked: gate.onLocked }),
       ...(namespace !== undefined && { namespace }),
+      ...(params.signal !== undefined && { signal: params.signal }),
       ...(idempotencyKey && idempotencyExpiresAt ? { idempotencyKey, idempotencyExpiresAt } : {}),
     });
   }
@@ -657,6 +678,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     idempotencyExpiresAt?: Date;
     /** Set by `start`: leave an in-flight run alone, and report taking the lock. */
     onLocked?: () => void;
+    signal?: AbortSignal;
   }): Promise<unknown> {
     const ctx = orchestrationContextFor({
       workflow: params.workflow,
@@ -666,6 +688,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
         ...(this.stepExecutor !== undefined && { stepExecutor: this.stepExecutor }),
         ...(this.executorId !== undefined && { executorId: this.executorId }),
         ...(this.hooks !== undefined && { hooks: this.hooks }),
+        ...(this.lock !== undefined && { lock: this.lock }),
       },
     });
     return runWorkflowOrchestration(ctx, {
@@ -674,6 +697,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       force: params.force,
       namespace: params.namespace,
       ...(params.onLocked !== undefined && { onLocked: params.onLocked, rejectInFlight: true }),
+      ...(params.signal !== undefined && { signal: params.signal }),
       ...(params.idempotencyKey && params.idempotencyExpiresAt
         ? {
             idempotencyKey: params.idempotencyKey,

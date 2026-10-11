@@ -156,7 +156,8 @@ export interface WorkflowQueryStore {
 
   /**
    * Bulk-fail every workflow in `statuses` (default: pending, running,
-   * suspended) whose `createdAt` is older than `olderThanMs`, recording
+   * suspended) whose `createdAt` is older than `olderThanMs` and whose lock
+   * is free or expired (a run someone is driving is left alone), recording
    * `error` on each. Returns the number of rows updated.
    *
    * Optional (capability `cancelStale`): `WorkflowRunner.recover()` uses it

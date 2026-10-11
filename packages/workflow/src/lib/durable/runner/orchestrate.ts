@@ -90,6 +90,12 @@ interface RunParams {
    * concurrent callers cannot both start the run.
    */
   readonly rejectInFlight?: boolean;
+  /**
+   * Abandon the run: once aborted, it stops at its next safe point as on a
+   * lost lock (`WorkflowLockLostError`) and releases the lock, leaving the
+   * run in flight for another driver.
+   */
+  readonly signal?: AbortSignal;
 }
 
 /** Statuses `rejectInFlight` treats as a run still in flight. */
@@ -142,6 +148,7 @@ export async function runWorkflowOrchestration(
       ...(params.drivenByParent && { drivenByParent: true }),
       ...(params.onLocked !== undefined && { onLocked: params.onLocked }),
       ...(params.rejectInFlight === true && { rejectInFlight: true }),
+      ...(params.signal !== undefined && { signal: params.signal }),
     });
   }
 
@@ -158,7 +165,15 @@ export async function runWorkflowOrchestration(
       storage: ctx.storage,
       workflowId,
       // The run's state comes with the lock: one round trip instead of two.
-      options: { lockDurationMs: DEFAULT_LOCK_DURATION_MS, clock, loadState: true },
+      options: {
+        lockDurationMs: ctx.lock?.durationMs ?? DEFAULT_LOCK_DURATION_MS,
+        ...(ctx.lock?.heartbeatIntervalMs !== undefined && {
+          heartbeatIntervalMs: ctx.lock.heartbeatIntervalMs,
+        }),
+        clock,
+        loadState: true,
+        ...(params.signal !== undefined && { signal: params.signal }),
+      },
       fn: async (lock) => {
         // Before the try: a rejected in-flight run is someone else's, and
         // its query handlers stay registered.
@@ -264,6 +279,7 @@ async function runChain(params: {
       await ctx.storage.startFreshRun({
         workflowId,
         guard: lock.fenceToken ? { fenceToken: lock.fenceToken } : undefined,
+        ...(loaded.state?.run !== undefined && { expectedRun: loaded.state.run }),
       });
       params.queries.reset();
       input = (err as WorkflowContinueAsNewError).nextInput;
@@ -293,6 +309,8 @@ export async function runChildWorkflow(params: {
   readonly workflow: Workflow<unknown, unknown>;
   readonly workflowId: string;
   readonly input: unknown;
+  /** The parent's lock signal: the child stops when the parent loses (or abandons) its run. */
+  readonly signal?: AbortSignal;
 }): Promise<unknown> {
   const { runtime, workflow, workflowId, input } = params;
   const def = workflow._definition;
@@ -318,6 +336,7 @@ export async function runChildWorkflow(params: {
     input,
     drivenByParent: true,
     ...(rerunFailed && { force: true }),
+    ...(params.signal !== undefined && { signal: params.signal }),
   });
 }
 
@@ -347,7 +366,7 @@ async function runOneOrchestrationCycle(cycle: {
     if (cached) return cached.result;
     const onExpiry = idempotency.onExpiry ?? "fresh-run";
     if (onExpiry === "fresh-run" && (state.status === "completed" || state.status === "failed")) {
-      await ctx.storage.startFreshRun({ workflowId, guard });
+      await ctx.storage.startFreshRun({ workflowId, guard, expectedRun: state.run });
       state = await ctx.storage.loadWorkflow(workflowId);
     }
   }
@@ -406,7 +425,7 @@ async function runOneOrchestrationCycle(cycle: {
       rejectEndedRun(state);
       return completedRunResult({ ctx, state });
     }
-    await ctx.storage.startFreshRun({ workflowId, guard });
+    await ctx.storage.startFreshRun({ workflowId, guard, expectedRun: state.run });
     state = await ctx.storage.loadWorkflow(workflowId);
     loaded.state = state;
   }
@@ -472,6 +491,7 @@ async function runOneOrchestrationCycle(cycle: {
         runtime: runtimeOf(ctx),
         parentWorkflowId: workflowId,
         ...(guard !== undefined && { parentGuard: guard }),
+        signal: lock.signal,
         ...child,
       }),
   };

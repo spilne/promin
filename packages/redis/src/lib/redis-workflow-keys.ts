@@ -108,6 +108,11 @@ export class RedisWorkflowKeys {
     return `${this.wf(id)}:streams:${streamId}`;
   }
 
+  /** Chunk ids of one stream → their index (repeated appends). */
+  streamChunkIds(id: string, streamId: string): string {
+    return `${this.wf(id)}:stream-chunk-ids:${streamId}`;
+  }
+
   /** Base of the journal keys; scripts append `<step>:idx` and friends. */
   journalBase(id: string): string {
     return `${this.wf(id)}:journal:`;

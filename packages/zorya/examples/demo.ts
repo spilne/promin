@@ -35,7 +35,6 @@ import {
   hasCapability,
   type Workflow,
 } from "@promin/workflow";
-import { InMemoryWorkerRegistry } from "@promin/workflow/distributed";
 import {
   LocalWorkflows,
   QueuedWorkflows,
@@ -50,6 +49,7 @@ import {
   SqliteWorkflowStorage,
   SqliteWorkflowStartQueue,
   SqliteWorkflowAdvertisementRegistry,
+  SqliteWorkerRegistry,
   SqliteSchedulerStorage,
   SqliteAgentRegistry,
   SqliteSkillRegistry,
@@ -103,7 +103,7 @@ import { WorkflowScanner } from "@promin/workflow/discovery";
 import { echoLLM } from "@promin/agent/testing";
 import { z } from "zod";
 import { Database } from "bun:sqlite";
-import { ZoryaServer, RegistryBackedWorkersProvider } from "../src/index.ts";
+import { ZoryaServer } from "../src/index.ts";
 // KB content lives at ./kb/org-knowledge-base.ts; the searchKnowledge +
 // getDocument tools that wrap it are exposed under ./tools/ for the
 // folder-scan registry.
@@ -726,60 +726,6 @@ async function seedNamespaceMemory() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Workers — register two mock workers so the dashboard's Workers page has
-// something to display. The demo runs every workflow in-process via
-// `runner.run` (no actual task dispatch over a queue), so these workers
-// don't claim any work; they just heartbeat and show up in the registry.
-// To see a real worker join, run `examples/worker.ts` in another terminal —
-// it connects via /rpc/* and advertises workflows the in-process map
-// doesn't know about (hello-world, fan-out-demo).
-
-const workerRegistry = new InMemoryWorkerRegistry();
-const MOCK_WORKERS = [
-  {
-    workerId: "demo-worker-eu-1",
-    capabilities: ["any"],
-    concurrency: 4,
-    metadata: {
-      hostname: "eu-1.demo.local",
-      runtime: "bun",
-      version: "0.4.2",
-      // Custom tags go under `labels` so the dashboard can render them
-      // as a distinct category (versus capabilities / workflows / namespaces).
-      labels: { region: "eu-west", env: "demo" },
-    },
-  },
-  {
-    workerId: "demo-worker-us-2",
-    capabilities: ["video", "etl"],
-    concurrency: 2,
-    metadata: {
-      hostname: "us-2.demo.local",
-      runtime: "bun",
-      version: "0.4.2",
-      labels: { region: "us-east", env: "demo" },
-    },
-  },
-] as const;
-
-for (const w of MOCK_WORKERS) {
-  await workerRegistry.register({
-    workerId: w.workerId,
-    capabilities: w.capabilities,
-    concurrency: w.concurrency,
-    metadata: w.metadata,
-  });
-}
-// Heartbeat each mock worker so detectDead() doesn't tip them into the
-// "dead" bucket. 5s cadence stays well below typical 30s timeouts and
-// keeps the lastHeartbeat field visibly fresh in the dashboard.
-const heartbeatHandle = setInterval(() => {
-  for (const w of MOCK_WORKERS) {
-    void workerRegistry.heartbeat(w.workerId);
-  }
-}, 5_000);
-
 // Registry so trigger-by-name works.
 // Auto-discover workflows by scanning ./workflows. Every .ts module under
 // that directory whose exports include a Workflow is registered under its
@@ -863,6 +809,9 @@ const workflowStarts = SqliteWorkflowStartQueue.make({ db });
 // Workflows page survives a quick demo restart without going blank
 // while the worker reconnects.
 const advertisements = SqliteWorkflowAdvertisementRegistry.make({ db });
+// The one worker registry: external workers register into it over
+// /rpc/worker and the Workers page lists it.
+const workerRegistry = SqliteWorkerRegistry.make({ db });
 
 // ---------------------------------------------------------------------------
 // Background: seed a handful of runs on startup so the first page has data.
@@ -1109,12 +1058,13 @@ const workflows = new LocalWorkflows({
   versionRegistry,
   recovery: RecoveryStrategy.builder()
     .failStale({ olderThanMs: 60 * 60 * 1000, error: "Stale run auto-failed on restart" })
-    .resumeRecent()
     .build(),
   fallback: new QueuedWorkflows({
     storage,
     workflowStarts,
     advertisements,
+    workerRegistry,
+    versionRegistry,
     acceptAny: true,
   }),
 });
@@ -1325,10 +1275,6 @@ const server = new ZoryaServer({
   insecure: ZORYA_INSECURE,
   sampleInput: (name) => inputFor(name),
   uiDir,
-  // Surfaces the demo's mock workers on /api/workers. (Distributed mode
-  // auto-derives this from workflows.workerRegistry; LocalWorkflows
-  // doesn't expose one, so the host passes its own registry.)
-  workers: new RegistryBackedWorkersProvider(workerRegistry),
   // Drives the Deployments page (#/deployments) — promote/rollback
   // mutates this registry and the runner's `findActive` lookup respects
   // the active pointer for new starts.
@@ -1384,7 +1330,6 @@ const shutdown = async (signal: string): Promise<void> => {
   }
   shuttingDown = true;
   console.log(`\n[zorya] ${signal} received — shutting down`);
-  clearInterval(heartbeatHandle);
   try {
     await server.stop();
   } catch (e) {

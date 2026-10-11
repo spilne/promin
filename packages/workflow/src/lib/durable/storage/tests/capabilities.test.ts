@@ -42,6 +42,7 @@ describe("storage capabilities", () => {
       ["listDueTimers", "dueTimers"],
       ["listSignalWakeups", "signalWakeups"],
       ["listOrphanedRuns", "orphanedRuns"],
+      ["listChildEndedWaits", "childEndedWaits"],
       ["checkpointStep", "stepCheckpoint"],
       ["saveStepAttempt", "stepAttempts"],
       ["beginCompensation", "compensationLedger"],

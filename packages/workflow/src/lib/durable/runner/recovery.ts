@@ -75,7 +75,8 @@ export class RecoveryStrategyBuilder {
 
   /**
    * Terminate pending/running workflows whose `createdAt` is older than
-   * `olderThanMs`. Uses `cancelWorkflow` — the run ends up `failed` with
+   * `olderThanMs` and that nobody is driving (a run with a live lock is
+   * left alone). Uses `cancelWorkflow` — the run ends up `failed` with
    * error `"Stale run cancelled on restart"`.
    *
    * When the configured storage exposes a bulk `cancelStaleWorkflows` method
@@ -148,6 +149,9 @@ export class RecoveryStrategyBuilder {
     });
   }
 }
+
+/** Lease taken on a stale run while terminating it. */
+const STALE_TERMINATION_LOCK_MS = 30_000;
 
 /** Page size of the recovery listings. */
 const RECOVERY_PAGE_SIZE = 200;
@@ -255,9 +259,12 @@ async function terminateStaleRuns(params: {
   }
 
   // Slow path: page through the oldest rows of each status and terminate
-  // the stale ones. A terminated row leaves the listing; one that stays
-  // (a terminate the backend ignored) is counted as stuck and skipped by
-  // the offset, and a page with nothing new to terminate ends the status.
+  // the stale ones nobody is driving: each is terminated under its own
+  // lock, so a run with a live lock (another instance or worker drives it)
+  // is skipped, and a driver can't take it over mid-terminate. A
+  // terminated row leaves the listing; one that stays (skipped, or a
+  // terminate the backend ignored) is counted as stuck and skipped by the
+  // offset, and a page with nothing new to terminate ends the status.
   const cutoff = clock.currentTimeMs() - thresholdMs;
   let terminated = 0;
   for (const status of opts.staleStatuses as WorkflowStatus[]) {
@@ -280,11 +287,28 @@ async function terminateStaleRuns(params: {
           continue;
         }
         tried.add(wf.workflowId);
+        const lock = await storage.tryLock({
+          workflowId: wf.workflowId,
+          lockDurationMs: STALE_TERMINATION_LOCK_MS,
+        });
+        if (!lock.acquired) {
+          stuck.add(wf.workflowId);
+          continue;
+        }
         progressed = true;
-        if (opts.staleAction.kind === "cancel") {
-          await storage.cancelWorkflow({ workflowId: wf.workflowId });
-        } else {
-          await storage.failWorkflow({ workflowId: wf.workflowId, error: opts.staleAction.error });
+        const guard = lock.token !== undefined ? { fenceToken: lock.token } : undefined;
+        try {
+          if (opts.staleAction.kind === "cancel") {
+            await storage.cancelWorkflow({ workflowId: wf.workflowId, guard });
+          } else {
+            await storage.failWorkflow({
+              workflowId: wf.workflowId,
+              error: opts.staleAction.error,
+              guard,
+            });
+          }
+        } finally {
+          await storage.releaseLock({ workflowId: wf.workflowId, guard }).catch(() => {});
         }
         terminated++;
       }

@@ -32,7 +32,12 @@ import {
  * ```
  */
 export function createWorkerApiHandler(config: {
-  stepQueue: StepQueue;
+  /**
+   * Optional StepQueue for the claim / settle methods. Without one, those
+   * methods return a "step_queue_not_configured" error (a registry-only
+   * handler, e.g. for workers that drive whole runs).
+   */
+  stepQueue?: StepQueue;
   /**
    * Optional WorkerRegistry. When provided, the handler dispatches
    * register/heartbeat/drain/deregister/list methods to it. Without one,
@@ -41,6 +46,11 @@ export function createWorkerApiHandler(config: {
   workerRegistry?: WorkerRegistry;
 }): (req: Request) => Promise<Response> {
   const { stepQueue, workerRegistry } = config;
+
+  const requireQueue = (): StepQueue => {
+    if (!stepQueue) throw new Error("step_queue_not_configured");
+    return stepQueue;
+  };
 
   const requireRegistry = async <T>(fn: (r: WorkerRegistry) => Promise<T>): Promise<T> => {
     if (!workerRegistry) {
@@ -55,7 +65,7 @@ export function createWorkerApiHandler(config: {
       if (typeof p?.workerId !== "string" || p.workerId === "") {
         throw new Error("claim requires a workerId");
       }
-      return stepQueue.claim({
+      return requireQueue().claim({
         workerId: p.workerId,
         limit: p.limit,
         capabilities: p.capabilities,
@@ -63,9 +73,9 @@ export function createWorkerApiHandler(config: {
         versions: p.versions,
       });
     },
-    release: (p) => stepQueue.release({ taskId: p.taskId, claimToken: p.claimToken }),
+    release: (p) => requireQueue().release({ taskId: p.taskId, claimToken: p.claimToken }),
     complete: (p) =>
-      stepQueue.complete({
+      requireQueue().complete({
         taskId: p.taskId,
         claimToken: p.claimToken,
         result: p.result,
@@ -73,7 +83,7 @@ export function createWorkerApiHandler(config: {
         ...(p.stepMetadata !== undefined && { stepMetadata: p.stepMetadata }),
       }),
     fail: (p) =>
-      stepQueue.fail({
+      requireQueue().fail({
         taskId: p.taskId,
         claimToken: p.claimToken,
         error: p.error,
@@ -81,7 +91,7 @@ export function createWorkerApiHandler(config: {
         durationMs: p.durationMs,
         ...(p.stepMetadata !== undefined && { stepMetadata: p.stepMetadata }),
       }),
-    heartbeat: (p) => stepQueue.heartbeat({ taskId: p.taskId, claimToken: p.claimToken }),
+    heartbeat: (p) => requireQueue().heartbeat({ taskId: p.taskId, claimToken: p.claimToken }),
     // WorkerRegistry
     registerWorker: (p) =>
       requireRegistry((r) =>

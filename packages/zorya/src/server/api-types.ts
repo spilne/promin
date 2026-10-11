@@ -518,3 +518,81 @@ export type RunEvent =
   | { type: "status"; status: WorkflowStatus }
   | { type: "error"; error: string }
   | { type: "end" };
+
+// ---------------------------------------------------------------------------
+// Worker protocol — /api/worker-protocol/* and /api/advertisements
+// ---------------------------------------------------------------------------
+
+/** Largest batch one start claim may take. */
+export const MAX_START_CLAIM_LIMIT = 100;
+/** Longest delay a worker may put a released start behind (1 hour). */
+export const MAX_START_RELEASE_DELAY_MS = 60 * 60 * 1000;
+
+const WorkerIdSchema = z.string().min(1).max(256);
+
+/** `POST /api/worker-protocol/claim-starts`. */
+export const ClaimStartsRequestSchema = z
+  .object({
+    workflowSpecs: z
+      .array(
+        z
+          .object({
+            name: z.string().min(1).max(512),
+            versions: z.array(z.string().min(1).max(256)).max(256),
+          })
+          .strict(),
+      )
+      .max(1_000),
+    workerId: WorkerIdSchema.optional(),
+    limit: z.number().int().min(1).max(MAX_START_CLAIM_LIMIT).optional(),
+    /** Makes the call idempotent: a resend gets the starts this id claimed. */
+    claimId: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]{1,128}$/)
+      .optional(),
+  })
+  .strict();
+
+/** `POST /api/worker-protocol/{heartbeat,complete}-start/:id`. */
+export const StartClaimRequestSchema = z
+  .object({ claimToken: z.string().min(1).max(256) })
+  .strict();
+
+/** `POST /api/worker-protocol/release-start/:id`. */
+export const ReleaseStartRequestSchema = z
+  .object({
+    claimToken: z.string().min(1).max(256),
+    delayMs: z.number().int().min(0).max(MAX_START_RELEASE_DELAY_MS).optional(),
+  })
+  .strict();
+
+/** `:id` of a start record. */
+export const StartParamsSchema = z.object({ id: z.string().min(1).max(512) });
+
+/** `:workerId` of an advertisement. */
+export const WorkerParamsSchema = z.object({ workerId: WorkerIdSchema });
+
+/** `POST /api/advertisements`. */
+export const UpsertAdvertisementsRequestSchema = z.object({
+  workerId: WorkerIdSchema,
+  workflows: z
+    .array(
+      z.object({
+        name: z.string().min(1).max(512),
+        version: z.string().min(1).max(256).optional(),
+        steps: z
+          .array(
+            z.object({
+              name: z.string().min(1).max(512),
+              kind: z.string().max(64),
+              dependsOn: z.array(z.string().max(512)).max(1_000),
+              needs: z.array(z.string().max(256)).max(256).optional(),
+              priority: z.number().optional(),
+            }),
+          )
+          .max(10_000),
+        sampleInput: z.unknown().optional(),
+      }),
+    )
+    .max(1_000),
+});

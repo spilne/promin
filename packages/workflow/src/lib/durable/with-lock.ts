@@ -83,6 +83,13 @@ export interface WithLockOptions {
    * Default: false.
    */
   loadState?: boolean;
+  /**
+   * Abandon the run: once aborted, `LockContext.signal` aborts too, with a
+   * `WorkflowLockLostError` carrying this signal's reason as its `cause`,
+   * so the callback stops at its next safe point exactly as on a lost lock
+   * and the lock is released for another driver.
+   */
+  signal?: AbortSignal;
 }
 
 /** Context passed to `withLock`'s callback. */
@@ -139,6 +146,13 @@ export async function withLock<T>(params: {
   const heartbeatMs = params.options?.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
   const lockDurationMs = params.options?.lockDurationMs ?? DEFAULT_LOCK_EXTENSION_MS;
   const clock = params.options?.clock ?? SystemWallClock;
+  if (params.options?.signal?.aborted) {
+    throw new WorkflowLockLostError({
+      workflowId,
+      message: `Not driving workflow "${workflowId}": the run was abandoned before it started`,
+      cause: params.options.signal.reason,
+    });
+  }
 
   const { acquired, token, state } = await acquireLock({
     storage,
@@ -157,6 +171,20 @@ export async function withLock<T>(params: {
   const lost = new AbortController();
   let lastExtendedMs = clock.currentTimeMs();
   let released = false;
+
+  const external = params.options?.signal;
+  const abandon = (): void => {
+    if (lost.signal.aborted) return;
+    lost.abort(
+      new WorkflowLockLostError({
+        workflowId,
+        message: `Stopped driving workflow "${workflowId}": the run was abandoned`,
+        cause: external?.reason,
+      }),
+    );
+  };
+  if (external?.aborted) abandon();
+  else external?.addEventListener("abort", abandon, { once: true });
 
   const heartbeatHandle = clock.setInterval(() => {
     storage.heartbeat({ workflowId, lockDurationMs, guard }).then(
@@ -200,6 +228,7 @@ export async function withLock<T>(params: {
   } finally {
     released = true;
     heartbeatHandle.clear();
+    external?.removeEventListener("abort", abandon);
     try {
       await storage.releaseLock({ workflowId, guard });
     } catch {

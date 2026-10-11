@@ -11,33 +11,25 @@
 // ---------------------------------------------------------------------------
 
 import type { WorkflowStorage, WorkflowWakeup } from "../durable/workflow-storage.ts";
-import type { Workflow } from "../durable/durable-pipeline.ts";
-import type { WorkflowRunner } from "../durable/workflow-runner.ts";
 import type { WorkflowState } from "../durable/workflow-state.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type { LeaderElection } from "./leader-election.ts";
-import { ResumeScanner } from "./resume-scanner.ts";
+import { ResumeScanner, scannerTargetOf, type ScannerTarget } from "./resume-scanner.ts";
 import { hasCapability } from "../durable/storage/capabilities.ts";
 
-export interface SleepScannerConfig {
+/**
+ * Sleep scanner config: the common knobs plus what to do with a due run —
+ * `{ runner, resolveWorkflow }` resumes it in this process, `{ wake }`
+ * hands it over (e.g. enqueues it for a worker that hosts the workflow).
+ */
+export type SleepScannerConfig = SleepScannerOptions & ScannerTarget;
+
+export interface SleepScannerOptions {
   /** Workflow storage to scan for expired sleeps. */
   storage: WorkflowStorage;
-  /**
-   * Runner used to resume woken workflows. Scanner calls
-   * `runner.run({ workflow, workflowId, input })` after `resolveWorkflow`
-   * returns a definition.
-   */
-  runner: WorkflowRunner;
   /** How often to scan (ms). Default: 10_000 (10 seconds). */
   scanIntervalMs?: number;
-  /**
-   * Resolve a pure `Workflow` definition by name. The scanner passes the
-   * returned definition back to the runner for resumption; it doesn't bind
-   * storage itself. A name it can't resolve is reported once through
-   * `onError` and its runs are skipped.
-   */
-  resolveWorkflow: (workflowName: string) => Workflow<unknown, unknown> | undefined;
-  /** Called when a workflow is resumed. */
+  /** Called when a workflow is resumed (or handed to `wake`). */
   onResume?: (workflowId: string) => void;
   /** Called when resumption fails. */
   onError?: (workflowId: string, error: unknown) => void;
@@ -76,6 +68,8 @@ export interface SleepScanner {
    * started have finished, and leadership (if any) has been released.
    */
   stop(): Promise<void>;
+  /** Scan now instead of after the current wait. */
+  wake(): void;
 }
 
 export class DefaultSleepScanner implements SleepScanner {
@@ -87,10 +81,9 @@ export class DefaultSleepScanner implements SleepScanner {
     const pageSize = config.pageSize ?? 100;
     this.scanner = new ResumeScanner<WorkflowWakeup>({
       name: "sleep-scanner",
-      runner: config.runner,
+      target: scannerTargetOf(config),
       intervalMs: config.scanIntervalMs ?? 10_000,
       clock,
-      resolveWorkflow: config.resolveWorkflow,
       onResume: config.onResume,
       onError: config.onError,
       leaderElection: config.leaderElection,
@@ -116,6 +109,10 @@ export class DefaultSleepScanner implements SleepScanner {
 
   stop(): Promise<void> {
     return this.scanner.stop();
+  }
+
+  wake(): void {
+    this.scanner.wake();
   }
 }
 

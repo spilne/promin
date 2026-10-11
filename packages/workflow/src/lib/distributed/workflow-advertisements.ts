@@ -1,19 +1,22 @@
 // ---------------------------------------------------------------------------
 // WorkflowAdvertisements — registry of workflows advertised by connected
-// workers. Populates dashboards and dispatch logic without requiring the
+// workers. Populates dashboards and start routing without requiring the
 // host server to own workflow code directly.
 //
-// Workers register on connect (`upsert`) with their full workflow
-// definitions (name, version, DAG steps, optional sampleInput). The
-// coordinator/dispatch layer reads `distinct()` to build stub workflows
-// for trigger requests; the dashboard reads it to populate the
-// Workflows page.
+// Workers register on connect (`upsert`) with their workflow definitions
+// (name, version, DAG steps, optional sampleInput) and re-advertise
+// periodically. The server reads `distinct()` to know which workflows (and
+// versions) some live worker can run; the dashboard reads it to populate
+// the Workflows page.
 //
 // Lifecycle:
-//   - upsert is called on worker startup + on heartbeat refresh
+//   - upsert is called on worker startup and then periodically
+//   - an advertisement not refreshed within the registry's `ttlMs` expires:
+//     `list` / `distinct` leave it out, and `prune` deletes it — so a
+//     worker that died without `remove` stops being advertised
 //   - remove is called on worker graceful shutdown
-//   - in-memory backends lose state on restart (workers re-advertise on
-//     reconnect); persistent backends (SQLite, Postgres) survive restarts
+//   - in-memory backends lose state on restart (workers re-advertise within
+//     one interval); persistent backends (SQLite, Postgres) survive restarts
 // ---------------------------------------------------------------------------
 
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
@@ -25,13 +28,9 @@ export interface AdvertisedWorkflow {
     name: string;
     kind: string;
     dependsOn: readonly string[];
-    /**
-     * Capabilities this step requires. Forwarded by step-mode workers so
-     * the coordinator can route the dispatched task to a worker that
-     * actually advertises the matching capabilities.
-     */
+    /** Capabilities this step requires (informational). */
     needs?: readonly string[];
-    /** Dispatch priority — higher runs first (queue-level default: 5). */
+    /** Dispatch priority — higher runs first (informational). */
     priority?: number;
   }>;
   sampleInput?: unknown;
@@ -43,36 +42,51 @@ export interface AdvertisementEntry {
   advertisedAt: Date;
 }
 
+/**
+ * Default advertisement lifetime: an advertisement not refreshed for this
+ * long is treated as gone. Workers re-advertise well within it.
+ */
+export const DEFAULT_ADVERTISEMENT_TTL_MS = 60_000;
+
 export interface WorkflowAdvertisementRegistry {
   /**
    * Replace the advertisement for a worker and stamp `advertisedAt` from the
-   * registry's clock. Called on worker startup and heartbeat refresh.
+   * registry's clock. Called on worker startup and on every re-advertise.
    */
   upsert(params: { workerId: string; workflows: AdvertisedWorkflow[] }): Promise<void>;
   /** Remove a worker's advertisement. Called on worker shutdown / death. */
   remove(workerId: string): Promise<void>;
-  /** List every outstanding advertisement entry. */
+  /** Every live advertisement entry (refreshed within the registry's TTL). */
   list(): Promise<AdvertisementEntry[]>;
   /**
-   * Distinct workflows across all workers, one row per (name, version).
+   * Distinct live workflows across all workers, one row per (name, version).
    * When several workers advertise the same (name, version), the most
    * recent advertisement (`advertisedAt`) wins. Sorted by name. Used to
-   * populate dispatch lookups and the dashboard's Workflows page.
+   * route starts and to populate the dashboard's Workflows page.
    */
   distinct(): Promise<AdvertisedWorkflow[]>;
+  /** Delete expired advertisements; resolves with how many workers' entries went. */
+  prune(): Promise<number>;
 }
 
 export interface InMemoryWorkflowAdvertisementRegistryConfig {
-  /** Time source for `advertisedAt`. Default: `SystemWallClock`. */
+  /** Time source for `advertisedAt` and expiry. Default: `SystemWallClock`. */
   clock?: WallClock;
+  /**
+   * An advertisement not refreshed for this long expires. Default:
+   * `DEFAULT_ADVERTISEMENT_TTL_MS`; `Infinity` keeps them until `remove`.
+   */
+  ttlMs?: number;
 }
 
 export class InMemoryWorkflowAdvertisementRegistry implements WorkflowAdvertisementRegistry {
   private readonly byWorker = new Map<string, AdvertisementEntry>();
   private readonly clock: WallClock;
+  private readonly ttlMs: number;
 
   constructor(config: InMemoryWorkflowAdvertisementRegistryConfig = {}) {
     this.clock = config.clock ?? SystemWallClock;
+    this.ttlMs = config.ttlMs ?? DEFAULT_ADVERTISEMENT_TTL_MS;
   }
 
   async upsert(params: { workerId: string; workflows: AdvertisedWorkflow[] }): Promise<void> {
@@ -85,16 +99,14 @@ export class InMemoryWorkflowAdvertisementRegistry implements WorkflowAdvertisem
   }
 
   async list(): Promise<AdvertisementEntry[]> {
-    return [...this.byWorker.values()];
+    return this.live();
   }
 
   async distinct(): Promise<AdvertisedWorkflow[]> {
     // Dedupe on (name, version). Walk entries oldest first so the most
     // recent advertisement overwrites older ones; Map insertion order
     // would keep a re-upserted worker at its first position.
-    const entries = [...this.byWorker.values()].sort(
-      (a, b) => a.advertisedAt.getTime() - b.advertisedAt.getTime(),
-    );
+    const entries = this.live().sort((a, b) => a.advertisedAt.getTime() - b.advertisedAt.getTime());
     const byKey = new Map<string, AdvertisedWorkflow>();
     for (const entry of entries) {
       for (const wf of entry.workflows) {
@@ -102,5 +114,22 @@ export class InMemoryWorkflowAdvertisementRegistry implements WorkflowAdvertisem
       }
     }
     return [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  async prune(): Promise<number> {
+    const cutoff = this.clock.currentTimeMs() - this.ttlMs;
+    let pruned = 0;
+    for (const [workerId, entry] of this.byWorker) {
+      if (entry.advertisedAt.getTime() <= cutoff) {
+        this.byWorker.delete(workerId);
+        pruned += 1;
+      }
+    }
+    return pruned;
+  }
+
+  private live(): AdvertisementEntry[] {
+    const cutoff = this.clock.currentTimeMs() - this.ttlMs;
+    return [...this.byWorker.values()].filter((e) => e.advertisedAt.getTime() > cutoff);
   }
 }

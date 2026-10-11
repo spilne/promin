@@ -250,6 +250,8 @@ export const workflowLocks = pgTable("wf_workflow_locks", {
   lockedAt: timestamp("locked_at", { withTimezone: true }).notNull().defaultNow(),
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   lockedBy: text("locked_by"),
+  /** The acquire attempt that took the lock: a repeat of it gets the lock back. */
+  attemptId: text("attempt_id"),
   /**
    * Monotonic fence token. Bumped on every successful `tryLock`, carried by
    * subsequent mutating calls, validated against this row before the write
@@ -544,6 +546,9 @@ export const workflowStarts = pgTable(
     input: jsonb("input").notNull(),
     metadata: jsonb("metadata"),
     enqueuedAt: timestamp("enqueued_at", { withTimezone: true }).notNull().defaultNow(),
+    // A released start (`release({ delayMs })`) is not claimable before
+    // this time. NULL means claimable now.
+    availableAt: timestamp("available_at", { withTimezone: true }),
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
     claimedBy: text("claimed_by"),
     // Fencing token of the current claim. `heartbeat` and `complete` only
@@ -554,11 +559,16 @@ export const workflowStarts = pgTable(
     // `heartbeat`). A claim whose heartbeat is older than `reclaimAfterMs`
     // goes back to pending.
     heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+    // Enqueued again while claimed: completing the claim puts the start
+    // back to pending instead of deleting it.
+    requeued: boolean("requeued").notNull().default(false),
     // status: 'pending' (waiting for a worker) | 'claimed' (in flight).
     // Completion deletes the row to keep the queue tight.
     status: text("status").notNull().default("pending"),
   },
   (t) => [
+    // One record per run: enqueue of a run already queued is a no-op.
+    uniqueIndex("wf_workflow_starts_workflow_id_key").on(t.workflowId),
     // Hot path: workers claim by (workflow_name, enqueued_at) over the
     // pending partition only. Partial index keeps the scan tight even
     // when the queue accumulates inflight + completed history.
@@ -695,9 +705,14 @@ export const workflowStreams = pgTable(
     payload: jsonb("payload").notNull(),
     appendedBy: text("appended_by").notNull().default("workflow"),
     appendedAt: timestamp("appended_at", { withTimezone: true }).notNull().defaultNow(),
+    // The appender's id for the chunk: a repeated append answers this row.
+    chunkId: text("chunk_id"),
   },
   (t) => [
     primaryKey({ columns: [t.workflowId, t.streamId, t.chunkIndex] }),
+    uniqueIndex("wf_streams_chunk_id_idx")
+      .on(t.workflowId, t.streamId, t.chunkId)
+      .where(sql`${t.chunkId} IS NOT NULL`),
     foreignKey({
       name: "wf_streams_workflow_id_fkey",
       columns: [t.workflowId],

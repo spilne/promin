@@ -93,7 +93,7 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
       runner,
       scanIntervalMs: SCAN_MS,
       clock,
-      resolveWorkflow: (name) => (name === "sleepy" ? wfDef : undefined),
+      resolveWorkflow: ({ workflowName: name }) => (name === "sleepy" ? wfDef : undefined),
       onResume: (id) => resumed.push(id),
     });
     void scanner.start();
@@ -132,7 +132,7 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
       runner,
       scanIntervalMs: SCAN_MS,
       clock,
-      resolveWorkflow: (name) => (name === "long-sleep" ? wfDef : undefined),
+      resolveWorkflow: ({ workflowName: name }) => (name === "long-sleep" ? wfDef : undefined),
       onResume: (id) => resumed.push(id),
     });
 
@@ -208,7 +208,7 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
       runner,
       scanIntervalMs: SCAN_MS,
       clock,
-      resolveWorkflow: (name) => (name === "multi" ? wfDef : undefined),
+      resolveWorkflow: ({ workflowName: name }) => (name === "multi" ? wfDef : undefined),
       onResume: (id) => resumed.push(id),
     });
 
@@ -251,7 +251,7 @@ describe("Sleep scanner — background process that wakes up sleeping workflows"
       runner,
       scanIntervalMs: SCAN_MS,
       clock,
-      resolveWorkflow: (name) => (name === "broken" ? broken : undefined),
+      resolveWorkflow: ({ workflowName: name }) => (name === "broken" ? broken : undefined),
       onError: (id, err) => errors.push({ id, err }),
     });
 

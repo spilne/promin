@@ -1,28 +1,40 @@
 // ---------------------------------------------------------------------------
-// Worker-protocol endpoints for the WorkflowStartQueue. Workers POST here
-// to claim, heartbeat and complete pending start requests enqueued by the
-// auto-trigger fn in ZoryaServer. Heartbeat and complete carry the claim
-// token from the claim (JSON body `{ claimToken }`).
+// Worker-protocol endpoints for the WorkflowStartQueue. Workers that host a
+// workflow claim its starts here, keep each claim alive while they drive the
+// run, then complete it (the run ended or suspended) or release it (the run
+// is locked elsewhere, the worker is stopping). Heartbeat, complete and
+// release carry the claim token from the claim (JSON body `{ claimToken }`).
+//
+//   POST /api/worker-protocol/claim-starts            { workflowSpecs, workerId?, limit?, claimId? }
+//   POST /api/worker-protocol/heartbeat-start/:id     { claimToken }           → { ok }
+//   POST /api/worker-protocol/complete-start/:id      { claimToken }           → { ok }
+//   POST /api/worker-protocol/release-start/:id       { claimToken, delayMs? } → { ok }
+//   GET  /api/worker-protocol/starts                  (debugging)
 // ---------------------------------------------------------------------------
 
-import { json, jsonError, readJson } from "../router.ts";
-import type {
-  WorkerWorkflowSpec,
-  WorkflowStartClaimRef,
-  WorkflowStartQueue,
-} from "../workflow-starts.ts";
+import { json } from "../router.ts";
+import { parseBody, parseParams } from "../request-validation.ts";
+import {
+  ClaimStartsRequestSchema,
+  ReleaseStartRequestSchema,
+  StartClaimRequestSchema,
+  StartParamsSchema,
+} from "../api-types.ts";
+import type { WorkflowStartClaimRef, WorkflowStartQueue } from "../workflow-starts.ts";
 
 export function claimWorkflowStarts(queue: WorkflowStartQueue) {
   return async (req: Request): Promise<Response> => {
-    const body = await readJson<{
-      workflowSpecs?: WorkerWorkflowSpec[];
-      workerId?: string;
-      limit?: number;
-    }>(req);
-    const limit = Math.min(Math.max(body?.limit ?? 10, 1), 100);
-    const specs: WorkerWorkflowSpec[] = body?.workflowSpecs ?? [];
-    if (specs.length === 0) return json(200, { starts: [] });
-    const starts = await queue.claim({ workflowSpecs: specs, workerId: body?.workerId, limit });
+    const { workflowSpecs, workerId, limit, claimId } = await parseBody({
+      req,
+      schema: ClaimStartsRequestSchema,
+    });
+    if (workflowSpecs.length === 0) return json(200, { starts: [] });
+    const starts = await queue.claim({
+      workflowSpecs,
+      ...(workerId !== undefined && { workerId }),
+      ...(claimId !== undefined && { claimId }),
+      limit: limit ?? 10,
+    });
     return json(200, { starts });
   };
 }
@@ -30,19 +42,27 @@ export function claimWorkflowStarts(queue: WorkflowStartQueue) {
 /** `POST /api/worker-protocol/heartbeat-start/:id` — `{ ok: false }` once the claim is lost. */
 export function heartbeatWorkflowStart(queue: WorkflowStartQueue) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const ref = await readClaimRef({ req, params });
-    if ("error" in ref) return ref.error;
-    const ok = await queue.heartbeat(ref);
-    return json(200, { ok });
+    return json(200, { ok: await queue.heartbeat(await readClaimRef({ req, params })) });
   };
 }
 
 /** `POST /api/worker-protocol/complete-start/:id` — `{ ok: false }` when the token is stale. */
 export function completeWorkflowStart(queue: WorkflowStartQueue) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const ref = await readClaimRef({ req, params });
-    if ("error" in ref) return ref.error;
-    const ok = await queue.complete(ref);
+    return json(200, { ok: await queue.complete(await readClaimRef({ req, params })) });
+  };
+}
+
+/** `POST /api/worker-protocol/release-start/:id` — `{ ok: false }` when the token is stale. */
+export function releaseWorkflowStart(queue: WorkflowStartQueue) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const { id } = parseParams({ params, schema: StartParamsSchema });
+    const body = await parseBody({ req, schema: ReleaseStartRequestSchema });
+    const ok = await queue.release({
+      id,
+      claimToken: body.claimToken,
+      ...(body.delayMs !== undefined && { delayMs: body.delayMs }),
+    });
     return json(200, { ok });
   };
 }
@@ -50,14 +70,9 @@ export function completeWorkflowStart(queue: WorkflowStartQueue) {
 async function readClaimRef(args: {
   req: Request;
   params: Record<string, string>;
-}): Promise<WorkflowStartClaimRef | { error: Response }> {
-  const id = args.params.id;
-  if (!id) return { error: jsonError(400, "missing_id") };
-  const body = await readJson<{ claimToken?: unknown }>(args.req);
-  const claimToken = body?.claimToken;
-  if (typeof claimToken !== "string" || claimToken.length === 0) {
-    return { error: jsonError(400, "missing_claim_token") };
-  }
+}): Promise<WorkflowStartClaimRef> {
+  const { id } = parseParams({ params: args.params, schema: StartParamsSchema });
+  const { claimToken } = await parseBody({ req: args.req, schema: StartClaimRequestSchema });
   return { id, claimToken };
 }
 

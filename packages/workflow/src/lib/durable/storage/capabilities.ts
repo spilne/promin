@@ -45,6 +45,8 @@ export interface StorageCapabilityMap {
   signalWakeups: Required<Pick<WorkflowScannerStore, "listSignalWakeups">>;
   /** `listOrphanedRuns`: the indexed recovery scan. */
   orphanedRuns: Required<Pick<WorkflowScannerStore, "listOrphanedRuns">>;
+  /** `listChildEndedWaits`: the indexed scan for parents parked on a child. */
+  childEndedWaits: Required<Pick<WorkflowScannerStore, "listChildEndedWaits">>;
 }
 
 /** Name of one optional storage capability. */
@@ -77,6 +79,7 @@ const CAPABILITY_METHODS: { readonly [K in StorageCapability]: readonly string[]
   dueTimers: ["listDueTimers"],
   signalWakeups: ["listSignalWakeups"],
   orphanedRuns: ["listOrphanedRuns"],
+  childEndedWaits: ["listChildEndedWaits"],
 };
 
 /** Every capability name, in declaration order. */

@@ -420,8 +420,10 @@ void coordinator.startLoop();
 They query storage with keyset paging (`listDueTimers`,
 `listSignalWakeups`), resume with bounded concurrency
 (`resumeConcurrency`, default 10), skip runs they are already resuming,
-report a workflow name `resolveWorkflow` doesn't know once, and back off on
-storage errors. With several instances, gate each scanner with a
+report a workflow name and version `resolveWorkflow` doesn't know once, and
+back off on storage errors. `resolveWorkflow({ workflowName, version })`
+gets the version the run was created with: return that version's definition
+(or one carrying it in `previousVersions`), never the newest one. With several instances, gate each scanner with a
 `LeaseLeaderElection` on `scannerLeaderKey({ scanner: "sleep" | "signal", namespace })`;
 without one every instance scans (safe — the run lock admits one driver —
 but wasteful).
@@ -442,13 +444,13 @@ const definitions = new Map([[reminder.name, reminder]]);
 const sleeps = createSleepScanner({
   storage,
   runner,
-  resolveWorkflow: (name) => definitions.get(name),
+  resolveWorkflow: ({ workflowName }) => definitions.get(workflowName),
   scanIntervalMs: 5_000,
 });
 const signals = createSignalScanner({
   storage,
   runner,
-  resolveWorkflow: (name) => definitions.get(name),
+  resolveWorkflow: ({ workflowName }) => definitions.get(workflowName),
 });
 void sleeps.start();
 void signals.start();
@@ -459,6 +461,28 @@ await Promise.all([sleeps.stop(), signals.stop()]);
 The signal scanner is also what wakes a parent parked on a child workflow:
 the child's end is delivered as a reserved signal (see
 [child wake-up](../durable/README.md#subworkflows-and-child-wake-up)).
+
+**Wake mode.** A process that doesn't host the workflow code (a server whose
+workers drive runs) passes `wake` instead of `runner` + `resolveWorkflow`:
+each due run — with its stored `version` — is handed to `wake(run)`, which
+typically enqueues it on a `WorkflowStartQueue` for a worker that hosts that
+version. A journaled signal wait's entry is still completed first. A run
+stays due until its driver resumes it, so later scans hand it over again:
+`wake` must be idempotent per `workflowId` (the start queue is).
+
+```typescript
+import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { createSleepScanner, InMemoryWorkflowStartQueue } from "@promin/workflow/distributed";
+
+const starts = new InMemoryWorkflowStartQueue();
+const wakeups = createSleepScanner({
+  storage: new InMemoryWorkflowStorage(),
+  wake: async (run) => {
+    await starts.enqueue({ ...run }); // one record per run: re-scans change nothing
+  },
+});
+void wakeups.start();
+```
 
 ## Time
 
@@ -473,12 +497,28 @@ advance — never on a fixed real-time sleep.
 
 - `InMemoryWorkerRegistry` (and the Postgres / SQLite / remote registries):
   worker rows with heartbeats, `detectDead`, `gc`.
-- Workflow advertisements and the start queue
-  (`InMemoryWorkflowAdvertisementRegistry`, `InMemoryWorkflowStartQueue`, and
-  their Postgres / SQLite versions): workers advertise the workflows they can
-  run; starts are claimed with a `claimToken`, kept alive with
-  `heartbeat({ id, claimToken })` and completed with a fenced
-  `complete({ id, claimToken })`, so a stale worker can't delete the new
-  claimant's record.
+- Workflow advertisements (`InMemoryWorkflowAdvertisementRegistry` and its
+  Postgres / SQLite versions): workers advertise the workflows and versions
+  they host and re-advertise periodically; an advertisement not refreshed
+  within `ttlMs` (default 60 s) drops out of `list` / `distinct`, and
+  `prune()` deletes it. Postgres stamps and expires on the database clock.
+- The start queue (`InMemoryWorkflowStartQueue`, `PgWorkflowStartQueue`,
+  `SqliteWorkflowStartQueue`) for worker-driven runs: a worker that hosts a
+  workflow claims a start and drives the whole run with
+  `createWorkflowRunner`. One record per run — `enqueue` of a run already
+  queued returns `{ created: false }`, so wake-ups, recovery sweeps and
+  retried triggers are idempotent; an enqueue that lands while a worker
+  holds the start marks it `requeued`, and that claim's `complete` puts
+  it back to pending instead of removing it, so a wake-up or resume during
+  a drive is never lost. Claims filter by name and version inside the claim
+  (a start of version `v` only goes to a worker listing `v`, or listing no
+  versions) and carry a `claimToken`; `heartbeat`, `complete` and
+  `release({ delayMs })` are fenced by it. A `claimId` makes a claim call
+  idempotent: a resend gets the starts it claimed. A claim not heartbeated
+  within `reclaimAfterMs` (default 120 s — the runner's default lock
+  lease) goes back to pending; Postgres stamps and expires claims on the
+  database clock. Complete a start only once its run has ended or
+  suspended; release it when the run stopped short (its lock is held
+  elsewhere, the worker is stopping).
 - `StepQueueExecutor` / `RoutingStepExecutor`: queue-backed steps from an
   in-process runner.

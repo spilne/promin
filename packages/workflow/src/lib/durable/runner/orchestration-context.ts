@@ -19,6 +19,17 @@ import type { WorkflowStorage } from "../workflow-storage.ts";
 import type { FailedWorkflowRecord } from "../workflow-state.ts";
 import type { StepExecutor } from "./step-executor.ts";
 
+/** The run lock's lease, as `WorkflowRunnerConfig.lock` sets it. */
+export interface RunLockOptions {
+  /**
+   * Lease length (ms): a driver that stops heartbeating loses the run this
+   * long after its last heartbeat. Default: 120 000.
+   */
+  readonly durationMs?: number;
+  /** How often the driver extends the lease (ms). Default: 30 000. */
+  readonly heartbeatIntervalMs?: number;
+}
+
 /**
  * Full workflow-runtime state the orchestration loop needs. A superset
  * of DagExecutionContext — adds the lock / retry / compensation / DLQ
@@ -75,6 +86,8 @@ export interface WorkflowOrchestrationContext {
    * definition's hooks.
    */
   readonly runnerHooks?: WorkflowHooks;
+  /** The run lock's lease. Inherited by drains and child runs. */
+  readonly lock?: RunLockOptions;
 }
 
 /**
@@ -92,6 +105,8 @@ export interface OrchestrationRuntime {
   readonly executorId?: string;
   /** Runner-level hooks. Win over the definition's own hooks. */
   readonly hooks?: WorkflowHooks;
+  /** The run lock's lease. */
+  readonly lock?: RunLockOptions;
 }
 
 /**
@@ -132,6 +147,7 @@ export function orchestrationContextFor(params: {
     ...(runtime.clock !== undefined && { clock: runtime.clock }),
     ...(runtime.executorId !== undefined && { executorId: runtime.executorId }),
     ...(runtime.hooks !== undefined && { runnerHooks: runtime.hooks }),
+    ...(runtime.lock !== undefined && { lock: runtime.lock }),
   };
 }
 
@@ -144,5 +160,6 @@ export function runtimeOf(ctx: WorkflowOrchestrationContext): OrchestrationRunti
     ...(stepExecutor !== undefined && { stepExecutor }),
     ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
     ...(ctx.runnerHooks !== undefined && { hooks: ctx.runnerHooks }),
+    ...(ctx.lock !== undefined && { lock: ctx.lock }),
   };
 }

@@ -391,6 +391,7 @@ CREATE TABLE wf_streams (
   payload jsonb NOT NULL,
   appended_by text DEFAULT 'workflow'::text NOT NULL,
   appended_at timestamp with time zone DEFAULT now() NOT NULL,
+  chunk_id text,
   CONSTRAINT wf_streams_appended_by_check CHECK ((appended_by = ANY (ARRAY['workflow'::text, 'external'::text]))),
   CONSTRAINT wf_streams_pkey PRIMARY KEY (workflow_id, stream_id, chunk_index)
 );
@@ -423,6 +424,7 @@ CREATE TABLE wf_workflow_locks (
   expires_at timestamp with time zone NOT NULL,
   locked_by text,
   fence_token bigserial NOT NULL,
+  attempt_id text,
   CONSTRAINT wf_workflow_locks_pkey PRIMARY KEY (workflow_id)
 );
 
@@ -468,11 +470,13 @@ CREATE TABLE wf_workflow_starts (
   input jsonb NOT NULL,
   metadata jsonb,
   enqueued_at timestamp with time zone DEFAULT now() NOT NULL,
+  available_at timestamp with time zone,
   claimed_at timestamp with time zone,
   claimed_by text,
   status text DEFAULT 'pending'::text NOT NULL,
   claim_token text,
   heartbeat_at timestamp with time zone,
+  requeued boolean DEFAULT false NOT NULL,
   CONSTRAINT wf_workflow_starts_pkey PRIMARY KEY (id)
 );
 
@@ -665,6 +669,10 @@ CREATE INDEX wf_workflow_starts_heartbeat_idx ON wf_workflow_starts (heartbeat_a
 CREATE INDEX wf_workflow_starts_pending_enqueued_idx ON wf_workflow_starts (enqueued_at) WHERE (status = 'pending'::text);
 
 CREATE INDEX wf_workflow_starts_pending_idx ON wf_workflow_starts (workflow_name, enqueued_at) WHERE (status = 'pending'::text);
+
+CREATE UNIQUE INDEX wf_workflow_starts_workflow_id_key ON wf_workflow_starts (workflow_id);
+
+CREATE UNIQUE INDEX wf_streams_chunk_id_idx ON wf_streams (workflow_id, stream_id, chunk_id) WHERE (chunk_id IS NOT NULL);
 
 CREATE INDEX wf_workflow_steps_signal_timeout_idx ON wf_workflow_steps (signal_timeout_at) WHERE ((status_id = 7) AND (signal_timeout_at IS NOT NULL));
 
