@@ -20,16 +20,18 @@ interface StatsBarProps {
 }
 
 export function StatsBar({ onPickStatus }: StatsBarProps = {}) {
-  const { data } = useFetch(() => api.getMetrics(), [], 5000);
+  // Metrics aggregate every run in storage: refresh them on a slower cadence
+  // than the run list itself.
+  const { data } = useFetch(() => api.getMetrics(), [], 15_000);
   const { data: health } = useFetch(() => api.getHealth(), [], 10_000);
 
   if (!data) {
     return (
-      <div class="stats stats-horizontal bg-base-300 shadow w-full">
+      <div class="grid grid-cols-2 gap-2 md:grid-cols-4 xl:grid-cols-8">
         {SKELETON_TITLES.map((t) => (
-          <div class="stat">
-            <div class="stat-title text-sm">{t}</div>
-            <div class="pt-1">
+          <div class="rounded border border-base-content/10 bg-base-300/80 p-3">
+            <div class="text-[11px] uppercase tracking-[0.12em] text-base-content/45">{t}</div>
+            <div class="pt-2">
               <Skeleton w="w-14" h="h-7" />
             </div>
           </div>
@@ -66,44 +68,61 @@ export function StatsBar({ onPickStatus }: StatsBarProps = {}) {
     },
   ];
 
+  const durations = [
+    { label: "Avg", value: data.avgDurationMs },
+    { label: "p95", value: data.p95DurationMs },
+    { label: "p99", value: data.p99DurationMs },
+  ];
+
   return (
-    <div class="card bg-base-300 shadow">
-      <div class="stats stats-horizontal bg-transparent">
+    <div class="rounded border border-base-content/10 bg-base-300/70 shadow-sm overflow-hidden">
+      <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8">
         {stats.map((s) => {
-          const clickable = !!s.filter && !!onPickStatus;
-          return (
-            <div
-              class={`stat ${clickable ? "cursor-pointer hover:bg-base-200/50 transition-colors" : ""}`}
-              onClick={() => clickable && onPickStatus?.(s.filter)}
+          const body = (
+            <>
+              <StatLabel>{s.label}</StatLabel>
+              <div class={`mt-2 text-2xl font-semibold leading-none ${s.color}`}>{s.value}</div>
+            </>
+          );
+          // A card that filters the table is a real button (focusable,
+          // keyboard-operable); the others are plain cells.
+          return s.filter && onPickStatus ? (
+            <button
+              type="button"
+              class={`${CELL_CLASS} block w-full text-left hover:bg-base-100/70 transition-colors`}
+              onClick={() => onPickStatus(s.filter)}
+              title={`Show ${s.label.toLowerCase()} runs`}
             >
-              <div class="stat-title text-sm">{s.label}</div>
-              <div class={`stat-value text-2xl ${s.color}`}>{s.value}</div>
-            </div>
+              {body}
+            </button>
+          ) : (
+            <div class={CELL_CLASS}>{body}</div>
           );
         })}
-        <div class="stat">
-          <div class="stat-title text-sm">Avg</div>
-          <div class="stat-value text-2xl">{formatDuration(data.avgDurationMs)}</div>
-        </div>
-        <div class="stat">
-          <div class="stat-title text-sm">p95</div>
-          <div class="stat-value text-2xl">{formatDuration(data.p95DurationMs)}</div>
-        </div>
-        <div class="stat">
-          <div class="stat-title text-sm">p99</div>
-          <div class="stat-value text-2xl">{formatDuration(data.p99DurationMs)}</div>
-        </div>
+        {durations.map((d) => (
+          <div class={CELL_CLASS}>
+            <StatLabel>{d.label}</StatLabel>
+            <div class="mt-2 text-2xl font-semibold leading-none">{formatDuration(d.value)}</div>
+          </div>
+        ))}
       </div>
       {health && (
-        <div class="flex items-center gap-4 px-4 py-2 text-xs text-base-content/60 border-t border-base-content/10">
+        <div class="flex flex-wrap items-center gap-3 px-4 py-2 text-xs text-base-content/60 border-t border-base-content/10">
           <HealthDot label="API" ok={true} />
           <HealthDot label="Storage" ok={true} />
-          <span class="text-base-content/30">·</span>
-          <span>Zorya dashboard · {new Date().toLocaleTimeString()}</span>
+          <span class="h-3 w-px bg-base-content/15" />
+          <span>Updated {new Date().toLocaleTimeString()}</span>
         </div>
       )}
     </div>
   );
+}
+
+/** One stat cell: bordered so the grid reads as a table when it wraps. */
+const CELL_CLASS = "min-h-[5.75rem] border-b border-r border-base-content/10 p-3 xl:border-b-0";
+
+function StatLabel({ children }: { children: string }) {
+  return <div class="text-[11px] uppercase tracking-[0.12em] text-base-content/45">{children}</div>;
 }
 
 function HealthDot({ label, ok }: { label: string; ok: boolean }) {

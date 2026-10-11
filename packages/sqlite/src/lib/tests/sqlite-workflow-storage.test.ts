@@ -154,6 +154,38 @@ describe("SqliteWorkflowStorage", () => {
     expect(byCompleted.some((d) => d.includes("TEMP B-TREE"))).toBe(false);
   });
 
+  it("serves namespace-scoped run pages and name/type pickers from an index", async () => {
+    const db = new Database(":memory:");
+    const s = SqliteWorkflowStorage.make({ db });
+    const seen: string[] = [];
+    const query = db.query.bind(db);
+    db.query = ((sql: string) => {
+      seen.push(sql);
+      return query(sql);
+    }) as typeof db.query;
+    const planOf = (params: { sql: string; args: Array<string | number> }): string[] =>
+      query<{ detail: string }, Array<string | number>>(`EXPLAIN QUERY PLAN ${params.sql}`)
+        .all(...params.args)
+        .map((r) => r.detail);
+
+    // The dashboard's default run page: one namespace, newest first.
+    seen.length = 0;
+    await s.listWorkflowSummaries({ namespace: "tenant-a", limit: 25 });
+    const page = planOf({ sql: seen.find((q) => q.includes("ORDER BY"))!, args: ["tenant-a", 25] });
+    expect(page.some((d) => d.includes("promin_wf_namespace_started_at"))).toBe(true);
+    expect(page.some((d) => d.includes("TEMP B-TREE"))).toBe(false);
+
+    seen.length = 0;
+    await s.distinctWorkflowNames({ namespace: "tenant-a" });
+    const names = planOf({ sql: seen.find((q) => q.includes("DISTINCT"))!, args: ["tenant-a"] });
+    expect(names.some((d) => d.includes("promin_wf_namespace_name"))).toBe(true);
+
+    seen.length = 0;
+    await s.distinctWorkflowTypes({ namespace: "tenant-a" });
+    const types = planOf({ sql: seen.find((q) => q.includes("DISTINCT"))!, args: ["tenant-a"] });
+    expect(types.some((d) => d.includes("promin_wf_namespace_type"))).toBe(true);
+  });
+
   it("countWorkflows returns exact counts per status", async () => {
     const s = makeStorage();
     await s.createWorkflow({ workflowId: "cw-1", workflowName: "wf", input: {} });

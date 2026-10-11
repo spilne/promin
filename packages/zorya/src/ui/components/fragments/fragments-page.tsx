@@ -10,7 +10,7 @@ import { confirm, toast } from "../../lib/dialogs.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
 import type { FragmentDto } from "../../../server/routes/fragments.ts";
-import { Page } from "../ui/page.tsx";
+import { Page, PageHeader } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { Markdown } from "../../lib/markdown.tsx";
 
@@ -54,23 +54,26 @@ export function FragmentsPage() {
 
   return (
     <Page>
-      <div class="flex items-start justify-between gap-4">
-        <div>
-          <h2 class="text-xl font-semibold">Fragments</h2>
-          <p class="text-xs text-base-content/50 max-w-2xl">
+      <PageHeader
+        title="Fragments"
+        eyebrow="Agent runtime"
+        description={
+          <>
             Reusable prompt layers role recipes compose into their system prompt at resolve time.
             Always-on (concatenated every turn), vs. skills which are load-on-demand. File-scanned
             fragments (.md) show a 📄 badge and are read-only here — edit the source file instead.
-          </p>
-        </div>
-        <button
-          type="button"
-          class="btn btn-sm btn-primary"
-          onClick={() => setEditor({ mode: "create" })}
-        >
-          New fragment
-        </button>
-      </div>
+          </>
+        }
+        actions={
+          <button
+            type="button"
+            class="btn btn-sm btn-primary"
+            onClick={() => setEditor({ mode: "create" })}
+          >
+            New fragment
+          </button>
+        }
+      />
 
       <input
         class="input input-bordered input-sm font-mono max-w-md"

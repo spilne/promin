@@ -9,7 +9,7 @@ import { SkeletonRows } from "../ui/skeleton.tsx";
 import { EmptyState } from "../ui/empty-state.tsx";
 import { Pagination } from "../ui/pagination.tsx";
 import { TriggerModal } from "./trigger-modal.tsx";
-import { Page } from "../ui/page.tsx";
+import { MetaDivider, Page, PageHeader, PageToolbar } from "../ui/page.tsx";
 
 const PAGE_SIZE = 20;
 
@@ -31,13 +31,23 @@ interface WorkflowListProps {
 export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: WorkflowListProps) {
   const [namespace] = useNamespace();
   const { data, loading, error, refresh } = useFetch(() => api.listWorkflowDefs(), [], 30_000);
-  const { data: sparklines } = useFetch<SparklinesResponse>(() => api.getSparklines(14), [], 5000);
+  // Sparklines are decoration: refresh them slower than the directory's
+  // own data, since each refresh aggregates recent runs of every workflow.
+  const { data: sparklines } = useFetch<SparklinesResponse>(
+    () => api.getSparklines(14),
+    [],
+    15_000,
+  );
   // Names of workflows that have run in the currently-selected namespace.
   // Used to filter the registry view so users see only the workflows
   // relevant to their tenant. When namespace is unset the filter is
-  // skipped — the registry is the union of all definitions.
+  // skipped — the registry is the union of all definitions — so the
+  // names aren't fetched at all.
   const { data: runNamesInNs } = useFetch(
-    () => api.listWorkflowNames({ namespace: namespace || undefined }),
+    () =>
+      namespace
+        ? api.listWorkflowNames({ namespace })
+        : Promise.resolve<{ names: string[] }>({ names: [] }),
     [namespace],
     30_000,
   );
@@ -103,59 +113,67 @@ export function WorkflowList({ onOpenRun, onOpenWorkflow, onOpenWorkflowRuns }: 
 
   return (
     <Page>
-      <div class="flex items-end justify-between">
-        <div>
-          <h2 class="text-xl font-semibold">Workflows</h2>
-          <p class="text-xs text-base-content/50">
-            {data ? (
-              <>
-                {totalDefs} registered
-                {namespace && !showAll && hiddenByNamespace > 0 ? (
-                  <>
-                    {" · "}
-                    <span class="text-warning/80">
-                      filtered to <span class="font-mono">{namespace}</span> ({hiddenByNamespace}{" "}
-                      hidden)
-                    </span>
-                  </>
-                ) : null}
-              </>
-            ) : (
-              "Loading…"
-            )}
-          </p>
-        </div>
-        <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
-          <span>↻</span>
-          Refresh
-        </button>
-      </div>
+      <PageHeader
+        title="Workflows"
+        eyebrow="Definitions"
+        description="Registered workflow definitions, versions, recent activity, and manual triggers."
+        meta={
+          data ? (
+            <>
+              <span class="font-mono">{totalDefs}</span>
+              <span>registered</span>
+              {namespace && !showAll && hiddenByNamespace > 0 ? (
+                <>
+                  <MetaDivider />
+                  <span class="text-warning/80">
+                    {hiddenByNamespace} hidden by <span class="font-mono">{namespace}</span>
+                  </span>
+                </>
+              ) : null}
+            </>
+          ) : (
+            <span>Loading…</span>
+          )
+        }
+        actions={
+          <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
+            <span aria-hidden="true">↻</span>
+            Refresh
+          </button>
+        }
+      />
 
-      <div class="flex items-center justify-end gap-2">
-        {namespace && (
-          <label class="text-xs text-base-content/60 flex items-center gap-1 cursor-pointer">
-            <input
-              type="checkbox"
-              class="checkbox checkbox-xs"
-              checked={showAll}
-              onChange={(e) => setShowAll((e.target as HTMLInputElement).checked)}
-            />
-            Show all (ignore namespace filter)
-          </label>
-        )}
-        <input
-          class="input input-bordered input-sm w-full max-w-md font-mono"
-          placeholder="Search by name, type, version…"
-          value={query}
-          onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
-        />
-      </div>
+      <PageToolbar>
+        <div class="text-xs text-base-content/55">
+          Showing <span class="font-mono">{filtered.length}</span> of{" "}
+          <span class="font-mono">{totalDefs}</span>
+        </div>
+        <div class="flex flex-1 flex-col gap-2 md:max-w-3xl md:flex-row md:items-center md:justify-end">
+          {namespace && (
+            <label class="text-xs text-base-content/60 flex items-center gap-1 cursor-pointer">
+              <input
+                type="checkbox"
+                class="checkbox checkbox-xs"
+                checked={showAll}
+                onChange={(e) => setShowAll((e.target as HTMLInputElement).checked)}
+              />
+              Show all (ignore namespace filter)
+            </label>
+          )}
+          <input
+            class="input input-bordered input-sm w-full md:max-w-md font-mono"
+            placeholder="Search by name, type, version…"
+            value={query}
+            onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
+          />
+        </div>
+      </PageToolbar>
 
       {error && <div class="alert alert-error text-sm">{error.message}</div>}
 
-      <div class="card bg-base-100 shadow overflow-hidden">
+      <div class="card bg-base-100/95 shadow overflow-hidden border border-base-content/10">
         <div class="overflow-x-auto">
-          <table class="table">
+          <table class="table table-sm">
             <thead>
               <tr class="bg-base-200 text-xs uppercase tracking-wider text-base-content/50">
                 <SortableTh col="name" label="Name" sort={sort} onClick={cycleSort} />

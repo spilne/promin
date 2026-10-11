@@ -106,13 +106,13 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
   return (
     <Page space="none">
       <div class="flex flex-col gap-3">
-        <div class="flex items-center justify-between">
-          <div class="flex items-center gap-3">
-            <button class="btn btn-sm btn-ghost" onClick={onBack}>
+        <div class="flex items-start justify-between gap-3">
+          <div class="flex min-w-0 items-start gap-3">
+            <button class="btn btn-sm btn-ghost shrink-0" onClick={onBack}>
               ← Agents
             </button>
-            <div>
-              <h2 class="text-xl font-semibold font-mono">{id}</h2>
+            <div class="min-w-0">
+              <h2 class="text-xl font-semibold font-mono break-all">{id}</h2>
               {agent && (
                 <div class="mt-1">
                   <AgentMetaBadges agent={agent} missingTools={missingTools} />
@@ -134,7 +134,7 @@ export function AgentDetail({ id, onBack, onOpenAgent }: AgentDetailProps) {
               )}
             </div>
           </div>
-          <div class="flex items-center gap-3">
+          <div class="flex shrink-0 items-center gap-3">
             <button
               class="btn btn-md btn-square btn-ghost text-2xl"
               onClick={() => setConfigOpen(true)}

@@ -204,6 +204,18 @@ export class SqliteWorkflowStorage
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_completed_at ON ${t} (completed_at DESC)`);
     // Covers SELECT DISTINCT workflow_name ORDER BY workflow_name
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_name ON ${t} (workflow_name)`);
+    // The dashboard scopes run pages and its name/type pickers to a
+    // namespace: these serve the filter and the default recency order (or
+    // the DISTINCT) together, instead of scanning every namespace's runs.
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_namespace_started_at ON ${t} (namespace, started_at DESC)`,
+    );
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_namespace_name ON ${t} (namespace, workflow_name)`,
+    );
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_namespace_type ON ${t} (namespace, workflow_type)`,
+    );
     this.db.run(`
       CREATE TABLE IF NOT EXISTS ${t}_signals (
         id          INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,

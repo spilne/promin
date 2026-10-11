@@ -9,7 +9,7 @@ import { CreateScheduleModal } from "./create-schedule-modal.tsx";
 import { ScheduleDrawer } from "./schedule-drawer.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { Pagination } from "../ui/pagination.tsx";
-import { Page } from "../ui/page.tsx";
+import { MetaDivider, Page, PageHeader } from "../ui/page.tsx";
 import { Combobox } from "../ui/combobox.tsx";
 
 const PAGE_SIZE = 20;
@@ -116,10 +116,7 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
   if (loading && !data) {
     return (
       <Page>
-        <div>
-          <h2 class="text-xl font-semibold">Schedules</h2>
-          <p class="text-xs text-base-content/50">Loading…</p>
-        </div>
+        <PageHeader title="Schedules" eyebrow="Automation" description="Loading schedules…" />
         <div class="card bg-base-100 shadow overflow-hidden">
           <table class="table">
             <thead>
@@ -193,27 +190,39 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
 
   return (
     <Page>
-      <div class="flex items-end justify-between">
-        <div>
-          <h2 class="text-xl font-semibold">Schedules</h2>
-          <p class="text-xs text-base-content/50">
-            {configured
-              ? `${data?.total ?? 0} configured · auto-refreshes every 10s`
-              : "Scheduler storage not configured on this server"}
-          </p>
-        </div>
-        <div class="flex gap-2">
-          {configured && (
-            <button class="btn btn-sm btn-primary gap-1" onClick={() => setShowCreate(true)}>
-              + New schedule
+      <PageHeader
+        title="Schedules"
+        eyebrow="Automation"
+        description={
+          configured
+            ? "Recurring and one-off workflow triggers: cron, intervals, and their fire history."
+            : "Scheduler storage is not configured on this server."
+        }
+        meta={
+          configured ? (
+            <>
+              <span class="font-mono">{data?.total ?? 0}</span>
+              <span>configured</span>
+              <MetaDivider />
+              <span>auto-refresh 10s</span>
+            </>
+          ) : undefined
+        }
+        actions={
+          <>
+            <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
+              <span aria-hidden="true">↻</span>
+              Refresh
             </button>
-          )}
-          <button class="btn btn-sm btn-ghost gap-1" onClick={() => refresh()}>
-            <span>↻</span>
-            Refresh
-          </button>
-        </div>
-      </div>
+            {configured && (
+              <button class="btn btn-sm btn-primary gap-1" onClick={() => setShowCreate(true)}>
+                <span aria-hidden="true">+</span>
+                New schedule
+              </button>
+            )}
+          </>
+        }
+      />
 
       {!configured && (
         <div class="alert alert-warning text-sm">

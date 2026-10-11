@@ -105,6 +105,16 @@ import { parseSseFrame, subscribeSse } from "./sse.ts";
 
 const BASE = ""; // served from same origin
 
+/** Attempts a GET gets in all before its failure surfaces. */
+const GET_ATTEMPTS = 3;
+/** Answers a server gives while it restarts or a gateway can't reach it. */
+const RETRYABLE_STATUSES: ReadonlySet<number> = new Set([502, 503, 504]);
+
+/** Backoff before retry `attempt + 1`: 50ms, then 100ms. */
+function retryDelay(attempt: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 50 * 2 ** (attempt - 1)));
+}
+
 /** The dashboard's stored operator key as an `authorization` header, if any. */
 export function authHeader(): Record<string, string> {
   const k = localStorage.getItem("zorya_api_key");
@@ -116,16 +126,43 @@ export function authHeader(): Record<string, string> {
  * caller passes its own `authorization` (the signal-token routes send the
  * token's bearer, which an operator key must never replace). 204 and empty
  * bodies resolve to `undefined`.
+ *
+ * A GET is retried (up to `GET_ATTEMPTS` in all, with a short backoff) on a
+ * network failure or a gateway-style 502/503/504, which a restarting or
+ * hot-reloading server answers for a moment. Other methods are never
+ * replayed from the browser.
  */
 export async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(authHeader());
   new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
-  const res = await fetch(`${BASE}${path}`, { ...init, headers });
+  const res = await fetchWithRetry({ url: `${BASE}${path}`, init: { ...init, headers } });
   if (!res.ok) throw new ApiError(res.status, await res.text());
   if (res.status === 204) return undefined as T;
   const text = await res.text();
   if (text.length === 0) return undefined as T;
   return JSON.parse(text) as T;
+}
+
+/** `fetch`, with a GET retried on a network failure or a 502/503/504. */
+async function fetchWithRetry(params: { url: string; init: RequestInit }): Promise<Response> {
+  const method = (params.init.method ?? "GET").toUpperCase();
+  const attempts = method === "GET" ? GET_ATTEMPTS : 1;
+  for (let attempt = 1; ; attempt++) {
+    const last = attempt >= attempts;
+    let res: Response;
+    try {
+      res = await fetch(params.url, params.init);
+    } catch (err) {
+      // fetch rejects with a TypeError when the request never got an answer.
+      if (last || !(err instanceof TypeError)) throw err;
+      await retryDelay(attempt);
+      continue;
+    }
+    if (last || !RETRYABLE_STATUSES.has(res.status)) return res;
+    // Release the discarded answer's body before asking again.
+    await res.body?.cancel();
+    await retryDelay(attempt);
+  }
 }
 
 /**

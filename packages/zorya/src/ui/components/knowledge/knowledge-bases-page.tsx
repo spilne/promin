@@ -19,7 +19,7 @@ import type {
 } from "../../../server/routes/knowledge-bases.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { confirm, toast } from "../../lib/dialogs.ts";
-import { Page } from "../ui/page.tsx";
+import { Page, PageHeader } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 
 type WorkspaceTab = "search" | "add" | "sources";
@@ -82,24 +82,32 @@ export function KnowledgeBasesPage() {
 
   return (
     <Page>
-      <div class="flex items-start justify-between gap-4">
-        <div>
-          <h2 class="text-xl font-semibold">Knowledge bases</h2>
-          <p class="text-xs text-base-content/50 max-w-2xl">
+      <PageHeader
+        title="Knowledge bases"
+        eyebrow="Agent runtime"
+        description={
+          <>
             Named document collections agents search. Add sources here, test retrieval, then bind a
             base to an agent in its editor's Knowledge / RAG section — the agent gets a search tool
             or injected context backed by it.
-          </p>
-        </div>
-        <div class="flex gap-2">
-          <button type="button" class="btn btn-sm btn-ghost" onClick={refresh} title="Refresh">
-            ↻
-          </button>
-          <button type="button" class="btn btn-sm btn-primary" onClick={() => setShowCreate(true)}>
-            New knowledge base
-          </button>
-        </div>
-      </div>
+          </>
+        }
+        actions={
+          <>
+            <button type="button" class="btn btn-sm btn-ghost gap-1" onClick={refresh}>
+              <span aria-hidden="true">↻</span>
+              Refresh
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-primary"
+              onClick={() => setShowCreate(true)}
+            >
+              New knowledge base
+            </button>
+          </>
+        }
+      />
 
       {error && <div class="alert alert-error text-xs">{error.message}</div>}
 

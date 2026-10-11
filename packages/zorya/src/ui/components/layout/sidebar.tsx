@@ -13,47 +13,59 @@ interface NavItem {
   disabled?: boolean;
 }
 
+// Icons are short letter badges rather than emoji: they render the same on
+// every platform and stay legible in the collapsed (icon-only) rail.
 const SECTIONS: Array<{ title?: string; items: NavItem[] }> = [
   {
     title: "Workflows",
     items: [
-      { path: "/", label: "Runs", icon: "▦" },
-      { path: "/workflows", label: "Workflows", icon: "◈" },
-      { path: "/builder", label: "Builder", icon: "✎" },
-      { path: "/schedules", label: "Schedules", icon: "⏱" },
-      { path: "/signals", label: "Signals", icon: "✓" },
-      { path: "/workers", label: "Workers", icon: "◉" },
+      { path: "/", label: "Runs", icon: "R" },
+      { path: "/workflows", label: "Workflows", icon: "W" },
+      { path: "/builder", label: "Builder", icon: "B" },
+      { path: "/schedules", label: "Schedules", icon: "S" },
+      { path: "/signals", label: "Signals", icon: "Q" },
+      { path: "/workers", label: "Workers", icon: "N" },
     ],
   },
   {
     title: "Agents",
     items: [
-      { path: "/agents", label: "Registry", icon: "✦" },
-      { path: "/roles", label: "Roles", icon: "🎭" },
-      { path: "/instances", label: "All instances", icon: "❋" },
-      { path: "/tools", label: "Tools", icon: "⚒" },
-      { path: "/skills", label: "Skills", icon: "🧩" },
-      { path: "/fragments", label: "Fragments", icon: "🧱" },
-      { path: "/dags", label: "DAGs", icon: "◈" },
-      { path: "/knowledge", label: "Knowledge", icon: "📚" },
+      { path: "/agents", label: "Registry", icon: "A" },
+      { path: "/roles", label: "Roles", icon: "P" },
+      { path: "/instances", label: "Instances", icon: "I" },
+      { path: "/tools", label: "Tools", icon: "T" },
+      { path: "/skills", label: "Skills", icon: "K" },
+      { path: "/fragments", label: "Fragments", icon: "F" },
+      { path: "/dags", label: "DAGs", icon: "D" },
+      { path: "/knowledge", label: "Knowledge", icon: "KB" },
     ],
   },
   {
     title: "Settings",
-    items: [{ path: "/secrets", label: "Secrets", icon: "✚" }],
+    items: [{ path: "/secrets", label: "Secrets", icon: "V" }],
   },
   {
     title: "Coming soon",
-    items: [{ path: "/alerts", label: "Alerts", icon: "⚠", disabled: true }],
+    items: [{ path: "/alerts", label: "Alerts", icon: "!", disabled: true }],
   },
 ];
 
+/**
+ * The navigation rail. Below `lg` it collapses to icons (labels move to
+ * tooltips) so the page keeps its width on small screens; it stays pinned
+ * while the page scrolls.
+ */
 export function Sidebar({ route, onNavigate }: SidebarProps) {
   return (
-    <aside class="w-56 shrink-0 border-r border-base-content/10 bg-base-300 flex flex-col">
-      <div class="px-4 py-4 flex items-center gap-2 border-b border-base-content/10">
-        <span class="text-primary text-xl">⚡</span>
-        <span class="font-semibold tracking-tight text-lg">Zorya</span>
+    <aside class="sticky top-0 h-screen w-16 shrink-0 border-r border-base-content/10 bg-base-300/95 backdrop-blur flex flex-col lg:w-60">
+      <div class="px-3 py-4 flex items-center justify-center gap-3 border-b border-base-content/10 lg:justify-start lg:px-4">
+        <span class="grid h-8 w-8 shrink-0 place-items-center rounded bg-primary/15 text-primary font-semibold">
+          Z
+        </span>
+        <div class="hidden min-w-0 lg:block">
+          <div class="font-semibold tracking-tight text-lg leading-tight">Zorya</div>
+          <div class="text-[11px] text-base-content/45 leading-tight">workflow control plane</div>
+        </div>
       </div>
 
       <NamespaceSwitcher />
@@ -62,33 +74,45 @@ export function Sidebar({ route, onNavigate }: SidebarProps) {
         {SECTIONS.map((section) => (
           <div>
             {section.title && (
-              <div class="px-4 mb-1 text-[10px] uppercase tracking-wider text-base-content/40">
+              <div class="hidden px-4 mb-1 text-[10px] uppercase tracking-[0.12em] text-base-content/40 lg:block">
                 {section.title}
               </div>
             )}
-            <ul class="menu menu-sm px-2">
-              {section.items.map((item) => (
-                <li>
-                  {item.disabled ? (
-                    <span class="opacity-40 cursor-not-allowed flex items-center gap-2">
-                      <span class="w-4 text-center">{item.icon}</span>
-                      <span>{item.label}</span>
-                    </span>
-                  ) : (
-                    <a
-                      href={item.path}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        onNavigate(item.path);
-                      }}
-                      class={`flex items-center gap-2 ${isActive(route, item.path) ? "active" : ""}`}
-                    >
-                      <span class="w-4 text-center">{item.icon}</span>
-                      <span>{item.label}</span>
-                    </a>
-                  )}
-                </li>
-              ))}
+            <ul class="px-2 space-y-1">
+              {section.items.map((item) => {
+                const active = !item.disabled && isActive(route, item.path);
+                return (
+                  <li>
+                    {item.disabled ? (
+                      <span
+                        class="opacity-40 cursor-not-allowed flex items-center justify-center gap-2 rounded px-2 py-2 text-sm lg:justify-start"
+                        title={item.label}
+                      >
+                        <NavIcon label={item.icon} active={false} />
+                        <span class="hidden lg:inline">{item.label}</span>
+                      </span>
+                    ) : (
+                      <a
+                        href={item.path}
+                        onClick={(e) => {
+                          e.preventDefault();
+                          onNavigate(item.path);
+                        }}
+                        title={item.label}
+                        aria-current={active ? "page" : undefined}
+                        class={`flex items-center justify-center gap-2 rounded border px-2 py-2 text-sm transition-colors lg:justify-start ${
+                          active
+                            ? "border-primary/20 bg-primary/10 text-primary"
+                            : "border-transparent text-base-content/80 hover:bg-base-100/70"
+                        }`}
+                      >
+                        <NavIcon label={item.icon} active={active} />
+                        <span class="hidden lg:inline">{item.label}</span>
+                      </a>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           </div>
         ))}
@@ -98,6 +122,19 @@ export function Sidebar({ route, onNavigate }: SidebarProps) {
         <ApiKeyButton />
       </div>
     </aside>
+  );
+}
+
+function NavIcon({ label, active }: { label: string; active: boolean }) {
+  return (
+    <span
+      aria-hidden="true"
+      class={`grid h-6 w-6 shrink-0 place-items-center rounded text-[11px] font-semibold ${
+        active ? "bg-primary text-primary-content" : "bg-base-100 text-base-content/55"
+      }`}
+    >
+      {label}
+    </span>
   );
 }
 
@@ -122,9 +159,18 @@ function ApiKeyButton() {
   };
   const hasKey = !!localStorage.getItem("zorya_api_key");
   return (
-    <button class="btn btn-ghost btn-sm w-full justify-start gap-2" onClick={setKey}>
-      <span class={`w-2 h-2 rounded-full ${hasKey ? "bg-success" : "bg-base-content/30"}`} />
-      <span class="text-sm">API key</span>
+    <button
+      class="btn btn-ghost btn-sm w-full justify-center gap-2 lg:justify-start"
+      onClick={setKey}
+      title={hasKey ? "API key: set" : "API key: none"}
+    >
+      <span
+        class={`w-2 h-2 shrink-0 rounded-full ${hasKey ? "bg-success" : "bg-base-content/30"}`}
+      />
+      <span class="hidden text-sm lg:inline">API key</span>
+      <span class="ml-auto hidden text-[10px] uppercase text-base-content/40 lg:inline">
+        {hasKey ? "set" : "none"}
+      </span>
     </button>
   );
 }

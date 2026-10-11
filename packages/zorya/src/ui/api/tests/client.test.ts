@@ -76,3 +76,39 @@ describe("api", () => {
     expect(await api.deleteSchedule("s1")).toBeUndefined();
   });
 });
+
+describe("req retries", () => {
+  it("retries a GET through a 503 and a network failure, then reads the answer", async () => {
+    const answers: Array<() => Response> = [
+      () => new Response("restarting", { status: 503 }),
+      () => {
+        throw new TypeError("Failed to fetch");
+      },
+      () => Response.json({ ok: true }),
+    ];
+    const seen = stub(() => answers.shift()!());
+    expect(await api.getHealth()).toEqual({ ok: true });
+    expect(seen.map((r) => r.method)).toEqual(["GET", "GET", "GET"]);
+  });
+
+  it("gives up on a GET after three attempts with the last answer", async () => {
+    const seen = stub(() => new Response("Bad Gateway", { status: 502 }));
+    const failure = await api.getHealth().catch((e) => e);
+    expect(failure).toBeInstanceOf(ApiError);
+    expect((failure as ApiError).status).toBe(502);
+    expect(seen).toHaveLength(3);
+  });
+
+  it("does not retry a GET answered with a non-gateway error", async () => {
+    const seen = stub(() => new Response("nope", { status: 500 }));
+    expect(await api.getHealth().catch((e) => (e as ApiError).status)).toBe(500);
+    expect(seen).toHaveLength(1);
+  });
+
+  it("never replays a mutation", async () => {
+    const seen = stub(() => new Response("restarting", { status: 503 }));
+    const failure = await api.triggerWorkflow("wf", { input: {} }).catch((e) => e);
+    expect((failure as ApiError).status).toBe(503);
+    expect(seen).toHaveLength(1);
+  });
+});

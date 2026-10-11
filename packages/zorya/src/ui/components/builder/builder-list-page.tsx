@@ -13,7 +13,7 @@ import { formatRelative } from "../../lib/format.ts";
 import { starterSchema } from "../../lib/workflow-builder-graph.ts";
 import { WORKFLOW_NAME_PATTERN } from "../../lib/workflow-builder-validation.ts";
 import { EmptyState } from "../ui/empty-state.tsx";
-import { Page } from "../ui/page.tsx";
+import { Page, PageHeader } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 
 export function BuilderListPage(props: {
@@ -67,26 +67,30 @@ export function BuilderListPage(props: {
 
   return (
     <Page>
-      <div class="flex items-start justify-between gap-4">
-        <div>
-          <h2 class="text-xl font-semibold">Workflow builder</h2>
-          <p class="text-xs text-base-content/50 max-w-2xl">
+      <PageHeader
+        title="Workflow builder"
+        eyebrow="Definitions"
+        description={
+          <>
             Compose workflows from the server's activities on a canvas, publish them as versions,
             and run them like any other workflow. Each publish is a new version on the workflow's
             Versions panel; runs finish on the version they started with.
-          </p>
-        </div>
-        <div class="flex gap-2">
-          <button type="button" class="btn btn-sm btn-ghost" onClick={refresh} title="Refresh">
-            ↻
-          </button>
-          {!notConfigured && (
-            <button type="button" class="btn btn-sm btn-primary" onClick={create}>
-              New workflow
+          </>
+        }
+        actions={
+          <>
+            <button type="button" class="btn btn-sm btn-ghost gap-1" onClick={refresh}>
+              <span aria-hidden="true">↻</span>
+              Refresh
             </button>
-          )}
-        </div>
-      </div>
+            {!notConfigured && (
+              <button type="button" class="btn btn-sm btn-primary" onClick={create}>
+                New workflow
+              </button>
+            )}
+          </>
+        }
+      />
 
       {notConfigured ? (
         <div class="card bg-base-100 shadow">

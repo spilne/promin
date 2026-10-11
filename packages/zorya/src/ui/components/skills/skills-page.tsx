@@ -17,7 +17,7 @@ import { confirm, toast } from "../../lib/dialogs.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
 import type { RegisteredSkill } from "../../../server/routes/skills.ts";
-import { Page } from "../ui/page.tsx";
+import { Page, PageHeader } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { Markdown } from "../../lib/markdown.tsx";
 
@@ -86,23 +86,26 @@ export function SkillsPage() {
 
   return (
     <Page>
-      <div class="flex items-start justify-between gap-4">
-        <div>
-          <h2 class="text-xl font-semibold">Skills</h2>
-          <p class="text-xs text-base-content/50 max-w-2xl">
+      <PageHeader
+        title="Skills"
+        eyebrow="Agent runtime"
+        description={
+          <>
             Reusable instruction blocks an agent loads on demand. Attach them to an agent in its
             editor; the agent sees each skill's description and pulls the full body into context via{" "}
             <span class="font-mono">loadSkill</span> when a task matches.
-          </p>
-        </div>
-        <button
-          type="button"
-          class="btn btn-sm btn-primary"
-          onClick={() => setEditor({ mode: "create" })}
-        >
-          New skill
-        </button>
-      </div>
+          </>
+        }
+        actions={
+          <button
+            type="button"
+            class="btn btn-sm btn-primary"
+            onClick={() => setEditor({ mode: "create" })}
+          >
+            New skill
+          </button>
+        }
+      />
 
       <input
         class="input input-bordered input-sm font-mono max-w-md"

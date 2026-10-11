@@ -341,7 +341,7 @@ export class WorkflowBuilder<
    * or via `WorkflowTripwireError` thrown from `run()`.
    *
    * ```typescript
-   * workflow({ name: "charge", storage })
+   * workflow({ name: "charge" })
    *   .step("load", ({ input }) => succeed(input))
    *   .tripwire("fraud-check", {
    *     when: (order) => order.riskScore > 0.9,
@@ -485,7 +485,7 @@ export class WorkflowBuilder<
    * names scoped under the block don't collide with unrelated siblings.
    *
    * ```typescript
-   * workflow({ name: "signup", storage })
+   * workflow({ name: "signup" })
    *   .step("load", ({ input }) => input)
    *   .parallel("enrich", {
    *     user: async ({ prev }) => fetchUser(prev),
@@ -652,7 +652,7 @@ export class WorkflowBuilder<
    * `JournaledStepOptions` (no `cache`, no `timeoutMs`).
    *
    * ```typescript
-   * workflow({ name: "signup", storage })
+   * workflow({ name: "signup" })
    *   .step("load", ({ input }) => succeed(input))
    *   .journaled("create-and-notify", function*(ctx, prev) {
    *     const user = yield* ctx.activity("create", () => createUser(prev))
