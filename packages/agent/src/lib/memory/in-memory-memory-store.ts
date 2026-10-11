@@ -19,6 +19,7 @@ import type {
   EpisodeListParams,
   EpisodicRecord,
   Fact,
+  FactInput,
   ListThreadsParams,
   MemoryStore,
   MessageRange,
@@ -104,11 +105,11 @@ export class InMemoryMemoryStore implements MemoryStore {
     return next;
   }
 
-  async appendNamespaceFact(namespaceId: string, text: string): Promise<Fact> {
+  async appendNamespaceFact(namespaceId: string, input: FactInput): Promise<Fact> {
     if (!this.namespaces.has(namespaceId)) {
       await this.upsertNamespace(namespaceId, {});
     }
-    const f = this.makeFact(text);
+    const f = this.makeFact(input);
     const list = this.namespaceFacts.get(namespaceId) ?? [];
     list.push(f);
     this.namespaceFacts.set(namespaceId, list);
@@ -189,11 +190,11 @@ export class InMemoryMemoryStore implements MemoryStore {
     return next;
   }
 
-  async appendResourceFact(key: ScopedKey, text: string): Promise<Fact> {
+  async appendResourceFact(key: ScopedKey, input: FactInput): Promise<Fact> {
     if (!this.resources.has(this.resourceK(key))) {
       await this.upsertResource(key, {});
     }
-    const f = this.makeFact(text);
+    const f = this.makeFact(input);
     const list = this.resourceFacts.get(this.resourceK(key)) ?? [];
     list.push(f);
     this.resourceFacts.set(this.resourceK(key), list);
@@ -389,11 +390,11 @@ export class InMemoryMemoryStore implements MemoryStore {
     });
   }
 
-  async appendThreadFact(key: ThreadKey, text: string): Promise<Fact> {
+  async appendThreadFact(key: ThreadKey, input: FactInput): Promise<Fact> {
     if (!this.threads.has(this.threadK(key))) {
       await this.createThread(key);
     }
-    const f = this.makeFact(text);
+    const f = this.makeFact(input);
     const list = this.threadFacts.get(this.threadK(key)) ?? [];
     list.push(f);
     this.threadFacts.set(this.threadK(key), list);
@@ -544,9 +545,15 @@ export class InMemoryMemoryStore implements MemoryStore {
     return row;
   }
 
-  private makeFact(text: string): Fact {
+  private makeFact(input: FactInput): Fact {
     const now = this.now();
-    return { id: randomUUID(), text, createdAt: now, updatedAt: now };
+    return {
+      id: randomUUID(),
+      text: input.text,
+      source: input.source,
+      createdAt: now,
+      updatedAt: now,
+    };
   }
 
   private makeEpisode(input: EpisodeInput): EpisodicRecord {

@@ -30,7 +30,7 @@ describe("PostgresMemoryStore — Postgres-specific", () => {
     const writer = new PostgresMemoryStore({ db: pg.db });
     const reader = new PostgresMemoryStore({ db: pg.db });
 
-    await writer.appendNamespaceFact("acme", "shared-fact");
+    await writer.appendNamespaceFact("acme", { text: "shared-fact", source: "model" });
     const facts = await reader.listNamespaceFacts("acme");
     expect(facts.map((f) => f.text)).toEqual(["shared-fact"]);
   });
@@ -40,9 +40,15 @@ describe("PostgresMemoryStore — Postgres-specific", () => {
     const texts = Array.from({ length: 20 }, (_, i) => `fact-${i}`);
     await s.createThread({ namespaceId: "acme", threadId: "t-1" });
     for (const text of texts) {
-      await s.appendNamespaceFact("acme", text);
-      await s.appendResourceFact({ namespaceId: "acme", resourceId: "r-1" }, text);
-      await s.appendThreadFact({ namespaceId: "acme", threadId: "t-1" }, text);
+      await s.appendNamespaceFact("acme", { text: text, source: "model" });
+      await s.appendResourceFact(
+        { namespaceId: "acme", resourceId: "r-1" },
+        { text: text, source: "model" },
+      );
+      await s.appendThreadFact(
+        { namespaceId: "acme", threadId: "t-1" },
+        { text: text, source: "model" },
+      );
     }
 
     expect((await s.listNamespaceFacts("acme")).map((f) => f.text)).toEqual(texts);

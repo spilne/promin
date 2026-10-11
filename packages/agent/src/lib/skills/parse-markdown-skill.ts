@@ -58,15 +58,12 @@ export function parseMarkdownSkill(
 
   const tags = parseList(fields.tags);
   const capabilities = parseList(fields.capabilities);
-  // Manifests can declare an explicit trust state ('trusted' / 'needs-review').
-  // When absent the scanner applies its needs-review default to a newly-seen
-  // skill; first-party manifests bypass that by declaring trusted.
-  const trust =
-    fields.trust === "trusted" || fields.trust === "needs-review" ? fields.trust : undefined;
+  // A `trust:` key in frontmatter is ignored: a file can't approve itself.
+  // Trust is set by the scanner (needs-review for new or edited skills) and
+  // by an operator's review.
   const metadata: Partial<SkillMetadata> = {
     ...(tags.length > 0 && { tags }),
     ...(capabilities.length > 0 && { capabilities }),
-    ...(trust !== undefined && { trust }),
   };
 
   const skill: RegisterSkillInput = {

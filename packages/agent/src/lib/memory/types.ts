@@ -26,14 +26,16 @@
 //
 // Slot semantics:
 //
-//   - staticRules    — markdown, human-authored. CLAUDE.md / Project
+//   - staticRules    — markdown, operator-authored. CLAUDE.md / Project
 //                      instructions / GPT system prompt analog. (Threads
 //                      do not carry static rules — only namespace and
-//                      resource do.)
+//                      resource do.) The only memory slot rendered as
+//                      instructions; everything else is reference data.
 //   - facts          — L3. Numbered, timestamped, plaintext list,
 //                      inspectable at every layer. Written by the model
-//                      via the `setMemory` tool or by user UI /
-//                      privileged tools.
+//                      via the `memory` tool, by the consolidator, or by
+//                      user UI / privileged tools; each carries its
+//                      provenance (`FactSource`).
 //   - workingMemory  — markdown scratchpad the agent self-edits.
 //                      Most-mutated at the thread layer.
 //   - messages       — L0/L1. Append-only transcript, THREAD ONLY.
@@ -82,9 +84,42 @@ export interface ThreadKey {
 export interface Fact {
   readonly id: string;
   readonly text: string;
+  /** Who wrote the fact. See `FactSource`. */
+  readonly source: FactSource;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
+
+/**
+ * Provenance of a fact:
+ *   - `operator` — written by an operator (admin API / dashboard, seed data)
+ *   - `user`     — entered directly by the end user through the host app
+ *   - `model`    — written by the agent (memory tool, tool code) or
+ *                  distilled from a transcript by the consolidator
+ *
+ * Every fact renders as untrusted reference data whatever its source; the
+ * provenance is shown beside it and decides retention — automatic fact
+ * eviction only ever drops `model` facts.
+ */
+export type FactSource = "operator" | "user" | "model";
+
+/** Caller-facing input to `append*Fact`. The store assigns `id` + timestamps. */
+export interface FactInput {
+  readonly text: string;
+  readonly source: FactSource;
+}
+
+/** Longest fact the agent's `memory` tool and the consolidator write, in characters. */
+export const MAX_FACT_CHARS = 500;
+
+/** Longest working-memory scratchpad the agent's `memory` tool writes, in characters. */
+export const MAX_WORKING_MEMORY_CHARS = 4_000;
+
+/**
+ * Longest `staticRules` rendered into the prompt, per scope, in characters.
+ * Longer rules are truncated by `resolveContext`; write paths reject them.
+ */
+export const MAX_STATIC_RULES_CHARS = 20_000;
 
 /**
  * Stored thread message — the runtime `Message` shape with storage
@@ -315,17 +350,23 @@ export interface TokenBudget {
 /**
  * Resolved cascade — the prompt-ready view returned by `resolveContext`.
  *
- * `systemPrompt` carries the deterministic merge of:
- *   - namespace.staticRules + namespace.facts + namespace.workingMemory
- *   - cache boundary marker, kept stable so providers that respect
- *     prompt caching can split cleanly
- *   - resource.staticRules + resource.facts + resource.workingMemory
- *   - thread.workingMemory
+ * The cascade is split by trust:
  *
- * `messages` is the trimmed thread tail (oldest-first within budget).
+ *   - `instructions` — operator-authored `staticRules` (namespace, then
+ *     resource), each capped at `MAX_STATIC_RULES_CHARS`. Authoritative:
+ *     runtimes send it as a system block right after the agent persona.
+ *   - `reference` — facts, working memory and episodes at every scope,
+ *     rendered as ONE fenced reference-data block (see
+ *     `fenceReferenceData`). This text is written by users, tools and the
+ *     model, so runtimes send it as data (a user-role message), never as
+ *     a system message.
+ *
+ * Both are `""` when empty. `messages` is the trimmed thread tail
+ * (oldest-first within budget).
  */
 export interface ResolvedContext {
-  readonly systemPrompt: string;
+  readonly instructions: string;
+  readonly reference: string;
   readonly messages: StoredMessage[];
 }
 
@@ -347,7 +388,7 @@ export interface MemoryStore {
   // --- Namespace --------------------------------------------------------
   getNamespace(namespaceId: string): Promise<NamespaceRow | null>;
   upsertNamespace(namespaceId: string, patch: NamespacePatch): Promise<NamespaceRow>;
-  appendNamespaceFact(namespaceId: string, text: string): Promise<Fact>;
+  appendNamespaceFact(namespaceId: string, fact: FactInput): Promise<Fact>;
   listNamespaceFacts(namespaceId: string): Promise<Fact[]>;
   deleteNamespaceFact(namespaceId: string, factId: string): Promise<void>;
   appendNamespaceEpisode(namespaceId: string, input: EpisodeInput): Promise<EpisodicRecord>;
@@ -357,7 +398,7 @@ export interface MemoryStore {
   // --- Resource (user / persona) ---------------------------------------
   getResource(key: ScopedKey): Promise<ResourceRow | null>;
   upsertResource(key: ScopedKey, patch: ResourcePatch): Promise<ResourceRow>;
-  appendResourceFact(key: ScopedKey, text: string): Promise<Fact>;
+  appendResourceFact(key: ScopedKey, fact: FactInput): Promise<Fact>;
   listResourceFacts(key: ScopedKey): Promise<Fact[]>;
   deleteResourceFact(key: ScopedKey, factId: string): Promise<void>;
   appendResourceEpisode(key: ScopedKey, input: EpisodeInput): Promise<EpisodicRecord>;
@@ -386,7 +427,7 @@ export interface MemoryStore {
   setThreadInheritFromParent(key: ThreadKey, inherit: boolean): Promise<void>;
   /** Archive or restore a thread. Pass `null` to restore (clear archivedAt). */
   setThreadArchived(key: ThreadKey, archivedAt: number | null): Promise<void>;
-  appendThreadFact(key: ThreadKey, text: string): Promise<Fact>;
+  appendThreadFact(key: ThreadKey, fact: FactInput): Promise<Fact>;
   listThreadFacts(key: ThreadKey): Promise<Fact[]>;
   deleteThreadFact(key: ThreadKey, factId: string): Promise<void>;
   appendMessages(key: ThreadKey, msgs: ReadonlyArray<Message>): Promise<StoredMessage[]>;
@@ -404,11 +445,3 @@ export interface MemoryStore {
    */
   resolveContext(key: ThreadKey, budget: TokenBudget): Promise<ResolvedContext>;
 }
-
-/**
- * Marker placed in `ResolvedContext.systemPrompt` between stable layers
- * (namespace) and volatile layers (resource + thread). Providers that
- * implement prompt caching can split on this exact marker. Plaintext —
- * not a control character — so the prompt stays human-inspectable.
- */
-export const PROMPT_CACHE_BOUNDARY = "<!-- promin:cache-boundary -->";

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { fenceReferenceData, oneLine } from "../reference-data.ts";
 import { tool, type AgentTool } from "../tool.ts";
 import { DEFAULT_RETRIEVER_TOOL_NAME } from "./retriever-tool-name.ts";
 import type { RetrieveResult, Retriever, RetrieverFilter } from "./types.ts";
@@ -143,6 +144,8 @@ function toToolResult(params: {
 /**
  * Model-visible rendering of retrieved chunks: one numbered block per
  * chunk with its source (title or id, plus uri) so the model can cite it.
+ * The output is raw chunk text — callers put it inside a
+ * `fenceReferenceData` block before it reaches the model.
  */
 export function formatRetrievedChunks(params: {
   results: ReadonlyArray<{
@@ -155,7 +158,7 @@ export function formatRetrievedChunks(params: {
   return params.results
     .map((result, i) => {
       const source = result.source
-        ? `source=${result.source.title ?? result.source.id}${result.source.uri ? ` (${result.source.uri})` : ""}`
+        ? `source=${oneLine(result.source.title ?? result.source.id)}${result.source.uri ? ` (${oneLine(result.source.uri)})` : ""}`
         : "source=hidden";
       const score = params.includeScores ? ` score=${result.score.toFixed(3)}` : "";
       return `[${i + 1}] ${source}${score}\n${result.text}`;
@@ -168,8 +171,16 @@ function formatRetrieverToolOutput(params: {
   includeScores: boolean;
 }): string {
   if (params.output.results.length === 0) return "No relevant knowledge-base results found.";
-  return formatRetrievedChunks({
-    results: params.output.results,
-    includeScores: params.includeScores,
-  });
+  return fenceReferenceData({
+    source: "knowledge",
+    sections: [
+      {
+        title: "Knowledge results",
+        body: formatRetrievedChunks({
+          results: params.output.results,
+          includeScores: params.includeScores,
+        }),
+      },
+    ],
+  })!;
 }

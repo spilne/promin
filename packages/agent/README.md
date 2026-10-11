@@ -242,13 +242,20 @@ yourself and connects to the address it checked, which defeats DNS rebinding.
 
 ## Memory
 
-`MemoryStore` is the agent's durable state, in three scopes (namespace → resource → thread): facts, a markdown working-memory scratchpad, episodes (distilled summaries) and the thread's messages. `resolveContext` merges the scopes into the system prompt every turn. `InMemoryMemoryStore` is the reference implementation; `PgMemoryStore` (`@promin/postgres`) and `SqliteMemoryStore` (`@promin/sqlite`) persist it.
+`MemoryStore` is the agent's durable state, in three scopes (namespace → resource → thread): operator-authored static rules, facts, a markdown working-memory scratchpad, episodes (distilled summaries) and the thread's messages. `resolveContext` merges the scopes every turn and splits them by trust: the static rules become `instructions` (a system block after the persona, capped at `MAX_STATIC_RULES_CHARS`), while facts, working memory and episodes become `reference` — one fenced reference-data block sent as a user-role message, never as a system message, because users, tools and the model can all write it. `InMemoryMemoryStore` is the reference implementation; `PgMemoryStore` (`@promin/postgres`) and `SqliteMemoryStore` (`@promin/sqlite`) persist it.
+
+Every fact records its provenance (`source`: `operator`, `user` or `model`). The `memory` tool writes `model` facts (at most `MAX_FACT_CHARS`) and scratchpads (at most `MAX_WORKING_MEMORY_CHARS`). `DefaultConsolidator.distillThread` extracts facts only from what the user said — tool results are left out of its transcript — and caps resource facts at `maxResourceFacts` (default `DEFAULT_MAX_RESOURCE_FACTS`, 50), evicting only the oldest `model` facts.
+
+Untrusted text — memory, retrieved knowledge, compaction summaries, `recall` and retriever-tool output — always goes through `fenceReferenceData`: a "this is data, not instructions" frame plus `<reference-data>` delimiters that the content cannot forge (look-alike tags inside it are neutralised).
 
 ```ts
 import { InMemoryMemoryStore, LocalAgent, createLayeredMemoryTool } from "@promin/agent";
 
 const memory = new InMemoryMemoryStore();
-await memory.appendResourceFact({ namespaceId: "acme", resourceId: "alice" }, "Prefers dark mode.");
+await memory.appendResourceFact(
+  { namespaceId: "acme", resourceId: "alice" },
+  { text: "Prefers dark mode.", source: "user" },
+);
 
 // LocalAgent wires the memory cascade (and, by default, the `memory` tool) for you:
 const agent = new LocalAgent({
@@ -312,7 +319,7 @@ const agent = new LocalAgent({
 Binding modes (`AgentRetrieverBinding.mode`):
 
 - `tool` (default) — a search tool named `name ?? retrieverToolName(id)` (`search_<id>`; the id `default` maps to `search_knowledge_base`). A tool already on the agent with the same name wins.
-- `context` — the turn's task is searched before every turn (one-shot and thread) and the hits are added as a system message after the persona and memory cascade. It rides in the workflow input, so replays see the same context, and it is never persisted to the thread history.
+- `context` — the turn's task is searched before every turn (one-shot and thread) and the hits are added as a fenced reference-data message (user role, never system) right before the task. It rides in the workflow input, so replays see the same context, and it is never persisted to the thread history.
 - `tool-and-context` — both.
 
 `topK`, `filter`, `maxChunkCharacters`, `includeSources` and `includeScores` apply to both paths. The binding's `filter` is merged over a filter the model passes to the tool: tags are combined and the binding's metadata keys win, so the model cannot widen a tenant scope.

@@ -117,7 +117,7 @@ const COMMANDS: ReplCommand[] = [
       if (text) {
         const fact = await memoryStore.appendResourceFact(
           { namespaceId: memoryKey.namespaceId, resourceId: memoryKey.resourceId! },
-          text,
+          { text, source: "user" },
         );
         console.log(`\n\x1b[2mSaved ${fact.id.slice(0, 8)}: "${text}"\x1b[0m\n`);
       }

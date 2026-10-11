@@ -26,6 +26,8 @@ export type { EmbeddingProvider } from "./embedding-provider.ts";
 export type {
   MemoryStore,
   Fact,
+  FactInput,
+  FactSource,
   EpisodicRecord,
   EpisodeInput,
   EpisodeListParams,
@@ -44,7 +46,20 @@ export type {
   TokenBudget,
   ResolvedContext,
 } from "./memory/types.ts";
-export { PROMPT_CACHE_BOUNDARY } from "./memory/types.ts";
+export {
+  MAX_FACT_CHARS,
+  MAX_STATIC_RULES_CHARS,
+  MAX_WORKING_MEMORY_CHARS,
+} from "./memory/types.ts";
+export {
+  REFERENCE_DATA_METADATA_KEY,
+  REFERENCE_DATA_TAG,
+  fenceReferenceData,
+  isReferenceDataMessage,
+  neutralizeReferenceDelimiters,
+  referenceDataMessage,
+} from "./reference-data.ts";
+export type { ReferenceSection } from "./reference-data.ts";
 
 export { DefaultConsolidator } from "./memory/consolidator.ts";
 export type {
@@ -55,7 +70,7 @@ export type {
   ConsolidationSignals,
   DefaultConsolidatorConfig,
 } from "./memory/consolidator.ts";
-export { NothingToConsolidateError } from "./memory/consolidator.ts";
+export { DEFAULT_MAX_RESOURCE_FACTS, NothingToConsolidateError } from "./memory/consolidator.ts";
 export {
   RateLimitedConsolidator,
   ConsolidatorRateLimitError,
@@ -68,7 +83,7 @@ export type {
 export { InMemoryMemoryStore } from "./memory/in-memory-memory-store.ts";
 export type { InMemoryMemoryStoreConfig } from "./memory/in-memory-memory-store.ts";
 
-export { resolveContext } from "./memory/resolve-context.ts";
+export { capStaticRules, resolveContext } from "./memory/resolve-context.ts";
 export type { ResolveContextInput } from "./memory/resolve-context.ts";
 
 // RAG — retrievers, chunking, the retriever tool and registry.

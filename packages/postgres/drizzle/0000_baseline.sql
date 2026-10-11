@@ -51,6 +51,7 @@ CREATE TABLE agent_fact (
   resource_id text,
   thread_id text,
   text text NOT NULL,
+  source text NOT NULL,
   created_at bigint NOT NULL,
   updated_at bigint NOT NULL,
   seq bigserial NOT NULL,

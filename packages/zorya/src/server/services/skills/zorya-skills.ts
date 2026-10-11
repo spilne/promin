@@ -16,6 +16,12 @@ export interface ZoryaSkillsScanConfig {
   intervalMs?: number;
   /** Sweep removed files (delete from registry). Default false. */
   sync?: boolean;
+  /**
+   * The operator vouches for every skill under `root` (first-party skills
+   * in the host's own repo): they register as trusted. Default false —
+   * new and edited skills need an operator's review before agents see them.
+   */
+  trusted?: boolean;
   /** Fired after each scan tick. */
   onTick?: (tick: {
     added: string[];
@@ -59,6 +65,7 @@ export class ZoryaSkills {
       root: this.scanConfig.root,
       ...(this.scanConfig.intervalMs !== undefined && { intervalMs: this.scanConfig.intervalMs }),
       ...(this.scanConfig.sync !== undefined && { sync: this.scanConfig.sync }),
+      ...(this.scanConfig.trusted !== undefined && { trusted: this.scanConfig.trusted }),
       // Rebuild the file-managed set from each tick's discovered ids
       // (`upserted` = every skill the scan applied this tick, so a
       // deleted file drops out next tick), then fan out to the user hook.

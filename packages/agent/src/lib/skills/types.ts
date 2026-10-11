@@ -84,11 +84,12 @@ export interface SkillMetadata {
    * `enabled: false` is "operator turned this off"; `"needs-review"` is
    * "nobody has approved this yet."
    *
-   * The scanner sets this to `"needs-review"` when it discovers a NEW
-   * file-scanned skill that doesn't declare its own trust — so cloned
-   * third-party SKILL.md files can't enter agent context until an operator
-   * reviews them. Manifest-declared trust on first discovery wins (the
-   * repo's own example skills declare `"trusted"`).
+   * The scanner sets this to `"needs-review"` for every NEW file-scanned
+   * skill and resets it to `"needs-review"` whenever a known skill's text
+   * (body, description, whenToUse) changes — so cloned third-party
+   * SKILL.md files, and edits to approved ones, can't enter agent context
+   * until an operator reviews them. Trust declared by the skill file itself
+   * is ignored.
    */
   readonly trust?: "trusted" | "needs-review";
 }

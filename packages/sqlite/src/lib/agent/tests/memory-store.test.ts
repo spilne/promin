@@ -22,7 +22,7 @@ describe("SqliteMemoryStore — persistence", () => {
   it("persists across instances sharing the same db", async () => {
     const db = new Database(":memory:");
     const s1 = SqliteMemoryStore.make({ db });
-    await s1.appendNamespaceFact("acme", "first fact");
+    await s1.appendNamespaceFact("acme", { text: "first fact", source: "model" });
     await s1.upsertResource(
       { namespaceId: "acme", resourceId: "alice" },
       { staticRules: "alice prefers terse" },
@@ -64,7 +64,10 @@ describe("SqliteMemoryStore — persistence", () => {
   it("respects a custom tablePrefix", async () => {
     const db = new Database(":memory:");
     const store = SqliteMemoryStore.make({ db, tablePrefix: "wf_layered_mem" });
-    await store.appendNamespaceFact("acme", "stored under custom prefix");
+    await store.appendNamespaceFact("acme", {
+      text: "stored under custom prefix",
+      source: "model",
+    });
     const rows = db.query("SELECT text FROM wf_layered_mem_fact").all() as Array<{
       text: string;
     }>;
@@ -76,7 +79,7 @@ describe("SqliteMemoryStore — persistence", () => {
     const key = { namespaceId: "acme", threadId: "t-delete" };
     await store.createThread(key);
     await store.appendMessages(key, [{ role: "user", content: "x" }]);
-    await store.appendThreadFact(key, "thread-fact");
+    await store.appendThreadFact(key, { text: "thread-fact", source: "model" });
     await store.appendThreadEpisode(key, { summary: "thread-rollup" });
 
     await store.deleteThread(key);

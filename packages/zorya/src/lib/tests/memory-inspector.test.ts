@@ -6,12 +6,13 @@
 //   - 400 when namespaceId missing
 //   - namespace-only inspection returns ns row + facts; resource/thread null
 //   - resource scope appears when resourceId given
-//   - thread scope appears when threadId given, including resolved system
-//     prompt and the message tail
+//   - thread scope appears when threadId given, including the resolved
+//     memory (operator rules vs fenced reference data) and the message tail
+//   - namespace staticRules are size-capped; operator facts are sourced
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { InMemoryAgentRegistry, InMemoryMemoryStore } from "@promin/agent";
+import { InMemoryAgentRegistry, InMemoryMemoryStore, MAX_STATIC_RULES_CHARS } from "@promin/agent";
 import { ZoryaServer } from "../../server/server.ts";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { LocalWorkflows, ZoryaAgents } from "../../index.ts";
@@ -49,7 +50,7 @@ describe("memory inspector — /api/memory/inspect", () => {
   it("returns namespace snapshot when only namespaceId given", async () => {
     const memory = new InMemoryMemoryStore();
     await memory.upsertNamespace("acme", { staticRules: "be polite" });
-    await memory.appendNamespaceFact("acme", "company name is Acme");
+    await memory.appendNamespaceFact("acme", { text: "company name is Acme", source: "model" });
 
     const server = makeServer(memory);
     const res = await server.handle(
@@ -78,7 +79,10 @@ describe("memory inspector — /api/memory/inspect", () => {
       { namespaceId: "acme", resourceId: "alice" },
       { workingMemory: "alice prefers terse replies" },
     );
-    await memory.appendResourceFact({ namespaceId: "acme", resourceId: "alice" }, "is in EU");
+    await memory.appendResourceFact(
+      { namespaceId: "acme", resourceId: "alice" },
+      { text: "is in EU", source: "model" },
+    );
     await memory.createThread({
       namespaceId: "acme",
       resourceId: "alice",
@@ -102,14 +106,16 @@ describe("memory inspector — /api/memory/inspect", () => {
         row: { threadId: string };
         messages: Array<{ role: string; content: string | null }>;
       };
-      resolved: { systemPrompt: string; messageCount: number };
+      resolved: { instructions: string; reference: string; messageCount: number };
     };
     expect(body.resource.row?.workingMemory).toContain("terse");
     expect(body.resource.facts.map((f) => f.text)).toEqual(["is in EU"]);
     expect(body.thread.row?.threadId).toBe("t1");
     expect(body.thread.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
-    expect(body.resolved.systemPrompt).toContain("be polite");
-    expect(body.resolved.systemPrompt).toContain("terse");
+    expect(body.resolved.instructions).toContain("be polite");
+    expect(body.resolved.instructions).not.toContain("terse");
+    expect(body.resolved.reference).toContain("<reference-data");
+    expect(body.resolved.reference).toContain("terse");
     expect(body.resolved.messageCount).toBe(2);
   });
 
@@ -199,6 +205,20 @@ describe("namespace mutations — operator-only writes", () => {
     expect(row?.workingMemory).toBe("in flight");
   });
 
+  it("PATCH 400s when staticRules exceed MAX_STATIC_RULES_CHARS", async () => {
+    const memory = new InMemoryMemoryStore();
+    const server = makeServer(memory);
+    const res = await server.handle(
+      new Request("http://test/api/memory/namespace/acme", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ staticRules: "r".repeat(MAX_STATIC_RULES_CHARS + 1) }),
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect(await memory.getNamespace("acme")).toBeNull();
+  });
+
   it("PATCH 400s on empty body", async () => {
     const server = makeServer(new InMemoryMemoryStore());
     const res = await server.handle(
@@ -223,7 +243,7 @@ describe("namespace mutations — operator-only writes", () => {
     );
     expect(res.status).toBe(201);
     const facts = await memory.listNamespaceFacts("acme");
-    expect(facts.map((f) => f.text)).toEqual(["company name is Acme"]);
+    expect(facts.map((f) => [f.text, f.source])).toEqual([["company name is Acme", "operator"]]);
   });
 
   it("POST /facts 400s on missing text", async () => {
@@ -240,7 +260,7 @@ describe("namespace mutations — operator-only writes", () => {
 
   it("DELETE /facts/:factId removes the fact", async () => {
     const memory = new InMemoryMemoryStore();
-    const fact = await memory.appendNamespaceFact("acme", "transient");
+    const fact = await memory.appendNamespaceFact("acme", { text: "transient", source: "model" });
     const server = makeServer(memory);
     const res = await server.handle(
       new Request(`http://test/api/memory/namespace/acme/facts/${encodeURIComponent(fact.id)}`, {

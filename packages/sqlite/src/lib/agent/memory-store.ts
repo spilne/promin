@@ -24,6 +24,8 @@ import type {
   EpisodeListParams,
   EpisodicRecord,
   Fact,
+  FactInput,
+  FactSource,
   ListThreadsParams,
   MemoryStore,
   Message,
@@ -129,6 +131,7 @@ export class SqliteMemoryStore implements MemoryStore {
         resource_id  TEXT,
         thread_id    TEXT,
         text         TEXT NOT NULL,
+        source       TEXT NOT NULL,
         created_at   INTEGER NOT NULL,
         updated_at   INTEGER NOT NULL
       )
@@ -237,24 +240,24 @@ export class SqliteMemoryStore implements MemoryStore {
     return next;
   }
 
-  async appendNamespaceFact(namespaceId: string, text: string): Promise<Fact> {
+  async appendNamespaceFact(namespaceId: string, input: FactInput): Promise<Fact> {
     if (!(await this.getNamespace(namespaceId))) {
       await this.upsertNamespace(namespaceId, {});
     }
-    const f = this.makeFact(text);
+    const f = this.makeFact(input);
     this.db
       .query(
-        `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, created_at, updated_at)
-         VALUES (?, ?, ?, NULL, NULL, ?, ?, ?)`,
+        `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at)
+         VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
       )
-      .run(f.id, SCOPE_NS, namespaceId, f.text, f.createdAt, f.updatedAt);
+      .run(f.id, SCOPE_NS, namespaceId, f.text, f.source, f.createdAt, f.updatedAt);
     return f;
   }
 
   async listNamespaceFacts(namespaceId: string): Promise<Fact[]> {
     const rows = this.db
       .query<DbFactRow>(
-        `SELECT id, text, created_at, updated_at FROM ${this.prefix}_fact
+        `SELECT id, text, source, created_at, updated_at FROM ${this.prefix}_fact
          WHERE scope = ? AND namespace_id = ?
          ORDER BY created_at ASC, rowid ASC`,
       )
@@ -361,24 +364,33 @@ export class SqliteMemoryStore implements MemoryStore {
     return next;
   }
 
-  async appendResourceFact(key: ScopedKey, text: string): Promise<Fact> {
+  async appendResourceFact(key: ScopedKey, input: FactInput): Promise<Fact> {
     if (!(await this.getResource(key))) {
       await this.upsertResource(key, {});
     }
-    const f = this.makeFact(text);
+    const f = this.makeFact(input);
     this.db
       .query(
-        `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, created_at, updated_at)
-         VALUES (?, ?, ?, ?, NULL, ?, ?, ?)`,
+        `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at)
+         VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
       )
-      .run(f.id, SCOPE_RES, key.namespaceId, key.resourceId, f.text, f.createdAt, f.updatedAt);
+      .run(
+        f.id,
+        SCOPE_RES,
+        key.namespaceId,
+        key.resourceId,
+        f.text,
+        f.source,
+        f.createdAt,
+        f.updatedAt,
+      );
     return f;
   }
 
   async listResourceFacts(key: ScopedKey): Promise<Fact[]> {
     const rows = this.db
       .query<DbFactRow>(
-        `SELECT id, text, created_at, updated_at FROM ${this.prefix}_fact
+        `SELECT id, text, source, created_at, updated_at FROM ${this.prefix}_fact
          WHERE scope = ? AND namespace_id = ? AND resource_id = ?
          ORDER BY created_at ASC, rowid ASC`,
       )
@@ -624,24 +636,33 @@ export class SqliteMemoryStore implements MemoryStore {
       .run(archivedAt, this.clock(), key.namespaceId, key.threadId);
   }
 
-  async appendThreadFact(key: ThreadKey, text: string): Promise<Fact> {
+  async appendThreadFact(key: ThreadKey, input: FactInput): Promise<Fact> {
     if (!(await this.getThread(key))) {
       await this.createThread(key);
     }
-    const f = this.makeFact(text);
+    const f = this.makeFact(input);
     this.db
       .query(
-        `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, created_at, updated_at)
-         VALUES (?, ?, ?, NULL, ?, ?, ?, ?)`,
+        `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at)
+         VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
       )
-      .run(f.id, SCOPE_THR, key.namespaceId, key.threadId, f.text, f.createdAt, f.updatedAt);
+      .run(
+        f.id,
+        SCOPE_THR,
+        key.namespaceId,
+        key.threadId,
+        f.text,
+        f.source,
+        f.createdAt,
+        f.updatedAt,
+      );
     return f;
   }
 
   async listThreadFacts(key: ThreadKey): Promise<Fact[]> {
     const rows = this.db
       .query<DbFactRow>(
-        `SELECT id, text, created_at, updated_at FROM ${this.prefix}_fact
+        `SELECT id, text, source, created_at, updated_at FROM ${this.prefix}_fact
          WHERE scope = ? AND namespace_id = ? AND thread_id = ?
          ORDER BY created_at ASC, rowid ASC`,
       )
@@ -826,9 +847,15 @@ export class SqliteMemoryStore implements MemoryStore {
     return row;
   }
 
-  private makeFact(text: string): Fact {
+  private makeFact(input: FactInput): Fact {
     const now = this.clock();
-    return { id: randomUUID(), text, createdAt: now, updatedAt: now };
+    return {
+      id: randomUUID(),
+      text: input.text,
+      source: input.source,
+      createdAt: now,
+      updatedAt: now,
+    };
   }
 
   private makeEpisode(input: EpisodeInput): EpisodicRecord {
@@ -949,6 +976,7 @@ interface DbThreadRow {
 interface DbFactRow {
   id: string;
   text: string;
+  source: string;
   created_at: number;
   updated_at: number;
 }
@@ -1020,7 +1048,13 @@ function toThreadRow(r: DbThreadRow): ThreadRow {
 }
 
 function toFact(r: DbFactRow): Fact {
-  return { id: r.id, text: r.text, createdAt: r.created_at, updatedAt: r.updated_at };
+  return {
+    id: r.id,
+    text: r.text,
+    source: r.source as FactSource,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
 }
 
 function toEpisode(r: DbEpisodeRow): EpisodicRecord {

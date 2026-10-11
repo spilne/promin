@@ -9,6 +9,12 @@
 //
 // `applyDiscoveredSkills` reconciles a discovered set into a `SkillRegistry`:
 // upsert by default, opt-in `sync` mode to delete entries not in the scan.
+//
+// Trust: a scanned file never vouches for itself. A newly discovered skill
+// always lands as `needs-review` (whatever trust its manifest declares), and
+// a known skill whose content (body, description or whenToUse) changed is
+// reset to `needs-review` — an operator approves each version of the text
+// the model will read.
 // ---------------------------------------------------------------------------
 
 import { readFile, readdir, stat } from "node:fs/promises";
@@ -16,7 +22,13 @@ import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { type WallClock, SystemWallClock } from "@promin/workflow";
 import { parseMarkdownSkill } from "../skills/parse-markdown-skill.ts";
-import type { RegisterSkillInput, SkillRegistry } from "../skills/types.ts";
+import {
+  DEFAULT_SKILL_VERSION,
+  type RegisteredSkill,
+  type RegisterSkillInput,
+  type SkillMetadata,
+  type SkillRegistry,
+} from "../skills/types.ts";
 
 /** File extensions a bundled skill might ship that we intentionally ignore. */
 const EXECUTABLE_EXTENSIONS = [".py", ".sh", ".rb", ".js", ".ts", ".mjs", ".bin", ".pl"];
@@ -268,6 +280,14 @@ export interface ApplyDiscoveredSkillsOptions {
    * colliding ids. No filter when omitted.
    */
   readonly idPrefix?: string;
+  /**
+   * The operator vouches for every skill under the scanned root (e.g.
+   * first-party skills checked into the host's own repo): discovered
+   * skills register as `trusted`, including after edits. Default `false` —
+   * new and edited skills land as `needs-review`. This is host config,
+   * never something a skill file can set for itself.
+   */
+  readonly trusted?: boolean;
 }
 
 export interface ApplyDiscoveredSkillsResult {
@@ -293,22 +313,24 @@ export async function applyDiscoveredSkills(
 
   for (const input of skills) {
     if (options.idPrefix !== undefined && !input.id.startsWith(options.idPrefix)) continue;
+    const version = input.version ?? DEFAULT_SKILL_VERSION;
     const existingRow = existingIds.has(input.id)
-      ? (existing.find((e) => e.id === input.id) ?? null)
-      : await registry.get(input.id);
+      ? (existing.find((e) => e.id === input.id && e.version === version) ?? null)
+      : await registry.get(input.id, version);
     const wasExisting = existingRow !== null;
-    // Trust policy: preserve trust on rescan; manifest-declared trust wins
-    // on first discovery; otherwise default a NEWLY-scanned file skill to
-    // 'needs-review' so unreviewed third-party instructions can't enter
-    // agent context until an operator approves them.
-    const declaredTrust = input.metadata?.trust;
-    const trust =
-      declaredTrust ?? existingRow?.metadata.trust ?? (wasExisting ? undefined : "needs-review");
+    // Trust is never taken from the scanned file (`input.metadata.trust` is
+    // dropped): a new skill, or a known one whose text changed, needs an
+    // operator's review before it can enter agent context. Unchanged
+    // content keeps whatever trust the registry row already has.
+    const { trust: _declaredTrust, ...declaredMetadata } = input.metadata ?? {};
+    const trust: SkillMetadata["trust"] = options.trusted
+      ? "trusted"
+      : existingRow && sameSkillContent({ row: existingRow, input })
+        ? existingRow.metadata.trust
+        : "needs-review";
     const finalInput: RegisterSkillInput = {
       ...input,
-      ...(trust !== undefined && {
-        metadata: { ...input.metadata, trust },
-      }),
+      metadata: { ...declaredMetadata, ...(trust !== undefined && { trust }) },
     };
     await registry.register(finalInput);
     upserted.push(input.id);
@@ -333,6 +355,16 @@ export async function applyDiscoveredSkills(
   return { upserted, added, deleted };
 }
 
+/** Whether a scanned skill carries the same model-visible text as its registry row. */
+function sameSkillContent(params: { row: RegisteredSkill; input: RegisterSkillInput }): boolean {
+  const { row, input } = params;
+  return (
+    row.body === input.body &&
+    row.description === input.description &&
+    row.whenToUse === (input.whenToUse ?? input.description)
+  );
+}
+
 function asMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -353,6 +385,8 @@ export interface SkillScanLoopOptions {
   readonly sync?: boolean;
   /** Pass through to `applyDiscoveredSkills`. */
   readonly idPrefix?: string;
+  /** Pass through to `applyDiscoveredSkills`. Default `false`. */
+  readonly trusted?: boolean;
   /** Filter scan results before applying. */
   readonly filterSkills?: (skills: ReadonlyArray<RegisterSkillInput>) => RegisterSkillInput[];
   /** Fired after each tick. Surfaces deltas + warnings to the host. */
@@ -396,6 +430,7 @@ export function startSkillScanLoop(options: SkillScanLoopOptions): SkillScanLoop
     const apply = await applyDiscoveredSkills(options.registry, filtered, {
       sync: options.sync ?? false,
       ...(options.idPrefix !== undefined ? { idPrefix: options.idPrefix } : {}),
+      ...(options.trusted !== undefined && { trusted: options.trusted }),
     });
     const tick: SkillScanLoopTick = {
       added: apply.added,

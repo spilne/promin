@@ -8,7 +8,7 @@
 //
 // Reads beyond `recall` happen automatically via `MemoryStore.resolveContext`
 // at prompt build — facts, working memory, and (opt-in) episodes are
-// already in the system prompt every turn. `recall` is for the cases that
+// already in the prompt's memory reference-data block every turn. `recall` is for the cases that
 // don't fit the budget: "what did we decide last month about X?".
 //
 // Scope keys (`namespaceId` / `resourceId` / `threadId`) come from the
@@ -22,7 +22,16 @@
 
 import { z } from "zod";
 import { tool, type AgentTool } from "../tool.ts";
-import type { EpisodicRecord, Fact, MemoryStore, ScopedKey, ThreadKey } from "../memory/types.ts";
+import {
+  MAX_FACT_CHARS,
+  MAX_WORKING_MEMORY_CHARS,
+  type EpisodicRecord,
+  type Fact,
+  type MemoryStore,
+  type ScopedKey,
+  type ThreadKey,
+} from "../memory/types.ts";
+import { fenceReferenceData, oneLine } from "../reference-data.ts";
 import { THREAD_AGENT_METADATA_KEY } from "../agent/types.ts";
 
 export interface LayeredMemoryToolConfig {
@@ -70,7 +79,7 @@ const SET_WORKING_DESCRIPTION =
   "  - 'currently debugging the login flow, blocked on token refresh'\n" +
   "  - 'next step: write the schema migration, then the rollback test'\n" +
   "  - 'open questions: do we need pgvector or is FTS enough?'\n\n" +
-  "The scratchpad is injected into the system prompt every turn, so " +
+  "The scratchpad is shown to you as memory every turn, so " +
   "keep it SHORT (a few lines) and CURRENT. Each call REPLACES the " +
   "previous scratchpad — it's not append. To remember something " +
   "permanently, use `set` instead.";
@@ -84,7 +93,7 @@ const RECALL_DESCRIPTION =
   "  - 'didn't we already talk about this somewhere?'\n\n" +
   "Returns the top matching facts and past-session summaries " +
   "(episodes) ranked by relevance + salience. Don't use this for " +
-  "things already injected into your system prompt — those are " +
+  "things already shown in your memory block — those are " +
   "already visible to you.";
 
 /**
@@ -98,14 +107,24 @@ export const LayeredMemoryToolInputSchema = z.discriminatedUnion("command", [
     scope: ModelScope.default("thread").describe(
       "thread = this conversation only. resource = this user, all conversations.",
     ),
-    text: z.string().min(1).describe("The fact, in one line."),
+    text: z
+      .string()
+      .trim()
+      .min(1)
+      .max(MAX_FACT_CHARS)
+      .describe(`The fact, in one line (at most ${MAX_FACT_CHARS} characters).`),
   }),
   z.object({
     command: z.literal("setWorking"),
     scope: ModelScope.default("thread").describe(
       "thread = this conversation. resource = persists across this user's conversations.",
     ),
-    markdown: z.string().describe("New scratchpad content. Replaces whatever was there."),
+    markdown: z
+      .string()
+      .max(MAX_WORKING_MEMORY_CHARS)
+      .describe(
+        `New scratchpad content (at most ${MAX_WORKING_MEMORY_CHARS} characters). Replaces whatever was there.`,
+      ),
   }),
   z.object({
     command: z.literal("recall"),
@@ -164,10 +183,16 @@ export function createLayeredMemoryTool(
             if (!resourceKey) {
               return "Cannot write resource-scope memory: no resourceId is bound to this task.";
             }
-            const f = await config.store.appendResourceFact(resourceKey, input.text);
+            const f = await config.store.appendResourceFact(resourceKey, {
+              text: input.text,
+              source: "model",
+            });
             return `Saved to resource memory (id: ${shortId(f.id)}).`;
           }
-          const f = await config.store.appendThreadFact(threadKey, input.text);
+          const f = await config.store.appendThreadFact(threadKey, {
+            text: input.text,
+            source: "model",
+          });
           return `Saved to thread memory (id: ${shortId(f.id)}).`;
         }
         case "setWorking": {
@@ -216,6 +241,8 @@ function defaultSearchScopes(hasResource: boolean): Array<"thread" | "resource" 
 /** One ranked `recall` match. */
 interface MemoryHit {
   readonly source: "fact" | "episode";
+  /** Provenance of a fact hit. */
+  readonly factSource?: Fact["source"];
   readonly scope: "namespace" | "resource" | "thread";
   readonly id: string;
   readonly text: string;
@@ -290,6 +317,7 @@ function factsToHits(
     return [
       {
         source: "fact" as const,
+        factSource: f.source,
         scope,
         id: f.id,
         text: f.text,
@@ -341,11 +369,21 @@ function keywordScore(query: string, content: string): number {
   return matches / queryWords.size;
 }
 
+/** Recalled memories are stored, untrusted text — returned as fenced reference data. */
 function formatHits(hits: ReadonlyArray<MemoryHit>, query: string): string {
-  if (hits.length === 0) return `No memories matched "${query}".`;
-  return hits
-    .map((h, i) => `${i + 1}. [${h.scope}/${h.source}] (${h.score.toFixed(2)}) ${h.text}`)
+  if (hits.length === 0) return `No memories matched "${oneLine(query)}".`;
+  const body = hits
+    .map((h, i) => {
+      const tag = h.factSource
+        ? `${h.scope}/${h.source}, ${h.factSource}`
+        : `${h.scope}/${h.source}`;
+      return `${i + 1}. [${tag}] (${h.score.toFixed(2)}) ${oneLine(h.text)}`;
+    })
     .join("\n");
+  return fenceReferenceData({
+    source: "memory-recall",
+    sections: [{ title: "Recalled memories", body }],
+  })!;
 }
 
 function shortId(id: string): string {

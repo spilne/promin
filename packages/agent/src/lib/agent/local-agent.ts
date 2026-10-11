@@ -53,6 +53,11 @@ import {
 import { createLayeredMemoryTool } from "../tools/layered-memory-tools.ts";
 import { createCallAgentTool, createFindAgentTool } from "../network/runtime.ts";
 import { createRetrieverTool, formatRetrievedChunks } from "../rag/retriever-tool.ts";
+import {
+  fenceReferenceData,
+  isReferenceDataMessage,
+  referenceDataMessage,
+} from "../reference-data.ts";
 import { retrieverToolName } from "../rag/retriever-tool-name.ts";
 import type { Retriever, RetrieverFilter } from "../rag/types.ts";
 import type { AgentKnowledgeMode } from "../registry/types.ts";
@@ -256,8 +261,9 @@ export interface AgentRetrieverBinding {
   readonly filter?: RetrieverFilter;
   /**
    * `tool` (default) exposes a search tool; `context` searches with the
-   * turn's task before every turn and injects the hits as a system message;
-   * `tool-and-context` does both.
+   * turn's task before every turn and injects the hits as a fenced
+   * reference-data message (user role, never system — the chunks are
+   * untrusted); `tool-and-context` does both.
    */
   readonly mode?: AgentKnowledgeMode;
 }
@@ -846,16 +852,16 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     }
 
     // Context-mode retrievers search with the task before the run starts;
-    // the hits ride in the workflow input as a system message, so a replay
-    // sees the same context without searching again.
+    // the hits ride in the workflow input as a fenced reference-data
+    // message right before the task, so a replay sees the same context
+    // without searching again.
     const promise = (async () => {
       const knowledge = await buildRetrieverContext({
         retrievers: this.config.retrievers,
         query: input.task,
       });
-      const messages: Message[] = [];
-      if (knowledge) messages.push({ role: "system", content: knowledge });
-      messages.push(...(input.messages ?? []));
+      const messages: Message[] = [...(input.messages ?? [])];
+      if (knowledge) messages.push(referenceDataMessage(knowledge));
       const r = await this.config.runner.run({
         workflow: wf,
         workflowId,
@@ -1096,9 +1102,10 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
    * before the runner returned, so the entire turn — user task,
    * tool calls, tool results, assistant response — needs to land here.
    *
-   * The turn's seed (cascade, retrieved knowledge, history) is skipped by
+   * The turn's seed (memory, retrieved knowledge, history) is skipped by
    * its length in the persisted workflow input; the persisted history
-   * length is only a fallback, since it misses the seed's system blocks.
+   * length is only a fallback, since it misses the seed's injected blocks
+   * (those are also dropped by role / reference-data marker).
    */
   private async persistResumedTurn(params: {
     turnHadSystemPrompt: boolean;
@@ -1108,7 +1115,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     const { turnHadSystemPrompt, result } = params;
     const seedLen = params.seedLen ?? (await this.loadContext()).messages.length;
     const skip = (turnHadSystemPrompt ? 1 : 0) + seedLen;
-    const newTail = result.messages.slice(skip).filter((m) => m.role !== "system");
+    const newTail = result.messages.slice(skip).filter(isTranscriptMessage);
     if (newTail.length === 0) return;
 
     if (this.deps.memory) {
@@ -1142,26 +1149,34 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       });
     }
 
-    // resolveContext-driven prompt assembly. The persona (agent's static
-    // prompt) goes through agentAction's config.systemPrompt — that puts
-    // it at messages[0]. The cascade (cascade-resolved memory) goes in
-    // FRONT of the seed as a second system message. Two distinct system
-    // blocks → two cache breakpoints at the Anthropic adapter, so the
-    // persona prefix stays cached when the cascade changes mid-session.
-    // Retrieved knowledge (context-mode retrievers) is a third system block
-    // after the cascade: it changes every turn, so it goes last among the
-    // system blocks to keep the persona and cascade prefixes cacheable. It
-    // is never persisted — persistTurn drops system messages.
-    const { persona, cascade, messages: history } = await this.loadContext();
+    // resolveContext-driven prompt assembly, ordered stable → volatile so
+    // the prompt-cache prefix survives as far as possible:
+    //
+    //   system: persona            agentAction's config.systemPrompt (messages[0])
+    //   system: instructions       operator-authored memory rules — a second
+    //                              system block, so the persona prefix stays
+    //                              cached when the rules change
+    //   user:   memory reference   facts / working memory / episodes, fenced
+    //   ...history
+    //   user:   knowledge          context-mode retriever hits, fenced; changes
+    //                              every turn, so it sits right before the task
+    //   user:   task               appended by agentAction
+    //
+    // Memory and knowledge are untrusted (written by users, tools, the
+    // model), so they are reference-data messages, never system ones.
+    // Neither is persisted — persistTurn slices the seed off and drops
+    // reference-data messages.
+    const { persona, instructions, reference, messages: history } = await this.loadContext();
     const knowledge = await buildRetrieverContext({
       retrievers: this.deps.retrievers,
       query: input.task,
     });
     const seed: Message[] = [];
-    if (cascade) seed.push({ role: "system", content: cascade });
-    if (knowledge) seed.push({ role: "system", content: knowledge });
+    if (instructions) seed.push({ role: "system", content: instructions });
+    if (reference) seed.push(referenceDataMessage(reference));
     seed.push(...history);
     if (input.messages) seed.push(...input.messages);
+    if (knowledge) seed.push(referenceDataMessage(knowledge));
 
     const actionConfig = toActionConfig(
       { ...this.deps.loopConfig, systemPrompt: persona },
@@ -1196,32 +1211,31 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
 
   /**
    * Load the thread's prompt-ready view via `MemoryStore.resolveContext`.
-   * Returns the agent's static persona prompt and the cascade-resolved
-   * prompt as SEPARATE strings — keeps them in distinct system blocks
-   * downstream so each gets its own prompt-cache breakpoint at the
-   * adapter layer.
-   *
-   * Why two blocks instead of one merged string:
-   *   - the persona is always stable across a session
-   *   - the cascade changes when memory.set / distillThread / facts edit
-   *     mid-conversation
-   *   - a single merged block invalidates the entire cached prefix on
-   *     any cascade change — you pay the full input-token price to
-   *     re-cache the persona too. Two blocks let Anthropic's caching
-   *     hit on the persona prefix even when the cascade changed.
+   * Returns the agent's static persona prompt, the operator-authored
+   * memory rules (`instructions`) and the fenced memory reference block
+   * as SEPARATE strings. The persona and rules become distinct system
+   * blocks, so each gets its own prompt-cache breakpoint at the adapter
+   * layer and a rules edit doesn't invalidate the cached persona; the
+   * reference block becomes a user-role data message.
    *
    * In-memory fallback (no `MemoryStore`) returns the raw message
-   * buffer with no cascade.
+   * buffer with no memory blocks.
    */
   private async loadContext(): Promise<{
     persona: string | undefined;
-    cascade: string | undefined;
+    instructions: string | undefined;
+    reference: string | undefined;
     messages: Message[];
   }> {
     const persona = this.deps.loopConfig.systemPrompt?.trim() || undefined;
 
     if (!this.deps.memory) {
-      return { persona, cascade: undefined, messages: [...this.inMemoryMessages] };
+      return {
+        persona,
+        instructions: undefined,
+        reference: undefined,
+        messages: [...this.inMemoryMessages],
+      };
     }
 
     const budget = this.deps.contextBudget ?? DEFAULT_CONTEXT_BUDGET;
@@ -1234,23 +1248,16 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       const stored = await this.deps.memory.getMessages(this.deps.key).catch(() => []);
       return {
         persona,
-        cascade: undefined,
+        instructions: undefined,
+        reference: undefined,
         messages: stored.map((m) => stripStorageMeta(m)),
       };
     }
 
-    // resolveContext always emits the cache-boundary marker, even when
-    // every layer is empty. Treat "boundary marker only" as no cascade
-    // — there's no point emitting a system block that contains only
-    // the marker, and skipping it lets the persona stand alone.
-    const cascadeRaw = resolved.systemPrompt.trim();
-    const cascade =
-      cascadeRaw.length > 0 && cascadeRaw !== "<!-- promin:cache-boundary -->"
-        ? cascadeRaw
-        : undefined;
     return {
       persona,
-      cascade,
+      instructions: resolved.instructions.trim() || undefined,
+      reference: resolved.reference.trim() || undefined,
       messages: resolved.messages.map((m) => stripStorageMeta(m)),
     };
   }
@@ -1272,11 +1279,11 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     source?: AgentInputSource,
   ): Promise<void> {
     // Use the per-turn flag, not the static loopConfig.systemPrompt:
-    // resolveContext can produce a non-empty cascade even when the
+    // resolveContext can produce non-empty memory blocks even when the
     // agent's static prompt is unset. Slicing on the static field
-    // would mis-attribute the cascade as the first user message.
+    // would mis-attribute a memory block as the first user message.
     const skip = seedLen + (turnHadSystemPrompt ? 1 : 0);
-    let newTail = result.messages.slice(skip).filter((m) => m.role !== "system");
+    let newTail = result.messages.slice(skip).filter(isTranscriptMessage);
 
     if (newTail.length === 0) return;
 
@@ -1872,9 +1879,17 @@ function retrieverBindings(
 }
 
 /**
+ * Whether a turn message belongs in the persisted transcript: system
+ * blocks and injected reference data are rebuilt every turn.
+ */
+function isTranscriptMessage(m: Message): boolean {
+  return m.role !== "system" && !isReferenceDataMessage(m);
+}
+
+/**
  * Search every context-mode binding with `query` and render the hits as
- * one system-message block. Returns `undefined` when no binding is in
- * context mode or nothing matched.
+ * one fenced reference-data block (one section per binding). Returns
+ * `undefined` when no binding is in context mode or nothing matched.
  */
 async function buildRetrieverContext(params: {
   retrievers: LocalAgentConfig["retrievers"];
@@ -1896,12 +1911,13 @@ async function buildRetrieverContext(params: {
       }),
     })),
   );
-  const blocks = batches
-    .filter(({ results }) => results.length > 0)
-    .map(({ binding, results }) =>
-      [
-        `Knowledge results from ${binding.id}:`,
-        formatRetrievedChunks({
+  return fenceReferenceData({
+    source: "knowledge",
+    sections: batches
+      .filter(({ results }) => results.length > 0)
+      .map(({ binding, results }) => ({
+        title: `Knowledge results from ${binding.id}`,
+        body: formatRetrievedChunks({
           results: results.map((r) => ({
             text: r.chunk.text,
             score: r.score,
@@ -1909,10 +1925,8 @@ async function buildRetrieverContext(params: {
           })),
           ...(binding.includeScores !== undefined && { includeScores: binding.includeScores }),
         }),
-      ].join("\n\n"),
-    );
-  if (blocks.length === 0) return undefined;
-  return `Use the following retrieved knowledge when relevant.\n\n${blocks.join("\n\n")}`;
+      })),
+  });
 }
 
 function stripStorageMeta(m: Message & { seq?: number; createdAt?: number }): Message {

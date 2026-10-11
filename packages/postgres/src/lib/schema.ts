@@ -974,6 +974,8 @@ export const agentFact = pgTable(
     resourceId: text("resource_id"),
     threadId: text("thread_id"),
     factText: text("text").notNull(),
+    /** Provenance: 'operator' | 'user' | 'model'. */
+    source: text("source").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
     /** Insertion order; breaks ties between facts with the same `createdAt`. */

@@ -1,6 +1,7 @@
 import type { LLMProvider } from "./llm-provider.ts";
 import type { Message } from "./message.ts";
 import { nonSystemMsgs } from "./agent-shared.ts";
+import { fenceReferenceData, referenceDataMessage } from "./reference-data.ts";
 
 export interface CompactionResult {
   messages: Message[];
@@ -27,7 +28,9 @@ export const RECAP_SUMMARY_PROMPT =
  * Keeps the most recent `config.keepMessages` turns, slicing at a clean user-turn
  * boundary so the resulting history is never malformed (no orphaned tool results).
  * When `config.summarize` is true, the dropped segment is summarized by `llm` and
- * injected as a `system` message so the agent retains high-level context.
+ * injected as a fenced reference-data message (user role) so the agent retains
+ * high-level context. The summary is distilled from user, tool and model text,
+ * so it is data, never a `system` message.
  */
 export async function compact(
   messages: Message[],
@@ -68,14 +71,14 @@ export async function compact(
     console.error("[agentLoop] compaction summarization failed, dropping without summary:", err);
   }
 
+  const fenced = summary
+    ? fenceReferenceData({
+        source: "conversation-summary",
+        sections: [{ title: "Earlier conversation summary", body: summary }],
+      })
+    : undefined;
   return {
-    messages: [
-      ...system,
-      ...(summary
-        ? [{ role: "system" as const, content: `Earlier conversation summary:\n${summary}` }]
-        : []),
-      ...keep,
-    ],
+    messages: [...system, ...(fenced ? [referenceDataMessage(fenced)] : []), ...keep],
     summary,
   };
 }

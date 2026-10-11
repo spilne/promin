@@ -266,10 +266,20 @@ describe("agentLoop session", () => {
       await session.send("turn 3"); // triggers compaction after emit
       await session.send("turn 4"); // first turn with compacted context
 
+      // The summary is distilled from untrusted conversation text, so it
+      // comes back as fenced reference data, never as a system message.
       const hasSummary = messagesAfterCompaction.some(
-        (m: any) => m.role === "system" && m.content?.includes("Earlier conversation summary"),
+        (m: any) =>
+          m.role === "user" &&
+          m.content?.includes("Earlier conversation summary") &&
+          m.content?.includes("<reference-data"),
       );
       expect(hasSummary).toBe(true);
+      expect(
+        messagesAfterCompaction.some(
+          (m: any) => m.role === "system" && m.content?.includes("Earlier conversation summary"),
+        ),
+      ).toBe(false);
       session.close();
     });
   });

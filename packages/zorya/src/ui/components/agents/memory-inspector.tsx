@@ -33,7 +33,6 @@ import type { ThreadSummary } from "../../../server/routes/agents/agent-gateway-
 import { Skeleton } from "../ui/skeleton.tsx";
 import { JsonBlock } from "../ui/json-block.tsx";
 import { formatRelative } from "../../lib/format.ts";
-import { PROMPT_CACHE_BOUNDARY } from "@promin/agent/browser";
 
 interface Props {
   agentId: string;
@@ -282,15 +281,12 @@ function PromptTab({ data }: { data: MemoryInspectResponse }) {
       </div>
     );
   }
-  // What the model actually sees is two blocks: the persona (role prompt)
-  // first, then the memory cascade. The cascade always carries the
-  // cache-boundary marker even when every layer is empty — treat
-  // "marker only" as no cascade so the operator sees an honest "(empty)"
-  // rather than a lone HTML comment.
-  const cascadeRaw = data.resolved.systemPrompt.trim();
-  const cascade =
-    cascadeRaw && cascadeRaw !== PROMPT_CACHE_BOUNDARY ? data.resolved.systemPrompt : "";
+  // What the model actually sees, in order: the persona (role prompt) and
+  // the operator memory rules as system blocks, then the memory reference
+  // data — facts, working memory, episodes — as a fenced user-role message.
   const persona = data.persona?.trim() ? data.persona : "";
+  const instructions = data.resolved.instructions.trim();
+  const reference = data.resolved.reference.trim();
   return (
     <section class="space-y-4">
       <div>
@@ -302,13 +298,22 @@ function PromptTab({ data }: { data: MemoryInspectResponse }) {
         <pre class={PROMPT_PRE_CLASS}>{persona || <em class="opacity-60">(empty)</em>}</pre>
       </div>
       <div>
-        <SectionLabel>Memory cascade</SectionLabel>
+        <SectionLabel>Memory rules</SectionLabel>
         <p class="text-xs text-base-content/60 mb-2">
-          What memory collapses to (namespace → resource → thread), injected after the persona.
-          Trimmed message tail: {data.resolved.messageCount} message
+          Namespace and resource static rules — operator-authored, sent as instructions right after
+          the persona.
+        </p>
+        <pre class={PROMPT_PRE_CLASS}>{instructions || <em class="opacity-60">(empty)</em>}</pre>
+      </div>
+      <div>
+        <SectionLabel>Memory reference data</SectionLabel>
+        <p class="text-xs text-base-content/60 mb-2">
+          Facts, working memory and episodes (namespace → resource → thread), fenced as untrusted
+          data the model reads but does not take instructions from. Trimmed message tail:{" "}
+          {data.resolved.messageCount} message
           {data.resolved.messageCount === 1 ? "" : "s"}.
         </p>
-        <pre class={PROMPT_PRE_CLASS}>{cascade || <em class="opacity-60">(empty)</em>}</pre>
+        <pre class={PROMPT_PRE_CLASS}>{reference || <em class="opacity-60">(empty)</em>}</pre>
       </div>
     </section>
   );
@@ -606,6 +611,7 @@ function NamespaceFactList({
           {facts.map((f) => (
             <li class="text-xs leading-relaxed flex items-start gap-2 group">
               <span class="flex-1 text-base-content/80">{f.text}</span>
+              <span class="text-[10px] text-base-content/40 font-mono shrink-0">{f.source}</span>
               <span class="text-[10px] text-base-content/40 font-mono shrink-0">
                 {formatRelative(new Date(f.createdAt).toISOString())}
               </span>
@@ -655,6 +661,7 @@ function FactList({ facts, scope }: { facts: Fact[]; scope: string }) {
           {facts.map((f) => (
             <li class="text-xs leading-relaxed">
               <span class="text-base-content/80">{f.text}</span>
+              <span class="text-[10px] text-base-content/40 ml-2 font-mono">{f.source}</span>
               <span class="text-[10px] text-base-content/40 ml-2 font-mono">
                 {formatRelative(new Date(f.createdAt).toISOString())}
               </span>

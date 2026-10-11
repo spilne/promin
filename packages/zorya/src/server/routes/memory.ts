@@ -10,9 +10,10 @@
 // The operator's debugging question is "what does the model actually see?"
 // The answer needs four things in one round-trip:
 //
-//   1. The persona (role system prompt) + the composite cascade
+//   1. The persona (role system prompt) + the resolved memory
 //      (resolveContext output) — together, what the LLM actually reads:
-//      persona first, then the cascade.
+//      persona first, then the operator rules (system), then the fenced
+//      memory reference data (a user-role data message).
 //   2. Per-scope rows + working memory + facts + episodes — so the operator
 //      can locate which layer a wrong/stale piece of context came from.
 //   3. The thread message history.
@@ -46,6 +47,7 @@ import type {
   StoredMessage,
   ThreadRow,
 } from "@promin/agent";
+import { MAX_STATIC_RULES_CHARS } from "@promin/agent";
 import {
   inlineRoleDefinition,
   resolveSystemPrompt,
@@ -125,7 +127,10 @@ export interface ThreadSnapshot {
  * count of trimmed-in messages so the operator sees what made the cut.
  */
 export interface ResolvedContextSummary {
-  readonly systemPrompt: string;
+  /** Operator-authored rules — sent as a system block after the persona. */
+  readonly instructions: string;
+  /** Facts / working memory / episodes as the fenced reference-data block. */
+  readonly reference: string;
   readonly messageCount: number;
 }
 
@@ -141,7 +146,7 @@ export interface MemoryInspectResponse {
   /**
    * The agent's resolved persona — its role system prompt, with layered
    * `{ base, layers }` forms expanded through the fragment registry. The
-   * model sees this BEFORE the memory cascade (`resolved.systemPrompt`).
+   * model sees this BEFORE the resolved memory (`resolved`).
    * `null` when no `agentId` was given, no registry is wired, the agent
    * isn't found, or the recipe has no system prompt.
    *
@@ -281,7 +286,7 @@ async function loadThreadSnapshot(
 
 const NamespacePatchSchema = z
   .object({
-    staticRules: z.string().nullable().optional(),
+    staticRules: z.string().max(MAX_STATIC_RULES_CHARS).nullable().optional(),
     workingMemory: z.string().nullable().optional(),
   })
   .strict();
@@ -316,7 +321,7 @@ export function patchNamespace(deps: MemoryInspectorDeps) {
       return jsonError(
         400,
         "invalid_body",
-        "Expected { staticRules?: string | null, workingMemory?: string | null }.",
+        `Expected { staticRules?: string | null, workingMemory?: string | null }; staticRules is at most ${MAX_STATIC_RULES_CHARS} characters.`,
       );
     }
 
@@ -346,7 +351,7 @@ export function addNamespaceFact(deps: MemoryInspectorDeps) {
       return jsonError(400, "text_too_long", `A fact is at most ${MAX_FACT_LENGTH} characters.`);
     }
     await requireActiveNamespace({ registry: deps.namespaces, namespace: namespaceId });
-    const fact = await deps.memory.appendNamespaceFact(namespaceId, text);
+    const fact = await deps.memory.appendNamespaceFact(namespaceId, { text, source: "operator" });
     return json(201, { fact });
   };
 }
@@ -403,7 +408,8 @@ async function loadResolvedSummary(
   try {
     const ctx: ResolvedContext = await store.resolveContext(key, DEFAULT_INSPECT_BUDGET);
     return {
-      systemPrompt: ctx.systemPrompt,
+      instructions: ctx.instructions,
+      reference: ctx.reference,
       messageCount: ctx.messages.length,
     };
   } catch {

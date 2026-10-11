@@ -36,9 +36,8 @@ beforeAll(async () => {
       "name: Structured Debugging",
       "description: A disciplined debugging loop.",
       "tags: [engineering]",
-      // Declare trust so the catalog-flow test doesn't get blocked by the
-      // scanner's needs-review default (that policy is exercised in the
-      // skill-scanner.test.ts "newly-discovered skill" cases).
+      // A file can't vouch for itself: this is ignored, the skill still
+      // lands as needs-review (see the trust cases below).
       "trust: trusted",
       "---",
       "",
@@ -97,10 +96,19 @@ describe("SkillScanner — markdown", () => {
     expect(debug.body).toContain("Reproduce, bisect, hypothesize.");
   });
 
+  it("ignores trust declared in frontmatter: a new markdown skill needs review", async () => {
+    const registry = new InMemorySkillRegistry();
+    const { skills } = await SkillScanner.scanFolder(ROOT);
+    expect(skills.find((s) => s.id === "structured-debugging")?.metadata?.trust).toBeUndefined();
+    await applyDiscoveredSkills(registry, skills);
+    expect((await registry.get("structured-debugging"))?.metadata.trust).toBe("needs-review");
+  });
+
   it("flows through the registry + catalog end-to-end (whenToUse falls back to description)", async () => {
     const registry = new InMemorySkillRegistry();
     const { skills } = await SkillScanner.scanFolder(ROOT);
-    await applyDiscoveredSkills(registry, skills);
+    // The host vouches for this root (operator config, not the file).
+    await applyDiscoveredSkills(registry, skills, { trusted: true });
 
     const recipe: RegisteredAgent = {
       id: "skilled-bot",

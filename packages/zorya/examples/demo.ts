@@ -714,18 +714,18 @@ async function seedNamespaceMemory() {
   }
   await memoryStore.upsertNamespace(DEMO_NAMESPACE, {
     staticRules:
-      "This is the Acme org tenant. Agents here can rely on facts under namespace scope as " +
-      "company-wide policy, including the catalogue of internal documents listed below.",
+      "This is the Acme org tenant. Namespace facts list the catalogue of internal documents " +
+      "agents can point users to.",
     workingMemory:
       "Demo seed. Edit me from the memory inspector — every agent in this namespace will see " +
       "your changes on the next turn.",
   });
   for (const [id, doc] of ORG_KNOWLEDGE_BASE) {
     const tags = doc.tags.join(", ");
-    await memoryStore.appendNamespaceFact(
-      DEMO_NAMESPACE,
-      `${SEED_FACT_PREFIX} ${id} — ${doc.title} (${tags})`,
-    );
+    await memoryStore.appendNamespaceFact(DEMO_NAMESPACE, {
+      text: `${SEED_FACT_PREFIX} ${id} — ${doc.title} (${tags})`,
+      source: "operator",
+    });
   }
   console.log(
     `[zorya] seeded namespace memory for "${DEMO_NAMESPACE}" with ${ORG_KNOWLEDGE_BASE.size} KB doc facts`,
@@ -1131,13 +1131,16 @@ const agents = new ZoryaAgents({
 // Skills service — owns the SkillRegistry that backs /api/skills CRUD, the
 // agent editor's skill picker (/api/agents/_catalog/skills), and the
 // resolver's catalog injection (see resolveAgent above). Hot-reloads skill
-// manifests (.ts modules + SKILL.md) from ./skills on a tick.
+// manifests (.ts modules + SKILL.md) from ./skills on a tick. These are
+// this repo's own skills, so the demo vouches for them (`trusted`); skills
+// scanned from anywhere else should go through review.
 const skillScanRoot = path.join(import.meta.dir, "skills");
 const skills = new ZoryaSkills({
   registry: skillRegistry,
   scan: {
     root: skillScanRoot,
     intervalMs: 5_000,
+    trusted: true,
     onTick: (tick) => {
       if (tick.added.length > 0) {
         console.log(`[zorya] hot-reload: registered new skills: ${tick.added.join(", ")}`);

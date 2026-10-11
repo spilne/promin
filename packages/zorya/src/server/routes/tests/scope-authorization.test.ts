@@ -53,7 +53,10 @@ async function errorOf(res: Response): Promise<string> {
 describe("namespace memory writes", () => {
   it("PATCH, add fact and delete fact need the caller to own the namespace", async () => {
     const { server, memory } = await boot();
-    const fact = await memory.appendNamespaceFact("globex", "globex secret");
+    const fact = await memory.appendNamespaceFact("globex", {
+      text: "globex secret",
+      source: "operator",
+    });
 
     const patch = await server.handle(
       req("PATCH", "/api/memory/namespace/globex", { staticRules: "pwned" }, asAcme),

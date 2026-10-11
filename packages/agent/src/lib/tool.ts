@@ -196,7 +196,10 @@ export interface AgentTool<TInput = unknown, TOutput = unknown> {
  * deliberately not exposed — it's the loop's, not a tool's.
  */
 export interface ScopedMemory {
-  /** Append a durable plaintext fact at the bound scope. */
+  /**
+   * Append a durable plaintext fact at the bound scope. Recorded with
+   * `source: "model"` — a tool call is driven by model output.
+   */
   recordFact(text: string): Promise<Fact>;
   /** All facts at the bound scope. */
   listFacts(): Promise<Fact[]>;
@@ -517,7 +520,7 @@ function buildScopedMemory(
   if (tier === "namespace") {
     const ns = scope.namespaceId;
     return {
-      recordFact: (text) => store.appendNamespaceFact(ns, text),
+      recordFact: (text) => store.appendNamespaceFact(ns, { text, source: "model" }),
       listFacts: () => store.listNamespaceFacts(ns),
       deleteFact: (id) => store.deleteNamespaceFact(ns, id),
       recordEpisode: (input) => store.appendNamespaceEpisode(ns, input),
@@ -529,7 +532,7 @@ function buildScopedMemory(
   if (tier === "resource") {
     const key: ScopedKey = { namespaceId: scope.namespaceId, resourceId: scope.resourceId };
     return {
-      recordFact: (text) => store.appendResourceFact(key, text),
+      recordFact: (text) => store.appendResourceFact(key, { text, source: "model" }),
       listFacts: () => store.listResourceFacts(key),
       deleteFact: (id) => store.deleteResourceFact(key, id),
       recordEpisode: (input) => store.appendResourceEpisode(key, input),
@@ -552,7 +555,7 @@ function buildScopedMemory(
     threadId: scope.threadId,
   };
   return {
-    recordFact: (text) => store.appendThreadFact(key, text),
+    recordFact: (text) => store.appendThreadFact(key, { text, source: "model" }),
     listFacts: () => store.listThreadFacts(key),
     deleteFact: (id) => store.deleteThreadFact(key, id),
     recordEpisode: (input) => store.appendThreadEpisode(key, input),

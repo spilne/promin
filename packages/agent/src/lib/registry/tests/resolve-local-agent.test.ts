@@ -18,6 +18,7 @@ import type { RegisteredAgent } from "../types.ts";
 import { createElevatedTool, tool } from "../../tool.ts";
 import { InMemoryRetriever } from "../../rag/in-memory-retriever.ts";
 import { InMemoryRetrieverRegistry } from "../../rag/retriever-registry.ts";
+import { isReferenceDataMessage } from "../../reference-data.ts";
 import { z } from "zod";
 
 function mockLLM(responses: LLMResponse[]): LLMProvider {
@@ -499,12 +500,19 @@ describe("resolveLocalAgent — knowledge bindings", () => {
     return { ...row, backend: { ...row.backend, knowledge } as RegisteredAgent["backend"] };
   };
   const recordingLLM = () => {
-    const seen: { tools: string[]; system: string[] } = { tools: [], system: [] };
+    const seen: { tools: string[]; system: string[]; reference: string[] } = {
+      tools: [],
+      system: [],
+      reference: [],
+    };
     const llm: LLMProvider = {
       chat: async (params) => {
         seen.tools = (params.tools ?? []).map((t) => t.name);
         seen.system = params.messages
           .filter((m) => m.role === "system")
+          .map((m) => String(m.content));
+        seen.reference = params.messages
+          .filter(isReferenceDataMessage)
           .map((m) => String(m.content));
         return { content: "ok", finishReason: "stop" };
       },
@@ -541,7 +549,8 @@ describe("resolveLocalAgent — knowledge bindings", () => {
     await agent.invoke({ task: "return items" });
 
     expect(seen.tools).toEqual(["search", "lookup_policy"]);
-    expect(seen.system.some((s) => s.includes("Return unopened items"))).toBe(true);
+    expect(seen.reference.some((s) => s.includes("Return unopened items"))).toBe(true);
+    expect(seen.system.some((s) => s.includes("Return unopened items"))).toBe(false);
   });
 
   it("context-only bindings add no tool", async () => {
@@ -556,7 +565,7 @@ describe("resolveLocalAgent — knowledge bindings", () => {
     await agent.invoke({ task: "return items" });
 
     expect(seen.tools).toEqual(["search"]);
-    expect(seen.system.some((s) => s.includes("Knowledge results from docs"))).toBe(true);
+    expect(seen.reference.some((s) => s.includes("Knowledge results from docs"))).toBe(true);
   });
 
   it("throws when recipe knowledge references an unwired retriever", () => {

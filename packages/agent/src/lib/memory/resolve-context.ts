@@ -4,22 +4,22 @@
 // Takes pre-loaded layer rows + facts + messages + a token budget and
 // returns the prompt-ready `ResolvedContext`. No I/O. Storage backends
 // load the rows however they like; this function decides what gets
-// stitched into the system prompt and in what order.
+// stitched into the prompt and in what order.
 //
-// Cascade (deepest layer wins; severance via `inheritFromParent`):
+// The cascade is split by trust. Operator-authored rules are instructions;
+// everything the model, tools or end users can write is reference data:
 //
-//   namespace.staticRules
-//   namespace.facts                    (numbered, dated)
-//   namespace.workingMemory
-//   ── PROMPT_CACHE_BOUNDARY ──
-//   resource.staticRules
-//   resource.facts                     (numbered, dated)
-//   resource.workingMemory
-//   resource.episodes        [L2]      (opt-in via budget.maxEpisodeTokens)
-//   thread.facts
-//   thread.workingMemory
+//   instructions (system block)      reference (one fenced data block)
+//   ───────────────────────────      ─────────────────────────────────
+//   namespace.staticRules            namespace.facts         (numbered, dated, sourced)
+//   resource.staticRules             namespace.workingMemory
+//                                    resource.facts
+//                                    resource.workingMemory
+//                                    resource.episodes  [L2] (opt-in via budget.maxEpisodeTokens)
+//                                    thread.facts
+//                                    thread.workingMemory
 //
-// Inheritance rules:
+// Inheritance rules (severance via `inheritFromParent`):
 //   - thread.inheritFromParent === false  →  skip namespace AND resource
 //                                            (and resource episodes)
 //   - resource.inheritFromParent === false →  skip namespace
@@ -28,13 +28,16 @@
 //   - messages: drop oldest first to fit `budget.maxMessageTokens`
 //   - episodes: drop lowest-salience first (tail of salience-sorted
 //               input) to fit `budget.maxEpisodeTokens`
-//   - static layers (rules, facts, working memory) are never trimmed —
-//     they're small and they're what makes the agent know who it is
+//   - staticRules: each scope cut to `MAX_STATIC_RULES_CHARS`
+//   - facts and working memory are not trimmed here — their write paths
+//     cap them (`MAX_FACT_CHARS`, `MAX_WORKING_MEMORY_CHARS`, the
+//     consolidator's fact-count cap)
 // ---------------------------------------------------------------------------
 
 import type { Message } from "../message.ts";
+import { fenceReferenceData, oneLine, type ReferenceSection } from "../reference-data.ts";
 import {
-  PROMPT_CACHE_BOUNDARY,
+  MAX_STATIC_RULES_CHARS,
   type EpisodicRecord,
   type Fact,
   type NamespaceRow,
@@ -77,35 +80,44 @@ function defaultEstimateEpisode(e: EpisodicRecord): number {
   return Math.ceil(len / 4);
 }
 
-/**
- * Render an episode block. One block per episode, salience-tagged,
- * dated. Caller provides episodes in display order; this only renders.
- */
-function renderEpisodes(episodes: ReadonlyArray<EpisodicRecord>, header: string): string {
-  if (episodes.length === 0) return "";
-  const lines = episodes.map((e, idx) => {
-    const date = new Date(e.occurredAt).toISOString().slice(0, 10);
-    const sal = e.salience.toFixed(2);
-    const outcome = e.outcome ? `\n   Outcome: ${e.outcome}` : "";
-    return `${idx + 1}. [${date}, salience=${sal}] ${e.summary}${outcome}`;
-  });
-  return `## ${header}\n${lines.join("\n")}`;
+/** One line per episode, salience-tagged, dated. Caller provides display order. */
+function episodesBody(episodes: ReadonlyArray<EpisodicRecord>): string {
+  return episodes
+    .map((e, idx) => {
+      const date = new Date(e.occurredAt).toISOString().slice(0, 10);
+      const sal = e.salience.toFixed(2);
+      const outcome = e.outcome ? `\n   Outcome: ${oneLine(e.outcome)}` : "";
+      return `${idx + 1}. [${date}, salience=${sal}] ${oneLine(e.summary)}${outcome}`;
+    })
+    .join("\n");
 }
 
-/** Render a numbered, dated fact list. Returns `""` when no facts. */
-function renderFacts(facts: ReadonlyArray<Fact> | undefined, header: string): string {
+/** Numbered fact list, each dated and tagged with its provenance. */
+function factsBody(facts: ReadonlyArray<Fact> | undefined): string {
   if (!facts || facts.length === 0) return "";
-  const lines = facts.map((f, idx) => {
-    const date = new Date(f.createdAt).toISOString().slice(0, 10);
-    return `${idx + 1}. [${date}] ${f.text}`;
-  });
-  return `## ${header}\n${lines.join("\n")}`;
+  return facts
+    .map((f, idx) => {
+      const date = new Date(f.createdAt).toISOString().slice(0, 10);
+      return `${idx + 1}. [${date}, ${f.source}] ${oneLine(f.text)}`;
+    })
+    .join("\n");
 }
 
-/** Render a markdown section. Returns `""` when content is null/empty. */
-function renderSection(content: string | null | undefined, header: string): string {
-  if (!content || content.trim().length === 0) return "";
-  return `## ${header}\n${content.trim()}`;
+/** Render one scope's rules as an instruction section. `""` when empty. */
+function renderRules(content: string | null | undefined, header: string): string {
+  const rules = capStaticRules(content);
+  return rules ? `## ${header}\n${rules}` : "";
+}
+
+/**
+ * Trim `staticRules` and cut it to `MAX_STATIC_RULES_CHARS`, noting how
+ * much was dropped. Returns `""` for null / blank rules.
+ */
+export function capStaticRules(content: string | null | undefined): string {
+  const rules = content?.trim() ?? "";
+  if (rules.length <= MAX_STATIC_RULES_CHARS) return rules;
+  const dropped = rules.length - MAX_STATIC_RULES_CHARS;
+  return `${rules.slice(0, MAX_STATIC_RULES_CHARS)}\n[… ${dropped} characters of rules truncated]`;
 }
 
 /**
@@ -130,27 +142,22 @@ export function resolveContext(input: ResolveContextInput): ResolvedContext {
   const includeResource = thread.inheritFromParent;
   const includeNamespace = includeResource && (resource ? resource.inheritFromParent : true);
 
-  // Build the system prompt sections, in cascade order.
-  const sections: string[] = [];
+  const rules: string[] = [];
+  const sections: ReferenceSection[] = [];
 
   if (includeNamespace && namespace) {
+    rules.push(renderRules(namespace.staticRules, "Namespace Rules"));
     sections.push(
-      renderSection(namespace.staticRules, "Namespace Rules"),
-      renderFacts(namespaceFacts, "Namespace Facts"),
-      renderSection(namespace.workingMemory, "Namespace Working Memory"),
+      { title: "Namespace Facts", body: factsBody(namespaceFacts) },
+      { title: "Namespace Working Memory", body: namespace.workingMemory ?? "" },
     );
   }
 
-  // Cache boundary always emitted between stable (namespace) and
-  // volatile (resource + thread) layers — even when one side is empty,
-  // so providers can split deterministically.
-  sections.push(PROMPT_CACHE_BOUNDARY);
-
   if (includeResource && resource) {
+    rules.push(renderRules(resource.staticRules, "Resource Rules"));
     sections.push(
-      renderSection(resource.staticRules, "Resource Rules"),
-      renderFacts(resourceFacts, "Resource Facts"),
-      renderSection(resource.workingMemory, "Resource Working Memory"),
+      { title: "Resource Facts", body: factsBody(resourceFacts) },
+      { title: "Resource Working Memory", body: resource.workingMemory ?? "" },
     );
   }
 
@@ -160,21 +167,22 @@ export function resolveContext(input: ResolveContextInput): ResolvedContext {
   if (includeResource && (budget.maxEpisodeTokens ?? 0) > 0 && resourceEpisodes?.length) {
     const trimmed = trimEpisodes(resourceEpisodes, budget);
     if (trimmed.length > 0) {
-      sections.push(renderEpisodes(trimmed, "Recent Episodes"));
+      sections.push({ title: "Recent Episodes", body: episodesBody(trimmed) });
     }
   }
 
   sections.push(
-    renderFacts(threadFacts, "Thread Facts"),
-    renderSection(thread.workingMemory, "Thread Working Memory"),
+    { title: "Thread Facts", body: factsBody(threadFacts) },
+    { title: "Thread Working Memory", body: thread.workingMemory ?? "" },
   );
 
-  const systemPrompt = sections.filter((s) => s.length > 0).join("\n\n");
+  const instructions = rules.filter((r) => r.length > 0).join("\n\n");
+  const reference = fenceReferenceData({ source: "memory", sections }) ?? "";
 
   // Trim messages from the oldest end until total token estimate fits.
   const messages = trimMessages(input.messages, budget);
 
-  return { systemPrompt, messages };
+  return { instructions, reference, messages };
 }
 
 /**

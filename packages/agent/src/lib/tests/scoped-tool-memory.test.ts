@@ -141,7 +141,7 @@ describe("createScopedTool — declarative scoped memory", () => {
     const store = new InMemoryMemoryStore();
     await store.appendResourceFact(
       { namespaceId: "acme", resourceId: "bob" },
-      "bob's private note",
+      { text: "bob's private note", source: "model" },
     );
     const t = createScopedTool({
       name: "isolated",

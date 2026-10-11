@@ -23,6 +23,8 @@ import type {
   EpisodeListParams,
   EpisodicRecord,
   Fact,
+  FactInput,
+  FactSource,
   ListThreadsParams,
   MemoryStore,
   Message,
@@ -127,11 +129,11 @@ export class PostgresMemoryStore implements MemoryStore {
     return next;
   }
 
-  async appendNamespaceFact(namespaceId: string, text: string): Promise<Fact> {
+  async appendNamespaceFact(namespaceId: string, input: FactInput): Promise<Fact> {
     if (!(await this.getNamespace(namespaceId))) {
       await this.upsertNamespace(namespaceId, {});
     }
-    const f = this.makeFact(text);
+    const f = this.makeFact(input);
     await this.db.insert(agentFact).values({
       id: f.id,
       scope: SCOPE_NS,
@@ -139,6 +141,7 @@ export class PostgresMemoryStore implements MemoryStore {
       resourceId: null,
       threadId: null,
       factText: f.text,
+      source: f.source,
       createdAt: f.createdAt,
       updatedAt: f.updatedAt,
     });
@@ -263,11 +266,11 @@ export class PostgresMemoryStore implements MemoryStore {
     return next;
   }
 
-  async appendResourceFact(key: ScopedKey, text: string): Promise<Fact> {
+  async appendResourceFact(key: ScopedKey, input: FactInput): Promise<Fact> {
     if (!(await this.getResource(key))) {
       await this.upsertResource(key, {});
     }
-    const f = this.makeFact(text);
+    const f = this.makeFact(input);
     await this.db.insert(agentFact).values({
       id: f.id,
       scope: SCOPE_RES,
@@ -275,6 +278,7 @@ export class PostgresMemoryStore implements MemoryStore {
       resourceId: key.resourceId,
       threadId: null,
       factText: f.text,
+      source: f.source,
       createdAt: f.createdAt,
       updatedAt: f.updatedAt,
     });
@@ -541,11 +545,11 @@ export class PostgresMemoryStore implements MemoryStore {
       );
   }
 
-  async appendThreadFact(key: ThreadKey, text: string): Promise<Fact> {
+  async appendThreadFact(key: ThreadKey, input: FactInput): Promise<Fact> {
     if (!(await this.getThread(key))) {
       await this.createThread(key);
     }
-    const f = this.makeFact(text);
+    const f = this.makeFact(input);
     await this.db.insert(agentFact).values({
       id: f.id,
       scope: SCOPE_THR,
@@ -553,6 +557,7 @@ export class PostgresMemoryStore implements MemoryStore {
       resourceId: null,
       threadId: key.threadId,
       factText: f.text,
+      source: f.source,
       createdAt: f.createdAt,
       updatedAt: f.updatedAt,
     });
@@ -784,9 +789,15 @@ export class PostgresMemoryStore implements MemoryStore {
     return row;
   }
 
-  private makeFact(text: string): Fact {
+  private makeFact(input: FactInput): Fact {
     const now = this.clock();
-    return { id: randomUUID(), text, createdAt: now, updatedAt: now };
+    return {
+      id: randomUUID(),
+      text: input.text,
+      source: input.source,
+      createdAt: now,
+      updatedAt: now,
+    };
   }
 
   private makeEpisode(input: EpisodeInput): EpisodicRecord {
@@ -874,6 +885,7 @@ interface DbThreadRow {
 interface DbFactRow {
   id: string;
   factText: string;
+  source: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -939,7 +951,13 @@ function toThreadRow(r: DbThreadRow): ThreadRow {
 }
 
 function toFact(r: DbFactRow): Fact {
-  return { id: r.id, text: r.factText, createdAt: r.createdAt, updatedAt: r.updatedAt };
+  return {
+    id: r.id,
+    text: r.factText,
+    source: r.source as FactSource,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+  };
 }
 
 function toEpisode(r: DbEpisodeRow): EpisodicRecord {

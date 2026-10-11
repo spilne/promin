@@ -2,7 +2,6 @@
 name: code-review
 description: A checklist for reviewing a code change — correctness, edges, and clarity — used when reviewing a diff or PR.
 tags: [engineering, review]
-trust: trusted
 ---
 
 # Code review
