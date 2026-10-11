@@ -1,5 +1,6 @@
 import { storageTestSuite } from "@promin/workflow/testing";
 import type { WorkflowStorage } from "@promin/workflow";
+import { RedisWorkflowKeys } from "../redis-workflow-keys.ts";
 import { RedisWorkflowStorage } from "../redis-workflow-storage.ts";
 import { redisDescribe, uniquePrefix } from "./redis-test-utils.ts";
 
@@ -23,6 +24,10 @@ redisDescribe("RedisWorkflowStorage conformance", (redis) => {
       hasResetSteps: true,
       createPeer: (storage) =>
         new RedisWorkflowStorage({ redis: redis.client(), prefix: prefixes.get(storage)! }),
+      // A lapsed PX key is simply gone; the fence counter lives in its own key.
+      expireLock: async ({ storage, workflowId }) => {
+        await redis.client().del(new RedisWorkflowKeys(prefixes.get(storage)!).lock(workflowId));
+      },
     },
   );
 });

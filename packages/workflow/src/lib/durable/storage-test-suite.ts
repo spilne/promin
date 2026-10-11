@@ -66,6 +66,15 @@ export interface StorageTestSuiteOptions {
    * exercising one instance.
    */
   createPeer?: (storage: WorkflowStorage) => WorkflowStorage | Promise<WorkflowStorage>;
+  /**
+   * Make the run lock on `workflowId` expire now, as if its lease ran out.
+   * Backends whose lock expiry runs on a database server (Postgres `NOW()`,
+   * Redis `PX`) set this, so the expired-lock cases don't depend on the
+   * server's clock moving in step with a sleep on the test host. Without
+   * it the suite takes a 1 ms lease and waits 30 ms of real time, which is
+   * exact for in-process clocks.
+   */
+  expireLock?: (params: { storage: WorkflowStorage; workflowId: string }) => Promise<void>;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -104,6 +113,12 @@ export function storageTestSuite(
   /** A second instance over the same backend (or the same instance when none is configured). */
   async function getPeer(s: WorkflowStorage): Promise<WorkflowStorage> {
     return options.createPeer ? options.createPeer(s) : s;
+  }
+
+  /** Let the 1 ms lock taken on `workflowId` lapse (see `expireLock`). */
+  async function lockLapsed(params: { storage: WorkflowStorage; workflowId: string }) {
+    if (options.expireLock) await options.expireLock(params);
+    else await sleep(30);
   }
 
   async function getSuspendStorage(): Promise<WorkflowStorage & JournalStore> {
@@ -1455,7 +1470,7 @@ export function storageTestSuite(
         const peer = await getPeer(s);
         const a = await s.tryLock({ workflowId: "lock-exp", lockDurationMs: 1 });
         expect(a.acquired).toBe(true);
-        await sleep(30);
+        await lockLapsed({ storage: s, workflowId: "lock-exp" });
         const b = await peer.tryLock({ workflowId: "lock-exp", lockDurationMs: 30_000 });
         expect(b.acquired).toBe(true);
         expect(b.token).toBeDefined();
@@ -1484,7 +1499,7 @@ export function storageTestSuite(
         const s = await getStorage();
         const peer = await getPeer(s);
         const stale = await s.tryLock({ workflowId: "lock-stale-rel", lockDurationMs: 1 });
-        await sleep(30);
+        await lockLapsed({ storage: s, workflowId: "lock-stale-rel" });
         const fresh = await peer.tryLock({ workflowId: "lock-stale-rel", lockDurationMs: 30_000 });
         expect(fresh.acquired).toBe(true);
 
@@ -1558,7 +1573,7 @@ export function storageTestSuite(
           lockDurationMs: 1,
         });
         expect(staleToken).toBeDefined();
-        await sleep(30);
+        await lockLapsed({ storage: s, workflowId: "fence-stale" });
         // B acquires fresh token for the same workflow.
         const { acquired: bAcquired, token: freshToken } = await s.tryLock({
           workflowId: "fence-stale",
@@ -1618,7 +1633,7 @@ export function storageTestSuite(
         const peer = await getPeer(s);
         await s.createWorkflow({ workflowId: "fence-term", workflowName: "t", input: {} });
         const stale = await s.tryLock({ workflowId: "fence-term", lockDurationMs: 1 });
-        await sleep(30);
+        await lockLapsed({ storage: s, workflowId: "fence-term" });
         const fresh = await peer.tryLock({ workflowId: "fence-term", lockDurationMs: 30_000 });
         expect(fresh.acquired).toBe(true);
 
@@ -1955,7 +1970,7 @@ export function storageTestSuite(
             const stale = await s.tryLock({ workflowId: id, lockDurationMs: 1 });
             expect(stale.acquired).toBe(true);
             if (stale.token === undefined) return; // backend without fencing
-            await sleep(30);
+            await lockLapsed({ storage: s, workflowId: id });
             const takeover =
               scenario === "taken-over"
                 ? await peer.tryLock({ workflowId: id, lockDurationMs: 30_000 })
@@ -1981,7 +1996,7 @@ export function storageTestSuite(
         const s = await getStorage();
         const held = await s.tryLock({ workflowId: "fw-hb-expired", lockDurationMs: 1 });
         if (held.token === undefined) return; // backend without fencing
-        await sleep(30);
+        await lockLapsed({ storage: s, workflowId: "fw-hb-expired" });
         await rejectsStale(() =>
           s.heartbeat({
             workflowId: "fw-hb-expired",
@@ -2744,7 +2759,7 @@ export function storageTestSuite(
         const stale = await s.tryLock({ workflowId: "hb-lost", lockDurationMs: 1 });
         expect(stale.acquired).toBe(true);
         if (stale.token === undefined) return; // backend without fencing
-        await sleep(30);
+        await lockLapsed({ storage: s, workflowId: "hb-lost" });
         const fresh = await peer.tryLock({ workflowId: "hb-lost", lockDurationMs: 30_000 });
         expect(fresh.acquired).toBe(true);
 
@@ -4114,7 +4129,7 @@ export function storageTestSuite(
             expect(live.acquired).toBe(true);
             const expired = await s.tryLock({ workflowId: "orph-expired", lockDurationMs: 1 });
             expect(expired.acquired).toBe(true);
-            await sleep(30);
+            await lockLapsed({ storage: s, workflowId: "orph-expired" });
 
             const rows = await s.listOrphanedRuns({
               now: later(),

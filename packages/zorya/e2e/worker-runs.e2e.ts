@@ -236,11 +236,16 @@ postgresDescribe("worker-driven runs across processes", { migrate }, (pg) => {
       const second = await startHost({ port, instanceId: "restart-host" });
       await waitUntil({ what: "rs-1 to complete", check: completed(["rs-1"]) });
       expect((await stepResult("rs-1", "second"))?.pid).toBe(worker.pid);
-      // Nothing is left queued.
-      const starts = (await (await fetch(`${second.url}/api/worker-protocol/starts`)).json()) as {
-        starts: unknown[];
-      };
-      expect(starts.starts).toEqual([]);
+      // Nothing is left queued. The worker completes its start just after
+      // the run reaches `completed`, so wait for the queue to drain.
+      await waitUntil({
+        what: "the start queue to drain",
+        check: async () => {
+          const res = await fetch(`${second.url}/api/worker-protocol/starts`);
+          return ((await res.json()) as { starts: unknown[] }).starts.length === 0;
+        },
+        timeoutMs: 15_000,
+      });
     },
     TEST_TIMEOUT_MS,
   );
