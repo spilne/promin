@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { defineInputStream, defineStream, InMemoryWorkflowStorage } from "@promin/workflow";
 import { getStreamChunks, sendStreamChunk, type StreamChunkDto } from "../streams.ts";
+import { invoke } from "./invoke-handler.ts";
 
 const jsonReq = (body: unknown) =>
   new Request("http://x", {
@@ -77,7 +78,7 @@ describe("streams routes", () => {
 
   it("rejects POST without payload (400)", async () => {
     const send = sendStreamChunk({ storage });
-    const res = await send(jsonReq({}), { id: workflowId, streamId: "progress" });
+    const res = await invoke(send, jsonReq({}), { id: workflowId, streamId: "progress" });
     expect(res.status).toBe(400);
   });
 });

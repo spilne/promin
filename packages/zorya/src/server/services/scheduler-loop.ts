@@ -110,7 +110,7 @@ export interface SchedulerLoopConfig {
   storage: SchedulerStorage;
   /**
    * Server-side trigger fn — the same one wired into
-   * `/api/runs/trigger/:name`. Defaults to using `metadata.workflowName` +
+   * `/api/workflows/:name/runs`. Defaults to using `metadata.workflowName` +
    * `metadata.input` from the schedule config; override `fire` for full
    * control. It must start the run and return, not wait for it to finish.
    */

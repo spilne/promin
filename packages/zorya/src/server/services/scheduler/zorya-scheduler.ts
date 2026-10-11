@@ -104,6 +104,12 @@ export interface ZoryaSchedulerConfig {
 
 export class ZoryaScheduler {
   readonly storage: SchedulerStorage;
+  /**
+   * Namespace a schedule created without one lands in: the single
+   * namespace this scheduler polls, or the global namespace.
+   */
+  readonly defaultNamespace?: string;
+  private readonly namespaces: "all" | ReadonlySet<string | undefined>;
   private readonly loop: SchedulerLoop;
   private readonly onError: (event: SchedulerLoopErrorEvent) => void;
   /** Agent turns started by this instance and still running, by run id. */
@@ -112,6 +118,9 @@ export class ZoryaScheduler {
   constructor(config: ZoryaSchedulerConfig) {
     this.storage = config.storage;
     this.onError = config.onError ?? logSchedulerLoopError;
+    if (config.namespace !== undefined) this.defaultNamespace = config.namespace;
+    this.namespaces =
+      config.namespaces === "all" ? "all" : new Set(config.namespaces ?? [config.namespace]);
 
     const userFire = config.fire;
     const agents = config.agents;
@@ -155,6 +164,15 @@ export class ZoryaScheduler {
     if (config.clock !== undefined) loopConfig.clock = config.clock;
 
     this.loop = new SchedulerLoop(loopConfig);
+  }
+
+  /**
+   * Whether this scheduler polls `namespace` (`undefined` is the global
+   * namespace). A schedule in a namespace no scheduler polls never fires,
+   * so the API refuses to create one.
+   */
+  servesNamespace(namespace: string | undefined): boolean {
+    return this.namespaces === "all" || this.namespaces.has(namespace);
   }
 
   /** Powers POST /api/schedules/:id/emit. */

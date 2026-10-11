@@ -8,6 +8,9 @@
 // reaches Bun's error page. `HttpError` maps to its status; anything else
 // becomes a JSON 500 `{ error: "internal_error", requestId }` with the
 // detail logged under that request id and never returned to the caller.
+//
+// A path that matches a route under another method answers 405 with an
+// `Allow` header; the static fallback only sees paths no route matches.
 // ---------------------------------------------------------------------------
 
 export type Handler = (
@@ -39,13 +42,27 @@ export interface RouterConfig {
 export class HttpError extends Error {
   readonly status: number;
   readonly code: string;
+  /** Field-level problems, returned as `issues` (request validation). */
+  readonly issues?: ReadonlyArray<ApiIssue>;
 
-  constructor(params: { status: number; code: string; message?: string }) {
+  constructor(params: {
+    status: number;
+    code: string;
+    message?: string;
+    issues?: ReadonlyArray<ApiIssue>;
+  }) {
     super(params.message ?? params.code);
     this.name = "HttpError";
     this.status = params.status;
     this.code = params.code;
+    if (params.issues !== undefined) this.issues = params.issues;
   }
+}
+
+/** One field-level validation problem: where (`path`) and what (`message`). */
+export interface ApiIssue {
+  readonly path: string;
+  readonly message: string;
 }
 
 export class Router {
@@ -103,10 +120,14 @@ export class Router {
 
   private async dispatch(req: Request): Promise<Response> {
     const path = new URL(req.url).pathname;
+    const allowed = new Set<string>();
     for (const r of this.routes) {
-      if (r.method !== req.method) continue;
       const m = r.regex.exec(path);
       if (!m) continue;
+      if (r.method !== req.method) {
+        allowed.add(r.method);
+        continue;
+      }
       const params: Record<string, string> = {};
       for (let i = 0; i < r.keys.length; i++) {
         const decoded = safeDecode(m[i + 1]!);
@@ -115,6 +136,7 @@ export class Router {
       }
       return await r.handler(req, params);
     }
+    if (allowed.size > 0) return methodNotAllowed([...allowed]);
     if (this.staticHandler) return await this.staticHandler(req, {});
     return await this.notFoundHandler(req, {});
   }
@@ -132,7 +154,13 @@ export function errorResponse(params: {
   logger: RouterErrorLogger;
 }): Response {
   const { err, req, logger } = params;
-  if (err instanceof HttpError) return jsonError(err.status, err.code, err.message);
+  if (err instanceof HttpError) {
+    return json(err.status, {
+      error: err.code,
+      message: err.message,
+      ...(err.issues !== undefined && { issues: err.issues }),
+    });
+  }
   const requestId = crypto.randomUUID();
   let where = "";
   if (req) {
@@ -161,7 +189,10 @@ function safeDecode(raw: string): string | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Response helpers. Errors share one envelope: `{ error, message? }`.
+// Response helpers. Errors share one envelope: `{ error, message?, issues? }`.
+// Success statuses: 200 for reads and actions (with the resulting state),
+// 201 + the resource for creates, 202 for work started asynchronously, 204
+// for deletes.
 // ---------------------------------------------------------------------------
 
 export function json(status: number, body: unknown): Response {
@@ -183,6 +214,28 @@ export function ok(body: unknown): Response {
 /** 201 with the created resource. */
 export function created(body: unknown): Response {
   return json(201, body);
+}
+
+/**
+ * 202 for work that was started, not finished. `location` names the
+ * resource to poll for the outcome.
+ */
+export function accepted(body: unknown, location?: string): Response {
+  return new Response(JSON.stringify(body), {
+    status: 202,
+    headers: {
+      "content-type": "application/json",
+      ...(location !== undefined && { location }),
+    },
+  });
+}
+
+/** 405 naming the methods the path does accept. */
+export function methodNotAllowed(allow: ReadonlyArray<string>): Response {
+  return new Response(
+    JSON.stringify({ error: "method_not_allowed", message: `Allowed: ${allow.join(", ")}` }),
+    { status: 405, headers: { "content-type": "application/json", allow: allow.join(", ") } },
+  );
 }
 
 /** 204, no body. */

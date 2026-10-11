@@ -1,6 +1,7 @@
 // ---------------------------------------------------------------------------
 // Run extras — secondary endpoints for signal history, attempt history,
-// prior runs, and children. Each one degrades gracefully when the backing
+// prior runs, children and journals, plus rerun. Every route answers 404
+// for an unknown run. The read routes degrade gracefully when the backing
 // storage doesn't implement the optional interface.
 // ---------------------------------------------------------------------------
 
@@ -12,11 +13,19 @@ import type {
   JournalEntry,
 } from "@promin/workflow";
 import { WorkflowLockError, hasCapability, isTerminalWorkflowStatus } from "@promin/workflow";
-import { json, jsonError } from "../router.ts";
+import { z } from "zod";
+import { HttpError, accepted, json, jsonError } from "../router.ts";
 import { runToSummaryDto } from "../serialize.ts";
-import type { RunSummaryDto } from "../api-types.ts";
-import type { RunsService } from "../services/runs-service.ts";
-import { runActionResponse } from "./runs.ts";
+import {
+  IdSchema,
+  NameSchema,
+  OffsetQuery,
+  limitQuery,
+  type RerunResponse,
+  type RunSummaryDto,
+} from "../api-types.ts";
+import { parseParams, parseQuery } from "../request-validation.ts";
+import { RunParamsSchema, runLocation } from "./runs.ts";
 
 export interface SignalDto {
   signalName: string;
@@ -25,6 +34,10 @@ export interface SignalDto {
   deliveredAt: string;
 }
 
+/**
+ * Signal values delivered to the current run, at most one per name (the
+ * latest: delivery is last-wins until the run consumes it).
+ */
 export interface SignalHistoryResponse {
   signals: SignalDto[];
 }
@@ -70,6 +83,8 @@ export interface RunHistoryResponse {
 
 export interface ChildrenResponse {
   children: RunSummaryDto[];
+  /** Children across all pages, when the storage can count. */
+  total?: number;
 }
 
 export interface JournalEntryDto {
@@ -92,6 +107,25 @@ export interface StepJournalResponse {
   supported: boolean;
   entries: JournalEntryDto[];
 }
+
+/** Query of `GET /api/runs/:id/attempts`. */
+export const AttemptsQuerySchema = z.object({
+  stepName: z.preprocess((v) => (v === "" ? undefined : v), NameSchema.optional()),
+});
+
+/** Query of `GET /api/runs/:id/history`. */
+export const RunHistoryQuerySchema = z.object({
+  limit: limitQuery({ fallback: 100 }),
+  offset: OffsetQuery,
+});
+
+/** Query of `GET /api/runs/:id/children`. */
+export const ChildrenQuerySchema = z.object({
+  limit: limitQuery({ fallback: 100 }),
+  offset: OffsetQuery,
+});
+
+const JournalParamsSchema = z.object({ id: IdSchema, stepName: NameSchema });
 
 // ---------------------------------------------------------------------------
 
@@ -131,12 +165,23 @@ function runSummaryToDto(s: WorkflowRunSummary): RunHistoryEntryDto {
   };
 }
 
+/** Throw a 404 unless the run exists. */
+export async function requireRun(params: {
+  storage: WorkflowStorage;
+  workflowId: string;
+}): Promise<void> {
+  const status = await params.storage.loadWorkflowStatus(params.workflowId);
+  if (status === null || status === undefined) {
+    throw new HttpError({ status: 404, code: "not_found", message: "Run not found" });
+  }
+}
+
 // ---------------------------------------------------------------------------
 
 export function getRunSignals(storage: WorkflowStorage) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    if (!id) return jsonError(400, "missing_id");
+    const { id } = parseParams({ params, schema: RunParamsSchema });
+    await requireRun({ storage, workflowId: id });
     const signals = await storage.loadSignals(id);
     const response: SignalHistoryResponse = { signals: signals.map(signalToDto) };
     return json(200, response);
@@ -145,14 +190,13 @@ export function getRunSignals(storage: WorkflowStorage) {
 
 export function getRunAttempts(storage: WorkflowStorage) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    if (!id) return jsonError(400, "missing_id");
+    const { id } = parseParams({ params, schema: RunParamsSchema });
+    const { stepName } = parseQuery({ req, schema: AttemptsQuerySchema });
+    await requireRun({ storage, workflowId: id });
     if (!hasCapability(storage, "stepAttempts")) {
       const response: AttemptsResponse = { supported: false, attempts: [] };
       return json(200, response);
     }
-    const url = new URL(req.url);
-    const stepName = url.searchParams.get("stepName") ?? undefined;
     const records = await storage.loadStepAttempts({ workflowId: id, stepName });
     const response: AttemptsResponse = {
       supported: true,
@@ -163,21 +207,33 @@ export function getRunAttempts(storage: WorkflowStorage) {
 }
 
 export function getRunHistory(storage: WorkflowStorage) {
-  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    if (!id) return jsonError(400, "missing_id");
-    const rows = await storage.loadRunHistory({ workflowId: id });
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const { id } = parseParams({ params, schema: RunParamsSchema });
+    const { limit, offset } = parseQuery({ req, schema: RunHistoryQuerySchema });
+    await requireRun({ storage, workflowId: id });
+    const rows = await storage.loadRunHistory({ workflowId: id, limit, offset });
     const response: RunHistoryResponse = { runs: rows.map(runSummaryToDto) };
     return json(200, response);
   };
 }
 
 export function getRunChildren(storage: WorkflowStorage) {
-  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    if (!id) return jsonError(400, "missing_id");
-    const rows = await storage.listWorkflows({ parentId: id, limit: 200 });
-    const response: ChildrenResponse = { children: rows.map(runToSummaryDto) };
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const { id } = parseParams({ params, schema: RunParamsSchema });
+    const { limit, offset } = parseQuery({ req, schema: ChildrenQuerySchema });
+    await requireRun({ storage, workflowId: id });
+    const [rows, total] = await Promise.all([
+      hasCapability(storage, "summaries")
+        ? storage.listWorkflowSummaries({ parentId: id, limit, offset })
+        : storage.listWorkflows({ parentId: id, limit, offset }),
+      hasCapability(storage, "countWorkflows")
+        ? storage.countWorkflows({ parentId: id })
+        : undefined,
+    ]);
+    const response: ChildrenResponse = {
+      children: rows.map(runToSummaryDto),
+      ...(total !== undefined && { total }),
+    };
     return json(200, response);
   };
 }
@@ -192,10 +248,8 @@ export function getRunChildren(storage: WorkflowStorage) {
  */
 export function getRunStepJournal(storage: WorkflowStorage) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    const stepName = params.stepName;
-    if (!id) return jsonError(400, "missing_id");
-    if (!stepName) return jsonError(400, "missing_step_name");
+    const { id, stepName } = parseParams({ params, schema: JournalParamsSchema });
+    await requireRun({ storage, workflowId: id });
     if (!hasCapability(storage, "journal")) {
       const response: StepJournalResponse = { supported: false, entries: [] };
       return json(200, response);
@@ -223,50 +277,12 @@ function journalEntryToDto(e: JournalEntry): JournalEntryDto {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Admin actions — mark success / failed / rerun
-// ---------------------------------------------------------------------------
-
-export function markRunSuccess(runs: RunsService) {
-  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    if (!id) return jsonError(400, "missing_id");
-    try {
-      return runActionResponse(await runs.markSuccess(id));
-    } catch (err) {
-      return jsonError(
-        400,
-        "mark_success_failed",
-        err instanceof Error ? err.message : String(err),
-      );
-    }
-  };
-}
-
-export function markRunFailed(runs: RunsService) {
-  return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    if (!id) return jsonError(400, "missing_id");
-    let reason = "marked failed";
-    try {
-      const body = (await req.json().catch(() => null)) as { reason?: string } | null;
-      if (typeof body?.reason === "string" && body.reason !== "") reason = body.reason;
-    } catch {
-      // body is optional
-    }
-    try {
-      return runActionResponse(await runs.markFailed({ id, reason }));
-    } catch (err) {
-      return jsonError(400, "mark_failed_failed", err instanceof Error ? err.message : String(err));
-    }
-  };
-}
-
 /**
- * Start a fresh run of an ended run under the same id. Only ended runs
- * re-run (409 `run_not_terminal` otherwise — resetting a live run would
- * race its driver). The workflow service owns the reset, so the run number
- * goes up exactly once.
+ * POST /api/runs/:id/rerun — start a fresh run of an ended run under the
+ * same id: 202 + `Location`. Only ended runs re-run (409
+ * `run_not_terminal` otherwise — resetting a live run would race its
+ * driver). The workflow service owns the reset, so the run number goes up
+ * exactly once.
  */
 export function rerunRun(params: {
   storage: WorkflowStorage;
@@ -274,8 +290,7 @@ export function rerunRun(params: {
 }) {
   const { storage, rerun } = params;
   return async (_req: Request, routeParams: Record<string, string>): Promise<Response> => {
-    const id = routeParams.id;
-    if (!id) return jsonError(400, "missing_id");
+    const { id } = parseParams({ params: routeParams, schema: RunParamsSchema });
     const state = await storage.loadWorkflow(id);
     if (!state) return jsonError(404, "not_found");
     if (!isTerminalWorkflowStatus(state.status)) {
@@ -287,12 +302,13 @@ export function rerunRun(params: {
     }
     try {
       await rerun(id);
-      return json(200, { ok: true });
     } catch (err) {
       if (err instanceof WorkflowLockError) {
         return jsonError(409, "run_in_flight", err.message);
       }
-      return jsonError(400, "rerun_failed", err instanceof Error ? err.message : String(err));
+      throw err;
     }
+    const response: RerunResponse = { workflowId: id };
+    return accepted(response, runLocation(id));
   };
 }

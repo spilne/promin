@@ -7,16 +7,23 @@
 // ---------------------------------------------------------------------------
 
 import type { WorkflowStorage } from "@promin/workflow";
-import type { DurableScheduleConfig, SchedulerStorage } from "@promin/workflow/scheduler";
+import type {
+  DurableScheduleConfig,
+  ScheduleTick,
+  SchedulerStorage,
+} from "@promin/workflow/scheduler";
 import {
   computeNextRun,
   isTickLogStorage,
   scheduleTickRunId,
   validateScheduleConfig,
 } from "@promin/workflow/scheduler";
-import { SystemWallClock, type WallClock } from "@promin/workflow";
+import { SystemWallClock, hasCapability, type WallClock } from "@promin/workflow";
 import { z } from "zod";
-import { isoOrNull, json, jsonError, parseIntParam, readJson } from "../router.ts";
+import { accepted, created, isoOrNull, json, jsonError, noContent } from "../router.ts";
+import { BooleanQuery, MetadataQuery, OffsetQuery, limitQuery } from "../api-types.ts";
+import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
+import { runLocation } from "./runs.ts";
 
 export interface ScheduleDto {
   id: string;
@@ -96,8 +103,12 @@ export interface ScheduleUpcomingResponse {
   exhausted: boolean;
 }
 
-export interface SchedulePatchRequest {
-  enabled?: boolean;
+/** `202` from `POST /api/schedules/:id/emit`: the tick fired and its run started. */
+export interface ScheduleEmitResponse {
+  scheduleId: string;
+  tickNumber: number;
+  /** Run the tick started (`scheduleTickRunId`); poll `/api/runs/:id`. */
+  workflowId: string;
 }
 
 /** `null` and `""` mean "not set" — the dashboard form sends either. */
@@ -125,28 +136,104 @@ const TimezoneSchema = z
     { message: "must be an IANA time zone" },
   );
 
-/** Body of `POST /api/schedules`. Validated before anything is stored. */
-export const ScheduleCreateRequestSchema = z.object({
-  id: z.string().min(1).max(256),
-  name: optional(z.string().max(256)),
-  namespace: optional(z.string().max(256)),
-  cron: optional(z.string().max(256)),
-  rrule: optional(z.string().max(4096)),
-  intervalMs: optional(z.number().finite().positive().max(Number.MAX_SAFE_INTEGER)),
-  timezone: optional(TimezoneSchema),
-  enabled: optional(z.boolean()),
-  startAt: optional(IsoDateSchema),
-  endAt: optional(IsoDateSchema),
-  jitterMs: optional(z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER)),
-  maxCatchUp: optional(z.number().int().nonnegative().max(100_000)),
-  /** Optional workflow name to link. Stored in metadata.workflowName. */
-  workflowName: optional(z.string().max(256)),
-  /** Optional input payload for triggered runs. Stored in metadata.input. */
-  input: z.unknown().optional(),
-  metadata: optional(z.record(z.unknown())),
-});
+const ScheduleName = z.string().max(256);
+const Cron = z.string().min(1).max(256);
+const RRule = z.string().min(1).max(4096);
+const IntervalMs = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const JitterMs = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const MaxCatchUp = z.number().int().nonnegative().max(100_000);
+
+/**
+ * Body of `POST /api/schedules` (create-only: 409 `schedule_exists` when
+ * the id is taken). Exactly one of `cron`, `rrule`, `intervalMs`.
+ * `namespace` must be one this server's scheduler polls; it defaults to
+ * the scheduler's own namespace.
+ */
+export const ScheduleCreateRequestSchema = z
+  .object({
+    id: z.string().min(1).max(256),
+    name: optional(ScheduleName),
+    namespace: optional(z.string().min(1).max(256)),
+    cron: optional(Cron),
+    rrule: optional(RRule),
+    intervalMs: optional(IntervalMs),
+    timezone: optional(TimezoneSchema),
+    enabled: optional(z.boolean()),
+    startAt: optional(IsoDateSchema),
+    endAt: optional(IsoDateSchema),
+    jitterMs: optional(JitterMs),
+    maxCatchUp: optional(MaxCatchUp),
+    /** Workflow to trigger on each tick. Stored in metadata.workflowName. */
+    workflowName: optional(z.string().min(1).max(256)),
+    /** Input for triggered runs. Stored in metadata.input. */
+    input: z.unknown().optional(),
+    metadata: optional(z.record(z.unknown())),
+  })
+  .strict();
 
 export type ScheduleCreateRequest = z.infer<typeof ScheduleCreateRequestSchema>;
+
+/**
+ * Body of `PATCH /api/schedules/:id`: any mutable field; omitted fields
+ * keep their value and `null` clears an optional one. Sending one of
+ * `cron` / `rrule` / `intervalMs` replaces the trigger (the other two are
+ * cleared). `metadata` is merged key by key (`null` removes a key). `id`
+ * and `namespace` are immutable — delete and re-create to move a schedule.
+ */
+export const SchedulePatchRequestSchema = z
+  .object({
+    name: ScheduleName.nullable().optional(),
+    cron: Cron.optional(),
+    rrule: RRule.optional(),
+    intervalMs: IntervalMs.optional(),
+    timezone: TimezoneSchema.nullable().optional(),
+    enabled: z.boolean().optional(),
+    startAt: IsoDateSchema.nullable().optional(),
+    endAt: IsoDateSchema.nullable().optional(),
+    jitterMs: JitterMs.nullable().optional(),
+    maxCatchUp: MaxCatchUp.nullable().optional(),
+    workflowName: z.string().min(1).max(256).nullable().optional(),
+    input: z.unknown().optional(),
+    metadata: z.record(z.unknown()).optional(),
+  })
+  .strict()
+  .refine(
+    (b) =>
+      (b.cron !== undefined ? 1 : 0) +
+        (b.rrule !== undefined ? 1 : 0) +
+        (b.intervalMs !== undefined ? 1 : 0) <=
+      1,
+    { message: "Send at most one of cron, rrule, intervalMs" },
+  );
+
+export type SchedulePatchRequest = z.infer<typeof SchedulePatchRequestSchema>;
+
+/** Query of `GET /api/schedules`. */
+export const ScheduleListQuerySchema = z.object({
+  enabled: BooleanQuery,
+  namespace: z.preprocess((v) => (v === "" ? undefined : v), z.string().max(256).optional()),
+  /**
+   * Containment filter, JSON-encoded. The chat per-thread drawer sends
+   * `{ agentTrigger: true, threadId }`, the "kind = agent" chip
+   * `{ agentTrigger: true }`.
+   */
+  metadata: MetadataQuery,
+  limit: limitQuery({ fallback: 100 }),
+  offset: OffsetQuery,
+});
+
+/** Query of `GET /api/schedules/:id/history`. */
+export const ScheduleHistoryQuerySchema = z.object({
+  limit: limitQuery({ fallback: 20 }),
+  offset: OffsetQuery,
+});
+
+/** Query of `GET /api/schedules/:id/upcoming`. */
+export const ScheduleUpcomingQuerySchema = z.object({
+  count: limitQuery({ fallback: 10, max: 100 }),
+});
+
+const ScheduleParamsSchema = z.object({ id: z.string().min(1).max(256) });
 
 /** ISO string, or `undefined` for a missing or unreadable stored date. */
 function iso(d?: Date | null): string | undefined {
@@ -164,6 +251,14 @@ export interface ScheduleRoutesDeps {
    * projected times line up with its due checks. Default: `SystemWallClock`.
    */
   readonly clock?: WallClock;
+  /**
+   * Whether a scheduler polls `namespace` (`undefined` is the global
+   * namespace). Creates elsewhere are refused: nothing would fire them.
+   * Default: only the global namespace.
+   */
+  readonly servesNamespace?: (namespace: string | undefined) => boolean;
+  /** Namespace of a schedule created without one. Default: global. */
+  readonly defaultNamespace?: string;
 }
 
 /** A clock frozen at `when` — `computeNextRun` only reads the time. */
@@ -224,30 +319,10 @@ export function listSchedules(deps: ScheduleRoutesDeps) {
   const { storage } = deps;
   const clock = deps.clock ?? SystemWallClock;
   return async (req: Request): Promise<Response> => {
-    const url = new URL(req.url);
-    const enabled = parseBool(url.searchParams.get("enabled"));
-    const namespace = url.searchParams.get("namespace") ?? undefined;
-    const limit = parseIntParam({ raw: url.searchParams.get("limit"), min: 1, max: 1_000 }) ?? 100;
-    const offset =
-      parseIntParam({ raw: url.searchParams.get("offset"), min: 0, max: 1_000_000 }) ?? 0;
-    // Metadata filter — JSON-encoded for nested-path queries (the chat
-    // per-thread drawer sends `{ agentTrigger: true, threadId: "..." }`,
-    // the dashboard's "kind = agent" chip sends `{ agentTrigger: true }`).
-    // Containment semantics ride through to the storage layer; backends
-    // with native JSON support push it to the database.
-    const metadataRaw = url.searchParams.get("metadata");
-    let metadata: Record<string, unknown> | undefined;
-    if (metadataRaw) {
-      try {
-        const parsed = JSON.parse(metadataRaw) as unknown;
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          metadata = parsed as Record<string, unknown>;
-        }
-      } catch {
-        return jsonError(400, "invalid_metadata", "metadata must be JSON-encoded object");
-      }
-    }
-
+    const { enabled, namespace, metadata, limit, offset } = parseQuery({
+      req,
+      schema: ScheduleListQuerySchema,
+    });
     const [configs, total] = await Promise.all([
       storage.listSchedules({ enabled, namespace, limit, offset, metadata }),
       storage.countSchedules({ enabled, namespace, metadata }),
@@ -267,8 +342,7 @@ export function getSchedule(deps: ScheduleRoutesDeps) {
   const { storage } = deps;
   const clock = deps.clock ?? SystemWallClock;
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    if (!id) return jsonError(400, "missing_id");
+    const { id } = parseParams({ params, schema: ScheduleParamsSchema });
     const config = await storage.loadSchedule(id);
     if (!config) return jsonError(404, "not_found");
     const state = await storage.loadScheduleState(id);
@@ -276,34 +350,24 @@ export function getSchedule(deps: ScheduleRoutesDeps) {
   };
 }
 
+/**
+ * POST /api/schedules — create a schedule: 201 + the schedule. Create-only:
+ * an existing id is a 409 `schedule_exists` (change it with PATCH). The
+ * namespace must be one this server's scheduler polls (400
+ * `namespace_not_served`), so every created schedule can fire.
+ */
 export function createSchedule(deps: ScheduleRoutesDeps) {
   const { storage } = deps;
   const clock = deps.clock ?? SystemWallClock;
+  const serves = deps.servesNamespace ?? ((ns: string | undefined) => ns === undefined);
   return async (req: Request): Promise<Response> => {
-    const raw = await readJson<unknown>(req);
-    if (!raw || typeof raw !== "object" || !(raw as { id?: unknown }).id) {
-      return jsonError(400, "missing_id");
-    }
-    const parsed = ScheduleCreateRequestSchema.safeParse(raw);
-    if (!parsed.success) {
+    const body = await parseBody({ req, schema: ScheduleCreateRequestSchema });
+    const namespace = body.namespace ?? deps.defaultNamespace;
+    if (!serves(namespace)) {
       return jsonError(
         400,
-        "invalid_schedule",
-        parsed.error.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; "),
-      );
-    }
-    const body = parsed.data;
-    if (body.startAt && body.endAt && Date.parse(body.startAt) > Date.parse(body.endAt)) {
-      return jsonError(400, "invalid_schedule", "startAt must not be after endAt");
-    }
-
-    const triggerCount =
-      (body.cron ? 1 : 0) + (body.rrule ? 1 : 0) + (body.intervalMs !== undefined ? 1 : 0);
-    if (triggerCount !== 1) {
-      return jsonError(
-        400,
-        "invalid_trigger",
-        "Exactly one of cron, rrule, intervalMs is required",
+        "namespace_not_served",
+        `No scheduler on this server polls namespace ${namespace === undefined ? "(global)" : `"${namespace}"`}`,
       );
     }
 
@@ -314,7 +378,7 @@ export function createSchedule(deps: ScheduleRoutesDeps) {
     const config: DurableScheduleConfig = {
       id: body.id,
       name: body.name,
-      namespace: body.namespace,
+      namespace,
       cron: body.cron,
       rrule: body.rrule,
       intervalMs: body.intervalMs,
@@ -326,101 +390,187 @@ export function createSchedule(deps: ScheduleRoutesDeps) {
       metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
       maxCatchUp: body.maxCatchUp,
     };
+    const invalid = invalidConfig(config);
+    if (invalid !== undefined) return jsonError(400, "invalid_schedule", invalid);
 
-    // Reject what the scheduler couldn't evaluate (bad cron/RRULE, a
-    // non-positive interval, ...) before it reaches storage.
-    try {
-      validateScheduleConfig(config);
-    } catch (err) {
-      return jsonError(400, "invalid_schedule", err instanceof Error ? err.message : String(err));
+    if (await storage.loadSchedule(config.id)) {
+      return jsonError(409, "schedule_exists", `Schedule "${config.id}" already exists`);
     }
-
-    try {
-      await storage.upsertSchedule(config);
-      // Match `DurableScheduler.register`: an enabled schedule is due now,
-      // so the first poll picks it up (computeDueTicks fires one boot tick
-      // at `now` when `lastFired` is null, then commitPoll advances nextRun
-      // onto the natural cron / interval cadence). A disabled one stays out
-      // of due-tracking — the upsert already cleared it.
-      if (config.enabled !== false) await storage.setNextRun(config.id, clock.now());
-      const state = await storage.loadScheduleState(config.id);
-      return json(200, toDto({ config, state, clock }));
-    } catch (err) {
-      return jsonError(400, "upsert_failed", err instanceof Error ? err.message : String(err));
-    }
+    await storage.upsertSchedule(config);
+    // Match `DurableScheduler.register`: an enabled schedule is due now,
+    // so the first poll picks it up (computeDueTicks fires one boot tick
+    // at `now` when `lastFired` is null, then commitPoll advances nextRun
+    // onto the natural cron / interval cadence). A disabled one stays out
+    // of due-tracking — the upsert already cleared it.
+    if (config.enabled !== false) await storage.setNextRun(config.id, clock.now());
+    const state = await storage.loadScheduleState(config.id);
+    return created(toDto({ config, state, clock }));
   };
 }
 
+/**
+ * PATCH /api/schedules/:id — change any mutable field (see
+ * `SchedulePatchRequestSchema`): 200 + the schedule. The merged config is
+ * validated before it is stored, and a change to when the schedule fires
+ * (trigger, timezone, window) recomputes its next run. Pausing takes it
+ * out of due-tracking; resuming makes it due now, as after a restart.
+ */
 export function patchSchedule(deps: ScheduleRoutesDeps) {
   const { storage } = deps;
   const clock = deps.clock ?? SystemWallClock;
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    if (!id) return jsonError(400, "missing_id");
-    const body = await readJson<SchedulePatchRequest>(req);
-    if (!body) return jsonError(400, "invalid_body");
-    if (typeof body.enabled === "boolean") {
-      await storage.setEnabled(id, body.enabled);
+    const { id } = parseParams({ params, schema: ScheduleParamsSchema });
+    const patch = await parseBody({ req, schema: SchedulePatchRequestSchema });
+    const current = await storage.loadSchedule(id);
+    if (!current) return jsonError(404, "not_found");
+
+    const merged = applySchedulePatch({ current, patch });
+    const invalid = invalidConfig(merged);
+    if (invalid !== undefined) return jsonError(400, "invalid_schedule", invalid);
+
+    await storage.upsertSchedule(merged);
+    const timingChanged =
+      patch.cron !== undefined ||
+      patch.rrule !== undefined ||
+      patch.intervalMs !== undefined ||
+      patch.timezone !== undefined ||
+      patch.startAt !== undefined ||
+      patch.endAt !== undefined;
+    const resumed = current.enabled === false && merged.enabled !== false;
+    if (merged.enabled !== false && timingChanged && !resumed) {
+      // Same as `DurableScheduler.update`: the next fire follows the new timing.
+      await storage.setNextRun(id, computeNextRun({ config: merged, clock }));
     }
-    const config = await storage.loadSchedule(id);
-    if (!config) return jsonError(404, "not_found");
     const state = await storage.loadScheduleState(id);
-    return json(200, toDto({ config, state, clock }));
+    return json(200, toDto({ config: merged, state, clock }));
   };
 }
 
+/** The stored config with `patch` applied (see `SchedulePatchRequestSchema`). */
+function applySchedulePatch(params: {
+  current: DurableScheduleConfig;
+  patch: SchedulePatchRequest;
+}): DurableScheduleConfig {
+  const { current, patch } = params;
+  const next: { -readonly [K in keyof DurableScheduleConfig]: DurableScheduleConfig[K] } = {
+    ...current,
+  };
+  const set = <K extends keyof DurableScheduleConfig>(
+    key: K,
+    value: DurableScheduleConfig[K] | null | undefined,
+  ): void => {
+    if (value === undefined) return;
+    if (value === null) delete next[key];
+    else next[key] = value;
+  };
+
+  if (patch.cron !== undefined || patch.rrule !== undefined || patch.intervalMs !== undefined) {
+    delete next.cron;
+    delete next.rrule;
+    delete next.intervalMs;
+    set("cron", patch.cron);
+    set("rrule", patch.rrule);
+    set("intervalMs", patch.intervalMs);
+  }
+  set("name", patch.name);
+  set("timezone", patch.timezone);
+  set("enabled", patch.enabled);
+  set("startAt", patch.startAt === undefined ? undefined : toDate(patch.startAt));
+  set("endAt", patch.endAt === undefined ? undefined : toDate(patch.endAt));
+  set("jitterMs", patch.jitterMs);
+  set("maxCatchUp", patch.maxCatchUp);
+
+  const metadata: Record<string, unknown> = { ...(current.metadata ?? {}) };
+  for (const [key, value] of Object.entries(patch.metadata ?? {})) {
+    if (value === null) delete metadata[key];
+    else metadata[key] = value;
+  }
+  if (patch.workflowName === null) delete metadata.workflowName;
+  else if (patch.workflowName !== undefined) metadata.workflowName = patch.workflowName;
+  if ("input" in patch) metadata.input = patch.input;
+  if (Object.keys(metadata).length > 0) next.metadata = metadata;
+  else delete next.metadata;
+  return next;
+}
+
+function toDate(iso: string | null): Date | null {
+  return iso === null ? null : new Date(iso);
+}
+
+/**
+ * Why the scheduler couldn't evaluate `config` (bad cron / RRULE, no or
+ * several triggers, an inverted window), or `undefined` when it can.
+ */
+function invalidConfig(config: DurableScheduleConfig): string | undefined {
+  if (config.startAt && config.endAt && config.startAt.getTime() > config.endAt.getTime()) {
+    return "startAt must not be after endAt";
+  }
+  try {
+    validateScheduleConfig(config);
+    return undefined;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/** DELETE /api/schedules/:id — 204; 404 when there is no such schedule. */
 export function deleteSchedule(storage: SchedulerStorage) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    if (!id) return jsonError(400, "missing_id");
+    const { id } = parseParams({ params, schema: ScheduleParamsSchema });
+    if (!(await storage.loadSchedule(id))) return jsonError(404, "not_found");
     await storage.deleteSchedule(id);
-    return json(200, { ok: true });
+    return noContent();
   };
 }
 
 // ---------------------------------------------------------------------------
-// Emit now — fires a schedule on the next poll cycle by setting its
-// `nextRun` to now. Goes through the same dispatch path as a normal
-// firing — same workflowId convention, same tick log, same metadata
-// stamping. Useful for testing without waiting on cron / interval.
+// Emit now — fire one tick of a schedule right away, through the scheduler
+// loop's `fireOnce`: the same tick numbering, tick log, metadata stamping
+// and dispatch as a polled fire, without waiting on cron / interval.
 //
-// We deliberately don't bypass the SchedulerLoop and call the trigger
-// directly: that would skip leader election, skip commitPoll's atomic
-// state advance, and break the invariant that tickCount === count of
-// logged ticks. One unified path keeps the model coherent.
+// 202 `{ scheduleId, tickNumber, workflowId }` once the tick's run has
+// started; 409 `schedule_paused` for a paused schedule; 502
+// `dispatch_failed` when the tick was recorded but its run could not start
+// (emit again to fire a new tick); 503 when no scheduler loop runs here.
 // ---------------------------------------------------------------------------
 
 export function emitScheduleNow(
   storage: SchedulerStorage,
-  fire: ((scheduleId: string) => Promise<unknown>) | undefined,
+  fire: ((scheduleId: string) => Promise<ScheduleTick | null>) | undefined,
 ) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    if (!id) return jsonError(400, "missing_id");
+    const { id } = parseParams({ params, schema: ScheduleParamsSchema });
     const config = await storage.loadSchedule(id);
     if (!config) return jsonError(404, "not_found");
     if (config.enabled === false) {
       return jsonError(409, "schedule_paused", "Resume the schedule before emitting.");
     }
     if (!fire) {
-      // Without an embedded scheduler loop, simply bumping `nextRun` won't
-      // fire interval schedules (computeIntervalDue's `lastFired + ms > now`
-      // guard skips them). Tell the operator clearly instead of silently
-      // failing.
       return jsonError(
         503,
         "scheduler_not_running",
         "Embedded scheduler is not running on this server — set scheduling.enabled to use emit-now.",
       );
     }
+    let tick: ScheduleTick | null;
     try {
-      await fire(id);
+      tick = await fire(id);
     } catch (err) {
       // The tick was recorded but its run did not start: say so instead of
       // reporting a fire that never happened.
       return jsonError(502, "dispatch_failed", err instanceof Error ? err.message : String(err));
     }
-    return json(200, { ok: true });
+    if (!tick) {
+      // Paused or deleted between the check above and the fire.
+      return jsonError(409, "schedule_paused", "The schedule was paused or removed.");
+    }
+    const workflowId = scheduleTickRunId({ scheduleId: id, tickNumber: tick.tickNumber });
+    const response: ScheduleEmitResponse = {
+      scheduleId: id,
+      tickNumber: tick.tickNumber,
+      workflowId,
+    };
+    return accepted(response, runLocation(workflowId));
   };
 }
 
@@ -441,15 +591,10 @@ export function getScheduleHistory(
   workflowStorage: WorkflowStorage,
 ) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    if (!id) return jsonError(400, "missing_id");
+    const { id } = parseParams({ params, schema: ScheduleParamsSchema });
+    const { limit, offset } = parseQuery({ req, schema: ScheduleHistoryQuerySchema });
     const config = await schedulerStorage.loadSchedule(id);
     if (!config) return jsonError(404, "not_found");
-
-    const url = new URL(req.url);
-    const limit = parseIntParam({ raw: url.searchParams.get("limit"), min: 1, max: 500 }) ?? 20;
-    const offset =
-      parseIntParam({ raw: url.searchParams.get("offset"), min: 0, max: 1_000_000 }) ?? 0;
 
     // Primary path: scheduler-side tick log. Authoritative — written in the
     // same transaction as the tickCount advance, so the history is always
@@ -475,8 +620,8 @@ export function getScheduleHistory(
       ]);
 
       // Enrich each tick with status / duration from the matching workflow
-      // row, joined on the deterministic `scheduleTickRunId` id. One bulk
-      // query per page, not N+1.
+      // row, joined on the deterministic `scheduleTickRunId` id: one read
+      // per tick on the page, so `limit` (at most 500) bounds the reads.
       const workflowIds = ticks.map((t) =>
         scheduleTickRunId({ scheduleId: id, tickNumber: t.tickNumber }),
       );
@@ -526,13 +671,19 @@ export function getScheduleHistory(
     // Fallback: derive history from workflow metadata. Loses fidelity on
     // backends that don't yet implement a tick log (Postgres, Redis), but
     // keeps the endpoint working without a hard dependency.
-    const all = await workflowStorage.listWorkflows({
-      metadata: { scheduleId: id },
-      orderBy: "createdAt",
-      orderDir: "desc",
-      limit: limit + offset,
-    });
-    const slice = all.slice(offset, offset + limit);
+    const filter = { metadata: { scheduleId: id } };
+    const [slice, counted] = await Promise.all([
+      workflowStorage.listWorkflows({
+        ...filter,
+        orderBy: "createdAt",
+        orderDir: "desc",
+        limit,
+        offset,
+      }),
+      hasCapability(workflowStorage, "countWorkflows")
+        ? workflowStorage.countWorkflows(filter)
+        : undefined,
+    ]);
     const history: ScheduleTickHistoryDto[] = slice.map((wf) => {
       const meta = wf.metadata ?? {};
       const tickNumberRaw = meta["scheduleTick"];
@@ -569,7 +720,8 @@ export function getScheduleHistory(
         namespace: wf.namespace ?? undefined,
       };
     });
-    const total = all.length < limit + offset ? all.length : offset + slice.length;
+    // Without a count, a full page means "at least one more may follow".
+    const total = counted ?? offset + slice.length + (slice.length === limit ? 1 : 0);
     return json(200, { history, total } satisfies ScheduleHistoryResponse);
   };
 }
@@ -583,13 +735,10 @@ export function getScheduleUpcoming(deps: ScheduleRoutesDeps) {
   const { storage } = deps;
   const clock = deps.clock ?? SystemWallClock;
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    if (!id) return jsonError(400, "missing_id");
+    const { id } = parseParams({ params, schema: ScheduleParamsSchema });
+    const { count } = parseQuery({ req, schema: ScheduleUpcomingQuerySchema });
     const config = await storage.loadSchedule(id);
     if (!config) return jsonError(404, "not_found");
-
-    const url = new URL(req.url);
-    const count = parseIntParam({ raw: url.searchParams.get("count"), min: 1, max: 100 }) ?? 10;
 
     // Disabled schedules have no upcoming fires by definition; surface the
     // empty list with `exhausted: false` so the UI distinguishes "nothing
@@ -626,11 +775,4 @@ export function getScheduleUpcoming(deps: ScheduleRoutesDeps) {
     }
     return json(200, { upcoming, exhausted } satisfies ScheduleUpcomingResponse);
   };
-}
-
-function parseBool(s: string | null): boolean | undefined {
-  if (s === null || s === "") return undefined;
-  if (s === "true" || s === "1") return true;
-  if (s === "false" || s === "0") return false;
-  return undefined;
 }

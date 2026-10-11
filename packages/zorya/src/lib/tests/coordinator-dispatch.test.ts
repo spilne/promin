@@ -8,7 +8,7 @@
 //   - Two ZoryaWorker instances in `mode: "step"` advertising the same
 //     workflow.
 //
-// Exercises the full path: trigger via /api/runs/trigger/:name → coordinator
+// Exercises the full path: trigger via /api/workflows/:name/runs → coordinator
 // submits → enqueues steps → step-mode workers claim and execute → storage
 // reflects per-step + workflow completion.
 // ---------------------------------------------------------------------------

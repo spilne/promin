@@ -34,7 +34,7 @@ async function create(
       body: JSON.stringify(body),
     }),
   );
-  expect(res.status).toBe(200);
+  expect(res.status).toBe(201);
   return (await res.json()) as ScheduleDto;
 }
 

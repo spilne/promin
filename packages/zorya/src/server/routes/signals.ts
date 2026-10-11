@@ -13,7 +13,10 @@
 
 import { listPendingSignals } from "@promin/agent";
 import type { WorkflowStorage } from "@promin/workflow";
+import { z } from "zod";
 import { json } from "../router.ts";
+import { NameSchema, limitQuery } from "../api-types.ts";
+import { parseQuery } from "../request-validation.ts";
 
 export interface SignalDto {
   workflowId: string;
@@ -46,26 +49,46 @@ export interface SignalDto {
   toolName?: string;
   /** Tool input (only populated when the agent loop wrote it). */
   toolInput?: unknown;
+  /**
+   * ISO time a value for this signal was delivered and is waiting to be
+   * consumed — the run resumes on the signal scanner's next pass. Absent
+   * while nothing has been delivered.
+   */
+  deliveredAt?: string;
 }
 
 export interface SignalsResponse {
   signals: SignalDto[];
+  /** Number of signal waits found among the `limit` most recent suspended runs scanned. */
   total: number;
 }
 
+/** Query of `GET /api/signals`. `limit` caps the suspended runs scanned (default 200). */
+export const SignalsQuerySchema = z.object({
+  namespace: z.preprocess((v) => (v === "" ? undefined : v), NameSchema.optional()),
+  limit: limitQuery({ fallback: 200 }),
+});
+
 export function listSignals(storage: WorkflowStorage) {
   return async (req: Request) => {
-    const url = new URL(req.url);
-    const namespace = url.searchParams.get("namespace") ?? undefined;
-    const limitRaw = url.searchParams.get("limit");
-    const limit = limitRaw ? Number(limitRaw) : undefined;
+    const { namespace, limit } = parseQuery({ req, schema: SignalsQuerySchema });
 
     const pending = await listPendingSignals(storage, {
-      ...(namespace ? { namespace } : {}),
-      ...(limit && Number.isFinite(limit) && limit > 0 ? { limit } : {}),
+      ...(namespace !== undefined && { namespace }),
+      limit,
     });
 
-    const signals: SignalDto[] = pending.map((p) => ({
+    // A value already delivered but not yet consumed: the run resumes on
+    // the scanner's next pass. Shown so a second operator doesn't decide
+    // again (a later delivery would replace it — delivery is last-wins).
+    const delivered = await Promise.all(
+      pending.map(async (p) => {
+        const signals = await storage.loadSignals(p.workflowId);
+        return signals.find((s) => s.signalName === p.signalName)?.deliveredAt;
+      }),
+    );
+
+    const signals: SignalDto[] = pending.map((p, i) => ({
       workflowId: p.workflowId,
       workflowName: p.workflowName,
       namespace: p.namespace ?? null,
@@ -77,6 +100,7 @@ export function listSignals(storage: WorkflowStorage) {
       ...(p.toolCallId !== undefined && { toolCallId: p.toolCallId }),
       ...(p.toolName !== undefined && { toolName: p.toolName }),
       ...(p.toolInput !== undefined && { toolInput: p.toolInput }),
+      ...(delivered[i] !== undefined && { deliveredAt: delivered[i]!.toISOString() }),
     }));
 
     const body: SignalsResponse = { signals, total: signals.length };

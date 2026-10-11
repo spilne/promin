@@ -101,18 +101,18 @@ describe("ZoryaServer", () => {
     });
   });
 
-  describe("POST /api/runs/trigger/:name", () => {
-    it("returns 400 when workflow is unknown to the configured workflows service", async () => {
+  describe("POST /api/workflows/:name/runs", () => {
+    it("returns 404 when workflow is unknown to the configured workflows service", async () => {
       const res = await server.handle(
-        new Request("http://x/api/runs/trigger/order", {
+        new Request("http://x/api/workflows/order/runs", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ input: { a: 1 } }),
         }),
       );
       // LocalWorkflows with empty definitions throws UnknownWorkflowError
-      // which the route maps to 400 trigger_failed.
-      expect(res.status).toBe(400);
+      // which the route maps to 404 workflow_not_found.
+      expect(res.status).toBe(404);
     });
 
     it("invokes trigger and returns workflow id", async () => {
@@ -128,13 +128,13 @@ describe("ZoryaServer", () => {
       });
       const s = new ZoryaServer({ insecure: true, workflows });
       const res = await s.handle(
-        new Request("http://x/api/runs/trigger/order", {
+        new Request("http://x/api/workflows/order/runs", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ input: { a: 1 } }),
         }),
       );
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(202);
       const body = (await res.json()) as TriggerRunResponse;
       expect(body.workflowId).toBeDefined();
       const enqueued = await queue.list();
@@ -166,7 +166,7 @@ describe("ZoryaServer", () => {
           body: JSON.stringify({ signalName: "approve", payload: { ok: true } }),
         }),
       );
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(202);
     });
   });
 

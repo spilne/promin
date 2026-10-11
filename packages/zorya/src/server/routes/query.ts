@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // POST /api/runs/:id/query — invoke a workflow's in-memory query handler.
 //
-// Body: { name: string, args?: unknown, timeoutMs?: number }
+// Body: { name: string, args?: unknown, timeoutMs?: number (1..30000, default 5000) }
 // Response (200): { result }
 // Response (404): "no_handler" — workflow not running on any worker, or
 //                  no handler with that name registered
@@ -17,13 +17,13 @@
 
 import type { WorkerWebSocketServer } from "../services/worker-ws-server.ts";
 import { SystemWallClock, type TimerHandle, type WallClock } from "@promin/workflow";
-import { json, jsonError, readJson } from "../router.ts";
+import { json, jsonError } from "../router.ts";
+import { QueryRunRequestSchema } from "../api-types.ts";
+import { parseBody, parseParams } from "../request-validation.ts";
+import { RunParamsSchema } from "./runs.ts";
 
-interface QueryRequestBody {
-  name?: string;
-  args?: unknown;
-  timeoutMs?: number;
-}
+/** Query timeout when the body names none (ms). */
+const DEFAULT_QUERY_TIMEOUT_MS = 5_000;
 
 export interface QueryRouteDeps {
   readonly workerWs: WorkerWebSocketServer;
@@ -35,13 +35,9 @@ export function queryRun(deps: QueryRouteDeps) {
   const { workerWs } = deps;
   const clock = deps.clock ?? SystemWallClock;
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const workflowId = params.id;
-    if (!workflowId) return jsonError(400, "missing_id");
-    const body = (await readJson<QueryRequestBody>(req)) ?? {};
-    if (!body.name || typeof body.name !== "string") {
-      return jsonError(400, "missing_name", "Body must include `name: string`.");
-    }
-    const timeoutMs = body.timeoutMs ?? 5_000;
+    const { id: workflowId } = parseParams({ params, schema: RunParamsSchema });
+    const body = await parseBody({ req, schema: QueryRunRequestSchema });
+    const timeoutMs = body.timeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS;
 
     const workers = workerWs.connectedWorkers();
     if (workers.length === 0) {

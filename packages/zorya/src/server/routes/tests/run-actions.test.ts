@@ -68,17 +68,17 @@ function waiting(name: string) {
     .build() as Workflow<unknown, unknown>;
 }
 
-describe("POST /api/runs/trigger/:name — existing workflowId", () => {
+describe("POST /api/workflows/:name/runs — existing workflowId", () => {
   it("a retried trigger with the same workflowId answers the run and does not re-run it", async () => {
     const charge = counted("charge");
     const { post, status, storage } = setup({ charge: charge.wf });
 
-    const first = await post("/api/runs/trigger/charge", { workflowId: "order-42" });
-    expect(first.status).toBe(200);
+    const first = await post("/api/workflows/charge/runs", { workflowId: "order-42" });
+    expect(first.status).toBe(202);
     expect(await first.json()).toEqual({ workflowId: "order-42" });
     await until(async () => (await status("order-42")) === "completed");
 
-    const retry = await post("/api/runs/trigger/charge", { workflowId: "order-42" });
+    const retry = await post("/api/workflows/charge/runs", { workflowId: "order-42" });
     expect(retry.status).toBe(200);
     expect(await retry.json()).toEqual({ workflowId: "order-42", existing: true });
 
@@ -89,10 +89,10 @@ describe("POST /api/runs/trigger/:name — existing workflowId", () => {
 
   it("a trigger for an in-flight workflowId returns it without starting a second driver", async () => {
     const { post, status } = setup({ w: waiting("w") });
-    await post("/api/runs/trigger/w", { workflowId: "w-1" });
+    await post("/api/workflows/w/runs", { workflowId: "w-1" });
     await until(async () => (await status("w-1")) === "suspended");
 
-    const again = await post("/api/runs/trigger/w", { workflowId: "w-1" });
+    const again = await post("/api/workflows/w/runs", { workflowId: "w-1" });
     expect(again.status).toBe(200);
     expect(await again.json()).toEqual({ workflowId: "w-1", existing: true });
     expect(await status("w-1")).toBe("suspended");
@@ -102,10 +102,10 @@ describe("POST /api/runs/trigger/:name — existing workflowId", () => {
     const hello = counted("hello");
     const other = counted("other");
     const { post, status, storage } = setup({ hello: hello.wf, other: other.wf });
-    await post("/api/runs/trigger/hello", { workflowId: "r1" });
+    await post("/api/workflows/hello/runs", { workflowId: "r1" });
     await until(async () => (await status("r1")) === "completed");
 
-    const res = await post("/api/runs/trigger/other", { workflowId: "r1" });
+    const res = await post("/api/workflows/other/runs", { workflowId: "r1" });
     expect(res.status).toBe(409);
     expect(((await res.json()) as { error: string }).error).toBe("workflow_id_conflict");
 
@@ -121,8 +121,8 @@ describe("POST /api/runs/trigger/:name — existing workflowId", () => {
     const { post, get, storage } = setup({ hello: hello.wf });
 
     for (const name of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
-      const res = await post(`/api/runs/trigger/${name}`, { workflowId: `p-${name}` });
-      expect(res.status).toBe(400);
+      const res = await post(`/api/workflows/${name}/runs`, { workflowId: `p-${name}` });
+      expect(res.status).toBe(404);
       expect(await storage.loadWorkflow(`p-${name}`)).toBeNull();
       expect((await get(`/api/workflows/${name}/definition`)).status).toBe(404);
     }
@@ -133,11 +133,11 @@ describe("POST /api/runs/:id/rerun", () => {
   it("re-runs an ended run once: one run-number bump, one history row", async () => {
     const charge = counted("charge");
     const { post, get, status, storage } = setup({ charge: charge.wf });
-    await post("/api/runs/trigger/charge", { workflowId: "c-1" });
+    await post("/api/workflows/charge/runs", { workflowId: "c-1" });
     await until(async () => (await status("c-1")) === "completed");
 
     const res = await post("/api/runs/c-1/rerun");
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
     await until(async () => {
       const run = await storage.loadWorkflow("c-1");
       return run?.run === 2 && run.status === "completed";
@@ -155,7 +155,7 @@ describe("POST /api/runs/:id/rerun", () => {
 
   it("refuses an in-flight run with 409 and leaves it untouched", async () => {
     const { post, status, storage } = setup({ w: waiting("w") });
-    await post("/api/runs/trigger/w", { workflowId: "w-1" });
+    await post("/api/workflows/w/runs", { workflowId: "w-1" });
     await until(async () => (await status("w-1")) === "suspended");
 
     const res = await post("/api/runs/w-1/rerun");
@@ -185,7 +185,7 @@ describe("operator actions — mark-success, mark-failed, cancel", () => {
   it("409 for an ended run, whose outcome is kept", async () => {
     const charge = counted("charge");
     const { post, status, storage } = setup({ charge: charge.wf });
-    await post("/api/runs/trigger/charge", { workflowId: "c-1" });
+    await post("/api/workflows/charge/runs", { workflowId: "c-1" });
     await until(async () => (await status("c-1")) === "completed");
 
     for (const action of ["mark-success", "mark-failed", "cancel"]) {
@@ -201,7 +201,7 @@ describe("operator actions — mark-success, mark-failed, cancel", () => {
   it("ends an in-flight run", async () => {
     const { post, status, storage } = setup({ w: waiting("w") });
     for (const id of ["a", "b", "c"]) {
-      await post("/api/runs/trigger/w", { workflowId: id });
+      await post("/api/workflows/w/runs", { workflowId: id });
       await until(async () => (await status(id)) === "suspended");
     }
 
@@ -231,7 +231,7 @@ describe("operator actions — mark-success, mark-failed, cancel", () => {
         .step("after", () => succeed("parent-done"))
         .build() as Workflow<unknown, unknown>;
       const { post, status, storage, runner } = setup({ parent, child });
-      await post("/api/runs/trigger/parent", { workflowId: "p-1" });
+      await post("/api/workflows/parent/runs", { workflowId: "p-1" });
       await until(
         async () =>
           (await status("kid-1")) === "suspended" && (await status("p-1")) === "suspended",
@@ -261,7 +261,7 @@ describe("POST /api/runs/:id/signal", () => {
   it("409 for an ended run", async () => {
     const charge = counted("charge");
     const { post, status, storage } = setup({ charge: charge.wf });
-    await post("/api/runs/trigger/charge", { workflowId: "c-1" });
+    await post("/api/workflows/charge/runs", { workflowId: "c-1" });
     await until(async () => (await status("c-1")) === "completed");
 
     const res = await post("/api/runs/c-1/signal", { signalName: "go" });
@@ -271,11 +271,11 @@ describe("POST /api/runs/:id/signal", () => {
 
   it("delivers to a suspended run", async () => {
     const { post, status, storage } = setup({ w: waiting("w") });
-    await post("/api/runs/trigger/w", { workflowId: "w-1" });
+    await post("/api/workflows/w/runs", { workflowId: "w-1" });
     await until(async () => (await status("w-1")) === "suspended");
 
     const res = await post("/api/runs/w-1/signal", { signalName: "go", payload: 1 });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
     expect((await storage.loadSignals("w-1")).map((s) => s.signalName)).toEqual(["go"]);
   });
 });

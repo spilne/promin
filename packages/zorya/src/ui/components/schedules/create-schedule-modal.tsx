@@ -75,19 +75,28 @@ export function CreateScheduleModal({ onClose, onCreated, editing }: CreateSched
     }
     setSubmitting(true);
     try {
-      // Edit is modeled as "delete + recreate" against the InMemorySchedulerStorage
-      // upsert semantics. Since the server POST uses upsertSchedule, it's
-      // effectively overwrite-if-exists. We just never change the id on edit.
-      await api.createSchedule({
-        id: id.trim(),
-        name: name.trim() || undefined,
-        workflowName: workflowName.trim(),
-        timezone: kind === "cron" ? timezone : undefined,
-        cron: kind === "cron" ? cron : undefined,
-        intervalMs: kind === "interval" ? intervalMs : undefined,
-        input,
-        enabled: editing?.enabled ?? true,
-      });
+      if (editing) {
+        // PATCH keeps the schedule's fire history and only changes what the
+        // form edits. An emptied input field clears the stored input.
+        await api.patchSchedule(editing.id, {
+          name: name.trim() || null,
+          workflowName: workflowName.trim(),
+          timezone: kind === "cron" ? timezone : null,
+          ...(kind === "cron" ? { cron } : { intervalMs }),
+          ...(input === undefined ? { metadata: { input: null } } : { input }),
+        });
+      } else {
+        await api.createSchedule({
+          id: id.trim(),
+          name: name.trim() || undefined,
+          workflowName: workflowName.trim(),
+          timezone: kind === "cron" ? timezone : undefined,
+          cron: kind === "cron" ? cron : undefined,
+          intervalMs: kind === "interval" ? intervalMs : undefined,
+          input,
+          enabled: true,
+        });
+      }
       onCreated();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

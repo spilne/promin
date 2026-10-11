@@ -233,10 +233,12 @@ export class ZoryaClient {
       metadata?: Record<string, unknown>;
     },
   ): Promise<{ workflowId: string }> {
-    const req = new Request(`${this.url}/api/runs/trigger/${encodeURIComponent(name)}`, {
+    // 202 when the run started, 200 when `workflowId` names an existing run
+    // of this workflow; either way the body names the run.
+    const req = new Request(`${this.url}/api/workflows/${encodeURIComponent(name)}/runs`, {
       method: "POST",
       headers: this.operatorHeaders,
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, runSource: "api" }),
     });
     const res = await this.fetch(req);
     const text = await res.text();

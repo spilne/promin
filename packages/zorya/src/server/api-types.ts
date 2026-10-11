@@ -3,10 +3,107 @@
 //
 // The server serialises WorkflowState / StepState to plain JSON (Date → ISO
 // string) and the UI parses them back. These interfaces describe that wire
-// format.
+// format. Request bodies and query strings are Zod schemas; their types are
+// inferred from them, and the routes reject anything that does not parse
+// with `400 { error: "invalid_request", message, issues }`.
+//
+// Conventions every route follows:
+//   - errors:   `{ error, message?, issues? }` (see `ApiError`)
+//   - creates:  201 + the created resource; 409 when it already exists
+//   - starts:   202 + `{ workflowId }` and a `Location` header for work that
+//               runs asynchronously (trigger, rerun, schedule emit, signal
+//               delivery)
+//   - actions:  200 + the resulting state
+//   - deletes:  204; 404 when there was nothing to delete
+//   - lists:    `?limit=&offset=` paging, `limit` capped at 500
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStatus, WorkflowOrderBy, StepStatus, StepType } from "@promin/workflow";
+import { z } from "zod";
+import {
+  WORKFLOW_STATUSES,
+  type RunSource,
+  type WorkflowStatus,
+  type WorkflowOrderBy,
+  type StepStatus,
+  type StepType,
+} from "@promin/workflow";
+
+/** Every `RunSource`, for request validation. */
+export const RUN_SOURCES = [
+  "manual",
+  "schedule",
+  "api",
+  "webhook",
+  "parent",
+  "agent",
+] as const satisfies ReadonlyArray<RunSource>;
+
+/** Sortable run-list columns (`?sort=<column>:<asc|desc>`). */
+export const RUN_ORDER_BY = [
+  "createdAt",
+  "startedAt",
+  "completedAt",
+  "duration",
+  "status",
+  "name",
+] as const satisfies ReadonlyArray<WorkflowOrderBy>;
+
+/** Largest `limit` any list route accepts. */
+export const MAX_LIST_LIMIT = 500;
+
+/** A name: workflow, signal, version, namespace. */
+export const NameSchema = z.string().min(1).max(256);
+const Name = NameSchema;
+/** An id: run, schedule, token, stream. */
+export const IdSchema = z.string().min(1).max(512);
+const Id = IdSchema;
+
+/** `""` counts as absent on the query string. */
+function optionalQuery<T extends z.ZodTypeAny>(schema: T) {
+  return z.preprocess((v) => (v === "" ? undefined : v), schema.optional());
+}
+
+/** `?limit=` — an integer in `[1, max]`, `fallback` when absent. */
+export function limitQuery(params: { fallback: number; max?: number }) {
+  return z.preprocess(
+    (v) => (v === undefined || v === "" ? params.fallback : v),
+    z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(params.max ?? MAX_LIST_LIMIT),
+  );
+}
+
+/** `?offset=` — a non-negative integer, 0 when absent. */
+export const OffsetQuery = z.preprocess(
+  (v) => (v === undefined || v === "" ? 0 : v),
+  z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+);
+
+/** `?flag=true|false|1|0`; absent or empty is `undefined`. */
+export const BooleanQuery = optionalQuery(
+  z.enum(["true", "false", "1", "0"]).transform((v) => v === "true" || v === "1"),
+);
+
+/** `?metadata=<JSON object>` — a containment filter; absent or empty is `undefined`. */
+export const MetadataQuery = optionalQuery(
+  z.string().transform((raw, ctx) => {
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // reported below
+    }
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "must be a JSON-encoded object" });
+    return z.NEVER;
+  }),
+);
+
+/** `?namespace=` alone. */
+export const NamespaceQuerySchema = z.object({ namespace: optionalQuery(Name) });
 
 export interface StepTaskDto {
   taskIndex: number;
@@ -116,29 +213,69 @@ export interface RunSummaryDto {
 
 export interface RunListResponse {
   runs: RunSummaryDto[];
+  /**
+   * Runs matching the filters across all pages. Present when the storage
+   * can count (`countWorkflows` capability).
+   */
   total?: number;
 }
 
+/** Query string of `GET /api/runs`. */
+export const RunListQuerySchema = z.object({
+  status: optionalQuery(
+    z.enum(WORKFLOW_STATUSES as unknown as [WorkflowStatus, ...WorkflowStatus[]]),
+  ),
+  name: optionalQuery(Name),
+  type: optionalQuery(Name),
+  namespace: optionalQuery(Name),
+  /** Workflow version the run was created with. */
+  version: optionalQuery(Name),
+  /** What kicked the run off (`"schedule"`, `"manual"`, `"api"`, …). */
+  runSource: optionalQuery(z.enum(RUN_SOURCES)),
+  /** Producer id paired with `runSource` (e.g. scheduleId). */
+  runSourceId: optionalQuery(Id),
+  /**
+   * Search-attributes filter, JSON-encoded (`?metadata=%7B%22userId%22%3A%22u_42%22%7D`)
+   * so nested values round-trip. A run matches when its metadata contains
+   * every key with a deep-equal value.
+   */
+  metadata: MetadataQuery,
+  /** Page size, 1–500. Default 50. */
+  limit: limitQuery({ fallback: 50 }),
+  /** Rows to skip. Default 0. */
+  offset: OffsetQuery,
+  /** `<column>[:asc|desc]`. Default `startedAt:desc` (most recently started first). */
+  sort: optionalQuery(
+    z
+      .string()
+      .regex(new RegExp(`^(${RUN_ORDER_BY.join("|")})(:(asc|desc))?$`), {
+        message: `must be <${RUN_ORDER_BY.join("|")}>[:asc|desc]`,
+      })
+      .transform((raw) => {
+        const [orderBy, orderDir] = raw.split(":") as [WorkflowOrderBy, "asc" | "desc" | undefined];
+        return { orderBy, orderDir: orderDir ?? ("desc" as const) };
+      }),
+  ),
+});
+
+/** Run-list filters as callers build them; `RunListQuerySchema` is the wire form. */
 export interface RunListQuery {
   status?: WorkflowStatus;
   name?: string;
   type?: string;
   namespace?: string;
-  /** Workflow version. Filtered post-fetch — uses with `name` for accuracy. */
+  /** Workflow version the run was created with. */
   version?: string;
-  /** Filter by trigger source (`"schedule"`, `"manual"`, …). Single index lookup. */
-  runSource?: import("@promin/workflow").RunSource;
+  /** Filter by trigger source (`"schedule"`, `"manual"`, …). */
+  runSource?: RunSource;
   /** Producer id paired with `runSource` (e.g. scheduleId). */
   runSourceId?: string;
-  /**
-   * Search-attributes filter. JSON-encoded `Record<string, unknown>` on the
-   * URL (`?metadata=%7B%22userId%22%3A%22u_42%22%7D`) so nested values can
-   * round-trip. Server forwards to `WorkflowStorage.listWorkflows({ metadata })`.
-   */
+  /** Search-attributes containment filter. */
   metadata?: Record<string, unknown>;
+  /** Page size, 1–500. Default 50. */
   limit?: number;
   offset?: number;
-  /** Server-side sort column. Default: `createdAt`. */
+  /** Server-side sort column. Default: `startedAt`. */
   orderBy?: WorkflowOrderBy;
   /** Sort direction. Default: `desc`. */
   orderDir?: "asc" | "desc";
@@ -204,47 +341,134 @@ export interface WorkersResponse {
   workers: WorkerDto[];
 }
 
-export interface TriggerRunRequest {
-  input?: unknown;
-  workflowType?: string;
-  namespace?: string;
-  metadata?: Record<string, unknown>;
-  /** Explicit id. Defaults to a generated UUID. */
-  workflowId?: string;
-  /**
-   * Workflow version this run should execute under. Recorded on the
-   * storage row and routed to a worker advertising that version. Defaults
-   * to whatever version a connected worker advertises.
-   */
-  version?: string;
-  /**
-   * Override the default `runSource` tag. The dashboard trigger sets
-   * `"manual"` when omitted; API clients / webhook ingestors set their
-   * own values to make the source visible in filtering and history.
-   */
-  runSource?: import("@promin/workflow").RunSource;
-  /** Producer id paired with `runSource`. */
-  runSourceId?: string;
-}
+/** Body of `POST /api/workflows/:name/runs`. Optional: no body starts a run with no input. */
+export const TriggerRunRequestSchema = z
+  .object({
+    input: z.unknown().optional(),
+    workflowType: Name.optional(),
+    namespace: Name.optional(),
+    metadata: z.record(z.unknown()).optional(),
+    /**
+     * Explicit run id. Default: a generated UUID. When a run with this id
+     * already exists nothing starts: the response names it (`existing:
+     * true`), or answers 409 when it belongs to another workflow.
+     */
+    workflowId: Id.optional(),
+    /**
+     * Workflow version this run should execute under. Recorded on the
+     * storage row and routed to a worker advertising that version.
+     */
+    version: Name.optional(),
+    /**
+     * Provenance tag. Default `"manual"` (the dashboard's trigger button);
+     * SDK clients send `"api"`, webhook ingestors `"webhook"`.
+     */
+    runSource: z.enum(RUN_SOURCES).optional(),
+    /** Producer id paired with `runSource`. */
+    runSourceId: Id.optional(),
+  })
+  .strict();
 
+export type TriggerRunRequest = z.infer<typeof TriggerRunRequestSchema>;
+
+/**
+ * `202` + `Location: /api/runs/:id` when a run was started. `200` with
+ * `existing: true` when a run with the requested `workflowId` already
+ * existed: nothing was started and the response names that run. Re-run an
+ * ended run with `POST /api/runs/:id/rerun`.
+ */
 export interface TriggerRunResponse {
   workflowId: string;
-  /**
-   * Set when a run with this `workflowId` already existed: nothing was
-   * started and the response names that run. Re-run an ended run with
-   * `POST /api/runs/:id/rerun`.
-   */
   existing?: true;
 }
 
-export interface SignalRequest {
-  signalName: string;
-  payload?: unknown;
+/** `202` from `POST /api/runs/:id/rerun`: a fresh run started under the same id. */
+export interface RerunResponse {
+  workflowId: string;
 }
 
+/** Body of `POST /api/runs/:id/signal`. */
+export const SignalRequestSchema = z
+  .object({
+    signalName: Name,
+    payload: z.unknown().optional(),
+    /**
+     * Refuse with 409 `signal_already_delivered` when a value for this
+     * signal is already waiting to be consumed. Without it delivery is
+     * last-wins: a second value replaces the first until the run consumes it.
+     */
+    ifAbsent: z.boolean().optional(),
+  })
+  .strict();
+
+export type SignalRequest = z.infer<typeof SignalRequestSchema>;
+
+/**
+ * `202` from `POST /api/runs/:id/signal`: the value is stored and the run
+ * resumes when it next consumes the signal (the signal scanner, within its
+ * poll interval). Delivery is last-wins: a later delivery of the same name
+ * before the run consumes it replaces this one, unless it sends `ifAbsent`.
+ */
+export interface SignalDeliveryResponse {
+  workflowId: string;
+  signalName: string;
+}
+
+/** Body of `POST /api/runs/:id/mark-failed`. Optional. */
+export const MarkFailedRequestSchema = z
+  .object({ reason: z.string().min(1).max(4096).optional() })
+  .strict();
+
+/** `200` from cancel / mark-success / mark-failed: the run's status after the action. */
+export interface RunActionResponse {
+  workflowId: string;
+  status: WorkflowStatus;
+}
+
+/** Body of `POST /api/workflows/:name/rollback`. */
+export const RollbackRequestSchema = z.object({ toVersion: Name }).strict();
+
+export type RollbackRequest = z.infer<typeof RollbackRequestSchema>;
+
+/** Longest `timeoutMs` a run query may ask for (ms). */
+export const MAX_QUERY_TIMEOUT_MS = 30_000;
+
+/** Body of `POST /api/runs/:id/query`. */
+export const QueryRunRequestSchema = z
+  .object({
+    name: Name,
+    args: z.unknown().optional(),
+    /** Default 5000, at most 30000. */
+    timeoutMs: z.number().int().min(1).max(MAX_QUERY_TIMEOUT_MS).optional(),
+  })
+  .strict();
+
+/** Body of `POST /api/runs/:id/streams/:streamId`. `payload` is required (it may be `null`). */
+export const StreamAppendRequestSchema = z
+  .object({ payload: z.unknown() })
+  .strict()
+  .refine((b) => "payload" in b, { message: "Required", path: ["payload"] });
+
+/** Body of `POST /api/signal-tokens/:tokenId/complete`. `value` is required (it may be `null`). */
+export const CompleteSignalTokenRequestSchema = z
+  .object({ value: z.unknown() })
+  .strict()
+  .refine((b) => "value" in b, { message: "Required", path: ["value"] });
+
+export type CompleteSignalTokenRequest = z.infer<typeof CompleteSignalTokenRequestSchema>;
+
+/** One field-level validation problem in an `invalid_request` error. */
+export interface ApiIssue {
+  path: string;
+  message: string;
+}
+
+/** The one error envelope every route answers with. */
 export interface ApiError {
   error: string;
   message?: string;
+  /** Present on `invalid_request`: which fields failed and why. */
+  issues?: ApiIssue[];
 }
 
 /** SSE event payloads sent on /api/runs/:id/events. */

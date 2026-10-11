@@ -12,8 +12,22 @@
 // ---------------------------------------------------------------------------
 
 import type { WallClock, WorkflowStorage, StreamChunk } from "@promin/workflow";
-import { SystemWallClock } from "@promin/workflow";
-import { json, jsonError, readJson } from "../router.ts";
+import { SystemWallClock, isTerminalWorkflowStatus } from "@promin/workflow";
+import { z } from "zod";
+import { json, jsonError } from "../router.ts";
+import { IdSchema, StreamAppendRequestSchema } from "../api-types.ts";
+import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
+import { requireRun } from "./run-extras.ts";
+
+const StreamParamsSchema = z.object({ id: IdSchema, streamId: IdSchema });
+
+/** `?since=<chunkIndex>`: only chunks after it. */
+export const StreamChunksQuerySchema = z.object({
+  since: z.preprocess(
+    (v) => (v === "" ? undefined : v),
+    z.coerce.number().int().min(-1).max(Number.MAX_SAFE_INTEGER).optional(),
+  ),
+});
 
 export interface StreamsRoutesDeps {
   readonly storage: WorkflowStorage;
@@ -45,14 +59,14 @@ function toDto(chunk: StreamChunk): StreamChunkDto {
  */
 export function sendStreamChunk(deps: StreamsRoutesDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    const streamId = params.streamId;
-    if (!id) return jsonError(400, "missing_run_id");
-    if (!streamId) return jsonError(400, "missing_stream_id");
+    const { id, streamId } = parseParams({ params, schema: StreamParamsSchema });
+    const body = await parseBody({ req, schema: StreamAppendRequestSchema });
 
-    const body = await readJson<{ payload: unknown }>(req);
-    if (!body || !("payload" in body)) {
-      return jsonError(400, "missing_payload");
+    // Only a run that can still read the stream takes input.
+    const run = await deps.storage.loadWorkflowStatus(id);
+    if (!run) return jsonError(404, "not_found");
+    if (isTerminalWorkflowStatus(run.status)) {
+      return jsonError(409, "run_ended", `Run has already ended (status: ${run.status})`);
     }
 
     const result = await deps.storage.appendStreamChunk({
@@ -71,18 +85,13 @@ export function sendStreamChunk(deps: StreamsRoutesDeps) {
  */
 export function getStreamChunks(deps: StreamsRoutesDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    const streamId = params.streamId;
-    if (!id) return jsonError(400, "missing_run_id");
-    if (!streamId) return jsonError(400, "missing_stream_id");
-
-    const url = new URL(req.url);
-    const sinceRaw = url.searchParams.get("since");
-    const since = sinceRaw !== null ? Number(sinceRaw) : undefined;
+    const { id, streamId } = parseParams({ params, schema: StreamParamsSchema });
+    const { since } = parseQuery({ req, schema: StreamChunksQuerySchema });
+    await requireRun({ storage: deps.storage, workflowId: id });
     const chunks = await deps.storage.readStreamChunks({
       workflowId: id,
       streamId,
-      ...(since !== undefined && Number.isFinite(since) ? { since } : {}),
+      ...(since !== undefined && since >= 0 && { since }),
     });
     return json(200, { chunks: chunks.map(toDto) });
   };
@@ -101,16 +110,12 @@ export function streamChunks(deps: StreamsRoutesDeps) {
   const clock = deps.clock ?? SystemWallClock;
 
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    const streamId = params.streamId;
-    if (!id) return jsonError(400, "missing_run_id");
-    if (!streamId) return jsonError(400, "missing_stream_id");
-
-    const url = new URL(req.url);
-    const lastEventId = req.headers.get("last-event-id");
-    const sinceRaw = lastEventId ?? url.searchParams.get("since");
-    let since = sinceRaw !== null ? Number(sinceRaw) : -1;
-    if (!Number.isFinite(since)) since = -1;
+    const { id, streamId } = parseParams({ params, schema: StreamParamsSchema });
+    const query = parseQuery({ req, schema: StreamChunksQuerySchema });
+    // A reconnecting EventSource resumes from its `Last-Event-ID`.
+    const lastEventId = Number.parseInt(req.headers.get("last-event-id") ?? "", 10);
+    let since = Number.isSafeInteger(lastEventId) ? lastEventId : (query.since ?? -1);
+    await requireRun({ storage: deps.storage, workflowId: id });
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({

@@ -166,9 +166,9 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
 
   const emitNow = async (s: ScheduleDto) => {
     try {
-      await api.emitSchedule(s.id);
+      const fired = await api.emitSchedule(s.id);
       refresh();
-      toast(`Emitting ${s.id}…`, { variant: "success" });
+      toast(`Fired tick ${fired.tickNumber} of ${s.id}`, { variant: "success" });
     } catch (e) {
       toast(`Failed: ${e}`, { variant: "error" });
     }

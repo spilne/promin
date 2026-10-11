@@ -1,12 +1,22 @@
 import type {
+  ApiError as ApiErrorBody,
+  ApiIssue,
+  RerunResponse,
+  RunActionResponse,
   RunDto,
   RunListResponse,
   RunListQuery,
   MetricsDto,
   WorkersResponse,
+  SignalDeliveryResponse,
   SignalRequest,
+  TriggerRunRequest,
+  TriggerRunResponse,
 } from "../../server/api-types.ts";
 import type {
+  ScheduleCreateRequest,
+  ScheduleEmitResponse,
+  SchedulePatchRequest,
   SchedulesResponse,
   ScheduleDto,
   ScheduleHistoryResponse,
@@ -57,6 +67,7 @@ import type {
 import type { MemoryInspectResponse } from "../../server/routes/memory.ts";
 import type { SignalsResponse } from "../../server/routes/signals.ts";
 import type {
+  CompleteTokenResponse,
   DescribeSignalTokenResponse,
   MintTokenResponse,
 } from "../../server/routes/signal-tokens.ts";
@@ -88,13 +99,52 @@ export async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return JSON.parse(text) as T;
 }
 
+/**
+ * A non-2xx answer. The server's error envelope (`{ error, message?,
+ * issues? }`) is parsed into `code`, `detail` and `issues`; the message
+ * reads as the server's explanation when there is one.
+ */
 export class ApiError extends Error {
+  /** The envelope's `error` code (e.g. `run_ended`), or `undefined` for a non-JSON body. */
+  readonly code?: string;
+  /** The envelope's `message`. */
+  readonly detail?: string;
+  /** Field-level problems of an `invalid_request`. */
+  readonly issues?: ReadonlyArray<ApiIssue>;
+
   constructor(
     public status: number,
     body: string,
   ) {
-    super(`HTTP ${status}: ${body}`);
+    const envelope = parseEnvelope(body);
+    super(
+      envelope
+        ? `HTTP ${status}: ${envelope.message ?? envelope.error}`
+        : `HTTP ${status}: ${body}`,
+    );
+    this.name = "ApiError";
+    if (envelope) {
+      this.code = envelope.error;
+      if (envelope.message !== undefined) this.detail = envelope.message;
+      if (envelope.issues !== undefined) this.issues = envelope.issues;
+    }
   }
+}
+
+function parseEnvelope(body: string): ApiErrorBody | undefined {
+  try {
+    const parsed = JSON.parse(body) as unknown;
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      typeof (parsed as ApiErrorBody).error === "string"
+    ) {
+      return parsed as ApiErrorBody;
+    }
+  } catch {
+    // not JSON
+  }
+  return undefined;
 }
 
 export const api = {
@@ -106,7 +156,7 @@ export const api = {
     }
     // Server reads `?sort=col:dir` (single param) so the URL stays compact
     // and cycle/clear semantics are atomic. Encode both halves only when
-    // a column is explicitly chosen — server defaults to createdAt:desc.
+    // a column is explicitly chosen — server defaults to startedAt:desc.
     if (orderBy) params.set("sort", `${orderBy}:${orderDir ?? "desc"}`);
     // Metadata travels as a single JSON-encoded param so nested values can
     // round-trip (URLSearchParams would flatten an object via String() to
@@ -120,10 +170,11 @@ export const api = {
   getRun(id: string): Promise<RunDto> {
     return req<RunDto>(`/api/runs/${encodeURIComponent(id)}`);
   },
-  cancelRun(id: string): Promise<{ ok: boolean }> {
+  cancelRun(id: string): Promise<RunActionResponse> {
     return req(`/api/runs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
   },
-  signalRun(id: string, body: SignalRequest): Promise<{ ok: boolean }> {
+  /** Deliver a signal (202). Last-wins unless `ifAbsent` is set. */
+  signalRun(id: string, body: SignalRequest): Promise<SignalDeliveryResponse> {
     return req(`/api/runs/${encodeURIComponent(id)}/signal`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -184,17 +235,17 @@ export const api = {
   getRunStepJournal(id: string, stepName: string): Promise<StepJournalResponse> {
     return req(`/api/runs/${encodeURIComponent(id)}/journal/${encodeURIComponent(stepName)}`);
   },
-  markRunSuccess(id: string): Promise<{ ok: boolean }> {
+  markRunSuccess(id: string): Promise<RunActionResponse> {
     return req(`/api/runs/${encodeURIComponent(id)}/mark-success`, { method: "POST" });
   },
-  markRunFailed(id: string, reason?: string): Promise<{ ok: boolean }> {
+  markRunFailed(id: string, reason?: string): Promise<RunActionResponse> {
     return req(`/api/runs/${encodeURIComponent(id)}/mark-failed`, {
       method: "POST",
       headers: reason ? { "content-type": "application/json" } : undefined,
       body: reason ? JSON.stringify({ reason }) : undefined,
     });
   },
-  rerunRun(id: string): Promise<{ ok: boolean }> {
+  rerunRun(id: string): Promise<RerunResponse> {
     return req(`/api/runs/${encodeURIComponent(id)}/rerun`, { method: "POST" });
   },
   getWorkflowGrid(name: string, limit = 25): Promise<GridResponse> {
@@ -212,11 +263,9 @@ export const api = {
   getWorkflowDef(name: string): Promise<WorkflowDefDto> {
     return req(`/api/workflows/${encodeURIComponent(name)}/definition`);
   },
-  triggerWorkflow(
-    name: string,
-    body: { input?: unknown; workflowId?: string; namespace?: string; version?: string },
-  ): Promise<{ workflowId: string }> {
-    return req(`/api/runs/trigger/${encodeURIComponent(name)}`, {
+  /** Start a run (202), or name the existing run with that `workflowId` (200, `existing`). */
+  triggerWorkflow(name: string, body: TriggerRunRequest): Promise<TriggerRunResponse> {
+    return req(`/api/workflows/${encodeURIComponent(name)}/runs`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -259,12 +308,20 @@ export const api = {
     const qs = qp.toString();
     return req(`/api/signals${qs ? `?${qs}` : ""}`);
   },
-  /** Deliver a signal payload to a suspended workflow. */
-  sendSignal(workflowId: string, signalName: string, payload: unknown): Promise<{ ok: true }> {
+  /**
+   * Deliver a decision from the inbox. Sent with `ifAbsent`, so a value
+   * another operator already delivered is not overwritten: that answers
+   * 409 `signal_already_delivered`.
+   */
+  sendSignal(
+    workflowId: string,
+    signalName: string,
+    payload: unknown,
+  ): Promise<SignalDeliveryResponse> {
     return req(`/api/runs/${encodeURIComponent(workflowId)}/signal`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ signalName, payload }),
+      body: JSON.stringify({ signalName, payload, ifAbsent: true } satisfies SignalRequest),
     });
   },
   /**
@@ -280,14 +337,15 @@ export const api = {
   },
   /**
    * Deliver a signal via a public bearer token — the no-dashboard path.
-   * Returns the resume status (201 first delivery, 200 idempotent
-   * re-submission, 410 already consumed, 408 expired).
+   * 202 on first delivery, 200 (`alreadyCompleted`) on a re-submission;
+   * rejects with 410 `token_expired`, 409 `run_ended` or
+   * `token_already_completed`.
    */
   completeSignalToken(
     tokenId: string,
     bearer: string,
     value: unknown,
-  ): Promise<{ ok: boolean; value?: unknown; alreadyCompleted?: boolean }> {
+  ): Promise<CompleteTokenResponse> {
     return req(`/api/signal-tokens/${encodeURIComponent(tokenId)}/complete`, {
       method: "POST",
       headers: {
@@ -343,34 +401,27 @@ export const api = {
     const qs = qp.toString();
     return req(`/api/schedules${qs ? `?${qs}` : ""}`);
   },
-  createSchedule(body: {
-    id: string;
-    name?: string;
-    cron?: string;
-    intervalMs?: number;
-    rrule?: string;
-    timezone?: string;
-    enabled?: boolean;
-    workflowName?: string;
-    input?: unknown;
-  }): Promise<ScheduleDto> {
+  /** Create a schedule (201); 409 `schedule_exists` when the id is taken. */
+  createSchedule(body: ScheduleCreateRequest): Promise<ScheduleDto> {
     return req(`/api/schedules`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
   },
-  patchSchedule(id: string, body: { enabled?: boolean }): Promise<ScheduleDto> {
+  /** Change any mutable field; `null` clears an optional one. */
+  patchSchedule(id: string, body: SchedulePatchRequest): Promise<ScheduleDto> {
     return req(`/api/schedules/${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
   },
-  deleteSchedule(id: string): Promise<{ ok: boolean }> {
-    return req(`/api/schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
+  deleteSchedule(id: string): Promise<void> {
+    return req<void>(`/api/schedules/${encodeURIComponent(id)}`, { method: "DELETE" });
   },
-  emitSchedule(id: string): Promise<{ ok: boolean }> {
+  /** Fire one tick now (202): names the tick and the run it started. */
+  emitSchedule(id: string): Promise<ScheduleEmitResponse> {
     return req(`/api/schedules/${encodeURIComponent(id)}/emit`, { method: "POST" });
   },
   getSchedule(id: string): Promise<ScheduleDto> {

@@ -126,8 +126,9 @@ describe("secrets HTTP routes — POST /api/secrets", () => {
       }),
     );
     expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string };
-    expect(body.error).toBe("missing_namespaceId");
+    const body = (await res.json()) as { error: string; issues?: Array<{ path: string }> };
+    expect(body.error).toBe("invalid_request");
+    expect(body.issues?.map((i) => i.path)).toContain("scope.namespaceId");
   });
 
   it("400 on missing value", async () => {
@@ -208,12 +209,12 @@ describe("secrets HTTP routes — DELETE /api/secrets/:key", () => {
     expect(await secrets.get({ scope: SecretScope.global(), key: "k" })).toBe("v-global");
   });
 
-  it("204 even when the key isn't there (idempotent delete)", async () => {
+  it("404 when the key isn't there", async () => {
     const { server } = await bootServerWithSecrets();
     const res = await server.handle(
       new Request("http://test/api/secrets/never", { method: "DELETE" }),
     );
-    expect(res.status).toBe(204);
+    expect(res.status).toBe(404);
   });
 });
 

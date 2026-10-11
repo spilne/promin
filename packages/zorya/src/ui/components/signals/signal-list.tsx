@@ -23,7 +23,7 @@
 // ---------------------------------------------------------------------------
 
 import { useEffect, useState } from "preact/hooks";
-import { api } from "../../api/client.ts";
+import { ApiError, api } from "../../api/client.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { useNamespace } from "../../hooks/use-namespace.ts";
 import { toast } from "../../lib/dialogs.ts";
@@ -78,6 +78,13 @@ export function SignalList({ onOpenRun }: Props) {
       });
       refresh();
     } catch (err) {
+      if (err instanceof ApiError && err.code === "signal_already_delivered") {
+        toast("Someone already answered this signal — the run resumes shortly.", {
+          variant: "info",
+        });
+        refresh();
+        return;
+      }
       toast(`Signal delivery failed: ${err instanceof Error ? err.message : String(err)}`, {
         variant: "error",
       });
@@ -157,8 +164,8 @@ export function SignalList({ onOpenRun }: Props) {
       // Surface server-side schema_mismatch inline (under the editor) so
       // the user can fix and resubmit without losing their draft.
       const msg = err instanceof Error ? err.message : String(err);
-      if (msg.includes("schema_mismatch")) {
-        setDraftError(msg);
+      if (err instanceof ApiError && err.code === "schema_mismatch") {
+        setDraftError(err.detail ?? msg);
       }
       toast(`Signal delivery failed: ${msg}`, {
         variant: "error",
@@ -232,6 +239,14 @@ export function SignalList({ onOpenRun }: Props) {
                   <tr key={key} class="hover">
                     <td>
                       <div class="font-mono text-xs">{s.signalName}</div>
+                      {s.deliveredAt !== undefined && (
+                        <div
+                          class="badge badge-info badge-xs mt-1"
+                          title="A value was delivered; the run resumes on the next signal scan."
+                        >
+                          delivered {formatRelative(s.deliveredAt)}, awaiting resume
+                        </div>
+                      )}
                       {s.toolName !== undefined && (
                         <div class="text-[11px] text-base-content/60 mt-1">
                           tool: <span class="font-mono">{s.toolName}</span>
@@ -268,7 +283,7 @@ export function SignalList({ onOpenRun }: Props) {
                               type="button"
                               class="btn btn-xs btn-success"
                               onClick={() => void decide(s.workflowId, s.signalName, true)}
-                              disabled={busy}
+                              disabled={busy || s.deliveredAt !== undefined}
                               title="Deliver { approved: true } to this workflow"
                             >
                               {busy ? "…" : "Approve"}
@@ -277,7 +292,7 @@ export function SignalList({ onOpenRun }: Props) {
                               type="button"
                               class="btn btn-xs btn-error btn-outline"
                               onClick={() => void decide(s.workflowId, s.signalName, false)}
-                              disabled={busy}
+                              disabled={busy || s.deliveredAt !== undefined}
                               title="Deliver { approved: false } to this workflow"
                             >
                               {busy ? "…" : "Reject"}

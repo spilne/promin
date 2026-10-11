@@ -3,7 +3,7 @@
 //
 // Stubs the Zorya server with an in-process fetch handler that:
 //   - serves the storage RPC against an InMemoryWorkflowStorage,
-//   - serves /api/runs/trigger by createWorkflow + completeWorkflow against
+//   - serves POST /api/workflows/:name/runs by createWorkflow + completeWorkflow against
 //     the same storage so the handle's status / result / cancel calls land
 //     on a real workflow row without spinning up a worker.
 // Lets us exercise the full `start → handle.result()` round-trip without
@@ -25,15 +25,17 @@ function mountTestServer(
     if (url.pathname.startsWith("/rpc/storage")) {
       return storageHandler(req);
     }
-    if (url.pathname.startsWith("/api/runs/trigger/")) {
+    const trigger = /^\/api\/workflows\/([^/]+)\/runs$/.exec(url.pathname);
+    if (req.method === "POST" && trigger) {
       const body = (await req.json()) as {
         input?: unknown;
         workflowId?: string;
         namespace?: string;
         version?: string;
         metadata?: Record<string, unknown>;
+        runSource?: "api";
       };
-      const name = decodeURIComponent(url.pathname.replace("/api/runs/trigger/", ""));
+      const name = decodeURIComponent(trigger[1]!);
       const workflowId = body.workflowId ?? `wf_${Math.random().toString(36).slice(2, 10)}`;
       await storage.createWorkflow({
         workflowId,
@@ -42,6 +44,7 @@ function mountTestServer(
         namespace: body.namespace,
         input: body.input,
         version: body.version,
+        runSource: body.runSource,
       });
       // autoComplete=true mirrors what a real worker would do (workflow
       // arrives terminal). autoComplete=false leaves the row in `pending`
@@ -51,7 +54,7 @@ function mountTestServer(
         await storage.completeWorkflow({ workflowId, result: { ok: true, echoed: body.input } });
       }
       return new Response(JSON.stringify({ workflowId }), {
-        status: 200,
+        status: 202,
         headers: { "content-type": "application/json" },
       });
     }
@@ -75,6 +78,8 @@ describe("ZoryaClient.start — typed dispatch", () => {
     });
 
     expect(handle.workflowId).toBe("wf-typed-1");
+    // SDK starts are tagged as API runs, not dashboard fires.
+    expect((await storage.loadWorkflow("wf-typed-1"))?.runSource).toBe("api");
     const result = await handle.result({ timeoutMs: 1_000 });
     // The fake server's completeWorkflow call wrote { ok, echoed }, not the
     // workflow's real output — we only care that the handle.result() path

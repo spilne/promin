@@ -2,89 +2,76 @@
 // Secrets HTTP routes — CRUD over the SecretsStorage primitive.
 //
 // Routes:
-//   POST   /api/secrets              — store a secret at exact scope
+//   POST   /api/secrets              — store a secret at exact scope (201)
 //   GET    /api/secrets              — list keys at scope (NEVER values)
-//   DELETE /api/secrets/:key         — delete from scope
+//   DELETE /api/secrets/:key         — delete from scope (204; 404 if absent)
 //
 // All routes require dashboard auth (apiKeys middleware). Read paths
 // return key NAMES only; the stored values never leave the server
 // outside of in-process resolve() calls by the agent runtime.
 //
-// Permission gradient: Phase 1 is coarse — anyone with dashboard auth
-// can read/write at any scope. Per-namespace ACLs land later (multi-
-// tenant work, promin-ybn9).
+// Permission gradient: coarse — anyone with dashboard auth can read/write
+// at any scope.
 // ---------------------------------------------------------------------------
 
 import type { SecretScope, SecretsStorage } from "@promin/agent";
-import { json, jsonError, readJson } from "../router.ts";
+import { z } from "zod";
+import { json, jsonError, noContent } from "../router.ts";
+import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
 import { internalError } from "./agent-gateway-kit.ts";
 
 export interface SecretsGatewayDeps {
   readonly secrets: SecretsStorage;
 }
 
-interface CreateSecretRequest {
-  readonly scope?: unknown;
-  readonly key?: unknown;
-  readonly value?: unknown;
-}
-
 /** Allowed secret key shape — shared with the clone route. */
 export const SECRET_KEY_PATTERN = /^[A-Za-z][A-Za-z0-9_\-.]{0,127}$/;
 export const SECRET_MAX_VALUE_BYTES = 1_048_576; // 1 MB
 
-/**
- * Parse a wire-format scope into a SecretScope. Accepts the discriminated
- * union shape ({ kind: 'global' | 'namespace' | 'resource', ... }) AND
- * a query-string convention for GET/DELETE — see `parseScopeFromQuery`.
- */
-function parseScopeFromBody(raw: unknown): SecretScope | { error: string } {
-  if (raw === undefined || raw === null) {
-    // Default: global. Lets callers omit `scope` for the simplest case.
-    return { kind: "global" };
-  }
-  if (typeof raw !== "object") return { error: "invalid_scope" };
-  const obj = raw as { kind?: unknown; namespaceId?: unknown; resourceId?: unknown };
-  if (obj.kind === "global") return { kind: "global" };
-  if (obj.kind === "namespace") {
-    if (typeof obj.namespaceId !== "string" || obj.namespaceId.length === 0) {
-      return { error: "missing_namespaceId" };
-    }
-    return { kind: "namespace", namespaceId: obj.namespaceId };
-  }
-  if (obj.kind === "resource") {
-    if (typeof obj.namespaceId !== "string" || obj.namespaceId.length === 0) {
-      return { error: "missing_namespaceId" };
-    }
-    if (typeof obj.resourceId !== "string" || obj.resourceId.length === 0) {
-      return { error: "missing_resourceId" };
-    }
-    return {
-      kind: "resource",
-      namespaceId: obj.namespaceId,
-      resourceId: obj.resourceId,
-    };
-  }
-  return { error: "invalid_scope_kind" };
-}
+const ScopeId = z.string().min(1).max(256);
 
-function parseScopeFromQuery(url: URL): SecretScope | { error: string } {
-  const kind = url.searchParams.get("scope") ?? "global";
-  if (kind === "global") return { kind: "global" };
-  if (kind === "namespace") {
-    const ns = url.searchParams.get("namespaceId");
-    if (!ns) return { error: "missing_namespaceId" };
-    return { kind: "namespace", namespaceId: ns };
-  }
-  if (kind === "resource") {
-    const ns = url.searchParams.get("namespaceId");
-    const res = url.searchParams.get("resourceId");
-    if (!ns) return { error: "missing_namespaceId" };
-    if (!res) return { error: "missing_resourceId" };
-    return { kind: "resource", namespaceId: ns, resourceId: res };
-  }
-  return { error: "invalid_scope_kind" };
-}
+/** A secret scope on the wire. Omitted means global. */
+export const SecretScopeSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("global") }).strict(),
+  z.object({ kind: z.literal("namespace"), namespaceId: ScopeId }).strict(),
+  z.object({ kind: z.literal("resource"), namespaceId: ScopeId, resourceId: ScopeId }).strict(),
+]);
+
+const SecretKeySchema = z.string().regex(SECRET_KEY_PATTERN, {
+  message: "must match [A-Za-z][A-Za-z0-9_\\-.]{0,127}",
+});
+
+/** Body of `POST /api/secrets`. */
+export const CreateSecretRequestSchema = z
+  .object({
+    scope: SecretScopeSchema.optional(),
+    key: SecretKeySchema,
+    value: z.string().min(1),
+  })
+  .strict();
+
+/** Query of `GET /api/secrets` and `DELETE /api/secrets/:key`: `?scope=global|namespace|resource`. */
+export const SecretScopeQuerySchema = z
+  .object({
+    scope: z.enum(["global", "namespace", "resource"]).default("global"),
+    namespaceId: ScopeId.optional(),
+    resourceId: ScopeId.optional(),
+  })
+  .transform((q, ctx): SecretScope => {
+    if (q.scope === "global") return { kind: "global" };
+    if (q.namespaceId === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["namespaceId"], message: "Required" });
+      return z.NEVER;
+    }
+    if (q.scope === "namespace") return { kind: "namespace", namespaceId: q.namespaceId };
+    if (q.resourceId === undefined) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["resourceId"], message: "Required" });
+      return z.NEVER;
+    }
+    return { kind: "resource", namespaceId: q.namespaceId, resourceId: q.resourceId };
+  });
+
+const SecretParamsSchema = z.object({ key: SecretKeySchema });
 
 export interface CreateSecretResponse {
   readonly scope: SecretScope;
@@ -98,16 +85,8 @@ export interface ListSecretsResponse {
 
 export function createSecret(deps: SecretsGatewayDeps) {
   return async (req: Request): Promise<Response> => {
-    const body = await readJson<CreateSecretRequest>(req);
-    if (!body) return jsonError(400, "missing_body");
-    const scope = parseScopeFromBody(body.scope);
-    if ("error" in scope) return jsonError(400, scope.error);
-    if (typeof body.key !== "string" || !SECRET_KEY_PATTERN.test(body.key)) {
-      return jsonError(400, "invalid_key", "Key must match [A-Za-z][A-Za-z0-9_\\-.]{0,127}.");
-    }
-    if (typeof body.value !== "string" || body.value.length === 0) {
-      return jsonError(400, "missing_value");
-    }
+    const body = await parseBody({ req, schema: CreateSecretRequestSchema });
+    const scope: SecretScope = body.scope ?? { kind: "global" };
     if (Buffer.byteLength(body.value, "utf8") > SECRET_MAX_VALUE_BYTES) {
       return jsonError(
         413,
@@ -127,9 +106,7 @@ export function createSecret(deps: SecretsGatewayDeps) {
 
 export function listSecrets(deps: SecretsGatewayDeps) {
   return async (req: Request): Promise<Response> => {
-    const url = new URL(req.url);
-    const scope = parseScopeFromQuery(url);
-    if ("error" in scope) return jsonError(400, scope.error);
+    const scope = parseQuery({ req, schema: SecretScopeQuerySchema });
     try {
       const keys = await deps.secrets.list({ scope });
       const response: ListSecretsResponse = { scope, keys };
@@ -142,14 +119,13 @@ export function listSecrets(deps: SecretsGatewayDeps) {
 
 export function deleteSecret(deps: SecretsGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const key = params.key;
-    if (!key) return jsonError(400, "missing_key");
-    const url = new URL(req.url);
-    const scope = parseScopeFromQuery(url);
-    if ("error" in scope) return jsonError(400, scope.error);
+    const { key } = parseParams({ params, schema: SecretParamsSchema });
+    const scope = parseQuery({ req, schema: SecretScopeQuerySchema });
     try {
+      const keys = await deps.secrets.list({ scope });
+      if (!keys.includes(key)) return jsonError(404, "not_found");
       await deps.secrets.delete({ scope, key });
-      return new Response(null, { status: 204 });
+      return noContent();
     } catch (err) {
       return internalError({ code: "delete_failed", err });
     }

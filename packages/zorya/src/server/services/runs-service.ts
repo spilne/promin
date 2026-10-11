@@ -8,7 +8,12 @@
 // ---------------------------------------------------------------------------
 
 import type { Workflow, WorkflowState, WorkflowStatus, WorkflowStorage } from "@promin/workflow";
-import { isCancelledRun, isTerminalWorkflowStatus, wakeParentOfEndedRun } from "@promin/workflow";
+import {
+  hasCapability,
+  isCancelledRun,
+  isTerminalWorkflowStatus,
+  wakeParentOfEndedRun,
+} from "@promin/workflow";
 import { findDefinition } from "./workflows/zorya-workflows.ts";
 import { runToDto, runToSummaryDto } from "../serialize.ts";
 import type { RunDto, RunListQuery, RunListResponse, StepDto } from "../api-types.ts";
@@ -30,12 +35,12 @@ export interface RunsServiceDeps {
 }
 
 /**
- * Outcome of an operator action on a run: `ok` when this call ended it,
- * `not_found` for an unknown id, `ended` when the run had already ended
- * (the action changed nothing).
+ * Outcome of an operator action on a run: `ok` when this call ended it
+ * (with the status it ended in), `not_found` for an unknown id, `ended`
+ * when the run had already ended (the action changed nothing).
  */
 export type RunActionResult =
-  | { readonly outcome: "ok" }
+  | { readonly outcome: "ok"; readonly status: WorkflowStatus }
   | { readonly outcome: "not_found" }
   | { readonly outcome: "ended"; readonly status: WorkflowStatus };
 
@@ -43,22 +48,28 @@ export class RunsService {
   constructor(private readonly deps: RunsServiceDeps) {}
 
   /**
-   * List runs with the given filters. Storage doesn't filter on `version`
-   * yet, so when that filter is set we over-fetch and trim in JS to keep
-   * pagination roughly correct.
+   * One page of runs matching `query`, most recently started first unless
+   * `orderBy` says otherwise. Storage applies every filter (`version`
+   * included), so `limit`/`offset` page over exactly the matching runs.
+   * `total` is set when the storage can count.
    *
-   * Uses `listWorkflowSummaries` when the storage supports it — avoids
-   * deserialising `steps`/`input`/`result` blobs that the list view doesn't need.
+   * Uses the lean summary list when the storage has it — the list view
+   * doesn't need `steps`/`input`/`result`.
    */
   async list(query: RunListQuery): Promise<RunListResponse> {
-    const { version, limit = 50, offset = 0, ...rest } = query;
-    const fetchLimit = version ? Math.min(limit * 5, 500) : limit;
-    const listParams = { ...rest, limit: fetchLimit, offset };
-    const rows = this.deps.storage.listWorkflowSummaries
-      ? await this.deps.storage.listWorkflowSummaries(listParams)
-      : await this.deps.storage.listWorkflows(listParams);
-    const filtered = version ? rows.filter((r) => r.version === version) : rows;
-    return { runs: filtered.slice(0, limit).map(runToSummaryDto) };
+    const { storage } = this.deps;
+    const { limit = 50, offset = 0, orderBy = "startedAt", orderDir = "desc", ...filter } = query;
+    const listParams = { ...filter, limit, offset, orderBy, orderDir };
+    const [rows, total] = await Promise.all([
+      hasCapability(storage, "summaries")
+        ? storage.listWorkflowSummaries(listParams)
+        : storage.listWorkflows(listParams),
+      hasCapability(storage, "countWorkflows") ? storage.countWorkflows(filter) : undefined,
+    ]);
+    return {
+      runs: rows.map(runToSummaryDto),
+      ...(total !== undefined && { total }),
+    };
   }
 
   /**
@@ -129,7 +140,7 @@ export class RunsService {
     // Lost to a run that ended first: its own end already woke the parent.
     if (!params.expect(after)) return { outcome: "ended", status: after.status };
     await wakeParentOfEndedRun({ storage, state: after });
-    return { outcome: "ok" };
+    return { outcome: "ok", status: after.status };
   }
 
   /**

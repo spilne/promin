@@ -21,7 +21,7 @@ if (!(console.log as unknown as { __ts?: boolean }).__ts) {
 // - DefaultWorkflowRunner drives two real workflow definitions
 //   (`order`, `payment`) with random-delay async steps and occasional
 //   failures.
-// - POST /api/runs/trigger/:name via ZoryaServer spawns a run.
+// - POST /api/workflows/:name/runs via ZoryaServer spawns a run.
 // - A background loop triggers random runs every few seconds so the Runs
 //   list and stats bar animate on their own.
 // - A lightweight poll loop fires due schedules (every second) and calls

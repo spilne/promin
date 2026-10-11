@@ -53,7 +53,7 @@ export function SharedSignalPage({ tokenId, bearer }: Props) {
           setResolvedAs("previously");
           setPhase("delivered");
         } else if (m.expiresAt === null || new Date(m.expiresAt).getTime() <= Date.now()) {
-          // Pre-empt the 408 the complete endpoint would return — the user
+          // Pre-empt the 410 the complete endpoint would return — the user
           // shouldn't have to click Approve only to discover the link's dead.
           setPhase("expired");
         } else {
@@ -61,7 +61,7 @@ export function SharedSignalPage({ tokenId, bearer }: Props) {
         }
       })
       .catch((err: unknown) => {
-        if (err instanceof ApiError && err.status === 408) {
+        if (err instanceof ApiError && err.status === 410) {
           setPhase("expired");
           return;
         }
@@ -81,7 +81,7 @@ export function SharedSignalPage({ tokenId, bearer }: Props) {
     } catch (err) {
       // Race: link was live at describe-time, expired before the click landed.
       // Surface as the same expired state instead of a raw HTTP error.
-      if (err instanceof ApiError && err.status === 408) {
+      if (err instanceof ApiError && err.status === 410) {
         setPhase("expired");
       } else {
         setError(err instanceof Error ? err.message : String(err));

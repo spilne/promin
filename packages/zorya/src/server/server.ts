@@ -34,7 +34,7 @@
 import type { RemoteDeploymentRegistry, SecretsStorage } from "@promin/agent";
 import type { WorkflowVersionRegistry, WallClock, WorkflowStorage } from "@promin/workflow";
 import type { StepQueue, WorkerRegistry } from "@promin/workflow/distributed";
-import { SystemWallClock, InMemoryWorkflowVersionRegistry } from "@promin/workflow";
+import { SystemWallClock } from "@promin/workflow";
 import { InMemoryStepQueue, InMemoryWorkerRegistry } from "@promin/workflow/distributed";
 import {
   RUNNER_STORAGE_METHODS,
@@ -43,7 +43,7 @@ import {
 } from "@promin/workflow-remote";
 import { Auth, bearerToken, type AuthConfig } from "./auth.ts";
 import { ServiceLifecycle, type ManagedService, type ServiceStatus } from "./service-lifecycle.ts";
-import { Router, errorResponse, jsonError } from "./router.ts";
+import { Router, errorResponse, json, jsonError } from "./router.ts";
 import {
   DEFAULT_IDLE_TIMEOUT_SECONDS,
   DEFAULT_MAX_REQUEST_BODY_BYTES,
@@ -71,6 +71,8 @@ import {
   getRun,
   listRuns,
   listWorkflowNames,
+  markRunFailed,
+  markRunSuccess,
   sendSignal,
   triggerRun,
 } from "./routes/runs.ts";
@@ -101,8 +103,6 @@ import {
   getRunHistory,
   getRunSignals,
   getRunStepJournal,
-  markRunFailed,
-  markRunSuccess,
   rerunRun,
 } from "./routes/run-extras.ts";
 import { listSignals } from "./routes/signals.ts";
@@ -114,10 +114,12 @@ import {
   mintSignalToken,
 } from "./routes/signal-tokens.ts";
 import {
+  createVersionSeeder,
   getActiveWorkflowVersion,
   listWorkflowVersions,
   promoteWorkflowVersion,
   rollbackWorkflow,
+  type WorkflowVersionsRoutesDeps,
 } from "./routes/workflow-versions.ts";
 import { getStreamChunks, sendStreamChunk, streamChunks } from "./routes/streams.ts";
 import { getSparklines, getWorkflowGrid, getWorkflowHistory } from "./routes/grid.ts";
@@ -323,13 +325,6 @@ export interface ZoryaServerConfig extends AuthConfig {
    */
   signalTokenMaxTtlMs?: number;
   /**
-   * Workflow version registry. Drives `/api/workflows/:name/versions/*`
-   * (promote/rollback, findActive, list-records). Defaults to a fresh
-   * in-memory `WorkflowVersionRegistry`; production deployments should
-   * pass `PostgresWorkflowVersionRegistry` so lifecycle survives restart.
-   */
-  versionRegistry?: WorkflowVersionRegistry;
-  /**
    * Public-facing base URL for token completion callbacks. When set, the
    * `POST /api/runs/:id/signals/:name/token` mint route returns
    * `url: "<publicBaseUrl>/api/signal-tokens/:tokenId/complete"` so external
@@ -415,7 +410,13 @@ export class ZoryaServer {
   readonly skills?: ZoryaSkills;
   readonly fragments?: ZoryaFragments;
   readonly dags?: ZoryaDags;
-  readonly versionRegistry: WorkflowVersionRegistry;
+  /**
+   * The workflows layer's version registry (`LocalWorkflowsConfig.versionRegistry`),
+   * which `/api/workflows/:name/versions/*` manage. One registry: a promote
+   * here changes the version new runs dispatch to. Absent when the layer
+   * has none; the version routes then list nothing and refuse changes.
+   */
+  readonly versionRegistry?: WorkflowVersionRegistry;
   /**
    * Worker → server WebSocket multiplexer. Always present — workers in
    * step / agent mode connect on `/ws/worker` to receive server-pushed
@@ -459,7 +460,8 @@ export class ZoryaServer {
     if (config.secrets) this.secrets = config.secrets;
     this.clock = config.clock ?? SystemWallClock;
     const clock = this.clock;
-    this.versionRegistry = config.versionRegistry ?? new InMemoryWorkflowVersionRegistry({ clock });
+    const versionRegistry = walkChainFor(this.workflows, versionRegistryOf);
+    if (versionRegistry) this.versionRegistry = versionRegistry;
 
     this.logger = config.logger ?? console;
     this.auth = new Auth(config);
@@ -518,6 +520,19 @@ export class ZoryaServer {
 
     const runActions = new RunsService({ storage });
 
+    // The version routes manage the registry the workflows layer dispatches
+    // through. Its versioned definitions are registered on first use, so a
+    // version the server runs can be promoted without a separate step.
+    const versionDeps: WorkflowVersionsRoutesDeps = this.versionRegistry
+      ? {
+          registry: this.versionRegistry,
+          prepare: createVersionSeeder({
+            registry: this.versionRegistry,
+            definitions: Object.values(definitions ?? {}),
+          }),
+        }
+      : {};
+
     this.runWatchers = new RunWatcherPool({
       storage,
       bus: this.bus,
@@ -544,6 +559,9 @@ export class ZoryaServer {
       .post("/api/runs/:id/mark-success", markRunSuccess(runActions))
       .post("/api/runs/:id/mark-failed", markRunFailed(runActions))
       .post("/api/runs/:id/rerun", rerunRun({ storage, rerun: (id) => this.workflows.rerun(id) }))
+      // Start a run. Under the workflow (not `/api/runs/...`) so no workflow
+      // name can collide with a run action.
+      .post("/api/workflows/:name/runs", triggerRun(deps))
       .get("/api/workflows/sparklines", getSparklines(storage))
       .get(
         "/api/workflows/definitions",
@@ -563,7 +581,6 @@ export class ZoryaServer {
           ...(advertisements !== undefined && { advertisements }),
         }),
       )
-      .post("/api/runs/trigger/:name", triggerRun(deps))
       .post("/api/runs/:id/cancel", cancelRun(deps))
       .post("/api/runs/:id/signal", sendSignal(deps))
       // Signal tokens — public-bearer auth for deliverSignal.
@@ -587,19 +604,10 @@ export class ZoryaServer {
       // Workflow versions — thin layer over WorkflowVersionRegistry's
       // lifecycle methods. Versions are a property of a workflow, so the
       // routes nest under /api/workflows/:name/...
-      .get(
-        "/api/workflows/:name/versions",
-        listWorkflowVersions({ registry: this.versionRegistry }),
-      )
-      .get(
-        "/api/workflows/:name/versions/active",
-        getActiveWorkflowVersion({ registry: this.versionRegistry }),
-      )
-      .post(
-        "/api/workflows/:name/versions/:version/promote",
-        promoteWorkflowVersion({ registry: this.versionRegistry }),
-      )
-      .post("/api/workflows/:name/rollback", rollbackWorkflow({ registry: this.versionRegistry }))
+      .get("/api/workflows/:name/versions", listWorkflowVersions(versionDeps))
+      .get("/api/workflows/:name/versions/active", getActiveWorkflowVersion(versionDeps))
+      .post("/api/workflows/:name/versions/:version/promote", promoteWorkflowVersion(versionDeps))
+      .post("/api/workflows/:name/rollback", rollbackWorkflow(versionDeps))
       // Streams — generic typed channels per workflow. Output (workflow →
       // subscribers) reads via the SSE handler; input (subscribers →
       // workflow) appends via the POST handler.
@@ -644,13 +652,13 @@ export class ZoryaServer {
           "/api/agents/_catalog/models",
           this.agents.models
             ? listCatalogModels({ models: this.agents.models })
-            : async () => new Response(JSON.stringify({ models: [] }), { status: 200 }),
+            : async () => json(200, { models: [] }),
         )
         .get(
           "/api/agents/_catalog/tools",
           this.agents.toolCatalog
             ? listCatalogTools({ tools: this.agents.toolCatalog })
-            : async () => new Response(JSON.stringify({ tools: [] }), { status: 200 }),
+            : async () => json(200, { tools: [] }),
         )
         // Reconciliation health: which recipe tool refs don't resolve?
         // Pure query at view time — no persistence, no audit trail.
@@ -661,8 +669,7 @@ export class ZoryaServer {
                 tools: this.agents.toolCatalog,
                 agents: this.agents.registry,
               })
-            : async () =>
-                new Response(JSON.stringify({ recipes: [], orphans: [] }), { status: 200 }),
+            : async () => json(200, { recipes: [], orphans: [] }),
         )
         // Tool catalog history: durable audit trail of exposed tools over
         // time. Mounted only when a tool-history store is wired.
@@ -670,7 +677,7 @@ export class ZoryaServer {
           "/api/agents/_catalog/tools/history",
           this.agents.toolHistory
             ? listToolHistory({ history: this.agents.toolHistory })
-            : async () => new Response(JSON.stringify({ history: [] }), { status: 200 }),
+            : async () => json(200, { history: [] }),
         )
         // Skill catalog — the agent editor's skill picker source. Mounted
         // here (under the agents block) so the `_catalog` prefix groups with
@@ -679,7 +686,7 @@ export class ZoryaServer {
           "/api/agents/_catalog/skills",
           this.skills
             ? listCatalogSkills({ skills: this.skills.registry })
-            : async () => new Response(JSON.stringify({ skills: [] }), { status: 200 }),
+            : async () => json(200, { skills: [] }),
         )
         // Fragment catalog — the agent editor's layered-prompt editor source.
         // Prefers the dedicated ZoryaFragments service (which the manager UI
@@ -690,7 +697,7 @@ export class ZoryaServer {
             ? listCatalogFragments({ fragments: this.fragments.registry })
             : this.agents.fragments
               ? listCatalogFragments({ fragments: this.agents.fragments })
-              : async () => new Response(JSON.stringify({ fragments: [] }), { status: 200 }),
+              : async () => json(200, { fragments: [] }),
         )
         // File-managed agent sources — which recipes are backed by a file on
         // disk (so the editor can disable in-place Save and the list can
@@ -888,26 +895,30 @@ export class ZoryaServer {
     if (this.scheduler) {
       const sch = this.scheduler.storage;
       const sched = this.scheduler;
+      const scheduleDeps = {
+        storage: sch,
+        clock,
+        servesNamespace: (ns: string | undefined) => sched.servesNamespace(ns),
+        ...(sched.defaultNamespace !== undefined && {
+          defaultNamespace: sched.defaultNamespace,
+        }),
+      };
       this.router
-        .get("/api/schedules", listSchedules({ storage: sch, clock }))
-        .post("/api/schedules", createSchedule({ storage: sch, clock }))
-        .get("/api/schedules/:id", getSchedule({ storage: sch, clock }))
-        .patch("/api/schedules/:id", patchSchedule({ storage: sch, clock }))
+        .get("/api/schedules", listSchedules(scheduleDeps))
+        .post("/api/schedules", createSchedule(scheduleDeps))
+        .get("/api/schedules/:id", getSchedule(scheduleDeps))
+        .patch("/api/schedules/:id", patchSchedule(scheduleDeps))
         .delete("/api/schedules/:id", deleteSchedule(sch))
         .get("/api/schedules/:id/history", getScheduleHistory(sch, storage))
-        .get("/api/schedules/:id/upcoming", getScheduleUpcoming({ storage: sch, clock }))
+        .get("/api/schedules/:id/upcoming", getScheduleUpcoming(scheduleDeps))
         .post(
           "/api/schedules/:id/emit",
           emitScheduleNow(sch, (id) => sched.fireOnce(id)),
         );
     } else {
       // Stub so the UI can tell "scheduler not configured" from "configured but empty".
-      this.router.get(
-        "/api/schedules",
-        () =>
-          new Response(JSON.stringify({ schedules: [], total: 0, configured: false }), {
-            headers: { "content-type": "application/json" },
-          }),
+      this.router.get("/api/schedules", () =>
+        json(200, { schedules: [], total: 0, configured: false }),
       );
     }
 
@@ -1344,6 +1355,15 @@ function walkChainFor<T>(
     layer = (layer as unknown as { fallback?: ZoryaWorkflows }).fallback;
   }
   return undefined;
+}
+
+/**
+ * A layer's version registry. `LocalWorkflows` keeps the one it dispatches
+ * through private; reading it here keeps the server and the runner on one
+ * registry instead of a second, disconnected one.
+ */
+function versionRegistryOf(layer: ZoryaWorkflows): WorkflowVersionRegistry | undefined {
+  return (layer as unknown as { versionRegistry?: WorkflowVersionRegistry }).versionRegistry;
 }
 
 /** Liveness and readiness probes: public, and answered while shutting down. */

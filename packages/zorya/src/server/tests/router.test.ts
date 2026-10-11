@@ -136,6 +136,37 @@ describe("static fallback with uiDir", () => {
   });
 });
 
+describe("method mismatch and validation issues", () => {
+  it("answers 405 with Allow when only the method is wrong", async () => {
+    const router = new Router({ logger: new RecordingLogger() })
+      .get("/things/:id", () => Response.json({}))
+      .delete("/things/:id", () => new Response(null, { status: 204 }));
+    const res = await router.handle(new Request("http://x/things/1", { method: "PUT" }));
+    expect(res.status).toBe(405);
+    expect(res.headers.get("allow")).toBe("GET, DELETE");
+    expect(((await res.json()) as { error: string }).error).toBe("method_not_allowed");
+    expect((await router.handle(new Request("http://x/nothing"))).status).toBe(404);
+  });
+
+  it("returns an HttpError's issues in the envelope", async () => {
+    const router = new Router({ logger: new RecordingLogger() }).post("/v", () => {
+      throw new HttpError({
+        status: 400,
+        code: "invalid_request",
+        message: "n: Expected number",
+        issues: [{ path: "n", message: "Expected number" }],
+      });
+    });
+    const res = await router.handle(new Request("http://x/v", { method: "POST" }));
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "invalid_request",
+      message: "n: Expected number",
+      issues: [{ path: "n", message: "Expected number" }],
+    });
+  });
+});
+
 describe("parse helpers", () => {
   it("parseIntParam clamps to its bounds and ignores garbage", () => {
     expect(parseIntParam({ raw: null, min: 1, max: 10 })).toBeUndefined();

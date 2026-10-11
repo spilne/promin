@@ -16,6 +16,7 @@ import {
   type MintTokenResponse,
   type SignalTokenDto,
 } from "../signal-tokens.ts";
+import { invoke } from "./invoke-handler.ts";
 
 const PUBLIC_BASE = "https://zorya.test";
 
@@ -92,7 +93,7 @@ describe("signal-tokens routes", () => {
       const completed = await complete(storage, minted.body.tokenId, minted.body.bearer, {
         approved: true,
       });
-      expect(completed.status).toBe(201);
+      expect(completed.status).toBe(202);
       expect(completed.body).toEqual({ ok: true, value: { approved: true } });
 
       // Signal was delivered through the existing mechanic.
@@ -106,7 +107,8 @@ describe("signal-tokens routes", () => {
 
     it("omits the URL when no publicBaseUrl is configured", async () => {
       const handler = mintSignalToken({ storage });
-      const res = await handler(
+      const res = await invoke(
+        handler,
         new Request(`http://x/api/runs/${workflowId}/signals/approve/token`, {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -142,12 +144,12 @@ describe("signal-tokens routes", () => {
   });
 
   describe("expiry + idempotent re-submission", () => {
-    it("returns 408 when the token has expired before completion", async () => {
+    it("returns 410 when the token has expired before completion", async () => {
       const minted = await mint(storage, workflowId, "approve", { expiresInMs: 1 });
       // Advance past expiry.
       await new Promise((r) => setTimeout(r, 5));
       const completed = await complete(storage, minted.body.tokenId, minted.body.bearer, "x");
-      expect(completed.status).toBe(408);
+      expect(completed.status).toBe(410);
       expect(completed.body.error).toBe("token_expired");
     });
 
@@ -156,7 +158,7 @@ describe("signal-tokens routes", () => {
       const first = await complete(storage, minted.body.tokenId, minted.body.bearer, {
         approved: true,
       });
-      expect(first.status).toBe(201);
+      expect(first.status).toBe(202);
       const second = await complete(storage, minted.body.tokenId, minted.body.bearer, {
         approved: false, // ignored — original wins
       });
@@ -190,7 +192,7 @@ describe("signal-tokens routes", () => {
 
       // The cached bearer still works for completion.
       const completed = await complete(storage, second.body.tokenId, second.body.bearer, "ok");
-      expect(completed.status).toBe(201);
+      expect(completed.status).toBe(202);
     });
 
     it("treats different idempotency keys as separate tokens", async () => {
@@ -210,7 +212,8 @@ describe("signal-tokens routes", () => {
   describe("validation", () => {
     it("rejects mint without expiresInMs (400)", async () => {
       const handler = mintSignalToken({ storage, publicBaseUrl: PUBLIC_BASE });
-      const res = await handler(
+      const res = await invoke(
+        handler,
         new Request(`http://x/api/runs/${workflowId}/signals/approve/token`, {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -223,7 +226,8 @@ describe("signal-tokens routes", () => {
 
     it("rejects mint against a non-existent workflow (404)", async () => {
       const handler = mintSignalToken({ storage, publicBaseUrl: PUBLIC_BASE });
-      const res = await handler(
+      const res = await invoke(
+        handler,
         new Request(`http://x/api/runs/missing/signals/approve/token`, {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -237,7 +241,8 @@ describe("signal-tokens routes", () => {
     it("rejects complete without `value` in body (400)", async () => {
       const minted = await mint(storage, workflowId, "approve", { expiresInMs: 60_000 });
       const handler = completeSignalToken({ storage });
-      const res = await handler(
+      const res = await invoke(
+        handler,
         new Request(`http://x/api/signal-tokens/${minted.body.tokenId}/complete`, {
           method: "POST",
           headers: {
@@ -261,9 +266,13 @@ describe("signal-tokens routes", () => {
       await mint(storage, workflowId, "review", { expiresInMs: 60_000, tags: ["review"] });
 
       const handler = listSignalTokensForRun({ storage });
-      const res = await handler(new Request(`http://x/api/runs/${workflowId}/signal-tokens`), {
-        id: workflowId,
-      });
+      const res = await invoke(
+        handler,
+        new Request(`http://x/api/runs/${workflowId}/signal-tokens`),
+        {
+          id: workflowId,
+        },
+      );
       const body = (await res.json()) as { tokens: SignalTokenDto[] };
       expect(body.tokens).toHaveLength(2);
       // Both signals show up; ordering by createdAt DESC may tie at ms
@@ -311,7 +320,7 @@ describe("signal tokens — expiry on an injected clock", () => {
 
     clock.advance(60_000);
     const expired = await completeAt();
-    expect(expired.status).toBe(408);
+    expect(expired.status).toBe(410);
     expect(((await expired.json()) as { error: string }).error).toBe("token_expired");
   });
 
@@ -343,6 +352,6 @@ describe("signal tokens — expiry on an injected clock", () => {
       }),
       { tokenId: minted.tokenId },
     );
-    expect(res.status).toBe(201);
+    expect(res.status).toBe(202);
   });
 });

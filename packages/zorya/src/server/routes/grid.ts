@@ -10,8 +10,23 @@
 // ---------------------------------------------------------------------------
 
 import type { WorkflowStorage, WorkflowStatus, StepStatus } from "@promin/workflow";
-import { json, jsonError } from "../router.ts";
-import type { ExtendedStepStatus } from "../api-types.ts";
+import { z } from "zod";
+import { json } from "../router.ts";
+import { NameSchema, limitQuery, type ExtendedStepStatus } from "../api-types.ts";
+import { parseParams, parseQuery } from "../request-validation.ts";
+import { WorkflowParamsSchema } from "./runs.ts";
+
+/** `?limit=` of the grid: 1–100 runs, default 25. */
+export const GridQuerySchema = z.object({ limit: limitQuery({ fallback: 25, max: 100 }) });
+/** `?limit=` of the duration history: 1–200 runs, default 50. */
+export const WorkflowHistoryQuerySchema = z.object({
+  limit: limitQuery({ fallback: 50, max: 200 }),
+});
+/** `?limit=&namespace=` of the sparklines: 1–50 runs per workflow, default 14. */
+export const SparklinesQuerySchema = z.object({
+  limit: limitQuery({ fallback: 14, max: 50 }),
+  namespace: z.preprocess((v) => (v === "" ? undefined : v), NameSchema.optional()),
+});
 
 export interface GridRunDto {
   workflowId: string;
@@ -58,13 +73,8 @@ function computeUpstreamFailed(
 
 export function getWorkflowGrid(storage: WorkflowStorage) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const name = params.name;
-    if (!name) return jsonError(400, "missing_name");
-    const url = new URL(req.url);
-    const limit = Math.max(
-      1,
-      Math.min(100, Number.parseInt(url.searchParams.get("limit") ?? "25", 10) || 25),
-    );
+    const { name } = parseParams({ params, schema: WorkflowParamsSchema });
+    const { limit } = parseQuery({ req, schema: GridQuerySchema });
     const rows = await storage.listWorkflows({ name, limit });
 
     const seenStepNames: string[] = [];
@@ -127,13 +137,8 @@ export interface HistoryResponse {
  */
 export function getWorkflowHistory(storage: WorkflowStorage) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const name = params.name;
-    if (!name) return jsonError(400, "missing_name");
-    const url = new URL(req.url);
-    const limit = Math.max(
-      1,
-      Math.min(200, Number.parseInt(url.searchParams.get("limit") ?? "50", 10) || 50),
-    );
+    const { name } = parseParams({ params, schema: WorkflowParamsSchema });
+    const { limit } = parseQuery({ req, schema: WorkflowHistoryQuerySchema });
     // Storage returns newest-first; the chart wants oldest on the left.
     const rows = (await storage.listWorkflows({ name, limit })).slice().reverse();
 
@@ -173,12 +178,7 @@ export function getWorkflowHistory(storage: WorkflowStorage) {
 
 export function getSparklines(storage: WorkflowStorage) {
   return async (req: Request): Promise<Response> => {
-    const url = new URL(req.url);
-    const limit = Math.max(
-      1,
-      Math.min(50, Number.parseInt(url.searchParams.get("limit") ?? "14", 10) || 14),
-    );
-    const namespace = url.searchParams.get("namespace") ?? undefined;
+    const { limit, namespace } = parseQuery({ req, schema: SparklinesQuerySchema });
     // The latest `limit` runs of each workflow, so a rarely-run workflow
     // still gets its sparkline next to busy ones. Uses the lean summary
     // path when the storage supports it — sparklines only need

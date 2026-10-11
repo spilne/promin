@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // TriggerService — encapsulates the "create a run from a name + input" step
-// that the dashboard's POST /api/runs/trigger/:name endpoint needs.
+// that the dashboard's POST /api/workflows/:name/runs endpoint needs.
 //
 // In split mode (no in-process workflow code, only a remote worker pool)
 // triggering means: pre-create a `pending` storage row so the dashboard

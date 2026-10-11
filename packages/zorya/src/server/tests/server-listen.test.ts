@@ -60,7 +60,7 @@ async function healthy(base: string): Promise<boolean> {
 describe("request body limits", () => {
   it("answers a declared oversized body with a JSON 413", async () => {
     const { base } = start({ listen: { maxRequestBodySize: 1_000 } });
-    const res = await fetch(`${base}/api/runs/trigger/x`, {
+    const res = await fetch(`${base}/api/workflows/x/runs`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ input: "x".repeat(1_500) }),
@@ -81,7 +81,7 @@ describe("request body limits", () => {
         c.close();
       },
     });
-    const res = await fetch(`${base}/api/runs/trigger/x`, {
+    const res = await fetch(`${base}/api/workflows/x/runs`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body,

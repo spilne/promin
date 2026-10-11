@@ -460,7 +460,7 @@ describe("browser auth", () => {
         body: JSON.stringify({ value: { ok: true } }),
       }),
     );
-    expect(complete.status).toBe(201);
+    expect(complete.status).toBe(202);
   });
 });
 
@@ -516,7 +516,7 @@ describe("graceful stop", () => {
     const base = `http://127.0.0.1:${handle.port}`;
     await server.ready();
 
-    const triggered = fetch(`${base}/api/runs/trigger/demo`, {
+    const triggered = fetch(`${base}/api/workflows/demo/runs`, {
       method: "POST",
       headers: { "content-type": "application/json", ...bearer(OPERATOR_KEY) },
       body: JSON.stringify({ input: {} }),

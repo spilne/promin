@@ -21,7 +21,7 @@
 // `fan-out-demo` show up because this worker advertised them. Click
 // trigger; the run lands here. Or via curl:
 //
-//   curl -X POST http://localhost:4100/api/runs/trigger/hello-world \
+//   curl -X POST http://localhost:4100/api/workflows/hello-world/runs \
 //     -H 'content-type: application/json' \
 //     -d '{"input":{"name":"curl"}}'
 //
@@ -116,7 +116,7 @@ console.log(`Worker ${worker.workerId} connected to ${url}`);
 console.log(`  Advertised: ${workflows.map((w) => `${w.name}@${w.version ?? "—"}`).join(", ")}`);
 console.log(`  Trigger from the dashboard or via curl:`);
 console.log(
-  `    curl -X POST ${url}/api/runs/trigger/hello-world \\\n      -H 'content-type: application/json' -d '{"input":{"name":"curl"}}'`,
+  `    curl -X POST ${url}/api/workflows/hello-world/runs \\\n      -H 'content-type: application/json' -d '{"input":{"name":"curl"}}'`,
 );
 
 // Graceful shutdown — unregisters the worker so the demo's Workers page

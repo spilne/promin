@@ -56,7 +56,7 @@ describe("signal-token mint bounds", () => {
     it(`rejects expiresInMs = ${label} with 400 and stores nothing`, async () => {
       const res = await mint(`{"expiresInMs":${raw}}`);
       expect(res.status).toBe(400);
-      expect(((await res.json()) as { error: string }).error).toBe("invalid_expires_in_ms");
+      expect(((await res.json()) as { error: string }).error).toBe("invalid_request");
       expect(await storage.listSignalTokensForWorkflow(WF)).toHaveLength(0);
     });
   }
@@ -112,7 +112,7 @@ describe("signal-token mint bounds", () => {
         body: JSON.stringify({ value: true }),
       }),
     );
-    expect(complete.status).toBe(408);
+    expect(complete.status).toBe(410);
     expect(await storage.loadSignals(WF)).toHaveLength(0);
   });
 });
@@ -150,7 +150,9 @@ describe("schedule create validation", () => {
     it(`rejects ${label} with 400 and stores nothing`, async () => {
       const res = await create({ id: "s1", intervalMs: 60_000, ...body });
       expect(res.status).toBe(400);
-      expect(((await res.json()) as { error: string }).error).toBe("invalid_schedule");
+      expect(((await res.json()) as { error: string }).error).toBe(
+        label === "startAt after endAt" ? "invalid_schedule" : "invalid_request",
+      );
       expect(await schedStorage.loadSchedule("s1")).toBeNull();
     });
   }
@@ -172,7 +174,7 @@ describe("schedule create validation", () => {
       name: "",
       endAt: null,
     });
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(201);
     const dto = (await res.json()) as ScheduleDto;
     expect(dto.startAt).toBe("2026-01-01T00:00:00.000Z");
     expect(dto.endAt).toBeUndefined();
@@ -201,8 +203,12 @@ describe("schedule create validation", () => {
     expect(upcoming.status).toBe(200);
   });
 
-  it("clamps list limits instead of passing garbage to storage", async () => {
-    const res = await server.handle(new Request("http://x/api/schedules?limit=-5&offset=1e400"));
-    expect(res.status).toBe(200);
+  it("rejects out-of-range list paging with 400 instead of passing it to storage", async () => {
+    for (const qs of ["limit=-5", "limit=501", "limit=abc", "offset=-1", "offset=1e400"]) {
+      const res = await server.handle(new Request(`http://x/api/schedules?${qs}`));
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe("invalid_request");
+    }
+    expect((await server.handle(new Request("http://x/api/schedules?limit=500"))).status).toBe(200);
   });
 });

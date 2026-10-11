@@ -14,14 +14,14 @@
 // ---------------------------------------------------------------------------
 
 import { parseApprovalSignal } from "@promin/agent";
-import type { SignalPayloadSchema, SignalTokenRecord, WorkflowStorage } from "@promin/workflow";
-import {
-  SystemWallClock,
-  isTerminalWorkflowStatus,
-  validate,
-  type WallClock,
-} from "@promin/workflow";
-import { isoOrNull, json, jsonError, readJson } from "../router.ts";
+import type { SignalTokenRecord, WorkflowStorage } from "@promin/workflow";
+import { SystemWallClock, isTerminalWorkflowStatus, type WallClock } from "@promin/workflow";
+import { z } from "zod";
+import { isoOrNull, json, jsonError } from "../router.ts";
+import { CompleteSignalTokenRequestSchema, IdSchema, NameSchema } from "../api-types.ts";
+import { parseBody, parseParams } from "../request-validation.ts";
+import { requireRun } from "./run-extras.ts";
+import { RunParamsSchema, signalSchemaMismatch } from "./runs.ts";
 
 /** Default cap on a minted token's validity window: 90 days. */
 export const DEFAULT_MAX_SIGNAL_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
@@ -40,14 +40,27 @@ export interface SignalTokenRoutesDeps {
   maxTtlMs?: number;
 }
 
-export interface MintTokenRequest {
-  /** Free-form labels for dashboard filtering. Optional. */
-  tags?: string[];
-  /** TTL in milliseconds. Required — caps the token's validity window. */
-  expiresInMs: number;
-  /** Caller-supplied dedup key. Reusing returns the cached token. Optional. */
-  idempotencyKey?: string;
+/** Body of `POST /api/runs/:id/signals/:name/token`, with `expiresInMs` capped at `maxTtlMs`. */
+export function mintTokenRequestSchema(params: { maxTtlMs: number }) {
+  return z
+    .object({
+      /** TTL in milliseconds. Required — caps the token's validity window. */
+      expiresInMs: z.number().int().min(1).max(params.maxTtlMs),
+      /** Free-form labels for dashboard filtering. */
+      tags: z.array(z.string().max(256)).max(64).optional(),
+      /**
+       * Caller-supplied dedup key. Reusing it for the same signal returns
+       * the cached token; for another signal it is a 409.
+       */
+      idempotencyKey: z.string().min(1).max(256).nullable().optional(),
+    })
+    .strict();
 }
+
+export type MintTokenRequest = z.infer<ReturnType<typeof mintTokenRequestSchema>>;
+
+const MintParamsSchema = z.object({ id: IdSchema, name: NameSchema });
+const TokenParamsSchema = z.object({ tokenId: IdSchema });
 
 export interface MintTokenResponse {
   tokenId: string;
@@ -57,9 +70,18 @@ export interface MintTokenResponse {
   isCached: boolean;
 }
 
-export interface CompleteTokenRequest {
-  /** Payload delivered through `storage.deliverSignal`. JSON-serializable. */
+/** Body of the complete route: `{ value }`, delivered through `storage.deliverSignal`. */
+export type { CompleteSignalTokenRequest as CompleteTokenRequest } from "../api-types.ts";
+
+/**
+ * `202` on first delivery (the run resumes when it next consumes the
+ * signal), `200` with `alreadyCompleted: true` on a re-submission with
+ * the same bearer.
+ */
+export interface CompleteTokenResponse {
+  ok: true;
   value: unknown;
+  alreadyCompleted?: true;
 }
 
 /** Bearer-authed metadata fetch for the public share page. */
@@ -101,45 +123,24 @@ export interface SignalTokenDto {
  * its own auth — it sits behind whatever protects the rest of `/api`).
  */
 export function mintSignalToken(deps: SignalTokenRoutesDeps) {
+  const mintSchema = mintTokenRequestSchema({
+    maxTtlMs: deps.maxTtlMs ?? DEFAULT_MAX_SIGNAL_TOKEN_TTL_MS,
+  });
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const workflowId = params.id;
-    const signalName = params.name;
-    if (!workflowId) return jsonError(400, "missing_workflow_id");
-    if (!signalName) return jsonError(400, "missing_signal_name");
-
-    const body = await readJson<MintTokenRequest>(req);
-    if (!body || typeof body !== "object" || body.expiresInMs === undefined) {
-      return jsonError(400, "missing_expires_in_ms");
-    }
-    const maxTtlMs = deps.maxTtlMs ?? DEFAULT_MAX_SIGNAL_TOKEN_TTL_MS;
+    const { id: workflowId, name: signalName } = parseParams({
+      params,
+      schema: MintParamsSchema,
+    });
+    const body = await parseBody({ req, schema: mintSchema });
     const ttl = body.expiresInMs;
-    if (typeof ttl !== "number" || !Number.isInteger(ttl) || ttl <= 0 || ttl > maxTtlMs) {
-      return jsonError(
-        400,
-        "invalid_expires_in_ms",
-        `expiresInMs must be an integer in [1, ${maxTtlMs}]`,
-      );
-    }
-    if (
-      body.tags !== undefined &&
-      (!Array.isArray(body.tags) ||
-        body.tags.length > 64 ||
-        !body.tags.every((t) => typeof t === "string" && t.length <= 256))
-    ) {
-      return jsonError(400, "invalid_tags", "tags must be at most 64 strings of <= 256 chars");
-    }
-    if (
-      body.idempotencyKey !== undefined &&
-      body.idempotencyKey !== null &&
-      (typeof body.idempotencyKey !== "string" || body.idempotencyKey.length > 256)
-    ) {
-      return jsonError(400, "invalid_idempotency_key", "idempotencyKey must be a string <= 256");
-    }
 
     // Verify the workflow exists — failing fast at mint time prevents
     // issuing tokens against a typo'd id that no completer would ever match.
-    const wf = await deps.storage.loadWorkflow(workflowId);
-    if (!wf) return jsonError(404, "workflow_not_found");
+    const status = await deps.storage.loadWorkflowStatus(workflowId);
+    if (!status) return jsonError(404, "workflow_not_found");
+    if (isTerminalWorkflowStatus(status.status)) {
+      return jsonError(409, "run_ended", `Run has already ended (status: ${status.status})`);
+    }
 
     const tokenId = randomToken(16);
     const bearer = randomToken(32);
@@ -154,6 +155,13 @@ export function mintSignalToken(deps: SignalTokenRoutesDeps) {
       idempotencyKey: body.idempotencyKey ?? null,
       expiresAt,
     });
+    if (isCached && record.signalName !== signalName) {
+      return jsonError(
+        409,
+        "idempotency_key_conflict",
+        `idempotencyKey already minted a token for signal "${record.signalName}"`,
+      );
+    }
 
     const response: MintTokenResponse = {
       tokenId: record.tokenId,
@@ -176,18 +184,18 @@ export function mintSignalToken(deps: SignalTokenRoutesDeps) {
  * caller chose (email, webhook URL, return-from-replicate, …).
  *
  * Status semantics:
- *   201 — first delivery, signal resumed
+ *   202 — first delivery; the run resumes when it next consumes the signal
  *   200 — re-submission with the same bearer; same value returned
+ *   400 — body is not `{ value }`, or the value fails the wait's schema
  *   401 — missing or wrong bearer
  *   404 — unknown token id, or its run no longer exists
- *   408 — token expired before completion
- *   409 — the run has already ended
- *   410 — token already consumed by something other than this bearer
+ *   409 — the run has already ended (`run_ended`), or a concurrent
+ *         completion won the token (`token_already_completed`)
+ *   410 — token expired before completion (`token_expired`)
  */
 export function completeSignalToken(deps: SignalTokenRoutesDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const tokenId = params.tokenId;
-    if (!tokenId) return jsonError(400, "missing_token_id");
+    const { tokenId } = parseParams({ params, schema: TokenParamsSchema });
 
     const bearer = extractBearer(req);
     if (!bearer) return jsonError(401, "missing_bearer");
@@ -201,18 +209,20 @@ export function completeSignalToken(deps: SignalTokenRoutesDeps) {
 
     if (token.completedAt) {
       // Idempotent re-submission: same bearer accepted, original value returned.
-      return json(200, { ok: true, value: token.completedValue, alreadyCompleted: true });
+      const response: CompleteTokenResponse = {
+        ok: true,
+        value: token.completedValue,
+        alreadyCompleted: true,
+      };
+      return json(200, response);
     }
 
     const now = (deps.clock ?? SystemWallClock).now();
     if (isExpired({ expiresAt: token.expiresAt, now })) {
-      return jsonError(408, "token_expired");
+      return jsonError(410, "token_expired", "The signal token has expired");
     }
 
-    const body = await readJson<CompleteTokenRequest>(req);
-    if (!body || !("value" in body)) {
-      return jsonError(400, "missing_value");
-    }
+    const body = await parseBody({ req, schema: CompleteSignalTokenRequestSchema });
 
     // Schema check — when the suspend point was set up via
     // `ctx.validatedSignal` / `ctx.approval`, the StepState carries a
@@ -225,24 +235,12 @@ export function completeSignalToken(deps: SignalTokenRoutesDeps) {
     if (isTerminalWorkflowStatus(wf.status)) {
       return jsonError(409, "run_ended", `Run has already ended (status: ${wf.status})`);
     }
-    for (const step of Object.values(wf.steps)) {
-      if (step.status === "waiting_for_signal" && step.signalName === token.signalName) {
-        const schema = step.signalJsonSchema;
-        if (schema !== undefined && schema !== null) {
-          const result = validate(body.value, schema as SignalPayloadSchema);
-          if (!result.ok) {
-            return jsonError(
-              400,
-              "schema_mismatch",
-              result.errors
-                .map((e) => (e.path === "" ? e.message : `${e.path}: ${e.message}`))
-                .join("; "),
-            );
-          }
-        }
-        break;
-      }
-    }
+    const mismatch = signalSchemaMismatch({
+      run: wf,
+      signalName: token.signalName,
+      payload: body.value,
+    });
+    if (mismatch !== undefined) return jsonError(400, "schema_mismatch", mismatch);
 
     const claim = await deps.storage.markSignalTokenCompleted({
       tokenId,
@@ -251,16 +249,13 @@ export function completeSignalToken(deps: SignalTokenRoutesDeps) {
     });
 
     if (claim.outcome === "already_completed") {
-      // Lost a race with a concurrent completer (or scanner expiry — when
-      // we add one). Surface as 410 since this bearer wasn't the one that
-      // delivered the value. The race window is small (claim is atomic in
-      // postgres + sqlite, near-atomic in redis), but the response shape
-      // is meaningful for ops debugging.
-      return json(410, {
-        ok: false,
-        error: "already_completed",
-        value: claim.record.completedValue,
-      });
+      // Lost a race with a concurrent completer: this bearer's value was
+      // not the one delivered.
+      return jsonError(
+        409,
+        "token_already_completed",
+        "A concurrent completion consumed this token first",
+      );
     }
 
     // Resume the workflow through the existing signal mechanic. From the
@@ -272,7 +267,8 @@ export function completeSignalToken(deps: SignalTokenRoutesDeps) {
       payload: body.value,
     });
 
-    return json(201, { ok: true, value: body.value });
+    const response: CompleteTokenResponse = { ok: true, value: body.value };
+    return json(202, response);
   };
 }
 
@@ -286,8 +282,7 @@ export function completeSignalToken(deps: SignalTokenRoutesDeps) {
  */
 export function describeSignalToken(deps: SignalTokenRoutesDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const tokenId = params.tokenId;
-    if (!tokenId) return jsonError(400, "missing_token_id");
+    const { tokenId } = parseParams({ params, schema: TokenParamsSchema });
     const bearer = extractBearer(req);
     if (!bearer) return jsonError(401, "missing_bearer");
     const token = await deps.storage.findSignalTokenById(tokenId);
@@ -334,8 +329,8 @@ export function describeSignalToken(deps: SignalTokenRoutesDeps) {
  */
 export function listSignalTokensForRun(deps: SignalTokenRoutesDeps) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
-    const workflowId = params.id;
-    if (!workflowId) return jsonError(400, "missing_workflow_id");
+    const { id: workflowId } = parseParams({ params, schema: RunParamsSchema });
+    await requireRun({ storage: deps.storage, workflowId });
     const records = await deps.storage.listSignalTokensForWorkflow(workflowId);
     return json(200, { tokens: records.map(toDto) });
   };

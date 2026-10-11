@@ -15,7 +15,8 @@ import {
   type WorkflowSummary,
 } from "@promin/workflow";
 import { json } from "../router.ts";
-import type { MetricsDto } from "../api-types.ts";
+import { NamespaceQuerySchema, type MetricsDto } from "../api-types.ts";
+import { parseQuery } from "../request-validation.ts";
 
 export interface MetricsProvider {
   /** Metrics over every run, or over one namespace's runs. */
@@ -98,7 +99,7 @@ export class StorageMetricsProvider implements MetricsProvider {
 
 export function getMetrics(provider: MetricsProvider) {
   return async (req: Request): Promise<Response> => {
-    const namespace = new URL(req.url).searchParams.get("namespace") ?? undefined;
+    const { namespace } = parseQuery({ req, schema: NamespaceQuerySchema });
     const m = await provider.getMetrics(namespace !== undefined ? { namespace } : undefined);
     return json(200, m);
   };
