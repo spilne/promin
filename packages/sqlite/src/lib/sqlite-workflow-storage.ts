@@ -175,7 +175,16 @@ export class SqliteWorkflowStorage
     this.db.run(
       `CREATE UNIQUE INDEX IF NOT EXISTS ${t}_idempotency_key ON ${t} (COALESCE(namespace, ''), workflow_name, idempotency_key) WHERE idempotency_key IS NOT NULL`,
     );
-    this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_status ON ${t} (status)`);
+    // Status filters (counts, the dashboard's metrics and status-filtered
+    // run lists) come with a recency sort: the composite indexes serve the
+    // filter and the order together, so a page of completed runs is an
+    // index walk instead of a sort of every row with that status.
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_status_started_at ON ${t} (status, started_at DESC)`,
+    );
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_status_completed_at ON ${t} (status, completed_at DESC)`,
+    );
     // Scanners (`listDueTimers` / `listSignalWakeups`) page suspended runs,
     // and coordinator recovery (`listOrphanedRuns`) pages pending / running /
     // compensating runs, in workflow-id order.

@@ -695,7 +695,9 @@ CREATE INDEX wf_workflows_run_source_idx ON wf_workflows (run_source, run_source
 
 CREATE INDEX wf_workflows_started_at_idx ON wf_workflows (started_at DESC NULLS LAST);
 
-CREATE INDEX wf_workflows_status_idx ON wf_workflows (status_id);
+CREATE INDEX wf_workflows_status_completed_at_idx ON wf_workflows (status_id, completed_at DESC NULLS LAST);
+
+CREATE INDEX wf_workflows_status_started_at_idx ON wf_workflows (status_id, started_at DESC NULLS LAST);
 
 CREATE INDEX wf_workflows_type_idx ON wf_workflows (workflow_type);
 

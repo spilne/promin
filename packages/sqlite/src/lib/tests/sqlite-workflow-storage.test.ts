@@ -125,6 +125,35 @@ describe("SqliteWorkflowStorage", () => {
     expect(await s.loadRunHistory({ workflowId: "purge-sqlite" })).toEqual([]);
   });
 
+  it("serves status-filtered run pages from an index, without a sort", async () => {
+    const db = new Database(":memory:");
+    const s = SqliteWorkflowStorage.make({ db });
+    const seen: string[] = [];
+    const query = db.query.bind(db);
+    db.query = ((sql: string) => {
+      seen.push(sql);
+      return query(sql);
+    }) as typeof db.query;
+
+    const planOf = async (params: { orderBy: "startedAt" | "completedAt" }): Promise<string[]> => {
+      seen.length = 0;
+      // The dashboard metrics sample: a page of completed runs, newest first.
+      await s.listWorkflowSummaries({ status: "completed", limit: 2000, orderBy: params.orderBy });
+      const sql = seen.find((q) => q.includes("ORDER BY"))!;
+      return query<{ detail: string }, [string, number]>(`EXPLAIN QUERY PLAN ${sql}`)
+        .all("completed", 2000)
+        .map((r) => r.detail);
+    };
+
+    const byStarted = await planOf({ orderBy: "startedAt" });
+    expect(byStarted.some((d) => d.includes("promin_wf_status_started_at"))).toBe(true);
+    expect(byStarted.some((d) => d.includes("TEMP B-TREE"))).toBe(false);
+
+    const byCompleted = await planOf({ orderBy: "completedAt" });
+    expect(byCompleted.some((d) => d.includes("promin_wf_status_completed_at"))).toBe(true);
+    expect(byCompleted.some((d) => d.includes("TEMP B-TREE"))).toBe(false);
+  });
+
   it("countWorkflows returns exact counts per status", async () => {
     const s = makeStorage();
     await s.createWorkflow({ workflowId: "cw-1", workflowName: "wf", input: {} });

@@ -1279,6 +1279,16 @@ const server = new ZoryaServer({
   // The Deployments page (#/deployments) manages the version registry
   // passed to LocalWorkflows above; the server finds it on the chain.
   uiDir,
+  // Keep the persistent demo database bounded: the demo fires several
+  // schedules often, and run history would otherwise grow until SQLite
+  // competes with the dashboard's reads. Ended runs older than
+  // ZORYA_RETENTION_DAYS (default 1) are deleted every
+  // ZORYA_RETENTION_INTERVAL_MS (default one hour).
+  retention: {
+    maxAgeMs: Number(process.env.ZORYA_RETENTION_DAYS ?? 1) * 24 * 60 * 60 * 1000,
+    intervalMs: Number(process.env.ZORYA_RETENTION_INTERVAL_MS ?? 60 * 60 * 1000),
+    batchSize: 500,
+  },
 });
 
 const port = Number(process.env.PORT ?? 4100);

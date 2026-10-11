@@ -71,6 +71,9 @@ Notes:
 - Runs, the start queue, advertisements and the worker registry survive a
   restart. On boot, the scanners and orphan recovery pick up runs that were
   parked or in flight when the process stopped.
+- Run history grows with every run. Set `retention: { maxAgeMs }` on the
+  server to delete ended runs past that age (see
+  [Retention](./README.md#retention)); the demo keeps one day.
 - Several processes on the same host can share one SQLite file as a
   cluster with `SqliteLeaderLeaseStore`, but one process per database is
   the expected shape. Use Postgres to scale out.
@@ -170,11 +173,14 @@ corresponding Zorya services.
 ### Leases and clustering
 
 With `cluster` set, the instances elect one leader per background loop
-(sleep scanner, signal scanner, orphan recovery or queued maintenance)
-through `wf_leader_leases`. Lease expiry is computed on the database
-clock, so instance clock skew does not matter. A lease is held for about
+(sleep scanner, signal scanner, orphan recovery, queued maintenance or run
+retention) through `wf_leader_leases`. Lease expiry is computed on the
+database clock, so instance clock skew does not matter. A lease is held for about
 three loop intervals (at least 5 s); when its holder dies, a peer takes
-over within that window.
+over within that window. Retention sweeps hourly by default, so its lease
+can take up to three hours to move after its holder dies (a clean `stop()`
+releases it at once); a missed sweep only delays deletion. The leader's `retention` settings apply, so give
+every instance the same ones.
 
 The scheduler elects its own leader through `PgSchedulerStorage`. Give each
 instance a distinct `instanceId` there too.
@@ -381,4 +387,6 @@ instance, or on this one after it restarts. Workers stopped with
 - `cluster` set on every workflows layer when there is more than one
   instance; sticky routing for `/ws/worker` if you use query handlers or
   agent streams.
+- `retention` set to how long ended runs must stay visible, so run history
+  stays bounded.
 - Readiness probe on `/api/ready`; grace period above `shutdownTimeoutMs`.

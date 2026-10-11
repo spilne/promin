@@ -18,6 +18,13 @@ export {
   type QueuedMaintenanceReport,
 } from "./queued-workflows.ts";
 export {
+  RunRetention,
+  DEFAULT_RETENTION_BATCH_SIZE,
+  DEFAULT_RETENTION_INTERVAL_MS,
+  type RunRetentionConfig,
+  type RunRetentionReport,
+} from "./run-retention.ts";
+export {
   ZoryaClusterConfigError,
   assertSharedStores,
   leaderElectionFor,

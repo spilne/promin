@@ -47,6 +47,7 @@ import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
 import { WorkerWakeups } from "./services/worker-wakeups.ts";
 import { WorkerWebSocketServer } from "./services/worker-ws-server.ts";
+import { RunRetention } from "./services/workflows/run-retention.ts";
 import {
   QueuedWorkflows,
   ZoryaWorkflows,
@@ -110,6 +111,8 @@ export class ZoryaServer {
   readonly workerWakeups?: WorkerWakeups;
   /** Optional secrets vault — populated when ZoryaServerConfig provides one. */
   readonly secrets?: SecretsStorage;
+  /** Deletes ended runs past their retention age. Present with `config.retention`. */
+  readonly retention?: RunRetention;
 
   private readonly planes: AuthPlanes;
   private readonly lifecycle: ServiceLifecycle;
@@ -178,6 +181,20 @@ export class ZoryaServer {
       this.workerWakeups = workerWakeups;
       this.unsubscribeWakeups = queued.onStartQueued((notice) => workerWakeups.notify(notice));
     }
+    const storage = this.workflows.storage;
+    const cluster = firstInChain((l) => l.cluster);
+    if (config.retention) {
+      this.retention = new RunRetention({
+        storage,
+        config: config.retention,
+        cluster,
+        clock,
+        onSwept: ({ deleted }) => {
+          if (deleted > 0) this.logger.log(`[zorya] retention: deleted ${deleted} ended runs`);
+        },
+        onError: (err) => this.logger.warn("[zorya] retention sweep failed", err),
+      });
+    }
     this.lifecycle = new ServiceLifecycle({
       services: managedServices({
         workflows: this.workflows,
@@ -185,6 +202,7 @@ export class ZoryaServer {
         agents: this.agents,
         skills: this.skills,
         fragments: this.fragments,
+        retention: this.retention,
       }),
       clock,
       onError: (message, err) => this.logger.error(message, err),
@@ -196,12 +214,10 @@ export class ZoryaServer {
       }),
     });
 
-    const storage = this.workflows.storage;
     this.workerRegistry =
       config.remoteWorkers?.workerRegistry ??
       queued?.workerRegistry ??
       new InMemoryWorkerRegistry({ clock });
-    const cluster = firstInChain((l) => l.cluster);
     if (cluster) {
       this.cluster = cluster;
       // A clustered deployment needs every store this server holds shared

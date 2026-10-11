@@ -17,6 +17,7 @@ import type { ZoryaFragments } from "./services/fragments/index.ts";
 import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
 import type { ZoryaWorkflows } from "./services/workflows/index.ts";
+import type { RunRetentionConfig } from "./services/workflows/run-retention.ts";
 
 export interface Logger {
   log(message: string, ...args: unknown[]): void;
@@ -166,6 +167,16 @@ export interface ZoryaServerConfig extends AuthConfig {
     endpointPolicy?: RemoteEndpointPolicy;
     sweepIntervalMs?: number;
   };
+  /**
+   * Delete ended runs (completed, failed, tripwire) older than
+   * `maxAgeMs`, with everything stored for them (steps, signals, run
+   * history, journal, attempts, signal tokens, streams). A leader-elected
+   * loop: with a `cluster` on the workflows chain only one instance
+   * sweeps. Every `intervalMs` (default one hour, the first sweep one
+   * interval after start) it deletes in batches of `batchSize` (default
+   * 500) until no expired run is left. Unset: runs are kept forever.
+   */
+  retention?: RunRetentionConfig;
   /**
    * Time source for the server's own time math: signal-token expiry, draft
    * TTL sweep, worker online cutoff, worker-socket heartbeats, SSE / stream

@@ -128,13 +128,32 @@ dead workers. On boot, `LocalWorkflows` can apply a one-shot
 `RecoveryStrategy` (for example, fail runs that went stale while the server
 was down).
 
+### Retention
+
+Runs are kept forever unless the server is given `retention`. With it, a
+background loop deletes ended runs (completed, failed, tripwire) once they
+ended more than `maxAgeMs` ago, together with everything stored for them.
+Each sweep deletes in bounded batches until nothing expired is left, so
+one large backlog does not become one long delete. Running, suspended and
+pending runs are never touched. The age is measured against the storage's
+own clock, the one that stamped `completedAt`.
+
+```ts
+const server = new ZoryaServer({
+  workflows,
+  apiKeys,
+  retention: { maxAgeMs: 30 * 24 * 60 * 60 * 1000 }, // 30 days
+});
+```
+
 ### Clustering
 
 Several Zorya instances can share one set of stores. Pass the same
 `cluster: { instanceId, leases }` to every workflows layer. Then every
-background loop (scanners, recovery, maintenance) runs on one leader at a
-time, elected over the shared `LeaderLeaseStore` (`PgLeaderLeaseStore`,
-`RedisLeaderLeaseStore`, or `SqliteLeaderLeaseStore` on one host).
+background loop (scanners, recovery, maintenance, retention) runs on one
+leader at a time, elected over the shared `LeaderLeaseStore`
+(`PgLeaderLeaseStore`, `RedisLeaderLeaseStore`, or `SqliteLeaderLeaseStore`
+on one host).
 
 A clustered layer refuses in-memory stores (`ZoryaClusterConfigError`),
 because each instance would hold its own copy. The server applies the same
@@ -145,8 +164,8 @@ a distinct `ZoryaScheduler.instanceId`.
 ### Background services and lifecycle
 
 `listen()` starts the background services (workflows, scheduler, agents,
-skills, fragments) and the worker WebSocket. A service whose `start()`
-fails (storage down at boot, for example) is retried with backoff.
+skills, fragments, retention) and the worker WebSocket. A service whose
+`start()` fails (storage down at boot, for example) is retried with backoff.
 `/api/ready` answers 200 only once storage responds and every service has
 started. `stop()` drains the server gracefully (see
 [DEPLOYMENT.md](./DEPLOYMENT.md#graceful-shutdown)).
@@ -190,6 +209,7 @@ needs.
 | `secrets`                     | none                    | `SecretsStorage` for `/api/secrets` and BYOK credential resolution.                                                                                                                                                                                                              |
 | `webhooks`                    | none                    | `{ sources, deliveries? }`: signed webhook ingress into agents. Mounted only when `agents` is set. `deliveries` (replay dedup) defaults to a store on the workflow storage, shared across instances.                                                                             |
 | `remoteDeployments`           | none                    | `{ registry, endpointPolicy?, sweepIntervalMs? }`: other Zorya servers register their agents here. Mounted only when `agents` is set.                                                                                                                                            |
+| `retention`                   | keep forever            | `{ maxAgeMs, intervalMs?, batchSize? }`: delete ended runs (completed, failed, tripwire) older than `maxAgeMs` with all their records, on one leader, every `intervalMs` (default 1 h, the first one interval after start), in batches of `batchSize` (default 500).             |
 | `metrics`                     | storage-backed          | `MetricsProvider` for `/api/metrics`.                                                                                                                                                                                                                                            |
 | `workers`                     | registry-backed         | `WorkersProvider` for the Workers page.                                                                                                                                                                                                                                          |
 | `sampleInput`                 | none                    | Sample input for the dashboard trigger form, by workflow name.                                                                                                                                                                                                                   |
@@ -231,6 +251,8 @@ maintenance cadence, `cluster`, `clock`, `onError`). See
 | `ZORYA_DB`                                                                                           | `./target/zorya.db` (`/data/zorya.db` in the image) | SQLite file for runs, schedules, the start queue and registries. `:memory:` for a throwaway database.            |
 | `ZORYA_PG_URL`                                                                                       | unset                                               | Puts agent, skill, fragment and memory stores on Postgres (migrated on boot). Runs and schedules stay on SQLite. |
 | `ZORYA_UI_DIR`                                                                                       | `packages/zorya/dist/public`                        | Built dashboard assets.                                                                                          |
+| `ZORYA_RETENTION_DAYS`                                                                               | 1                                                   | Ended runs older than this are deleted (`retention.maxAgeMs`).                                                   |
+| `ZORYA_RETENTION_INTERVAL_MS`                                                                        | 3600000                                             | Delay between retention sweeps.                                                                                  |
 | `PROMIN_SECRETS_PASSPHRASE`                                                                          | a demo value                                        | Encrypts the secrets vault. Set it for anything but a demo.                                                      |
 | `ANTHROPIC_API_KEY`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_CONSOLIDATOR_MODEL`, `ZORYA_CONSOLIDATOR` | unset                                               | LLM backends for the demo agents. Without them the agents fall back to Ollama or an echo model.                  |
 

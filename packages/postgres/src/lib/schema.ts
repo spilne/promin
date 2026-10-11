@@ -89,7 +89,11 @@ export const workflows = pgTable(
   },
   (t) => [
     index("wf_workflows_name_status_idx").on(t.workflowName, t.statusId),
-    index("wf_workflows_status_idx").on(t.statusId),
+    // Status filters (counts, dashboard metrics, status-filtered run lists)
+    // with the recency sort `listWorkflows` applies: one index walk serves
+    // both, instead of sorting every row of that status.
+    index("wf_workflows_status_started_at_idx").on(t.statusId, t.startedAt.desc().nullsLast()),
+    index("wf_workflows_status_completed_at_idx").on(t.statusId, t.completedAt.desc().nullsLast()),
     index("wf_workflows_type_idx").on(t.workflowType),
     // Default `listWorkflows` order, unscoped and namespace-scoped.
     index("wf_workflows_started_at_idx").on(t.startedAt.desc().nullsLast()),

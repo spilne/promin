@@ -4,6 +4,7 @@ import { workflow, createWorkflowRunner, FakeWallClock } from "@promin/workflow"
 import { PostgresWorkflowStorage } from "../postgres-workflow-storage.ts";
 import { migrate } from "../migrate.ts";
 import { postgresDescribe } from "../test-utils.ts";
+import { WorkflowStatusIds } from "../workflow-lookups.ts";
 
 // ---------------------------------------------------------------------------
 // Test error types
@@ -52,6 +53,30 @@ postgresDescribe("migrate", { migrate }, (pg) => {
 
   it("is idempotent", async () => {
     await migrate(pg.db);
+  });
+
+  it("serves status-filtered run pages from an index, without a sort", async () => {
+    // The ORDER BY `listWorkflows` builds for each recency sort, under the
+    // dashboard metrics' status filter. Sequential scans and sorts are
+    // priced out so the plan shows which index can serve filter and order.
+    const plan = (orderBy: "started_at" | "completed_at") =>
+      pg.sql.begin(async (tx) => {
+        await tx`SET LOCAL enable_seqscan = off`;
+        await tx`SET LOCAL enable_sort = off`;
+        const rows = await tx.unsafe(
+          `EXPLAIN SELECT workflow_id FROM wf_workflows
+           WHERE status_id = ${WorkflowStatusIds.id.completed}
+           ORDER BY ${orderBy} DESC NULLS LAST LIMIT 2000`,
+        );
+        return rows.map((r) => String(r["QUERY PLAN"])).join("\n");
+      });
+
+    const byStarted = await plan("started_at");
+    expect(byStarted).toContain("wf_workflows_status_started_at_idx");
+    expect(byStarted).not.toContain("Sort");
+    const byCompleted = await plan("completed_at");
+    expect(byCompleted).toContain("wf_workflows_status_completed_at_idx");
+    expect(byCompleted).not.toContain("Sort");
   });
 });
 

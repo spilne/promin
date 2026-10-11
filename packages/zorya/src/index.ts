@@ -28,6 +28,11 @@ export {
   type QueuedWorkflowsErrorEvent,
   type QueuedWorkflowsErrorSource,
   type QueuedMaintenanceReport,
+  RunRetention,
+  DEFAULT_RETENTION_BATCH_SIZE,
+  DEFAULT_RETENTION_INTERVAL_MS,
+  type RunRetentionConfig,
+  type RunRetentionReport,
   type TriggerOptions,
   type TriggerResult,
 } from "./server/services/workflows/index.ts";

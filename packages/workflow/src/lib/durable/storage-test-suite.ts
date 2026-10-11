@@ -3719,6 +3719,35 @@ export function storageTestSuite(
         expect(await s.listSignalTokensForWorkflow("purge-deps")).toEqual([]);
         expect(await s.readStreamChunks({ workflowId: "purge-deps", streamId: "out" })).toEqual([]);
       });
+
+      it("removes step attempts of purged runs and keeps those of other runs", async () => {
+        const s = await getStorage();
+        if (!hasCapability(s, "stepAttempts")) return;
+        const before = new Date(Date.now() - 1_000);
+        const attempt = (workflowId: string): StepAttemptRecord => ({
+          workflowId,
+          stepName: "a",
+          attempt: 1,
+          type: "execution",
+          status: "completed",
+          result: { ok: true },
+          durationMs: 5,
+          startedAt: new Date(),
+          completedAt: new Date(),
+        });
+        await s.createWorkflow({ workflowId: "purge-att", workflowName: "t", input: {} });
+        await s.createWorkflow({ workflowId: "purge-att-live", workflowName: "t", input: {} });
+        await s.saveStepAttempt({ record: attempt("purge-att") });
+        await s.saveStepAttempt({ record: attempt("purge-att-live") });
+        await s.completeWorkflow({ workflowId: "purge-att", result: "done" });
+        await sleep(10);
+
+        await s.purgeCompleted({ from: before, to: new Date(), limit: 100 });
+
+        expect(await s.loadWorkflow("purge-att")).toBeNull();
+        expect(await s.loadStepAttempts({ workflowId: "purge-att" })).toEqual([]);
+        expect(await s.loadStepAttempts({ workflowId: "purge-att-live" })).toHaveLength(1);
+      });
     });
 
     // -------------------------------------------------------------------
