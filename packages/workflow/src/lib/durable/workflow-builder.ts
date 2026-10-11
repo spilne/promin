@@ -12,13 +12,12 @@
 // ---------------------------------------------------------------------------
 
 import { LosslessJsonCodec, type Codec } from "@spilne/perfect-core/connect";
-import { promiseOrDie } from "../shared/eff.ts";
 import type { TaggedError } from "../shared/tagged-error.ts";
 import {
   appendSteps,
   emptySteps,
+  findStep,
   hasStep,
-  lastStep,
   stepsToArray,
   type BuilderState,
 } from "./builder-state.ts";
@@ -35,10 +34,11 @@ import type {
   JournaledStepOptions,
   MapOverOptions,
   MapStepContext,
-  ParallelStepsOptions,
+  ParallelOptions,
+  StepBody,
+  StepBodyResult,
   StepContext,
   StepDefinition,
-  StepEff,
   StepOptions,
   SubworkflowOptions,
   TripwireOptions,
@@ -58,6 +58,7 @@ import {
 import { createSleepStep, createWaitForSignalStep } from "./steps/suspend-steps.ts";
 import { createSubworkflowStep } from "./steps/subworkflow-step.ts";
 import { toWorkflowDag, type WorkflowDAG } from "./workflow-dag-viz.ts";
+import type { FragmentFits, WorkflowFragment } from "./workflow-fragment.ts";
 import type {
   IdempotencyConfig,
   Workflow,
@@ -73,7 +74,15 @@ type AnyStepFn = (ctx: any) => unknown;
 /** Step options as the overload implementations see them. */
 type AnyStepOptions = StepOptions<any, any, any>;
 
-/** What `.step()` / `.stepAsync()` resolve their overloaded arguments to. */
+/** `.parallel()` options as the overload implementation sees them. */
+type AnyParallelOptions = ParallelOptions<Record<string, unknown>>;
+
+/** Whether an overloaded argument is the `{ dependsOn }` config of a DAG form. */
+function isDependsOnConfig(value: unknown): value is { dependsOn: string[] } {
+  return Array.isArray((value as { dependsOn?: unknown } | null)?.dependsOn);
+}
+
+/** What `.step()` resolves its overloaded arguments to. */
 interface StepArgs<F> {
   readonly dependsOn: string[];
   /** No explicit `dependsOn`: the step follows the current head. */
@@ -115,7 +124,9 @@ function parseStepArgs<F extends AnyStepFn>(params: {
  * nothing: it would otherwise widen `Steps` to `Record<string, T>`, after
  * which every `dependsOn` name type-checks.
  */
-type AddStep<Steps, Name extends string, T> = string extends Name ? Steps : Steps & Record<Name, T>;
+export type AddStep<Steps, Name extends string, T> = string extends Name
+  ? Steps
+  : Steps & Record<Name, T>;
 
 /**
  * The value a DAG step with `dependsOn: DependsOn` receives as `prev`: its
@@ -130,6 +141,17 @@ type FirstDepValue<
     ? Steps[First]
     : Input
   : Input;
+
+/**
+ * `prev` of a step that takes an optional `dependsOn`: the current head's
+ * value when it is left out (`DependsOn` stays `never`), else the first
+ * dependency's value.
+ */
+type HeadOrFirstDep<Steps, DependsOn extends readonly unknown[], Input, Current> = [
+  DependsOn,
+] extends [never]
+  ? Current
+  : FirstDepValue<Steps, DependsOn, Input>;
 
 const duplicateStepError = (name: string): WorkflowError =>
   new WorkflowError({ workflowId: "", message: `Duplicate step name: "${name}"` });
@@ -149,17 +171,32 @@ export class WorkflowBuilder<
   }
 
   // ---------------------------------------------------------------------------
-  // step / stepAsync
+  // step
   // ---------------------------------------------------------------------------
 
-  /** Linear step — Eff-returning. */
+  /**
+   * Linear step: runs after the current head and receives its value as
+   * `prev`. `fn` returns an `Eff` (its typed failures feed `retry` and
+   * `onFailure`), a Promise (a rejection is a defect, not retried) or the
+   * value itself.
+   *
+   * ```typescript
+   * workflow<{ userId: string }>({ name: "signup" })
+   *   .step("load", ({ input }) => loadUser(input.userId)) // Eff
+   *   .step("enrich", async ({ prev }) => enrich(prev)) // Promise
+   *   .step("shape", ({ prev }) => ({ id: prev.id })) // plain value
+   * ```
+   */
   step<Name extends string, Output, E2 extends TaggedError = never>(
     name: Name,
-    fn: (ctx: StepContext<Input, Current>) => StepEff<Output, E2>,
+    fn: StepBody<StepContext<Input, Current>, Output, E2>,
     options?: StepOptions<Output, Input, Current>,
   ): WorkflowBuilder<Input, AddStep<Steps, Name, Output>, Output, Err | E2>;
 
-  /** DAG step — Eff-returning. */
+  /**
+   * DAG step: runs once every step in `dependsOn` has completed and reads
+   * their results from `ctx.deps`. Same body contract as the linear form.
+   */
   step<
     Name extends string,
     DependsOn extends (keyof Steps & string)[],
@@ -168,7 +205,7 @@ export class WorkflowBuilder<
   >(
     name: Name,
     config: { dependsOn: [...DependsOn] },
-    fn: (ctx: DagStepContext<Input, Pick<Steps, DependsOn[number]>>) => StepEff<Output, E2>,
+    fn: StepBody<DagStepContext<Input, Pick<Steps, DependsOn[number]>>, Output, E2>,
     options?: StepOptions<Output, Input, FirstDepValue<Steps, DependsOn, Input>>,
   ): WorkflowBuilder<Input, AddStep<Steps, Name, Output>, Output, Err | E2>;
 
@@ -184,38 +221,33 @@ export class WorkflowBuilder<
     );
   }
 
-  /** Linear stepAsync — Promise-returning convenience; a rejection is a defect. */
-  stepAsync<Name extends string, Output>(
-    name: Name,
-    fn: (ctx: StepContext<Input, Current>) => Promise<Output>,
-    options?: StepOptions<Output, Input, Current>,
-  ): WorkflowBuilder<Input, AddStep<Steps, Name, Output>, Output, Err>;
+  // ---------------------------------------------------------------------------
+  // use — apply a reusable fragment
+  // ---------------------------------------------------------------------------
 
-  /** DAG stepAsync — Promise-returning convenience; a rejection is a defect. */
-  stepAsync<Name extends string, DependsOn extends (keyof Steps & string)[], Output>(
-    name: Name,
-    config: { dependsOn: [...DependsOn] },
-    fn: (ctx: DagStepContext<Input, Pick<Steps, DependsOn[number]>>) => Promise<Output>,
-    options?: StepOptions<Output, Input, FirstDepValue<Steps, DependsOn, Input>>,
-  ): WorkflowBuilder<Input, AddStep<Steps, Name, Output>, Output, Err>;
-
-  stepAsync(
-    name: string,
-    fnOrConfig: AnyStepFn | { dependsOn: string[] },
-    fnOrOptions?: AnyStepFn | AnyStepOptions,
-    maybeOptions?: AnyStepOptions,
-  ): WorkflowBuilder<Input, any, any, any> {
-    const args = parseStepArgs({
-      fnOrConfig,
-      fnOrOptions,
-      maybeOptions,
-      linearDeps: this._linearDeps(),
-    });
-    const asyncFn = args.fn as (ctx: unknown) => Promise<unknown>;
-    return this._basicStep(name, {
-      ...args,
-      fn: (ctx: unknown) => promiseOrDie(() => asyncFn(ctx)),
-    });
+  /**
+   * Append the steps of a reusable `WorkflowFragment` (built with the
+   * top-level `step()`), as if they were written here. The fragment's
+   * first step follows the current head. Its step names join this
+   * workflow's, so applying a fragment twice needs distinct names.
+   *
+   * The fragment must fit here: this workflow's input must be assignable to
+   * the fragment's input, and the current head's value to the `prev` its
+   * first step expects.
+   *
+   * ```typescript
+   * const normalize = step("trim", ({ input }: { input: { name: string } }) =>
+   *   input.name.trim(),
+   * ).andThen("upper", ({ prev }) => prev.toUpperCase());
+   *
+   * workflow<{ name: string }>({ name: "onboard" }).use(normalize);
+   * ```
+   */
+  use<FInput, FPrev, Added extends Record<string, unknown>, Output, E2 extends TaggedError = never>(
+    fragment: WorkflowFragment<FInput, FPrev, Added, Output, E2> &
+      FragmentFits<Input, Current, FInput, FPrev>,
+  ): WorkflowBuilder<Input, Steps & Added, Output, Err | E2> {
+    return fragment.applyTo(this);
   }
 
   // ---------------------------------------------------------------------------
@@ -225,7 +257,8 @@ export class WorkflowBuilder<
   /**
    * Run `fn` for every element of the array produced by step `config.array`
    * (up to `config.concurrency` at a time) and complete with the results in
-   * order. Each element's result is written as a task row (encoded with the
+   * order. `fn` returns what a `.step()` function may: an `Eff`, a Promise
+   * or a value. Each element's result is written as a task row (encoded with the
    * element codec), and an element that fails past its retries gets a failed
    * task row. The step-level options apply to the map step as a whole;
    * `options.element` sets an element's own codec, timeout and retry (see
@@ -251,7 +284,7 @@ export class WorkflowBuilder<
     fn: (
       element: Steps[ArrayStep] extends readonly (infer U)[] ? U : never,
       ctx: MapStepContext<Input>,
-    ) => StepEff<Output, E2>,
+    ) => StepBodyResult<Output, E2>,
     options?: MapOverOptions<Output, Input, Steps[ArrayStep]>,
   ): WorkflowBuilder<Input, AddStep<Steps, Name, Output[]>, Output[], Err | E2> {
     this._validateName(name);
@@ -265,24 +298,6 @@ export class WorkflowBuilder<
         defaultCodec: this._codec(),
         cacheNamespace: this.s.config.name,
       }),
-    );
-  }
-
-  /** `mapOver` with a Promise-returning `fn`; a rejection is a defect. */
-  mapOverAsync<Name extends string, ArrayStep extends keyof Steps & string, Output>(
-    name: Name,
-    config: { array: ArrayStep; concurrency?: number },
-    fn: (
-      element: Steps[ArrayStep] extends readonly (infer U)[] ? U : never,
-      ctx: MapStepContext<Input>,
-    ) => Promise<Output>,
-    options?: MapOverOptions<Output, Input, Steps[ArrayStep]>,
-  ): WorkflowBuilder<Input, AddStep<Steps, Name, Output[]>, Output[], Err> {
-    return this.mapOver(
-      name,
-      config,
-      (element, ctx) => promiseOrDie(() => fn(element, ctx)),
-      options,
     );
   }
 
@@ -366,10 +381,10 @@ export class WorkflowBuilder<
 
   /**
    * Add a step-based loop — iterates `body` while `condition(result, iter)`
-   * stays `true`. The body returns an `Eff`, like a `.step()` function: its
-   * typed failures (`E2`) fail the loop step as typed failures, so `retry`
-   * and `onFailure` apply; a throw is a defect. For a Promise-returning
-   * body use `.dowhileAsync()`.
+   * stays `true`. The body returns what a `.step()` function may: an `Eff`
+   * (its typed failures `E2` fail the loop step as typed failures, so
+   * `retry` and `onFailure` apply), a Promise or a value (a throw or
+   * rejection is a defect).
    *
    * Each iteration is persisted as its own step row (named
    * `"<name>.iter.<n>"`) via `saveStepResult`, with its own duration /
@@ -386,7 +401,7 @@ export class WorkflowBuilder<
    * workflow({ name: "drain" })
    *   .dowhile(
    *     "process-batch",
-   *     (ctx, iter) => processNextBatch(ctx.prev), // returns an Eff
+   *     async (ctx, iter) => processNextBatch(ctx.prev),
    *     (batch) => batch.length > 0,
    *   )
    * ```
@@ -409,59 +424,24 @@ export class WorkflowBuilder<
    */
   dowhile<Name extends string, T, E2 extends TaggedError = never>(
     name: Name,
-    body: (ctx: StepContext<Input, Current>, iter: number) => StepEff<T, E2>,
+    body: (ctx: StepContext<Input, Current>, iter: number) => StepBodyResult<T, E2>,
     condition: (result: T, iter: number) => boolean,
     options?: LoopOptions<T, Input, Current>,
   ): WorkflowBuilder<Input, AddStep<Steps, Name, T>, T, Err | E2 | LoopLimitExceededError> {
-    return this._loop({
-      name,
-      body,
-      keepGoing: condition,
-      options,
-      asyncVariant: ".dowhileAsync()",
-    });
-  }
-
-  /**
-   * `.dowhile()` with a body that returns a value or a Promise. A throw or
-   * rejection is a defect (no `retry` / `onFailure`), as with `.stepAsync()`;
-   * return a failed `Eff` from `.dowhile()` for a typed failure.
-   *
-   * ```typescript
-   * workflow({ name: "drain" })
-   *   .dowhileAsync(
-   *     "process-batch",
-   *     async (ctx) => processNextBatch(ctx.prev),
-   *     (batch) => batch.length > 0,
-   *   )
-   * ```
-   */
-  dowhileAsync<Name extends string, T>(
-    name: Name,
-    body: (ctx: StepContext<Input, Current>, iter: number) => T | PromiseLike<T>,
-    condition: (result: T, iter: number) => boolean,
-    options?: LoopOptions<T, Input, Current>,
-  ): WorkflowBuilder<Input, AddStep<Steps, Name, T>, T, Err | LoopLimitExceededError> {
-    return this._loop({
-      name,
-      body: asyncLoopBody(body),
-      keepGoing: condition,
-      options,
-      asyncVariant: ".dowhileAsync()",
-    });
+    return this._loop({ name, body, keepGoing: condition, options });
   }
 
   /**
    * Inverse polarity of `.dowhile()` — iterate `body` until the condition
    * becomes `true`. Same step-row-per-iteration semantics and the same
-   * `Eff` body contract. Body always runs at least once. See `.dowhile()`
-   * for the step-vs-journaled tradeoff.
+   * body contract. Body always runs at least once. See `.dowhile()` for the
+   * step-vs-journaled tradeoff.
    *
    * ```typescript
    * workflow({ name: "poll" })
    *   .dountil(
    *     "wait-ready",
-   *     ({ prev }) => checkStatus(prev.jobId), // returns an Eff
+   *     ({ prev }) => checkStatus(prev.jobId),
    *     (status) => status === "ready",
    *     { maxIterations: 60 },
    *   )
@@ -469,7 +449,7 @@ export class WorkflowBuilder<
    */
   dountil<Name extends string, T, E2 extends TaggedError = never>(
     name: Name,
-    body: (ctx: StepContext<Input, Current>, iter: number) => StepEff<T, E2>,
+    body: (ctx: StepContext<Input, Current>, iter: number) => StepBodyResult<T, E2>,
     condition: (result: T, iter: number) => boolean,
     options?: LoopOptions<T, Input, Current>,
   ): WorkflowBuilder<Input, AddStep<Steps, Name, T>, T, Err | E2 | LoopLimitExceededError> {
@@ -479,41 +459,24 @@ export class WorkflowBuilder<
       body,
       keepGoing: (r: T, i: number) => !condition(r, i),
       options,
-      asyncVariant: ".dountilAsync()",
-    });
-  }
-
-  /** `.dountil()` with a body that returns a value or a Promise (see `.dowhileAsync()`). */
-  dountilAsync<Name extends string, T>(
-    name: Name,
-    body: (ctx: StepContext<Input, Current>, iter: number) => T | PromiseLike<T>,
-    condition: (result: T, iter: number) => boolean,
-    options?: LoopOptions<T, Input, Current>,
-  ): WorkflowBuilder<Input, AddStep<Steps, Name, T>, T, Err | LoopLimitExceededError> {
-    return this._loop({
-      name,
-      body: asyncLoopBody(body),
-      keepGoing: (r: T, i: number) => !condition(r, i),
-      options,
-      asyncVariant: ".dountilAsync()",
     });
   }
 
   // ---------------------------------------------------------------------------
-  // parallelSteps — fluent fork/join over multiple named DAG steps
+  // parallel — fluent fork/join over multiple named DAG steps
   // ---------------------------------------------------------------------------
 
   /**
-   * Add a parallel-steps block — forks from the current head into N
-   * branches that run concurrently as **distinct DAG steps** (each
-   * distributable to workers and retriable independently), then joins them
-   * into a keyed record that downstream steps consume via `prev`.
+   * Add a parallel block — forks from the current head into N branches
+   * that run concurrently as **distinct DAG steps** (each distributable to
+   * workers and retriable independently), then joins them into a keyed
+   * record that downstream steps consume via `prev`. A branch returns what
+   * a `.step()` function may: an `Eff`, a Promise or a value.
    *
-   * Named `parallelSteps` rather than `parallel` to disambiguate from
-   * `ctx.parallel()` on `JournaledContext`, which fans out **activities
-   * in-process** inside a single journaled step. This one operates at the
-   * DAG level — each branch is a separate queue entry that can land on a
-   * different worker.
+   * Not to be confused with `ctx.parallel()` inside a `.journaled()` body,
+   * which runs activities **in-process** within that one step. This one
+   * operates at the DAG level — each branch is a separate queue entry that
+   * can land on a different worker.
    *
    * Follows the house style from `.branch()` and `.match()`: the outer
    * block takes a `name`; branch labels are keys in a record rather than
@@ -523,12 +486,12 @@ export class WorkflowBuilder<
    *
    * ```typescript
    * workflow({ name: "signup", storage })
-   *   .step("load", ({ input }) => succeed(input))
-   *   .parallelSteps("enrich", {
-   *     user: ({ prev }) => tryPromise(() => fetchUser(prev), toShipError),
-   *     perms: ({ prev }) => tryPromise(() => fetchPerms(prev), toShipError),
+   *   .step("load", ({ input }) => input)
+   *   .parallel("enrich", {
+   *     user: async ({ prev }) => fetchUser(prev),
+   *     perms: ({ prev }) => tryPromise(() => fetchPerms(prev), toPermsError),
    *   })
-   *   .step("join", ({ prev }) => succeed({ ...prev.user, ...prev.perms }))
+   *   .step("join", ({ prev }) => ({ ...prev.user, ...prev.perms }))
    * ```
    *
    * Semantics match the existing DAG executor: branches run concurrently
@@ -542,39 +505,75 @@ export class WorkflowBuilder<
    * typed by that branch's output. `codec` encodes the joined record.
    *
    * ```typescript
-   * .parallelSteps("enrich", { user, perms }, {
+   * .parallel("enrich", { user, perms }, {
    *   retry: { maxRetries: 2 },
    *   branches: { perms: { onFailure: { fallback: () => [] } } },
    * })
    * ```
    */
-  parallelSteps<
+  parallel<
     Name extends string,
-    Branches extends Record<
-      string,
-      (ctx: StepContext<Input, Current>) => StepEff<unknown, TaggedError>
-    >,
+    Branches extends Record<string, StepBody<StepContext<Input, Current>, unknown, TaggedError>>,
   >(
     name: Name,
     branches: Branches,
-    options?: ParallelStepsOptions<
+    options?: ParallelOptions<{ [K in keyof Branches]: BranchOutput<Branches[K]> }, Input, Current>,
+  ): WorkflowBuilder<
+    Input,
+    AddStep<Steps, Name, { [K in keyof Branches]: BranchOutput<Branches[K]> }>,
+    { [K in keyof Branches]: BranchOutput<Branches[K]> },
+    Err | BranchError<Branches>
+  >;
+
+  /**
+   * DAG fan-out: the branches run once every step in `dependsOn` has
+   * completed, and receive the first dependency's result as `prev` (the
+   * workflow input when `dependsOn` is empty).
+   *
+   * ```typescript
+   * .parallel("notify", { dependsOn: ["user", "org"] }, {
+   *   email: async ({ prev }) => sendEmail(prev),
+   *   slack: async ({ prev }) => postToSlack(prev),
+   * })
+   * ```
+   */
+  parallel<
+    Name extends string,
+    DependsOn extends (keyof Steps & string)[],
+    Branches extends Record<
+      string,
+      StepBody<StepContext<Input, FirstDepValue<Steps, DependsOn, Input>>, unknown, TaggedError>
+    >,
+  >(
+    name: Name,
+    config: { dependsOn: [...DependsOn] },
+    branches: Branches,
+    options?: ParallelOptions<
       { [K in keyof Branches]: BranchOutput<Branches[K]> },
       Input,
-      Current
+      FirstDepValue<Steps, DependsOn, Input>
     >,
   ): WorkflowBuilder<
     Input,
     AddStep<Steps, Name, { [K in keyof Branches]: BranchOutput<Branches[K]> }>,
     { [K in keyof Branches]: BranchOutput<Branches[K]> },
     Err | BranchError<Branches>
-  > {
+  >;
+
+  parallel(
+    name: string,
+    branchesOrConfig: Record<string, AnyStepFn> | { dependsOn: string[] },
+    branchesOrOptions?: Record<string, AnyStepFn> | AnyParallelOptions,
+    maybeOptions?: AnyParallelOptions,
+  ): WorkflowBuilder<Input, any, any, any> {
     this._validateName(name);
+    const dag = isDependsOnConfig(branchesOrConfig);
     return this._append(
       createParallelSteps({
         name,
-        dependsOn: this._linearDeps(),
-        branches,
-        options: options as ParallelStepsOptions<Record<string, unknown>> | undefined,
+        dependsOn: dag ? [...branchesOrConfig.dependsOn] : this._linearDeps(),
+        branches: (dag ? branchesOrOptions : branchesOrConfig) as Record<string, AnyStepFn>,
+        options: (dag ? maybeOptions : branchesOrOptions) as AnyParallelOptions | undefined,
         defaultCodec: this._codec(),
         cacheNamespace: this.s.config.name,
       }),
@@ -588,25 +587,45 @@ export class WorkflowBuilder<
   /**
    * Two-way conditional: run `ifTrue` or `ifFalse` depending on
    * `condition(prev)`. One DAG node; every `StepOptions` field applies to it
-   * (a `retry` re-evaluates `condition`). A throw from `condition` is a
-   * defect and is not retried; return a failed `Eff` from the branch for a
-   * typed failure.
+   * (a `retry` re-evaluates `condition`). The branches return what a
+   * `.step()` function may: an `Eff`, a Promise or a value. A throw from
+   * `condition` is a defect and is not retried; return a failed `Eff` from
+   * the branch for a typed failure.
    */
-  branch<Name extends string, Output, E2 extends TaggedError = never>(
+  branch<
+    Name extends string,
+    Output,
+    E2 extends TaggedError = never,
+    const DependsOn extends readonly (keyof Steps & string)[] = never,
+  >(
     name: Name,
     params: {
-      condition: (value: Current) => boolean;
-      ifTrue: (ctx: StepContext<Input, Current>) => StepEff<Output, E2>;
-      ifFalse: (ctx: StepContext<Input, Current>) => StepEff<Output, E2>;
+      /**
+       * Run after these steps instead of the current head; `condition` and
+       * the branches then see the first one's result as `prev` (the
+       * workflow input when empty).
+       */
+      dependsOn?: DependsOn;
+      condition: (value: HeadOrFirstDep<Steps, DependsOn, Input, Current>) => boolean;
+      ifTrue: StepBody<
+        StepContext<Input, HeadOrFirstDep<Steps, DependsOn, Input, Current>>,
+        Output,
+        E2
+      >;
+      ifFalse: StepBody<
+        StepContext<Input, HeadOrFirstDep<Steps, DependsOn, Input, Current>>,
+        Output,
+        E2
+      >;
     },
-    options?: StepOptions<Output, Input, Current>,
+    options?: StepOptions<Output, Input, HeadOrFirstDep<Steps, DependsOn, Input, Current>>,
   ): WorkflowBuilder<Input, AddStep<Steps, Name, Output>, Output, Err | E2> {
     this._validateName(name);
     return this._append(
       createBranchStep({
         name,
-        dependsOn: this._linearDeps(),
-        condition: params.condition,
+        dependsOn: params.dependsOn ? [...params.dependsOn] : this._linearDeps(),
+        condition: params.condition as (value: never) => boolean,
         ifTrue: params.ifTrue,
         ifFalse: params.ifFalse,
         options: options as StepOptions<unknown> | undefined,
@@ -799,17 +818,37 @@ export class WorkflowBuilder<
   sleep<Name extends string>(
     name: Name,
     ms: number,
-  ): WorkflowBuilder<Input, AddStep<Steps, Name, Current>, Current, Err> {
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, Current>, Current, Err>;
+
+  /**
+   * DAG form: the timer starts once every step in `options.dependsOn` has
+   * completed, and on wake the step passes the first dependency's value
+   * through (the workflow input when `dependsOn` is empty).
+   */
+  sleep<Name extends string, DependsOn extends (keyof Steps & string)[]>(
+    name: Name,
+    ms: number,
+    options: { dependsOn: [...DependsOn] },
+  ): WorkflowBuilder<
+    Input,
+    AddStep<Steps, Name, FirstDepValue<Steps, DependsOn, Input>>,
+    FirstDepValue<Steps, DependsOn, Input>,
+    Err
+  >;
+
+  sleep(
+    name: string,
+    ms: number,
+    options?: { dependsOn: string[] },
+  ): WorkflowBuilder<Input, any, any, any> {
     this._validateName(name);
+    const dependsOn = options ? [...options.dependsOn] : this._linearDeps();
+    // The checkpointed result is the passed-through value, so round-trip it
+    // with the codec of the step that produced it.
+    const source =
+      dependsOn.length > 0 ? findStep({ seq: this.s.steps, name: dependsOn[0]! }) : undefined;
     return this._append(
-      createSleepStep({
-        name,
-        dependsOn: this._linearDeps(),
-        ms,
-        // The checkpointed result is the predecessor's value, so round-trip
-        // it with the predecessor's codec.
-        codec: lastStep(this.s.steps)?.codec ?? this._codec(),
-      }),
+      createSleepStep({ name, dependsOn, ms, codec: source?.codec ?? this._codec() }),
     );
   }
 
@@ -844,6 +883,9 @@ export class WorkflowBuilder<
    * both (`.waitForSignal<Payload, "approval">(…)`) or let `codec` infer
    * `T` to make it addressable. A non-literal name never widens the named
    * steps to `Record<string, T>`.
+   *
+   * `dependsOn` starts the wait once the named steps have completed
+   * instead of after the current head.
    */
   waitForSignal<T, Name extends string = string>(
     name: Name,
@@ -851,18 +893,56 @@ export class WorkflowBuilder<
       signalName: string;
       timeoutMs?: number;
       codec?: Codec<T>;
+      dependsOn?: ReadonlyArray<keyof Steps & string>;
     },
   ): WorkflowBuilder<Input, AddStep<Steps, Name, T>, T, Err | WorkflowTimeoutError> {
     this._validateName(name);
     return this._append(
       createWaitForSignalStep({
         name,
-        dependsOn: this._linearDeps(),
+        dependsOn: params.dependsOn ? [...params.dependsOn] : this._linearDeps(),
         signalName: params.signalName,
         timeoutMs: params.timeoutMs,
         codec: this._codec(params.codec),
       }),
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // approval — waitForSignal for a human decision
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Wait for an approval decision: `.waitForSignal()` with a default signal
+   * name (`"<name>-approved"`) and a default payload type
+   * (`{ approved: boolean }`). The step completes with the delivered
+   * payload; branch on it in the next step. All `.waitForSignal()`
+   * semantics apply (last delivery wins, `timeoutMs` measured from the
+   * first execution, `dependsOn`).
+   *
+   * ```typescript
+   * .approval("manager", { timeoutMs: 86_400_000 })
+   * .step("finish", ({ prev }) => (prev.approved ? ship() : cancel()))
+   *
+   * // elsewhere
+   * await runner
+   *   .handle(workflowId)
+   *   .signal({ signalName: "manager-approved", payload: { approved: true } });
+   * ```
+   */
+  approval<T = { approved: boolean }, Name extends string = string>(
+    name: Name,
+    params?: {
+      signalName?: string;
+      timeoutMs?: number;
+      codec?: Codec<T>;
+      dependsOn?: ReadonlyArray<keyof Steps & string>;
+    },
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, T>, T, Err | WorkflowTimeoutError> {
+    return this.waitForSignal<T, Name>(name, {
+      ...params,
+      signalName: params?.signalName ?? `${name}-approved`,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1029,7 +1109,6 @@ export class WorkflowBuilder<
     readonly body: (ctx: StepContext<Input, Current>, iter: number) => unknown;
     readonly keepGoing: (result: T, iter: number) => boolean;
     readonly options: LoopOptions<T, Input, Current> | undefined;
-    readonly asyncVariant: string;
   }): WorkflowBuilder<Input, any, any, any> {
     this._validateName(params.name);
     return this._append(
@@ -1040,17 +1119,9 @@ export class WorkflowBuilder<
         keepGoing: params.keepGoing,
         options: params.options as LoopOptions<unknown> | undefined,
         codec: this._codec(params.options?.codec),
-        asyncVariant: params.asyncVariant,
       }),
     );
   }
-}
-
-/** Lift a value-or-Promise loop body into an `Eff` body; a rejection is a defect. */
-function asyncLoopBody<C, T>(
-  body: (ctx: C, iter: number) => T | PromiseLike<T>,
-): (ctx: C, iter: number) => StepEff<T> {
-  return (ctx, iter) => promiseOrDie(async () => body(ctx, iter));
 }
 
 // ---------------------------------------------------------------------------
@@ -1093,7 +1164,7 @@ export function workflow<Input>(params: WorkflowParams<Input>): WorkflowBuilder<
  * ```ts
  * const result = await flow<{ userId: string }>("process-user")
  *   .step("fetch", ({ input }) => api.get(`/users/${input.userId}`))
- *   .stepAsync("enrich", async ({ prev }) => enrichUser(prev))
+ *   .step("enrich", async ({ prev }) => enrichUser(prev))
  *   .execute({ userId: "123" });
  * ```
  */

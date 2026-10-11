@@ -43,11 +43,11 @@ export const reserveInventoryWorkflow = workflow<ReserveInventoryInput>({
   name: "reserve-inventory",
   type: "commerce-child",
 })
-  .stepAsync("lookup-sku", async ({ input }) => {
+  .step("lookup-sku", async ({ input }) => {
     await sleep(delay(800, 2_000));
     return { orderId: input.orderId, sku: input.sku ?? `SKU-${input.orderId % 1000}` };
   })
-  .stepAsync("hold", async ({ prev }) => {
+  .step("hold", async ({ prev }) => {
     await sleep(delay(1_000, 3_000));
     return { orderId: prev.orderId, sku: prev.sku, reservationId: `r-${Date.now()}` };
   })
@@ -63,12 +63,12 @@ export const chargeCardWorkflow = workflow<ChargeCardInput>({
   name: "charge-card",
   type: "commerce-child",
 })
-  .stepAsync("authorize", async ({ input }) => {
+  .step("authorize", async ({ input }) => {
     await sleep(delay(1_500, 3_500));
     if (Math.random() < 0.05) throw new Error("Card declined");
     return { orderId: input.orderId, authCode: `auth-${Date.now()}` };
   })
-  .stepAsync("capture", async ({ prev, input }) => {
+  .step("capture", async ({ prev, input }) => {
     await sleep(delay(800, 2_000));
     return {
       orderId: prev.orderId,
@@ -87,11 +87,11 @@ export const shipLabelWorkflow = workflow<ShipLabelInput>({
   name: "ship-label",
   type: "commerce-child",
 })
-  .stepAsync("rate", async ({ input }) => {
+  .step("rate", async ({ input }) => {
     await sleep(delay(500, 1_500));
     return { orderId: input.orderId, carrier: "UPS", costCents: 599 };
   })
-  .stepAsync("print", async ({ prev }) => {
+  .step("print", async ({ prev }) => {
     await sleep(delay(700, 1_800));
     return { orderId: prev.orderId, tracking: `1Z${Math.floor(Math.random() * 1e9)}` };
   })

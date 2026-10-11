@@ -11,18 +11,18 @@ interface RawData {
 }
 
 const etl = flow<{ source: string }>("etl-pipeline")
-  .stepAsync("extract", async ({ input }) => {
+  .step("extract", async ({ input }) => {
     const data = await fetchFromSource(input.source);
     return data;
   })
-  .stepAsync("enrich", { dependsOn: ["extract"] }, async ({ deps }) => {
+  .step("enrich", { dependsOn: ["extract"] }, async ({ deps }) => {
     return deps.extract.records.map((r) => ({ ...r, enrichedAt: Date.now() }));
   })
-  .stepAsync("validate", { dependsOn: ["extract"] }, async ({ deps }) => {
+  .step("validate", { dependsOn: ["extract"] }, async ({ deps }) => {
     const invalid = deps.extract.records.filter((r) => r.value < 0);
     return { total: deps.extract.records.length, invalid: invalid.length };
   })
-  .stepAsync("load", { dependsOn: ["enrich", "validate"] }, async ({ deps }) => {
+  .step("load", { dependsOn: ["enrich", "validate"] }, async ({ deps }) => {
     if (deps.validate.invalid > 0) {
       throw new Error(`${deps.validate.invalid} invalid records`);
     }

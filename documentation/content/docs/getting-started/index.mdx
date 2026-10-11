@@ -46,11 +46,11 @@ declare function refund(chargeId: string): Promise<void>;
 declare function ship(chargeId: string): Promise<{ trackingId: string }>;
 
 const orderFlow = workflow<{ id: string }>({ name: "process-order" })
-  .stepAsync("validate", ({ input }) => validate(input))
-  .stepAsync("charge", ({ prev }) => charge(prev), {
+  .step("validate", ({ input }) => validate(input))
+  .step("charge", ({ prev }) => charge(prev), {
     compensate: ({ result }) => refund(result.chargeId),
   })
-  .stepAsync("ship", ({ prev }) => ship(prev.chargeId))
+  .step("ship", ({ prev }) => ship(prev.chargeId))
   .build();
 
 // A Workflow is plain data; a runner executes it against a storage.

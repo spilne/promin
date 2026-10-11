@@ -19,6 +19,7 @@
 
 // Authoring
 export { workflow, flow, type WorkflowBuilder } from "./lib/durable/workflow-builder.ts";
+export { step, WorkflowFragment, type FragmentFits } from "./lib/durable/workflow-fragment.ts";
 export type {
   Workflow,
   WorkflowErrorOf,
@@ -42,7 +43,11 @@ export type {
   StepFailureStrategy,
   MapOverOptions,
   MapElementOptions,
-  ParallelStepsOptions,
+  ParallelOptions,
+  StepBody,
+  StepBodyResult,
+  StepBodyOutput,
+  StepBodyError,
   JournaledStepOptions,
   SubworkflowOptions,
   TripwireOptions,
@@ -241,6 +246,13 @@ export {
   type StaleTerminationAction,
 } from "./lib/durable/workflow-runner.ts";
 export {
+  bindWorkflow,
+  createWorkflowApp,
+  type BoundWorkflow,
+  type BoundWorkflowRunParams,
+  type WorkflowApp,
+} from "./lib/durable/workflow-app.ts";
+export {
   trigger,
   WorkflowResult,
   type TriggerParams,
@@ -290,6 +302,12 @@ export {
   type StepSchema,
   type SingleStepSchema,
   type MapStepSchema,
+  type SleepStepSchema,
+  type SignalStepSchema,
+  type ApprovalStepSchema,
+  type BranchStepSchema,
+  type ParallelStepSchema,
+  type ActivityRefSchema,
   type StepSchemaOptions,
   type MapStepSchemaOptions,
   type NodeUiMeta,

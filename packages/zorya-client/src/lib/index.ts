@@ -1,6 +1,7 @@
 export { ZoryaClient, type ZoryaClientConfig, type WorkflowStartClaim } from "./zorya-client.ts";
 export {
   ZoryaWorker,
+  ZoryaWorkerBuilder,
   StartClaimLostError,
   ZoryaWorkerStoppingError,
   type ZoryaWorkerConfig,

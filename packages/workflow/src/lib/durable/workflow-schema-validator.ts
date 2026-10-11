@@ -52,7 +52,65 @@ const MapStepSchemaZ = z.object({
   outputSchema: JsonSchemaZ.optional(),
 });
 
-const StepSchemaZ = z.discriminatedUnion("type", [SingleStepSchemaZ, MapStepSchemaZ]);
+const SleepStepSchemaZ = z.object({
+  type: z.literal("sleep"),
+  name: z.string().min(1),
+  dependsOn: z.array(z.string()),
+  ms: z.number().int().min(0),
+});
+
+const SignalStepSchemaZ = z.object({
+  type: z.literal("signal"),
+  name: z.string().min(1),
+  dependsOn: z.array(z.string()),
+  signalName: z.string().min(1),
+  timeoutMs: z.number().int().min(0).optional(),
+  outputSchema: JsonSchemaZ.optional(),
+});
+
+const ApprovalStepSchemaZ = z.object({
+  type: z.literal("approval"),
+  name: z.string().min(1),
+  dependsOn: z.array(z.string()),
+  signalName: z.string().min(1).optional(),
+  timeoutMs: z.number().int().min(0).optional(),
+  outputSchema: JsonSchemaZ.optional(),
+});
+
+const ActivityRefSchemaZ = z.object({
+  activityRef: z.string().min(1),
+  config: z.record(z.string(), z.unknown()).optional(),
+});
+
+const BranchStepSchemaZ = z.object({
+  type: z.literal("branch"),
+  name: z.string().min(1),
+  dependsOn: z.array(z.string()),
+  conditionRef: z.string().min(1),
+  ifTrue: ActivityRefSchemaZ,
+  ifFalse: ActivityRefSchemaZ,
+  options: StepSchemaOptionsZ.optional(),
+  outputSchema: JsonSchemaZ.optional(),
+});
+
+const ParallelStepSchemaZ = z.object({
+  type: z.literal("parallel"),
+  name: z.string().min(1),
+  dependsOn: z.array(z.string()),
+  branches: z.record(z.string(), ActivityRefSchemaZ),
+  options: StepSchemaOptionsZ.optional(),
+  outputSchema: JsonSchemaZ.optional(),
+});
+
+const StepSchemaZ = z.discriminatedUnion("type", [
+  SingleStepSchemaZ,
+  MapStepSchemaZ,
+  SleepStepSchemaZ,
+  SignalStepSchemaZ,
+  ApprovalStepSchemaZ,
+  BranchStepSchemaZ,
+  ParallelStepSchemaZ,
+]);
 
 // ---------------------------------------------------------------------------
 // Node UI metadata

@@ -13,15 +13,15 @@ const runner = createWorkflowRunner({ storage });
 const processVideo = workflow<{ videoId: string }>({
   name: "process-video",
 })
-  .stepAsync("download", async ({ input }) => {
+  .step("download", async ({ input }) => {
     const path = await downloadVideo(input.videoId);
     return { path };
   })
-  .stepAsync("transcribe", { dependsOn: ["download"] }, async ({ deps }) => {
+  .step("transcribe", { dependsOn: ["download"] }, async ({ deps }) => {
     const text = await transcribe(deps.download.path);
     return { text };
   })
-  .stepAsync("summarize", { dependsOn: ["transcribe"] }, async ({ deps }) => {
+  .step("summarize", { dependsOn: ["transcribe"] }, async ({ deps }) => {
     const summary = await summarize(deps.transcribe.text);
     return { summary };
   })

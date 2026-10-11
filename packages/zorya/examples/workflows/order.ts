@@ -22,14 +22,14 @@ function delay(minMs: number, maxMs: number): number {
 }
 
 export const orderWorkflow = workflow<OrderInput>({ name: "order", type: "commerce" })
-  .stepAsync("validate", async ({ input }) => {
+  .step("validate", async ({ input }) => {
     await sleep(delay(2_000, 8_000));
     if (!input.orderId || input.orderId < 0) {
       throw new Error(`Invalid orderId: ${input.orderId}`);
     }
     return { orderId: input.orderId, customer: input.customer ?? "anon", validated: true };
   })
-  .stepAsync("charge", async ({ prev }) => {
+  .step("charge", async ({ prev }) => {
     await sleep(delay(5_000, 20_000));
     // Occasionally fail so the dashboard shows failures too.
     if (Math.random() < 0.08) {
@@ -37,11 +37,11 @@ export const orderWorkflow = workflow<OrderInput>({ name: "order", type: "commer
     }
     return { orderId: prev.orderId, charged: true, amountCents: 999 };
   })
-  .stepAsync("notify-email", async ({ prev }) => {
+  .step("notify-email", async ({ prev }) => {
     await sleep(delay(3_000, 10_000));
     return { channel: "email", to: `${prev.orderId}@example.com`, delivered: true };
   })
-  .stepAsync("cleanup", async () => {
+  .step("cleanup", async () => {
     await sleep(delay(2_000, 6_000));
     return { cleaned: true };
   })

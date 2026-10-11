@@ -252,7 +252,7 @@ describe("WorkflowHooks", () => {
         },
       },
     })
-      .stepAsync("wait", async () => {
+      .step("wait", async () => {
         const waited = new Promise<void>((r) => clock.setTimeout(r, 10));
         armed = true;
         await waited;

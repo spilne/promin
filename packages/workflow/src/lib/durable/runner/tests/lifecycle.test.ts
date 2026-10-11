@@ -44,13 +44,13 @@ describe("cancel during a run", () => {
     const gate = deferred();
     const ran: string[] = [];
     const wf = workflow<number>({ name: "cancel-mid-run" })
-      .stepAsync("slow", async ({ input }) => {
+      .step("slow", async ({ input }) => {
         started.resolve();
         await gate.promise;
         ran.push("slow");
         return input;
       })
-      .stepAsync("after", async ({ prev }) => {
+      .step("after", async ({ prev }) => {
         ran.push("after");
         return (prev as number) + 1;
       })
@@ -89,13 +89,13 @@ describe("cancel during a run", () => {
       const ran: string[] = [];
       const wf = workflow<number>({ name: "cancel-seen-by-checkpoint" })
         .step("a", ({ input }) => succeed(input))
-        .stepAsync("cancels", async ({ prev }) => {
+        .step("cancels", async ({ prev }) => {
           ran.push("cancels");
           // Lands before this step's own checkpoint.
           await storage.cancelWorkflow({ workflowId: "c-ck" });
           return prev as number;
         })
-        .stepAsync("after", async ({ prev }) => {
+        .step("after", async ({ prev }) => {
           ran.push("after");
           return prev as number;
         })
@@ -121,8 +121,8 @@ describe("cancel during a run", () => {
     const firstSaved = deferred();
     const ran: string[] = [];
     const wf = workflow<number>({ name: "cancel-between-siblings" })
-      .stepAsync("fast", async ({ input }) => input)
-      .stepAsync(
+      .step("fast", async ({ input }) => input)
+      .step(
         "slow",
         async ({ input }) => {
           await firstSaved.promise;
@@ -131,7 +131,7 @@ describe("cancel during a run", () => {
         },
         { dependsOn: [] },
       )
-      .stepAsync(
+      .step(
         "after",
         async ({ input }) => {
           ran.push("after");
@@ -156,7 +156,7 @@ describe("cancel during a run", () => {
     const started = deferred();
     const gate = deferred();
     const wf = workflow<number>({ name: "cancel-last-wave" })
-      .stepAsync("only", async ({ input }) => {
+      .step("only", async ({ input }) => {
         started.resolve();
         await gate.promise;
         return input;
@@ -186,7 +186,7 @@ describe("cancel during a run", () => {
           compensated++;
         },
       })
-      .stepAsync("b", async () => {
+      .step("b", async () => {
         attempts++;
         started.resolve();
         await gate.promise;
@@ -213,7 +213,7 @@ describe("cancel during a run", () => {
     const wf = workflow<number>({ name: "cancel-sleep" })
       .step("a", ({ input }) => succeed(input))
       .sleep("nap", 1_000)
-      .stepAsync("b", async ({ prev }) => {
+      .step("b", async ({ prev }) => {
         ran.push("b");
         return prev;
       })
@@ -264,7 +264,7 @@ describe("re-running an ended run", () => {
     const runner = createWorkflowRunner({ storage });
     let runs = 0;
     const wf = workflow<number>({ name: "cancelled-rerun" })
-      .stepAsync("a", async ({ input }) => {
+      .step("a", async ({ input }) => {
         runs++;
         return input;
       })
@@ -282,7 +282,7 @@ describe("re-running an ended run", () => {
     const runner = createWorkflowRunner({ storage });
     let runs = 0;
     const wf = workflow<number>({ name: "completed-rerun" })
-      .stepAsync("a", async ({ input }) => {
+      .step("a", async ({ input }) => {
         runs++;
         return input * 2;
       })
@@ -386,7 +386,7 @@ describe("stored error tags", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<number>({ name: "defect-failure" })
-      .stepAsync("pay", async () => {
+      .step("pay", async () => {
         throw new Error("socket hang up");
       })
       .build();
@@ -656,7 +656,7 @@ describe("workflow-level retry", () => {
       return 1;
     };
     const plain = workflow<number>({ name: "wf-defect", retry: { maxRetries: 2, baseDelayMs: 1 } })
-      .stepAsync("a", body)
+      .step("a", body)
       .build();
     const r1 = await runner.runSafe({ workflow: plain, workflowId: "wd-1", input: 1 });
     expect((r1.error as Error).message).toBe("socket hang up");
@@ -667,7 +667,7 @@ describe("workflow-level retry", () => {
       name: "wf-defect-opt-in",
       retry: { maxRetries: 2, baseDelayMs: 1, retryDefects: true },
     })
-      .stepAsync("a", body)
+      .step("a", body)
       .build();
     const r2 = await runner.runSafe({ workflow: optedIn, workflowId: "wd-2", input: 1 });
     expect(r2.error).toBeNull();

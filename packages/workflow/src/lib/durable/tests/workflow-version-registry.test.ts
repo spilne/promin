@@ -10,10 +10,10 @@ describe("WorkflowVersionRegistry", () => {
     const registry = new InMemoryWorkflowVersionRegistry();
 
     const v1 = workflow({ name: "order", version: "1" })
-      .stepAsync("validate", async () => "v1-result")
+      .step("validate", async () => "v1-result")
       .build();
     const v2 = workflow({ name: "order", version: "2" })
-      .stepAsync("verify", async () => "v2-result")
+      .step("verify", async () => "v2-result")
       .build();
 
     registry.register(v1);
@@ -30,7 +30,7 @@ describe("WorkflowVersionRegistry", () => {
     const registry = new InMemoryWorkflowVersionRegistry();
 
     const noVersion = workflow({ name: "order" })
-      .stepAsync("step", async () => "done")
+      .step("step", async () => "done")
       .build();
 
     await expect(registry.register(noVersion)).rejects.toThrow("must have a version");
@@ -41,10 +41,10 @@ describe("WorkflowVersionRegistry", () => {
     const registry = new InMemoryWorkflowVersionRegistry();
 
     const v1 = workflow({ name: "order", version: "1" })
-      .stepAsync("step", async () => "v1")
+      .step("step", async () => "v1")
       .build();
     const v2 = workflow({ name: "order", version: "2" })
-      .stepAsync("step", async () => "v2")
+      .step("step", async () => "v2")
       .build();
 
     registry.register(v1);
@@ -69,13 +69,13 @@ describe("WorkflowVersionRegistry", () => {
     // Register v1 and v2
     let v1Calls = 0;
     const v1 = workflow({ name: "order", version: "1" })
-      .stepAsync("step", async () => {
+      .step("step", async () => {
         v1Calls++;
         return "v1";
       })
       .build();
     const v2 = workflow({ name: "order", version: "2" })
-      .stepAsync("step", async () => "v2")
+      .step("step", async () => "v2")
       .build();
 
     registry.register(v1);
@@ -106,7 +106,7 @@ describe("WorkflowVersionRegistry", () => {
 
     // Create workflow with v1
     const v1 = workflow({ name: "order", version: "1" })
-      .stepAsync("step", async () => "v1")
+      .step("step", async () => "v1")
       .build();
     const seedRunner = createWorkflowRunner({ storage });
     await seedRunner.run({ workflow: v1, workflowId: "old-1", input: {} });
@@ -114,7 +114,7 @@ describe("WorkflowVersionRegistry", () => {
 
     // Only register v2 (v1 not registered)
     const v2 = workflow({ name: "order", version: "2" })
-      .stepAsync("step", async () => "v2")
+      .step("step", async () => "v2")
       .build();
     registry.register(v2);
 
@@ -129,12 +129,12 @@ describe("WorkflowVersionRegistry", () => {
 
     registry.register(
       workflow({ name: "order", version: "1" })
-        .stepAsync("s", async () => 1)
+        .step("s", async () => 1)
         .build(),
     );
     registry.register(
       workflow({ name: "payment", version: "1" })
-        .stepAsync("s", async () => 1)
+        .step("s", async () => 1)
         .build(),
     );
 
@@ -146,10 +146,10 @@ describe("WorkflowVersionRegistry", () => {
     const registry = new InMemoryWorkflowVersionRegistry();
 
     const v1 = workflow({ name: "order", version: "1" })
-      .stepAsync("step", async () => "v1")
+      .step("step", async () => "v1")
       .build();
     const v2 = workflow({ name: "order", version: "2" })
-      .stepAsync("step", async () => "v2")
+      .step("step", async () => "v2")
       .build();
 
     registry.register(v1);
@@ -177,10 +177,10 @@ describe("WorkflowVersionRegistry", () => {
     const registry = new InMemoryWorkflowVersionRegistry();
 
     const order = workflow({ name: "order", version: "1" })
-      .stepAsync("s", async () => "order-result")
+      .step("s", async () => "order-result")
       .build();
     const payment = workflow({ name: "payment", version: "1" })
-      .stepAsync("s", async () => "payment-result")
+      .step("s", async () => "payment-result")
       .build();
 
     registry.register(order);
@@ -200,10 +200,10 @@ describe("WorkflowVersionRegistry", () => {
     const registry = new InMemoryWorkflowVersionRegistry();
 
     const v1a = workflow({ name: "order", version: "1" })
-      .stepAsync("s", async () => "first")
+      .step("s", async () => "first")
       .build();
     const v1b = workflow({ name: "order", version: "1" })
-      .stepAsync("s", async () => "replaced")
+      .step("s", async () => "replaced")
       .build();
 
     registry.register(v1a);
@@ -237,17 +237,17 @@ describe("WorkflowVersionRegistry", () => {
 
     registry.register(
       workflow({ name: "order", version: "3" })
-        .stepAsync("s", async () => 1)
+        .step("s", async () => 1)
         .build(),
     );
     registry.register(
       workflow({ name: "order", version: "1" })
-        .stepAsync("s", async () => 1)
+        .step("s", async () => 1)
         .build(),
     );
     registry.register(
       workflow({ name: "order", version: "2" })
-        .stepAsync("s", async () => 1)
+        .step("s", async () => 1)
         .build(),
     );
 
@@ -261,15 +261,15 @@ describe("WorkflowVersionRegistry", () => {
 
     // v1: 2 steps
     const v1 = workflow({ name: "order", version: "1" })
-      .stepAsync("validate", async () => "validated")
-      .stepAsync("charge", async () => "v1-charged")
+      .step("validate", async () => "validated")
+      .step("charge", async () => "v1-charged")
       .build();
 
     // v2: 3 steps (different names, extra step)
     const v2 = workflow({ name: "order", version: "2" })
-      .stepAsync("verify", async () => "verified")
-      .stepAsync("charge", async () => "v2-charged")
-      .stepAsync("notify", async () => "v2-notified")
+      .step("verify", async () => "verified")
+      .step("charge", async () => "v2-charged")
+      .step("notify", async () => "v2-notified")
       .build();
 
     registry.register(v1);
@@ -297,13 +297,13 @@ describe("WorkflowVersionRegistry", () => {
     let v2Count = 0;
 
     const v1 = workflow({ name: "job", version: "1" })
-      .stepAsync("run", async () => {
+      .step("run", async () => {
         v1Count++;
         return "v1";
       })
       .build();
     const v2 = workflow({ name: "job", version: "2" })
-      .stepAsync("run", async () => {
+      .step("run", async () => {
         v2Count++;
         return "v2";
       })
@@ -342,10 +342,10 @@ describe("WorkflowVersionRegistry", () => {
   describe("InMemoryWorkflowVersionRegistry.for() scoped builder", () => {
     it("returns a builder scoped to one workflow name", async () => {
       const v1 = workflow({ name: "order", version: "1" })
-        .stepAsync("x", async () => "v1")
+        .step("x", async () => "v1")
         .build();
       const v2 = workflow({ name: "order", version: "2" })
-        .stepAsync("x", async () => "v2")
+        .step("x", async () => "v2")
         .build();
 
       const scoped = InMemoryWorkflowVersionRegistry.for("order").register(v1).register(v2);
@@ -357,7 +357,7 @@ describe("WorkflowVersionRegistry", () => {
 
     it("rejects definitions with a mismatched name", () => {
       const wrongName = workflow({ name: "billing", version: "1" })
-        .stepAsync("x", async () => "v1")
+        .step("x", async () => "v1")
         .build();
 
       const scoped = InMemoryWorkflowVersionRegistry.for("order");
@@ -366,10 +366,10 @@ describe("WorkflowVersionRegistry", () => {
 
     it("deregister removes a version", async () => {
       const v1 = workflow({ name: "order", version: "1" })
-        .stepAsync("x", async () => "v1")
+        .step("x", async () => "v1")
         .build();
       const v2 = workflow({ name: "order", version: "2" })
-        .stepAsync("x", async () => "v2")
+        .step("x", async () => "v2")
         .build();
 
       const scoped = InMemoryWorkflowVersionRegistry.for("order").register(v1).register(v2);
@@ -391,10 +391,10 @@ describe("WorkflowVersionRegistry", () => {
       });
 
       const v1 = workflow({ name: "order", version: "1" })
-        .stepAsync("x", async () => "v1")
+        .step("x", async () => "v1")
         .build();
       const v2 = workflow({ name: "order", version: "2" })
-        .stepAsync("x", async () => "v2")
+        .step("x", async () => "v2")
         .build();
 
       registry.register(v1);
@@ -416,10 +416,10 @@ describe("WorkflowVersionRegistry", () => {
       const registry = new InMemoryWorkflowVersionRegistry({ autoDeregister: true });
 
       const v1 = workflow({ name: "order", version: "1" })
-        .stepAsync("x", async () => "v1")
+        .step("x", async () => "v1")
         .build();
       const v2 = workflow({ name: "order", version: "2" })
-        .stepAsync("x", async () => "v2")
+        .step("x", async () => "v2")
         .build();
 
       registry.register(v1);
@@ -446,7 +446,7 @@ describe("WorkflowVersionRegistry", () => {
       });
 
       const v1 = workflow({ name: "job", version: "1" })
-        .stepAsync("x", async () => "v1")
+        .step("x", async () => "v1")
         .build();
       registry.register(v1);
 
@@ -466,13 +466,13 @@ describe("WorkflowVersionRegistry", () => {
       let v1Calls = 0;
       let v2Calls = 0;
       const v1 = workflow<{ n: number }>({ name: "compute", version: "1" })
-        .stepAsync("x", async ({ input }) => {
+        .step("x", async ({ input }) => {
           v1Calls++;
           return input.n;
         })
         .build();
       const v2 = workflow<{ n: number }>({ name: "compute", version: "2" })
-        .stepAsync("x", async ({ input }) => {
+        .step("x", async ({ input }) => {
           v2Calls++;
           return input.n * 2;
         })
@@ -494,13 +494,13 @@ describe("WorkflowVersionRegistry", () => {
       let v1Calls = 0;
       let v2Calls = 0;
       const v1 = workflow<{ n: number }>({ name: "compute", version: "1" })
-        .stepAsync("x", async ({ input }) => {
+        .step("x", async ({ input }) => {
           v1Calls++;
           return input.n;
         })
         .build();
       const v2 = workflow<{ n: number }>({ name: "compute", version: "2" })
-        .stepAsync("x", async ({ input }) => {
+        .step("x", async ({ input }) => {
           v2Calls++;
           return input.n * 2;
         })
@@ -523,13 +523,13 @@ describe("WorkflowVersionRegistry", () => {
       let v1Calls = 0;
       let v2Calls = 0;
       const v1 = workflow<{ n: number }>({ name: "compute", version: "1" })
-        .stepAsync("x", async () => {
+        .step("x", async () => {
           v1Calls++;
           return "v1";
         })
         .build();
       const v2 = workflow<{ n: number }>({ name: "compute", version: "2" })
-        .stepAsync("x", async () => {
+        .step("x", async () => {
           v2Calls++;
           return "v2";
         })
@@ -552,13 +552,13 @@ describe("WorkflowVersionRegistry", () => {
       let v1Calls = 0;
       let v2Calls = 0;
       const v1 = workflow<{ n: number }>({ name: "compute", version: "1" })
-        .stepAsync("x", async () => {
+        .step("x", async () => {
           v1Calls++;
           return "v1";
         })
         .build();
       const v2 = workflow<{ n: number }>({ name: "compute", version: "2" })
-        .stepAsync("x", async () => {
+        .step("x", async () => {
           v2Calls++;
           return "v2";
         })
@@ -583,10 +583,10 @@ describe("WorkflowVersionRegistry — lifecycle stamps on an injected clock", ()
     const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
     const registry = new InMemoryWorkflowVersionRegistry({ clock });
     const v1 = workflow({ name: "stamped", version: "1" })
-      .stepAsync("a", async () => 1)
+      .step("a", async () => 1)
       .build();
     const v2 = workflow({ name: "stamped", version: "2" })
-      .stepAsync("b", async () => 2)
+      .step("b", async () => 2)
       .build();
 
     registry.register(v1);

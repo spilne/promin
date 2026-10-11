@@ -25,11 +25,11 @@ const runner = createWorkflowRunner({ storage, registry });
 // ---------------------------------------------------------------------------
 
 const orderV1 = workflow({ name: "order", version: "1" })
-  .stepAsync("validate", async (input: any) => {
+  .step("validate", async (input: any) => {
     console.log("[v1] Validating order...");
     return { ...input, validated: true };
   })
-  .stepAsync("charge", async (ctx: any) => {
+  .step("charge", async (ctx: any) => {
     console.log("[v1] Charging payment...");
     return { ...ctx, charged: true };
   })
@@ -40,11 +40,11 @@ const orderV1 = workflow({ name: "order", version: "1" })
 // ---------------------------------------------------------------------------
 
 const orderV2 = workflow({ name: "order", version: "2" })
-  .stepAsync("verify", async (input: any) => {
+  .step("verify", async (input: any) => {
     console.log("[v2] Verifying order + fraud check...");
     return { ...input, verified: true, fraudScore: 0.1 };
   })
-  .stepAsync("charge", async (ctx: any) => {
+  .step("charge", async (ctx: any) => {
     console.log("[v2] Charging payment (new provider)...");
     return { ...ctx, charged: true };
   })

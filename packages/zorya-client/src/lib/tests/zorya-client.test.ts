@@ -69,7 +69,7 @@ describe("ZoryaClient.start — typed dispatch", () => {
     const client = new ZoryaClient({ url: "http://test.local", fetch });
 
     const wf = workflow<{ orderId: number }>({ name: "order" })
-      .stepAsync("hello", async ({ input }) => ({ orderId: input.orderId, ok: true }))
+      .step("hello", async ({ input }) => ({ orderId: input.orderId, ok: true }))
       .build();
 
     const handle = await client.start(wf, {
@@ -93,7 +93,7 @@ describe("ZoryaClient.start — typed dispatch", () => {
     const client = new ZoryaClient({ url: "http://test.local", fetch });
 
     const wf = workflow<number>({ name: "noop" })
-      .stepAsync("a", async ({ input }) => input)
+      .step("a", async ({ input }) => input)
       .build();
 
     const handle = await client.start(wf, { input: 1, workflowId: "wf-status-1" });

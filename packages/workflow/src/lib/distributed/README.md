@@ -116,7 +116,7 @@ pass `stepExecutor: new RoutingStepExecutor({ remote: new StepQueueExecutor({ st
   `retry.when` and `fallback` as a `QueuedStepError` with the same `_tag`
   and message. An untagged throw or rejection, or a dead-lettered task, is
   a defect: it fails the step without retry or `onFailure`, like a rejected
-  `.stepAsync()` body. Attempt rows record every attempt, with the worker's
+  `.step()` body. Attempt rows record every attempt, with the worker's
   id as `executorId`.
 - **Registrations have no policies.** `register({ stepName, handler })`
   takes no `retry` / `onFailure`. Worker middleware (`retryMiddleware`,
@@ -282,7 +282,7 @@ from `@promin/workflow/testing`.
   `ctx.prev` is the result of the step's first declared dependency (the input
   for a root step) and `ctx.deps` the results of its declared dependencies
   only, by name — the `prev` and `deps` the inline body gets (a
-  `.parallelSteps()` join gets its branches as `"<block>.<label>"`). Only
+  `.parallel()` join gets its branches as `"<block>.<label>"`). Only
   those results travel on the task. `ctx.attempt` is the runner's attempt
   number; `ctx.workflowId`, `ctx.stepName` and `ctx.signal` complete it.
 - **One attempt, then settle.** Each task is one attempt: the handler runs

@@ -52,7 +52,7 @@ export interface RetryPolicy<E> {
  * failed step, with the `RetryPolicy` defaults once a policy is set (no
  * policy, no retry). Retried by default: typed failures. Never retried:
  * engine control flow, `WorkflowDeadlineError` (the deadline is already
- * spent), a cancel. Defects (untagged throws, a rejected `.stepAsync()`)
+ * spent), a cancel. Defects (untagged throws, a rejected step Promise)
  * only with `retryDefects: true`; `when` then sees them too.
  */
 export interface WorkflowRetryPolicy<E = TaggedError> extends RetryPolicy<E> {

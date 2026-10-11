@@ -35,11 +35,15 @@ export {
   type MapElementOptions,
   type MapOverOptions,
   type MapStepContext,
-  type ParallelStepsOptions,
+  type ParallelOptions,
   type RunChildWorkflow,
   type StepCacheOption,
   type StepContext,
   type StepDefinition,
+  type StepBody,
+  type StepBodyError,
+  type StepBodyOutput,
+  type StepBodyResult,
   type StepEff,
   type StepFailureStrategy,
   type StepKind,
@@ -56,4 +60,5 @@ export type { LoopOptions } from "./steps/loop-step.ts";
 export { MatchError, type MatchParams } from "./steps/match-step.ts";
 export type { BranchError, BranchOutput } from "./steps/parallel-steps.ts";
 export { WorkflowBuilder, flow, workflow } from "./workflow-builder.ts";
+export { WorkflowFragment, step, type FragmentFits } from "./workflow-fragment.ts";
 export { dagToDot, dagToMermaid, toWorkflowDag, type WorkflowDAG } from "./workflow-dag-viz.ts";

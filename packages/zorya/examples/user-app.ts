@@ -18,7 +18,7 @@
 //   No queue, no advertisement, no risk of accidentally claiming someone
 //   else's runs — you only run what you call. Same dashboard visibility.
 //   Two flavors shown:
-//     • `verifyOrder`    — simple `.stepAsync().stepAsync()` chain.
+//     • `verifyOrder`    — simple `.step().step()` chain.
 //     • `researchTopic`  — single `.journaled` step with multiple
 //                          `yield* ctx.activity(...)` calls. Each
 //                          activity result is journaled, so a crash
@@ -41,14 +41,14 @@ const verifyOrder = workflow<{ orderId: number; amountCents: number }>({
   name: "verify-order",
   type: "app",
 })
-  .stepAsync("validate", async ({ input }) => {
+  .step("validate", async ({ input }) => {
     await new Promise((r) => setTimeout(r, 200));
     return {
       valid: input.orderId > 0 && input.amountCents > 0,
       orderId: input.orderId,
     };
   })
-  .stepAsync("score-risk", async ({ prev, input }) => {
+  .step("score-risk", async ({ prev, input }) => {
     await new Promise((r) => setTimeout(r, 300));
     // Toy risk model — orders > $1000 are high risk; even orderIds
     // are flagged as suspicious; risky+invalid are auto-rejected.

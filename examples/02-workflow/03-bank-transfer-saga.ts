@@ -14,7 +14,7 @@ const transfer = workflow<{ from: string; to: string; amount: number }>({
   retry: { maxRetries: 2 },
   compensate: { trigger: "after-retries" },
 })
-  .stepAsync(
+  .step(
     "debit",
     async ({ input }) => {
       const tx = await bankApi.debit(input.from, input.amount);
@@ -26,7 +26,7 @@ const transfer = workflow<{ from: string; to: string; amount: number }>({
       },
     },
   )
-  .stepAsync(
+  .step(
     "credit",
     async ({ input }) => {
       const tx = await bankApi.credit(input.to, input.amount);
@@ -38,7 +38,7 @@ const transfer = workflow<{ from: string; to: string; amount: number }>({
       },
     },
   )
-  .stepAsync("notify", async ({ input }) => {
+  .step("notify", async ({ input }) => {
     await email.send(input.from, `Transferred $${input.amount} to ${input.to}`);
   })
   .build();

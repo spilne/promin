@@ -170,7 +170,7 @@ describe("step-started notices", () => {
         ran.push("root");
         return succeed(input);
       })
-      .parallelSteps("fork", {
+      .parallel("fork", {
         a: ({ prev }) => {
           ran.push("a");
           return succeed(prev + 1);

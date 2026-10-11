@@ -63,12 +63,12 @@ const topRegions = await DataFrame.fromArray(sales)
 // Durable workflow — survives crashes, waits for signals
 declare function submitCheck(input: { userId: string }): Promise<{ checkId: string }>;
 const kyc = workflow<{ userId: string }>({ name: "kyc" })
-  .stepAsync("submit-check", ({ input }) => submitCheck(input))
+  .step("submit-check", ({ input }) => submitCheck(input))
   .waitForSignal<{ passed: boolean }>("result", {
     signalName: "check-done",
     timeoutMs: 30 * 60_000,
   })
-  .stepAsync("decide", async ({ prev }) => (prev.passed ? "approved" : "rejected"))
+  .step("decide", async ({ prev }) => (prev.passed ? "approved" : "rejected"))
   .build();
 
 const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });

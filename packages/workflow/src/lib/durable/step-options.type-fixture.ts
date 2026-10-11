@@ -65,11 +65,11 @@ base.mapOver("m", { array: "arr" }, (n) => succeed(String(n)), {
 });
 
 // ---------------------------------------------------------------------------
-// parallelSteps: per-branch options typed by that branch's output; failure
+// parallel: per-branch options typed by that branch's output; failure
 // handling, compensation and skipping are per branch only.
 // ---------------------------------------------------------------------------
 
-export const _parallelOk = base.parallelSteps(
+export const _parallelOk = base.parallel(
   "p",
   { a: () => succeed(1), b: () => succeed("s") },
   {
@@ -80,40 +80,28 @@ export const _parallelOk = base.parallelSteps(
   },
 );
 
-base.parallelSteps(
+// @ts-expect-error — block-level onFailure: each branch has its own result type
+base.parallel(
   "p",
   { a: () => succeed(1), b: () => succeed("s") },
-  // @ts-expect-error — block-level onFailure: each branch has its own result type
   { onFailure: { fallback: () => ({ a: 0, b: "" }) } },
 );
 
-base.parallelSteps(
-  "p",
-  { a: () => succeed(1) },
-  // @ts-expect-error — block-level compensate: compensate a branch instead
-  { compensate: () => succeed(undefined) },
-);
+// @ts-expect-error — block-level compensate: compensate a branch instead
+base.parallel("p", { a: () => succeed(1) }, { compensate: () => succeed(undefined) });
 
-base.parallelSteps(
-  "p",
-  { a: () => succeed(1) },
-  // @ts-expect-error — block-level skipWhen: skip a branch instead
-  { skipWhen: () => true },
-);
+// @ts-expect-error — block-level skipWhen: skip a branch instead
+base.parallel("p", { a: () => succeed(1) }, { skipWhen: () => true });
 
-base.parallelSteps(
+// @ts-expect-error — a branch fallback must return that branch's output (number)
+base.parallel(
   "p",
   { a: () => succeed(1) },
-  // @ts-expect-error — a branch fallback must return that branch's output (number)
   { branches: { a: { onFailure: { fallback: () => "zero" } } } },
 );
 
-base.parallelSteps(
-  "p",
-  { a: () => succeed(1) },
-  // @ts-expect-error — options for a branch that does not exist
-  { branches: { nope: { retry } } },
-);
+// @ts-expect-error — options for a branch that does not exist
+base.parallel("p", { a: () => succeed(1) }, { branches: { nope: { retry } } });
 
 // ---------------------------------------------------------------------------
 // journaled: no cache, no timeoutMs.
@@ -182,7 +170,7 @@ base.dountil(
   { cache },
 );
 
-base.dowhileAsync(
+base.dowhile(
   "l",
   async () => 1,
   () => false,

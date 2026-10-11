@@ -51,6 +51,15 @@ export function hasStep(params: { readonly seq: StepSeq; readonly name: string }
   return i !== undefined && i < params.seq.length;
 }
 
+/** The step named `name` among the steps of `seq`, if any. */
+export function findStep(params: {
+  readonly seq: StepSeq;
+  readonly name: string;
+}): StepDefinition | undefined {
+  const i = params.seq.store.index.get(params.name);
+  return i !== undefined && i < params.seq.length ? params.seq.store.defs[i] : undefined;
+}
+
 /** The last step of `seq`, if any. */
 export function lastStep(seq: StepSeq): StepDefinition | undefined {
   return seq.length === 0 ? undefined : seq.store.defs[seq.length - 1];

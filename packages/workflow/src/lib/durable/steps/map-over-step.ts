@@ -82,7 +82,7 @@ export function createMapOverStep(params: {
             taskIndex,
             attempt: stepAttempt + elementRetries,
           };
-          return asStepEff({ result: fn(element, ctx), stepName: name });
+          return asStepEff(fn(element, ctx));
         });
         if (elementOptions?.timeoutMs != null) {
           attemptEff = withStepTimeout({

@@ -57,7 +57,7 @@ describe("workflow singleflight", () => {
     const slow = gate();
 
     const wf = workflow({ name: "nonblocking" })
-      .stepAsync("slow", async () => {
+      .step("slow", async () => {
         await slow.promise;
         return { done: true };
       })
@@ -81,7 +81,7 @@ describe("workflow singleflight", () => {
     let executionCount = 0;
 
     const wf = workflow({ name: "singleflight" })
-      .stepAsync("compute", async () => {
+      .step("compute", async () => {
         executionCount++;
         await release.promise;
         return { value: 42 };
@@ -111,7 +111,7 @@ describe("workflow singleflight", () => {
     let executionCount = 0;
 
     const wf = workflow({ name: "triple" })
-      .stepAsync("compute", async () => {
+      .step("compute", async () => {
         executionCount++;
         await release.promise;
         return { ok: true };
@@ -145,7 +145,7 @@ describe("workflow singleflight", () => {
     let executionCount = 0;
 
     const wf = workflow({ name: "independent" })
-      .stepAsync("compute", async () => {
+      .step("compute", async () => {
         executionCount++;
         return { value: executionCount };
       })
@@ -169,7 +169,7 @@ describe("workflow singleflight", () => {
     let executionCount = 0;
 
     const wf = workflow({ name: "cached" })
-      .stepAsync("compute", async () => {
+      .step("compute", async () => {
         executionCount++;
         return { run: executionCount };
       })
@@ -192,7 +192,7 @@ describe("workflow singleflight", () => {
     let executionCount = 0;
 
     const wf = workflow({ name: "suspended-test" })
-      .stepAsync("first", async () => {
+      .step("first", async () => {
         executionCount++;
         return { step: 1 };
       })
@@ -217,7 +217,7 @@ describe("workflow singleflight", () => {
     let executionCount = 0;
 
     const wf = workflow({ name: "race-test" })
-      .stepAsync("compute", async () => {
+      .step("compute", async () => {
         executionCount++;
         await release.promise;
         return { value: 42 };
@@ -247,7 +247,7 @@ describe("workflow singleflight", () => {
     const slow = gate();
 
     const wf = workflow({ name: "no-idempotency" })
-      .stepAsync("slow", async () => {
+      .step("slow", async () => {
         await slow.promise;
         return { done: true };
       })
@@ -277,7 +277,7 @@ describe("workflow singleflight", () => {
     const deriveId = (input: { userId: string; orderId: string }) =>
       `order:${input.userId}:${input.orderId}`;
     const wf = workflow({ name: "derive" })
-      .stepAsync("compute", async () => ({ done: true }))
+      .step("compute", async () => ({ done: true }))
       .build({ idempotency });
 
     const input = { userId: "u1", orderId: "o5" };
@@ -295,7 +295,7 @@ describe("workflow singleflight", () => {
 
     const deriveId = (input: { id: string }) => `key:${input.id}`;
     const wf = workflow({ name: "derive-dedup" })
-      .stepAsync("compute", async () => {
+      .step("compute", async () => {
         executions++;
         await release.promise;
         return { value: 42 };

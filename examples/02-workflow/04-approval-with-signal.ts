@@ -12,7 +12,7 @@ const runner = createWorkflowRunner({ storage });
 const approval = workflow<{ requestId: string; requestedBy: string }>({
   name: "approval-flow",
 })
-  .stepAsync("submit", async ({ input }) => {
+  .step("submit", async ({ input }) => {
     await notifyManager(input.requestId, input.requestedBy);
     return { submitted: true };
   })
@@ -20,7 +20,7 @@ const approval = workflow<{ requestId: string; requestedBy: string }>({
     signalName: "manager-decision",
     timeoutMs: 24 * 60 * 60_000, // 24 hours
   })
-  .stepAsync("process", async ({ prev }) => {
+  .step("process", async ({ prev }) => {
     if (!prev.approved) {
       return { status: "rejected" as const, by: prev.approvedBy };
     }

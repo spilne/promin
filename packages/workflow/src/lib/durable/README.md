@@ -12,7 +12,7 @@ import { succeed } from "@spilne/perfect-core";
 
 const onboard = workflow<{ userId: string }>({ name: "onboard-user" })
   .step("fetch", ({ input }) => succeed({ id: input.userId, email: `${input.userId}@example.com` }))
-  .stepAsync("provision", async ({ prev }) => ({ accountId: `acct-${prev.id}` }))
+  .step("provision", async ({ prev }) => ({ accountId: `acct-${prev.id}` }))
   .step("welcome", ({ prev }) => succeed(`welcome ${prev.accountId}`))
   .build();
 
@@ -43,20 +43,25 @@ const total = await flow<{ prices: number[] }>("sum")
 
 ## Step bodies
 
-`.step()` takes a function returning a perfect `Eff<A, Throws<E>>`
-(`StepEff<A, E>`). The typed failure `E` must be a tagged error; it is what
-`retry` and `onFailure` act on, and it is collected into the workflow's error
-type. Anything else that goes wrong (a throw, a rejected promise) is a
-**defect**: it fails the step without retry.
+A step function (`StepBody`) returns one of:
 
-| Method                                  | Body returns                  | Failure                                                         |
-| --------------------------------------- | ----------------------------- | --------------------------------------------------------------- |
-| `.step(name, fn, options?)`             | `Eff` (or a Promise of one)   | typed `E`; a throw is a defect                                  |
-| `.stepAsync(name, fn, options?)`        | `Promise<A>`                  | a rejection is a defect                                         |
-| `.mapOver` / `.mapOverAsync`            | `Eff` / `Promise` per element | as above, per element                                           |
-| `.dowhile` / `.dountil`                 | `Eff` per iteration           | typed `E`                                                       |
-| `.dowhileAsync` / `.dountilAsync`       | value or `Promise`            | a rejection is a defect                                         |
-| `.branch` / `.match` / `.parallelSteps` | `Eff` per branch / case       | typed `E`; a throw from `condition` / `on` / `when` is a defect |
+- a perfect `Eff<A, Throws<E>>` (`StepEff<A, E>`). The typed failure `E` must
+  be a tagged error; it is what `retry` and `onFailure` act on, and it is
+  collected into the workflow's error type.
+- a `Promise<A>` (an `async` function). A rejection is a **defect**: it fails
+  the step without retry or `onFailure`. A Promise that resolves to an `Eff`
+  runs that `Eff`, so its typed failures stay typed.
+- a plain value `A`.
+
+A synchronous throw is a defect too. Every step kind that takes a function
+accepts the same three shapes:
+
+| Method                             | Body                         | Failure                                                        |
+| ---------------------------------- | ---------------------------- | -------------------------------------------------------------- |
+| `.step(name, fn, options?)`        | `StepBody`                   | typed `E` from an `Eff`; a throw or rejection is a defect      |
+| `.mapOver`                         | `StepBody` per element       | as above, per element                                          |
+| `.dowhile` / `.dountil`            | `StepBody` per iteration     | as above, per iteration                                        |
+| `.branch` / `.match` / `.parallel` | `StepBody` per branch / case | as above; a throw from `condition` / `on` / `when` is a defect |
 
 ```typescript
 import { createWorkflowRunner, InMemoryWorkflowStorage, workflow } from "@promin/workflow";
@@ -80,7 +85,7 @@ const checkout = workflow<{ orderId: string }>({ name: "checkout" })
       ),
     { retry: { maxRetries: 3, when: (e) => e._tag === "PaymentDeclined" } },
   )
-  .stepAsync("receipt", async ({ prev }) => {
+  .step("receipt", async ({ prev }) => {
     await sendReceipt(prev.chargeId);
     return prev.chargeId;
   })
@@ -160,7 +165,7 @@ yet saved when the process died runs again. A typed element failure past
 step-level options (`codec`, `onFailure`, `skipValue`, `compensate`, `cache`)
 apply to the `T[]` result.
 
-### parallelSteps, branch, match
+### parallel, branch, match
 
 ```typescript
 import { workflow } from "@promin/workflow";
@@ -169,7 +174,7 @@ import { succeed } from "@spilne/perfect-core";
 const route = workflow<{ id: string; total: number; kind: "express" | "standard" }>({
   name: "route",
 })
-  .parallelSteps(
+  .parallel(
     "enrich",
     {
       user: ({ input }) => succeed({ userId: input.id }),
@@ -192,12 +197,16 @@ const route = workflow<{ id: string; total: number; kind: "express" | "standard"
   .build();
 ```
 
-- `parallelSteps` forks into one DAG step per branch (`"enrich.user"`,
+- `parallel` forks into one DAG step per branch (`"enrich.user"`,
   `"enrich.risk"`), each retried, cached and distributed on its own, then
   joins them into a keyed record. Block-level `timeoutMs` / `retry` /
   `needs` / `priority` / `queue` / `cache` are defaults for every branch;
   `branches` sets per-branch options; `codec` encodes the joined record.
-- `branch` and `match` are one DAG node each. A selector with no matching case
+  `.parallel(name, { dependsOn }, branches)` forks from the named steps
+  instead of the head. (`ctx.parallel()` inside a `.journaled()` body is a
+  different thing: in-process activities within one step.)
+- `branch` and `match` are one DAG node each. `.branch(name, { dependsOn,
+condition, ifTrue, ifFalse })` runs after the named steps. A selector with no matching case
   and no `default` fails with the typed `MatchError`. A throw from
   `condition`, `on` or `when` is a defect.
 
@@ -215,7 +224,7 @@ const wait = workflow<{ jobId: string }>({ name: "wait-ready" })
     (_ctx, iter) => succeed(iter * 10),
     (processed) => processed < 30,
   )
-  .dountilAsync(
+  .dountil(
     "ready",
     ({ input }) => pollStatus(input.jobId),
     (s) => s === "ready",
@@ -242,14 +251,14 @@ deliberate short-circuit, not a failure. `run()` rejects with
 Every step kind accepts the options it can honour, and an option it cannot
 honour is a compile error.
 
-| Option                       | step / stepAsync / branch / match | mapOver             | parallelSteps                | journaled | subworkflow | loops | tripwire |
-| ---------------------------- | --------------------------------- | ------------------- | ---------------------------- | --------- | ----------- | ----- | -------- |
-| `codec`                      | yes                               | array (+ `element`) | joined record (+ per branch) | yes       | yes         | yes   | yes      |
-| `retry`, `timeoutMs`         | yes                               | yes (+ `element`)   | default + per branch         | `retry`   | `retry`     | yes   | –        |
-| `onFailure`, `compensate`    | yes                               | yes                 | per branch                   | yes       | yes         | yes   | –        |
-| `skipWhen`, `skipValue`      | yes                               | yes                 | per branch                   | yes       | yes         | yes   | –        |
-| `needs`, `priority`, `queue` | yes                               | yes                 | default + per branch         | yes       | yes         | yes   | –        |
-| `cache`                      | yes                               | yes                 | default + per branch         | –         | –           | –     | –        |
+| Option                       | step / branch / match | mapOver             | parallel                     | journaled | subworkflow | loops | tripwire |
+| ---------------------------- | --------------------- | ------------------- | ---------------------------- | --------- | ----------- | ----- | -------- |
+| `codec`                      | yes                   | array (+ `element`) | joined record (+ per branch) | yes       | yes         | yes   | yes      |
+| `retry`, `timeoutMs`         | yes                   | yes (+ `element`)   | default + per branch         | `retry`   | `retry`     | yes   | –        |
+| `onFailure`, `compensate`    | yes                   | yes                 | per branch                   | yes       | yes         | yes   | –        |
+| `skipWhen`, `skipValue`      | yes                   | yes                 | per branch                   | yes       | yes         | yes   | –        |
+| `needs`, `priority`, `queue` | yes                   | yes                 | default + per branch         | yes       | yes         | yes   | –        |
+| `cache`                      | yes                   | yes                 | default + per branch         | –         | –           | –     | –        |
 
 - `timeoutMs` is per attempt: the attempt is interrupted and fails with the
   typed `StepTimeoutError`, so `retry` / `onFailure` see it. The timer runs on
@@ -441,10 +450,10 @@ const transfer = workflow<{ from: string; to: string; amount: number }>({
     },
   },
 })
-  .stepAsync("debit", ({ input }) => bank.debit(input.from, input.amount), {
+  .step("debit", ({ input }) => bank.debit(input.from, input.amount), {
     compensate: ({ result }) => bank.refund(result.txId),
   })
-  .stepAsync("credit", ({ input }) => bank.credit(input.to, input.amount))
+  .step("credit", ({ input }) => bank.credit(input.to, input.amount))
   .step("notify", ({ prev }) => succeed(prev.txId))
   .build();
 ```
@@ -576,6 +585,11 @@ const handle = await runner.start({
 await handle.signal({ signalName: "manager-decision", payload: { approved: true } });
 ```
 
+- `.approval(name, { signalName?, timeoutMs? })` is `.waitForSignal()` with
+  the defaults for a human decision: signal `"<name>-approved"`, payload
+  `{ approved: boolean }`.
+- `.sleep()`, `.waitForSignal()` and `.approval()` take `dependsOn` to start
+  after named steps instead of the head.
 - `.sleep()` passes its predecessor's value through. The wake time and a
   signal's deadline are computed once, on the step's first execution, and
   stored; resuming early never moves them. A signal wait past its deadline

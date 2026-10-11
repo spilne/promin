@@ -64,14 +64,14 @@ export function buildDataPipelineWorkflow() {
       name: "data-pipeline",
       version: "1",
     })
-      .stepAsync(
+      .step(
         "ingest-dataset",
         async (): Promise<IngestResult> => {
           throw new Error("placeholder — worker runs the real handler");
         },
         { needs: ["ingest"] },
       )
-      .stepAsync(
+      .step(
         "transform-shard-a",
         { dependsOn: ["ingest-dataset"] },
         async (): Promise<ShardResult> => {
@@ -79,7 +79,7 @@ export function buildDataPipelineWorkflow() {
         },
         { needs: ["transform"] },
       )
-      .stepAsync(
+      .step(
         "transform-shard-b",
         { dependsOn: ["ingest-dataset"] },
         async (): Promise<ShardResult> => {
@@ -87,7 +87,7 @@ export function buildDataPipelineWorkflow() {
         },
         { needs: ["transform"] },
       )
-      .stepAsync(
+      .step(
         "transform-shard-c",
         { dependsOn: ["ingest-dataset"] },
         async (): Promise<ShardResult> => {
@@ -95,7 +95,7 @@ export function buildDataPipelineWorkflow() {
         },
         { needs: ["transform"] },
       )
-      .stepAsync(
+      .step(
         "reduce-results",
         { dependsOn: ["transform-shard-a", "transform-shard-b", "transform-shard-c"] },
         async (): Promise<ReduceResult> => {
@@ -103,7 +103,7 @@ export function buildDataPipelineWorkflow() {
         },
         { needs: ["loader"] },
       )
-      .stepAsync(
+      .step(
         "publish-report",
         { dependsOn: ["reduce-results"] },
         async (): Promise<ReportResult> => {

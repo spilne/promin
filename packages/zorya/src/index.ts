@@ -1,6 +1,7 @@
 // Public API exports
 
 export { ZoryaServer } from "./server/server.ts";
+export { ZoryaServerBuilder } from "./server/server-builder.ts";
 export {
   type ZoryaServerConfig,
   type ListenOptions,

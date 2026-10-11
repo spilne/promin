@@ -187,7 +187,7 @@ describe("queued step context — ctx.prev / ctx.deps match the inline runner", 
         seen["d"] = { deps: { ...deps } };
         return succeed(deps.b + deps.c);
       })
-      .parallelSteps("p", {
+      .parallel("p", {
         x: ({ prev }) => ((seen["p.x"] = { prev }), succeed(prev + 1)),
         y: ({ prev }) => ((seen["p.y"] = { prev }), succeed(prev - 1)),
       })
@@ -481,7 +481,7 @@ describe("queued step policies — the definition's retry, timeoutMs and onFailu
     // Inline: the body never settles on its own; the timeout interrupts it.
     const inline = await runInline({
       wf: workflow<number>({ name: "timeout" })
-        .stepAsync("s", () => new Promise<string>(() => {}), {
+        .step("s", () => new Promise<string>(() => {}), {
           timeoutMs: 100,
           retry: { maxRetries: 1, baseDelayMs: 10 },
         })
@@ -492,7 +492,7 @@ describe("queued step policies — the definition's retry, timeoutMs and onFailu
     const signals: AbortSignal[] = [];
     const distributed = await runDistributed({
       wf: workflow<number>({ name: "timeout" })
-        .stepAsync("s", () => new Promise<string>(() => {}), {
+        .step("s", () => new Promise<string>(() => {}), {
           timeoutMs: 100,
           retry: { maxRetries: 1, baseDelayMs: 10 },
         })
@@ -527,7 +527,7 @@ describe("queued step policies — the definition's retry, timeoutMs and onFailu
   it("an untagged failure is a defect, as inline: no retry, no onFailure", async () => {
     const definition = () =>
       workflow<number>({ name: "defect" })
-        .stepAsync(
+        .step(
           "s",
           async () => {
             throw new Error("plain throw");

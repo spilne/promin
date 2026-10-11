@@ -34,7 +34,7 @@ const v1 = workflow<GreeterInput>({
   type: "demo",
   version: "1",
 })
-  .stepAsync("greet", async ({ input }) => {
+  .step("greet", async ({ input }) => {
     await sleep(delay(200, 600));
     return { message: `Hello, ${input.name ?? "world"}!` };
   })
@@ -49,11 +49,11 @@ const v2 = workflow<GreeterInput>({
   onVersionMismatch: "drain",
   previousVersions: [v1],
 })
-  .stepAsync("greet", async ({ input }) => {
+  .step("greet", async ({ input }) => {
     await sleep(delay(200, 600));
     return { message: `Hello, ${input.name ?? "world"}!` };
   })
-  .stepAsync("farewell", async ({ prev }) => {
+  .step("farewell", async ({ prev }) => {
     await sleep(delay(150, 400));
     return {
       ...prev,
@@ -69,18 +69,18 @@ const v3 = workflow<GreeterInput>({
   onVersionMismatch: "drain",
   previousVersions: [v1, v2],
 })
-  .stepAsync("greet", async ({ input }) => {
+  .step("greet", async ({ input }) => {
     await sleep(delay(200, 600));
     return { message: `Hello, ${input.name ?? "world"}!` };
   })
-  .stepAsync("farewell", async ({ prev }) => {
+  .step("farewell", async ({ prev }) => {
     await sleep(delay(150, 400));
     return {
       ...prev,
       farewell: `Bye, ${prev.message.replace("Hello, ", "").replace("!", "")}.`,
     };
   })
-  .stepAsync("audit", async ({ prev }) => {
+  .step("audit", async ({ prev }) => {
     await sleep(delay(100, 300));
     return { ...prev, auditedAt: new Date().toISOString() };
   })

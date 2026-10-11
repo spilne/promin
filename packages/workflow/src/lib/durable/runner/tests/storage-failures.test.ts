@@ -99,7 +99,7 @@ describe("a storage write that fails once", () => {
       name: "blip-checkpoint",
       retry: { maxRetries: 1, baseDelayMs: 1 },
     })
-      .stepAsync("charge", async ({ input }) => {
+      .step("charge", async ({ input }) => {
         charges++;
         return input;
       })
@@ -141,7 +141,7 @@ describe("a storage write that fails once", () => {
       name: "blip-result",
       retry: { maxRetries: 1, baseDelayMs: 1 },
     })
-      .stepAsync("charge", async ({ input }) => {
+      .step("charge", async ({ input }) => {
         charges++;
         return input;
       })
@@ -161,7 +161,7 @@ describe("a storage write that fails once", () => {
     const writes = failing(storage, "saveStepAttempt");
     let charges = 0;
     const wf = workflow<number>({ name: "blip-attempt" })
-      .stepAsync("charge", async ({ input }) => {
+      .step("charge", async ({ input }) => {
         charges++;
         return input;
       })
@@ -241,13 +241,13 @@ describe("a storage write that fails once", () => {
     const gate = deferred();
     const ran: string[] = [];
     const wf = workflow<number>({ name: "blip-heartbeat" })
-      .stepAsync("long", async ({ input }) => {
+      .step("long", async ({ input }) => {
         started.resolve();
         await gate.promise;
         ran.push("long");
         return input;
       })
-      .stepAsync("next", async ({ prev }) => {
+      .step("next", async ({ prev }) => {
         ran.push("next");
         return prev;
       })
@@ -292,12 +292,12 @@ describe("a checkpoint write that keeps failing", () => {
           },
         },
       })
-        .stepAsync("reserve", async ({ input }) => input, {
+        .step("reserve", async ({ input }) => input, {
           compensate: async () => {
             compensated++;
           },
         })
-        .stepAsync("charge", async ({ prev }) => {
+        .step("charge", async ({ prev }) => {
           charges++;
           return prev as number;
         })
@@ -367,13 +367,13 @@ describe("lost lock", () => {
       });
     };
     const wf = workflow<number>({ name: "lock-lost" })
-      .stepAsync("long", async ({ input }) => {
+      .step("long", async ({ input }) => {
         started.resolve();
         await gate.promise;
         ran.push("long");
         return input;
       })
-      .stepAsync("next", async ({ prev }) => {
+      .step("next", async ({ prev }) => {
         ran.push("next");
         return prev;
       })

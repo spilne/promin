@@ -4,20 +4,20 @@ import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 
-// Reproducer for promin-4ace: a workflow whose `.stepAsync()` body throws
+// Reproducer for promin-4ace: a workflow whose `.step()` body throws
 // used to leave the workflow row stuck in `status = "pending"` with no
-// step rows and no error recorded. `.stepAsync()` lifts its body with
+// step rows and no error recorded. `.step()` lifts its body with
 // defect semantics (a rejection is a defect, not a typed failure), and
 // settling the step batch without catching defects let the failure escape
 // past the `saveStepFailure` path. Fixed by catching defects there too.
 
-describe("stepAsync throwing body — promin-4ace reproducer", () => {
-  it("lands the workflow in status=failed when stepAsync throws", async () => {
+describe("Promise-returning step throwing body — promin-4ace reproducer", () => {
+  it("lands the workflow in status=failed when an async step throws", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<{ input: number }>({ name: "throwy" })
-      .stepAsync("boom", async () => {
+      .step("boom", async () => {
         throw new Error("boom");
       })
       .build();
@@ -70,12 +70,12 @@ describe("stepAsync throwing body — promin-4ace reproducer", () => {
     expect(state?.steps["boom"]?.error).toContain("raw rejection");
   });
 
-  it("sync throw inside stepAsync also fails the workflow", async () => {
+  it("sync throw inside a step body also fails the workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "sync-throw" })
-      .stepAsync("boom", (() => {
+      .step("boom", (() => {
         throw new Error("sync");
       }) as () => Promise<number>)
       .build();

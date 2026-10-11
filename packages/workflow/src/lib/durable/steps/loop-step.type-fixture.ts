@@ -1,8 +1,8 @@
 // ---------------------------------------------------------------------------
 // Compile-time fixtures for loop body types. `.dowhile()` / `.dountil()`
-// take an `Eff` body (like `.step()`): the condition sees the effect's
-// value, and its typed failures join the builder's Error channel.
-// `.dowhileAsync()` / `.dountilAsync()` take a value or Promise body.
+// take a `.step()`-style body (an `Eff`, a Promise or a value): the
+// condition sees the produced value, and an `Eff`'s typed failures join the
+// builder's Error channel.
 //
 // Not imported anywhere at runtime. Pure type surface.
 // ---------------------------------------------------------------------------
@@ -38,17 +38,9 @@ const untilLoop = base.dountil(
 );
 assertType<Equals<CurrentOf<typeof untilLoop>, string>>(true);
 
-// A plain value is not an Eff body: use `.dowhileAsync()`.
-base.dowhile(
-  "plain",
-  // @ts-expect-error — `.dowhile()` bodies return an Eff
-  () => 1,
-  () => false,
-);
-
-// Promise (or plain value) bodies go through the Async variants; their
-// rejections are defects, so nothing joins the Error channel.
-const asyncLoop = base.dowhileAsync(
+// Promise and plain-value bodies: a rejection or throw is a defect, so
+// nothing joins the Error channel.
+const asyncLoop = base.dowhile(
   "a",
   async (_ctx, iter) => ({ iter }),
   (r) => r.iter < 3,
@@ -56,7 +48,7 @@ const asyncLoop = base.dowhileAsync(
 assertType<Equals<CurrentOf<typeof asyncLoop>, { iter: number }>>(true);
 assertType<Equals<ErrorOf<typeof asyncLoop>, LoopLimitExceededError>>(true);
 
-const syncUntil = base.dountilAsync(
+const syncUntil = base.dountil(
   "s",
   (_ctx, iter) => iter,
   (n) => n >= 3,

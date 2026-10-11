@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// `.step()` / `.stepAsync()` — one user function as one DAG node.
+// `.step()` — one user function as one DAG node.
 // ---------------------------------------------------------------------------
 
 import { sync } from "@spilne/perfect-core";
@@ -57,7 +57,7 @@ export function createBasicStep(params: {
         ctx: isLinear
           ? (ctx as StepContext<unknown, unknown>)
           : linearStepContext({ dependsOn, exec }),
-        runBody: () => asStepEff({ result: fn(ctx), stepName: name }),
+        runBody: () => asStepEff(fn(ctx)),
         stepName: name,
         namespace: params.cacheNamespace,
         codec,

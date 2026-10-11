@@ -33,10 +33,10 @@ declare function refund(chargeId: string): Promise<void>;
 declare function ship(chargeId: string): Promise<{ trackingId: string }>;
 
 const orderFlow = workflow<{ orderId: string }>({ name: "process-order" })
-  .stepAsync("charge", ({ input }) => charge(input.orderId), {
+  .step("charge", ({ input }) => charge(input.orderId), {
     compensate: ({ result }) => refund(result.chargeId),
   })
-  .stepAsync("ship", ({ prev }) => ship(prev.chargeId))
+  .step("ship", ({ prev }) => ship(prev.chargeId))
   .build();
 
 const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });

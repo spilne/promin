@@ -36,6 +36,12 @@ const registry = new MapActivityRegistry({
   "transform.exclaim": () => (ctx) => succeed(`${ctx.prev}!`),
 
   "transform.identity": () => (ctx) => succeed(ctx.prev),
+
+  "predicate.long": () => (ctx) => succeed(String(ctx.prev).length > 3),
+
+  "transform.true": () => () => succeed("long"),
+
+  "transform.false": () => () => succeed("short"),
 });
 
 // ---------------------------------------------------------------------------
@@ -80,6 +86,46 @@ describe("WorkflowSchema validation", () => {
       ],
     };
     expect(() => validateWorkflowSchema(schema)).not.toThrow();
+  });
+
+  it("validates sleep, signal, approval, branch and parallel step schemas", () => {
+    const schema: WorkflowSchema = {
+      version: 1,
+      name: "parity",
+      steps: [
+        { type: "step", name: "start", dependsOn: [], activityRef: "transform.identity" },
+        { type: "sleep", name: "pause", dependsOn: ["start"], ms: 1 },
+        {
+          type: "parallel",
+          name: "fanout",
+          dependsOn: ["pause"],
+          branches: {
+            upper: { activityRef: "transform.uppercase" },
+            reverse: { activityRef: "transform.reverse" },
+          },
+        },
+        {
+          type: "branch",
+          name: "route",
+          dependsOn: ["start"],
+          conditionRef: "predicate.long",
+          ifTrue: { activityRef: "transform.true" },
+          ifFalse: { activityRef: "transform.false" },
+        },
+        { type: "signal", name: "wait", dependsOn: ["route"], signalName: "go", timeoutMs: 10 },
+        { type: "approval", name: "approve", dependsOn: ["wait"], signalName: "approved" },
+      ],
+    };
+    expect(() => validateWorkflowSchema(schema)).not.toThrow();
+  });
+
+  it("rejects a parallel branch without an activityRef", () => {
+    const result = validateWorkflowSchemaSafe({
+      version: 1,
+      name: "bad-parallel",
+      steps: [{ type: "parallel", name: "p", dependsOn: [], branches: { a: { config: {} } } }],
+    });
+    expect(result.success).toBe(false);
   });
 
   it("validates schema with UI metadata", () => {
@@ -226,10 +272,262 @@ describe("compileWorkflow", () => {
   });
 
   // ---------------------------------------------------------------------------
+  // sleep / signal / approval / branch / parallel
+  // ---------------------------------------------------------------------------
+
+  describe("sleep, signal, approval, branch and parallel nodes", () => {
+    it("compiles branch nodes", async () => {
+      const definition = compileWorkflow({
+        schema: {
+          version: 1,
+          name: "branch-schema",
+          steps: [
+            { type: "step", name: "start", dependsOn: [], activityRef: "transform.identity" },
+            {
+              type: "branch",
+              name: "route",
+              dependsOn: ["start"],
+              conditionRef: "predicate.long",
+              ifTrue: { activityRef: "transform.true" },
+              ifFalse: { activityRef: "transform.false" },
+            },
+          ],
+        },
+        registry,
+      });
+
+      await expect(
+        runner.run({ workflow: definition, workflowId: "compile-branch-1", input: "hello" }),
+      ).resolves.toBe("long");
+      await expect(
+        runner.run({ workflow: definition, workflowId: "compile-branch-2", input: "hi" }),
+      ).resolves.toBe("short");
+    });
+
+    it("compiles parallel nodes", async () => {
+      const definition = compileWorkflow({
+        schema: {
+          version: 1,
+          name: "parallel-schema",
+          steps: [
+            { type: "step", name: "start", dependsOn: [], activityRef: "transform.identity" },
+            {
+              type: "parallel",
+              name: "fanout",
+              dependsOn: ["start"],
+              branches: {
+                upper: { activityRef: "transform.uppercase" },
+                reverse: { activityRef: "transform.reverse" },
+              },
+            },
+          ],
+        },
+        registry,
+      });
+
+      await expect(
+        runner.run({ workflow: definition, workflowId: "compile-parallel-1", input: "abc" }),
+      ).resolves.toEqual({ upper: "ABC", reverse: "cba" });
+      expect(definition.dag.steps.map((s) => s.name).sort()).toEqual([
+        "fanout",
+        "fanout.reverse",
+        "fanout.upper",
+        "start",
+      ]);
+    });
+
+    it("gives a root parallel node the workflow input", async () => {
+      const definition = compileWorkflow({
+        schema: {
+          version: 1,
+          name: "root-parallel-schema",
+          steps: [
+            {
+              type: "parallel",
+              name: "fanout",
+              dependsOn: [],
+              branches: { upper: { activityRef: "transform.uppercase" } },
+            },
+          ],
+        },
+        registry,
+      });
+
+      await expect(
+        runner.run({ workflow: definition, workflowId: "compile-parallel-root", input: "abc" }),
+      ).resolves.toEqual({ upper: "ABC" });
+    });
+
+    it("compiles sleep nodes that pass their dependency's value through", async () => {
+      const definition = compileWorkflow({
+        schema: {
+          version: 1,
+          name: "sleep-schema",
+          steps: [
+            { type: "step", name: "start", dependsOn: [], activityRef: "transform.uppercase" },
+            { type: "sleep", name: "pause", dependsOn: ["start"], ms: 0 },
+            {
+              type: "step",
+              name: "finish",
+              dependsOn: ["pause"],
+              activityRef: "transform.exclaim",
+            },
+          ],
+        },
+        registry,
+      });
+
+      // The first run suspends on the timer; the run after it is due wakes.
+      const first = await runner.runSafe({
+        workflow: definition,
+        workflowId: "compile-sleep-1",
+        input: "zzz",
+      });
+      expect((first.error as { _tag?: string } | null)?._tag).toBe("WorkflowSuspendedError");
+      await expect(
+        runner.run({ workflow: definition, workflowId: "compile-sleep-1", input: "zzz" }),
+      ).resolves.toBe("ZZZ!");
+    });
+
+    it("compiles signal nodes", async () => {
+      const localStorage = new InMemoryWorkflowStorage();
+      const localRunner = createWorkflowRunner({ storage: localStorage });
+      const definition = compileWorkflow({
+        schema: {
+          version: 1,
+          name: "signal-schema",
+          steps: [
+            { type: "step", name: "start", dependsOn: [], activityRef: "transform.identity" },
+            { type: "signal", name: "wait", dependsOn: ["start"], signalName: "go" },
+          ],
+        },
+        registry,
+      });
+
+      const first = await localRunner.runSafe({
+        workflow: definition,
+        workflowId: "compile-signal-1",
+        input: "x",
+      });
+      expect((first.error as { _tag?: string } | null)?._tag).toBe("WorkflowSuspendedError");
+      await localStorage.deliverSignal({
+        workflowId: "compile-signal-1",
+        signalName: "go",
+        payload: { n: 1 },
+      });
+      await expect(
+        localRunner.run({ workflow: definition, workflowId: "compile-signal-1", input: "x" }),
+      ).resolves.toEqual({ n: 1 });
+    });
+
+    it("compiles approval nodes as waitForSignal sugar", async () => {
+      const localStorage = new InMemoryWorkflowStorage();
+      const localRunner = createWorkflowRunner({ storage: localStorage });
+      const definition = compileWorkflow({
+        schema: {
+          version: 1,
+          name: "approval-schema",
+          steps: [
+            { type: "step", name: "start", dependsOn: [], activityRef: "transform.identity" },
+            { type: "approval", name: "approve", dependsOn: ["start"] },
+            {
+              type: "step",
+              name: "finish",
+              dependsOn: ["approve"],
+              activityRef: "transform.identity",
+            },
+          ],
+        },
+        registry,
+      });
+
+      await localRunner.runSafe({
+        workflow: definition,
+        workflowId: "compile-approval-1",
+        input: "go",
+      });
+      // The default signal name is "<step>-approved".
+      await localStorage.deliverSignal({
+        workflowId: "compile-approval-1",
+        signalName: "approve-approved",
+        payload: { approved: true },
+      });
+
+      await expect(
+        localRunner.run({ workflow: definition, workflowId: "compile-approval-1", input: "go" }),
+      ).resolves.toEqual({ approved: true });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Validation errors
   // ---------------------------------------------------------------------------
 
   describe("validation errors", () => {
+    it("rejects unknown activity refs in branch and parallel nodes", () => {
+      let issues: string[] = [];
+      try {
+        compileWorkflow({
+          schema: {
+            version: 1,
+            name: "bad-refs",
+            steps: [
+              {
+                type: "branch",
+                name: "route",
+                dependsOn: [],
+                conditionRef: "missing.condition",
+                ifTrue: { activityRef: "transform.true" },
+                ifFalse: { activityRef: "missing.false" },
+              },
+              {
+                type: "parallel",
+                name: "fanout",
+                dependsOn: ["route"],
+                branches: { a: { activityRef: "missing.branch" } },
+              },
+            ],
+          },
+          registry,
+        });
+      } catch (e) {
+        expect(e).toBeInstanceOf(WorkflowCompilationError);
+        issues = (e as WorkflowCompilationError).issues;
+      }
+      expect(issues).toHaveLength(3);
+      expect(issues[0]).toContain('Branch step "route" condition references unknown activity');
+      expect(issues[1]).toContain('Branch step "route" ifFalse references unknown activity');
+      expect(issues[2]).toContain(
+        'Parallel step "fanout" branch "a" references unknown activity "missing.branch"',
+      );
+    });
+
+    it("rejects a parallel node without branches", () => {
+      expect(() =>
+        compileWorkflow({
+          schema: {
+            version: 1,
+            name: "empty-parallel",
+            steps: [{ type: "parallel", name: "fanout", dependsOn: [], branches: {} }],
+          },
+          registry,
+        }),
+      ).toThrow('Parallel step "fanout" requires at least one branch');
+    });
+
+    it("rejects a signal node depending on a missing step", () => {
+      expect(() =>
+        compileWorkflow({
+          schema: {
+            version: 1,
+            name: "bad-signal-dep",
+            steps: [{ type: "signal", name: "wait", dependsOn: ["nope"], signalName: "go" }],
+          },
+          registry,
+        }),
+      ).toThrow('Step "wait" depends on "nope" which does not exist');
+    });
+
     it("rejects unknown activity ref", () => {
       expect(() =>
         compileWorkflow({

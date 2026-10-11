@@ -193,7 +193,7 @@ function deploy(params: { reclaimAfterMs?: number } = {}): Deployment {
   return dep;
 }
 
-const asDefs = (...wfs: unknown[]) => wfs as Workflow<unknown, unknown>[];
+const asDefs = (...wfs: Workflow<unknown, unknown>[]) => wfs;
 
 describe("worker-driven runs", () => {
   it("never drives more than `concurrency` runs at once, and completes them all", async () => {

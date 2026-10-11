@@ -50,7 +50,7 @@ describe("workflow — step result codec round-trip on replay", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow({ name: "date-rt" })
-      .stepAsync("produce", async () => new Date("2026-04-16T12:00:00Z"))
+      .step("produce", async () => new Date("2026-04-16T12:00:00Z"))
       .build();
 
     const r1 = await runner.run({ workflow: wf, workflowId: "date-rt-1", input: {} });
@@ -67,7 +67,7 @@ describe("workflow — step result codec round-trip on replay", () => {
     const big = 12345678901234567890n;
 
     const wf = workflow({ name: "bigint-rt" })
-      .stepAsync("produce", async () => big)
+      .step("produce", async () => big)
       .build();
 
     const r1 = await runner.run({ workflow: wf, workflowId: "bi-1", input: {} });
@@ -83,7 +83,7 @@ describe("workflow — step result codec round-trip on replay", () => {
     const storage = new JsonRoundTripStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow({ name: "map-rt" })
-      .stepAsync(
+      .step(
         "produce",
         async () =>
           new Map<Date, bigint>([
@@ -110,7 +110,7 @@ describe("workflow — step result codec round-trip on replay", () => {
     const storage = new JsonRoundTripStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow({ name: "set-rt" })
-      .stepAsync("produce", async () => new Set(["a", "b", "c"]))
+      .step("produce", async () => new Set(["a", "b", "c"]))
       .build();
 
     const r1 = await runner.run({ workflow: wf, workflowId: "set-1", input: {} });
@@ -125,7 +125,7 @@ describe("workflow — step result codec round-trip on replay", () => {
     const storage = new JsonRoundTripStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow({ name: "special-rt" })
-      .stepAsync("produce", async () => ({
+      .step("produce", async () => ({
         u: undefined,
         nan: Number.NaN,
         inf: Number.POSITIVE_INFINITY,
@@ -152,12 +152,12 @@ describe("workflow — step result codec round-trip on replay", () => {
     let secondStepSawDate = false;
 
     const wf = workflow({ name: "downstream-rt" })
-      .stepAsync("produce", async () => {
+      .step("produce", async () => {
         const d = new Date("2026-04-16T00:00:00Z");
         firstStepSawDate = d instanceof Date;
         return d;
       })
-      .stepAsync(
+      .step(
         "consume",
         async ({ prev }: { prev: unknown }) => {
           secondStepSawDate = prev instanceof Date;
@@ -181,7 +181,7 @@ describe("workflow — explicit JsonCodec opt-out still works", () => {
     const storage = new JsonRoundTripStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow({ name: "identity-codec" })
-      .stepAsync("produce", async () => new Date("2026-04-16T00:00:00Z"), {
+      .step("produce", async () => new Date("2026-04-16T00:00:00Z"), {
         codec: JsonCodec,
       })
       .build();
@@ -203,8 +203,8 @@ describe("workflow — pipeline-level default codec", () => {
     const storage = new JsonRoundTripStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow({ name: "pipeline-default", codec: JsonCodec })
-      .stepAsync("a", async () => new Date("2026-04-16T00:00:00Z"))
-      .stepAsync("b", async ({ prev }: { prev: unknown }) => prev)
+      .step("a", async () => new Date("2026-04-16T00:00:00Z"))
+      .step("b", async ({ prev }: { prev: unknown }) => prev)
       .build();
 
     await runner.run({ workflow: wf, workflowId: "pdc-1", input: {} });
@@ -219,8 +219,8 @@ describe("workflow — pipeline-level default codec", () => {
     const storage = new JsonRoundTripStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow({ name: "pipeline-override", codec: JsonCodec })
-      .stepAsync("lossy", async () => new Date("2026-04-16T00:00:00Z"))
-      .stepAsync(
+      .step("lossy", async () => new Date("2026-04-16T00:00:00Z"))
+      .step(
         "lossless",
         async ({ prev: _ }: { prev: unknown }) => new Date("2026-05-01T00:00:00Z"),
         { codec: (await import("@spilne/perfect-core/connect")).LosslessJsonCodec },
@@ -239,7 +239,7 @@ describe("workflow — pipeline-level default codec", () => {
     const storage = new JsonRoundTripStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow({ name: "no-pipeline-codec" })
-      .stepAsync("produce", async () => new Date("2026-04-16T00:00:00Z"))
+      .step("produce", async () => new Date("2026-04-16T00:00:00Z"))
       .build();
 
     const replay = await runner.run({ workflow: wf, workflowId: "npc-1", input: {} });

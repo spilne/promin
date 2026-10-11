@@ -301,6 +301,11 @@ export class ZoryaWorker {
   private releaseWakeups: number[] = [];
   private releaseWakeTimer?: { handle: TimerHandle; dueAt: number };
 
+  /** Start a fluent `ZoryaWorker` configuration (see `ZoryaWorkerBuilder`). */
+  static builder(): ZoryaWorkerBuilder {
+    return new ZoryaWorkerBuilder();
+  }
+
   constructor(config: ZoryaWorkerConfig) {
     this.config = config;
     this.client = config.client;
@@ -1091,5 +1096,139 @@ function tryGetHostname(): string | undefined {
     return os.hostname?.();
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Fluent builder for a `ZoryaWorker`; start one with `ZoryaWorker.builder()`.
+ * Each setter sets the `ZoryaWorkerConfig` field of the same name (see there
+ * for defaults). `.workflow()` / `.workflows()` accumulate across calls.
+ * `build()` checks that `client()` and at least one workflow were given.
+ *
+ * ```ts
+ * const worker = ZoryaWorker.builder()
+ *   .client(new ZoryaClient({ url, apiKey }))
+ *   .workflows(orderWorkflow, paymentWorkflow)
+ *   .capabilities(["payments"])
+ *   .concurrency(4)
+ *   .build();
+ *
+ * worker.start();
+ * await worker.ready();
+ * ```
+ */
+export class ZoryaWorkerBuilder {
+  private config: Partial<ZoryaWorkerConfig> = {};
+
+  /** Required. The Zorya server this worker connects to. */
+  client(client: ZoryaClient): this {
+    return this.set({ client });
+  }
+
+  /** Add workflow definitions this worker hosts. Accumulates across calls. */
+  workflows(...workflows: ReadonlyArray<Workflow<unknown, unknown>>): this {
+    return this.set({ workflows: [...(this.config.workflows ?? []), ...workflows] });
+  }
+
+  /** Add one workflow definition this worker hosts. */
+  workflow(workflow: Workflow<unknown, unknown>): this {
+    return this.workflows(workflow);
+  }
+
+  /** Stable worker id. Default: random UUID. */
+  workerId(workerId: string): this {
+    return this.set({ workerId });
+  }
+
+  /** Capability tags, recorded in the worker registry. */
+  capabilities(capabilities: readonly string[]): this {
+    return this.set({ capabilities });
+  }
+
+  /** Most runs driven at once. Default 10. */
+  concurrency(concurrency: number): this {
+    return this.set({ concurrency });
+  }
+
+  /** Registry heartbeat and re-advertise cadence (ms). Default 10_000. */
+  heartbeatIntervalMs(heartbeatIntervalMs: number): this {
+    return this.set({ heartbeatIntervalMs });
+  }
+
+  /** Start-queue polling, or `false` to only advertise and serve control commands. */
+  pollWorkflowStarts(
+    pollWorkflowStarts: NonNullable<ZoryaWorkerConfig["pollWorkflowStarts"]>,
+  ): this {
+    return this.set({ pollWorkflowStarts });
+  }
+
+  /** Wait before a start whose run is locked elsewhere can be claimed again (ms). */
+  lockedRetryDelayMs(lockedRetryDelayMs: number): this {
+    return this.set({ lockedRetryDelayMs });
+  }
+
+  /** The run lock's lease. */
+  lock(lock: RunLockOptions): this {
+    return this.set({ lock });
+  }
+
+  /** Time source for every timer. Default: `SystemWallClock`. */
+  clock(clock: WallClock): this {
+    return this.set({ clock });
+  }
+
+  /** Sample-input lookup for dashboard trigger forms. */
+  sampleInput(sampleInput: (workflowName: string) => unknown): this {
+    return this.set({ sampleInput });
+  }
+
+  /** Application version, surfaced on the Workers page. */
+  version(version: string): this {
+    return this.set({ version });
+  }
+
+  /** Free-form labels surfaced on the Workers page. */
+  labels(labels: Record<string, string>): this {
+    return this.set({ labels });
+  }
+
+  /** Namespaces this worker serves (informational). */
+  namespaces(namespaces: readonly string[]): this {
+    return this.set({ namespaces });
+  }
+
+  /** Raw metadata, merged over the auto-detected fields. */
+  metadata(metadata: Record<string, unknown>): this {
+    return this.set({ metadata });
+  }
+
+  /** The worker → server control WebSocket: `false`, `true` or its options. Default: on. */
+  controlSocket(controlSocket: NonNullable<ZoryaWorkerConfig["controlSocket"]>): this {
+    return this.set({ controlSocket });
+  }
+
+  /** Background failures. Default: logs. */
+  onError(onError: (event: ZoryaWorkerErrorEvent) => void): this {
+    return this.set({ onError });
+  }
+
+  /** The config built so far. Throws if `client()` or a workflow is missing. */
+  buildConfig(): ZoryaWorkerConfig {
+    const { client, workflows } = this.config;
+    if (!client) throw new Error("ZoryaWorker.builder(): client() is required");
+    if (!workflows || workflows.length === 0) {
+      throw new Error("ZoryaWorker.builder(): at least one workflow() is required");
+    }
+    return { ...this.config, client, workflows };
+  }
+
+  /** Build the worker (not started). Throws if `client()` or a workflow is missing. */
+  build(): ZoryaWorker {
+    return new ZoryaWorker(this.buildConfig());
+  }
+
+  private set(fields: Partial<ZoryaWorkerConfig>): this {
+    this.config = { ...this.config, ...fields };
+    return this;
   }
 }

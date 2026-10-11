@@ -74,10 +74,10 @@ export function buildPremiumJobWorkflow() {
     name: "premium-job",
     version: "1",
   })
-    .stepAsync("validate-job", async (): Promise<ValidationResult> => {
+    .step("validate-job", async (): Promise<ValidationResult> => {
       throw new Error("placeholder — worker runs the real handler");
     })
-    .stepAsync(
+    .step(
       "execute-premium-job",
       { dependsOn: ["validate-job"] },
       async (): Promise<ExecutionResult> => {
@@ -85,20 +85,16 @@ export function buildPremiumJobWorkflow() {
       },
       { needs: ["premium"] },
     )
-    .stepAsync(
+    .step(
       "store-result",
       { dependsOn: ["execute-premium-job"] },
       async (): Promise<StoreResult> => {
         throw new Error("placeholder");
       },
     )
-    .stepAsync(
-      "notify-webhook",
-      { dependsOn: ["store-result"] },
-      async (): Promise<WebhookResult> => {
-        throw new Error("placeholder");
-      },
-    )
+    .step("notify-webhook", { dependsOn: ["store-result"] }, async (): Promise<WebhookResult> => {
+      throw new Error("placeholder");
+    })
     .build();
 }
 
@@ -107,30 +103,26 @@ export function buildStandardJobWorkflow() {
     name: "standard-job",
     version: "1",
   })
-    .stepAsync("validate-job", async (): Promise<ValidationResult> => {
+    .step("validate-job", async (): Promise<ValidationResult> => {
       throw new Error("placeholder");
     })
-    .stepAsync(
+    .step(
       "execute-standard-job",
       { dependsOn: ["validate-job"] },
       async (): Promise<ExecutionResult> => {
         throw new Error("placeholder");
       },
     )
-    .stepAsync(
+    .step(
       "store-result",
       { dependsOn: ["execute-standard-job"] },
       async (): Promise<StoreResult> => {
         throw new Error("placeholder");
       },
     )
-    .stepAsync(
-      "notify-webhook",
-      { dependsOn: ["store-result"] },
-      async (): Promise<WebhookResult> => {
-        throw new Error("placeholder");
-      },
-    )
+    .step("notify-webhook", { dependsOn: ["store-result"] }, async (): Promise<WebhookResult> => {
+      throw new Error("placeholder");
+    })
     .build();
 }
 

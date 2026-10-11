@@ -47,7 +47,7 @@ interface HelloInput {
   name?: string;
 }
 const helloV1 = workflow<HelloInput>({ name: "hello-world", type: "demo", version: "1" })
-  .stepAsync("greet", async ({ input }) => {
+  .step("greet", async ({ input }) => {
     await sleep(300);
     return { message: `Hello, ${input.name ?? "world"}!` };
   })
@@ -59,11 +59,11 @@ const hello = workflow<HelloInput>({
   onVersionMismatch: "drain",
   previousVersions: [helloV1],
 })
-  .stepAsync("greet", async ({ input }) => {
+  .step("greet", async ({ input }) => {
     await sleep(300);
     return { message: `Hello, ${input.name ?? "world"}!` };
   })
-  .stepAsync("farewell", async ({ prev }) => {
+  .step("farewell", async ({ prev }) => {
     await sleep(200);
     return {
       ...prev,
@@ -78,15 +78,15 @@ interface FanOutInput {
   items?: string[];
 }
 const fanOut = workflow<FanOutInput>({ name: "fan-out-demo", type: "demo" })
-  .stepAsync("a", async () => {
+  .step("a", async () => {
     await sleep(500);
     return { result: "a-done" };
   })
-  .stepAsync("b", async () => {
+  .step("b", async () => {
     await sleep(700);
     return { result: "b-done" };
   })
-  .stepAsync("c", async () => {
+  .step("c", async () => {
     await sleep(400);
     return { result: "c-done" };
   })
@@ -105,14 +105,11 @@ function sampleInputFor(name: string): unknown {
   }
 }
 
-const client = new ZoryaClient({ url, apiKey: process.env["ZORYA_WORKER_API_KEY"] });
-const worker = new ZoryaWorker({
-  client,
-  workflows: workflows as unknown as ReadonlyArray<
-    import("@promin/workflow").Workflow<unknown, unknown>
-  >,
-  sampleInput: sampleInputFor,
-});
+const worker = ZoryaWorker.builder()
+  .client(new ZoryaClient({ url, apiKey: process.env["ZORYA_WORKER_API_KEY"] }))
+  .workflows(...workflows)
+  .sampleInput(sampleInputFor)
+  .build();
 
 worker.start();
 await worker.ready();

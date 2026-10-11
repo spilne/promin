@@ -14,7 +14,7 @@ const CACHE_MISS: unique symbol = Symbol("cache-miss");
 
 /**
  * Build the store key for a cached step result. The physical step name is
- * always part of the key, so two steps (or two `parallelSteps` branches)
+ * always part of the key, so two steps (or two `.parallel()` branches)
  * that share one cache config and see the same context never read each
  * other's results.
  */
@@ -48,7 +48,7 @@ function wrapWithStepCache(params: {
   readonly cache: StepCacheOption;
   readonly ctx: StepContext<unknown, unknown>;
   readonly runBody: () => StepEff<unknown, TaggedError>;
-  /** Physical step name (for `parallelSteps` branches: `block.branch`). */
+  /** Physical step name (for `.parallel()` branches: `block.branch`). */
   readonly stepName: string;
   readonly namespace: string;
   /** The step's codec. Values are stored encoded and decoded on a hit. */

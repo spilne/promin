@@ -27,32 +27,32 @@ export const onboardingWorkflow = workflow<OnboardingInput>({
   name: "onboarding",
   type: "platform",
 })
-  .stepAsync("validate-email", async ({ input }) => {
+  .step("validate-email", async ({ input }) => {
     await sleep(delay(1_500, 4_000));
     if (!input.email.includes("@")) throw new Error("Invalid email");
     return { email: input.email };
   })
-  .stepAsync("create-user", { dependsOn: ["validate-email"] }, async ({ deps }) => {
+  .step("create-user", { dependsOn: ["validate-email"] }, async ({ deps }) => {
     await sleep(delay(3_000, 8_000));
     return {
       userId: `u-${Math.floor(Math.random() * 1_000_000)}`,
       email: deps["validate-email"].email,
     };
   })
-  .stepAsync("provision-db", { dependsOn: ["create-user"] }, async ({ deps }) => {
+  .step("provision-db", { dependsOn: ["create-user"] }, async ({ deps }) => {
     await sleep(delay(4_000, 12_000));
     if (Math.random() < 0.05) throw new Error("DB pool exhausted");
     return { userId: deps["create-user"].userId, dbShard: "shard-us-east-2" };
   })
-  .stepAsync("provision-storage", { dependsOn: ["create-user"] }, async ({ deps }) => {
+  .step("provision-storage", { dependsOn: ["create-user"] }, async ({ deps }) => {
     await sleep(delay(3_000, 10_000));
     return { userId: deps["create-user"].userId, bucketName: `user-${deps["create-user"].userId}` };
   })
-  .stepAsync("send-invites", { dependsOn: ["create-user"] }, async ({ deps }) => {
+  .step("send-invites", { dependsOn: ["create-user"] }, async ({ deps }) => {
     await sleep(delay(2_000, 7_000));
     return { userId: deps["create-user"].userId, invitesSent: Math.floor(Math.random() * 5) };
   })
-  .stepAsync(
+  .step(
     "send-welcome",
     { dependsOn: ["provision-db", "provision-storage", "send-invites"] },
     async ({ deps }) => {
@@ -60,7 +60,7 @@ export const onboardingWorkflow = workflow<OnboardingInput>({
       return { userId: deps["provision-db"].userId, welcomeSent: true };
     },
   )
-  .stepAsync("audit", { dependsOn: ["send-welcome"] }, async ({ deps }) => {
+  .step("audit", { dependsOn: ["send-welcome"] }, async ({ deps }) => {
     await sleep(delay(1_000, 3_000));
     return { userId: deps["send-welcome"].userId, auditedAt: new Date().toISOString() };
   })

@@ -342,15 +342,15 @@ describe("WorkflowBuilder", () => {
   });
 
   // ---------------------------------------------------------------------------
-  // stepAsync
+  // Promise-returning steps
   // ---------------------------------------------------------------------------
 
-  describe("stepAsync", () => {
+  describe("Promise-returning step", () => {
     it("executes a single async step", async () => {
       const storage = new InMemoryWorkflowStorage();
       const runner = createWorkflowRunner({ storage });
       const wf = workflow<{ value: number }>({ name: "async-single" })
-        .stepAsync("double", async ({ input }) => input.value * 2)
+        .step("double", async ({ input }) => input.value * 2)
         .build();
       const result = await runner.run({
         workflow: wf,
@@ -360,11 +360,11 @@ describe("WorkflowBuilder", () => {
       expect(result).toBe(42);
     });
 
-    it("chains stepAsync with step", async () => {
+    it("chains a Promise-returning step with an Eff step", async () => {
       const storage = new InMemoryWorkflowStorage();
       const runner = createWorkflowRunner({ storage });
       const wf = workflow<{ name: string }>({ name: "async-chain" })
-        .stepAsync("fetch", async ({ input }) => ({ name: input.name, id: 1 }))
+        .step("fetch", async ({ input }) => ({ name: input.name, id: 1 }))
         .step("format", ({ prev }) => succeed(`${prev.name} (${prev.id})`))
         .build();
       const result = await runner.run({
@@ -375,14 +375,14 @@ describe("WorkflowBuilder", () => {
       expect(result).toBe("Alice (1)");
     });
 
-    it("DAG mode with stepAsync", async () => {
+    it("DAG mode with a Promise-returning step", async () => {
       const storage = new InMemoryWorkflowStorage();
       const runner = createWorkflowRunner({ storage });
       const wf = workflow<{ text: string }>({ name: "async-dag" })
-        .stepAsync("parse", async ({ input }) => input.text.split(" "))
-        .stepAsync("count", { dependsOn: ["parse"] }, async ({ deps }) => deps.parse.length)
-        .stepAsync("join", { dependsOn: ["parse"] }, async ({ deps }) => deps.parse.join("-"))
-        .stepAsync(
+        .step("parse", async ({ input }) => input.text.split(" "))
+        .step("count", { dependsOn: ["parse"] }, async ({ deps }) => deps.parse.length)
+        .step("join", { dependsOn: ["parse"] }, async ({ deps }) => deps.parse.join("-"))
+        .step(
           "result",
           { dependsOn: ["count", "join"] },
           async ({ deps }) => `${deps.join} (${deps.count} words)`,
@@ -521,16 +521,16 @@ describe("WorkflowBuilder", () => {
   });
 
   // ---------------------------------------------------------------------------
-  // mapOverAsync
+  // mapOver with a Promise-returning fn
   // ---------------------------------------------------------------------------
 
-  describe("mapOverAsync", () => {
+  describe("mapOver with a Promise-returning fn", () => {
     it("fans out with async functions", async () => {
       const storage = new InMemoryWorkflowStorage();
       const runner = createWorkflowRunner({ storage });
       const wf = workflow<{ nums: number[] }>({ name: "async-map" })
         .step("source", ({ input }) => succeed(input.nums))
-        .mapOverAsync("double", { array: "source" }, async (n) => n * 2)
+        .mapOver("double", { array: "source" }, async (n) => n * 2)
         .build();
       const result = await runner.run({
         workflow: wf,
@@ -1861,10 +1861,10 @@ describe("flow", () => {
     expect(result).toBe("hello-beautiful-world (3)");
   });
 
-  it("works with stepAsync", async () => {
+  it("works with a Promise-returning step", async () => {
     const result = await flow<{ n: number }>("compute")
-      .stepAsync("double", async ({ input }) => input.n * 2)
-      .stepAsync("add-ten", async ({ prev }) => prev + 10)
+      .step("double", async ({ input }) => input.n * 2)
+      .step("add-ten", async ({ prev }) => prev + 10)
       .execute({ n: 5 });
 
     expect(result).toBe(20);
@@ -2230,7 +2230,7 @@ describe("Per-step activity timeout", () => {
     const storage = new InMemoryWorkflowStorage({ clock });
     const runner = createWorkflowRunner({ storage, clock });
     const wf = workflow<{}>({ name: "step-timeout" })
-      .stepAsync(
+      .step(
         "slow",
         async () => {
           await new Promise<void>((r) => clock.setTimeout(r, 500));
@@ -2257,7 +2257,7 @@ describe("Per-step activity timeout", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<{}>({ name: "no-timeout" })
-      .stepAsync("fast", async () => "done")
+      .step("fast", async () => "done")
       .build();
 
     const result = await runner.run({ workflow: wf, workflowId: "t-no-timeout", input: {} });
@@ -2268,7 +2268,7 @@ describe("Per-step activity timeout", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<{}>({ name: "within-timeout" })
-      .stepAsync(
+      .step(
         "quick",
         async () => {
           await new Promise((r) => setTimeout(r, 5));
@@ -2332,9 +2332,9 @@ describe("Workflow global deadline", () => {
       return name;
     };
     const wf = workflow<{}>({ name: "deadline-test", timeoutMs: 50 })
-      .stepAsync("step1", slowStep("step1"))
-      .stepAsync("step2", slowStep("step2"))
-      .stepAsync("step3", slowStep("step3"))
+      .step("step1", slowStep("step1"))
+      .step("step2", slowStep("step2"))
+      .step("step3", slowStep("step3"))
       .build();
 
     const { error } = await drive({
@@ -2351,8 +2351,8 @@ describe("Workflow global deadline", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<{}>({ name: "within-deadline", timeoutMs: 5000 })
-      .stepAsync("step1", async () => "a")
-      .stepAsync("step2", async () => "b")
+      .step("step1", async () => "a")
+      .step("step2", async () => "b")
       .build();
 
     const result = await runner.run({ workflow: wf, workflowId: "t-within-deadline", input: {} });
@@ -2363,11 +2363,11 @@ describe("Workflow global deadline", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<{}>({ name: "no-deadline" })
-      .stepAsync("step1", async () => {
+      .step("step1", async () => {
         await new Promise((r) => setTimeout(r, 10));
         return "a";
       })
-      .stepAsync("step2", async () => {
+      .step("step2", async () => {
         await new Promise((r) => setTimeout(r, 10));
         return "b";
       })
@@ -2388,7 +2388,7 @@ describe("guard", () => {
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<{ paid: boolean }>({ name: "guard-pass" })
       .guard("ensure-paid", (input) => input.paid)
-      .stepAsync("ship", async () => "shipped")
+      .step("ship", async () => "shipped")
       .build();
     const result = await runner.run({ workflow: wf, workflowId: "g-1", input: { paid: true } });
 
@@ -2402,7 +2402,7 @@ describe("guard", () => {
       .guard("ensure-paid", (input) => input.paid, {
         failureMessage: "Cannot ship unpaid order",
       })
-      .stepAsync("ship", async () => "shipped")
+      .step("ship", async () => "shipped")
       .build();
 
     await expect(
@@ -2415,7 +2415,7 @@ describe("guard", () => {
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<{ ok: boolean }>({ name: "guard-default-msg" })
       .guard("check", (input) => input.ok)
-      .stepAsync("next", async () => "done")
+      .step("next", async () => "done")
       .build();
 
     await expect(
@@ -2450,7 +2450,7 @@ describe("skipWhen", () => {
     const runner = createWorkflowRunner({ storage });
     let stepRan = false;
     const wf = workflow<{ n: number }>({ name: "skip-true" })
-      .stepAsync(
+      .step(
         "maybe",
         async ({ input }) => {
           stepRan = true;
@@ -2470,7 +2470,7 @@ describe("skipWhen", () => {
     const runner = createWorkflowRunner({ storage });
     let stepRan = false;
     const wf = workflow<{ n: number }>({ name: "skip-false" })
-      .stepAsync(
+      .step(
         "maybe",
         async ({ input }) => {
           stepRan = true;
@@ -2489,7 +2489,7 @@ describe("skipWhen", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<{ n: number }>({ name: "skip-value" })
-      .stepAsync("double", async ({ input }) => input.n * 2, {
+      .step("double", async ({ input }) => input.n * 2, {
         skipWhen: (prev: unknown) => (prev as { n: number }).n === 0,
         skipValue: () => -1,
       })
@@ -2511,11 +2511,11 @@ describe("skipWhen", () => {
         },
       },
     })
-      .stepAsync("first", async () => "a")
-      .stepAsync("skippable", async () => "b", {
+      .step("first", async () => "a")
+      .step("skippable", async () => "b", {
         skipWhen: (prev: unknown) => (prev as string) === "a",
       })
-      .stepAsync("last", async () => "c")
+      .step("last", async () => "c")
       .build();
     const result = await runner.run({ workflow: wf, workflowId: "s-4", input: { skip: true } });
 

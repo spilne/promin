@@ -200,7 +200,7 @@ function deploy() {
   };
 }
 
-const asDefs = (...wfs: unknown[]) => wfs as Workflow<unknown, unknown>[];
+const asDefs = (...wfs: Workflow<unknown, unknown>[]) => wfs;
 const quick = (name = "quick", version?: string) =>
   workflow<number>({ name, ...(version !== undefined && { version }) })
     .step("only", ({ input }) => succeed(input * 2))

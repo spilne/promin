@@ -125,7 +125,7 @@ describe(".map()", () => {
   it("picks a free name when <head>.map is taken", async () => {
     const { runner } = setup();
     const wf = workflow<number>({ name: "map-names" })
-      .parallelSteps("p", { map: () => succeed(1) })
+      .parallel("p", { map: () => succeed(1) })
       .map((rec) => rec.map + 1)
       .build();
 

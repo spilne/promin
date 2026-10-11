@@ -54,14 +54,12 @@ const DEFAULT_MAX_ITERATIONS = 100;
 export function createLoopStep(params: {
   readonly name: string;
   readonly dependsOn: string[];
-  /** Returns the iteration's `Eff` (or, via `asStepEff`, a Promise of its value). */
+  /** Returns the iteration's `Eff`, a Promise of its value, or the value (see `asStepEff`). */
   readonly body: (ctx: StepContext<never, never>, iter: number) => unknown;
   /** `true` runs another iteration. */
   readonly keepGoing: (result: never, iter: number) => boolean;
   readonly options: LoopOptions<unknown> | undefined;
   readonly codec: Codec<unknown>;
-  /** The Promise-body method named in the defect for a non-Eff result. */
-  readonly asyncVariant: string;
 }): StepDefinition {
   const { name, dependsOn, codec, options } = params;
   const body = params.body as (ctx: StepContext<unknown, unknown>, iter: number) => unknown;
@@ -135,13 +133,7 @@ export function createLoopStep(params: {
         suspend(() => {
           const stepName = `${name}.iter.${iter}`;
           const startedAt = clock.now();
-          return suspend(() =>
-            asStepEff({
-              result: body(ctx, iter),
-              stepName: name,
-              asyncVariant: params.asyncVariant,
-            }),
-          )
+          return suspend(() => asStepEff(body(ctx, iter)))
             .tapErrorCause((cause) => {
               // Interrupted (step timeout, abandoned run): write nothing more.
               if (Cause.isInterruptedOnly(cause)) return succeed(undefined);

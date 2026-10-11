@@ -11,7 +11,7 @@
 // the same pattern Effect, Zod and RxJS use for heterogeneous collections.
 // ---------------------------------------------------------------------------
 
-import { die, succeed, type Eff, type Throws } from "@spilne/perfect-core";
+import { succeed, type Eff, type ErrorsOf, type Throws } from "@spilne/perfect-core";
 import type { Codec } from "@spilne/perfect-core/connect";
 import type { CacheStore } from "../shared/cache-store.ts";
 import { isEff, isThenable, promiseOrDie, promiseOrEff } from "../shared/eff.ts";
@@ -58,6 +58,31 @@ export interface MapStepContext<Input> {
 export type StepEff<A, E extends TaggedError = never> = Eff<A, Throws<E>>;
 
 /**
+ * What a step function may return: an `Eff` (its typed failures `E` feed
+ * `retry` / `onFailure`), a Promise of the value (a rejection is a defect,
+ * as is a synchronous throw), or the value itself. A Promise that resolves
+ * to an `Eff` runs that `Eff`.
+ */
+export type StepBodyResult<A, E extends TaggedError = never> = StepEff<A, E> | PromiseLike<A> | A;
+
+/** A step function: takes the step's context, returns a `StepBodyResult`. */
+export type StepBody<Ctx, A, E extends TaggedError = never> = (ctx: Ctx) => StepBodyResult<A, E>;
+
+/** The value a step function returning `R` produces (`R` unwrapped from `Eff` / Promise). */
+export type StepBodyOutput<R> =
+  R extends Eff<infer A, infer _S> ? A : R extends PromiseLike<infer A> ? A : R;
+
+/** The typed failures of a step function returning `R` (`never` unless `R` is an `Eff`). */
+export type StepBodyError<R> =
+  R extends Eff<infer _A, infer S>
+    ? ErrorsOf<S> extends infer E
+      ? E extends TaggedError
+        ? E
+        : never
+      : never
+    : never;
+
+/**
  * What a step-level `queue.concurrencyKey` receives. It is evaluated when
  * the runner hands the step to a step executor (dispatch), before the body
  * runs.
@@ -101,9 +126,9 @@ export interface StepQueueOption {
 export type StepFailureStrategy<T> = "fail" | "skip" | { readonly fallback: (error: unknown) => T };
 
 /**
- * Options of `.step()` / `.stepAsync()`, `.branch()` and `.match()`, which
+ * Options of `.step()`, `.branch()` and `.match()`, which
  * honour every field. Other step kinds take a narrowed variant that leaves
- * out what they cannot honour (`MapOverOptions`, `ParallelStepsOptions`,
+ * out what they cannot honour (`MapOverOptions`, `ParallelOptions`,
  * `JournaledStepOptions`, `SubworkflowOptions`, `LoopOptions`,
  * `TripwireOptions`), so an unsupported option is a compile error rather
  * than silently ignored.
@@ -171,7 +196,7 @@ export interface StepOptions<T, Input = unknown, Prev = unknown> {
    *
    * The store key is `${namespace}:${stepName}:${key(ctx)}`: the step name
    * is always included, so one cache config can be shared by several steps
-   * (or used as the `parallelSteps` option, where it applies to every
+   * (or used as the `.parallel()` option, where it applies to every
    * branch) without their entries colliding. Values are stored encoded with
    * the step's codec.
    */
@@ -199,7 +224,7 @@ export interface MapElementOptions<T> {
 }
 
 /**
- * Options of `.mapOver()` / `.mapOverAsync()`. The step-level fields apply
+ * Options of `.mapOver()`. The step-level fields apply
  * to the whole map step, whose result is the `T[]` array: `codec` encodes
  * that array (default: `element.codec` lifted to arrays, else the workflow
  * codec), `onFailure.fallback` and `skipValue` return an array, `compensate`
@@ -218,14 +243,14 @@ export interface MapOverOptions<T, Input = unknown, Prev = unknown> extends Step
 }
 
 /**
- * Options of `.parallelSteps()`. `codec` encodes the joined record (default:
+ * Options of `.parallel()`. `codec` encodes the joined record (default:
  * the branch codecs combined per key). `timeoutMs`, `retry`, `needs`,
  * `priority`, `queue` and `cache` are defaults for every branch; `branches`
  * sets any `StepOptions` field per branch, overriding those defaults.
  * Failure handling, compensation and skipping are per branch only, because
  * each branch is its own step with its own result type.
  */
-export interface ParallelStepsOptions<
+export interface ParallelOptions<
   Outputs extends Record<string, unknown>,
   Input = unknown,
   Prev = unknown,
@@ -453,27 +478,15 @@ export interface ExecuteParams extends StepRuntime {
 /**
  * Normalise what a user step function returned into the `Eff` the runner
  * executes. An `Eff` passes through. A Promise (e.g. an `async` function
- * handed to `.step()`) is awaited with `.stepAsync()` semantics — its
- * rejection is a defect. A Promise that resolves to an `Eff` runs that
- * `Eff` as the step body, so its typed failures stay typed and the step's
- * retry policy applies to them. Anything else is a defect whose message
- * names `asyncVariant` (default `.stepAsync()`).
+ * handed to `.step()`) is awaited and its rejection is a defect; a Promise
+ * that resolves to an `Eff` runs that `Eff` as the step body, so its typed
+ * failures stay typed and the step's retry policy applies to them. Any
+ * other value is the step's result.
  */
-export function asStepEff(params: {
-  readonly result: unknown;
-  readonly stepName: string;
-  /** The Promise-body method to suggest in the defect message. */
-  readonly asyncVariant?: string;
-}): StepEff<unknown, TaggedError> {
-  const { result, stepName } = params;
+export function asStepEff(result: unknown): StepEff<unknown, TaggedError> {
   if (isEff(result)) return result as StepEff<unknown, TaggedError>;
   if (isThenable(result)) return promiseOrEff(() => result) as StepEff<unknown, TaggedError>;
-  return die(
-    new TypeError(
-      `Step "${stepName}" must return an Eff (got ${result === null ? "null" : typeof result}); ` +
-        `use ${params.asyncVariant ?? ".stepAsync()"} for Promise-returning functions`,
-    ),
-  );
+  return succeed(result);
 }
 
 /**

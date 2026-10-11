@@ -27,11 +27,11 @@ export const videoTranscodeWorkflow = workflow<VideoTranscodeInput>({
   name: "video-transcode",
   type: "media",
 })
-  .stepAsync("download", async ({ input }) => {
+  .step("download", async ({ input }) => {
     await sleep(delay(3_000, 10_000));
     return { videoId: input.videoId, bytes: Math.floor(Math.random() * 500_000_000) };
   })
-  .stepAsync("analyze", { dependsOn: ["download"] }, async ({ deps }) => {
+  .step("analyze", { dependsOn: ["download"] }, async ({ deps }) => {
     await sleep(delay(2_000, 6_000));
     return {
       videoId: deps.download.videoId,
@@ -39,20 +39,20 @@ export const videoTranscodeWorkflow = workflow<VideoTranscodeInput>({
       codec: "h264",
     };
   })
-  .stepAsync("transcode-1080p", { dependsOn: ["analyze"] }, async ({ deps }) => {
+  .step("transcode-1080p", { dependsOn: ["analyze"] }, async ({ deps }) => {
     await sleep(delay(8_000, 25_000));
     if (Math.random() < 0.08) throw new Error("FFmpeg crashed on 1080p");
     return { format: "1080p", videoId: deps.analyze.videoId, bytes: 120_000_000 };
   })
-  .stepAsync("transcode-720p", { dependsOn: ["analyze"] }, async ({ deps }) => {
+  .step("transcode-720p", { dependsOn: ["analyze"] }, async ({ deps }) => {
     await sleep(delay(5_000, 18_000));
     return { format: "720p", videoId: deps.analyze.videoId, bytes: 70_000_000 };
   })
-  .stepAsync("transcode-480p", { dependsOn: ["analyze"] }, async ({ deps }) => {
+  .step("transcode-480p", { dependsOn: ["analyze"] }, async ({ deps }) => {
     await sleep(delay(3_000, 12_000));
     return { format: "480p", videoId: deps.analyze.videoId, bytes: 40_000_000 };
   })
-  .stepAsync(
+  .step(
     "publish",
     { dependsOn: ["transcode-1080p", "transcode-720p", "transcode-480p"] },
     async ({ deps }) => {
@@ -64,7 +64,7 @@ export const videoTranscodeWorkflow = workflow<VideoTranscodeInput>({
       };
     },
   )
-  .stepAsync("notify", { dependsOn: ["publish"] }, async ({ deps }) => {
+  .step("notify", { dependsOn: ["publish"] }, async ({ deps }) => {
     await sleep(delay(1_000, 4_000));
     return { videoId: deps.publish.videoId, notified: ["creator", "subscribers"] };
   })

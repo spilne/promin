@@ -15,6 +15,11 @@ import type {
   StepSchema,
   SingleStepSchema,
   MapStepSchema,
+  SleepStepSchema,
+  SignalStepSchema,
+  ApprovalStepSchema,
+  BranchStepSchema,
+  ParallelStepSchema,
 } from "./workflow-schema.ts";
 import type { ActivityRegistry, ActivityContext } from "./activity-registry.ts";
 import { validateWorkflowSchema } from "./workflow-schema-validator.ts";
@@ -153,6 +158,16 @@ export function compileWorkflow<Input = unknown>(params: {
       builder = compileSingleStep(builder, step, registry);
     } else if (step.type === "map") {
       builder = compileMapStep(builder, step, registry);
+    } else if (step.type === "sleep") {
+      builder = compileSleepStep(builder, step);
+    } else if (step.type === "signal") {
+      builder = compileSignalStep(builder, step);
+    } else if (step.type === "approval") {
+      builder = compileApprovalStep(builder, step);
+    } else if (step.type === "branch") {
+      builder = compileBranchStep(builder, step, registry);
+    } else {
+      builder = compileParallelStep(builder, step, registry);
     }
   }
 
@@ -208,6 +223,69 @@ function compileMapStep(builder: any, step: MapStepSchema, registry: ActivityReg
   ) as any;
 }
 
+/** Compile a SleepStepSchema into a DAG-form .sleep() call. */
+function compileSleepStep(builder: any, step: SleepStepSchema): any {
+  return builder.sleep(step.name, step.ms, { dependsOn: step.dependsOn });
+}
+
+/** Compile a SignalStepSchema into a .waitForSignal() call. */
+function compileSignalStep(builder: any, step: SignalStepSchema): any {
+  return builder.waitForSignal(step.name, {
+    dependsOn: step.dependsOn,
+    signalName: step.signalName,
+    timeoutMs: step.timeoutMs,
+  });
+}
+
+/** Compile an ApprovalStepSchema into an .approval() call. */
+function compileApprovalStep(builder: any, step: ApprovalStepSchema): any {
+  return builder.approval(step.name, {
+    dependsOn: step.dependsOn,
+    signalName: step.signalName,
+    timeoutMs: step.timeoutMs,
+  });
+}
+
+/**
+ * Compile a BranchStepSchema into one DAG step that runs the condition
+ * activity, then `ifTrue` or `ifFalse` with the same context.
+ */
+function compileBranchStep(builder: any, step: BranchStepSchema, registry: ActivityRegistry): any {
+  const condition = registry.resolve({ ref: step.conditionRef });
+  const ifTrue = registry.resolve({ ref: step.ifTrue.activityRef, config: step.ifTrue.config });
+  const ifFalse = registry.resolve({ ref: step.ifFalse.activityRef, config: step.ifFalse.config });
+  return builder.step(
+    step.name,
+    { dependsOn: step.dependsOn },
+    (ctx: any) => {
+      const activityCtx = toActivityContext(ctx);
+      return condition(activityCtx).flatMap((passes) =>
+        (passes === true ? ifTrue : ifFalse)(activityCtx),
+      );
+    },
+    compileStepOptions(step.options),
+  );
+}
+
+/** Compile a ParallelStepSchema into a DAG-form .parallel() call. */
+function compileParallelStep(
+  builder: any,
+  step: ParallelStepSchema,
+  registry: ActivityRegistry,
+): any {
+  const branches: Record<string, (ctx: any) => unknown> = {};
+  for (const [label, branch] of Object.entries(step.branches)) {
+    const activityFn = registry.resolve({ ref: branch.activityRef, config: branch.config });
+    branches[label] = (ctx: any) => activityFn(toActivityContext(ctx));
+  }
+  return builder.parallel(
+    step.name,
+    { dependsOn: step.dependsOn },
+    branches,
+    compileStepOptions(step.options),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -222,8 +300,16 @@ function toActivityContext(ctx: any): ActivityContext {
   // Linear steps have ctx.prev, DAG steps have ctx.deps
   const deps: Record<string, unknown> = ctx.deps ?? {};
   const depValues = Object.values(deps);
-  // For DAG steps with a single dep, use that value as prev (most natural for activities)
-  const prev = ctx.prev !== undefined ? ctx.prev : depValues.length === 1 ? depValues[0] : deps;
+  // For DAG steps with a single dep, use that value as prev (most natural
+  // for activities); a DAG step with no deps gets the workflow input.
+  const prev =
+    ctx.prev !== undefined
+      ? ctx.prev
+      : depValues.length === 1
+        ? depValues[0]
+        : depValues.length === 0
+          ? ctx.input
+          : deps;
   return {
     input: ctx.input,
     prev,
@@ -252,9 +338,30 @@ function compileStepOptions(options?: {
 
 /** Extract dependency list from any step type. */
 function stepDependsOn(step: StepSchema): string[] {
-  if (step.type === "step") return step.dependsOn;
   if (step.type === "map") return [step.arrayFrom];
-  return [];
+  return step.dependsOn;
+}
+
+/** The activity references a step uses, labelled for error messages. */
+function stepActivityRefs(step: StepSchema): Array<{ label: string; ref: string }> {
+  switch (step.type) {
+    case "step":
+    case "map":
+      return [{ label: `Step "${step.name}"`, ref: step.activityRef }];
+    case "branch":
+      return [
+        { label: `Branch step "${step.name}" condition`, ref: step.conditionRef },
+        { label: `Branch step "${step.name}" ifTrue`, ref: step.ifTrue.activityRef },
+        { label: `Branch step "${step.name}" ifFalse`, ref: step.ifFalse.activityRef },
+      ];
+    case "parallel":
+      return Object.entries(step.branches).map(([branch, arm]) => ({
+        label: `Parallel step "${step.name}" branch "${branch}"`,
+        ref: arm.activityRef,
+      }));
+    default:
+      return [];
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -280,10 +387,15 @@ function validateDag(schema: WorkflowSchema, registry: ActivityRegistry): string
 
   for (const step of schema.steps) {
     // Check activity refs exist in registry
-    if (!registry.has(step.activityRef)) {
-      issues.push(
-        `Step "${step.name}" references unknown activity "${step.activityRef}". Available: ${registry.list().join(", ")}`,
-      );
+    for (const { label, ref } of stepActivityRefs(step)) {
+      if (!registry.has(ref)) {
+        issues.push(
+          `${label} references unknown activity "${ref}". Available: ${registry.list().join(", ")}`,
+        );
+      }
+    }
+    if (step.type === "parallel" && Object.keys(step.branches).length === 0) {
+      issues.push(`Parallel step "${step.name}" requires at least one branch`);
     }
 
     // Check dependencies reference existing steps

@@ -11,7 +11,7 @@ import { outcomeOfBody, settleWave, skippedOutcome } from "./wave.ts";
 
 /**
  * Run `readySteps` inline and wait for all of them. Typed failures and
- * defects (a `.stepAsync()` rejection, a synchronous throw) both settle as
+ * defects (a rejected step Promise, a synchronous throw) both settle as
  * that step's `failed` outcome; siblings run to completion and keep their
  * own rows.
  */

@@ -138,7 +138,7 @@ export function dagToMermaid(dag: WorkflowDAG): string {
 /**
  * Convert a WorkflowDAG to DOT (Graphviz) syntax. Step nodes are named by
  * their step names; a case node is `<step>.<case>` unless that collides
- * with a step (e.g. a `parallelSteps` branch), in which case it gets a
+ * with a step (e.g. a `.parallel()` branch), in which case it gets a
  * `~N` suffix.
  */
 export function dagToDot(dag: WorkflowDAG): string {

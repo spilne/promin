@@ -13,7 +13,7 @@ const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 /** Two steps; `second` takes `input.ms` milliseconds. */
 export const slow = workflow<{ ms: number }>({ name: "e2e-slow" })
   .step("first", () => succeed({ pid: pid() }))
-  .stepAsync("second", async ({ input }) => {
+  .step("second", async ({ input }) => {
     await delay(input.ms);
     return { pid: pid() };
   })
@@ -51,7 +51,7 @@ export const parent = workflow<{ n: number; id: string }>({ name: "e2e-parent" }
 export function versioned(version: string): Workflow<unknown, unknown> {
   return workflow<unknown>({ name: "e2e-versioned", version })
     .step("which", () => succeed({ version, pid: pid() }))
-    .build() as Workflow<unknown, unknown>;
+    .build();
 }
 
-export const ALL = [slow, sleeper, waiter, parent] as unknown as Workflow<unknown, unknown>[];
+export const ALL: Workflow<unknown, unknown>[] = [slow, sleeper, waiter, parent];

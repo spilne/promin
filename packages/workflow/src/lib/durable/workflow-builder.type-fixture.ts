@@ -225,9 +225,9 @@ export const _mapped = workflow<number>({ name: "mapped" })
   })
   .step("byName", { dependsOn: ["load"] }, ({ deps }) => succeed(deps.load.id));
 
-// parallelSteps: branch outputs are inferred without `any`.
+// parallel: branch outputs are inferred without `any`.
 export const _parallel = workflow<number>({ name: "par" })
-  .parallelSteps("both", { a: () => succeed(1), b: () => succeed("s") })
+  .parallel("both", { a: () => succeed(1), b: () => succeed("s") })
   .step("join", ({ prev }) => {
     const joined: Equal<typeof prev, { a: number; b: string }> = true;
     return succeed(joined);

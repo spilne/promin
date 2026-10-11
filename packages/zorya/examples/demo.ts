@@ -30,13 +30,7 @@ if (!(console.log as unknown as { __ts?: boolean }).__ts) {
 //   the same runner — so the Schedules page ticks increment live.
 // ---------------------------------------------------------------------------
 
-import {
-  createWorkflowRunner,
-  RecoveryStrategy,
-  completeSignal,
-  hasCapability,
-  type Workflow,
-} from "@promin/workflow";
+import { RecoveryStrategy, completeSignal, hasCapability, type Workflow } from "@promin/workflow";
 import {
   LocalWorkflows,
   QueuedWorkflows,
@@ -47,20 +41,6 @@ import {
   ZoryaDags,
 } from "../src/index.ts";
 import { researchSynthesisRecipe } from "./dags/research-synthesis.ts";
-import {
-  SqliteWorkflowStorage,
-  SqliteWorkflowStartQueue,
-  SqliteWorkflowAdvertisementRegistry,
-  SqliteWorkerRegistry,
-  SqliteSchedulerStorage,
-  SqliteAgentRegistry,
-  SqliteSkillRegistry,
-  SqliteFragmentStore,
-  SqliteAgentInstanceRegistry,
-  SqliteDagRegistry,
-  SqliteMemoryStore,
-  SqliteSecretsStorage,
-} from "@promin/sqlite";
 import { createPostgresDb } from "@spilne/perfect-postgres";
 import {
   migrate as migratePostgres,
@@ -104,14 +84,13 @@ import {
 import { WorkflowScanner } from "@promin/workflow/discovery";
 import { echoLLM } from "@promin/agent/testing";
 import { z } from "zod";
-import { Database } from "bun:sqlite";
 import { ZoryaServer } from "../src/index.ts";
+import { createSqliteZoryaStack } from "../src/sqlite.ts";
 // KB content lives at ./kb/org-knowledge-base.ts; the searchKnowledge +
 // getDocument tools that wrap it are exposed under ./tools/ for the
 // folder-scan registry.
 import { ORG_KNOWLEDGE_BASE } from "./kb/org-knowledge-base.ts";
 import path from "node:path";
-import { mkdirSync } from "node:fs";
 
 // ---------------------------------------------------------------------------
 // Storage + runner
@@ -146,22 +125,17 @@ if (!ZORYA_INSECURE && (!ZORYA_API_KEY || !ZORYA_WORKER_API_KEY)) {
 }
 
 const dbPath = process.env.ZORYA_DB ?? "./target/zorya.db";
-if (dbPath !== ":memory:") {
-  // mkdir -p the parent so first-time runs don't crash on a missing dir.
-  mkdirSync(path.dirname(dbPath), { recursive: true });
-}
-const db = new Database(dbPath);
-// Turn on WAL + foreign keys for file-backed DBs. No-op for :memory:.
-db.exec("PRAGMA journal_mode = WAL");
-db.exec("PRAGMA foreign_keys = ON");
-
-const storage = SqliteWorkflowStorage.make({ db });
-// Persistent scheduler state — `lastFiredAt`, `tickCount`, `nextRun`, and
-// leader locks all live on disk in the same db as workflow runs, so a
-// server restart resumes schedules from where they left off instead of
-// starting fresh on every boot.
-const schedulerStorage = SqliteSchedulerStorage.make({ db });
-const runner = createWorkflowRunner({ storage });
+// One SQLite db for everything: workflow runs, schedules (`lastFiredAt`,
+// `tickCount`, `nextRun` and leader locks, so a restart resumes schedules
+// where they left off), the worker start queue and advertisements, agent
+// state and the secrets vault (AES-256-GCM at rest). The vault's passphrase
+// comes from PROMIN_SECRETS_PASSPHRASE; the dev default below is fine for
+// local hacking, production deployments must set it.
+const stack = createSqliteZoryaStack({
+  path: dbPath,
+  secretsPassphrase: process.env.PROMIN_SECRETS_PASSPHRASE ?? "demo-only-passphrase-change-in-prod",
+});
+const { storage, schedulerStorage, runner } = stack;
 
 // Agent registry + memory store — SQLite (shares the db above) by
 // default, or Postgres when ZORYA_PG_URL is set. Postgres mode boots
@@ -183,10 +157,10 @@ if (pgUrl) {
     "[zorya] agent + skill registries + fragment store + memory store → Postgres (ZORYA_PG_URL)",
   );
 } else {
-  agentRegistry = SqliteAgentRegistry.make({ db });
-  skillRegistry = SqliteSkillRegistry.make({ db });
-  fragmentStore = SqliteFragmentStore.make({ db });
-  memoryStore = SqliteMemoryStore.make({ db });
+  agentRegistry = stack.agentRegistry;
+  skillRegistry = stack.skillRegistry;
+  fragmentStore = stack.fragmentStore;
+  memoryStore = stack.memoryStore;
 }
 // Prompt-fragment registry — small curated markdown layers role recipes
 // compose into their system prompt. The ZoryaFragments service below scans
@@ -197,20 +171,16 @@ const fragmentRegistry = new InMemoryFragmentRegistry();
 // operators author roles via /api/roles, or "Save as role" lifts an agent's
 // inline role into here. Refs resolve through this at agent-materialize time.
 const roleRegistry = new InMemoryRoleRegistry();
-const dagRegistry = SqliteDagRegistry.make({ db });
+const dagRegistry = stack.dagRegistry;
 // Long-lived agent instances. Persisted alongside the registry so they
 // survive restarts; the cascade still keys memory by `resourceId =
 // instance.id`, so one instance = one per-(agent, owner) memory slot.
-const instanceRegistry = SqliteAgentInstanceRegistry.make({ db });
+const instanceRegistry = stack.instanceRegistry;
 
-// Secrets vault. AES-256-GCM at rest (passphrase via PROMIN_SECRETS_PASSPHRASE,
-// dev default below). Exposes /api/secrets HTTP CRUD + the dashboard's
-// /secrets page; agent resolver fetches model.credentialRef from here
-// at request time (BYOK). The dev-default passphrase is fine for local
-// hacking — production deployments must set PROMIN_SECRETS_PASSPHRASE.
-const secretsPassphrase =
-  process.env.PROMIN_SECRETS_PASSPHRASE ?? "demo-only-passphrase-change-in-prod";
-const secretsStorage = SqliteSecretsStorage.make({ db, passphrase: secretsPassphrase });
+// Secrets vault (see the stack above). Exposes /api/secrets HTTP CRUD + the
+// dashboard's /secrets page; agent resolver fetches model.credentialRef from
+// here at request time (BYOK).
+const secretsStorage = stack.secretsStorage;
 
 // ---------------------------------------------------------------------------
 // Agents — auto-discovered from ./agents (mirrors the workflow scanner).
@@ -805,15 +775,15 @@ function nextId(name: string): string {
 // in-process LocalWorkflows can't handle. Persisted to the same SQLite
 // db as everything else, so triggers fired before a worker connects
 // stay queued across demo restarts.
-const workflowStarts = SqliteWorkflowStartQueue.make({ db });
+const workflowStarts = stack.workflowStarts;
 // Worker-advertisement registry — same db, same lifetime. Workers
 // re-advertise on connect, but persisting it means the dashboard's
 // Workflows page survives a quick demo restart without going blank
 // while the worker reconnects.
-const advertisements = SqliteWorkflowAdvertisementRegistry.make({ db });
+const advertisements = stack.advertisements;
 // The one worker registry: external workers register into it over
 // /rpc/worker and the Workers page lists it.
-const workerRegistry = SqliteWorkerRegistry.make({ db });
+const workerRegistry = stack.workerRegistry;
 
 // ---------------------------------------------------------------------------
 // Background: seed a handful of runs on startup so the first page has data.
@@ -1257,39 +1227,39 @@ console.log(
     `(${researchSynthesisRecipe.nodes.length} nodes, ${researchSynthesisRecipe.edges.length} edges)`,
 );
 
-const server = new ZoryaServer({
-  workflows,
-  scheduler,
-  agents,
-  skills,
-  fragments,
-  dags,
+const server = ZoryaServer.builder()
+  .workflows(workflows)
+  .scheduler(scheduler)
+  .agents(agents)
+  .skills(skills)
+  .fragments(fragments)
+  .dags(dags)
   // BYOK / per-tenant API keys / MCP credentials live here. Exposes
   // /api/secrets HTTP CRUD + the dashboard's Secrets page; the agent
   // resolver wiring (in `agents.resolve` above) reads model.credentialRef
   // from this vault at request time.
-  secrets: secretsStorage,
+  .secrets(secretsStorage)
   // Operator key for /api; worker key for /rpc/storage, /rpc/worker,
   // /ws/worker, /api/advertisements and /api/worker-protocol/* — the surface
   // external workers connect to. Without keys only ZORYA_INSECURE=1 boots.
-  ...(ZORYA_API_KEY !== undefined && { apiKeys: [ZORYA_API_KEY] }),
-  remoteWorkers: ZORYA_WORKER_API_KEY !== undefined ? { apiKeys: [ZORYA_WORKER_API_KEY] } : {},
-  insecure: ZORYA_INSECURE,
-  sampleInput: (name) => inputFor(name),
+  .apiKeys(ZORYA_API_KEY !== undefined ? [ZORYA_API_KEY] : [])
+  .remoteWorkers(ZORYA_WORKER_API_KEY !== undefined ? { apiKeys: [ZORYA_WORKER_API_KEY] } : {})
+  .insecure(ZORYA_INSECURE)
+  .sampleInput((name) => inputFor(name))
   // The Deployments page (#/deployments) manages the version registry
   // passed to LocalWorkflows above; the server finds it on the chain.
-  uiDir,
+  .uiDir(uiDir)
   // Keep the persistent demo database bounded: the demo fires several
   // schedules often, and run history would otherwise grow until SQLite
   // competes with the dashboard's reads. Ended runs older than
   // ZORYA_RETENTION_DAYS (default 1) are deleted every
   // ZORYA_RETENTION_INTERVAL_MS (default one hour).
-  retention: {
+  .retention({
     maxAgeMs: Number(process.env.ZORYA_RETENTION_DAYS ?? 1) * 24 * 60 * 60 * 1000,
     intervalMs: Number(process.env.ZORYA_RETENTION_INTERVAL_MS ?? 60 * 60 * 1000),
     batchSize: 500,
-  },
-});
+  })
+  .build();
 
 const port = Number(process.env.PORT ?? 4100);
 const { port: actualPort, hostname } = server.listen({ port });

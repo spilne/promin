@@ -12,7 +12,7 @@ const runner = createWorkflowRunner({ storage });
 const kycVerification = workflow<{ userId: string; documentUrl: string }>({
   name: "kyc-verification",
 })
-  .stepAsync("submit-check", async ({ input }) => {
+  .step("submit-check", async ({ input }) => {
     const checkId = await submitToProvider(input.documentUrl);
     return { checkId };
   })
@@ -20,7 +20,7 @@ const kycVerification = workflow<{ userId: string; documentUrl: string }>({
     signalName: "provider-callback",
     timeoutMs: 24 * 60 * 60_000,
   })
-  .stepAsync("finalize", async ({ prev }) => {
+  .step("finalize", async ({ prev }) => {
     return { verified: prev.passed };
   })
   .build();

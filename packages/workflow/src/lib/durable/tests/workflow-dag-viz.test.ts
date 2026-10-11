@@ -20,10 +20,10 @@ describe("dagToMermaid", () => {
     expect(mermaid).toContain("a_b_2 --> c");
   });
 
-  it("keeps a parallelSteps branch apart from a step with the reduced name", () => {
+  it("keeps a parallel branch apart from a step with the reduced name", () => {
     const wf = workflow<number>({ name: "p" })
       .step("enrich_user", () => succeed(1))
-      .parallelSteps("enrich", { user: () => succeed(2) })
+      .parallel("enrich", { user: () => succeed(2) })
       .build();
     const mermaid = dagToMermaid(wf.dag);
     expect(mermaid).toContain('enrich_user["enrich_user"]');

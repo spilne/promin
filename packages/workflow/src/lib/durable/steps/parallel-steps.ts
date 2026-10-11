@@ -1,35 +1,31 @@
 // ---------------------------------------------------------------------------
-// `.parallelSteps()` — fork the current head into named branches that run as
-// distinct DAG steps (`<block>.<branch>`), joined into a keyed record by a
-// synthetic `parallel` step named after the block.
+// `.parallel()` — fork the current head (or the named dependencies) into
+// named branches that run as distinct DAG steps (`<block>.<branch>`), joined
+// into a keyed record by a synthetic `parallel` step named after the block.
 // ---------------------------------------------------------------------------
 
-import { succeed, type Eff, type ErrorsOf } from "@spilne/perfect-core";
+import { succeed } from "@spilne/perfect-core";
 import type { Codec } from "@spilne/perfect-core/connect";
-import type { TaggedError } from "../../shared/tagged-error.ts";
+
 import { WorkflowError } from "../durable-pipeline-error.ts";
 import { withOptionalStepCache } from "../step-cache.ts";
 import {
   asStepEff,
   linearStepContext,
-  type ParallelStepsOptions,
+  type ParallelOptions,
+  type StepBodyError,
+  type StepBodyOutput,
   type StepDefinition,
   type StepOptions,
 } from "../step-definition.ts";
 import { toStepPolicy } from "../step-policy.ts";
 
-/** Extract the success type from a parallel branch function. */
-export type BranchOutput<B> = B extends (ctx: never) => Eff<infer T, infer _S> ? T : never;
+/** The value a parallel branch function produces. */
+export type BranchOutput<B> = B extends (ctx: never) => infer R ? StepBodyOutput<R> : never;
 
 /** Union of all branch error types — flows into the builder's typed Error channel. */
 export type BranchError<Branches extends Record<string, unknown>> = {
-  [K in keyof Branches]: Branches[K] extends (ctx: never) => Eff<infer _A, infer S>
-    ? ErrorsOf<S> extends infer E
-      ? E extends TaggedError
-        ? E
-        : never
-      : never
-    : never;
+  [K in keyof Branches]: Branches[K] extends (ctx: never) => infer R ? StepBodyError<R> : never;
 }[keyof Branches];
 
 /**
@@ -40,7 +36,7 @@ export function createParallelSteps(params: {
   readonly name: string;
   readonly dependsOn: string[];
   readonly branches: Readonly<Record<string, (ctx: never) => unknown>>;
-  readonly options: ParallelStepsOptions<Record<string, unknown>> | undefined;
+  readonly options: ParallelOptions<Record<string, unknown>> | undefined;
   /** The workflow's default codec. */
   readonly defaultCodec: Codec<unknown>;
   /** Default step-cache namespace (the workflow name). */
@@ -51,7 +47,7 @@ export function createParallelSteps(params: {
   if (branchKeys.length === 0) {
     throw new WorkflowError({
       workflowId: "",
-      message: `.parallelSteps("${name}", ...) requires at least one branch`,
+      message: `.parallel("${name}", ...) requires at least one branch`,
     });
   }
   const perBranch = (options?.branches ?? {}) as Record<string, StepOptions<unknown> | undefined>;
@@ -59,7 +55,7 @@ export function createParallelSteps(params: {
     if (!Object.hasOwn(branches, key)) {
       throw new WorkflowError({
         workflowId: "",
-        message: `.parallelSteps("${name}", ...): options.branches has no branch "${key}"`,
+        message: `.parallel("${name}", ...): options.branches has no branch "${key}"`,
       });
     }
   }
@@ -102,7 +98,7 @@ export function createParallelSteps(params: {
         return withOptionalStepCache({
           cache: branchOptions.cache,
           ctx,
-          runBody: () => asStepEff({ result: branchFn(ctx), stepName: scopedName }),
+          runBody: () => asStepEff(branchFn(ctx)),
           stepName: scopedName,
           namespace: params.cacheNamespace,
           codec,
@@ -137,7 +133,7 @@ export function createParallelSteps(params: {
 
 /**
  * Combine per-key codecs into a codec for the record of their values (the
- * `parallelSteps` join). Keys without a codec are encoded as-is.
+ * `.parallel()` join). Keys without a codec are encoded as-is.
  */
 function recordCodec(codecs: Readonly<Record<string, Codec<unknown>>>): Codec<unknown> {
   const mapRecord = (value: unknown, pick: (codec: Codec<unknown>, v: unknown) => unknown) => {

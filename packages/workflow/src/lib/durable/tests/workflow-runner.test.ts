@@ -170,9 +170,9 @@ describe("WorkflowRunner", () => {
     /** Two parallel roots: "fast" settles at once, "slow" waits for `release`. */
     const eagerWorkflow = (name: string, release: Promise<void>) =>
       workflow<void>({ name })
-        .stepAsync("fast", async () => "fast-done")
+        .step("fast", async () => "fast-done")
         // `{ dependsOn: [] }` as the config makes "slow" a second root.
-        .stepAsync("slow", { dependsOn: [] }, async () => {
+        .step("slow", { dependsOn: [] }, async () => {
           await release;
           return "slow-done";
         })
@@ -227,11 +227,11 @@ describe("WorkflowRunner", () => {
       // though the wave failed overall.
       const storage = new RecordingStorage();
       const wf = workflow<void>({ name: "eager-partial" })
-        .stepAsync("ok", async () => "yay")
+        .step("ok", async () => "yay")
         // A second root, so "ok" and "boom" share a wave. No ordering help:
         // the wave waits for every sibling and persists each outcome,
         // whichever settles first.
-        .stepAsync("boom", { dependsOn: [] }, async (): Promise<string> => {
+        .step("boom", { dependsOn: [] }, async (): Promise<string> => {
           throw new Error("kaboom");
         })
         .build();

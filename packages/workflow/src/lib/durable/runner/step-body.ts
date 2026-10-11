@@ -76,7 +76,7 @@ export function errorTagOf(error: unknown): string | undefined {
  * attempt that fails with a typed error (other than suspension or
  * continue-as-new) is reported in `failedAttempts`, including a last
  * attempt that `onFailure` then absorbed. Defects (a rejected
- * `.stepAsync()` body, a synchronous throw) settle as `failed` too.
+ * step Promise, a synchronous throw) settle as `failed` too.
  */
 export async function runStepBody(params: {
   readonly stepDef: StepDefinition;

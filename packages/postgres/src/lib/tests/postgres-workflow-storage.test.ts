@@ -412,9 +412,9 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
     expect((await storage.loadWorkflow("e2e-fail-1"))!.status).toBe("failed");
   });
 
-  it("runs with stepAsync", async () => {
+  it("runs with a Promise-returning step", async () => {
     const wf = workflow<{ name: string }>({ name: "e2e-async" })
-      .stepAsync("greet", async ({ input }) => `Hello, ${input.name}!`)
+      .step("greet", async ({ input }) => `Hello, ${input.name}!`)
       .build();
     const runner = createWorkflowRunner({ storage });
     const result = await runner.run({
@@ -435,7 +435,7 @@ postgresDescribe("End-to-end workflow with Postgres", { migrate }, (pg) => {
       metadata: { team: "growth", region: "us-east", priority: "high" },
     })
       .step("fetch", ({ input }) => succeed({ name: `User ${input.userId}` }))
-      .stepAsync("provision", async ({ prev }) => ({ accountId: `acc-${prev.name}` }))
+      .step("provision", async ({ prev }) => ({ accountId: `acc-${prev.name}` }))
       .build();
     await runner.run({
       workflow: onboardWf,

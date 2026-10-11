@@ -14,7 +14,7 @@ describe("workflow idempotency TTL", () => {
     let runCount = 0;
 
     const wf = workflow({ name: "ttl-test" })
-      .stepAsync("compute", async () => {
+      .step("compute", async () => {
         runCount++;
         return { value: 42 };
       })
@@ -35,7 +35,7 @@ describe("workflow idempotency TTL", () => {
     const runner = createWorkflowRunner({ storage, clock });
 
     const wf = workflow({ name: "ttl-expire" })
-      .stepAsync("compute", async () => ({ value: 1 }))
+      .step("compute", async () => ({ value: 1 }))
       .build({ idempotency: { ttl: 1 } });
 
     await runner.run({ workflow: wf, workflowId: "cd-2", input: {} });
@@ -52,7 +52,7 @@ describe("workflow idempotency TTL", () => {
     const runner = createWorkflowRunner({ storage, clock });
 
     const wf = workflow({ name: "split-ttl" })
-      .stepAsync("compute", async () => ({ value: 1 }))
+      .step("compute", async () => ({ value: 1 }))
       .build({
         idempotency: {
           ttl: { success: 60_000, failure: 100 },
@@ -73,7 +73,7 @@ describe("workflow idempotency TTL", () => {
     const runner = createWorkflowRunner({ storage, clock });
 
     const wf = workflow({ name: "force-test" })
-      .stepAsync("compute", async () => ({ value: 1 }))
+      .step("compute", async () => ({ value: 1 }))
       .build({ idempotency: { ttl: 60_000 } });
 
     await runner.run({ workflow: wf, workflowId: "cd-4", input: {} });
@@ -90,7 +90,7 @@ describe("workflow idempotency TTL", () => {
     let runCount = 0;
 
     const wf = workflow({ name: "ttl-safe" })
-      .stepAsync("compute", async () => {
+      .step("compute", async () => {
         runCount++;
         return { value: 42 };
       })
@@ -111,7 +111,7 @@ describe("workflow idempotency TTL", () => {
     let runCount = 0;
 
     const wf = workflow({ name: "no-ttl" })
-      .stepAsync("compute", async () => {
+      .step("compute", async () => {
         runCount++;
         return { value: runCount };
       })

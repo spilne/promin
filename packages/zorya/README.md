@@ -53,24 +53,26 @@ this for you.
 A minimal host of your own:
 
 ```ts
-import { createWorkflowRunner, workflow } from "@promin/workflow";
-import { SqliteWorkflowStorage } from "@promin/sqlite";
+import { workflow } from "@promin/workflow";
 import { LocalWorkflows, ZoryaServer } from "@promin/zorya";
-import { Database } from "bun:sqlite";
-import { succeed } from "@spilne/perfect-core";
+import { createSqliteZoryaStack } from "@promin/zorya/sqlite";
 
 const hello = workflow<{ name: string }>({ name: "hello" })
-  .step("greet", ({ input }) => succeed(`hello ${input.name}`))
+  .step("greet", ({ input }) => `hello ${input.name}`)
   .build();
 
-const storage = SqliteWorkflowStorage.make({ db: new Database("zorya.db") });
+// Every store on one SQLite file (needs `@promin/sqlite` installed).
+const stack = createSqliteZoryaStack({ path: "./data/zorya.db" });
 const workflows = new LocalWorkflows({
-  storage,
-  runner: createWorkflowRunner({ storage }),
+  storage: stack.storage,
+  runner: stack.runner,
   definitions: { hello },
 });
 
-const server = new ZoryaServer({ workflows, apiKeys: [process.env.ZORYA_API_KEY!] });
+const server = ZoryaServer.builder()
+  .workflows(workflows)
+  .apiKeys([process.env.ZORYA_API_KEY!])
+  .build();
 server.listen({ port: 4100 });
 await server.ready();
 process.on("SIGTERM", () => void server.stop().then(() => process.exit(0)));
@@ -195,7 +197,24 @@ needs.
 
 ## Configuration reference
 
-`new ZoryaServer(config: ZoryaServerConfig)`:
+`new ZoryaServer(config: ZoryaServerConfig)`, or the same fields through
+`ZoryaServer.builder()`: one setter per field, `build()` (or
+`listen(options)`), and `buildConfig()` for the plain config. `build()`
+throws when `workflows()` is missing; the constructor then applies the key
+checks below.
+
+```ts
+const server = ZoryaServer.builder()
+  .workflows(workflows)
+  .scheduler(scheduler)
+  .agents(agents)
+  .secrets(stack.secretsStorage)
+  .apiKeys([process.env.ZORYA_API_KEY!])
+  .remoteWorkers({ apiKeys: [process.env.ZORYA_WORKER_API_KEY!] })
+  .sampleInput((name) => sampleInputFor(name))
+  .uiDir(uiDir)
+  .build();
+```
 
 | Field                         | Default                 | Meaning                                                                                                                                                                                                                                                                          |
 | ----------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -237,6 +256,19 @@ needs.
 The workflows layers have their own options (scan intervals, orphan grace,
 maintenance cadence, `cluster`, `clock`, `onError`). See
 `LocalWorkflowsConfig` and `QueuedWorkflowsConfig`.
+
+### SQLite stack
+
+`createSqliteZoryaStack({ path, secretsPassphrase?, clock? })` from
+`@promin/zorya/sqlite` (needs `@promin/sqlite`) opens one Bun SQLite
+database (WAL, foreign keys on; `":memory:"` for an ephemeral one) and
+returns every store a single-process Zorya uses on it: workflow `storage`
+and a `runner` over it, `schedulerStorage`, the worker protocol's
+`workflowStarts`, `advertisements` and `workerRegistry`, the agent
+registries and stores, and `secretsStorage` — only when a
+`secretsPassphrase` is given; there is no default passphrase. Larger
+deployments build stores themselves, or replace some of these (the demo
+moves agent state to Postgres with `ZORYA_PG_URL`).
 
 ### Demo server environment
 
@@ -383,6 +415,26 @@ What the worker does:
 Step bodies are at-least-once: a run resumed after a crash re-runs the step
 that was in flight. Make them idempotent.
 
+`ZoryaWorker.builder()` builds the same `ZoryaWorkerConfig` fluently, one
+setter per field; `.workflow()` and `.workflows(...)` add to the hosted
+definitions across calls, and `build()` throws without a `client()` or a
+workflow:
+
+```ts
+const worker = ZoryaWorker.builder()
+  .client(new ZoryaClient({ url, apiKey: process.env.ZORYA_WORKER_API_KEY }))
+  .workflows(hello, orderWorkflow)
+  .workflow(paymentWorkflow)
+  .capabilities(["payments"])
+  .concurrency(4)
+  .sampleInput(sampleInputFor)
+  .build();
+```
+
+Typed definitions (`Workflow<{ name: string }, string, MyError>`) are
+accepted as they are, here and in `ZoryaWorkerConfig.workflows`; no cast is
+needed.
+
 Starting runs from application code:
 
 ```ts
@@ -407,6 +459,8 @@ streams over the `/ws/worker` control socket (`WorkerControlSocket`,
 src/server/
   server.ts            ZoryaServer: resolves the chain's stores, mounts, lifecycle
   server-config.ts     ZoryaServerConfig, ListenOptions, Logger, defaults
+  server-builder.ts    ZoryaServerBuilder (ZoryaServer.builder())
+  sqlite-stack.ts      createSqliteZoryaStack (the @promin/zorya/sqlite entry)
   mount/
     mount-auth.ts      auth planes: which credentials each path needs
     mount-lifecycle.ts probes, background services, in-flight and stream tracking

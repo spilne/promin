@@ -142,12 +142,12 @@ const KINDS: readonly KindCase[] = [
         .mapOver("k", { array: "arr" }, () => script.eff(), options as never),
   },
   {
-    kind: "parallelSteps (per branch)",
+    kind: "parallel (per branch)",
     supports: ALL,
     policyStep: "k.a",
     shape: (v) => ({ a: v }),
     add: ({ wf, script, options }) =>
-      wf.parallelSteps("k", { a: () => script.eff() }, { branches: { a: options } }),
+      wf.parallel("k", { a: () => script.eff() }, { branches: { a: options } }),
   },
   {
     kind: "journaled",
@@ -491,13 +491,13 @@ describe("mapOver element options", () => {
   });
 });
 
-describe("parallelSteps options", () => {
+describe("parallel options", () => {
   it("block-level retry is the default for every branch; a branch can override it", async () => {
     const { runner, uid } = setup();
     const a = new Script({ failTimes: 1 });
     const b = new Script({ failTimes: 2, value: 7 });
     const wf = workflow<number>({ name: `p-${uid}` })
-      .parallelSteps(
+      .parallel(
         "k",
         { a: () => a.eff(), b: () => b.eff() },
         {
@@ -519,7 +519,7 @@ describe("parallelSteps options", () => {
       decode: (raw) => String(raw).toLowerCase(),
     };
     const wf = workflow<number>({ name: `p-${uid}` })
-      .parallelSteps(
+      .parallel(
         "k",
         { a: () => succeed("x"), b: () => succeed(1) },
         { branches: { a: { codec: upper } } },
@@ -534,7 +534,7 @@ describe("parallelSteps options", () => {
 
   it("rejects options for a branch that does not exist", () => {
     expect(() =>
-      workflow<number>({ name: "p-bad" }).parallelSteps(
+      workflow<number>({ name: "p-bad" }).parallel(
         "k",
         { a: () => succeed(1) },
         { branches: { nope: { retry: {} } } as never },

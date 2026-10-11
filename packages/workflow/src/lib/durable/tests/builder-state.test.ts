@@ -131,9 +131,9 @@ describe("WorkflowBuilder state", () => {
     expect(built.dag.steps.map((s) => s.name)).toEqual(["a"]);
   });
 
-  it("parallelSteps branch names collide with existing steps", () => {
+  it("parallel branch names collide with existing steps", () => {
     const b = workflow<number>({ name: "p" }).step("fan.a", () => succeed(1));
-    expect(() => b.parallelSteps("fan", { a: () => succeed(2) })).toThrow(
+    expect(() => b.parallel("fan", { a: () => succeed(2) })).toThrow(
       /Duplicate step name: "fan.a"/,
     );
   });

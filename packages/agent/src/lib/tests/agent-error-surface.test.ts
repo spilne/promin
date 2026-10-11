@@ -105,10 +105,10 @@ describe("surfaceAgentError — classifies thrown values", () => {
     expect((result.error as { _tag?: string })._tag).toBe("TerminalError");
   });
 
-  it("surfaces a thrown stepAsync error from the runner verbatim", async () => {
+  it("surfaces a thrown async step error from the runner verbatim", async () => {
     const inner = new Error("inner cause");
     const err = await runnerRejection(() =>
-      workflow<number>({ name: "async-throw" }).stepAsync("s", async () => {
+      workflow<number>({ name: "async-throw" }).step("s", async () => {
         throw inner;
       }),
     );

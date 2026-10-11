@@ -16,15 +16,15 @@ const runner = createWorkflowRunner({ storage });
 const processOrder = workflow<{ orderId: string; amount: number }>({
   name: "process-order",
 })
-  .stepAsync("validate", async ({ input }) => {
+  .step("validate", async ({ input }) => {
     if (input.amount <= 0) throw new Error("Invalid amount");
     return { valid: true, orderId: input.orderId };
   })
-  .stepAsync("charge", async ({ prev }) => {
+  .step("charge", async ({ prev }) => {
     const tx = await chargeCard(prev.orderId, 99.99);
     return { txId: tx.id };
   })
-  .stepAsync("ship", async ({ prev }) => {
+  .step("ship", async ({ prev }) => {
     const tracking = await createShipment(prev.txId);
     return { trackingNumber: tracking.number };
   })

@@ -92,12 +92,24 @@ export interface WorkflowSchema {
 // ---------------------------------------------------------------------------
 
 /**
- * A step in the workflow DAG. Either a single step or a fan-out map step.
+ * A step in the workflow DAG.
  *
- * Use `type: "step"` for normal steps (including DAG steps with `dependsOn`).
- * Use `type: "map"` for fan-out over an array produced by another step.
+ * - `type: "step"` — one activity (including DAG steps with `dependsOn`).
+ * - `type: "map"` — fan-out over an array produced by another step.
+ * - `type: "sleep"` — durable timer that passes its dependency's value on.
+ * - `type: "signal"` — wait for a named signal; completes with its payload.
+ * - `type: "approval"` — `signal` with the approval defaults.
+ * - `type: "branch"` — run one of two activities, chosen by a predicate activity.
+ * - `type: "parallel"` — run several activities concurrently, joined into a record.
  */
-export type StepSchema = SingleStepSchema | MapStepSchema;
+export type StepSchema =
+  | SingleStepSchema
+  | MapStepSchema
+  | SleepStepSchema
+  | SignalStepSchema
+  | ApprovalStepSchema
+  | BranchStepSchema
+  | ParallelStepSchema;
 
 /**
  * A single workflow step that executes one activity.
@@ -173,6 +185,82 @@ export interface MapStepSchema {
   /** Step-level options (retry, timeout, concurrency). */
   options?: MapStepSchemaOptions;
   /** JSON Schema describing each element's output type. */
+  outputSchema?: JsonSchema;
+}
+
+/** A reference to a registered activity plus its static config. */
+export interface ActivityRefSchema {
+  /** Reference to the activity implementation (resolved via ActivityRegistry). */
+  activityRef: string;
+  /** Static config passed to the activity factory. */
+  config?: Record<string, unknown>;
+}
+
+/**
+ * A durable timer (`.sleep()`). On wake it passes its first dependency's
+ * value through (the workflow input when `dependsOn` is empty).
+ */
+export interface SleepStepSchema {
+  type: "sleep";
+  name: string;
+  dependsOn: string[];
+  /** How long to sleep, in milliseconds. */
+  ms: number;
+}
+
+/** Wait for a named signal (`.waitForSignal()`); completes with its payload. */
+export interface SignalStepSchema {
+  type: "signal";
+  name: string;
+  dependsOn: string[];
+  signalName: string;
+  /** Fail with `WorkflowTimeoutError` when no signal arrives in time. */
+  timeoutMs?: number;
+  /** JSON Schema describing the signal payload. */
+  outputSchema?: JsonSchema;
+}
+
+/**
+ * Wait for an approval decision (`.approval()`): a signal step whose signal
+ * name defaults to `"<name>-approved"`.
+ */
+export interface ApprovalStepSchema {
+  type: "approval";
+  name: string;
+  dependsOn: string[];
+  signalName?: string;
+  timeoutMs?: number;
+  outputSchema?: JsonSchema;
+}
+
+/**
+ * Two-way conditional (`.branch()`): the `conditionRef` activity returns a
+ * boolean, then `ifTrue` or `ifFalse` runs. All three see the same context
+ * (the first dependency's value as `prev`).
+ */
+export interface BranchStepSchema {
+  type: "branch";
+  name: string;
+  dependsOn: string[];
+  /** Activity returning a boolean. */
+  conditionRef: string;
+  ifTrue: ActivityRefSchema;
+  ifFalse: ActivityRefSchema;
+  options?: StepSchemaOptions;
+  outputSchema?: JsonSchema;
+}
+
+/**
+ * Fork/join (`.parallel()`): each branch runs as its own step
+ * (`"<name>.<branch>"`); the step's result is `{ [branch]: result }`.
+ */
+export interface ParallelStepSchema {
+  type: "parallel";
+  name: string;
+  dependsOn: string[];
+  branches: Record<string, ActivityRefSchema>;
+  /** Applied to every branch. */
+  options?: StepSchemaOptions;
   outputSchema?: JsonSchema;
 }
 

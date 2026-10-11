@@ -14,7 +14,7 @@ describe("parallel", () => {
 
     const wf = workflow<{ userId: string }>({ name: "par-basic" })
       .step("load", ({ input }) => succeed(input))
-      .parallelSteps("enrich", {
+      .parallel("enrich", {
         user: ({ prev }) => succeed({ name: `U:${prev.userId}` }),
         perms: ({ prev }) => succeed({ roles: [`R:${prev.userId}`] }),
       })
@@ -35,7 +35,7 @@ describe("parallel", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<{ a: number; b: number }>({ name: "par-first" })
-      .parallelSteps("ops", {
+      .parallel("ops", {
         sum: ({ input }) => succeed(input.a + input.b),
         prod: ({ input }) => succeed(input.a * input.b),
       })
@@ -56,7 +56,7 @@ describe("parallel", () => {
 
     const wf = workflow<number>({ name: "par-persist" })
       .step("in", ({ input }) => succeed(input))
-      .parallelSteps("fork", {
+      .parallel("fork", {
         x: ({ prev }) => succeed(prev * 10),
         y: ({ prev }) => succeed(prev * 100),
       })
@@ -76,7 +76,7 @@ describe("parallel", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<string>({ name: "par-join-result" })
-      .parallelSteps("f", {
+      .parallel("f", {
         upper: ({ input }) => succeed(input.toUpperCase()),
         len: ({ input }) => succeed(input.length),
       })
@@ -93,7 +93,7 @@ describe("parallel", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "par-3" })
-      .parallelSteps("triple", {
+      .parallel("triple", {
         a: ({ input }) => succeed(input + 1),
         b: ({ input }) => succeed(input + 2),
         c: ({ input }) => succeed(input + 3),
@@ -109,7 +109,7 @@ describe("parallel", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "par-fail" })
-      .parallelSteps("fork", {
+      .parallel("fork", {
         ok: ({ input }) => succeed(input),
         bad: () => fail(new BranchFailed({ message: "boom" })),
       })
@@ -128,16 +128,16 @@ describe("parallel", () => {
   });
 
   it("rejects empty branches object", () => {
-    expect(() =>
-      workflow<number>({ name: "par-empty" }).parallelSteps("empty", {}).build(),
-    ).toThrow(/at least one branch/);
+    expect(() => workflow<number>({ name: "par-empty" }).parallel("empty", {}).build()).toThrow(
+      /at least one branch/,
+    );
   });
 
   it("rejects duplicate block name", () => {
     expect(() =>
       workflow<number>({ name: "par-dup" })
         .step("foo", ({ input }) => succeed(input))
-        .parallelSteps("foo", {
+        .parallel("foo", {
           a: ({ prev }) => succeed(prev),
         })
         .build(),
@@ -148,7 +148,7 @@ describe("parallel", () => {
     expect(() =>
       workflow<number>({ name: "par-col" })
         .step("fork.a", ({ input }) => succeed(input))
-        .parallelSteps("fork", {
+        .parallel("fork", {
           a: ({ prev }) => succeed(prev),
         })
         .build(),
@@ -160,7 +160,7 @@ describe("parallel", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "par-chain" })
-      .parallelSteps("split", {
+      .parallel("split", {
         dbl: ({ input }) => succeed(input * 2),
         trp: ({ input }) => succeed(input * 3),
       })
@@ -179,7 +179,7 @@ describe("parallel", () => {
   it("DAG exports branches and join node", () => {
     const wf = workflow<number>({ name: "par-dag" })
       .step("start", ({ input }) => succeed(input))
-      .parallelSteps("fork", {
+      .parallel("fork", {
         left: ({ prev }) => succeed(prev + 1),
         right: ({ prev }) => succeed(prev + 2),
       })
@@ -216,7 +216,7 @@ describe("parallel", () => {
         (e) => e,
       ).orDie();
     const wf = workflow<number>({ name: "par-concurrent" })
-      .parallelSteps("sleep", { a: branch("a"), b: branch("b") })
+      .parallel("sleep", { a: branch("a"), b: branch("b") })
       .build();
 
     const t0 = clock.currentTimeMs();

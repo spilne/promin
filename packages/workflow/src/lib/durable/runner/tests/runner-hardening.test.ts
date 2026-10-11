@@ -34,14 +34,14 @@ describe("RoutingStepExecutor", () => {
     const localDone = gate();
     const order: string[] = [];
     const wf = workflow({ name: "routed" })
-      .stepAsync("root", async () => "root")
-      .stepAsync("remote", { dependsOn: ["root"] }, async () => new Date(0))
-      .stepAsync("local", { dependsOn: ["root"] }, async () => {
+      .step("root", async () => "root")
+      .step("remote", { dependsOn: ["root"] }, async () => new Date(0))
+      .step("local", { dependsOn: ["root"] }, async () => {
         order.push("local");
         localDone.open();
         return "local";
       })
-      .stepAsync("join", { dependsOn: ["remote", "local"] }, async ({ deps }) => ({
+      .step("join", { dependsOn: ["remote", "local"] }, async ({ deps }) => ({
         isDate: deps.remote instanceof Date,
         at: (deps.remote as Date).getTime(),
       }))
@@ -78,7 +78,7 @@ describe("RoutingStepExecutor", () => {
 describe("start()", () => {
   const slowWorkflow = (params: { release: Promise<void>; runs: string[]; join?: boolean }) =>
     workflow({ name: "slow-start" })
-      .stepAsync("work", async () => {
+      .step("work", async () => {
         params.runs.push("work");
         await params.release;
         return "done";
@@ -133,7 +133,7 @@ describe("start()", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow({ name: "waits" })
-      .stepAsync("a", async () => 1)
+      .step("a", async () => 1)
       .waitForSignal("wait", { signalName: "go" })
       .build();
 
@@ -155,7 +155,7 @@ describe("start()", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow({ name: "keyed" })
-      .stepAsync("a", async () => "ok")
+      .step("a", async () => "ok")
       .build();
 
     const first = await runner.start({

@@ -10,7 +10,7 @@
 // its queue based on `routing` (see coordinator.ts). Workers run the real
 // handlers — see steps.ts — matched by step name via a MapStepRegistry.
 //
-// The stepAsync bodies here are DAG placeholders; for distributed execution
+// The Promise-returning step bodies here are DAG placeholders; for distributed execution
 // the coordinator never calls them, so they're just a declaration that
 // "this step exists, these are its dependencies, here's the output type."
 // In local (in-process) runs the body IS called — `bun run --mode local`
@@ -64,10 +64,10 @@ export function buildVideoWorkflow() {
       // decode backlog when no transcode work is queued. Use a worker
       // "taint" (v2) if you ever need to reserve a specialized worker
       // exclusively for its specialty.
-      .stepAsync("decode", async (): Promise<DecodeResult> => {
+      .step("decode", async (): Promise<DecodeResult> => {
         throw new Error("decode body is placeholder — worker runs the real handler");
       })
-      .stepAsync(
+      .step(
         "transcode",
         { dependsOn: ["decode"] },
         async (): Promise<TranscodeResult> => {
@@ -75,7 +75,7 @@ export function buildVideoWorkflow() {
         },
         { needs: ["gpu"] },
       )
-      .stepAsync(
+      .step(
         "thumbnail",
         { dependsOn: ["transcode"] },
         async (): Promise<ThumbnailResult> => {
@@ -83,16 +83,12 @@ export function buildVideoWorkflow() {
         },
         { needs: ["cpu"] },
       )
-      .stepAsync("metadata", { dependsOn: ["decode"] }, async (): Promise<MetadataResult> => {
+      .step("metadata", { dependsOn: ["decode"] }, async (): Promise<MetadataResult> => {
         throw new Error("metadata body is placeholder");
       })
-      .stepAsync(
-        "notify",
-        { dependsOn: ["thumbnail", "metadata"] },
-        async (): Promise<NotifyResult> => {
-          throw new Error("notify body is placeholder");
-        },
-      )
+      .step("notify", { dependsOn: ["thumbnail", "metadata"] }, async (): Promise<NotifyResult> => {
+        throw new Error("notify body is placeholder");
+      })
       .build()
   );
 }

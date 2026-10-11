@@ -78,7 +78,7 @@ export function buildOrderWorkflow() {
       // bottom-up for every completed step that has a `compensate` hook.
       compensate: { trigger: "after-retries" },
     })
-      .stepAsync(
+      .step(
         "reserve-inventory",
         async (): Promise<InventoryResult> => {
           throw new Error("placeholder — worker runs the real handler");
@@ -94,7 +94,7 @@ export function buildOrderWorkflow() {
           },
         },
       )
-      .stepAsync(
+      .step(
         "charge-payment",
         { dependsOn: ["reserve-inventory"] },
         async (): Promise<PaymentResult> => {
@@ -111,7 +111,7 @@ export function buildOrderWorkflow() {
           },
         },
       )
-      .stepAsync(
+      .step(
         "generate-label",
         { dependsOn: ["charge-payment"] },
         async (): Promise<LabelResult> => {
@@ -119,7 +119,7 @@ export function buildOrderWorkflow() {
         },
         { needs: ["shipping"] },
       )
-      .stepAsync("notify-warehouse", { dependsOn: ["generate-label"] }, async (): Promise<void> => {
+      .step("notify-warehouse", { dependsOn: ["generate-label"] }, async (): Promise<void> => {
         throw new Error("placeholder");
       })
       // Suspend until the warehouse posts a "shipped" signal. Resume
@@ -130,7 +130,7 @@ export function buildOrderWorkflow() {
         signalName: "shipped",
         timeoutMs: 7 * 24 * 60 * 60_000, // 7 days
       })
-      .stepAsync("mark-delivered", async (): Promise<DeliveredResult> => {
+      .step("mark-delivered", async (): Promise<DeliveredResult> => {
         throw new Error("placeholder");
       })
       .build()

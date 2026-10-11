@@ -195,7 +195,7 @@ describe("trigger", () => {
     let current = 0;
 
     const def = workflow<{ n: number }>({ name: "conc-trigger" })
-      .stepAsync("slow", async ({ input }) => {
+      .step("slow", async ({ input }) => {
         current++;
         maxConcurrent = Math.max(maxConcurrent, current);
         await new Promise((r) => setTimeout(r, 20));
@@ -227,7 +227,7 @@ describe("trigger", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const def = workflow<{ n: number }>({ name: "ordered-trigger" })
-      .stepAsync("slow", async ({ input }) => {
+      .step("slow", async ({ input }) => {
         await new Promise((r) => setTimeout(r, input.n * 10));
         return input.n;
       })
@@ -255,7 +255,7 @@ describe("trigger", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const def = workflow<{}>({ name: "duration-trigger" })
-      .stepAsync("wait", async () => {
+      .step("wait", async () => {
         await new Promise((r) => setTimeout(r, 20));
         return "done";
       })
@@ -314,7 +314,7 @@ describe("trigger", () => {
     let runCount = 0;
 
     const def = workflow<{ tick: number }>({ name: "cron-trigger" })
-      .stepAsync("process", async ({ input }) => {
+      .step("process", async ({ input }) => {
         runCount++;
         return `tick-${input.tick}`;
       })

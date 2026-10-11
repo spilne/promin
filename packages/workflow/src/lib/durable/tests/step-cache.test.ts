@@ -75,7 +75,7 @@ describe("step cache — hit / miss / TTL", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow({ name: "hit" })
-      .stepAsync(
+      .step(
         "discover",
         async () => {
           c.bump();
@@ -115,7 +115,7 @@ describe("step cache — hit / miss / TTL", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow({ name: "share" })
-      .stepAsync(
+      .step(
         "discover",
         async () => {
           c.bump();
@@ -145,7 +145,7 @@ describe("step cache — hit / miss / TTL", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow({ name: "ttl" })
-      .stepAsync(
+      .step(
         "discover",
         async () => {
           c.bump();
@@ -181,7 +181,7 @@ describe("step cache — hit / miss / TTL", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow({ name: "keys" })
-      .stepAsync(
+      .step(
         "discover",
         async ({ input }: any) => {
           c.bump();
@@ -216,7 +216,7 @@ describe("step cache — failure never caches", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow({ name: "fail" })
-      .stepAsync(
+      .step(
         "discover",
         async () => {
           attempts++;
@@ -252,7 +252,7 @@ describe("step cache — backend errors are swallowed", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow({ name: "get-fail" })
-      .stepAsync(
+      .step(
         "discover",
         async () => {
           c.bump();
@@ -278,7 +278,7 @@ describe("step cache — backend errors are swallowed", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow({ name: "set-fail" })
-      .stepAsync(
+      .step(
         "discover",
         async () => {
           c.bump();
@@ -313,7 +313,7 @@ describe("step cache — namespace keeps different workflows isolated", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf1 = workflow({ name: "wfA" })
-      .stepAsync(
+      .step(
         "discover",
         async () => {
           c1.bump();
@@ -324,7 +324,7 @@ describe("step cache — namespace keeps different workflows isolated", () => {
       .build();
 
     const wf2 = workflow({ name: "wfB" })
-      .stepAsync(
+      .step(
         "discover",
         async () => {
           c2.bump();
@@ -349,7 +349,7 @@ describe("step cache — namespace keeps different workflows isolated", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf1 = workflow({ name: "sharedA" })
-      .stepAsync(
+      .step(
         "discover",
         async () => {
           c.bump();
@@ -367,7 +367,7 @@ describe("step cache — namespace keeps different workflows isolated", () => {
       .build();
 
     const wf2 = workflow({ name: "sharedB" })
-      .stepAsync(
+      .step(
         "discover",
         async () => {
           c.bump();
@@ -426,13 +426,13 @@ describe("step cache — keys include the step name", () => {
     expect(store.setKeys).toEqual(["shared-cfg:a:x", "shared-cfg:b:x"]);
   });
 
-  it("parallelSteps cache option keeps each branch's entry separate", async () => {
+  it("parallel cache option keeps each branch's entry separate", async () => {
     const store = new RecordingCache();
     const calls = { a: 0, b: 0 };
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<string>({ name: "par-cache" })
-      .parallelSteps(
+      .parallel(
         "fan",
         {
           a: () => {
@@ -465,7 +465,7 @@ describe("step cache — values round-trip through the step codec", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow({ name: "codec-cache" })
-      .stepAsync(
+      .step(
         "load",
         async () => {
           c.bump();
@@ -493,7 +493,7 @@ describe("step cache — values round-trip through the step codec", () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow({ name: "undef-cache" })
-      .stepAsync(
+      .step(
         "noop",
         async () => {
           c.bump();
@@ -522,7 +522,7 @@ describe("step cache — values round-trip through the step codec", () => {
     };
     await store.set("bad-entry:compute:k", "garbage");
     const wf = workflow({ name: "bad-entry" })
-      .stepAsync(
+      .step(
         "compute",
         async () => {
           c.bump();

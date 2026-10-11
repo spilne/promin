@@ -5,7 +5,7 @@
 //   * linear chains of 100 / 1k / 4k / 10k `.step()` calls, then `.build()`
 //     (per-append cost; super-linear growth shows up between 1k and 10k)
 //   * a 4k chain built and run in memory (build share of build + run)
-//   * a 1k `.parallelSteps()` fan-out (branch-name validation)
+//   * a 1k `.parallel()` fan-out (branch-name validation)
 //   * branching: 1k builders forked from one 1k-step prefix
 //
 // Each scenario reports the median of a few runs after one warm-up run.
@@ -65,10 +65,10 @@ for (const n of [100, 1_000, 4_000, 10_000]) {
 {
   const branches: Record<string, (p: { prev: number }) => unknown> = {};
   for (let i = 0; i < 1_000; i++) branches[`b${i}`] = ({ prev }) => succeed(prev + i);
-  await time("build parallelSteps 1000", () =>
+  await time("build parallel 1000", () =>
     (workflow<number>({ name: "fan" }) as any)
       .step("root", ({ input }: { input: number }) => succeed(input))
-      .parallelSteps("fork", branches)
+      .parallel("fork", branches)
       .build(),
   );
 }

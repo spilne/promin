@@ -43,7 +43,7 @@ function fanOut(n: number): Workflow<number, unknown> {
   for (let i = 0; i < n; i++) branches[`b${i}`] = ({ prev }) => succeed(prev + i);
   return (workflow<number>({ name: `fan-${n}` }) as any)
     .step("root", ({ input }: { input: number }) => succeed(input))
-    .parallelSteps("fork", branches)
+    .parallel("fork", branches)
     .build();
 }
 

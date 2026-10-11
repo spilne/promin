@@ -69,6 +69,7 @@ import { mountRpc } from "./mount/mount-rpc.ts";
 import { mountRuns } from "./mount/mount-runs.ts";
 import { mountSchedules } from "./mount/mount-schedules.ts";
 import { mountStatic } from "./mount/mount-static.ts";
+import { ZoryaServerBuilder } from "./server-builder.ts";
 
 export class ZoryaServer {
   readonly workflows: ZoryaWorkflows;
@@ -127,6 +128,11 @@ export class ZoryaServer {
   private remoteDeploymentSweeper?: RemoteDeploymentSweeper;
   private bunServer?: ListeningServer;
   private unsubscribeWakeups?: () => void;
+
+  /** Start a fluent `ZoryaServer` configuration (see `ZoryaServerBuilder`). */
+  static builder(): ZoryaServerBuilder {
+    return new ZoryaServerBuilder();
+  }
 
   constructor(config: ZoryaServerConfig) {
     this.workflows = config.workflows;

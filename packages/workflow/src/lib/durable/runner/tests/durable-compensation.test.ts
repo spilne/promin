@@ -297,8 +297,8 @@ describe("durable compensation", () => {
     });
     let slowArmed = false;
     const wf = workflow({ name: "parallel-rollback" })
-      .stepAsync("root", async () => "root", undo("root"))
-      .stepAsync(
+      .step("root", async () => "root", undo("root"))
+      .step(
         "slow",
         { dependsOn: ["root"] },
         async () => {
@@ -311,8 +311,8 @@ describe("durable compensation", () => {
         },
         undo("slow"),
       )
-      .stepAsync("fast", { dependsOn: ["root"] }, async () => "fast", undo("fast"))
-      .stepAsync("join", { dependsOn: ["slow", "fast"] }, async () => {
+      .step("fast", { dependsOn: ["root"] }, async () => "fast", undo("fast"))
+      .step("join", { dependsOn: ["slow", "fast"] }, async () => {
         throw new Error("join failed");
       })
       .build();

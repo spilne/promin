@@ -43,7 +43,7 @@ describe("parallel wave failure attribution", () => {
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<number>({ name: "par-fail" })
       .step("root", ({ input }) => succeed(input))
-      .parallelSteps("fork", {
+      .parallel("fork", {
         ok: ({ prev }) => succeed((prev as number) * 10),
         bad: () => fail(new Boom({ message: "bad branch" })),
       })
@@ -60,13 +60,13 @@ describe("parallel wave failure attribution", () => {
     });
   });
 
-  it("attributes a defect (rejected stepAsync) to its own step", async () => {
+  it("attributes a defect (rejected async step) to its own step", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<number>({ name: "par-defect" })
       .step("root", ({ input }) => succeed(input))
       .step("slowok", { dependsOn: ["root"] }, () => succeed(1))
-      .stepAsync("boom", { dependsOn: ["root"] }, () => Promise.reject(new Error("defect in boom")))
+      .step("boom", { dependsOn: ["root"] }, () => Promise.reject(new Error("defect in boom")))
       .build();
 
     await runner.runSafe({ workflow: wf, workflowId: "pd-1", input: 1 });
@@ -150,7 +150,7 @@ describe("parallel wave failure attribution", () => {
     });
     let armed = false;
     const wf = workflow<number>({ name: "fail-timing" })
-      .stepAsync("slow-fail", async () => {
+      .step("slow-fail", async () => {
         armed = true;
         await new Promise<void>((r) => clock.setTimeout(() => r(), 500));
         throw new Error("late failure");
@@ -286,7 +286,7 @@ describe("executor path", () => {
     const runner = createWorkflowRunner({ storage, stepExecutor: executor });
     const wf = workflow<number>({ name: "exec-par", retry: { maxRetries: 1, baseDelayMs: 1 } })
       .step("root", ({ input }) => succeed(input))
-      .parallelSteps("fork", { slow: () => succeed(1), bad: () => succeed(2) })
+      .parallel("fork", { slow: () => succeed(1), bad: () => succeed(2) })
       .build();
 
     let settled = false;
@@ -334,7 +334,7 @@ describe("executor path", () => {
       .journaled("loop", function* (ctx) {
         ctx.continueAsNew({ count: ctx.input.count + 1 });
       })
-      .stepAsync("crash", () => Promise.reject(new Error("crashed")))
+      .step("crash", () => Promise.reject(new Error("crashed")))
       .build();
     const executor = new InProcessStepExecutor({ workflow: wf, storage });
     await storage.createWorkflow({ workflowId: "d-1", workflowName: wf.name, input: { count: 0 } });

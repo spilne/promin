@@ -90,8 +90,8 @@ describe("storage handler allow", () => {
     const backing = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage: runnerScoped(backing) });
     const wf = workflow<{ n: number }>({ name: "scoped" })
-      .stepAsync("double", async ({ input }) => input.n * 2)
-      .stepAsync("inc", async ({ input }) => input.n + 1)
+      .step("double", async ({ input }) => input.n * 2)
+      .step("inc", async ({ input }) => input.n + 1)
       .build();
     await runner.run({ workflow: wf, workflowId: "scoped-1", input: { n: 4 } });
     expect((await backing.loadWorkflow("scoped-1"))?.status).toBe("completed");

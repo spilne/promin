@@ -19,7 +19,7 @@ const STEPS = 100;
 function chain(n: number): Workflow<number, number> {
   let b: any = workflow<number>({ name: `chain-${n}` });
   for (let i = 0; i < n; i++) {
-    b = b.stepAsync(
+    b = b.step(
       `s${i}`,
       async ({ prev, input }: { prev?: number; input: number }) => (prev ?? input) + 1,
     );

@@ -11,6 +11,7 @@ import {
   asStepEff,
   linearStepContext,
   type StepContext,
+  type StepBodyResult,
   type StepDefinition,
   type StepEff,
   type StepOptions,
@@ -33,7 +34,7 @@ export class MatchError extends PerfectTaggedError("MatchError")<{
 
 type MatchCaseFn<Input, Current, Output, E extends TaggedError> = (
   ctx: StepContext<Input, Current>,
-) => StepEff<Output, E>;
+) => StepBodyResult<Output, E>;
 
 /**
  * Two-mode params for `.match()`:
@@ -176,7 +177,7 @@ export function createMatchStep(params: {
           matchCase: picked.label,
           matchMode: picked.mode,
         };
-        return asStepEff({ result: picked.fn(ctx), stepName: name });
+        return asStepEff(picked.fn(ctx));
       };
       return withOptionalStepCache({
         cache: options?.cache,

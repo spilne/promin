@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // `.dowhile()` / `.dountil()` run as one Eff: Eff bodies keep their typed
-// failures, Promise bodies (`.dowhileAsync()`) fail with defects, and an
+// failures, Promise bodies fail with defects, and an
 // interrupted loop (step timeout) writes no iteration rows afterwards.
 // ---------------------------------------------------------------------------
 
@@ -134,36 +134,32 @@ describe("loop bodies are Effs", () => {
     expect(attempts.map((a) => a.status)).toEqual(["failed"]);
   });
 
-  it("a non-Eff result from a .dowhile() body is a defect naming .dowhileAsync()", async () => {
+  it("a plain value from a .dowhile() body is the iteration's result", async () => {
     const { runner, storage } = setup();
     const wf = workflow<number>({ name: "eff-plain" })
       .dowhile(
-        "bad",
-        // A JS caller (or a cast) handing a plain value to `.dowhile()`.
-        (() => 1) as never,
-        () => false,
+        "plain",
+        (_ctx, iter) => iter * 2,
+        (n) => n < 4,
       )
       .build();
 
-    const r = await runner.runSafe({ workflow: wf, workflowId: "ep-1", input: 0 });
-    expect(r.data).toBeNull();
+    await expect(runner.run({ workflow: wf, workflowId: "ep-1", input: 0 })).resolves.toBe(4);
     const state = await storage.loadWorkflow("ep-1");
-    expect(state?.status).toBe("failed");
-    expect(state?.steps["bad.iter.0"]?.status).toBe("failed");
-    expect(state?.steps["bad.iter.0"]?.error).toContain(".dowhileAsync()");
+    expect(state?.steps["plain.iter.2"]?.status).toBe("completed");
   });
 });
 
-describe("dowhileAsync / dountilAsync", () => {
+describe("dowhile / dountil with value or Promise bodies", () => {
   it("runs value and Promise bodies", async () => {
     const { runner } = setup();
     const wf = workflow<number>({ name: "async-bodies" })
-      .dowhileAsync(
+      .dowhile(
         "a",
         async (_ctx, iter) => iter,
         (n) => n < 2,
       )
-      .dountilAsync(
+      .dountil(
         "b",
         ({ prev }, iter) => prev + iter,
         (n) => n >= 4,
@@ -178,7 +174,7 @@ describe("dowhileAsync / dountilAsync", () => {
     const { runner, storage } = setup();
     let calls = 0;
     const wf = workflow<number>({ name: "async-reject" })
-      .dowhileAsync(
+      .dowhile(
         "poll",
         async () => {
           calls++;
@@ -212,7 +208,7 @@ describe("loop timeout", () => {
     await storage.createWorkflow({ workflowId: "raw-1", workflowName: "raw", input: 0 });
     let calls = 0;
     const step = workflow<number>({ name: "raw" })
-      .dowhileAsync(
+      .dowhile(
         "spin",
         async (_ctx, iter) => {
           calls++;
@@ -260,7 +256,7 @@ describe("loop timeout", () => {
     const { clock, runner, storage } = setupClocked();
     let calls = 0;
     const wf = workflow<number>({ name: "loop-timeout" })
-      .dowhileAsync(
+      .dowhile(
         "spin",
         async (_ctx, iter) => {
           calls++;
@@ -290,7 +286,7 @@ describe("loop timeout", () => {
     const bodies: number[] = [];
     let attempt = 0;
     const wf = workflow<number>({ name: "loop-timeout-retry" })
-      .dowhileAsync(
+      .dowhile(
         "spin",
         async (_ctx, iter) => {
           bodies.push(iter);

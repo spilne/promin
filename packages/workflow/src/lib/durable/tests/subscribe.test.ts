@@ -211,7 +211,7 @@ describe("subscribe — run-scoped event stream", () => {
     const runner = createWorkflowRunner({ storage });
 
     const wf = workflow<number>({ name: "sub-late" })
-      .stepAsync("a", async ({ input }) => {
+      .step("a", async ({ input }) => {
         // yield control so the subscribe call that happens after run() starts
         // can attach before step "b" completes
         await new Promise((r) => setTimeout(r, 0));

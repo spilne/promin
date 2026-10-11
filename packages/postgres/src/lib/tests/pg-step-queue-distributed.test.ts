@@ -216,18 +216,18 @@ describe("Distributed DAG workflow — video processing pipeline", () => {
     const queue = new PgStepQueue({ db: pg.db });
 
     const videoPipeline = workflow<{ videoUrl: string }>({ name: "video-processing", storage })
-      .stepAsync("upload", async (ctx) => ({ url: ctx.input.videoUrl, size: 1024 }))
-      .stepAsync("transcribe", { dependsOn: ["upload"] }, async (ctx) => ({
+      .step("upload", async (ctx) => ({ url: ctx.input.videoUrl, size: 1024 }))
+      .step("transcribe", { dependsOn: ["upload"] }, async (ctx) => ({
         text: `Transcript of ${ctx.deps.upload.url}`,
       }))
-      .stepAsync("thumbnail", { dependsOn: ["upload"] }, async (ctx) => ({
+      .step("thumbnail", { dependsOn: ["upload"] }, async (ctx) => ({
         thumbUrl: `${ctx.deps.upload.url}/thumb.jpg`,
       }))
-      .stepAsync("summarize", { dependsOn: ["transcribe", "thumbnail"] }, async (ctx) => ({
+      .step("summarize", { dependsOn: ["transcribe", "thumbnail"] }, async (ctx) => ({
         summary: ctx.deps.transcribe.text.slice(0, 20),
         thumb: ctx.deps.thumbnail.thumbUrl,
       }))
-      .stepAsync("notify", async (ctx) => ({ notified: true, summary: ctx.prev.summary }))
+      .step("notify", async (ctx) => ({ notified: true, summary: ctx.prev.summary }))
       .build();
 
     const coordinator = createDistributedWorkflowRunner({
@@ -317,7 +317,7 @@ describe("Distributed workers — competing task execution", () => {
     const processed: { worker: string; workflowId: string }[] = [];
 
     const orderWorkflow = workflow<{ orderId: string }>({ name: "order-fulfillment", storage })
-      .stepAsync("fulfill", async (ctx) => ({ fulfilled: true, orderId: ctx.input.orderId }))
+      .step("fulfill", async (ctx) => ({ fulfilled: true, orderId: ctx.input.orderId }))
       .build();
 
     const coordinator = createDistributedWorkflowRunner({
@@ -500,13 +500,13 @@ describe("Queue routing — GPU vs CPU workers", () => {
     const queue = new PgStepQueue({ db: pg.db });
 
     const mlPipeline = workflow<{ imageUrl: string }>({ name: "ml-pipeline", storage })
-      .stepAsync("preprocess", async (ctx) => ({ processed: ctx.input.imageUrl }), {
+      .step("preprocess", async (ctx) => ({ processed: ctx.input.imageUrl }), {
         needs: ["cpu"],
       })
-      .stepAsync("inference", async () => ({ prediction: "cat", confidence: 0.95 }), {
+      .step("inference", async () => ({ prediction: "cat", confidence: 0.95 }), {
         needs: ["gpu"],
       })
-      .stepAsync("postprocess", async (ctx) => ({ result: ctx.prev }), { needs: ["cpu"] })
+      .step("postprocess", async (ctx) => ({ result: ctx.prev }), { needs: ["cpu"] })
       .build();
 
     const coordinator = createDistributedWorkflowRunner({

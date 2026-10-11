@@ -69,14 +69,14 @@ export function buildModelWorkflow(version: "1" | "2") {
     name: "ml-training",
     version,
   })
-    .stepAsync(
+    .step(
       "prepare-data",
       async (): Promise<PreparedData> => {
         throw new Error("placeholder — worker runs the real handler");
       },
       { needs: ["cpu"] },
     )
-    .stepAsync(
+    .step(
       "train-model",
       { dependsOn: ["prepare-data"] },
       async (): Promise<TrainedModel> => {
@@ -84,7 +84,7 @@ export function buildModelWorkflow(version: "1" | "2") {
       },
       { needs: ["gpu"] },
     )
-    .stepAsync(
+    .step(
       "evaluate",
       { dependsOn: ["train-model"] },
       async (): Promise<EvalResult> => {
@@ -95,7 +95,7 @@ export function buildModelWorkflow(version: "1" | "2") {
 
   if (version === "2") {
     return base
-      .stepAsync(
+      .step(
         "optimize",
         { dependsOn: ["evaluate"] },
         async (): Promise<OptimizeResult> => {

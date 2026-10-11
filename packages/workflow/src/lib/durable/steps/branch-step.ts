@@ -42,7 +42,7 @@ export function createBranchStep(params: {
         // `condition` runs on every attempt (and only on a cache miss).
         runBody: () => {
           const branch = condition(ctx.prev) ? ifTrue : ifFalse;
-          return asStepEff({ result: branch(ctx), stepName: name });
+          return asStepEff(branch(ctx));
         },
         stepName: name,
         namespace: params.cacheNamespace,

@@ -49,7 +49,7 @@ describe("keyed workflow-mode worker", () => {
     const url = `http://127.0.0.1:${handle.port}`;
 
     const wf = workflow<{ n: number }>({ name: "keyed-e2e" })
-      .stepAsync("double", async ({ input }) => input.n * 2)
+      .step("double", async ({ input }) => input.n * 2)
       .build();
     const worker = new ZoryaWorker({
       client: new ZoryaClient({ url, apiKey: WORKER_KEY }),

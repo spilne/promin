@@ -220,7 +220,7 @@ export function zombieWorkerTestSuite(options: ZombieWorkerTestSuiteOptions): vo
 
     function buildStep(work: () => Promise<string>) {
       return workflow<Record<string, never>>({ name: "zombie-step" })
-        .stepAsync("body", () => work())
+        .step("body", () => work())
         .build() as Workflow<unknown, unknown>;
     }
 

@@ -14,7 +14,7 @@ describe("workflow fresh run (onExpiry: fresh-run)", () => {
     let runCount = 0;
 
     const wf = workflow({ name: "fresh-test" })
-      .stepAsync("compute", async () => {
+      .step("compute", async () => {
         runCount++;
         return { value: runCount };
       })
@@ -40,7 +40,7 @@ describe("workflow fresh run (onExpiry: fresh-run)", () => {
     let runCount = 0;
 
     const wf = workflow({ name: "fresh-cached" })
-      .stepAsync("compute", async () => {
+      .step("compute", async () => {
         runCount++;
         return { value: runCount };
       })
@@ -60,7 +60,7 @@ describe("workflow fresh run (onExpiry: fresh-run)", () => {
     const runner = createWorkflowRunner({ storage, clock });
 
     const wf = workflow({ name: "run-counter" })
-      .stepAsync("compute", async () => ({ ok: true }))
+      .step("compute", async () => ({ ok: true }))
       .build({ idempotency: { ttl: 1, onExpiry: "fresh-run" } });
 
     await runner.run({ workflow: wf, workflowId: "fr-3", input: {} });
@@ -82,7 +82,7 @@ describe("workflow fresh run (onExpiry: fresh-run)", () => {
     let callCount = 0;
 
     const wf = workflow({ name: "history-test" })
-      .stepAsync("fetch", async () => {
+      .step("fetch", async () => {
         callCount++;
         return { data: `result-${callCount}` };
       })
@@ -109,15 +109,15 @@ describe("workflow fresh run (onExpiry: fresh-run)", () => {
     const calls: string[] = [];
 
     const wf = workflow({ name: "multi-step" })
-      .stepAsync("step-a", async () => {
+      .step("step-a", async () => {
         calls.push("a");
         return { a: true };
       })
-      .stepAsync("step-b", async ({ prev }) => {
+      .step("step-b", async ({ prev }) => {
         calls.push("b");
         return { ...prev, b: true };
       })
-      .stepAsync("step-c", async ({ prev }) => {
+      .step("step-c", async ({ prev }) => {
         calls.push("c");
         return { ...prev, c: true };
       })
@@ -142,7 +142,7 @@ describe("workflow fresh run (onExpiry: fresh-run)", () => {
     let runCount = 0;
 
     const wf = workflow({ name: "replay-test" })
-      .stepAsync("compute", async () => {
+      .step("compute", async () => {
         runCount++;
         return { value: runCount };
       })

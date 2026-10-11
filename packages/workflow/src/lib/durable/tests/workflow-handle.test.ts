@@ -44,7 +44,7 @@ describe("WorkflowHandle — generic threading on runner.start", () => {
     const runner = createWorkflowRunner({ storage, clock });
 
     const wf = workflow<{ n: number }>({ name: "doubler" })
-      .stepAsync("double", async ({ input }) => ({ doubled: input.n * 2 }))
+      .step("double", async ({ input }) => ({ doubled: input.n * 2 }))
       .build();
 
     const handle = await runner.start({
@@ -68,7 +68,7 @@ describe("WorkflowHandle — cancel()", () => {
 
     // Workflow that will sleep forever; we cancel before the timer fires.
     const wf = workflow<{ n: number }>({ name: "sleeper" })
-      .stepAsync("compute", async ({ input }) => input.n)
+      .step("compute", async ({ input }) => input.n)
       .build();
 
     const handle = await runner.start({
@@ -105,7 +105,7 @@ describe("WorkflowHandle — cancel()", () => {
 
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<number>({ name: "trivial" })
-      .stepAsync("a", async ({ input }) => input)
+      .step("a", async ({ input }) => input)
       .build();
 
     const handle = await runner.start({ workflow: wf, workflowId: "cancel-2", input: 1 });
@@ -125,11 +125,11 @@ describe("WorkflowHandle — events()", () => {
     // attached, so no event can be emitted before it listens.
     const subscribed = gate();
     const wf = workflow<{ n: number }>({ name: "evented" })
-      .stepAsync("a", async ({ input }) => {
+      .step("a", async ({ input }) => {
         await subscribed.promise;
         return input.n + 1;
       })
-      .stepAsync("b", async ({ prev }) => prev * 2)
+      .step("b", async ({ prev }) => prev * 2)
       .build();
 
     const handle = await runner.start({
@@ -168,7 +168,7 @@ describe("WorkflowHandle — events()", () => {
     // only the abort signal can close the events stream.
     const hang = gate();
     const wf = workflow<number>({ name: "abortable" })
-      .stepAsync("hang", async () => {
+      .step("hang", async () => {
         await hang.promise;
         return 0;
       })

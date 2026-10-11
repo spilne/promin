@@ -25,7 +25,7 @@ import {
  * (engine control flow is not an attempt failure and skips it).
  *
  * Retry and `onFailure` act on typed failures only. Defects (a throw from a
- * step's synchronous callback, a rejected `.stepAsync()` body) and engine
+ * step's synchronous callback, a rejected step Promise) and engine
  * control flow (suspension, continue-as-new, tripwire, lost lock) pass
  * through untouched.
  */

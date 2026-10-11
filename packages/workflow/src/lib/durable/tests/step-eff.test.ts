@@ -65,10 +65,10 @@ describe("step Eff — rejection shape", () => {
 });
 
 describe("step Eff — non-Eff returns", () => {
-  it("a Promise returned from .step() is awaited like .stepAsync()", async () => {
+  it("a Promise returned from .step() is awaited", async () => {
     const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
     const wf = workflow<number>({ name: "promise-step" })
-      .step("double", (async ({ input }: { input: number }) => input * 2) as never)
+      .step("double", async ({ input }) => input * 2)
       .build();
     expect(await runner.run({ workflow: wf, workflowId: "t-1", input: 21 })).toBe(42);
   });
@@ -101,18 +101,16 @@ describe("step Eff — non-Eff returns", () => {
     expect(await runner.run({ workflow: wf, workflowId: "t-2b", input: 21 })).toBe(42);
   });
 
-  it("a plain value returned from .step() fails the step with a clear message", async () => {
+  it("a plain value returned from .step() is the step's result", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
     const wf = workflow<number>({ name: "plain-value-step" })
-      .step("oops", (() => 42) as never)
+      .step("value", () => 42)
       .build();
 
-    await expect(runner.run({ workflow: wf, workflowId: "t-3", input: 0 })).rejects.toThrow(
-      /must return an Eff/,
-    );
+    await expect(runner.run({ workflow: wf, workflowId: "t-3", input: 0 })).resolves.toBe(42);
     const state = await storage.loadWorkflow("t-3");
-    expect(state?.steps["oops"]?.status).toBe("failed");
+    expect(state?.steps["value"]?.status).toBe("completed");
   });
 });
 
