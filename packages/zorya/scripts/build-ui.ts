@@ -6,11 +6,16 @@
 //     index.html
 //     app.js       — bundled Preact app
 //     app.css      — Tailwind + DaisyUI + custom styles
+//
+// The bundle is written to a fresh sibling directory first and swapped into
+// dist/public only once every step succeeded, so a failed build leaves the
+// previous dashboard in place. Workspace packages resolve through their
+// `@promin/source` export condition (their `src/`), so no package needs to
+// be built first.
 // ---------------------------------------------------------------------------
 
 import { $ } from "bun";
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 // Injected into dist/public/index.html only when ZORYA_DEV_RELOAD=1 (set by
@@ -38,14 +43,38 @@ const DEV_RELOAD_SCRIPT = `<script>
 </script>`;
 
 const pkgRoot = path.resolve(import.meta.dir, "..");
-const outDir = path.join(pkgRoot, "dist", "public");
+const distDir = path.join(pkgRoot, "dist");
+const publicDir = path.join(distDir, "public");
 
 async function main() {
   console.log("[zorya] building UI…");
 
-  if (existsSync(outDir)) await rm(outDir, { recursive: true, force: true });
-  await mkdir(outDir, { recursive: true });
+  await mkdir(distDir, { recursive: true });
+  const outDir = await mkdtemp(path.join(distDir, ".public-build-"));
+  try {
+    await buildInto(outDir);
+    await swapInto({ staged: outDir, target: publicDir });
+  } catch (err) {
+    await rm(outDir, { recursive: true, force: true });
+    throw err;
+  }
+  console.log(`[zorya] done → ${path.relative(process.cwd(), publicDir)}`);
+}
 
+/** Replace `target` with `staged`; the old directory is removed only after the rename. */
+async function swapInto(params: { staged: string; target: string }): Promise<void> {
+  const old = `${params.target}.old-${process.pid}`;
+  await rm(old, { recursive: true, force: true });
+  await rename(params.target, old).catch((err: NodeJS.ErrnoException) => {
+    if (err.code !== "ENOENT") throw err;
+  });
+  await rename(params.staged, params.target);
+  // mkdtemp creates the directory owner-only; the served tree should not be.
+  await chmod(params.target, 0o755);
+  await rm(old, { recursive: true, force: true });
+}
+
+async function buildInto(outDir: string): Promise<void> {
   // 1. Bundle JS (Preact app).
   const jsResult = await Bun.build({
     entrypoints: [path.join(pkgRoot, "src/ui/main.tsx")],
@@ -56,6 +85,9 @@ async function main() {
     naming: {
       entry: "app.js",
     },
+    // `bun --conditions` does not reach Bun.build; workspace packages
+    // resolve to their sources through this condition.
+    conditions: ["@promin/source"],
     define: {
       "process.env.NODE_ENV": '"production"',
     },
@@ -93,8 +125,6 @@ async function main() {
   console.log(
     `[zorya] index.html${process.env.ZORYA_DEV_RELOAD === "1" ? " (with hot-reload client)" : ""}`,
   );
-
-  console.log(`[zorya] done → ${path.relative(process.cwd(), outDir)}`);
 }
 
 await main();

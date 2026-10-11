@@ -19,8 +19,10 @@ permissions:
   contents: read
 
 jobs:
-  # Typecheck + lint + tests (Postgres/Redis store tests use testcontainers)
-  unit:
+  # The jobs below run in parallel; CI wall time is the slowest of them.
+
+  # Typecheck + lint
+  checks:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +48,29 @@ jobs:
       - name: Lint
         run: bunx nx run-many -t lint
 
+  # Every package's tests: one nx task per package, in parallel, resolving
+  # workspace packages to their sources (Postgres/Redis store tests use
+  # testcontainers).
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          filter: tree:0
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - run: bun install
+
       - name: Pre-pull test container images
         run: |
           docker pull redis:7-alpine &
@@ -54,6 +79,48 @@ jobs:
 
       - name: Tests
         run: bun run test
+
+  # Zorya dashboard bundle + Docker image, smoke-tested by serving the dashboard.
+  zorya-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          filter: tree:0
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - run: bun install
+
+      - name: Build UI
+        run: bun run build:ui
+
+      - name: Docker build
+        run: docker build -f packages/zorya/Dockerfile -t zorya:ci .
+
+      - name: Serve the dashboard
+        run: |
+          docker run -d --name zorya-ci -p 4100:4100 zorya:ci
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://127.0.0.1:4100/api/health && break
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:4100/ | grep -q '<div id="app">'
+          curl -sf -o /dev/null http://127.0.0.1:4100/app.js
+          curl -sf -o /dev/null http://127.0.0.1:4100/app.css
+
+      - name: Container logs
+        if: always()
+        run: docker logs zorya-ci || true
 
   # Benchmarks: runs in parallel with unit
   benchmarks:

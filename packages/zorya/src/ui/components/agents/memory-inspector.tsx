@@ -33,6 +33,7 @@ import type { ThreadSummary } from "../../../server/routes/agents.ts";
 import { Skeleton } from "../ui/skeleton.tsx";
 import { JsonBlock } from "../ui/json-block.tsx";
 import { formatRelative } from "../../lib/format.ts";
+import { PROMPT_CACHE_BOUNDARY } from "@promin/agent/browser";
 
 interface Props {
   agentId: string;
@@ -269,11 +270,6 @@ export function MemoryInspector({
   );
 }
 
-// Mirror of @promin/agent's PROMPT_CACHE_BOUNDARY. Inlined rather than
-// imported so the browser bundle stays clear of the agent runtime — the
-// marker is stable API (cache-splitting providers match it verbatim).
-const CACHE_BOUNDARY = "<!-- promin:cache-boundary -->";
-
 const PROMPT_PRE_CLASS =
   "bg-base-200 p-3 rounded text-xs whitespace-pre-wrap break-words font-mono leading-relaxed max-h-[40vh] overflow-y-auto";
 
@@ -292,7 +288,8 @@ function PromptTab({ data }: { data: MemoryInspectResponse }) {
   // "marker only" as no cascade so the operator sees an honest "(empty)"
   // rather than a lone HTML comment.
   const cascadeRaw = data.resolved.systemPrompt.trim();
-  const cascade = cascadeRaw && cascadeRaw !== CACHE_BOUNDARY ? data.resolved.systemPrompt : "";
+  const cascade =
+    cascadeRaw && cascadeRaw !== PROMPT_CACHE_BOUNDARY ? data.resolved.systemPrompt : "";
   const persona = data.persona?.trim() ? data.persona : "";
   return (
     <section class="space-y-4">

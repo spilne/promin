@@ -42,7 +42,7 @@ export async function buildUi(): Promise<void> {
   await $`bun ${ZORYA_DEV_PATHS.buildScript}`
     .cwd(ZORYA_DEV_PATHS.pkgRoot)
     .env({ ...process.env, ZORYA_DEV_RELOAD: "1" });
-  // Sentinel must be written AFTER build — the build clears dist/public.
+  // Sentinel must be written AFTER build — the build replaces dist/public.
   await writeFile(ZORYA_DEV_PATHS.reloadFile, String(Date.now()));
 }
 

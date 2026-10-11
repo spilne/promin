@@ -146,6 +146,24 @@ bun nx run @promin/workflow:typecheck
 bun nx run @promin/data:typecheck
 ```
 
+## Running Tests
+
+Tests run from source: workspace packages resolve to their `src/` through
+the `@promin/source` export condition, so nothing needs building first.
+Postgres and Redis store tests start containers through testcontainers, so
+Docker must be running.
+
+```bash
+bun run test                                        # every package, in parallel (what CI does)
+bun nx run @promin/agent:test                       # one package
+bun run test:src packages/workflow/src/lib/durable  # files or folders
+```
+
+Plain `bun test` without the condition resolves workspace imports to
+`dist/` and fails in a fresh checkout. `bun run build:ui` builds the zorya
+dashboard; browser code imports `@promin/agent/browser`, never the
+`@promin/agent` root (which loads Node built-ins).
+
 ## Key Libraries
 
 | Purpose        | Library                          |

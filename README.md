@@ -86,20 +86,27 @@ console.log(data, topRegions, status?.state);
 
 ```bash
 bun install          # install dependencies
-bun run test         # unit tests
+bun run test         # every package's tests
 bun run bench        # cross-language benchmarks (vs Pandas/Polars)
 bun run bench:all    # all benchmark suites
 ```
 
 ### Commands
 
-| Command                        | Description                                                             |
-| ------------------------------ | ----------------------------------------------------------------------- |
-| `bun run test`                 | Tests (workflow, data, postgres, redis; store tests use testcontainers) |
-| `bun run bench`                | Cross-language benchmarks (Promin vs Pandas vs Polars)                  |
-| `bun run bench:all`            | All benchmarks (dataframe, workflow, cross-language)                    |
-| `bun nx run-many -t typecheck` | Typecheck all packages                                                  |
-| `bun nx run-many -t lint`      | Lint all packages                                                       |
+| Command                                       | Description                                                                      |
+| --------------------------------------------- | -------------------------------------------------------------------------------- |
+| `bun run test`                                | Every package's tests, one nx task per package in parallel (Docker for PG/Redis) |
+| `bun nx run @promin/<pkg>:test`               | One package's tests                                                              |
+| `bun run test:src <path>`                     | `bun test` on files or folders, resolving workspace packages to their sources    |
+| `bun run build:ui`                            | Build the zorya dashboard into `packages/zorya/dist/public`                      |
+| `docker build -f packages/zorya/Dockerfile .` | Zorya demo server image (dashboard included)                                     |
+| `bun run bench`                               | Cross-language benchmarks (Promin vs Pandas vs Polars)                           |
+| `bun run bench:all`                           | All benchmarks (dataframe, workflow, cross-language)                             |
+| `bun nx run-many -t typecheck`                | Typecheck all packages                                                           |
+| `bun nx run-many -t lint`                     | Lint all packages                                                                |
+
+Workspace packages resolve to their `src/` through the `@promin/source` export
+condition, so tests and the UI build need no prior `build`.
 
 ## Architecture
 

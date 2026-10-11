@@ -200,7 +200,8 @@ describe.skipIf(NODE === null)("entry points — load under Node", () => {
       const entry = join(outDir, ENTRIES[name]!.replace(/\.ts$/, ".js"));
       const script =
         `const m = await import(${JSON.stringify(`file://${entry}`)});` +
-        "console.log(Object.keys(m).length);";
+        // Plain write: console.log colors numbers when FORCE_COLOR is set (nx sets it).
+        "process.stdout.write(String(Object.keys(m).length));";
       const proc = Bun.spawn(
         [NODE!, "--import", join(outDir, "register.mjs"), "--input-type=module", "-e", script],
         { cwd: outDir, stdout: "pipe", stderr: "pipe" },

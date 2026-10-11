@@ -70,12 +70,9 @@
     },
     "test": {
       "executor": "nx:run-commands",
-      "dependsOn": [
-        "typecheck"
-      ],
       "options": {
         "commands": [
-          "bun test --pass-with-no-tests"
+          "bun --conditions=@promin/source test --pass-with-no-tests"
         ],
         "cwd": "{projectRoot}"
       }

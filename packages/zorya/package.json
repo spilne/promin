@@ -41,7 +41,7 @@
     "access": "public"
   },
   "scripts": {
-    "build:ui": "bun --conditions=@promin/source scripts/build-ui.ts",
+    "build:ui": "bun scripts/build-ui.ts",
     "dev": "bun --conditions=@promin/source scripts/dev.ts",
     "demo": "bun --conditions=@promin/source scripts/dev.ts"
   },
