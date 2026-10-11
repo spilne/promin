@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
-// Registry CRUD APIs: skills, fragments, secrets and DAGs. Each is mounted
-// only when its service is configured.
+// Registry CRUD APIs: skills, fragments, secrets, DAGs and knowledge bases.
+// Each is mounted only when its service is configured.
 // ---------------------------------------------------------------------------
 
 import type { SecretsStorage } from "@promin/agent";
@@ -8,6 +8,7 @@ import type { Router } from "../router.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaDags } from "../services/dags/index.ts";
 import type { ZoryaFragments } from "../services/fragments/index.ts";
+import type { ZoryaKnowledgeBases } from "../services/knowledge/index.ts";
 import type { ZoryaSkills } from "../services/skills/index.ts";
 import {
   createDag,
@@ -26,6 +27,22 @@ import {
   listFragments,
   updateFragment,
 } from "../routes/fragments.ts";
+import {
+  createKnowledgeBase,
+  deleteKnowledgeBase,
+  deleteKnowledgeSource,
+  getKnowledgeBase,
+  importKnowledgeSources,
+  ingestKnowledgeSource,
+  listKnowledgeBases,
+  listKnowledgeChunks,
+  listKnowledgeSourceAdapters,
+  listKnowledgeSources,
+  reindexKnowledgeSource,
+  searchKnowledgeBase,
+  updateKnowledgeBase,
+  type KnowledgeBaseGatewayDeps,
+} from "../routes/knowledge-bases.ts";
 import { createSecret, deleteSecret, listSecrets } from "../routes/secrets.ts";
 import {
   createSkill,
@@ -116,4 +133,31 @@ export function mountDags(params: { readonly router: Router; readonly dags: Zory
     .delete("/api/dags/:id", deleteDag(dagDeps))
     .get("/api/dags/:id/versions", listDagVersions(dagDeps))
     .post("/api/dags/:id/run", runDag(dagDeps));
+}
+
+export function mountKnowledgeBases(params: {
+  readonly router: Router;
+  readonly knowledgeBases: ZoryaKnowledgeBases;
+  readonly agents: ZoryaAgents | undefined;
+}): void {
+  const deps: KnowledgeBaseGatewayDeps = {
+    knowledgeBases: params.knowledgeBases,
+    ...(params.agents !== undefined && { agents: params.agents.registry }),
+  };
+  params.router
+    .get("/api/knowledge-bases", listKnowledgeBases(deps))
+    .post("/api/knowledge-bases", createKnowledgeBase(deps))
+    // `_adapters` before `:id` so the literal segment isn't shadowed
+    // (knowledge base ids cannot start with `_`).
+    .get("/api/knowledge-bases/_adapters", listKnowledgeSourceAdapters(deps))
+    .get("/api/knowledge-bases/:id", getKnowledgeBase(deps))
+    .patch("/api/knowledge-bases/:id", updateKnowledgeBase(deps))
+    .delete("/api/knowledge-bases/:id", deleteKnowledgeBase(deps))
+    .get("/api/knowledge-bases/:id/sources", listKnowledgeSources(deps))
+    .post("/api/knowledge-bases/:id/sources", ingestKnowledgeSource(deps))
+    .post("/api/knowledge-bases/:id/sources/import", importKnowledgeSources(deps))
+    .post("/api/knowledge-bases/:id/sources/:sourceId/reindex", reindexKnowledgeSource(deps))
+    .delete("/api/knowledge-bases/:id/sources/:sourceId", deleteKnowledgeSource(deps))
+    .get("/api/knowledge-bases/:id/chunks", listKnowledgeChunks(deps))
+    .post("/api/knowledge-bases/:id/search", searchKnowledgeBase(deps));
 }

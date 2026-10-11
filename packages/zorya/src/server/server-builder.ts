@@ -17,6 +17,7 @@ import type {
 import type { ZoryaAgents } from "./services/agents/index.ts";
 import type { ZoryaDags } from "./services/dags/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
+import type { ZoryaKnowledgeBases } from "./services/knowledge/index.ts";
 import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
 import type { RunRetentionConfig, ZoryaWorkflows } from "./services/workflows/index.ts";
@@ -130,6 +131,11 @@ export class ZoryaServerBuilder {
   /** Public base URL for signal-token completion links. */
   publicBaseUrl(publicBaseUrl: string): this {
     return this.set({ publicBaseUrl });
+  }
+
+  /** Managed knowledge bases: `/api/knowledge-bases/*` and the dashboard's Knowledge page. */
+  knowledgeBases(knowledgeBases: ZoryaKnowledgeBases): this {
+    return this.set({ knowledgeBases });
   }
 
   /** Secrets vault: `/api/secrets` CRUD and agent credential resolution. */

@@ -8,6 +8,7 @@ import { ZoryaInsecureConfigError, type Logger, type ZoryaServerConfig } from ".
 import { ZoryaServer } from "../server.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaDags } from "../services/dags/index.ts";
+import type { ZoryaKnowledgeBases } from "../services/knowledge/index.ts";
 import type { ZoryaFragments } from "../services/fragments/index.ts";
 import type { ZoryaScheduler } from "../services/scheduler/index.ts";
 import type { ZoryaSkills } from "../services/skills/index.ts";
@@ -66,6 +67,7 @@ describe("ZoryaServer.builder()", () => {
       signalTokenMaxTtlMs: 60_000,
       publicBaseUrl: "https://zorya.example.com",
       secrets: stub<SecretsStorage>("secrets"),
+      knowledgeBases: stub<ZoryaKnowledgeBases>("knowledgeBases"),
       webhooks: { sources: { github: stub("github-source") } },
       remoteDeployments: { registry: stub("registry"), sweepIntervalMs: 1_000 },
       retention: { maxAgeMs: 86_400_000, intervalMs: 60_000, batchSize: 100 },
@@ -94,6 +96,7 @@ describe("ZoryaServer.builder()", () => {
       .signalTokenMaxTtlMs(expected.signalTokenMaxTtlMs)
       .publicBaseUrl(expected.publicBaseUrl)
       .secrets(expected.secrets)
+      .knowledgeBases(expected.knowledgeBases)
       .webhooks(expected.webhooks)
       .remoteDeployments(expected.remoteDeployments)
       .retention(expected.retention)

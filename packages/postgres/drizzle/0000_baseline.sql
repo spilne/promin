@@ -183,6 +183,33 @@ CREATE TABLE fragment_store (
   CONSTRAINT fragment_store_pkey PRIMARY KEY (key)
 );
 
+CREATE TABLE knowledge_base (
+  id text NOT NULL,
+  description text,
+  tags jsonb NOT NULL,
+  metadata jsonb NOT NULL,
+  created_at bigint NOT NULL,
+  updated_at bigint NOT NULL,
+  CONSTRAINT knowledge_base_pkey PRIMARY KEY (id)
+);
+
+CREATE TABLE knowledge_base_source (
+  base_id text NOT NULL,
+  source_id text NOT NULL,
+  title text,
+  uri text,
+  mime_type text,
+  tags jsonb NOT NULL,
+  metadata jsonb NOT NULL,
+  text text NOT NULL,
+  status text NOT NULL,
+  error text,
+  chunk_count integer NOT NULL,
+  created_at bigint NOT NULL,
+  updated_at bigint NOT NULL,
+  CONSTRAINT knowledge_base_source_pkey PRIMARY KEY (base_id, source_id)
+);
+
 CREATE TABLE role_registry (
   role_id text NOT NULL,
   version text NOT NULL,

@@ -817,6 +817,43 @@ export const fragmentStore = pgTable("fragment_store", {
 });
 
 // ---------------------------------------------------------------------------
+// Managed knowledge bases — a base row plus one row per source with its full
+// text and last ingestion outcome. The chunks themselves live in whatever
+// retriever the host wires (in memory, rebuilt from these rows at boot, or
+// a pgvector table). Deleting a base deletes its sources in the same
+// transaction.
+// ---------------------------------------------------------------------------
+
+export const knowledgeBase = pgTable("knowledge_base", {
+  id: text("id").primaryKey(),
+  description: text("description"),
+  tags: jsonb("tags").$type<string[]>().notNull(),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull(),
+  createdAt: bigint("created_at", { mode: "number" }).notNull(),
+  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+});
+
+export const knowledgeBaseSource = pgTable(
+  "knowledge_base_source",
+  {
+    baseId: text("base_id").notNull(),
+    sourceId: text("source_id").notNull(),
+    title: text("title"),
+    uri: text("uri"),
+    mimeType: text("mime_type"),
+    tags: jsonb("tags").$type<string[]>().notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull(),
+    text: text("text").notNull(),
+    status: text("status").$type<"ready" | "failed">().notNull(),
+    error: text("error"),
+    chunkCount: integer("chunk_count").notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.baseId, t.sourceId] })],
+);
+
+// ---------------------------------------------------------------------------
 // Agent memory — three-scope cascade × four-tier model. Mirrors
 // SqliteMemoryStore's 6 tables. Single-table-per-tier with a `scope`
 // column keeps queries simple while supporting per-scope indexes.

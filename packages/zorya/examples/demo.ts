@@ -39,6 +39,8 @@ import {
   ZoryaSkills,
   ZoryaFragments,
   ZoryaDags,
+  ZoryaKnowledgeBases,
+  createUrlKnowledgeSourceAdapter,
 } from "../src/index.ts";
 import { researchSynthesisRecipe } from "./dags/research-synthesis.ts";
 import { createPostgresDb } from "@spilne/perfect-postgres";
@@ -47,6 +49,7 @@ import {
   PostgresAgentRegistry,
   PostgresSkillRegistry,
   PostgresFragmentStore,
+  PostgresKnowledgeBaseStore,
   PostgresMemoryStore,
 } from "@promin/postgres";
 import {
@@ -61,6 +64,7 @@ import {
   resolveCursorAgent,
   DefaultAgentToolCatalog,
   type FragmentStore,
+  type KnowledgeBaseStore,
   resolveCredentialRef,
   resolveLocalAgent,
   resolveSkillCatalog,
@@ -86,9 +90,9 @@ import { echoLLM } from "@promin/agent/testing";
 import { z } from "zod";
 import { ZoryaServer } from "../src/index.ts";
 import { createSqliteZoryaStack } from "../src/sqlite.ts";
-// KB content lives at ./kb/org-knowledge-base.ts; the searchKnowledge +
-// getDocument tools that wrap it are exposed under ./tools/ for the
-// folder-scan registry.
+// KB content lives at ./kb/org-knowledge-base.ts and seeds the managed
+// "org-handbook" knowledge base below; knowledge-bot binds it through
+// `backend.knowledge`.
 import { ORG_KNOWLEDGE_BASE } from "./kb/org-knowledge-base.ts";
 import path from "node:path";
 
@@ -145,6 +149,7 @@ const pgUrl = process.env.ZORYA_PG_URL;
 let agentRegistry: AgentRegistry;
 let skillRegistry: SkillRegistry;
 let fragmentStore: FragmentStore;
+let knowledgeBaseStore: KnowledgeBaseStore;
 let memoryStore: MemoryStore;
 if (pgUrl) {
   const pgDb = createPostgresDb(pgUrl);
@@ -152,16 +157,42 @@ if (pgUrl) {
   agentRegistry = new PostgresAgentRegistry({ db: pgDb });
   skillRegistry = new PostgresSkillRegistry({ db: pgDb });
   fragmentStore = new PostgresFragmentStore({ db: pgDb });
+  knowledgeBaseStore = new PostgresKnowledgeBaseStore({ db: pgDb });
   memoryStore = new PostgresMemoryStore({ db: pgDb });
   console.log(
-    "[zorya] agent + skill registries + fragment store + memory store → Postgres (ZORYA_PG_URL)",
+    "[zorya] agent + skill registries + fragment, knowledge-base and memory stores → Postgres (ZORYA_PG_URL)",
   );
 } else {
   agentRegistry = stack.agentRegistry;
   skillRegistry = stack.skillRegistry;
   fragmentStore = stack.fragmentStore;
+  knowledgeBaseStore = stack.knowledgeBaseStore;
   memoryStore = stack.memoryStore;
 }
+
+// Managed knowledge bases — the dashboard's Knowledge page. Bases and their
+// sources persist in the store above; the default in-memory index is rebuilt
+// from it at boot. "org-handbook" is seeded once from ./kb and is what
+// knowledge-bot binds in `backend.knowledge`. The `url` adapter lets the page
+// import public web pages (private and internal hosts are refused).
+const knowledgeBases = new ZoryaKnowledgeBases({
+  store: knowledgeBaseStore,
+  sourceAdapters: [createUrlKnowledgeSourceAdapter()],
+  seed: [
+    {
+      id: "org-handbook",
+      description: "Engineering, on-call, security, and platform reference material.",
+      tags: ["demo", "internal"],
+      documents: [...ORG_KNOWLEDGE_BASE.entries()].map(([id, doc]) => ({
+        id,
+        title: doc.title,
+        tags: doc.tags,
+        mimeType: "text/markdown",
+        text: doc.body,
+      })),
+    },
+  ],
+});
 // Prompt-fragment registry — small curated markdown layers role recipes
 // compose into their system prompt. The ZoryaFragments service below scans
 // examples/fragments/*.md on boot + on a tick, and the manager UI mutates
@@ -589,6 +620,8 @@ async function resolveAgent(
   return resolveLocalAgent(recipe, {
     runner,
     memory: memoryStore,
+    // `backend.knowledge` bindings resolve against the managed knowledge bases.
+    retrievers: knowledgeBases.registry,
     skills: skillRegistry,
     skillCatalog,
     role: roleDef,
@@ -671,7 +704,7 @@ const SEED_FACT_PREFIX = "Org doc available:";
 
 // Seed namespace memory with KB metadata so any agent in the "acme"
 // tenant has cross-cutting awareness of the org docs without having to
-// call searchKnowledge first. Idempotent: re-running the demo skips
+// search the knowledge base first. Idempotent: re-running the demo skips
 // when seed facts already exist (we look for the SEED_FACT_PREFIX).
 async function seedNamespaceMemory() {
   const existing = await memoryStore.listNamespaceFacts(DEMO_NAMESPACE);
@@ -1061,6 +1094,8 @@ const agents = new ZoryaAgents({
   instances: instanceRegistry,
   models: modelCatalog,
   toolCatalog: agentToolCatalog,
+  // The agent editor's Knowledge / RAG picker lists these.
+  retrievers: knowledgeBases.registry,
   fragments: fragmentRegistry,
   roles: roleRegistry,
   scan: {
@@ -1234,6 +1269,7 @@ const server = ZoryaServer.builder()
   .skills(skills)
   .fragments(fragments)
   .dags(dags)
+  .knowledgeBases(knowledgeBases)
   // BYOK / per-tenant API keys / MCP credentials live here. Exposes
   // /api/secrets HTTP CRUD + the dashboard's Secrets page; the agent
   // resolver wiring (in `agents.resolve` above) reads model.credentialRef

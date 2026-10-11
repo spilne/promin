@@ -104,6 +104,7 @@ export {
   DEFAULT_RETRIEVER_TOOL_NAME,
   FallbackRetriever,
   FlatTextChunker,
+  InMemoryKnowledgeBaseStore,
   InMemoryRetriever,
   InMemoryRetrieverRegistry,
   RerankingRetriever,
@@ -119,10 +120,15 @@ export type {
   FallbackRetrieverSource,
   FlatTextChunkerConfig,
   InMemoryRetrieverConfig,
+  IngestibleRetriever,
+  KnowledgeBaseRecord,
+  KnowledgeBaseStore,
   KnowledgeChunk,
   KnowledgeChunker,
   KnowledgeIngestDocument,
   KnowledgeSource,
+  KnowledgeSourceRecord,
+  KnowledgeSourceStatus,
   ListRetrieversParams,
   RegisteredRetriever,
   RegisterRetrieverInput,
@@ -139,6 +145,7 @@ export type {
   RetrieverToolOutput,
   RetrieverToolSource,
   RouterRetrieverConfig,
+  StoredKnowledgeBase,
 } from "./rag/index.ts";
 
 // Auto-compaction + auto-distillation config — exposed alongside Consolidator for demos that wire them.

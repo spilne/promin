@@ -23,7 +23,7 @@ import {
   type KnowledgeSource,
   type RetrieveRequest,
   type RetrieveResult,
-  type Retriever,
+  type IngestibleRetriever,
   type RetrieverFilter,
 } from "@promin/agent";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
@@ -74,7 +74,7 @@ interface PgVectorRetrieverRow {
 /** Postgres truncates identifiers past this length, which could merge index names. */
 const MAX_IDENTIFIER_LENGTH = 63;
 
-export class PgVectorRetriever implements Retriever {
+export class PgVectorRetriever implements IngestibleRetriever {
   private readonly db: DrizzleDb;
   private readonly embeddings: EmbeddingProvider;
   private readonly tableName: string;

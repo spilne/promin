@@ -14,6 +14,14 @@ export type { RerankingRetrieverConfig, RetrieveReranker } from "./reranking-ret
 export { RouterRetriever } from "./router-retriever.ts";
 export type { RouterRetrieverConfig, RetrieverRoute } from "./router-retriever.ts";
 export { InMemoryRetrieverRegistry } from "./retriever-registry.ts";
+export { InMemoryKnowledgeBaseStore } from "./knowledge-base-store.ts";
+export type {
+  KnowledgeBaseRecord,
+  KnowledgeBaseStore,
+  KnowledgeSourceRecord,
+  KnowledgeSourceStatus,
+  StoredKnowledgeBase,
+} from "./knowledge-base-store.ts";
 export type {
   ListRetrieversParams,
   RegisteredRetriever,
@@ -29,6 +37,7 @@ export type {
 } from "./retriever-tool.ts";
 export { DEFAULT_RETRIEVER_TOOL_NAME, retrieverToolName } from "./retriever-tool-name.ts";
 export type {
+  IngestibleRetriever,
   KnowledgeChunk,
   KnowledgeChunker,
   KnowledgeIngestDocument,

@@ -341,6 +341,89 @@ list. The search tools a binding adds appear among the agent's system tools.
 Recipe writes validate `backend.knowledge`: unique ids, a known mode, and a
 tool name of letters, digits, `_` or `-`.
 
+### Managed knowledge bases
+
+`ZoryaKnowledgeBases` lets operators create knowledge bases and fill them
+from the dashboard's **Knowledge** page. Each base is a retriever registered
+under its id in a `RetrieverRegistry`; pass that registry to `ZoryaAgents`
+and the resolver so recipes bind the bases by id.
+
+```ts
+import { ZoryaKnowledgeBases, createUrlKnowledgeSourceAdapter } from "@promin/zorya";
+import { SqliteKnowledgeBaseStore } from "@promin/sqlite";
+
+const knowledgeBases = new ZoryaKnowledgeBases({
+  store: SqliteKnowledgeBaseStore.make({ db }), // or PostgresKnowledgeBaseStore
+  embeddings, // optional: cosine ranking instead of keyword overlap
+  sourceAdapters: [createUrlKnowledgeSourceAdapter()],
+  seed: [{ id: "handbook", description: "Org handbook", documents }],
+});
+const retrievers = knowledgeBases.registry;
+const agents = new ZoryaAgents({
+  registry,
+  retrievers,
+  resolve: (recipe) => resolveLocalAgent(recipe, { runner, llm, tools, retrievers }),
+});
+const server = new ZoryaServer({ workflows, agents, knowledgeBases, apiKeys });
+```
+
+The store (`InMemoryKnowledgeBaseStore`, `SqliteKnowledgeBaseStore`,
+`PostgresKnowledgeBaseStore`; conformance suite `knowledgeBaseStoreTestSuite`)
+keeps each base and every source's text and last ingestion outcome, so a base
+survives restarts and the recipes binding it keep resolving. By default each
+base is an `InMemoryRetriever` that `start()` rebuilds from the stored text.
+For a durable index pass a factory, for example one pgvector table per base:
+
+```ts
+new ZoryaKnowledgeBases({
+  store,
+  retrievers: {
+    durable: true, // chunks survive restarts; nothing is re-ingested at start
+    create: async ({ base, chunker }) => {
+      const retriever = new PgVectorRetriever({
+        db,
+        embeddings,
+        dimensions: 1536,
+        chunker,
+        tableName: `kb_${base.id.replace(/[^A-Za-z0-9_]/g, "_")}`,
+      });
+      await retriever.ensureSchema({ createExtension: true });
+      return retriever;
+    },
+  },
+});
+```
+
+Ingestion (chunk, embed, store) runs inside the request. A failure answers
+`502 ingest_failed` with the reason, and the source stays listed with status
+`failed` and that reason (the base reports `degraded`) until it is re-indexed
+from its stored text or removed. Writes to one base run one at a time. A
+source's text is bounded by the server's request body limit and by
+`maxSourceCharacters` (default 2,000,000).
+
+Source adapters load documents server-side and are opt-in.
+`createUrlKnowledgeSourceAdapter` fetches public http(s) pages only by default
+(the remote-deployment `RemoteEndpointPolicy`, checked on every redirect),
+caps the body (2 MiB) and the time (15 s), refuses binary content and reduces
+HTML to text. `createFileKnowledgeSourceAdapter({ root })` reads text files
+under `root` only. Implement `KnowledgeSourceAdapter` for other sources.
+
+| Route                                                          |                                                                                                                                 |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `GET/POST /api/knowledge-bases`                                | list, create (409 when the id is taken, also by a host-wired retriever)                                                         |
+| `GET /api/knowledge-bases/_adapters`                           | import kinds the server accepts                                                                                                 |
+| `GET/PATCH/DELETE /api/knowledge-bases/:id`                    | read, edit description / tags / metadata, delete (409 `knowledge_base_in_use` while a recipe binds it; `?force=true` overrides) |
+| `GET/POST /api/knowledge-bases/:id/sources`                    | list sources (without text), ingest `{ id, text, title?, uri?, mimeType?, tags?, metadata? }`                                   |
+| `POST /api/knowledge-bases/:id/sources/import`                 | ingest through an adapter: `{ kind, config }`                                                                                   |
+| `POST /api/knowledge-bases/:id/sources/:sourceId/reindex`      | re-ingest a stored source                                                                                                       |
+| `DELETE /api/knowledge-bases/:id/sources/:sourceId`            | drop a source and its chunks                                                                                                    |
+| `GET /api/knowledge-bases/:id/chunks?sourceId=&limit=&offset=` | chunk inspection                                                                                                                |
+| `POST /api/knowledge-bases/:id/search`                         | `{ query, topK?, tags?, metadata?, maxChunkCharacters? }`; 502 `search_failed` when the retriever throws                        |
+
+The service reads the store once at start, so replicas sharing a store see
+each other's new bases after a restart; serve the Knowledge page from one
+replica, and use a durable retriever so searches agree across replicas.
+
 ## Writing and running a worker
 
 A worker hosts workflow code and drives runs for a `QueuedWorkflows`

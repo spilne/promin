@@ -14,6 +14,7 @@ import type { WorkersProvider } from "./routes/workers.ts";
 import type { ZoryaAgents } from "./services/agents/index.ts";
 import type { ZoryaDags } from "./services/dags/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
+import type { ZoryaKnowledgeBases } from "./services/knowledge/index.ts";
 import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
 import type { ZoryaWorkflows } from "./services/workflows/index.ts";
@@ -101,6 +102,12 @@ export interface ZoryaServerConfig extends AuthConfig {
   fragments?: ZoryaFragments;
   /** Optional DAG gateway service. Mounts /api/dags/* routes. */
   dags?: ZoryaDags;
+  /**
+   * Optional managed knowledge bases. Mounts /api/knowledge-bases/* (the
+   * dashboard's Knowledge page) and starts with the server. Pass its
+   * `registry` as `ZoryaAgents.retrievers` so recipes can bind the bases.
+   */
+  knowledgeBases?: ZoryaKnowledgeBases;
   /**
    * Mount the remote-worker HTTP surface. Pulls stepQueue / workerRegistry /
    * advertisements / workflowStarts from the workflows service.

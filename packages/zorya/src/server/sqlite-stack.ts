@@ -18,6 +18,7 @@ import {
   SqliteAgentRegistry,
   SqliteDagRegistry,
   SqliteFragmentStore,
+  SqliteKnowledgeBaseStore,
   SqliteMemoryStore,
   SqliteRoleRegistry,
   SqliteSchedulerStorage,
@@ -65,6 +66,7 @@ export interface SqliteZoryaStack {
   readonly roleRegistry: SqliteRoleRegistry;
   readonly skillRegistry: SqliteSkillRegistry;
   readonly fragmentStore: SqliteFragmentStore;
+  readonly knowledgeBaseStore: SqliteKnowledgeBaseStore;
   readonly memoryStore: SqliteMemoryStore;
   readonly dagRegistry: SqliteDagRegistry;
   /** Present when `secretsPassphrase` was given. */
@@ -123,6 +125,7 @@ export function createSqliteZoryaStack(config: SqliteZoryaStackConfig): SqliteZo
     roleRegistry: SqliteRoleRegistry.make({ db: sqlite, now }),
     skillRegistry: SqliteSkillRegistry.make({ db: sqlite, now }),
     fragmentStore: SqliteFragmentStore.make({ db: sqlite, now }),
+    knowledgeBaseStore: SqliteKnowledgeBaseStore.make({ db: sqlite }),
     memoryStore: SqliteMemoryStore.make({ db: sqlite, now }),
     dagRegistry: SqliteDagRegistry.make({ db: sqlite, now }),
     ...(config.secretsPassphrase !== undefined && {

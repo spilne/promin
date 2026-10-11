@@ -43,6 +43,7 @@ import { AgentStreamHub } from "./services/agent-stream-hub.ts";
 import type { ZoryaAgents } from "./services/agents/index.ts";
 import type { ZoryaDags } from "./services/dags/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
+import type { ZoryaKnowledgeBases } from "./services/knowledge/index.ts";
 import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
 import { WorkerWakeups } from "./services/worker-wakeups.ts";
@@ -64,7 +65,13 @@ import {
   mountProbes,
 } from "./mount/mount-lifecycle.ts";
 import { serveListener, type ListeningServer } from "./mount/mount-listener.ts";
-import { mountDags, mountFragments, mountSecrets, mountSkills } from "./mount/mount-registries.ts";
+import {
+  mountDags,
+  mountFragments,
+  mountKnowledgeBases,
+  mountSecrets,
+  mountSkills,
+} from "./mount/mount-registries.ts";
 import { mountRpc } from "./mount/mount-rpc.ts";
 import { mountRuns } from "./mount/mount-runs.ts";
 import { mountSchedules } from "./mount/mount-schedules.ts";
@@ -78,6 +85,7 @@ export class ZoryaServer {
   readonly skills?: ZoryaSkills;
   readonly fragments?: ZoryaFragments;
   readonly dags?: ZoryaDags;
+  readonly knowledgeBases?: ZoryaKnowledgeBases;
   /**
    * The workflows layer's version registry (`LocalWorkflowsConfig.versionRegistry`),
    * which `/api/workflows/:name/versions/*` manage. One registry: a promote
@@ -141,6 +149,7 @@ export class ZoryaServer {
     if (config.skills) this.skills = config.skills;
     if (config.fragments) this.fragments = config.fragments;
     if (config.dags) this.dags = config.dags;
+    if (config.knowledgeBases) this.knowledgeBases = config.knowledgeBases;
     if (config.secrets) this.secrets = config.secrets;
     const clock: WallClock = config.clock ?? SystemWallClock;
     this.inFlight = new InFlightRequests(clock);
@@ -208,6 +217,7 @@ export class ZoryaServer {
         agents: this.agents,
         skills: this.skills,
         fragments: this.fragments,
+        knowledgeBases: this.knowledgeBases,
         retention: this.retention,
       }),
       clock,
@@ -303,6 +313,9 @@ export class ZoryaServer {
       });
     }
     if (this.dags) mountDags({ router, dags: this.dags });
+    if (this.knowledgeBases) {
+      mountKnowledgeBases({ router, knowledgeBases: this.knowledgeBases, agents: this.agents });
+    }
     mountSchedules({ router, scheduler: this.scheduler, storage, clock });
     if (config.remoteWorkers) {
       mountRpc({
@@ -338,7 +351,7 @@ export class ZoryaServer {
 
   /**
    * Start the background services (workflows, scheduler, agents, skills,
-   * fragments) and the worker socket. A service whose start fails is retried
+   * fragments, knowledge bases) and the worker socket. A service whose start fails is retried
    * with backoff; `/api/ready` and `ready()` reflect progress. `listen()`
    * calls this. Idempotent.
    */

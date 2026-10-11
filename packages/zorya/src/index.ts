@@ -73,6 +73,31 @@ export {
   type ZoryaFragmentsScanConfig,
 } from "./server/services/fragments/index.ts";
 export { ZoryaDags, type ZoryaDagsConfig } from "./server/services/dags/index.ts";
+export {
+  DEFAULT_MAX_SOURCE_BYTES,
+  DEFAULT_MAX_SOURCE_CHARACTERS,
+  KNOWLEDGE_BASE_ID_PATTERN,
+  KnowledgeBaseExistsError,
+  KnowledgeBaseNotFoundError,
+  KnowledgeIngestError,
+  KnowledgeInputError,
+  KnowledgeSourceImportError,
+  KnowledgeSourceNotFoundError,
+  ZoryaKnowledgeBases,
+  createFileKnowledgeSourceAdapter,
+  createUrlKnowledgeSourceAdapter,
+  type FileKnowledgeSourceAdapterConfig,
+  type KnowledgeBase,
+  type KnowledgeBaseCreateInput,
+  type KnowledgeBaseSeed,
+  type KnowledgeBaseUpdateInput,
+  type KnowledgeRetrieverFactory,
+  type KnowledgeSourceAdapter,
+  type KnowledgeSourceInput,
+  type KnowledgeSourceSummary,
+  type UrlKnowledgeSourceAdapterConfig,
+  type ZoryaKnowledgeBasesConfig,
+} from "./server/services/knowledge/index.ts";
 export { Auth, bearerToken, type AuthConfig } from "./server/auth.ts";
 export { RunEventBus } from "./server/run-event-bus.ts";
 export { RunPollWatcher, RunWatcherPool } from "./server/run-poll-watcher.ts";

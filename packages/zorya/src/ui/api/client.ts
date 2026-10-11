@@ -69,6 +69,21 @@ import type {
   SkillsCatalogResponse,
 } from "../../server/routes/agent-catalog.ts";
 import type { MemoryInspectResponse } from "../../server/routes/memory.ts";
+import type {
+  KnowledgeBase,
+  KnowledgeBaseCreateRequest,
+  KnowledgeBasePatchRequest,
+  KnowledgeBasesListResponse,
+  KnowledgeChunksResponse,
+  KnowledgeSearchRequest,
+  KnowledgeSearchResponse,
+  KnowledgeSourceAdaptersResponse,
+  KnowledgeSourceCreateRequest,
+  KnowledgeSourceImportRequest,
+  KnowledgeSourcesImportResponse,
+  KnowledgeSourcesResponse,
+  KnowledgeSourceSummary,
+} from "../../server/routes/knowledge-bases.ts";
 import type { SignalsResponse } from "../../server/routes/signals.ts";
 import type {
   CompleteTokenResponse,
@@ -657,6 +672,92 @@ export const api = {
   },
   listFragmentSources(): Promise<FragmentSourcesResponse> {
     return req<FragmentSourcesResponse>(`/api/fragments/_sources`);
+  },
+
+  // ---------------------------------------------------------------------
+  // Knowledge bases — managed retrievers agents bind in backend.knowledge
+  // ---------------------------------------------------------------------
+  listKnowledgeBases(): Promise<KnowledgeBasesListResponse> {
+    return req<KnowledgeBasesListResponse>(`/api/knowledge-bases`);
+  },
+  listKnowledgeSourceAdapters(): Promise<KnowledgeSourceAdaptersResponse> {
+    return req<KnowledgeSourceAdaptersResponse>(`/api/knowledge-bases/_adapters`);
+  },
+  createKnowledgeBase(body: KnowledgeBaseCreateRequest): Promise<KnowledgeBase> {
+    return req<KnowledgeBase>(`/api/knowledge-bases`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  updateKnowledgeBase(id: string, body: KnowledgeBasePatchRequest): Promise<KnowledgeBase> {
+    return req<KnowledgeBase>(`/api/knowledge-bases/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  deleteKnowledgeBase(id: string, opts: { force?: boolean } = {}): Promise<void> {
+    const qs = opts.force ? "?force=true" : "";
+    return req<void>(`/api/knowledge-bases/${encodeURIComponent(id)}${qs}`, { method: "DELETE" });
+  },
+  listKnowledgeSources(id: string): Promise<KnowledgeSourcesResponse> {
+    return req<KnowledgeSourcesResponse>(`/api/knowledge-bases/${encodeURIComponent(id)}/sources`);
+  },
+  ingestKnowledgeSource(
+    id: string,
+    body: KnowledgeSourceCreateRequest,
+  ): Promise<KnowledgeSourceSummary> {
+    return req<KnowledgeSourceSummary>(`/api/knowledge-bases/${encodeURIComponent(id)}/sources`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  importKnowledgeSources(
+    id: string,
+    body: KnowledgeSourceImportRequest,
+  ): Promise<KnowledgeSourcesImportResponse> {
+    return req<KnowledgeSourcesImportResponse>(
+      `/api/knowledge-bases/${encodeURIComponent(id)}/sources/import`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+  },
+  reindexKnowledgeSource(id: string, sourceId: string): Promise<KnowledgeSourceSummary> {
+    return req<KnowledgeSourceSummary>(
+      `/api/knowledge-bases/${encodeURIComponent(id)}/sources/${encodeURIComponent(sourceId)}/reindex`,
+      { method: "POST" },
+    );
+  },
+  deleteKnowledgeSource(id: string, sourceId: string): Promise<void> {
+    return req<void>(
+      `/api/knowledge-bases/${encodeURIComponent(id)}/sources/${encodeURIComponent(sourceId)}`,
+      { method: "DELETE" },
+    );
+  },
+  listKnowledgeChunks(
+    id: string,
+    params: { sourceId?: string; limit?: number; offset?: number } = {},
+  ): Promise<KnowledgeChunksResponse> {
+    const qs = new URLSearchParams();
+    if (params.sourceId !== undefined) qs.set("sourceId", params.sourceId);
+    if (params.limit !== undefined) qs.set("limit", String(params.limit));
+    if (params.offset !== undefined) qs.set("offset", String(params.offset));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return req<KnowledgeChunksResponse>(
+      `/api/knowledge-bases/${encodeURIComponent(id)}/chunks${suffix}`,
+    );
+  },
+  searchKnowledgeBase(id: string, body: KnowledgeSearchRequest): Promise<KnowledgeSearchResponse> {
+    return req<KnowledgeSearchResponse>(`/api/knowledge-bases/${encodeURIComponent(id)}/search`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
   },
   listSkillSources(): Promise<SkillSourcesResponse> {
     return req<SkillSourcesResponse>(`/api/skills/_sources`);

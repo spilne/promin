@@ -2,12 +2,12 @@ import type { EmbeddingProvider } from "../memory-index.ts";
 import { FlatTextChunker } from "./chunking.ts";
 import { truncateChunk } from "./result-utils.ts";
 import type {
+  IngestibleRetriever,
   KnowledgeChunk,
   KnowledgeChunker,
   KnowledgeIngestDocument,
   RetrieveRequest,
   RetrieveResult,
-  Retriever,
   RetrieverFilter,
 } from "./types.ts";
 
@@ -37,7 +37,7 @@ interface StoredChunk {
  * Without one it falls back to keyword overlap. Results scoring 0 are
  * dropped.
  */
-export class InMemoryRetriever implements Retriever {
+export class InMemoryRetriever implements IngestibleRetriever {
   private readonly chunks: StoredChunk[] = [];
   private readonly chunker: KnowledgeChunker;
   private readonly embeddings?: EmbeddingProvider;

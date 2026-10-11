@@ -73,6 +73,18 @@ export interface KnowledgeIngestDocument {
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
+/**
+ * A retriever that also takes documents in and drops them by source: the
+ * contract managed knowledge bases ingest through. `InMemoryRetriever` and
+ * `PgVectorRetriever` implement it.
+ */
+export interface IngestibleRetriever extends Retriever {
+  /** Chunk, index and store a document; returns the stored chunks. */
+  addDocument(document: KnowledgeIngestDocument): Promise<KnowledgeChunk[]>;
+  /** Drop every chunk of a source. Dropping an unknown source is a no-op. */
+  deleteSource(sourceId: string): Promise<void>;
+}
+
 export interface KnowledgeChunker {
   chunk(document: KnowledgeIngestDocument): KnowledgeChunk[];
 }

@@ -74,6 +74,7 @@ export function managedServices(params: {
   readonly agents: Lifecycled | undefined;
   readonly skills: Lifecycled | undefined;
   readonly fragments: Lifecycled | undefined;
+  readonly knowledgeBases: Lifecycled | undefined;
   readonly retention: Lifecycled | undefined;
 }): ManagedService[] {
   const out: ManagedService[] = [{ name: "workflows", ...bindLifecycle(params.workflows) }];
@@ -81,6 +82,9 @@ export function managedServices(params: {
   if (params.agents) out.push({ name: "agents", ...bindLifecycle(params.agents) });
   if (params.skills) out.push({ name: "skills", ...bindLifecycle(params.skills) });
   if (params.fragments) out.push({ name: "fragments", ...bindLifecycle(params.fragments) });
+  if (params.knowledgeBases) {
+    out.push({ name: "knowledgeBases", ...bindLifecycle(params.knowledgeBases) });
+  }
   if (params.retention) out.push({ name: "retention", ...bindLifecycle(params.retention) });
   return out;
 }
