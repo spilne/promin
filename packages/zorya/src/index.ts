@@ -150,10 +150,7 @@ export {
   type WebhookDeliveryStore,
   type WebhookSourceConfig,
 } from "./server/routes/webhooks.ts";
-export {
-  RemoteDeploymentSweeper,
-  type RemoteEndpointPolicy,
-} from "./server/routes/remote-deployments.ts";
+export { RemoteDeploymentSweeper } from "./server/routes/remote-deployments.ts";
 export { StorageMetricsProvider, type MetricsProvider } from "./server/routes/metrics.ts";
 export {
   emptyWorkersProvider,

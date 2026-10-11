@@ -507,6 +507,7 @@ export type {
   SchedulerClient,
   SchedulerClientScope,
   SchedulerCreateInput,
+  SchedulerCreateResult,
   SchedulerSummary,
   InProcessSchedulerClientConfig,
   HttpSchedulerClientConfig,
@@ -537,14 +538,33 @@ export {
 } from "./tools/filesystem-tools.ts";
 export type { FilesystemToolsConfig, FilesystemTools } from "./tools/filesystem-tools.ts";
 
-export { createShellTool } from "./tools/shell-tool.ts";
+export { createShellTool, DEFAULT_INHERITED_ENV } from "./tools/shell-tool.ts";
 export type { ShellToolConfig } from "./tools/shell-tool.ts";
 
 export { createAgentTool } from "./tools/agent-tool-factory.ts";
 export type { AgentToolFactoryConfig } from "./tools/agent-tool-factory.ts";
 
 export { createFetchUrlTool, createWebSearchTool, fetchUrl, webSearch } from "./tools/web-tools.ts";
-export type { WebToolsConfig } from "./tools/web-tools.ts";
+export type { FetchUrlToolConfig, WebToolsConfig } from "./tools/web-tools.ts";
+
+export { isPublicAddress } from "./outbound/address-ranges.ts";
+export { checkOutboundUrl } from "./outbound/outbound-policy.ts";
+export type {
+  OutboundPolicy,
+  OutboundRejection,
+  OutboundUrlCheck,
+} from "./outbound/outbound-policy.ts";
+export {
+  OutboundRequestError,
+  createOutboundFetch,
+  outboundFetch,
+} from "./outbound/outbound-fetch.ts";
+export type {
+  OutboundErrorCode,
+  OutboundFetchOptions,
+  OutboundFetchTransport,
+  OutboundResponse,
+} from "./outbound/outbound-fetch.ts";
 
 export type {
   LLMProvider,

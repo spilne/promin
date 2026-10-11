@@ -51,13 +51,21 @@ export interface SchedulerSummary {
   readonly tickCount: number;
 }
 
+/** Outcome of `SchedulerClient.create`. */
+export type SchedulerCreateResult =
+  | { readonly created: true; readonly id: string }
+  | { readonly created: false };
+
 export interface SchedulerClient {
   /**
-   * Persist a new schedule. Implementations validate ownership +
-   * tenant boundary at the boundary (the in-process client trusts the
-   * tool; the HTTP client gets server-side enforcement).
+   * Persist a new schedule under `input.id` only if that id is free —
+   * atomically, in the store (`SchedulerStorage.insertSchedule`, or the
+   * server's 409 on `POST /api/schedules`). `{ created: false }` when the
+   * id is taken; nothing is changed then. The scheduler tool builds its
+   * per-thread cap on this: ids are a fixed set of slots per thread, so
+   * concurrent creates can never exceed it.
    */
-  create(input: SchedulerCreateInput): Promise<{ id: string }>;
+  create(input: SchedulerCreateInput): Promise<SchedulerCreateResult>;
   /**
    * Return schedules that belong to this client's scope. Filtering is
    * the implementation's responsibility — the in-process client does
@@ -99,16 +107,10 @@ export function inProcessSchedulerClient(config: InProcessSchedulerClientConfig)
         enabled: true,
         metadata: input.metadata,
       };
-      await storage.upsertSchedule(dsConfig);
-      // `upsertSchedule` is a low-level write that doesn't touch the
-      // due-tracking column — without an explicit `setNextRun`, the row
-      // is invisible to `findDue` and the SchedulerLoop never picks it
-      // up. Match `DurableScheduler.register`: seed nextRun = now
-      // so the first poll fires it (computeDueTicks for cron/interval
-      // with `lastFired = null` returns one boot tick at `now`, then
-      // commitPoll advances nextRun to the natural cron/interval cadence).
-      await storage.setNextRun(input.id, new Date());
-      return { id: input.id };
+      // Insert-if-absent; it also seeds nextRun (now, or a later startAt)
+      // so the schedule is visible to findDue right away.
+      const created = await storage.insertSchedule(dsConfig);
+      return created ? { created: true, id: input.id } : { created: false };
     },
 
     async list() {
@@ -219,11 +221,15 @@ export function httpSchedulerClient(config: HttpSchedulerClientConfig): Schedule
         headers: headers(),
         body: JSON.stringify(body),
       });
+      if (res.status === 409) {
+        await res.body?.cancel().catch(() => {});
+        return { created: false };
+      }
       if (!res.ok) {
         throw new Error(`POST /api/schedules failed: ${res.status} ${await res.text()}`);
       }
       const dto = (await res.json()) as { id: string };
-      return { id: dto.id };
+      return { created: true, id: dto.id };
     },
 
     async list() {

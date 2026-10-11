@@ -11,14 +11,16 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { InMemoryAgentRegistry, InMemoryRemoteDeploymentRegistry } from "@promin/agent";
+import {
+  InMemoryAgentRegistry,
+  InMemoryRemoteDeploymentRegistry,
+  type OutboundPolicy,
+} from "@promin/agent";
 import { FakeWallClock, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { LocalWorkflows, ZoryaAgents } from "../../../index.ts";
 import { ZoryaServer } from "../../server.ts";
 import { REDACTED_SECRET } from "../agent-gateway-kit.ts";
 import { RemoteDeploymentSweeper } from "../remote-deployments.ts";
-import type { RemoteEndpointPolicy } from "../remote-endpoint-policy.ts";
-import { isPublicAddress } from "../remote-endpoint-policy.ts";
 
 const localBackend = {
   type: "local" as const,
@@ -27,7 +29,7 @@ const localBackend = {
 };
 
 /** Fake DNS: every `*.example` host resolves to a public address. */
-const PUBLIC_DNS: RemoteEndpointPolicy = {
+const PUBLIC_DNS: OutboundPolicy = {
   resolveHost: async (host) => {
     if (host === "rebind.example") return ["10.0.0.5"];
     if (host.endsWith(".example")) return ["93.184.216.34"];
@@ -35,7 +37,7 @@ const PUBLIC_DNS: RemoteEndpointPolicy = {
   },
 };
 
-async function boot(opts: { endpointPolicy?: RemoteEndpointPolicy } = {}) {
+async function boot(opts: { endpointPolicy?: OutboundPolicy } = {}) {
   const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
   const storage = new InMemoryWorkflowStorage();
   const runner = createWorkflowRunner({ storage });
@@ -195,21 +197,6 @@ describe("remote-deployments — endpoint policy (SSRF guard)", () => {
     expect(
       (await register(narrow.server, { endpoint: "https://a.example", agents: ["y"] })).status,
     ).toBe(400);
-  });
-
-  it("classifies addresses", () => {
-    expect(isPublicAddress("93.184.216.34")).toBe(true);
-    expect(isPublicAddress("2606:2800:220:1::1")).toBe(true);
-    for (const a of [
-      "0.0.0.0",
-      "100.64.0.1",
-      "172.16.0.1",
-      "192.168.1.1",
-      "224.0.0.1",
-      "fe80::1",
-    ]) {
-      expect([a, isPublicAddress(a)]).toEqual([a, false]);
-    }
   });
 });
 

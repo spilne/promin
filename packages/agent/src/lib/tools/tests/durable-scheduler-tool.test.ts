@@ -11,11 +11,15 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
+import { FakeWallClock } from "@promin/workflow";
 import { InMemorySchedulerStorage } from "@promin/workflow/scheduler";
 import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
-import { createDurableSchedulerTools } from "../durable-scheduler-tool.ts";
+import {
+  createDurableSchedulerTools,
+  type DurableSchedulerToolDeps,
+} from "../durable-scheduler-tool.ts";
 import { dispatchAgentSchedule, isAgentSchedule } from "../dispatch-agent-schedule.ts";
-import { inProcessSchedulerClient } from "../scheduler-client.ts";
+import { httpSchedulerClient, inProcessSchedulerClient } from "../scheduler-client.ts";
 import type { Agent, AgentInput, AgentRunOutput } from "../../agent/types.ts";
 
 const SCOPE = {
@@ -26,10 +30,13 @@ const SCOPE = {
 } as const;
 
 /** Mimic the agent runtime: build the tools with a per-call client factory. */
-function toolsWith(storage: InMemorySchedulerStorage, opts: { maxPerThread?: number } = {}) {
+function toolsWith(
+  storage: InMemorySchedulerStorage,
+  opts: Omit<DurableSchedulerToolDeps, "getClient"> = {},
+) {
   return createDurableSchedulerTools({
     getClient: (scope) => inProcessSchedulerClient({ storage, scope }),
-    ...(opts.maxPerThread !== undefined && { maxPerThread: opts.maxPerThread }),
+    ...opts,
   });
 }
 
@@ -69,9 +76,15 @@ describe("createDurableSchedulerTools — schedulerCreate", () => {
     });
   });
 
-  it("agentId override targets a peer instead of self", async () => {
+  it("agentId override targets a peer when the host authorizes it", async () => {
     const storage = new InMemorySchedulerStorage();
-    const tools = toolsWith(storage);
+    const asked: Array<{ agentId: string; targetAgentId: string }> = [];
+    const tools = toolsWith(storage, {
+      authorizeDelegation: ({ scope, targetAgentId }) => {
+        asked.push({ agentId: scope.agentId, targetAgentId });
+        return targetAgentId === "summarizer";
+      },
+    });
 
     const result = await tools.schedulerCreate.execute(
       {
@@ -87,6 +100,80 @@ describe("createDurableSchedulerTools — schedulerCreate", () => {
     const stored = await storage.loadSchedule(result.id);
     expect(stored?.metadata?.agentId).toBe("summarizer");
     expect(stored?.metadata?.createdByAgent).toBe("writer"); // who scheduled it
+    expect(asked).toEqual([{ agentId: "writer", targetAgentId: "summarizer" }]);
+  });
+
+  it("refuses to delegate to another agent without an authorization hook", async () => {
+    const storage = new InMemorySchedulerStorage();
+    const result = await toolsWith(storage).schedulerCreate.execute(
+      { task: "Wire money", agentId: "payments-admin", intervalMs: 3_600_000 },
+      CTX,
+    );
+    expect(result).toMatchObject({ ok: false });
+    if (!result.ok) expect(result.error).toContain("payments-admin");
+    expect(await storage.countSchedules()).toBe(0);
+  });
+
+  it("requires approval on create by default, not on list / cancel", () => {
+    const tools = toolsWith(new InMemorySchedulerStorage());
+    expect(tools.schedulerCreate.requireApproval).toBe(true);
+    expect(tools.schedulerList.requireApproval).toBeFalsy();
+    expect(tools.schedulerCancel.requireApproval).toBeFalsy();
+    const unattended = toolsWith(new InMemorySchedulerStorage(), { requireApproval: false });
+    expect(unattended.schedulerCreate.requireApproval).toBe(false);
+  });
+
+  it("refuses cadences faster than the minimum interval", async () => {
+    const storage = new InMemorySchedulerStorage();
+    const tools = toolsWith(storage, { minIntervalMs: 60_000 });
+    for (const trigger of [
+      { intervalMs: 1_000 },
+      { cron: "*/5 * * * * *" },
+      { rrule: "RRULE:FREQ=SECONDLY;INTERVAL=10" },
+    ]) {
+      const result = await tools.schedulerCreate.execute({ task: "spam", ...trigger }, CTX);
+      expect([trigger, result.ok]).toEqual([trigger, false]);
+      if (!result.ok) expect(result.error).toContain("minimum is 60 s");
+    }
+    const ok = await tools.schedulerCreate.execute({ task: "fine", cron: "* * * * *" }, CTX);
+    expect(ok.ok).toBe(true);
+    expect(await storage.countSchedules()).toBe(1);
+  });
+
+  it("validates startAt / endAt / timezone / trigger syntax", async () => {
+    const clock = FakeWallClock.create("2026-05-01T00:00:00Z");
+    const storage = new InMemorySchedulerStorage();
+    const tools = toolsWith(storage, { clock });
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ startAt: "next tuesday" }, "ISO 8601"],
+      [{ startAt: "2026-05-02" }, "ISO 8601"],
+      [{ startAt: "2026-04-30T00:00:00Z" }, "in the future"],
+      [{ endAt: "2026-04-30T00:00:00Z" }, "in the future"],
+      [{ startAt: "2026-05-03T00:00:00Z", endAt: "2026-05-02T00:00:00Z" }, "after startAt"],
+      [{ timezone: "Mars/Olympus" }, "timezone"],
+      [{ cron: "not a cron", intervalMs: undefined }, "cron"],
+    ];
+    for (const [extra, message] of cases) {
+      const result = await tools.schedulerCreate.execute(
+        { task: "x", intervalMs: 3_600_000, ...extra } as never,
+        CTX,
+      );
+      expect([extra, result.ok]).toEqual([extra, false]);
+      if (!result.ok)
+        expect([extra, result.error]).toEqual([extra, expect.stringContaining(message)]);
+    }
+    expect(await storage.countSchedules()).toBe(0);
+
+    const ok = await tools.schedulerCreate.execute(
+      { task: "x", intervalMs: 3_600_000, startAt: "2026-05-02T09:00:00+02:00" },
+      CTX,
+    );
+    expect(ok.ok).toBe(true);
+    if (ok.ok) {
+      expect((await storage.loadSchedule(ok.id))?.startAt).toEqual(
+        new Date("2026-05-02T07:00:00Z"),
+      );
+    }
   });
 
   it("rejects when no trigger is set", async () => {
@@ -118,6 +205,37 @@ describe("createDurableSchedulerTools — schedulerCreate", () => {
     const result = await tools.schedulerCreate.execute({ task: "c", cron: "* * * * *" }, CTX);
     expect(result.ok).toBe(false);
     if ("error" in result) expect(result.error).toMatch(/cap 2/);
+  });
+
+  it("holds the cap under concurrent creates", async () => {
+    const storage = new InMemorySchedulerStorage();
+    const tools = toolsWith(storage, { maxPerThread: 3 });
+    const results = await Promise.all(
+      Array.from({ length: 12 }, (_, i) =>
+        tools.schedulerCreate.execute({ task: `t${i}`, cron: "* * * * *" }, CTX),
+      ),
+    );
+    expect(results.filter((r) => r.ok)).toHaveLength(3);
+    expect(await storage.countSchedules()).toBe(3);
+  });
+
+  it("frees a slot on cancel and keeps threads' caps separate", async () => {
+    const storage = new InMemorySchedulerStorage();
+    const tools = toolsWith(storage, { maxPerThread: 1 });
+    const first = await tools.schedulerCreate.execute({ task: "a", cron: "* * * * *" }, CTX);
+    if (!first.ok) throw new Error("expected create ok");
+    const other = await tools.schedulerCreate.execute(
+      { task: "b", cron: "* * * * *" },
+      { scope: { ...SCOPE, threadId: "t2" } },
+    );
+    expect(other.ok).toBe(true);
+    expect((await tools.schedulerCreate.execute({ task: "c", cron: "* * * * *" }, CTX)).ok).toBe(
+      false,
+    );
+    await tools.schedulerCancel.execute({ id: first.id }, CTX);
+    expect((await tools.schedulerCreate.execute({ task: "d", cron: "* * * * *" }, CTX)).ok).toBe(
+      true,
+    );
   });
 
   it("seeds nextRun so the schedule is immediately visible to findDue", async () => {
@@ -424,5 +542,19 @@ describe("isAgentSchedule", () => {
         metadata: { agentTrigger: true, agentId: "writer" }, // missing task + namespaceId
       }),
     ).toBe(false);
+  });
+});
+
+describe("httpSchedulerClient.create", () => {
+  it("reports a taken id (409) as not created instead of throwing", async () => {
+    const client = httpSchedulerClient({
+      baseUrl: "http://zorya.test",
+      scope: SCOPE,
+      fetch: (async () =>
+        Response.json({ error: "schedule_exists" }, { status: 409 })) as unknown as typeof fetch,
+    });
+    expect(await client.create({ id: "slot-1", intervalMs: 60_000, metadata: {} })).toEqual({
+      created: false,
+    });
   });
 });

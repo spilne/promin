@@ -215,6 +215,38 @@ export class PgSchedulerStorage implements SchedulerStorage {
   // -------------------------------------------------------------------------
 
   async upsertSchedule(config: DurableScheduleConfig): Promise<void> {
+    const { values, insertValues, now } = this.scheduleRow(config);
+    // An insert starts a new incarnation; a replace keeps it (and the fire
+    // state). Either way the config changed, so its last error is moot.
+    await this.db
+      .insert(durableSchedules)
+      .values(insertValues)
+      .onConflictDoUpdate({
+        target: durableSchedules.id,
+        set: {
+          ...values,
+          lastError: null,
+          lastErrorAt: null,
+          nextRun: sql`CASE WHEN excluded.enabled THEN COALESCE(wf_schedules.next_run, excluded.next_run) ELSE NULL END`,
+          updatedAt: now,
+        },
+      });
+  }
+
+  async insertSchedule(config: DurableScheduleConfig): Promise<boolean> {
+    // One `INSERT … ON CONFLICT DO NOTHING RETURNING`: the unique id
+    // decides a race, and only the winner gets a row back.
+    const { insertValues } = this.scheduleRow(config);
+    const rows = await this.db
+      .insert(durableSchedules)
+      .values(insertValues)
+      .onConflictDoNothing({ target: durableSchedules.id })
+      .returning({ id: durableSchedules.id });
+    return rows.length > 0;
+  }
+
+  /** Column values shared by `upsertSchedule` and `insertSchedule`. */
+  private scheduleRow(config: DurableScheduleConfig) {
     const enabled = config.enabled !== false;
     const values = {
       id: config.id,
@@ -242,21 +274,11 @@ export class PgSchedulerStorage implements SchedulerStorage {
         ? config.startAt
         : now
       : null;
-    // An insert starts a new incarnation; a replace keeps it (and the fire
-    // state). Either way the config changed, so its last error is moot.
-    await this.db
-      .insert(durableSchedules)
-      .values({ ...values, nextRun: seededNextRun, incarnation: newScheduleIncarnation() })
-      .onConflictDoUpdate({
-        target: durableSchedules.id,
-        set: {
-          ...values,
-          lastError: null,
-          lastErrorAt: null,
-          nextRun: sql`CASE WHEN excluded.enabled THEN COALESCE(wf_schedules.next_run, excluded.next_run) ELSE NULL END`,
-          updatedAt: now,
-        },
-      });
+    return {
+      values,
+      insertValues: { ...values, nextRun: seededNextRun, incarnation: newScheduleIncarnation() },
+      now,
+    };
   }
 
   async deleteSchedule(id: string): Promise<void> {

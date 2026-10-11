@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach } from "bun:test";
-import { mkdir, writeFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, writeFile, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -8,7 +9,7 @@ import {
   createListDirTool,
   createStatTool,
   createFilesystemTools,
-} from "../tools/filesystem-tools.ts";
+} from "../filesystem-tools.ts";
 
 async function tempDir(): Promise<string> {
   const dir = join(tmpdir(), `promin-fs-test-${Math.random().toString(36).slice(2)}`);
@@ -168,5 +169,91 @@ describe("createFilesystemTools", () => {
     expect(tools.writeFile.name).toBe("writeFile");
     expect(tools.listDir.name).toBe("listDir");
     expect(tools.statFile.name).toBe("statFile");
+  });
+});
+
+// ---- symlink containment ----
+
+describe("symlink containment", () => {
+  /** A root holding `link` → a directory outside it that has `secret.txt`. */
+  async function rootWithEscapeLink(): Promise<{ root: string; outside: string }> {
+    const root = await tempDir();
+    const outside = await tempDir();
+    dirs.push(root, outside);
+    await writeFile(join(outside, "secret.txt"), "top secret");
+    await symlink(outside, join(root, "link"));
+    return { root, outside };
+  }
+
+  it("refuses to read through a symlinked directory that leaves the root", async () => {
+    const { root } = await rootWithEscapeLink();
+    const t = createReadFileTool({ rootDir: root });
+    await expect(t.execute({ path: "link/secret.txt" })).rejects.toThrow("escapes");
+  });
+
+  it("refuses to read a file symlink that points outside the root", async () => {
+    const { root, outside } = await rootWithEscapeLink();
+    await symlink(join(outside, "secret.txt"), join(root, "secret-link"));
+    const t = createReadFileTool({ rootDir: root });
+    await expect(t.execute({ path: "secret-link" })).rejects.toThrow("escapes");
+  });
+
+  it("refuses to create a new file under a symlinked directory outside the root", async () => {
+    const { root, outside } = await rootWithEscapeLink();
+    const t = createWriteFileTool({ rootDir: root });
+    await expect(t.execute({ path: "link/new/dir/planted.txt", content: "x" })).rejects.toThrow(
+      "escapes",
+    );
+    expect(existsSync(join(outside, "new"))).toBe(false);
+  });
+
+  it("refuses to write through a dangling symlink", async () => {
+    const { root, outside } = await rootWithEscapeLink();
+    await symlink(join(outside, "not-yet.txt"), join(root, "dangling"));
+    const t = createWriteFileTool({ rootDir: root });
+    await expect(t.execute({ path: "dangling", content: "x" })).rejects.toThrow("dangling");
+    expect(existsSync(join(outside, "not-yet.txt"))).toBe(false);
+  });
+
+  it("refuses to list or stat through an escaping symlink", async () => {
+    const { root } = await rootWithEscapeLink();
+    await expect(
+      createListDirTool({ rootDir: root }).execute({ path: "link", recursive: false }),
+    ).rejects.toThrow("escapes");
+    await expect(
+      createStatTool({ rootDir: root }).execute({ path: "link/secret.txt" }),
+    ).rejects.toThrow("escapes");
+  });
+
+  it("does not descend into an escaping symlink when listing recursively", async () => {
+    const { root } = await rootWithEscapeLink();
+    const result = await createListDirTool({ rootDir: root }).execute({
+      path: ".",
+      recursive: true,
+    });
+    expect(result).not.toContain("secret.txt");
+  });
+
+  it("allows symlinks that stay inside the root and a root that is itself a symlink", async () => {
+    const real = await tempDir();
+    const parent = await tempDir();
+    dirs.push(real, parent);
+    await mkdir(join(real, "data"));
+    await writeFile(join(real, "data", "a.txt"), "inside");
+    await symlink(join(real, "data"), join(real, "alias"));
+    const rootLink = join(parent, "root-link");
+    await symlink(real, rootLink);
+    const t = createReadFileTool({ rootDir: rootLink });
+    expect(await t.execute({ path: "alias/a.txt" })).toBe("inside");
+    const w = createWriteFileTool({ rootDir: rootLink });
+    await w.execute({ path: "fresh/b.txt", content: "new" });
+    expect(await Bun.file(join(real, "fresh", "b.txt")).text()).toBe("new");
+  });
+
+  it("accepts names that merely start with two dots", async () => {
+    const root = await tempDir();
+    dirs.push(root);
+    await writeFile(join(root, "..notes"), "ok");
+    expect(await createReadFileTool({ rootDir: root }).execute({ path: "..notes" })).toBe("ok");
   });
 });

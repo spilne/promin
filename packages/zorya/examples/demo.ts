@@ -591,7 +591,7 @@ async function resolveAgent(
   recipe: RegisteredAgent,
   scope?: { readonly namespaceId?: string; readonly resourceId?: string },
 ): Promise<Agent> {
-  if (recipe.backend.type === "remote") return resolveRemoteAgent(recipe);
+  if (recipe.backend.type === "remote") return resolveRemoteAgent({ agent: recipe });
   // BYOK: resolve credentialRef from secrets vault before constructing
   // the LLM. Throws clearly when a ref is set but no value exists at
   // any scope; falls through to undefined (host default) when unset.

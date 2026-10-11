@@ -199,6 +199,13 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     else this.seedNextRun(config);
   }
 
+  async insertSchedule(config: DurableScheduleConfig): Promise<boolean> {
+    // Synchronous check-and-write: no await between them, so it is atomic.
+    if (this.schedules.has(config.id)) return false;
+    await this.upsertSchedule(config);
+    return true;
+  }
+
   async deleteSchedule(id: string): Promise<void> {
     this.schedules.delete(id);
     this.state.delete(id);

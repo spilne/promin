@@ -451,7 +451,9 @@ source's text is bounded by the server's request body limit and by
 
 Source adapters load documents server-side and are opt-in.
 `createUrlKnowledgeSourceAdapter` fetches public http(s) pages only by default
-(the remote-deployment `RemoteEndpointPolicy`, checked on every redirect),
+(an `OutboundPolicy` from `@promin/agent`, checked on every redirect hop, and the
+connection goes to the address the check resolved, so DNS rebinding cannot
+redirect it),
 caps the body (2 MiB) and the time (15 s), refuses binary content and reduces
 HTML to text. `createFileKnowledgeSourceAdapter({ root })` reads text files
 under `root` only. Implement `KnowledgeSourceAdapter` for other sources.

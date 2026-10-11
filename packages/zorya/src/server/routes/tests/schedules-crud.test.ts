@@ -92,6 +92,18 @@ describe("POST /api/schedules — create-only", () => {
     expect([stored?.intervalMs, stored?.cron]).toEqual([60_000, undefined]);
   });
 
+  it("two concurrent creates of one id yield one 201 and one 409", async () => {
+    const { send, schedStorage } = setup();
+    const [a, b] = await Promise.all([
+      send("POST", "/api/schedules", { id: "race", intervalMs: 60_000 }),
+      send("POST", "/api/schedules", { id: "race", cron: "0 * * * *" }),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([201, 409]);
+    const stored = await schedStorage.loadSchedule("race");
+    expect(stored?.intervalMs !== undefined).toBe(a.status === 201);
+    expect(stored?.cron !== undefined).toBe(b.status === 201);
+  });
+
   it("refuses a namespace no scheduler here polls", async () => {
     const { send, schedStorage } = setup();
     const res = await send("POST", "/api/schedules", {

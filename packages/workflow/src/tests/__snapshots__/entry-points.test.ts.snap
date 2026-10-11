@@ -505,6 +505,7 @@ exports[`entry points — exported names match the snapshot 1`] = `
     "type ScheduleState",
     "type ScheduleTick",
     "scheduleTickRunId",
+    "shortestFireGapMs",
     "StaleLeaseError",
     "validateScheduleConfig",
   ],

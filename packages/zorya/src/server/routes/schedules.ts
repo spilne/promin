@@ -449,10 +449,11 @@ export function createSchedule(deps: ScheduleRoutesDeps) {
     const invalid = invalidConfig(config);
     if (invalid !== undefined) return jsonError(400, "invalid_schedule", invalid);
 
-    if (await storage.loadSchedule(config.id)) {
+    // Insert-if-absent in one storage step, so two concurrent creates of
+    // one id can't both pass an existence check and overwrite each other.
+    if (!(await storage.insertSchedule(config))) {
       return jsonError(409, "schedule_exists", `Schedule "${config.id}" already exists`);
     }
-    await storage.upsertSchedule(config);
     // Match `DurableScheduler.register`: an enabled schedule is due now,
     // so the first poll picks it up (computeDueTicks fires one boot tick
     // at `now` when `lastFired` is null, then commitPoll advances nextRun

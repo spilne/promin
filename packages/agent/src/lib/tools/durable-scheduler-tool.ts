@@ -51,18 +51,30 @@
 // against. See `dispatchAgentSchedule` (sibling helper) for the
 // reference implementation.
 //
-// Multi-tenant safety
-// -------------------
+// Safety
+// ------
 // Every schedule is stamped with the caller's (namespaceId, resourceId,
 // threadId, agentId) in `metadata`. `list` and `cancel` filter by
 // thread so one tenant can't see / cancel another's schedules even if
-// they guess the schedule id. The cap check below also relies on the
-// client filtering correctly — wire `inProcessSchedulerClient` /
+// they guess the schedule id — wire `inProcessSchedulerClient` /
 // `httpSchedulerClient` with the same scope as the tool.
+//
+// A schedule keeps acting long after the conversation that made it, so
+// `schedulerCreate`:
+//   - asks for human approval by default (`requireApproval`);
+//   - refuses cadences faster than `minIntervalMs` (cron seconds fields
+//     and SECONDLY rrules included) and unparseable triggers / dates;
+//   - fires only the calling agent unless `authorizeDelegation` allows a
+//     peer — the model must not pick which agent runs in this scope;
+//   - caps schedules per thread atomically: ids are `maxPerThread` fixed
+//     slots derived from the scope, and the store inserts a slot id only
+//     if it is free, so concurrent creates can't overshoot the cap.
 // ---------------------------------------------------------------------------
 
+import { createHash } from "node:crypto";
 import { z } from "zod";
-import { randomUUID } from "node:crypto";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
+import { shortestFireGapMs, validateScheduleConfig } from "@promin/workflow/scheduler";
 import { tool } from "../tool.ts";
 import type { AgentTool, ToolScope } from "../tool.ts";
 import type { SchedulerClient, SchedulerClientScope } from "./scheduler-client.ts";
@@ -83,19 +95,33 @@ export interface DurableSchedulerToolDeps {
    */
   readonly getClient: (scope: SchedulerClientScope) => SchedulerClient;
   /**
-   * Override id generation. Default: `${threadId ?? agentId}-${uuid()}`
-   * so ids are roughly thread-scoped + globally unique.
-   */
-  readonly generateId?: () => string;
-  /**
-   * Maximum schedules an agent can create per thread. Soft cap — the
-   * tool returns an error to the model when hit so it can ask the user
-   * which existing schedule to cancel. Default: 20.
+   * Maximum schedules per thread (per namespace + resource when the
+   * scope has no thread). Enforced atomically by the store. Default: 20.
    */
   readonly maxPerThread?: number;
+  /**
+   * Shortest allowed gap between two fires, in ms. Applies to intervals,
+   * cron expressions (incl. a seconds field) and RRULEs. Default: 60 000.
+   */
+  readonly minIntervalMs?: number;
+  /** Ask a human before each `schedulerCreate`. Default: `true`. */
+  readonly requireApproval?: boolean;
+  /**
+   * Decide whether the calling agent may schedule a different agent
+   * (`agentId` other than its own). Without this hook delegation is
+   * refused: the model never chooses which agent runs in a tenant's scope
+   * on its own.
+   */
+  readonly authorizeDelegation?: (params: {
+    readonly scope: SchedulerClientScope;
+    readonly targetAgentId: string;
+  }) => boolean | Promise<boolean>;
+  /** Time source for validating `startAt` / `endAt`. Default: `SystemWallClock`. */
+  readonly clock?: WallClock;
 }
 
 const DEFAULT_MAX_PER_THREAD = 20;
+const DEFAULT_MIN_INTERVAL_MS = 60_000;
 
 const CREATE_SCHEMA = z.object({
   task: z
@@ -108,7 +134,7 @@ const CREATE_SCHEMA = z.object({
     .string()
     .optional()
     .describe(
-      "Recipe id of the agent to invoke. Defaults to the calling agent (you re-fire yourself).",
+      "Recipe id of the agent to invoke. Defaults to the calling agent (you re-fire yourself). Other agents only when the host allows it.",
     ),
   cron: z.string().optional().describe("Cron expression, e.g. '0 14 * * 5' (Friday 14:00)."),
   intervalMs: z
@@ -120,8 +146,14 @@ const CREATE_SCHEMA = z.object({
   rrule: z.string().optional().describe("iCalendar RRULE string (RFC 5545)."),
   name: z.string().optional().describe("Human-readable label shown in the schedule list."),
   timezone: z.string().optional().describe("IANA timezone for cron / rrule."),
-  startAt: z.string().optional().describe("ISO timestamp. Don't fire before this time."),
-  endAt: z.string().optional().describe("ISO timestamp. Stop firing after this time."),
+  startAt: z
+    .string()
+    .optional()
+    .describe("ISO 8601 timestamp with timezone, in the future. Don't fire before this time."),
+  endAt: z
+    .string()
+    .optional()
+    .describe("ISO 8601 timestamp with timezone, in the future. Stop firing after this time."),
 });
 
 const LIST_SCHEMA = z.object({});
@@ -184,19 +216,26 @@ export interface DurableSchedulerTools {
  * ```
  */
 export function createDurableSchedulerTools(deps: DurableSchedulerToolDeps): DurableSchedulerTools {
-  const maxPerThread = deps.maxPerThread ?? DEFAULT_MAX_PER_THREAD;
-  const generateIdFor = (scope: SchedulerClientScope) =>
-    deps.generateId ?? (() => `${scope.threadId ?? scope.agentId}-${randomUUID().slice(0, 8)}`);
+  const policy: CreatePolicy = {
+    maxPerThread: deps.maxPerThread ?? DEFAULT_MAX_PER_THREAD,
+    minIntervalMs: deps.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS,
+    clock: deps.clock ?? SystemWallClock,
+    ...(deps.authorizeDelegation !== undefined && {
+      authorizeDelegation: deps.authorizeDelegation,
+    }),
+  };
 
   const schedulerCreate = tool({
     name: "schedulerCreate",
     description:
-      "Schedule a recurring agent invocation. Each fire re-runs an agent with the given `task`. Survives server restart. Pass exactly one of `cron` (most common: '0 9 * * MON' = Monday 9am UTC; use `timezone` for other zones), `intervalMs`, or `rrule`. Defaults to firing the SAME agent that called this tool — pass `agentId` only to delegate to a peer.",
+      "Schedule a recurring agent invocation. Each fire re-runs an agent with the given `task`. Survives server restart. Pass exactly one of `cron` (most common: '0 9 * * MON' = Monday 9am UTC; use `timezone` for other zones), `intervalMs`, or `rrule`. " +
+      `Fires at most once every ${Math.round(policy.minIntervalMs / 1_000)} s. Defaults to firing the SAME agent that called this tool.`,
     parameters: CREATE_SCHEMA,
+    requireApproval: deps.requireApproval ?? true,
     execute: async (input, ctx): Promise<CreateOk | ToolError> => {
       const scope = resolveSchedulerScope(ctx?.scope);
       if ("error" in scope) return scope;
-      return handleCreate(input, deps.getClient(scope), scope, generateIdFor(scope), maxPerThread);
+      return handleCreate({ input, client: deps.getClient(scope), scope, policy });
     },
   });
 
@@ -225,6 +264,13 @@ export function createDurableSchedulerTools(deps: DurableSchedulerToolDeps): Dur
   });
 
   return { schedulerCreate, schedulerList, schedulerCancel };
+}
+
+interface CreatePolicy {
+  readonly maxPerThread: number;
+  readonly minIntervalMs: number;
+  readonly clock: WallClock;
+  readonly authorizeDelegation?: DurableSchedulerToolDeps["authorizeDelegation"];
 }
 
 /**
@@ -256,37 +302,96 @@ function resolveSchedulerScope(scope: ToolScope | undefined): SchedulerClientSco
   };
 }
 
-async function handleCreate(
-  input: z.infer<typeof CREATE_SCHEMA>,
-  client: SchedulerClient,
-  scope: SchedulerClientScope,
-  generateId: () => string,
-  maxPerThread: number,
-): Promise<CreateOk | ToolError> {
-  const triggers = [input.cron, input.intervalMs, input.rrule].filter((v) => v !== undefined);
-  if (triggers.length !== 1) {
-    return {
-      ok: false,
-      error: "exactly one of cron / intervalMs / rrule must be provided",
-    };
-  }
+/**
+ * The fixed schedule ids one scope may occupy: `maxPerThread` slots under
+ * a prefix derived from (namespace, resource, thread).
+ */
+function slotIds(params: { scope: SchedulerClientScope; maxPerThread: number }): string[] {
+  const { scope } = params;
+  const key = createHash("sha256")
+    .update(JSON.stringify([scope.namespaceId, scope.resourceId ?? null, scope.threadId ?? null]))
+    .digest("hex")
+    .slice(0, 16);
+  return Array.from({ length: params.maxPerThread }, (_, i) => `agent-schedule-${key}-${i + 1}`);
+}
 
-  // Cap check — count this thread's existing agent-created schedules.
-  // Relies on the client filtering by scope (it does — both
-  // inProcessSchedulerClient and httpSchedulerClient honour threadId).
-  if (scope.threadId) {
-    const ours = await client.list();
-    const agentOwned = ours.filter((s) => s.metadata?.agentTrigger === true);
-    if (agentOwned.length >= maxPerThread) {
-      return {
-        ok: false,
-        error: `you already have ${agentOwned.length} schedules in this thread (cap ${maxPerThread}). Cancel one first.`,
-      };
+/** Parse an ISO timestamp the model sent; `undefined` when absent, an error string when bad. */
+function parseInstant(params: {
+  field: string;
+  raw: string | undefined;
+}): Date | string | undefined {
+  if (params.raw === undefined) return undefined;
+  const iso = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/i;
+  const at = new Date(params.raw);
+  if (!iso.test(params.raw) || Number.isNaN(at.getTime())) {
+    return `${params.field} must be an ISO 8601 timestamp with a timezone, e.g. 2026-05-01T09:00:00Z`;
+  }
+  return at;
+}
+
+async function handleCreate(params: {
+  input: CreateInput;
+  client: SchedulerClient;
+  scope: SchedulerClientScope;
+  policy: CreatePolicy;
+}): Promise<CreateOk | ToolError> {
+  const { input, client, scope, policy } = params;
+  const fail = (error: string): ToolError => ({ ok: false, error });
+
+  const triggers = [input.cron, input.intervalMs, input.rrule].filter((v) => v !== undefined);
+  if (triggers.length !== 1)
+    return fail("exactly one of cron / intervalMs / rrule must be provided");
+
+  if (input.timezone !== undefined) {
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: input.timezone });
+    } catch {
+      return fail(`unknown timezone "${input.timezone}"`);
     }
   }
 
-  const id = generateId();
+  const now = policy.clock.now();
+  const startAt = parseInstant({ field: "startAt", raw: input.startAt });
+  if (typeof startAt === "string") return fail(startAt);
+  const endAt = parseInstant({ field: "endAt", raw: input.endAt });
+  if (typeof endAt === "string") return fail(endAt);
+  if (startAt && startAt.getTime() <= now.getTime()) {
+    return fail("startAt must be in the future; omit it to start now");
+  }
+  if (endAt && endAt.getTime() <= now.getTime()) return fail("endAt must be in the future");
+  if (startAt && endAt && endAt.getTime() <= startAt.getTime()) {
+    return fail("endAt must be after startAt");
+  }
+
+  const trigger = {
+    ...(input.cron !== undefined && { cron: input.cron }),
+    ...(input.intervalMs !== undefined && { intervalMs: input.intervalMs }),
+    ...(input.rrule !== undefined && { rrule: input.rrule }),
+    ...(input.timezone !== undefined && { timezone: input.timezone }),
+  };
+  try {
+    validateScheduleConfig({ id: "candidate", ...trigger });
+  } catch (err) {
+    return fail(err instanceof Error ? err.message : String(err));
+  }
+  const gap = shortestFireGapMs({ config: trigger, from: startAt ?? now });
+  if (gap !== null && gap < policy.minIntervalMs) {
+    return fail(
+      `this schedule would fire every ${Math.round(gap / 1_000)} s; the minimum is ${Math.round(policy.minIntervalMs / 1_000)} s`,
+    );
+  }
+
   const targetAgentId = input.agentId ?? scope.agentId;
+  if (targetAgentId !== scope.agentId) {
+    const allowed = policy.authorizeDelegation
+      ? await policy.authorizeDelegation({ scope, targetAgentId })
+      : false;
+    if (!allowed) {
+      return fail(
+        `you may not schedule agent "${targetAgentId}"; omit agentId to schedule yourself`,
+      );
+    }
+  }
 
   const metadata: Record<string, unknown> = {
     // Dispatch contract — read by the host's scheduler-loop fireOverride.
@@ -302,23 +407,30 @@ async function handleCreate(
     createdByAgent: scope.agentId,
   };
 
-  await client.create({
-    id,
-    ...(input.name !== undefined && { name: input.name }),
-    ...(input.cron !== undefined && { cron: input.cron }),
-    ...(input.intervalMs !== undefined && { intervalMs: input.intervalMs }),
-    ...(input.rrule !== undefined && { rrule: input.rrule }),
-    ...(input.timezone !== undefined && { timezone: input.timezone }),
-    ...(input.startAt !== undefined && { startAt: new Date(input.startAt) }),
-    ...(input.endAt !== undefined && { endAt: new Date(input.endAt) }),
-    metadata,
-  });
-
-  const schedule: CreateOk["schedule"] = { task: input.task, agentId: targetAgentId };
-  if (input.cron !== undefined) schedule.cron = input.cron;
-  if (input.intervalMs !== undefined) schedule.intervalMs = input.intervalMs;
-  if (input.rrule !== undefined) schedule.rrule = input.rrule;
-  return { ok: true, id, schedule };
+  // Claim the first free slot. The listing only skips slots known to be
+  // taken; the store's insert-if-absent is what decides, so two concurrent
+  // creates never land in one slot and never exceed `maxPerThread`.
+  const taken = new Set((await client.list()).map((s) => s.id));
+  for (const id of slotIds({ scope, maxPerThread: policy.maxPerThread })) {
+    if (taken.has(id)) continue;
+    const result = await client.create({
+      id,
+      ...(input.name !== undefined && { name: input.name }),
+      ...trigger,
+      ...(startAt !== undefined && { startAt }),
+      ...(endAt !== undefined && { endAt }),
+      metadata,
+    });
+    if (!result.created) continue;
+    const schedule: CreateOk["schedule"] = { task: input.task, agentId: targetAgentId };
+    if (input.cron !== undefined) schedule.cron = input.cron;
+    if (input.intervalMs !== undefined) schedule.intervalMs = input.intervalMs;
+    if (input.rrule !== undefined) schedule.rrule = input.rrule;
+    return { ok: true, id: result.id, schedule };
+  }
+  return fail(
+    `you already have ${policy.maxPerThread} schedules in this thread (cap ${policy.maxPerThread}). Cancel one first.`,
+  );
 }
 
 async function handleList(client: SchedulerClient): Promise<ListOk> {

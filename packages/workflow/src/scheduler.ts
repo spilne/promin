@@ -50,4 +50,4 @@ export {
   commitPlannedSchedules,
   schedulePartition,
 } from "./lib/scheduler/durable-scheduler.ts";
-export { validateScheduleConfig } from "./lib/scheduler/schedule-config.ts";
+export { shortestFireGapMs, validateScheduleConfig } from "./lib/scheduler/schedule-config.ts";

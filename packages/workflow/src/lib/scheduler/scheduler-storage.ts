@@ -187,6 +187,17 @@ export interface SchedulerStorage extends LeaderLeaseStore {
   upsertSchedule(config: DurableScheduleConfig): Promise<void>;
 
   /**
+   * Insert a schedule only when no schedule with `config.id` exists.
+   * Returns `true` when it was inserted, with exactly the effects of an
+   * insert through `upsertSchedule`: a new incarnation, `tickCount` 0, no
+   * `lastError`, and due-tracking seeded at now (or a later `startAt`) for
+   * an enabled schedule. Returns `false` and changes nothing when the id is
+   * taken. The check and the write are one atomic step: of several
+   * concurrent inserts of the same id exactly one returns `true`.
+   */
+  insertSchedule(config: DurableScheduleConfig): Promise<boolean>;
+
+  /**
    * Delete a schedule, its due-tracking state and its tick log. Storing the
    * id again starts a new incarnation.
    */

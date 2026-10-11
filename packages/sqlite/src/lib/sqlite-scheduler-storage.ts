@@ -349,16 +349,24 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
   // ---------------------------------------------------------------------------
 
   async upsertSchedule(config: DurableScheduleConfig): Promise<void> {
+    this.writeSchedule({ config, onlyIfAbsent: false });
+  }
+
+  async insertSchedule(config: DurableScheduleConfig): Promise<boolean> {
+    return this.writeSchedule({ config, onlyIfAbsent: true });
+  }
+
+  /**
+   * One INSERT statement for both writes: `onlyIfAbsent` ends it with
+   * `ON CONFLICT DO NOTHING` (atomic insert-if-absent), otherwise the
+   * conflict clause replaces the config. Returns whether a row was written.
+   */
+  private writeSchedule(params: { config: DurableScheduleConfig; onlyIfAbsent: boolean }): boolean {
+    const { config, onlyIfAbsent } = params;
     const now = this.clock.currentTimeMs();
-    this.db
-      .query(
-        `
-      INSERT INTO ${this._t}
-        (id, namespace, name, cron, rrule, interval_ms, timezone, enabled,
-         start_at, end_at, jitter_ms, metadata, max_catch_up,
-         next_run, incarnation, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT (id) DO UPDATE SET
+    const onConflict = onlyIfAbsent
+      ? "ON CONFLICT (id) DO NOTHING"
+      : `ON CONFLICT (id) DO UPDATE SET
         namespace      = excluded.namespace,
         name           = excluded.name,
         cron           = excluded.cron,
@@ -376,10 +384,20 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
                               ELSE NULL END,
         last_error     = NULL,
         last_error_at  = NULL,
-        updated_at     = excluded.updated_at
+        updated_at     = excluded.updated_at`;
+    const row = this.db
+      .query<{ id: string }>(
+        `
+      INSERT INTO ${this._t}
+        (id, namespace, name, cron, rrule, interval_ms, timezone, enabled,
+         start_at, end_at, jitter_ms, metadata, max_catch_up,
+         next_run, incarnation, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ${onConflict}
+      RETURNING id
       `,
       )
-      .run(
+      .get(
         config.id,
         config.namespace ?? null,
         config.name ?? null,
@@ -407,6 +425,7 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
         now,
         now,
       );
+    return row !== null && row !== undefined;
   }
 
   async deleteSchedule(id: string): Promise<void> {

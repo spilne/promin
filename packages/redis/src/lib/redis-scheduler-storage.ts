@@ -57,15 +57,22 @@ const GLOBAL_NS = "_";
  * - Due-tracking follows the enabled flag: a disabled schedule is removed
  *   from the due set; an enabled one keeps its pending next-run, or is
  *   seeded at ARGV[4] (now, or `startAt` when that is later) if it has none.
+ * - With ARGV[8] = '1' (insert only) an existing schedule is left untouched
+ *   and the script returns 0 before writing anything.
+ *
+ * Returns 1 when the schedule was inserted, 0 when it already existed.
  *
  * KEYS: [schedule_key, all_key, due_key, namespaces_key]
  * ARGV: [id, namespace_key_base, namespace, seed_ms, enabled('1'|'0'),
- *        global_ns, new_incarnation, field1, value1, ...]
+ *        global_ns, new_incarnation, only_if_absent('1'|'0'),
+ *        field1, value1, ...]
  */
 const UPSERT_LUA = `
 local schedule_key = KEYS[1]
 local all_key = KEYS[2]
 local due_key = KEYS[3]
+local existed = redis.call('HEXISTS', schedule_key, 'id') == 1
+if existed and ARGV[8] == '1' then return 0 end
 redis.call('SADD', KEYS[4], ARGV[3])
 local id = ARGV[1]
 local ns_base = ARGV[2]
@@ -74,7 +81,6 @@ local seed_ms = ARGV[4]
 local enabled = ARGV[5]
 local global_ns = ARGV[6]
 
-local existed = redis.call('HEXISTS', schedule_key, 'id') == 1
 local last_fired = false
 local tick_count = false
 local old_ns = false
@@ -87,7 +93,7 @@ if existed then
 end
 
 local fields = {}
-for i = 8, #ARGV do fields[#fields + 1] = ARGV[i] end
+for i = 9, #ARGV do fields[#fields + 1] = ARGV[i] end
 redis.call('DEL', schedule_key)
 redis.call('HSET', schedule_key, unpack(fields))
 redis.call('HSET', schedule_key, 'incarnation', incarnation)
@@ -457,6 +463,20 @@ export class RedisSchedulerStorage implements SchedulerStorage {
   // -------------------------------------------------------------------------
 
   async upsertSchedule(config: DurableScheduleConfig): Promise<void> {
+    await this.writeSchedule({ config, onlyIfAbsent: false });
+  }
+
+  async insertSchedule(config: DurableScheduleConfig): Promise<boolean> {
+    // The script checks for the hash and writes it in one atomic step.
+    return this.writeSchedule({ config, onlyIfAbsent: true });
+  }
+
+  /** Run `UPSERT_LUA`; returns whether the schedule was newly inserted. */
+  private async writeSchedule(params: {
+    config: DurableScheduleConfig;
+    onlyIfAbsent: boolean;
+  }): Promise<boolean> {
+    const { config, onlyIfAbsent } = params;
     const ns = config.namespace;
     const fields: Record<string, string> = {
       id: config.id,
@@ -475,7 +495,7 @@ export class RedisSchedulerStorage implements SchedulerStorage {
     if (config.metadata) fields.metadata = JSON.stringify(config.metadata);
 
     const seedMs = Math.max(this.clock.currentTimeMs(), config.startAt?.getTime() ?? 0);
-    await this.redis.eval(
+    const inserted = await this.redis.eval(
       UPSERT_LUA,
       4,
       this.scheduleKey(config.id),
@@ -489,8 +509,10 @@ export class RedisSchedulerStorage implements SchedulerStorage {
       fields.enabled!,
       GLOBAL_NS,
       newScheduleIncarnation(),
+      onlyIfAbsent ? "1" : "0",
       ...Object.entries(fields).flat(),
     );
+    return Number(inserted) === 1;
   }
 
   async deleteSchedule(id: string): Promise<void> {

@@ -220,17 +220,23 @@ Approval is per tool (`requireApproval`), not per command.
 
 ### Built-in tools
 
-| Factory                         | Description                                                               |
-| ------------------------------- | ------------------------------------------------------------------------- |
-| `createFilesystemTools()`       | `readFile`, `writeFile`, `listDir`, `statFile`                            |
-| `createShellTool()`             | Execute shell commands in a workspace                                     |
-| `createLayeredMemoryTool()`     | `memory` tool over a `MemoryStore`: `set`, `setWorking`, `recall`         |
-| `createLlmTool()`               | One-shot LLM call from inside the agent                                   |
-| `createAgentTool()`             | Delegate to a child agentLoop session                                     |
-| `createFetchUrlTool()`          | Fetch a URL                                                               |
-| `createWebSearchTool()`         | Web search                                                                |
-| `createDurableSchedulerTools()` | `schedulerCreate`, `schedulerList`, `schedulerCancel` (durable schedules) |
-| `createWriteToolTool()`         | Let the agent write and hot-load new tools at runtime                     |
+`shell`, `fetchUrl`, `writeFile` and `schedulerCreate` ask for approval by
+default. `fetchUrl` reaches public hosts only unless its `OutboundPolicy` says
+otherwise; the same policy (`checkOutboundUrl`, `outboundFetch`,
+`createOutboundFetch`) guards any server-side fetch of a URL you did not write
+yourself and connects to the address it checked, which defeats DNS rebinding.
+
+| Factory                         | Description                                                                                           |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `createFilesystemTools()`       | `readFile`, `writeFile`, `listDir`, `statFile`, confined to a root (symlinks resolved)                |
+| `createShellTool()`             | Run an allowlisted program with argv (no shell), scrubbed env, group-kill on timeout                  |
+| `createLayeredMemoryTool()`     | `memory` tool over a `MemoryStore`: `set`, `setWorking`, `recall`                                     |
+| `createLlmTool()`               | One-shot LLM call from inside the agent                                                               |
+| `createAgentTool()`             | Delegate to a child agentLoop session                                                                 |
+| `createFetchUrlTool()`          | Fetch a public http(s) URL (SSRF policy, pinned DNS, size cap, approval)                              |
+| `createWebSearchTool()`         | Web search                                                                                            |
+| `createDurableSchedulerTools()` | `schedulerCreate` (approval, min interval, atomic per-thread cap), `schedulerList`, `schedulerCancel` |
+| `createWriteToolTool()`         | Let the agent write and hot-load new tools at runtime                                                 |
 
 ---
 

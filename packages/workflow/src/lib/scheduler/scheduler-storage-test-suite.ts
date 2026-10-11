@@ -141,6 +141,78 @@ export function schedulerStorageTestSuite(
       });
     });
 
+    describe("insertSchedule — atomic insert-if-absent", () => {
+      it("inserts a new schedule like upsertSchedule does", async () => {
+        const s = await getStorage();
+        expect(await s.insertSchedule({ id: "ins-new", name: "fresh", intervalMs: 1_000 })).toBe(
+          true,
+        );
+        const loaded = await s.loadSchedule("ins-new");
+        expect(loaded!.name).toBe("fresh");
+        expect(loaded!.enabled).toBe(true);
+        const state = await s.loadScheduleState("ins-new");
+        expect(state!.tickCount).toBe(0);
+        expect(state!.lastFired).toBeNull();
+        expect(state!.lastError).toBeNull();
+        expect(await s.findDue({ now: new Date(), limit: 100 })).toContain("ins-new");
+      });
+
+      it("seeds nextRun at a future startAt, and not at all when disabled", async () => {
+        const s = await getStorage();
+        const startAt = new Date(Date.now() + 3_600_000);
+        expect(await s.insertSchedule({ id: "ins-later", intervalMs: 1_000, startAt })).toBe(true);
+        expect(await s.insertSchedule({ id: "ins-off", intervalMs: 1_000, enabled: false })).toBe(
+          true,
+        );
+        expect(await s.findDue({ now: new Date(), limit: 100 })).not.toContain("ins-later");
+        const afterStart = await s.findDue({
+          now: new Date(startAt.getTime() + 1_000),
+          limit: 100,
+        });
+        expect(afterStart).toContain("ins-later");
+        expect(afterStart).not.toContain("ins-off");
+      });
+
+      it("returns false for an existing id and changes nothing", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "ins-taken", name: "original", intervalMs: 1_000 });
+        await s.recordFire("ins-taken", new Date("2026-01-01T00:00:00Z"), 3);
+        const future = new Date(Date.now() + 60_000);
+        await s.setNextRun("ins-taken", future);
+        const before = await s.loadScheduleState("ins-taken");
+
+        expect(
+          await s.insertSchedule({
+            id: "ins-taken",
+            name: "intruder",
+            intervalMs: 5,
+            enabled: false,
+          }),
+        ).toBe(false);
+
+        const loaded = await s.loadSchedule("ins-taken");
+        expect(loaded!.name).toBe("original");
+        expect(loaded!.intervalMs).toBe(1_000);
+        expect(loaded!.enabled).toBe(true);
+        expect(await s.loadScheduleState("ins-taken")).toEqual(before);
+        expect(await s.findDue({ now: new Date(), limit: 100 })).not.toContain("ins-taken");
+        expect(await s.findDue({ now: new Date(future.getTime() + 1_000), limit: 100 })).toContain(
+          "ins-taken",
+        );
+      });
+
+      it("of concurrent inserts of one id exactly one wins", async () => {
+        const s = await getStorage();
+        const names = Array.from({ length: 10 }, (_, i) => `racer-${i}`);
+        const results = await Promise.all(
+          names.map((name) => s.insertSchedule({ id: "ins-race", name, intervalMs: 1_000 })),
+        );
+        expect(results.filter(Boolean)).toHaveLength(1);
+        const winner = names[results.indexOf(true)];
+        expect((await s.loadSchedule("ins-race"))!.name).toBe(winner);
+      });
+    });
+
     describe("setNextRun + findDue", () => {
       it("upsertSchedule seeds nextRun on insert (enabled) so findDue finds it without an explicit setNextRun call", async () => {
         const s = await getStorage();

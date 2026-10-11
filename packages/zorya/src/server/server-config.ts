@@ -3,12 +3,11 @@
 // the logger contract, and the defaults the server applies.
 // ---------------------------------------------------------------------------
 
-import type { RemoteDeploymentRegistry, SecretsStorage } from "@promin/agent";
+import type { OutboundPolicy, RemoteDeploymentRegistry, SecretsStorage } from "@promin/agent";
 import type { NamespaceRegistry, WallClock } from "@promin/workflow";
 import type { WorkerRegistry } from "@promin/workflow/distributed";
 import type { AuthConfig } from "./auth.ts";
 import type { MetricsProvider } from "./routes/metrics.ts";
-import type { RemoteEndpointPolicy } from "./routes/remote-deployments.ts";
 import type { WebhookDeliveryStore, WebhookSourceConfig } from "./routes/webhooks.ts";
 import type { WorkersProvider } from "./routes/workers.ts";
 import type { ZoryaAgents } from "./services/agents/index.ts";
@@ -197,7 +196,7 @@ export interface ZoryaServerConfig extends AuthConfig {
    */
   remoteDeployments?: {
     registry: RemoteDeploymentRegistry;
-    endpointPolicy?: RemoteEndpointPolicy;
+    endpointPolicy?: OutboundPolicy;
     sweepIntervalMs?: number;
   };
   /**

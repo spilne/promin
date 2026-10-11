@@ -5,7 +5,9 @@
 //
 //   - the URL adapter checks every hop (redirects included) with the same
 //     outbound policy remote deployments use (public http(s) hosts only by
-//     default), caps the body size and the time the fetch may take;
+//     default) and connects to the address that check resolved, so a DNS
+//     answer that changes in between (rebinding) is never followed; it caps
+//     the body size and the time the fetch may take;
 //   - the file adapter resolves paths inside its root only (symlinks are
 //     resolved before the check) and caps the file size.
 // ---------------------------------------------------------------------------
@@ -15,9 +17,11 @@ import path from "node:path";
 import { z } from "zod";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
-  checkRemoteEndpoint,
-  type RemoteEndpointPolicy,
-} from "../../routes/remote-endpoint-policy.ts";
+  OutboundRequestError,
+  outboundFetch,
+  type OutboundFetchTransport,
+  type OutboundPolicy,
+} from "@promin/agent";
 import { KnowledgeSourceImportError, errorMessage } from "./errors.ts";
 import type { KnowledgeSourceAdapter, KnowledgeSourceInput } from "./zorya-knowledge-bases.ts";
 
@@ -43,15 +47,19 @@ export const FileSourceConfigSchema = z
 
 export interface UrlKnowledgeSourceAdapterConfig {
   /** Which hosts may be fetched. Default: public http(s) hosts only. */
-  policy?: RemoteEndpointPolicy;
+  policy?: OutboundPolicy;
   /** Largest body accepted, in bytes. Default 2 MiB. */
   maxBytes?: number;
   /** Deadline for the whole fetch, redirects and body included. Default 15 000 ms. */
   timeoutMs?: number;
   /** Redirects followed (each target is checked against `policy`). Default 3. */
   maxRedirects?: number;
-  /** Default: global `fetch`. Tests pass a fake. */
-  fetch?: (url: string, init: RequestInit) => Promise<Response>;
+  /**
+   * Transport. Default: global `fetch`. It receives the URL with the host
+   * replaced by the vetted IP (the name travels in `Host` and TLS SNI).
+   * Tests pass a fake.
+   */
+  fetch?: OutboundFetchTransport;
   /** Time source for the deadline. Default: `SystemWallClock`. */
   clock?: WallClock;
 }
@@ -63,7 +71,6 @@ export function createUrlKnowledgeSourceAdapter(
   const maxBytes = config.maxBytes ?? DEFAULT_MAX_SOURCE_BYTES;
   const timeoutMs = config.timeoutMs ?? 15_000;
   const maxRedirects = config.maxRedirects ?? 3;
-  const doFetch = config.fetch ?? ((url, init) => fetch(url, init));
   const clock = config.clock ?? SystemWallClock;
 
   return {
@@ -77,52 +84,44 @@ export function createUrlKnowledgeSourceAdapter(
         controller.abort();
       }, timeoutMs);
       try {
-        let target = parsed.url;
-        for (let hop = 0; ; hop += 1) {
-          const check = await checkRemoteEndpoint({
-            raw: target,
-            ...(config.policy !== undefined && { policy: config.policy }),
-          });
-          if (!check.ok) throw invalid(check.message);
-          const res = await doFetch(check.url, { redirect: "manual", signal: controller.signal });
-          const location = res.headers.get("location");
-          if (res.status >= 300 && res.status < 400 && location) {
-            await res.body?.cancel().catch(() => {});
-            if (hop >= maxRedirects) {
-              throw unavailable(`${parsed.url} redirected more than ${maxRedirects} times.`);
-            }
-            target = new URL(location, check.url).toString();
-            continue;
-          }
-          if (!res.ok) {
-            await res.body?.cancel().catch(() => {});
-            throw unavailable(`GET ${check.url} answered HTTP ${res.status}.`);
-          }
-          const mimeType = (res.headers.get("content-type") ?? "text/plain")
-            .split(";")[0]!
-            .trim()
-            .toLowerCase();
-          if (!isTextual(mimeType)) {
-            await res.body?.cancel().catch(() => {});
-            throw invalid(`${check.url} is ${mimeType}; only text documents can be imported.`);
-          }
-          const body = await readCapped({ res, maxBytes, what: check.url });
-          const html = mimeType === "text/html" || mimeType === "application/xhtml+xml";
-          const text = html ? htmlToText(body) : body;
-          const title = parsed.title ?? (html ? htmlTitle(body) : undefined) ?? check.url;
-          return [
-            sourceInput({
-              parsed,
-              id: parsed.id ?? check.url,
-              text,
-              title,
-              uri: check.url,
-              mimeType,
-            }),
-          ];
+        const { response: res, url } = await outboundFetch({
+          url: parsed.url,
+          init: { signal: controller.signal },
+          maxRedirects,
+          ...(config.policy !== undefined && { policy: config.policy }),
+          ...(config.fetch !== undefined && { fetch: config.fetch }),
+        });
+        if (!res.ok) {
+          await res.body?.cancel().catch(() => {});
+          throw unavailable(`GET ${url} answered HTTP ${res.status}.`);
         }
+        const mimeType = (res.headers.get("content-type") ?? "text/plain")
+          .split(";")[0]!
+          .trim()
+          .toLowerCase();
+        if (!isTextual(mimeType)) {
+          await res.body?.cancel().catch(() => {});
+          throw invalid(`${url} is ${mimeType}; only text documents can be imported.`);
+        }
+        const body = await readCapped({ res, maxBytes, what: url });
+        const html = mimeType === "text/html" || mimeType === "application/xhtml+xml";
+        const text = html ? htmlToText(body) : body;
+        const title = parsed.title ?? (html ? htmlTitle(body) : undefined) ?? url;
+        return [
+          sourceInput({
+            parsed,
+            id: parsed.id ?? url,
+            text,
+            title,
+            uri: url,
+            mimeType,
+          }),
+        ];
       } catch (err) {
         if (err instanceof KnowledgeSourceImportError) throw err;
+        if (err instanceof OutboundRequestError) {
+          throw err.code === "too_many_redirects" ? unavailable(err.message) : invalid(err.message);
+        }
         if (timedOut) throw unavailable(`${parsed.url} did not answer within ${timeoutMs} ms.`);
         throw unavailable(`Fetching ${parsed.url} failed: ${errorMessage(err)}`, err);
       } finally {

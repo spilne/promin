@@ -46,7 +46,8 @@ describe("url source adapter", () => {
     const [doc] = await adapter.load({
       config: { url: "https://docs.example.com/deploy", id: "deploy", tags: ["ops"] },
     });
-    expect(seen).toEqual(["https://docs.example.com/deploy"]);
+    // The connection goes to the vetted address; the name rides in Host / SNI.
+    expect(seen).toEqual(["https://93.184.216.34/deploy"]);
     expect(doc).toMatchObject({
       id: "deploy",
       text: "Deploys need a rollback plan.",
@@ -97,13 +98,32 @@ describe("url source adapter", () => {
         resolveHost: async (host) =>
           host === "evil.example.com" ? ["10.0.0.5"] : ["93.184.216.34"],
       },
-      fetch: async (url) =>
-        url.startsWith("https://docs.example.com")
+      fetch: async (_url, init) =>
+        new Headers(init.headers).get("host") === "docs.example.com"
           ? respond({ status: 302, headers: { location: "https://evil.example.com/meta" } })
           : respond({ body: "secret" }),
     });
     const err = await importError(adapter.load({ config: { url: "https://docs.example.com/a" } }));
     expect(err.reason).toBe("invalid");
+  });
+
+  it("connects to the address it checked, so DNS rebinding cannot reach a private host", async () => {
+    let lookups = 0;
+    const seen: string[] = [];
+    const adapter = createUrlKnowledgeSourceAdapter({
+      policy: {
+        // First answer passes the check; a re-resolution would hit metadata.
+        resolveHost: async () => (++lookups === 1 ? ["93.184.216.34"] : ["169.254.169.254"]),
+      },
+      fetch: async (url) => {
+        seen.push(url);
+        return respond({ body: "public page" });
+      },
+    });
+    const [doc] = await adapter.load({ config: { url: "http://rebind.example.com/page" } });
+    expect(doc!.text).toBe("public page");
+    expect(lookups).toBe(1);
+    expect(seen).toEqual(["http://93.184.216.34/page"]);
   });
 
   it("follows allowed redirects up to the limit", async () => {

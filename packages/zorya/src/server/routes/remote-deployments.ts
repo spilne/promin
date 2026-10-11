@@ -18,13 +18,15 @@
 //   tagged with that deployment.
 //
 // Outbound safety:
-//   The endpoint must pass the `RemoteEndpointPolicy` (public http(s)
-//   hosts only by default). Bearer tokens are stored but never returned:
+//   The endpoint must pass the `OutboundPolicy` (public http(s) hosts
+//   only by default); see `remote-endpoint-policy.ts` for the call-time
+//   side. Bearer tokens are stored but never returned:
 //   every response redacts them.
 // ---------------------------------------------------------------------------
 
 import type {
   AgentRegistry,
+  OutboundPolicy,
   RegisterDeploymentInput,
   RegisteredAgent,
   RegisteredDeployment,
@@ -33,9 +35,7 @@ import type {
 import { SystemWallClock, type TimerHandle, type WallClock } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 import { redactDeployment } from "./agent-gateway-kit.ts";
-import { checkRemoteEndpoint, type RemoteEndpointPolicy } from "./remote-endpoint-policy.ts";
-
-export type { RemoteEndpointPolicy } from "./remote-endpoint-policy.ts";
+import { checkRemoteEndpoint } from "./remote-endpoint-policy.ts";
 
 /** Tag prefix marking a recipe as written by a remote deployment. */
 export const REMOTE_DEPLOYMENT_TAG_PREFIX = "remote-deployment:";
@@ -54,7 +54,7 @@ export interface RemoteDeploymentsGatewayDeps {
   readonly registry: RemoteDeploymentRegistry;
   readonly agents: AgentRegistry;
   /** Outbound endpoint policy. Default: public http(s) hosts only. */
-  readonly endpointPolicy?: RemoteEndpointPolicy;
+  readonly endpointPolicy?: OutboundPolicy;
 }
 
 interface RegisterRequest {

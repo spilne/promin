@@ -37,6 +37,8 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
 
     const schedulerTools = createDurableSchedulerTools({
       getClient: (scope) => inProcessSchedulerClient({ storage: schedulerStorage, scope }),
+      // The scripted LLM stands in for a user who already agreed.
+      requireApproval: false,
     });
 
     // First run: assistant calls schedulerCreate + we don't expect a

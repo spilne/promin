@@ -63,6 +63,13 @@ interface RemoteAgentConfig {
   readonly timeoutMs?: number;
   readonly namespaceId?: string;
   readonly resourceId?: string;
+  /**
+   * Transport for every call. Default: global `fetch`. Hosts calling
+   * endpoints they don't control (self-registered deployments) pass
+   * `createOutboundFetch({ policy })` so each call is policy-checked and
+   * pinned to the address it vetted.
+   */
+  readonly fetch?: (url: string, init: RequestInit) => Promise<Response>;
 }
 
 // ---------------------------------------------------------------------------
@@ -164,8 +171,12 @@ export class RemoteAgent implements Agent {
     return ctrl;
   }
 
+  private send(url: string, init: RequestInit): Promise<Response> {
+    return this.cfg.fetch ? this.cfg.fetch(url, init) : fetch(url, init);
+  }
+
   post(path: string, body: unknown, ctrl: AbortController): Promise<Response> {
-    return fetch(`${this.cfg.endpoint}${path}`, {
+    return this.send(`${this.cfg.endpoint}${path}`, {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
@@ -174,14 +185,14 @@ export class RemoteAgent implements Agent {
   }
 
   get(path: string): Promise<Response> {
-    return fetch(`${this.cfg.endpoint}${path}`, {
+    return this.send(`${this.cfg.endpoint}${path}`, {
       method: "GET",
       headers: this.headers(),
     });
   }
 
   patch(path: string, body: unknown): Promise<Response> {
-    return fetch(`${this.cfg.endpoint}${path}`, {
+    return this.send(`${this.cfg.endpoint}${path}`, {
       method: "PATCH",
       headers: this.headers(),
       body: JSON.stringify(body),
@@ -189,7 +200,7 @@ export class RemoteAgent implements Agent {
   }
 
   postJson(path: string, body: unknown): Promise<Response> {
-    return fetch(`${this.cfg.endpoint}${path}`, {
+    return this.send(`${this.cfg.endpoint}${path}`, {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),
