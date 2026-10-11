@@ -3254,7 +3254,7 @@ export function storageTestSuite(
         });
         const outcomes = await Promise.all(
           Array.from({ length: 6 }, (_, i) =>
-            s.markSignalTokenCompleted({ tokenId: "tk-race", value: i, now: new Date() }),
+            s.completeSignalToken({ tokenId: "tk-race", value: i, now: new Date() }),
           ),
         );
         const delivered = outcomes.filter((o) => o.outcome === "delivered");
@@ -3265,6 +3265,57 @@ export function storageTestSuite(
         for (const o of outcomes.filter((x) => x.outcome === "already_completed")) {
           expect(o.record.completedValue).toEqual(stored.completedValue);
         }
+        // The winner's value, and only it, was delivered as the signal.
+        const signals = await s.loadSignals("tok-race");
+        expect(signals.map((sig) => [sig.signalName, sig.payload])).toEqual([
+          ["approve", stored.completedValue],
+        ]);
+      });
+
+      it("completion delivers the token's signal; a repeat delivers nothing", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "tok-deliver", workflowName: "t", input: {} });
+        await s.createSignalToken({
+          tokenId: "tk-deliver",
+          workflowId: "tok-deliver",
+          signalName: "approve",
+          bearer: "b",
+          tags: [],
+          expiresAt: future(),
+        });
+        expect(await s.loadSignals("tok-deliver")).toEqual([]);
+
+        const first = await s.completeSignalToken({
+          tokenId: "tk-deliver",
+          value: { ok: true },
+          now: new Date(),
+        });
+        expect(first.outcome).toBe("delivered");
+        expect(first.record.completedValue).toEqual({ ok: true });
+        const delivered = await s.loadSignals("tok-deliver");
+        expect(delivered.map((sig) => [sig.signalName, sig.payload])).toEqual([
+          ["approve", { ok: true }],
+        ]);
+
+        // A later delivery under the same name is not overwritten by a
+        // repeat completion of the consumed token.
+        await s.deliverSignal({ workflowId: "tok-deliver", signalName: "approve", payload: "x" });
+        const again = await s.completeSignalToken({
+          tokenId: "tk-deliver",
+          value: { ok: false },
+          now: new Date(),
+        });
+        expect(again.outcome).toBe("already_completed");
+        expect(again.record.completedValue).toEqual({ ok: true });
+        const after = await s.loadSignals("tok-deliver");
+        expect(after.map((sig) => [sig.signalName, sig.payload])).toEqual([["approve", "x"]]);
+      });
+
+      it("completing an unknown token throws", async () => {
+        const s = await getStorage();
+        await expect(
+          s.completeSignalToken({ tokenId: "tk-missing", value: 1, now: new Date() }),
+        ).rejects.toThrow();
       });
 
       it("lists a workflow's tokens newest first", async () => {

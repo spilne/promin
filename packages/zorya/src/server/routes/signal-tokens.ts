@@ -9,8 +9,10 @@
 // The mint route is reachable by Zorya operators / admins; the complete
 // route is the only route a third-party (Stripe webhook, email reviewer
 // link, etc.) ever hits — bearer-validated, no Zorya credentials needed.
-// On successful completion the route calls `storage.deliverSignal` so the
-// workflow resumes through the existing signal mechanic.
+// Completion goes through `storage.completeSignalToken`, which consumes the
+// token and delivers its signal in one atomic write, so the workflow
+// resumes through the existing signal mechanic and a failed delivery never
+// leaves a consumed token behind.
 // ---------------------------------------------------------------------------
 
 import { parseApprovalSignal } from "@promin/agent";
@@ -70,7 +72,7 @@ export interface MintTokenResponse {
   isCached: boolean;
 }
 
-/** Body of the complete route: `{ value }`, delivered through `storage.deliverSignal`. */
+/** Body of the complete route: `{ value }`, delivered as the token's signal payload. */
 export type { CompleteSignalTokenRequest as CompleteTokenRequest } from "../api-types.ts";
 
 /**
@@ -242,7 +244,11 @@ export function completeSignalToken(deps: SignalTokenRoutesDeps) {
     });
     if (mismatch !== undefined) return jsonError(400, "schema_mismatch", mismatch);
 
-    const claim = await deps.storage.markSignalTokenCompleted({
+    // Consume the token and deliver the signal in one storage write. From
+    // the signal's perspective, the bearer-completer is indistinguishable
+    // from an in-app `storage.deliverSignal` caller. A write that throws
+    // changed nothing: the token stays completable.
+    const claim = await deps.storage.completeSignalToken({
       tokenId,
       value: body.value,
       now,
@@ -257,15 +263,6 @@ export function completeSignalToken(deps: SignalTokenRoutesDeps) {
         "A concurrent completion consumed this token first",
       );
     }
-
-    // Resume the workflow through the existing signal mechanic. From the
-    // signal's perspective, the bearer-completer is indistinguishable from
-    // an in-app `storage.deliverSignal` caller.
-    await deps.storage.deliverSignal({
-      workflowId: token.workflowId,
-      signalName: token.signalName,
-      payload: body.value,
-    });
 
     const response: CompleteTokenResponse = { ok: true, value: body.value };
     return json(202, response);

@@ -32,6 +32,11 @@ export const durableSchedules = pgTable(
     lastFiredAt: timestamp("last_fired_at", { withTimezone: true }),
     nextRun: timestamp("next_run", { withTimezone: true }),
     tickCount: bigint("tick_count", { mode: "number" }).notNull().default(0),
+    /** Token of this incarnation of the id: set on insert, kept by updates. */
+    incarnation: text("incarnation").notNull(),
+    /** Last failure to fire, cleared by the next fire that goes through. */
+    lastError: text("last_error"),
+    lastErrorAt: timestamp("last_error_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

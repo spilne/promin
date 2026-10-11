@@ -40,6 +40,8 @@ import type {
   CancelWorkflowParams,
   CheckpointStepParams,
   CompletePendingEntryParams,
+  CompleteSignalTokenParams,
+  CompleteSignalTokenResult,
   CompleteWorkflowParams,
   CreateWorkflowParams,
   DeliverSignalParams,
@@ -1202,8 +1204,18 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async deliverSignal({ workflowId, signalName, payload }: DeliverSignalParams): Promise<void> {
-    await this.db
+  async deliverSignal(params: DeliverSignalParams): Promise<void> {
+    await this.writeSignal({ db: this.db, ...params });
+  }
+
+  /** Upsert a run's signal row: the last delivery per name wins. */
+  private async writeSignal({
+    db,
+    workflowId,
+    signalName,
+    payload,
+  }: DeliverSignalParams & { db: DrizzleDb }): Promise<void> {
+    await db
       .insert(workflowSignals)
       .values({ workflowId, signalName, payload })
       .onConflictDoUpdate({
@@ -2305,26 +2317,29 @@ export class PostgresWorkflowStorage
     return row ? rowToSignalToken(row) : null;
   }
 
-  async markSignalTokenCompleted(params: {
-    tokenId: string;
-    value: unknown;
-    now: Date;
-  }): Promise<
-    | { outcome: "delivered"; record: SignalTokenRecord }
-    | { outcome: "already_completed"; record: SignalTokenRecord }
-  > {
-    // Atomic: only update rows still pending; UPDATE ... RETURNING tells us
-    // whether we won the race or lost to a concurrent completer.
-    const [won] = await this.db
-      .update(signalTokens)
-      .set({ completedAt: params.now, completedValue: params.value as never })
-      .where(
-        and(eq(signalTokens.tokenId, params.tokenId), sql`${signalTokens.completedAt} IS NULL`),
-      )
-      .returning();
-    if (won) {
-      return { outcome: "delivered", record: rowToSignalToken(won) };
-    }
+  async completeSignalToken(params: CompleteSignalTokenParams): Promise<CompleteSignalTokenResult> {
+    // One transaction: the conditional claim (only a pending token updates,
+    // so exactly one concurrent completer wins) and the signal row commit
+    // together, or neither does.
+    const won = await this.db.transaction(async (tx) => {
+      const db = tx as unknown as DrizzleDb;
+      const [row] = await db
+        .update(signalTokens)
+        .set({ completedAt: params.now, completedValue: params.value as never })
+        .where(
+          and(eq(signalTokens.tokenId, params.tokenId), sql`${signalTokens.completedAt} IS NULL`),
+        )
+        .returning();
+      if (!row) return undefined;
+      await this.writeSignal({
+        db,
+        workflowId: row.workflowId,
+        signalName: row.signalName,
+        payload: params.value,
+      });
+      return row;
+    });
+    if (won) return { outcome: "delivered", record: rowToSignalToken(won) };
     const current = await this.findSignalTokenById(params.tokenId);
     if (!current) {
       throw new Error(`signal token ${params.tokenId} not found`);

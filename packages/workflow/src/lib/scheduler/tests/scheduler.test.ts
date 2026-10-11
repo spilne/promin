@@ -1,6 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { InMemoryScheduler } from "../in-memory-scheduler.ts";
-import { scheduleTickRunId } from "../types.ts";
+import { newScheduleIncarnation, scheduleTickRunId } from "../types.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 const T0 = Date.parse("2026-01-01T00:00:00Z");
@@ -36,18 +36,52 @@ async function drive<T>(params: {
 // ---------------------------------------------------------------------------
 
 describe("scheduleTickRunId", () => {
-  it("formats `${scheduleId}.${tickNumber}` so a duplicate fire collides on the same run row", () => {
-    expect(scheduleTickRunId({ scheduleId: "daily-summary", tickNumber: 0 })).toBe(
-      "daily-summary.0",
-    );
-    expect(scheduleTickRunId({ scheduleId: "daily-summary", tickNumber: 42 })).toBe(
-      "daily-summary.42",
-    );
+  it("formats `<scheduleId>.<incarnation>.<tickNumber>` so a duplicate fire collides on the same run row", () => {
+    expect(
+      scheduleTickRunId({ scheduleId: "daily-summary", incarnation: "a1b2", tickNumber: 0 }),
+    ).toBe("daily-summary.a1b2.0");
+    expect(
+      scheduleTickRunId({ scheduleId: "daily-summary", incarnation: "a1b2", tickNumber: 42 }),
+    ).toBe("daily-summary.a1b2.42");
     // Same inputs → same output: this is the property both the
     // workflow-trigger and agent-dispatch paths rely on for idempotency.
-    expect(scheduleTickRunId({ scheduleId: "x", tickNumber: 7 })).toBe(
-      scheduleTickRunId({ scheduleId: "x", tickNumber: 7 }),
+    expect(scheduleTickRunId({ scheduleId: "x", incarnation: "i", tickNumber: 7 })).toBe(
+      scheduleTickRunId({ scheduleId: "x", incarnation: "i", tickNumber: 7 }),
     );
+  });
+
+  it("tells incarnations of one schedule id apart", () => {
+    const old = scheduleTickRunId({ scheduleId: "x", incarnation: "old", tickNumber: 0 });
+    const fresh = scheduleTickRunId({ scheduleId: "x", incarnation: "new", tickNumber: 0 });
+    expect(old).not.toBe(fresh);
+  });
+
+  it("newScheduleIncarnation returns distinct short tokens", () => {
+    const tokens = new Set(Array.from({ length: 100 }, () => newScheduleIncarnation()));
+    expect(tokens.size).toBe(100);
+    for (const t of tokens) expect(t).toMatch(/^[0-9a-f]{12}$/);
+  });
+
+  it("InMemoryScheduler keeps the incarnation on replace and starts a new one after unregister", async () => {
+    const clock = FakeWallClock.create(T0);
+    const scheduler = new InMemoryScheduler({ clock });
+    const firstTick = async () => {
+      const [tick] = await drive({
+        clock,
+        promise: scheduler.stream("inc").take(1).toArray().run(),
+        stepMs: 100,
+      });
+      return tick!;
+    };
+    await scheduler.register({ id: "inc", intervalMs: 1_000 });
+    const a = await firstTick();
+    await scheduler.register({ id: "inc", intervalMs: 1_000, name: "renamed" });
+    const b = await firstTick();
+    expect(b.incarnation).toBe(a.incarnation);
+    await scheduler.unregister({ scheduleId: "inc" });
+    await scheduler.register({ id: "inc", intervalMs: 1_000 });
+    const c = await firstTick();
+    expect(c.incarnation).not.toBe(a.incarnation);
   });
 });
 

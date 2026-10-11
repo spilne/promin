@@ -106,7 +106,7 @@ const scheduler = new DurableScheduler({
 await scheduler.register({ id: "daily-etl", cron: "0 2 * * *", maxCatchUp: 3 });
 
 for await (const tick of scheduler.stream().toAsyncIterable()) {
-  const runId = scheduleTickRunId({ scheduleId: tick.scheduleId, tickNumber: tick.tickNumber });
+  const runId = scheduleTickRunId(tick); // <scheduleId>.<incarnation>.<tickNumber>
   console.log("start", runId); // start the workflow under this id: a redelivery is a no-op
   break;
 }
@@ -138,10 +138,21 @@ here or on another instance — emits them again **with the same
 
 So a tick may be delivered more than once, never skipped while a scheduler
 is running. Make the consumer idempotent by deriving the run id from the tick
-only: `scheduleTickRunId({ scheduleId, tickNumber })`, or a `toWorkflowId`
-built from `scheduleId` and `tickNumber` / `scheduledAt`, with
+only: `scheduleTickRunId(tick)`, or a `toWorkflowId` built from
+`scheduleId`, `incarnation` and `tickNumber` / `scheduledAt`, with
 `trigger({ onDuplicate: "skip" })` or the runner's terminal gate (a
 completed run is answered from storage, not run again).
+
+- **Incarnations.** A schedule stored for the first time gets a fresh
+  `incarnation` token (`ScheduleState.incarnation`, `ScheduleTick.incarnation`);
+  updates keep it. Deleting a schedule and creating it again under the same
+  id starts a new incarnation with `tickNumber` back at 0, so its run ids
+  never collide with the deleted schedule's. Commits carry the incarnation
+  they were planned for (`expectedIncarnation`) and are refused for another.
+- **Last error.** `ScheduleState.lastError` records why a schedule last
+  failed to fire (`commitPoll({ lastError })`, e.g. a dispatch that threw or
+  a config that can't be evaluated); a commit with `lastError: null` and
+  every `upsertSchedule` clear it.
 
 - **Catch-up.** When the scheduler was down across several occurrences, the
   newest `max(1, maxCatchUp)` of them fire, oldest first — for cron, RRULE

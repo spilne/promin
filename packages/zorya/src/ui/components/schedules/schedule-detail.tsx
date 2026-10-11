@@ -139,6 +139,18 @@ export function ScheduleDetail({ id, onBack, onOpenRun }: ScheduleDetailProps) {
         <SummaryCell label="Total ticks" value={String(schedule.tickCount ?? 0)} mono />
       </div>
 
+      {schedule.lastError && (
+        <div role="alert" class="alert alert-error">
+          <div class="min-w-0">
+            <div class="font-semibold">Last fire failed — retrying with backoff</div>
+            <div class="text-sm font-mono break-words">{schedule.lastError.message}</div>
+            <div class="text-xs opacity-70">
+              <RelativePlusUtc iso={schedule.lastError.at} />
+            </div>
+          </div>
+        </div>
+      )}
+
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div class="card surface-card shadow lg:col-span-2">
           <div class="card-body p-0">

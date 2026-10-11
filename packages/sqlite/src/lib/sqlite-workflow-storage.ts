@@ -37,6 +37,8 @@ import type {
   CancelWorkflowParams,
   CheckpointStepParams,
   CompletePendingEntryParams,
+  CompleteSignalTokenParams,
+  CompleteSignalTokenResult,
   CompleteWorkflowParams,
   CreateWorkflowParams,
   DeliverSignalParams,
@@ -1190,19 +1192,21 @@ export class SqliteWorkflowStorage
   // WorkflowStorage — signals
   // ---------------------------------------------------------------------------
 
-  async deliverSignal({ workflowId, signalName, payload }: DeliverSignalParams): Promise<void> {
-    // Last delivery per name wins (one row per (workflow, name)).
-    this.db.transaction((): void => {
-      this.db
-        .query(`DELETE FROM ${this._t}_signals WHERE workflow_id = ? AND signal_name = ?`)
-        .run(workflowId, signalName);
-      this.db
-        .query(
-          `INSERT INTO ${this._t}_signals (workflow_id, signal_name, payload, delivered_at)
-           VALUES (?, ?, ?, ?)`,
-        )
-        .run(workflowId, signalName, JSON.stringify(payload), this.clock.currentTimeMs());
-    })();
+  async deliverSignal(params: DeliverSignalParams): Promise<void> {
+    this.db.transaction((): void => this.writeSignal(params))();
+  }
+
+  /** Replace a run's signal row: the last delivery per name wins. Run inside a transaction. */
+  private writeSignal({ workflowId, signalName, payload }: DeliverSignalParams): void {
+    this.db
+      .query(`DELETE FROM ${this._t}_signals WHERE workflow_id = ? AND signal_name = ?`)
+      .run(workflowId, signalName);
+    this.db
+      .query(
+        `INSERT INTO ${this._t}_signals (workflow_id, signal_name, payload, delivered_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(workflowId, signalName, JSON.stringify(payload), this.clock.currentTimeMs());
   }
 
   async setWorkflowMetadata({
@@ -1299,39 +1303,32 @@ export class SqliteWorkflowStorage
     return row ? rowToSignalToken(row) : null;
   }
 
-  async markSignalTokenCompleted(params: {
-    tokenId: string;
-    value: unknown;
-    now: Date;
-  }): Promise<
-    | { outcome: "delivered"; record: SignalTokenRecord }
-    | { outcome: "already_completed"; record: SignalTokenRecord }
-  > {
-    return this.db.transaction(
-      ():
-        | { outcome: "delivered"; record: SignalTokenRecord }
-        | { outcome: "already_completed"; record: SignalTokenRecord } => {
-        const row = this.db
-          .query<SignalTokenRow>(`SELECT * FROM ${this._t}_signal_tokens WHERE token_id = ?`)
-          .get(params.tokenId);
-        if (!row) throw new Error(`signal token ${params.tokenId} not found`);
-        if (row.completed_at !== null) {
-          return { outcome: "already_completed", record: rowToSignalToken(row) };
-        }
-        this.db
-          .query(
-            `UPDATE ${this._t}_signal_tokens
-             SET completed_at = ?, completed_value = ?
-             WHERE token_id = ? AND completed_at IS NULL`,
-          )
-          .run(params.now.getTime(), JSON.stringify(params.value), params.tokenId);
-        const updated = this.db
-          .query<SignalTokenRow>(`SELECT * FROM ${this._t}_signal_tokens WHERE token_id = ?`)
-          .get(params.tokenId);
-        if (!updated) throw new Error("markSignalTokenCompleted: row disappeared");
-        return { outcome: "delivered", record: rowToSignalToken(updated) };
-      },
-    )();
+  async completeSignalToken(params: CompleteSignalTokenParams): Promise<CompleteSignalTokenResult> {
+    // One transaction: the claim and the signal row land together or not at all.
+    return this.db.transaction((): CompleteSignalTokenResult => {
+      const row = this.db
+        .query<SignalTokenRow>(`SELECT * FROM ${this._t}_signal_tokens WHERE token_id = ?`)
+        .get(params.tokenId);
+      if (!row) throw new Error(`signal token ${params.tokenId} not found`);
+      if (row.completed_at !== null) {
+        return { outcome: "already_completed", record: rowToSignalToken(row) };
+      }
+      const updated = this.db
+        .query<SignalTokenRow>(
+          `UPDATE ${this._t}_signal_tokens
+           SET completed_at = ?, completed_value = ?
+           WHERE token_id = ? AND completed_at IS NULL
+           RETURNING *`,
+        )
+        .get(params.now.getTime(), JSON.stringify(params.value), params.tokenId);
+      if (!updated) throw new Error(`completeSignalToken: token ${params.tokenId} row disappeared`);
+      this.writeSignal({
+        workflowId: updated.workflow_id,
+        signalName: updated.signal_name,
+        payload: params.value,
+      });
+      return { outcome: "delivered", record: rowToSignalToken(updated) };
+    })();
   }
 
   async listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>> {

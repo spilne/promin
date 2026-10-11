@@ -71,7 +71,7 @@ export type StorageMethod =
   // remote workers can surface tokens through their parent storage.
   | "createSignalToken"
   | "findSignalTokenById"
-  | "markSignalTokenCompleted"
+  | "completeSignalToken"
   | "listSignalTokensForWorkflow"
   // Streams — generic typed channels per workflow.
   | "appendStreamChunk"

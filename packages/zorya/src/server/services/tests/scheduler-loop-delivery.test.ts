@@ -69,6 +69,7 @@ describe("SchedulerLoop — commit only dispatched ticks", () => {
   it("a failed dispatch is reported, not committed, and redelivered with the same tickNumber", async () => {
     const { clock, storage, errors, onError } = await setup();
     await due({ storage, id: "nightly" });
+    const runId = `nightly.${(await storage.loadScheduleState("nightly"))!.incarnation}.0`;
     const calls: Array<string | undefined> = [];
     let failing = true;
     const loop = new SchedulerLoop({
@@ -87,16 +88,23 @@ describe("SchedulerLoop — commit only dispatched ticks", () => {
       ["dispatch", "nightly", 0],
     ]);
     expect(await tickCount(storage, "nightly")).toBe(0);
+    // The failure is recorded on the schedule, where the API shows it.
+    expect((await storage.loadScheduleState("nightly"))?.lastError).toEqual({
+      message: "storage down",
+      at: clock.now(),
+    });
 
     // Backing off: the next poll leaves it alone.
     expect(await loop.tickOnce()).toEqual([]);
-    expect(calls).toEqual(["nightly.0"]);
+    expect(calls).toEqual([runId]);
 
     failing = false;
     clock.advance(2_000); // 2 × pollIntervalMs after the first failure
     const fired = await loop.tickOnce();
     expect(fired.map((t) => [t.scheduleId, t.tickNumber])).toEqual([["nightly", 0]]);
-    expect(calls).toEqual(["nightly.0", "nightly.0"]);
+    expect(calls).toEqual([runId, runId]);
+    // The fire that went through cleared it.
+    expect((await storage.loadScheduleState("nightly"))?.lastError).toBeNull();
     expect(await tickCount(storage, "nightly")).toBe(1);
     expect(errors).toHaveLength(1);
   });
@@ -294,16 +302,15 @@ describe("SchedulerLoop — redelivered ticks", () => {
       trigger: (name, input, opts) => workflows.trigger(name, input, opts),
     });
 
+    const runId = `charge-nightly.${(await storage.loadScheduleState("charge-nightly"))!.incarnation}.0`;
     await loop.tickOnce();
-    await until(
-      async () => (await wfStorage.loadWorkflow("charge-nightly.0"))?.status === "completed",
-    );
+    await until(async () => (await wfStorage.loadWorkflow(runId))?.status === "completed");
     await loop.tickOnce(); // same tick, delivered again
     for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
 
     expect(errors.map((e) => e.phase)).toEqual(["commit"]);
     expect(executions).toBe(1);
-    const run = await wfStorage.loadWorkflow("charge-nightly.0");
+    const run = await wfStorage.loadWorkflow(runId);
     expect([run?.run, run?.status, run?.runSource]).toEqual([1, "completed", "schedule"]);
     expect(await tickCount(storage, "charge-nightly")).toBe(1);
   });

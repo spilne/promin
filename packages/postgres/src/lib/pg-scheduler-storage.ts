@@ -9,12 +9,14 @@
 // ---------------------------------------------------------------------------
 
 import { and, asc, eq, inArray, isNotNull, lte, sql, type SQL } from "drizzle-orm";
-import type {
-  CommitPollResult,
-  DurableScheduleConfig,
-  LeaderLease,
-  ScheduleCommit,
-  SchedulerStorage,
+import {
+  newScheduleIncarnation,
+  type CommitPollResult,
+  type DurableScheduleConfig,
+  type LeaderLease,
+  type ScheduleCommit,
+  type ScheduleState,
+  type SchedulerStorage,
 } from "@promin/workflow/scheduler";
 import { durableSchedules, durableScheduleTicks, leaderLeases } from "./scheduler-schema.ts";
 import type { DrizzleDb } from "@spilne/perfect-postgres";
@@ -89,37 +91,33 @@ export class PgSchedulerStorage implements SchedulerStorage {
     return out;
   }
 
-  async loadScheduleState(
-    id: string,
-  ): Promise<{ lastFired: Date | null; tickCount: number } | null> {
-    const [row] = await this.db
-      .select({
-        lastFired: durableSchedules.lastFiredAt,
-        tickCount: durableSchedules.tickCount,
-      })
-      .from(durableSchedules)
-      .where(eq(durableSchedules.id, id));
-    if (!row) return null;
-    return { lastFired: row.lastFired ?? null, tickCount: Number(row.tickCount) };
+  async loadScheduleState(id: string): Promise<ScheduleState | null> {
+    return (await this.loadScheduleStates([id])).get(id) ?? null;
   }
 
-  async loadScheduleStates(
-    ids: string[],
-  ): Promise<Map<string, { lastFired: Date | null; tickCount: number }>> {
+  async loadScheduleStates(ids: string[]): Promise<Map<string, ScheduleState>> {
     if (ids.length === 0) return new Map();
     const rows = await this.db
       .select({
         id: durableSchedules.id,
         lastFired: durableSchedules.lastFiredAt,
         tickCount: durableSchedules.tickCount,
+        incarnation: durableSchedules.incarnation,
+        lastError: durableSchedules.lastError,
+        lastErrorAt: durableSchedules.lastErrorAt,
       })
       .from(durableSchedules)
       .where(inArray(durableSchedules.id, ids));
-    const out = new Map<string, { lastFired: Date | null; tickCount: number }>();
+    const out = new Map<string, ScheduleState>();
     for (const row of rows) {
       out.set(row.id, {
         lastFired: row.lastFired ?? null,
         tickCount: Number(row.tickCount),
+        incarnation: row.incarnation,
+        lastError:
+          row.lastError !== null && row.lastErrorAt !== null
+            ? { message: row.lastError, at: row.lastErrorAt }
+            : null,
       });
     }
     return out;
@@ -175,7 +173,7 @@ export class PgSchedulerStorage implements SchedulerStorage {
     const valuesSql = sql.join(
       updates.map(
         (u) =>
-          sql`(${u.id}::text, ${u.firedAt?.toISOString() ?? null}::timestamptz, ${u.tickIncrement ?? 0}::bigint, ${u.nextRun !== undefined}::boolean, ${u.nextRun?.toISOString() ?? null}::timestamptz, ${u.expectedTickCount ?? null}::bigint)`,
+          sql`(${u.id}::text, ${u.firedAt?.toISOString() ?? null}::timestamptz, ${u.tickIncrement ?? 0}::bigint, ${u.nextRun !== undefined}::boolean, ${u.nextRun?.toISOString() ?? null}::timestamptz, ${u.expectedTickCount ?? null}::bigint, ${u.expectedIncarnation ?? null}::text, ${u.lastError !== undefined}::boolean, ${u.lastError?.message ?? null}::text, ${u.lastError?.at.toISOString() ?? null}::timestamptz)`,
       ),
       sql`, `,
     );
@@ -191,15 +189,24 @@ export class PgSchedulerStorage implements SchedulerStorage {
           WHEN v.set_next THEN v.next_run
           ELSE s.next_run
         END,
+        last_error = CASE WHEN v.set_error THEN v.error_message ELSE s.last_error END,
+        last_error_at = CASE WHEN v.set_error THEN v.error_at ELSE s.last_error_at END,
         updated_at = ${this.clock.now().toISOString()}::timestamptz
-      FROM (VALUES ${valuesSql}) AS v(id, fired_at, tick_inc, set_next, next_run, expected)
-      WHERE s.id = v.id AND (v.expected IS NULL OR s.tick_count = v.expected)
+      FROM (VALUES ${valuesSql})
+        AS v(id, fired_at, tick_inc, set_next, next_run, expected, expected_inc, set_error, error_message, error_at)
+      WHERE s.id = v.id
+        AND (v.expected IS NULL OR s.tick_count = v.expected)
+        AND (v.expected_inc IS NULL OR s.incarnation = v.expected_inc)
       RETURNING s.id
     `,
     );
     const applied = new Set(rows.map((r) => String(r.id)));
     return updates
-      .filter((u) => u.expectedTickCount !== undefined && !applied.has(u.id))
+      .filter(
+        (u) =>
+          (u.expectedTickCount !== undefined || u.expectedIncarnation !== undefined) &&
+          !applied.has(u.id),
+      )
       .map((u) => u.id);
   }
 
@@ -235,13 +242,17 @@ export class PgSchedulerStorage implements SchedulerStorage {
         ? config.startAt
         : now
       : null;
+    // An insert starts a new incarnation; a replace keeps it (and the fire
+    // state). Either way the config changed, so its last error is moot.
     await this.db
       .insert(durableSchedules)
-      .values({ ...values, nextRun: seededNextRun })
+      .values({ ...values, nextRun: seededNextRun, incarnation: newScheduleIncarnation() })
       .onConflictDoUpdate({
         target: durableSchedules.id,
         set: {
           ...values,
+          lastError: null,
+          lastErrorAt: null,
           nextRun: sql`CASE WHEN excluded.enabled THEN COALESCE(wf_schedules.next_run, excluded.next_run) ELSE NULL END`,
           updatedAt: now,
         },

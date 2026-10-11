@@ -355,3 +355,88 @@ describe("signal tokens — expiry on an injected clock", () => {
     expect(res.status).toBe(202);
   });
 });
+
+describe("signal tokens — completion consumes the token only with its delivery", () => {
+  /** Storage whose next `completeSignalToken` fails before writing anything. */
+  class FailingOnceStorage extends InMemoryWorkflowStorage {
+    failNext = true;
+    override async completeSignalToken(
+      params: Parameters<InMemoryWorkflowStorage["completeSignalToken"]>[0],
+    ): ReturnType<InMemoryWorkflowStorage["completeSignalToken"]> {
+      if (this.failNext) {
+        this.failNext = false;
+        throw new Error("storage unavailable");
+      }
+      return super.completeSignalToken(params);
+    }
+  }
+
+  async function mintOn(params: { storage: InMemoryWorkflowStorage; workflowId: string }) {
+    const { storage, workflowId } = params;
+    await storage.createWorkflow({ workflowId, workflowName: "approve-doc", input: {} });
+    const res = await mintSignalToken({ storage })(
+      new Request(`http://x/api/runs/${workflowId}/signals/approve/token`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expiresInMs: 60_000 }),
+      }),
+      { id: workflowId, name: "approve" },
+    );
+    return (await res.json()) as MintTokenResponse;
+  }
+
+  function completeRequest(params: { minted: MintTokenResponse; value: unknown }): Request {
+    return new Request(`http://x/api/signal-tokens/${params.minted.tokenId}/complete`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${params.minted.bearer}`,
+      },
+      body: JSON.stringify({ value: params.value }),
+    });
+  }
+
+  it("leaves the token completable when the delivery fails, then delivers on retry", async () => {
+    const storage = new FailingOnceStorage();
+    const minted = await mintOn({ storage, workflowId: "wf-token-fail" });
+    const handler = completeSignalToken({ storage });
+
+    const failed = await invoke(handler, completeRequest({ minted, value: "first" }), {
+      tokenId: minted.tokenId,
+    });
+    expect(failed.status).toBe(500);
+    expect((await storage.findSignalTokenById(minted.tokenId))!.completedAt).toBeNull();
+    expect(await storage.loadSignals("wf-token-fail")).toEqual([]);
+
+    const retried = await invoke(handler, completeRequest({ minted, value: "second" }), {
+      tokenId: minted.tokenId,
+    });
+    expect(retried.status).toBe(202);
+    const token = (await storage.findSignalTokenById(minted.tokenId))!;
+    expect(token.completedValue).toBe("second");
+    const signals = await storage.loadSignals("wf-token-fail");
+    expect(signals.map((s) => [s.signalName, s.payload])).toEqual([["approve", "second"]]);
+  });
+
+  it("lets exactly one of concurrent completions deliver", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const minted = await mintOn({ storage, workflowId: "wf-token-race" });
+    const handler = completeSignalToken({ storage });
+
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, (_, i) =>
+        invoke(handler, completeRequest({ minted, value: i }), { tokenId: minted.tokenId }),
+      ),
+    );
+    const statuses = responses.map((r) => r.status);
+    expect(statuses.filter((s) => s === 202)).toHaveLength(1);
+    // Losers either lost the claim (409) or read the token already completed (200).
+    expect(statuses.every((s) => s === 202 || s === 409 || s === 200)).toBe(true);
+
+    const winner = responses[statuses.indexOf(202)]!;
+    const { value } = (await winner.json()) as { value: unknown };
+    const signals = await storage.loadSignals("wf-token-race");
+    expect(signals.map((s) => [s.signalName, s.payload])).toEqual([["approve", value]]);
+    expect((await storage.findSignalTokenById(minted.tokenId))!.completedValue).toBe(value);
+  });
+});

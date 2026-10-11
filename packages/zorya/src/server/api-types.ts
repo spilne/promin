@@ -431,6 +431,34 @@ export const MarkFailedRequestSchema = z
   .object({ reason: z.string().min(1).max(4096).optional() })
   .strict();
 
+/** Body of `POST /api/runs/:id/cancel`. Optional. */
+export const CancelRunRequestSchema = z
+  .object({
+    /** Also cancel every in-flight descendant run (children, grandchildren, ...). */
+    cascade: z.boolean().optional(),
+  })
+  .strict();
+
+/** Body of `POST /api/runs/:id/resume`. */
+export const ResumeRunRequestSchema = z
+  .object({
+    /** Step to rewind to: it and every step downstream of it run again. */
+    fromStep: Name,
+  })
+  .strict();
+
+export type ResumeRunRequest = z.infer<typeof ResumeRunRequestSchema>;
+
+/**
+ * `202` from `POST /api/runs/:id/resume`: `fromStep` and its downstream
+ * steps were reset and the run continues from there, keeping the results
+ * of the steps upstream of it.
+ */
+export interface ResumeRunResponse {
+  workflowId: string;
+  fromStep: string;
+}
+
 /** `200` from cancel / mark-success / mark-failed: the run's status after the action. */
 export interface RunActionResponse {
   workflowId: string;

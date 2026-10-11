@@ -115,6 +115,7 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
         scheduleId: sched.id,
         scheduledAt: new Date("2026-04-28T15:00:00Z"),
         firedAt: new Date("2026-04-28T15:00:01Z"),
+        incarnation: "inc1",
         tickNumber: 0,
       },
       sched,
@@ -169,14 +170,15 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
       scheduleId: sched!.id,
       scheduledAt: new Date("2026-04-28T15:00:00Z"),
       firedAt: new Date("2026-04-28T15:00:01Z"),
+      incarnation: "inc1",
       tickNumber: 7,
     };
     await dispatchAgentSchedule(tick, sched!, { registry, resolve: () => fakeAgent });
     await dispatchAgentSchedule(tick, sched!, { registry, resolve: () => fakeAgent });
 
     expect(captures).toHaveLength(2);
-    expect(captures[0]!.runId).toBe(`${sched!.id}.7`);
-    expect(captures[1]!.runId).toBe(`${sched!.id}.7`);
+    expect(captures[0]!.runId).toBe(`${sched!.id}.inc1.7`);
+    expect(captures[1]!.runId).toBe(`${sched!.id}.inc1.7`);
   });
 
   it("LocalAgent.invoke honors caller-provided runId — the workflow row carries that exact id", async () => {

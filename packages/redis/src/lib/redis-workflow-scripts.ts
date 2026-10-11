@@ -455,6 +455,19 @@ end
 return 1
 `;
 
+// Complete a signal token and deliver its signal in one step: swap the
+// token's pending record for the completed one only if it is unchanged,
+// and write the signal field alongside.
+// KEYS: [tokensHash, signalsHash]
+// ARGV: [tokenId, expectedRecordJson, completedRecordJson, signalName, signalJson]
+// Returns 1 when completed and delivered, 0 when the record changed.
+export const COMPLETE_SIGNAL_TOKEN_LUA = `
+if redis.call('HGET', KEYS[1], ARGV[1]) ~= ARGV[2] then return 0 end
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[3])
+redis.call('HSET', KEYS[2], ARGV[4], ARGV[5])
+return 1
+`;
+
 // Create a signal token, deduplicated on (workflowId, idempotencyKey). The
 // tokenId → workflowId lookup is its own key; the caller writes it next.
 // KEYS: [tokensHash, idempotencyHash]

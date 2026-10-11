@@ -2,6 +2,7 @@ import type {
   ApiError as ApiErrorBody,
   ApiIssue,
   RerunResponse,
+  ResumeRunResponse,
   RunActionResponse,
   RunDto,
   RunListResponse,
@@ -171,8 +172,13 @@ export const api = {
   getRun(id: string): Promise<RunDto> {
     return req<RunDto>(`/api/runs/${encodeURIComponent(id)}`);
   },
-  cancelRun(id: string): Promise<RunActionResponse> {
-    return req(`/api/runs/${encodeURIComponent(id)}/cancel`, { method: "POST" });
+  /** Cancel an in-flight run; `cascade` cancels its in-flight descendants too. */
+  cancelRun(id: string, opts?: { cascade?: boolean }): Promise<RunActionResponse> {
+    return req(`/api/runs/${encodeURIComponent(id)}/cancel`, {
+      method: "POST",
+      headers: opts?.cascade ? { "content-type": "application/json" } : undefined,
+      body: opts?.cascade ? JSON.stringify({ cascade: true }) : undefined,
+    });
   },
   /** Deliver a signal (202). Last-wins unless `ifAbsent` is set. */
   signalRun(id: string, body: SignalRequest): Promise<SignalDeliveryResponse> {
@@ -248,6 +254,14 @@ export const api = {
   },
   rerunRun(id: string): Promise<RerunResponse> {
     return req(`/api/runs/${encodeURIComponent(id)}/rerun`, { method: "POST" });
+  },
+  /** Continue an ended run from `fromStep`, keeping the results of the steps before it (202). */
+  resumeRun(id: string, fromStep: string): Promise<ResumeRunResponse> {
+    return req(`/api/runs/${encodeURIComponent(id)}/resume`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ fromStep }),
+    });
   },
   getWorkflowGrid(name: string, limit = 25): Promise<GridResponse> {
     return req(`/api/workflows/${encodeURIComponent(name)}/grid?limit=${limit}`);

@@ -16,7 +16,8 @@ import { createWorkflowRunner, type WorkflowRunner } from "../workflow-runner.ts
 import { FakeWallClock } from "../../shared/wall-clock.ts";
 import { createSignalScanner } from "../../distributed/signal-scanner.ts";
 import { createSleepScanner } from "../../distributed/sleep-scanner.ts";
-import { childEndedSignalName } from "../child-wake.ts";
+import { childEndedSignalName, wakeParentOfEndedRun } from "../child-wake.ts";
+import { MARKED_FAILED_ERROR_TAG } from "../workflow-state.ts";
 import type { Workflow } from "../workflow-types.ts";
 
 /** Yield to the event loop until `predicate` holds (bounded). */
@@ -195,6 +196,121 @@ describe("a child that ends wakes its parked parent", () => {
     expect(failed?.steps.run?.status).toBe("failed");
     expect(failed?.error).toContain("cancel");
     await scanners.stop();
+  });
+
+  describe("a child marked failed by an operator", () => {
+    /** End `workflowId` the way an operator's mark-failed does, waking its parent. */
+    async function markFailed(params: {
+      storage: InMemoryWorkflowStorage;
+      workflowId: string;
+      reason: string;
+    }): Promise<void> {
+      const { storage, workflowId, reason } = params;
+      await storage.failWorkflow({ workflowId, error: reason, errorTag: MARKED_FAILED_ERROR_TAG });
+      const state = (await storage.loadWorkflow(workflowId))!;
+      await wakeParentOfEndedRun({ storage, state });
+    }
+
+    it(".subworkflow(): the parent step fails with the child's failure, not a re-run", async () => {
+      const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+      const storage = new InMemoryWorkflowStorage({ clock });
+      let childStarts = 0;
+      const child = workflow<{ id: number }>({ name: "gated-child" })
+        .step("start", ({ input }) => succeed(++childStarts + input.id))
+        .waitForSignal<number>("wait", { signalName: "go" })
+        .build();
+      const parent = workflow<{ n: number }>({ name: "gated-parent" })
+        .subworkflow("enrich", child, {
+          input: ({ n }: { n: number }) => ({ id: n }),
+          workflowId: () => "enrich-kid",
+        })
+        .build();
+      const runner = createWorkflowRunner({ storage, clock });
+
+      await runner.run({ workflow: parent, workflowId: "p", input: { n: 3 } }).catch(() => {});
+      expect((await storage.loadWorkflow("p"))?.status).toBe("suspended");
+      expect(childStarts).toBe(1);
+
+      const scanners = startScanners({
+        storage,
+        runner,
+        clock,
+        definitions: [child, parent] as never,
+      });
+      await markFailed({ storage, workflowId: "enrich-kid", reason: "bad payload" });
+      await driveUntil({ storage, clock, workflowId: "p", status: "failed" });
+
+      const failed = await storage.loadWorkflow("p");
+      expect(failed?.steps.enrich?.status).toBe("failed");
+      expect(failed?.error).toContain("bad payload");
+      // The child was not started again: same run, same outcome, one start.
+      const kid = await storage.loadWorkflow("enrich-kid");
+      expect(kid?.status).toBe("failed");
+      expect(kid?.run).toBe(1);
+      expect(kid?.errorTag).toBe(MARKED_FAILED_ERROR_TAG);
+      expect(childStarts).toBe(1);
+      await scanners.stop();
+    });
+
+    it("journaled ctx.child: the activity fails with the child's failure", async () => {
+      const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+      const storage = new InMemoryWorkflowStorage({ clock });
+      const parent = workflow<{ v: number }>({ name: "approval-parent" })
+        .journaled("run", function* (ctx, input) {
+          return yield* ctx.child(approval, { input: { v: input.v }, workflowId: "kid" });
+        })
+        .build();
+      const runner = createWorkflowRunner({ storage, clock });
+
+      await runner.run({ workflow: parent, workflowId: "par", input: { v: 1 } }).catch(() => {});
+      expect((await storage.loadWorkflow("par"))?.status).toBe("suspended");
+
+      const scanners = startScanners({
+        storage,
+        runner,
+        clock,
+        definitions: [approval, parent] as never,
+      });
+      await markFailed({ storage, workflowId: "kid", reason: "rejected by operator" });
+      await driveUntil({ storage, clock, workflowId: "par", status: "failed" });
+
+      expect((await storage.loadWorkflow("par"))?.error).toContain("rejected by operator");
+      const kid = await storage.loadWorkflow("kid");
+      expect(kid?.run).toBe(1);
+      expect(kid?.status).toBe("failed");
+      await scanners.stop();
+    });
+
+    it("a child that failed by itself is still run again when its parent step retries", async () => {
+      const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+      const storage = new InMemoryWorkflowStorage({ clock });
+      let childStarts = 0;
+      const child = workflow<{ id: number }>({ name: "flaky-child" })
+        .step("start", () => succeed(++childStarts))
+        .build();
+      const parent = workflow<{ n: number }>({ name: "flaky-parent" })
+        .subworkflow("enrich", child, {
+          input: ({ n }: { n: number }) => ({ id: n }),
+          workflowId: () => "flaky-kid",
+        })
+        .build();
+      // A previous attempt of the parent step left the child failed (a crash
+      // or an exhausted retry), with no operator decision behind it.
+      await storage.createWorkflow({
+        workflowId: "flaky-kid",
+        workflowName: "flaky-child",
+        input: { id: 1 },
+        parentWorkflowId: "fp",
+      });
+      await storage.failWorkflow({ workflowId: "flaky-kid", error: "worker crashed" });
+
+      const runner = createWorkflowRunner({ storage, clock });
+      await runner.run({ workflow: parent, workflowId: "fp", input: { n: 1 } });
+      const kid = await storage.loadWorkflow("flaky-kid");
+      expect(kid?.status).toBe("completed");
+      expect(kid?.run).toBe(2);
+      expect(childStarts).toBe(1);
+    });
   });
 
   it("does not wake a parent that is not parked on the child", async () => {

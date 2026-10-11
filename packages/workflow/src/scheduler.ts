@@ -11,6 +11,7 @@ export {
   type ScheduleConfig,
   type DurableScheduleConfig,
   type ScheduleTick,
+  newScheduleIncarnation,
   scheduleTickRunId,
 } from "./lib/scheduler/types.ts";
 export type { Scheduler } from "./lib/scheduler/scheduler.ts";
@@ -22,6 +23,8 @@ export {
   type SchedulerStorage,
   type ScheduleCommit,
   type CommitPollResult,
+  type ScheduleError,
+  type ScheduleState,
   isTickLogStorage,
 } from "./lib/scheduler/scheduler-storage.ts";
 export { InMemorySchedulerStorage } from "./lib/scheduler/in-memory-scheduler-storage.ts";

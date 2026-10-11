@@ -9,6 +9,7 @@
 import type { WorkflowStorage } from "@promin/workflow";
 import type {
   DurableScheduleConfig,
+  ScheduleState,
   ScheduleTick,
   SchedulerStorage,
 } from "@promin/workflow/scheduler";
@@ -46,6 +47,19 @@ export interface ScheduleDto {
   tickCount?: number;
   /** ISO timestamp of the next scheduled fire. Null when no next run. */
   nextRunAt?: string;
+  /**
+   * Token of this incarnation of the schedule id: new when the schedule is
+   * deleted and created again. Part of every tick's run id.
+   */
+  incarnation?: string;
+  /**
+   * The schedule's last failure to fire — a tick whose run could not be
+   * started (e.g. its `workflowName` resolves to no workflow) or a config
+   * the scheduler can't evaluate. Absent once a fire goes through, or after
+   * the schedule is edited. A failing schedule stays due and is retried
+   * with backoff.
+   */
+  lastError?: { message: string; at: string };
 }
 
 export interface SchedulesResponse {
@@ -54,7 +68,7 @@ export interface SchedulesResponse {
 }
 
 export interface ScheduleTickHistoryDto {
-  /** Tick number parsed from `${scheduleId}.${tickNumber}`; undefined if id doesn't fit the pattern. */
+  /** The tick's number within its schedule incarnation; undefined when unknown. */
   tickNumber?: number;
   workflowId: string;
   workflowName: string;
@@ -292,7 +306,7 @@ function nextRunIso(params: {
 
 function toDto(params: {
   config: DurableScheduleConfig;
-  state?: { lastFired: Date | null; tickCount: number } | null;
+  state?: ScheduleState | null;
   clock: WallClock;
 }): ScheduleDto {
   const { config, state, clock } = params;
@@ -313,16 +327,27 @@ function toDto(params: {
     lastFiredAt: state?.lastFired ? iso(state.lastFired) : undefined,
     tickCount: state?.tickCount,
     nextRunAt: nextRunIso({ config, clock }),
+    incarnation: state?.incarnation,
+    lastError: state?.lastError
+      ? { message: state.lastError.message, at: iso(state.lastError.at) ?? "" }
+      : undefined,
   };
 }
 
 /**
- * Entity tag of a schedule: its stored configuration. Fire state
- * (`lastFiredAt`, `tickCount`, `nextRunAt`) is left out, so a tick firing
- * between a read and a PATCH doesn't fail the PATCH's `If-Match`.
+ * Entity tag of a schedule: its stored configuration and incarnation. Fire
+ * state (`lastFiredAt`, `tickCount`, `nextRunAt`, `lastError`) is left out,
+ * so a tick firing between a read and a PATCH doesn't fail the PATCH's
+ * `If-Match`; a schedule deleted and created again under the same id does.
  */
 function scheduleEtag(dto: ScheduleDto): string {
-  const { lastFiredAt: _fired, tickCount: _ticks, nextRunAt: _next, ...config } = dto;
+  const {
+    lastFiredAt: _fired,
+    tickCount: _ticks,
+    nextRunAt: _next,
+    lastError: _error,
+    ...config
+  } = dto;
   return contentEtag(config);
 }
 
@@ -441,7 +466,12 @@ export function patchSchedule(deps: ScheduleRoutesDeps) {
     const patch = await parseBody({ req, schema: SchedulePatchRequestSchema });
     const current = await storage.loadSchedule(id);
     if (!current) return jsonError(404, "not_found");
-    assertIfMatch({ req, etag: scheduleEtag(toDto({ config: current, clock })), what: "schedule" });
+    const currentState = await storage.loadScheduleState(id);
+    assertIfMatch({
+      req,
+      etag: scheduleEtag(toDto({ config: current, state: currentState, clock })),
+      what: "schedule",
+    });
 
     const merged = applySchedulePatch({ current, patch });
     const invalid = invalidConfig(merged);
@@ -584,7 +614,7 @@ export function emitScheduleNow(
       // Paused or deleted between the check above and the fire.
       return jsonError(409, "schedule_paused", "The schedule was paused or removed.");
     }
-    const workflowId = scheduleTickRunId({ scheduleId: id, tickNumber: tick.tickNumber });
+    const workflowId = scheduleTickRunId(tick);
     const response: ScheduleEmitResponse = {
       scheduleId: id,
       tickNumber: tick.tickNumber,
@@ -622,7 +652,7 @@ export function getScheduleHistory(
     // workflow row preserved its metadata across replays / retries.
     //
     // Both workflow- and agent-targeted schedules produce a workflow row
-    // with id `scheduleTickRunId(scheduleId, tickNumber)` — workflow ones
+    // with id `scheduleTickRunId(tick)` — workflow ones
     // via `scheduler-loop`'s deterministic `workflowId`, agent ones via
     // `dispatchAgentSchedule` passing `runId` into `agent.invoke`. Same
     // join either way; the `kind` chip just reflects schedule provenance.
@@ -642,16 +672,16 @@ export function getScheduleHistory(
       // Enrich each tick with status / duration from the matching workflow
       // row, joined on the deterministic `scheduleTickRunId` id: one read
       // per tick on the page, so `limit` (at most 500) bounds the reads.
-      const workflowIds = ticks.map((t) =>
-        scheduleTickRunId({ scheduleId: id, tickNumber: t.tickNumber }),
-      );
+      // Each logged tick carries its incarnation, so a schedule deleted
+      // and created again never joins the old schedule's runs.
+      const workflowIds = ticks.map((t) => scheduleTickRunId(t));
       const wfStates = await Promise.all(
         workflowIds.map((wfId) => workflowStorage.loadWorkflow(wfId)),
       );
       const wfById = new Map(wfStates.filter((s) => s != null).map((s) => [s!.workflowId, s!]));
 
       const history: ScheduleTickHistoryDto[] = ticks.map((t) => {
-        const wfId = scheduleTickRunId({ scheduleId: id, tickNumber: t.tickNumber });
+        const wfId = scheduleTickRunId(t);
         const wf = wfById.get(wfId);
         const firedMs = t.firedAt.getTime();
         // Both lag and duration are measured against this fire's
@@ -691,7 +721,14 @@ export function getScheduleHistory(
     // Fallback: derive history from workflow metadata. Loses fidelity on
     // backends that don't yet implement a tick log (Postgres, Redis), but
     // keeps the endpoint working without a hard dependency.
-    const filter = { metadata: { scheduleId: id } };
+    // Only this incarnation's runs: the dispatcher stamps it next to the id.
+    const state = await schedulerStorage.loadScheduleState(id);
+    const filter = {
+      metadata: {
+        scheduleId: id,
+        ...(state && { scheduleIncarnation: state.incarnation }),
+      },
+    };
     const [slice, counted] = await Promise.all([
       workflowStorage.listWorkflows({
         ...filter,

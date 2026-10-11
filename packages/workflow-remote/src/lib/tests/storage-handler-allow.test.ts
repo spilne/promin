@@ -76,7 +76,7 @@ describe("storage handler allow", () => {
     for (const m of [
       "createSignalToken",
       "findSignalTokenById",
-      "markSignalTokenCompleted",
+      "completeSignalToken",
       "listSignalTokensForWorkflow",
       "purgeCompleted",
       "cancelWorkflow",

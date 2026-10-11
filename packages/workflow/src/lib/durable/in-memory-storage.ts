@@ -51,8 +51,8 @@ import type {
   LoadJournalParams,
   LoadRunHistoryParams,
   LoadStepAttemptsParams,
-  MarkSignalTokenCompletedParams,
-  MarkSignalTokenCompletedResult,
+  CompleteSignalTokenParams,
+  CompleteSignalTokenResult,
   NotifyStepStartedParams,
   OrphanedRun,
   PurgeCompletedParams,
@@ -852,9 +852,12 @@ export class InMemoryWorkflowStorage
   // SignalStore
   // -------------------------------------------------------------------------
 
-  async deliverSignal({ workflowId, signalName, payload }: DeliverSignalParams): Promise<void> {
-    // Last delivery per name wins — same shape as the keyed rows the
-    // networked backends keep.
+  async deliverSignal(params: DeliverSignalParams): Promise<void> {
+    this.putSignal(params);
+  }
+
+  /** Last delivery per name wins — same shape as the keyed rows the networked backends keep. */
+  private putSignal({ workflowId, signalName, payload }: DeliverSignalParams): void {
     const others = (this.signals.get(workflowId) ?? []).filter((s) => s.signalName !== signalName);
     others.push({ signalName, payload, deliveredAt: this.clock.now() });
     this.signals.set(workflowId, others);
@@ -878,10 +881,17 @@ export class InMemoryWorkflowStorage
     return this.signalTokens.findById(tokenId);
   }
 
-  async markSignalTokenCompleted(
-    params: MarkSignalTokenCompletedParams,
-  ): Promise<MarkSignalTokenCompletedResult> {
-    return this.signalTokens.markCompleted(params);
+  async completeSignalToken(params: CompleteSignalTokenParams): Promise<CompleteSignalTokenResult> {
+    // One synchronous block: the claim and the delivery land together.
+    const result = this.signalTokens.markCompleted(params);
+    if (result.outcome === "delivered") {
+      this.putSignal({
+        workflowId: result.record.workflowId,
+        signalName: result.record.signalName,
+        payload: params.value,
+      });
+    }
+    return result;
   }
 
   async listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>> {

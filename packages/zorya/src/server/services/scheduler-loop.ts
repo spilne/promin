@@ -21,16 +21,18 @@
 //
 // Delivery is at least once: each poll dispatches its ticks first and
 // commits the fire state of the schedules whose ticks all dispatched. A
-// failed dispatch is reported (`phase: "dispatch"`), its schedule stays due
-// and is retried with backoff; a crash or a failed commit re-fires the same
-// ticks (same tickNumber) on the next poll rather than losing them. A stored
-// schedule that can't be evaluated is reported, disabled and skipped without
-// failing the poll for the others.
+// failed dispatch is reported (`phase: "dispatch"`) and recorded as the
+// schedule's `lastError` (shown by `GET /api/schedules` and the dashboard);
+// its schedule stays due and is retried with backoff, and the next fire that
+// goes through clears the error. A crash or a failed commit re-fires the
+// same ticks (same tickNumber) on the next poll rather than losing them. A
+// stored schedule that can't be evaluated is reported, recorded, disabled
+// and skipped without failing the poll for the others.
 //
 // Dispatch STARTS a run and returns: the trigger creates the run row and
 // hands it to a driver; an agent tick starts the turn without awaiting it.
-// The deterministic `${scheduleId}.${tickNumber}` run id makes a redelivered
-// tick a no-op — the workflow layer answers an existing id from storage
+// The deterministic `scheduleTickRunId(tick)` run id
+// (`<scheduleId>.<incarnation>.<tickNumber>`) makes a redelivered tick a no-op — the workflow layer answers an existing id from storage
 // instead of running it again. Each dispatch has a deadline, and the lease
 // is renewed while a poll dispatches, so a slow poll neither stalls the
 // loop forever nor lets a second instance fire the same ticks meanwhile.
@@ -123,7 +125,8 @@ export interface SchedulerLoopConfig {
    *
    * Resolve once the tick's work has STARTED (a run created, a turn
    * kicked off); throw when it could not start, and the tick is delivered
-   * again. The hook may see a tick more than once and must dedupe by
+   * again (the error is also recorded as the schedule's `lastError`). The
+   * hook may see a tick more than once and must dedupe by
    * `scheduleTickRunId(tick)`.
    */
   fire?: (
@@ -336,6 +339,7 @@ export class SchedulerLoop {
         scheduleName: config.name,
         scheduledAt: now,
         firedAt: now,
+        incarnation: state.incarnation,
         tickNumber: state.tickCount,
         metadata: config.metadata,
       };
@@ -346,6 +350,7 @@ export class SchedulerLoop {
             firedAt: now,
             tickIncrement: 1,
             expectedTickCount: state.tickCount,
+            expectedIncarnation: state.incarnation,
             nextRun: computeNextRun({ config, clock: this.clock }),
             ticks: [tick],
           },
@@ -366,8 +371,10 @@ export class SchedulerLoop {
       await this.dispatchWithDeadline({ tick, schedule: config });
     } catch (error) {
       this.report({ phase: "dispatch", scheduleId, tickNumber: tick.tickNumber, error });
+      await this.recordErrors([{ tick, error }]);
       throw new ScheduleDispatchError({ tick, cause: error });
     }
+    await this.recordErrors([{ tick, error: null }]);
     return tick;
   }
 
@@ -492,7 +499,7 @@ export class SchedulerLoop {
     // The lease is renewed meanwhile; once it is lost, nothing more is
     // dispatched and the new leader redelivers the rest.
     const keeper = ticks.length > 0 ? this.keepLease(params.lease) : undefined;
-    const failed = new Map<string, { tickNumber: number; error: unknown }>();
+    const failed = new Map<string, { tick: ScheduleTick; error: unknown }>();
     const skipped = new Set<string>();
     const dispatched: ScheduleTick[] = [];
     let cursor = 0;
@@ -512,9 +519,7 @@ export class SchedulerLoop {
               await this.dispatchWithDeadline({ tick, schedule: config });
               dispatched.push(tick);
             } catch (error) {
-              if (!failed.has(tick.scheduleId)) {
-                failed.set(tick.scheduleId, { tickNumber: tick.tickNumber, error });
-              }
+              if (!failed.has(tick.scheduleId)) failed.set(tick.scheduleId, { tick, error });
             }
           }
         }),
@@ -523,8 +528,8 @@ export class SchedulerLoop {
       keeper?.stop();
     }
 
-    for (const [scheduleId, { tickNumber, error }] of failed) {
-      this.report({ phase: "dispatch", scheduleId, tickNumber, error });
+    for (const [scheduleId, { tick, error }] of failed) {
+      this.report({ phase: "dispatch", scheduleId, tickNumber: tick.tickNumber, error });
       this.backOff(scheduleId);
     }
 
@@ -534,7 +539,11 @@ export class SchedulerLoop {
     // ticks that did start a no-op. The lease fences the commit: if
     // leadership moved on during dispatch it is rejected and the new
     // leader redelivers.
-    const commit = deliver.filter((p) => !failed.has(p.id) && !skipped.has(p.id));
+    // A schedule whose ticks all started clears its last error; a failed
+    // one records why (it stays due, nothing else of it is committed).
+    const commit = deliver
+      .filter((p) => !failed.has(p.id) && !skipped.has(p.id))
+      .map((p) => (p.ticks.length > 0 ? { ...p, commit: { ...p.commit, lastError: null } } : p));
     for (const plan of commit) {
       if (plan.ticks.length > 0) this.dispatchBackoff.delete(plan.id);
     }
@@ -543,6 +552,7 @@ export class SchedulerLoop {
     } catch (error) {
       this.report({ phase: "commit", error });
     }
+    await this.recordErrors([...failed.values()], params.lease);
 
     return dispatched;
   }
@@ -582,6 +592,34 @@ export class SchedulerLoop {
       Math.max(1, Math.floor(this.leaderLockTtlMs / 3)),
     );
     return { lost: () => lost, stop: () => handle.clear() };
+  }
+
+  /**
+   * Record (`error`) or clear (`null`) each tick's schedule `lastError`,
+   * guarded by the tick's incarnation. A failure to record is reported and
+   * otherwise ignored: the dispatch outcome stands either way.
+   */
+  private async recordErrors(
+    entries: readonly { tick: ScheduleTick; error: unknown }[],
+    lease?: LeaderLease,
+  ): Promise<void> {
+    if (entries.length === 0) return;
+    const at = this.clock.now();
+    try {
+      await this.storage.commitPoll({
+        updates: entries.map(({ tick, error }) => ({
+          id: tick.scheduleId,
+          expectedIncarnation: tick.incarnation,
+          lastError:
+            error === null
+              ? null
+              : { message: error instanceof Error ? error.message : String(error), at },
+        })),
+        ...(lease !== undefined && { lease }),
+      });
+    } catch (error) {
+      this.report({ phase: "commit", error });
+    }
   }
 
   private backOff(scheduleId: string): void {
@@ -667,10 +705,7 @@ export class SchedulerLoop {
     // handover) names the run it already created, and the workflow layer
     // answers an existing id from storage instead of running it again.
     // Same id shape used by `dispatchAgentSchedule` for agent-targeted ticks.
-    const workflowId = scheduleTickRunId({
-      scheduleId: tick.scheduleId,
-      tickNumber: tick.tickNumber,
-    });
+    const workflowId = scheduleTickRunId(tick);
     await this.trigger(workflowName, meta.input, {
       workflowId,
       namespace: meta.namespace ?? schedule.namespace,
@@ -685,6 +720,7 @@ export class SchedulerLoop {
       metadata: {
         ...schedule.metadata,
         scheduleId: tick.scheduleId,
+        scheduleIncarnation: tick.incarnation,
         scheduleTick: tick.tickNumber,
         scheduledAt: tick.scheduledAt.toISOString(),
         firedAt: tick.firedAt.toISOString(),

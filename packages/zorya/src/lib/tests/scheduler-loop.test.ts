@@ -24,6 +24,7 @@ import {
   InMemorySchedulerStorage,
   isStaleLeaseError,
   schedulePartition,
+  scheduleTickRunId,
 } from "@promin/workflow/scheduler";
 import type { ScheduleTick, SchedulerErrorEvent } from "@promin/workflow/scheduler";
 import { ZoryaClient, ZoryaWorker } from "@promin/zorya-client";
@@ -100,7 +101,7 @@ describe("ZoryaServer scheduling — embedded ZoryaScheduler", () => {
     expect(ticks[0]!.scheduleId).toBe("every-second");
     expect(ticks[0]!.tickNumber).toBe(0);
 
-    const wfId = `every-second.${ticks[0]!.tickNumber}`;
+    const wfId = scheduleTickRunId(ticks[0]!);
     const ok = await pollUntil(
       async () => (await storage.loadWorkflow(wfId))?.status === "completed",
       5_000,

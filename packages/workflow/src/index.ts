@@ -104,8 +104,8 @@ export {
   type DeliverSignalParams,
   type SignalTokenRecord,
   type CreateSignalTokenParams,
-  type MarkSignalTokenCompletedParams,
-  type MarkSignalTokenCompletedResult,
+  type CompleteSignalTokenParams,
+  type CompleteSignalTokenResult,
   type StreamChunk,
   type AppendStreamChunkParams,
   type ReadStreamChunksParams,
@@ -154,6 +154,9 @@ export {
   TERMINAL_WORKFLOW_STATUSES,
   isTerminalWorkflowStatus,
   isCancelledRun,
+  isFinalFailedRun,
+  isMarkedFailedRun,
+  MARKED_FAILED_ERROR_TAG,
 } from "./lib/durable/workflow-state.ts";
 export { InMemoryWorkflowStorage } from "./lib/durable/in-memory-storage.ts";
 

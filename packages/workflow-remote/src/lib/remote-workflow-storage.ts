@@ -51,8 +51,8 @@ import type {
   LoadJournalParams,
   LoadRunHistoryParams,
   LoadStepAttemptsParams,
-  MarkSignalTokenCompletedParams,
-  MarkSignalTokenCompletedResult,
+  CompleteSignalTokenParams,
+  CompleteSignalTokenResult,
   PurgeCompletedParams,
   ReadStreamChunksParams,
   ReleaseLockParams,
@@ -253,10 +253,8 @@ export class RemoteWorkflowStorage
     return this.call("findSignalTokenById", { tokenId });
   }
 
-  markSignalTokenCompleted(
-    params: MarkSignalTokenCompletedParams,
-  ): Promise<MarkSignalTokenCompletedResult> {
-    return this.call("markSignalTokenCompleted", params);
+  completeSignalToken(params: CompleteSignalTokenParams): Promise<CompleteSignalTokenResult> {
+    return this.call("completeSignalToken", params);
   }
 
   listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>> {

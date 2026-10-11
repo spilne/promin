@@ -8,6 +8,7 @@ import { describe, it, expect } from "bun:test";
 import { succeed, sync } from "@spilne/perfect-core";
 import {
   InMemoryWorkflowStorage,
+  MARKED_FAILED_ERROR_TAG,
   createWorkflowRunner,
   workflow,
   type Workflow,
@@ -215,13 +216,45 @@ describe("operator actions — mark-success, mark-failed, cancel", () => {
     expect((await storage.loadWorkflow("c"))?.errorTag).toBe("WorkflowCancelledError");
   });
 
+  it("mark-failed tags the run as an operator failure", async () => {
+    const { post, status, storage } = setup({ w: waiting("w") });
+    await post("/api/workflows/w/runs", { workflowId: "m-1" });
+    await until(async () => (await status("m-1")) === "suspended");
+
+    const res = await post("/api/runs/m-1/mark-failed", { reason: "stuck" });
+    expect(await res.json()).toEqual({ workflowId: "m-1", status: "failed" });
+    const run = await storage.loadWorkflow("m-1");
+    expect([run?.error, run?.errorTag]).toEqual(["stuck", MARKED_FAILED_ERROR_TAG]);
+  });
+
+  it("an operator-failed child fails its parent with the child's reason", async () => {
+    const child = waiting("child");
+    const parent = workflow<unknown>({ name: "parent" })
+      .subworkflow("kid", child, { input: () => ({}), workflowId: () => "kid-1" })
+      .build() as Workflow<unknown, unknown>;
+    const { post, status, storage, runner } = setup({ parent, child });
+    await post("/api/workflows/parent/runs", { workflowId: "p-1" });
+    await until(
+      async () => (await status("kid-1")) === "suspended" && (await status("p-1")) === "suspended",
+    );
+
+    await post("/api/runs/kid-1/mark-failed", { reason: "bad payload" });
+    await runner.runSafe({ workflow: parent, workflowId: "p-1", input: {} });
+    const p = await storage.loadWorkflow("p-1");
+    expect(p?.status).toBe("failed");
+    expect(p?.steps.kid?.status).toBe("failed");
+    expect(p?.error).toContain("bad payload");
+    const kid = await storage.loadWorkflow("kid-1");
+    expect([kid?.run, kid?.status]).toEqual([1, "failed"]);
+  });
+
   // The resumed parent continues from the child's outcome: a completed
-  // child completes it, a cancelled child fails it, and a failed child is
-  // driven again from scratch (the engine re-runs a failed child when its
-  // parent step runs), so the parent waits on the child's second run.
+  // child completes it, and a cancelled or operator-failed child fails it.
+  // An operator's failure is a decision, not a crash, so the parent step
+  // observes it instead of running the child again from scratch.
   for (const [action, parentStatus, childRun] of [
     ["mark-success", "completed", 1],
-    ["mark-failed", "suspended", 2],
+    ["mark-failed", "failed", 1],
     ["cancel", "failed", 1],
   ] as const) {
     it(`${action} on a suspended child wakes its parent`, async () => {
@@ -248,6 +281,182 @@ describe("operator actions — mark-success, mark-failed, cancel", () => {
       expect((await storage.loadWorkflow("kid-1"))?.run).toBe(childRun);
     });
   }
+});
+
+describe("POST /api/runs/:id/cancel — cascade", () => {
+  function family() {
+    const child = waiting("child");
+    const parent = workflow<unknown>({ name: "parent" })
+      .subworkflow("kid", child, { input: () => ({}), workflowId: () => "kid-1" })
+      .build() as Workflow<unknown, unknown>;
+    return setup({ parent, child });
+  }
+
+  it("cancels the run's in-flight descendants with cascade: true", async () => {
+    const { post, status, storage } = family();
+    await post("/api/workflows/parent/runs", { workflowId: "p-1" });
+    await until(
+      async () => (await status("kid-1")) === "suspended" && (await status("p-1")) === "suspended",
+    );
+
+    const res = await post("/api/runs/p-1/cancel", { cascade: true });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ workflowId: "p-1", status: "failed" });
+    expect((await storage.loadWorkflow("p-1"))?.errorTag).toBe("WorkflowCancelledError");
+    expect((await storage.loadWorkflow("kid-1"))?.errorTag).toBe("WorkflowCancelledError");
+  });
+
+  it("leaves descendants running without cascade", async () => {
+    const { post, status, storage } = family();
+    await post("/api/workflows/parent/runs", { workflowId: "p-2" });
+    await until(
+      async () => (await status("kid-1")) === "suspended" && (await status("p-2")) === "suspended",
+    );
+
+    expect((await post("/api/runs/p-2/cancel")).status).toBe(200);
+    expect((await storage.loadWorkflow("p-2"))?.errorTag).toBe("WorkflowCancelledError");
+    expect(await status("kid-1")).toBe("suspended");
+  });
+
+  it("rejects an unknown body field with 400", async () => {
+    const { post, status, storage } = family();
+    await storage.createWorkflow({ workflowId: "x-1", workflowName: "parent", input: {} });
+    expect((await post("/api/runs/x-1/cancel", { cascade: "yes" })).status).toBe(400);
+    expect((await post("/api/runs/x-1/cancel", { recursive: true })).status).toBe(400);
+    expect(await status("x-1")).toBe("pending");
+  });
+});
+
+/** A local layer that can resume a run from a step, as `WorkflowRunner.resume` does. */
+class ResumableLocalWorkflows extends LocalWorkflows {
+  constructor(
+    private readonly resumable: {
+      storage: InMemoryWorkflowStorage;
+      runner: WorkflowRunner;
+      definitions: Record<string, Workflow<unknown, unknown>>;
+    },
+  ) {
+    super({
+      storage: resumable.storage,
+      runner: resumable.runner,
+      definitions: resumable.definitions,
+      sleepScanIntervalMs: 0,
+      signalScanIntervalMs: 0,
+    });
+  }
+
+  async resume(params: { workflowId: string; fromStep: string }): Promise<void> {
+    const state = await this.resumable.storage.loadWorkflow(params.workflowId);
+    const workflow = this.resumable.definitions[state!.workflowName]!;
+    void this.resumable.runner.resume({ workflow, ...params }).catch(() => {});
+  }
+}
+
+describe("POST /api/runs/:id/resume", () => {
+  function pipeline() {
+    const runs = { load: 0, transform: 0, publish: 0 };
+    let failPublish = true;
+    const wf = workflow<unknown>({ name: "pipeline" })
+      .step("load", () => sync(() => ++runs.load))
+      .step("transform", ({ prev }) => sync(() => (prev as number) * 10 + ++runs.transform))
+      .step("publish", ({ prev }) =>
+        sync(() => {
+          runs.publish++;
+          if (failPublish) throw new Error("publish failed");
+          return `published ${prev as number}`;
+        }),
+      )
+      .build() as Workflow<unknown, unknown>;
+    return {
+      wf,
+      runs,
+      heal: () => {
+        failPublish = false;
+      },
+    };
+  }
+
+  function resumableSetup(definitions: Record<string, Workflow<unknown, unknown>>) {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const workflows = new ResumableLocalWorkflows({ storage, runner, definitions });
+    const server = new ZoryaServer({ workflows, insecure: true });
+    const post = (path: string, body?: unknown) =>
+      server.handle(
+        new Request(`http://x${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          ...(body !== undefined && { body: JSON.stringify(body) }),
+        }),
+      );
+    const status = async (id: string) => (await storage.loadWorkflow(id))?.status;
+    return { storage, post, status };
+  }
+
+  it("continues an ended run from a step, keeping the steps before it", async () => {
+    const p = pipeline();
+    const { post, status, storage } = resumableSetup({ pipeline: p.wf });
+    await post("/api/workflows/pipeline/runs", { workflowId: "r-1" });
+    await until(async () => (await status("r-1")) === "failed");
+    expect(p.runs).toEqual({ load: 1, transform: 1, publish: 1 });
+
+    p.heal();
+    const res = await post("/api/runs/r-1/resume", { fromStep: "transform" });
+    expect(res.status).toBe(202);
+    expect(res.headers.get("location")).toBe("/api/runs/r-1");
+    expect(await res.json()).toEqual({ workflowId: "r-1", fromStep: "transform" });
+    await until(async () => (await status("r-1")) === "completed");
+
+    // load kept its result; transform and publish ran again; same run number.
+    expect(p.runs).toEqual({ load: 1, transform: 2, publish: 2 });
+    const run = await storage.loadWorkflow("r-1");
+    expect(run?.run).toBe(1);
+    expect(run?.result).toBe("published 12");
+  });
+
+  it("is a 404 for an unknown run or step, nothing reset", async () => {
+    const p = pipeline();
+    const { post, status, storage } = resumableSetup({ pipeline: p.wf });
+    expect((await post("/api/runs/nope/resume", { fromStep: "load" })).status).toBe(404);
+
+    await post("/api/workflows/pipeline/runs", { workflowId: "r-2" });
+    await until(async () => (await status("r-2")) === "failed");
+    const res = await post("/api/runs/r-2/resume", { fromStep: "nope" });
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: string }).error).toBe("step_not_found");
+    expect(await status("r-2")).toBe("failed");
+    expect(Object.keys((await storage.loadWorkflow("r-2"))!.steps).sort()).toEqual([
+      "load",
+      "publish",
+      "transform",
+    ]);
+  });
+
+  it("is a 409 for an in-flight run, left untouched", async () => {
+    const { post, status, storage } = resumableSetup({ w: waiting("w") });
+    await post("/api/workflows/w/runs", { workflowId: "w-1" });
+    await until(async () => (await status("w-1")) === "suspended");
+
+    const res = await post("/api/runs/w-1/resume", { fromStep: "wait" });
+    expect(res.status).toBe(409);
+    expect(((await res.json()) as { error: string }).error).toBe("run_not_terminal");
+    expect((await storage.loadWorkflow("w-1"))?.steps.wait?.status).toBe("waiting_for_signal");
+  });
+
+  it("is a 400 without fromStep", async () => {
+    const { post } = resumableSetup({});
+    expect((await post("/api/runs/x/resume", {})).status).toBe(400);
+  });
+
+  it("is a 501 when the workflows layer cannot resume", async () => {
+    const p = pipeline();
+    const { post, status } = setup({ pipeline: p.wf });
+    await post("/api/workflows/pipeline/runs", { workflowId: "r-3" });
+    await until(async () => (await status("r-3")) === "failed");
+    const res = await post("/api/runs/r-3/resume", { fromStep: "publish" });
+    expect(res.status).toBe(501);
+    expect(await status("r-3")).toBe("failed");
+  });
 });
 
 describe("POST /api/runs/:id/signal", () => {

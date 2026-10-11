@@ -677,7 +677,10 @@ export function schedulerStorageTestSuite(
             (error: unknown) => error,
           );
         expect(isStaleLeaseError(stale)).toBe(true);
-        expect(await s.loadScheduleState("fenced")).toEqual({ lastFired: null, tickCount: 0 });
+        expect(await s.loadScheduleState("fenced")).toMatchObject({
+          lastFired: null,
+          tickCount: 0,
+        });
         expect(await s.findDue({ now: new Date(Date.now() + 60_000), limit: 10 })).toEqual(before);
 
         const ok = await s.commitPoll({
@@ -693,7 +696,7 @@ export function schedulerStorageTestSuite(
           lease: current!,
         });
         expect(ok.conflicts).toEqual([]);
-        expect(await s.loadScheduleState("fenced")).toEqual({
+        expect(await s.loadScheduleState("fenced")).toMatchObject({
           lastFired: new Date(1_000),
           tickCount: 1,
         });
@@ -811,11 +814,11 @@ export function schedulerStorageTestSuite(
         });
 
         expect([...result.conflicts].sort()).toEqual(["gone", "moved"]);
-        expect(await s.loadScheduleState("moved")).toEqual({
+        expect(await s.loadScheduleState("moved")).toMatchObject({
           lastFired: new Date(500),
           tickCount: 1,
         });
-        expect(await s.loadScheduleState("fresh")).toEqual({
+        expect(await s.loadScheduleState("fresh")).toMatchObject({
           lastFired: new Date(1_000),
           tickCount: 2,
         });
@@ -838,6 +841,172 @@ export function schedulerStorageTestSuite(
       });
     });
 
+    describe("incarnations — delete and re-create never reuses tick numbers", () => {
+      it("an insert starts an incarnation; a replace keeps it and the fire state", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "inc", intervalMs: 1_000 });
+        const first = (await s.loadScheduleState("inc"))!;
+        expect(first).toMatchObject({ lastFired: null, tickCount: 0, lastError: null });
+        expect(first.incarnation).toMatch(/^\S+$/);
+
+        await s.commitPoll({
+          updates: [{ id: "inc", firedAt: new Date(1_000), tickIncrement: 1, nextRun: null }],
+        });
+        await s.upsertSchedule({ id: "inc", intervalMs: 2_000, name: "renamed" });
+        expect(await s.loadScheduleState("inc")).toEqual({
+          lastFired: new Date(1_000),
+          tickCount: 1,
+          incarnation: first.incarnation,
+          lastError: null,
+        });
+        expect((await s.loadScheduleStates(["inc"])).get("inc")?.incarnation).toBe(
+          first.incarnation,
+        );
+      });
+
+      it("a schedule deleted and created again starts a new incarnation at tick 0", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "again", intervalMs: 1_000 });
+        const old = (await s.loadScheduleState("again"))!;
+        await s.commitPoll({
+          updates: [{ id: "again", firedAt: new Date(1_000), tickIncrement: 3, nextRun: null }],
+        });
+
+        await s.deleteSchedule("again");
+        expect(await s.loadScheduleState("again")).toBeNull();
+        await s.upsertSchedule({ id: "again", intervalMs: 1_000 });
+        const fresh = (await s.loadScheduleState("again"))!;
+        expect(fresh.incarnation).not.toBe(old.incarnation);
+        expect(fresh).toMatchObject({ lastFired: null, tickCount: 0, lastError: null });
+      });
+
+      it("commitPoll skips entries planned for an earlier incarnation", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "stale-inc", intervalMs: 1_000 });
+        const old = (await s.loadScheduleState("stale-inc"))!.incarnation;
+        await s.deleteSchedule("stale-inc");
+        await s.upsertSchedule({ id: "stale-inc", intervalMs: 1_000 });
+        const current = (await s.loadScheduleState("stale-inc"))!.incarnation;
+
+        // A poll planned tick 0 of the deleted schedule; tickCount alone
+        // (0 again) would not tell the incarnations apart.
+        const tick: ScheduleTick = {
+          scheduleId: "stale-inc",
+          incarnation: old,
+          tickNumber: 0,
+          scheduledAt: new Date(1_000),
+          firedAt: new Date(1_001),
+        };
+        const result = await s.commitPoll({
+          updates: [
+            {
+              id: "stale-inc",
+              firedAt: tick.firedAt,
+              tickIncrement: 1,
+              expectedTickCount: 0,
+              expectedIncarnation: old,
+              nextRun: null,
+              ticks: [tick],
+              lastError: null,
+            },
+          ],
+        });
+        expect(result.conflicts).toEqual(["stale-inc"]);
+        expect(await s.loadScheduleState("stale-inc")).toMatchObject({
+          lastFired: null,
+          tickCount: 0,
+          incarnation: current,
+        });
+        // The skipped entry's `nextRun: null` was not applied either.
+        expect(await s.findDue({ now: new Date(Date.now() + 60_000), limit: 10 })).toContain(
+          "stale-inc",
+        );
+        if (isTickLogStorage(s)) expect(await s.countTicks({ scheduleId: "stale-inc" })).toBe(0);
+
+        const applied = await s.commitPoll({
+          updates: [
+            {
+              id: "stale-inc",
+              firedAt: tick.firedAt,
+              tickIncrement: 1,
+              expectedTickCount: 0,
+              expectedIncarnation: current,
+              nextRun: null,
+              ticks: [{ ...tick, incarnation: current }],
+            },
+          ],
+        });
+        expect(applied.conflicts).toEqual([]);
+        expect((await s.loadScheduleState("stale-inc"))?.tickCount).toBe(1);
+      });
+    });
+
+    describe("lastError — why a schedule last failed to fire", () => {
+      it("commitPoll records and clears it without touching fire state or nextRun", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "err", intervalMs: 1_000 });
+        await s.setNextRun("err", new Date(5_000));
+        const incarnation = (await s.loadScheduleState("err"))!.incarnation;
+        const lastError = { message: 'Unknown workflow "nope"', at: new Date(4_000) };
+
+        const result = await s.commitPoll({
+          updates: [{ id: "err", expectedIncarnation: incarnation, lastError }],
+        });
+        expect(result.conflicts).toEqual([]);
+        expect(await s.loadScheduleState("err")).toEqual({
+          lastFired: null,
+          tickCount: 0,
+          incarnation,
+          lastError,
+        });
+        expect((await s.loadScheduleStates(["err"])).get("err")?.lastError).toEqual(lastError);
+        expect(await s.findDue({ now: new Date(5_000), limit: 10 })).toEqual(["err"]);
+
+        await s.commitPoll({
+          updates: [{ id: "err", firedAt: new Date(6_000), tickIncrement: 1, lastError: null }],
+        });
+        expect(await s.loadScheduleState("err")).toMatchObject({
+          lastFired: new Date(6_000),
+          tickCount: 1,
+          lastError: null,
+        });
+      });
+
+      it("an entry without lastError keeps it; upsertSchedule clears it", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "err-keep", intervalMs: 1_000 });
+        const lastError = { message: "boom", at: new Date(1_000) };
+        await s.commitPoll({ updates: [{ id: "err-keep", lastError }] });
+        await s.commitPoll({
+          updates: [{ id: "err-keep", firedAt: new Date(2_000), tickIncrement: 1 }],
+        });
+        expect((await s.loadScheduleState("err-keep"))?.lastError).toEqual(lastError);
+
+        await s.upsertSchedule({ id: "err-keep", intervalMs: 2_000 });
+        expect((await s.loadScheduleState("err-keep"))?.lastError).toBeNull();
+      });
+
+      it("a lastError for an earlier incarnation is not recorded", async () => {
+        const s = await getStorage();
+        await s.upsertSchedule({ id: "err-old", intervalMs: 1_000 });
+        const old = (await s.loadScheduleState("err-old"))!.incarnation;
+        await s.deleteSchedule("err-old");
+        await s.upsertSchedule({ id: "err-old", intervalMs: 1_000 });
+
+        const result = await s.commitPoll({
+          updates: [
+            {
+              id: "err-old",
+              expectedIncarnation: old,
+              lastError: { message: "boom", at: new Date(1_000) },
+            },
+          ],
+        });
+        expect(result.conflicts).toEqual(["err-old"]);
+        expect((await s.loadScheduleState("err-old"))?.lastError).toBeNull();
+      });
+    });
+
     // Optional: tick log capability. Backends declare support by exposing
     // `listTicks` + `countTicks`; the suite skips itself otherwise so a
     // backend without the capability still passes the rest of the spec.
@@ -846,14 +1015,17 @@ export function schedulerStorageTestSuite(
         const s = await getStorage();
         if (!isTickLogStorage(s)) return;
         await s.upsertSchedule({ id: "log-1", intervalMs: 1_000 });
+        const incarnation = (await s.loadScheduleState("log-1"))!.incarnation;
         const t0: ScheduleTick = {
           scheduleId: "log-1",
+          incarnation,
           tickNumber: 0,
           scheduledAt: new Date(1_000_000),
           firedAt: new Date(1_000_005),
         };
         const t1: ScheduleTick = {
           scheduleId: "log-1",
+          incarnation,
           tickNumber: 1,
           scheduledAt: new Date(2_000_000),
           firedAt: new Date(2_000_010),
@@ -876,6 +1048,7 @@ export function schedulerStorageTestSuite(
         expect(ticks[0]?.tickNumber).toBe(1);
         expect(ticks[1]?.tickNumber).toBe(0);
         expect(ticks[0]?.metadata).toEqual({ foo: "bar" });
+        expect(ticks.map((t) => t.incarnation)).toEqual([incarnation, incarnation]);
         // tickCount and the count of logged rows match.
         const state = await s.loadScheduleState("log-1");
         const total = await s.countTicks({ scheduleId: "log-1" });
@@ -887,8 +1060,10 @@ export function schedulerStorageTestSuite(
         const s = await getStorage();
         if (!isTickLogStorage(s)) return;
         await s.upsertSchedule({ id: "page", intervalMs: 1_000 });
+        const incarnation = (await s.loadScheduleState("page"))!.incarnation;
         const ticks: ScheduleTick[] = Array.from({ length: 25 }, (_, i) => ({
           scheduleId: "page",
+          incarnation,
           tickNumber: i,
           scheduledAt: new Date(i * 1000),
           firedAt: new Date(i * 1000 + 1),
@@ -907,12 +1082,13 @@ export function schedulerStorageTestSuite(
         expect(await s.countTicks({ scheduleId: "page" })).toBe(25);
       });
 
-      it("retried commitPoll doesn't double-log (PK on (scheduleId, tickNumber))", async () => {
+      it("retried commitPoll doesn't double-log (one row per (scheduleId, incarnation, tickNumber))", async () => {
         const s = await getStorage();
         if (!isTickLogStorage(s)) return;
         await s.upsertSchedule({ id: "retry", intervalMs: 1_000 });
         const t: ScheduleTick = {
           scheduleId: "retry",
+          incarnation: (await s.loadScheduleState("retry"))!.incarnation,
           tickNumber: 0,
           scheduledAt: new Date(1_000),
           firedAt: new Date(1_001),
@@ -938,6 +1114,7 @@ export function schedulerStorageTestSuite(
         await s.upsertSchedule({ id: "drop", intervalMs: 1_000 });
         const t: ScheduleTick = {
           scheduleId: "drop",
+          incarnation: (await s.loadScheduleState("drop"))!.incarnation,
           tickNumber: 0,
           scheduledAt: new Date(1_000),
           firedAt: new Date(1_001),

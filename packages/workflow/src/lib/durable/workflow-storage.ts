@@ -84,8 +84,8 @@ export type {
   SignalTokenStore,
   SignalTokenRecord,
   CreateSignalTokenParams,
-  MarkSignalTokenCompletedParams,
-  MarkSignalTokenCompletedResult,
+  CompleteSignalTokenParams,
+  CompleteSignalTokenResult,
 } from "./storage/signal-store.ts";
 export type {
   StreamStore,

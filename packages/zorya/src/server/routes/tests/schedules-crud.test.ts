@@ -46,6 +46,7 @@ function setup(
   const scheduler = new ZoryaScheduler({
     storage: schedStorage,
     workflows,
+    clock,
     ...params.scheduler,
     onError: () => {},
   });
@@ -284,6 +285,72 @@ describe("POST /api/schedules/:id/emit", () => {
     const failed = await send("POST", "/api/schedules/ghost/emit");
     expect(failed.status).toBe(502);
     expect(((await failed.json()) as ApiError).error).toBe("dispatch_failed");
+  });
+});
+
+describe("schedules whose workflow can't be dispatched", () => {
+  it("GET /api/schedules shows the dispatch error until a fire goes through", async () => {
+    const { send, server, storage, clock } = setup();
+    await send("POST", "/api/schedules", { id: "ghost", intervalMs: 60_000, workflowName: "nope" });
+
+    expect(await server.scheduler!.tickOnce()).toEqual([]);
+    const listed = (await (await send("GET", "/api/schedules")).json()) as {
+      schedules: ScheduleDto[];
+    };
+    const ghost = listed.schedules.find((s) => s.id === "ghost")!;
+    expect(ghost.lastError?.message).toContain('Unknown workflow "nope"');
+    expect(ghost.lastError?.at).toBe(clock.now().toISOString());
+    expect(ghost.tickCount).toBe(0);
+    expect((await dto(await send("GET", "/api/schedules/ghost"))).lastError).toEqual(
+      ghost.lastError,
+    );
+
+    // Pointing it at a real workflow clears the error; the next fire runs.
+    const fixed = await dto(await send("PATCH", "/api/schedules/ghost", { workflowName: "hello" }));
+    expect(fixed.lastError).toBeUndefined();
+    clock.advance(60_000);
+    const fired = await server.scheduler!.tickOnce();
+    expect(fired.map((t) => t.tickNumber)).toEqual([0]);
+    const after = await dto(await send("GET", "/api/schedules/ghost"));
+    expect(after.lastError).toBeUndefined();
+    expect(after.tickCount).toBe(1);
+    const runId = `ghost.${after.incarnation}.0`;
+    expect((await storage.loadWorkflow(runId))?.workflowName).toBe("hello");
+  });
+
+  it("a failed emit is recorded too", async () => {
+    const { send } = setup();
+    await send("POST", "/api/schedules", { id: "ghost", intervalMs: 60_000, workflowName: "nope" });
+    expect((await send("POST", "/api/schedules/ghost/emit")).status).toBe(502);
+    const ghost = await dto(await send("GET", "/api/schedules/ghost"));
+    expect(ghost.lastError?.message).toContain("nope");
+  });
+});
+
+describe("schedules deleted and created again", () => {
+  it("the new schedule's ticks start new runs instead of answering the old ones", async () => {
+    const { send, storage, runs } = setup();
+    await send("POST", "/api/schedules", { id: "s1", intervalMs: 60_000, workflowName: "hello" });
+    const first = (await (
+      await send("POST", "/api/schedules/s1/emit")
+    ).json()) as ScheduleEmitResponse;
+    const oldIncarnation = (await dto(await send("GET", "/api/schedules/s1"))).incarnation;
+
+    expect((await send("DELETE", "/api/schedules/s1")).status).toBe(204);
+    await send("POST", "/api/schedules", { id: "s1", intervalMs: 60_000, workflowName: "hello" });
+    const recreated = await dto(await send("GET", "/api/schedules/s1"));
+    expect(recreated.incarnation).not.toBe(oldIncarnation);
+    expect(recreated.tickCount).toBe(0);
+
+    const second = (await (
+      await send("POST", "/api/schedules/s1/emit")
+    ).json()) as ScheduleEmitResponse;
+    expect(second.tickNumber).toBe(0);
+    expect(second.workflowId).not.toBe(first.workflowId);
+    expect(second.workflowId).toBe(`s1.${recreated.incarnation}.0`);
+    for (let i = 0; i < 200 && runs.executions < 2; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(runs.executions).toBe(2);
+    expect((await storage.loadWorkflow(second.workflowId))?.runSourceId).toBe("s1");
   });
 });
 

@@ -104,6 +104,8 @@ import {
   getRunSignals,
   getRunStepJournal,
   rerunRun,
+  resumeRun,
+  type RunResumer,
 } from "./routes/run-extras.ts";
 import { listSignals } from "./routes/signals.ts";
 import { RunsService } from "./services/runs-service.ts";
@@ -518,7 +520,12 @@ export class ZoryaServer {
       ...(advertisements !== undefined && { advertisements }),
     };
 
-    const runActions = new RunsService({ storage });
+    const runActions = new RunsService({
+      storage,
+      ...(definitions !== undefined && { workflows: definitions }),
+      ...(advertisements !== undefined && { advertisements }),
+    });
+    const resume = resumerOf(this.workflows);
 
     // The version routes manage the registry the workflows layer dispatches
     // through. Its versioned definitions are registered on first use, so a
@@ -559,6 +566,10 @@ export class ZoryaServer {
       .post("/api/runs/:id/mark-success", markRunSuccess(runActions))
       .post("/api/runs/:id/mark-failed", markRunFailed(runActions))
       .post("/api/runs/:id/rerun", rerunRun({ storage, rerun: (id) => this.workflows.rerun(id) }))
+      .post(
+        "/api/runs/:id/resume",
+        resumeRun({ storage, runs: runActions, ...(resume !== undefined && { resume }) }),
+      )
       // Start a run. Under the workflow (not `/api/runs/...`) so no workflow
       // name can collide with a run action.
       .post("/api/workflows/:name/runs", triggerRun(deps))
@@ -616,6 +627,7 @@ export class ZoryaServer {
         streamChunks({
           storage,
           clock,
+          watchers: this.runWatchers,
           ...(config.sseIntervalMs !== undefined && { pollIntervalMs: config.sseIntervalMs }),
         }),
       )
@@ -1366,6 +1378,17 @@ function walkChainFor<T>(
  */
 function versionRegistryOf(layer: ZoryaWorkflows): WorkflowVersionRegistry | undefined {
   return (layer as unknown as { versionRegistry?: WorkflowVersionRegistry }).versionRegistry;
+}
+
+/**
+ * The workflows layer's `resume({ workflowId, fromStep })`, when the layer
+ * has one: the layer that drives a run is the one that continues it from a
+ * step (`WorkflowRunner.resume` semantics). Without it the resume route
+ * answers 501.
+ */
+function resumerOf(layer: ZoryaWorkflows): RunResumer | undefined {
+  const resume = (layer as { resume?: RunResumer }).resume;
+  return typeof resume === "function" ? (params) => resume.call(layer, params) : undefined;
 }
 
 /** Liveness and readiness probes: public, and answered while shutting down. */

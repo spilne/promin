@@ -52,6 +52,8 @@ import type {
   CancelWorkflowParams,
   CheckpointStepParams,
   CompletePendingEntryParams,
+  CompleteSignalTokenParams,
+  CompleteSignalTokenResult,
   CompleteWorkflowParams,
   CreateWorkflowParams,
   DeliverSignalParams,
@@ -109,6 +111,7 @@ import {
   APPEND_PENDING_LUA,
   CHECKPOINT_STEP_LUA,
   COMPLETE_PENDING_LUA,
+  COMPLETE_SIGNAL_TOKEN_LUA,
   CREATE_SIGNAL_TOKEN_LUA,
   DISCARD_ENTRIES_LUA,
   FENCE_REJECTED,
@@ -1457,19 +1460,17 @@ export class RedisWorkflowStorage
   }
 
   async deliverSignal({ workflowId, signalName, payload }: DeliverSignalParams): Promise<void> {
-    const signal: SignalState = {
-      signalName,
-      payload,
-      deliveredAt: this.clock.now(),
-    };
     await this.redis.hset(
       this.keys.signals(workflowId),
       signalName,
-      JSON.stringify({
-        ...signal,
-        deliveredAt: this.serializeDate(signal.deliveredAt),
-      }),
+      this.serializeSignal({ signalName, payload }),
     );
+  }
+
+  /** A signal hash field's value, delivered now. */
+  private serializeSignal(params: { signalName: string; payload: unknown }): string {
+    const signal: SignalState = { ...params, deliveredAt: this.clock.now() };
+    return JSON.stringify({ ...signal, deliveredAt: this.serializeDate(signal.deliveredAt) });
   }
 
   async loadSignals(workflowId: string): Promise<SignalState[]> {
@@ -1573,17 +1574,11 @@ export class RedisWorkflowStorage
     return raw ? deserializeSignalToken(raw) : null;
   }
 
-  async markSignalTokenCompleted(params: {
-    tokenId: string;
-    value: unknown;
-    now: Date;
-  }): Promise<
-    | { outcome: "delivered"; record: SignalTokenRecord }
-    | { outcome: "already_completed"; record: SignalTokenRecord }
-  > {
-    // Compare-and-set against the pending record we read: exactly one
-    // concurrent completer swaps it, every other one re-reads and sees the
-    // completed record.
+  async completeSignalToken(params: CompleteSignalTokenParams): Promise<CompleteSignalTokenResult> {
+    // Compare-and-set against the pending record we read, with the signal
+    // written in the same script: exactly one concurrent completer swaps
+    // the record and delivers; every other one re-reads and sees it
+    // completed. Token and signal hashes share the run's slot.
     const workflowId = await this.redis.get(this.keys.signalTokenLookup(params.tokenId));
     if (!workflowId) throw new Error(`signal token ${params.tokenId} not found`);
     const hashKey = this.keys.signalTokens(workflowId);
@@ -1600,18 +1595,19 @@ export class RedisWorkflowStorage
         completedValue: params.value,
       };
       const written = await this.redis.eval(
-        HASH_FIELD_CAS_LUA,
-        1,
+        COMPLETE_SIGNAL_TOKEN_LUA,
+        2,
         hashKey,
+        this.keys.signals(workflowId),
         params.tokenId,
-        "0",
         raw,
         serializeSignalToken(updated),
-        "",
+        current.signalName,
+        this.serializeSignal({ signalName: current.signalName, payload: params.value }),
       );
       if (written === 1) return { outcome: "delivered", record: updated };
     }
-    throw new Error(`markSignalTokenCompleted: gave up on ${params.tokenId} after contention`);
+    throw new Error(`completeSignalToken: gave up on ${params.tokenId} after contention`);
   }
 
   async listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>> {

@@ -169,14 +169,14 @@ export async function startAgentSchedule(
     },
   };
 
-  // Deterministic run id — same `${scheduleId}.${tickNumber}` shape used
+  // Deterministic run id — same `scheduleTickRunId(tick)` shape used
   // by the workflow-trigger path. Two effects: (1) the schedule history
   // route's join `wf_workflows.workflow_id = scheduleTickRunId(...)` finds
   // the agent's run row directly, no special-case needed; (2) a
   // redelivered tick lands on the same workflow row, and the runner's
   // terminal gate answers a finished turn from storage instead of
   // billing the model again.
-  const runId = scheduleTickRunId({ scheduleId: tick.scheduleId, tickNumber: tick.tickNumber });
+  const runId = scheduleTickRunId(tick);
 
   // A thread this tick creates is stamped with the recipe it runs, so the
   // agent's gateway can list and open it like any other of its threads.

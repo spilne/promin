@@ -109,7 +109,7 @@ redisDescribe("RedisWorkflowStorage store correctness", (redis) => {
       });
       const outcomes = await Promise.all(
         Array.from({ length: 10 }, (_, i) =>
-          (i % 2 ? a : b).markSignalTokenCompleted({ tokenId: "tk", value: i, now: new Date() }),
+          (i % 2 ? a : b).completeSignalToken({ tokenId: "tk", value: i, now: new Date() }),
         ),
       );
       expect(outcomes.filter((o) => o.outcome === "delivered")).toHaveLength(1);

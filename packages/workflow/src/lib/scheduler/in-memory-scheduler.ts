@@ -16,7 +16,7 @@ import { jitterDelayMs, validateScheduleConfig } from "./schedule-config.ts";
 import type { WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
 import type { Scheduler } from "./scheduler.ts";
-import type { ScheduleConfig, ScheduleTick } from "./types.ts";
+import { newScheduleIncarnation, type ScheduleConfig, type ScheduleTick } from "./types.ts";
 
 export interface InMemorySchedulerConfig {
   /**
@@ -105,11 +105,13 @@ export class InMemoryScheduler implements Scheduler {
   /**
    * Register (or replace) a schedule. Rejects on an invalid config (see
    * `validateScheduleConfig`). Replacing a schedule restarts its wait with
-   * the new config in every active stream.
+   * the new config in every active stream; it keeps its incarnation, while
+   * registering an id again after `unregister` starts a new one.
    */
   async register(config: ScheduleConfig): Promise<void> {
     validateScheduleConfig(config);
-    this.schedules.set(config.id, { ...config, paused: config.enabled === false });
+    const incarnation = this.schedules.get(config.id)?.incarnation ?? newScheduleIncarnation();
+    this.schedules.set(config.id, { ...config, paused: config.enabled === false, incarnation });
     // Notify any active subscribe() streams so they pick up the new schedule immediately.
     for (const cb of this._registerCallbacks) cb(config.id);
   }
@@ -134,7 +136,7 @@ export class InMemoryScheduler implements Scheduler {
 
   /** List all registered schedules with their current enabled state. */
   async list(): Promise<ScheduleConfig[]> {
-    return [...this.schedules.values()].map(({ paused, ...config }) => ({
+    return [...this.schedules.values()].map(({ paused, incarnation: _, ...config }) => ({
       ...config,
       enabled: !paused,
     }));
@@ -244,8 +246,11 @@ export class InMemoryScheduler implements Scheduler {
 /** How often a paused schedule re-checks whether it has been resumed. */
 const PAUSED_RECHECK_MS = 1000;
 
-/** A registered schedule plus its paused flag (mutated in place by pause/resume). */
-type ScheduleEntry = ScheduleConfig & { paused: boolean };
+/**
+ * A registered schedule plus its paused flag (mutated in place by
+ * pause/resume) and the incarnation its ticks carry.
+ */
+type ScheduleEntry = ScheduleConfig & { paused: boolean; incarnation: string };
 
 /** One unfold step: a tick (or nothing yet) plus the next tick number, or end. */
 type ScheduleStep = [ScheduleTick | null, number] | null;
@@ -295,6 +300,7 @@ function computeAndSleep(params: {
       scheduleName: config.name,
       scheduledAt: nextFireTime,
       firedAt: clock.now(),
+      incarnation: config.incarnation,
       tickNumber,
       metadata: config.metadata,
     };

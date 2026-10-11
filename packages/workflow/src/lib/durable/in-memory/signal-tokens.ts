@@ -4,8 +4,8 @@
 
 import type {
   CreateSignalTokenParams,
-  MarkSignalTokenCompletedParams,
-  MarkSignalTokenCompletedResult,
+  CompleteSignalTokenParams,
+  CompleteSignalTokenResult,
   SignalTokenRecord,
 } from "../storage/signal-store.ts";
 import type { WallClock } from "../../shared/wall-clock.ts";
@@ -74,7 +74,7 @@ export class InMemorySignalTokens {
     return t ? snapshot(t) : null;
   }
 
-  markCompleted(params: MarkSignalTokenCompletedParams): MarkSignalTokenCompletedResult {
+  markCompleted(params: CompleteSignalTokenParams): CompleteSignalTokenResult {
     const t = this.tokens.get(params.tokenId);
     if (!t) {
       throw new Error(`signal token ${params.tokenId} not found`);

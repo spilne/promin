@@ -10,6 +10,31 @@
 import type { DurableScheduleConfig, ScheduleTick } from "./types.ts";
 import type { LeaderLease, LeaderLeaseStore } from "./leader-lease.ts";
 
+/** Why a schedule last failed to fire, as recorded by `commitPoll`. */
+export interface ScheduleError {
+  readonly message: string;
+  readonly at: Date;
+}
+
+/** A schedule's stored fire state. */
+export interface ScheduleState {
+  /** Last fire time, `null` before the first fire. */
+  readonly lastFired: Date | null;
+  /** Fires so far in this incarnation; the next tick takes this number. */
+  readonly tickCount: number;
+  /**
+   * The schedule's incarnation token (`ScheduleTick.incarnation`): set on
+   * insert, kept by `upsertSchedule`, new after delete and re-create.
+   */
+  readonly incarnation: string;
+  /**
+   * The schedule's last failure to fire (a dispatch that threw, a config
+   * that can't be evaluated), or `null` when its last fire went through.
+   * Cleared by `upsertSchedule` and by a commit with `lastError: null`.
+   */
+  readonly lastError: ScheduleError | null;
+}
+
 /** One schedule's entry in a `commitPoll` batch. */
 export interface ScheduleCommit {
   readonly id: string;
@@ -32,6 +57,18 @@ export interface ScheduleCommit {
    */
   readonly expectedTickCount?: number;
   /**
+   * Compare-and-set guard: apply this entry only while the stored schedule
+   * is still this incarnation. Ticks numbered for one incarnation never
+   * advance (or log under) a schedule deleted and created again since.
+   * A skipped entry is reported in `CommitPollResult.conflicts`.
+   */
+  readonly expectedIncarnation?: string;
+  /**
+   * Record (`ScheduleError`) or clear (`null`) the schedule's `lastError`.
+   * Omit it to leave `lastError` as it is.
+   */
+  readonly lastError?: ScheduleError | null;
+  /**
    * Individual ticks fired in this poll cycle. Backends that maintain
    * a tick log persist these IN THE SAME TRANSACTION as the state
    * advance — so `tickCount` and the count of logged rows never
@@ -43,9 +80,9 @@ export interface ScheduleCommit {
 /** What `commitPoll` did. */
 export interface CommitPollResult {
   /**
-   * Ids of entries skipped because their `expectedTickCount` no longer
-   * matched or the schedule no longer exists. Entries without
-   * `expectedTickCount` are never reported.
+   * Ids of entries skipped because their `expectedTickCount` or
+   * `expectedIncarnation` no longer matched or the schedule no longer
+   * exists. Entries without either guard are never reported.
    */
   readonly conflicts: readonly string[];
 }
@@ -80,17 +117,19 @@ export interface SchedulerStorage extends LeaderLeaseStore {
    */
   loadSchedules(ids: string[]): Promise<Map<string, DurableScheduleConfig>>;
 
-  /** Read fire-state — `lastFired` is the last firedAt, `tickCount` is the running counter. */
-  loadScheduleState(id: string): Promise<{ lastFired: Date | null; tickCount: number } | null>;
+  /**
+   * Read fire-state — `lastFired` is the last firedAt, `tickCount` the
+   * running counter of this incarnation, `lastError` the last failure to
+   * fire. `null` for an unknown id.
+   */
+  loadScheduleState(id: string): Promise<ScheduleState | null>;
 
   /**
    * Bulk variant of `loadScheduleState` — same single-round-trip rationale.
    * Returned map omits ids that don't exist; ids that exist but have no fire
-   * history return `{ lastFired: null, tickCount: 0 }`.
+   * history have `lastFired: null, tickCount: 0`.
    */
-  loadScheduleStates(
-    ids: string[],
-  ): Promise<Map<string, { lastFired: Date | null; tickCount: number }>>;
+  loadScheduleStates(ids: string[]): Promise<Map<string, ScheduleState>>;
 
   /**
    * Record that a schedule fired. Increments `tickCount` by `count` (default 1)
@@ -107,13 +146,15 @@ export interface SchedulerStorage extends LeaderLeaseStore {
 
   /**
    * Atomic commit for an entire poll cycle. For each entry:
-   * - skip it (reporting it in `conflicts`) when `expectedTickCount` is set
-   *   and differs from the stored `tickCount`, or the schedule is gone;
+   * - skip it (reporting it in `conflicts`) when `expectedTickCount` or
+   *   `expectedIncarnation` is set and differs from the stored value, or
+   *   the schedule is gone;
    * - if `firedAt`/`tickIncrement` are set, update `lastFired`/`tickCount`
    *   and log `ticks` (backends with a tick log);
    * - if `nextRun` is present, update it (`null` removes the schedule from
    *   due-tracking). A schedule disabled since it was loaded stays out of
-   *   due-tracking.
+   *   due-tracking;
+   * - if `lastError` is present, record (or, `null`, clear) it.
    *
    * Fencing: with `lease`, the whole commit is rejected with
    * `StaleLeaseError` and nothing is written unless `lease.epoch` is still
@@ -135,14 +176,20 @@ export interface SchedulerStorage extends LeaderLeaseStore {
   // -------------------------------------------------------------------------
 
   /**
-   * Insert or replace a schedule. Fire state (`lastFired`, `tickCount`)
-   * survives a replace. Due-tracking follows the enabled flag: a disabled
-   * schedule gets `nextRun = null`; an enabled one keeps its existing
-   * `nextRun`, or is seeded at now (or a later `startAt`) when it has none.
+   * Insert or replace a schedule. An insert starts a new incarnation (a
+   * fresh `newScheduleIncarnation()` token, `tickCount` 0); fire state
+   * (`lastFired`, `tickCount`) and the incarnation survive a replace.
+   * Either way `lastError` is cleared: the config it was about changed.
+   * Due-tracking follows the enabled flag: a disabled schedule gets
+   * `nextRun = null`; an enabled one keeps its existing `nextRun`, or is
+   * seeded at now (or a later `startAt`) when it has none.
    */
   upsertSchedule(config: DurableScheduleConfig): Promise<void>;
 
-  /** Delete a schedule and any due-tracking state for it. */
+  /**
+   * Delete a schedule, its due-tracking state and its tick log. Storing the
+   * id again starts a new incarnation.
+   */
   deleteSchedule(id: string): Promise<void>;
 
   /**

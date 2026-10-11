@@ -611,8 +611,12 @@ const onboard = workflow<{ userId: string }>({ name: "onboard" })
   `version` and `parentWorkflowId`, and driven with the parent runner's
   storage, clock, step executor and hooks.
 - A failed child fails the step with a typed `StepError`, so `retry`
-  re-drives the child (a failed child is re-run fresh for a retried parent
-  step) and `onFailure` / `compensate` apply.
+  re-drives the child (a child that failed by itself is re-run fresh for a
+  retried parent step) and `onFailure` / `compensate` apply. A child whose
+  failure was a decision — cancelled, or marked failed by an operator
+  (`failWorkflow({ errorTag: MARKED_FAILED_ERROR_TAG })`, see
+  `isFinalFailedRun`) — is never re-run: the parent step observes its stored
+  failure.
 - **Child wake-up.** When the child suspends, the parent step parks as a
   signal wait on a reserved signal
   `workflow.child-ended:<childId>#<childRun>`, with the child's earliest wake

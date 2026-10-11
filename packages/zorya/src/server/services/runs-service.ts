@@ -9,8 +9,10 @@
 
 import type { Workflow, WorkflowState, WorkflowStatus, WorkflowStorage } from "@promin/workflow";
 import {
+  MARKED_FAILED_ERROR_TAG,
   hasCapability,
   isCancelledRun,
+  isMarkedFailedRun,
   isTerminalWorkflowStatus,
   wakeParentOfEndedRun,
 } from "@promin/workflow";
@@ -88,12 +90,21 @@ export class RunsService {
     return dto;
   }
 
-  /** Cancel a pending, running or suspended workflow. */
-  async cancel(id: string): Promise<RunActionResult> {
+  /**
+   * Cancel a pending, running or suspended workflow. With `cascade`, every
+   * in-flight descendant (children started with this run as their parent,
+   * and theirs) is cancelled in the same storage call.
+   */
+  async cancel(params: { id: string; cascade?: boolean }): Promise<RunActionResult> {
+    const { id, cascade } = params;
     return this.endRun({
       workflowId: id,
       expect: (state) => isCancelledRun(state),
-      write: () => this.deps.storage.cancelWorkflow({ workflowId: id }),
+      write: () =>
+        this.deps.storage.cancelWorkflow({
+          workflowId: id,
+          ...(cascade === true && { cascade: true }),
+        }),
     });
   }
 
@@ -106,13 +117,23 @@ export class RunsService {
     });
   }
 
-  /** Operator override: end an in-flight run as failed with `reason`. */
+  /**
+   * Operator override: end an in-flight run as failed with `reason`. The
+   * run is tagged `MARKED_FAILED_ERROR_TAG`, so a parent parked on it
+   * observes the failure when it resumes instead of re-running the child,
+   * as it would for a child that failed by itself.
+   */
   async markFailed(params: { id: string; reason: string }): Promise<RunActionResult> {
     const { id, reason } = params;
     return this.endRun({
       workflowId: id,
-      expect: (state) => state.status === "failed" && state.error === reason,
-      write: () => this.deps.storage.failWorkflow({ workflowId: id, error: reason }),
+      expect: (state) => isMarkedFailedRun(state) && state.error === reason,
+      write: () =>
+        this.deps.storage.failWorkflow({
+          workflowId: id,
+          error: reason,
+          errorTag: MARKED_FAILED_ERROR_TAG,
+        }),
     });
   }
 
@@ -173,7 +194,7 @@ export class RunsService {
    * Resolve a workflow's step definitions from the in-process registry,
    * falling back to worker advertisements. Empty array if nothing matches.
    */
-  private async resolveStepDefs(name: string): Promise<readonly StepDefLike[]> {
+  async resolveStepDefs(name: string): Promise<readonly StepDefLike[]> {
     const def = findDefinition(this.deps.workflows, name);
     if (def) return def.dag.steps;
     if (this.deps.advertisements) {

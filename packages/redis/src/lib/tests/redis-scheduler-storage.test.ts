@@ -24,7 +24,10 @@ redisDescribe("RedisSchedulerStorage", (redis) => {
       await s.recordFire("a", new Date(T0), 3);
       await s.upsertSchedule({ id: "a", intervalMs: 2_000 });
 
-      expect(await s.loadScheduleState("a")).toEqual({ lastFired: new Date(T0), tickCount: 3 });
+      expect(await s.loadScheduleState("a")).toMatchObject({
+        lastFired: new Date(T0),
+        tickCount: 3,
+      });
       expect((await s.loadSchedule("a"))?.intervalMs).toBe(2_000);
     });
 

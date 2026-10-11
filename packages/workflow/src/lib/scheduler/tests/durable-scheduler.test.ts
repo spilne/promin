@@ -58,7 +58,7 @@ describe("DurableScheduler scalability features", () => {
     // Single update with N tickIncrement should move tickCount by exactly N.
     await storage.upsertSchedule({ id: "ci-1", intervalMs: 100, namespace: undefined });
     const before = await storage.loadScheduleState("ci-1");
-    expect(before).toEqual({ lastFired: null, tickCount: 0 });
+    expect(before).toMatchObject({ lastFired: null, tickCount: 0 });
 
     const fired = new Date();
     await storage.commitPoll({
@@ -67,7 +67,7 @@ describe("DurableScheduler scalability features", () => {
       ],
     });
     const after = await storage.loadScheduleState("ci-1");
-    expect(after).toEqual({ lastFired: fired, tickCount: 5 });
+    expect(after).toMatchObject({ lastFired: fired, tickCount: 5 });
   });
 
   it("jitterMs delays the next run, so the tick is emitted late with its nominal scheduledAt", async () => {
@@ -686,7 +686,7 @@ describe("computeDueTicks catch-up", () => {
       { id: "i", intervalMs: 3_600_000, maxCatchUp: 2 },
     ];
     for (const config of configs) {
-      const ticks = computeDueTicks({ config, lastFired, tickCount: 7, clock });
+      const ticks = computeDueTicks({ config, lastFired, tickCount: 7, incarnation: "i", clock });
       expect(hhmm(ticks)).toEqual(["09:00", "10:00"]);
       expect(ticks.map((t) => t.tickNumber)).toEqual([7, 8]);
     }
@@ -699,7 +699,9 @@ describe("computeDueTicks catch-up", () => {
       { id: "i", intervalMs: 3_600_000 },
     ];
     for (const config of configs) {
-      expect(hhmm(computeDueTicks({ config, lastFired, tickCount: 0, clock }))).toEqual(["10:00"]);
+      expect(
+        hhmm(computeDueTicks({ config, lastFired, tickCount: 0, incarnation: "i", clock })),
+      ).toEqual(["10:00"]);
     }
   });
 
@@ -717,7 +719,13 @@ describe("computeDueTicks catch-up", () => {
       ),
     ).toEqual(["01:00", "02:00"]);
     expect(
-      computeDueTicks({ config: cron, lastFired, tickCount: 0, clock: at("2026-01-01T00:59:59Z") }),
+      computeDueTicks({
+        config: cron,
+        lastFired,
+        tickCount: 0,
+        incarnation: "i",
+        clock: at("2026-01-01T00:59:59Z"),
+      }),
     ).toEqual([]);
   });
 });
@@ -733,9 +741,9 @@ describe("planDueTicks", () => {
       ["off", { id: "off", intervalMs: 1_000, enabled: false }],
     ]);
     const states = new Map([
-      ["ok", { lastFired: null, tickCount: 0 }],
-      ["bad", { lastFired: new Date(T0 - 1_000), tickCount: 3 }],
-      ["off", { lastFired: null, tickCount: 0 }],
+      ["ok", { lastFired: null, tickCount: 0, incarnation: "i", lastError: null }],
+      ["bad", { lastFired: new Date(T0 - 1_000), tickCount: 3, incarnation: "i", lastError: null }],
+      ["off", { lastFired: null, tickCount: 0, incarnation: "i", lastError: null }],
     ]);
     const plans = planDueTicks({ ids: ["ok", "bad", "off", "gone"], configs, states, clock });
 
@@ -755,8 +763,8 @@ describe("planDueTicks", () => {
       ["end", { id: "end", intervalMs: 10_000, jitterMs: 4_000, endAt: new Date(T0 + 11_000) }],
     ]);
     const states = new Map([
-      ["j", { lastFired: new Date(T0), tickCount: 1 }],
-      ["end", { lastFired: new Date(T0), tickCount: 1 }],
+      ["j", { lastFired: new Date(T0), tickCount: 1, incarnation: "i", lastError: null }],
+      ["end", { lastFired: new Date(T0), tickCount: 1, incarnation: "i", lastError: null }],
     ]);
     const plans = planDueTicks({
       ids: ["j", "end"],
@@ -806,7 +814,7 @@ describe("DurableScheduler due-time math follows the injected WallClock", () => 
     expect(consumer.seen[1]!.tickNumber).toBe(1);
 
     const state = await storage.loadScheduleState("every-10s");
-    expect(state).toEqual({ lastFired: new Date(T0 + 10_000), tickCount: 2 });
+    expect(state).toMatchObject({ lastFired: new Date(T0 + 10_000), tickCount: 2 });
   });
 
   it("a cron tick becomes due when the fake clock reaches the next occurrence", async () => {
@@ -856,12 +864,19 @@ describe("DurableScheduler due-time math follows the injected WallClock", () => 
     const lastFired = new Date(T0);
 
     expect(
-      computeDueTicks({ config, lastFired, tickCount: 1, clock: FakeWallClock.create(T0 + 999) }),
+      computeDueTicks({
+        config,
+        lastFired,
+        tickCount: 1,
+        incarnation: "i",
+        clock: FakeWallClock.create(T0 + 999),
+      }),
     ).toEqual([]);
     const due = computeDueTicks({
       config,
       lastFired,
       tickCount: 1,
+      incarnation: "i",
       clock: FakeWallClock.create(T0 + 1_500),
     });
     expect(due.map((t) => [t.scheduledAt.getTime(), t.firedAt.getTime()])).toEqual([

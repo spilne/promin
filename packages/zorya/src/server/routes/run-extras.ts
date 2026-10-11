@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // Run extras — secondary endpoints for signal history, attempt history,
-// prior runs, children and journals, plus rerun. Every route answers 404
+// prior runs, children and journals, plus rerun and resume. Every route answers 404
 // for an unknown run. The read routes degrade gracefully when the backing
 // storage doesn't implement the optional interface.
 // ---------------------------------------------------------------------------
@@ -21,10 +21,13 @@ import {
   NameSchema,
   OffsetQuery,
   limitQuery,
+  ResumeRunRequestSchema,
   type RerunResponse,
+  type ResumeRunResponse,
   type RunSummaryDto,
 } from "../api-types.ts";
-import { parseParams, parseQuery } from "../request-validation.ts";
+import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
+import type { RunsService } from "../services/runs-service.ts";
 import { RunParamsSchema, runLocation } from "./runs.ts";
 
 export interface SignalDto {
@@ -309,6 +312,71 @@ export function rerunRun(params: {
       throw err;
     }
     const response: RerunResponse = { workflowId: id };
+    return accepted(response, runLocation(id));
+  };
+}
+
+/**
+ * Re-drives an ended run from `fromStep` with `WorkflowRunner.resume`
+ * semantics: `fromStep` and every step downstream of it are reset and run
+ * again, the steps upstream keep their results. Resolves once the run is
+ * under way. Throws `WorkflowLockError` when another driver holds the run.
+ */
+export type RunResumer = (params: { workflowId: string; fromStep: string }) => Promise<void>;
+
+/**
+ * POST /api/runs/:id/resume — body `{ fromStep }`: continue an ended run
+ * from one of its steps, keeping the results of the steps before it. 202 +
+ * `Location` once the run is under way; 404 `not_found` for an unknown run
+ * and `step_not_found` for a step the run's workflow doesn't have; 409
+ * `run_not_terminal` for an in-flight run (resetting it would race its
+ * driver) and `run_in_flight` when another driver holds it; 501 when the
+ * storage can't reset steps or the workflows layer can't resume.
+ */
+export function resumeRun(params: {
+  storage: WorkflowStorage;
+  /** Resolves the run's workflow definition (in-process or advertised). */
+  runs: RunsService;
+  resume?: RunResumer;
+}) {
+  const { storage, runs, resume } = params;
+  return async (req: Request, routeParams: Record<string, string>): Promise<Response> => {
+    const { id } = parseParams({ params: routeParams, schema: RunParamsSchema });
+    const { fromStep } = await parseBody({ req, schema: ResumeRunRequestSchema });
+    const state = await storage.loadWorkflow(id);
+    if (!state) return jsonError(404, "not_found");
+    if (!isTerminalWorkflowStatus(state.status)) {
+      return jsonError(
+        409,
+        "run_not_terminal",
+        `Only an ended run can be resumed (status: ${state.status})`,
+      );
+    }
+    const defs = await runs.resolveStepDefs(state.workflowName);
+    const known = defs.length > 0 ? defs.map((d) => d.name) : Object.keys(state.steps);
+    if (!known.includes(fromStep)) {
+      return jsonError(
+        404,
+        "step_not_found",
+        `Workflow "${state.workflowName}" has no step "${fromStep}"`,
+      );
+    }
+    if (!resume || !hasCapability(storage, "resetSteps")) {
+      return jsonError(
+        501,
+        "resume_not_supported",
+        "This server's workflows layer or storage cannot resume a run from a step",
+      );
+    }
+    try {
+      await resume({ workflowId: id, fromStep });
+    } catch (err) {
+      if (err instanceof WorkflowLockError) {
+        return jsonError(409, "run_in_flight", err.message);
+      }
+      throw err;
+    }
+    const response: ResumeRunResponse = { workflowId: id, fromStep };
     return accepted(response, runLocation(id));
   };
 }

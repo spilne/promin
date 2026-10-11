@@ -299,6 +299,9 @@ CREATE TABLE wf_schedules (
   namespace text,
   next_run timestamp with time zone,
   tick_count bigint DEFAULT 0 NOT NULL,
+  incarnation text NOT NULL,
+  last_error text,
+  last_error_at timestamp with time zone,
   CONSTRAINT wf_schedules_pkey PRIMARY KEY (id)
 );
 

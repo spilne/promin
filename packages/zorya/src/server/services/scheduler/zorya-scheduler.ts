@@ -206,7 +206,7 @@ export class ZoryaScheduler {
     schedule: DurableScheduleConfig;
   }): Promise<void> {
     const { agents, tick, schedule } = params;
-    const runId = scheduleTickRunId({ scheduleId: tick.scheduleId, tickNumber: tick.tickNumber });
+    const runId = scheduleTickRunId(tick);
     if (this.turns.has(runId)) return;
     this.turns.add(runId);
     let started: AgentScheduleStart;

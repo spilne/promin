@@ -240,7 +240,7 @@ describe("/rpc/storage scoping", () => {
       "resetSteps",
       "findSignalTokenById",
       "listSignalTokensForWorkflow",
-      "markSignalTokenCompleted",
+      "completeSignalToken",
       "createSignalToken",
     ]) {
       const res = await call(server, method, { workflowId: "x", tokenId: "t" }, WORKER_KEY);

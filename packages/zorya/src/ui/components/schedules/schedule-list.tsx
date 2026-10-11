@@ -369,6 +369,14 @@ export function ScheduleList({ onNavigate }: ScheduleListProps) {
                         >
                           {s.enabled ? "active" : "paused"}
                         </span>
+                        {s.lastError && (
+                          <span
+                            class="badge badge-sm badge-error ml-1"
+                            title={`${s.lastError.message} (${s.lastError.at})`}
+                          >
+                            failing
+                          </span>
+                        )}
                       </td>
                       <td class="text-right">
                         <div class="flex gap-1 justify-end">

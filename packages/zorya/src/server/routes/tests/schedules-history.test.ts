@@ -40,12 +40,23 @@ async function callHistory(
   return (await res.json()) as { history: HistoryRow[]; total: number };
 }
 
+/** The run id tick `tickNumber` of the schedule's current incarnation dispatches. */
+async function runIdOf(
+  sch: InMemorySchedulerStorage,
+  scheduleId: string,
+  tickNumber: number,
+): Promise<string> {
+  const { incarnation } = (await sch.loadScheduleState(scheduleId))!;
+  return scheduleTickRunId({ scheduleId, incarnation, tickNumber });
+}
+
 async function logTick(
   sch: InMemorySchedulerStorage,
   scheduleId: string,
   tickNumber: number,
   firedAt: Date,
 ): Promise<void> {
+  const { incarnation } = (await sch.loadScheduleState(scheduleId))!;
   await sch.commitPoll({
     updates: [
       {
@@ -53,11 +64,37 @@ async function logTick(
         firedAt,
         tickIncrement: 1,
         nextRun: new Date(firedAt.getTime() + 60_000),
-        ticks: [{ scheduleId, scheduledAt: firedAt, firedAt, tickNumber }],
+        ticks: [{ scheduleId, scheduledAt: firedAt, firedAt, incarnation, tickNumber }],
       },
     ],
   });
 }
+
+describe("getScheduleHistory — schedule incarnations", () => {
+  it("a schedule deleted and created again doesn't join the old schedule's runs", async () => {
+    const sch = new InMemorySchedulerStorage();
+    const wfs = new InMemoryWorkflowStorage();
+    const metadata = { workflowName: "nightly-wf" };
+
+    await sch.upsertSchedule({ id: "nightly", intervalMs: 60_000, metadata });
+    await logTick(sch, "nightly", 0, new Date("2026-05-01T09:00:00Z"));
+    const oldRun = await runIdOf(sch, "nightly", 0);
+    await wfs.createWorkflow({ workflowId: oldRun, workflowName: "nightly-wf", input: {} });
+    await wfs.failWorkflow({ workflowId: oldRun, error: "old failure" });
+
+    await sch.deleteSchedule("nightly");
+    await sch.upsertSchedule({ id: "nightly", intervalMs: 60_000, metadata });
+    await logTick(sch, "nightly", 0, new Date("2026-05-02T09:00:00Z"));
+    const newRun = await runIdOf(sch, "nightly", 0);
+    expect(newRun).not.toBe(oldRun);
+
+    const { history, total } = await callHistory(sch, wfs, "nightly");
+    expect(total).toBe(1);
+    expect(history.map((h) => [h.tickNumber, h.workflowId, h.status])).toEqual([
+      [0, newRun, "pending"],
+    ]);
+  });
+});
 
 describe("getScheduleHistory — agent ticks join the workflow row at scheduleTickRunId", () => {
   it("an agent-triggered tick that produced a completed workflow row reports kind=agent + real status", async () => {
@@ -82,7 +119,7 @@ describe("getScheduleHistory — agent ticks join the workflow row at scheduleTi
 
     // Simulate `dispatchAgentSchedule` having created and completed the
     // workflow row at the deterministic id.
-    const wfId = scheduleTickRunId({ scheduleId: "daily-summary", tickNumber: 0 });
+    const wfId = await runIdOf(sch, "daily-summary", 0);
     await wfs.createWorkflow({
       workflowId: wfId,
       workflowName: "summary-bot",
@@ -116,7 +153,7 @@ describe("getScheduleHistory — agent ticks join the workflow row at scheduleTi
     });
     const firedAt = new Date("2026-05-02T09:05:00Z");
     await logTick(sch, "flaky-bot", 0, firedAt);
-    const wfId = scheduleTickRunId({ scheduleId: "flaky-bot", tickNumber: 0 });
+    const wfId = await runIdOf(sch, "flaky-bot", 0);
     await wfs.createWorkflow({ workflowId: wfId, workflowName: "flaky", input: {} });
     await wfs.failWorkflow({ workflowId: wfId, error: "boom" });
 
@@ -157,7 +194,7 @@ describe("getScheduleHistory — agent ticks join the workflow row at scheduleTi
     });
     const firedAt = new Date("2026-05-02T03:00:00Z");
     await logTick(sch, "nightly", 0, firedAt);
-    const wfId = scheduleTickRunId({ scheduleId: "nightly", tickNumber: 0 });
+    const wfId = await runIdOf(sch, "nightly", 0);
     await wfs.createWorkflow({ workflowId: wfId, workflowName: "send-email", input: {} });
     await wfs.completeWorkflow({ workflowId: wfId, result: "sent" });
 

@@ -181,7 +181,7 @@ redisDescribe("RedisWorkflowStorage on Redis Cluster", (redis) => {
       idempotencyKey: "k",
       expiresAt: new Date(Date.now() + 60_000),
     });
-    await s.markSignalTokenCompleted({ tokenId: "tk", value: 1, now: new Date() });
+    await s.completeSignalToken({ tokenId: "tk", value: 1, now: new Date() });
 
     // Journal: completed, pending sleep and signal, completion, discard.
     await s.appendEntry({

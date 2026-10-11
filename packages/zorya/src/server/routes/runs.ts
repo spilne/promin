@@ -17,6 +17,7 @@ import { isTerminalWorkflowStatus, validate } from "@promin/workflow";
 import { z } from "zod";
 import { accepted, json, jsonError } from "../router.ts";
 import {
+  CancelRunRequestSchema,
   IdSchema,
   MarkFailedRequestSchema,
   NameSchema,
@@ -149,12 +150,17 @@ export function triggerRun(deps: RunRoutesDeps) {
   };
 }
 
-/** POST /api/runs/:id/cancel — end an in-flight run as cancelled. */
+/**
+ * POST /api/runs/:id/cancel — end an in-flight run as cancelled. Body
+ * (optional) `{ cascade: true }` cancels its in-flight descendants too.
+ */
 export function cancelRun(deps: RunRoutesDeps) {
   const service = makeService(deps);
-  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const { id } = parseParams({ params, schema: RunParamsSchema });
-    return runActionResponse({ workflowId: id, result: await service.cancel(id) });
+    const body = await parseBody({ req, schema: CancelRunRequestSchema.optional() });
+    const result = await service.cancel({ id, cascade: body?.cascade });
+    return runActionResponse({ workflowId: id, result });
   };
 }
 

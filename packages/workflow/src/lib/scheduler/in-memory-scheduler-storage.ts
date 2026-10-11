@@ -6,8 +6,13 @@
 // All state lives in a few Maps.
 // ---------------------------------------------------------------------------
 
-import type { DurableScheduleConfig, ScheduleTick } from "./types.ts";
-import type { CommitPollResult, ScheduleCommit, SchedulerStorage } from "./scheduler-storage.ts";
+import { newScheduleIncarnation, type DurableScheduleConfig, type ScheduleTick } from "./types.ts";
+import type {
+  CommitPollResult,
+  ScheduleCommit,
+  ScheduleState,
+  SchedulerStorage,
+} from "./scheduler-storage.ts";
 import { scheduleMetadataContains } from "./metadata-filter.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import { InMemoryLeaderLeases, type LeaderLease } from "./leader-lease.ts";
@@ -18,11 +23,6 @@ export interface InMemorySchedulerStorageConfig {
    * expiry. Default: `SystemWallClock`.
    */
   clock?: WallClock;
-}
-
-interface ScheduleState {
-  lastFired: Date | null;
-  tickCount: number;
 }
 
 export class InMemorySchedulerStorage implements SchedulerStorage {
@@ -73,27 +73,24 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     return out;
   }
 
-  async loadScheduleState(
-    id: string,
-  ): Promise<{ lastFired: Date | null; tickCount: number } | null> {
+  async loadScheduleState(id: string): Promise<ScheduleState | null> {
     if (!this.schedules.has(id)) return null;
-    return this.state.get(id) ?? { lastFired: null, tickCount: 0 };
+    return this.state.get(id) ?? null;
   }
 
-  async loadScheduleStates(
-    ids: string[],
-  ): Promise<Map<string, { lastFired: Date | null; tickCount: number }>> {
-    const out = new Map<string, { lastFired: Date | null; tickCount: number }>();
+  async loadScheduleStates(ids: string[]): Promise<Map<string, ScheduleState>> {
+    const out = new Map<string, ScheduleState>();
     for (const id of ids) {
-      if (!this.schedules.has(id)) continue;
-      out.set(id, this.state.get(id) ?? { lastFired: null, tickCount: 0 });
+      const state = this.schedules.has(id) ? this.state.get(id) : undefined;
+      if (state) out.set(id, state);
     }
     return out;
   }
 
   async recordFire(id: string, firedAt: Date, count: number = 1): Promise<void> {
-    const prev = this.state.get(id) ?? { lastFired: null, tickCount: 0 };
-    this.state.set(id, { lastFired: firedAt, tickCount: prev.tickCount + count });
+    const prev = this.state.get(id);
+    if (!prev) return;
+    this.state.set(id, { ...prev, lastFired: firedAt, tickCount: prev.tickCount + count });
   }
 
   async setNextRun(id: string, nextRun: Date | null): Promise<void> {
@@ -112,33 +109,39 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     const conflicts: string[] = [];
     for (const u of params.updates) {
       const cfg = this.schedules.get(u.id);
-      const current = cfg ? (this.state.get(u.id)?.tickCount ?? 0) : null;
-      if (u.expectedTickCount !== undefined && current !== u.expectedTickCount) {
+      const state = cfg ? this.state.get(u.id) : undefined;
+      const guarded = u.expectedTickCount !== undefined || u.expectedIncarnation !== undefined;
+      if (
+        guarded &&
+        (!state ||
+          (u.expectedTickCount !== undefined && state.tickCount !== u.expectedTickCount) ||
+          (u.expectedIncarnation !== undefined && state.incarnation !== u.expectedIncarnation))
+      ) {
         conflicts.push(u.id);
         continue;
       }
       // Deleted since the poll loaded it: nothing to update, keep it out of due-tracking.
-      if (!cfg) {
+      if (!cfg || !state) {
         this.nextRun.delete(u.id);
         continue;
       }
+      let next = state;
       if (u.firedAt !== undefined && u.tickIncrement && u.tickIncrement > 0) {
-        const prev = this.state.get(u.id) ?? { lastFired: null, tickCount: 0 };
-        this.state.set(u.id, {
-          lastFired: u.firedAt,
-          tickCount: prev.tickCount + u.tickIncrement,
-        });
+        next = { ...next, lastFired: u.firedAt, tickCount: next.tickCount + u.tickIncrement };
       }
+      if (u.lastError !== undefined) next = { ...next, lastError: u.lastError };
+      this.state.set(u.id, next);
       // A schedule paused since the poll loaded it stays out of due-tracking.
       if (cfg.enabled === false || u.nextRun === null) this.nextRun.delete(u.id);
       else if (u.nextRun !== undefined) this.nextRun.set(u.id, u.nextRun.getTime());
       if (u.ticks?.length) {
         const log = this.ticks.get(u.id) ?? [];
-        // Dedupe on (scheduleId, tickNumber) so a retried commitPoll doesn't
-        // double-log — same idempotency the SQLite PK enforces.
-        const existing = new Set(log.map((t) => t.tickNumber));
+        // Dedupe on (scheduleId, incarnation, tickNumber) so a retried
+        // commitPoll doesn't double-log — same idempotency the SQLite PK
+        // enforces.
+        const existing = new Set(log.map((t) => `${t.incarnation}.${t.tickNumber}`));
         for (const t of u.ticks) {
-          if (!existing.has(t.tickNumber)) log.push(t);
+          if (!existing.has(`${t.incarnation}.${t.tickNumber}`)) log.push(t);
         }
         this.ticks.set(u.id, log);
       }
@@ -173,9 +176,20 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     // Normalize: enabled defaults to true.
     const enabled = config.enabled !== false;
     this.schedules.set(config.id, { ...config, enabled });
-    if (!this.state.has(config.id)) {
-      this.state.set(config.id, { lastFired: null, tickCount: 0 });
-    }
+    const prev = this.state.get(config.id);
+    // An insert starts a new incarnation; a replace keeps it and the fire
+    // state. The config changed either way, so its last error is moot.
+    this.state.set(
+      config.id,
+      prev
+        ? { ...prev, lastError: null }
+        : {
+            lastFired: null,
+            tickCount: 0,
+            incarnation: newScheduleIncarnation(),
+            lastError: null,
+          },
+    );
     // Due-tracking follows the enabled flag. Disabled: out of due-tracking.
     // Enabled: keep an existing nextRun (the caller recomputes it when the
     // trigger changes), or seed one so findDue picks the schedule up —

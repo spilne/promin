@@ -16,7 +16,12 @@ import type { WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
 import type { Scheduler } from "./scheduler.ts";
 import type { DurableScheduleConfig, ScheduleConfig, ScheduleTick } from "./types.ts";
-import type { CommitPollResult, ScheduleCommit, SchedulerStorage } from "./scheduler-storage.ts";
+import type {
+  CommitPollResult,
+  ScheduleCommit,
+  ScheduleState,
+  SchedulerStorage,
+} from "./scheduler-storage.ts";
 import { schedulerLeaderKey, type LeaderLease } from "./leader-lease.ts";
 
 /** Where a `DurableScheduler` error happened. */
@@ -119,7 +124,7 @@ export interface DurableSchedulerConfig {
  * with it. If the consumer stops early (`take(n)`, interruption, a crash),
  * schedules whose ticks were all acknowledged are committed and the rest are
  * left due: the next poll emits them again with the **same `tickNumber`**.
- * Use `scheduleTickRunId(tick.scheduleId, tick.tickNumber)` as the run id so
+ * Use `scheduleTickRunId(tick)` as the run id so
  * a redelivered tick is a no-op. Operators that pull ahead (buffers,
  * `parMapAsync`) acknowledge a tick when they pull it.
  *
@@ -357,6 +362,7 @@ export class DurableScheduler implements Scheduler {
           scheduleName: config.name,
           scheduledAt,
           firedAt: now,
+          incarnation: state.incarnation,
           tickNumber: state.tickCount + i,
           metadata: config.metadata,
         }),
@@ -368,6 +374,7 @@ export class DurableScheduler implements Scheduler {
             firedAt: now,
             tickIncrement: ticks.length,
             expectedTickCount: state.tickCount,
+            expectedIncarnation: state.incarnation,
             ticks,
           },
         ],
@@ -631,7 +638,8 @@ export interface PlannedSchedule {
   /**
    * Set when the stored config could not be evaluated (e.g. an invalid cron
    * written straight to storage). The plan then removes the schedule from
-   * due-tracking, and `commitPlannedSchedules` also disables it.
+   * due-tracking and records the error as its `lastError`, and
+   * `commitPlannedSchedules` also disables it.
    */
   readonly error?: unknown;
 }
@@ -639,14 +647,15 @@ export interface PlannedSchedule {
 /**
  * Decide what each due schedule fires, without any I/O. Deleted and disabled
  * schedules are dropped from due-tracking. A schedule whose config throws
- * during evaluation is isolated: it gets an `error` and `nextRun = null`
- * instead of failing the whole poll. Enabled schedules get their due ticks
+ * during evaluation is isolated: it gets an `error`, `nextRun = null` and
+ * the error as its `lastError` instead of failing the whole poll. Enabled
+ * schedules get their due ticks, numbered within the stored incarnation,
  * and their next run (delayed by a random `[0, jitterMs)` when set).
  */
 export function planDueTicks(params: {
   ids: readonly string[];
   configs: ReadonlyMap<string, DurableScheduleConfig>;
-  states: ReadonlyMap<string, { lastFired: Date | null; tickCount: number }>;
+  states: ReadonlyMap<string, ScheduleState>;
   clock: WallClock;
   /** Randomness for `jitterMs`, returning `[0, 1)`. Default: `Math.random`. */
   random?: () => number;
@@ -655,17 +664,18 @@ export function planDueTicks(params: {
   const plans: PlannedSchedule[] = [];
   for (const id of params.ids) {
     const config = params.configs.get(id);
-    if (!config || config.enabled === false) {
+    const state = params.states.get(id);
+    if (!config || !state || config.enabled === false) {
       // Deleted since findDue, or disabled with a stale nextRun: drop it from due-tracking.
       plans.push({ id, ticks: [], commit: { id, nextRun: null } });
       continue;
     }
     try {
-      const state = params.states.get(id) ?? { lastFired: null, tickCount: 0 };
       const due = computeDueTicks({
         config,
         lastFired: state.lastFired,
         tickCount: state.tickCount,
+        incarnation: state.incarnation,
         clock: params.clock,
       });
       const nextRun = jitterNextRun({
@@ -681,15 +691,27 @@ export function planDueTicks(params: {
           id,
           firedAt: last?.firedAt,
           tickIncrement: due.length > 0 ? due.length : undefined,
-          // The ticks are numbered from this count; don't commit them over
-          // a fire that took those numbers in the meantime.
+          // The ticks are numbered from this count within this incarnation;
+          // don't commit them over a fire that took those numbers in the
+          // meantime, or onto a schedule re-created since.
           expectedTickCount: due.length > 0 ? state.tickCount : undefined,
+          expectedIncarnation: due.length > 0 ? state.incarnation : undefined,
           nextRun,
           ticks: due.length > 0 ? due : undefined,
         },
       });
     } catch (error) {
-      plans.push({ id, ticks: [], commit: { id, nextRun: null }, error });
+      plans.push({
+        id,
+        ticks: [],
+        commit: {
+          id,
+          nextRun: null,
+          expectedIncarnation: state.incarnation,
+          lastError: { message: errorMessage(error), at: params.clock.now() },
+        },
+        error,
+      });
     }
   }
   return plans;
@@ -717,6 +739,11 @@ export async function commitPlannedSchedules(params: {
     if (plan.error !== undefined) await params.storage.setEnabled(plan.id, false);
   }
   return result;
+}
+
+/** A thrown value's message, for `ScheduleError.message`. */
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function jitterNextRun(params: {
@@ -751,17 +778,19 @@ export function computeDueTicks(params: {
   config: DurableScheduleConfig;
   lastFired: Date | null;
   tickCount: number;
+  /** The schedule's incarnation, stamped on every tick. */
+  incarnation: string;
   /** Time source for "now" and each tick's `firedAt`. Default: `SystemWallClock`. */
   clock?: WallClock;
 }): ScheduleTick[] {
-  const { config, lastFired, tickCount, clock = SystemWallClock } = params;
+  const { config, lastFired, tickCount, incarnation, clock = SystemWallClock } = params;
   const now = clock.now();
   if (config.startAt && now < config.startAt) return [];
   if (config.endAt && now > config.endAt) return [];
 
   if (!lastFired) {
     // First-fire bootstrap: a never-fired schedule fires once immediately.
-    return [makeTick({ config, scheduledAt: now, tickNumber: tickCount, clock })];
+    return [makeTick({ config, scheduledAt: now, incarnation, tickNumber: tickCount, clock })];
   }
 
   const limit = Math.max(1, config.maxCatchUp ?? 0);
@@ -774,7 +803,7 @@ export function computeDueTicks(params: {
         ? missedIntervalOccurrences(missed)
         : [];
   return occurrences.map((scheduledAt, i) =>
-    makeTick({ config, scheduledAt, tickNumber: tickCount + i, clock }),
+    makeTick({ config, scheduledAt, incarnation, tickNumber: tickCount + i, clock }),
   );
 }
 
@@ -830,15 +859,17 @@ function missedIntervalOccurrences(params: MissedParams): Date[] {
 function makeTick(params: {
   config: DurableScheduleConfig;
   scheduledAt: Date;
+  incarnation: string;
   tickNumber: number;
   clock: WallClock;
 }): ScheduleTick {
-  const { config, scheduledAt, tickNumber, clock } = params;
+  const { config, scheduledAt, incarnation, tickNumber, clock } = params;
   return {
     scheduleId: config.id,
     scheduleName: config.name,
     scheduledAt,
     firedAt: clock.now(),
+    incarnation,
     tickNumber,
     metadata: config.metadata,
   };

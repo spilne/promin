@@ -67,10 +67,18 @@ export interface ScheduleTick {
   /** Actual fire time — when it was emitted (later than `scheduledAt` under jitter/load). */
   readonly firedAt: Date;
   /**
-   * Monotonic counter per schedule (0, 1, 2, ...). Durable schedulers deliver
-   * ticks at least once: a tick that was emitted but not acknowledged is
-   * emitted again with the same `tickNumber`, so derive run ids from it
-   * (`scheduleTickRunId`) to make redelivery a no-op.
+   * Token of the schedule's incarnation: chosen when a schedule id is first
+   * stored (or registered), kept by every later update, and new once the
+   * schedule is deleted and created again. `tickNumber` restarts at 0 for a
+   * new incarnation, so run ids include this token (`scheduleTickRunId`)
+   * and a recreated schedule's ticks never name a run of the deleted one.
+   */
+  readonly incarnation: string;
+  /**
+   * Monotonic counter per schedule incarnation (0, 1, 2, ...). Durable
+   * schedulers deliver ticks at least once: a tick that was emitted but not
+   * acknowledged is emitted again with the same `tickNumber`, so derive run
+   * ids from it (`scheduleTickRunId`) to make redelivery a no-op.
    */
   readonly tickNumber: number;
   /** Metadata from the ScheduleConfig. */
@@ -79,14 +87,31 @@ export interface ScheduleTick {
 
 /**
  * Deterministic id for the run a schedule tick produces — workflow id for
- * workflow-targeted ticks, agent run id for agent-targeted ticks. Keeps a
- * duplicate tick (TTL-window leader race) from creating two rows: the
- * second dispatch lands on the same id and `createWorkflow` (or the
- * agent runtime's equivalent) is idempotent.
+ * workflow-targeted ticks, agent run id for agent-targeted ticks:
+ * `<scheduleId>.<incarnation>.<tickNumber>`. Keeps a duplicate tick
+ * (TTL-window leader race, redelivery) from creating two rows: the second
+ * dispatch lands on the same id and `createWorkflow` (or the agent
+ * runtime's equivalent) is idempotent. The incarnation keeps a schedule
+ * deleted and created again under the same id from landing on the old
+ * schedule's runs.
  *
  * Both the scheduler loop's workflow-trigger path and
  * `dispatchAgentSchedule`'s agent path use this — single source of truth.
+ * A `ScheduleTick` can be passed as is.
  */
-export function scheduleTickRunId(params: { scheduleId: string; tickNumber: number }): string {
-  return `${params.scheduleId}.${params.tickNumber}`;
+export function scheduleTickRunId(params: {
+  scheduleId: string;
+  incarnation: string;
+  tickNumber: number;
+}): string {
+  return `${params.scheduleId}.${params.incarnation}.${params.tickNumber}`;
+}
+
+/**
+ * A fresh incarnation token for a schedule being stored for the first time
+ * (12 hex characters). Storages call it on insert and keep the token on
+ * every replace.
+ */
+export function newScheduleIncarnation(): string {
+  return crypto.randomUUID().replaceAll("-", "").slice(0, 12);
 }

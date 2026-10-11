@@ -60,6 +60,7 @@ describe("ZoryaAgents.dispatchSchedule", () => {
       scheduleName: "agent-sched",
       scheduledAt: new Date(),
       firedAt: new Date(),
+      incarnation: "inc1",
       tickNumber: 0,
       metadata: schedule.metadata,
     };
@@ -89,6 +90,7 @@ describe("ZoryaAgents.dispatchSchedule — starts the turn, doesn't await it", (
     scheduleName: "digest",
     scheduledAt: new Date(0),
     firedAt: new Date(0),
+    incarnation: "inc1",
     tickNumber: 3,
     metadata: schedule.metadata,
   };
@@ -111,7 +113,7 @@ describe("ZoryaAgents.dispatchSchedule — starts the turn, doesn't await it", (
     const agents = new ZoryaAgents({ registry, resolve: () => agent });
 
     const started = await agents.dispatchSchedule(tick, schedule);
-    expect(runIds).toEqual(["digest.3"]);
+    expect(runIds).toEqual(["digest.inc1.3"]);
 
     answer("done");
     expect(await started.done).toEqual({ ok: true, text: "done" });

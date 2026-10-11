@@ -274,6 +274,7 @@ describe("dispatchAgentSchedule", () => {
       scheduleId: "s-1",
       scheduledAt: new Date("2026-04-28T14:00:00Z"),
       firedAt: new Date("2026-04-28T14:00:01Z"),
+      incarnation: "inc1",
       tickNumber: 0,
     };
     const schedule = {
@@ -320,6 +321,7 @@ describe("dispatchAgentSchedule", () => {
         scheduleId: "s-1",
         scheduledAt: new Date(0),
         firedAt: new Date(0),
+        incarnation: "inc1",
         tickNumber: 0,
       },
       {
@@ -341,7 +343,13 @@ describe("dispatchAgentSchedule", () => {
 
   it("skips non-agent schedules", async () => {
     const result = await dispatchAgentSchedule(
-      { scheduleId: "x", scheduledAt: new Date(0), firedAt: new Date(0), tickNumber: 0 },
+      {
+        scheduleId: "x",
+        scheduledAt: new Date(0),
+        firedAt: new Date(0),
+        incarnation: "inc1",
+        tickNumber: 0,
+      },
       { id: "x", cron: "* * * * *", metadata: { workflowName: "send-email" } },
       {
         registry: new InMemoryAgentRegistry(),
@@ -356,7 +364,13 @@ describe("dispatchAgentSchedule", () => {
 
   it("returns recipe_not_found when the agentId is unknown", async () => {
     const result = await dispatchAgentSchedule(
-      { scheduleId: "x", scheduledAt: new Date(0), firedAt: new Date(0), tickNumber: 0 },
+      {
+        scheduleId: "x",
+        scheduledAt: new Date(0),
+        firedAt: new Date(0),
+        incarnation: "inc1",
+        tickNumber: 0,
+      },
       {
         id: "x",
         cron: "* * * * *",

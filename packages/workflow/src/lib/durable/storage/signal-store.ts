@@ -72,15 +72,17 @@ export interface CreateSignalTokenParams {
   readonly expiresAt: Date;
 }
 
-/** Params of `markSignalTokenCompleted`. */
-export interface MarkSignalTokenCompletedParams {
+/** Params of `completeSignalToken`. */
+export interface CompleteSignalTokenParams {
   readonly tokenId: string;
+  /** Recorded on the token and delivered as the signal's payload. */
   readonly value: unknown;
+  /** Recorded as the token's `completedAt`. */
   readonly now: Date;
 }
 
-/** Answer of `markSignalTokenCompleted`. */
-export type MarkSignalTokenCompletedResult =
+/** Answer of `completeSignalToken`. */
+export type CompleteSignalTokenResult =
   | { readonly outcome: "delivered"; readonly record: SignalTokenRecord }
   | { readonly outcome: "already_completed"; readonly record: SignalTokenRecord };
 
@@ -89,10 +91,11 @@ export type MarkSignalTokenCompletedResult =
  *
  * A signal token grants one-shot delivery rights to an external completer
  * (no Zorya auth) for a specific (workflowId, signalName). The completion
- * route validates the bearer, then calls `deliverSignal` to resume the
- * workflow through the existing path. Tokens don't change suspend
- * semantics — they're an authz sidecar, not a new primitive. Tokens are
- * workflow-scoped: they survive `startFreshRun`.
+ * route validates the bearer, then `completeSignalToken` consumes the token
+ * and delivers its signal in one write, so the workflow resumes through the
+ * existing signal path. Tokens don't change suspend semantics — they're an
+ * authz sidecar, not a new primitive. Tokens are workflow-scoped: they
+ * survive `startFreshRun`.
  */
 export interface SignalTokenStore {
   /**
@@ -109,15 +112,18 @@ export interface SignalTokenStore {
   findSignalTokenById(tokenId: string): Promise<SignalTokenRecord | null>;
 
   /**
-   * Atomic completion: marks the token as completed (`completedAt` +
-   * `completedValue`) only if it was still pending. Returns the prior
-   * state so the caller can decide between 200 (delivered) and 410
-   * (already completed). Doesn't itself call `deliverSignal` — the
-   * route does that after a successful claim.
+   * Consume a pending token and deliver its signal, as one atomic write:
+   * the token is marked completed (`completedAt` + `completedValue`) and
+   * `value` is delivered to the token's `(workflowId, signalName)` exactly
+   * as `deliverSignal` would. Either both land or neither does, so a
+   * failed call leaves the token pending and completable again.
+   *
+   * Of concurrent completions of one token exactly one answers
+   * `delivered`; the others answer `already_completed` with the winning
+   * record and deliver nothing. A token completed earlier answers
+   * `already_completed` too. Throws for an unknown token id.
    */
-  markSignalTokenCompleted(
-    params: MarkSignalTokenCompletedParams,
-  ): Promise<MarkSignalTokenCompletedResult>;
+  completeSignalToken(params: CompleteSignalTokenParams): Promise<CompleteSignalTokenResult>;
 
   /**
    * List every token issued for one workflow — drives

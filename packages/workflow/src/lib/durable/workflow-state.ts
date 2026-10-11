@@ -53,6 +53,33 @@ export function isCancelledRun(state: {
 }
 
 /**
+ * `errorTag` of a run an operator ended as failed (Zorya's mark-failed).
+ * Store it with `failWorkflow({ errorTag: MARKED_FAILED_ERROR_TAG })`.
+ */
+export const MARKED_FAILED_ERROR_TAG = "WorkflowMarkedFailedError";
+
+/** True when a run is `failed` because an operator marked it failed. */
+export function isMarkedFailedRun(state: {
+  readonly status: WorkflowStatus;
+  readonly errorTag?: string;
+}): boolean {
+  return state.status === "failed" && state.errorTag === MARKED_FAILED_ERROR_TAG;
+}
+
+/**
+ * True when a failed run's failure is a decision, not a crash: it was
+ * cancelled or marked failed by an operator. A parent step that reaches
+ * such a child again observes its stored failure; a child that failed by
+ * itself is run again from scratch when its parent step is retried.
+ */
+export function isFinalFailedRun(state: {
+  readonly status: WorkflowStatus;
+  readonly errorTag?: string;
+}): boolean {
+  return isCancelledRun(state) || isMarkedFailedRun(state);
+}
+
+/**
  * The status fields of a run, as returned by `WorkflowStorage.loadWorkflowStatus`:
  * what the runner re-reads between waves to notice a cancel without loading
  * every step row.

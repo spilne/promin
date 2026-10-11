@@ -137,7 +137,7 @@ export function createWorkflowStorageHandler(
     // -- Signal tokens.
     createSignalToken: (p) => storage.createSignalToken(p),
     findSignalTokenById: (p) => storage.findSignalTokenById(p.tokenId),
-    markSignalTokenCompleted: (p) => storage.markSignalTokenCompleted(p),
+    completeSignalToken: (p) => storage.completeSignalToken(p),
     listSignalTokensForWorkflow: (p) => storage.listSignalTokensForWorkflow(p.workflowId),
     // -- Streams.
     appendStreamChunk: (p) => storage.appendStreamChunk(p),

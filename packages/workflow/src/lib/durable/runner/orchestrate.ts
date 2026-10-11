@@ -25,6 +25,7 @@ import { withLock, type LockContext } from "../with-lock.ts";
 import { topologicalSort, type DagNode } from "../workflow-dag.ts";
 import {
   isCancelledRun,
+  isFinalFailedRun,
   isTerminalWorkflowStatus,
   type WorkflowState,
   type WorkflowStatus,
@@ -305,11 +306,13 @@ export async function runChildWorkflow(params: {
     version: workflow.version,
     guard: params.parentGuard,
   });
-  // A child that failed is run again from scratch when its parent step is
-  // retried; a completed, cancelled or tripwired child answers as stored.
+  // A child that failed by itself is run again from scratch when its parent
+  // step is retried. A completed or tripwired child answers as stored, and
+  // so does one whose failure was a decision (cancelled, or marked failed
+  // by an operator): the parent step observes that failure.
   const existing = created.created ? undefined : created.existing;
   const rerunFailed =
-    existing !== undefined && existing.status === "failed" && !isCancelledRun(existing);
+    existing !== undefined && existing.status === "failed" && !isFinalFailedRun(existing);
   return runWorkflowOrchestration(orchestrationContextFor({ workflow, runtime }), {
     workflowId,
     input,

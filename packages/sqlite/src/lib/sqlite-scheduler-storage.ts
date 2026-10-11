@@ -1,11 +1,13 @@
 import type { WallClock } from "@promin/workflow";
-import type {
-  CommitPollResult,
-  DurableScheduleConfig,
-  LeaderLease,
-  ScheduleCommit,
-  SchedulerStorage,
-  ScheduleTick,
+import {
+  newScheduleIncarnation,
+  type CommitPollResult,
+  type DurableScheduleConfig,
+  type LeaderLease,
+  type ScheduleCommit,
+  type ScheduleState,
+  type SchedulerStorage,
+  type ScheduleTick,
 } from "@promin/workflow/scheduler";
 import { SystemWallClock } from "@promin/workflow";
 import { flattenLeafPaths } from "@promin/workflow/storage-kit";
@@ -80,6 +82,9 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
         next_run        INTEGER,
         last_fired_at   INTEGER,
         tick_count      INTEGER NOT NULL DEFAULT 0,
+        incarnation     TEXT    NOT NULL,
+        last_error      TEXT,
+        last_error_at   INTEGER,
         created_at      INTEGER NOT NULL,
         updated_at      INTEGER NOT NULL
       )
@@ -92,19 +97,21 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
 
     // Past-fire log. Written inside the same transaction as `commitPoll`'s
     // state advance, so `tickCount` and the count of rows here can never
-    // disagree. PK is (schedule_id, tick_number) — duplicate inserts from
-    // a retried commitPoll are rejected, not silently double-counted. Index
+    // disagree. PK is (schedule_id, incarnation, tick_number) — duplicate
+    // inserts from a retried commitPoll are rejected, not silently
+    // double-counted. Index
     // on (schedule_id, fired_at DESC) so the history endpoint can paginate
     // by recency without re-scanning.
     this.db.run(`
       CREATE TABLE IF NOT EXISTS ${t}_ticks (
         schedule_id   TEXT    NOT NULL,
+        incarnation   TEXT    NOT NULL,
         tick_number   INTEGER NOT NULL,
         scheduled_at  INTEGER NOT NULL,
         fired_at      INTEGER NOT NULL,
         schedule_name TEXT,
         metadata      TEXT,
-        PRIMARY KEY (schedule_id, tick_number)
+        PRIMARY KEY (schedule_id, incarnation, tick_number)
       )
     `);
     this.db.run(
@@ -188,36 +195,29 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
     return out;
   }
 
-  async loadScheduleState(
-    id: string,
-  ): Promise<{ lastFired: Date | null; tickCount: number } | null> {
-    const row = this.db
-      .query<{ last_fired_at: number | null; tick_count: number }>(
-        `SELECT last_fired_at, tick_count FROM ${this._t} WHERE id = ?`,
-      )
-      .get(id);
-    if (!row) return null;
-    return {
-      lastFired: row.last_fired_at == null ? null : new Date(row.last_fired_at),
-      tickCount: Number(row.tick_count),
-    };
+  async loadScheduleState(id: string): Promise<ScheduleState | null> {
+    return (await this.loadScheduleStates([id])).get(id) ?? null;
   }
 
-  async loadScheduleStates(
-    ids: string[],
-  ): Promise<Map<string, { lastFired: Date | null; tickCount: number }>> {
+  async loadScheduleStates(ids: string[]): Promise<Map<string, ScheduleState>> {
     if (ids.length === 0) return new Map();
     const placeholders = ids.map(() => "?").join(", ");
     const rows = this.db
-      .query<{ id: string; last_fired_at: number | null; tick_count: number }>(
-        `SELECT id, last_fired_at, tick_count FROM ${this._t} WHERE id IN (${placeholders})`,
+      .query<StateRow>(
+        `SELECT id, last_fired_at, tick_count, incarnation, last_error, last_error_at
+           FROM ${this._t} WHERE id IN (${placeholders})`,
       )
       .all(...ids);
-    const out = new Map<string, { lastFired: Date | null; tickCount: number }>();
+    const out = new Map<string, ScheduleState>();
     for (const row of rows) {
       out.set(row.id, {
         lastFired: row.last_fired_at == null ? null : new Date(row.last_fired_at),
         tickCount: Number(row.tick_count),
+        incarnation: row.incarnation,
+        lastError:
+          row.last_error != null && row.last_error_at != null
+            ? { message: row.last_error, at: new Date(row.last_error_at) }
+            : null,
       });
     }
     return out;
@@ -257,8 +257,10 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
              next_run      = CASE WHEN enabled = 0 THEN NULL
                                   WHEN ? = 1 THEN ?
                                   ELSE next_run END,
+             last_error    = CASE WHEN ? = 1 THEN ? ELSE last_error END,
+             last_error_at = CASE WHEN ? = 1 THEN ? ELSE last_error_at END,
              updated_at    = ?
-       WHERE id = ? AND (? IS NULL OR tick_count = ?)
+       WHERE id = ? AND (? IS NULL OR tick_count = ?) AND (? IS NULL OR incarnation = ?)
        RETURNING id
     `);
     // INSERT OR IGNORE so a retried commitPoll (rare leader-transition
@@ -267,32 +269,41 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
     // first commit, no need to overwrite it.
     const insertTickStmt = this.db.query(`
       INSERT OR IGNORE INTO ${this._t}_ticks
-        (schedule_id, tick_number, scheduled_at, fired_at, schedule_name, metadata)
-      VALUES (?, ?, ?, ?, ?, ?)
+        (schedule_id, incarnation, tick_number, scheduled_at, fired_at, schedule_name, metadata)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `);
     const conflicts = this.db.transaction((): string[] => {
       if (lease) this.leases.assertCurrent(lease);
       const skipped: string[] = [];
       for (const u of updates) {
         const expected = u.expectedTickCount ?? null;
+        const expectedInc = u.expectedIncarnation ?? null;
+        const setError = u.lastError === undefined ? 0 : 1;
         const applied = updateStmt.get(
           u.firedAt == null ? null : u.firedAt.getTime(),
           u.tickIncrement ?? 0,
           u.nextRun === undefined ? 0 : 1,
           u.nextRun == null ? null : u.nextRun.getTime(),
+          setError,
+          u.lastError?.message ?? null,
+          setError,
+          u.lastError?.at.getTime() ?? null,
           now,
           u.id,
           expected,
           expected,
+          expectedInc,
+          expectedInc,
         );
         if (!applied) {
-          if (expected !== null) skipped.push(u.id);
+          if (expected !== null || expectedInc !== null) skipped.push(u.id);
           continue;
         }
         if (u.ticks) {
           for (const t of u.ticks) {
             insertTickStmt.run(
               t.scheduleId,
+              t.incarnation,
               t.tickNumber,
               t.scheduledAt.getTime(),
               t.firedAt.getTime(),
@@ -316,7 +327,7 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
     const offset = params.offset ?? 0;
     const rows = this.db
       .query<TickRow>(
-        `SELECT schedule_id, tick_number, scheduled_at, fired_at, schedule_name, metadata
+        `SELECT schedule_id, incarnation, tick_number, scheduled_at, fired_at, schedule_name, metadata
            FROM ${this._t}_ticks
           WHERE schedule_id = ?
           ORDER BY fired_at DESC, tick_number DESC
@@ -345,8 +356,8 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
       INSERT INTO ${this._t}
         (id, namespace, name, cron, rrule, interval_ms, timezone, enabled,
          start_at, end_at, jitter_ms, metadata, max_catch_up,
-         next_run, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         next_run, incarnation, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (id) DO UPDATE SET
         namespace      = excluded.namespace,
         name           = excluded.name,
@@ -363,6 +374,8 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
         next_run       = CASE WHEN excluded.enabled = 1
                               THEN COALESCE(${this._t}.next_run, excluded.next_run)
                               ELSE NULL END,
+        last_error     = NULL,
+        last_error_at  = NULL,
         updated_at     = excluded.updated_at
       `,
       )
@@ -389,6 +402,8 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
           : config.startAt && config.startAt.getTime() > now
             ? config.startAt.getTime()
             : now,
+        // Used on insert only: a replace keeps the stored incarnation.
+        newScheduleIncarnation(),
         now,
         now,
       );
@@ -554,8 +569,18 @@ function rowToConfig(row: ScheduleRow): DurableScheduleConfig {
   };
 }
 
+interface StateRow {
+  id: string;
+  last_fired_at: number | null;
+  tick_count: number;
+  incarnation: string;
+  last_error: string | null;
+  last_error_at: number | null;
+}
+
 interface TickRow {
   schedule_id: string;
+  incarnation: string;
   tick_number: number;
   scheduled_at: number;
   fired_at: number;
@@ -566,6 +591,7 @@ interface TickRow {
 function rowToTick(row: TickRow): ScheduleTick {
   return {
     scheduleId: row.schedule_id,
+    incarnation: row.incarnation,
     tickNumber: row.tick_number,
     scheduledAt: new Date(row.scheduled_at),
     firedAt: new Date(row.fired_at),

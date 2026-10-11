@@ -23,10 +23,12 @@
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
   StaleLeaseError,
+  newScheduleIncarnation,
   type CommitPollResult,
   type DurableScheduleConfig,
   type LeaderLease,
   type ScheduleCommit,
+  type ScheduleState,
   type SchedulerStorage,
 } from "@promin/workflow/scheduler";
 import { scheduleMetadataContains } from "@promin/workflow/storage-kit";
@@ -47,7 +49,9 @@ const GLOBAL_NS = "_";
 /**
  * Insert or replace a schedule hash atomically.
  *
- * - Fire state (`lastFiredAt`, `tickCount`) survives a replace.
+ * - Fire state (`lastFiredAt`, `tickCount`) and the `incarnation` survive a
+ *   replace; an insert takes ARGV[7] as its incarnation. `lastError` /
+ *   `lastErrorAt` are dropped either way (the hash is rebuilt).
  * - A namespace change moves the id between the per-namespace `all` sets and
  *   carries any pending next-run over to the new due set.
  * - Due-tracking follows the enabled flag: a disabled schedule is removed
@@ -56,7 +60,7 @@ const GLOBAL_NS = "_";
  *
  * KEYS: [schedule_key, all_key, due_key, namespaces_key]
  * ARGV: [id, namespace_key_base, namespace, seed_ms, enabled('1'|'0'),
- *        global_ns, field1, value1, ...]
+ *        global_ns, new_incarnation, field1, value1, ...]
  */
 const UPSERT_LUA = `
 local schedule_key = KEYS[1]
@@ -74,16 +78,19 @@ local existed = redis.call('HEXISTS', schedule_key, 'id') == 1
 local last_fired = false
 local tick_count = false
 local old_ns = false
+local incarnation = ARGV[7]
 if existed then
   last_fired = redis.call('HGET', schedule_key, 'lastFiredAt')
   tick_count = redis.call('HGET', schedule_key, 'tickCount')
   old_ns = redis.call('HGET', schedule_key, 'namespace') or global_ns
+  incarnation = redis.call('HGET', schedule_key, 'incarnation') or incarnation
 end
 
 local fields = {}
-for i = 7, #ARGV do fields[#fields + 1] = ARGV[i] end
+for i = 8, #ARGV do fields[#fields + 1] = ARGV[i] end
 redis.call('DEL', schedule_key)
 redis.call('HSET', schedule_key, unpack(fields))
+redis.call('HSET', schedule_key, 'incarnation', incarnation)
 if last_fired then redis.call('HSET', schedule_key, 'lastFiredAt', last_fired) end
 if tick_count then redis.call('HSET', schedule_key, 'tickCount', tick_count) end
 redis.call('SADD', all_key, id)
@@ -188,15 +195,18 @@ return out
 /**
  * Commit a poll atomically. With a lease (ARGV[1] = '1'), nothing is written
  * unless the lease's epoch key still holds ARGV[2]. Per entry: skip and
- * report it when its expected tick count (if any) no longer matches or the
- * schedule is gone; otherwise advance the fire state and, if requested, set
- * or clear its next run — a disabled schedule always leaves due-tracking.
+ * report it when its expected tick count or incarnation (if any) no longer
+ * matches or the schedule is gone; otherwise advance the fire state, set or
+ * clear its next run if requested — a disabled schedule always leaves
+ * due-tracking — and set or clear its last error if requested.
  *
  * KEYS: [lease_epoch_key] when fenced, else [namespaces_key] (only routes
  *       the script to the scheduler's slot)
  * ARGV: [fenced('1'|'0'), epoch, schedule_key_prefix, namespace_key_base,
  *        global_ns, then per entry: id, fired_at_ms|'', tick_inc,
- *        set_next('1'|'0'), next_run_ms|'', expected_tick_count|'']
+ *        set_next('1'|'0'), next_run_ms|'', expected_tick_count|'',
+ *        expected_incarnation|'', error_op (''=keep, '0'=clear, '1'=set),
+ *        error_message, error_at_ms]
  * Returns {'stale', current_epoch} or {'ok', conflict_id, ...}.
  */
 const COMMIT_POLL_LUA = `
@@ -208,18 +218,25 @@ local prefix = ARGV[3]
 local ns_base = ARGV[4]
 local global_ns = ARGV[5]
 local out = {'ok'}
-for i = 6, #ARGV, 6 do
+for i = 6, #ARGV, 10 do
   local id = ARGV[i]
   local key = prefix .. id
-  local fields = redis.call('HMGET', key, 'id', 'namespace', 'enabled', 'tickCount')
+  local fields = redis.call('HMGET', key, 'id', 'namespace', 'enabled', 'tickCount', 'incarnation')
   local expected = ARGV[i + 5]
+  local expected_inc = ARGV[i + 6]
   local count = tonumber(fields[4] or '0')
   if not fields[1] then
-    if expected ~= '' then out[#out + 1] = id end
+    if expected ~= '' or expected_inc ~= '' then out[#out + 1] = id end
     redis.call('ZREM', ns_base .. global_ns .. ':due', id)
-  elseif expected ~= '' and tonumber(expected) ~= count then
+  elseif (expected ~= '' and tonumber(expected) ~= count)
+      or (expected_inc ~= '' and expected_inc ~= fields[5]) then
     out[#out + 1] = id
   else
+    if ARGV[i + 7] == '1' then
+      redis.call('HSET', key, 'lastError', ARGV[i + 8], 'lastErrorAt', ARGV[i + 9])
+    elseif ARGV[i + 7] == '0' then
+      redis.call('HDEL', key, 'lastError', 'lastErrorAt')
+    end
     local inc = tonumber(ARGV[i + 2])
     if ARGV[i + 1] ~= '' and inc > 0 then
       redis.call('HSET', key, 'lastFiredAt', ARGV[i + 1])
@@ -357,31 +374,18 @@ export class RedisSchedulerStorage implements SchedulerStorage {
     return out;
   }
 
-  async loadScheduleState(
-    id: string,
-  ): Promise<{ lastFired: Date | null; tickCount: number } | null> {
+  async loadScheduleState(id: string): Promise<ScheduleState | null> {
     const raw = await this.redis.hgetall(this.scheduleKey(id));
-    if (!raw || !raw.id) return null;
-    return {
-      lastFired: raw.lastFiredAt ? new Date(Number(raw.lastFiredAt)) : null,
-      tickCount: raw.tickCount ? Number(raw.tickCount) : 0,
-    };
+    return raw && raw.id ? rawToState(raw) : null;
   }
 
-  async loadScheduleStates(
-    ids: string[],
-  ): Promise<Map<string, { lastFired: Date | null; tickCount: number }>> {
-    const out = new Map<string, { lastFired: Date | null; tickCount: number }>();
+  async loadScheduleStates(ids: string[]): Promise<Map<string, ScheduleState>> {
+    const out = new Map<string, ScheduleState>();
     if (ids.length === 0) return out;
     const raws = await Promise.all(ids.map((id) => this.redis.hgetall(this.scheduleKey(id))));
     for (let i = 0; i < ids.length; i++) {
       const raw = raws[i];
-      if (raw && raw.id) {
-        out.set(ids[i]!, {
-          lastFired: raw.lastFiredAt ? new Date(Number(raw.lastFiredAt)) : null,
-          tickCount: raw.tickCount ? Number(raw.tickCount) : 0,
-        });
-      }
+      if (raw && raw.id) out.set(ids[i]!, rawToState(raw));
     }
     return out;
   }
@@ -424,6 +428,10 @@ export class RedisSchedulerStorage implements SchedulerStorage {
       u.nextRun === undefined ? "0" : "1",
       u.nextRun ? String(u.nextRun.getTime()) : "",
       u.expectedTickCount === undefined ? "" : String(u.expectedTickCount),
+      u.expectedIncarnation ?? "",
+      u.lastError === undefined ? "" : u.lastError === null ? "0" : "1",
+      u.lastError?.message ?? "",
+      u.lastError ? String(u.lastError.at.getTime()) : "",
     ]);
     const keys = lease ? [this.leases.keysFor(lease.key).epoch] : [this.namespacesKey];
     const reply = (await this.redis.eval(
@@ -480,6 +488,7 @@ export class RedisSchedulerStorage implements SchedulerStorage {
       seedMs,
       fields.enabled!,
       GLOBAL_NS,
+      newScheduleIncarnation(),
       ...Object.entries(fields).flat(),
     );
   }
@@ -616,6 +625,18 @@ export class RedisSchedulerStorage implements SchedulerStorage {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function rawToState(raw: Record<string, string>): ScheduleState {
+  return {
+    lastFired: raw.lastFiredAt ? new Date(Number(raw.lastFiredAt)) : null,
+    tickCount: raw.tickCount ? Number(raw.tickCount) : 0,
+    incarnation: raw.incarnation ?? "",
+    lastError:
+      raw.lastError !== undefined && raw.lastErrorAt !== undefined
+        ? { message: raw.lastError, at: new Date(Number(raw.lastErrorAt)) }
+        : null,
+  };
+}
 
 function rawToConfig(raw: Record<string, string>): DurableScheduleConfig {
   return {
