@@ -37,7 +37,7 @@ export function FragmentsPage() {
       !(await confirm({
         title: `Delete fragment "${key}"`,
         message:
-          "Role recipes referencing it will fall back to base only (with a console warning at resolve).",
+          "A fragment still layered by a role or an agent's inline role is refused — remove it there first.",
         variant: "danger",
         confirmLabel: "Delete",
       }))

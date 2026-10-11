@@ -127,6 +127,7 @@ export type {
 } from "./agent/types.ts";
 
 export { LocalAgent } from "./agent/local-agent.ts";
+export { THREAD_AGENT_METADATA_KEY } from "./agent/types.ts";
 export { ThreadNotFoundError } from "./agent/errors.ts";
 export type { LocalAgentConfig } from "./agent/local-agent.ts";
 

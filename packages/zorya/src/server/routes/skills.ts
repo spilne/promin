@@ -26,6 +26,7 @@ import type {
 import { DEFAULT_SKILL_VERSION } from "@promin/agent";
 import { z } from "zod";
 import { json, jsonError, parseIntParam, readJson } from "../router.ts";
+import { assertIfMatch, contentEtag, withEtag } from "../preconditions.ts";
 
 // Re-export the underlying type so the UI bundle types responses without
 // importing @promin/agent directly (matches agents.ts).
@@ -93,8 +94,8 @@ export function getSkill(deps: SkillGatewayDeps) {
     const url = new URL(req.url);
     const version = url.searchParams.get("version") ?? undefined;
     const skill = await deps.registry.get(id, version);
-    if (!skill) return jsonError(404, "skill_not_found", `Skill "${id}" is not registered.`);
-    return json(200, skill);
+    if (!skill) return skillNotFound(id);
+    return skillResponse(200, skill);
   };
 }
 
@@ -116,6 +117,7 @@ export function listSkillVersions(deps: SkillGatewayDeps) {
 //   POST   — create-only: 409 when (id, version) exists.
 //   PATCH  — edits the active version; metadata merges field by field, so
 //            `trust` and `enabled` change only when the body names them.
+//            `If-Match` (the GET `etag`) makes it conditional (412 on mismatch).
 //   DELETE — 409 while a role or agent references the skill (unless
 //            ?force=true). File-managed skills refuse PATCH / DELETE.
 // ---------------------------------------------------------------------------
@@ -155,6 +157,11 @@ function parseMetadata(
 
 function optionalString(raw: unknown): string | undefined {
   return typeof raw === "string" && raw.length > 0 ? raw : undefined;
+}
+
+/** A skill row with its entity tag (`If-Match` on PATCH compares against it). */
+function skillResponse(status: number, skill: RegisteredSkill): Response {
+  return withEtag(json(status, skill), contentEtag(skill));
 }
 
 function skillNotFound(id: string): Response {
@@ -202,7 +209,12 @@ export function createSkill(deps: SkillGatewayDeps) {
       ...(whenToUse !== undefined && { whenToUse }),
       ...(metadata !== undefined && { metadata }),
     };
-    return json(201, await deps.registry.register(input));
+    const registered = await deps.registry.register(input);
+    // Answer the row as the store reads it back, so the `etag` matches the next GET.
+    return skillResponse(
+      201,
+      (await deps.registry.get(registered.id, registered.version)) ?? registered,
+    );
   };
 }
 
@@ -225,6 +237,7 @@ export function updateSkill(deps: SkillGatewayDeps) {
         `Only the active version (${active.version}) can be edited; publish a new version instead.`,
       );
     }
+    assertIfMatch({ req, etag: contentEtag(active), what: "skill" });
     for (const field of ["description", "body"] as const) {
       const v = body[field];
       if (v !== undefined && (typeof v !== "string" || v.length === 0)) {
@@ -248,7 +261,7 @@ export function updateSkill(deps: SkillGatewayDeps) {
       body: typeof body.body === "string" ? body.body : active.body,
       metadata,
     });
-    return json(200, updated);
+    return skillResponse(200, (await deps.registry.get(id, updated.version)) ?? updated);
   };
 }
 

@@ -1,7 +1,7 @@
 import { useMemo, useState } from "preact/hooks";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
-import type { RegisteredAgent } from "../../../server/routes/agents.ts";
+import type { AgentListEntry, RegisteredAgent } from "../../../server/routes/agents.ts";
 import { Page } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { formatRelative } from "../../lib/format.ts";
@@ -29,8 +29,15 @@ const BLANK_AGENT: RegisteredAgent = {
   updatedAt: 0,
 };
 
+/** Agents the list page loads — the API's largest page. */
+const AGENT_PAGE_LIMIT = 500;
+
 export function AgentList({ onOpen }: AgentListProps) {
-  const { data, loading, error, refresh } = useFetch(() => api.listAgents(), [], 30_000);
+  const { data, loading, error, refresh } = useFetch(
+    () => api.listAgents({ limit: AGENT_PAGE_LIMIT }),
+    [],
+    30_000,
+  );
   const { data: sourcesData } = useFetch(() => api.listAgentSources(), [], 30_000);
   const fileManaged = useMemo(() => new Set(sourcesData?.fileManaged ?? []), [sourcesData]);
   const [query, setQuery] = useState("");
@@ -96,7 +103,9 @@ export function AgentList({ onOpen }: AgentListProps) {
           <h2 class="text-xl font-semibold">Agents</h2>
           <p class="text-xs text-base-content/50">
             {configured
-              ? `${agents.length} registered · auto-refreshes every 30s`
+              ? `${data.total} registered${
+                  data.total > agents.length ? ` · showing the first ${agents.length}` : ""
+                } · auto-refreshes every 30s`
               : "Agent gateway not configured on this server"}
           </p>
         </div>
@@ -187,7 +196,7 @@ function AgentRow({
   onOpen,
   fileManaged,
 }: {
-  agent: RegisteredAgent;
+  agent: AgentListEntry;
   onOpen: (id: string) => void;
   fileManaged: boolean;
 }) {
@@ -213,7 +222,10 @@ function AgentRow({
           {agent.metadata.description && (
             <span class="text-xs text-base-content/60">{agent.metadata.description}</span>
           )}
-          <span class="text-[10px] text-base-content/40 font-mono">v{agent.version}</span>
+          <span class="text-[10px] text-base-content/40 font-mono">
+            {agent.version}
+            {agent.versionCount > 1 && ` · ${agent.versionCount} versions`}
+          </span>
         </div>
       </td>
       <td class="font-mono text-xs">{model}</td>

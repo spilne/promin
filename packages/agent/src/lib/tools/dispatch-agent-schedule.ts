@@ -36,7 +36,7 @@
 
 import type { ScheduleTick, DurableScheduleConfig } from "@promin/workflow/scheduler";
 import { scheduleTickRunId } from "@promin/workflow/scheduler";
-import type { Agent } from "../agent/types.ts";
+import { THREAD_AGENT_METADATA_KEY, type Agent } from "../agent/types.ts";
 import type { AgentRegistry, RegisteredAgent } from "../registry/types.ts";
 
 export interface AgentScheduleMetadata {
@@ -178,7 +178,13 @@ export async function startAgentSchedule(
   // billing the model again.
   const runId = scheduleTickRunId({ scheduleId: tick.scheduleId, tickNumber: tick.tickNumber });
 
-  const thread = meta.threadId ? await agent.thread(meta.threadId) : undefined;
+  // A thread this tick creates is stamped with the recipe it runs, so the
+  // agent's gateway can list and open it like any other of its threads.
+  const thread = meta.threadId
+    ? await agent.thread(meta.threadId, {
+        metadata: { [THREAD_AGENT_METADATA_KEY]: recipe.id },
+      })
+    : undefined;
   // Kick the turn off; only its outcome is awaited, in `done`.
   const turn = Promise.resolve(
     thread ? thread.send(input, { runId }) : agent.invoke(input, { runId }),

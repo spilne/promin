@@ -135,6 +135,16 @@ export interface AgentInvokeOpts {
   readonly runId?: string;
 }
 
+/**
+ * Thread-metadata key holding the id of the agent that owns the thread.
+ * `LocalAgent` stamps it on every thread it creates (from
+ * `LocalAgentConfig.agentId`) and keeps it across `setMetadata`, so a
+ * gateway that lists or opens threads by agent reaches every thread the
+ * agent created — through the gateway, programmatically or from a
+ * scheduled dispatch.
+ */
+export const THREAD_AGENT_METADATA_KEY = "agentId";
+
 export interface ThreadOptions {
   /** User / persona key — wires to `MemoryStore` resource layer. */
   readonly resourceId?: string;
@@ -142,7 +152,11 @@ export interface ThreadOptions {
   readonly namespaceId?: string;
   /** Default `true`. When `false`, refuses to create a thread that doesn't exist. */
   readonly createIfMissing?: boolean;
-  /** Free-form thread metadata persisted with the thread row. */
+  /**
+   * Free-form thread metadata persisted with the thread row when it is
+   * created. The agent's own `THREAD_AGENT_METADATA_KEY` stamp wins over
+   * one passed here.
+   */
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 

@@ -42,11 +42,14 @@ import type {
   StoredMessage,
   ThreadRow,
 } from "@promin/agent";
-import { inlineRoleDefinition, resolveSystemPrompt } from "@promin/agent";
+import {
+  inlineRoleDefinition,
+  resolveSystemPrompt,
+  THREAD_AGENT_METADATA_KEY,
+} from "@promin/agent";
 import { z } from "zod";
 import { json, jsonError } from "../router.ts";
 import { internalError, type ScopeAuthorizer } from "./agent-gateway-kit.ts";
-import { THREAD_AGENT_METADATA_KEY } from "./agents.ts";
 
 export interface MemoryInspectorDeps {
   readonly memory: MemoryStore;

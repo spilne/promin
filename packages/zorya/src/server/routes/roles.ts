@@ -9,7 +9,8 @@
 //   GET    /api/roles/:id          — get one (active version)
 //   GET    /api/roles/:id/versions — all versions of an id
 //   POST   /api/roles              — create a role (409 when (id, version) exists)
-//   PATCH  /api/roles/:id          — edit the active version (metadata merges)
+//   PATCH  /api/roles/:id          — edit the active version (metadata merges);
+//                                    `If-Match` (the GET `etag`) → 412 on mismatch
 //   DELETE /api/roles/:id          — delete (all versions, or ?version=);
 //                                    409 while agents bind it, unless ?force=true
 //
@@ -28,6 +29,7 @@ import type {
 import { DEFAULT_ROLE_VERSION } from "@promin/agent";
 import { z } from "zod";
 import { json, jsonError, parseIntParam, readJson } from "../router.ts";
+import { assertIfMatch, contentEtag, withEtag } from "../preconditions.ts";
 
 // Re-export so the UI bundle types responses without importing @promin/agent
 // directly (matches agents.ts / skills.ts).
@@ -76,7 +78,7 @@ export function getRole(deps: RoleGatewayDeps) {
     const version = url.searchParams.get("version") ?? undefined;
     const role = await deps.registry.get(id, version);
     if (!role) return roleNotFound(id);
-    return json(200, role);
+    return roleResponse(200, role);
   };
 }
 
@@ -88,6 +90,11 @@ export function listRoleVersions(deps: RoleGatewayDeps) {
     if (versions.length === 0) return roleNotFound(id);
     return json(200, { versions } satisfies RoleVersionsResponse);
   };
+}
+
+/** A role row with its entity tag (`If-Match` on PATCH compares against it). */
+function roleResponse(status: number, role: RegisteredRole): Response {
+  return withEtag(json(status, role), contentEtag(role));
 }
 
 function roleNotFound(id: string): Response {
@@ -185,7 +192,12 @@ export function createRole(deps: RoleGatewayDeps) {
       definition: def.definition,
       ...(metadata !== undefined && { metadata }),
     };
-    return json(201, await deps.registry.register(input));
+    const registered = await deps.registry.register(input);
+    // Answer the row as the store reads it back, so the `etag` matches the next GET.
+    return roleResponse(
+      201,
+      (await deps.registry.get(registered.id, registered.version)) ?? registered,
+    );
   };
 }
 
@@ -207,6 +219,7 @@ export function updateRole(deps: RoleGatewayDeps) {
         `Only the active version (${active.version}) can be edited; publish a new version instead.`,
       );
     }
+    assertIfMatch({ req, etag: contentEtag(active), what: "role" });
 
     // Field-merge against the active row so a partial PATCH (e.g. just
     // editing tags) keeps everything it doesn't mention.
@@ -228,7 +241,7 @@ export function updateRole(deps: RoleGatewayDeps) {
       definition,
       metadata,
     });
-    return json(200, updated);
+    return roleResponse(200, (await deps.registry.get(id, updated.version)) ?? updated);
   };
 }
 

@@ -816,6 +816,8 @@ export class ZoryaServer {
         registry: fragments.registry,
         setFragment: (key: string, content: string) => fragments.setFragment(key, content),
         deleteFragment: (key: string) => fragments.deleteFragment(key),
+        ...(this.agents !== undefined && { agents: this.agents.registry }),
+        ...(this.agents?.roles !== undefined && { roles: this.agents.roles }),
       };
       this.router
         .get("/api/fragments", listFragments(fragmentDeps))

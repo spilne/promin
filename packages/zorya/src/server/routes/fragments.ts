@@ -8,13 +8,17 @@
 //   GET    /api/fragments              — list all
 //   GET    /api/fragments/:key         — get one
 //   POST   /api/fragments              — create a custom fragment
-//   PATCH  /api/fragments/:key         — update content
-//   DELETE /api/fragments/:key         — delete
+//   PATCH  /api/fragments/:key         — update content; `If-Match` (the GET
+//                                         `etag`) → 412 on mismatch
+//   DELETE /api/fragments/:key         — delete; 409 while a role or an
+//                                         agent's inline role layers it,
+//                                         unless ?force=true
 //   GET    /api/fragments/_sources     — { fileManaged: string[] }
 // ---------------------------------------------------------------------------
 
-import type { FragmentRegistry } from "@promin/agent";
+import type { AgentRegistry, FragmentRegistry, RoleDefinition, RoleRegistry } from "@promin/agent";
 import { json, jsonError, readJson } from "../router.ts";
+import { assertIfMatch, contentEtag, withEtag } from "../preconditions.ts";
 
 export interface FragmentDto {
   readonly key: string;
@@ -40,6 +44,19 @@ export interface FragmentGatewayDeps {
    */
   setFragment(key: string, content: string): Promise<void>;
   deleteFragment(key: string): Promise<void>;
+  /** Agent recipes — an inline role that layers the fragment blocks its delete. */
+  readonly agents?: AgentRegistry;
+  /** Role registry — a role that layers the fragment blocks its delete. */
+  readonly roles?: RoleRegistry;
+}
+
+/** A fragment with its entity tag (`If-Match` on PATCH compares against it). */
+function fragmentResponse(status: number, fragment: FragmentDto): Response {
+  return withEtag(json(status, fragment), contentEtag(fragment));
+}
+
+function fragmentNotFound(key: string): Response {
+  return jsonError(404, "fragment_not_found", `Fragment "${key}" is not registered.`);
 }
 
 function asMessage(err: unknown): string {
@@ -68,10 +85,8 @@ export function getFragment(deps: FragmentGatewayDeps) {
     const key = params.key;
     if (!key) return jsonError(400, "missing_key");
     const content = deps.registry.get(key);
-    if (content === undefined) {
-      return jsonError(404, "fragment_not_found", `Fragment "${key}" is not registered.`);
-    }
-    return json(200, { key, content } satisfies FragmentDto);
+    if (content === undefined) return fragmentNotFound(key);
+    return fragmentResponse(200, { key, content });
   };
 }
 
@@ -119,7 +134,7 @@ export function createFragment(deps: FragmentGatewayDeps) {
     }
     try {
       await deps.setFragment(body.key, body.content);
-      return json(201, { key: body.key, content: body.content } satisfies FragmentDto);
+      return fragmentResponse(201, { key: body.key, content: body.content });
     } catch (err) {
       return jsonError(500, "create_failed", asMessage(err));
     }
@@ -135,12 +150,12 @@ export function updateFragment(deps: FragmentGatewayDeps) {
     if (typeof body.content !== "string" || body.content.length === 0) {
       return jsonError(400, "missing_content");
     }
-    if (deps.registry.get(key) === undefined) {
-      return jsonError(404, "fragment_not_found", `Fragment "${key}" is not registered.`);
-    }
+    const current = deps.registry.get(key);
+    if (current === undefined) return fragmentNotFound(key);
+    assertIfMatch({ req, etag: contentEtag({ key, content: current }), what: "fragment" });
     try {
       await deps.setFragment(key, body.content);
-      return json(200, { key, content: body.content } satisfies FragmentDto);
+      return fragmentResponse(200, { key, content: body.content });
     } catch (err) {
       return jsonError(500, "update_failed", asMessage(err));
     }
@@ -148,9 +163,22 @@ export function updateFragment(deps: FragmentGatewayDeps) {
 }
 
 export function deleteFragment(deps: FragmentGatewayDeps) {
-  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const key = params.key;
     if (!key) return jsonError(400, "missing_key");
+    if (deps.registry.get(key) === undefined) return fragmentNotFound(key);
+    const force = new URL(req.url).searchParams.get("force") === "true";
+    if (!force) {
+      const users = await fragmentReferences({ deps, key });
+      if (users.agents.length > 0 || users.roles.length > 0) {
+        return json(409, {
+          error: "fragment_in_use",
+          message:
+            "Roles or agents still layer this fragment; remove it there or pass ?force=true.",
+          ...users,
+        });
+      }
+    }
     try {
       await deps.deleteFragment(key);
       return new Response(null, { status: 204 });
@@ -158,4 +186,31 @@ export function deleteFragment(deps: FragmentGatewayDeps) {
       return jsonError(500, "delete_failed", asMessage(err));
     }
   };
+}
+
+function definitionLayersFragment(def: RoleDefinition, key: string): boolean {
+  const sp = def.systemPrompt;
+  return typeof sp === "object" && sp !== null && (sp.layers?.includes(key) ?? false);
+}
+
+/** Agents (inline roles) and roles whose system prompt layers fragment `key`. */
+async function fragmentReferences(params: {
+  deps: FragmentGatewayDeps;
+  key: string;
+}): Promise<{ agents: string[]; roles: string[] }> {
+  const { deps, key } = params;
+  const agents = new Set<string>();
+  const roles = new Set<string>();
+  if (deps.agents) {
+    for (const recipe of await deps.agents.list({})) {
+      if (recipe.backend.type !== "local" || !("inline" in recipe.backend.role)) continue;
+      if (definitionLayersFragment(recipe.backend.role.inline, key)) agents.add(recipe.id);
+    }
+  }
+  if (deps.roles) {
+    for (const role of await deps.roles.list({})) {
+      if (definitionLayersFragment(role.definition, key)) roles.add(role.id);
+    }
+  }
+  return { agents: [...agents].sort(), roles: [...roles].sort() };
 }

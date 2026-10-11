@@ -37,6 +37,7 @@ import type {
 import type { WorkflowDefDto, WorkflowDefsResponse } from "../../server/routes/workflow-defs.ts";
 import type {
   AgentsListResponse,
+  AgentVersionsResponse,
   AgentSourcesResponse,
   AgentThreadsResponse,
   RegisteredAgent,
@@ -450,8 +451,20 @@ export const api = {
   // ---------------------------------------------------------------------
   // Agents — registry browsing + chat console
   // ---------------------------------------------------------------------
-  listAgents(): Promise<AgentsListResponse> {
-    return req<AgentsListResponse>(`/api/agents`);
+  /**
+   * One row per agent (its active version + version count), sorted by id.
+   * `total` counts every matching agent; page with `limit` / `offset`.
+   */
+  listAgents(
+    opts: { capability?: string; tag?: string; limit?: number; offset?: number } = {},
+  ): Promise<AgentsListResponse> {
+    const qs = new URLSearchParams();
+    if (opts.capability) qs.set("capability", opts.capability);
+    if (opts.tag) qs.set("tag", opts.tag);
+    if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+    if (opts.offset !== undefined) qs.set("offset", String(opts.offset));
+    const q = qs.toString();
+    return req<AgentsListResponse>(`/api/agents${q ? `?${q}` : ""}`);
   },
   getAgent(id: string): Promise<RegisteredAgent> {
     return req<RegisteredAgent>(`/api/agents/${encodeURIComponent(id)}`);
@@ -487,8 +500,8 @@ export const api = {
     const qp = version ? `?version=${encodeURIComponent(version)}` : "";
     return req<void>(`/api/agents/${encodeURIComponent(id)}${qp}`, { method: "DELETE" });
   },
-  listAgentVersions(id: string): Promise<{ versions: RegisteredAgent[] }> {
-    return req<{ versions: RegisteredAgent[] }>(`/api/agents/${encodeURIComponent(id)}/versions`);
+  listAgentVersions(id: string): Promise<AgentVersionsResponse> {
+    return req<AgentVersionsResponse>(`/api/agents/${encodeURIComponent(id)}/versions`);
   },
   cloneAgent(
     id: string,

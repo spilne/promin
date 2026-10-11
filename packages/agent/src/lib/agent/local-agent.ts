@@ -55,6 +55,7 @@ import { createCallAgentTool, createFindAgentTool } from "../network/runtime.ts"
 import { frameTask } from "./frame-task.ts";
 import { completeSignal, hasCapability } from "@promin/workflow";
 import { ThreadNotFoundError } from "./errors.ts";
+import { THREAD_AGENT_METADATA_KEY } from "./types.ts";
 import type { ApprovalDecision } from "../tool.ts";
 import { filterToolsByCapability } from "../tool.ts";
 import { resolveLocalAgent } from "../registry/resolve-local-agent.ts";
@@ -467,6 +468,11 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     });
   }
 
+  /** Recipe id this agent runs as (`config.agentId`, else the loop name). */
+  private agentId(): string {
+    return this.config.agentId ?? this.config.agent.name;
+  }
+
   // --- Conversational ---------------------------------------------------
 
   async thread(
@@ -498,9 +504,11 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
         throw new ThreadNotFoundError({ namespaceId, threadId });
       }
       if (!existing) {
+        // Stamp the owning agent so a gateway that scopes threads by agent
+        // reaches this one however it was created.
         await this.config.memory.createThread(key, {
           resourceId,
-          metadata: opts.metadata,
+          metadata: { ...opts.metadata, [THREAD_AGENT_METADATA_KEY]: this.agentId() },
         });
         created = true;
       }
@@ -534,7 +542,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       runner: this.config.runner,
       memory: this.config.memory,
       created,
-      agentId: this.config.agentId ?? this.config.agent.name,
+      agentId: this.agentId(),
       autoCompact: this.config.autoCompact === false ? undefined : this.config.autoCompact,
       autoDistill: this.config.autoDistill === false ? undefined : this.config.autoDistill,
       consolidator: () => this.resolveConsolidator(),
@@ -576,6 +584,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
         namespaceId: scope.namespaceId,
         resourceId: scope.resourceId,
         threadId: scope.threadId,
+        agentId: this.agentId(),
       });
       tools = { ...tools, memory: memoryTool };
     }
@@ -736,7 +745,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     const actionConfig = toActionConfig(agent, bus, {
       ...(namespaceId !== undefined && { namespaceId }),
       ...(resourceId !== undefined && { resourceId }),
-      agentId: this.config.agentId ?? this.config.agent.name,
+      agentId: this.agentId(),
     });
     const wf = (agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>)(
       actionConfig as AgentActionConfig<TOutput>,
@@ -1000,9 +1009,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     if (newTail.length === 0) return;
 
     if (this.deps.memory) {
-      if (!(await this.deps.memory.getThread(this.deps.key))) {
-        await this.deps.memory.createThread(this.deps.key);
-      }
+      await this.ensureThreadRow();
       await this.deps.memory.appendMessages(this.deps.key, newTail);
       await this.maybeAutoCompact();
       await this.maybeAutoDistill();
@@ -1176,9 +1183,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     }
 
     if (this.deps.memory) {
-      if (!(await this.deps.memory.getThread(this.deps.key))) {
-        await this.deps.memory.createThread(this.deps.key);
-      }
+      await this.ensureThreadRow();
       await this.deps.memory.appendMessages(this.deps.key, newTail);
       await this.maybeAutoCompact();
       await this.maybeAutoDistill();
@@ -1377,9 +1382,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
 
   async setWorkingMemory(markdown: string | null): Promise<void> {
     if (!this.deps.memory) return;
-    if (!(await this.deps.memory.getThread(this.deps.key))) {
-      await this.deps.memory.createThread(this.deps.key);
-    }
+    await this.ensureThreadRow();
     await this.deps.memory.setThreadWorking(this.deps.key, markdown);
   }
 
@@ -1389,12 +1392,14 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     return row?.metadata ?? {};
   }
 
+  /** Replace the metadata bag; the thread's owner stamp is kept. */
   async setMetadata(metadata: Readonly<Record<string, unknown>>): Promise<void> {
     if (!this.deps.memory) return;
-    if (!(await this.deps.memory.getThread(this.deps.key))) {
-      await this.deps.memory.createThread(this.deps.key);
-    }
-    await this.deps.memory.setThreadMetadata(this.deps.key, metadata);
+    const row = await this.ensureThreadRow();
+    await this.deps.memory.setThreadMetadata(this.deps.key, {
+      ...metadata,
+      [THREAD_AGENT_METADATA_KEY]: row.metadata[THREAD_AGENT_METADATA_KEY] ?? this.deps.agentId,
+    });
   }
 
   async title(): Promise<string | null> {
@@ -1405,18 +1410,28 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
 
   async setTitle(title: string | null): Promise<void> {
     if (!this.deps.memory) return;
-    if (!(await this.deps.memory.getThread(this.deps.key))) {
-      await this.deps.memory.createThread(this.deps.key);
-    }
+    await this.ensureThreadRow();
     await this.deps.memory.setThreadTitle(this.deps.key, title);
   }
 
   async setArchived(archivedAt: number | null): Promise<void> {
     if (!this.deps.memory) return;
-    if (!(await this.deps.memory.getThread(this.deps.key))) {
-      await this.deps.memory.createThread(this.deps.key);
-    }
+    await this.ensureThreadRow();
     await this.deps.memory.setThreadArchived(this.deps.key, archivedAt);
+  }
+
+  /**
+   * The thread's row, created (stamped with the owning agent) when it is
+   * missing — e.g. deleted out from under a live handle.
+   */
+  private async ensureThreadRow(): Promise<ThreadRow> {
+    const memory = this.deps.memory!;
+    const existing = await memory.getThread(this.deps.key);
+    if (existing) return existing;
+    return await memory.createThread(this.deps.key, {
+      ...(this.deps.key.resourceId !== undefined && { resourceId: this.deps.key.resourceId }),
+      metadata: { [THREAD_AGENT_METADATA_KEY]: this.deps.agentId },
+    });
   }
 
   async delete(): Promise<void> {

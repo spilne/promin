@@ -25,8 +25,10 @@
 //   A thread belongs to the (namespace, resource, agent) that created it.
 //   The resource half is enforced by the agent backend (`LocalAgent.thread`
 //   refuses a thread owned by another resource); the agent half by the
-//   gateway, which stamps `metadata.agentId` when a thread is created and
-//   only lists / opens threads carrying its own agent id. A thread owned by
+//   `metadata.agentId` stamp (`THREAD_AGENT_METADATA_KEY`): the agent backend
+//   stamps it on every thread it creates — through this gateway,
+//   programmatically or from a scheduled dispatch — and the gateway only
+//   lists / opens threads carrying its own agent id. A thread owned by
 //   someone else answers exactly like a missing one (404), so ids can't be
 //   probed. Hosts that authenticate end users bind the requested scope to
 //   the caller with `authorizeScope` (403 on mismatch).
@@ -62,11 +64,15 @@ import {
   ConsolidatorRateLimitError,
   NothingToConsolidateError,
   SecretScope,
+  THREAD_AGENT_METADATA_KEY,
   ThreadNotFoundError,
   TurnInProgressError,
 } from "@promin/agent";
 import { SystemWallClock, WorkflowSuspendedError, type WallClock } from "@promin/workflow";
 import { json, jsonError, parseIntParam, readJson } from "../router.ts";
+import { AgentListQuerySchema } from "../api-types.ts";
+import { assertIfMatch, contentEtag, withEtag } from "../preconditions.ts";
+import { parseQuery } from "../request-validation.ts";
 import {
   internalError,
   mergeAgentMetadata,
@@ -89,8 +95,21 @@ import { SECRET_KEY_PATTERN, SECRET_MAX_VALUE_BYTES } from "./secrets.ts";
 
 export type { AgentThreadSummary as ThreadSummary, RegisteredAgent, Message } from "@promin/agent";
 
+/** One row of `GET /api/agents`: the agent's active version plus its version count. */
+export type AgentListEntry = RegisteredAgent & {
+  /** How many versions the agent has (`GET /api/agents/:id/versions` lists them). */
+  versionCount: number;
+};
+
 export interface AgentsListResponse {
-  agents: RegisteredAgent[];
+  agents: AgentListEntry[];
+  /** Agents matching the filters across all pages. */
+  total: number;
+}
+
+export interface AgentVersionsResponse {
+  /** Every version of the agent, oldest first. */
+  versions: RegisteredAgent[];
 }
 
 export interface AgentThreadsResponse {
@@ -125,13 +144,6 @@ export interface ThreadInvokeResponse extends InvokeResponse {
   threadId: string;
   isNew: boolean;
 }
-
-/**
- * Thread-metadata key the gateway stamps with the owning agent's id when
- * it creates a thread. Listing filters on it and every thread route
- * checks it, so one agent's threads are never reachable through another.
- */
-export const THREAD_AGENT_METADATA_KEY = "agentId";
 
 export interface AgentGatewayDeps {
   readonly registry: AgentRegistry;
@@ -549,31 +561,45 @@ export function listAgentSources(deps: { readonly fileManagedIds: () => string[]
   };
 }
 
+/**
+ * GET /api/agents — one row per agent: its active version (the one `GET
+ * /api/agents/:id` answers) plus how many versions it has, sorted by id.
+ * `capability` / `tag` filter on the active version; Designer drafts are
+ * hidden. Filtering happens before `limit` / `offset`, so `total` counts
+ * every matching agent and every page is full. All versions of one agent
+ * are under `GET /api/agents/:id/versions`.
+ */
 export function listAgents(deps: AgentGatewayDeps) {
   return async (req: Request): Promise<Response> => {
-    const url = new URL(req.url);
-    const capability = url.searchParams.get("capability") ?? undefined;
-    const tag = url.searchParams.get("tag") ?? undefined;
-    const limit = parseLimitParam(url.searchParams.get("limit"));
-    const cursor = url.searchParams.get("cursor") ?? undefined;
-    const agents = await deps.registry.list({ capability, tag, limit, cursor });
-    // Hide ephemeral Designer drafts — they're not real recipes and
-    // shouldn't clutter the agent list.
-    return json(200, {
-      agents: agents.filter((a) => !isDraftId(a.id)).map(redactRecipe),
-    } satisfies AgentsListResponse);
+    const { capability, tag, limit, offset } = parseQuery({ req, schema: AgentListQuerySchema });
+    const versionCounts = new Map<string, number>();
+    for (const row of await deps.registry.list({})) {
+      if (isDraftId(row.id)) continue;
+      versionCounts.set(row.id, (versionCounts.get(row.id) ?? 0) + 1);
+    }
+    const ids = [...versionCounts.keys()].sort();
+    const active = await Promise.all(ids.map((id) => deps.registry.get(id)));
+    const matching = active.filter(
+      (recipe): recipe is RegisteredAgent =>
+        recipe !== null &&
+        (capability === undefined || recipe.metadata.capabilities.includes(capability)) &&
+        (tag === undefined || recipe.metadata.tags.includes(tag)),
+    );
+    const agents = matching.slice(offset, offset + limit).map((recipe) => ({
+      ...redactRecipe(recipe),
+      versionCount: versionCounts.get(recipe.id) ?? 1,
+    }));
+    return json(200, { agents, total: matching.length } satisfies AgentsListResponse);
   };
 }
 
-/** Weak ETag for a recipe row — its `updatedAt`. */
+/** Entity tag of a recipe row (secrets redacted before hashing). */
 function recipeEtag(recipe: RegisteredAgent): string {
-  return `W/"${recipe.version}:${recipe.updatedAt}"`;
+  return contentEtag(redactRecipe(recipe));
 }
 
 function recipeResponse(status: number, recipe: RegisteredAgent): Response {
-  const res = json(status, redactRecipe(recipe));
-  res.headers.set("etag", recipeEtag(recipe));
-  return res;
+  return withEtag(json(status, redactRecipe(recipe)), recipeEtag(recipe));
 }
 
 export function getAgent(deps: AgentGatewayDeps) {
@@ -690,7 +716,7 @@ export function createAgent(deps: AgentGatewayDeps) {
       backend: restored,
       ...(metadata !== undefined && { metadata }),
     });
-    return recipeResponse(201, recipe);
+    return recipeResponse(201, (await deps.registry.get(recipe.id, recipe.version)) ?? recipe);
   };
 }
 
@@ -713,10 +739,7 @@ export function updateAgent(deps: AgentGatewayDeps) {
         `Only the active version (${active.version}) can be edited; publish a new version instead.`,
       );
     }
-    const ifMatch = req.headers.get("if-match");
-    if (ifMatch !== null && ifMatch !== "*" && ifMatch !== recipeEtag(active)) {
-      return jsonError(412, "precondition_failed", "The recipe changed since it was read.");
-    }
+    assertIfMatch({ req, etag: recipeEtag(active), what: "recipe" });
 
     let nextBackend = active.backend;
     if (body.backend !== undefined && body.backend !== null) {
@@ -738,7 +761,7 @@ export function updateAgent(deps: AgentGatewayDeps) {
       backend: nextBackend,
       metadata: nextMetadata,
     });
-    return recipeResponse(200, updated);
+    return recipeResponse(200, (await deps.registry.get(id, updated.version)) ?? updated);
   };
 }
 
@@ -761,7 +784,7 @@ export function listAgentVersions(deps: AgentGatewayDeps) {
     if (!id) return jsonError(400, "missing_id");
     const versions = await deps.registry.versions(id);
     if (versions.length === 0) return agentNotFound(id);
-    return json(200, { versions: versions.map(redactRecipe) });
+    return json(200, { versions: versions.map(redactRecipe) } satisfies AgentVersionsResponse);
   };
 }
 

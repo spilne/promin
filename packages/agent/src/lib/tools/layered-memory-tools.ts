@@ -32,6 +32,7 @@ import {
   type ScopedKey,
   type ThreadKey,
 } from "../memory/types.ts";
+import { THREAD_AGENT_METADATA_KEY } from "../agent/types.ts";
 
 export interface LayeredMemoryToolConfig {
   readonly store: MemoryStore;
@@ -39,6 +40,11 @@ export interface LayeredMemoryToolConfig {
   /** Optional — when absent, `"resource"` scope is rejected at runtime. */
   readonly resourceId?: string;
   readonly threadId: string;
+  /**
+   * Agent stamped as the owner (`THREAD_AGENT_METADATA_KEY`) of a thread
+   * this tool has to create. Omitted: the thread is created unstamped.
+   */
+  readonly agentId?: string;
   /**
    * Default sources searched by `recall` when the model does not specify.
    * Default: `["fact", "episode"]` — messages are not searched by default
@@ -144,7 +150,12 @@ export function createLayeredMemoryTool(config: LayeredMemoryToolConfig) {
           // Auto-create the thread if it doesn't exist yet — symmetric with
           // `appendMessages` / `appendThreadFact` which also auto-create.
           if (!(await config.store.getThread(threadKey))) {
-            await config.store.createThread(threadKey);
+            await config.store.createThread(
+              threadKey,
+              config.agentId !== undefined
+                ? { metadata: { [THREAD_AGENT_METADATA_KEY]: config.agentId } }
+                : {},
+            );
           }
           await config.store.setThreadWorking(threadKey, markdown);
           return "Updated thread working memory.";

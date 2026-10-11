@@ -6,6 +6,8 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
+import { resolveLocalAgent, type LLMProvider } from "@promin/agent";
+import { createWorkflowRunner } from "@promin/workflow";
 import { bootAgents, jsonOf, req } from "./agent-gateway-harness.ts";
 
 async function aliceThread() {
@@ -201,5 +203,39 @@ describe("scope authorization hook", () => {
       req("GET", "/api/memory/inspect?namespaceId=ns&resourceId=bob", undefined, asAlice),
     );
     expect(mem.status).toBe(403);
+  });
+});
+
+describe("thread isolation — threads created outside the gateway", () => {
+  it("a thread a LocalAgent created programmatically is listed and opened by its agent only", async () => {
+    const h = await bootAgents();
+    const recipe = await h.registry.get("support");
+    const llm: LLMProvider = { chat: async () => ({ content: "ok", finishReason: "stop" }) };
+    const agent = resolveLocalAgent(recipe!, {
+      runner: createWorkflowRunner({ storage: h.storage }),
+      memory: h.memory,
+      llm: () => llm,
+      tools: {},
+    }).withScope({ namespaceId: "ns", resourceId: "alice" });
+    const thread = await agent.thread("prog-1");
+    await thread.send({ task: "made outside the gateway" });
+
+    const own = await h.server.handle(
+      req("GET", "/api/agents/support/threads?namespaceId=ns&resourceId=alice"),
+    );
+    expect(
+      (await jsonOf<{ threads: Array<{ id: string }> }>(own)).threads.map((t) => t.id),
+    ).toEqual(["prog-1"]);
+    const msgs = await h.server.handle(
+      req("GET", "/api/agents/support/threads/prog-1/messages?namespaceId=ns&resourceId=alice"),
+    );
+    expect(msgs.status).toBe(200);
+    const body = await jsonOf<{ messages: Array<{ content: string }> }>(msgs);
+    expect(body.messages.map((m) => m.content)).toContain("made outside the gateway");
+
+    const foreign = await h.server.handle(
+      req("GET", "/api/agents/other/threads/prog-1/messages?namespaceId=ns&resourceId=alice"),
+    );
+    expect(foreign.status).toBe(404);
   });
 });

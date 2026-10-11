@@ -20,9 +20,10 @@ import {
 } from "@promin/workflow/scheduler";
 import { SystemWallClock, hasCapability, type WallClock } from "@promin/workflow";
 import { z } from "zod";
-import { accepted, created, isoOrNull, json, jsonError, noContent } from "../router.ts";
+import { accepted, isoOrNull, json, jsonError, noContent } from "../router.ts";
 import { BooleanQuery, MetadataQuery, OffsetQuery, limitQuery } from "../api-types.ts";
 import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
+import { assertIfMatch, contentEtag, withEtag } from "../preconditions.ts";
 import { runLocation } from "./runs.ts";
 
 export interface ScheduleDto {
@@ -315,6 +316,21 @@ function toDto(params: {
   };
 }
 
+/**
+ * Entity tag of a schedule: its stored configuration. Fire state
+ * (`lastFiredAt`, `tickCount`, `nextRunAt`) is left out, so a tick firing
+ * between a read and a PATCH doesn't fail the PATCH's `If-Match`.
+ */
+function scheduleEtag(dto: ScheduleDto): string {
+  const { lastFiredAt: _fired, tickCount: _ticks, nextRunAt: _next, ...config } = dto;
+  return contentEtag(config);
+}
+
+/** A schedule with its entity tag (`If-Match` on PATCH compares against it). */
+function scheduleResponse(status: number, dto: ScheduleDto): Response {
+  return withEtag(json(status, dto), scheduleEtag(dto));
+}
+
 export function listSchedules(deps: ScheduleRoutesDeps) {
   const { storage } = deps;
   const clock = deps.clock ?? SystemWallClock;
@@ -346,7 +362,7 @@ export function getSchedule(deps: ScheduleRoutesDeps) {
     const config = await storage.loadSchedule(id);
     if (!config) return jsonError(404, "not_found");
     const state = await storage.loadScheduleState(id);
-    return json(200, toDto({ config, state, clock }));
+    return scheduleResponse(200, toDto({ config, state, clock }));
   };
 }
 
@@ -404,7 +420,7 @@ export function createSchedule(deps: ScheduleRoutesDeps) {
     // of due-tracking — the upsert already cleared it.
     if (config.enabled !== false) await storage.setNextRun(config.id, clock.now());
     const state = await storage.loadScheduleState(config.id);
-    return created(toDto({ config, state, clock }));
+    return scheduleResponse(201, toDto({ config, state, clock }));
   };
 }
 
@@ -414,6 +430,8 @@ export function createSchedule(deps: ScheduleRoutesDeps) {
  * validated before it is stored, and a change to when the schedule fires
  * (trigger, timezone, window) recomputes its next run. Pausing takes it
  * out of due-tracking; resuming makes it due now, as after a restart.
+ * `If-Match` (the GET `etag`) makes the edit conditional: 412
+ * `precondition_failed` when the configuration changed since it was read.
  */
 export function patchSchedule(deps: ScheduleRoutesDeps) {
   const { storage } = deps;
@@ -423,6 +441,7 @@ export function patchSchedule(deps: ScheduleRoutesDeps) {
     const patch = await parseBody({ req, schema: SchedulePatchRequestSchema });
     const current = await storage.loadSchedule(id);
     if (!current) return jsonError(404, "not_found");
+    assertIfMatch({ req, etag: scheduleEtag(toDto({ config: current, clock })), what: "schedule" });
 
     const merged = applySchedulePatch({ current, patch });
     const invalid = invalidConfig(merged);
@@ -442,7 +461,8 @@ export function patchSchedule(deps: ScheduleRoutesDeps) {
       await storage.setNextRun(id, computeNextRun({ config: merged, clock }));
     }
     const state = await storage.loadScheduleState(id);
-    return json(200, toDto({ config: merged, state, clock }));
+    const stored = (await storage.loadSchedule(id)) ?? merged;
+    return scheduleResponse(200, toDto({ config: stored, state, clock }));
   };
 }
 

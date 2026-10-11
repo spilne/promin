@@ -224,6 +224,8 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
       maxStepsPerTurn: backend.maxStepsPerTurn,
       maxTurns: backend.maxTurns,
     },
+    // Threads this agent creates carry the recipe id as their owner stamp.
+    agentId: agent.id,
     runner: deps.runner,
     memory: deps.memory,
     namespaceId: deps.namespaceId,

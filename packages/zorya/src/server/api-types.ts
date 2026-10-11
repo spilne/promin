@@ -102,6 +102,18 @@ export const MetadataQuery = optionalQuery(
   }),
 );
 
+/** Query string of `GET /api/agents`. */
+export const AgentListQuerySchema = z.object({
+  /** Agents whose active version claims this capability. */
+  capability: optionalQuery(Name),
+  /** Agents whose active version carries this tag. */
+  tag: optionalQuery(Name),
+  /** Page size, 1–500. Default 100. */
+  limit: limitQuery({ fallback: 100 }),
+  /** Agents to skip. Default 0. */
+  offset: OffsetQuery,
+});
+
 /** `?namespace=` alone. */
 export const NamespaceQuerySchema = z.object({ namespace: optionalQuery(Name) });
 
