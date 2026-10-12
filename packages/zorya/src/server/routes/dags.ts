@@ -35,7 +35,12 @@
 // ---------------------------------------------------------------------------
 
 import {
+  admitTurn,
   DagValidationError,
+  tightenBudget,
+  TurnBudgetSchema,
+  type AgentBudgets,
+  type TurnBudget,
   type AgentRegistry,
   type DagRecipe,
   type DagRegistry,
@@ -60,6 +65,7 @@ import {
   promoteRoute,
   registryCall,
 } from "./versioned-resource.ts";
+import { budgetRefusal } from "./agents/agent-usage.ts";
 
 export interface DagGatewayDeps {
   readonly registry: DagRegistry;
@@ -79,6 +85,12 @@ export interface DagGatewayDeps {
    * `namespace_not_found`, 409 `namespace_archived`).
    */
   readonly namespaces?: NamespaceRegistry;
+  /**
+   * Namespace budgets (`ZoryaAgents.budgets`): a run is admitted against
+   * its namespace's (429 `budget_exceeded` when used up), runs capped by
+   * what is left, and its spend is recorded under the run id.
+   */
+  readonly budgets?: AgentBudgets;
 }
 
 /**
@@ -92,6 +104,11 @@ interface RunRequest {
   readonly ownerId?: unknown;
   readonly version?: string;
   readonly initialInput?: Readonly<Record<string, unknown>>;
+  /**
+   * What the whole run may spend (`TurnBudget`), shared between its nodes;
+   * a node that runs out fails with `budget_exceeded`. Unset: unlimited.
+   */
+  readonly budget?: unknown;
   /**
    * Override the run id. Defaults to a fresh one — pass an explicit id to
    * make a retried POST idempotent: an id that already has a run answers
@@ -248,6 +265,10 @@ export function runDag(deps: DagGatewayDeps) {
     const body = (await readJson<RunRequest>(req)) ?? {};
     const scope = parseScopeFields(body);
     if ("error" in scope) return jsonError(400, scope.error);
+    const budget = body.budget === undefined ? undefined : TurnBudgetSchema.safeParse(body.budget);
+    if (budget && !budget.success) {
+      return jsonError(400, "invalid_budget", budget.error.issues.map((i) => i.message).join("; "));
+    }
     const dag = await deps.registry.get({
       id,
       ...(body.version !== undefined && { version: body.version }),
@@ -276,6 +297,20 @@ export function runDag(deps: DagGatewayDeps) {
     }
     await requireActiveNamespace({ registry: deps.namespaces, namespace: scope.namespaceId });
 
+    // The run is admitted against its namespace's budget like a turn; what
+    // is left caps the run (tightening the body's budget).
+    let ceiling: TurnBudget | undefined;
+    if (deps.budgets) {
+      try {
+        ceiling = await admitTurn({ budgets: deps.budgets, namespaceId: scope.namespaceId });
+      } catch (err) {
+        const refused = budgetRefusal(err);
+        if (refused) return refused;
+        throw err;
+      }
+    }
+    const runBudget = tightenBudget(budget?.data, ceiling);
+
     // The run names the DAG by reference; the workflow reads the recipe
     // from the registry, so a run only ever executes a registered DAG.
     const input: DurableDagInput = {
@@ -283,6 +318,7 @@ export function runDag(deps: DagGatewayDeps) {
       version: dag.version,
       initialInput: body.initialInput ?? {},
       scope,
+      ...(runBudget && { budget: runBudget }),
     };
     let started: TriggerResult;
     try {

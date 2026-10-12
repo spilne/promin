@@ -16,6 +16,7 @@ import { Markdown } from "../../lib/markdown.tsx";
 import { MemoryInspector } from "./memory-inspector.tsx";
 import { AgentConfigDrawer } from "./agent-config-drawer.tsx";
 import { AgentTraceModal } from "./agent-trace-modal.tsx";
+import { ThreadBudgetBadge } from "./thread-budget-badge.tsx";
 import { systemToolsFor, SystemToolChips } from "./system-tools.tsx";
 import { inlineRoleDefinition } from "@promin/agent/browser";
 
@@ -871,6 +872,12 @@ export function ChatPane({
           {threadId}
         </span>
         <div class="flex items-center gap-1 shrink-0">
+          <ThreadBudgetBadge
+            agentId={agentId}
+            threadId={threadId}
+            tenant={tenant}
+            refreshKey={messages.length}
+          />
           {/* Inspection lenses — both are per-thread, complementary views. */}
           {onTrace && (
             <button

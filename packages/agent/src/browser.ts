@@ -24,3 +24,4 @@ export { DEFAULT_RETRIEVER_TOOL_NAME, retrieverToolName } from "./lib/rag/retrie
 export type { AgentKnowledgeMode, AgentKnowledgeRecipe } from "./lib/registry/types.ts";
 export { MCP_RECIPE_SERVER_NAME } from "./lib/mcp/types.ts";
 export type { McpHttpServerRecipe, McpServerRecipe, McpServerRefRecipe } from "./lib/mcp/types.ts";
+export type { BudgetDimension, BudgetUsage, TurnBudget } from "./lib/budget/budget.ts";

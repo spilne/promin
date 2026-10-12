@@ -12,7 +12,8 @@
 // paths run side by side. A node is
 //
 //   node-<id>-start   journaled: whether the node starts (not when the DAG
-//                     was aborted by then), so a replay takes the same path
+//                     was aborted by then) and, with a run budget, the
+//                     node's share of it — so a replay takes the same path
 //   node-<id>-route   journaled: the node's scope (the owner's instance of
 //                     its agent, when the run has an owner), the resolver's
 //                     check (unknown / disabled agents refuse) and the turn
@@ -28,6 +29,16 @@
 // not started never start, and running ones are stopped (their turns end
 // as cancelled). Waiting on upstream nodes is not journaled — it only
 // orders the branches; every decision that depends on timing is.
+//
+// Budget: a run started with `budget` shares it between its nodes. A node
+// starting gets an equal share of what is free — the budget minus what
+// settled nodes spent and what running nodes hold — among itself and the
+// nodes that have not started yet; a settled node gives back what it did
+// not spend. So the nodes together never get more than the run's budget,
+// and an early node's leftovers flow to later ones. A node that runs out
+// fails with `budget_exceeded`. The run reports what its nodes spent and,
+// with a `usageRecorder`, records it (journaled `record-usage`; also when
+// the run fails after its nodes spent).
 //
 // Replay semantics: a node whose child finished replays its outcome; a DAG
 // run that stopped while a node ran (a crash, a restart) re-attaches to the
@@ -45,9 +56,21 @@ import {
 } from "@promin/workflow";
 import type { AgentInput, AgentResult } from "../agent-action.ts";
 import type { Agent, AgentScope } from "../agent/types.ts";
-import { formatToolError } from "../agent-shared.ts";
+import { formatToolError, isEngineControl } from "../agent-shared.ts";
 import type { ApprovalDecision } from "../tool.ts";
-import { isChildControlFlow } from "../delegation/run-delegated-call.ts";
+import { childSpend, isChildControlFlow } from "../delegation/run-delegated-call.ts";
+import {
+  addUsage,
+  budgetAsUsage,
+  EMPTY_USAGE,
+  parseTurnBudget,
+  remainingBudget,
+  shareOfBudget,
+  subtractBudget,
+  tightenBudget,
+  type BudgetUsage,
+  type TurnBudget,
+} from "../budget/budget.ts";
 import { agentTurnWorkflow } from "../delegation/sub-agent-tool.ts";
 import { isDelegableAgent } from "../delegation/types.ts";
 import { composeAgentInstanceId, type AgentInstanceRegistry } from "../instance/types.ts";
@@ -115,6 +138,8 @@ export interface DurableDagInput {
   readonly initialInput: Readonly<Record<string, unknown>>;
   /** Tenant scope every node runs in. See `DagRunScope`. */
   readonly scope: DagRunScope;
+  /** What the whole run may spend, shared between its nodes. Unset: unlimited. */
+  readonly budget?: TurnBudget;
 }
 
 export interface DurableDagOutput {
@@ -128,6 +153,11 @@ export interface DurableDagOutput {
   readonly errors: Readonly<Record<string, string>>;
   /** Node ids that were skipped (upstream blocker / failed condition / onError). */
   readonly skipped: ReadonlyArray<string>;
+  /**
+   * What the run's nodes spent. A node that failed without a result is
+   * counted at its whole share of the budget.
+   */
+  readonly spend: BudgetUsage;
 }
 
 export interface CreateDagWorkflowConfig {
@@ -145,6 +175,25 @@ export interface CreateDagWorkflowConfig {
   readonly name?: string;
   /** Workflow type tag — surfaces in the dashboard. Default `"agentic-dag"`. */
   readonly type?: string;
+  /**
+   * Where a run's spend goes (namespace budgets): called once the run has
+   * its outcome, and when it fails after its nodes spent, inside a
+   * journaled activity — again only when a crash interrupts it, so make it
+   * idempotent per `workflowId` (`UsageLedger.record` is). Node turns
+   * record nothing themselves: the run records them all.
+   */
+  readonly usageRecorder?: DagUsageRecorder;
+}
+
+/** Records what a DAG run spent. */
+export interface DagUsageRecorder {
+  record(params: {
+    /** The DAG run's workflow id. */
+    readonly workflowId: string;
+    readonly dagId: string;
+    readonly scope: DagRunScope;
+    readonly usage: BudgetUsage;
+  }): Promise<void>;
 }
 
 /** How one node settled. */
@@ -206,6 +255,7 @@ export function createDagWorkflow(
   config: CreateDagWorkflowConfig,
 ): Workflow<DurableDagInput, DurableDagOutput> {
   const { registry, resolver, instances, name = DAG_WORKFLOW_NAME, type = "agentic-dag" } = config;
+  const usageRecorder = config.usageRecorder;
 
   return workflow<DurableDagInput>({ name, type })
     .journaled("execute-dag", function* (ctx, input) {
@@ -234,6 +284,20 @@ export function createDagWorkflow(
       // Live abort: set when a node fails with onError "abort". It only
       // steers what happens next; whether a node started is journaled.
       const abort = new AbortController();
+
+      // Run budget: what settled nodes spent, and the shares running nodes hold.
+      const runBudget = input.budget === undefined ? undefined : parseTurnBudget(input.budget);
+      let spent: BudgetUsage = EMPTY_USAGE;
+      const held = new Map<string, TurnBudget>();
+      /** A starting node's share: what is free, split with the nodes not started yet. */
+      const shareFor = (): TurnBudget | null => {
+        if (!runBudget) return null;
+        let free = remainingBudget({ budget: runBudget, usage: spent });
+        for (const taken of held.values()) free = subtractBudget({ budget: free, taken });
+        // Includes the starting node: it is neither settled nor holding a share yet.
+        const waiting = order.filter((id) => !states.has(id) && !held.has(id)).length;
+        return shareOfBudget({ budget: free, parts: Math.max(1, waiting) });
+      };
 
       const outputs = (): Record<string, unknown> => {
         const out: Record<string, unknown> = {};
@@ -289,13 +353,23 @@ export function createDagWorkflow(
           }
           const start = yield* ctx.activity(
             `node-${node.id}-start`,
-            async () => !abort.signal.aborted,
-            {
-              idempotent: true,
-            },
+            async () =>
+              abort.signal.aborted
+                ? { start: false, budget: null }
+                : { start: true, budget: shareFor() },
+            { idempotent: true },
           );
-          if (!start) return settle(node, { kind: "not-started" });
-          const outcome = yield* runNode({ node, nodeInput, scope: input.scope });
+          if (!start.start) return settle(node, { kind: "not-started" });
+          const share = start.budget ?? undefined;
+          if (share) held.set(node.id, share);
+          const outcome = yield* runNode({
+            node,
+            nodeInput,
+            scope: input.scope,
+            ...(share && { budget: share }),
+          });
+          held.delete(node.id);
+          if (outcome.spend) spent = addUsage(spent, outcome.spend);
           settle(
             node,
             outcome.ok
@@ -314,7 +388,9 @@ export function createDagWorkflow(
         node: DagNode;
         nodeInput: Record<string, unknown>;
         scope: DagRunScope;
-      }): Generator<ActivityYield, NodeOutcome, any> {
+        /** The node's share of the run's budget. */
+        budget?: TurnBudget;
+      }): Generator<ActivityYield, NodeOutcome & { readonly spend?: BudgetUsage }, any> {
         const { node, nodeInput } = params;
         const task = stringifyTask(nodeInput);
         const routed: NodeRoute = yield* ctx.activity(
@@ -382,18 +458,36 @@ export function createDagWorkflow(
             },
             {
               workflowId: dagNodeRunId({ dagRunId: ctx.workflowId, nodeId: node.id }),
-              input: routed.input,
+              input: {
+                ...routed.input,
+                ...(params.budget && {
+                  budget: tightenBudget(routed.input.budget, params.budget),
+                }),
+              },
             },
           );
         } catch (err) {
           if (isChildControlFlow(err)) throw err;
-          return { ok: false, error: formatToolError(err) };
+          return {
+            ok: false,
+            error: formatToolError(err),
+            ...(params.budget && { spend: budgetAsUsage(params.budget) }),
+          };
         }
+        const spend = childSpend(result);
         if (result.finishReason === "cancelled") {
-          return { ok: false, error: `node "${node.id}" was cancelled` };
+          return { ok: false, error: `node "${node.id}" was cancelled`, spend };
+        }
+        if (result.finishReason === "budget_exceeded") {
+          return {
+            ok: false,
+            error: `budget_exceeded: node "${node.id}" ran out of budget`,
+            spend,
+          };
         }
         const text = result.answer;
         return {
+          spend,
           ok: true,
           output:
             node.outputPath !== undefined
@@ -402,7 +496,46 @@ export function createDagWorkflow(
         };
       }
 
-      yield* ctx.parallel(order.map((id) => nodeBranch(nodeById.get(id)!)));
+      try {
+        yield* ctx.parallel(order.map((id) => nodeBranch(nodeById.get(id)!)));
+      } catch (err) {
+        if (isEngineControl(err) || !usageRecorder) throw err;
+        // What the nodes spent before the run failed still counts. Recorded
+        // as a failure, like the run's other failed entries.
+        const failedSpend = spent;
+        yield* ctx.activity(
+          "record-usage-failed",
+          async (): Promise<void> => {
+            try {
+              await usageRecorder.record({
+                workflowId: ctx.workflowId,
+                dagId: input.dagId,
+                scope: input.scope,
+                usage: failedSpend,
+              });
+            } catch (recordErr) {
+              console.error("[dag] usage record of a failed run failed:", recordErr);
+            }
+            throw err;
+          },
+          { idempotent: true },
+        );
+        throw err;
+      }
+      if (usageRecorder) {
+        const runSpend = spent;
+        yield* ctx.activity(
+          "record-usage",
+          () =>
+            usageRecorder.record({
+              workflowId: ctx.workflowId,
+              dagId: input.dagId,
+              scope: input.scope,
+              usage: runSpend,
+            }),
+          { idempotent: true },
+        );
+      }
 
       // Assembled in topological order, so live runs and replays agree.
       const nodeOutputs: Record<string, unknown> = {};
@@ -430,6 +563,7 @@ export function createDagWorkflow(
         nodeOutputs,
         errors: nodeErrors,
         skipped,
+        spend: spent,
       };
     })
     .build();

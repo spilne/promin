@@ -37,6 +37,8 @@ import {
   type ContextBudgetForm,
   type RunMode,
 } from "../../lib/recipe-memory-form.ts";
+import { BudgetFields } from "./budget-fields.tsx";
+import { buildBudget, initBudgetForm, type BudgetForm } from "../../lib/recipe-budget-form.ts";
 import {
   buildKnowledge,
   initKnowledge,
@@ -127,6 +129,10 @@ export function AgentEditDrawer({
     isLocal && agent.backend.maxStepsPerTurn !== undefined
       ? String(agent.backend.maxStepsPerTurn)
       : "",
+  );
+  // Turn budget (`backend.budget`).
+  const [budgetForm, setBudgetForm] = useState<BudgetForm>(() =>
+    initBudgetForm(isLocal ? agent.backend.budget : undefined),
   );
 
   // Memory & compaction (local backends only).
@@ -226,6 +232,8 @@ export function AgentEditDrawer({
     const [provider, modelId] = modelKey.split("::");
     const trimmedCred = credentialRef.trim();
     const steps = parseLimit(maxStepsPerTurn);
+    const budgetValue = buildBudget(budgetForm);
+    if ("error" in budgetValue) throw new Error(budgetValue.error);
     // `undefined` → omit the field (inherit host default); `false` →
     // explicitly disabled; object → recipe-level config.
     const autoCompactValue = buildAutoCompact(autoCompact);
@@ -235,6 +243,7 @@ export function AgentEditDrawer({
     const mcpServersValue = buildMcpServers(mcpServers);
     const {
       maxStepsPerTurn: _stripSteps,
+      budget: _stripBudget,
       autoCompact: _stripAutoCompact,
       autoDistill: _stripAutoDistill,
       contextBudget: _stripContextBudget,
@@ -272,6 +281,7 @@ export function AgentEditDrawer({
         ...(trimmedCred && { credentialRef: trimmedCred }),
       },
       ...(steps !== undefined ? { maxStepsPerTurn: steps } : {}),
+      ...(budgetValue.budget !== undefined ? { budget: budgetValue.budget } : {}),
       ...(autoCompactValue !== undefined ? { autoCompact: autoCompactValue } : {}),
       ...(autoDistillValue !== undefined ? { autoDistill: autoDistillValue } : {}),
       ...(contextBudgetValue !== undefined ? { contextBudget: contextBudgetValue } : {}),
@@ -283,8 +293,8 @@ export function AgentEditDrawer({
 
   const save = async (): Promise<RegisteredAgent | null> => {
     setError(null);
-    const { backend, metadata } = buildPayload();
     try {
+      const { backend, metadata } = buildPayload();
       // Create posts a new recipe keyed on the typed id; an edit publishes
       // a new version built on the one this drawer loaded (a concurrent
       // edit answers 412). An unchanged form stores no new version. A
@@ -644,6 +654,7 @@ export function AgentEditDrawer({
                       onInput={(e) => setMaxStepsPerTurn((e.target as HTMLInputElement).value)}
                     />
                   </label>
+                  <BudgetFields form={budgetForm} onChange={setBudgetForm} />
                 </div>
               )}
             </div>

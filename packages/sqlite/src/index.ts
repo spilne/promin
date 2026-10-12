@@ -34,6 +34,8 @@ export type {
 } from "./lib/agent/tool-audit-logger.ts";
 export { SqliteToolHistoryStore } from "./lib/agent/tool-history-store.ts";
 export type { SqliteToolHistoryStoreConfig } from "./lib/agent/tool-history-store.ts";
+export { SqliteUsageLedger } from "./lib/agent/usage-ledger.ts";
+export type { SqliteUsageLedgerConfig } from "./lib/agent/usage-ledger.ts";
 export { SqliteWorkflowStorage } from "./lib/sqlite-workflow-storage.ts";
 export {
   SqliteWorkflowSchemaStore,

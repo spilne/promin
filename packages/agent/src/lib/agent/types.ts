@@ -104,6 +104,7 @@ export type FinishReason =
   | "tool_use"
   | "length"
   | "max_steps"
+  | "budget_exceeded"
   | "stalled"
   | "cancelled"
   | "error";

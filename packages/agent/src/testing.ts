@@ -8,6 +8,11 @@ export {
   type PendingApprovalStoreFactory,
   type PendingApprovalStoreHarness,
 } from "./lib/approvals/pending-approval-store-test-suite.ts";
+export {
+  usageLedgerTestSuite,
+  type UsageLedgerFactory,
+  type UsageLedgerHarness,
+} from "./lib/budget/usage-ledger-test-suite.ts";
 export { secretsStorageTestSuite } from "./lib/secrets/secrets-storage-test-suite.ts";
 export { toolHistoryStoreTestSuite } from "./lib/tool-history/tool-history-store-test-suite.ts";
 export {

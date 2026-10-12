@@ -213,7 +213,8 @@ function isAgent(value: Omit<AgentActionConfig, "signal"> | Agent): value is Age
  * agent's own turn when it is a `DelegableAgent` (`LocalAgent`), otherwise
  * one activity that invokes it. That activity is not idempotent: a crash
  * while the agent runs fails the child (its outcome is unknown) rather
- * than invoking the agent twice.
+ * than invoking the agent twice. An invoked agent can't be held to the
+ * input's `budget`; the caller is charged the tokens it reports.
  */
 export function agentTurnWorkflow(params: {
   readonly agent: Agent;
@@ -272,6 +273,7 @@ function engineFinishReason(reason: FinishReason): AgentFinishReason {
   switch (reason) {
     case "cancelled":
     case "max_steps":
+    case "budget_exceeded":
     case "stalled":
       return reason;
     default:

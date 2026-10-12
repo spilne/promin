@@ -14,6 +14,7 @@ import {
   InMemoryRoleRegistry,
   InMemorySecretsStorage,
   resolveLocalAgent,
+  type AgentBudgets,
   type ResolveLocalAgentDeps,
   type LLMProvider,
   type RegisteredAgent,
@@ -56,6 +57,8 @@ export interface HarnessOpts {
   streaming?: TurnStreamLimits;
   /** The agent registry (default: a fresh in-memory one). */
   registry?: InMemoryAgentRegistry;
+  /** Thread and namespace budgets. */
+  budgets?: AgentBudgets;
 }
 
 export async function bootAgents(opts: HarnessOpts = {}) {
@@ -106,6 +109,7 @@ export async function bootAgents(opts: HarnessOpts = {}) {
     ...(opts.turnGate === false && { turnGate: false as const }),
     ...(opts.authorizeScope && { authorizeScope: opts.authorizeScope }),
     ...(opts.streaming && { streaming: opts.streaming }),
+    ...(opts.budgets && { budgets: opts.budgets }),
   });
   const dags = opts.dags
     ? new ZoryaDags({ registry: new InMemoryDagRegistry({ clock }), workflows, agents })

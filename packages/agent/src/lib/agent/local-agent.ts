@@ -54,7 +54,11 @@ import {
   type AgentResult,
   type TurnApprovalIndex,
   type TurnTranscript,
+  type TurnUsageRecorder,
 } from "../agent-action.ts";
+import { admitTurn, type AgentBudgets } from "../budget/agent-budgets.ts";
+import type { TurnBudget } from "../budget/budget.ts";
+import type { UsageLedger } from "../budget/usage-ledger.ts";
 import { composeApprovalSignal } from "../approvals/approve-signal.ts";
 import { InMemoryPendingApprovalStore } from "../approvals/in-memory-pending-approval-store.ts";
 import {
@@ -302,6 +306,15 @@ export interface LocalAgentConfig<TOutput = any> {
    * to `agent.name`.
    */
   readonly agentId?: string;
+  /**
+   * Thread and namespace budgets (see `AgentBudgets`). A thread turn or a
+   * one-shot `invoke` is refused with `BudgetExceededError` when its
+   * thread's cumulative budget or its namespace's window is used up, runs
+   * capped by what is left, and records its spend in `budgets.ledger` when
+   * it commits. A delegated turn (`turnWorkflow`) is neither: its caller's
+   * budget covers it.
+   */
+  readonly budgets?: AgentBudgets;
 }
 
 export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>, DelegableAgent {
@@ -390,6 +403,11 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     });
   }
 
+  /** This agent with thread and namespace budgets (see `LocalAgentConfig.budgets`). */
+  withBudgets(budgets: AgentBudgets): LocalAgent<TOutput> {
+    return new LocalAgent<TOutput>({ ...this.config, budgets });
+  }
+
   /** Recipe id this agent runs as (`config.agentId`, else the loop name). */
   private agentId(): string {
     return this.config.agentId ?? this.config.agent.name;
@@ -467,6 +485,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       consolidator: () => this.resolveConsolidator(),
       contextBudget: this.config.contextBudget,
       ...(this.config.retrievers !== undefined && { retrievers: this.config.retrievers }),
+      ...(this.config.budgets !== undefined && { budgets: this.config.budgets }),
     });
   }
 
@@ -642,6 +661,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     signal: AbortSignal;
     approvalIndex?: TurnApprovalIndex;
     onApprovalRequired?: (call: ToolCall) => Promise<ApprovalDecision>;
+    usageRecorder?: TurnUsageRecorder;
   }): ReturnType<typeof agentAction> {
     // Tools come from buildTools so the network tools auto-attach for
     // one-shot invoke too. No threadId here (one-shot is stateless), so
@@ -666,6 +686,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       },
       signal: params.signal,
       ...(params.approvalIndex && { approvalIndex: params.approvalIndex }),
+      ...(params.usageRecorder && { usageRecorder: params.usageRecorder }),
     });
   }
 
@@ -694,10 +715,21 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     const bus = new SessionEventBus();
     bus.subscribe((e) => recordEvent(capture, e));
 
+    const namespaceId = opts?.namespaceId ?? this.config.namespaceId;
+    // A one-shot run counts against its namespace's budget (it has no thread).
+    const budgets = namespaceId !== undefined ? this.config.budgets : undefined;
     const wf = this.oneShotWorkflow({
-      namespaceId: opts?.namespaceId ?? this.config.namespaceId,
+      namespaceId,
       bus,
       signal: capture.abort.signal,
+      ...(budgets &&
+        namespaceId !== undefined && {
+          usageRecorder: ledgerRecorder({
+            ledger: budgets.ledger,
+            namespaceId,
+            agentId: this.agentId(),
+          }),
+        }),
     });
     // Honor caller-provided `runId` so a schedule tick (or any deterministic
     // caller) lands on the same workflow row across retries. Falls back to
@@ -715,10 +747,13 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
         input: existing.input,
       })) as AgentResult;
     }
+    const ceiling =
+      budgets && namespaceId !== undefined ? await admitTurn({ budgets, namespaceId }) : undefined;
+    const turnInput = await this.turnInput(input);
     return (await this.config.runner.run({
       workflow: wf,
       workflowId,
-      input: await this.turnInput(input),
+      input: ceiling ? { ...turnInput, budget: ceiling } : turnInput,
     })) as AgentResult;
   }
 }
@@ -774,6 +809,8 @@ interface LocalAgentThreadDeps<TOutput> {
   readonly contextBudget?: TokenBudget;
   /** Retriever bindings; context-mode ones are searched before every turn. */
   readonly retrievers?: AgentRetrievers;
+  /** Thread and namespace budgets; see `LocalAgentConfig.budgets`. */
+  readonly budgets?: AgentBudgets;
 }
 
 /**
@@ -1295,6 +1332,16 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     }
 
     await this.prepareTurn();
+    // Refused when the thread's or namespace's budget is used up; else
+    // capped by what is left. The ceiling rides in the turn's input, so a
+    // retry of this turn keeps it.
+    const ceiling = this.deps.budgets
+      ? await admitTurn({
+          budgets: this.deps.budgets,
+          namespaceId: this.deps.key.namespaceId,
+          threadId: this.deps.key.threadId,
+        })
+      : undefined;
 
     // resolveContext-driven prompt assembly, ordered stable → volatile so
     // the prompt-cache prefix survives as far as possible:
@@ -1327,7 +1374,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
 
     const result = await this.runWorkflow({
       workflowId,
-      input: { task: frameTask(input), messages: seed },
+      input: { task: frameTask(input), messages: seed, ...(ceiling && { budget: ceiling }) },
       persona,
       capture,
       ...(input.source !== undefined && { source: input.source }),
@@ -1354,6 +1401,14 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       signal: capture.abort.signal,
       transcript: this.transcript(source),
       approvalIndex: this.approvalIndex(),
+      ...(this.deps.budgets && {
+        usageRecorder: ledgerRecorder({
+          ledger: this.deps.budgets.ledger,
+          namespaceId: this.deps.key.namespaceId,
+          threadId: this.deps.key.threadId,
+          agentId: this.deps.agentId,
+        }),
+      }),
     });
     return (await this.deps.runner.run({ workflow: wf, workflowId, input })) as AgentResult;
   }
@@ -1586,8 +1641,11 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
 // Helpers — capture, conversion, output assembly
 // ---------------------------------------------------------------------------
 
-/** What one turn's workflow runs on: the (framed) task and its seed. */
-type AgentRunInput = { task: string; messages: Message[] };
+/**
+ * What one turn's workflow runs on: the (framed) task, its seed and the
+ * ceiling left by the thread's and namespace's budgets.
+ */
+type AgentRunInput = { task: string; messages: Message[]; budget?: TurnBudget };
 
 /** `decidedBy` of an approval the agent closed itself (expired, or its turn ended). */
 const SYSTEM_DECIDER = "system";
@@ -1725,6 +1783,7 @@ function buildTurnWorkflow<TOutput>(params: {
   signal: AbortSignal;
   transcript?: TurnTranscript;
   approvalIndex?: TurnApprovalIndex;
+  usageRecorder?: TurnUsageRecorder;
 }): ReturnType<typeof agentAction> {
   const config: AgentActionConfig<TOutput> = {
     ...params.engine,
@@ -1733,12 +1792,34 @@ function buildTurnWorkflow<TOutput>(params: {
     signal: params.signal,
     ...(params.transcript && { transcript: params.transcript }),
     ...(params.approvalIndex && { approvalIndex: params.approvalIndex }),
+    ...(params.usageRecorder && { usageRecorder: params.usageRecorder }),
   };
   // The overloads split on `outputSchema`'s presence; this config may or
   // may not carry one.
   return (agentAction as (cfg: AgentActionConfig<TOutput>) => ReturnType<typeof agentAction>)(
     config,
   );
+}
+
+/** Records a committed turn's spend in `ledger`, keyed by the turn's workflow id. */
+function ledgerRecorder(params: {
+  readonly ledger: UsageLedger;
+  readonly namespaceId: string;
+  readonly threadId?: string;
+  readonly agentId: string;
+}): TurnUsageRecorder {
+  const { ledger, namespaceId, threadId, agentId } = params;
+  return {
+    record: async ({ workflowId, usage }) => {
+      await ledger.record({
+        turnId: workflowId,
+        namespaceId,
+        ...(threadId !== undefined && { threadId }),
+        agentId,
+        usage,
+      });
+    },
+  };
 }
 
 function applyRange(messages: ReadonlyArray<Message>, range?: MessageRange): Message[] {

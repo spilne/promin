@@ -164,6 +164,22 @@ CREATE TABLE agent_tool_history (
   CONSTRAINT agent_tool_history_pkey PRIMARY KEY (name, source_kind, source_detail, schema_hash)
 );
 
+CREATE TABLE agent_usage_ledger (
+  namespace_id text NOT NULL,
+  turn_id text NOT NULL,
+  thread_id text,
+  agent_id text,
+  input_tokens bigint NOT NULL,
+  output_tokens bigint NOT NULL,
+  cache_read_tokens bigint NOT NULL,
+  cache_write_tokens bigint NOT NULL,
+  cost_usd double precision NOT NULL,
+  llm_calls integer NOT NULL,
+  tool_calls integer NOT NULL,
+  recorded_at timestamp with time zone DEFAULT now() NOT NULL,
+  CONSTRAINT agent_usage_ledger_pkey PRIMARY KEY (namespace_id, turn_id)
+);
+
 CREATE TABLE eval_dataset (
   dataset_id text NOT NULL,
   cases jsonb NOT NULL,
@@ -659,6 +675,10 @@ CREATE INDEX agent_thread_lease_expires_idx ON agent_thread_lease (expires_at);
 CREATE INDEX agent_thread_resource_idx ON agent_thread (namespace_id, resource_id);
 
 CREATE INDEX agent_tool_history_name_idx ON agent_tool_history (name, last_seen_at);
+
+CREATE INDEX agent_usage_ledger_window_idx ON agent_usage_ledger (namespace_id, recorded_at);
+
+CREATE INDEX agent_usage_ledger_thread_idx ON agent_usage_ledger (namespace_id, thread_id);
 
 CREATE INDEX eval_run_dataset_idx ON eval_run (dataset_id);
 

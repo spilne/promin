@@ -306,6 +306,10 @@ function RecipeBody({
           {local.maxStepsPerTurn !== undefined && (
             <KV k="maxStepsPerTurn" v={<span class="font-mono">{local.maxStepsPerTurn}</span>} />
           )}
+          {local.budget !== undefined &&
+            Object.entries(local.budget).map(([k, v]) => (
+              <KV key={k} k={`budget.${k}`} v={<span class="font-mono">{String(v)}</span>} />
+            ))}
         </Section>
       )}
 

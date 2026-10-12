@@ -17,6 +17,16 @@
 // ---------------------------------------------------------------------------
 
 import type { LLMProvider } from "../llm-provider.ts";
+import type { ModelCostRates, ModelCostRegistry } from "../metrics/types.ts";
+
+/**
+ * The `pricing` of a catalog's models as a `ModelCostRegistry`, for the
+ * engine's `costs` (`resolveLocalAgent({ costs })`). Read live, so a
+ * re-created catalog prices new turns.
+ */
+export function catalogCostRegistry(catalog: ModelCatalog): ModelCostRegistry {
+  return { rates: (provider, modelId) => catalog.get(provider, modelId)?.pricing };
+}
 
 /** Capability tag — matches what the designer UI's filter chips compare against. */
 export type ModelCapability = "chat" | "tools" | "vision" | "thinking" | "stream" | string;
@@ -40,6 +50,8 @@ export interface ModelCatalogItem {
   readonly capabilities?: ReadonlyArray<ModelCapability>;
   /** Cost tier for the picker. */
   readonly costTier?: ModelCostTier;
+  /** USD rates per million tokens; prices the model for cost budgets (`catalogCostRegistry`). */
+  readonly pricing?: ModelCostRates;
   /** Live LLMProvider. Runtime-only — not serializable. */
   readonly llm: LLMProvider;
 }
@@ -57,6 +69,7 @@ export interface SerializedModelCatalogItem {
   readonly contextLimit?: number;
   readonly capabilities?: ReadonlyArray<ModelCapability>;
   readonly costTier?: ModelCostTier;
+  readonly pricing?: ModelCostRates;
 }
 
 /** Read-only registry of available models keyed by `(provider, id)`. */

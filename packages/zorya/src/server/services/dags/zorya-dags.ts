@@ -18,6 +18,8 @@ import {
   DAG_WORKFLOW_NAME,
   type AgentResolver,
   type DagRegistry,
+  type DagUsageRecorder,
+  type UsageLedger,
   type DurableDagInput,
   type DurableDagOutput,
 } from "@promin/agent";
@@ -61,9 +63,28 @@ export class ZoryaDags {
       registry: config.registry,
       resolver: this.resolver,
       ...(config.agents.instances !== undefined && { instances: config.agents.instances }),
+      // A run's spend counts against its namespace's budget, recorded under
+      // the run id (its node turns record nothing themselves).
+      ...(config.agents.budgets !== undefined && {
+        usageRecorder: dagLedgerRecorder(config.agents.budgets.ledger),
+      }),
       name: DAG_WORKFLOW_NAME,
     });
     // Internal: runs start through the DAG route only, after its scope checks.
     config.workflows.define(this.workflow as Workflow<unknown, unknown>, { internal: true });
   }
+}
+
+/** Records a DAG run's spend in `ledger` under the run's workflow id. */
+function dagLedgerRecorder(ledger: UsageLedger): DagUsageRecorder {
+  return {
+    record: async ({ workflowId, dagId, scope, usage }) => {
+      await ledger.record({
+        turnId: workflowId,
+        namespaceId: scope.namespaceId,
+        agentId: `dag:${dagId}`,
+        usage,
+      });
+    },
+  };
 }

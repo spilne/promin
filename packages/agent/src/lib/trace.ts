@@ -15,6 +15,7 @@
 // turn → assistant moves (text / tool calls) → tool results → final answer.
 // ---------------------------------------------------------------------------
 
+import type { BudgetOverrun, BudgetUsage, TurnBudget } from "./budget/budget.ts";
 import type { Message, ToolCall } from "./message.ts";
 
 export type TraceNode =
@@ -120,11 +121,24 @@ export interface TurnTrace {
   readonly startedAt: number;
   readonly endedAt: number;
   readonly durationMs: number;
-  /** `stop`, `max_steps`, `stalled` or `cancelled`. */
+  /** `stop`, `max_steps`, `stalled`, `cancelled` or `budget_exceeded`. */
   readonly finishReason: string;
   /** Think steps taken. */
   readonly steps: number;
   readonly usage: TurnTraceUsage;
+  /**
+   * What the turn spent, its sub-agents included: tokens, priced cost, LLM
+   * and tool calls.
+   */
+  readonly spend?: BudgetUsage;
+  /**
+   * The turn's budget, when it had one, and — when it ran out — the limit
+   * it hit and the step it ended at.
+   */
+  readonly budget?: {
+    readonly limits: TurnBudget;
+    readonly exceeded?: BudgetOverrun & { readonly step: number };
+  };
   /** Spans in start order (calls of one step run in parallel and may overlap). */
   readonly spans: ReadonlyArray<TurnSpan>;
 }

@@ -32,6 +32,7 @@ export {
 } from "./lib/agent/knowledge-base-store.ts";
 export { PostgresMemoryStore, type PostgresMemoryStoreConfig } from "./lib/agent/memory-store.ts";
 export { PostgresLeaseStore, type PostgresLeaseStoreConfig } from "./lib/agent/lease-store.ts";
+export { PostgresUsageLedger, type PostgresUsageLedgerConfig } from "./lib/agent/usage-ledger.ts";
 export {
   PostgresPendingApprovalStore,
   type PostgresPendingApprovalStoreConfig,

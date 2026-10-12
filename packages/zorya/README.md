@@ -439,6 +439,24 @@ approvals }`. An agent turn's approval is never delivered as a plain signal:
   `agent_approval` for it, and `/api/signals` marks it with `agentThread` —
   only the agent route records the approver, keeps the thread in order and
   resumes the turn.
+- **Budgets.** A recipe's `backend.budget` caps what one turn spends, its
+  sub-agents included (see [Budgets in `@promin/agent`](../agent/README.md#budgets));
+  a turn that runs out ends with finishReason `budget_exceeded`. Cost limits
+  price the recipe's model with `resolveLocalAgent({ costs })`
+  (`catalogCostRegistry(models)` reads the catalog items' `pricing`).
+  `ZoryaAgents({ budgets: { ledger, thread, namespace } })` adds a
+  cumulative per-thread budget and a rolling per-namespace one: a turn on a
+  thread or namespace that used a limit up answers 429 `budget_exceeded`
+  (`scope`, `dimension`, `limit`, `used`) before it runs, and committed turns
+  record their spend in `ledger` once per turn (`createSqliteZoryaStack`
+  provides `usageLedger`; `PostgresUsageLedger` is the Postgres one).
+  `GET /api/agents/:id/threads/:threadId/usage` shows the thread's and its
+  namespace's spend against the limits (the chat header shows it), and
+  `GET /api/agents/_usage?namespaceId=` the namespace's. A cost budget on a
+  model with no price answers 400 `model_unpriced`. A DAG run takes a
+  `budget` shared between its nodes (`POST /api/dags/:id/run`); with
+  `budgets` it is admitted against its namespace's budget (429 when used up,
+  else capped by what is left) and records its nodes' spend under the run id.
 - **Webhooks.** A delivery's claim records its scope and task durably before
   the agent runs, and the agent turn runs under a run id derived from the
   delivery and its attempt (`webhookRunId`). The delivery is marked done after

@@ -23,12 +23,16 @@
 //                                      call is a child workflow plus -route / -end
 //                                      entries (see delegation/run-delegated-call.ts)
 //   stall-<step>                       emits stall.detected
+//   budget-<step>                      with a budget: whether the next think step
+//                                      fits (spend so far plus its projection)
 //   after-turn                         hooks.afterTurn
 //   turn-trace                         end time of the turn's trace
 //   transcript-commit                  transcript.commit (what the turn produced,
 //                                      the final assistant message stamped with
 //                                      the turn's trace)
-//   turn-end                           emits turn.end / turn.aborted / step_limit.hit
+//   turn-usage                         usageRecorder.record (the turn's spend)
+//   turn-end                           emits turn.end / turn.aborted / step_limit.hit /
+//                                      budget.exceeded
 //   turn-failed                        emits turn.failed (only when the turn throws)
 //
 // Replay contract: control flow between activities depends only on the
@@ -36,6 +40,13 @@
 // the activity that produced it, so nothing is emitted twice for one
 // journal position. Time comes from the injected WallClock, inside
 // activities only.
+//
+// Budgets: `turn-start` journals the turn's effective budget (config
+// tightened by the input's ceiling); each think and compaction journals
+// its usage and priced cost; a sub-agent's spend comes back in its
+// journaled result. So the turn's spend, and every budget decision made
+// from it, replays the same. A turn over budget ends between steps — never
+// between a tool call and its result — with `budget_exceeded`.
 //
 // Tracing: think and tool activities journal their own start time and
 // duration next to their result, approval entries their request and
@@ -66,7 +77,24 @@ import {
 import type { LLMProvider, LLMToolChoice, LLMToolDefinition } from "./llm-provider.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
 import { recordApproval, recordChat, recordTool } from "./metrics/instrument.ts";
-import type { AgentMetrics, ModelCostRegistry } from "./metrics/types.ts";
+import type { AgentMetrics, ModelCostRates, ModelCostRegistry } from "./metrics/types.ts";
+import {
+  addUsage,
+  budgetOverrun,
+  EMPTY_USAGE,
+  hasLimits,
+  llmCallUsage,
+  DEFAULT_MIN_CALL_TOKENS,
+  ModelUnpricedError,
+  planBudgetedCall,
+  parseTurnBudget,
+  remainingBudget,
+  shareOfBudget,
+  tightenBudget,
+  type BudgetOverrun,
+  type BudgetUsage,
+  type TurnBudget,
+} from "./budget/budget.ts";
 import type { ProcessorsConfig } from "./processors.ts";
 import type { SessionEventBus } from "./session-logger.ts";
 import { StallDetector, type StallDetectorOptions } from "./stall-detector.ts";
@@ -98,6 +126,13 @@ export interface AgentInput {
    * sub-agent's turn (`subAgentTool`). Absent: a turn nobody delegated to.
    */
   delegation?: DelegationFrame;
+  /**
+   * A ceiling on this turn's spend, tightening `AgentActionConfig.budget`
+   * limit by limit. Set by whoever starts the turn on someone's account: a
+   * delegating turn passes its remaining budget, a DAG run a node's share,
+   * `LocalAgent` what is left of the thread's and namespace's budgets.
+   */
+  budget?: TurnBudget;
 }
 
 /**
@@ -107,8 +142,10 @@ export interface AgentInput {
  *   is `STEP_LIMIT_ANSWER`.
  * - `stalled` — the stall detector forced a final answer.
  * - `cancelled` — the turn's `signal` aborted.
+ * - `budget_exceeded` — the turn's budget ran out; the answer is
+ *   `BUDGET_EXCEEDED_ANSWER`.
  */
-export type AgentFinishReason = "stop" | "max_steps" | "stalled" | "cancelled";
+export type AgentFinishReason = "stop" | "max_steps" | "stalled" | "cancelled" | "budget_exceeded";
 
 export interface AgentResult<TOutput = unknown> {
   answer: string;
@@ -140,6 +177,12 @@ export interface AgentResult<TOutput = unknown> {
     cacheReadTokens?: number;
     cacheWriteTokens?: number;
   };
+  /**
+   * What the turn spent, sub-agents it delegated to included: tokens,
+   * priced cost, LLM and tool calls. Set by every `agentAction` turn; a
+   * delegating turn charges it to its own budget.
+   */
+  spend?: BudgetUsage;
   /**
    * The turn's timed trace: think / tool / approval spans and totals. Set
    * by every `agentAction` turn; absent on a result relayed from an agent
@@ -225,6 +268,16 @@ export interface TurnTranscript {
 }
 
 /**
+ * Where a turn's spend is recorded once it commits (thread and namespace
+ * budgets). Runs inside the journaled `turn-usage` activity, again only
+ * when a crash interrupts it: implementations must be idempotent per
+ * `workflowId` (`UsageLedger.record` is).
+ */
+export interface TurnUsageRecorder {
+  record(params: { readonly workflowId: string; readonly usage: BudgetUsage }): Promise<void>;
+}
+
+/**
  * Index of the approvals a turn suspends on. `requested` runs inside the
  * journaled activity that precedes the `approve:<toolCallId>` suspension
  * (only when no `onApprovalRequired` callback decides instead), so the
@@ -270,6 +323,25 @@ export interface AgentActionConfig<TOutput = any> {
   onApprovalRequired?: (call: ToolCall) => Promise<ApprovalDecision>;
   /** Think steps per turn. Default 20. Running out ends the turn with `max_steps`. */
   maxSteps?: number;
+  /**
+   * What one turn may spend, its sub-agents included (see `TurnBudget`).
+   * Checked before every LLM call against the spend so far plus the call's
+   * prompt — its output is capped to what is left (see `minCallTokens`) —
+   * and after it against the spend; running out ends the turn
+   * with `budget_exceeded` before the next step. Sub-agent calls get the
+   * remaining budget, split evenly between the calls of one step, and are
+   * charged what they spent. `maxCostUsd` needs `costs`, `llmProvider`
+   * and `llmModel` to price the model. Default: unlimited.
+   */
+  budget?: TurnBudget;
+  /**
+   * With a budget: the smallest output allowance worth an LLM call. A call
+   * that could produce fewer tokens than this before a limit is not made
+   * (the turn ends with `budget_exceeded`); otherwise the call's
+   * `maxTokens` is lowered to what the output, total and cost limits leave.
+   * Default `DEFAULT_MIN_CALL_TOKENS` (256).
+   */
+  minCallTokens?: number;
   systemPrompt?: string;
   rateLimiter?: RateLimiter;
   /** Time source for durations, timeouts and retry waits. Default `SystemWallClock`. */
@@ -348,6 +420,8 @@ export interface AgentActionConfig<TOutput = any> {
   transcript?: TurnTranscript;
   /** Pending-approval index — see `TurnApprovalIndex`. Thread turns set it. */
   approvalIndex?: TurnApprovalIndex;
+  /** Where the committed turn's spend goes — see `TurnUsageRecorder`. Thread turns set it. */
+  usageRecorder?: TurnUsageRecorder;
   /** Audit sink for elevated tools, surfaced on `ctx.toolAuditLogger`. */
   toolAuditLogger?: ToolAuditLogger;
   /**
@@ -358,7 +432,7 @@ export interface AgentActionConfig<TOutput = any> {
   signal?: AbortSignal;
   /** Telemetry sink: llm.*, tool.* and approval.* metrics. */
   metrics?: AgentMetrics;
-  /** Per-model USD rates for llm.cost.usd. */
+  /** Per-model USD rates: llm.cost.usd and the turn's priced spend (`budget.maxCostUsd`). */
   costs?: ModelCostRegistry;
   /** Provider label for LLM metrics (required with `metrics` for llm.* metrics). */
   llmProvider?: string;
@@ -371,11 +445,11 @@ export interface AgentActionConfig<TOutput = any> {
 /**
  * Engine settings a long-lived agent applies to every turn —
  * `AgentActionConfig` minus the per-run wiring (`bus`, `scope`, `signal`,
- * `transcript`, `approvalIndex`).
+ * `transcript`, `approvalIndex`, `usageRecorder`).
  */
 export type AgentEngineConfig<TOutput = any> = Omit<
   AgentActionConfig<TOutput>,
-  "bus" | "scope" | "signal" | "transcript" | "approvalIndex"
+  "bus" | "scope" | "signal" | "transcript" | "approvalIndex" | "usageRecorder"
 >;
 
 export class StructuredOutputParseError extends Error {
@@ -393,6 +467,11 @@ export const STEP_LIMIT_ANSWER = "(step limit reached)";
 export const CANCELLED_ANSWER = "(cancelled)";
 /** Final assistant message of a stalled turn whose forced round produced no text. */
 export const STALLED_ANSWER = "(no answer: the agent stopped making progress)";
+/** Final assistant message of a turn that ran out of budget. */
+export const BUDGET_EXCEEDED_ANSWER = "(budget exhausted)";
+
+/** Tool result of a call the engine did not run because the budget ran out. */
+const BUDGET_SKIPPED = "Not run: the turn's budget is exhausted.";
 
 const STRUCTURED_OUTPUT_INSTRUCTION =
   "When you have gathered all needed information and are ready to respond, " +
@@ -421,6 +500,9 @@ interface ToolSnapshotEntry {
 }
 
 type RoundMode = "normal" | "force-respond" | "force-answer";
+
+/** One think step's response with what it spent. */
+type ThinkResult = RunLlmCallResult & { readonly spend: BudgetUsage };
 
 interface TurnOutcome {
   readonly answer: string;
@@ -471,7 +553,9 @@ export function agentAction(
 ): Workflow<AgentInput, AgentResult>;
 export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput, AgentResult> {
   if (config.compaction) validateCompactionConfig(config.compaction);
+  const configBudget = config.budget === undefined ? undefined : parseTurnBudget(config.budget);
   const maxSteps = config.maxSteps ?? 20;
+  const minCallTokens = config.minCallTokens ?? DEFAULT_MIN_CALL_TOKENS;
   const clock = config.clock ?? SystemWallClock;
   const bus = config.bus;
   const repairBudget = config.structuredOutputRepairs ?? 2;
@@ -511,27 +595,54 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
         input.delegation === undefined ? ROOT_FRAME : parseDelegationFrame(input.delegation);
       // The turn's trace spans, rebuilt from journaled values on replay.
       const spans: TurnSpan[] = [];
-      const startedAt = yield* ctx.activity(
+      // The turn's limits, journaled: a config edited while the turn is
+      // suspended can't change the decisions a replay makes.
+      const started = yield* ctx.activity(
         "turn-start",
         async () => {
+          const ceiling = input.budget === undefined ? undefined : parseTurnBudget(input.budget);
+          const effective = tightenBudget(configBudget, ceiling);
           emit({ type: "turn.start", turn: 0, task: input.task });
           lifecycle({ workflowId, event: "message", from: "idle", to: "thinking" });
-          return clock.currentTimeMs();
+          return {
+            startedAt: clock.currentTimeMs(),
+            budget: hasLimits(effective) ? effective : null,
+            // Whether the turn's model is priced, journaled with the
+            // budget: a replay doesn't re-read the live `costs`.
+            priced: mainRates() !== undefined,
+          };
         },
         { idempotent: true },
       );
+      const startedAt = started.startedAt;
+      const budget: TurnBudget | undefined = started.budget ?? undefined;
+      // What the turn has spent so far, from journaled values only.
+      let spend: BudgetUsage = EMPTY_USAGE;
+      let budgetHit: (BudgetOverrun & { readonly step: number }) | undefined;
 
       try {
         return yield* turnBody();
       } catch (err) {
         if (isEngineControl(err)) throw err;
         const error = err instanceof Error ? err.message : String(err);
+        const failedSpend = spend;
         // Recorded as a failure, not a success: when the step is discarded
         // and run again, the journal drops it with the turn's other failed
         // entries instead of leaving a "turn-failed" slot the re-run can't match.
         yield* ctx.activity(
           "turn-failed",
           async (): Promise<void> => {
+            // A failed turn spent too (the steps before the failure): record
+            // it, so failing turns can't run past thread / namespace budgets.
+            // The recorder keeps the larger spend per turn, so a turn run
+            // again after this records what it adds.
+            if (config.usageRecorder) {
+              try {
+                await config.usageRecorder.record({ workflowId, usage: failedSpend });
+              } catch (recordErr) {
+                console.error("[agentAction] usage record of a failed turn failed:", recordErr);
+              }
+            }
             emit({ type: "turn.failed", turn: 0, error });
             lifecycle({ workflowId, event: "failed", from: "thinking", to: "idle" });
             throw err;
@@ -542,6 +653,9 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
       }
 
       function* turnBody(): Generator<ActivityYield, AgentResult, any> {
+        if (budget?.maxCostUsd !== undefined && !started.priced) {
+          throw new ModelUnpricedError(config.llmProvider, config.llmModel);
+        }
         const transcript = config.transcript;
         if (transcript) {
           yield* ctx.activity(
@@ -633,6 +747,38 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
           const snapshot = plan.tools;
           const snapshotByName = new Map(snapshot.map((e) => [e.name, e]));
 
+          // ---- budget: does the next LLM call fit, and with what output cap? ----
+          let callMaxTokens = config.maxTokens;
+          if (budget) {
+            const projectedInput = plan.compaction
+              ? plan.compaction.after
+              : estimateMessageTokens(planned);
+            const summarizes = plan.compaction !== null && config.compaction?.summarize !== false;
+            const spent = spend;
+            const call = yield* ctx.activity(
+              `budget-${step}`,
+              async () =>
+                planBudgetedCall({
+                  budget,
+                  spent,
+                  promptTokens: projectedInput,
+                  llmCalls: summarizes ? 2 : 1,
+                  rates: mainRates(),
+                  maxTokens: config.maxTokens,
+                  minOutputTokens: minCallTokens,
+                }),
+              { idempotent: true },
+            );
+            callMaxTokens = call.maxTokens ?? undefined;
+            const overrun = call.overrun;
+            if (overrun) {
+              budgetHit = { ...overrun, step };
+              record({ role: "assistant", content: BUDGET_EXCEEDED_ANSWER });
+              outcome = { answer: BUDGET_EXCEEDED_ANSWER, finishReason: "budget_exceeded" };
+              break;
+            }
+          }
+
           // ---- compaction: fold the older steps into one summary ----
           if (plan.compaction) {
             const { cut, tokens, after, ineffective } = plan.compaction;
@@ -673,6 +819,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
               usage.cacheReadTokens += result.usage.cacheReadTokens ?? 0;
               usage.cacheWriteTokens += result.usage.cacheWriteTokens ?? 0;
             }
+            spend = addUsage(spend, result.spend);
             if (ineffective) ineffectiveAt = step;
             messages = applyCompaction({ messages: planned, stepStart, cut, summary });
             reported = undefined;
@@ -691,6 +838,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
                   messages: conversation,
                   snapshot,
                   roundMode,
+                  ...(callMaxTokens !== undefined && { maxTokens: callMaxTokens }),
                   isReplay: ctx.isReplay,
                   workflowId,
                 }),
@@ -705,6 +853,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
             durationMs: thought.durationMs,
             ...(response.usage && { usage: response.usage }),
           });
+          spend = addUsage(spend, response.spend);
           if (response.usage) {
             usage.inputTokens += response.usage.inputTokens;
             usage.outputTokens += response.usage.outputTokens;
@@ -811,6 +960,30 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
             feedback = decision?.feedback ?? undefined;
           }
 
+          // ---- over budget: answer instead of running more tools ----
+          // A text answer still ends the turn normally; tool calls are
+          // closed with results that say why they did not run.
+          const callsOverrun =
+            calls.length > 0 && budget
+              ? (budgetOverrun({ budget, usage: spend }) ??
+                budgetOverrun({
+                  budget,
+                  usage: addUsage(spend, { ...EMPTY_USAGE, toolCalls: calls.length }),
+                }))
+              : undefined;
+          if (callsOverrun) {
+            budgetHit = { ...callsOverrun, step };
+            record(
+              ...skippedResults(calls, BUDGET_SKIPPED),
+              {
+                role: "assistant",
+                content: BUDGET_EXCEEDED_ANSWER,
+              },
+            );
+            outcome = { answer: BUDGET_EXCEEDED_ANSWER, finishReason: "budget_exceeded" };
+            break;
+          }
+
           // ---- a text answer ----
           if (calls.length === 0) {
             if (schema) {
@@ -894,11 +1067,25 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
             toRun.push({ index, call, entry });
           }
           if (toRun.length > 0) {
+            spend = addUsage(spend, { ...EMPTY_USAGE, toolCalls: toRun.length });
+            // Sub-agent calls of this step share what is left of the budget.
+            const delegatedCount = toRun.filter(({ entry }) => entry.delegated).length;
+            const childBudget =
+              budget && delegatedCount > 0
+                ? shareOfBudget({
+                    budget: remainingBudget({ budget, usage: spend }),
+                    parts: delegatedCount,
+                  })
+                : undefined;
             const outputs = yield* ctx.parallel(
-              toRun.map(({ call, entry }) => runTool({ step, call, entry })),
+              toRun.map(({ call, entry }) =>
+                runTool({ step, call, entry, ...(childBudget && { childBudget }) }),
+              ),
             );
             toRun.forEach(({ index }, k) => {
-              results[index] = outputs[k]!;
+              const ran = outputs[k]!;
+              results[index] = ran.result;
+              if (ran.spend) spend = addUsage(spend, ran.spend);
             });
           }
           record(...results);
@@ -969,6 +1156,10 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
           finishReason: final.finishReason,
           steps: stepsTaken,
           usage: tokens,
+          spend,
+          ...(budget && {
+            budget: { limits: budget, ...(budgetHit && { exceeded: budgetHit }) },
+          }),
           spans: orderSpans(spans),
         };
 
@@ -982,11 +1173,31 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
             { idempotent: true },
           );
         }
+        if (config.usageRecorder) {
+          const recorder = config.usageRecorder;
+          const turnSpend = spend;
+          yield* ctx.activity(
+            "turn-usage",
+            () => recorder.record({ workflowId, usage: turnSpend }),
+            { idempotent: true },
+          );
+        }
+        const hit = budgetHit;
         yield* ctx.activity(
           "turn-end",
           async () => {
             if (final.finishReason === "max_steps") {
               emit({ type: "step_limit.hit", turn: 0, maxSteps });
+            }
+            if (hit) {
+              emit({
+                type: "budget.exceeded",
+                turn: 0,
+                step: hit.step,
+                dimension: hit.dimension,
+                limit: hit.limit,
+                used: hit.used,
+              });
             }
             if (final.finishReason === "cancelled") {
               emit({ type: "turn.aborted", turn: 0, reason: "signal" });
@@ -1019,6 +1230,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
           steps: stepsTaken,
           finishReason: final.finishReason,
           ...(hasUsage && { usage: tokens }),
+          spend,
           trace,
         };
         return result;
@@ -1129,7 +1341,9 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
         step: number;
         call: ToolCall;
         entry: ToolSnapshotEntry;
-      }): Generator<ActivityYield, ToolResultMessage, any> {
+        /** A sub-agent call's share of the turn's remaining budget. */
+        childBudget?: TurnBudget;
+      }): Generator<ActivityYield, { result: ToolResultMessage; spend?: BudgetUsage }, any> {
         const { step, call, entry } = params;
         if (entry.delegated) {
           const timeoutMs = timeoutFor(call);
@@ -1146,6 +1360,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
             ...(config.scope && { scope: config.scope }),
             ...(config.signal && { signal: config.signal }),
             ...(timeoutMs !== undefined && { timeoutMs }),
+            ...(params.childBudget && { budget: params.childBudget }),
             clock,
             onStart: () => toolStarted({ step, call }),
             onEnd: ({ result, output, durationMs }) => {
@@ -1158,7 +1373,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
             step,
             name: call.name,
             toolCallId: call.id,
-            failed: delegated.isError === true,
+            failed: delegated.result.isError === true,
             delegated: true,
           });
           return delegated;
@@ -1178,14 +1393,14 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
             startedAt: ran.startedAt,
             durationMs: ran.durationMs,
           });
-          return ran.value;
+          return { result: ran.value };
         } catch (err) {
           // A non-idempotent tool interrupted by a crash: don't re-run it,
           // tell the model the outcome is unknown. Replays land here again,
           // so the transcript is the same on every pass.
           if ((err as { _tag?: unknown } | null)?._tag === "AmbiguousActivityOutcome") {
             spans.push({ kind: "tool", step, name: call.name, toolCallId: call.id, failed: true });
-            return errorResult(call, OUTCOME_UNKNOWN_MESSAGE);
+            return { result: errorResult(call, OUTCOME_UNKNOWN_MESSAGE) };
           }
           throw err;
         }
@@ -1209,7 +1424,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
     kept: number;
     firstIneffective: boolean;
     fallbackMaxTokens: number;
-  }): Promise<StepSummary> {
+  }): Promise<StepSummary & { readonly spend: BudgetUsage }> {
     const { step } = params;
     // A compaction recorded by a plan whose config is gone since: digest.
     const compaction = config.compaction ?? {
@@ -1228,6 +1443,8 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
       ...(config.signal && { signal: config.signal }),
     });
     const durationMs = clock.currentTimeMs() - start;
+    const provider = compaction.llmProvider ?? config.llmProvider;
+    const model = compaction.llmModel ?? config.llmModel;
     if (result.summarized) {
       emit({
         type: "llm.call",
@@ -1237,8 +1454,6 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
         durationMs,
         ...(result.usage && { tokens: result.usage }),
       });
-      const provider = compaction.llmProvider ?? config.llmProvider;
-      const model = compaction.llmModel ?? config.llmModel;
       if (config.metrics && provider && model) {
         recordChat({
           metrics: config.metrics,
@@ -1273,7 +1488,32 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
         maxTokens: compaction.maxTokens,
       });
     }
-    return result;
+    // Priced here, inside the journaled step, like a think step — at the
+    // summary model's own rates. An unpriced summary model counts its
+    // tokens and calls but no cost.
+    const rates = ratesOf({ provider, model });
+    if (result.summarized && !rates && configBudget?.maxCostUsd !== undefined) {
+      console.warn(
+        `[agentAction] compaction model ${provider ?? "?"}/${model ?? "?"} has no price: ` +
+          "its summaries are not counted against maxCostUsd",
+      );
+    }
+    const spend = result.summarized ? llmCallUsage({ usage: result.usage, rates }) : EMPTY_USAGE;
+    return { ...result, spend };
+  }
+
+  /** Rates of `provider` / `model` in `config.costs`, when all three are known. */
+  function ratesOf(params: {
+    provider: string | undefined;
+    model: string | undefined;
+  }): ModelCostRates | undefined {
+    const { provider, model } = params;
+    return config.costs && provider && model ? config.costs.rates(provider, model) : undefined;
+  }
+
+  /** Rates of the turn's own model. */
+  function mainRates(): ModelCostRates | undefined {
+    return ratesOf({ provider: config.llmProvider, model: config.llmModel });
   }
 
   async function timed<T>(
@@ -1301,12 +1541,14 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
     messages: Message[];
     snapshot: ReadonlyArray<ToolSnapshotEntry>;
     roundMode: RoundMode;
+    /** Output cap of this call: `maxTokens`, lowered to what the budget leaves. */
+    maxTokens?: number;
     isReplay: boolean;
     workflowId: string;
-  }): Promise<RunLlmCallResult> {
+  }): Promise<ThinkResult> {
     const { step, roundMode } = params;
     if (config.signal?.aborted) {
-      return { content: null, finishReason: "stop", aborted: true };
+      return { content: null, finishReason: "stop", aborted: true, spend: EMPTY_USAGE };
     }
     const live = resolveTools(config);
     const offered = Object.fromEntries(
@@ -1354,7 +1596,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
           processors: config.processors,
           processorCtx: { step, turn: 0, workflowId: params.workflowId, isReplay: params.isReplay },
           thinkingBudgetTokens,
-          ...(config.maxTokens !== undefined && { maxTokens: config.maxTokens }),
+          ...(params.maxTokens !== undefined && { maxTokens: params.maxTokens }),
           ...(config.signal && { signal: config.signal }),
           clock,
           ...(config.metrics && { metrics: config.metrics }),
@@ -1392,7 +1634,9 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
     if (!normalized.aborted) {
       for (const call of normalized.toolCalls ?? []) config.onToolCall?.(call);
     }
-    return normalized;
+    // Priced here, inside the journaled step: a later change of rates
+    // can't change what a replay of this turn has spent.
+    return { ...normalized, spend: llmCallUsage({ usage: result.usage, rates: mainRates() }) };
   }
 
   /** Per-call time limit: the tool's own, else the agent's default. */

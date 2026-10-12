@@ -10,6 +10,7 @@ Durable agent turns, LLM adapters, tools, memory, retrieval, and a terminal UI f
 - [LocalAgent — conversations](#localagent--conversations)
 - [agentAction — the durable turn engine](#agentaction--the-durable-turn-engine)
   - [Engine contract](#engine-contract)
+  - [Budgets](#budgets)
 - [Tools](#tools)
   - [tool()](#tool)
   - [Multi-command tools](#multi-command-tools)
@@ -133,9 +134,9 @@ const { output, finishReason } = await runner.run({
 
 ### Engine contract
 
-**Journal.** Each side effect is one activity: `turn-start`, `transcript-open` (with a `transcript`), `before-turn`, then per step `plan-<n>` (tool-set snapshot and compaction cut), `compact-<n>` (the step summary, when compacting), `think-<n>` (the LLM call), `step-<n>-hook` (`onStep`), `step-<n>-approvals` (the `autoApprove` verdicts), `step-<n>-approval-<id>-start` / `-end` around the decision, `tool-<name>-<n>-<id>` (each tool call, in parallel), `stall-<n>`; then `after-turn`, `transcript-commit` (with a `transcript`) and `turn-end` (or `turn-failed` when the turn throws). Control flow between activities reads only the input and journaled values, so a replay takes the recorded path — a tool or `autoApprove` policy edited while a turn is suspended doesn't change it. Time comes from the injected `clock` (a `WallClock`), inside activities only. Every activity except a non-idempotent tool call is idempotent: a crash inside one re-runs it on recovery.
+**Journal.** Each side effect is one activity: `turn-start`, `transcript-open` (with a `transcript`), `before-turn`, then per step `plan-<n>` (tool-set snapshot and compaction cut), `compact-<n>` (the step summary, when compacting), `think-<n>` (the LLM call), `step-<n>-hook` (`onStep`), `step-<n>-approvals` (the `autoApprove` verdicts), `step-<n>-approval-<id>-start` / `-end` around the decision, `tool-<name>-<n>-<id>` (each tool call, in parallel), `stall-<n>`, `budget-<n>` (with a budget: whether the next LLM call fits); then `after-turn`, `transcript-commit` (with a `transcript`), `turn-usage` (with a `usageRecorder`) and `turn-end` (or `turn-failed` when the turn throws). Control flow between activities reads only the input and journaled values, so a replay takes the recorded path — a tool or `autoApprove` policy edited while a turn is suspended doesn't change it. Time comes from the injected `clock` (a `WallClock`), inside activities only. Every activity except a non-idempotent tool call is idempotent: a crash inside one re-runs it on recovery.
 
-**Events.** Every bus event (`turn.start`, `llm.call`, `llm.retry`, `token.delta`, `tool.start` / `tool.progress` / `tool.end`, `compact`, `compaction.ineffective`, `approval.requested` / `approval.decision`, `stall.detected`, `step_limit.hit`, `turn.end` / `turn.aborted` / `turn.failed`) is emitted by the activity that produced it, so a replay never re-emits an event for a recorded activity. An approval resume streams only what happens after the resume. `approval.requested` carries the tool name and input; tool events carry the `toolCallId`.
+**Events.** Every bus event (`turn.start`, `llm.call`, `llm.retry`, `token.delta`, `tool.start` / `tool.progress` / `tool.end`, `compact`, `compaction.ineffective`, `approval.requested` / `approval.decision`, `stall.detected`, `step_limit.hit`, `budget.exceeded`, `turn.end` / `turn.aborted` / `turn.failed`) is emitted by the activity that produced it, so a replay never re-emits an event for a recorded activity. An approval resume streams only what happens after the resume. `approval.requested` carries the tool name and input; tool events carry the `toolCallId`.
 
 **LLM calls** are idempotent activities: a crash mid-call re-runs the call on recovery. Failures are classified with `classifyLLMError`: `transient` and `rate_limit` are retried per `llmRetry` (exponential backoff, or the server's `Retry-After` up to `maxRetryAfterMs`); `context_overflow` and `permanent` fail the turn. If the provider is already a `resilientLLM`, set `llmRetry: false`.
 
@@ -152,12 +153,13 @@ Every tool gets `ctx.toolCallId`, `ctx.signal` (aborted on cancel or timeout) an
 
 **Ending a turn.** `result.finishReason` says why the turn ended, and the transcript always ends with an assistant message and has a result for every tool call. `result.turnMessages` is what the turn adds to a conversation (the task, then the assistant and tool messages it produced — no seed, nothing a `beforeTurn` hook did, no engine guidance); `LocalAgent` persists exactly that, through the run's `transcript`: `transcript-open` records the user message when the turn starts and `transcript-commit` records the produced messages once it has its answer, each an idempotent append keyed by the workflow id. A turn that throws emits `turn.failed` and an `onLifecycle` `failed` transition.
 
-| `finishReason` | When                                                        | `answer`                               |
-| -------------- | ----------------------------------------------------------- | -------------------------------------- |
-| `stop`         | the model answered (or `onStep` returned `continue: false`) | the model's text                       |
-| `max_steps`    | `maxSteps` think steps ran without an answer                | `STEP_LIMIT_ANSWER`                    |
-| `stalled`      | the stall detector forced a final answer                    | the forced answer, or `STALLED_ANSWER` |
-| `cancelled`    | `signal` aborted                                            | streamed text, or `CANCELLED_ANSWER`   |
+| `finishReason`    | When                                                        | `answer`                               |
+| ----------------- | ----------------------------------------------------------- | -------------------------------------- |
+| `stop`            | the model answered (or `onStep` returned `continue: false`) | the model's text                       |
+| `max_steps`       | `maxSteps` think steps ran without an answer                | `STEP_LIMIT_ANSWER`                    |
+| `stalled`         | the stall detector forced a final answer                    | the forced answer, or `STALLED_ANSWER` |
+| `cancelled`       | `signal` aborted                                            | streamed text, or `CANCELLED_ANSWER`   |
+| `budget_exceeded` | the turn's `budget` ran out (see [Budgets](#budgets))       | `BUDGET_EXCEEDED_ANSWER`               |
 
 **Cancellation.** `signal` is threaded into every LLM call and tool (and ends an LLM retry wait). The engine records the cancellation at the next think step, so a replay ends the turn at the same point.
 
@@ -165,7 +167,7 @@ Every tool gets `ctx.toolCallId`, `ctx.signal` (aborted on cancel or timeout) an
 
 **Structured output.** With `outputSchema`, the engine offers a `_respond` tool and forces it through `tool_choice` once the model is ready to answer (from the first step when the agent has no other tools, after a prose answer otherwise — the forced round gets a user nudge, so a request never ends on the assistant's prose; extended thinking is off for a forced round, which Anthropic requires). Other tool calls in a `_respond` response are answered as not run. A payload that fails the schema goes back to the model with the validation errors, up to `structuredOutputRepairs` (default 2) times, then the turn fails with `StructuredOutputParseError`; the repair round keeps the agent's tools available, so the model can re-issue a skipped call.
 
-**Settings.** `thinkingBudgetTokens`, `maxTokens`, `redactPriorThinking`, `compaction`, `metrics` (+ `costs`, `llmProvider`, `llmModel`, `metricLabels`: `llm.*`, `tool.*`, `approval.*`), `hooks.beforeTurn` / `hooks.afterTurn`, `onLifecycle`, `onStep` (with `feedback`), `onToolCall`, `onToolResult`, `onChunk`, `onThinking`, `processors`, `rateLimiter`, `scope`, `toolAuditLogger`. `LocalAgent`'s `agent` field is `AgentEngineConfig` — this config minus the per-run `bus` / `scope` / `signal` / `transcript` / `approvalIndex` it supplies — and every field reaches every turn.
+**Settings.** `budget`, `thinkingBudgetTokens`, `maxTokens`, `redactPriorThinking`, `compaction`, `metrics` (+ `costs`, `llmProvider`, `llmModel`, `metricLabels`: `llm.*`, `tool.*`, `approval.*`), `hooks.beforeTurn` / `hooks.afterTurn`, `onLifecycle`, `onStep` (with `feedback`), `onToolCall`, `onToolResult`, `onChunk`, `onThinking`, `processors`, `rateLimiter`, `scope`, `toolAuditLogger`. `LocalAgent`'s `agent` field is `AgentEngineConfig` — this config minus the per-run `bus` / `scope` / `signal` / `transcript` / `approvalIndex` / `usageRecorder` it supplies — and every field reaches every turn.
 
 ### Thread turns
 
@@ -178,6 +180,79 @@ Every tool gets `ctx.toolCallId`, `ctx.signal` (aborted on cancel or timeout) an
 - **Ordering.** A new send on a thread with an open approval whose turn has not ended throws `ThreadAwaitingApprovalError` — including a turn that is still on its way to the suspension — so the turn's output lands right after its own user message. Decide the approval first. `thread.prepareTurn()` runs this check alone (a gateway calls it before it streams); approvals whose turn ended out of band are closed instead of blocking.
 
 Run output: `steps`, `toolCalls` and `toolResults` (with tool names and `failed`) cover this turn only; `fullStream` and `textStream` are push-based and every consumer reads them from the start; `cancel()` aborts the turn and resolves once it has stopped — a tool that ignores `ctx.signal` keeps the turn running until it returns.
+
+### Budgets
+
+`budget` caps what one turn spends, the sub-agents it delegates to included:
+`maxInputTokens` (prompt tokens, cache reads and writes included),
+`maxOutputTokens`, `maxTotalTokens`, `maxCostUsd`, `maxLlmCalls` (think steps
+and compaction summaries) and `maxToolCalls`. Tokens add up over every LLM call
+of the turn. Before each LLM call the engine checks the spend so far plus the
+call's estimated prompt, and caps the call's `maxTokens` to the output the
+output, total and (priced) cost limits leave; a call that could produce fewer
+than `minCallTokens` (default 256) tokens is not made. After the call it checks
+the spend.
+Running out ends the turn between steps with `finishReason: "budget_exceeded"`,
+`BUDGET_EXCEEDED_ANSWER`, a `budget.exceeded` event and `trace.budget.exceeded`
+(the limit, what was used, the step); tool calls of the last response are closed
+with "not run" results, never left without one. A text answer that arrives over
+budget still ends the turn as `stop`.
+
+Every think and compaction journals its usage and its cost, priced with `costs`
+for `llmProvider` / `llmModel` (`catalogCostRegistry(catalog)` reads a
+`ModelCatalog`'s `pricing`); a turn under `maxCostUsd` whose model has no rates
+fails with `ModelUnpricedError` (`code: "model_unpriced"`; whether the model is
+priced is journaled at `turn-start`). A compaction summary is priced at its own
+model's rates; an unpriced summary model counts tokens and calls but no cost
+(with a warning). `turn-start` journals the effective budget — `budget` tightened by the
+input's `AgentInput.budget` ceiling — so a resumed or replayed turn makes the
+same decisions under an edited config. `AgentResult.spend` (and
+`trace.spend`) is what the turn spent: tokens, cost, LLM and tool calls.
+
+**Call tree.** A sub-agent call gets the caller's remaining budget in its
+child input (`AgentInput.budget`), split evenly between the sub-agent calls of
+one step, and the caller is charged the child's `spend` from the child's
+journaled result; a child that failed without one is charged its whole share.
+A DAG run started with `budget` shares it between its nodes the same way: a
+starting node gets an equal share of what is free among itself and the nodes
+not yet started, a settled node gives back what it did not spend, and
+`DurableDagOutput.spend` sums the nodes, and a `usageRecorder`
+(`createDagWorkflow({ usageRecorder })`) records it under the run id — also
+when the run fails after its nodes spent. Node turns record nothing themselves.
+
+**Threads and namespaces.** `LocalAgentConfig.budgets` (`AgentBudgets`) adds a
+cumulative per-thread budget (`thread`) and a rolling per-namespace one
+(`namespace: { limits, windowMs }`, or a function of the namespace id). A thread
+send or one-shot `invoke` whose thread or namespace has used a limit up throws
+`BudgetExceededError` (`code: "budget_exceeded"`, `scope`, `dimension`, `limit`,
+`used`) — also when less is left than one useful call (`minCallTokens`,
+default 256), so a thread never gets stuck on empty turns; an admitted turn runs
+with what is left as its ceiling. A turn records its spend — when it commits,
+and when it fails after paid steps — in `budgets.ledger` (a `UsageLedger`:
+`InMemoryUsageLedger`, `SqliteUsageLedger`, `PostgresUsageLedger`, all passing
+`usageLedgerTestSuite`) per turn workflow id, keeping the larger spend per
+field, so a retried send or a crash recovery never counts it twice and a turn
+run on after a failure records what it added. Ledger rows are kept (thread
+totals need them); prune old rows yourself if you must bound the table. Memory
+consolidation (`compactThread`, `distillThread`, auto-compact / auto-distill)
+runs outside turns and is not budgeted. Records are atomic inserts; concurrent turns of
+a namespace are each admitted against what was recorded at their start, so
+together they can overshoot a window by at most what was left for each.
+Postgres stamps and windows rows with the database clock. `budgetStatus` reports
+spend against the limits.
+
+```ts
+const agent = new LocalAgent({
+  runner,
+  memory,
+  agent: { name: "support", llm, budget: { maxTotalTokens: 50_000, maxToolCalls: 20 } },
+  budgets: {
+    ledger: new PostgresUsageLedger({ db }),
+    thread: { maxTotalTokens: 1_000_000 },
+    namespace: { limits: { maxCostUsd: 25 }, windowMs: 86_400_000 },
+  },
+});
+```
 
 ---
 
@@ -713,6 +788,8 @@ await resolveLocalAgent(recipe, {
 });
 ```
 
+Give an item `pricing` (`ModelCostRates`, USD per million tokens) and pass `costs: catalogCostRegistry(catalog)` to `resolveLocalAgent` to price its turns for cost budgets.
+
 The runtime-only `llm` field is stripped by `catalog.serialize()` so the catalog can be safely returned over HTTP — Zorya exposes `GET /api/agents/_catalog/models` to populate the designer UI's model dropdown without leaking provider closures or API keys.
 
 For folder-driven discovery (one file per model, hot-reload on change), use `createFileModelCatalog({ dir })` — same shape and ergonomics as `createFileToolRegistry`.
@@ -783,4 +860,4 @@ bus.subscribe((event) => console.log(event.type, event));
 const turn = agentAction({ name: "my-agent", llm, bus });
 ```
 
-Event types: `turn.start`, `turn.end`, `turn.aborted`, `turn.failed`, `llm.call`, `llm.retry`, `token.delta`, `tool.start`, `tool.progress`, `tool.end`, `compact`, `approval.requested`, `approval.decision`, `stall.detected`, `step_limit.hit`.
+Event types: `turn.start`, `turn.end`, `turn.aborted`, `turn.failed`, `llm.call`, `llm.retry`, `token.delta`, `tool.start`, `tool.progress`, `tool.end`, `compact`, `approval.requested`, `approval.decision`, `stall.detected`, `step_limit.hit`, `budget.exceeded`.

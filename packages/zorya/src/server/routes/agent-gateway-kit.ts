@@ -16,6 +16,7 @@
 
 import {
   MCP_RECIPE_SERVER_NAME,
+  TurnBudgetSchema,
   type AgentBackend,
   type AgentMetadata,
   type RegisteredAgent,
@@ -190,6 +191,7 @@ const LocalBackendSchema = z
     mcpServers: z.array(McpServerRecipeSchema).optional(),
     knowledge: KnowledgeSchema.optional(),
     maxStepsPerTurn: PositiveInt.optional(),
+    budget: TurnBudgetSchema.optional(),
     autoCompact: z.union([z.literal(false), z.object({}).passthrough()]).optional(),
     autoDistill: z.union([z.literal(false), z.object({}).passthrough()]).optional(),
     contextBudget: z

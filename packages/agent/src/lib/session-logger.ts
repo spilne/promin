@@ -1,3 +1,5 @@
+import type { BudgetDimension } from "./budget/budget.ts";
+
 export type LogUsage = {
   inputTokens: number;
   outputTokens: number;
@@ -90,6 +92,19 @@ type SessionEventBody =
     }
   | { type: "approval.decision"; turn: number; toolCallId: string; approved: boolean }
   | { type: "step_limit.hit"; turn: number; maxSteps: number }
+  | {
+      /**
+       * The turn's budget ran out at `step`: the turn ends with
+       * `budget_exceeded`. `dimension` names the limit (`maxTotalTokens`,
+       * `maxCostUsd`, …), `used` what was (or would have been) spent on it.
+       */
+      type: "budget.exceeded";
+      turn: number;
+      step: number;
+      dimension: BudgetDimension;
+      limit: number;
+      used: number;
+    }
   | {
       /**
        * The stall detector saw no progress — the same tool calls repeated

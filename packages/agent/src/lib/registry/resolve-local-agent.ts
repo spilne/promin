@@ -42,6 +42,8 @@ import type { RoleDefinition } from "../role/types.ts";
 import type { AgentRetrieverBinding } from "../agent/retriever-bindings.ts";
 import type { RetrieverRegistry } from "../rag/retriever-registry.ts";
 import type { Retriever } from "../rag/types.ts";
+import type { AgentBudgets } from "../budget/agent-budgets.ts";
+import type { ModelCostRegistry } from "../metrics/types.ts";
 
 /** Caller-supplied runtime injectables. */
 export interface ResolveLocalAgentDeps {
@@ -175,6 +177,14 @@ export interface ResolveLocalAgentDeps {
    * MCP servers without this throws, so they are never silently dropped.
    */
   readonly mcpTools?: Readonly<Record<string, AgentTool<any, any>>>;
+  /**
+   * Per-model rates. Prices the agent's spend for `backend.budget.maxCostUsd`
+   * (and namespace / thread cost budgets); `catalogCostRegistry` builds one
+   * from a `ModelCatalog` whose items carry `pricing`.
+   */
+  readonly costs?: ModelCostRegistry;
+  /** Thread and namespace budgets — see `LocalAgentConfig.budgets`. */
+  readonly budgets?: AgentBudgets;
 }
 
 /**
@@ -253,7 +263,13 @@ export async function resolveLocalAgent(
       tools,
       systemPrompt,
       maxSteps: backend.maxStepsPerTurn,
+      ...(backend.budget !== undefined && { budget: backend.budget }),
+      // Names the model for pricing (`costs`) and LLM metrics.
+      llmProvider: backend.model.provider,
+      llmModel: backend.model.id,
+      ...(deps.costs !== undefined && { costs: deps.costs }),
     },
+    ...(deps.budgets !== undefined && { budgets: deps.budgets }),
     // Threads this agent creates carry the recipe id as their owner stamp.
     agentId: agent.id,
     runner: deps.runner,

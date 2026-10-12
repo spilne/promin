@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 
 import {
+  admitTurn,
   ApprovalAlreadyDecidedError,
   ApprovalExpiredError,
   ApprovalNotFoundError,
@@ -43,6 +44,33 @@ import {
   type ScopedAgent,
 } from "./agent-scope.ts";
 import { parseEventId, type TurnStream, type TurnStreamOwner } from "./agent-sse.ts";
+import { budgetRefusal } from "./agent-usage.ts";
+
+/**
+ * Refuse a turn whose thread or namespace budget is used up (429) before a
+ * stream starts — the backend checks again when the turn starts. Null when
+ * the turn may run. Remote-backend agents are not budgeted here.
+ */
+async function budgetPreflight(params: {
+  readonly deps: AgentGatewayDeps;
+  readonly scoped: ScopedAgent;
+  readonly threadId?: string;
+}): Promise<Response | null> {
+  const { deps, scoped, threadId } = params;
+  if (!deps.budgets || scoped.recipe.backend.type !== "local") return null;
+  try {
+    await admitTurn({
+      budgets: deps.budgets,
+      namespaceId: scoped.namespaceId,
+      ...(threadId !== undefined && { threadId }),
+    });
+    return null;
+  } catch (err) {
+    const refused = budgetRefusal(err);
+    if (refused) return refused;
+    throw err;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // One-shot invoke + stream
@@ -68,7 +96,7 @@ export function invokeAgent(deps: AgentGatewayDeps) {
       if (scoped.instanceId !== undefined) response.instanceId = scoped.instanceId;
       return json(200, response);
     } catch (err) {
-      return internalError({ code: "invoke_failed", err });
+      return budgetRefusal(err) ?? internalError({ code: "invoke_failed", err });
     }
   };
 }
@@ -86,6 +114,8 @@ export function streamAgent(deps: AgentGatewayDeps) {
     if ("error" in parsed) return refusalResponse(parsed);
     const scoped = await loadScopedAgent({ deps, req, id, scope: parsed, invoking: true });
     if (scoped instanceof Response) return scoped;
+    const refused = await budgetPreflight({ deps, scoped });
+    if (refused) return refused;
 
     const out = scoped.agent.stream({ task: parsed.task });
     const stream = deps.turnStreams.start({
@@ -149,7 +179,9 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
         };
         return json(202, suspended);
       }
-      return approvalError(err) ?? internalError({ code: "send_failed", err });
+      return (
+        approvalError(err) ?? budgetRefusal(err) ?? internalError({ code: "send_failed", err })
+      );
     } finally {
       await lease.release();
     }
@@ -219,6 +251,11 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
         const refused = approvalError(err);
         if (refused) return refused;
         throw err;
+      }
+      const overBudget = await budgetPreflight({ deps, scoped, threadId });
+      if (overBudget) {
+        await lease.release();
+        return overBudget;
       }
       const out = thread.stream({ task: parsed.task }, { turnKey });
       const stream = deps.turnStreams.start({

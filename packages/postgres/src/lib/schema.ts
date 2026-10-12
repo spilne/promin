@@ -1080,6 +1080,35 @@ export const agentPendingApproval = pgTable(
 );
 
 // ---------------------------------------------------------------------------
+// Usage ledger — what each committed agent turn spent, one row per turn
+// (keyed by its workflow id), for thread and namespace budgets. Rows are
+// stamped by the database clock; namespace windows compare against NOW().
+// ---------------------------------------------------------------------------
+
+export const agentUsageLedger = pgTable(
+  "agent_usage_ledger",
+  {
+    namespaceId: text("namespace_id").notNull(),
+    turnId: text("turn_id").notNull(),
+    threadId: text("thread_id"),
+    agentId: text("agent_id"),
+    inputTokens: bigint("input_tokens", { mode: "number" }).notNull(),
+    outputTokens: bigint("output_tokens", { mode: "number" }).notNull(),
+    cacheReadTokens: bigint("cache_read_tokens", { mode: "number" }).notNull(),
+    cacheWriteTokens: bigint("cache_write_tokens", { mode: "number" }).notNull(),
+    costUsd: doublePrecision("cost_usd").notNull(),
+    llmCalls: integer("llm_calls").notNull(),
+    toolCalls: integer("tool_calls").notNull(),
+    recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.namespaceId, t.turnId] }),
+    index("agent_usage_ledger_window_idx").on(t.namespaceId, t.recordedAt),
+    index("agent_usage_ledger_thread_idx").on(t.namespaceId, t.threadId),
+  ],
+);
+
+// ---------------------------------------------------------------------------
 // Secrets — scoped credential vault. Three scopes share one table; the
 // kind column discriminates 'global' / 'namespace' / 'resource'. Values
 // are stored encrypted (AES-256-GCM, scrypt-stretched passphrase). The

@@ -46,6 +46,7 @@ import type {
   ThreadApprovalsResponse,
   ThreadInvokeResponse,
   ThreadMessagesResponse,
+  ThreadUsageResponse,
 } from "../../server/routes/agents/agent-gateway-deps.ts";
 import type {
   RegisteredSkill,
@@ -1136,6 +1137,18 @@ export const api = {
     if (params.limit !== undefined) qp.set("limit", String(params.limit));
     return req<ThreadMessagesResponse>(
       `/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/messages?${qp}`,
+    );
+  },
+  /** The thread's spend against its thread and namespace budgets. */
+  getAgentThreadUsage(
+    id: string,
+    threadId: string,
+    params: { namespaceId: string; resourceId?: string },
+  ): Promise<ThreadUsageResponse> {
+    const qp = new URLSearchParams({ namespaceId: params.namespaceId });
+    if (params.resourceId) qp.set("resourceId", params.resourceId);
+    return req<ThreadUsageResponse>(
+      `/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/usage?${qp}`,
     );
   },
   /** Tool approvals the thread's turns are suspended on (the pending-approval index). */

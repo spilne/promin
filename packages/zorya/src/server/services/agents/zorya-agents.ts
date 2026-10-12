@@ -9,6 +9,7 @@
 
 import type {
   Agent,
+  AgentBudgets,
   AgentInstanceRegistry,
   AgentRegistry,
   AgentToolCatalog,
@@ -28,6 +29,7 @@ import {
   AgentTurnGate,
   InMemoryLeaseStore,
   InMemoryMemoryStore,
+  LocalAgent,
   startAgentSchedule,
   startAgentScanLoop,
 } from "@promin/agent";
@@ -145,6 +147,22 @@ export interface ZoryaAgentsConfig {
    * per-response queue. Defaults: see `TurnStreamLimits`.
    */
   streaming?: TurnStreamLimits;
+  /**
+   * Thread and namespace budgets for local agents: a thread's cumulative
+   * budget and a namespace's rolling-window budget. Applied to every agent
+   * `resolve` returns, so gateway and scheduled thread turns and one-shot
+   * invokes are admitted against them — refused once their thread or
+   * namespace has used its budget up (429 `budget_exceeded`), else capped
+   * by what is left — and record their spend, committed or failed. A DAG
+   * run is admitted against its namespace's budget at the DAG route and
+   * records its nodes' spend under the run id (`ZoryaDags`); its node
+   * turns, like sub-agent turns, record nothing themselves. Spend goes to
+   * `budgets.ledger` — pass a durable one
+   * (`SqliteUsageLedger`, `PostgresUsageLedger`) shared by every process.
+   * Spend is shown on `GET /api/agents/:id/threads/:threadId/usage` and
+   * `GET /api/agents/_usage`. Remote-backend agents are not budgeted here.
+   */
+  budgets?: AgentBudgets;
 }
 
 export class ZoryaAgents implements AgentScheduleDispatcher {
@@ -171,12 +189,23 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly workerId?: string;
   readonly authorizeScope?: ScopeAuthorizer;
   readonly streaming?: TurnStreamLimits;
+  readonly budgets?: AgentBudgets;
   private readonly scanConfig?: ZoryaAgentsScanConfig;
   private scanHandle?: ScanLoopHandle<ScanLoopTick>;
 
   constructor(config: ZoryaAgentsConfig) {
     this.registry = config.registry;
-    this.resolve = config.resolve;
+    const budgets = config.budgets;
+    if (budgets) {
+      this.budgets = budgets;
+      const resolve = config.resolve;
+      this.resolve = async (recipe, scope) => {
+        const agent = await resolve(recipe, scope);
+        return agent instanceof LocalAgent ? agent.withBudgets(budgets) : agent;
+      };
+    } else {
+      this.resolve = config.resolve;
+    }
     if (config.memory) this.memory = config.memory;
     if (config.instances) this.instances = config.instances;
     if (config.models) this.models = config.models;

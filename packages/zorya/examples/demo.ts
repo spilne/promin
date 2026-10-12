@@ -58,6 +58,7 @@ import {
   PostgresMemoryStore,
   PostgresLeaseStore,
   PostgresPendingApprovalStore,
+  PostgresUsageLedger,
 } from "@promin/postgres";
 import {
   anthropic,
@@ -67,6 +68,7 @@ import {
   createFileToolRegistry,
   inProcessSchedulerClient,
   InMemoryModelCatalog,
+  catalogCostRegistry,
   DefaultAgentToolCatalog,
   type FragmentRegistry,
   type KnowledgeBaseStore,
@@ -85,6 +87,7 @@ import {
   type Agent,
   type AgentRegistry,
   type MemoryStore,
+  type UsageLedger,
   type ModelCatalogItem,
   type PendingApprovalStore,
   AgentTurnGate,
@@ -162,6 +165,9 @@ let memoryStore: MemoryStore;
 // suspend on here, and the approve route finds them here — on the same
 // backend as the memory store, so approvals survive restarts.
 let approvalStore: PendingApprovalStore;
+// What each committed agent turn spent: the thread and namespace budgets
+// below are measured against it.
+let usageLedger: UsageLedger;
 // Thread turn gate: ZoryaAgents' default (in-process) gate serializes turns
 // in one process; replicas sharing Postgres share the gate's leases too.
 let turnGate: AgentTurnGate | undefined;
@@ -174,6 +180,7 @@ if (pgUrl) {
   knowledgeBaseStore = new PostgresKnowledgeBaseStore({ db: pgDb });
   memoryStore = new PostgresMemoryStore({ db: pgDb });
   approvalStore = new PostgresPendingApprovalStore({ db: pgDb });
+  usageLedger = new PostgresUsageLedger({ db: pgDb });
   turnGate = new AgentTurnGate({ leaseStore: new PostgresLeaseStore({ db: pgDb }) });
   console.log(
     "[zorya] agent, skill and fragment registries + knowledge-base and memory stores → Postgres (ZORYA_PG_URL)",
@@ -185,6 +192,7 @@ if (pgUrl) {
   knowledgeBaseStore = stack.knowledgeBaseStore;
   memoryStore = stack.memoryStore;
   approvalStore = stack.pendingApprovalStore;
+  usageLedger = stack.usageLedger;
 }
 
 // Managed knowledge bases — the dashboard's Knowledge page. Bases and their
@@ -545,6 +553,8 @@ const catalogItems: ModelCatalogItem[] = [
     displayName: `Ollama · ${OLLAMA_MODEL}`,
     capabilities: ["chat"],
     costTier: "low",
+    // Local and free: priced at $0, so cost budgets can run on it.
+    pricing: { inputPerMillion: 0, outputPerMillion: 0 },
     llm: ollama({ model: OLLAMA_MODEL, baseURL: OLLAMA_URL }),
   },
 ];
@@ -665,6 +675,9 @@ async function resolveAgent(
     skillCatalog,
     role: roleDef,
     fragments: fragmentRegistry,
+    // Prices turns for cost budgets (`backend.budget.maxCostUsd`) from the
+    // catalog's `pricing`; a model without one can't run under a cost budget.
+    costs: catalogCostRegistry(modelCatalog),
     ...(apiKey !== undefined && { apiKey }),
     // Resolution order:
     //   1. Demo-specific id-keyed mocks (echo / round-robin / tool-calling
@@ -1149,6 +1162,13 @@ const agents = new ZoryaAgents({
   retrievers: knowledgeBases.registry,
   fragments: fragmentRegistry,
   roles: roleRegistry,
+  // Generous demo budgets: a thread may spend 2M tokens over its life, a
+  // namespace 10M a day. The chat header shows the spend against them.
+  budgets: {
+    ledger: usageLedger,
+    thread: { maxTotalTokens: 2_000_000 },
+    namespace: { limits: { maxTotalTokens: 10_000_000 }, windowMs: 86_400_000 },
+  },
   scan: {
     root: agentScanRoot,
     intervalMs: 5_000,

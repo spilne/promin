@@ -19,6 +19,11 @@
 // across crashes and resumes — time the child spends suspended (waiting
 // for an approval) counts. The child's approvals and tool events are
 // carried up to the root turn (`child-wiring.ts`).
+//
+// Budgets: the caller's share of its remaining budget rides in the child's
+// input (`AgentInput.budget`), and what the child spent comes back in its
+// journaled result (`AgentResult.spend`) for the caller to charge — so a
+// caller can't spend past its budget through its sub-agents.
 // ---------------------------------------------------------------------------
 
 import {
@@ -34,6 +39,13 @@ import type { ToolCall, ToolResultMessage } from "../message.ts";
 import type { SessionEventBus } from "../session-logger.ts";
 import type { AgentTool, ToolScope } from "../tool.ts";
 import { buildAgentTrace, CHILD_TRACE_META_KEY } from "../trace.ts";
+import {
+  budgetAsUsage,
+  tightenBudget,
+  usageOf,
+  type BudgetUsage,
+  type TurnBudget,
+} from "../budget/budget.ts";
 import { childTurnWiring } from "./child-wiring.ts";
 import {
   childFrame,
@@ -93,6 +105,11 @@ export interface RunDelegatedCallParams {
   readonly signal?: AbortSignal;
   /** Time limit for the child run from the call's journaled start, ms; 0 / unset: none. */
   readonly timeoutMs?: number;
+  /**
+   * The child turn's budget: the caller's share of what it has left. It
+   * rides in the child's input, so it holds on whichever worker runs it.
+   */
+  readonly budget?: TurnBudget;
   readonly clock: WallClock;
   /** Runs inside the route activity, before anything else. */
   readonly onStart?: () => void;
@@ -113,9 +130,31 @@ export function delegatedRunId(params: {
   return `${params.workflowId}.${params.step}.${params.toolCallId}`;
 }
 
+/** A finished sub-agent call: the caller's tool result and what the child spent. */
+export interface DelegatedCallOutcome {
+  readonly result: ToolResultMessage;
+  /**
+   * The child's spend, from its journaled result, for the caller to charge.
+   * A child that failed without a result is charged its whole `budget`
+   * (what it may have spent); without a budget, nothing. Unset when the
+   * child never ran.
+   */
+  readonly spend?: BudgetUsage;
+}
+
+/**
+ * What a child turn spent, read from its journaled result. A result from
+ * an agent not run by this engine may report only tokens (and steps).
+ */
+export function childSpend(output: AgentResult): BudgetUsage {
+  if (output.spend !== undefined) return usageOf(output.spend);
+  const tokens = usageOf(output.usage);
+  return { ...tokens, llmCalls: Number.isFinite(output.steps) ? output.steps : 0 };
+}
+
 export function* runDelegatedCall(
   params: RunDelegatedCallParams,
-): Generator<ActivityYield, ToolResultMessage, any> {
+): Generator<ActivityYield, DelegatedCallOutcome, any> {
   const { ctx, name, call, clock } = params;
   const errorResult = (content: string): ToolResultMessage => ({
     role: "tool",
@@ -161,7 +200,8 @@ export function* runDelegatedCall(
   function* finish(
     result: ToolResultMessage,
     output?: AgentResult,
-  ): Generator<ActivityYield, ToolResultMessage, any> {
+    spend?: BudgetUsage,
+  ): Generator<ActivityYield, DelegatedCallOutcome, any> {
     yield* ctx.activity(
       `${name}-end`,
       async () => {
@@ -170,7 +210,8 @@ export function* runDelegatedCall(
       },
       { idempotent: true },
     );
-    return result;
+    const charged = output ? childSpend(output) : spend;
+    return { result, ...(charged && { spend: charged }) };
   }
 
   if (!routed.ok) return yield* finish(errorResult(routed.error));
@@ -223,13 +264,19 @@ export function* runDelegatedCall(
       },
       {
         workflowId: params.childWorkflowId,
-        input: { ...route.input, delegation: frame },
+        input: {
+          ...route.input,
+          delegation: frame,
+          ...(params.budget && { budget: tightenBudget(route.input.budget, params.budget) }),
+        },
       },
     );
   } catch (err) {
     if (isChildControlFlow(err)) throw err;
     return yield* finish(
       errorResult(`Sub-agent "${route.agentId}" failed: ${formatToolError(err)}`),
+      undefined,
+      params.budget && budgetAsUsage(params.budget),
     );
   } finally {
     timer?.clear();

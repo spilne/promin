@@ -15,6 +15,14 @@
 //   GET  /api/agents/:id/threads/:threadId/messages — read message history
 //   POST /api/agents/:id/threads/:threadId/approve  — decide a pending approval, SSE
 //   GET  /api/agents/:id/threads/:threadId/approvals — the thread's pending approvals
+//   GET  /api/agents/:id/threads/:threadId/usage — the thread's spend vs its budgets
+//   GET  /api/agents/_usage?namespaceId=       — the namespace's spend vs its budget
+//
+// Budgets (`ZoryaAgents.budgets`):
+//   A turn on a thread or namespace whose budget is used up answers 429
+//   `budget_exceeded` (with `scope`, `dimension`, `limit`, `used`) before it
+//   runs; an admitted turn is capped by what is left and ends with
+//   finishReason `budget_exceeded` when it runs out.
 //
 // Thread turns:
 //   A send may carry `turnKey` (body) or `Idempotency-Key` (header): the
@@ -67,15 +75,18 @@
 
 import type {
   Agent,
+  AgentBudgets,
   AgentInstanceRegistry,
   AgentRegistry,
   AgentThreadSummary,
   AgentTurnGate,
   AgentTurnPolicy,
+  BudgetUsage,
   Message,
   RegisteredAgent,
   RoleRegistry,
   SecretsStorage,
+  TurnBudget,
 } from "@promin/agent";
 import type { NamespaceRegistry, WallClock } from "@promin/workflow";
 import type { McpRecipeChecker, ScopeAuthorizer } from "../agent-gateway-kit.ts";
@@ -89,7 +100,13 @@ import type { TurnStreamHub } from "./agent-sse.ts";
 // memory-store shape (which uses `threadId`).
 // ---------------------------------------------------------------------------
 
-export type { AgentThreadSummary as ThreadSummary, RegisteredAgent, Message } from "@promin/agent";
+export type {
+  AgentThreadSummary as ThreadSummary,
+  BudgetUsage,
+  RegisteredAgent,
+  Message,
+  TurnBudget,
+} from "@promin/agent";
 
 /** One row of `GET /api/agents`: the agent's active version plus its version count. */
 export type AgentListEntry = RegisteredAgent & {
@@ -139,6 +156,41 @@ export interface InvokeResponse {
   };
   /** Set when the gateway resolved an AgentInstance from `ownerId`. */
   instanceId?: string;
+}
+
+/** A budget's limits next to what was spent; `limits` is absent when no limit is set. */
+export interface BudgetStandingDto {
+  spent: BudgetUsage;
+  limits?: TurnBudget;
+}
+
+/** `GET /api/agents/:id/threads/:threadId/usage`. */
+export interface ThreadUsageResponse {
+  threadId: string;
+  /** False when the server has no budgets configured: nothing is accounted. */
+  enabled: boolean;
+  /** The thread's spend over all its turns, and its cumulative budget. */
+  thread?: BudgetStandingDto;
+  /** The namespace's spend in its window, and its budget. Absent without a namespace budget. */
+  namespace?: BudgetStandingDto & { windowMs: number };
+}
+
+/** `GET /api/agents/_usage?namespaceId=`. */
+export interface NamespaceUsageResponse {
+  namespaceId: string;
+  enabled: boolean;
+  /** Absent without a namespace budget. */
+  namespace?: BudgetStandingDto & { windowMs: number };
+}
+
+/** 429 body of a turn refused because a budget is used up. */
+export interface BudgetExceededResponse {
+  error: "budget_exceeded";
+  message: string;
+  scope: "thread" | "namespace";
+  dimension: keyof TurnBudget;
+  limit: number;
+  used: number;
 }
 
 export interface ThreadInvokeResponse extends InvokeResponse {
@@ -263,6 +315,8 @@ export interface AgentGatewayDeps {
    * through it, so clients can detach, reattach and resume by event id.
    */
   readonly turnStreams: TurnStreamHub;
+  /** Thread and namespace budgets (`ZoryaAgents.budgets`): 429 refusals and the usage routes. */
+  readonly budgets?: AgentBudgets;
   /**
    * Time source for the distill rate-limit `retry-after`, the default
    * thread `archivedAt` stamp and turn-lease extension.

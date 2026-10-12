@@ -97,6 +97,9 @@ export function recordEvent(capture: RunCapture, e: SessionEvent): void {
     case "step_limit.hit":
       capture.finishReason = "max_steps";
       break;
+    case "budget.exceeded":
+      capture.finishReason = "budget_exceeded";
+      break;
     case "stall.detected":
       capture.finishReason = "stalled";
       break;

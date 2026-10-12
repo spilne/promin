@@ -20,6 +20,7 @@
 //    per-call opts (see LocalAgent.bind).
 // ---------------------------------------------------------------------------
 
+import type { TurnBudget } from "../budget/budget.ts";
 import type { NetworkRecipe } from "../network/types.ts";
 import type {
   RegisterVersionInput,
@@ -112,6 +113,12 @@ export interface LocalAgentBackend {
   readonly knowledge?: ReadonlyArray<AgentKnowledgeRecipe>;
   /** Per-turn step cap. Optional, runtime default applies when unset. */
   readonly maxStepsPerTurn?: number;
+  /**
+   * What one turn may spend, sub-agents included (`AgentActionConfig.budget`).
+   * `maxCostUsd` needs the host to price the recipe's model
+   * (`resolveLocalAgent({ costs })`). Unset: unlimited.
+   */
+  readonly budget?: TurnBudget;
   /**
    * Recipe-level auto-compaction config. JSON-serialisable subset of
    * the runtime `AutoCompactConfig` (no `when` predicate — closures

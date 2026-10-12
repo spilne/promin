@@ -27,6 +27,7 @@ import {
   SqliteSchedulerStorage,
   SqliteSecretsStorage,
   SqliteSkillRegistry,
+  SqliteUsageLedger,
   SqliteWorkerRegistry,
   SqliteWorkflowAdvertisementRegistry,
   SqliteWorkflowSchemaStore,
@@ -79,6 +80,8 @@ export interface SqliteZoryaStack {
    * (`resolveLocalAgent({ approvals })`).
    */
   readonly pendingApprovalStore: SqlitePendingApprovalStore;
+  /** What committed agent turns spent (`ZoryaAgents.budgets.ledger`). */
+  readonly usageLedger: SqliteUsageLedger;
   readonly dagRegistry: SqliteDagRegistry;
   /** Remote deployments that self-registered (`ZoryaServerConfig.remoteDeployments`). */
   readonly remoteDeploymentRegistry: SqliteRemoteDeploymentRegistry;
@@ -141,6 +144,7 @@ export function createSqliteZoryaStack(config: SqliteZoryaStackConfig): SqliteZo
     knowledgeBaseStore: SqliteKnowledgeBaseStore.make({ db: sqlite }),
     memoryStore: SqliteMemoryStore.make({ db: sqlite, now }),
     pendingApprovalStore: SqlitePendingApprovalStore.make({ db: sqlite, clock }),
+    usageLedger: new SqliteUsageLedger({ db: sqlite, clock }),
     dagRegistry: new SqliteDagRegistry({ db: sqlite, clock }),
     remoteDeploymentRegistry: new SqliteRemoteDeploymentRegistry({ db: sqlite, clock }),
     workflowSchemaStore: SqliteWorkflowSchemaStore.make({ db: sqlite }),

@@ -37,6 +37,8 @@ import {
   extractRole,
   getAgent,
   getThreadTrace,
+  getNamespaceUsage,
+  getThreadUsage,
   invokeAgent,
   listAgentSources,
   listAgentThreads,
@@ -103,6 +105,7 @@ export function mountAgents(params: {
     ...(params.secrets !== undefined && { secrets: params.secrets }),
     ...(params.mcp !== undefined && { mcp: params.mcp }),
     ...(agents.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
+    ...(agents.budgets !== undefined && { budgets: agents.budgets }),
     ...namespaced,
     clock,
     turnStreams: new TurnStreamHub({
@@ -116,6 +119,8 @@ export function mountAgents(params: {
 
   router
     .get("/api/agents", listAgents(agentDeps))
+    // A namespace's spend against its budget (before `/api/agents/:id`).
+    .get("/api/agents/_usage", getNamespaceUsage(agentDeps))
     // Read-only metadata — the designer UI's model dropdown source.
     .get(
       "/api/agents/_catalog/models",
@@ -203,6 +208,7 @@ export function mountAgents(params: {
     .get("/api/agents/:id/threads/:threadId/approvals", listThreadApprovals(agentDeps))
     .get("/api/agents/:id/threads/:threadId/messages", listThreadMessages(agentDeps))
     .get("/api/agents/:id/threads/:threadId/trace", getThreadTrace(agentDeps))
+    .get("/api/agents/:id/threads/:threadId/usage", getThreadUsage(agentDeps))
     .post("/api/agents/:id/threads/:threadId/distill", distillThread(agentDeps))
     .post("/api/agents/:id/threads/:threadId/compact", compactThread(agentDeps))
     .post("/api/agents/:id/threads/:threadId/archive", archiveAgentThread(agentDeps));

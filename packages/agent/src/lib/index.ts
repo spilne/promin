@@ -2,6 +2,7 @@ export {
   agentAction,
   CANCELLED_ANSWER,
   RESPOND_TOOL_NAME,
+  BUDGET_EXCEEDED_ANSWER,
   STALLED_ANSWER,
   STEP_LIMIT_ANSWER,
   StructuredOutputParseError,
@@ -18,7 +19,43 @@ export type {
   StepContext,
   TurnApprovalIndex,
   TurnTranscript,
+  TurnUsageRecorder,
 } from "./agent-action.ts";
+
+// Budgets — per-turn, call-tree, thread and namespace spend limits.
+export {
+  addUsage,
+  budgetOverrun,
+  BudgetExceededError,
+  EMPTY_USAGE,
+  parseTurnBudget,
+  remainingBudget,
+  tightenBudget,
+  DEFAULT_MIN_CALL_TOKENS,
+  ModelUnpricedError,
+  TurnBudgetSchema,
+} from "./budget/budget.ts";
+export type {
+  BudgetDimension,
+  BudgetOverrun,
+  BudgetScope,
+  BudgetUsage,
+  TurnBudget,
+} from "./budget/budget.ts";
+export { admitTurn, budgetStatus } from "./budget/agent-budgets.ts";
+export type {
+  AgentBudgets,
+  BudgetStanding,
+  BudgetStatus,
+  NamespaceBudget,
+} from "./budget/agent-budgets.ts";
+export { InMemoryUsageLedger } from "./budget/usage-ledger.ts";
+export type {
+  InMemoryUsageLedgerConfig,
+  UsageEntry,
+  UsageLedger,
+  UsageTotalQuery,
+} from "./budget/usage-ledger.ts";
 export { StallDetector } from "./stall-detector.ts";
 export type { StallDetectorOptions, StallVerdict } from "./stall-detector.ts";
 
@@ -292,7 +329,7 @@ export type { RemoteAgentConfig } from "./registry/remote-agent.ts";
 export { resolveRemoteAgent } from "./registry/resolve-remote-agent.ts";
 export type { RemoteAgentBackend } from "./registry/types.ts";
 
-export { InMemoryModelCatalog } from "./registry/model-catalog.ts";
+export { catalogCostRegistry, InMemoryModelCatalog } from "./registry/model-catalog.ts";
 export type {
   ModelCatalog,
   ModelCatalogItem,
@@ -866,4 +903,5 @@ export type {
   DurableDagInput,
   DurableDagOutput,
   CreateDagWorkflowConfig,
+  DagUsageRecorder,
 } from "./dag/durable-executor.ts";
