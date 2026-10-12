@@ -47,7 +47,7 @@ export function recipeTarget(config: RecipeTargetConfig): EvalTarget {
     async run(evalCase, opts) {
       const startedAt = clock.currentTimeMs();
       try {
-        const agent = resolveLocalAgent(recipe, deps);
+        const agent = await resolveLocalAgent(recipe, deps);
         const run = await agent.invoke(
           toInput(evalCase),
           opts?.signal !== undefined ? { signal: opts.signal } : undefined,

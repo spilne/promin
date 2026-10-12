@@ -65,7 +65,9 @@ function recipe(mcpServers: ReadonlyArray<McpServerRecipe>): RegisteredAgent & {
     },
     metadata: { description: null, capabilities: [], tags: [] },
     createdAt: 0,
-    updatedAt: 0,
+    active: true,
+    enabled: true,
+    trust: "trusted",
   };
 }
 
@@ -113,7 +115,7 @@ async function invokeWith(params: {
 }) {
   // Non-streaming: the fake answers with plain JSON, not an SSE stream.
   const chatOnly: LLMProvider = { chat: (p) => params.llm.chat(p) };
-  const agent = resolveLocalAgent(recipe([{ server: "github" }]), {
+  const agent = await resolveLocalAgent(recipe([{ server: "github" }]), {
     runner: freshRunner().runner,
     llm: () => chatOnly,
     tools: {},
@@ -166,14 +168,14 @@ describe("MCP end to end", () => {
     await pool.closeAll();
   });
 
-  it("resolveLocalAgent refuses a recipe with MCP servers when they were not loaded", () => {
-    expect(() =>
+  it("resolveLocalAgent refuses a recipe with MCP servers when they were not loaded", async () => {
+    await expect(
       resolveLocalAgent(recipe([{ server: "github" }]), {
         runner: freshRunner().runner,
         llm: () => anthropic("m", { apiKey: "k" }),
         tools: {},
       }),
-    ).toThrow(/attaches MCP servers but deps.mcpTools is unset/);
+    ).rejects.toThrow(/attaches MCP servers but deps.mcpTools is unset/);
   });
 
   function callPingThenAnswer() {

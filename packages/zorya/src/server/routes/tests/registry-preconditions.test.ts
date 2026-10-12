@@ -2,7 +2,8 @@
 // Optimistic concurrency through `ZoryaServer.handle`: agents, roles,
 // skills, fragments and schedules answer GET / POST / PATCH with an `etag`,
 // and a PATCH carrying a stale `If-Match` is refused with 412 and leaves the
-// resource unchanged.
+// resource unchanged. The versioned registry resources also refuse a PATCH
+// without `If-Match` (428).
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
@@ -80,6 +81,8 @@ interface Resource {
   readonly edits: readonly [unknown, unknown, unknown];
   /** A field of the GET body that shows which edit is stored. */
   readonly probe: (body: Record<string, unknown>) => unknown;
+  /** Versioned registry resources refuse an edit without If-Match (428). */
+  readonly requiresIfMatch: boolean;
 }
 
 const RESOURCES: Resource[] = [
@@ -94,6 +97,7 @@ const RESOURCES: Resource[] = [
       { metadata: { description: "three" } },
     ],
     probe: (b) => (b.metadata as { description: unknown }).description,
+    requiresIfMatch: true,
   },
   {
     name: "role",
@@ -106,6 +110,7 @@ const RESOURCES: Resource[] = [
       { metadata: { description: "three" } },
     ],
     probe: (b) => (b.metadata as { description: unknown }).description,
+    requiresIfMatch: true,
   },
   {
     name: "skill",
@@ -114,14 +119,16 @@ const RESOURCES: Resource[] = [
     create: { id: "triage", description: "Triage bugs", body: "# Triage" },
     edits: [{ body: "# one" }, { body: "# two" }, { body: "# three" }],
     probe: (b) => b.body,
+    requiresIfMatch: true,
   },
   {
     name: "fragment",
     collection: "/api/fragments",
     item: "/api/fragments/tone",
-    create: { key: "tone", content: "Be brief." },
+    create: { id: "tone", content: "Be brief." },
     edits: [{ content: "one" }, { content: "two" }, { content: "three" }],
     probe: (b) => b.content,
+    requiresIfMatch: true,
   },
   {
     name: "schedule",
@@ -130,6 +137,7 @@ const RESOURCES: Resource[] = [
     create: { id: "nightly", intervalMs: 60_000 },
     edits: [{ name: "one" }, { name: "two" }, { name: "three" }],
     probe: (b) => b.name,
+    requiresIfMatch: false,
   },
 ];
 
@@ -175,7 +183,7 @@ for (const r of RESOURCES) {
       expect(unchanged.headers.get("etag")).toBe(editedTag);
     });
 
-    it("applies an edit with If-Match: *, a tag list naming the current tag, or no If-Match", async () => {
+    it("applies an edit with If-Match: * or a tag list naming the current tag", async () => {
       const { send, clock } = boot();
       await send({ method: "POST", path: r.collection, body: r.create });
       clock.advance(1_000);
@@ -191,7 +199,19 @@ for (const r of RESOURCES) {
       expect(listed.status).toBe(200);
       clock.advance(1_000);
       const bare = await send({ method: "PATCH", path: r.item, body: r.edits[2] });
-      expect(bare.status).toBe(200);
+      if (r.requiresIfMatch) {
+        // No If-Match: the edit is refused, not applied blind.
+        expect(bare.status).toBe(428);
+        const again = await send({
+          method: "PATCH",
+          path: r.item,
+          body: r.edits[2],
+          ifMatch: listed.headers.get("etag")!,
+        });
+        expect(again.status).toBe(200);
+      } else {
+        expect(bare.status).toBe(200);
+      }
       const final = await send({ method: "GET", path: r.item });
       expect(r.probe((await final.json()) as Record<string, unknown>)).toBe(
         r.probe(r.edits[2] as Record<string, unknown>),

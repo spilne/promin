@@ -41,6 +41,7 @@ import {
   listAgentSources,
   listAgentThreads,
   listAgentVersions,
+  promoteAgent,
   listAgents,
   listThreadApprovals,
   listThreadMessages,
@@ -74,6 +75,7 @@ import {
   getRole,
   listRoleVersions,
   listRoles,
+  promoteRole,
   updateRole,
 } from "../routes/roles.ts";
 
@@ -102,7 +104,6 @@ export function mountAgents(params: {
     ...(params.mcp !== undefined && { mcp: params.mcp }),
     ...(agents.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
     ...namespaced,
-    fileManagedIds: () => agents.fileManagedIds(),
     clock,
     turnStreams: new TurnStreamHub({
       clock,
@@ -170,10 +171,7 @@ export function mountAgents(params: {
     )
     // Which recipes are backed by a file on disk (the editor disables
     // in-place Save for them and the list badges them).
-    .get(
-      "/api/agents/_sources",
-      listAgentSources({ fileManagedIds: () => agents.fileManagedIds() }),
-    )
+    .get("/api/agents/_sources", listAgentSources({ registry: agents.registry }))
     // Draft recipes — test a recipe edit before committing it.
     .post(
       "/api/agents/_draft",
@@ -190,6 +188,7 @@ export function mountAgents(params: {
     .patch("/api/agents/:id", updateAgent(agentDeps))
     .delete("/api/agents/:id", deleteAgent(agentDeps))
     .get("/api/agents/:id/versions", listAgentVersions(agentDeps))
+    .post("/api/agents/:id/promote", promoteAgent(agentDeps))
     .post("/api/agents/:id/clone", cloneAgent(agentDeps))
     .post("/api/agents/:id/extract-role", extractRole(agentDeps))
     .post("/api/agents/:id/invoke", invokeAgent(agentDeps))
@@ -252,6 +251,7 @@ export function mountAgents(params: {
       .get("/api/roles/:id", getRole(roleDeps))
       .patch("/api/roles/:id", updateRole(roleDeps))
       .delete("/api/roles/:id", deleteRole(roleDeps))
-      .get("/api/roles/:id/versions", listRoleVersions(roleDeps));
+      .get("/api/roles/:id/versions", listRoleVersions(roleDeps))
+      .post("/api/roles/:id/promote", promoteRole(roleDeps));
   }
 }

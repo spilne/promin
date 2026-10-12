@@ -8,7 +8,8 @@
 // call), removing their recipes.
 //
 // Ownership:
-//   Every recipe a deployment writes is tagged `remote-deployment:<id>`.
+//   Every recipe version a deployment writes is tagged
+//   `remote-deployment:<id>` and promoted to the agent's active version.
 //   Register refuses (409 `agent_id_conflict`) an agent id that already
 //   belongs to anything else — a hand-authored or file-scanned recipe, or
 //   a live deployment at a different endpoint — so a registration can
@@ -24,13 +25,15 @@
 //   every response redacts them.
 // ---------------------------------------------------------------------------
 
-import type {
-  AgentRegistry,
-  OutboundPolicy,
-  RegisterDeploymentInput,
-  RegisteredAgent,
-  RegisteredDeployment,
-  RemoteDeploymentRegistry,
+import {
+  isRegistryConflict,
+  listAllVersioned,
+  type AgentRegistry,
+  type OutboundPolicy,
+  type RegisterDeploymentInput,
+  type RegisteredAgent,
+  type RegisteredDeployment,
+  type RemoteDeploymentRegistry,
 } from "@promin/agent";
 import { SystemWallClock, type TimerHandle, type WallClock } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
@@ -131,15 +134,20 @@ function recipeOwner(recipe: RegisteredAgent): string | null {
 
 /**
  * Agent ids `input` may not claim: ids with a version not written by a
- * deployment, or owned by a live deployment at another endpoint.
+ * deployment, or owned by a live deployment at another endpoint. For the
+ * others, the active version this check saw (`null`: none) — the recipe
+ * write is conditional on it.
  */
-async function conflictingIds(
+async function claimableIds(
   deps: RemoteDeploymentsGatewayDeps,
   input: RegisterDeploymentInput,
-): Promise<string[]> {
+): Promise<{ conflicts: string[]; seen: Map<string, string | null> }> {
   const conflicts: string[] = [];
+  const seen = new Map<string, string | null>();
   for (const agentId of input.agents) {
-    for (const version of await deps.agents.versions(agentId)) {
+    const versions = await deps.agents.versions({ id: agentId });
+    seen.set(agentId, versions.find((v) => v.active)?.version ?? null);
+    for (const version of versions) {
       const owner = recipeOwner(version);
       if (owner === null) {
         conflicts.push(agentId);
@@ -152,30 +160,62 @@ async function conflictingIds(
       }
     }
   }
-  return conflicts;
+  return { conflicts, seen };
 }
 
-/** Write a RemoteAgentBackend recipe per declared agent, tagged with its owner. */
-async function upsertRecipes(
-  agents: AgentRegistry,
-  deployment: RegisteredDeployment,
-): Promise<void> {
+/**
+ * Write a RemoteAgentBackend recipe per declared agent, tagged with its
+ * owner, as the agent's active version — each write conditional on the
+ * active version the ownership check saw, so an agent created or changed
+ * in between (a hand-authored recipe, another deployment's claim) is never
+ * overwritten. Returns the ids that lost that race.
+ */
+async function upsertRecipes(params: {
+  agents: AgentRegistry;
+  deployment: RegisteredDeployment;
+  seen: ReadonlyMap<string, string | null>;
+}): Promise<string[]> {
+  const { agents, deployment, seen } = params;
+  const lost: string[] = [];
   for (const agentId of deployment.agents) {
-    await agents.register({
-      id: agentId,
-      backend: {
-        type: "remote",
-        endpoint: deployment.endpoint,
-        remoteAgentId: agentId,
-        ...(deployment.auth !== undefined && { auth: deployment.auth }),
-      },
-      metadata: {
-        description: `Auto-registered from ${deployment.endpoint} (deployment ${deployment.deploymentId})`,
-        capabilities: [],
-        tags: ["remote", "auto-registered", ownerTag(deployment.deploymentId)],
-      },
-    });
+    try {
+      await registerRecipe({
+        agents,
+        deployment,
+        agentId,
+        expectedActive: seen.get(agentId) ?? null,
+      });
+    } catch (err) {
+      if (!isRegistryConflict(err) || err.code !== "active_mismatch") throw err;
+      lost.push(agentId);
+    }
   }
+  return lost;
+}
+
+async function registerRecipe(params: {
+  agents: AgentRegistry;
+  deployment: RegisteredDeployment;
+  agentId: string;
+  expectedActive: string | null;
+}): Promise<void> {
+  const { agents, deployment, agentId } = params;
+  await agents.register({
+    id: agentId,
+    promote: true,
+    expectedActive: params.expectedActive,
+    backend: {
+      type: "remote",
+      endpoint: deployment.endpoint,
+      remoteAgentId: agentId,
+      ...(deployment.auth !== undefined && { auth: deployment.auth }),
+    },
+    metadata: {
+      description: `Auto-registered from ${deployment.endpoint} (deployment ${deployment.deploymentId})`,
+      capabilities: [],
+      tags: ["remote", "auto-registered", ownerTag(deployment.deploymentId)],
+    },
+  });
 }
 
 /** Delete the recipe versions `deployment` still owns; others are left alone. */
@@ -184,12 +224,36 @@ async function deleteOwnedRecipes(
   deployment: RegisteredDeployment,
 ): Promise<void> {
   for (const agentId of deployment.agents) {
-    for (const version of await agents.versions(agentId)) {
+    for (const version of await agents.versions({ id: agentId })) {
       if (recipeOwner(version) === deployment.deploymentId) {
-        await agents.unregister(agentId, version.version);
+        await agents.unregister({ id: agentId, version: version.version });
       }
     }
   }
+}
+
+/**
+ * Delete every recipe version written by a deployment that is no longer
+ * registered — left behind when the registry lost its rows (an in-memory
+ * registry across a restart) or a process died between removing a
+ * deployment and its recipes. Returns how many versions were removed.
+ */
+export async function sweepOrphanedRemoteRecipes(
+  deps: RemoteDeploymentsGatewayDeps,
+): Promise<number> {
+  const live = new Map<string, boolean>();
+  let removed = 0;
+  // Any version may be owned, not just the active one — so every agent.
+  for (const { id } of await listAllVersioned({ registry: deps.agents })) {
+    for (const version of await deps.agents.versions({ id })) {
+      const owner = recipeOwner(version);
+      if (owner === null) continue;
+      if (!live.has(owner)) live.set(owner, (await deps.registry.get(owner)) !== null);
+      if (live.get(owner)) continue;
+      if (await deps.agents.unregister({ id, version: version.version })) removed += 1;
+    }
+  }
+  return removed;
 }
 
 /** Expire stale registrations and remove their recipes. */
@@ -219,22 +283,31 @@ export function registerDeployment(deps: RemoteDeploymentsGatewayDeps) {
     const input: RegisterDeploymentInput = { ...parsed, endpoint: endpoint.url };
 
     await sweepExpiredDeployments(deps);
-    const conflicts = await conflictingIds(deps, input);
-    if (conflicts.length > 0) {
-      return json(409, {
+    const claim = await claimableIds(deps, input);
+    const conflict409 = (agents: string[]) =>
+      json(409, {
         error: "agent_id_conflict",
         message: "These agent ids already belong to another agent or deployment.",
-        agents: conflicts,
+        agents,
       });
-    }
+    if (claim.conflicts.length > 0) return conflict409(claim.conflicts);
 
     const deployment = await deps.registry.register(input);
-    try {
-      await upsertRecipes(deps.agents, deployment);
-    } catch (err) {
+    const rollback = async () => {
       await deps.registry.unregister(deployment.deploymentId).catch(() => {});
       await deleteOwnedRecipes(deps.agents, deployment).catch(() => {});
+    };
+    let lost: string[];
+    try {
+      lost = await upsertRecipes({ agents: deps.agents, deployment, seen: claim.seen });
+    } catch (err) {
+      await rollback();
       throw err;
+    }
+    if (lost.length > 0) {
+      // Another writer took these ids after the check: no partial claim.
+      await rollback();
+      return conflict409(lost);
     }
     const id = encodeURIComponent(deployment.deploymentId);
     const response: RegisterDeploymentResponse = {
@@ -311,7 +384,8 @@ export interface RemoteDeploymentSweeperConfig extends RemoteDeploymentsGatewayD
 /**
  * Periodic expiry of stale deployments, so a remote that died without
  * unregistering stops receiving traffic within one sweep period even
- * when nobody opens the deployments page.
+ * when nobody opens the deployments page. `start()` first runs a boot
+ * sweep that also removes recipes whose deployment is gone.
  */
 export class RemoteDeploymentSweeper {
   private readonly deps: RemoteDeploymentsGatewayDeps;
@@ -333,6 +407,19 @@ export class RemoteDeploymentSweeper {
     if (this.timer) return;
     this.timer = this.clock.setInterval(() => void this.tick(), this.intervalMs);
     this.timer.unref?.();
+    void this.bootSweep();
+  }
+
+  /**
+   * Expire stale deployments, then remove every recipe whose deployment is
+   * gone: a restart may have lost registrations (an in-memory registry) or
+   * died between removing a deployment and its recipes.
+   */
+  async bootSweep(): Promise<void> {
+    await this.guarded(async () => {
+      await sweepExpiredDeployments(this.deps);
+      await sweepOrphanedRemoteRecipes(this.deps);
+    });
   }
 
   stop(): void {
@@ -340,12 +427,16 @@ export class RemoteDeploymentSweeper {
     this.timer = null;
   }
 
-  /** One sweep; overlapping ticks are skipped. */
+  /** One expiry sweep; overlapping sweeps are skipped. */
   async tick(): Promise<void> {
+    await this.guarded(() => sweepExpiredDeployments(this.deps));
+  }
+
+  private async guarded(fn: () => Promise<unknown>): Promise<void> {
     if (this.running) return;
     this.running = true;
     try {
-      await sweepExpiredDeployments(this.deps);
+      await fn();
     } catch (err) {
       this.onError(err);
     } finally {

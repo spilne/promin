@@ -1,48 +1,38 @@
 // ---------------------------------------------------------------------------
-// Fragment registry — small, operator-curated markdown blocks that role
-// recipes compose into their system prompt. Always-on; concatenated at
-// resolve time. Distinct from skills (which are load-on-demand).
+// Prompt fragments — small, operator-curated markdown blocks that roles
+// compose into their system prompt (`systemPrompt.layers`). Always-on;
+// concatenated at resolve time. Distinct from skills (load-on-demand).
 //
-// Synchronous on purpose: fragments are short static markdown strings —
-// no I/O needed at resolve time. `resolveLocalAgent` reads them inline.
+// Fragments live in a `VersionedRegistry` like every other recipe kind, so
+// every replica reads the same durable store (no per-process cache to
+// drift) and a role can pin a fragment version with `"<id>@<version>"`.
+// File-scanned and operator-authored fragments share the store; scanned
+// versions carry `source: "file"`, and scanner sync only removes those.
 // ---------------------------------------------------------------------------
 
-/**
- * Look up the prompt fragments referenced by a recipe's `systemPrompt.layers`.
- *
- * Mutators (`set` / `delete`) are sync so a Postgres-backed adapter would
- * implement them as a write-through cache over an async store rather than
- * making `resolveSystemPrompt` async. For the in-memory case used by the
- * demo, the operations are direct Map writes.
- */
-export interface FragmentRegistry {
-  /** Return the fragment body for `key`, or `undefined` if absent. */
-  get(key: string): string | undefined;
-  /** Enumerate every registered fragment (key + body). */
-  list(): ReadonlyArray<{ readonly key: string; readonly content: string }>;
-  /** Create or replace a fragment. Sync; used by the scanner and CRUD routes. */
-  set(key: string, content: string): void;
-  /** Remove a fragment. No-op when not present. */
-  delete(key: string): void;
+import type {
+  RegisterVersionInput,
+  Versioned,
+  VersionedRegistry,
+} from "../versioned-registry/types.ts";
+
+/** What a fragment version stores. */
+export interface FragmentRecipe {
+  /** The markdown block concatenated into the system prompt. */
+  readonly content: string;
 }
 
-/**
- * Durable persistence for operator-authored fragments. Async because real
- * backends (SQLite / Postgres) need I/O. `FragmentRegistry` stays sync (so
- * `resolveSystemPrompt` doesn't have to become async); hosts wire a Store
- * behind the Registry and coordinate them — at boot, `loadAll` seeds the
- * registry; on each operator write the host calls registry.set AND
- * store.set; on operator delete it calls both.
- *
- * File-scanned fragments DO NOT go through the Store (the .md file is the
- * source of truth — persisting them would create stale entries after the
- * file is removed). Only operator-authored fragments live here.
- */
-export interface FragmentStore {
-  /** Load every persisted fragment. Called once at boot to seed a registry. */
-  loadAll(): Promise<ReadonlyArray<{ readonly key: string; readonly content: string }>>;
-  /** Create or replace a fragment. */
-  set(key: string, content: string): Promise<void>;
-  /** Remove a fragment. No-op when not present. */
-  delete(key: string): Promise<void>;
-}
+/** A stored fragment version; `id` is the fragment key roles layer by. */
+export type RegisteredFragment = Versioned<FragmentRecipe>;
+
+/** `FragmentRegistry.register` input. */
+export type RegisterFragmentInput = RegisterVersionInput<FragmentRecipe>;
+
+/** Fragments have no list filter. */
+export type FragmentFilter = Readonly<Record<string, never>>;
+
+/** Versioned store of prompt fragments. */
+export type FragmentRegistry = VersionedRegistry<FragmentRecipe, FragmentFilter>;
+
+/** Separator of a pinned layer reference: `"<fragment id>@<version>"`. */
+export const FRAGMENT_VERSION_SEPARATOR = "@";

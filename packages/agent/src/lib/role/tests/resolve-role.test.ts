@@ -5,7 +5,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { resolveRoleBinding } from "../resolve-role.ts";
-import { InMemoryRoleRegistry } from "../in-memory-role-registry.ts";
+import { InMemoryRoleRegistry } from "../../versioned-registry/in-memory-registries.ts";
 
 describe("resolveRoleBinding", () => {
   it("returns the embedded definition for an inline binding (no registry needed)", async () => {
@@ -45,6 +45,16 @@ describe("resolveRoleBinding", () => {
     await expect(resolveRoleBinding({ ref: { id: "git-master" } })).rejects.toThrow(
       /needs a RoleRegistry/,
     );
+  });
+
+  it("refuses a disabled role", async () => {
+    const roles = new InMemoryRoleRegistry();
+    await roles.register({
+      id: "off",
+      definition: { systemPrompt: "x", tools: [] },
+      enabled: false,
+    });
+    await expect(resolveRoleBinding({ ref: { id: "off" } }, { roles })).rejects.toThrow(/disabled/);
   });
 
   it("throws when the referenced role is not found", async () => {

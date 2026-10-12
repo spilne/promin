@@ -19,15 +19,6 @@ CREATE TABLE agent_audit_log (
   CONSTRAINT agent_audit_log_pkey PRIMARY KEY (id)
 );
 
-CREATE TABLE agent_dag (
-  id text NOT NULL,
-  version text NOT NULL,
-  body jsonb NOT NULL,
-  created_at bigint NOT NULL,
-  updated_at bigint NOT NULL,
-  CONSTRAINT agent_dag_pkey PRIMARY KEY (id, version)
-);
-
 CREATE TABLE agent_episode (
   id text NOT NULL,
   scope text NOT NULL,
@@ -92,17 +83,6 @@ CREATE TABLE agent_namespace (
   created_at bigint NOT NULL,
   updated_at bigint NOT NULL,
   CONSTRAINT agent_namespace_pkey PRIMARY KEY (namespace_id)
-);
-
-CREATE TABLE agent_registry (
-  agent_id text NOT NULL,
-  version text NOT NULL,
-  backend_type text NOT NULL,
-  backend jsonb NOT NULL,
-  metadata jsonb NOT NULL,
-  created_at bigint NOT NULL,
-  updated_at bigint NOT NULL,
-  CONSTRAINT agent_registry_pkey PRIMARY KEY (agent_id, version)
 );
 
 CREATE TABLE agent_resource (
@@ -201,13 +181,6 @@ CREATE TABLE eval_run (
   CONSTRAINT eval_run_pkey PRIMARY KEY (run_id)
 );
 
-CREATE TABLE fragment_store (
-  key text NOT NULL,
-  content text NOT NULL,
-  updated_at bigint NOT NULL,
-  CONSTRAINT fragment_store_pkey PRIMARY KEY (key)
-);
-
 CREATE TABLE knowledge_base (
   id text NOT NULL,
   description text,
@@ -235,26 +208,40 @@ CREATE TABLE knowledge_base_source (
   CONSTRAINT knowledge_base_source_pkey PRIMARY KEY (base_id, source_id)
 );
 
-CREATE TABLE role_registry (
-  role_id text NOT NULL,
-  version text NOT NULL,
-  definition jsonb NOT NULL,
-  metadata jsonb NOT NULL,
-  created_at bigint NOT NULL,
-  updated_at bigint NOT NULL,
-  CONSTRAINT role_registry_pkey PRIMARY KEY (role_id, version)
+CREATE TABLE registry_head (
+  kind text NOT NULL,
+  id text COLLATE "C" NOT NULL,
+  active_version text,
+  history jsonb NOT NULL,
+  enabled boolean NOT NULL,
+  next_seq integer NOT NULL,
+  CONSTRAINT registry_head_pkey PRIMARY KEY (kind, id)
 );
 
-CREATE TABLE skill_registry (
-  skill_id text NOT NULL,
+CREATE TABLE registry_version (
+  kind text NOT NULL,
+  id text COLLATE "C" NOT NULL,
   version text NOT NULL,
-  description text NOT NULL,
-  when_to_use text NOT NULL,
-  body text NOT NULL,
-  metadata jsonb NOT NULL,
+  seq integer NOT NULL,
+  body jsonb NOT NULL,
+  body_hash text NOT NULL,
+  facets jsonb NOT NULL,
+  trust text NOT NULL,
+  source text,
   created_at bigint NOT NULL,
-  updated_at bigint NOT NULL,
-  CONSTRAINT skill_registry_pkey PRIMARY KEY (skill_id, version)
+  removed boolean NOT NULL,
+  CONSTRAINT registry_version_pkey PRIMARY KEY (kind, id, version)
+);
+
+CREATE TABLE remote_deployment (
+  deployment_id text NOT NULL,
+  endpoint text NOT NULL,
+  agents jsonb NOT NULL,
+  auth jsonb,
+  registered_at bigint NOT NULL,
+  last_heartbeat bigint NOT NULL,
+  ttl_ms bigint NOT NULL,
+  CONSTRAINT remote_deployment_pkey PRIMARY KEY (deployment_id)
 );
 
 CREATE TABLE sm_machine_events (
@@ -641,8 +628,6 @@ CREATE TABLE wf_workflows (
 
 CREATE INDEX agent_audit_log_ns_time_idx ON agent_audit_log (namespace_id, recorded_at);
 
-CREATE INDEX agent_dag_id_updated_idx ON agent_dag (id, updated_at);
-
 CREATE INDEX agent_episode_ns_idx ON agent_episode (scope, namespace_id, salience);
 
 CREATE INDEX agent_episode_res_idx ON agent_episode (scope, namespace_id, resource_id, salience);
@@ -658,10 +643,6 @@ CREATE INDEX agent_fact_thr_idx ON agent_fact (scope, namespace_id, thread_id, c
 CREATE INDEX agent_instance_agent_idx ON agent_instance (registered_agent_id);
 
 CREATE INDEX agent_instance_ns_owner_idx ON agent_instance (namespace_id, owner_id);
-
-CREATE INDEX agent_registry_backend_type_idx ON agent_registry (backend_type);
-
-CREATE INDEX agent_registry_id_updated_idx ON agent_registry (agent_id, updated_at);
 
 CREATE INDEX agent_secret_scope_idx ON agent_secret (scope_kind, namespace_id, resource_id);
 
@@ -683,9 +664,13 @@ CREATE INDEX eval_run_dataset_idx ON eval_run (dataset_id);
 
 CREATE INDEX eval_run_target_ran_idx ON eval_run (target_id, ran_at);
 
-CREATE INDEX role_registry_id_updated_idx ON role_registry (role_id, updated_at);
+CREATE INDEX registry_version_facets_idx ON registry_version USING gin (facets);
 
-CREATE INDEX skill_registry_id_updated_idx ON skill_registry (skill_id, updated_at);
+CREATE INDEX registry_version_hash_idx ON registry_version (kind, id, body_hash);
+
+CREATE UNIQUE INDEX registry_version_seq_idx ON registry_version (kind, id, seq);
+
+CREATE INDEX remote_deployment_heartbeat_idx ON remote_deployment (last_heartbeat);
 
 CREATE INDEX sm_machine_events_machine_idx ON sm_machine_events (machine_id);
 

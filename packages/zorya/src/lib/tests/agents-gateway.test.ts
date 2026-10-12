@@ -504,7 +504,7 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
       const body = (await res.json()) as { id: string; metadata: { tags: string[] } };
       expect(body.id).toBe("new-bot");
       expect(body.metadata.tags).toContain("alpha");
-      expect(await registry.get("new-bot")).not.toBeNull();
+      expect(await registry.get({ id: "new-bot" })).not.toBeNull();
     });
 
     it("rejects ids starting with `_` (reserved for catalog routes)", async () => {
@@ -555,14 +555,14 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
       const res = await server.handle(
         new Request("http://test/api/agents/support", {
           method: "PATCH",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", "if-match": "*" },
           body: JSON.stringify({
             metadata: { description: "now helpful", capabilities: ["chat", "search"], tags: [] },
           }),
         }),
       );
       expect(res.status).toBe(200);
-      const updated = await registry.get("support");
+      const updated = await registry.get({ id: "support" });
       expect(updated?.metadata.description).toBe("now helpful");
       expect(updated?.metadata.capabilities).toContain("search");
     });
@@ -572,7 +572,7 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
       const res = await server.handle(
         new Request("http://test/api/agents/never", {
           method: "PATCH",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", "if-match": "*" },
           body: JSON.stringify({ metadata: { description: "x" } }),
         }),
       );
@@ -587,7 +587,7 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
         new Request("http://test/api/agents/support", { method: "DELETE" }),
       );
       expect(res.status).toBe(204);
-      expect(await registry.get("support")).toBeNull();
+      expect(await registry.get({ id: "support" })).toBeNull();
     });
 
     it("removes a single version when ?version=X", async () => {
@@ -606,8 +606,8 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
         new Request("http://test/api/agents/support?version=v2", { method: "DELETE" }),
       );
       expect(res.status).toBe(204);
-      expect(await registry.get("support", "v2")).toBeNull();
-      expect(await registry.get("support", "v1")).not.toBeNull();
+      expect(await registry.get({ id: "support", version: "v2" })).toBeNull();
+      expect(await registry.get({ id: "support", version: "v1" })).not.toBeNull();
     });
   });
 
@@ -659,7 +659,7 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
       };
       expect(body.recipe.id).toBe("support-fork");
       expect(body.acceptedSecrets).toEqual([]);
-      expect(await registry.get("support-fork")).not.toBeNull();
+      expect(await registry.get({ id: "support-fork" })).not.toBeNull();
     });
 
     it("rejects missing targetId with 400", async () => {
@@ -700,7 +700,7 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
       );
       expect(res.status).toBe(400);
       expect(((await res.json()) as { error: string }).error).toBe("secrets_unsupported");
-      expect(await registry.get("support-fork")).toBeNull();
+      expect(await registry.get({ id: "support-fork" })).toBeNull();
     });
 
     it("clone-with-secrets persists supplied secrets at the requested scope", async () => {
@@ -862,17 +862,9 @@ describe("agent gateway — recipe CRUD (gsze Phase 1)", () => {
 });
 
 describe("agent gateway — disabled recipe gate", () => {
-  it("invoke returns 410 when recipe.metadata.enabled === false", async () => {
+  it("invoke returns 410 when the agent is disabled", async () => {
     const { server, registry } = await bootGateway();
-    await registry.register({
-      id: "support",
-      backend: {
-        type: "local",
-        model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        role: { inline: { systemPrompt: "Helpful", tools: [] } },
-      },
-      metadata: { description: null, capabilities: [], tags: [], enabled: false },
-    });
+    await registry.setEnabled({ id: "support", enabled: false });
     const res = await server.handle(
       new Request("http://test/api/agents/support/invoke", {
         method: "POST",
@@ -887,15 +879,7 @@ describe("agent gateway — disabled recipe gate", () => {
 
   it("thread-send returns 410 when recipe is disabled", async () => {
     const { server, registry } = await bootGateway();
-    await registry.register({
-      id: "support",
-      backend: {
-        type: "local",
-        model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        role: { inline: { systemPrompt: "Helpful", tools: [] } },
-      },
-      metadata: { description: null, capabilities: [], tags: [], enabled: false },
-    });
+    await registry.setEnabled({ id: "support", enabled: false });
     const res = await server.handle(
       new Request("http://test/api/agents/support/threads/t-1", {
         method: "POST",
@@ -908,15 +892,7 @@ describe("agent gateway — disabled recipe gate", () => {
 
   it("read paths still work on disabled agents (browse + edit allowed)", async () => {
     const { server, registry } = await bootGateway();
-    await registry.register({
-      id: "support",
-      backend: {
-        type: "local",
-        model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        role: { inline: { systemPrompt: "Helpful", tools: [] } },
-      },
-      metadata: { description: null, capabilities: [], tags: [], enabled: false },
-    });
+    await registry.setEnabled({ id: "support", enabled: false });
     const get = await server.handle(
       new Request("http://test/api/agents/support", { method: "GET" }),
     );
@@ -924,7 +900,7 @@ describe("agent gateway — disabled recipe gate", () => {
     const patch = await server.handle(
       new Request("http://test/api/agents/support", {
         method: "PATCH",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "if-match": "*" },
         body: JSON.stringify({ metadata: { description: "edited while disabled" } }),
       }),
     );
@@ -935,15 +911,7 @@ describe("agent gateway — disabled recipe gate", () => {
     const { server, registry } = await bootGateway({
       responses: [{ content: "ok", finishReason: "stop" }],
     });
-    await registry.register({
-      id: "support",
-      backend: {
-        type: "local",
-        model: { provider: "anthropic", id: "claude-sonnet-4-6" },
-        role: { inline: { systemPrompt: "Helpful", tools: [] } },
-      },
-      metadata: { description: null, capabilities: [], tags: [], enabled: false },
-    });
+    await registry.setEnabled({ id: "support", enabled: false });
     const blocked = await server.handle(
       new Request("http://test/api/agents/support/invoke", {
         method: "POST",
@@ -955,8 +923,8 @@ describe("agent gateway — disabled recipe gate", () => {
     await server.handle(
       new Request("http://test/api/agents/support", {
         method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ metadata: { enabled: true } }),
+        headers: { "content-type": "application/json", "if-match": "*" },
+        body: JSON.stringify({ enabled: true }),
       }),
     );
     const ok = await server.handle(

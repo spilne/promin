@@ -53,7 +53,7 @@ import {
   migrate as migratePostgres,
   PostgresAgentRegistry,
   PostgresSkillRegistry,
-  PostgresFragmentStore,
+  PostgresFragmentRegistry,
   PostgresKnowledgeBaseStore,
   PostgresMemoryStore,
   PostgresLeaseStore,
@@ -66,10 +66,9 @@ import {
   createDurableSchedulerTools,
   createFileToolRegistry,
   inProcessSchedulerClient,
-  InMemoryFragmentRegistry,
   InMemoryModelCatalog,
   DefaultAgentToolCatalog,
-  type FragmentStore,
+  type FragmentRegistry,
   type KnowledgeBaseStore,
   resolveCredentialRef,
   resolveLocalAgent,
@@ -156,7 +155,7 @@ const { storage, schedulerStorage, runner } = stack;
 const pgUrl = process.env.ZORYA_PG_URL;
 let agentRegistry: AgentRegistry;
 let skillRegistry: SkillRegistry;
-let fragmentStore: FragmentStore;
+let fragmentRegistry: FragmentRegistry;
 let knowledgeBaseStore: KnowledgeBaseStore;
 let memoryStore: MemoryStore;
 // Pending-approval index: thread turns record the tool approvals they
@@ -171,18 +170,18 @@ if (pgUrl) {
   await migratePostgres(pgDb);
   agentRegistry = new PostgresAgentRegistry({ db: pgDb });
   skillRegistry = new PostgresSkillRegistry({ db: pgDb });
-  fragmentStore = new PostgresFragmentStore({ db: pgDb });
+  fragmentRegistry = new PostgresFragmentRegistry({ db: pgDb });
   knowledgeBaseStore = new PostgresKnowledgeBaseStore({ db: pgDb });
   memoryStore = new PostgresMemoryStore({ db: pgDb });
   approvalStore = new PostgresPendingApprovalStore({ db: pgDb });
   turnGate = new AgentTurnGate({ leaseStore: new PostgresLeaseStore({ db: pgDb }) });
   console.log(
-    "[zorya] agent + skill registries + fragment, knowledge-base and memory stores → Postgres (ZORYA_PG_URL)",
+    "[zorya] agent, skill and fragment registries + knowledge-base and memory stores → Postgres (ZORYA_PG_URL)",
   );
 } else {
   agentRegistry = stack.agentRegistry;
   skillRegistry = stack.skillRegistry;
-  fragmentStore = stack.fragmentStore;
+  fragmentRegistry = stack.fragmentRegistry;
   knowledgeBaseStore = stack.knowledgeBaseStore;
   memoryStore = stack.memoryStore;
   approvalStore = stack.pendingApprovalStore;
@@ -211,11 +210,10 @@ const knowledgeBases = new ZoryaKnowledgeBases({
     },
   ],
 });
-// Prompt-fragment registry — small curated markdown layers role recipes
+// Prompt-fragment registry (above) — small curated markdown layers roles
 // compose into their system prompt. The ZoryaFragments service below scans
-// examples/fragments/*.md on boot + on a tick, and the manager UI mutates
-// the same in-memory registry via /api/fragments CRUD.
-const fragmentRegistry = new InMemoryFragmentRegistry();
+// examples/fragments/*.md into it on boot + on a tick, and the manager UI
+// edits the same durable registry via /api/fragments CRUD.
 // Role registry — the behavioral bundles agents bind by ref. Empty at boot;
 // operators author roles via /api/roles, or "Save as role" lifts an agent's
 // inline role into here. Refs resolve through this at agent-materialize time.
@@ -597,14 +595,19 @@ async function seedAgents() {
     console.log(`[zorya] no agents discovered under ${agentScanRoot}`);
     return;
   }
-  // Upsert by default — keeps operator-edited rows from boot N when
-  // recipe code changes for boot N+1. Pass `sync: true` if you want the
-  // filesystem to be authoritative (deletes registry rows not in scan).
-  const result = await applyDiscoveredAgents(agentRegistry, agentScan.agents);
+  // Unchanged recipes are left alone; an edited file becomes a new active
+  // version. Pass `sync: true` to also remove recipes whose file is gone
+  // (operator-authored recipes are never removed).
+  const result = await applyDiscoveredAgents({
+    registry: agentRegistry,
+    agents: agentScan.agents,
+  });
   if (result.added.length > 0) {
     console.log(`[zorya] registered new agents: ${result.added.join(", ")}`);
   }
-  console.log(`[zorya] upserted ${result.upserted.length} agent recipe(s)`);
+  console.log(
+    `[zorya] ${result.changed.length} of ${result.upserted.length} agent recipe(s) changed`,
+  );
 }
 
 // Materialize a recipe into a live Agent. Dispatches on backend type so
@@ -1181,11 +1184,10 @@ const skills = new ZoryaSkills({
 });
 
 // Fragments service — scans examples/fragments/*.md on boot + on a tick;
-// the manager UI mutates the same registry via /api/fragments CRUD.
+// the manager UI edits the same registry via /api/fragments CRUD.
 const fragmentScanRoot = path.join(import.meta.dir, "fragments");
 const fragments = new ZoryaFragments({
   registry: fragmentRegistry,
-  store: fragmentStore,
   scan: {
     root: fragmentScanRoot,
     intervalMs: 5_000,

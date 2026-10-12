@@ -8,8 +8,9 @@
 // (.ts / SKILL.md) and operator-authored ones share this registry. A
 // file-scanned skill would be overwritten on the next scan tick, so it's
 // shown with a 📄 badge and its editor disables Save (edit the source file
-// instead) — see the `fileManaged` flow below. Operator-authored skills are
-// fully editable.
+// instead) — see the `fileManaged` flow below; reviewing it (Approve) works
+// either way. Saving an operator-authored skill publishes a new version; the
+// editor's Versions panel makes any version active.
 // ---------------------------------------------------------------------------
 
 import { useEffect, useMemo, useState } from "preact/hooks";
@@ -20,6 +21,7 @@ import type { RegisteredSkill } from "../../../server/routes/skills.ts";
 import { Page, PageHeader } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
 import { Markdown } from "../../lib/markdown.tsx";
+import { VersionsPanel } from "../ui/versions-panel.tsx";
 
 type EditorTarget = { mode: "create" } | { mode: "edit"; skill: RegisteredSkill };
 
@@ -43,20 +45,14 @@ export function SkillsPage() {
   }, [skills, query]);
 
   const onApprove = async (id: string) => {
-    // Flip metadata.trust to "trusted". updateSkill PATCH does a partial
-    // metadata replace — re-send the existing tags/capabilities/enabled so
-    // they aren't dropped. (The route's parseSkillBody preserves
-    // description/whenToUse/body when omitted.)
+    // Record the review on the version this row shows — no new version.
     const skill = skills.find((s) => s.id === id);
     if (!skill) return;
     try {
       await api.updateSkill(id, {
-        metadata: {
-          capabilities: skill.metadata.capabilities,
-          tags: skill.metadata.tags,
-          ...(skill.metadata.enabled !== undefined && { enabled: skill.metadata.enabled }),
-          trust: "trusted",
-        },
+        expectedVersion: skill.version,
+        version: skill.version,
+        trust: "trusted",
       });
       toast(`Approved skill "${id}"`, { variant: "success" });
       refresh();
@@ -141,7 +137,7 @@ export function SkillsPage() {
                 </tr>
               ) : (
                 filtered.map((s) => (
-                  <tr class={`hover ${s.metadata.enabled === false ? "opacity-60" : ""}`}>
+                  <tr class={`hover ${!s.enabled ? "opacity-60" : ""}`}>
                     <td class="font-mono text-xs">{s.id}</td>
                     <td class="font-mono text-xs text-base-content/50">{s.version}</td>
                     <td class="text-xs max-w-md truncate" title={s.description}>
@@ -156,7 +152,7 @@ export function SkillsPage() {
                           📄 file
                         </span>
                       )}
-                      {s.metadata.trust === "needs-review" && (
+                      {s.trust === "needs-review" && (
                         <span
                           class="badge badge-xs badge-warning gap-1"
                           title="Unreviewed third-party instructions. Hidden from agents until you Approve."
@@ -164,15 +160,13 @@ export function SkillsPage() {
                           🛡 needs review
                         </span>
                       )}
-                      {s.metadata.enabled === false && (
-                        <span class="badge badge-xs badge-error">disabled</span>
-                      )}
+                      {!s.enabled && <span class="badge badge-xs badge-error">disabled</span>}
                       {s.metadata.tags.map((t) => (
                         <span class="badge badge-xs badge-ghost">{t}</span>
                       ))}
                     </td>
                     <td class="text-right whitespace-nowrap">
-                      {s.metadata.trust === "needs-review" && (
+                      {s.trust === "needs-review" && (
                         <button
                           type="button"
                           class="btn btn-xs btn-warning"
@@ -242,7 +236,7 @@ function SkillEditor({ target, existingIds, fileManaged, onClose, onSaved }: Ski
   const [body, setBody] = useState(seed?.body ?? "");
   const [tags, setTags] = useState((seed?.metadata.tags ?? []).join(", "));
   const [capabilities, setCapabilities] = useState((seed?.metadata.capabilities ?? []).join(", "));
-  const [enabled, setEnabled] = useState(seed?.metadata.enabled !== false);
+  const [enabled, setEnabled] = useState(seed?.enabled ?? true);
   const [preview, setPreview] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -265,23 +259,30 @@ function SkillEditor({ target, existingIds, fileManaged, onClose, onSaved }: Ski
   const save = async () => {
     setErr(null);
     setSaving(true);
-    const metadata = { tags: parseList(tags), capabilities: parseList(capabilities), enabled };
+    const metadata = { tags: parseList(tags), capabilities: parseList(capabilities) };
     try {
-      if (isEdit) {
+      if (isEdit && seed) {
+        // A new version built on the one this editor loaded; an unchanged
+        // form stores no new version.
         await api.updateSkill(id.trim(), {
+          expectedVersion: seed.version,
           description: description.trim(),
           ...(whenToUse.trim() && { whenToUse: whenToUse.trim() }),
           body,
           metadata,
+          enabled,
         });
       } else {
-        await api.createSkill({
+        const created = await api.createSkill({
           id: id.trim(),
           description: description.trim(),
           ...(whenToUse.trim() && { whenToUse: whenToUse.trim() }),
           body,
           metadata,
         });
+        if (!enabled) {
+          await api.updateSkill(created.id, { expectedVersion: created.version, enabled: false });
+        }
       }
       toast(`Saved skill "${id.trim()}"`, { variant: "success" });
       onSaved();
@@ -414,6 +415,16 @@ function SkillEditor({ target, existingIds, fileManaged, onClose, onSaved }: Ski
             Disabled skills stay registered but are hidden from agent catalogs.
           </span>
         </label>
+
+        {seed && (
+          <VersionsPanel
+            reloadKey={seed.id}
+            load={() => api.listSkillVersions(seed.id)}
+            promote={(p) => api.promoteSkill(seed.id, p)}
+            onPromoted={() => onSaved()}
+            describe={(v) => v.description}
+          />
+        )}
 
         {err && <div class="alert alert-error text-xs">{err}</div>}
 

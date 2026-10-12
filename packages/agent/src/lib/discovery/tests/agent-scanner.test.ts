@@ -7,17 +7,36 @@
 //   - flattens both single-export and array-export modules
 //   - skips test/bench/.d.ts files
 //   - duplicate ids across files emit a warning, last-wins
-//   - applyDiscoveredAgents upserts; sync mode deletes the rest
+//   - applyDiscoveredAgents registers changed recipes as promoted versions
+//     and leaves unchanged ones alone
+//   - sync removes only scanner-written recipes, and nothing after a scan
+//     that could not import every file
 //   - idPrefix filter narrows reconciliation to a subset
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { FakeWallClock } from "@promin/workflow";
 import { AgentScanner, applyDiscoveredAgents, startAgentScanLoop } from "../agent-scanner.ts";
-import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
+import type { RegisterAgentInput, RegisteredAgent } from "../../registry/types.ts";
+import { InMemoryAgentRegistry } from "../../versioned-registry/in-memory-registries.ts";
+
+/** Counts writes, to tell an unchanged recipe was left alone. */
+class CountingAgentRegistry extends InMemoryAgentRegistry {
+  registers = 0;
+  override async register(input: RegisterAgentInput): Promise<RegisteredAgent> {
+    this.registers += 1;
+    return super.register(input);
+  }
+}
+
+const LOCAL = {
+  type: "local" as const,
+  model: { provider: "anthropic", id: "x" },
+  role: { inline: { systemPrompt: null, tools: [] } },
+};
 
 const FIXTURE_ROOT = join(tmpdir(), `agent-scanner-${process.pid}-${Date.now()}`);
 
@@ -93,7 +112,7 @@ describe("applyDiscoveredAgents", () => {
   it("upserts discovered agents into the registry", async () => {
     const registry = new InMemoryAgentRegistry();
     const { agents } = await AgentScanner.scanFolder(FIXTURE_ROOT);
-    const result = await applyDiscoveredAgents(registry, agents);
+    const result = await applyDiscoveredAgents({ registry, agents });
     expect(result.upserted.sort()).toEqual([
       "research",
       "summarize",
@@ -101,32 +120,76 @@ describe("applyDiscoveredAgents", () => {
       "tenant-acme:billing",
     ]);
     expect(result.added.length).toBe(4);
-    expect((await registry.get("support"))?.id).toBe("support");
+    expect(await registry.get({ id: "support" })).toMatchObject({
+      id: "support",
+      version: "v1",
+      source: "file",
+    });
+  });
+
+  it("leaves unchanged recipes alone and promotes a changed one as a new version", async () => {
+    const registry = new CountingAgentRegistry();
+    const { agents } = await AgentScanner.scanFolder(FIXTURE_ROOT);
+    await applyDiscoveredAgents({ registry, agents });
+    const writes = registry.registers;
+
+    const again = await applyDiscoveredAgents({ registry, agents });
+    expect(registry.registers).toBe(writes);
+    expect(again.changed).toEqual([]);
+    expect(again.upserted).toHaveLength(4);
+
+    const edited = agents.map((a) =>
+      a.id === "support" ? { ...a, metadata: { ...a.metadata, tags: ["edited"] } } : a,
+    );
+    const third = await applyDiscoveredAgents({ registry, agents: edited });
+    expect(third.changed).toEqual(["support"]);
+    expect(registry.registers).toBe(writes + 1);
+    expect((await registry.versions({ id: "support" })).map((v) => [v.version, v.active])).toEqual([
+      ["v1", false],
+      ["v2", true],
+    ]);
   });
 
   it("idPrefix narrows reconciliation to a subset", async () => {
     const registry = new InMemoryAgentRegistry();
     const { agents } = await AgentScanner.scanFolder(FIXTURE_ROOT);
-    const result = await applyDiscoveredAgents(registry, agents, { idPrefix: "tenant-acme:" });
+    const result = await applyDiscoveredAgents({ registry, agents, idPrefix: "tenant-acme:" });
     expect(result.upserted).toEqual(["tenant-acme:billing"]);
-    expect(await registry.get("support")).toBeNull();
+    expect(await registry.get({ id: "support" })).toBeNull();
   });
 
-  it("sync mode deletes registry entries not in the scan", async () => {
+  it("sync removes scanner-written recipes not in the scan, never operator-authored ones", async () => {
     const registry = new InMemoryAgentRegistry();
-    // Pre-populate with an entry that won't be in the scan.
+    // A recipe an earlier scan wrote, whose file is gone.
+    await registry.register({ id: "stale-agent", backend: LOCAL, source: "file" });
+    // A recipe an operator authored through the API.
+    await registry.register({ id: "operator-agent", backend: LOCAL });
+    // Operator edits on top of a scanned recipe survive; the file versions go.
+    await registry.register({ id: "mixed", backend: LOCAL, source: "file" });
     await registry.register({
-      id: "stale-agent",
-      backend: {
-        type: "local",
-        model: { provider: "anthropic", id: "x" },
-        role: { inline: { systemPrompt: null, tools: [] } },
-      },
+      id: "mixed",
+      backend: { ...LOCAL, model: { provider: "anthropic", id: "y" } },
+      promote: true,
     });
     const { agents } = await AgentScanner.scanFolder(FIXTURE_ROOT);
-    const result = await applyDiscoveredAgents(registry, agents, { sync: true });
-    expect(result.deleted).toContain("stale-agent");
-    expect(await registry.get("stale-agent")).toBeNull();
+    const result = await applyDiscoveredAgents({ registry, agents, sync: true });
+    expect(result.deleted.sort()).toEqual(["mixed", "stale-agent"]);
+    expect(await registry.get({ id: "stale-agent" })).toBeNull();
+    expect(await registry.get({ id: "operator-agent" })).not.toBeNull();
+    expect((await registry.versions({ id: "mixed" })).map((v) => v.version)).toEqual(["v2"]);
+  });
+
+  it("sync deletes nothing after a scan that could not read every file", async () => {
+    const registry = new InMemoryAgentRegistry();
+    await registry.register({ id: "stale-agent", backend: LOCAL, source: "file" });
+    const result = await applyDiscoveredAgents({
+      registry,
+      agents: [],
+      sync: true,
+      complete: false,
+    });
+    expect(result.deleted).toEqual([]);
+    expect(await registry.get({ id: "stale-agent" })).not.toBeNull();
   });
 });
 
@@ -142,7 +205,7 @@ describe("startAgentScanLoop", () => {
       // First tick: empty folder.
       const t1 = await loop.tick();
       expect(t1.added).toEqual([]);
-      expect(await registry.list()).toEqual([]);
+      expect((await registry.list()).items).toEqual([]);
 
       // Drop a recipe in and tick again.
       await writeFile(
@@ -151,7 +214,7 @@ describe("startAgentScanLoop", () => {
       );
       const t2 = await loop.tick();
       expect(t2.added).toEqual(["support"]);
-      expect((await registry.get("support"))?.id).toBe("support");
+      expect((await registry.get({ id: "support" }))?.id).toBe("support");
       loop.stop();
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -182,7 +245,7 @@ describe("startAgentScanLoop", () => {
       await rm(recipePath);
       const t2 = await loop.tick();
       expect(t2.deleted).toContain("live-only");
-      expect(await registry.get("live-only")).toBeNull();
+      expect(await registry.get({ id: "live-only" })).toBeNull();
       loop.stop();
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -209,7 +272,35 @@ describe("startAgentScanLoop", () => {
       });
       const t = await loop.tick();
       expect(t.added).toEqual(["keep-me"]);
-      expect(await registry.get("drop-me")).toBeNull();
+      expect(await registry.get({ id: "drop-me" })).toBeNull();
+      loop.stop();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("a file that fails to import keeps sync from deleting its recipe", async () => {
+    const root = join(tmpdir(), `agent-scan-loop-broken-${process.pid}-${Date.now()}`);
+    await mkdir(root, { recursive: true });
+    const recipePath = join(root, "live.ts");
+    await writeFile(
+      recipePath,
+      `export const a = { id: "live", backend: { type: "local", model: { provider: "anthropic", id: "x" }, role: { inline: { systemPrompt: null, tools: [] } } } };`,
+    );
+    try {
+      const registry = new InMemoryAgentRegistry();
+      const clock = FakeWallClock.create(0);
+      const loop = startAgentScanLoop({ registry, root, intervalMs: 1_000, sync: true, clock });
+      expect((await loop.tick()).added).toEqual(["live"]);
+
+      // The recipe moves into a new file that does not import (a syntax
+      // error mid-edit): the scan cannot tell it was not just removed.
+      await rm(recipePath);
+      await writeFile(join(root, "moved.ts"), `export const a = { id: "live", backend: {`);
+      const t2 = await loop.tick();
+      expect(t2.errors).toHaveLength(1);
+      expect(t2.deleted).toEqual([]);
+      expect(await registry.get({ id: "live" })).not.toBeNull();
       loop.stop();
     } finally {
       await rm(root, { recursive: true, force: true });

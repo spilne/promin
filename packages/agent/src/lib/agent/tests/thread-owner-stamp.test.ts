@@ -11,7 +11,7 @@ import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow"
 import { LocalAgent } from "../local-agent.ts";
 import { THREAD_AGENT_METADATA_KEY } from "../types.ts";
 import { InMemoryMemoryStore } from "../../memory/in-memory-memory-store.ts";
-import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
+import { InMemoryAgentRegistry } from "../../versioned-registry/in-memory-registries.ts";
 import { resolveLocalAgent } from "../../registry/resolve-local-agent.ts";
 import type { RegisteredAgent } from "../../registry/types.ts";
 import { dispatchAgentSchedule } from "../../tools/dispatch-agent-schedule.ts";
@@ -52,7 +52,7 @@ describe("LocalAgent — thread owner stamp", () => {
   it("stamps a programmatically created thread with the recipe id", async () => {
     const { memory, registry, resolve } = setup();
     const recipe = await registry.register({ id: "writer", backend: BACKEND });
-    const agent = resolve(recipe).withScope({ namespaceId: "acme", resourceId: "alice" });
+    const agent = (await resolve(recipe)).withScope({ namespaceId: "acme", resourceId: "alice" });
 
     const thread = await agent.thread("t1", { metadata: { topic: "launch" } });
     expect(thread.isNew).toBe(true);
@@ -67,7 +67,7 @@ describe("LocalAgent — thread owner stamp", () => {
   it("keeps its own stamp over one the caller passes", async () => {
     const { memory, registry, resolve } = setup();
     const recipe = await registry.register({ id: "writer", backend: BACKEND });
-    const agent = resolve(recipe).withScope({ namespaceId: "acme", resourceId: "alice" });
+    const agent = (await resolve(recipe)).withScope({ namespaceId: "acme", resourceId: "alice" });
     await agent.thread("t1", { metadata: { [THREAD_AGENT_METADATA_KEY]: "someone-else" } });
     expect(await ownerOf({ memory, threadId: "t1", resourceId: "alice" })).toBe("writer");
   });
@@ -92,7 +92,7 @@ describe("LocalAgent — thread owner stamp", () => {
   it("re-creates a vanished row stamped, and setMetadata keeps the stamp", async () => {
     const { memory, registry, resolve } = setup();
     const recipe = await registry.register({ id: "writer", backend: BACKEND });
-    const agent = resolve(recipe).withScope({ namespaceId: "acme", resourceId: "alice" });
+    const agent = (await resolve(recipe)).withScope({ namespaceId: "acme", resourceId: "alice" });
     const thread = await agent.thread("t1");
 
     await memory.deleteThread({ namespaceId: "acme", resourceId: "alice", threadId: "t1" });

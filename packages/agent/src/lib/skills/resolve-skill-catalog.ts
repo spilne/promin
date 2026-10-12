@@ -57,7 +57,7 @@ export interface ResolveSkillCatalogParams {
  * return the resolved catalog (pinned version + description + whenToUse).
  * Returns `[]` when the backend isn't local or the role declares no skills.
  *
- * Version pinning: when a ref omits `version`, the registry's latest is
+ * Version pinning: when a ref omits `version`, the skill's active version is
  * used and its concrete version is recorded in the entry — so downstream
  * `loadSkill` fetches exactly the version the catalog showed.
  */
@@ -73,7 +73,10 @@ export async function resolveSkillCatalog(
 
   const out: ResolvedSkillEntry[] = [];
   for (const ref of refs) {
-    const row = await registry.get(ref.id, ref.version);
+    const row = await registry.get({
+      id: ref.id,
+      ...(ref.version !== undefined && { version: ref.version }),
+    });
     if (!row) {
       if (onMissing === "skip") continue;
       throw new Error(
@@ -82,7 +85,7 @@ export async function resolveSkillCatalog(
           "Register the skill or set onMissing: 'skip'.",
       );
     }
-    if (row.metadata.enabled === false) {
+    if (!row.enabled) {
       if (onMissing === "skip") continue;
       throw new Error(
         `resolveSkillCatalog: skill "${row.id}@${row.version}" is disabled (enabled: false). ` +
@@ -100,7 +103,7 @@ export async function resolveSkillCatalog(
     // Trust gate (fail-closed, SILENT). A needs-review skill is in the
     // registry but hasn't been approved by an operator yet — silently keep
     // it out of agent context. The skills manager surfaces these for review.
-    if (row.metadata.trust === "needs-review") continue;
+    if (row.trust === "needs-review") continue;
     out.push({
       id: row.id,
       version: row.version,

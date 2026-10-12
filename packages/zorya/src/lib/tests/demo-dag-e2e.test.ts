@@ -314,7 +314,7 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
     });
   });
 
-  describe("Agent versioning — PATCH + publish via POST", () => {
+  describe("Agent versioning — PATCH publishes, promote switches", () => {
     it("GET /api/agents/echo-bot/versions returns the seeded version", async () => {
       const res = await fetch(`${baseUrl}/api/agents/echo-bot/versions`);
       expect(res.status).toBe(200);
@@ -325,14 +325,14 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
     it("refuses in-place edits of a file-managed recipe (the next scan would undo them)", async () => {
       const patch = await fetch(`${baseUrl}/api/agents/echo-bot`, {
         method: "PATCH",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "if-match": "*" },
         body: JSON.stringify({ metadata: { tags: ["e2e-touched"] } }),
       });
       expect(patch.status).toBe(409);
       expect(((await patch.json()) as { error: string }).error).toBe("file_managed");
     });
 
-    it("PATCH /api/agents/:id replaces in-place (same version) and POST publishes a new version", async () => {
+    it("PATCH publishes a new version, publish: false keeps a draft, promote switches", async () => {
       const backend = {
         type: "local",
         model: { provider: "mock", id: "echo-v1" },
@@ -344,18 +344,18 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
         body: JSON.stringify({ id: "e2e-echo", backend, metadata: { tags: ["e2e"] } }),
       });
       expect(created.status).toBe(201);
+      const etag = created.headers.get("etag")!;
       const versionsOf = async () =>
         (
           (await (await fetch(`${baseUrl}/api/agents/e2e-echo/versions`)).json()) as {
-            versions: ReadonlyArray<{ version: string }>;
+            versions: ReadonlyArray<{ version: string; active: boolean }>;
           }
         ).versions;
-      const beforeCount = (await versionsOf()).length;
 
-      // PATCH replaces in-place — no new row.
+      // PATCH publishes a new active version.
       const patch = await fetch(`${baseUrl}/api/agents/e2e-echo`, {
         method: "PATCH",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "if-match": etag },
         body: JSON.stringify({
           metadata: {
             description: "Echoes — touched by e2e PATCH.",
@@ -365,25 +365,32 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
         }),
       });
       expect(patch.status).toBe(200);
-      const patched = (await patch.json()) as { metadata: { tags: ReadonlyArray<string> } };
+      const patched = (await patch.json()) as {
+        version: string;
+        metadata: { tags: ReadonlyArray<string> };
+      };
       expect(patched.metadata.tags).toContain("e2e-touched");
-      expect((await versionsOf()).length).toBe(beforeCount);
+      expect(patched.version).toBe("v2");
 
-      // POST registers a brand-new version — row count grows by 1.
-      const post = await fetch(`${baseUrl}/api/agents`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          id: "e2e-echo",
-          version: "v2",
-          backend,
-          metadata: { description: "Echo — e2e published version.", tags: ["e2e-published"] },
-        }),
+      // A draft does not go live until promoted.
+      const draft = await fetch(`${baseUrl}/api/agents/e2e-echo`, {
+        method: "PATCH",
+        headers: { "content-type": "application/json", "if-match": 'W/"v2"' },
+        body: JSON.stringify({ metadata: { tags: ["e2e-draft"] }, publish: false }),
       });
-      expect(post.status).toBe(201);
-      const after = await versionsOf();
-      expect(after.length).toBe(beforeCount + 1);
-      expect(after.map((v) => v.version)).toContain("v2");
+      expect(draft.status).toBe(200);
+      expect((await versionsOf()).map((v) => [v.version, v.active])).toEqual([
+        ["v1", false],
+        ["v2", true],
+        ["v3", false],
+      ]);
+      const promote = await fetch(`${baseUrl}/api/agents/e2e-echo/promote`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "if-match": 'W/"v2"' },
+        body: JSON.stringify({ version: "v3" }),
+      });
+      expect(promote.status).toBe(200);
+      expect((await versionsOf()).find((v) => v.active)?.version).toBe("v3");
     });
   });
 });

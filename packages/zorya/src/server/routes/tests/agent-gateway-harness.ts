@@ -47,13 +47,15 @@ export interface HarnessOpts {
   secrets?: boolean;
   authorizeScope?: ScopeAuthorizer;
   /** Wrap the resolved agent (e.g. to make `thread()` throw). */
-  wrapAgent?: (agent: ReturnType<typeof resolveLocalAgent>) => unknown;
+  wrapAgent?: (agent: Awaited<ReturnType<typeof resolveLocalAgent>>) => unknown;
   /** Mount the DAG gateway over the same agents. */
   dags?: boolean;
   /** Namespace registry the server checks agent writes against. */
   namespaces?: NamespaceRegistry;
   /** Bounds of the agent routes' event streams. */
   streaming?: TurnStreamLimits;
+  /** The agent registry (default: a fresh in-memory one). */
+  registry?: InMemoryAgentRegistry;
 }
 
 export async function bootAgents(opts: HarnessOpts = {}) {
@@ -62,7 +64,7 @@ export async function bootAgents(opts: HarnessOpts = {}) {
   const runner = createWorkflowRunner({ storage });
   const memory = new InMemoryMemoryStore();
   const approvals = new InMemoryPendingApprovalStore({ clock });
-  const registry = new InMemoryAgentRegistry({ clock });
+  const registry = opts.registry ?? new InMemoryAgentRegistry({ clock });
   const instances = new InMemoryAgentInstanceRegistry();
   const roles = new InMemoryRoleRegistry();
   const secrets = opts.secrets ? new InMemorySecretsStorage() : undefined;
@@ -87,8 +89,8 @@ export async function bootAgents(opts: HarnessOpts = {}) {
   });
   const agents = new ZoryaAgents({
     registry,
-    resolve: (recipe: RegisteredAgent) => {
-      const agent = resolveLocalAgent(recipe, {
+    resolve: async (recipe: RegisteredAgent) => {
+      const agent = await resolveLocalAgent(recipe, {
         runner,
         memory,
         approvals,

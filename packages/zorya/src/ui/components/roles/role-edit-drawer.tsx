@@ -6,7 +6,8 @@
 // tool / skill multi-select, comma-list inputs) but edits a role registry
 // row directly — no model, credentials, or memory config (those live on the
 // agent binding). Create mode lets the operator type the role id; edit mode
-// pins it and PATCHes in place.
+// pins it, and saving publishes a new version built on the one loaded (a
+// concurrent edit answers 412). The Versions panel makes any version active.
 // ---------------------------------------------------------------------------
 
 import { useEffect, useMemo, useState } from "preact/hooks";
@@ -14,13 +15,14 @@ import { api, type ToolCatalogEntryDto } from "../../api/client.ts";
 import type { RegisteredRole, RoleDefinition, RoleMetadata } from "../../../server/routes/roles.ts";
 import type { SkillCatalogEntry } from "../../../server/routes/agent-catalog.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
+import { VersionsPanel } from "../ui/versions-panel.tsx";
 
 interface Props {
   role: RegisteredRole;
   /**
-   * "edit" (default) PATCHes in place against `role.id`. "create" POSTs a new
-   * role keyed on the typed id. The caller passes a blank `role` template to
-   * seed the form defaults (empty prompt / tools).
+   * "edit" (default) publishes a new version of `role.id`. "create" POSTs a
+   * new role keyed on the typed id. The caller passes a blank `role`
+   * template to seed the form defaults (empty prompt / tools).
    */
   mode?: "create" | "edit";
   onClose: () => void;
@@ -68,6 +70,7 @@ export function RoleEditDrawer({ role, mode = "edit", onClose, onSaved }: Props)
     new Set((role.definition.skills ?? []).map((s) => s.id)),
   );
   const [capabilities, setCapabilities] = useState((role.definition.capabilities ?? []).join(", "));
+  const [enabled, setEnabled] = useState(role.enabled);
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -122,9 +125,17 @@ export function RoleEditDrawer({ role, mode = "edit", onClose, onSaved }: Props)
     const { definition, metadata } = buildPayload();
     try {
       if (isCreate) {
-        return await api.createRole({ id: trimmedId, definition, metadata });
+        const created = await api.createRole({ id: trimmedId, definition, metadata });
+        return enabled
+          ? created
+          : await api.updateRole(created.id, { expectedVersion: created.version, enabled });
       }
-      return await api.updateRole(role.id, { definition, metadata });
+      return await api.updateRole(role.id, {
+        expectedVersion: role.version,
+        definition,
+        metadata,
+        enabled,
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       return null;
@@ -271,6 +282,29 @@ export function RoleEditDrawer({ role, mode = "edit", onClose, onSaved }: Props)
             </span>
           </label>
 
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              class="toggle toggle-sm"
+              checked={enabled}
+              onChange={(e) => setEnabled((e.target as HTMLInputElement).checked)}
+            />
+            <span class="text-sm">Enabled</span>
+            <span class="text-xs text-base-content/40">
+              Agents bound to a disabled role by ref refuse to start.
+            </span>
+          </label>
+
+          {!isCreate && (
+            <VersionsPanel
+              reloadKey={role.id}
+              load={() => api.listRoleVersions(role.id)}
+              promote={(p) => api.promoteRole(role.id, p)}
+              onPromoted={onSaved}
+              describe={(v) => v.metadata.description ?? ""}
+            />
+          )}
+
           {error && <div class="alert alert-error text-xs">{error}</div>}
 
           <div class="flex justify-end gap-2 pt-2">
@@ -306,7 +340,7 @@ function parseList(raw: string): string[] {
 }
 
 interface LayersSectionProps {
-  fragments: ReadonlyArray<{ key: string; content: string }>;
+  fragments: ReadonlyArray<{ id: string; version: string; content: string }>;
   selected: ReadonlyArray<string>;
   onChange: (next: ReadonlyArray<string>) => void;
 }
@@ -318,16 +352,27 @@ interface LayersSectionProps {
 //
 // Hidden when no fragment catalog is wired AND no layers are already pinned.
 function LayersSection({ fragments, selected, onChange }: LayersSectionProps) {
-  const fragmentByKey = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const f of fragments) m.set(f.key, f.content);
+  const fragmentById = useMemo(() => {
+    const m = new Map<string, { version: string; content: string }>();
+    for (const f of fragments) m.set(f.id, { version: f.version, content: f.content });
     return m;
   }, [fragments]);
+  const selectedIds = useMemo(() => selected.map((layer) => layerId(layer)), [selected]);
 
   const availableToAdd = useMemo(
-    () => fragments.filter((f) => !selected.includes(f.key)).map((f) => f.key),
-    [fragments, selected],
+    () => fragments.filter((f) => !selectedIds.includes(f.id)).map((f) => f.id),
+    [fragments, selectedIds],
   );
+  // A pinned layer (`id@version`) keeps that fragment version; a bare id
+  // follows the fragment's active version.
+  const togglePin = (index: number) => {
+    const layer = selected[index]!;
+    const id = layerId(layer);
+    const active = fragmentById.get(id);
+    const next = [...selected];
+    next[index] = layer !== id ? id : active ? `${id}@${active.version}` : layer;
+    onChange(next);
+  };
 
   if (fragments.length === 0 && selected.length === 0) return null;
 
@@ -343,9 +388,9 @@ function LayersSection({ fragments, selected, onChange }: LayersSectionProps) {
     next.splice(index, 1);
     onChange(next);
   };
-  const add = (key: string) => {
-    if (!key || selected.includes(key)) return;
-    onChange([...selected, key]);
+  const add = (id: string) => {
+    if (!id || selectedIds.includes(id)) return;
+    onChange([...selected, id]);
   };
 
   return (
@@ -366,17 +411,35 @@ function LayersSection({ fragments, selected, onChange }: LayersSectionProps) {
       ) : (
         <ul class="space-y-1">
           {selected.map((key, i) => {
-            const broken = !fragmentByKey.has(key);
+            const broken = !fragmentById.has(layerId(key));
+            const pinned = key !== layerId(key);
             return (
               <li class="flex items-center gap-2 bg-base-200 rounded px-2 py-1">
                 <span class="text-[10px] text-base-content/50 font-mono w-4">{i + 1}.</span>
                 <span
                   class={`font-mono text-xs flex-1 truncate ${broken ? "text-error" : ""}`}
-                  title={broken ? "Fragment not in catalog — broken ref" : fragmentByKey.get(key)}
+                  title={
+                    broken
+                      ? "Fragment not in catalog — broken ref"
+                      : fragmentById.get(layerId(key))?.content
+                  }
                 >
                   {key}
                   {broken && <span class="ml-1">⚠</span>}
                 </span>
+                <button
+                  type="button"
+                  class={`btn btn-xs btn-ghost ${pinned ? "text-primary" : ""}`}
+                  disabled={broken && !pinned}
+                  title={
+                    pinned
+                      ? "Pinned to this version — click to follow the active version"
+                      : "Follows the active version — click to pin it"
+                  }
+                  onClick={() => togglePin(i)}
+                >
+                  {pinned ? "pinned" : "pin"}
+                </button>
                 <button
                   type="button"
                   class="btn btn-xs btn-ghost"
@@ -799,4 +862,10 @@ function ToolSourceBadge({ source }: { source: ToolCatalogEntryDto["source"] }) 
       mcp:{source.server}
     </span>
   );
+}
+
+/** The fragment id of a layer reference (`id` or `id@version`). */
+function layerId(layer: string): string {
+  const at = layer.lastIndexOf("@");
+  return at > 0 && at < layer.length - 1 ? layer.slice(0, at) : layer;
 }

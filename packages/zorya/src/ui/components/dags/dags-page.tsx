@@ -1,9 +1,10 @@
 // ---------------------------------------------------------------------------
 // DagsPage — registry browser + run trigger for AgenticDagRecipe.
 //
-// Lists registered DAGs (latest-per-id). Click → detail panel showing
-// the graph structure (indented adjacency view), version history, and
-// a Run button that POSTs to /api/dags/:id/run. The POST answers with
+// Lists registered DAGs (their active version). Click → detail panel
+// showing the graph structure (indented adjacency view), the version
+// history (make any version active), the kill switch, and a Run button
+// that POSTs to /api/dags/:id/run. The POST answers with
 // the run's id at once; the page follows the run like any other (its
 // event stream, then the stored result) and links to its run page,
 // where each node shows as a child run.
@@ -15,6 +16,7 @@ import { useNamespace } from "../../hooks/use-namespace.ts";
 import { api, type DagDto, type DagRunResultDto } from "../../api/client.ts";
 import { useRunEvents } from "../../hooks/use-sse.ts";
 import { Page, PageHeader } from "../ui/page.tsx";
+import { VersionsPanel } from "../ui/versions-panel.tsx";
 
 export function DagsPage() {
   const { data, loading, error, refresh } = useFetch(() => api.listDags(), [], 0);
@@ -81,6 +83,7 @@ export function DagsPage() {
                     <div class="font-mono text-sm">{d.id}</div>
                     <div class="text-[10px] text-base-content/50 mt-0.5">
                       {d.version} · {d.nodes.length} nodes · {d.edges.length} edges
+                      {!d.enabled && <span class="ml-1 badge badge-xs badge-error">disabled</span>}
                     </div>
                     {d.metadata?.description && (
                       <div class="text-[11px] text-base-content/60 mt-1 line-clamp-2">
@@ -95,7 +98,7 @@ export function DagsPage() {
         </aside>
 
         {selectedId ? (
-          <DagDetail dag={dags.find((d) => d.id === selectedId) ?? null} />
+          <DagDetail dag={dags.find((d) => d.id === selectedId) ?? null} onChanged={refresh} />
         ) : (
           <div class="card bg-base-100 shadow flex items-center justify-center text-sm text-base-content/40 p-8">
             Select a DAG from the left.
@@ -106,7 +109,7 @@ export function DagsPage() {
   );
 }
 
-function DagDetail({ dag }: { dag: DagDto | null }) {
+function DagDetail({ dag, onChanged }: { dag: DagDto | null; onChanged: () => void }) {
   // A run acts in a tenant scope like an agent chat: the sidebar's
   // namespace ("default" when none is selected) and a resource.
   const [globalNamespace] = useNamespace();
@@ -119,6 +122,7 @@ function DagDetail({ dag }: { dag: DagDto | null }) {
   const [error, setError] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [runId, setRunId] = useState<string | undefined>(undefined);
+  const [switching, setSwitching] = useState(false);
 
   // Read the run; once it has ended, show its result or error.
   const checkRun = async (id: string) => {
@@ -148,6 +152,19 @@ function DagDetail({ dag }: { dag: DagDto | null }) {
   if (!dag) {
     return <div class="p-8 text-center text-base-content/40">Loading…</div>;
   }
+
+  const toggleEnabled = async () => {
+    setSwitching(true);
+    setError(null);
+    try {
+      await api.setDagEnabled(dag.id, { enabled: !dag.enabled, expectedVersion: dag.version });
+      onChanged();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSwitching(false);
+    }
+  };
 
   const trigger = async () => {
     setRunning(true);
@@ -189,12 +206,34 @@ function DagDetail({ dag }: { dag: DagDto | null }) {
               </div>
             )}
           </div>
-          <div class="text-[10px] text-base-content/40 font-mono text-right">
-            entry: {dag.entry.join(",")}
-            <br />
-            terminals: {dag.terminals.join(",")}
+          <div class="text-[10px] text-base-content/40 font-mono text-right space-y-1">
+            <div>
+              entry: {dag.entry.join(",")}
+              <br />
+              terminals: {dag.terminals.join(",")}
+            </div>
+            <label class="flex items-center justify-end gap-1 cursor-pointer">
+              <span>{dag.enabled ? "enabled" : "disabled — runs refused"}</span>
+              <input
+                type="checkbox"
+                class="toggle toggle-xs"
+                checked={dag.enabled}
+                disabled={switching}
+                onChange={() => void toggleEnabled()}
+              />
+            </label>
           </div>
         </div>
+      </div>
+
+      <div class="card bg-base-100 shadow p-4">
+        <VersionsPanel
+          reloadKey={`${dag.id}@${dag.version}`}
+          load={() => api.listDagVersions(dag.id)}
+          promote={(p) => api.promoteDag(dag.id, p)}
+          onPromoted={() => onChanged()}
+          describe={(v) => `${v.nodes.length} nodes · ${v.edges.length} edges`}
+        />
       </div>
 
       <div class="card bg-base-100 shadow p-4 space-y-3">
@@ -240,7 +279,7 @@ function DagDetail({ dag }: { dag: DagDto | null }) {
         )}
         <button
           class="btn btn-sm btn-primary self-start"
-          disabled={running || resourceId.trim().length === 0}
+          disabled={running || !dag.enabled || resourceId.trim().length === 0}
           onClick={trigger}
         >
           {running ? "Running…" : "▶ Run"}

@@ -305,10 +305,10 @@ describe("webhook ingress — dedup and retry semantics", () => {
 
   it("410s a disabled agent and processes the retry once it is re-enabled", async () => {
     const { server, registry, dispatched } = await boot();
-    await registry.register({ id: "echo-bot", backend, metadata: { enabled: false } });
+    await registry.setEnabled({ id: "echo-bot", enabled: false });
     expect((await server.handle(delivery())).status).toBe(410);
     expect(dispatched).toEqual([]);
-    await registry.register({ id: "echo-bot", backend, metadata: { enabled: true } });
+    await registry.setEnabled({ id: "echo-bot", enabled: true });
     expect((await server.handle(delivery())).status).toBe(200);
     expect(dispatched).toHaveLength(1);
   });
@@ -480,6 +480,49 @@ describe("webhook ingress — durable dispatch", () => {
     await recovery.tick();
     expect(runIds).toHaveLength(1);
     expect((await deliveries.claim({ delivery: recorded, leaseMs: 1 })).outcome).toBe("duplicate");
+  });
+
+  it("does not run a recovered delivery for an agent disabled since it was accepted", async () => {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const deliveries = new WorkflowStorageWebhookDeliveryStore({ storage });
+    const registry = new InMemoryAgentRegistry();
+    await registry.register({ id: "echo-bot", backend });
+    const runIds: Array<string | undefined> = [];
+    const agent = {
+      invoke: async (_input: { task: string }, opts?: { runId?: string }) => {
+        runIds.push(opts?.runId);
+        return { text: Promise.resolve("ok") };
+      },
+      withScope: () => agent,
+    };
+    const errors: unknown[] = [];
+    const recovery = new WebhookDeliveryRecovery({
+      registry,
+      resolve: async () => agent,
+      sources: { github: { secret: SECRET } },
+      deliveries,
+      clock,
+      claimLeaseMs: 60_000,
+      onError: (err) => errors.push(err),
+    });
+    const recorded: WebhookDelivery = {
+      key,
+      task: "Incoming webhook from github:\n{}",
+      scope: {
+        source: "github",
+        agentId: "echo-bot",
+        namespaceId: "acme",
+        deliveryId: "d-1",
+        timestamp: T0,
+      },
+    };
+    await deliveries.claim({ delivery: recorded, leaseMs: 60_000 });
+    await registry.setEnabled({ id: "echo-bot", enabled: false });
+    clock.advance(60_001);
+    await recovery.tick();
+    expect(runIds).toEqual([]);
+    expect(String(errors[0])).toContain("agent_disabled");
   });
 });
 

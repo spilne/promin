@@ -11,7 +11,7 @@
 import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { resolveLocalAgent } from "../resolve-local-agent.ts";
-import { InMemoryAgentRegistry } from "../in-memory-agent-registry.ts";
+import { InMemoryAgentRegistry } from "../../versioned-registry/in-memory-registries.ts";
 import { LocalAgent } from "../../agent/local-agent.ts";
 import type { LLMProvider, LLMResponse } from "../../llm-provider.ts";
 import type { LocalAgentBackend, RegisteredAgent } from "../types.ts";
@@ -49,7 +49,9 @@ const baseRow = (): LocalRecipe => ({
   },
   metadata: { description: null, capabilities: [], tags: [] },
   createdAt: 0,
-  updatedAt: 0,
+  active: true,
+  enabled: true,
+  trust: "trusted",
 });
 
 const searchTool = tool({
@@ -68,7 +70,7 @@ const fileTool = tool({
 describe("resolveLocalAgent", () => {
   it("instantiates a LocalAgent that runs against the resolved LLM", async () => {
     const llmCalls: Array<{ provider: string; id: string }> = [];
-    const agent = resolveLocalAgent(baseRow(), {
+    const agent = await resolveLocalAgent(baseRow(), {
       runner: makeRunner(),
       llm: (provider, id) => {
         llmCalls.push({ provider, id });
@@ -92,7 +94,7 @@ describe("resolveLocalAgent", () => {
       },
     };
 
-    const agent = resolveLocalAgent(baseRow(), {
+    const agent = await resolveLocalAgent(baseRow(), {
       runner: makeRunner(),
       llm: () => llm,
       // Intentionally provide MORE tools than the recipe listed.
@@ -104,16 +106,16 @@ describe("resolveLocalAgent", () => {
     expect(observedTools).toEqual(["search"]); // fileRead not selected
   });
 
-  it("throws on unknown tool by default", () => {
+  it("throws on unknown tool by default", async () => {
     const row = baseRow();
-    expect(() =>
+    await expect(
       resolveLocalAgent(row, {
         runner: makeRunner(),
         llm: () => mockLLM([]),
         tools: {}, // search missing
         namespaceId: "acme",
       }),
-    ).toThrow(/search/);
+    ).rejects.toThrow(/search/);
   });
 
   it("skips unknown tools when onUnknownTool='skip'", async () => {
@@ -124,7 +126,7 @@ describe("resolveLocalAgent", () => {
         return { content: "ok", finishReason: "stop" };
       },
     };
-    const agent = resolveLocalAgent(baseRow(), {
+    const agent = await resolveLocalAgent(baseRow(), {
       runner: makeRunner(),
       llm: () => llm,
       tools: {}, // search missing
@@ -145,7 +147,7 @@ describe("resolveLocalAgent", () => {
         contextBudget: { maxMessageTokens: 4_000, maxEpisodeTokens: 1_000 },
       } as RegisteredAgent["backend"],
     };
-    const agent = resolveLocalAgent(row, {
+    const agent = await resolveLocalAgent(row, {
       runner: makeRunner(),
       llm: () => mockLLM([]),
       tools: { search: searchTool },
@@ -172,7 +174,7 @@ describe("resolveLocalAgent", () => {
         autoCompact: false,
       } as RegisteredAgent["backend"],
     };
-    const agent = resolveLocalAgent(row, {
+    const agent = await resolveLocalAgent(row, {
       runner: makeRunner(),
       llm: () => mockLLM([]),
       tools: { search: searchTool },
@@ -185,7 +187,7 @@ describe("resolveLocalAgent", () => {
 
   it("recipe inherits host's autoCompact when recipe leaves it unset", async () => {
     const row = baseRow(); // no autoCompact on the recipe
-    const agent = resolveLocalAgent(row, {
+    const agent = await resolveLocalAgent(row, {
       runner: makeRunner(),
       llm: () => mockLLM([]),
       tools: { search: searchTool },
@@ -205,7 +207,7 @@ describe("resolveLocalAgent", () => {
       } as RegisteredAgent["backend"],
     };
     const hostWhen = () => false;
-    const agent = resolveLocalAgent(row, {
+    const agent = await resolveLocalAgent(row, {
       runner: makeRunner(),
       llm: () => mockLLM([]),
       tools: { search: searchTool },
@@ -219,17 +221,17 @@ describe("resolveLocalAgent", () => {
     expect(ac.when).toBe(hostWhen);
   });
 
-  it("rejects non-local backends", () => {
+  it("rejects non-local backends", async () => {
     const row = baseRow();
     const futureRow: RegisteredAgent = { ...row, backend: { type: "acp" as any } as any };
-    expect(() =>
+    await expect(
       resolveLocalAgent(futureRow, {
         runner: makeRunner(),
         llm: () => mockLLM([]),
         tools: {},
         namespaceId: "acme",
       }),
-    ).toThrow(/not supported/);
+    ).rejects.toThrow(/not supported/);
   });
 });
 
@@ -280,7 +282,7 @@ async function offeredTools(
       return { content: "ok", finishReason: "stop" };
     },
   };
-  const agent = resolveLocalAgent(recipe, {
+  const agent = await resolveLocalAgent(recipe, {
     runner: makeRunner(),
     llm: () => llm,
     tools,
@@ -342,7 +344,7 @@ describe("resolveLocalAgent — role binding", () => {
         return { content: "ok", finishReason: "stop" };
       },
     };
-    const agent = resolveLocalAgent(recipe, {
+    const agent = await resolveLocalAgent(recipe, {
       runner: makeRunner(),
       llm: () => llm,
       tools,
@@ -385,19 +387,19 @@ describe("resolveLocalAgent — role binding", () => {
     expect(tools).toEqual(["fileRead"]);
   });
 
-  it("throws when a ref binding is not pre-resolved into deps.role", () => {
+  it("throws when a ref binding is not pre-resolved into deps.role", async () => {
     const row = baseRow();
     const recipe: RegisteredAgent = {
       ...row,
       backend: { ...row.backend, role: { ref: { id: "git-master" } } },
     };
-    expect(() =>
+    await expect(
       resolveLocalAgent(recipe, {
         runner: makeRunner(),
         llm: () => mockLLM([]),
         tools: {},
       }),
-    ).toThrow(/role is a ref/);
+    ).rejects.toThrow(/role is a ref/);
   });
 
   it("the role's capabilities gate elevated tools", async () => {
@@ -525,7 +527,7 @@ describe("resolveLocalAgent — knowledge bindings", () => {
 
   it("resolves recipe knowledge bindings from a retriever map", async () => {
     const { llm, seen } = recordingLLM();
-    const agent = resolveLocalAgent(withKnowledge([{ id: "docs" }]), {
+    const agent = await resolveLocalAgent(withKnowledge([{ id: "docs" }]), {
       runner: makeRunner(),
       llm: () => llm,
       tools: { search: searchTool },
@@ -539,7 +541,7 @@ describe("resolveLocalAgent — knowledge bindings", () => {
 
   it("resolves recipe knowledge bindings from a RetrieverRegistry", async () => {
     const { llm, seen } = recordingLLM();
-    const agent = resolveLocalAgent(
+    const agent = await resolveLocalAgent(
       withKnowledge([{ id: "docs", name: "lookup_policy", mode: "tool-and-context" }]),
       {
         runner: makeRunner(),
@@ -558,7 +560,7 @@ describe("resolveLocalAgent — knowledge bindings", () => {
 
   it("context-only bindings add no tool", async () => {
     const { llm, seen } = recordingLLM();
-    const agent = resolveLocalAgent(withKnowledge([{ id: "docs", mode: "context" }]), {
+    const agent = await resolveLocalAgent(withKnowledge([{ id: "docs", mode: "context" }]), {
       runner: makeRunner(),
       llm: () => llm,
       tools: { search: searchTool },
@@ -571,16 +573,16 @@ describe("resolveLocalAgent — knowledge bindings", () => {
     expect(seen.reference.some((s) => s.includes("Knowledge results from docs"))).toBe(true);
   });
 
-  it("throws when recipe knowledge references an unwired retriever", () => {
-    expect(() =>
+  it("throws when recipe knowledge references an unwired retriever", async () => {
+    await expect(
       resolveLocalAgent(withKnowledge([{ id: "docs" }]), {
         runner: makeRunner(),
         llm: () => mockLLM([]),
         tools: { search: searchTool },
         namespaceId: "acme",
       }),
-    ).toThrow(/knowledge retriever "docs"/);
-    expect(() =>
+    ).rejects.toThrow(/knowledge retriever "docs"/);
+    await expect(
       resolveLocalAgent(withKnowledge([{ id: "toString" }]), {
         runner: makeRunner(),
         llm: () => mockLLM([]),
@@ -588,6 +590,6 @@ describe("resolveLocalAgent — knowledge bindings", () => {
         namespaceId: "acme",
         retrievers: { docs: docs() },
       }),
-    ).toThrow(/knowledge retriever "toString"/);
+    ).rejects.toThrow(/knowledge retriever "toString"/);
   });
 });

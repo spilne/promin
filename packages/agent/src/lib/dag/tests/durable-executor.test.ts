@@ -16,11 +16,11 @@ import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow"
 import type { Agent, AgentInput, AgentRunOutput, AgentScope } from "../../agent/types.ts";
 import { InMemoryAgentInstanceRegistry } from "../../instance/in-memory-agent-instance-registry.ts";
 import { composeAgentInstanceId } from "../../instance/types.ts";
-import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
+import { InMemoryAgentRegistry } from "../../versioned-registry/in-memory-registries.ts";
 import { createDagWorkflow, type DurableDagInput } from "../durable-executor.ts";
 import { createRegistryAgentResolver } from "../registry-agent-resolver.ts";
 import type { AgentResolver, AgenticDagRecipe, DagRunScope } from "../types.ts";
-import { InMemoryDagRegistry } from "../registry.ts";
+import { InMemoryDagRegistry } from "../../versioned-registry/in-memory-registries.ts";
 
 /** DAGs run by reference: register `dag` and name it in the run input. */
 const dags = new InMemoryDagRegistry();
@@ -320,7 +320,7 @@ describe("createDagWorkflow — scope", () => {
         model: { provider: "test", id: "m" },
         role: { inline: { systemPrompt: null, tools: [] } },
       },
-      metadata: { capabilities: [], tags: [], enabled: false },
+      enabled: false,
     });
     const bound: AgentScope[] = [];
     const wf = createDagWorkflow({

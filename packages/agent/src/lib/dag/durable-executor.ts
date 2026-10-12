@@ -52,7 +52,7 @@ import { agentTurnWorkflow } from "../delegation/sub-agent-tool.ts";
 import { isDelegableAgent } from "../delegation/types.ts";
 import { composeAgentInstanceId, type AgentInstanceRegistry } from "../instance/types.ts";
 import { checkBlockers, pickPath, resolveNodeInputs, stringifyTask } from "./dag-helpers.ts";
-import type { DagRegistry } from "./registry.ts";
+import type { DagRegistry } from "./types.ts";
 import {
   isAgentRefusal,
   type AgentResolver,
@@ -212,7 +212,7 @@ export function createDagWorkflow(
       const dag = yield* ctx.activity(
         "load-dag",
         async (): Promise<AgenticDagRecipe> => {
-          const found = await registry.get(input.dagId, input.version);
+          const found = await registry.get({ id: input.dagId, version: input.version });
           if (!found) {
             throw new Error(`dag_not_found: DAG "${input.dagId}" version ${input.version}`);
           }

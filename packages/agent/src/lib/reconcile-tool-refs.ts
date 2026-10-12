@@ -23,6 +23,7 @@
 import type { AgentToolCatalog } from "./tool-catalog.ts";
 import type { AgentRegistry, RegisteredAgent } from "./registry/types.ts";
 import { inlineRoleDefinition } from "./role/resolve-role.ts";
+import { listAllVersioned } from "./versioned-registry/types.ts";
 
 export interface RecipeToolRefHealth {
   readonly recipeId: string;
@@ -59,7 +60,7 @@ export async function reconcileToolReferences(
   // distinguishes 'disabled' from 'removed' via the source/enabled
   // badges.
   const liveNames = new Set(liveTools.filter((t) => t.enabled).map((t) => t.name));
-  const allRecipes = await deps.registry.list();
+  const allRecipes = await listAllVersioned({ registry: deps.registry });
 
   const recipes: RecipeToolRefHealth[] = [];
   // toolName → list of recipes referencing it (only built for missing names)

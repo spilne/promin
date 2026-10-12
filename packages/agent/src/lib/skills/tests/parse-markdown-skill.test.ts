@@ -91,7 +91,8 @@ describe("parseMarkdownSkill", () => {
     const trusted = ok(
       ["---", "name: x", "description: d", "trust: trusted", "---", "b"].join("\n"),
     );
-    expect(trusted.metadata?.trust).toBeUndefined();
+    expect(trusted.metadata).not.toHaveProperty("trust");
+    expect(trusted).not.toHaveProperty("trust");
   });
 
   it("tolerates CRLF line endings", () => {

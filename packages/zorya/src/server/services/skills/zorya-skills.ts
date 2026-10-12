@@ -6,15 +6,15 @@
 // agent resolver's catalog injection.
 // ---------------------------------------------------------------------------
 
-import type { SkillRegistry } from "@promin/agent";
-import { startSkillScanLoop } from "@promin/agent";
+import type { ScanLoopHandle, ScanLoopTick, SkillRegistry } from "@promin/agent";
+import { FILE_SOURCE, listAllVersioned, startSkillScanLoop } from "@promin/agent";
 
 export interface ZoryaSkillsScanConfig {
   /** Filesystem root to scan for skill manifests (.ts modules or SKILL.md). */
   root: string;
   /** Poll interval in ms. Default 5000. */
   intervalMs?: number;
-  /** Sweep removed files (delete from registry). Default false. */
+  /** Remove scanner-written entries whose file is gone (never operator-authored ones). Default false. */
   sync?: boolean;
   /**
    * The operator vouches for every skill under `root` (first-party skills
@@ -23,13 +23,9 @@ export interface ZoryaSkillsScanConfig {
    */
   trusted?: boolean;
   /** Fired after each scan tick. */
-  onTick?: (tick: {
-    added: string[];
-    upserted: string[];
-    deleted: string[];
-    warnings: string[];
-    durationMs: number;
-  }) => void;
+  onTick?: (tick: ScanLoopTick) => void;
+  /** A failed scan tick lands here. Default: console. */
+  onError?: (err: unknown) => void;
 }
 
 export interface ZoryaSkillsConfig {
@@ -41,20 +37,20 @@ export interface ZoryaSkillsConfig {
 export class ZoryaSkills {
   readonly registry: SkillRegistry;
   private readonly scanConfig?: ZoryaSkillsScanConfig;
-  private scanHandle?: { stop(): void; tick(): Promise<unknown> };
-  // Ids currently backed by a file on disk (rebuilt each scan tick). The UI
-  // marks these read-only so an operator edit isn't silently overwritten by
-  // the next scan. Empty when no scanner is configured.
-  private _fileManaged: ReadonlySet<string> = new Set();
+  private scanHandle?: ScanLoopHandle<ScanLoopTick>;
 
   constructor(config: ZoryaSkillsConfig) {
     this.registry = config.registry;
     if (config.scan) this.scanConfig = config.scan;
   }
 
-  /** Skill ids that are managed by a file on disk (vs. operator-authored). */
-  fileManagedIds(): string[] {
-    return [...this._fileManaged];
+  /**
+   * Ids whose active version a file scan wrote. Read from the registry, so
+   * every replica agrees from boot.
+   */
+  async fileManagedIds(): Promise<string[]> {
+    const managed = await listAllVersioned({ registry: this.registry, source: FILE_SOURCE });
+    return managed.map((e) => e.id);
   }
 
   async start(): Promise<void> {
@@ -65,17 +61,12 @@ export class ZoryaSkills {
       root: this.scanConfig.root,
       ...(this.scanConfig.intervalMs !== undefined && { intervalMs: this.scanConfig.intervalMs }),
       ...(this.scanConfig.sync !== undefined && { sync: this.scanConfig.sync }),
+      ...(this.scanConfig.onError !== undefined && { onError: this.scanConfig.onError }),
       ...(this.scanConfig.trusted !== undefined && { trusted: this.scanConfig.trusted }),
-      // Rebuild the file-managed set from each tick's discovered ids
-      // (`upserted` = every skill the scan applied this tick, so a
-      // deleted file drops out next tick), then fan out to the user hook.
-      onTick: (tick) => {
-        this._fileManaged = new Set(tick.upserted);
-        userOnTick?.(tick);
-      },
+      ...(userOnTick !== undefined && { onTick: userOnTick }),
     });
-    // Populate immediately so skills (and their file-managed flags) are
-    // available right after boot instead of after the first interval.
+    // Populate immediately so scanned skills are available right after boot
+    // instead of after the first interval.
     await this.scanHandle.tick();
   }
 

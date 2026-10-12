@@ -1,67 +1,190 @@
 // ---------------------------------------------------------------------------
-// Recipe correctness through `ZoryaServer.handle`: metadata merge on PATCH,
-// create-only POST / clone / extract-role, active-version edits, backend
-// and secrets validation, If-Match, file-managed refusal, role / skill
-// edits and referential integrity, instance ownership, memory validation,
-// thread housekeeping, and 500 bodies that never carry internals.
+// Recipe correctness through `ZoryaServer.handle`: versioned edits (a PATCH
+// publishes a new version, `If-Match` is the store's compare-and-set),
+// promote / rollback, create-only POST / clone / extract-role, backend and
+// secrets validation, file-managed refusal, role / skill edits and
+// referential integrity, instance ownership, memory validation, thread
+// housekeeping, and 500 bodies that never carry internals.
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { SecretScope, type RegisteredAgent } from "@promin/agent";
+import {
+  InMemoryAgentRegistry,
+  SecretScope,
+  type RegisterAgentInput,
+  type RegisteredAgent,
+} from "@promin/agent";
 import { bootAgents, jsonOf, localBackend, req } from "./agent-gateway-harness.ts";
 
+const ANY = { "if-match": "*" };
+
 describe("agent recipes — PATCH", () => {
-  it("merges metadata: a description edit keeps a disabled agent disabled and keeps its tags", async () => {
+  it("publishes a new version; metadata merges and the kill switch stays per agent", async () => {
     const { server, registry } = await bootAgents();
     await registry.register({
-      id: "support",
+      id: "support-x",
       backend: localBackend,
-      metadata: { description: "d", capabilities: ["chat"], tags: ["beta"], enabled: false },
-    });
-    const res = await server.handle(
-      req("PATCH", "/api/agents/support", { metadata: { description: "new" } }),
-    );
-    expect(res.status).toBe(200);
-    const after = await registry.get("support");
-    expect(after?.metadata).toEqual({
-      description: "new",
-      capabilities: ["chat"],
-      tags: ["beta"],
+      metadata: { description: "d", capabilities: ["chat"], tags: ["beta"] },
       enabled: false,
     });
-  });
-
-  it("editing an older version is refused, so it never becomes the live one", async () => {
-    const { server, registry } = await bootAgents();
-    await registry.register({ id: "support", version: "v2", backend: localBackend });
     const res = await server.handle(
-      req("PATCH", "/api/agents/support", { version: "v1", metadata: { tags: ["x"] } }),
+      req(
+        "PATCH",
+        "/api/agents/support-x",
+        { metadata: { description: "new" } },
+        { "if-match": 'W/"v1"' },
+      ),
     );
-    expect(res.status).toBe(409);
-    expect((await jsonOf<{ error: string }>(res)).error).toBe("version_not_active");
-    expect((await registry.get("support"))?.version).toBe("v2");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("etag")).toBe('W/"v2"');
+    const after = await registry.get({ id: "support-x" });
+    expect(after).toMatchObject({ version: "v2", active: true, enabled: false });
+    expect(after?.metadata).toEqual({ description: "new", capabilities: ["chat"], tags: ["beta"] });
+    // The edited-from version is kept unchanged.
+    expect((await registry.get({ id: "support-x", version: "v1" }))?.metadata.description).toBe(
+      "d",
+    );
   });
 
-  it("validates the backend and metadata", async () => {
+  it("needs If-Match (428 without it)", async () => {
+    const { server, registry } = await bootAgents();
+    const res = await server.handle(
+      req("PATCH", "/api/agents/support", { metadata: { tags: ["x"] } }),
+    );
+    expect(res.status).toBe(428);
+    expect(await registry.versions({ id: "support" })).toHaveLength(1);
+  });
+
+  it("two edits from the same read: exactly one wins, the other is 412", async () => {
+    const { server, registry } = await bootAgents();
+    const etag = (await server.handle(req("GET", "/api/agents/support"))).headers.get("etag")!;
+    const [a, b] = await Promise.all(
+      ["a", "b"].map((tag) =>
+        server.handle(
+          req("PATCH", "/api/agents/support", { metadata: { tags: [tag] } }, { "if-match": etag }),
+        ),
+      ),
+    );
+    expect([a!.status, b!.status].sort()).toEqual([200, 412]);
+    expect(await registry.versions({ id: "support" })).toHaveLength(2);
+  });
+
+  it("publish: false saves a draft; promote makes it live and rolls back", async () => {
+    const { server, registry } = await bootAgents();
+    const draft = await server.handle(
+      req(
+        "PATCH",
+        "/api/agents/support",
+        { metadata: { tags: ["draft"] }, publish: false, version: "candidate" },
+        ANY,
+      ),
+    );
+    expect(draft.status).toBe(200);
+    expect(await jsonOf<{ version: string; active: boolean }>(draft)).toMatchObject({
+      version: "candidate",
+      active: false,
+    });
+    expect((await registry.get({ id: "support" }))?.version).toBe("v1");
+
+    const promoted = await server.handle(
+      req(
+        "POST",
+        "/api/agents/support/promote",
+        { version: "candidate" },
+        { "if-match": 'W/"v1"' },
+      ),
+    );
+    expect(promoted.status).toBe(200);
+    expect((await registry.get({ id: "support" }))?.version).toBe("candidate");
+
+    const stale = await server.handle(
+      req("POST", "/api/agents/support/promote", { version: "v1" }, { "if-match": 'W/"v1"' }),
+    );
+    expect(stale.status).toBe(412);
+    const rollback = await server.handle(
+      req("POST", "/api/agents/support/promote", { version: "v1" }),
+    );
+    expect(rollback.status).toBe(200);
+    expect((await registry.get({ id: "support" }))?.version).toBe("v1");
+    const versions = await jsonOf<{ versions: Array<{ version: string; active: boolean }> }>(
+      await server.handle(req("GET", "/api/agents/support/versions")),
+    );
+    expect(versions.versions.map((v) => [v.version, v.active])).toEqual([
+      ["v1", true],
+      ["candidate", false],
+    ]);
+  });
+
+  it("a new version and the kill switch land in one write — no 412 after the version", async () => {
+    // Another writer rolls the agent back right after each version lands:
+    // a separate kill-switch write conditional on the new version would lose.
+    class RollingBack extends InMemoryAgentRegistry {
+      override async register(input: RegisterAgentInput): Promise<RegisteredAgent> {
+        const written = await super.register(input);
+        if (written.version !== "v1") await this.promote({ id: input.id, version: "v1" });
+        return written;
+      }
+    }
+    const registry = new RollingBack();
+    const { server } = await bootAgents({ registry });
+    const res = await server.handle(
+      req("PATCH", "/api/agents/support", { metadata: { tags: ["x"] }, enabled: false }, ANY),
+    );
+    expect(res.status).toBe(200);
+    expect(await registry.get({ id: "support" })).toMatchObject({ version: "v1", enabled: false });
+    expect(await registry.versions({ id: "support" })).toHaveLength(2);
+  });
+
+  it("deleting the active version needs If-Match and names its replacement", async () => {
+    const { server, registry } = await bootAgents();
+    await server.handle(req("PATCH", "/api/agents/support", { metadata: { tags: ["v2"] } }, ANY));
+    await server.handle(
+      req("PATCH", "/api/agents/support", { metadata: { tags: ["draft"] }, publish: false }, ANY),
+    );
+    const del = (query: string, headers: Record<string, string> = {}) =>
+      server.handle(req("DELETE", `/api/agents/support${query}`, undefined, headers));
+    expect((await del("?version=v2")).status).toBe(428);
+    const unnamed = await del("?version=v2", { "if-match": 'W/"v2"' });
+    expect(unnamed.status).toBe(409);
+    expect((await jsonOf<{ error: string }>(unnamed)).error).toBe("active_version");
+    expect((await del("?version=v2&promote=v1", { "if-match": 'W/"v2"' })).status).toBe(204);
+    expect((await registry.get({ id: "support" }))?.version).toBe("v1");
+    // A draft goes without ceremony.
+    expect((await del("?version=v3")).status).toBe(204);
+    // The last version takes the id with it.
+    expect((await del("?version=v1")).status).toBe(204);
+    expect(await registry.get({ id: "support" })).toBeNull();
+  });
+
+  it("enabled flips the kill switch without a new version", async () => {
+    const { server, registry } = await bootAgents();
+    const res = await server.handle(req("PATCH", "/api/agents/support", { enabled: false }, ANY));
+    expect(res.status).toBe(200);
+    expect(await registry.get({ id: "support" })).toMatchObject({ version: "v1", enabled: false });
+    expect(await registry.versions({ id: "support" })).toHaveLength(1);
+  });
+
+  it("validates the backend, metadata and switches", async () => {
     const { server } = await bootAgents();
     for (const body of [
       { backend: { type: "local" } },
       { backend: { type: "remote", endpoint: "not a url", remoteAgentId: "x" } },
       { backend: { type: "martian" } },
-      { metadata: { enabled: "yes" } },
+      { metadata: { enabled: false } },
       { metadata: { tags: "a,b" } },
+      { enabled: "yes" },
+      { publish: "no" },
     ]) {
-      const res = await server.handle(req("PATCH", "/api/agents/support", body));
+      const res = await server.handle(req("PATCH", "/api/agents/support", body, ANY));
       expect([JSON.stringify(body), res.status]).toEqual([JSON.stringify(body), 400]);
     }
   });
 
   it("If-Match makes the edit conditional on the version read", async () => {
-    const { server, clock } = await bootAgents();
+    const { server } = await bootAgents();
     const got = await server.handle(req("GET", "/api/agents/support"));
-    clock.advance(1);
     const etag = got.headers.get("etag")!;
-    expect(etag).toBeTruthy();
+    expect(etag).toBe('W/"v1"');
     const stale = await server.handle(
       req("PATCH", "/api/agents/support", { metadata: { tags: ["a"] } }, { "if-match": '"nope"' }),
     );
@@ -70,25 +193,38 @@ describe("agent recipes — PATCH", () => {
       req("PATCH", "/api/agents/support", { metadata: { tags: ["a"] } }, { "if-match": etag }),
     );
     expect(ok.status).toBe(200);
-    expect(ok.headers.get("etag")).not.toBe(etag);
+    expect(ok.headers.get("etag")).toBe('W/"v2"');
   });
 });
 
 describe("agent recipes — create-only", () => {
-  it("POST /api/agents with an existing (id, version) is 409 and leaves it untouched", async () => {
+  it("POST /api/agents on an existing id is 409 and leaves it untouched", async () => {
     const { server, registry } = await bootAgents();
-    const before = await registry.get("support");
-    const res = await server.handle(
-      req("POST", "/api/agents", { id: "support", backend: localBackend }),
+    const before = await registry.get({ id: "support" });
+    for (const body of [
+      { id: "support", backend: localBackend },
+      { id: "support", version: "v2", backend: localBackend },
+    ]) {
+      const res = await server.handle(req("POST", "/api/agents", body));
+      expect(res.status).toBe(409);
+    }
+    expect(await registry.versions({ id: "support" })).toEqual([before!]);
+  });
+
+  it("concurrent creates of one id: exactly one is 201", async () => {
+    const { server, registry } = await bootAgents();
+    const results = await Promise.all(
+      ["m1", "m2", "m3"].map((model) =>
+        server.handle(
+          req("POST", "/api/agents", {
+            id: "fresh",
+            backend: { ...localBackend, model: { provider: "mock", id: model } },
+          }),
+        ),
+      ),
     );
-    expect(res.status).toBe(409);
-    expect(await registry.get("support")).toEqual(before);
-    // A new version is a publish, and becomes the active one.
-    const pub = await server.handle(
-      req("POST", "/api/agents", { id: "support", version: "v2", backend: localBackend }),
-    );
-    expect(pub.status).toBe(201);
-    expect((await registry.get("support"))?.version).toBe("v2");
+    expect(results.map((r) => r.status).sort()).toEqual([201, 409, 409]);
+    expect(await registry.versions({ id: "fresh" })).toHaveLength(1);
   });
 
   it("POST /api/agents rejects an invalid backend", async () => {
@@ -97,17 +233,17 @@ describe("agent recipes — create-only", () => {
       req("POST", "/api/agents", { id: "bad", backend: { type: "local" } }),
     );
     expect(res.status).toBe(400);
-    expect(await registry.get("bad")).toBeNull();
+    expect(await registry.get({ id: "bad" })).toBeNull();
   });
 
   it("clone onto an existing id is 409", async () => {
     const { server, registry } = await bootAgents();
-    const before = await registry.get("support");
+    const before = await registry.get({ id: "support" });
     const res = await server.handle(
       req("POST", "/api/agents/other/clone", { targetId: "support" }),
     );
     expect(res.status).toBe(409);
-    expect(await registry.get("support")).toEqual(before);
+    expect(await registry.get({ id: "support" })).toEqual(before);
   });
 
   it("clone validates secrets with the /api/secrets rules", async () => {
@@ -118,7 +254,7 @@ describe("agent recipes — create-only", () => {
       );
       expect([JSON.stringify(secretsBody), res.status]).toEqual([JSON.stringify(secretsBody), 400]);
     }
-    expect(await registry.get("c1")).toBeNull();
+    expect(await registry.get({ id: "c1" })).toBeNull();
     expect(await secrets!.list({ scope: SecretScope.global() })).toEqual([]);
     const ok = await server.handle(
       req("POST", "/api/agents/support/clone", { targetId: "c1", secrets: { API_KEY: "v" } }),
@@ -134,8 +270,8 @@ describe("agent recipes — create-only", () => {
       req("POST", "/api/agents/support/extract-role", { roleId: "taken" }),
     );
     expect(res.status).toBe(409);
-    expect((await roles.get("taken"))?.definition.systemPrompt).toBe("x");
-    const recipe = (await registry.get("support")) as RegisteredAgent;
+    expect((await roles.get({ id: "taken" }))?.definition.systemPrompt).toBe("x");
+    const recipe = (await registry.get({ id: "support" })) as RegisteredAgent;
     expect(recipe.backend.type === "local" && "inline" in recipe.backend.role).toBe(true);
   });
 });
@@ -151,7 +287,7 @@ describe("agent recipes — file-managed and disabled agents", () => {
       }),
     );
     expect(send.status).toBe(200);
-    await registry.register({ id: "support", backend: localBackend, metadata: { enabled: false } });
+    await registry.setEnabled({ id: "support", enabled: false });
     const scope = "namespaceId=ns&resourceId=alice";
     for (const path of [
       `/api/agents/support/threads?${scope}`,
@@ -284,10 +420,10 @@ describe("roles and skills", () => {
       (await server.handle(req("POST", "/api/roles", { id: "r", definition: def }))).status,
     ).toBe(409);
     await server.handle(
-      req("PATCH", "/api/roles/r", { metadata: { description: "desc", tags: ["t"] } }),
+      req("PATCH", "/api/roles/r", { metadata: { description: "desc", tags: ["t"] } }, ANY),
     );
-    await server.handle(req("PATCH", "/api/roles/r", { metadata: { description: "new" } }));
-    expect((await roles.get("r"))?.metadata.tags).toEqual(["t"]);
+    await server.handle(req("PATCH", "/api/roles/r", { metadata: { description: "new" } }, ANY));
+    expect((await roles.get({ id: "r" }))?.metadata.tags).toEqual(["t"]);
   });
 
   it("deleting a role an agent binds is 409 unless forced", async () => {

@@ -11,7 +11,7 @@ import { describe, expect, it } from "bun:test";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { InMemorySchedulerStorage } from "@promin/workflow/scheduler";
 import { LocalAgent } from "../../agent/local-agent.ts";
-import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
+import { InMemoryAgentRegistry } from "../../versioned-registry/in-memory-registries.ts";
 import { createDurableSchedulerTools } from "../durable-scheduler-tool.ts";
 import { inProcessSchedulerClient } from "../scheduler-client.ts";
 import { dispatchAgentSchedule, isAgentSchedule } from "../dispatch-agent-schedule.ts";

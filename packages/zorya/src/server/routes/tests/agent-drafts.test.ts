@@ -40,8 +40,8 @@ describe("createDraft — TTL sweep on an injected clock", () => {
     expect(a).toMatch(new RegExp(`^__draft__${ts}[0-9a-f]{12}__support$`));
     // Same millisecond, same source — still two distinct drafts.
     expect(b).not.toBe(a);
-    expect(await registry.get(a)).not.toBeNull();
-    expect(await registry.get(b)).not.toBeNull();
+    expect(await registry.get({ id: a })).not.toBeNull();
+    expect(await registry.get({ id: b })).not.toBeNull();
   });
 
   it("strips unsafe characters from the source id", async () => {
@@ -63,7 +63,7 @@ describe("createDraft — TTL sweep on an injected clock", () => {
     );
     expect(res.status).toBe(400);
     expect(((await res.json()) as { error: string }).error).toBe("invalid_backend");
-    expect(await registry.list({})).toEqual([]);
+    expect((await registry.list()).items).toEqual([]);
   });
 
   it("reaps a draft only once it is older than the TTL by the clock", async () => {
@@ -76,13 +76,13 @@ describe("createDraft — TTL sweep on an injected clock", () => {
     // Exactly one TTL later the first draft is not yet stale (strict `<`).
     clock.advance(HOUR_MS);
     const second = await postDraft(handler, "b");
-    expect(await registry.get(first)).not.toBeNull();
+    expect(await registry.get({ id: first })).not.toBeNull();
 
     // Sweeps run at most once a minute; the next one reaps the first draft.
     clock.advance(SWEEP_INTERVAL_MS);
     const third = await postDraft(handler, "c");
-    expect(await registry.get(first)).toBeNull();
-    expect(await registry.get(second)).not.toBeNull();
-    expect(await registry.get(third)).not.toBeNull();
+    expect(await registry.get({ id: first })).toBeNull();
+    expect(await registry.get({ id: second })).not.toBeNull();
+    expect(await registry.get({ id: third })).not.toBeNull();
   });
 });

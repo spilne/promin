@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { InMemorySkillRegistry } from "../in-memory-skill-registry.ts";
+import { InMemorySkillRegistry } from "../../versioned-registry/in-memory-registries.ts";
 import {
   buildSkillCatalogPrompt,
   resolveSkillCatalog,
@@ -45,7 +45,9 @@ function recipe(skills?: ReadonlyArray<SkillRef>): RegisteredAgent {
     },
     metadata: { description: null, capabilities: [], tags: [] },
     createdAt: 0,
-    updatedAt: 0,
+    active: true,
+    enabled: true,
+    trust: "trusted",
   };
 }
 
@@ -105,16 +107,16 @@ describe("resolveSkillCatalog", () => {
       whenToUse: "x",
       body: "old",
     });
-    await new Promise((r) => setTimeout(r, 2));
     await registry.register({
       id: "writing-style",
       version: "v2",
       description: "v2",
       whenToUse: "x",
       body: "new",
+      promote: true,
     });
     const catalog = await catalogFor(recipe([{ id: "writing-style" }]), { registry });
-    expect(catalog[0]!.version).toBe("v2"); // latest pinned to its concrete version
+    expect(catalog[0]!.version).toBe("v2"); // the active version, pinned concretely
   });
 
   it("honors an explicit version pin", async () => {
@@ -155,7 +157,7 @@ describe("resolveSkillCatalog", () => {
       description: "x",
       whenToUse: "x",
       body: "x",
-      metadata: { enabled: false },
+      enabled: false,
     });
     const r = recipe([{ id: "writing-style" }]);
     await expect(catalogFor(r, { registry })).rejects.toThrow(/disabled/);
@@ -170,7 +172,9 @@ describe("resolveSkillCatalog", () => {
       backend: { type: "remote", endpoint: "http://x", remoteAgentId: "y" },
       metadata: { description: null, capabilities: [], tags: [] },
       createdAt: 0,
-      updatedAt: 0,
+      active: true,
+      enabled: true,
+      trust: "trusted",
     };
     expect(await catalogFor(remote, { registry })).toEqual([]);
   });
@@ -220,7 +224,9 @@ describe("resolveSkillCatalog — capability gating", () => {
       },
       metadata: { description: null, capabilities: caps, tags: [] },
       createdAt: 0,
-      updatedAt: 0,
+      active: true,
+      enabled: true,
+      trust: "trusted",
     };
   }
 
@@ -258,7 +264,7 @@ describe("resolveSkillCatalog — capability gating", () => {
       description: "x",
       whenToUse: "x",
       body: "x",
-      metadata: { tags: [], capabilities: [], trust: "needs-review" },
+      trust: "needs-review",
     });
     const catalog = await catalogFor(recipeWithCaps([], [{ id: "review-pending" }]), {
       registry,

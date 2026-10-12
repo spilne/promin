@@ -20,7 +20,7 @@ import { resolveLocalAgent } from "../../registry/resolve-local-agent.ts";
 import { resolveSkillCatalog } from "../resolve-skill-catalog.ts";
 import { inlineRoleDefinition } from "../../role/resolve-role.ts";
 import { createLoadSkillTool, type LoadSkillOutput } from "../load-skill-tool.ts";
-import { InMemorySkillRegistry } from "../in-memory-skill-registry.ts";
+import { InMemorySkillRegistry } from "../../versioned-registry/in-memory-registries.ts";
 import type { RegisteredAgent } from "../../registry/types.ts";
 import type { LLMProvider, LLMChatParams, LLMResponse } from "../../llm-provider.ts";
 import type { Message } from "../../message.ts";
@@ -60,7 +60,9 @@ const recipe: RegisteredAgent = {
   },
   metadata: { description: null, capabilities: ["skills"], tags: [] },
   createdAt: 0,
-  updatedAt: 0,
+  active: true,
+  enabled: true,
+  trust: "trusted",
 };
 
 // Skills the host sources from the bound role and feeds to resolveSkillCatalog.
@@ -96,7 +98,7 @@ describe("skills end-to-end", () => {
       },
     };
 
-    const agent = resolveLocalAgent(recipe, {
+    const agent = await resolveLocalAgent(recipe, {
       runner: createWorkflowRunner({ storage: new InMemoryWorkflowStorage() }),
       llm: () => llm,
       tools: {},
@@ -124,7 +126,9 @@ describe("skills end-to-end", () => {
 
     // (4) And it shows up in the run's tool results.
     const results = await out.toolResults;
-    expect(results.some((r) => String(r.content ?? "").includes("Reproduce"))).toBe(true);
+    expect(
+      results.some((r: { content?: unknown }) => String(r.content ?? "").includes("Reproduce")),
+    ).toBe(true);
   });
 
   it("loadSkill body survives replay bit-identically (journaled, not re-fetched)", async () => {
@@ -157,7 +161,7 @@ describe("skills end-to-end", () => {
     expect(execCount).toBe(1);
 
     // Now remove the pinned version from the registry — a re-fetch would fail.
-    await registry.unregister("structured-debugging", first.version);
+    await registry.unregister({ id: "structured-debugging", version: first.version });
 
     // Replay against the same journal: the body comes back bit-identically
     // and loadSkill is NOT re-executed.

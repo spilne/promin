@@ -1,8 +1,9 @@
 // ---------------------------------------------------------------------------
 // RolesPage — CRUD over the role registry. A role is the behavioral bundle an
 // agent binds: persona prompt (plain or layered over fragments) + tools +
-// skills + capabilities. This page lists registered roles, creates new ones,
-// edits them in place (RoleEditDrawer), and deletes them.
+// skills + capabilities. This page lists registered roles (their active
+// version), creates new ones, publishes edits and switches versions
+// (RoleEditDrawer), and deletes them.
 // ---------------------------------------------------------------------------
 
 import { useMemo, useState } from "preact/hooks";
@@ -22,7 +23,9 @@ function blankRole(): RegisteredRole {
     definition: { systemPrompt: null, tools: [] },
     metadata: { description: null, tags: [] },
     createdAt: 0,
-    updatedAt: 0,
+    active: true,
+    enabled: true,
+    trust: "trusted",
   };
 }
 
@@ -93,7 +96,7 @@ export function RolesPage() {
                 <th>Description</th>
                 <th class="text-right">Tools</th>
                 <th>Tags</th>
-                <th>Updated</th>
+                <th title="The active version and when it was published">Active version</th>
                 <th class="text-right">Actions</th>
               </tr>
             </thead>
@@ -123,7 +126,8 @@ export function RolesPage() {
                     <td class="text-right text-xs">{r.definition.tools.length}</td>
                     <td>
                       <div class="flex flex-wrap gap-1">
-                        {r.metadata.tags.length === 0 ? (
+                        {!r.enabled && <span class="badge badge-xs badge-error">disabled</span>}
+                        {r.metadata.tags.length === 0 && r.enabled ? (
                           <span class="text-base-content/30 text-xs">—</span>
                         ) : (
                           r.metadata.tags.map((t) => (
@@ -133,7 +137,8 @@ export function RolesPage() {
                       </div>
                     </td>
                     <td class="text-xs text-base-content/60 whitespace-nowrap">
-                      {r.updatedAt ? formatRelative(new Date(r.updatedAt).toISOString()) : "—"}
+                      <span class="font-mono">{r.version}</span> ·{" "}
+                      {formatRelative(new Date(r.createdAt).toISOString())}
                     </td>
                     <td class="text-right">
                       <button

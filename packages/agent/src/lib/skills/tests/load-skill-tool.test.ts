@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { InMemorySkillRegistry } from "../in-memory-skill-registry.ts";
+import { InMemorySkillRegistry } from "../../versioned-registry/in-memory-registries.ts";
 import { createLoadSkillTool } from "../load-skill-tool.ts";
 import type { ResolvedSkillEntry } from "../resolve-skill-catalog.ts";
 
@@ -62,11 +62,25 @@ describe("createLoadSkillTool", () => {
 
   it("returns an error result when the pinned version was unregistered mid-session", async () => {
     const registry = await seedRegistry();
-    await registry.unregister("writing-style", "v1");
+    await registry.unregister({ id: "writing-style", version: "v1" });
     const t = createLoadSkillTool({ registry, catalog });
     const out = await t.execute({ id: "writing-style" });
     expect("error" in out).toBe(true);
     if ("error" in out) expect(out.error).toContain("no longer available");
+  });
+
+  it("refuses a skill disabled after the catalog was built", async () => {
+    const registry = await seedRegistry();
+    await registry.setEnabled({ id: "writing-style", enabled: false });
+    const out = await createLoadSkillTool({ registry, catalog }).execute({ id: "writing-style" });
+    expect("error" in out && out.error).toContain("not available");
+  });
+
+  it("refuses a pinned version sent back for review", async () => {
+    const registry = await seedRegistry();
+    await registry.setTrust({ id: "writing-style", version: "v1", trust: "needs-review" });
+    const out = await createLoadSkillTool({ registry, catalog }).execute({ id: "writing-style" });
+    expect("error" in out && out.error).toContain("not available");
   });
 
   it("reports no skills available when the catalog is empty", async () => {

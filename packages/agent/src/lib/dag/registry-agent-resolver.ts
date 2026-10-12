@@ -17,11 +17,11 @@ export function createRegistryAgentResolver(params: {
 }): AgentResolver {
   const { registry, resolve } = params;
   return async ({ agentId, scope }) => {
-    const recipe = await registry.get(agentId);
+    const recipe = await registry.get({ id: agentId });
     if (!recipe) {
       throw new AgentRefusedError("agent_not_found", `no agent registered as "${agentId}"`);
     }
-    if (recipe.metadata.enabled === false) {
+    if (!recipe.enabled) {
       throw new AgentRefusedError("agent_disabled", `"${agentId}" is disabled`);
     }
     return resolve(recipe, scope);

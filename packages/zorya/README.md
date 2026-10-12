@@ -274,7 +274,7 @@ const server = ZoryaServer.builder()
 | `mcp`                 | none                    | `ZoryaMcpServers`: the MCP server allowlist recipes attach from, recipe http endpoints on or off, and the shared client pool. Without it recipes cannot attach MCP servers. See [Agent MCP servers](#agent-mcp-servers).                                                                                                               |
 | `namespaces`          | free-form namespaces    | `NamespaceRegistry` for `/api/namespaces`; new runs, schedules and agent state then need a registered, active namespace (see [Namespaces](#namespaces)).                                                                                                                                                                               |
 | `webhooks`            | none                    | `{ sources, deliveries?, recoveryIntervalMs? }`: signed webhook ingress into agents. Mounted only when `agents` is set. `deliveries` (replay dedup, durable delivery record) defaults to a store on the workflow storage, shared across instances. See [Agent threads, approvals and webhooks](#agent-threads-approvals-and-webhooks). |
-| `remoteDeployments`   | none                    | `{ registry, endpointPolicy?, sweepIntervalMs? }`: other Zorya servers register their agents here. Mounted only when `agents` is set.                                                                                                                                                                                                  |
+| `remoteDeployments`   | none                    | `{ registry, endpointPolicy?, sweepIntervalMs? }`: other Zorya servers register their agents here (`InMemory…`, `SqliteRemoteDeploymentRegistry`, `PostgresRemoteDeploymentRegistry`). At start, recipes of deployments the registry no longer knows are removed. Mounted only when `agents` is set.                                   |
 | `retention`           | keep forever            | `{ maxAgeMs, intervalMs?, batchSize? }`: delete ended runs (completed, failed, tripwire) older than `maxAgeMs` with all their records, on one leader, every `intervalMs` (default 1 h, the first one interval after start), in batches of `batchSize` (default 500).                                                                   |
 | `metrics`             | storage-backed          | `MetricsProvider` for `/api/metrics`.                                                                                                                                                                                                                                                                                                  |
 | `workers`             | registry-backed         | `WorkersProvider` for the Workers page.                                                                                                                                                                                                                                                                                                |
@@ -357,10 +357,24 @@ line; internal detail never reaches the caller.
 | Fleet        | `GET /api/workers`, `GET /api/metrics`                                                                                                                                                                                      |
 | Schedules    | `GET/POST /api/schedules`, `GET/PATCH/DELETE /api/schedules/:id`, `.../history`, `.../upcoming`, `POST .../emit`                                                                                                            |
 | Namespaces   | `GET/POST /api/namespaces` (`?status=active\|archived`), `GET/PATCH/DELETE /api/namespaces/:id`; without a registry only `GET`, with `configured: false`                                                                    |
-| Agents       | `/api/agents` CRUD, `/api/agents/_catalog/*`, `_sources`, `_draft`, `/api/agents/:id/{versions,clone,extract-role,invoke,stream,threads,...}`                                                                               |
+| Agents       | `/api/agents` CRUD, `/api/agents/_catalog/*`, `_sources`, `_draft`, `/api/agents/:id/{versions,promote,clone,extract-role,invoke,stream,threads,...}`                                                                       |
 | Agent data   | `/api/memory/*`, `/api/instances`, `/api/agents/:id/instances/*`, `/api/roles/*`, `/api/skills/*`, `/api/fragments/*`, `/api/secrets/*`, `/api/dags/*`, `/api/remote-deployments/*`                                         |
 | Worker plane | `/ws/worker`, `POST /rpc/storage`, `POST /rpc/worker`, `/api/advertisements`, `/api/worker-protocol/{claim-starts,heartbeat-start/:id,complete-start/:id,release-start/:id,starts}`                                         |
 | Webhooks     | `POST /webhooks/:source/:agentId`                                                                                                                                                                                           |
+
+Agents, roles, skills, fragments and DAGs are versioned: `POST` creates a
+new id (409 when it exists); `PATCH /:id` publishes a new version built on
+the active one (`version` names it, `publish: false` keeps a draft) and
+must send `If-Match` with the active version's `etag` (`W/"<version>"`,
+428 without it, 412 when another write moved the active version);
+`POST /:id/promote { version }` makes any version active; `enabled` in a
+PATCH flips the kill switch (in the same write as a new version, when the
+PATCH has one). `DELETE /:id?version=` of the active version, while others
+remain, needs `If-Match` and `&promote=<version>` naming the replacement
+(409 `active_version` otherwise). File-managed entries (the active version
+was written by a scan — stored, so every replica agrees) refuse content
+edits and deletes; promoting another version is allowed and a scan never
+undoes it.
 
 The wire types live in `src/server/api-types.ts` and are exported from the
 package root.

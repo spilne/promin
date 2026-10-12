@@ -25,7 +25,7 @@ import type {
   ToolHistoryStore,
   ToolRefReport,
 } from "@promin/agent";
-import { reconcileToolReferences } from "@promin/agent";
+import { listAllVersioned, reconcileToolReferences } from "@promin/agent";
 import { json } from "../router.ts";
 import type { McpServersCatalogResponse, ZoryaMcpServers } from "../services/mcp/index.ts";
 import { internalError } from "./agent-gateway-kit.ts";
@@ -167,7 +167,10 @@ export function listCatalogRetrievers(deps: AgentRetrieverCatalogDeps) {
  * inline keeps the picker snappy and the wire shape simple.
  */
 export interface FragmentCatalogEntry {
-  readonly key: string;
+  /** The fragment id a role layers by (`"<id>"`, or `"<id>@<version>"` to pin). */
+  readonly id: string;
+  /** The active version. */
+  readonly version: string;
   readonly content: string;
 }
 
@@ -186,7 +189,9 @@ export interface AgentFragmentCatalogDeps {
 export function listCatalogFragments(deps: AgentFragmentCatalogDeps) {
   return async (): Promise<Response> => {
     try {
-      const fragments = deps.fragments.list().map((f) => ({ key: f.key, content: f.content }));
+      const fragments = (await listAllVersioned({ registry: deps.fragments }))
+        .filter((f) => f.enabled && f.trust !== "needs-review")
+        .map((f) => ({ id: f.id, version: f.version, content: f.content }));
       return json(200, { fragments } satisfies FragmentsCatalogResponse);
     } catch (err) {
       return internalError({ code: "list_failed", err });
@@ -201,13 +206,13 @@ export function listCatalogFragments(deps: AgentFragmentCatalogDeps) {
 export function listCatalogSkills(deps: AgentSkillCatalogDeps) {
   return async (): Promise<Response> => {
     try {
-      const rows = await deps.skills.list();
+      const rows = await listAllVersioned({ registry: deps.skills });
       // Hide needs-review skills from the agent editor's picker — they
       // can't actually be loaded (resolveSkillCatalog drops them), so
       // showing them would only confuse the operator. Review happens in
       // the skills manager via /api/skills, which surfaces all of them.
       const skills: SkillCatalogEntry[] = rows
-        .filter((s) => s.metadata.trust !== "needs-review")
+        .filter((s) => s.trust !== "needs-review")
         .map((s) => ({
           id: s.id,
           version: s.version,
@@ -215,7 +220,7 @@ export function listCatalogSkills(deps: AgentSkillCatalogDeps) {
           whenToUse: s.whenToUse,
           tags: s.metadata.tags,
           capabilities: s.metadata.capabilities,
-          enabled: s.metadata.enabled !== false,
+          enabled: s.enabled,
         }));
       return json(200, { skills } satisfies SkillsCatalogResponse);
     } catch (err) {

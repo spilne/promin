@@ -18,9 +18,13 @@ import type {
   RegisteredAgent,
   RetrieverRegistry,
   RoleRegistry,
+  ScanLoopHandle,
+  ScanLoopTick,
   ToolHistoryStore,
 } from "@promin/agent";
 import {
+  FILE_SOURCE,
+  listAllVersioned,
   AgentTurnGate,
   InMemoryLeaseStore,
   InMemoryMemoryStore,
@@ -37,16 +41,12 @@ export interface ZoryaAgentsScanConfig {
   root: string;
   /** Poll interval in ms. Default 5000. */
   intervalMs?: number;
-  /** Sweep removed files (delete from registry). Default false. */
+  /** Remove scanner-written entries whose file is gone (never operator-authored ones). Default false. */
   sync?: boolean;
   /** Fired after each scan tick. */
-  onTick?: (tick: {
-    added: string[];
-    upserted: string[];
-    deleted: string[];
-    warnings: string[];
-    durationMs: number;
-  }) => void;
+  onTick?: (tick: ScanLoopTick) => void;
+  /** A failed scan tick lands here. Default: console. */
+  onError?: (err: unknown) => void;
 }
 
 export interface ZoryaAgentsConfig {
@@ -172,12 +172,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly authorizeScope?: ScopeAuthorizer;
   readonly streaming?: TurnStreamLimits;
   private readonly scanConfig?: ZoryaAgentsScanConfig;
-  private scanHandle?: { stop(): void; tick(): Promise<unknown> };
-  // Agent ids currently backed by a recipe file on disk (rebuilt each scan
-  // tick). The editor uses this to mark a recipe read-only — without it, an
-  // in-place edit gets silently overwritten by the next scan. Empty when no
-  // scanner is configured. Sibling of ZoryaSkills.fileManagedIds().
-  private _fileManaged: ReadonlySet<string> = new Set();
+  private scanHandle?: ScanLoopHandle<ScanLoopTick>;
 
   constructor(config: ZoryaAgentsConfig) {
     this.registry = config.registry;
@@ -241,9 +236,13 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     return { done: Promise.resolve(started) };
   }
 
-  /** Agent ids currently managed by a recipe file on disk. */
-  fileManagedIds(): string[] {
-    return [...this._fileManaged];
+  /**
+   * Ids whose active version a file scan wrote. Read from the registry, so
+   * every replica agrees from boot.
+   */
+  async fileManagedIds(): Promise<string[]> {
+    const managed = await listAllVersioned({ registry: this.registry, source: FILE_SOURCE });
+    return managed.map((e) => e.id);
   }
 
   async start(): Promise<void> {
@@ -256,17 +255,11 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
         intervalMs: this.scanConfig.intervalMs,
       }),
       ...(this.scanConfig.sync !== undefined && { sync: this.scanConfig.sync }),
-      // Rebuild the file-managed set from each tick's discovered ids
-      // (`upserted` = every recipe the scan applied, so a deleted file
-      // drops out next tick), then fan out to the user hook. Mirrors
-      // ZoryaSkills.start().
-      onTick: (tick) => {
-        this._fileManaged = new Set(tick.upserted);
-        userOnTick?.(tick);
-      },
+      ...(this.scanConfig.onError !== undefined && { onError: this.scanConfig.onError }),
+      ...(userOnTick !== undefined && { onTick: userOnTick }),
     });
-    // One immediate tick so the file-managed flag is available at boot
-    // instead of after the first interval (which is 5s in the demo).
+    // One immediate tick so file recipes are registered at boot instead of
+    // after the first interval (which is 5s in the demo).
     await this.scanHandle.tick();
   }
 

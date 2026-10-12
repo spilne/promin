@@ -15,6 +15,7 @@ import {
   InMemoryAgentRegistry,
   InMemoryRemoteDeploymentRegistry,
   type OutboundPolicy,
+  type RegisteredAgent,
 } from "@promin/agent";
 import { FakeWallClock, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { LocalWorkflows, ZoryaAgents } from "../../../index.ts";
@@ -37,11 +38,13 @@ const PUBLIC_DNS: OutboundPolicy = {
   },
 };
 
-async function boot(opts: { endpointPolicy?: OutboundPolicy } = {}) {
+async function boot(
+  opts: { endpointPolicy?: OutboundPolicy; agentRegistry?: InMemoryAgentRegistry } = {},
+) {
   const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
   const storage = new InMemoryWorkflowStorage();
   const runner = createWorkflowRunner({ storage });
-  const agentRegistry = new InMemoryAgentRegistry({ clock });
+  const agentRegistry = opts.agentRegistry ?? new InMemoryAgentRegistry({ clock });
   const workflows = new LocalWorkflows({
     storage,
     runner,
@@ -95,14 +98,14 @@ describe("remote-deployments — register", () => {
       agents: ["claude-bot", "analyst-bot"],
       ttlMs: 30_000,
     });
-    const claude = await agentRegistry.get("claude-bot");
+    const claude = await agentRegistry.get({ id: "claude-bot" });
     expect(claude?.backend).toEqual({
       type: "remote",
       endpoint: "https://server-b.example",
       remoteAgentId: "claude-bot",
     });
     expect(claude?.metadata.tags).toContain(`remote-deployment:${id}`);
-    expect((await agentRegistry.get("analyst-bot"))?.backend.type).toBe("remote");
+    expect((await agentRegistry.get({ id: "analyst-bot" }))?.backend.type).toBe("remote");
   });
 
   it("409s instead of shadowing a local agent, and writes nothing", async () => {
@@ -114,8 +117,8 @@ describe("remote-deployments — register", () => {
     });
     expect(res.status).toBe(409);
     expect(((await res.json()) as { agents: string[] }).agents).toEqual(["support"]);
-    expect((await agentRegistry.get("support"))?.backend.type).toBe("local");
-    expect(await agentRegistry.get("fresh-bot")).toBeNull();
+    expect((await agentRegistry.get({ id: "support" }))?.backend.type).toBe("local");
+    expect(await agentRegistry.get({ id: "fresh-bot" })).toBeNull();
     expect(await deployments.list()).toEqual([]);
   });
 
@@ -124,7 +127,7 @@ describe("remote-deployments — register", () => {
     await registerOk(server, { endpoint: "https://a.example", agents: ["shared"] });
     const res = await register(server, { endpoint: "https://b.example", agents: ["shared"] });
     expect(res.status).toBe(409);
-    const recipe = await agentRegistry.get("shared");
+    const recipe = await agentRegistry.get({ id: "shared" });
     expect(recipe?.backend.type === "remote" && recipe.backend.endpoint).toBe("https://a.example");
   });
 
@@ -140,7 +143,7 @@ describe("remote-deployments — register", () => {
     // First registration expires; the recipe now belongs to the second.
     clock.advance(4_000);
     await get(server, "/api/remote-deployments");
-    const recipe = await agentRegistry.get("bot");
+    const recipe = await agentRegistry.get({ id: "bot" });
     expect(recipe?.metadata.tags).toContain(`remote-deployment:${second}`);
   });
 
@@ -179,7 +182,7 @@ describe("remote-deployments — endpoint policy (SSRF guard)", () => {
       const res = await register(server, { endpoint, agents: ["x"] });
       expect([endpoint, res.status]).toEqual([endpoint, 400]);
     }
-    expect(await agentRegistry.get("x")).toBeNull();
+    expect(await agentRegistry.get({ id: "x" })).toBeNull();
   });
 
   it("allowPrivateNetworks and allowedHosts are honored", async () => {
@@ -209,7 +212,7 @@ describe("remote-deployments — token redaction", () => {
       auth: { kind: "bearer", token: "TOPSECRET" },
     });
     // Stored for outbound calls...
-    const stored = await agentRegistry.get("bot");
+    const stored = await agentRegistry.get({ id: "bot" });
     expect(stored?.backend.type === "remote" && stored.backend.auth?.token).toBe("TOPSECRET");
     // ...but redacted everywhere it is served.
     for (const path of [
@@ -241,12 +244,12 @@ describe("remote-deployments — token redaction", () => {
     const res = await server.handle(
       new Request("http://test/api/agents/proxy", {
         method: "PATCH",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "if-match": "*" },
         body: JSON.stringify({ backend: { ...(fetched.backend as object), timeoutMs: 5_000 } }),
       }),
     );
     expect(res.status).toBe(200);
-    const stored = await agentRegistry.get("proxy");
+    const stored = await agentRegistry.get({ id: "proxy" });
     expect(stored?.backend).toEqual({
       type: "remote",
       endpoint: "https://a.example",
@@ -285,7 +288,7 @@ describe("remote-deployments — heartbeat, unregister and expiry", () => {
       new Request(`http://test/api/remote-deployments/${id}/heartbeat`, { method: "POST" }),
     );
     expect(res.status).toBe(410);
-    expect(await agentRegistry.get("bot")).toBeNull();
+    expect(await agentRegistry.get({ id: "bot" })).toBeNull();
   });
 
   it("unregister deletes only the versions the deployment owns", async () => {
@@ -297,7 +300,7 @@ describe("remote-deployments — heartbeat, unregister and expiry", () => {
       new Request(`http://test/api/remote-deployments/${id}`, { method: "DELETE" }),
     );
     expect(res.status).toBe(204);
-    expect((await agentRegistry.versions("bot")).map((v) => v.version)).toEqual(["v2"]);
+    expect((await agentRegistry.versions({ id: "bot" })).map((v) => v.version)).toEqual(["v2"]);
     // Idempotent.
     const again = await server.handle(
       new Request(`http://test/api/remote-deployments/${id}`, { method: "DELETE" }),
@@ -323,15 +326,79 @@ describe("remote-deployments — heartbeat, unregister and expiry", () => {
       await settle();
       expect(await deployments.list()).toHaveLength(1);
       clock.advance(1_000); // the TTL passes; this tick expires it
-      for (let i = 0; i < 100 && (await agentRegistry.get("bot")) !== null; i++) {
+      for (let i = 0; i < 100 && (await agentRegistry.get({ id: "bot" })) !== null; i++) {
         await new Promise((r) => setTimeout(r, 0));
       }
       expect(await deployments.list()).toEqual([]);
-      expect(await agentRegistry.get("bot")).toBeNull();
+      expect(await agentRegistry.get({ id: "bot" })).toBeNull();
     } finally {
       sweeper.stop();
     }
     expect(clock.pendingCount()).toBe(0);
+  });
+
+  it("an agent created between the ownership check and the recipe write is never overwritten", async () => {
+    // The operator's create lands right after the deployment checked the id.
+    class RacingRegistry extends InMemoryAgentRegistry {
+      raced = false;
+      override async versions(params: { id: string }): Promise<RegisteredAgent[]> {
+        const seen = await super.versions(params);
+        if (!this.raced && params.id === "bot") {
+          this.raced = true;
+          await super.register({ id: "bot", backend: localBackend });
+        }
+        return seen;
+      }
+    }
+    const agentRegistry = new RacingRegistry();
+    const { server, deployments } = await boot({ agentRegistry });
+    const res = await register(server, { endpoint: "https://a.example", agents: ["other", "bot"] });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: "agent_id_conflict", agents: ["bot"] });
+    expect(await agentRegistry.get({ id: "bot" })).toMatchObject({ backend: { type: "local" } });
+    // No partial claim: the deployment and its other recipe are gone.
+    expect(await deployments.list()).toEqual([]);
+    expect(await agentRegistry.get({ id: "other" })).toBeNull();
+  });
+
+  it("at start, the sweeper removes recipes whose deployment is gone (a restart lost it)", async () => {
+    const { server, agentRegistry, deployments, clock } = await boot();
+    const liveId = await registerOk(server, { endpoint: "https://a.example", agents: ["live"] });
+    const remote = { type: "remote" as const, endpoint: "https://b.example", remoteAgentId: "x" };
+    // Written by a deployment the (restarted, in-memory) registry no longer knows.
+    await agentRegistry.register({
+      id: "orphan",
+      backend: remote,
+      metadata: { tags: ["remote", "remote-deployment:gone-1"] },
+    });
+    // A hand-authored remote recipe has no owner and stays.
+    await agentRegistry.register({ id: "manual", backend: remote });
+    // An orphaned version under an operator's active version goes; the active stays.
+    await agentRegistry.register({ id: "mixed", backend: localBackend });
+    await agentRegistry.register({
+      id: "mixed",
+      backend: remote,
+      metadata: { tags: ["remote-deployment:gone-2"] },
+    });
+    const sweeper = new RemoteDeploymentSweeper({
+      registry: deployments,
+      agents: agentRegistry,
+      clock,
+      intervalMs: 60_000,
+    });
+    sweeper.start();
+    try {
+      for (let i = 0; i < 100 && (await agentRegistry.get({ id: "orphan" })) !== null; i++) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      expect(await agentRegistry.get({ id: "orphan" })).toBeNull();
+      expect(await agentRegistry.get({ id: "manual" })).not.toBeNull();
+      expect((await agentRegistry.versions({ id: "mixed" })).map((v) => v.version)).toEqual(["v1"]);
+      expect(await agentRegistry.get({ id: "live" })).not.toBeNull();
+      expect(await deployments.get(liveId)).not.toBeNull();
+    } finally {
+      sweeper.stop();
+    }
   });
 
   it("routes are not mounted without a remoteDeployments config", async () => {

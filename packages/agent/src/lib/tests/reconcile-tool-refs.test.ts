@@ -11,7 +11,7 @@
 
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
-import { InMemoryAgentRegistry } from "../registry/in-memory-agent-registry.ts";
+import { InMemoryAgentRegistry } from "../versioned-registry/in-memory-registries.ts";
 import { DefaultAgentToolCatalog } from "../tool-catalog.ts";
 import { reconcileToolReferences } from "../reconcile-tool-refs.ts";
 import { tool } from "../tool.ts";

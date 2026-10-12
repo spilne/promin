@@ -97,7 +97,9 @@ describe("recipeTarget", () => {
     },
     metadata: { description: null, capabilities: [], tags: [] },
     createdAt: 0,
-    updatedAt: 0,
+    active: true,
+    enabled: true,
+    trust: "trusted",
   };
   const deps = {
     runner: undefined,

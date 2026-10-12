@@ -11,21 +11,21 @@ export {
   type PostgresNamespaceRegistryConfig,
 } from "./lib/postgres-namespace-registry.ts";
 export {
+  PostgresVersionedRegistry,
+  type PostgresVersionedRegistryConfig,
+} from "./lib/agent/versioned-registry.ts";
+export {
   PostgresAgentRegistry,
-  type PostgresAgentRegistryConfig,
-} from "./lib/agent/agent-registry.ts";
-export {
+  PostgresDagRegistry,
+  PostgresFragmentRegistry,
   PostgresRoleRegistry,
-  type PostgresRoleRegistryConfig,
-} from "./lib/agent/role-registry.ts";
-export {
   PostgresSkillRegistry,
-  type PostgresSkillRegistryConfig,
-} from "./lib/agent/skill-registry.ts";
+  type PostgresRegistryConfig,
+} from "./lib/agent/registries.ts";
 export {
-  PostgresFragmentStore,
-  type PostgresFragmentStoreConfig,
-} from "./lib/agent/fragment-store.ts";
+  PostgresRemoteDeploymentRegistry,
+  type PostgresRemoteDeploymentRegistryConfig,
+} from "./lib/agent/remote-deployment-registry.ts";
 export {
   PostgresKnowledgeBaseStore,
   type PostgresKnowledgeBaseStoreConfig,
@@ -53,7 +53,6 @@ export {
   PostgresAgentInstanceRegistry,
   type PostgresAgentInstanceRegistryConfig,
 } from "./lib/agent/agent-instance-registry.ts";
-export { PostgresDagRegistry, type PostgresDagRegistryConfig } from "./lib/agent/dag-registry.ts";
 export {
   PgVectorRetriever,
   type PgVectorEnsureSchemaOptions,

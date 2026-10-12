@@ -46,7 +46,9 @@ function recipe(mcpServers: ReadonlyArray<McpServerRecipe>): RegisteredAgent {
     },
     metadata: { description: null, capabilities: [], tags: [] },
     createdAt: 0,
-    updatedAt: 0,
+    active: true,
+    enabled: true,
+    trust: "trusted",
   };
 }
 

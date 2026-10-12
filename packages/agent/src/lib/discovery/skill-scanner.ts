@@ -7,28 +7,25 @@
 // a non-empty string `id`, `description`, `whenToUse`, and `body`. Modules
 // can export either a single manifest or an array — both flatten.
 //
-// `applyDiscoveredSkills` reconciles a discovered set into a `SkillRegistry`:
-// upsert by default, opt-in `sync` mode to delete entries not in the scan.
+// `applyDiscoveredSkills` reconciles a discovered set into a `SkillRegistry`
+// through `applyDiscovered`: unchanged skills are left alone, changed ones
+// become a new promoted version, opt-in `sync` removes scanner-written
+// skills whose file is gone.
 //
-// Trust: a scanned file never vouches for itself. A newly discovered skill
-// always lands as `needs-review` (whatever trust its manifest declares), and
-// a known skill whose content (body, description or whenToUse) changed is
-// reset to `needs-review` — an operator approves each version of the text
-// the model will read.
+// Trust: a scanned file never vouches for itself. Every version the scanner
+// creates lands as `needs-review` (whatever its manifest declares) — an
+// operator approves each version of the text the model will read. Unchanged
+// content keeps the review its version already has.
 // ---------------------------------------------------------------------------
 
 import { readFile, readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { type WallClock, SystemWallClock } from "@promin/workflow";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { parseMarkdownSkill } from "../skills/parse-markdown-skill.ts";
-import {
-  DEFAULT_SKILL_VERSION,
-  type RegisteredSkill,
-  type RegisterSkillInput,
-  type SkillMetadata,
-  type SkillRegistry,
-} from "../skills/types.ts";
+import type { RegisterSkillInput, SkillRegistry } from "../skills/types.ts";
+import { applyDiscovered, type ApplyDiscoveredResult } from "./apply-discovered.ts";
+import { startScanLoop, type ScanLoopHandle, type ScanLoopTick } from "./scan-loop.ts";
 
 /** File extensions a bundled skill might ship that we intentionally ignore. */
 const EXECUTABLE_EXTENSIONS = [".py", ".sh", ".rb", ".js", ".ts", ".mjs", ".bin", ".pl"];
@@ -55,7 +52,10 @@ export interface SkillScanResult {
   readonly skills: RegisterSkillInput[];
   /** Per-id source path — useful for duplicate diagnostics. */
   readonly sources: Record<string, string>;
+  /** Diagnostics that did not lose a skill (duplicates, ignored bundled files). */
   readonly warnings: string[];
+  /** Directories or skill files that could not be read, parsed or imported. */
+  readonly errors: string[];
 }
 
 const DEFAULT_EXTENSIONS = [".ts", ".tsx", ".js", ".mjs"];
@@ -84,26 +84,19 @@ export class SkillScanner {
   }
 
   async scan(root: string): Promise<SkillScanResult> {
-    const skills: RegisterSkillInput[] = [];
-    const sources: Record<string, string> = {};
-    const warnings: string[] = [];
-    await this.walk(root, 0, skills, sources, warnings);
-    return { skills, sources, warnings };
+    const out: ScanOutput = { skills: [], sources: {}, warnings: [], errors: [] };
+    await this.walk({ dir: root, depth: 0, out });
+    return out;
   }
 
-  private async walk(
-    dir: string,
-    depth: number,
-    skills: RegisterSkillInput[],
-    sources: Record<string, string>,
-    warnings: string[],
-  ): Promise<void> {
+  private async walk(params: { dir: string; depth: number; out: ScanOutput }): Promise<void> {
+    const { dir, depth, out } = params;
     if (depth > this.maxDepth) return;
     let entries;
     try {
       entries = await readdir(dir, { withFileTypes: true });
     } catch (err) {
-      warnings.push(`failed to read ${dir}: ${asMessage(err)}`);
+      out.errors.push(`failed to read ${dir}: ${asMessage(err)}`);
       return;
     }
 
@@ -113,7 +106,7 @@ export class SkillScanner {
 
       if (entry.isDirectory()) {
         if (name === "node_modules" || name.startsWith(".")) continue;
-        await this.walk(full, depth + 1, skills, sources, warnings);
+        await this.walk({ dir: full, depth: depth + 1, out });
         continue;
       }
       if (!entry.isFile()) continue;
@@ -123,7 +116,7 @@ export class SkillScanner {
       // before the module-extension gate so .md files are picked up even
       // though they aren't importable modules.
       if (name.endsWith(".md")) {
-        await this.loadMarkdownSkill(full, name, entries, skills, sources, warnings);
+        await this.loadMarkdownSkill({ absPath: full, fileName: name, siblings: entries, out });
         continue;
       }
 
@@ -132,29 +125,30 @@ export class SkillScanner {
         continue;
       }
 
-      await this.importModule(full, skills, sources, warnings);
+      await this.importModule({ absPath: full, out });
     }
   }
 
   /**
    * Load a markdown skill (`SKILL.md` or a bare `*.md` with frontmatter).
-   * Files without frontmatter (e.g. README.md) are silently skipped — only
-   * the body is consumed, never bundled scripts. When a `SKILL.md` ships
-   * sibling executables, a warning notes they were ignored.
+   * Only the body is consumed, never bundled scripts; when a `SKILL.md`
+   * ships sibling executables, a warning notes they were ignored. A
+   * markdown file that is not a readable skill (empty, no frontmatter,
+   * malformed) is a scan error — `README.md` excepted — so a skill caught
+   * mid-edit is never taken for a removed one by sync.
    */
-  private async loadMarkdownSkill(
-    absPath: string,
-    fileName: string,
-    siblings: ReadonlyArray<{ name: string; isFile(): boolean; isDirectory(): boolean }>,
-    skills: RegisterSkillInput[],
-    sources: Record<string, string>,
-    warnings: string[],
-  ): Promise<void> {
+  private async loadMarkdownSkill(params: {
+    absPath: string;
+    fileName: string;
+    siblings: ReadonlyArray<{ name: string; isFile(): boolean; isDirectory(): boolean }>;
+    out: ScanOutput;
+  }): Promise<void> {
+    const { absPath, fileName, siblings, out } = params;
     let text: string;
     try {
       text = await readFile(absPath, "utf8");
     } catch (err) {
-      warnings.push(`failed to read ${absPath}: ${asMessage(err)}`);
+      out.errors.push(`failed to read ${absPath}: ${asMessage(err)}`);
       return;
     }
     // `SKILL.md` → id falls back to the containing directory name; a bare
@@ -164,9 +158,14 @@ export class SkillScanner {
         ? basename(absPath.slice(0, absPath.length - fileName.length - 1))
         : fileName.slice(0, -3);
     const parsed = parseMarkdownSkill({ text, fallbackId });
-    if (parsed === null) return; // no frontmatter → not a skill
+    if (parsed === null) {
+      if (fileName.toLowerCase() !== "readme.md") {
+        out.errors.push(`${absPath}: no frontmatter — not a readable skill`);
+      }
+      return;
+    }
     if ("warning" in parsed) {
-      warnings.push(`${absPath}: ${parsed.warning}`);
+      out.errors.push(`${absPath}: ${parsed.warning}`);
       return;
     }
     // Instruction-only boundary: note (and ignore) any bundled executables
@@ -178,24 +177,24 @@ export class SkillScanner {
           (e.isFile() && EXECUTABLE_EXTENSIONS.some((ext) => e.name.endsWith(ext))),
       );
       if (bundled.length > 0) {
-        warnings.push(
+        out.warnings.push(
           `skill "${parsed.skill.id}" ships bundled files (${bundled
             .map((e) => e.name)
             .join(", ")}) — ignored; skills are instruction-only`,
         );
       }
     }
-    this.recordSkill(parsed.skill, absPath, skills, sources, warnings);
+    this.recordSkill({ candidate: parsed.skill, absPath, out });
   }
 
   /** Add a discovered skill, warning + last-wins on a duplicate id. */
-  private recordSkill(
-    candidate: RegisterSkillInput,
-    absPath: string,
-    skills: RegisterSkillInput[],
-    sources: Record<string, string>,
-    warnings: string[],
-  ): void {
+  private recordSkill(params: {
+    candidate: RegisterSkillInput;
+    absPath: string;
+    out: ScanOutput;
+  }): void {
+    const { candidate, absPath } = params;
+    const { skills, sources, warnings } = params.out;
     const existing = sources[candidate.id];
     if (existing && existing !== absPath) {
       warnings.push(`duplicate skill id "${candidate.id}": ${existing} vs ${absPath} — last wins`);
@@ -209,12 +208,8 @@ export class SkillScanner {
     this.onSkill?.(candidate, absPath);
   }
 
-  private async importModule(
-    absPath: string,
-    skills: RegisterSkillInput[],
-    sources: Record<string, string>,
-    warnings: string[],
-  ): Promise<void> {
+  private async importModule(params: { absPath: string; out: ScanOutput }): Promise<void> {
+    const { absPath, out } = params;
     let mod: Record<string, unknown>;
     let url = pathToFileURL(absPath).href;
     if (this.cacheBust) {
@@ -233,7 +228,7 @@ export class SkillScanner {
     try {
       mod = (await import(url)) as Record<string, unknown>;
     } catch (err) {
-      warnings.push(`failed to import ${absPath}: ${asMessage(err)}`);
+      out.errors.push(`failed to import ${absPath}: ${asMessage(err)}`);
       return;
     }
 
@@ -241,10 +236,17 @@ export class SkillScanner {
       const candidates = Array.isArray(value) ? value : [value];
       for (const candidate of candidates) {
         if (!isSkillInput(candidate)) continue;
-        this.recordSkill(candidate, absPath, skills, sources, warnings);
+        this.recordSkill({ candidate, absPath, out });
       }
     }
   }
+}
+
+interface ScanOutput {
+  skills: RegisterSkillInput[];
+  sources: Record<string, string>;
+  warnings: string[];
+  errors: string[];
 }
 
 function isSkillInput(v: unknown): v is RegisterSkillInput {
@@ -267,102 +269,46 @@ function isSkillInput(v: unknown): v is RegisterSkillInput {
 // Reconcile a discovered set into a `SkillRegistry`.
 // ---------------------------------------------------------------------------
 
-export interface ApplyDiscoveredSkillsOptions {
+export interface ApplyDiscoveredSkillsParams {
+  readonly registry: SkillRegistry;
+  readonly skills: ReadonlyArray<RegisterSkillInput>;
   /**
-   * Delete registry entries whose `id` isn't in the discovered set. Default:
-   * `false` (upsert-only — operator-created entries stay). Set `true` to
-   * make the filesystem authoritative.
+   * Remove skills whose file is gone. Default `false`. Only versions a
+   * scanner wrote are removed; operator-authored skills always stay.
    */
   readonly sync?: boolean;
-  /**
-   * Restrict the operation to entries whose discovered `id` starts with this
-   * prefix. Useful for partitioning skills by tenant / environment without
-   * colliding ids. No filter when omitted.
-   */
+  /** Whether the scan read every file; `false` skips sync deletes. Default `true`. */
+  readonly complete?: boolean;
+  /** Only touch ids with this prefix. */
   readonly idPrefix?: string;
   /**
    * The operator vouches for every skill under the scanned root (e.g.
-   * first-party skills checked into the host's own repo): discovered
-   * skills register as `trusted`, including after edits. Default `false` —
-   * new and edited skills land as `needs-review`. This is host config,
-   * never something a skill file can set for itself.
+   * first-party skills checked into the host's own repo): scanned versions
+   * register as `trusted`, including after edits. Default `false` — new and
+   * edited skills land as `needs-review`. This is host config, never
+   * something a skill file can set for itself.
    */
   readonly trusted?: boolean;
 }
 
-export interface ApplyDiscoveredSkillsResult {
-  readonly upserted: string[];
-  /** Subset of `upserted` that didn't exist before this call. */
-  readonly added: string[];
-  /** Only populated when `sync: true`. */
-  readonly deleted: string[];
-}
-
 export async function applyDiscoveredSkills(
-  registry: SkillRegistry,
-  skills: ReadonlyArray<RegisterSkillInput>,
-  options: ApplyDiscoveredSkillsOptions = {},
-): Promise<ApplyDiscoveredSkillsResult> {
-  const upserted: string[] = [];
-  const added: string[] = [];
-  const deleted: string[] = [];
-
-  // Snapshot the existing set when we'll need it for added-tracking or sync.
-  const existing = options.sync ? await registry.list({ limit: 100_000 }) : [];
-  const existingIds = new Set(existing.map((row) => row.id));
-
-  for (const input of skills) {
-    if (options.idPrefix !== undefined && !input.id.startsWith(options.idPrefix)) continue;
-    const version = input.version ?? DEFAULT_SKILL_VERSION;
-    const existingRow = existingIds.has(input.id)
-      ? (existing.find((e) => e.id === input.id && e.version === version) ?? null)
-      : await registry.get(input.id, version);
-    const wasExisting = existingRow !== null;
-    // Trust is never taken from the scanned file (`input.metadata.trust` is
-    // dropped): a new skill, or a known one whose text changed, needs an
-    // operator's review before it can enter agent context. Unchanged
-    // content keeps whatever trust the registry row already has.
-    const { trust: _declaredTrust, ...declaredMetadata } = input.metadata ?? {};
-    const trust: SkillMetadata["trust"] = options.trusted
-      ? "trusted"
-      : existingRow && sameSkillContent({ row: existingRow, input })
-        ? existingRow.metadata.trust
-        : "needs-review";
-    const finalInput: RegisterSkillInput = {
-      ...input,
-      metadata: { ...declaredMetadata, ...(trust !== undefined && { trust }) },
-    };
-    await registry.register(finalInput);
-    upserted.push(input.id);
-    if (!wasExisting) added.push(input.id);
-  }
-
-  if (options.sync) {
-    const discoveredIds = new Set(
-      skills
-        .filter((s) => options.idPrefix === undefined || s.id.startsWith(options.idPrefix))
-        .map((s) => s.id),
-    );
-    for (const row of existing) {
-      if (options.idPrefix !== undefined && !row.id.startsWith(options.idPrefix)) continue;
-      if (!discoveredIds.has(row.id)) {
-        await registry.unregister(row.id);
-        deleted.push(row.id);
+  params: ApplyDiscoveredSkillsParams,
+): Promise<ApplyDiscoveredResult> {
+  const { registry, trusted = false } = params;
+  return applyDiscovered({
+    registry,
+    discovered: params.skills,
+    ...(params.sync !== undefined && { sync: params.sync }),
+    ...(params.complete !== undefined && { complete: params.complete }),
+    ...(params.idPrefix !== undefined && { idPrefix: params.idPrefix }),
+    trust: trusted ? "trusted" : "needs-review",
+    // A trusted root vouches for the content already stored, too.
+    onUnchanged: async (entry) => {
+      if (trusted && entry.trust !== "trusted") {
+        await registry.setTrust({ id: entry.id, version: entry.version, trust: "trusted" });
       }
-    }
-  }
-
-  return { upserted, added, deleted };
-}
-
-/** Whether a scanned skill carries the same model-visible text as its registry row. */
-function sameSkillContent(params: { row: RegisteredSkill; input: RegisterSkillInput }): boolean {
-  const { row, input } = params;
-  return (
-    row.body === input.body &&
-    row.description === input.description &&
-    row.whenToUse === (input.whenToUse ?? input.description)
-  );
+    },
+  });
 }
 
 function asMessage(err: unknown): string {
@@ -381,7 +327,7 @@ export interface SkillScanLoopOptions {
   readonly root: string;
   /** Poll interval in ms. Default: `5_000`. */
   readonly intervalMs?: number;
-  /** Pass through to `applyDiscoveredSkills` — sweeps removed files. Default: `false`. */
+  /** Pass through to `applyDiscoveredSkills` — removes skills whose file is gone. Default: `false`. */
   readonly sync?: boolean;
   /** Pass through to `applyDiscoveredSkills`. */
   readonly idPrefix?: string;
@@ -390,81 +336,46 @@ export interface SkillScanLoopOptions {
   /** Filter scan results before applying. */
   readonly filterSkills?: (skills: ReadonlyArray<RegisterSkillInput>) => RegisterSkillInput[];
   /** Fired after each tick. Surfaces deltas + warnings to the host. */
-  readonly onTick?: (event: SkillScanLoopTick) => void;
+  readonly onTick?: (event: ScanLoopTick) => void;
+  /** A failed timer tick lands here. Default: `console.error`. */
+  readonly onError?: (err: unknown) => void;
   /** Time source. Default: `SystemWallClock`. Tests pass `FakeWallClock`. */
   readonly clock?: WallClock;
   /** Forwarded to the underlying scanner. `cacheBust` defaults to `true` for the loop. */
   readonly scanner?: Omit<SkillScannerOptions, "cacheBust" | "onSkill">;
 }
 
-export interface SkillScanLoopTick {
-  readonly added: string[];
-  readonly upserted: string[];
-  readonly deleted: string[];
-  readonly warnings: string[];
-  readonly durationMs: number;
-}
-
-export interface SkillScanLoopHandle {
-  /** Stop polling. Idempotent. */
-  stop(): void;
-  /** Run one scan immediately. Resolves with the tick result. */
-  tick(): Promise<SkillScanLoopTick>;
-}
-
-export function startSkillScanLoop(options: SkillScanLoopOptions): SkillScanLoopHandle {
+export function startSkillScanLoop(options: SkillScanLoopOptions): ScanLoopHandle<ScanLoopTick> {
   const clock = options.clock ?? SystemWallClock;
-  const intervalMs = options.intervalMs ?? 5_000;
-  const scanner = new SkillScanner({
-    ...options.scanner,
-    cacheBust: true,
-  });
-
-  let inFlight: Promise<SkillScanLoopTick> | null = null;
-  let stopped = false;
-
-  async function runOnce(): Promise<SkillScanLoopTick> {
-    const start = clock.currentTimeMs();
-    const scan = await scanner.scan(options.root);
-    const filtered = options.filterSkills ? options.filterSkills(scan.skills) : scan.skills;
-    const apply = await applyDiscoveredSkills(options.registry, filtered, {
-      sync: options.sync ?? false,
-      ...(options.idPrefix !== undefined ? { idPrefix: options.idPrefix } : {}),
-      ...(options.trusted !== undefined && { trusted: options.trusted }),
-    });
-    const tick: SkillScanLoopTick = {
-      added: apply.added,
-      upserted: apply.upserted,
-      deleted: apply.deleted,
-      warnings: scan.warnings,
-      durationMs: clock.currentTimeMs() - start,
-    };
-    options.onTick?.(tick);
-    return tick;
-  }
-
-  async function tickGuarded(): Promise<SkillScanLoopTick> {
-    // Coalesce overlapping ticks — two concurrent applyDiscoveredSkills
-    // racing for the same registry row would just produce duplicate work.
-    if (inFlight) return inFlight;
-    const p = runOnce().finally(() => {
-      inFlight = null;
-    });
-    inFlight = p;
-    return p;
-  }
-
-  const handle = clock.setInterval(() => {
-    if (stopped) return;
-    void tickGuarded();
-  }, intervalMs);
-
-  return {
-    stop() {
-      if (stopped) return;
-      stopped = true;
-      handle.clear();
+  const scanner = new SkillScanner({ ...options.scanner, cacheBust: true });
+  return startScanLoop({
+    label: "skill-scan",
+    clock,
+    ...(options.intervalMs !== undefined && { intervalMs: options.intervalMs }),
+    ...(options.onError !== undefined && { onError: options.onError }),
+    run: async () => {
+      const start = clock.currentTimeMs();
+      const scan = await scanner.scan(options.root);
+      const filtered = options.filterSkills ? options.filterSkills(scan.skills) : scan.skills;
+      const apply = await applyDiscoveredSkills({
+        registry: options.registry,
+        skills: filtered,
+        sync: options.sync ?? false,
+        complete: scan.errors.length === 0,
+        ...(options.idPrefix !== undefined && { idPrefix: options.idPrefix }),
+        ...(options.trusted !== undefined && { trusted: options.trusted }),
+      });
+      const tick: ScanLoopTick = {
+        added: apply.added,
+        upserted: apply.upserted,
+        changed: apply.changed,
+        deleted: apply.deleted,
+        warnings: [...scan.warnings, ...apply.warnings],
+        errors: scan.errors,
+        durationMs: clock.currentTimeMs() - start,
+      };
+      options.onTick?.(tick);
+      return tick;
     },
-    tick: tickGuarded,
-  };
+  });
 }

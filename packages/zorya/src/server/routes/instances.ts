@@ -177,7 +177,7 @@ export function resolveAgentInstance(deps: InstanceDeps) {
     ) {
       return jsonError(400, "invalid_metadata");
     }
-    if (!(await deps.agents.get(registeredAgentId))) {
+    if (!(await deps.agents.get({ id: registeredAgentId }))) {
       return jsonError(404, "agent_not_found", `Agent "${registeredAgentId}" is not registered.`);
     }
     const denied = await authorize({

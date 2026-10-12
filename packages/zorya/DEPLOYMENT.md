@@ -165,11 +165,13 @@ process.on("SIGTERM", () => void server.stop().then(() => process.exit(0)));
 
 A worker-only deployment drops `LocalWorkflows` and uses the
 `QueuedWorkflows` layer on its own (`e2e/host.ts` is a complete example).
-Agents, skills, fragments, roles, secrets and memory have Postgres stores
-too (`PostgresAgentRegistry`, `PostgresSkillRegistry`,
-`PostgresFragmentStore`, `PostgresRoleRegistry`, `PostgresSecretsStorage`,
-`PostgresMemoryStore`, all from `@promin/postgres`); pass them to the
-corresponding Zorya services. For registered namespaces (see the README's
+Agents, skills, fragments, roles, DAGs, secrets, memory and remote
+deployments have Postgres stores too (`PostgresAgentRegistry`,
+`PostgresSkillRegistry`, `PostgresFragmentRegistry`, `PostgresRoleRegistry`,
+`PostgresDagRegistry`, `PostgresSecretsStorage`, `PostgresMemoryStore`,
+`PostgresRemoteDeploymentRegistry`, all from `@promin/postgres`); pass them
+to the corresponding Zorya services. Every replica then reads the same
+recipe versions, and remote-deployment expiry runs on the database clock. For registered namespaces (see the README's
 Namespaces section) pass `namespaces: new PostgresNamespaceRegistry({ db })`;
 every instance then sees the same namespaces and archive states.
 

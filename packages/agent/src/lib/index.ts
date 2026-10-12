@@ -191,44 +191,104 @@ export type { LocalAgentConfig } from "./agent/local-agent.ts";
 
 export { frameTask } from "./agent/frame-task.ts";
 
+// VersionedRegistry — the one store behind agents, roles, skills, DAGs and
+// fragments: immutable versions, an active pointer, compare-and-set writes.
+export type {
+  VersionedRegistry,
+  Versioned,
+  VersionInfo,
+  VersionTrust,
+  RegisterOptions,
+  RegisterVersionInput,
+  ListVersionedParams,
+  VersionedPage,
+  RegistryKind,
+  FacetQuery,
+} from "./versioned-registry/types.ts";
+export {
+  RegistryConflictError,
+  RegistryNotFoundError,
+  RegistryInputError,
+  isRegistryConflict,
+  isRegistryNotFound,
+  isRegistryInputError,
+  listAllVersioned,
+  VERSION_PATTERN,
+} from "./versioned-registry/types.ts";
+export {
+  assertListLimit,
+  assertVersionLabel,
+  nextActiveVersion,
+  pushHistory,
+  autoVersionLabel,
+  bodyOf,
+  sameBody,
+  canonicalJson,
+  contentHash,
+  facetQuery,
+  matchesFacets,
+  prepareRegister,
+} from "./versioned-registry/store-helpers.ts";
+export type { PreparedRegister } from "./versioned-registry/store-helpers.ts";
+export {
+  AGENT_KIND,
+  DAG_KIND,
+  FRAGMENT_KIND,
+  ROLE_KIND,
+  SKILL_KIND,
+} from "./versioned-registry/kinds.ts";
+export {
+  InMemoryVersionedRegistry,
+  type InMemoryVersionedRegistryConfig,
+} from "./versioned-registry/in-memory-versioned-registry.ts";
+export {
+  InMemoryAgentRegistry,
+  InMemoryDagRegistry,
+  InMemoryFragmentRegistry,
+  InMemoryRoleRegistry,
+  InMemorySkillRegistry,
+  type InMemoryRegistryConfig,
+} from "./versioned-registry/in-memory-registries.ts";
+
 // AgentRegistry — versioned recipe store.
 export type {
   AgentRegistry,
+  AgentRecipe,
+  AgentRecipeInput,
+  AgentFilter,
   RegisteredAgent,
   RegisterAgentInput,
   AgentBackend,
   LocalAgentBackend,
   AgentMetadata,
-  ListAgentsParams,
   AutoCompactRecipe,
   AutoDistillRecipe,
   ContextBudgetRecipe,
   AgentKnowledgeRecipe,
   AgentKnowledgeMode,
 } from "./registry/types.ts";
-export { DEFAULT_AGENT_VERSION, DEFAULT_AGENT_METADATA } from "./registry/types.ts";
-export { InMemoryAgentRegistry } from "./registry/in-memory-agent-registry.ts";
-export type { InMemoryAgentRegistryConfig } from "./registry/in-memory-agent-registry.ts";
+export { AGENT_DRAFT_ID_PREFIX, DEFAULT_AGENT_METADATA } from "./registry/types.ts";
 
 // RoleRegistry — versioned behavioral-bundle store (persona prompt +
 // fragments + tools + skills). An agent binds a role; see ROLE_AGENT_MODEL.
 export type {
   RoleRegistry,
+  RoleRecipe,
+  RoleRecipeInput,
+  RoleFilter,
   RegisteredRole,
   RegisterRoleInput,
   RoleDefinition,
   RoleMetadata,
   RoleBinding,
-  ListRolesParams,
 } from "./role/types.ts";
-export { DEFAULT_ROLE_VERSION, DEFAULT_ROLE_METADATA } from "./role/types.ts";
-export { InMemoryRoleRegistry } from "./role/in-memory-role-registry.ts";
-export type { InMemoryRoleRegistryConfig } from "./role/in-memory-role-registry.ts";
+export { DEFAULT_ROLE_METADATA } from "./role/types.ts";
 export { resolveRoleBinding, inlineRoleDefinition } from "./role/resolve-role.ts";
 export type { ResolveRoleBindingDeps } from "./role/resolve-role.ts";
 export { resolveLocalAgent, resolveCredentialRef } from "./registry/resolve-local-agent.ts";
 export type { ResolveLocalAgentDeps } from "./registry/resolve-local-agent.ts";
-export { RemoteAgent } from "./registry/remote-agent.ts";
+export { DEFAULT_REMOTE_REQUEST_TIMEOUT_MS, RemoteAgent } from "./registry/remote-agent.ts";
+export type { RemoteAgentConfig } from "./registry/remote-agent.ts";
 export { resolveRemoteAgent } from "./registry/resolve-remote-agent.ts";
 export type { RemoteAgentBackend } from "./registry/types.ts";
 
@@ -249,15 +309,15 @@ export type { FileModelCatalogConfig } from "./registry/file-model-catalog.ts";
 // and the model pulls a full body into context on demand via loadSkill.
 export type {
   SkillRegistry,
+  SkillRecipe,
+  SkillRecipeInput,
+  SkillFilter,
   RegisteredSkill,
   RegisterSkillInput,
   SkillMetadata,
   SkillRef,
-  ListSkillsParams,
 } from "./skills/types.ts";
-export { DEFAULT_SKILL_VERSION, DEFAULT_SKILL_METADATA } from "./skills/types.ts";
-export { InMemorySkillRegistry } from "./skills/in-memory-skill-registry.ts";
-export type { InMemorySkillRegistryConfig } from "./skills/in-memory-skill-registry.ts";
+export { DEFAULT_SKILL_METADATA } from "./skills/types.ts";
 export {
   resolveSkillCatalog,
   buildSkillCatalogPrompt,
@@ -275,9 +335,15 @@ export type { LoadSkillToolConfig, LoadSkillOutput } from "./skills/load-skill-t
 // load-on-demand). See packages/zorya/examples/fragments for the curated
 // library; resolveLocalAgent reads fragments via the optional `fragments`
 // dep (FragmentRegistry).
-export type { FragmentRegistry, FragmentStore } from "./fragments/types.ts";
-export { InMemoryFragmentRegistry } from "./fragments/in-memory-fragment-registry.ts";
-export { resolveSystemPrompt } from "./fragments/resolve-prompt.ts";
+export type {
+  FragmentRegistry,
+  FragmentRecipe,
+  FragmentFilter,
+  RegisteredFragment,
+  RegisterFragmentInput,
+} from "./fragments/types.ts";
+export { FRAGMENT_VERSION_SEPARATOR } from "./fragments/types.ts";
+export { parseLayerRef, resolveSystemPrompt } from "./fragments/resolve-prompt.ts";
 export type { ResolveSystemPromptParams } from "./fragments/resolve-prompt.ts";
 export { parseMarkdownSkill, slugify } from "./skills/parse-markdown-skill.ts";
 export type { ParseMarkdownSkillParams } from "./skills/parse-markdown-skill.ts";
@@ -336,7 +402,12 @@ export type { InMemoryAgentInstanceRegistryConfig } from "./instance/in-memory-a
 export { wipeAgentInstance } from "./instance/wipe.ts";
 export type { WipeAgentInstanceResult } from "./instance/wipe.ts";
 
-// Discovery — auto-scan agent recipes from a folder + reconcile into a registry.
+// Discovery — scan folders for agent recipes, skills and prompt fragments
+// and reconcile them into their registries (one shared reconcile + loop).
+export { applyDiscovered, FILE_SOURCE } from "./discovery/apply-discovered.ts";
+export type { ApplyDiscoveredParams, ApplyDiscoveredResult } from "./discovery/apply-discovered.ts";
+export { startScanLoop } from "./discovery/scan-loop.ts";
+export type { ScanLoopConfig, ScanLoopHandle, ScanLoopTick } from "./discovery/scan-loop.ts";
 export {
   AgentScanner,
   applyDiscoveredAgents,
@@ -345,14 +416,9 @@ export {
 export type {
   AgentScannerOptions,
   AgentScanResult,
-  ApplyDiscoveredAgentsOptions,
-  ApplyDiscoveredAgentsResult,
+  ApplyDiscoveredAgentsParams,
   AgentScanLoopOptions,
-  AgentScanLoopTick,
-  AgentScanLoopHandle,
 } from "./discovery/agent-scanner.ts";
-
-// Discovery — auto-scan skill manifests from a folder + reconcile into a SkillRegistry.
 export {
   SkillScanner,
   applyDiscoveredSkills,
@@ -361,15 +427,9 @@ export {
 export type {
   SkillScannerOptions,
   SkillScanResult,
-  ApplyDiscoveredSkillsOptions,
-  ApplyDiscoveredSkillsResult,
+  ApplyDiscoveredSkillsParams,
   SkillScanLoopOptions,
-  SkillScanLoopTick,
-  SkillScanLoopHandle,
 } from "./discovery/skill-scanner.ts";
-
-// Discovery — auto-scan markdown prompt fragments from a folder + reconcile
-// into a FragmentRegistry. Each .md file is one fragment, key = basename.
 export {
   FragmentScanner,
   applyDiscoveredFragments,
@@ -379,11 +439,8 @@ export type {
   FragmentSpec,
   FragmentScannerOptions,
   FragmentScanResult,
-  ApplyDiscoveredFragmentsOptions,
-  ApplyDiscoveredFragmentsResult,
+  ApplyDiscoveredFragmentsParams,
   FragmentScanLoopOptions,
-  FragmentScanLoopTick,
-  FragmentScanLoopHandle,
 } from "./discovery/fragment-scanner.ts";
 
 // ThreadLeaseStore — coordination primitive for horizontally-scaled
@@ -793,6 +850,12 @@ export { createRegistryAgentResolver } from "./dag/registry-agent-resolver.ts";
 export type {
   AgentResolver,
   AgenticDagRecipe,
+  DagGraph,
+  DagRecipe,
+  DagFilter,
+  DagRegistry,
+  RegisteredDag,
+  RegisterDagInput,
   DagRunScope,
   DagNode,
   DagEdge,
@@ -804,11 +867,3 @@ export type {
   DurableDagOutput,
   CreateDagWorkflowConfig,
 } from "./dag/durable-executor.ts";
-export { InMemoryDagRegistry } from "./dag/registry.ts";
-export type {
-  DagRegistry,
-  RegisteredDag,
-  RegisterDagInput,
-  ListDagsParams,
-  InMemoryDagRegistryConfig,
-} from "./dag/registry.ts";

@@ -24,7 +24,12 @@
 // source's text is also bounded by the service's `maxSourceCharacters`.
 // ---------------------------------------------------------------------------
 
-import type { AgentRegistry, KnowledgeChunk, RetrieveResult } from "@promin/agent";
+import {
+  listAllVersioned,
+  type AgentRegistry,
+  type KnowledgeChunk,
+  type RetrieveResult,
+} from "@promin/agent";
 import { z } from "zod";
 import { BooleanQuery, limitQuery, OffsetQuery } from "../api-types.ts";
 import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
@@ -373,9 +378,12 @@ function mapError(err: unknown): unknown {
   return err;
 }
 
-/** Ids of local agents whose latest recipe binds `baseId` in `backend.knowledge`. */
+/** Ids of local agents whose active recipe binds `baseId` in `backend.knowledge`. */
 async function agentsBinding(params: { agents: AgentRegistry; baseId: string }): Promise<string[]> {
-  const recipes = await params.agents.list({ backendType: "local" });
+  const recipes = await listAllVersioned({
+    registry: params.agents,
+    filter: { backendType: "local" },
+  });
   return recipes
     .filter(
       (recipe) =>

@@ -11,9 +11,9 @@
 // that referenced agentIds exist in a registry — that's a runtime concern.
 // ---------------------------------------------------------------------------
 
-import { type AgenticDagRecipe, DagValidationError } from "./types.ts";
+import { type DagGraph, DagValidationError } from "./types.ts";
 
-export function validateDag(dag: AgenticDagRecipe): void {
+export function validateDag(dag: DagGraph): void {
   const issues: string[] = [];
   const nodeIds = new Set(dag.nodes.map((n) => n.id));
 
@@ -141,7 +141,7 @@ export function validateDag(dag: AgenticDagRecipe): void {
 }
 
 /** Topological sort. Throws DagValidationError on cycle. */
-export function topologicalOrder(dag: AgenticDagRecipe): string[] {
+export function topologicalOrder(dag: DagGraph): string[] {
   const inDegree = new Map<string, number>();
   for (const n of dag.nodes) inDegree.set(n.id, 0);
   const outgoing = new Map<string, string[]>();

@@ -11,16 +11,17 @@
 // block; a role composes fragments and adds tools + skills) and one tier
 // below the agent (an agent = role + model + credentials + runtime).
 //
-// Design choices mirror `AgentRegistry` on purpose — same versioning,
-// upsert, and list semantics — so the two stores share a conformance
-// shape and operators reason about them the same way:
-//
-//   1. `version` is part of the primary key, defaulting to `"v1"`. Lets a
-//      role evolve while agents pin a specific version for reproducibility
-//      (or float to latest for live fixes).
-//   2. No tenant column — roles are tenant-agnostic definitions. Tenancy
-//      binds at the agent/instance layer.
+// Roles live in a `VersionedRegistry` like agents, skills, DAGs and
+// fragments: immutable versions, an active pointer, no tenant column
+// (tenancy binds at the agent/instance layer). Agents pin a role version
+// for reproducibility or float to the active one for live fixes.
 // ---------------------------------------------------------------------------
+
+import type {
+  RegisterVersionInput,
+  Versioned,
+  VersionedRegistry,
+} from "../versioned-registry/types.ts";
 
 /**
  * The behavioral definition a role carries. JSON-serializable; the runtime
@@ -30,9 +31,10 @@
 export interface RoleDefinition {
   /**
    * Persona. Either a plain string OR the layered `{ base, layers }` form,
-   * where `layers` are fragment keys concatenated onto `base` (same shape
-   * `LocalAgentBackend.systemPrompt` accepts today). `null` means "no
-   * persona of its own" — the agent runs on memory cascade alone.
+   * where `layers` are fragment ids concatenated onto `base`. A layer
+   * `"<id>@<version>"` pins that fragment version; a bare `"<id>"` follows
+   * the fragment's active version. `null` means "no persona of its own" —
+   * the agent runs on memory cascade alone.
    */
   readonly systemPrompt:
     | string
@@ -56,9 +58,12 @@ export interface RoleDefinition {
 
 /**
  * How an agent binds a role. Two shapes, one resolved code path:
- *   - `ref`    — points at a `(id, version?)` in the RoleRegistry. A live
- *                link: editing that role changes every agent that refs it.
- *                Omitting `version` floats to the latest registered version.
+ *   - `ref`    — points at a `(id, version?)` in the RoleRegistry. Omitting
+ *                `version` follows the role's active version, so promoting
+ *                a new role version changes every agent that refs it. A
+ *                pinned version fixes the definition; layers it names by
+ *                bare fragment id still follow those fragments' active
+ *                versions (pin them as `"<id>@<version>"` too).
  *   - `inline` — carries the definition directly on the agent. A one-off,
  *                no shared link. "Save as role" lifts it into the registry
  *                and swaps the binding to a `ref`.
@@ -79,76 +84,37 @@ export interface RoleMetadata {
   readonly suggestedSecrets?: ReadonlyArray<string>;
 }
 
-/**
- * A registered role — JSON-serializable, durable, version-keyed. An agent
- * binds one of these by reference (live link) or carries one inline.
- */
-export interface RegisteredRole {
-  readonly id: string;
-  readonly version: string;
+/** What a role version stores. */
+export interface RoleRecipe {
   readonly definition: RoleDefinition;
   readonly metadata: RoleMetadata;
-  readonly createdAt: number;
-  readonly updatedAt: number;
 }
 
-export interface RegisterRoleInput {
-  readonly id: string;
-  /** Defaults to `"v1"` when omitted. */
-  readonly version?: string;
+/** `register` input body: metadata fields default when omitted. */
+export interface RoleRecipeInput {
   readonly definition: RoleDefinition;
   readonly metadata?: Partial<RoleMetadata>;
 }
 
-/** Filter / pagination params for `list`. */
-export interface ListRolesParams {
-  /** Restrict to roles whose `definition.capabilities` include this. */
-  readonly capability?: string;
-  /** Restrict to roles whose `metadata.tags` include this. */
-  readonly tag?: string;
-  readonly limit?: number;
-  readonly cursor?: string;
-  /** Defaults to "createdDesc" (most recent first). */
-  readonly order?: "createdAsc" | "createdDesc" | "idAsc";
-}
-
 /**
- * Versioned registry of role definitions. Implementations:
- *   - `InMemoryRoleRegistry` (reference, in this package)
- *   - `SqliteRoleRegistry` (SQLite, in `@promin/sqlite`)
- *   - `PostgresRoleRegistry` (Postgres, in `@promin/postgres`)
- *
- * All must pass `roleRegistryTestSuite`.
+ * A stored role version — JSON-serializable, immutable. An agent binds one
+ * by reference or carries a definition inline.
  */
-export interface RoleRegistry {
-  /**
-   * Register or replace a role at `(id, version)`. When the row exists,
-   * `definition` and `metadata` are replaced; `createdAt` is preserved and
-   * `updatedAt` advances.
-   */
-  register(input: RegisterRoleInput): Promise<RegisteredRole>;
+export type RegisteredRole = Versioned<RoleRecipe>;
 
-  /**
-   * Look up by id. When `version` is omitted, returns the most recently
-   * registered version of that id (sorted by `updatedAt` desc).
-   */
-  get(id: string, version?: string): Promise<RegisteredRole | null>;
+/** `RoleRegistry.register` input. */
+export type RegisterRoleInput = RegisterVersionInput<RoleRecipeInput>;
 
-  /** List, optionally filtered + paginated. */
-  list(params?: ListRolesParams): Promise<RegisteredRole[]>;
-
-  /** All versions of one id, in ascending `createdAt` order. */
-  versions(id: string): Promise<RegisteredRole[]>;
-
-  /**
-   * Remove a row. When `version` is omitted, removes ALL versions of `id`.
-   * No-op when nothing matches.
-   */
-  unregister(id: string, version?: string): Promise<void>;
+/** `RoleRegistry.list` filter; every field narrows. */
+export interface RoleFilter {
+  /** Only roles whose `definition.capabilities` include this. */
+  readonly capability?: string;
+  /** Only roles whose `metadata.tags` include this. */
+  readonly tag?: string;
 }
 
-/** Default version assigned to new registrations when caller doesn't specify. */
-export const DEFAULT_ROLE_VERSION = "v1";
+/** Versioned store of role definitions. */
+export type RoleRegistry = VersionedRegistry<RoleRecipe, RoleFilter, RoleRecipeInput>;
 
 /** Default `RoleMetadata` shape for new registrations. */
 export const DEFAULT_ROLE_METADATA: RoleMetadata = {

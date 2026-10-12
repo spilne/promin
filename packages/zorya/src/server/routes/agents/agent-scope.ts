@@ -25,7 +25,7 @@ import type { AgentGatewayDeps } from "./agent-gateway-deps.ts";
  * operators inspect and re-enable a kill-switched agent.
  */
 export function disabled410(recipe: RegisteredAgent): Response | null {
-  if (recipe.metadata.enabled === false) {
+  if (!recipe.enabled) {
     return jsonError(
       410,
       "agent_disabled",
@@ -213,7 +213,7 @@ export async function loadScopedAgent(params: {
   readonly invoking: boolean;
 }): Promise<ScopedAgent | Response> {
   const { deps, req, id, scope, invoking } = params;
-  const recipe = await deps.registry.get(id);
+  const recipe = await deps.registry.get({ id });
   if (!recipe) return agentNotFound(id);
   if (invoking) {
     const disabled = disabled410(recipe);

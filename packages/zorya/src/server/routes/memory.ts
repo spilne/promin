@@ -383,15 +383,18 @@ export function deleteNamespaceFact(deps: MemoryInspectorDeps) {
 async function loadPersona(deps: MemoryInspectorDeps, agentId: string): Promise<string | null> {
   if (!deps.registry) return null;
   try {
-    const recipe: RegisteredAgent | null = await deps.registry.get(agentId);
+    const recipe: RegisteredAgent | null = await deps.registry.get({ id: agentId });
     if (!recipe || recipe.backend.type !== "local") return null;
     const binding = recipe.backend.role;
     let def: RoleDefinition | undefined = inlineRoleDefinition(binding);
     if (!def && "ref" in binding && deps.roles) {
-      const role = await deps.roles.get(binding.ref.id, binding.ref.version);
+      const role = await deps.roles.get({
+        id: binding.ref.id,
+        ...(binding.ref.version !== undefined && { version: binding.ref.version }),
+      });
       def = role?.definition;
     }
-    const persona = resolveSystemPrompt({
+    const persona = await resolveSystemPrompt({
       systemPrompt: def?.systemPrompt ?? null,
       ...(deps.fragments !== undefined && { fragments: deps.fragments }),
     });

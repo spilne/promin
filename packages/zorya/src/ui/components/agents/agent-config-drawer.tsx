@@ -183,6 +183,7 @@ export function AgentConfigDrawer({
               agentId={agent.id}
               initialVersion={agent.version}
               onClose={onClose}
+              onPromoted={(promoted) => onSaved?.(promoted)}
               embed
             />
           )}
@@ -286,12 +287,12 @@ function RecipeBody({
           }
         />
         <KV
-          k="updated"
+          k="version created"
           v={
             <span class="text-base-content/70">
-              {new Date(agent.updatedAt).toISOString()}{" "}
+              {new Date(agent.createdAt).toISOString()}{" "}
               <span class="text-base-content/40">
-                ({formatRelative(new Date(agent.updatedAt).toISOString())})
+                ({formatRelative(new Date(agent.createdAt).toISOString())})
               </span>
             </span>
           }

@@ -32,7 +32,9 @@ function recipeWithRef(credentialRef?: string): RegisteredAgent {
     },
     metadata: { description: null, capabilities: [], tags: [] },
     createdAt: 0,
-    updatedAt: 0,
+    active: true,
+    enabled: true,
+    trust: "trusted",
   };
 }
 
@@ -57,7 +59,9 @@ describe("resolveCredentialRef", () => {
       },
       metadata: { description: null, capabilities: [], tags: [] },
       createdAt: 0,
-      updatedAt: 0,
+      active: true,
+      enabled: true,
+      trust: "trusted",
     };
     const secrets = new InMemorySecretsStorage();
     const out = await resolveCredentialRef({ recipe, secrets });

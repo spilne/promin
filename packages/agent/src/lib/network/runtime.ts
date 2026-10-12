@@ -158,16 +158,19 @@ export function createFindAgentTool(args: {
       limit: z.number().int().positive().max(100).optional().describe("Max hits. Default 25."),
     }),
     execute: async (input): Promise<FindAgentOutput> => {
-      const all = await deps.registry.list({
-        ...(input.capability !== undefined ? { capability: input.capability } : {}),
-        ...(input.tag !== undefined ? { tag: input.tag } : {}),
+      const { items: all } = await deps.registry.list({
+        filter: {
+          ...(input.capability !== undefined ? { capability: input.capability } : {}),
+          ...(input.tag !== undefined ? { tag: input.tag } : {}),
+          drafts: "exclude",
+        },
+        // A disabled (kill-switched) agent can't be called, so don't offer it.
+        enabled: true,
         limit: 1000,
       });
 
       const visible = all.filter((p) => {
         if (p.id === callerRecipe.id) return false; // never list self
-        // A disabled (kill-switched) agent can't be called, so don't offer it.
-        if (p.metadata.enabled === false) return false;
         return peerVisible({
           callerNamespaceId: scope.namespaceId,
           callerNetworks: network.networks,
@@ -255,9 +258,9 @@ export function createCallAgentTool(args: {
 
   /** The callee's recipe, if it may still run. */
   async function enabledRecipe(id: string): Promise<RegisteredAgent | string> {
-    const recipe = await deps.registry.get(id);
+    const recipe = await deps.registry.get({ id });
     if (!recipe) return `agent_not_found: no recipe registered as "${id}"`;
-    if (recipe.metadata.enabled === false) return `agent_disabled: "${recipe.id}" is disabled`;
+    if (!recipe.enabled) return `agent_disabled: "${recipe.id}" is disabled`;
     return recipe;
   }
 
@@ -331,7 +334,7 @@ export function createCallAgentTool(args: {
       // The peer runs as the version the call was routed to: a child run
       // re-attached after a crash is never driven by another definition.
       const data = route.data as unknown as CallAgentRouteData;
-      const recipe = await deps.registry.get(route.agentId, data.version);
+      const recipe = await deps.registry.get({ id: route.agentId, version: data.version });
       if (!recipe) {
         throw new ChildWorkflowGoneError({
           message: `agent_version_gone: "${route.agentId}" version ${data.version} is no longer registered`,

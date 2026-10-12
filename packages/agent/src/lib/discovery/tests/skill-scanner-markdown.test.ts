@@ -15,7 +15,7 @@ import { mkdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { SkillScanner, applyDiscoveredSkills } from "../skill-scanner.ts";
-import { InMemorySkillRegistry } from "../../skills/in-memory-skill-registry.ts";
+import { InMemorySkillRegistry } from "../../versioned-registry/in-memory-registries.ts";
 import {
   resolveSkillCatalog,
   buildSkillCatalogPrompt,
@@ -99,16 +99,16 @@ describe("SkillScanner — markdown", () => {
   it("ignores trust declared in frontmatter: a new markdown skill needs review", async () => {
     const registry = new InMemorySkillRegistry();
     const { skills } = await SkillScanner.scanFolder(ROOT);
-    expect(skills.find((s) => s.id === "structured-debugging")?.metadata?.trust).toBeUndefined();
-    await applyDiscoveredSkills(registry, skills);
-    expect((await registry.get("structured-debugging"))?.metadata.trust).toBe("needs-review");
+    expect(skills.find((s) => s.id === "structured-debugging")?.trust).toBeUndefined();
+    await applyDiscoveredSkills({ registry, skills });
+    expect((await registry.get({ id: "structured-debugging" }))?.trust).toBe("needs-review");
   });
 
   it("flows through the registry + catalog end-to-end (whenToUse falls back to description)", async () => {
     const registry = new InMemorySkillRegistry();
     const { skills } = await SkillScanner.scanFolder(ROOT);
     // The host vouches for this root (operator config, not the file).
-    await applyDiscoveredSkills(registry, skills, { trusted: true });
+    await applyDiscoveredSkills({ registry, skills, trusted: true });
 
     const recipe: RegisteredAgent = {
       id: "skilled-bot",
@@ -122,7 +122,9 @@ describe("SkillScanner — markdown", () => {
       },
       metadata: { description: null, capabilities: [], tags: [] },
       createdAt: 0,
-      updatedAt: 0,
+      active: true,
+      enabled: true,
+      trust: "trusted",
     };
     const catalog = await resolveSkillCatalog({
       recipe,

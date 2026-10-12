@@ -4,32 +4,44 @@
 // fragments) + tools + skills + capabilities. Agents bind a role by ref
 // (shared, live) or inline (one-off). See ROLE_AGENT_MODEL.
 //
-// Routes:
-//   GET    /api/roles              — list (filter by tag / capability)
-//   GET    /api/roles/:id          — get one (active version)
+// Routes (versioning per `versioned-resource.ts`):
+//   GET    /api/roles              — active version per role (tag / capability
+//                                    filter, `limit` + `cursor` paging)
+//   GET    /api/roles/:id          — get one (active, or ?version=)
 //   GET    /api/roles/:id/versions — all versions of an id
-//   POST   /api/roles              — create a role (409 when (id, version) exists)
-//   PATCH  /api/roles/:id          — edit the active version (metadata merges);
-//                                    `If-Match` (the GET `etag`) → 412 on mismatch
+//   POST   /api/roles              — create a role (409 when the id exists)
+//   PATCH  /api/roles/:id          — new version from the active one (metadata
+//                                    merges) and/or the kill switch (`enabled`);
+//                                    `If-Match` required
+//   POST   /api/roles/:id/promote  — make a version active
 //   DELETE /api/roles/:id          — delete (all versions, or ?version=);
-//                                    409 while agents bind it, unless ?force=true
+//                                    409 while an agent binds it, unless ?force=true
 //
 // Like skills, a role is pure data — there is no resolver here. An agent's
 // resolver loads + expands the bound role at materialize time.
 // ---------------------------------------------------------------------------
 
-import type {
-  AgentRegistry,
-  RegisteredRole,
-  RegisterRoleInput,
-  RoleDefinition,
-  RoleMetadata,
-  RoleRegistry,
+import {
+  listAllVersioned,
+  type AgentRegistry,
+  type RegisteredRole,
+  type RoleDefinition,
+  type RoleMetadata,
+  type RoleRegistry,
 } from "@promin/agent";
-import { DEFAULT_ROLE_VERSION } from "@promin/agent";
 import { z } from "zod";
 import { json, jsonError, parseIntParam, readJson } from "../router.ts";
-import { assertIfMatch, contentEtag, withEtag } from "../preconditions.ts";
+import {
+  matchActiveVersion,
+  createOnly,
+  deleteRoute,
+  entryResponse,
+  ifMatchVersions,
+  listVersionsRoute,
+  optionalVersion,
+  promoteRoute,
+  registryCall,
+} from "./versioned-resource.ts";
 
 // Re-export so the UI bundle types responses without importing @promin/agent
 // directly (matches agents.ts / skills.ts).
@@ -37,6 +49,8 @@ export type { RegisteredRole, RoleDefinition, RoleMetadata } from "@promin/agent
 
 export interface RolesListResponse {
   roles: RegisteredRole[];
+  /** Pass as `cursor` for the next page; `null` on the last one. */
+  nextCursor: string | null;
 }
 
 export interface RoleVersionsResponse {
@@ -54,6 +68,10 @@ function parseLimitParam(raw: string | null): number | undefined {
   return parseIntParam({ raw, min: 1, max: 1_000 });
 }
 
+function roleNotFound(id: string): Response {
+  return jsonError(404, "role_not_found", `Role "${id}" is not registered.`);
+}
+
 // ---------------------------------------------------------------------------
 // List + get
 // ---------------------------------------------------------------------------
@@ -65,8 +83,18 @@ export function listRoles(deps: RoleGatewayDeps) {
     const tag = url.searchParams.get("tag") ?? undefined;
     const limit = parseLimitParam(url.searchParams.get("limit"));
     const cursor = url.searchParams.get("cursor") ?? undefined;
-    const roles = await deps.registry.list({ capability, tag, limit, cursor });
-    return json(200, { roles } satisfies RolesListResponse);
+    const page = await deps.registry.list({
+      filter: {
+        ...(capability !== undefined && { capability }),
+        ...(tag !== undefined && { tag }),
+      },
+      ...(limit !== undefined && { limit }),
+      ...(cursor !== undefined && { cursor }),
+    });
+    return json(200, {
+      roles: page.items,
+      nextCursor: page.nextCursor,
+    } satisfies RolesListResponse);
   };
 }
 
@@ -74,31 +102,19 @@ export function getRole(deps: RoleGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
-    const url = new URL(req.url);
-    const version = url.searchParams.get("version") ?? undefined;
-    const role = await deps.registry.get(id, version);
+    const version = new URL(req.url).searchParams.get("version") ?? undefined;
+    const role = await deps.registry.get({ id, ...(version !== undefined && { version }) });
     if (!role) return roleNotFound(id);
-    return roleResponse(200, role);
+    return entryResponse({ status: 200, entry: role });
   };
 }
 
 export function listRoleVersions(deps: RoleGatewayDeps) {
-  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    if (!id) return jsonError(400, "missing_id");
-    const versions = await deps.registry.versions(id);
-    if (versions.length === 0) return roleNotFound(id);
-    return json(200, { versions } satisfies RoleVersionsResponse);
-  };
+  return listVersionsRoute({ registry: deps.registry, notFound: roleNotFound });
 }
 
-/** A role row with its entity tag (`If-Match` on PATCH compares against it). */
-function roleResponse(status: number, role: RegisteredRole): Response {
-  return withEtag(json(status, role), contentEtag(role));
-}
-
-function roleNotFound(id: string): Response {
-  return jsonError(404, "role_not_found", `Role "${id}" is not registered.`);
+export function promoteRole(deps: RoleGatewayDeps) {
+  return promoteRoute({ registry: deps.registry, notFound: roleNotFound });
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +126,17 @@ interface CreateRoleRequest {
   readonly version?: unknown;
   readonly definition?: unknown;
   readonly metadata?: unknown;
+}
+
+interface UpdateRoleRequest {
+  /** Label of the new version. Default: the next `v<n>`. */
+  readonly version?: unknown;
+  readonly definition?: unknown;
+  readonly metadata?: unknown;
+  /** Make the new version active. Default `true`. */
+  readonly publish?: unknown;
+  /** The role's kill switch: agents bound to a disabled role fail to resolve. */
+  readonly enabled?: unknown;
 }
 
 const RoleMetadataPatchSchema = z
@@ -162,10 +189,6 @@ function parseMetadata(
   return { metadata: parsed.data };
 }
 
-function optionalString(raw: unknown): string | undefined {
-  return typeof raw === "string" && raw.length > 0 ? raw : undefined;
-}
-
 export function createRole(deps: RoleGatewayDeps) {
   return async (req: Request): Promise<Response> => {
     const body = await readJson<CreateRoleRequest>(req);
@@ -174,6 +197,7 @@ export function createRole(deps: RoleGatewayDeps) {
     if (body.id.startsWith("_")) {
       return jsonError(400, "reserved_id_prefix", "Role ids starting with `_` are reserved.");
     }
+    const id = body.id;
     const def = parseDefinition(body.definition);
     if ("error" in def) return jsonError(400, def.error, def.message);
     let metadata: Partial<RoleMetadata> | undefined;
@@ -182,22 +206,20 @@ export function createRole(deps: RoleGatewayDeps) {
       if ("error" in parsed) return jsonError(400, parsed.error, parsed.message);
       metadata = parsed.metadata;
     }
-    const version = optionalString(body.version) ?? DEFAULT_ROLE_VERSION;
-    if (await deps.registry.get(body.id, version)) {
-      return jsonError(409, "role_exists", `Role "${body.id}@${version}" already exists.`);
-    }
-    const input: RegisterRoleInput = {
-      id: body.id,
-      version,
-      definition: def.definition,
-      ...(metadata !== undefined && { metadata }),
-    };
-    const registered = await deps.registry.register(input);
-    // Answer the row as the store reads it back, so the `etag` matches the next GET.
-    return roleResponse(
-      201,
-      (await deps.registry.get(registered.id, registered.version)) ?? registered,
-    );
+    const version = optionalVersion(body.version);
+    const created = await createOnly({
+      register: () =>
+        deps.registry.register({
+          id,
+          ...(version !== undefined && { version }),
+          definition: def.definition,
+          ...(metadata !== undefined && { metadata }),
+          expectedActive: null,
+        }),
+      onExists: () => jsonError(409, "role_exists", `Role "${id}" already exists.`),
+    });
+    if (created instanceof Response) return created;
+    return entryResponse({ status: 201, entry: created });
   };
 }
 
@@ -205,21 +227,23 @@ export function updateRole(deps: RoleGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
-    const body = await readJson<CreateRoleRequest>(req);
+    const body = await readJson<UpdateRoleRequest>(req);
     if (!body) return jsonError(400, "missing_body");
-
-    const active = await deps.registry.get(id);
-    if (!active) return roleNotFound(id);
-    const version = optionalString(body.version);
-    if (version !== undefined && version !== active.version) {
-      if (!(await deps.registry.get(id, version))) return roleNotFound(id);
-      return jsonError(
-        409,
-        "version_not_active",
-        `Only the active version (${active.version}) can be edited; publish a new version instead.`,
-      );
+    const ifMatch = ifMatchVersions({ req, required: true });
+    if (body.publish !== undefined && typeof body.publish !== "boolean") {
+      return jsonError(400, "invalid_publish");
     }
-    assertIfMatch({ req, etag: contentEtag(active), what: "role" });
+    if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
+      return jsonError(400, "invalid_enabled");
+    }
+    const enabled = typeof body.enabled === "boolean" ? body.enabled : undefined;
+    const editsContent =
+      (body.definition !== undefined && body.definition !== null) ||
+      (body.metadata !== undefined && body.metadata !== null);
+
+    const active = await deps.registry.get({ id });
+    if (!active) return roleNotFound(id);
+    matchActiveVersion({ tags: ifMatch, active: active.version });
 
     // Field-merge against the active row so a partial PATCH (e.g. just
     // editing tags) keeps everything it doesn't mention.
@@ -235,47 +259,61 @@ export function updateRole(deps: RoleGatewayDeps) {
       if ("error" in parsed) return jsonError(400, parsed.error, parsed.message);
       metadata = { ...active.metadata, ...parsed.metadata };
     }
-    const updated = await deps.registry.register({
-      id,
-      version: active.version,
-      definition,
-      metadata,
-    });
-    return roleResponse(200, (await deps.registry.get(id, updated.version)) ?? updated);
+    const version = optionalVersion(body.version);
+    // One write: the new version and the kill switch land together or not at all.
+    const updated =
+      !editsContent && enabled !== undefined
+        ? await registryCall(() =>
+            deps.registry.setEnabled({ id, enabled, expectedActive: active.version }),
+          )
+        : await registryCall(() =>
+            deps.registry.register({
+              id,
+              ...(version !== undefined && { version }),
+              definition,
+              metadata,
+              promote: body.publish !== false,
+              expectedActive: active.version,
+              ...(enabled !== undefined && { enabled }),
+            }),
+          );
+    return entryResponse({ status: 200, entry: updated });
   };
 }
 
 export function deleteRole(deps: RoleGatewayDeps) {
-  return async (req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    if (!id) return jsonError(400, "missing_id");
-    const url = new URL(req.url);
-    const version = url.searchParams.get("version") ?? undefined;
-    const force = url.searchParams.get("force") === "true";
-    if (!(await deps.registry.get(id, version))) return roleNotFound(id);
-    if (!force && deps.agents) {
-      const bound = await agentsBindingRole({ agents: deps.agents, roleId: id, version });
-      if (bound.length > 0) {
-        return json(409, {
-          error: "role_in_use",
-          message: "Agents still bind this role; rebind them or pass ?force=true.",
-          agents: bound,
-        });
-      }
-    }
-    await deps.registry.unregister(id, version);
-    return new Response(null, { status: 204 });
-  };
+  return deleteRoute({
+    registry: deps.registry,
+    notFound: roleNotFound,
+    beforeDelete: async ({ req, id, version }) => {
+      const force = new URL(req.url).searchParams.get("force") === "true";
+      if (force || !deps.agents) return undefined;
+      const bound = await agentsBindingRole({
+        agents: deps.agents,
+        roleId: id,
+        ...(version !== undefined && { version }),
+      });
+      if (bound.length === 0) return undefined;
+      return json(409, {
+        error: "role_in_use",
+        message: "Agents still bind this role; rebind them or pass ?force=true.",
+        agents: bound,
+      });
+    },
+  });
 }
 
-/** Ids of agents (any version) bound by ref to `roleId` (at `version`, when given). */
+/**
+ * Ids of agents whose active version binds `roleId` by ref (at `version`,
+ * when given — a ref without a version follows the active role version).
+ */
 async function agentsBindingRole(params: {
   agents: AgentRegistry;
   roleId: string;
   version?: string;
 }): Promise<string[]> {
   const ids = new Set<string>();
-  for (const recipe of await params.agents.list({})) {
+  for (const recipe of await listAllVersioned({ registry: params.agents })) {
     if (recipe.backend.type !== "local" || !("ref" in recipe.backend.role)) continue;
     const ref = recipe.backend.role.ref;
     if (ref.id !== params.roleId) continue;

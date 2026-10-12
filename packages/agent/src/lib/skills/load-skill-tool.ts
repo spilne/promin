@@ -79,7 +79,7 @@ export function createLoadSkillTool(
             "Use one of those ids exactly as listed under '## Skills'.",
         };
       }
-      const row = await config.registry.get(id, version);
+      const row = await config.registry.get({ id, version });
       if (!row) {
         // The catalog pinned this version at resolve time but the registry
         // no longer has it (e.g. unregistered mid-session). Surface clearly
@@ -88,6 +88,15 @@ export function createLoadSkillTool(
           error:
             `Skill "${id}@${version}" was in your catalog but is no longer available in the ` +
             "registry. Proceed without it or tell the user it's unavailable.",
+        };
+      }
+      // Re-checked at load time: a skill disabled, or a version sent back
+      // for review, after the catalog was built is not delivered.
+      if (!row.enabled || row.trust === "needs-review") {
+        return {
+          error:
+            `Skill "${id}@${version}" is not available right now. ` +
+            "Proceed without it or tell the user it's unavailable.",
         };
       }
       return { id: row.id, version: row.version, body: row.body };

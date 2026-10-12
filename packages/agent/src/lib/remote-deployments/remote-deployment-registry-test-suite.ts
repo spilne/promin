@@ -1,33 +1,31 @@
 // ---------------------------------------------------------------------------
 // Conformance suite for `RemoteDeploymentRegistry`. Every implementation
-// (in-memory, future Sqlite/Postgres) must pass.
+// (in-memory, SQLite, Postgres) must pass.
 //
-// Tests drive a `FakeWallClock` so they can fast-forward across the TTL
-// window without sleeping.
+// Tests move time with the harness's `advance`: a `FakeWallClock` for the
+// single-host stores, and shifting the stored stamps back for Postgres,
+// whose expiry runs on the database clock.
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { FakeWallClock } from "@promin/workflow";
 import type { RemoteDeploymentRegistry } from "./types.ts";
 
-export interface RemoteDeploymentRegistryFactory {
-  /** Build a fresh registry with `clock` as the time source. */
-  (clock: FakeWallClock): RemoteDeploymentRegistry | Promise<RemoteDeploymentRegistry>;
+export interface RemoteDeploymentRegistryHarness {
+  readonly registry: RemoteDeploymentRegistry;
+  /** Let `ms` pass, as far as the registry's expiry is concerned. */
+  advance(ms: number): void | Promise<void>;
+  /** The registry's current time, when the test can know it exactly. */
+  now?(): number;
 }
 
+/** Builds a fresh, empty registry harness. */
+export type RemoteDeploymentRegistryFactory = () =>
+  | RemoteDeploymentRegistryHarness
+  | Promise<RemoteDeploymentRegistryHarness>;
+
 export function remoteDeploymentRegistryTestSuite(factory: RemoteDeploymentRegistryFactory) {
-  async function make(): Promise<{
-    registry: RemoteDeploymentRegistry;
-    advance: (ms: number) => void;
-    now: () => number;
-  }> {
-    const clock = FakeWallClock.create(1_700_000_000_000);
-    const registry = await factory(clock);
-    return {
-      registry,
-      advance: (ms) => clock.advance(ms),
-      now: () => clock.currentTimeMs(),
-    };
+  async function make(): Promise<RemoteDeploymentRegistryHarness> {
+    return factory();
   }
 
   describe("RemoteDeploymentRegistry conformance", () => {
@@ -41,9 +39,10 @@ export function remoteDeploymentRegistryTestSuite(factory: RemoteDeploymentRegis
         expect(r.deploymentId).toBeTruthy();
         expect(r.endpoint).toBe("https://server-b");
         expect(r.agents).toEqual(["claude-bot", "analyst-bot"]);
-        expect(r.registeredAt).toBe(now());
-        expect(r.lastHeartbeat).toBe(now());
+        expect(r.lastHeartbeat).toBe(r.registeredAt);
+        if (now) expect(r.registeredAt).toBe(now());
         expect(r.ttlMs).toBeGreaterThan(0);
+        expect(await registry.get(r.deploymentId)).toEqual(r);
       });
 
       it("returns distinct ids for two register calls with the same endpoint", async () => {
@@ -74,18 +73,19 @@ export function remoteDeploymentRegistryTestSuite(factory: RemoteDeploymentRegis
       it("extends lastHeartbeat to current time", async () => {
         const { registry, advance, now } = await make();
         const r = await registry.register({ endpoint: "https://x", agents: ["a"] });
-        const initial = r.lastHeartbeat;
-        advance(15_000);
+        await advance(15_000);
+        const before = (await registry.get(r.deploymentId))!.lastHeartbeat;
         const updated = await registry.heartbeat(r.deploymentId);
         expect(updated).not.toBeNull();
-        expect(updated?.lastHeartbeat).toBe(now());
-        expect(updated?.lastHeartbeat).toBeGreaterThan(initial);
+        if (now) expect(updated?.lastHeartbeat).toBe(now());
+        expect(updated!.lastHeartbeat).toBeGreaterThan(before);
+        expect((await registry.get(r.deploymentId))?.lastHeartbeat).toBe(updated!.lastHeartbeat);
       });
 
       it("returns null once the TTL has passed, even before a sweep", async () => {
         const { registry, advance } = await make();
         const r = await registry.register({ endpoint: "https://x", agents: ["a"], ttlMs: 1_000 });
-        advance(1_000);
+        await advance(1_000);
         expect(await registry.heartbeat(r.deploymentId)).toBeNull();
         const expired = await registry.expireStale();
         expect(expired.map((d) => d.deploymentId)).toEqual([r.deploymentId]);
@@ -136,7 +136,7 @@ export function remoteDeploymentRegistryTestSuite(factory: RemoteDeploymentRegis
           agents: ["a"],
           ttlMs: 10_000,
         });
-        advance(15_000);
+        await advance(15_000);
         const expired = await registry.expireStale();
         expect(expired.map((d) => d.deploymentId)).toEqual([r.deploymentId]);
         expect(await registry.list()).toEqual([]);
@@ -149,7 +149,7 @@ export function remoteDeploymentRegistryTestSuite(factory: RemoteDeploymentRegis
           agents: ["a"],
           ttlMs: 60_000,
         });
-        advance(30_000);
+        await advance(30_000);
         const expired = await registry.expireStale();
         expect(expired).toEqual([]);
         expect(await registry.get(r.deploymentId)).not.toBeNull();
@@ -162,9 +162,9 @@ export function remoteDeploymentRegistryTestSuite(factory: RemoteDeploymentRegis
           agents: ["a"],
           ttlMs: 10_000,
         });
-        advance(8_000);
+        await advance(8_000);
         await registry.heartbeat(r.deploymentId);
-        advance(8_000); // total 16s, but heartbeat at 8s, so 8s since last heartbeat
+        await advance(8_000); // total 16s, but heartbeat at 8s, so 8s since last heartbeat
         const expired = await registry.expireStale();
         expect(expired).toEqual([]);
       });
@@ -172,7 +172,7 @@ export function remoteDeploymentRegistryTestSuite(factory: RemoteDeploymentRegis
       it("is idempotent — running twice doesn't double-report", async () => {
         const { registry, advance } = await make();
         await registry.register({ endpoint: "https://x", agents: ["a"], ttlMs: 1_000 });
-        advance(5_000);
+        await advance(5_000);
         const first = await registry.expireStale();
         expect(first).toHaveLength(1);
         const second = await registry.expireStale();

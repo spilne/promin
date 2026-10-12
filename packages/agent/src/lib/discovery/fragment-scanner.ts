@@ -2,22 +2,31 @@
 // FragmentScanner — auto-discover prompt fragments from a folder of `.md`
 // files. Sibling of `SkillScanner` / `AgentScanner`.
 //
-// Each .md file is one fragment: the **key** is the file basename without
+// Each .md file is one fragment: the **id** is the file basename without
 // the `.md` extension; the **content** is the entire file body. README.md
 // is skipped by convention (it's prose, not a fragment).
 //
 // `applyDiscoveredFragments` reconciles a discovered set into a
-// `FragmentRegistry`: upsert by default, opt-in `sync` mode to delete
-// entries not in the scan.
+// `FragmentRegistry` through `applyDiscovered`: unchanged fragments are
+// left alone, changed ones become a new promoted version, and opt-in
+// `sync` removes scanner-written fragments whose file is gone — never an
+// operator-authored one.
 // ---------------------------------------------------------------------------
 
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { type WallClock, SystemWallClock } from "@promin/workflow";
-import type { FragmentRegistry } from "../fragments/types.ts";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
+import {
+  FRAGMENT_VERSION_SEPARATOR,
+  type FragmentRegistry,
+  type RegisterFragmentInput,
+} from "../fragments/types.ts";
+import { applyDiscovered, type ApplyDiscoveredResult } from "./apply-discovered.ts";
+import { startScanLoop, type ScanLoopHandle, type ScanLoopTick } from "./scan-loop.ts";
 
+/** A discovered fragment: its id (file basename) and content. */
 export interface FragmentSpec {
-  readonly key: string;
+  readonly id: string;
   readonly content: string;
 }
 
@@ -34,9 +43,12 @@ export interface FragmentScannerOptions {
 
 export interface FragmentScanResult {
   readonly fragments: FragmentSpec[];
-  /** Per-key source path — useful for duplicate diagnostics. */
+  /** Per-id source path — useful for duplicate diagnostics. */
   readonly sources: Record<string, string>;
+  /** Diagnostics that did not lose a fragment (duplicates). */
   readonly warnings: string[];
+  /** Directories or fragment files that could not be read, or are empty or misnamed. */
+  readonly errors: string[];
 }
 
 const DEFAULT_EXTENSIONS = [".md"];
@@ -63,26 +75,23 @@ export class FragmentScanner {
   }
 
   async scan(root: string): Promise<FragmentScanResult> {
-    const fragments: FragmentSpec[] = [];
-    const sources: Record<string, string> = {};
-    const warnings: string[] = [];
-    await this.walk(root, 0, fragments, sources, warnings);
-    return { fragments, sources, warnings };
+    const out: FragmentScanResult = { fragments: [], sources: {}, warnings: [], errors: [] };
+    await this.walk({ dir: root, depth: 0, out });
+    return out;
   }
 
-  private async walk(
-    dir: string,
-    depth: number,
-    fragments: FragmentSpec[],
-    sources: Record<string, string>,
-    warnings: string[],
-  ): Promise<void> {
+  private async walk(params: {
+    dir: string;
+    depth: number;
+    out: FragmentScanResult;
+  }): Promise<void> {
+    const { dir, depth, out } = params;
     if (depth > this.maxDepth) return;
     let entries;
     try {
       entries = await readdir(dir, { withFileTypes: true });
     } catch (err) {
-      warnings.push(`failed to read ${dir}: ${asMessage(err)}`);
+      out.errors.push(`failed to read ${dir}: ${asMessage(err)}`);
       return;
     }
     for (const entry of entries) {
@@ -90,7 +99,7 @@ export class FragmentScanner {
       const full = join(dir, name);
       if (entry.isDirectory()) {
         if (name === "node_modules" || name.startsWith(".")) continue;
-        await this.walk(full, depth + 1, fragments, sources, warnings);
+        await this.walk({ dir: full, depth: depth + 1, out });
         continue;
       }
       if (!entry.isFile()) continue;
@@ -99,41 +108,49 @@ export class FragmentScanner {
       // README.md is prose, not a fragment.
       if (name.toLowerCase() === "readme.md") continue;
 
-      await this.loadFragment(full, name, fragments, sources, warnings);
+      await this.loadFragment({ absPath: full, fileName: name, out });
     }
   }
 
-  private async loadFragment(
-    absPath: string,
-    fileName: string,
-    fragments: FragmentSpec[],
-    sources: Record<string, string>,
-    warnings: string[],
-  ): Promise<void> {
+  private async loadFragment(params: {
+    absPath: string;
+    fileName: string;
+    out: FragmentScanResult;
+  }): Promise<void> {
+    const { absPath, fileName, out } = params;
+    const { fragments, sources, warnings } = out;
     let text: string;
     try {
       text = await readFile(absPath, "utf8");
     } catch (err) {
-      warnings.push(`failed to read ${absPath}: ${asMessage(err)}`);
+      out.errors.push(`failed to read ${absPath}: ${asMessage(err)}`);
       return;
     }
     const content = text.trim();
+    // An empty or unusable file is a scan error, not a removed fragment:
+    // sync deletes nothing on a scan with errors.
     if (content.length === 0) {
-      warnings.push(`fragment file is empty: ${absPath}`);
+      out.errors.push(`fragment file is empty: ${absPath}`);
       return;
     }
-    const key = fileName.slice(0, -3); // strip ".md"
-    const existing = sources[key];
-    if (existing && existing !== absPath) {
-      warnings.push(`duplicate fragment key "${key}": ${existing} vs ${absPath} — last wins`);
-      const i = fragments.findIndex((f) => f.key === key);
-      if (i >= 0) fragments[i] = { key, content };
-      else fragments.push({ key, content });
-    } else {
-      fragments.push({ key, content });
+    const id = fileName.slice(0, -3); // strip ".md"
+    if (id.includes(FRAGMENT_VERSION_SEPARATOR)) {
+      out.errors.push(
+        `fragment file name contains "${FRAGMENT_VERSION_SEPARATOR}" (reserved for version pins): ${absPath}`,
+      );
+      return;
     }
-    sources[key] = absPath;
-    this.onFragment?.({ key, content }, absPath);
+    const existing = sources[id];
+    if (existing && existing !== absPath) {
+      warnings.push(`duplicate fragment id "${id}": ${existing} vs ${absPath} — last wins`);
+      const i = fragments.findIndex((f) => f.id === id);
+      if (i >= 0) fragments[i] = { id, content };
+      else fragments.push({ id, content });
+    } else {
+      fragments.push({ id, content });
+    }
+    sources[id] = absPath;
+    this.onFragment?.({ id, content }, absPath);
   }
 }
 
@@ -141,47 +158,28 @@ export class FragmentScanner {
 // Reconcile a discovered set into a `FragmentRegistry`.
 // ---------------------------------------------------------------------------
 
-export interface ApplyDiscoveredFragmentsOptions {
-  /** Delete registry entries whose `key` isn't in the discovered set. */
+export interface ApplyDiscoveredFragmentsParams {
+  readonly registry: FragmentRegistry;
+  readonly fragments: ReadonlyArray<FragmentSpec>;
+  /** Remove scanner-written fragments whose file is gone. Default `false`. */
   readonly sync?: boolean;
+  /** Whether the scan read every file; `false` skips sync deletes. Default `true`. */
+  readonly complete?: boolean;
 }
 
-export interface ApplyDiscoveredFragmentsResult {
-  /** Every fragment key that was applied this run. */
-  readonly upserted: string[];
-  /** Subset of `upserted` that didn't exist before this call. */
-  readonly added: string[];
-  /** Only populated when `sync: true`. */
-  readonly deleted: string[];
-}
-
-export function applyDiscoveredFragments(
-  registry: FragmentRegistry,
-  fragments: ReadonlyArray<FragmentSpec>,
-  options: ApplyDiscoveredFragmentsOptions = {},
-): ApplyDiscoveredFragmentsResult {
-  const upserted: string[] = [];
-  const added: string[] = [];
-  const deleted: string[] = [];
-
-  const existingKeys = new Set(registry.list().map((f) => f.key));
-  for (const frag of fragments) {
-    const wasExisting = existingKeys.has(frag.key);
-    registry.set(frag.key, frag.content);
-    upserted.push(frag.key);
-    if (!wasExisting) added.push(frag.key);
-  }
-
-  if (options.sync) {
-    const discovered = new Set(fragments.map((f) => f.key));
-    for (const key of existingKeys) {
-      if (!discovered.has(key)) {
-        registry.delete(key);
-        deleted.push(key);
-      }
-    }
-  }
-  return { upserted, added, deleted };
+export async function applyDiscoveredFragments(
+  params: ApplyDiscoveredFragmentsParams,
+): Promise<ApplyDiscoveredResult> {
+  const discovered: RegisterFragmentInput[] = params.fragments.map((f) => ({
+    id: f.id,
+    content: f.content,
+  }));
+  return applyDiscovered({
+    registry: params.registry,
+    discovered,
+    ...(params.sync !== undefined && { sync: params.sync }),
+    ...(params.complete !== undefined && { complete: params.complete }),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -194,73 +192,47 @@ export interface FragmentScanLoopOptions {
   readonly root: string;
   /** Poll interval in ms. Default: `5_000`. */
   readonly intervalMs?: number;
-  /** Pass through to `applyDiscoveredFragments` — sweeps removed files. Default: `false`. */
+  /** Pass through to `applyDiscoveredFragments`. Default: `false`. */
   readonly sync?: boolean;
-  readonly onTick?: (event: FragmentScanLoopTick) => void;
+  readonly onTick?: (event: ScanLoopTick) => void;
+  /** A failed timer tick lands here. Default: `console.error`. */
+  readonly onError?: (err: unknown) => void;
   readonly clock?: WallClock;
   readonly scanner?: FragmentScannerOptions;
 }
 
-export interface FragmentScanLoopTick {
-  readonly added: string[];
-  readonly upserted: string[];
-  readonly deleted: string[];
-  readonly warnings: string[];
-  readonly durationMs: number;
-}
-
-export interface FragmentScanLoopHandle {
-  stop(): void;
-  tick(): Promise<FragmentScanLoopTick>;
-}
-
-export function startFragmentScanLoop(options: FragmentScanLoopOptions): FragmentScanLoopHandle {
+export function startFragmentScanLoop(
+  options: FragmentScanLoopOptions,
+): ScanLoopHandle<ScanLoopTick> {
   const clock = options.clock ?? SystemWallClock;
-  const intervalMs = options.intervalMs ?? 5_000;
   const scanner = new FragmentScanner(options.scanner ?? {});
-
-  let inFlight: Promise<FragmentScanLoopTick> | null = null;
-  let stopped = false;
-
-  async function runOnce(): Promise<FragmentScanLoopTick> {
-    const start = clock.currentTimeMs();
-    const scan = await scanner.scan(options.root);
-    const apply = applyDiscoveredFragments(options.registry, scan.fragments, {
-      sync: options.sync ?? false,
-    });
-    const tick: FragmentScanLoopTick = {
-      added: apply.added,
-      upserted: apply.upserted,
-      deleted: apply.deleted,
-      warnings: scan.warnings,
-      durationMs: clock.currentTimeMs() - start,
-    };
-    options.onTick?.(tick);
-    return tick;
-  }
-
-  async function tickGuarded(): Promise<FragmentScanLoopTick> {
-    if (inFlight) return inFlight;
-    const p = runOnce().finally(() => {
-      inFlight = null;
-    });
-    inFlight = p;
-    return p;
-  }
-
-  const handle = clock.setInterval(() => {
-    if (stopped) return;
-    void tickGuarded();
-  }, intervalMs);
-
-  return {
-    stop() {
-      if (stopped) return;
-      stopped = true;
-      handle.clear();
+  return startScanLoop({
+    label: "fragment-scan",
+    clock,
+    ...(options.intervalMs !== undefined && { intervalMs: options.intervalMs }),
+    ...(options.onError !== undefined && { onError: options.onError }),
+    run: async () => {
+      const start = clock.currentTimeMs();
+      const scan = await scanner.scan(options.root);
+      const apply = await applyDiscoveredFragments({
+        registry: options.registry,
+        fragments: scan.fragments,
+        sync: options.sync ?? false,
+        complete: scan.errors.length === 0,
+      });
+      const tick: ScanLoopTick = {
+        added: apply.added,
+        upserted: apply.upserted,
+        changed: apply.changed,
+        deleted: apply.deleted,
+        warnings: [...scan.warnings, ...apply.warnings],
+        errors: scan.errors,
+        durationMs: clock.currentTimeMs() - start,
+      };
+      options.onTick?.(tick);
+      return tick;
     },
-    tick: tickGuarded,
-  };
+  });
 }
 
 function asMessage(err: unknown): string {

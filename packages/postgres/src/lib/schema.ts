@@ -784,96 +784,81 @@ export const workflowStreams = pgTable(
 );
 
 // ---------------------------------------------------------------------------
-// Agent registry — versioned recipe store. Mirrors the shape of
-// SqliteAgentRegistry: one row per (id, version) tuple. Backend and
-// metadata are stored as JSONB so new backend variants land without
-// schema migrations. The `id` column is `agent_id` to keep the column
-// names readable when joined against future agent_* tables.
+// Versioned registry — the one store behind agents, roles, skills, DAGs and
+// prompt fragments (`PostgresVersionedRegistry`). Rows are keyed by `kind`.
+//
+// registry_head: one row per (kind, id) — the active version, the id's kill
+// switch, and the next per-id sequence number.
+// registry_version: one row per immutable version. `body` is the kind's
+// JSON body, `body_hash` its canonical hash (identical bodies reuse a
+// version), `facets` the strings `list` filters on, `seq` the per-id order
+// (latest = highest seq; never a timestamp). Removed versions stay as
+// tombstones and heads are never deleted, so a label or a sequence number
+// is never bound to another body. `id` is `COLLATE "C"` (byte order, the
+// order `list` pages in).
 // ---------------------------------------------------------------------------
 
-export const agentRegistry = pgTable(
-  "agent_registry",
+export const registryHead = pgTable(
+  "registry_head",
   {
-    agentId: text("agent_id").notNull(),
+    kind: text("kind").notNull(),
+    // COLLATE "C" in the migration: the primary key serves `list`'s id order.
+    id: text("id").notNull(),
+    /** NULL while the id has no live version; the head itself is never deleted. */
+    activeVersion: text("active_version"),
+    /** Earlier active versions, oldest first — removing the active one falls back here. */
+    history: jsonb("history").notNull(),
+    enabled: boolean("enabled").notNull(),
+    nextSeq: integer("next_seq").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.kind, t.id] })],
+);
+
+export const registryVersion = pgTable(
+  "registry_version",
+  {
+    kind: text("kind").notNull(),
+    id: text("id").notNull(),
     version: text("version").notNull(),
-    backendType: text("backend_type").notNull(),
-    backend: jsonb("backend").notNull(),
-    metadata: jsonb("metadata").notNull(),
+    seq: integer("seq").notNull(),
+    body: jsonb("body").notNull(),
+    bodyHash: text("body_hash").notNull(),
+    facets: jsonb("facets").notNull(),
+    trust: text("trust").notNull(),
+    source: text("source"),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
-    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+    /** A removed version is a tombstone: its label stays bound to its body. */
+    removed: boolean("removed").notNull(),
   },
   (t) => [
-    primaryKey({ columns: [t.agentId, t.version] }),
-    // get(id) without version — pick latest by updated_at
-    index("agent_registry_id_updated_idx").on(t.agentId, t.updatedAt),
-    // list({ backendType }) filter
-    index("agent_registry_backend_type_idx").on(t.backendType),
+    primaryKey({ columns: [t.kind, t.id, t.version] }),
+    uniqueIndex("registry_version_seq_idx").on(t.kind, t.id, t.seq),
+    // register() without a version reuses the version holding the same body.
+    index("registry_version_hash_idx").on(t.kind, t.id, t.bodyHash),
+    // list() filters: `facets @> [...]`.
+    index("registry_version_facets_idx").using("gin", t.facets),
   ],
 );
 
 // ---------------------------------------------------------------------------
-// Role registry — versioned behavioral-bundle store. Sibling of
-// agent_registry: one row per (role_id, version). The behavioral
-// `definition` (persona prompt + tools + skills + capabilities) and the
-// `metadata` (description / tags / suggestedSecrets) are JSONB so the shapes
-// evolve without schema migrations. An agent binds a role; see
-// ROLE_AGENT_MODEL.
+// Remote deployments — live remote Zorya deployments that self-registered
+// to expose agents here (`PostgresRemoteDeploymentRegistry`). Heartbeats
+// and expiry use the database clock so every replica agrees.
 // ---------------------------------------------------------------------------
 
-export const roleRegistry = pgTable(
-  "role_registry",
+export const remoteDeployment = pgTable(
+  "remote_deployment",
   {
-    roleId: text("role_id").notNull(),
-    version: text("version").notNull(),
-    definition: jsonb("definition").notNull(),
-    metadata: jsonb("metadata").notNull(),
-    createdAt: bigint("created_at", { mode: "number" }).notNull(),
-    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+    deploymentId: text("deployment_id").primaryKey(),
+    endpoint: text("endpoint").notNull(),
+    agents: jsonb("agents").notNull(),
+    auth: jsonb("auth"),
+    registeredAt: bigint("registered_at", { mode: "number" }).notNull(),
+    lastHeartbeat: bigint("last_heartbeat", { mode: "number" }).notNull(),
+    ttlMs: bigint("ttl_ms", { mode: "number" }).notNull(),
   },
-  (t) => [
-    primaryKey({ columns: [t.roleId, t.version] }),
-    // get(id) without version — pick latest by updated_at
-    index("role_registry_id_updated_idx").on(t.roleId, t.updatedAt),
-  ],
+  (t) => [index("remote_deployment_heartbeat_idx").on(t.lastHeartbeat)],
 );
-
-// ---------------------------------------------------------------------------
-// Skill registry — versioned instruction-block store. Sibling of
-// agent_registry: one row per (skill_id, version). Content fields
-// (description / when_to_use / body) are columns; metadata (capabilities /
-// tags / enabled) is a JSONB blob.
-// ---------------------------------------------------------------------------
-
-export const skillRegistry = pgTable(
-  "skill_registry",
-  {
-    skillId: text("skill_id").notNull(),
-    version: text("version").notNull(),
-    description: text("description").notNull(),
-    whenToUse: text("when_to_use").notNull(),
-    body: text("body").notNull(),
-    metadata: jsonb("metadata").notNull(),
-    createdAt: bigint("created_at", { mode: "number" }).notNull(),
-    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
-  },
-  (t) => [
-    primaryKey({ columns: [t.skillId, t.version] }),
-    // get(id) without version — pick latest by updated_at
-    index("skill_registry_id_updated_idx").on(t.skillId, t.updatedAt),
-  ],
-);
-
-// ---------------------------------------------------------------------------
-// Fragment store — durable storage for operator-authored prompt fragments.
-// Sibling of skill_registry. File-scanned fragments live in memory only and
-// are NOT persisted here (the .md file is the source of truth).
-// ---------------------------------------------------------------------------
-
-export const fragmentStore = pgTable("fragment_store", {
-  key: text("key").primaryKey(),
-  content: text("content").notNull(),
-  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
-});
 
 // ---------------------------------------------------------------------------
 // Managed knowledge bases — a base row plus one row per source with its full
@@ -1235,30 +1220,6 @@ export const agentInstance = pgTable(
     index("agent_instance_ns_owner_idx").on(t.namespaceId, t.ownerId),
     // list({ registeredAgentId }) — all instances of one recipe.
     index("agent_instance_agent_idx").on(t.registeredAgentId),
-  ],
-);
-
-// ---------------------------------------------------------------------------
-// Agent DAG registry — operator-authored multi-agent execution graphs,
-// version-keyed (one row per (id, version), like the agent registry). The
-// graph itself (nodes / edges / entry / terminals / metadata) lives in the
-// `body` jsonb blob; `created_at` is preserved across version re-writes.
-// ---------------------------------------------------------------------------
-
-export const agentDag = pgTable(
-  "agent_dag",
-  {
-    id: text("id").notNull(),
-    version: text("version").notNull(),
-    /** AgenticDagRecipe minus the identity columns — nodes/edges/entry/... */
-    body: jsonb("body").notNull(),
-    createdAt: bigint("created_at", { mode: "number" }).notNull(),
-    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
-  },
-  (t) => [
-    primaryKey({ columns: [t.id, t.version] }),
-    // get(id) without version + list() pick the latest by updated_at.
-    index("agent_dag_id_updated_idx").on(t.id, t.updatedAt),
   ],
 );
 

@@ -23,9 +23,14 @@ describe("GET /api/agents — one row per agent", () => {
     const { server, clock } = await bootAgents();
     clock.advance(1_000);
     const v2 = await server.handle(
-      req("POST", "/api/agents", { id: "support", version: "v2", backend: localBackend }),
+      req(
+        "PATCH",
+        "/api/agents/support",
+        { version: "v2", backend: localBackend, metadata: { capabilities: [], tags: [] } },
+        { "if-match": "*" },
+      ),
     );
-    expect(v2.status).toBe(201);
+    expect(v2.status).toBe(200);
 
     const body = await list(server);
     expect(body.total).toBe(2);
@@ -41,7 +46,12 @@ describe("GET /api/agents — one row per agent", () => {
     expect((await list(server, "?capability=chat")).agents.map((a) => a.id)).toEqual(["support"]);
     clock.advance(1_000);
     await server.handle(
-      req("POST", "/api/agents", { id: "support", version: "v2", backend: localBackend }),
+      req(
+        "PATCH",
+        "/api/agents/support",
+        { version: "v2", backend: localBackend, metadata: { capabilities: [], tags: [] } },
+        { "if-match": "*" },
+      ),
     );
     expect(await list(server, "?capability=chat")).toEqual({ agents: [], total: 0 });
     expect(await list(server, "?tag=beta")).toEqual({ agents: [], total: 0 });
@@ -84,7 +94,12 @@ describe("GET /api/agents/:id/versions", () => {
     const { server, clock } = await bootAgents();
     clock.advance(1_000);
     await server.handle(
-      req("POST", "/api/agents", { id: "support", version: "v2", backend: localBackend }),
+      req(
+        "PATCH",
+        "/api/agents/support",
+        { version: "v2", backend: localBackend, metadata: { capabilities: [], tags: [] } },
+        { "if-match": "*" },
+      ),
     );
     const res = await server.handle(req("GET", "/api/agents/support/versions"));
     expect(res.status).toBe(200);

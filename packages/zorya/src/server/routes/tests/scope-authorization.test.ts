@@ -178,7 +178,7 @@ describe("scoped secrets", () => {
       ),
     );
     expect(res.status).toBe(403);
-    expect(await registry.get("support-2")).toBeNull();
+    expect(await registry.get({ id: "support-2" })).toBeNull();
     expect(await secrets!.list({ scope: { kind: "namespace", namespaceId: "globex" } })).toEqual(
       [],
     );
@@ -243,7 +243,7 @@ describe("global secrets", () => {
       );
       expect(res.status).toBe(403);
     }
-    expect(await registry.get("support-2")).toBeNull();
+    expect(await registry.get({ id: "support-2" })).toBeNull();
     expect(await secrets!.list({ scope: { kind: "global" } })).toEqual([]);
 
     const ok = await server.handle(
@@ -315,7 +315,7 @@ describe("DAG runs", () => {
     await h.registry.register({
       id: "off",
       backend: localBackend,
-      metadata: { capabilities: [], tags: [], enabled: false },
+      enabled: false,
     });
     for (const id of ["support", "restricted", "off"]) await h.dags!.registry.register(dagOf(id));
     return h;
@@ -382,6 +382,42 @@ describe("DAG runs", () => {
     const otherScope = await server.handle(run("support", { ...body, resourceId: "bob" }));
     expect(otherScope.status).toBe(409);
     expect(await errorOf(otherScope)).toBe("workflow_id_conflict");
+  });
+
+  it("a DAG edit publishes a new version; promote rolls back; a disabled DAG refuses runs", async () => {
+    const { server, dags } = await bootDags();
+    const patch = (body: unknown, ifMatch: string) =>
+      server.handle(
+        req("PATCH", "/api/dags/dag-support", body, { ...asAcme, "if-match": ifMatch }),
+      );
+    const graph = {
+      nodes: [
+        { id: "n2", agentId: "support", inputs: { task: { kind: "initial", path: "task" } } },
+      ],
+      edges: [],
+      entry: ["n2"],
+      terminals: ["n2"],
+    };
+    const edited = await patch(graph, 'W/"v1"');
+    expect(edited.status).toBe(200);
+    expect(edited.headers.get("etag")).toBe('W/"v2"');
+    expect((await patch(graph, 'W/"v1"')).status).toBe(412);
+    const invalid = await patch({ ...graph, entry: ["ghost"] }, 'W/"v2"');
+    expect(invalid.status).toBe(400);
+    expect(await errorOf(invalid)).toBe("invalid_dag");
+
+    const back = await server.handle(
+      req("POST", "/api/dags/dag-support/promote", { version: "v1" }, asAcme),
+    );
+    expect(back.status).toBe(200);
+    expect((await dags!.registry.get({ id: "dag-support" }))?.nodes[0]?.id).toBe("n1");
+
+    expect((await patch({ enabled: false }, 'W/"v1"')).status).toBe(200);
+    const refused = await server.handle(
+      run("support", { namespaceId: "acme", resourceId: "alice" }),
+    );
+    expect(refused.status).toBe(410);
+    expect(await errorOf(refused)).toBe("dag_disabled");
   });
 
   it("the DAG workflow can't be started through the generic trigger route", async () => {

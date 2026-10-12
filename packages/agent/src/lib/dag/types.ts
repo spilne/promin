@@ -1,4 +1,9 @@
 import type { Agent, AgentScope } from "../agent/types.ts";
+import type {
+  RegisterVersionInput,
+  Versioned,
+  VersionedRegistry,
+} from "../versioned-registry/types.ts";
 
 // ---------------------------------------------------------------------------
 // Agentic DAG — a planned multi-agent execution graph.
@@ -87,6 +92,27 @@ export interface AgenticDagRecipe {
     readonly tags?: ReadonlyArray<string>;
   };
 }
+
+/** The graph part of a DAG — what `validateDag` checks. */
+export type DagGraph = Pick<AgenticDagRecipe, "nodes" | "edges" | "entry" | "terminals">;
+
+/** What a DAG version stores: the recipe minus its identity. */
+export type DagRecipe = Omit<AgenticDagRecipe, "id" | "version">;
+
+/** A stored DAG version. */
+export type RegisteredDag = Versioned<DagRecipe>;
+
+/** `DagRegistry.register` input. */
+export type RegisterDagInput = RegisterVersionInput<DagRecipe>;
+
+/** `DagRegistry.list` filter. */
+export interface DagFilter {
+  /** Only DAGs whose `metadata.tags` include this. */
+  readonly tag?: string;
+}
+
+/** Versioned store of DAG recipes. `register` rejects invalid graphs with `DagValidationError`. */
+export type DagRegistry = VersionedRegistry<DagRecipe, DagFilter>;
 
 /**
  * The tenant scope a DAG run acts in. Every node runs bound to it: in

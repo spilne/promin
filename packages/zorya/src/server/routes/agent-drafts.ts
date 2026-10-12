@@ -16,7 +16,7 @@
 // permanent orphan — no background loop required.
 // ---------------------------------------------------------------------------
 
-import type { AgentRegistry } from "@promin/agent";
+import { AGENT_DRAFT_ID_PREFIX, listAllVersioned, type AgentRegistry } from "@promin/agent";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 import {
@@ -29,7 +29,7 @@ import {
 } from "./agent-gateway-kit.ts";
 
 /** Reserved id prefix marking a recipe as an ephemeral Designer draft. */
-export const DRAFT_PREFIX = "__draft__";
+export const DRAFT_PREFIX = AGENT_DRAFT_ID_PREFIX;
 
 /** How long an orphaned draft survives before the opportunistic sweep reaps it. */
 const DRAFT_TTL_MS = 60 * 60 * 1000; // 1h
@@ -81,7 +81,7 @@ export function createDraft(deps: AgentDraftsDeps) {
     const rawSourceId = typeof body.sourceId === "string" ? body.sourceId : "";
     // A draft of a remote agent round-trips the redacted token; restore the
     // source recipe's stored one so the draft can actually call out.
-    const source = rawSourceId.length > 0 ? await deps.registry.get(rawSourceId) : null;
+    const source = rawSourceId.length > 0 ? await deps.registry.get({ id: rawSourceId }) : null;
     const backend = restoreRedactedSecrets({
       next: parsed.backend,
       ...(source !== null && { existing: source.backend }),
@@ -119,7 +119,7 @@ export function deleteDraft(deps: AgentDraftsDeps) {
         "Only `__draft__`-prefixed draft recipes can be deleted here.",
       );
     }
-    await deps.registry.unregister(id);
+    await deps.registry.unregister({ id });
     return new Response(null, { status: 204 });
   };
 }
@@ -131,10 +131,9 @@ async function sweepStaleDrafts(params: {
   const { registry, clock } = params;
   try {
     const cutoff = clock.currentTimeMs() - DRAFT_TTL_MS;
-    for (const recipe of await registry.list({})) {
-      if (isDraftId(recipe.id) && recipe.createdAt < cutoff) {
-        await registry.unregister(recipe.id);
-      }
+    const drafts = await listAllVersioned({ registry, filter: { drafts: "only" } });
+    for (const recipe of drafts) {
+      if (recipe.createdAt < cutoff) await registry.unregister({ id: recipe.id });
     }
   } catch {
     // Cleanup is best-effort — a hiccup here must not block a draft create.

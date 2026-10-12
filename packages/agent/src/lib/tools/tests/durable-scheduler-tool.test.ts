@@ -13,7 +13,7 @@
 import { describe, expect, it } from "bun:test";
 import { FakeWallClock } from "@promin/workflow";
 import { InMemorySchedulerStorage } from "@promin/workflow/scheduler";
-import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
+import { InMemoryAgentRegistry } from "../../versioned-registry/in-memory-registries.ts";
 import {
   createDurableSchedulerTools,
   type DurableSchedulerToolDeps,
@@ -376,6 +376,45 @@ describe("dispatchAgentSchedule", () => {
     } as unknown as Agent;
     return agent;
   }
+
+  it("skips (and records) a tick for a disabled recipe without running it", async () => {
+    const captures: Capture[] = [];
+    const registry = new InMemoryAgentRegistry();
+    await registry.register({
+      id: "writer",
+      backend: {
+        type: "local",
+        model: { provider: "test", id: "x" },
+        role: { inline: { systemPrompt: null, tools: [] } },
+      },
+      enabled: false,
+    });
+    const tick = {
+      scheduleId: "s-1",
+      scheduledAt: new Date("2026-04-28T14:00:00Z"),
+      firedAt: new Date("2026-04-28T14:00:01Z"),
+      incarnation: "inc1",
+      tickNumber: 0,
+    };
+    const schedule = {
+      id: "s-1",
+      cron: "0 * * * *",
+      metadata: {
+        agentTrigger: true,
+        agentId: "writer",
+        task: "Check Twitter",
+        namespaceId: "acme",
+        resourceId: "alice",
+        createdByAgent: "writer",
+      },
+    };
+    const result = await dispatchAgentSchedule(tick, schedule, {
+      registry,
+      resolve: () => fakeAgent(captures),
+    });
+    expect(result).toMatchObject({ ok: false, skipped: "recipe_disabled" });
+    expect(captures).toEqual([]);
+  });
 
   it("invokes the recipe with the bare task + scheduled source on the named thread", async () => {
     const captures: Capture[] = [];

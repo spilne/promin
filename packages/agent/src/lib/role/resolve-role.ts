@@ -1,12 +1,12 @@
 // ---------------------------------------------------------------------------
 // `resolveRoleBinding` — turn an agent's `RoleBinding` into a concrete
 // `RoleDefinition`. The async step (registry lookup for a `ref`) lives here
-// so the host resolves it BEFORE calling the sync `resolveLocalAgent`, the
+// so the host resolves it BEFORE calling `resolveLocalAgent`, the
 // same pattern `resolveCredentialRef` / `resolveSkillCatalog` follow.
 //
 //   - `inline` resolves with no I/O — just hand back the embedded definition.
 //   - `ref` reads the RoleRegistry. Throws when no registry is wired or the
-//     referenced role/version doesn't exist, so a dangling binding surfaces
+//     referenced role/version does not exist or the role is disabled, so a dangling binding surfaces
 //     loudly at resolve time rather than silently dropping the persona.
 // ---------------------------------------------------------------------------
 
@@ -41,11 +41,14 @@ export async function resolveRoleBinding(
         "Pass `roles` so the binding can be resolved.",
     );
   }
-  const role = await deps.roles.get(id, version);
+  const role = await deps.roles.get({ id, ...(version !== undefined && { version }) });
   if (!role) {
     throw new Error(
       `resolveRoleBinding: role "${id}"${version ? `@${version}` : ""} not found in the registry.`,
     );
+  }
+  if (!role.enabled) {
+    throw new Error(`resolveRoleBinding: role "${id}" is disabled.`);
   }
   return role.definition;
 }

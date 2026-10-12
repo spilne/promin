@@ -8,15 +8,18 @@
 // Modules can export either a single config or an array — both flatten.
 //
 // `applyDiscoveredAgents` reconciles a discovered set into an
-// `AgentRegistry`. Same shape as `applyDiscoveredSchedules`: upsert by
-// default, opt-in `sync` mode to delete entries not in the scan.
+// `AgentRegistry` through `applyDiscovered`: unchanged recipes are left
+// alone, changed ones become a new promoted version, and opt-in `sync`
+// removes scanner-written recipes whose file is gone.
 // ---------------------------------------------------------------------------
 
 import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { type WallClock, SystemWallClock } from "@promin/workflow";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { AgentBackend, AgentRegistry, RegisterAgentInput } from "../registry/types.ts";
+import { applyDiscovered, type ApplyDiscoveredResult } from "./apply-discovered.ts";
+import { startScanLoop, type ScanLoopHandle, type ScanLoopTick } from "./scan-loop.ts";
 
 /**
  * Per-backend list of env vars that must be present at materialization
@@ -56,7 +59,10 @@ export interface AgentScanResult {
   readonly agents: RegisterAgentInput[];
   /** Per-id source path — useful for duplicate diagnostics. */
   readonly sources: Record<string, string>;
+  /** Diagnostics that did not lose a file (duplicate ids). */
   readonly warnings: string[];
+  /** Directories or files that could not be read or imported. */
+  readonly errors: string[];
 }
 
 const DEFAULT_EXTENSIONS = [".ts", ".tsx", ".js", ".mjs"];
@@ -88,23 +94,26 @@ export class AgentScanner {
     const agents: RegisterAgentInput[] = [];
     const sources: Record<string, string> = {};
     const warnings: string[] = [];
-    await this.walk(root, 0, agents, sources, warnings);
-    return { agents, sources, warnings };
+    const errors: string[] = [];
+    await this.walk({ dir: root, depth: 0, agents, sources, warnings, errors });
+    return { agents, sources, warnings, errors };
   }
 
-  private async walk(
-    dir: string,
-    depth: number,
-    agents: RegisterAgentInput[],
-    sources: Record<string, string>,
-    warnings: string[],
-  ): Promise<void> {
+  private async walk(params: {
+    dir: string;
+    depth: number;
+    agents: RegisterAgentInput[];
+    sources: Record<string, string>;
+    warnings: string[];
+    errors: string[];
+  }): Promise<void> {
+    const { dir, depth, agents, sources, warnings, errors } = params;
     if (depth > this.maxDepth) return;
     let entries;
     try {
       entries = await readdir(dir, { withFileTypes: true });
     } catch (err) {
-      warnings.push(`failed to read ${dir}: ${asMessage(err)}`);
+      errors.push(`failed to read ${dir}: ${asMessage(err)}`);
       return;
     }
 
@@ -114,7 +123,7 @@ export class AgentScanner {
 
       if (entry.isDirectory()) {
         if (name === "node_modules" || name.startsWith(".")) continue;
-        await this.walk(full, depth + 1, agents, sources, warnings);
+        await this.walk({ ...params, dir: full, depth: depth + 1 });
         continue;
       }
       if (!entry.isFile()) continue;
@@ -124,16 +133,18 @@ export class AgentScanner {
         continue;
       }
 
-      await this.importModule(full, agents, sources, warnings);
+      await this.importModule({ absPath: full, agents, sources, warnings, errors });
     }
   }
 
-  private async importModule(
-    absPath: string,
-    agents: RegisterAgentInput[],
-    sources: Record<string, string>,
-    warnings: string[],
-  ): Promise<void> {
+  private async importModule(params: {
+    absPath: string;
+    agents: RegisterAgentInput[];
+    sources: Record<string, string>;
+    warnings: string[];
+    errors: string[];
+  }): Promise<void> {
+    const { absPath, agents, sources, warnings, errors } = params;
     let mod: Record<string, unknown>;
     let url = pathToFileURL(absPath).href;
     if (this.cacheBust) {
@@ -152,7 +163,7 @@ export class AgentScanner {
     try {
       mod = (await import(url)) as Record<string, unknown>;
     } catch (err) {
-      warnings.push(`failed to import ${absPath}: ${asMessage(err)}`);
+      errors.push(`failed to import ${absPath}: ${asMessage(err)}`);
       return;
     }
 
@@ -191,80 +202,41 @@ function isAgentInput(v: unknown): v is RegisterAgentInput {
 // Reconcile a discovered set into an `AgentRegistry`.
 // ---------------------------------------------------------------------------
 
-export interface ApplyDiscoveredAgentsOptions {
+export interface ApplyDiscoveredAgentsParams {
+  readonly registry: AgentRegistry;
+  readonly agents: ReadonlyArray<RegisterAgentInput>;
   /**
-   * Delete registry entries whose `id` isn't in the discovered set. Default:
-   * `false` (upsert-only — operator-created entries stay). Set `true` to
-   * make the filesystem authoritative.
+   * Remove recipes whose file is gone. Default `false`. Only versions a
+   * scanner wrote are removed; operator-authored recipes always stay.
    */
   readonly sync?: boolean;
-  /**
-   * Restrict the operation to entries whose discovered `id` starts with
-   * this prefix. Useful for partitioning agent recipes by tenant /
-   * environment without colliding ids. No filter when omitted.
-   */
+  /** Whether the scan read every file; `false` skips sync deletes. Default `true`. */
+  readonly complete?: boolean;
+  /** Only touch ids with this prefix (partition recipes by tenant / environment). */
   readonly idPrefix?: string;
 }
 
-export interface ApplyDiscoveredAgentsResult {
-  readonly upserted: string[];
-  /** Subset of `upserted` that didn't exist before this call. */
-  readonly added: string[];
-  /** Only populated when `sync: true`. */
-  readonly deleted: string[];
-}
-
 export async function applyDiscoveredAgents(
-  registry: AgentRegistry,
-  agents: ReadonlyArray<RegisterAgentInput>,
-  options: ApplyDiscoveredAgentsOptions = {},
-): Promise<ApplyDiscoveredAgentsResult> {
-  const upserted: string[] = [];
-  const added: string[] = [];
-  const deleted: string[] = [];
-
-  // Snapshot the existing set when we'll need it for either added-tracking or sync.
-  const existing = options.sync ? await registry.list({ limit: 100_000 }) : [];
-  const existingIds = new Set(existing.map((row) => row.id));
-
-  for (const input of agents) {
-    if (options.idPrefix !== undefined && !input.id.startsWith(options.idPrefix)) continue;
-    const wasExisting = existingIds.has(input.id) || (await registry.get(input.id)) !== null;
-    // Backend-specific required-env probe. We DON'T refuse to register a
-    // recipe whose env is missing — recipe rows are JSON and stay
-    // useful once the operator wires the var. We just warn so the boot
-    // log makes the missing config obvious.
-    const required = backendRequiredEnv(input.backend);
-    if (required.length > 0) {
-      const missing = required.filter((name) => !process.env[name]);
+  params: ApplyDiscoveredAgentsParams,
+): Promise<ApplyDiscoveredResult> {
+  return applyDiscovered({
+    registry: params.registry,
+    discovered: params.agents,
+    ...(params.sync !== undefined && { sync: params.sync }),
+    ...(params.complete !== undefined && { complete: params.complete }),
+    ...(params.idPrefix !== undefined && { idPrefix: params.idPrefix }),
+    // A recipe whose env is missing is still stored — it is just JSON and
+    // works once the operator sets the vars — but the boot log says so.
+    beforeRegister: (input) => {
+      const missing = backendRequiredEnv(input.backend).filter((name) => !process.env[name]);
       if (missing.length > 0) {
         console.warn(
           `[agent-registry] registering "${input.id}" but required env var(s) are not set: ${missing.join(", ")}. ` +
             "The recipe will be stored; the resolver will throw until the vars are present.",
         );
       }
-    }
-    await registry.register(input);
-    upserted.push(input.id);
-    if (!wasExisting) added.push(input.id);
-  }
-
-  if (options.sync) {
-    const discoveredIds = new Set(
-      agents
-        .filter((a) => options.idPrefix === undefined || a.id.startsWith(options.idPrefix))
-        .map((a) => a.id),
-    );
-    for (const row of existing) {
-      if (options.idPrefix !== undefined && !row.id.startsWith(options.idPrefix)) continue;
-      if (!discoveredIds.has(row.id)) {
-        await registry.unregister(row.id);
-        deleted.push(row.id);
-      }
-    }
-  }
-
-  return { upserted, added, deleted };
+    },
+  });
 }
 
 function asMessage(err: unknown): string {
@@ -284,90 +256,52 @@ export interface AgentScanLoopOptions {
   readonly root: string;
   /** Poll interval in ms. Default: `5_000`. */
   readonly intervalMs?: number;
-  /** Pass through to `applyDiscoveredAgents` — sweeps removed files. Default: `false`. */
+  /** Pass through to `applyDiscoveredAgents` — removes recipes whose file is gone. Default: `false`. */
   readonly sync?: boolean;
   /** Pass through to `applyDiscoveredAgents`. */
   readonly idPrefix?: string;
   /** Filter scan results before applying (e.g. drop live-only recipes when key missing). */
   readonly filterAgents?: (agents: ReadonlyArray<RegisterAgentInput>) => RegisterAgentInput[];
   /** Fired after each tick. Surfaces deltas + warnings to the host. */
-  readonly onTick?: (event: AgentScanLoopTick) => void;
+  readonly onTick?: (event: ScanLoopTick) => void;
+  /** A failed timer tick lands here. Default: `console.error`. */
+  readonly onError?: (err: unknown) => void;
   /** Time source. Default: `SystemWallClock`. Tests pass `FakeWallClock`. */
   readonly clock?: WallClock;
   /** Forwarded to the underlying scanner. `cacheBust` defaults to `true` for the loop. */
   readonly scanner?: Omit<AgentScannerOptions, "cacheBust" | "onAgent">;
 }
 
-export interface AgentScanLoopTick {
-  readonly added: string[];
-  readonly upserted: string[];
-  readonly deleted: string[];
-  readonly warnings: string[];
-  readonly durationMs: number;
-}
-
-export interface AgentScanLoopHandle {
-  /** Stop polling. Idempotent. */
-  stop(): void;
-  /** Run one scan immediately. Resolves with the tick result. */
-  tick(): Promise<AgentScanLoopTick>;
-}
-
-export function startAgentScanLoop(options: AgentScanLoopOptions): AgentScanLoopHandle {
-  const clock = options.clock ?? SystemWallClock;
-  const intervalMs = options.intervalMs ?? 5_000;
-  const scanner = new AgentScanner({
-    ...options.scanner,
-    cacheBust: true,
-  });
-
-  let inFlight: Promise<AgentScanLoopTick> | null = null;
-  let stopped = false;
-
-  async function runOnce(): Promise<AgentScanLoopTick> {
-    const start = clock.currentTimeMs();
-    const scan = await scanner.scan(options.root);
-    const filtered = options.filterAgents ? options.filterAgents(scan.agents) : scan.agents;
-    const apply = await applyDiscoveredAgents(options.registry, filtered, {
-      sync: options.sync ?? false,
-      ...(options.idPrefix !== undefined ? { idPrefix: options.idPrefix } : {}),
-    });
-    const tick: AgentScanLoopTick = {
-      added: apply.added,
-      upserted: apply.upserted,
-      deleted: apply.deleted,
-      warnings: scan.warnings,
-      durationMs: clock.currentTimeMs() - start,
-    };
-    options.onTick?.(tick);
-    return tick;
-  }
-
-  async function tickGuarded(): Promise<AgentScanLoopTick> {
-    // Coalesce overlapping ticks. If the previous scan is still in
-    // flight when the timer fires (slow filesystem, many agents),
-    // return that promise instead of starting a parallel scan — two
-    // concurrent applyDiscoveredAgents racing for the same registry
-    // row would just produce duplicate work.
-    if (inFlight) return inFlight;
-    const p = runOnce().finally(() => {
-      inFlight = null;
-    });
-    inFlight = p;
-    return p;
-  }
-
-  const handle = clock.setInterval(() => {
-    if (stopped) return;
-    void tickGuarded();
-  }, intervalMs);
-
-  return {
-    stop() {
-      if (stopped) return;
-      stopped = true;
-      handle.clear();
+export function startAgentScanLoop(options: AgentScanLoopOptions): ScanLoopHandle<ScanLoopTick> {
+  const scanner = new AgentScanner({ ...options.scanner, cacheBust: true });
+  return startScanLoop({
+    label: "agent-scan",
+    ...(options.intervalMs !== undefined && { intervalMs: options.intervalMs }),
+    ...(options.clock !== undefined && { clock: options.clock }),
+    ...(options.onError !== undefined && { onError: options.onError }),
+    run: async () => {
+      const clock = options.clock ?? SystemWallClock;
+      const start = clock.currentTimeMs();
+      const scan = await scanner.scan(options.root);
+      const filtered = options.filterAgents ? options.filterAgents(scan.agents) : scan.agents;
+      const apply = await applyDiscoveredAgents({
+        registry: options.registry,
+        agents: filtered,
+        sync: options.sync ?? false,
+        complete: scan.errors.length === 0,
+        ...(options.idPrefix !== undefined && { idPrefix: options.idPrefix }),
+      });
+      const tick: ScanLoopTick = {
+        added: apply.added,
+        upserted: apply.upserted,
+        changed: apply.changed,
+        deleted: apply.deleted,
+        warnings: [...scan.warnings, ...apply.warnings],
+        errors: scan.errors,
+        durationMs: clock.currentTimeMs() - start,
+      };
+      options.onTick?.(tick);
+      return tick;
     },
-    tick: tickGuarded,
-  };
+  });
 }

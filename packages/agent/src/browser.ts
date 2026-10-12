@@ -5,13 +5,15 @@
 // ---------------------------------------------------------------------------
 
 export { inlineRoleDefinition } from "./lib/role/resolve-role.ts";
-export { DEFAULT_ROLE_VERSION, DEFAULT_ROLE_METADATA } from "./lib/role/types.ts";
+export { DEFAULT_ROLE_METADATA } from "./lib/role/types.ts";
 export type {
   RoleBinding,
   RoleDefinition,
   RoleMetadata,
+  RoleRecipe,
   RegisteredRole,
 } from "./lib/role/types.ts";
+export type { Versioned, VersionInfo, VersionTrust } from "./lib/versioned-registry/types.ts";
 export {
   MAX_FACT_CHARS,
   MAX_STATIC_RULES_CHARS,

@@ -17,11 +17,12 @@ import {
   SqliteAgentInstanceRegistry,
   SqliteAgentRegistry,
   SqliteDagRegistry,
-  SqliteFragmentStore,
+  SqliteFragmentRegistry,
   SqliteKnowledgeBaseStore,
   SqliteMemoryStore,
   SqliteNamespaceRegistry,
   SqlitePendingApprovalStore,
+  SqliteRemoteDeploymentRegistry,
   SqliteRoleRegistry,
   SqliteSchedulerStorage,
   SqliteSecretsStorage,
@@ -70,7 +71,7 @@ export interface SqliteZoryaStack {
   readonly instanceRegistry: SqliteAgentInstanceRegistry;
   readonly roleRegistry: SqliteRoleRegistry;
   readonly skillRegistry: SqliteSkillRegistry;
-  readonly fragmentStore: SqliteFragmentStore;
+  readonly fragmentRegistry: SqliteFragmentRegistry;
   readonly knowledgeBaseStore: SqliteKnowledgeBaseStore;
   readonly memoryStore: SqliteMemoryStore;
   /**
@@ -79,6 +80,8 @@ export interface SqliteZoryaStack {
    */
   readonly pendingApprovalStore: SqlitePendingApprovalStore;
   readonly dagRegistry: SqliteDagRegistry;
+  /** Remote deployments that self-registered (`ZoryaServerConfig.remoteDeployments`). */
+  readonly remoteDeploymentRegistry: SqliteRemoteDeploymentRegistry;
   /** Drafts and published versions of builder workflows (`ZoryaWorkflowBuilder`). */
   readonly workflowSchemaStore: SqliteWorkflowSchemaStore;
   /** Present when `secretsPassphrase` was given. */
@@ -130,15 +133,16 @@ export function createSqliteZoryaStack(config: SqliteZoryaStackConfig): SqliteZo
     advertisements: SqliteWorkflowAdvertisementRegistry.make({ db: sqlite, clock }),
     workerRegistry: SqliteWorkerRegistry.make({ db: sqlite, clock }),
     namespaceRegistry: SqliteNamespaceRegistry.make({ db: sqlite, clock }),
-    agentRegistry: SqliteAgentRegistry.make({ db: sqlite, now }),
+    agentRegistry: new SqliteAgentRegistry({ db: sqlite, clock }),
     instanceRegistry: SqliteAgentInstanceRegistry.make({ db: sqlite, now }),
-    roleRegistry: SqliteRoleRegistry.make({ db: sqlite, now }),
-    skillRegistry: SqliteSkillRegistry.make({ db: sqlite, now }),
-    fragmentStore: SqliteFragmentStore.make({ db: sqlite, now }),
+    roleRegistry: new SqliteRoleRegistry({ db: sqlite, clock }),
+    skillRegistry: new SqliteSkillRegistry({ db: sqlite, clock }),
+    fragmentRegistry: new SqliteFragmentRegistry({ db: sqlite, clock }),
     knowledgeBaseStore: SqliteKnowledgeBaseStore.make({ db: sqlite }),
     memoryStore: SqliteMemoryStore.make({ db: sqlite, now }),
     pendingApprovalStore: SqlitePendingApprovalStore.make({ db: sqlite, clock }),
-    dagRegistry: SqliteDagRegistry.make({ db: sqlite, now }),
+    dagRegistry: new SqliteDagRegistry({ db: sqlite, clock }),
+    remoteDeploymentRegistry: new SqliteRemoteDeploymentRegistry({ db: sqlite, clock }),
     workflowSchemaStore: SqliteWorkflowSchemaStore.make({ db: sqlite }),
     ...(config.secretsPassphrase !== undefined && {
       secretsStorage: SqliteSecretsStorage.make({

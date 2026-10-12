@@ -14,7 +14,7 @@ import { describe, expect, it } from "bun:test";
 import { FakeWallClock, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import type { Agent, AgentInput, AgentRunOutput } from "../../agent/types.ts";
 import type { LLMProvider, LLMResponse } from "../../llm-provider.ts";
-import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
+import { InMemoryAgentRegistry } from "../../versioned-registry/in-memory-registries.ts";
 import { resolveLocalAgent } from "../../registry/resolve-local-agent.ts";
 import { deferred, lastMessage, reactiveLLM, until } from "../../tests/engine-harness.ts";
 import { z } from "zod";
@@ -29,7 +29,7 @@ import {
 } from "../durable-executor.ts";
 import { createRegistryAgentResolver } from "../registry-agent-resolver.ts";
 import type { AgentResolver, AgenticDagRecipe, DagRunScope } from "../types.ts";
-import { InMemoryDagRegistry } from "../registry.ts";
+import { InMemoryDagRegistry } from "../../versioned-registry/in-memory-registries.ts";
 
 /** DAGs run by reference: register `dag` and name it in the run input. */
 const dags = new InMemoryDagRegistry();

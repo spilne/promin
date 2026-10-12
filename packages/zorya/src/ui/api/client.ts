@@ -54,9 +54,10 @@ import type {
   SkillVersionsResponse,
 } from "../../server/routes/skills.ts";
 import type {
-  FragmentDto,
   FragmentsListResponse,
   FragmentSourcesResponse,
+  FragmentVersionsResponse,
+  RegisteredFragment,
 } from "../../server/routes/fragments.ts";
 import type {
   RegisteredRole,
@@ -136,6 +137,38 @@ export function authHeader(): Record<string, string> {
  * hot-reloading server answers for a moment. Other methods are never
  * replayed from the browser.
  */
+/**
+ * `If-Match` for a write built on `version` — the version the editor
+ * loaded. Without one the write is unconditional (`*`).
+ */
+function ifMatch(version: string | undefined): Record<string, string> {
+  return { "if-match": version !== undefined ? `W/"${version}"` : "*" };
+}
+
+/** A JSON write to a versioned registry resource, conditional on `expectedVersion`. */
+function versionedWrite<T>(params: {
+  method: "PATCH" | "POST" | "DELETE";
+  path: string;
+  body?: unknown;
+  expectedVersion?: string;
+}): Promise<T> {
+  return req<T>(params.path, {
+    method: params.method,
+    headers: { "content-type": "application/json", ...ifMatch(params.expectedVersion) },
+    ...(params.body !== undefined && { body: JSON.stringify(params.body) }),
+  });
+}
+
+/** Fields every versioned edit takes besides its content. */
+export interface VersionedEditOptions {
+  /** The active version the edit is built on; another write since → 412. */
+  expectedVersion?: string;
+  /** Label of the new version. Default: the next `v<n>`. */
+  version?: string;
+  /** Make the new version active. Default `true`; `false` saves a draft. */
+  publish?: boolean;
+}
+
 export async function req<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(authHeader());
   new Headers(init?.headers).forEach((value, key) => headers.set(key, value));
@@ -562,6 +595,7 @@ export const api = {
     version?: string;
     backend: RegisteredAgent["backend"];
     metadata?: Partial<RegisteredAgent["metadata"]>;
+    enabled?: boolean;
   }): Promise<RegisteredAgent> {
     return req<RegisteredAgent>(`/api/agents`, {
       method: "POST",
@@ -569,18 +603,21 @@ export const api = {
       body: JSON.stringify(body),
     });
   },
+  /** Publish a new version built on `expectedVersion`, and/or flip the kill switch. */
   updateAgent(
     id: string,
-    body: {
-      version?: string;
+    body: VersionedEditOptions & {
       backend?: RegisteredAgent["backend"];
       metadata?: Partial<RegisteredAgent["metadata"]>;
+      enabled?: boolean;
     },
   ): Promise<RegisteredAgent> {
-    return req<RegisteredAgent>(`/api/agents/${encodeURIComponent(id)}`, {
+    const { expectedVersion, ...rest } = body;
+    return versionedWrite<RegisteredAgent>({
       method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      path: `/api/agents/${encodeURIComponent(id)}`,
+      body: rest,
+      ...(expectedVersion !== undefined && { expectedVersion }),
     });
   },
   deleteAgent(id: string, version?: string): Promise<void> {
@@ -589,6 +626,18 @@ export const api = {
   },
   listAgentVersions(id: string): Promise<AgentVersionsResponse> {
     return req<AgentVersionsResponse>(`/api/agents/${encodeURIComponent(id)}/versions`);
+  },
+  /** Make `version` the active one (publish a draft, or roll back). */
+  promoteAgent(
+    id: string,
+    body: { version: string; expectedVersion?: string },
+  ): Promise<RegisteredAgent> {
+    return versionedWrite<RegisteredAgent>({
+      method: "POST",
+      path: `/api/agents/${encodeURIComponent(id)}/promote`,
+      body: { version: body.version },
+      ...(body.expectedVersion !== undefined && { expectedVersion: body.expectedVersion }),
+    });
   },
   cloneAgent(
     id: string,
@@ -669,7 +718,7 @@ export const api = {
     description: string;
     whenToUse?: string;
     body: string;
-    metadata?: RegisteredSkill["metadata"];
+    metadata?: Partial<RegisteredSkill["metadata"]>;
   }): Promise<RegisteredSkill> {
     return req<RegisteredSkill>(`/api/skills`, {
       method: "POST",
@@ -677,20 +726,38 @@ export const api = {
       body: JSON.stringify(body),
     });
   },
+  /**
+   * Publish a new version (content / metadata), flip the kill switch, or
+   * record a review (`trust`, of `version` — default the active one).
+   */
   updateSkill(
     id: string,
-    body: {
-      version?: string;
+    body: VersionedEditOptions & {
       description?: string;
       whenToUse?: string;
       body?: string;
-      metadata?: RegisteredSkill["metadata"];
+      metadata?: Partial<RegisteredSkill["metadata"]>;
+      enabled?: boolean;
+      trust?: RegisteredSkill["trust"];
     },
   ): Promise<RegisteredSkill> {
-    return req<RegisteredSkill>(`/api/skills/${encodeURIComponent(id)}`, {
+    const { expectedVersion, ...rest } = body;
+    return versionedWrite<RegisteredSkill>({
       method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      path: `/api/skills/${encodeURIComponent(id)}`,
+      body: rest,
+      ...(expectedVersion !== undefined && { expectedVersion }),
+    });
+  },
+  promoteSkill(
+    id: string,
+    body: { version: string; expectedVersion?: string },
+  ): Promise<RegisteredSkill> {
+    return versionedWrite<RegisteredSkill>({
+      method: "POST",
+      path: `/api/skills/${encodeURIComponent(id)}/promote`,
+      body: { version: body.version },
+      ...(body.expectedVersion !== undefined && { expectedVersion: body.expectedVersion }),
     });
   },
   deleteSkill(id: string, version?: string): Promise<void> {
@@ -710,25 +777,47 @@ export const api = {
   listFragments(): Promise<FragmentsListResponse> {
     return req<FragmentsListResponse>(`/api/fragments`);
   },
-  getFragment(key: string): Promise<FragmentDto> {
-    return req<FragmentDto>(`/api/fragments/${encodeURIComponent(key)}`);
+  getFragment(id: string, version?: string): Promise<RegisteredFragment> {
+    const qp = version ? `?version=${encodeURIComponent(version)}` : "";
+    return req<RegisteredFragment>(`/api/fragments/${encodeURIComponent(id)}${qp}`);
   },
-  createFragment(body: { key: string; content: string }): Promise<FragmentDto> {
-    return req<FragmentDto>(`/api/fragments`, {
+  listFragmentVersions(id: string): Promise<FragmentVersionsResponse> {
+    return req<FragmentVersionsResponse>(`/api/fragments/${encodeURIComponent(id)}/versions`);
+  },
+  createFragment(body: { id: string; content: string }): Promise<RegisteredFragment> {
+    return req<RegisteredFragment>(`/api/fragments`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
   },
-  updateFragment(key: string, body: { content: string }): Promise<FragmentDto> {
-    return req<FragmentDto>(`/api/fragments/${encodeURIComponent(key)}`, {
+  /** Publish a new version built on `expectedVersion`, and/or flip the kill switch. */
+  updateFragment(
+    id: string,
+    body: VersionedEditOptions & { content?: string; enabled?: boolean },
+  ): Promise<RegisteredFragment> {
+    const { expectedVersion, ...rest } = body;
+    return versionedWrite<RegisteredFragment>({
       method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      path: `/api/fragments/${encodeURIComponent(id)}`,
+      body: rest,
+      ...(expectedVersion !== undefined && { expectedVersion }),
     });
   },
-  deleteFragment(key: string): Promise<void> {
-    return req<void>(`/api/fragments/${encodeURIComponent(key)}`, { method: "DELETE" });
+  promoteFragment(
+    id: string,
+    body: { version: string; expectedVersion?: string },
+  ): Promise<RegisteredFragment> {
+    return versionedWrite<RegisteredFragment>({
+      method: "POST",
+      path: `/api/fragments/${encodeURIComponent(id)}/promote`,
+      body: { version: body.version },
+      ...(body.expectedVersion !== undefined && { expectedVersion: body.expectedVersion }),
+    });
+  },
+  deleteFragment(id: string, version?: string): Promise<void> {
+    const qp = version ? `?version=${encodeURIComponent(version)}` : "";
+    return req<void>(`/api/fragments/${encodeURIComponent(id)}${qp}`, { method: "DELETE" });
   },
   listFragmentSources(): Promise<FragmentSourcesResponse> {
     return req<FragmentSourcesResponse>(`/api/fragments/_sources`);
@@ -892,7 +981,7 @@ export const api = {
     id: string;
     version?: string;
     definition: RoleDefinition;
-    metadata?: RegisteredRole["metadata"];
+    metadata?: Partial<RegisteredRole["metadata"]>;
   }): Promise<RegisteredRole> {
     return req<RegisteredRole>(`/api/roles`, {
       method: "POST",
@@ -900,18 +989,32 @@ export const api = {
       body: JSON.stringify(body),
     });
   },
+  /** Publish a new version built on `expectedVersion`, and/or flip the kill switch. */
   updateRole(
     id: string,
-    body: {
-      version?: string;
+    body: VersionedEditOptions & {
       definition?: RoleDefinition;
-      metadata?: RegisteredRole["metadata"];
+      metadata?: Partial<RegisteredRole["metadata"]>;
+      enabled?: boolean;
     },
   ): Promise<RegisteredRole> {
-    return req<RegisteredRole>(`/api/roles/${encodeURIComponent(id)}`, {
+    const { expectedVersion, ...rest } = body;
+    return versionedWrite<RegisteredRole>({
       method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      path: `/api/roles/${encodeURIComponent(id)}`,
+      body: rest,
+      ...(expectedVersion !== undefined && { expectedVersion }),
+    });
+  },
+  promoteRole(
+    id: string,
+    body: { version: string; expectedVersion?: string },
+  ): Promise<RegisteredRole> {
+    return versionedWrite<RegisteredRole>({
+      method: "POST",
+      path: `/api/roles/${encodeURIComponent(id)}/promote`,
+      body: { version: body.version },
+      ...(body.expectedVersion !== undefined && { expectedVersion: body.expectedVersion }),
     });
   },
   deleteRole(id: string, version?: string): Promise<void> {
@@ -931,11 +1034,28 @@ export const api = {
   },
 
   // Agentic DAG endpoints
-  listDags(params?: { tag?: string }): Promise<{ dags: DagDto[] }> {
+  listDags(params?: { tag?: string }): Promise<{ dags: DagDto[]; nextCursor: string | null }> {
     const qp = new URLSearchParams();
     if (params?.tag) qp.set("tag", params.tag);
     const q = qp.toString();
-    return req<{ dags: DagDto[] }>(`/api/dags${q ? `?${q}` : ""}`);
+    return req<{ dags: DagDto[]; nextCursor: string | null }>(`/api/dags${q ? `?${q}` : ""}`);
+  },
+  promoteDag(id: string, body: { version: string; expectedVersion?: string }): Promise<DagDto> {
+    return versionedWrite<DagDto>({
+      method: "POST",
+      path: `/api/dags/${encodeURIComponent(id)}/promote`,
+      body: { version: body.version },
+      ...(body.expectedVersion !== undefined && { expectedVersion: body.expectedVersion }),
+    });
+  },
+  /** Flip a DAG's kill switch. */
+  setDagEnabled(id: string, body: { enabled: boolean; expectedVersion?: string }): Promise<DagDto> {
+    return versionedWrite<DagDto>({
+      method: "PATCH",
+      path: `/api/dags/${encodeURIComponent(id)}`,
+      body: { enabled: body.enabled },
+      ...(body.expectedVersion !== undefined && { expectedVersion: body.expectedVersion }),
+    });
   },
   getDag(id: string, version?: string): Promise<DagDto> {
     const qp = version ? `?version=${encodeURIComponent(version)}` : "";
@@ -1338,7 +1458,10 @@ export interface DagDto {
     tags?: string[];
   };
   createdAt: number;
-  updatedAt: number;
+  /** Whether this version is the DAG's active one. */
+  active: boolean;
+  /** The DAG's kill switch: a disabled DAG refuses runs (410). */
+  enabled: boolean;
 }
 
 /** Answer of POST /api/dags/:id/run: the run it started (or found under `workflowId`). */

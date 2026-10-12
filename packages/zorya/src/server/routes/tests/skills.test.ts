@@ -87,17 +87,18 @@ describe("skills HTTP routes — read / update / delete", () => {
     ).json()) as RegisteredSkill;
     expect(got.body).toContain("Reproduce first.");
 
-    // partial update: toggle enabled without resending body
+    // partial update: toggle enabled without resending body (no new version)
     const patched = await server.handle(
       new Request("http://test/api/skills/structured-debugging", {
         method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ metadata: { capabilities: [], tags: [], enabled: false } }),
+        headers: { "content-type": "application/json", "if-match": 'W/"v1"' },
+        body: JSON.stringify({ enabled: false }),
       }),
     );
     expect(patched.status).toBe(200);
     const patchedRow = (await patched.json()) as RegisteredSkill;
-    expect(patchedRow.metadata.enabled).toBe(false);
+    expect(patchedRow.enabled).toBe(false);
+    expect(patchedRow.version).toBe("v1");
     expect(patchedRow.body).toContain("Reproduce first."); // body preserved
 
     // delete
@@ -149,6 +150,27 @@ describe("GET /api/skills/_sources — file-managed tracking", () => {
       expect(body.fileManaged).toContain("from-file");
       expect(body.fileManaged).not.toContain("structured-debugging");
 
+      // A scanned skill lands unreviewed. Its text belongs to the file, but
+      // reviewing it (and its kill switch) is the operator's.
+      expect((await registry.get({ id: "from-file" }))?.trust).toBe("needs-review");
+      const patch = (b: unknown) =>
+        server.handle(
+          new Request("http://test/api/skills/from-file", {
+            method: "PATCH",
+            headers: { "content-type": "application/json", "if-match": 'W/"v1"' },
+            body: JSON.stringify(b),
+          }),
+        );
+      expect((await patch({ body: "# Rewritten" })).status).toBe(409);
+      const approved = await patch({ trust: "trusted" });
+      expect(approved.status).toBe(200);
+      expect(await approved.json()).toMatchObject({ version: "v1", trust: "trusted" });
+      expect((await patch({ enabled: false })).status).toBe(200);
+      expect(await registry.get({ id: "from-file" })).toMatchObject({
+        trust: "trusted",
+        enabled: false,
+      });
+
       await skills.stop();
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -180,7 +202,7 @@ describe("listCatalogSkills handler", () => {
       description: "third-party, not approved",
       whenToUse: "never until reviewed",
       body: "# x",
-      metadata: { tags: [], capabilities: [], trust: "needs-review" },
+      trust: "needs-review",
     });
     const res = await listCatalogSkills({ skills: registry })();
     const body = (await res.json()) as { skills: Array<{ id: string }> };

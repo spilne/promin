@@ -27,9 +27,11 @@ const BLANK_AGENT: RegisteredAgent = {
     model: { provider: "anthropic", id: "claude-sonnet-4-6" },
     role: { inline: { systemPrompt: null, tools: [] } },
   },
-  metadata: { description: null, capabilities: [], tags: [], enabled: true },
+  metadata: { description: null, capabilities: [], tags: [] },
   createdAt: 0,
-  updatedAt: 0,
+  active: true,
+  enabled: true,
+  trust: "trusted",
 };
 
 /** Agents the list page loads — the API's largest page. */
@@ -75,7 +77,7 @@ export function AgentList({ onOpen }: AgentListProps) {
                 <th>Tools</th>
                 <th>Capabilities</th>
                 <th>Tags</th>
-                <th>Updated</th>
+                <th title="When the active version was published">Published</th>
               </tr>
             </thead>
             <tbody>
@@ -181,7 +183,7 @@ export function AgentList({ onOpen }: AgentListProps) {
                   <th>Tools</th>
                   <th>Capabilities</th>
                   <th>Tags</th>
-                  <th>Updated</th>
+                  <th title="When the active version was published">Published</th>
                 </tr>
               </thead>
               <tbody>
@@ -286,7 +288,7 @@ function AgentRow({
         )}
       </td>
       <td class="text-sm text-base-content/60">
-        {formatRelative(new Date(agent.updatedAt).toISOString())}
+        {formatRelative(new Date(agent.createdAt).toISOString())}
       </td>
     </tr>
   );

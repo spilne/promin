@@ -9,23 +9,20 @@ export { SqliteMemoryStore } from "./lib/agent/memory-store.ts";
 export type { SqliteMemoryStoreConfig } from "./lib/agent/memory-store.ts";
 export { SqlitePendingApprovalStore } from "./lib/agent/pending-approval-store.ts";
 export type { SqlitePendingApprovalStoreConfig } from "./lib/agent/pending-approval-store.ts";
-export { SqliteAgentRegistry } from "./lib/agent/agent-registry.ts";
-export type { SqliteAgentRegistryConfig } from "./lib/agent/agent-registry.ts";
-export { SqliteRoleRegistry } from "./lib/agent/role-registry.ts";
-export type { SqliteRoleRegistryConfig } from "./lib/agent/role-registry.ts";
-export { SqliteSkillRegistry } from "./lib/agent/skill-registry.ts";
-export type { SqliteSkillRegistryConfig } from "./lib/agent/skill-registry.ts";
-export { SqliteFragmentStore } from "./lib/agent/fragment-store.ts";
-export type { SqliteFragmentStoreConfig } from "./lib/agent/fragment-store.ts";
+export { SqliteVersionedRegistry } from "./lib/agent/versioned-registry.ts";
+export type { SqliteVersionedRegistryConfig } from "./lib/agent/versioned-registry.ts";
+export {
+  SqliteAgentRegistry,
+  SqliteDagRegistry,
+  SqliteFragmentRegistry,
+  SqliteRoleRegistry,
+  SqliteSkillRegistry,
+} from "./lib/agent/registries.ts";
+export type { SqliteRegistryConfig } from "./lib/agent/registries.ts";
+export { SqliteRemoteDeploymentRegistry } from "./lib/agent/remote-deployment-registry.ts";
+export type { SqliteRemoteDeploymentRegistryConfig } from "./lib/agent/remote-deployment-registry.ts";
 export { SqliteKnowledgeBaseStore } from "./lib/agent/knowledge-base-store.ts";
 export type { SqliteKnowledgeBaseStoreConfig } from "./lib/agent/knowledge-base-store.ts";
-export { SqliteDagRegistry } from "./lib/agent/dag-registry.ts";
-export type { SqliteDagRegistryConfig } from "./lib/agent/dag-registry.ts";
-export { createVersionedRecipeStore } from "./lib/agent/versioned-recipe-store.ts";
-export type {
-  VersionedRecipeStore,
-  VersionedRecipeStoreConfig,
-} from "./lib/agent/versioned-recipe-store.ts";
 export { SqliteAgentInstanceRegistry } from "./lib/agent/agent-instance-registry.ts";
 export type { SqliteAgentInstanceRegistryConfig } from "./lib/agent/agent-instance-registry.ts";
 export { SqliteSecretsStorage } from "./lib/agent/secrets-storage.ts";

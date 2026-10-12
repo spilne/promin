@@ -1,7 +1,8 @@
 // ---------------------------------------------------------------------------
-// AgentVersionsModal — list every persisted version of a recipe and
-// render a side-by-side diff between any two. Read-only viewer; publish
-// happens from the Edit drawer ("Publish new version…").
+// AgentVersionsModal — list every version of a recipe, render a
+// side-by-side diff between any two, and make one of them the active
+// version (publish a draft, or roll back). Edits that create versions
+// happen in the Edit drawer.
 //
 // Diff rendering:
 //   - model: provider/id change shown explicitly above the columns
@@ -25,6 +26,8 @@ interface Props {
   agentId: string;
   initialVersion?: string;
   onClose: () => void;
+  /** Called with the agent's new active version after a promote. */
+  onPromoted?: (agent: RegisteredAgent) => void;
   /**
    * When true, render only the picker + diff body (no backdrop, no
    * positioning, no own header). The host owns the chrome — e.g. a tab
@@ -33,14 +36,37 @@ interface Props {
   embed?: boolean;
 }
 
-export function AgentVersionsModal({ agentId, initialVersion, onClose, embed }: Props) {
-  const { data, loading, error } = useFetch(() => api.listAgentVersions(agentId), [agentId], 0);
+export function AgentVersionsModal({ agentId, initialVersion, onClose, onPromoted, embed }: Props) {
+  const { data, loading, error, refresh } = useFetch(
+    () => api.listAgentVersions(agentId),
+    [agentId],
+    0,
+  );
   const versions = useMemo(() => {
     const list = data?.versions ?? [];
-    // Newest-first: registries return ascending; reverse here so the
-    // most-recently-published version sits at the top.
-    return [...list].sort((a, b) => b.createdAt - a.createdAt);
+    // Newest-first: the registry answers in registration order (oldest
+    // first, even within one millisecond); reverse so the latest is on top.
+    return [...list].reverse();
   }, [data]);
+  const activeVersion = versions.find((v) => v.active)?.version;
+  const [promoting, setPromoting] = useState(false);
+  const [promoteError, setPromoteError] = useState<string | null>(null);
+  const promote = async (version: string) => {
+    setPromoting(true);
+    setPromoteError(null);
+    try {
+      const promoted = await api.promoteAgent(agentId, {
+        version,
+        ...(activeVersion !== undefined && { expectedVersion: activeVersion }),
+      });
+      refresh();
+      onPromoted?.(promoted);
+    } catch (err) {
+      setPromoteError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setPromoting(false);
+    }
+  };
 
   const [leftVersion, setLeftVersion] = useState<string | null>(null);
   const [rightVersion, setRightVersion] = useState<string | null>(null);
@@ -104,6 +130,7 @@ export function AgentVersionsModal({ agentId, initialVersion, onClose, embed }: 
         )}
 
         {error && <div class="alert alert-error m-4 text-xs">{error.message}</div>}
+        {promoteError && <div class="alert alert-error m-4 text-xs">{promoteError}</div>}
 
         {loading && !data ? (
           <div class="p-8 text-center text-base-content/50 text-sm">Loading…</div>
@@ -118,7 +145,13 @@ export function AgentVersionsModal({ agentId, initialVersion, onClose, embed }: 
                 value={leftVersion}
                 onChange={setLeftVersion}
               />
-              {left && <VersionMeta agent={left} />}
+              {left && (
+                <VersionMeta
+                  agent={left}
+                  promoting={promoting}
+                  onPromote={() => void promote(left.version)}
+                />
+              )}
             </div>
             <div class="flex flex-col min-h-0">
               <VersionPicker
@@ -127,7 +160,13 @@ export function AgentVersionsModal({ agentId, initialVersion, onClose, embed }: 
                 value={rightVersion}
                 onChange={setRightVersion}
               />
-              {right && <VersionMeta agent={right} />}
+              {right && (
+                <VersionMeta
+                  agent={right}
+                  promoting={promoting}
+                  onPromote={() => void promote(right.version)}
+                />
+              )}
             </div>
             {left && right && (
               <div class="col-span-2 overflow-y-auto border-t border-base-300 pt-3 space-y-4">
@@ -165,7 +204,8 @@ function VersionPicker({
       >
         {versions.map((v) => (
           <option value={v.version}>
-            {v.version} · {formatRelative(new Date(v.createdAt).toISOString())}
+            {v.version}
+            {v.active ? " (active)" : ""} · {formatRelative(new Date(v.createdAt).toISOString())}
           </option>
         ))}
       </select>
@@ -173,11 +213,31 @@ function VersionPicker({
   );
 }
 
-function VersionMeta({ agent }: { agent: RegisteredAgent }) {
+function VersionMeta({
+  agent,
+  promoting,
+  onPromote,
+}: {
+  agent: RegisteredAgent;
+  promoting: boolean;
+  onPromote: () => void;
+}) {
   return (
-    <div class="text-[10px] text-base-content/50 font-mono space-y-0.5">
-      <div>created: {new Date(agent.createdAt).toISOString()}</div>
-      <div>updated: {new Date(agent.updatedAt).toISOString()}</div>
+    <div class="text-[10px] text-base-content/50 font-mono flex items-center gap-2">
+      <span>created: {new Date(agent.createdAt).toISOString()}</span>
+      {agent.active ? (
+        <span class="badge badge-xs badge-success">active</span>
+      ) : (
+        <button
+          type="button"
+          class="btn btn-xs btn-outline"
+          disabled={promoting}
+          title="Serve new invocations with this version"
+          onClick={onPromote}
+        >
+          {promoting ? "…" : "Make active"}
+        </button>
+      )}
     </div>
   );
 }
@@ -286,12 +346,7 @@ function ToolsDiff({ left, right }: { left: RegisteredAgent; right: RegisteredAg
 }
 
 function MetadataDiff({ left, right }: { left: RegisteredAgent; right: RegisteredAgent }) {
-  const fields: Array<keyof RegisteredAgent["metadata"]> = [
-    "description",
-    "capabilities",
-    "tags",
-    "enabled",
-  ];
+  const fields: Array<keyof RegisteredAgent["metadata"]> = ["description", "capabilities", "tags"];
   const rows = fields
     .map((f) => {
       const lv = left.metadata[f];

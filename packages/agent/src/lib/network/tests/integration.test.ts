@@ -204,7 +204,7 @@ describe("agents network — discovery", () => {
       metadata: { capabilities: ["billing"], tags: [] },
     });
 
-    const coordinator = (await registry.get("coordinator"))!;
+    const coordinator = (await registry.get({ id: "coordinator" }))!;
     const agent = (await resolve(coordinator)).withScope({ namespaceId: "acme" });
 
     // We can't easily intercept the tool result, but if billing-bot were
@@ -425,7 +425,7 @@ describe("agents network — delegation", () => {
         },
       },
     });
-    const coordinator = (await registry.get("coordinator"))!;
+    const coordinator = (await registry.get({ id: "coordinator" }))!;
     const agent = (await resolve(coordinator)).withScope({ namespaceId: "acme" });
     const out = await agent.invoke({ task: "delegate" });
     // Coordinator's LLM gets the tool error result and emits the final text.

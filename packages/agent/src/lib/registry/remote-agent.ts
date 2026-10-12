@@ -52,16 +52,26 @@ import type {
 import type { EpisodicRecord } from "../memory/types.ts";
 import type { Message, ToolCall } from "../message.ts";
 import type { CompactThreadOptions, DistillThreadOptions } from "../memory/consolidator.ts";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 
 // ---------------------------------------------------------------------------
 // State shared across a proxy instance + its `withScope` derivatives.
 // ---------------------------------------------------------------------------
 
-interface RemoteAgentConfig {
+/** Default timeout of the proxy's non-turn calls (thread list, messages, title, archive). */
+export const DEFAULT_REMOTE_REQUEST_TIMEOUT_MS = 30_000;
+
+export interface RemoteAgentConfig {
   readonly endpoint: string;
   readonly remoteAgentId: string;
   readonly auth?: { readonly kind: "bearer"; readonly token: string };
+  /** Timeout of a turn (invoke, send, stream). Default: none — turns can run long. */
   readonly timeoutMs?: number;
+  /**
+   * Timeout of every other call (thread list, message history, title,
+   * archive). Default: `DEFAULT_REMOTE_REQUEST_TIMEOUT_MS`.
+   */
+  readonly requestTimeoutMs?: number;
   readonly namespaceId?: string;
   readonly resourceId?: string;
   /**
@@ -71,6 +81,150 @@ interface RemoteAgentConfig {
    * pinned to the address it vetted.
    */
   readonly fetch?: (url: string, init: RequestInit) => Promise<Response>;
+  /** Timer source for the timeouts. Default: `SystemWallClock`. */
+  readonly clock?: WallClock;
+}
+
+/** An abort signal that fires on the upstream signal or after `timeoutMs`. */
+interface Deadline {
+  readonly ctrl: AbortController;
+  /** Stop the timer and drop the upstream listener. Idempotent. */
+  release(): void;
+}
+
+function startDeadline(params: {
+  readonly clock: WallClock;
+  readonly timeoutMs?: number;
+  readonly upstream?: AbortSignal;
+}): Deadline {
+  const ctrl = new AbortController();
+  const onAbort = () => ctrl.abort();
+  params.upstream?.addEventListener("abort", onAbort);
+  if (params.upstream?.aborted) ctrl.abort();
+  const timer =
+    params.timeoutMs !== undefined
+      ? params.clock.setTimeout(
+          () => ctrl.abort(new Error(`RemoteAgent: request timed out after ${params.timeoutMs}ms`)),
+          params.timeoutMs,
+        )
+      : undefined;
+  timer?.unref?.();
+  let released = false;
+  return {
+    ctrl,
+    release() {
+      if (released) return;
+      released = true;
+      timer?.clear();
+      params.upstream?.removeEventListener("abort", onAbort);
+    },
+  };
+}
+
+/** HTTP plumbing shared by `RemoteAgent` and its threads. */
+class RemoteTransport {
+  constructor(private readonly cfg: RemoteAgentConfig) {}
+
+  private get clock(): WallClock {
+    return this.cfg.clock ?? SystemWallClock;
+  }
+
+  private headers(): Record<string, string> {
+    const h: Record<string, string> = { "content-type": "application/json" };
+    if (this.cfg.auth?.kind === "bearer") {
+      h.authorization = `Bearer ${this.cfg.auth.token}`;
+    }
+    return h;
+  }
+
+  private send(params: {
+    method: string;
+    path: string;
+    body?: unknown;
+    signal: AbortSignal;
+  }): Promise<Response> {
+    const init: RequestInit = {
+      method: params.method,
+      headers: this.headers(),
+      signal: params.signal,
+      ...(params.body !== undefined && { body: JSON.stringify(params.body) }),
+    };
+    const url = `${this.cfg.endpoint}${params.path}`;
+    return this.cfg.fetch ? this.cfg.fetch(url, init) : fetch(url, init);
+  }
+
+  /**
+   * One request whose whole exchange — headers and body — runs under a
+   * deadline: the turn timeout for turns, the request timeout otherwise.
+   */
+  async call(params: {
+    method: string;
+    path: string;
+    body?: unknown;
+    turn?: boolean;
+    signal?: AbortSignal;
+  }): Promise<{ readonly status: number; readonly ok: boolean; readonly text: string }> {
+    const timeoutMs = params.turn
+      ? this.cfg.timeoutMs
+      : (this.cfg.requestTimeoutMs ?? DEFAULT_REMOTE_REQUEST_TIMEOUT_MS);
+    const deadline = startDeadline({
+      clock: this.clock,
+      ...(timeoutMs !== undefined && { timeoutMs }),
+      ...(params.signal !== undefined && { upstream: params.signal }),
+    });
+    try {
+      const res = await this.send({ ...params, signal: deadline.ctrl.signal });
+      return { status: res.status, ok: res.ok, text: await res.text() };
+    } finally {
+      deadline.release();
+    }
+  }
+
+  /**
+   * A streamed turn. The caller's `signal` or the turn timeout cancels it
+   * (`cancel()`); the deadline runs until the stream ends. `cancelRemote`
+   * cancels the run on the server first — for a thread stream, where
+   * closing the stream only detaches from the turn.
+   */
+  stream(params: {
+    path: string;
+    body: unknown;
+    signal?: AbortSignal;
+    cancelRemote?: (turnId: string | undefined) => Promise<void>;
+  }): AgentRunOutput {
+    const ctrl = new AbortController();
+    const deadline = startDeadline({
+      clock: this.clock,
+      ...(this.cfg.timeoutMs !== undefined && { timeoutMs: this.cfg.timeoutMs }),
+      ...(params.signal !== undefined && { upstream: params.signal }),
+    });
+    const pending = this.send({
+      method: "POST",
+      path: params.path,
+      body: params.body,
+      signal: ctrl.signal,
+    });
+    const out = buildSseRunOutput({
+      pending,
+      ctrl,
+      ...(params.cancelRemote !== undefined && { cancelRemote: params.cancelRemote }),
+      onSettled: () => deadline.release(),
+    });
+    const stop = (): void => {
+      out.cancel().catch(() => {});
+    };
+    if (deadline.ctrl.signal.aborted) stop();
+    else deadline.ctrl.signal.addEventListener("abort", stop, { once: true });
+    return out;
+  }
+
+  /** Cancel a thread's running turn on the server; a turn that already ended (404) is fine. */
+  async cancelTurn(params: { path: string; body: Record<string, unknown> }): Promise<void> {
+    const res = await this.call({ method: "POST", path: params.path, body: params.body });
+    if (!res.ok && res.status !== 404) {
+      throw new Error(`RemoteAgent cancel failed: ${res.status} ${res.text}`);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -78,33 +232,39 @@ interface RemoteAgentConfig {
 // ---------------------------------------------------------------------------
 
 export class RemoteAgent implements Agent {
-  constructor(private readonly cfg: RemoteAgentConfig) {}
+  private readonly http: RemoteTransport;
+
+  constructor(private readonly cfg: RemoteAgentConfig) {
+    this.http = new RemoteTransport(cfg);
+  }
 
   // --- one-shot ------------------------------------------------------------
 
-  async invoke(input: { task: string }, _opts?: AgentInvokeOpts): Promise<AgentRunOutput> {
-    const body = this.baseBody(input.task);
-    const ctrl = this.abortCtrl(_opts?.signal);
-    const res = await this.post(`/api/agents/${enc(this.cfg.remoteAgentId)}/invoke`, body, ctrl);
-    if (!res.ok) {
-      throw new Error(`RemoteAgent.invoke failed: ${res.status} ${await res.text()}`);
-    }
-    const data = (await res.json()) as { text: string; finishReason: string; usage: UsageStats };
+  async invoke(input: { task: string }, opts?: AgentInvokeOpts): Promise<AgentRunOutput> {
+    const res = await this.http.call({
+      method: "POST",
+      path: `/api/agents/${enc(this.cfg.remoteAgentId)}/invoke`,
+      body: this.baseBody(input.task),
+      turn: true,
+      ...(opts?.signal !== undefined && { signal: opts.signal }),
+    });
+    if (!res.ok) throw new Error(`RemoteAgent.invoke failed: ${res.status} ${res.text}`);
+    const data = JSON.parse(res.text) as { text: string; finishReason: string; usage: UsageStats };
     return buildStaticRunOutput(data);
   }
 
   stream(input: { task: string }, opts?: AgentInvokeOpts): AgentRunOutput {
-    const body = this.baseBody(input.task);
-    const ctrl = this.abortCtrl(opts?.signal);
-    const pending = this.post(`/api/agents/${enc(this.cfg.remoteAgentId)}/stream`, body, ctrl);
-    // A one-shot stream is cancelled by closing it.
-    return buildSseRunOutput({ pending, ctrl });
+    return this.http.stream({
+      path: `/api/agents/${enc(this.cfg.remoteAgentId)}/stream`,
+      body: this.baseBody(input.task),
+      ...(opts?.signal !== undefined && { signal: opts.signal }),
+    });
   }
 
   // --- thread --------------------------------------------------------------
 
   async thread(threadId: string, _opts?: ThreadOptions): Promise<AgentThread> {
-    return new RemoteAgentThread(this.cfg, threadId);
+    return new RemoteAgentThread({ cfg: this.cfg, http: this.http, id: threadId });
   }
 
   // --- threads list --------------------------------------------------------
@@ -117,9 +277,12 @@ export class RemoteAgent implements Agent {
     if (this.cfg.resourceId) qp.set("resourceId", this.cfg.resourceId);
     if (params?.q) qp.set("q", params.q);
     if (params?.limit !== undefined) qp.set("limit", String(params.limit));
-    const res = await this.get(`/api/agents/${enc(this.cfg.remoteAgentId)}/threads?${qp}`);
+    const res = await this.http.call({
+      method: "GET",
+      path: `/api/agents/${enc(this.cfg.remoteAgentId)}/threads?${qp}`,
+    });
     if (!res.ok) throw new Error(`RemoteAgent.listThreads failed: ${res.status}`);
-    const body = (await res.json()) as { threads: RemoteThreadSummary[] };
+    const body = JSON.parse(res.text) as { threads: RemoteThreadSummary[] };
     return body.threads.map(toThreadSummary);
   }
 
@@ -147,66 +310,11 @@ export class RemoteAgent implements Agent {
     });
   }
 
-  // --- HTTP helpers ---------------------------------------------------------
-
   private baseBody(task: string): Record<string, unknown> {
     const body: Record<string, unknown> = { task };
     if (this.cfg.namespaceId) body.namespaceId = this.cfg.namespaceId;
     if (this.cfg.resourceId) body.resourceId = this.cfg.resourceId;
     return body;
-  }
-
-  private headers(): Record<string, string> {
-    const h: Record<string, string> = { "content-type": "application/json" };
-    if (this.cfg.auth?.kind === "bearer") {
-      h.authorization = `Bearer ${this.cfg.auth.token}`;
-    }
-    return h;
-  }
-
-  private abortCtrl(upstream?: AbortSignal): AbortController {
-    const ctrl = new AbortController();
-    if (upstream) upstream.addEventListener("abort", () => ctrl.abort());
-    if (this.cfg.timeoutMs !== undefined) {
-      setTimeout(() => ctrl.abort(), this.cfg.timeoutMs);
-    }
-    return ctrl;
-  }
-
-  private send(url: string, init: RequestInit): Promise<Response> {
-    return this.cfg.fetch ? this.cfg.fetch(url, init) : fetch(url, init);
-  }
-
-  post(path: string, body: unknown, ctrl: AbortController): Promise<Response> {
-    return this.send(`${this.cfg.endpoint}${path}`, {
-      method: "POST",
-      headers: this.headers(),
-      body: JSON.stringify(body),
-      signal: ctrl.signal,
-    });
-  }
-
-  get(path: string): Promise<Response> {
-    return this.send(`${this.cfg.endpoint}${path}`, {
-      method: "GET",
-      headers: this.headers(),
-    });
-  }
-
-  patch(path: string, body: unknown): Promise<Response> {
-    return this.send(`${this.cfg.endpoint}${path}`, {
-      method: "PATCH",
-      headers: this.headers(),
-      body: JSON.stringify(body),
-    });
-  }
-
-  postJson(path: string, body: unknown): Promise<Response> {
-    return this.send(`${this.cfg.endpoint}${path}`, {
-      method: "POST",
-      headers: this.headers(),
-      body: JSON.stringify(body),
-    });
   }
 }
 
@@ -216,11 +324,15 @@ export class RemoteAgent implements Agent {
 
 class RemoteAgentThread implements AgentThread {
   readonly isNew = false;
+  readonly id: string;
+  private readonly cfg: RemoteAgentConfig;
+  private readonly http: RemoteTransport;
 
-  constructor(
-    private readonly cfg: RemoteAgentConfig,
-    readonly id: string,
-  ) {}
+  constructor(params: { cfg: RemoteAgentConfig; http: RemoteTransport; id: string }) {
+    this.cfg = params.cfg;
+    this.http = params.http;
+    this.id = params.id;
+  }
 
   get resourceId(): string | null {
     return this.cfg.resourceId ?? null;
@@ -229,18 +341,15 @@ class RemoteAgentThread implements AgentThread {
   // --- send / stream -------------------------------------------------------
 
   async send(input: { task: string }, opts?: AgentInvokeOpts): Promise<AgentRunOutput> {
-    const body = this.threadBody(input.task);
-    const ctrl = this.abortCtrl(opts?.signal);
-    const proxy = new RemoteAgent(this.cfg);
-    const res = await proxy.post(this.threadPath(), body, ctrl);
-    if (!res.ok) {
-      throw new Error(`RemoteAgentThread.send failed: ${res.status} ${await res.text()}`);
-    }
-    const data = (await res.json()) as {
-      text: string;
-      finishReason: string;
-      usage: UsageStats;
-    };
+    const res = await this.http.call({
+      method: "POST",
+      path: this.threadPath(),
+      body: this.scoped({ task: input.task }),
+      turn: true,
+      ...(opts?.signal !== undefined && { signal: opts.signal }),
+    });
+    if (!res.ok) throw new Error(`RemoteAgentThread.send failed: ${res.status} ${res.text}`);
+    const data = JSON.parse(res.text) as { text: string; finishReason: string; usage: UsageStats };
     return buildStaticRunOutput(data);
   }
 
@@ -252,42 +361,16 @@ class RemoteAgentThread implements AgentThread {
    * refuses the cancel; a turn that already ended (404) is not an error.
    */
   stream(input: { task: string }, opts?: AgentInvokeOpts): AgentRunOutput {
-    const body = this.threadBody(input.task);
-    const ctrl = new AbortController();
-    const proxy = new RemoteAgent(this.cfg);
-    const pending = proxy.post(`${this.threadPath()}/stream`, body, ctrl);
-    const out = buildSseRunOutput({
-      pending,
-      ctrl,
-      cancelRemote: async (turnId) => {
-        const cancelBody: Record<string, unknown> = {};
-        if (this.cfg.namespaceId) cancelBody.namespaceId = this.cfg.namespaceId;
-        if (this.cfg.resourceId) cancelBody.resourceId = this.cfg.resourceId;
-        if (turnId !== undefined) cancelBody.turnId = turnId;
-        const res = await proxy.post(
-          `${this.threadPath()}/cancel`,
-          cancelBody,
-          new AbortController(),
-        );
-        if (!res.ok && res.status !== 404) {
-          throw new Error(`RemoteAgent cancel failed: ${res.status} ${await res.text()}`);
-        }
-      },
+    return this.http.stream({
+      path: `${this.threadPath()}/stream`,
+      body: this.scoped({ task: input.task }),
+      ...(opts?.signal !== undefined && { signal: opts.signal }),
+      cancelRemote: (turnId) =>
+        this.http.cancelTurn({
+          path: `${this.threadPath()}/cancel`,
+          body: this.scoped(turnId !== undefined ? { turnId } : {}),
+        }),
     });
-    const stop = (): void => {
-      out.cancel().catch(() => {});
-    };
-    const upstream = opts?.signal;
-    if (upstream?.aborted) stop();
-    else upstream?.addEventListener("abort", stop, { once: true });
-    const timer =
-      this.cfg.timeoutMs !== undefined ? setTimeout(stop, this.cfg.timeoutMs) : undefined;
-    const clear = (): void => {
-      if (timer !== undefined) clearTimeout(timer);
-      upstream?.removeEventListener("abort", stop);
-    };
-    out.text.then(clear, clear);
-    return out;
   }
 
   // --- messages ------------------------------------------------------------
@@ -297,10 +380,12 @@ class RemoteAgentThread implements AgentThread {
     if (this.cfg.namespaceId) qp.set("namespaceId", this.cfg.namespaceId);
     if (this.cfg.resourceId) qp.set("resourceId", this.cfg.resourceId);
     if (range?.limit !== undefined) qp.set("limit", String(range.limit));
-    const proxy = new RemoteAgent(this.cfg);
-    const res = await proxy.get(`${this.threadPath()}/messages?${qp}`);
+    const res = await this.http.call({
+      method: "GET",
+      path: `${this.threadPath()}/messages?${qp}`,
+    });
     if (!res.ok) return [];
-    const body = (await res.json()) as { messages: Message[] };
+    const body = JSON.parse(res.text) as { messages?: Message[] };
     return body.messages ?? [];
   }
 
@@ -329,21 +414,25 @@ class RemoteAgentThread implements AgentThread {
   }
 
   async setTitle(title: string | null): Promise<void> {
-    const body: Record<string, unknown> = { title };
-    if (this.cfg.namespaceId) body.namespaceId = this.cfg.namespaceId;
-    if (this.cfg.resourceId) body.resourceId = this.cfg.resourceId;
-    const proxy = new RemoteAgent(this.cfg);
-    await proxy.patch(this.threadPath(), body);
+    const res = await this.http.call({
+      method: "PATCH",
+      path: this.threadPath(),
+      body: this.scoped({ title }),
+    });
+    if (!res.ok) throw new Error(`RemoteAgentThread.setTitle failed: ${res.status} ${res.text}`);
   }
 
   // --- archive -------------------------------------------------------------
 
   async setArchived(archivedAt: number | null): Promise<void> {
-    const body: Record<string, unknown> = { archivedAt };
-    if (this.cfg.namespaceId) body.namespaceId = this.cfg.namespaceId;
-    if (this.cfg.resourceId) body.resourceId = this.cfg.resourceId;
-    const proxy = new RemoteAgent(this.cfg);
-    await proxy.postJson(`${this.threadPath()}/archive`, body);
+    const res = await this.http.call({
+      method: "POST",
+      path: `${this.threadPath()}/archive`,
+      body: this.scoped({ archivedAt }),
+    });
+    if (!res.ok) {
+      throw new Error(`RemoteAgentThread.setArchived failed: ${res.status} ${res.text}`);
+    }
   }
 
   // --- delete --------------------------------------------------------------
@@ -358,20 +447,11 @@ class RemoteAgentThread implements AgentThread {
     return `/api/agents/${enc(this.cfg.remoteAgentId)}/threads/${enc(this.id)}`;
   }
 
-  private threadBody(task: string): Record<string, unknown> {
-    const body: Record<string, unknown> = { task };
-    if (this.cfg.namespaceId) body.namespaceId = this.cfg.namespaceId;
-    if (this.cfg.resourceId) body.resourceId = this.cfg.resourceId;
-    return body;
-  }
-
-  private abortCtrl(upstream?: AbortSignal): AbortController {
-    const ctrl = new AbortController();
-    if (upstream) upstream.addEventListener("abort", () => ctrl.abort());
-    if (this.cfg.timeoutMs !== undefined) {
-      setTimeout(() => ctrl.abort(), this.cfg.timeoutMs);
-    }
-    return ctrl;
+  private scoped(body: Record<string, unknown>): Record<string, unknown> {
+    const out = { ...body };
+    if (this.cfg.namespaceId) out.namespaceId = this.cfg.namespaceId;
+    if (this.cfg.resourceId) out.resourceId = this.cfg.resourceId;
+    return out;
   }
 }
 
@@ -411,8 +491,10 @@ function buildSseRunOutput(params: {
   ctrl: AbortController;
   /** Cancels the run (turn id from `x-turn-id`) on the server; closing the stream alone only detaches. */
   cancelRemote?: (turnId: string | undefined) => Promise<void>;
+  /** Called once the stream has ended, however it ended. */
+  onSettled?: () => void;
 }): AgentRunOutput {
-  const { pending, ctrl, cancelRemote } = params;
+  const { pending, ctrl, cancelRemote, onSettled } = params;
   const turnId = pending.then(
     (res) => res.headers.get("x-turn-id") ?? undefined,
     () => undefined,
@@ -516,14 +598,14 @@ function buildSseRunOutput(params: {
         resolveFinish("error");
         resolveUsage({ inputTokens: 0, outputTokens: 0 });
       }
-      // On abort: callers who awaited `text` get their rejection from
-      // `ctrl.abort()` triggering `AbortError` inside the fetch — handled
-      // by the catch above and the reject path below.
+      // On abort (cancel, upstream signal or timeout) the fetch rejects
+      // with AbortError; the finally below settles every deferred promise.
     } finally {
       // Ensure all deferred promises are settled so callers don't hang.
       resolveText?.("");
       resolveFinish?.("stop");
       resolveUsage?.({ inputTokens: 0, outputTokens: 0 });
+      onSettled?.();
       close();
     }
   })();

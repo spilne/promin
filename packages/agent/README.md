@@ -282,7 +282,7 @@ const pool = new McpClientPool(); // shared; closeAll() on shutdown
 
 // recipe.backend.mcpServers = [{ server: "github" }]
 const mcpTools = await loadMcpToolsFromRecipe({ recipe, servers, pool, secrets, scope });
-const agent = resolveLocalAgent(recipe, { ...deps, mcpTools });
+const agent = await resolveLocalAgent(recipe, { ...deps, mcpTools });
 ```
 
 - **Names**: `<server>__<tool>`, valid for every provider
@@ -388,6 +388,74 @@ callee per call with `route` / `load`: the agents network's `callAgent`
 async, scope-aware resolver. The tool runs only inside a durable turn
 (`agentAction`, `LocalAgent`).
 
+### Versioned registries
+
+Agents, roles, skills, DAGs and prompt fragments all live in one kind of
+store, `VersionedRegistry<TBody, TFilter>`: `InMemoryVersionedRegistry`
+here, `SqliteVersionedRegistry` (`@promin/sqlite`) and
+`PostgresVersionedRegistry` (`@promin/postgres`), each bound to a kind
+(`AGENT_KIND`, `ROLE_KIND`, `SKILL_KIND`, `DAG_KIND`, `FRAGMENT_KIND`; the
+`*AgentRegistry` / `*RoleRegistry` / … classes bind it for you). All pass
+`versionedRegistryTestSuite` from `@promin/agent/testing`.
+
+- **Immutable versions.** `register({ id, ...body })` stores a version;
+  without `version` it reuses the version holding the same body or mints
+  the next `v<n>`. Re-registering an existing version with another body is a
+  `RegistryConflictError` (`version_conflict`). A label is never rebound:
+  `unregister` leaves a tombstone, the sequence never restarts, and only the
+  same body can bring a removed version back — so a pin like `tone@v1`
+  never resolves to other text.
+- **Active pointer.** The first version is active; later ones are drafts
+  until `promote({ id, version })` (or `register({ promote: true })`).
+  `get({ id })` answers the active version, `get({ id, version })` any live
+  one, `versions({ id })` all live ones in registration order. Removing the
+  active version activates `unregister({ promote })`, else the version that
+  was active before it (never just the latest draft), else the latest one.
+- **Compare-and-set.** Writes take `expectedActive` (the active version the
+  caller read, `null` for "id must not exist"); a stale one is an
+  `active_mismatch` conflict and writes nothing.
+- **State.** `enabled` is the id's kill switch (`setEnabled`, or
+  `register({ enabled })` in the same write as a version) — held for
+  invocations, DAG nodes, the agents network, scheduled turns, queued
+  webhook deliveries, role refs, skills and fragments. `trust` is a
+  version's review state (`setTrust`) — `needs-review` skills and fragments
+  never reach a model.
+- **Listing.** `list({ filter, enabled, source, limit, cursor })` answers one
+  active entry per id in id order, filtered in the store before the page is
+  cut, with a `nextCursor`. `source: "file"` lists the file-managed ids.
+- **Concurrency.** SQLite writes run in `BEGIN IMMEDIATE` transactions
+  (several processes on one file take turns; set `busy_timeout`); Postgres
+  writes take a per-id advisory lock.
+
+```ts
+const roles = new InMemoryRoleRegistry();
+const v1 = await roles.register({
+  id: "reviewer",
+  definition: { systemPrompt: "Review.", tools: [] },
+});
+const v2 = await roles.register({
+  id: "reviewer",
+  definition: { systemPrompt: "Review carefully.", tools: [] },
+  expectedActive: v1.version, // someone else's edit since → RegistryConflictError
+});
+await roles.promote({ id: "reviewer", version: v2.version });
+```
+
+A role layers fragments by id (`systemPrompt.layers: ["tone"]`, following the
+fragment's active version) or pins one (`"tone@v2"`). Pinning a role version
+(`role: { ref: { id, version } }`) pins its definition, not the fragments it
+layers by bare id: a role version renders the same prompt forever only when
+its layers are pinned too (the dashboard's layer picker pins with one
+click). Skills pin the same way through `skills: [{ id, version }]`. The folder scanners
+(`startAgentScanLoop`, `startSkillScanLoop`, `startFragmentScanLoop`, one
+shared `startScanLoop`) register a changed file as a new version with
+`source: "file"` and leave unchanged files alone. A changed file becomes
+active when the active version is the file's own; when an operator made
+another version active, the file's version waits as a draft (a scan never
+undoes an operator's promote). With `sync` they remove only versions they
+wrote — never an operator's — and nothing after a scan that could not read
+every file (an empty, unparsable or misnamed file is a scan error).
+
 Agentic DAGs (`createDagWorkflow`) run each node the same way, as a child run
 `<dag run>.node-<id>`. A run names a registered DAG (`{ dagId, version,
 initialInput, scope }`) and reads the recipe from the `DagRegistry` in its first
@@ -489,7 +557,7 @@ Recipes reference retrievers by id in `backend.knowledge` (`AgentKnowledgeRecipe
 const retrievers = new InMemoryRetrieverRegistry([
   { id: "docs", retriever: docs, description: "Product docs", tags: ["public"] },
 ]);
-const agent = resolveLocalAgent(recipe, { runner, llm, tools, retrievers });
+const agent = await resolveLocalAgent(recipe, { runner, llm, tools, retrievers });
 ```
 
 `retrieverRegistryTestSuite` (from `@promin/agent/testing`) checks a custom `RetrieverRegistry`.
@@ -639,7 +707,7 @@ const catalog = new InMemoryModelCatalog([
   },
 ]);
 
-resolveLocalAgent(recipe, {
+await resolveLocalAgent(recipe, {
   // ...
   llm: (provider, id) => catalog.get(provider, id)?.llm ?? fallback,
 });

@@ -249,7 +249,7 @@ function AgentMetaBadges({
       : agent.backend.type;
   const skills =
     agent.backend.type === "local" ? (inlineRoleDefinition(agent.backend.role)?.skills ?? []) : [];
-  const isDisabled = agent.metadata.enabled === false;
+  const isDisabled = !agent.enabled;
   return (
     <div class="flex gap-1 flex-wrap items-center">
       {isDisabled && (

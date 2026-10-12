@@ -1,13 +1,17 @@
 // ---------------------------------------------------------------------------
 // DAG gateway — operator-facing CRUD + run for AgenticDagRecipe.
 //
-// Routes:
-//   GET    /api/dags                      — list (latest-per-id)
-//   GET    /api/dags/:id                  — fetch (latest, or ?version=)
+// Routes (versioning per `versioned-resource.ts`):
+//   GET    /api/dags                      — active version per DAG (tag filter,
+//                                           `limit` + `cursor` paging)
+//   GET    /api/dags/:id                  — fetch (active, or ?version=)
 //   GET    /api/dags/:id/versions         — full version history
-//   POST   /api/dags                      — register (or new version)
-//   DELETE /api/dags/:id                  — unregister all versions
-//   POST   /api/dags/:id/run              — start a durable run (202 + run id)
+//   POST   /api/dags                      — register a new DAG (409 when it exists)
+//   PATCH  /api/dags/:id                  — new version / kill switch; `If-Match` required
+//   POST   /api/dags/:id/promote          — make a version active
+//   DELETE /api/dags/:id                  — remove all versions (or ?version=)
+//   POST   /api/dags/:id/run              — start a durable run (202 + run id;
+//                                           410 while the DAG is disabled)
 //
 // A run names its scope (`namespaceId` + `resourceId | ownerId`) like an
 // agent invocation; every node runs bound to it. Before the run starts,
@@ -33,17 +37,29 @@
 import {
   DagValidationError,
   type AgentRegistry,
+  type DagRecipe,
   type DagRegistry,
   type DurableDagInput,
-  type RegisterDagInput,
+  type RegisteredDag,
 } from "@promin/agent";
 import type { NamespaceRegistry } from "@promin/workflow";
-import { json, jsonError, readJson } from "../router.ts";
+import { json, jsonError, parseIntParam, readJson } from "../router.ts";
 import { requireActiveNamespace } from "../namespace-guard.ts";
 import { WorkflowIdConflictError } from "../services/workflows/errors.ts";
 import type { TriggerResult, ZoryaWorkflows } from "../services/workflows/zorya-workflows.ts";
 import type { ScopeAuthorizer } from "./agent-gateway-kit.ts";
 import { agentNotFound, disabled410, parseScopeFields } from "./agents/agent-scope.ts";
+import {
+  matchActiveVersion,
+  createOnly,
+  deleteRoute,
+  entryResponse,
+  ifMatchVersions,
+  listVersionsRoute,
+  optionalVersion,
+  promoteRoute,
+  registryCall,
+} from "./versioned-resource.ts";
 
 export interface DagGatewayDeps {
   readonly registry: DagRegistry;
@@ -91,86 +107,137 @@ function asMessage(err: unknown): string {
 export function listDags(deps: DagGatewayDeps) {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
-    const limit = url.searchParams.get("limit");
-    const tag = url.searchParams.get("tag");
-    const params: { limit?: number; tag?: string } = {};
-    if (limit) {
-      const n = Number.parseInt(limit, 10);
-      if (Number.isFinite(n) && n > 0) params.limit = n;
-    }
-    if (tag) params.tag = tag;
-    try {
-      const dags = await deps.registry.list(params);
-      return json(200, { dags });
-    } catch (err) {
-      return jsonError(500, "list_failed", asMessage(err));
-    }
+    const limit = parseIntParam({ raw: url.searchParams.get("limit"), min: 1, max: 1_000 });
+    const cursor = url.searchParams.get("cursor") ?? undefined;
+    const tag = url.searchParams.get("tag") ?? undefined;
+    const page = await deps.registry.list({
+      ...(tag !== undefined && { filter: { tag } }),
+      ...(limit !== undefined && { limit }),
+      ...(cursor !== undefined && { cursor }),
+    });
+    return json(200, { dags: page.items, nextCursor: page.nextCursor });
   };
+}
+
+function dagNotFound(id: string): Response {
+  return jsonError(404, "dag_not_found", `DAG "${id}" not registered.`);
 }
 
 export function getDag(deps: DagGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
-    const url = new URL(req.url);
-    const version = url.searchParams.get("version") ?? undefined;
-    try {
-      const dag = await deps.registry.get(id, version);
-      if (!dag) return jsonError(404, "dag_not_found", `DAG "${id}" not registered.`);
-      return json(200, dag);
-    } catch (err) {
-      return jsonError(500, "get_failed", asMessage(err));
-    }
+    const version = new URL(req.url).searchParams.get("version") ?? undefined;
+    const dag = await deps.registry.get({ id, ...(version !== undefined && { version }) });
+    if (!dag) return dagNotFound(id);
+    return entryResponse({ status: 200, entry: dag });
   };
 }
 
 export function listDagVersions(deps: DagGatewayDeps) {
-  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
-    const id = params.id;
-    if (!id) return jsonError(400, "missing_id");
-    try {
-      const versions = await deps.registry.versions(id);
-      if (versions.length === 0) {
-        return jsonError(404, "dag_not_found", `DAG "${id}" not registered.`);
-      }
-      return json(200, { versions });
-    } catch (err) {
-      return jsonError(500, "list_versions_failed", asMessage(err));
-    }
+  return listVersionsRoute({ registry: deps.registry, notFound: dagNotFound });
+}
+
+export function promoteDag(deps: DagGatewayDeps) {
+  return promoteRoute({ registry: deps.registry, notFound: dagNotFound });
+}
+
+export function deleteDag(deps: DagGatewayDeps) {
+  return deleteRoute({ registry: deps.registry, notFound: dagNotFound });
+}
+
+/** The graph fields of a request body; validation happens in the registry. */
+function dagBody(raw: Record<string, unknown>): DagRecipe {
+  return {
+    nodes: (raw.nodes ?? []) as DagRecipe["nodes"],
+    edges: (raw.edges ?? []) as DagRecipe["edges"],
+    entry: (raw.entry ?? []) as DagRecipe["entry"],
+    terminals: (raw.terminals ?? []) as DagRecipe["terminals"],
+    ...(raw.metadata !== undefined && { metadata: raw.metadata as DagRecipe["metadata"] }),
   };
 }
 
+/** A registry write that answers 400 with the issues of an invalid graph. */
+async function dagWrite<T>(fn: () => Promise<T>): Promise<T | Response> {
+  try {
+    return await registryCall(fn);
+  } catch (err) {
+    if (err instanceof DagValidationError) {
+      return json(400, { error: "invalid_dag", issues: err.issues });
+    }
+    throw err;
+  }
+}
+
+/** `POST /api/dags` — register a new DAG (409 `dag_exists` when the id is taken). */
 export function createDag(deps: DagGatewayDeps) {
   return async (req: Request): Promise<Response> => {
-    const body = await readJson<RegisterDagInput>(req);
+    const body = await readJson<Record<string, unknown>>(req);
     if (!body) return jsonError(400, "missing_body");
     if (typeof body.id !== "string" || body.id.length === 0) {
       return jsonError(400, "missing_id");
     }
-    try {
-      const dag = await deps.registry.register(body);
-      return json(201, dag);
-    } catch (err) {
-      if (err instanceof DagValidationError) {
-        return json(400, { error: "invalid_dag", issues: err.issues });
-      }
-      return jsonError(500, "create_failed", asMessage(err));
-    }
+    const id = body.id;
+    const version = optionalVersion(body.version);
+    const created = await dagWrite(() =>
+      createOnly({
+        register: () =>
+          deps.registry.register({
+            id,
+            ...(version !== undefined && { version }),
+            ...dagBody(body),
+            expectedActive: null,
+          }),
+        onExists: () => jsonError(409, "dag_exists", `DAG "${id}" already exists.`),
+      }),
+    );
+    if (created instanceof Response) return created;
+    return entryResponse({ status: 201, entry: created });
   };
 }
 
-export function deleteDag(deps: DagGatewayDeps) {
+/**
+ * `PATCH /api/dags/:id` — `If-Match` required. A graph in the body becomes
+ * a new version (`version` names it; `publish: false` keeps it a draft);
+ * `enabled` flips the DAG's kill switch.
+ */
+export function updateDag(deps: DagGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
-    const url = new URL(req.url);
-    const version = url.searchParams.get("version") ?? undefined;
-    try {
-      await deps.registry.unregister(id, version);
-      return new Response(null, { status: 204 });
-    } catch (err) {
-      return jsonError(500, "delete_failed", asMessage(err));
+    const body = await readJson<Record<string, unknown>>(req);
+    if (!body) return jsonError(400, "missing_body");
+    const ifMatch = ifMatchVersions({ req, required: true });
+    if (body.enabled !== undefined && typeof body.enabled !== "boolean") {
+      return jsonError(400, "invalid_enabled");
     }
+    const active = await deps.registry.get({ id });
+    if (!active) return dagNotFound(id);
+    matchActiveVersion({ tags: ifMatch, active: active.version });
+
+    // One write: the new version and the kill switch land together or not at all.
+    const enabled = typeof body.enabled === "boolean" ? body.enabled : undefined;
+    let current: RegisteredDag = active;
+    if (body.nodes !== undefined) {
+      const version = optionalVersion(body.version);
+      const written = await dagWrite(() =>
+        deps.registry.register({
+          id,
+          ...(version !== undefined && { version }),
+          ...dagBody(body),
+          promote: body.publish !== false,
+          expectedActive: active.version,
+          ...(enabled !== undefined && { enabled }),
+        }),
+      );
+      if (written instanceof Response) return written;
+      current = written;
+    } else if (enabled !== undefined) {
+      current = await registryCall(() =>
+        deps.registry.setEnabled({ id, enabled, expectedActive: active.version }),
+      );
+    }
+    return entryResponse({ status: 200, entry: current });
   };
 }
 
@@ -181,14 +248,24 @@ export function runDag(deps: DagGatewayDeps) {
     const body = (await readJson<RunRequest>(req)) ?? {};
     const scope = parseScopeFields(body);
     if ("error" in scope) return jsonError(400, scope.error);
-    const dag = await deps.registry.get(id, body.version);
-    if (!dag) return jsonError(404, "dag_not_found", `DAG "${id}" not registered.`);
+    const dag = await deps.registry.get({
+      id,
+      ...(body.version !== undefined && { version: body.version }),
+    });
+    if (!dag) return dagNotFound(id);
+    if (!dag.enabled) {
+      return jsonError(
+        410,
+        "dag_disabled",
+        `DAG "${id}" is disabled. Re-enable it before running.`,
+      );
+    }
 
     // Every node runs in the caller's scope, so the caller must be allowed
     // to invoke each node's agent there — the same checks as a direct
     // invocation. Nodes are re-checked for the kill switch as they run.
     for (const agentId of new Set(dag.nodes.map((n) => n.agentId))) {
-      const recipe = await deps.agents.get(agentId);
+      const recipe = await deps.agents.get({ id: agentId });
       if (!recipe) return agentNotFound(agentId);
       const disabled = disabled410(recipe);
       if (disabled) return disabled;

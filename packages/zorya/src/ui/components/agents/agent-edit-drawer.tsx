@@ -114,7 +114,7 @@ export function AgentEditDrawer({
   const [selectedLayers, setSelectedLayers] = useState<ReadonlyArray<string>>(initialLayers);
   const [capabilities, setCapabilities] = useState(agent.metadata.capabilities.join(", "));
   const [tags, setTags] = useState(agent.metadata.tags.join(", "));
-  const [enabled, setEnabled] = useState(agent.metadata.enabled !== false);
+  const [enabled, setEnabled] = useState(agent.enabled);
   // Model selection (local backends only).
   const initialProvider = isLocal ? agent.backend.model.provider : "";
   const initialModelId = isLocal ? agent.backend.model.id : "";
@@ -165,6 +165,8 @@ export function AgentEditDrawer({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
   const [publishVersion, setPublishVersion] = useState(() => bumpVersion(agent.version));
+  // Publish a named version as the active one, or keep it as a draft.
+  const [publishActive, setPublishActive] = useState(true);
   // Id of the draft recipe currently being chat-tested, if any.
   const [draftTestId, setDraftTestId] = useState<string | null>(null);
 
@@ -179,10 +181,10 @@ export function AgentEditDrawer({
   const catalogSkills = useMemo(() => skillsData?.skills ?? [], [skillsData]);
   const { data: retrieversData } = useFetch(() => api.listCatalogRetrievers(), [], 0);
   const catalogRetrievers = useMemo(() => retrieversData?.retrievers ?? [], [retrieversData]);
-  // Self-fetch which agent recipes are file-managed. When THIS one is, Save
-  // would be silently overwritten by the next scan tick — show a warning +
-  // disable Save (Publish stays enabled; a new version is operator-managed
-  // and doesn't conflict with the file's version). Mirrors the skills page.
+  // Self-fetch which agent recipes are file-managed. When THIS one is, an
+  // edit would be undone by the next scan tick (the scan promotes the file's
+  // version) — the server refuses it, so Save and Publish are disabled with
+  // a warning. Mirrors the skills page.
   // Fragment catalog drives the LayersSection's add-layer dropdown.
   const { data: fragmentsData } = useFetch(() => api.listCatalogFragments(), [], 0);
   const catalogFragments = useMemo(() => fragmentsData?.fragments ?? [], [fragmentsData]);
@@ -206,8 +208,9 @@ export function AgentEditDrawer({
     return Number.isFinite(n) && n > 0 ? n : undefined;
   };
 
-  // Build the (backend, metadata) shape from current form state — used
-  // by both Save (PATCH in place) and Publish (POST a new version).
+  // Build the (backend, metadata) shape from current form state — used by
+  // Save (a new active version), Publish (a named version, active or draft)
+  // and the draft test.
   const buildPayload = (): {
     backend: RegisteredAgent["backend"];
     metadata: Partial<RegisteredAgent["metadata"]>;
@@ -216,7 +219,6 @@ export function AgentEditDrawer({
       description: description.trim() || null,
       capabilities: parseList(capabilities),
       tags: parseList(tags),
-      enabled,
     };
     if (!isLocal) {
       return { backend: agent.backend, metadata };
@@ -283,17 +285,20 @@ export function AgentEditDrawer({
     setError(null);
     const { backend, metadata } = buildPayload();
     try {
-      // Create posts a new recipe keyed on the typed id; edit patches the
-      // existing one in place. A blank-template backend is always local,
-      // so `backend` is sent unconditionally in create mode.
+      // Create posts a new recipe keyed on the typed id; an edit publishes
+      // a new version built on the one this drawer loaded (a concurrent
+      // edit answers 412). An unchanged form stores no new version. A
+      // blank-template backend is always local, so `backend` is sent
+      // unconditionally in create mode.
       if (isCreate) {
-        return await api.createAgent({ id: trimmedId, backend, metadata });
+        return await api.createAgent({ id: trimmedId, backend, metadata, enabled });
       }
-      const updates: Parameters<typeof api.updateAgent>[1] = {
+      return await api.updateAgent(agent.id, {
+        expectedVersion: agent.version,
         metadata,
+        enabled,
         ...(isLocal && { backend }),
-      };
-      return await api.updateAgent(agent.id, updates);
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       return null;
@@ -347,9 +352,10 @@ export function AgentEditDrawer({
     setError(null);
     try {
       const { backend, metadata } = buildPayload();
-      const created = await api.createAgent({
-        id: agent.id,
+      const created = await api.updateAgent(agent.id, {
+        expectedVersion: agent.version,
         version: newVersion,
+        publish: publishActive,
         backend,
         metadata,
       });
@@ -391,7 +397,7 @@ export function AgentEditDrawer({
               <div class="text-[10px] text-base-content/40 mt-0.5">
                 {isCreate
                   ? "Creates a new local recipe. Fill in an id, pick a model, and save."
-                  : "Updates the latest version in place. Changing model or tools needs a programmatic edit until the full Designer ships."}
+                  : "Saving publishes a new version; earlier versions stay listed under Versions, where any of them can be made active again."}
               </div>
             </div>
             <button
@@ -411,9 +417,8 @@ export function AgentEditDrawer({
         >
           {!isCreate && fileManaged && (
             <div class="alert alert-warning text-xs">
-              📄 This agent recipe is defined by a file on disk. Saving in place is disabled — edit
-              the source file, or use <span class="font-mono">Publish new version</span> to create
-              an operator-managed copy. The next scan would overwrite any in-place change.
+              📄 This agent recipe is defined by a file on disk. Editing here is disabled — edit the
+              source file; the next scan publishes it as a new version.
             </div>
           )}
           {isCreate && (
@@ -810,8 +815,8 @@ export function AgentEditDrawer({
                 Publish new version
               </div>
               <div class="text-[10px] text-base-content/50">
-                Creates a new recipe row keyed on (id, version). Previous version stays intact —
-                roll back via the Versions panel.
+                Creates a version under this name. Previous versions stay intact — roll back via the
+                Versions panel.
               </div>
               <label class="form-control">
                 <span class="text-[10px] text-base-content/50 mb-1">
@@ -822,6 +827,17 @@ export function AgentEditDrawer({
                   value={publishVersion}
                   onInput={(e) => setPublishVersion((e.target as HTMLInputElement).value)}
                 />
+              </label>
+              <label class="label cursor-pointer justify-start gap-2">
+                <input
+                  type="checkbox"
+                  class="checkbox checkbox-xs"
+                  checked={publishActive}
+                  onChange={(e) => setPublishActive((e.target as HTMLInputElement).checked)}
+                />
+                <span class="text-[11px]">
+                  Make it the active version (unchecked: save as a draft to promote later)
+                </span>
               </label>
               <div class="flex justify-end gap-2">
                 <button
@@ -835,7 +851,10 @@ export function AgentEditDrawer({
                   type="button"
                   class="btn btn-xs btn-primary"
                   disabled={
-                    saving || !publishVersion.trim() || publishVersion.trim() === agent.version
+                    saving ||
+                    fileManaged ||
+                    !publishVersion.trim() ||
+                    publishVersion.trim() === agent.version
                   }
                   onClick={() => onPublish(publishVersion.trim())}
                 >
@@ -853,8 +872,9 @@ export function AgentEditDrawer({
               <button
                 type="button"
                 class="btn btn-sm btn-ghost"
+                disabled={fileManaged}
                 onClick={() => setPublishOpen(true)}
-                title="Create a new version row instead of overwriting in place"
+                title="Name the new version, or save it as a draft"
               >
                 Publish new version…
               </button>
@@ -895,7 +915,7 @@ export function AgentEditDrawer({
                     ? "Enter a valid agent id to create."
                     : undefined
                   : fileManaged
-                    ? "Disabled — this recipe is defined by a file on disk. Edit the source file or use Publish new version."
+                    ? "Disabled — this recipe is defined by a file on disk. Edit the source file."
                     : undefined
               }
             >
@@ -982,7 +1002,7 @@ function RunModeField({ value, onChange }: { value: RunMode; onChange: (v: RunMo
 }
 
 interface LayersSectionProps {
-  fragments: ReadonlyArray<{ key: string; content: string }>;
+  fragments: ReadonlyArray<{ id: string; version: string; content: string }>;
   selected: ReadonlyArray<string>;
   onChange: (next: ReadonlyArray<string>) => void;
 }
@@ -998,16 +1018,27 @@ interface LayersSectionProps {
 function LayersSection({ fragments, selected, onChange }: LayersSectionProps) {
   if (fragments.length === 0 && selected.length === 0) return null;
 
-  const fragmentByKey = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const f of fragments) m.set(f.key, f.content);
+  const fragmentById = useMemo(() => {
+    const m = new Map<string, { version: string; content: string }>();
+    for (const f of fragments) m.set(f.id, { version: f.version, content: f.content });
     return m;
   }, [fragments]);
+  const selectedIds = useMemo(() => selected.map((layer) => layerId(layer)), [selected]);
 
   const availableToAdd = useMemo(
-    () => fragments.filter((f) => !selected.includes(f.key)).map((f) => f.key),
-    [fragments, selected],
+    () => fragments.filter((f) => !selectedIds.includes(f.id)).map((f) => f.id),
+    [fragments, selectedIds],
   );
+  // A pinned layer (`id@version`) keeps that fragment version; a bare id
+  // follows the fragment's active version.
+  const togglePin = (index: number) => {
+    const layer = selected[index]!;
+    const id = layerId(layer);
+    const active = fragmentById.get(id);
+    const next = [...selected];
+    next[index] = layer !== id ? id : active ? `${id}@${active.version}` : layer;
+    onChange(next);
+  };
 
   const move = (index: number, delta: -1 | 1) => {
     const next = [...selected];
@@ -1021,9 +1052,9 @@ function LayersSection({ fragments, selected, onChange }: LayersSectionProps) {
     next.splice(index, 1);
     onChange(next);
   };
-  const add = (key: string) => {
-    if (!key || selected.includes(key)) return;
-    onChange([...selected, key]);
+  const add = (id: string) => {
+    if (!id || selectedIds.includes(id)) return;
+    onChange([...selected, id]);
   };
 
   return (
@@ -1044,17 +1075,35 @@ function LayersSection({ fragments, selected, onChange }: LayersSectionProps) {
       ) : (
         <ul class="space-y-1">
           {selected.map((key, i) => {
-            const broken = !fragmentByKey.has(key);
+            const broken = !fragmentById.has(layerId(key));
+            const pinned = key !== layerId(key);
             return (
               <li class="flex items-center gap-2 bg-base-200 rounded px-2 py-1">
                 <span class="text-[10px] text-base-content/50 font-mono w-4">{i + 1}.</span>
                 <span
                   class={`font-mono text-xs flex-1 truncate ${broken ? "text-error" : ""}`}
-                  title={broken ? "Fragment not in catalog — broken ref" : fragmentByKey.get(key)}
+                  title={
+                    broken
+                      ? "Fragment not in catalog — broken ref"
+                      : fragmentById.get(layerId(key))?.content
+                  }
                 >
                   {key}
                   {broken && <span class="ml-1">⚠</span>}
                 </span>
+                <button
+                  type="button"
+                  class={`btn btn-xs btn-ghost ${pinned ? "text-primary" : ""}`}
+                  disabled={broken && !pinned}
+                  title={
+                    pinned
+                      ? "Pinned to this version — click to follow the active version"
+                      : "Follows the active version — click to pin it"
+                  }
+                  onClick={() => togglePin(i)}
+                >
+                  {pinned ? "pinned" : "pin"}
+                </button>
                 <button
                   type="button"
                   class="btn btn-xs btn-ghost"
@@ -1503,4 +1552,10 @@ function formatContext(tokens: number): string {
   if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M ctx`;
   if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}k ctx`;
   return `${tokens} ctx`;
+}
+
+/** The fragment id of a layer reference (`id` or `id@version`). */
+function layerId(layer: string): string {
+  const at = layer.lastIndexOf("@");
+  return at > 0 && at < layer.length - 1 ? layer.slice(0, at) : layer;
 }

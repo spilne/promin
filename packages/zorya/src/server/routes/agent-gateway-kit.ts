@@ -226,7 +226,6 @@ export const AgentMetadataPatchSchema = z
     description: z.string().nullable().optional(),
     capabilities: z.array(z.string()).optional(),
     tags: z.array(z.string()).optional(),
-    enabled: z.boolean().optional(),
   })
   .strict();
 
@@ -273,11 +272,7 @@ function describeIssues(err: z.ZodError): string {
     .join("; ");
 }
 
-/**
- * Field-level merge for a metadata PATCH: only fields present in the
- * patch change. `enabled` in particular survives an edit that doesn't
- * mention it, so a description tweak can't undo the kill switch.
- */
+/** Field-level merge for a metadata PATCH: only fields present in the patch change. */
 export function mergeAgentMetadata(params: {
   existing: AgentMetadata;
   patch: AgentMetadataPatch;
@@ -288,7 +283,6 @@ export function mergeAgentMetadata(params: {
     ...(patch.description !== undefined && { description: patch.description }),
     ...(patch.capabilities !== undefined && { capabilities: patch.capabilities }),
     ...(patch.tags !== undefined && { tags: patch.tags }),
-    ...(patch.enabled !== undefined && { enabled: patch.enabled }),
   };
 }
 

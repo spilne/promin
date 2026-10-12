@@ -337,7 +337,10 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     deps: ResolveLocalAgentDeps,
     opts?: { version?: string },
   ): Promise<LocalAgent> {
-    const recipe = await registry.get(id, opts?.version);
+    const recipe = await registry.get({
+      id,
+      ...(opts?.version !== undefined && { version: opts.version }),
+    });
     if (!recipe) {
       const v = opts?.version ? ` version "${opts.version}"` : "";
       throw new Error(`LocalAgent.fromRegistry: no agent "${id}"${v} in the registry.`);

@@ -210,14 +210,16 @@ describe("scope authorization hook", () => {
 describe("thread isolation — threads created outside the gateway", () => {
   it("a thread a LocalAgent created programmatically is listed and opened by its agent only", async () => {
     const h = await bootAgents();
-    const recipe = await h.registry.get("support");
+    const recipe = await h.registry.get({ id: "support" });
     const llm: LLMProvider = { chat: async () => ({ content: "ok", finishReason: "stop" }) };
-    const agent = resolveLocalAgent(recipe!, {
-      runner: createWorkflowRunner({ storage: h.storage }),
-      memory: h.memory,
-      llm: () => llm,
-      tools: {},
-    }).withScope({ namespaceId: "ns", resourceId: "alice" });
+    const agent = (
+      await resolveLocalAgent(recipe!, {
+        runner: createWorkflowRunner({ storage: h.storage }),
+        memory: h.memory,
+        llm: () => llm,
+        tools: {},
+      })
+    ).withScope({ namespaceId: "ns", resourceId: "alice" });
     const thread = await agent.thread("prog-1");
     await thread.send({ task: "made outside the gateway" });
 

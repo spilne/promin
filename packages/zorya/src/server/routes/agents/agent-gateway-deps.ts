@@ -256,12 +256,6 @@ export interface AgentGatewayDeps {
    * `namespace_archived`. Read routes are not checked.
    */
   readonly namespaces?: NamespaceRegistry;
-  /**
-   * Agent ids backed by a recipe file on disk. Edits and deletes of
-   * those ids are refused (409 `file_managed`): the next scan tick would
-   * silently overwrite them.
-   */
-  readonly fileManagedIds?: () => ReadonlyArray<string>;
   /** Binds a request's scope to its authenticated caller. See `ScopeAuthorizer`. */
   readonly authorizeScope?: ScopeAuthorizer;
   /**

@@ -120,7 +120,9 @@ describe("ZoryaMcpServers", () => {
     },
     metadata: { description: null, capabilities: [], tags: [] },
     createdAt: 0,
-    updatedAt: 0,
+    active: true,
+    enabled: true,
+    trust: "trusted",
   };
 
   it("refuses to load a recipe's MCP tools without the caller's scope", async () => {

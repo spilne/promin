@@ -142,7 +142,7 @@ export interface ResolveLocalAgentDeps {
   readonly skills?: SkillRegistry;
   /**
    * Pre-resolved skill catalog for this recipe — the async output of
-   * `resolveSkillCatalog`, sourced before calling this (sync) resolver,
+   * `resolveSkillCatalog`, sourced before calling this resolver,
    * exactly like `apiKey` via `resolveCredentialRef`. When present and
    * non-empty, its `description` + `whenToUse` are injected into the system
    * prompt and `loadSkill` is auto-attached (bound to this catalog).
@@ -160,7 +160,7 @@ export interface ResolveLocalAgentDeps {
   /**
    * Pre-resolved role definition — the behavioral bundle (persona prompt +
    * tools + capabilities) sourced from `resolveRoleBinding()` before calling
-   * this sync resolver, exactly like `skillCatalog` / `apiKey`. When set, it
+   * this resolver, exactly like `skillCatalog` / `apiKey`. When set, it
    * is the source of persona + tools + capabilities, overriding the inline
    * `backend.systemPrompt` / `backend.tools`. A `ref` binding MUST be
    * pre-resolved here; an `inline` binding resolves automatically when this
@@ -182,7 +182,10 @@ export interface ResolveLocalAgentDeps {
  * `agent.backend.type !== "local"` — callers should branch on backend
  * type before calling this resolver.
  */
-export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgentDeps): LocalAgent {
+export async function resolveLocalAgent(
+  agent: RegisteredAgent,
+  deps: ResolveLocalAgentDeps,
+): Promise<LocalAgent> {
   if (agent.backend.type !== "local") {
     throw new Error(
       `resolveLocalAgent: backend type "${agent.backend.type}" is not supported. ` +
@@ -211,7 +214,7 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
   // Resolve the recipe's systemPrompt to a flat string first (handles
   // plain-string, layered { base, layers }, and null shapes), then append
   // the skill catalog block when there is one.
-  const baseSystemPrompt = resolveSystemPrompt({
+  const baseSystemPrompt = await resolveSystemPrompt({
     systemPrompt: effective.systemPrompt,
     ...(deps.fragments !== undefined && { fragments: deps.fragments }),
   });
@@ -227,7 +230,7 @@ export function resolveLocalAgent(agent: RegisteredAgent, deps: ResolveLocalAgen
 
   // BYOK: deps.apiKey carries a pre-resolved credential — typically
   // sourced via `resolveCredentialRef()` (this module) before calling
-  // resolveLocalAgent. Sync path; secrets-storage I/O happens in the
+  // resolveLocalAgent; secrets-storage I/O happens in the
   // caller, not here.
   const llm = deps.llm(backend.model.provider, backend.model.id, deps.apiKey);
 
@@ -451,11 +454,11 @@ function mergeContextBudget(
  * declared but the secret isn't resolvable, so misconfig surfaces
  * loudly instead of silently using the wrong key.
  *
- * Sync `resolveLocalAgent` stays sync; this async pre-step is the
- * caller's responsibility. The agent gateway pattern is:
+ * This pre-step is the caller's responsibility. The agent gateway
+ * pattern is:
  *
  *   const apiKey = await resolveCredentialRef({ recipe, secrets, scope });
- *   const agent = resolveLocalAgent(recipe, { ...deps, apiKey });
+ *   const agent = await resolveLocalAgent(recipe, { ...deps, apiKey });
  *
  * Hosts without BYOK (single-tenant, env-var keys) skip this entirely.
  */

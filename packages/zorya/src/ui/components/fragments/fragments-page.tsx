@@ -1,20 +1,23 @@
 // ---------------------------------------------------------------------------
-// FragmentsPage — operator UI for the prompt-fragment registry. Lists
-// registered fragments and lets operators author custom ones (markdown body
-// with live preview). File-scanned fragments show a 📄 badge and disable
-// Save (edit the source file instead). Parallel to SkillsPage.
+// FragmentsPage — operator UI for the prompt-fragment registry. Lists each
+// fragment's active version and lets operators author custom ones (markdown
+// body with live preview). Saving publishes a new version; the editor's
+// Versions panel makes any version active. File-scanned fragments show a
+// 📄 badge and disable Save (edit the source file instead). Parallel to
+// SkillsPage.
 // ---------------------------------------------------------------------------
 
 import { useEffect, useMemo, useState } from "preact/hooks";
 import { confirm, toast } from "../../lib/dialogs.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { api } from "../../api/client.ts";
-import type { FragmentDto } from "../../../server/routes/fragments.ts";
+import type { RegisteredFragment } from "../../../server/routes/fragments.ts";
 import { Page, PageHeader } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
+import { VersionsPanel } from "../ui/versions-panel.tsx";
 import { Markdown } from "../../lib/markdown.tsx";
 
-type EditorTarget = { mode: "create" } | { mode: "edit"; fragment: FragmentDto };
+type EditorTarget = { mode: "create" } | { mode: "edit"; fragment: RegisteredFragment };
 
 export function FragmentsPage() {
   const { data, loading, error, refresh } = useFetch(() => api.listFragments(), [], 0);
@@ -28,24 +31,24 @@ export function FragmentsPage() {
     const q = query.trim().toLowerCase();
     if (!q) return fragments;
     return fragments.filter(
-      (f) => f.key.toLowerCase().includes(q) || f.content.toLowerCase().includes(q),
+      (f) => f.id.toLowerCase().includes(q) || f.content.toLowerCase().includes(q),
     );
   }, [fragments, query]);
 
-  const onDelete = async (key: string) => {
+  const onDelete = async (id: string) => {
     if (
       !(await confirm({
-        title: `Delete fragment "${key}"`,
+        title: `Delete fragment "${id}"`,
         message:
-          "A fragment still layered by a role or an agent's inline role is refused — remove it there first.",
+          "Removes every version. A fragment still layered by a role or an agent's inline role is refused — remove it there first.",
         variant: "danger",
         confirmLabel: "Delete",
       }))
     )
       return;
     try {
-      await api.deleteFragment(key);
-      toast(`Deleted fragment "${key}"`, { variant: "success" });
+      await api.deleteFragment(id);
+      toast(`Deleted fragment "${id}"`, { variant: "success" });
       refresh();
     } catch (err) {
       toast(err instanceof Error ? err.message : String(err), { variant: "error" });
@@ -59,9 +62,11 @@ export function FragmentsPage() {
         eyebrow="Agent runtime"
         description={
           <>
-            Reusable prompt layers role recipes compose into their system prompt at resolve time.
-            Always-on (concatenated every turn), vs. skills which are load-on-demand. File-scanned
-            fragments (.md) show a 📄 badge and are read-only here — edit the source file instead.
+            Reusable prompt layers roles compose into their system prompt at resolve time. Always-on
+            (concatenated every turn), vs. skills which are load-on-demand. A role layer{" "}
+            <span class="font-mono">id</span> follows the active version;{" "}
+            <span class="font-mono">id@version</span> pins one. File-scanned fragments (.md) show a
+            📄 badge and are read-only here — edit the source file instead.
           </>
         }
         actions={
@@ -89,7 +94,8 @@ export function FragmentsPage() {
           <table class="table table-sm">
             <thead>
               <tr class="bg-base-200 text-xs uppercase tracking-wider text-base-content/50">
-                <th>Key</th>
+                <th>Id</th>
+                <th>Version</th>
                 <th>Preview</th>
                 <th>Tags</th>
                 <th class="text-right">Actions</th>
@@ -97,10 +103,10 @@ export function FragmentsPage() {
             </thead>
             <tbody>
               {loading && !data ? (
-                <SkeletonRows rows={3} cols={4} />
+                <SkeletonRows rows={3} cols={5} />
               ) : filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={4} class="text-center text-base-content/40 py-6 text-sm">
+                  <td colSpan={5} class="text-center text-base-content/40 py-6 text-sm">
                     {fragments.length === 0
                       ? "No fragments registered yet. Create one, or drop a .md file into the scan folder."
                       : "No fragments match."}
@@ -108,13 +114,14 @@ export function FragmentsPage() {
                 </tr>
               ) : (
                 filtered.map((f) => (
-                  <tr class="hover">
-                    <td class="font-mono text-xs">{f.key}</td>
+                  <tr class={`hover ${!f.enabled ? "opacity-60" : ""}`}>
+                    <td class="font-mono text-xs">{f.id}</td>
+                    <td class="font-mono text-xs text-base-content/50">{f.version}</td>
                     <td class="text-xs max-w-md truncate" title={f.content}>
                       {firstLine(f.content)}
                     </td>
                     <td class="flex flex-wrap gap-1 py-2">
-                      {fileManaged.has(f.key) && (
+                      {fileManaged.has(f.id) && (
                         <span
                           class="badge badge-xs badge-info gap-1"
                           title="Defined by a file on disk — edit the source file, not here"
@@ -122,6 +129,7 @@ export function FragmentsPage() {
                           📄 file
                         </span>
                       )}
+                      {!f.enabled && <span class="badge badge-xs badge-error">disabled</span>}
                     </td>
                     <td class="text-right whitespace-nowrap">
                       <button
@@ -134,7 +142,7 @@ export function FragmentsPage() {
                       <button
                         type="button"
                         class="btn btn-xs btn-ghost text-error"
-                        onClick={() => onDelete(f.key)}
+                        onClick={() => onDelete(f.id)}
                       >
                         Delete
                       </button>
@@ -150,8 +158,8 @@ export function FragmentsPage() {
       {editor && (
         <FragmentEditor
           target={editor}
-          existingKeys={fragments.map((f) => f.key)}
-          fileManaged={editor.mode === "edit" && fileManaged.has(editor.fragment.key)}
+          existingIds={fragments.map((f) => f.id)}
+          fileManaged={editor.mode === "edit" && fileManaged.has(editor.fragment.id)}
           onClose={() => setEditor(null)}
           onSaved={() => {
             setEditor(null);
@@ -171,7 +179,7 @@ function firstLine(text: string): string {
 
 interface FragmentEditorProps {
   target: EditorTarget;
-  existingKeys: ReadonlyArray<string>;
+  existingIds: ReadonlyArray<string>;
   fileManaged?: boolean;
   onClose: () => void;
   onSaved: () => void;
@@ -179,15 +187,16 @@ interface FragmentEditorProps {
 
 function FragmentEditor({
   target,
-  existingKeys,
+  existingIds,
   fileManaged,
   onClose,
   onSaved,
 }: FragmentEditorProps) {
   const isEdit = target.mode === "edit";
   const seed = target.mode === "edit" ? target.fragment : null;
-  const [key, setKey] = useState(seed?.key ?? "");
+  const [id, setId] = useState(seed?.id ?? "");
   const [content, setContent] = useState(seed?.content ?? "");
+  const [enabled, setEnabled] = useState(seed?.enabled ?? true);
   const [preview, setPreview] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -198,19 +207,28 @@ function FragmentEditor({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const keyClash = !isEdit && existingKeys.includes(key.trim());
-  const valid = key.trim().length > 0 && content.trim().length > 0;
+  const idClash = !isEdit && existingIds.includes(id.trim());
+  const valid = id.trim().length > 0 && content.trim().length > 0;
 
   const save = async () => {
     setErr(null);
     setSaving(true);
     try {
-      if (isEdit) {
-        await api.updateFragment(key.trim(), { content });
+      if (isEdit && seed) {
+        // A new version built on the one this editor loaded (a concurrent
+        // edit answers 412); unchanged content stores no new version.
+        await api.updateFragment(seed.id, {
+          expectedVersion: seed.version,
+          ...(content !== seed.content && { content }),
+          ...(enabled !== seed.enabled && { enabled }),
+        });
       } else {
-        await api.createFragment({ key: key.trim(), content });
+        const created = await api.createFragment({ id: id.trim(), content });
+        if (!enabled) {
+          await api.updateFragment(created.id, { expectedVersion: created.version, enabled });
+        }
       }
-      toast(`Saved fragment "${key.trim()}"`, { variant: "success" });
+      toast(`Saved fragment "${id.trim()}"`, { variant: "success" });
       onSaved();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -226,7 +244,7 @@ function FragmentEditor({
         onClick={(e) => e.stopPropagation()}
       >
         <div class="flex items-center justify-between">
-          <h3 class="text-lg font-semibold">{isEdit ? `Edit "${seed?.key}"` : "New fragment"}</h3>
+          <h3 class="text-lg font-semibold">{isEdit ? `Edit "${seed?.id}"` : "New fragment"}</h3>
           <button type="button" class="btn btn-sm btn-ghost" onClick={onClose}>
             ✕
           </button>
@@ -234,22 +252,22 @@ function FragmentEditor({
 
         {fileManaged && (
           <div class="alert alert-warning text-xs">
-            📄 This fragment is defined by a file on disk. Saving is disabled here — edit the source
-            file instead, since the next scan would overwrite any change made through the UI.
+            📄 This fragment is defined by a file on disk. Editing its text is disabled here — edit
+            the source file; the next scan publishes it as a new version.
           </div>
         )}
 
         <label class="form-control">
-          <span class="text-xs text-base-content/60 mb-1 uppercase tracking-wider">Key</span>
+          <span class="text-xs text-base-content/60 mb-1 uppercase tracking-wider">Id</span>
           <input
             class="input input-bordered input-sm font-mono"
             placeholder="e.g. review-checklist"
-            value={key}
+            value={id}
             disabled={isEdit}
-            onInput={(e) => setKey((e.target as HTMLInputElement).value)}
+            onInput={(e) => setId((e.target as HTMLInputElement).value)}
           />
-          {keyClash && (
-            <span class="text-xs text-error mt-1">A fragment with this key already exists.</span>
+          {idClash && (
+            <span class="text-xs text-error mt-1">A fragment with this id already exists.</span>
           )}
         </label>
 
@@ -275,10 +293,34 @@ function FragmentEditor({
               class="textarea textarea-bordered font-mono text-xs min-h-48"
               placeholder={"## Title\n\nReusable instruction layer — what should the agent do?"}
               value={content}
+              disabled={fileManaged === true}
               onInput={(e) => setContent((e.target as HTMLTextAreaElement).value)}
             />
           )}
         </div>
+
+        <label class="flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            class="toggle toggle-sm"
+            checked={enabled}
+            onChange={(e) => setEnabled((e.target as HTMLInputElement).checked)}
+          />
+          <span class="text-sm">Enabled</span>
+          <span class="text-xs text-base-content/40">
+            A disabled fragment stays registered but is left out of every prompt.
+          </span>
+        </label>
+
+        {seed && (
+          <VersionsPanel
+            reloadKey={seed.id}
+            load={() => api.listFragmentVersions(seed.id)}
+            promote={(p) => api.promoteFragment(seed.id, p)}
+            onPromoted={() => onSaved()}
+            describe={(v) => firstLine(v.content)}
+          />
+        )}
 
         {err && <div class="alert alert-error text-xs">{err}</div>}
 
@@ -289,7 +331,7 @@ function FragmentEditor({
           <button
             type="button"
             class="btn btn-sm btn-primary"
-            disabled={!valid || keyClash || saving || fileManaged}
+            disabled={!valid || idClash || saving}
             onClick={save}
           >
             {saving ? "Saving…" : isEdit ? "Save" : "Create"}

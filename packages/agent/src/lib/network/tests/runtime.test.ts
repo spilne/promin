@@ -10,7 +10,7 @@ import { describe, expect, it } from "bun:test";
 import type { Agent, AgentRunOutput, AgentScope } from "../../agent/types.ts";
 import { InMemoryAgentInstanceRegistry } from "../../instance/in-memory-agent-instance-registry.ts";
 import { composeAgentInstanceId } from "../../instance/types.ts";
-import { InMemoryAgentRegistry } from "../../registry/in-memory-agent-registry.ts";
+import { InMemoryAgentRegistry } from "../../versioned-registry/in-memory-registries.ts";
 import type { RegisteredAgent } from "../../registry/types.ts";
 import type { DelegationFrame, SubAgentRouteResult } from "../../delegation/types.ts";
 import {
@@ -53,11 +53,7 @@ async function setup(opts?: {
         role: { inline: { systemPrompt: null, tools: [] } },
         network: { networks: ["default"], canDiscover: true, canCall: true, maxDepth: 5 },
       },
-      metadata: {
-        capabilities: [],
-        tags: [],
-        ...(opts?.disabled?.includes(id) && { enabled: false }),
-      },
+      ...(opts?.disabled?.includes(id) && { enabled: false }),
     });
   const coordinator = await register("coordinator");
   await register("writer");

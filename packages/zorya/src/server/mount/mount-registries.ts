@@ -18,7 +18,9 @@ import {
   getDag,
   listDagVersions,
   listDags,
+  promoteDag,
   runDag,
+  updateDag,
   type DagGatewayDeps,
 } from "../routes/dags.ts";
 import {
@@ -26,7 +28,9 @@ import {
   deleteFragment,
   getFragment,
   listFragmentSources,
+  listFragmentVersions,
   listFragments,
+  promoteFragment,
   updateFragment,
 } from "../routes/fragments.ts";
 import {
@@ -53,6 +57,7 @@ import {
   listSkillSources,
   listSkillVersions,
   listSkills,
+  promoteSkill,
   updateSkill,
 } from "../routes/skills.ts";
 
@@ -64,7 +69,6 @@ export function mountSkills(params: {
   const { router, skills, agents } = params;
   const skillDeps = {
     registry: skills.registry,
-    fileManagedIds: () => skills.fileManagedIds(),
     ...(agents !== undefined && { agents: agents.registry }),
     ...(agents?.roles !== undefined && { roles: agents.roles }),
   };
@@ -73,14 +77,12 @@ export function mountSkills(params: {
     .post("/api/skills", createSkill(skillDeps))
     // `_sources` before `:id` so the literal segment isn't shadowed (skill
     // ids starting with `_` are rejected at create time).
-    .get(
-      "/api/skills/_sources",
-      listSkillSources({ fileManagedIds: () => skills.fileManagedIds() }),
-    )
+    .get("/api/skills/_sources", listSkillSources({ registry: skills.registry }))
     .get("/api/skills/:id", getSkill(skillDeps))
     .patch("/api/skills/:id", updateSkill(skillDeps))
     .delete("/api/skills/:id", deleteSkill(skillDeps))
-    .get("/api/skills/:id/versions", listSkillVersions(skillDeps));
+    .get("/api/skills/:id/versions", listSkillVersions(skillDeps))
+    .post("/api/skills/:id/promote", promoteSkill(skillDeps));
 }
 
 export function mountFragments(params: {
@@ -91,23 +93,20 @@ export function mountFragments(params: {
   const { router, fragments, agents } = params;
   const fragmentDeps = {
     registry: fragments.registry,
-    setFragment: (key: string, content: string) => fragments.setFragment(key, content),
-    deleteFragment: (key: string) => fragments.deleteFragment(key),
     ...(agents !== undefined && { agents: agents.registry }),
     ...(agents?.roles !== undefined && { roles: agents.roles }),
   };
   router
     .get("/api/fragments", listFragments(fragmentDeps))
     .post("/api/fragments", createFragment(fragmentDeps))
-    // `_sources` before `:key` so the literal segment isn't shadowed
-    // (operator-supplied fragment keys starting with `_` are rejected).
-    .get(
-      "/api/fragments/_sources",
-      listFragmentSources({ fileManagedIds: () => fragments.fileManagedIds() }),
-    )
-    .get("/api/fragments/:key", getFragment(fragmentDeps))
-    .patch("/api/fragments/:key", updateFragment(fragmentDeps))
-    .delete("/api/fragments/:key", deleteFragment(fragmentDeps));
+    // `_sources` before `:id` so the literal segment isn't shadowed
+    // (operator-supplied fragment ids starting with `_` are rejected).
+    .get("/api/fragments/_sources", listFragmentSources({ registry: fragments.registry }))
+    .get("/api/fragments/:id", getFragment(fragmentDeps))
+    .patch("/api/fragments/:id", updateFragment(fragmentDeps))
+    .delete("/api/fragments/:id", deleteFragment(fragmentDeps))
+    .get("/api/fragments/:id/versions", listFragmentVersions(fragmentDeps))
+    .post("/api/fragments/:id/promote", promoteFragment(fragmentDeps));
 }
 
 export function mountSecrets(params: {
@@ -149,8 +148,10 @@ export function mountDags(params: {
     .get("/api/dags", listDags(dagDeps))
     .post("/api/dags", createDag(dagDeps))
     .get("/api/dags/:id", getDag(dagDeps))
+    .patch("/api/dags/:id", updateDag(dagDeps))
     .delete("/api/dags/:id", deleteDag(dagDeps))
     .get("/api/dags/:id/versions", listDagVersions(dagDeps))
+    .post("/api/dags/:id/promote", promoteDag(dagDeps))
     .post("/api/dags/:id/run", runDag(dagDeps));
 }
 

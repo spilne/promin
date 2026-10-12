@@ -115,7 +115,7 @@ export interface ScheduleFireContext {
 
 export interface DispatchAgentScheduleResult {
   readonly ok: boolean;
-  readonly skipped?: "not_agent_schedule" | "recipe_not_found" | "before_hook";
+  readonly skipped?: "not_agent_schedule" | "recipe_not_found" | "recipe_disabled" | "before_hook";
   readonly text?: string;
   readonly error?: string;
 }
@@ -136,7 +136,7 @@ export interface StartedAgentSchedule {
  * poll must not hold its lease across an LLM turn.
  *
  * Resolves `{ ok: false, skipped }` when the schedule is not an agent
- * schedule, the recipe is gone or `beforeFire` declined; rejects when the
+ * schedule, the recipe is gone or disabled, or `beforeFire` declined; rejects when the
  * recipe can't be resolved to an agent or its thread can't be opened —
  * the caller can then deliver the tick again. The turn runs under the
  * deterministic `scheduleTickRunId` run id.
@@ -151,9 +151,14 @@ export async function startAgentSchedule(
   }
   const meta = schedule.metadata;
 
-  const recipe = await deps.registry.get(meta.agentId);
+  const recipe = await deps.registry.get({ id: meta.agentId });
   if (!recipe) {
     return { ok: false, skipped: "recipe_not_found", error: `recipe "${meta.agentId}"` };
+  }
+  // The kill switch holds for scheduled turns too: the tick is recorded as
+  // skipped, not run.
+  if (!recipe.enabled) {
+    return { ok: false, skipped: "recipe_disabled", error: `recipe "${meta.agentId}" is disabled` };
   }
 
   const ctx: ScheduleFireContext = { tick, metadata: meta, recipe };

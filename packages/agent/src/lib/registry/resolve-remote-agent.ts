@@ -1,3 +1,4 @@
+import type { WallClock } from "@promin/workflow";
 import type { RegisteredAgent } from "./types.ts";
 import { RemoteAgent } from "./remote-agent.ts";
 
@@ -16,6 +17,8 @@ import { RemoteAgent } from "./remote-agent.ts";
 export function resolveRemoteAgent(params: {
   agent: RegisteredAgent;
   fetch?: (url: string, init: RequestInit) => Promise<Response>;
+  /** Timer source for the proxy's timeouts. Default: `SystemWallClock`. */
+  clock?: WallClock;
 }): RemoteAgent {
   const { agent } = params;
   if (agent.backend.type !== "remote") {
@@ -30,5 +33,6 @@ export function resolveRemoteAgent(params: {
     auth: b.auth,
     timeoutMs: b.timeoutMs,
     ...(params.fetch !== undefined && { fetch: params.fetch }),
+    ...(params.clock !== undefined && { clock: params.clock }),
   });
 }

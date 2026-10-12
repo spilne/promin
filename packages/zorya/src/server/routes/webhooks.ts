@@ -552,8 +552,10 @@ async function dispatchDelivery(params: {
   );
   renewal.unref?.();
   try {
-    const recipe = await deps.registry.get(scope.agentId);
+    const recipe = await deps.registry.get({ id: scope.agentId });
     if (!recipe) throw new Error(`agent "${scope.agentId}" is not registered`);
+    // The kill switch holds for deliveries accepted before it was flipped.
+    if (!recipe.enabled) throw new Error(`agent_disabled: "${scope.agentId}" is disabled`);
     const resolved = await deps.resolve(recipe, {
       namespaceId: scope.namespaceId,
       ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
@@ -743,11 +745,11 @@ export function ingestWebhook(deps: WebhookGatewayDeps) {
 
     // Unknown / disabled agents are answered before claiming, so the
     // sender's retry after the agent is registered or re-enabled runs.
-    const recipe = await deps.registry.get(agentId);
+    const recipe = await deps.registry.get({ id: agentId });
     if (!recipe) {
       return jsonError(404, "agent_not_found", `Agent "${agentId}" is not registered.`);
     }
-    if (recipe.metadata.enabled === false) {
+    if (!recipe.enabled) {
       return jsonError(410, "agent_disabled", `Agent "${agentId}" is disabled.`);
     }
     await requireActiveNamespace({ registry: deps.namespaces, namespace: delivery.namespaceId });

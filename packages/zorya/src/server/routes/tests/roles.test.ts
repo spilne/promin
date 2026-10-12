@@ -88,9 +88,14 @@ describe("roles HTTP routes — CRUD", () => {
   it("lists, gets, versions, and deletes", async () => {
     const { server } = boot();
     await server.handle(post("/api/roles", VALID));
-    // Distinct updatedAt so "latest" (get without version) is unambiguous.
-    await new Promise((r) => setTimeout(r, 2));
-    await server.handle(post("/api/roles", { ...VALID, version: "v2" }));
+    const edit = await server.handle(
+      new Request("http://test/api/roles/git-master", {
+        method: "PATCH",
+        headers: { "content-type": "application/json", "if-match": 'W/"v1"' },
+        body: JSON.stringify({ metadata: { tags: ["v2"] } }),
+      }),
+    );
+    expect(edit.status).toBe(200);
 
     const list = (await (await server.handle(new Request("http://test/api/roles"))).json()) as {
       roles: RegisteredRole[];
@@ -100,7 +105,7 @@ describe("roles HTTP routes — CRUD", () => {
     const got = (await (
       await server.handle(new Request("http://test/api/roles/git-master"))
     ).json()) as RegisteredRole;
-    expect(got.version).toBe("v2"); // latest
+    expect(got.version).toBe("v2"); // the edit published v2
 
     const versions = (await (
       await server.handle(new Request("http://test/api/roles/git-master/versions"))
@@ -123,7 +128,7 @@ describe("roles HTTP routes — CRUD", () => {
     const res = await server.handle(
       new Request("http://test/api/roles/git-master", {
         method: "PATCH",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", "if-match": "*" },
         body: JSON.stringify({ metadata: { description: "Git expert", tags: ["updated"] } }),
       }),
     );
@@ -155,7 +160,7 @@ describe("extract-role — Save as role", () => {
     // Role registered from the inline definition.
     expect(body.role.id).toBe("git-helper");
     expect(body.role.definition.systemPrompt).toBe("you help with git");
-    expect(await roles.get("git-helper")).not.toBeNull();
+    expect(await roles.get({ id: "git-helper" })).not.toBeNull();
     // Agent rebound to a ref pinning the new role version.
     if (body.agent.backend.type === "local") {
       expect(body.agent.backend.role).toEqual({ ref: { id: "git-helper", version: "v1" } });
