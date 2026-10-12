@@ -1,4 +1,7 @@
 import { describe, expect, it } from "bun:test";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { inlineDataset } from "../../datasets/inline.ts";
 import { runEval } from "../../runner.ts";
 import { exactMatch } from "../../scorers/exact-match.ts";
@@ -6,12 +9,15 @@ import { fnTarget } from "../../targets/fn-target.ts";
 import { consoleReporter } from "../console.ts";
 import { jsonReporter } from "../json.ts";
 
+const dataset = inlineDataset({ cases: [{ id: "c1", input: "a", expected: "A" }], id: "ds" });
+const upper = fnTarget({ fn: (input) => String(input).toUpperCase() });
+
 describe("consoleReporter", () => {
   it("emits a line per case and a summary block", async () => {
     const lines: string[] = [];
     await runEval({
-      dataset: inlineDataset([{ id: "c1", input: "a", expected: "A" }], "ds"),
-      target: fnTarget((input) => String(input).toUpperCase()),
+      dataset,
+      target: upper,
       scorers: [exactMatch],
       reporters: [consoleReporter({ log: (line) => lines.push(line) })],
     });
@@ -22,14 +28,15 @@ describe("consoleReporter", () => {
 
 describe("jsonReporter", () => {
   it("writes the run summary as JSON", async () => {
-    const path = `/tmp/evals-report-${Date.now()}.json`;
+    const dir = await mkdtemp(path.join(tmpdir(), "evals-report-"));
+    const file = path.join(dir, "report.json");
     await runEval({
-      dataset: inlineDataset([{ id: "c1", input: "a", expected: "A" }], "ds"),
-      target: fnTarget((input) => String(input).toUpperCase()),
+      dataset,
+      target: upper,
       scorers: [exactMatch],
-      reporters: [jsonReporter(path)],
+      reporters: [jsonReporter(file)],
     });
-    const written = JSON.parse(await Bun.file(path).text()) as {
+    const written = JSON.parse(await Bun.file(file).text()) as {
       datasetId: string;
       passRate: number;
     };

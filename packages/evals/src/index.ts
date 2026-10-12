@@ -1,7 +1,8 @@
 // @promin/evals — agent evaluation framework.
 //
 // Four pluggable seams — datasets, targets, scorers, reporters — plus the
-// orchestration (`runEval` / `runMatrix`) and the ergonomic `defineEval`.
+// orchestration (`runEval` / `runMatrix`), the ergonomic `defineEval`,
+// persistent run history, versioned eval suites and promotion gates.
 
 // Core types — the four seams + result shapes.
 export type {
@@ -28,16 +29,28 @@ export type {
 // Datasets.
 export { inlineDataset } from "./lib/datasets/inline.ts";
 export { jsonlDataset } from "./lib/datasets/jsonl.ts";
-export { traceDataset, type TraceDatasetConfig } from "./lib/datasets/trace.ts";
+export {
+  traceDataset,
+  DEFAULT_TRACE_PAGE_SIZE,
+  type TraceDatasetConfig,
+} from "./lib/datasets/trace.ts";
 
 // Scorers — deterministic.
 export { exactMatch } from "./lib/scorers/exact-match.ts";
 export { regexMatch, type RegexMatchConfig } from "./lib/scorers/regex-match.ts";
 export { jsonMatch, type JsonMatchConfig } from "./lib/scorers/json-match.ts";
+export {
+  setMatch,
+  normalizeSetItem,
+  type SetMatchConfig,
+  type SetMatchMetric,
+} from "./lib/scorers/set-match.ts";
 
 // Scorers — judgement.
 export {
   createLLMScorer,
+  parseJudgement,
+  JudgeParseError,
   type JudgePrompt,
   type LLMScorerConfig,
   type ParsedJudgement,
@@ -49,11 +62,21 @@ export {
   type ToolTrajectoryConfig,
   type TrajectoryMode,
 } from "./lib/scorers/tool-trajectory.ts";
+export {
+  retrievalRecall,
+  retrievedSourceIds,
+  type RetrievalRecallConfig,
+} from "./lib/scorers/retrieval-recall.ts";
 export { budget, type BudgetConfig } from "./lib/scorers/budget.ts";
 
 // Targets.
-export { toEvalOutput, type ToEvalOutputOpts } from "./lib/targets/to-eval-output.ts";
+export { toEvalOutput, type ToEvalOutputParams } from "./lib/targets/to-eval-output.ts";
 export { fnTarget, type FnTargetConfig } from "./lib/targets/fn-target.ts";
+export {
+  agentTarget,
+  defaultAgentInput,
+  type AgentTargetConfig,
+} from "./lib/targets/agent-target.ts";
 export { recipeTarget, type RecipeTargetConfig } from "./lib/targets/recipe-target.ts";
 
 // Reporters.
@@ -64,59 +87,96 @@ export { jsonReporter } from "./lib/reporters/json.ts";
 export {
   runEval,
   runMatrix,
+  runEvalCase,
+  summarizeCases,
+  totalsOf,
+  resolveEvalOptions,
+  EvalRunAbortedError,
+  MAX_EVAL_CONCURRENCY,
+  MAX_EVAL_SAMPLES_PER_CASE,
+  type EvalCaseOptions,
   type EvalRunConfig,
+  type EvalRunPersistence,
   type EvalMatrixConfig,
   type EvalMatrixResult,
+  type ResolvedEvalOptions,
 } from "./lib/runner.ts";
 export { diffRuns } from "./lib/diff.ts";
 export { defineEval, type DefineEvalConfig, type DefinedEval } from "./lib/define-eval.ts";
 
 // Storage — persistent run history + datasets.
-export type {
-  EvalDatasetStore,
-  EvalRunQuery,
-  EvalRunStore,
-  StoredEvalRun,
-} from "./lib/storage/types.ts";
-export { composeRunId } from "./lib/storage/run-id.ts";
 export {
-  InMemoryEvalRunStore,
-  type InMemoryEvalRunStoreConfig,
-} from "./lib/storage/in-memory-run-store.ts";
+  storedRunSummary,
+  type EvalDatasetStore,
+  type EvalRunQuery,
+  type EvalRunRecord,
+  type EvalRunStatus,
+  type EvalRunStore,
+  type EvalRunTotals,
+  type FinishEvalRunParams,
+  type StartEvalRunParams,
+  type StoredEvalRun,
+} from "./lib/storage/types.ts";
+export { InMemoryEvalRunStore } from "./lib/storage/in-memory-run-store.ts";
 export { InMemoryEvalDatasetStore } from "./lib/storage/in-memory-dataset-store.ts";
 export { storedDataset } from "./lib/storage/stored-dataset.ts";
 export { compareRuns } from "./lib/storage/compare-runs.ts";
 
 // CI gate.
-export { assertEvalSummary, type EvalAssertion } from "./lib/assert-eval-summary.ts";
+export {
+  assertEvalSummary,
+  evalSummaryFailures,
+  type EvalAssertion,
+} from "./lib/assert-eval-summary.ts";
 
 // Live scoring — score an agent's own production runs, sampled.
-export type { LiveScore, LiveScoreSink, LiveScoringConfig } from "./lib/live/types.ts";
-export { liveScored } from "./lib/live/live-scored.ts";
+export {
+  DEFAULT_LIVE_MAX_CONCURRENT,
+  type LiveScore,
+  type LiveScoreSink,
+  type LiveScoringConfig,
+} from "./lib/live/types.ts";
+export { liveScored, type LiveScoredParams } from "./lib/live/live-scored.ts";
 export { metricsLiveSink, inMemoryLiveSink, InMemoryLiveScoreSink } from "./lib/live/sinks.ts";
 export {
   liveScoredFromRecipe,
   type LiveScoringRecipeConfig,
-  type LiveScoredFromRecipeDeps,
+  type LiveScoredFromRecipeParams,
 } from "./lib/live/from-recipe.ts";
 
-// Eval specs — serializable, version-keyed eval definitions.
+// Eval suites — serializable eval definitions in a VersionedRegistry.
 export {
-  DEFAULT_EVAL_SPEC_VERSION,
+  SCORER_SPEC_KINDS,
   type DatasetSpec,
-  type EvalSpec,
-  type EvalSpecRegistry,
-  type RegisterEvalSpecInput,
+  type EvalSuite,
+  type EvalSuiteFilter,
+  type EvalSuiteInput,
+  type EvalSuiteMetadata,
+  type EvalSuiteRegistry,
+  type RegisteredEvalSuite,
   type ScorerSpec,
-  type TargetSpec,
-} from "./lib/spec/types.ts";
+} from "./lib/suite/types.ts";
+export { EVAL_SUITE_KIND } from "./lib/suite/kind.ts";
 export {
-  resolveEvalSpec,
-  runEvalSpec,
-  type ResolveEvalSpecDeps,
-  type ResolvedEvalSpec,
-} from "./lib/spec/resolve.ts";
+  resolveEvalSuite,
+  runEvalSuite,
+  type ResolveEvalSuiteDeps,
+  type ResolvedEvalSuite,
+} from "./lib/suite/resolve.ts";
 export {
-  InMemoryEvalSpecRegistry,
-  type InMemoryEvalSpecRegistryConfig,
-} from "./lib/spec/in-memory-registry.ts";
+  InMemoryEvalSuiteRegistry,
+  InMemoryEvalGateRegistry,
+  type InMemoryEvalRegistryConfig,
+} from "./lib/suite/registries.ts";
+
+// Promotion gates.
+export {
+  EVAL_GATE_KIND,
+  checkEvalGate,
+  evalGateScore,
+  type EvalGate,
+  type EvalGateFilter,
+  type EvalGateRegistry,
+  type EvalGateVerdict,
+  type RegisteredEvalGate,
+} from "./lib/suite/gate.ts";

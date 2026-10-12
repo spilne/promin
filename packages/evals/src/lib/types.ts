@@ -132,9 +132,12 @@ export interface PerScorerSummary {
 
 /** The result of one `runEval`. */
 export interface EvalRunSummary {
+  /** The stored run's id, when the run was persisted to an `EvalRunStore`. */
+  readonly runId?: string;
   readonly targetId: string;
   readonly targetVersion?: string;
   readonly datasetId: string;
+  /** When the run started (epoch ms, the runner's clock). */
   readonly ranAt: number;
   readonly totalCases: number;
   /** Fraction of cases that passed. */
@@ -146,6 +149,7 @@ export interface EvalRunSummary {
 
 /** Seam 4 — result sink. */
 export interface EvalReporter {
+  /** Called as each case finishes (every sample scored), in completion order. */
   onCaseResult?(result: EvalCaseResult): void | Promise<void>;
   onComplete?(summary: EvalRunSummary): void | Promise<void>;
 }
@@ -162,7 +166,7 @@ export interface CaseDiff {
 
 /**
  * A baseline-vs-candidate comparison. One type, two producers: `runMatrix`
- * (ephemeral, in-memory) and `compareRuns` (P3, from persisted runs).
+ * (ephemeral, in-memory) and `compareRuns` (from persisted runs).
  */
 export interface RunDiff {
   readonly baseline: EvalRunSummary;

@@ -107,6 +107,26 @@ import type {
   MintTokenResponse,
 } from "../../server/routes/signal-tokens.ts";
 import type { WorkflowVersionDto } from "../../server/routes/workflow-versions.ts";
+import type {
+  EvalGateResponse,
+  EvalGatesListResponse,
+  EvalRunStartedResponse,
+  EvalRunsListResponse,
+  EvalSuitesListResponse,
+  RegisteredEvalSuite,
+  RunDiff,
+  StoredEvalRun,
+} from "../../server/routes/evals.ts";
+
+export type {
+  EvalGateFailedResponse,
+  EvalGateResponse,
+  EvalRunRecord,
+  RegisteredEvalGate,
+  RegisteredEvalSuite,
+  RunDiff,
+  StoredEvalRun,
+} from "../../server/routes/evals.ts";
 import { readResumableSse, SseHttpError, subscribeSse, type SseMessage } from "./sse.ts";
 
 const BASE = ""; // served from same origin
@@ -631,12 +651,15 @@ export const api = {
   /** Make `version` the active one (publish a draft, or roll back). */
   promoteAgent(
     id: string,
-    body: { version: string; expectedVersion?: string },
+    body: { version: string; expectedVersion?: string; overrideEvalGate?: boolean },
   ): Promise<RegisteredAgent> {
     return versionedWrite<RegisteredAgent>({
       method: "POST",
       path: `/api/agents/${encodeURIComponent(id)}/promote`,
-      body: { version: body.version },
+      body: {
+        version: body.version,
+        ...(body.overrideEvalGate === true && { overrideEvalGate: true }),
+      },
       ...(body.expectedVersion !== undefined && { expectedVersion: body.expectedVersion }),
     });
   },
@@ -1109,6 +1132,88 @@ export const api = {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
+    });
+  },
+  listEvalSuites(params: { agentId?: string } = {}): Promise<EvalSuitesListResponse> {
+    const q = params.agentId ? `?agentId=${encodeURIComponent(params.agentId)}` : "";
+    return req<EvalSuitesListResponse>(`/api/evals/suites${q}`);
+  },
+  listEvalSuiteVersions(params: { id: string }): Promise<{ versions: RegisteredEvalSuite[] }> {
+    return req<{ versions: RegisteredEvalSuite[] }>(
+      `/api/evals/suites/${encodeURIComponent(params.id)}/versions`,
+    );
+  },
+  promoteEvalSuite(params: {
+    id: string;
+    version: string;
+    expectedVersion?: string;
+  }): Promise<RegisteredEvalSuite> {
+    return versionedWrite<RegisteredEvalSuite>({
+      method: "POST",
+      path: `/api/evals/suites/${encodeURIComponent(params.id)}/promote`,
+      body: { version: params.version },
+      ...(params.expectedVersion !== undefined && { expectedVersion: params.expectedVersion }),
+    });
+  },
+  startEvalRun(body: {
+    suiteId: string;
+    suiteVersion?: string;
+    agentId: string;
+    agentVersion?: string;
+    namespaceId: string;
+    resourceId?: string;
+  }): Promise<EvalRunStartedResponse> {
+    return req<EvalRunStartedResponse>("/api/evals/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  listEvalRuns(
+    params: {
+      suiteId?: string;
+      agentId?: string;
+      agentVersion?: string;
+      namespaceId?: string;
+      limit?: number;
+    } = {},
+  ): Promise<EvalRunsListResponse> {
+    const q = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) if (v !== undefined) q.set(k, String(v));
+    const qs = q.toString();
+    return req<EvalRunsListResponse>(`/api/evals/runs${qs ? `?${qs}` : ""}`);
+  },
+  getEvalRun(params: { runId: string }): Promise<StoredEvalRun> {
+    return req<StoredEvalRun>(`/api/evals/runs/${encodeURIComponent(params.runId)}`);
+  },
+  cancelEvalRun(params: { runId: string }): Promise<StoredEvalRun> {
+    return req<StoredEvalRun>(`/api/evals/runs/${encodeURIComponent(params.runId)}/cancel`, {
+      method: "POST",
+    });
+  },
+  compareEvalRuns(params: { baseline: string; candidate: string }): Promise<RunDiff> {
+    const q = new URLSearchParams(params).toString();
+    return req<RunDiff>(`/api/evals/compare?${q}`);
+  },
+  listEvalGates(): Promise<EvalGatesListResponse> {
+    return req<EvalGatesListResponse>("/api/evals/gates");
+  },
+  putEvalGate(params: {
+    agentId: string;
+    suiteId: string;
+    minScore: number;
+    scorerId?: string;
+  }): Promise<EvalGateResponse> {
+    const { agentId, ...body } = params;
+    return req<EvalGateResponse>(`/api/evals/gates/${encodeURIComponent(agentId)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  deleteEvalGate(params: { agentId: string }): Promise<void> {
+    return req<void>(`/api/evals/gates/${encodeURIComponent(params.agentId)}`, {
+      method: "DELETE",
     });
   },
   getThreadTrace(

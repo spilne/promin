@@ -39,7 +39,11 @@ const PUBLIC_DNS: OutboundPolicy = {
 };
 
 async function boot(
-  opts: { endpointPolicy?: OutboundPolicy; agentRegistry?: InMemoryAgentRegistry } = {},
+  opts: {
+    endpointPolicy?: OutboundPolicy;
+    agentRegistry?: InMemoryAgentRegistry;
+    canAutoPromote?: (params: { readonly id: string }) => boolean;
+  } = {},
 ) {
   const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
   const storage = new InMemoryWorkflowStorage();
@@ -57,6 +61,7 @@ async function boot(
       throw new Error("unused");
     },
   });
+  if (opts.canAutoPromote !== undefined) agents.canAutoPromote = opts.canAutoPromote;
   const deployments = new InMemoryRemoteDeploymentRegistry({ clock });
   const server = new ZoryaServer({
     insecure: true,
@@ -145,6 +150,19 @@ describe("remote-deployments — register", () => {
     await get(server, "/api/remote-deployments");
     const recipe = await agentRegistry.get({ id: "bot" });
     expect(recipe?.metadata.tags).toContain(`remote-deployment:${second}`);
+  });
+
+  it("a re-sync of a gated agent stores its recipe as a draft and reports it", async () => {
+    const { server, agentRegistry } = await boot({ canAutoPromote: () => false });
+    // The first version of a new id is always active.
+    const first = await registerOk(server, { endpoint: "https://a.example", agents: ["bot"] });
+    const res = await register(server, { endpoint: "https://a.example", agents: ["bot"] });
+    expect(res.status).toBe(201);
+    expect(((await res.json()) as { drafts?: string[] }).drafts).toEqual(["bot"]);
+    const active = await agentRegistry.get({ id: "bot" });
+    expect(active?.version).toBe("v1");
+    expect(active?.metadata.tags).toContain(`remote-deployment:${first}`);
+    expect(await agentRegistry.versions({ id: "bot" })).toHaveLength(2);
   });
 
   it("400s on bad bodies: missing endpoint, empty / reserved agent ids, invalid auth or ttl", async () => {

@@ -58,6 +58,12 @@ export interface RemoteDeploymentsGatewayDeps {
   readonly agents: AgentRegistry;
   /** Outbound endpoint policy. Default: public http(s) hosts only. */
   readonly endpointPolicy?: OutboundPolicy;
+  /**
+   * Whether a deployment's recipe may become an existing agent's active
+   * version (false while the agent has a promotion gate: the recipe is
+   * stored as a draft and the response lists it in `drafts`). Default: always.
+   */
+  readonly canAutoPromote?: (params: { readonly id: string }) => boolean | Promise<boolean>;
 }
 
 interface RegisterRequest {
@@ -174,23 +180,34 @@ async function upsertRecipes(params: {
   agents: AgentRegistry;
   deployment: RegisteredDeployment;
   seen: ReadonlyMap<string, string | null>;
-}): Promise<string[]> {
+  canAutoPromote: RemoteDeploymentsGatewayDeps["canAutoPromote"];
+}): Promise<{ lost: string[]; drafts: string[] }> {
   const { agents, deployment, seen } = params;
   const lost: string[] = [];
+  const drafts: string[] = [];
   for (const agentId of deployment.agents) {
+    const expectedActive = seen.get(agentId) ?? null;
+    // A gated agent that exists keeps its active version; the first
+    // version of a new id is always active.
+    const promote =
+      expectedActive === null ||
+      params.canAutoPromote === undefined ||
+      (await params.canAutoPromote({ id: agentId }));
     try {
-      await registerRecipe({
+      const written = await registerRecipe({
         agents,
         deployment,
         agentId,
-        expectedActive: seen.get(agentId) ?? null,
+        expectedActive,
+        promote,
       });
+      if (!written.active) drafts.push(agentId);
     } catch (err) {
       if (!isRegistryConflict(err) || err.code !== "active_mismatch") throw err;
       lost.push(agentId);
     }
   }
-  return lost;
+  return { lost, drafts };
 }
 
 async function registerRecipe(params: {
@@ -198,11 +215,12 @@ async function registerRecipe(params: {
   deployment: RegisteredDeployment;
   agentId: string;
   expectedActive: string | null;
-}): Promise<void> {
+  promote: boolean;
+}): Promise<RegisteredAgent> {
   const { agents, deployment, agentId } = params;
-  await agents.register({
+  return agents.register({
     id: agentId,
-    promote: true,
+    promote: params.promote,
     expectedActive: params.expectedActive,
     backend: {
       type: "remote",
@@ -268,6 +286,8 @@ export interface RegisterDeploymentResponse {
   readonly ttlMs: number;
   readonly heartbeatPath: string;
   readonly unregisterPath: string;
+  /** Agents whose recipe was stored as a draft (a promotion gate guards them). */
+  readonly drafts?: ReadonlyArray<string>;
 }
 
 export function registerDeployment(deps: RemoteDeploymentsGatewayDeps) {
@@ -298,8 +318,14 @@ export function registerDeployment(deps: RemoteDeploymentsGatewayDeps) {
       await deleteOwnedRecipes(deps.agents, deployment).catch(() => {});
     };
     let lost: string[];
+    let drafts: string[];
     try {
-      lost = await upsertRecipes({ agents: deps.agents, deployment, seen: claim.seen });
+      ({ lost, drafts } = await upsertRecipes({
+        agents: deps.agents,
+        deployment,
+        seen: claim.seen,
+        canAutoPromote: deps.canAutoPromote,
+      }));
     } catch (err) {
       await rollback();
       throw err;
@@ -315,6 +341,7 @@ export function registerDeployment(deps: RemoteDeploymentsGatewayDeps) {
       ttlMs: deployment.ttlMs,
       heartbeatPath: `/api/remote-deployments/${id}/heartbeat`,
       unregisterPath: `/api/remote-deployments/${id}`,
+      ...(drafts.length > 0 && { drafts }),
     };
     return json(201, response);
   };

@@ -39,6 +39,7 @@ import {
   ZoryaSkills,
   ZoryaFragments,
   ZoryaDags,
+  ZoryaEvals,
   ZoryaKnowledgeBases,
   ZoryaMcpServers,
   createUrlKnowledgeSourceAdapter,
@@ -104,6 +105,8 @@ import { createSqliteZoryaStack } from "../src/sqlite.ts";
 // "org-handbook" knowledge base below; knowledge-bot binds it through
 // `backend.knowledge`.
 import { ORG_KNOWLEDGE_BASE } from "./kb/org-knowledge-base.ts";
+import { weatherBotLLM } from "./llms/scripted-llms.ts";
+import { DEMO_EVAL_SUITES } from "./evals/suites.ts";
 import path from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -291,52 +294,6 @@ function roundRobinLLM(replies: ReadonlyArray<string>): LLMProvider {
   };
 }
 
-// Two-phase mock — turn 1 emits a tool call, turn 2 (after the tool result
-// arrives in the message history) returns a final answer. Detection is
-// "did the previous message come from a tool?" so a single instance handles
-// any number of conversational turns.
-function toolCallingMockLLM(opts: {
-  toolName: string;
-  pickInput: (lastUser: string) => unknown;
-  finalAnswer: (toolResult: string) => string;
-}): LLMProvider {
-  let callCounter = 0;
-  return {
-    chat: async (params: LLMChatParams): Promise<LLMResponse> => {
-      const last = params.messages.at(-1);
-      if (last?.role === "tool") {
-        return {
-          content: opts.finalAnswer(last.content),
-          finishReason: "stop",
-          usage: { inputTokens: 32, outputTokens: 24 },
-        };
-      }
-      callCounter += 1;
-      const lastUser = lastUserText(params);
-      return {
-        content: null,
-        toolCalls: [
-          {
-            id: `tc-${callCounter}`,
-            name: opts.toolName,
-            input: opts.pickInput(lastUser) as Record<string, unknown>,
-          },
-        ],
-        finishReason: "tool_calls",
-        usage: { inputTokens: 28, outputTokens: 12 },
-      };
-    },
-  };
-}
-
-function lastUserText(params: LLMChatParams): string {
-  for (let i = params.messages.length - 1; i >= 0; i--) {
-    const m = params.messages[i]!;
-    if (m.role === "user" && typeof m.content === "string") return m.content;
-  }
-  return "";
-}
-
 // Wrap any provider with realistic latency: a "thinking" pause before the
 // reply starts, then chunked deltas during the stream so the UI sees a
 // natural typing cadence instead of a blob landing in one frame. Falls
@@ -509,25 +466,7 @@ const agentLlms: Record<string, LLMProvider> = {
         "Researching '{task}'... summary (turn #{n}): I found 3 relevant past discussions on this topic.",
     }),
   ),
-  "weather-bot": naturalLLM(
-    toolCallingMockLLM({
-      toolName: "weather",
-      // Naive city extraction from the user's question. Falls back to a
-      // default so the demo never produces a malformed tool input.
-      pickInput: (text) => ({ city: pickCityFromText(text) }),
-      finalAnswer: (toolResult) => {
-        try {
-          const parsed = JSON.parse(toolResult) as { tempF?: number; conditions?: string };
-          if (typeof parsed.tempF === "number" && parsed.conditions) {
-            return `It's ${parsed.conditions} and ${parsed.tempF}°F right now.`;
-          }
-        } catch {
-          // tool output not JSON — fall through
-        }
-        return `Got it: ${toolResult}`;
-      },
-    }),
-  ),
+  "weather-bot": naturalLLM(weatherBotLLM()),
   // Live LLMs — bound only when the key is present. Anthropic's adapter
   // streams natively with real network latency, so we DON'T wrap it in
   // naturalLLM (that would pile fake delays on top of real ones).
@@ -583,24 +522,6 @@ if (haveAnthropicKey) {
 }
 const modelCatalog = new InMemoryModelCatalog(catalogItems);
 
-const KNOWN_CITIES = [
-  "berlin",
-  "paris",
-  "london",
-  "new york",
-  "tokyo",
-  "san francisco",
-  "kyiv",
-  "lisbon",
-];
-function pickCityFromText(text: string): string {
-  const lower = text.toLowerCase();
-  for (const c of KNOWN_CITIES) {
-    if (lower.includes(c)) return c.replace(/\b\w/g, (ch) => ch.toUpperCase());
-  }
-  return "Berlin";
-}
-
 async function seedAgents() {
   if (agentScan.agents.length === 0) {
     console.log(`[zorya] no agents discovered under ${agentScanRoot}`);
@@ -612,7 +533,13 @@ async function seedAgents() {
   const result = await applyDiscoveredAgents({
     registry: agentRegistry,
     agents: agentScan.agents,
+    // An agent with an eval promotion gate keeps an edited file as a draft.
+    canAutoPromote: async ({ id }) => {
+      const gate = await stack.evalGateRegistry.get({ id });
+      return !gate || !gate.enabled;
+    },
   });
+  for (const warning of result.warnings) console.warn(`[zorya] ${warning}`);
   if (result.added.length > 0) {
     console.log(`[zorya] registered new agents: ${result.added.join(", ")}`);
   }
@@ -1327,6 +1254,20 @@ await dagRegistry.register(researchSynthesisRecipe);
 // invocations.
 const dags = new ZoryaDags({ registry: dagRegistry, workflows, agents });
 
+// Evals — the dashboard's Evals page. Suites, gates and run history live in
+// the SQLite db; the demo agents' suites (./evals/suites.ts, which CI also
+// runs with scripted LLMs) are registered at boot. A run is a durable
+// workflow run: restart mid-run and it resumes.
+const evals = new ZoryaEvals({
+  suites: stack.evalSuiteRegistry,
+  gates: stack.evalGateRegistry,
+  runs: stack.evalRunStore,
+  datasets: stack.evalDatasetStore,
+  workflows,
+  agents,
+  seed: DEMO_EVAL_SUITES,
+});
+
 console.log(
   `[zorya] DAG registered: ${researchSynthesisRecipe.id}@${researchSynthesisRecipe.version ?? "v1"} ` +
     `(${researchSynthesisRecipe.nodes.length} nodes, ${researchSynthesisRecipe.edges.length} edges)`,
@@ -1339,6 +1280,7 @@ const server = ZoryaServer.builder()
   .skills(skills)
   .fragments(fragments)
   .dags(dags)
+  .evals(evals)
   .knowledgeBases(knowledgeBases)
   .workflowBuilder(workflowBuilder)
   // BYOK / per-tenant API keys / MCP credentials live here. Exposes

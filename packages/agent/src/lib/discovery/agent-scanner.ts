@@ -214,6 +214,8 @@ export interface ApplyDiscoveredAgentsParams {
   readonly complete?: boolean;
   /** Only touch ids with this prefix (partition recipes by tenant / environment). */
   readonly idPrefix?: string;
+  /** See `ApplyDiscoveredParams.canAutoPromote`. */
+  readonly canAutoPromote?: (params: { readonly id: string }) => boolean | Promise<boolean>;
 }
 
 export async function applyDiscoveredAgents(
@@ -225,6 +227,7 @@ export async function applyDiscoveredAgents(
     ...(params.sync !== undefined && { sync: params.sync }),
     ...(params.complete !== undefined && { complete: params.complete }),
     ...(params.idPrefix !== undefined && { idPrefix: params.idPrefix }),
+    ...(params.canAutoPromote !== undefined && { canAutoPromote: params.canAutoPromote }),
     // A recipe whose env is missing is still stored — it is just JSON and
     // works once the operator sets the vars — but the boot log says so.
     beforeRegister: (input) => {
@@ -260,6 +263,8 @@ export interface AgentScanLoopOptions {
   readonly sync?: boolean;
   /** Pass through to `applyDiscoveredAgents`. */
   readonly idPrefix?: string;
+  /** Pass through to `applyDiscoveredAgents`. */
+  readonly canAutoPromote?: (params: { readonly id: string }) => boolean | Promise<boolean>;
   /** Filter scan results before applying (e.g. drop live-only recipes when key missing). */
   readonly filterAgents?: (agents: ReadonlyArray<RegisterAgentInput>) => RegisterAgentInput[];
   /** Fired after each tick. Surfaces deltas + warnings to the host. */
@@ -290,6 +295,7 @@ export function startAgentScanLoop(options: AgentScanLoopOptions): ScanLoopHandl
         sync: options.sync ?? false,
         complete: scan.errors.length === 0,
         ...(options.idPrefix !== undefined && { idPrefix: options.idPrefix }),
+        ...(options.canAutoPromote !== undefined && { canAutoPromote: options.canAutoPromote }),
       });
       const tick: ScanLoopTick = {
         added: apply.added,

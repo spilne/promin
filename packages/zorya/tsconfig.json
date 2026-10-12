@@ -26,6 +26,9 @@
       "path": "../agent"
     },
     {
+      "path": "../evals"
+    },
+    {
       "path": "./tsconfig.lib.json"
     },
     {

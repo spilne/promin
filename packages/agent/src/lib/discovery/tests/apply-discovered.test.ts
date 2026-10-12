@@ -40,6 +40,31 @@ describe("applyDiscovered — operator choices", () => {
     expect(await registry.versions({ id: "bot" })).toHaveLength(2);
   });
 
+  it("a changed file waits as a draft while canAutoPromote refuses its id (a gate)", async () => {
+    const registry = new InMemoryAgentRegistry();
+    await applyDiscoveredAgents({ registry, agents: [{ id: "bot", backend: backend("a") }] });
+    const asked: string[] = [];
+    const changed = await applyDiscoveredAgents({
+      registry,
+      agents: [{ id: "bot", backend: backend("b") }],
+      canAutoPromote: ({ id }) => {
+        asked.push(id);
+        return false;
+      },
+    });
+    expect(asked).toEqual(["bot"]);
+    expect(changed.warnings.join()).toContain("promotion gate");
+    expect((await registry.get({ id: "bot" }))?.version).toBe("v1");
+    expect((await registry.versions({ id: "bot" })).map((v) => v.version)).toEqual(["v1", "v2"]);
+    // Allowed: the file's new version becomes active as before.
+    await applyDiscoveredAgents({
+      registry,
+      agents: [{ id: "bot", backend: backend("c") }],
+      canAutoPromote: () => true,
+    });
+    expect((await registry.get({ id: "bot" }))?.version).toBe("v3");
+  });
+
   it("a changed file waits as a draft while an operator's version is active", async () => {
     const registry = new InMemoryAgentRegistry();
     await applyDiscoveredAgents({ registry, agents: [{ id: "bot", backend: backend("a") }] });

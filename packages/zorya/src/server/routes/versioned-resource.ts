@@ -198,18 +198,40 @@ export function listVersionsRoute<TBody>(deps: VersionedRouteDeps<TBody>) {
   };
 }
 
-/** `POST /:id/promote` `{ version }` — make a version active; optional `If-Match`. */
-export function promoteRoute<TBody>(deps: VersionedRouteDeps<TBody>) {
+/**
+ * `POST /:id/promote` `{ version }` — make a version active; optional
+ * `If-Match`. `beforePromote` may refuse (e.g. a failing eval gate); it
+ * sees the request body for its own flags.
+ */
+export function promoteRoute<TBody>(
+  deps: VersionedRouteDeps<TBody> & {
+    readonly beforePromote?: (params: {
+      req: Request;
+      id: string;
+      version: string;
+      body: Readonly<Record<string, unknown>>;
+    }) => Promise<Response | undefined>;
+  },
+) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
-    const body = await readJson<{ version?: unknown }>(req);
+    const body = await readJson<Record<string, unknown>>(req);
     const version = optionalVersion(body?.version);
     if (version === undefined) return jsonError(400, "missing_version");
     const ifMatch = ifMatchVersions({ req, required: false });
     const active = await deps.registry.get({ id });
     if (!active) return deps.notFound(id);
     const expectedActive = matchActiveVersion({ tags: ifMatch, active: active.version });
+    // An unknown version is left to `promote`, which answers 404.
+    if (
+      deps.beforePromote &&
+      version !== active.version &&
+      (await deps.registry.get({ id, version }))
+    ) {
+      const refused = await deps.beforePromote({ req, id, version, body: body ?? {} });
+      if (refused) return refused;
+    }
     const entry = await registryCall(() =>
       deps.registry.promote({
         id,

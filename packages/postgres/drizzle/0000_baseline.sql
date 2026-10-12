@@ -199,13 +199,28 @@ CREATE TABLE eval_dataset (
 
 CREATE TABLE eval_run (
   run_id text NOT NULL,
+  status text NOT NULL,
   target_id text NOT NULL,
   target_version text,
   dataset_id text NOT NULL,
-  ran_at bigint NOT NULL,
-  summary jsonb NOT NULL,
-  saved_at bigint NOT NULL,
+  suite_id text,
+  suite_version text,
+  namespace_id text,
+  samples_per_case integer NOT NULL,
+  total_cases integer NOT NULL,
+  started_at bigint NOT NULL,
+  finished_at bigint,
+  totals jsonb,
+  error text,
+  metadata jsonb,
   CONSTRAINT eval_run_pkey PRIMARY KEY (run_id)
+);
+
+CREATE TABLE eval_run_case (
+  run_id text NOT NULL,
+  case_index integer NOT NULL,
+  result jsonb NOT NULL,
+  CONSTRAINT eval_run_case_pkey PRIMARY KEY (run_id, case_index)
 );
 
 CREATE TABLE knowledge_base (
@@ -704,9 +719,9 @@ CREATE INDEX agent_usage_ledger_window_idx ON agent_usage_ledger (namespace_id, 
 
 CREATE INDEX agent_usage_ledger_thread_idx ON agent_usage_ledger (namespace_id, thread_id);
 
-CREATE INDEX eval_run_dataset_idx ON eval_run (dataset_id);
+CREATE INDEX eval_run_suite_started_idx ON eval_run (suite_id, started_at);
 
-CREATE INDEX eval_run_target_ran_idx ON eval_run (target_id, ran_at);
+CREATE INDEX eval_run_target_started_idx ON eval_run (target_id, started_at);
 
 CREATE INDEX registry_version_facets_idx ON registry_version USING gin (facets);
 
@@ -827,6 +842,9 @@ CREATE INDEX wf_workflows_status_started_at_idx ON wf_workflows (status_id, star
 CREATE INDEX wf_workflows_type_idx ON wf_workflows (workflow_type);
 
 -- Foreign keys
+
+ALTER TABLE eval_run_case
+  ADD CONSTRAINT eval_run_case_run_id_fkey FOREIGN KEY(run_id) REFERENCES eval_run(run_id) ON DELETE CASCADE;
 
 ALTER TABLE sm_machine_events
   ADD CONSTRAINT sm_machine_events_machine_id_fkey FOREIGN KEY(machine_id) REFERENCES sm_machines(id) ON DELETE CASCADE;

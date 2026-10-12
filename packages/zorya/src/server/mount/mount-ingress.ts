@@ -75,6 +75,7 @@ export function mountRemoteDeployments(params: {
   const remoteDeps: RemoteDeploymentsGatewayDeps = {
     registry: remoteDeployments.registry,
     agents: params.agents.registry,
+    canAutoPromote: async (p) => (await params.agents.canAutoPromote?.(p)) ?? true,
     ...(remoteDeployments.endpointPolicy !== undefined && {
       endpointPolicy: remoteDeployments.endpointPolicy,
     }),

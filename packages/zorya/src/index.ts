@@ -74,6 +74,20 @@ export {
 } from "./server/services/fragments/index.ts";
 export { ZoryaDags, type ZoryaDagsConfig } from "./server/services/dags/index.ts";
 export {
+  ZoryaEvals,
+  DEFAULT_EVAL_MAX_CONCURRENCY,
+  EVAL_RUN_WORKFLOW_NAME,
+  createEvalRunWorkflow,
+  type EvalGateCheck,
+  type EvalRunPlan,
+  type EvalRunSteps,
+  type EvalRunWorkflowInput,
+  type EvalRunWorkflowOutput,
+  type EvalSuiteSeed,
+  type StartEvalRunRefusal,
+  type ZoryaEvalsConfig,
+} from "./server/services/evals/index.ts";
+export {
   McpServerConfigSchema,
   McpServersConfigSchema,
   parseMcpServersConfig,

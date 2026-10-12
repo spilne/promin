@@ -1,12 +1,16 @@
 // ---------------------------------------------------------------------------
 // diffRuns — baseline vs candidate. The pure comparison behind both
-// `runMatrix` (ephemeral) and `compareRuns` (P3, persisted).
+// `runMatrix` (ephemeral) and `compareRuns` (persisted).
 // ---------------------------------------------------------------------------
 
 import type { CaseDiff, EvalRunSummary, RunDiff } from "./types.ts";
 
 /** Compare two run summaries case-by-case and scorer-by-scorer. */
-export function diffRuns(baseline: EvalRunSummary, candidate: EvalRunSummary): RunDiff {
+export function diffRuns(params: {
+  readonly baseline: EvalRunSummary;
+  readonly candidate: EvalRunSummary;
+}): RunDiff {
+  const { baseline, candidate } = params;
   const baselineByCase = new Map(baseline.caseResults.map((c) => [c.caseId, c.passed]));
 
   const perCase: CaseDiff[] = [];

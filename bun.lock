@@ -188,6 +188,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@promin/agent": "workspace:*",
+        "@promin/evals": "workspace:*",
         "@promin/workflow": "workspace:*",
         "@promin/workflow-remote": "workspace:*",
         "marked": "^18.0.2",

@@ -59,3 +59,4 @@ export {
   SqliteEvalDatasetStore,
   type SqliteEvalDatasetStoreConfig,
 } from "./lib/evals/eval-dataset-store.ts";
+export { SqliteEvalGateRegistry, SqliteEvalSuiteRegistry } from "./lib/evals/eval-registries.ts";

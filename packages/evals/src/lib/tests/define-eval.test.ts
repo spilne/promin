@@ -6,7 +6,8 @@ import { fnTarget } from "../targets/fn-target.ts";
 
 describe("defineEval", () => {
   it("coerces a bare case array and a bare function", async () => {
-    const evaluation = defineEval("smoke", {
+    const evaluation = defineEval({
+      name: "smoke",
       data: [{ id: "1", input: "a", expected: "A" }],
       target: (input) => String(input).toUpperCase(),
       scorers: [exactMatch],
@@ -18,9 +19,10 @@ describe("defineEval", () => {
   });
 
   it("accepts ready-made dataset and target objects", async () => {
-    const summary = await defineEval("obj", {
-      data: inlineDataset([{ id: "1", input: "a", expected: "WRONG" }], "ds"),
-      target: fnTarget((input) => String(input), { id: "t" }),
+    const summary = await defineEval({
+      name: "obj",
+      data: inlineDataset({ cases: [{ id: "1", input: "a", expected: "WRONG" }], id: "ds" }),
+      target: fnTarget({ fn: (input) => String(input), id: "t" }),
       scorers: [exactMatch],
     }).run();
     expect(summary.datasetId).toBe("ds");

@@ -5,14 +5,15 @@
 
 import { diffRuns } from "../diff.ts";
 import type { RunDiff } from "../types.ts";
-import type { EvalRunStore } from "./types.ts";
+import { storedRunSummary, type EvalRunStore } from "./types.ts";
 
 /** Fetch two stored runs and diff them. Throws when either id is absent. */
-export async function compareRuns(
-  store: EvalRunStore,
-  baselineRunId: string,
-  candidateRunId: string,
-): Promise<RunDiff> {
+export async function compareRuns(params: {
+  readonly store: EvalRunStore;
+  readonly baselineRunId: string;
+  readonly candidateRunId: string;
+}): Promise<RunDiff> {
+  const { store, baselineRunId, candidateRunId } = params;
   const [baseline, candidate] = await Promise.all([
     store.get(baselineRunId),
     store.get(candidateRunId),
@@ -23,5 +24,8 @@ export async function compareRuns(
   if (candidate === null) {
     throw new Error(`compareRuns: candidate run "${candidateRunId}" not found`);
   }
-  return diffRuns(baseline.summary, candidate.summary);
+  return diffRuns({
+    baseline: storedRunSummary(baseline),
+    candidate: storedRunSummary(candidate),
+  });
 }

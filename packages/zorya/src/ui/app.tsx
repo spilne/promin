@@ -18,6 +18,7 @@ import { SkillsPage } from "./components/skills/skills-page.tsx";
 import { FragmentsPage } from "./components/fragments/fragments-page.tsx";
 import { RolesPage } from "./components/roles/roles-page.tsx";
 import { DagsPage } from "./components/dags/dags-page.tsx";
+import { EvalsPage } from "./components/evals/evals-page.tsx";
 import { KnowledgeBasesPage } from "./components/knowledge/knowledge-bases-page.tsx";
 import { BuilderListPage } from "./components/builder/builder-list-page.tsx";
 import { BuilderEditorPage } from "./components/builder/builder-editor-page.tsx";
@@ -103,6 +104,9 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   }
   if (path === "/dags") {
     return <DagsPage />;
+  }
+  if (path === "/evals") {
+    return <EvalsPage />;
   }
   if (path === "/knowledge") {
     return <KnowledgeBasesPage />;

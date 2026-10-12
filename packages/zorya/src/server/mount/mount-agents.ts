@@ -12,6 +12,8 @@ import type { SecretsStorage } from "@promin/agent";
 import type { NamespaceRegistry, WallClock } from "@promin/workflow";
 import { json, type Router } from "../router.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
+import type { ZoryaEvals } from "../services/evals/index.ts";
+import { evalPromotionGate } from "../routes/evals.ts";
 import type { ZoryaFragments } from "../services/fragments/index.ts";
 import type { ZoryaMcpServers } from "../services/mcp/index.ts";
 import type { ZoryaSkills } from "../services/skills/index.ts";
@@ -91,6 +93,8 @@ export function mountAgents(params: {
   readonly mcp: ZoryaMcpServers | undefined;
   /** Registry the namespace of agent writes is checked against. */
   readonly namespaces: NamespaceRegistry | undefined;
+  /** Evals service whose gates guard agent promotion. */
+  readonly evals: ZoryaEvals | undefined;
   readonly clock: WallClock;
 }): void {
   const { router, agents, skills, fragments, clock } = params;
@@ -107,6 +111,12 @@ export function mountAgents(params: {
     ...(agents.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
     ...(agents.budgets !== undefined && { budgets: agents.budgets }),
     ...namespaced,
+    ...(params.evals !== undefined && {
+      promotionGate: evalPromotionGate({
+        evals: params.evals,
+        ...(agents.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
+      }),
+    }),
     clock,
     turnStreams: new TurnStreamHub({
       clock,

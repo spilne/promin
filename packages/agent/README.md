@@ -812,34 +812,20 @@ For folder-driven discovery (one file per model, hot-reload on change), use `cre
 
 ## Evals
 
+Evaluation lives in [`@promin/evals`](../evals/README.md): datasets, targets
+(`agentTarget` runs any `Agent`), scorers (exact / regex / JSON / tool
+trajectory / retrieval recall / budget / LLM judge), run history, versioned
+eval suites and promotion gates.
+
 ```ts
-import { runEval, exactMatch, containsAll, llmJudge } from "@promin/agent";
+import { agentTarget, exactMatch, inlineDataset, runEval } from "@promin/evals";
 
-const results = await runEval({
-  agent: myAgentWorkflow,
-  runner: createWorkflowRunner({ storage: new InMemoryWorkflowStorage() }),
-  cases: [
-    { input: "What is 2+2?", expected: "4" },
-    { input: "Capital of France?", expected: "Paris" },
-  ],
-  scorers: [
-    exactMatch,
-    containsAll(["Paris"]),
-    llmJudge({ llm: claude, rubric: "Score accuracy 0-10." }),
-  ],
-  concurrency: 5,
+const summary = await runEval({
+  dataset: inlineDataset({ cases: [{ id: "sum", input: "What is 2+2?", expected: "4" }] }),
+  target: agentTarget({ id: "math-bot", agent: () => resolveLocalAgent(recipe, deps) }),
+  scorers: [exactMatch],
 });
-
-for (const r of results) {
-  console.log(r.case.input, r.scores);
-}
 ```
-
-| Scorer                      | Description                                           |
-| --------------------------- | ----------------------------------------------------- |
-| `exactMatch`                | 1 if output matches expected (case-insensitive trim). |
-| `containsAll(strs)`         | 1 if output contains every string in `strs`.          |
-| `llmJudge({ llm, rubric })` | LLM scores 0–10; returned as 0–1.                     |
 
 ---
 

@@ -269,6 +269,7 @@ const server = ZoryaServer.builder()
 | `agents`              | none                    | `ZoryaAgents`: the agent gateway, plus memory, instances and roles when their stores are set.                                                                                                                                                                                                                                          |
 | `skills`, `fragments` | none                    | Registry services with CRUD routes.                                                                                                                                                                                                                                                                                                    |
 | `dags`                | none                    | `ZoryaDags`: DAG CRUD and runs. It defines the DAG workflow, internal (not startable through the generic trigger routes), on its `LocalWorkflows` (which must be in `workflows`); `POST /api/dags/:id/run` answers 202 with the run id, and each node runs as a child run.                                                             |
+| `evals`               | none                    | `ZoryaEvals`: eval suites, durable eval runs and promotion gates (`/api/evals/*`, the Evals page). Defines the eval-run workflow (internal) on its `LocalWorkflows`; the agent promote route enforces each agent's gate. See [Evals](#evals).                                                                                          |
 | `workflowBuilder`     | none                    | `ZoryaWorkflowBuilder`: the Builder page and `/api/workflow-builder/*`. Its `LocalWorkflows` layer must be in `workflows`. See [Workflow builder](#workflow-builder).                                                                                                                                                                  |
 | `secrets`             | none                    | `SecretsStorage` for `/api/secrets` and BYOK credential resolution.                                                                                                                                                                                                                                                                    |
 | `mcp`                 | none                    | `ZoryaMcpServers`: the MCP server allowlist recipes attach from, recipe http endpoints on or off, and the shared client pool. Without it recipes cannot attach MCP servers. See [Agent MCP servers](#agent-mcp-servers).                                                                                                               |
@@ -359,6 +360,7 @@ line; internal detail never reaches the caller.
 | Namespaces   | `GET/POST /api/namespaces` (`?status=active\|archived`), `GET/PATCH/DELETE /api/namespaces/:id`; without a registry only `GET`, with `configured: false`                                                                    |
 | Agents       | `/api/agents` CRUD, `/api/agents/_catalog/*`, `_sources`, `_draft`, `/api/agents/:id/{versions,promote,clone,extract-role,invoke,stream,threads,...}`                                                                       |
 | Agent data   | `/api/memory/*`, `/api/instances`, `/api/agents/:id/instances/*`, `/api/roles/*`, `/api/skills/*`, `/api/fragments/*`, `/api/secrets/*`, `/api/dags/*`, `/api/remote-deployments/*`                                         |
+| Evals        | `/api/evals/suites` (versioned), `POST/GET /api/evals/runs`, `GET /api/evals/runs/:runId`, `POST .../cancel`, `GET /api/evals/compare`, `/api/evals/gates/:agentId` (GET/PUT/DELETE)                                        |
 | Worker plane | `/ws/worker`, `POST /rpc/storage`, `POST /rpc/worker`, `/api/advertisements`, `/api/worker-protocol/{claim-starts,heartbeat-start/:id,complete-start/:id,release-start/:id,starts}`                                         |
 | Webhooks     | `POST /webhooks/:source/:agentId`                                                                                                                                                                                           |
 
@@ -675,6 +677,102 @@ turns it off) the whole store is re-read, so bases, sources and deletions
 made on one replica reach the others' registries without a restart. With the
 default in-memory retriever each replica indexes the ready sources itself;
 a durable retriever shares one index.
+
+### Evals
+
+`ZoryaEvals` runs [`@promin/evals`](../evals/README.md) suites against agent
+recipe versions from the dashboard's Evals page or `/api/evals/*`:
+
+```ts
+const evals = new ZoryaEvals({
+  suites: stack.evalSuiteRegistry, // a VersionedRegistry of eval suites
+  gates: stack.evalGateRegistry, // promotion gates, keyed by agent id
+  runs: stack.evalRunStore, // run history, written case by case
+  datasets: stack.evalDatasetStore,
+  workflows, // the LocalWorkflows the server mounts
+  agents,
+  seed: [mySuite], // registered (and promoted) at start
+});
+ZoryaServer.builder().workflows(workflows).agents(agents).evals(evals);
+```
+
+- **Suites** are versioned like recipes: `POST /api/evals/suites` creates one,
+  `PATCH` (with `If-Match`) adds a version (`publish: false` keeps a draft),
+  `/:id/promote` makes a version active. A suite is a dataset (inline, or a
+  stored dataset; `jsonl` paths are refused over HTTP) plus scorers
+  (`exactMatch`, `regexMatch`, `jsonMatch`, `toolTrajectory`, `budget`,
+  `retrievalRecall`, `setMatch`, `llmJudge` with `judges`) and run knobs
+  (`samplesPerCase`, `concurrency` capped by `maxConcurrency`,
+  `passThreshold`, `caseTimeoutMs`, `idempotentCases`, `allowedTools`). A
+  `stored` dataset is read by name when a run starts: a suite version does
+  not pin the stored cases, so editing the dataset changes what later runs
+  of the same suite version measure.
+- **Runs**: `POST /api/evals/runs { suiteId, agentId, agentVersion?,
+namespaceId, resourceId? }` answers 202 with a `runId`. Any agent version
+  can be measured, drafts included. A run is a run of the internal
+  `eval-run` workflow: each case is journaled, so after a restart orphan
+  recovery resumes the run without re-running finished cases. Case results
+  land in the run store as each case finishes; poll
+  `GET /api/evals/runs/:runId` for progress. A run whose workflow ended some
+  other way (cancelled, marked failed, swept) is reconciled to `cancelled` /
+  `failed` when read. `POST .../cancel` stops one.
+- **What a run can touch.** Cases run as one-shot invocations of the agent in
+  the run's scope: they read that namespace's facts, knowledge bases and
+  BYOK credentials and spend its budget, and their tools run for real. The
+  resource defaults to one of the run's own (`eval-<runId>`). Approval-gated
+  tool calls are refused (nobody can approve inside a run), and a suite's
+  `allowedTools` narrows the tools further. A case a restart cut short is
+  recorded as failed (`interrupted`) rather than run a second time, unless
+  the suite sets `idempotentCases: true`.
+- **Compare**: `GET /api/evals/compare?baseline=<runId>&candidate=<runId>` diffs
+  two runs case by case (e.g. the active version against a draft).
+- **Authorization** (with `ZoryaAgents.authorizeScope`): starting a run checks
+  the caller's scope for the agent like an invocation; reading, cancelling
+  and comparing a run checks the scope it ran in (otherwise 404);
+  `GET /api/evals/runs` needs `?namespaceId=` the caller may act in. Suite
+  writes need `{ kind: "operator", resource: "eval-suite" }` and gate writes
+  `{ kind: "operator", resource: "eval-gate" }`: either could weaken what a
+  promotion must pass.
+- **Promotion gates**: `PUT /api/evals/gates/:agentId { suiteId, minScore,
+suiteVersion?, scorerId? }`. While an enabled gate is set, a version of that
+  agent becomes active only if the NEWEST completed run of the gate's suite
+  version on that agent version scored at least `minScore` (case pass rate,
+  or the scorer's mean value). Without `suiteVersion` the suite's version
+  that is active when the gate is checked counts (the version active when
+  the gate was set is recorded as `suiteVersionAtSet`, for display only); a
+  run of a never-promoted suite draft never satisfies a gate. A newer
+  failing run overrides an older passing one, but nothing stops re-running a
+  flaky suite until it passes — keep gating suites deterministic. A refused
+  version answers 409 `eval_gate_failed` with the gate, the score and the
+  latest run. `overrideEvalGate: true` (`?overrideEvalGate=true` on DELETE)
+  lets it through; with `authorizeScope` it needs
+  `{ kind: "operator", resource: "eval-gate" }`. A gate also blocks rolling
+  back to an earlier version that has no passing run, short of an override.
+
+  Gated paths (anything that would make a version of a gated agent active):
+  - `POST /api/agents/:id/promote`;
+  - a publishing `PATCH /api/agents/:id` (save it with `publish: false`, run
+    the suite on the draft, then promote);
+  - `DELETE /api/agents/:id?version=<active>&promote=<other>`;
+  - `POST /api/agents` and `POST /api/agents/:id/clone` into a gated id (a
+    gate outlives the agent's versions, so deleting an agent and creating it
+    again is gated too);
+  - `POST /api/agents/:id/extract-role`: the rebound version is stored as a
+    draft (`published: false` in the answer);
+  - the agent file scan and remote-deployment re-registration: a new version
+    of a gated agent is stored as a draft (a scan warning; `drafts` in the
+    registration answer). `ZoryaEvals` installs this check as
+    `ZoryaAgents.canAutoPromote`.
+
+  Not gated: writes straight to the `AgentRegistry` (library code, hosts'
+  own seeding) — pass `canAutoPromote` to `applyDiscoveredAgents` yourself —
+  and the registry's own fallback when an active version is removed without
+  naming a replacement (a remote deployment expiring, `sweepOrphanedRemoteRecipes`),
+  which activates the previous or latest remaining version.
+
+The demo registers the demo agents' suites from `examples/evals/suites.ts`.
+CI runs them all offline with scripted LLMs (`bun run evals:ci`) and fails on
+a score below `examples/evals/thresholds.json`.
 
 ### Workflow builder
 

@@ -43,6 +43,7 @@ import { RegistryBackedWorkersProvider } from "./routes/workers.ts";
 import { AgentStreamHub } from "./services/agent-stream-hub.ts";
 import type { ZoryaAgents } from "./services/agents/index.ts";
 import type { ZoryaDags } from "./services/dags/index.ts";
+import type { ZoryaEvals } from "./services/evals/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
 import type { ZoryaKnowledgeBases } from "./services/knowledge/index.ts";
 import type { ZoryaMcpServers } from "./services/mcp/index.ts";
@@ -77,6 +78,7 @@ import {
   mountSkills,
 } from "./mount/mount-registries.ts";
 import { adoptStoredNamespaces, mountNamespaces } from "./mount/mount-namespaces.ts";
+import { mountEvals } from "./mount/mount-evals.ts";
 import { mountRpc } from "./mount/mount-rpc.ts";
 import { mountRuns } from "./mount/mount-runs.ts";
 import { mountSchedules } from "./mount/mount-schedules.ts";
@@ -91,6 +93,8 @@ export class ZoryaServer {
   readonly skills?: ZoryaSkills;
   readonly fragments?: ZoryaFragments;
   readonly dags?: ZoryaDags;
+  /** Eval suites, runs and promotion gates (`ZoryaServerConfig.evals`). */
+  readonly evals?: ZoryaEvals;
   readonly knowledgeBases?: ZoryaKnowledgeBases;
   /** The operator's MCP allowlist and client pool (`ZoryaServerConfig.mcp`). */
   readonly mcp?: ZoryaMcpServers;
@@ -166,6 +170,7 @@ export class ZoryaServer {
     if (config.skills) this.skills = config.skills;
     if (config.fragments) this.fragments = config.fragments;
     if (config.dags) this.dags = config.dags;
+    if (config.evals) this.evals = config.evals;
     if (config.knowledgeBases) this.knowledgeBases = config.knowledgeBases;
     if (config.mcp) this.mcp = config.mcp;
     if (config.workflowBuilder) this.workflowBuilder = config.workflowBuilder;
@@ -244,6 +249,7 @@ export class ZoryaServer {
         skills: this.skills,
         fragments: this.fragments,
         knowledgeBases: this.knowledgeBases,
+        evals: this.evals,
         mcp: this.mcp,
         workflowBuilder: this.workflowBuilder,
         retention: this.retention,
@@ -354,6 +360,7 @@ export class ZoryaServer {
         secrets: this.secrets,
         mcp: this.mcp,
         namespaces,
+        evals: this.evals,
         clock,
       });
     }
@@ -388,6 +395,14 @@ export class ZoryaServer {
       });
     }
     if (this.dags) mountDags({ router, dags: this.dags, namespaces });
+    if (this.evals) {
+      mountEvals({
+        router,
+        evals: this.evals,
+        namespaces,
+        authorizeScope: this.agents?.authorizeScope,
+      });
+    }
     if (this.knowledgeBases) {
       mountKnowledgeBases({
         router,

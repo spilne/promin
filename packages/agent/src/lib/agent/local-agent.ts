@@ -713,6 +713,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     signal: AbortSignal;
     approvalIndex?: TurnApprovalIndex;
     onApprovalRequired?: (call: ToolCall) => Promise<ApprovalDecision>;
+    allowedTools?: ReadonlyArray<string>;
     usageRecorder?: TurnUsageRecorder;
   }): ReturnType<typeof agentAction> {
     // Tools come from buildTools so the network tools auto-attach for
@@ -722,9 +723,12 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     const resourceId = this.config.resourceId;
     const engine: AgentEngineConfig<TOutput> = {
       ...this.config.agent,
-      ...this.buildTools({
-        ...(namespaceId !== undefined && { namespaceId }),
-        ...(resourceId !== undefined && { resourceId }),
+      ...onlyTools({
+        built: this.buildTools({
+          ...(namespaceId !== undefined && { namespaceId }),
+          ...(resourceId !== undefined && { resourceId }),
+        }),
+        allowed: params.allowedTools,
       }),
       ...(params.onApprovalRequired && { onApprovalRequired: params.onApprovalRequired }),
     };
@@ -780,6 +784,8 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       namespaceId,
       bus,
       signal: capture.abort.signal,
+      ...(opts?.onApprovalRequired && { onApprovalRequired: opts.onApprovalRequired }),
+      ...(opts?.allowedTools && { allowedTools: opts.allowedTools }),
       ...(budgets &&
         namespaceId !== undefined && {
           usageRecorder: ledgerRecorder({
@@ -1945,3 +1951,23 @@ function stripStorageMeta(m: Message & { seq?: number; createdAt?: number }): Me
 
 // Re-export `ThreadRow` so callers can introspect downcast types if needed.
 export type { ThreadRow };
+
+/** The turn's tools narrowed to `allowed` (by name); all of them when `allowed` is absent. */
+function onlyTools(params: {
+  built: { tools?: Record<string, AgentTool<any, any>>; toolRegistry?: ToolRegistry };
+  allowed: ReadonlyArray<string> | undefined;
+}): { tools?: Record<string, AgentTool<any, any>>; toolRegistry?: ToolRegistry } {
+  const { built, allowed } = params;
+  if (allowed === undefined) return built;
+  const keep = new Set(allowed);
+  const narrow = (tools: Record<string, AgentTool<any, any>>) =>
+    Object.fromEntries(Object.entries(tools).filter(([name]) => keep.has(name)));
+  const registry = built.toolRegistry;
+  if (registry) {
+    return {
+      tools: undefined,
+      toolRegistry: { getTools: () => narrow(registry.getTools()), close: () => registry.close() },
+    };
+  }
+  return { tools: narrow(built.tools ?? {}) };
+}

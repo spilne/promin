@@ -3,27 +3,61 @@
 //
 // An explicit delegating wrapper (not a Proxy). Only `invoke` / `stream` and
 // thread `send` / `stream` get the scoring hook; the rest pass through and
-// `withScope` re-wraps. After a run resolves it samples, and on a hit runs
-// the scorers off-thread against `toEvalOutput(run)`, pushing a `LiveScore`
-// to the sink.
+// `withScope` re-wraps (sharing the concurrency budget). After a run
+// resolves it samples, and on a hit runs the scorers off-thread against
+// `toEvalOutput(run)`, pushing a `LiveScore` to the sink.
 //
-// Three load-bearing constraints: the response is never blocked; a throwing
-// scorer is swallowed via `onError`; a sampling miss skips `toEvalOutput`.
+// Load-bearing constraints: the response is never blocked; a throwing
+// scorer is swallowed via `onError`; a sampling miss skips `toEvalOutput`;
+// at most `maxConcurrent` runs are scored at once (the rest are dropped).
 // ---------------------------------------------------------------------------
 
 import type { Agent, AgentInvokeOpts, AgentRunOutput, AgentThread } from "@promin/agent";
-import { SystemWallClock } from "@promin/workflow";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { toEvalOutput } from "../targets/to-eval-output.ts";
 import type { Score } from "../types.ts";
-import type { LiveScore, LiveScoringConfig } from "./types.ts";
+import { DEFAULT_LIVE_MAX_CONCURRENT, type LiveScore, type LiveScoringConfig } from "./types.ts";
 
-/** Wrap an `Agent` so every sampled run is scored off-thread. */
+export interface LiveScoredParams<Input, Output> extends LiveScoringConfig {
+  readonly agent: Agent<Input, Output>;
+}
+
+/** Scoring state shared by an agent and every `withScope` view of it. */
+interface ScoringState {
+  inFlight: number;
+}
+
+/**
+ * Wrap an `Agent` so every sampled run is scored off-thread. Throws
+ * `RangeError` for a sampling rate outside 0..1 or a non-positive
+ * `maxConcurrent`.
+ */
 export function liveScored<Input, Output>(
-  agent: Agent<Input, Output>,
-  config: LiveScoringConfig,
+  params: LiveScoredParams<Input, Output>,
 ): Agent<Input, Output> {
-  const clock = config.clock ?? SystemWallClock;
+  const { agent, ...config } = params;
   const rate = config.sampling?.rate ?? 1;
+  if (!Number.isFinite(rate) || rate < 0 || rate > 1) {
+    throw new RangeError(`liveScored: sampling.rate must be in 0..1, got ${rate}`);
+  }
+  const maxConcurrent = config.maxConcurrent ?? DEFAULT_LIVE_MAX_CONCURRENT;
+  if (!Number.isInteger(maxConcurrent) || maxConcurrent < 1) {
+    throw new RangeError(
+      `liveScored: maxConcurrent must be a positive integer, got ${maxConcurrent}`,
+    );
+  }
+  return wrapAgent({ agent, config, rate, maxConcurrent, state: { inFlight: 0 } });
+}
+
+function wrapAgent<Input, Output>(params: {
+  readonly agent: Agent<Input, Output>;
+  readonly config: LiveScoringConfig;
+  readonly rate: number;
+  readonly maxConcurrent: number;
+  readonly state: ScoringState;
+}): Agent<Input, Output> {
+  const { agent, config, rate, maxConcurrent, state } = params;
+  const clock: WallClock = config.clock ?? SystemWallClock;
   const agentId = config.agentId ?? "agent";
   const onError = config.onError ?? noop;
 
@@ -31,20 +65,26 @@ export function liveScored<Input, Output>(
     config.decide !== undefined ? config.decide(runId) : Math.random() < rate;
 
   // Fire-and-forget: score a run off-thread. Never throws into the caller;
-  // a sampling miss skips `toEvalOutput` entirely.
-  const scoreRun = (
-    run: AgentRunOutput<Output>,
-    startedAt: number,
-    input: Input,
-    opts: AgentInvokeOpts | undefined,
-  ): void => {
+  // a sampling miss (or a drop at the cap) skips `toEvalOutput` entirely.
+  const scoreRun = (scored: {
+    run: AgentRunOutput<Output>;
+    startedAt: number;
+    input: Input;
+    opts: AgentInvokeOpts | undefined;
+  }): void => {
+    const { run, startedAt, input, opts } = scored;
     const runId =
       opts?.runId ?? `live-${clock.currentTimeMs()}-${Math.random().toString(36).slice(2, 10)}`;
     if (!sample(runId)) return;
+    if (state.inFlight >= maxConcurrent) {
+      config.onDropped?.(runId);
+      return;
+    }
+    state.inFlight += 1;
     void (async (): Promise<void> => {
       // Wait for the run to settle without surfacing its rejection here.
       await Promise.allSettled([run.messages]);
-      const output = await toEvalOutput(run, { latencyMs: clock.currentTimeMs() - startedAt });
+      const output = await toEvalOutput({ run, latencyMs: clock.currentTimeMs() - startedAt });
       const scores: Score[] = [];
       for (const scorer of config.scorers) {
         try {
@@ -62,7 +102,11 @@ export function liveScored<Input, Output>(
         ...(opts?.resourceId !== undefined && { resourceId: opts.resourceId }),
       };
       await config.sink.record(liveScore);
-    })().catch(onError);
+    })()
+      .catch(onError)
+      .finally(() => {
+        state.inFlight -= 1;
+      });
   };
 
   const wrapThread = (inner: AgentThread<Input, Output>): AgentThread<Input, Output> => {
@@ -73,13 +117,13 @@ export function liveScored<Input, Output>(
       async send(input, opts) {
         const startedAt = clock.currentTimeMs();
         const run = await inner.send(input, opts);
-        scoreRun(run, startedAt, input, opts);
+        scoreRun({ run, startedAt, input, opts });
         return run;
       },
       stream(input, opts) {
         const startedAt = clock.currentTimeMs();
         const run = inner.stream(input, opts);
-        scoreRun(run, startedAt, input, opts);
+        scoreRun({ run, startedAt, input, opts });
         return run;
       },
       messages: (range) => inner.messages(range),
@@ -107,22 +151,22 @@ export function liveScored<Input, Output>(
     async invoke(input, opts) {
       const startedAt = clock.currentTimeMs();
       const run = await agent.invoke(input, opts);
-      scoreRun(run, startedAt, input, opts);
+      scoreRun({ run, startedAt, input, opts });
       return run;
     },
     stream(input, opts) {
       const startedAt = clock.currentTimeMs();
       const run = agent.stream(input, opts);
-      scoreRun(run, startedAt, input, opts);
+      scoreRun({ run, startedAt, input, opts });
       return run;
     },
     async thread(threadId, opts) {
       return wrapThread(await agent.thread(threadId, opts));
     },
-    listThreads: (params) => agent.listThreads(params),
+    listThreads: (listParams) => agent.listThreads(listParams),
     compactThread: (threadId, opts) => agent.compactThread(threadId, opts),
     distillThread: (threadId, opts) => agent.distillThread(threadId, opts),
-    withScope: (scope) => liveScored(agent.withScope(scope), config),
+    withScope: (scope) => wrapAgent({ ...params, agent: agent.withScope(scope) }),
   };
 }
 

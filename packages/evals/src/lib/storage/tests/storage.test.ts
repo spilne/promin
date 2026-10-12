@@ -21,38 +21,42 @@ async function drain(dataset: EvalDataset): Promise<void> {
 describe("compareRuns", () => {
   it("diffs two stored runs", async () => {
     const store = new InMemoryEvalRunStore();
-    const dataset = inlineDataset(cases, "ds");
-    const baseline = await runEval({
+    const dataset = inlineDataset({ cases, id: "ds" });
+    await runEval({
       dataset,
-      target: fnTarget(() => "x", { id: "t" }),
+      target: fnTarget({ fn: () => "x", id: "t" }),
       scorers: [exactMatch],
+      persist: { store, runId: "base" },
     });
-    const candidate = await runEval({
+    await runEval({
       dataset,
-      target: fnTarget((input) => String(input).toUpperCase(), { id: "t", version: "v2" }),
+      target: fnTarget({ fn: (input) => String(input).toUpperCase(), id: "t", version: "v2" }),
       scorers: [exactMatch],
+      persist: { store, runId: "cand" },
     });
-    const baselineId = await store.save(baseline);
-    const candidateId = await store.save(candidate);
 
-    const diff = await compareRuns(store, baselineId, candidateId);
+    const diff = await compareRuns({ store, baselineRunId: "base", candidateRunId: "cand" });
     expect(diff.passRateDelta).toBe(1);
     expect(diff.regressions).toEqual([]);
+    expect(diff.perCase.map((c) => c.status)).toEqual(["improved", "improved"]);
+    expect(diff.candidate.targetVersion).toBe("v2");
   });
 
   it("throws when a run id is missing", async () => {
     const store = new InMemoryEvalRunStore();
-    await expect(compareRuns(store, "missing-a", "missing-b")).rejects.toThrow("baseline");
+    await expect(
+      compareRuns({ store, baselineRunId: "missing-a", candidateRunId: "missing-b" }),
+    ).rejects.toThrow("baseline");
   });
 });
 
 describe("storedDataset", () => {
   it("materializes a stored dataset for runEval", async () => {
     const datasets = new InMemoryEvalDatasetStore();
-    await datasets.save("support", cases);
+    await datasets.save({ datasetId: "support", cases });
     const summary = await runEval({
-      dataset: storedDataset(datasets, "support"),
-      target: fnTarget((input) => String(input).toUpperCase()),
+      dataset: storedDataset({ store: datasets, datasetId: "support" }),
+      target: fnTarget({ fn: (input) => String(input).toUpperCase() }),
       scorers: [exactMatch],
     });
     expect(summary.datasetId).toBe("support");
@@ -61,6 +65,8 @@ describe("storedDataset", () => {
 
   it("throws for an unknown dataset", async () => {
     const datasets = new InMemoryEvalDatasetStore();
-    await expect(drain(storedDataset(datasets, "ghost"))).rejects.toThrow("ghost");
+    await expect(drain(storedDataset({ store: datasets, datasetId: "ghost" }))).rejects.toThrow(
+      "ghost",
+    );
   });
 });

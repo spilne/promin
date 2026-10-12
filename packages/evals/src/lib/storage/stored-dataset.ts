@@ -6,7 +6,11 @@ import type { EvalDataset } from "../types.ts";
 import type { EvalDatasetStore } from "./types.ts";
 
 /** Wrap a stored dataset as an `EvalDataset` for `runEval` / `runMatrix`. */
-export function storedDataset(store: EvalDatasetStore, datasetId: string): EvalDataset {
+export function storedDataset(params: {
+  readonly store: EvalDatasetStore;
+  readonly datasetId: string;
+}): EvalDataset {
+  const { store, datasetId } = params;
   return {
     id: datasetId,
     async *cases() {

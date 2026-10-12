@@ -1,16 +1,17 @@
 // ---------------------------------------------------------------------------
 // toEvalOutput — adapt an AgentRunOutput into an EvalOutput.
 //
-// Shared by `recipeTarget` and (later) live scoring: it builds the run
-// trace via `buildAgentTrace`, computes cost from token usage + per-model
-// rates, and surfaces a finished-in-error run as `EvalOutput.error`.
+// Shared by the agent targets and live scoring: it builds the run trace via
+// `buildAgentTrace`, computes cost from token usage + per-model rates, and
+// surfaces a finished-in-error run as `EvalOutput.error`.
 // ---------------------------------------------------------------------------
 
 import { buildAgentTrace, computeCallCostUsd } from "@promin/agent";
 import type { AgentRunOutput, ModelCostRates } from "@promin/agent";
 import type { EvalMetrics, EvalOutput } from "../types.ts";
 
-export interface ToEvalOutputOpts {
+export interface ToEvalOutputParams {
+  readonly run: AgentRunOutput;
   /** Wall-clock duration of the run, measured by the caller. */
   readonly latencyMs: number;
   /** Per-model cost rates — when supplied, `metrics.costUsd` is computed. */
@@ -18,10 +19,8 @@ export interface ToEvalOutputOpts {
 }
 
 /** Map a completed `AgentRunOutput` to the eval framework's `EvalOutput`. */
-export async function toEvalOutput(
-  run: AgentRunOutput,
-  opts: ToEvalOutputOpts,
-): Promise<EvalOutput> {
+export async function toEvalOutput(params: ToEvalOutputParams): Promise<EvalOutput> {
+  const { run } = params;
   const [text, structured, usage, messages, finishReason] = await Promise.all([
     run.text,
     run.output,
@@ -30,9 +29,9 @@ export async function toEvalOutput(
     run.finishReason,
   ]);
 
-  const costUsd = computeCallCostUsd(usage, opts.rates);
+  const costUsd = computeCallCostUsd(usage, params.rates);
   const metrics: EvalMetrics = {
-    latencyMs: opts.latencyMs,
+    latencyMs: params.latencyMs,
     inputTokens: usage.inputTokens,
     outputTokens: usage.outputTokens,
     ...(costUsd !== undefined && { costUsd }),

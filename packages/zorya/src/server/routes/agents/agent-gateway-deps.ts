@@ -90,6 +90,7 @@ import type {
 } from "@promin/agent";
 import type { NamespaceRegistry, WallClock } from "@promin/workflow";
 import type { McpRecipeChecker, ScopeAuthorizer } from "../agent-gateway-kit.ts";
+import type { PromotionGate } from "../evals.ts";
 import type { TurnStreamHub } from "./agent-sse.ts";
 
 // ---------------------------------------------------------------------------
@@ -325,6 +326,12 @@ export interface AgentGatewayDeps {
    * Default: `SystemWallClock`.
    */
   readonly clock?: WallClock;
+  /**
+   * Consulted before an agent version becomes active (promote, a publishing
+   * edit, removing the active version in favour of another). With the
+   * evals service: the agent's eval gate (409 `eval_gate_failed`).
+   */
+  readonly promotionGate?: PromotionGate;
 }
 
 /**

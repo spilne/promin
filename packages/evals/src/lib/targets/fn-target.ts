@@ -9,6 +9,8 @@ import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { EvalCase, EvalTarget } from "../types.ts";
 
 export interface FnTargetConfig {
+  /** The subject under test: case input in, output out. A throw becomes a failed run. */
+  readonly fn: (input: unknown) => Promise<unknown> | unknown;
   /** Target id — default `"fn"`. */
   readonly id?: string;
   /** Optional version, feeds run identity. */
@@ -18,11 +20,9 @@ export interface FnTargetConfig {
 }
 
 /** Build an `EvalTarget` from a function of the case input. */
-export function fnTarget(
-  fn: (input: unknown) => Promise<unknown> | unknown,
-  config: FnTargetConfig = {},
-): EvalTarget {
+export function fnTarget(config: FnTargetConfig): EvalTarget {
   const clock = config.clock ?? SystemWallClock;
+  const { fn } = config;
   return {
     id: config.id ?? "fn",
     ...(config.version !== undefined && { version: config.version }),

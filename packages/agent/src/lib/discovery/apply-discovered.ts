@@ -50,6 +50,12 @@ export interface ApplyDiscoveredParams<TBody, TFilter, TInput> {
   readonly beforeRegister?: (input: RegisterVersionInput<TInput>) => void;
   /** Called with the active entry when the scanned body is already stored. */
   readonly onUnchanged?: (entry: Versioned<TBody>) => Promise<void>;
+  /**
+   * Whether a changed file may make its new (never evaluated) version of
+   * `id` active, e.g. `false` while the id has a promotion gate. A refused
+   * version waits as a draft with a warning. Default: always.
+   */
+  readonly canAutoPromote?: (params: { readonly id: string }) => boolean | Promise<boolean>;
 }
 
 export interface ApplyDiscoveredResult {
@@ -96,7 +102,13 @@ export async function applyDiscovered<TBody, TFilter, TInput>(
       // A file edit replaces what a file published. An operator's choice of
       // active version (one they authored or promoted) stays active; the
       // file's new text waits as a draft.
-      const promote = active === null || active.source === FILE_SOURCE;
+      const fileOwnsActive = active === null || active.source === FILE_SOURCE;
+      const gated =
+        active !== null &&
+        fileOwnsActive &&
+        params.canAutoPromote !== undefined &&
+        !(await params.canAutoPromote({ id: input.id }));
+      const promote = fileOwnsActive && !gated;
       const written = await registry.register({
         ...input,
         // Registry state is the scanner's to set, never the file's.
@@ -106,7 +118,12 @@ export async function applyDiscovered<TBody, TFilter, TInput>(
         trust: params.trust ?? "trusted",
         promote,
       });
-      if (!promote) {
+      if (gated) {
+        warnings.push(
+          `${registry.kind.name} "${input.id}": the file changed; ${written.version} waits as a ` +
+            `draft because a promotion gate guards "${input.id}" (${active!.version} stays active)`,
+        );
+      } else if (!promote) {
         warnings.push(
           `${registry.kind.name} "${input.id}": the file changed; ${written.version} waits as a ` +
             `draft because an operator made ${active!.version} active`,

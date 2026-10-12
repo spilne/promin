@@ -2,9 +2,9 @@
 // liveScoredFromRecipe — bridge a declarative config into the decorator.
 //
 // A `RegisteredAgent` recipe carries JSON, not live objects. This resolver
-// reads a declarative `{ scorerRefs, sampling }` block, looks the scorer
-// names up in a catalog, and returns a `liveScored` agent — the "scoring
-// field wraps into the decorator" step, done host-side.
+// reads a declarative `{ scorerRefs, sampling, maxConcurrent }` block, looks
+// the scorer names up in a catalog, and returns a `liveScored` agent — the
+// "scoring field wraps into the decorator" step, done host-side.
 // ---------------------------------------------------------------------------
 
 import type { Agent } from "@promin/agent";
@@ -17,40 +17,49 @@ import type { LiveScoreSink } from "./types.ts";
 export interface LiveScoringRecipeConfig {
   /** Scorer ids to resolve against the catalog. */
   readonly scorerRefs: ReadonlyArray<string>;
+  /** Fraction of runs to score, 0..1. */
   readonly sampling?: { readonly rate: number };
+  /** Most sampled runs scored at once; see `LiveScoringConfig.maxConcurrent`. */
+  readonly maxConcurrent?: number;
 }
 
-export interface LiveScoredFromRecipeDeps {
+export interface LiveScoredFromRecipeParams<Input, Output> {
+  readonly agent: Agent<Input, Output>;
+  readonly config: LiveScoringRecipeConfig;
   /** Scorer id to implementation — the host's resolvable scorer set. */
   readonly scorerCatalog: Readonly<Record<string, Scorer>>;
   readonly sink: LiveScoreSink;
   readonly agentId?: string;
   readonly clock?: WallClock;
   readonly onError?: (err: unknown) => void;
+  readonly onDropped?: (runId: string) => void;
 }
 
 /**
  * Resolve a declarative live-scoring config into a `liveScored` agent.
- * Throws when a referenced scorer is absent from the catalog.
+ * Throws when a referenced scorer is absent from the catalog, and
+ * `RangeError` for out-of-range sampling or concurrency.
  */
 export function liveScoredFromRecipe<Input, Output>(
-  agent: Agent<Input, Output>,
-  config: LiveScoringRecipeConfig,
-  deps: LiveScoredFromRecipeDeps,
+  params: LiveScoredFromRecipeParams<Input, Output>,
 ): Agent<Input, Output> {
+  const { config } = params;
   const scorers = config.scorerRefs.map((ref) => {
-    const scorer = deps.scorerCatalog[ref];
+    const scorer = params.scorerCatalog[ref];
     if (scorer === undefined) {
       throw new Error(`liveScoredFromRecipe: scorer "${ref}" not found in the catalog`);
     }
     return scorer;
   });
-  return liveScored(agent, {
+  return liveScored({
+    agent: params.agent,
     scorers,
-    sink: deps.sink,
+    sink: params.sink,
     ...(config.sampling !== undefined && { sampling: config.sampling }),
-    ...(deps.agentId !== undefined && { agentId: deps.agentId }),
-    ...(deps.clock !== undefined && { clock: deps.clock }),
-    ...(deps.onError !== undefined && { onError: deps.onError }),
+    ...(config.maxConcurrent !== undefined && { maxConcurrent: config.maxConcurrent }),
+    ...(params.agentId !== undefined && { agentId: params.agentId }),
+    ...(params.clock !== undefined && { clock: params.clock }),
+    ...(params.onError !== undefined && { onError: params.onError }),
+    ...(params.onDropped !== undefined && { onDropped: params.onDropped }),
   });
 }

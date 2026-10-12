@@ -42,14 +42,17 @@ export class SqliteEvalDatasetStore implements EvalDatasetStore {
     `);
   }
 
-  async save(datasetId: string, cases: ReadonlyArray<EvalCase>): Promise<void> {
+  async save(params: {
+    readonly datasetId: string;
+    readonly cases: ReadonlyArray<EvalCase>;
+  }): Promise<void> {
     this.db
       .query(
         `INSERT INTO ${this.table} (dataset_id, cases)
          VALUES (?, ?)
          ON CONFLICT(dataset_id) DO UPDATE SET cases = excluded.cases`,
       )
-      .run(datasetId, JSON.stringify(cases));
+      .run(params.datasetId, JSON.stringify(params.cases));
   }
 
   async get(datasetId: string): Promise<EvalCase[] | null> {

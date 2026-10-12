@@ -39,7 +39,8 @@ export interface VersionedRegistryFactory {
     | Promise<VersionedRegistry<TBody, TFilter, TInput>>;
 }
 
-interface KindFixture<TBody, TFilter, TInput> {
+/** How a kind's conformance run builds bodies and filters. */
+export interface VersionedRegistryKindFixture<TBody, TFilter, TInput> {
   readonly kind: RegistryKind<TBody, TFilter, TInput>;
   /** A valid input body; distinct `n` give distinct bodies. */
   readonly sample: (n: number) => TInput;
@@ -60,7 +61,7 @@ async function rejection(promise: Promise<unknown>): Promise<unknown> {
 
 function sharedSemantics<TBody, TFilter, TInput>(params: {
   readonly factory: VersionedRegistryFactory;
-  readonly fixture: KindFixture<TBody, TFilter, TInput>;
+  readonly fixture: VersionedRegistryKindFixture<TBody, TFilter, TInput>;
 }): void {
   const { factory, fixture } = params;
   const { kind, sample } = fixture;
@@ -542,7 +543,7 @@ const LOCAL_BACKEND = {
   role: { inline: { systemPrompt: "You help.", tools: [] } },
 };
 
-const AGENT_FIXTURE: KindFixture<AgentRecipe, AgentFilter, AgentRecipeInput> = {
+const AGENT_FIXTURE: VersionedRegistryKindFixture<AgentRecipe, AgentFilter, AgentRecipeInput> = {
   kind: AGENT_KIND,
   sample: (n) => ({
     backend: { ...LOCAL_BACKEND, model: { provider: "mock", id: `model-${n}` } },
@@ -556,7 +557,7 @@ const AGENT_FIXTURE: KindFixture<AgentRecipe, AgentFilter, AgentRecipeInput> = {
   },
 };
 
-const ROLE_FIXTURE: KindFixture<RoleRecipe, RoleFilter, RoleRecipeInput> = {
+const ROLE_FIXTURE: VersionedRegistryKindFixture<RoleRecipe, RoleFilter, RoleRecipeInput> = {
   kind: ROLE_KIND,
   sample: (n) => ({ definition: { systemPrompt: `Persona ${n}`, tools: [] } }),
   filtering: {
@@ -568,7 +569,7 @@ const ROLE_FIXTURE: KindFixture<RoleRecipe, RoleFilter, RoleRecipeInput> = {
   },
 };
 
-const SKILL_FIXTURE: KindFixture<SkillRecipe, SkillFilter, SkillRecipeInput> = {
+const SKILL_FIXTURE: VersionedRegistryKindFixture<SkillRecipe, SkillFilter, SkillRecipeInput> = {
   kind: SKILL_KIND,
   sample: (n) => ({ description: `Skill ${n}`, body: `# Body ${n}` }),
   filtering: {
@@ -594,13 +595,17 @@ function dagBody(n: number, tags?: ReadonlyArray<string>): DagRecipe {
   };
 }
 
-const DAG_FIXTURE: KindFixture<DagRecipe, DagFilter, DagRecipe> = {
+const DAG_FIXTURE: VersionedRegistryKindFixture<DagRecipe, DagFilter, DagRecipe> = {
   kind: DAG_KIND,
   sample: (n) => dagBody(n),
   filtering: { matching: (n) => dagBody(n, ["nightly"]), filter: { tag: "nightly" } },
 };
 
-const FRAGMENT_FIXTURE: KindFixture<FragmentRecipe, FragmentFilter, FragmentRecipe> = {
+const FRAGMENT_FIXTURE: VersionedRegistryKindFixture<
+  FragmentRecipe,
+  FragmentFilter,
+  FragmentRecipe
+> = {
   kind: FRAGMENT_KIND,
   sample: (n) => ({ content: `## Block ${n}` }),
 };
@@ -680,6 +685,20 @@ function kindSpecifics(factory: VersionedRegistryFactory): void {
         true,
       );
     });
+  });
+}
+
+/**
+ * Run the shared `VersionedRegistry` semantics for one kind defined outside
+ * this package (eval suites, say) against a backend.
+ */
+export function versionedRegistryKindTestSuite<TBody, TFilter, TInput>(params: {
+  readonly name: string;
+  readonly factory: VersionedRegistryFactory;
+  readonly fixture: VersionedRegistryKindFixture<TBody, TFilter, TInput>;
+}): void {
+  describe(`${params.name} conformance`, () => {
+    sharedSemantics({ factory: params.factory, fixture: params.fixture });
   });
 }
 

@@ -67,6 +67,10 @@ export {
   PostgresEvalDatasetStore,
   type PostgresEvalDatasetStoreConfig,
 } from "./lib/evals/eval-dataset-store.ts";
+export {
+  PostgresEvalGateRegistry,
+  PostgresEvalSuiteRegistry,
+} from "./lib/evals/eval-registries.ts";
 export { type PostgresStorageConfig } from "./lib/config.ts";
 export { migrate, type MigrateOptions } from "./lib/migrate.ts";
 

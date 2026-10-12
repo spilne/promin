@@ -190,6 +190,13 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly authorizeScope?: ScopeAuthorizer;
   readonly streaming?: TurnStreamLimits;
   readonly budgets?: AgentBudgets;
+  /**
+   * Whether a new, never evaluated version of an agent may become active
+   * on a path without a request to refuse (the file scan, remote
+   * deployment re-syncs); refused versions wait as drafts. `ZoryaEvals`
+   * installs its promotion gates here. Default: always.
+   */
+  canAutoPromote?: (params: { readonly id: string }) => boolean | Promise<boolean>;
   private readonly scanConfig?: ZoryaAgentsScanConfig;
   private scanHandle?: ScanLoopHandle<ScanLoopTick>;
 
@@ -284,6 +291,8 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
         intervalMs: this.scanConfig.intervalMs,
       }),
       ...(this.scanConfig.sync !== undefined && { sync: this.scanConfig.sync }),
+      // Read per call: the evals service installs its gates after construction.
+      canAutoPromote: (p) => this.canAutoPromote?.(p) ?? true,
       ...(this.scanConfig.onError !== undefined && { onError: this.scanConfig.onError }),
       ...(userOnTick !== undefined && { onTick: userOnTick }),
     });

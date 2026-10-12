@@ -1,0 +1,14 @@
+{
+  "knowledge-bot-retrieval": {
+    "minPassRate": 1,
+    "minMeanPerScorer": { "retrievalRecall": 1 }
+  },
+  "weather-bot-trajectory": {
+    "minPassRate": 1,
+    "minMeanPerScorer": { "toolTrajectory": 1, "reports-reading": 1 }
+  },
+  "memory-fact-precision": {
+    "minPassRate": 1,
+    "minMeanPerScorer": { "factPrecision": 1, "factRecall": 1 }
+  }
+}

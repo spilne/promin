@@ -16,8 +16,13 @@ interface RawCase {
 }
 
 /** Read a `.jsonl` file as an `EvalDataset`. */
-export function jsonlDataset(path: string, id?: string): EvalDataset {
-  const datasetId = id ?? path;
+export function jsonlDataset(params: {
+  readonly path: string;
+  /** Dataset id. Default: the path. */
+  readonly id?: string;
+}): EvalDataset {
+  const { path } = params;
+  const datasetId = params.id ?? path;
   return {
     id: datasetId,
     async *cases() {

@@ -16,7 +16,7 @@ export function evalDatasetStoreTestSuite(makeStore: () => EvalDatasetStore): vo
   describe("EvalDatasetStore conformance", () => {
     it("saves and gets a dataset", async () => {
       const store = makeStore();
-      await store.save("ds", CASES);
+      await store.save({ datasetId: "ds", cases: CASES });
       const got = await store.get("ds");
       expect(got?.length).toBe(2);
       expect(got?.[0]?.expected).toBe("A");
@@ -28,8 +28,8 @@ export function evalDatasetStoreTestSuite(makeStore: () => EvalDatasetStore): vo
 
     it("save replaces the existing cases", async () => {
       const store = makeStore();
-      await store.save("ds", CASES);
-      await store.save("ds", [{ id: "x", input: "z" }]);
+      await store.save({ datasetId: "ds", cases: CASES });
+      await store.save({ datasetId: "ds", cases: [{ id: "x", input: "z" }] });
       const got = await store.get("ds");
       expect(got?.length).toBe(1);
       expect(got?.[0]?.id).toBe("x");
@@ -37,14 +37,14 @@ export function evalDatasetStoreTestSuite(makeStore: () => EvalDatasetStore): vo
 
     it("lists dataset ids in ascending order", async () => {
       const store = makeStore();
-      await store.save("b", CASES);
-      await store.save("a", CASES);
+      await store.save({ datasetId: "b", cases: CASES });
+      await store.save({ datasetId: "a", cases: CASES });
       expect(await store.list()).toEqual(["a", "b"]);
     });
 
     it("deletes a dataset", async () => {
       const store = makeStore();
-      await store.save("ds", CASES);
+      await store.save({ datasetId: "ds", cases: CASES });
       await store.delete("ds");
       expect(await store.get("ds")).toBeNull();
     });

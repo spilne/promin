@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // assertEvalSummary — a CI-gate helper. Throws a readable error when a run
-// misses its quality bar; designed to be called inside a `bun:test` block.
+// misses its quality bar; call it inside a `bun:test` block or a CI script.
 // ---------------------------------------------------------------------------
 
 import type { EvalRunSummary } from "./types.ts";
@@ -10,6 +10,8 @@ export interface EvalAssertion {
   readonly minPassRate?: number;
   /** Per-scorer minimum pass-rate, keyed by scorer id. */
   readonly minPerScorer?: Readonly<Record<string, number>>;
+  /** Per-scorer minimum mean value, keyed by scorer id. */
+  readonly minMeanPerScorer?: Readonly<Record<string, number>>;
   /** Fail when the run's pass-rate drops more than `maxPassRateDrop` below `baseline`. */
   readonly maxRegression?: {
     readonly baseline: EvalRunSummary;
@@ -17,29 +19,32 @@ export interface EvalAssertion {
   };
 }
 
-/**
- * Throw when `summary` misses any configured bar. A no-op when every check
- * passes. Call it inside a `bun:test` `it(...)` to gate a deploy on eval
- * quality:
- *
- *     it("support-bot meets the bar", async () => {
- *       assertEvalSummary(await runEval(config), { minPassRate: 0.9 });
- *     });
- */
-export function assertEvalSummary(summary: EvalRunSummary, assertion: EvalAssertion): void {
+/** The bars `summary` misses, one readable line each; empty when it meets them all. */
+export function evalSummaryFailures(params: {
+  readonly summary: EvalRunSummary;
+  readonly assertion: EvalAssertion;
+}): string[] {
+  const { summary, assertion } = params;
   const failures: string[] = [];
 
   if (assertion.minPassRate !== undefined && summary.passRate < assertion.minPassRate) {
     failures.push(`passRate ${summary.passRate.toFixed(3)} < required ${assertion.minPassRate}`);
   }
 
-  if (assertion.minPerScorer !== undefined) {
-    for (const [scorerId, min] of Object.entries(assertion.minPerScorer)) {
-      const actual = summary.perScorer[scorerId]?.passRate;
+  const perScorerBars: Array<{
+    bars: Readonly<Record<string, number>> | undefined;
+    field: "passRate" | "meanValue";
+  }> = [
+    { bars: assertion.minPerScorer, field: "passRate" },
+    { bars: assertion.minMeanPerScorer, field: "meanValue" },
+  ];
+  for (const { bars, field } of perScorerBars) {
+    for (const [scorerId, min] of Object.entries(bars ?? {})) {
+      const actual = summary.perScorer[scorerId]?.[field];
       if (actual === undefined) {
         failures.push(`scorer "${scorerId}" has no result in this run`);
       } else if (actual < min) {
-        failures.push(`scorer "${scorerId}" passRate ${actual.toFixed(3)} < required ${min}`);
+        failures.push(`scorer "${scorerId}" ${field} ${actual.toFixed(3)} < required ${min}`);
       }
     }
   }
@@ -53,7 +58,22 @@ export function assertEvalSummary(summary: EvalRunSummary, assertion: EvalAssert
       );
     }
   }
+  return failures;
+}
 
+/**
+ * Throw when `summary` misses any configured bar. A no-op when every check
+ * passes:
+ *
+ *     it("support-bot meets the bar", async () => {
+ *       assertEvalSummary({ summary: await runEval(config), assertion: { minPassRate: 0.9 } });
+ *     });
+ */
+export function assertEvalSummary(params: {
+  readonly summary: EvalRunSummary;
+  readonly assertion: EvalAssertion;
+}): void {
+  const failures = evalSummaryFailures(params);
   if (failures.length > 0) {
     throw new Error(`assertEvalSummary failed:\n  - ${failures.join("\n  - ")}`);
   }

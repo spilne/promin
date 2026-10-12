@@ -18,6 +18,8 @@ import type {
 } from "./types.ts";
 
 export interface DefineEvalConfig {
+  /** Names the eval; also the dataset / target id when they are bare. */
+  readonly name: string;
   /** A dataset, or a bare array of cases (wrapped via `inlineDataset`). */
   readonly data: EvalDataset | ReadonlyArray<EvalCase>;
   /** A target, or a bare `input -> output` function (wrapped via `fnTarget`). */
@@ -27,23 +29,31 @@ export interface DefineEvalConfig {
   readonly samplesPerCase?: number;
   readonly concurrency?: number;
   readonly passThreshold?: number;
+  readonly caseTimeoutMs?: number;
   readonly clock?: WallClock;
 }
 
 export interface DefinedEval {
   readonly name: string;
-  run(): Promise<EvalRunSummary>;
+  run(opts?: { readonly signal?: AbortSignal }): Promise<EvalRunSummary>;
 }
 
 /** Assemble a runnable eval from loosely-typed config. */
-export function defineEval(name: string, config: DefineEvalConfig): DefinedEval {
-  const dataset = isEvalDataset(config.data) ? config.data : inlineDataset(config.data, name);
+export function defineEval(config: DefineEvalConfig): DefinedEval {
+  const { name } = config;
+  const dataset = isEvalDataset(config.data)
+    ? config.data
+    : inlineDataset({ cases: config.data, id: name });
   const target = isEvalTarget(config.target)
     ? config.target
-    : fnTarget(config.target, { id: name });
+    : fnTarget({
+        fn: config.target,
+        id: name,
+        ...(config.clock !== undefined && { clock: config.clock }),
+      });
   return {
     name,
-    run: () =>
+    run: (opts) =>
       runEval({
         dataset,
         target,
@@ -52,7 +62,9 @@ export function defineEval(name: string, config: DefineEvalConfig): DefinedEval 
         ...(config.samplesPerCase !== undefined && { samplesPerCase: config.samplesPerCase }),
         ...(config.concurrency !== undefined && { concurrency: config.concurrency }),
         ...(config.passThreshold !== undefined && { passThreshold: config.passThreshold }),
+        ...(config.caseTimeoutMs !== undefined && { caseTimeoutMs: config.caseTimeoutMs }),
         ...(config.clock !== undefined && { clock: config.clock }),
+        ...(opts?.signal !== undefined && { signal: opts.signal }),
       }),
   };
 }

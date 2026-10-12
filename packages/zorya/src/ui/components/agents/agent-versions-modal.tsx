@@ -16,7 +16,7 @@
 // ---------------------------------------------------------------------------
 
 import { useEffect, useMemo, useState } from "preact/hooks";
-import { api } from "../../api/client.ts";
+import { ApiError, api } from "../../api/client.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { formatRelative } from "../../lib/format.ts";
 import { inlineRoleDefinition } from "@promin/agent/browser";
@@ -51,18 +51,23 @@ export function AgentVersionsModal({ agentId, initialVersion, onClose, onPromote
   const activeVersion = versions.find((v) => v.active)?.version;
   const [promoting, setPromoting] = useState(false);
   const [promoteError, setPromoteError] = useState<string | null>(null);
-  const promote = async (version: string) => {
+  // The version an eval gate refused: an operator may promote it anyway.
+  const [gatedVersion, setGatedVersion] = useState<string | null>(null);
+  const promote = async (version: string, overrideEvalGate = false) => {
     setPromoting(true);
     setPromoteError(null);
+    setGatedVersion(null);
     try {
       const promoted = await api.promoteAgent(agentId, {
         version,
         ...(activeVersion !== undefined && { expectedVersion: activeVersion }),
+        ...(overrideEvalGate && { overrideEvalGate: true }),
       });
       refresh();
       onPromoted?.(promoted);
     } catch (err) {
       setPromoteError(err instanceof Error ? err.message : String(err));
+      if (err instanceof ApiError && err.code === "eval_gate_failed") setGatedVersion(version);
     } finally {
       setPromoting(false);
     }
@@ -130,7 +135,27 @@ export function AgentVersionsModal({ agentId, initialVersion, onClose, onPromote
         )}
 
         {error && <div class="alert alert-error m-4 text-xs">{error.message}</div>}
-        {promoteError && <div class="alert alert-error m-4 text-xs">{promoteError}</div>}
+        {promoteError && (
+          <div class="alert alert-error m-4 text-xs flex flex-wrap gap-2">
+            <span>{promoteError}</span>
+            {gatedVersion !== null && (
+              <>
+                <a class="link" href="#/evals">
+                  Run the suite
+                </a>
+                <button
+                  type="button"
+                  class="btn btn-xs btn-outline"
+                  disabled={promoting}
+                  title="Operators only: promote past the failing eval gate"
+                  onClick={() => void promote(gatedVersion, true)}
+                >
+                  Promote anyway
+                </button>
+              </>
+            )}
+          </div>
+        )}
 
         {loading && !data ? (
           <div class="p-8 text-center text-base-content/50 text-sm">Loading…</div>

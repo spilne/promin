@@ -75,6 +75,7 @@ export function managedServices(params: {
   readonly skills: Lifecycled | undefined;
   readonly fragments: Lifecycled | undefined;
   readonly knowledgeBases: Lifecycled | undefined;
+  readonly evals: Lifecycled | undefined;
   /** MCP client pool: stopping closes every client (stdio processes exit). */
   readonly mcp: Lifecycled | undefined;
   readonly workflowBuilder: Lifecycled | undefined;
@@ -91,6 +92,7 @@ export function managedServices(params: {
   if (params.knowledgeBases) {
     out.push({ name: "knowledgeBases", ...bindLifecycle(params.knowledgeBases) });
   }
+  if (params.evals) out.push({ name: "evals", ...bindLifecycle(params.evals) });
   if (params.mcp) out.push({ name: "mcp", ...bindLifecycle(params.mcp) });
   if (params.workflowBuilder) {
     out.push({ name: "workflowBuilder", ...bindLifecycle(params.workflowBuilder) });

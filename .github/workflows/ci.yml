@@ -83,6 +83,36 @@ jobs:
       - name: Tests
         run: bun run test
 
+  # The demo agents' eval suites with scripted LLMs (offline, seconds): fails
+  # when a score drops below packages/zorya/examples/evals/thresholds.json.
+  evals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+
+      - run: bun install
+
+      - name: Eval suites
+        run: bun run evals:ci --report eval-report.json
+
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-report
+          path: eval-report.json
+          if-no-files-found: ignore
+
   # Zorya worker-driven runs across real processes on Postgres (spawned hosts
   # and workers, kill -9, restarts): minutes of wall time, so its own job.
   zorya-e2e:

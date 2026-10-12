@@ -12,6 +12,7 @@ import type { WebhookDeliveryStore, WebhookSourceConfig } from "./routes/webhook
 import type { WorkersProvider } from "./routes/workers.ts";
 import type { ZoryaAgents } from "./services/agents/index.ts";
 import type { ZoryaDags } from "./services/dags/index.ts";
+import type { ZoryaEvals } from "./services/evals/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
 import type { ZoryaKnowledgeBases } from "./services/knowledge/index.ts";
 import type { ZoryaMcpServers } from "./services/mcp/index.ts";
@@ -113,6 +114,13 @@ export interface ZoryaServerConfig extends AuthConfig {
   mcp?: ZoryaMcpServers;
   /** Optional DAG gateway service. Mounts /api/dags/* routes. */
   dags?: ZoryaDags;
+  /**
+   * Eval suites, durable eval runs and promotion gates: mounts
+   * /api/evals/* (the dashboard's Evals page), and the agent promote route
+   * enforces each agent's gate. Build it over the same `agents` and
+   * in-process workflows the server mounts.
+   */
+  evals?: ZoryaEvals;
   /**
    * Optional managed knowledge bases. Mounts /api/knowledge-bases/* (the
    * dashboard's Knowledge page) and starts with the server. Pass its

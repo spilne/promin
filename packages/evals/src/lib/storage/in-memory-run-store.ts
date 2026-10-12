@@ -2,50 +2,104 @@
 // InMemoryEvalRunStore — the default, process-local EvalRunStore.
 // ---------------------------------------------------------------------------
 
-import { SystemWallClock, type WallClock } from "@promin/workflow";
-import type { EvalRunSummary } from "../types.ts";
-import { composeRunId } from "./run-id.ts";
-import type { EvalRunQuery, EvalRunStore, StoredEvalRun } from "./types.ts";
+import type { EvalCaseResult } from "../types.ts";
+import type {
+  EvalRunQuery,
+  EvalRunRecord,
+  EvalRunStore,
+  FinishEvalRunParams,
+  StartEvalRunParams,
+  StoredEvalRun,
+} from "./types.ts";
 
-export interface InMemoryEvalRunStoreConfig {
-  /** Time source for `savedAt`. Default `SystemWallClock`. */
-  readonly clock?: WallClock;
+interface Row {
+  record: Omit<EvalRunRecord, "completedCases">;
+  cases: Map<number, EvalCaseResult>;
 }
 
 export class InMemoryEvalRunStore implements EvalRunStore {
-  private readonly runs = new Map<string, StoredEvalRun>();
-  private readonly clock: WallClock;
+  private readonly runs = new Map<string, Row>();
 
-  constructor(config: InMemoryEvalRunStoreConfig = {}) {
-    this.clock = config.clock ?? SystemWallClock;
+  async start(params: StartEvalRunParams): Promise<void> {
+    if (this.runs.has(params.runId)) return;
+    this.runs.set(params.runId, {
+      record: {
+        runId: params.runId,
+        status: "running",
+        targetId: params.targetId,
+        ...(params.targetVersion !== undefined && { targetVersion: params.targetVersion }),
+        datasetId: params.datasetId,
+        ...(params.suiteId !== undefined && { suiteId: params.suiteId }),
+        ...(params.suiteVersion !== undefined && { suiteVersion: params.suiteVersion }),
+        ...(params.namespaceId !== undefined && { namespaceId: params.namespaceId }),
+        samplesPerCase: params.samplesPerCase,
+        totalCases: params.totalCases,
+        startedAt: params.startedAt,
+        ...(params.metadata !== undefined && { metadata: params.metadata }),
+      },
+      cases: new Map(),
+    });
   }
 
-  async save(summary: EvalRunSummary): Promise<string> {
-    const runId = composeRunId(summary);
-    this.runs.set(runId, { runId, summary, savedAt: this.clock.currentTimeMs() });
-    return runId;
+  async recordCase(params: {
+    readonly runId: string;
+    readonly caseIndex: number;
+    readonly result: EvalCaseResult;
+  }): Promise<void> {
+    const row = this.require(params.runId);
+    if (row.record.status !== "running") return;
+    row.cases.set(params.caseIndex, params.result);
+  }
+
+  async finish(params: FinishEvalRunParams): Promise<void> {
+    const row = this.require(params.runId);
+    if (row.record.status !== "running") return;
+    row.record = {
+      ...row.record,
+      status: params.status,
+      finishedAt: params.finishedAt,
+      ...(params.totals !== undefined && { totals: params.totals }),
+      ...(params.error !== undefined && { error: params.error }),
+    };
   }
 
   async get(runId: string): Promise<StoredEvalRun | null> {
-    return this.runs.get(runId) ?? null;
+    const row = this.runs.get(runId);
+    if (row === undefined) return null;
+    const caseResults = [...row.cases.entries()]
+      .sort(([a], [b]) => a - b)
+      .map(([, result]) => result);
+    return { ...recordOf(row), caseResults };
   }
 
-  async list(query: EvalRunQuery = {}): Promise<StoredEvalRun[]> {
-    let rows = [...this.runs.values()];
-    if (query.targetId !== undefined) {
-      rows = rows.filter((r) => r.summary.targetId === query.targetId);
-    }
-    if (query.targetVersion !== undefined) {
-      rows = rows.filter((r) => r.summary.targetVersion === query.targetVersion);
-    }
-    if (query.datasetId !== undefined) {
-      rows = rows.filter((r) => r.summary.datasetId === query.datasetId);
-    }
-    rows.sort((a, b) => b.summary.ranAt - a.summary.ranAt);
+  async list(query: EvalRunQuery = {}): Promise<EvalRunRecord[]> {
+    const rows = [...this.runs.values()]
+      .map(recordOf)
+      .filter(
+        (r) =>
+          (query.targetId === undefined || r.targetId === query.targetId) &&
+          (query.targetVersion === undefined || r.targetVersion === query.targetVersion) &&
+          (query.datasetId === undefined || r.datasetId === query.datasetId) &&
+          (query.suiteId === undefined || r.suiteId === query.suiteId) &&
+          (query.suiteVersion === undefined || r.suiteVersion === query.suiteVersion) &&
+          (query.namespaceId === undefined || r.namespaceId === query.namespaceId) &&
+          (query.status === undefined || r.status === query.status),
+      )
+      .sort((a, b) => b.startedAt - a.startedAt || (a.runId < b.runId ? 1 : -1));
     return query.limit !== undefined ? rows.slice(0, query.limit) : rows;
   }
 
   async delete(runId: string): Promise<void> {
     this.runs.delete(runId);
   }
+
+  private require(runId: string): Row {
+    const row = this.runs.get(runId);
+    if (row === undefined) throw new Error(`eval run "${runId}" not found`);
+    return row;
+  }
+}
+
+function recordOf(row: Row): EvalRunRecord {
+  return { ...row.record, completedCases: row.cases.size };
 }

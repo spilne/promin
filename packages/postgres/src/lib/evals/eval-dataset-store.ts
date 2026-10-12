@@ -21,8 +21,12 @@ export class PostgresEvalDatasetStore implements EvalDatasetStore {
     this.db = config.db;
   }
 
-  async save(datasetId: string, cases: ReadonlyArray<EvalCase>): Promise<void> {
-    const stored = [...cases];
+  async save(params: {
+    readonly datasetId: string;
+    readonly cases: ReadonlyArray<EvalCase>;
+  }): Promise<void> {
+    const { datasetId } = params;
+    const stored = [...params.cases];
     await this.db
       .insert(evalDataset)
       .values({ datasetId, cases: stored })

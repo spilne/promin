@@ -19,6 +19,7 @@
     { "path": "../postgres/tsconfig.lib.json" },
     { "path": "../sqlite/tsconfig.lib.json" },
     { "path": "../workflow/tsconfig.lib.json" },
-    { "path": "../agent/tsconfig.lib.json" }
+    { "path": "../agent/tsconfig.lib.json" },
+    { "path": "../evals/tsconfig.lib.json" }
   ]
 }

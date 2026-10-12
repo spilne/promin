@@ -196,6 +196,11 @@ export interface TraceToolCallNode {
      * failures) as a failure for highlighting purposes.
      */
     readonly failed: boolean;
+    /**
+     * The tool's result metadata (e.g. a retriever's `sources`), without
+     * a sub-agent's trace — that one is `childTrace`.
+     */
+    readonly metadata?: Readonly<Record<string, unknown>>;
   };
   /**
    * Sub-agent run trace, present on `callAgent` tool calls that
@@ -319,6 +324,7 @@ export function buildAgentTrace(rawMessages: ReadonlyArray<Message>): AgentTrace
           }
           const resultMsg = resultIm.msg as Extract<Message, { role: "tool" }>;
           const childTrace = extractChildTrace(resultMsg.metadata);
+          const metadata = resultMetadata(resultMsg.metadata);
           return {
             kind: "tool-call",
             id: call.id,
@@ -329,6 +335,7 @@ export function buildAgentTrace(rawMessages: ReadonlyArray<Message>): AgentTrace
               seq: resultIm.seq,
               content: resultMsg.content,
               failed: detectFailure(resultMsg.content),
+              ...(metadata && { metadata }),
             },
             ...(childTrace && { childTrace }),
           };
@@ -401,6 +408,15 @@ export function buildAgentTrace(rawMessages: ReadonlyArray<Message>): AgentTrace
 
 /** Key under which `callAgent` stows the sub-run trace on result metadata. */
 export const CHILD_TRACE_META_KEY = "childTrace";
+
+/** A tool result's metadata minus the sub-run trace; undefined when nothing is left. */
+function resultMetadata(
+  metadata: Readonly<Record<string, unknown>> | undefined,
+): Readonly<Record<string, unknown>> | undefined {
+  if (metadata === undefined) return undefined;
+  const { [CHILD_TRACE_META_KEY]: _childTrace, ...rest } = metadata;
+  return Object.keys(rest).length > 0 ? rest : undefined;
+}
 
 /**
  * Pull a sub-agent `AgentTrace` out of a tool-result message's metadata,

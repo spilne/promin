@@ -1,23 +1,21 @@
 // ---------------------------------------------------------------------------
 // recipeTarget — run a registered agent recipe as an EvalTarget.
 //
-// Resolves the recipe into a `LocalAgent` (via `resolveLocalAgent`),
-// invokes it per case, and maps the run through `toEvalOutput` so the
-// trace + token/cost metrics ride along. `id` / `version` come from the
+// Resolves the recipe into a `LocalAgent` (via `resolveLocalAgent`) per
+// case and runs it through `agentTarget`. `id` / `version` come from the
 // recipe, so a run is identifiable as "recipe X at version v".
 // ---------------------------------------------------------------------------
 
 import { resolveLocalAgent } from "@promin/agent";
 import type {
   AgentInput,
-  ModelCostRates,
   ModelCostRegistry,
   RegisteredAgent,
   ResolveLocalAgentDeps,
 } from "@promin/agent";
-import { SystemWallClock, type WallClock } from "@promin/workflow";
+import type { WallClock } from "@promin/workflow";
 import type { EvalCase, EvalTarget } from "../types.ts";
-import { toEvalOutput } from "./to-eval-output.ts";
+import { agentTarget } from "./agent-target.ts";
 
 export interface RecipeTargetConfig {
   readonly recipe: RegisteredAgent;
@@ -34,40 +32,16 @@ export interface RecipeTargetConfig {
 /** Build an `EvalTarget` that runs an operator-authored agent recipe. */
 export function recipeTarget(config: RecipeTargetConfig): EvalTarget {
   const { recipe, deps, costRegistry } = config;
-  const clock = config.clock ?? SystemWallClock;
-  const toInput = config.toInput ?? defaultToInput;
-  const rates: ModelCostRates | undefined =
+  const rates =
     costRegistry !== undefined && recipe.backend.type === "local"
       ? costRegistry.rates(recipe.backend.model.provider, recipe.backend.model.id)
       : undefined;
-
-  return {
+  return agentTarget({
     id: recipe.id,
     version: recipe.version,
-    async run(evalCase, opts) {
-      const startedAt = clock.currentTimeMs();
-      try {
-        const agent = await resolveLocalAgent(recipe, deps);
-        const run = await agent.invoke(
-          toInput(evalCase),
-          opts?.signal !== undefined ? { signal: opts.signal } : undefined,
-        );
-        return await toEvalOutput(run, {
-          latencyMs: clock.currentTimeMs() - startedAt,
-          ...(rates !== undefined && { rates }),
-        });
-      } catch (err) {
-        return {
-          output: undefined,
-          metrics: { latencyMs: clock.currentTimeMs() - startedAt },
-          error: err instanceof Error ? err.message : String(err),
-        };
-      }
-    },
-  };
-}
-
-function defaultToInput(evalCase: EvalCase): AgentInput {
-  const { input } = evalCase;
-  return { task: typeof input === "string" ? input : JSON.stringify(input) };
+    agent: () => resolveLocalAgent(recipe, deps),
+    ...(config.toInput !== undefined && { toInput: config.toInput }),
+    ...(rates !== undefined && { rates }),
+    ...(config.clock !== undefined && { clock: config.clock }),
+  });
 }

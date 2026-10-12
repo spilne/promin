@@ -5,7 +5,10 @@ import { mockLLM } from "@promin/agent/testing";
 import type { EvalOutput } from "../../types.ts";
 import { budget } from "../budget.ts";
 import { llmJudge } from "../llm-judge.ts";
-import { createLLMScorer } from "../llm-scorer.ts";
+import { inlineDataset } from "../../datasets/inline.ts";
+import { runEval } from "../../runner.ts";
+import { fnTarget } from "../../targets/fn-target.ts";
+import { createLLMScorer, JudgeParseError, parseJudgement } from "../llm-scorer.ts";
 import { toolCallNames, toolTrajectory } from "../tool-trajectory.ts";
 
 function out(output: unknown): EvalOutput {
@@ -38,34 +41,48 @@ describe("createLLMScorer", () => {
     expect(score.reason).toBe("solid");
   });
 
-  it("falls back to the first number, scaling an N/10 rating", async () => {
-    const scorer = createLLMScorer({
-      id: "j",
-      judge: mockLLM([{ content: "I'd give this an 8 out of 10.", finishReason: "stop" }]),
-      prompt: () => "rate it",
-    });
-    const score = await scorer.score({ input: "q", output: out("a") });
-    expect(score.value).toBe(0.8);
+  it("reads a rating with its scale: 85/100, 8 out of 10, 85%, outOf", async () => {
+    const valueOf = async (reply: string): Promise<number> =>
+      (
+        await createLLMScorer({
+          id: "j",
+          judge: mockLLM([{ content: reply, finishReason: "stop" }]),
+          prompt: () => "rate it",
+        }).score({ input: "q", output: out("a") })
+      ).value;
+    // "85/100" used to be read as 85 → 8.5 → clamped to 1.
+    expect(await valueOf("Score: 85/100")).toBe(0.85);
+    expect(await valueOf("I'd give this an 8 out of 10.")).toBe(0.8);
+    expect(await valueOf("about 85% there")).toBe(0.85);
+    expect(await valueOf('{"score": 4, "outOf": 5}')).toBe(0.8);
+    expect(await valueOf("0.7")).toBe(0.7);
+  });
+});
+
+describe("parseJudgement", () => {
+  it("refuses replies with no score or no scale instead of guessing", () => {
+    // A bare "7" used to be read as 7/10, and {"value":4} clamped to 1.
+    for (const reply of ["no idea", "Score: 7", '{"value":4}', "12/10", "3 or 0.5"]) {
+      expect(() => parseJudgement(reply)).toThrow(JudgeParseError);
+    }
   });
 
-  it("scores 0 on an unparseable reply", async () => {
-    const scorer = createLLMScorer({
-      id: "j",
-      judge: mockLLM([{ content: "no idea", finishReason: "stop" }]),
-      prompt: () => "rate it",
+  it("an unparsable reply fails the score with its reason instead of a silent 0", async () => {
+    const summary = await runEval({
+      dataset: inlineDataset({ cases: [{ id: "1", input: "q" }] }),
+      target: fnTarget({ fn: () => "a" }),
+      scorers: [
+        createLLMScorer({
+          id: "j",
+          judge: mockLLM([{ content: "Score: 7", finishReason: "stop" }]),
+          prompt: () => "rate it",
+        }),
+      ],
     });
-    const score = await scorer.score({ input: "q", output: out("a") });
-    expect(score.value).toBe(0);
-  });
-
-  it("clamps an out-of-range value to 0..1", async () => {
-    const scorer = createLLMScorer({
-      id: "j",
-      judge: mockLLM([{ content: '{"value":4}', finishReason: "stop" }]),
-      prompt: () => "x",
-    });
-    const score = await scorer.score({ input: "q", output: out("a") });
-    expect(score.value).toBe(1);
+    const score = summary.caseResults[0]?.samples[0]?.scores[0];
+    expect(score?.passed).toBe(false);
+    expect(score?.reason).toContain("unparsable judge reply");
+    expect(score?.reason).toContain("Score: 7");
   });
 });
 

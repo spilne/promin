@@ -1297,28 +1297,48 @@ export const agentInstance = pgTable(
 );
 
 // ---------------------------------------------------------------------------
-// Eval run store — persistent history of completed evaluation runs. One row
-// per run, keyed on the deterministic composeRunId; the full EvalRunSummary
-// rides in the `summary` jsonb blob, identity columns are projected out for
-// indexed filtering.
+// Eval run store — evaluation runs, written while they run. One row per run
+// (identity columns for indexed filtering, totals once finished) and one
+// row per recorded case in `eval_run_case`, keyed by dataset position.
 // ---------------------------------------------------------------------------
 
 export const evalRun = pgTable(
   "eval_run",
   {
     runId: text("run_id").primaryKey(),
+    status: text("status").notNull(),
     targetId: text("target_id").notNull(),
     targetVersion: text("target_version"),
     datasetId: text("dataset_id").notNull(),
-    ranAt: bigint("ran_at", { mode: "number" }).notNull(),
-    /** The full EvalRunSummary. */
-    summary: jsonb("summary").notNull(),
-    savedAt: bigint("saved_at", { mode: "number" }).notNull(),
+    suiteId: text("suite_id"),
+    suiteVersion: text("suite_version"),
+    namespaceId: text("namespace_id"),
+    samplesPerCase: integer("samples_per_case").notNull(),
+    totalCases: integer("total_cases").notNull(),
+    startedAt: bigint("started_at", { mode: "number" }).notNull(),
+    finishedAt: bigint("finished_at", { mode: "number" }),
+    /** EvalRunTotals, set when the run finishes. */
+    totals: jsonb("totals"),
+    error: text("error"),
+    metadata: jsonb("metadata"),
   },
   (t) => [
-    index("eval_run_target_ran_idx").on(t.targetId, t.ranAt),
-    index("eval_run_dataset_idx").on(t.datasetId),
+    index("eval_run_target_started_idx").on(t.targetId, t.startedAt),
+    index("eval_run_suite_started_idx").on(t.suiteId, t.startedAt),
   ],
+);
+
+export const evalRunCase = pgTable(
+  "eval_run_case",
+  {
+    runId: text("run_id")
+      .notNull()
+      .references(() => evalRun.runId, { onDelete: "cascade" }),
+    caseIndex: integer("case_index").notNull(),
+    /** The EvalCaseResult. */
+    result: jsonb("result").notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.runId, t.caseIndex] })],
 );
 
 // ---------------------------------------------------------------------------

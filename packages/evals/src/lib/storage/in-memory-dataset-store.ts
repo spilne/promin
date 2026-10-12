@@ -8,8 +8,11 @@ import type { EvalDatasetStore } from "./types.ts";
 export class InMemoryEvalDatasetStore implements EvalDatasetStore {
   private readonly datasets = new Map<string, EvalCase[]>();
 
-  async save(datasetId: string, cases: ReadonlyArray<EvalCase>): Promise<void> {
-    this.datasets.set(datasetId, [...cases]);
+  async save(params: {
+    readonly datasetId: string;
+    readonly cases: ReadonlyArray<EvalCase>;
+  }): Promise<void> {
+    this.datasets.set(params.datasetId, [...params.cases]);
   }
 
   async get(datasetId: string): Promise<EvalCase[] | null> {

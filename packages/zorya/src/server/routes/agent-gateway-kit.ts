@@ -311,8 +311,12 @@ export interface TenantScope {
  */
 export interface OperatorScope {
   readonly kind: "operator";
-  /** What the operator action touches. */
-  readonly resource: "secrets";
+  /**
+   * What the operator action touches: global secrets; (`eval-gate`) a
+   * promotion gate, or promoting an agent version past a failing one;
+   * (`eval-suite`) an eval suite.
+   */
+  readonly resource: "secrets" | "eval-gate" | "eval-suite";
 }
 
 /** The scope a request asks to act in. */

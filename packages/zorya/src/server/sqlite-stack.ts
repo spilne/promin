@@ -17,6 +17,10 @@ import {
   SqliteAgentInstanceRegistry,
   SqliteAgentRegistry,
   SqliteDagRegistry,
+  SqliteEvalDatasetStore,
+  SqliteEvalGateRegistry,
+  SqliteEvalRunStore,
+  SqliteEvalSuiteRegistry,
   SqliteFragmentRegistry,
   SqliteKnowledgeBaseStore,
   SqliteMemoryStore,
@@ -83,6 +87,11 @@ export interface SqliteZoryaStack {
   /** What committed agent turns spent (`ZoryaAgents.budgets.ledger`). */
   readonly usageLedger: SqliteUsageLedger;
   readonly dagRegistry: SqliteDagRegistry;
+  /** Eval suites, promotion gates, run history and stored datasets (`ZoryaEvals`). */
+  readonly evalSuiteRegistry: SqliteEvalSuiteRegistry;
+  readonly evalGateRegistry: SqliteEvalGateRegistry;
+  readonly evalRunStore: SqliteEvalRunStore;
+  readonly evalDatasetStore: SqliteEvalDatasetStore;
   /** Remote deployments that self-registered (`ZoryaServerConfig.remoteDeployments`). */
   readonly remoteDeploymentRegistry: SqliteRemoteDeploymentRegistry;
   /** Drafts and published versions of builder workflows (`ZoryaWorkflowBuilder`). */
@@ -146,6 +155,10 @@ export function createSqliteZoryaStack(config: SqliteZoryaStackConfig): SqliteZo
     pendingApprovalStore: SqlitePendingApprovalStore.make({ db: sqlite, clock }),
     usageLedger: new SqliteUsageLedger({ db: sqlite, clock }),
     dagRegistry: new SqliteDagRegistry({ db: sqlite, clock }),
+    evalSuiteRegistry: new SqliteEvalSuiteRegistry({ db: sqlite, clock }),
+    evalGateRegistry: new SqliteEvalGateRegistry({ db: sqlite, clock }),
+    evalRunStore: SqliteEvalRunStore.make({ db: sqlite }),
+    evalDatasetStore: SqliteEvalDatasetStore.make({ db: sqlite }),
     remoteDeploymentRegistry: new SqliteRemoteDeploymentRegistry({ db: sqlite, clock }),
     workflowSchemaStore: SqliteWorkflowSchemaStore.make({ db: sqlite }),
     ...(config.secretsPassphrase !== undefined && {

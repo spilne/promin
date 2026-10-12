@@ -166,6 +166,18 @@ export interface AgentInvokeOpts {
    * Ignored when `runId` is set. Omitted: every send is a new turn.
    */
   readonly turnKey?: string;
+  /**
+   * One-shot `invoke` / `stream` only: decides the turn's tool approvals
+   * instead of suspending on them (e.g. refuse every approval-gated call
+   * where nobody is there to decide). Thread sends ignore it.
+   */
+  readonly onApprovalRequired?: (call: ToolCall) => Promise<ApprovalDecision>;
+  /**
+   * One-shot `invoke` / `stream` only: the tools the turn may use, by name.
+   * Others are left out of the turn (a call to one answers as an unknown
+   * tool). Omitted: every tool of the agent.
+   */
+  readonly allowedTools?: ReadonlyArray<string>;
 }
 
 /**

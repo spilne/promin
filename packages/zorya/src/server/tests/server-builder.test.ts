@@ -13,6 +13,7 @@ import { ZoryaInsecureConfigError, type Logger, type ZoryaServerConfig } from ".
 import { ZoryaServer } from "../server.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaDags } from "../services/dags/index.ts";
+import type { ZoryaEvals } from "../services/evals/index.ts";
 import type { ZoryaKnowledgeBases } from "../services/knowledge/index.ts";
 import type { ZoryaMcpServers } from "../services/mcp/index.ts";
 import type { ZoryaFragments } from "../services/fragments/index.ts";
@@ -64,6 +65,7 @@ describe("ZoryaServer.builder()", () => {
       skills: stub<ZoryaSkills>("skills"),
       fragments: stub<ZoryaFragments>("fragments"),
       dags: stub<ZoryaDags>("dags"),
+      evals: stub<ZoryaEvals>("evals"),
       remoteWorkers: { apiKeys: ["worker-key"], wakeups: false },
       metrics: stub<MetricsProvider>("metrics"),
       workers: stub<WorkersProvider>("workers"),
@@ -96,6 +98,7 @@ describe("ZoryaServer.builder()", () => {
       .skills(expected.skills)
       .fragments(expected.fragments)
       .dags(expected.dags)
+      .evals(expected.evals)
       .remoteWorkers(expected.remoteWorkers)
       .metrics(expected.metrics)
       .workers(expected.workers)

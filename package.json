@@ -11,6 +11,7 @@
     "test": "bunx nx run-many -t test --parallel=12",
     "test:src": "bun --conditions=@promin/source test",
     "test:e2e": "bunx nx run-many -t e2e",
+    "evals:ci": "bun --conditions=@promin/source run packages/zorya/examples/evals/run-ci.ts",
     "fmt": "bunx nx run-many -t format",
     "ff": "bun run fmt",
     "format": "bun run fmt",

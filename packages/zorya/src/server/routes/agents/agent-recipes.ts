@@ -32,6 +32,7 @@ import {
   promoteRoute,
   registryCall,
 } from "../versioned-resource.ts";
+import { overrideFlag } from "../evals.ts";
 import type { AgentGatewayDeps, AgentsListResponse } from "./agent-gateway-deps.ts";
 import { agentNotFound } from "./agent-scope.ts";
 
@@ -116,6 +117,8 @@ interface CreateAgentRequest {
   readonly backend?: unknown;
   readonly metadata?: unknown;
   readonly enabled?: unknown;
+  /** Create a gated id (one whose versions were all removed) past its eval gate. */
+  readonly overrideEvalGate?: unknown;
 }
 
 interface UpdateAgentRequest {
@@ -129,6 +132,8 @@ interface UpdateAgentRequest {
   readonly publish?: unknown;
   /** The agent's kill switch. */
   readonly enabled?: unknown;
+  /** Publish past a failing eval gate (operator only). */
+  readonly overrideEvalGate?: unknown;
 }
 
 interface CloneAgentRequest {
@@ -149,6 +154,8 @@ interface CloneAgentRequest {
    * Default: global.
    */
   readonly secretsScope?: unknown;
+  /** Clone into a gated id past its eval gate (operator only). */
+  readonly overrideEvalGate?: unknown;
 }
 
 function fileManaged409(id: string): Response {
@@ -161,6 +168,28 @@ function fileManaged409(id: string): Response {
 
 function agentExists409(id: string): Response {
   return jsonError(409, "agent_exists", `Agent "${id}" already exists.`);
+}
+
+/**
+ * The promotion gate's answer for a write that would make a new, never
+ * evaluated version of `id` active (`undefined`: go ahead). A gate row
+ * outlives the agent's versions, so this also guards re-creating a
+ * deleted id.
+ */
+async function gateNewVersion(params: {
+  readonly deps: AgentGatewayDeps;
+  readonly req: Request;
+  readonly id: string;
+  readonly override: unknown;
+}): Promise<Response | undefined> {
+  const gate = params.deps.promotionGate;
+  if (!gate) return undefined;
+  return gate({
+    req: params.req,
+    agentId: params.id,
+    version: null,
+    override: overrideFlag(params.override),
+  });
 }
 
 export function createAgent(deps: AgentGatewayDeps) {
@@ -193,6 +222,9 @@ export function createAgent(deps: AgentGatewayDeps) {
     }
     const version = optionalVersion(body.version);
     const id = body.id;
+    if (await deps.registry.get({ id })) return agentExists409(id);
+    const gated = await gateNewVersion({ deps, req, id, override: body.overrideEvalGate });
+    if (gated) return gated;
     const created = await createOnly({
       register: () =>
         deps.registry.register({
@@ -252,6 +284,18 @@ export function updateAgent(deps: AgentGatewayDeps) {
       nextMetadata = mergeAgentMetadata({ existing: active.metadata, patch: patch.metadata });
     }
     const version = optionalVersion(body.version);
+    const publishes =
+      body.publish !== false &&
+      (nextBackend !== active.backend || nextMetadata !== active.metadata);
+    if (publishes && deps.promotionGate) {
+      const refused = await deps.promotionGate({
+        req,
+        agentId: id,
+        version: null,
+        override: overrideFlag(body.overrideEvalGate),
+      });
+      if (refused) return refused;
+    }
     // One write: the new version and the kill switch land together or not
     // at all (a lost compare-and-set leaves both untouched).
     const enabled = typeof body.enabled === "boolean" ? body.enabled : undefined;
@@ -277,12 +321,31 @@ export function updateAgent(deps: AgentGatewayDeps) {
   };
 }
 
-/** `DELETE /api/agents/:id[?version=]`. */
+/**
+ * `DELETE /api/agents/:id[?version=][&promote=][&overrideEvalGate=true]`.
+ * Removing the active version in favour of `promote` passes the gate.
+ */
 export function deleteAgent(deps: AgentGatewayDeps) {
+  const gate = deps.promotionGate;
   return deleteRoute({
     registry: deps.registry,
     notFound: agentNotFound,
     refuseFileManaged: true,
+    ...(gate !== undefined && {
+      beforeDelete: async ({ req, id, version }) => {
+        const url = new URL(req.url);
+        const promote = url.searchParams.get("promote");
+        if (version === undefined || !promote) return undefined;
+        const active = await deps.registry.get({ id });
+        if (active?.version !== version || promote === version) return undefined;
+        return gate({
+          req,
+          agentId: id,
+          version: promote,
+          override: url.searchParams.get("overrideEvalGate") === "true",
+        });
+      },
+    }),
   });
 }
 
@@ -295,12 +358,22 @@ export function listAgentVersions(deps: AgentGatewayDeps) {
   });
 }
 
-/** `POST /api/agents/:id/promote` `{ version }`. */
+/**
+ * `POST /api/agents/:id/promote` `{ version, overrideEvalGate? }`. With a
+ * promotion gate, a version that has not passed the agent's eval gate
+ * answers 409 `eval_gate_failed` (with the latest result) unless an
+ * operator overrides it.
+ */
 export function promoteAgent(deps: AgentGatewayDeps) {
+  const gate = deps.promotionGate;
   return promoteRoute({
     registry: deps.registry,
     notFound: agentNotFound,
     present: redactRecipe,
+    ...(gate !== undefined && {
+      beforePromote: ({ req, id, version, body }) =>
+        gate({ req, agentId: id, version, override: overrideFlag(body.overrideEvalGate) }),
+    }),
   });
 }
 
@@ -348,6 +421,14 @@ export function cloneAgent(deps: AgentGatewayDeps) {
     }
 
     const targetVersion = optionalVersion(body.targetVersion);
+    if (await deps.registry.get({ id: targetId })) return agentExists409(targetId);
+    const gated = await gateNewVersion({
+      deps,
+      req,
+      id: targetId,
+      override: body.overrideEvalGate,
+    });
+    if (gated) return gated;
     const clone = await createOnly({
       register: () =>
         deps.registry.register({
@@ -441,6 +522,8 @@ interface ExtractRoleRequest {
   readonly roleId?: unknown;
   readonly roleVersion?: unknown;
   readonly metadata?: unknown;
+  /** Publish the rebound agent version past its eval gate (operator only). */
+  readonly overrideEvalGate?: unknown;
 }
 
 export function extractRole(deps: AgentGatewayDeps) {
@@ -475,6 +558,16 @@ export function extractRole(deps: AgentGatewayDeps) {
     }
     const backend = recipe.backend;
     const inline = recipe.backend.role.inline;
+    // A gated agent's rebound version waits as a draft (run the suite on
+    // it, then promote); an override the caller may not make is refused.
+    const gated = await gateNewVersion({
+      deps,
+      req,
+      id: agentId,
+      override: body.overrideEvalGate,
+    });
+    if (gated && gated.status !== 409) return gated;
+    const publish = gated === undefined;
 
     const roleVersion = optionalVersion(body.roleVersion);
     const metadata =
@@ -500,11 +593,11 @@ export function extractRole(deps: AgentGatewayDeps) {
           id: recipe.id,
           backend: { ...backend, role: { ref: { id: role.id, version: role.version } } },
           metadata: recipe.metadata,
-          promote: true,
+          promote: publish,
           expectedActive: recipe.version,
         }),
       );
-      return json(201, { role, agent: redactRecipe(agent) });
+      return json(201, { role, agent: redactRecipe(agent), published: publish });
     } catch (err) {
       await roles.unregister({ id: role.id }).catch(() => {});
       throw err;
