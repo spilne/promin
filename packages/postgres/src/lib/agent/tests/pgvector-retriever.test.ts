@@ -152,7 +152,7 @@ describe("PgVectorRetriever", () => {
       "Deploy with the canary script.",
     ]);
 
-    await retriever.deleteSource("doc");
+    await retriever.deleteSource({ sourceId: "doc" });
     const after = await retriever.retrieve({ query: "deploy", topK: 10 });
     expect(after.map((r) => r.chunk.source.id)).toEqual(["other"]);
   });

@@ -113,8 +113,13 @@ export type {
   TokenBudget,
   ResolvedContext,
   AppendMessagesOptions,
+  ConsolidationReservation,
+  ConsolidationReservationRequest,
 } from "./memory/types.ts";
 export {
+  COMPACT_EPISODE_KIND,
+  DEFAULT_THREAD_PAGE_SIZE,
+  DISTILL_EPISODE_KIND,
   MAX_FACT_CHARS,
   MAX_STATIC_RULES_CHARS,
   MAX_WORKING_MEMORY_CHARS,
@@ -135,11 +140,21 @@ export type {
   CompactThreadOptions,
   DistillThreadOptions,
   DistillResourceOptions,
+  ConsolidationLlmCall,
   ConsolidationSignals,
   DefaultConsolidatorConfig,
+  TriggerTurnHandling,
 } from "./memory/consolidator.ts";
-export { DEFAULT_MAX_RESOURCE_FACTS, NothingToConsolidateError } from "./memory/consolidator.ts";
 export {
+  ConsolidationOutputError,
+  sweepResourceThreads,
+  DEFAULT_CONSOLIDATION_CHUNK_CHARS,
+  DEFAULT_CONSOLIDATION_SUMMARY_TOKENS,
+  DEFAULT_MAX_RESOURCE_FACTS,
+  NothingToConsolidateError,
+} from "./memory/consolidator.ts";
+export {
+  DEFAULT_DISTILL_RATE_LIMIT,
   RateLimitedConsolidator,
   ConsolidatorRateLimitError,
 } from "./memory/rate-limited-consolidator.ts";
@@ -149,15 +164,24 @@ export type {
 } from "./memory/rate-limited-consolidator.ts";
 
 export { InMemoryMemoryStore } from "./memory/in-memory-memory-store.ts";
+export {
+  isAfterThreadCursor,
+  nextThreadCursor,
+  parseThreadCursor,
+} from "./memory/thread-cursor.ts";
+export type { ThreadCursorPosition } from "./memory/thread-cursor.ts";
 export type { InMemoryMemoryStoreConfig } from "./memory/in-memory-memory-store.ts";
 
 export { capStaticRules, resolveContext } from "./memory/resolve-context.ts";
+export { loadResolvedContext, readMessageTail } from "./memory/load-context.ts";
 export type { ResolveContextInput } from "./memory/resolve-context.ts";
 
 // RAG — retrievers, chunking, the retriever tool and registry.
 export {
   DEFAULT_RETRIEVER_TOOL_NAME,
   FlatTextChunker,
+  chunkId,
+  deletesVersion,
   InMemoryKnowledgeBaseStore,
   InMemoryRetriever,
   InMemoryRetrieverRegistry,
@@ -166,17 +190,23 @@ export {
   retrieverToolName,
 } from "./rag/index.ts";
 export type {
+  ClaimedKnowledgeSource,
+  DeleteSourceRequest,
   FlatTextChunkerConfig,
+  InMemoryKnowledgeBaseStoreConfig,
   InMemoryRetrieverConfig,
   IngestibleRetriever,
+  KnowledgeBaseKey,
   KnowledgeBaseRecord,
   KnowledgeBaseStore,
   KnowledgeChunk,
   KnowledgeChunker,
   KnowledgeIngestDocument,
   KnowledgeSource,
+  KnowledgeSourceKey,
   KnowledgeSourceRecord,
   KnowledgeSourceStatus,
+  KnowledgeSourceSummary,
   ListRetrieversParams,
   RegisteredRetriever,
   RegisterRetrieverInput,
@@ -184,6 +214,7 @@ export type {
   RetrieveResult,
   Retriever,
   RetrieverFilter,
+  RetrieverKey,
   RetrieverRegistry,
   RetrieverToolConfig,
   RetrieverToolInput,

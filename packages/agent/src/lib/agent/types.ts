@@ -125,6 +125,13 @@ export type AgentEvent =
       /** The tool call's input, so an approval UI can show what will run. */
       readonly input: unknown;
     }
+  | {
+      /** A context-mode retriever failed; the turn runs without its results. */
+      readonly type: "retriever-failed";
+      readonly bindingId: string;
+      readonly error: string;
+      readonly timedOut: boolean;
+    }
   | { readonly type: "step-start"; readonly step: Step }
   | { readonly type: "step-end"; readonly step: Step }
   | { readonly type: "finish"; readonly reason: FinishReason; readonly usage: UsageStats }

@@ -79,7 +79,7 @@ export class FlatTextChunker implements KnowledgeChunker {
       .map((text) => text.trim())
       .filter((text) => text.length >= this.minSize)
       .map((text, index) => ({
-        id: `${document.id}#${index}`,
+        id: chunkId({ document, index }),
         text,
         index,
         source: {
@@ -89,9 +89,21 @@ export class FlatTextChunker implements KnowledgeChunker {
           mimeType: document.mimeType,
           tags: document.tags,
           metadata: document.metadata,
+          ...(document.version !== undefined && { version: document.version }),
         },
       }));
   }
+}
+
+/**
+ * Id of a document's `index`th chunk: `<source>#<index>`, or
+ * `<source>@<version>#<index>` for a versioned document.
+ */
+export function chunkId(params: { document: KnowledgeIngestDocument; index: number }): string {
+  const { document, index } = params;
+  return document.version === undefined
+    ? `${document.id}#${index}`
+    : `${document.id}@${document.version}#${index}`;
 }
 
 function splitLongText(params: {

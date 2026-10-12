@@ -12,15 +12,23 @@
 //   promin_memory_fact      (id PK, scope-tagged; one table for all scopes)
 //   promin_memory_episode   (id PK, scope-tagged; one table for all scopes)
 //   promin_memory_message   ((namespace_id, thread_id, seq) PK; payload as JSON)
+//   promin_memory_reservation (id PK; consolidation rate-limit window)
+//
+// Reads that grow with the data are bounded in SQL: `listThreads` pages
+// over the thread rows (message count and last activity are kept on the
+// row by `appendMessages`), episode lists filter / order / limit in the
+// query, and `resolveContext` reads only the message tail that fits.
 //
 // Single-table-per-tier with a `scope` column keeps queries simple while
 // still supporting per-scope indexes. Index naming: `<table>_<purpose>`.
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from "node:crypto";
-import { resolveContext } from "@promin/agent";
+import { DEFAULT_THREAD_PAGE_SIZE, loadResolvedContext, parseThreadCursor } from "@promin/agent";
 import type {
   AppendMessagesOptions,
+  ConsolidationReservation,
+  ConsolidationReservationRequest,
   EpisodeInput,
   EpisodeListParams,
   EpisodicRecord,
@@ -116,6 +124,8 @@ export class SqliteMemoryStore implements MemoryStore {
         inherit_from_parent INTEGER NOT NULL DEFAULT 1,
         metadata            TEXT,
         archived_at         INTEGER,
+        message_count       INTEGER NOT NULL DEFAULT 0,
+        last_active_at      INTEGER NOT NULL,
         created_at          INTEGER NOT NULL,
         updated_at          INTEGER NOT NULL,
         PRIMARY KEY (namespace_id, thread_id)
@@ -123,6 +133,21 @@ export class SqliteMemoryStore implements MemoryStore {
     `);
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${p}_thread_resource ON ${p}_thread (namespace_id, resource_id)`,
+    );
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${p}_thread_active ON ${p}_thread (namespace_id, last_active_at)`,
+    );
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS ${p}_reservation (
+        id           TEXT NOT NULL PRIMARY KEY,
+        namespace_id TEXT NOT NULL,
+        resource_id  TEXT NOT NULL,
+        kind         TEXT NOT NULL,
+        reserved_at  INTEGER NOT NULL
+      )
+    `);
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${p}_reservation_res ON ${p}_reservation (namespace_id, resource_id, kind, reserved_at)`,
     );
     this.db.run(`
       CREATE TABLE IF NOT EXISTS ${p}_fact (
@@ -156,7 +181,6 @@ export class SqliteMemoryStore implements MemoryStore {
         summary             TEXT NOT NULL,
         outcome             TEXT,
         salience            REAL NOT NULL DEFAULT 0.5,
-        embedding           TEXT,
         source_thread_id    TEXT,
         source_msg_from_seq INTEGER,
         source_msg_to_seq   INTEGER,
@@ -294,13 +318,11 @@ export class SqliteMemoryStore implements MemoryStore {
     namespaceId: string,
     params?: EpisodeListParams,
   ): Promise<EpisodicRecord[]> {
-    const rows = this.db
-      .query<DbEpisodeRow>(
-        `SELECT * FROM ${this.prefix}_episode
-         WHERE scope = ? AND namespace_id = ?`,
-      )
-      .all(SCOPE_NS, namespaceId);
-    return this.queryEpisodesPostFilter(rows, params);
+    return this.queryEpisodes({
+      where: "scope = ? AND namespace_id = ?",
+      args: [SCOPE_NS, namespaceId],
+      ...(params && { params }),
+    });
   }
 
   async deleteNamespaceEpisode(namespaceId: string, episodeId: string): Promise<void> {
@@ -427,27 +449,11 @@ export class SqliteMemoryStore implements MemoryStore {
     key: ScopedKey,
     params?: EpisodeListParams,
   ): Promise<EpisodicRecord[]> {
-    const rows = this.db
-      .query<DbEpisodeRow>(
-        `SELECT * FROM ${this.prefix}_episode
-         WHERE scope = ? AND namespace_id = ? AND resource_id = ?`,
-      )
-      .all(SCOPE_RES, key.namespaceId, key.resourceId);
-    return this.queryEpisodesPostFilter(rows, params);
-  }
-
-  async listResourceEpisodesForNamespace(
-    namespaceId: string,
-    params?: EpisodeListParams,
-  ): Promise<EpisodicRecord[]> {
-    // Same query as listResourceEpisodes minus the resource_id filter.
-    const rows = this.db
-      .query<DbEpisodeRow>(
-        `SELECT * FROM ${this.prefix}_episode
-         WHERE scope = ? AND namespace_id = ?`,
-      )
-      .all(SCOPE_RES, namespaceId);
-    return this.queryEpisodesPostFilter(rows, params);
+    return this.queryEpisodes({
+      where: "scope = ? AND namespace_id = ? AND resource_id = ?",
+      args: [SCOPE_RES, key.namespaceId, key.resourceId],
+      ...(params && { params }),
+    });
   }
 
   async deleteResourceEpisode(key: ScopedKey, episodeId: string): Promise<void> {
@@ -482,8 +488,8 @@ export class SqliteMemoryStore implements MemoryStore {
     this.db
       .query(
         `INSERT INTO ${this.prefix}_thread
-           (namespace_id, thread_id, resource_id, title, working_memory, inherit_from_parent, metadata, archived_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (namespace_id, thread_id, resource_id, title, working_memory, inherit_from_parent, metadata, archived_at, message_count, last_active_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
       )
       .run(
         row.namespaceId,
@@ -494,6 +500,7 @@ export class SqliteMemoryStore implements MemoryStore {
         row.inheritFromParent ? 1 : 0,
         JSON.stringify(row.metadata),
         row.archivedAt,
+        row.createdAt,
         row.createdAt,
         row.updatedAt,
       );
@@ -511,83 +518,64 @@ export class SqliteMemoryStore implements MemoryStore {
 
   async listThreads(params: ListThreadsParams): Promise<ThreadSummary[]> {
     const where: string[] = ["namespace_id = ?"];
-    const args: unknown[] = [params.namespaceId];
+    const args: Array<string | number | null> = [params.namespaceId];
     if (params.resourceId !== undefined) {
       where.push("resource_id = ?");
       args.push(params.resourceId);
     }
-    if (params.q && params.q.trim().length > 0) {
-      // Case-insensitive substring on thread_id. SQLite's LIKE is
-      // case-insensitive on ASCII by default; lower() the pattern + the
-      // column for safety against non-ASCII threadIds.
-      where.push("LOWER(thread_id) LIKE ?");
-      args.push(`%${params.q.trim().toLowerCase()}%`);
+    const q = params.q?.trim().toLowerCase();
+    if (q) {
+      // Case-insensitive substring on thread_id; LIKE wildcards in the
+      // search text match literally.
+      where.push("LOWER(thread_id) LIKE ? ESCAPE '\\'");
+      args.push(`%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`);
     }
-    if (params.archived === true) {
-      where.push("archived_at IS NOT NULL");
-    } else if (params.archived === false || params.archived === undefined) {
-      where.push("archived_at IS NULL");
+    for (const [k, v] of Object.entries(params.metadataFilter ?? {})) {
+      if (v === undefined) continue;
+      // Present, of the same JSON type (`true` is not `1`), and equal:
+      // json_quote of a scalar / of a container's text gives the same
+      // canonical text on both sides.
+      const path = `$.${JSON.stringify(k)}`;
+      const value = JSON.stringify(v);
+      where.push(
+        "json_type(metadata, ?) = json_type(?) AND json_quote(json_extract(metadata, ?)) = json_quote(json_extract(?, '$'))",
+      );
+      args.push(path, value, path, value);
     }
-    const rows = this.db
-      .query<DbThreadRow>(`SELECT * FROM ${this.prefix}_thread WHERE ${where.join(" AND ")}`)
-      .all(...args);
-
-    // Per-thread message-count + lastActiveAt computed via subqueries.
-    const summaries: ThreadSummary[] = rows.map((r) => {
-      const lastMsg = this.db
-        .query<{ created_at: number }>(
-          `SELECT created_at FROM ${this.prefix}_message
-           WHERE namespace_id = ? AND thread_id = ?
-           ORDER BY seq DESC LIMIT 1`,
-        )
-        .get(r.namespace_id, r.thread_id);
-      const count = this.db
-        .query<{ c: number }>(
-          `SELECT COUNT(*) AS c FROM ${this.prefix}_message
-           WHERE namespace_id = ? AND thread_id = ?`,
-        )
-        .get(r.namespace_id, r.thread_id);
-      const metadata = r.metadata ? (JSON.parse(r.metadata) as Record<string, unknown>) : {};
-      const title = r.title ?? null;
-      return {
-        namespaceId: r.namespace_id,
-        resourceId: r.resource_id,
-        threadId: r.thread_id,
-        title,
-        metadata,
-        archivedAt: r.archived_at ?? null,
-        messageCount: count?.c ?? 0,
-        lastActiveAt: lastMsg?.created_at ?? r.updated_at,
-        createdAt: r.created_at,
-      };
-    });
-
-    // Apply metadata filter in JS (subset match).
-    let filtered = summaries;
-    if (params.metadataFilter) {
-      filtered = summaries.filter((s) => {
-        for (const [k, v] of Object.entries(params.metadataFilter!)) {
-          if (s.metadata[k] !== v) return false;
-        }
-        return true;
-      });
-    }
+    if (params.archived === true) where.push("archived_at IS NOT NULL");
+    if (params.archived === false) where.push("archived_at IS NULL");
 
     const order = params.order ?? "lastActiveDesc";
-    filtered.sort((a, b) => {
-      switch (order) {
-        case "lastActiveDesc":
-          return b.lastActiveAt - a.lastActiveAt;
-        case "createdAsc":
-          return a.createdAt - b.createdAt;
-        case "createdDesc":
-          return b.createdAt - a.createdAt;
-      }
-    });
+    const keyColumn = order === "lastActiveDesc" ? "last_active_at" : "created_at";
+    const direction = order === "createdAsc" ? "ASC" : "DESC";
+    const position = parseThreadCursor(params.cursor);
+    if (position) {
+      // Keyset: strictly after the cursor's (key, thread id).
+      where.push(
+        `(${keyColumn} ${order === "createdAsc" ? ">" : "<"} ? OR (${keyColumn} = ? AND thread_id > ?))`,
+      );
+      args.push(position.key, position.key, position.threadId);
+    }
+    args.push(params.limit ?? DEFAULT_THREAD_PAGE_SIZE);
+    const rows = this.db
+      .query<DbThreadRow>(
+        // Thread id breaks ties, so pages never overlap or skip a thread.
+        `SELECT * FROM ${this.prefix}_thread WHERE ${where.join(" AND ")}
+         ORDER BY ${keyColumn} ${direction}, thread_id ASC LIMIT ?`,
+      )
+      .all(...args);
 
-    const offset = params.cursor ? parseInt(params.cursor, 10) || 0 : 0;
-    const limit = params.limit ?? filtered.length;
-    return filtered.slice(offset, offset + limit);
+    return rows.map((r) => ({
+      namespaceId: r.namespace_id,
+      resourceId: r.resource_id,
+      threadId: r.thread_id,
+      title: r.title ?? null,
+      metadata: r.metadata ? (JSON.parse(r.metadata) as Record<string, unknown>) : {},
+      archivedAt: r.archived_at ?? null,
+      messageCount: r.message_count,
+      lastActiveAt: r.last_active_at,
+      createdAt: r.created_at,
+    }));
   }
 
   async setThreadWorking(key: ThreadKey, content: string | null): Promise<void> {
@@ -731,19 +719,17 @@ export class SqliteMemoryStore implements MemoryStore {
         );
         stored.push({ ...m, seq, createdAt: now } as StoredMessage);
       });
+      // Keep the thread row's activity bookkeeping that listThreads reads.
+      this.db
+        .query(
+          `UPDATE ${this.prefix}_thread
+           SET updated_at = ?, last_active_at = ?, message_count = message_count + ?
+           WHERE namespace_id = ? AND thread_id = ?`,
+        )
+        .run(now, now, stored.length, key.namespaceId, key.threadId);
       return { stored, appended: true };
     });
-    const { stored, appended } = tx();
-    if (!appended) return stored;
-
-    // Touch updated_at on the thread row so listThreads ranks by activity.
-    this.db
-      .query(
-        `UPDATE ${this.prefix}_thread SET updated_at = ?
-         WHERE namespace_id = ? AND thread_id = ?`,
-      )
-      .run(now, key.namespaceId, key.threadId);
-
+    const { stored } = tx();
     return stored;
   }
 
@@ -797,13 +783,11 @@ export class SqliteMemoryStore implements MemoryStore {
   }
 
   async listThreadEpisodes(key: ThreadKey, params?: EpisodeListParams): Promise<EpisodicRecord[]> {
-    const rows = this.db
-      .query<DbEpisodeRow>(
-        `SELECT * FROM ${this.prefix}_episode
-         WHERE scope = ? AND namespace_id = ? AND thread_id = ?`,
-      )
-      .all(SCOPE_THR, key.namespaceId, key.threadId);
-    return this.queryEpisodesPostFilter(rows, params);
+    return this.queryEpisodes({
+      where: "scope = ? AND namespace_id = ? AND thread_id = ?",
+      args: [SCOPE_THR, key.namespaceId, key.threadId],
+      ...(params && { params }),
+    });
   }
 
   async deleteThreadEpisode(key: ThreadKey, episodeId: string): Promise<void> {
@@ -837,45 +821,75 @@ export class SqliteMemoryStore implements MemoryStore {
     tx();
   }
 
+  // --- Consolidation rate limit ---------------------------------------
+
+  async reserveConsolidation(
+    request: ConsolidationReservationRequest,
+  ): Promise<ConsolidationReservation> {
+    const t = `${this.prefix}_reservation`;
+    // One synchronous transaction: nothing interleaves between the counts
+    // and the insert.
+    const tx = this.db.transaction((): ConsolidationReservation => {
+      const now = this.clock();
+      this.db
+        .query(`DELETE FROM ${t} WHERE namespace_id = ? AND kind = ? AND reserved_at <= ?`)
+        .run(request.namespaceId, request.kind, now - request.windowMs);
+      const window = (resourceId?: string) =>
+        this.db
+          .query<{ seen: number; oldest: number | null }>(
+            `SELECT COUNT(*) AS seen, MIN(reserved_at) AS oldest FROM ${t}
+             WHERE namespace_id = ? AND kind = ?${resourceId !== undefined ? " AND resource_id = ?" : ""}`,
+          )
+          .get(
+            request.namespaceId,
+            request.kind,
+            ...(resourceId !== undefined ? [resourceId] : []),
+          ) ?? { seen: 0, oldest: null };
+      const denied = (params: {
+        scope: "resource" | "namespace";
+        row: { seen: number; oldest: number | null };
+        max: number;
+      }): ConsolidationReservation => ({
+        granted: false,
+        scope: params.scope,
+        seen: params.row.seen,
+        max: params.max,
+        retryAfterMs: Math.max(0, (params.row.oldest ?? now) + request.windowMs - now),
+      });
+      const perResource = window(request.resourceId);
+      if (perResource.seen >= request.maxPerResource) {
+        return denied({ scope: "resource", row: perResource, max: request.maxPerResource });
+      }
+      if (request.maxPerNamespace !== undefined) {
+        const perNamespace = window();
+        if (perNamespace.seen >= request.maxPerNamespace) {
+          return denied({ scope: "namespace", row: perNamespace, max: request.maxPerNamespace });
+        }
+      }
+      const id = randomUUID();
+      this.db
+        .query(
+          `INSERT INTO ${t} (id, namespace_id, resource_id, kind, reserved_at) VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run(id, request.namespaceId, request.resourceId, request.kind, now);
+      return { granted: true, reservationId: id };
+    });
+    return tx();
+  }
+
+  async releaseConsolidation(params: {
+    namespaceId: string;
+    reservationId: string;
+  }): Promise<void> {
+    this.db
+      .query(`DELETE FROM ${this.prefix}_reservation WHERE namespace_id = ? AND id = ?`)
+      .run(params.namespaceId, params.reservationId);
+  }
+
   // --- Cascade ---------------------------------------------------------
 
   async resolveContext(key: ThreadKey, budget: TokenBudget): Promise<ResolvedContext> {
-    const thread = await this.getThread(key);
-    if (!thread) {
-      throw new Error(`Thread not found: ${key.namespaceId}/${key.threadId}`);
-    }
-    const namespace = await this.getNamespace(key.namespaceId);
-    const namespaceFacts = await this.listNamespaceFacts(key.namespaceId);
-
-    const resourceId = thread.resourceId ?? key.resourceId;
-    const resource = resourceId
-      ? await this.getResource({ namespaceId: key.namespaceId, resourceId })
-      : null;
-    const resourceFacts = resourceId
-      ? await this.listResourceFacts({ namespaceId: key.namespaceId, resourceId })
-      : [];
-    const resourceEpisodes =
-      resourceId && (budget.maxEpisodeTokens ?? 0) > 0
-        ? await this.listResourceEpisodes(
-            { namespaceId: key.namespaceId, resourceId },
-            { order: "salienceDesc" },
-          )
-        : [];
-
-    const threadFacts = await this.listThreadFacts(key);
-    const messages = await this.getMessages(key);
-
-    return resolveContext({
-      namespace,
-      namespaceFacts,
-      resource,
-      resourceFacts,
-      resourceEpisodes,
-      thread,
-      threadFacts,
-      messages,
-      budget,
-    });
+    return loadResolvedContext({ store: this, key, budget });
   }
 
   // --- helpers ---------------------------------------------------------
@@ -907,7 +921,6 @@ export class SqliteMemoryStore implements MemoryStore {
       summary: input.summary,
       outcome: input.outcome ?? null,
       salience,
-      embedding: input.embedding ?? null,
       sourceThreadId: input.sourceThreadId ?? null,
       sourceMessageRange: input.sourceMessageRange ?? null,
       occurredAt: input.occurredAt ?? now,
@@ -927,10 +940,10 @@ export class SqliteMemoryStore implements MemoryStore {
       .query(
         `INSERT INTO ${this.prefix}_episode
            (id, scope, namespace_id, resource_id, thread_id,
-            summary, outcome, salience, embedding,
+            summary, outcome, salience,
             source_thread_id, source_msg_from_seq, source_msg_to_seq,
             occurred_at, created_at, metadata)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         ep.id,
@@ -941,7 +954,6 @@ export class SqliteMemoryStore implements MemoryStore {
         ep.summary,
         ep.outcome,
         ep.salience,
-        ep.embedding ? JSON.stringify(ep.embedding) : null,
         ep.sourceThreadId,
         ep.sourceMessageRange?.fromSeq ?? null,
         ep.sourceMessageRange?.toSeq ?? null,
@@ -951,28 +963,49 @@ export class SqliteMemoryStore implements MemoryStore {
       );
   }
 
-  private queryEpisodesPostFilter(
-    rows: DbEpisodeRow[],
-    params?: EpisodeListParams,
-  ): EpisodicRecord[] {
-    let out = rows.map(toEpisode);
+  /** Episodes matching `where` and `params`, filtered, ordered and limited in SQL. */
+  private queryEpisodes(query: {
+    where: string;
+    args: ReadonlyArray<string | number | null>;
+    params?: EpisodeListParams;
+  }): EpisodicRecord[] {
+    const { params } = query;
+    const where = [query.where];
+    const args: Array<string | number | null> = [...query.args];
+    if (params?.kind !== undefined) {
+      where.push("json_extract(metadata, '$.kind') = ?");
+      args.push(params.kind);
+    }
+    if (params?.sourceThreadId !== undefined) {
+      where.push("source_thread_id = ?");
+      args.push(params.sourceThreadId);
+    }
     if (params?.minSalience !== undefined) {
-      const threshold = params.minSalience;
-      out = out.filter((e) => e.salience >= threshold);
+      where.push("salience >= ?");
+      args.push(params.minSalience);
     }
     const order = params?.order ?? "salienceDesc";
-    out.sort((a, b) => {
-      switch (order) {
-        case "salienceDesc":
-          return b.salience - a.salience;
-        case "createdDesc":
-          return b.createdAt - a.createdAt;
-        case "occurredDesc":
-          return b.occurredAt - a.occurredAt;
-      }
-    });
-    if (params?.limit !== undefined) out = out.slice(0, params.limit);
-    return out;
+    const primary =
+      order === "salienceDesc"
+        ? "salience DESC"
+        : order === "createdDesc"
+          ? "created_at DESC"
+          : order === "occurredDesc"
+            ? "occurred_at DESC"
+            : "source_msg_to_seq IS NULL, source_msg_to_seq DESC";
+    let limit = "";
+    if (params?.limit !== undefined) {
+      limit = " LIMIT ?";
+      args.push(params.limit);
+    }
+    return this.db
+      .query<DbEpisodeRow>(
+        // Ties go to the later insert.
+        `SELECT * FROM ${this.prefix}_episode WHERE ${where.join(" AND ")}
+         ORDER BY ${primary}, rowid DESC${limit}`,
+      )
+      .all(...args)
+      .map(toEpisode);
   }
 }
 
@@ -1010,6 +1043,8 @@ interface DbThreadRow {
   inherit_from_parent: number;
   metadata: string | null;
   archived_at: number | null;
+  message_count: number;
+  last_active_at: number;
   created_at: number;
   updated_at: number;
 }
@@ -1031,7 +1066,6 @@ interface DbEpisodeRow {
   summary: string;
   outcome: string | null;
   salience: number;
-  embedding: string | null;
   source_thread_id: string | null;
   source_msg_from_seq: number | null;
   source_msg_to_seq: number | null;
@@ -1108,7 +1142,6 @@ function toEpisode(r: DbEpisodeRow): EpisodicRecord {
     summary: r.summary,
     outcome: r.outcome,
     salience: r.salience,
-    embedding: r.embedding ? (JSON.parse(r.embedding) as number[]) : null,
     sourceThreadId: r.source_thread_id,
     sourceMessageRange: range,
     occurredAt: r.occurred_at,

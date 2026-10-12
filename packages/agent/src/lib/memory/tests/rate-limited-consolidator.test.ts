@@ -1,17 +1,6 @@
 // ---------------------------------------------------------------------------
-// RateLimitedConsolidator — caps distill cost per (namespace, resource).
-// Pinned cases:
-//   1. under-cap → delegates straight through
-//   2. at-cap → throws ConsolidatorRateLimitError; inner not invoked
-//   3. window slides — old episodes age out, new fires allowed
-//   4. compactThread + distillResource always delegate (no rate limit on those)
-//   5. no-resourceId calls bypass the limit entirely (delegate, surface inner error)
-//   6. force: true does NOT bypass the rate limit (limit is cost-based, not dedup-based)
-//   7. counts only kind==="distill" episodes, ignoring other resource episodes
-//   8. per-namespace cap throttles tenant-wide spend even when every
-//      individual resource is under its own per-resource cap
-//   9. per-namespace cap allows distill while the namespace total is under it
-//  10. per-resource cap is checked first when both caps would trip
+// RateLimitedConsolidator — caps distill cost per (namespace, resource) and
+// per namespace, counted atomically in the memory store.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
@@ -20,268 +9,199 @@ import { InMemoryMemoryStore } from "../in-memory-memory-store.ts";
 import {
   RateLimitedConsolidator,
   ConsolidatorRateLimitError,
+  type ConsolidatorRateLimitConfig,
 } from "../rate-limited-consolidator.ts";
 import type { Consolidator, DistillThreadOptions } from "../consolidator.ts";
 import type { EpisodicRecord, ScopedKey, ThreadKey } from "../types.ts";
 
-function makeStubConsolidator() {
-  let distillCalls = 0;
-  let compactCalls = 0;
-  let distillResourceCalls = 0;
-  const inner: Consolidator = {
-    async compactThread(_key: ThreadKey): Promise<EpisodicRecord> {
-      compactCalls += 1;
-      return {} as EpisodicRecord;
-    },
-    async distillResource(_key: ScopedKey): Promise<EpisodicRecord[]> {
-      distillResourceCalls += 1;
-      return [];
-    },
-    async distillThread(_key: ThreadKey, _opts?: DistillThreadOptions) {
-      distillCalls += 1;
-      return {} as EpisodicRecord;
-    },
-  };
-  return {
-    inner,
-    counts: () => ({
-      distill: distillCalls,
-      compact: compactCalls,
-      distillResource: distillResourceCalls,
-    }),
-  };
-}
-
-async function seedDistillEpisode(
-  memory: InMemoryMemoryStore,
-  scope: { namespaceId: string; resourceId: string },
-  threadId: string,
-) {
-  return memory.appendResourceEpisode(scope, {
-    summary: "seed",
-    sourceThreadId: threadId,
-    salience: 0.5,
-    metadata: { kind: "distill" },
-  });
-}
-
 const KEY: ThreadKey = { namespaceId: "acme", resourceId: "alice", threadId: "t-1" };
 const SCOPE = { namespaceId: "acme", resourceId: "alice" };
 
+/**
+ * An inner consolidator that writes a distill episode per call (like the
+ * real one) after an optional gate, or throws when `fail` is set.
+ */
+function makeInner(params: { memory: InMemoryMemoryStore; gate?: Promise<void>; fail?: boolean }) {
+  const calls = { distill: 0, compact: 0, distillResource: 0 };
+  const inner: Consolidator = {
+    async compactThread(_key: ThreadKey): Promise<EpisodicRecord> {
+      calls.compact += 1;
+      return params.memory.appendThreadEpisode(KEY, { summary: "c" });
+    },
+    async distillResource(_key: ScopedKey): Promise<EpisodicRecord[]> {
+      calls.distillResource += 1;
+      return [];
+    },
+    async distillThread(key: ThreadKey, _opts?: DistillThreadOptions) {
+      calls.distill += 1;
+      await params.gate;
+      if (params.fail) throw new Error("llm down");
+      return params.memory.appendResourceEpisode(
+        { namespaceId: key.namespaceId, resourceId: key.resourceId! },
+        { summary: "d", sourceThreadId: key.threadId, metadata: { kind: "distill" } },
+      );
+    },
+  };
+  return { inner, calls };
+}
+
+function limited(params: {
+  memory: InMemoryMemoryStore;
+  inner: Consolidator;
+  limits: ConsolidatorRateLimitConfig;
+}): RateLimitedConsolidator {
+  return new RateLimitedConsolidator(params);
+}
+
 describe("RateLimitedConsolidator", () => {
   it("delegates when under the cap", async () => {
-    const clock = FakeWallClock.create(1_000_000);
-    const memory = new InMemoryMemoryStore({ clock });
-    const { inner, counts } = makeStubConsolidator();
-    const rl = new RateLimitedConsolidator(inner, memory, {
-      windowMs: 60_000,
-      maxDistillsPerWindow: 3,
-      clock,
-    });
-
-    await seedDistillEpisode(memory, SCOPE, "old-t");
-    await rl.distillThread(KEY);
-    expect(counts().distill).toBe(1);
+    const memory = new InMemoryMemoryStore();
+    const { inner, calls } = makeInner({ memory });
+    const rl = limited({ memory, inner, limits: { windowMs: 60_000, maxDistillsPerWindow: 2 } });
+    await rl.distillThread(KEY, { force: true });
+    expect(calls.distill).toBe(1);
   });
 
-  it("throws ConsolidatorRateLimitError at the cap; inner not invoked", async () => {
+  it("throws at the cap without invoking inner, with the store's retry-after", async () => {
     const clock = FakeWallClock.create(1_000_000);
     const memory = new InMemoryMemoryStore({ clock });
-    const { inner, counts } = makeStubConsolidator();
-    const rl = new RateLimitedConsolidator(inner, memory, {
-      windowMs: 60_000,
-      maxDistillsPerWindow: 2,
-      clock,
-    });
-
-    await seedDistillEpisode(memory, SCOPE, "t-a");
+    const { inner, calls } = makeInner({ memory });
+    const rl = limited({ memory, inner, limits: { windowMs: 60_000, maxDistillsPerWindow: 2 } });
+    await rl.distillThread(KEY, { force: true });
     clock.advance(10_000);
-    await seedDistillEpisode(memory, SCOPE, "t-b");
-
-    let caught: ConsolidatorRateLimitError | undefined;
-    try {
-      await rl.distillThread(KEY);
-    } catch (err) {
-      caught = err as ConsolidatorRateLimitError;
-    }
-    expect(caught).toBeInstanceOf(ConsolidatorRateLimitError);
-    expect(caught!.scope).toEqual({ kind: "resource", ...SCOPE });
-    expect(caught!.max).toBe(2);
-    expect(caught!.seen).toBe(2);
-    // Oldest in-window episode was the seed at t=1_000_000.
-    expect(caught!.oldestInWindowAt).toBe(1_000_000);
-    // Retry-After: oldest ages out at 1_000_000 + 60_000 = 1_060_000.
-    // Now is 1_010_000 → 50s until retry. Ceiling, min 1.
-    expect(caught!.retryAfterSeconds(clock.currentTimeMs())).toBe(50);
-    expect(counts().distill).toBe(0);
+    await rl.distillThread({ ...KEY, threadId: "t-2" });
+    const err = await rl.distillThread({ ...KEY, threadId: "t-3" }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConsolidatorRateLimitError);
+    const limit = err as ConsolidatorRateLimitError;
+    expect(limit.scope).toEqual({ kind: "resource", ...SCOPE });
+    expect(limit.seen).toBe(2);
+    expect(limit.retryAfterMs).toBe(50_000);
+    expect(limit.retryAfterSeconds()).toBe(50);
+    expect(calls.distill).toBe(2);
   });
 
-  it("window slides — old episodes age out and re-allow distill", async () => {
+  it("concurrent distills never overshoot the cap", async () => {
+    const memory = new InMemoryMemoryStore();
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    const { inner, calls } = makeInner({ memory, gate });
+    const rl = limited({ memory, inner, limits: { windowMs: 60_000, maxDistillsPerWindow: 2 } });
+    // All checks run before any inner call has written its episode: a
+    // check-then-act limiter would let all five through.
+    const runs = Array.from({ length: 5 }, (_, i) =>
+      rl.distillThread({ ...KEY, threadId: `t-${i}` }).then(
+        () => "ok",
+        (e: unknown) => (e instanceof ConsolidatorRateLimitError ? "limited" : "error"),
+      ),
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    open();
+    const outcomes = await Promise.all(runs);
+    expect(outcomes.filter((o) => o === "ok")).toHaveLength(2);
+    expect(outcomes.filter((o) => o === "limited")).toHaveLength(3);
+    expect(calls.distill).toBe(2);
+  });
+
+  it("the window slides: old distills age out", async () => {
     const clock = FakeWallClock.create(1_000_000);
     const memory = new InMemoryMemoryStore({ clock });
-    const { inner, counts } = makeStubConsolidator();
-    const rl = new RateLimitedConsolidator(inner, memory, {
-      windowMs: 60_000,
-      maxDistillsPerWindow: 1,
-      clock,
-    });
-
-    await seedDistillEpisode(memory, SCOPE, "old"); // createdAt = 1_000_000
-    await expect(rl.distillThread(KEY)).rejects.toBeInstanceOf(ConsolidatorRateLimitError);
-
-    // Advance past window — old episode (createdAt 1_000_000) is now
-    // outside [now-60s, now] (now=1_000_000+61_000=1_061_000, since=1_001_000).
-    clock.advance(61_000);
+    const { inner, calls } = makeInner({ memory });
+    const rl = limited({ memory, inner, limits: { windowMs: 60_000, maxDistillsPerWindow: 1 } });
     await rl.distillThread(KEY);
-    expect(counts().distill).toBe(1);
+    await expect(rl.distillThread({ ...KEY, threadId: "t-2" })).rejects.toBeInstanceOf(
+      ConsolidatorRateLimitError,
+    );
+    clock.advance(60_001);
+    await rl.distillThread({ ...KEY, threadId: "t-2" });
+    expect(calls.distill).toBe(2);
   });
 
-  it("compactThread + distillResource always delegate (no rate limit on those)", async () => {
-    const clock = FakeWallClock.create(1_000_000);
-    const memory = new InMemoryMemoryStore({ clock });
-    const { inner, counts } = makeStubConsolidator();
-    const rl = new RateLimitedConsolidator(inner, memory, {
-      windowMs: 60_000,
-      maxDistillsPerWindow: 0, // even at zero — these paths are unaffected
-      clock,
+  it("a failed distill gives its slot back", async () => {
+    const memory = new InMemoryMemoryStore();
+    const failing = makeInner({ memory, fail: true });
+    const rl = limited({
+      memory,
+      inner: failing.inner,
+      limits: { windowMs: 60_000, maxDistillsPerWindow: 1 },
     });
-
-    await rl.compactThread(KEY);
-    await rl.distillResource(SCOPE);
-    expect(counts().compact).toBe(1);
-    expect(counts().distillResource).toBe(1);
+    await expect(rl.distillThread(KEY)).rejects.toThrow("llm down");
+    const ok = makeInner({ memory });
+    const rl2 = limited({
+      memory,
+      inner: ok.inner,
+      limits: { windowMs: 60_000, maxDistillsPerWindow: 1 },
+    });
+    await rl2.distillThread(KEY);
+    expect(ok.calls.distill).toBe(1);
   });
 
-  it("no-resourceId calls bypass the limit (delegate to inner)", async () => {
-    const clock = FakeWallClock.create(1_000_000);
-    const memory = new InMemoryMemoryStore({ clock });
-    const { inner, counts } = makeStubConsolidator();
-    const rl = new RateLimitedConsolidator(inner, memory, {
-      windowMs: 60_000,
-      maxDistillsPerWindow: 0,
-      clock,
-    });
-
-    const noRes: ThreadKey = { namespaceId: "acme", threadId: "t-no-res" };
-    await rl.distillThread(noRes);
-    expect(counts().distill).toBe(1);
-  });
-
-  it("force: true does NOT bypass the rate limit (limit is cost-based, not dedup-based)", async () => {
-    const clock = FakeWallClock.create(1_000_000);
-    const memory = new InMemoryMemoryStore({ clock });
-    const { inner, counts } = makeStubConsolidator();
-    const rl = new RateLimitedConsolidator(inner, memory, {
-      windowMs: 60_000,
-      maxDistillsPerWindow: 1,
-      clock,
-    });
-
-    await seedDistillEpisode(memory, SCOPE, "t");
+  it("an already-distilled thread (no force) takes no slot", async () => {
+    const memory = new InMemoryMemoryStore();
+    const { inner, calls } = makeInner({ memory });
+    const rl = limited({ memory, inner, limits: { windowMs: 60_000, maxDistillsPerWindow: 1 } });
+    await rl.distillThread(KEY);
+    // Re-fires on the same thread (autoDistill after every turn) are no-ops.
+    await rl.distillThread(KEY);
+    await rl.distillThread(KEY);
+    expect(calls.distill).toBe(3);
+    // force re-distills cost a slot: the one slot is taken.
     await expect(rl.distillThread(KEY, { force: true })).rejects.toBeInstanceOf(
       ConsolidatorRateLimitError,
     );
-    expect(counts().distill).toBe(0);
   });
 
-  it("counts only kind=='distill' episodes, ignoring other resource episodes", async () => {
-    const clock = FakeWallClock.create(1_000_000);
-    const memory = new InMemoryMemoryStore({ clock });
-    const { inner, counts } = makeStubConsolidator();
-    const rl = new RateLimitedConsolidator(inner, memory, {
-      windowMs: 60_000,
-      maxDistillsPerWindow: 1,
-      clock,
-    });
-
-    // Seed two NON-distill episodes (e.g. operator-uploaded docs, manual rollups).
-    // They should not count toward the distill cap.
-    await memory.appendResourceEpisode(SCOPE, {
-      summary: "manual upload",
-      sourceThreadId: null,
-      salience: 0.5,
-      metadata: { kind: "manual" },
-    });
-    await memory.appendResourceEpisode(SCOPE, {
-      summary: "no kind",
-      sourceThreadId: null,
-      salience: 0.5,
-    });
-
-    await rl.distillThread(KEY); // first distill ever for resource → allowed
-    expect(counts().distill).toBe(1);
+  it("compactThread delegates without a limit", async () => {
+    const memory = new InMemoryMemoryStore();
+    const { inner, calls } = makeInner({ memory });
+    const rl = limited({ memory, inner, limits: { windowMs: 60_000, maxDistillsPerWindow: 0 } });
+    await rl.compactThread(KEY);
+    expect(calls.compact).toBe(1);
   });
 
-  it("per-namespace cap throttles tenant-wide spend under generous per-resource caps", async () => {
-    const clock = FakeWallClock.create(1_000_000);
-    const memory = new InMemoryMemoryStore({ clock });
-    const { inner, counts } = makeStubConsolidator();
-    const rl = new RateLimitedConsolidator(inner, memory, {
-      windowMs: 60_000,
-      maxDistillsPerWindow: 5, // generous per-resource cap
-      maxDistillsPerNamespacePerWindow: 2,
-      clock,
-    });
-
-    // Two different resources in the same namespace, one distill each.
-    // Each is well under the per-resource cap of 5, but the namespace
-    // total is at the per-namespace cap of 2.
-    await seedDistillEpisode(memory, SCOPE, "t-alice");
-    clock.advance(10_000);
-    await seedDistillEpisode(memory, { namespaceId: "acme", resourceId: "bob" }, "t-bob");
-
-    let caught: ConsolidatorRateLimitError | undefined;
-    try {
-      await rl.distillThread(KEY);
-    } catch (err) {
-      caught = err as ConsolidatorRateLimitError;
+  it("distillResource counts every thread it distills and stops at the cap", async () => {
+    const memory = new InMemoryMemoryStore();
+    for (const threadId of ["t-1", "t-2", "t-3"]) {
+      await memory.appendMessages({ ...KEY, threadId }, [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "hello" },
+      ]);
     }
-    expect(caught).toBeInstanceOf(ConsolidatorRateLimitError);
-    expect(caught!.scope).toEqual({ kind: "namespace", namespaceId: "acme" });
-    expect(caught!.max).toBe(2);
-    expect(caught!.seen).toBe(2);
-    // Oldest in-window distill across the namespace was the alice seed.
-    expect(caught!.oldestInWindowAt).toBe(1_000_000);
-    expect(counts().distill).toBe(0);
+    const { inner, calls } = makeInner({ memory });
+    const rl = limited({ memory, inner, limits: { windowMs: 60_000, maxDistillsPerWindow: 2 } });
+    const episodes = await rl.distillResource(SCOPE);
+    expect(episodes).toHaveLength(2);
+    expect(calls.distill).toBe(2);
+    // The inner sweep (uncounted) was never used.
+    expect(calls.distillResource).toBe(0);
   });
 
-  it("per-namespace cap allows distill while the namespace total is under it", async () => {
-    const clock = FakeWallClock.create(1_000_000);
-    const memory = new InMemoryMemoryStore({ clock });
-    const { inner, counts } = makeStubConsolidator();
-    const rl = new RateLimitedConsolidator(inner, memory, {
-      windowMs: 60_000,
-      maxDistillsPerWindow: 5,
-      maxDistillsPerNamespacePerWindow: 3,
-      clock,
-    });
-
-    await seedDistillEpisode(memory, SCOPE, "t-alice");
-    await seedDistillEpisode(memory, { namespaceId: "acme", resourceId: "bob" }, "t-bob");
-    // Namespace total = 2, cap 3 → allowed.
-    await rl.distillThread(KEY);
-    expect(counts().distill).toBe(1);
+  it("no-resourceId calls delegate to inner", async () => {
+    const memory = new InMemoryMemoryStore();
+    const { inner, calls } = makeInner({ memory });
+    const rl = limited({ memory, inner, limits: { windowMs: 60_000, maxDistillsPerWindow: 0 } });
+    const noRes: ThreadKey = { namespaceId: "acme", threadId: "t-1" };
+    await rl.distillThread(noRes).catch(() => undefined);
+    expect(calls.distill).toBe(1);
   });
 
-  it("checks the per-resource cap first when both caps would trip", async () => {
-    const clock = FakeWallClock.create(1_000_000);
-    const memory = new InMemoryMemoryStore({ clock });
-    const { inner } = makeStubConsolidator();
-    const rl = new RateLimitedConsolidator(inner, memory, {
-      windowMs: 60_000,
-      maxDistillsPerWindow: 1,
-      maxDistillsPerNamespacePerWindow: 1,
-      clock,
+  it("the per-namespace cap throttles tenant-wide spend", async () => {
+    const memory = new InMemoryMemoryStore();
+    const { inner, calls } = makeInner({ memory });
+    const rl = limited({
+      memory,
+      inner,
+      limits: { windowMs: 60_000, maxDistillsPerWindow: 10, maxDistillsPerNamespacePerWindow: 2 },
     });
-
-    await seedDistillEpisode(memory, SCOPE, "t");
-    let caught: ConsolidatorRateLimitError | undefined;
-    try {
-      await rl.distillThread(KEY);
-    } catch (err) {
-      caught = err as ConsolidatorRateLimitError;
-    }
-    // Both caps sit at 1 and both are hit — the resource check runs first.
-    expect(caught!.scope).toEqual({ kind: "resource", ...SCOPE });
+    await rl.distillThread({ ...KEY, resourceId: "r1" });
+    await rl.distillThread({ ...KEY, resourceId: "r2" });
+    const err = await rl
+      .distillThread({ ...KEY, resourceId: "r3" })
+      .catch((e: unknown) => e as ConsolidatorRateLimitError);
+    expect(err).toBeInstanceOf(ConsolidatorRateLimitError);
+    expect((err as ConsolidatorRateLimitError).scope).toEqual({
+      kind: "namespace",
+      namespaceId: "acme",
+    });
+    expect(calls.distill).toBe(2);
   });
 });

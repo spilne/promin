@@ -16,6 +16,8 @@
 //                                    resource.facts
 //                                    resource.workingMemory
 //                                    resource.episodes  [L2] (opt-in via budget.maxEpisodeTokens)
+//                                    thread compaction  [L2] (latest; replaces the
+//                                                             messages it folded)
 //                                    thread.facts
 //                                    thread.workingMemory
 //
@@ -25,7 +27,8 @@
 //   - resource.inheritFromParent === false →  skip namespace
 //
 // Trimming policy:
-//   - messages: drop oldest first to fit `budget.maxMessageTokens`
+//   - messages: those folded by the compaction are left out; of the rest,
+//               drop whole turns oldest first to fit `budget.maxMessageTokens`
 //   - episodes: drop lowest-salience first (tail of salience-sorted
 //               input) to fit `budget.maxEpisodeTokens`
 //   - staticRules: each scope cut to `MAX_STATIC_RULES_CHARS`
@@ -64,12 +67,18 @@ export interface ResolveContextInput {
   /** Thread row — required, since `resolveContext` is keyed on a thread. */
   readonly thread: ThreadRow;
   readonly threadFacts?: ReadonlyArray<Fact>;
+  /**
+   * The thread's latest compaction episode. Its summary is rendered as
+   * reference data, and messages up to its `sourceMessageRange.toSeq`
+   * are left out of `messages` — the summary stands in for them.
+   */
+  readonly compaction?: EpisodicRecord | null;
   readonly messages: ReadonlyArray<StoredMessage>;
   readonly budget: TokenBudget;
 }
 
 /** Default token estimator: chars/4 (rough heuristic, good enough for trim decisions). */
-function defaultEstimate(m: StoredMessage | Message): number {
+export function defaultEstimate(m: StoredMessage | Message): number {
   const len = typeof m.content === "string" ? m.content.length : 0;
   return Math.ceil(len / 4);
 }
@@ -135,6 +144,7 @@ export function resolveContext(input: ResolveContextInput): ResolvedContext {
     resourceEpisodes,
     thread,
     threadFacts,
+    compaction,
     budget,
   } = input;
 
@@ -171,6 +181,13 @@ export function resolveContext(input: ResolveContextInput): ResolvedContext {
     }
   }
 
+  const foldedThrough = compaction?.sourceMessageRange?.toSeq ?? 0;
+  if (compaction) {
+    sections.push({
+      title: `Summary of this thread's earlier messages (through message ${foldedThrough})`,
+      body: compaction.summary,
+    });
+  }
   sections.push(
     { title: "Thread Facts", body: factsBody(threadFacts) },
     { title: "Thread Working Memory", body: thread.workingMemory ?? "" },
@@ -179,8 +196,10 @@ export function resolveContext(input: ResolveContextInput): ResolvedContext {
   const instructions = rules.filter((r) => r.length > 0).join("\n\n");
   const reference = fenceReferenceData({ source: "memory", sections }) ?? "";
 
-  // Trim messages from the oldest end until total token estimate fits.
-  const messages = trimMessages(input.messages, budget);
+  // Messages the compaction folded are represented by its summary; trim
+  // the rest from the oldest end until the token estimate fits.
+  const live = input.messages.filter((m) => m.seq > foldedThrough);
+  const messages = trimMessages(live, budget);
 
   return { instructions, reference, messages };
 }

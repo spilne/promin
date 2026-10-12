@@ -21,7 +21,10 @@
 // ---------------------------------------------------------------------------
 
 import type { AgentInstanceRegistry } from "./types.ts";
-import type { MemoryStore } from "../memory/types.ts";
+import type { MemoryStore, ThreadSummary } from "../memory/types.ts";
+
+/** Threads read (and deleted) per page. */
+const WIPE_PAGE_SIZE = 200;
 
 export interface WipeAgentInstanceResult {
   readonly instanceId: string;
@@ -49,20 +52,27 @@ export async function wipeAgentInstance(deps: {
 
   // 1. Drop threads. The memory store cascades thread deletes to messages
   //    + thread-scope facts/episodes, so we don't need to walk those by hand.
-  const threads = await deps.memory.listThreads({
-    namespaceId: instance.namespaceId,
-    resourceId: instance.id,
-    limit: 100_000,
-  });
-  for (const t of threads) {
-    // listThreads is filtered by resourceId so t.resourceId always equals
-    // instance.id here, but the type still allows null — pass instance.id
-    // to keep the call site total.
-    await deps.memory.deleteThread({
-      namespaceId: t.namespaceId,
+  //    Archived threads included; each page is deleted before the next
+  //    read, so the first page is always the next one.
+  const threads: ThreadSummary[] = [];
+  for (;;) {
+    const page = await deps.memory.listThreads({
+      namespaceId: instance.namespaceId,
       resourceId: instance.id,
-      threadId: t.threadId,
+      limit: WIPE_PAGE_SIZE,
     });
+    for (const t of page) {
+      // listThreads is filtered by resourceId so t.resourceId always equals
+      // instance.id here, but the type still allows null — pass instance.id
+      // to keep the call site total.
+      await deps.memory.deleteThread({
+        namespaceId: t.namespaceId,
+        resourceId: instance.id,
+        threadId: t.threadId,
+      });
+    }
+    threads.push(...page);
+    if (page.length < WIPE_PAGE_SIZE) break;
   }
 
   // 2. Resource-scope working memory + facts + episodes. We clear working

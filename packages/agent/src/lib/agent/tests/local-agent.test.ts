@@ -17,6 +17,7 @@ import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow"
 import { ThreadNotFoundError } from "../errors.ts";
 import { LocalAgent } from "../local-agent.ts";
 import { InMemoryMemoryStore } from "../../memory/in-memory-memory-store.ts";
+import { ConsolidatorRateLimitError } from "../../memory/rate-limited-consolidator.ts";
 import { isReferenceDataMessage } from "../../reference-data.ts";
 import type { LLMProvider, LLMResponse } from "../../llm-provider.ts";
 import type { Message } from "../../message.ts";
@@ -519,9 +520,10 @@ describe("LocalAgent — autoCompact", () => {
       autoCompact: { tokenThreshold: 200, keepRecent: 1, mode: "blocking" },
     });
     const t = await agent.thread("auto-token");
-    // ONE turn only — proves the token gate fires at low message
-    // count when individual messages are large.
-    await driveTurns(t, 1);
+    // Two turns (4 messages) — the token gate fires at low message count
+    // when individual messages are large. After the first turn it fires
+    // too, but a lone turn is the kept tail: nothing to fold yet.
+    await driveTurns(t, 2);
 
     const episodes = await memory.listThreadEpisodes({
       namespaceId: "acme",
@@ -558,7 +560,7 @@ describe("LocalAgent — autoCompact", () => {
       },
     });
     const t = await agent.thread("auto-ctx");
-    await driveTurns(t, 1);
+    await driveTurns(t, 2);
 
     const episodes = await memory.listThreadEpisodes({
       namespaceId: "acme",
@@ -584,7 +586,7 @@ describe("LocalAgent — autoCompact", () => {
         messageThreshold: 100,
         when: ({ uncompactedCount }) => {
           seenSignals.push(uncompactedCount);
-          return uncompactedCount >= 4;
+          return uncompactedCount >= 5;
         },
         keepRecent: 1,
         mode: "blocking",
@@ -640,17 +642,20 @@ describe("LocalAgent — autoDistill", () => {
       }),
     };
   }
-  function envelopeLLM(): LLMProvider {
+  function envelopeLLM(calls?: { count: number }): LLMProvider {
     return {
-      chat: async () => ({
-        content: JSON.stringify({
-          summary: "thread distilled by test",
-          outcome: null,
-          salience: 0.7,
-          facts: ["user mentioned X"],
-        }),
-        finishReason: "stop",
-      }),
+      chat: async () => {
+        if (calls) calls.count += 1;
+        return {
+          content: JSON.stringify({
+            summary: "thread distilled by test",
+            outcome: null,
+            salience: 0.7,
+            facts: ["user mentioned X"],
+          }),
+          finishReason: "stop",
+        };
+      },
     };
   }
   async function driveTurns(thread: Awaited<ReturnType<LocalAgent["thread"]>>, n: number) {
@@ -693,13 +698,14 @@ describe("LocalAgent — autoDistill", () => {
   it("force: true causes auto-distill to re-run on every fire", async () => {
     const { runner } = makeRunner();
     const memory = new InMemoryMemoryStore();
+    const calls = { count: 0 };
     const agent = new LocalAgent({
       agent: { name: "support", llm: chattyLLM() },
       runner,
       memory,
       namespaceId: "acme",
       resourceId: "alice",
-      consolidatorLlm: envelopeLLM(),
+      consolidatorLlm: envelopeLLM(calls),
       autoDistill: {
         // Distill every turn from turn 2 onward.
         when: ({ totalCount }) => totalCount >= 4,
@@ -708,14 +714,16 @@ describe("LocalAgent — autoDistill", () => {
       },
     });
     const t = await agent.thread("auto-d-force");
-    // 4 turns: at turns 2, 3, 4 the predicate fires and rewrites the
-    // episode (force: true → consolidator's idempotency check is skipped).
+    // 4 turns: at turns 2, 3, 4 the predicate fires and re-distills
+    // (force: true → consolidator's idempotency check is skipped).
     await driveTurns(t, 4);
 
+    expect(calls.count).toBe(3);
     const eps = await memory.listResourceEpisodes({ namespaceId: "acme", resourceId: "alice" });
     const distillEps = eps.filter((e) => e.sourceThreadId === "auto-d-force");
-    // 3 distinct episode rows (turns 2/3/4 each wrote a fresh one).
-    expect(distillEps.length).toBe(3);
+    // Each re-distill replaces the thread's episode: one row, covering every message.
+    expect(distillEps.length).toBe(1);
+    expect(distillEps[0]!.sourceMessageRange).toEqual({ fromSeq: 1, toSeq: 8 });
   });
 
   it("`when` predicate sees lastUserMessage for goodbye-style heuristics", async () => {
@@ -801,13 +809,14 @@ describe("LocalAgent — autoDistill", () => {
     // Memory store must share the clock so episode.createdAt is in
     // the same domain as the trigger's "now".
     const memory = new InMemoryMemoryStore({ clock });
+    const calls = { count: 0 };
     const agent = new LocalAgent({
       agent: { name: "support", llm: chattyLLM(), clock },
       runner,
       memory,
       namespaceId: "acme",
       resourceId: "alice",
-      consolidatorLlm: envelopeLLM(),
+      consolidatorLlm: envelopeLLM(calls),
       // Only intervalMs is set. First call: lastDistilledAt=0 →
       // msSinceLastDistill=Infinity → trips. Subsequent calls gated
       // until 60s of wall-clock has passed.
@@ -831,13 +840,16 @@ describe("LocalAgent — autoDistill", () => {
     expect(eps.filter((e) => e.sourceThreadId === "auto-d-interval").length).toBe(1);
 
     // Turn 3 after another +35s → 65_000 since last distill → fires
-    // again (force:true so a fresh episode rather than dedup).
+    // again (force:true so a fresh episode, replacing the first).
     clock.advance(35_000);
     await (
       await t.send({ task: "turn 2" })
     ).text;
+    expect(calls.count).toBe(2);
     eps = await memory.listResourceEpisodes({ namespaceId: "acme", resourceId: "alice" });
-    expect(eps.filter((e) => e.sourceThreadId === "auto-d-interval").length).toBe(2);
+    const latest = eps.filter((e) => e.sourceThreadId === "auto-d-interval");
+    expect(latest).toHaveLength(1);
+    expect(latest[0]!.createdAt).toBe(1_065_000);
   });
 
   it("OR-composition: gates compose so any one tripping fires", async () => {
@@ -866,30 +878,21 @@ describe("LocalAgent — autoDistill", () => {
 
   it("rate-limited consolidator: auto-trigger swallows ConsolidatorRateLimitError silently", async () => {
     const { FakeWallClock } = await import("@promin/workflow");
-    const { DefaultConsolidator } = await import("../../memory/consolidator.ts");
-    const { RateLimitedConsolidator } = await import("../../memory/rate-limited-consolidator.ts");
     const clock = FakeWallClock.create(1_000_000);
     const { runner } = makeRunner();
     const memory = new InMemoryMemoryStore({ clock });
+    const limits = { windowMs: 60_000, maxDistillsPerWindow: 1 };
 
-    const inner = new DefaultConsolidator({ store: memory, llm: envelopeLLM() });
-    const consolidator = new RateLimitedConsolidator(inner, memory, {
-      windowMs: 60_000,
-      maxDistillsPerWindow: 1,
-      clock,
+    // An earlier distill took the one slot → the cap is already reached.
+    // Auto-trigger should fire, hit the rate limit, and swallow without warning.
+    await memory.reserveConsolidation({
+      namespaceId: "acme",
+      resourceId: "alice",
+      kind: "distill",
+      windowMs: limits.windowMs,
+      maxPerResource: limits.maxDistillsPerWindow,
     });
-
-    // Pre-seed one distill episode → cap is already reached. Auto-trigger
-    // should fire, hit the rate limit, and swallow without warning.
-    await memory.appendResourceEpisode(
-      { namespaceId: "acme", resourceId: "alice" },
-      {
-        summary: "seed",
-        sourceThreadId: "earlier",
-        salience: 0.5,
-        metadata: { kind: "distill" },
-      },
-    );
+    const calls = { count: 0 };
 
     const warnings: string[] = [];
     const origWarn = console.warn;
@@ -904,17 +907,23 @@ describe("LocalAgent — autoDistill", () => {
         memory,
         namespaceId: "acme",
         resourceId: "alice",
-        consolidator,
+        consolidatorLlm: envelopeLLM(calls),
+        distillRateLimit: limits,
         autoDistill: { messageThreshold: 2, mode: "blocking" },
       });
       const t = await agent.thread("auto-d-rl");
       await driveTurns(t, 1);
 
       expect(warnings.filter((w) => w.includes("autoDistill"))).toHaveLength(0);
-      // Still only the seeded episode — auto-trigger did NOT add a second.
-      const eps = await memory.listResourceEpisodes({ namespaceId: "acme", resourceId: "alice" });
-      const distillEps = eps.filter((e) => (e.metadata as { kind?: unknown }).kind === "distill");
-      expect(distillEps).toHaveLength(1);
+      // The limiter LocalAgent wires in stopped it before any LLM call.
+      expect(calls.count).toBe(0);
+      expect(
+        await memory.listResourceEpisodes({ namespaceId: "acme", resourceId: "alice" }),
+      ).toEqual([]);
+      // A manual distill hits the same limiter.
+      await expect(agent.distillThread("auto-d-rl")).rejects.toBeInstanceOf(
+        ConsolidatorRateLimitError,
+      );
     } finally {
       console.warn = origWarn;
     }

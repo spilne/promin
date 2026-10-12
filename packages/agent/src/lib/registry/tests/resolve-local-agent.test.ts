@@ -558,6 +558,23 @@ describe("resolveLocalAgent — knowledge bindings", () => {
     expect(seen.system.some((s) => s.includes("Return unopened items"))).toBe(false);
   });
 
+  it("binds a registry row of the agent's own namespace only", () => {
+    const registry = new InMemoryRetrieverRegistry([
+      { id: "handbook", namespaceId: "acme", retriever: docs() },
+    ]);
+    const resolve = (namespaceId: string) =>
+      resolveLocalAgent(withKnowledge([{ id: "handbook" }]), {
+        runner: makeRunner(),
+        llm: () => mockLLM([]),
+        tools: { search: searchTool },
+        namespaceId,
+        retrievers: registry,
+      });
+
+    expect(() => resolve("acme")).not.toThrow();
+    expect(() => resolve("beta")).toThrow(/knowledge retriever "handbook" .* for namespace "beta"/);
+  });
+
   it("context-only bindings add no tool", async () => {
     const { llm, seen } = recordingLLM();
     const agent = await resolveLocalAgent(withKnowledge([{ id: "docs", mode: "context" }]), {

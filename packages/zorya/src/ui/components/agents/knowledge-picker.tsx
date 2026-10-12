@@ -4,7 +4,9 @@
 // as a search tool, as context injected before every turn, or both.
 //
 // Ids come from GET /api/agents/_catalog/retrievers when the host wires a
-// RetrieverRegistry; "Manual id" still lets an operator bind an id the
+// RetrieverRegistry: global host-wired retrievers plus the managed knowledge
+// bases of the namespace the editor is scoped to (an agent binds the bases
+// of the namespace it runs in). "Manual id" still lets an operator bind an id the
 // catalog doesn't list (resolve then fails fast until the host wires it).
 // The recipe stores ids and per-binding options only — never the retriever.
 // ---------------------------------------------------------------------------

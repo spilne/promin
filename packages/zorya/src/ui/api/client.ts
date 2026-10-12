@@ -695,9 +695,13 @@ export const api = {
   listCatalogModels(): Promise<{ models: ModelCatalogEntryDto[] }> {
     return req<{ models: ModelCatalogEntryDto[] }>(`/api/agents/_catalog/models`);
   },
-  /** Host-wired retrievers for the agent editor's knowledge picker. */
-  listCatalogRetrievers(): Promise<RetrieversCatalogResponse> {
-    return req<RetrieversCatalogResponse>(`/api/agents/_catalog/retrievers`);
+  /**
+   * Retrievers for the agent editor's knowledge picker: the host-wired
+   * global ones, plus `namespaceId`'s knowledge bases when given.
+   */
+  listCatalogRetrievers(params: { namespaceId?: string } = {}): Promise<RetrieversCatalogResponse> {
+    const qs = params.namespaceId ? `?${kbScope({ namespaceId: params.namespaceId })}` : "";
+    return req<RetrieversCatalogResponse>(`/api/agents/_catalog/retrievers${qs}`);
   },
 
   // ---------------------------------------------------------------------
@@ -825,88 +829,114 @@ export const api = {
   },
 
   // ---------------------------------------------------------------------
-  // Knowledge bases — managed retrievers agents bind in backend.knowledge
+  // Knowledge bases — managed retrievers agents bind in backend.knowledge.
+  // Every base lives in a namespace; ingestion runs in the background (the
+  // ingest, import and reindex calls answer with the queued sources).
   // ---------------------------------------------------------------------
-  listKnowledgeBases(): Promise<KnowledgeBasesListResponse> {
-    return req<KnowledgeBasesListResponse>(`/api/knowledge-bases`);
+  listKnowledgeBases(params: { namespaceId: string }): Promise<KnowledgeBasesListResponse> {
+    return req<KnowledgeBasesListResponse>(`/api/knowledge-bases?${kbScope(params)}`);
   },
   listKnowledgeSourceAdapters(): Promise<KnowledgeSourceAdaptersResponse> {
     return req<KnowledgeSourceAdaptersResponse>(`/api/knowledge-bases/_adapters`);
   },
-  createKnowledgeBase(body: KnowledgeBaseCreateRequest): Promise<KnowledgeBase> {
-    return req<KnowledgeBase>(`/api/knowledge-bases`, {
+  createKnowledgeBase(params: {
+    namespaceId: string;
+    body: KnowledgeBaseCreateRequest;
+  }): Promise<KnowledgeBase> {
+    return req<KnowledgeBase>(`/api/knowledge-bases?${kbScope(params)}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(params.body),
     });
   },
-  updateKnowledgeBase(id: string, body: KnowledgeBasePatchRequest): Promise<KnowledgeBase> {
-    return req<KnowledgeBase>(`/api/knowledge-bases/${encodeURIComponent(id)}`, {
+  updateKnowledgeBase(params: {
+    namespaceId: string;
+    id: string;
+    body: KnowledgeBasePatchRequest;
+  }): Promise<KnowledgeBase> {
+    return req<KnowledgeBase>(`${kbPath(params)}?${kbScope(params)}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(params.body),
     });
   },
-  deleteKnowledgeBase(id: string, opts: { force?: boolean } = {}): Promise<void> {
-    const qs = opts.force ? "?force=true" : "";
-    return req<void>(`/api/knowledge-bases/${encodeURIComponent(id)}${qs}`, { method: "DELETE" });
+  deleteKnowledgeBase(params: { namespaceId: string; id: string; force?: boolean }): Promise<void> {
+    const force = params.force ? "&force=true" : "";
+    return req<void>(`${kbPath(params)}?${kbScope(params)}${force}`, { method: "DELETE" });
   },
-  listKnowledgeSources(id: string): Promise<KnowledgeSourcesResponse> {
-    return req<KnowledgeSourcesResponse>(`/api/knowledge-bases/${encodeURIComponent(id)}/sources`);
+  listKnowledgeSources(params: {
+    namespaceId: string;
+    id: string;
+  }): Promise<KnowledgeSourcesResponse> {
+    return req<KnowledgeSourcesResponse>(`${kbPath(params)}/sources?${kbScope(params)}`);
   },
-  ingestKnowledgeSource(
-    id: string,
-    body: KnowledgeSourceCreateRequest,
-  ): Promise<KnowledgeSourceSummary> {
-    return req<KnowledgeSourceSummary>(`/api/knowledge-bases/${encodeURIComponent(id)}/sources`, {
+  ingestKnowledgeSource(params: {
+    namespaceId: string;
+    id: string;
+    body: KnowledgeSourceCreateRequest;
+  }): Promise<KnowledgeSourceSummary> {
+    return req<KnowledgeSourceSummary>(`${kbPath(params)}/sources?${kbScope(params)}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(params.body),
     });
   },
-  importKnowledgeSources(
-    id: string,
-    body: KnowledgeSourceImportRequest,
-  ): Promise<KnowledgeSourcesImportResponse> {
+  importKnowledgeSources(params: {
+    namespaceId: string;
+    id: string;
+    body: KnowledgeSourceImportRequest;
+  }): Promise<KnowledgeSourcesImportResponse> {
     return req<KnowledgeSourcesImportResponse>(
-      `/api/knowledge-bases/${encodeURIComponent(id)}/sources/import`,
+      `${kbPath(params)}/sources/import?${kbScope(params)}`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify(params.body),
       },
     );
   },
-  reindexKnowledgeSource(id: string, sourceId: string): Promise<KnowledgeSourceSummary> {
+  reindexKnowledgeSource(params: {
+    namespaceId: string;
+    id: string;
+    sourceId: string;
+  }): Promise<KnowledgeSourceSummary> {
     return req<KnowledgeSourceSummary>(
-      `/api/knowledge-bases/${encodeURIComponent(id)}/sources/${encodeURIComponent(sourceId)}/reindex`,
+      `${kbPath(params)}/sources/${encodeURIComponent(params.sourceId)}/reindex?${kbScope(params)}`,
       { method: "POST" },
     );
   },
-  deleteKnowledgeSource(id: string, sourceId: string): Promise<void> {
+  deleteKnowledgeSource(params: {
+    namespaceId: string;
+    id: string;
+    sourceId: string;
+  }): Promise<void> {
     return req<void>(
-      `/api/knowledge-bases/${encodeURIComponent(id)}/sources/${encodeURIComponent(sourceId)}`,
+      `${kbPath(params)}/sources/${encodeURIComponent(params.sourceId)}?${kbScope(params)}`,
       { method: "DELETE" },
     );
   },
-  listKnowledgeChunks(
-    id: string,
-    params: { sourceId?: string; limit?: number; offset?: number } = {},
-  ): Promise<KnowledgeChunksResponse> {
-    const qs = new URLSearchParams();
+  listKnowledgeChunks(params: {
+    namespaceId: string;
+    id: string;
+    sourceId?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<KnowledgeChunksResponse> {
+    const qs = new URLSearchParams({ namespaceId: params.namespaceId });
     if (params.sourceId !== undefined) qs.set("sourceId", params.sourceId);
     if (params.limit !== undefined) qs.set("limit", String(params.limit));
     if (params.offset !== undefined) qs.set("offset", String(params.offset));
-    const suffix = qs.toString() ? `?${qs.toString()}` : "";
-    return req<KnowledgeChunksResponse>(
-      `/api/knowledge-bases/${encodeURIComponent(id)}/chunks${suffix}`,
-    );
+    return req<KnowledgeChunksResponse>(`${kbPath(params)}/chunks?${qs.toString()}`);
   },
-  searchKnowledgeBase(id: string, body: KnowledgeSearchRequest): Promise<KnowledgeSearchResponse> {
-    return req<KnowledgeSearchResponse>(`/api/knowledge-bases/${encodeURIComponent(id)}/search`, {
+  searchKnowledgeBase(params: {
+    namespaceId: string;
+    id: string;
+    body: KnowledgeSearchRequest;
+  }): Promise<KnowledgeSearchResponse> {
+    return req<KnowledgeSearchResponse>(`${kbPath(params)}/search?${kbScope(params)}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(params.body),
     });
   },
 
@@ -1521,6 +1551,16 @@ export interface SecretsListResponse {
 export interface SecretsCreateResponse {
   scope: SecretScopeWire;
   key: string;
+}
+
+/** `namespaceId=…` query of a knowledge-base route. */
+function kbScope(params: { namespaceId: string }): string {
+  return new URLSearchParams({ namespaceId: params.namespaceId }).toString();
+}
+
+/** Path of one knowledge base. */
+function kbPath(params: { id: string }): string {
+  return `/api/knowledge-bases/${encodeURIComponent(params.id)}`;
 }
 
 function scopeToQuery(scope: SecretScopeWire): string {

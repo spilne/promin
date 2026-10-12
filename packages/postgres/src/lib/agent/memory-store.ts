@@ -11,15 +11,21 @@
 //
 // Timestamps are millisecond unix epochs (BIGINT) for clock-parity with
 // the SQLite implementation. Booleans are real BOOLEANs in PG; metadata
-// and embedding are JSONB so containment queries land cheaply when we
-// need them.
+// is JSONB so filters on it run in SQL.
+//
+// Reads that grow with the data are bounded in SQL: `listThreads` pages
+// over the thread rows (message count and last activity are kept on the
+// row by `appendMessages`), episode lists filter / order / limit in the
+// query, and `resolveContext` reads only the message tail that fits.
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, isNotNull, isNull, sql } from "drizzle-orm";
-import { resolveContext } from "@promin/agent";
+import { and, asc, desc, eq, gte, isNotNull, isNull, lt, sql, type SQL } from "drizzle-orm";
+import { DEFAULT_THREAD_PAGE_SIZE, loadResolvedContext, parseThreadCursor } from "@promin/agent";
 import type {
   AppendMessagesOptions,
+  ConsolidationReservation,
+  ConsolidationReservationRequest,
   EpisodeInput,
   EpisodeListParams,
   EpisodicRecord,
@@ -45,6 +51,7 @@ import type {
 } from "@promin/agent";
 import type { DrizzleDb } from "@spilne/perfect-postgres";
 import {
+  agentConsolidationReservation,
   agentEpisode,
   agentFact,
   agentMessage,
@@ -183,11 +190,10 @@ export class PostgresMemoryStore implements MemoryStore {
     namespaceId: string,
     params?: EpisodeListParams,
   ): Promise<EpisodicRecord[]> {
-    const rows = await this.db
-      .select()
-      .from(agentEpisode)
-      .where(and(eq(agentEpisode.scope, SCOPE_NS), eq(agentEpisode.namespaceId, namespaceId)));
-    return queryEpisodesPostFilter(rows, params);
+    return this.queryEpisodes(
+      [eq(agentEpisode.scope, SCOPE_NS), eq(agentEpisode.namespaceId, namespaceId)],
+      params,
+    );
   }
 
   async deleteNamespaceEpisode(namespaceId: string, episodeId: string): Promise<void> {
@@ -327,29 +333,14 @@ export class PostgresMemoryStore implements MemoryStore {
     key: ScopedKey,
     params?: EpisodeListParams,
   ): Promise<EpisodicRecord[]> {
-    const rows = await this.db
-      .select()
-      .from(agentEpisode)
-      .where(
-        and(
-          eq(agentEpisode.scope, SCOPE_RES),
-          eq(agentEpisode.namespaceId, key.namespaceId),
-          eq(agentEpisode.resourceId, key.resourceId),
-        ),
-      );
-    return queryEpisodesPostFilter(rows, params);
-  }
-
-  async listResourceEpisodesForNamespace(
-    namespaceId: string,
-    params?: EpisodeListParams,
-  ): Promise<EpisodicRecord[]> {
-    // Same query as listResourceEpisodes minus the resource_id filter.
-    const rows = await this.db
-      .select()
-      .from(agentEpisode)
-      .where(and(eq(agentEpisode.scope, SCOPE_RES), eq(agentEpisode.namespaceId, namespaceId)));
-    return queryEpisodesPostFilter(rows, params);
+    return this.queryEpisodes(
+      [
+        eq(agentEpisode.scope, SCOPE_RES),
+        eq(agentEpisode.namespaceId, key.namespaceId),
+        eq(agentEpisode.resourceId, key.resourceId),
+      ],
+      params,
+    );
   }
 
   async deleteResourceEpisode(key: ScopedKey, episodeId: string): Promise<void> {
@@ -394,6 +385,8 @@ export class PostgresMemoryStore implements MemoryStore {
       inheritFromParent: row.inheritFromParent,
       metadata: row.metadata as Record<string, unknown>,
       archivedAt: row.archivedAt,
+      messageCount: 0,
+      lastActiveAt: row.createdAt,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
     });
@@ -413,84 +406,54 @@ export class PostgresMemoryStore implements MemoryStore {
   }
 
   async listThreads(params: ListThreadsParams): Promise<ThreadSummary[]> {
-    const conditions = [eq(agentThread.namespaceId, params.namespaceId)];
+    const conditions: SQL[] = [eq(agentThread.namespaceId, params.namespaceId)];
     if (params.resourceId !== undefined) {
       conditions.push(eq(agentThread.resourceId, params.resourceId));
     }
-    if (params.q && params.q.trim().length > 0) {
-      const needle = `%${params.q.trim().toLowerCase()}%`;
+    const q = params.q?.trim().toLowerCase();
+    if (q) {
+      const needle = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`;
       conditions.push(sql`LOWER(${agentThread.threadId}) LIKE ${needle}`);
     }
-    if (params.archived === true) {
-      conditions.push(isNotNull(agentThread.archivedAt));
-    } else {
-      conditions.push(isNull(agentThread.archivedAt));
+    for (const [k, v] of Object.entries(params.metadataFilter ?? {})) {
+      if (v === undefined) continue;
+      conditions.push(sql`(${agentThread.metadata} -> ${k}) = ${JSON.stringify(v)}::jsonb`);
     }
+    if (params.archived === true) conditions.push(isNotNull(agentThread.archivedAt));
+    if (params.archived === false) conditions.push(isNull(agentThread.archivedAt));
 
+    const order = params.order ?? "lastActiveDesc";
+    const keyColumn = order === "lastActiveDesc" ? agentThread.lastActiveAt : agentThread.createdAt;
+    const position = parseThreadCursor(params.cursor);
+    if (position) {
+      // Keyset: strictly after the cursor's (key, thread id).
+      const beyond =
+        order === "createdAsc"
+          ? sql`${keyColumn} > ${position.key}`
+          : sql`${keyColumn} < ${position.key}`;
+      conditions.push(
+        sql`(${beyond} OR (${keyColumn} = ${position.key} AND ${agentThread.threadId} > ${position.threadId}))`,
+      );
+    }
     const rows = await this.db
       .select()
       .from(agentThread)
-      .where(and(...conditions));
+      .where(and(...conditions))
+      // Thread id breaks ties, so pages never overlap or skip a thread.
+      .orderBy(order === "createdAsc" ? asc(keyColumn) : desc(keyColumn), asc(agentThread.threadId))
+      .limit(params.limit ?? DEFAULT_THREAD_PAGE_SIZE);
 
-    // Per-thread message-count + lastActiveAt. Mirrors the SQLite N+1
-    // pattern; can be folded into a single CTE later if it shows up hot.
-    const summaries: ThreadSummary[] = await Promise.all(
-      rows.map(async (r) => {
-        const lastMsgRows = await this.db
-          .select({ createdAt: agentMessage.createdAt })
-          .from(agentMessage)
-          .where(
-            and(eq(agentMessage.namespaceId, r.namespaceId), eq(agentMessage.threadId, r.threadId)),
-          )
-          .orderBy(desc(agentMessage.seq))
-          .limit(1);
-        const countRows = await this.db
-          .select({ c: sql<number>`COUNT(*)::int` })
-          .from(agentMessage)
-          .where(
-            and(eq(agentMessage.namespaceId, r.namespaceId), eq(agentMessage.threadId, r.threadId)),
-          );
-        const metadata = (r.metadata as Record<string, unknown> | null) ?? {};
-        const title = r.title ?? null;
-        return {
-          namespaceId: r.namespaceId,
-          resourceId: r.resourceId,
-          threadId: r.threadId,
-          title,
-          metadata,
-          archivedAt: r.archivedAt,
-          messageCount: countRows[0]?.c ?? 0,
-          lastActiveAt: lastMsgRows[0]?.createdAt ?? r.updatedAt,
-          createdAt: r.createdAt,
-        };
-      }),
-    );
-
-    let filtered = summaries;
-    if (params.metadataFilter) {
-      filtered = summaries.filter((s) => {
-        for (const [k, v] of Object.entries(params.metadataFilter!)) {
-          if (s.metadata[k] !== v) return false;
-        }
-        return true;
-      });
-    }
-
-    const order = params.order ?? "lastActiveDesc";
-    filtered.sort((a, b) => {
-      switch (order) {
-        case "lastActiveDesc":
-          return b.lastActiveAt - a.lastActiveAt;
-        case "createdAsc":
-          return a.createdAt - b.createdAt;
-        case "createdDesc":
-          return b.createdAt - a.createdAt;
-      }
-    });
-
-    const offset = params.cursor ? parseInt(params.cursor, 10) || 0 : 0;
-    const limit = params.limit ?? filtered.length;
-    return filtered.slice(offset, offset + limit);
+    return rows.map((r) => ({
+      namespaceId: r.namespaceId,
+      resourceId: r.resourceId,
+      threadId: r.threadId,
+      title: r.title ?? null,
+      metadata: (r.metadata as Record<string, unknown> | null) ?? {},
+      archivedAt: r.archivedAt,
+      messageCount: r.messageCount,
+      lastActiveAt: r.lastActiveAt,
+      createdAt: r.createdAt,
+    }));
   }
 
   async setThreadWorking(key: ThreadKey, content: string | null): Promise<void> {
@@ -646,10 +609,14 @@ export class PostgresMemoryStore implements MemoryStore {
         await tx.insert(agentMessage).values(values);
       }
 
-      // Touch updated_at on the thread row so listThreads ranks by activity.
+      // Keep the thread row's activity bookkeeping that listThreads reads.
       await tx
         .update(agentThread)
-        .set({ updatedAt: now })
+        .set({
+          updatedAt: now,
+          lastActiveAt: now,
+          messageCount: sql`${agentThread.messageCount} + ${values.length}`,
+        })
         .where(
           and(eq(agentThread.namespaceId, key.namespaceId), eq(agentThread.threadId, key.threadId)),
         );
@@ -721,17 +688,14 @@ export class PostgresMemoryStore implements MemoryStore {
   }
 
   async listThreadEpisodes(key: ThreadKey, params?: EpisodeListParams): Promise<EpisodicRecord[]> {
-    const rows = await this.db
-      .select()
-      .from(agentEpisode)
-      .where(
-        and(
-          eq(agentEpisode.scope, SCOPE_THR),
-          eq(agentEpisode.namespaceId, key.namespaceId),
-          eq(agentEpisode.threadId, key.threadId),
-        ),
-      );
-    return queryEpisodesPostFilter(rows, params);
+    return this.queryEpisodes(
+      [
+        eq(agentEpisode.scope, SCOPE_THR),
+        eq(agentEpisode.namespaceId, key.namespaceId),
+        eq(agentEpisode.threadId, key.threadId),
+      ],
+      params,
+    );
   }
 
   async deleteThreadEpisode(key: ThreadKey, episodeId: string): Promise<void> {
@@ -783,48 +747,135 @@ export class PostgresMemoryStore implements MemoryStore {
     });
   }
 
-  // --- Cascade ---------------------------------------------------------
+  // --- Consolidation rate limit ---------------------------------------
 
-  async resolveContext(key: ThreadKey, budget: TokenBudget): Promise<ResolvedContext> {
-    const thread = await this.getThread(key);
-    if (!thread) {
-      throw new Error(`Thread not found: ${key.namespaceId}/${key.threadId}`);
-    }
-    const namespace = await this.getNamespace(key.namespaceId);
-    const namespaceFacts = await this.listNamespaceFacts(key.namespaceId);
-
-    const resourceId = thread.resourceId ?? key.resourceId;
-    const resource = resourceId
-      ? await this.getResource({ namespaceId: key.namespaceId, resourceId })
-      : null;
-    const resourceFacts = resourceId
-      ? await this.listResourceFacts({ namespaceId: key.namespaceId, resourceId })
-      : [];
-    const resourceEpisodes =
-      resourceId && (budget.maxEpisodeTokens ?? 0) > 0
-        ? await this.listResourceEpisodes(
-            { namespaceId: key.namespaceId, resourceId },
-            { order: "salienceDesc" },
-          )
-        : [];
-
-    const threadFacts = await this.listThreadFacts(key);
-    const messages = await this.getMessages(key);
-
-    return resolveContext({
-      namespace,
-      namespaceFacts,
-      resource,
-      resourceFacts,
-      resourceEpisodes,
-      thread,
-      threadFacts,
-      messages,
-      budget,
+  async reserveConsolidation(
+    request: ConsolidationReservationRequest,
+  ): Promise<ConsolidationReservation> {
+    const r = agentConsolidationReservation;
+    // The window is measured on the database clock: every replica counts
+    // the same reservations. A transaction-scoped advisory lock per
+    // (namespace, kind) makes count-then-insert atomic.
+    return this.db.transaction(async (tx) => {
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify(["consolidation", request.namespaceId, request.kind])}, 0))`,
+      );
+      const nowRows = await tx.execute(
+        sql`SELECT (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint AS now`,
+      );
+      const now = Number((nowRows as unknown as Array<{ now: string | number }>)[0]!.now);
+      const since = now - request.windowMs;
+      await tx
+        .delete(r)
+        .where(
+          and(
+            eq(r.namespaceId, request.namespaceId),
+            eq(r.kind, request.kind),
+            lt(r.reservedAt, since + 1),
+          ),
+        );
+      const window = (resourceId?: string) =>
+        tx
+          .select({
+            seen: sql<number>`COUNT(*)::int`,
+            oldest: sql<string | null>`MIN(${r.reservedAt})`,
+          })
+          .from(r)
+          .where(
+            and(
+              eq(r.namespaceId, request.namespaceId),
+              eq(r.kind, request.kind),
+              ...(resourceId !== undefined ? [eq(r.resourceId, resourceId)] : []),
+            ),
+          );
+      const denied = (params: {
+        scope: "resource" | "namespace";
+        row: { seen: number; oldest: string | null };
+        max: number;
+      }): ConsolidationReservation => ({
+        granted: false,
+        scope: params.scope,
+        seen: params.row.seen,
+        max: params.max,
+        retryAfterMs: Math.max(0, Number(params.row.oldest ?? now) + request.windowMs - now),
+      });
+      const [perResource] = await window(request.resourceId);
+      if (perResource!.seen >= request.maxPerResource) {
+        return denied({ scope: "resource", row: perResource!, max: request.maxPerResource });
+      }
+      if (request.maxPerNamespace !== undefined) {
+        const [perNamespace] = await window();
+        if (perNamespace!.seen >= request.maxPerNamespace) {
+          return denied({ scope: "namespace", row: perNamespace!, max: request.maxPerNamespace });
+        }
+      }
+      const id = randomUUID();
+      await tx.insert(r).values({
+        id,
+        namespaceId: request.namespaceId,
+        resourceId: request.resourceId,
+        kind: request.kind,
+        reservedAt: now,
+      });
+      return { granted: true, reservationId: id };
     });
   }
 
+  async releaseConsolidation(params: {
+    namespaceId: string;
+    reservationId: string;
+  }): Promise<void> {
+    await this.db
+      .delete(agentConsolidationReservation)
+      .where(
+        and(
+          eq(agentConsolidationReservation.namespaceId, params.namespaceId),
+          eq(agentConsolidationReservation.id, params.reservationId),
+        ),
+      );
+  }
+
+  // --- Cascade ---------------------------------------------------------
+
+  async resolveContext(key: ThreadKey, budget: TokenBudget): Promise<ResolvedContext> {
+    return loadResolvedContext({ store: this, key, budget });
+  }
+
   // --- helpers ---------------------------------------------------------
+
+  /** Episodes matching `scoped` and `params`, filtered, ordered and limited in SQL. */
+  private async queryEpisodes(
+    scoped: SQL[],
+    params?: EpisodeListParams,
+  ): Promise<EpisodicRecord[]> {
+    const conditions = [...scoped];
+    if (params?.kind !== undefined) {
+      conditions.push(sql`${agentEpisode.metadata} ->> 'kind' = ${params.kind}`);
+    }
+    if (params?.sourceThreadId !== undefined) {
+      conditions.push(eq(agentEpisode.sourceThreadId, params.sourceThreadId));
+    }
+    if (params?.minSalience !== undefined) {
+      conditions.push(gte(agentEpisode.salience, params.minSalience));
+    }
+    const order = params?.order ?? "salienceDesc";
+    const primary =
+      order === "salienceDesc"
+        ? desc(agentEpisode.salience)
+        : order === "createdDesc"
+          ? desc(agentEpisode.createdAt)
+          : order === "occurredDesc"
+            ? desc(agentEpisode.occurredAt)
+            : sql`${agentEpisode.sourceMsgToSeq} DESC NULLS LAST`;
+    let q = this.db
+      .select()
+      .from(agentEpisode)
+      .where(and(...conditions))
+      // Ties go to the later insert.
+      .orderBy(primary, desc(agentEpisode.seq));
+    if (params?.limit !== undefined) q = q.limit(params.limit) as typeof q;
+    return (await q).map(toEpisode);
+  }
 
   private async requireThread(key: ThreadKey): Promise<ThreadRow> {
     const row = await this.getThread(key);
@@ -853,7 +904,6 @@ export class PostgresMemoryStore implements MemoryStore {
       summary: input.summary,
       outcome: input.outcome ?? null,
       salience,
-      embedding: input.embedding ?? null,
       sourceThreadId: input.sourceThreadId ?? null,
       sourceMessageRange: input.sourceMessageRange ?? null,
       occurredAt: input.occurredAt ?? now,
@@ -878,7 +928,6 @@ export class PostgresMemoryStore implements MemoryStore {
       summary: ep.summary,
       outcome: ep.outcome,
       salience: ep.salience,
-      embedding: ep.embedding ? (ep.embedding as unknown as Record<string, unknown>) : null,
       sourceThreadId: ep.sourceThreadId,
       sourceMsgFromSeq: ep.sourceMessageRange?.fromSeq ?? null,
       sourceMsgToSeq: ep.sourceMessageRange?.toSeq ?? null,
@@ -944,7 +993,6 @@ interface DbEpisodeRow {
   summary: string;
   outcome: string | null;
   salience: number;
-  embedding: unknown;
   sourceThreadId: string | null;
   sourceMsgFromSeq: number | null;
   sourceMsgToSeq: number | null;
@@ -1010,43 +1058,17 @@ function toEpisode(r: DbEpisodeRow): EpisodicRecord {
     r.sourceMsgFromSeq !== null && r.sourceMsgToSeq !== null
       ? { fromSeq: r.sourceMsgFromSeq, toSeq: r.sourceMsgToSeq }
       : null;
-  const embedding = r.embedding as number[] | null;
   return {
     id: r.id,
     summary: r.summary,
     outcome: r.outcome,
     salience: r.salience,
-    embedding,
     sourceThreadId: r.sourceThreadId,
     sourceMessageRange: range,
     occurredAt: r.occurredAt,
     createdAt: r.createdAt,
     metadata: (r.metadata as Record<string, unknown>) ?? {},
   };
-}
-
-function queryEpisodesPostFilter(
-  rows: DbEpisodeRow[],
-  params?: EpisodeListParams,
-): EpisodicRecord[] {
-  let out = rows.map(toEpisode);
-  if (params?.minSalience !== undefined) {
-    const threshold = params.minSalience;
-    out = out.filter((e) => e.salience >= threshold);
-  }
-  const order = params?.order ?? "salienceDesc";
-  out.sort((a, b) => {
-    switch (order) {
-      case "salienceDesc":
-        return b.salience - a.salience;
-      case "createdDesc":
-        return b.createdAt - a.createdAt;
-      case "occurredDesc":
-        return b.occurredAt - a.occurredAt;
-    }
-  });
-  if (params?.limit !== undefined) out = out.slice(0, params.limit);
-  return out;
 }
 
 function clamp01(n: number): number {

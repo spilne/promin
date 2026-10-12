@@ -593,7 +593,7 @@ Higher scores are more relevant; the scale is retriever-specific.
 | `InMemoryRetriever`                      | In-process store: cosine similarity with an `EmbeddingProvider`, keyword overlap without one. `addDocument`, `addChunks`, `deleteSource`.              |
 | `PgVectorRetriever` (`@promin/postgres`) | pgvector table: `ensureSchema({ createExtension?, index? })`, `addDocument`, `addChunks` (upsert by chunk id), `deleteSource`, cosine search.          |
 | `createRetrieverTool`                    | Wraps a retriever as an agent tool (default name `search_knowledge_base`). Sources land in the model text and in the tool result's `sources` metadata. |
-| `InMemoryRetrieverRegistry`              | `RetrieverRegistry` of live retrievers keyed by id, with description / tags / metadata for catalogs.                                                   |
+| `InMemoryRetrieverRegistry`              | `RetrieverRegistry` of live retrievers keyed by id (global, or within a namespace), with description / tags / metadata for catalogs.                   |
 
 ```ts
 import { InMemoryRetriever, LocalAgent } from "@promin/agent";
@@ -626,13 +626,21 @@ Binding modes (`AgentRetrieverBinding.mode`):
 
 `topK`, `filter`, `maxChunkCharacters`, `includeSources` and `includeScores` apply to both paths. The binding's `filter` is merged over a filter the model passes to the tool: tags are combined and the binding's metadata keys win, so the model cannot widen a tenant scope.
 
-Recipes reference retrievers by id in `backend.knowledge` (`AgentKnowledgeRecipe`: `id` plus the binding options above). `resolveLocalAgent` looks each id up in `deps.retrievers`, a plain `{ id: Retriever }` map or a `RetrieverRegistry`, and throws when one is missing:
+Recipes reference retrievers by id in `backend.knowledge` (`AgentKnowledgeRecipe`: `id` plus the binding options above). `resolveLocalAgent` looks each id up in `deps.retrievers`, a plain `{ id: Retriever }` map or a `RetrieverRegistry`, and throws when one is missing. A registry row is global (no `namespaceId`, visible to every namespace) or belongs to one namespace (a managed knowledge base); the resolver reads it from `deps.namespaceId`, where a namespace row shadows a global one with the same id:
 
 ```ts
 const retrievers = new InMemoryRetrieverRegistry([
   { id: "docs", retriever: docs, description: "Product docs", tags: ["public"] },
+  { id: "handbook", namespaceId: "acme", retriever: acmeHandbook },
 ]);
-const agent = await resolveLocalAgent(recipe, { runner, llm, tools, retrievers });
+// Binds `docs` and acme's `handbook`; in another namespace `handbook` is missing.
+const agent = await resolveLocalAgent(recipe, {
+  runner,
+  llm,
+  tools,
+  retrievers,
+  namespaceId: "acme",
+});
 ```
 
 `retrieverRegistryTestSuite` (from `@promin/agent/testing`) checks a custom `RetrieverRegistry`.
@@ -653,7 +661,13 @@ const agent = await resolveLocalAgent(recipe, { runner, llm, tools, retrievers }
 - The config is validated when the turn is built (finite positive numbers, `targetRatio` ≤ 1, `keepRecentSteps` an integer ≥ 1).
 - The cut is journaled in `plan-<n>` and the summary in `compact-<n>`, so a replay rebuilds the same messages without calling the summary LLM again. The turn's transcript (`turnMessages`, what a thread persists) is never compacted.
 
-**Across turns.** A thread turn is seeded from `MemoryStore.resolveContext`, which trims history to `contextBudget.maxMessageTokens`; `autoCompact` / `compactThread` roll older messages into thread episodes.
+**Across turns.** A thread turn is seeded from `MemoryStore.resolveContext`, which reads only the message tail that fits `contextBudget.maxMessageTokens` (whole turns, oldest dropped first). `autoCompact` / `compactThread` fold older messages into the thread's compaction episode, and `resolveContext` renders the latest one (fenced as reference data) in place of the messages it covers:
+
+- Compaction is incremental: each run summarises the previous summary plus the messages after it, never the whole thread again. The kept tail (`keepRecent`, default 10) always starts at a user message, so a turn is never split. Summaries are capped at `summaryMaxTokens * 4` characters.
+- `distillThread` writes one resource episode per thread (a forced re-distill replaces it) plus durable user facts. A long transcript is summarised in chunks of `maxChunkChars`, each call carrying the running summary.
+- Consolidation calls use the agent's `llmRetry`, `rateLimiter`, `clock`, `metrics` and `costs` (labels `purpose=consolidation`, `operation=compact|distill`); token usage lands on the episode as `metadata.usage`, and `onLlmCall` reports each call.
+- Distills (manual and `autoDistill`) are capped by `distillRateLimit` (default `DEFAULT_DISTILL_RATE_LIMIT`: 30 per user, 1 000 per namespace, per hour; `false` turns it off). The count is reserved atomically in the memory store (`reserveConsolidation`), so concurrent distills on any number of processes never overshoot; a failed distill gives its slot back. Over the cap, `ConsolidatorRateLimitError` carries `retryAfterMs`.
+- A memory store failure while resolving the context fails the turn; a context-mode retriever that throws or exceeds its `timeoutMs` (default 10 s) is skipped instead — the knowledge block notes the missing source and the run emits a `retriever-failed` event.
 
 ---
 

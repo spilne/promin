@@ -160,10 +160,15 @@ export function mountKnowledgeBases(params: {
   readonly router: Router;
   readonly knowledgeBases: ZoryaKnowledgeBases;
   readonly agents: ZoryaAgents | undefined;
+  /** Registry a written base's namespace is checked against. */
+  readonly namespaces: NamespaceRegistry | undefined;
 }): void {
+  const { agents } = params;
   const deps: KnowledgeBaseGatewayDeps = {
     knowledgeBases: params.knowledgeBases,
-    ...(params.agents !== undefined && { agents: params.agents.registry }),
+    ...(agents !== undefined && { agents: agents.registry }),
+    ...(agents?.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
+    ...(params.namespaces !== undefined && { namespaces: params.namespaces }),
   };
   params.router
     .get("/api/knowledge-bases", listKnowledgeBases(deps))

@@ -171,7 +171,10 @@ export function mountAgents(params: {
     .get(
       "/api/agents/_catalog/retrievers",
       agents.retrievers
-        ? listCatalogRetrievers({ retrievers: agents.retrievers })
+        ? listCatalogRetrievers({
+            retrievers: agents.retrievers,
+            ...(agents.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
+          })
         : async () => json(200, { retrievers: [] }),
     )
     // Which recipes are backed by a file on disk (the editor disables

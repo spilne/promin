@@ -11,31 +11,36 @@
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { Message } from "../message.ts";
-import { resolveContext } from "./resolve-context.ts";
-import type {
-  AppendMessagesOptions,
-  EpisodeInput,
-  EpisodeListParams,
-  EpisodicRecord,
-  Fact,
-  FactInput,
-  ListThreadsParams,
-  MemoryStore,
-  MessageRange,
-  NamespacePatch,
-  NamespaceRow,
-  ResolvedContext,
-  ResourcePatch,
-  ResourceRow,
-  ScopedKey,
-  StoredMessage,
-  ThreadInit,
-  ThreadKey,
-  ThreadRow,
-  ThreadSummary,
-  TokenBudget,
+import { loadResolvedContext } from "./load-context.ts";
+import { isAfterThreadCursor, parseThreadCursor } from "./thread-cursor.ts";
+import {
+  DEFAULT_THREAD_PAGE_SIZE,
+  type AppendMessagesOptions,
+  type ConsolidationReservation,
+  type ConsolidationReservationRequest,
+  type EpisodeInput,
+  type EpisodeListParams,
+  type EpisodicRecord,
+  type Fact,
+  type FactInput,
+  type ListThreadsParams,
+  type MemoryStore,
+  type MessageRange,
+  type NamespacePatch,
+  type NamespaceRow,
+  type ResolvedContext,
+  type ResourcePatch,
+  type ResourceRow,
+  type ScopedKey,
+  type StoredMessage,
+  type ThreadInit,
+  type ThreadKey,
+  type ThreadRow,
+  type ThreadSummary,
+  type TokenBudget,
 } from "./types.ts";
 
 export interface InMemoryMemoryStoreConfig {
@@ -59,6 +64,13 @@ export class InMemoryMemoryStore implements MemoryStore {
   private readonly namespaceEpisodes = new Map<string, EpisodicRecord[]>();
   private readonly resourceEpisodes = new Map<string, EpisodicRecord[]>();
   private readonly threadEpisodes = new Map<string, EpisodicRecord[]>();
+  private reservations: Array<{
+    readonly id: string;
+    readonly namespaceId: string;
+    readonly resourceId: string;
+    readonly kind: string;
+    readonly at: number;
+  }> = [];
 
   constructor(config: InMemoryMemoryStoreConfig = {}) {
     this.clock = config.clock ?? SystemWallClock;
@@ -236,20 +248,6 @@ export class InMemoryMemoryStore implements MemoryStore {
     return this.queryEpisodes(this.resourceEpisodes.get(this.resourceK(key)) ?? [], params);
   }
 
-  async listResourceEpisodesForNamespace(
-    namespaceId: string,
-    params?: EpisodeListParams,
-  ): Promise<EpisodicRecord[]> {
-    // Resource keys are `${namespaceId}|${resourceId}` — scan every
-    // resource bucket in this namespace and flatten before querying.
-    const prefix = `${namespaceId}|`;
-    const all: EpisodicRecord[] = [];
-    for (const [k, list] of this.resourceEpisodes) {
-      if (k.startsWith(prefix)) all.push(...list);
-    }
-    return this.queryEpisodes(all, params);
-  }
-
   async deleteResourceEpisode(key: ScopedKey, episodeId: string): Promise<void> {
     const k = this.resourceK(key);
     const list = this.resourceEpisodes.get(k);
@@ -299,14 +297,12 @@ export class InMemoryMemoryStore implements MemoryStore {
       if (q && !t.threadId.toLowerCase().includes(q)) return false;
       if (params.metadataFilter) {
         for (const [k, v] of Object.entries(params.metadataFilter)) {
-          if (t.metadata[k] !== v) return false;
+          if (v === undefined) continue;
+          if (!(k in t.metadata) || !isDeepStrictEqual(t.metadata[k], v)) return false;
         }
       }
-      if (params.archived === true) {
-        if (t.archivedAt == null) return false;
-      } else if (params.archived === false || params.archived === undefined) {
-        if (t.archivedAt != null) return false;
-      }
+      if (params.archived === true && t.archivedAt === null) return false;
+      if (params.archived === false && t.archivedAt !== null) return false;
       return true;
     });
 
@@ -330,19 +326,34 @@ export class InMemoryMemoryStore implements MemoryStore {
 
     const order = params.order ?? "lastActiveDesc";
     summaries.sort((a, b) => {
-      switch (order) {
-        case "lastActiveDesc":
-          return b.lastActiveAt - a.lastActiveAt;
-        case "createdAsc":
-          return a.createdAt - b.createdAt;
-        case "createdDesc":
-          return b.createdAt - a.createdAt;
-      }
+      const byOrder =
+        order === "lastActiveDesc"
+          ? b.lastActiveAt - a.lastActiveAt
+          : order === "createdAsc"
+            ? a.createdAt - b.createdAt
+            : b.createdAt - a.createdAt;
+      // Thread id breaks ties, so pages never overlap or skip a thread.
+      return byOrder !== 0
+        ? byOrder
+        : a.threadId < b.threadId
+          ? -1
+          : a.threadId > b.threadId
+            ? 1
+            : 0;
     });
 
-    const offset = params.cursor ? parseInt(params.cursor, 10) || 0 : 0;
-    const limit = params.limit ?? summaries.length;
-    return summaries.slice(offset, offset + limit);
+    const position = parseThreadCursor(params.cursor);
+    const page = position
+      ? summaries.filter((s) =>
+          isAfterThreadCursor({
+            position,
+            key: order === "lastActiveDesc" ? s.lastActiveAt : s.createdAt,
+            threadId: s.threadId,
+            order,
+          }),
+        )
+      : summaries;
+    return page.slice(0, params.limit ?? DEFAULT_THREAD_PAGE_SIZE);
   }
 
   async setThreadWorking(key: ThreadKey, content: string | null): Promise<void> {
@@ -508,49 +519,59 @@ export class InMemoryMemoryStore implements MemoryStore {
     this.lastActiveByThread.delete(k);
   }
 
+  // --- Consolidation rate limit ----------------------------------------
+
+  async reserveConsolidation(
+    request: ConsolidationReservationRequest,
+  ): Promise<ConsolidationReservation> {
+    // Synchronous from here on: no other call interleaves between the
+    // count and the insert.
+    const now = this.now();
+    const since = now - request.windowMs;
+    this.reservations = this.reservations.filter(
+      (r) => !(r.namespaceId === request.namespaceId && r.kind === request.kind && r.at <= since),
+    );
+    const inNamespace = this.reservations.filter(
+      (r) => r.namespaceId === request.namespaceId && r.kind === request.kind,
+    );
+    const inResource = inNamespace.filter((r) => r.resourceId === request.resourceId);
+    const denied = (scope: "resource" | "namespace", rows: typeof inNamespace, max: number) => ({
+      granted: false as const,
+      scope,
+      seen: rows.length,
+      max,
+      retryAfterMs: Math.max(0, Math.min(...rows.map((r) => r.at)) + request.windowMs - now),
+    });
+    if (inResource.length >= request.maxPerResource) {
+      return denied("resource", inResource, request.maxPerResource);
+    }
+    if (request.maxPerNamespace !== undefined && inNamespace.length >= request.maxPerNamespace) {
+      return denied("namespace", inNamespace, request.maxPerNamespace);
+    }
+    const id = randomUUID();
+    this.reservations.push({
+      id,
+      namespaceId: request.namespaceId,
+      resourceId: request.resourceId,
+      kind: request.kind,
+      at: now,
+    });
+    return { granted: true, reservationId: id };
+  }
+
+  async releaseConsolidation(params: {
+    namespaceId: string;
+    reservationId: string;
+  }): Promise<void> {
+    this.reservations = this.reservations.filter(
+      (r) => !(r.namespaceId === params.namespaceId && r.id === params.reservationId),
+    );
+  }
+
   // --- Cascade ----------------------------------------------------------
 
   async resolveContext(key: ThreadKey, budget: TokenBudget): Promise<ResolvedContext> {
-    const thread = await this.getThread(key);
-    if (!thread) {
-      throw new Error(`Thread not found: ${key.namespaceId}/${key.threadId}`);
-    }
-    const namespace = await this.getNamespace(key.namespaceId);
-    const namespaceFacts = await this.listNamespaceFacts(key.namespaceId);
-
-    const resourceId = thread.resourceId ?? key.resourceId;
-    const resource = resourceId
-      ? await this.getResource({ namespaceId: key.namespaceId, resourceId })
-      : null;
-    const resourceFacts = resourceId
-      ? await this.listResourceFacts({ namespaceId: key.namespaceId, resourceId })
-      : [];
-
-    // Episodes only loaded when the budget opts in. Pulled from the
-    // resource scope (cross-thread recall for THIS user); per-thread
-    // and per-namespace episodes are storage-only by default.
-    const resourceEpisodes =
-      resourceId && (budget.maxEpisodeTokens ?? 0) > 0
-        ? await this.listResourceEpisodes(
-            { namespaceId: key.namespaceId, resourceId },
-            { order: "salienceDesc" },
-          )
-        : [];
-
-    const threadFacts = await this.listThreadFacts(key);
-    const messages = await this.getMessages(key);
-
-    return resolveContext({
-      namespace,
-      namespaceFacts,
-      resource,
-      resourceFacts,
-      resourceEpisodes,
-      thread,
-      threadFacts,
-      messages,
-      budget,
-    });
+    return loadResolvedContext({ store: this, key, budget });
   }
 
   // --- helpers ----------------------------------------------------------
@@ -582,7 +603,6 @@ export class InMemoryMemoryStore implements MemoryStore {
       summary: input.summary,
       outcome: input.outcome ?? null,
       salience,
-      embedding: input.embedding ?? null,
       sourceThreadId: input.sourceThreadId ?? null,
       sourceMessageRange: input.sourceMessageRange ?? null,
       occurredAt: input.occurredAt ?? now,
@@ -596,21 +616,31 @@ export class InMemoryMemoryStore implements MemoryStore {
     params?: EpisodeListParams,
   ): EpisodicRecord[] {
     let out = list.slice();
+    if (params?.kind !== undefined) {
+      const kind = params.kind;
+      out = out.filter((e) => e.metadata["kind"] === kind);
+    }
+    if (params?.sourceThreadId !== undefined) {
+      const source = params.sourceThreadId;
+      out = out.filter((e) => e.sourceThreadId === source);
+    }
     if (params?.minSalience !== undefined) {
       const threshold = params.minSalience;
       out = out.filter((e) => e.salience >= threshold);
     }
     const order = params?.order ?? "salienceDesc";
-    out.sort((a, b) => {
-      switch (order) {
-        case "salienceDesc":
-          return b.salience - a.salience;
-        case "createdDesc":
-          return b.createdAt - a.createdAt;
-        case "occurredDesc":
-          return b.occurredAt - a.occurredAt;
-      }
-    });
+    const key = (e: EpisodicRecord): number =>
+      order === "salienceDesc"
+        ? e.salience
+        : order === "createdDesc"
+          ? e.createdAt
+          : order === "occurredDesc"
+            ? e.occurredAt
+            : (e.sourceMessageRange?.toSeq ?? -1);
+    // Ties go to the later insert, like the SQL stores' insertion sequence.
+    const ranked = out.map((e, index) => ({ e, index }));
+    ranked.sort((a, b) => key(b.e) - key(a.e) || b.index - a.index);
+    out = ranked.map((r) => r.e);
     if (params?.limit !== undefined) out = out.slice(0, params.limit);
     return out;
   }

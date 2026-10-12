@@ -83,6 +83,18 @@ type SessionEventBody =
       maxTokens: number;
     }
   | {
+      /**
+       * A context-mode retriever failed or timed out while the turn was
+       * prepared: the turn runs without its results (the knowledge block
+       * notes the missing source).
+       */
+      type: "retriever.failed";
+      turn: number;
+      bindingId: string;
+      error: string;
+      timedOut: boolean;
+    }
+  | {
       type: "approval.requested";
       turn: number;
       toolCallId: string;

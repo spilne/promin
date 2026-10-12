@@ -20,6 +20,7 @@ import type { MemoryStore } from "../memory/types.ts";
 import type { PendingApprovalStore } from "../approvals/pending-approval-store.ts";
 import type { AgentTool } from "../tool.ts";
 import type { Consolidator } from "../memory/consolidator.ts";
+import type { ConsolidatorRateLimitConfig } from "../memory/rate-limited-consolidator.ts";
 import type { AutoCompactConfig, AutoDistillConfig } from "../agent/auto-consolidation.ts";
 import type { TokenBudget } from "../memory/types.ts";
 import type { SecretsStorage } from "../secrets/types.ts";
@@ -103,6 +104,15 @@ export interface ResolveLocalAgentDeps {
    * — usually fine to use a cheaper model than the chat LLM.
    */
   readonly consolidatorLlm?: LLMProvider;
+  /** Metric labels of `consolidatorLlm` calls; see `LocalAgentConfig.consolidatorLlmProvider`. */
+  readonly consolidatorLlmProvider?: string;
+  readonly consolidatorLlmModel?: string;
+  /**
+   * Distill rate limit (manual and auto). Default
+   * `DEFAULT_DISTILL_RATE_LIMIT`; `false` turns it off. See
+   * `LocalAgentConfig.distillRateLimit`.
+   */
+  readonly distillRateLimit?: ConsolidatorRateLimitConfig | false;
   /**
    * Auto-compaction config — fires `compactThread` after each thread
    * turn when the configured rule trips. Set to `false` (or leave unset)
@@ -132,7 +142,8 @@ export interface ResolveLocalAgentDeps {
   readonly network?: import("../network/runtime.ts").NetworkRuntimeDeps;
   /**
    * Retrievers the recipe's `backend.knowledge[].id` entries resolve
-   * against — a plain id → `Retriever` map or a `RetrieverRegistry`. A
+   * against — a plain id → `Retriever` map or a `RetrieverRegistry`, which
+   * is read from `namespaceId` (that namespace's rows, then global ones). A
    * recipe naming an id that isn't here throws, like an unknown tool.
    */
   readonly retrievers?: Readonly<Record<string, Retriever>> | RetrieverRegistry;
@@ -251,9 +262,10 @@ export async function resolveLocalAgent(
   const autoCompact = mergeAutoCompact(backend.autoCompact, deps.autoCompact);
   const autoDistill = mergeAutoDistill(backend.autoDistill, deps.autoDistill);
   const contextBudget = mergeContextBudget(backend.contextBudget, deps.contextBudget);
-  const retrievers = resolveKnowledgeBindings({
+  const retrievers = await resolveKnowledgeBindings({
     knowledge: backend.knowledge,
     available: deps.retrievers,
+    namespaceId: deps.namespaceId,
   });
 
   const config: LocalAgentConfig = {
@@ -283,6 +295,13 @@ export async function resolveLocalAgent(
     capabilities: effective.capabilities ?? agent.metadata.capabilities,
     consolidator: deps.consolidator,
     consolidatorLlm: deps.consolidatorLlm,
+    ...(deps.consolidatorLlmProvider !== undefined && {
+      consolidatorLlmProvider: deps.consolidatorLlmProvider,
+    }),
+    ...(deps.consolidatorLlmModel !== undefined && {
+      consolidatorLlmModel: deps.consolidatorLlmModel,
+    }),
+    ...(deps.distillRateLimit !== undefined && { distillRateLimit: deps.distillRateLimit }),
     autoCompact,
     autoDistill,
     contextBudget,
@@ -328,19 +347,20 @@ function attachMcpTools(params: {
  * Turn the recipe's `backend.knowledge` entries into live retriever
  * bindings, looking each id up in the host's retrievers.
  */
-function resolveKnowledgeBindings(params: {
+async function resolveKnowledgeBindings(params: {
   knowledge: LocalAgentBackend["knowledge"];
   available: ResolveLocalAgentDeps["retrievers"];
-}): Record<string, AgentRetrieverBinding> | undefined {
-  const { knowledge, available } = params;
+  namespaceId: string | undefined;
+}): Promise<Record<string, AgentRetrieverBinding> | undefined> {
+  const { knowledge, available, namespaceId } = params;
   if (!knowledge || knowledge.length === 0) return undefined;
   const out: Record<string, AgentRetrieverBinding> = {};
   for (const { id, ...options } of knowledge) {
-    const retriever = lookupRetriever({ available, id });
+    const retriever = await lookupRetriever({ available, id, namespaceId });
     if (!retriever) {
       throw new Error(
         `resolveLocalAgent: knowledge retriever "${id}" referenced by the recipe but not ` +
-          "provided in deps.retrievers.",
+          `provided in deps.retrievers${namespaceId !== undefined ? ` for namespace "${namespaceId}"` : ""}.`,
       );
     }
     out[id] = { ...options, retriever };
@@ -348,13 +368,21 @@ function resolveKnowledgeBindings(params: {
   return out;
 }
 
-function lookupRetriever(params: {
+async function lookupRetriever(params: {
   available: ResolveLocalAgentDeps["retrievers"];
   id: string;
-}): Retriever | undefined {
-  const { available, id } = params;
+  namespaceId: string | undefined;
+}): Promise<Retriever | undefined> {
+  const { available, id, namespaceId } = params;
   if (!available) return undefined;
-  if (isRetrieverRegistry(available)) return available.get(id)?.retriever;
+  if (isRetrieverRegistry(available)) {
+    // `resolve` re-reads a store-backed registry on a miss.
+    const row = await available.resolve({
+      id,
+      ...(namespaceId !== undefined && { namespaceId }),
+    });
+    return row?.retriever;
+  }
   return Object.hasOwn(available, id) ? available[id] : undefined;
 }
 
@@ -364,6 +392,7 @@ function isRetrieverRegistry(
   const candidate = value as Partial<RetrieverRegistry>;
   return (
     typeof candidate.get === "function" &&
+    typeof candidate.resolve === "function" &&
     typeof candidate.list === "function" &&
     typeof candidate.register === "function"
   );

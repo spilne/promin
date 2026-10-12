@@ -1,25 +1,34 @@
 // ---------------------------------------------------------------------------
 // RateLimitedConsolidator — decorator that caps `distillThread` cost.
 //
-// Distillation is one LLM call per fire. With autoDistill on, a busy
-// resource can rack up dozens of distill calls in a short window —
-// every 6 messages (default messageThreshold) per active thread. The
-// rate limiter caps that at the (namespace, resource) layer, throwing
-// `ConsolidatorRateLimitError` when the cap is hit.
+// Distillation is one or more LLM calls per fire. With autoDistill on, a
+// busy resource can rack up dozens of distill calls in a short window. The
+// rate limiter caps them per (namespace, resource) and, optionally, per
+// namespace, throwing `ConsolidatorRateLimitError` when a cap is hit.
 //
-// Source of truth: existing `resource_episodes` rows. We count distill
-// episodes (`metadata.kind === "distill"`) with `createdAt` in the
-// trailing window — no new storage. Works uniformly across the
-// in-memory / sqlite / postgres backends because all three implement
-// `listResourceEpisodes`.
+// The count lives in the memory store (`MemoryStore.reserveConsolidation`):
+// counting and recording a run is one atomic step, so concurrent distills
+// — on one process or many sharing a store — never overshoot the cap. A
+// run that fails gives its slot back; a call that would be a no-op (the
+// thread is already distilled and `force` is off) takes no slot.
 //
 // Wraps ALL distill paths (auto-trigger + manual gateway + scripts) by
 // design — capping only auto leaves a hole.
 // ---------------------------------------------------------------------------
 
-import { SystemWallClock, type WallClock } from "@promin/workflow";
-import type { Consolidator, DistillThreadOptions } from "./consolidator.ts";
-import type { EpisodicRecord, MemoryStore, ThreadKey } from "./types.ts";
+import {
+  sweepResourceThreads,
+  type Consolidator,
+  type DistillResourceOptions,
+  type DistillThreadOptions,
+} from "./consolidator.ts";
+import {
+  DISTILL_EPISODE_KIND,
+  type EpisodicRecord,
+  type MemoryStore,
+  type ScopedKey,
+  type ThreadKey,
+} from "./types.ts";
 
 export interface ConsolidatorRateLimitConfig {
   /**
@@ -31,7 +40,7 @@ export interface ConsolidatorRateLimitConfig {
   /**
    * Maximum distill calls allowed per (namespace, resource) within the
    * window. Once reached, further distill calls throw
-   * `ConsolidatorRateLimitError` until older episodes age out.
+   * `ConsolidatorRateLimitError` until older ones age out.
    */
   readonly maxDistillsPerWindow: number;
   /**
@@ -43,9 +52,17 @@ export interface ConsolidatorRateLimitConfig {
    * throws (`scope.kind` tells the caller which).
    */
   readonly maxDistillsPerNamespacePerWindow?: number;
-  /** Time source. Default: `SystemWallClock`. Tests pass `FakeWallClock`. */
-  readonly clock?: WallClock;
 }
+
+/**
+ * Default distill rate limit of a `LocalAgent` with memory: 30 distills per
+ * user and 1 000 per namespace per hour.
+ */
+export const DEFAULT_DISTILL_RATE_LIMIT: ConsolidatorRateLimitConfig = {
+  windowMs: 3_600_000,
+  maxDistillsPerWindow: 30,
+  maxDistillsPerNamespacePerWindow: 1_000,
+};
 
 /**
  * Which cap a `ConsolidatorRateLimitError` tripped — lets a gateway
@@ -62,20 +79,15 @@ export class ConsolidatorRateLimitError extends Error {
   readonly windowMs: number;
   readonly max: number;
   readonly seen: number;
-  /**
-   * `createdAt` of the oldest distill episode currently inside the
-   * window. The earliest moment another distill could succeed is
-   * `oldestInWindowAt + windowMs` (when this episode ages out and
-   * `seen` drops to `max - 1`). Gateways turn this into Retry-After.
-   */
-  readonly oldestInWindowAt: number;
+  /** Time until the oldest counted distill leaves the window, in ms. */
+  readonly retryAfterMs: number;
 
   constructor(args: {
     scope: ConsolidatorRateLimitScope;
     windowMs: number;
     max: number;
     seen: number;
-    oldestInWindowAt: number;
+    retryAfterMs: number;
   }) {
     const where =
       args.scope.kind === "resource"
@@ -90,32 +102,48 @@ export class ConsolidatorRateLimitError extends Error {
     this.windowMs = args.windowMs;
     this.max = args.max;
     this.seen = args.seen;
-    this.oldestInWindowAt = args.oldestInWindowAt;
+    this.retryAfterMs = args.retryAfterMs;
   }
 
   /** Seconds to wait before retrying. Suitable for the `Retry-After` HTTP header. */
-  retryAfterSeconds(now: number): number {
-    return Math.max(1, Math.ceil((this.oldestInWindowAt + this.windowMs - now) / 1000));
+  retryAfterSeconds(): number {
+    return Math.max(1, Math.ceil(this.retryAfterMs / 1000));
   }
 }
 
 export class RateLimitedConsolidator implements Consolidator {
-  private readonly clock: WallClock;
+  private readonly inner: Consolidator;
+  private readonly memory: MemoryStore;
+  private readonly limits: ConsolidatorRateLimitConfig;
 
-  constructor(
-    private readonly inner: Consolidator,
-    private readonly memory: MemoryStore,
-    private readonly config: ConsolidatorRateLimitConfig,
-  ) {
-    this.clock = config.clock ?? SystemWallClock;
+  constructor(params: {
+    readonly inner: Consolidator;
+    /** Store holding the distill counts — the one the agents share. */
+    readonly memory: MemoryStore;
+    readonly limits: ConsolidatorRateLimitConfig;
+  }) {
+    this.inner = params.inner;
+    this.memory = params.memory;
+    this.limits = params.limits;
   }
 
   compactThread(...args: Parameters<Consolidator["compactThread"]>) {
     return this.inner.compactThread(...args);
   }
 
-  distillResource(...args: Parameters<Consolidator["distillResource"]>) {
-    return this.inner.distillResource(...args);
+  /**
+   * The resource sweep, each thread distilled through this limiter (so
+   * every LLM distill counts). The sweep stops at the first rate-limited
+   * thread and returns what it distilled.
+   */
+  distillResource(key: ScopedKey, opts: DistillResourceOptions = {}): Promise<EpisodicRecord[]> {
+    return sweepResourceThreads({
+      store: this.memory,
+      key,
+      opts,
+      distill: (thread, distillOpts) => this.distillThread(thread, distillOpts),
+      stopOn: (err) => err instanceof ConsolidatorRateLimitError,
+    });
   }
 
   async distillThread(key: ThreadKey, opts?: DistillThreadOptions): Promise<EpisodicRecord> {
@@ -124,64 +152,47 @@ export class RateLimitedConsolidator implements Consolidator {
       // anyway; defer to inner so the same error surfaces.
       return this.inner.distillThread(key, opts);
     }
-    const resourceId = key.resourceId;
-    const since = this.clock.currentTimeMs() - this.config.windowMs;
+    const resourceKey = { namespaceId: key.namespaceId, resourceId: key.resourceId };
+    if (!opts?.force) {
+      // Already distilled: the inner call returns the episode without an
+      // LLM call, so it costs no slot.
+      const existing = await this.memory.listResourceEpisodes(resourceKey, {
+        kind: DISTILL_EPISODE_KIND,
+        sourceThreadId: key.threadId,
+        limit: 1,
+      });
+      if (existing.length > 0) return this.inner.distillThread(key, opts);
+    }
 
-    // Per-(namespace, resource) cap — protects per-user cost.
-    const resourceEpisodes = await this.memory.listResourceEpisodes(
-      { namespaceId: key.namespaceId, resourceId },
-      { order: "createdDesc" },
-    );
-    const perResource = countDistillsInWindow(resourceEpisodes, since);
-    if (perResource.seen >= this.config.maxDistillsPerWindow) {
+    const reservation = await this.memory.reserveConsolidation({
+      ...resourceKey,
+      kind: DISTILL_EPISODE_KIND,
+      windowMs: this.limits.windowMs,
+      maxPerResource: this.limits.maxDistillsPerWindow,
+      ...(this.limits.maxDistillsPerNamespacePerWindow !== undefined && {
+        maxPerNamespace: this.limits.maxDistillsPerNamespacePerWindow,
+      }),
+    });
+    if (!reservation.granted) {
       throw new ConsolidatorRateLimitError({
-        scope: { kind: "resource", namespaceId: key.namespaceId, resourceId },
-        windowMs: this.config.windowMs,
-        max: this.config.maxDistillsPerWindow,
-        seen: perResource.seen,
-        oldestInWindowAt: perResource.oldestInWindowAt,
+        scope:
+          reservation.scope === "resource"
+            ? { kind: "resource", ...resourceKey }
+            : { kind: "namespace", namespaceId: key.namespaceId },
+        windowMs: this.limits.windowMs,
+        max: reservation.max,
+        seen: reservation.seen,
+        retryAfterMs: reservation.retryAfterMs,
       });
     }
-
-    // Optional per-namespace cap — protects per-tenant cost.
-    const nsMax = this.config.maxDistillsPerNamespacePerWindow;
-    if (nsMax !== undefined) {
-      const nsEpisodes = await this.memory.listResourceEpisodesForNamespace(key.namespaceId, {
-        order: "createdDesc",
+    try {
+      return await this.inner.distillThread(key, opts);
+    } catch (err) {
+      await this.memory.releaseConsolidation({
+        namespaceId: key.namespaceId,
+        reservationId: reservation.reservationId,
       });
-      const perNamespace = countDistillsInWindow(nsEpisodes, since);
-      if (perNamespace.seen >= nsMax) {
-        throw new ConsolidatorRateLimitError({
-          scope: { kind: "namespace", namespaceId: key.namespaceId },
-          windowMs: this.config.windowMs,
-          max: nsMax,
-          seen: perNamespace.seen,
-          oldestInWindowAt: perNamespace.oldestInWindowAt,
-        });
-      }
-    }
-
-    return this.inner.distillThread(key, opts);
-  }
-}
-
-/**
- * Count distill-kind episodes whose `createdAt` falls inside the
- * trailing window. `episodes` must be ordered `createdDesc` — the scan
- * stops at the first entry older than `since`.
- */
-function countDistillsInWindow(
-  episodes: ReadonlyArray<EpisodicRecord>,
-  since: number,
-): { seen: number; oldestInWindowAt: number } {
-  let seen = 0;
-  let oldestInWindowAt = Number.POSITIVE_INFINITY;
-  for (const ep of episodes) {
-    if (ep.createdAt < since) break; // ordered desc — older entries are older
-    if ((ep.metadata as { kind?: unknown } | null)?.kind === "distill") {
-      seen += 1;
-      if (ep.createdAt < oldestInWindowAt) oldestInWindowAt = ep.createdAt;
+      throw err;
     }
   }
-  return { seen, oldestInWindowAt };
 }

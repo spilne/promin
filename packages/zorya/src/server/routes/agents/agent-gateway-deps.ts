@@ -132,6 +132,8 @@ export interface AgentVersionsResponse {
 
 export interface AgentThreadsResponse {
   threads: AgentThreadSummary[];
+  /** Pass as `?cursor=` for the next page; absent on the last page. */
+  nextCursor?: string;
 }
 
 export interface ThreadMessagesResponse {

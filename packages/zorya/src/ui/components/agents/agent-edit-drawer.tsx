@@ -185,7 +185,13 @@ export function AgentEditDrawer({
   const { data: mcpCatalog } = useFetch(() => api.listCatalogMcpServers(), [], 0);
   const { data: skillsData } = useFetch(() => api.listCatalogSkills(), [], 0);
   const catalogSkills = useMemo(() => skillsData?.skills ?? [], [skillsData]);
-  const { data: retrieversData } = useFetch(() => api.listCatalogRetrievers(), [], 0);
+  // Global retrievers, plus the knowledge bases of the namespace the agent is tested in.
+  const catalogNamespace = tenant?.namespaceId;
+  const { data: retrieversData } = useFetch(
+    () => api.listCatalogRetrievers(catalogNamespace ? { namespaceId: catalogNamespace } : {}),
+    [catalogNamespace],
+    0,
+  );
   const catalogRetrievers = useMemo(() => retrieversData?.retrievers ?? [], [retrieversData]);
   // Self-fetch which agent recipes are file-managed. When THIS one is, an
   // edit would be undone by the next scan tick (the scan promotes the file's

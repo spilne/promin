@@ -26,9 +26,9 @@ import type {
   ToolRefReport,
 } from "@promin/agent";
 import { listAllVersioned, reconcileToolReferences } from "@promin/agent";
-import { json } from "../router.ts";
+import { json, jsonError } from "../router.ts";
 import type { McpServersCatalogResponse, ZoryaMcpServers } from "../services/mcp/index.ts";
-import { internalError } from "./agent-gateway-kit.ts";
+import { internalError, type ScopeAuthorizer } from "./agent-gateway-kit.ts";
 
 export interface ModelsCatalogResponse {
   models: SerializedModelCatalogItem[];
@@ -86,6 +86,8 @@ export interface CatalogToolsDeps {
  */
 export interface RetrieverCatalogEntry {
   readonly id: string;
+  /** Namespace of a managed knowledge base; absent for a host-wired retriever every namespace sees. */
+  readonly namespaceId?: string;
   readonly description?: string;
   readonly tags: ReadonlyArray<string>;
   readonly metadata: Readonly<Record<string, unknown>>;
@@ -97,6 +99,8 @@ export interface RetrieversCatalogResponse {
 
 export interface AgentRetrieverCatalogDeps {
   readonly retrievers: RetrieverRegistry;
+  /** Binds a requested `?namespaceId=` to the caller. See `ScopeAuthorizer`. */
+  readonly authorizeScope?: ScopeAuthorizer;
 }
 
 export function listCatalogModels(deps: AgentCatalogDeps) {
@@ -143,12 +147,27 @@ export function listCatalogMcpServers(deps: { readonly mcp?: ZoryaMcpServers }) 
   };
 }
 
-/** List host-wired retrievers (sans the retriever object) for the knowledge picker. */
+/**
+ * List the retrievers an agent in `?namespaceId=` can bind (sans the
+ * retriever object) for the knowledge picker: the global host-wired ones
+ * plus that namespace's knowledge bases. Without a namespace: the global
+ * ones only.
+ */
 export function listCatalogRetrievers(deps: AgentRetrieverCatalogDeps) {
-  return async (): Promise<Response> => {
+  return async (req: Request): Promise<Response> => {
+    const namespaceId = new URL(req.url).searchParams.get("namespaceId") || undefined;
+    if (
+      namespaceId !== undefined &&
+      deps.authorizeScope &&
+      !(await deps.authorizeScope({ req, scope: { namespaceId } }))
+    ) {
+      return jsonError(403, "scope_forbidden");
+    }
     try {
-      const retrievers: RetrieverCatalogEntry[] = deps.retrievers.list().map((r) => ({
+      const rows = deps.retrievers.list(namespaceId !== undefined ? { namespaceId } : {});
+      const retrievers: RetrieverCatalogEntry[] = rows.map((r) => ({
         id: r.id,
+        ...(r.namespaceId !== undefined && { namespaceId: r.namespaceId }),
         ...(r.description !== undefined && { description: r.description }),
         tags: r.tags,
         metadata: r.metadata,

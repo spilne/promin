@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
-// Agent gateway time reads go through the injected clock — the distill
-// rate-limit Retry-After and the default thread `archivedAt` stamp. Calls
-// the handlers directly with a stub agent.
+// Agent gateway time handling: the distill rate-limit Retry-After comes from
+// the limiter, the default thread `archivedAt` stamp from the injected clock.
+// Calls the handlers directly with a stub agent.
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
@@ -22,13 +22,13 @@ async function setup(clock: FakeWallClock) {
   const stubAgent = {
     withScope: () => stubAgent,
     distillThread: async () => {
-      // Window opened 10s ago (clock time) and lasts 60s → 50s to wait.
+      // The store's window frees a slot in 50s.
       throw new ConsolidatorRateLimitError({
         scope: { kind: "namespace", namespaceId: "ns" },
         windowMs: 60_000,
         max: 1,
         seen: 1,
-        oldestInWindowAt: clock.currentTimeMs() - 10_000,
+        retryAfterMs: 50_000,
       });
     },
     thread: async (id: string) => ({
@@ -57,7 +57,7 @@ function post(body: unknown): Request {
 }
 
 describe("agent gateway — time on an injected clock", () => {
-  it("computes the distill Retry-After against the clock", async () => {
+  it("answers a distill rate limit with the store's Retry-After", async () => {
     const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
     const { deps } = await setup(clock);
 

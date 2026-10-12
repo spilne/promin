@@ -16,13 +16,12 @@
 import { describe, it, expect } from "bun:test";
 import {
   AgentTurnGate,
-  DefaultConsolidator,
   InMemoryAgentInstanceRegistry,
   InMemoryAgentRegistry,
   InMemoryLeaseStore,
   InMemoryMemoryStore,
   InMemorySecretsStorage,
-  RateLimitedConsolidator,
+  DEFAULT_DISTILL_RATE_LIMIT,
   SecretScope,
   resolveLocalAgent,
 } from "@promin/agent";
@@ -329,6 +328,53 @@ describe("agent gateway — threads", () => {
     const ids = body.threads.map((t) => t.id).sort();
     expect(ids).toEqual(["t-a", "t-b"]);
     for (const t of body.threads) expect(t.messageCount).toBeGreaterThan(0);
+  });
+
+  it("GET /api/agents/:id/threads?archived= picks active, archived or all threads", async () => {
+    const { server, memory } = await bootGateway();
+    for (const threadId of ["t-active", "t-archived"]) {
+      await memory.createThread(
+        { namespaceId: "acme", resourceId: "alice", threadId },
+        { resourceId: "alice", metadata: { agentId: "support" } },
+      );
+    }
+    await memory.setThreadArchived({ namespaceId: "acme", threadId: "t-archived" }, 1_000);
+    const ids = async (archived?: string) => {
+      const qs = `namespaceId=acme&resourceId=alice${archived ? `&archived=${archived}` : ""}`;
+      const res = await server.handle(
+        new Request(`http://test/api/agents/support/threads?${qs}`, { method: "GET" }),
+      );
+      const body = (await res.json()) as { threads: Array<{ id: string }> };
+      return body.threads.map((t) => t.id).sort();
+    };
+    expect(await ids()).toEqual(["t-active"]);
+    expect(await ids("true")).toEqual(["t-archived"]);
+    expect(await ids("all")).toEqual(["t-active", "t-archived"]);
+  });
+
+  it("GET /messages without a range returns the newest page, oldest first", async () => {
+    const { server, memory } = await bootGateway();
+    const key = { namespaceId: "acme", resourceId: "alice", threadId: "t-long" };
+    await memory.createThread(key, { resourceId: "alice", metadata: { agentId: "support" } });
+    await memory.appendMessages(
+      key,
+      Array.from({ length: 600 }, (_, i) => ({ role: "user" as const, content: `m${i + 1}` })),
+    );
+    const get = async (query: string) => {
+      const res = await server.handle(
+        new Request(
+          `http://test/api/agents/support/threads/t-long/messages?namespaceId=acme&resourceId=alice${query}`,
+          { method: "GET" },
+        ),
+      );
+      const body = (await res.json()) as { messages: Array<{ content: string }> };
+      return body.messages.map((m) => m.content);
+    };
+    const page = await get("");
+    expect(page).toHaveLength(500);
+    expect(page[0]).toBe("m101");
+    expect(page.at(-1)).toBe("m600");
+    expect(await get("&fromSeq=1&limit=2")).toEqual(["m1", "m2"]);
   });
 
   it("GET /api/agents/:id/threads requires namespaceId", async () => {
@@ -1086,19 +1132,18 @@ describe("agent gateway — distill rate limit (429)", () => {
       { ...SCOPE, threadId: "t-now" },
       { resourceId: "alice", metadata: { agentId: "support" } },
     );
-    await memory.appendResourceEpisode(SCOPE, {
-      summary: "old distill",
-      sourceThreadId: "earlier",
-      salience: 0.5,
-      metadata: { kind: "distill" },
-    });
+    // Earlier distills took every slot of the default limit, which the
+    // agent applies without any configuration.
+    for (let i = 0; i < DEFAULT_DISTILL_RATE_LIMIT.maxDistillsPerWindow; i++) {
+      await memory.reserveConsolidation({
+        ...SCOPE,
+        kind: "distill",
+        windowMs: DEFAULT_DISTILL_RATE_LIMIT.windowMs,
+        maxPerResource: DEFAULT_DISTILL_RATE_LIMIT.maxDistillsPerWindow,
+      });
+    }
 
     const llm = mockLLM([{ content: "ignored", finishReason: "stop" }]);
-    const inner = new DefaultConsolidator({ store: memory, llm });
-    const rateLimited = new RateLimitedConsolidator(inner, memory, {
-      windowMs: 600_000,
-      maxDistillsPerWindow: 1,
-    });
 
     const workflows = new LocalWorkflows({
       storage,
@@ -1114,7 +1159,6 @@ describe("agent gateway — distill rate limit (429)", () => {
           memory,
           llm: () => llm,
           tools: {},
-          consolidator: rateLimited,
         }),
       memory,
     });
@@ -1139,8 +1183,8 @@ describe("agent gateway — distill rate limit (429)", () => {
       retryAfterSeconds: number;
     };
     expect(body.error).toBe("distill_rate_limited");
-    expect(body.max).toBe(1);
-    expect(body.seen).toBe(1);
+    expect(body.max).toBe(DEFAULT_DISTILL_RATE_LIMIT.maxDistillsPerWindow);
+    expect(body.seen).toBe(DEFAULT_DISTILL_RATE_LIMIT.maxDistillsPerWindow);
     expect(body.retryAfterSeconds).toBeGreaterThan(0);
   });
 });

@@ -1,12 +1,15 @@
 export {
   DEFAULT_MAX_SOURCE_CHARACTERS,
   KNOWLEDGE_BASE_ID_PATTERN,
+  KNOWLEDGE_INGESTION_DEFAULTS,
+  MAX_KNOWLEDGE_NAMESPACE_LENGTH,
   MAX_KNOWLEDGE_SOURCE_ID_LENGTH,
   ZoryaKnowledgeBases,
   type KnowledgeBase,
   type KnowledgeBaseCreateInput,
   type KnowledgeBaseSeed,
   type KnowledgeBaseUpdateInput,
+  type KnowledgeIngestionConfig,
   type KnowledgeRetrieverFactory,
   type KnowledgeSourceAdapter,
   type KnowledgeSourceInput,
@@ -26,7 +29,6 @@ export {
 export {
   KnowledgeBaseExistsError,
   KnowledgeBaseNotFoundError,
-  KnowledgeIngestError,
   KnowledgeInputError,
   KnowledgeSourceImportError,
   KnowledgeSourceNotFoundError,

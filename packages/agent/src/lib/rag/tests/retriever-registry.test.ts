@@ -18,4 +18,11 @@ describe("InMemoryRetrieverRegistry", () => {
       "id must not be empty",
     );
   });
+
+  it("rejects an empty namespace", () => {
+    const registry = new InMemoryRetrieverRegistry();
+    expect(() =>
+      registry.register({ id: "docs", namespaceId: "", retriever: { retrieve: async () => [] } }),
+    ).toThrow("namespaceId must not be empty");
+  });
 });

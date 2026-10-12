@@ -499,6 +499,11 @@ async function pumpAgentRun(params: {
           pendingApproval = { toolCallId: event.toolCallId, toolName: event.toolName };
           send("approval-requested", { ...pendingApproval, input: event.input });
           break;
+        case "retriever-failed":
+          // The turn goes on without that knowledge source. The error text
+          // stays server-side, like a stream error's.
+          send("retriever-failed", { bindingId: event.bindingId, timedOut: event.timedOut });
+          break;
         case "error":
           send("error", { message: event.error.message });
           break;

@@ -7,6 +7,8 @@
 import {
   buildAgentTrace,
   ConsolidatorRateLimitError,
+  DEFAULT_THREAD_PAGE_SIZE,
+  nextThreadCursor,
   NothingToConsolidateError,
   THREAD_AGENT_METADATA_KEY,
 } from "@promin/agent";
@@ -38,17 +40,62 @@ export function listAgentThreads(deps: AgentGatewayDeps) {
     const scoped = await loadScopedAgent({ deps, req, id, scope, invoking: false });
     if (scoped instanceof Response) return scoped;
 
+    const order = ThreadOrderSchema.safeParse(url.searchParams.get("order") ?? undefined);
+    if (!order.success) return jsonError(400, "invalid_order");
+    const metadata = parseMetadataFilter(url.searchParams.get("metadata"));
+    if (metadata === null) return jsonError(400, "invalid_metadata");
+    const limit = parseLimitParam(url.searchParams.get("limit")) ?? DEFAULT_THREAD_PAGE_SIZE;
     const threads = await scoped.agent.listThreads({
       resourceId: scoped.resourceId,
-      ...(scoped.recipe.backend.type === "local" && {
-        metadataFilter: { [THREAD_AGENT_METADATA_KEY]: id },
-      }),
-      limit: parseLimitParam(url.searchParams.get("limit")),
+      // The caller's filter, never widening the gateway's own agent stamp.
+      metadataFilter: {
+        ...metadata,
+        ...(scoped.recipe.backend.type === "local" && { [THREAD_AGENT_METADATA_KEY]: id }),
+      },
+      limit,
       cursor: url.searchParams.get("cursor") ?? undefined,
       q: url.searchParams.get("q") ?? undefined,
+      ...(order.data !== undefined && { order: order.data }),
+      // Active threads unless `archived=true` (only archived) or `archived=all`.
+      ...archivedFilter(url.searchParams.get("archived")),
     });
-    return json(200, { threads } satisfies AgentThreadsResponse);
+    const last = threads.at(-1);
+    const nextCursor =
+      last && threads.length === limit
+        ? nextThreadCursor({
+            thread: {
+              threadId: last.id,
+              lastActiveAt: last.lastActiveAt,
+              createdAt: last.createdAt,
+            },
+            ...(order.data !== undefined && { order: order.data }),
+          })
+        : undefined;
+    return json(200, {
+      threads,
+      ...(nextCursor !== undefined && { nextCursor }),
+    } satisfies AgentThreadsResponse);
   };
+}
+
+const ThreadOrderSchema = z.enum(["lastActiveDesc", "createdAsc", "createdDesc"]).optional();
+
+function archivedFilter(raw: string | null): { archived?: boolean } {
+  if (raw === "all") return {};
+  return { archived: raw === "true" };
+}
+
+/** `?metadata=` as a JSON object (`{}` when absent); `null` when it is not one. */
+function parseMetadataFilter(raw: string | null): Record<string, unknown> | null {
+  if (raw === null) return {};
+  try {
+    const value: unknown = JSON.parse(raw);
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 export function getThreadTrace(deps: AgentGatewayDeps) {
@@ -69,7 +116,7 @@ export function listThreadMessages(deps: AgentGatewayDeps) {
     const opened = await openThreadFromQuery({ deps, req, params });
     if (opened instanceof Response) return opened;
     const { thread, url } = opened;
-    const limit = parseLimitParam(url.searchParams.get("limit"));
+    const limit = parseLimitParam(url.searchParams.get("limit")) ?? DEFAULT_MESSAGE_PAGE;
     const fromSeq = parseIntParam({
       raw: url.searchParams.get("fromSeq"),
       min: 0,
@@ -80,10 +127,18 @@ export function listThreadMessages(deps: AgentGatewayDeps) {
       min: 0,
       max: Number.MAX_SAFE_INTEGER,
     });
-    const messages = await thread.messages({ limit, fromSeq, toSeq });
+    // From `fromSeq` forward when given; otherwise the newest `limit`
+    // messages (up to `toSeq`). Either way oldest-first.
+    const messages =
+      fromSeq !== undefined
+        ? await thread.messages({ limit, fromSeq, toSeq })
+        : (await thread.messages({ limit, toSeq, order: "desc" })).reverse();
     return json(200, { threadId: thread.id, messages } satisfies ThreadMessagesResponse);
   };
 }
+
+/** Messages a thread-messages request returns without a `limit`. */
+const DEFAULT_MESSAGE_PAGE = 500;
 
 // ---------------------------------------------------------------------------
 // Rename thread — sets the thread's first-class display title. The
@@ -166,7 +221,7 @@ export function distillThread(deps: AgentGatewayDeps) {
       return json(200, { episode });
     } catch (err) {
       if (err instanceof ConsolidatorRateLimitError) {
-        const retryAfter = err.retryAfterSeconds((deps.clock ?? SystemWallClock).currentTimeMs());
+        const retryAfter = err.retryAfterSeconds();
         return new Response(
           JSON.stringify({
             error: "distill_rate_limited",

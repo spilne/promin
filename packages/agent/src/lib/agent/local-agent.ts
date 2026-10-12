@@ -79,7 +79,6 @@ import { SessionEventBus } from "../session-logger.ts";
 import type {
   EpisodicRecord,
   MemoryStore,
-  ResolvedContext,
   ThreadKey,
   ThreadRow,
   TokenBudget,
@@ -90,6 +89,11 @@ import {
   type Consolidator,
   type DistillThreadOptions,
 } from "../memory/consolidator.ts";
+import {
+  DEFAULT_DISTILL_RATE_LIMIT,
+  RateLimitedConsolidator,
+  type ConsolidatorRateLimitConfig,
+} from "../memory/rate-limited-consolidator.ts";
 import { isReferenceDataMessage, referenceDataMessage } from "../reference-data.ts";
 import {
   maybeAutoCompact,
@@ -99,7 +103,11 @@ import {
 } from "./auto-consolidation.ts";
 import { withAutoTools, type AutoToolScope } from "./auto-tools.ts";
 import { frameTask } from "./frame-task.ts";
-import { buildRetrieverContext, type AgentRetrievers } from "./retriever-bindings.ts";
+import {
+  buildRetrieverContext,
+  type AgentRetrievers,
+  type RetrieverFailure,
+} from "./retriever-bindings.ts";
 import {
   liveOutput,
   makeCapture,
@@ -221,8 +229,26 @@ export interface LocalAgentConfig<TOutput = any> {
    * `agent.llm = anthropic("claude-sonnet-4-6")` for chat,
    * `consolidatorLlm = anthropic("claude-haiku-4-5-20251001")` for
    * distillation. Ignored when `consolidator` is supplied directly.
+   *
+   * The auto-built consolidator shares the agent's `llmRetry`,
+   * `rateLimiter`, `clock`, `metrics` and `costs`; its calls are recorded
+   * with `purpose: "consolidation"`.
    */
   readonly consolidatorLlm?: import("../llm-provider.ts").LLMProvider;
+  /**
+   * Provider / model labels of the `consolidatorLlm` calls' metrics.
+   * Default: the agent's `llmProvider` / `llmModel` (right when
+   * `consolidatorLlm` is unset and the chat LLM is reused).
+   */
+  readonly consolidatorLlmProvider?: string;
+  readonly consolidatorLlmModel?: string;
+  /**
+   * Cap on `distillThread` runs (manual and `autoDistill` alike), counted
+   * atomically in `memory` so several processes share it. Default
+   * `DEFAULT_DISTILL_RATE_LIMIT`; `false` turns it off. Applies to a
+   * supplied `consolidator` too.
+   */
+  readonly distillRateLimit?: ConsolidatorRateLimitConfig | false;
   /**
    * Auto-fire `compactThread` after each thread turn whose persisted
    * message count crosses `threshold`. Writes a `ThreadEpisode` covering
@@ -549,7 +575,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
   private resolveConsolidator(): Consolidator {
     if (this._consolidator) return this._consolidator;
     if (this.config.consolidator) {
-      this._consolidator = this.config.consolidator;
+      this._consolidator = this.rateLimited(this.config.consolidator);
       return this._consolidator;
     }
     if (!this.config.memory) {
@@ -557,14 +583,39 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
         "LocalAgent.{compact,distill}Thread: no MemoryStore configured. Pass `memory` (and optionally `consolidator`) in LocalAgentConfig.",
       );
     }
-    this._consolidator = new DefaultConsolidator({
+    const engine = this.config.agent;
+    const consolidatorLlm = this.config.consolidatorLlm;
+    const llmProvider =
+      this.config.consolidatorLlmProvider ?? (consolidatorLlm ? undefined : engine.llmProvider);
+    const llmModel =
+      this.config.consolidatorLlmModel ?? (consolidatorLlm ? undefined : engine.llmModel);
+    const inner = new DefaultConsolidator({
       store: this.config.memory,
       // Prefer the explicit distill model when set — distillation is
       // summarisation work, often cheaper to run with a faster/smaller
       // model than the chat path.
-      llm: this.config.consolidatorLlm ?? this.config.agent.llm,
+      llm: consolidatorLlm ?? engine.llm,
+      ...(engine.llmRetry !== undefined && { retry: engine.llmRetry }),
+      ...(engine.rateLimiter && { rateLimiter: engine.rateLimiter }),
+      ...(engine.clock && { clock: engine.clock }),
+      ...(engine.metrics && { metrics: engine.metrics }),
+      ...(engine.costs && { costs: engine.costs }),
+      ...(llmProvider !== undefined && { llmProvider }),
+      ...(llmModel !== undefined && { llmModel }),
+      ...(engine.metricLabels && { metricLabels: engine.metricLabels }),
     });
+    this._consolidator = this.rateLimited(inner);
     return this._consolidator;
+  }
+
+  /** `inner` behind the distill rate limit (`distillRateLimit`), when there is one. */
+  private rateLimited(inner: Consolidator): Consolidator {
+    const limits = this.config.distillRateLimit ?? DEFAULT_DISTILL_RATE_LIMIT;
+    // An already rate-limited consolidator keeps its own limits.
+    if (limits === false || !this.config.memory || inner instanceof RateLimitedConsolidator) {
+      return inner;
+    }
+    return new RateLimitedConsolidator({ inner, memory: this.config.memory, limits });
   }
 
   async compactThread(threadId: string, opts?: CompactThreadOptions): Promise<EpisodicRecord> {
@@ -629,7 +680,8 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
    * journals the result, so the retrievers run once per delegated call.
    */
   async prepareTurn(input: AgentInput): Promise<PreparedTurn> {
-    return { agentId: this.agentId(), input: await this.turnInput(input) };
+    const { input: turnInput } = await this.turnInput(input);
+    return { agentId: this.agentId(), input: turnInput };
   }
 
   /**
@@ -696,14 +748,20 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
    * input as a fenced reference-data message right before the task, so a
    * replay sees the same context without searching again.
    */
-  private async turnInput(input: AgentInput): Promise<TurnInput> {
+  private async turnInput(
+    input: AgentInput,
+  ): Promise<{ input: TurnInput; retrieverFailures: ReadonlyArray<RetrieverFailure> }> {
     const knowledge = await buildRetrieverContext({
       retrievers: this.config.retrievers,
       query: input.task,
+      ...(this.config.agent.clock && { clock: this.config.agent.clock }),
     });
     const messages: Message[] = [...(input.messages ?? [])];
-    if (knowledge) messages.push(referenceDataMessage(knowledge));
-    return { task: frameTask(input), messages };
+    if (knowledge.text) messages.push(referenceDataMessage(knowledge.text));
+    return {
+      input: { task: frameTask(input), messages },
+      retrieverFailures: knowledge.failures,
+    };
   }
 
   private async runOnce(params: {
@@ -749,11 +807,12 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     }
     const ceiling =
       budgets && namespaceId !== undefined ? await admitTurn({ budgets, namespaceId }) : undefined;
-    const turnInput = await this.turnInput(input);
+    const prepared = await this.turnInput(input);
+    emitRetrieverFailures({ bus, failures: prepared.retrieverFailures });
     return (await this.config.runner.run({
       workflow: wf,
       workflowId,
-      input: ceiling ? { ...turnInput, budget: ceiling } : turnInput,
+      input: ceiling ? { ...prepared.input, budget: ceiling } : prepared.input,
     })) as AgentResult;
   }
 }
@@ -1008,7 +1067,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
    * suspends again or is driven elsewhere stays as it is.
    */
   private async rerunRoot(root: WorkflowState): Promise<WorkflowState | null> {
-    const { persona } = await this.loadContext();
+    const persona = this.persona();
     try {
       await this.runWorkflow({
         workflowId: root.workflowId,
@@ -1187,7 +1246,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     // to the child (and the child to its own children), which consumes the
     // decision, so the whole chain finishes and the root commits once.
     const turn = await rootRun({ storage, run: wf });
-    const { persona } = await this.loadContext();
+    const persona = this.persona();
     let result: AgentResult;
     try {
       result = await this.runRootPastSiblings({
@@ -1319,7 +1378,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       // A retry of a turn that already started: its input is fixed, and
       // must be for the same task.
       assertSameTask({ workflowId, input: existing.input, task: frameTask(input) });
-      const { persona } = await this.loadContext();
+      const persona = this.persona();
       const result = await this.runWorkflow({
         workflowId,
         input: existing.input as AgentRunInput,
@@ -1364,19 +1423,21 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     const knowledge = await buildRetrieverContext({
       retrievers: this.deps.retrievers,
       query: input.task,
+      ...(this.deps.engine.clock && { clock: this.deps.engine.clock }),
     });
     const seed: Message[] = [];
     if (instructions) seed.push({ role: "system", content: instructions });
     if (reference) seed.push(referenceDataMessage(reference));
     seed.push(...history);
     if (input.messages) seed.push(...input.messages);
-    if (knowledge) seed.push(referenceDataMessage(knowledge));
+    if (knowledge.text) seed.push(referenceDataMessage(knowledge.text));
 
     const result = await this.runWorkflow({
       workflowId,
       input: { task: frameTask(input), messages: seed, ...(ceiling && { budget: ceiling }) },
       persona,
       capture,
+      retrieverFailures: knowledge.failures,
       ...(input.source !== undefined && { source: input.source }),
     });
     await this.afterTurn();
@@ -1390,10 +1451,13 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     persona: string | undefined;
     capture: RunCapture;
     source?: AgentInputSource;
+    /** Context-mode retrievers that failed while the turn was prepared. */
+    retrieverFailures?: ReadonlyArray<RetrieverFailure>;
   }): Promise<AgentResult> {
     const { workflowId, input, persona, capture, source } = params;
     const bus = new SessionEventBus();
     bus.subscribe((e) => recordEvent(capture, e));
+    emitRetrieverFailures({ bus, failures: params.retrieverFailures ?? [] });
     const wf = buildTurnWorkflow<TOutput>({
       engine: { ...this.deps.engine, systemPrompt: persona },
       bus,
@@ -1503,6 +1567,11 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     }
   }
 
+  /** The agent's static persona prompt (the engine's system prompt). */
+  private persona(): string | undefined {
+    return this.deps.engine.systemPrompt?.trim() || undefined;
+  }
+
   /**
    * Load the thread's prompt-ready view via `MemoryStore.resolveContext`.
    * Returns the agent's static persona prompt, the operator-authored
@@ -1511,6 +1580,10 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
    * blocks, so each gets its own prompt-cache breakpoint at the adapter
    * layer and a rules edit doesn't invalidate the cached persona; the
    * reference block becomes a user-role data message.
+   *
+   * A failure to resolve fails the turn: running it without the
+   * namespace rules, or with the whole unbudgeted transcript, would be
+   * silently wrong. (A fresh thread with no row yet resolves fine.)
    *
    * In-memory fallback (no `MemoryStore`) returns the raw message
    * buffer with no memory blocks.
@@ -1521,7 +1594,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     reference: string | undefined;
     messages: Message[];
   }> {
-    const persona = this.deps.engine.systemPrompt?.trim() || undefined;
+    const persona = this.persona();
 
     if (!this.deps.memory) {
       return {
@@ -1533,20 +1606,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     }
 
     const budget = this.deps.contextBudget ?? DEFAULT_CONTEXT_BUDGET;
-    let resolved: ResolvedContext;
-    try {
-      resolved = await this.deps.memory.resolveContext(this.deps.key, budget);
-    } catch {
-      // Thread row may not exist yet on a fresh send — fall back to
-      // raw messages so the first turn still runs cleanly.
-      const stored = await this.deps.memory.getMessages(this.deps.key).catch(() => []);
-      return {
-        persona,
-        instructions: undefined,
-        reference: undefined,
-        messages: stored.map((m) => stripStorageMeta(m)),
-      };
-    }
+    const resolved = await this.deps.memory.resolveContext(this.deps.key, budget);
 
     return {
       persona,
@@ -1646,6 +1706,22 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
  * ceiling left by the thread's and namespace's budgets.
  */
 type AgentRunInput = { task: string; messages: Message[]; budget?: TurnBudget };
+
+/** Report the context-mode retrievers a turn went on without, as `retriever.failed` events. */
+function emitRetrieverFailures(params: {
+  bus: SessionEventBus;
+  failures: ReadonlyArray<RetrieverFailure>;
+}): void {
+  for (const f of params.failures) {
+    params.bus.emit({
+      type: "retriever.failed",
+      turn: 0,
+      bindingId: f.bindingId,
+      error: f.error,
+      timedOut: f.timedOut,
+    });
+  }
+}
 
 /** `decidedBy` of an approval the agent closed itself (expired, or its turn ended). */
 const SYSTEM_DECIDER = "system";

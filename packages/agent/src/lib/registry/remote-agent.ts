@@ -277,6 +277,13 @@ export class RemoteAgent implements Agent {
     if (this.cfg.resourceId) qp.set("resourceId", this.cfg.resourceId);
     if (params?.q) qp.set("q", params.q);
     if (params?.limit !== undefined) qp.set("limit", String(params.limit));
+    if (params?.cursor !== undefined) qp.set("cursor", params.cursor);
+    if (params?.order !== undefined) qp.set("order", params.order);
+    if (params?.metadataFilter !== undefined) {
+      qp.set("metadata", JSON.stringify(params.metadataFilter));
+    }
+    // The gateway lists active threads unless told otherwise; omitted means every thread.
+    qp.set("archived", params?.archived === undefined ? "all" : String(params.archived));
     const res = await this.http.call({
       method: "GET",
       path: `/api/agents/${enc(this.cfg.remoteAgentId)}/threads?${qp}`,
@@ -380,13 +387,17 @@ class RemoteAgentThread implements AgentThread {
     if (this.cfg.namespaceId) qp.set("namespaceId", this.cfg.namespaceId);
     if (this.cfg.resourceId) qp.set("resourceId", this.cfg.resourceId);
     if (range?.limit !== undefined) qp.set("limit", String(range.limit));
+    if (range?.fromSeq !== undefined) qp.set("fromSeq", String(range.fromSeq));
+    if (range?.toSeq !== undefined) qp.set("toSeq", String(range.toSeq));
     const res = await this.http.call({
       method: "GET",
       path: `${this.threadPath()}/messages?${qp}`,
     });
     if (!res.ok) return [];
     const body = JSON.parse(res.text) as { messages?: Message[] };
-    return body.messages ?? [];
+    // The gateway answers oldest-first.
+    const messages = body.messages ?? [];
+    return range?.order === "desc" ? messages.reverse() : messages;
   }
 
   // --- metadata stubs (no direct API today) --------------------------------

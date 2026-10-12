@@ -389,7 +389,12 @@ export class ZoryaServer {
     }
     if (this.dags) mountDags({ router, dags: this.dags, namespaces });
     if (this.knowledgeBases) {
-      mountKnowledgeBases({ router, knowledgeBases: this.knowledgeBases, agents: this.agents });
+      mountKnowledgeBases({
+        router,
+        knowledgeBases: this.knowledgeBases,
+        agents: this.agents,
+        namespaces,
+      });
     }
     mountSchedules({ router, scheduler: this.scheduler, storage, clock, namespaces });
     if (config.remoteWorkers) {

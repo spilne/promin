@@ -128,7 +128,7 @@ describe("InMemoryRetriever", () => {
       ],
     });
 
-    await retriever.deleteSource("returns");
+    await retriever.deleteSource({ sourceId: "returns" });
     const results = await retriever.retrieve({ query: "returns" });
 
     expect(results.map((r) => r.chunk.source.id)).toEqual(["refunds"]);

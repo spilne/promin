@@ -16,6 +16,7 @@
 import { sql, type SQL } from "drizzle-orm";
 import {
   FlatTextChunker,
+  type DeleteSourceRequest,
   type EmbeddingProvider,
   type KnowledgeChunk,
   type KnowledgeChunker,
@@ -60,6 +61,7 @@ interface PgVectorRetrieverRow {
   id: string;
   text: string;
   source_id: string;
+  source_version: string | null;
   source_title: string | null;
   source_uri: string | null;
   source_mime_type: string | null;
@@ -109,6 +111,7 @@ export class PgVectorRetriever implements IngestibleRetriever {
         id text PRIMARY KEY,
         text text NOT NULL,
         source_id text NOT NULL,
+        source_version text,
         source_title text,
         source_uri text,
         source_mime_type text,
@@ -157,9 +160,14 @@ export class PgVectorRetriever implements IngestibleRetriever {
     }
   }
 
-  /** Delete every chunk of a source (e.g. before re-ingesting it). */
-  async deleteSource(sourceId: string): Promise<void> {
-    await this.db.execute(sql`DELETE FROM ${this.table} WHERE source_id = ${sourceId}`);
+  /** Drop a source's chunks: all, one version, or all but one (see `DeleteSourceRequest`). */
+  async deleteSource(request: DeleteSourceRequest): Promise<void> {
+    const clauses: SQL[] = [sql`source_id = ${request.sourceId}`];
+    if (request.version !== undefined) clauses.push(sql`source_version = ${request.version}`);
+    if (request.keepVersion !== undefined) {
+      clauses.push(sql`source_version IS DISTINCT FROM ${request.keepVersion}`);
+    }
+    await this.db.execute(sql`DELETE FROM ${this.table} WHERE ${sql.join(clauses, sql` AND `)}`);
   }
 
   async retrieve(request: RetrieveRequest): Promise<RetrieveResult[]> {
@@ -170,7 +178,9 @@ export class PgVectorRetriever implements IngestibleRetriever {
       throw new Error("PgVectorRetriever: topK must be a positive integer");
     }
 
+    request.signal?.throwIfAborted();
     const vector = this.vectorParam(await this.embeddings.embed(query));
+    request.signal?.throwIfAborted();
     const rows = (await execRaw(
       this.db,
       sql`
@@ -178,6 +188,7 @@ export class PgVectorRetriever implements IngestibleRetriever {
           id,
           text,
           source_id,
+          source_version,
           source_title,
           source_uri,
           source_mime_type,
@@ -209,6 +220,7 @@ export class PgVectorRetriever implements IngestibleRetriever {
         id,
         text,
         source_id,
+        source_version,
         source_title,
         source_uri,
         source_mime_type,
@@ -225,6 +237,7 @@ export class PgVectorRetriever implements IngestibleRetriever {
         ${chunk.id},
         ${chunk.text},
         ${chunk.source.id},
+        ${chunk.source.version ?? null},
         ${chunk.source.title ?? null},
         ${chunk.source.uri ?? null},
         ${chunk.source.mimeType ?? null},
@@ -240,6 +253,7 @@ export class PgVectorRetriever implements IngestibleRetriever {
       ON CONFLICT (id) DO UPDATE SET
         text = EXCLUDED.text,
         source_id = EXCLUDED.source_id,
+        source_version = EXCLUDED.source_version,
         source_title = EXCLUDED.source_title,
         source_uri = EXCLUDED.source_uri,
         source_mime_type = EXCLUDED.source_mime_type,
@@ -281,6 +295,7 @@ export class PgVectorRetriever implements IngestibleRetriever {
 function rowToChunk(row: PgVectorRetrieverRow): KnowledgeChunk {
   const source: KnowledgeSource = {
     id: row.source_id,
+    ...(row.source_version !== null && { version: row.source_version }),
     ...(row.source_title !== null && { title: row.source_title }),
     ...(row.source_uri !== null && { uri: row.source_uri }),
     ...(row.source_mime_type !== null && { mimeType: row.source_mime_type }),

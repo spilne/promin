@@ -2,6 +2,14 @@
 // Managed knowledge-base routes — the dashboard's Knowledge page. Backed by
 // `ZoryaKnowledgeBases`; mounted only when the server is given one.
 //
+// Knowledge bases live in a namespace: every route except `_adapters` takes
+// `?namespaceId=` and acts on that namespace's bases only. With an
+// `authorizeScope` hook (the agents service's) the caller must be allowed
+// the namespace (403 `scope_forbidden`); with a namespace registry, writes
+// that put state into a namespace need it registered and active (404
+// `namespace_not_found`, 409 `namespace_archived`). Deletes are not checked
+// against the registry, so an archived namespace's bases can be cleaned up.
+//
 // Routes:
 //   GET    /api/knowledge-bases                        — list
 //   POST   /api/knowledge-bases                        — create (409 when the id is taken)
@@ -10,18 +18,19 @@
 //   PATCH  /api/knowledge-bases/:id                    — edit description / tags / metadata
 //   DELETE /api/knowledge-bases/:id                    — delete; 409 while recipes bind it
 //   GET    /api/knowledge-bases/:id/sources            — sources (without their text)
-//   POST   /api/knowledge-bases/:id/sources            — ingest one document
-//   POST   /api/knowledge-bases/:id/sources/import     — ingest through a source adapter
-//   POST   /api/knowledge-bases/:id/sources/:sourceId/reindex — re-ingest stored text
+//   POST   /api/knowledge-bases/:id/sources            — queue one document (202)
+//   POST   /api/knowledge-bases/:id/sources/import     — load through an adapter, queue (202)
+//   POST   /api/knowledge-bases/:id/sources/:sourceId/reindex — queue stored text again (202)
 //   DELETE /api/knowledge-bases/:id/sources/:sourceId  — remove a source and its chunks
 //   GET    /api/knowledge-bases/:id/chunks             — chunk inspection (paged)
 //   POST   /api/knowledge-bases/:id/search             — query the retriever
 //
-// Ingestion runs inside the request: an indexing failure (embedding provider
-// down, store error) answers 502 `ingest_failed` with the reason, and the
-// source is listed with status `failed` and that reason until it is
-// re-ingested. Bodies are bounded by the server's request body limit; a
-// source's text is also bounded by the service's `maxSourceCharacters`.
+// Ingestion runs in the background: the ingest, import and reindex routes
+// answer 202 with the queued source(s), status `pending`, and a `Location`
+// of the base's source listing, where each source moves to `ingesting`,
+// then `ready` or `failed` with the reason (embedding provider down, store
+// error). Bodies are bounded by the server's request body limit; a source's
+// text is also bounded by the service's `maxSourceCharacters`.
 // ---------------------------------------------------------------------------
 
 import {
@@ -30,14 +39,15 @@ import {
   type KnowledgeChunk,
   type RetrieveResult,
 } from "@promin/agent";
+import type { NamespaceRegistry } from "@promin/workflow";
 import { z } from "zod";
 import { BooleanQuery, limitQuery, OffsetQuery } from "../api-types.ts";
+import { requireActiveNamespace } from "../namespace-guard.ts";
 import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
-import { HttpError, created, json, noContent, ok } from "../router.ts";
+import { HttpError, accepted, created, json, noContent, ok } from "../router.ts";
 import {
   KnowledgeBaseExistsError,
   KnowledgeBaseNotFoundError,
-  KnowledgeIngestError,
   KnowledgeInputError,
   KnowledgeSourceImportError,
   KnowledgeSourceNotFoundError,
@@ -45,11 +55,13 @@ import {
 } from "../services/knowledge/errors.ts";
 import {
   KNOWLEDGE_BASE_ID_PATTERN,
+  MAX_KNOWLEDGE_NAMESPACE_LENGTH,
   MAX_KNOWLEDGE_SOURCE_ID_LENGTH,
   type KnowledgeBase,
   type KnowledgeSourceSummary,
   type ZoryaKnowledgeBases,
 } from "../services/knowledge/zorya-knowledge-bases.ts";
+import type { ScopeAuthorizer } from "./agent-gateway-kit.ts";
 
 export type {
   KnowledgeBase,
@@ -60,6 +72,10 @@ export interface KnowledgeBaseGatewayDeps {
   readonly knowledgeBases: ZoryaKnowledgeBases;
   /** Agent recipes — ones that bind a base block its delete. */
   readonly agents?: AgentRegistry;
+  /** Binds the requested namespace to the caller. See `ScopeAuthorizer`. */
+  readonly authorizeScope?: ScopeAuthorizer;
+  /** When set, writes need a registered, active namespace. */
+  readonly namespaces?: NamespaceRegistry;
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +137,11 @@ const SourceId = z.string().trim().min(1).max(MAX_KNOWLEDGE_SOURCE_ID_LENGTH);
 const Tags = z.array(z.string().max(128)).max(64);
 const Metadata = z.record(z.string(), z.unknown());
 const Description = z.string().max(2_000);
+
+/** `?namespaceId=` of every route but `_adapters`: the namespace the bases live in. */
+export const KnowledgeNamespaceQuerySchema = z.object({
+  namespaceId: z.string().min(1).max(MAX_KNOWLEDGE_NAMESPACE_LENGTH),
+});
 
 export const KnowledgeBaseParamsSchema = z.object({ id: z.string().min(1).max(256) });
 export const KnowledgeSourceParamsSchema = KnowledgeBaseParamsSchema.extend({
@@ -198,11 +219,39 @@ export type KnowledgeSearchRequest = z.infer<typeof KnowledgeSearchRequestSchema
 // Handlers
 // ---------------------------------------------------------------------------
 
+/**
+ * The namespace a request names in `?namespaceId=`, after the caller's
+ * `authorizeScope` allowed it (403 `scope_forbidden` otherwise) and — for
+ * writes, with a namespace registry — after the namespace was found active.
+ */
+async function scopedNamespace(params: {
+  deps: KnowledgeBaseGatewayDeps;
+  req: Request;
+  write: boolean;
+}): Promise<string> {
+  const { deps, req } = params;
+  const { namespaceId } = parseQuery({ req, schema: KnowledgeNamespaceQuerySchema });
+  if (deps.authorizeScope && !(await deps.authorizeScope({ req, scope: { namespaceId } }))) {
+    throw new HttpError({ status: 403, code: "scope_forbidden" });
+  }
+  if (params.write) {
+    await requireActiveNamespace({ registry: deps.namespaces, namespace: namespaceId });
+  }
+  return namespaceId;
+}
+
+/** `Location` of a base's source listing, where queued ingestions report their outcome. */
+function sourcesLocation(params: { namespaceId: string; id: string }): string {
+  return `/api/knowledge-bases/${encodeURIComponent(params.id)}/sources?namespaceId=${encodeURIComponent(params.namespaceId)}`;
+}
+
 export function listKnowledgeBases(deps: KnowledgeBaseGatewayDeps) {
-  return async (): Promise<Response> =>
-    ok({
-      knowledgeBases: await deps.knowledgeBases.list(),
+  return async (req: Request): Promise<Response> => {
+    const namespaceId = await scopedNamespace({ deps, req, write: false });
+    return ok({
+      knowledgeBases: await deps.knowledgeBases.list({ namespaceId }),
     } satisfies KnowledgeBasesListResponse);
+  };
 }
 
 export function listKnowledgeSourceAdapters(deps: KnowledgeBaseGatewayDeps) {
@@ -211,10 +260,11 @@ export function listKnowledgeSourceAdapters(deps: KnowledgeBaseGatewayDeps) {
 }
 
 export function getKnowledgeBase(deps: KnowledgeBaseGatewayDeps) {
-  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const { id } = parseParams({ params, schema: KnowledgeBaseParamsSchema });
-    const base = await deps.knowledgeBases.get(id);
-    if (!base) throw mapError(new KnowledgeBaseNotFoundError(id));
+    const namespaceId = await scopedNamespace({ deps, req, write: false });
+    const base = await deps.knowledgeBases.get({ namespaceId, id });
+    if (!base) throw mapError(new KnowledgeBaseNotFoundError({ namespaceId, id }));
     return ok(base);
   };
 }
@@ -222,7 +272,8 @@ export function getKnowledgeBase(deps: KnowledgeBaseGatewayDeps) {
 export function createKnowledgeBase(deps: KnowledgeBaseGatewayDeps) {
   return async (req: Request): Promise<Response> => {
     const body = await parseBody({ req, schema: KnowledgeBaseCreateRequestSchema });
-    return created(await guard(() => deps.knowledgeBases.create(body)));
+    const namespaceId = await scopedNamespace({ deps, req, write: true });
+    return created(await guard(() => deps.knowledgeBases.create({ ...body, namespaceId })));
   };
 }
 
@@ -230,7 +281,8 @@ export function updateKnowledgeBase(deps: KnowledgeBaseGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const { id } = parseParams({ params, schema: KnowledgeBaseParamsSchema });
     const patch = await parseBody({ req, schema: KnowledgeBasePatchRequestSchema });
-    return ok(await guard(() => deps.knowledgeBases.update({ id, patch })));
+    const namespaceId = await scopedNamespace({ deps, req, write: true });
+    return ok(await guard(() => deps.knowledgeBases.update({ namespaceId, id, patch })));
   };
 }
 
@@ -238,7 +290,9 @@ export function deleteKnowledgeBase(deps: KnowledgeBaseGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const { id } = parseParams({ params, schema: KnowledgeBaseParamsSchema });
     const { force } = parseQuery({ req, schema: KnowledgeBaseDeleteQuerySchema });
-    if (!(await deps.knowledgeBases.get(id))) throw mapError(new KnowledgeBaseNotFoundError(id));
+    const namespaceId = await scopedNamespace({ deps, req, write: false });
+    const key = { namespaceId, id };
+    if (!(await deps.knowledgeBases.get(key))) throw mapError(new KnowledgeBaseNotFoundError(key));
     if (!force && deps.agents) {
       const agents = await agentsBinding({ agents: deps.agents, baseId: id });
       if (agents.length > 0) {
@@ -250,15 +304,16 @@ export function deleteKnowledgeBase(deps: KnowledgeBaseGatewayDeps) {
         } satisfies KnowledgeBaseInUseResponse);
       }
     }
-    await guard(() => deps.knowledgeBases.remove(id));
+    await guard(() => deps.knowledgeBases.remove(key));
     return noContent();
   };
 }
 
 export function listKnowledgeSources(deps: KnowledgeBaseGatewayDeps) {
-  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const { id } = parseParams({ params, schema: KnowledgeBaseParamsSchema });
-    const sources = await guard(() => deps.knowledgeBases.listSources(id));
+    const namespaceId = await scopedNamespace({ deps, req, write: false });
+    const sources = await guard(() => deps.knowledgeBases.listSources({ namespaceId, baseId: id }));
     return ok({ sources } satisfies KnowledgeSourcesResponse);
   };
 }
@@ -267,7 +322,11 @@ export function ingestKnowledgeSource(deps: KnowledgeBaseGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const { id } = parseParams({ params, schema: KnowledgeBaseParamsSchema });
     const source = await parseBody({ req, schema: KnowledgeSourceCreateRequestSchema });
-    return created(await guard(() => deps.knowledgeBases.ingest({ baseId: id, source })));
+    const namespaceId = await scopedNamespace({ deps, req, write: true });
+    const queued = await guard(() =>
+      deps.knowledgeBases.ingest({ namespaceId, baseId: id, source }),
+    );
+    return accepted(queued, sourcesLocation({ namespaceId, id }));
   };
 }
 
@@ -275,24 +334,38 @@ export function importKnowledgeSources(deps: KnowledgeBaseGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const { id } = parseParams({ params, schema: KnowledgeBaseParamsSchema });
     const body = await parseBody({ req, schema: KnowledgeSourceImportRequestSchema });
+    const namespaceId = await scopedNamespace({ deps, req, write: true });
     const sources = await guard(() =>
-      deps.knowledgeBases.importSources({ baseId: id, kind: body.kind, config: body.config }),
+      deps.knowledgeBases.importSources({
+        namespaceId,
+        baseId: id,
+        kind: body.kind,
+        config: body.config,
+      }),
     );
-    return created({ sources } satisfies KnowledgeSourcesImportResponse);
+    return accepted(
+      { sources } satisfies KnowledgeSourcesImportResponse,
+      sourcesLocation({ namespaceId, id }),
+    );
   };
 }
 
 export function reindexKnowledgeSource(deps: KnowledgeBaseGatewayDeps) {
-  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const { id, sourceId } = parseParams({ params, schema: KnowledgeSourceParamsSchema });
-    return ok(await guard(() => deps.knowledgeBases.reindexSource({ baseId: id, sourceId })));
+    const namespaceId = await scopedNamespace({ deps, req, write: true });
+    const queued = await guard(() =>
+      deps.knowledgeBases.reindexSource({ namespaceId, baseId: id, sourceId }),
+    );
+    return accepted(queued, sourcesLocation({ namespaceId, id }));
   };
 }
 
 export function deleteKnowledgeSource(deps: KnowledgeBaseGatewayDeps) {
-  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const { id, sourceId } = parseParams({ params, schema: KnowledgeSourceParamsSchema });
-    await guard(() => deps.knowledgeBases.removeSource({ baseId: id, sourceId }));
+    const namespaceId = await scopedNamespace({ deps, req, write: false });
+    await guard(() => deps.knowledgeBases.removeSource({ namespaceId, baseId: id, sourceId }));
     return noContent();
   };
 }
@@ -301,8 +374,10 @@ export function listKnowledgeChunks(deps: KnowledgeBaseGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const { id } = parseParams({ params, schema: KnowledgeBaseParamsSchema });
     const query = parseQuery({ req, schema: KnowledgeChunksQuerySchema });
+    const namespaceId = await scopedNamespace({ deps, req, write: false });
     const page = await guard(() =>
       deps.knowledgeBases.chunks({
+        namespaceId,
         baseId: id,
         limit: query.limit,
         offset: query.offset,
@@ -317,14 +392,17 @@ export function searchKnowledgeBase(deps: KnowledgeBaseGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const { id } = parseParams({ params, schema: KnowledgeBaseParamsSchema });
     const body = await parseBody({ req, schema: KnowledgeSearchRequestSchema });
+    const namespaceId = await scopedNamespace({ deps, req, write: false });
+    const key = { namespaceId, id };
     const filter = {
       ...(body.tags !== undefined && body.tags.length > 0 && { tags: body.tags }),
       ...(body.metadata !== undefined && { metadata: body.metadata }),
     };
-    if (!(await deps.knowledgeBases.get(id))) throw mapError(new KnowledgeBaseNotFoundError(id));
+    if (!(await deps.knowledgeBases.get(key))) throw mapError(new KnowledgeBaseNotFoundError(key));
     let results: RetrieveResult[];
     try {
       results = await deps.knowledgeBases.search({
+        namespaceId,
         baseId: id,
         request: {
           query: body.query,
@@ -371,9 +449,6 @@ function mapError(err: unknown): unknown {
     return err.reason === "invalid"
       ? new HttpError({ status: 400, code: "invalid_source_config", message: err.message })
       : new HttpError({ status: 502, code: "source_unavailable", message: err.message });
-  }
-  if (err instanceof KnowledgeIngestError) {
-    return new HttpError({ status: 502, code: "ingest_failed", message: err.message });
   }
   return err;
 }

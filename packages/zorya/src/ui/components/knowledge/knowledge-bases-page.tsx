@@ -3,9 +3,11 @@
 // on the left; on the right, test retrieval the way an agent's search tool
 // runs it, add sources (paste text, upload a text file, or import a URL when
 // the server registers the `url` adapter), and inspect each source's chunks.
-// A source whose indexing failed is listed with the reason and can be
-// re-indexed from its stored text. Agents bind a base by id in the agent
-// editor's Knowledge / RAG section.
+// Sources are indexed in the background: a new source is listed as pending,
+// then ingesting, then ready — or failed with the reason, re-indexable from
+// its stored text. The page polls while sources wait. Knowledge bases live
+// in the namespace picked in the sidebar; agents running in that namespace
+// bind a base by id in the agent editor's Knowledge / RAG section.
 // ---------------------------------------------------------------------------
 
 import { useEffect, useMemo, useState } from "preact/hooks";
@@ -18,6 +20,7 @@ import type {
   KnowledgeSourceSummary,
 } from "../../../server/routes/knowledge-bases.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
+import { useNamespace } from "../../hooks/use-namespace.ts";
 import { confirm, toast } from "../../lib/dialogs.ts";
 import { Page, PageHeader } from "../ui/page.tsx";
 import { SkeletonRows } from "../ui/skeleton.tsx";
@@ -28,10 +31,38 @@ type AddMode = "paste" | "file" | "url";
 /** Uploads go through the JSON API, whose body cap defaults to 1 MiB. */
 const MAX_UPLOAD_BYTES = 900_000;
 
+/** How often the page re-reads while sources wait for ingestion, in ms. */
+const INGESTION_POLL_MS = 2_000;
+
 export function KnowledgeBasesPage() {
-  const { data, loading, error, refresh } = useFetch(() => api.listKnowledgeBases(), [], 0);
+  const [namespaceId] = useNamespace();
+  if (!namespaceId) {
+    return (
+      <Page>
+        <PageHeader title="Knowledge bases" eyebrow="Agent runtime" />
+        <div class="card bg-base-100 shadow p-10 text-center">
+          <div class="font-semibold">Pick a namespace</div>
+          <p class="mx-auto mt-2 max-w-md text-xs text-base-content/50">
+            Knowledge bases belong to a namespace, and agents bind the bases of the namespace they
+            run in. Choose one in the sidebar's namespace switcher.
+          </p>
+        </div>
+      </Page>
+    );
+  }
+  return <NamespaceKnowledgeBases key={namespaceId} namespaceId={namespaceId} />;
+}
+
+function NamespaceKnowledgeBases({ namespaceId }: { namespaceId: string }) {
+  const [poll, setPoll] = useState(false);
+  const { data, loading, error, refresh } = useFetch(
+    () => api.listKnowledgeBases({ namespaceId }),
+    [namespaceId],
+    poll ? INGESTION_POLL_MS : 0,
+  );
   const { data: adapters } = useFetch(() => api.listKnowledgeSourceAdapters(), [], 0);
   const bases = useMemo(() => data?.knowledgeBases ?? [], [data]);
+  useEffect(() => setPoll(bases.some((base) => base.status === "ingesting")), [bases]);
   const [selectedId, setSelectedId] = useState("");
   const [tab, setTab] = useState<WorkspaceTab>("search");
   const [showCreate, setShowCreate] = useState(false);
@@ -55,7 +86,7 @@ export function KnowledgeBasesPage() {
       return;
     }
     try {
-      await api.deleteKnowledgeBase(id);
+      await api.deleteKnowledgeBase({ namespaceId, id });
     } catch (err) {
       if (!(err instanceof ApiError && err.code === "knowledge_base_in_use")) {
         toast(errorMessage(err), { variant: "error" });
@@ -69,7 +100,7 @@ export function KnowledgeBasesPage() {
       });
       if (!force) return;
       try {
-        await api.deleteKnowledgeBase(id, { force: true });
+        await api.deleteKnowledgeBase({ namespaceId, id, force: true });
       } catch (forced) {
         toast(errorMessage(forced), { variant: "error" });
         return;
@@ -87,9 +118,9 @@ export function KnowledgeBasesPage() {
         eyebrow="Agent runtime"
         description={
           <>
-            Named document collections agents search. Add sources here, test retrieval, then bind a
-            base to an agent in its editor's Knowledge / RAG section — the agent gets a search tool
-            or injected context backed by it.
+            Named document collections agents in <span class="font-mono">{namespaceId}</span>{" "}
+            search. Add sources here, test retrieval, then bind a base to an agent in its editor's
+            Knowledge / RAG section — the agent gets a search tool or injected context backed by it.
           </>
         }
         actions={
@@ -113,6 +144,7 @@ export function KnowledgeBasesPage() {
 
       {showCreate && (
         <CreateKnowledgeBaseForm
+          namespaceId={namespaceId}
           existingIds={bases.map((b) => b.id)}
           onCancel={() => setShowCreate(false)}
           onCreated={(base) => {
@@ -156,8 +188,8 @@ export function KnowledgeBasesPage() {
                       <div class="truncate font-mono text-xs">{base.id}</div>
                       <div class="text-[11px] opacity-60">
                         {base.sourceCount} sources · {base.chunkCount} chunks
-                        {base.status === "degraded" && (
-                          <span class="text-warning"> · degraded</span>
+                        {base.status !== "ready" && (
+                          <span class={statusText(base.status)}> · {base.status}</span>
                         )}
                       </div>
                     </div>
@@ -171,6 +203,7 @@ export function KnowledgeBasesPage() {
         {selected ? (
           <KnowledgeWorkspace
             key={selected.id}
+            namespaceId={namespaceId}
             base={selected}
             tab={tab}
             setTab={setTab}
@@ -202,6 +235,7 @@ export function KnowledgeBasesPage() {
 }
 
 function CreateKnowledgeBaseForm(props: {
+  namespaceId: string;
   existingIds: ReadonlyArray<string>;
   onCancel: () => void;
   onCreated: (base: KnowledgeBase) => void;
@@ -219,9 +253,12 @@ function CreateKnowledgeBaseForm(props: {
     setSaving(true);
     try {
       const base = await api.createKnowledgeBase({
-        id: id.trim(),
-        ...(description.trim() && { description: description.trim() }),
-        ...(splitTags(tags).length > 0 && { tags: splitTags(tags) }),
+        namespaceId: props.namespaceId,
+        body: {
+          id: id.trim(),
+          ...(description.trim() && { description: description.trim() }),
+          ...(splitTags(tags).length > 0 && { tags: splitTags(tags) }),
+        },
       });
       toast(`Created knowledge base "${base.id}"`, { variant: "success" });
       props.onCreated(base);
@@ -290,6 +327,7 @@ function CreateKnowledgeBaseForm(props: {
 }
 
 function KnowledgeWorkspace(props: {
+  namespaceId: string;
   base: KnowledgeBase;
   tab: WorkspaceTab;
   setTab: (tab: WorkspaceTab) => void;
@@ -297,10 +335,17 @@ function KnowledgeWorkspace(props: {
   onChanged: () => void;
   onDelete: () => void;
 }) {
-  const { base, tab, setTab } = props;
-  const sources = useFetch(() => api.listKnowledgeSources(base.id), [base.id, base.updatedAt], 0);
+  const { base, tab, setTab, namespaceId } = props;
+  const [poll, setPoll] = useState(false);
+  const sources = useFetch(
+    () => api.listKnowledgeSources({ namespaceId, id: base.id }),
+    [namespaceId, base.id, base.updatedAt],
+    poll ? INGESTION_POLL_MS : 0,
+  );
   const sourceList = sources.data?.sources ?? [];
   const failed = sourceList.filter((s) => s.status === "failed").length;
+  const queued = sourceList.filter((s) => s.status === "pending" || s.status === "ingesting");
+  useEffect(() => setPoll(queued.length > 0), [queued.length]);
 
   const changed = () => {
     sources.refresh();
@@ -313,11 +358,7 @@ function KnowledgeWorkspace(props: {
         <div class="min-w-0">
           <div class="flex flex-wrap items-center gap-2">
             <h3 class="truncate font-mono text-lg font-semibold">{base.id}</h3>
-            <span
-              class={`badge badge-sm ${base.status === "degraded" ? "badge-warning" : "badge-success"}`}
-            >
-              {base.status}
-            </span>
+            <span class={`badge badge-sm ${statusBadge(base.status)}`}>{base.status}</span>
             {base.tags.map((tag) => (
               <span key={tag} class="badge badge-sm badge-outline">
                 {tag}
@@ -326,13 +367,20 @@ function KnowledgeWorkspace(props: {
           </div>
           <p class="mt-1 text-xs text-base-content/50">{base.description ?? "No description"}</p>
           <p class="mt-1 font-mono text-[11px] text-base-content/40">
-            backend.knowledge: [{"{"} id: "{base.id}" {"}"}]
+            backend.knowledge: [{"{"} id: "{base.id}" {"}"}] · agents in {namespaceId}
           </p>
         </div>
         <button type="button" class="btn btn-sm btn-ghost text-error" onClick={props.onDelete}>
           Delete
         </button>
       </div>
+
+      {queued.length > 0 && (
+        <div class="alert alert-info text-xs">
+          {queued.length} source{queued.length === 1 ? "" : "s"} waiting for indexing; this page
+          refreshes until {queued.length === 1 ? "it is" : "they are"} done.
+        </div>
+      )}
 
       {failed > 0 && (
         <div class="alert alert-warning text-xs">
@@ -353,20 +401,21 @@ function KnowledgeWorkspace(props: {
         </TabButton>
       </div>
 
-      {tab === "search" && <SearchPanel baseId={base.id} />}
+      {tab === "search" && <SearchPanel namespaceId={namespaceId} baseId={base.id} />}
       {tab === "add" && (
         <AddSourcePanel
+          namespaceId={namespaceId}
           baseId={base.id}
           canImportUrl={props.canImportUrl}
           onAdded={() => {
             changed();
             setTab("sources");
           }}
-          onFailed={changed}
         />
       )}
       {tab === "sources" && (
         <SourcesPanel
+          namespaceId={namespaceId}
           baseId={base.id}
           sources={sourceList}
           loading={sources.loading && !sources.data}
@@ -392,7 +441,7 @@ function TabButton(props: { active: boolean; onClick: () => void; children: Comp
   );
 }
 
-function SearchPanel({ baseId }: { baseId: string }) {
+function SearchPanel({ namespaceId, baseId }: { namespaceId: string; baseId: string }) {
   const [query, setQuery] = useState("");
   const [topK, setTopK] = useState(8);
   const [submitted, setSubmitted] = useState("");
@@ -408,7 +457,10 @@ function SearchPanel({ baseId }: { baseId: string }) {
     setErr(null);
     setSubmitted(q);
     try {
-      setResults((await api.searchKnowledgeBase(baseId, { query: q, topK })).results);
+      setResults(
+        (await api.searchKnowledgeBase({ namespaceId, id: baseId, body: { query: q, topK } }))
+          .results,
+      );
     } catch (e) {
       setResults([]);
       setErr(errorMessage(e));
@@ -514,10 +566,10 @@ function ResultCard({ result }: { result: KnowledgeSearchResultDto }) {
 }
 
 function AddSourcePanel(props: {
+  namespaceId: string;
   baseId: string;
   canImportUrl: boolean;
   onAdded: () => void;
-  onFailed: () => void;
 }) {
   const [mode, setMode] = useState<AddMode>("paste");
   const [sourceId, setSourceId] = useState("");
@@ -543,25 +595,35 @@ function AddSourcePanel(props: {
     const tagList = splitTags(tags);
     try {
       if (mode === "url") {
-        const { sources } = await api.importKnowledgeSources(props.baseId, {
-          kind: "url",
-          config: {
-            url: url.trim(),
-            ...(sourceId.trim() && { id: sourceId.trim() }),
+        const { sources } = await api.importKnowledgeSources({
+          namespaceId: props.namespaceId,
+          id: props.baseId,
+          body: {
+            kind: "url",
+            config: {
+              url: url.trim(),
+              ...(sourceId.trim() && { id: sourceId.trim() }),
+              ...(title.trim() && { title: title.trim() }),
+              ...(tagList.length > 0 && { tags: tagList }),
+            },
+          },
+        });
+        toast(`Imported ${sources.map((s) => s.id).join(", ")}; indexing in the background`, {
+          variant: "success",
+        });
+      } else {
+        const source = await api.ingestKnowledgeSource({
+          namespaceId: props.namespaceId,
+          id: props.baseId,
+          body: {
+            id: sourceId.trim(),
+            text,
             ...(title.trim() && { title: title.trim() }),
+            ...(fileName && mode === "file" && { uri: fileName }),
             ...(tagList.length > 0 && { tags: tagList }),
           },
         });
-        toast(`Imported ${sources.map((s) => s.id).join(", ")}`, { variant: "success" });
-      } else {
-        const source = await api.ingestKnowledgeSource(props.baseId, {
-          id: sourceId.trim(),
-          text,
-          ...(title.trim() && { title: title.trim() }),
-          ...(fileName && mode === "file" && { uri: fileName }),
-          ...(tagList.length > 0 && { tags: tagList }),
-        });
-        toast(`Indexed "${source.id}" into ${source.chunkCount} chunks`, { variant: "success" });
+        toast(`Queued "${source.id}"; indexing in the background`, { variant: "success" });
       }
       setSourceId("");
       setTitle("");
@@ -572,8 +634,6 @@ function AddSourcePanel(props: {
       props.onAdded();
     } catch (e) {
       setErr(errorMessage(e));
-      // A failed ingestion is still recorded as a failed source.
-      if (e instanceof ApiError && e.code === "ingest_failed") props.onFailed();
     } finally {
       setBusy(false);
     }
@@ -602,7 +662,8 @@ function AddSourcePanel(props: {
     <form class="card bg-base-100 shadow p-4 space-y-3" onSubmit={submit}>
       <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <p class="text-xs text-base-content/50">
-          Sources are chunked and indexed on submit. Re-using a source id replaces that source.
+          Sources are chunked and indexed in the background after submit. Re-using a source id
+          replaces that source once the new version is indexed.
         </p>
         <div class="join" role="tablist" aria-label="Source type">
           {modes.map((m) => (
@@ -691,7 +752,7 @@ function AddSourcePanel(props: {
 
       <div class="flex justify-end">
         <button type="submit" class="btn btn-sm btn-primary" disabled={!ready || busy}>
-          {busy ? "Indexing…" : mode === "url" ? "Import and index" : "Add source"}
+          {busy ? "Submitting…" : mode === "url" ? "Import and index" : "Add source"}
         </button>
       </div>
     </form>
@@ -710,20 +771,27 @@ function Field(props: { label: string; children: ComponentChildren }) {
 const CHUNK_PAGE = 50;
 
 function SourcesPanel(props: {
+  namespaceId: string;
   baseId: string;
   sources: KnowledgeSourceSummary[];
   loading: boolean;
   error?: string;
   onChanged: () => void;
 }) {
-  const { baseId, sources } = props;
+  const { namespaceId, baseId, sources } = props;
   const [inspected, setInspected] = useState<{ sourceId: string; page: KnowledgeChunksResponse }>();
   const [busy, setBusy] = useState<string | null>(null);
 
   const inspect = async (params: { sourceId: string; offset?: number }) => {
     const { sourceId, offset = 0 } = params;
     try {
-      const page = await api.listKnowledgeChunks(baseId, { sourceId, limit: CHUNK_PAGE, offset });
+      const page = await api.listKnowledgeChunks({
+        namespaceId,
+        id: baseId,
+        sourceId,
+        limit: CHUNK_PAGE,
+        offset,
+      });
       setInspected((prev) =>
         prev && prev.sourceId === sourceId && offset > 0
           ? { sourceId, page: { ...page, chunks: [...prev.page.chunks, ...page.chunks] } }
@@ -737,8 +805,8 @@ function SourcesPanel(props: {
   const reindex = async (sourceId: string) => {
     setBusy(sourceId);
     try {
-      const source = await api.reindexKnowledgeSource(baseId, sourceId);
-      toast(`Re-indexed "${source.id}" into ${source.chunkCount} chunks`, { variant: "success" });
+      const source = await api.reindexKnowledgeSource({ namespaceId, id: baseId, sourceId });
+      toast(`Queued "${source.id}" for re-indexing`, { variant: "success" });
     } catch (e) {
       toast(errorMessage(e), { variant: "error" });
     } finally {
@@ -760,7 +828,7 @@ function SourcesPanel(props: {
     }
     setBusy(sourceId);
     try {
-      await api.deleteKnowledgeSource(baseId, sourceId);
+      await api.deleteKnowledgeSource({ namespaceId, id: baseId, sourceId });
       if (inspected?.sourceId === sourceId) setInspected(undefined);
       toast(`Removed "${sourceId}"`, { variant: "success" });
     } catch (e) {
@@ -806,9 +874,7 @@ function SourcesPanel(props: {
                       </div>
                     </td>
                     <td>
-                      <span
-                        class={`badge badge-xs ${source.status === "failed" ? "badge-error" : "badge-success"}`}
-                      >
+                      <span class={`badge badge-xs ${statusBadge(source.status)}`}>
                         {source.status}
                       </span>
                       {source.error && (
@@ -827,16 +893,16 @@ function SourcesPanel(props: {
                         >
                           Chunks
                         </button>
-                      ) : (
+                      ) : source.status === "failed" ? (
                         <button
                           type="button"
                           class="btn btn-xs btn-ghost"
                           disabled={busy === source.id}
                           onClick={() => void reindex(source.id)}
                         >
-                          {busy === source.id ? "Indexing…" : "Re-index"}
+                          {busy === source.id ? "Queueing…" : "Re-index"}
                         </button>
-                      )}
+                      ) : null}
                       <button
                         type="button"
                         class="btn btn-xs btn-ghost text-error"
@@ -898,6 +964,19 @@ function SourcesPanel(props: {
       )}
     </div>
   );
+}
+
+/** Badge class of a base or source status. */
+function statusBadge(status: string): string {
+  if (status === "ready") return "badge-success";
+  if (status === "failed") return "badge-error";
+  if (status === "degraded") return "badge-warning";
+  return "badge-info";
+}
+
+/** Text class of a base status in the base list. */
+function statusText(status: string): string {
+  return status === "degraded" ? "text-warning" : "text-info";
 }
 
 function splitTags(raw: string): string[] {

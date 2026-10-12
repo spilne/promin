@@ -47,7 +47,9 @@ describe("RemoteAgent timeouts", () => {
     clock.advance(DEFAULT_REMOTE_REQUEST_TIMEOUT_MS);
     const { error } = await listing;
     expect(String(error)).toContain("timed out");
-    expect(seen).toEqual(["GET https://peer.example/api/agents/peer/threads?namespaceId=acme"]);
+    expect(seen).toEqual([
+      "GET https://peer.example/api/agents/peer/threads?namespaceId=acme&archived=all",
+    ]);
     expect(clock.pendingCount()).toBe(0);
   });
 

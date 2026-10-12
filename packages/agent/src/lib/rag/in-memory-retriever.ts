@@ -1,13 +1,15 @@
 import type { EmbeddingProvider } from "../embedding-provider.ts";
 import { FlatTextChunker } from "./chunking.ts";
-import type {
-  IngestibleRetriever,
-  KnowledgeChunk,
-  KnowledgeChunker,
-  KnowledgeIngestDocument,
-  RetrieveRequest,
-  RetrieveResult,
-  RetrieverFilter,
+import {
+  deletesVersion,
+  type DeleteSourceRequest,
+  type IngestibleRetriever,
+  type KnowledgeChunk,
+  type KnowledgeChunker,
+  type KnowledgeIngestDocument,
+  type RetrieveRequest,
+  type RetrieveResult,
+  type RetrieverFilter,
 } from "./types.ts";
 
 export interface InMemoryRetrieverConfig {
@@ -72,16 +74,19 @@ export class InMemoryRetriever implements IngestibleRetriever {
     }
   }
 
-  /** Drop every chunk that belongs to `sourceId` (e.g. before re-ingesting it). */
-  async deleteSource(sourceId: string): Promise<void> {
+  /** Drop a source's chunks: all, one version, or all but one (see `DeleteSourceRequest`). */
+  async deleteSource(request: DeleteSourceRequest): Promise<void> {
     for (let index = this.chunks.length - 1; index >= 0; index -= 1) {
-      if (this.chunks[index]!.chunk.source.id === sourceId) this.chunks.splice(index, 1);
+      const { source } = this.chunks[index]!.chunk;
+      if (source.id !== request.sourceId) continue;
+      if (deletesVersion({ request, version: source.version })) this.chunks.splice(index, 1);
     }
   }
 
   async retrieve(request: RetrieveRequest): Promise<RetrieveResult[]> {
     const query = request.query.trim();
     if (!query) return [];
+    request.signal?.throwIfAborted();
 
     const candidates = this.chunks.filter(({ chunk }) =>
       matchesFilter({ chunk, filter: request.filter }),
@@ -89,6 +94,7 @@ export class InMemoryRetriever implements IngestibleRetriever {
     const queryEmbedding = this.embeddings ? await this.embeddings.embed(query) : undefined;
     const scored: RetrieveResult[] = [];
     for (const candidate of candidates) {
+      request.signal?.throwIfAborted();
       if (this.embeddings && !candidate.embedding) {
         candidate.embedding = await this.embeddings.embed(candidate.chunk.text);
       }

@@ -16,7 +16,7 @@
 //   ┌──────────────┬──────────────────┬────────────────────┬────────────────┬──────────────────┐
 //   │              │ Raw (L0/L1)      │ Episodic (L2)      │ Semantic (L3)  │ Procedural (L4)  │
 //   │              │ working / recent │ summaries +        │ distilled      │ reusable rules / │
-//   │              │ buffer           │ salience + embed.  │ key/value      │ strategies       │
+//   │              │ buffer           │ salience           │ key/value      │ strategies       │
 //   ├──────────────┼──────────────────┼────────────────────┼────────────────┼──────────────────┤
 //   │ namespace    │ —                │ episodes           │ facts          │ staticRules      │
 //   │ resource     │ —                │ episodes           │ facts          │ staticRules      │
@@ -40,9 +40,9 @@
 //                      Most-mutated at the thread layer.
 //   - messages       — L0/L1. Append-only transcript, THREAD ONLY.
 //   - episodes       — L2. Distilled "what happened" entries with
-//                      salience + optional embedding. Per-thread
-//                      rollups support compaction; per-resource
-//                      episodes power cross-thread recall.
+//                      salience. A thread's latest compaction episode
+//                      stands in for the messages it folded;
+//                      per-resource episodes power cross-thread recall.
 //
 // Inheritance: each scope row carries `inheritFromParent: boolean`
 // (default `true`). Setting it to `false` cuts inheritance both ways:
@@ -137,17 +137,18 @@ export type StoredMessage = Message & {
  * for one chunk of past activity (a thread, a session, a resolved task).
  * Sits between raw `messages` and crystallised `Fact`s:
  *
- *   raw transcript  →  EpisodicRecord (summary + salience + embedding)
+ *   raw transcript  →  EpisodicRecord (summary + salience)
  *                                     →  Fact (one-line, indefinite)
  *
- * Storage scope is decided by the writer. Per-thread episodes are
- * useful for in-thread compaction (free message tokens, keep gist).
+ * Storage scope is decided by the writer. Per-thread episodes carry
+ * compaction: the latest one with `metadata.kind === "compact"` is
+ * rendered by `resolveContext` in place of the messages it covers.
  * Per-resource episodes power cross-thread recall ("what did this user
  * and I work on last week?"). Per-namespace episodes are rare but
  * supported for org-wide events.
  *
  * The base store treats episodes as plain rows and sorts them by
- * `salience` or `createdAt` only.
+ * `salience`, `createdAt` or `occurredAt` only.
  */
 export interface EpisodicRecord {
   readonly id: string;
@@ -160,8 +161,6 @@ export interface EpisodicRecord {
    * curves. Stored as-given; no auto-decay in the base store.
    */
   readonly salience: number;
-  /** Optional embedding vector — populated by indexer or model. */
-  readonly embedding: ReadonlyArray<number> | null;
   /** Source thread this episode was distilled from, if any. */
   readonly sourceThreadId: string | null;
   /** Inclusive seq range on the source thread, if applicable. */
@@ -178,7 +177,6 @@ export interface EpisodeInput {
   readonly outcome?: string | null;
   /** Defaults to `0.5` when omitted. Clamped to [0, 1]. */
   readonly salience?: number;
-  readonly embedding?: ReadonlyArray<number> | null;
   readonly sourceThreadId?: string | null;
   readonly sourceMessageRange?: { readonly fromSeq: number; readonly toSeq: number } | null;
   /** Defaults to `now()` when omitted. */
@@ -191,9 +189,22 @@ export interface EpisodeListParams {
   readonly limit?: number;
   /** Drop episodes below this salience threshold. */
   readonly minSalience?: number;
-  /** Defaults to "salienceDesc". */
-  readonly order?: "salienceDesc" | "createdDesc" | "occurredDesc";
+  /**
+   * Defaults to "salienceDesc". `sourceRangeDesc` puts the episode covering
+   * the newest messages first (highest `sourceMessageRange.toSeq`; episodes
+   * without a range last). Ties go to the later insert.
+   */
+  readonly order?: "salienceDesc" | "createdDesc" | "occurredDesc" | "sourceRangeDesc";
+  /** Only episodes whose `metadata.kind` equals this (e.g. `"compact"`, `"distill"`). */
+  readonly kind?: string;
+  /** Only episodes distilled from this thread (`sourceThreadId`). */
+  readonly sourceThreadId?: string;
 }
+
+/** Episode `metadata.kind` of a thread compaction (`Consolidator.compactThread`). */
+export const COMPACT_EPISODE_KIND = "compact";
+/** Episode `metadata.kind` of a thread distillation (`Consolidator.distillThread`). */
+export const DISTILL_EPISODE_KIND = "distill";
 
 /** Common slot shape — namespace and resource carry these four. */
 interface NamespaceLikeRow {
@@ -286,7 +297,8 @@ export interface ListThreadsParams {
   readonly resourceId?: string;
   /**
    * Subset match against thread metadata. Each entry must be present
-   * on the thread's metadata with an equal value.
+   * on the thread's metadata with an equal JSON value (same type: `true`
+   * does not match `1`). Entries whose value is `undefined` are ignored.
    */
   readonly metadataFilter?: Readonly<Record<string, unknown>>;
   /**
@@ -296,18 +308,25 @@ export interface ListThreadsParams {
    * the page-size hint.
    */
   readonly q?: string;
+  /** Page size. Default `DEFAULT_THREAD_PAGE_SIZE`. */
   readonly limit?: number;
-  /** Opaque continuation token returned from a prior page. */
+  /**
+   * Continuation token: `nextThreadCursor({ thread, order })` of the last
+   * thread of the previous page (same order and filters). The next page
+   * starts right after that thread.
+   */
   readonly cursor?: string;
   /** Defaults to "lastActiveDesc". */
   readonly order?: "lastActiveDesc" | "createdAsc" | "createdDesc";
   /**
-   * When `false` (default): exclude archived threads (archivedAt IS NOT NULL).
-   * When `true`: include only archived threads.
-   * When `undefined`: return all threads regardless of archive status.
+   * `false`: only active threads (archivedAt null). `true`: only archived
+   * threads. Omitted: every thread, archived or not.
    */
   readonly archived?: boolean;
 }
+
+/** Default `ListThreadsParams.limit`. */
+export const DEFAULT_THREAD_PAGE_SIZE = 50;
 
 /** Options of `MemoryStore.appendMessages`. */
 export interface AppendMessagesOptions {
@@ -382,6 +401,37 @@ export interface ResolvedContext {
 }
 
 /**
+ * A request to record one consolidation run (an LLM distill) against the
+ * sliding-window caps of `MemoryStore.reserveConsolidation`.
+ */
+export interface ConsolidationReservationRequest {
+  readonly namespaceId: string;
+  readonly resourceId: string;
+  /** Operation being counted. Caps count reservations of the same kind. */
+  readonly kind: string;
+  /** Length of the trailing window, in ms. */
+  readonly windowMs: number;
+  /** Most reservations per `(namespaceId, resourceId)` inside the window. */
+  readonly maxPerResource: number;
+  /** Most reservations per `namespaceId` (all resources) inside the window. */
+  readonly maxPerNamespace?: number;
+}
+
+/** Outcome of `MemoryStore.reserveConsolidation`. */
+export type ConsolidationReservation =
+  | { readonly granted: true; readonly reservationId: string }
+  | {
+      readonly granted: false;
+      /** Which cap is full. */
+      readonly scope: "resource" | "namespace";
+      /** Reservations inside the window for that scope. */
+      readonly seen: number;
+      readonly max: number;
+      /** Wait until the oldest reservation of that scope leaves the window. */
+      readonly retryAfterMs: number;
+    };
+
+/**
  * Three-scope memory store with four cognitive tiers per scope.
  *
  * Tier ↔ scope matrix:
@@ -414,22 +464,16 @@ export interface MemoryStore {
   deleteResourceFact(key: ScopedKey, factId: string): Promise<void>;
   appendResourceEpisode(key: ScopedKey, input: EpisodeInput): Promise<EpisodicRecord>;
   listResourceEpisodes(key: ScopedKey, params?: EpisodeListParams): Promise<EpisodicRecord[]>;
-  /**
-   * Resource-scoped episodes across EVERY resource in a namespace.
-   * `listResourceEpisodes` only ever sees one resource; namespace-wide
-   * cost controls (e.g. the consolidator rate limiter's per-namespace
-   * cap) need the aggregate. Same filter/order semantics as the
-   * per-resource list.
-   */
-  listResourceEpisodesForNamespace(
-    namespaceId: string,
-    params?: EpisodeListParams,
-  ): Promise<EpisodicRecord[]>;
   deleteResourceEpisode(key: ScopedKey, episodeId: string): Promise<void>;
 
   // --- Thread ----------------------------------------------------------
   createThread(key: ThreadKey, init?: ThreadInit): Promise<ThreadRow>;
   getThread(key: ThreadKey): Promise<ThreadRow | null>;
+  /**
+   * One page of the namespace's threads, filtered and ordered by the store
+   * (`limit` default `DEFAULT_THREAD_PAGE_SIZE`). `messageCount` and
+   * `lastActiveAt` come from the store's own bookkeeping, not a scan.
+   */
   listThreads(params: ListThreadsParams): Promise<ThreadSummary[]>;
   setThreadWorking(key: ThreadKey, content: string | null): Promise<void>;
   /** Set the thread's display title. `null` clears it (UI falls back to threadId). */
@@ -452,17 +496,38 @@ export interface MemoryStore {
     msgs: ReadonlyArray<Message>,
     opts?: AppendMessagesOptions,
   ): Promise<StoredMessage[]>;
+  /**
+   * Messages of the thread inside `range`, ordered by `range.order`
+   * (default oldest-first). Without `limit` every message in range is
+   * returned; readers of a live thread pass a limit.
+   */
   getMessages(key: ThreadKey, range?: MessageRange): Promise<StoredMessage[]>;
   appendThreadEpisode(key: ThreadKey, input: EpisodeInput): Promise<EpisodicRecord>;
   listThreadEpisodes(key: ThreadKey, params?: EpisodeListParams): Promise<EpisodicRecord[]>;
   deleteThreadEpisode(key: ThreadKey, episodeId: string): Promise<void>;
   deleteThread(key: ThreadKey): Promise<void>;
 
+  // --- Consolidation rate limit ---------------------------------------
+  /**
+   * Atomically count the `kind` reservations inside the trailing
+   * `windowMs` for the resource and (when `maxPerNamespace` is set) the
+   * namespace, and record a new one only when both are under their caps.
+   * Two concurrent callers never both take the last slot. Reservations
+   * older than the window are dropped on the way.
+   */
+  reserveConsolidation(request: ConsolidationReservationRequest): Promise<ConsolidationReservation>;
+  /** Give back a reservation whose run did not happen (it failed or was a no-op). */
+  releaseConsolidation(params: { namespaceId: string; reservationId: string }): Promise<void>;
+
   // --- Cascade & assembly ----------------------------------------------
   /**
    * Build the prompt-ready view for a thread by merging namespace +
    * resource + thread layers per the documented cascade. Honors
-   * `inheritFromParent` severance and trims messages to fit `budget`.
+   * `inheritFromParent` severance, renders the thread's latest
+   * compaction in place of the messages it folded, and reads only the
+   * message tail that fits `budget` (see `loadResolvedContext`). A thread
+   * without a row resolves as an empty thread under the namespace and
+   * resource layers of `key`.
    */
   resolveContext(key: ThreadKey, budget: TokenBudget): Promise<ResolvedContext>;
 }

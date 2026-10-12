@@ -3,22 +3,29 @@
 // to a status (see routes/knowledge-bases.ts); embedders catch them by class.
 // ---------------------------------------------------------------------------
 
-/** No managed knowledge base has this id. */
+/** No managed knowledge base has this id in this namespace. */
 export class KnowledgeBaseNotFoundError extends Error {
+  readonly namespaceId: string;
   readonly id: string;
-  constructor(id: string) {
-    super(`Knowledge base "${id}" does not exist.`);
+  constructor(params: { namespaceId: string; id: string }) {
+    super(`Knowledge base "${params.id}" does not exist in namespace "${params.namespaceId}".`);
     this.name = "KnowledgeBaseNotFoundError";
-    this.id = id;
+    this.namespaceId = params.namespaceId;
+    this.id = params.id;
   }
 }
 
-/** The id is taken, by a managed knowledge base or a host-wired retriever. */
+/** The id is taken in the namespace, by a managed knowledge base or a host-wired retriever. */
 export class KnowledgeBaseExistsError extends Error {
+  readonly namespaceId: string;
   readonly id: string;
-  constructor(params: { id: string; message?: string }) {
-    super(params.message ?? `Knowledge base "${params.id}" already exists.`);
+  constructor(params: { namespaceId: string; id: string; message?: string }) {
+    super(
+      params.message ??
+        `Knowledge base "${params.id}" already exists in namespace "${params.namespaceId}".`,
+    );
     this.name = "KnowledgeBaseExistsError";
+    this.namespaceId = params.namespaceId;
     this.id = params.id;
   }
 }
@@ -42,22 +49,6 @@ export class KnowledgeInputError extends Error {
     super(params.message);
     this.name = "KnowledgeInputError";
     this.code = params.code;
-  }
-}
-
-/**
- * Chunking, embedding or storing a source's chunks failed. The source is
- * recorded with status `failed` and this message, and its partial chunks
- * are dropped.
- */
-export class KnowledgeIngestError extends Error {
-  readonly sourceId: string;
-  constructor(params: { sourceId: string; cause: unknown }) {
-    super(`Indexing source "${params.sourceId}" failed: ${errorMessage(params.cause)}`, {
-      cause: params.cause,
-    });
-    this.name = "KnowledgeIngestError";
-    this.sourceId = params.sourceId;
   }
 }
 

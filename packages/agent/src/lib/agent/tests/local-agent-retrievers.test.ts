@@ -207,6 +207,8 @@ describe("LocalAgent — retriever bindings", () => {
         topK: 2,
         maxChunkCharacters: 40,
         filter: { tags: ["policy"], metadata: { tenant: "acme" } },
+        // Aborted when the search outlives the binding's timeout.
+        signal: expect.any(AbortSignal),
       },
     ]);
   });

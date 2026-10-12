@@ -11,7 +11,8 @@
 
 import { describe, it, expect } from "bun:test";
 import type { Message } from "../message.ts";
-import type { MemoryStore } from "./types.ts";
+import { nextThreadCursor } from "./thread-cursor.ts";
+import { DEFAULT_THREAD_PAGE_SIZE, type MemoryStore } from "./types.ts";
 
 const NS = "ns-test";
 const ALICE = "alice";
@@ -351,9 +352,128 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
         const key = { namespaceId: NS, threadId: T_DEFAULT };
         await s.createThread(key);
         await s.appendMessages(key, [userMsg("a"), userMsg("b")]);
+        await s.appendMessages(key, [userMsg("c")]);
         const [t] = await s.listThreads({ namespaceId: NS });
-        expect(t.messageCount).toBe(2);
-        expect(typeof t.lastActiveAt).toBe("number");
+        expect(t!.messageCount).toBe(3);
+        expect(t!.lastActiveAt).toBeGreaterThanOrEqual(t!.createdAt);
+      });
+
+      it("pages with limit + cursor: no overlap, no gap, in the listing's order", async () => {
+        const s = await make();
+        for (const id of ["t-1", "t-2", "t-3", "t-4", "t-5"]) {
+          await s.createThread({ namespaceId: NS, threadId: id });
+        }
+        for (const order of ["createdAsc", "createdDesc", "lastActiveDesc"] as const) {
+          const all = await s.listThreads({ namespaceId: NS, order });
+          const pages: string[] = [];
+          let cursor: string | undefined;
+          for (let i = 0; i < 5; i++) {
+            const page = await s.listThreads({
+              namespaceId: NS,
+              order,
+              limit: 2,
+              ...(cursor !== undefined && { cursor }),
+            });
+            expect(page.length).toBeLessThanOrEqual(2);
+            pages.push(...page.map((t) => t.threadId));
+            const last = page.at(-1);
+            if (!last) break;
+            cursor = nextThreadCursor({ thread: last, order });
+          }
+          expect(pages).toEqual(all.map((t) => t.threadId));
+          expect([...pages].sort()).toEqual(["t-1", "t-2", "t-3", "t-4", "t-5"]);
+        }
+      });
+
+      it("a cursor continues after its thread even when earlier rows are deleted", async () => {
+        const s = await make();
+        for (const id of ["t-1", "t-2", "t-3", "t-4"]) {
+          await s.createThread({ namespaceId: NS, threadId: id });
+        }
+        const first = await s.listThreads({ namespaceId: NS, order: "createdAsc", limit: 2 });
+        // An offset cursor would skip a thread once a row before it is gone.
+        await s.deleteThread({ namespaceId: NS, threadId: first[0]!.threadId });
+        const second = await s.listThreads({
+          namespaceId: NS,
+          order: "createdAsc",
+          limit: 2,
+          cursor: nextThreadCursor({ thread: first.at(-1)!, order: "createdAsc" }),
+        });
+        const all = await s.listThreads({ namespaceId: NS, order: "createdAsc", limit: 10 });
+        expect(second.map((t) => t.threadId)).toEqual(all.slice(1).map((t) => t.threadId));
+      });
+
+      it("matches metadata by JSON type and ignores undefined filter values", async () => {
+        const s = await make();
+        await s.createThread({ namespaceId: NS, threadId: "bool" }, { metadata: { flag: true } });
+        await s.createThread({ namespaceId: NS, threadId: "num" }, { metadata: { flag: 1 } });
+        const ids = async (filter: Record<string, unknown>) =>
+          (await s.listThreads({ namespaceId: NS, metadataFilter: filter }))
+            .map((t) => t.threadId)
+            .sort();
+        expect(await ids({ flag: true })).toEqual(["bool"]);
+        expect(await ids({ flag: 1 })).toEqual(["num"]);
+        expect(await ids({ flag: true, other: undefined })).toEqual(["bool"]);
+      });
+
+      it("pages after filtering (metadata, resource, q)", async () => {
+        const s = await make();
+        for (let i = 0; i < 3; i++) {
+          await s.createThread(
+            { namespaceId: NS, resourceId: ALICE, threadId: `billing-${i}` },
+            { metadata: { topic: "billing" } },
+          );
+          await s.createThread(
+            { namespaceId: NS, resourceId: ALICE, threadId: `support-${i}` },
+            { metadata: { topic: "support" } },
+          );
+        }
+        const params = {
+          namespaceId: NS,
+          resourceId: ALICE,
+          metadataFilter: { topic: "billing" },
+          q: "BILL",
+          order: "createdAsc" as const,
+          limit: 2,
+        };
+        const first = await s.listThreads(params);
+        const second = await s.listThreads({
+          ...params,
+          cursor: nextThreadCursor({ thread: first.at(-1)!, order: "createdAsc" }),
+        });
+        expect([...first, ...second].map((t) => t.threadId).sort()).toEqual([
+          "billing-0",
+          "billing-1",
+          "billing-2",
+        ]);
+        expect(second).toHaveLength(1);
+      });
+
+      it(`defaults the page size to ${DEFAULT_THREAD_PAGE_SIZE}`, async () => {
+        const s = await make();
+        for (let i = 0; i <= DEFAULT_THREAD_PAGE_SIZE; i++) {
+          await s.createThread({ namespaceId: NS, threadId: `t-${i}` });
+        }
+        expect(await s.listThreads({ namespaceId: NS })).toHaveLength(DEFAULT_THREAD_PAGE_SIZE);
+      });
+
+      it("archived: omitted lists every thread, false only active, true only archived", async () => {
+        const s = await make();
+        await s.createThread({ namespaceId: NS, threadId: "active" });
+        await s.createThread({ namespaceId: NS, threadId: "archived" });
+        await s.setThreadArchived({ namespaceId: NS, threadId: "archived" }, 1_000);
+        const ids = async (archived?: boolean) =>
+          (
+            await s.listThreads({
+              namespaceId: NS,
+              ...(archived !== undefined && { archived }),
+            })
+          )
+            .map((t) => t.threadId)
+            .sort();
+        expect(await ids()).toEqual(["active", "archived"]);
+        expect(await ids(false)).toEqual(["active"]);
+        expect(await ids(true)).toEqual(["archived"]);
       });
     });
 
@@ -443,6 +563,70 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
         expect(ctx.reference.trimEnd().endsWith("</reference-data>")).toBe(true);
       });
 
+      it("resolves a thread with no row under its namespace and resource layers", async () => {
+        const s = await make();
+        await s.upsertNamespace(NS, { staticRules: "NS-RULES" });
+        await s.appendResourceFact(
+          { namespaceId: NS, resourceId: ALICE },
+          { text: "res-fact", source: "user" },
+        );
+        const ctx = await s.resolveContext(
+          { namespaceId: NS, resourceId: ALICE, threadId: "never-created" },
+          looseBudget,
+        );
+        expect(ctx.instructions).toContain("NS-RULES");
+        expect(ctx.reference).toContain("res-fact");
+        expect(ctx.messages).toEqual([]);
+        expect(await s.getThread({ namespaceId: NS, threadId: "never-created" })).toBeNull();
+      });
+
+      it("renders the latest compaction in place of the messages it folded", async () => {
+        const s = await make();
+        const key = { namespaceId: NS, threadId: T_DEFAULT };
+        await s.appendMessages(key, [
+          userMsg("m1"),
+          assistantMsg("m2"),
+          userMsg("m3"),
+          assistantMsg("m4"),
+          userMsg("m5"),
+          assistantMsg("m6"),
+        ]);
+        await s.appendThreadEpisode(key, {
+          summary: "OLD-SUMMARY",
+          sourceMessageRange: { fromSeq: 1, toSeq: 2 },
+          metadata: { kind: "compact" },
+        });
+        await s.appendThreadEpisode(key, {
+          summary: "NEW-SUMMARY",
+          sourceMessageRange: { fromSeq: 1, toSeq: 4 },
+          metadata: { kind: "compact" },
+        });
+        // A non-compaction thread episode is not rendered.
+        await s.appendThreadEpisode(key, { summary: "NOTE", metadata: { kind: "note" } });
+
+        const ctx = await s.resolveContext(key, looseBudget);
+        expect(ctx.reference).toContain("NEW-SUMMARY");
+        expect(ctx.reference).not.toContain("OLD-SUMMARY");
+        expect(ctx.reference).not.toContain("NOTE");
+        expect(ctx.messages.map((m) => m.seq)).toEqual([5, 6]);
+      });
+
+      it("reads only the newest messages that fit, cut on a turn boundary", async () => {
+        const s = await make();
+        const key = { namespaceId: NS, threadId: T_DEFAULT };
+        const msgs: Message[] = [];
+        for (let i = 0; i < 150; i++) {
+          msgs.push(userMsg(`question ${i} ${"x".repeat(36)}`), assistantMsg(`answer ${i}`));
+        }
+        await s.appendMessages(key, msgs);
+        const ctx = await s.resolveContext(key, { maxMessageTokens: 50 });
+        const seqs = ctx.messages.map((m) => m.seq);
+        expect(seqs.at(-1)).toBe(300);
+        expect(ctx.messages[0]!.role).toBe("user");
+        expect(seqs).toEqual(Array.from({ length: seqs.length }, (_, i) => seqs[0]! + i));
+        expect(seqs.length).toBeLessThan(10);
+      });
+
       it("trims oldest messages first to fit the budget", async () => {
         const s = await make();
         const key = { namespaceId: NS, threadId: T_DEFAULT };
@@ -504,29 +688,55 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
         expect(capped.map((e) => e.summary)).toEqual(["c"]);
       });
 
-      it("listResourceEpisodesForNamespace aggregates across resources, scoped to the namespace", async () => {
+      it("filters by metadata.kind and sourceThreadId", async () => {
         const s = await make();
-        await s.appendResourceEpisode(
-          { namespaceId: NS, resourceId: ALICE },
-          { summary: "alice-ep", salience: 0.9 },
-        );
-        await s.appendResourceEpisode(
-          { namespaceId: NS, resourceId: BOB },
-          { summary: "bob-ep", salience: 0.5 },
-        );
-        // A different namespace must not leak into the aggregate.
-        await s.appendResourceEpisode(
-          { namespaceId: "other-ns", resourceId: ALICE },
-          { summary: "other-ep", salience: 0.7 },
-        );
-        const out = await s.listResourceEpisodesForNamespace(NS);
-        expect(out.map((e) => e.summary).sort()).toEqual(["alice-ep", "bob-ep"]);
-        // Honors order + limit like the per-resource list.
-        const top = await s.listResourceEpisodesForNamespace(NS, {
-          order: "salienceDesc",
-          limit: 1,
+        const key = { namespaceId: NS, resourceId: ALICE };
+        await s.appendResourceEpisode(key, {
+          summary: "t1-distill",
+          sourceThreadId: "t1",
+          metadata: { kind: "distill" },
         });
-        expect(top.map((e) => e.summary)).toEqual(["alice-ep"]);
+        await s.appendResourceEpisode(key, {
+          summary: "t2-distill",
+          sourceThreadId: "t2",
+          metadata: { kind: "distill" },
+        });
+        await s.appendResourceEpisode(key, {
+          summary: "t1-other",
+          sourceThreadId: "t1",
+          metadata: { kind: "other" },
+        });
+        const out = await s.listResourceEpisodes(key, { kind: "distill", sourceThreadId: "t1" });
+        expect(out.map((e) => e.summary)).toEqual(["t1-distill"]);
+        const distills = await s.listResourceEpisodes(key, { kind: "distill" });
+        expect(distills.map((e) => e.summary).sort()).toEqual(["t1-distill", "t2-distill"]);
+      });
+
+      it("sourceRangeDesc puts the episode covering the newest messages first", async () => {
+        const s = await make();
+        const key = { namespaceId: NS, threadId: T_DEFAULT };
+        await s.appendThreadEpisode(key, {
+          summary: "covers-8",
+          sourceMessageRange: { fromSeq: 1, toSeq: 8 },
+        });
+        // Written later but covering less (a stale, slower compaction).
+        await s.appendThreadEpisode(key, {
+          summary: "covers-4",
+          sourceMessageRange: { fromSeq: 1, toSeq: 4 },
+        });
+        await s.appendThreadEpisode(key, { summary: "no-range" });
+        const out = await s.listThreadEpisodes(key, { order: "sourceRangeDesc" });
+        expect(out.map((e) => e.summary)).toEqual(["covers-8", "covers-4", "no-range"]);
+      });
+
+      it("createdDesc puts the later insert first, even within one millisecond", async () => {
+        const s = await make();
+        const key = { namespaceId: NS, threadId: T_DEFAULT };
+        for (let i = 0; i < 5; i++) {
+          await s.appendThreadEpisode(key, { summary: `ep-${i}` });
+        }
+        const [latest] = await s.listThreadEpisodes(key, { order: "createdDesc", limit: 1 });
+        expect(latest!.summary).toBe("ep-4");
       });
 
       it("supports per-thread and per-namespace episodes", async () => {
@@ -624,6 +834,61 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
     });
 
     // --- Tenant isolation --------------------------------------------
+    describe("consolidation reservations", () => {
+      const request = {
+        namespaceId: NS,
+        resourceId: ALICE,
+        kind: "distill",
+        windowMs: 3_600_000,
+        maxPerResource: 3,
+      };
+
+      it("grants at most the cap, even to concurrent callers", async () => {
+        const s = await make();
+        const results = await Promise.all(
+          Array.from({ length: 10 }, () => s.reserveConsolidation(request)),
+        );
+        expect(results.filter((r) => r.granted)).toHaveLength(3);
+        const denied = results.find((r) => !r.granted);
+        expect(denied).toMatchObject({ granted: false, scope: "resource", seen: 3, max: 3 });
+      });
+
+      it("applies the namespace cap across resources and kinds separately", async () => {
+        const s = await make();
+        const nsCapped = { ...request, maxPerResource: 10, maxPerNamespace: 2 };
+        expect((await s.reserveConsolidation(nsCapped)).granted).toBe(true);
+        expect((await s.reserveConsolidation({ ...nsCapped, resourceId: BOB })).granted).toBe(true);
+        const third = await s.reserveConsolidation({ ...nsCapped, resourceId: "carol" });
+        expect(third).toMatchObject({ granted: false, scope: "namespace", seen: 2, max: 2 });
+        // Another kind and another namespace count on their own.
+        expect((await s.reserveConsolidation({ ...nsCapped, kind: "compact" })).granted).toBe(true);
+        expect(
+          (await s.reserveConsolidation({ ...nsCapped, namespaceId: "other-ns" })).granted,
+        ).toBe(true);
+      });
+
+      it("release gives the slot back", async () => {
+        const s = await make();
+        const one = { ...request, maxPerResource: 1 };
+        const first = await s.reserveConsolidation(one);
+        expect(first.granted).toBe(true);
+        expect((await s.reserveConsolidation(one)).granted).toBe(false);
+        if (!first.granted) throw new Error("unreachable");
+        await s.releaseConsolidation({ namespaceId: NS, reservationId: first.reservationId });
+        expect((await s.reserveConsolidation(one)).granted).toBe(true);
+      });
+
+      it("reports when the oldest reservation leaves the window", async () => {
+        const s = await make();
+        const one = { ...request, maxPerResource: 1, windowMs: 60_000 };
+        await s.reserveConsolidation(one);
+        const denied = await s.reserveConsolidation(one);
+        if (denied.granted) throw new Error("expected a denial");
+        expect(denied.retryAfterMs).toBeGreaterThan(0);
+        expect(denied.retryAfterMs).toBeLessThanOrEqual(60_000);
+      });
+    });
+
     describe("tenant isolation", () => {
       it("namespaces do not leak facts or threads across tenants", async () => {
         const s = await make();

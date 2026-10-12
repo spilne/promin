@@ -195,28 +195,29 @@ if (pgUrl) {
   usageLedger = stack.usageLedger;
 }
 
-// Managed knowledge bases — the dashboard's Knowledge page. Bases and their
-// sources persist in the store above; the default in-memory index is rebuilt
-// from it at boot. "org-handbook" is seeded once from ./kb and is what
-// knowledge-bot binds in `backend.knowledge`. The `url` adapter lets the page
-// import public web pages (private and internal hosts are refused).
+// Managed knowledge bases — the dashboard's Knowledge page. Bases live in a
+// namespace and persist with their sources in the store above; the default
+// in-memory index is rebuilt from it at boot, and sources are indexed in the
+// background. "org-handbook" is seeded once from ./kb into each demo
+// namespace and is what knowledge-bot binds in `backend.knowledge` (an agent
+// binds the bases of the namespace it runs in). The `url` adapter lets the
+// page import public web pages (private and internal hosts are refused).
 const knowledgeBases = new ZoryaKnowledgeBases({
   store: knowledgeBaseStore,
   sourceAdapters: [createUrlKnowledgeSourceAdapter()],
-  seed: [
-    {
-      id: "org-handbook",
-      description: "Engineering, on-call, security, and platform reference material.",
-      tags: ["demo", "internal"],
-      documents: [...ORG_KNOWLEDGE_BASE.entries()].map(([id, doc]) => ({
-        id,
-        title: doc.title,
-        tags: doc.tags,
-        mimeType: "text/markdown",
-        text: doc.body,
-      })),
-    },
-  ],
+  seed: ["default", "acme", "tenant-a", "tenant-b"].map((namespaceId) => ({
+    namespaceId,
+    id: "org-handbook",
+    description: "Engineering, on-call, security, and platform reference material.",
+    tags: ["demo", "internal"],
+    documents: [...ORG_KNOWLEDGE_BASE.entries()].map(([id, doc]) => ({
+      id,
+      title: doc.title,
+      tags: doc.tags,
+      mimeType: "text/markdown",
+      text: doc.body,
+    })),
+  })),
 });
 // Prompt-fragment registry (above) — small curated markdown layers roles
 // compose into their system prompt. The ZoryaFragments service below scans
@@ -664,12 +665,16 @@ async function resolveAgent(
   // MCP: open (or reuse, per tenant namespace) the recipe's MCP servers
   // against the operator allowlist and hand their tools to the resolver.
   const mcpTools = await mcp.loadTools({ recipe, scope });
+  // `backend.knowledge` bindings resolve against the managed knowledge bases
+  // of the agent's namespace; the registry re-reads the store for a base
+  // another replica created.
+  const namespaceId = scope?.namespaceId;
   return resolveLocalAgent(recipe, {
     mcpTools,
     runner,
     memory: memoryStore,
     approvals: approvalStore,
-    // `backend.knowledge` bindings resolve against the managed knowledge bases.
+    ...(namespaceId !== undefined && { namespaceId }),
     retrievers: knowledgeBases.registry,
     skills: skillRegistry,
     skillCatalog,

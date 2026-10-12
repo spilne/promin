@@ -5,8 +5,15 @@
 // ---------------------------------------------------------------------------
 
 import type { WallClock } from "@promin/workflow";
-import type { Consolidator } from "../memory/consolidator.ts";
-import type { MemoryStore, ThreadKey } from "../memory/types.ts";
+import { NothingToConsolidateError, type Consolidator } from "../memory/consolidator.ts";
+import { ConsolidatorRateLimitError } from "../memory/rate-limited-consolidator.ts";
+import {
+  COMPACT_EPISODE_KIND,
+  DISTILL_EPISODE_KIND,
+  type MemoryStore,
+  type StoredMessage,
+  type ThreadKey,
+} from "../memory/types.ts";
 
 export interface AutoCompactConfig {
   /**
@@ -83,8 +90,6 @@ export interface AutoCompactSignals {
   readonly totalCount: number;
   /** Count of messages with seq > most recent compact episode's toSeq. */
   readonly uncompactedCount: number;
-  /** Estimated token count over all persisted messages (chars/4). */
-  readonly totalTokens: number;
   /** Estimated token count over uncompacted messages (chars/4). */
   readonly uncompactedTokens: number;
   /** `createdAt` of the most recent compact episode (0 if none). */
@@ -187,14 +192,14 @@ export interface AutoDistillSignals {
 }
 
 /**
- * Auto-compaction trigger. Reads the persisted state, computes signals
- * (uncompacted-since-last-compact counts in messages and tokens), checks
- * whether the configured rule fires, and dispatches the compactThread
- * call in either background or blocking mode.
+ * Auto-compaction trigger. Reads the thread's compaction state and the
+ * messages after its latest compaction (never the folded ones), checks
+ * whether the configured rule fires, and dispatches `compactThread` in
+ * background or blocking mode. The compaction episode it writes is what
+ * `resolveContext` renders in place of the folded messages.
  *
- * Writes a thread episode only; `resolveContext` does not render
- * per-thread episodes into the prompt (the memory tool's `recall`
- * searches them on demand).
+ * Best-effort: a failure (reading the signals or compacting) is logged,
+ * never thrown — the turn already succeeded.
  */
 export async function maybeAutoCompact(params: {
   readonly config: AutoCompactConfig;
@@ -211,27 +216,36 @@ export async function maybeAutoCompact(params: {
   ) {
     return; // nothing to gate on
   }
-
-  const messages = await memory.getMessages(key, { order: "asc" });
-  const episodes = await memory.listThreadEpisodes(key, { order: "createdDesc" }).catch(() => []);
-  const lastCompact = episodes.find(
-    (e) => (e.metadata as { kind?: unknown } | null)?.kind === "compact",
-  );
-  const lastCompactedSeq = lastCompact?.sourceMessageRange?.toSeq ?? 0;
-  const lastCompactedAt = lastCompact?.createdAt ?? 0;
-
-  const uncompacted = messages.filter((m) => m.seq > lastCompactedSeq);
-  const totalTokens = messages.reduce((s, m) => s + estimateTokens(m), 0);
-  const uncompactedTokens = uncompacted.reduce((s, m) => s + estimateTokens(m), 0);
-
-  const signals: AutoCompactSignals = {
-    totalCount: messages.length,
-    uncompactedCount: uncompacted.length,
-    totalTokens,
-    uncompactedTokens,
-    lastCompactedAt,
-    threadKey: key,
+  const warn = (err: unknown) => {
+    // Don't propagate — auto-compact is best-effort. Log so operators
+    // can spot a misconfigured consolidator (missing key, malformed
+    // LLM output, etc.) without breaking the user-visible turn.
+    console.warn(
+      `[LocalAgent] autoCompact failed for thread ${key.threadId}:`,
+      err instanceof Error ? err.message : err,
+    );
   };
+
+  let signals: AutoCompactSignals;
+  try {
+    const [lastCompact] = await memory.listThreadEpisodes(key, {
+      kind: COMPACT_EPISODE_KIND,
+      order: "sourceRangeDesc",
+      limit: 1,
+    });
+    const lastCompactedSeq = lastCompact?.sourceMessageRange?.toSeq ?? 0;
+    const uncompacted = await messagesAfter({ memory, key, afterSeq: lastCompactedSeq });
+    signals = {
+      totalCount: uncompacted.at(-1)?.seq ?? lastCompactedSeq,
+      uncompactedCount: uncompacted.length,
+      uncompactedTokens: uncompacted.reduce((s, m) => s + estimateTokens(m), 0),
+      lastCompactedAt: lastCompact?.createdAt ?? 0,
+      threadKey: key,
+    };
+  } catch (err) {
+    warn(err);
+    return;
+  }
 
   // Effective token gate: contextLimit * compressAt wins when set,
   // else tokenThreshold.
@@ -242,22 +256,24 @@ export async function maybeAutoCompact(params: {
 
   const fire = cfg.when
     ? cfg.when(signals)
-    : (cfg.messageThreshold !== undefined && uncompacted.length > cfg.messageThreshold) ||
-      (effectiveTokenThreshold !== undefined && uncompactedTokens > effectiveTokenThreshold);
+    : (cfg.messageThreshold !== undefined && signals.uncompactedCount > cfg.messageThreshold) ||
+      (effectiveTokenThreshold !== undefined &&
+        signals.uncompactedTokens > effectiveTokenThreshold);
   if (!fire) return;
 
   const run = params
     .consolidator()
     .compactThread(key, { keepRecent: cfg.keepRecent ?? 10 })
-    .catch((err) => {
-      // Don't propagate — auto-compact is best-effort. Log so operators
-      // can spot a misconfigured consolidator (missing key, malformed
-      // LLM output, etc.) without breaking the user-visible turn.
-      console.warn(
-        `[LocalAgent] autoCompact failed for thread ${key.threadId}:`,
-        err instanceof Error ? err.message : err,
-      );
-    });
+    .then(
+      () => undefined,
+      (err: unknown) => {
+        // Too little to fold yet (the kept tail is one long turn) is not a
+        // failure. An empty or cut-off summary wrote nothing: logged, and
+        // the next turn tries again.
+        if (err instanceof NothingToConsolidateError) return;
+        warn(err);
+      },
+    );
 
   if ((cfg.mode ?? "background") === "blocking") {
     await run;
@@ -270,9 +286,11 @@ export async function maybeAutoCompact(params: {
  * Auto-distillation trigger. Symmetric with `maybeAutoCompact`: computes
  * signals (totalCount, turnsSinceLastDistill, lastDistilledAt,
  * lastUserMessage), runs the configured rule, dispatches to the
- * Consolidator. Idempotency is on the consolidator side — a second fire
- * on the same thread without `force: true` returns the existing episode
- * without re-running the LLM.
+ * Consolidator. A thread already distilled is skipped without reading its
+ * messages unless `force` is set (re-distilling it would be a no-op).
+ *
+ * Best-effort like `maybeAutoCompact`; a rate-limit hit is expected
+ * (host-configured cost cap) and not logged.
  */
 export async function maybeAutoDistill(params: {
   readonly config: AutoDistillConfig;
@@ -291,82 +309,100 @@ export async function maybeAutoDistill(params: {
   // Distillation writes a ResourceEpisode — only meaningful when a
   // resourceId is bound. Without one, silently skip.
   if (!key.resourceId) return;
-
-  const messages = await memory.getMessages(key, { order: "asc" });
-  const resourceEpisodes = await memory
-    .listResourceEpisodes(
-      { namespaceId: key.namespaceId, resourceId: key.resourceId },
-      { order: "createdDesc" },
-    )
-    .catch(() => []);
-  const lastDistill = resourceEpisodes.find(
-    (e) =>
-      e.sourceThreadId === key.threadId &&
-      (e.metadata as { kind?: unknown } | null)?.kind === "distill",
-  );
-  const lastDistilledSeq = lastDistill?.sourceMessageRange?.toSeq ?? 0;
-  const lastDistilledAt = lastDistill?.createdAt ?? 0;
-  const newMessages = messages.filter((m) => m.seq > lastDistilledSeq);
-  const turnsSinceLastDistill = newMessages.length;
-  const tokensSinceLastDistill = newMessages.reduce((s, m) => s + estimateTokens(m), 0);
-  const now = params.clock.currentTimeMs();
-  const msSinceLastDistill = lastDistilledAt ? now - lastDistilledAt : Number.POSITIVE_INFINITY;
-
-  // Walk back from the end to find the most recent USER message —
-  // after the turn's commit the assistant turn (and any tool messages)
-  // are at the tail; the user's input sits before them.
-  let lastUserMessage: string | undefined;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!;
-    if (m.role === "user" && typeof m.content === "string") {
-      lastUserMessage = m.content.trim();
-      break;
-    }
-  }
-
-  const signals: AutoDistillSignals = {
-    totalCount: messages.length,
-    turnsSinceLastDistill,
-    tokensSinceLastDistill,
-    msSinceLastDistill,
-    lastDistilledAt,
-    lastUserMessage,
-    threadKey: key,
+  const warn = (err: unknown) => {
+    console.warn(
+      `[LocalAgent] autoDistill failed for thread ${key.threadId}:`,
+      err instanceof Error ? err.message : err,
+    );
   };
+
+  let signals: AutoDistillSignals;
+  try {
+    const [lastDistill] = await memory.listResourceEpisodes(
+      { namespaceId: key.namespaceId, resourceId: key.resourceId },
+      { kind: DISTILL_EPISODE_KIND, sourceThreadId: key.threadId, order: "createdDesc", limit: 1 },
+    );
+    if (lastDistill && !cfg.force) return;
+    const lastDistilledSeq = lastDistill?.sourceMessageRange?.toSeq ?? 0;
+    const lastDistilledAt = lastDistill?.createdAt ?? 0;
+    const newMessages = await messagesAfter({ memory, key, afterSeq: lastDistilledSeq });
+    const totalCount = newMessages.at(-1)?.seq ?? lastDistilledSeq;
+    // The thread's most recent USER message: after the turn's commit the
+    // assistant turn (and any tool messages) are at the tail.
+    let lastUserMessage: string | undefined;
+    for (let i = newMessages.length - 1; i >= 0; i--) {
+      const m = newMessages[i]!;
+      if (m.role === "user" && typeof m.content === "string") {
+        lastUserMessage = m.content.trim();
+        break;
+      }
+    }
+    const now = params.clock.currentTimeMs();
+    signals = {
+      totalCount,
+      turnsSinceLastDistill: newMessages.length,
+      tokensSinceLastDistill: newMessages.reduce((s, m) => s + estimateTokens(m), 0),
+      msSinceLastDistill: lastDistilledAt ? now - lastDistilledAt : Number.POSITIVE_INFINITY,
+      lastDistilledAt,
+      ...(lastUserMessage !== undefined && { lastUserMessage }),
+      threadKey: key,
+    };
+  } catch (err) {
+    warn(err);
+    return;
+  }
 
   // Custom predicate REPLACES built-in gates entirely. Otherwise OR
   // across whichever built-in gates are configured: any one tripping
   // is enough to fire.
   const fire = cfg.when
     ? cfg.when(signals)
-    : (cfg.messageThreshold !== undefined && messages.length >= cfg.messageThreshold) ||
-      (cfg.tokenThreshold !== undefined && tokensSinceLastDistill >= cfg.tokenThreshold) ||
-      (cfg.intervalMs !== undefined && msSinceLastDistill >= cfg.intervalMs);
+    : (cfg.messageThreshold !== undefined && signals.totalCount >= cfg.messageThreshold) ||
+      (cfg.tokenThreshold !== undefined && signals.tokensSinceLastDistill >= cfg.tokenThreshold) ||
+      (cfg.intervalMs !== undefined && signals.msSinceLastDistill >= cfg.intervalMs);
   if (!fire) return;
 
   const run = params
     .consolidator()
     .distillThread(key, { force: cfg.force ?? false })
-    .catch((err) => {
-      // Rate-limit hits are by design (host-configured cost cap),
-      // not failures worth a warn. Swallow silently.
-      if (
-        err &&
-        typeof err === "object" &&
-        (err as { name?: string }).name === "ConsolidatorRateLimitError"
-      ) {
-        return;
-      }
-      console.warn(
-        `[LocalAgent] autoDistill failed for thread ${key.threadId}:`,
-        err instanceof Error ? err.message : err,
-      );
-    });
+    .then(
+      () => undefined,
+      (err: unknown) => {
+        // Rate-limit hits are by design (host-configured cost cap), and a
+        // thread still too short is not a failure: neither is worth a warn.
+        if (err instanceof ConsolidatorRateLimitError) return;
+        if (err instanceof NothingToConsolidateError) return;
+        warn(err);
+      },
+    );
 
   if ((cfg.mode ?? "background") === "blocking") {
     await run;
   }
 }
+
+/** The thread's messages after `afterSeq`, oldest first, read page by page. */
+async function messagesAfter(params: {
+  memory: MemoryStore;
+  key: ThreadKey;
+  afterSeq: number;
+}): Promise<StoredMessage[]> {
+  const out: StoredMessage[] = [];
+  let from = params.afterSeq + 1;
+  for (;;) {
+    const page = await params.memory.getMessages(params.key, {
+      fromSeq: from,
+      order: "asc",
+      limit: SIGNAL_PAGE_SIZE,
+    });
+    out.push(...page);
+    if (page.length < SIGNAL_PAGE_SIZE) return out;
+    from = page[page.length - 1]!.seq + 1;
+  }
+}
+
+/** Messages read per page while computing trigger signals. */
+const SIGNAL_PAGE_SIZE = 200;
 
 /**
  * chars/4 token estimator — same heuristic resolveContext's default

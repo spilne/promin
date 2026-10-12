@@ -862,24 +862,35 @@ export const remoteDeployment = pgTable(
 
 // ---------------------------------------------------------------------------
 // Managed knowledge bases — a base row plus one row per source with its full
-// text and last ingestion outcome. The chunks themselves live in whatever
-// retriever the host wires (in memory, rebuilt from these rows at boot, or
-// a pgvector table). Deleting a base deletes its sources in the same
-// transaction.
+// text and ingestion state. Base ids are unique per namespace. The chunks
+// themselves live in whatever retriever the host wires (in memory, rebuilt
+// from these rows, or a pgvector table). Deleting a base deletes its sources
+// in the same transaction.
+//
+// Sources double as the ingestion queue: `pending` rows wait for a worker,
+// which claims one (`ingesting`, `claimed_by`, `claimed_at`) and records the
+// outcome while it still holds the claim. `claimed_at` is stamped and
+// compared on the database server's clock only.
 // ---------------------------------------------------------------------------
 
-export const knowledgeBase = pgTable("knowledge_base", {
-  id: text("id").primaryKey(),
-  description: text("description"),
-  tags: jsonb("tags").$type<string[]>().notNull(),
-  metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull(),
-  createdAt: bigint("created_at", { mode: "number" }).notNull(),
-  updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
-});
+export const knowledgeBase = pgTable(
+  "knowledge_base",
+  {
+    namespaceId: text("namespace_id").notNull(),
+    id: text("id").notNull(),
+    description: text("description"),
+    tags: jsonb("tags").$type<string[]>().notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull(),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.namespaceId, t.id] })],
+);
 
 export const knowledgeBaseSource = pgTable(
   "knowledge_base_source",
   {
+    namespaceId: text("namespace_id").notNull(),
     baseId: text("base_id").notNull(),
     sourceId: text("source_id").notNull(),
     title: text("title"),
@@ -888,13 +899,22 @@ export const knowledgeBaseSource = pgTable(
     tags: jsonb("tags").$type<string[]>().notNull(),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull(),
     text: text("text").notNull(),
-    status: text("status").$type<"ready" | "failed">().notNull(),
+    status: text("status").$type<"pending" | "ingesting" | "ready" | "failed">().notNull(),
     error: text("error"),
     chunkCount: integer("chunk_count").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+    /** Worker holding the ingestion claim; set while `status` is `ingesting`. */
+    claimedBy: text("claimed_by"),
+    /** Database-server epoch ms of the claim. */
+    claimedAt: bigint("claimed_at", { mode: "number" }),
   },
-  (t) => [primaryKey({ columns: [t.baseId, t.sourceId] })],
+  (t) => [
+    primaryKey({ columns: [t.namespaceId, t.baseId, t.sourceId] }),
+    index("knowledge_base_source_queue_idx")
+      .on(t.updatedAt)
+      .where(sql`${t.status} IN ('pending', 'ingesting')`),
+  ],
 );
 
 // ---------------------------------------------------------------------------
@@ -941,12 +961,17 @@ export const agentThread = pgTable(
     inheritFromParent: boolean("inherit_from_parent").notNull().default(true),
     metadata: jsonb("metadata"),
     archivedAt: bigint("archived_at", { mode: "number" }),
+    /** Messages in the thread; kept by `appendMessages` (messages are never deleted one by one). */
+    messageCount: integer("message_count").notNull().default(0),
+    /** Time of the newest message, or of creation before the first one. */
+    lastActiveAt: bigint("last_active_at", { mode: "number" }).notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
   },
   (t) => [
     primaryKey({ columns: [t.namespaceId, t.threadId] }),
     index("agent_thread_resource_idx").on(t.namespaceId, t.resourceId),
+    index("agent_thread_active_idx").on(t.namespaceId, t.lastActiveAt),
   ],
 );
 
@@ -984,18 +1009,37 @@ export const agentEpisode = pgTable(
     summary: text("summary").notNull(),
     outcome: text("outcome"),
     salience: doublePrecision("salience").notNull().default(0.5),
-    embedding: jsonb("embedding"),
     sourceThreadId: text("source_thread_id"),
     sourceMsgFromSeq: integer("source_msg_from_seq"),
     sourceMsgToSeq: integer("source_msg_to_seq"),
     occurredAt: bigint("occurred_at", { mode: "number" }).notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     metadata: jsonb("metadata"),
+    /** Insertion order; breaks ties between episodes with the same sort key. */
+    seq: bigserial("seq", { mode: "number" }).notNull(),
   },
   (t) => [
     index("agent_episode_ns_idx").on(t.scope, t.namespaceId, t.salience),
     index("agent_episode_res_idx").on(t.scope, t.namespaceId, t.resourceId, t.salience),
     index("agent_episode_thr_idx").on(t.scope, t.namespaceId, t.threadId, t.createdAt),
+  ],
+);
+
+// One row per consolidation run counted against a sliding-window rate
+// limit (`MemoryStore.reserveConsolidation`). `reserved_at` is stamped by
+// the database clock, so every replica counts the same window.
+export const agentConsolidationReservation = pgTable(
+  "agent_consolidation_reservation",
+  {
+    id: text("id").primaryKey(),
+    namespaceId: text("namespace_id").notNull(),
+    resourceId: text("resource_id").notNull(),
+    kind: text("kind").notNull(),
+    reservedAt: bigint("reserved_at", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    index("agent_consolidation_ns_idx").on(t.namespaceId, t.kind, t.reservedAt),
+    index("agent_consolidation_res_idx").on(t.namespaceId, t.resourceId, t.kind, t.reservedAt),
   ],
 );
 

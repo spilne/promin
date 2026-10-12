@@ -28,14 +28,23 @@ CREATE TABLE agent_episode (
   summary text NOT NULL,
   outcome text,
   salience double precision DEFAULT 0.5 NOT NULL,
-  embedding jsonb,
   source_thread_id text,
   source_msg_from_seq integer,
   source_msg_to_seq integer,
   occurred_at bigint NOT NULL,
   created_at bigint NOT NULL,
   metadata jsonb,
+  seq bigserial NOT NULL,
   CONSTRAINT agent_episode_pkey PRIMARY KEY (id)
+);
+
+CREATE TABLE agent_consolidation_reservation (
+  id text NOT NULL,
+  namespace_id text NOT NULL,
+  resource_id text NOT NULL,
+  kind text NOT NULL,
+  reserved_at bigint NOT NULL,
+  CONSTRAINT agent_consolidation_reservation_pkey PRIMARY KEY (id)
 );
 
 CREATE TABLE agent_fact (
@@ -119,6 +128,8 @@ CREATE TABLE agent_thread (
   inherit_from_parent boolean DEFAULT true NOT NULL,
   metadata jsonb,
   archived_at bigint,
+  message_count integer DEFAULT 0 NOT NULL,
+  last_active_at bigint NOT NULL,
   created_at bigint NOT NULL,
   updated_at bigint NOT NULL,
   CONSTRAINT agent_thread_pkey PRIMARY KEY (namespace_id, thread_id)
@@ -198,16 +209,18 @@ CREATE TABLE eval_run (
 );
 
 CREATE TABLE knowledge_base (
+  namespace_id text NOT NULL,
   id text NOT NULL,
   description text,
   tags jsonb NOT NULL,
   metadata jsonb NOT NULL,
   created_at bigint NOT NULL,
   updated_at bigint NOT NULL,
-  CONSTRAINT knowledge_base_pkey PRIMARY KEY (id)
+  CONSTRAINT knowledge_base_pkey PRIMARY KEY (namespace_id, id)
 );
 
 CREATE TABLE knowledge_base_source (
+  namespace_id text NOT NULL,
   base_id text NOT NULL,
   source_id text NOT NULL,
   title text,
@@ -221,8 +234,13 @@ CREATE TABLE knowledge_base_source (
   chunk_count integer NOT NULL,
   created_at bigint NOT NULL,
   updated_at bigint NOT NULL,
-  CONSTRAINT knowledge_base_source_pkey PRIMARY KEY (base_id, source_id)
+  claimed_by text,
+  claimed_at bigint,
+  CONSTRAINT knowledge_base_source_pkey PRIMARY KEY (namespace_id, base_id, source_id)
 );
+
+CREATE INDEX knowledge_base_source_queue_idx ON knowledge_base_source (updated_at)
+  WHERE status IN ('pending', 'ingesting');
 
 CREATE TABLE registry_head (
   kind text NOT NULL,
@@ -644,6 +662,10 @@ CREATE TABLE wf_workflows (
 
 CREATE INDEX agent_audit_log_ns_time_idx ON agent_audit_log (namespace_id, recorded_at);
 
+CREATE INDEX agent_consolidation_ns_idx ON agent_consolidation_reservation (namespace_id, kind, reserved_at);
+
+CREATE INDEX agent_consolidation_res_idx ON agent_consolidation_reservation (namespace_id, resource_id, kind, reserved_at);
+
 CREATE INDEX agent_episode_ns_idx ON agent_episode (scope, namespace_id, salience);
 
 CREATE INDEX agent_episode_res_idx ON agent_episode (scope, namespace_id, resource_id, salience);
@@ -673,6 +695,8 @@ CREATE INDEX agent_pending_approval_thread_open_idx ON agent_pending_approval (n
 CREATE INDEX agent_thread_lease_expires_idx ON agent_thread_lease (expires_at);
 
 CREATE INDEX agent_thread_resource_idx ON agent_thread (namespace_id, resource_id);
+
+CREATE INDEX agent_thread_active_idx ON agent_thread (namespace_id, last_active_at);
 
 CREATE INDEX agent_tool_history_name_idx ON agent_tool_history (name, last_seen_at);
 

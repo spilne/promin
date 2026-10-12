@@ -94,6 +94,14 @@ export function recordEvent(capture: RunCapture, e: SessionEvent): void {
         input: e.input,
       });
       break;
+    case "retriever.failed":
+      capture.events.push({
+        type: "retriever-failed",
+        bindingId: e.bindingId,
+        error: e.error,
+        timedOut: e.timedOut,
+      });
+      break;
     case "step_limit.hit":
       capture.finishReason = "max_steps";
       break;

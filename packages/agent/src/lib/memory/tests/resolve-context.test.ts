@@ -310,7 +310,6 @@ function episode(summary: string, salience: number, dayOffset = 0): EpisodicReco
     summary,
     outcome: null,
     salience,
-    embedding: null,
     sourceThreadId: null,
     sourceMessageRange: null,
     occurredAt: ts,

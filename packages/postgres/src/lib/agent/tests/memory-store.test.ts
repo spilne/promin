@@ -20,7 +20,7 @@ beforeAll(async () => {
 afterEach(async () => {
   // Truncate in dependency order. CASCADE not strictly needed since
   // we don't FK-link the tables, but spelled out explicitly for safety.
-  await pg.sql`TRUNCATE agent_message, agent_episode, agent_fact, agent_thread, agent_resource, agent_namespace`;
+  await pg.sql`TRUNCATE agent_message, agent_episode, agent_fact, agent_thread, agent_resource, agent_namespace, agent_consolidation_reservation`;
 });
 
 memoryStoreTestSuite(() => new PostgresMemoryStore({ db: pg.db }));

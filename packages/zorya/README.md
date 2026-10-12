@@ -487,9 +487,11 @@ const agents = new ZoryaAgents({
 });
 ```
 
-`GET /api/agents/_catalog/retrievers` lists the registry's ids, descriptions,
-tags and metadata (never the retriever) and answers an empty list without a
-registry. The agent editor's **Knowledge / RAG** section adds bindings from
+`GET /api/agents/_catalog/retrievers?namespaceId=` lists the ids,
+descriptions, tags and metadata (never the retriever) of the global rows plus
+that namespace's knowledge bases (each with its `namespaceId`), asking
+`authorizeScope` for the namespace; without `namespaceId` it lists the global
+rows only, and without a registry an empty list. The agent editor's **Knowledge / RAG** section adds bindings from
 that catalog (or by manual id), sets each binding's mode (`tool`, `context`,
 `tool + context`), tool name and description, top K, chunk-size cap and
 whether sources and scores are shown, and warns about ids the catalog does not
@@ -554,9 +556,11 @@ for the allowlist file.
 ### Managed knowledge bases
 
 `ZoryaKnowledgeBases` lets operators create knowledge bases and fill them
-from the dashboard's **Knowledge** page. Each base is a retriever registered
-under its id in a `RetrieverRegistry`; pass that registry to `ZoryaAgents`
-and the resolver so recipes bind the bases by id.
+from the dashboard's **Knowledge** page. A base lives in a namespace: ids are
+unique per namespace, and an agent binds the bases of the namespace it runs
+in. Each base is a retriever registered under its namespace and id in a
+`RetrieverRegistry`; pass that registry to `ZoryaAgents` and the resolver
+(with the request's `namespaceId`) so recipes bind the bases by id.
 
 ```ts
 import { ZoryaKnowledgeBases, createUrlKnowledgeSourceAdapter } from "@promin/zorya";
@@ -566,36 +570,44 @@ const knowledgeBases = new ZoryaKnowledgeBases({
   store: SqliteKnowledgeBaseStore.make({ db }), // or PostgresKnowledgeBaseStore
   embeddings, // optional: cosine ranking instead of keyword overlap
   sourceAdapters: [createUrlKnowledgeSourceAdapter()],
-  seed: [{ id: "handbook", description: "Org handbook", documents }],
+  seed: [{ namespaceId: "acme", id: "handbook", description: "Org handbook", documents }],
 });
 const retrievers = knowledgeBases.registry;
 const agents = new ZoryaAgents({
   registry,
   retrievers,
-  resolve: (recipe) => resolveLocalAgent(recipe, { runner, llm, tools, retrievers }),
+  // The registry re-reads the store for a base another replica created.
+  resolve: (recipe, scope) =>
+    resolveLocalAgent(recipe, {
+      runner,
+      llm,
+      tools,
+      retrievers,
+      ...(scope?.namespaceId !== undefined && { namespaceId: scope.namespaceId }),
+    }),
 });
 const server = new ZoryaServer({ workflows, agents, knowledgeBases, apiKeys });
 ```
 
 The store (`InMemoryKnowledgeBaseStore`, `SqliteKnowledgeBaseStore`,
 `PostgresKnowledgeBaseStore`; conformance suite `knowledgeBaseStoreTestSuite`)
-keeps each base and every source's text and last ingestion outcome, so a base
+keeps each base and every source's text and ingestion state, so a base
 survives restarts and the recipes binding it keep resolving. By default each
-base is an `InMemoryRetriever` that `start()` rebuilds from the stored text.
+base is an `InMemoryRetriever` each process builds from the stored text.
 For a durable index pass a factory, for example one pgvector table per base:
 
 ```ts
 new ZoryaKnowledgeBases({
   store,
   retrievers: {
-    durable: true, // chunks survive restarts; nothing is re-ingested at start
+    durable: true, // chunks are shared; nothing is re-ingested at start
     create: async ({ base, chunker }) => {
       const retriever = new PgVectorRetriever({
         db,
         embeddings,
         dimensions: 1536,
         chunker,
-        tableName: `kb_${base.id.replace(/[^A-Za-z0-9_]/g, "_")}`,
+        tableName: `kb_${`${base.namespaceId}_${base.id}`.replace(/[^A-Za-z0-9_]/g, "_")}`,
       });
       await retriever.ensureSchema({ createExtension: true });
       return retriever;
@@ -604,12 +616,28 @@ new ZoryaKnowledgeBases({
 });
 ```
 
-Ingestion (chunk, embed, store) runs inside the request. A failure answers
-`502 ingest_failed` with the reason, and the source stays listed with status
-`failed` and that reason (the base reports `degraded`) until it is re-indexed
-from its stored text or removed. Writes to one base run one at a time. A
-source's text is bounded by the server's request body limit and by
-`maxSourceCharacters` (default 2,000,000).
+Ingestion (chunk, embed, store) runs in the background. Adding, importing or
+re-indexing a source stores it as `pending` and answers `202` with the queued
+source(s) and a `Location` of the base's source listing. A worker loop claims
+pending sources from the store (`ingestion.concurrency`, default 2, per
+process) and records each outcome: `ready`, or
+`failed` with the reason (the base reports `degraded`) until it is re-indexed
+from its stored text or removed; while sources wait the base reports
+`ingesting`, and a re-ingested source keeps its previous chunks searchable
+until the new version is indexed. The queue is the store's rows, so it
+survives restarts: pending sources are picked up again, a worker restarting
+under the same `ingestion.workerId` resumes its interrupted ingestions at once,
+and any other worker takes over a claim older than `ingestion.staleAfterMs`
+(default 10 minutes, measured on the store's clock — the database server's for
+Postgres); a worker renews its claim every third of that while it embeds, so a
+long ingestion is never taken over. Embedding runs outside the base's write
+lock, so edits and resolves of the base go on meanwhile. Chunks carry their
+source version: a new version is indexed beside the old one, and an ingestion
+whose outcome the store refuses (the source was rewritten or removed meanwhile,
+maybe on another replica) deletes exactly the chunks it wrote. The worker also polls every `ingestion.pollIntervalMs` (default
+2 s) for sources other processes queued. `drain()` waits until every queued
+source is ingested (tests, scripts). A source's text is bounded by the
+server's request body limit and by `maxSourceCharacters` (default 2,000,000).
 
 Source adapters load documents server-side and are opt-in.
 `createUrlKnowledgeSourceAdapter` fetches public http(s) pages only by default
@@ -625,16 +653,28 @@ under `root` only. Implement `KnowledgeSourceAdapter` for other sources.
 | `GET/POST /api/knowledge-bases`                                | list, create (409 when the id is taken, also by a host-wired retriever)                                                         |
 | `GET /api/knowledge-bases/_adapters`                           | import kinds the server accepts                                                                                                 |
 | `GET/PATCH/DELETE /api/knowledge-bases/:id`                    | read, edit description / tags / metadata, delete (409 `knowledge_base_in_use` while a recipe binds it; `?force=true` overrides) |
-| `GET/POST /api/knowledge-bases/:id/sources`                    | list sources (without text), ingest `{ id, text, title?, uri?, mimeType?, tags?, metadata? }`                                   |
-| `POST /api/knowledge-bases/:id/sources/import`                 | ingest through an adapter: `{ kind, config }`                                                                                   |
-| `POST /api/knowledge-bases/:id/sources/:sourceId/reindex`      | re-ingest a stored source                                                                                                       |
+| `GET/POST /api/knowledge-bases/:id/sources`                    | list sources (without text) with their status; queue `{ id, text, title?, uri?, mimeType?, tags?, metadata? }` (202)            |
+| `POST /api/knowledge-bases/:id/sources/import`                 | load through an adapter and queue: `{ kind, config }` (202)                                                                     |
+| `POST /api/knowledge-bases/:id/sources/:sourceId/reindex`      | queue a stored source again (202)                                                                                               |
 | `DELETE /api/knowledge-bases/:id/sources/:sourceId`            | drop a source and its chunks                                                                                                    |
 | `GET /api/knowledge-bases/:id/chunks?sourceId=&limit=&offset=` | chunk inspection                                                                                                                |
 | `POST /api/knowledge-bases/:id/search`                         | `{ query, topK?, tags?, metadata?, maxChunkCharacters? }`; 502 `search_failed` when the retriever throws                        |
 
-The service reads the store once at start, so replicas sharing a store see
-each other's new bases after a restart; serve the Knowledge page from one
-replica, and use a durable retriever so searches agree across replicas.
+Every route but `_adapters` takes `?namespaceId=` and acts on that
+namespace's bases only. With the agents service's `authorizeScope` the caller
+must be allowed the namespace (403 `scope_forbidden`); with a namespace
+registry, writes need the namespace registered and active (404
+`namespace_not_found`, 409 `namespace_archived`), while reads and deletes do
+not, so an archived namespace's bases can be cleaned up.
+
+Replicas may share one store. A base missing locally is re-read from the store
+before answering not-found (and `registry.resolve`, which `resolveLocalAgent`
+uses, does it for a resolve), reads
+re-read the base they show, and every `refreshIntervalMs` (default 15 s; 0
+turns it off) the whole store is re-read, so bases, sources and deletions
+made on one replica reach the others' registries without a restart. With the
+default in-memory retriever each replica indexes the ready sources itself;
+a durable retriever shares one index.
 
 ### Workflow builder
 
