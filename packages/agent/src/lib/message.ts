@@ -34,6 +34,12 @@ export interface AssistantMessage {
   toolCalls?: ToolCall[];
   /** Extended-thinking blocks emitted before the text response. Must be replayed verbatim on subsequent turns. */
   thinkingBlocks?: ThinkingBlock[];
+  /**
+   * Structured side-channel data, persisted with the message but never
+   * sent to the LLM. The engine stamps a turn's final assistant message
+   * with the turn's trace (`TURN_TRACE_META_KEY`).
+   */
+  metadata?: Readonly<Record<string, unknown>>;
 }
 
 export interface ToolResultMessage {

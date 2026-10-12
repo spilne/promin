@@ -11,6 +11,7 @@ import {
   THREAD_AGENT_METADATA_KEY,
 } from "@promin/agent";
 import { SystemWallClock } from "@promin/workflow";
+import { z } from "zod";
 import { json, jsonError, parseIntParam, readJson } from "../../router.ts";
 import { internalError } from "../agent-gateway-kit.ts";
 import type {
@@ -96,16 +97,28 @@ interface RenameThreadRequest {
   readonly title?: unknown;
 }
 
+/** Longest accepted thread title, in characters (after trimming). */
+export const MAX_THREAD_TITLE_CHARS = 200;
+
+/** A thread title: trimmed, at most `MAX_THREAD_TITLE_CHARS`; empty or null clears it. */
+export const ThreadTitleSchema = z
+  .string()
+  .transform((t) => t.trim())
+  .pipe(z.string().max(MAX_THREAD_TITLE_CHARS))
+  .nullish();
+
 export function renameAgentThread(deps: AgentGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const body = await readJson<RenameThreadRequest>(req);
     if (!body) return jsonError(400, "missing_body");
-    if (body.title !== undefined && body.title !== null && typeof body.title !== "string") {
-      return jsonError(400, "invalid_title");
+    const parsedTitle = ThreadTitleSchema.safeParse(body.title);
+    if (!parsedTitle.success) {
+      return typeof body.title === "string"
+        ? jsonError(400, "title_too_long", `title exceeds ${MAX_THREAD_TITLE_CHARS} characters.`)
+        : jsonError(400, "invalid_title");
     }
     // Empty / null title clears the rename — back to the threadId default.
-    const title =
-      typeof body.title === "string" && body.title.trim().length > 0 ? body.title.trim() : null;
+    const title = parsedTitle.data ? parsedTitle.data : null;
     const opened = await openThreadFromBody({ deps, req, params, body });
     if (opened instanceof Response) return opened;
     await opened.thread.setTitle(title);

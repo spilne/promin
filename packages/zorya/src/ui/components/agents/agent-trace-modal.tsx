@@ -11,7 +11,9 @@
 //     └─ assistant: "I found..."
 //   Turn 2 — ...
 //
-// Rendered as an indented tree (no graph layout).
+// Rendered as an indented tree (no graph layout). A turn the engine traced
+// also shows its timeline: think / approval / tool spans with durations,
+// token usage and the finish reason.
 // ---------------------------------------------------------------------------
 
 import { useEffect, useMemo, useState } from "preact/hooks";
@@ -20,6 +22,8 @@ import {
   type AgentTraceDto,
   type TraceChildDto,
   type TraceToolCallDto,
+  type TurnSpanDto,
+  type TurnTimingDto,
 } from "../../api/client.ts";
 import { useFetch } from "../../hooks/use-fetch.ts";
 import { buildTraceGraph, type TraceGraphNode } from "../../lib/trace-graph.ts";
@@ -240,11 +244,71 @@ function TurnView({
           seq {turn.fromSeq}–{turn.toSeq}
         </span>
       </div>
+      {turn.timing && <TurnTimingView timing={turn.timing} />}
       <div class="p-3 space-y-2">
         {turn.children.map((c) => (
           <ChildView child={c} hideToolCalls={hideToolCalls} failuresOnly={failuresOnly} />
         ))}
       </div>
+    </div>
+  );
+}
+
+function formatMs(ms: number): string {
+  return ms < 1_000 ? `${ms} ms` : `${(ms / 1_000).toFixed(ms < 10_000 ? 2 : 1)} s`;
+}
+
+function spanLabel(span: TurnSpanDto): string {
+  switch (span.kind) {
+    case "think":
+      return `think · step ${span.step + 1}`;
+    case "tool":
+      return `tool ${span.name}${span.delegated ? " (sub-agent)" : ""}`;
+    case "approval":
+      return `approval ${span.toolName} · ${span.approved ? "approved" : "rejected"}`;
+  }
+}
+
+/** The engine's timeline of one turn: a bar per span, offset from the turn start. */
+function TurnTimingView({ timing }: { timing: TurnTimingDto }) {
+  const total = Math.max(1, timing.durationMs);
+  return (
+    <div class="px-3 pt-2 text-[11px] font-sans space-y-1">
+      <div class="text-base-content/60">
+        {formatMs(timing.durationMs)} · {timing.steps} step{timing.steps === 1 ? "" : "s"} ·{" "}
+        {timing.usage.inputTokens} in / {timing.usage.outputTokens} out tokens ·{" "}
+        <span class={timing.finishReason === "stop" ? "" : "text-warning"}>
+          {timing.finishReason}
+        </span>
+      </div>
+      {timing.spans.map((span) => {
+        const failed = span.kind === "tool" && span.failed;
+        const left =
+          span.startedAt !== undefined
+            ? ((span.startedAt - timing.startedAt) / total) * 100
+            : undefined;
+        const width = span.durationMs !== undefined ? (span.durationMs / total) * 100 : undefined;
+        return (
+          <div class="flex items-center gap-2">
+            <span class={`w-48 truncate ${failed ? "text-error" : "text-base-content/70"}`}>
+              {spanLabel(span)}
+            </span>
+            <div class="relative flex-1 h-2 bg-base-200 rounded">
+              {left !== undefined && width !== undefined && (
+                <div
+                  class={`absolute h-2 rounded ${
+                    failed ? "bg-error" : span.kind === "approval" ? "bg-warning" : "bg-primary"
+                  }`}
+                  style={{ left: `${left}%`, width: `${Math.max(0.5, width)}%` }}
+                />
+              )}
+            </div>
+            <span class="w-16 text-right text-base-content/50">
+              {span.durationMs !== undefined ? formatMs(span.durationMs) : "—"}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }

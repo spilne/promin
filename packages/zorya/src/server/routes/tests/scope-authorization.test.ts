@@ -4,7 +4,7 @@
 // (direct and via clone), DAG runs, and the owner a gateway binds into the
 // scoped agent. The test authorizer admits a caller only into the
 // namespace named by its `x-tenant` header, and never for agent
-// "restricted".
+// "restricted"; operator scope (global secrets) only with `x-operator`.
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
@@ -20,9 +20,12 @@ import {
 } from "./agent-gateway-harness.ts";
 
 const authorizeScope: ScopeAuthorizer = ({ req: r, scope }) =>
-  r.headers.get("x-tenant") === scope.namespaceId && scope.agentId !== "restricted";
+  scope.kind === "operator"
+    ? r.headers.get("x-operator") === "yes"
+    : r.headers.get("x-tenant") === scope.namespaceId && scope.agentId !== "restricted";
 
 const asAcme = { "x-tenant": "acme" };
+const asOperator = { "x-operator": "yes" };
 
 /** Boot with the test authorizer; `bound` collects every scope an agent is bound to. */
 async function boot(opts: HarnessOpts = {}) {
@@ -179,6 +182,80 @@ describe("scoped secrets", () => {
     expect(await secrets!.list({ scope: { kind: "namespace", namespaceId: "globex" } })).toEqual(
       [],
     );
+  });
+});
+
+describe("global secrets", () => {
+  it("a tenant caller cannot store, list or delete global secrets", async () => {
+    const { server, secrets } = await boot({ secrets: true });
+    const global = { kind: "global" as const };
+    await secrets!.set({ scope: global, key: "API_KEY", value: "operator-key" });
+
+    const store = await server.handle(
+      req("POST", "/api/secrets", { scope: global, key: "API_KEY", value: "evil" }, asAcme),
+    );
+    expect(store.status).toBe(403);
+    expect(await errorOf(store)).toBe("scope_forbidden");
+    // An omitted scope is global too.
+    const implicit = await server.handle(
+      req("POST", "/api/secrets", { key: "OTHER", value: "evil" }, asAcme),
+    );
+    expect(implicit.status).toBe(403);
+    const list = await server.handle(req("GET", "/api/secrets?scope=global", undefined, asAcme));
+    expect(list.status).toBe(403);
+    const del = await server.handle(
+      req("DELETE", "/api/secrets/API_KEY?scope=global", undefined, asAcme),
+    );
+    expect(del.status).toBe(403);
+
+    expect(await secrets!.list({ scope: global })).toEqual(["API_KEY"]);
+    expect(await secrets!.get({ scope: global, key: "API_KEY" })).toBe("operator-key");
+  });
+
+  it("an operator can store, list and delete global secrets", async () => {
+    const { server, secrets } = await boot({ secrets: true });
+    const store = await server.handle(
+      req("POST", "/api/secrets", { key: "API_KEY", value: "v" }, asOperator),
+    );
+    expect(store.status).toBe(201);
+    const list = await server.handle(
+      req("GET", "/api/secrets?scope=global", undefined, asOperator),
+    );
+    expect(list.status).toBe(200);
+    expect((await jsonOf<{ keys: string[] }>(list)).keys).toEqual(["API_KEY"]);
+    const del = await server.handle(
+      req("DELETE", "/api/secrets/API_KEY?scope=global", undefined, asOperator),
+    );
+    expect(del.status).toBe(204);
+    expect(await secrets!.list({ scope: { kind: "global" } })).toEqual([]);
+  });
+
+  it("a tenant clone cannot provision global secrets; an operator clone can", async () => {
+    const { server, registry, secrets } = await boot({ secrets: true });
+    for (const secretsScope of [undefined, { kind: "global" }]) {
+      const res = await server.handle(
+        req(
+          "POST",
+          "/api/agents/support/clone",
+          { targetId: "support-2", secrets: { API_KEY: "evil" }, secretsScope },
+          asAcme,
+        ),
+      );
+      expect(res.status).toBe(403);
+    }
+    expect(await registry.get("support-2")).toBeNull();
+    expect(await secrets!.list({ scope: { kind: "global" } })).toEqual([]);
+
+    const ok = await server.handle(
+      req(
+        "POST",
+        "/api/agents/support/clone",
+        { targetId: "support-2", secrets: { API_KEY: "k" }, secretsScope: { kind: "global" } },
+        asOperator,
+      ),
+    );
+    expect(ok.status).toBe(201);
+    expect(await secrets!.list({ scope: { kind: "global" } })).toEqual(["API_KEY"]);
   });
 });
 

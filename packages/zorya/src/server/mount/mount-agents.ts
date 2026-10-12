@@ -28,6 +28,7 @@ import {
 import { createDraft, deleteDraft } from "../routes/agent-drafts.ts";
 import {
   archiveAgentThread,
+  cancelThreadTurn,
   cloneAgent,
   compactThread,
   createAgent,
@@ -43,11 +44,13 @@ import {
   listAgents,
   listThreadApprovals,
   listThreadMessages,
+  reattachThreadStream,
   renameAgentThread,
   sendThreadMessage,
   streamAgent,
   streamThreadApproval,
   streamThreadMessage,
+  TurnStreamHub,
   updateAgent,
   type AgentGatewayDeps,
 } from "../routes/agents/index.ts";
@@ -101,6 +104,10 @@ export function mountAgents(params: {
     ...namespaced,
     fileManagedIds: () => agents.fileManagedIds(),
     clock,
+    turnStreams: new TurnStreamHub({
+      clock,
+      ...(agents.streaming !== undefined && { limits: agents.streaming }),
+    }),
   };
   // The standalone fragments service wins over the registry passed on
   // ZoryaAgents, for the catalog and the memory inspector alike.
@@ -191,6 +198,8 @@ export function mountAgents(params: {
     .patch("/api/agents/:id/threads/:threadId", renameAgentThread(agentDeps))
     .post("/api/agents/:id/threads/:threadId", sendThreadMessage(agentDeps))
     .post("/api/agents/:id/threads/:threadId/stream", streamThreadMessage(agentDeps))
+    .get("/api/agents/:id/threads/:threadId/stream", reattachThreadStream(agentDeps))
+    .post("/api/agents/:id/threads/:threadId/cancel", cancelThreadTurn(agentDeps))
     .post("/api/agents/:id/threads/:threadId/approve", streamThreadApproval(agentDeps))
     .get("/api/agents/:id/threads/:threadId/approvals", listThreadApprovals(agentDeps))
     .get("/api/agents/:id/threads/:threadId/messages", listThreadMessages(agentDeps))

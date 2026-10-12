@@ -29,6 +29,7 @@ import {
 } from "@promin/agent";
 import type { DurableScheduleConfig, ScheduleTick } from "@promin/workflow/scheduler";
 import type { ScopeAuthorizer } from "../../routes/agent-gateway-kit.ts";
+import type { TurnStreamLimits } from "../../routes/agents/agent-sse.ts";
 import type { AgentScheduleDispatcher, AgentScheduleStart } from "../scheduler/index.ts";
 
 export interface ZoryaAgentsScanConfig {
@@ -130,11 +131,20 @@ export interface ZoryaAgentsConfig {
   workerId?: string;
   /**
    * Binds the `(namespaceId, resourceId | ownerId)` a request names to its
-   * authenticated caller; `false` answers 403. Without it, any caller the
-   * server's auth admits may act in any scope it names (thread ownership
-   * by resource and agent is enforced either way).
+   * authenticated caller; `false` answers 403. It is also asked for
+   * `{ kind: "operator" }` before global secrets are stored, listed or
+   * deleted (directly or by a clone), which only operators should get.
+   * Without it, any caller the server's auth admits may act in any scope
+   * it names (thread ownership by resource and agent is enforced either
+   * way).
    */
   authorizeScope?: ScopeAuthorizer;
+  /**
+   * Bounds of the agent routes' event streams: per-turn buffer bytes,
+   * retention for reattach, heartbeat interval, kept turns and the
+   * per-response queue. Defaults: see `TurnStreamLimits`.
+   */
+  streaming?: TurnStreamLimits;
 }
 
 export class ZoryaAgents implements AgentScheduleDispatcher {
@@ -160,6 +170,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly turnGateInProcess: boolean;
   readonly workerId?: string;
   readonly authorizeScope?: ScopeAuthorizer;
+  readonly streaming?: TurnStreamLimits;
   private readonly scanConfig?: ZoryaAgentsScanConfig;
   private scanHandle?: { stop(): void; tick(): Promise<unknown> };
   // Agent ids currently backed by a recipe file on disk (rebuilt each scan
@@ -200,6 +211,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     }
     if (config.workerId) this.workerId = config.workerId;
     if (config.authorizeScope) this.authorizeScope = config.authorizeScope;
+    if (config.streaming) this.streaming = config.streaming;
   }
 
   /**

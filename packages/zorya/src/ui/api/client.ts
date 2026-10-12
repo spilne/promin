@@ -105,7 +105,7 @@ import type {
   MintTokenResponse,
 } from "../../server/routes/signal-tokens.ts";
 import type { WorkflowVersionDto } from "../../server/routes/workflow-versions.ts";
-import { parseSseFrame, subscribeSse } from "./sse.ts";
+import { readResumableSse, SseHttpError, subscribeSse, type SseMessage } from "./sse.ts";
 
 const BASE = ""; // served from same origin
 
@@ -1077,8 +1077,10 @@ export const api = {
    *
    * EventSource doesn't support POST or custom headers (auth), so this uses
    * fetch + manual SSE parsing — same pattern ChatGPT/Claude.ai use.
-   * `onDelta` fires per text chunk; `onFinish` once at completion.
-   * Returns an AbortController so callers can cancel mid-stream.
+   * `onDelta` fires per text chunk; `onFinish` once at completion. A
+   * dropped connection is resumed with `Last-Event-ID`, so no delta is
+   * delivered twice. `abort()` only detaches: the turn keeps running on the
+   * server (`cancelAgentThreadTurn` stops it).
    */
   streamAgentThread(
     id: string,
@@ -1087,7 +1089,34 @@ export const api = {
     handlers: AgentStreamHandlers,
   ): { abort: () => void; done: Promise<void> } {
     const url = `${BASE}/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/stream`;
-    return startSseStream(url, body, handlers);
+    return startSseStream({
+      url,
+      body,
+      resumeUrl: threadStreamResumeUrl({ id, threadId, scope: body }),
+      handlers,
+    });
+  },
+
+  /**
+   * POST /api/agents/:id/threads/:threadId/cancel — cancel the thread's
+   * running turn. Resolves false when no turn runs (404).
+   */
+  async cancelAgentThreadTurn(
+    id: string,
+    threadId: string,
+    body: { namespaceId: string; resourceId?: string },
+  ): Promise<boolean> {
+    const res = await fetch(
+      `${BASE}/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/cancel`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", ...authHeader() },
+        body: JSON.stringify(body),
+      },
+    );
+    if (res.status === 404) return false;
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return true;
   },
 
   /**
@@ -1109,7 +1138,12 @@ export const api = {
     handlers: AgentStreamHandlers,
   ): { abort: () => void; done: Promise<void> } {
     const url = `${BASE}/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/approve`;
-    return startSseStream(url, body, handlers);
+    return startSseStream({
+      url,
+      body,
+      resumeUrl: threadStreamResumeUrl({ id, threadId, scope: body }),
+      handlers,
+    });
   },
 };
 
@@ -1182,6 +1216,8 @@ export interface AgentTraceDto {
     fromSeq: number;
     toSeq: number;
     children: Array<TraceChildDto>;
+    /** The engine's timed trace of the turn, when it recorded one. */
+    timing?: TurnTimingDto;
   }>;
   orphanSystem: Array<{ kind: "system"; seq: number; content: string }>;
   summary: {
@@ -1192,6 +1228,44 @@ export interface AgentTraceDto {
     orphanedToolCalls: number;
     orphanedToolResults: number;
   };
+}
+/** Token usage of a think step or a whole turn. */
+export interface TraceUsageDto {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+}
+export type TurnSpanDto =
+  | { kind: "think"; step: number; startedAt: number; durationMs: number; usage?: TraceUsageDto }
+  | {
+      kind: "tool";
+      step: number;
+      name: string;
+      toolCallId: string;
+      failed: boolean;
+      delegated?: true;
+      startedAt?: number;
+      durationMs?: number;
+    }
+  | {
+      kind: "approval";
+      step: number;
+      toolCallId: string;
+      toolName: string;
+      approved: boolean;
+      startedAt: number;
+      durationMs: number;
+    };
+export interface TurnTimingDto {
+  workflowId: string;
+  startedAt: number;
+  endedAt: number;
+  durationMs: number;
+  finishReason: string;
+  steps: number;
+  usage: TraceUsageDto;
+  spans: TurnSpanDto[];
 }
 export type TraceChildDto =
   | { kind: "user"; seq: number; content: string; metadata?: Record<string, unknown> }
@@ -1335,7 +1409,13 @@ export const secretsApi = {
 };
 
 export interface AgentStreamHandlers {
-  onThread?: (info: { threadId: string; isNew: boolean; instanceId?: string }) => void;
+  onThread?: (info: {
+    threadId: string;
+    isNew: boolean;
+    instanceId?: string;
+    /** The turn's id: event ids are `<turnId>:<seq>`. */
+    turnId?: string;
+  }) => void;
   onDelta: (delta: string) => void;
   /** Workflow suspended on an approval gate — banner should render. */
   onApprovalRequested?: (info: { toolCallId: string; toolName: string; input?: unknown }) => void;
@@ -1354,68 +1434,85 @@ export interface AgentStreamHandlers {
   onError?: (message: string) => void;
 }
 
-function startSseStream<TBody>(
-  url: string,
-  body: TBody,
-  handlers: AgentStreamHandlers,
-): { abort: () => void; done: Promise<void> } {
+/** `GET .../threads/:threadId/stream` — where a dropped turn stream is resumed. */
+function threadStreamResumeUrl(params: {
+  id: string;
+  threadId: string;
+  scope: { namespaceId: string; resourceId?: string };
+}): string {
+  const qp = new URLSearchParams({ namespaceId: params.scope.namespaceId });
+  if (params.scope.resourceId) qp.set("resourceId", params.scope.resourceId);
+  return `${BASE}/api/agents/${encodeURIComponent(params.id)}/threads/${encodeURIComponent(params.threadId)}/stream?${qp}`;
+}
+
+/** Turn-ending events: the stream is complete once one arrives. */
+const TERMINAL_STREAM_EVENTS = new Set(["finish", "suspended", "error"]);
+
+/** Deliver one agent stream message to its handler. */
+export function dispatchAgentStreamMessage(params: {
+  message: SseMessage;
+  handlers: AgentStreamHandlers;
+}): void {
+  const { message, handlers } = params;
+  let payload: Record<string, unknown> | null;
+  try {
+    payload = JSON.parse(message.data) as Record<string, unknown> | null;
+  } catch {
+    return; // Skip malformed frames.
+  }
+  const event = message.event;
+  if (event === "thread") {
+    handlers.onThread?.(payload as Parameters<NonNullable<AgentStreamHandlers["onThread"]>>[0]);
+  } else if (event === "finish") {
+    handlers.onFinish?.(payload as Parameters<NonNullable<AgentStreamHandlers["onFinish"]>>[0]);
+  } else if (event === "error") {
+    handlers.onError?.(String(payload?.message ?? payload?.error ?? "stream error"));
+  } else if (event === "approval-requested") {
+    handlers.onApprovalRequested?.(
+      payload as Parameters<NonNullable<AgentStreamHandlers["onApprovalRequested"]>>[0],
+    );
+  } else if (event === "suspended") {
+    handlers.onSuspended?.(
+      payload as Parameters<NonNullable<AgentStreamHandlers["onSuspended"]>>[0],
+    );
+  } else if (typeof payload?.delta === "string") {
+    handlers.onDelta(payload.delta);
+  }
+}
+
+function startSseStream<TBody>(params: {
+  url: string;
+  body: TBody;
+  /** Where the stream is resumed with `Last-Event-ID` after a network blip. */
+  resumeUrl: string;
+  handlers: AgentStreamHandlers;
+}): { abort: () => void; done: Promise<void> } {
+  const { handlers } = params;
   const ctrl = new AbortController();
 
   const done = (async () => {
     try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "text/event-stream",
-          ...authHeader(),
+      const outcome = await readResumableSse({
+        start: {
+          url: params.url,
+          init: {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(params.body),
+          },
         },
-        body: JSON.stringify(body),
+        resumeUrl: params.resumeUrl,
+        headers: authHeader,
         signal: ctrl.signal,
+        isTerminal: (message) => TERMINAL_STREAM_EVENTS.has(message.event),
+        onMessage: (message) => dispatchAgentStreamMessage({ message, handlers }),
       });
-      if (!res.ok || !res.body) {
-        handlers.onError?.(`HTTP ${res.status}`);
-        return;
-      }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      while (true) {
-        const { value, done: streamDone } = await reader.read();
-        if (streamDone) break;
-        buffer += decoder.decode(value, { stream: true });
-        // SSE frames are separated by a blank line. Process whole frames
-        // and keep any trailing partial frame in the buffer.
-        let sepIndex: number;
-        while ((sepIndex = buffer.indexOf("\n\n")) !== -1) {
-          const frame = buffer.slice(0, sepIndex);
-          buffer = buffer.slice(sepIndex + 2);
-          const parsed = parseSseFrame(frame);
-          if (!parsed) continue;
-          const { event, data } = parsed;
-          try {
-            const payload = JSON.parse(data);
-            if (event === "thread") {
-              handlers.onThread?.(payload);
-            } else if (event === "finish") {
-              handlers.onFinish?.(payload);
-            } else if (event === "error") {
-              handlers.onError?.(String(payload?.message ?? "stream error"));
-            } else if (event === "approval-requested") {
-              handlers.onApprovalRequested?.(payload);
-            } else if (event === "suspended") {
-              handlers.onSuspended?.(payload);
-            } else if (typeof payload?.delta === "string") {
-              handlers.onDelta(payload.delta);
-            }
-          } catch {
-            // Skip malformed frames.
-          }
-        }
-      }
+      // Gave up resuming: the turn may still finish on the server, and the
+      // thread's messages will show it.
+      if (outcome === "lost") handlers.onError?.("connection lost; reload the thread");
     } catch (e) {
       if ((e as Error).name === "AbortError") return;
-      handlers.onError?.((e as Error).message);
+      handlers.onError?.(e instanceof SseHttpError ? e.message : (e as Error).message);
     }
   })();
 

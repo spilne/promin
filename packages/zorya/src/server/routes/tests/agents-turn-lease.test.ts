@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
+import { DEFAULT_TURN_STREAM_RETENTION_MS } from "../agents/agent-sse.ts";
 import { bootAgents, req } from "./agent-gateway-harness.ts";
 
 const body = { task: "hi", namespaceId: "ns", resourceId: "alice" };
@@ -151,7 +152,9 @@ describe("turn lease — streaming", () => {
     release();
     expect(await reading).toContain("event: finish");
     expect(await waitFor(async () => (await leaseStore.get(key)) === null)).toBe(true);
-    // The extension timer is gone with the lease.
+    // The extension timer is gone with the lease; what is left is the
+    // finished turn stream's retention, which ends on schedule.
+    clock.advance(DEFAULT_TURN_STREAM_RETENTION_MS);
     expect(clock.pendingCount()).toBe(0);
   });
 

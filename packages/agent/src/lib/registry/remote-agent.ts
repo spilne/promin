@@ -8,6 +8,7 @@
 //   POST /api/agents/:id/stream                    → SSE (text/event-stream)
 //   POST /api/agents/:id/threads/:tid              → ThreadInvokeResponse JSON
 //   POST /api/agents/:id/threads/:tid/stream       → SSE
+//   POST /api/agents/:id/threads/:tid/cancel       → cancel the running turn
 //   GET  /api/agents/:id/threads?namespaceId=...   → { threads: [...] }
 //   GET  /api/agents/:id/threads/:tid/messages     → { messages: [...] }
 //   PATCH /api/agents/:id/threads/:tid             → rename (setTitle)
@@ -96,7 +97,8 @@ export class RemoteAgent implements Agent {
     const body = this.baseBody(input.task);
     const ctrl = this.abortCtrl(opts?.signal);
     const pending = this.post(`/api/agents/${enc(this.cfg.remoteAgentId)}/stream`, body, ctrl);
-    return buildSseRunOutput(pending, ctrl);
+    // A one-shot stream is cancelled by closing it.
+    return buildSseRunOutput({ pending, ctrl });
   }
 
   // --- thread --------------------------------------------------------------
@@ -242,12 +244,50 @@ class RemoteAgentThread implements AgentThread {
     return buildStaticRunOutput(data);
   }
 
+  /**
+   * Stream a turn. Closing a thread stream only detaches from the turn on
+   * the server, so `cancel()` — and the caller's `signal` or `timeoutMs`
+   * running out — cancels the turn through the cancel route (by the turn
+   * id the server named), then closes. `cancel()` rejects when the server
+   * refuses the cancel; a turn that already ended (404) is not an error.
+   */
   stream(input: { task: string }, opts?: AgentInvokeOpts): AgentRunOutput {
     const body = this.threadBody(input.task);
-    const ctrl = this.abortCtrl(opts?.signal);
+    const ctrl = new AbortController();
     const proxy = new RemoteAgent(this.cfg);
     const pending = proxy.post(`${this.threadPath()}/stream`, body, ctrl);
-    return buildSseRunOutput(pending, ctrl);
+    const out = buildSseRunOutput({
+      pending,
+      ctrl,
+      cancelRemote: async (turnId) => {
+        const cancelBody: Record<string, unknown> = {};
+        if (this.cfg.namespaceId) cancelBody.namespaceId = this.cfg.namespaceId;
+        if (this.cfg.resourceId) cancelBody.resourceId = this.cfg.resourceId;
+        if (turnId !== undefined) cancelBody.turnId = turnId;
+        const res = await proxy.post(
+          `${this.threadPath()}/cancel`,
+          cancelBody,
+          new AbortController(),
+        );
+        if (!res.ok && res.status !== 404) {
+          throw new Error(`RemoteAgent cancel failed: ${res.status} ${await res.text()}`);
+        }
+      },
+    });
+    const stop = (): void => {
+      out.cancel().catch(() => {});
+    };
+    const upstream = opts?.signal;
+    if (upstream?.aborted) stop();
+    else upstream?.addEventListener("abort", stop, { once: true });
+    const timer =
+      this.cfg.timeoutMs !== undefined ? setTimeout(stop, this.cfg.timeoutMs) : undefined;
+    const clear = (): void => {
+      if (timer !== undefined) clearTimeout(timer);
+      upstream?.removeEventListener("abort", stop);
+    };
+    out.text.then(clear, clear);
+    return out;
   }
 
   // --- messages ------------------------------------------------------------
@@ -366,7 +406,17 @@ function buildStaticRunOutput(data: {
  *   - two buffered async generators (`textStream`, `fullStream`)
  *   - deferred promises (`text`, `finishReason`, `usage`)
  */
-function buildSseRunOutput(pending: Promise<Response>, ctrl: AbortController): AgentRunOutput {
+function buildSseRunOutput(params: {
+  pending: Promise<Response>;
+  ctrl: AbortController;
+  /** Cancels the run (turn id from `x-turn-id`) on the server; closing the stream alone only detaches. */
+  cancelRemote?: (turnId: string | undefined) => Promise<void>;
+}): AgentRunOutput {
+  const { pending, ctrl, cancelRemote } = params;
+  const turnId = pending.then(
+    (res) => res.headers.get("x-turn-id") ?? undefined,
+    () => undefined,
+  );
   // Deferred promise handles
   let resolveText!: (t: string) => void;
   let rejectText!: (e: unknown) => void;
@@ -511,7 +561,13 @@ function buildSseRunOutput(pending: Promise<Response>, ctrl: AbortController): A
     usage: usagePromise,
     finishReason: finishPromise,
     messages: Promise.resolve([] as Message[]),
-    cancel: async () => ctrl.abort(),
+    cancel: async () => {
+      try {
+        if (cancelRemote) await cancelRemote(await turnId);
+      } finally {
+        ctrl.abort();
+      }
+    },
   };
 }
 

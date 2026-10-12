@@ -22,7 +22,10 @@
 //                                      entries (see delegation/run-delegated-call.ts)
 //   stall-<step>                       emits stall.detected
 //   after-turn                         hooks.afterTurn
-//   transcript-commit                  transcript.commit (what the turn produced)
+//   turn-trace                         end time of the turn's trace
+//   transcript-commit                  transcript.commit (what the turn produced,
+//                                      the final assistant message stamped with
+//                                      the turn's trace)
 //   turn-end                           emits turn.end / turn.aborted / step_limit.hit
 //   turn-failed                        emits turn.failed (only when the turn throws)
 //
@@ -31,6 +34,12 @@
 // the activity that produced it, so nothing is emitted twice for one
 // journal position. Time comes from the injected WallClock, inside
 // activities only.
+//
+// Tracing: think and tool activities journal their own start time and
+// duration next to their result, approval entries their request and
+// decision times, so the turn's `TurnTrace` (AgentResult.trace, and the
+// metadata of the committed final assistant message) is rebuilt from the
+// journal on replay and reports the original timings.
 //
 // Every activity except a non-idempotent tool call is idempotent: a crash
 // inside one re-runs it on recovery. So events, hooks and callbacks run
@@ -65,6 +74,7 @@ import { delegatedRunId, runDelegatedCall } from "./delegation/run-delegated-cal
 import { parseDelegationFrame, ROOT_FRAME, type DelegationFrame } from "./delegation/types.ts";
 import type { AgentTool, ApprovalDecision, AutoApprove, ToolScope } from "./tool.ts";
 import { shouldAutoApprove } from "./tool.ts";
+import { TURN_TRACE_META_KEY, type TurnSpan, type TurnTrace } from "./trace.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
 import { buildToolDefs } from "./tool-registry.ts";
 
@@ -116,6 +126,12 @@ export interface AgentResult<TOutput = unknown> {
     cacheReadTokens?: number;
     cacheWriteTokens?: number;
   };
+  /**
+   * The turn's timed trace: think / tool / approval spans and totals. Set
+   * by every `agentAction` turn; absent on a result relayed from an agent
+   * that is not run by this engine.
+   */
+  trace?: TurnTrace;
 }
 
 export interface StepContext {
@@ -468,6 +484,8 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
       // a malformed one fails the run before anything happens.
       const frame: DelegationFrame =
         input.delegation === undefined ? ROOT_FRAME : parseDelegationFrame(input.delegation);
+      // The turn's trace spans, rebuilt from journaled values on replay.
+      const spans: TurnSpan[] = [];
       const startedAt = yield* ctx.activity(
         "turn-start",
         async () => {
@@ -563,19 +581,29 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
           const roundMode: RoundMode =
             mode === "normal" && respondDef && snapshot.length === 0 ? "force-respond" : mode;
           const conversation = messages;
-          const response = yield* ctx.activity(
+          const thought = yield* ctx.activity(
             `think-${step}`,
             () =>
-              think({
-                step,
-                messages: conversation,
-                snapshot,
-                roundMode,
-                isReplay: ctx.isReplay,
-                workflowId,
-              }),
+              timed(() =>
+                think({
+                  step,
+                  messages: conversation,
+                  snapshot,
+                  roundMode,
+                  isReplay: ctx.isReplay,
+                  workflowId,
+                }),
+              ),
             { idempotent: true },
           );
+          const response = thought.value;
+          spans.push({
+            kind: "think",
+            step,
+            startedAt: thought.startedAt,
+            durationMs: thought.durationMs,
+            ...(response.usage && { usage: response.usage }),
+          });
           if (response.usage) {
             usage.inputTokens += response.usage.inputTokens;
             usage.outputTokens += response.usage.outputTokens;
@@ -816,22 +844,36 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
           );
         }
 
-        if (transcript) {
-          // Everything after the user message `transcript-open` recorded.
-          const output = produced.slice(1);
-          yield* ctx.activity(
-            "transcript-commit",
-            () => transcript.commit({ workflowId, messages: output }),
-            { idempotent: true },
-          );
-        }
-
         const tokens = {
           inputTokens: usage.inputTokens,
           outputTokens: usage.outputTokens,
           ...(usage.cacheReadTokens > 0 && { cacheReadTokens: usage.cacheReadTokens }),
           ...(usage.cacheWriteTokens > 0 && { cacheWriteTokens: usage.cacheWriteTokens }),
         };
+        const endedAt = yield* ctx.activity("turn-trace", async () => clock.currentTimeMs(), {
+          idempotent: true,
+        });
+        const trace: TurnTrace = {
+          workflowId,
+          startedAt,
+          endedAt,
+          durationMs: endedAt - startedAt,
+          finishReason: final.finishReason,
+          steps: stepsTaken,
+          usage: tokens,
+          spans: orderSpans(spans),
+        };
+
+        if (transcript) {
+          // Everything after the user message `transcript-open` recorded,
+          // the final assistant message carrying the turn's trace.
+          const output = stampTrace({ messages: produced.slice(1), trace });
+          yield* ctx.activity(
+            "transcript-commit",
+            () => transcript.commit({ workflowId, messages: output }),
+            { idempotent: true },
+          );
+        }
         yield* ctx.activity(
           "turn-end",
           async () => {
@@ -869,6 +911,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
           steps: stepsTaken,
           finishReason: final.finishReason,
           ...(hasUsage && { usage: tokens }),
+          trace,
         };
         return result;
       }
@@ -885,9 +928,10 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
         // `listPendingSignals` reads it to describe the pending approval.
         const onApprovalRequired = config.onApprovalRequired;
         const approvalIndex = onApprovalRequired ? undefined : config.approvalIndex;
-        yield* ctx.activity(
+        const requested = yield* ctx.activity(
           `${prefix}-start`,
           async () => {
+            const requestedAt = clock.currentTimeMs();
             await approvalIndex?.requested({ workflowId, call });
             emit({
               type: "approval.requested",
@@ -922,14 +966,19 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
                     ...(scope.agentId !== undefined && { agentId: scope.agentId }),
                   }
                 : undefined);
-            return { toolName: call.name, toolInput: call.input, ...(thread && { thread }) };
+            return {
+              toolName: call.name,
+              toolInput: call.input,
+              requestedAt,
+              ...(thread && { thread }),
+            };
           },
           { idempotent: true },
         );
         const decision: ApprovalDecision = onApprovalRequired
           ? yield* ctx.activity(prefix, () => onApprovalRequired(call), { idempotent: true })
           : yield* ctx.approval(call.id);
-        yield* ctx.activity(
+        const decidedAt = yield* ctx.activity(
           `${prefix}-end`,
           async () => {
             emit({
@@ -952,9 +1001,19 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
               to: "thinking",
               toolCallId: call.id,
             });
+            return clock.currentTimeMs();
           },
           { idempotent: true },
         );
+        spans.push({
+          kind: "approval",
+          step,
+          toolCallId: call.id,
+          toolName: call.name,
+          approved: decision.approved,
+          startedAt: requested.requestedAt,
+          durationMs: decidedAt - requested.requestedAt,
+        });
         return decision;
       }
 
@@ -962,11 +1021,11 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
         step: number;
         call: ToolCall;
         entry: ToolSnapshotEntry;
-      }): Generator<ActivityYield, ToolResultMessage, ToolResultMessage> {
+      }): Generator<ActivityYield, ToolResultMessage, any> {
         const { step, call, entry } = params;
         if (entry.delegated) {
           const timeoutMs = timeoutFor(call);
-          return yield* runDelegatedCall({
+          const delegated = yield* runDelegatedCall({
             ctx,
             name: `tool-${call.name}-${step}-${call.id}`,
             call,
@@ -986,18 +1045,38 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
               toolEnded({ step, call, durationMs, failed: result.isError === true });
             },
           });
+          spans.push({
+            kind: "tool",
+            step,
+            name: call.name,
+            toolCallId: call.id,
+            failed: delegated.isError === true,
+            delegated: true,
+          });
+          return delegated;
         }
         try {
-          return yield* ctx.activity(
+          const ran = yield* ctx.activity(
             `tool-${call.name}-${step}-${call.id}`,
-            () => executeTool({ step, call }),
+            () => timed(() => executeTool({ step, call })),
             { idempotent: entry.idempotent },
           );
+          spans.push({
+            kind: "tool",
+            step,
+            name: call.name,
+            toolCallId: call.id,
+            failed: ran.value.isError === true,
+            startedAt: ran.startedAt,
+            durationMs: ran.durationMs,
+          });
+          return ran.value;
         } catch (err) {
           // A non-idempotent tool interrupted by a crash: don't re-run it,
           // tell the model the outcome is unknown. Replays land here again,
           // so the transcript is the same on every pass.
           if ((err as { _tag?: unknown } | null)?._tag === "AmbiguousActivityOutcome") {
+            spans.push({ kind: "tool", step, name: call.name, toolCallId: call.id, failed: true });
             return errorResult(call, OUTCOME_UNKNOWN_MESSAGE);
           }
           throw err;
@@ -1005,6 +1084,15 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
       }
     })
     .build();
+
+  /** Run `fn`, journaling its start time and duration next to its value. */
+  async function timed<T>(
+    fn: () => Promise<T>,
+  ): Promise<{ value: T; startedAt: number; durationMs: number }> {
+    const startedAt = clock.currentTimeMs();
+    const value = await fn();
+    return { value, startedAt, durationMs: clock.currentTimeMs() - startedAt };
+  }
 
   function autoApproved(call: ToolCall, entry: ToolSnapshotEntry): boolean {
     const live = resolveTools(config)[call.name];
@@ -1205,4 +1293,43 @@ function errorResult(call: ToolCall, content: string): ToolResultMessage {
 /** Error results for tool calls the engine chose not to run. */
 function skippedResults(calls: ReadonlyArray<ToolCall>, reason: string): ToolResultMessage[] {
   return calls.map((call) => errorResult(call, reason));
+}
+
+/**
+ * Spans in start order, independent of the order they were recorded in
+ * (calls of one step finish in any order, and a replay records them in
+ * another): by start time, then step, then think / approval / tool, then
+ * tool call id. A span without a start time sorts at its step's think.
+ */
+function orderSpans(spans: ReadonlyArray<TurnSpan>): TurnSpan[] {
+  const thinkStart = new Map<number, number>();
+  for (const span of spans) {
+    if (span.kind === "think") thinkStart.set(span.step, span.startedAt);
+  }
+  const rank = { think: 0, approval: 1, tool: 2 } as const;
+  const at = (span: TurnSpan): number => span.startedAt ?? thinkStart.get(span.step) ?? 0;
+  const callId = (span: TurnSpan): string => (span.kind === "think" ? "" : span.toolCallId);
+  return [...spans].sort(
+    (a, b) =>
+      at(a) - at(b) ||
+      a.step - b.step ||
+      rank[a.kind] - rank[b.kind] ||
+      (callId(a) < callId(b) ? -1 : callId(a) > callId(b) ? 1 : 0),
+  );
+}
+
+/** The turn's output with its final assistant message stamped with `trace`. */
+function stampTrace(params: {
+  readonly messages: ReadonlyArray<Message>;
+  readonly trace: TurnTrace;
+}): Message[] {
+  const out = [...params.messages];
+  for (let i = out.length - 1; i >= 0; i--) {
+    const m = out[i]!;
+    if (m.role === "assistant") {
+      out[i] = { ...m, metadata: { ...m.metadata, [TURN_TRACE_META_KEY]: params.trace } };
+      break;
+    }
+  }
+  return out;
 }

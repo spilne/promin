@@ -177,7 +177,8 @@ describe("thread isolation — writes", () => {
 describe("scope authorization hook", () => {
   it("authorizeScope binds the requested resource to the caller (403 otherwise)", async () => {
     const { server } = await bootAgents({
-      authorizeScope: ({ req: r, scope }) => r.headers.get("x-user") === scope.resourceId,
+      authorizeScope: ({ req: r, scope }) =>
+        scope.kind !== "operator" && r.headers.get("x-user") === scope.resourceId,
     });
     const asAlice = { "x-user": "alice" };
     const ok = await server.handle(

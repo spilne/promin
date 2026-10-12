@@ -296,8 +296,9 @@ export function mergeAgentMetadata(params: {
 // Caller scope authorization
 // ---------------------------------------------------------------------------
 
-/** The scope a request asks to act in. */
-export interface RequestedScope {
+/** A tenant scope a request asks to act in: a namespace, maybe narrowed to a resource. */
+export interface TenantScope {
+  readonly kind?: "tenant";
   readonly namespaceId: string;
   /** Raw resource key, when the caller named one. */
   readonly resourceId?: string;
@@ -308,10 +309,27 @@ export interface RequestedScope {
 }
 
 /**
+ * Operator-level access: state that is not any tenant's but applies to all
+ * of them, such as global secrets (the fallback every namespace resolves
+ * against). A tenant caller must not be allowed this.
+ */
+export interface OperatorScope {
+  readonly kind: "operator";
+  /** What the operator action touches. */
+  readonly resource: "secrets";
+}
+
+/** The scope a request asks to act in. */
+export type RequestedScope = TenantScope | OperatorScope;
+
+/**
  * Host hook binding a request's scope to its authenticated caller. Return
- * `true` to allow, `false` to answer 403 `scope_forbidden`. Without a hook
- * every caller that passed the server's auth may act in any scope it
- * names; thread ownership (a thread is reachable only through the
+ * `true` to allow, `false` to answer 403 `scope_forbidden`. Tenant scopes
+ * name a namespace (and maybe a resource); an `operator` scope asks for
+ * operator-level access (global secrets) and should be granted only to
+ * operators, never to tenant callers. Without a hook every caller that
+ * passed the server's auth may act in any scope it names, operator scope
+ * included; thread ownership (a thread is reachable only through the
  * resource and agent that created it) is enforced either way.
  */
 export type ScopeAuthorizer = (params: {

@@ -27,6 +27,7 @@ import {
 import { LocalWorkflows, ZoryaAgents, ZoryaDags } from "../../../index.ts";
 import { ZoryaServer } from "../../server.ts";
 import type { ScopeAuthorizer } from "../agent-gateway-kit.ts";
+import type { TurnStreamLimits } from "../agents/agent-sse.ts";
 
 export const localBackend = {
   type: "local" as const,
@@ -41,6 +42,7 @@ export interface HarnessOpts {
   llm?: LLMProvider;
   /** Host tools recipes may pick by name. */
   tools?: ResolveLocalAgentDeps["tools"];
+  /** `true`: a gate over the test lease store; `false`: no gate at all; unset: the default gate. */
   turnGate?: boolean;
   secrets?: boolean;
   authorizeScope?: ScopeAuthorizer;
@@ -50,6 +52,8 @@ export interface HarnessOpts {
   dags?: boolean;
   /** Namespace registry the server checks agent writes against. */
   namespaces?: NamespaceRegistry;
+  /** Bounds of the agent routes' event streams. */
+  streaming?: TurnStreamLimits;
 }
 
 export async function bootAgents(opts: HarnessOpts = {}) {
@@ -97,7 +101,9 @@ export async function bootAgents(opts: HarnessOpts = {}) {
     instances,
     roles,
     ...(turnGate && { turnGate, workerId: "w-1" }),
+    ...(opts.turnGate === false && { turnGate: false as const }),
     ...(opts.authorizeScope && { authorizeScope: opts.authorizeScope }),
+    ...(opts.streaming && { streaming: opts.streaming }),
   });
   const dags = opts.dags
     ? new ZoryaDags({ registry: new InMemoryDagRegistry({ clock }), workflows, agents })

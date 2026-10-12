@@ -383,6 +383,31 @@ PostgresLeaseStore({ db }) })`. `turnGate: false` turns it off. Scheduled
   turns into a thread take the same gate. The default gate warns when the
   memory store is durable, and a clustered server refuses it (and an
   in-memory memory store).
+- **Streams.** Every event of a turn stream carries `id: <turnId>:<seq>`;
+  `turnId` is the turn's workflow id (also in the `thread` frame and the
+  `x-turn-id` header). An idle stream sends a heartbeat comment every 15 s.
+  A client that disconnects only detaches: the turn runs on and commits.
+  `GET .../stream` (query scope) reattaches with `Last-Event-ID` (or
+  `?turnId=&from=`) and resumes after that event; without either it attaches
+  to the thread's latest turn. Sending the same `turnKey` again while that
+  turn runs attaches to it too (with another task: 422
+  `idempotency_key_mismatch`). `POST .../cancel` (body scope, optional
+  `turnId`; required, 400 `turnId_required`, when there is no turn gate and
+  several turns run on the thread) is the only way to cancel a running turn.
+  Streams are kept in the serving process: for 5 minutes after the turn
+  ends, up to 4 MiB of frames per turn and 64 MiB across kept turns (the
+  oldest finished turns go first; an older event id answers
+  `replay_unavailable`, a client that falls behind the buffer
+  `slow_consumer`), and responses are written only as fast as the client
+  reads. Tune with `ZoryaAgents({ streaming })`. A
+  reattach that reaches another replica, or comes after a restart, answers
+  404 `turn_stream_not_found`; read the thread's messages instead.
+- **Input caps.** A `task` longer than 100,000 characters answers 413
+  `task_too_large`; a thread title longer than 200 characters 400
+  `title_too_long`.
+- **Trace.** `GET .../trace` shows each turn the engine ran with its timing:
+  think, approval and tool spans with durations, token usage and the finish
+  reason (stamped on the turn's final assistant message).
 - **Approvals.** A turn suspended on a tool approval is recorded in a
   `PendingApprovalStore`. Pass a durable one to `resolveLocalAgent({ approvals })`
   in `resolve` — `createSqliteZoryaStack` provides `pendingApprovalStore`;

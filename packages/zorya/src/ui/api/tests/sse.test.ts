@@ -1,5 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { parseSseFrame, readSseBody, subscribeSse, type SseMessage } from "../sse.ts";
+import {
+  parseSseFrame,
+  readResumableSse,
+  readSseBody,
+  SseHttpError,
+  subscribeSse,
+  type SseMessage,
+} from "../sse.ts";
 
 function bodyOf(chunks: string[]): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -16,6 +23,13 @@ describe("parseSseFrame", () => {
     expect(parseSseFrame(': heartbeat\nevent: finish\ndata: {"a":\ndata: 1}')).toEqual({
       event: "finish",
       data: '{"a":\n1}',
+    });
+  });
+  it("reads the event id", () => {
+    expect(parseSseFrame("id: turn-1:3\ndata: x")).toEqual({
+      event: "message",
+      data: "x",
+      id: "turn-1:3",
     });
   });
   it("defaults the event name and ignores data-less frames", () => {
@@ -83,5 +97,129 @@ describe("subscribeSse", () => {
     for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 1));
     unsubscribe();
     expect(connections).toBe(1);
+  });
+});
+
+/** A body that delivers `chunks`, then fails like a dropped connection. */
+function droppingBodyOf(chunks: string[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  let sent = false;
+  return new ReadableStream({
+    pull(controller) {
+      if (!sent) {
+        sent = true;
+        for (const c of chunks) controller.enqueue(encoder.encode(c));
+        return;
+      }
+      controller.error(new TypeError("network error"));
+    },
+  });
+}
+
+describe("readResumableSse", () => {
+  const isTerminal = (m: SseMessage) => m.event === "finish";
+
+  it("resumes a dropped stream after the last event id without repeating events", async () => {
+    const requests: Array<{ url: string; method: string; lastEventId: string | null }> = [];
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      const headers = new Headers(init.headers);
+      requests.push({
+        url,
+        method: init.method ?? "GET",
+        lastEventId: headers.get("last-event-id"),
+      });
+      if (requests.length === 1) {
+        return new Response(
+          droppingBodyOf([
+            "id: t:0\nevent: thread\ndata: {}\n\n",
+            'id: t:1\ndata: {"delta":"Hel"}\n\n',
+          ]),
+        );
+      }
+      return new Response(
+        bodyOf([
+          ": heartbeat\n\n",
+          'id: t:2\ndata: {"delta":"lo"}\n\n',
+          'id: t:3\nevent: finish\ndata: {"text":"Hello"}\n\n',
+        ]),
+      );
+    }) as unknown as typeof fetch;
+    const got: SseMessage[] = [];
+    const outcome = await readResumableSse({
+      start: { url: "http://x/stream", init: { method: "POST", body: "{}" } },
+      resumeUrl: "http://x/stream?scope",
+      headers: () => ({ authorization: "Bearer k" }),
+      signal: new AbortController().signal,
+      isTerminal,
+      onMessage: (m) => got.push(m),
+      fetchImpl,
+      sleep: async () => {},
+    });
+    expect(outcome).toBe("ended");
+    expect(requests).toEqual([
+      { url: "http://x/stream", method: "POST", lastEventId: null },
+      { url: "http://x/stream?scope", method: "GET", lastEventId: "t:1" },
+    ]);
+    expect(got.map((m) => m.id)).toEqual(["t:0", "t:1", "t:2", "t:3"]);
+    const text = got
+      .filter((m) => m.event === "message")
+      .map((m) => (JSON.parse(m.data) as { delta: string }).delta)
+      .join("");
+    expect(text).toBe("Hello");
+  });
+
+  it("gives up when the server no longer has the stream", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      return calls === 1
+        ? new Response(droppingBodyOf(['id: t:0\ndata: {"delta":"a"}\n\n']))
+        : new Response("gone", { status: 404 });
+    }) as unknown as typeof fetch;
+    const outcome = await readResumableSse({
+      start: { url: "http://x/stream", init: { method: "POST" } },
+      resumeUrl: "http://x/stream?scope",
+      signal: new AbortController().signal,
+      isTerminal,
+      onMessage: () => {},
+      fetchImpl,
+      sleep: async () => {},
+    });
+    expect(outcome).toBe("lost");
+    expect(calls).toBe(2);
+  });
+
+  it("stops after maxReconnects failures in a row", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      if (calls === 1) return new Response(droppingBodyOf(["id: t:0\ndata: {}\n\n"]));
+      throw new TypeError("offline");
+    }) as unknown as typeof fetch;
+    const outcome = await readResumableSse({
+      start: { url: "http://x/stream", init: { method: "POST" } },
+      resumeUrl: "http://x/stream?scope",
+      signal: new AbortController().signal,
+      isTerminal,
+      onMessage: () => {},
+      maxReconnects: 3,
+      fetchImpl,
+      sleep: async () => {},
+    });
+    expect(outcome).toBe("lost");
+    expect(calls).toBe(4);
+  });
+
+  it("rejects when the first request is refused", async () => {
+    const fetchImpl = (async () => new Response("no", { status: 409 })) as unknown as typeof fetch;
+    const failed = readResumableSse({
+      start: { url: "http://x/stream", init: { method: "POST" } },
+      resumeUrl: "http://x/stream?scope",
+      signal: new AbortController().signal,
+      isTerminal,
+      onMessage: () => {},
+      fetchImpl,
+    });
+    await expect(failed).rejects.toBeInstanceOf(SseHttpError);
   });
 });

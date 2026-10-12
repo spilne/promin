@@ -36,6 +36,99 @@ export interface TraceTurnNode {
   readonly fromSeq: number;
   readonly toSeq: number;
   readonly children: ReadonlyArray<TraceNode>;
+  /**
+   * The engine's timed trace of the turn (think / tool / approval spans,
+   * usage, finish reason), when the turn's final assistant message
+   * carries one (`TURN_TRACE_META_KEY`).
+   */
+  readonly timing?: TurnTrace;
+}
+
+// ---------------------------------------------------------------------------
+// Turn trace — the engine's structured, timed record of one turn
+// ---------------------------------------------------------------------------
+
+/** Metadata key on a turn's final assistant message holding its `TurnTrace`. */
+export const TURN_TRACE_META_KEY = "turnTrace";
+
+/** Token usage of one think step or of a whole turn. */
+export interface TurnTraceUsage {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly cacheReadTokens?: number;
+  readonly cacheWriteTokens?: number;
+}
+
+/**
+ * One span of a turn. Times are epoch ms on the engine's clock, journaled
+ * with the step they time, so a replayed or resumed turn reports the
+ * original timings.
+ */
+export type TurnSpan =
+  | {
+      /** One LLM call (retries included). */
+      readonly kind: "think";
+      readonly step: number;
+      readonly startedAt: number;
+      readonly durationMs: number;
+      readonly usage?: TurnTraceUsage;
+    }
+  | {
+      /**
+       * One tool call. `startedAt` / `durationMs` are absent for a
+       * sub-agent call (its child run has its own trace) and for a call
+       * whose outcome a crash lost.
+       */
+      readonly kind: "tool";
+      readonly step: number;
+      readonly name: string;
+      readonly toolCallId: string;
+      readonly failed: boolean;
+      readonly delegated?: true;
+      readonly startedAt?: number;
+      readonly durationMs?: number;
+    }
+  | {
+      /** A tool approval: from the request to the decision reaching the turn. */
+      readonly kind: "approval";
+      readonly step: number;
+      readonly toolCallId: string;
+      readonly toolName: string;
+      readonly approved: boolean;
+      readonly startedAt: number;
+      readonly durationMs: number;
+    };
+
+/** The engine's trace of one turn: its spans plus the turn's totals. */
+export interface TurnTrace {
+  /** The turn's workflow id. */
+  readonly workflowId: string;
+  readonly startedAt: number;
+  readonly endedAt: number;
+  readonly durationMs: number;
+  /** `stop`, `max_steps`, `stalled` or `cancelled`. */
+  readonly finishReason: string;
+  /** Think steps taken. */
+  readonly steps: number;
+  readonly usage: TurnTraceUsage;
+  /** Spans in start order (calls of one step run in parallel and may overlap). */
+  readonly spans: ReadonlyArray<TurnSpan>;
+}
+
+/** A `TurnTrace` read back from message metadata (untyped JSON), or undefined. */
+export function turnTraceOf(
+  metadata: Readonly<Record<string, unknown>> | undefined,
+): TurnTrace | undefined {
+  const raw = metadata?.[TURN_TRACE_META_KEY];
+  if (
+    raw &&
+    typeof raw === "object" &&
+    typeof (raw as { workflowId?: unknown }).workflowId === "string" &&
+    Array.isArray((raw as { spans?: unknown }).spans)
+  ) {
+    return raw as TurnTrace;
+  }
+  return undefined;
 }
 
 export interface TraceUserNode {
@@ -178,10 +271,12 @@ export function buildAgentTrace(rawMessages: ReadonlyArray<Message>): AgentTrace
 
     // Collect every message that belongs to this turn — assistant +
     // tool results — until we hit the next user message OR end of input.
+    let timing: TurnTrace | undefined;
     while (i < messages.length && messages[i]!.msg.role !== "user") {
       const im = messages[i]!;
       if (im.msg.role === "assistant") {
         const aMsg = im.msg as Extract<Message, { role: "assistant" }>;
+        timing = turnTraceOf(aMsg.metadata) ?? timing;
         const calls = aMsg.toolCalls ?? [];
         const toolCallNodes: TraceToolCallNode[] = calls.map((call: ToolCall) => {
           const resultIm = resultByCallId.get(call.id);
@@ -263,6 +358,7 @@ export function buildAgentTrace(rawMessages: ReadonlyArray<Message>): AgentTrace
         fromSeq: messages[turnStart]!.seq,
         toSeq: messages[i - 1]!.seq,
         children,
+        ...(timing && { timing }),
       });
       turnIndex += 1;
     }

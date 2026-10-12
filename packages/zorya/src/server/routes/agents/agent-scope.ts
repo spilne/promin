@@ -12,6 +12,7 @@ import {
   TurnInProgressError,
 } from "@promin/agent";
 import { SystemWallClock } from "@promin/workflow";
+import { z } from "zod";
 import { json, jsonError, parseIntParam } from "../../router.ts";
 import { requireActiveNamespace } from "../../namespace-guard.ts";
 import { internalError } from "../agent-gateway-kit.ts";
@@ -118,14 +119,43 @@ export function parseScopeFields(body: {
   };
 }
 
-export function parseInvokeBody(body: InvokeRequest | null): ParsedInvoke | { error: string } {
-  if (!body) return { error: "missing_body" };
-  if (typeof body.task !== "string" || body.task.length === 0) {
-    return { error: "missing_task" };
+/** Longest accepted invoke / send `task`, in characters. */
+export const MAX_AGENT_TASK_CHARS = 100_000;
+
+/** An invoke / send `task`: non-empty, at most `MAX_AGENT_TASK_CHARS`. */
+export const AgentTaskSchema = z.string().min(1).max(MAX_AGENT_TASK_CHARS);
+
+/** A rejected request: the status and error code to answer with. */
+export interface RequestRefusal {
+  readonly error: string;
+  readonly status: number;
+  readonly message?: string;
+}
+
+/** The JSON error answer of a refusal. */
+export function refusalResponse(refusal: RequestRefusal): Response {
+  return jsonError(refusal.status, refusal.error, refusal.message);
+}
+
+/**
+ * Parse an invoke / send body. A missing task answers 400 `missing_task`,
+ * one longer than `MAX_AGENT_TASK_CHARS` 413 `task_too_large`.
+ */
+export function parseInvokeBody(body: InvokeRequest | null): ParsedInvoke | RequestRefusal {
+  if (!body) return { error: "missing_body", status: 400 };
+  const task = AgentTaskSchema.safeParse(body.task);
+  if (!task.success) {
+    return typeof body.task === "string" && body.task.length > MAX_AGENT_TASK_CHARS
+      ? {
+          error: "task_too_large",
+          status: 413,
+          message: `task exceeds ${MAX_AGENT_TASK_CHARS} characters.`,
+        }
+      : { error: "missing_task", status: 400 };
   }
   const scope = parseScopeFields(body);
-  if ("error" in scope) return scope;
-  return { task: body.task, ...scope };
+  if ("error" in scope) return { error: scope.error, status: 400 };
+  return { task: task.data, ...scope };
 }
 
 /** Longest accepted turn key. */
@@ -336,7 +366,7 @@ export async function openThreadFromQuery(args: {
   readonly deps: AgentGatewayDeps;
   readonly req: Request;
   readonly params: Record<string, string>;
-}): Promise<{ thread: AgentThread; url: URL } | Response> {
+}): Promise<{ thread: AgentThread; scoped: ScopedAgent; url: URL } | Response> {
   const { deps, req, params } = args;
   const id = params.id;
   const threadId = params.threadId;
@@ -349,7 +379,7 @@ export async function openThreadFromQuery(args: {
   if (scoped instanceof Response) return scoped;
   const thread = await openOwnedThread({ scoped, threadId, create: false });
   if (thread instanceof Response) return thread;
-  return { thread, url };
+  return { thread, scoped, url };
 }
 
 /** Scope + thread for a body-scoped route (rename / archive / distill / compact). */

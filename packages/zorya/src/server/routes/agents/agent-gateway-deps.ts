@@ -9,6 +9,8 @@
 //   POST /api/agents/:id/stream               — one-shot, SSE response
 //   POST /api/agents/:id/threads/:threadId    — conversational turn (one-shot per call)
 //   POST /api/agents/:id/threads/:threadId/stream — conversational, SSE
+//   GET  /api/agents/:id/threads/:threadId/stream  — reattach to a turn's SSE
+//   POST /api/agents/:id/threads/:threadId/cancel  — cancel a running turn
 //   GET  /api/agents/:id/threads              — list the caller's threads
 //   GET  /api/agents/:id/threads/:threadId/messages — read message history
 //   POST /api/agents/:id/threads/:threadId/approve  — decide a pending approval, SSE
@@ -20,6 +22,16 @@
 //   continuing) the first attempt. A send on a thread whose turn waits for
 //   an approval answers 409 `approval_pending` — decide the approval first,
 //   so the suspended turn's output lands before the next message.
+//
+// Streams (see agent-sse.ts):
+//   Every SSE event carries `id: <turnId>:<seq>`, the server sends a
+//   heartbeat comment while idle, and a client that disconnects detaches:
+//   the turn runs on and commits. Reattach with `GET .../stream` and
+//   `Last-Event-ID`; cancel only with `POST .../cancel`.
+//
+// Input caps:
+//   `task` is at most MAX_AGENT_TASK_CHARS (413 `task_too_large`), a thread
+//   title at most MAX_THREAD_TITLE_CHARS (400 `title_too_long`).
 //
 // Scope binding:
 //   Every invocation AND every thread route requires `namespaceId` and
@@ -67,6 +79,7 @@ import type {
 } from "@promin/agent";
 import type { NamespaceRegistry, WallClock } from "@promin/workflow";
 import type { McpRecipeChecker, ScopeAuthorizer } from "../agent-gateway-kit.ts";
+import type { TurnStreamHub } from "./agent-sse.ts";
 
 // ---------------------------------------------------------------------------
 // Response DTOs — UI imports these for typing API responses. Re-export the
@@ -251,6 +264,11 @@ export interface AgentGatewayDeps {
   readonly fileManagedIds?: () => ReadonlyArray<string>;
   /** Binds a request's scope to its authenticated caller. See `ScopeAuthorizer`. */
   readonly authorizeScope?: ScopeAuthorizer;
+  /**
+   * The turn streams of this process: every streamed turn's events go
+   * through it, so clients can detach, reattach and resume by event id.
+   */
+  readonly turnStreams: TurnStreamHub;
   /**
    * Time source for the distill rate-limit `retry-after`, the default
    * thread `archivedAt` stamp and turn-lease extension.

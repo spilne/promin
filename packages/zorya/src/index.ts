@@ -147,8 +147,10 @@ export {
 export { runToDto, runToSummaryDto, stepToDto } from "./server/serialize.ts";
 export {
   REDACTED_SECRET,
+  type OperatorScope,
   type RequestedScope,
   type ScopeAuthorizer,
+  type TenantScope,
 } from "./server/routes/agent-gateway-kit.ts";
 export {
   InMemoryWebhookDeliveryStore,

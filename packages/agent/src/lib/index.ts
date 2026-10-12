@@ -198,7 +198,7 @@ export type {
   AgentScope,
 } from "./agent/types.ts";
 
-export { LocalAgent } from "./agent/local-agent.ts";
+export { LocalAgent, threadTurnWorkflowId } from "./agent/local-agent.ts";
 export { THREAD_AGENT_METADATA_KEY } from "./agent/types.ts";
 export { ThreadNotFoundError, TurnKeyConflictError } from "./agent/errors.ts";
 export type { LocalAgentConfig } from "./agent/local-agent.ts";
@@ -780,8 +780,11 @@ export { compact, DEFAULT_SUMMARY_PROMPT, RECAP_SUMMARY_PROMPT } from "./agent-l
 export type { CompactionConfig, CompactionResult } from "./agent-loop-compaction.ts";
 
 // Agent run trace — turn-structured tree from stored messages.
-export { buildAgentTrace } from "./trace.ts";
+export { buildAgentTrace, TURN_TRACE_META_KEY, turnTraceOf } from "./trace.ts";
 export type {
+  TurnSpan,
+  TurnTrace,
+  TurnTraceUsage,
   AgentTrace,
   TraceNode,
   TraceTurnNode,

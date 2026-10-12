@@ -823,8 +823,22 @@ export function ChatPane({
   };
 
   const cancel = () => {
+    // Closing the stream only detaches; the cancel route stops the turn.
     abortRef.current?.abort();
     abortRef.current = null;
+    if (pending && !pending.done) {
+      api
+        .cancelAgentThreadTurn(agentId, threadId, {
+          namespaceId: tenant.namespaceId,
+          resourceId: tenant.resourceId || undefined,
+        })
+        .then(() => refreshMessages())
+        .catch((err: unknown) =>
+          toast(`Cancel failed: ${err instanceof Error ? err.message : String(err)}`, {
+            variant: "error",
+          }),
+        );
+    }
     setPending(null);
     setPendingUser(null);
     setPendingApproval(null);

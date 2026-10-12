@@ -13,8 +13,10 @@
 // Permission gradient: coarse — anyone with dashboard auth can read/write
 // at any scope, unless an `authorizeScope` hook is wired: then listing,
 // storing or deleting a namespace- or resource-scoped secret needs the
-// caller to be allowed that (namespace, resource?) — 403 `scope_forbidden`.
-// The global scope is not a tenant scope and stays behind server auth only.
+// caller to be allowed that (namespace, resource?), and the global scope —
+// the fallback every tenant resolves against — needs operator access
+// (`{ kind: "operator", resource: "secrets" }`); 403 `scope_forbidden`
+// otherwise.
 // ---------------------------------------------------------------------------
 
 import type { SecretScope, SecretsStorage } from "@promin/agent";
@@ -27,7 +29,10 @@ import { internalError, type ScopeAuthorizer } from "./agent-gateway-kit.ts";
 
 export interface SecretsGatewayDeps {
   readonly secrets: SecretsStorage;
-  /** Binds a namespace- or resource-scoped secret to the caller. See `ScopeAuthorizer`. */
+  /**
+   * Binds a namespace- or resource-scoped secret to the caller, and gates
+   * global secrets behind operator access. See `ScopeAuthorizer`.
+   */
   readonly authorizeScope?: ScopeAuthorizer;
   /**
    * When set, storing a namespace- or resource-scoped secret needs a
@@ -89,7 +94,8 @@ const SecretParamsSchema = z.object({ key: SecretKeySchema });
 
 /**
  * 403 `scope_forbidden` unless the caller may act in the secret scope's
- * namespace (and resource). Global scopes are not checked.
+ * namespace (and resource), or, for the global scope, is an operator.
+ * Nothing is checked without an authorizer.
  */
 export async function forbidSecretScope(params: {
   readonly authorizeScope: ScopeAuthorizer | undefined;
@@ -97,13 +103,16 @@ export async function forbidSecretScope(params: {
   readonly scope: SecretScope;
 }): Promise<Response | null> {
   const { authorizeScope, req, scope } = params;
-  if (!authorizeScope || scope.kind === "global") return null;
+  if (!authorizeScope) return null;
   const allowed = await authorizeScope({
     req,
-    scope: {
-      namespaceId: scope.namespaceId,
-      ...(scope.kind === "resource" && { resourceId: scope.resourceId }),
-    },
+    scope:
+      scope.kind === "global"
+        ? { kind: "operator", resource: "secrets" }
+        : {
+            namespaceId: scope.namespaceId,
+            ...(scope.kind === "resource" && { resourceId: scope.resourceId }),
+          },
   });
   return allowed ? null : jsonError(403, "scope_forbidden");
 }
