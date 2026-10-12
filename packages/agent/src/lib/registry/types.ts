@@ -61,7 +61,7 @@ export interface AgentMetadata {
 /**
  * Backend-specific recipe. Discriminated by `type`.
  *
- * - `local`  — LocalAgent running in this process (agentAction / agentLoop)
+ * - `local`  — LocalAgent running in this process (agentAction)
  * - `remote` — thin HTTP proxy forwarding calls to another Zorya deployment
  */
 export type AgentBackend = LocalAgentBackend | RemoteAgentBackend;

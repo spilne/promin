@@ -48,22 +48,8 @@ export type {
   SubAgentRouteResult,
 } from "./delegation/types.ts";
 
-export { agentLoop } from "./agent-loop.ts";
-export type {
-  AgentLoopConfig,
-  AgentSession,
-  AgentLoop,
-  AgentStatus,
-  StreamOptions,
-  ContextConfig,
-  HooksConfig,
-  HooksTurnParams,
-  HooksAfterTurnParams,
-  CompactResult,
-} from "./agent-loop.ts";
-
-export { InMemorySessionLogger, SessionEventBus } from "./session-logger.ts";
-export type { SessionLogger, SessionEvent, LogUsage } from "./session-logger.ts";
+export { SessionEventBus } from "./session-logger.ts";
+export type { SessionEvent, LogUsage } from "./session-logger.ts";
 
 export type { EmbeddingProvider } from "./embedding-provider.ts";
 
@@ -175,8 +161,8 @@ export type {
   AutoCompactSignals,
   AutoDistillConfig,
   AutoDistillSignals,
-  AgentRetrieverBinding,
-} from "./agent/local-agent.ts";
+} from "./agent/auto-consolidation.ts";
+export type { AgentRetrieverBinding } from "./agent/retriever-bindings.ts";
 
 // Universal Agent interface + LocalAgent backend.
 export type {
@@ -776,8 +762,12 @@ export type {
   RateLimiter,
 } from "./agent-shared.ts";
 
-export { compact, DEFAULT_SUMMARY_PROMPT, RECAP_SUMMARY_PROMPT } from "./agent-loop-compaction.ts";
-export type { CompactionConfig, CompactionResult } from "./agent-loop-compaction.ts";
+export {
+  estimateMessageTokens,
+  TURN_SUMMARY_PROMPT,
+  TURN_SUMMARY_SOURCE,
+} from "./turn-compaction.ts";
+export type { TurnCompactionConfig } from "./turn-compaction.ts";
 
 // Agent run trace — turn-structured tree from stored messages.
 export { buildAgentTrace, TURN_TRACE_META_KEY, turnTraceOf } from "./trace.ts";

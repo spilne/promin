@@ -18,7 +18,7 @@ import type {
  * surface as `tool.progress` SessionEvents (labeled with the current
  * turn / step / toolCallId), so the UI can render "downloading… 50%".
  *
- * The writer is injected by the agent loop when running through a session.
+ * The writer is injected by the turn engine (`agentAction`).
  * Unit tests that call `tool.execute(input)` directly get `ctx === undefined`
  * — always access via the optional chain.
  *
@@ -76,7 +76,7 @@ export interface ToolExecuteContext {
   /**
    * Caller scope (namespace, resource, thread, agentId). Populated by
    * the agent runtime — present when invoked through `agentAction` /
-   * `agentLoop`; absent in unit tests that call `execute` directly.
+   * `LocalAgent`; absent in unit tests that call `execute` directly.
    * Tool authors that need scope should treat it as optional and fall
    * back to a sensible default or throw a clear error.
    */
@@ -447,7 +447,7 @@ export function createScopedTool<TInput, TOutput>(
         throw new Error(
           `Scoped tool '${config.name}' invoked without complete (namespaceId, resourceId) scope. ` +
             "This indicates a runtime bug — scoped tools must only be dispatched through " +
-            "the agent loop / agentAction with a populated ToolScope.",
+            "agentAction / LocalAgent with a populated ToolScope.",
         );
       }
       return userExecute(input, scoped);

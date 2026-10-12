@@ -9,7 +9,7 @@
 // hardcoded to `name: "approval-flow"`, so this workflow's suspensions
 // are NOT auto-resolved.
 //
-// Tool metadata (toolName / toolInput) is normally written by agentLoop
+// Tool metadata (toolName / toolInput) is normally written by the agent engine
 // when an agent calls a require-approval tool; this workflow bypasses
 // the agent path, so /approvals shows the row with tool "unknown" — the
 // workflow name + suspendedAt + "View run" link still work and the

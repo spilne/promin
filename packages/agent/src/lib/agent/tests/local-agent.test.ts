@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
-// `LocalAgent` — Agent interface impl over agentAction (one-shot) and
-// agentLoop (conversational + memory-backed).
+// `LocalAgent` — Agent interface impl over agentAction, one-shot and
+// conversational (memory-backed threads).
 //
 // Pins:
 //   - invoke runs agentAction, awaits, returns resolved AgentRunOutput
@@ -532,7 +532,7 @@ describe("LocalAgent — autoCompact", () => {
     expect(compacts.length).toBe(1);
   });
 
-  it("`contextLimit` + `compressAt` compute the effective token gate (mirrors agentLoop convention)", async () => {
+  it("`contextLimit` + `compressAt` compute the effective token gate", async () => {
     const { runner } = makeRunner();
     const memory = new InMemoryMemoryStore();
     // Big assistant message — ~500 estimated tokens per turn.

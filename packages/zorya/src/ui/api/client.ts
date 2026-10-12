@@ -1249,6 +1249,15 @@ export type TurnSpanDto =
       durationMs?: number;
     }
   | {
+      kind: "compaction";
+      step: number;
+      startedAt: number;
+      durationMs: number;
+      compacted: number;
+      summarized: boolean;
+      usage?: TraceUsageDto;
+    }
+  | {
       kind: "approval";
       step: number;
       toolCallId: string;

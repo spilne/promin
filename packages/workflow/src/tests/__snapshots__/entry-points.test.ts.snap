@@ -34,6 +34,7 @@ exports[`entry points — exported names match the snapshot 1`] = `
     "CheckpointError",
     "type CheckpointStepParams",
     "type ChildEndedWaits",
+    "childOfEndedSignal",
     "ChildWorkflowGoneError",
     "compareWorkflowVersions",
     "type CompensateConfig",

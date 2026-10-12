@@ -5,7 +5,7 @@
 // Architecture:
 //
 //   browser ──SSE── ZoryaServer ──WS── worker
-//        GET /api/runs/:id/agent-stream         AgentSession events
+//        GET /api/runs/:id/agent-stream         agent turn events
 //
 // On SSE connect:
 //   1. Mint a unique streamId.

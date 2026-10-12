@@ -1,13 +1,13 @@
 # @promin/agent
 
-Agent loop, LLM adapters, tools, memory, retrieval, and a terminal UI for building interactive AI applications.
+Durable agent turns, LLM adapters, tools, memory, retrieval, and a terminal UI for building interactive AI applications.
 
 ---
 
 ## Table of contents
 
 - [Core concepts](#core-concepts)
-- [agentLoop — persistent sessions](#agentloop--persistent-sessions)
+- [LocalAgent — conversations](#localagent--conversations)
 - [agentAction — the durable turn engine](#agentaction--the-durable-turn-engine)
   - [Engine contract](#engine-contract)
 - [Tools](#tools)
@@ -27,7 +27,7 @@ Agent loop, LLM adapters, tools, memory, retrieval, and a terminal UI for buildi
   - [rotatingLLM](#rotatingllm)
 - [Evals](#evals)
 - [Terminal UI](#terminal-ui)
-- [Session logging](#session-logging)
+- [Turn events](#turn-events)
 
 ---
 
@@ -35,8 +35,8 @@ Agent loop, LLM adapters, tools, memory, retrieval, and a terminal UI for buildi
 
 | Concept          | What it is                                                                            |
 | ---------------- | ------------------------------------------------------------------------------------- |
-| `AgentLoop`      | Factory for long-lived interactive sessions. One loop, many sessions.                 |
-| `AgentSession`   | A single conversation: accumulates message history, can stream, can be compacted.     |
+| `LocalAgent`     | An agent: one-shot `invoke` / `stream`, and conversational threads.                   |
+| `AgentThread`    | A conversation: each `send` / `stream` is one durable turn over the thread's history. |
 | `agentAction`    | The durable turn engine: one journaled agent turn (LocalAgent runs every turn on it). |
 | `AgentTool`      | A Zod-validated tool the LLM can call.                                                |
 | `LLMProvider`    | Uniform interface across Anthropic, OpenAI, Gemini, Ollama, etc.                      |
@@ -45,82 +45,52 @@ Agent loop, LLM adapters, tools, memory, retrieval, and a terminal UI for buildi
 
 ---
 
-## agentLoop — persistent sessions
+## LocalAgent — conversations
 
-Use `agentLoop` for interactive chat where the user sends many messages in sequence.
+Use a `LocalAgent` thread for interactive chat where the user sends many messages in sequence. Every turn runs on `agentAction` (below); the thread's history lives in the `MemoryStore` (or in memory when none is configured).
 
 ```ts
-import { agentLoop } from "@promin/agent";
-import { anthropic } from "@promin/agent";
+import { LocalAgent, InMemoryMemoryStore, anthropic } from "@promin/agent";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 
-const storage = new InMemoryWorkflowStorage();
-const runner = createWorkflowRunner({ storage });
+const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
 
-const loop = agentLoop({
-  name: "my-agent",
-  llm: anthropic("claude-sonnet-4-6", { apiKey }),
-  tools: { search: webSearchTool },
-  systemPrompt: "You are a helpful assistant.",
+const agent = new LocalAgent({
+  agent: {
+    name: "my-agent",
+    llm: anthropic("claude-sonnet-4-6", { apiKey }),
+    tools: { search: webSearchTool },
+    systemPrompt: "You are a helpful assistant.",
+    compaction: { maxTokens: 120_000 }, // in-turn compaction, see below
+  },
+  runner,
+  memory: new InMemoryMemoryStore(),
+  namespaceId: "acme",
 });
 
-const session = await loop.session({ runner, sessionId: "s1" });
+const thread = await agent.thread("t1", { resourceId: "user-1" });
 
 // Streaming
-for await (const chunk of session.stream("What's the weather in Tokyo?")) {
-  process.stdout.write(chunk);
-}
+const run = thread.stream({ task: "What's the weather in Tokyo?" });
+for await (const chunk of run.textStream) process.stdout.write(chunk);
 
 // Non-streaming
-const answer = await session.send("Summarise that.");
-
-await session.close();
+const answer = await (await thread.send({ task: "Summarise that." })).text;
 ```
 
-### AgentSession API
+### AgentThread API
 
-| Method                        | Description                                           |
-| ----------------------------- | ----------------------------------------------------- |
-| `send(task)`                  | Run a turn and return the full answer string.         |
-| `stream(task, opts?)`         | Run a turn and yield token deltas.                    |
-| `approve(toolCallId)`         | Approve a tool call gated by `requireApproval: true`. |
-| `reject(toolCallId, reason?)` | Reject a pending tool call.                           |
-| `status()`                    | `"idle"` / `"thinking"` / `"waiting_approval"`.       |
-| `messages()`                  | Full message history as of the last completed turn.   |
-| `usage()`                     | Cumulative `{ inputTokens, outputTokens }`.           |
-| `compact(opts?)`              | Manually compact history between turns.               |
-| `close()`                     | Shut down and release resources.                      |
+| Method                                   | Description                                                              |
+| ---------------------------------------- | ------------------------------------------------------------------------ |
+| `send(input, opts?)`                     | Run a turn; every result promise is already resolved.                    |
+| `stream(input, opts?)`                   | Run a turn; `textStream` / `fullStream` are live, `cancel()` stops it.   |
+| `resume(callId, decision)`               | Approve or reject a tool call the turn suspended on (`requireApproval`). |
+| `pendingApprovals()`                     | The thread's open approvals.                                             |
+| `messages(range?)`                       | The persisted transcript.                                                |
+| `workingMemory()` / `setWorkingMemory()` | The thread's working-memory note.                                        |
+| `delete()`                               | Delete the thread, its messages and its approvals.                       |
 
-### Key config options
-
-```ts
-agentLoop({
-  name: "my-agent",
-  llm,
-  tools, // plain tools map
-  toolRegistry, // dynamic hot-loadable registry (alternative to tools)
-  systemPrompt,
-  maxTurns: 1000,
-  maxStepsPerTurn: 20,
-  context: {
-    maxMessages: 80, // compact when history exceeds this
-    keepMessages: 40, // keep this many after compaction
-    summarize: true, // LLM summarizes dropped messages
-    contextLimit, // token-based compaction threshold
-    compressAt: 0.7, // compact at 70% of contextLimit
-  },
-  hooks: {
-    beforeTurn, // inject context before the LLM loop
-    afterTurn, // analytics, logging
-    onIdle, // fires when the session is quiet for idleTimeoutMs
-    onApprovalRequired, // inline approval for the same process (terminal REPLs)
-    onClose,
-  },
-  compactionLlm, // cheaper model for summaries
-  thinkingBudgetTokens, // extended thinking (Claude 3.7+)
-  logger, // InMemorySessionLogger for /log pane
-});
-```
+`agent.compactThread(id)` / `agent.distillThread(id)` roll a thread into episodes (`autoCompact` / `autoDistill` run them after turns). See `packages/agent/src/examples/console-chat.ts` for a REPL built on a thread.
 
 ### Side effects in hooks
 
@@ -163,9 +133,9 @@ const { output, finishReason } = await runner.run({
 
 ### Engine contract
 
-**Journal.** Each side effect is one activity: `turn-start`, `transcript-open` (with a `transcript`), `before-turn`, then per step `tools-<n>` (tool-set snapshot), `think-<n>` (the LLM call), `step-<n>-hook` (`onStep`), `step-<n>-approvals` (the `autoApprove` verdicts), `step-<n>-approval-<id>-start` / `-end` around the decision, `tool-<name>-<n>-<id>` (each tool call, in parallel), `stall-<n>`; then `after-turn`, `transcript-commit` (with a `transcript`) and `turn-end` (or `turn-failed` when the turn throws). Control flow between activities reads only the input and journaled values, so a replay takes the recorded path — a tool or `autoApprove` policy edited while a turn is suspended doesn't change it. Time comes from the injected `clock` (a `WallClock`), inside activities only. Every activity except a non-idempotent tool call is idempotent: a crash inside one re-runs it on recovery.
+**Journal.** Each side effect is one activity: `turn-start`, `transcript-open` (with a `transcript`), `before-turn`, then per step `plan-<n>` (tool-set snapshot and compaction cut), `compact-<n>` (the step summary, when compacting), `think-<n>` (the LLM call), `step-<n>-hook` (`onStep`), `step-<n>-approvals` (the `autoApprove` verdicts), `step-<n>-approval-<id>-start` / `-end` around the decision, `tool-<name>-<n>-<id>` (each tool call, in parallel), `stall-<n>`; then `after-turn`, `transcript-commit` (with a `transcript`) and `turn-end` (or `turn-failed` when the turn throws). Control flow between activities reads only the input and journaled values, so a replay takes the recorded path — a tool or `autoApprove` policy edited while a turn is suspended doesn't change it. Time comes from the injected `clock` (a `WallClock`), inside activities only. Every activity except a non-idempotent tool call is idempotent: a crash inside one re-runs it on recovery.
 
-**Events.** Every bus event (`turn.start`, `llm.call`, `llm.retry`, `token.delta`, `tool.start` / `tool.progress` / `tool.end`, `approval.requested` / `approval.decision`, `stall.detected`, `step_limit.hit`, `turn.end` / `turn.aborted` / `turn.failed`) is emitted by the activity that produced it, so a replay never re-emits an event for a recorded activity. An approval resume streams only what happens after the resume. `approval.requested` carries the tool name and input; tool events carry the `toolCallId`.
+**Events.** Every bus event (`turn.start`, `llm.call`, `llm.retry`, `token.delta`, `tool.start` / `tool.progress` / `tool.end`, `compact`, `compaction.ineffective`, `approval.requested` / `approval.decision`, `stall.detected`, `step_limit.hit`, `turn.end` / `turn.aborted` / `turn.failed`) is emitted by the activity that produced it, so a replay never re-emits an event for a recorded activity. An approval resume streams only what happens after the resume. `approval.requested` carries the tool name and input; tool events carry the `toolCallId`.
 
 **LLM calls** are idempotent activities: a crash mid-call re-runs the call on recovery. Failures are classified with `classifyLLMError`: `transient` and `rate_limit` are retried per `llmRetry` (exponential backoff, or the server's `Retry-After` up to `maxRetryAfterMs`); `context_overflow` and `permanent` fail the turn. If the provider is already a `resilientLLM`, set `llmRetry: false`.
 
@@ -195,7 +165,7 @@ Every tool gets `ctx.toolCallId`, `ctx.signal` (aborted on cancel or timeout) an
 
 **Structured output.** With `outputSchema`, the engine offers a `_respond` tool and forces it through `tool_choice` once the model is ready to answer (from the first step when the agent has no other tools, after a prose answer otherwise — the forced round gets a user nudge, so a request never ends on the assistant's prose; extended thinking is off for a forced round, which Anthropic requires). Other tool calls in a `_respond` response are answered as not run. A payload that fails the schema goes back to the model with the validation errors, up to `structuredOutputRepairs` (default 2) times, then the turn fails with `StructuredOutputParseError`; the repair round keeps the agent's tools available, so the model can re-issue a skipped call.
 
-**Settings.** `thinkingBudgetTokens`, `maxTokens`, `redactPriorThinking`, `metrics` (+ `costs`, `llmProvider`, `llmModel`, `metricLabels`: `llm.*`, `tool.*`, `approval.*`), `hooks.beforeTurn` / `hooks.afterTurn`, `onLifecycle`, `onStep` (with `feedback`), `onToolCall`, `onToolResult`, `onChunk`, `onThinking`, `processors`, `rateLimiter`, `scope`, `toolAuditLogger`. `LocalAgent`'s `agent` field is `AgentEngineConfig` — this config minus the per-run `bus` / `scope` / `signal` / `transcript` / `approvalIndex` it supplies — and every field reaches every turn.
+**Settings.** `thinkingBudgetTokens`, `maxTokens`, `redactPriorThinking`, `compaction`, `metrics` (+ `costs`, `llmProvider`, `llmModel`, `metricLabels`: `llm.*`, `tool.*`, `approval.*`), `hooks.beforeTurn` / `hooks.afterTurn`, `onLifecycle`, `onStep` (with `feedback`), `onToolCall`, `onToolResult`, `onChunk`, `onThinking`, `processors`, `rateLimiter`, `scope`, `toolAuditLogger`. `LocalAgent`'s `agent` field is `AgentEngineConfig` — this config minus the per-run `bus` / `scope` / `signal` / `transcript` / `approvalIndex` it supplies — and every field reaches every turn.
 
 ### Thread turns
 
@@ -415,8 +385,8 @@ const lead = agentAction({ name: "lead", llm, tools: { researcher } });
 the child; other agents are invoked inside it). A routed sub-agent picks its
 callee per call with `route` / `load`: the agents network's `callAgent`
 (recipes with `backend.network`) is one, resolving peers through the host's
-async, scope-aware resolver. The tool runs only inside the durable engines
-(`agentAction`, `agentLoop`, `LocalAgent`).
+async, scope-aware resolver. The tool runs only inside a durable turn
+(`agentAction`, `LocalAgent`).
 
 Agentic DAGs (`createDagWorkflow`) run each node the same way, as a child run
 `<dag run>.node-<id>`. A run names a registered DAG (`{ dagId, version,
@@ -528,13 +498,19 @@ const agent = resolveLocalAgent(recipe, { runner, llm, tools, retrievers });
 
 ## Context compaction
 
-When message history grows large, `agentLoop` automatically compacts it:
+**In a turn.** A long turn (many tool steps) grows the messages sent on every think step. With `compaction: { maxTokens }` on the engine config, when the next step is estimated over `maxTokens` — the larger of a chars/4 estimate (`estimateTokens` to replace it) and the provider's reported usage of the previous step — the turn's older steps are folded into one summary:
 
-- **Message-count trigger**: fires when non-system messages exceed `context.maxMessages` (default 80). Keeps the most recent `keepMessages` (default 40) turns at a clean user-turn boundary.
-- **Token-based trigger**: fires when input tokens for a think step exceed `context.contextLimit * compressAt`. Uses a RECAP prompt to produce a ≤150-word summary of the dropped segment.
-- **Manual compaction**: call `session.compact()` between turns at any time (e.g. via a `/compact` REPL command).
+- The seed (system prompt, history, reference data, the user task) is never compacted, and the most recent `keepRecentSteps` (default 2) tool steps stay verbatim. A step is an assistant message with its tool calls plus their results, so no tool call ever loses its result.
+- The summary is one fenced reference-data message (`source="turn-summary"`, user role, never `system`) right after the task. A later compaction folds the previous summary into the new one, so there is always at most one.
+- A compaction folds the fewest old steps that bring the estimate (with the summary at its cap) down to `targetRatio * maxTokens` (default 0.6), so the next one is several steps away.
+- The summary request is plain text — the steps fenced as reference data, no tools, no tool blocks — sent to `compaction.llm` (default: the agent's `llm`) with `compaction.prompt` (default `TURN_SUMMARY_PROMPT`), retried per `llmRetry`. With `summarize: false`, or when the call still fails, a deterministic digest of the calls and their results is used. Either is capped at `summaryMaxTokens * 4` characters (default 15% of `maxTokens`, 64–1024 tokens), keeping the most recent lines.
+- The summary call counts like a think: in `result.usage`, as an `llm.call` event with `purpose: "compaction"`, in the `llm.*` metrics (label `purpose=compaction`) and as a `compaction` span of the turn's trace.
+- Nothing fires while there is nothing to compact: until a step ages out of the kept window, an over-budget turn goes on uncompacted. When a compaction can't bring the step under `maxTokens` (the seed or the kept steps alone are too big), the turn emits `compaction.ineffective` once and compacts again only every few steps.
+- `AgentResult.messages`, `onStep`, `afterTurn` and a LocalAgent run's `messages` see the compacted list; `turnMessages`, `toolCalls` / `toolResults` and the thread transcript see every step.
+- The config is validated when the turn is built (finite positive numbers, `targetRatio` ≤ 1, `keepRecentSteps` an integer ≥ 1).
+- The cut is journaled in `plan-<n>` and the summary in `compact-<n>`, so a replay rebuilds the same messages without calling the summary LLM again. The turn's transcript (`turnMessages`, what a thread persists) is never compacted.
 
-When `summarize: true` (the default), dropped turns are summarized by the LLM and injected as a `system` message so the agent retains high-level context.
+**Across turns.** A thread turn is seeded from `MemoryStore.resolveContext`, which trims history to `contextBudget.maxMessageTokens`; `autoCompact` / `compactThread` roll older messages into thread episodes.
 
 ---
 
@@ -727,18 +703,16 @@ See `packages/agent/src/examples/console-chat.ts` for a complete REPL example.
 
 ---
 
-## Session logging
+## Turn events
+
+Pass a `SessionEventBus` as `bus` to `agentAction` (`LocalAgent` wires one per run and turns its events into `fullStream`):
 
 ```ts
-import { InMemorySessionLogger } from "@promin/agent";
+import { SessionEventBus, agentAction } from "@promin/agent";
 
-const logger = new InMemorySessionLogger(2000); // ring buffer, 2000 events max
-
-const loop = agentLoop({ ..., logger });
-
-// After some turns:
-const events = logger.events();
-// [{ type: "turn.start", turn: 0, task: "Hello", ts: 1714000000000 }, ...]
+const bus = new SessionEventBus();
+bus.subscribe((event) => console.log(event.type, event));
+const turn = agentAction({ name: "my-agent", llm, bus });
 ```
 
-Event types: `turn.start`, `turn.end`, `turn.aborted`, `llm.call`, `tool.start`, `tool.end`, `tool.parse_error`, `compact`, `approval.requested`, `approval.decision`, `step_limit.hit`.
+Event types: `turn.start`, `turn.end`, `turn.aborted`, `turn.failed`, `llm.call`, `llm.retry`, `token.delta`, `tool.start`, `tool.progress`, `tool.end`, `compact`, `approval.requested`, `approval.decision`, `stall.detected`, `step_limit.hit`.

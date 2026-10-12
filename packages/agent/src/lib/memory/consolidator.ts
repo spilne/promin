@@ -6,8 +6,8 @@
 //   compactThread(key)   — synchronous mid-thread roll-up. Summarises the
 //                          oldest portion of a thread into a ThreadEpisode,
 //                          freeing message budget without losing the gist.
-//                          Pairs with the agent loop's existing `compact()`
-//                          trigger.
+//                          LocalAgent's `autoCompact` triggers it after
+//                          a thread turn.
 //
 //   distillThread(key)   — end-of-thread / "sleep" pass. Produces ONE
 //                          ResourceEpisode summarising the thread for

@@ -1,16 +1,16 @@
 // ---------------------------------------------------------------------------
 // Tool-progress writer — verifies that a tool calling
 // `ctx.writer.write(payload)` mid-execution emits `tool.progress`
-// SessionEvents labeled with the current turn / step / toolCallId.
+// SessionEvents labeled with the current step / toolCallId.
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
-import { agentLoop } from "../agent-loop.ts";
+import { agentAction } from "../agent-action.ts";
 import { tool } from "../tool.ts";
 import type { LLMProvider, LLMResponse } from "../llm-provider.ts";
-import type { SessionEvent } from "../session-logger.ts";
+import { SessionEventBus, type SessionEvent } from "../session-logger.ts";
 
 function scriptedLLM(...responses: LLMResponse[]): LLMProvider {
   let i = 0;
@@ -24,7 +24,7 @@ function scriptedLLM(...responses: LLMResponse[]): LLMProvider {
 }
 
 describe("tool-progress writer", () => {
-  it("writer.write emits tool.progress events labeled with turn / step / toolCallId", async () => {
+  it("writer.write emits tool.progress events labeled with step / toolCallId", async () => {
     const downloadTool = tool({
       name: "download",
       description: "Long-running download with progress.",
@@ -39,9 +39,12 @@ describe("tool-progress writer", () => {
 
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
-    const session = await agentLoop({
+    const events: SessionEvent[] = [];
+    const bus = new SessionEventBus();
+    bus.subscribe((e) => events.push(e));
+    const turn = agentAction({
       name: "test",
-      heartbeatMs: 0,
+      bus,
       llm: scriptedLLM(
         {
           content: null,
@@ -51,11 +54,9 @@ describe("tool-progress writer", () => {
         { content: "done", finishReason: "stop" },
       ),
       tools: { download: downloadTool },
-    }).session({ runner, sessionId: "tp-1" });
+    });
 
-    const events: SessionEvent[] = [];
-    session.subscribe((e) => events.push(e));
-    await session.send("download something");
+    await runner.run({ workflow: turn, workflowId: "tp-1", input: { task: "download something" } });
 
     const progress = events.filter((e) => e.type === "tool.progress");
     expect(progress).toHaveLength(3);
@@ -70,11 +71,9 @@ describe("tool-progress writer", () => {
         type: "tool.progress",
         toolCallId: "t1",
         name: "download",
-        turn: 0,
+        step: 0,
       });
     });
-
-    await session.close();
   });
 
   it("a tool that takes only its input works without a writer", async () => {
@@ -88,9 +87,12 @@ describe("tool-progress writer", () => {
 
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
-    const session = await agentLoop({
+    const events: SessionEvent[] = [];
+    const bus = new SessionEventBus();
+    bus.subscribe((e) => events.push(e));
+    const turn = agentAction({
       name: "test",
-      heartbeatMs: 0,
+      bus,
       llm: scriptedLLM(
         {
           content: null,
@@ -100,16 +102,12 @@ describe("tool-progress writer", () => {
         { content: "ok", finishReason: "stop" },
       ),
       tools: { noProgress: noProgressTool },
-    }).session({ runner, sessionId: "tp-2" });
+    });
 
-    const events: SessionEvent[] = [];
-    session.subscribe((e) => events.push(e));
-    await session.send("call it");
+    await runner.run({ workflow: turn, workflowId: "tp-2", input: { task: "call it" } });
 
     expect(events.filter((e) => e.type === "tool.progress")).toHaveLength(0);
     expect(events.find((e) => e.type === "tool.end")).toBeDefined();
-
-    await session.close();
   });
 
   it("writer.write across multiple tool calls in one turn carries distinct toolCallIds", async () => {
@@ -125,9 +123,12 @@ describe("tool-progress writer", () => {
 
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
-    const session = await agentLoop({
+    const events: SessionEvent[] = [];
+    const bus = new SessionEventBus();
+    bus.subscribe((e) => events.push(e));
+    const turn = agentAction({
       name: "test",
-      heartbeatMs: 0,
+      bus,
       llm: scriptedLLM(
         {
           content: null,
@@ -140,18 +141,14 @@ describe("tool-progress writer", () => {
         { content: "done", finishReason: "stop" },
       ),
       tools: { ping: writerTool },
-    }).session({ runner, sessionId: "tp-3" });
+    });
 
-    const events: SessionEvent[] = [];
-    session.subscribe((e) => events.push(e));
-    await session.send("ping twice");
+    await runner.run({ workflow: turn, workflowId: "tp-3", input: { task: "ping twice" } });
 
     const progress = events
       .filter((e) => e.type === "tool.progress")
       .map((e) => (e as { toolCallId: string }).toolCallId)
       .sort();
     expect(progress).toEqual(["a", "b"]);
-
-    await session.close();
   });
 });

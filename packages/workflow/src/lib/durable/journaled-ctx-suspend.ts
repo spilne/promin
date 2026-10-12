@@ -247,7 +247,7 @@ export function makeSignalMethods(env: JournaledCtxEnv): SignalMethods {
   }
 
   // Approval preset over validatedSignal. The wire-format signal name is
-  // `approve:<id>`, the convention agentLoop, SignalScanner and the
+  // `approve:<id>`, the convention the agent engine, SignalScanner and the
   // dashboard /signals Approve/Reject shortcut already use.
   function approvalImpl(id: string): Generator<ActivityYield, ApprovalDecision, ApprovalDecision>;
   function approvalImpl(

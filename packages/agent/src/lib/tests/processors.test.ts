@@ -1,7 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { agentAction } from "../agent-action.ts";
-import { agentLoop } from "../agent-loop.ts";
 import { combineProcessors } from "../processors.ts";
 import type { LLMResponse } from "../llm-provider.ts";
 import type { Message } from "../message.ts";
@@ -24,12 +23,6 @@ async function runAction(wf: ReturnType<typeof agentAction>, task: string) {
     workflowId: "p-1",
     input: { task },
   });
-}
-
-async function makeSession(config: Parameters<typeof agentLoop>[0]) {
-  const storage = new InMemoryWorkflowStorage();
-  const runner = createWorkflowRunner({ storage });
-  return agentLoop(config).session({ runner, sessionId: "p-s1" });
 }
 
 describe("processors — agentAction", () => {
@@ -82,33 +75,6 @@ describe("processors — agentAction", () => {
 
     await runAction(action, "hello");
     expect(ctxs[0]).toMatchObject({ step: 0, turn: 0 });
-  });
-});
-
-describe("processors — agentLoop", () => {
-  it("beforeLLM runs each turn", async () => {
-    const injected: string[] = [];
-
-    const session = await makeSession({
-      name: "loop-proc",
-      llm: mockLLM([
-        { content: "r1", finishReason: "stop" },
-        { content: "r2", finishReason: "stop" },
-      ]),
-      processors: {
-        beforeLLM: (msgs, ctx) => {
-          injected.push(`turn-${ctx.turn}-step-${ctx.step}`);
-          return msgs;
-        },
-      },
-    });
-
-    await session.send("first");
-    await session.send("second");
-    await session.close();
-
-    expect(injected).toContain("turn-0-step-0");
-    expect(injected).toContain("turn-1-step-0");
   });
 });
 

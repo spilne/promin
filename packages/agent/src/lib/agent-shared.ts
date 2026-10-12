@@ -18,16 +18,6 @@ import type { ToolRegistry } from "./tool-registry.ts";
 import { LLMHttpError } from "./adapters/llm-http.ts";
 import { classifyLLMError, type LLMErrorClass } from "./adapters/llm-error-classification.ts";
 
-// ---- message utilities ----
-
-export function systemMsgs(messages: Message[]): Message[] {
-  return messages.filter((m) => m.role === "system");
-}
-
-export function nonSystemMsgs(messages: Message[]): Message[] {
-  return messages.filter((m) => m.role !== "system");
-}
-
 // ---- tool resolution ----
 
 export function resolveTools(config: {
@@ -45,62 +35,6 @@ export function resolveTools(config: {
     );
   }
   return config.toolRegistry?.getTools() ?? config.tools ?? {};
-}
-
-// ---- agent error surfacing ----
-
-/**
- * `true` when the error is a `WorkflowSuspendedError`. Suspension is a
- * normal control signal; callers typically swallow it instead of propagating.
- */
-export function isWorkflowSuspension(error: unknown): boolean {
-  if (!error || typeof error !== "object") return false;
-  return (error as { _tag?: string })._tag === "WorkflowSuspendedError";
-}
-
-/**
- * Classification produced by `surfaceAgentError`.
- * - `suspended`: WorkflowSuspendedError — the body is waiting on a signal
- *   or sleep. Not a failure.
- * - `user-error`: thrown by user code, a tool, a hook, or
- *   `TerminalError` — won't succeed on retry.
- * - `infra-error`: framework / transient failures
- *   (`RetryableError`, a thrown non-Error value, etc.).
- */
-export type SurfacedAgentErrorKind = "suspended" | "user-error" | "infra-error";
-
-export interface SurfacedAgentError {
-  readonly kind: SurfacedAgentErrorKind;
-  /** Always an Error instance with a meaningful `.message`. */
-  readonly error: Error;
-}
-
-function toError(err: unknown): Error {
-  if (err instanceof Error) return err;
-  if (typeof err === "string") return new Error(err);
-  try {
-    return new Error(JSON.stringify(err));
-  } catch {
-    return new Error(String(err));
-  }
-}
-
-/**
- * Classify an error from any agent primitive (agentLoop / agentAction).
- * The workflow runner rejects with the original thrown value, so this only
- * tags the kind — call sites can branch (suspend vs surface to user vs
- * infra-retry) without re-implementing the same `instanceof` chain.
- *
- * Preserves tagged-error metadata: a `TerminalError` keeps its `_tag`. The
- * returned `error.name` matches the original constructor when one is present.
- */
-export function surfaceAgentError(err: unknown): SurfacedAgentError {
-  if (isWorkflowSuspension(err)) return { kind: "suspended", error: toError(err) };
-  const tag = (err as { _tag?: string } | null | undefined)?._tag;
-  if (tag === "TerminalError") return { kind: "user-error", error: toError(err) };
-  if (tag === "RetryableError") return { kind: "infra-error", error: toError(err) };
-  if (err instanceof Error) return { kind: "user-error", error: err };
-  return { kind: "infra-error", error: toError(err) };
 }
 
 // ---- tool error formatting ----
@@ -375,15 +309,47 @@ export async function runLlmCall({
     ...(maxTokens !== undefined && { maxTokens }),
   };
 
-  let raw: LLMResponse;
+  /** Per-call instrumentation; skipped when the host didn't label the call. */
+  const record = (response: LLMResponse): void => {
+    if (!metrics || !provider || !model) return;
+    recordChat({
+      metrics,
+      ...(costs && { costs }),
+      provider,
+      model,
+      response,
+      durationMs: clock.currentTimeMs() - callStart,
+      ...(metricLabels && { extraLabels: metricLabels }),
+    });
+  };
   // Text streamed so far — kept as the answer when the call is aborted mid-stream.
   let content = "";
+  // Usage the stream reported before an abort cut it short — still billed.
+  let usage: LLMUsage | undefined;
+  /**
+   * An aborted call: a clean stop, so conversation history stays
+   * consistent — the text already streamed is kept, half-built tool calls
+   * are dropped, `content` stays null when nothing was streamed. Tokens
+   * already consumed are still recorded.
+   */
+  const aborted = (): RunLlmCallResult => {
+    const response: RunLlmCallResult = {
+      content: content.trim() ? content : null,
+      toolCalls: undefined,
+      finishReason: "stop",
+      ...(usage && { usage }),
+      aborted: true,
+    };
+    record(response);
+    return response;
+  };
+
+  let raw: LLMResponse;
   try {
     if (onChunk && llm.chatStream) {
       const startStream = () => Promise.resolve(llm.chatStream!(chatParams));
       const stream = await (rateLimiter ? rateLimiter.withLimitAsync(startStream) : startStream());
       let finishReason: LLMFinishReason = "stop";
-      let usage: LLMUsage | undefined;
       const toolCalls: ToolCall[] = [];
       const thinkingBlocks: ThinkingBlock[] = [];
       for await (const chunk of stream) {
@@ -399,6 +365,9 @@ export async function runLlmCall({
         if (chunk.finishReason) finishReason = chunk.finishReason;
         if (chunk.usage) usage = chunk.usage;
       }
+      // A stream that ended because its request was aborted is aborted,
+      // whether the adapter threw or just stopped yielding.
+      if (signal?.aborted) return aborted();
       raw = {
         content: content || null,
         toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
@@ -413,38 +382,12 @@ export async function runLlmCall({
       if (onChunk && raw.content) onChunk(raw.content);
     }
   } catch (err) {
-    // Treat abort as a clean stop so conversation history stays consistent:
-    // keep the text already streamed to the caller, drop half-built tool
-    // calls. `content` stays null when nothing was streamed, so no empty
-    // assistant text reaches the next request.
-    if (signal?.aborted || (err instanceof Error && err.name === "AbortError")) {
-      return {
-        content: content.trim() ? content : null,
-        toolCalls: undefined,
-        finishReason: "stop",
-        aborted: true,
-      };
-    }
+    if (signal?.aborted || (err instanceof Error && err.name === "AbortError")) return aborted();
     throw err;
   }
 
   const finalResponse = processors?.afterLLM ? await processors.afterLLM(raw, processorCtx) : raw;
-
-  // Per-call instrumentation. Skip when metrics is unset, or when the
-  // host didn't bother to label the call (provider/model unknown — we
-  // don't want unlabeled metrics polluting Prometheus dashboards).
-  if (metrics && provider && model) {
-    recordChat({
-      metrics,
-      ...(costs && { costs }),
-      provider,
-      model,
-      response: finalResponse,
-      durationMs: clock.currentTimeMs() - callStart,
-      ...(metricLabels && { extraLabels: metricLabels }),
-    });
-  }
-
+  record(finalResponse);
   return finalResponse;
 }
 

@@ -266,6 +266,8 @@ function spanLabel(span: TurnSpanDto): string {
       return `tool ${span.name}${span.delegated ? " (sub-agent)" : ""}`;
     case "approval":
       return `approval ${span.toolName} · ${span.approved ? "approved" : "rejected"}`;
+    case "compaction":
+      return `compaction · ${span.compacted} messages${span.summarized ? "" : " (digest)"}`;
   }
 }
 

@@ -83,7 +83,7 @@ const TASK_PARAMETERS = z.object({
  * `maxDepth`, or to an agent already waiting on the chain, is refused.
  *
  * Sub-agent tools run inside the durable engines (`agentAction`,
- * `agentLoop`, `LocalAgent`); calling `execute` directly throws.
+ * `LocalAgent`); calling `execute` directly throws.
  *
  * @example
  * ```ts
@@ -114,7 +114,7 @@ export function subAgentTool<TInput>(
     execute: async (): Promise<string> => {
       throw new Error(
         `subAgentTool "${config.name}" runs only inside a durable agent turn ` +
-          "(agentAction, agentLoop or LocalAgent)",
+          "(agentAction or LocalAgent)",
       );
     },
   };

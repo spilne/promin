@@ -2,10 +2,10 @@
 // Approval-signal wire format — the one place the `approve:<callId>`
 // convention lives.
 //
-// `agentLoop` registers a `ctx.signal("approve:<toolCallId>")` wait when a
+// `agentAction` registers a `ctx.approval(<toolCallId>)` wait when a
 // tool with `requireApproval: true` is invoked. listPendingSignals tags
 // rows as approvals via this parse; the dashboard's /signals UI keys its
-// shortcut Approve / Reject buttons off the result; the agent loop's
+// shortcut Approve / Reject buttons off the result; LocalAgent's
 // resume path constructs the name. One string, centralised here so a
 // rename is a one-file change.
 // ---------------------------------------------------------------------------
@@ -20,7 +20,7 @@ export function isApprovalSignal(signalName: string): boolean {
   );
 }
 
-/** Compose the signal name `agentLoop` registers for a tool-call approval. */
+/** Compose the signal name `agentAction` waits on for a tool-call approval. */
 export function composeApprovalSignal(toolCallId: string): string {
   return `${APPROVE_SIGNAL_PREFIX}${toolCallId}`;
 }

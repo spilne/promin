@@ -15,7 +15,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
+import { FakeWallClock, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { agentAction } from "../agent-action.ts";
 import { SessionEventBus, type SessionEvent } from "../session-logger.ts";
 import { tool } from "../tool.ts";
@@ -193,5 +193,113 @@ describe("agentAction — SessionEventBus integration", () => {
     // depending on event-loop timing. Strict check: early sees more
     // than late.
     expect(early.length).toBeGreaterThanOrEqual(late.length);
+  });
+});
+
+describe("agentAction — event payloads", () => {
+  const echo = tool({
+    name: "echo",
+    description: "echo",
+    parameters: z.object({ text: z.string() }),
+    execute: async ({ text }) => text,
+  });
+  const callEcho: LLMResponse = {
+    content: null,
+    finishReason: "tool_calls",
+    toolCalls: [{ id: "tc-1", name: "echo", input: { text: "ping" } }],
+  };
+
+  it("turn.end carries the duration on the engine clock and the turn's tokens", async () => {
+    const clock = FakeWallClock.create(1_000);
+    const bus = new SessionEventBus();
+    const events: SessionEvent[] = [];
+    bus.subscribe((e) => events.push(e));
+    const llm: LLMProvider = {
+      chat: async () => {
+        clock.advance(250);
+        return {
+          content: "reply",
+          finishReason: "stop",
+          usage: { inputTokens: 10, outputTokens: 5 },
+        };
+      },
+    };
+
+    await runAction(agentAction({ name: "timed", llm, bus, clock }), "hi");
+
+    expect(events.find((e) => e.type === "turn.end")).toMatchObject({
+      durationMs: 250,
+      tokens: { inputTokens: 10, outputTokens: 5 },
+    });
+    expect(events.every((e) => typeof e.ts === "number")).toBe(true);
+  });
+
+  it("emits one llm.call per think step, numbered by step", async () => {
+    const bus = new SessionEventBus();
+    const events: SessionEvent[] = [];
+    bus.subscribe((e) => events.push(e));
+
+    await runAction(
+      agentAction({
+        name: "steps",
+        llm: mockLLM([callEcho, { content: "done", finishReason: "stop" }]),
+        tools: { echo },
+        bus,
+      }),
+      "run",
+    );
+
+    const steps = events.flatMap((e) => (e.type === "llm.call" ? [e.step] : []));
+    expect(steps).toEqual([0, 1]);
+  });
+
+  it("tool.end marks failed=true when the tool throws", async () => {
+    const bus = new SessionEventBus();
+    const events: SessionEvent[] = [];
+    bus.subscribe((e) => events.push(e));
+    const faulty = tool({
+      name: "echo",
+      description: "always throws",
+      parameters: z.object({ text: z.string() }),
+      execute: async (): Promise<string> => {
+        throw new Error("boom");
+      },
+    });
+
+    await runAction(
+      agentAction({
+        name: "faulty",
+        llm: mockLLM([callEcho, { content: "handled", finishReason: "stop" }]),
+        tools: { echo: faulty },
+        bus,
+      }),
+      "run faulty",
+    );
+
+    expect(events.find((e) => e.type === "tool.end")).toMatchObject({
+      name: "echo",
+      failed: true,
+    });
+  });
+
+  it("emits step_limit.hit when maxSteps runs out", async () => {
+    const bus = new SessionEventBus();
+    const events: SessionEvent[] = [];
+    bus.subscribe((e) => events.push(e));
+
+    const result = await runAction(
+      agentAction({
+        name: "limit",
+        llm: { chat: async () => callEcho },
+        tools: { echo },
+        maxSteps: 2,
+        stall: false,
+        bus,
+      }),
+      "loop",
+    );
+
+    expect(result.finishReason).toBe("max_steps");
+    expect(events.find((e) => e.type === "step_limit.hit")).toMatchObject({ maxSteps: 2 });
   });
 });

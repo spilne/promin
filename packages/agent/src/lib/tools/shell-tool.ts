@@ -59,7 +59,7 @@ const CREDENTIAL_NAME = /KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|COOKIE
  * when output passes `maxOutputBytes`. Approval is required by default.
  *
  * Usage:
- *   agentLoop({
+ *   agentAction({
  *     tools: { shell: createShellTool({ cwd: "/workspace", allowedCommands: ["bun", "git"] }) },
  *   });
  */

@@ -9,7 +9,9 @@
 //   turn-start                         start time; emits turn.start
 //   transcript-open                    transcript.open (the turn's user message)
 //   before-turn                        hooks.beforeTurn
-//   tools-<step>                       tool-set snapshot (name, requireApproval, idempotent)
+//   plan-<step>                        tool-set snapshot (name, requireApproval, idempotent)
+//                                      and the compaction cut (see turn-compaction.ts)
+//   compact-<step>                     summary of the steps before the cut; emits compact
 //   think-<step>                       one LLM call, retried per llmRetry
 //   step-<step>-hook                   onStep decision
 //   step-<step>-approvals              which calls need approval (autoApprove verdicts)
@@ -63,7 +65,7 @@ import {
 } from "./agent-shared.ts";
 import type { LLMProvider, LLMToolChoice, LLMToolDefinition } from "./llm-provider.ts";
 import type { Message, AssistantMessage, ToolResultMessage, ToolCall } from "./message.ts";
-import { recordApproval, recordTool } from "./metrics/instrument.ts";
+import { recordApproval, recordChat, recordTool } from "./metrics/instrument.ts";
 import type { AgentMetrics, ModelCostRegistry } from "./metrics/types.ts";
 import type { ProcessorsConfig } from "./processors.ts";
 import type { SessionEventBus } from "./session-logger.ts";
@@ -71,6 +73,16 @@ import { StallDetector, type StallDetectorOptions } from "./stall-detector.ts";
 import type { ToolAuditLogger } from "./tool-audit/types.ts";
 import { zodToToolJsonSchema } from "./tool-json-schema.ts";
 import { delegatedRunId, runDelegatedCall } from "./delegation/run-delegated-call.ts";
+import {
+  applyCompaction,
+  estimateMessageTokens,
+  planCompaction,
+  promptTokens,
+  summarizeSteps,
+  validateCompactionConfig,
+  type StepSummary,
+  type TurnCompactionConfig,
+} from "./turn-compaction.ts";
 import { parseDelegationFrame, ROOT_FRAME, type DelegationFrame } from "./delegation/types.ts";
 import type { AgentTool, ApprovalDecision, AutoApprove, ToolScope } from "./tool.ts";
 import { shouldAutoApprove } from "./tool.ts";
@@ -106,8 +118,10 @@ export interface AgentResult<TOutput = unknown> {
    */
   output?: TOutput;
   /**
-   * The turn's transcript. Always ends with an assistant message and has a
-   * tool result for every tool call, so it can seed the next turn.
+   * The turn's working conversation as the engine last held it: seed plus
+   * steps. Always ends with an assistant message and has a tool result for
+   * every tool call. With `compaction`, older steps of a long turn are
+   * folded into a summary here — `turnMessages` has them all.
    */
   messages: Message[];
   /**
@@ -136,6 +150,7 @@ export interface AgentResult<TOutput = unknown> {
 
 export interface StepContext {
   step: number;
+  /** The conversation as the next think step sees it (compacted, with `compaction`). */
   messages: Message[];
   workflowId: string;
   /**
@@ -181,6 +196,7 @@ export interface AgentTurnHooks {
   afterTurn?: (params: {
     task: string;
     answer: string;
+    /** `AgentResult.messages`: compacted, with `compaction`. */
     messages: Message[];
     finishReason: AgentFinishReason;
     usage: { inputTokens: number; outputTokens: number };
@@ -276,6 +292,14 @@ export interface AgentActionConfig<TOutput = any> {
   thinkingBudgetTokens?: number;
   /** Output-token cap forwarded to every LLM call. */
   maxTokens?: number;
+  /**
+   * In-turn context compaction: when the messages of the next think step
+   * are estimated to exceed `compaction.maxTokens`, older tool steps of the
+   * turn are folded into one summary (see `TurnCompactionConfig`). The
+   * seed — system prompt, `input.messages`, the task — is never compacted.
+   * Default: off.
+   */
+  compaction?: TurnCompactionConfig;
   /**
    * Strip thinking blocks of earlier turns from the messages sent to the
    * LLM (see `redactPriorThinkingBlocks`). Default `true`.
@@ -446,6 +470,7 @@ export function agentAction(
   config: AgentActionConfig<never> & { outputSchema?: undefined },
 ): Workflow<AgentInput, AgentResult>;
 export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput, AgentResult> {
+  if (config.compaction) validateCompactionConfig(config.compaction);
   const maxSteps = config.maxSteps ?? 20;
   const clock = config.clock ?? SystemWallClock;
   const bus = config.bus;
@@ -558,14 +583,32 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
         let outcome: TurnOutcome | undefined;
         let stepsTaken = 0;
 
+        // Compaction state: the turn's steps start after the seed; the
+        // summary of compacted steps (when any) sits at `stepStart`.
+        const stepStart = messages.length;
+        let summary: string | undefined;
+        // What the provider reported for the last think step, while the
+        // list it measured is still the list being extended.
+        let reported: { readonly tokens: number; readonly sent: number } | undefined;
+        // A compaction that couldn't bring the step under budget (the seed
+        // or the kept steps alone are too big) backs off for a few steps
+        // instead of summarising again on every one.
+        let ineffectiveAt: number | undefined;
+
         for (let step = 0; step < maxSteps && outcome === undefined; step++) {
           stepsTaken = step + 1;
 
-          // ---- tool-set snapshot: control flow below reads only this ----
-          const snapshot = yield* ctx.activity(
-            `tools-${step}`,
-            async () =>
-              Object.entries(resolveTools(config)).map(
+          // ---- plan: control flow below reads only this ----
+          // The tool-set snapshot and where to compact are journaled, so a
+          // tool or compaction config edited mid-turn can't alter a replay.
+          const planned = messages;
+          const reportedTokens = reported
+            ? reported.tokens + estimateMessageTokens(planned.slice(reported.sent + 1))
+            : undefined;
+          const plan = yield* ctx.activity(
+            `plan-${step}`,
+            async () => ({
+              tools: Object.entries(resolveTools(config)).map(
                 ([name, t]): ToolSnapshotEntry => ({
                   name,
                   requireApproval: t.requireApproval === true,
@@ -573,9 +616,67 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
                   delegated: t.delegation !== undefined,
                 }),
               ),
+              compaction:
+                config.compaction &&
+                (ineffectiveAt === undefined ||
+                  step - ineffectiveAt >= ineffectiveBackoff(config.compaction))
+                  ? planCompaction({
+                      messages: planned,
+                      stepStart,
+                      config: config.compaction,
+                      ...(reportedTokens !== undefined && { reportedTokens }),
+                    })
+                  : null,
+            }),
             { idempotent: true },
           );
+          const snapshot = plan.tools;
           const snapshotByName = new Map(snapshot.map((e) => [e.name, e]));
+
+          // ---- compaction: fold the older steps into one summary ----
+          if (plan.compaction) {
+            const { cut, tokens, after, ineffective } = plan.compaction;
+            const previousSummary = summary;
+            const steps = planned.slice(stepStart + (previousSummary === undefined ? 0 : 1), cut);
+            const firstIneffective = ineffective && ineffectiveAt === undefined;
+            const compacted = yield* ctx.activity(
+              `compact-${step}`,
+              () =>
+                timed(() =>
+                  compactSteps({
+                    step,
+                    steps,
+                    previousSummary,
+                    tokens,
+                    after,
+                    kept: planned.length - cut,
+                    firstIneffective,
+                    fallbackMaxTokens: tokens,
+                  }),
+                ),
+              { idempotent: true },
+            );
+            const result = compacted.value;
+            summary = result.text;
+            spans.push({
+              kind: "compaction",
+              step,
+              startedAt: compacted.startedAt,
+              durationMs: compacted.durationMs,
+              compacted: steps.length,
+              summarized: result.summarized,
+              ...(result.usage && { usage: result.usage }),
+            });
+            if (result.usage) {
+              usage.inputTokens += result.usage.inputTokens;
+              usage.outputTokens += result.usage.outputTokens;
+              usage.cacheReadTokens += result.usage.cacheReadTokens ?? 0;
+              usage.cacheWriteTokens += result.usage.cacheWriteTokens ?? 0;
+            }
+            if (ineffective) ineffectiveAt = step;
+            messages = applyCompaction({ messages: planned, stepStart, cut, summary });
+            reported = undefined;
+          }
 
           // ---- think ----
           const roundMode: RoundMode =
@@ -609,6 +710,13 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
             usage.outputTokens += response.usage.outputTokens;
             usage.cacheReadTokens += response.usage.cacheReadTokens ?? 0;
             usage.cacheWriteTokens += response.usage.cacheWriteTokens ?? 0;
+            // The prompt plus the reply this step adds as its assistant message.
+            reported = {
+              tokens: promptTokens(response.usage) + response.usage.outputTokens,
+              sent: conversation.length,
+            };
+          } else {
+            reported = undefined;
           }
 
           if (response.aborted) {
@@ -1086,6 +1194,88 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
     .build();
 
   /** Run `fn`, journaling its start time and duration next to its value. */
+  /**
+   * Summarise the steps being compacted (inside the `compact-<step>`
+   * activity) and emit what the summary call cost: `llm.call` with
+   * `purpose: "compaction"`, its metrics, the `compact` event, and — once
+   * per turn — `compaction.ineffective`.
+   */
+  async function compactSteps(params: {
+    step: number;
+    steps: ReadonlyArray<Message>;
+    previousSummary: string | undefined;
+    tokens: number;
+    after: number;
+    kept: number;
+    firstIneffective: boolean;
+    fallbackMaxTokens: number;
+  }): Promise<StepSummary> {
+    const { step } = params;
+    // A compaction recorded by a plan whose config is gone since: digest.
+    const compaction = config.compaction ?? {
+      maxTokens: params.fallbackMaxTokens,
+      summarize: false,
+    };
+    const start = clock.currentTimeMs();
+    const result = await summarizeSteps({
+      steps: params.steps,
+      previousSummary: params.previousSummary,
+      config: compaction,
+      llm: config.llm,
+      retry: config.llmRetry ?? {},
+      clock,
+      ...(config.rateLimiter && { rateLimiter: config.rateLimiter }),
+      ...(config.signal && { signal: config.signal }),
+    });
+    const durationMs = clock.currentTimeMs() - start;
+    if (result.summarized) {
+      emit({
+        type: "llm.call",
+        turn: 0,
+        step,
+        purpose: "compaction",
+        durationMs,
+        ...(result.usage && { tokens: result.usage }),
+      });
+      const provider = compaction.llmProvider ?? config.llmProvider;
+      const model = compaction.llmModel ?? config.llmModel;
+      if (config.metrics && provider && model) {
+        recordChat({
+          metrics: config.metrics,
+          ...(config.costs && { costs: config.costs }),
+          provider,
+          model,
+          response: {
+            content: result.text,
+            finishReason: "stop",
+            ...(result.usage && { usage: result.usage }),
+          },
+          durationMs,
+          extraLabels: { ...metricLabels, purpose: "compaction" },
+        });
+      }
+    }
+    emit({
+      type: "compact",
+      turn: 0,
+      step,
+      reason: "token_limit",
+      tokens: params.tokens,
+      compacted: params.steps.length,
+      kept: params.kept,
+    });
+    if (params.firstIneffective) {
+      emit({
+        type: "compaction.ineffective",
+        turn: 0,
+        step,
+        tokens: params.after,
+        maxTokens: compaction.maxTokens,
+      });
+    }
+    return result;
+  }
+
   async function timed<T>(
     fn: () => Promise<T>,
   ): Promise<{ value: T; startedAt: number; durationMs: number }> {
@@ -1286,6 +1476,14 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
   }
 }
 
+/**
+ * Steps a turn waits after a compaction that left it over budget before
+ * compacting again: one summary per few steps instead of one per step.
+ */
+function ineffectiveBackoff(compaction: TurnCompactionConfig): number {
+  return Math.max(4, (compaction.keepRecentSteps ?? 2) + 1);
+}
+
 function errorResult(call: ToolCall, content: string): ToolResultMessage {
   return { role: "tool", toolCallId: call.id, content, isError: true };
 }
@@ -1298,7 +1496,8 @@ function skippedResults(calls: ReadonlyArray<ToolCall>, reason: string): ToolRes
 /**
  * Spans in start order, independent of the order they were recorded in
  * (calls of one step finish in any order, and a replay records them in
- * another): by start time, then step, then think / approval / tool, then
+ * another): by start time, then step, then compaction / think / approval /
+ * tool, then
  * tool call id. A span without a start time sorts at its step's think.
  */
 function orderSpans(spans: ReadonlyArray<TurnSpan>): TurnSpan[] {
@@ -1306,9 +1505,9 @@ function orderSpans(spans: ReadonlyArray<TurnSpan>): TurnSpan[] {
   for (const span of spans) {
     if (span.kind === "think") thinkStart.set(span.step, span.startedAt);
   }
-  const rank = { think: 0, approval: 1, tool: 2 } as const;
+  const rank = { compaction: 0, think: 1, approval: 2, tool: 3 } as const;
   const at = (span: TurnSpan): number => span.startedAt ?? thinkStart.get(span.step) ?? 0;
-  const callId = (span: TurnSpan): string => (span.kind === "think" ? "" : span.toolCallId);
+  const callId = (span: TurnSpan): string => ("toolCallId" in span ? span.toolCallId : "");
   return [...spans].sort(
     (a, b) =>
       at(a) - at(b) ||

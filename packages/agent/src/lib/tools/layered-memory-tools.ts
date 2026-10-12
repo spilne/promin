@@ -147,7 +147,7 @@ export type LayeredMemoryToolInput = z.infer<typeof LayeredMemoryToolInputSchema
  *   const memory = createLayeredMemoryTool({
  *     store, namespaceId, resourceId, threadId,
  *   });
- *   agentLoop({ tools: { memory } });
+ *   agentAction({ tools: { memory }, ... });
  */
 export function createLayeredMemoryTool(
   config: LayeredMemoryToolConfig,

@@ -220,7 +220,7 @@ export interface FilesystemTools {
  *
  * Usage:
  *   const fs = createFilesystemTools({ rootDir: "/workspace/my-project" });
- *   agentLoop({ tools: { ...fs }, ... });
+ *   agentAction({ tools: { ...fs }, ... });
  */
 export function createFilesystemTools(config: FilesystemToolsConfig): FilesystemTools {
   return {

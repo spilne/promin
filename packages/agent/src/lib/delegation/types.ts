@@ -95,7 +95,7 @@ export type SubAgentRouteResult =
 
 /**
  * The engine contract of a sub-agent tool (`AgentTool.delegation`). The
- * agent engines (`agentAction`, `agentLoop`) run a call of such a tool as
+ * turn engine (`agentAction`) runs a call of such a tool as
  * a child workflow instead of calling `execute`.
  */
 export interface SubAgentDelegation {

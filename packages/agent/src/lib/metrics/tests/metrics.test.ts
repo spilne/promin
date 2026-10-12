@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // AgentMetrics — pure tests for the no-op + in-memory adapters and the
 // per-call recording helpers. Integration with runLlmCall is covered by
-// the agent-loop tests once the metrics field is set.
+// the agentAction config tests once the metrics field is set.
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";

@@ -247,7 +247,9 @@ export function* runDelegatedCall(
     role: "tool",
     toolCallId: call.id,
     content: truncateToolContent(output.answer),
-    metadata: { [CHILD_TRACE_META_KEY]: buildAgentTrace(output.messages) },
+    // From the turn's own messages: `messages` is what the last think step
+    // saw, compacted in a long turn.
+    metadata: { [CHILD_TRACE_META_KEY]: buildAgentTrace(output.turnMessages) },
   };
   return yield* finish(result, output);
 }

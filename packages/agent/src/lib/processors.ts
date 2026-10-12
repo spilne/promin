@@ -4,7 +4,7 @@ import type { LLMResponse } from "./llm-provider.ts";
 export interface ProcessorContext {
   /** Zero-based think-step index within the current turn. */
   step: number;
-  /** Turn index (agentLoop only; always 0 for agentAction). */
+  /** Turn index — always 0: one engine workflow runs one turn. */
   turn: number;
   workflowId: string;
   /**

@@ -71,7 +71,7 @@ import { childToolCallId } from "../delegation/child-wiring.ts";
 import type { DelegableAgent, PreparedTurn } from "../delegation/types.ts";
 import type { ToolRegistry } from "../tool-registry.ts";
 import type { Message, ToolCall } from "../message.ts";
-import { SessionEventBus, type SessionEvent } from "../session-logger.ts";
+import { SessionEventBus } from "../session-logger.ts";
 import type {
   EpisodicRecord,
   MemoryStore,
@@ -86,48 +86,48 @@ import {
   type Consolidator,
   type DistillThreadOptions,
 } from "../memory/consolidator.ts";
-import { createLayeredMemoryTool } from "../tools/layered-memory-tools.ts";
-import { createCallAgentTool, createFindAgentTool } from "../network/runtime.ts";
-import { createRetrieverTool, formatRetrievedChunks } from "../rag/retriever-tool.ts";
+import { isReferenceDataMessage, referenceDataMessage } from "../reference-data.ts";
 import {
-  fenceReferenceData,
-  isReferenceDataMessage,
-  referenceDataMessage,
-} from "../reference-data.ts";
-import { retrieverToolName } from "../rag/retriever-tool-name.ts";
-import type { Retriever, RetrieverFilter } from "../rag/types.ts";
-import type { AgentKnowledgeMode } from "../registry/types.ts";
+  maybeAutoCompact,
+  maybeAutoDistill,
+  type AutoCompactConfig,
+  type AutoDistillConfig,
+} from "./auto-consolidation.ts";
+import { withAutoTools, type AutoToolScope } from "./auto-tools.ts";
 import { frameTask } from "./frame-task.ts";
+import { buildRetrieverContext, type AgentRetrievers } from "./retriever-bindings.ts";
+import {
+  liveOutput,
+  makeCapture,
+  recordEvent,
+  resolvedOutput,
+  type RunCapture,
+} from "./run-output.ts";
 import {
   InMemoryWorkflowStorage,
   SystemWallClock,
+  childOfEndedSignal,
   completeSignal,
   hasCapability,
 } from "@promin/workflow";
 import { ThreadNotFoundError, TurnKeyConflictError } from "./errors.ts";
 import { THREAD_AGENT_METADATA_KEY } from "./types.ts";
 import type { AgentTool, ApprovalDecision } from "../tool.ts";
-import { filterToolsByCapability } from "../tool.ts";
 import { resolveLocalAgent } from "../registry/resolve-local-agent.ts";
 import type { ResolveLocalAgentDeps } from "../registry/resolve-local-agent.ts";
 import type { AgentRegistry } from "../registry/types.ts";
 import type {
   Agent,
-  AgentEvent,
   AgentInput,
   AgentInputSource,
   AgentInvokeOpts,
   AgentRunOutput,
   AgentScope,
   AgentThread,
-  FinishReason,
   ListThreadsParams,
   MessageRange,
-  Step,
   ThreadOptions,
   ThreadSummary,
-  ToolResult,
-  UsageStats,
 } from "./types.ts";
 
 export interface LocalAgentConfig<TOutput = any> {
@@ -292,7 +292,7 @@ export interface LocalAgentConfig<TOutput = any> {
    * see `AgentRetrieverBinding.mode`. A tool never shadows a same-named
    * tool already on the agent.
    */
-  readonly retrievers?: Readonly<Record<string, Retriever | AgentRetrieverBinding>>;
+  readonly retrievers?: AgentRetrievers;
   /**
    * Recipe id surfaced as `ctx.scope.agentId` to scope-aware tools
    * (the durable scheduler stamps this in schedule metadata so
@@ -302,210 +302,6 @@ export interface LocalAgentConfig<TOutput = any> {
    * to `agent.name`.
    */
   readonly agentId?: string;
-}
-
-/** A retriever plus how it is exposed to the model. */
-export interface AgentRetrieverBinding {
-  readonly retriever: Retriever;
-  /** LLM-facing tool name. Default `retrieverToolName(id)`. */
-  readonly name?: string;
-  /** LLM-facing tool description. */
-  readonly description?: string;
-  /** Results per search. Default: the retriever's own default. */
-  readonly topK?: number;
-  /** Include source metadata in tool output. Default true. */
-  readonly includeSources?: boolean;
-  /** Include relevance scores in the model-visible tool output. Default false. */
-  readonly includeScores?: boolean;
-  /** Truncate each returned chunk to this many characters. */
-  readonly maxChunkCharacters?: number;
-  /** Filter applied to every search (tool calls and context injection). */
-  readonly filter?: RetrieverFilter;
-  /**
-   * `tool` (default) exposes a search tool; `context` searches with the
-   * turn's task before every turn and injects the hits as a fenced
-   * reference-data message (user role, never system — the chunks are
-   * untrusted); `tool-and-context` does both.
-   */
-  readonly mode?: AgentKnowledgeMode;
-}
-
-export interface AutoCompactConfig {
-  /**
-   * Built-in count gate: fire when the count of UNCOMPACTED messages —
-   * those with seq higher than the most recent compaction episode's
-   * toSeq — exceeds this number. Tracks "since last compact" so the
-   * trigger doesn't re-fire every turn once the thread is past the
-   * threshold.
-   */
-  readonly messageThreshold?: number;
-  /**
-   * Built-in token gate: fire when uncompacted-message tokens exceed
-   * this number. Tokens are estimated as `chars/4` over `content`,
-   * matching the `resolveContext` default estimator. More accurate
-   * than `messageThreshold` when message lengths vary widely (one
-   * giant tool result can blow context even at low message counts).
-   *
-   * Often more ergonomic to express via `contextLimit` + `compressAt`
-   * below — that way you don't have to recompute the threshold when
-   * you swap chat models.
-   */
-  readonly tokenThreshold?: number;
-  /**
-   * Model context window in tokens. When combined with `compressAt`,
-   * the effective token gate becomes `contextLimit * compressAt`.
-   *
-   * Examples: 200_000 for current Anthropic models. Wins over
-   * `tokenThreshold` when both are set.
-   */
-  readonly contextLimit?: number;
-  /**
-   * Fraction of `contextLimit` at which to compact. Default 0.70 —
-   * leaves the model 30% headroom for the assistant's reply.
-   * Ignored when `contextLimit` isn't set.
-   */
-  readonly compressAt?: number;
-  /**
-   * Custom predicate. Mirrors `RetryPolicy.when` from `@promin/workflow`:
-   * receives a signals envelope and returns `true` to fire on this
-   * turn. When set, REPLACES both built-in thresholds. Use this for
-   * compound rules.
-   *
-   * Examples:
-   *
-   *     // count + cooldown — don't compact more than once a minute
-   *     when: ({ uncompactedCount, lastCompactedAt }) =>
-   *       uncompactedCount > 30 &&
-   *       Date.now() - lastCompactedAt > 60_000
-   *
-   *     // token gate with thread-id allowlist
-   *     when: ({ uncompactedTokens, threadKey }) =>
-   *       uncompactedTokens > 8_000 &&
-   *       threadKey.threadId.startsWith("lr-")
-   */
-  readonly when?: (signals: AutoCompactSignals) => boolean;
-  /** Newest messages to leave unsummarised. Default 10. */
-  readonly keepRecent?: number;
-  /**
-   * Execution mode:
-   *   - `"background"` (default) — fire-and-forget AFTER the turn
-   *     resolves. The caller never waits for the compact LLM call.
-   *     Errors are logged but not surfaced.
-   *   - `"blocking"` — await the compact before the turn resolves.
-   *     Caller pays the compactionLlm round-trip on every triggered
-   *     turn. Use only when a downstream caller expects the episode
-   *     to exist before moving on.
-   */
-  readonly mode?: "background" | "blocking";
-}
-
-/** State the auto-compact predicate sees. */
-export interface AutoCompactSignals {
-  /** Total persisted message count for this thread. */
-  readonly totalCount: number;
-  /** Count of messages with seq > most recent compact episode's toSeq. */
-  readonly uncompactedCount: number;
-  /** Estimated token count over all persisted messages (chars/4). */
-  readonly totalTokens: number;
-  /** Estimated token count over uncompacted messages (chars/4). */
-  readonly uncompactedTokens: number;
-  /** `createdAt` of the most recent compact episode (0 if none). */
-  readonly lastCompactedAt: number;
-  readonly threadKey: ThreadKey;
-}
-
-export interface AutoDistillConfig {
-  /**
-   * Built-in message-count gate: fire when the thread's persisted
-   * message count reaches this number. Cheap to compute — best for
-   * simple "distill once after N messages" patterns.
-   *
-   * Common values: 6 (after a couple of turns, conversation has
-   * enough substance), 20 (only substantial threads).
-   *
-   * Multiple gates compose with OR semantics — fires when ANY of
-   * `messageThreshold`, `tokenThreshold`, `intervalMs` trips.
-   */
-  readonly messageThreshold?: number;
-  /**
-   * Built-in token-count gate: fire when the SUM of estimated tokens
-   * across NEW messages (since last distill) exceeds this value.
-   * Tokens estimated as `chars/4`, matching autoCompact's heuristic.
-   *
-   * More cost-aware than `messageThreshold` — three short messages
-   * vs three giant ones cost very different amounts to distill.
-   * Common values: 4_000 (roughly one Haiku context's worth of new
-   * material), 16_000 (substantial accumulated content).
-   */
-  readonly tokenThreshold?: number;
-  /**
-   * Built-in time-since-last-distill gate (milliseconds): fire when
-   * the elapsed time since the last distill episode exceeds this.
-   * Distinct from message/token gates — useful for low-volume
-   * threads where 6 messages might span a week, OR for periodic
-   * re-distillation patterns regardless of message volume.
-   *
-   * Combine with `force: true` to re-distill on every interval tick.
-   */
-  readonly intervalMs?: number;
-  /**
-   * Custom predicate. When set, REPLACES the built-in gates entirely
-   * — the predicate has full control. Use for compound rules:
-   *
-   *     when: ({ turnsSinceLastDistill, lastUserMessage }) =>
-   *       turnsSinceLastDistill >= 10 ||
-   *       /^(thanks|bye|goodbye|see ya)\b/i.test(lastUserMessage ?? ""),
-   */
-  readonly when?: (signals: AutoDistillSignals) => boolean;
-  /**
-   * Re-distill even when an episode for this thread already exists.
-   * Default `false` (idempotent — first qualifying turn writes one
-   * episode; subsequent turns are no-ops). Set `true` for periodic
-   * re-distillation patterns (works well with `intervalMs` or
-   * `tokenThreshold` past initial fire).
-   */
-  readonly force?: boolean;
-  /**
-   * Execution mode (same semantics as `AutoCompactConfig.mode`):
-   *   - `"background"` (default) — fire-and-forget after the turn resolves
-   *   - `"blocking"` — await before resolving the turn
-   */
-  readonly mode?: "background" | "blocking";
-}
-
-/** State the auto-distill predicate sees. */
-export interface AutoDistillSignals {
-  /** Total persisted message count for this thread. */
-  readonly totalCount: number;
-  /**
-   * Number of NEW messages since the most recent
-   * resource-scope episode whose `sourceThreadId` is this thread.
-   * Equals `totalCount` when never distilled.
-   */
-  readonly turnsSinceLastDistill: number;
-  /**
-   * Estimated token count (chars/4) summed across the NEW messages
-   * since the most recent distill episode. Equals total-thread-tokens
-   * when never distilled.
-   */
-  readonly tokensSinceLastDistill: number;
-  /**
-   * Milliseconds elapsed since the most recent distill episode.
-   * `Infinity` when never distilled (so `intervalMs` always trips).
-   */
-  readonly msSinceLastDistill: number;
-  /**
-   * `createdAt` of the most recent distill episode for this thread
-   * (0 if none).
-   */
-  readonly lastDistilledAt: number;
-  /**
-   * Trimmed string content of the thread's most recent user message,
-   * or `undefined` when the latest message isn't a user turn.
-   * Useful for goodbye-detection heuristics.
-   */
-  readonly lastUserMessage?: string;
-  readonly threadKey: ThreadKey;
 }
 
 export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>, DelegableAgent {
@@ -701,97 +497,24 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
   }
 
   private withAutoTools(params: {
-    scope: { namespaceId?: string; resourceId?: string; threadId?: string };
+    scope: AutoToolScope;
     userTools: Record<string, AgentTool<any, any>>;
   }): Record<string, AgentTool<any, any>> {
-    const { scope, userTools } = params;
-    let tools: Record<string, AgentTool<any, any>> = userTools;
-
-    // Auto-attached memory tool — needs a threadId, only the thread path
-    // has one. One-shot invoke is stateless by design.
-    if (
-      scope.threadId &&
-      scope.namespaceId &&
-      this.config.memory &&
-      this.config.autoMemoryTool !== false &&
-      !("memory" in userTools)
-    ) {
-      const memoryTool = createLayeredMemoryTool({
-        store: this.config.memory,
-        namespaceId: scope.namespaceId,
-        resourceId: scope.resourceId,
-        threadId: scope.threadId,
+    const config = this.config;
+    return withAutoTools({
+      sources: {
         agentId: this.agentId(),
-      });
-      tools = { ...tools, memory: memoryTool };
-    }
-
-    // Auto-attached network tools — recipe opt-in + host deps + a
-    // resolved namespace. Built per-turn because they close over the
-    // current scope.
-    if (this.config.network && scope.namespaceId) {
-      const recipe = this.config.network.recipe;
-      const networkRecipe = recipe.backend.type === "local" ? recipe.backend.network : undefined;
-      if (networkRecipe) {
-        // The owner is the one the gateway bound with `withScope`, and only
-        // while the turn runs at the resource it was bound for.
-        const ownerId =
-          this.config.ownerId !== undefined && scope.resourceId === this.config.resourceId
-            ? this.config.ownerId
-            : undefined;
-        const callerScope: import("../network/runtime.ts").NetworkCallerScope = {
-          namespaceId: scope.namespaceId,
-          ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
-          ...(ownerId !== undefined && { ownerId }),
-        };
-        const findAgent = createFindAgentTool({
-          deps: this.config.network.deps,
-          scope: callerScope,
-          callerRecipe: recipe,
-          network: networkRecipe,
-        });
-        const callAgent = createCallAgentTool({
-          deps: this.config.network.deps,
-          scope: callerScope,
-          callerRecipe: recipe,
-          network: networkRecipe,
-        });
-        // Don't shadow user-supplied tools of the same name — host wins.
-        const merged = { ...tools };
-        if (!("findAgent" in merged)) merged.findAgent = findAgent;
-        if (!("callAgent" in merged)) merged.callAgent = callAgent;
-        tools = merged;
-      }
-    }
-
-    // Retriever tools — one search tool per binding whose mode includes
-    // `tool`. Host / recipe tools of the same name win.
-    if (this.config.retrievers) {
-      const merged = { ...tools };
-      for (const binding of retrieverBindings(this.config.retrievers)) {
-        if (binding.mode === "context") continue;
-        if (binding.toolName in merged) continue;
-        merged[binding.toolName] = createRetrieverTool({
-          retriever: binding.retriever,
-          name: binding.toolName,
-          ...(binding.description !== undefined && { description: binding.description }),
-          ...(binding.topK !== undefined && { topK: binding.topK }),
-          ...(binding.includeSources !== undefined && { includeSources: binding.includeSources }),
-          ...(binding.includeScores !== undefined && { includeScores: binding.includeScores }),
-          ...(binding.maxChunkCharacters !== undefined && {
-            maxChunkCharacters: binding.maxChunkCharacters,
-          }),
-          ...(binding.filter !== undefined && { filter: binding.filter }),
-        });
-      }
-      tools = merged;
-    }
-
-    // Capability gate — an elevated tool is exposed only when the
-    // recipe's `capabilities` grant its `requires`. Applied last so the
-    // auto-attached memory / network tools are gated too (they aren't
-    // elevated today, so they pass through unchanged).
-    return filterToolsByCapability(tools, this.config.capabilities ?? []);
+        ...(config.memory && { memory: config.memory }),
+        ...(config.autoMemoryTool !== undefined && { autoMemoryTool: config.autoMemoryTool }),
+        ...(config.network && { network: config.network }),
+        ...(config.resourceId !== undefined && { boundResourceId: config.resourceId }),
+        ...(config.ownerId !== undefined && { ownerId: config.ownerId }),
+        ...(config.retrievers && { retrievers: config.retrievers }),
+        ...(config.capabilities && { capabilities: config.capabilities }),
+      },
+      scope: params.scope,
+      userTools: params.userTools,
+    });
   }
 
   /**
@@ -1047,7 +770,7 @@ interface LocalAgentThreadDeps<TOutput> {
   /** Token budget for resolveContext. Default DEFAULT_CONTEXT_BUDGET. */
   readonly contextBudget?: TokenBudget;
   /** Retriever bindings; context-mode ones are searched before every turn. */
-  readonly retrievers?: LocalAgentConfig["retrievers"];
+  readonly retrievers?: AgentRetrievers;
 }
 
 /**
@@ -1427,11 +1150,14 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     const { persona } = await this.loadContext();
     let result: AgentResult;
     try {
-      result = await this.runWorkflow({
-        workflowId: turn.workflowId,
-        input: turn.input as AgentRunInput,
-        persona,
-        capture,
+      result = await this.runRootPastSiblings({
+        key,
+        run: {
+          workflowId: turn.workflowId,
+          input: turn.input as AgentRunInput,
+          persona,
+          capture,
+        },
       });
     } catch (err) {
       // Another process is running the turn: the decision is recorded and
@@ -1456,6 +1182,44 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     await this.closeRowsOfRoot(turn.workflowId);
     await this.afterTurn();
     return result;
+  }
+
+  /**
+   * Run a resumed root turn. A sibling sub-agent an earlier resume set
+   * going may still be finishing its run in the background: the root then
+   * parks on that running child instead of reaching its end. Wait (engine
+   * clock, up to `RESUME_WAIT_MS`) for such a child to settle and run the
+   * root again; past the wait, `ApprovalNotReadyError`. A root that parks
+   * on a child waiting for its own approval is suspended for real.
+   */
+  private async runRootPastSiblings(params: {
+    key: PendingApprovalKey;
+    run: {
+      workflowId: string;
+      input: AgentRunInput;
+      persona: string | undefined;
+      capture: RunCapture;
+    };
+  }): Promise<AgentResult> {
+    const storage = this.deps.runner.storage;
+    const clock = this.deps.engine.clock ?? SystemWallClock;
+    const deadline = clock.currentTimeMs() + RESUME_WAIT_MS;
+    for (;;) {
+      try {
+        return await this.runWorkflow(params.run);
+      } catch (err) {
+        if (!isSuspension(err)) throw err;
+        const root = await storage.loadWorkflow(params.run.workflowId);
+        const running = root ? await runningChildAwaited({ storage, root }) : undefined;
+        if (!running) throw err;
+        for (;;) {
+          const child = await storage.loadWorkflow(running);
+          if (!child || !(await childInFlight({ storage, child }))) break;
+          if (clock.currentTimeMs() >= deadline) throw new ApprovalNotReadyError(params.key);
+          await new Promise<void>((resolve) => clock.setTimeout(resolve, RESUME_POLL_MS));
+        }
+      }
+    }
   }
 
   /**
@@ -1665,9 +1429,20 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
 
   /** Best-effort memory consolidation once a turn has finished. */
   private async afterTurn(): Promise<void> {
-    if (!this.deps.memory) return;
-    await this.maybeAutoCompact();
-    await this.maybeAutoDistill();
+    const { memory, consolidator, key } = this.deps;
+    if (!memory || !consolidator) return;
+    if (this.deps.autoCompact) {
+      await maybeAutoCompact({ config: this.deps.autoCompact, memory, key, consolidator });
+    }
+    if (this.deps.autoDistill) {
+      await maybeAutoDistill({
+        config: this.deps.autoDistill,
+        memory,
+        key,
+        consolidator,
+        clock: this.deps.engine.clock ?? SystemWallClock,
+      });
+    }
   }
 
   /**
@@ -1721,181 +1496,6 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       reference: resolved.reference.trim() || undefined,
       messages: resolved.messages.map((m) => stripStorageMeta(m)),
     };
-  }
-
-  /**
-   * Auto-compaction trigger. Reads the persisted state, computes signals
-   * (uncompacted-since-last-compact counts in messages and tokens),
-   * checks whether the configured rule fires, and dispatches the
-   * compactThread call in either background or blocking mode.
-   *
-   * Writes a thread episode only; `resolveContext` does not render
-   * per-thread episodes into the prompt (the memory tool's `recall`
-   * searches them on demand).
-   */
-  private async maybeAutoCompact(): Promise<void> {
-    const cfg = this.deps.autoCompact;
-    if (!cfg || !this.deps.memory || !this.deps.consolidator) return;
-    if (
-      cfg.messageThreshold === undefined &&
-      cfg.tokenThreshold === undefined &&
-      cfg.contextLimit === undefined &&
-      !cfg.when
-    ) {
-      return; // nothing to gate on
-    }
-
-    const messages = await this.deps.memory.getMessages(this.deps.key, { order: "asc" });
-    const episodes = await this.deps.memory
-      .listThreadEpisodes(this.deps.key, { order: "createdDesc" })
-      .catch(() => []);
-    const lastCompact = episodes.find(
-      (e) => (e.metadata as { kind?: unknown } | null)?.kind === "compact",
-    );
-    const lastCompactedSeq = lastCompact?.sourceMessageRange?.toSeq ?? 0;
-    const lastCompactedAt = lastCompact?.createdAt ?? 0;
-
-    const uncompacted = messages.filter((m) => m.seq > lastCompactedSeq);
-    const totalTokens = messages.reduce((s, m) => s + estimateTokens(m), 0);
-    const uncompactedTokens = uncompacted.reduce((s, m) => s + estimateTokens(m), 0);
-
-    const signals: AutoCompactSignals = {
-      totalCount: messages.length,
-      uncompactedCount: uncompacted.length,
-      totalTokens,
-      uncompactedTokens,
-      lastCompactedAt,
-      threadKey: this.deps.key,
-    };
-
-    // Effective token gate: contextLimit * compressAt wins when set,
-    // else tokenThreshold. Matches agent-loop's `compressAt` convention.
-    const effectiveTokenThreshold =
-      cfg.contextLimit !== undefined
-        ? cfg.contextLimit * (cfg.compressAt ?? 0.7)
-        : cfg.tokenThreshold;
-
-    const fire = cfg.when
-      ? cfg.when(signals)
-      : (cfg.messageThreshold !== undefined && uncompacted.length > cfg.messageThreshold) ||
-        (effectiveTokenThreshold !== undefined && uncompactedTokens > effectiveTokenThreshold);
-    if (!fire) return;
-
-    const consolidator = this.deps.consolidator();
-    const opts = { keepRecent: cfg.keepRecent ?? 10 };
-    const run = consolidator.compactThread(this.deps.key, opts).catch((err) => {
-      // Don't propagate — auto-compact is best-effort. Log so operators
-      // can spot a misconfigured consolidator (missing key, malformed
-      // LLM output, etc.) without breaking the user-visible turn.
-      console.warn(
-        `[LocalAgent] autoCompact failed for thread ${this.deps.key.threadId}:`,
-        err instanceof Error ? err.message : err,
-      );
-    });
-
-    if ((cfg.mode ?? "background") === "blocking") {
-      await run;
-    }
-    // else: fire-and-forget; the run's promise carries no value the
-    // turn cares about, errors are already logged above.
-  }
-
-  /**
-   * Auto-distillation trigger. Symmetric with maybeAutoCompact:
-   * computes signals (totalCount, turnsSinceLastDistill, lastDistilledAt,
-   * lastUserMessage), runs the configured rule, dispatches to the
-   * Consolidator. Idempotency is on the consolidator side — a second
-   * fire on the same thread without `force: true` returns the existing
-   * episode without re-running the LLM.
-   */
-  private async maybeAutoDistill(): Promise<void> {
-    const cfg = this.deps.autoDistill;
-    if (!cfg || !this.deps.memory || !this.deps.consolidator) return;
-    const hasGate =
-      cfg.messageThreshold !== undefined ||
-      cfg.tokenThreshold !== undefined ||
-      cfg.intervalMs !== undefined ||
-      cfg.when !== undefined;
-    if (!hasGate) return;
-    // Distillation writes a ResourceEpisode — only meaningful when a
-    // resourceId is bound. Without one, silently skip.
-    if (!this.deps.key.resourceId) return;
-
-    const messages = await this.deps.memory.getMessages(this.deps.key, { order: "asc" });
-    const resourceKey = {
-      namespaceId: this.deps.key.namespaceId,
-      resourceId: this.deps.key.resourceId,
-    };
-    const resourceEpisodes = await this.deps.memory
-      .listResourceEpisodes(resourceKey, { order: "createdDesc" })
-      .catch(() => []);
-    const lastDistill = resourceEpisodes.find(
-      (e) =>
-        e.sourceThreadId === this.deps.key.threadId &&
-        (e.metadata as { kind?: unknown } | null)?.kind === "distill",
-    );
-    const lastDistilledSeq = lastDistill?.sourceMessageRange?.toSeq ?? 0;
-    const lastDistilledAt = lastDistill?.createdAt ?? 0;
-    const newMessages = messages.filter((m) => m.seq > lastDistilledSeq);
-    const turnsSinceLastDistill = newMessages.length;
-    const tokensSinceLastDistill = newMessages.reduce((s, m) => s + estimateTokens(m), 0);
-    const now = (this.deps.engine.clock ?? SystemWallClock).currentTimeMs();
-    const msSinceLastDistill = lastDistilledAt ? now - lastDistilledAt : Number.POSITIVE_INFINITY;
-
-    // Walk back from the end to find the most recent USER message —
-    // after the turn's commit the assistant turn (and any tool messages)
-    // are at the tail; the user's input sits before them.
-    let lastUserMessage: string | undefined;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i]!;
-      if (m.role === "user" && typeof m.content === "string") {
-        lastUserMessage = m.content.trim();
-        break;
-      }
-    }
-
-    const signals: AutoDistillSignals = {
-      totalCount: messages.length,
-      turnsSinceLastDistill,
-      tokensSinceLastDistill,
-      msSinceLastDistill,
-      lastDistilledAt,
-      lastUserMessage,
-      threadKey: this.deps.key,
-    };
-
-    // Custom predicate REPLACES built-in gates entirely. Otherwise OR
-    // across whichever built-in gates are configured: any one tripping
-    // is enough to fire.
-    const fire = cfg.when
-      ? cfg.when(signals)
-      : (cfg.messageThreshold !== undefined && messages.length >= cfg.messageThreshold) ||
-        (cfg.tokenThreshold !== undefined && tokensSinceLastDistill >= cfg.tokenThreshold) ||
-        (cfg.intervalMs !== undefined && msSinceLastDistill >= cfg.intervalMs);
-    if (!fire) return;
-
-    const consolidator = this.deps.consolidator();
-    const run = consolidator
-      .distillThread(this.deps.key, { force: cfg.force ?? false })
-      .catch((err) => {
-        // Rate-limit hits are by design (host-configured cost cap),
-        // not failures worth a warn. Swallow silently.
-        if (
-          err &&
-          typeof err === "object" &&
-          (err as { name?: string }).name === "ConsolidatorRateLimitError"
-        ) {
-          return;
-        }
-        console.warn(
-          `[LocalAgent] autoDistill failed for thread ${this.deps.key.threadId}:`,
-          err instanceof Error ? err.message : err,
-        );
-      });
-
-    if ((cfg.mode ?? "background") === "blocking") {
-      await run;
-    }
   }
 
   async messages(range?: MessageRange): Promise<Message[]> {
@@ -2037,6 +1637,43 @@ async function rootRun(params: {
 }
 
 /** The step of `wf` suspended on `signalName`, if any. */
+/** A child `root` is parked on whose run is still going (see `childInFlight`). */
+async function runningChildAwaited(params: {
+  storage: WorkflowRunner["storage"];
+  root: WorkflowState;
+}): Promise<string | undefined> {
+  if (params.root.status !== "suspended") return undefined;
+  for (const step of Object.values(params.root.steps)) {
+    if (step.status !== "waiting_for_signal" || !step.signalName) continue;
+    const childId = childOfEndedSignal(step.signalName);
+    if (!childId) continue;
+    const child = await params.storage.loadWorkflow(childId);
+    if (child && (await childInFlight({ storage: params.storage, child }))) return childId;
+  }
+  return undefined;
+}
+
+/**
+ * Whether `child`'s run is going on somewhere: it has not ended and a
+ * driver holds its run lock. Probed with a 1ms lease, released at once.
+ */
+async function childInFlight(params: {
+  storage: WorkflowRunner["storage"];
+  child: WorkflowState;
+}): Promise<boolean> {
+  const { storage, child } = params;
+  if (isTerminal(child.status)) return false;
+  const probe = await storage.tryLock({ workflowId: child.workflowId, lockDurationMs: 1 });
+  if (!probe.acquired) return true;
+  await storage
+    .releaseLock({
+      workflowId: child.workflowId,
+      ...(probe.token !== undefined && { guard: { fenceToken: probe.token } }),
+    })
+    .catch(() => undefined);
+  return false;
+}
+
 function waitingStep(params: { wf: WorkflowState; signalName: string }) {
   return Object.values(params.wf.steps).find(
     (s) => s.status === "waiting_for_signal" && s.signalName === params.signalName,
@@ -2073,174 +1710,6 @@ export function threadTurnWorkflowId(params: {
   return `thread-turn-${digest.slice(0, 40)}`;
 }
 
-interface RunCapture {
-  readonly text: PushChannel<string>;
-  readonly events: PushChannel<AgentEvent>;
-  readonly steps: Step[];
-  /** Aborts the run: `cancel()` and the caller's `signal` both feed it. */
-  readonly abort: AbortController;
-  finishReason: FinishReason | null;
-  usage: UsageStats;
-  toolStartByCallId: Map<string, { input: unknown }>;
-}
-
-function makeCapture(signal?: AbortSignal): RunCapture {
-  const abort = new AbortController();
-  if (signal) {
-    if (signal.aborted) abort.abort(signal.reason);
-    else signal.addEventListener("abort", () => abort.abort(signal.reason), { once: true });
-  }
-  return {
-    text: new PushChannel<string>(),
-    events: new PushChannel<AgentEvent>(),
-    steps: [],
-    abort,
-    finishReason: null,
-    usage: { inputTokens: 0, outputTokens: 0 },
-    toolStartByCallId: new Map(),
-  };
-}
-
-function recordEvent(capture: RunCapture, e: SessionEvent): void {
-  switch (e.type) {
-    case "token.delta":
-      capture.text.push(e.delta);
-      capture.events.push({ type: "text-delta", delta: e.delta });
-      break;
-    case "tool.start": {
-      capture.toolStartByCallId.set(e.toolCallId, { input: e.input });
-      capture.events.push({
-        type: "tool-call",
-        call: { id: e.toolCallId, name: e.name, input: e.input },
-      });
-      break;
-    }
-    case "tool.end": {
-      const step: Step = {
-        type: "tool",
-        index: capture.steps.length,
-        name: e.name,
-        toolCallId: e.toolCallId,
-        input: capture.toolStartByCallId.get(e.toolCallId)?.input,
-        failed: e.failed,
-        durationMs: e.durationMs,
-      };
-      capture.steps.push(step);
-      capture.events.push({ type: "step-end", step });
-      break;
-    }
-    case "llm.call": {
-      const step: Step = { type: "llm", index: capture.steps.length, durationMs: e.durationMs };
-      capture.steps.push(step);
-      if (e.tokens) {
-        capture.usage = sumUsage(capture.usage, e.tokens);
-      }
-      capture.events.push({ type: "step-end", step });
-      break;
-    }
-    case "approval.requested":
-      capture.events.push({
-        type: "approval-requested",
-        toolCallId: e.toolCallId,
-        toolName: e.toolName,
-        input: e.input,
-      });
-      break;
-    case "step_limit.hit":
-      capture.finishReason = "max_steps";
-      break;
-    case "stall.detected":
-      capture.finishReason = "stalled";
-      break;
-    case "turn.end":
-      if (capture.finishReason === null) capture.finishReason = "stop";
-      capture.events.push({ type: "finish", reason: capture.finishReason, usage: capture.usage });
-      break;
-    case "turn.aborted":
-      capture.finishReason = "cancelled";
-      capture.events.push({
-        type: "finish",
-        reason: "cancelled",
-        usage: capture.usage,
-      });
-      break;
-    default:
-      break;
-  }
-}
-
-/** Usage of a finished turn, from the engine's result. */
-function usageOf(result: AgentResult): UsageStats {
-  return {
-    inputTokens: result.usage?.inputTokens ?? 0,
-    outputTokens: result.usage?.outputTokens ?? 0,
-    ...(result.usage?.cacheReadTokens !== undefined && {
-      cacheReadTokens: result.usage.cacheReadTokens,
-    }),
-    ...(result.usage?.cacheWriteTokens !== undefined && {
-      cacheWriteTokens: result.usage.cacheWriteTokens,
-    }),
-  };
-}
-
-/** Build an AgentRunOutput where every promise is already resolved. */
-function resolvedOutput<TOutput>(params: {
-  result: AgentResult;
-  capture: RunCapture;
-}): AgentRunOutput<TOutput> {
-  const { result, capture } = params;
-  capture.text.close();
-  capture.events.close();
-  return {
-    textStream: capture.text,
-    fullStream: capture.events,
-    text: Promise.resolve(result.answer),
-    output: Promise.resolve(result.output as TOutput | undefined),
-    toolCalls: Promise.resolve(extractToolCalls(result.turnMessages)),
-    toolResults: Promise.resolve(extractToolResults(result.turnMessages)),
-    steps: Promise.resolve(capture.steps.slice()),
-    usage: Promise.resolve(usageOf(result)),
-    finishReason: Promise.resolve(result.finishReason),
-    messages: Promise.resolve([...result.messages]),
-    // Already finished: nothing left to cancel.
-    cancel: async () => {},
-  };
-}
-
-function liveOutput<TOutput>(params: {
-  promise: Promise<AgentResult>;
-  capture: RunCapture;
-}): AgentRunOutput<TOutput> {
-  const { promise, capture } = params;
-  // Both streams end when the run settles, however it ends.
-  const settled = promise.finally(() => {
-    capture.text.close();
-    capture.events.close();
-  });
-  return {
-    textStream: capture.text,
-    fullStream: capture.events,
-    text: settled.then((r) => r.answer),
-    output: settled.then((r) => r.output as TOutput | undefined),
-    toolCalls: settled.then((r) => extractToolCalls(r.turnMessages)),
-    toolResults: settled.then((r) => extractToolResults(r.turnMessages)),
-    steps: settled.then(() => capture.steps.slice()),
-    usage: settled.then(usageOf),
-    finishReason: settled.then((r) => r.finishReason),
-    messages: settled.then((r) => [...r.messages]),
-    // Abort the run (LLM calls and tools see the signal; the engine ends
-    // the turn as `cancelled` at its next step) and wait until it has
-    // actually stopped.
-    cancel: async () => {
-      capture.abort.abort();
-      await settled.then(
-        () => undefined,
-        () => undefined,
-      );
-    },
-  };
-}
-
 /**
  * Build one turn's workflow: the agent's engine config plus this run's
  * bus, tool scope, cancellation signal and (for thread turns) durable
@@ -2269,33 +1738,6 @@ function buildTurnWorkflow<TOutput>(params: {
   );
 }
 
-function extractToolCalls(messages: ReadonlyArray<Message>): ToolCall[] {
-  const calls: ToolCall[] = [];
-  for (const m of messages) {
-    if (m.role === "assistant" && m.toolCalls) {
-      calls.push(...m.toolCalls);
-    }
-  }
-  return calls;
-}
-
-/** Tool results, each paired with its call's tool name. */
-function extractToolResults(messages: ReadonlyArray<Message>): ToolResult[] {
-  const names = new Map(extractToolCalls(messages).map((c) => [c.id, c.name]));
-  const out: ToolResult[] = [];
-  for (const m of messages) {
-    if (m.role === "tool") {
-      out.push({
-        toolCallId: m.toolCallId,
-        name: names.get(m.toolCallId) ?? "",
-        content: m.content,
-        failed: m.isError === true,
-      });
-    }
-  }
-  return out;
-}
-
 function applyRange(messages: ReadonlyArray<Message>, range?: MessageRange): Message[] {
   // Without storage seq numbers, range filtering on in-memory mode is positional.
   if (!range) return [...messages];
@@ -2305,47 +1747,6 @@ function applyRange(messages: ReadonlyArray<Message>, range?: MessageRange): Mes
   if (range.order === "desc") out = out.reverse();
   if (range.limit !== undefined) out = out.slice(0, range.limit);
   return out;
-}
-
-/**
- * chars/4 token estimator — same heuristic resolveContext's default
- * uses. Matches the worst-case "ASCII text" approximation that's good
- * enough for compaction-trigger decisions; an over-estimate is fine
- * (we'd compact slightly early).
- */
-function estimateTokens(m: { content?: string | null }): number {
-  const len = typeof m.content === "string" ? m.content.length : 0;
-  return Math.ceil(len / 4);
-}
-
-/**
- * Add the per-call usage delta into a running total. Cache fields are
- * optional on each delta; when undefined we leave the running cache
- * total unchanged. We intentionally don't promote the running total's
- * undefined to 0 — observability code can distinguish "no cache info"
- * (undefined) from "cache reported zero" (0).
- */
-function sumUsage(
-  total: UsageStats,
-  delta: {
-    inputTokens: number;
-    outputTokens: number;
-    cacheReadTokens?: number;
-    cacheWriteTokens?: number;
-  },
-): UsageStats {
-  return {
-    inputTokens: total.inputTokens + delta.inputTokens,
-    outputTokens: total.outputTokens + delta.outputTokens,
-    cacheReadTokens:
-      delta.cacheReadTokens !== undefined
-        ? (total.cacheReadTokens ?? 0) + delta.cacheReadTokens
-        : total.cacheReadTokens,
-    cacheWriteTokens:
-      delta.cacheWriteTokens !== undefined
-        ? (total.cacheWriteTokens ?? 0) + delta.cacheWriteTokens
-        : total.cacheWriteTokens,
-  };
 }
 
 function serializeSource(
@@ -2369,27 +1770,6 @@ function serializeSource(
   }
 }
 
-interface NormalizedRetrieverBinding extends AgentRetrieverBinding {
-  readonly id: string;
-  readonly toolName: string;
-  readonly mode: AgentKnowledgeMode;
-}
-
-function retrieverBindings(
-  retrievers: NonNullable<LocalAgentConfig["retrievers"]>,
-): NormalizedRetrieverBinding[] {
-  return Object.entries(retrievers).map(([id, bindingLike]) => {
-    const binding: AgentRetrieverBinding =
-      "retrieve" in bindingLike ? { retriever: bindingLike } : bindingLike;
-    return {
-      ...binding,
-      id,
-      toolName: binding.name ?? retrieverToolName(id),
-      mode: binding.mode ?? "tool",
-    };
-  });
-}
-
 /**
  * Whether a turn message belongs in the persisted transcript: system
  * blocks and injected reference data are rebuilt every turn.
@@ -2398,96 +1778,9 @@ function isTranscriptMessage(m: Message): boolean {
   return m.role !== "system" && !isReferenceDataMessage(m);
 }
 
-/**
- * Search every context-mode binding with `query` and render the hits as
- * one fenced reference-data block (one section per binding). Returns
- * `undefined` when no binding is in context mode or nothing matched.
- */
-async function buildRetrieverContext(params: {
-  retrievers: LocalAgentConfig["retrievers"];
-  query: string;
-}): Promise<string | undefined> {
-  if (!params.retrievers) return undefined;
-  const contextBindings = retrieverBindings(params.retrievers).filter((b) => b.mode !== "tool");
-  if (contextBindings.length === 0) return undefined;
-  const batches = await Promise.all(
-    contextBindings.map(async (binding) => ({
-      binding,
-      results: await binding.retriever.retrieve({
-        query: params.query,
-        ...(binding.topK !== undefined && { topK: binding.topK }),
-        ...(binding.filter !== undefined && { filter: binding.filter }),
-        ...(binding.maxChunkCharacters !== undefined && {
-          maxChunkCharacters: binding.maxChunkCharacters,
-        }),
-      }),
-    })),
-  );
-  return fenceReferenceData({
-    source: "knowledge",
-    sections: batches
-      .filter(({ results }) => results.length > 0)
-      .map(({ binding, results }) => ({
-        title: `Knowledge results from ${binding.id}`,
-        body: formatRetrievedChunks({
-          results: results.map((r) => ({
-            text: r.chunk.text,
-            score: r.score,
-            ...(binding.includeSources !== false && { source: r.chunk.source }),
-          })),
-          ...(binding.includeScores !== undefined && { includeScores: binding.includeScores }),
-        }),
-      })),
-  });
-}
-
 function stripStorageMeta(m: Message & { seq?: number; createdAt?: number }): Message {
   const { seq: _seq, createdAt: _createdAt, ...rest } = m as Record<string, unknown> & Message;
   return rest as Message;
-}
-
-// ---- PushChannel: buffered, push-based async stream ----
-
-/**
- * An async stream fed by `push` and ended by `close`. Every iterator reads
- * the whole stream from the start (late subscribers miss nothing) and
- * parks on a promise until the next push or close — no polling.
- */
-class PushChannel<T> implements AsyncIterable<T> {
-  private readonly items: T[] = [];
-  private closed = false;
-  private waiters: Array<() => void> = [];
-
-  push(item: T): void {
-    if (this.closed) return;
-    this.items.push(item);
-    this.wake();
-  }
-
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    this.wake();
-  }
-
-  private wake(): void {
-    const waiters = this.waiters;
-    this.waiters = [];
-    for (const w of waiters) w();
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<T> {
-    let i = 0;
-    return {
-      next: async () => {
-        while (i >= this.items.length && !this.closed) {
-          await new Promise<void>((resolve) => this.waiters.push(resolve));
-        }
-        if (i < this.items.length) return { value: this.items[i++]!, done: false };
-        return { value: undefined, done: true };
-      },
-    };
-  }
 }
 
 // Re-export `ThreadRow` so callers can introspect downcast types if needed.

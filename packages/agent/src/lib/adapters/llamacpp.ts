@@ -20,7 +20,7 @@ export interface LlamaCppOptions extends LLMHttpOptions {
  *   llama-server --model ./your-model.gguf --port 8080
  *
  * Then wire it into an agent:
- *   agentLoop({ llm: llamacpp({ baseURL: "http://localhost:8080" }), ... })
+ *   agentAction({ llm: llamacpp({ baseURL: "http://localhost:8080" }), ... })
  */
 export function llamacpp(options: LlamaCppOptions = {}): LLMProvider {
   const { model, baseURL, ...rest } = options;

@@ -32,6 +32,14 @@ export function childEndedSignalName(params: {
   return `${CHILD_ENDED_SIGNAL_PREFIX}${params.childWorkflowId}#${params.run}`;
 }
 
+/** The child workflow id a child-ended signal name is for; undefined for any other signal. */
+export function childOfEndedSignal(signalName: string): string | undefined {
+  if (!signalName.startsWith(CHILD_ENDED_SIGNAL_PREFIX)) return undefined;
+  const rest = signalName.slice(CHILD_ENDED_SIGNAL_PREFIX.length);
+  const hash = rest.lastIndexOf("#");
+  return hash > 0 ? rest.slice(0, hash) : undefined;
+}
+
 /**
  * Park step `stepName` of `workflowId` on its suspended child: a signal
  * wait on the child's ended-signal, timing out at the child's earliest wake

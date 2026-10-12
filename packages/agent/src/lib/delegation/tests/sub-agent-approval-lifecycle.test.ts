@@ -40,6 +40,8 @@ function setup(params?: {
   leadCalls?: ToolCall[];
   /** Replaces the lead's final answer (e.g. to hold it on a gate). */
   leadAnswer?: (messages: ReadonlyArray<Message>) => LLMResponse | Promise<LLMResponse>;
+  /** Runs before the helper's final answer (e.g. to hold it on a gate). */
+  beforeHelperAnswer?: (messages: ReadonlyArray<Message>) => Promise<void>;
   helper?: (tools: Record<string, AgentTool<any, any>>) => AgentTool<any, any>;
 }) {
   const storage = new InMemoryWorkflowStorage();
@@ -57,15 +59,17 @@ function setup(params?: {
       return `ran ${what}`;
     },
   };
-  const helperLlm: LLMProvider = reactiveLLM((messages) =>
-    lastMessage(messages)?.role === "tool"
-      ? { content: `helper: ${lastContent(messages)}`, finishReason: "stop" }
-      : {
-          content: null,
-          finishReason: "tool_calls",
-          toolCalls: [{ id: "g1", name: "guarded", input: { what: lastContent(messages) } }],
-        },
-  );
+  const helperLlm: LLMProvider = reactiveLLM(async (messages) => {
+    if (lastMessage(messages)?.role === "tool") {
+      await params?.beforeHelperAnswer?.(messages);
+      return { content: `helper: ${lastContent(messages)}`, finishReason: "stop" };
+    }
+    return {
+      content: null,
+      finishReason: "tool_calls",
+      toolCalls: [{ id: "g1", name: "guarded", input: { what: lastContent(messages) } }],
+    };
+  });
   const helper = params?.helper
     ? params.helper({ guarded })
     : subAgentTool({
@@ -176,19 +180,44 @@ describe("sub-agent approvals — judged by the root turn", () => {
     expect(h.runs).toEqual([]);
   });
 
-  it("finishes two parallel sub-agent approvals decided one after the other", async () => {
+  it("finishes two parallel sub-agent approvals decided back to back", async () => {
+    // Child A, once approved, holds its final answer: the first resume
+    // returns while A's run is still going, and the second resume reaches
+    // the root before A has ended.
+    const gate = deferred();
+    let holding = false;
     const h = setup({
       leadCalls: [
         { id: "a", name: "helper", input: { task: "A" } },
         { id: "b", name: "helper", input: { task: "B" } },
       ],
+      beforeHelperAnswer: async (messages) => {
+        if (lastContent(messages) !== "ran A") return;
+        holding = true;
+        await gate.promise;
+      },
     });
     const thread = await suspended(h);
     const rows = await thread.pendingApprovals!();
     expect(rows).toHaveLength(2);
 
-    await thread.resume!(rows[0]!.toolCallId, { approved: true }).catch(() => undefined);
-    const out = await thread.resume!(rows[1]!.toolCallId, { approved: false, reason: "no" });
+    await expect(thread.resume!(rows[0]!.toolCallId, { approved: true })).rejects.toThrow(
+      /waiting/,
+    );
+    expect(holding).toBe(true);
+    const second = thread.resume!(rows[1]!.toolCallId, { approved: false, reason: "no" });
+    // Let A finish once the second resume has parked the root on it.
+    const root = rows[0]!.workflowId.split(".")[0]!;
+    for (let i = 0; i < 1_000; i++) {
+      const wf = await h.storage.loadWorkflow(root);
+      const parked = Object.values(wf?.steps ?? {}).some((s) =>
+        s.signalName?.includes(rows[0]!.workflowId),
+      );
+      if (parked && wf?.status === "suspended") break;
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    gate.resolve();
+    const out = await second;
 
     expect(await out.text).toBe("lead: helper: ran A | helper: Rejected: no");
     expect(await thread.pendingApprovals!()).toEqual([]);

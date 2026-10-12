@@ -65,7 +65,7 @@ export function defineSignal<S extends Schema<unknown>>(params: {
 // ---------------------------------------------------------------------------
 // Canonical ApprovalSignal — the shape `ctx.approval(id)` waits on.
 //
-// The `approve:<id>` name prefix is the convention agentLoop uses too, so
+// The `approve:<id>` name prefix is the convention the agent engine uses too, so
 // SignalScanner / dashboard filters / external delivery callers see one
 // naming scheme for every approval. Authors who
 // want a custom approval shape can `defineSignal` their own; this one is
@@ -92,7 +92,7 @@ export type ApprovalDecision = Infer<typeof ApprovalSchema>;
 
 /**
  * Build a SignalType for an approval keyed by `<id>`. The wire-format
- * name is `approve:<id>` — same convention agentLoop and SignalScanner
+ * name is `approve:<id>` — same convention the agent engine and SignalScanner
  * already use, so this drops in transparently.
  */
 export function approvalSignal(id: string): SignalType<ApprovalDecision> {

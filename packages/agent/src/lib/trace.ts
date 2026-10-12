@@ -89,6 +89,20 @@ export type TurnSpan =
       readonly durationMs?: number;
     }
   | {
+      /**
+       * An in-turn compaction: older steps folded into one summary before
+       * this step's think. `summarized` is false for a digest (no LLM call).
+       */
+      readonly kind: "compaction";
+      readonly step: number;
+      readonly startedAt: number;
+      readonly durationMs: number;
+      /** Messages folded into the summary. */
+      readonly compacted: number;
+      readonly summarized: boolean;
+      readonly usage?: TurnTraceUsage;
+    }
+  | {
       /** A tool approval: from the request to the decision reaching the turn. */
       readonly kind: "approval";
       readonly step: number;

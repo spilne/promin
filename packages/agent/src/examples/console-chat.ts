@@ -19,13 +19,12 @@ import {
 } from "@promin/workflow";
 import { anthropic } from "../lib/adapters/anthropic.ts";
 import type { RateLimiter } from "../lib/agent-shared.ts";
-import { agentLoop } from "../lib/agent-loop.ts";
+import { LocalAgent } from "../lib/agent/local-agent.ts";
 import { InMemoryMemoryStore } from "../lib/memory/in-memory-memory-store.ts";
 import type { ThreadKey } from "../lib/memory/types.ts";
 import { InMemorySecretsStorage } from "../lib/secrets/in-memory-secrets-storage.ts";
 import { ChatTerminal, ConsoleRunner } from "../terminal.ts";
 import { UsageTracker, fmtN } from "./console-usage.ts";
-import { InMemorySessionLogger } from "../lib/session-logger.ts";
 import { createSpinnerTracker, abbrevInput } from "./console-spinner.ts";
 import { createToolRegistry } from "./console-tools.ts";
 import {
@@ -38,7 +37,7 @@ import {
   buildEventLog,
 } from "./console-panes.ts";
 import { executeDirectCall, dispatchCommand, type ReplCommand } from "./console-repl.ts";
-import type { AgentSession } from "../lib/agent-loop.ts";
+import { openConsoleSession, type ConsoleSession } from "./console-session.ts";
 
 const apiKey = process.env.ANTHROPIC_API_KEY;
 if (!apiKey) {
@@ -55,7 +54,7 @@ const COMMANDS: ReplCommand[] = [
     cmd: "/history",
     desc: "conversation messages (full session truth)",
     handle: async () => {
-      await term.showPane("history", buildHistory(session));
+      await term.showPane("history", buildHistory(await session.messages()));
     },
   },
   {
@@ -153,17 +152,14 @@ const COMMANDS: ReplCommand[] = [
   },
   {
     cmd: "/compact",
-    desc: "compact conversation history now (summarise and drop old messages)",
+    desc: "roll older conversation messages into a summary episode",
     handle: async () => {
       term.startSpinner("compacting…");
       try {
-        const r = await session.compact();
+        const summary = await session.compact();
         term.stopSpinner();
-        const summary = r.summary
-          ? `\n\x1b[2m  Summary: ${r.summary.slice(0, 120)}${r.summary.length > 120 ? "…" : ""}\x1b[0m`
-          : "";
         term.printAbove(
-          `\x1b[2mCompacted — kept ${r.kept} messages, dropped ${r.dropped}.${summary}\x1b[0m`,
+          `\x1b[2mCompacted.\n  Summary: ${summary.slice(0, 120)}${summary.length > 120 ? "…" : ""}\x1b[0m`,
         );
       } catch (e) {
         term.stopSpinner();
@@ -183,7 +179,7 @@ const COMMANDS: ReplCommand[] = [
     cmd: "/log",
     desc: "session event log",
     handle: async () => {
-      const lines = buildEventLog(sessionLogger.events());
+      const lines = buildEventLog(session.events());
       await term.showPane("log", lines.length ? lines : ["  No events recorded yet."]);
     },
   },
@@ -241,9 +237,7 @@ const spinner = createSpinnerTracker(term);
 const consoleRunner = new ConsoleRunner(term, usage);
 
 // ---- tools ----
-const sessionRef: { current: AgentSession | undefined } = { current: undefined };
-const sessionIdRef: { current: string } = { current: "session" };
-const sessionLogger = new InMemorySessionLogger();
+const sessionRef: { current: ConsoleSession | undefined } = { current: undefined };
 
 const { registry, scheduler, activeTicks } = await createToolRegistry({
   workspace,
@@ -252,22 +246,16 @@ const { registry, scheduler, activeTicks } = await createToolRegistry({
   apiKey,
   ask: (q) => term.ask(q),
   printAbove: (...lines) => term.printAbove(...lines),
-  runner,
   usage,
   sessionRef,
-  sessionIdRef,
   autoApproveRef,
-  logger: sessionLogger,
 });
 chatTerm.setRegistry(registry);
 
 // ---- agent lifecycle state machine ----
 type AgentStates = {
   idle: { context: { turns: number }; transitions: { message: "thinking" } };
-  thinking: {
-    context: { turns: number; turn: number; task: string };
-    transitions: { done: "idle" };
-  };
+  thinking: { context: { turns: number }; transitions: { done: "idle" } };
 };
 
 const agentMachine = stateMachine<AgentStates>({
@@ -279,13 +267,17 @@ const agentMachine = stateMachine<AgentStates>({
   .on("message", {
     from: "idle",
     to: "thinking",
-    action: (ctx: any, d: any) => ({ turns: ctx.turns, turn: d.turn, task: d.task }),
+    action: (ctx: { turns: number }) => ({ turns: ctx.turns }),
   })
-  .on("done", { from: "thinking", to: "idle", action: (ctx: any) => ({ turns: ctx.turns + 1 }) })
+  .on("done", {
+    from: "thinking",
+    to: "idle",
+    action: (ctx: { turns: number }) => ({ turns: ctx.turns + 1 }),
+  })
   .initial("idle")
   .build();
 
-// ---- agent loop (created once, reused across sessions) ----
+// ---- system prompt ----
 const SYSTEM_PROMPT = [
   "You are a helpful assistant in an interactive console. Be concise.",
   "IMPORTANT: After every tool call (or sequence of tool calls), always write a brief text",
@@ -306,14 +298,16 @@ const SYSTEM_PROMPT = [
 let sessionIdSeq = 0;
 let currentSessionId = "session";
 
-const loop = agentLoop({
-  name: "console-agent",
-  llm: usage.withTracking(anthropic("claude-sonnet-4-6", { apiKey }), "claude-sonnet-4-6"),
-  logger: sessionLogger,
-  toolRegistry: spinner.withStatusTracking(registry),
-  rateLimiter,
-  systemPrompt: SYSTEM_PROMPT,
-  hooks: {
+// Every turn runs as a durable LocalAgent thread turn; history and facts
+// live in the memory store, and long turns compact their older tool steps.
+const agent = new LocalAgent({
+  agent: {
+    name: "console-agent",
+    llm: usage.withTracking(anthropic("claude-sonnet-4-6", { apiKey }), "claude-sonnet-4-6"),
+    toolRegistry: spinner.withStatusTracking(registry),
+    rateLimiter,
+    systemPrompt: SYSTEM_PROMPT,
+    compaction: { maxTokens: 120_000 },
     onApprovalRequired: async (call) => {
       if (autoApproveRef.value) return { approved: true };
       term.stopSpinner();
@@ -330,25 +324,26 @@ const loop = agentLoop({
       if (approved) term.startSpinner(`thinking...  \x1b[2mstep ${spinner.step + 1}\x1b[0m`);
       return { approved };
     },
+    onLifecycle: (e) => {
+      if (e.event === "message") {
+        agentMachine.send({ id: currentSessionId, event: "message" }).catch(() => {});
+      } else if (e.event === "done" || e.event === "failed") {
+        agentMachine.send({ id: currentSessionId, event: "done" }).catch(() => {});
+      }
+    },
   },
-  onLifecycle: (e) => {
-    if (e.event === "message") {
-      agentMachine
-        .send({ id: e.sessionId, event: "message", data: e.context as any })
-        .catch(() => {});
-    } else if (e.event === "done") {
-      agentMachine.send({ id: e.sessionId, event: "done" }).catch(() => {});
-    }
-  },
+  runner,
+  memory: memoryStore,
+  namespaceId: memoryKey.namespaceId,
+  resourceId: memoryKey.resourceId,
+  contextBudget: { maxMessageTokens: 60_000, maxEpisodeTokens: 2_000 },
 });
 
 // ---- session reset helper ----
-async function resetSession(newId: string): Promise<AgentSession> {
+async function resetSession(newId: string): Promise<ConsoleSession> {
   currentSessionId = newId;
-  sessionIdRef.current = newId;
-  sessionLogger.clear();
   await agentMachine.start({ id: newId, context: { turns: 0 } }).catch(() => {});
-  const s = await loop.session({ runner, sessionId: newId });
+  const s = await openConsoleSession({ agent, threadId: newId });
   sessionRef.current = s;
   usage.resetSession();
   return s;

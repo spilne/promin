@@ -1,270 +1,180 @@
 import { describe, it, expect } from "bun:test";
-import { z } from "zod";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
-import { agentLoop } from "../agent-loop.ts";
-import type { LLMProvider, LLMResponse, LLMStreamChunk, LLMChatParams } from "../llm-provider.ts";
+import type { AgentEngineConfig } from "../agent-action.ts";
+import { LocalAgent } from "../agent/local-agent.ts";
+import type { LLMChatParams, LLMProvider, LLMStreamChunk } from "../llm-provider.ts";
+import { InMemoryAgentMetrics } from "../metrics/types.ts";
 
 // ---------------------------------------------------------------------------
-// streaming + abort + close concurrency tests
-//
-// stream() composes runner.runSafe (the workflow side) with a ChunkQueue
-// (the producer-consumer queue feeding tokens to the for-await caller).
-// Several races deserve test coverage:
+// Streaming + abort concurrency of a thread turn's `stream()`:
 //   1. Normal completion — chunks delivered, stream ends cleanly
-//   2. Abort mid-stream — caller's AbortSignal fires while chunks are queued
-//   3. session.close() during stream — session-level abort
-//   4. LLM rejects after chunks have streamed — error surfaces, no hang
+//   2. Abort mid-stream — the caller's AbortSignal ends the turn
+//   3. cancel() mid-stream — the output's own cancel ends the turn
+//   4. LLM rejects after chunks have streamed — the error surfaces from
+//      the result promises, no hang, and the promises the caller doesn't
+//      read don't count as unhandled rejections
 // ---------------------------------------------------------------------------
 
-/** Streaming LLM that yields chunks one at a time, optionally with a delay between them. */
-function makeStreamingLLM(opts: {
-  chunks: string[];
-  /** ms to wait between chunks. Default 5. */
-  perChunkDelayMs?: number;
-  /** When set, throw this error after emitting `chunks` items. */
-  throwAfter?: Error;
-}): LLMProvider {
-  const delay = opts.perChunkDelayMs ?? 5;
+async function makeThread(config: AgentEngineConfig) {
+  const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+  const agent = new LocalAgent({ agent: config, runner, namespaceId: "ns" });
+  return agent.thread(`t-${Math.random()}`);
+}
+
+/** Streams `chunks`, then stalls until the request is aborted. */
+function stallingLLM(chunks: ReadonlyArray<string>): LLMProvider {
   return {
     chat: async () => {
       throw new Error("non-streaming chat not used in this test");
     },
     chatStream: async function* (params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
-      for (const chunk of opts.chunks) {
-        if (params.signal?.aborted) {
-          // Match real provider behaviour — abort yields a stop finish.
-          return;
-        }
-        await new Promise((r) => setTimeout(r, delay));
-        yield { delta: chunk };
-      }
-      if (opts.throwAfter) throw opts.throwAfter;
-      yield { delta: "", finishReason: "stop" };
+      for (const delta of chunks) yield { delta };
+      await new Promise<void>((resolve) => {
+        if (params.signal?.aborted) return resolve();
+        params.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      // Match real provider behaviour — abort ends the stream.
     },
-  } as unknown as LLMProvider;
+  };
 }
 
-describe("stream() — concurrency contract", () => {
+describe("thread stream() — concurrency contract", () => {
   it("delivers all chunks for a normal completion", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
-    const session = await agentLoop({
+    const thread = await makeThread({
       name: "test",
-      llm: makeStreamingLLM({ chunks: ["hel", "lo, ", "world"] }),
-    }).session({ runner, sessionId: "stream-1" });
+      llm: {
+        chat: async () => {
+          throw new Error("non-streaming chat not used in this test");
+        },
+        chatStream: async function* (): AsyncIterable<LLMStreamChunk> {
+          for (const delta of ["hel", "lo, ", "world"]) yield { delta };
+          yield { delta: "", finishReason: "stop" };
+        },
+      },
+    });
 
     const collected: string[] = [];
-    for await (const chunk of session.stream("hi")) {
-      collected.push(chunk);
-    }
+    const out = thread.stream({ task: "hi" });
+    for await (const chunk of out.textStream) collected.push(chunk);
     expect(collected.join("")).toBe("hello, world");
-    await session.close();
+    expect(await out.text).toBe("hello, world");
   });
 
   it("AbortSignal aborts mid-stream without hanging", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
     // Two chunks, then the LLM stalls until its request is aborted: the
     // stream can only end through the caller's abort, so no timing is
     // involved in telling "abort propagated" from "hung".
-    const llm = {
-      chat: async () => {
-        throw new Error("non-streaming chat not used in this test");
-      },
-      chatStream: async function* (params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
-        yield { delta: "one " };
-        yield { delta: "two " };
-        await new Promise<void>((resolve) => {
-          if (params.signal?.aborted) return resolve();
-          params.signal?.addEventListener("abort", () => resolve(), { once: true });
-        });
-        // Match real provider behaviour — abort ends the stream.
-      },
-    } as unknown as LLMProvider;
-    const session = await agentLoop({ name: "test", llm }).session({
-      runner,
-      sessionId: "stream-abort",
-    });
+    const thread = await makeThread({ name: "test", llm: stallingLLM(["one ", "two "]) });
 
     const ac = new AbortController();
     const collected: string[] = [];
-    let chunkCount = 0;
-    for await (const chunk of session.stream("count", { signal: ac.signal })) {
+    const out = thread.stream({ task: "count" }, { signal: ac.signal });
+    for await (const chunk of out.textStream) {
       collected.push(chunk);
-      chunkCount++;
-      if (chunkCount === 2) ac.abort();
+      if (collected.length === 2) ac.abort();
     }
 
-    // The iteration ended after the abort, with the chunks seen before it.
     expect(collected).toEqual(["one ", "two "]);
-    await session.close();
+    expect(await out.finishReason).toBe("cancelled");
   });
 
-  it("session.close() during streaming ends the iteration without hanging", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
-    // The LLM streams one chunk and then stalls until the request is
-    // aborted, so only close() can end the iteration — no timing involved.
-    const llm = {
-      chat: async () => {
-        throw new Error("non-streaming chat not used in this test");
-      },
-      chatStream: async function* (params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
-        yield { delta: "a " };
-        await new Promise<void>((resolve) => {
-          if (params.signal?.aborted) return resolve();
-          params.signal?.addEventListener("abort", () => resolve(), { once: true });
-        });
-      },
-    } as unknown as LLMProvider;
-    const session = await agentLoop({ name: "test", llm }).session({
+  it("cancel() during streaming ends the iteration without hanging", async () => {
+    const thread = await makeThread({ name: "test", llm: stallingLLM(["a "]) });
+
+    const collected: string[] = [];
+    const out = thread.stream({ task: "go" });
+    for await (const chunk of out.textStream) {
+      collected.push(chunk);
+      void out.cancel();
+    }
+
+    expect(collected).toEqual(["a "]);
+    expect(await out.finishReason).toBe("cancelled");
+  });
+
+  it("an LLM error after chunks surfaces from the result, with no unhandled rejection", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const thread = await makeThread({
+        name: "test",
+        llmRetry: false,
+        llm: {
+          chat: async () => {
+            throw new Error("non-streaming chat not used in this test");
+          },
+          chatStream: async function* (): AsyncIterable<LLMStreamChunk> {
+            yield { delta: "partial " };
+            yield { delta: "answer " };
+            throw new Error("upstream-fail");
+          },
+        },
+      });
+
+      const collected: string[] = [];
+      const out = thread.stream({ task: "fail me" });
+      for await (const chunk of out.textStream) collected.push(chunk);
+
+      expect(collected).toEqual(["partial ", "answer "]);
+      // The failure shows on fullStream too, not only on the promises.
+      const events = [];
+      for await (const e of out.fullStream) events.push(e);
+      expect(events.at(-1)).toEqual({ type: "error", error: { message: "upstream-fail" } });
+      // Only `text` is read; the other result promises reject unobserved.
+      await expect(out.text).rejects.toThrow("upstream-fail");
+      for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("a run that fails before its turn starts ends fullStream with an error event", async () => {
+    const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+    const agent = new LocalAgent({
+      agent: { name: "test", llm: { chat: async () => ({ content: "ok", finishReason: "stop" }) } },
       runner,
-      sessionId: "stream-close",
+      namespaceId: "ns",
+    });
+    await agent.invoke({ task: "first" }, { runId: "same-run" });
+
+    // The run id names another task: refused before any turn runs.
+    const out = agent.stream({ task: "second" }, { runId: "same-run" });
+    const events = [];
+    for await (const e of out.fullStream) events.push(e);
+
+    expect(events).toEqual([{ type: "error", error: { message: expect.any(String) } }]);
+    await expect(out.text).rejects.toThrow();
+  });
+
+  it("an aborted stream still counts the tokens it reported", async () => {
+    const metrics = new InMemoryAgentMetrics();
+    const thread = await makeThread({
+      name: "test",
+      metrics,
+      llmProvider: "p",
+      llmModel: "m",
+      llm: {
+        chat: async () => {
+          throw new Error("non-streaming chat not used in this test");
+        },
+        chatStream: async function* (params: LLMChatParams): AsyncIterable<LLMStreamChunk> {
+          yield { delta: "partial", usage: { inputTokens: 120, outputTokens: 7 } };
+          await new Promise<void>((resolve) => {
+            if (params.signal?.aborted) return resolve();
+            params.signal?.addEventListener("abort", () => resolve(), { once: true });
+          });
+        },
+      },
     });
 
-    const collected: string[] = [];
-    let closed = false;
-    try {
-      for await (const chunk of session.stream("go")) {
-        collected.push(chunk);
-        // Close mid-stream, while the LLM is stalled on the next chunk.
-        if (!closed) {
-          closed = true;
-          void session.close();
-        }
-      }
-    } catch (err) {
-      // close() rejects the answerPromise with "Session closed"; either a
-      // clean exit OR this thrown error is acceptable. The bug we're
-      // guarding against is HANGING, not erroring.
-      expect((err as Error).message).toMatch(/Session closed/i);
-    }
-    // We got here: the iteration ended although the LLM never finished.
-    expect(closed).toBe(true);
-    expect(collected).toEqual(["a "]);
-  });
+    const ac = new AbortController();
+    const out = thread.stream({ task: "go" }, { signal: ac.signal });
+    for await (const _chunk of out.textStream) ac.abort();
 
-  it("LLM error AFTER chunks have streamed surfaces from the for-await (no hang, no swallow)", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
-    const session = await agentLoop({
-      name: "test",
-      llm: makeStreamingLLM({
-        chunks: ["partial ", "answer "],
-        throwAfter: new Error("upstream-fail"),
-      }),
-    }).session({ runner, sessionId: "stream-err" });
-
-    let caught: unknown = null;
-    const collected: string[] = [];
-    try {
-      for await (const chunk of session.stream("fail me")) {
-        collected.push(chunk);
-      }
-    } catch (err) {
-      caught = err;
-    }
-
-    // Caller sees SOME chunks (the ones that landed before the throw)…
-    expect(collected.length).toBeGreaterThanOrEqual(1);
-    // …and the upstream error must surface (not be silently dropped).
-    expect(caught).toBeDefined();
-    await session.close();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// approval-gate race tests
-//
-// session.approve() / .reject() deliver workflow signals via
-// completeSignal. The retry loop inside deliverApprovalSignal handles the
-// case where the workflow hasn't yet suspended on the matching signalName
-// — which is the common race in real UIs (UI calls /approve milliseconds
-// after the approval card renders).
-// ---------------------------------------------------------------------------
-
-function nonStreamingLLM(responses: LLMResponse[]): LLMProvider {
-  let i = 0;
-  return {
-    chat: async () => {
-      const r = responses[i++];
-      if (!r) throw new Error("LLM exhausted");
-      return r;
-    },
-  } as unknown as LLMProvider;
-}
-
-describe("approve()/reject() — early-call race", () => {
-  it("approve() called before the workflow suspends still delivers (retry path)", async () => {
-    // The agent loop emits a tool call; the approval activity reads the
-    // signal. If the caller approves immediately after send() returns,
-    // the signal might land before the suspend point — deliverApprovalSignal
-    // retries until the signal lands at a suspended workflow.
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
-    const session = await agentLoop({
-      name: "test",
-      llm: nonStreamingLLM([
-        // First response: ask to use a tool
-        {
-          content: null,
-          toolCalls: [{ id: "call-1", name: "doit", input: {} }],
-          finishReason: "tool_calls",
-        },
-        // After approval + tool result: final answer
-        { content: "done", finishReason: "stop" },
-      ]),
-      tools: {
-        doit: {
-          name: "doit",
-          description: "",
-          parameters: z.object({}),
-          requireApproval: true,
-          execute: async () => "tool output",
-        },
-      } as any,
-    }).session({ runner, sessionId: "approve-early" });
-
-    const turnPromise = session.send("use the tool");
-    // Immediately approve — workflow likely hasn't suspended yet.
-    const approvePromise = session.approve("call-1");
-
-    const [answer, approved] = await Promise.all([turnPromise, approvePromise]);
-    expect(approved).toBe(true);
-    expect(answer).toBe("done");
-    await session.close();
-  });
-
-  it("reject() before suspend works the same way", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    const runner = createWorkflowRunner({ storage });
-    const session = await agentLoop({
-      name: "test",
-      llm: nonStreamingLLM([
-        {
-          content: null,
-          toolCalls: [{ id: "call-1", name: "doit", input: {} }],
-          finishReason: "tool_calls",
-        },
-        { content: "rejected, here's what i can do instead", finishReason: "stop" },
-      ]),
-      tools: {
-        doit: {
-          name: "doit",
-          description: "",
-          parameters: z.object({}),
-          requireApproval: true,
-          execute: async () => "should not run",
-        },
-      } as any,
-    }).session({ runner, sessionId: "reject-early" });
-
-    const turnPromise = session.send("use the tool");
-    const rejectPromise = session.reject("call-1", "no thanks");
-
-    const [answer, rejected] = await Promise.all([turnPromise, rejectPromise]);
-    expect(rejected).toBe(true);
-    expect(answer).toContain("rejected");
-    await session.close();
+    expect(await out.finishReason).toBe("cancelled");
+    expect(await out.usage).toMatchObject({ inputTokens: 120, outputTokens: 7 });
+    expect(metrics.counterTotal("llm.tokens.input")).toBe(120);
   });
 });

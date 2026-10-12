@@ -1,7 +1,8 @@
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
-import { agentLoop } from "../agent-loop.ts";
+import { LocalAgent } from "../agent/local-agent.ts";
+import type { AgentEngineConfig } from "../agent-action.ts";
 import { tool } from "../tool.ts";
 import type { LLMProvider, LLMResponse, LLMStreamChunk, LLMFinishReason } from "../llm-provider.ts";
 import type { ToolCall, ThinkingBlock } from "../message.ts";
@@ -78,10 +79,12 @@ function mockPlainLLM(responses: LLMResponse[]): LLMProvider {
   };
 }
 
-async function makeSession(config: Parameters<typeof agentLoop>[0]) {
+/** A thread of a LocalAgent running `config`. */
+async function makeThread(config: AgentEngineConfig) {
   const storage = new InMemoryWorkflowStorage();
   const runner = createWorkflowRunner({ storage });
-  return agentLoop(config).session({ runner, sessionId: `s-${Math.random()}` });
+  const agent = new LocalAgent({ agent: config, runner, namespaceId: "ns" });
+  return agent.thread(`t-${Math.random()}`);
 }
 
 async function collectStream(iter: AsyncIterable<string>): Promise<string[]> {
@@ -93,18 +96,17 @@ async function collectStream(iter: AsyncIterable<string>): Promise<string[]> {
 }
 
 // ---------------------------------------------------------------------------
-// session.stream() — with chatStream
+// thread.stream() — with chatStream
 // ---------------------------------------------------------------------------
 
-describe("session.stream() — with chatStream", () => {
+describe("thread.stream() — with chatStream", () => {
   it("yields deltas in order and terminates", async () => {
-    const session = await makeSession({
+    const thread = await makeThread({
       name: "stream-basic",
       llm: mockStreamingLLM([{ chunks: ["Hello", " world"], finishReason: "stop" }]),
     });
 
-    const chunks = await collectStream(session.stream("hi"));
-    await session.close();
+    const chunks = await collectStream(thread.stream({ task: "hi" }).textStream);
 
     expect(chunks).toEqual(["Hello", " world"]);
   });
@@ -117,7 +119,7 @@ describe("session.stream() — with chatStream", () => {
       execute: async ({ text }) => text,
     });
 
-    const session = await makeSession({
+    const thread = await makeThread({
       name: "stream-multistep",
       llm: mockStreamingLLM([
         // Step 1: tool call only — no text deltas
@@ -135,14 +137,13 @@ describe("session.stream() — with chatStream", () => {
       tools: { echo: echoTool },
     });
 
-    const chunks = await collectStream(session.stream("go"));
-    await session.close();
+    const chunks = await collectStream(thread.stream({ task: "go" }).textStream);
 
     expect(chunks).toEqual(["done"]);
   });
 
   it("stream ends after the turn; second turn yields its own deltas independently", async () => {
-    const session = await makeSession({
+    const thread = await makeThread({
       name: "stream-two-turns",
       llm: mockStreamingLLM([
         { chunks: ["turn1"], finishReason: "stop" },
@@ -150,9 +151,8 @@ describe("session.stream() — with chatStream", () => {
       ]),
     });
 
-    const firstChunks = await collectStream(session.stream("first"));
-    const secondChunks = await collectStream(session.stream("second"));
-    await session.close();
+    const firstChunks = await collectStream(thread.stream({ task: "first" }).textStream);
+    const secondChunks = await collectStream(thread.stream({ task: "second" }).textStream);
 
     expect(firstChunks).toEqual(["turn1"]);
     expect(secondChunks).toEqual(["turn2"]);
@@ -160,31 +160,32 @@ describe("session.stream() — with chatStream", () => {
 });
 
 // ---------------------------------------------------------------------------
-// session.stream() — fallback without chatStream
+// thread.stream() — fallback without chatStream
 // ---------------------------------------------------------------------------
 
-describe("session.stream() — fallback without chatStream", () => {
+describe("thread.stream() — fallback without chatStream", () => {
   it("emits full content as a single chunk when chatStream is absent", async () => {
-    const session = await makeSession({
+    const thread = await makeThread({
       name: "stream-fallback",
       llm: mockPlainLLM([{ content: "The full answer.", finishReason: "stop" }]),
     });
 
-    const chunks = await collectStream(session.stream("tell me something"));
-    await session.close();
+    const chunks = await collectStream(thread.stream({ task: "tell me something" }).textStream);
 
     expect(chunks).toEqual(["The full answer."]);
   });
 });
 
 // ---------------------------------------------------------------------------
-// session.stream() — extended thinking via onThinking callback
+// thread.stream() — extended thinking via onThinking callback
 // ---------------------------------------------------------------------------
 
-describe("session.stream() — extended thinking", () => {
+describe("thread.stream() — extended thinking", () => {
   it("delivers thinking deltas to onThinking and text deltas to the stream", async () => {
-    const session = await makeSession({
+    const thinkingDeltas: string[] = [];
+    const thread = await makeThread({
       name: "stream-thinking",
+      onThinking: (delta) => thinkingDeltas.push(delta),
       llm: mockStreamingLLM([
         {
           thinkingChunks: ["Let me", " think..."],
@@ -195,20 +196,14 @@ describe("session.stream() — extended thinking", () => {
       ]),
     });
 
-    const thinkingDeltas: string[] = [];
-    const textChunks = await collectStream(
-      session.stream("solve this", {
-        onThinking: (delta) => thinkingDeltas.push(delta),
-      }),
-    );
-    await session.close();
+    const textChunks = await collectStream(thread.stream({ task: "solve this" }).textStream);
 
     expect(textChunks).toEqual(["The answer"]);
     expect(thinkingDeltas).toEqual(["Let me", " think..."]);
   });
 
   it("stores thinking blocks on the assistant message in history", async () => {
-    const session = await makeSession({
+    const thread = await makeThread({
       name: "stream-thinking-history",
       llm: mockStreamingLLM([
         {
@@ -220,23 +215,23 @@ describe("session.stream() — extended thinking", () => {
       ]),
     });
 
-    await collectStream(session.stream("question"));
-    const msgs = session.messages();
-    await session.close();
+    await collectStream(thread.stream({ task: "question" }).textStream);
+    const msgs = await thread.messages();
 
     const assistant = msgs.find((m) => m.role === "assistant");
     expect(assistant?.thinkingBlocks).toEqual([{ thinking: "reasoning", signature: "sig-xyz" }]);
   });
 
-  it("options.signal works alongside thinking", async () => {
-    const session = await makeSession({
+  it("an unaborted signal leaves the stream untouched", async () => {
+    const thread = await makeThread({
       name: "stream-thinking-signal",
       llm: mockStreamingLLM([{ chunks: ["ok"], finishReason: "stop" }]),
     });
 
     const ac = new AbortController();
-    const chunks = await collectStream(session.stream("hi", { signal: ac.signal }));
-    await session.close();
+    const chunks = await collectStream(
+      thread.stream({ task: "hi" }, { signal: ac.signal }).textStream,
+    );
 
     expect(chunks).toEqual(["ok"]);
   });

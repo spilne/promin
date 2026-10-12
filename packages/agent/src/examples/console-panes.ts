@@ -1,5 +1,5 @@
-import type { AgentSession } from "../lib/agent-loop.ts";
 import type { Fact, MemoryStore, ThreadKey } from "../lib/memory/types.ts";
+import type { Message } from "../lib/message.ts";
 import type { CommandDef, TreeNode } from "../terminal.ts";
 import type { InMemoryWorkflowStorage, WorkflowRunner } from "@promin/workflow";
 import type { InMemoryScheduler } from "@promin/workflow/scheduler";
@@ -54,8 +54,7 @@ export const WORKFLOW_ICON: Record<string, string> = {
   waiting_for_signal: "⏳",
 };
 
-export function buildHistory(session: AgentSession): string[] {
-  const msgs = session.messages();
+export function buildHistory(msgs: ReadonlyArray<Message>): string[] {
   if (!msgs.length) return ["(no history yet)"];
   const lines: string[] = [];
   for (const m of msgs) {

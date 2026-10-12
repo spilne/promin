@@ -1,21 +1,20 @@
 // ---------------------------------------------------------------------------
-// listPendingSignals tests — combine an integration spec that drives the
-// real agent loop until it suspends on `approve:<id>` (verifies the helper
-// reads the tool metadata the loop actually writes) with fixture-based
+// listPendingSignals tests — combine an integration spec that drives a
+// real agent turn until it suspends on `approve:<id>` (verifies the helper
+// reads the tool metadata the engine actually writes) with fixture-based
 // specs for the filter / shape edges (namespace scoping, non-approval
 // signals, limits).
-// Fixtures use `createWorkflow` + `saveStepResult` + `suspendWorkflow`
+// Fixtures use `createWorkflow` + `appendEntry` + `suspendWorkflow`
 // directly so we can exercise namespace + non-approval cases without
-// plumbing them through agent-loop config.
+// plumbing them through engine config.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
 import { z } from "zod";
-import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
-import { agentLoop } from "../../agent-loop.ts";
+import { InMemoryWorkflowStorage, completeSignal, createWorkflowRunner } from "@promin/workflow";
+import { agentAction } from "../../agent-action.ts";
 import { tool } from "../../tool.ts";
 import { listPendingSignals } from "../list-pending-signals.ts";
-import type { AgentSession } from "../../agent-loop.ts";
 import type { LLMResponse } from "../../llm-provider.ts";
 
 function mockLLM(responses: LLMResponse[]) {
@@ -37,15 +36,6 @@ const guarded = tool({
   requireApproval: true,
 });
 
-async function waitForStatus(session: AgentSession, target: string, timeoutMs = 2000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if ((await session.status()) === target) return;
-    await new Promise((r) => setTimeout(r, 10));
-  }
-  throw new Error(`Timed out waiting for status "${target}"`);
-}
-
 /** Stamp a fixture pending-approval workflow row directly into storage. */
 async function fixturePending(opts: {
   storage: InMemoryWorkflowStorage;
@@ -63,19 +53,19 @@ async function fixturePending(opts: {
     input: undefined,
     ...(opts.namespace !== undefined && { namespace: opts.namespace }),
   });
-  // The lc-approval-start activity records its result on the journal,
-  // not in wf.steps — match what the real agent loop does.
+  // The approval-start activity records its result on the journal,
+  // not in wf.steps — match what the engine does.
   await opts.storage.appendEntry({
     workflowId: opts.workflowId,
-    stepName: "conversation",
+    stepName: "agent",
     activityIndex: 0,
-    activityName: `lc-0-approval-${opts.toolCallId}-start`,
+    activityName: `step-0-approval-${opts.toolCallId}-start`,
     exit: { tag: "Success", value: { toolName: opts.toolName, toolInput: opts.toolInput } },
   });
-  // The conversation step suspended waiting for the approve signal.
+  // The agent step suspended waiting for the approve signal.
   await opts.storage.suspendWorkflow({
     workflowId: opts.workflowId,
-    stepName: "conversation",
+    stepName: "agent",
     stepUpdate: {
       status: "waiting_for_signal",
       signalName: `approve:${opts.toolCallId}`,
@@ -85,25 +75,26 @@ async function fixturePending(opts: {
   });
 }
 
-describe("listPendingSignals — integration with the real agent loop", () => {
-  it("surfaces a session that's actually suspended on an approval gate", async () => {
+describe("listPendingSignals — integration with a real agent turn", () => {
+  it("surfaces a turn that's actually suspended on an approval gate", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
-    const session = await agentLoop({
-      name: "approval-test",
-      llm: mockLLM([
-        {
-          content: null,
-          finishReason: "tool_calls",
-          toolCalls: [{ id: "tc-real", name: "guarded", input: { x: "hello" } }],
-        },
-        { content: "ok", finishReason: "stop" },
-      ]),
-      tools: { guarded },
-    }).session({ runner, sessionId: "wf-real" });
+    const llm = mockLLM([
+      {
+        content: null,
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "tc-real", name: "guarded", input: { x: "hello" } }],
+      },
+      { content: "ok", finishReason: "stop" },
+    ]);
+    const turn = () => agentAction({ name: "approval-test", llm, tools: { guarded } });
 
-    void session.send("call the guarded tool please");
-    await waitForStatus(session, "waiting_approval");
+    const first = await runner.runSafe({
+      workflow: turn(),
+      workflowId: "wf-real",
+      input: { task: "call the guarded tool please" },
+    });
+    expect(first.error).toBeTruthy();
 
     const pending = await listPendingSignals(storage);
     expect(pending).toHaveLength(1);
@@ -118,12 +109,21 @@ describe("listPendingSignals — integration with the real agent loop", () => {
     });
     expect(pending[0]!.suspendedAt).toBeInstanceOf(Date);
 
-    // Approving resolves the approval suspension; the session then waits
-    // on its next task signal, which is not an approval.
-    await session.approve("tc-real");
-    const after = await listPendingSignals(storage);
-    expect(after.filter((p) => p.isApproval)).toEqual([]);
-    await session.close();
+    // Approving resolves the suspension; the finished turn waits on nothing.
+    await completeSignal({
+      storage,
+      workflowId: "wf-real",
+      stepName: pending[0]!.stepName,
+      signalName: "approve:tc-real",
+      value: { approved: true },
+    });
+    const result = await runner.run({
+      workflow: turn(),
+      workflowId: "wf-real",
+      input: { task: "call the guarded tool please" },
+    });
+    expect(result.answer).toBe("ok");
+    expect(await listPendingSignals(storage)).toEqual([]);
   });
 });
 

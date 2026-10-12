@@ -99,7 +99,7 @@ export interface LLMStreamChunk {
 export interface LLMProvider {
   chat(params: LLMChatParams): Promise<LLMResponse>;
   /**
-   * Optional streaming variant. When present, agentLoop.stream() uses it to push
+   * Optional streaming variant. When present, a streamed turn uses it to push
    * token deltas to the caller in real time. Falls back to chat() when absent.
    * Yields text deltas followed by a final chunk carrying finishReason + toolCalls.
    */

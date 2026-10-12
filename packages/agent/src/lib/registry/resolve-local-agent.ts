@@ -20,7 +20,7 @@ import type { MemoryStore } from "../memory/types.ts";
 import type { PendingApprovalStore } from "../approvals/pending-approval-store.ts";
 import type { AgentTool } from "../tool.ts";
 import type { Consolidator } from "../memory/consolidator.ts";
-import type { AutoCompactConfig, AutoDistillConfig } from "../agent/local-agent.ts";
+import type { AutoCompactConfig, AutoDistillConfig } from "../agent/auto-consolidation.ts";
 import type { TokenBudget } from "../memory/types.ts";
 import type { SecretsStorage } from "../secrets/types.ts";
 import type {
@@ -39,7 +39,7 @@ import { LOAD_SKILL_TOOL_NAME, createLoadSkillTool } from "../skills/load-skill-
 import { resolveSystemPrompt } from "../fragments/resolve-prompt.ts";
 import type { FragmentRegistry } from "../fragments/types.ts";
 import type { RoleDefinition } from "../role/types.ts";
-import type { AgentRetrieverBinding } from "../agent/local-agent.ts";
+import type { AgentRetrieverBinding } from "../agent/retriever-bindings.ts";
 import type { RetrieverRegistry } from "../rag/retriever-registry.ts";
 import type { Retriever } from "../rag/types.ts";
 

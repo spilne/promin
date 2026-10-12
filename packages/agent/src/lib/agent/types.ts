@@ -2,7 +2,7 @@
 // Universal `Agent` interface — the contract every backend implements.
 //
 // Backends (each will live in its own file):
-//   - `LocalAgent`   wraps `@promin/agent` agentLoop / agentAction
+//   - `LocalAgent`   wraps `@promin/agent` agentAction
 //   - `ACPAgent`     wraps any ACP-speaking process (Claude Code, Codex,
 //                    OpenCode, OpenClaw)
 //   - `MastraAgent`  wraps `@mastra/core` Agent
@@ -49,7 +49,12 @@ export interface AgentRunOutput<Output = unknown> {
   readonly usage: Promise<UsageStats>;
   /** Why the run ended. */
   readonly finishReason: Promise<FinishReason>;
-  /** All messages produced or ingested by the run, in order. */
+  /**
+   * The run's working conversation (seed plus steps), in order. A long
+   * turn of an agent with in-turn `compaction` has its older steps folded
+   * into a summary here; `toolCalls` / `toolResults` and the persisted
+   * thread transcript have them all.
+   */
   readonly messages: Promise<Message[]>;
   /** Best-effort cancel. May not interrupt the underlying provider mid-stream. */
   cancel(): Promise<void>;

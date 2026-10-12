@@ -10,7 +10,8 @@
 //   - cancelling the caller stops the child; a time limit stops the child
 //     and fails the call; a failed child is a tool error;
 //   - depth and cycle checks hold across hops;
-//   - the tool is never run through `execute`, and works in `agentLoop` too.
+//   - the tool is never run through `execute`, and works in a LocalAgent
+//     thread turn too.
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
@@ -22,7 +23,7 @@ import {
 } from "@promin/workflow";
 import { z } from "zod";
 import { agentAction, type AgentActionConfig } from "../../agent-action.ts";
-import { agentLoop } from "../../agent-loop.ts";
+import { LocalAgent } from "../../agent/local-agent.ts";
 import type { LLMResponse } from "../../llm-provider.ts";
 import type { Message, ToolResultMessage } from "../../message.ts";
 import type { AgentTool } from "../../tool.ts";
@@ -331,29 +332,31 @@ describe("subAgentTool — child workflow", () => {
   });
 });
 
-describe("subAgentTool — agentLoop", () => {
-  it("runs the sub-agent as a child run of the session", async () => {
+describe("subAgentTool — LocalAgent thread", () => {
+  it("runs the sub-agent as a child run of the thread turn", async () => {
     const { runner, storage } = freshRunner();
     const helperLlm = scriptedLLM([answer("from helper")]);
-    const loop = agentLoop({
-      name: "loop-lead",
-      llm: delegatingLLM({ tool: "helper", input: { task: "help me" } }),
-      tools: {
-        helper: subAgentTool({
-          name: "helper",
-          description: "helps",
-          agent: { name: "helper", llm: helperLlm },
-        }),
+    const agent = new LocalAgent({
+      agent: {
+        name: "thread-lead",
+        llm: delegatingLLM({ tool: "helper", input: { task: "help me" } }),
+        tools: {
+          helper: subAgentTool({
+            name: "helper",
+            description: "helps",
+            agent: { name: "helper", llm: helperLlm },
+          }),
+        },
       },
+      runner,
+      namespaceId: "ns",
     });
-    const session = await loop.session({ runner, sessionId: "loop-1" });
-    try {
-      expect(await session.send("go")).toBe("lead got: from helper");
-    } finally {
-      await session.close();
-    }
-    const child = await storage.loadWorkflow("loop-1.0.0.call-1");
-    expect(child?.parentWorkflowId).toBe("loop-1");
+    const thread = await agent.thread("t-1");
+    const out = await thread.send({ task: "go" }, { runId: "turn-1" });
+
+    expect(await out.text).toBe("lead got: from helper");
+    const child = await storage.loadWorkflow("turn-1.0.call-1");
+    expect(child?.parentWorkflowId).toBe("turn-1");
     expect(helperLlm.calls).toHaveLength(1);
   });
 });

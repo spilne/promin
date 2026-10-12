@@ -14,7 +14,7 @@
 // journaled-suspend storages the pending journal entry must also be
 // completed (`completeSignal`) and the workflow re-run before the body
 // observes the delivery. Without this scanner, every code path that
-// calls `deliverSignal` (server routes, custom resolvers, agent-loop
+// calls `deliverSignal` (server routes, custom resolvers, agent
 // approval path) has to do those extra two steps itself — easy to
 // forget, easy to half-implement. The scanner closes the loop generically
 // so a `deliverSignal` call from anywhere just works.
