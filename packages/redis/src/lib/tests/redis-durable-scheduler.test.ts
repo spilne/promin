@@ -13,23 +13,9 @@ redisDescribe("RedisDurableScheduler conformance", (redis) => {
     });
     return {
       scheduler,
-      register: (config) => scheduler.registerAsync(config),
-      unregister: (id, options) => scheduler.unregisterAsync(id, options),
-      pause: (id) => scheduler.pauseAsync(id),
-      resume: (id) => scheduler.resumeAsync(id),
-      list: async () => scheduler.listAsync(),
     };
   });
 });
-
-/** Poll a condition on real time until it holds (or give up after 5s). */
-async function waitFor(condition: () => boolean): Promise<void> {
-  const deadline = Date.now() + 5_000;
-  while (!condition()) {
-    if (Date.now() > deadline) throw new Error("waitFor: condition not met within 5s");
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-}
 
 redisDescribe("RedisDurableScheduler injected clock", (redis) => {
   it("due ticks and their timestamps follow the injected WallClock", async () => {
@@ -43,13 +29,11 @@ redisDescribe("RedisDurableScheduler injected clock", (redis) => {
       pollIntervalMs: 1_000,
       clock,
     });
-    await scheduler.registerAsync({ id: "fake-clock-tick", intervalMs: 10_000 });
+    await scheduler.register({ id: "fake-clock-tick", intervalMs: 10_000 });
 
-    const result = scheduler.stream("fake-clock-tick").take(1).toArray().run();
-    // The first poll ends by parking on the clock's interval timer.
-    await waitFor(() => clock.pendingCount() > 0);
-    clock.advance(1_000);
-    const [tick] = await result;
+    // The first poll's ticks are delivered right away, before any wait.
+    const [tick] = await scheduler.stream("fake-clock-tick").take(1).toArray().run();
+    expect(clock.pendingCount()).toBe(0);
 
     expect(tick!.scheduledAt.getTime()).toBe(t0);
     expect(tick!.firedAt.getTime()).toBe(t0);

@@ -23,6 +23,7 @@ export const durableSchedules = pgTable(
     rrule: text("rrule"),
     intervalMs: bigint("interval_ms", { mode: "number" }),
     timezone: text("timezone").notNull().default("UTC"),
+    // No longer read or written; kept so existing tables need no migration.
     overlapPolicy: text("overlap_policy").notNull().default("allow"),
     maxCatchUp: integer("max_catch_up").notNull().default(0),
     jitterMs: integer("jitter_ms").notNull().default(0),

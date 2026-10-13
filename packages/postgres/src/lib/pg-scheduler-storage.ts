@@ -8,7 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import { and, asc, eq, inArray, isNotNull, lte, sql, type SQL } from "drizzle-orm";
-import type { DurableScheduleConfig, SchedulerStorage } from "@promin/workflow";
+import type { DurableScheduleConfig, ScheduleCommit, SchedulerStorage } from "@promin/workflow";
 import { durableSchedules, durableScheduleTicks } from "./scheduler-schema.ts";
 import { type DrizzleDb, hashToInt32, PgLeaderElection } from "@spilne/perfect-postgres";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
@@ -139,14 +139,7 @@ export class PgSchedulerStorage implements SchedulerStorage {
       .where(eq(durableSchedules.id, id));
   }
 
-  async commitPoll(
-    updates: Array<{
-      id: string;
-      firedAt?: Date;
-      tickIncrement?: number;
-      nextRun: Date | null;
-    }>,
-  ): Promise<void> {
+  async commitPoll(updates: ScheduleCommit[]): Promise<void> {
     if (updates.length === 0) return;
 
     // One UPDATE … FROM (VALUES …) statement covers every id in the batch.
@@ -169,7 +162,8 @@ export class PgSchedulerStorage implements SchedulerStorage {
       .set({
         lastFiredAt: sql`COALESCE(v.fired_at, ${durableSchedules.lastFiredAt})`,
         tickCount: sql`${durableSchedules.tickCount} + v.tick_inc`,
-        nextRun: sql`v.next_run::timestamptz`,
+        // A schedule paused since the poll loaded it stays out of due-tracking.
+        nextRun: sql`CASE WHEN ${durableSchedules.enabled} THEN v.next_run::timestamptz ELSE NULL END`,
         updatedAt: this.clock.now(),
       })
       .from(sql`(VALUES ${valuesSql}) AS v(id, fired_at, tick_inc, next_run)` as any)
@@ -190,7 +184,6 @@ export class PgSchedulerStorage implements SchedulerStorage {
       rrule: config.rrule,
       intervalMs: config.intervalMs,
       timezone: config.timezone ?? "UTC",
-      overlapPolicy: config.overlapPolicy ?? "allow",
       maxCatchUp: config.maxCatchUp ?? 0,
       jitterMs: config.jitterMs ?? 0,
       enabled,
@@ -198,12 +191,11 @@ export class PgSchedulerStorage implements SchedulerStorage {
       endAt: config.endAt,
       metadata: config.metadata,
     };
-    // Seed `nextRun` on INSERT only (when enabled) so `findDue` picks the
-    // schedule up without a separate `setNextRun` call — matches the
-    // in-memory and sqlite contracts. Honor `startAt` so a deferred
-    // schedule isn't immediately reported as due. On UPDATE, leave the
-    // existing `nextRun` alone; the caller recomputes it when the
-    // trigger changes.
+    // Due-tracking follows the enabled flag. A disabled schedule gets
+    // `nextRun = NULL`. An enabled one keeps an existing `nextRun` (the
+    // caller recomputes it when the trigger changes) or is seeded at now so
+    // `findDue` picks it up without a separate `setNextRun` call; a future
+    // `startAt` is honored so a deferred schedule isn't reported as due.
     const now = this.clock.now();
     const seededNextRun = enabled
       ? config.startAt && config.startAt > now
@@ -215,7 +207,11 @@ export class PgSchedulerStorage implements SchedulerStorage {
       .values({ ...values, nextRun: seededNextRun })
       .onConflictDoUpdate({
         target: durableSchedules.id,
-        set: { ...values, updatedAt: now },
+        set: {
+          ...values,
+          nextRun: sql`CASE WHEN excluded.enabled THEN COALESCE(wf_schedules.next_run, excluded.next_run) ELSE NULL END`,
+          updatedAt: now,
+        },
       });
   }
 
@@ -224,9 +220,15 @@ export class PgSchedulerStorage implements SchedulerStorage {
   }
 
   async setEnabled(id: string, enabled: boolean): Promise<void> {
+    // Disabling drops the schedule from due-tracking; enabling one with no
+    // `nextRun` seeds it at now (or a later `startAt`), like an insert.
+    const now = this.clock.now();
+    const nextRun = enabled
+      ? sql`COALESCE(${durableSchedules.nextRun}, GREATEST(${now.toISOString()}::timestamptz, ${durableSchedules.startAt}))`
+      : null;
     await this.db
       .update(durableSchedules)
-      .set({ enabled, updatedAt: this.clock.now() })
+      .set({ enabled, nextRun, updatedAt: now })
       .where(eq(durableSchedules.id, id));
   }
 
@@ -310,6 +312,7 @@ export class PgSchedulerStorage implements SchedulerStorage {
     // Single index scan over (namespace, next_run). The namespace filter,
     // when supplied, becomes an IN list (with optional NULL for global).
     const filters: SQL[] = [
+      eq(durableSchedules.enabled, true),
       isNotNull(durableSchedules.nextRun),
       lte(durableSchedules.nextRun, params.now),
     ];
@@ -346,7 +349,6 @@ function rowToConfig(row: any): DurableScheduleConfig {
     rrule: row.rrule ?? undefined,
     intervalMs: row.intervalMs ? Number(row.intervalMs) : undefined,
     timezone: row.timezone,
-    overlapPolicy: row.overlapPolicy,
     maxCatchUp: row.maxCatchUp,
     jitterMs: row.jitterMs,
     enabled: row.enabled,

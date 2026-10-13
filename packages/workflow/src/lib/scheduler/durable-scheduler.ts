@@ -7,15 +7,33 @@
 
 import { Cron } from "croner";
 import { RRule } from "rrule";
-import { Stream, tryPromise } from "@spilne/perfect-core";
+import { Stream, succeed, suspend, tryPromise, type Eff } from "@spilne/perfect-core";
 import { SystemWallClock } from "../shared/wall-clock.ts";
 import { wallClockSleep } from "./wall-clock-sleep.ts";
 import { JsonCodec } from "@spilne/perfect-core/connect";
+import { jitterDelayMs, validateScheduleConfig } from "./schedule-config.ts";
 import type { WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
 import type { Scheduler } from "./scheduler.ts";
 import type { DurableScheduleConfig, ScheduleConfig, ScheduleTick } from "./types.ts";
-import type { SchedulerStorage } from "./scheduler-storage.ts";
+import type { ScheduleCommit, SchedulerStorage } from "./scheduler-storage.ts";
+
+/** Where a `DurableScheduler` error happened. */
+export type SchedulerErrorPhase =
+  /** Leader election, `findDue` or the bulk loads failed; the poll is retried with backoff. */
+  | "poll"
+  /** `commitPoll` (or disabling an invalid schedule) failed; uncommitted ticks are redelivered. */
+  | "commit"
+  /** One stored schedule could not be evaluated; it is disabled and skipped. */
+  | "schedule";
+
+/** Passed to `DurableSchedulerConfig.onError`. */
+export interface SchedulerErrorEvent {
+  readonly phase: SchedulerErrorPhase;
+  readonly error: unknown;
+  /** Set for `"schedule"` errors. */
+  readonly scheduleId?: string;
+}
 
 export interface DurableSchedulerConfig {
   /** Storage backend (Postgres, Redis, in-memory, ...). */
@@ -28,7 +46,7 @@ export interface DurableSchedulerConfig {
   leaderLockTtlMs?: number;
   /**
    * Scope this scheduler instance to a single namespace. `findDue`,
-   * `listAsync`, and the leader lock are all filtered by this value.
+   * `list`, and the leader lock are all filtered by this value.
    * Default: undefined (global namespace).
    */
   namespace?: string;
@@ -47,16 +65,49 @@ export interface DurableSchedulerConfig {
   partition?: { index: number; count: number };
   /**
    * Time source. Drives nextRun seeding, which ticks are due, each tick's
-   * `firedAt`, the next-run computation, and the poll-loop tick cadence.
-   * Default: `SystemWallClock`.
+   * `firedAt`, the next-run computation, the poll-loop tick cadence and
+   * the error backoff. Default: `SystemWallClock`.
    */
   clock?: WallClock;
+  /**
+   * Called when a poll or commit fails, or a stored schedule can't be
+   * evaluated. The tick stream keeps running in every case. Default: logs
+   * with `console.error`.
+   */
+  onError?: (event: SchedulerErrorEvent) => void;
+  /**
+   * Upper bound for the wait between failed polls. Consecutive failures
+   * back off exponentially from `2 × pollIntervalMs` up to this value.
+   * Default: 30 000 (or `pollIntervalMs`, if larger).
+   */
+  maxErrorBackoffMs?: number;
+  /** Randomness for `jitterMs`, returning `[0, 1)`. Default: `Math.random`. */
+  random?: () => number;
 }
 
 /**
  * Generic poll-based scheduler. Backend-agnostic — give it a `SchedulerStorage`
  * (Postgres, Redis, in-memory) and it handles cron/rrule/interval, catch-up,
  * jitter, leader election, and the streaming surface.
+ *
+ * ## Delivery guarantee: at least once
+ *
+ * Each poll computes the due ticks without writing anything, emits them, and
+ * commits the fire state (`tickCount`, `lastFired`, `nextRun`) only once the
+ * consumer has pulled past them. A tick counts as acknowledged when the
+ * consumer pulls the next element, so a sequential consumer has finished
+ * with it. If the consumer stops early (`take(n)`, interruption, a crash),
+ * schedules whose ticks were all acknowledged are committed and the rest are
+ * left due: the next poll emits them again with the **same `tickNumber`**.
+ * Use `scheduleTickRunId(tick.scheduleId, tick.tickNumber)` as the run id so
+ * a redelivered tick is a no-op. Operators that pull ahead (buffers,
+ * `parMapAsync`) acknowledge a tick when they pull it.
+ *
+ * Storage errors never end the stream: a failed poll is reported through
+ * `onError` and retried with backoff, a failed commit is reported and its
+ * ticks are redelivered, and a stored schedule that can't be evaluated (for
+ * example an invalid cron written straight to storage) is reported, disabled
+ * and skipped without affecting the others.
  *
  * Convenience factories live in backend packages (`createPgScheduler`,
  * `createRedisScheduler`) — they wrap this with a pre-built storage adapter.
@@ -72,6 +123,9 @@ export class DurableScheduler implements Scheduler {
   private readonly batchSize: number;
   private readonly partition?: { index: number; count: number };
   private readonly clock: WallClock;
+  private readonly onError: (event: SchedulerErrorEvent) => void;
+  private readonly maxErrorBackoffMs: number;
+  private readonly random: () => number;
 
   constructor(config: DurableSchedulerConfig) {
     this.storage = config.storage;
@@ -81,6 +135,9 @@ export class DurableScheduler implements Scheduler {
     this.namespace = config.namespace;
     this.batchSize = config.batchSize ?? 100;
     this.clock = config.clock ?? SystemWallClock;
+    this.onError = config.onError ?? defaultOnError;
+    this.maxErrorBackoffMs = Math.max(config.maxErrorBackoffMs ?? 30_000, this.pollIntervalMs);
+    this.random = config.random ?? Math.random;
     if (config.partition) {
       if (
         config.partition.count < 1 ||
@@ -99,12 +156,12 @@ export class DurableScheduler implements Scheduler {
   // Schedule management
   // -------------------------------------------------------------------------
 
-  /** Fire-and-forget register. Use `registerAsync` to await persistence. */
-  register(config: DurableScheduleConfig | ScheduleConfig): void {
-    void this.registerAsync(config);
-  }
-
-  async registerAsync(config: DurableScheduleConfig | ScheduleConfig): Promise<void> {
+  /**
+   * Register (or replace) a schedule and persist it. An enabled schedule is
+   * due immediately, so the next poll picks it up. Rejects on an invalid
+   * config or a storage error.
+   */
+  async register(config: DurableScheduleConfig | ScheduleConfig): Promise<void> {
     validateScheduleConfig(config);
     const durable = config as DurableScheduleConfig;
     // If this scheduler instance is namespaced, force the registered schedule
@@ -113,13 +170,16 @@ export class DurableScheduler implements Scheduler {
     const stored: DurableScheduleConfig = { ...durable, namespace };
     await this.storage.upsertSchedule(stored);
 
-    // Seed nextRun = now so the first poll picks it up immediately.
-    await this.storage.setNextRun(config.id, this.clock.now());
+    // Seed nextRun = now so the first poll picks it up immediately. A
+    // disabled schedule stays out of due-tracking (the upsert cleared it).
+    if (config.enabled !== false) {
+      await this.storage.setNextRun(config.id, this.clock.now());
+    }
   }
 
   /**
    * Update an existing schedule, merging changes with its current config.
-   * Unlike `registerAsync` (which requires a full config and upserts), this
+   * Unlike `register` (which requires a full config and upserts), this
    * takes a partial and preserves unspecified fields — ergonomic for runtime
    * management UIs that only touch one field at a time ("change the cron",
    * "bump the timezone", etc.).
@@ -127,10 +187,9 @@ export class DurableScheduler implements Scheduler {
    * Recomputes `nextRun` from the merged config and writes it back so the
    * change is picked up on the next poll without a round-trip lag.
    *
-   * Throws if the schedule doesn't exist. Re-validates cron/rrule/intervalMs
-   * exclusivity on the merged result.
+   * Throws if the schedule doesn't exist. Re-validates the merged result.
    */
-  async updateAsync(
+  async update(
     scheduleId: string,
     patch: Partial<Omit<DurableScheduleConfig, "id">>,
   ): Promise<void> {
@@ -144,40 +203,31 @@ export class DurableScheduler implements Scheduler {
 
     // Any change to trigger/timezone/startAt/endAt can alter when the next fire
     // should be. Recompute and push into due-tracking so the next poll sees it.
-    const next = computeNextRun(merged, this.clock);
-    await this.storage.setNextRun(scheduleId, next);
+    if (merged.enabled !== false) {
+      await this.storage.setNextRun(scheduleId, computeNextRun(merged, this.clock));
+    }
   }
 
-  unregister(scheduleId: string, options?: { reason?: string }): void {
-    void this.unregisterAsync(scheduleId, options);
-  }
-
-  async unregisterAsync(scheduleId: string, _options?: { reason?: string }): Promise<void> {
+  async unregister(scheduleId: string, _options?: { reason?: string }): Promise<void> {
     await this.storage.deleteSchedule(scheduleId);
   }
 
-  pause(scheduleId: string): void {
-    void this.pauseAsync(scheduleId);
-  }
-
-  async pauseAsync(scheduleId: string): Promise<void> {
+  /** Pause a schedule. It leaves due-tracking until resumed. */
+  async pause(scheduleId: string): Promise<void> {
     await this.storage.setEnabled(scheduleId, false);
   }
 
-  resume(scheduleId: string): void {
-    void this.resumeAsync(scheduleId);
-  }
-
-  async resumeAsync(scheduleId: string): Promise<void> {
+  /**
+   * Resume a paused schedule. It is due immediately; the next poll fires
+   * the most recent missed occurrence (more with `maxCatchUp`), the same as
+   * after a scheduler restart.
+   */
+  async resume(scheduleId: string): Promise<void> {
     await this.storage.setEnabled(scheduleId, true);
   }
 
-  list(): ScheduleConfig[] {
-    // Sync per Scheduler interface — returns empty. Use listAsync for real data.
-    return [];
-  }
-
-  async listAsync(params?: {
+  /** List schedules in this scheduler's namespace (or `params.namespace`). */
+  async list(params?: {
     enabled?: boolean;
     namespace?: string;
     limit?: number;
@@ -191,7 +241,7 @@ export class DurableScheduler implements Scheduler {
     });
   }
 
-  async countAsync(params?: { enabled?: boolean; namespace?: string }): Promise<number> {
+  async count(params?: { enabled?: boolean; namespace?: string }): Promise<number> {
     return await this.storage.countSchedules({
       enabled: params?.enabled,
       namespace: params?.namespace ?? this.namespace,
@@ -282,37 +332,129 @@ export class DurableScheduler implements Scheduler {
   // -------------------------------------------------------------------------
 
   /**
-   * Poll loop: poll storage, wait `pollIntervalMs` on the configured
-   * `WallClock`, emit that poll's ticks, then poll again once the consumer
-   * pulls for more. The first poll runs as soon as the stream is pulled; its
-   * ticks are delivered one interval later.
+   * Poll loop: poll storage, emit that poll's ticks as the consumer pulls
+   * them, commit once the consumer has pulled past the last one, then wait
+   * `pollIntervalMs` on the configured `WallClock` and poll again. The first
+   * poll runs as soon as the stream is pulled and its ticks are delivered
+   * right away. See the class docs for the at-least-once guarantee.
    *
    * Every call builds a fresh stream. Stopping the consumer cancels the
-   * pending interval timer.
+   * pending interval timer and commits the acknowledged part of the current
+   * batch.
    */
   stream(scheduleId?: string): Stream<ScheduleTick> {
-    const poll = tryPromise(
-      () => this.pollOnce(scheduleId),
-      (e) => e,
-    ).orDie();
-    const pollThenWait = poll.flatMap((ticks) =>
-      wallClockSleep({ clock: this.clock, ms: this.pollIntervalMs }).map(() => ticks),
-    );
-    return Stream.repeat(pollThenWait).flatMap((ticks) => Stream.fromArray(ticks));
+    return Stream.suspend(() => {
+      // The batch that has been emitted (in part) but not committed yet.
+      let open: PollBatch | undefined;
+
+      const afterBatch = (batch: PollBatch): Eff<LoopStep> =>
+        this.commitEff({ batch, acked: batch.ticks.length }).flatMap(() =>
+          this.sleep(this.pollIntervalMs).map(
+            (): LoopStep => [null, { kind: "poll", failures: 0 }],
+          ),
+        );
+
+      const step = (state: LoopState): Eff<LoopStep> =>
+        suspend((): Eff<LoopStep> => {
+          if (state.kind === "emit") {
+            // Being pulled again means the consumer is done with tick `index - 1`.
+            state.batch.acked = state.index;
+            if (state.index < state.batch.ticks.length) {
+              const tick = state.batch.ticks[state.index]!;
+              return succeed<LoopStep>([
+                tick,
+                { kind: "emit", batch: state.batch, index: state.index + 1 },
+              ]);
+            }
+            open = undefined;
+            return afterBatch(state.batch);
+          }
+
+          return this.pollEff(scheduleId).flatMap((result): Eff<LoopStep> => {
+            if (!result.ok) {
+              const failures = state.failures + 1;
+              return this.sleep(this.errorBackoffMs(failures)).map(
+                (): LoopStep => [null, { kind: "poll", failures }],
+              );
+            }
+            const batch = result.batch;
+            if (batch.ticks.length === 0) return afterBatch(batch);
+            open = batch;
+            return succeed<LoopStep>([batch.ticks[0]!, { kind: "emit", batch, index: 1 }]);
+          });
+        });
+
+      // On early stop, commit what the consumer acknowledged; the rest stays due.
+      const commitOpen = suspend((): Eff<void> => {
+        const batch = open;
+        open = undefined;
+        return batch ? this.commitEff({ batch, acked: batch.acked }) : succeed(undefined);
+      });
+
+      const initial: LoopState = { kind: "poll", failures: 0 };
+      return Stream.unfoldEffect(initial, step).unNone().onFinalize(commitOpen);
+    });
   }
 
   subscribe(_params?: { group?: string }): Stream<ScheduleTick> {
     return this.stream();
   }
 
-  /** One leader-gated poll: claim due schedules, compute ticks, commit state. */
-  private async pollOnce(scheduleId: string | undefined): Promise<ScheduleTick[]> {
+  private sleep(ms: number): Eff<void> {
+    return wallClockSleep({ clock: this.clock, ms });
+  }
+
+  private errorBackoffMs(failures: number): number {
+    return Math.min(this.maxErrorBackoffMs, this.pollIntervalMs * 2 ** failures);
+  }
+
+  private report(event: SchedulerErrorEvent): void {
+    try {
+      this.onError(event);
+    } catch {
+      // A throwing error hook must not take the poll loop down with it.
+    }
+  }
+
+  /** One poll as an Eff that never fails: errors are reported and returned. */
+  private pollEff(
+    scheduleId: string | undefined,
+  ): Eff<{ ok: true; batch: PollBatch } | { ok: false }> {
+    return tryPromise(
+      async () => ({ ok: true as const, batch: await this.pollOnce(scheduleId) }),
+      (e) => e,
+    ).catch((error) => {
+      this.report({ phase: "poll", error });
+      return succeed({ ok: false as const });
+    });
+  }
+
+  /**
+   * Commit the schedules of `batch` whose ticks are all acknowledged
+   * (`acked` = number of acknowledged ticks, in emission order), plus the
+   * entries that carry no ticks. Never fails: errors are reported.
+   */
+  private commitEff(params: { batch: PollBatch; acked: number }): Eff<void> {
+    const { batch, acked } = params;
+    const ready = batch.plans.filter((p, i) => p.ticks.length === 0 || batch.tickEnds[i]! <= acked);
+    if (ready.length === 0) return succeed(undefined);
+    return tryPromise(
+      () => commitPlannedSchedules({ storage: this.storage, plans: ready }),
+      (e) => e,
+    ).catch((error) => {
+      this.report({ phase: "commit", error });
+      return succeed(undefined);
+    });
+  }
+
+  /** One leader-gated poll: claim due schedules and compute their ticks. Writes nothing. */
+  private async pollOnce(scheduleId: string | undefined): Promise<PollBatch> {
     const isLeader = await this.storage.tryAcquireLeader({
       instanceId: this.instanceId,
       namespace: this.namespace,
       ttlMs: this.leaderLockTtlMs,
     });
-    if (!isLeader) return [] as ScheduleTick[];
+    if (!isLeader) return emptyBatch();
 
     const dueIds = await this.storage.findDue({
       now: this.clock.now(),
@@ -330,7 +472,7 @@ export class DurableScheduler implements Scheduler {
       return true;
     });
 
-    if (targetIds.length === 0) return [] as ScheduleTick[];
+    if (targetIds.length === 0) return emptyBatch();
 
     // Bulk load — TWO storage round-trips for ALL due schedules instead
     // of 2N. Storage backends collapse this into one IN/pipeline call.
@@ -339,76 +481,167 @@ export class DurableScheduler implements Scheduler {
       this.storage.loadScheduleStates(targetIds),
     ]);
 
-    // Compute ticks + commit-batch entries in pure code (no I/O).
-    const ticks: ScheduleTick[] = [];
-    const updates: Array<{
-      id: string;
-      firedAt?: Date;
-      tickIncrement?: number;
-      nextRun: Date | null;
-    }> = [];
-
-    for (const id of targetIds) {
-      const config = configs.get(id);
-      if (!config) {
-        // Schedule was deleted between findDue and now — drop from due-tracking.
-        updates.push({ id, nextRun: null });
-        continue;
+    const plans = planDueTicks({
+      ids: targetIds,
+      configs,
+      states,
+      clock: this.clock,
+      random: this.random,
+    });
+    for (const plan of plans) {
+      if (plan.error !== undefined) {
+        this.report({ phase: "schedule", scheduleId: plan.id, error: plan.error });
       }
-      if (config.enabled === false) continue;
-
-      const state = states.get(id) ?? { lastFired: null, tickCount: 0 };
-      const due = computeDueTicks(config, state.lastFired, state.tickCount, this.clock);
-      ticks.push(...due);
-
-      updates.push({
-        id,
-        firedAt: due.length > 0 ? due[due.length - 1]!.firedAt : undefined,
-        tickIncrement: due.length > 0 ? due.length : undefined,
-        nextRun: computeNextRun(config, this.clock),
-      });
     }
 
-    // ONE round-trip writes back state for every fired/rescheduled id.
-    if (updates.length > 0) {
-      await this.storage.commitPoll(updates);
+    const ticks: ScheduleTick[] = [];
+    const tickEnds: number[] = [];
+    for (const plan of plans) {
+      ticks.push(...plan.ticks);
+      tickEnds.push(ticks.length);
     }
-    return ticks;
+    return { plans, ticks, tickEnds, acked: 0 };
   }
+}
+
+/** Ticks of one poll, in emission order, plus what to commit for them. */
+interface PollBatch {
+  readonly plans: readonly PlannedSchedule[];
+  readonly ticks: readonly ScheduleTick[];
+  /** For each plan, the index just past its last tick in `ticks`. */
+  readonly tickEnds: readonly number[];
+  /** How many ticks the consumer has acknowledged. */
+  acked: number;
+}
+
+type LoopState =
+  | { kind: "poll"; failures: number }
+  | { kind: "emit"; batch: PollBatch; index: number };
+
+/** One unfold step: a tick (or nothing) and the next state. The loop never ends by itself. */
+type LoopStep = [ScheduleTick | null, LoopState];
+
+function emptyBatch(): PollBatch {
+  return { plans: [], ticks: [], tickEnds: [], acked: 0 };
+}
+
+function defaultOnError(event: SchedulerErrorEvent): void {
+  const where = event.scheduleId ? ` (schedule "${event.scheduleId}")` : "";
+  console.error(`[durable-scheduler] ${event.phase} failed${where}:`, event.error);
+}
+
+// ---------------------------------------------------------------------------
+// Poll planning — shared with other poll loops built on SchedulerStorage.
+// ---------------------------------------------------------------------------
+
+/** What one poll decided for one due schedule. */
+export interface PlannedSchedule {
+  readonly id: string;
+  /** Ticks to deliver, oldest first. Empty when nothing is due. */
+  readonly ticks: readonly ScheduleTick[];
+  /** Fire-state update to commit once the ticks are delivered. */
+  readonly commit: ScheduleCommit;
+  /**
+   * Set when the stored config could not be evaluated (e.g. an invalid cron
+   * written straight to storage). The plan then removes the schedule from
+   * due-tracking, and `commitPlannedSchedules` also disables it.
+   */
+  readonly error?: unknown;
+}
+
+/**
+ * Decide what each due schedule fires, without any I/O. Deleted and disabled
+ * schedules are dropped from due-tracking. A schedule whose config throws
+ * during evaluation is isolated: it gets an `error` and `nextRun = null`
+ * instead of failing the whole poll. Enabled schedules get their due ticks
+ * and their next run (delayed by a random `[0, jitterMs)` when set).
+ */
+export function planDueTicks(params: {
+  ids: readonly string[];
+  configs: ReadonlyMap<string, DurableScheduleConfig>;
+  states: ReadonlyMap<string, { lastFired: Date | null; tickCount: number }>;
+  clock: WallClock;
+  /** Randomness for `jitterMs`, returning `[0, 1)`. Default: `Math.random`. */
+  random?: () => number;
+}): PlannedSchedule[] {
+  const random = params.random ?? Math.random;
+  const plans: PlannedSchedule[] = [];
+  for (const id of params.ids) {
+    const config = params.configs.get(id);
+    if (!config || config.enabled === false) {
+      // Deleted since findDue, or disabled with a stale nextRun: drop it from due-tracking.
+      plans.push({ id, ticks: [], commit: { id, nextRun: null } });
+      continue;
+    }
+    try {
+      const state = params.states.get(id) ?? { lastFired: null, tickCount: 0 };
+      const due = computeDueTicks(config, state.lastFired, state.tickCount, params.clock);
+      const nextRun = jitterNextRun({
+        config,
+        nextRun: computeNextRun(config, params.clock),
+        random,
+      });
+      const last = due[due.length - 1];
+      plans.push({
+        id,
+        ticks: due,
+        commit: {
+          id,
+          firedAt: last?.firedAt,
+          tickIncrement: due.length > 0 ? due.length : undefined,
+          nextRun,
+          ticks: due.length > 0 ? due : undefined,
+        },
+      });
+    } catch (error) {
+      plans.push({ id, ticks: [], commit: { id, nextRun: null }, error });
+    }
+  }
+  return plans;
+}
+
+/**
+ * Commit planned schedules in one `commitPoll`, then disable the ones whose
+ * config could not be evaluated so they show up as paused.
+ */
+export async function commitPlannedSchedules(params: {
+  storage: SchedulerStorage;
+  plans: readonly PlannedSchedule[];
+}): Promise<void> {
+  if (params.plans.length === 0) return;
+  await params.storage.commitPoll(params.plans.map((p) => p.commit));
+  for (const plan of params.plans) {
+    if (plan.error !== undefined) await params.storage.setEnabled(plan.id, false);
+  }
+}
+
+function jitterNextRun(params: {
+  config: DurableScheduleConfig;
+  nextRun: Date | null;
+  random: () => number;
+}): Date | null {
+  const { config, nextRun } = params;
+  if (!nextRun) return null;
+  const delay = jitterDelayMs({ config, random: params.random });
+  if (delay === 0) return nextRun;
+  const jittered = nextRun.getTime() + delay;
+  // Never push the last occurrence past endAt, where it would no longer fire.
+  const capped = config.endAt ? Math.min(jittered, config.endAt.getTime()) : jittered;
+  return new Date(Math.max(capped, nextRun.getTime()));
 }
 
 // ---------------------------------------------------------------------------
 // Pure helpers — no storage access, easy to unit-test.
 // ---------------------------------------------------------------------------
 
-export function validateScheduleConfig(config: ScheduleConfig | DurableScheduleConfig): void {
-  const triggers = [config.cron, config.rrule, config.intervalMs].filter(Boolean).length;
-  if (triggers === 0) {
-    throw new Error(`Schedule "${config.id}" must have one of: cron, rrule, or intervalMs`);
-  }
-  if (triggers > 1) {
-    throw new Error(`Schedule "${config.id}" must have exactly one of: cron, rrule, or intervalMs`);
-  }
-  if (config.cron) {
-    try {
-      new Cron(config.cron, { timezone: config.timezone ?? "UTC" });
-    } catch (e) {
-      throw new Error(`Invalid cron expression "${config.cron}" for schedule "${config.id}": ${e}`);
-    }
-  }
-  if (config.rrule) {
-    try {
-      RRule.fromString(config.rrule);
-    } catch (e) {
-      throw new Error(`Invalid RRULE "${config.rrule}" for schedule "${config.id}": ${e}`);
-    }
-  }
-}
-
 /**
  * Compute the ticks that should fire NOW for a given schedule and its
  * lastFired state. No I/O — "now" and each tick's `firedAt` come from
  * `clock` (default: `SystemWallClock`). Caller persists the results.
+ *
+ * With no `lastFired` (never fired), one tick fires at "now". Otherwise the
+ * missed occurrences after `lastFired` up to "now" are due, of which the
+ * newest `max(1, maxCatchUp)` fire, oldest first.
  */
 export function computeDueTicks(
   config: DurableScheduleConfig,
@@ -420,116 +653,86 @@ export function computeDueTicks(
   if (config.startAt && now < config.startAt) return [];
   if (config.endAt && now > config.endAt) return [];
 
-  const params = { config, now, lastFired, startTickNumber: tickCount, clock };
-  if (config.cron) return computeCronDue(params);
-  if (config.rrule) return computeRruleDue(params);
-  if (config.intervalMs !== undefined) return computeIntervalDue(params);
-  return [];
+  if (!lastFired) {
+    // First-fire bootstrap: a never-fired schedule fires once immediately.
+    return [makeTick({ config, scheduledAt: now, tickNumber: tickCount, clock })];
+  }
+
+  const limit = Math.max(1, config.maxCatchUp ?? 0);
+  const params = { config, now, lastFired, limit };
+  const occurrences = config.cron
+    ? missedCronOccurrences(params)
+    : config.rrule
+      ? missedRruleOccurrences(params)
+      : config.intervalMs !== undefined
+        ? missedIntervalOccurrences(params)
+        : [];
+  return occurrences.map((scheduledAt, i) =>
+    makeTick({ config, scheduledAt, tickNumber: tickCount + i, clock }),
+  );
 }
 
-interface DueParams {
+interface MissedParams {
   config: DurableScheduleConfig;
   now: Date;
-  lastFired: Date | null;
-  startTickNumber: number;
-  clock: WallClock;
+  lastFired: Date;
+  /** How many of the newest missed occurrences to return. */
+  limit: number;
 }
 
-function computeCronDue(params: DueParams): ScheduleTick[] {
-  const { config, now, lastFired, startTickNumber, clock } = params;
+/** Newest `limit` cron occurrences in `(lastFired, now]`, oldest first. */
+function missedCronOccurrences(params: MissedParams): Date[] {
+  const { config, now, lastFired, limit } = params;
   const cron = new Cron(config.cron!, { timezone: config.timezone ?? "UTC" });
-  const ticks: ScheduleTick[] = [];
-  const maxCatchUp = config.maxCatchUp ?? 0;
-  const jitterMs = config.jitterMs ?? 0;
-
-  // First-fire bootstrap: with no lastFired, the catch-up loop below would
-  // never produce a tick (cron.nextRun(now-1) returns the next FUTURE
-  // occurrence, which fails the `next > now` guard). Fire one immediate tick.
-  if (!lastFired) {
-    return [makeTick({ config, scheduledAt: now, jitterMs, tickNumber: startTickNumber, clock })];
-  }
-
-  // Fast path: no catch-up wanted — just fire the single most-recent missed
-  // tick (if any) without iterating through every skipped occurrence.
-  if (maxCatchUp === 0) {
-    const next = cron.nextRun(new Date(lastFired.getTime() + 1));
-    if (!next || next > now) return [];
-    return [makeTick({ config, scheduledAt: next, jitterMs, tickNumber: startTickNumber, clock })];
-  }
-
-  let cursor = new Date(lastFired.getTime() + 1);
-  let tickNumber = startTickNumber;
-  let catchUpCount = 0;
-
-  while (true) {
-    const next = cron.nextRun(cursor);
-    if (!next || next > now) break;
-    if (catchUpCount >= maxCatchUp) {
-      cursor = new Date(next.getTime() + 1);
-      continue;
-    }
-    ticks.push(makeTick({ config, scheduledAt: next, jitterMs, tickNumber, clock }));
-    cursor = new Date(next.getTime() + 1);
-    tickNumber++;
-    catchUpCount++;
-  }
-  return ticks;
+  // `previousRuns` looks strictly before its reference at second precision,
+  // so look from a second past "now" and drop anything after "now".
+  return cron
+    .previousRuns(limit + 2, new Date(now.getTime() + 1000))
+    .filter((d) => d.getTime() > lastFired.getTime() && d.getTime() <= now.getTime())
+    .slice(0, limit)
+    .reverse();
 }
 
-function computeRruleDue(params: DueParams): ScheduleTick[] {
-  const { config, now, lastFired, startTickNumber, clock } = params;
+/** Newest `limit` RRULE occurrences in `(lastFired, now]`, oldest first. */
+function missedRruleOccurrences(params: MissedParams): Date[] {
+  const { config, now, lastFired, limit } = params;
   const rule = RRule.fromString(config.rrule!);
-  const ticks: ScheduleTick[] = [];
-  const maxCatchUp = config.maxCatchUp ?? 0;
-  const jitterMs = config.jitterMs ?? 0;
-
-  if (!lastFired) {
-    return [makeTick({ config, scheduledAt: now, jitterMs, tickNumber: startTickNumber, clock })];
+  if (limit === 1) {
+    const latest = rule.before(now, true);
+    return latest && latest.getTime() > lastFired.getTime() ? [latest] : [];
   }
-
-  const after = new Date(lastFired.getTime() + 1);
-  // Fast path: no catch-up — only need the first missed occurrence.
-  if (maxCatchUp === 0) {
-    const first = rule.after(after, true);
-    if (!first || first > now) return [];
-    return [makeTick({ config, scheduledAt: first, jitterMs, tickNumber: startTickNumber, clock })];
-  }
-  const occurrences = rule.between(after, now, true);
-  const limited = occurrences.length > maxCatchUp ? occurrences.slice(-maxCatchUp) : occurrences;
-
-  let tickNumber = startTickNumber;
-  for (const scheduledAt of limited) {
-    ticks.push(makeTick({ config, scheduledAt, jitterMs, tickNumber, clock }));
-    tickNumber++;
-  }
-  return ticks;
+  return rule
+    .between(lastFired, now, true)
+    .filter((d) => d.getTime() > lastFired.getTime())
+    .slice(-limit);
 }
 
-function computeIntervalDue(params: DueParams): ScheduleTick[] {
-  const { config, now, lastFired, startTickNumber, clock } = params;
+/** Newest `limit` interval occurrences in `(lastFired, now]`, oldest first. */
+function missedIntervalOccurrences(params: MissedParams): Date[] {
+  const { config, now, lastFired, limit } = params;
   const intervalMs = config.intervalMs!;
-  const nextFireTime = lastFired ? new Date(lastFired.getTime() + intervalMs) : now;
-  if (nextFireTime > now) return [];
-  const jitterMs = config.jitterMs ?? 0;
-  return [
-    makeTick({ config, scheduledAt: nextFireTime, jitterMs, tickNumber: startTickNumber, clock }),
-  ];
+  const missed = Math.floor((now.getTime() - lastFired.getTime()) / intervalMs);
+  if (missed < 1) return [];
+  const count = Math.min(limit, missed);
+  const out: Date[] = [];
+  for (let k = missed - count + 1; k <= missed; k++) {
+    out.push(new Date(lastFired.getTime() + k * intervalMs));
+  }
+  return out;
 }
 
 function makeTick(params: {
   config: DurableScheduleConfig;
   scheduledAt: Date;
-  jitterMs: number;
   tickNumber: number;
   clock: WallClock;
 }): ScheduleTick {
-  const { config, scheduledAt, jitterMs, tickNumber, clock } = params;
-  const jitter = jitterMs > 0 ? Math.random() * jitterMs : 0;
+  const { config, scheduledAt, tickNumber, clock } = params;
   return {
     scheduleId: config.id,
     scheduleName: config.name,
     scheduledAt,
-    firedAt: new Date(clock.currentTimeMs() + jitter),
+    firedAt: clock.now(),
     tickNumber,
     metadata: config.metadata,
   };

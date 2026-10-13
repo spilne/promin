@@ -1,4 +1,9 @@
-import type { DurableScheduleConfig, SchedulerStorage, ScheduleTick } from "@promin/workflow";
+import type {
+  DurableScheduleConfig,
+  ScheduleCommit,
+  SchedulerStorage,
+  ScheduleTick,
+} from "@promin/workflow";
 import { flattenLeafPaths } from "@promin/workflow";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
@@ -50,7 +55,6 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
         end_at          INTEGER,
         jitter_ms       INTEGER NOT NULL DEFAULT 0,
         metadata        TEXT,
-        overlap_policy  TEXT    NOT NULL DEFAULT 'allow',
         max_catch_up    INTEGER NOT NULL DEFAULT 0,
         next_run        INTEGER,
         last_fired_at   INTEGER,
@@ -225,15 +229,7 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
       .run(nextRun == null ? null : nextRun.getTime(), Date.now(), id);
   }
 
-  async commitPoll(
-    updates: Array<{
-      id: string;
-      firedAt?: Date;
-      tickIncrement?: number;
-      nextRun: Date | null;
-      ticks?: readonly ScheduleTick[];
-    }>,
-  ): Promise<void> {
+  async commitPoll(updates: ScheduleCommit[]): Promise<void> {
     if (updates.length === 0) return;
     const now = Date.now();
     // Per-row UPDATEs + tick log inserts in a single transaction. SQLite's
@@ -245,7 +241,7 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
       UPDATE ${this._t}
          SET last_fired_at = COALESCE(?, last_fired_at),
              tick_count    = tick_count + ?,
-             next_run      = ?,
+             next_run      = CASE WHEN enabled = 1 THEN ? ELSE NULL END,
              updated_at    = ?
        WHERE id = ?
     `);
@@ -320,9 +316,9 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
         `
       INSERT INTO ${this._t}
         (id, namespace, name, cron, rrule, interval_ms, timezone, enabled,
-         start_at, end_at, jitter_ms, metadata, overlap_policy, max_catch_up,
+         start_at, end_at, jitter_ms, metadata, max_catch_up,
          next_run, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (id) DO UPDATE SET
         namespace      = excluded.namespace,
         name           = excluded.name,
@@ -335,8 +331,10 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
         end_at         = excluded.end_at,
         jitter_ms      = excluded.jitter_ms,
         metadata       = excluded.metadata,
-        overlap_policy = excluded.overlap_policy,
         max_catch_up   = excluded.max_catch_up,
+        next_run       = CASE WHEN excluded.enabled = 1
+                              THEN COALESCE(${this._t}.next_run, excluded.next_run)
+                              ELSE NULL END,
         updated_at     = excluded.updated_at
       `,
       )
@@ -353,11 +351,11 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
         config.endAt?.getTime() ?? null,
         config.jitterMs ?? 0,
         config.metadata ? JSON.stringify(config.metadata) : null,
-        config.overlapPolicy ?? "allow",
         config.maxCatchUp ?? 0,
-        // Seed next_run on enabled INSERT, honoring `startAt` so a deferred
-        // schedule isn't reported as due before its start time. ON CONFLICT
-        // below leaves the existing next_run alone.
+        // Due-tracking follows the enabled flag: disabled → NULL; enabled →
+        // keep an existing next_run (ON CONFLICT above) or seed it at now,
+        // honoring `startAt` so a deferred schedule isn't reported as due
+        // before its start time.
         config.enabled === false
           ? null
           : config.startAt && config.startAt.getTime() > now
@@ -377,9 +375,19 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
   }
 
   async setEnabled(id: string, enabled: boolean): Promise<void> {
+    // Disabling drops the schedule from due-tracking; enabling one with no
+    // next_run seeds it at now (or a later start_at), like an insert.
+    const now = Date.now();
     this.db
-      .query(`UPDATE ${this._t} SET enabled = ?, updated_at = ? WHERE id = ?`)
-      .run(enabled ? 1 : 0, Date.now(), id);
+      .query(
+        `UPDATE ${this._t}
+            SET enabled = ?,
+                next_run = CASE WHEN ? = 1 THEN COALESCE(next_run, MAX(?, COALESCE(start_at, 0)))
+                                ELSE NULL END,
+                updated_at = ?
+          WHERE id = ?`,
+      )
+      .run(enabled ? 1 : 0, enabled ? 1 : 0, now, now, id);
   }
 
   async listSchedules(params?: {
@@ -516,7 +524,6 @@ interface ScheduleRow {
   end_at: number | null;
   jitter_ms: number;
   metadata: string | null;
-  overlap_policy: string;
   max_catch_up: number;
   next_run: number | null;
   last_fired_at: number | null;
@@ -539,7 +546,6 @@ function rowToConfig(row: ScheduleRow): DurableScheduleConfig {
     endAt: row.end_at == null ? undefined : new Date(row.end_at),
     jitterMs: row.jitter_ms,
     metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : undefined,
-    overlapPolicy: row.overlap_policy as DurableScheduleConfig["overlapPolicy"],
     maxCatchUp: row.max_catch_up,
   };
 }

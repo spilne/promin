@@ -124,16 +124,16 @@ const COMMANDS: ReplCommand[] = [
     cmd: "/schedules",
     desc: "list active schedules",
     handle: async () => {
-      await term.showPane("schedules", buildSchedules(scheduler));
+      await term.showPane("schedules", await buildSchedules(scheduler));
     },
   },
   {
     cmd: "/cancel-schedule",
     args: "<id>",
     desc: "immediately cancel a schedule",
-    handle: (input) => {
+    handle: async (input) => {
       const id = input.slice("/cancel-schedule ".length).trim();
-      scheduler.unregister(id);
+      await scheduler.unregister(id);
       activeTicks.delete(id);
       console.log(`\n\x1b[2mCancelled schedule "${id}"\x1b[0m\n`);
     },
@@ -142,9 +142,9 @@ const COMMANDS: ReplCommand[] = [
     cmd: "/pause-schedule",
     args: "<id>",
     desc: "pause a schedule",
-    handle: (input) => {
+    handle: async (input) => {
       const id = input.slice("/pause-schedule ".length).trim();
-      scheduler.pause(id);
+      await scheduler.pause(id);
       console.log(`\n\x1b[2mPaused schedule "${id}"\x1b[0m\n`);
     },
   },

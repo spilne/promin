@@ -338,11 +338,12 @@ export async function createToolRegistry(deps: ToolDeps): Promise<ToolSetup> {
     ...createSchedulerTools({
       scheduler,
       onTick: (task, tick) => {
-        if (!scheduler.list().find((s) => s.id === tick.scheduleId)) return;
         if (activeTicks.has(tick.scheduleId)) return;
         activeTicks.add(tick.scheduleId);
         const run = async () => {
           try {
+            const schedules = await scheduler.list();
+            if (!schedules.some((s) => s.id === tick.scheduleId)) return;
             const answer = await sessionRef.current!.send(task);
             console.log(`\x1b[2m[scheduler]\x1b[0m Agent: ${answer}`);
           } finally {

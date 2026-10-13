@@ -9,15 +9,36 @@
 
 import type { DurableScheduleConfig, ScheduleTick } from "./types.ts";
 
+/** One schedule's entry in a `commitPoll` batch. */
+export interface ScheduleCommit {
+  readonly id: string;
+  /** Last fire time to record as `lastFired`. Set together with `tickIncrement`. */
+  readonly firedAt?: Date;
+  /** How much to add to `tickCount`. */
+  readonly tickIncrement?: number;
+  /** New `nextRun`; `null` removes the schedule from due-tracking. */
+  readonly nextRun: Date | null;
+  /**
+   * Individual ticks fired in this poll cycle. Backends that maintain
+   * a tick log persist these IN THE SAME TRANSACTION as the state
+   * advance — so `tickCount` and the count of logged rows never
+   * diverge. Backends without a tick log silently ignore this field.
+   */
+  readonly ticks?: readonly ScheduleTick[];
+}
+
 export interface SchedulerStorage {
   // -------------------------------------------------------------------------
   // Hot path — called every poll cycle. Implementations must be fast.
   // -------------------------------------------------------------------------
 
   /**
-   * Return up to `limit` schedule IDs whose next run is at or before `now`.
-   * Filtered by namespace if provided. Implementations should use an index on
-   * `(namespace, nextRun)` (Postgres) or a per-namespace sorted set (Redis).
+   * Return up to `limit` schedule IDs whose next run is at or before `now`,
+   * oldest `nextRun` first. Filtered by namespace if provided. Never returns
+   * disabled schedules, even if a stale `nextRun` is still recorded for one,
+   * so paused schedules can't fill the `limit` and starve active ones.
+   * Implementations should use an index on `(namespace, nextRun)` (Postgres)
+   * or a per-namespace sorted set (Redis).
    */
   findDue(params: { now: Date; limit: number; namespace?: string }): Promise<string[]>;
 
@@ -64,34 +85,32 @@ export interface SchedulerStorage {
    * Implementations should collapse this to one network round-trip per poll
    * (Postgres: `UPDATE … FROM (VALUES …)`; Redis: MULTI/pipeline). Sequential
    * fallback (loop over single-record methods) is acceptable for in-memory.
+   * A schedule disabled since it was loaded stays out of due-tracking.
    */
-  commitPoll(
-    updates: Array<{
-      id: string;
-      firedAt?: Date;
-      tickIncrement?: number;
-      nextRun: Date | null;
-      /**
-       * Individual ticks fired in this poll cycle. Backends that maintain
-       * a tick log persist these IN THE SAME TRANSACTION as the state
-       * advance — so `tickCount` and the count of logged rows never
-       * diverge. Backends without a tick log silently ignore this field.
-       */
-      ticks?: readonly ScheduleTick[];
-    }>,
-  ): Promise<void>;
+  commitPoll(updates: ScheduleCommit[]): Promise<void>;
 
   // -------------------------------------------------------------------------
-  // Admin / CRUD path — used by registerAsync, listAsync, pause, etc.
+  // Admin / CRUD path — used by register, list, pause, etc.
   // -------------------------------------------------------------------------
 
-  /** Insert or replace a schedule. */
+  /**
+   * Insert or replace a schedule. Fire state (`lastFired`, `tickCount`)
+   * survives a replace. Due-tracking follows the enabled flag: a disabled
+   * schedule gets `nextRun = null`; an enabled one keeps its existing
+   * `nextRun`, or is seeded at now (or a later `startAt`) when it has none.
+   */
   upsertSchedule(config: DurableScheduleConfig): Promise<void>;
 
   /** Delete a schedule and any due-tracking state for it. */
   deleteSchedule(id: string): Promise<void>;
 
-  /** Toggle a schedule's enabled flag. Disabled schedules don't fire. */
+  /**
+   * Toggle a schedule's enabled flag. Disabled schedules don't fire:
+   * disabling also removes the schedule from due-tracking (`nextRun = null`),
+   * and enabling a schedule that has no `nextRun` seeds it at now (or
+   * `startAt` when that is later), the same as inserting an enabled schedule.
+   * Unknown ids are a no-op.
+   */
   setEnabled(id: string, enabled: boolean): Promise<void>;
 
   /** Paginated list of schedules, optionally filtered by enabled flag and namespace. */
@@ -156,6 +175,7 @@ export interface SchedulerStorage {
    *
    * Pass `namespaces` to restrict to a specific subset (filter happens
    * server-side / in-storage so the limit is honored after the filter).
+   * Like `findDue`, never returns disabled schedules.
    */
   findDueAcross(params: {
     now: Date;

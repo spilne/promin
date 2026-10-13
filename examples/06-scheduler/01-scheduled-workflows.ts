@@ -8,7 +8,7 @@ import { createScheduler } from "@promin/workflow";
 const scheduler = createScheduler();
 
 // Every weekday at 9am
-scheduler.register({
+await scheduler.register({
   id: "morning-report",
   cron: "0 9 * * MON-FRI",
   timezone: "America/New_York",
@@ -16,17 +16,17 @@ scheduler.register({
 });
 
 // Every 30 seconds
-scheduler.register({ id: "health-check", intervalMs: 30_000 });
+await scheduler.register({ id: "health-check", intervalMs: 30_000 });
 
 // Biweekly on Tuesday at 10am (rrule)
-scheduler.register({
+await scheduler.register({
   id: "sprint-planning",
   rrule: "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU;BYHOUR=10",
 });
 
 // Pause / resume at runtime
-scheduler.pause("health-check");
-scheduler.resume("health-check");
+await scheduler.pause("health-check");
+await scheduler.resume("health-check");
 
 // Stream ticks from a single schedule — stream() returns a perfect Stream,
 // consumed here with for-await. Breaking out of the loop stops the stream

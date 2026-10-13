@@ -2,9 +2,8 @@
 // Portable Scheduler conformance test suite
 //
 // Run the full Scheduler interface conformance suite against any
-// implementation. Sync impls (InMemoryScheduler) just plug in the scheduler;
-// async impls (DurableScheduler/Postgres, RedisDurableScheduler) supply
-// awaitable overrides so the suite can wait for writes to land.
+// implementation. Every management method is async, so the suite awaits
+// each write before reading state back.
 //
 // Usage:
 //   import { schedulerTestSuite } from "@promin/workflow/testing";
@@ -15,18 +14,9 @@ import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import type { Scheduler } from "./scheduler.ts";
 import type { ScheduleConfig } from "./types.ts";
 
-/**
- * Test-time wiring for a Scheduler implementation. The `scheduler` field is
- * required; the optional async overrides let durable impls await persistence
- * before the suite reads back state.
- */
+/** Test-time wiring for a Scheduler implementation. */
 export interface SchedulerTestHarness {
   scheduler: Scheduler;
-  register?: (config: ScheduleConfig) => Promise<void>;
-  unregister?: (id: string, options?: { reason?: string }) => Promise<void>;
-  pause?: (id: string) => Promise<void>;
-  resume?: (id: string) => Promise<void>;
-  list?: () => Promise<ScheduleConfig[]>;
   cleanup?: () => Promise<void>;
 }
 
@@ -43,26 +33,12 @@ export function schedulerTestSuite(
   describe(`Scheduler conformance: ${name}`, () => {
     let harness: SchedulerTestHarness;
 
-    async function reg(config: ScheduleConfig): Promise<void> {
-      if (harness.register) await harness.register(config);
-      else harness.scheduler.register(config);
-    }
-    async function unreg(id: string, options?: { reason?: string }): Promise<void> {
-      if (harness.unregister) await harness.unregister(id, options);
-      else harness.scheduler.unregister(id, options);
-    }
-    async function pause(id: string): Promise<void> {
-      if (harness.pause) await harness.pause(id);
-      else harness.scheduler.pause(id);
-    }
-    async function resume(id: string): Promise<void> {
-      if (harness.resume) await harness.resume(id);
-      else harness.scheduler.resume(id);
-    }
-    async function list(): Promise<ScheduleConfig[]> {
-      if (harness.list) return await harness.list();
-      return harness.scheduler.list();
-    }
+    const reg = (config: ScheduleConfig) => harness.scheduler.register(config);
+    const unreg = (id: string, options?: { reason?: string }) =>
+      harness.scheduler.unregister(id, options);
+    const pause = (id: string) => harness.scheduler.pause(id);
+    const resume = (id: string) => harness.scheduler.resume(id);
+    const list = () => harness.scheduler.list();
 
     beforeEach(async () => {
       harness = await factory();
@@ -115,6 +91,17 @@ export function schedulerTestSuite(
         await expect(reg({ id: "bad", rrule: "not an rrule" })).rejects.toThrow(/[Ii]nvalid RRULE/);
       });
 
+      it("rejects a non-positive interval", async () => {
+        await expect(reg({ id: "bad", intervalMs: -5 })).rejects.toThrow(/intervalMs/);
+      });
+
+      it("an invalid config rejects the returned promise and registers nothing", async () => {
+        const result = harness.scheduler.register({ id: "bad-async", cron: "not a cron" });
+        expect(result).toBeInstanceOf(Promise);
+        await expect(result).rejects.toThrow(/[Ii]nvalid cron/);
+        expect((await list()).find((s) => s.id === "bad-async")).toBeUndefined();
+      });
+
       it("preserves timezone on registered schedule", async () => {
         await reg({ id: "tz-1", cron: "0 9 * * MON", timezone: "America/New_York" });
         const all = await list();
@@ -164,6 +151,15 @@ export function schedulerTestSuite(
         await reg({ id: "off-1", intervalMs: 1000, enabled: false });
         const found = (await list()).find((s) => s.id === "off-1")!;
         expect(found.enabled).toBe(false);
+      });
+
+      it("a paused schedule emits nothing while an active one keeps firing", async () => {
+        await reg({ id: "pz-off", intervalMs: 50 });
+        await pause("pz-off");
+        await reg({ id: "pz-on", intervalMs: 50 });
+
+        const ticks = await harness.scheduler.stream().take(3).toArray().run();
+        expect(ticks.map((t) => t.scheduleId)).toEqual(["pz-on", "pz-on", "pz-on"]);
       });
     });
 

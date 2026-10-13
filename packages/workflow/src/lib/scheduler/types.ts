@@ -27,10 +27,12 @@ export interface ScheduleConfig {
   /** Stop firing after this time. Schedule auto-disables when endAt is reached. */
   readonly endAt?: Date;
   /**
-   * Random jitter in ms added to each fire time. Spreads load when many
-   * schedules fire on the same boundary (e.g. midnight crons). Each tick
-   * fires at a uniformly-random offset in `[0, jitterMs)` past its nominal
-   * time. Default: 0 (no jitter). Same approach as Temporal/Quartz.
+   * Random delay in ms added before each tick is emitted. Spreads load when
+   * many schedules fire on the same boundary (e.g. midnight crons): each
+   * tick is emitted a uniformly-random `[0, jitterMs)` after its nominal
+   * time. `scheduledAt` stays the nominal time; `firedAt` is when the tick
+   * was actually emitted. The first tick after registration is not delayed.
+   * Default: 0 (no jitter).
    */
   readonly jitterMs?: number;
   /** Arbitrary metadata passed through to ScheduleTick. */
@@ -43,9 +45,14 @@ export interface ScheduleConfig {
  * changing the schedule definition.
  */
 export interface DurableScheduleConfig extends ScheduleConfig {
-  /** What to do if the previous run hasn't finished. Default: "allow". */
-  readonly overlapPolicy?: "skip" | "queue" | "cancel_previous" | "allow";
-  /** Max catch-up runs when scheduler was down. Default: 0 (no catch-up). */
+  /**
+   * How many missed occurrences to fire when a poll finds more than one due
+   * (the scheduler was down, or the schedule fires faster than the poll
+   * interval). The newest `max(1, maxCatchUp)` missed occurrences fire, in
+   * chronological order; older ones are skipped. Applies the same way to
+   * cron, RRULE and interval schedules. Default: 0 (only the most recent
+   * missed occurrence fires).
+   */
   readonly maxCatchUp?: number;
 }
 
@@ -57,9 +64,14 @@ export interface ScheduleTick {
   readonly scheduleName?: string;
   /** Nominal fire time — when this should have fired (cron-computed). */
   readonly scheduledAt: Date;
-  /** Actual fire time — when it actually fired (may differ due to jitter/load). */
+  /** Actual fire time — when it was emitted (later than `scheduledAt` under jitter/load). */
   readonly firedAt: Date;
-  /** Monotonic counter per schedule (0, 1, 2, ...). Useful for idempotent workflowIds. */
+  /**
+   * Monotonic counter per schedule (0, 1, 2, ...). Durable schedulers deliver
+   * ticks at least once: a tick that was emitted but not acknowledged is
+   * emitted again with the same `tickNumber`, so derive run ids from it
+   * (`scheduleTickRunId`) to make redelivery a no-op.
+   */
   readonly tickNumber: number;
   /** Metadata from the ScheduleConfig. */
   readonly metadata?: Record<string, unknown>;

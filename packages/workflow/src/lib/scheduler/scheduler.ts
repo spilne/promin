@@ -12,25 +12,33 @@ import type { ScheduleConfig, ScheduleTick } from "./types.ts";
  * Implements Streamable<ScheduleTick>: `stream()` and `subscribe()` return
  * perfect `Stream`s, built fresh on every call.
  *
+ * Management methods are async: they resolve once the change is applied
+ * (persisted, for durable implementations) and reject on invalid configs or
+ * storage errors, so callers can await or handle every failure.
+ *
  * Two implementations:
- * - `InMemoryScheduler` (core) — non-blocking, in-process, no persistence
- * - `DurableScheduler` (postgres) — persistent, catch-up, overlap policies, leader election
+ * - `InMemoryScheduler` — non-blocking, in-process, no persistence
+ * - `DurableScheduler` — persistent (pluggable storage), catch-up, leader
+ *   election, at-least-once tick delivery
  */
 export interface Scheduler extends Streamable<ScheduleTick> {
-  /** Register a new schedule. */
-  register(config: ScheduleConfig): void;
+  /**
+   * Register (or replace) a schedule. Rejects if the config is invalid: no
+   * trigger or more than one, an unparseable cron/RRULE, and so on.
+   */
+  register(config: ScheduleConfig): Promise<void>;
 
   /** Remove a schedule. Optional reason for audit/logging. */
-  unregister(scheduleId: string, options?: { reason?: string }): void;
+  unregister(scheduleId: string, options?: { reason?: string }): Promise<void>;
 
   /** Pause a schedule (stops firing, keeps config). */
-  pause(scheduleId: string): void;
+  pause(scheduleId: string): Promise<void>;
 
   /** Resume a paused schedule. */
-  resume(scheduleId: string): void;
+  resume(scheduleId: string): Promise<void>;
 
-  /** List all registered schedules. */
-  list(): ScheduleConfig[];
+  /** List registered schedules, with `enabled` reflecting paused state. */
+  list(): Promise<ScheduleConfig[]>;
 
   /**
    * Stream ticks from a specific schedule (or all if no id given).

@@ -989,7 +989,7 @@ async function seedSchedules() {
 
   // Kickstart schedules that have never fired so the embedded
   // SchedulerLoop picks them up on its first poll. `upsertSchedule` alone
-  // doesn't write `nextRun` — DurableScheduler.registerAsync would, but
+  // doesn't write `nextRun` — DurableScheduler.register would, but
   // the demo manages schedules through the storage directly.
   //
   // Only kickstart when `lastFired` is null. With persistent storage that

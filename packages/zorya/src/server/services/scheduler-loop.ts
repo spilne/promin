@@ -10,9 +10,15 @@
 //
 // The leader-lock + tick computation use the same primitives the standalone
 // DurableScheduler does — `tryAcquireLeader`, `findDue`, `loadSchedules`,
-// `loadScheduleStates`, `computeDueTicks`, `computeNextRun`, `commitPoll`.
+// `loadScheduleStates`, `planDueTicks`, `commitPlannedSchedules`.
 // Wire-compatible with every SchedulerStorage backend (Postgres, Redis,
 // in-memory).
+//
+// Delivery is at least once, like DurableScheduler: each poll dispatches
+// its ticks first and commits the fire state after, so a crash or a failed
+// commit re-fires the same ticks (same tickNumber) on the next poll rather
+// than losing them. A stored schedule that can't be evaluated is reported,
+// disabled and skipped without failing the poll for the others.
 //
 // Dispatch routes through `RunTrigger`, which is whichever trigger the
 // server is configured with — `CoordinatedTriggerService` under
@@ -23,12 +29,18 @@
 // is a no-op.
 // ---------------------------------------------------------------------------
 
-import type { SchedulerStorage, ScheduleTick, DurableScheduleConfig } from "@promin/workflow";
+import type {
+  SchedulerStorage,
+  ScheduleTick,
+  DurableScheduleConfig,
+  SchedulerErrorEvent,
+} from "@promin/workflow";
 import type { WallClock } from "@promin/workflow";
 import {
   SystemWallClock,
-  computeDueTicks,
+  commitPlannedSchedules,
   computeNextRun,
+  planDueTicks,
   scheduleTickRunId,
 } from "@promin/workflow";
 import type { RunTrigger } from "../routes/runs.ts";
@@ -106,6 +118,12 @@ export interface SchedulerLoopConfig {
    * between polls. Default: `SystemWallClock`. Tests pass a `FakeWallClock`.
    */
   clock?: WallClock;
+  /**
+   * Called when a poll or commit fails, or a stored schedule can't be
+   * evaluated (it is then disabled). The loop keeps running either way.
+   * Default: logs with `console.error`.
+   */
+  onError?: (event: SchedulerErrorEvent) => void;
 }
 
 export class SchedulerLoop {
@@ -121,6 +139,7 @@ export class SchedulerLoop {
   private readonly dispatchConcurrency: number;
   private readonly partition?: { index: number; count: number };
   private readonly clock: WallClock;
+  private readonly onError: (event: SchedulerErrorEvent) => void;
   private running = false;
   private loopPromise?: Promise<void>;
   /** Cuts the current between-poll wait short; set only while waiting. */
@@ -141,6 +160,7 @@ export class SchedulerLoop {
     this.batchSize = config.batchSize ?? 100;
     this.dispatchConcurrency = config.dispatchConcurrency ?? 10;
     this.clock = config.clock ?? SystemWallClock;
+    this.onError = config.onError ?? defaultOnError;
     if (config.partition) {
       const { index, count } = config.partition;
       if (count < 1 || index < 0 || index >= count) {
@@ -315,40 +335,17 @@ export class SchedulerLoop {
       this.storage.loadScheduleStates(targetIds),
     ]);
 
-    const ticks: ScheduleTick[] = [];
-    const updates: Array<{
-      id: string;
-      firedAt?: Date;
-      tickIncrement?: number;
-      nextRun: Date | null;
-      ticks?: readonly ScheduleTick[];
-    }> = [];
-
-    for (const id of targetIds) {
-      const config = configs.get(id);
-      if (!config) {
-        // Schedule deleted between findDue and now — clear it from due.
-        updates.push({ id, nextRun: null });
-        continue;
+    // Pure planning: due ticks + the fire-state update for each schedule.
+    // A schedule whose config throws is isolated (error + nextRun null).
+    // `commitPoll` gets the individual ticks so backends with a tick log
+    // persist them in the SAME transaction as the state advance.
+    const plans = planDueTicks({ ids: targetIds, configs, states, clock: this.clock });
+    for (const plan of plans) {
+      if (plan.error !== undefined) {
+        this.report({ phase: "schedule", scheduleId: plan.id, error: plan.error });
       }
-      if (config.enabled === false) continue;
-      const state = states.get(id) ?? { lastFired: null, tickCount: 0 };
-      const due = computeDueTicks(config, state.lastFired, state.tickCount, this.clock);
-      ticks.push(...due);
-      updates.push({
-        id,
-        firedAt: due.length > 0 ? due[due.length - 1]!.firedAt : undefined,
-        tickIncrement: due.length > 0 ? due.length : undefined,
-        nextRun: computeNextRun(config, this.clock),
-        // Hand the individual fired ticks to commitPoll so backends with a
-        // tick log persist them in the SAME transaction as the state
-        // advance — `tickCount` and the count of logged rows can never
-        // diverge. Backends without a log silently ignore this field.
-        ticks: due.length > 0 ? due : undefined,
-      });
     }
-
-    if (updates.length > 0) await this.storage.commitPoll(updates);
+    const ticks = plans.flatMap((p) => p.ticks);
 
     // Bounded-parallel dispatch — same shape as
     // `scheduler.stream().parMapAsync(dispatchConcurrency)`. A pool of N
@@ -375,7 +372,23 @@ export class SchedulerLoop {
       }),
     );
 
+    // Commit after dispatch: if this fails, the next poll re-fires the same
+    // ticks and the deterministic run ids make the repeat a no-op.
+    try {
+      await commitPlannedSchedules({ storage: this.storage, plans });
+    } catch (error) {
+      this.report({ phase: "commit", error });
+    }
+
     return ticks;
+  }
+
+  private report(event: SchedulerErrorEvent): void {
+    try {
+      this.onError(event);
+    } catch {
+      // A throwing error hook must not take the loop down with it.
+    }
   }
 
   private async dispatch(tick: ScheduleTick, schedule: DurableScheduleConfig): Promise<void> {
@@ -436,9 +449,10 @@ export class SchedulerLoop {
     while (this.running) {
       try {
         await this.tickOnce();
-      } catch {
+      } catch (error) {
         // Loop-level errors (RPC blip, transient lock failure) should not
-        // kill the loop; log surface lives with the storage / trigger.
+        // kill the loop; report them and poll again next interval.
+        this.report({ phase: "poll", error });
       }
       if (!this.running) break;
       await this.waitForNextPoll();
@@ -459,6 +473,11 @@ export class SchedulerLoop {
       };
     });
   }
+}
+
+function defaultOnError(event: SchedulerErrorEvent): void {
+  const where = event.scheduleId ? ` (schedule "${event.scheduleId}")` : "";
+  console.error(`[scheduler-loop] ${event.phase} failed${where}:`, event.error);
 }
 
 // 32-bit non-cryptographic string hash. Cheap + deterministic — same

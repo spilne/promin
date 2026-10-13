@@ -169,8 +169,8 @@ export async function buildMemories(store: MemoryIndex, query?: string): Promise
   );
 }
 
-export function buildSchedules(scheduler: InMemoryScheduler): string[] {
-  const schedules = scheduler.list();
+export async function buildSchedules(scheduler: InMemoryScheduler): Promise<string[]> {
+  const schedules = await scheduler.list();
   if (!schedules.length) return ["(no active schedules)"];
   const lines = schedules.map((s) => {
     const trigger = s.cron ?? (s.intervalMs ? `every ${s.intervalMs}ms` : "unknown");
