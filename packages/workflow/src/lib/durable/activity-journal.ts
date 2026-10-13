@@ -14,6 +14,15 @@ import type { WorkflowStorage } from "./workflow-storage.ts";
 /** What kind of checkpoint an entry records. Used by replay + the sleep scanner. */
 export type JournalStepType = "activity" | "sleep" | "signal" | "compensation" | "child";
 
+/** Every `JournalStepType`. Backends with a CHECK constraint mirror this list. */
+export const JOURNAL_STEP_TYPES: readonly JournalStepType[] = [
+  "activity",
+  "sleep",
+  "signal",
+  "compensation",
+  "child",
+];
+
 /** Lifecycle phase of an entry. `pending` means suspend is in flight (sleep wake or signal delivery). */
 export type JournalPhase = "pending" | "completed";
 

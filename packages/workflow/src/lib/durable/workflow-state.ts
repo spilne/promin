@@ -11,6 +11,33 @@ export type WorkflowStatus =
   | "compensating"
   | "tripwire";
 
+/** Every `WorkflowStatus`, in enum order. Use instead of hand-written lists. */
+export const WORKFLOW_STATUSES: readonly WorkflowStatus[] = [
+  "pending",
+  "running",
+  "completed",
+  "failed",
+  "suspended",
+  "compensating",
+  "tripwire",
+];
+
+/**
+ * Statuses a run cannot leave through `completeWorkflow` / `failWorkflow` /
+ * `tripwireWorkflow` / `cancelWorkflow`. Only `startFreshRun` and
+ * `resetSteps` move a run out of one of these.
+ */
+export const TERMINAL_WORKFLOW_STATUSES: readonly WorkflowStatus[] = [
+  "completed",
+  "failed",
+  "tripwire",
+];
+
+/** True when `status` is one of `TERMINAL_WORKFLOW_STATUSES`. */
+export function isTerminalWorkflowStatus(status: WorkflowStatus): boolean {
+  return status === "completed" || status === "failed" || status === "tripwire";
+}
+
 export type CompensationStatus = "none" | "compensating" | "compensated" | "partial";
 
 export type StepStatus =

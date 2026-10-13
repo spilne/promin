@@ -1,10 +1,13 @@
 import { eq, and, sql } from "drizzle-orm";
 import type { StateMachineStorage, MachineState, TransitionEvent } from "@promin/workflow";
-import { machines, machineEvents } from "./schema.ts";
-import { type DrizzleDb, hashToInt32 } from "@spilne/perfect-postgres";
+import { machines, machineEvents, machineLocks } from "./schema.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { execRaw } from "./exec-raw.ts";
 
 export class PgStateMachineStorage implements StateMachineStorage {
+  /** Lock owner id — `releaseLock` only frees leases this instance holds. */
+  private readonly instanceId = crypto.randomUUID();
+
   constructor(private readonly db: DrizzleDb) {}
 
   async create(params: {
@@ -104,15 +107,31 @@ export class PgStateMachineStorage implements StateMachineStorage {
     }));
   }
 
-  async tryLock(id: string, _durationMs: number): Promise<boolean> {
-    const [result] = await execRaw(
+  /**
+   * Lease row in `sm_machine_locks`, expiry on the server clock. Unlike a
+   * session advisory lock it excludes callers on every pool connection and
+   * process, honours `durationMs`, and is released by row delete rather
+   * than by whichever connection the pool happens to hand out.
+   */
+  async tryLock(id: string, durationMs: number): Promise<boolean> {
+    const expiresAt = sql`NOW() + (${Math.max(0, Math.trunc(durationMs))}::double precision * INTERVAL '1 millisecond')`;
+    const rows = await execRaw(
       this.db,
-      sql`SELECT pg_try_advisory_lock(${hashToInt32("sm:" + id)}) as acquired`,
+      sql`
+      INSERT INTO sm_machine_locks (machine_id, locked_by, expires_at)
+      VALUES (${id}, ${this.instanceId}, ${expiresAt})
+      ON CONFLICT (machine_id) DO UPDATE
+        SET locked_by = EXCLUDED.locked_by, expires_at = EXCLUDED.expires_at
+        WHERE sm_machine_locks.expires_at < NOW()
+      RETURNING machine_id
+    `,
     );
-    return result?.acquired === true;
+    return rows.length > 0;
   }
 
   async releaseLock(id: string): Promise<void> {
-    await execRaw(this.db, sql`SELECT pg_advisory_unlock(${hashToInt32("sm:" + id)})`);
+    await this.db
+      .delete(machineLocks)
+      .where(and(eq(machineLocks.machineId, id), eq(machineLocks.lockedBy, this.instanceId)));
   }
 }

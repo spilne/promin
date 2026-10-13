@@ -11,6 +11,7 @@ import type { WorkflowStorage } from "./workflow-storage.ts";
 import {
   isActivityJournalStorage,
   isJournaledSuspendStorage,
+  JOURNAL_STEP_TYPES,
   type ActivityJournalStorage,
   type JournaledSuspendStorage,
 } from "./activity-journal.ts";
@@ -34,7 +35,17 @@ export interface StorageTestSuiteOptions {
    * optional `resetSteps` method (backs `WorkflowRunner.resume`).
    */
   hasResetSteps?: boolean;
+  /**
+   * Build a second storage instance over the same backend as `storage` —
+   * what another process, pool client or worker would hold. Enables the
+   * cross-instance lock-exclusion and fence-token cases. Omit for
+   * single-instance backends (in-memory), where those cases fall back to
+   * exercising one instance.
+   */
+  createPeer?: (storage: WorkflowStorage) => WorkflowStorage | Promise<WorkflowStorage>;
 }
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Run the full WorkflowStorage conformance suite against any implementation.
@@ -65,6 +76,11 @@ export function storageTestSuite(
       );
     }
     return s;
+  }
+
+  /** A second instance over the same backend (or the same instance when none is configured). */
+  async function getPeer(s: WorkflowStorage): Promise<WorkflowStorage> {
+    return options.createPeer ? options.createPeer(s) : s;
   }
 
   async function getSuspendStorage(): Promise<WorkflowStorage & JournaledSuspendStorage> {
@@ -951,15 +967,97 @@ export function storageTestSuite(
         await s.releaseLock("lock-1");
       });
 
-      it("rejects double-lock from different logical owners", async () => {
-        // Note: advisory locks (Postgres) are per-session, so the same connection
-        // can acquire the same lock twice. This test validates row-level locks
-        // and in-memory locks where re-locking is rejected.
+      it("rejects double-lock from the same instance and from a peer", async () => {
         const s = await getStorage();
-        const { acquired } = await s.tryLock("lock-2", 30_000);
-        expect(acquired).toBe(true);
-        // Don't assert false for double-lock — advisory locks allow it
-        await s.releaseLock("lock-2");
+        const peer = await getPeer(s);
+        const first = await s.tryLock("lock-2", 30_000);
+        expect(first.acquired).toBe(true);
+
+        expect((await s.tryLock("lock-2", 30_000)).acquired).toBe(false);
+        expect((await peer.tryLock("lock-2", 30_000)).acquired).toBe(false);
+        const concurrent = await Promise.all(
+          Array.from({ length: 5 }, () => peer.tryLock("lock-2", 30_000)),
+        );
+        expect(concurrent.every((r) => !r.acquired)).toBe(true);
+
+        await s.releaseLock("lock-2", { fenceToken: first.token });
+      });
+
+      it("concurrent tryLock calls produce exactly one winner", async () => {
+        const s = await getStorage();
+        const peer = await getPeer(s);
+        const results = await Promise.all(
+          Array.from({ length: 8 }, (_, i) =>
+            (i % 2 === 0 ? s : peer).tryLock("lock-race", 30_000),
+          ),
+        );
+        expect(results.filter((r) => r.acquired)).toHaveLength(1);
+        const winner = results.find((r) => r.acquired)!;
+        await s.releaseLock("lock-race", { fenceToken: winner.token });
+      });
+
+      it("releaseLock frees the lock for a peer", async () => {
+        const s = await getStorage();
+        const peer = await getPeer(s);
+        const a = await s.tryLock("lock-free", 30_000);
+        expect(a.acquired).toBe(true);
+        await s.releaseLock("lock-free", { fenceToken: a.token });
+
+        const b = await peer.tryLock("lock-free", 30_000);
+        expect(b.acquired).toBe(true);
+        await peer.releaseLock("lock-free", { fenceToken: b.token });
+      });
+
+      it("releasing many locks concurrently frees every one of them", async () => {
+        const s = await getStorage();
+        const peer = await getPeer(s);
+        const ids = Array.from({ length: 8 }, (_, i) => `lock-many-${i}`);
+        const held = await Promise.all(ids.map((id) => s.tryLock(id, 30_000)));
+        expect(held.every((r) => r.acquired)).toBe(true);
+        await Promise.all(ids.map((id, i) => s.releaseLock(id, { fenceToken: held[i]!.token })));
+
+        const again = await Promise.all(ids.map((id) => peer.tryLock(id, 30_000)));
+        expect(again.every((r) => r.acquired)).toBe(true);
+        await Promise.all(
+          ids.map((id, i) => peer.releaseLock(id, { fenceToken: again[i]!.token })),
+        );
+      });
+
+      it("an expired lock can be re-acquired with a newer token", async () => {
+        const s = await getStorage();
+        const peer = await getPeer(s);
+        const a = await s.tryLock("lock-exp", 1);
+        expect(a.acquired).toBe(true);
+        await sleep(30);
+        const b = await peer.tryLock("lock-exp", 30_000);
+        expect(b.acquired).toBe(true);
+        expect(b.token).toBeDefined();
+        expect(b.token).not.toBe(a.token);
+        await peer.releaseLock("lock-exp", { fenceToken: b.token });
+      });
+
+      it("heartbeat extends the lock past its original expiry", async () => {
+        const s = await getStorage();
+        const peer = await getPeer(s);
+        const a = await s.tryLock("lock-hb", 600);
+        expect(a.acquired).toBe(true);
+        await s.heartbeat("lock-hb", 60_000, { fenceToken: a.token });
+        await sleep(900);
+        expect((await peer.tryLock("lock-hb", 30_000)).acquired).toBe(false);
+        await s.releaseLock("lock-hb", { fenceToken: a.token });
+      });
+
+      it("a stale holder's release does not free the new holder's lock", async () => {
+        const s = await getStorage();
+        const peer = await getPeer(s);
+        const stale = await s.tryLock("lock-stale-rel", 1);
+        await sleep(30);
+        const fresh = await peer.tryLock("lock-stale-rel", 30_000);
+        expect(fresh.acquired).toBe(true);
+
+        await s.releaseLock("lock-stale-rel", { fenceToken: stale.token });
+        expect((await s.tryLock("lock-stale-rel", 30_000)).acquired).toBe(false);
+        await peer.releaseLock("lock-stale-rel", { fenceToken: fresh.token });
       });
 
       it("tryLockAndLoad returns lock=true + the current state in one call", async () => {
@@ -996,11 +1094,7 @@ export function storageTestSuite(
         await s.createWorkflow({ workflowId: "fence-ok", workflowName: "t", input: {} });
         const { acquired, token } = await s.tryLock("fence-ok", 30_000);
         expect(acquired).toBe(true);
-        if (token === undefined) {
-          // Backend doesn't support fencing — conformance ends here.
-          await s.releaseLock("fence-ok");
-          return;
-        }
+        expect(token).toBeDefined();
         await s.saveStepResult(
           {
             workflowId: "fence-ok",
@@ -1021,8 +1115,8 @@ export function storageTestSuite(
         await s.createWorkflow({ workflowId: "fence-stale", workflowName: "t", input: {} });
         // A acquires → stale.
         const { token: staleToken } = await s.tryLock("fence-stale", 1);
-        if (staleToken === undefined) return; // no fencing on this backend
-        await new Promise((r) => setTimeout(r, 10));
+        expect(staleToken).toBeDefined();
+        await sleep(30);
         // B acquires fresh token for the same workflow.
         const { acquired: bAcquired, token: freshToken } = await s.tryLock("fence-stale", 30_000);
         expect(bAcquired).toBe(true);
@@ -1064,7 +1158,7 @@ export function storageTestSuite(
         await s.createWorkflow({ workflowId: "fence-lal", workflowName: "t", input: {} });
         const res = await s.tryLockAndLoad("fence-lal", 30_000);
         expect(res.locked).toBe(true);
-        if (res.token === undefined) return; // backend without fencing
+        expect(res.token).toBeDefined();
         await s.saveStepResult(
           {
             workflowId: "fence-lal",
@@ -1078,6 +1172,50 @@ export function storageTestSuite(
         const state = await s.loadWorkflow("fence-lal");
         expect(state?.steps["s"]?.result).toBe(1);
         await s.releaseLock("fence-lal", { fenceToken: res.token });
+      });
+
+      it("a stale token cannot complete or fail the workflow", async () => {
+        const s = await getStorage();
+        const peer = await getPeer(s);
+        await s.createWorkflow({ workflowId: "fence-term", workflowName: "t", input: {} });
+        const stale = await s.tryLock("fence-term", 1);
+        await sleep(30);
+        const fresh = await peer.tryLock("fence-term", 30_000);
+        expect(fresh.acquired).toBe(true);
+
+        await expect(
+          s.completeWorkflow("fence-term", "late", { fenceToken: stale.token }),
+        ).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" });
+        await expect(
+          s.failWorkflow("fence-term", "late", { fenceToken: stale.token }),
+        ).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" });
+        expect((await s.loadWorkflow("fence-term"))!.status).toBe("pending");
+        await peer.releaseLock("fence-term", { fenceToken: fresh.token });
+      });
+
+      it("tokens are never reused across instances", async () => {
+        const s = await getStorage();
+        const peer = await getPeer(s);
+        await s.createWorkflow({ workflowId: "fence-reuse", workflowName: "t", input: {} });
+        const first = await s.tryLock("fence-reuse", 30_000);
+        await s.releaseLock("fence-reuse", { fenceToken: first.token });
+        const second = await peer.tryLock("fence-reuse", 30_000);
+        expect(second.acquired).toBe(true);
+        expect(second.token).not.toBe(first.token);
+
+        await expect(
+          s.saveStepResult(
+            {
+              workflowId: "fence-reuse",
+              stepName: "late",
+              result: 1,
+              durationMs: 1,
+              startedAt: new Date(),
+            },
+            { fenceToken: first.token },
+          ),
+        ).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" });
+        await peer.releaseLock("fence-reuse", { fenceToken: second.token });
       });
     });
 
@@ -1445,6 +1583,541 @@ export function storageTestSuite(
     });
 
     // -------------------------------------------------------------------
+    // terminal-state guards
+    // -------------------------------------------------------------------
+
+    describe("terminal-state guards", () => {
+      it("a late completeWorkflow does not overwrite a cancel", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "term-cc", workflowName: "t", input: {} });
+        await s.cancelWorkflow("term-cc");
+        await s.completeWorkflow("term-cc", "late");
+        const state = (await s.loadWorkflow("term-cc"))!;
+        expect(state.status).toBe("failed");
+        expect(state.error).toBe("Cancelled");
+        expect(state.result).toBeUndefined();
+      });
+
+      it("a fenced completion from the lock holder does not resurrect a cancelled run", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "term-fenced", workflowName: "t", input: {} });
+        const { token } = await s.tryLock("term-fenced", 30_000);
+        await s.cancelWorkflow("term-fenced");
+        await s.completeWorkflow("term-fenced", "late", { fenceToken: token });
+        const state = (await s.loadWorkflow("term-fenced"))!;
+        expect(state.status).toBe("failed");
+        expect(state.error).toBe("Cancelled");
+        await s.releaseLock("term-fenced", { fenceToken: token });
+      });
+
+      it("failWorkflow does not overwrite a cancel or a completion", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "term-cf", workflowName: "t", input: {} });
+        await s.cancelWorkflow("term-cf");
+        await s.failWorkflow("term-cf", "boom");
+        expect((await s.loadWorkflow("term-cf"))!.error).toBe("Cancelled");
+
+        await s.createWorkflow({ workflowId: "term-ok", workflowName: "t", input: {} });
+        await s.completeWorkflow("term-ok", "done");
+        await s.failWorkflow("term-ok", "boom");
+        const ok = (await s.loadWorkflow("term-ok"))!;
+        expect(ok.status).toBe("completed");
+        expect(ok.result).toBe("done");
+        expect(ok.error).toBeUndefined();
+      });
+
+      it("tripwireWorkflow does not overwrite a terminal run", async () => {
+        const s = await getStorage();
+        if (typeof s.tripwireWorkflow !== "function") return;
+        await s.createWorkflow({ workflowId: "term-tw", workflowName: "t", input: {} });
+        await s.completeWorkflow("term-tw", "done");
+        await s.tripwireWorkflow("term-tw", { why: "late" });
+        expect((await s.loadWorkflow("term-tw"))!.status).toBe("completed");
+
+        await s.createWorkflow({ workflowId: "term-tw2", workflowName: "t", input: {} });
+        await s.tripwireWorkflow("term-tw2", { why: "first" });
+        await s.completeWorkflow("term-tw2", "late");
+        const tw = (await s.loadWorkflow("term-tw2"))!;
+        expect(tw.status).toBe("tripwire");
+        expect(tw.tripwire).toEqual({ why: "first" });
+      });
+
+      it("completing a suspended run is allowed", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "term-susp", workflowName: "t", input: {} });
+        await s.suspendWorkflow("term-susp", "wait", {
+          status: "sleeping",
+          stepType: "sleep",
+          wakeAt: new Date(Date.now() + 60_000),
+        });
+        await s.completeWorkflow("term-susp", "done");
+        expect((await s.loadWorkflow("term-susp"))!.status).toBe("completed");
+      });
+    });
+
+    // -------------------------------------------------------------------
+    // parent / run source persistence, filters and cascade cancel
+    // -------------------------------------------------------------------
+
+    describe("parent and run source", () => {
+      async function seedFamily(s: WorkflowStorage): Promise<void> {
+        await s.createWorkflow({
+          workflowId: "fam-root",
+          workflowName: "root",
+          input: {},
+          runSource: "schedule",
+          runSourceId: "sched-1",
+        });
+        await s.createWorkflow({
+          workflowId: "fam-child",
+          workflowName: "child",
+          input: {},
+          parentWorkflowId: "fam-root",
+          runSource: "parent",
+          runSourceId: "fam-root",
+        });
+        await s.createWorkflow({
+          workflowId: "fam-grandchild",
+          workflowName: "child",
+          input: {},
+          parentWorkflowId: "fam-child",
+          runSource: "parent",
+          runSourceId: "fam-child",
+        });
+        await s.createWorkflow({
+          workflowId: "fam-other",
+          workflowName: "root",
+          input: {},
+          runSource: "schedule",
+          runSourceId: "sched-2",
+        });
+        await s.createWorkflow({ workflowId: "fam-manual", workflowName: "root", input: {} });
+      }
+
+      it("round-trips parentWorkflowId, runSource and runSourceId", async () => {
+        const s = await getStorage();
+        await seedFamily(s);
+        const child = (await s.loadWorkflow("fam-child"))!;
+        expect(child.parentWorkflowId).toBe("fam-root");
+        expect(child.runSource).toBe("parent");
+        expect(child.runSourceId).toBe("fam-root");
+        const manual = (await s.loadWorkflow("fam-manual"))!;
+        expect(manual.parentWorkflowId).toBeUndefined();
+        expect(manual.runSource).toBeUndefined();
+        expect(manual.runSourceId).toBeUndefined();
+      });
+
+      it("listWorkflows filters by parentId, runSource and runSourceId", async () => {
+        const s = await getStorage();
+        await seedFamily(s);
+        const ids = async (params: Parameters<WorkflowStorage["listWorkflows"]>[0]) =>
+          (await s.listWorkflows(params)).map((w) => w.workflowId).sort();
+
+        expect(await ids({ parentId: "fam-root" })).toEqual(["fam-child"]);
+        expect(await ids({ runSource: "schedule" })).toEqual(["fam-other", "fam-root"]);
+        expect(await ids({ runSource: "schedule", runSourceId: "sched-1" })).toEqual(["fam-root"]);
+        expect(await ids({ runSource: "parent", name: "child" })).toEqual([
+          "fam-child",
+          "fam-grandchild",
+        ]);
+      });
+
+      it("countWorkflows and listWorkflowSummaries apply the same filters", async () => {
+        const s = await getStorage();
+        await seedFamily(s);
+        const cases: Array<Parameters<WorkflowStorage["listWorkflows"]>[0]> = [
+          {},
+          { parentId: "fam-root" },
+          { runSource: "schedule" },
+          { runSource: "schedule", runSourceId: "sched-2" },
+          { name: "child" },
+        ];
+        for (const params of cases) {
+          const expected = (await s.listWorkflows(params)).length;
+          if (s.countWorkflows) expect(await s.countWorkflows(params)).toBe(expected);
+          if (s.listWorkflowSummaries) {
+            expect((await s.listWorkflowSummaries(params)).length).toBe(expected);
+          }
+        }
+      });
+
+      it("cancel without cascade leaves children alone", async () => {
+        const s = await getStorage();
+        await seedFamily(s);
+        await s.cancelWorkflow("fam-root");
+        expect((await s.loadWorkflow("fam-root"))!.status).toBe("failed");
+        expect((await s.loadWorkflow("fam-child"))!.status).toBe("pending");
+      });
+
+      it("cancel with cascade cancels every descendant and nothing else", async () => {
+        const s = await getStorage();
+        await seedFamily(s);
+        await s.cancelWorkflow("fam-root", { cascade: true });
+        for (const id of ["fam-root", "fam-child", "fam-grandchild"]) {
+          const state = (await s.loadWorkflow(id))!;
+          expect(state.status).toBe("failed");
+          expect(state.error).toBe("Cancelled");
+        }
+        expect((await s.loadWorkflow("fam-other"))!.status).toBe("pending");
+        expect((await s.loadWorkflow("fam-manual"))!.status).toBe("pending");
+      });
+    });
+
+    // -------------------------------------------------------------------
+    // unfiltered listing
+    // -------------------------------------------------------------------
+
+    describe("unfiltered listWorkflows", () => {
+      it("includes runs in every status", async () => {
+        const s = await getStorage();
+        const expected = ["st-pending", "st-running", "st-completed", "st-failed", "st-suspended"];
+        for (const id of expected) {
+          await s.createWorkflow({ workflowId: id, workflowName: "t", input: {} });
+        }
+        await s.saveStepResult({
+          workflowId: "st-running",
+          stepName: "a",
+          result: 1,
+          durationMs: 1,
+          startedAt: new Date(),
+        });
+        await s.completeWorkflow("st-completed", "ok");
+        await s.failWorkflow("st-failed", "boom");
+        await s.suspendWorkflow("st-suspended", "wait", {
+          status: "sleeping",
+          stepType: "sleep",
+          wakeAt: new Date(Date.now() + 60_000),
+        });
+        if (typeof s.tripwireWorkflow === "function") {
+          await s.createWorkflow({ workflowId: "st-tripwire", workflowName: "t", input: {} });
+          await s.tripwireWorkflow("st-tripwire", { why: "x" });
+          expected.push("st-tripwire");
+        }
+
+        const ids = (await s.listWorkflows()).map((w) => w.workflowId).sort();
+        expect(ids).toEqual([...expected].sort());
+        if (s.countWorkflows) expect(await s.countWorkflows()).toBe(expected.length);
+      });
+    });
+
+    // -------------------------------------------------------------------
+    // idempotency keys
+    // -------------------------------------------------------------------
+
+    describe("idempotency keys", () => {
+      it("an expired key is reclaimed by the next create", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "idem-old",
+          workflowName: "w",
+          input: 1,
+          idempotencyKey: "k",
+          idempotencyExpiresAt: new Date(Date.now() - 1_000),
+        });
+        expect(
+          await s.findWorkflowByIdempotencyKey({
+            workflowName: "w",
+            idempotencyKey: "k",
+            now: new Date(),
+          }),
+        ).toBeNull();
+
+        const fresh = await s.createWorkflow({
+          workflowId: "idem-new",
+          workflowName: "w",
+          input: 2,
+          idempotencyKey: "k",
+          idempotencyExpiresAt: new Date(Date.now() + 60_000),
+        });
+        expect(fresh.created).toBe(true);
+        expect(
+          await s.findWorkflowByIdempotencyKey({
+            workflowName: "w",
+            idempotencyKey: "k",
+            now: new Date(),
+          }),
+        ).toEqual({ workflowId: "idem-new" });
+        // The old run itself is untouched.
+        expect((await s.loadWorkflow("idem-old"))!.input).toBe(1);
+      });
+
+      it("an unexpired key still redirects to the owning run", async () => {
+        const s = await getStorage();
+        const expiresAt = new Date(Date.now() + 60_000);
+        await s.createWorkflow({
+          workflowId: "idem-a",
+          workflowName: "w",
+          input: 1,
+          idempotencyKey: "live",
+          idempotencyExpiresAt: expiresAt,
+        });
+        const second = await s.createWorkflow({
+          workflowId: "idem-b",
+          workflowName: "w",
+          input: 2,
+          idempotencyKey: "live",
+          idempotencyExpiresAt: expiresAt,
+        });
+        expect(second.created).toBe(false);
+        if (!second.created) expect(second.existing.workflowId).toBe("idem-a");
+        expect(await s.loadWorkflow("idem-b")).toBeNull();
+      });
+    });
+
+    // -------------------------------------------------------------------
+    // signal semantics
+    // -------------------------------------------------------------------
+
+    describe("signal semantics", () => {
+      it("the last delivery under a name wins", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "sig-lw", workflowName: "t", input: {} });
+        await s.deliverSignal("sig-lw", "a", 1);
+        await s.deliverSignal("sig-lw", "a", 2);
+        await s.deliverSignal("sig-lw", "b", "x");
+        const signals = await s.loadSignals("sig-lw");
+        const byName = Object.fromEntries(signals.map((x) => [x.signalName, x.payload]));
+        expect(signals).toHaveLength(2);
+        expect(byName).toEqual({ a: 2, b: "x" });
+      });
+
+      it("startFreshRun drops the previous run's signals", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "sig-fresh", workflowName: "t", input: {} });
+        await s.deliverSignal("sig-fresh", "go", { approved: true });
+        await s.completeWorkflow("sig-fresh", "done");
+        await s.startFreshRun("sig-fresh");
+        expect(await s.loadSignals("sig-fresh")).toEqual([]);
+
+        await s.deliverSignal("sig-fresh", "go", { approved: false });
+        expect((await s.loadSignals("sig-fresh")).map((x) => x.payload)).toEqual([
+          { approved: false },
+        ]);
+      });
+    });
+
+    // -------------------------------------------------------------------
+    // signal tokens
+    // -------------------------------------------------------------------
+
+    describe("signal tokens", () => {
+      const future = () => new Date(Date.now() + 60_000);
+
+      it("create is idempotent on (workflowId, idempotencyKey)", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "tok-idem", workflowName: "t", input: {} });
+        const first = await s.createSignalToken({
+          tokenId: "tk-1",
+          workflowId: "tok-idem",
+          signalName: "approve",
+          bearer: "b1",
+          tags: ["x"],
+          idempotencyKey: "ik",
+          expiresAt: future(),
+        });
+        const again = await s.createSignalToken({
+          tokenId: "tk-2",
+          workflowId: "tok-idem",
+          signalName: "approve",
+          bearer: "b2",
+          tags: [],
+          idempotencyKey: "ik",
+          expiresAt: future(),
+        });
+        expect(first.isCached).toBe(false);
+        expect(again.isCached).toBe(true);
+        expect(again.record.tokenId).toBe("tk-1");
+        expect(again.record.bearer).toBe("b1");
+        expect(await s.findSignalTokenById("tk-2")).toBeNull();
+      });
+
+      it("concurrent completions produce exactly one delivery", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "tok-race", workflowName: "t", input: {} });
+        await s.createSignalToken({
+          tokenId: "tk-race",
+          workflowId: "tok-race",
+          signalName: "approve",
+          bearer: "b",
+          tags: [],
+          expiresAt: future(),
+        });
+        const outcomes = await Promise.all(
+          Array.from({ length: 6 }, (_, i) =>
+            s.markSignalTokenCompleted({ tokenId: "tk-race", value: i, now: new Date() }),
+          ),
+        );
+        const delivered = outcomes.filter((o) => o.outcome === "delivered");
+        expect(delivered).toHaveLength(1);
+        const stored = (await s.findSignalTokenById("tk-race"))!;
+        expect(stored.completedAt).toBeInstanceOf(Date);
+        expect(stored.completedValue).toEqual(delivered[0]!.record.completedValue);
+        for (const o of outcomes.filter((x) => x.outcome === "already_completed")) {
+          expect(o.record.completedValue).toEqual(stored.completedValue);
+        }
+      });
+
+      it("lists a workflow's tokens newest first", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "tok-list", workflowName: "t", input: {} });
+        for (const id of ["tk-a", "tk-b", "tk-c"]) {
+          await s.createSignalToken({
+            tokenId: id,
+            workflowId: "tok-list",
+            signalName: "approve",
+            bearer: id,
+            tags: [],
+            expiresAt: future(),
+          });
+          await sleep(5);
+        }
+        const listed = await s.listSignalTokensForWorkflow("tok-list");
+        expect(listed.map((t) => t.tokenId)).toEqual(["tk-c", "tk-b", "tk-a"]);
+        expect(await s.listSignalTokensForWorkflow("tok-none")).toEqual([]);
+      });
+    });
+
+    // -------------------------------------------------------------------
+    // streams
+    // -------------------------------------------------------------------
+
+    describe("streams", () => {
+      it("concurrent appends get distinct, gap-free indices", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "str-race", workflowName: "t", input: {} });
+        const results = await Promise.all(
+          Array.from({ length: 20 }, (_, i) =>
+            s.appendStreamChunk({
+              workflowId: "str-race",
+              streamId: "out",
+              payload: { i },
+              appendedBy: "workflow",
+            }),
+          ),
+        );
+        const indices = results.map((r) => r.chunkIndex).sort((a, b) => a - b);
+        expect(indices).toEqual(Array.from({ length: 20 }, (_, i) => i));
+        const chunks = await s.readStreamChunks({ workflowId: "str-race", streamId: "out" });
+        expect(chunks.map((c) => c.chunkIndex)).toEqual(indices);
+      });
+
+      it("reads with since (exclusive) and limit, per stream", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "str-page", workflowName: "t", input: {} });
+        for (let i = 0; i < 5; i++) {
+          await s.appendStreamChunk({
+            workflowId: "str-page",
+            streamId: "out",
+            payload: i,
+            appendedBy: i % 2 === 0 ? "workflow" : "external",
+          });
+        }
+        await s.appendStreamChunk({
+          workflowId: "str-page",
+          streamId: "other",
+          payload: "x",
+          appendedBy: "external",
+        });
+        const page = await s.readStreamChunks({
+          workflowId: "str-page",
+          streamId: "out",
+          since: 1,
+          limit: 2,
+        });
+        expect(page.map((c) => [c.chunkIndex, c.payload, c.appendedBy])).toEqual([
+          [2, 2, "workflow"],
+          [3, 3, "external"],
+        ]);
+        expect(page[0]!.appendedAt).toBeInstanceOf(Date);
+        const other = await s.readStreamChunks({ workflowId: "str-page", streamId: "other" });
+        expect(other.map((c) => c.chunkIndex)).toEqual([0]);
+      });
+    });
+
+    // -------------------------------------------------------------------
+    // setWorkflowMetadata
+    // -------------------------------------------------------------------
+
+    describe("setWorkflowMetadata", () => {
+      it("shallow-merges and deletes keys set to null", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "meta-merge",
+          workflowName: "t",
+          input: {},
+          metadata: { keep: 1, drop: 2 },
+        });
+        await s.setWorkflowMetadata("meta-merge", { drop: null, added: { deep: true } });
+        expect((await s.loadWorkflow("meta-merge"))!.metadata).toEqual({
+          keep: 1,
+          added: { deep: true },
+        });
+      });
+
+      it("concurrent patches on different keys all land", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "meta-race", workflowName: "t", input: {} });
+        const keys = ["a", "b", "c", "d", "e", "f"];
+        await Promise.all(keys.map((k, i) => s.setWorkflowMetadata("meta-race", { [k]: i })));
+        expect((await s.loadWorkflow("meta-race"))!.metadata).toEqual({
+          a: 0,
+          b: 1,
+          c: 2,
+          d: 3,
+          e: 4,
+          f: 5,
+        });
+      });
+    });
+
+    // -------------------------------------------------------------------
+    // purge removes dependent records
+    // -------------------------------------------------------------------
+
+    describe("purgeCompleted dependents", () => {
+      it("purges tripwired runs too", async () => {
+        const s = await getStorage();
+        if (typeof s.tripwireWorkflow !== "function") return;
+        const before = new Date(Date.now() - 1_000);
+        await s.createWorkflow({ workflowId: "purge-tw", workflowName: "t", input: {} });
+        await s.tripwireWorkflow("purge-tw", { why: "x" });
+        await sleep(10);
+        const deleted = await s.purgeCompleted({ from: before, to: new Date(), limit: 100 });
+        expect(deleted).toBe(1);
+        expect(await s.loadWorkflow("purge-tw")).toBeNull();
+      });
+
+      it("removes signal tokens and streams of purged runs", async () => {
+        const s = await getStorage();
+        const before = new Date(Date.now() - 1_000);
+        await s.createWorkflow({ workflowId: "purge-deps", workflowName: "t", input: {} });
+        await s.createSignalToken({
+          tokenId: "tk-purge",
+          workflowId: "purge-deps",
+          signalName: "approve",
+          bearer: "b",
+          tags: [],
+          expiresAt: new Date(Date.now() + 60_000),
+        });
+        await s.appendStreamChunk({
+          workflowId: "purge-deps",
+          streamId: "out",
+          payload: 1,
+          appendedBy: "workflow",
+        });
+        await s.completeWorkflow("purge-deps", "done");
+        await sleep(10);
+
+        await s.purgeCompleted({ from: before, to: new Date(), limit: 100 });
+
+        expect(await s.loadWorkflow("purge-deps")).toBeNull();
+        expect(await s.findSignalTokenById("tk-purge")).toBeNull();
+        expect(await s.listSignalTokensForWorkflow("purge-deps")).toEqual([]);
+        expect(await s.readStreamChunks({ workflowId: "purge-deps", streamId: "out" })).toEqual([]);
+      });
+    });
+
+    // -------------------------------------------------------------------
     // resetSteps (opt-in) — backs WorkflowRunner.resume
     // -------------------------------------------------------------------
 
@@ -1651,6 +2324,70 @@ export function storageTestSuite(
           expect((await s.loadJournal("j-scope-a", "other")).map((e) => e.exit)).toEqual([
             { tag: "Success", value: "C" },
           ]);
+        });
+
+        it("startFreshRun clears the journal of every step", async () => {
+          const s = await getJournalStorage();
+          await s.createWorkflow({ workflowId: "j-fresh", workflowName: "test", input: {} });
+          for (const stepName of ["calc", "other"]) {
+            await s.appendEntry({
+              workflowId: "j-fresh",
+              stepName,
+              activityIndex: 0,
+              activityName: "fetch",
+              exit: { tag: "Success", value: stepName },
+            });
+          }
+          await s.completeWorkflow("j-fresh", "done");
+
+          await s.startFreshRun("j-fresh");
+
+          expect(await s.loadJournal("j-fresh", "calc")).toEqual([]);
+          expect(await s.loadJournal("j-fresh", "other")).toEqual([]);
+          // The new run journals from a clean slate.
+          await s.appendEntry({
+            workflowId: "j-fresh",
+            stepName: "calc",
+            activityIndex: 0,
+            activityName: "fetch",
+            exit: { tag: "Success", value: "run-2" },
+          });
+          expect((await s.loadJournal("j-fresh", "calc")).map((e) => e.exit)).toEqual([
+            { tag: "Success", value: "run-2" },
+          ]);
+        });
+
+        it("purgeCompleted removes the journal of purged runs", async () => {
+          const s = await getJournalStorage();
+          const before = new Date(Date.now() - 1_000);
+          await s.createWorkflow({ workflowId: "j-purge", workflowName: "test", input: {} });
+          await s.appendEntry({
+            workflowId: "j-purge",
+            stepName: "calc",
+            activityIndex: 0,
+            activityName: "fetch",
+            exit: { tag: "Success", value: 1 },
+          });
+          await s.completeWorkflow("j-purge", "done");
+          await sleep(10);
+          await s.purgeCompleted({ from: before, to: new Date(), limit: 100 });
+          expect(await s.loadJournal("j-purge", "calc")).toEqual([]);
+        });
+
+        it("startFreshRun leaves other workflows' journals alone", async () => {
+          const s = await getJournalStorage();
+          for (const id of ["j-keep-a", "j-keep-b"]) {
+            await s.createWorkflow({ workflowId: id, workflowName: "test", input: {} });
+            await s.appendEntry({
+              workflowId: id,
+              stepName: "calc",
+              activityIndex: 0,
+              activityName: "fetch",
+              exit: { tag: "Success", value: id },
+            });
+          }
+          await s.startFreshRun("j-keep-a");
+          expect(await s.loadJournal("j-keep-b", "calc")).toHaveLength(1);
         });
       });
     }
@@ -1875,6 +2612,57 @@ export function storageTestSuite(
             signalName: "approval",
           });
           expect(hit).toBeNull();
+        });
+
+        it("accepts a pending entry for every journal step type", async () => {
+          const s = await getSuspendStorage();
+          await s.createWorkflow({ workflowId: "j-types", workflowName: "test", input: {} });
+          for (const [i, stepType] of JOURNAL_STEP_TYPES.entries()) {
+            await s.appendPendingEntry({
+              workflowId: "j-types",
+              stepName: "body",
+              activityIndex: i,
+              activityName: `entry-${stepType}`,
+              stepType,
+              ...(stepType === "sleep" && { wakeAt: new Date(Date.now() + 60_000) }),
+            });
+          }
+          const entries = await s.loadJournal("j-types", "body");
+          expect(entries.map((e) => e.stepType)).toEqual([...JOURNAL_STEP_TYPES]);
+          expect(entries.every((e) => e.phase === "pending")).toBe(true);
+        });
+
+        it("startFreshRun drops pending sleeps and signals of the old run", async () => {
+          const s = await getSuspendStorage();
+          await s.createWorkflow({ workflowId: "j-fresh-p", workflowName: "test", input: {} });
+          await s.appendPendingEntry({
+            workflowId: "j-fresh-p",
+            stepName: "wait",
+            activityIndex: 0,
+            activityName: "nap",
+            stepType: "sleep",
+            wakeAt: new Date(Date.now() - 60_000),
+          });
+          await s.appendPendingEntry({
+            workflowId: "j-fresh-p",
+            stepName: "wait",
+            activityIndex: 1,
+            activityName: "approval",
+            stepType: "signal",
+          });
+
+          await s.startFreshRun("j-fresh-p");
+
+          const due = await s.findDueSleeps({ now: new Date(), limit: 100 });
+          expect(due.map((d) => d.workflowId)).not.toContain("j-fresh-p");
+          expect(
+            await s.findPendingSignal({
+              workflowId: "j-fresh-p",
+              stepName: "wait",
+              signalName: "approval",
+            }),
+          ).toBeNull();
+          expect(await s.loadJournal("j-fresh-p", "wait")).toEqual([]);
         });
       });
     }

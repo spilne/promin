@@ -50,7 +50,7 @@ PostgresWorkflowStorage.create({
   db, // DrizzleDb instance (required)
   tablePrefix: "wf_", // Table name prefix (default: "wf_")
   instanceId: "node-1", // Lock ownership ID (default: random UUID)
-  useAdvisoryLocks: true, // pg_advisory_lock vs row locks (default: true)
+  useAdvisoryLocks: false, // row locks + fence tokens (default); `true` is deprecated (unsafe through a pool)
   defaultLockDurationMs: 30_000,
   autoSeedLookups: true, // Auto-seed status enum tables (default: true)
 });

@@ -18,7 +18,19 @@ export interface PostgresStorageConfig {
   /** Instance ID for lock ownership tracking. Default: random UUID. */
   instanceId?: string;
 
-  /** Whether to use pg_advisory_lock (true) or row-based locks (false). Default: true. */
+  /**
+   * Lock implementation. Default `false`: row locks in `wf_workflow_locks`
+   * with a server-side lease expiry and a monotonic fence token — they
+   * exclude every other caller (any pool connection, any process) and let
+   * fenced writes reject a stale holder.
+   *
+   * @deprecated `true` selects session-scoped `pg_try_advisory_lock`, which
+   * is unsafe through a connection pool: the lock is re-entrant per
+   * connection (two callers on the same idle connection both "win"),
+   * `releaseLock` unlocks on whichever connection the pool hands out (so
+   * locks leak until that connection closes), and no fence token is issued.
+   * Only usable when the storage owns a single dedicated connection.
+   */
   useAdvisoryLocks?: boolean;
 
   /** Default lock duration in ms. Default: 30_000. */
@@ -45,7 +57,7 @@ export interface PostgresStorageConfig {
 export const DEFAULT_CONFIG = {
   namespace: null,
   tablePrefix: "wf_",
-  useAdvisoryLocks: true,
+  useAdvisoryLocks: false,
   defaultLockDurationMs: 30_000,
   autoSeedLookups: true,
   logger: () => {},
