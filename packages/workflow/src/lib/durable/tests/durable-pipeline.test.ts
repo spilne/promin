@@ -1365,17 +1365,17 @@ describe("Eff.catch (handleError)", () => {
   });
 });
 
-describe("Eff.handleErrorWith", () => {
+describe("Eff.catch with an Eff handler", () => {
   it("handles error with an Eff", async () => {
     const result = await fail(new FetchError({ message: "fail" }))
-      .handleErrorWith(() => succeed("from-eff"))
+      .catch(() => succeed("from-eff"))
       .run();
     expect(result).toBe("from-eff");
   });
 
   it("can chain to a different Eff with different error", async () => {
     const { data } = await runSafe(
-      fail(new FetchError({ message: "fail" })).handleErrorWith(() => succeed(42)),
+      fail(new FetchError({ message: "fail" })).catch(() => succeed(42)),
     );
     expect(data).toBe(42);
   });
