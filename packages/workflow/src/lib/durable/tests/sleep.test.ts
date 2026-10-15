@@ -70,11 +70,12 @@ describe("Durable sleep — pause a workflow and resume it later", () => {
     await new Promise((r) => setTimeout(r, 10));
 
     // Resume: completes
-    await runner.run({ workflow: buildWf(), workflowId: "s-2", input: 5 });
+    const result = await runner.run({ workflow: buildWf(), workflowId: "s-2", input: 5 });
 
-    // "double" should NOT re-execute — it was checkpointed
-    // But prev through sleep may be undefined (sleep doesn't pass through value)
+    // "double" should NOT re-execute — it was checkpointed — and its value
+    // flows through the sleep into `prev`.
     expect(log).toEqual(["double", "add-100"]);
+    expect(result).toBe(110);
 
     const state = await storage.loadWorkflow("s-2");
     expect(state?.status).toBe("completed");

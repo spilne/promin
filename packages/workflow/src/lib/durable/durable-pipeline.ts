@@ -429,6 +429,12 @@ export interface StepOptions<T> {
    * running the body. On miss, run the body and cache the result for
    * `ttlMs`. Cache failures never fail the workflow — they fall through to
    * a cache miss.
+   *
+   * The store key is `${namespace}:${stepName}:${key(ctx)}`: the step name
+   * is always included, so one cache config can be shared by several steps
+   * (or used as the `parallelSteps` option, where it applies to every
+   * branch) without their entries colliding. Values are stored encoded with
+   * the step's codec.
    */
   readonly cache?: StepCacheOption;
   /**
@@ -452,7 +458,9 @@ export interface StepCacheOption {
   readonly store: CacheStore<string, unknown>;
   /**
    * Key prefix. Defaults to the workflow name so caches for different
-   * workflows don't collide when they share a backing store.
+   * workflows don't collide when they share a backing store. The step name
+   * follows the namespace in the key; two workflows that set the same
+   * namespace share entries only for steps with the same name.
    */
   readonly namespace?: string;
 }
@@ -510,9 +518,11 @@ export interface DispatchConfig {
 // ---------------------------------------------------------------------------
 
 /**
- * Thrown by `.match()` when no case applies and no `default` was provided.
- * Carries the step name, mode, and (for selector mode) the resolved key so
- * debugging prod failures doesn't require re-running the workflow.
+ * Typed failure of a `.match()` step when no case applies and no `default`
+ * was provided (selector keys are looked up as own properties of `cases`
+ * only, so e.g. `"toString"` never hits `Object.prototype`). Carries the
+ * step name, mode, and (for selector mode) the resolved key so debugging
+ * prod failures doesn't require re-running the workflow.
  */
 export class MatchError extends PerfectTaggedError("MatchError")<{
   readonly stepName: string;
@@ -530,7 +540,7 @@ type MatchCaseFn<Input, Current, Output, E extends TaggedError> = (
  * - **Selector**: `on` returns a key; `cases` is a record keyed by that string.
  * - **Predicate**: `cases` is an array of `{when, then}`; first match wins.
  *
- * `default` is optional in both modes; missing match throws `MatchError`.
+ * `default` is optional in both modes; no match fails the step with `MatchError`.
  */
 export type MatchParams<Input, Current, Output, E extends TaggedError> =
   | {
@@ -587,19 +597,28 @@ interface PickedMatchBranch<Input, Current, Output, E extends TaggedError> {
   readonly label: string;
 }
 
-/** Resolve which case fires for `prev`. Throws `MatchError` if none + no default. */
-function pickMatchBranch<Input, Current, Output, E extends TaggedError>(
-  params: MatchParams<Input, Current, Output, E>,
-  prev: Current,
-  stepName: string,
-): PickedMatchBranch<Input, Current, Output, E> {
+/**
+ * Resolve which case fires for `prev`. Returns a `MatchError` (not thrown)
+ * when nothing applies and there is no default, so the caller can surface
+ * it as a typed failure. Exceptions thrown by the user's `on`/`when`
+ * callbacks propagate as-is.
+ */
+function pickMatchBranch<Input, Current, Output, E extends TaggedError>(params: {
+  readonly match: MatchParams<Input, Current, Output, E>;
+  readonly prev: Current;
+  readonly stepName: string;
+}): PickedMatchBranch<Input, Current, Output, E> | MatchError {
+  const { match, prev, stepName } = params;
   // Selector mode (`on` is a function, `cases` is a record).
-  if ("on" in params && typeof params.on === "function") {
-    const key = params.on(prev);
-    const hit = (params.cases as Record<string, MatchCaseFn<Input, Current, Output, E>>)[key];
+  if ("on" in match && typeof match.on === "function") {
+    const key = match.on(prev);
+    // Own keys only: a selector value such as "constructor" or "toString"
+    // must not resolve to an inherited `Object.prototype` member.
+    const cases = match.cases as Record<string, MatchCaseFn<Input, Current, Output, E>>;
+    const hit = Object.hasOwn(cases, key) ? cases[key] : undefined;
     if (hit) return { fn: hit, mode: "selector", label: key };
-    if (params.default) return { fn: params.default, mode: "selector", label: "default" };
-    throw new MatchError({
+    if (match.default) return { fn: match.default, mode: "selector", label: "default" };
+    return new MatchError({
       stepName,
       mode: "selector",
       selectorKey: key,
@@ -608,7 +627,7 @@ function pickMatchBranch<Input, Current, Output, E extends TaggedError>(
   }
 
   // Predicate mode (`cases` is an array).
-  const cases = params.cases as ReadonlyArray<{
+  const cases = match.cases as ReadonlyArray<{
     when: (v: Current) => boolean;
     then: MatchCaseFn<Input, Current, Output, E>;
     label?: string;
@@ -619,8 +638,8 @@ function pickMatchBranch<Input, Current, Output, E extends TaggedError>(
       return { fn: c.then, mode: "predicate", label: c.label ?? `case[${i}]` };
     }
   }
-  if (params.default) return { fn: params.default, mode: "predicate", label: "default" };
-  throw new MatchError({
+  if (match.default) return { fn: match.default, mode: "predicate", label: "default" };
+  return new MatchError({
     stepName,
     mode: "predicate",
     message: `match step "${stepName}" — no predicate matched and no default`,
@@ -706,6 +725,15 @@ export interface ExecuteParams {
    * loop-iteration timing. Default: `SystemWallClock`.
    */
   readonly clock?: WallClock;
+  /**
+   * Version of the workflow definition this step belongs to. Read by
+   * `.journaled()` for `ctx.workflowVersion`. Filled in when the builder is
+   * frozen (`build()` / `execute()`), so a `.version()` call anywhere in the
+   * chain is seen; a value supplied by the caller takes precedence.
+   */
+  readonly workflowVersion?: string;
+  /** Patch names active in this definition (`ctx.patched(name)`). Same sourcing as `workflowVersion`. */
+  readonly patches?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1459,12 +1487,14 @@ export class WorkflowBuilder<
           const cacheOption = options?.cache;
           if (!cacheOption)
             return asStepEff(branchFn(ctx as StepContext<Input, Current>), scopedName);
-          return wrapWithStepCache(
-            cacheOption,
-            ctx as StepContext<unknown, unknown>,
-            () => asStepEff(branchFn(ctx as StepContext<Input, Current>), scopedName),
-            cacheOption.namespace ?? workflowName,
-          );
+          return wrapWithStepCache({
+            cache: cacheOption,
+            ctx: ctx as StepContext<unknown, unknown>,
+            runBody: () => asStepEff(branchFn(ctx as StepContext<Input, Current>), scopedName),
+            stepName: scopedName,
+            namespace: cacheOption.namespace ?? workflowName,
+            codec,
+          });
         },
       });
     }
@@ -1575,6 +1605,7 @@ export class WorkflowBuilder<
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
     const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
+    const payloadHash = this._defaultPayloadHash;
     // Storage capability check is deferred to execute time — the builder has
     // no storage of its own; validation runs against the runner's storage
     // via `execParams.storage`.
@@ -1595,8 +1626,12 @@ export class WorkflowBuilder<
       execute: (execParams) => {
         const prevStepName = dependsOn[0];
         const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
-        const builderVersion = this._version;
-        const builderPatches = this._patches;
+        // Version and patches come from the frozen definition (see
+        // `bindDefinitionConfig`), not from `this`: `.version()` returns a new
+        // builder that shares this step object, so a closure over `this`
+        // would miss any config set later in the chain.
+        const workflowVersion = execParams.workflowVersion;
+        const patches = execParams.patches;
         const runtimeStorage = execParams.storage;
         // Use tryPromise (not a defect-raising promise lift) so any `throw`
         // from the generator body surfaces as a TYPED step failure.
@@ -1616,10 +1651,10 @@ export class WorkflowBuilder<
               stepName: name,
               storage: getJournalStorage(runtimeStorage),
               workflowStorage: runtimeStorage,
-              workflowVersion: builderVersion,
-              patches: builderPatches,
+              workflowVersion,
+              patches,
               codec,
-              payloadHash: this._defaultPayloadHash,
+              payloadHash,
               ...(execParams.clock !== undefined && { clock: execParams.clock }),
               runChild: async ({
                 workflow: childWorkflow,
@@ -1678,7 +1713,8 @@ export class WorkflowBuilder<
    * Multi-way conditional routing. Two modes — pick whichever matches your data:
    *
    * **Selector mode** — like `switch (key)`. `on` returns a string key that
-   * selects from `cases`. `default` is optional; missing key throws `MatchError`.
+   * selects from `cases` (own keys only). `default` is optional; a missing
+   * key fails the step with `MatchError`.
    *
    * ```typescript
    * .match("route", {
@@ -1734,7 +1770,10 @@ export class WorkflowBuilder<
           attempt: 1,
         };
 
-        const picked = pickMatchBranch(params, prev as Current, name);
+        const picked = pickMatchBranch({ match: params, prev: prev as Current, stepName: name });
+        // No case and no default: a typed failure, so step retry / onFailure
+        // policies and `runSafe` callers see it like any other step error.
+        if (picked instanceof MatchError) return fail(picked);
         // Record the chosen case BEFORE running it — even if the branch
         // throws, the metadata is still there to debug "which case fired".
         execParams.metadataRef.current = {
@@ -1755,7 +1794,10 @@ export class WorkflowBuilder<
 
   /**
    * Invoke a child workflow as a step. The child is independently durable.
-   * Automatically sets parentWorkflowId for tracking.
+   * Automatically sets parentWorkflowId for tracking. The child row is
+   * created with the child's `version` if it does not exist yet; an existing
+   * row with that `workflowId` is resumed as-is (its original parent and
+   * version are kept).
    *
    * @example
    * ```ts
@@ -1796,20 +1838,23 @@ export class WorkflowBuilder<
         const storage = execParams.storage;
 
         return promiseOrDie(async () => {
-          // Seed the child row with the parent pointer before handing it to
-          // the runner so downstream `listWorkflows({ parentId })` queries
-          // and the coordinator's recovery see the relationship.
-          const existing = await storage.loadWorkflow(childWorkflowId);
-          if (!existing) {
-            await storage.createWorkflow({
-              workflowId: childWorkflowId,
-              workflowName: child.name,
-              input: childInput,
-              workflowType: childInternals.type,
-              parentWorkflowId,
-              metadata: childInternals.metadata,
-            });
-          }
+          // Seed the child row with the parent pointer and the child's
+          // version before handing it to the runner, so downstream
+          // `listWorkflows({ parentId })` queries and the coordinator's
+          // recovery see the relationship, and the runner's version check
+          // compares against the version the child was started with.
+          // `createWorkflow` is create-if-absent: on a re-run it returns
+          // `{ created: false }` and the existing row (with its original
+          // version) is resumed.
+          await storage.createWorkflow({
+            workflowId: childWorkflowId,
+            workflowName: child.name,
+            input: childInput,
+            workflowType: childInternals.type,
+            parentWorkflowId,
+            metadata: childInternals.metadata,
+            version: child.version,
+          });
           return runWorkflowOrchestration(
             {
               storage,
@@ -1827,6 +1872,7 @@ export class WorkflowBuilder<
               onVersionMismatch: childInternals.onVersionMismatch,
               previousVersions: childInternals.previousVersions,
               hooks: childInternals.hooks,
+              ...(execParams.clock !== undefined && { clock: execParams.clock }),
             },
             { workflowId: childWorkflowId, input: childInput },
           );
@@ -1841,6 +1887,14 @@ export class WorkflowBuilder<
   // sleep — durable timer
   // ---------------------------------------------------------------------------
 
+  /**
+   * Durable timer. The first execution stores a wake time (`now + ms`) and
+   * suspends; every later resume compares against that stored wake time, so
+   * resuming early does not move it. On wake the step passes its predecessor's
+   * value through unchanged: the next step's `prev` is the value from before
+   * the sleep, and the sleep step's own checkpointed result is that same value
+   * (encoded with the predecessor's codec).
+   */
   sleep(
     name: string,
     ms: number,
@@ -1848,12 +1902,18 @@ export class WorkflowBuilder<
     this._validateName(name);
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
+    // The checkpointed result is the predecessor's value, so round-trip it
+    // with the predecessor's codec.
+    const prevDef =
+      this._lastStepName != null
+        ? this._steps.find((s) => s.name === this._lastStepName)
+        : undefined;
 
     const stepDef: StepDefinition = {
       name,
       dependsOn,
       kind: "sleep",
-      codec: this._codec(),
+      codec: prevDef?.codec ?? this._codec(),
       execute: (params) => {
         const clock = params.clock ?? SystemWallClock;
         const program = eff(function* () {
@@ -1862,7 +1922,10 @@ export class WorkflowBuilder<
 
           if (stepState?.status === "sleeping" && stepState.wakeAt) {
             if (clock.now() >= stepState.wakeAt) {
-              return undefined;
+              // Pass the predecessor value through so the next linear step's
+              // `prev` is what the types promise (`Current`), not `undefined`.
+              const prevStepName = dependsOn[0];
+              return prevStepName != null ? params.results[prevStepName] : params.input;
             }
             return yield* fail(
               new WorkflowSuspendedError({
@@ -1902,6 +1965,26 @@ export class WorkflowBuilder<
   // waitForSignal — wait for external event
   // ---------------------------------------------------------------------------
 
+  /**
+   * Suspend until a signal named `signalName` has been delivered to this run,
+   * then complete with its payload (decoded through `codec`).
+   *
+   * Signal semantics:
+   * - A signal is a named value on the run, not a queued event. Delivering
+   *   the same name again replaces the earlier payload (last delivery wins),
+   *   and signals are cleared when a fresh run starts.
+   * - A signal delivered before the step runs is picked up immediately.
+   * - Signals are not consumed. Every `waitForSignal` on the same
+   *   `signalName` in one run resolves with the payload delivered at the
+   *   time it runs, so two waits on one name are both satisfied by a single
+   *   delivery. To wait for distinct events, use distinct signal names (e.g.
+   *   `approve-1`, `approve-2`, or a name that includes a loop counter).
+   *
+   * `timeoutMs` is measured from the step's first execution. The deadline is
+   * stored with the step and reused on every resume, so resuming the run
+   * before the deadline does not extend it; the first resume at or after the
+   * deadline fails the step with `WorkflowTimeoutError`.
+   */
   waitForSignal<T>(
     name: string,
     params: {
@@ -1940,13 +2023,14 @@ export class WorkflowBuilder<
             return codec.decode(signal.payload);
           }
 
-          // Check if this is a re-entry with timeout
+          // Check if this is a re-entry while already waiting
           const state = yield* promiseOrDie(() =>
             execParams.storage.loadWorkflow(execParams.workflowId),
           );
           const stepState = state?.steps[name];
+          const alreadyWaiting = stepState?.status === "waiting_for_signal";
 
-          if (stepState?.status === "waiting_for_signal" && stepState.signalTimeoutAt) {
+          if (alreadyWaiting && stepState.signalTimeoutAt) {
             if (clock.now() >= stepState.signalTimeoutAt) {
               return yield* fail(
                 new WorkflowTimeoutError({
@@ -1958,9 +2042,15 @@ export class WorkflowBuilder<
             }
           }
 
-          // First execution or still waiting — suspend
-          const signalTimeoutAt =
-            timeoutMs != null ? new Date(clock.currentTimeMs() + timeoutMs) : undefined;
+          // First execution: compute the deadline once. Re-entry while still
+          // waiting: keep the stored deadline. Recomputing it here would push
+          // it forward on every resume (result polls, signal scans), so a
+          // frequently resumed workflow would never time out.
+          const signalTimeoutAt = alreadyWaiting
+            ? stepState.signalTimeoutAt
+            : timeoutMs != null
+              ? new Date(clock.currentTimeMs() + timeoutMs)
+              : undefined;
           yield* promiseOrDie(() =>
             execParams.storage.suspendWorkflow(execParams.workflowId, name, {
               status: "waiting_for_signal",
@@ -2030,7 +2120,7 @@ export class WorkflowBuilder<
         version: this._version,
         type: this._type,
         metadata: this._metadata,
-        steps: this._steps,
+        steps: this._frozenSteps(),
         retry: this._retry,
         compensateConfig: this._compensateConfig,
         dlq: this._dlq,
@@ -2072,7 +2162,7 @@ export class WorkflowBuilder<
   /** @internal — project builder state into the Workflow._definition shape. */
   private _toDefinitionInternals(): WorkflowDefinitionInternals {
     return {
-      steps: this._steps,
+      steps: this._frozenSteps(),
       type: this._type,
       metadata: this._metadata,
       retry: this._retry,
@@ -2110,6 +2200,15 @@ export class WorkflowBuilder<
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
+
+  /** Step definitions with this builder's final version/patches bound in. */
+  private _frozenSteps(): StepDefinition[] {
+    return bindDefinitionConfig({
+      steps: this._steps,
+      workflowVersion: this._version,
+      patches: this._patches,
+    });
+  }
 
   /** Create a new builder inheriting all config from this one. */
   private _derive(
@@ -2225,12 +2324,14 @@ export class WorkflowBuilder<
 
         const cacheOption = params.options?.cache;
         if (!cacheOption) return asStepEff(params.fn(ctx), params.name);
-        return wrapWithStepCache(
-          cacheOption,
-          ctx as StepContext<unknown, unknown>,
-          () => asStepEff(params.fn(ctx), params.name),
-          cacheOption.namespace ?? workflowName,
-        );
+        return wrapWithStepCache({
+          cache: cacheOption,
+          ctx: ctx as StepContext<unknown, unknown>,
+          runBody: () => asStepEff(params.fn(ctx), params.name),
+          stepName: params.name,
+          namespace: cacheOption.namespace ?? workflowName,
+          codec,
+        });
       },
     };
 
@@ -2243,38 +2344,97 @@ export class WorkflowBuilder<
 // a cache miss on any cache error so storage hiccups never fail the workflow.
 // ---------------------------------------------------------------------------
 
-function wrapWithStepCache(
-  cache: StepCacheOption,
-  ctx: StepContext<unknown, unknown>,
-  runBody: () => StepEff<unknown, TaggedError>,
-  namespace: string,
-): StepEff<unknown, TaggedError> {
-  const cacheKey = `${namespace}:${cache.key(ctx)}`;
+/**
+ * Bind definition-level config (`workflowVersion`, `patches`) into the
+ * `ExecuteParams` of the steps that read it, at freeze time. Builder methods
+ * return new builders that share `StepDefinition` objects, so a step closure
+ * must not read builder fields itself; config set later in the chain (e.g.
+ * `.version()` after `.journaled()`) would be invisible. Values the caller
+ * already put on `ExecuteParams` win. Only `journaled` steps read this
+ * config, so other steps are returned unchanged.
+ */
+function bindDefinitionConfig(params: {
+  readonly steps: StepDefinition[];
+  readonly workflowVersion: string | undefined;
+  readonly patches: readonly string[] | undefined;
+}): StepDefinition[] {
+  const { workflowVersion, patches } = params;
+  return params.steps.map((step) => {
+    if (step.kind !== "journaled") return step;
+    const execute = step.execute;
+    return {
+      ...step,
+      execute: (execParams: ExecuteParams) =>
+        execute({
+          ...execParams,
+          workflowVersion: execParams.workflowVersion ?? workflowVersion,
+          patches: execParams.patches ?? patches,
+        }),
+    };
+  });
+}
+
+/** Sentinel for "no usable cache entry" (absent, unreadable or undecodable). */
+const CACHE_MISS: unique symbol = Symbol("cache-miss");
+
+/**
+ * Build the store key for a cached step result. The physical step name is
+ * always part of the key, so two steps (or two `parallelSteps` branches)
+ * that share one cache config and see the same context never read each
+ * other's results.
+ */
+export function stepCacheKey(params: {
+  readonly namespace: string;
+  readonly stepName: string;
+  readonly key: string;
+}): string {
+  return `${params.namespace}:${params.stepName}:${params.key}`;
+}
+
+function wrapWithStepCache(params: {
+  readonly cache: StepCacheOption;
+  readonly ctx: StepContext<unknown, unknown>;
+  readonly runBody: () => StepEff<unknown, TaggedError>;
+  /** Physical step name (for `parallelSteps` branches: `block.branch`). */
+  readonly stepName: string;
+  readonly namespace: string;
+  /** The step's codec. Values are stored encoded and decoded on a hit. */
+  readonly codec: Codec<unknown>;
+}): StepEff<unknown, TaggedError> {
+  const { cache, codec } = params;
+  const cacheKey = stepCacheKey({
+    namespace: params.namespace,
+    stepName: params.stepName,
+    key: cache.key(params.ctx),
+  });
 
   // Lookup is expressed as an Eff so we can keep everything inside the
-  // caller's error channel. A sentinel object marks "miss" so `undefined`
-  // cached values are distinguishable from misses.
-  const miss = Symbol("cache-miss");
-  const lookup = promiseOrDie(async () => {
+  // caller's error channel. Values are stored codec-encoded, so a hit has
+  // the same shape as a fresh run's result (Dates, BigInts, etc. survive a
+  // serializing store). `undefined` from the store means "no entry"; a step
+  // result of `undefined` is still cacheable because its encoded form is
+  // not `undefined` for the default codec. Read and decode failures fall
+  // through to a miss.
+  const lookup = promiseOrDie(async (): Promise<unknown> => {
     try {
       const hit = await cache.store.get(cacheKey);
-      return hit === undefined ? miss : hit;
+      return hit === undefined ? CACHE_MISS : codec.decode(hit);
     } catch {
-      return miss;
+      return CACHE_MISS;
     }
   });
 
   return lookup.flatMap((value): StepEff<unknown, TaggedError> => {
-    if (value !== miss) return succeed(value);
+    if (value !== CACHE_MISS) return succeed(value);
     // Miss — run the body, then write to cache on success. The write is
     // awaited (so tests see cache state deterministically), and write
     // errors are swallowed so cache backends can never fail a step.
-    return runBody().tap((result) =>
+    return params.runBody().tap((result) =>
       promiseOrDie(async () => {
         try {
-          await cache.store.set(cacheKey, result, cache.ttlMs);
+          await cache.store.set(cacheKey, codec.encode(result), cache.ttlMs);
         } catch {
-          /* ignore cache write failures — ticket contract */
+          /* a cache write failure must never fail the step */
         }
       }),
     );
