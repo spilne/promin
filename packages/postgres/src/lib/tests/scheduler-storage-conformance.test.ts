@@ -18,7 +18,9 @@ postgresDescribe("PgSchedulerStorage conformance", { migrate }, (pg) => {
     // Truncate both scheduler tables so every test in the suite sees an
     // empty backend. CASCADE handles the FK from durable_schedule_ticks
     // back to durable_schedules.
-    await pg.db.execute(sql`TRUNCATE TABLE wf_schedules, wf_schedule_ticks CASCADE`);
+    await pg.db.execute(
+      sql`TRUNCATE TABLE wf_schedules, wf_schedule_ticks, wf_leader_leases CASCADE`,
+    );
     return new PgSchedulerStorage({ db: pg.db });
   });
 });

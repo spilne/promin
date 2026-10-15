@@ -49,15 +49,17 @@ async function logTick(
   tickNumber: number,
   firedAt: Date,
 ): Promise<void> {
-  await sch.commitPoll([
-    {
-      id: scheduleId,
-      firedAt,
-      tickIncrement: 1,
-      nextRun: new Date(firedAt.getTime() + 60_000),
-      ticks: [{ scheduleId, scheduledAt: firedAt, firedAt, tickNumber }],
-    },
-  ]);
+  await sch.commitPoll({
+    updates: [
+      {
+        id: scheduleId,
+        firedAt,
+        tickIncrement: 1,
+        nextRun: new Date(firedAt.getTime() + 60_000),
+        ticks: [{ scheduleId, scheduledAt: firedAt, firedAt, tickNumber }],
+      },
+    ],
+  });
 }
 
 describe("getScheduleHistory — agent ticks join the workflow row at scheduleTickRunId", () => {

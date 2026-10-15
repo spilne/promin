@@ -3,27 +3,30 @@
 //
 // Heavy lifting (cron/rrule/catch-up/jitter/leader loop) lives in the generic
 // DurableScheduler shell in @promin/workflow. This file is the storage-only
-// adapter — schedule CRUD, due-row lookup, and advisory-lock leader election
-// (perfect-postgres PgLeaderElection, one lock per namespace).
+// adapter — schedule CRUD, due-row lookup, and leader leases
+// (`PgLeaderLeaseStore`, one `wf_leader_leases` row per lease key) with the
+// lease fence checked inside `commitPoll`'s transaction.
 // ---------------------------------------------------------------------------
 
 import { and, asc, eq, inArray, isNotNull, lte, sql, type SQL } from "drizzle-orm";
-import type { DurableScheduleConfig, ScheduleCommit, SchedulerStorage } from "@promin/workflow";
-import { durableSchedules, durableScheduleTicks } from "./scheduler-schema.ts";
-import { type DrizzleDb, hashToInt32, PgLeaderElection } from "@spilne/perfect-postgres";
+import type {
+  CommitPollResult,
+  DurableScheduleConfig,
+  LeaderLease,
+  ScheduleCommit,
+  SchedulerStorage,
+} from "@promin/workflow";
+import { durableSchedules, durableScheduleTicks, leaderLeases } from "./scheduler-schema.ts";
+import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
+import { assertPgLeaseCurrent, PgLeaderLeaseStore } from "./pg-leader-lease-store.ts";
+import { execRaw } from "./exec-raw.ts";
 
 export interface PgSchedulerStorageConfig {
   db: DrizzleDb;
   /**
-   * Namespace → leader-lock advisory ID. If unset, all namespaces share one
-   * lock derived from the literal "wf-scheduler-leader". Callers running
-   * multiple per-namespace leaders should provide unique IDs per namespace.
-   */
-  leaderLockId?: number;
-  /**
    * Time source for client-side `updatedAt` timestamps on schedule CRUD.
-   * Default: `SystemWallClock`. Pass a `FakeWallClock` for deterministic tests.
+   * Lease expiry always uses the database clock. Default: `SystemWallClock`.
    */
   clock?: WallClock;
 }
@@ -33,16 +36,17 @@ export class PgSchedulerStorage implements SchedulerStorage {
   static readonly schema = {
     schedules: durableSchedules,
     ticks: durableScheduleTicks,
+    leaderLeases,
   };
 
   private readonly db: DrizzleDb;
-  private readonly leaderLockId: number;
   private readonly clock: WallClock;
+  private readonly leases: PgLeaderLeaseStore;
 
   constructor(config: PgSchedulerStorageConfig) {
     this.db = config.db;
-    this.leaderLockId = config.leaderLockId ?? hashToInt32("wf-scheduler-leader");
     this.clock = config.clock ?? SystemWallClock;
+    this.leases = new PgLeaderLeaseStore({ db: config.db });
   }
 
   // -------------------------------------------------------------------------
@@ -139,35 +143,64 @@ export class PgSchedulerStorage implements SchedulerStorage {
       .where(eq(durableSchedules.id, id));
   }
 
-  async commitPoll(updates: ScheduleCommit[]): Promise<void> {
-    if (updates.length === 0) return;
+  async commitPoll(params: {
+    updates: readonly ScheduleCommit[];
+    lease?: LeaderLease;
+  }): Promise<CommitPollResult> {
+    const { updates, lease } = params;
+    if (updates.length === 0 && !lease) return { conflicts: [] };
+    if (!lease) return { conflicts: await this.applyCommits({ db: this.db, updates }) };
+    // Fence and writes in one transaction: the share lock on the lease row
+    // holds off a takeover until the writes are committed.
+    const conflicts = await this.db.transaction(async (tx) => {
+      const db = tx as unknown as DrizzleDb;
+      await assertPgLeaseCurrent({ db, lease });
+      return updates.length === 0 ? [] : await this.applyCommits({ db, updates });
+    });
+    return { conflicts };
+  }
 
-    // One UPDATE … FROM (VALUES …) statement covers every id in the batch.
-    // Drizzle's .update().from() expects a typed Table, not a (VALUES …)
-    // literal — so the VALUES list and join predicate use `sql`, while the
-    // column SETs reference the typed `durableSchedules` table for safety.
-    // Dates are serialized to ISO strings explicitly — the postgres-js bind
-    // path inside `sql.raw`/`sql.join` doesn't auto-coerce Date in this path,
-    // so we rely on the `::timestamptz` cast to parse the string server-side.
+  /**
+   * One `UPDATE … FROM (VALUES …)` for the whole batch. Rows whose
+   * `expected` tick count no longer matches are left alone; the ids of
+   * guarded entries that weren't updated are returned as conflicts.
+   * Dates are bound as ISO strings with a `::timestamptz` cast — the
+   * postgres-js bind path inside `sql.join` doesn't coerce Date.
+   */
+  private async applyCommits(params: {
+    db: DrizzleDb;
+    updates: readonly ScheduleCommit[];
+  }): Promise<string[]> {
+    const { updates } = params;
     const valuesSql = sql.join(
       updates.map(
         (u) =>
-          sql`(${u.id}::text, ${u.firedAt?.toISOString() ?? null}::timestamptz, ${u.tickIncrement ?? 0}::bigint, ${u.nextRun?.toISOString() ?? null}::timestamptz)`,
+          sql`(${u.id}::text, ${u.firedAt?.toISOString() ?? null}::timestamptz, ${u.tickIncrement ?? 0}::bigint, ${u.nextRun !== undefined}::boolean, ${u.nextRun?.toISOString() ?? null}::timestamptz, ${u.expectedTickCount ?? null}::bigint)`,
       ),
       sql`, `,
     );
-
-    await this.db
-      .update(durableSchedules)
-      .set({
-        lastFiredAt: sql`COALESCE(v.fired_at, ${durableSchedules.lastFiredAt})`,
-        tickCount: sql`${durableSchedules.tickCount} + v.tick_inc`,
-        // A schedule paused since the poll loaded it stays out of due-tracking.
-        nextRun: sql`CASE WHEN ${durableSchedules.enabled} THEN v.next_run::timestamptz ELSE NULL END`,
-        updatedAt: this.clock.now(),
-      })
-      .from(sql`(VALUES ${valuesSql}) AS v(id, fired_at, tick_inc, next_run)` as any)
-      .where(sql`${durableSchedules.id} = v.id`);
+    const rows = await execRaw(
+      params.db,
+      sql`
+      UPDATE wf_schedules AS s SET
+        last_fired_at = COALESCE(v.fired_at, s.last_fired_at),
+        tick_count = s.tick_count + v.tick_inc,
+        -- A schedule paused since the poll loaded it stays out of due-tracking.
+        next_run = CASE
+          WHEN NOT s.enabled THEN NULL
+          WHEN v.set_next THEN v.next_run
+          ELSE s.next_run
+        END,
+        updated_at = ${this.clock.now().toISOString()}::timestamptz
+      FROM (VALUES ${valuesSql}) AS v(id, fired_at, tick_inc, set_next, next_run, expected)
+      WHERE s.id = v.id AND (v.expected IS NULL OR s.tick_count = v.expected)
+      RETURNING s.id
+    `,
+    );
+    const applied = new Set(rows.map((r) => String(r.id)));
+    return updates
+      .filter((u) => u.expectedTickCount !== undefined && !applied.has(u.id))
+      .map((u) => u.id);
   }
 
   // -------------------------------------------------------------------------
@@ -289,19 +322,19 @@ export class PgSchedulerStorage implements SchedulerStorage {
   }
 
   // -------------------------------------------------------------------------
-  // Leader election — pg_advisory_lock per namespace
+  // Leader election — lease rows, expiry on the server clock
   // -------------------------------------------------------------------------
 
   async tryAcquireLeader(params: {
+    key: string;
     instanceId: string;
-    namespace?: string;
     ttlMs: number;
-  }): Promise<boolean> {
-    // Per-namespace lock: derive the advisory ID from base + namespace hash.
-    const lockId = params.namespace
-      ? this.leaderLockId ^ hashToInt32(params.namespace)
-      : this.leaderLockId;
-    return new PgLeaderElection({ db: this.db, lockId }).tryAcquire();
+  }): Promise<LeaderLease | null> {
+    return await this.leases.tryAcquireLeader(params);
+  }
+
+  async releaseLeader(params: { lease: LeaderLease }): Promise<void> {
+    await this.leases.releaseLeader(params);
   }
 
   async findDueAcross(params: {

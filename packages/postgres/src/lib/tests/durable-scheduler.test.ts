@@ -212,7 +212,7 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
   // -------------------------------------------------------------------------
   schedulerTestSuite("DurableScheduler", async () => {
     await pg.db.execute(
-      sql`TRUNCATE ${DurableScheduler.schema.schedules}, ${DurableScheduler.schema.ticks} CASCADE`,
+      sql`TRUNCATE ${DurableScheduler.schema.schedules}, ${DurableScheduler.schema.ticks}, ${DurableScheduler.schema.leaderLeases} CASCADE`,
     );
     const scheduler = createDurableScheduler({ db: pg.db, pollIntervalMs: 25 });
     return {
@@ -220,21 +220,18 @@ postgresDescribe("DurableScheduler", { migrate }, (pg) => {
     };
   });
 
-  describe("leader election", () => {
-    it("only one instance acquires the lock", async () => {
-      const s1 = createDurableScheduler({ db: pg.db, instanceId: "instance-1" });
-      // In production, s2 would be a separate process with its own DB connection.
-      // Advisory locks are session-scoped, so same-connection test is limited.
-      void createDurableScheduler({ db: pg.db, instanceId: "instance-2" });
+  describe("manual fires", () => {
+    it("concurrent triggerNow calls take distinct tick numbers", async () => {
+      const scheduler = createDurableScheduler({ db: pg.db });
+      await scheduler.register({ id: "manual-race", intervalMs: 60_000 });
 
-      // Both try to acquire — with advisory locks on the same connection,
-      // the same session can re-acquire. In production, these would be
-      // separate connections from separate processes.
-      // Here we just verify the lock mechanism doesn't throw.
-      await s1.register({ id: "leader-test", intervalMs: 1000 });
+      const ticks = await Promise.all(
+        Array.from({ length: 8 }, () => scheduler.triggerNow("manual-race")),
+      );
 
-      const t1 = await s1.triggerNow("leader-test");
-      expect(t1).not.toBeNull();
+      expect(ticks.map((t) => t!.tickNumber).sort((a, b) => a - b)).toEqual([
+        0, 1, 2, 3, 4, 5, 6, 7,
+      ]);
     });
   });
 });

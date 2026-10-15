@@ -23,10 +23,12 @@ export interface DurableSchedulerConfig {
   instanceId?: string;
   /** Poll interval in ms. Default: 1000. */
   pollIntervalMs?: number;
-  /** Leader lock advisory lock ID. Default: hash of "wf-scheduler-leader". */
-  leaderLockId?: number;
+  /** Leader-lease TTL (server clock). Default: 3 × pollIntervalMs. */
+  leaderLockTtlMs?: number;
   /** Scope this scheduler instance to a single namespace. */
   namespace?: string;
+  /** Hash partitioning; each partition elects its own leader. */
+  partition?: GenericConfig["partition"];
   /** Max schedules claimed per poll cycle. Default: 100. */
   batchSize?: number;
   /**
@@ -53,16 +55,14 @@ export class DurableScheduler extends GenericDurableScheduler {
   static readonly schema = PgSchedulerStorage.schema;
 
   constructor(config: DurableSchedulerConfig) {
-    const storage = new PgSchedulerStorage({
-      db: config.db,
-      leaderLockId: config.leaderLockId,
-      clock: config.clock,
-    });
+    const storage = new PgSchedulerStorage({ db: config.db, clock: config.clock });
     const cfg: GenericConfig = {
       storage,
       instanceId: config.instanceId,
       pollIntervalMs: config.pollIntervalMs,
+      leaderLockTtlMs: config.leaderLockTtlMs,
       namespace: config.namespace,
+      partition: config.partition,
       batchSize: config.batchSize,
       clock: config.clock,
       onError: config.onError,

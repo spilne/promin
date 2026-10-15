@@ -12,10 +12,10 @@ Management methods (`register`, `unregister`, `pause`, `resume`, `list`) are asy
 
 Two implementations:
 
-| Implementation      | Package            | Persistence                                                        | Multi-instance                      |
-| ------------------- | ------------------ | ------------------------------------------------------------------ | ----------------------------------- |
-| `InMemoryScheduler` | `@promin/workflow` | None                                                               | No                                  |
-| `DurableScheduler`  | `@promin/workflow` | Pluggable (`SchedulerStorage`): in-memory, Postgres, Redis, SQLite | Yes (leader election per namespace) |
+| Implementation      | Package            | Persistence                                                        | Multi-instance                                        |
+| ------------------- | ------------------ | ------------------------------------------------------------------ | ----------------------------------------------------- |
+| `InMemoryScheduler` | `@promin/workflow` | None                                                               | No                                                    |
+| `DurableScheduler`  | `@promin/workflow` | Pluggable (`SchedulerStorage`): in-memory, Postgres, Redis, SQLite | Yes (fenced leader lease per namespace and partition) |
 
 ## ScheduleConfig
 
@@ -122,7 +122,7 @@ A schedule paused, replaced or removed while a stream waits for its next fire ti
 
 - **Persistent schedules** in the storage backend
 - **Catch-up** for missed runs: when more than one occurrence was missed (the scheduler was down), the newest `max(1, maxCatchUp)` fire, oldest first — for cron, RRULE and interval schedules alike
-- **Leader election** per namespace so only one instance fires
+- **Leader election** with fenced leases per namespace (and per partition) so only one instance fires and a stale leader can't commit
 - **Jitter** (`jitterMs`) delays each next run by a random `[0, jitterMs)`, spreading schedules that share a boundary
 - **Backfill** to generate ticks for past time ranges
 
@@ -131,6 +131,18 @@ A schedule paused, replaced or removed while a stream waits for its next fire ti
 Each poll computes the due ticks, emits them, and commits the fire state only after the consumer has pulled past them; then it waits `pollIntervalMs` and polls again. A tick is acknowledged when the consumer pulls the next one. If the consumer stops early (`take(n)`, interruption, crash), schedules whose ticks were all acknowledged are committed and the rest stay due: the next poll emits them again with the **same `tickNumber`**. Derive run ids with `scheduleTickRunId(tick.scheduleId, tick.tickNumber)` (or another id derived only from the tick, like `toWorkflowId` below) so a redelivered tick is a no-op. Zorya's scheduler loop gives the same guarantee: it dispatches a poll's ticks, then commits.
 
 Storage errors never end the stream. A failed poll is reported through `onError` and retried with exponential backoff (on the injected clock, capped by `maxErrorBackoffMs`); a failed commit is reported and its ticks are redelivered; a stored schedule that can't be evaluated (say, an invalid cron written straight to storage) is reported, disabled and skipped while the others keep firing. Paused schedules leave due-tracking (`nextRun = null`), so they never crowd active ones out of a poll batch.
+
+### Leader election and fencing
+
+Only the holder of a **leader lease** polls. There is one lease per namespace and, for a partitioned scheduler, per partition (`schedulerLeaderKey`), so the partitions of a namespace fire in parallel. Every `SchedulerStorage` is a `LeaderLeaseStore`:
+
+- `tryAcquireLeader({ key, instanceId, ttlMs })` acquires or refreshes the lease in one atomic step and returns it (or `null` while another instance holds it). Each lease carries an `epoch` that goes up whenever a new lease starts on the key; a refresh keeps it. Postgres (`wf_leader_leases`, migration `0049`) and Redis (Lua) measure the TTL on the server clock; in-memory and SQLite use the injected `WallClock`.
+- `releaseLeader({ lease })` gives it up. The scheduler releases when its last stream stops, so another instance takes over at its next poll instead of after the TTL.
+- `commitPoll({ updates, lease })` is **fenced**: it writes nothing and throws `StaleLeaseError` unless the lease's epoch is still current, checked in the same transaction (or Lua script) as the writes. A leader that paused past its TTL can still emit the ticks it had planned (they are redelivered under the same `tickNumber` by the new leader), but it can't commit stale fire state over the new leader's.
+
+Entries also carry a compare-and-set guard (`expectedTickCount`): a poll never commits over a fire that took its tick numbers in the meantime. `triggerNow` and `backfill` take their numbers the same way, so a manual fire never shares a `tickNumber` with another fire.
+
+The lease API is exported for other leader-elected loops: `PgLeaderLeaseStore` / `assertPgLeaseCurrent` (`@promin/postgres`), `RedisLeaderLeaseStore` (`@promin/redis`), `SqliteLeaderLeaseStore` (`@promin/sqlite`), `InMemoryLeaderLeases`, and `LeaseLeaderElection`, which wraps a store and key as a `tryAcquire()` / `release()` election that also exposes the current lease for fencing.
 
 ### Postgres
 

@@ -10,3 +10,4 @@ export {
   type RedisSchedulerStorageConfig,
   type DurableScheduleConfig,
 } from "./lib/index.ts";
+export { RedisLeaderLeaseStore, type RedisLeaderLeaseStoreConfig } from "./lib/index.ts";

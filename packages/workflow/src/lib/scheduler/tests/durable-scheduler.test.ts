@@ -13,9 +13,11 @@ import {
   computeDueTicks,
   computeNextRun,
   planDueTicks,
+  schedulePartition,
   type SchedulerErrorEvent,
 } from "../durable-scheduler.ts";
 import { InMemorySchedulerStorage } from "../in-memory-scheduler-storage.ts";
+import { schedulerLeaderKey } from "../leader-lease.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
 import type { DurableScheduleConfig, ScheduleTick } from "../types.ts";
 
@@ -59,9 +61,11 @@ describe("DurableScheduler scalability features", () => {
     expect(before).toEqual({ lastFired: null, tickCount: 0 });
 
     const fired = new Date();
-    await storage.commitPoll([
-      { id: "ci-1", firedAt: fired, tickIncrement: 5, nextRun: new Date(Date.now() + 1000) },
-    ]);
+    await storage.commitPoll({
+      updates: [
+        { id: "ci-1", firedAt: fired, tickIncrement: 5, nextRun: new Date(Date.now() + 1000) },
+      ],
+    });
     const after = await storage.loadScheduleState("ci-1");
     expect(after).toEqual({ lastFired: fired, tickCount: 5 });
   });
@@ -98,41 +102,56 @@ describe("DurableScheduler scalability features", () => {
     expect(consumer.seen[1]!.firedAt.getTime()).toBe(T0 + 13_000);
   });
 
-  it("partitioning splits workload across instances by hash(id) % count", async () => {
+  it("partitioned instances each lead their own partition and fire concurrently", async () => {
     const storage = new InMemorySchedulerStorage();
+    const workers = [0, 1].map(
+      (index) =>
+        new DurableScheduler({
+          storage,
+          pollIntervalMs: 25,
+          partition: { index, count: 2 },
+          instanceId: `worker-${index}`,
+        }),
+    );
 
-    const w0 = new DurableScheduler({
+    const ids = Array.from({ length: 20 }, (_, i) => `part-${i}`);
+    for (const id of ids) await workers[0]!.register({ id, intervalMs: 60_000 });
+    const expected = [0, 1].map((index) =>
+      ids.filter((id) => schedulePartition({ id, count: 2 }) === index).sort(),
+    );
+    expect(expected[0]!.length).toBeGreaterThan(0);
+    expect(expected[1]!.length).toBeGreaterThan(0);
+
+    // Both streams run at once: a shared leader lock would let only one fire.
+    const fired = await Promise.all(
+      workers.map((w, i) => w.stream().take(expected[i]!.length).toArray().run()),
+    );
+
+    expect(fired.map((ticks) => ticks.map((t) => t.scheduleId).sort())).toEqual(expected);
+  });
+
+  it("partitioned polls look past the other partitions' due schedules", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const storage = new InMemorySchedulerStorage({ clock });
+    const pick = (partition: number) =>
+      Array.from({ length: 200 }, (_, i) => `deep-${i}`)
+        .filter((id) => schedulePartition({ id, count: 2 }) === partition)
+        .slice(0, 10);
+    const [others, mine] = [pick(0), pick(1)];
+    const scheduler = new DurableScheduler({
       storage,
-      pollIntervalMs: 25,
-      partition: { index: 0, count: 2 },
-      // Each worker needs its own leader lock — reuse instanceId so the lock
-      // doesn't bounce. Use distinct ids so they don't compete for it either.
-      instanceId: "worker-0",
-    });
-    const w1 = new DurableScheduler({
-      storage,
-      pollIntervalMs: 25,
+      clock,
+      pollIntervalMs: 1_000,
+      batchSize: 10,
       partition: { index: 1, count: 2 },
-      instanceId: "worker-1",
     });
+    // Partition 0 has no running instance; its schedules are due first.
+    for (const id of others) await scheduler.register({ id, intervalMs: 60_000 });
+    clock.advance(1);
+    for (const id of mine) await scheduler.register({ id, intervalMs: 60_000 });
 
-    for (let i = 0; i < 30; i++) {
-      await w0.register({ id: `part-${i}`, intervalMs: 1000 });
-    }
-
-    // Manually fan out a single fireChunk per partition: instead of relying on
-    // both workers' streams (which would race for the shared in-memory leader
-    // lock), check the partition-filter logic by running them in series.
-    const w0Ticks = await w0.stream().take(15).toArray().run();
-    const w1Ticks = await w1.stream().take(15).toArray().run();
-
-    const w0Ids = w0Ticks.map((t) => t.scheduleId);
-    const w1Ids = w1Ticks.map((t) => t.scheduleId);
-
-    // Each partition should only fire ids whose hash falls in its bucket.
-    // Pure assertion: no schedule appears in both partitions' tick streams.
-    const overlap = w0Ids.filter((id) => w1Ids.includes(id));
-    expect(overlap).toHaveLength(0);
+    const ticks = await scheduler.stream().take(mine.length).toArray().run();
+    expect(ticks.map((t) => t.scheduleId).sort()).toEqual([...mine].sort());
   });
 
   it("partition validation rejects out-of-range index/count", () => {
@@ -844,10 +863,11 @@ describe("DurableScheduler due-time math follows the injected WallClock", () => 
     expect(await storage.findDue({ now: new Date(T0 - 1), limit: 10 })).toEqual([]);
     expect(await storage.findDue({ now: new Date(T0), limit: 10 })).toEqual(["seeded"]);
 
-    expect(await storage.tryAcquireLeader({ instanceId: "a", ttlMs: 1_000 })).toBe(true);
+    const key = schedulerLeaderKey({});
+    expect(await storage.tryAcquireLeader({ key, instanceId: "a", ttlMs: 1_000 })).not.toBeNull();
     clock.advance(999);
-    expect(await storage.tryAcquireLeader({ instanceId: "b", ttlMs: 1_000 })).toBe(false);
+    expect(await storage.tryAcquireLeader({ key, instanceId: "b", ttlMs: 1_000 })).toBeNull();
     clock.advance(2);
-    expect(await storage.tryAcquireLeader({ instanceId: "b", ttlMs: 1_000 })).toBe(true);
+    expect(await storage.tryAcquireLeader({ key, instanceId: "b", ttlMs: 1_000 })).not.toBeNull();
   });
 });

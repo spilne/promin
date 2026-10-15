@@ -30,6 +30,7 @@
 // ---------------------------------------------------------------------------
 
 import type {
+  LeaderLease,
   SchedulerStorage,
   ScheduleTick,
   DurableScheduleConfig,
@@ -41,7 +42,9 @@ import {
   commitPlannedSchedules,
   computeNextRun,
   planDueTicks,
+  schedulePartition,
   scheduleTickRunId,
+  schedulerLeaderKey,
 } from "@promin/workflow";
 import type { RunTrigger } from "../routes/runs.ts";
 
@@ -108,8 +111,10 @@ export interface SchedulerLoopConfig {
   dispatchConcurrency?: number;
   /**
    * Hash partitioning so multiple Zorya instances can share work across
-   * different schedule subsets while leader election still gates each
-   * partition's ticks. Default: undefined (single partition).
+   * different schedule subsets. Each (namespace, partition) pair has its own
+   * leader lease, so the partitions fire in parallel. Run every partition:
+   * see `DurableSchedulerConfig.partition`. Default: undefined (single
+   * partition).
    */
   partition?: { index: number; count: number };
   /**
@@ -142,6 +147,8 @@ export class SchedulerLoop {
   private readonly onError: (event: SchedulerErrorEvent) => void;
   private running = false;
   private loopPromise?: Promise<void>;
+  /** Leases this loop currently holds, by lease key; released on `stop()`. */
+  private readonly leases = new Map<string, LeaderLease>();
   /** Cuts the current between-poll wait short; set only while waiting. */
   private wakeUp?: () => void;
 
@@ -183,6 +190,16 @@ export class SchedulerLoop {
     this.wakeUp?.();
     if (this.loopPromise) await this.loopPromise.catch(() => {});
     this.loopPromise = undefined;
+    // Hand leadership over now rather than after the TTL.
+    const held = [...this.leases.values()];
+    this.leases.clear();
+    await Promise.all(
+      held.map((lease) =>
+        this.storage.releaseLeader({ lease }).catch((error: unknown) => {
+          this.report({ phase: "release", error });
+        }),
+      ),
+    );
   }
 
   /**
@@ -222,31 +239,45 @@ export class SchedulerLoop {
    * doesn't exist or is disabled.
    */
   async fireOnce(scheduleId: string): Promise<ScheduleTick | null> {
-    const config = await this.storage.loadSchedule(scheduleId);
-    if (!config) return null;
-    if (config.enabled === false) return null;
-
-    const state = await this.storage.loadScheduleState(scheduleId);
-    const tickNumber = state?.tickCount ?? 0;
-    const now = this.clock.now();
-    const tick: ScheduleTick = {
-      scheduleId,
-      scheduleName: config.name,
-      scheduledAt: now,
-      firedAt: now,
-      tickNumber,
-      metadata: config.metadata,
-    };
-
-    await this.storage.commitPoll([
-      {
-        id: scheduleId,
+    // The tick takes the next number with a compare-and-set on tickCount,
+    // retried if a poll or another manual fire got there first, so it never
+    // shares a tickNumber (and so a run id) with another fire.
+    let fired: { tick: ScheduleTick; config: DurableScheduleConfig } | undefined;
+    for (let attempt = 0; attempt < FIRE_ONCE_ATTEMPTS && !fired; attempt++) {
+      const [config, state] = await Promise.all([
+        this.storage.loadSchedule(scheduleId),
+        this.storage.loadScheduleState(scheduleId),
+      ]);
+      if (!config || !state || config.enabled === false) return null;
+      const now = this.clock.now();
+      const tick: ScheduleTick = {
+        scheduleId,
+        scheduleName: config.name,
+        scheduledAt: now,
         firedAt: now,
-        tickIncrement: 1,
-        nextRun: computeNextRun(config, this.clock),
-        ticks: [tick],
-      },
-    ]);
+        tickNumber: state.tickCount,
+        metadata: config.metadata,
+      };
+      const { conflicts } = await this.storage.commitPoll({
+        updates: [
+          {
+            id: scheduleId,
+            firedAt: now,
+            tickIncrement: 1,
+            expectedTickCount: state.tickCount,
+            nextRun: computeNextRun(config, this.clock),
+            ticks: [tick],
+          },
+        ],
+      });
+      if (conflicts.length === 0) fired = { tick, config };
+    }
+    if (!fired) {
+      throw new Error(
+        `SchedulerLoop: schedule "${scheduleId}" kept changing; fireOnce gave up after ${FIRE_ONCE_ATTEMPTS} attempts`,
+      );
+    }
+    const { tick, config } = fired;
 
     try {
       await this.dispatch(tick, config);
@@ -258,20 +289,42 @@ export class SchedulerLoop {
     return tick;
   }
 
-  private async tickSingleNamespace(namespace: string | undefined): Promise<ScheduleTick[]> {
-    const isLeader = await this.storage.tryAcquireLeader({
+  /** Acquire or refresh the lease for one namespace (and this loop's partition). */
+  private async acquireLease(namespace: string | undefined): Promise<LeaderLease | null> {
+    const key = schedulerLeaderKey({ namespace, partition: this.partition });
+    const lease = await this.storage.tryAcquireLeader({
+      key,
       instanceId: this.instanceId,
-      namespace,
       ttlMs: this.leaderLockTtlMs,
     });
-    if (!isLeader) return [];
+    if (lease) this.leases.set(key, lease);
+    else this.leases.delete(key);
+    return lease;
+  }
+
+  /** Partitions filter after `findDue`, so leave room for the other partitions' due ids. */
+  private get fetchLimit(): number {
+    return this.batchSize * (this.partition?.count ?? 1);
+  }
+
+  private inPartition(id: string): boolean {
+    return (
+      !this.partition ||
+      schedulePartition({ id, count: this.partition.count }) === this.partition.index
+    );
+  }
+
+  private async tickSingleNamespace(namespace: string | undefined): Promise<ScheduleTick[]> {
+    const lease = await this.acquireLease(namespace);
+    if (!lease) return [];
 
     const dueIds = await this.storage.findDue({
       now: this.clock.now(),
-      limit: this.batchSize,
+      limit: this.fetchLimit,
       namespace,
     });
-    return await this.processDueIds(dueIds);
+    const targetIds = dueIds.filter((id) => this.inPartition(id)).slice(0, this.batchSize);
+    return await this.processDueIds({ dueIds: targetIds, lease });
   }
 
   private async tickAcrossNamespaces(): Promise<ScheduleTick[]> {
@@ -281,7 +334,7 @@ export class SchedulerLoop {
     // appear here so they cost nothing.
     const due = await this.storage.findDueAcross({
       now: this.clock.now(),
-      limit: this.batchSize,
+      limit: this.fetchLimit,
       namespaces: filter,
     });
     if (due.length === 0) return [];
@@ -289,10 +342,7 @@ export class SchedulerLoop {
     // Group by namespace so each tenant's leader lock + commit happens
     // independently. A slow / contested namespace can't block the others.
     const byNamespace = new Map<string | undefined, string[]>();
-    for (const row of due) {
-      if (this.partition && hashCode(row.id) % this.partition.count !== this.partition.index) {
-        continue;
-      }
+    for (const row of due.filter((r) => this.inPartition(r.id)).slice(0, this.batchSize)) {
       const list = byNamespace.get(row.namespace) ?? [];
       list.push(row.id);
       byNamespace.set(row.namespace, list);
@@ -304,30 +354,23 @@ export class SchedulerLoop {
     // once without coupling them.
     const perNamespace = await Promise.all(
       [...byNamespace.entries()].map(async ([namespace, ids]) => {
-        const isLeader = await this.storage.tryAcquireLeader({
-          instanceId: this.instanceId,
-          namespace,
-          ttlMs: this.leaderLockTtlMs,
-        });
-        if (!isLeader) return [] as ScheduleTick[];
-        return await this.processDueIds(ids);
+        const lease = await this.acquireLease(namespace);
+        if (!lease) return [] as ScheduleTick[];
+        return await this.processDueIds({ dueIds: ids, lease });
       }),
     );
     return perNamespace.flat();
   }
 
   /**
-   * Shared post-findDue path: load configs/states, compute ticks,
-   * commitPoll, dispatch.
+   * Shared post-findDue path (ids already partition-filtered): load
+   * configs/states, compute ticks, dispatch, then commit under `lease`.
    */
-  private async processDueIds(dueIds: readonly string[]): Promise<ScheduleTick[]> {
-    const targetIds = this.namespacesMode
-      ? // Cross-namespace path already partition-filtered upstream.
-        [...dueIds]
-      : dueIds.filter((id) => {
-          if (!this.partition) return true;
-          return hashCode(id) % this.partition.count === this.partition.index;
-        });
+  private async processDueIds(params: {
+    dueIds: readonly string[];
+    lease: LeaderLease;
+  }): Promise<ScheduleTick[]> {
+    const targetIds = [...params.dueIds];
     if (targetIds.length === 0) return [];
 
     const [configs, states] = await Promise.all([
@@ -373,9 +416,11 @@ export class SchedulerLoop {
     );
 
     // Commit after dispatch: if this fails, the next poll re-fires the same
-    // ticks and the deterministic run ids make the repeat a no-op.
+    // ticks and the deterministic run ids make the repeat a no-op. The lease
+    // fences it: if leadership moved on during dispatch the commit is
+    // rejected and the new leader redelivers.
     try {
-      await commitPlannedSchedules({ storage: this.storage, plans });
+      await commitPlannedSchedules({ storage: this.storage, plans, lease: params.lease });
     } catch (error) {
       this.report({ phase: "commit", error });
     }
@@ -480,14 +525,5 @@ function defaultOnError(event: SchedulerErrorEvent): void {
   console.error(`[scheduler-loop] ${event.phase} failed${where}:`, event.error);
 }
 
-// 32-bit non-cryptographic string hash. Cheap + deterministic — same
-// algorithm DurableScheduler uses for its partitioning so a SchedulerLoop
-// and a standalone DurableScheduler can coexist on the same partition
-// indices without colliding.
-function hashCode(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) {
-    h = (h * 31 + s.charCodeAt(i)) | 0;
-  }
-  return Math.abs(h);
-}
+/** Upper bound on compare-and-set retries for `fireOnce`. */
+const FIRE_ONCE_ATTEMPTS = 10;

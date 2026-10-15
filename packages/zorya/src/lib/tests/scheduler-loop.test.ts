@@ -21,6 +21,8 @@ import {
   InMemoryWorkflowStorage,
   workflow,
   createWorkflowRunner,
+  isStaleLeaseError,
+  schedulePartition,
 } from "@promin/workflow";
 import type { ScheduleTick, SchedulerErrorEvent } from "@promin/workflow";
 import { ZoryaClient, ZoryaWorker } from "@promin/zorya-client";
@@ -616,5 +618,112 @@ describe("SchedulerLoop — delivery and isolation", () => {
 
     expect(errors.map((e) => e.phase)).toEqual(["poll"]);
     expect(fired.map((t) => t.scheduleId)).toEqual(["a"]);
+  });
+});
+
+describe("SchedulerLoop — leader leases", () => {
+  const T0 = Date.parse("2026-01-01T00:00:00Z");
+
+  function loopOn(params: {
+    storage: InMemorySchedulerStorage;
+    clock: FakeWallClock;
+    instanceId: string;
+    partition?: { index: number; count: number };
+    onError?: (e: SchedulerErrorEvent) => void;
+  }) {
+    const fired: ScheduleTick[] = [];
+    const loop = new SchedulerLoop({
+      storage: params.storage,
+      clock: params.clock,
+      instanceId: params.instanceId,
+      partition: params.partition,
+      leaderLockTtlMs: 60_000,
+      fire: async (tick) => {
+        fired.push(tick);
+      },
+      onError: params.onError,
+    });
+    return { loop, fired };
+  }
+
+  it("stop() releases the lease so another instance leads at once", async () => {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemorySchedulerStorage({ clock });
+    const a = loopOn({ storage, clock, instanceId: "A" });
+    const b = loopOn({ storage, clock, instanceId: "B" });
+    await storage.upsertSchedule({ id: "x", intervalMs: 60_000 });
+
+    await a.loop.tickOnce();
+    await storage.upsertSchedule({ id: "y", intervalMs: 60_000 });
+    expect(await b.loop.tickOnce()).toEqual([]);
+
+    await a.loop.stop();
+    expect((await b.loop.tickOnce()).map((t) => t.scheduleId)).toEqual(["y"]);
+  });
+
+  it("partitioned loops each lead their own partition", async () => {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemorySchedulerStorage({ clock });
+    const loops = [0, 1].map((index) =>
+      loopOn({ storage, clock, instanceId: `p${index}`, partition: { index, count: 2 } }),
+    );
+    const ids = Array.from({ length: 10 }, (_, i) => `job-${i}`);
+    for (const id of ids) await storage.upsertSchedule({ id, intervalMs: 60_000 });
+
+    const fired = await Promise.all(loops.map((l) => l.loop.tickOnce()));
+
+    expect(
+      fired
+        .flat()
+        .map((t) => t.scheduleId)
+        .sort(),
+    ).toEqual([...ids].sort());
+    for (const [index, ticks] of fired.entries()) {
+      expect(ticks.every((t) => schedulePartition({ id: t.scheduleId, count: 2 }) === index)).toBe(
+        true,
+      );
+    }
+  });
+
+  it("a loop whose lease was taken over can't commit the poll it dispatched", async () => {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemorySchedulerStorage({ clock });
+    const errors: SchedulerErrorEvent[] = [];
+    await storage.upsertSchedule({ id: "x", intervalMs: 60_000 });
+    let b: ReturnType<typeof loopOn> | undefined;
+    const fired: ScheduleTick[] = [];
+    // A's dispatch takes longer than its lease; B takes over meanwhile.
+    const a = new SchedulerLoop({
+      storage,
+      clock,
+      instanceId: "A",
+      leaderLockTtlMs: 1_000,
+      fire: async (tick) => {
+        fired.push(tick);
+        clock.advance(2_000);
+        await b!.loop.tickOnce();
+      },
+      onError: (e) => void errors.push(e),
+    });
+    b = loopOn({ storage, clock, instanceId: "B" });
+
+    await a.tickOnce();
+
+    expect(errors.map((e) => [e.phase, isStaleLeaseError(e.error)])).toEqual([["commit", true]]);
+    expect(fired.map((t) => t.tickNumber)).toEqual([0]);
+    expect(b.fired.map((t) => t.tickNumber)).toEqual([0]);
+    expect((await storage.loadScheduleState("x"))?.tickCount).toBe(1);
+  });
+
+  it("concurrent fireOnce calls take distinct tick numbers", async () => {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemorySchedulerStorage({ clock });
+    const { loop } = loopOn({ storage, clock, instanceId: "A" });
+    await storage.upsertSchedule({ id: "m", intervalMs: 60_000 });
+
+    const ticks = await Promise.all(Array.from({ length: 4 }, () => loop.fireOnce("m")));
+
+    expect(ticks.map((t) => t!.tickNumber).sort()).toEqual([0, 1, 2, 3]);
+    expect((await storage.loadScheduleState("m"))?.tickCount).toBe(4);
   });
 });

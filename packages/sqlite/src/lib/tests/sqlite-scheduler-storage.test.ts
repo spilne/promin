@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
+import { FakeWallClock, isStaleLeaseError, schedulerLeaderKey } from "@promin/workflow";
 import { schedulerStorageTestSuite } from "@promin/workflow/testing";
 import { SqliteSchedulerStorage } from "../sqlite-scheduler-storage.ts";
 
@@ -47,24 +48,36 @@ describe("SqliteSchedulerStorage", () => {
     expect((await tenantB.loadSchedule("same"))?.intervalMs).toBe(2_000);
   });
 
-  it("expired leader lock can be claimed by a different instance", async () => {
-    // Burn the conformance suite's "TTL refresh" guarantee from the other
-    // direction — once expires_at is in the past, a different instanceId
-    // wins the next acquire.
-    const s = SqliteSchedulerStorage.make({ db: new Database(":memory:") });
-    const first = await s.tryAcquireLeader({
-      instanceId: "expired-leader",
-      namespace: "ns",
-      ttlMs: 0, // immediate expiry
-    });
-    expect(first).toBe(true);
-    // ttlMs=0 means expires_at = now, which is NOT > now in tryAcquire's
-    // strict-greater check, so a fresh instance wins immediately.
-    const second = await s.tryAcquireLeader({
-      instanceId: "new-leader",
-      namespace: "ns",
-      ttlMs: 10_000,
-    });
-    expect(second).toBe(true);
+  it("lease expiry follows the injected clock", async () => {
+    const clock = FakeWallClock.create(0);
+    const s = SqliteSchedulerStorage.make({ db: new Database(":memory:"), clock });
+    const key = schedulerLeaderKey({ namespace: "ns" });
+    const first = await s.tryAcquireLeader({ key, instanceId: "a", ttlMs: 1_000 });
+    clock.advance(999);
+    expect(await s.tryAcquireLeader({ key, instanceId: "b", ttlMs: 1_000 })).toBeNull();
+    clock.advance(1);
+    const second = await s.tryAcquireLeader({ key, instanceId: "b", ttlMs: 1_000 });
+    expect(second!.epoch).toBe(first!.epoch + 1);
+  });
+
+  it("two storages on one database file share leases and fencing", async () => {
+    const db = new Database(":memory:");
+    const a = SqliteSchedulerStorage.make({ db });
+    const b = SqliteSchedulerStorage.make({ db });
+    const key = schedulerLeaderKey({});
+    await a.upsertSchedule({ id: "shared", intervalMs: 1_000 });
+
+    const leaseA = await a.tryAcquireLeader({ key, instanceId: "A", ttlMs: 60_000 });
+    expect(await b.tryAcquireLeader({ key, instanceId: "B", ttlMs: 60_000 })).toBeNull();
+    await a.releaseLeader({ lease: leaseA! });
+    expect(await b.tryAcquireLeader({ key, instanceId: "B", ttlMs: 60_000 })).not.toBeNull();
+
+    const stale = await a
+      .commitPoll({ updates: [{ id: "shared", nextRun: null }], lease: leaseA! })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    expect(isStaleLeaseError(stale)).toBe(true);
   });
 });

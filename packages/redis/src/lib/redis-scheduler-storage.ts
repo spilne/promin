@@ -4,24 +4,29 @@
 // Heavy lifting (cron/rrule/catch-up/jitter/leader loop) lives in the generic
 // DurableScheduler shell in @promin/workflow. This file is just the storage
 // adapter — schedule CRUD via hashes, due-row lookup via per-namespace ZSETs,
-// and SET NX PX-based leader election.
+// and fenced leader leases (`RedisLeaderLeaseStore`).
 //
 // Key layout (with namespace `ns` — global namespace = "_"):
 //   {prefix}:ns:{ns}:all          — SET of schedule IDs in that namespace
 //   {prefix}:ns:{ns}:due          — ZSET, score=nextRunMs, member=id (per ns!)
-//   {prefix}:ns:{ns}:leader       — STRING with TTL, holds instanceId of leader
 //   {prefix}:schedule:{id}        — HASH with config + state (namespace-tagged)
+//   {prefix}:lease:{<key>}:holder — STRING with PX TTL, the lease holder
+//   {prefix}:lease:{<key>}:epoch  — STRING counter, the lease's fencing epoch
 // ---------------------------------------------------------------------------
 
 import {
+  StaleLeaseError,
   scheduleMetadataContains,
   SystemWallClock,
+  type CommitPollResult,
   type DurableScheduleConfig,
+  type LeaderLease,
   type ScheduleCommit,
   type SchedulerStorage,
   type WallClock,
 } from "@promin/workflow";
 import type { RedisStoreClient } from "./redis-client.ts";
+import { RedisLeaderLeaseStore } from "./redis-leader-lease-store.ts";
 
 export interface RedisSchedulerStorageConfig {
   redis: RedisStoreClient;
@@ -173,15 +178,78 @@ for _, id in ipairs(stale) do redis.call('ZREM', due_key, id) end
 return out
 `;
 
+/**
+ * Commit a poll atomically. With a lease (ARGV[1] = '1'), nothing is written
+ * unless the lease's epoch key still holds ARGV[2]. Per entry: skip and
+ * report it when its expected tick count (if any) no longer matches or the
+ * schedule is gone; otherwise advance the fire state and, if requested, set
+ * or clear its next run — a disabled schedule always leaves due-tracking.
+ *
+ * KEYS: [lease_epoch_key] when fenced, else none
+ * ARGV: [fenced('1'|'0'), epoch, schedule_key_prefix, namespace_key_base,
+ *        global_ns, then per entry: id, fired_at_ms|'', tick_inc,
+ *        set_next('1'|'0'), next_run_ms|'', expected_tick_count|'']
+ * Returns {'stale', current_epoch} or {'ok', conflict_id, ...}.
+ */
+const COMMIT_POLL_LUA = `
+if ARGV[1] == '1' then
+  local current = redis.call('GET', KEYS[1])
+  if current ~= ARGV[2] then return {'stale', current or ''} end
+end
+local prefix = ARGV[3]
+local ns_base = ARGV[4]
+local global_ns = ARGV[5]
+local out = {'ok'}
+for i = 6, #ARGV, 6 do
+  local id = ARGV[i]
+  local key = prefix .. id
+  local fields = redis.call('HMGET', key, 'id', 'namespace', 'enabled', 'tickCount')
+  local expected = ARGV[i + 5]
+  local count = tonumber(fields[4] or '0')
+  if not fields[1] then
+    if expected ~= '' then out[#out + 1] = id end
+    redis.call('ZREM', ns_base .. global_ns .. ':due', id)
+  elseif expected ~= '' and tonumber(expected) ~= count then
+    out[#out + 1] = id
+  else
+    local inc = tonumber(ARGV[i + 2])
+    if ARGV[i + 1] ~= '' and inc > 0 then
+      redis.call('HSET', key, 'lastFiredAt', ARGV[i + 1])
+      redis.call('HINCRBY', key, 'tickCount', inc)
+    end
+    local due_key = ns_base .. (fields[2] or global_ns) .. ':due'
+    if fields[3] == '0' then
+      redis.call('ZREM', due_key, id)
+    elseif ARGV[i + 3] == '1' then
+      if ARGV[i + 4] == '' then
+        redis.call('ZREM', due_key, id)
+      else
+        redis.call('ZADD', due_key, ARGV[i + 4], id)
+      end
+    end
+  end
+end
+return out
+`;
+
+/** KEYS: [schedule_key]  ARGV: [fired_at_ms, count] */
+const RECORD_FIRE_LUA = `
+redis.call('HSET', KEYS[1], 'lastFiredAt', ARGV[1])
+redis.call('HINCRBY', KEYS[1], 'tickCount', ARGV[2])
+return 1
+`;
+
 export class RedisSchedulerStorage implements SchedulerStorage {
   private readonly redis: RedisStoreClient;
   private readonly prefix: string;
   private readonly clock: WallClock;
+  private readonly leases: RedisLeaderLeaseStore;
 
   constructor(config: RedisSchedulerStorageConfig) {
     this.redis = config.redis;
     this.prefix = config.prefix ?? "sched";
     this.clock = config.clock ?? SystemWallClock;
+    this.leases = new RedisLeaderLeaseStore({ redis: config.redis, prefix: this.prefix });
   }
 
   // -------------------------------------------------------------------------
@@ -199,10 +267,6 @@ export class RedisSchedulerStorage implements SchedulerStorage {
 
   private dueKey(ns: string | undefined): string {
     return `${this.prefix}:ns:${this.nsKey(ns)}:due`;
-  }
-
-  private leaderKey(ns: string | undefined): string {
-    return `${this.prefix}:ns:${this.nsKey(ns)}:leader`;
   }
 
   private scheduleKey(id: string): string {
@@ -281,12 +345,13 @@ export class RedisSchedulerStorage implements SchedulerStorage {
   }
 
   async recordFire(id: string, firedAt: Date, count: number = 1): Promise<void> {
-    const current = await this.redis.hget(this.scheduleKey(id), "tickCount");
-    const next = (current ? Number(current) : 0) + count;
-    await this.redis.hset(this.scheduleKey(id), {
-      lastFiredAt: String(firedAt.getTime()),
-      tickCount: String(next),
-    });
+    await this.redis.eval(
+      RECORD_FIRE_LUA,
+      1,
+      this.scheduleKey(id),
+      String(firedAt.getTime()),
+      count,
+    );
   }
 
   async setNextRun(id: string, nextRun: Date | null): Promise<void> {
@@ -303,34 +368,38 @@ export class RedisSchedulerStorage implements SchedulerStorage {
     );
   }
 
-  async commitPoll(updates: ScheduleCommit[]): Promise<void> {
-    if (updates.length === 0) return;
-
-    // Need current tickCounts for the increments — Redis lacks an HSET-with-add
-    // primitive, so fetch + recompute. One pipeline round-trip total.
-    const tickCounts = await Promise.all(
-      updates.map((u) =>
-        u.tickIncrement
-          ? this.redis.hget(this.scheduleKey(u.id), "tickCount")
-          : Promise.resolve(null),
-      ),
-    );
-
-    // HSET fire-state for any update that fired, then set the next run
-    // (the script skips schedules paused since the poll). The client
-    // pipelines these concurrent calls on one connection.
-    await Promise.all(
-      updates.map(async (u, i) => {
-        if (u.firedAt !== undefined && u.tickIncrement && u.tickIncrement > 0) {
-          const next = (tickCounts[i] ? Number(tickCounts[i]) : 0) + u.tickIncrement;
-          await this.redis.hset(this.scheduleKey(u.id), {
-            lastFiredAt: String(u.firedAt.getTime()),
-            tickCount: String(next),
-          });
-        }
-        await this.setNextRun(u.id, u.nextRun);
-      }),
-    );
+  async commitPoll(params: {
+    updates: readonly ScheduleCommit[];
+    lease?: LeaderLease;
+  }): Promise<CommitPollResult> {
+    const { updates, lease } = params;
+    if (updates.length === 0 && !lease) return { conflicts: [] };
+    // One script: fence check, compare-and-set and every write together.
+    const entries = updates.flatMap((u) => [
+      u.id,
+      u.firedAt ? String(u.firedAt.getTime()) : "",
+      String(u.tickIncrement ?? 0),
+      u.nextRun === undefined ? "0" : "1",
+      u.nextRun ? String(u.nextRun.getTime()) : "",
+      u.expectedTickCount === undefined ? "" : String(u.expectedTickCount),
+    ]);
+    const keys = lease ? [this.leases.keysFor(lease.key).epoch] : [];
+    const reply = (await this.redis.eval(
+      COMMIT_POLL_LUA,
+      keys.length,
+      ...keys,
+      lease ? "1" : "0",
+      lease ? String(lease.epoch) : "",
+      `${this.prefix}:schedule:`,
+      `${this.prefix}:ns:`,
+      GLOBAL_NS,
+      ...entries,
+    )) as string[];
+    if (reply[0] === "stale") {
+      const current = reply[1] ? Number(reply[1]) : null;
+      throw new StaleLeaseError({ lease: lease!, currentEpoch: current });
+    }
+    return { conflicts: reply.slice(1) };
   }
 
   // -------------------------------------------------------------------------
@@ -452,25 +521,19 @@ export class RedisSchedulerStorage implements SchedulerStorage {
   }
 
   // -------------------------------------------------------------------------
-  // Leader election — SET NX PX with TTL refresh.
+  // Leader election — fenced leases, expiry on the Redis server clock.
   // -------------------------------------------------------------------------
 
   async tryAcquireLeader(params: {
+    key: string;
     instanceId: string;
-    namespace?: string;
     ttlMs: number;
-  }): Promise<boolean> {
-    const key = this.leaderKey(params.namespace);
-    const result = await this.redis.set(key, params.instanceId, "PX", params.ttlMs, "NX");
-    if (result === "OK") return true;
+  }): Promise<LeaderLease | null> {
+    return await this.leases.tryAcquireLeader(params);
+  }
 
-    // Already held — refresh TTL if we're the holder.
-    const holder = await this.redis.get(key);
-    if (holder === params.instanceId) {
-      await this.redis.pexpire(key, params.ttlMs);
-      return true;
-    }
-    return false;
+  async releaseLeader(params: { lease: LeaderLease }): Promise<void> {
+    await this.leases.releaseLeader(params);
   }
 
   async findDueAcross(params: {
