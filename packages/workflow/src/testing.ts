@@ -1,5 +1,9 @@
 export { storageTestSuite } from "./lib/durable/storage-test-suite.ts";
 export { versionRegistryTestSuite } from "./lib/durable/version-registry-test-suite.ts";
+export {
+  journalReplayTestSuite,
+  type JournalReplayTestSuiteOptions,
+} from "./lib/durable/journal-replay-test-suite.ts";
 export { stepQueueTestSuite } from "./lib/distributed/step-queue-test-suite.ts";
 export { workerRegistryConformance } from "./lib/distributed/worker-registry-conformance.ts";
 export { workflowAdvertisementRegistryTestSuite } from "./lib/distributed/workflow-advertisements-test-suite.ts";

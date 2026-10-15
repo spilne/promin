@@ -44,8 +44,10 @@ export interface JournalEntry {
   /**
    * Branch path inside a `ctx.parallel` tree. Empty string `""` means "at
    * top-level in the body" — that's the value every pre-parallel workflow
-   * journal already has, so old data works unchanged. Parallel branches get
-   * paths like `"0"`, `"1"`, `"2.3"` for nested parallels. The journal
+   * journal already has, so old data works unchanged. Yields inside parallel
+   * branches get paths like `"/0.0"`, `"/1.2"`, `"/1.1/0.0"` (nested); journals
+   * written before that grammar hold `"0"`, `"1.1"`-style paths and still
+   * replay — see `journal-format.ts`. Opaque text to storage backends. The
    * (workflow, step, activity_index, branch_path) quadruple is unique.
    */
   readonly branchPath: string;
