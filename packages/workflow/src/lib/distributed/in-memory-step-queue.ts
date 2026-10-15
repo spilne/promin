@@ -176,6 +176,9 @@ export class InMemoryStepQueue implements StepQueue {
       task.status = "running";
       task.claimedBy = this.workerId;
       task.claimedAt = this.clock.now();
+      // A fresh claim starts a fresh lease: a heartbeat left over from an
+      // earlier claim must not make the new one look stale.
+      task.heartbeatAt = undefined;
       task.claimToken = `claim-${this.workerId}-${++this.counter}`;
       claimed.push({ ...task });
     }
@@ -240,6 +243,7 @@ export class InMemoryStepQueue implements StepQueue {
         task.claimedBy = undefined;
         task.claimedAt = undefined;
         task.claimToken = undefined;
+        task.heartbeatAt = undefined;
         count++;
       }
     }

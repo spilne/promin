@@ -6,7 +6,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { workflowAdvertisementRegistryTestSuite } from "@promin/workflow";
+import { workflowAdvertisementRegistryTestSuite } from "@promin/workflow/testing";
 import { SqliteWorkflowAdvertisementRegistry } from "../sqlite-workflow-advertisements.ts";
 
 let counter = 0;

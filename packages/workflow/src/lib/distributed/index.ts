@@ -13,6 +13,7 @@ export {
   DistributedWorkflowRunner,
   createDistributedWorkflowRunner,
   type DistributedRunnerConfig,
+  type DistributedRunnerErrorEvent,
   /** @deprecated Use DistributedWorkflowRunner */
   type WorkflowCoordinator,
   /** @deprecated Use DistributedRunnerConfig */
@@ -27,6 +28,7 @@ export {
   type WorkflowWorker,
   type WorkerConfig,
   type WorkerHooks,
+  type WorkerErrorEvent,
   DefaultWorker,
   createWorker,
 } from "./worker.ts";
@@ -66,7 +68,6 @@ export {
   InMemoryWorkflowAdvertisementRegistry,
   type InMemoryWorkflowAdvertisementRegistryConfig,
 } from "./workflow-advertisements.ts";
-export { workflowAdvertisementRegistryTestSuite } from "./workflow-advertisements-test-suite.ts";
 export {
   type WorkflowStartQueue,
   type WorkflowStartRecord,
@@ -74,4 +75,3 @@ export {
   InMemoryWorkflowStartQueue,
   type InMemoryWorkflowStartQueueConfig,
 } from "./workflow-start-queue.ts";
-export { workflowStartQueueTestSuite } from "./workflow-start-queue-test-suite.ts";

@@ -387,6 +387,23 @@ export function stepQueueTestSuite(factory: () => StepQueue | Promise<StepQueue>
         expect(requeued).toBe(0);
       });
 
+      it("a re-claimed task starts a fresh lease (an earlier claim's heartbeat doesn't count)", async () => {
+        const q = await getQueue();
+        await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });
+        const [first] = await q.claim({ limit: 1 });
+        await q.heartbeat({ taskId: first!.id, claimToken: first!.claimToken });
+
+        // The first claimant goes silent until its heartbeat is stale.
+        await new Promise((r) => setTimeout(r, 300));
+        expect(await q.requeueStuck({ staleTimeoutMs: 250 })).toBe(1);
+
+        const [second] = await q.claim({ limit: 1 });
+        expect(second?.id).toBe(first!.id);
+
+        // An immediate sweep must not see the fresh claim as stale.
+        expect(await q.requeueStuck({ staleTimeoutMs: 250 })).toBe(0);
+      });
+
       it("rejects stale claim completion after requeue", async () => {
         const q = await getQueue();
         await q.enqueue({ workflowId: "wf-1", stepName: "s1", input: {}, prevResults: {} });

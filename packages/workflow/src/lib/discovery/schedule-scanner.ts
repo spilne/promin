@@ -13,9 +13,7 @@
 // always wants to push them into storage afterward.
 // ---------------------------------------------------------------------------
 
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { loadNodeFs } from "./node-fs.ts";
 import type { DurableScheduleConfig } from "../scheduler/types.ts";
 import type { SchedulerStorage } from "../scheduler/scheduler-storage.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
@@ -71,6 +69,7 @@ export class ScheduleScanner {
     warnings: string[],
   ): Promise<void> {
     if (depth > this.maxDepth) return;
+    const { readdir, join } = await loadNodeFs();
     let entries;
     try {
       entries = await readdir(dir, { withFileTypes: true });
@@ -105,6 +104,7 @@ export class ScheduleScanner {
     sources: Record<string, string>,
     warnings: string[],
   ): Promise<void> {
+    const { pathToFileURL } = await loadNodeFs();
     let mod: Record<string, unknown>;
     try {
       mod = (await import(pathToFileURL(absPath).href)) as Record<string, unknown>;

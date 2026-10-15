@@ -3,7 +3,7 @@
 // implementation (in-memory, SQLite, future Postgres) must pass.
 //
 // Usage:
-//   import { workflowAdvertisementRegistryTestSuite } from "@promin/workflow";
+//   import { workflowAdvertisementRegistryTestSuite } from "@promin/workflow/testing";
 //   workflowAdvertisementRegistryTestSuite(() => new InMemoryWorkflowAdvertisementRegistry());
 // ---------------------------------------------------------------------------
 

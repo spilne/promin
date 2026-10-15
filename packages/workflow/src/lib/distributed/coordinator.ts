@@ -39,6 +39,7 @@ import type { LeaderElection } from "./leader-election.ts";
 import { SingleLeader } from "./leader-election.ts";
 import { StepQueueExecutor } from "./step-queue-executor.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
+import { PollLoop } from "../shared/poll-loop.ts";
 
 export interface DistributedRunnerConfig {
   /** Workflow storage for state persistence. */
@@ -77,6 +78,26 @@ export interface DistributedRunnerConfig {
    * `FakeWallClock`.
    */
   clock?: WallClock;
+  /**
+   * Called when a background loop iteration fails: a dead-worker sweep
+   * (`source: "sweep"`) or a step executor's storage check
+   * (`source: "step-wait"`). Both loops keep running and back off; nothing
+   * here is fatal. Default: `console.error`.
+   */
+  onError?: (event: DistributedRunnerErrorEvent) => void;
+  /**
+   * Upper bound for the sweep loop's wait after consecutive failures.
+   * Default: 30 000 (or `pollIntervalMs`, if larger).
+   */
+  maxErrorBackoffMs?: number;
+}
+
+/** A background-loop failure reported through `DistributedRunnerConfig.onError`. */
+export interface DistributedRunnerErrorEvent {
+  readonly source: "sweep" | "step-wait";
+  readonly error: unknown;
+  /** Failures in a row for this loop, including this one. */
+  readonly consecutiveFailures: number;
 }
 
 /** @deprecated Use DistributedRunnerConfig */
@@ -101,7 +122,10 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
   private workerSweepCount = 0;
   private readonly leaderElection: LeaderElection;
   private readonly clock: WallClock;
-  private running = false;
+  private readonly registry?: WorkflowVersionRegistry | IWorkflowVersionRegistry;
+  private readonly sweepLoop: PollLoop;
+  private readonly onError: (event: DistributedRunnerErrorEvent) => void;
+  private sweepLoopDone?: Promise<void>;
   private isLeader = false;
   private runningWorkflows = new Map<string, Promise<unknown>>();
   private waiters = new Map<
@@ -118,6 +142,19 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     this.workerRetentionMs = config.workerRetentionMs ?? 7 * 24 * 60 * 60 * 1000;
     this.leaderElection = config.leaderElection ?? new SingleLeader();
     this.clock = config.clock ?? SystemWallClock;
+    this.registry = config.registry;
+    const onError = config.onError ?? defaultOnError;
+    this.onError = onError;
+
+    this.sweepLoop = new PollLoop({
+      name: "distributed-runner-sweep",
+      intervalMs: this.pollIntervalMs,
+      clock: this.clock,
+      maxBackoffMs: config.maxErrorBackoffMs,
+      tick: () => this._sweepOnce(),
+      onError: (error, info) =>
+        onError({ source: "sweep", error, consecutiveFailures: info.consecutiveFailures }),
+    });
 
     const executor = new StepQueueExecutor({
       stepQueue: config.stepQueue,
@@ -125,6 +162,8 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
       pollIntervalMs: config.stepPollIntervalMs ?? config.pollIntervalMs ?? 500,
       staleTimeoutMs: config.workerTimeoutMs ?? 30_000,
       clock: this.clock,
+      onError: (error, info) =>
+        onError({ source: "step-wait", error, consecutiveFailures: info.consecutiveFailures }),
     });
 
     this.innerRunner = createWorkflowRunner({
@@ -220,30 +259,51 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
   // Lifecycle — start/stop the background dead-worker sweep loop
   // ---------------------------------------------------------------------------
 
-  async startLoop(): Promise<void> {
-    this.running = true;
-
-    while (this.running) {
-      this.isLeader = await this.leaderElection.tryAcquire();
-
-      if (this.isLeader) {
-        if (this.runningWorkflows.size === 0) {
-          await this._recoverActiveWorkflows();
+  /**
+   * Run the leader-elected sweep loop: recover orphaned workflows and
+   * re-enqueue steps held by dead or stalled workers. A failed sweep is
+   * reported through `onError` and retried with backoff; it never ends the
+   * loop. Resolves after `stopLoop()`, once leadership has been released.
+   */
+  startLoop(): Promise<void> {
+    if (this.sweepLoopDone) return this.sweepLoopDone;
+    const done = (async () => {
+      try {
+        await this.sweepLoop.start();
+      } finally {
+        if (this.isLeader) {
+          this.isLeader = false;
+          try {
+            await this.leaderElection.release();
+          } catch (error) {
+            this.onError({ source: "sweep", error, consecutiveFailures: 1 });
+          }
         }
-        await this._tickDeadWorkers();
       }
-
-      await new Promise<void>((r) => this.clock.setTimeout(() => r(), this.pollIntervalMs));
-    }
-
-    if (this.isLeader) {
-      await this.leaderElection.release();
-      this.isLeader = false;
-    }
+    })().finally(() => {
+      if (this.sweepLoopDone === done) this.sweepLoopDone = undefined;
+    });
+    this.sweepLoopDone = done;
+    return done;
   }
 
+  /**
+   * Stop the sweep loop. Cancels the pending wait, then resolves once the
+   * in-flight sweep has finished and leadership has been released.
+   */
   async stopLoop(): Promise<void> {
-    this.running = false;
+    const done = this.sweepLoopDone;
+    await this.sweepLoop.stop();
+    await done;
+  }
+
+  private async _sweepOnce(): Promise<void> {
+    this.isLeader = await this.leaderElection.tryAcquire();
+    if (!this.isLeader) return;
+    if (this.runningWorkflows.size === 0) {
+      await this._recoverActiveWorkflows();
+    }
+    await this._tickDeadWorkers();
   }
 
   // ---------------------------------------------------------------------------
@@ -258,10 +318,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     if ("workflow" in params) {
       workflow = params.workflow as Workflow<unknown, unknown>;
     } else {
-      workflow = (await this._resolveByName(params.name, (params as any).version)) as Workflow<
-        unknown,
-        unknown
-      >;
+      workflow = await this._resolveByName(params.name, params.version);
     }
 
     // Pre-create in storage with DAG embedded in metadata so crash-recovery
@@ -296,28 +353,48 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
   }
 
   private _waitForResult<Output>(workflowId: string): Promise<Output> {
-    return this.storage.loadWorkflow(workflowId).then((state) => {
-      if (state?.status === "completed") return state.result as Output;
-      if (state?.status === "failed") throw new Error(state.error ?? "Workflow failed");
+    // Register the waiter before reading storage: a run that settles between
+    // the read and the registration would otherwise never resolve it.
+    return new Promise<Output>((resolve, reject) => {
+      const waiter = { resolve: resolve as (v: unknown) => void, reject };
+      const list = this.waiters.get(workflowId) ?? [];
+      list.push(waiter);
+      this.waiters.set(workflowId, list);
 
-      return new Promise<Output>((resolve, reject) => {
-        if (!this.waiters.has(workflowId)) this.waiters.set(workflowId, []);
-        this.waiters.get(workflowId)!.push({
-          resolve: resolve as (v: unknown) => void,
-          reject,
-        });
-      });
+      this.storage.loadWorkflow(workflowId).then(
+        (state) => {
+          if (state?.status === "completed") {
+            this._removeWaiter(workflowId, waiter);
+            resolve(state.result as Output);
+          } else if (state?.status === "failed") {
+            this._removeWaiter(workflowId, waiter);
+            reject(new Error(state.error ?? "Workflow failed"));
+          }
+        },
+        (err: unknown) => {
+          this._removeWaiter(workflowId, waiter);
+          reject(err);
+        },
+      );
     });
+  }
+
+  private _removeWaiter(
+    workflowId: string,
+    waiter: { resolve: (v: unknown) => void; reject: (e: unknown) => void },
+  ): void {
+    const list = this.waiters.get(workflowId);
+    if (!list) return;
+    const remaining = list.filter((w) => w !== waiter);
+    if (remaining.length === 0) this.waiters.delete(workflowId);
+    else this.waiters.set(workflowId, remaining);
   }
 
   private async _resolveByName(
     name: string,
     version?: string,
   ): Promise<Workflow<unknown, unknown>> {
-    const registry = (this.innerRunner as any).registry as
-      | WorkflowVersionRegistry
-      | IWorkflowVersionRegistry
-      | undefined;
+    const registry = this.registry;
     if (!registry) {
       throw new Error(
         `DistributedWorkflowRunner.run({ name }) requires \`registry\` on the config. ` +
@@ -382,6 +459,13 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     for (const w of waiters) w.reject(error);
     this.waiters.delete(workflowId);
   }
+}
+
+function defaultOnError(event: DistributedRunnerErrorEvent): void {
+  console.error(
+    `[distributed-runner] ${event.source} failed (${event.consecutiveFailures} in a row):`,
+    event.error,
+  );
 }
 
 /**

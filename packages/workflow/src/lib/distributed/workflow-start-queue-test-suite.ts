@@ -3,7 +3,7 @@
 // (in-memory, SQLite, future Postgres) must pass.
 //
 // Usage:
-//   import { workflowStartQueueTestSuite } from "@promin/workflow";
+//   import { workflowStartQueueTestSuite } from "@promin/workflow/testing";
 //   workflowStartQueueTestSuite(() => new InMemoryWorkflowStartQueue());
 // ---------------------------------------------------------------------------
 

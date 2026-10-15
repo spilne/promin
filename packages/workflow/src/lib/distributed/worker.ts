@@ -9,6 +9,7 @@
 import { runHookValue } from "../shared/eff.ts";
 import type { TaggedError } from "../shared/tagged-error.ts";
 import { SystemWallClock, type WallClock, type TimerHandle } from "../shared/wall-clock.ts";
+import { PollLoop, type PollTickResult } from "../shared/poll-loop.ts";
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
 import { isStepAttemptStorage } from "../durable/workflow-storage.ts";
 import type { StepRegistry, StepContext, StepRegistration } from "./step-registry.ts";
@@ -84,6 +85,39 @@ export interface WorkerConfig {
    * Default: `SystemWallClock`.
    */
   clock?: WallClock;
+  /**
+   * Called for failures that don't belong to a step body: a failed claim,
+   * a failed outcome write (the task is then redelivered), a throwing
+   * hook. Nothing reported here stops the worker. Default: `console.error`.
+   */
+  onError?: (event: WorkerErrorEvent) => void;
+  /**
+   * Upper bound for the claim loop's wait after consecutive claim
+   * failures. Default: 30 000 (or `pollIntervalMs`, if larger).
+   */
+  maxErrorBackoffMs?: number;
+}
+
+/** Where a worker-side failure happened. */
+export type WorkerErrorPhase =
+  /** Claiming from the queue failed; the loop backs off and retries. */
+  | "claim"
+  /**
+   * Writing a step outcome failed (storage or queue). The queue task stays
+   * claimed and is redelivered once its lease goes stale.
+   */
+  | "commit"
+  /** A `WorkerHooks` callback threw; the step outcome is unaffected. */
+  | "hook"
+  /** Anything else that escaped a task — reported, never rethrown. */
+  | "task";
+
+/** A failure reported through `WorkerConfig.onError`. */
+export interface WorkerErrorEvent {
+  readonly phase: WorkerErrorPhase;
+  readonly error: unknown;
+  /** The task involved, for every phase except `"claim"`. */
+  readonly task?: StepTask;
 }
 
 // ---------------------------------------------------------------------------
@@ -91,10 +125,32 @@ export interface WorkerConfig {
 // ---------------------------------------------------------------------------
 
 export interface WorkflowWorker {
+  /**
+   * Register (when a registry is configured) and run the claim loop. A
+   * failed claim is reported through `onError` and retried with backoff;
+   * it never ends the loop. Resolves once the worker has stopped.
+   */
   start(): Promise<void>;
+  /**
+   * Stop claiming, wait for the in-flight claim and every running task to
+   * finish, then deregister.
+   */
   stop(): Promise<void>;
   readonly workerId: string;
 }
+
+/**
+ * What a step run produced, before anything is written. `completed` covers
+ * the handler's value as well as the `skip` / `fallback` strategies.
+ */
+type StepOutcome =
+  | { readonly kind: "completed"; readonly value: unknown; readonly durationMs: number }
+  | {
+      readonly kind: "failed";
+      readonly error: string;
+      readonly cause: unknown;
+      readonly durationMs: number;
+    };
 
 // ---------------------------------------------------------------------------
 // Implementation
@@ -107,7 +163,6 @@ export class DefaultWorker implements WorkflowWorker {
   private readonly registry: StepRegistry;
   private readonly capabilities: readonly string[];
   private readonly concurrency: number;
-  private readonly pollIntervalMs: number;
   private readonly hooks: WorkerHooks;
   private readonly middleware: WorkerMiddleware[];
   private readonly workerRegistry?: WorkerRegistry;
@@ -115,8 +170,12 @@ export class DefaultWorker implements WorkflowWorker {
   private readonly workerMetadata?: Record<string, unknown>;
   private readonly claimFilter: (task: StepTask) => boolean;
   private readonly clock: WallClock;
-  private running = false;
+  private readonly onError: (event: WorkerErrorEvent) => void;
+  private readonly pollLoop: PollLoop;
   private activeCount = 0;
+  /** The last claim filled every free slot, so more work is likely queued. */
+  private backlogLikely = false;
+  private idleWaiters: (() => void)[] = [];
   private heartbeatTimer?: TimerHandle;
 
   constructor(config: WorkerConfig) {
@@ -126,13 +185,13 @@ export class DefaultWorker implements WorkflowWorker {
     this.registry = config.registry;
     this.capabilities = config.capabilities ?? [];
     this.concurrency = config.concurrency ?? 1;
-    this.pollIntervalMs = config.pollIntervalMs ?? 1000;
     this.hooks = config.hooks ?? {};
     this.middleware = config.middleware ?? [];
     this.workerRegistry = config.workerRegistry;
     this.heartbeatIntervalMs = config.heartbeatIntervalMs ?? 5000;
     this.workerMetadata = config.metadata;
     this.clock = config.clock ?? SystemWallClock;
+    this.onError = config.onError ?? defaultOnError;
 
     // Build the claim-time filter. Explicit `taskFilter` wins; otherwise
     // compose registry-has-handler + optional version allow-list.
@@ -150,10 +209,19 @@ export class DefaultWorker implements WorkflowWorker {
         return true;
       };
     }
+
+    this.pollLoop = new PollLoop({
+      name: "worker",
+      intervalMs: config.pollIntervalMs ?? 1000,
+      clock: this.clock,
+      maxBackoffMs: config.maxErrorBackoffMs,
+      tick: () => this.claimOnce(),
+      onError: (error) => this.report({ phase: "claim", error }),
+    });
   }
 
   async start(): Promise<void> {
-    this.running = true;
+    if (this.pollLoop.running) return this.pollLoop.start();
 
     // Register with worker registry
     if (this.workerRegistry) {
@@ -168,55 +236,106 @@ export class DefaultWorker implements WorkflowWorker {
       }, this.heartbeatIntervalMs);
     }
 
-    while (this.running) {
-      if (this.activeCount < this.concurrency) {
-        const claimCount = this.concurrency - this.activeCount;
-        const tasks = await this.stepQueue.claim({
-          capabilities: this.capabilities,
-          limit: claimCount,
-          filter: this.claimFilter,
-        });
-
-        for (const task of tasks) {
-          this.activeCount++;
-          this.executeTask(task).finally(() => {
-            this.activeCount--;
-          });
-        }
-      }
-      await new Promise<void>((r) => this.clock.setTimeout(() => r(), this.pollIntervalMs));
-    }
+    await this.pollLoop.start();
   }
 
   async stop(): Promise<void> {
-    this.running = false;
+    // Stop claiming first. Awaiting the loop means a claim already in
+    // flight has handed its tasks to `launch` before we wait for them.
+    await this.pollLoop.stop();
 
     // Mark as draining, then wait for active tasks
     if (this.workerRegistry) {
       await this.workerRegistry.drain(this.workerId);
     }
 
-    while (this.activeCount > 0) {
-      await new Promise<void>((r) => this.clock.setTimeout(() => r(), 100));
+    if (this.activeCount > 0) {
+      await new Promise<void>((resolve) => this.idleWaiters.push(resolve));
     }
 
     // Deregister and stop heartbeat
     if (this.heartbeatTimer) {
       this.heartbeatTimer.clear();
+      this.heartbeatTimer = undefined;
     }
     if (this.workerRegistry) {
       await this.workerRegistry.deregister(this.workerId);
     }
   }
 
+  /**
+   * One claim-loop iteration. Claims up to the free slots. A full batch
+   * means the queue likely holds more, so each slot that frees up re-claims
+   * at once instead of waiting out the poll interval; a short batch means
+   * the queue is drained and the loop goes back to polling.
+   */
+  private async claimOnce(): Promise<PollTickResult> {
+    const free = this.concurrency - this.activeCount;
+    if (free <= 0) return "idle";
+
+    const tasks = await this.stepQueue.claim({
+      capabilities: this.capabilities,
+      limit: free,
+      filter: this.claimFilter,
+    });
+    for (const task of tasks) this.launch(task);
+
+    // Every free slot is now busy, so the next claim waits for one to
+    // free up: `launch` wakes the loop as each task settles.
+    this.backlogLikely = tasks.length >= free;
+    return "idle";
+  }
+
+  private launch(task: StepTask): void {
+    this.activeCount++;
+    void this.executeTask(task)
+      .catch((error: unknown) => this.report({ phase: "task", error, task }))
+      .finally(() => {
+        this.activeCount--;
+        if (this.activeCount === 0) {
+          const waiters = this.idleWaiters;
+          this.idleWaiters = [];
+          for (const resolve of waiters) resolve();
+        }
+        // A slot just freed: claim straight away while there's a backlog.
+        if (this.backlogLikely) this.pollLoop.wake();
+      });
+  }
+
+  private report(event: WorkerErrorEvent): void {
+    try {
+      this.onError(event);
+    } catch {
+      // A throwing error hook must not escape into an unhandled rejection.
+    }
+  }
+
+  /**
+   * Run one task: compute its outcome (handler + retry + middleware +
+   * `onFailure` strategy), then commit it. Nothing is written until the
+   * outcome is known, so a throwing strategy can't half-commit.
+   */
   private async executeTask(task: StepTask): Promise<void> {
     const startTime = this.clock.currentTimeMs();
+    const taskHeartbeatTimer = this.clock.setInterval(() => {
+      this.stepQueue.heartbeat({ taskId: task.id, claimToken: task.claimToken }).catch(() => {});
+    }, this.heartbeatIntervalMs);
+
+    try {
+      const outcome = await this.computeOutcome(task, startTime);
+      await this.commit(task, outcome, startTime);
+    } finally {
+      taskHeartbeatTimer.clear();
+    }
+  }
+
+  private async computeOutcome(task: StepTask, startTime: number): Promise<StepOutcome> {
+    const elapsed = () => this.clock.currentTimeMs() - startTime;
     const registration = this.registry.resolve(task.stepName);
 
     if (!registration) {
       const error = `Step "${task.stepName}" not found in registry. Available: ${this.registry.list().join(", ")}`;
-      await this.failTask(task, error, startTime);
-      return;
+      return { kind: "failed", error, cause: new Error(error), durationMs: elapsed() };
     }
 
     const ctx: StepContext = {
@@ -228,97 +347,115 @@ export class DefaultWorker implements WorkflowWorker {
       attempt: task.attempt,
     };
 
-    const taskHeartbeatTimer = this.clock.setInterval(() => {
-      this.stepQueue.heartbeat({ taskId: task.id, claimToken: task.claimToken }).catch(() => {});
-    }, this.heartbeatIntervalMs);
-
     try {
       await this.hooks.beforeStep?.(task);
-
       const chain = this.buildChain(task, registration);
       const value = await chain(ctx);
+      return { kind: "completed", value, durationMs: elapsed() };
+    } catch (err) {
+      const durationMs = elapsed();
+      const strategy = registration.options?.onFailure ?? "fail";
+      if (strategy === "skip") {
+        return { kind: "completed", value: undefined, durationMs };
+      }
+      if (typeof strategy === "object" && "fallback" in strategy) {
+        try {
+          return { kind: "completed", value: strategy.fallback(err), durationMs };
+        } catch (fallbackErr) {
+          return {
+            kind: "failed",
+            error: `fallback threw: ${errorMessage(fallbackErr)} (step error: ${errorMessage(err)})`,
+            cause: fallbackErr,
+            durationMs,
+          };
+        }
+      }
+      return { kind: "failed", error: errorMessage(err), cause: err, durationMs };
+    }
+  }
 
-      const durationMs = this.clock.currentTimeMs() - startTime;
+  /**
+   * Commit an outcome: (1) check the claim is still ours, (2) write
+   * storage, (3) settle the queue task. Storage goes first so the queue
+   * never says `completed` / `failed` while storage has nothing — the
+   * executor waits on storage, so that state would hang the workflow. If
+   * the storage write fails, the queue task is left claimed; its lease goes
+   * stale and it is redelivered (at-least-once). If the queue write fails
+   * after storage succeeded, the step is already visible and the task is
+   * redelivered and re-run, so handlers must be idempotent.
+   */
+  private async commit(task: StepTask, outcome: StepOutcome, startTime: number): Promise<void> {
+    const claim = { taskId: task.id, claimToken: task.claimToken };
+    const startedAt = new Date(startTime);
+    const { durationMs } = outcome;
 
-      const completed = await this.stepQueue.complete({
-        taskId: task.id,
-        claimToken: task.claimToken,
-        result: value,
-        durationMs,
-      });
-      if (!completed) return;
-      await this.storage.saveStepResult({
-        workflowId: task.workflowId,
-        stepName: task.stepName,
-        result: value,
-        durationMs,
-        startedAt: new Date(startTime),
-      });
+    try {
+      // Fence: a reclaimed task belongs to another worker now; writing our
+      // outcome over theirs would race them.
+      if (!(await this.stepQueue.heartbeat(claim))) return;
 
-      if (isStepAttemptStorage(this.storage)) {
+      if (outcome.kind === "completed") {
+        await this.storage.saveStepResult({
+          workflowId: task.workflowId,
+          stepName: task.stepName,
+          result: outcome.value,
+          durationMs,
+          startedAt,
+        });
+      } else {
+        await this.storage.saveStepFailure({
+          workflowId: task.workflowId,
+          stepName: task.stepName,
+          error: outcome.error,
+          durationMs,
+          startedAt,
+        });
+      }
+    } catch (error) {
+      this.report({ phase: "commit", error, task });
+      return;
+    }
+
+    if (isStepAttemptStorage(this.storage)) {
+      try {
         await this.storage.saveStepAttempt({
           workflowId: task.workflowId,
           stepName: task.stepName,
           attempt: task.attempt,
           type: "execution",
-          status: "completed",
-          result: value,
+          status: outcome.kind,
+          ...(outcome.kind === "completed" ? { result: outcome.value } : { error: outcome.error }),
           durationMs,
-          startedAt: new Date(startTime),
+          startedAt,
           completedAt: this.clock.now(),
           executorId: this.workerId,
         });
+      } catch (error) {
+        // The audit row is secondary: the step row is written, so carry on.
+        this.report({ phase: "commit", error, task });
       }
+    }
 
-      await this.hooks.afterStep?.(task, value, durationMs);
-    } catch (err) {
-      const durationMs = this.clock.currentTimeMs() - startTime;
+    let settled: boolean;
+    try {
+      settled =
+        outcome.kind === "completed"
+          ? await this.stepQueue.complete({ ...claim, result: outcome.value, durationMs })
+          : await this.stepQueue.fail({ ...claim, error: outcome.error, durationMs });
+    } catch (error) {
+      this.report({ phase: "commit", error, task });
+      return;
+    }
+    if (!settled) return;
 
-      // Apply onFailure strategy
-      const strategy = registration.options?.onFailure ?? "fail";
-      if (strategy === "skip") {
-        const completed = await this.stepQueue.complete({
-          taskId: task.id,
-          claimToken: task.claimToken,
-          result: undefined,
-          durationMs,
-        });
-        if (!completed) return;
-        await this.storage.saveStepResult({
-          workflowId: task.workflowId,
-          stepName: task.stepName,
-          result: undefined,
-          durationMs,
-          startedAt: new Date(startTime),
-        });
-        await this.hooks.afterStep?.(task, undefined, durationMs);
-        return;
+    try {
+      if (outcome.kind === "completed") {
+        await this.hooks.afterStep?.(task, outcome.value, durationMs);
+      } else {
+        await this.hooks.onError?.(task, outcome.cause, durationMs);
       }
-
-      if (typeof strategy === "object" && "fallback" in strategy) {
-        const fallbackValue = strategy.fallback(err);
-        const completed = await this.stepQueue.complete({
-          taskId: task.id,
-          claimToken: task.claimToken,
-          result: fallbackValue,
-          durationMs,
-        });
-        if (!completed) return;
-        await this.storage.saveStepResult({
-          workflowId: task.workflowId,
-          stepName: task.stepName,
-          result: fallbackValue,
-          durationMs,
-          startedAt: new Date(startTime),
-        });
-        await this.hooks.afterStep?.(task, fallbackValue, durationMs);
-        return;
-      }
-
-      // Default: fail
-      await this.failTask(task, err instanceof Error ? err.message : String(err), startTime);
-    } finally {
-      taskHeartbeatTimer.clear();
+    } catch (error) {
+      this.report({ phase: "hook", error, task });
     }
   }
 
@@ -367,42 +504,6 @@ export class DefaultWorker implements WorkflowWorker {
     );
   }
 
-  private async failTask(task: StepTask, error: string, startTime: number): Promise<void> {
-    const durationMs = this.clock.currentTimeMs() - startTime;
-
-    const failed = await this.stepQueue.fail({
-      taskId: task.id,
-      claimToken: task.claimToken,
-      error,
-      durationMs,
-    });
-    if (!failed) return;
-    await this.storage.saveStepFailure({
-      workflowId: task.workflowId,
-      stepName: task.stepName,
-      error,
-      durationMs,
-      startedAt: new Date(startTime),
-    });
-
-    if (isStepAttemptStorage(this.storage)) {
-      await this.storage.saveStepAttempt({
-        workflowId: task.workflowId,
-        stepName: task.stepName,
-        attempt: task.attempt,
-        type: "execution",
-        status: "failed",
-        error,
-        durationMs,
-        startedAt: new Date(startTime),
-        completedAt: this.clock.now(),
-        executorId: this.workerId,
-      });
-    }
-
-    await this.hooks.onError?.(task, new Error(error), durationMs);
-  }
-
   private computePrev(task: StepTask): unknown {
     const results = task.prevResults;
     const keys = Object.keys(results);
@@ -410,6 +511,15 @@ export class DefaultWorker implements WorkflowWorker {
     if (keys.length === 0) return task.input;
     return results;
   }
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function defaultOnError(event: WorkerErrorEvent): void {
+  const where = event.task ? ` (${event.task.workflowId}/${event.task.stepName})` : "";
+  console.error(`[worker] ${event.phase} failed${where}:`, event.error);
 }
 
 export function createWorker(config: WorkerConfig): WorkflowWorker {
