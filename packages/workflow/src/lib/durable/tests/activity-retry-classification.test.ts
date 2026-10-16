@@ -309,9 +309,17 @@ describe("activity retry — retry.when predicate", () => {
 // Failure journaling — classification errors are recorded as Failure
 // ---------------------------------------------------------------------------
 
+/**
+ * Never discards journal entries, so the test can inspect what a failed
+ * attempt recorded and replay it, as after a crash before the discard.
+ */
+class RetainingStorage extends InMemoryWorkflowStorage {
+  override async discardJournalEntries(): Promise<void> {}
+}
+
 describe("activity retry — journal Failure after exhausting retries", () => {
   it("records TerminalError in the journal after a single attempt", async () => {
-    const storage = new InMemoryWorkflowStorage();
+    const storage = new RetainingStorage();
 
     await expect(
       runJournaledStep<unknown, unknown, number>({
@@ -357,7 +365,7 @@ describe("activity retry — journal Failure after exhausting retries", () => {
           );
         },
       }),
-    ).rejects.toThrow("forbidden");
+    ).rejects.toBeInstanceOf(TerminalError);
     expect(ran).toBe(false);
   });
 });

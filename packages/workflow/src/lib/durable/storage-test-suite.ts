@@ -30,6 +30,12 @@ export interface StorageTestSuiteOptions {
    */
   hasJournaledSuspend?: boolean;
   /**
+   * Run the `discardJournalEntries` cases. Defaults to `hasJournaledSuspend`;
+   * pass `false` for a suspend-capable storage that leaves the optional
+   * method out.
+   */
+  hasJournalDiscard?: boolean;
+  /**
    * Opt in to the `resetSteps` conformance section. Defaults to `false`.
    * When `true`, the factory must return a storage that implements the
    * optional `resetSteps` method (backs `WorkflowRunner.resume`).
@@ -2614,6 +2620,144 @@ export function storageTestSuite(
           expect(hit).toBeNull();
         });
 
+        it("completePendingEntry reports the winner, and the winner's exit to the loser", async () => {
+          const s = await getSuspendStorage();
+          await s.createWorkflow({ workflowId: "j-win", workflowName: "test", input: {} });
+          await s.appendPendingEntry({
+            workflowId: "j-win",
+            stepName: "sig",
+            activityIndex: 0,
+            branchPath: "/1.0",
+            activityName: "approval",
+            stepType: "signal",
+          });
+          const delivered = { tag: "Success", value: { $signal: "delivered", value: 1 } } as const;
+          const timedOut = { tag: "Success", value: { $signal: "timeout" } } as const;
+
+          const first = await s.completePendingEntry({
+            workflowId: "j-win",
+            stepName: "sig",
+            activityIndex: 0,
+            branchPath: "/1.0",
+            exit: delivered,
+          });
+          expect(first).toEqual({ completed: true, exit: delivered });
+
+          const second = await s.completePendingEntry({
+            workflowId: "j-win",
+            stepName: "sig",
+            activityIndex: 0,
+            branchPath: "/1.0",
+            exit: timedOut,
+          });
+          expect(second).toEqual({ completed: false, exit: delivered });
+          expect((await s.loadJournal("j-win", "sig"))[0]!.exit).toEqual(delivered);
+        });
+
+        it("a pending signal keeps its timeout deadline (wakeAt) and stays out of due sleeps", async () => {
+          const s = await getSuspendStorage();
+          await s.createWorkflow({ workflowId: "j-sig-wake", workflowName: "test", input: {} });
+          const wakeAt = new Date(Date.now() - 60_000);
+          await s.appendPendingEntry({
+            workflowId: "j-sig-wake",
+            stepName: "wait",
+            activityIndex: 0,
+            activityName: "approval",
+            stepType: "signal",
+            wakeAt,
+          });
+          const [entry] = await s.loadJournal("j-sig-wake", "wait");
+          expect(entry!.wakeAt?.getTime()).toBe(wakeAt.getTime());
+          const due = await s.findDueSleeps({ now: new Date(), limit: 1000 });
+          expect(due.map((d) => d.workflowId)).not.toContain("j-sig-wake");
+        });
+
+        it("completePendingEntry on a missing entry completes nothing and reports no exit", async () => {
+          const s = await getSuspendStorage();
+          await s.createWorkflow({ workflowId: "j-miss", workflowName: "test", input: {} });
+          const result = await s.completePendingEntry({
+            workflowId: "j-miss",
+            stepName: "sig",
+            activityIndex: 3,
+            exit: { tag: "Success", value: 1 },
+          });
+          expect(result).toEqual({ completed: false, exit: undefined });
+          expect(await s.loadJournal("j-miss", "sig")).toEqual([]);
+        });
+
+        it("concurrent completePendingEntry calls have exactly one winner", async () => {
+          const s = await getSuspendStorage();
+          const peer = (await getPeer(s)) as WorkflowStorage & JournaledSuspendStorage;
+          await s.createWorkflow({ workflowId: "j-race", workflowName: "test", input: {} });
+          for (let round = 0; round < 5; round++) {
+            await s.appendPendingEntry({
+              workflowId: "j-race",
+              stepName: "sig",
+              activityIndex: round,
+              activityName: `go-${round}`,
+              stepType: "signal",
+              wakeAt: new Date(Date.now() - 1_000),
+            });
+            const exits = Array.from({ length: 6 }, (_, i) => ({
+              tag: "Success" as const,
+              value: { $signal: "delivered", value: `writer-${i}` },
+            }));
+            const results = await Promise.all(
+              exits.map((exit, i) =>
+                (i % 2 === 0 ? s : peer).completePendingEntry({
+                  workflowId: "j-race",
+                  stepName: "sig",
+                  activityIndex: round,
+                  exit,
+                }),
+              ),
+            );
+            const winners = results.filter((r) => r.completed);
+            expect(winners).toHaveLength(1);
+            const stored = (await s.loadJournal("j-race", "sig")).find(
+              (e) => e.activityIndex === round,
+            )!;
+            expect(stored.exit).toEqual(winners[0]!.exit!);
+            for (const r of results) expect(r.exit).toEqual(stored.exit!);
+          }
+        });
+
+        it("failure exits round-trip with tag, name and fields", async () => {
+          const s = await getSuspendStorage();
+          await s.createWorkflow({ workflowId: "j-fail", workflowName: "test", input: {} });
+          const tagged = {
+            tag: "Failure",
+            error: "card declined",
+            errorTag: "TerminalError",
+            errorData: { code: "E42", attempts: 3, nested: { ok: false } },
+          } as const;
+          const named = { tag: "Failure", error: "bad input", errorName: "TypeError" } as const;
+          for (const [i, exit] of [tagged, named].entries()) {
+            await s.appendPendingEntry({
+              workflowId: "j-fail",
+              stepName: "body",
+              activityIndex: i,
+              activityName: `a${i}`,
+              stepType: "activity",
+            });
+            await s.completePendingEntry({
+              workflowId: "j-fail",
+              stepName: "body",
+              activityIndex: i,
+              exit,
+            });
+          }
+          await s.appendEntry({
+            workflowId: "j-fail",
+            stepName: "body",
+            activityIndex: 2,
+            activityName: "single-phase",
+            exit: tagged,
+          });
+          const entries = await s.loadJournal("j-fail", "body");
+          expect(entries.map((e) => e.exit)).toEqual([tagged, named, tagged]);
+        });
+
         it("accepts a pending entry for every journal step type", async () => {
           const s = await getSuspendStorage();
           await s.createWorkflow({ workflowId: "j-types", workflowName: "test", input: {} });
@@ -2663,6 +2807,151 @@ export function storageTestSuite(
             }),
           ).toBeNull();
           expect(await s.loadJournal("j-fresh-p", "wait")).toEqual([]);
+        });
+      });
+    }
+
+    if (options.hasJournalDiscard ?? options.hasJournaledSuspend) {
+      describe("journal — discardJournalEntries", () => {
+        async function getDiscardStorage() {
+          const s = await getSuspendStorage();
+          const discard = s.discardJournalEntries;
+          if (typeof discard !== "function") {
+            throw new Error(
+              "storageTestSuite runs the discardJournalEntries cases, but the storage does " +
+                "not implement it. Pass hasJournalDiscard: false to skip them.",
+            );
+          }
+          return {
+            s,
+            discard: (p: Parameters<typeof discard>[0]) => discard.call(s, p),
+          };
+        }
+
+        it("deletes exactly the listed slots, branch paths included", async () => {
+          const { s, discard } = await getDiscardStorage();
+          await s.createWorkflow({ workflowId: "j-disc", workflowName: "test", input: {} });
+          const slots = [
+            { activityIndex: 0, branchPath: "" },
+            { activityIndex: 1, branchPath: "/0.0" },
+            { activityIndex: 1, branchPath: "/1.0" },
+            { activityIndex: 2, branchPath: "" },
+          ];
+          for (const slot of slots) {
+            await s.appendPendingEntry({
+              workflowId: "j-disc",
+              stepName: "body",
+              ...slot,
+              activityName: `a${slot.activityIndex}${slot.branchPath}`,
+              stepType: "activity",
+            });
+            await s.completePendingEntry({
+              workflowId: "j-disc",
+              stepName: "body",
+              ...slot,
+              exit: { tag: "Failure", error: "boom" },
+            });
+          }
+          await s.appendEntry({
+            workflowId: "j-disc",
+            stepName: "other",
+            activityIndex: 0,
+            activityName: "kept",
+            exit: { tag: "Success", value: 1 },
+          });
+
+          await discard({
+            workflowId: "j-disc",
+            stepName: "body",
+            slots: [
+              { activityIndex: 1, branchPath: "/1.0" },
+              { activityIndex: 2, branchPath: "" },
+              { activityIndex: 9, branchPath: "" },
+            ],
+          });
+
+          const left = (await s.loadJournal("j-disc", "body")).map(
+            (e) => `${e.activityIndex}|${e.branchPath}`,
+          );
+          expect(left).toEqual(["0|", "1|/0.0"]);
+          expect(await s.loadJournal("j-disc", "other")).toHaveLength(1);
+        });
+
+        it("a discarded slot can be recorded again", async () => {
+          const { s, discard } = await getDiscardStorage();
+          await s.createWorkflow({ workflowId: "j-disc2", workflowName: "test", input: {} });
+          const slot = { activityIndex: 0, branchPath: "" };
+          await s.appendPendingEntry({
+            workflowId: "j-disc2",
+            stepName: "body",
+            ...slot,
+            activityName: "pay",
+            stepType: "activity",
+          });
+          await s.completePendingEntry({
+            workflowId: "j-disc2",
+            stepName: "body",
+            ...slot,
+            exit: { tag: "Failure", error: "declined" },
+          });
+          await discard({ workflowId: "j-disc2", stepName: "body", slots: [slot] });
+
+          await s.appendPendingEntry({
+            workflowId: "j-disc2",
+            stepName: "body",
+            ...slot,
+            activityName: "pay",
+            stepType: "activity",
+          });
+          const result = await s.completePendingEntry({
+            workflowId: "j-disc2",
+            stepName: "body",
+            ...slot,
+            exit: { tag: "Success", value: "paid" },
+          });
+          expect(result.completed).toBe(true);
+          const entries = await s.loadJournal("j-disc2", "body");
+          expect(entries).toHaveLength(1);
+          expect(entries[0]!.exit).toEqual({ tag: "Success", value: "paid" });
+        });
+
+        it("drops discarded pending sleeps and signals from the lookups", async () => {
+          const { s, discard } = await getDiscardStorage();
+          await s.createWorkflow({ workflowId: "j-disc3", workflowName: "test", input: {} });
+          await s.appendPendingEntry({
+            workflowId: "j-disc3",
+            stepName: "wait",
+            activityIndex: 0,
+            activityName: "sleep",
+            stepType: "sleep",
+            wakeAt: new Date(Date.now() - 60_000),
+          });
+          await s.appendPendingEntry({
+            workflowId: "j-disc3",
+            stepName: "wait",
+            activityIndex: 1,
+            activityName: "approval",
+            stepType: "signal",
+          });
+          await discard({
+            workflowId: "j-disc3",
+            stepName: "wait",
+            slots: [
+              { activityIndex: 0, branchPath: "" },
+              { activityIndex: 1, branchPath: "" },
+            ],
+          });
+
+          const due = await s.findDueSleeps({ now: new Date(), limit: 1000 });
+          expect(due.map((d) => d.workflowId)).not.toContain("j-disc3");
+          expect(
+            await s.findPendingSignal({
+              workflowId: "j-disc3",
+              stepName: "wait",
+              signalName: "approval",
+            }),
+          ).toBeNull();
+          expect(await s.loadJournal("j-disc3", "wait")).toEqual([]);
         });
       });
     }

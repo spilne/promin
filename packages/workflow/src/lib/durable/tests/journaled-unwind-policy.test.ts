@@ -223,7 +223,10 @@ describe("unwind policy — engine-integrity exits do not compensate", () => {
 
 describe("unwind policy — genuine failures still compensate", () => {
   it("a plain Error unwinds and journals the compensation", async () => {
-    const storage = new InMemoryWorkflowStorage();
+    // Keeps the rows the engine discards after the unwind.
+    const storage = new (class extends InMemoryWorkflowStorage {
+      override async discardJournalEntries(): Promise<void> {}
+    })();
     const rolled: string[] = [];
     const err = await capture(
       run({

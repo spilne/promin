@@ -48,6 +48,7 @@ export type StorageMethod =
   | "appendEntry"
   | "appendPendingEntry"
   | "completePendingEntry"
+  | "discardJournalEntries"
   | "findDueSleeps"
   | "findPendingSignal"
   // StepAttemptStorage — forwarded only when the underlying storage

@@ -88,6 +88,13 @@ export function createWorkflowStorageHandler(
     appendEntry: (p) => requireJournal(storage).appendEntry(p),
     appendPendingEntry: (p) => requireSuspend(storage).appendPendingEntry(p),
     completePendingEntry: (p) => requireSuspend(storage).completePendingEntry(p),
+    discardJournalEntries: async (p) => {
+      const suspend = requireSuspend(storage);
+      if (!suspend.discardJournalEntries) {
+        throw new Error("storage does not implement discardJournalEntries");
+      }
+      await suspend.discardJournalEntries(p);
+    },
     findDueSleeps: (p) => requireSuspend(storage).findDueSleeps(p),
     findPendingSignal: (p) => requireSuspend(storage).findPendingSignal(p),
     // -- StepAttempt methods. Feature-detected so backends without

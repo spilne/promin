@@ -5,9 +5,9 @@
 //   * One branch fails → the parallel rejects with that error (Promise.all
 //     semantics). Other branches may complete in the background — their
 //     journal entries still land.
-//   * Replay after a parallel failure: body re-runs deterministically;
-//     successful branches hit the journal, the failing branch's recorded
-//     failure rethrows.
+//   * Re-drive after a parallel failure: body re-runs deterministically;
+//     successful branches hit the journal, the failing branch runs again
+//     (its failure was discarded when it escaped the body).
 //   * Compensations registered BEFORE the parallel unwind when the parallel
 //     fails, confirming intra-step saga + parallel compose.
 //   * `compensate` inside a parallel branch is rejected at call time with a
@@ -54,9 +54,10 @@ describe("ctx.parallel — failure semantics", () => {
     expect(slower!.exit?.tag).toBe("Success");
   });
 
-  it("replay re-throws the recorded failure at the failing branch", async () => {
+  it("a re-drive replays the successful branch and re-runs the failed one", async () => {
     const storage = new InMemoryWorkflowStorage();
     let ran = 0;
+    let badRan = 0;
 
     const body = function* (ctx: any) {
       return yield* ctx.parallel([
@@ -65,6 +66,7 @@ describe("ctx.parallel — failure semantics", () => {
           return 1;
         }),
         ctx.activity("bad", async () => {
+          badRan++;
           throw new Error("nope");
         }),
       ]);
@@ -82,7 +84,7 @@ describe("ctx.parallel — failure semantics", () => {
     ).rejects.toThrow("nope");
     expect(ran).toBe(1);
 
-    // Replay: "ok" loads from journal; "bad" rethrows the recorded failure.
+    // Re-drive: "ok" loads from journal; "bad" runs again.
     await expect(
       runJournaledStep({
         input: undefined,
@@ -94,6 +96,7 @@ describe("ctx.parallel — failure semantics", () => {
       }),
     ).rejects.toThrow("nope");
     expect(ran).toBe(1); // ok was NOT re-run — hit the journal
+    expect(badRan).toBe(2);
   });
 });
 

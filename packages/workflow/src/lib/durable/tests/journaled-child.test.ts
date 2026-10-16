@@ -131,12 +131,16 @@ describe("ctx.child", () => {
       })
       .build();
 
-    const runner = createWorkflowRunner({ storage });
+    // Keeps the failure the engine discards once it escapes the body.
+    const retaining = new (class extends InMemoryWorkflowStorage {
+      override async discardJournalEntries(): Promise<void> {}
+    })();
+    const runner = createWorkflowRunner({ storage: retaining });
     await expect(
       runner.run({ workflow: parent, workflowId: "fail-par-1", input: undefined }),
     ).rejects.toThrow();
 
-    const journal = await storage.loadJournal("fail-par-1", "run");
+    const journal = await retaining.loadJournal("fail-par-1", "run");
     const childEntry = journal.find((e) => e.stepType === "child");
     expect(childEntry).toBeDefined();
     expect(childEntry?.exit?.tag).toBe("Failure");

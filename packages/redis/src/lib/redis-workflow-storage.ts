@@ -14,6 +14,9 @@ import type {
   ActivityJournalStorage,
   JournaledSuspendStorage,
   JournalEntry,
+  JournalExit,
+  JournalSlot,
+  CompletePendingResult,
   FenceGuard,
   WorkflowOrderBy,
   SignalTokenRecord,
@@ -158,18 +161,38 @@ end
 return 1
 `;
 
-// Journal: transition pending -> completed atomically. No-op if already completed.
+// Journal: transition pending -> completed atomically. First writer wins: a
+// call on an already-completed (or missing) entry changes nothing.
 // KEYS: [entryHash, sleepsZset (global), signalIdxHash]
 // ARGV: [exitJson, sleepsMember|'', signalName|'']
+// Returns {1, ''} when this call completed the entry, else {0, storedExitJson|''}.
 const COMPLETE_PENDING_LUA = `
 local phase = redis.call('HGET', KEYS[1], 'phase')
-if phase ~= 'pending' then return 0 end
+if phase ~= 'pending' then
+  return {0, redis.call('HGET', KEYS[1], 'exit') or ''}
+end
 local stepType = redis.call('HGET', KEYS[1], 'stepType')
 redis.call('HSET', KEYS[1], 'phase', 'completed', 'exit', ARGV[1])
 if stepType == 'sleep' and ARGV[2] ~= '' then
   redis.call('ZREM', KEYS[2], ARGV[2])
 elseif stepType == 'signal' and ARGV[3] ~= '' then
   redis.call('HDEL', KEYS[3], ARGV[3])
+end
+return {1, ''}
+`;
+
+// Journal: delete one entry and its index memberships.
+// KEYS: [entryHash, idxZset, sleepsZset (global), signalIdxHash]
+// ARGV: [idxMember, sleepsMember, legacyIdxMember|'']
+const DISCARD_ENTRY_LUA = `
+local stepType = redis.call('HGET', KEYS[1], 'stepType')
+local name = redis.call('HGET', KEYS[1], 'activityName')
+redis.call('DEL', KEYS[1])
+redis.call('ZREM', KEYS[2], ARGV[1])
+if ARGV[3] ~= '' then redis.call('ZREM', KEYS[2], ARGV[3]) end
+if stepType == 'sleep' then redis.call('ZREM', KEYS[3], ARGV[2]) end
+if stepType == 'signal' and name then
+  if redis.call('HGET', KEYS[4], name) == ARGV[1] then redis.call('HDEL', KEYS[4], name) end
 end
 return 1
 `;
@@ -2054,8 +2077,9 @@ export class RedisWorkflowStorage
     const idxKey = this.journalIdxKey(params.workflowId, params.stepName);
     const stepsKey = this.journalStepsKey(params.workflowId);
     const signalIdxKey = this.journalSignalIdxKey(params.workflowId, params.stepName);
-    const wakeAtMs =
-      params.stepType === "sleep" && params.wakeAt ? String(params.wakeAt.getTime()) : "";
+    // Persist wakeAt for signals too: it is the signal's timeout deadline,
+    // and replay must read the recorded one rather than recompute it.
+    const wakeAtMs = params.wakeAt ? String(params.wakeAt.getTime()) : "";
     // Only register in the global sleeps zset when we have a wakeAt — a sleep
     // entry without one can't be scanned anyway.
     const sleepsMember =
@@ -2090,8 +2114,8 @@ export class RedisWorkflowStorage
     stepName: string;
     activityIndex: number;
     branchPath?: string;
-    exit: NonNullable<JournalEntry["exit"]>;
-  }): Promise<void> {
+    exit: JournalExit;
+  }): Promise<CompletePendingResult> {
     const branchPath = params.branchPath ?? "";
     const entryKey = this.journalEntryKey(
       params.workflowId,
@@ -2101,10 +2125,10 @@ export class RedisWorkflowStorage
     );
     const signalIdxKey = this.journalSignalIdxKey(params.workflowId, params.stepName);
     // Load current entry to learn the signal name (if any) so the Lua script
-    // can remove it from the signal-idx hash. Safe under the workflow lock;
-    // completePendingEntry is always called by the lock holder (workflow
-    // resume, scanner, or signal deliverer) and the Lua phase check makes
-    // the write itself atomic.
+    // can remove it from the signal-idx hash. stepType and activityName never
+    // change after the pending write; the Lua phase check makes the
+    // transition itself atomic, so concurrent completers (a signal delivery
+    // racing the body's timeout write) get exactly one winner.
     const current = await this.redis.hgetall(entryKey);
     const stepType = current?.stepType;
     const sleepsMember =
@@ -2113,7 +2137,7 @@ export class RedisWorkflowStorage
         : "";
     const signalName = stepType === "signal" ? (current?.activityName ?? "") : "";
 
-    await this.redis.eval(
+    const [won, storedExit] = (await this.redis.eval(
       COMPLETE_PENDING_LUA,
       3,
       entryKey,
@@ -2122,7 +2146,40 @@ export class RedisWorkflowStorage
       JSON.stringify(params.exit),
       sleepsMember,
       signalName,
-    );
+    )) as [number, string];
+    if (Number(won) === 1) return { completed: true, exit: params.exit };
+    return {
+      completed: false,
+      exit: storedExit ? (JSON.parse(storedExit) as JournalExit) : undefined,
+    };
+  }
+
+  async discardJournalEntries(params: {
+    workflowId: string;
+    stepName: string;
+    slots: readonly JournalSlot[];
+  }): Promise<void> {
+    const idxKey = this.journalIdxKey(params.workflowId, params.stepName);
+    const signalIdxKey = this.journalSignalIdxKey(params.workflowId, params.stepName);
+    for (const slot of params.slots) {
+      await this.redis.eval(
+        DISCARD_ENTRY_LUA,
+        4,
+        this.journalEntryKey(
+          params.workflowId,
+          params.stepName,
+          slot.activityIndex,
+          slot.branchPath,
+        ),
+        idxKey,
+        this.sleepsKey,
+        signalIdxKey,
+        `${slot.activityIndex}|${slot.branchPath}`,
+        this.sleepsMember(params.workflowId, params.stepName, slot.activityIndex, slot.branchPath),
+        // Index members written before branch paths existed are the bare index.
+        slot.branchPath === "" ? String(slot.activityIndex) : "",
+      );
+    }
   }
 
   async findDueSleeps(params: { now: Date; limit: number }): Promise<

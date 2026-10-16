@@ -27,6 +27,42 @@ export const JOURNAL_STEP_TYPES: readonly JournalStepType[] = [
 export type JournalPhase = "pending" | "completed";
 
 /**
+ * A recorded failure. `error` is the message. Entries written before tagged
+ * persistence hold only `error` and replay as a plain `Error`.
+ */
+export interface JournalFailureExit {
+  readonly tag: "Failure";
+  readonly error: string;
+  /** `_tag` of a tagged error (`TerminalError`, a user `TaggedError`, ...). */
+  readonly errorTag?: string;
+  /** `name` of an untagged error when it isn't plain `"Error"` (e.g. `"TypeError"`). */
+  readonly errorName?: string;
+  /** The error's other own enumerable fields, `LosslessJsonCodec`-encoded. */
+  readonly errorData?: unknown;
+}
+
+/** Completed outcome of a journal entry. */
+export type JournalExit = { readonly tag: "Success"; readonly value: unknown } | JournalFailureExit;
+
+/**
+ * Result of `completePendingEntry`. `completed` is `true` when this call
+ * moved the entry from `pending` to `completed`; `false` when the entry was
+ * already completed (another writer won) or doesn't exist. `exit` is the
+ * exit stored after the call: this call's own exit when it won, the
+ * winner's when it lost, `undefined` when there is no such entry.
+ */
+export interface CompletePendingResult {
+  readonly completed: boolean;
+  readonly exit: JournalExit | undefined;
+}
+
+/** Address of one journal entry inside a step. */
+export interface JournalSlot {
+  readonly activityIndex: number;
+  readonly branchPath: string;
+}
+
+/**
  * One entry in a journaled step's activity log.
  *
  * Exit is a tagged union so failures serialize cleanly alongside successes.
@@ -36,8 +72,9 @@ export type JournalPhase = "pending" | "completed";
  * replay.
  *
  * Success values are codec-encoded (currently plain JSON; per-activity
- * Zod codecs are a planned follow-up). Errors serialize to string today;
- * tagged error unions for type-safe rethrow are a future refinement.
+ * Zod codecs are a planned follow-up). Failures carry the error message plus
+ * its `_tag` / `name` and public fields (see `JournalFailureExit`) so replay
+ * rethrows an error of the same kind.
  */
 export interface JournalEntry {
   readonly activityIndex: number;
@@ -66,9 +103,7 @@ export interface JournalEntry {
    */
   readonly payloadHash?: string;
   /** Exit is set once the entry reaches `completed` phase. `undefined` while `pending`. */
-  readonly exit?:
-    | { readonly tag: "Success"; readonly value: unknown }
-    | { readonly tag: "Failure"; readonly error: string };
+  readonly exit?: JournalExit;
   /** For `sleep` entries: when the workflow should wake. Null for other types. */
   readonly wakeAt?: Date;
   readonly createdAt: Date;
@@ -139,17 +174,39 @@ export interface JournaledSuspendStorage extends ActivityJournalStorage {
 
   /**
    * Transition a `pending` entry to `completed`. Used by the sleep scanner
-   * (for sleep entries, exit = `{ tag: "Success", value: actual wake time }`)
-   * and by `completeSignal` (for signal entries, exit carries the delivered
-   * value). No-op if already completed (idempotent on repeated delivery).
-   * `branchPath` defaults to `""` for non-parallel entries.
+   * (for sleep entries, exit = `{ tag: "Success", value: actual wake time }`),
+   * by `completeSignal` (for signal entries, exit carries the delivered
+   * value) and by the step body itself (activity results, sleep and signal
+   * timeouts). First writer wins: if the entry is already completed the call
+   * changes nothing. `branchPath` defaults to `""` for non-parallel entries.
+   *
+   * The check and the write must be one atomic step, and the result must
+   * report who won (see `CompletePendingResult`). A signal delivery and the
+   * signal's timeout race for the same entry, and the losing side adopts the
+   * stored exit so the live run and the journal agree.
    */
   completePendingEntry(params: {
     readonly workflowId: string;
     readonly stepName: string;
     readonly activityIndex: number;
     readonly branchPath?: string;
-    readonly exit: NonNullable<JournalEntry["exit"]>;
+    readonly exit: JournalExit;
+  }): Promise<CompletePendingResult>;
+
+  /**
+   * Delete the given entries of one journaled step. Missing slots are
+   * ignored. Also drops them from any sleep or signal lookup index.
+   *
+   * The engine calls this when a failure escapes a journaled body: recorded
+   * failures (and activities whose compensation ran) are removed so the next
+   * attempt of the step re-executes them instead of replaying the failure.
+   * On a storage without this method a step-level retry replays the
+   * recorded failure.
+   */
+  discardJournalEntries?(params: {
+    readonly workflowId: string;
+    readonly stepName: string;
+    readonly slots: readonly JournalSlot[];
   }): Promise<void>;
 
   /**

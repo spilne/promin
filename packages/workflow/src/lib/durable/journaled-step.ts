@@ -17,6 +17,24 @@
 // Why sync generator: the body signature `Generator<ActivityYield, R, any>`
 // makes raw `await` a compile-time type error — every side effect must go
 // through `ctx.activity`, which is what makes the journal/replay safe.
+//
+// Failures and step attempts:
+//   - An activity (or child) that fails after its own `retry` is journaled
+//     as a Failure with the error's `_tag` / `name` and fields. While the
+//     body that saw it is still in flight (suspended on sleep/signal, or
+//     re-driven after a crash) replay rethrows an error of the same kind, so
+//     a body that catches the failure takes the same branch again.
+//   - When a failure escapes the body, the step attempt is over. After the
+//     compensation unwind, the engine discards the attempt's recorded
+//     failures (failed compensations included, so the next unwind retries
+//     them), plus every activity whose compensation completed together with
+//     that compensation's row: its effect was rolled back. The next attempt
+//     (step-level `retry`, or a later resume of the failed workflow)
+//     re-executes those activities. Successful activities that were not
+//     rolled back still replay and never run twice.
+//   - Control-flow and engine-integrity exits (suspend, continue-as-new,
+//     tripwire, non-determinism, ambiguous outcome, lock loss) discard
+//     nothing.
 // ---------------------------------------------------------------------------
 
 import type { RetryPolicy } from "../shared/retry-policy.ts";
@@ -25,10 +43,20 @@ import type { Codec } from "@spilne/perfect-core/connect";
 import { LosslessJsonCodec, payloadHash as hashPayload } from "@spilne/perfect-core/connect";
 import {
   isJournaledSuspendStorage,
+  type CompletePendingResult,
   type JournalEntry,
+  type JournalExit,
+  type JournalSlot,
   type ActivityJournalStorage,
   type JournaledSuspendStorage,
 } from "./activity-journal.ts";
+import {
+  decodeSignalExitValue,
+  deliveredSignalExitValue,
+  failureExit,
+  rehydrateFailure,
+  timedOutSignalExitValue,
+} from "./journal-exit.ts";
 import type { Workflow } from "./durable-pipeline.ts";
 import {
   AmbiguousActivityOutcome,
@@ -231,6 +259,15 @@ export interface JournaledContext<Input, Prev> {
    *   name, different input" bugs that the 2-arg form can't see through
    *   the closure.
    *
+   * Failures: if `fn` still throws after `options.retry`, the failure is
+   * journaled and rethrown. A replay inside the same step attempt (resume
+   * after sleep/signal, crash recovery) rethrows an error of the same kind:
+   * `TerminalError` / `RetryableError` and the other engine errors come back
+   * as their own class, any other `_tag` comes back as an `Error` with that
+   * `_tag`, `name` and fields. Once a failure escapes the body, the recorded
+   * failures are discarded, so a step-level `retry` (or a later resume)
+   * runs the failed activity again while successful ones replay.
+   *
    * Must be consumed with `yield*` — the sub-generator delegates its single
    * yielded promise to the runner and returns the resolved value.
    */
@@ -271,6 +308,12 @@ export interface JournaledContext<Input, Prev> {
    * and the call returns a result envelope instead of `T` directly. This
    * mirrors the timeout already available on the builder-level
    * `.waitForSignal({ timeoutMs })` step.
+   *
+   * A delivery and the timeout race for the same journal entry; whichever
+   * completes it first wins, and both the live run and every replay take
+   * that outcome. The entry stores a tagged value (delivered or timeout), so
+   * a delivered payload shaped like `{ ok: false, ... }` is returned as
+   * `{ ok: true, value: { ok: false, ... } }`, never mistaken for a timeout.
    */
   signal<T>(name: string): Generator<ActivityYield, T, T>;
   signal<T>(
@@ -677,7 +720,7 @@ function makeCtx<Input, Prev>(params: {
   clock?: WallClock;
   /** Fence guard passed on the ctx.sleep / ctx.signal suspension writes. */
   guard?: FenceGuard;
-}): { ctx: JournaledContext<Input, Prev>; unwind: (bodyError: unknown) => Promise<void> } {
+}): { ctx: JournaledContext<Input, Prev>; unwind: (bodyError: unknown) => Promise<JournalSlot[]> } {
   const {
     input,
     prev,
@@ -738,8 +781,34 @@ function makeCtx<Input, Prev>(params: {
     return { activityIndex: indexRef.next++, branchPath: "" };
   }
 
+  /**
+   * Complete a pending slot and return the exit the journal now holds. When
+   * another writer completed the slot first (a signal delivery beating the
+   * timeout, or a second worker), that writer's exit is returned and
+   * `won` is false: the caller must continue with it so the live run and
+   * replay agree.
+   */
+  async function completeSlot(params: {
+    slot: JournalSlot;
+    exit: JournalExit;
+    /**
+     * Read the row back when the storage predates `CompletePendingResult`
+     * and reports nothing. Only worth the read where a race is expected.
+     */
+    readBack: boolean;
+  }): Promise<{ won: boolean; exit: JournalExit }> {
+    return completeAndReport({
+      storage: storage as JournaledSuspendStorage,
+      workflowId,
+      stepName,
+      ...params,
+    });
+  }
+
   interface Compensation {
     readonly activityIndex: number; // reserved at registration time
+    /** Slot of the activity this compensation rolls back. */
+    readonly sourceActivityIndex: number;
     readonly activityName: string; // for diagnostics
     readonly run: () => Promise<void>; // bound to the activity's result
   }
@@ -826,6 +895,7 @@ function makeCtx<Input, Prev>(params: {
       const reservedIndex = indexRef.next++;
       compensations.push({
         activityIndex: reservedIndex,
+        sourceActivityIndex: activityIndex,
         activityName: name,
         run: async () => {
           // Run outside the body scope so Date.now / random inside
@@ -841,6 +911,14 @@ function makeCtx<Input, Prev>(params: {
     // single-phase path (side effect risks duplication under worker crash,
     // same as before this change).
     const twoPhase = isJournaledSuspendStorage(storage);
+
+    /** Value of a completed exit: a failure rethrows, a success decodes. */
+    const settle = (exit: JournalExit): T => {
+      if (exit.tag === "Failure") throw rehydrateFailure(exit);
+      const value = codec.decode(exit.value) as T;
+      maybeRegisterCompensation(value);
+      return value;
+    };
 
     // Build the async work for this activity. Replay-or-run is decided here
     // so the runner sees a single awaitable Promise regardless of path.
@@ -892,15 +970,10 @@ function makeCtx<Input, Prev>(params: {
               `journal entry ${activityIndex} for step "${stepName}" is completed but has no exit`,
             );
           }
-          if (recorded.exit.tag === "Failure") {
-            throw new Error(recorded.exit.error);
-          }
-          const replayed = codec.decode(recorded.exit.value) as T;
           // Register compensation on replay too — a LATER activity in this
           // run might still fail, and the unwind needs to call our rollback
           // with the replayed value.
-          maybeRegisterCompensation(replayed);
-          return replayed;
+          return settle(recorded.exit);
         }
         // Pending row on replay — the worker that started this activity
         // crashed between the pending write and the completion write. The
@@ -951,16 +1024,15 @@ function makeCtx<Input, Prev>(params: {
           ? await runWithRetry({ fn: runOnce, policy: options.retry, clock })
           : await runOnce();
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        const failureExit = { tag: "Failure", error: message } as const;
+        const exit = failureExit(err);
         if (twoPhase) {
-          await storage.completePendingEntry({
-            workflowId,
-            stepName,
-            activityIndex,
-            branchPath,
-            exit: failureExit,
+          const stored = await completeSlot({
+            slot: { activityIndex, branchPath },
+            exit,
+            readBack: false,
           });
+          // Another writer completed the slot first: follow the journal.
+          if (!stored.won) return settle(stored.exit);
         } else {
           await storage.appendEntry({
             workflowId,
@@ -969,7 +1041,7 @@ function makeCtx<Input, Prev>(params: {
             branchPath,
             activityName: name,
             payloadHash: payloadHashValue,
-            exit: failureExit,
+            exit,
           });
         }
         throw err;
@@ -977,32 +1049,27 @@ function makeCtx<Input, Prev>(params: {
       // Encode for storage, then return the round-tripped value so fresh-run
       // consumers see the same shape they'd see on replay. Without the decode
       // step, a step body that yields `new Date()` would see a real Date on
-      // fresh run and a stringified one after restart — the asymmetry
-      // promin-sd5k was built to eliminate.
+      // fresh run and a stringified one after restart.
       const encoded = codec.encode(value);
       const successExit = { tag: "Success", value: encoded } as const;
       if (twoPhase) {
-        await storage.completePendingEntry({
-          workflowId,
-          stepName,
-          activityIndex,
-          branchPath,
+        const stored = await completeSlot({
+          slot: { activityIndex, branchPath },
           exit: successExit,
+          readBack: false,
         });
-      } else {
-        await storage.appendEntry({
-          workflowId,
-          stepName,
-          activityIndex,
-          branchPath,
-          activityName: name,
-          payloadHash: payloadHashValue,
-          exit: successExit,
-        });
+        return settle(stored.exit);
       }
-      const roundTripped = codec.decode(encoded) as T;
-      maybeRegisterCompensation(roundTripped);
-      return roundTripped;
+      await storage.appendEntry({
+        workflowId,
+        stepName,
+        activityIndex,
+        branchPath,
+        activityName: name,
+        payloadHash: payloadHashValue,
+        exit: successExit,
+      });
+      return settle(successExit);
     })();
 
     // The runner will await the promise and resume via .next(resolvedValue);
@@ -1045,11 +1112,15 @@ function makeCtx<Input, Prev>(params: {
         );
       }
 
+      const wokeAt = (exit: JournalExit): Date => {
+        if (exit.tag === "Failure") throw rehydrateFailure(exit);
+        const raw = exit.value;
+        return typeof raw === "string" ? new Date(raw) : (raw as Date);
+      };
+
       // Replay after completion — entry holds the actual wake time.
       if (recorded && recorded.phase === "completed" && recorded.exit) {
-        if (recorded.exit.tag === "Failure") throw new Error(recorded.exit.error);
-        const raw = recorded.exit.value;
-        return typeof raw === "string" ? new Date(raw) : (raw as Date);
+        return wokeAt(recorded.exit);
       }
 
       // First run or pending replay — determine wake time.
@@ -1075,15 +1146,15 @@ function makeCtx<Input, Prev>(params: {
       // passed, complete the entry here (no external completion needed) and
       // return. The DefaultSleepScanner's existing "run workflow on wake"
       // loop works unchanged — ctx.sleep does its own time check.
+      // `completeDueSleeps` may complete the entry at the same moment; both
+      // write the same wake time, but the stored exit is what replay sees.
       if (clock.currentTimeMs() >= wakeAt.getTime()) {
-        await suspendStorage.completePendingEntry({
-          workflowId,
-          stepName,
-          activityIndex,
-          branchPath,
+        const stored = await completeSlot({
+          slot: { activityIndex, branchPath },
           exit: { tag: "Success", value: wakeAt.toISOString() },
+          readBack: false,
         });
-        return wakeAt;
+        return wokeAt(stored.exit);
       }
 
       // Still sleeping — mark the WORKFLOW as suspended at step level so the
@@ -1151,32 +1222,33 @@ function makeCtx<Input, Prev>(params: {
         );
       }
 
-      // Replay after delivery — entry completed with the signal payload.
-      // Two completion shapes:
-      //   - delivered  : exit.value is the bare T (legacy + non-timeout path)
-      //   - timed-out  : exit.value is `{ ok: false, error: "timeout" }`,
-      //                  written by the scanner. Identified by shape, not
-      //                  by a separate journal column, so old rows stay
-      //                  compatible.
+      // Result of a completed entry. The stored value is tagged delivered /
+      // timeout (see `journal-exit.ts`); untagged legacy rows decode by
+      // their old shape. With a timeout configured a delivery is wrapped in
+      // the `{ ok: true, value }` envelope so `result.ok` works uniformly.
+      const outcomeOf = (exit: JournalExit): T | TimedSignalOutcome<T> => {
+        if (exit.tag === "Failure") throw rehydrateFailure(exit);
+        const outcome = decodeSignalExitValue({ stored: exit.value, hasTimeout });
+        if (outcome.kind === "timeout") {
+          if (!hasTimeout) {
+            // The run that recorded this waited with a timeout; this code
+            // waits without one.
+            throw new JournalNonDeterminismError(
+              stepName,
+              activityIndex,
+              `signal:${signalName} (timed out)`,
+              `signal:${signalName} (no timeout)`,
+            );
+          }
+          return { ok: false, error: "timeout" };
+        }
+        const value = outcome.value as T;
+        return hasTimeout ? { ok: true, value } : value;
+      };
+
+      // Replay after delivery or timeout.
       if (recorded && recorded.phase === "completed" && recorded.exit) {
-        if (recorded.exit.tag === "Failure") {
-          throw new Error(recorded.exit.error);
-        }
-        const exitValue = recorded.exit.value;
-        if (
-          hasTimeout &&
-          typeof exitValue === "object" &&
-          exitValue !== null &&
-          "ok" in exitValue &&
-          (exitValue as { ok?: unknown }).ok === false
-        ) {
-          return exitValue as TimedSignalOutcome<T>;
-        }
-        // Bare T came back (in-app delivery or no-timeout legacy form).
-        // With a timeout configured, wrap into the result envelope so the
-        // caller's switch on `result.ok` works uniformly.
-        const bare = exitValue as T;
-        return hasTimeout ? { ok: true, value: bare } : bare;
+        return outcomeOf(recorded.exit);
       }
 
       // First run (or still pending) — register interest, mark the workflow
@@ -1209,16 +1281,16 @@ function makeCtx<Input, Prev>(params: {
       // Self-healing replay: if the scanner re-ran us and our timeout has
       // passed without a delivery, complete the entry with the timeout
       // outcome and return. Mirrors `ctx.sleep` — the scanner wakes us, the
-      // body decides what to do.
+      // body decides what to do. A delivery that completed the entry after
+      // the journal was loaded wins the race: take its value, the same one
+      // every replay will see.
       if (wakeAt && clock.currentTimeMs() >= wakeAt.getTime()) {
-        await suspendStorage.completePendingEntry({
-          workflowId,
-          stepName,
-          activityIndex,
-          branchPath,
-          exit: { tag: "Success", value: { ok: false, error: "timeout" } },
+        const stored = await completeSlot({
+          slot: { activityIndex, branchPath },
+          exit: { tag: "Success", value: timedOutSignalExitValue() },
+          readBack: true,
         });
-        return { ok: false, error: "timeout" } as TimedSignalOutcome<T>;
+        return outcomeOf(stored.exit);
       }
 
       if (workflowStorage) {
@@ -1350,6 +1422,48 @@ function makeCtx<Input, Prev>(params: {
   // ctx.child — inline child workflow execution
   // -------------------------------------------------------------------------
 
+  /**
+   * The child workflow suspended. Suspend this step too, waking when the
+   * child does: the child's earliest sleep wake time or signal deadline.
+   * The sleep scanner then re-drives the parent, whose `ctx.child` resumes
+   * the child. A child waiting on a signal without a deadline gives the
+   * parent no wake time; the parent stays suspended until it is resumed.
+   */
+  async function suspendForChild(params: {
+    childWorkflowId: string;
+    childError: unknown;
+  }): Promise<WorkflowSuspendedError> {
+    const { childWorkflowId, childError } = params;
+    const reason = (childError as { reason?: unknown }).reason === "sleep" ? "sleep" : "signal";
+    let wakeAt: Date | undefined;
+    if (workflowStorage) {
+      const child = await workflowStorage.loadWorkflow(childWorkflowId);
+      for (const step of Object.values(child?.steps ?? {})) {
+        const at =
+          step.status === "sleeping"
+            ? step.wakeAt
+            : step.status === "waiting_for_signal"
+              ? step.signalTimeoutAt
+              : undefined;
+        if (at && (!wakeAt || at.getTime() < wakeAt.getTime())) wakeAt = at;
+      }
+      await workflowStorage.suspendWorkflow(
+        workflowId,
+        stepName,
+        { status: "sleeping", ...(wakeAt && { wakeAt }) },
+        guard,
+      );
+    }
+    return new WorkflowSuspendedError({
+      workflowId,
+      stepName,
+      reason,
+      message:
+        `waiting for child workflow "${childWorkflowId}"` +
+        (wakeAt ? ` (wakes at ${wakeAt.toISOString()})` : ""),
+    });
+  }
+
   function* childImpl<Output>(
     workflow: Workflow<unknown, Output>,
     options?: { readonly input?: unknown; readonly workflowId?: string },
@@ -1363,6 +1477,12 @@ function makeCtx<Input, Prev>(params: {
       `${workflowId}.${stepName}.${activityIndex}${branchPath.replaceAll("/", "~")}`;
     const childInput = options?.input;
     const activityName = workflow.name;
+
+    /** Value of a completed exit: a failure rethrows, a success decodes. */
+    const settle = (exit: JournalExit): Output => {
+      if (exit.tag === "Failure") throw rehydrateFailure(exit);
+      return stepCodec.decode(exit.value) as Output;
+    };
 
     const promise = (async (): Promise<Output> => {
       const recorded = journalByKey.get(journalKey(activityIndex, branchPath));
@@ -1393,8 +1513,7 @@ function makeCtx<Input, Prev>(params: {
               `journal entry ${activityIndex} for step "${stepName}" (child: ${activityName}) is completed but has no exit`,
             );
           }
-          if (recorded.exit.tag === "Failure") throw new Error(recorded.exit.error);
-          return stepCodec.decode(recorded.exit.value) as Output;
+          return settle(recorded.exit);
         }
         // Pending row — previous worker started the child but didn't record
         // the result. Re-running is safe: the child workflow has its own
@@ -1432,16 +1551,25 @@ function makeCtx<Input, Prev>(params: {
           }),
         )) as Output;
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        const failureExit = { tag: "Failure", error: message } as const;
+        const tag = errorTag(err);
+        if (tag === "WorkflowSuspendedError") {
+          // The child is parked on a sleep or signal: not an outcome. The
+          // entry stays pending, so the parent's next run calls runChild
+          // again, which resumes the child.
+          throw await suspendForChild({ childWorkflowId, childError: err });
+        }
+        // Another worker holds the child: nothing happened that the journal
+        // should remember.
+        if (tag === "WorkflowLockError" || tag === "FenceTokenMismatchError") throw err;
+        const exit = failureExit(err);
         if (twoPhase) {
-          await storage.completePendingEntry({
-            workflowId,
-            stepName,
-            activityIndex,
-            branchPath,
-            exit: failureExit,
+          const stored = await completeSlot({
+            slot: { activityIndex, branchPath },
+            exit,
+            readBack: false,
           });
+          // Another writer completed the slot first: follow the journal.
+          if (!stored.won) return settle(stored.exit);
         } else {
           await storage.appendEntry({
             workflowId,
@@ -1449,7 +1577,7 @@ function makeCtx<Input, Prev>(params: {
             activityIndex,
             branchPath,
             activityName,
-            exit: failureExit,
+            exit,
           });
         }
         throw err;
@@ -1458,24 +1586,22 @@ function makeCtx<Input, Prev>(params: {
       const encoded = stepCodec.encode(result);
       const successExit = { tag: "Success", value: encoded } as const;
       if (twoPhase) {
-        await storage.completePendingEntry({
-          workflowId,
-          stepName,
-          activityIndex,
-          branchPath,
+        const stored = await completeSlot({
+          slot: { activityIndex, branchPath },
           exit: successExit,
+          readBack: false,
         });
-      } else {
-        await storage.appendEntry({
-          workflowId,
-          stepName,
-          activityIndex,
-          branchPath,
-          activityName,
-          exit: successExit,
-        });
+        return settle(stored.exit);
       }
-      return stepCodec.decode(encoded) as Output;
+      await storage.appendEntry({
+        workflowId,
+        stepName,
+        activityIndex,
+        branchPath,
+        activityName,
+        exit: successExit,
+      });
+      return settle(successExit);
     })();
 
     return yield { _tag: "Activity", name: activityName, promise };
@@ -1509,9 +1635,20 @@ function makeCtx<Input, Prev>(params: {
    * Compensation failures do NOT halt the unwind — the engine records the
    * failure in the journal and continues with the remaining compensations.
    * The caller (runJournaledStep) rethrows the original body error after.
+   *
+   * Returns the slots of every rolled-back activity together with its
+   * completed compensation, so the caller can discard them and the next
+   * step attempt re-executes the activity.
    */
-  async function unwind(_bodyError: unknown): Promise<void> {
+  async function unwind(_bodyError: unknown): Promise<JournalSlot[]> {
     const twoPhase = isJournaledSuspendStorage(storage);
+    const rolledBack: JournalSlot[] = [];
+    const markRolledBack = (comp: Compensation): void => {
+      rolledBack.push(
+        { activityIndex: comp.sourceActivityIndex, branchPath: "" },
+        { activityIndex: comp.activityIndex, branchPath: "" },
+      );
+    };
     for (let i = compensations.length - 1; i >= 0; i--) {
       const comp = compensations[i]!;
       const compIdx = comp.activityIndex;
@@ -1520,7 +1657,10 @@ function makeCtx<Input, Prev>(params: {
       // Replay: if a completed row already exists for this compensation
       // index, the previous worker finished it — skip.
       const recorded = journalByKey.get(journalKey(compIdx, ""));
-      if (recorded && (recorded.phase ?? "completed") === "completed") continue;
+      if (recorded && (recorded.phase ?? "completed") === "completed") {
+        if (recorded.exit?.tag === "Success") markRolledBack(comp);
+        continue;
+      }
 
       if (twoPhase) {
         try {
@@ -1535,27 +1675,25 @@ function makeCtx<Input, Prev>(params: {
           // Journal unreachable — nothing to do.
           continue;
         }
+        let exit: JournalExit;
         try {
           await comp.run();
+          exit = { tag: "Success", value: null };
+        } catch (err) {
+          exit = failureExit(err);
+        }
+        try {
           await storage.completePendingEntry({
             workflowId,
             stepName,
             activityIndex: compIdx,
-            exit: { tag: "Success", value: null },
+            exit,
           });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          try {
-            await storage.completePendingEntry({
-              workflowId,
-              stepName,
-              activityIndex: compIdx,
-              exit: { tag: "Failure", error: message },
-            });
-          } catch {
-            /* journal unreachable — give up on this one, continue unwind */
-          }
+        } catch {
+          /* journal unreachable — give up on this one, continue unwind */
+          continue;
         }
+        if (exit.tag === "Success") markRolledBack(comp);
       } else {
         // Legacy single-phase storage — best-effort record. The side effect
         // risk of a crash here is the same as a non-two-phase activity,
@@ -1570,19 +1708,19 @@ function makeCtx<Input, Prev>(params: {
             exit: { tag: "Success", value: null },
           });
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
           await storage
             .appendEntry({
               workflowId,
               stepName,
               activityIndex: compIdx,
               activityName: compName,
-              exit: { tag: "Failure", error: message },
+              exit: failureExit(err),
             })
             .catch(() => undefined);
         }
       }
     }
+    return rolledBack;
   }
 
   // Journaled-activity loop. Each iteration yields through `ctx.activity`
@@ -1777,8 +1915,11 @@ async function driveSubGenerator<T>(gen: Generator<ActivityYield, T, T>): Promis
  * callers drive resume themselves; an automatic resume path through the
  * step queue is planned as a refinement.
  *
- * Returns `true` if a pending entry was found and completed; `false` if no
- * matching pending signal exists (already delivered, or never registered).
+ * Returns `true` if this call completed the pending entry; `false` if no
+ * matching pending signal exists (already delivered, never registered) or
+ * the entry was completed concurrently — by another delivery, or by the
+ * body recording the signal's timeout. On `false` the value was not
+ * delivered and the workflow will not see it.
  */
 export async function completeSignal(params: {
   storage: JournaledSuspendStorage;
@@ -1794,14 +1935,55 @@ export async function completeSignal(params: {
   });
   if (!hit) return false;
 
-  await params.storage.completePendingEntry({
+  const result: CompletePendingResult | undefined = await params.storage.completePendingEntry({
     workflowId: params.workflowId,
     stepName: params.stepName,
     activityIndex: hit.activityIndex,
     branchPath: hit.branchPath,
-    exit: { tag: "Success", value: params.value },
+    exit: { tag: "Success", value: deliveredSignalExitValue(params.value) },
   });
-  return true;
+  // A storage written before `CompletePendingResult` reports nothing; keep
+  // its old answer.
+  return result?.completed ?? true;
+}
+
+/**
+ * Complete a pending journal entry and return the exit the journal now
+ * holds. `won` is false when another writer completed the entry first; the
+ * returned exit is then that writer's. Storages that predate
+ * `CompletePendingResult` return nothing: with `readBack` the entry is read
+ * back to learn the stored exit, otherwise the caller's exit is assumed.
+ */
+async function completeAndReport(params: {
+  storage: JournaledSuspendStorage;
+  workflowId: string;
+  stepName: string;
+  slot: JournalSlot;
+  exit: JournalExit;
+  readBack: boolean;
+}): Promise<{ won: boolean; exit: JournalExit }> {
+  const { storage, workflowId, stepName, slot, exit, readBack } = params;
+  const result: CompletePendingResult | undefined = await storage.completePendingEntry({
+    workflowId,
+    stepName,
+    activityIndex: slot.activityIndex,
+    branchPath: slot.branchPath,
+    exit,
+  });
+  if (result) {
+    // No stored exit means the entry is gone (purged under us): nothing to
+    // follow, keep the local outcome.
+    if (result.completed || result.exit === undefined) return { won: true, exit };
+    return { won: false, exit: result.exit };
+  }
+  if (!readBack) return { won: true, exit };
+  const stored = (await storage.loadJournal(workflowId, stepName)).find(
+    (e) => e.activityIndex === slot.activityIndex && e.branchPath === slot.branchPath,
+  );
+  if (stored?.exit && (stored.phase ?? "completed") === "completed") {
+    return { won: false, exit: stored.exit };
+  }
+  return { won: true, exit };
 }
 
 /**
@@ -1984,8 +2166,47 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     // branch.
     return await activityScope.exit(() => driveBody());
   } catch (bodyError) {
-    if (runsCompensations(bodyError)) await unwind(bodyError);
+    if (runsCompensations(bodyError)) {
+      const rolledBack = await unwind(bodyError);
+      await discardFailedAttempt({ storage, workflowId, stepName, rolledBack });
+    }
     throw bodyError;
+  }
+}
+
+/**
+ * A failure escaped the body, so this step attempt is over. Drop what the
+ * next attempt must re-execute rather than replay: recorded failures of
+ * activities, children and compensations, and every rolled-back activity
+ * with its compensation row. Best effort: if the journal can't be read or
+ * written, the next attempt replays the failure and discards it then.
+ */
+async function discardFailedAttempt(params: {
+  storage: ActivityJournalStorage;
+  workflowId: string;
+  stepName: string;
+  rolledBack: readonly JournalSlot[];
+}): Promise<void> {
+  const { storage, workflowId, stepName, rolledBack } = params;
+  const discard = (storage as Partial<JournaledSuspendStorage>).discardJournalEntries;
+  if (typeof discard !== "function") return;
+  try {
+    const journal = await storage.loadJournal(workflowId, stepName);
+    const slots = new Map<string, JournalSlot>();
+    const add = (slot: JournalSlot): void => {
+      slots.set(`${slot.activityIndex}:${slot.branchPath}`, slot);
+    };
+    for (const entry of journal) {
+      const type = entry.stepType ?? "activity";
+      if (type !== "activity" && type !== "child" && type !== "compensation") continue;
+      if ((entry.phase ?? "completed") !== "completed" || entry.exit?.tag !== "Failure") continue;
+      add({ activityIndex: entry.activityIndex, branchPath: entry.branchPath });
+    }
+    for (const slot of rolledBack) add(slot);
+    if (slots.size === 0) return;
+    await discard.call(storage, { workflowId, stepName, slots: [...slots.values()] });
+  } catch {
+    // Journal unreachable: the body error is what the caller needs to see.
   }
 }
 
@@ -2016,9 +2237,15 @@ const NON_COMPENSATING_EXITS: ReadonlySet<string> = new Set([
 
 /** Whether a body error is a genuine failure that unwinds compensations. */
 function runsCompensations(bodyError: unknown): boolean {
-  if (typeof bodyError !== "object" || bodyError === null) return true;
-  const tag = (bodyError as { readonly _tag?: unknown })._tag;
-  return !(typeof tag === "string" && NON_COMPENSATING_EXITS.has(tag));
+  const tag = errorTag(bodyError);
+  return !(tag !== undefined && NON_COMPENSATING_EXITS.has(tag));
+}
+
+/** `_tag` of a thrown value, when it has one. */
+function errorTag(err: unknown): string | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const tag = (err as { readonly _tag?: unknown })._tag;
+  return typeof tag === "string" ? tag : undefined;
 }
 
 // ---------------------------------------------------------------------------

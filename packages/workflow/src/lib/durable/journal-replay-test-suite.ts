@@ -5,7 +5,10 @@
 // persists replays deterministically: nested `ctx.parallel` branch paths,
 // `ctx.sleep` / `ctx.signal` / `ctx.child` slots inside branches, journals
 // written in the legacy branch-path format, and slot stability under
-// randomized activity timing.
+// randomized activity timing. It also checks suspend and failure outcomes:
+// a signal delivery racing its timeout, delivered payloads that look like a
+// timeout, legacy signal rows, failures discarded between step attempts,
+// and tagged errors replayed as the same kind.
 //
 // Usage:
 //   import { journalReplayTestSuite } from "@promin/workflow/testing";
@@ -14,7 +17,7 @@
 
 import { describe, it, expect } from "bun:test";
 import type { JournaledSuspendStorage } from "./activity-journal.ts";
-import { WorkflowSuspendedError } from "./durable-pipeline-error.ts";
+import { TerminalError, WorkflowSuspendedError } from "./durable-pipeline-error.ts";
 import type { Workflow } from "./durable-pipeline.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 import { completeDueSleeps, completeSignal, runJournaledStep } from "./journaled-step.ts";
@@ -428,6 +431,279 @@ export function journalReplayTestSuite(
         );
       }
       expect(executed.count).toBe(freshExecutions);
+    });
+  });
+
+  describe("journal outcome conformance", () => {
+    /**
+     * The storage, with `deliver` run right after the body's first journal
+     * load: a delivery that lands after the body read the journal and before
+     * it records the timeout.
+     */
+    const deliverAfterLoad = (params: {
+      storage: JournalReplayStorage;
+      deliver: () => Promise<void>;
+    }): JournalReplayStorage => {
+      let armed = true;
+      return new Proxy(params.storage, {
+        get(target, prop) {
+          if (prop === "loadJournal") {
+            return async (workflowId: string, stepName: string) => {
+              const journal = await target.loadJournal(workflowId, stepName);
+              if (armed) {
+                armed = false;
+                await params.deliver();
+              }
+              return journal;
+            };
+          }
+          const value = Reflect.get(target, prop, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+    };
+
+    const timedSignalBody = (ran: string[]): Body =>
+      function* (ctx) {
+        const r = yield* ctx.signal("go", { timeout: 60_000 });
+        if (r.ok) {
+          yield* ctx.activity("proceed", async () => {
+            ran.push("proceed");
+            return r.value;
+          });
+          return { decided: r.value };
+        }
+        yield* ctx.activity("escalate", async () => {
+          ran.push("escalate");
+          return "escalated";
+        });
+        return { decided: "timeout" };
+      };
+
+    const expectSuspended = async (run: Promise<unknown>) => {
+      let err: unknown;
+      try {
+        await run;
+      } catch (e) {
+        err = e;
+      }
+      expect(err).toBeInstanceOf(WorkflowSuspendedError);
+    };
+
+    it("a delivery racing the signal timeout wins on the live run and on replay", async () => {
+      const storage = await factory();
+      const workflowId = await newWorkflow({ storage, label: "race-deliver" });
+      const clock = FakeWallClock.create(0);
+      const ran: string[] = [];
+      const body = timedSignalBody(ran);
+      await expectSuspended(runStep({ storage, workflowId, body, clock }));
+
+      clock.advance(60_000);
+      let delivered: boolean | undefined;
+      const racing = deliverAfterLoad({
+        storage,
+        deliver: async () => {
+          delivered = await completeSignal({
+            storage,
+            workflowId,
+            stepName: "s",
+            signalName: "go",
+            value: "approved",
+          });
+        },
+      });
+
+      // The body read a pending entry past its deadline, but the delivery
+      // completed it first: the live run follows the delivery.
+      const live = await runStep({ storage: racing, workflowId, body, clock });
+      expect(delivered).toBe(true);
+      expect(live).toEqual({ decided: "approved" });
+      expect(ran).toEqual(["proceed"]);
+      expect(await keys({ storage, workflowId })).toEqual(["0||signal|go", "1||activity|proceed"]);
+
+      expect(await runStep({ storage, workflowId, body, clock })).toEqual(live);
+      expect(ran).toEqual(["proceed"]);
+    });
+
+    it("a timeout recorded first makes a late delivery report false", async () => {
+      const storage = await factory();
+      const workflowId = await newWorkflow({ storage, label: "race-timeout" });
+      const clock = FakeWallClock.create(0);
+      const ran: string[] = [];
+      const body = timedSignalBody(ran);
+      await expectSuspended(runStep({ storage, workflowId, body, clock }));
+
+      clock.advance(60_000);
+      const live = await runStep({ storage, workflowId, body, clock });
+      expect(live).toEqual({ decided: "timeout" });
+
+      const late = await completeSignal({
+        storage,
+        workflowId,
+        stepName: "s",
+        signalName: "go",
+        value: "approved",
+      });
+      expect(late).toBe(false);
+      expect(await runStep({ storage, workflowId, body, clock })).toEqual(live);
+      expect(ran).toEqual(["escalate"]);
+    });
+
+    it("a delivered payload shaped like a timeout is returned as delivered", async () => {
+      const storage = await factory();
+      const workflowId = await newWorkflow({ storage, label: "shape" });
+      const clock = FakeWallClock.create(0);
+      const body: Body = function* (ctx) {
+        const timed = yield* ctx.signal("timed", { timeout: 60_000 });
+        const bare = yield* ctx.signal("bare");
+        return { timed, bare };
+      };
+      const deliver = (signalName: string, value: unknown) =>
+        completeSignal({ storage, workflowId, stepName: "s", signalName, value });
+
+      await expectSuspended(runStep({ storage, workflowId, body, clock }));
+      expect(await deliver("timed", { ok: false, error: "timeout" })).toBe(true);
+      await expectSuspended(runStep({ storage, workflowId, body, clock }));
+      expect(await deliver("bare", { ok: false, reason: "declined" })).toBe(true);
+
+      const expected = {
+        timed: { ok: true, value: { ok: false, error: "timeout" } },
+        bare: { ok: false, reason: "declined" },
+      };
+      expect(await runStep({ storage, workflowId, body, clock })).toEqual(expected);
+      expect(await runStep({ storage, workflowId, body, clock })).toEqual(expected);
+    });
+
+    it("signal entries written before the delivered/timeout tag replay as before", async () => {
+      const storage = await factory();
+      const workflowId = await newWorkflow({ storage, label: "legacy-signal" });
+      const legacy: Array<[string, unknown]> = [
+        ["declined", { ok: false, reason: "declined" }],
+        ["expired", { ok: false, error: "timeout" }],
+        ["plain", "v"],
+      ];
+      for (const [i, [signalName, value]] of legacy.entries()) {
+        await storage.appendPendingEntry({
+          workflowId,
+          stepName: "s",
+          activityIndex: i,
+          activityName: signalName,
+          stepType: "signal",
+        });
+        await storage.completePendingEntry({
+          workflowId,
+          stepName: "s",
+          activityIndex: i,
+          exit: { tag: "Success", value },
+        });
+      }
+      const body: Body = function* (ctx) {
+        return [
+          yield* ctx.signal("declined", { timeout: 1_000 }),
+          yield* ctx.signal("expired", { timeout: 1_000 }),
+          yield* ctx.signal("plain"),
+        ];
+      };
+      expect(await runStep({ storage, workflowId, body })).toEqual([
+        { ok: true, value: { ok: false, reason: "declined" } },
+        { ok: false, error: "timeout" },
+        "v",
+      ]);
+    });
+
+    it("a failure that escapes the body is re-executed by the next attempt", async () => {
+      const storage = await factory();
+      const workflowId = await newWorkflow({ storage, label: "retry" });
+      const calls = { charge: 0, ship: 0 };
+      const body: Body = function* (ctx) {
+        const charge = yield* ctx.activity("charge", async () => ++calls.charge);
+        const ship = yield* ctx.activity("ship", async () => {
+          calls.ship++;
+          if (calls.ship < 3) throw new Error(`warehouse down #${calls.ship}`);
+          return "shipped";
+        });
+        return [charge, ship];
+      };
+
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        let err: unknown;
+        try {
+          await runStep({ storage, workflowId, body });
+        } catch (e) {
+          err = e;
+        }
+        expect((err as Error).message).toBe(`warehouse down #${attempt}`);
+        expect(await keys({ storage, workflowId })).toEqual(["0||activity|charge"]);
+      }
+      expect(await runStep({ storage, workflowId, body })).toEqual([1, "shipped"]);
+      expect(calls).toEqual({ charge: 1, ship: 3 });
+    });
+
+    it("a caught failure replays inside the attempt as the same error kind", async () => {
+      const storage = await factory();
+      const workflowId = await newWorkflow({ storage, label: "tagged" });
+      const clock = FakeWallClock.create(0);
+      let runs = 0;
+      const seen: unknown[] = [];
+      const body: Body = function* (ctx) {
+        const caught: unknown[] = [];
+        for (const [name, error] of [
+          ["terminal", () => new TerminalError({ message: "declined", code: "E42" } as never)],
+          ["tagged", () => Object.assign(new Error("custom"), { _tag: "CardExpired", month: 7 })],
+          ["typed", () => new TypeError("bad input")],
+        ] as const) {
+          try {
+            yield* ctx.activity(name, async () => {
+              runs++;
+              throw error();
+            });
+          } catch (e) {
+            const err = e as Error & Record<string, unknown>;
+            caught.push({
+              terminal: e instanceof TerminalError,
+              typeError: e instanceof TypeError,
+              tag: err._tag,
+              message: err.message,
+              code: err.code,
+              month: err.month,
+            });
+          }
+        }
+        seen.push(caught);
+        yield* ctx.sleep(60_000);
+        return caught;
+      };
+
+      await expectSuspended(runStep({ storage, workflowId, body, clock }));
+      await expectSuspended(runStep({ storage, workflowId, body, clock }));
+      expect(runs).toBe(3);
+      expect(seen[1]).toEqual(seen[0]);
+      expect(seen[0]).toEqual([
+        {
+          terminal: true,
+          typeError: false,
+          tag: "TerminalError",
+          message: "declined",
+          code: "E42",
+          month: undefined,
+        },
+        {
+          terminal: false,
+          typeError: false,
+          tag: "CardExpired",
+          message: "custom",
+          code: undefined,
+          month: 7,
+        },
+        {
+          terminal: false,
+          typeError: true,
+          tag: undefined,
+          message: "bad input",
+          code: undefined,
+          month: undefined,
+        },
+      ]);
     });
   });
 }

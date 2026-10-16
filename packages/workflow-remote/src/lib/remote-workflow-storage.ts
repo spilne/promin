@@ -18,6 +18,9 @@ import type {
   SignalState,
   FenceGuard,
   JournalEntry,
+  JournalExit,
+  JournalSlot,
+  CompletePendingResult,
   JournaledSuspendStorage,
   StepAttemptStorage,
   StepAttemptRecord,
@@ -413,9 +416,17 @@ export class RemoteWorkflowStorage
     readonly stepName: string;
     readonly activityIndex: number;
     readonly branchPath?: string;
-    readonly exit: NonNullable<JournalEntry["exit"]>;
-  }): Promise<void> {
+    readonly exit: JournalExit;
+  }): Promise<CompletePendingResult> {
     return this.call("completePendingEntry", params);
+  }
+
+  discardJournalEntries(params: {
+    readonly workflowId: string;
+    readonly stepName: string;
+    readonly slots: readonly JournalSlot[];
+  }): Promise<void> {
+    return this.call("discardJournalEntries", params);
   }
 
   findDueSleeps(params: { now: Date; limit: number }): Promise<

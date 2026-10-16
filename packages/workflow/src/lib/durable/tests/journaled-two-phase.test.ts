@@ -329,7 +329,11 @@ describe("journaled activity — crash between phases (idempotent)", () => {
 
 describe("journaled activity — failure during first phase", () => {
   it("failure after pending write is recorded as completed Failure", async () => {
-    const storage = new InMemoryWorkflowStorage();
+    // Keeps the failure the engine would discard once it escapes the body,
+    // as after a crash before the discard.
+    const storage = new (class extends InMemoryWorkflowStorage {
+      override async discardJournalEntries(): Promise<void> {}
+    })();
     await expect(
       runJournaledStep<unknown, unknown, number>({
         input: undefined,
