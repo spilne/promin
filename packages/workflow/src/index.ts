@@ -87,6 +87,8 @@ export {
   type StepExecutor,
   type StepExecutionRequest,
   type StepExecutionResult,
+  type StepRuntime,
+  type RunChildWorkflow,
   type RecoveryResult,
   type StaleTerminationAction,
   trigger,

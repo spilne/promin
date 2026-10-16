@@ -52,7 +52,7 @@ import {
   type JournalFormatVersion,
 } from "./journal-format.ts";
 import { registerQueryHandler } from "./query-registry.ts";
-import type { WorkflowStorage } from "./workflow-storage.ts";
+import type { FenceGuard, WorkflowStorage } from "./workflow-storage.ts";
 import {
   approvalSignal,
   type ApprovalDecision,
@@ -675,6 +675,8 @@ function makeCtx<Input, Prev>(params: {
   initialMetadata?: Record<string, unknown>;
   /** Time source for sleep / signal deadlines and activity retry backoff. */
   clock?: WallClock;
+  /** Fence guard passed on the ctx.sleep / ctx.signal suspension writes. */
+  guard?: FenceGuard;
 }): { ctx: JournaledContext<Input, Prev>; unwind: (bodyError: unknown) => Promise<void> } {
   const {
     input,
@@ -690,6 +692,7 @@ function makeCtx<Input, Prev>(params: {
     defaultPayloadHash,
     runChild,
     initialMetadata,
+    guard,
   } = params;
   const clock = params.clock ?? SystemWallClock;
   const stepCodec = defaultCodec ?? LosslessJsonCodec;
@@ -1086,10 +1089,12 @@ function makeCtx<Input, Prev>(params: {
       // Still sleeping — mark the WORKFLOW as suspended at step level so the
       // existing DefaultSleepScanner (which scans step.wakeAt) picks it up.
       if (workflowStorage) {
-        await workflowStorage.suspendWorkflow(workflowId, stepName, {
-          status: "sleeping",
-          wakeAt,
-        });
+        await workflowStorage.suspendWorkflow(
+          workflowId,
+          stepName,
+          { status: "sleeping", wakeAt },
+          guard,
+        );
       }
       throw new WorkflowSuspendedError({
         workflowId,
@@ -1217,20 +1222,25 @@ function makeCtx<Input, Prev>(params: {
       }
 
       if (workflowStorage) {
-        await workflowStorage.suspendWorkflow(workflowId, stepName, {
-          status: "waiting_for_signal",
-          signalName,
-          ...(wakeAt && { signalTimeoutAt: wakeAt }),
-          // Schema snapshot — a dedicated field on `StepState`. The server's
-          // delivery path (POST /api/runs/:id/signal + the public token
-          // complete route) reads `step.signalJsonSchema` and validates
-          // inbound payloads against it before calling deliverSignal. Lives
-          // on the suspend record (not the journal entry) so it survives a
-          // SignalType definition change between suspend and delivery.
-          ...(options?.jsonSchema !== undefined && {
-            signalJsonSchema: options.jsonSchema,
-          }),
-        });
+        await workflowStorage.suspendWorkflow(
+          workflowId,
+          stepName,
+          {
+            status: "waiting_for_signal",
+            signalName,
+            ...(wakeAt && { signalTimeoutAt: wakeAt }),
+            // Schema snapshot — a dedicated field on `StepState`. The server's
+            // delivery path (POST /api/runs/:id/signal + the public token
+            // complete route) reads `step.signalJsonSchema` and validates
+            // inbound payloads against it before calling deliverSignal. Lives
+            // on the suspend record (not the journal entry) so it survives a
+            // SignalType definition change between suspend and delivery.
+            ...(options?.jsonSchema !== undefined && {
+              signalJsonSchema: options.jsonSchema,
+            }),
+          },
+          guard,
+        );
       }
       throw new WorkflowSuspendedError({
         workflowId,
@@ -1894,6 +1904,11 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
    * backoff. Wired from the runner's clock; default `SystemWallClock`.
    */
   clock?: WallClock;
+  /**
+   * Fence guard of the runner's lock on this run, passed on the
+   * ctx.sleep / ctx.signal suspension writes.
+   */
+  guard?: FenceGuard;
   body: JournaledStepBody<Input, Prev, Output>;
 }): Promise<Output> {
   const {
@@ -1909,6 +1924,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     payloadHash,
     runChild,
     clock,
+    guard,
     body,
   } = params;
 
@@ -1931,6 +1947,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     defaultPayloadHash: payloadHash,
     runChild,
     ...(clock !== undefined && { clock }),
+    ...(guard !== undefined && { guard }),
     ...(wfState?.metadata !== undefined && { initialMetadata: wfState.metadata }),
   });
   const gen = body(ctx, prev);

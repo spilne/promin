@@ -7,7 +7,12 @@
 
 import { StepError } from "../durable-pipeline-error.ts";
 import { isStepAttemptStorage } from "../workflow-storage.ts";
-import type { LocalStepResult, WaveOutcome, WaveParams } from "./dag-context.ts";
+import {
+  stepRuntimeFor,
+  type LocalStepResult,
+  type WaveOutcome,
+  type WaveParams,
+} from "./dag-context.ts";
 import { resolveStepConcurrency } from "./step-concurrency.ts";
 import type { StepExecutionRequest } from "./step-executor.ts";
 
@@ -18,7 +23,7 @@ import type { StepExecutionRequest } from "./step-executor.ts";
  * unsaved and persisted by the DAG executor after the wave.
  */
 export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> {
-  const { ctx, workflowId, input, readySteps, results, clock } = params;
+  const { ctx, workflowId, input, readySteps, results, clock, stepStates } = params;
   let batchResults: LocalStepResult[] | null = null;
   let batchError: unknown = null;
 
@@ -71,6 +76,8 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
           attempt: currentAttempt,
           needs: stepDef.needs,
           priority: stepDef.priority,
+          ...(ctx.workflowVersion !== undefined && { version: ctx.workflowVersion }),
+          runtime: stepRuntimeFor({ ctx, clock, stepStates, stepName: stepDef.name }),
           ...(concurrency
             ? {
                 concurrencyKey: concurrency.key,

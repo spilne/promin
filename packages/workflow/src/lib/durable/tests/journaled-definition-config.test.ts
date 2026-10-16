@@ -2,7 +2,7 @@
 // A `.journaled()` body sees the version / patches of the definition it was
 // built into, regardless of where `.version()` sits in the builder chain.
 // Builder methods share StepDefinition objects between builders, so the
-// config is bound when the builder is frozen, not when the step is added.
+// runner hands the driving definition's config to the step at run time.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
@@ -10,7 +10,7 @@ import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 
-describe(".journaled() — definition config is read at freeze time", () => {
+describe(".journaled() — definition config comes from the driving definition", () => {
   it(".version() after .journaled() is visible as ctx.workflowVersion", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });

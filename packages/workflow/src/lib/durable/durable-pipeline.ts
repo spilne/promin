@@ -43,10 +43,8 @@ import type { Codec } from "@spilne/perfect-core/connect";
 import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
 import type { Show } from "@spilne/perfect-core";
 import type { Sinkable } from "../shared/streamable.ts";
-import type { FailedWorkflowRecord } from "./workflow-state.ts";
-import { type WorkflowStorage, isStepAttemptStorage } from "./workflow-storage.ts";
-import { InMemoryWorkflowStorage } from "./in-memory-storage.ts";
-import { runWorkflowOrchestration } from "./workflow-runner.ts";
+import type { FailedWorkflowRecord, StepState } from "./workflow-state.ts";
+import { type FenceGuard, type WorkflowStorage, isStepAttemptStorage } from "./workflow-storage.ts";
 import {
   WorkflowError,
   StepError,
@@ -276,6 +274,11 @@ export interface WorkflowDefinitionInternals {
    * declare their own. See `WorkflowQueueConfig`.
    */
   readonly queue?: WorkflowQueueConfig<unknown>;
+  /**
+   * Patch names active in this definition. The runner hands them to every
+   * step as `ExecuteParams.patches` (journaled `ctx.patched(name)`).
+   */
+  readonly patches?: readonly string[];
 }
 
 /**
@@ -706,7 +709,55 @@ export interface StepDefinition {
   };
 }
 
-export interface ExecuteParams {
+/**
+ * Launch a child workflow on behalf of the running step and resolve with its
+ * result. Supplied by the runner, bound to the parent run: the child row is
+ * created (create-if-absent) with `parentWorkflowId` pointing at the parent,
+ * and the child runs on the parent's runtime (storage, clock, step executor,
+ * executor id, runner-level hooks). An existing child row is resumed as-is.
+ */
+export type RunChildWorkflow = (params: {
+  readonly workflow: Workflow<unknown, unknown>;
+  readonly workflowId: string;
+  readonly input: unknown;
+}) => Promise<unknown>;
+
+/**
+ * Runtime the runner hands every step body next to the step's data. Every
+ * field is optional so a step can be driven by hand (tests, custom
+ * executors); each step kind documents its fallback.
+ */
+export interface StepRuntime {
+  /**
+   * The runner's time source. Drives sleep / signal-timeout deadlines and
+   * loop-iteration timing. Default: `SystemWallClock`.
+   */
+  readonly clock?: WallClock;
+  /**
+   * Fence guard of the lock the runner holds on this run. Passed on every
+   * storage write a step kind makes itself (sleep / signal suspension,
+   * `mapOver` task rows, loop iteration rows, journaled suspension), so a
+   * holder that lost the lock is rejected by fencing backends.
+   */
+  readonly guard?: FenceGuard;
+  /**
+   * This step's stored row as of the runner's last load of the run (`null`
+   * when the step has no row yet). `undefined` means the caller did not
+   * supply it; step kinds that need it (sleep, waitForSignal) then load it.
+   */
+  readonly stepState?: StepState | null;
+  /**
+   * Run a child workflow (`.subworkflow()`, journaled `ctx.child`). Without
+   * it those step kinds fail with a clear error.
+   */
+  readonly runChild?: RunChildWorkflow;
+  /** Version of the definition driving this run (`ctx.workflowVersion` in `.journaled()`). */
+  readonly workflowVersion?: string;
+  /** Patch names active in the definition driving this run (`ctx.patched(name)`). */
+  readonly patches?: readonly string[];
+}
+
+export interface ExecuteParams extends StepRuntime {
   readonly input: unknown;
   readonly results: Record<string, unknown>;
   readonly workflowId: string;
@@ -720,20 +771,6 @@ export interface ExecuteParams {
    * Stays `undefined` for step kinds that don't produce audit data.
    */
   readonly metadataRef: { current?: Record<string, unknown> };
-  /**
-   * The runner's time source. Drives sleep / signal-timeout deadlines and
-   * loop-iteration timing. Default: `SystemWallClock`.
-   */
-  readonly clock?: WallClock;
-  /**
-   * Version of the workflow definition this step belongs to. Read by
-   * `.journaled()` for `ctx.workflowVersion`. Filled in when the builder is
-   * frozen (`build()` / `execute()`), so a `.version()` call anywhere in the
-   * chain is seen; a value supplied by the caller takes precedence.
-   */
-  readonly workflowVersion?: string;
-  /** Patch names active in this definition (`ctx.patched(name)`). Same sourcing as `workflowVersion`. */
-  readonly patches?: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,12 +1044,15 @@ export class WorkflowBuilder<
             };
             return asStepEff((fn as any)(element, ctx), name).flatMap((result) =>
               promiseOrDie(() =>
-                params.storage.saveTaskResult({
-                  workflowId: params.workflowId,
-                  stepName: name,
-                  taskIndex,
-                  result: codec.encode(result),
-                }),
+                params.storage.saveTaskResult(
+                  {
+                    workflowId: params.workflowId,
+                    stepName: name,
+                    taskIndex,
+                    result: codec.encode(result),
+                  },
+                  params.guard,
+                ),
               ).as(result),
             );
           },
@@ -1269,6 +1309,7 @@ export class WorkflowBuilder<
         const storage = execParams.storage;
         const storageAttempts = isStepAttemptStorage(storage) ? storage : undefined;
         const clock = execParams.clock ?? SystemWallClock;
+        const guard = execParams.guard;
         return tryPromise(
           async (): Promise<T> => {
             let result: T = undefined as unknown as T;
@@ -1313,49 +1354,61 @@ export class WorkflowBuilder<
               } catch (err) {
                 const durationMs = clock.currentTimeMs() - iterStart;
                 const message = err instanceof Error ? err.message : String(err);
-                await storage.saveStepFailure({
-                  workflowId: execParams.workflowId,
-                  stepName: iterName,
-                  error: message,
-                  durationMs,
-                  startedAt,
-                });
-                if (storageAttempts) {
-                  await storageAttempts.saveStepAttempt({
+                await storage.saveStepFailure(
+                  {
                     workflowId: execParams.workflowId,
                     stepName: iterName,
-                    attempt: 1,
-                    type: "execution",
-                    status: "failed",
                     error: message,
                     durationMs,
                     startedAt,
-                    completedAt: clock.now(),
-                  });
+                  },
+                  guard,
+                );
+                if (storageAttempts) {
+                  await storageAttempts.saveStepAttempt(
+                    {
+                      workflowId: execParams.workflowId,
+                      stepName: iterName,
+                      attempt: 1,
+                      type: "execution",
+                      status: "failed",
+                      error: message,
+                      durationMs,
+                      startedAt,
+                      completedAt: clock.now(),
+                    },
+                    guard,
+                  );
                 }
                 throw err;
               }
               const durationMs = clock.currentTimeMs() - iterStart;
               const encoded = iterCodec.encode(result);
-              await storage.saveStepResult({
-                workflowId: execParams.workflowId,
-                stepName: iterName,
-                result: encoded,
-                durationMs,
-                startedAt,
-              });
-              if (storageAttempts) {
-                await storageAttempts.saveStepAttempt({
+              await storage.saveStepResult(
+                {
                   workflowId: execParams.workflowId,
                   stepName: iterName,
-                  attempt: 1,
-                  type: "execution",
-                  status: "completed",
                   result: encoded,
                   durationMs,
                   startedAt,
-                  completedAt: clock.now(),
-                });
+                },
+                guard,
+              );
+              if (storageAttempts) {
+                await storageAttempts.saveStepAttempt(
+                  {
+                    workflowId: execParams.workflowId,
+                    stepName: iterName,
+                    attempt: 1,
+                    type: "execution",
+                    status: "completed",
+                    result: encoded,
+                    durationMs,
+                    startedAt,
+                    completedAt: clock.now(),
+                  },
+                  guard,
+                );
               }
               iter++;
               if (!condition(result, currentIter)) break;
@@ -1626,10 +1679,11 @@ export class WorkflowBuilder<
       execute: (execParams) => {
         const prevStepName = dependsOn[0];
         const prev = prevStepName != null ? execParams.results[prevStepName] : execParams.input;
-        // Version and patches come from the frozen definition (see
-        // `bindDefinitionConfig`), not from `this`: `.version()` returns a new
-        // builder that shares this step object, so a closure over `this`
-        // would miss any config set later in the chain.
+        // Version and patches come from the runner (the definition driving
+        // the run), not from `this`: `.version()` returns a new builder that
+        // shares this step object, so a closure over `this` would miss any
+        // config set later in the chain, and a version-drained run must see
+        // the older definition's values.
         const workflowVersion = execParams.workflowVersion;
         const patches = execParams.patches;
         const runtimeStorage = execParams.storage;
@@ -1656,45 +1710,8 @@ export class WorkflowBuilder<
               codec,
               payloadHash,
               ...(execParams.clock !== undefined && { clock: execParams.clock }),
-              runChild: async ({
-                workflow: childWorkflow,
-                workflowId: childId,
-                input: childInput,
-              }) => {
-                const childDef = (childWorkflow as any)._definition as any;
-                await runtimeStorage
-                  .createWorkflow({
-                    workflowId: childId,
-                    workflowName: childWorkflow.name,
-                    input: childInput,
-                    parentWorkflowId: execParams.workflowId,
-                    version: childWorkflow.version,
-                    workflowType: childDef.type,
-                    metadata: childDef.metadata,
-                  })
-                  .catch(() => undefined); // no-op on conflict (idempotent re-run)
-                return runWorkflowOrchestration(
-                  {
-                    storage: runtimeStorage,
-                    name: childWorkflow.name,
-                    version: childWorkflow.version,
-                    idempotency: childWorkflow.idempotency,
-                    type: childDef.type,
-                    metadata: childDef.metadata,
-                    steps: childDef.steps,
-                    retry: childDef.retry,
-                    compensateConfig: childDef.compensateConfig,
-                    dlq: childDef.dlq,
-                    dispatch: childDef.dispatch,
-                    timeoutMs: childDef.timeoutMs,
-                    onVersionMismatch: childDef.onVersionMismatch,
-                    previousVersions: childDef.previousVersions,
-                    hooks: childDef.hooks,
-                    ...(execParams.clock !== undefined && { clock: execParams.clock }),
-                  },
-                  { workflowId: childId, input: childInput },
-                );
-              },
+              ...(execParams.guard !== undefined && { guard: execParams.guard }),
+              ...(execParams.runChild !== undefined && { runChild: execParams.runChild }),
               body,
             }),
           (err) => err as TaggedError,
@@ -1820,8 +1837,6 @@ export class WorkflowBuilder<
 
     const dependsOn = this._lastStepName ? [this._lastStepName] : [];
     const codec = (options?.codec ?? this._codec()) as Codec<unknown>;
-    const childInternals = child._definition;
-
     const stepDef: StepDefinition = {
       name,
       dependsOn,
@@ -1834,49 +1849,29 @@ export class WorkflowBuilder<
         ) as Current;
         const childWorkflowId = config.workflowId(prev);
         const childInput = config.input(prev);
-        const parentWorkflowId = execParams.workflowId;
-        const storage = execParams.storage;
-
-        return promiseOrDie(async () => {
-          // Seed the child row with the parent pointer and the child's
-          // version before handing it to the runner, so downstream
-          // `listWorkflows({ parentId })` queries and the coordinator's
-          // recovery see the relationship, and the runner's version check
-          // compares against the version the child was started with.
-          // `createWorkflow` is create-if-absent: on a re-run it returns
-          // `{ created: false }` and the existing row (with its original
-          // version) is resumed.
-          await storage.createWorkflow({
-            workflowId: childWorkflowId,
-            workflowName: child.name,
-            input: childInput,
-            workflowType: childInternals.type,
-            parentWorkflowId,
-            metadata: childInternals.metadata,
-            version: child.version,
-          });
-          return runWorkflowOrchestration(
-            {
-              storage,
-              name: child.name,
-              version: child.version,
-              idempotency: child.idempotency,
-              type: childInternals.type,
-              metadata: childInternals.metadata,
-              steps: childInternals.steps,
-              retry: childInternals.retry,
-              compensateConfig: childInternals.compensateConfig,
-              dlq: childInternals.dlq,
-              dispatch: childInternals.dispatch,
-              timeoutMs: childInternals.timeoutMs,
-              onVersionMismatch: childInternals.onVersionMismatch,
-              previousVersions: childInternals.previousVersions,
-              hooks: childInternals.hooks,
-              ...(execParams.clock !== undefined && { clock: execParams.clock }),
-            },
-            { workflowId: childWorkflowId, input: childInput },
+        const runChild = execParams.runChild;
+        if (!runChild) {
+          return die(
+            new Error(
+              `subworkflow "${name}": no \`runChild\` in ExecuteParams. Run the parent ` +
+                `through a WorkflowRunner (or pass \`runChild\` when executing the step by hand).`,
+            ),
           );
-        });
+        }
+
+        // The runner creates the child row with the parent pointer and the
+        // child's version before running it, so `listWorkflows({ parentId })`
+        // and recovery see the relationship and the version check compares
+        // against the version the child was started with. Creation is
+        // create-if-absent: an existing child row (with its original
+        // version) is resumed.
+        return promiseOrDie(() =>
+          runChild({
+            workflow: child as Workflow<unknown, unknown>,
+            workflowId: childWorkflowId,
+            input: childInput,
+          }),
+        );
       },
     };
 
@@ -1917,8 +1912,7 @@ export class WorkflowBuilder<
       execute: (params) => {
         const clock = params.clock ?? SystemWallClock;
         const program = eff(function* () {
-          const state = yield* promiseOrDie(() => params.storage.loadWorkflow(params.workflowId));
-          const stepState = state?.steps[name];
+          const stepState = yield* currentStepState({ params, stepName: name });
 
           if (stepState?.status === "sleeping" && stepState.wakeAt) {
             if (clock.now() >= stepState.wakeAt) {
@@ -1939,11 +1933,12 @@ export class WorkflowBuilder<
 
           const wakeAt = new Date(clock.currentTimeMs() + ms);
           yield* promiseOrDie(() =>
-            params.storage.suspendWorkflow(params.workflowId, name, {
-              status: "sleeping",
-              stepType: "sleep",
-              wakeAt,
-            }),
+            params.storage.suspendWorkflow(
+              params.workflowId,
+              name,
+              { status: "sleeping", stepType: "sleep", wakeAt },
+              params.guard,
+            ),
           );
           return yield* fail(
             new WorkflowSuspendedError({
@@ -2024,10 +2019,7 @@ export class WorkflowBuilder<
           }
 
           // Check if this is a re-entry while already waiting
-          const state = yield* promiseOrDie(() =>
-            execParams.storage.loadWorkflow(execParams.workflowId),
-          );
-          const stepState = state?.steps[name];
+          const stepState = yield* currentStepState({ params: execParams, stepName: name });
           const alreadyWaiting = stepState?.status === "waiting_for_signal";
 
           if (alreadyWaiting && stepState.signalTimeoutAt) {
@@ -2052,12 +2044,12 @@ export class WorkflowBuilder<
               ? new Date(clock.currentTimeMs() + timeoutMs)
               : undefined;
           yield* promiseOrDie(() =>
-            execParams.storage.suspendWorkflow(execParams.workflowId, name, {
-              status: "waiting_for_signal",
-              stepType: "signal",
-              signalName,
-              signalTimeoutAt,
-            }),
+            execParams.storage.suspendWorkflow(
+              execParams.workflowId,
+              name,
+              { status: "waiting_for_signal", stepType: "signal", signalName, signalTimeoutAt },
+              execParams.guard,
+            ),
           );
           return yield* fail(
             new WorkflowSuspendedError({
@@ -2112,27 +2104,18 @@ export class WorkflowBuilder<
    * against a real backend when you need durability.
    */
   async execute(input: Input): Promise<Current> {
-    const storage = new InMemoryWorkflowStorage();
-    return runWorkflowOrchestration(
-      {
-        storage,
-        name: this._name,
-        version: this._version,
-        type: this._type,
-        metadata: this._metadata,
-        steps: this._frozenSteps(),
-        retry: this._retry,
-        compensateConfig: this._compensateConfig,
-        dlq: this._dlq,
-        dispatch: this._dispatch,
-        idempotency: this._idempotency,
-        timeoutMs: this._timeoutMs,
-        onVersionMismatch: this._onVersionMismatch,
-        previousVersions: this._previousVersions,
-        hooks: this._hooks,
-      },
-      { workflowId: crypto.randomUUID(), input },
-    ) as Promise<Current>;
+    // Loaded on demand: a `Workflow` is pure data, so the builder module
+    // keeps no static dependency on the runner or a storage backend.
+    const [{ createWorkflowRunner }, { InMemoryWorkflowStorage }] = await Promise.all([
+      import("./workflow-runner.ts"),
+      import("./in-memory-storage.ts"),
+    ]);
+    const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+    return runner.run({
+      workflow: this.build() as Workflow<unknown, unknown>,
+      workflowId: crypto.randomUUID(),
+      input,
+    }) as Promise<Current>;
   }
 
   // ---------------------------------------------------------------------------
@@ -2162,7 +2145,7 @@ export class WorkflowBuilder<
   /** @internal — project builder state into the Workflow._definition shape. */
   private _toDefinitionInternals(): WorkflowDefinitionInternals {
     return {
-      steps: this._frozenSteps(),
+      steps: this._steps,
       type: this._type,
       metadata: this._metadata,
       retry: this._retry,
@@ -2174,6 +2157,7 @@ export class WorkflowBuilder<
       previousVersions: this._previousVersions,
       hooks: this._hooks,
       queue: this._queue as WorkflowQueueConfig<unknown> | undefined,
+      patches: this._patches,
     };
   }
 
@@ -2200,15 +2184,6 @@ export class WorkflowBuilder<
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
-
-  /** Step definitions with this builder's final version/patches bound in. */
-  private _frozenSteps(): StepDefinition[] {
-    return bindDefinitionConfig({
-      steps: this._steps,
-      workflowVersion: this._version,
-      patches: this._patches,
-    });
-  }
 
   /** Create a new builder inheriting all config from this one. */
   private _derive(
@@ -2345,33 +2320,18 @@ export class WorkflowBuilder<
 // ---------------------------------------------------------------------------
 
 /**
- * Bind definition-level config (`workflowVersion`, `patches`) into the
- * `ExecuteParams` of the steps that read it, at freeze time. Builder methods
- * return new builders that share `StepDefinition` objects, so a step closure
- * must not read builder fields itself; config set later in the chain (e.g.
- * `.version()` after `.journaled()`) would be invisible. Values the caller
- * already put on `ExecuteParams` win. Only `journaled` steps read this
- * config, so other steps are returned unchanged.
+ * This step's stored row: the runner-supplied `stepState` when present
+ * (`null` = no row), else a fresh load (steps driven without a runner).
  */
-function bindDefinitionConfig(params: {
-  readonly steps: StepDefinition[];
-  readonly workflowVersion: string | undefined;
-  readonly patches: readonly string[] | undefined;
-}): StepDefinition[] {
-  const { workflowVersion, patches } = params;
-  return params.steps.map((step) => {
-    if (step.kind !== "journaled") return step;
-    const execute = step.execute;
-    return {
-      ...step,
-      execute: (execParams: ExecuteParams) =>
-        execute({
-          ...execParams,
-          workflowVersion: execParams.workflowVersion ?? workflowVersion,
-          patches: execParams.patches ?? patches,
-        }),
-    };
-  });
+function currentStepState(params: {
+  readonly params: ExecuteParams;
+  readonly stepName: string;
+}): Eff<StepState | undefined> {
+  const { params: execParams, stepName } = params;
+  if (execParams.stepState !== undefined) return succeed(execParams.stepState ?? undefined);
+  return promiseOrDie(() => execParams.storage.loadWorkflow(execParams.workflowId)).map(
+    (state) => state?.steps[stepName],
+  );
 }
 
 /** Sentinel for "no usable cache entry" (absent, unreadable or undecodable). */

@@ -5,7 +5,6 @@
 // version it was created with.
 // ---------------------------------------------------------------------------
 
-import type { WallClock } from "../../shared/wall-clock.ts";
 import type { Workflow } from "../durable-pipeline.ts";
 import { WorkflowVersionMismatchError } from "../durable-pipeline-error.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
@@ -13,7 +12,11 @@ import type {
   IWorkflowVersionRegistry,
   WorkflowVersionRegistry,
 } from "../workflow-version-registry.ts";
-import type { WorkflowOrchestrationContext } from "./orchestration-context.ts";
+import {
+  orchestrationContextFor,
+  runtimeOf,
+  type WorkflowOrchestrationContext,
+} from "./orchestration-context.ts";
 
 /**
  * Resolve the definition for `run({ name, version? })`. Implements
@@ -86,9 +89,8 @@ export async function resolveRunDefinition(params: {
 export async function resolveDrainContext(params: {
   ctx: WorkflowOrchestrationContext;
   workflowId: string;
-  clock: WallClock;
 }): Promise<WorkflowOrchestrationContext | undefined> {
-  const { ctx, workflowId, clock } = params;
+  const { ctx, workflowId } = params;
   if (ctx.onVersionMismatch === "drain" && ctx.version) {
     const existing = await ctx.storage.loadWorkflow(workflowId);
     if (existing && existing.version !== ctx.version) {
@@ -104,30 +106,15 @@ export async function resolveDrainContext(params: {
             `onVersionMismatch is "drain" but no matching previousVersion was registered.`,
         });
       }
-      // Delegate drain to the previous version by building its own
-      // orchestration context — both versions share this workflow's
-      // storage so the stored state keeps one source of truth.
-      const prevDef = previousDef._definition;
-      const prevCtx: WorkflowOrchestrationContext = {
-        storage: ctx.storage,
-        name: previousDef.name,
-        version: previousDef.version,
-        idempotency: previousDef.idempotency,
-        type: prevDef.type,
-        metadata: prevDef.metadata,
-        steps: prevDef.steps,
-        retry: prevDef.retry,
-        compensateConfig: prevDef.compensateConfig,
-        dlq: prevDef.dlq,
-        dispatch: prevDef.dispatch,
-        timeoutMs: prevDef.timeoutMs,
-        onVersionMismatch: prevDef.onVersionMismatch,
-        previousVersions: prevDef.previousVersions,
-        hooks: ctx.hooks ?? prevDef.hooks,
-        queue: prevDef.queue,
-        clock,
-      };
-      return prevCtx;
+      // Delegate drain to the previous version through its own
+      // orchestration context on this run's runtime — same storage (one
+      // source of truth for the stored state), clock, step executor and
+      // executor id — keeping the hooks of the run it takes over.
+      return orchestrationContextFor({
+        workflow: previousDef,
+        runtime: runtimeOf(ctx),
+        ...(ctx.hooks !== undefined && { hooks: ctx.hooks }),
+      });
     }
   }
   return undefined;

@@ -48,7 +48,7 @@ import type {
 import type { StepExecutor } from "./runner/step-executor.ts";
 import { recoverWorkflows, type RecoveryResult, type RecoveryStrategy } from "./runner/recovery.ts";
 import { resolveRunDefinition } from "./runner/definition-resolver.ts";
-import type { WorkflowOrchestrationContext } from "./runner/orchestration-context.ts";
+import { orchestrationContextFor } from "./runner/orchestration-context.ts";
 import { runWorkflowOrchestration } from "./runner/orchestrate.ts";
 import {
   createWorkflowHandle,
@@ -68,7 +68,11 @@ export {
   type RecoveryResult,
   type StaleTerminationAction,
 } from "./runner/recovery.ts";
-export type { WorkflowOrchestrationContext } from "./runner/orchestration-context.ts";
+export {
+  orchestrationContextFor,
+  type OrchestrationRuntime,
+  type WorkflowOrchestrationContext,
+} from "./runner/orchestration-context.ts";
 export { runWorkflowOrchestration } from "./runner/orchestrate.ts";
 export type { DagExecutionContext } from "./runner/dag-context.ts";
 export { executeWorkflowDag } from "./runner/dag-executor.ts";
@@ -151,7 +155,8 @@ export interface WorkflowRunnerConfig {
   readonly registry?: WorkflowVersionRegistry | IWorkflowVersionRegistry;
   /**
    * Workflow-level lifecycle hooks. Fired on workflow / step boundaries.
-   * Overrides any hooks carried by the workflow's own `_definition`.
+   * Overrides any hooks carried by the workflow's own `_definition`, for
+   * the run itself and for the child workflows it starts.
    */
   readonly hooks?: WorkflowHooks;
   /**
@@ -159,7 +164,9 @@ export interface WorkflowRunnerConfig {
    * executor instead of the default inline Eff execution. Use
    * `InProcessStepExecutor` for in-process execution with explicit
    * storage/clock wiring, or `StepQueueExecutor` for queue-backed dispatch.
-   * Defaults to the inline pipeline when omitted.
+   * Version-drained runs and child workflows run through it too (rebound
+   * via `StepExecutor.forWorkflow` when it is definition-bound). Defaults
+   * to the inline pipeline when omitted.
    */
   readonly stepExecutor?: StepExecutor;
   /**
@@ -535,28 +542,16 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     idempotencyKey?: string;
     idempotencyExpiresAt?: Date;
   }): Promise<unknown> {
-    const def = params.workflow._definition;
-    const ctx: WorkflowOrchestrationContext = {
-      storage: params.storage,
-      name: params.workflow.name,
-      version: params.workflow.version,
-      idempotency: params.workflow.idempotency,
-      type: def.type,
-      metadata: def.metadata,
-      steps: def.steps,
-      retry: def.retry,
-      compensateConfig: def.compensateConfig,
-      dlq: def.dlq,
-      dispatch: def.dispatch,
-      timeoutMs: def.timeoutMs,
-      onVersionMismatch: def.onVersionMismatch,
-      previousVersions: def.previousVersions,
-      hooks: this.hooks ?? def.hooks,
-      queue: def.queue,
-      stepExecutor: this.stepExecutor,
-      clock: this.clock,
-      ...(this.executorId !== undefined && { executorId: this.executorId }),
-    };
+    const ctx = orchestrationContextFor({
+      workflow: params.workflow,
+      runtime: {
+        storage: params.storage,
+        clock: this.clock,
+        ...(this.stepExecutor !== undefined && { stepExecutor: this.stepExecutor }),
+        ...(this.executorId !== undefined && { executorId: this.executorId }),
+        ...(this.hooks !== undefined && { hooks: this.hooks }),
+      },
+    });
     return runWorkflowOrchestration(ctx, {
       workflowId: params.workflowId,
       input: params.input,
