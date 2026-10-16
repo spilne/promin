@@ -27,7 +27,13 @@
 //   );
 // ---------------------------------------------------------------------------
 
-import type { WorkerWorkflowSpec, WorkflowStartQueue, WorkflowStartRecord } from "@promin/workflow";
+import {
+  SystemWallClock,
+  type WallClock,
+  type WorkerWorkflowSpec,
+  type WorkflowStartQueue,
+  type WorkflowStartRecord,
+} from "@promin/workflow";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
 interface Row {
@@ -49,19 +55,24 @@ export interface SqliteWorkflowStartQueueOptions {
   tableName?: string;
   /** Worker stuck mid-execution — re-claimable after this many ms. Default 60s. */
   reclaimAfterMs?: number;
+  /** Time source for enqueue / claim timestamps and the reclaim cutoff. Default: `SystemWallClock`. */
+  clock?: WallClock;
 }
 
 export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
   private readonly _t: string;
   private readonly _reclaimAfterMs: number;
+  private readonly clock: WallClock;
 
   private constructor(
     private readonly db: SqliteDatabase,
     table: string,
     reclaimAfterMs: number,
+    clock: WallClock,
   ) {
     this._t = table;
     this._reclaimAfterMs = reclaimAfterMs;
+    this.clock = clock;
     this._setup();
   }
 
@@ -70,6 +81,7 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
       opts.db,
       opts.tableName ?? "promin_workflow_starts",
       opts.reclaimAfterMs ?? 60_000,
+      opts.clock ?? SystemWallClock,
     );
   }
 
@@ -106,7 +118,7 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
     metadata?: Record<string, unknown>;
     version?: string;
   }): Promise<{ id: string }> {
-    const id = `start-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const id = `start-${this.clock.currentTimeMs().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     this.db
       .query(
         `INSERT INTO ${this._t}
@@ -120,7 +132,7 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
         params.version ?? null,
         JSON.stringify(params.input),
         params.metadata !== undefined ? JSON.stringify(params.metadata) : null,
-        Date.now(),
+        this.clock.currentTimeMs(),
       );
     return { id };
   }
@@ -134,7 +146,7 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
 
     const t = this._t;
     const claimed: WorkflowStartRecord[] = [];
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
 
     // BEGIN IMMEDIATE acquires the write lock up front so the
     // SELECT → UPDATE pair runs without another writer slipping in
@@ -216,7 +228,7 @@ export class SqliteWorkflowStartQueue implements WorkflowStartQueue {
   async list(): Promise<WorkflowStartRecord[]> {
     // Sweep stale claims first so the snapshot reflects the current
     // claimable set, matching the in-memory impl's behaviour.
-    const cutoff = Date.now() - this._reclaimAfterMs;
+    const cutoff = this.clock.currentTimeMs() - this._reclaimAfterMs;
     this.db
       .query(
         `UPDATE ${this._t}

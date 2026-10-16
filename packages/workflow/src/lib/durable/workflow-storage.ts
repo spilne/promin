@@ -106,6 +106,8 @@ export interface WorkflowStorage {
   listWorkflows(params?: {
     status?: WorkflowStatus;
     name?: string;
+    /** Workflow definition version the run was created with. */
+    version?: string;
     type?: string;
     parentId?: string;
     namespace?: string;
@@ -156,6 +158,8 @@ export interface WorkflowStorage {
   countWorkflows?(params?: {
     status?: WorkflowStatus;
     name?: string;
+    /** Workflow definition version the run was created with. */
+    version?: string;
     type?: string;
     parentId?: string;
     namespace?: string;

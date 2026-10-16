@@ -108,11 +108,13 @@ await registry.run({ workflowId: "j-42", input: { x: 1 } });
 
 // Operational monitoring:
 const counts = await registry.countByVersion({ storage });
-// → Map<version, { running, completed, failed }>
+// → Map<version, { running, completed, failed, tripwire }>
 ```
 
-`autoDeregister: true` removes drained versions (except the latest) from the
-registry automatically. `onDrained` fires exactly once per version.
+`autoDeregister: true` removes drained versions from the registry automatically,
+except the latest registered and the promoted active version. `onDrained` fires
+once per drain (again if new runs appear and drain later). Terminal runs
+(`completed`, `failed`, `tripwire`) never hold a version open.
 
 **Full example**: [`examples/versioning/03-drain-registry.ts`](./examples/versioning/03-drain-registry.ts)
 

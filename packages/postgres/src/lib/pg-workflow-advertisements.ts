@@ -59,7 +59,8 @@ export class PgWorkflowAdvertisementRegistry implements WorkflowAdvertisementReg
     await this.db.transaction(async (tx) => {
       await tx.delete(workflowAdvertisements).where(eq(workflowAdvertisements.workerId, workerId));
       if (workflows.length === 0) return;
-      const now = new Date();
+      // Server clock: advertisements from different hosts order consistently.
+      const now = sql`NOW()`;
       const rows = workflows.map((wf) => ({
         workerId,
         workflowName: wf.name,

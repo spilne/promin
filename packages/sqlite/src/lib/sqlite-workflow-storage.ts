@@ -1,5 +1,7 @@
 import {
   FenceTokenMismatchError,
+  SystemWallClock,
+  type WallClock,
   workflowMetadataMatches,
   encodeRunSource,
   decodeRunSource,
@@ -58,12 +60,15 @@ export class SqliteWorkflowStorage
   implements WorkflowStorage, ActivityJournalStorage, JournaledSuspendStorage, StepAttemptStorage
 {
   private readonly _t: string;
+  private readonly clock: WallClock;
 
   private constructor(
     private readonly db: SqliteDatabase,
     table: string,
+    clock: WallClock,
   ) {
     this._t = table;
+    this.clock = clock;
     this._setup();
   }
 
@@ -71,8 +76,18 @@ export class SqliteWorkflowStorage
     db: SqliteDatabase;
     /** Override the table prefix (default: `promin_wf`). */
     tablePrefix?: string;
+    /**
+     * Time source for every stored timestamp, lock expiry, idempotency
+     * window and age cutoff. Default: `SystemWallClock`. Tests pass a
+     * `FakeWallClock`.
+     */
+    clock?: WallClock;
   }): SqliteWorkflowStorage {
-    return new SqliteWorkflowStorage(params.db, params.tablePrefix ?? "promin_wf");
+    return new SqliteWorkflowStorage(
+      params.db,
+      params.tablePrefix ?? "promin_wf",
+      params.clock ?? SystemWallClock,
+    );
   }
 
   private _setup(): void {
@@ -369,6 +384,7 @@ export class SqliteWorkflowStorage
   async listWorkflows(params?: {
     status?: WorkflowStatus;
     name?: string;
+    version?: string;
     type?: string;
     parentId?: string;
     namespace?: string;
@@ -390,6 +406,10 @@ export class SqliteWorkflowStorage
     if (params?.name) {
       conditions.push(`workflow_name = ?`);
       args.push(params.name);
+    }
+    if (params?.version !== undefined) {
+      conditions.push(`version = ?`);
+      args.push(params.version);
     }
     if (params?.type) {
       conditions.push(`workflow_type = ?`);
@@ -478,6 +498,10 @@ export class SqliteWorkflowStorage
     if (params?.name) {
       conditions.push(`workflow_name = ?`);
       args.push(params.name);
+    }
+    if (params?.version !== undefined) {
+      conditions.push(`version = ?`);
+      args.push(params.version);
     }
     if (params?.type) {
       conditions.push(`workflow_type = ?`);
@@ -569,6 +593,7 @@ export class SqliteWorkflowStorage
   async countWorkflows(params?: {
     status?: WorkflowStatus;
     name?: string;
+    version?: string;
     type?: string;
     parentId?: string;
     namespace?: string;
@@ -586,6 +611,10 @@ export class SqliteWorkflowStorage
     if (params?.name) {
       conditions.push(`workflow_name = ?`);
       args.push(params.name);
+    }
+    if (params?.version !== undefined) {
+      conditions.push(`version = ?`);
+      args.push(params.version);
     }
     if (params?.type) {
       conditions.push(`workflow_type = ?`);
@@ -634,10 +663,10 @@ export class SqliteWorkflowStorage
     error?: string;
     statuses?: Array<"pending" | "running" | "suspended">;
   }): number {
-    const cutoff = Date.now() - params.olderThanMs;
+    const cutoff = this.clock.currentTimeMs() - params.olderThanMs;
     const statuses = params.statuses ?? ["pending", "running", "suspended"];
     const placeholders = statuses.map(() => "?").join(", ");
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     // Count first (the interface's run() returns void, not a changes count).
     const before = this.db
       .query<{ c: number }>(
@@ -708,7 +737,7 @@ export class SqliteWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     this._checkFence(workflowId, guard);
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     this.db
       .query(
         `UPDATE ${this._t}
@@ -745,7 +774,7 @@ export class SqliteWorkflowStorage
   }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
     return this.db.transaction(
       (): { created: true } | { created: false; existing: WorkflowState } => {
-        const now = Date.now();
+        const now = this.clock.currentTimeMs();
 
         // Idempotency-key path: if (namespace, workflow_name, idempotency_key) exists
         // and is unexpired, attach to it. Inside the transaction so the
@@ -858,7 +887,7 @@ export class SqliteWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     this._checkFence(params.workflowId, guard);
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     this.db.transaction((): void => {
       this._markRunning(params.workflowId, now);
       const row = this.db
@@ -916,7 +945,7 @@ export class SqliteWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     this._checkFence(params.workflowId, guard);
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     this.db.transaction((): void => {
       this._markRunning(params.workflowId, now);
       const row = this.db
@@ -958,7 +987,7 @@ export class SqliteWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     this._checkFence(params.workflowId, guard);
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     this.db.transaction((): void => {
       const row = this.db
         .query<{ steps: string; run: number }>(
@@ -1011,7 +1040,7 @@ export class SqliteWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     this._checkFence(params.workflowId, guard);
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     this.db.transaction((): void => {
       const row = this.db
         .query<{ steps: string; run: number }>(
@@ -1060,7 +1089,7 @@ export class SqliteWorkflowStorage
 
   async completeWorkflow(workflowId: string, result: unknown, guard?: FenceGuard): Promise<void> {
     this._checkFence(workflowId, guard);
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     this.db
       .query(
         `UPDATE ${this._t}
@@ -1072,7 +1101,7 @@ export class SqliteWorkflowStorage
 
   async failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void> {
     this._checkFence(workflowId, guard);
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     this.db
       .query(
         `UPDATE ${this._t}
@@ -1089,7 +1118,7 @@ export class SqliteWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     this._checkFence(workflowId, guard);
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     this.db.transaction((): void => {
       const row = this.db
         .query<{ steps: string; run: number }>(
@@ -1133,7 +1162,7 @@ export class SqliteWorkflowStorage
           `INSERT INTO ${this._t}_signals (workflow_id, signal_name, payload, delivered_at)
            VALUES (?, ?, ?, ?)`,
         )
-        .run(workflowId, signalName, JSON.stringify(payload), Date.now());
+        .run(workflowId, signalName, JSON.stringify(payload), this.clock.currentTimeMs());
     })();
   }
 
@@ -1154,7 +1183,7 @@ export class SqliteWorkflowStorage
       }
       this.db
         .query(`UPDATE ${this._t} SET metadata = ?, updated_at = ? WHERE workflow_id = ?`)
-        .run(JSON.stringify(merged), Date.now(), workflowId);
+        .run(JSON.stringify(merged), this.clock.currentTimeMs(), workflowId);
     })();
   }
 
@@ -1196,7 +1225,7 @@ export class SqliteWorkflowStorage
           return { record: rowToSignalToken(existing), isCached: true };
         }
       }
-      const now = Date.now();
+      const now = this.clock.currentTimeMs();
       this.db
         .query(
           `INSERT INTO ${this._t}_signal_tokens
@@ -1301,7 +1330,7 @@ export class SqliteWorkflowStorage
           chunkIndex,
           JSON.stringify(params.payload),
           params.appendedBy,
-          Date.now(),
+          this.clock.currentTimeMs(),
         );
       return { chunkIndex };
     })();
@@ -1350,7 +1379,7 @@ export class SqliteWorkflowStorage
     lockDurationMs: number,
   ): Promise<{ acquired: boolean; token?: FenceToken }> {
     return this.db.transaction((): { acquired: boolean; token?: FenceToken } => {
-      const now = Date.now();
+      const now = this.clock.currentTimeMs();
       const existing = this.db
         .query<{ expires_at: number; token: string }>(
           `SELECT expires_at, token FROM ${this._t}_locks WHERE workflow_id = ?`,
@@ -1395,7 +1424,7 @@ export class SqliteWorkflowStorage
   }
 
   async heartbeat(workflowId: string, lockDurationMs: number, guard?: FenceGuard): Promise<void> {
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     if (guard?.fenceToken) {
       this.db
         .query(
@@ -1442,7 +1471,7 @@ export class SqliteWorkflowStorage
         );
 
       const newRun = row.run + 1;
-      const now = Date.now();
+      const now = this.clock.currentTimeMs();
       this.db
         .query(
           `UPDATE ${this._t}
@@ -1492,7 +1521,7 @@ export class SqliteWorkflowStorage
       // it; a still-running / suspended workflow keeps its status.
       const terminal =
         row.status === "completed" || row.status === "failed" || row.status === "tripwire";
-      const now = Date.now();
+      const now = this.clock.currentTimeMs();
       if (terminal) {
         this.db
           .query(
@@ -1557,7 +1586,7 @@ export class SqliteWorkflowStorage
 
     if ("olderThanMs" in params) {
       fromMs = 0;
-      toMs = Date.now() - params.olderThanMs;
+      toMs = this.clock.currentTimeMs() - params.olderThanMs;
     } else {
       fromMs = params.from.getTime();
       toMs = params.to.getTime();
@@ -1625,7 +1654,7 @@ export class SqliteWorkflowStorage
 
     if (existing && existing.phase !== "pending") return;
 
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     this.db
       .query(
         `INSERT INTO ${this._t}_journal
@@ -1691,7 +1720,7 @@ export class SqliteWorkflowStorage
         params.stepType,
         params.payloadHash ?? null,
         params.wakeAt != null ? params.wakeAt.getTime() : null,
-        Date.now(),
+        this.clock.currentTimeMs(),
       );
   }
 

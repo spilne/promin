@@ -1,4 +1,10 @@
-import type { WorkerRegistry, WorkerInfo, WorkerStatus } from "@promin/workflow";
+import {
+  SystemWallClock,
+  type WallClock,
+  type WorkerRegistry,
+  type WorkerInfo,
+  type WorkerStatus,
+} from "@promin/workflow";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
 /**
@@ -28,12 +34,15 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
  */
 export class SqliteWorkerRegistry implements WorkerRegistry {
   private readonly _t: string;
+  private readonly clock: WallClock;
 
   private constructor(
     private readonly db: SqliteDatabase,
     table: string,
+    clock: WallClock,
   ) {
     this._t = table;
+    this.clock = clock;
     this._setup();
   }
 
@@ -41,8 +50,14 @@ export class SqliteWorkerRegistry implements WorkerRegistry {
     db: SqliteDatabase;
     /** Override the table prefix (default: `promin_wf`). The worker table is `<prefix>_workers`. */
     tablePrefix?: string;
+    /** Time source for heartbeats and dead / retention cutoffs. Default: `SystemWallClock`. */
+    clock?: WallClock;
   }): SqliteWorkerRegistry {
-    return new SqliteWorkerRegistry(params.db, params.tablePrefix ?? "promin_wf");
+    return new SqliteWorkerRegistry(
+      params.db,
+      params.tablePrefix ?? "promin_wf",
+      params.clock ?? SystemWallClock,
+    );
   }
 
   private _setup(): void {
@@ -99,7 +114,7 @@ export class SqliteWorkerRegistry implements WorkerRegistry {
     // Matches InMemory + Postgres: re-registering the same workerId
     // replaces the row and refreshes startedAt + heartbeat. A re-register
     // is conceptually a new worker lifecycle.
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     this.db.run(
       `INSERT INTO ${this._t}_workers
          (worker_id, status, capabilities, concurrency, metadata, started_at, last_heartbeat_at)
@@ -125,7 +140,7 @@ export class SqliteWorkerRegistry implements WorkerRegistry {
     // from unknown workers are dropped, not an error).
     this.db.run(
       `UPDATE ${this._t}_workers SET last_heartbeat_at = ? WHERE worker_id = ?`,
-      Date.now(),
+      this.clock.currentTimeMs(),
       workerId,
     );
   }
@@ -139,7 +154,7 @@ export class SqliteWorkerRegistry implements WorkerRegistry {
     // it. No-ops on a missing worker (zero rows updated).
     this.db.run(
       `UPDATE ${this._t}_workers SET status = 'retired', retired_at = ? WHERE worker_id = ?`,
-      Date.now(),
+      this.clock.currentTimeMs(),
       workerId,
     );
   }
@@ -158,7 +173,7 @@ export class SqliteWorkerRegistry implements WorkerRegistry {
     // 3.45+) supports UPDATE ... RETURNING, matching the Postgres impl's
     // single-round-trip sweep. Skips 'dead' and 'retired' — a retired
     // worker stopped on purpose and must not be relabelled a crash.
-    const cutoff = Date.now() - timeoutMs;
+    const cutoff = this.clock.currentTimeMs() - timeoutMs;
     const rows = this.db
       .query<WorkerRow>(
         `UPDATE ${this._t}_workers
@@ -173,7 +188,7 @@ export class SqliteWorkerRegistry implements WorkerRegistry {
   async gc(params: { retainMs: number }): Promise<number> {
     // Reap on the most-recent activity: retired_at when the worker
     // retired, otherwise its last heartbeat. RETURNING gives the count.
-    const cutoff = Date.now() - params.retainMs;
+    const cutoff = this.clock.currentTimeMs() - params.retainMs;
     const rows = this.db
       .query<{ worker_id: string }>(
         `DELETE FROM ${this._t}_workers

@@ -496,8 +496,8 @@ Before deregistering an old version, check that all its workflows have finished:
 
 ```typescript
 const counts = await registry.countByVersion({ name: "order", storage });
-// Map { "1" => { running: 3, completed: 150, failed: 1 },
-//        "2" => { running: 12, completed: 40, failed: 0 } }
+// Map { "1" => { running: 3, completed: 150, failed: 1, tripwire: 0 },
+//       "2" => { running: 12, completed: 40, failed: 0, tripwire: 2 } }
 
 if (counts.get("1")!.running === 0) {
   // Safe to remove v1 from the registry

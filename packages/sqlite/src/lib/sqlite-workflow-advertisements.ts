@@ -22,10 +22,12 @@
 //   );
 // ---------------------------------------------------------------------------
 
-import type {
-  AdvertisedWorkflow,
-  AdvertisementEntry,
-  WorkflowAdvertisementRegistry,
+import {
+  SystemWallClock,
+  type AdvertisedWorkflow,
+  type AdvertisementEntry,
+  type WallClock,
+  type WorkflowAdvertisementRegistry,
 } from "@promin/workflow";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
@@ -42,16 +44,21 @@ export interface SqliteWorkflowAdvertisementRegistryOptions {
   db: SqliteDatabase;
   /** Override the table name (default: `promin_workflow_advertisements`). */
   tableName?: string;
+  /** Time source for `advertisedAt`. Default: `SystemWallClock`. */
+  clock?: WallClock;
 }
 
 export class SqliteWorkflowAdvertisementRegistry implements WorkflowAdvertisementRegistry {
   private readonly _t: string;
+  private readonly clock: WallClock;
 
   private constructor(
     private readonly db: SqliteDatabase,
     table: string,
+    clock: WallClock,
   ) {
     this._t = table;
+    this.clock = clock;
     this._setup();
   }
 
@@ -61,6 +68,7 @@ export class SqliteWorkflowAdvertisementRegistry implements WorkflowAdvertisemen
     return new SqliteWorkflowAdvertisementRegistry(
       opts.db,
       opts.tableName ?? "promin_workflow_advertisements",
+      opts.clock ?? SystemWallClock,
     );
   }
 
@@ -86,7 +94,7 @@ export class SqliteWorkflowAdvertisementRegistry implements WorkflowAdvertisemen
     // longer hosts. Wrap in a transaction so a mid-replace failure
     // leaves the previous advertisement intact rather than partially gone.
     const t = this._t;
-    const now = Date.now();
+    const now = this.clock.currentTimeMs();
     this.db.run("BEGIN IMMEDIATE");
     try {
       this.db.query(`DELETE FROM ${t} WHERE worker_id = ?`).run(workerId);

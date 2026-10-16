@@ -245,6 +245,7 @@ export class PostgresWorkflowStorage
   async listWorkflows(params?: {
     status?: WorkflowStatus;
     name?: string;
+    version?: string;
     type?: string;
     parentId?: string;
     namespace?: string;
@@ -256,6 +257,52 @@ export class PostgresWorkflowStorage
     orderBy?: WorkflowOrderBy;
     orderDir?: "asc" | "desc";
   }): Promise<WorkflowState[]> {
+    const conditions = this.workflowFilterConditions(params);
+    const query = this.db.select().from(workflows).$dynamic();
+    if (conditions.length > 0)
+      query.where(conditions.length === 1 ? conditions[0] : and(...conditions));
+    query.orderBy(postgresOrderByClause(params?.orderBy, params?.orderDir));
+    if (params?.limit) query.limit(params.limit);
+    if (params?.offset) query.offset(params.offset);
+
+    const rows = await query;
+    return rows.map((row: any) => this.rowToWorkflowState(row, []));
+  }
+
+  /** `SELECT COUNT(*)` over the same filters as `listWorkflows`. */
+  async countWorkflows(params?: {
+    status?: WorkflowStatus;
+    name?: string;
+    version?: string;
+    type?: string;
+    parentId?: string;
+    namespace?: string;
+    runSource?: RunSource;
+    runSourceId?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<number> {
+    const conditions = this.workflowFilterConditions(params);
+    const query = this.db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(workflows)
+      .$dynamic();
+    if (conditions.length > 0)
+      query.where(conditions.length === 1 ? conditions[0] : and(...conditions));
+    const [row] = await query;
+    return Number(row?.n ?? 0);
+  }
+
+  private workflowFilterConditions(params?: {
+    status?: WorkflowStatus;
+    name?: string;
+    version?: string;
+    type?: string;
+    parentId?: string;
+    namespace?: string;
+    runSource?: RunSource;
+    runSourceId?: string;
+    metadata?: Record<string, unknown>;
+  }) {
     const conditions = [];
     // Scope to constructor namespace if set and no explicit namespace filter
     const ns = params?.namespace ?? this.config.namespace;
@@ -263,6 +310,7 @@ export class PostgresWorkflowStorage
     if (params?.status)
       conditions.push(eq(workflows.statusId, WorkflowStatusIds.toId(params.status)));
     if (params?.name) conditions.push(eq(workflows.workflowName, params.name));
+    if (params?.version !== undefined) conditions.push(eq(workflows.version, params.version));
     if (params?.type) conditions.push(eq(workflows.workflowType, params.type));
     if (params?.parentId) conditions.push(eq(workflows.parentWorkflowId, params.parentId));
     if (params?.runSource !== undefined) {
@@ -279,16 +327,7 @@ export class PostgresWorkflowStorage
     if (params?.metadata && Object.keys(params.metadata).length > 0) {
       conditions.push(sql`${workflows.metadata} @> ${JSON.stringify(params.metadata)}::jsonb`);
     }
-
-    const query = this.db.select().from(workflows).$dynamic();
-    if (conditions.length > 0)
-      query.where(conditions.length === 1 ? conditions[0] : and(...conditions));
-    query.orderBy(postgresOrderByClause(params?.orderBy, params?.orderDir));
-    if (params?.limit) query.limit(params.limit);
-    if (params?.offset) query.offset(params.offset);
-
-    const rows = await query;
-    return rows.map((row: any) => this.rowToWorkflowState(row, []));
+    return conditions;
   }
 
   async distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]> {

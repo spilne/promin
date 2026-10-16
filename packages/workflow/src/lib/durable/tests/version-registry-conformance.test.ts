@@ -1,4 +1,6 @@
 import { createWorkflowVersionRegistry } from "../workflow-version-registry.ts";
-import { versionRegistryTestSuite } from "../version-registry-test-suite.ts";
+import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
+import { versionDrainTestSuite, versionRegistryTestSuite } from "../version-registry-test-suite.ts";
 
 versionRegistryTestSuite(() => createWorkflowVersionRegistry());
+versionDrainTestSuite(() => new InMemoryWorkflowStorage());
