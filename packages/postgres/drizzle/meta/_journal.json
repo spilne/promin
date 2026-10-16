@@ -351,6 +351,13 @@
       "when": 1743400049000,
       "tag": "0049_leader_leases",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1743400050000,
+      "tag": "0050_step_queue_v2",
+      "breakpoints": true
     }
   ]
 }

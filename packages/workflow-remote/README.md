@@ -12,7 +12,7 @@ bun add @promin/workflow-remote
 
 - `RemoteWorkflowStorage` — client-side `WorkflowStorage` that forwards every call to an HTTP handler. Plugs into any `runner` / `workflow().run()` site.
 - `createWorkflowStorageHandler(storage)` — server-side handler. Wraps any `WorkflowStorage` (in-memory, Postgres, …) into a `(Request) => Response` function suitable for `Bun.serve`, Hono, Deno, or raw Node.
-- `RemoteStepQueue` + `createWorkerApiHandler` — worker-facing RPC for `claim` / `complete` / `fail` / `heartbeat` against a `StepQueue` running on the coordinator.
+- `RemoteStepQueue` + `createWorkerApiHandler` — worker-facing RPC for `claim` / `release` / `complete` / `fail` / `heartbeat` against a `StepQueue` running on the coordinator.
 - `RemoteWorkerRegistry` — same shape, for `WorkerRegistry`.
 
 ## Quick example
@@ -77,7 +77,7 @@ The runner publishes `step-started` events via the optional `notifyStepStarted(w
 
 ### `RemoteStepQueue.enqueue` throws
 
-`enqueue` is a coordinator concern — workers never enqueue, that's what schedule-the-next-step does on the server side. `RemoteStepQueue` only exposes the worker subset of `StepQueue` (`claim`, `complete`, `fail`, `heartbeat`, `requeueStuck`) and throws on `enqueue`. If you need to push a task from a remote process, route the request through your coordinator instead of bypassing it.
+`enqueue` is a coordinator concern — workers never enqueue, that's what schedule-the-next-step does on the server side. `RemoteStepQueue` only exposes the worker subset of `StepQueue` (`claim`, `release`, `complete`, `fail`, `heartbeat`) and throws on `enqueue`, `requeueStuck`, `get` and `purge`. `claim` carries the worker's `workerId`, `stepNames` and `versions`, so routing happens inside the server-side claim and the coordinator's dead-worker sweep can reclaim a remote worker's tasks by its id. If you need to push a task from a remote process, route the request through your coordinator instead of bypassing it.
 
 In `coordination: { enabled: true }` mode (`@promin/zorya`), the server-side coordinator owns enqueue: trigger requests land on `/api/runs/trigger/:name`, the `CoordinatedTriggerService` builds a stub workflow from the worker advertisement, and `coordinator.submit(...)` enqueues the ready set to the local `StepQueue`. Step-mode workers (`ZoryaWorker({ mode: "step" })`) then claim individual tasks via the existing worker wire.
 

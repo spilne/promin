@@ -2,63 +2,61 @@
 // InMemoryStepQueue — for testing distributed workflows without Postgres
 // ---------------------------------------------------------------------------
 
-import type { StepQueue, StepTask, FairnessPolicy } from "./step-queue.ts";
+import {
+  DEFAULT_MAX_DELIVERIES,
+  deadLetterError,
+  percentileCont,
+  type StepQueue,
+  type StepQueueClaimParams,
+  type StepQueueEnqueueParams,
+  type StepQueueRequeueParams,
+  type StepQueueRequeueResult,
+  type StepTask,
+  type StepTaskRecord,
+} from "./step-queue.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 
 type MutableTask = {
-  -readonly [K in keyof StepTask]: StepTask[K];
+  -readonly [K in keyof StepTaskRecord]: StepTaskRecord[K];
 } & {
-  result?: unknown;
-  error?: string;
-  claimedBy?: string;
-  claimedAt?: Date;
-  claimToken?: string;
-  heartbeatAt?: Date;
-  completedAt?: Date;
-  durationMs?: number;
-  // Internal — StepTask hides namespace from consumers, but we need it to
-  // clear the activeByKey slot on complete/fail.
+  /** Internal — StepTask hides namespace from consumers. */
   namespace?: string;
 };
+
+export interface InMemoryStepQueueConfig {
+  /** Time source — drives createdAt/claimedAt/completedAt + metrics window. */
+  clock?: WallClock;
+  /**
+   * Deliveries after which `requeueStuck` dead-letters a task instead of
+   * requeueing it. Default: `DEFAULT_MAX_DELIVERIES` (10).
+   */
+  maxDeliveries?: number;
+}
 
 export class InMemoryStepQueue implements StepQueue {
   private tasks = new Map<string, MutableTask>();
   /**
-   * `${namespace}::${workflowId}::${stepName}` → active taskId. Drives the
-   * idempotent-enqueue contract: while a prior task for the triple is
-   * pending/running, re-enqueue returns the existing id. Cleared on
-   * complete/fail so retries + fresh runs can re-enqueue cleanly.
+   * `${workflowId}::${stepName}` → active taskId. Drives the
+   * idempotent-enqueue contract: while a prior task for the pair is
+   * pending/running, re-enqueue returns the existing id. Cleared when the
+   * task reaches a terminal state so retries + fresh runs can re-enqueue.
    */
   private activeByKey = new Map<string, string>();
   private counter = 0;
-  private readonly workerId: string;
-  /** Time source — drives createdAt/claimedAt/completedAt + metrics window. */
   private readonly clock: WallClock;
+  private readonly maxDeliveries: number;
 
-  constructor(params?: { workerId?: string; clock?: WallClock }) {
-    this.workerId = params?.workerId ?? "in-memory";
-    this.clock = params?.clock ?? SystemWallClock;
+  constructor(config?: InMemoryStepQueueConfig) {
+    this.clock = config?.clock ?? SystemWallClock;
+    this.maxDeliveries = config?.maxDeliveries ?? DEFAULT_MAX_DELIVERIES;
   }
 
-  private activeKey(namespace: string | undefined, workflowId: string, stepName: string): string {
-    return `${namespace ?? ""}::${workflowId}::${stepName}`;
+  private activeKey(workflowId: string, stepName: string): string {
+    return `${workflowId}::${stepName}`;
   }
 
-  async enqueue(params: {
-    workflowId: string;
-    stepName: string;
-    input: unknown;
-    prevResults: Record<string, unknown>;
-    needs?: readonly string[];
-    priority?: number;
-    namespace?: string;
-    version?: string;
-    metadata?: Record<string, unknown>;
-    concurrencyKey?: string;
-    concurrencyScope?: string;
-    concurrencyLimit?: number;
-  }): Promise<string> {
-    const key = this.activeKey(params.namespace, params.workflowId, params.stepName);
+  async enqueue(params: StepQueueEnqueueParams): Promise<string> {
+    const key = this.activeKey(params.workflowId, params.stepName);
     const existing = this.activeByKey.get(key);
     if (existing !== undefined) return existing;
 
@@ -71,7 +69,8 @@ export class InMemoryStepQueue implements StepQueue {
       priority: params.priority ?? 5,
       input: params.input,
       prevResults: params.prevResults,
-      attempt: 1,
+      attempt: params.attempt ?? 1,
+      deliveries: 0,
       status: "pending",
       createdAt: this.clock.now(),
       version: params.version,
@@ -85,74 +84,29 @@ export class InMemoryStepQueue implements StepQueue {
     return id;
   }
 
-  async claim(params: {
-    capabilities?: readonly string[];
-    limit: number;
-    fairness?: FairnessPolicy;
-    filter?: (task: StepTask) => boolean;
-  }): Promise<StepTask[]> {
+  async claim(params: StepQueueClaimParams): Promise<StepTask[]> {
     const caps = new Set(params.capabilities ?? []);
-    const fairness = params.fairness ?? "strict-priority";
+    const stepNames = params.stepNames ? new Set(params.stepNames) : undefined;
+    const versions = params.versions ? new Set(params.versions) : undefined;
 
-    // Subset check: task.needs ⊆ capabilities. Empty needs matches anyone.
-    const canHandle = (task: MutableTask): boolean => {
+    const claimable = (task: MutableTask): boolean => {
+      if (task.status !== "pending") return false;
+      if (stepNames && !stepNames.has(task.stepName)) return false;
+      if (versions && task.version !== undefined && !versions.has(task.version)) return false;
+      // Subset check: task.needs ⊆ capabilities. Empty needs matches anyone.
       for (const n of task.needs) {
         if (!caps.has(n)) return false;
       }
       return true;
     };
 
-    const pending = [...this.tasks.values()].filter((t) => t.status === "pending" && canHandle(t));
+    const ordered = [...this.tasks.values()]
+      .filter(claimable)
+      .sort((a, b) => b.priority - a.priority || a.createdAt.getTime() - b.createdAt.getTime());
 
-    let ordered: MutableTask[];
-
-    switch (fairness) {
-      case "strict-priority":
-        ordered = pending.sort(
-          (a, b) =>
-            (b.priority ?? 5) - (a.priority ?? 5) || a.createdAt.getTime() - b.createdAt.getTime(),
-        );
-        break;
-
-      case "round-robin": {
-        const byWorkflow = new Map<string, MutableTask[]>();
-        for (const t of pending.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())) {
-          if (!byWorkflow.has(t.workflowId)) byWorkflow.set(t.workflowId, []);
-          byWorkflow.get(t.workflowId)!.push(t);
-        }
-        ordered = [];
-        const queues = [...byWorkflow.values()];
-        let round = 0;
-        while (ordered.length < pending.length) {
-          let added = false;
-          for (const wfTasks of queues) {
-            if (round < wfTasks.length) {
-              ordered.push(wfTasks[round]!);
-              added = true;
-            }
-          }
-          if (!added) break;
-          round++;
-        }
-        break;
-      }
-
-      case "weighted": {
-        ordered = pending
-          .map((t) => ({ t, score: (t.priority ?? 5) * (0.5 + Math.random()) }))
-          .sort((a, b) => b.score - a.score)
-          .map((x) => x.t);
-        break;
-      }
-
-      default:
-        ordered = pending;
-    }
-
-    // Per-(scope,key) running counter — built once per claim() call so we
-    // can decide if claiming a task would push past its concurrencyLimit.
-    // Counts both already-running tasks and tasks claimed earlier in this
-    // same batch (so a single claim call can't itself violate the cap).
+    // Per-(scope,key) running counter, counting both already-running tasks
+    // and tasks claimed earlier in this batch (so one claim() can't itself
+    // violate the cap).
     const runningPerKey = new Map<string, number>();
     for (const t of this.tasks.values()) {
       if (t.status !== "running") continue;
@@ -164,9 +118,6 @@ export class InMemoryStepQueue implements StepQueue {
     const claimed: StepTask[] = [];
     for (const task of ordered) {
       if (claimed.length >= params.limit) break;
-      if (task.status !== "pending") continue;
-      if (params.filter && !params.filter({ ...task } as StepTask)) continue;
-      // Concurrency cap check — only when all three fields are set.
       if (task.concurrencyKey && task.concurrencyScope && task.concurrencyLimit !== undefined) {
         const k = `${task.concurrencyScope}::${task.concurrencyKey}`;
         const running = runningPerKey.get(k) ?? 0;
@@ -174,16 +125,32 @@ export class InMemoryStepQueue implements StepQueue {
         runningPerKey.set(k, running + 1);
       }
       task.status = "running";
-      task.claimedBy = this.workerId;
+      task.claimedBy = params.workerId;
       task.claimedAt = this.clock.now();
       // A fresh claim starts a fresh lease: a heartbeat left over from an
       // earlier claim must not make the new one look stale.
       task.heartbeatAt = undefined;
-      task.claimToken = `claim-${this.workerId}-${++this.counter}`;
-      claimed.push({ ...task });
+      task.claimToken = `claim-${++this.counter}`;
+      task.deliveries += 1;
+      claimed.push(this.toTask(task));
     }
 
     return claimed;
+  }
+
+  async release(params: { taskId: string; claimToken: string }): Promise<boolean> {
+    const task = this.tasks.get(params.taskId);
+    if (!this.isCurrentClaim(task, params.claimToken)) return false;
+    this.backToPending(task);
+    task.deliveries = Math.max(0, task.deliveries - 1);
+    return true;
+  }
+
+  async get(taskId: string): Promise<StepTaskRecord | undefined> {
+    const task = this.tasks.get(taskId);
+    if (!task) return undefined;
+    const { namespace: _ns, ...record } = task;
+    return { ...record };
   }
 
   async complete(params: {
@@ -198,7 +165,7 @@ export class InMemoryStepQueue implements StepQueue {
     task.result = params.result;
     task.durationMs = params.durationMs;
     task.completedAt = this.clock.now();
-    this.activeByKey.delete(this.activeKey(task.namespace, task.workflowId, task.stepName));
+    this.activeByKey.delete(this.activeKey(task.workflowId, task.stepName));
     return true;
   }
 
@@ -221,33 +188,51 @@ export class InMemoryStepQueue implements StepQueue {
     task.error = params.error;
     task.durationMs = params.durationMs;
     task.completedAt = this.clock.now();
-    this.activeByKey.delete(this.activeKey(task.namespace, task.workflowId, task.stepName));
+    this.activeByKey.delete(this.activeKey(task.workflowId, task.stepName));
     return true;
   }
 
-  async requeueStuck(params: { claimedBy?: string; staleTimeoutMs?: number }): Promise<number> {
-    let count = 0;
-    const cutoff = params.staleTimeoutMs
-      ? this.clock.currentTimeMs() - params.staleTimeoutMs
-      : undefined;
+  async requeueStuck(params: StepQueueRequeueParams): Promise<StepQueueRequeueResult> {
+    let requeued = 0;
+    let deadLettered = 0;
+    const cutoff =
+      params.mode === "stale" ? this.clock.currentTimeMs() - params.olderThanMs : undefined;
 
     for (const task of this.tasks.values()) {
       if (task.status !== "running") continue;
 
-      const matchesByWorker = params.claimedBy && task.claimedBy === params.claimedBy;
-      const lastActivity = task.heartbeatAt ?? task.claimedAt;
-      const matchesByTimeout = cutoff && lastActivity && lastActivity.getTime() < cutoff;
+      if (params.mode === "worker") {
+        if (task.claimedBy !== params.workerId) continue;
+      } else {
+        const lastActivity = task.heartbeatAt ?? task.claimedAt;
+        if (!lastActivity || lastActivity.getTime() >= cutoff!) continue;
+      }
 
-      if (matchesByWorker || matchesByTimeout) {
-        task.status = "pending";
-        task.claimedBy = undefined;
-        task.claimedAt = undefined;
+      if (task.deliveries >= this.maxDeliveries) {
+        task.status = "failed";
+        task.error = deadLetterError(this.maxDeliveries);
+        task.completedAt = this.clock.now();
         task.claimToken = undefined;
-        task.heartbeatAt = undefined;
-        count++;
+        this.activeByKey.delete(this.activeKey(task.workflowId, task.stepName));
+        deadLettered++;
+      } else {
+        this.backToPending(task);
+        requeued++;
       }
     }
-    return count;
+    return { requeued, deadLettered };
+  }
+
+  async purge(params: { completedBefore: Date }): Promise<number> {
+    const cutoff = params.completedBefore.getTime();
+    let purged = 0;
+    for (const [id, task] of this.tasks) {
+      if (task.status !== "completed" && task.status !== "failed") continue;
+      if (!task.completedAt || task.completedAt.getTime() >= cutoff) continue;
+      this.tasks.delete(id);
+      purged++;
+    }
+    return purged;
   }
 
   async metrics(params: { since: Date; until?: Date }): Promise<{
@@ -276,8 +261,7 @@ export class InMemoryStepQueue implements StepQueue {
     for (const task of this.tasks.values()) {
       // Each status uses the timestamp that defines its current membership
       // in the window: createdAt for pending, claimedAt for running,
-      // completedAt for terminal. Tasks that don't fit the window don't
-      // count — this is the whole point of the mandatory window.
+      // completedAt for terminal.
       if (task.status === "pending" && inWindow(task.createdAt)) {
         pending++;
       } else if (task.status === "running" && inWindow(task.claimedAt)) {
@@ -288,8 +272,6 @@ export class InMemoryStepQueue implements StepQueue {
       ) {
         if (task.status === "completed") completed++;
         else failed++;
-        // Latency pool spans both completed and failed — ops wants exec
-        // distribution regardless of outcome.
         if (task.claimedAt) {
           waitSum += task.claimedAt.getTime() - task.createdAt.getTime();
           waitN++;
@@ -309,13 +291,46 @@ export class InMemoryStepQueue implements StepQueue {
       failed,
       avgWaitMs: waitN > 0 ? waitSum / waitN : 0,
       avgExecMs: terminalN > 0 ? execSum / terminalN : 0,
-      p95ExecMs: terminalN > 0 ? percentile(execTimes, 0.95) : 0,
+      p95ExecMs: terminalN > 0 ? percentileCont({ values: execTimes, p: 0.95 }) : 0,
     };
   }
 
   /** Test helper: get all tasks. */
-  getAllTasks(): StepTask[] {
-    return [...this.tasks.values()];
+  getAllTasks(): StepTaskRecord[] {
+    return [...this.tasks.values()].map((t) => {
+      const { namespace: _ns, ...record } = t;
+      return { ...record };
+    });
+  }
+
+  private backToPending(task: MutableTask): void {
+    task.status = "pending";
+    task.claimedBy = undefined;
+    task.claimedAt = undefined;
+    task.claimToken = undefined;
+    task.heartbeatAt = undefined;
+  }
+
+  private toTask(task: MutableTask): StepTask {
+    return {
+      id: task.id,
+      workflowId: task.workflowId,
+      stepName: task.stepName,
+      needs: task.needs,
+      priority: task.priority,
+      input: task.input,
+      prevResults: task.prevResults,
+      attempt: task.attempt,
+      deliveries: task.deliveries,
+      status: task.status,
+      createdAt: task.createdAt,
+      claimToken: task.claimToken,
+      version: task.version,
+      metadata: task.metadata,
+      concurrencyKey: task.concurrencyKey,
+      concurrencyScope: task.concurrencyScope,
+      concurrencyLimit: task.concurrencyLimit,
+    };
   }
 
   private isCurrentClaim(
@@ -325,18 +340,4 @@ export class InMemoryStepQueue implements StepQueue {
     if (!task || task.status !== "running") return false;
     return claimToken === undefined || task.claimToken === claimToken;
   }
-}
-
-/**
- * Linear-interpolation percentile (matches SQL `PERCENTILE_CONT`). Sorts a
- * copy so callers keep their ordering. Handles the degenerate cases
- * cleanly: single value returns itself, empty array is guarded by callers.
- */
-function percentile(values: number[], p: number): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const rank = p * (sorted.length - 1);
-  const lo = Math.floor(rank);
-  const hi = Math.ceil(rank);
-  if (lo === hi) return sorted[lo]!;
-  return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (rank - lo);
 }

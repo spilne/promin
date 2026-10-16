@@ -69,9 +69,10 @@ describe("versioned dispatch", () => {
 
     // Claim directly — avoid spinning the worker loop.
     const claimed = await stepQueue.claim({
+      workerId: "w-known",
       capabilities: [],
       limit: 10,
-      filter: (task) => registry.has(task.stepName),
+      stepNames: registry.list(),
     });
 
     expect(claimed).toHaveLength(1);
@@ -79,9 +80,10 @@ describe("versioned dispatch", () => {
 
     // The unknown-step task stays pending — another worker can pick it up.
     const second = await stepQueue.claim({
+      workerId: "w-unknown",
       capabilities: [],
       limit: 10,
-      filter: (task) => task.stepName === "unknown-step",
+      stepNames: ["unknown-step"],
     });
     expect(second).toHaveLength(1);
     expect(second[0]!.stepName).toBe("unknown-step");
@@ -114,13 +116,11 @@ describe("versioned dispatch", () => {
     // backward compat. v3 is rejected.
     const supported = ["1", "2"];
     const claimed = await stepQueue.claim({
+      workerId: "w-1",
       capabilities: [],
       limit: 10,
-      filter: (task) => {
-        if (!registry.has(task.stepName)) return false;
-        if (task.version !== undefined && !supported.includes(task.version)) return false;
-        return true;
-      },
+      stepNames: registry.list(),
+      versions: supported,
     });
 
     const versions = claimed.map((t) => t.version).sort();

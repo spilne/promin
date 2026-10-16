@@ -118,7 +118,7 @@ await scheduler.resume("daily-etl");
 
 ## Step Queue
 
-Postgres-backed distributed step queue for workflow workers. Uses `SELECT FOR UPDATE SKIP LOCKED` so each pending task is handed to exactly one claimer, with natural load balancing across workers. A task is only handed out again after `requeueStuck` returns it to pending (dead worker, or no heartbeat within the stale timeout), so execution is at-least-once across worker crashes.
+Postgres-backed distributed step queue for workflow workers. Uses `SELECT FOR UPDATE SKIP LOCKED` so each pending task is handed to exactly one claimer, with natural load balancing across workers. A task is only handed out again after `requeueStuck` returns it to pending (dead worker, or no heartbeat within the stale timeout), so execution is at-least-once across worker crashes: handlers must be idempotent, and `claimToken` fences every write so only the current claim can settle a task.
 
 ### Setup
 
@@ -127,8 +127,8 @@ import { PgStepQueue } from "@promin/postgres";
 
 const queue = new PgStepQueue({
   db, // DrizzleDb instance (required)
-  workerId: "worker-1", // Identifies this worker (default: random UUID)
   namespace: "prod", // Isolate tasks by namespace (default: null = unscoped)
+  maxDeliveries: 10, // Dead-letter a task after this many deliveries (default: 10)
 });
 
 // Create the table (for dev/testing — prefer migrations for production)
@@ -148,78 +148,73 @@ export const stepQueue = PgStepQueue.schema;
 const taskId = await queue.enqueue({
   workflowId: "order-123",
   stepName: "charge",
-  queue: "payments",
+  needs: ["payments"], // Capabilities a worker must have (default: none)
   input: { amount: 99.99 },
   prevResults: { validate: { ok: true } },
   priority: 8, // Higher = claimed first (default: 5)
+  attempt: 1, // The runner's attempt number (default: 1)
 });
 ```
+
+Enqueue is idempotent on `(workflowId, stepName)` while a task for the pair is pending or running.
 
 ### Claim and process tasks
 
 ```typescript
 const tasks = await queue.claim({
-  queues: ["payments", "notifications"],
+  workerId: "worker-1", // Recorded on each task; dead-worker reclaim uses it
   limit: 10,
-  fairness: "strict-priority",
+  capabilities: ["payments"],
+  stepNames: ["charge", "refund"], // Only steps this worker hosts (default: any)
+  versions: ["2"], // Only these workflow versions; unversioned always pass (default: any)
 });
 
 for (const task of tasks) {
   const start = Date.now();
+  const claim = { taskId: task.id, claimToken: task.claimToken };
   try {
     const result = await processStep(task);
-    await queue.complete({
-      taskId: task.id,
-      result,
-      durationMs: Date.now() - start,
-    });
+    await queue.complete({ ...claim, result, durationMs: Date.now() - start });
   } catch (err) {
-    await queue.fail({
-      taskId: task.id,
-      error: String(err),
-      durationMs: Date.now() - start,
-    });
+    await queue.fail({ ...claim, error: String(err), durationMs: Date.now() - start });
   }
 }
+
+// Give back a task you claimed but won't run (no delivery is counted):
+await queue.release({ taskId: task.id, claimToken: task.claimToken! });
 ```
 
-### Fairness policies
-
-Control how tasks are ordered when claiming:
-
-| Policy              | Behavior                                                                                 |
-| ------------------- | ---------------------------------------------------------------------------------------- |
-| `"strict-priority"` | Highest priority first, then oldest (default)                                            |
-| `"round-robin"`     | Interleave across workflows — prevents one workflow from starving others                 |
-| `"weighted"`        | Priority weighted by randomness — high priority tasks are more likely but not guaranteed |
-
-```typescript
-// Round-robin across workflows
-const tasks = await queue.claim({
-  queues: ["default"],
-  limit: 5,
-  fairness: "round-robin",
-});
-```
+The step-name, version and capability filters run inside the claim query, so a worker never claims tasks it can't run and they never block the tasks behind them. Tasks are claimed highest priority first, FIFO within a priority. Tasks sharing a `(concurrencyScope, concurrencyKey)` are capped at `concurrencyLimit` running at once across every claimer: admission takes a transaction-scoped advisory lock per key and recounts the running tasks under it.
 
 ### Requeue stuck tasks
 
-Recover tasks claimed by crashed workers:
+Recover tasks claimed by crashed workers. A task that has already been delivered `maxDeliveries` times is dead-lettered instead — marked `failed` with `poisoned: exceeded N deliveries` — so a task that crashes every worker stops being redelivered.
 
 ```typescript
-// Requeue tasks older than 5 minutes
-const requeued = await queue.requeueStuck({ staleTimeoutMs: 300_000 });
+// Requeue tasks with no heartbeat for 5 minutes
+const { requeued, deadLettered } = await queue.requeueStuck({
+  mode: "stale",
+  olderThanMs: 300_000,
+});
 
-// Requeue tasks from a specific dead worker
-const requeued = await queue.requeueStuck({ claimedBy: "worker-3" });
+// Requeue every task claimed by a dead worker
+await queue.requeueStuck({ mode: "worker", workerId: "worker-3" });
+```
+
+### Inspect and purge
+
+```typescript
+const task = await queue.get(taskId); // status, deliveries, claimedBy, result / error, …
+
+// Delete completed / failed tasks older than a week
+await queue.purge({ completedBefore: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) });
 ```
 
 ### Metrics
 
 ```typescript
-const metrics = await queue.metrics();
-// { "payments": { pending: 12, running: 3, completed: 450, failed: 2 },
-//   "notifications": { pending: 0, running: 1, completed: 89, failed: 0 } }
+const metrics = await queue.metrics({ since: new Date(Date.now() - 60 * 60 * 1000) });
+// { pending, running, completed, failed, avgWaitMs, avgExecMs, p95ExecMs }
 ```
 
 ## Running Tests

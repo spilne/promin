@@ -20,7 +20,6 @@ import {
   InProcessStepExecutor,
   invokeQueryHandler,
   listQueryHandlers,
-  type FairnessPolicy,
   type SleepScanner,
   type StepTask,
   type Workflow,
@@ -109,8 +108,6 @@ export interface ZoryaWorkerConfig {
     limit?: number;
     /** Heartbeat cadence per running step. Default 5_000ms. */
     heartbeatMs?: number;
-    /** Fairness policy passed to `stepQueue.claim`. Default `"strict-priority"`. */
-    fairness?: FairnessPolicy;
   };
   /**
    * Opt in to the persistent worker → server WebSocket. When enabled the
@@ -465,12 +462,14 @@ export class ZoryaWorker {
    * `coordination: { enabled: true }`.
    */
   private async drainPendingStepTasks(limit: number): Promise<void> {
-    const fairness = this.config.stepPolling?.fairness ?? "strict-priority";
+    // Routing runs inside the server-side claim: only steps of an
+    // advertised workflow are handed out, so foreign steps never block ours
+    // and none are claimed only to be dropped.
     const tasks = await this.client.stepQueue.claim({
-      capabilities: this.config.capabilities ?? [],
+      workerId: this.workerId,
       limit,
-      fairness,
-      filter: (t) => this.canHandleStep(t),
+      capabilities: this.config.capabilities ?? [],
+      stepNames: this.advertisedStepNames(),
     });
     for (const task of tasks) {
       void this.executeStepTask(task).catch(() => {
@@ -481,11 +480,22 @@ export class ZoryaWorker {
     }
   }
 
-  private canHandleStep(task: StepTask): boolean {
-    // StepTask doesn't carry workflowName, so we filter by step-name
-    // presence across every advertised workflow. Capability subset matching
-    // happens server-side via `stepQueue.claim`.
-    return this.findWorkflowForStep(task) !== undefined;
+  /**
+   * Every step name across the advertised workflows. StepTask doesn't carry
+   * a workflow name, so step-name presence is what decides whether this
+   * worker can run a task.
+   */
+  private advertisedStepNames(): string[] {
+    const names = new Set<string>();
+    for (const wf of this.byName.values()) {
+      for (const s of wf._definition.steps) names.add(s.name);
+    }
+    for (const [, byVersion] of this.byNameAndVersion) {
+      for (const wf of byVersion.values()) {
+        for (const s of wf._definition.steps) names.add(s.name);
+      }
+    }
+    return [...names];
   }
 
   private async executeStepTask(task: StepTask): Promise<void> {
@@ -498,7 +508,9 @@ export class ZoryaWorker {
 
     const heartbeatMs = this.config.stepPolling?.heartbeatMs ?? 5_000;
     const heartbeat = setInterval(() => {
-      void this.client.stepQueue.heartbeat({ taskId: task.id }).catch(() => {});
+      void this.client.stepQueue
+        .heartbeat({ taskId: task.id, claimToken: task.claimToken })
+        .catch(() => {});
     }, heartbeatMs);
     const cleanup = () => clearInterval(heartbeat);
     this.inFlightSteps.set(task.id, cleanup);
@@ -536,6 +548,7 @@ export class ZoryaWorker {
         });
         await this.client.stepQueue.complete({
           taskId: task.id,
+          claimToken: task.claimToken,
           result: result.result,
           durationMs,
         });
@@ -596,7 +609,9 @@ export class ZoryaWorker {
         startedAt,
       })
       .catch(() => {});
-    await this.client.stepQueue.fail({ taskId: task.id, error, durationMs }).catch(() => {});
+    await this.client.stepQueue
+      .fail({ taskId: task.id, claimToken: task.claimToken, error, durationMs })
+      .catch(() => {});
   }
 
   /**

@@ -61,7 +61,7 @@ async function eventually(
 
 describe("PgStepQueue — competing claims", () => {
   it("enqueue and claim a step task", async () => {
-    const queue = new PgStepQueue({ db: pg.db, workerId: "worker-1" });
+    const queue = new PgStepQueue({ db: pg.db });
 
     await queue.enqueue({
       workflowId: "wf-1",
@@ -71,15 +71,15 @@ describe("PgStepQueue — competing claims", () => {
       prevResults: {},
     });
 
-    const tasks = await queue.claim({ capabilities: ["default"], limit: 1 });
+    const tasks = await queue.claim({ workerId: "w-1", capabilities: ["default"], limit: 1 });
     expect(tasks).toHaveLength(1);
     expect(tasks[0]!.stepName).toBe("process");
     expect(tasks[0]!.input).toEqual({ data: "hello" });
   });
 
   it("SKIP LOCKED prevents double-claim between simultaneous claimers", async () => {
-    const q1 = new PgStepQueue({ db: pg.db, workerId: "w1" });
-    const q2 = new PgStepQueue({ db: pg.db, workerId: "w2" });
+    const q1 = new PgStepQueue({ db: pg.db });
+    const q2 = new PgStepQueue({ db: pg.db });
 
     await q1.enqueue({
       workflowId: "wf-2",
@@ -90,15 +90,15 @@ describe("PgStepQueue — competing claims", () => {
     });
 
     const [t1, t2] = await Promise.all([
-      q1.claim({ capabilities: ["default"], limit: 1 }),
-      q2.claim({ capabilities: ["default"], limit: 1 }),
+      q1.claim({ workerId: "w1", capabilities: ["default"], limit: 1 }),
+      q2.claim({ workerId: "w2", capabilities: ["default"], limit: 1 }),
     ]);
 
     expect([...t1, ...t2]).toHaveLength(1);
   });
 
   it("higher priority tasks are claimed first", async () => {
-    const queue = new PgStepQueue({ db: pg.db, workerId: "w1" });
+    const queue = new PgStepQueue({ db: pg.db });
 
     await queue.enqueue({
       workflowId: "wf-lo",
@@ -117,15 +117,15 @@ describe("PgStepQueue — competing claims", () => {
       priority: 10,
     });
 
-    const first = await queue.claim({ capabilities: ["default"], limit: 1 });
+    const first = await queue.claim({ workerId: "w-1", capabilities: ["default"], limit: 1 });
     expect(first[0]!.stepName).toBe("high");
 
-    const second = await queue.claim({ capabilities: ["default"], limit: 1 });
+    const second = await queue.claim({ workerId: "w-1", capabilities: ["default"], limit: 1 });
     expect(second[0]!.stepName).toBe("low");
   });
 
   it("a completed task is never claimed again", async () => {
-    const queue = new PgStepQueue({ db: pg.db, workerId: "w1" });
+    const queue = new PgStepQueue({ db: pg.db });
 
     await queue.enqueue({
       workflowId: "wf-done",
@@ -135,15 +135,15 @@ describe("PgStepQueue — competing claims", () => {
       prevResults: {},
     });
 
-    const tasks = await queue.claim({ capabilities: ["default"], limit: 1 });
+    const tasks = await queue.claim({ workerId: "w-1", capabilities: ["default"], limit: 1 });
     await queue.complete({ taskId: tasks[0]!.id, result: { output: "done" }, durationMs: 42 });
 
-    const next = await queue.claim({ capabilities: ["default"], limit: 1 });
+    const next = await queue.claim({ workerId: "w-1", capabilities: ["default"], limit: 1 });
     expect(next).toHaveLength(0);
   });
 
   it("three workers drain the queue with every task claimed exactly once", async () => {
-    const coordinator = new PgStepQueue({ db: pg.db, workerId: "coordinator" });
+    const coordinator = new PgStepQueue({ db: pg.db });
     for (let i = 0; i < 10; i++) {
       await coordinator.enqueue({
         workflowId: "wf-e2e",
@@ -158,9 +158,9 @@ describe("PgStepQueue — competing claims", () => {
     const assignments: Record<string, string[]> = { w1: [], w2: [], w3: [] };
 
     async function work(name: string) {
-      const q = new PgStepQueue({ db: pg.db, workerId: name });
+      const q = new PgStepQueue({ db: pg.db });
       while (true) {
-        const tasks = await q.claim({ capabilities: ["default"], limit: 1 });
+        const tasks = await q.claim({ workerId: name, capabilities: ["default"], limit: 1 });
         if (tasks.length === 0) break;
         const task = tasks[0]!;
         assignments[name]!.push(task.stepName);
@@ -180,7 +180,7 @@ describe("PgStepQueue — competing claims", () => {
     // Many short-lived tasks claimed and completed by several workers at
     // once maximizes the window where one worker's claim scan meets a row
     // another worker has just completed.
-    const enqueuer = new PgStepQueue({ db: pg.db, workerId: "enqueuer" });
+    const enqueuer = new PgStepQueue({ db: pg.db });
     const total = 200;
     for (let i = 0; i < total; i++) {
       await enqueuer.enqueue({
@@ -194,9 +194,9 @@ describe("PgStepQueue — competing claims", () => {
 
     const claimedIds: string[] = [];
     async function work(name: string) {
-      const q = new PgStepQueue({ db: pg.db, workerId: name });
+      const q = new PgStepQueue({ db: pg.db });
       while (true) {
-        const tasks = await q.claim({ capabilities: ["default"], limit: 3 });
+        const tasks = await q.claim({ workerId: name, capabilities: ["default"], limit: 3 });
         if (tasks.length === 0) break;
         for (const task of tasks) {
           claimedIds.push(task.id);
@@ -221,7 +221,7 @@ describe("PgStepQueue — competing claims", () => {
 describe("Distributed DAG workflow — video processing pipeline", () => {
   it("coordinator dispatches DAG steps, workers execute in correct order", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const queue = new PgStepQueue({ db: pg.db, workerId: "coordinator" });
+    const queue = new PgStepQueue({ db: pg.db });
 
     const videoPipeline = workflow<{ videoUrl: string }>({ name: "video-processing", storage })
       .stepAsync("upload", async (ctx) => ({ url: ctx.input.videoUrl, size: 1024 }))
@@ -303,7 +303,7 @@ describe("Distributed DAG workflow — video processing pipeline", () => {
 describe("Distributed workers — competing task execution", () => {
   it("3 workers process 50 tasks with no duplicates via SKIP LOCKED", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const queue = new PgStepQueue({ db: pg.db, workerId: "coordinator" });
+    const queue = new PgStepQueue({ db: pg.db });
     const processed: { worker: string; workflowId: string }[] = [];
 
     const orderWorkflow = workflow<{ orderId: string }>({ name: "order-fulfillment", storage })
@@ -381,7 +381,7 @@ describe("Distributed workers — competing task execution", () => {
 
 describe("Dead worker detection — task recovery", () => {
   it("coordinator re-enqueues stuck tasks from dead worker", async () => {
-    const queue = new PgStepQueue({ db: pg.db, workerId: "coordinator" });
+    const queue = new PgStepQueue({ db: pg.db });
     const workerRegistry = new InMemoryWorkerRegistry();
 
     await queue.enqueue({
@@ -392,8 +392,12 @@ describe("Dead worker detection — task recovery", () => {
       prevResults: {},
     });
 
-    const w1Queue = new PgStepQueue({ db: pg.db, workerId: "worker-dead" });
-    const claimed = await w1Queue.claim({ capabilities: ["default"], limit: 1 });
+    const w1Queue = new PgStepQueue({ db: pg.db });
+    const claimed = await w1Queue.claim({
+      workerId: "worker-dead",
+      capabilities: ["default"],
+      limit: 1,
+    });
     expect(claimed).toHaveLength(1);
 
     // The worker "crashes": its task stays running and it stops heartbeating.
@@ -410,11 +414,15 @@ describe("Dead worker detection — task recovery", () => {
     const dead = await workerRegistry.detectDead(5_000);
     expect(dead.length).toBe(1);
 
-    const requeued = await queue.requeueStuck({ claimedBy: "worker-dead" });
+    const { requeued } = await queue.requeueStuck({ mode: "worker", workerId: "worker-dead" });
     expect(requeued).toBe(1);
 
-    const w2Queue = new PgStepQueue({ db: pg.db, workerId: "worker-alive" });
-    const reclaimed = await w2Queue.claim({ capabilities: ["default"], limit: 1 });
+    const w2Queue = new PgStepQueue({ db: pg.db });
+    const reclaimed = await w2Queue.claim({
+      workerId: "worker-alive",
+      capabilities: ["default"],
+      limit: 1,
+    });
     expect(reclaimed).toHaveLength(1);
     expect(reclaimed[0]!.stepName).toBe("process");
 
@@ -432,7 +440,7 @@ describe("Dead worker detection — task recovery", () => {
 
 describe("Priority queue — critical orders processed first", () => {
   it("higher priority tasks are claimed before lower priority", async () => {
-    const queue = new PgStepQueue({ db: pg.db, workerId: "worker-1" });
+    const queue = new PgStepQueue({ db: pg.db });
 
     for (let i = 0; i < 5; i++) {
       await queue.enqueue({
@@ -457,7 +465,7 @@ describe("Priority queue — critical orders processed first", () => {
 
     const order: string[] = [];
     for (let i = 0; i < 8; i++) {
-      const tasks = await queue.claim({ capabilities: ["default"], limit: 1 });
+      const tasks = await queue.claim({ workerId: "w-1", capabilities: ["default"], limit: 1 });
       if (tasks.length > 0) {
         order.push(tasks[0]!.workflowId.startsWith("high") ? "high" : "low");
         await queue.complete({ taskId: tasks[0]!.id, result: {}, durationMs: 1 });
@@ -476,7 +484,7 @@ describe("Priority queue — critical orders processed first", () => {
 describe("Queue routing — GPU vs CPU workers", () => {
   it("coordinator routes steps to specialized queues, workers claim their own", async () => {
     const storage = new InMemoryWorkflowStorage();
-    const queue = new PgStepQueue({ db: pg.db, workerId: "coordinator" });
+    const queue = new PgStepQueue({ db: pg.db });
 
     const mlPipeline = workflow<{ imageUrl: string }>({ name: "ml-pipeline", storage })
       .stepAsync("preprocess", async (ctx) => ({ processed: ctx.input.imageUrl }), {
@@ -500,7 +508,7 @@ describe("Queue routing — GPU vs CPU workers", () => {
     });
     const gpuWorker = new DefaultWorker({
       storage,
-      stepQueue: new PgStepQueue({ db: pg.db, workerId: "gpu-worker" }),
+      stepQueue: new PgStepQueue({ db: pg.db }),
       registry: gpuRegistry,
       capabilities: ["gpu"],
       concurrency: 1,
@@ -519,7 +527,7 @@ describe("Queue routing — GPU vs CPU workers", () => {
     });
     const cpuWorker = new DefaultWorker({
       storage,
-      stepQueue: new PgStepQueue({ db: pg.db, workerId: "cpu-worker" }),
+      stepQueue: new PgStepQueue({ db: pg.db }),
       registry: cpuRegistry,
       capabilities: ["cpu"],
       concurrency: 2,

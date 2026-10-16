@@ -7,8 +7,20 @@ export {
   type StepFailureStrategy,
   MapStepRegistry,
 } from "./step-registry.ts";
-export { type StepQueue, type StepTask, type FairnessPolicy } from "./step-queue.ts";
-export { InMemoryStepQueue } from "./in-memory-step-queue.ts";
+export {
+  type StepQueue,
+  type StepTask,
+  type StepTaskStatus,
+  type StepTaskRecord,
+  type StepQueueEnqueueParams,
+  type StepQueueClaimParams,
+  type StepQueueRequeueParams,
+  type StepQueueRequeueResult,
+  DEFAULT_MAX_DELIVERIES,
+  deadLetterError,
+  percentileCont,
+} from "./step-queue.ts";
+export { InMemoryStepQueue, type InMemoryStepQueueConfig } from "./in-memory-step-queue.ts";
 export {
   DistributedWorkflowRunner,
   createDistributedWorkflowRunner,

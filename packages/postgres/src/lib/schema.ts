@@ -227,7 +227,11 @@ export const stepQueue = pgTable(
     priority: integer("priority").notNull().default(5),
     input: jsonb("input"),
     prevResults: jsonb("prev_results"),
+    // The runner's attempt number, forwarded on enqueue.
     attempt: integer("attempt").notNull().default(1),
+    // Claims not given back with release(); requeueStuck dead-letters a
+    // task once this reaches the queue's maxDeliveries.
+    deliveries: integer("deliveries").notNull().default(0),
     status: text("status").notNull().default("pending"),
     result: jsonb("result"),
     error: text("error"),
@@ -271,6 +275,19 @@ export const stepQueue = pgTable(
     index("wf_step_queue_concurrency_running_idx")
       .on(t.concurrencyScope, t.concurrencyKey)
       .where(sql`${t.status} = 'running' AND ${t.concurrencyKey} IS NOT NULL`),
+    // Claim order: walking this index in order lets the claim stop after
+    // `limit` matching rows instead of sorting every pending task.
+    index("wf_step_queue_pending_order_idx")
+      .on(t.priority.desc(), t.createdAt.asc(), t.id.asc())
+      .where(sql`${t.status} = 'pending'`),
+    // requeueStuck({ mode: "worker" }) — a dead worker's running tasks.
+    index("wf_step_queue_running_claimed_by_idx")
+      .on(t.claimedBy)
+      .where(sql`${t.status} = 'running'`),
+    // purge() — terminal tasks by completion time.
+    index("wf_step_queue_terminal_completed_idx")
+      .on(t.completedAt)
+      .where(sql`${t.status} IN ('completed', 'failed')`),
   ],
 );
 

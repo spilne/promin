@@ -416,7 +416,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     if (this.workerRegistry) {
       const dead = await this.workerRegistry.detectDead(this.workerTimeoutMs);
       for (const worker of dead) {
-        await this.stepQueue.requeueStuck({ claimedBy: worker.workerId });
+        await this.stepQueue.requeueStuck({ mode: "worker", workerId: worker.workerId });
       }
       // Reap worker rows past the retention window. Throttled — see
       // WORKER_GC_EVERY_N_TICKS — so retired / dead rows stay visible
@@ -426,7 +426,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
         await this.workerRegistry.gc({ retainMs: this.workerRetentionMs });
       }
     }
-    await this.stepQueue.requeueStuck({ staleTimeoutMs: this.workerTimeoutMs });
+    await this.stepQueue.requeueStuck({ mode: "stale", olderThanMs: this.workerTimeoutMs });
   }
 
   private async _recoverActiveWorkflows(): Promise<void> {

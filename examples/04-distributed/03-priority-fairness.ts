@@ -1,10 +1,11 @@
 /**
- * Priority queue with fairness policies — control how tasks are dequeued.
+ * Priority queue — how tasks are ordered and routed at claim time.
  *
- * Three policies:
- * - strict-priority: highest priority first (default)
- * - round-robin: interleave across workflows (prevents starvation)
- * - weighted: probabilistic priority (higher = more likely, not guaranteed)
+ * - Higher `priority` is claimed first; FIFO within the same priority.
+ * - `stepNames` / `versions` / `capabilities` are applied inside the claim,
+ *   so tasks a worker can't run never block the ones behind them.
+ * - `concurrencyKey` caps how many tasks per key run at once, across every
+ *   claimer.
  */
 
 import { InMemoryStepQueue } from "@promin/workflow";
@@ -19,7 +20,6 @@ const queue = new InMemoryStepQueue();
 await queue.enqueue({
   workflowId: "order-premium-1",
   stepName: "process",
-  needs: ["default"],
   input: { customer: "premium" },
   prevResults: {},
   priority: 10, // highest priority
@@ -30,96 +30,63 @@ for (let i = 0; i < 5; i++) {
   await queue.enqueue({
     workflowId: `order-standard-${i}`,
     stepName: "process",
-    needs: ["default"],
     input: { customer: "standard" },
     prevResults: {},
     priority: 5, // default priority
   });
 }
 
-// Background task — low priority
+// Background task — low priority, a different step
 await queue.enqueue({
   workflowId: "cleanup-1",
   stepName: "gc",
-  needs: ["default"],
   input: {},
   prevResults: {},
   priority: 1, // lowest priority
 });
 
 // ---------------------------------------------------------------------------
-// 2. Strict priority — premium always first
+// 2. Priority order — premium first, then FIFO within a priority
 // ---------------------------------------------------------------------------
 
-const strictTasks = await queue.claim({
-  capabilities: ["default"],
-  limit: 3,
-  fairness: "strict-priority",
-});
+const first = await queue.claim({ workerId: "worker-1", limit: 3 });
 console.log(
-  "Strict priority:",
-  strictTasks.map((t) => `${t.workflowId} (p=${t.priority})`),
+  "Priority order:",
+  first.map((t) => `${t.workflowId} (p=${t.priority})`),
 );
 // ["order-premium-1 (p=10)", "order-standard-0 (p=5)", "order-standard-1 (p=5)"]
-// Premium always first, then FIFO within same priority
 
 // ---------------------------------------------------------------------------
-// 3. Round-robin — fair across workflows
+// 3. Routing inside the claim — a gc-only worker skips the backlog ahead
 // ---------------------------------------------------------------------------
 
-// Re-enqueue for demo
-const queue2 = new InMemoryStepQueue();
-for (const wfId of ["wf-A", "wf-B", "wf-C"]) {
-  for (let i = 0; i < 3; i++) {
-    await queue2.enqueue({
-      workflowId: wfId,
-      stepName: `step-${i}`,
-      needs: ["default"],
-      input: {},
-      prevResults: {},
-    });
-  }
-}
-
-const rrTasks = await queue2.claim({
-  capabilities: ["default"],
-  limit: 6,
-  fairness: "round-robin",
-});
+const gcOnly = await queue.claim({ workerId: "janitor", limit: 1, stepNames: ["gc"] });
 console.log(
-  "Round-robin:",
-  rrTasks.map((t) => `${t.workflowId}:${t.stepName}`),
+  "gc worker:",
+  gcOnly.map((t) => t.workflowId),
 );
-// Interleaved: ["wf-A:step-0", "wf-B:step-0", "wf-C:step-0", "wf-A:step-1", ...]
-// Each workflow gets equal share — no starvation
+// ["cleanup-1"] — the three pending "process" tasks ahead of it didn't block it
 
 // ---------------------------------------------------------------------------
-// 4. Weighted — probabilistic priority
+// 4. Concurrency keys — at most 2 per tenant, however many workers claim
 // ---------------------------------------------------------------------------
 
-const queue3 = new InMemoryStepQueue();
-for (let i = 0; i < 10; i++) {
-  await queue3.enqueue({
-    workflowId: `wf-${i}`,
-    stepName: "work",
-    needs: ["default"],
+const queue2 = new InMemoryStepQueue();
+for (let i = 0; i < 6; i++) {
+  await queue2.enqueue({
+    workflowId: `email-${i}`,
+    stepName: "send",
     input: {},
     prevResults: {},
-    priority: i < 3 ? 10 : 2, // 3 high priority, 7 low priority
+    concurrencyKey: "tenant-a",
+    concurrencyScope: "send-email",
+    concurrencyLimit: 2,
   });
 }
-
-const weightedTasks = await queue3.claim({
-  capabilities: ["default"],
-  limit: 5,
-  fairness: "weighted",
-});
-console.log(
-  "Weighted:",
-  weightedTasks.map((t) => `${t.workflowId} (p=${t.priority})`),
+const claims = await Promise.all(
+  ["w-1", "w-2", "w-3"].map((workerId) => queue2.claim({ workerId, limit: 5 })),
 );
-// High priority tasks are MORE LIKELY to be picked, but not guaranteed
-// Some low-priority tasks may appear — that's the fairness
+console.log("Running for tenant-a:", claims.flat().length); // 2
 
 // ---------------------------------------------------------------------------
 // 5. Queue metrics
@@ -127,4 +94,4 @@ console.log(
 
 const metrics = await queue.metrics({ since: new Date(Date.now() - 60_000) });
 console.log("Queue metrics:", metrics);
-// { default: { pending: 4, running: 3, completed: 0, failed: 0 } }
+// { pending: 3, running: 4, completed: 0, failed: 0, ... }

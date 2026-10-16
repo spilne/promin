@@ -37,7 +37,7 @@ describe("Step queue — distribute tasks to available workers", () => {
       prevResults: {},
     });
 
-    const tasks = await queue.claim({ capabilities: [], limit: 10 });
+    const tasks = await queue.claim({ workerId: "w-1", capabilities: [], limit: 10 });
     expect(tasks).toHaveLength(1);
     expect(tasks[0]!.stepName).toBe("step-a");
     expect(tasks[0]!.status).toBe("running");
@@ -60,11 +60,11 @@ describe("Step queue — distribute tasks to available workers", () => {
       prevResults: {},
     });
 
-    const defaultTasks = await queue.claim({ capabilities: [], limit: 10 });
+    const defaultTasks = await queue.claim({ workerId: "w-1", capabilities: [], limit: 10 });
     expect(defaultTasks).toHaveLength(1);
     expect(defaultTasks[0]!.stepName).toBe("a");
 
-    const gpuTasks = await queue.claim({ capabilities: ["gpu"], limit: 10 });
+    const gpuTasks = await queue.claim({ workerId: "w-1", capabilities: ["gpu"], limit: 10 });
     expect(gpuTasks).toHaveLength(1);
     expect(gpuTasks[0]!.stepName).toBe("b");
   });
@@ -81,7 +81,7 @@ describe("Step queue — distribute tasks to available workers", () => {
       });
     }
 
-    const tasks = await queue.claim({ capabilities: [], limit: 2 });
+    const tasks = await queue.claim({ workerId: "w-1", capabilities: [], limit: 2 });
     expect(tasks).toHaveLength(2);
   });
 
@@ -110,7 +110,7 @@ describe("Step queue — distribute tasks to available workers", () => {
       priority: 5,
     });
 
-    const tasks = await queue.claim({ capabilities: [], limit: 3 });
+    const tasks = await queue.claim({ workerId: "w-1", capabilities: [], limit: 3 });
     expect(tasks.map((t) => t.stepName)).toEqual(["high", "medium", "low"]);
   });
 
@@ -124,7 +124,7 @@ describe("Step queue — distribute tasks to available workers", () => {
       prevResults: {},
     });
 
-    const tasks = await queue.claim({ capabilities: [], limit: 1 });
+    const tasks = await queue.claim({ workerId: "w-1", capabilities: [], limit: 1 });
     expect(tasks[0]!.priority).toBe(5);
   });
 
@@ -138,10 +138,10 @@ describe("Step queue — distribute tasks to available workers", () => {
       prevResults: {},
     });
 
-    const first = await queue.claim({ capabilities: [], limit: 10 });
+    const first = await queue.claim({ workerId: "w-1", capabilities: [], limit: 10 });
     expect(first).toHaveLength(1);
 
-    const second = await queue.claim({ capabilities: [], limit: 10 });
+    const second = await queue.claim({ workerId: "w-1", capabilities: [], limit: 10 });
     expect(second).toHaveLength(0);
   });
 
@@ -161,7 +161,7 @@ describe("Step queue — distribute tasks to available workers", () => {
       prevResults: {},
     });
 
-    await queue.claim({ capabilities: [], limit: 10 });
+    await queue.claim({ workerId: "w-1", capabilities: [], limit: 10 });
     await queue.complete({ taskId: id1, result: "ok", durationMs: 100 });
     await queue.fail({ taskId: id2, error: "boom", durationMs: 50 });
 
