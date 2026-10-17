@@ -3,7 +3,9 @@ import { InMemoryWorkflowStartQueue } from "../workflow-start-queue.ts";
 import { workflowStartQueueTestSuite } from "../workflow-start-queue-test-suite.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
 
-workflowStartQueueTestSuite(() => new InMemoryWorkflowStartQueue());
+workflowStartQueueTestSuite(
+  ({ clock, reclaimAfterMs }) => new InMemoryWorkflowStartQueue({ clock, reclaimAfterMs }),
+);
 
 describe("InMemoryWorkflowStartQueue — stamps and reclaim on an injected clock", () => {
   const specs = [{ name: "wf", versions: [] }];

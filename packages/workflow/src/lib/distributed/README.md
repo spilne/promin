@@ -46,7 +46,7 @@ gpuWorker.start();
 - Steps are in different languages/runtimes (via container executor, future Phase 3.4)
 - You want independent deployment of step implementations
 
-**You get:** per-step retry + `when` predicate, `onFailure` (skip/fallback), compensation, step attempt recording, hooks, middleware (timeout, logging, metrics, tracing).
+**You get:** per-step retry + `when` predicate, `onFailure` (skip/fallback), step attempt recording, lease-loss abort (`ctx.signal`), hooks, middleware (timeout, logging, metrics, tracing).
 
 ### Feature comparison
 
@@ -55,7 +55,7 @@ gpuWorker.start();
                           ─────────────────    ──────────────────
 Step retry + when         ✓ StepOptions        ✓ WorkerStepOptions
 onFailure (skip/fallback) ✓ StepOptions        ✓ WorkerStepOptions
-Compensation              ✓ StepOptions        ✓ WorkerStepOptions
+Compensation              ✓ StepOptions        ✗ (not on workers)
 Step attempt recording    ✓ StepAttemptStorage  ✓ StepAttemptStorage
 Workflow-level retry      ✓ workflow({ retry }) ✗ (coordinator manages)
 Compensation cascade      ✓ CompensateConfig   ✗ (coordinator manages)
@@ -339,10 +339,10 @@ registry.register("load-config", (ctx) => loadFromRemote(), {
   onFailure: { fallback: () => ({ defaults: true }) },
 });
 
-// Compensation — undo side effects during saga rollback
-registry.register("charge-payment", (ctx) => chargeCard(ctx.prev), {
-  compensate: ({ result }) => refundPayment(result.paymentId),
-});
+// Lease loss — `ctx.signal` aborts when the worker no longer owns the task
+// (it stalled and the task was reclaimed, or `stop({ timeoutMs })` gave it
+// back). Pass it on so the work stops; its result would be discarded anyway.
+registry.register("fetch-report", (ctx) => fetch(reportUrl(ctx.prev), { signal: ctx.signal }));
 ```
 
 ### Hooks
@@ -453,7 +453,6 @@ const registry = new MapStepRegistry();
 registry.register("charge", chargeFn, {
   retry: { maxRetries: 3 }, // per-step: retry this specific step
   onFailure: { fallback: () => ({ charged: false }) },
-  compensate: ({ result }) => refund(result.id),
 });
 
 const worker = createWorker({

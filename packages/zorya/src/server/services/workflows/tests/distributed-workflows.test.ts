@@ -21,12 +21,15 @@ describe("DistributedWorkflows.canHandle", () => {
     const storage = new InMemoryWorkflowStorage();
     const stepQueue = new InMemoryStepQueue();
     const advertisements = new InMemoryWorkflowAdvertisementRegistry();
-    await advertisements.upsert("worker-gpu", [
-      {
-        name: "encode",
-        steps: [{ name: "compress", kind: "single", dependsOn: [], needs: ["gpu"] }],
-      },
-    ]);
+    await advertisements.upsert({
+      workerId: "worker-gpu",
+      workflows: [
+        {
+          name: "encode",
+          steps: [{ name: "compress", kind: "single", dependsOn: [], needs: ["gpu"] }],
+        },
+      ],
+    });
 
     const workflows = new DistributedWorkflows({ storage, stepQueue, advertisements });
     const r = await workflows.trigger("encode", { url: "x" });
@@ -47,9 +50,10 @@ describe("DistributedWorkflows.canHandle", () => {
     const storage = new InMemoryWorkflowStorage();
     const stepQueue = new InMemoryStepQueue();
     const advertisements = new InMemoryWorkflowAdvertisementRegistry();
-    await advertisements.upsert("w1", [
-      { name: "wf", steps: [{ name: "s", kind: "single", dependsOn: [] }] },
-    ]);
+    await advertisements.upsert({
+      workerId: "w1",
+      workflows: [{ name: "wf", steps: [{ name: "s", kind: "single", dependsOn: [] }] }],
+    });
 
     const workflows = new DistributedWorkflows({ storage, stepQueue, advertisements });
     const { workflowId } = await workflows.trigger(

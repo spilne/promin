@@ -3,6 +3,9 @@ import { PostgresTestContainer } from "../test-utils.ts";
 import { PgStepQueue } from "../pg-step-queue.ts";
 import { FakeWallClock } from "@promin/workflow";
 import { stepQueueTestSuite } from "@promin/workflow/testing";
+import { ensureTable } from "@spilne/perfect-postgres";
+import { PgLeaderLeaseStore } from "../pg-leader-lease-store.ts";
+import { leaderLeases } from "../scheduler-schema.ts";
 
 // ---------------------------------------------------------------------------
 // Container setup
@@ -347,12 +350,23 @@ describe("Postgres step queue — distributed task dispatch with SKIP LOCKED", (
 // a clean table. `TRUNCATE ... RESTART IDENTITY` also resets the bigserial
 // id counter so ordering-dependent assertions stay deterministic across
 // runs.
-stepQueueTestSuite(async ({ maxDeliveries }) => {
-  const queue = new PgStepQueue({ db: pg.db, maxDeliveries });
-  await queue.ensureTable();
-  await pg.sql`TRUNCATE wf_step_queue RESTART IDENTITY`;
-  return queue;
-});
+stepQueueTestSuite(
+  async ({ maxDeliveries }) => {
+    const queue = new PgStepQueue({ db: pg.db, maxDeliveries });
+    await queue.ensureTable();
+    await pg.sql`TRUNCATE wf_step_queue RESTART IDENTITY`;
+    return queue;
+  },
+  {
+    leaseFenced: async () => {
+      const queue = new PgStepQueue({ db: pg.db });
+      await queue.ensureTable();
+      await ensureTable(pg.db, leaderLeases);
+      await pg.sql`TRUNCATE wf_step_queue RESTART IDENTITY`;
+      return { queue, leases: new PgLeaderLeaseStore({ db: pg.db }) };
+    },
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Regressions that need real concurrency / a real planner

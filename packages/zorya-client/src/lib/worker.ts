@@ -80,6 +80,12 @@ export interface ZoryaWorkerConfig {
         intervalMs?: number;
         /** Max claims per poll. Default 10. */
         limit?: number;
+        /**
+         * Heartbeat cadence for each running start, in ms. Keep it well
+         * under the server's reclaim window (60s by default) or a long
+         * run is handed to another worker. Default 10_000.
+         */
+        heartbeatMs?: number;
       };
   /**
    * Dispatch mode:
@@ -358,8 +364,9 @@ export class ZoryaWorker {
       if (poll !== false) {
         const intervalMs = (typeof poll === "object" && poll?.intervalMs) || 1_000;
         const limit = (typeof poll === "object" && poll?.limit) || 10;
+        const heartbeatMs = (typeof poll === "object" && poll?.heartbeatMs) || 10_000;
         this.startsPollHandle = setInterval(() => {
-          void this.drainPendingStarts(limit).catch(() => {
+          void this.drainPendingStarts({ limit, heartbeatMs }).catch(() => {
             // Transient — next tick retries.
           });
         }, intervalMs);
@@ -370,31 +377,39 @@ export class ZoryaWorker {
   /**
    * Claim any pending workflow-starts the server has queued for workflows
    * we advertise, run them, and ack each on completion (success or
-   * failure — the storage row carries the actual outcome).
+   * failure — the storage row carries the actual outcome). While a start
+   * runs it is heartbeated so the server doesn't hand it to another worker.
    */
-  private async drainPendingStarts(limit: number): Promise<void> {
+  private async drainPendingStarts(params: { limit: number; heartbeatMs: number }): Promise<void> {
     const specs = this.workflowSpecs();
     if (specs.length === 0) return;
     const claims = await this.client.claimWorkflowStarts({
       workflowSpecs: specs,
       workerId: this.workerId,
-      limit,
+      limit: params.limit,
     });
     for (const claim of claims) {
+      const ref = { id: claim.id, claimToken: claim.claimToken };
       const def = this.resolveWorkflow(claim.workflowName, claim.version);
       if (!def) {
         // Server thought we could serve this name+version but our local
         // index disagrees. Ack so we don't loop, but don't pretend we ran.
-        await this.client.completeWorkflowStart(claim.id).catch(() => {});
+        await this.client.completeWorkflowStart(ref).catch(() => {});
         continue;
       }
+      const heartbeat = setInterval(() => {
+        void this.client.heartbeatWorkflowStart(ref).catch(() => {
+          // Transient — next tick retries; a lost claim shows up as false.
+        });
+      }, params.heartbeatMs);
       // Fire-and-forget: don't block the poll loop on a long workflow.
       void this.run({ workflow: def, workflowId: claim.workflowId, input: claim.input })
         .catch(() => {
           // Failure is recorded in storage by the runner.
         })
         .finally(() => {
-          void this.client.completeWorkflowStart(claim.id).catch(() => {});
+          clearInterval(heartbeat);
+          void this.client.completeWorkflowStart(ref).catch(() => {});
         });
     }
   }

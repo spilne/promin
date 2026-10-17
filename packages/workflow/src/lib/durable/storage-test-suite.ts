@@ -42,6 +42,13 @@ export interface StorageTestSuiteOptions {
    */
   hasResetSteps?: boolean;
   /**
+   * Opt in to the scanner-query conformance section. Defaults to `false`.
+   * When `true`, the factory must return a storage that implements the
+   * optional `listDueTimers`, `listSignalWakeups` and `listOrphanedRuns`
+   * methods (back the sleep / signal scanners and coordinator recovery).
+   */
+  hasScannerQueries?: boolean;
+  /**
    * Build a second storage instance over the same backend as `storage` —
    * what another process, pool client or worker would hold. Enables the
    * cross-instance lock-exclusion and fence-token cases. Omit for
@@ -2122,6 +2129,400 @@ export function storageTestSuite(
         expect(await s.readStreamChunks({ workflowId: "purge-deps", streamId: "out" })).toEqual([]);
       });
     });
+
+    // -------------------------------------------------------------------
+    // scanner queries (opt-in) — listDueTimers / listSignalWakeups /
+    // listOrphanedRuns
+    // -------------------------------------------------------------------
+
+    if (options.hasScannerQueries) {
+      describe("scanner queries", () => {
+        type ScannerStorage = WorkflowStorage &
+          Required<
+            Pick<WorkflowStorage, "listDueTimers" | "listSignalWakeups" | "listOrphanedRuns">
+          >;
+
+        async function getScannerStorage(): Promise<ScannerStorage> {
+          const s = await getStorage();
+          if (!s.listDueTimers || !s.listSignalWakeups || !s.listOrphanedRuns) {
+            throw new Error(
+              "storageTestSuite was invoked with hasScannerQueries: true, but the factory " +
+                "returned a storage without listDueTimers / listSignalWakeups / listOrphanedRuns.",
+            );
+          }
+          return s as ScannerStorage;
+        }
+
+        const past = (): Date => new Date(Date.now() - 60_000);
+        const future = (): Date => new Date(Date.now() + 60 * 60_000);
+
+        async function createSleeping(params: {
+          s: WorkflowStorage;
+          workflowId: string;
+          wakeAt: Date;
+          stepName?: string;
+        }): Promise<void> {
+          await params.s.createWorkflow({
+            workflowId: params.workflowId,
+            workflowName: "scan-wf",
+            input: { id: params.workflowId },
+            version: "v1",
+          });
+          await params.s.suspendWorkflow(params.workflowId, params.stepName ?? "nap", {
+            status: "sleeping",
+            stepType: "sleep",
+            wakeAt: params.wakeAt,
+          });
+        }
+
+        async function createWaiting(params: {
+          s: WorkflowStorage;
+          workflowId: string;
+          signalName: string;
+          stepName?: string;
+          signalTimeoutAt?: Date;
+        }): Promise<void> {
+          await params.s.createWorkflow({
+            workflowId: params.workflowId,
+            workflowName: "scan-wf",
+            input: { id: params.workflowId },
+          });
+          await params.s.suspendWorkflow(params.workflowId, params.stepName ?? "wait", {
+            status: "waiting_for_signal",
+            stepType: "signal",
+            signalName: params.signalName,
+            ...(params.signalTimeoutAt ? { signalTimeoutAt: params.signalTimeoutAt } : {}),
+          });
+        }
+
+        describe("listDueTimers", () => {
+          it("returns a suspended run whose sleep is due", async () => {
+            const s = await getScannerStorage();
+            await createSleeping({ s, workflowId: "due-1", wakeAt: past() });
+
+            const rows = await s.listDueTimers({ now: new Date(), limit: 10 });
+            expect(rows).toHaveLength(1);
+            expect(rows[0]!.workflowId).toBe("due-1");
+            expect(rows[0]!.workflowName).toBe("scan-wf");
+            expect(rows[0]!.version).toBe("v1");
+            expect(rows[0]!.input).toEqual({ id: "due-1" });
+            expect(rows[0]!.stepName).toBe("nap");
+            expect(rows[0]!.reason).toBe("sleep");
+          });
+
+          it("excludes sleeps that are not yet due", async () => {
+            const s = await getScannerStorage();
+            await createSleeping({ s, workflowId: "due-later", wakeAt: future() });
+
+            expect(await s.listDueTimers({ now: new Date(), limit: 10 })).toEqual([]);
+          });
+
+          it("excludes runs that are no longer suspended", async () => {
+            const s = await getScannerStorage();
+            await createSleeping({ s, workflowId: "due-done", wakeAt: past() });
+            await s.completeWorkflow("due-done", "ok");
+            await createSleeping({ s, workflowId: "due-failed", wakeAt: past() });
+            await s.failWorkflow("due-failed", "boom");
+
+            expect(await s.listDueTimers({ now: new Date(), limit: 10 })).toEqual([]);
+          });
+
+          it("reports a passed signal timeout as signal-timeout", async () => {
+            const s = await getScannerStorage();
+            await createWaiting({
+              s,
+              workflowId: "due-sigto",
+              signalName: "approval",
+              signalTimeoutAt: past(),
+            });
+            await createWaiting({
+              s,
+              workflowId: "due-sigto-later",
+              signalName: "approval",
+              signalTimeoutAt: future(),
+            });
+            await createWaiting({ s, workflowId: "due-sig-forever", signalName: "approval" });
+
+            const rows = await s.listDueTimers({ now: new Date(), limit: 10 });
+            expect(rows).toHaveLength(1);
+            expect(rows[0]!.workflowId).toBe("due-sigto");
+            expect(rows[0]!.reason).toBe("signal-timeout");
+            expect(rows[0]!.signalName).toBe("approval");
+            expect(rows[0]!.stepName).toBe("wait");
+          });
+
+          it("returns one row per run when two of its steps are due", async () => {
+            const s = await getScannerStorage();
+            await createSleeping({ s, workflowId: "due-two", wakeAt: past(), stepName: "b-nap" });
+            await s.suspendWorkflow("due-two", "a-nap", {
+              status: "sleeping",
+              stepType: "sleep",
+              wakeAt: past(),
+            });
+
+            const rows = await s.listDueTimers({ now: new Date(), limit: 10 });
+            expect(rows).toHaveLength(1);
+            expect(rows[0]!.workflowId).toBe("due-two");
+            expect(rows[0]!.stepName).toBe("a-nap");
+          });
+
+          it("keyset-paginates every due run exactly once, in order, across resumes", async () => {
+            const s = await getScannerStorage();
+            const ids = Array.from({ length: 7 }, (_, i) => `due-page-${i}`);
+            for (const id of ids) await createSleeping({ s, workflowId: id, wakeAt: past() });
+            await createSleeping({ s, workflowId: "due-page-x-later", wakeAt: future() });
+
+            const now = new Date();
+            const seen: string[] = [];
+            const page1 = await s.listDueTimers({ now, limit: 3 });
+            expect(page1.map((r) => r.workflowId)).toEqual(ids.slice(0, 3));
+            seen.push(...page1.map((r) => r.workflowId));
+
+            // Resume rows of the first page before asking for the next one:
+            // they leave the due set, which must not shift later pages.
+            await s.saveStepResult({
+              workflowId: "due-page-0",
+              stepName: "nap",
+              result: null,
+              durationMs: 1,
+              startedAt: new Date(),
+            });
+            await s.completeWorkflow("due-page-1", "ok");
+
+            let after = page1.at(-1)!.workflowId;
+            for (;;) {
+              const page = await s.listDueTimers({ now, limit: 3, afterWorkflowId: after });
+              if (page.length === 0) break;
+              expect(page.length).toBeLessThanOrEqual(3);
+              seen.push(...page.map((r) => r.workflowId));
+              after = page.at(-1)!.workflowId;
+            }
+            expect(seen).toEqual(ids);
+
+            const fromStart = await s.listDueTimers({ now, limit: 10 });
+            expect(fromStart.map((r) => r.workflowId)).toEqual(ids.slice(2));
+          });
+        });
+
+        describe("listSignalWakeups", () => {
+          it("returns only runs whose awaited signal was delivered", async () => {
+            const s = await getScannerStorage();
+            await createWaiting({ s, workflowId: "sw-hit", signalName: "approval" });
+            await createWaiting({ s, workflowId: "sw-other-name", signalName: "approval" });
+            await s.deliverSignal("sw-other-name", "rejection", { no: true });
+            await createWaiting({ s, workflowId: "sw-none", signalName: "approval" });
+            await s.deliverSignal("sw-hit", "approval", { ok: 1 });
+
+            const rows = await s.listSignalWakeups({ limit: 10 });
+            expect(rows).toHaveLength(1);
+            expect(rows[0]!.workflowId).toBe("sw-hit");
+            expect(rows[0]!.workflowName).toBe("scan-wf");
+            expect(rows[0]!.input).toEqual({ id: "sw-hit" });
+            expect(rows[0]!.stepName).toBe("wait");
+            expect(rows[0]!.reason).toBe("signal");
+            expect(rows[0]!.signalName).toBe("approval");
+            expect(rows[0]!.signalPayload).toEqual({ ok: 1 });
+          });
+
+          it("carries the latest payload after a repeated delivery", async () => {
+            const s = await getScannerStorage();
+            await createWaiting({ s, workflowId: "sw-latest", signalName: "approval" });
+            await s.deliverSignal("sw-latest", "approval", { n: 1 });
+            await s.deliverSignal("sw-latest", "approval", { n: 2 });
+
+            const rows = await s.listSignalWakeups({ limit: 10 });
+            expect(rows).toHaveLength(1);
+            expect(rows[0]!.signalPayload).toEqual({ n: 2 });
+          });
+
+          it("excludes runs that are not suspended", async () => {
+            const s = await getScannerStorage();
+            await createWaiting({ s, workflowId: "sw-done", signalName: "approval" });
+            await s.deliverSignal("sw-done", "approval", {});
+            await s.completeWorkflow("sw-done", "ok");
+
+            expect(await s.listSignalWakeups({ limit: 10 })).toEqual([]);
+          });
+
+          it("returns one row per run when two waiting steps have deliveries", async () => {
+            const s = await getScannerStorage();
+            await createWaiting({ s, workflowId: "sw-two", signalName: "b", stepName: "wait-b" });
+            await s.suspendWorkflow("sw-two", "wait-a", {
+              status: "waiting_for_signal",
+              stepType: "signal",
+              signalName: "a",
+            });
+            await s.deliverSignal("sw-two", "a", "A");
+            await s.deliverSignal("sw-two", "b", "B");
+
+            const rows = await s.listSignalWakeups({ limit: 10 });
+            expect(rows).toHaveLength(1);
+            expect(rows[0]!.stepName).toBe("wait-a");
+            expect(rows[0]!.signalPayload).toBe("A");
+          });
+
+          it("does not return a run whose signals were cleared by startFreshRun", async () => {
+            const s = await getScannerStorage();
+            await createWaiting({ s, workflowId: "sw-fresh", signalName: "approval" });
+            await s.deliverSignal("sw-fresh", "approval", { stale: true });
+            await s.startFreshRun("sw-fresh");
+            await s.suspendWorkflow("sw-fresh", "wait", {
+              status: "waiting_for_signal",
+              stepType: "signal",
+              signalName: "approval",
+            });
+
+            expect(await s.listSignalWakeups({ limit: 10 })).toEqual([]);
+          });
+
+          it("keyset-paginates in workflowId order", async () => {
+            const s = await getScannerStorage();
+            const ids = Array.from({ length: 5 }, (_, i) => `sw-page-${i}`);
+            for (const id of ids) {
+              await createWaiting({ s, workflowId: id, signalName: "go" });
+              await s.deliverSignal(id, "go", id);
+            }
+
+            const seen: string[] = [];
+            let after: string | undefined;
+            for (;;) {
+              const page = await s.listSignalWakeups({ limit: 2, afterWorkflowId: after });
+              if (page.length === 0) break;
+              seen.push(...page.map((r) => r.workflowId));
+              after = page.at(-1)!.workflowId;
+            }
+            expect(seen).toEqual(ids);
+          });
+        });
+
+        describe("listOrphanedRuns", () => {
+          // Lock expiry and `updatedAt` may come from the backend's own
+          // clock, so the bounds sit well clear of "right now".
+          const later = (): Date => new Date(Date.now() + 5_000);
+
+          it("returns pending and running runs that hold no lock", async () => {
+            const s = await getScannerStorage();
+            await s.createWorkflow({
+              workflowId: "orph-pending",
+              workflowName: "orph-wf",
+              input: { a: 1 },
+              version: "v2",
+              metadata: { team: "x" },
+            });
+            await s.createWorkflow({
+              workflowId: "orph-running",
+              workflowName: "orph-wf",
+              input: {},
+            });
+            await s.saveStepResult({
+              workflowId: "orph-running",
+              stepName: "s1",
+              result: 1,
+              durationMs: 1,
+              startedAt: new Date(),
+            });
+
+            const rows = await s.listOrphanedRuns({
+              now: later(),
+              updatedBefore: later(),
+              limit: 10,
+            });
+            expect(rows.map((r) => r.workflowId)).toEqual(["orph-pending", "orph-running"]);
+            expect(rows[0]!.status).toBe("pending");
+            expect(rows[0]!.workflowName).toBe("orph-wf");
+            expect(rows[0]!.version).toBe("v2");
+            expect(rows[0]!.input).toEqual({ a: 1 });
+            expect(rows[0]!.metadata).toEqual({ team: "x" });
+            expect(rows[1]!.status).toBe("running");
+          });
+
+          it("excludes runs holding a live lock and includes runs whose lock expired", async () => {
+            const s = await getScannerStorage();
+            await s.createWorkflow({ workflowId: "orph-live", workflowName: "orph-wf", input: {} });
+            await s.createWorkflow({
+              workflowId: "orph-expired",
+              workflowName: "orph-wf",
+              input: {},
+            });
+            const live = await s.tryLock("orph-live", 60_000);
+            expect(live.acquired).toBe(true);
+            const expired = await s.tryLock("orph-expired", 1);
+            expect(expired.acquired).toBe(true);
+            await sleep(30);
+
+            const rows = await s.listOrphanedRuns({
+              now: later(),
+              updatedBefore: later(),
+              limit: 10,
+            });
+            expect(rows.map((r) => r.workflowId)).toEqual(["orph-expired"]);
+            await s.releaseLock("orph-live", { fenceToken: live.token });
+          });
+
+          it("excludes suspended and terminal runs", async () => {
+            const s = await getScannerStorage();
+            await createSleeping({ s, workflowId: "orph-suspended", wakeAt: past() });
+            await s.createWorkflow({
+              workflowId: "orph-completed",
+              workflowName: "orph-wf",
+              input: {},
+            });
+            await s.completeWorkflow("orph-completed", "ok");
+            await s.createWorkflow({
+              workflowId: "orph-failed",
+              workflowName: "orph-wf",
+              input: {},
+            });
+            await s.failWorkflow("orph-failed", "boom");
+
+            expect(
+              await s.listOrphanedRuns({ now: later(), updatedBefore: later(), limit: 10 }),
+            ).toEqual([]);
+          });
+
+          it("leaves alone runs updated after updatedBefore", async () => {
+            const s = await getScannerStorage();
+            await s.createWorkflow({
+              workflowId: "orph-fresh",
+              workflowName: "orph-wf",
+              input: {},
+            });
+
+            expect(
+              await s.listOrphanedRuns({
+                now: later(),
+                updatedBefore: new Date(Date.now() - 60_000),
+                limit: 10,
+              }),
+            ).toEqual([]);
+          });
+
+          it("keyset-paginates in workflowId order", async () => {
+            const s = await getScannerStorage();
+            const ids = Array.from({ length: 5 }, (_, i) => `orph-page-${i}`);
+            for (const id of ids) {
+              await s.createWorkflow({ workflowId: id, workflowName: "orph-wf", input: {} });
+            }
+
+            const seen: string[] = [];
+            let after: string | undefined;
+            for (;;) {
+              const page = await s.listOrphanedRuns({
+                now: later(),
+                updatedBefore: later(),
+                limit: 2,
+                afterWorkflowId: after,
+              });
+              if (page.length === 0) break;
+              expect(page.length).toBeLessThanOrEqual(2);
+              seen.push(...page.map((r) => r.workflowId));
+              after = page.at(-1)!.workflowId;
+            }
+            expect(seen).toEqual(ids);
+          });
+        });
+      });
+    }
 
     // -------------------------------------------------------------------
     // resetSteps (opt-in) — backs WorkflowRunner.resume

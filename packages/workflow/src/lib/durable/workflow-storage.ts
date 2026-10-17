@@ -84,6 +84,44 @@ export interface SignalTokenRecord {
   readonly createdAt: Date;
 }
 
+/**
+ * A suspended run that is due to be resumed, returned by the scanner
+ * queries (`listDueTimers`, `listSignalWakeups`). One row per run.
+ */
+export interface WorkflowWakeup {
+  readonly workflowId: string;
+  readonly workflowName: string;
+  /** Definition version the run was created with. */
+  readonly version?: string;
+  readonly input: unknown;
+  /** The suspended step that is due. */
+  readonly stepName: string;
+  /**
+   * Why the run is due:
+   * - `sleep` — a sleeping step's `wakeAt` has passed.
+   * - `signal-timeout` — a signal wait's `signalTimeoutAt` has passed.
+   * - `signal` — the signal a waiting step waits on has been delivered.
+   */
+  readonly reason: "sleep" | "signal-timeout" | "signal";
+  /** `signal` / `signal-timeout`: the awaited signal name. */
+  readonly signalName?: string;
+  /** `signal`: the delivered payload (the latest delivery under the name). */
+  readonly signalPayload?: unknown;
+}
+
+/**
+ * A `pending` / `running` run whose lock is free or expired, returned by
+ * `listOrphanedRuns`: nobody is driving it, so a coordinator may adopt it.
+ */
+export interface OrphanedRun {
+  readonly workflowId: string;
+  readonly workflowName: string;
+  readonly version?: string;
+  readonly status: "pending" | "running";
+  readonly input: unknown;
+  readonly metadata?: Record<string, unknown>;
+}
+
 export interface WorkflowStorage {
   /** Load the full workflow state. Returns null if workflow doesn't exist. */
   loadWorkflow(workflowId: string): Promise<WorkflowState | null>;
@@ -628,6 +666,65 @@ export interface WorkflowStorage {
     error?: string;
     statuses?: Array<"pending" | "running" | "suspended">;
   }): number | Promise<number>;
+
+  /**
+   * Scanner query: suspended runs (current run only) with a due timer — a
+   * `sleeping` step whose `wakeAt <= now` (`reason: "sleep"`), or a
+   * `waiting_for_signal` step whose `signalTimeoutAt <= now`
+   * (`reason: "signal-timeout"`). One row per run (its due step with the
+   * smallest name), ordered by `workflowId` ascending, at most `limit`.
+   *
+   * Keyset pagination: pass the last row's `workflowId` as
+   * `afterWorkflowId` for the next page. Resuming rows between pages never
+   * makes a later page skip one, unlike offset paging over a status filter.
+   *
+   * Scoped to the storage's namespace, like listWorkflows.
+   *
+   * Optional: without it the sleep scanner pages through `listWorkflows`.
+   * Backends index `wakeAt` / `signalTimeoutAt` on suspended steps.
+   */
+  listDueTimers?(params: {
+    now: Date;
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<WorkflowWakeup[]>;
+
+  /**
+   * Scanner query: suspended runs (current run only) with a
+   * `waiting_for_signal` step whose `signalName` has a delivered signal
+   * (`reason: "signal"`, `signalPayload` = the delivered payload). One row
+   * per run (its matching step with the smallest name), ordered by
+   * `workflowId` ascending, keyset-paginated like `listDueTimers`.
+   *
+   * Scoped to the storage's namespace, like listWorkflows.
+   *
+   * Optional: without it the signal scanner pages through `listWorkflows`
+   * and `loadSignals`.
+   */
+  listSignalWakeups?(params: {
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<WorkflowWakeup[]>;
+
+  /**
+   * Recovery query: `pending` / `running` runs that nobody is driving —
+   * no lock, or a lock that expired at or before `now` — and that were last
+   * updated before `updatedBefore` (so a run a live coordinator has just
+   * created and not locked yet is left alone). Never returns `suspended`
+   * runs: the scanners own those. Ordered by `workflowId` ascending,
+   * keyset-paginated with `afterWorkflowId`, at most `limit` rows.
+   *
+   * Scoped to the storage's namespace, like listWorkflows.
+   *
+   * Optional: without it the coordinator pages through `listWorkflows`
+   * and lets the run lock turn away runs that are still owned.
+   */
+  listOrphanedRuns?(params: {
+    now: Date;
+    updatedBefore: Date;
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<OrphanedRun[]>;
 
   /**
    * Load run history for a workflow — all runs with their step results.

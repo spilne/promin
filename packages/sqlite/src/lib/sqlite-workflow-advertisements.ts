@@ -88,7 +88,8 @@ export class SqliteWorkflowAdvertisementRegistry implements WorkflowAdvertisemen
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_workflow ON ${t} (workflow_name, version)`);
   }
 
-  async upsert(workerId: string, workflows: AdvertisedWorkflow[]): Promise<void> {
+  async upsert(params: { workerId: string; workflows: AdvertisedWorkflow[] }): Promise<void> {
+    const { workerId, workflows } = params;
     // Replace all rows for this worker atomically — a worker that
     // re-advertises with a smaller set should drop the workflows it no
     // longer hosts. Wrap in a transaction so a mid-replace failure

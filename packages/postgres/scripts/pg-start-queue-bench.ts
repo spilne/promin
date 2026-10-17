@@ -96,7 +96,7 @@ async function reset(): Promise<void> {
     });
     if (claimed.length === 0) break;
     drained += claimed.length;
-    for (const c of claimed) await q.complete(c.id);
+    for (const c of claimed) await q.complete({ id: c.id, claimToken: c.claimToken! });
   }
   const dt = performance.now() - t0;
   console.log(`3. drain 1000 single worker (10/call): ${fmt(dt, drained)} (drained ${drained})`);
@@ -126,7 +126,7 @@ async function reset(): Promise<void> {
     const claimed = results.flat();
     totalClaimed += claimed.length;
     if (claimed.length === 0) break;
-    await Promise.all(claimed.map((c) => q.complete(c.id)));
+    await Promise.all(claimed.map((c) => q.complete({ id: c.id, claimToken: c.claimToken! })));
   }
   const dt = performance.now() - t0;
   console.log(`4. drain ${N} via 10-worker bursts  : ${fmt(dt, totalClaimed)} · ${bursts} bursts`);
@@ -161,7 +161,7 @@ async function reset(): Promise<void> {
     const claimed = results.flat();
     totalClaimed += claimed.length;
     if (claimed.length === 0) break;
-    await Promise.all(claimed.map((c) => q.complete(c.id)));
+    await Promise.all(claimed.map((c) => q.complete({ id: c.id, claimToken: c.claimToken! })));
   }
   const dt = performance.now() - t0;
   console.log(`5. drain ${N} via 10×version-filtered: ${fmt(dt, totalClaimed)} · ${bursts} bursts`);
@@ -179,7 +179,7 @@ async function reset(): Promise<void> {
       workerId: "e2e",
       limit: 1,
     });
-    if (c) await q.complete(c.id);
+    if (c) await q.complete({ id: c.id, claimToken: c.claimToken! });
   }
   const dt = performance.now() - t0;
   console.log(`6. e2e enqueue→claim→complete × ${N}: ${fmt(dt, N)}`);

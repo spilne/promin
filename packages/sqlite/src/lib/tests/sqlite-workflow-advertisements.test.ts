@@ -6,17 +6,23 @@
 
 import { describe, it, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { workflowAdvertisementRegistryTestSuite } from "@promin/workflow/testing";
+import {
+  workflowAdvertisementRegistryTestSuite,
+  type WorkflowAdvertisementRegistrySuiteFactoryParams,
+} from "@promin/workflow/testing";
 import { SqliteWorkflowAdvertisementRegistry } from "../sqlite-workflow-advertisements.ts";
 
 let counter = 0;
-function freshRegistry(): SqliteWorkflowAdvertisementRegistry {
+function freshRegistry(
+  params?: WorkflowAdvertisementRegistrySuiteFactoryParams,
+): SqliteWorkflowAdvertisementRegistry {
   // Unique table per factory invocation so the conformance suite's
   // independent describes start from an empty store.
   const db = new Database(":memory:");
   return SqliteWorkflowAdvertisementRegistry.make({
     db,
     tableName: `promin_workflow_advertisements_${++counter}`,
+    ...(params && { clock: params.clock }),
   });
 }
 
@@ -26,9 +32,12 @@ describe("SqliteWorkflowAdvertisementRegistry — persistence", () => {
   it("survives a fresh registry instance over the same db", async () => {
     const db = new Database(":memory:");
     const a = SqliteWorkflowAdvertisementRegistry.make({ db });
-    await a.upsert("w1", [
-      { name: "hello", version: "1", steps: [{ name: "greet", kind: "single", dependsOn: [] }] },
-    ]);
+    await a.upsert({
+      workerId: "w1",
+      workflows: [
+        { name: "hello", version: "1", steps: [{ name: "greet", kind: "single", dependsOn: [] }] },
+      ],
+    });
 
     // Brand-new instance pointed at the same db — should rebind to the
     // existing table and read what the prior instance wrote. This is the

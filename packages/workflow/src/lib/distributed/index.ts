@@ -43,6 +43,8 @@ export {
   type WorkerErrorEvent,
   DefaultWorker,
   createWorker,
+  TaskLeaseLostError,
+  WorkerStoppingError,
 } from "./worker.ts";
 export {
   type WorkerInfo,
@@ -51,7 +53,12 @@ export {
   InMemoryWorkerRegistry,
   type InMemoryWorkerRegistryConfig,
 } from "./worker-registry.ts";
-export { type LeaderElection, SingleLeader } from "./leader-election.ts";
+export {
+  type LeaderElection,
+  SingleLeader,
+  coordinatorLeaderKey,
+  scannerLeaderKey,
+} from "./leader-election.ts";
 export {
   type SleepScanner,
   type SleepScannerConfig,
@@ -84,6 +91,7 @@ export {
   type WorkflowStartQueue,
   type WorkflowStartRecord,
   type WorkerWorkflowSpec,
+  type WorkflowStartClaimRef,
   InMemoryWorkflowStartQueue,
   type InMemoryWorkflowStartQueueConfig,
 } from "./workflow-start-queue.ts";

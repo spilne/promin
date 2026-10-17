@@ -4,22 +4,23 @@
 // Implements the same WorkflowRunner interface as DefaultWorkflowRunner but
 // delegates step execution to remote workers via a StepQueue instead of
 // running step bodies in-process. The orchestration loop (DAG ready-set,
-// lock, retry, compensation) still runs here; only step bodies are remote.
+// lock, retry, compensation) still runs here; ordinary step bodies are
+// remote, while sleep and signal-wait steps run here (they only record their
+// suspension).
 //
 // Also runs a background leader-elected sweep loop (startLoop / stopLoop)
-// that detects dead workers and re-enqueues their claimed steps.
+// that adopts orphaned runs and re-enqueues steps held by dead or stalled
+// workers.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage } from "../durable/workflow-storage.ts";
+import type { WorkflowStorage, OrphanedRun } from "../durable/workflow-storage.ts";
 import type { WorkflowState, WorkflowRunEvent } from "../durable/workflow-state.ts";
 import type {
   Workflow,
   WorkflowDAG,
-  StepDefinition,
   WorkflowStatusInfo,
   WorkflowHandle,
 } from "../durable/durable-pipeline.ts";
-import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
 import type {
   IWorkflowVersionRegistry,
   WorkflowVersionRegistry,
@@ -38,8 +39,17 @@ import type { WorkerRegistry } from "./worker-registry.ts";
 import type { LeaderElection } from "./leader-election.ts";
 import { SingleLeader } from "./leader-election.ts";
 import { StepQueueExecutor } from "./step-queue-executor.ts";
+import {
+  CoordinatorStepExecutor,
+  sharedReadStorage,
+  withoutRequeue,
+} from "./coordinator-step-executor.ts";
+import { buildStubWorkflow } from "./stub-workflow.ts";
+import { isStaleLeaseError } from "../scheduler/leader-lease.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import { PollLoop } from "../shared/poll-loop.ts";
+
+export { buildStubWorkflow } from "./stub-workflow.ts";
 
 export interface DistributedRunnerConfig {
   /** Workflow storage for state persistence. */
@@ -60,18 +70,46 @@ export interface DistributedRunnerConfig {
    * dashboard + run forensics for a window. Default: 7 days.
    */
   workerRetentionMs?: number;
-  /** Leader election — ensures only one instance runs the sweep. Default: SingleLeader (always wins). */
+  /**
+   * Leader election — ensures only one instance runs the sweep. Default:
+   * `SingleLeader` (always wins; for a single coordinator). With more than
+   * one instance, pass a `LeaseLeaderElection` over any `LeaderLeaseStore`
+   * with key `coordinatorLeaderKey({ namespace })`: its lease fences the
+   * sweep's queue writes, so an instance that lost leadership while paused
+   * can't commit them. Use a TTL of several `pollIntervalMs`; leadership is
+   * refreshed every sweep and released by `stopLoop()`.
+   */
   leaderElection?: LeaderElection;
   /**
    * Optional workflow registry. When provided, `run({ name, ... })`
-   * resolves the definition by name via the registry.
+   * resolves the definition by name via the registry, and recovery adopts
+   * orphaned runs with their real definition instead of a stub rebuilt from
+   * the stored DAG.
    */
   registry?: WorkflowVersionRegistry | IWorkflowVersionRegistry;
   /**
-   * How often the StepQueueExecutor polls storage while waiting for a step
-   * to complete. Default: 500ms.
+   * How often the step executor polls storage while waiting for a step to
+   * complete. Waits on one run share each read. Default: 500ms.
    */
   stepPollIntervalMs?: number;
+  /**
+   * How often the leader looks for orphaned runs (pending / running runs
+   * nobody holds the lock of) after the scan it does on becoming leader.
+   * Default: 60 000.
+   */
+  recoveryIntervalMs?: number;
+  /**
+   * A run is only adopted once it hasn't been updated for this long, so a
+   * run another coordinator has just created (and not locked yet) is left
+   * to it. Default: `workerTimeoutMs`.
+   */
+  orphanGraceMs?: number;
+  /**
+   * How often `run()` / `waitForResult()` check storage for a run that is
+   * driven elsewhere (another instance holds its lock, or it is suspended
+   * and a scanner will resume it). Default: 1000.
+   */
+  resultPollIntervalMs?: number;
   /**
    * Time source for the sweep-loop cadence, the step executor's polls and
    * the inner runner's timestamps. Default: `SystemWallClock`. Tests pass a
@@ -79,10 +117,11 @@ export interface DistributedRunnerConfig {
    */
   clock?: WallClock;
   /**
-   * Called when a background loop iteration fails: a dead-worker sweep
-   * (`source: "sweep"`) or a step executor's storage check
-   * (`source: "step-wait"`). Both loops keep running and back off; nothing
-   * here is fatal. Default: `console.error`.
+   * Called when background work fails: a sweep (`"sweep"`), adopting an
+   * orphaned run (`"recovery"`), a step executor's storage check
+   * (`"step-wait"`) or a result wait's storage check (`"result-wait"`).
+   * Every loop keeps running and backs off; nothing here is fatal.
+   * Default: `console.error`.
    */
   onError?: (event: DistributedRunnerErrorEvent) => void;
   /**
@@ -94,10 +133,12 @@ export interface DistributedRunnerConfig {
 
 /** A background-loop failure reported through `DistributedRunnerConfig.onError`. */
 export interface DistributedRunnerErrorEvent {
-  readonly source: "sweep" | "step-wait";
+  readonly source: "sweep" | "recovery" | "step-wait" | "result-wait";
   readonly error: unknown;
   /** Failures in a row for this loop, including this one. */
   readonly consecutiveFailures: number;
+  /** The run involved, when there is one. */
+  readonly workflowId?: string;
 }
 
 /** @deprecated Use DistributedRunnerConfig */
@@ -109,6 +150,23 @@ export type CoordinatorConfig = DistributedRunnerConfig;
  * At the default 1s poll this is roughly once a minute.
  */
 const WORKER_GC_EVERY_N_TICKS = 60;
+
+/** Page size for the orphaned-run scan. */
+const RECOVERY_PAGE_SIZE = 100;
+
+/** How a run driven by this instance ended up. */
+type LocalOutcome =
+  | { readonly kind: "completed"; readonly result: unknown }
+  | { readonly kind: "failed"; readonly error: unknown }
+  /** The run suspended (sleep / signal); a scanner resumes it later. */
+  | { readonly kind: "suspended"; readonly error: unknown }
+  /** Another instance holds the run's lock and is driving it. */
+  | { readonly kind: "elsewhere" };
+
+interface ResultWaiter {
+  readonly resolve: (value: unknown) => void;
+  readonly reject: (error: unknown) => void;
+}
 
 export class DistributedWorkflowRunner implements WorkflowRunner {
   readonly storage: WorkflowStorage;
@@ -123,15 +181,20 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
   private readonly leaderElection: LeaderElection;
   private readonly clock: WallClock;
   private readonly registry?: WorkflowVersionRegistry | IWorkflowVersionRegistry;
+  private readonly recoveryIntervalMs: number;
+  private readonly orphanGraceMs: number;
   private readonly sweepLoop: PollLoop;
+  private readonly resultLoop: PollLoop;
+  private resultLoopRunning = false;
   private readonly onError: (event: DistributedRunnerErrorEvent) => void;
   private sweepLoopDone?: Promise<void>;
   private isLeader = false;
-  private runningWorkflows = new Map<string, Promise<unknown>>();
-  private waiters = new Map<
-    string,
-    { resolve: (v: unknown) => void; reject: (e: unknown) => void }[]
-  >();
+  /** When the leader next scans for orphaned runs; unset until it has led. */
+  private nextRecoveryAtMs?: number;
+  /** Runs this instance is driving, by workflow id. */
+  private runningWorkflows = new Map<string, Promise<LocalOutcome>>();
+  /** Result waits on runs driven elsewhere, checked by `resultLoop`. */
+  private resultWaiters = new Map<string, ResultWaiter[]>();
 
   constructor(config: DistributedRunnerConfig) {
     this.storage = config.storage;
@@ -143,6 +206,8 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     this.leaderElection = config.leaderElection ?? new SingleLeader();
     this.clock = config.clock ?? SystemWallClock;
     this.registry = config.registry;
+    this.recoveryIntervalMs = config.recoveryIntervalMs ?? 60_000;
+    this.orphanGraceMs = config.orphanGraceMs ?? this.workerTimeoutMs;
     const onError = config.onError ?? defaultOnError;
     this.onError = onError;
 
@@ -156,11 +221,26 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
         onError({ source: "sweep", error, consecutiveFailures: info.consecutiveFailures }),
     });
 
-    const executor = new StepQueueExecutor({
-      stepQueue: config.stepQueue,
-      storage: config.storage,
-      pollIntervalMs: config.stepPollIntervalMs ?? config.pollIntervalMs ?? 500,
-      staleTimeoutMs: config.workerTimeoutMs ?? 30_000,
+    this.resultLoop = new PollLoop({
+      name: "distributed-runner-results",
+      intervalMs: config.resultPollIntervalMs ?? 1000,
+      clock: this.clock,
+      tick: () => this._checkResults(),
+      onError: (error, info) =>
+        onError({ source: "result-wait", error, consecutiveFailures: info.consecutiveFailures }),
+    });
+
+    const stepPollIntervalMs = config.stepPollIntervalMs ?? config.pollIntervalMs ?? 500;
+    const queueExecutor = new StepQueueExecutor({
+      // The leader's fenced sweep is the only requeue (see coordinator-step-executor.ts).
+      stepQueue: withoutRequeue(config.stepQueue),
+      storage: sharedReadStorage({
+        storage: config.storage,
+        clock: this.clock,
+        maxAgeMs: Math.max(1, Math.floor(stepPollIntervalMs / 2)),
+      }),
+      pollIntervalMs: stepPollIntervalMs,
+      staleTimeoutMs: this.workerTimeoutMs,
       clock: this.clock,
       onError: (error, info) =>
         onError({ source: "step-wait", error, consecutiveFailures: info.consecutiveFailures }),
@@ -169,7 +249,11 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     this.innerRunner = createWorkflowRunner({
       storage: config.storage,
       registry: config.registry,
-      stepExecutor: executor,
+      stepExecutor: new CoordinatorStepExecutor({
+        queueExecutor,
+        storage: config.storage,
+        clock: this.clock,
+      }),
       clock: this.clock,
     });
   }
@@ -178,10 +262,25 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
   // WorkflowRunner interface
   // ---------------------------------------------------------------------------
 
+  /**
+   * Submit the run and wait for it. Resolves with the result, or rejects
+   * with the run's error. Like the in-process runner, a run that suspends
+   * (sleep / signal) rejects with `WorkflowSuspendedError`; use
+   * `waitForResult()` to wait through suspensions. A run another instance
+   * is driving (it holds the lock) is waited for through storage.
+   */
   async run(params: WorkflowRunnerRunParams): Promise<unknown> {
-    const { workflowId } = params;
-    await this._submit(params);
-    return this._waitForResult(workflowId);
+    const { outcome: running } = await this._submit(params);
+    const outcome = await running;
+    switch (outcome.kind) {
+      case "completed":
+        return outcome.result;
+      case "failed":
+      case "suspended":
+        throw outcome.error;
+      case "elsewhere":
+        return this._watchResult(params.workflowId);
+    }
   }
 
   async runSafe(
@@ -255,15 +354,32 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     await this._submit(params as WorkflowRunnerRunParams);
   }
 
+  /**
+   * Wait until the run is terminal, wherever it runs: resolves with the
+   * result of a completed run and rejects with an `Error` carrying the
+   * stored error of a failed (or tripwired) run. Suspensions are waited
+   * through. Rejects when the run doesn't exist (or was deleted).
+   */
+  async waitForResult<Output>(workflowId: string): Promise<Output> {
+    const local = this.runningWorkflows.get(workflowId);
+    if (local) {
+      const outcome = await local;
+      if (outcome.kind === "completed") return outcome.result as Output;
+      if (outcome.kind === "failed") throw outcome.error;
+    }
+    return this._watchResult(workflowId) as Promise<Output>;
+  }
+
   // ---------------------------------------------------------------------------
-  // Lifecycle — start/stop the background dead-worker sweep loop
+  // Lifecycle — start/stop the background sweep loop
   // ---------------------------------------------------------------------------
 
   /**
-   * Run the leader-elected sweep loop: recover orphaned workflows and
-   * re-enqueue steps held by dead or stalled workers. A failed sweep is
-   * reported through `onError` and retried with backoff; it never ends the
-   * loop. Resolves after `stopLoop()`, once leadership has been released.
+   * Run the leader-elected sweep loop: adopt orphaned runs (on becoming
+   * leader, then every `recoveryIntervalMs`) and re-enqueue steps held by
+   * dead or stalled workers. A failed sweep is reported through `onError`
+   * and retried with backoff; it never ends the loop. Resolves after
+   * `stopLoop()`, once leadership has been released.
    */
   startLoop(): Promise<void> {
     if (this.sweepLoopDone) return this.sweepLoopDone;
@@ -273,6 +389,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
       } finally {
         if (this.isLeader) {
           this.isLeader = false;
+          this.nextRecoveryAtMs = undefined;
           try {
             await this.leaderElection.release();
           } catch (error) {
@@ -298,21 +415,42 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
   }
 
   private async _sweepOnce(): Promise<void> {
+    const wasLeader = this.isLeader;
     this.isLeader = await this.leaderElection.tryAcquire();
-    if (!this.isLeader) return;
-    if (this.runningWorkflows.size === 0) {
-      await this._recoverActiveWorkflows();
+    if (!this.isLeader) {
+      this.nextRecoveryAtMs = undefined;
+      return;
     }
-    await this._tickDeadWorkers();
+    try {
+      // Recovery is leadership-triggered: once on taking over (a previous
+      // leader may have died with runs in flight), then at a coarse cadence.
+      const now = this.clock.currentTimeMs();
+      if (!wasLeader || this.nextRecoveryAtMs === undefined || now >= this.nextRecoveryAtMs) {
+        await this._recoverOrphanedRuns();
+        this.nextRecoveryAtMs = now + this.recoveryIntervalMs;
+      }
+      await this._tickDeadWorkers();
+    } catch (error) {
+      // A fenced write was rejected: another instance leads now.
+      if (isStaleLeaseError(error)) {
+        this.isLeader = false;
+        this.nextRecoveryAtMs = undefined;
+      }
+      throw error;
+    }
   }
 
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
 
-  private async _submit(params: WorkflowRunnerRunParams): Promise<void> {
+  /** Create the run and start driving it here (unless it already is). Resolves once started. */
+  private async _submit(
+    params: WorkflowRunnerRunParams,
+  ): Promise<{ readonly outcome: Promise<LocalOutcome> }> {
     const { workflowId, input } = params;
-    if (this.runningWorkflows.has(workflowId)) return;
+    const existing = this.runningWorkflows.get(workflowId);
+    if (existing) return { outcome: existing };
 
     let workflow: Workflow<unknown, unknown>;
     if ("workflow" in params) {
@@ -328,66 +466,104 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
       workflowName: workflow.name,
       input,
       version: workflow.version,
-      metadata: { ...((workflow as any).metadata ?? {}), _dag: workflow.dag },
+      metadata: { ...workflow._definition.metadata, _dag: workflow.dag },
     });
 
-    const p = this.innerRunner
-      .run({ workflow, workflowId, input })
-      .then((r) => this._resolveWaiters(workflowId, r))
-      .catch((e) => {
-        if (e instanceof WorkflowLockError) return;
-        this._rejectWaiters(workflowId, e);
-      })
-      .finally(() => this.runningWorkflows.delete(workflowId));
-    this.runningWorkflows.set(workflowId, p);
+    return {
+      outcome:
+        this.runningWorkflows.get(workflowId) ?? this._launch({ workflow, workflowId, input }),
+    };
   }
 
-  /**
-   * Wait for a previously-submitted workflow to complete (or fail). Pairs
-   * with `submit({...})` for the deprecated submit-then-wait flow that
-   * the `WorkflowCoordinator` interface still describes; new code should
-   * use `run({...})` which submits + waits in one call.
-   */
-  waitForResult<Output>(workflowId: string): Promise<Output> {
-    return this._waitForResult<Output>(workflowId);
-  }
-
-  private _waitForResult<Output>(workflowId: string): Promise<Output> {
-    // Register the waiter before reading storage: a run that settles between
-    // the read and the registration would otherwise never resolve it.
-    return new Promise<Output>((resolve, reject) => {
-      const waiter = { resolve: resolve as (v: unknown) => void, reject };
-      const list = this.waiters.get(workflowId) ?? [];
-      list.push(waiter);
-      this.waiters.set(workflowId, list);
-
-      this.storage.loadWorkflow(workflowId).then(
-        (state) => {
-          if (state?.status === "completed") {
-            this._removeWaiter(workflowId, waiter);
-            resolve(state.result as Output);
-          } else if (state?.status === "failed") {
-            this._removeWaiter(workflowId, waiter);
-            reject(new Error(state.error ?? "Workflow failed"));
+  /** Drive the run in this process; the outcome promise never rejects. */
+  private _launch(params: {
+    readonly workflow: Workflow<unknown, unknown>;
+    readonly workflowId: string;
+    readonly input: unknown;
+  }): Promise<LocalOutcome> {
+    const { workflowId } = params;
+    const outcome = this.innerRunner
+      .run(params)
+      .then(
+        (result): LocalOutcome => ({ kind: "completed", result }),
+        (error: unknown): LocalOutcome => {
+          if (error instanceof WorkflowLockError || tagOf(error) === "WorkflowLockError") {
+            return { kind: "elsewhere" };
           }
+          if (tagOf(error) === "WorkflowSuspendedError") return { kind: "suspended", error };
+          return { kind: "failed", error };
         },
-        (err: unknown) => {
-          this._removeWaiter(workflowId, waiter);
-          reject(err);
-        },
-      );
+      )
+      .finally(() => {
+        if (this.runningWorkflows.get(workflowId) === outcome) {
+          this.runningWorkflows.delete(workflowId);
+        }
+      });
+    this.runningWorkflows.set(workflowId, outcome);
+    return outcome;
+  }
+
+  /** Wait for a run this process isn't driving to become terminal. */
+  private _watchResult(workflowId: string): Promise<unknown> {
+    return new Promise<unknown>((resolve, reject) => {
+      const list = this.resultWaiters.get(workflowId) ?? [];
+      list.push({ resolve, reject });
+      this.resultWaiters.set(workflowId, list);
+      this._ensureResultLoop();
     });
   }
 
-  private _removeWaiter(
-    workflowId: string,
-    waiter: { resolve: (v: unknown) => void; reject: (e: unknown) => void },
+  private _ensureResultLoop(): void {
+    if (this.resultLoopRunning) {
+      this.resultLoop.wake();
+      return;
+    }
+    this.resultLoopRunning = true;
+    void this.resultLoop.start().finally(() => {
+      this.resultLoopRunning = false;
+      // A waiter registered while the loop was exiting.
+      if (this.resultWaiters.size > 0) this._ensureResultLoop();
+    });
+  }
+
+  /** One pass of the result loop: settle every waiter whose run is terminal. */
+  private async _checkResults(): Promise<"stop" | "idle"> {
+    const ids = [...this.resultWaiters.keys()].filter((id) => !this.runningWorkflows.has(id));
+    await Promise.all(
+      ids.map(async (workflowId) => {
+        const state = await this.storage.loadWorkflow(workflowId);
+        if (state === null) {
+          this._settleWaiters({
+            workflowId,
+            error: new Error(`Workflow "${workflowId}" not found`),
+          });
+        } else if (state.status === "completed") {
+          this._settleWaiters({ workflowId, result: state.result });
+        } else if (state.status === "failed") {
+          this._settleWaiters({ workflowId, error: new Error(state.error ?? "Workflow failed") });
+        } else if (state.status === "tripwire") {
+          this._settleWaiters({
+            workflowId,
+            error: new Error(state.error ?? `Workflow "${workflowId}" ended via tripwire`),
+          });
+        }
+      }),
+    );
+    return this.resultWaiters.size === 0 ? "stop" : "idle";
+  }
+
+  private _settleWaiters(
+    params: { readonly workflowId: string } & (
+      | { readonly result: unknown; readonly error?: undefined }
+      | { readonly error: Error; readonly result?: undefined }
+    ),
   ): void {
-    const list = this.waiters.get(workflowId);
-    if (!list) return;
-    const remaining = list.filter((w) => w !== waiter);
-    if (remaining.length === 0) this.waiters.delete(workflowId);
-    else this.waiters.set(workflowId, remaining);
+    const waiters = this.resultWaiters.get(params.workflowId) ?? [];
+    this.resultWaiters.delete(params.workflowId);
+    for (const w of waiters) {
+      if (params.error) w.reject(params.error);
+      else w.resolve(params.result);
+    }
   }
 
   private async _resolveByName(
@@ -413,10 +589,12 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
   }
 
   private async _tickDeadWorkers(): Promise<void> {
+    const lease = this.leaderElection.lease ?? undefined;
+    const fence = lease ? { lease } : {};
     if (this.workerRegistry) {
       const dead = await this.workerRegistry.detectDead(this.workerTimeoutMs);
       for (const worker of dead) {
-        await this.stepQueue.requeueStuck({ mode: "worker", workerId: worker.workerId });
+        await this.stepQueue.requeueStuck({ mode: "worker", workerId: worker.workerId, ...fence });
       }
       // Reap worker rows past the retention window. Throttled — see
       // WORKER_GC_EVERY_N_TICKS — so retired / dead rows stay visible
@@ -426,82 +604,134 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
         await this.workerRegistry.gc({ retainMs: this.workerRetentionMs });
       }
     }
-    await this.stepQueue.requeueStuck({ mode: "stale", olderThanMs: this.workerTimeoutMs });
+    await this.stepQueue.requeueStuck({
+      mode: "stale",
+      olderThanMs: this.workerTimeoutMs,
+      ...fence,
+    });
   }
 
-  private async _recoverActiveWorkflows(): Promise<void> {
-    for (const status of ["pending", "running", "suspended"] as const) {
-      let offset = 0;
-      const pageSize = 100;
+  /**
+   * Adopt runs nobody is driving: `pending` / `running` runs whose lock is
+   * free or expired and that haven't been touched for `orphanGraceMs`.
+   * Suspended runs are never adopted: the sleep / signal scanners resume
+   * them when they're due. Uses `storage.listOrphanedRuns` (keyset-paged)
+   * when the backend has it; otherwise lists pending and running runs and
+   * lets the run lock turn away the ones still owned.
+   */
+  private async _recoverOrphanedRuns(): Promise<void> {
+    const nowMs = this.clock.currentTimeMs();
+    const now = new Date(nowMs);
+    const updatedBefore = new Date(nowMs - this.orphanGraceMs);
+
+    if (this.storage.listOrphanedRuns) {
+      let afterWorkflowId: string | undefined;
       while (true) {
-        const page = await this.storage.listWorkflows({ status, limit: pageSize, offset });
-        for (const state of page) {
-          if (this.runningWorkflows.has(state.workflowId)) continue;
-          const dag = state.metadata?._dag as WorkflowDAG | undefined;
-          if (!dag) continue;
-          const stub = buildStubWorkflow(dag, state.workflowName ?? dag.name, state.version);
-          await this._submit({ workflow: stub, workflowId: state.workflowId, input: state.input });
-        }
-        if (page.length < pageSize) break;
-        offset += pageSize;
+        const page = await this.storage.listOrphanedRuns({
+          now,
+          updatedBefore,
+          limit: RECOVERY_PAGE_SIZE,
+          ...(afterWorkflowId !== undefined && { afterWorkflowId }),
+        });
+        for (const run of page) await this._adopt(run);
+        if (page.length < RECOVERY_PAGE_SIZE) return;
+        afterWorkflowId = page[page.length - 1]!.workflowId;
       }
     }
+
+    // Collect first, adopt after: adopting moves runs out of `pending`, which
+    // would make offset paging over that status skip rows.
+    const candidates: OrphanedRun[] = [];
+    for (const status of ["pending", "running"] as const) {
+      for (let offset = 0; ; offset += RECOVERY_PAGE_SIZE) {
+        const page = await this.storage.listWorkflows({
+          status,
+          limit: RECOVERY_PAGE_SIZE,
+          offset,
+          orderBy: "createdAt",
+          orderDir: "asc",
+        });
+        for (const state of page) {
+          if (state.updatedAt >= updatedBefore) continue;
+          candidates.push({
+            workflowId: state.workflowId,
+            workflowName: state.workflowName,
+            status,
+            input: state.input,
+            ...(state.version !== undefined && { version: state.version }),
+            ...(state.metadata !== undefined && { metadata: state.metadata }),
+          });
+        }
+        if (page.length < RECOVERY_PAGE_SIZE) break;
+      }
+    }
+    for (const run of candidates) await this._adopt(run);
   }
 
-  private _resolveWaiters(workflowId: string, result: unknown): void {
-    const waiters = this.waiters.get(workflowId) ?? [];
-    for (const w of waiters) w.resolve(result);
-    this.waiters.delete(workflowId);
+  /** Start driving an orphaned run here. Failures are reported, never thrown. */
+  private async _adopt(run: OrphanedRun): Promise<void> {
+    if (this.runningWorkflows.has(run.workflowId)) return;
+    let workflow: Workflow<unknown, unknown> | undefined;
+    try {
+      workflow = await this._definitionFor(run);
+    } catch (error) {
+      this.onError({
+        source: "recovery",
+        error,
+        consecutiveFailures: 1,
+        workflowId: run.workflowId,
+      });
+      return;
+    }
+    if (!workflow) {
+      this.onError({
+        source: "recovery",
+        error: new Error(
+          `Cannot adopt orphaned run "${run.workflowId}" (${run.workflowName}): no registered ` +
+            `definition and no stored DAG`,
+        ),
+        consecutiveFailures: 1,
+        workflowId: run.workflowId,
+      });
+      return;
+    }
+    if (this.runningWorkflows.has(run.workflowId)) return;
+    void this._launch({ workflow, workflowId: run.workflowId, input: run.input }).then(
+      (outcome) => {
+        if (outcome.kind === "failed") {
+          this.onError({
+            source: "recovery",
+            error: outcome.error,
+            consecutiveFailures: 1,
+            workflowId: run.workflowId,
+          });
+        }
+      },
+    );
   }
 
-  private _rejectWaiters(workflowId: string, error: Error): void {
-    const waiters = this.waiters.get(workflowId) ?? [];
-    for (const w of waiters) w.reject(error);
-    this.waiters.delete(workflowId);
+  /** The registered definition for a run, else a stub from its stored DAG. */
+  private async _definitionFor(run: OrphanedRun): Promise<Workflow<unknown, unknown> | undefined> {
+    if (this.registry) {
+      const def = await this.registry.resolve(run.workflowName, run.version);
+      if (def) return def;
+    }
+    const dag = run.metadata?._dag as WorkflowDAG | undefined;
+    if (!dag) return undefined;
+    return buildStubWorkflow(dag, run.workflowName ?? dag.name, run.version);
   }
+}
+
+function tagOf(error: unknown): string | undefined {
+  return (error as { _tag?: string } | null)?._tag;
 }
 
 function defaultOnError(event: DistributedRunnerErrorEvent): void {
+  const run = event.workflowId ? ` (${event.workflowId})` : "";
   console.error(
-    `[distributed-runner] ${event.source} failed (${event.consecutiveFailures} in a row):`,
+    `[distributed-runner] ${event.source} failed${run} (${event.consecutiveFailures} in a row):`,
     event.error,
   );
-}
-
-/**
- * Build a minimal Workflow stub from a persisted DAG. Step `execute`
- * functions are unreachable — the distributed runner delegates all step
- * bodies to `StepQueueExecutor`. Used for crash recovery and by trigger
- * handlers that build from an advertised DAG without holding the full definition.
- */
-export function buildStubWorkflow(
-  dag: WorkflowDAG,
-  name: string,
-  version?: string,
-): Workflow<unknown, unknown> {
-  const steps: StepDefinition[] = dag.steps.map((node) => ({
-    name: node.name,
-    dependsOn: [...node.dependsOn],
-    kind: node.kind as StepDefinition["kind"],
-    execute: () => {
-      throw new Error(
-        `unreachable: stub workflow step "${node.name}" should never be executed in-process`,
-      );
-    },
-    codec: LosslessJsonCodec,
-    needs: node.needs,
-    priority: node.priority,
-  }));
-
-  return {
-    name,
-    version,
-    dag,
-    _definition: {
-      steps,
-      onVersionMismatch: "strict",
-    },
-  };
 }
 
 export function createDistributedWorkflowRunner(

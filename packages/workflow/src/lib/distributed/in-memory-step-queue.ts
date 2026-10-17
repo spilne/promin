@@ -15,6 +15,7 @@ import {
   type StepTaskRecord,
 } from "./step-queue.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
+import type { InMemoryLeaderLeases } from "../scheduler/leader-lease.ts";
 
 type MutableTask = {
   -readonly [K in keyof StepTaskRecord]: StepTaskRecord[K];
@@ -31,6 +32,12 @@ export interface InMemoryStepQueueConfig {
    * requeueing it. Default: `DEFAULT_MAX_DELIVERIES` (10).
    */
   maxDeliveries?: number;
+  /**
+   * Lease store that `requeueStuck({ lease })` fences against: the sweep
+   * rejects with `StaleLeaseError` and changes nothing unless the lease is
+   * still current here. Without it the `lease` param is ignored.
+   */
+  leaderLeases?: InMemoryLeaderLeases;
 }
 
 export class InMemoryStepQueue implements StepQueue {
@@ -45,10 +52,12 @@ export class InMemoryStepQueue implements StepQueue {
   private counter = 0;
   private readonly clock: WallClock;
   private readonly maxDeliveries: number;
+  private readonly leaderLeases: InMemoryLeaderLeases | undefined;
 
   constructor(config?: InMemoryStepQueueConfig) {
     this.clock = config?.clock ?? SystemWallClock;
     this.maxDeliveries = config?.maxDeliveries ?? DEFAULT_MAX_DELIVERIES;
+    this.leaderLeases = config?.leaderLeases;
   }
 
   private activeKey(workflowId: string, stepName: string): string {
@@ -193,6 +202,8 @@ export class InMemoryStepQueue implements StepQueue {
   }
 
   async requeueStuck(params: StepQueueRequeueParams): Promise<StepQueueRequeueResult> {
+    // Synchronous with the sweep below, so no takeover can land in between.
+    if (params.lease && this.leaderLeases) this.leaderLeases.assertCurrent(params.lease);
     let requeued = 0;
     let deadLettered = 0;
     const cutoff =

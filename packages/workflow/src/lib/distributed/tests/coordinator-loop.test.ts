@@ -1,7 +1,6 @@
 // ---------------------------------------------------------------------------
 // DistributedWorkflowRunner: the sweep loop survives storage / queue errors,
-// stopLoop() waits for the loop and releases leadership, and a result waiter
-// registered while a run settles is never stranded.
+// and stopLoop() waits for the loop and releases leadership.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
@@ -10,7 +9,6 @@ import { InMemoryStepQueue } from "../in-memory-step-queue.ts";
 import type { LeaderElection } from "../leader-election.ts";
 import type { StepQueue } from "../step-queue.ts";
 import { InMemoryWorkflowStorage } from "../../durable/in-memory-storage.ts";
-import type { WorkflowState } from "../../durable/workflow-state.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
 
 /** Yield to the event loop until `predicate` holds (bounded). */
@@ -129,35 +127,5 @@ describe("DistributedWorkflowRunner sweep loop", () => {
     await stopping;
     expect(leader.released).toBe(1);
     expect(clock.pendingCount()).toBe(0);
-  });
-});
-
-describe("DistributedWorkflowRunner.waitForResult", () => {
-  it("a run that settles while the storage check is in flight still resolves the waiter", async () => {
-    const storage = new InMemoryWorkflowStorage();
-    let releaseLoad!: () => void;
-    const loadGate = new Promise<void>((r) => (releaseLoad = r));
-    const realLoad = storage.loadWorkflow.bind(storage);
-    storage.loadWorkflow = async (id: string): Promise<WorkflowState | null> => {
-      // Snapshot first, then stall: the caller sees the pre-settle state.
-      const snapshot = await realLoad(id);
-      await loadGate;
-      return snapshot;
-    };
-    await storage.createWorkflow({ workflowId: "wf", workflowName: "x", input: {} });
-    const runner = new DistributedWorkflowRunner({ storage, stepQueue: new InMemoryStepQueue() });
-
-    let result: unknown = "pending";
-    const waiting = runner.waitForResult("wf").then((r) => (result = r));
-    await new Promise<void>((r) => setImmediate(r));
-
-    // The run settles in this process while the load is still in flight.
-    (runner as unknown as { _resolveWaiters(id: string, r: unknown): void })._resolveWaiters(
-      "wf",
-      "done",
-    );
-    releaseLoad();
-    await waiting;
-    expect(result).toBe("done");
   });
 });

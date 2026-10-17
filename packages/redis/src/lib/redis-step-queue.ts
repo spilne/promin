@@ -31,7 +31,9 @@ import {
   DEFAULT_MAX_DELIVERIES,
   deadLetterError,
   percentileCont,
+  StaleLeaseError,
   SystemWallClock,
+  type LeaderLease,
   type StepQueue,
   type StepQueueClaimParams,
   type StepQueueEnqueueParams,
@@ -43,6 +45,7 @@ import {
   type WallClock,
 } from "@promin/workflow";
 import type { RedisStoreClient } from "./redis-client.ts";
+import type { RedisLeaderLeaseStore } from "./redis-leader-lease-store.ts";
 
 // -- Lua scripts -------------------------------------------------------------
 
@@ -229,11 +232,14 @@ return results
  * `mode` = 'requeue' (requeueStuck) or 'release' (release(): never
  * dead-letters, and gives the delivery back).
  *
- * KEYS: [task_key, running_key, pending_key, done_key]
+ * Fenced when ARGV[9] is non-empty: nothing is written, and -1 returned,
+ * unless the lease epoch key (KEYS[5]) still holds ARGV[9].
+ *
+ * KEYS: [task_key, running_key, pending_key, done_key, lease_epoch_key?]
  * ARGV: [id, prefix, claim_token, mode, max_deliveries, dead_letter_error,
- *        completed_at_iso, completed_at_ms]
- * Returns 0 (not running under the token), 1 (back to pending),
- * 2 (dead-lettered).
+ *        completed_at_iso, completed_at_ms, lease_epoch|'']
+ * Returns -1 (stale lease), 0 (not running under the token), 1 (back to
+ * pending), 2 (dead-lettered).
  */
 const REQUEUE_LUA =
   CONC_KEY_LUA +
@@ -246,6 +252,8 @@ local id = ARGV[1]
 local prefix = ARGV[2]
 local claim_token = ARGV[3]
 local mode = ARGV[4]
+
+if ARGV[9] and ARGV[9] ~= '' and redis.call('GET', KEYS[5]) ~= ARGV[9] then return -1 end
 
 local f = redis.call('HMGET', task_key, 'status', 'claimToken', 'priority', 'concurrencyKey',
   'concurrencyScope', 'deliveries', 'workflowId', 'stepName')
@@ -379,6 +387,13 @@ export interface RedisStepQueueConfig {
   maxDeliveries?: number;
   /** Time source for client-side timestamps. Default: `SystemWallClock`. */
   clock?: WallClock;
+  /**
+   * Lease store whose epoch keys `requeueStuck({ lease })` fences against:
+   * every requeue script checks the lease's epoch before writing, and the
+   * sweep rejects with `StaleLeaseError` once it has moved on. Must live on
+   * the same Redis as the queue. Without it the `lease` param is ignored.
+   */
+  leaseStore?: RedisLeaderLeaseStore;
 }
 
 const PURGE_BATCH = 500;
@@ -389,6 +404,7 @@ export class RedisStepQueue implements StepQueue {
   private readonly claimScanLimit: number;
   private readonly maxDeliveries: number;
   private readonly clock: WallClock;
+  private readonly leaseStore: RedisLeaderLeaseStore | undefined;
 
   constructor(config: RedisStepQueueConfig) {
     this.redis = config.redis;
@@ -396,6 +412,7 @@ export class RedisStepQueue implements StepQueue {
     this.claimScanLimit = config.claimScanLimit ?? 1000;
     this.maxDeliveries = config.maxDeliveries ?? DEFAULT_MAX_DELIVERIES;
     this.clock = config.clock ?? SystemWallClock;
+    this.leaseStore = config.leaseStore;
   }
 
   // -- Key helpers -----------------------------------------------------------
@@ -542,7 +559,16 @@ export class RedisStepQueue implements StepQueue {
     return ok === 1;
   }
 
+  /**
+   * With `lease` and a configured `leaseStore`, the sweep checks the lease
+   * up front (so a stale lease rejects even when nothing is stuck) and again
+   * inside every per-task requeue script. Tasks are requeued one script at a
+   * time, so a takeover mid-sweep stops it there: what was requeued while
+   * the lease was current stays requeued, and nothing is written after.
+   */
   async requeueStuck(params: StepQueueRequeueParams): Promise<StepQueueRequeueResult> {
+    const lease = this.leaseStore ? params.lease : undefined;
+    if (lease) await this.assertLeaseCurrent(lease);
     const runningIds = await this.redis.smembers(this.runningKey);
     let requeued = 0;
     let deadLettered = 0;
@@ -562,7 +588,18 @@ export class RedisStepQueue implements StepQueue {
 
       // Token-guarded, so a task completed between the read above and the
       // requeue stays completed.
-      const code = await this.requeue({ id, claimToken: raw.claimToken ?? "", mode: "requeue" });
+      const code = await this.requeue({
+        id,
+        claimToken: raw.claimToken ?? "",
+        mode: "requeue",
+        lease,
+      });
+      if (code === -1) {
+        // The epoch never goes back, so this re-read throws with the
+        // current epoch.
+        await this.assertLeaseCurrent(lease!);
+        throw new StaleLeaseError({ lease: lease!, currentEpoch: null });
+      }
       if (code === 1) requeued++;
       else if (code === 2) deadLettered++;
     }
@@ -689,20 +726,33 @@ export class RedisStepQueue implements StepQueue {
     return ok === 1;
   }
 
-  /** Run REQUEUE_LUA; returns 0 (no-op), 1 (pending again), 2 (dead-lettered). */
+  /** Throw `StaleLeaseError` unless the lease's epoch key still holds its epoch. */
+  private async assertLeaseCurrent(lease: LeaderLease): Promise<void> {
+    const raw = await this.redis.get(this.leaseStore!.keysFor(lease.key).epoch);
+    const current = raw === null || raw === undefined ? null : Number(raw);
+    if (current !== lease.epoch) throw new StaleLeaseError({ lease, currentEpoch: current });
+  }
+
+  /**
+   * Run REQUEUE_LUA; returns -1 (stale `lease`), 0 (no-op), 1 (pending
+   * again), 2 (dead-lettered).
+   */
   private async requeue(params: {
     id: string;
     claimToken: string;
     mode: "requeue" | "release";
+    lease?: LeaderLease;
   }): Promise<number> {
     const now = this.clock.now();
+    const leaseKeys = params.lease ? [this.leaseStore!.keysFor(params.lease.key).epoch] : [];
     const code = await this.redis.eval(
       REQUEUE_LUA,
-      4,
+      4 + leaseKeys.length,
       this.taskKey(params.id),
       this.runningKey,
       this.pendingKey,
       this.doneKey,
+      ...leaseKeys,
       params.id,
       this.prefix,
       params.claimToken,
@@ -711,6 +761,7 @@ export class RedisStepQueue implements StepQueue {
       deadLetterError(this.maxDeliveries),
       now.toISOString(),
       String(now.getTime()),
+      params.lease ? String(params.lease.epoch) : "",
     );
     return Number(code);
   }

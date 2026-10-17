@@ -23,6 +23,7 @@ import {
 } from "@promin/workflow";
 import { type DrizzleDb, ensureTable as ensureTableFromSchema } from "@spilne/perfect-postgres";
 import { execRaw } from "./exec-raw.ts";
+import { assertPgLeaseCurrent } from "./pg-leader-lease-store.ts";
 import { stepQueue } from "./schema.ts";
 
 /**
@@ -389,6 +390,11 @@ export class PgStepQueue implements StepQueue {
     return rows.length > 0;
   }
 
+  /**
+   * With `lease`, fences against the `wf_leader_leases` table in this same
+   * database, so the lease must come from a `PgLeaderLeaseStore` (or
+   * `PgSchedulerStorage`) on it; no extra config is needed.
+   */
   async requeueStuck(params: StepQueueRequeueParams): Promise<StepQueueRequeueResult> {
     // postgres-js refuses to bind Date directly against an untyped
     // parameter; pass ISO strings and let Postgres cast them.
@@ -404,9 +410,7 @@ export class PgStepQueue implements StepQueue {
 
     // SET expressions all read the pre-update row, so `deliveries >= max`
     // means the same thing in every column.
-    const rows = await execRaw(
-      this.db,
-      sql`
+    const update = sql`
         UPDATE wf_step_queue
         SET status = CASE WHEN deliveries >= ${max} THEN 'failed' ELSE 'pending' END,
             error = CASE WHEN deliveries >= ${max} THEN ${deadLetterError(max)} ELSE error END,
@@ -417,8 +421,18 @@ export class PgStepQueue implements StepQueue {
             heartbeat_at = NULL
         WHERE status = 'running' AND ${match}${nsFilter}
         RETURNING status
-      `,
-    );
+      `;
+    const lease = params.lease;
+    // Fenced: the lease check share-locks the lease row inside the same
+    // transaction as the update, so a takeover waits for the sweep to
+    // commit, or the sweep sees the new epoch and writes nothing.
+    const rows = lease
+      ? await this.db.transaction(async (tx) => {
+          const db = tx as unknown as DrizzleDb;
+          await assertPgLeaseCurrent({ db, lease });
+          return execRaw(db, update);
+        })
+      : await execRaw(this.db, update);
     let deadLettered = 0;
     for (const r of rows) if (r.status === "failed") deadLettered++;
     return { requeued: rows.length - deadLettered, deadLettered };

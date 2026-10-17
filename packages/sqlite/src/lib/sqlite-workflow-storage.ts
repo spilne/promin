@@ -12,6 +12,8 @@ import {
   type RunSource,
   type SignalTokenRecord,
   type StreamChunk,
+  type WorkflowWakeup,
+  type OrphanedRun,
 } from "@promin/workflow";
 import type {
   WorkflowState,
@@ -141,6 +143,15 @@ export class SqliteWorkflowStorage
       `CREATE UNIQUE INDEX IF NOT EXISTS ${t}_idempotency_key ON ${t} (COALESCE(namespace, ''), workflow_name, idempotency_key) WHERE idempotency_key IS NOT NULL`,
     );
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_status ON ${t} (status)`);
+    // Scanners (`listDueTimers` / `listSignalWakeups`) page suspended runs,
+    // and coordinator recovery (`listOrphanedRuns`) pages pending / running
+    // runs, in workflow-id order.
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_suspended ON ${t} (workflow_id) WHERE status = 'suspended'`,
+    );
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_active ON ${t} (workflow_id) WHERE status IN ('pending', 'running')`,
+    );
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_parent ON ${t} (parent_workflow_id)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_run_source ON ${t} (run_source, run_source_id)`);
     // Sort-order indexes so listWorkflows ORDER BY clauses can use index
@@ -1542,6 +1553,145 @@ export class SqliteWorkflowStorage
     })();
   }
 
+  // ---------------------------------------------------------------------------
+  // Scanner / recovery queries
+  // ---------------------------------------------------------------------------
+  //
+  // Steps live as a JSON object on the workflow row, so the scanners expand
+  // them with `json_each` over the suspended rows (partial index on
+  // workflow_id) and keep the smallest matching step name per run with
+  // ROW_NUMBER(). Step timestamps are ISO strings; `julianday` compares them.
+
+  async listDueTimers(params: {
+    now: Date;
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<WorkflowWakeup[]> {
+    const now = params.now.toISOString();
+    const after = params.afterWorkflowId !== undefined ? "AND w.workflow_id > ?" : "";
+    const args: unknown[] = params.afterWorkflowId !== undefined ? [params.afterWorkflowId] : [];
+    args.push(now, now, Math.max(0, Math.trunc(params.limit)));
+    const rows = this.db
+      .query<ScanWakeupRow>(
+        `SELECT workflow_id, workflow_name, version, input, step_name, reason, signal_name
+         FROM (
+           SELECT w.workflow_id, w.workflow_name, w.version, w.input,
+             j.key AS step_name,
+             CASE json_extract(j.value, '$.status')
+               WHEN 'sleeping' THEN 'sleep' ELSE 'signal-timeout' END AS reason,
+             json_extract(j.value, '$.signalName') AS signal_name,
+             ROW_NUMBER() OVER (PARTITION BY w.workflow_id ORDER BY j.key) AS rn
+           FROM ${this._t} w, json_each(w.steps) j
+           WHERE w.status = 'suspended' ${after}
+             AND (
+               (json_extract(j.value, '$.status') = 'sleeping'
+                 AND julianday(json_extract(j.value, '$.wakeAt')) <= julianday(?))
+               OR (json_extract(j.value, '$.status') = 'waiting_for_signal'
+                 AND json_extract(j.value, '$.signalTimeoutAt') IS NOT NULL
+                 AND julianday(json_extract(j.value, '$.signalTimeoutAt')) <= julianday(?))
+             )
+         )
+         WHERE rn = 1
+         ORDER BY workflow_id
+         LIMIT ?`,
+      )
+      .all(...args);
+    return rows.map((r) => ({
+      workflowId: r.workflow_id,
+      workflowName: r.workflow_name,
+      ...(r.version != null ? { version: r.version } : {}),
+      input: JSON.parse(r.input),
+      stepName: r.step_name,
+      reason: r.reason as "sleep" | "signal-timeout",
+      ...(r.reason === "signal-timeout" && r.signal_name != null
+        ? { signalName: r.signal_name }
+        : {}),
+    }));
+  }
+
+  async listSignalWakeups(params: {
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<WorkflowWakeup[]> {
+    const after = params.afterWorkflowId !== undefined ? "AND w.workflow_id > ?" : "";
+    const args: unknown[] = params.afterWorkflowId !== undefined ? [params.afterWorkflowId] : [];
+    args.push(Math.max(0, Math.trunc(params.limit)));
+    const rows = this.db
+      .query<ScanWakeupRow & { payload: string }>(
+        `SELECT workflow_id, workflow_name, version, input, step_name, signal_name, payload
+         FROM (
+           SELECT w.workflow_id, w.workflow_name, w.version, w.input,
+             j.key AS step_name, g.signal_name, g.payload,
+             ROW_NUMBER() OVER (PARTITION BY w.workflow_id ORDER BY j.key) AS rn
+           FROM ${this._t} w, json_each(w.steps) j
+           JOIN ${this._t}_signals g
+             ON g.workflow_id = w.workflow_id
+            AND g.signal_name = json_extract(j.value, '$.signalName')
+           WHERE w.status = 'suspended' ${after}
+             AND json_extract(j.value, '$.status') = 'waiting_for_signal'
+             AND g.id = (
+               SELECT MAX(g2.id) FROM ${this._t}_signals g2
+               WHERE g2.workflow_id = g.workflow_id AND g2.signal_name = g.signal_name
+             )
+         )
+         WHERE rn = 1
+         ORDER BY workflow_id
+         LIMIT ?`,
+      )
+      .all(...args);
+    return rows.map((r) => ({
+      workflowId: r.workflow_id,
+      workflowName: r.workflow_name,
+      ...(r.version != null ? { version: r.version } : {}),
+      input: JSON.parse(r.input),
+      stepName: r.step_name,
+      reason: "signal" as const,
+      signalName: r.signal_name!,
+      signalPayload: JSON.parse(r.payload),
+    }));
+  }
+
+  async listOrphanedRuns(params: {
+    now: Date;
+    updatedBefore: Date;
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<OrphanedRun[]> {
+    const after = params.afterWorkflowId !== undefined ? "AND w.workflow_id > ?" : "";
+    const args: unknown[] = [params.updatedBefore.getTime()];
+    if (params.afterWorkflowId !== undefined) args.push(params.afterWorkflowId);
+    args.push(params.now.getTime(), Math.max(0, Math.trunc(params.limit)));
+    const rows = this.db
+      .query<{
+        workflow_id: string;
+        workflow_name: string;
+        version: string | null;
+        status: string;
+        input: string;
+        metadata: string | null;
+      }>(
+        `SELECT w.workflow_id, w.workflow_name, w.version, w.status, w.input, w.metadata
+         FROM ${this._t} w
+         WHERE w.status IN ('pending', 'running')
+           AND w.updated_at < ? ${after}
+           AND NOT EXISTS (
+             SELECT 1 FROM ${this._t}_locks l
+             WHERE l.workflow_id = w.workflow_id AND l.expires_at > ?
+           )
+         ORDER BY w.workflow_id
+         LIMIT ?`,
+      )
+      .all(...args);
+    return rows.map((r) => ({
+      workflowId: r.workflow_id,
+      workflowName: r.workflow_name,
+      ...(r.version != null ? { version: r.version } : {}),
+      status: r.status as "pending" | "running",
+      input: JSON.parse(r.input),
+      ...(r.metadata != null ? { metadata: JSON.parse(r.metadata) } : {}),
+    }));
+  }
+
   async loadRunHistory(
     workflowId: string,
     params?: { limit?: number; offset?: number },
@@ -2029,6 +2179,17 @@ function sqliteOrderByClause(orderBy?: WorkflowOrderBy, orderDir?: "asc" | "desc
     default:
       return asc ? "started_at ASC NULLS LAST" : "started_at DESC";
   }
+}
+
+/** Row shape shared by the scanner queries. */
+interface ScanWakeupRow {
+  workflow_id: string;
+  workflow_name: string;
+  version: string | null;
+  input: string;
+  step_name: string;
+  reason?: string;
+  signal_name: string | null;
 }
 
 /** Revive date strings in JSON-parsed StepState objects (JSON.parse gives strings, not Dates). */

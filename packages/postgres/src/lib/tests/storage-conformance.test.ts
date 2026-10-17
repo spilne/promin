@@ -34,6 +34,7 @@ postgresDescribe("PostgresWorkflowStorage conformance", { migrate }, (pg) => {
       hasJournal: true,
       hasJournaledSuspend: true,
       hasResetSteps: true,
+      hasScannerQueries: true,
       createPeer: () => PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false }),
     },
   );

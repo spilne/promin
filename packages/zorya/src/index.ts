@@ -75,6 +75,7 @@ export {
   InMemoryWorkflowStartQueue,
   type WorkflowStartQueue,
   type WorkflowStartRecord,
+  type WorkflowStartClaimRef,
   type WorkerWorkflowSpec,
 } from "./server/workflow-starts.ts";
 export {

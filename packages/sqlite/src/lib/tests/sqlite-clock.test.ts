@@ -83,7 +83,7 @@ describe("SqliteWorkflowAdvertisementRegistry on a FakeWallClock", () => {
       clock,
     });
     clock.advance(1_000);
-    await registry.upsert("w1", [{ name: "n", steps: [] }]);
+    await registry.upsert({ workerId: "w1", workflows: [{ name: "n", steps: [] }] });
 
     const [entry] = await registry.list();
     expect(entry!.advertisedAt.toISOString()).toBe("2026-01-01T00:00:01.000Z");

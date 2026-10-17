@@ -1,12 +1,25 @@
 import { describe, expect, it } from "bun:test";
 import { stepQueueTestSuite } from "@promin/workflow/testing";
 import { RedisStepQueue } from "../redis-step-queue.ts";
+import { RedisLeaderLeaseStore } from "../redis-leader-lease-store.ts";
 import { redisDescribe, uniquePrefix, type RedisTestContext } from "./redis-test-utils.ts";
 
 redisDescribe("RedisStepQueue conformance", (redis) => {
   stepQueueTestSuite(
     ({ maxDeliveries }) =>
       new RedisStepQueue({ redis: redis.client(), prefix: uniquePrefix("sq"), maxDeliveries }),
+    {
+      leaseFenced: () => {
+        const client = redis.client();
+        const leases = new RedisLeaderLeaseStore({ redis: client, prefix: uniquePrefix("lease") });
+        const queue = new RedisStepQueue({
+          redis: client,
+          prefix: uniquePrefix("sq"),
+          leaseStore: leases,
+        });
+        return { queue, leases };
+      },
+    },
   );
 });
 

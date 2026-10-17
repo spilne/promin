@@ -1,24 +1,22 @@
 // ---------------------------------------------------------------------------
 // SleepScanner — resumes suspended workflows whose sleep has expired
 //
-// Periodically queries for workflows with status "suspended" and steps
-// with status "sleeping" whose wakeAt has passed. Resumes them by
-// re-running the workflow (engine skips completed steps automatically).
+// Periodically asks storage for suspended runs with a due timer: a sleeping
+// step whose `wakeAt` has passed, or a signal wait whose `signalTimeoutAt`
+// has passed. Resumes them by re-running the workflow (the engine skips
+// completed steps automatically), several at once.
 //
 // This enables durable sleeps of any duration — minutes to years.
 // The workflow process doesn't need to stay running during the sleep.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage } from "../durable/workflow-storage.ts";
+import type { WorkflowStorage, WorkflowWakeup } from "../durable/workflow-storage.ts";
 import type { Workflow } from "../durable/durable-pipeline.ts";
 import type { WorkflowRunner } from "../durable/workflow-runner.ts";
+import type { WorkflowState } from "../durable/workflow-state.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
-import {
-  PollLoop,
-  describeError,
-  isNetworkError,
-  type PollLoopErrorInfo,
-} from "../shared/poll-loop.ts";
+import type { LeaderElection } from "./leader-election.ts";
+import { ResumeScanner } from "./resume-scanner.ts";
 
 export interface SleepScannerConfig {
   /** Workflow storage to scan for expired sleeps. */
@@ -34,7 +32,8 @@ export interface SleepScannerConfig {
   /**
    * Resolve a pure `Workflow` definition by name. The scanner passes the
    * returned definition back to the runner for resumption; it doesn't bind
-   * storage itself.
+   * storage itself. A name it can't resolve is reported once through
+   * `onError` and its runs are skipped.
    */
   resolveWorkflow: (workflowName: string) => Workflow<unknown, unknown> | undefined;
   /** Called when a workflow is resumed. */
@@ -48,6 +47,20 @@ export interface SleepScannerConfig {
    * re-ticks the scan loop deterministically.
    */
   clock?: WallClock;
+  /**
+   * Resumes run at once, at most. A resume lasts until the run next
+   * suspends or finishes, so one long resume holds one slot instead of
+   * every other wake-up. Default: 10.
+   */
+  resumeConcurrency?: number;
+  /**
+   * Only the leader scans. Pass a `LeaseLeaderElection` with key
+   * `scannerLeaderKey({ scanner: "sleep", namespace })` when several
+   * instances run the scanner. Default: every instance scans.
+   */
+  leaderElection?: LeaderElection;
+  /** Runs fetched per storage query. Default: 100. */
+  pageSize?: number;
 }
 
 export interface SleepScanner {
@@ -57,117 +70,108 @@ export interface SleepScanner {
    * once the scanner has stopped.
    */
   start(): Promise<void>;
-  /** Stop scanning. Resolves once the in-flight scan (if any) has finished. */
+  /**
+   * Stop scanning. Resolves once the in-flight scan and the resumes it
+   * started have finished, and leadership (if any) has been released.
+   */
   stop(): Promise<void>;
 }
 
 export class DefaultSleepScanner implements SleepScanner {
-  private readonly storage: WorkflowStorage;
-  private readonly runner: WorkflowRunner;
-  private readonly scanIntervalMs: number;
-  private readonly resolveWorkflow: SleepScannerConfig["resolveWorkflow"];
-  private readonly onResume?: SleepScannerConfig["onResume"];
-  private readonly onError?: SleepScannerConfig["onError"];
-  private readonly clock: WallClock;
-  private readonly loop: PollLoop;
+  private readonly scanner: ResumeScanner<WorkflowWakeup>;
 
   constructor(config: SleepScannerConfig) {
-    this.storage = config.storage;
-    this.runner = config.runner;
-    this.scanIntervalMs = config.scanIntervalMs ?? 10_000;
-    this.resolveWorkflow = config.resolveWorkflow;
-    this.onResume = config.onResume;
-    this.onError = config.onError;
-    this.clock = config.clock ?? SystemWallClock;
-    this.loop = new PollLoop({
+    const storage = config.storage;
+    const clock = config.clock ?? SystemWallClock;
+    const pageSize = config.pageSize ?? 100;
+    this.scanner = new ResumeScanner<WorkflowWakeup>({
       name: "sleep-scanner",
-      intervalMs: this.scanIntervalMs,
-      clock: this.clock,
-      tick: () => this.scan(),
-      onError: (err, info) => this.reportScanError(err, info),
+      runner: config.runner,
+      intervalMs: config.scanIntervalMs ?? 10_000,
+      clock,
+      resolveWorkflow: config.resolveWorkflow,
+      onResume: config.onResume,
+      onError: config.onError,
+      leaderElection: config.leaderElection,
+      resumeConcurrency: config.resumeConcurrency,
+      find: async ({ afterWorkflowId }) => {
+        const now = clock.now();
+        if (storage.listDueTimers) {
+          const rows = await storage.listDueTimers({
+            now,
+            limit: pageSize,
+            ...(afterWorkflowId !== undefined && { afterWorkflowId }),
+          });
+          return { rows, done: rows.length < pageSize };
+        }
+        return { rows: await dueTimersByListing({ storage, now, pageSize }), done: true };
+      },
     });
   }
 
   start(): Promise<void> {
-    return this.loop.start();
+    return this.scanner.start();
   }
 
-  /** Stop scanning. Resolves once the in-flight scan (if any) has finished. */
   stop(): Promise<void> {
-    return this.loop.stop();
+    return this.scanner.stop();
   }
+}
 
-  /**
-   * Scan-loop failure: most often storage is briefly unreachable (dev
-   * hot-reload, restart). Network blips log tersely for the first few
-   * failures, then stay quiet; anything else logs loudly every time.
-   * `onError` gets a synthetic `"(scan-loop)"` id with the real error.
-   */
-  private reportScanError(err: unknown, info: PollLoopErrorInfo): void {
-    if (isNetworkError(err)) {
-      if (info.consecutiveFailures <= 3) {
-        console.warn(`[sleep-scanner] storage unreachable, retrying — ${describeError(err)}`);
-      }
-    } else {
-      console.error("[sleep-scanner] scan failed:", err);
+/**
+ * Fallback for storages without `listDueTimers`: list every suspended run
+ * and test its steps. Collects every page before anything is resumed, so
+ * resumes changing statuses can't make offset paging skip rows.
+ */
+async function dueTimersByListing(params: {
+  readonly storage: WorkflowStorage;
+  readonly now: Date;
+  readonly pageSize: number;
+}): Promise<WorkflowWakeup[]> {
+  const { storage, now, pageSize } = params;
+  const due: WorkflowWakeup[] = [];
+  for (let offset = 0; ; offset += pageSize) {
+    const page = await storage.listWorkflows({
+      status: "suspended",
+      limit: pageSize,
+      offset,
+      orderBy: "createdAt",
+      orderDir: "asc",
+    });
+    for (const wf of page) {
+      const wakeup = dueTimerOf(wf, now);
+      if (wakeup) due.push(wakeup);
     }
-    this.onError?.("(scan-loop)", err);
+    if (page.length < pageSize) break;
   }
+  return due;
+}
 
-  private async scan(): Promise<void> {
-    const now = this.clock.now();
-    let offset = 0;
-    const pageSize = 100;
-
-    while (!this.loop.stopRequested) {
-      const suspended = await this.storage.listWorkflows({
-        status: "suspended",
-        limit: pageSize,
-        offset,
-      });
-
-      for (const wf of suspended) {
-        if (this.loop.stopRequested) return;
-        for (const step of Object.values(wf.steps)) {
-          // Sleeping steps wake on `wakeAt`. Signal-waiting steps with a
-          // configured `signalTimeoutAt` also wake — the body's
-          // `ctx.signal({ timeout })` self-heals on replay (sees the
-          // timeout has passed, completes the journal entry with the
-          // timeout outcome, returns).
-          const sleepDue = step.status === "sleeping" && step.wakeAt && step.wakeAt <= now;
-          const signalTimedOut =
-            step.status === "waiting_for_signal" &&
-            step.signalTimeoutAt &&
-            step.signalTimeoutAt <= now;
-          if (sleepDue || signalTimedOut) {
-            await this.resumeWorkflow(wf.workflowId, wf.workflowName, wf.input);
-            break; // one resume per workflow per scan
-          }
-        }
-      }
-
-      if (suspended.length < pageSize) break;
-      offset += pageSize;
+function dueTimerOf(wf: WorkflowState, now: Date): WorkflowWakeup | undefined {
+  const base = {
+    workflowId: wf.workflowId,
+    workflowName: wf.workflowName,
+    input: wf.input,
+    ...(wf.version !== undefined && { version: wf.version }),
+  };
+  for (const step of Object.values(wf.steps)) {
+    if (step.status === "sleeping" && step.wakeAt && step.wakeAt <= now) {
+      return { ...base, stepName: step.stepName, reason: "sleep" };
     }
-  }
-
-  private async resumeWorkflow(
-    workflowId: string,
-    workflowName: string,
-    input: unknown,
-  ): Promise<void> {
-    const definition = this.resolveWorkflow(workflowName);
-    if (!definition) return;
-
-    try {
-      await this.runner.run({ workflow: definition, workflowId, input });
-      this.onResume?.(workflowId);
-    } catch (err) {
-      // WorkflowSuspendedError is expected if another sleep follows
-      if ((err as any)?._tag === "WorkflowSuspendedError") return;
-      this.onError?.(workflowId, err);
+    if (
+      step.status === "waiting_for_signal" &&
+      step.signalTimeoutAt &&
+      step.signalTimeoutAt <= now
+    ) {
+      return {
+        ...base,
+        stepName: step.stepName,
+        reason: "signal-timeout",
+        ...(step.signalName !== undefined && { signalName: step.signalName }),
+      };
     }
   }
+  return undefined;
 }
 
 export function createSleepScanner(config: SleepScannerConfig): SleepScanner {

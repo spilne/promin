@@ -9,7 +9,7 @@
 // same DB see one consolidated catalog.
 //
 // Lifecycle:
-//   - upsert(workerId, workflows) replaces the worker's row set atomically
+//   - upsert({ workerId, workflows }) replaces the worker's row set atomically
 //     (a worker that re-advertises with a smaller set drops the workflows
 //     it no longer hosts)
 //   - remove(workerId) deletes everything for that worker (graceful shutdown)
@@ -51,7 +51,8 @@ export class PgWorkflowAdvertisementRegistry implements WorkflowAdvertisementReg
     await ensureTableFromSchema(this.db, workflowAdvertisements);
   }
 
-  async upsert(workerId: string, workflows: AdvertisedWorkflow[]): Promise<void> {
+  async upsert(params: { workerId: string; workflows: AdvertisedWorkflow[] }): Promise<void> {
+    const { workerId, workflows } = params;
     // Replace all rows for this worker atomically — a worker that
     // re-advertises with a smaller set should drop the workflows it no
     // longer hosts. Single transaction so a mid-replace failure leaves

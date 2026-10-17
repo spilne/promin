@@ -8,6 +8,15 @@
 // The factory receives the queue options a case needs (`maxDeliveries`);
 // a factory that ignores them only fails the dead-letter cases.
 //
+// Lease fencing of `requeueStuck` is opt-in: pass `leaseFenced`, a factory
+// for a queue wired to a lease store, plus that store:
+//   stepQueueTestSuite(factory, {
+//     leaseFenced: () => {
+//       const leases = new InMemoryLeaderLeases();
+//       return { queue: new InMemoryStepQueue({ leaderLeases: leases }), leases };
+//     },
+//   });
+//
 // Routing model: tasks declare `needs: string[]`; workers claim via
 // `capabilities: string[]`. A task is claimable when `needs ⊆ capabilities`.
 // Empty needs = unrestricted; empty capabilities = generalist (can only
@@ -16,6 +25,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { deadLetterError, type StepQueue, type StepQueueEnqueueParams } from "./step-queue.ts";
+import { isStaleLeaseError, type LeaderLeaseStore } from "../scheduler/leader-lease.ts";
 
 /** Queue options a conformance case asks the factory for. */
 export interface StepQueueTestOptions {
@@ -23,8 +33,25 @@ export interface StepQueueTestOptions {
   maxDeliveries?: number;
 }
 
+/** A queue that fences `requeueStuck({ lease })` against `leases`. */
+export interface LeaseFencedStepQueue {
+  queue: StepQueue;
+  leases: LeaderLeaseStore;
+}
+
+/** Opt-in conformance groups. */
+export interface StepQueueTestSuiteOptions {
+  /**
+   * Run the `requeueStuck` lease-fencing cases against queues from this
+   * factory. Each call should return an empty queue; lease keys are unique
+   * per case, so the lease store may be shared.
+   */
+  leaseFenced?: () => LeaseFencedStepQueue | Promise<LeaseFencedStepQueue>;
+}
+
 export function stepQueueTestSuite(
   factory: (options: StepQueueTestOptions) => StepQueue | Promise<StepQueue>,
+  suiteOptions: StepQueueTestSuiteOptions = {},
 ) {
   let queue: StepQueue;
 
@@ -934,6 +961,89 @@ export function stepQueueTestSuite(
         });
       });
     });
+
+    // -------------------------------------------------------------------
+    // requeueStuck — leader-lease fencing (opt-in)
+    // -------------------------------------------------------------------
+
+    const leaseFenced = suiteOptions.leaseFenced;
+    if (leaseFenced) {
+      describe("requeueStuck lease fencing", () => {
+        let keySeq = 0;
+        const leaseKey = () =>
+          `step-queue-sweep/${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${++keySeq}`;
+
+        async function acquire(params: {
+          leases: LeaderLeaseStore;
+          key: string;
+          instanceId: string;
+        }) {
+          const lease = await params.leases.tryAcquireLeader({ ...params, ttlMs: 60_000 });
+          expect(lease).not.toBeNull();
+          return lease!;
+        }
+
+        /** The old leader's lease, after another instance took the key over. */
+        async function takenOver(leases: LeaderLeaseStore) {
+          const key = leaseKey();
+          const old = await acquire({ leases, key, instanceId: "coord-a" });
+          await leases.releaseLeader({ lease: old });
+          const current = await acquire({ leases, key, instanceId: "coord-b" });
+          expect(current.epoch).not.toBe(old.epoch);
+          return { old, current };
+        }
+
+        it("sweeps under the current lease", async () => {
+          const { queue: q, leases } = await leaseFenced();
+          const lease = await acquire({ leases, key: leaseKey(), instanceId: "coord-a" });
+          await q.enqueue(task("a", "s"));
+          const [claimed] = await q.claim({ workerId: "w-dead", limit: 1 });
+
+          const res = await q.requeueStuck({ mode: "worker", workerId: "w-dead", lease });
+          expect(res).toEqual({ requeued: 1, deadLettered: 0 });
+          expect((await q.get(claimed!.id))?.status).toBe("pending");
+        });
+
+        it("rejects a stale lease and leaves the stuck task running", async () => {
+          const { queue: q, leases } = await leaseFenced();
+          await q.enqueue(task("a", "s"));
+          const [claimed] = await q.claim({ workerId: "w-dead", limit: 1 });
+          const { old, current } = await takenOver(leases);
+
+          const err = await q.requeueStuck({ mode: "worker", workerId: "w-dead", lease: old }).then(
+            () => undefined,
+            (e: unknown) => e,
+          );
+          expect(isStaleLeaseError(err)).toBe(true);
+
+          const after = await q.get(claimed!.id);
+          expect(after?.status).toBe("running");
+          expect(after?.claimedBy).toBe("w-dead");
+          expect(after?.claimToken).toBe(claimed!.claimToken);
+          expect(after?.deliveries).toBe(1);
+
+          // The new leader's sweep goes through.
+          expect(
+            await q.requeueStuck({ mode: "worker", workerId: "w-dead", lease: current }),
+          ).toEqual({ requeued: 1, deadLettered: 0 });
+        });
+
+        it("rejects a stale lease in stale mode", async () => {
+          const { queue: q, leases } = await leaseFenced();
+          await q.enqueue(task("a", "s"));
+          const [claimed] = await q.claim({ workerId: "w-dead", limit: 1 });
+          const { old } = await takenOver(leases);
+          await new Promise((r) => setTimeout(r, 10));
+
+          const err = await q.requeueStuck({ mode: "stale", olderThanMs: 1, lease: old }).then(
+            () => undefined,
+            (e: unknown) => e,
+          );
+          expect(isStaleLeaseError(err)).toBe(true);
+          expect((await q.get(claimed!.id))?.status).toBe("running");
+        });
+      });
+    }
 
     // -------------------------------------------------------------------
     // attempt / deliveries / maxDeliveries

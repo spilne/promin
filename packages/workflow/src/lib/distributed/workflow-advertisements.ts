@@ -44,15 +44,20 @@ export interface AdvertisementEntry {
 }
 
 export interface WorkflowAdvertisementRegistry {
-  /** Replace the advertisement for a worker. Called on worker startup. */
-  upsert(workerId: string, workflows: AdvertisedWorkflow[]): Promise<void>;
+  /**
+   * Replace the advertisement for a worker and stamp `advertisedAt` from the
+   * registry's clock. Called on worker startup and heartbeat refresh.
+   */
+  upsert(params: { workerId: string; workflows: AdvertisedWorkflow[] }): Promise<void>;
   /** Remove a worker's advertisement. Called on worker shutdown / death. */
   remove(workerId: string): Promise<void>;
   /** List every outstanding advertisement entry. */
   list(): Promise<AdvertisementEntry[]>;
   /**
    * Distinct workflows across all workers, one row per (name, version).
-   * Used to populate dispatch lookups and the dashboard's Workflows page.
+   * When several workers advertise the same (name, version), the most
+   * recent advertisement (`advertisedAt`) wins. Sorted by name. Used to
+   * populate dispatch lookups and the dashboard's Workflows page.
    */
   distinct(): Promise<AdvertisedWorkflow[]>;
 }
@@ -70,7 +75,8 @@ export class InMemoryWorkflowAdvertisementRegistry implements WorkflowAdvertisem
     this.clock = config.clock ?? SystemWallClock;
   }
 
-  async upsert(workerId: string, workflows: AdvertisedWorkflow[]): Promise<void> {
+  async upsert(params: { workerId: string; workflows: AdvertisedWorkflow[] }): Promise<void> {
+    const { workerId, workflows } = params;
     this.byWorker.set(workerId, { workerId, workflows, advertisedAt: this.clock.now() });
   }
 
@@ -83,9 +89,14 @@ export class InMemoryWorkflowAdvertisementRegistry implements WorkflowAdvertisem
   }
 
   async distinct(): Promise<AdvertisedWorkflow[]> {
-    // Dedupe on (name, version); last advertisement wins (newer replaces older)
+    // Dedupe on (name, version). Walk entries oldest first so the most
+    // recent advertisement overwrites older ones; Map insertion order
+    // would keep a re-upserted worker at its first position.
+    const entries = [...this.byWorker.values()].sort(
+      (a, b) => a.advertisedAt.getTime() - b.advertisedAt.getTime(),
+    );
     const byKey = new Map<string, AdvertisedWorkflow>();
-    for (const entry of this.byWorker.values()) {
+    for (const entry of entries) {
       for (const wf of entry.workflows) {
         byKey.set(`${wf.name}@${wf.version ?? ""}`, wf);
       }

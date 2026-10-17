@@ -2,12 +2,12 @@
 // WorkflowWorker — polls step queue, executes steps, checkpoints results
 //
 // Supports both:
-// - Per-step options (retry, onFailure, compensate) via StepRegistry
+// - Per-step options (retry, onFailure) via StepRegistry
 // - Global middleware + hooks on the worker itself
 // ---------------------------------------------------------------------------
 
 import { runHookValue } from "../shared/eff.ts";
-import type { TaggedError } from "../shared/tagged-error.ts";
+import type { RetryPolicy } from "../shared/retry-policy.ts";
 import { SystemWallClock, type WallClock, type TimerHandle } from "../shared/wall-clock.ts";
 import { PollLoop, type PollTickResult } from "../shared/poll-loop.ts";
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
@@ -16,6 +16,7 @@ import type { StepRegistry, StepContext, StepRegistration } from "./step-registr
 import type { StepQueue, StepTask } from "./step-queue.ts";
 import type { WorkerMiddleware } from "./middleware.ts";
 import type { WorkerRegistry } from "./worker-registry.ts";
+import { retryAsync } from "./retry.ts";
 
 // ---------------------------------------------------------------------------
 // Hooks
@@ -25,6 +26,12 @@ export interface WorkerHooks {
   beforeStep?: (task: StepTask) => void | Promise<void>;
   afterStep?: (task: StepTask, result: unknown, durationMs: number) => void | Promise<void>;
   onError?: (task: StepTask, error: unknown, durationMs: number) => void | Promise<void>;
+  /**
+   * The worker lost its claim on a running task: a heartbeat found it
+   * reclaimed (this worker stalled past the stale timeout) or gone. The
+   * handler's `ctx.signal` is aborted and its outcome will not be written.
+   */
+  onLeaseLost?: (task: StepTask) => void | Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +119,11 @@ export type WorkerErrorPhase =
   /** A `WorkerHooks` callback threw; the step outcome is unaffected. */
   | "hook"
   /**
+   * A task heartbeat failed (storage / network). The task keeps running;
+   * if heartbeats keep failing its lease goes stale and it is redelivered.
+   */
+  | "heartbeat"
+  /**
    * Giving a `taskFilter`-rejected task back failed; it is redelivered
    * once its lease goes stale.
    */
@@ -139,10 +151,14 @@ export interface WorkflowWorker {
    */
   start(): Promise<void>;
   /**
-   * Stop claiming, wait for the in-flight claim and every running task to
-   * finish, then deregister.
+   * Stop claiming, wait for the in-flight claim and the running tasks to
+   * finish, then deregister. With `timeoutMs`, tasks still running after
+   * that long are given back to the queue (`release`, so another worker
+   * claims them at once instead of after the stale timeout) and their
+   * handlers' `ctx.signal` is aborted; their outcomes are not written.
+   * Without it, stop waits for every task.
    */
-  stop(): Promise<void>;
+  stop(params?: { readonly timeoutMs?: number }): Promise<void>;
   readonly workerId: string;
 }
 
@@ -180,7 +196,11 @@ export class DefaultWorker implements WorkflowWorker {
   private readonly clock: WallClock;
   private readonly onError: (event: WorkerErrorEvent) => void;
   private readonly pollLoop: PollLoop;
-  private activeCount = 0;
+  /** Running tasks, by task id, with the controller behind their `ctx.signal`. */
+  private readonly active = new Map<
+    string,
+    { readonly task: StepTask; readonly controller: AbortController }
+  >();
   /** The last claim filled every free slot, so more work is likely queued. */
   private backlogLikely = false;
   private idleWaiters: (() => void)[] = [];
@@ -233,7 +253,7 @@ export class DefaultWorker implements WorkflowWorker {
     await this.pollLoop.start();
   }
 
-  async stop(): Promise<void> {
+  async stop(params?: { readonly timeoutMs?: number }): Promise<void> {
     // Stop claiming first. Awaiting the loop means a claim already in
     // flight has handed its tasks to `launch` before we wait for them.
     await this.pollLoop.stop();
@@ -243,8 +263,20 @@ export class DefaultWorker implements WorkflowWorker {
       await this.workerRegistry.drain(this.workerId);
     }
 
-    if (this.activeCount > 0) {
-      await new Promise<void>((resolve) => this.idleWaiters.push(resolve));
+    if (this.active.size > 0) {
+      const idle = new Promise<void>((resolve) => this.idleWaiters.push(resolve));
+      const timeoutMs = params?.timeoutMs;
+      if (timeoutMs === undefined) {
+        await idle;
+      } else {
+        let timer: TimerHandle | undefined;
+        const timedOut = new Promise<"timeout">((resolve) => {
+          timer = this.clock.setTimeout(() => resolve("timeout"), timeoutMs);
+        });
+        const result = await Promise.race([idle, timedOut]);
+        timer?.clear();
+        if (result === "timeout") await this.releaseUnfinished();
+      }
     }
 
     // Deregister and stop heartbeat
@@ -264,7 +296,7 @@ export class DefaultWorker implements WorkflowWorker {
    * the queue is drained and the loop goes back to polling.
    */
   private async claimOnce(): Promise<PollTickResult> {
-    const free = this.concurrency - this.activeCount;
+    const free = this.concurrency - this.active.size;
     if (free <= 0) return "idle";
 
     // Routing is pushed into the claim: the queue only hands out tasks for
@@ -304,12 +336,13 @@ export class DefaultWorker implements WorkflowWorker {
   }
 
   private launch(task: StepTask): void {
-    this.activeCount++;
-    void this.executeTask(task)
+    const controller = new AbortController();
+    this.active.set(task.id, { task, controller });
+    void this.executeTask(task, controller)
       .catch((error: unknown) => this.report({ phase: "task", error, task }))
       .finally(() => {
-        this.activeCount--;
-        if (this.activeCount === 0) {
+        this.active.delete(task.id);
+        if (this.active.size === 0) {
           const waiters = this.idleWaiters;
           this.idleWaiters = [];
           for (const resolve of waiters) resolve();
@@ -317,6 +350,29 @@ export class DefaultWorker implements WorkflowWorker {
         // A slot just freed: claim straight away while there's a backlog.
         if (this.backlogLikely) this.pollLoop.wake();
       });
+  }
+
+  /**
+   * Stop-timeout path: give every task still running back to the queue so
+   * another worker picks it up now, and abort its handler. The task's own
+   * commit then finds its claim gone and writes nothing.
+   */
+  private async releaseUnfinished(): Promise<void> {
+    const unfinished = [...this.active.values()];
+    await Promise.all(
+      unfinished.map(async ({ task, controller }) => {
+        controller.abort(
+          new WorkerStoppingError(
+            `worker ${this.workerId} stopped before task ${task.id} finished`,
+          ),
+        );
+        try {
+          await this.stepQueue.release({ taskId: task.id, claimToken: task.claimToken ?? "" });
+        } catch (error) {
+          this.report({ phase: "release", error, task });
+        }
+      }),
+    );
   }
 
   private report(event: WorkerErrorEvent): void {
@@ -332,21 +388,58 @@ export class DefaultWorker implements WorkflowWorker {
    * `onFailure` strategy), then commit it. Nothing is written until the
    * outcome is known, so a throwing strategy can't half-commit.
    */
-  private async executeTask(task: StepTask): Promise<void> {
+  private async executeTask(task: StepTask, controller: AbortController): Promise<void> {
     const startTime = this.clock.currentTimeMs();
-    const taskHeartbeatTimer = this.clock.setInterval(() => {
-      this.stepQueue.heartbeat({ taskId: task.id, claimToken: task.claimToken }).catch(() => {});
+    const taskHeartbeatTimer: TimerHandle = this.clock.setInterval(() => {
+      void this.heartbeatTask({ task, controller, timer: taskHeartbeatTimer });
     }, this.heartbeatIntervalMs);
 
     try {
-      const outcome = await this.computeOutcome(task, startTime);
+      const outcome = await this.computeOutcome({ task, startTime, signal: controller.signal });
+      // Lease lost or given back on stop: the task belongs to someone else.
+      if (controller.signal.aborted) return;
       await this.commit(task, outcome, startTime);
     } finally {
       taskHeartbeatTimer.clear();
     }
   }
 
-  private async computeOutcome(task: StepTask, startTime: number): Promise<StepOutcome> {
+  /**
+   * Extend the task's lease. `false` means the claim is gone (the task was
+   * reclaimed after this worker stalled, or settled elsewhere): abort the
+   * handler, stop heartbeating and tell `onLeaseLost`. A failed heartbeat
+   * is only reported; the next one may get through.
+   */
+  private async heartbeatTask(params: {
+    readonly task: StepTask;
+    readonly controller: AbortController;
+    readonly timer: TimerHandle;
+  }): Promise<void> {
+    const { task, controller, timer } = params;
+    if (controller.signal.aborted) return;
+    let held: boolean;
+    try {
+      held = await this.stepQueue.heartbeat({ taskId: task.id, claimToken: task.claimToken });
+    } catch (error) {
+      this.report({ phase: "heartbeat", error, task });
+      return;
+    }
+    if (held || controller.signal.aborted) return;
+    timer.clear();
+    controller.abort(new TaskLeaseLostError(`lost the claim on task ${task.id}`));
+    try {
+      await this.hooks.onLeaseLost?.(task);
+    } catch (error) {
+      this.report({ phase: "hook", error, task });
+    }
+  }
+
+  private async computeOutcome(params: {
+    readonly task: StepTask;
+    readonly startTime: number;
+    readonly signal: AbortSignal;
+  }): Promise<StepOutcome> {
+    const { task, startTime, signal } = params;
     const elapsed = () => this.clock.currentTimeMs() - startTime;
     const registration = this.registry.resolve(task.stepName);
 
@@ -362,6 +455,7 @@ export class DefaultWorker implements WorkflowWorker {
       workflowId: task.workflowId,
       stepName: task.stepName,
       attempt: task.attempt,
+      signal,
     };
 
     try {
@@ -489,29 +583,15 @@ export class DefaultWorker implements WorkflowWorker {
 
     // Wrap with step-level retry (from StepOptions)
     if (options?.retry) {
-      const retryPolicy = options.retry;
+      const policy = options.retry as RetryPolicy<unknown>;
       const innerBase = base;
-      base = async (ctx: StepContext): Promise<unknown> => {
-        const maxRetries = retryPolicy.maxRetries ?? 3;
-        const baseDelayMs = retryPolicy.baseDelayMs ?? 250;
-        const when = retryPolicy.when;
-        let lastError: unknown;
-
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
-          try {
-            if (attempt > 0) {
-              await new Promise<void>((r) =>
-                this.clock.setTimeout(() => r(), baseDelayMs * Math.pow(2, attempt - 1)),
-              );
-            }
-            return await innerBase({ ...ctx, attempt: ctx.attempt + attempt });
-          } catch (err) {
-            lastError = err;
-            if (when && !when(err as TaggedError)) throw err;
-          }
-        }
-        throw lastError;
-      };
+      base = (ctx: StepContext): Promise<unknown> =>
+        retryAsync({
+          policy,
+          clock: this.clock,
+          signal: ctx.signal,
+          run: (retry) => innerBase({ ...ctx, attempt: ctx.attempt + retry }),
+        });
     }
 
     // Wrap with global middleware (right to left)
@@ -528,6 +608,16 @@ export class DefaultWorker implements WorkflowWorker {
     if (keys.length === 0) return task.input;
     return results;
   }
+}
+
+/** Abort reason when a heartbeat finds the task's claim gone. */
+export class TaskLeaseLostError extends Error {
+  override readonly name = "TaskLeaseLostError";
+}
+
+/** Abort reason for tasks still running when `stop({ timeoutMs })` gives up on them. */
+export class WorkerStoppingError extends Error {
+  override readonly name = "WorkerStoppingError";
 }
 
 function errorMessage(err: unknown): string {

@@ -26,9 +26,10 @@ describe("QueuedWorkflows.trigger", () => {
     const storage = new InMemoryWorkflowStorage();
     const queue = new InMemoryWorkflowStartQueue();
     const advertisements = new InMemoryWorkflowAdvertisementRegistry();
-    await advertisements.upsert("worker-1", [
-      { name: "video", steps: [{ name: "encode", kind: "single", dependsOn: [] }] },
-    ]);
+    await advertisements.upsert({
+      workerId: "worker-1",
+      workflows: [{ name: "video", steps: [{ name: "encode", kind: "single", dependsOn: [] }] }],
+    });
 
     const workflows = new QueuedWorkflows({
       storage,
@@ -102,7 +103,7 @@ describe("QueuedWorkflows.rerun", () => {
       workflowSpecs: [{ name: "wf", versions: [] }],
       limit: 10,
     });
-    for (const c of claimed) await queue.complete(c.id);
+    for (const c of claimed) await queue.complete({ id: c.id, claimToken: c.claimToken! });
 
     await workflows.rerun(workflowId);
     const list = await queue.list();
