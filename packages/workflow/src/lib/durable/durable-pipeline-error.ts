@@ -6,12 +6,28 @@ export class WorkflowError extends TaggedError("WorkflowError")<{
   readonly message: string;
 }>() {}
 
-/** A step-level execution error. */
+/**
+ * A step-level execution error. On the executor path it stands in for an
+ * error that could not cross the executor boundary; `errorTag` keeps the
+ * original error's `_tag` when the executor reported it.
+ */
 export class StepError extends TaggedError("StepError")<{
   readonly workflowId: string;
   readonly stepName: string;
   readonly message: string;
+  readonly errorTag?: string;
   readonly cause?: unknown;
+}>() {}
+
+/**
+ * A stored run ended `failed`. Raised by `WorkflowHandle.result()`, which
+ * reads the outcome back from storage: `stepName` is the step whose row is
+ * `failed`, when there is one, and `message` the stored error.
+ */
+export class WorkflowFailedError extends TaggedError("WorkflowFailedError")<{
+  readonly workflowId: string;
+  readonly stepName?: string;
+  readonly message: string;
 }>() {}
 
 /** A storage backend error. */

@@ -84,6 +84,7 @@ export {
 export {
   WorkflowError,
   StepError,
+  WorkflowFailedError,
   StorageError,
   WorkflowLockError,
   WorkflowSuspendedError,
@@ -112,6 +113,7 @@ export {
   type StepExecutor,
   type StepExecutionRequest,
   type StepExecutionResult,
+  type StepAttemptFailure,
   type RecoveryResult,
   type StaleTerminationAction,
 } from "./workflow-runner.ts";

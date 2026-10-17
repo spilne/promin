@@ -552,6 +552,20 @@ export class ZoryaWorker {
           result: result.result,
           durationMs,
         });
+      } else if (result.kind === "suspended") {
+        // Journaled step suspended (sleep / signal). The journal entry was
+        // already written to storage by `runJournaledStep`; don't fail or
+        // complete the queue task — let its lease expire so it gets
+        // requeued when the journal entry resumes.
+        return;
+      } else if (result.kind === "continue-as-new") {
+        // A queued step cannot restart the run it belongs to.
+        await this.failStepTask(
+          task,
+          result.message ?? `Step "${task.stepName}" requested continue-as-new`,
+          durationMs,
+          startedAt,
+        );
       } else {
         await this.failStepTask(task, result.error, durationMs, startedAt);
       }

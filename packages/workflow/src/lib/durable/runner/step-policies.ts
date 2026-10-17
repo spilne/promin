@@ -26,12 +26,19 @@ import { StepTimeoutError } from "../durable-pipeline-error.ts";
  * strategy. `invoke` runs again on every retry. A step that does not settle
  * within `timeoutMs` (measured on `clock`) fails with `StepTimeoutError`;
  * the abandoned attempt is interrupted. Retry backoff sleeps on `clock`.
+ * `onAttemptFailed` sees each attempt's typed failure before retry does.
  */
 export function applyStepPolicies(params: {
   stepDef: StepDefinition;
   workflowId: string;
   clock: WallClock;
   invoke: () => Eff<unknown, Throws<TaggedError>>;
+  /**
+   * Called once per attempt that fails with a typed error (a timeout
+   * included), before retry decides whether to run another. Defects do not
+   * reach it.
+   */
+  onAttemptFailed?: (error: unknown) => void;
 }): Eff<unknown, Throws<TaggedError>> {
   const { stepDef, workflowId, clock } = params;
   let raw: Eff<unknown, Throws<TaggedError>> = suspend(params.invoke);
@@ -55,6 +62,14 @@ export function applyStepPolicies(params: {
         ),
       ),
     ]);
+  }
+
+  const onAttemptFailed = params.onAttemptFailed;
+  if (onAttemptFailed) {
+    raw = raw.catch((err) => {
+      onAttemptFailed(err);
+      return fail(err) as Eff<never, Throws<TaggedError>>;
+    });
   }
 
   if (stepDef.retry) {

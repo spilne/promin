@@ -7,7 +7,7 @@
 
 import type { WallClock } from "../../shared/wall-clock.ts";
 import type { WorkflowHandle, WorkflowStatusInfo } from "../durable-pipeline.ts";
-import { WorkflowTripwireError } from "../durable-pipeline-error.ts";
+import { WorkflowFailedError, WorkflowTripwireError } from "../durable-pipeline-error.ts";
 import { createWorkflowEventStream } from "../workflow-event-stream.ts";
 import type { StepState, WorkflowRunEvent, WorkflowState } from "../workflow-state.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
@@ -23,7 +23,23 @@ export function findTripwireStep(steps: Record<string, StepState>): StepState | 
 }
 
 /**
- * Build a `WorkflowHandle` over a known `workflowId`. `getStatus` and
+ * The step whose row is `failed` — the one that failed the run. With
+ * several, the latest to finish.
+ */
+function findFailedStep(steps: Record<string, StepState>): StepState | undefined {
+  let latest: StepState | undefined;
+  for (const step of Object.values(steps)) {
+    if (step.status !== "failed") continue;
+    const at = step.completedAt?.getTime() ?? 0;
+    if (latest === undefined || at > (latest.completedAt?.getTime() ?? 0)) latest = step;
+  }
+  return latest;
+}
+
+/**
+ * Build a `WorkflowHandle` over a known `workflowId`. `result()` rejects with
+ * `WorkflowFailedError` for a failed run and `WorkflowTripwireError` for a
+ * tripwired one. `getStatus` and
  * `subscribe` back the handle's `status` and `events`.
  */
 export function createWorkflowHandle<Output>(params: {
@@ -52,7 +68,12 @@ export function createWorkflowHandle<Output>(params: {
         const state = await storage.loadWorkflow(workflowId);
         if (state?.status === "completed") return state.result as Output;
         if (state?.status === "failed") {
-          throw new Error(state.error ?? `Workflow ${workflowId} failed`);
+          const failedStep = findFailedStep(state.steps);
+          throw new WorkflowFailedError({
+            workflowId,
+            ...(failedStep !== undefined && { stepName: failedStep.stepName }),
+            message: state.error ?? `Workflow ${workflowId} failed`,
+          });
         }
         if (state?.status === "tripwire") {
           // Report the tripwire step's name in the error.
