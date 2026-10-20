@@ -8,9 +8,12 @@
 // can resume a wait the real definition already started (the wake time,
 // signal name and deadline are on the stored step row) but can't start one,
 // because the duration / signal name only exist in the definition.
+// Subworkflow (`child`) steps also run on the coordinator, but the child
+// definition, its input and its id only exist in the parent's definition,
+// so their stub bodies fail the step with an error saying so.
 // ---------------------------------------------------------------------------
 
-import { fail, succeed, type Eff, type Throws } from "@spilne/perfect-core";
+import { die, fail, succeed, type Eff, type Throws } from "@spilne/perfect-core";
 import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
 import type {
   ExecuteParams,
@@ -29,7 +32,7 @@ type StubOutcome = { readonly value: unknown } | { readonly error: TaggedError }
 /**
  * Build a Workflow from a persisted DAG. Ordinary step bodies throw (the
  * distributed runner sends them to workers); `sleep` and `signal` steps get
- * resume-only bodies (see the file header).
+ * resume-only bodies and `child` steps fail (see the file header).
  */
 export function buildStubWorkflow(
   dag: WorkflowDAG,
@@ -71,6 +74,15 @@ function stubBody(params: {
           "error" in outcome ? fail(outcome.error) : succeed(outcome.value),
       );
     };
+  }
+  if (kind === "child") {
+    return () =>
+      die(
+        new Error(
+          `stub workflow step "${stepName}" runs a child workflow, which only the real ` +
+            `definition knows; register the workflow definition so the run can start it`,
+        ),
+      );
   }
   return () => {
     throw new Error(

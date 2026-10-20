@@ -93,6 +93,13 @@ export interface DistributedRunnerConfig {
    */
   stepPollIntervalMs?: number;
   /**
+   * How long a queued step may go without an outcome before it fails with
+   * `StepWaitTimeoutError`. A wait also ends, failing the step with
+   * `StepWaitAbandonedError`, when the run is deleted or reaches a terminal
+   * status. `Infinity` waits forever. Default: 24 hours.
+   */
+  stepWaitTimeoutMs?: number;
+  /**
    * How often the leader looks for orphaned runs (pending / running runs
    * nobody holds the lock of) after the scan it does on becoming leader.
    * Default: 60 000.
@@ -241,6 +248,9 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
       }),
       pollIntervalMs: stepPollIntervalMs,
       staleTimeoutMs: this.workerTimeoutMs,
+      ...(config.stepWaitTimeoutMs !== undefined && {
+        stepWaitTimeoutMs: config.stepWaitTimeoutMs,
+      }),
       clock: this.clock,
       onError: (error, info) =>
         onError({ source: "step-wait", error, consecutiveFailures: info.consecutiveFailures }),

@@ -203,13 +203,17 @@ base.step("s", () => succeed(1), { onFailure: { handler: () => "skip" } });
 // @ts-expect-error — StepOptions.show was never read and is removed
 base.step("s", () => succeed(1), { show: () => "" });
 
-// The queue key sees prev and deps (its runtime context), not a mistyped input.
+// The queue key sees the workflow input, prev and deps (its runtime context).
 export const _queue: StepQueueOption = {
   concurrencyLimit: 1,
   concurrencyKey: (ctx) => `${String(ctx.prev)}:${Object.keys(ctx.deps).length}`,
 };
 export const _queueInput: StepQueueOption = {
   concurrencyLimit: 1,
-  // @ts-expect-error — ctx.input is not part of the queue-key context
+  concurrencyKey: (ctx) => (ctx.input as { tenantId: string }).tenantId,
+};
+export const _queueInputUnknown: StepQueueOption = {
+  concurrencyLimit: 1,
+  // @ts-expect-error — ctx.input is the untyped workflow input, not a string
   concurrencyKey: (ctx) => ctx.input,
 };

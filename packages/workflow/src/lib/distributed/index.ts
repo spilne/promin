@@ -79,7 +79,12 @@ export {
   loggingMiddleware,
   metricsMiddleware,
 } from "./middleware.ts";
-export { StepQueueExecutor } from "./step-queue-executor.ts";
+export {
+  StepQueueExecutor,
+  StepWaitTimeoutError,
+  StepWaitAbandonedError,
+  DEFAULT_STEP_WAIT_TIMEOUT_MS,
+} from "./step-queue-executor.ts";
 export {
   type WorkflowAdvertisementRegistry,
   type AdvertisedWorkflow,

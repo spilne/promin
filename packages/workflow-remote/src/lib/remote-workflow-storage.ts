@@ -27,6 +27,8 @@ import type {
   StepAttemptRecord,
   SignalTokenRecord,
   StreamChunk,
+  WorkflowWakeup,
+  OrphanedRun,
 } from "@promin/workflow";
 import { WIRE_CODEC, type RpcResponse, type StorageMethod } from "./wire.ts";
 
@@ -383,6 +385,38 @@ export class RemoteWorkflowStorage
     params: { olderThanMs: number; limit: number } | { from: Date; to: Date; limit: number },
   ): Promise<number> {
     return this.call("purgeCompleted", params);
+  }
+
+  // -------------------------------------------------------------------------
+  // Scanner / recovery queries. Forwarded over the wire so the sleep and
+  // signal scanners and coordinator recovery run the backend's indexed
+  // queries instead of paging `listWorkflows`. The server feature-detects on
+  // the backing storage and surfaces a clear error if it lacks one (every
+  // bundled backend implements all three).
+  // -------------------------------------------------------------------------
+
+  listDueTimers(params: {
+    now: Date;
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<WorkflowWakeup[]> {
+    return this.call("listDueTimers", params);
+  }
+
+  listSignalWakeups(params: {
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<WorkflowWakeup[]> {
+    return this.call("listSignalWakeups", params);
+  }
+
+  listOrphanedRuns(params: {
+    now: Date;
+    updatedBefore: Date;
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<OrphanedRun[]> {
+    return this.call("listOrphanedRuns", params);
   }
 
   // -------------------------------------------------------------------------
