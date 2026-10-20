@@ -7,40 +7,19 @@
 
 import type { WallClock } from "../../shared/wall-clock.ts";
 import type { WorkflowHandle, WorkflowStatusInfo } from "../durable-pipeline.ts";
-import { WorkflowFailedError, WorkflowTripwireError } from "../durable-pipeline-error.ts";
 import { createWorkflowEventStream } from "../workflow-event-stream.ts";
 import type { StepState, WorkflowRunEvent, WorkflowState } from "../workflow-state.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
+import { findTripwireStep, storedRunError } from "./run-status.ts";
 
-/**
- * The step whose row carries `metadata.tripwireFired = true` — the
- * `.tripwire()` step that ended a run with status `tripwire`.
- */
-export function findTripwireStep(steps: Record<string, StepState>): StepState | undefined {
-  return Object.values(steps).find(
-    (s) => (s.metadata as { tripwireFired?: boolean } | undefined)?.tripwireFired === true,
-  );
-}
-
-/**
- * The step whose row is `failed` — the one that failed the run. With
- * several, the latest to finish.
- */
-function findFailedStep(steps: Record<string, StepState>): StepState | undefined {
-  let latest: StepState | undefined;
-  for (const step of Object.values(steps)) {
-    if (step.status !== "failed") continue;
-    const at = step.completedAt?.getTime() ?? 0;
-    if (latest === undefined || at > (latest.completedAt?.getTime() ?? 0)) latest = step;
-  }
-  return latest;
-}
+export { findTripwireStep } from "./run-status.ts";
 
 /**
  * Build a `WorkflowHandle` over a known `workflowId`. `result()` rejects with
- * `WorkflowFailedError` for a failed run and `WorkflowTripwireError` for a
- * tripwired one. `getStatus` and
- * `subscribe` back the handle's `status` and `events`.
+ * `WorkflowFailedError` for a failed run (carrying the stored `errorTag`),
+ * `WorkflowCancelledError` for a cancelled one and `WorkflowTripwireError`
+ * for a tripwired one. `getStatus` and `subscribe` back the handle's
+ * `status` and `events`.
  */
 export function createWorkflowHandle<Output>(params: {
   workflowId: string;
@@ -67,24 +46,8 @@ export function createWorkflowHandle<Output>(params: {
       while (clock.currentTimeMs() < deadline) {
         const state = await storage.loadWorkflow(workflowId);
         if (state?.status === "completed") return state.result as Output;
-        if (state?.status === "failed") {
-          const failedStep = findFailedStep(state.steps);
-          throw new WorkflowFailedError({
-            workflowId,
-            ...(failedStep !== undefined && { stepName: failedStep.stepName }),
-            message: state.error ?? `Workflow ${workflowId} failed`,
-          });
-        }
-        if (state?.status === "tripwire") {
-          // Report the tripwire step's name in the error.
-          const firedStep = findTripwireStep(state.steps);
-          throw new WorkflowTripwireError({
-            workflowId,
-            stepName: firedStep?.stepName ?? "unknown",
-            reason: state.tripwire,
-            message: `Workflow "${workflowId}" ended via tripwire`,
-          });
-        }
+        const ended = state ? storedRunError(state) : undefined;
+        if (ended !== undefined) throw ended;
         await new Promise((r) => clock.setTimeout(() => r(undefined), intervalMs));
       }
       throw new Error(`Workflow ${workflowId} did not complete within ${timeoutMs}ms`);
@@ -131,6 +94,7 @@ export function toStatusInfo(params: {
     state: state.status === "compensating" ? "failed" : state.status,
     result: state.status === "completed" ? state.result : undefined,
     error: state.error,
+    ...(state.errorTag !== undefined && { errorTag: state.errorTag }),
     tripwire: state.status === "tripwire" ? state.tripwire : undefined,
     currentStep,
     suspendedReason,

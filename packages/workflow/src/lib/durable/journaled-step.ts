@@ -37,7 +37,7 @@
 //     nothing.
 // ---------------------------------------------------------------------------
 
-import type { RetryPolicy } from "../shared/retry-policy.ts";
+import { retryAsync, type RetryPolicy } from "../shared/retry-policy.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
 import { LosslessJsonCodec, payloadHash as hashPayload } from "@spilne/perfect-core/connect";
@@ -2222,8 +2222,11 @@ async function discardFailedAttempt(params: {
  *    back completed work would turn a deploy problem into data loss.
  *  - `AmbiguousActivityOutcome`: the workflow halts so an operator can
  *    inspect the external system before anything else runs.
- *  - `WorkflowLockError` / `FenceTokenMismatchError`: this worker lost the
- *    workflow; the new owner re-drives it from storage.
+ *  - `WorkflowLockError` / `FenceTokenMismatchError` /
+ *    `WorkflowLockLostError`: this worker lost the workflow; the new owner
+ *    re-drives it from storage.
+ *  - `CheckpointError`: a durable write failed past its retries; recovery
+ *    re-drives the workflow.
  */
 const NON_COMPENSATING_EXITS: ReadonlySet<string> = new Set([
   "WorkflowSuspendedError",
@@ -2233,6 +2236,8 @@ const NON_COMPENSATING_EXITS: ReadonlySet<string> = new Set([
   "AmbiguousActivityOutcome",
   "WorkflowLockError",
   "FenceTokenMismatchError",
+  "WorkflowLockLostError",
+  "CheckpointError",
 ]);
 
 /** Whether a body error is a genuine failure that unwinds compensations. */
@@ -2248,36 +2253,30 @@ function errorTag(err: unknown): string | undefined {
   return typeof tag === "string" ? tag : undefined;
 }
 
-// ---------------------------------------------------------------------------
-// Local retry runner — intentionally small.
-// ---------------------------------------------------------------------------
-
-async function runWithRetry<T>(params: {
+/**
+ * Run an activity body under its retry policy on the shared retry loop.
+ * Class-based classification wins over the policy's `when`: a
+ * `TerminalError` is never retried, a `RetryableError` always is (while
+ * retries remain), so a lax predicate can't re-run the first and a strict
+ * one can't skip the second.
+ */
+function runWithRetry<T>(params: {
   fn: () => Promise<T>;
   policy: RetryPolicy<unknown>;
   clock: WallClock;
 }): Promise<T> {
-  const { fn, policy, clock } = params;
-  const maxRetries = policy.maxRetries ?? 3;
-  const baseDelay = policy.baseDelayMs ?? 100;
-  const maxDelay = policy.maxDelayMs ?? Infinity;
-  const jitter = policy.jitter ?? false;
-
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    try {
-      return await fn();
-    } catch (err) {
-      // Class-based classification first — these take precedence over the
-      // predicate so a TerminalError can't be re-retried by a lax `when`,
-      // and a RetryableError can't be skipped by a strict one.
-      if (err instanceof TerminalError) throw err;
-      const forcedRetry = err instanceof RetryableError;
-      if (!forcedRetry && policy.when && !policy.when(err)) throw err;
-      if (attempt >= maxRetries) throw err;
-      let delay = Math.min(baseDelay * 2 ** attempt, maxDelay);
-      if (jitter) delay *= 0.75 + Math.random() * 0.5;
-      await new Promise<void>((r) => clock.setTimeout(() => r(), delay));
-    }
-  }
-  throw new Error("unreachable");
+  const { policy } = params;
+  const userWhen = policy.when;
+  return retryAsync({
+    policy: {
+      ...policy,
+      when: (err) => {
+        if (err instanceof TerminalError) return false;
+        if (err instanceof RetryableError) return true;
+        return userWhen === undefined || userWhen(err);
+      },
+    },
+    clock: params.clock,
+    run: () => params.fn(),
+  });
 }

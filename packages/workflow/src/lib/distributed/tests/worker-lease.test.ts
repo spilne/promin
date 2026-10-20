@@ -10,7 +10,7 @@ import { DefaultWorker, TaskLeaseLostError, WorkerStoppingError } from "../worke
 import { InMemoryStepQueue } from "../in-memory-step-queue.ts";
 import { MapStepRegistry } from "../step-registry.ts";
 import { InMemoryWorkerRegistry } from "../worker-registry.ts";
-import { retryAsync } from "../retry.ts";
+import { retryAsync } from "../../shared/retry-policy.ts";
 import { InMemoryWorkflowStorage } from "../../durable/in-memory-storage.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
 

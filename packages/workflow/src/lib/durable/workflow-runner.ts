@@ -109,6 +109,11 @@ export type WorkflowRunnerRunParams =
       readonly workflow: Workflow<unknown, unknown>;
       readonly workflowId: string;
       readonly input: unknown;
+      /**
+       * Skip the idempotency cache, and run a workflow whose stored run already
+       * ended (completed, failed, cancelled, tripwire) as a fresh run instead of
+       * answering with that outcome.
+       */
       readonly force?: boolean;
       /** Optional namespace used for workflow creation and idempotency-key scoping. */
       readonly namespace?: string;
@@ -134,6 +139,11 @@ export type WorkflowRunnerRunParams =
       readonly version?: string;
       readonly workflowId: string;
       readonly input: unknown;
+      /**
+       * Skip the idempotency cache, and run a workflow whose stored run already
+       * ended (completed, failed, cancelled, tripwire) as a fresh run instead of
+       * answering with that outcome.
+       */
       readonly force?: boolean;
       /** Optional namespace used for workflow creation and idempotency-key scoping. */
       readonly namespace?: string;

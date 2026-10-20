@@ -5,8 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import type { Sinkable } from "../../shared/streamable.ts";
-import type { TaggedError } from "../../shared/tagged-error.ts";
-import type { RetryPolicy } from "../../shared/retry-policy.ts";
+import type { WorkflowRetryPolicy } from "../../shared/retry-policy.ts";
 import type { WallClock } from "../../shared/wall-clock.ts";
 import type {
   CompensateConfig,
@@ -34,7 +33,7 @@ export interface WorkflowOrchestrationContext {
   readonly type?: string;
   readonly metadata?: Record<string, unknown>;
   readonly steps: ReadonlyArray<StepDefinition>;
-  readonly retry?: RetryPolicy<TaggedError>;
+  readonly retry?: WorkflowRetryPolicy;
   readonly compensateConfig?: CompensateConfig;
   readonly dlq?: Sinkable<FailedWorkflowRecord>;
   readonly dispatch?: DispatchConfig;

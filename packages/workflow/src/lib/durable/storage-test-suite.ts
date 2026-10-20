@@ -1669,6 +1669,106 @@ export function storageTestSuite(
     });
 
     // -------------------------------------------------------------------
+    // error tags, status reads, lock loss
+    // -------------------------------------------------------------------
+
+    describe("error tags and status", () => {
+      it("saveStepFailure stores the step's errorTag; an untagged failure has none", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "etag-step", workflowName: "t", input: {} });
+        await s.saveStepFailure({
+          workflowId: "etag-step",
+          stepName: "tagged",
+          error: "card declined",
+          errorTag: "PaymentDeclined",
+          durationMs: 1,
+          startedAt: new Date(),
+        });
+        await s.saveStepFailure({
+          workflowId: "etag-step",
+          stepName: "plain",
+          error: "boom",
+          durationMs: 1,
+          startedAt: new Date(),
+        });
+        const steps = (await s.loadWorkflow("etag-step"))!.steps;
+        expect(steps["tagged"]!.errorTag).toBe("PaymentDeclined");
+        expect(steps["tagged"]!.error).toBe("card declined");
+        expect(steps["plain"]!.errorTag).toBeUndefined();
+      });
+
+      it("failWorkflow stores the errorTag; fresh runs clear it", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "etag-wf", workflowName: "t", input: {} });
+        await s.failWorkflow("etag-wf", "card declined", undefined, {
+          errorTag: "PaymentDeclined",
+        });
+        const failed = (await s.loadWorkflow("etag-wf"))!;
+        expect(failed.status).toBe("failed");
+        expect(failed.errorTag).toBe("PaymentDeclined");
+        expect(await s.loadWorkflowStatus("etag-wf")).toEqual({
+          status: "failed",
+          error: "card declined",
+          errorTag: "PaymentDeclined",
+        });
+
+        await s.startFreshRun("etag-wf");
+        const fresh = (await s.loadWorkflow("etag-wf"))!;
+        expect(fresh.errorTag).toBeUndefined();
+        expect(fresh.error).toBeUndefined();
+      });
+
+      it("cancelWorkflow stores the cancel tag", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "etag-cancel", workflowName: "t", input: {} });
+        await s.cancelWorkflow("etag-cancel");
+        expect((await s.loadWorkflow("etag-cancel"))!.errorTag).toBe("WorkflowCancelledError");
+        expect(await s.loadWorkflowStatus("etag-cancel")).toEqual({
+          status: "failed",
+          error: "Cancelled",
+          errorTag: "WorkflowCancelledError",
+        });
+      });
+
+      it("loadWorkflowStatus reads a live run without error fields, and null when absent", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "status-live", workflowName: "t", input: {} });
+        expect(await s.loadWorkflowStatus("status-live")).toEqual({ status: "pending" });
+        await s.completeWorkflow("status-live", "done");
+        expect(await s.loadWorkflowStatus("status-live")).toEqual({ status: "completed" });
+        expect(await s.loadWorkflowStatus("status-missing")).toBeNull();
+      });
+
+      it("a fenced heartbeat rejects once the lock is held under another token", async () => {
+        const s = await getStorage();
+        const peer = await getPeer(s);
+        const stale = await s.tryLock("hb-lost", 1);
+        expect(stale.acquired).toBe(true);
+        if (stale.token === undefined) return; // backend without fencing
+        await sleep(30);
+        const fresh = await peer.tryLock("hb-lost", 30_000);
+        expect(fresh.acquired).toBe(true);
+
+        await expect(
+          s.heartbeat("hb-lost", 30_000, { fenceToken: stale.token }),
+        ).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" });
+        // The holder's own heartbeat still extends.
+        await peer.heartbeat("hb-lost", 30_000, { fenceToken: fresh.token });
+        await peer.releaseLock("hb-lost", { fenceToken: fresh.token });
+      });
+
+      it("a fenced heartbeat rejects once the lock was released", async () => {
+        const s = await getStorage();
+        const held = await s.tryLock("hb-gone", 30_000);
+        if (held.token === undefined) return; // backend without fencing
+        await s.releaseLock("hb-gone", { fenceToken: held.token });
+        await expect(
+          s.heartbeat("hb-gone", 30_000, { fenceToken: held.token }),
+        ).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" });
+      });
+    });
+
+    // -------------------------------------------------------------------
     // parent / run source persistence, filters and cascade cancel
     // -------------------------------------------------------------------
 

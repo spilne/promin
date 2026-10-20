@@ -313,6 +313,34 @@ Step fails
 - `compensate.retry` retries individual compensation functions
 - `onFailure: "skip"` or `{ fallback }` prevents compensation (workflow continues)
 
+**Retry defaults.** Every retry (step `retry`, workflow `retry`, activity `retry`,
+`compensate.retry`, the state machine's `retryMiddleware`, the distributed worker) runs on
+one loop (`retryAsync` / `retryWithPolicy` in `shared/retry-policy.ts`): 3 retries, 250ms
+base delay doubling per retry, no delay cap (`maxDelayMs: 0` is no cap), jitter off, the
+time budget measured from the first failure, all waits on the injected clock. Workflow-level
+and compensation retries only happen once a policy is set. The workflow-level retry never
+retries control flow, a spent deadline or a cancel, and retries defects only with
+`retryDefects: true`.
+
+**Run lifecycle.**
+
+- A run that already ended is not executed again: re-running a `completed` workflow returns
+  its result; a `failed`, cancelled or `tripwire` one rejects with `WorkflowFailedError`
+  (carrying the stored `errorTag`), `WorkflowCancelledError` or `WorkflowTripwireError`.
+  `force: true` archives the ended run and starts a fresh one; `runner.resume({ fromStep })`
+  re-drives a failed run from a step.
+- `handle.cancel()` during a run wins: the run stops at the next wave boundary and rejects with
+  `WorkflowCancelledError`; terminal writes are conditional, so a late completion never
+  overwrites the cancel. Completed steps are not compensated.
+- The `timeoutMs` deadline runs from the run's persisted start, across sleeps and signal waits.
+- Hooks are observers: a throwing hook is reported to `hooks.onHookError` (default
+  `console.error`) and never changes the outcome.
+- A durable write the run depends on (step checkpoint, terminal status) is retried; if it
+  still fails the run rejects with `CheckpointError` and stops as it stands (no compensation,
+  no `failWorkflow`). Recovery re-drives it later, so a step whose result was not saved runs
+  again (at-least-once). A lost lock stops the run at the next wave with
+  `WorkflowLockLostError`.
+
 ### Observability
 
 ```typescript

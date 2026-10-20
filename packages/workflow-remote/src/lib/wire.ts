@@ -14,6 +14,7 @@ import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
 /** Every name on the WorkflowStorage interface we can dispatch through. */
 export type StorageMethod =
   | "loadWorkflow"
+  | "loadWorkflowStatus"
   | "listWorkflows"
   | "distinctWorkflowNames"
   | "distinctWorkflowTypes"

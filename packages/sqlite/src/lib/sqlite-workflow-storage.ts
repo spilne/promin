@@ -1,4 +1,6 @@
 import {
+  CANCELLED_ERROR,
+  CANCELLED_ERROR_TAG,
   FenceTokenMismatchError,
   SystemWallClock,
   type WallClock,
@@ -17,6 +19,7 @@ import {
 } from "@promin/workflow";
 import type {
   WorkflowState,
+  WorkflowStatusSnapshot,
   WorkflowSummary,
   WorkflowStatus,
   WorkflowRunSummary,
@@ -110,6 +113,7 @@ export class SqliteWorkflowStorage
         input                TEXT    NOT NULL,
         result               TEXT,
         error                TEXT,
+        error_tag            TEXT,
         metadata             TEXT,
         steps                TEXT    NOT NULL DEFAULT '{}',
         run_source           INTEGER,
@@ -129,6 +133,7 @@ export class SqliteWorkflowStorage
       `ALTER TABLE ${t} ADD COLUMN run_source_id TEXT`,
       `ALTER TABLE ${t} ADD COLUMN idempotency_key TEXT`,
       `ALTER TABLE ${t} ADD COLUMN idempotency_expires_at INTEGER`,
+      `ALTER TABLE ${t} ADD COLUMN error_tag TEXT`,
     ]) {
       try {
         this.db.run(stmt);
@@ -359,6 +364,7 @@ export class SqliteWorkflowStorage
       input: JSON.parse(row.input),
       result: row.result != null ? JSON.parse(row.result) : undefined,
       error: row.error ?? undefined,
+      errorTag: row.error_tag ?? undefined,
       metadata: row.metadata != null ? JSON.parse(row.metadata) : undefined,
       runSource: decodeRunSource(row.run_source),
       runSourceId: row.run_source_id ?? undefined,
@@ -387,6 +393,20 @@ export class SqliteWorkflowStorage
   // ---------------------------------------------------------------------------
   // WorkflowStorage — CRUD
   // ---------------------------------------------------------------------------
+
+  async loadWorkflowStatus(workflowId: string): Promise<WorkflowStatusSnapshot | null> {
+    const row = this.db
+      .query<{ status: string; error: string | null; error_tag: string | null }>(
+        `SELECT status, error, error_tag FROM ${this._t} WHERE workflow_id = ?`,
+      )
+      .get(workflowId);
+    if (!row) return null;
+    return {
+      status: row.status as WorkflowStatus,
+      ...(row.error !== null && { error: row.error }),
+      ...(row.error_tag !== null && { errorTag: row.error_tag }),
+    };
+  }
 
   async loadWorkflow(workflowId: string): Promise<WorkflowState | null> {
     const row = this.db
@@ -755,10 +775,10 @@ export class SqliteWorkflowStorage
     this.db
       .query(
         `UPDATE ${this._t}
-         SET status = 'failed', error = 'Cancelled', completed_at = ?, updated_at = ?
+         SET status = 'failed', error = ?, error_tag = ?, completed_at = ?, updated_at = ?
          WHERE workflow_id = ? AND status IN ('pending', 'running', 'suspended')`,
       )
-      .run(now, now, workflowId);
+      .run(CANCELLED_ERROR, CANCELLED_ERROR_TAG, now, now, workflowId);
 
     if (options?.cascade) {
       const children = this.db
@@ -952,6 +972,7 @@ export class SqliteWorkflowStorage
       workflowId: string;
       stepName: string;
       error: string;
+      errorTag?: string;
       durationMs: number;
       startedAt: Date;
       metadata?: Record<string, unknown>;
@@ -978,6 +999,7 @@ export class SqliteWorkflowStorage
         dependsOn: existing?.dependsOn ?? [],
         stepType: existing?.stepType ?? "single",
         error: params.error,
+        ...(params.errorTag !== undefined && { errorTag: params.errorTag }),
         metadata: params.metadata ?? existing?.metadata,
         startedAt: params.startedAt,
         completedAt: new Date(now),
@@ -1113,16 +1135,21 @@ export class SqliteWorkflowStorage
       .run(JSON.stringify(result), now, now, workflowId);
   }
 
-  async failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void> {
+  async failWorkflow(
+    workflowId: string,
+    error: string,
+    guard?: FenceGuard,
+    details?: { readonly errorTag?: string },
+  ): Promise<void> {
     this._checkFence(workflowId, guard);
     const now = this.clock.currentTimeMs();
     this.db
       .query(
         `UPDATE ${this._t}
-         SET status = 'failed', error = ?, completed_at = ?, updated_at = ?
+         SET status = 'failed', error = ?, error_tag = ?, completed_at = ?, updated_at = ?
          WHERE workflow_id = ? AND status NOT IN ('completed', 'failed', 'tripwire')`,
       )
-      .run(error, now, now, workflowId);
+      .run(error, details?.errorTag ?? null, now, now, workflowId);
   }
 
   async suspendWorkflow(
@@ -1440,6 +1467,8 @@ export class SqliteWorkflowStorage
   async heartbeat(workflowId: string, lockDurationMs: number, guard?: FenceGuard): Promise<void> {
     const now = this.clock.currentTimeMs();
     if (guard?.fenceToken) {
+      // A token holder whose lock is gone or re-taken learns it lost the run.
+      this._checkFence(workflowId, guard);
       this.db
         .query(
           `UPDATE ${this._t}_locks SET expires_at = ?
@@ -1489,7 +1518,7 @@ export class SqliteWorkflowStorage
       this.db
         .query(
           `UPDATE ${this._t}
-           SET run = ?, status = 'pending', result = NULL, error = NULL,
+           SET run = ?, status = 'pending', result = NULL, error = NULL, error_tag = NULL,
                started_at = NULL, completed_at = NULL, steps = '{}', updated_at = ?
            WHERE workflow_id = ?`,
         )
@@ -1540,7 +1569,7 @@ export class SqliteWorkflowStorage
         this.db
           .query(
             `UPDATE ${this._t}
-             SET steps = ?, status = 'running', result = NULL, error = NULL,
+             SET steps = ?, status = 'running', result = NULL, error = NULL, error_tag = NULL,
                  completed_at = NULL, updated_at = ?
              WHERE workflow_id = ?`,
           )
@@ -2080,6 +2109,7 @@ interface WfRow {
   input: string;
   result: string | null;
   error: string | null;
+  error_tag: string | null;
   metadata: string | null;
   steps: string;
   run_source: number | null;

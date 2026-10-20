@@ -127,4 +127,40 @@ describe("ctx.activity retry — backoff waits on the injected clock", () => {
     expect(calls).toBe(3);
     expect(clock.pendingCount()).toBe(0);
   });
+
+  it("uses the shared retry defaults (250ms base) and honours timeBudgetMs", async () => {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    const at: number[] = [];
+    const body = function* (ctx: JournaledContext<unknown, unknown>) {
+      return yield* ctx.activity(
+        "flaky",
+        async () => {
+          at.push(clock.currentTimeMs() - Date.parse(T0));
+          throw new Error("down");
+        },
+        { retry: { timeBudgetMs: 700 } },
+      );
+    };
+
+    const done = runJournaledStep({
+      input: {},
+      prev: {},
+      workflowId: "jc-retry-defaults",
+      stepName: "work",
+      storage,
+      clock,
+      body,
+    }).catch((e: unknown) => e);
+
+    await waitFor(() => at.length === 1 && clock.pendingCount() === 1);
+    clock.advance(250);
+    await waitFor(() => at.length === 2 && clock.pendingCount() === 1);
+    clock.advance(500);
+    // Third failure lands 750ms after the first: past the 700ms budget.
+    const err = await done;
+    expect((err as Error).message).toBe("down");
+    expect(at).toEqual([0, 250, 750]);
+    expect(clock.pendingCount()).toBe(0);
+  });
 });

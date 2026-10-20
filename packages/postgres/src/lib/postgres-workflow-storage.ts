@@ -8,6 +8,7 @@ import type {
   StepAttemptStorage,
   RunSource,
   WorkflowState,
+  WorkflowStatusSnapshot,
   WorkflowRunSummary,
   WorkflowStatus,
   WorkflowOrderBy,
@@ -30,6 +31,8 @@ import type {
   OrphanedRun,
 } from "@promin/workflow";
 import {
+  CANCELLED_ERROR,
+  CANCELLED_ERROR_TAG,
   FenceTokenMismatchError,
   encodeRunSource,
   decodeRunSource,
@@ -174,6 +177,7 @@ export class PostgresWorkflowStorage
       input: row.input,
       result: row.result ?? undefined,
       error: row.error ?? undefined,
+      errorTag: row.errorTag ?? undefined,
       tripwire: row.tripwire ?? undefined,
       metadata: row.metadata ?? undefined,
       steps: stepMap,
@@ -193,6 +197,7 @@ export class PostgresWorkflowStorage
       stepType: StepTypeIds.toName(row.stepTypeId),
       result: row.result ?? undefined,
       error: row.error ?? undefined,
+      errorTag: row.errorTag ?? undefined,
       startedAt: row.startedAt ?? undefined,
       completedAt: row.completedAt ?? undefined,
       durationMs: row.durationMs ?? undefined,
@@ -222,6 +227,23 @@ export class PostgresWorkflowStorage
   // ---------------------------------------------------------------------------
   // WorkflowStorage implementation
   // ---------------------------------------------------------------------------
+
+  async loadWorkflowStatus(workflowId: string): Promise<WorkflowStatusSnapshot | null> {
+    const [row] = await this.db
+      .select({
+        statusId: workflows.statusId,
+        error: workflows.error,
+        errorTag: workflows.errorTag,
+      })
+      .from(workflows)
+      .where(eq(workflows.workflowId, workflowId));
+    if (!row) return null;
+    return {
+      status: WorkflowStatusIds.toName(row.statusId),
+      ...(row.error !== null && { error: row.error }),
+      ...(row.errorTag !== null && { errorTag: row.errorTag }),
+    };
+  }
 
   async loadWorkflow(workflowId: string): Promise<WorkflowState | null> {
     const [wfRow] = await this.db
@@ -386,7 +408,8 @@ export class PostgresWorkflowStorage
     const now = this.config.clock.now();
     const set = {
       statusId: WorkflowStatusIds.id.failed,
-      error: "Cancelled",
+      error: CANCELLED_ERROR,
+      errorTag: CANCELLED_ERROR_TAG,
       completedAt: now,
       updatedAt: now,
     };
@@ -668,6 +691,7 @@ export class PostgresWorkflowStorage
       workflowId: string;
       stepName: string;
       error: string;
+      errorTag?: string;
       durationMs: number;
       startedAt: Date;
       metadata?: Record<string, unknown>;
@@ -686,6 +710,7 @@ export class PostgresWorkflowStorage
         run,
         statusId: StepStatusIds.id.failed,
         error: params.error,
+        errorTag: params.errorTag ?? null,
         metadata: params.metadata,
         startedAt: params.startedAt,
         completedAt: now,
@@ -697,6 +722,7 @@ export class PostgresWorkflowStorage
         set: {
           statusId: StepStatusIds.id.failed,
           error: params.error,
+          errorTag: params.errorTag ?? null,
           ...(params.metadata !== undefined ? { metadata: params.metadata } : {}),
           completedAt: now,
           durationMs: params.durationMs,
@@ -831,12 +857,23 @@ export class PostgresWorkflowStorage
       );
   }
 
-  async failWorkflow(workflowId: string, error: string, guard?: FenceGuard): Promise<void> {
+  async failWorkflow(
+    workflowId: string,
+    error: string,
+    guard?: FenceGuard,
+    details?: { readonly errorTag?: string },
+  ): Promise<void> {
     await this.checkFence(workflowId, guard);
     const now = this.config.clock.now();
     await this.db
       .update(workflows)
-      .set({ statusId: WorkflowStatusIds.id.failed, error, completedAt: now, updatedAt: now })
+      .set({
+        statusId: WorkflowStatusIds.id.failed,
+        error,
+        errorTag: details?.errorTag ?? null,
+        completedAt: now,
+        updatedAt: now,
+      })
       .where(
         and(
           eq(workflows.workflowId, workflowId),
@@ -1017,7 +1054,7 @@ export class PostgresWorkflowStorage
     // Expiry is computed on the server clock, same as `tryRowLock`, so the
     // lease length doesn't drift with client/server skew.
     if (guard?.fenceToken) {
-      await this.db
+      const extended = await this.db
         .update(workflowLocks)
         .set({ expiresAt: serverNowPlusMs(lockDurationMs) })
         .where(
@@ -1025,7 +1062,11 @@ export class PostgresWorkflowStorage
             eq(workflowLocks.workflowId, workflowId),
             eq(workflowLocks.fenceToken, Number(guard.fenceToken)),
           ),
-        );
+        )
+        .returning({ fenceToken: workflowLocks.fenceToken });
+      // Nothing extended: the lock is gone or held under another token —
+      // the caller lost the run.
+      if (extended.length === 0) await this.checkFence(workflowId, guard, { lockGone: true });
       return;
     }
     await this.db
@@ -1045,7 +1086,11 @@ export class PostgresWorkflowStorage
    * token skip the check (fencing is additive — legacy call sites keep
    * working).
    */
-  private async checkFence(workflowId: string, guard?: FenceGuard): Promise<void> {
+  private async checkFence(
+    workflowId: string,
+    guard?: FenceGuard,
+    options?: { readonly lockGone?: boolean },
+  ): Promise<void> {
     if (!guard?.fenceToken) return;
     if (this.config.useAdvisoryLocks) return; // no per-row fence in advisory mode
     const [row] = await this.db
@@ -1053,7 +1098,10 @@ export class PostgresWorkflowStorage
       .from(workflowLocks)
       .where(eq(workflowLocks.workflowId, workflowId));
     const current = row ? String(row.fenceToken) : undefined;
-    if (current !== guard.fenceToken) {
+    // `lockGone`: the caller already saw its fenced write match nothing, so
+    // even a token that reads back as matching (a concurrent re-acquire
+    // cannot reuse it) means the lock moved.
+    if (current !== guard.fenceToken || options?.lockGone === true) {
       throw new FenceTokenMismatchError({
         workflowId,
         expected: current ?? "(no lock)",
@@ -1100,6 +1148,7 @@ export class PostgresWorkflowStorage
           statusId: WorkflowStatusIds.id.pending,
           result: null,
           error: null,
+          errorTag: null,
           tripwire: null,
           startedAt: null,
           completedAt: null,
@@ -1168,6 +1217,7 @@ export class PostgresWorkflowStorage
           statusId: WorkflowStatusIds.id.running,
           result: null,
           error: null,
+          errorTag: null,
           tripwire: null,
           completedAt: null,
           updatedAt: this.config.clock.now(),

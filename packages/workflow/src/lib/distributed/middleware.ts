@@ -5,7 +5,7 @@
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type { StepTask } from "./step-queue.ts";
 import type { StepContext } from "./step-registry.ts";
-import { retryAsync } from "./retry.ts";
+import { retryAsync } from "../shared/retry-policy.ts";
 
 /** The next function in the middleware chain. Call it to proceed. */
 export type NextFn = (ctx: StepContext) => Promise<unknown>;

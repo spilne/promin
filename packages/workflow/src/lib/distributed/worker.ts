@@ -7,7 +7,6 @@
 // ---------------------------------------------------------------------------
 
 import { runHookValue } from "../shared/eff.ts";
-import type { RetryPolicy } from "../shared/retry-policy.ts";
 import { SystemWallClock, type WallClock, type TimerHandle } from "../shared/wall-clock.ts";
 import { PollLoop, type PollTickResult } from "../shared/poll-loop.ts";
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
@@ -16,7 +15,7 @@ import type { StepRegistry, StepContext, StepRegistration } from "./step-registr
 import type { StepQueue, StepTask } from "./step-queue.ts";
 import type { WorkerMiddleware } from "./middleware.ts";
 import type { WorkerRegistry } from "./worker-registry.ts";
-import { retryAsync } from "./retry.ts";
+import { retryAsync, type RetryPolicy } from "../shared/retry-policy.ts";
 
 // ---------------------------------------------------------------------------
 // Hooks

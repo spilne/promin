@@ -56,6 +56,10 @@ export {
   WORKFLOW_STATUSES,
   TERMINAL_WORKFLOW_STATUSES,
   isTerminalWorkflowStatus,
+  CANCELLED_ERROR,
+  CANCELLED_ERROR_TAG,
+  isCancelledRun,
+  type WorkflowStatusSnapshot,
   encodeRunSource,
   decodeRunSource,
   InMemoryWorkflowStorage,
@@ -70,6 +74,9 @@ export {
   WorkflowError,
   StepError,
   WorkflowFailedError,
+  WorkflowCancelledError,
+  CheckpointError,
+  WorkflowLockLostError,
   StorageError,
   WorkflowLockError,
   WorkflowSuspendedError,
@@ -385,7 +392,13 @@ export {
 // Plain-data contracts shared by the engine and its storage/transport
 // packages: persisted retry shape, typed-error constraint, step cache,
 // and dead-letter / schedule source contracts.
-export { type RetryPolicy } from "./lib/shared/retry-policy.ts";
+export {
+  type RetryPolicy,
+  type WorkflowRetryPolicy,
+  RETRY_POLICY_DEFAULTS,
+  retryAsync,
+  retryDelayMs,
+} from "./lib/shared/retry-policy.ts";
 export { type TaggedError } from "./lib/shared/tagged-error.ts";
 export { type CacheStore, MemoryCache, type MemoryCacheConfig } from "./lib/shared/cache-store.ts";
 export { type Streamable, type Sinkable } from "./lib/shared/streamable.ts";

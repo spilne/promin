@@ -71,6 +71,9 @@ export const workflows = pgTable(
     metadata: jsonb("metadata"),
     result: jsonb("result"),
     error: text("error"),
+    // `_tag` of the error that failed the run; "WorkflowCancelledError"
+    // for a cancelled run.
+    errorTag: text("error_tag"),
     // Structured reason attached when the workflow ended via a `.tripwire()`
     // step. Present only for `status_id = tripwire (6)`; null otherwise.
     tripwire: jsonb("tripwire"),
@@ -157,6 +160,8 @@ export const workflowSteps = pgTable(
     dependsOn: jsonb("depends_on").$type<string[]>().notNull().default([]),
     result: jsonb("result"),
     error: text("error"),
+    // `_tag` of the error that failed the step.
+    errorTag: text("error_tag"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     durationMs: bigint("duration_ms", { mode: "number" }),
