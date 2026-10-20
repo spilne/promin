@@ -213,7 +213,7 @@ export {
   composeMachineMiddleware,
   retryMiddleware,
 } from "./state-machine.ts";
-export type { StateMachineStorage } from "./state-machine-storage.ts";
+export type { StateMachineStorage, StateMachineLockToken } from "./state-machine-storage.ts";
 export { InMemoryStateMachineStorage } from "./state-machine-storage.ts";
 export type {
   MachineSnapshot,

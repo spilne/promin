@@ -119,8 +119,8 @@ const order = stateMachine<OrderStates>({ name: "order", storage })
   .build();
 ```
 
-- `transition()` is compare-and-set: it applies only while the machine is still in `from`, and the snapshot update and history append happen together. Otherwise it throws.
-- `tryLock()` / `releaseLock()` use a per-holder token, so releasing never frees a lock another instance acquired after yours expired.
+- `transition()` is compare-and-set: it applies only while the machine is still in `from` at `expectedRevision`, and the snapshot update, revision bump and history append happen together. Otherwise it throws.
+- `tryLock()` returns a token; `releaseLock()` and `extendLock()` act only while the lock still holds it, so a holder whose lock expired never frees or extends the next holder's lock.
 - Terminal states registered by the state machine builder switch the keys to `terminalTtlMs`.
 
 ## Errors and connections

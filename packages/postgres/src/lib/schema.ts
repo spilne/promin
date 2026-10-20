@@ -557,6 +557,8 @@ export const machines = pgTable(
     metadata: jsonb("metadata"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    /** Committed transition count; `transition` compares and bumps it. */
+    revision: integer("revision").notNull().default(0),
   },
   (t) => [
     index("sm_machines_name_idx").on(t.name),
@@ -577,6 +579,7 @@ export const machineEvents = pgTable(
     fromState: text("from_state").notNull(),
     toState: text("to_state").notNull(),
     context: jsonb("context").notNull(),
+    eventData: jsonb("event_data"),
     metadata: jsonb("metadata"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

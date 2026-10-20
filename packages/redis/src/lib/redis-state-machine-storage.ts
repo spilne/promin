@@ -2,7 +2,7 @@
 // RedisStateMachineStorage — Redis adapter for StateMachineStorage
 //
 // Key layout:
-//   {prefix}:machine:{id}   — HASH with the machine snapshot
+//   {prefix}:machine:{id}   — HASH with the machine snapshot and revision
 //   {prefix}:events:{id}    — LIST of JSON transition events (append-only)
 //   {prefix}:lock:{id}      — STRING lock token with PX expiry
 // ---------------------------------------------------------------------------
@@ -10,6 +10,7 @@
 import {
   SystemWallClock,
   type MachineState,
+  type StateMachineLockToken,
   type StateMachineStorage,
   type TransitionEvent,
   type WallClock,
@@ -30,18 +31,21 @@ export interface RedisStateMachineStorageConfig {
 
 /**
  * Compare-and-set transition: only applies when the machine is still in
- * `from`, updating the snapshot, appending the event and refreshing TTLs in
- * one step. Returns the current state on mismatch, nil when missing, and
- * `true` on success.
+ * `from` at the expected revision, updating the snapshot, bumping the
+ * revision, appending the event and refreshing TTLs in one step. Returns
+ * `{current, revision}` on mismatch, nil when missing, and `1` on success.
+ * A machine written before revisions existed has no `revision` field; its
+ * history length stands in for it.
  *
  * KEYS: [machine_key, events_key]
- * ARGV: [from, to, context_json, updated_at, event_json, ttl_ms ('' = none)]
+ * ARGV: [from, to, context_json, updated_at, event_json, ttl_ms ('' = none), expected_revision]
  */
 const TRANSITION_LUA = `
 local current = redis.call('HGET', KEYS[1], 'current')
 if not current then return nil end
-if current ~= ARGV[1] then return {current} end
-redis.call('HSET', KEYS[1], 'current', ARGV[2], 'context', ARGV[3], 'updatedAt', ARGV[4])
+local revision = tonumber(redis.call('HGET', KEYS[1], 'revision') or redis.call('LLEN', KEYS[2]))
+if current ~= ARGV[1] or revision ~= tonumber(ARGV[7]) then return {current, revision} end
+redis.call('HSET', KEYS[1], 'current', ARGV[2], 'context', ARGV[3], 'updatedAt', ARGV[4], 'revision', revision + 1)
 redis.call('RPUSH', KEYS[2], ARGV[5])
 if ARGV[6] ~= '' then
   redis.call('PEXPIRE', KEYS[1], ARGV[6])
@@ -58,6 +62,14 @@ end
 return 0
 `;
 
+/** Move the lock's expiry only while it still holds our token. */
+const EXTEND_LOCK_LUA = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+`;
+
 export class RedisStateMachineStorage implements StateMachineStorage {
   private readonly redis: RedisStoreClient;
   private readonly prefix: string;
@@ -65,8 +77,6 @@ export class RedisStateMachineStorage implements StateMachineStorage {
   private readonly activeTtlMs?: number;
   private readonly clock: WallClock;
   private readonly terminalStates = new Set<string>();
-  /** Tokens of locks this instance holds, so release never frees someone else's lock. */
-  private readonly lockTokens = new Map<string, string>();
 
   constructor(config: RedisStateMachineStorageConfig) {
     this.redis = config.redis;
@@ -109,6 +119,7 @@ export class RedisStateMachineStorage implements StateMachineStorage {
       name: params.name,
       current: params.initial,
       context: JSON.stringify(params.context),
+      revision: "0",
       createdAt: now,
       updatedAt: now,
     };
@@ -129,6 +140,8 @@ export class RedisStateMachineStorage implements StateMachineStorage {
   async load(id: string): Promise<MachineState | null> {
     const raw = await this.redis.hgetall(this.machineKey(id));
     if (!raw || !raw.id) return null;
+    const revision =
+      raw.revision !== undefined ? Number(raw.revision) : await this.redis.llen(this.eventsKey(id));
     return {
       id: raw.id,
       name: raw.name ?? "",
@@ -138,6 +151,7 @@ export class RedisStateMachineStorage implements StateMachineStorage {
       context: raw.context !== undefined ? JSON.parse(raw.context) : undefined,
       version: raw.version ?? undefined,
       metadata: raw.metadata ? JSON.parse(raw.metadata) : undefined,
+      revision,
       createdAt: new Date(raw.createdAt ?? 0),
       updatedAt: new Date(raw.updatedAt ?? 0),
     };
@@ -147,6 +161,7 @@ export class RedisStateMachineStorage implements StateMachineStorage {
     id: string;
     from: string;
     to: string;
+    expectedRevision: number;
     event: string;
     context: unknown;
     eventData?: unknown;
@@ -176,12 +191,15 @@ export class RedisStateMachineStorage implements StateMachineStorage {
       now.toISOString(),
       JSON.stringify(event),
       ttlMs ? String(ttlMs) : "",
+      String(params.expectedRevision),
     );
     if (result === null || result === undefined) {
       throw new Error(`Machine ${params.id} not found`);
     }
     if (Array.isArray(result)) {
-      throw new Error(`Machine ${params.id} is in state "${result[0]}", not "${params.from}"`);
+      throw new Error(
+        `Machine ${params.id} is in state "${result[0]}" at revision ${result[1]}, not "${params.from}" at revision ${params.expectedRevision}`,
+      );
     }
   }
 
@@ -200,18 +218,34 @@ export class RedisStateMachineStorage implements StateMachineStorage {
     });
   }
 
-  async tryLock(id: string, durationMs: number): Promise<boolean> {
+  async tryLock(params: { id: string; durationMs: number }): Promise<StateMachineLockToken | null> {
     const token = crypto.randomUUID();
-    const result = await this.redis.set(this.lockKey(id), token, "PX", durationMs, "NX");
-    if (result !== "OK") return false;
-    this.lockTokens.set(id, token);
-    return true;
+    const result = await this.redis.set(
+      this.lockKey(params.id),
+      token,
+      "PX",
+      Math.max(1, Math.trunc(params.durationMs)),
+      "NX",
+    );
+    return result === "OK" ? token : null;
   }
 
-  async releaseLock(id: string): Promise<void> {
-    const token = this.lockTokens.get(id);
-    if (token === undefined) return;
-    this.lockTokens.delete(id);
-    await this.redis.eval(RELEASE_LOCK_LUA, 1, this.lockKey(id), token);
+  async releaseLock(params: { id: string; token: StateMachineLockToken }): Promise<void> {
+    await this.redis.eval(RELEASE_LOCK_LUA, 1, this.lockKey(params.id), params.token);
+  }
+
+  async extendLock(params: {
+    id: string;
+    token: StateMachineLockToken;
+    durationMs: number;
+  }): Promise<boolean> {
+    const result = await this.redis.eval(
+      EXTEND_LOCK_LUA,
+      1,
+      this.lockKey(params.id),
+      params.token,
+      String(Math.max(1, Math.trunc(params.durationMs))),
+    );
+    return Number(result) === 1;
   }
 }
