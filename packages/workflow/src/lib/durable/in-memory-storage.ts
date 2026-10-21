@@ -369,20 +369,24 @@ export class InMemoryWorkflowStorage
     }
   }
 
-  async createWorkflow(params: {
-    workflowId: string;
-    workflowName: string;
-    input: unknown;
-    workflowType?: string;
-    parentWorkflowId?: string;
-    namespace?: string;
-    metadata?: Record<string, unknown>;
-    version?: string;
-    runSource?: RunSource;
-    runSourceId?: string;
-    idempotencyKey?: string;
-    idempotencyExpiresAt?: Date;
-  }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
+  async createWorkflow(
+    params: {
+      workflowId: string;
+      workflowName: string;
+      input: unknown;
+      workflowType?: string;
+      parentWorkflowId?: string;
+      namespace?: string;
+      metadata?: Record<string, unknown>;
+      version?: string;
+      runSource?: RunSource;
+      runSourceId?: string;
+      idempotencyKey?: string;
+      idempotencyExpiresAt?: Date;
+    },
+    guard?: FenceGuard,
+  ): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
+    this.checkParentFence(params.parentWorkflowId, guard);
     // Idempotency-key path: if `(namespace, workflowName, idempotencyKey)` is already
     // claimed by an unexpired row, return that row instead. Mirrors the
     // partial-unique-index conflict resolution that postgres does
@@ -470,6 +474,18 @@ export class InMemoryWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     this.checkFence(params.workflowId, guard);
+    this.writeStepResult(params);
+  }
+
+  /** The unfenced body of `saveStepResult`; synchronous so a batch is one step. */
+  private writeStepResult(params: {
+    workflowId: string;
+    stepName: string;
+    result: unknown;
+    durationMs: number;
+    startedAt: Date;
+    metadata?: Record<string, unknown>;
+  }): void {
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return;
     this.markRunning(wf);
@@ -515,11 +531,10 @@ export class InMemoryWorkflowStorage
     }>,
     guard?: FenceGuard,
   ): Promise<void> {
-    // In-memory doesn't have a "batch" primitive to exploit — the loop-over-
-    // single-writes form is already O(n) with no round-trip amplification.
-    // Kept explicit (rather than delegating to the default helper) so the
-    // conformance suite's batch tests cover the actual method body here.
-    for (const r of records) await this.saveStepResult(r, guard);
+    // Every fence is checked before the first write and nothing awaits in
+    // between, so the batch lands whole or not at all.
+    for (const id of new Set(records.map((r) => r.workflowId))) this.checkFence(id, guard);
+    for (const r of records) this.writeStepResult(r);
   }
 
   async saveStepFailure(
@@ -802,7 +817,12 @@ export class InMemoryWorkflowStorage
     return [...(this.signals.get(workflowId) ?? [])];
   }
 
-  async setWorkflowMetadata(workflowId: string, patch: Record<string, unknown>): Promise<void> {
+  async setWorkflowMetadata(
+    workflowId: string,
+    patch: Record<string, unknown>,
+    guard?: FenceGuard,
+  ): Promise<void> {
+    this.checkFence(workflowId, guard);
     const wf = this.workflows.get(workflowId);
     if (!wf) return; // silent no-op on missing workflow — scrubs don't need to fail
     const current = wf.metadata ?? {};
@@ -873,10 +893,10 @@ export class InMemoryWorkflowStorage
   }
 
   /**
-   * Reject a mutating call when the caller's fence token doesn't match the
-   * current lock. `guard` is optional — legacy call sites that don't pass
-   * a token still succeed (fencing is additive during migration). Pass a
-   * token and back it up with a lock, or don't pass one at all.
+   * Reject a fenced write unless `guard.fenceToken` is the workflow's
+   * current, unexpired lock token. Every caller runs it before its first
+   * mutation with no `await` in between, so the check and the write are one
+   * synchronous step. Without a token the write is unfenced.
    */
   private checkFence(workflowId: string, guard?: FenceGuard): void {
     if (!guard?.fenceToken) return;
@@ -899,9 +919,27 @@ export class InMemoryWorkflowStorage
         message: `Fenced write for "${workflowId}" rejected — token mismatch (expected "${lock.token}", got "${guard.fenceToken}")`,
       });
     }
+    if (lock.expiresAt <= this.clock.currentTimeMs()) {
+      throw new FenceTokenMismatchError({
+        workflowId,
+        expected: "(expired)",
+        provided: guard.fenceToken,
+        message: `Fenced write for "${workflowId}" rejected — the lock for token "${guard.fenceToken}" expired`,
+      });
+    }
   }
 
-  async startFreshRun(workflowId: string): Promise<number> {
+  /** `checkFence` on the parent's lock — the fence of a child create. */
+  private checkParentFence(parentWorkflowId: string | undefined, guard?: FenceGuard): void {
+    if (!guard?.fenceToken) return;
+    if (parentWorkflowId === undefined) {
+      throw new Error("createWorkflow: a fenced create needs parentWorkflowId");
+    }
+    this.checkFence(parentWorkflowId, guard);
+  }
+
+  async startFreshRun(workflowId: string, guard?: FenceGuard): Promise<number> {
+    this.checkFence(workflowId, guard);
     const wf = this.workflows.get(workflowId);
     if (!wf) throw new Error(`Workflow ${workflowId} not found`);
 
@@ -1252,15 +1290,19 @@ export class InMemoryWorkflowStorage
     );
   }
 
-  async appendEntry(params: {
-    workflowId: string;
-    stepName: string;
-    activityIndex: number;
-    branchPath?: string;
-    activityName: string;
-    payloadHash?: string;
-    exit: NonNullable<JournalEntry["exit"]>;
-  }): Promise<void> {
+  async appendEntry(
+    params: {
+      workflowId: string;
+      stepName: string;
+      activityIndex: number;
+      branchPath?: string;
+      activityName: string;
+      payloadHash?: string;
+      exit: NonNullable<JournalEntry["exit"]>;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    this.checkFence(params.workflowId, guard);
     const branchPath = params.branchPath ?? "";
     const key = this.journalKey(params.workflowId, params.stepName);
     const entries = this.journal.get(key) ?? [];
@@ -1285,16 +1327,20 @@ export class InMemoryWorkflowStorage
     this.journal.set(key, entries);
   }
 
-  async appendPendingEntry(params: {
-    workflowId: string;
-    stepName: string;
-    activityIndex: number;
-    branchPath?: string;
-    activityName: string;
-    payloadHash?: string;
-    stepType: "sleep" | "signal" | "activity" | "compensation" | "child";
-    wakeAt?: Date;
-  }): Promise<void> {
+  async appendPendingEntry(
+    params: {
+      workflowId: string;
+      stepName: string;
+      activityIndex: number;
+      branchPath?: string;
+      activityName: string;
+      payloadHash?: string;
+      stepType: "sleep" | "signal" | "activity" | "compensation" | "child";
+      wakeAt?: Date;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    this.checkFence(params.workflowId, guard);
     const branchPath = params.branchPath ?? "";
     const key = this.journalKey(params.workflowId, params.stepName);
     const entries = this.journal.get(key) ?? [];
@@ -1313,13 +1359,17 @@ export class InMemoryWorkflowStorage
     this.journal.set(key, entries);
   }
 
-  async completePendingEntry(params: {
-    workflowId: string;
-    stepName: string;
-    activityIndex: number;
-    branchPath?: string;
-    exit: JournalExit;
-  }): Promise<CompletePendingResult> {
+  async completePendingEntry(
+    params: {
+      workflowId: string;
+      stepName: string;
+      activityIndex: number;
+      branchPath?: string;
+      exit: JournalExit;
+    },
+    guard?: FenceGuard,
+  ): Promise<CompletePendingResult> {
+    this.checkFence(params.workflowId, guard);
     const branchPath = params.branchPath ?? "";
     const key = this.journalKey(params.workflowId, params.stepName);
     const entries = this.journal.get(key);
@@ -1338,11 +1388,15 @@ export class InMemoryWorkflowStorage
     return { completed: true, exit: params.exit };
   }
 
-  async discardJournalEntries(params: {
-    workflowId: string;
-    stepName: string;
-    slots: readonly JournalSlot[];
-  }): Promise<void> {
+  async discardJournalEntries(
+    params: {
+      workflowId: string;
+      stepName: string;
+      slots: readonly JournalSlot[];
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    this.checkFence(params.workflowId, guard);
     const key = this.journalKey(params.workflowId, params.stepName);
     const entries = this.journal.get(key);
     if (!entries) return;
@@ -1480,12 +1534,16 @@ export class InMemoryWorkflowStorage
   // Streams — append-only chunks per (workflow, stream).
   // ---------------------------------------------------------------------------
 
-  async appendStreamChunk(params: {
-    workflowId: string;
-    streamId: string;
-    payload: unknown;
-    appendedBy: "workflow" | "external";
-  }): Promise<{ chunkIndex: number }> {
+  async appendStreamChunk(
+    params: {
+      workflowId: string;
+      streamId: string;
+      payload: unknown;
+      appendedBy: "workflow" | "external";
+    },
+    guard?: FenceGuard,
+  ): Promise<{ chunkIndex: number }> {
+    this.checkFence(params.workflowId, guard);
     const key = `${params.workflowId}::${params.streamId}`;
     const existing = this.streamChunks.get(key) ?? [];
     const chunkIndex = existing.length;

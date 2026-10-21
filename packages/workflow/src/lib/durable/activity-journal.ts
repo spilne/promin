@@ -9,7 +9,7 @@
 // Mirrors the StepAttemptStorage pattern for consistency.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowStorage } from "./workflow-storage.ts";
+import type { FenceGuard, WorkflowStorage } from "./workflow-storage.ts";
 
 /** What kind of checkpoint an entry records. Used by replay + the sleep scanner. */
 export type JournalStepType = "activity" | "sleep" | "signal" | "compensation" | "child";
@@ -130,16 +130,22 @@ export interface ActivityJournalStorage {
    * effect completes, so at-most-once is the target). `branchPath` defaults
    * to `""` for backwards compatibility with callers that don't use
    * `ctx.parallel`.
+   *
+   * Fenced by `guard`: the step body's run passes its lock token (see
+   * `FenceGuard`).
    */
-  appendEntry(params: {
-    readonly workflowId: string;
-    readonly stepName: string;
-    readonly activityIndex: number;
-    readonly branchPath?: string;
-    readonly activityName: string;
-    readonly payloadHash?: string;
-    readonly exit: NonNullable<JournalEntry["exit"]>;
-  }): Promise<void>;
+  appendEntry(
+    params: {
+      readonly workflowId: string;
+      readonly stepName: string;
+      readonly activityIndex: number;
+      readonly branchPath?: string;
+      readonly activityName: string;
+      readonly payloadHash?: string;
+      readonly exit: NonNullable<JournalEntry["exit"]>;
+    },
+    guard?: FenceGuard,
+  ): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,18 +165,21 @@ export interface JournaledSuspendStorage extends ActivityJournalStorage {
    * (pending row written before the side effect, completed after), and by
    * the intra-step compensation unwind for each rollback callback. For
    * sleep: carries `wakeAt`. For signal / activity / compensation: the name
-   * lives in `activityName`. Idempotent on PK.
+   * lives in `activityName`. Idempotent on PK. Fenced by `guard`.
    */
-  appendPendingEntry(params: {
-    readonly workflowId: string;
-    readonly stepName: string;
-    readonly activityIndex: number;
-    readonly branchPath?: string;
-    readonly activityName: string;
-    readonly payloadHash?: string;
-    readonly stepType: "sleep" | "signal" | "activity" | "compensation" | "child";
-    readonly wakeAt?: Date;
-  }): Promise<void>;
+  appendPendingEntry(
+    params: {
+      readonly workflowId: string;
+      readonly stepName: string;
+      readonly activityIndex: number;
+      readonly branchPath?: string;
+      readonly activityName: string;
+      readonly payloadHash?: string;
+      readonly stepType: "sleep" | "signal" | "activity" | "compensation" | "child";
+      readonly wakeAt?: Date;
+    },
+    guard?: FenceGuard,
+  ): Promise<void>;
 
   /**
    * Transition a `pending` entry to `completed`. Used by the sleep scanner
@@ -184,14 +193,22 @@ export interface JournaledSuspendStorage extends ActivityJournalStorage {
    * report who won (see `CompletePendingResult`). A signal delivery and the
    * signal's timeout race for the same entry, and the losing side adopts the
    * stored exit so the live run and the journal agree.
+   *
+   * Fenced by `guard` when the step body completes its own entry. The sleep
+   * scanner and signal delivery complete entries unfenced: they hold no
+   * lock, and first writer wins already settles their race with the body.
+   * A rejected fenced call changes nothing.
    */
-  completePendingEntry(params: {
-    readonly workflowId: string;
-    readonly stepName: string;
-    readonly activityIndex: number;
-    readonly branchPath?: string;
-    readonly exit: JournalExit;
-  }): Promise<CompletePendingResult>;
+  completePendingEntry(
+    params: {
+      readonly workflowId: string;
+      readonly stepName: string;
+      readonly activityIndex: number;
+      readonly branchPath?: string;
+      readonly exit: JournalExit;
+    },
+    guard?: FenceGuard,
+  ): Promise<CompletePendingResult>;
 
   /**
    * Delete the given entries of one journaled step. Missing slots are
@@ -201,13 +218,16 @@ export interface JournaledSuspendStorage extends ActivityJournalStorage {
    * failures (and activities whose compensation ran) are removed so the next
    * attempt of the step re-executes them instead of replaying the failure.
    * On a storage without this method a step-level retry replays the
-   * recorded failure.
+   * recorded failure. Fenced by `guard`.
    */
-  discardJournalEntries?(params: {
-    readonly workflowId: string;
-    readonly stepName: string;
-    readonly slots: readonly JournalSlot[];
-  }): Promise<void>;
+  discardJournalEntries?(
+    params: {
+      readonly workflowId: string;
+      readonly stepName: string;
+      readonly slots: readonly JournalSlot[];
+    },
+    guard?: FenceGuard,
+  ): Promise<void>;
 
   /**
    * Scanner hook — return pending sleep entries whose `wakeAt <= now`, up to

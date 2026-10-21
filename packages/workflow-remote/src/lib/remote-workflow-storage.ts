@@ -157,19 +157,22 @@ export class RemoteWorkflowStorage
     return this.call("cancelWorkflow", { workflowId, options, guard });
   }
 
-  createWorkflow(params: {
-    workflowId: string;
-    workflowName: string;
-    input: unknown;
-    workflowType?: string;
-    parentWorkflowId?: string;
-    namespace?: string;
-    metadata?: Record<string, unknown>;
-    version?: string;
-    idempotencyKey?: string;
-    idempotencyExpiresAt?: Date;
-  }): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
-    return this.call("createWorkflow", params);
+  createWorkflow(
+    params: {
+      workflowId: string;
+      workflowName: string;
+      input: unknown;
+      workflowType?: string;
+      parentWorkflowId?: string;
+      namespace?: string;
+      metadata?: Record<string, unknown>;
+      version?: string;
+      idempotencyKey?: string;
+      idempotencyExpiresAt?: Date;
+    },
+    guard?: FenceGuard,
+  ): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
+    return this.call("createWorkflow", { ...params, guard });
   }
 
   findWorkflowByIdempotencyKey(params: {
@@ -282,8 +285,12 @@ export class RemoteWorkflowStorage
     return this.call("loadSignals", { workflowId });
   }
 
-  setWorkflowMetadata(workflowId: string, patch: Record<string, unknown>): Promise<void> {
-    return this.call("setWorkflowMetadata", { workflowId, patch });
+  setWorkflowMetadata(
+    workflowId: string,
+    patch: Record<string, unknown>,
+    guard?: FenceGuard,
+  ): Promise<void> {
+    return this.call("setWorkflowMetadata", { workflowId, patch, guard });
   }
 
   // ---------------------------------------------------------------------------
@@ -321,13 +328,16 @@ export class RemoteWorkflowStorage
     return this.call("listSignalTokensForWorkflow", { workflowId });
   }
 
-  appendStreamChunk(params: {
-    workflowId: string;
-    streamId: string;
-    payload: unknown;
-    appendedBy: "workflow" | "external";
-  }): Promise<{ chunkIndex: number }> {
-    return this.call("appendStreamChunk", params);
+  appendStreamChunk(
+    params: {
+      workflowId: string;
+      streamId: string;
+      payload: unknown;
+      appendedBy: "workflow" | "external";
+    },
+    guard?: FenceGuard,
+  ): Promise<{ chunkIndex: number }> {
+    return this.call("appendStreamChunk", { ...params, guard });
   }
 
   readStreamChunks(params: {
@@ -361,8 +371,8 @@ export class RemoteWorkflowStorage
     return this.call("heartbeat", { workflowId, lockDurationMs, guard });
   }
 
-  startFreshRun(workflowId: string): Promise<number> {
-    return this.call("startFreshRun", { workflowId });
+  startFreshRun(workflowId: string, guard?: FenceGuard): Promise<number> {
+    return this.call("startFreshRun", { workflowId, guard });
   }
 
   loadRunHistory(
@@ -431,47 +441,59 @@ export class RemoteWorkflowStorage
     return this.call("loadJournal", { workflowId, stepName });
   }
 
-  appendEntry(params: {
-    readonly workflowId: string;
-    readonly stepName: string;
-    readonly activityIndex: number;
-    readonly branchPath?: string;
-    readonly activityName: string;
-    readonly payloadHash?: string;
-    readonly exit: NonNullable<JournalEntry["exit"]>;
-  }): Promise<void> {
-    return this.call("appendEntry", params);
+  appendEntry(
+    params: {
+      readonly workflowId: string;
+      readonly stepName: string;
+      readonly activityIndex: number;
+      readonly branchPath?: string;
+      readonly activityName: string;
+      readonly payloadHash?: string;
+      readonly exit: NonNullable<JournalEntry["exit"]>;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    return this.call("appendEntry", { ...params, guard });
   }
 
-  appendPendingEntry(params: {
-    readonly workflowId: string;
-    readonly stepName: string;
-    readonly activityIndex: number;
-    readonly branchPath?: string;
-    readonly activityName: string;
-    readonly payloadHash?: string;
-    readonly stepType: "sleep" | "signal" | "activity" | "compensation" | "child";
-    readonly wakeAt?: Date;
-  }): Promise<void> {
-    return this.call("appendPendingEntry", params);
+  appendPendingEntry(
+    params: {
+      readonly workflowId: string;
+      readonly stepName: string;
+      readonly activityIndex: number;
+      readonly branchPath?: string;
+      readonly activityName: string;
+      readonly payloadHash?: string;
+      readonly stepType: "sleep" | "signal" | "activity" | "compensation" | "child";
+      readonly wakeAt?: Date;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    return this.call("appendPendingEntry", { ...params, guard });
   }
 
-  completePendingEntry(params: {
-    readonly workflowId: string;
-    readonly stepName: string;
-    readonly activityIndex: number;
-    readonly branchPath?: string;
-    readonly exit: JournalExit;
-  }): Promise<CompletePendingResult> {
-    return this.call("completePendingEntry", params);
+  completePendingEntry(
+    params: {
+      readonly workflowId: string;
+      readonly stepName: string;
+      readonly activityIndex: number;
+      readonly branchPath?: string;
+      readonly exit: JournalExit;
+    },
+    guard?: FenceGuard,
+  ): Promise<CompletePendingResult> {
+    return this.call("completePendingEntry", { ...params, guard });
   }
 
-  discardJournalEntries(params: {
-    readonly workflowId: string;
-    readonly stepName: string;
-    readonly slots: readonly JournalSlot[];
-  }): Promise<void> {
-    return this.call("discardJournalEntries", params);
+  discardJournalEntries(
+    params: {
+      readonly workflowId: string;
+      readonly stepName: string;
+      readonly slots: readonly JournalSlot[];
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    return this.call("discardJournalEntries", { ...params, guard });
   }
 
   findDueSleeps(params: { now: Date; limit: number }): Promise<

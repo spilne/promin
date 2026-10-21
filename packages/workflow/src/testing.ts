@@ -1,5 +1,9 @@
 export { storageTestSuite } from "./lib/durable/storage-test-suite.ts";
 export {
+  zombieWorkerTestSuite,
+  type ZombieWorkerTestSuiteOptions,
+} from "./lib/durable/zombie-worker-test-suite.ts";
+export {
   versionRegistryTestSuite,
   versionDrainTestSuite,
 } from "./lib/durable/version-registry-test-suite.ts";
