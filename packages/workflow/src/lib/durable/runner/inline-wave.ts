@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Inline wave — runs one wave of ready steps in-process, concurrently,
 // applying each step's policies and checkpointing each step's outcome as
-// soon as that step settles.
+// soon as that step settles (and its `step-started` notice has gone out).
 // ---------------------------------------------------------------------------
 
 import { stepRuntimeFor, type WaveOutcome, type WaveParams } from "./dag-context.ts";
@@ -28,7 +28,10 @@ export async function runInlineWave(params: WaveParams): Promise<WaveOutcome> {
         clock,
         attempt: params.stepAttempts.get(stepDef.name) ?? 1,
       });
-      if (skipped) return checkpointStepOutcome({ ctx, clock, workflowId, outcome: skipped });
+      if (skipped) {
+        await params.stepStarted?.get(stepDef.name);
+        return checkpointStepOutcome({ ctx, clock, workflowId, outcome: skipped });
+      }
 
       const startedAt = clock.now();
       // Attempt numbers continue across workflow retries.
@@ -49,12 +52,15 @@ export async function runInlineWave(params: WaveParams): Promise<WaveOutcome> {
           }),
       });
       params.stepAttempts.set(stepDef.name, body.attempt);
+      const outcome = outcomeOfBody({ name: stepDef.name, body, startedAt, clock });
 
+      // The step's `step-started` notice goes out before its outcome row.
+      await params.stepStarted?.get(stepDef.name);
       return checkpointStepOutcome({
         ctx,
         clock,
         workflowId,
-        outcome: outcomeOfBody({ name: stepDef.name, body, startedAt, clock }),
+        outcome,
         failedAttempts:
           body.kind === "completed" || body.kind === "failed" ? body.failedAttempts : [],
       });

@@ -7,12 +7,14 @@
 import type { WallClock } from "../../shared/wall-clock.ts";
 import { StepError } from "../durable-pipeline-error.ts";
 import type { DagExecutionContext, DagExecutionFailure } from "./dag-context.ts";
+import type { StepDefinition } from "../durable-pipeline.ts";
 import { fireHook } from "./hooks.ts";
 
 /**
  * Dispatch `names` (all ready, all listed in `ctx.dispatch.remoteSteps`) and
- * wait for each. Completed steps land in `results` and `completed`. Returns
- * the failure outcome for the first step a worker fails, else `undefined`.
+ * wait for each. Completed steps land in `results` and are passed to
+ * `markCompleted`. Returns the failure outcome for the first step a worker
+ * fails, else `undefined`.
  */
 export async function runDispatchedSteps(params: {
   ctx: DagExecutionContext;
@@ -20,13 +22,14 @@ export async function runDispatchedSteps(params: {
   workflowId: string;
   input: unknown;
   names: string[];
+  stepsByName: ReadonlyMap<string, StepDefinition>;
   results: Record<string, unknown>;
-  completed: Set<string>;
+  markCompleted: (name: string) => void;
 }): Promise<DagExecutionFailure | undefined> {
-  const { ctx, clock, workflowId, input, results, completed } = params;
+  const { ctx, clock, workflowId, input, results } = params;
 
   for (const name of params.names) {
-    const stepDef = ctx.steps.find((s) => s.name === name);
+    const stepDef = params.stepsByName.get(name);
     await ctx.dispatch!.stepQueue.enqueue({
       workflowId,
       stepName: name,
@@ -43,7 +46,7 @@ export async function runDispatchedSteps(params: {
       const stepState = currentState?.steps[name];
       if (stepState?.status === "completed") {
         results[name] = stepState.result;
-        completed.add(name);
+        params.markCompleted(name);
         await fireHook({
           hooks: ctx.hooks,
           name: "onStepComplete",

@@ -43,6 +43,9 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
           clock,
           attempt: params.stepAttempts.get(stepDef.name) ?? 1,
         });
+        // The step's `step-started` notice goes out before anything is
+        // written for it — here, or by an executor that persists the step.
+        await params.stepStarted?.get(stepDef.name);
         if (skipped) return checkpointStepOutcome({ ctx, clock, workflowId, outcome: skipped });
 
         const startedAt = clock.now();
@@ -69,7 +72,9 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
           workflowId,
           stepName: stepDef.name,
           input,
-          prevResults: { ...results },
+          // The run's results map, not a copy: it only grows between waves,
+          // after every step of this one has reported.
+          prevResults: results,
           attempt: currentAttempt,
           needs: stepDef.needs,
           priority: stepDef.priority,

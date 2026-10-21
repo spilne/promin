@@ -109,3 +109,82 @@ export function computeReadySet(params: {
 
   return ready;
 }
+
+// ---------------------------------------------------------------------------
+// Incremental ready tracking
+// ---------------------------------------------------------------------------
+
+/**
+ * Tracks which nodes of a DAG are ready as nodes complete, without
+ * rescanning the graph: each node keeps a count of its unfinished
+ * dependencies, and completing a node only visits its dependents. Driving
+ * a whole DAG through it costs O(V + E), plus sorting each ready batch.
+ */
+export interface ReadyTracker {
+  /**
+   * Nodes whose dependencies have all completed and that have not
+   * completed themselves, in definition order (the order of `nodes`): the
+   * names and order `computeReadySet` returns with nothing running. A node
+   * stays ready until it is marked completed.
+   */
+  ready(): string[];
+  /** Mark `name` completed. Unknown or already-completed names are ignored. */
+  markCompleted(name: string): void;
+  /** Number of nodes marked completed, including the initial ones. */
+  readonly completedCount: number;
+}
+
+/**
+ * A `ReadyTracker` over `nodes`, with the names in `completed` (nodes
+ * already done, e.g. replayed from storage) marked completed up front. A
+ * dependency on a name that is not a node never completes.
+ */
+export function createReadyTracker(params: {
+  nodes: readonly DagNode[];
+  completed?: Iterable<string>;
+}): ReadyTracker {
+  const { nodes } = params;
+  const indexOf = new Map<string, number>();
+  nodes.forEach((node, i) => indexOf.set(node.name, i));
+
+  // Unfinished dependencies per node, and each node's dependents.
+  const pendingDeps = new Int32Array(nodes.length);
+  const dependents: number[][] = nodes.map(() => []);
+  nodes.forEach((node, i) => {
+    const deps = node.dependsOn;
+    pendingDeps[i] = deps.length;
+    for (const dep of deps) {
+      const d = indexOf.get(dep);
+      if (d !== undefined) dependents[d]!.push(i);
+    }
+  });
+
+  const done = new Uint8Array(nodes.length);
+  const readyNow = new Set<number>();
+  nodes.forEach((_, i) => {
+    if (pendingDeps[i] === 0) readyNow.add(i);
+  });
+  let completedCount = 0;
+
+  const markCompleted = (name: string): void => {
+    const i = indexOf.get(name);
+    if (i === undefined || done[i] === 1) return;
+    done[i] = 1;
+    completedCount++;
+    readyNow.delete(i);
+    for (const dependent of dependents[i]!) {
+      pendingDeps[dependent]!--;
+      if (pendingDeps[dependent] === 0 && done[dependent] === 0) readyNow.add(dependent);
+    }
+  };
+
+  for (const name of params.completed ?? []) markCompleted(name);
+
+  return {
+    ready: () => [...readyNow].sort((a, b) => a - b).map((i) => nodes[i]!.name),
+    markCompleted,
+    get completedCount() {
+      return completedCount;
+    },
+  };
+}
