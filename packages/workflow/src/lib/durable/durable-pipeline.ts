@@ -30,6 +30,7 @@ import {
   type Throws,
 } from "@spilne/perfect-core";
 import { isActivityJournalStorage, type ActivityJournalStorage } from "./activity-journal.ts";
+import { suspendOnChild } from "./child-wake.ts";
 import {
   runJournaledStep,
   JournalStorageMissingError,
@@ -2109,14 +2110,26 @@ export class WorkflowBuilder<
         //
         // A child that fails is a typed `StepError` on this step, so step
         // retry (which re-drives the same child run) and `onFailure` apply.
-        // Engine control flow from the child (its suspension, a lost lock)
-        // propagates unchanged.
+        // A child that suspends parks this step as a wait on the child (see
+        // `suspendOnChild`), so the parent is re-driven at the child's wake
+        // time or once the child ends. Other engine control flow from the
+        // child (a lost lock) propagates unchanged.
         return tryPromise(
           () =>
             runChild({
               workflow: child as Workflow<unknown, unknown>,
               workflowId: childWorkflowId,
               input: childInput,
+            }).catch(async (err: unknown) => {
+              if ((err as { _tag?: unknown } | null)?._tag !== "WorkflowSuspendedError") throw err;
+              throw await suspendOnChild({
+                storage: execParams.storage,
+                workflowId: execParams.workflowId,
+                stepName: name,
+                childWorkflowId,
+                childError: err,
+                guard: execParams.guard,
+              });
             }),
           (err): TaggedError =>
             isControlFlowExit(err)

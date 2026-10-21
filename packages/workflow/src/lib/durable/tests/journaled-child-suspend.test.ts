@@ -2,9 +2,10 @@
 // ctx.child whose child workflow suspends.
 //
 // The child's suspension is not an outcome: the parent's child entry stays
-// pending (never a Failure), the parent step suspends until the child's own
-// wake time, and the next parent run resumes the child and returns its
-// result.
+// pending (never a Failure), the parent step parks on the child until the
+// child's own wake time, and the next parent run resumes the child and
+// returns its result. (A child that ends wakes the parent itself: see
+// child-wake.test.ts.)
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
@@ -12,6 +13,7 @@ import { workflow } from "../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 import { FakeWallClock } from "../../shared/wall-clock.ts";
+import { childEndedSignalName } from "../child-wake.ts";
 
 describe("ctx.child — child suspends", () => {
   it("keeps the child entry pending, suspends the parent until the child wakes, then resumes", async () => {
@@ -49,8 +51,13 @@ describe("ctx.child — child suspends", () => {
 
     const parentState = await storage.loadWorkflow("par-s");
     expect(parentState?.status).toBe("suspended");
-    expect(parentState?.steps.run?.status).toBe("sleeping");
-    expect(parentState?.steps.run?.wakeAt?.toISOString()).toBe("2026-01-01T00:01:00.000Z");
+    // Parked on the child: a wait that times out at the child's wake time
+    // and ends when the child does.
+    expect(parentState?.steps.run?.status).toBe("waiting_for_signal");
+    expect(parentState?.steps.run?.signalName).toBe(
+      childEndedSignalName({ childWorkflowId: "kid-1", run: 1 }),
+    );
+    expect(parentState?.steps.run?.signalTimeoutAt?.toISOString()).toBe("2026-01-01T00:01:00.000Z");
 
     clock.advance(60_000);
     const result = await runner.run({ workflow: parent, workflowId: "par-s", input: { v: 21 } });

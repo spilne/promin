@@ -38,6 +38,7 @@ import {
   type OrchestrationRuntime,
   type WorkflowOrchestrationContext,
 } from "./orchestration-context.ts";
+import { wakeParentOfEndedRun } from "../child-wake.ts";
 import { assertRunActive, cancelledError, rejectEndedRun, runStartMs } from "./run-status.ts";
 import { checkpointWrite } from "./step-checkpoint.ts";
 import { errorMessage, errorTagOf } from "./step-body.ts";
@@ -59,6 +60,16 @@ interface RunParams {
   readonly namespace?: string;
   readonly idempotencyKey?: string;
   readonly idempotencyExpiresAt?: Date;
+  /**
+   * The run's parent is driving it (`runChildWorkflow`) and reads its
+   * outcome directly, so an ended run does not wake the parent.
+   */
+  readonly drivenByParent?: boolean;
+}
+
+/** The run's state as last loaded under the lock, for the parent wake. */
+interface LoadedRun {
+  state?: WorkflowState | null;
 }
 
 /**
@@ -90,7 +101,13 @@ export async function runWorkflowOrchestration(
   // matching previousVersion definition.
   const drainCtx = await resolveDrainContext({ ctx, workflowId });
   if (drainCtx) {
-    return runWorkflowOrchestration(drainCtx, { workflowId, input, force, namespace });
+    return runWorkflowOrchestration(drainCtx, {
+      workflowId,
+      input,
+      force,
+      namespace,
+      ...(params.drivenByParent && { drivenByParent: true }),
+    });
   }
 
   // Idempotency check — return the cached outcome if within TTL.
@@ -100,23 +117,62 @@ export async function runWorkflowOrchestration(
     if (cached) return cached.result;
   }
 
-  return withLock({
-    storage: ctx.storage,
-    workflowId,
-    options: { lockDurationMs: DEFAULT_LOCK_DURATION_MS, clock },
-    fn: async (lock) => {
-      try {
-        const result = await runChain({ ctx, params, lock, clock });
-        clearQueryHandlers(workflowId);
-        return result;
-      } catch (err) {
-        // A suspended run is still hosted here: the resume re-registers
-        // its handlers on replay, so they stay up across the wait.
-        if (errorTag(err) !== "WorkflowSuspendedError") clearQueryHandlers(workflowId);
-        throw err;
-      }
-    },
-  });
+  const loaded: LoadedRun = {};
+  try {
+    return await withLock({
+      storage: ctx.storage,
+      workflowId,
+      options: { lockDurationMs: DEFAULT_LOCK_DURATION_MS, clock },
+      fn: async (lock) => {
+        try {
+          const result = await runChain({ ctx, params, lock, clock, loaded });
+          clearQueryHandlers(workflowId);
+          return result;
+        } catch (err) {
+          // A suspended run is still hosted here: the resume re-registers
+          // its handlers on replay, so they stay up across the wait.
+          if (errorTag(err) !== "WorkflowSuspendedError") clearQueryHandlers(workflowId);
+          throw err;
+        }
+      },
+    });
+  } finally {
+    // After the lock is released, so the woken parent can drive the child.
+    if (!params.drivenByParent) await wakeParentIfEnded({ ctx, loaded, clock });
+  }
+}
+
+/**
+ * A child run that ended wakes its parent (`wakeParentOfEndedRun`), which
+ * may be parked on it. The wake is retried like a checkpoint; one that
+ * still fails is dropped, leaving the parent to its own wake time or to the
+ * next run of this child, which delivers the wake again.
+ */
+async function wakeParentIfEnded(params: {
+  ctx: WorkflowOrchestrationContext;
+  loaded: LoadedRun;
+  clock: WallClock;
+}): Promise<void> {
+  const { ctx, clock } = params;
+  const state = params.loaded.state;
+  if (!state || state.parentWorkflowId === undefined) return;
+  try {
+    await checkpointWrite({
+      clock,
+      workflowId: state.workflowId,
+      operation: "wakeParent",
+      write: async () => {
+        const status = await ctx.storage.loadWorkflowStatus(state.workflowId);
+        if (!status) return;
+        await wakeParentOfEndedRun({
+          storage: ctx.storage,
+          state: { ...state, status: status.status },
+        });
+      },
+    });
+  } catch {
+    // Best effort: see above.
+  }
 }
 
 /**
@@ -130,8 +186,9 @@ async function runChain(params: {
   params: RunParams;
   lock: LockContext;
   clock: WallClock;
+  loaded: LoadedRun;
 }): Promise<unknown> {
-  const { ctx, lock, clock } = params;
+  const { ctx, lock, clock, loaded } = params;
   const { workflowId } = params.params;
   let input = params.params.input;
   for (let chain = 0; chain < MAX_CONTINUE_AS_NEW_CHAIN; chain++) {
@@ -140,6 +197,7 @@ async function runChain(params: {
         ctx,
         lock,
         clock,
+        loaded,
         // A continued run is an internal restart: no idempotency cache,
         // and the key stays on the archived row.
         params:
@@ -196,6 +254,7 @@ export async function runChildWorkflow(params: {
   return runWorkflowOrchestration(orchestrationContextFor({ workflow, runtime }), {
     workflowId,
     input,
+    drivenByParent: true,
     ...(rerunFailed && { force: true }),
   });
 }
@@ -205,8 +264,9 @@ async function runOneOrchestrationCycle(cycle: {
   params: RunParams;
   lock: LockContext;
   clock: WallClock;
+  loaded: LoadedRun;
 }): Promise<unknown> {
-  const { ctx, lock, clock } = cycle;
+  const { ctx, lock, clock, loaded } = cycle;
   const { workflowId, input, force, namespace } = cycle.params;
   const workflowStartTime = clock.currentTimeMs();
   const idempotency = force ? undefined : ctx.idempotency;
@@ -275,6 +335,7 @@ async function runOneOrchestrationCycle(cycle: {
   // answers with its result, decoded as a replay would; any other ended run
   // rejects with its stored outcome. `force` archives it and starts a fresh
   // run instead.
+  loaded.state = state;
   if (state && isTerminalWorkflowStatus(state.status)) {
     if (!force) {
       rejectEndedRun(state);
@@ -282,6 +343,7 @@ async function runOneOrchestrationCycle(cycle: {
     }
     await ctx.storage.startFreshRun(workflowId);
     state = await ctx.storage.loadWorkflow(workflowId);
+    loaded.state = state;
   }
 
   // 4. Validate DAG
