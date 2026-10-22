@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { TaggedError, succeed, fail } from "@spilne/perfect-core";
-import { workflow, type StepEff } from "../durable-pipeline.ts";
+import type { StepEff } from "../step-definition.ts";
+import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 

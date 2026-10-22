@@ -8,13 +8,9 @@
 import { describe, expect, it } from "bun:test";
 import { TaggedError, fail, succeed, suspend, tryPromise } from "@spilne/perfect-core";
 import type { Codec } from "@spilne/perfect-core/connect";
-import {
-  workflow,
-  type StepEff,
-  type StepOptions,
-  type Workflow,
-  type WorkflowBuilder,
-} from "../durable-pipeline.ts";
+import type { StepEff, StepOptions } from "../step-definition.ts";
+import { workflow, type WorkflowBuilder } from "../workflow-builder.ts";
+import type { Workflow } from "../workflow-types.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 import { MemoryCache } from "../../shared/cache-store.ts";
@@ -36,14 +32,6 @@ class Script {
       throw new Boom({ message: `attempt ${this.calls} failed` });
     }
     return this.opts.value ?? 42;
-  }
-  /** The attempt as a Promise (a loop body): rejects while failing. */
-  promise(): Promise<number> {
-    if (this.opts.hang) {
-      this.calls++;
-      return new Promise<number>(() => {});
-    }
-    return Promise.resolve().then(() => this.next());
   }
   /** The attempt as a step `Eff`. */
   eff(): StepEff<number, Boom> {
@@ -202,7 +190,7 @@ const KINDS: readonly KindCase[] = [
     add: ({ wf, script, options }) =>
       wf.dowhile(
         "k",
-        () => script.promise(),
+        () => script.eff(),
         () => false,
         options as never,
       ),

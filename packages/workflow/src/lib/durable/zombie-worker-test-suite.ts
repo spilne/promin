@@ -13,7 +13,8 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { workflow, type Workflow } from "./durable-pipeline.ts";
+import { workflow } from "./workflow-builder.ts";
+import type { Workflow } from "./workflow-types.ts";
 import { createWorkflowRunner } from "./workflow-runner.ts";
 import { isActivityJournalStorage } from "./activity-journal.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";

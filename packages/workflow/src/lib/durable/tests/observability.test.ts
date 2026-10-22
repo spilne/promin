@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { TaggedError, succeed, fail } from "@spilne/perfect-core";
-import { workflow, dagToMermaid, dagToDot } from "../durable-pipeline.ts";
+import { workflow } from "../workflow-builder.ts";
+import { dagToMermaid, dagToDot } from "../workflow-dag-viz.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 

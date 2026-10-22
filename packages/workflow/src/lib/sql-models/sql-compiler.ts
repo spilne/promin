@@ -6,8 +6,8 @@
 // run data quality tests.
 // ---------------------------------------------------------------------------
 
-import { workflow } from "../durable/durable-pipeline.ts";
-import type { Workflow } from "../durable/durable-pipeline.ts";
+import { workflow } from "../durable/workflow-builder.ts";
+import type { Workflow } from "../durable/workflow-types.ts";
 import { topologicalSort } from "../durable/workflow-dag.ts";
 import type { SqlProject, SqlModel, SqlProjectResult, ExpectationDef } from "./sql-model.ts";
 

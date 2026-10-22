@@ -14,7 +14,7 @@
 // ---------------------------------------------------------------------------
 
 import { loadNodeFs } from "./node-fs.ts";
-import type { Workflow } from "../durable/durable-pipeline.ts";
+import type { Workflow } from "../durable/workflow-types.ts";
 
 export interface WorkflowScannerOptions {
   /** File extensions to consider. Default: .ts, .tsx, .js, .mjs. */

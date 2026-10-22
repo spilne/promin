@@ -14,7 +14,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { TaggedError } from "@spilne/perfect-core";
-import { workflow } from "../durable-pipeline.ts";
+import { workflow } from "../workflow-builder.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { completeSignal, runJournaledStep } from "../journaled-step.ts";

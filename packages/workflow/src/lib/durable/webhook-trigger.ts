@@ -13,7 +13,7 @@
 // - Fire-and-forget by default (202); `wait: true` for sync-until-complete (200)
 // ---------------------------------------------------------------------------
 
-import type { Workflow } from "./durable-pipeline.ts";
+import type { Workflow } from "./workflow-types.ts";
 import type { WorkflowRunner } from "./workflow-runner.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 

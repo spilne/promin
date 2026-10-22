@@ -11,7 +11,7 @@ import { sleepOn } from "../shared/eff.ts";
 import { retryWithPolicy, type RetryPolicy } from "../shared/retry-policy.ts";
 import type { WallClock } from "../shared/wall-clock.ts";
 import { StepTimeoutError } from "./durable-pipeline-error.ts";
-import type { StepDefinition, StepOptions } from "./durable-pipeline.ts";
+import type { StepDefinition, StepOptions } from "./step-definition.ts";
 
 /** The policy fields of a `StepDefinition` that come from step options. */
 export type StepPolicy = Pick<

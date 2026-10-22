@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { tryPromise, type Eff, type Pipe } from "@spilne/perfect-core";
-import type { Workflow } from "./durable-pipeline.ts";
+import type { Workflow } from "./workflow-types.ts";
 import type { WorkflowRunner } from "./workflow-runner.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";

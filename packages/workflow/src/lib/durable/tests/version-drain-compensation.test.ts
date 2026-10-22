@@ -23,7 +23,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { TaggedError, succeed, fail } from "@spilne/perfect-core";
-import { workflow } from "../durable-pipeline.ts";
+import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 import { createWorkflowVersionRegistry } from "../workflow-version-registry.ts";
