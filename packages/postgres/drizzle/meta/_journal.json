@@ -386,6 +386,13 @@
       "when": 1743400054000,
       "tag": "0054_start_queue_claim_order",
       "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1743400055000,
+      "tag": "0055_compensation_ledger",
+      "breakpoints": true
     }
   ]
 }

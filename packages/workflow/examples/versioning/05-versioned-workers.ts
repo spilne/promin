@@ -23,12 +23,23 @@ import {
   MapStepRegistry,
   createWorker,
   createWorkflowRunner,
+  RoutingStepExecutor,
+  StepQueueExecutor,
 } from "@promin/workflow";
 
 async function main(): Promise<void> {
   const storage = new InMemoryWorkflowStorage();
   const stepQueue = new InMemoryStepQueue();
-  const runner = createWorkflowRunner({ storage });
+  // "process" runs on the workers (through the step queue); every other
+  // step runs in this process.
+  const runner = createWorkflowRunner({
+    storage,
+    stepExecutor: new RoutingStepExecutor({
+      remote: new StepQueueExecutor({ stepQueue, storage, pollIntervalMs: 25 }),
+      remoteSteps: ["process"],
+      storage,
+    }),
+  });
 
   // Worker-side: register handlers. In this example the handler logic is
   // the same for v1 and v2 — real deployments might have version-specific
@@ -55,7 +66,6 @@ async function main(): Promise<void> {
   const v1Wf = workflow<{ id: string }>({
     name: "order",
     version: "1",
-    dispatch: { stepQueue, remoteSteps: ["process"], pollIntervalMs: 25 },
   })
     .step("process", ({ input }) => succeed(`v1-${input.id}`))
     .build();
@@ -65,7 +75,6 @@ async function main(): Promise<void> {
   const v2Wf = workflow<{ id: string }>({
     name: "order",
     version: "2",
-    dispatch: { stepQueue, remoteSteps: ["process"], pollIntervalMs: 25 },
   })
     .step("process", ({ input }) => succeed(`v2-${input.id}`))
     .build();

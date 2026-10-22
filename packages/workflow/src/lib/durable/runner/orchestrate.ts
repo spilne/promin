@@ -14,16 +14,26 @@ import { SystemWallClock, type WallClock } from "../../shared/wall-clock.ts";
 import {
   TripwireStorageMissingError,
   WorkflowError,
+  WorkflowLockError,
   WorkflowTripwireError,
   WorkflowVersionMismatchError,
   type WorkflowContinueAsNewError,
 } from "../durable-pipeline-error.ts";
-import { clearQueryHandlers } from "../query-registry.ts";
+import { openQueryScope, type QueryScope } from "../query-registry.ts";
 import { isAbandonRunExit, isControlFlowExit } from "../step-policy.ts";
 import { withLock, type LockContext } from "../with-lock.ts";
 import { topologicalSort, type DagNode } from "../workflow-dag.ts";
-import { isCancelledRun, isTerminalWorkflowStatus, type WorkflowState } from "../workflow-state.ts";
-import { isTripwireCapableStorage, type FenceGuard } from "../workflow-storage.ts";
+import {
+  isCancelledRun,
+  isTerminalWorkflowStatus,
+  type WorkflowState,
+  type WorkflowStatus,
+} from "../workflow-state.ts";
+import {
+  isCompensationLedgerStorage,
+  isTripwireCapableStorage,
+  type FenceGuard,
+} from "../workflow-storage.ts";
 import type { Workflow } from "../durable-pipeline.ts";
 import { compensateWorkflow } from "./compensation.ts";
 import type { DagExecutionContext } from "./dag-context.ts";
@@ -39,7 +49,13 @@ import {
   type WorkflowOrchestrationContext,
 } from "./orchestration-context.ts";
 import { wakeParentOfEndedRun } from "../child-wake.ts";
-import { assertRunActive, cancelledError, rejectEndedRun, runStartMs } from "./run-status.ts";
+import {
+  assertRunActive,
+  cancelledError,
+  rejectEndedRun,
+  runFailure,
+  runStartMs,
+} from "./run-status.ts";
 import { checkpointWrite } from "./step-checkpoint.ts";
 import { errorMessage, errorTagOf } from "./step-body.ts";
 
@@ -65,7 +81,27 @@ interface RunParams {
    * outcome directly, so an ended run does not wake the parent.
    */
   readonly drivenByParent?: boolean;
+  /**
+   * Called once this invocation holds the run's lock, before anything is
+   * read or written under it (`WorkflowRunner.start` resolves on it).
+   */
+  readonly onLocked?: () => void;
+  /**
+   * Leave a stored run that is still in flight (pending, running,
+   * suspended, compensating) alone: reject with `WorkflowLockError`, as if
+   * its lock were held elsewhere. Checked under the lock, so two
+   * concurrent callers cannot both start the run.
+   */
+  readonly rejectInFlight?: boolean;
 }
+
+/** Statuses `rejectInFlight` treats as a run still in flight. */
+const IN_FLIGHT_STATUSES: ReadonlySet<WorkflowStatus> = new Set([
+  "pending",
+  "running",
+  "suspended",
+  "compensating",
+]);
 
 /** The run's state as last loaded under the lock, for the parent wake. */
 interface LoadedRun {
@@ -84,10 +120,10 @@ interface LoadedRun {
  * fresh run starts instead (`startFreshRun`). To re-drive a failed run
  * from a step, use `WorkflowRunner.resume`.
  *
- * Query handlers registered by the run are cleared when it ends (not when
- * it suspends), and only by the invocation that holds the lock, so a
- * duplicate call rejected with `WorkflowLockError` leaves the live run's
- * handlers in place.
+ * Query handlers registered by the run live in a scope the invocation opens
+ * once it holds the lock: they are dropped when the run ends, kept for
+ * `suspendedTtlMs` when it suspends, and never touched by a duplicate call
+ * rejected with `WorkflowLockError`.
  */
 export async function runWorkflowOrchestration(
   ctx: WorkflowOrchestrationContext,
@@ -107,6 +143,8 @@ export async function runWorkflowOrchestration(
       force,
       namespace,
       ...(params.drivenByParent && { drivenByParent: true }),
+      ...(params.onLocked !== undefined && { onLocked: params.onLocked }),
+      ...(params.rejectInFlight === true && { rejectInFlight: true }),
     });
   }
 
@@ -125,14 +163,28 @@ export async function runWorkflowOrchestration(
       // The run's state comes with the lock: one round trip instead of two.
       options: { lockDurationMs: DEFAULT_LOCK_DURATION_MS, clock, loadState: true },
       fn: async (lock) => {
+        // Before the try: a rejected in-flight run is someone else's, and
+        // its query handlers stay registered.
+        if (params.rejectInFlight === true) {
+          const stored =
+            lock.state !== undefined ? lock.state : await ctx.storage.loadWorkflow(workflowId);
+          if (stored && IN_FLIGHT_STATUSES.has(stored.status)) {
+            throw new WorkflowLockError({
+              workflowId,
+              message: `Workflow "${workflowId}" is already running`,
+            });
+          }
+        }
+        params.onLocked?.();
+        const queries = openQueryScope(workflowId);
         try {
-          const result = await runChain({ ctx, params, lock, clock, loaded });
-          clearQueryHandlers(workflowId);
+          const result = await runChain({ ctx, params, lock, clock, loaded, queries });
+          queries.close();
           return result;
         } catch (err) {
-          // A suspended run is still hosted here: the resume re-registers
-          // its handlers on replay, so they stay up across the wait.
-          if (errorTag(err) !== "WorkflowSuspendedError") clearQueryHandlers(workflowId);
+          // A suspended run keeps its handlers for a while: a resume here
+          // re-registers them on replay, so they stay up across the wait.
+          queries.close({ suspended: errorTag(err) === "WorkflowSuspendedError" });
           throw err;
         }
       },
@@ -188,6 +240,8 @@ async function runChain(params: {
   lock: LockContext;
   clock: WallClock;
   loaded: LoadedRun;
+  /** The query handlers of the runs of this chain. */
+  queries: QueryScope;
 }): Promise<unknown> {
   const { ctx, lock, clock, loaded } = params;
   const { workflowId } = params.params;
@@ -214,7 +268,7 @@ async function runChain(params: {
         workflowId,
         lock.fenceToken ? { fenceToken: lock.fenceToken } : undefined,
       );
-      clearQueryHandlers(workflowId);
+      params.queries.reset();
       input = (err as WorkflowContinueAsNewError).nextInput;
     }
   }
@@ -367,6 +421,26 @@ async function runOneOrchestrationCycle(cycle: {
   }));
   topologicalSort({ nodes: dagNodes, workflowId });
 
+  // A run found mid-rollback (its driver stopped while compensating) is
+  // not executed again: its rollback is finished and the run fails with
+  // the failure that started it.
+  if (state?.status === "compensating") {
+    return rollBackAndFail({
+      ctx,
+      lock,
+      clock,
+      workflowId,
+      input: state.input,
+      dagNodes,
+      guard,
+      workflowStartTime,
+      error: runFailure(state),
+      errorMsg: state.error ?? `Workflow ${workflowId} failed`,
+      errorTag: state.errorTag,
+      resumed: true,
+    });
+  }
+
   // The deadline runs from the run's persisted start, so a resume after a
   // sleep or signal wait does not restart it.
   const deadlineMs =
@@ -386,7 +460,6 @@ async function runOneOrchestrationCycle(cycle: {
     steps: ctx.steps,
     hooks: ctx.hooks,
     timeoutMs: ctx.timeoutMs,
-    dispatch: ctx.dispatch,
     stepExecutor: ctx.stepExecutor,
     guard,
     clock,
@@ -519,9 +592,77 @@ async function runOneOrchestrationCycle(cycle: {
     state = await ctx.storage.loadWorkflow(workflowId);
   }
 
-  // Not retryable or retries exhausted — run the compensation cascade
+  // Not retryable or retries exhausted — roll back, then fail the run.
+  return rollBackAndFail({
+    ctx,
+    lock,
+    clock,
+    workflowId,
+    input,
+    dagNodes,
+    guard,
+    workflowStartTime,
+    error: lastStepError,
+    errorMsg: errorMessage(lastStepError),
+    errorTag: errorTagOf(lastStepError),
+    resumed: false,
+  });
+}
+
+/**
+ * The failure path of a run: enter the `compensating` phase (when the
+ * storage keeps a compensation ledger), roll the completed steps back,
+ * fire `compensate.onComplete`, fail the run with `errorMsg` / `errorTag`,
+ * fire `onWorkflowFailure`, publish to the DLQ, and reject with `error`.
+ *
+ * `resumed` finishes the rollback of a run found `compensating` (its
+ * previous driver stopped mid-rollback): the phase is already persisted,
+ * and the steps its ledger lists are not rolled back again.
+ *
+ * A run that ended before the phase could be entered (a cancel landed) is
+ * not rolled back: it rejects with `WorkflowCancelledError`, or with
+ * `error` for any other ending.
+ */
+async function rollBackAndFail(params: {
+  ctx: WorkflowOrchestrationContext;
+  lock: LockContext;
+  clock: WallClock;
+  workflowId: string;
+  input: unknown;
+  dagNodes: DagNode[];
+  guard: FenceGuard | undefined;
+  workflowStartTime: number;
+  error: unknown;
+  errorMsg: string;
+  errorTag: string | undefined;
+  resumed: boolean;
+}): Promise<never> {
+  const { ctx, lock, clock, workflowId, input, dagNodes, guard, workflowStartTime } = params;
+  const { errorMsg, errorTag: failedTag } = params;
+  const lastStepError = params.error;
+  const storage = ctx.storage;
+
+  if (!params.resumed && isCompensationLedgerStorage(storage)) {
+    let entered = false;
+    await checkpointWrite({
+      clock,
+      workflowId,
+      operation: "beginCompensation",
+      write: async () => {
+        entered = await storage.beginCompensation(
+          { workflowId, error: errorMsg, ...(failedTag !== undefined && { errorTag: failedTag }) },
+          guard,
+        );
+      },
+    });
+    if (!entered) {
+      await assertNotCancelled({ ctx, workflowId });
+      throw lastStepError;
+    }
+  }
+
   const compensationReport = await compensateWorkflow({
-    storage: ctx.storage,
+    storage,
     steps: ctx.steps,
     compensateConfig: ctx.compensateConfig,
     workflowId,
@@ -529,6 +670,8 @@ async function runOneOrchestrationCycle(cycle: {
     dagNodes,
     guard,
     clock,
+    signal: lock.signal,
+    resumed: params.resumed,
     ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
   });
 
@@ -548,8 +691,6 @@ async function runOneOrchestrationCycle(cycle: {
   }
 
   // Fail the workflow, keeping the error's tag with it.
-  const errorMsg = errorMessage(lastStepError);
-  const failedTag = errorTagOf(lastStepError);
   await checkpointWrite({
     clock,
     workflowId,

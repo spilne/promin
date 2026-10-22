@@ -135,14 +135,16 @@ export interface WorkflowWakeup {
 }
 
 /**
- * A `pending` / `running` run whose lock is free or expired, returned by
- * `listOrphanedRuns`: nobody is driving it, so a coordinator may adopt it.
+ * A `pending` / `running` / `compensating` run whose lock is free or
+ * expired, returned by `listOrphanedRuns`: nobody is driving it, so a
+ * coordinator may adopt it. Adopting a `compensating` run finishes its
+ * rollback.
  */
 export interface OrphanedRun {
   readonly workflowId: string;
   readonly workflowName: string;
   readonly version?: string;
-  readonly status: "pending" | "running";
+  readonly status: "pending" | "running" | "compensating";
   readonly input: unknown;
   readonly metadata?: Record<string, unknown>;
 }
@@ -709,7 +711,9 @@ export interface WorkflowStorage {
    * Reset specific step rows back to `pending`, clearing their result /
    * error / completedAt. Also clears any journal entries for those steps
    * so journaled bodies re-execute from zero. The workflow's overall
-   * status flips back to `running` so the runner picks it up.
+   * status flips back to `running` so the runner picks it up, and the
+   * compensation ledger (`CompensationLedgerStorage`) is cleared on every
+   * step of the run, so a later failure rolls the kept steps back again.
    *
    * Used by `WorkflowRunner.resume(workflowId, fromStep)` for the
    * "rewind to step N and continue" debugging primitive — storage is the
@@ -781,7 +785,8 @@ export interface WorkflowStorage {
   }): Promise<WorkflowWakeup[]>;
 
   /**
-   * Recovery query: `pending` / `running` runs that nobody is driving —
+   * Recovery query: `pending` / `running` / `compensating` runs that
+   * nobody is driving —
    * no lock, or a lock that expired at or before `now` — and that were last
    * updated before `updatedBefore` (so a run a live coordinator has just
    * created and not locked yet is left alone). Never returns `suspended`
@@ -937,6 +942,73 @@ export function isStepAttemptStorage(
   storage: WorkflowStorage,
 ): storage is WorkflowStorage & StepAttemptStorage {
   return "saveStepAttempt" in storage && typeof (storage as any).saveStepAttempt === "function";
+}
+
+/**
+ * What a run's compensation ledger records for one step: its rollback ran
+ * (`compensated`) or failed after its retries (`compensation_failed`).
+ */
+export type StepCompensationOutcome = "compensated" | "compensation_failed";
+
+/**
+ * Optional storage extension that makes saga compensation durable: the
+ * run's `compensating` phase and a per-step ledger of the rollbacks that
+ * already ran. A run that crashes mid-rollback is found `compensating` by
+ * its next driver, which finishes the rollback instead of re-running the
+ * workflow, and skips every step the ledger already lists.
+ *
+ * The ledger lives on the step rows of the current run
+ * (`StepState.compensationStatus` / `compensationError` /
+ * `compensatedAt`), so `loadWorkflow` returns it. `startFreshRun` starts
+ * an empty ledger (new step rows), and `resetSteps` clears it on every step
+ * of the run, so a run re-driven after a rollback can be rolled back again.
+ *
+ * Both writes are fenced by `guard`, atomically with the write, like every
+ * other write of the run's lock holder.
+ *
+ * The engine detects this at runtime via `isCompensationLedgerStorage()`.
+ * Without it, compensation still runs, but a crash mid-rollback is not
+ * resumable.
+ */
+export interface CompensationLedgerStorage {
+  /**
+   * Enter the compensation phase: a `pending`, `running` or `suspended` run
+   * becomes `compensating`, storing `error` / `errorTag` (the failure that
+   * triggered the rollback; the run ends `failed` with them). A run that is
+   * already `compensating` is left as it is, ledger and error included.
+   *
+   * Returns `true` when the run is `compensating` after the call, `false`
+   * when it is missing or has ended (completed, failed, cancelled,
+   * tripwire): an ended run is never rolled back by this call.
+   */
+  beginCompensation(
+    params: { readonly workflowId: string; readonly error: string; readonly errorTag?: string },
+    guard?: FenceGuard,
+  ): Promise<boolean>;
+
+  /**
+   * Record one step's rollback in the ledger of the current run: sets the
+   * step row's `compensationStatus` to `status`, `compensationError` to
+   * `error` (cleared when absent) and `compensatedAt` to now. A step without
+   * a row in the current run is left alone.
+   */
+  saveStepCompensation(
+    params: {
+      readonly workflowId: string;
+      readonly stepName: string;
+      readonly status: StepCompensationOutcome;
+      readonly error?: string;
+    },
+    guard?: FenceGuard,
+  ): Promise<void>;
+}
+
+/** Runtime check for whether a storage implementation keeps a compensation ledger. */
+export function isCompensationLedgerStorage(
+  storage: WorkflowStorage,
+): storage is WorkflowStorage & CompensationLedgerStorage {
+  const s = storage as Partial<CompensationLedgerStorage>;
+  return typeof s.beginCompensation === "function" && typeof s.saveStepCompensation === "function";
 }
 
 /**

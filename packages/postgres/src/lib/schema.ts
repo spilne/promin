@@ -109,13 +109,17 @@ export const workflows = pgTable(
     index("wf_workflows_parent_idx")
       .on(t.parentWorkflowId)
       .where(sql`${t.parentWorkflowId} IS NOT NULL`),
-    // Coordinator recovery (`listOrphanedRuns`): pending / running runs
-    // in workflow-id order.
+    // Coordinator recovery (`listOrphanedRuns`): pending / running /
+    // compensating runs in workflow-id order.
     index("wf_workflows_active_idx")
       .on(t.workflowId)
       .where(
         sql`${t.statusId} IN (${sql.raw(
-          [WorkflowStatusIds.id.pending, WorkflowStatusIds.id.running].join(", "),
+          [
+            WorkflowStatusIds.id.pending,
+            WorkflowStatusIds.id.running,
+            WorkflowStatusIds.id.compensating,
+          ].join(", "),
         )})`,
       ),
     index("wf_workflows_run_source_idx")
@@ -179,9 +183,19 @@ export const workflowSteps = pgTable(
     // case). Opaque JSON; queryable with `metadata->>'<key>'`. Null for
     // steps that don't produce audit data.
     metadata: jsonb("metadata"),
+    // Compensation ledger: the step's rollback ran (`compensated`) or
+    // failed (`compensation_failed`), with its error and when. Null until
+    // the run rolls this step back; `resetSteps` clears it.
+    compensationStatus: text("compensation_status"),
+    compensationError: text("compensation_error"),
+    compensatedAt: timestamp("compensated_at", { withTimezone: true }),
   },
   (t) => [
     primaryKey({ columns: [t.workflowId, t.stepName, t.run] }),
+    check(
+      "wf_workflow_steps_compensation_status_check",
+      sql`${t.compensationStatus} IN ('compensated', 'compensation_failed')`,
+    ),
     // Sleep scanner (`listDueTimers`): sleeping steps by wake time.
     index("wf_workflow_steps_wake_at_idx")
       .on(t.wakeAt)

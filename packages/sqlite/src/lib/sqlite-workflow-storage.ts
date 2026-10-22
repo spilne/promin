@@ -7,7 +7,10 @@ import {
   workflowMetadataMatches,
   encodeRunSource,
   decodeRunSource,
+  withoutCompensationLedger,
   type WorkflowStorage,
+  type CompensationLedgerStorage,
+  type StepCompensationOutcome,
   type FenceToken,
   type FenceGuard,
   type WorkflowOrderBy,
@@ -65,7 +68,12 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
  * ```
  */
 export class SqliteWorkflowStorage
-  implements WorkflowStorage, ActivityJournalStorage, JournaledSuspendStorage, StepAttemptStorage
+  implements
+    WorkflowStorage,
+    ActivityJournalStorage,
+    JournaledSuspendStorage,
+    StepAttemptStorage,
+    CompensationLedgerStorage
 {
   private readonly _t: string;
   private readonly clock: WallClock;
@@ -149,13 +157,21 @@ export class SqliteWorkflowStorage
     );
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_status ON ${t} (status)`);
     // Scanners (`listDueTimers` / `listSignalWakeups`) page suspended runs,
-    // and coordinator recovery (`listOrphanedRuns`) pages pending / running
-    // runs, in workflow-id order.
+    // and coordinator recovery (`listOrphanedRuns`) pages pending / running /
+    // compensating runs, in workflow-id order.
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_suspended ON ${t} (workflow_id) WHERE status = 'suspended'`,
     );
+    // `_active` covered pending / running only; recovery now lists
+    // compensating runs too.
+    const legacyActive = this.db
+      .query<{ name: string }>(
+        `SELECT name FROM sqlite_master WHERE type = 'index' AND name = ? AND tbl_name = ?`,
+      )
+      .get(`${t}_active`, t);
+    if (legacyActive) this.db.run(`DROP INDEX IF EXISTS ${t}_active`);
     this.db.run(
-      `CREATE INDEX IF NOT EXISTS ${t}_active ON ${t} (workflow_id) WHERE status IN ('pending', 'running')`,
+      `CREATE INDEX IF NOT EXISTS ${t}_active_runs ON ${t} (workflow_id) WHERE status IN ('pending', 'running', 'compensating')`,
     );
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_parent ON ${t} (parent_workflow_id)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_run_source ON ${t} (run_source, run_source_id)`);
@@ -1629,8 +1645,12 @@ export class SqliteWorkflowStorage
       // Drop the listed steps from the JSON step map — a removed entry
       // reads back as "never ran", same shape as InMemoryWorkflowStorage.
       // Map-step tasks live nested under the step, so they go with it.
-      const steps = JSON.parse(row.steps) as Record<string, unknown>;
+      const steps = JSON.parse(row.steps) as Record<string, StepState>;
       for (const name of names) delete steps[name];
+      // The kept steps start a fresh compensation ledger.
+      for (const [name, step] of Object.entries(steps)) {
+        steps[name] = withoutCompensationLedger(step);
+      }
 
       // Clear journal entries so the activities re-fire on replay rather
       // than returning stale recorded values.
@@ -1782,7 +1802,7 @@ export class SqliteWorkflowStorage
       }>(
         `SELECT w.workflow_id, w.workflow_name, w.version, w.status, w.input, w.metadata
          FROM ${this._t} w
-         WHERE w.status IN ('pending', 'running')
+         WHERE w.status IN ('pending', 'running', 'compensating')
            AND w.updated_at < ? ${after}
            AND NOT EXISTS (
              SELECT 1 FROM ${this._t}_locks l
@@ -1796,7 +1816,7 @@ export class SqliteWorkflowStorage
       workflowId: r.workflow_id,
       workflowName: r.workflow_name,
       ...(r.version != null ? { version: r.version } : {}),
-      status: r.status as "pending" | "running",
+      status: r.status as OrphanedRun["status"],
       input: JSON.parse(r.input),
       ...(r.metadata != null ? { metadata: JSON.parse(r.metadata) } : {}),
     }));
@@ -2231,6 +2251,68 @@ export class SqliteWorkflowStorage
         ...(r.executor_id !== null && { executorId: r.executor_id }),
       };
       return rec;
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // CompensationLedgerStorage
+  // ---------------------------------------------------------------------------
+
+  async beginCompensation(
+    params: { readonly workflowId: string; readonly error: string; readonly errorTag?: string },
+    guard?: FenceGuard,
+  ): Promise<boolean> {
+    const now = this.clock.currentTimeMs();
+    return this._fenced({
+      workflowId: params.workflowId,
+      guard,
+      write: () => {
+        this.db
+          .query(
+            `UPDATE ${this._t}
+             SET status = 'compensating', error = ?, error_tag = ?, updated_at = ?
+             WHERE workflow_id = ? AND status IN ('pending', 'running', 'suspended')`,
+          )
+          .run(params.error, params.errorTag ?? null, now, params.workflowId);
+        const row = this.db
+          .query<{ status: string }>(`SELECT status FROM ${this._t} WHERE workflow_id = ?`)
+          .get(params.workflowId);
+        return row?.status === "compensating";
+      },
+    });
+  }
+
+  async saveStepCompensation(
+    params: {
+      readonly workflowId: string;
+      readonly stepName: string;
+      readonly status: StepCompensationOutcome;
+      readonly error?: string;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    const now = this.clock.currentTimeMs();
+    this._fenced({
+      workflowId: params.workflowId,
+      guard,
+      write: () => {
+        const row = this.db
+          .query<{ steps: string }>(`SELECT steps FROM ${this._t} WHERE workflow_id = ?`)
+          .get(params.workflowId);
+        if (!row) return;
+        const steps: Record<string, StepState> = JSON.parse(row.steps);
+        const step = steps[params.stepName];
+        if (!step) return;
+        steps[params.stepName] = {
+          ...withoutCompensationLedger(step),
+          compensationStatus: params.status,
+          ...(params.error !== undefined && { compensationError: params.error }),
+          compensatedAt: new Date(now),
+        };
+        this.db
+          .query(`UPDATE ${this._t} SET steps = ?, updated_at = ? WHERE workflow_id = ?`)
+          .run(JSON.stringify(steps), now, params.workflowId);
+      },
     });
   }
 }

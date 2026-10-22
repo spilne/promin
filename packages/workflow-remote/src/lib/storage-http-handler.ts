@@ -19,10 +19,11 @@ import type {
 } from "@promin/workflow";
 import {
   isActivityJournalStorage,
+  isCompensationLedgerStorage,
   isJournaledSuspendStorage,
   isStepAttemptStorage,
 } from "@promin/workflow";
-import type { StepAttemptStorage } from "@promin/workflow";
+import type { CompensationLedgerStorage, StepAttemptStorage } from "@promin/workflow";
 import { WIRE_CODEC, type RpcRequest, type RpcResponse, type StorageMethod } from "./wire.ts";
 
 /**
@@ -144,6 +145,15 @@ export function createWorkflowStorageHandler(
     // failure.
     saveStepAttempt: (p) => requireStepAttempt(storage).saveStepAttempt(p.record, p.guard),
     loadStepAttempts: (p) => requireStepAttempt(storage).loadStepAttempts(p.workflowId, p.stepName),
+    // -- Compensation ledger. Feature-detected like the attempt history.
+    beginCompensation: (p) => {
+      const { guard, ...params } = p;
+      return requireCompensationLedger(storage).beginCompensation(params, guard);
+    },
+    saveStepCompensation: (p) => {
+      const { guard, ...params } = p;
+      return requireCompensationLedger(storage).saveStepCompensation(params, guard);
+    },
     // -- Signal tokens. Core methods on WorkflowStorage — no feature gate.
     createSignalToken: (p) => storage.createSignalToken(p),
     findSignalTokenById: (p) => storage.findSignalTokenById(p.tokenId),
@@ -232,6 +242,15 @@ function requireSuspend(storage: WorkflowStorage): JournaledSuspendStorage {
   if (!isActivityJournalStorage(storage) || !isJournaledSuspendStorage(storage)) {
     throw new Error(
       "storage does not implement JournaledSuspendStorage — ctx.sleep / ctx.signal in journaled steps are unsupported on this backend",
+    );
+  }
+  return storage;
+}
+
+function requireCompensationLedger(storage: WorkflowStorage): CompensationLedgerStorage {
+  if (!isCompensationLedgerStorage(storage)) {
+    throw new Error(
+      "storage does not implement CompensationLedgerStorage — durable compensation is unsupported on this backend",
     );
   }
   return storage;

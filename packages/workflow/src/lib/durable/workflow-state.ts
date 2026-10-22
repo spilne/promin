@@ -257,6 +257,22 @@ export interface StepState {
   readonly metadata?: Record<string, unknown>;
 }
 
+/**
+ * `step` without its compensation-ledger fields (`compensationStatus`,
+ * `compensationError`, `compensatedAt`). For storages that keep step rows
+ * as documents: `resetSteps` clears the ledger with it, and a ledger write
+ * replaces the previous entry.
+ */
+export function withoutCompensationLedger(step: StepState): StepState {
+  const {
+    compensationStatus: _status,
+    compensationError: _error,
+    compensatedAt: _at,
+    ...rest
+  } = step;
+  return rest;
+}
+
 export interface StepTaskState {
   readonly taskIndex: number;
   readonly status: StepStatus;

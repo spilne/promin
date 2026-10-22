@@ -6,6 +6,8 @@ import { eq, and, or, sql, desc, asc, inArray, gte, lt } from "drizzle-orm";
 import type {
   WorkflowStorage,
   StepAttemptStorage,
+  CompensationLedgerStorage,
+  StepCompensationOutcome,
   RunSource,
   WorkflowState,
   WorkflowStatusSnapshot,
@@ -121,7 +123,12 @@ function parseJsonText(text: string | null | undefined): unknown {
 // ---------------------------------------------------------------------------
 
 export class PostgresWorkflowStorage
-  implements WorkflowStorage, StepAttemptStorage, ActivityJournalStorage, JournaledSuspendStorage
+  implements
+    WorkflowStorage,
+    StepAttemptStorage,
+    CompensationLedgerStorage,
+    ActivityJournalStorage,
+    JournaledSuspendStorage
 {
   /**
    * Drizzle schemas for all workflow tables.
@@ -231,6 +238,11 @@ export class PostgresWorkflowStorage
       signalTimeoutAt: row.signalTimeoutAt ?? undefined,
       signalJsonSchema: row.signalJsonSchema ?? undefined,
       metadata: (row.metadata as Record<string, unknown> | null) ?? undefined,
+      ...(row.compensationStatus != null && {
+        compensationStatus: row.compensationStatus as StepCompensationOutcome,
+      }),
+      ...(row.compensationError != null && { compensationError: row.compensationError }),
+      ...(row.compensatedAt != null && { compensatedAt: row.compensatedAt }),
     };
   }
 
@@ -1327,6 +1339,17 @@ export class PostgresWorkflowStorage
             inArray(workflowStepTasks.stepName, names),
           ),
         );
+      // The kept steps start a fresh compensation ledger.
+      await tx
+        .update(workflowSteps)
+        .set({ compensationStatus: null, compensationError: null, compensatedAt: null })
+        .where(
+          and(
+            eq(workflowSteps.workflowId, workflowId),
+            eq(workflowSteps.run, wf.run),
+            sql`${workflowSteps.compensationStatus} IS NOT NULL`,
+          ),
+        );
       // Clear journal entries so the activities re-fire on replay rather
       // than returning stale recorded values.
       await tx
@@ -1490,7 +1513,7 @@ export class PostgresWorkflowStorage
       SELECT w.workflow_id, w.workflow_name, w.version, w.status_id,
         w.input::text AS input_json, w.metadata::text AS metadata_json
       FROM wf_workflows w
-      WHERE w.status_id IN (${WorkflowStatusIds.id.pending}, ${WorkflowStatusIds.id.running})
+      WHERE w.status_id IN (${WorkflowStatusIds.id.pending}, ${WorkflowStatusIds.id.running}, ${WorkflowStatusIds.id.compensating})
         AND w.updated_at < ${params.updatedBefore.toISOString()}::timestamptz${after}${this.namespaceScope()}
         AND NOT EXISTS (
           SELECT 1 FROM wf_workflow_locks l
@@ -1507,7 +1530,7 @@ export class PostgresWorkflowStorage
         workflowId: r.workflow_id,
         workflowName: r.workflow_name,
         ...(r.version != null ? { version: r.version } : {}),
-        status: WorkflowStatusIds.toName(Number(r.status_id)) as "pending" | "running",
+        status: WorkflowStatusIds.toName(Number(r.status_id)) as OrphanedRun["status"],
         input: parseJsonText(r.input_json),
         ...(metadata != null ? { metadata } : {}),
       };
@@ -1775,6 +1798,82 @@ export class PostgresWorkflowStorage
       completedAt: r.completedAt,
       executorId: r.workerId ?? undefined,
     }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // CompensationLedgerStorage
+  // ---------------------------------------------------------------------------
+
+  async beginCompensation(
+    params: { readonly workflowId: string; readonly error: string; readonly errorTag?: string },
+    guard?: FenceGuard,
+  ): Promise<boolean> {
+    const { workflowId } = params;
+    return this.fenced({
+      workflowId,
+      guard,
+      write: async (db) => {
+        const moved = await db
+          .update(workflows)
+          .set({
+            statusId: WorkflowStatusIds.id.compensating,
+            error: params.error,
+            errorTag: params.errorTag ?? null,
+            updatedAt: this.config.clock.now(),
+          })
+          .where(
+            and(
+              eq(workflows.workflowId, workflowId),
+              inArray(workflows.statusId, CANCELLABLE_STATUS_IDS),
+            ),
+          )
+          .returning({ workflowId: workflows.workflowId });
+        if (moved.length > 0) return true;
+        const [row] = await db
+          .select({ statusId: workflows.statusId })
+          .from(workflows)
+          .where(eq(workflows.workflowId, workflowId));
+        return row?.statusId === WorkflowStatusIds.id.compensating;
+      },
+    });
+  }
+
+  async saveStepCompensation(
+    params: {
+      readonly workflowId: string;
+      readonly stepName: string;
+      readonly status: StepCompensationOutcome;
+      readonly error?: string;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    const { workflowId } = params;
+    await this.fenced({
+      workflowId,
+      guard,
+      write: async (db) => {
+        const now = this.config.clock.now();
+        const run = await this.getCurrentRun({ db, workflowId });
+        await db
+          .update(workflowSteps)
+          .set({
+            compensationStatus: params.status,
+            compensationError: params.error ?? null,
+            compensatedAt: now,
+          })
+          .where(
+            and(
+              eq(workflowSteps.workflowId, workflowId),
+              eq(workflowSteps.stepName, params.stepName),
+              eq(workflowSteps.run, run),
+            ),
+          );
+        await db
+          .update(workflows)
+          .set({ updatedAt: now })
+          .where(eq(workflows.workflowId, workflowId));
+      },
+    });
   }
 
   // ---------------------------------------------------------------------------

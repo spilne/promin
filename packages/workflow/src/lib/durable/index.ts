@@ -40,6 +40,9 @@ export {
   type WorkflowWakeup,
   type OrphanedRun,
   type StreamChunk,
+  type CompensationLedgerStorage,
+  type StepCompensationOutcome,
+  isCompensationLedgerStorage,
   workflowMetadataMatches,
   isStepAttemptStorage,
   isTripwireCapableStorage,
@@ -71,6 +74,7 @@ export {
   CANCELLED_ERROR,
   CANCELLED_ERROR_TAG,
   isCancelledRun,
+  withoutCompensationLedger,
   type WorkflowStatusSnapshot,
   encodeRunSource,
   decodeRunSource,
@@ -118,12 +122,14 @@ export { topologicalSort, computeReadySet, type DagNode } from "./workflow-dag.t
 export {
   DefaultWorkflowRunner,
   InProcessStepExecutor,
+  RoutingStepExecutor,
   createWorkflowRunner,
   RecoveryStrategy,
   RecoveryStrategyBuilder,
   type WorkflowRunner,
   type WorkflowRunnerConfig,
   type WorkflowRunnerRunParams,
+  type WorkflowRunnerStartParams,
   type WorkflowRunSafeError,
   type StepExecutor,
   type StepExecutionRequest,
@@ -177,6 +183,8 @@ export {
   hasQueryHandlers,
   listQueryHandlers,
   clearQueryHandlers,
+  configureQueryRegistry,
+  DEFAULT_SUSPENDED_QUERY_TTL_MS,
 } from "./query-registry.ts";
 
 // Visual editor schema — serializable DAG representation for authoring UIs

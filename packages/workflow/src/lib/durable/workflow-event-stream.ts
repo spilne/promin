@@ -18,6 +18,12 @@ export interface EventStreamProducer {
    * resolves with `{ done: true }`. Idempotent.
    */
   end(): void;
+  /**
+   * Close the stream with an error: events already pushed are still
+   * delivered, then the next `next()` rejects with `error` (once; later
+   * calls report done). No-op after the stream is done.
+   */
+  fail(error: unknown): void;
   /** `true` once the stream has been closed. */
   readonly done: boolean;
 }
@@ -36,6 +42,7 @@ export function createWorkflowEventStream(
   const queue: WorkflowRunEvent[] = [];
   const waiters: Array<(value: WorkflowRunEvent | null) => void> = [];
   let done = false;
+  let failure: { readonly error: unknown } | undefined;
 
   const producer: EventStreamProducer = {
     get done() {
@@ -53,6 +60,20 @@ export function createWorkflowEventStream(
       const pending = waiters.splice(0);
       for (const w of pending) w(null);
     },
+    fail(error: unknown): void {
+      if (done) return;
+      failure = { error };
+      producer.end();
+    },
+  };
+
+  /** The stream is over: dispose, then reject once with its failure, if any. */
+  const finish = (): IteratorResult<WorkflowRunEvent> => {
+    disposeOnce();
+    const failed = failure;
+    failure = undefined;
+    if (failed) throw failed.error;
+    return { value: undefined, done: true };
   };
 
   const dispose = setup(producer) ?? (() => undefined);
@@ -70,17 +91,11 @@ export function createWorkflowEventStream(
           if (queue.length > 0) {
             return { value: queue.shift()!, done: false };
           }
-          if (done) {
-            disposeOnce();
-            return { value: undefined, done: true };
-          }
+          if (done) return finish();
           const val = await new Promise<WorkflowRunEvent | null>((resolve) => {
             waiters.push(resolve);
           });
-          if (val === null) {
-            disposeOnce();
-            return { value: undefined, done: true };
-          }
+          if (val === null) return finish();
           return { value: val, done: false };
         },
         async return(): Promise<IteratorResult<WorkflowRunEvent>> {

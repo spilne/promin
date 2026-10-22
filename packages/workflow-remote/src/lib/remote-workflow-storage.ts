@@ -25,6 +25,8 @@ import type {
   JournaledSuspendStorage,
   StepAttemptStorage,
   StepAttemptRecord,
+  CompensationLedgerStorage,
+  StepCompensationOutcome,
   SignalTokenRecord,
   StreamChunk,
   WorkflowWakeup,
@@ -52,7 +54,7 @@ export interface RemoteWorkflowStorageConfig {
 }
 
 export class RemoteWorkflowStorage
-  implements WorkflowStorage, JournaledSuspendStorage, StepAttemptStorage
+  implements WorkflowStorage, JournaledSuspendStorage, StepAttemptStorage, CompensationLedgerStorage
 {
   private readonly url: string;
   private readonly fetch: FetchLike;
@@ -532,5 +534,29 @@ export class RemoteWorkflowStorage
 
   loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]> {
     return this.call("loadStepAttempts", { workflowId, stepName });
+  }
+
+  // -------------------------------------------------------------------------
+  // CompensationLedgerStorage — forwarded to the server's storage, which
+  // must implement it (the handler rejects the call otherwise).
+  // -------------------------------------------------------------------------
+
+  beginCompensation(
+    params: { readonly workflowId: string; readonly error: string; readonly errorTag?: string },
+    guard?: FenceGuard,
+  ): Promise<boolean> {
+    return this.call("beginCompensation", { ...params, guard });
+  }
+
+  saveStepCompensation(
+    params: {
+      readonly workflowId: string;
+      readonly stepName: string;
+      readonly status: StepCompensationOutcome;
+      readonly error?: string;
+    },
+    guard?: FenceGuard,
+  ): Promise<void> {
+    return this.call("saveStepCompensation", { ...params, guard });
   }
 }

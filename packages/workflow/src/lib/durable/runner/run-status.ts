@@ -64,6 +64,17 @@ export function storedRunError(state: WorkflowState): Error | undefined {
   }
   if (state.status !== "failed") return undefined;
   if (isCancelledRun(state)) return cancelledError(workflowId);
+  return runFailure(state);
+}
+
+/**
+ * The stored failure of a run as a `WorkflowFailedError`: the run's
+ * `error` and `errorTag` (or the failed step's tag), attributed to the
+ * failed step. For a `failed` run, and for a `compensating` one, whose
+ * stored error is the failure its rollback answers.
+ */
+export function runFailure(state: WorkflowState): WorkflowFailedError {
+  const { workflowId } = state;
   const failedStep = findFailedStep(state.steps);
   const errorTag = state.errorTag ?? failedStep?.errorTag;
   return new WorkflowFailedError({
