@@ -9,42 +9,29 @@
 
 import { describe, it, expect } from "bun:test";
 import { JsonCodec } from "@spilne/perfect-core/connect";
-import type { ActivityJournalStorage, JournalEntry } from "../activity-journal.ts";
+import type { CompletePendingResult, JournalExit } from "../activity-journal.ts";
+import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { runJournaledStep } from "../journaled-step.ts";
+import type { FenceGuard } from "../workflow-storage.ts";
 
 /**
- * A minimal in-memory journal storage whose `appendEntry` puts the value
- * through JSON.stringify + JSON.parse before storing — exactly what Redis /
+ * An in-memory journal storage that puts each recorded exit through
+ * JSON.stringify + JSON.parse before storing — exactly what Redis /
  * Postgres journals do. If the codec is pulling its weight, the replay path
  * hydrates values back to their original types.
  */
-class JsonJournalStorage implements ActivityJournalStorage {
-  private readonly entries = new Map<string, JournalEntry[]>();
-
-  private key(workflowId: string, stepName: string): string {
-    return `${workflowId}\x00${stepName}`;
-  }
-
-  async loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]> {
-    return this.entries.get(this.key(workflowId, stepName)) ?? [];
-  }
-
-  async appendEntry(entry: {
-    workflowId: string;
-    stepName: string;
-    activityIndex: number;
-    branchPath?: string;
-    activityName: string;
-    exit: NonNullable<JournalEntry["exit"]>;
-  }): Promise<void> {
-    const branchPath = entry.branchPath ?? "";
-    const normalized = { ...entry, branchPath };
-    const roundTripped: JournalEntry = JSON.parse(JSON.stringify(normalized));
-    roundTripped.branchPath = normalized.branchPath;
-    const key = this.key(entry.workflowId, entry.stepName);
-    const list = this.entries.get(key) ?? [];
-    list.push(roundTripped);
-    this.entries.set(key, list);
+class JsonJournalStorage extends InMemoryWorkflowStorage {
+  override async completePendingEntry(
+    params: {
+      readonly workflowId: string;
+      readonly stepName: string;
+      readonly activityIndex: number;
+      readonly branchPath?: string;
+      readonly exit: JournalExit;
+    },
+    guard?: FenceGuard,
+  ): Promise<CompletePendingResult> {
+    return super.completePendingEntry(JSON.parse(JSON.stringify(params)), guard);
   }
 }
 

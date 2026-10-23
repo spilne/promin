@@ -18,11 +18,11 @@ import type {
   WorkflowRunSummary,
   SignalState,
   FenceGuard,
+  ActivityJournalStorage,
   JournalEntry,
   JournalExit,
   JournalSlot,
   CompletePendingResult,
-  JournaledSuspendStorage,
   StepAttemptStorage,
   StepAttemptRecord,
   CompensationLedgerStorage,
@@ -54,7 +54,7 @@ export interface RemoteWorkflowStorageConfig {
 }
 
 export class RemoteWorkflowStorage
-  implements WorkflowStorage, JournaledSuspendStorage, StepAttemptStorage, CompensationLedgerStorage
+  implements WorkflowStorage, ActivityJournalStorage, StepAttemptStorage, CompensationLedgerStorage
 {
   private readonly url: string;
   private readonly fetch: FetchLike;
@@ -432,11 +432,11 @@ export class RemoteWorkflowStorage
   }
 
   // -------------------------------------------------------------------------
-  // ActivityJournalStorage / JournaledSuspendStorage. Forwarded over the wire
-  // so .journaled() workflows (with ctx.activity / ctx.sleep / ctx.signal)
-  // can run against a remote storage. The runtime detects support via
-  // function-presence checks (`isActivityJournalStorage`, `isJournaledSuspendStorage`),
-  // so wiring these methods is enough — no extra plumbing on the engine side.
+  // ActivityJournalStorage. Forwarded over the wire so .journaled() workflows
+  // (with ctx.activity / ctx.sleep / ctx.signal) can run against a remote
+  // storage. The runtime detects support via function-presence checks
+  // (`isActivityJournalStorage`), so wiring these methods is enough — no
+  // extra plumbing on the engine side.
   // -------------------------------------------------------------------------
 
   loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]> {

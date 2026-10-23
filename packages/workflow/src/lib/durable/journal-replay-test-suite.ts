@@ -16,7 +16,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import type { JournaledSuspendStorage } from "./activity-journal.ts";
+import type { ActivityJournalStorage } from "./activity-journal.ts";
 import { TerminalError, WorkflowSuspendedError } from "./durable-pipeline-error.ts";
 import type { Workflow } from "./workflow-types.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
@@ -40,7 +40,7 @@ const uniqueId = (label: string): string =>
     .slice(2, 8)}`;
 
 /** A journal-capable store; `createWorkflow` is called first when present. */
-export type JournalReplayStorage = JournaledSuspendStorage &
+export type JournalReplayStorage = ActivityJournalStorage &
   Partial<Pick<WorkflowStorage, "createWorkflow">>;
 
 /** Fresh workflow id; creates the workflow row on stores whose journal references it. */
@@ -56,7 +56,7 @@ async function newWorkflow(params: {
 const CHILD_WORKFLOW = { name: "child-wf" } as unknown as Workflow<unknown, unknown>;
 
 /**
- * Run the journal replay suite against any `JournaledSuspendStorage`. The
+ * Run the journal replay suite against any `ActivityJournalStorage`. The
  * factory may return a shared store; every case uses unique workflow ids.
  */
 export function journalReplayTestSuite(

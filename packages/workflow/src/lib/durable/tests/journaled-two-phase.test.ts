@@ -6,11 +6,11 @@
 //   - idempotent: false (default) → throw AmbiguousActivityOutcome
 //   - idempotent: true             → re-run the activity body
 // Also covers the happy path (normal completion → recorded exit on replay)
-// and the legacy single-phase fallback (storages without suspend support).
+// and the rejection of storages that can't do the two-phase record.
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { runJournaledStep } from "../journaled-step.ts";
+import { JournalStorageMissingError, runJournaledStep } from "../journaled-step.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { AmbiguousActivityOutcome } from "../durable-pipeline-error.ts";
 import type { ActivityJournalStorage, JournalEntry } from "../activity-journal.ts";
@@ -46,12 +46,15 @@ class CrashBetweenPhasesStorage extends InMemoryWorkflowStorage {
 }
 
 // ---------------------------------------------------------------------------
-// A minimal ActivityJournalStorage that doesn't implement JournaledSuspendStorage,
-// used to prove the legacy single-phase fallback path still works when a
-// custom storage can't do two-phase record.
+// A custom storage with only the single-write journal methods (no pending
+// entries), used to prove such a storage is rejected up front rather than
+// recording without the two-phase guarantee.
 // ---------------------------------------------------------------------------
 
-class SinglePhaseOnlyStorage implements ActivityJournalStorage {
+class SinglePhaseOnlyStorage implements Pick<
+  ActivityJournalStorage,
+  "loadJournal" | "appendEntry"
+> {
   private readonly entries = new Map<string, JournalEntry[]>();
 
   private key(workflowId: string, stepName: string): string {
@@ -370,31 +373,28 @@ describe("journaled activity — failure during first phase", () => {
   });
 });
 
-describe("journaled activity — legacy single-phase fallback", () => {
-  it("storages without JournaledSuspendStorage still record + replay via appendEntry", async () => {
+describe("journaled activity — storage without the two-phase record", () => {
+  it("is rejected with JournalStorageMissingError before the body runs", async () => {
     const storage = new SinglePhaseOnlyStorage();
     let ran = 0;
 
-    const run = () =>
+    await expect(
       runJournaledStep<unknown, unknown, number>({
         input: undefined,
         prev: undefined,
         workflowId: "wf-legacy",
         stepName: "step",
-        storage,
+        storage: storage as unknown as ActivityJournalStorage,
         body: function* (ctx) {
           return yield* ctx.activity("a", async () => {
             ran++;
             return 7;
           });
         },
-      });
+      }),
+    ).rejects.toBeInstanceOf(JournalStorageMissingError);
 
-    const fresh = await run();
-    const replay = await run();
-
-    expect(fresh).toBe(7);
-    expect(replay).toBe(7);
-    expect(ran).toBe(1); // replay hit the journal even in the single-phase path
+    expect(ran).toBe(0);
+    expect(await storage.loadJournal("wf-legacy", "step")).toEqual([]);
   });
 });

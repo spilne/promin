@@ -37,7 +37,6 @@ import { createWorkflowEventStream } from "./workflow-event-stream.ts";
 import type {
   ActivityJournalStorage,
   CompletePendingResult,
-  JournaledSuspendStorage,
   JournalEntry,
   JournalExit,
   JournalSlot,
@@ -128,12 +127,7 @@ interface MutableWorkflow {
 }
 
 export class InMemoryWorkflowStorage
-  implements
-    WorkflowStorage,
-    StepAttemptStorage,
-    CompensationLedgerStorage,
-    ActivityJournalStorage,
-    JournaledSuspendStorage
+  implements WorkflowStorage, StepAttemptStorage, CompensationLedgerStorage, ActivityJournalStorage
 {
   private workflows = new Map<string, MutableWorkflow>();
   /**

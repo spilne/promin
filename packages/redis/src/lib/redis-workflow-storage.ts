@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // RedisWorkflowStorage — Redis-backed WorkflowStorage, StepAttemptStorage,
-// ActivityJournalStorage, and JournaledSuspendStorage.
+// and ActivityJournalStorage.
 // ---------------------------------------------------------------------------
 //
 // Multi-key Lua scripts (terminal transitions, fresh runs) touch keys
@@ -14,7 +14,6 @@ import type {
   CompensationLedgerStorage,
   StepCompensationOutcome,
   ActivityJournalStorage,
-  JournaledSuspendStorage,
   JournalEntry,
   JournalExit,
   JournalSlot,
@@ -432,12 +431,7 @@ function fenceMismatch(params: {
 }
 
 export class RedisWorkflowStorage
-  implements
-    WorkflowStorage,
-    StepAttemptStorage,
-    CompensationLedgerStorage,
-    ActivityJournalStorage,
-    JournaledSuspendStorage
+  implements WorkflowStorage, StepAttemptStorage, CompensationLedgerStorage, ActivityJournalStorage
 {
   private readonly redis: RedisStoreClient;
   private readonly prefix: string;
@@ -2490,7 +2484,7 @@ export class RedisWorkflowStorage
     });
   }
 
-  // -- JournaledSuspendStorage ----------------------------------------------
+  // -- ActivityJournalStorage: pending entries -------------------------------
 
   async appendPendingEntry(
     params: {

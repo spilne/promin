@@ -12,15 +12,10 @@
 // put it in front of this handler.
 // ---------------------------------------------------------------------------
 
-import type {
-  WorkflowStorage,
-  ActivityJournalStorage,
-  JournaledSuspendStorage,
-} from "@promin/workflow";
+import type { WorkflowStorage, ActivityJournalStorage } from "@promin/workflow";
 import {
   isActivityJournalStorage,
   isCompensationLedgerStorage,
-  isJournaledSuspendStorage,
   isStepAttemptStorage,
 } from "@promin/workflow";
 import type { CompensationLedgerStorage, StepAttemptStorage } from "@promin/workflow";
@@ -124,22 +119,22 @@ export function createWorkflowStorageHandler(
     },
     appendPendingEntry: (p) => {
       const { guard, ...params } = p;
-      return requireSuspend(storage).appendPendingEntry(params, guard);
+      return requireJournal(storage).appendPendingEntry(params, guard);
     },
     completePendingEntry: (p) => {
       const { guard, ...params } = p;
-      return requireSuspend(storage).completePendingEntry(params, guard);
+      return requireJournal(storage).completePendingEntry(params, guard);
     },
     discardJournalEntries: async (p) => {
-      const suspend = requireSuspend(storage);
-      if (!suspend.discardJournalEntries) {
+      const journal = requireJournal(storage);
+      if (!journal.discardJournalEntries) {
         throw new Error("storage does not implement discardJournalEntries");
       }
       const { guard, ...params } = p;
-      await suspend.discardJournalEntries(params, guard);
+      await journal.discardJournalEntries(params, guard);
     },
-    findDueSleeps: (p) => requireSuspend(storage).findDueSleeps(p),
-    findPendingSignal: (p) => requireSuspend(storage).findPendingSignal(p),
+    findDueSleeps: (p) => requireJournal(storage).findDueSleeps(p),
+    findPendingSignal: (p) => requireJournal(storage).findPendingSignal(p),
     // -- StepAttempt methods. Feature-detected so backends without
     // attempt-history support surface a clear error instead of silent
     // failure.
@@ -233,15 +228,6 @@ function requireJournal(storage: WorkflowStorage): ActivityJournalStorage {
   if (!isActivityJournalStorage(storage)) {
     throw new Error(
       "storage does not implement ActivityJournalStorage — .journaled() steps are unsupported on this backend",
-    );
-  }
-  return storage;
-}
-
-function requireSuspend(storage: WorkflowStorage): JournaledSuspendStorage {
-  if (!isActivityJournalStorage(storage) || !isJournaledSuspendStorage(storage)) {
-    throw new Error(
-      "storage does not implement JournaledSuspendStorage — ctx.sleep / ctx.signal in journaled steps are unsupported on this backend",
     );
   }
   return storage;
