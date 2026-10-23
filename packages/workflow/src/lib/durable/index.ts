@@ -1,6 +1,7 @@
 export { workflow, flow, WorkflowBuilder } from "./workflow-builder.ts";
 export type {
   Workflow,
+  WorkflowErrorOf,
   IdempotencyConfig,
   WorkflowHandle,
   WorkflowStatusInfo,
@@ -131,6 +132,9 @@ export {
   type WorkflowRunnerRunParams,
   type WorkflowRunnerStartParams,
   type WorkflowRunSafeError,
+  type WorkflowRunError,
+  type WorkflowRunSafeResult,
+  type WorkflowRunParamsFor,
   type StepExecutor,
   type StepExecutionRequest,
   type StepExecutionResult,

@@ -104,6 +104,26 @@ export type WorkflowRunSafeError =
   | TaggedError;
 
 /**
+ * What `run` rejects with and `runSafe` returns as `error` for a workflow
+ * with typed errors `E`: one of `E` (a step's typed failure, rethrown as
+ * is), an engine error, or a defect. `E` is listed first so it shows in
+ * hovers; the rest (`WorkflowRunSafeError`) stays because an annotation can
+ * widen `E` away (see `Workflow`). Narrow with `instanceof` or `_tag`.
+ */
+export type WorkflowRunError<E extends TaggedError = never> = E | WorkflowRunSafeError;
+
+/** `runSafe`'s result for a workflow with output `Output` and typed errors `E`. */
+export type WorkflowRunSafeResult<Output, E extends TaggedError = never> =
+  | { data: Output; error: null }
+  | { data: null; error: WorkflowRunError<E> };
+
+/** `WorkflowRunnerRunParams` for a given definition (the `{ workflow }` shape). */
+export type WorkflowRunParamsFor<W> = Omit<
+  Extract<WorkflowRunnerRunParams, { readonly workflow: unknown }>,
+  "workflow"
+> & { readonly workflow: W };
+
+/**
  * Params for `WorkflowRunner.run` / `runSafe`. Two shapes:
  *
  * - `{ workflow, ... }` — run a specific definition directly. The runner
@@ -164,12 +184,16 @@ export type WorkflowRunnerRunParams =
  * Params for `WorkflowRunner.start`: everything `run` takes, with the
  * input and output typed by the workflow when it is passed directly.
  */
-export type WorkflowRunnerStartParams<Input = unknown, Output = unknown> =
+export type WorkflowRunnerStartParams<
+  Input = unknown,
+  Output = unknown,
+  E extends TaggedError = never,
+> =
   | (Omit<
       Extract<WorkflowRunnerRunParams, { readonly workflow: unknown }>,
       "workflow" | "input"
     > & {
-      readonly workflow: Workflow<Input, Output>;
+      readonly workflow: Workflow<Input, Output, E>;
       readonly input: Input;
     })
   | (Omit<Extract<WorkflowRunnerRunParams, { readonly name: string }>, "input"> & {
@@ -246,9 +270,23 @@ export interface WorkflowRunnerConfig {
 export interface WorkflowRunner {
   /** Storage the runner writes workflow state to. */
   readonly storage: WorkflowStorage;
-  /** Run a workflow and throw on failure. */
+  /**
+   * Run a workflow and throw on failure. For a `{ workflow }` call the result
+   * is typed by the workflow's output, and it rejects with a
+   * `WorkflowRunError<E>` of the workflow's typed errors.
+   */
+  run<Output, E extends TaggedError = never>(
+    params: WorkflowRunParamsFor<Workflow<unknown, Output, E>>,
+  ): Promise<Output>;
   run(params: WorkflowRunnerRunParams): Promise<unknown>;
-  /** Run a workflow and return `{ data, error }` instead of throwing. */
+  /**
+   * Run a workflow and return `{ data, error }` instead of throwing. For a
+   * `{ workflow }` call, `data` is the workflow's output and `error` a
+   * `WorkflowRunError<E>` of its typed errors.
+   */
+  runSafe<Output, E extends TaggedError = never>(
+    params: WorkflowRunParamsFor<Workflow<unknown, Output, E>>,
+  ): Promise<WorkflowRunSafeResult<Output, E>>;
   runSafe(
     params: WorkflowRunnerRunParams,
   ): Promise<{ data: unknown; error: null } | { data: null; error: WorkflowRunSafeError }>;
@@ -266,9 +304,9 @@ export interface WorkflowRunner {
    * one starts the run. A run that ends before taking the lock (an
    * idempotency-cache hit, a version mismatch) is reported by the handle.
    */
-  start<Input = unknown, Output = unknown>(
-    params: WorkflowRunnerStartParams<Input, Output>,
-  ): Promise<WorkflowHandle<Output>>;
+  start<Input = unknown, Output = unknown, E extends TaggedError = never>(
+    params: WorkflowRunnerStartParams<Input, Output, E>,
+  ): Promise<WorkflowHandle<Output, E>>;
   /**
    * Build a `WorkflowHandle` for a workflow that is *already running* — does
    * not enqueue or start anything. Useful when execution lives elsewhere
@@ -383,6 +421,10 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     if (config.executorId !== undefined) this.executorId = config.executorId;
   }
 
+  run<Output, E extends TaggedError = never>(
+    params: WorkflowRunParamsFor<Workflow<unknown, Output, E>>,
+  ): Promise<Output>;
+  run(params: WorkflowRunnerRunParams): Promise<unknown>;
   run(params: WorkflowRunnerRunParams): Promise<unknown> {
     return this._run(params);
   }
@@ -446,6 +488,12 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     });
   }
 
+  runSafe<Output, E extends TaggedError = never>(
+    params: WorkflowRunParamsFor<Workflow<unknown, Output, E>>,
+  ): Promise<WorkflowRunSafeResult<Output, E>>;
+  runSafe(
+    params: WorkflowRunnerRunParams,
+  ): Promise<{ data: unknown; error: null } | { data: null; error: WorkflowRunSafeError }>;
   async runSafe(
     params: WorkflowRunnerRunParams,
   ): Promise<{ data: unknown; error: null } | { data: null; error: WorkflowRunSafeError }> {
@@ -457,9 +505,9 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     }
   }
 
-  async start<Input = unknown, Output = unknown>(
-    params: WorkflowRunnerStartParams<Input, Output>,
-  ): Promise<WorkflowHandle<Output>> {
+  async start<Input = unknown, Output = unknown, E extends TaggedError = never>(
+    params: WorkflowRunnerStartParams<Input, Output, E>,
+  ): Promise<WorkflowHandle<Output, E>> {
     let workflowId = params.workflowId;
     let onInFlight: "reject" | "join" =
       "workflow" in params ? (params.workflow.idempotency?.onInFlight ?? "reject") : "reject";

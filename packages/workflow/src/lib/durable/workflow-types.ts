@@ -10,6 +10,7 @@ import type { Codec } from "@spilne/perfect-core/connect";
 import type { StepQueue } from "../distributed/step-queue.ts";
 import type { WorkflowRetryPolicy } from "../shared/retry-policy.ts";
 import type { Sinkable } from "../shared/streamable.ts";
+import type { TaggedError } from "../shared/tagged-error.ts";
 import type { StepDefinition } from "./step-definition.ts";
 import type { WorkflowDAG } from "./workflow-dag-viz.ts";
 import type { FailedWorkflowRecord, WorkflowRunEvent } from "./workflow-state.ts";
@@ -87,8 +88,19 @@ export interface IdempotencyConfig {
  * compensation, etc.) so the runner can build an orchestration context from
  * the pure shape. Part of the runtime contract between builder and runner,
  * not a public surface — callers shouldn't read it directly.
+ *
+ * `E` is the union of typed step failures the workflow can end with: what
+ * the builder collected from its steps' `Eff` error channels and from the
+ * step kinds (`GuardError`, `MatchError`, `LoopLimitExceededError`, ...).
+ * Engine control flow (suspension, continue-as-new) is not part of it. The
+ * runner surfaces `E` on `run` / `runSafe` / `start` (see `WorkflowRunError`).
+ *
+ * `E` is informational and defaults to `never`, so an annotation that leaves
+ * it out (`Workflow<I, O>`) still accepts a workflow with typed errors, and
+ * one written with fewer or more errors than the builder found still
+ * compiles. Read it with `WorkflowErrorOf<typeof wf>`.
  */
-export interface Workflow<Input, Output> {
+export interface Workflow<Input, Output, E extends TaggedError = never> {
   readonly name: string;
   readonly version?: string;
   readonly dag: WorkflowDAG;
@@ -106,7 +118,24 @@ export interface Workflow<Input, Output> {
    */
   readonly __input?: Input;
   readonly __output?: Output;
+  /** @internal Carrier of `E` (see `ErrorCarrier`). Never populated at runtime. */
+  readonly __error?: ErrorCarrier<E>;
 }
+
+/**
+ * Phantom carrier of a typed error union. A method parameter is checked
+ * bivariantly, so `Workflow<I, O, A>` and `Workflow<I, O, B>` are mutually
+ * assignable whenever `A` and `B` are related (`never` is related to every
+ * union). That keeps `E` additive: existing `Workflow<I, O>` annotations
+ * and `Workflow<unknown, unknown>` parameters accept any workflow, while
+ * inference from a `Workflow<I, O, E>` parameter still recovers `E`.
+ */
+interface ErrorCarrier<E> {
+  carry(error: E): void;
+}
+
+/** The typed error union `E` of a `Workflow<I, O, E>` (`never` when it has none). */
+export type WorkflowErrorOf<W> = W extends Workflow<any, any, infer E> ? E : never;
 
 /**
  * Runtime internals of a Workflow. Captured from the builder at `.build()` time
@@ -142,9 +171,14 @@ export interface WorkflowDefinitionInternals {
 
 /**
  * Handle to a running workflow. Returned by `WorkflowRunner.start()`.
+ *
+ * `E` is the workflow's typed error union (see `Workflow`); `result()`
+ * reports a typed failure by its `_tag` (see there).
  */
-export interface WorkflowHandle<Output> {
+export interface WorkflowHandle<Output, E extends TaggedError = never> {
   readonly workflowId: string;
+  /** @internal Carrier of `E`. Never populated at runtime. */
+  readonly __error?: ErrorCarrier<E>;
 
   /** Get the current workflow status. */
   status(params?: { includeStepResults?: boolean }): Promise<WorkflowStatusInfo<Output> | null>;
@@ -152,7 +186,13 @@ export interface WorkflowHandle<Output> {
   /** Send a signal to the workflow (e.g. from a webhook). */
   signal(signalName: string, payload: unknown): Promise<void>;
 
-  /** Wait for the workflow to complete. Resumes suspended workflows on each poll. */
+  /**
+   * Wait for the workflow to complete. Resumes suspended workflows on each
+   * poll. The run may execute elsewhere, so a failure is read back from
+   * storage: `result()` rejects with `WorkflowFailedError`, whose `errorTag`
+   * is the `_tag` of the error that failed the run (for a typed failure,
+   * one of `E["_tag"]`), `WorkflowCancelledError` or `WorkflowTripwireError`.
+   */
   result(params?: { intervalMs?: number; timeoutMs?: number }): Promise<Output>;
 
   /**

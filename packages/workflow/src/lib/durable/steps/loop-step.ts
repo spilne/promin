@@ -27,7 +27,10 @@ import { isStepAttemptStorage } from "../workflow-storage.ts";
  * the loop, which replays completed iterations from their rows and resumes
  * at the first missing one. No `cache` (iteration rows are the loop's memo).
  */
-export interface LoopOptions<T> extends Omit<StepOptions<T>, "cache"> {
+export interface LoopOptions<T, Input = unknown, Prev = unknown> extends Omit<
+  StepOptions<T, Input, Prev>,
+  "cache"
+> {
   /**
    * Safety cap on the number of iterations. When the loop runs this many
    * times without the exit condition being satisfied, the loop step fails

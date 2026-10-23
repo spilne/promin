@@ -3,7 +3,8 @@
 // ---------------------------------------------------------------------------
 //
 // The public API (`.step()` overloads and friends) is fully typed — Input,
-// the Steps record, Current and Error are tracked through the chain via
+// the Steps record, Current and Err (the typed error channel, carried into
+// `Workflow<I, O, E>` by `build()`) are tracked through the chain via
 // type-level computation. Each method is a thin generic signature over a
 // pure step factory in `steps/`: `this._append(createXStep({...}))`. The
 // builder wraps one immutable `BuilderState` (see `builder-state.ts`), so a
@@ -18,7 +19,6 @@ import {
   emptySteps,
   hasStep,
   lastStep,
-  replaceLastStep,
   stepsToArray,
   type BuilderState,
 } from "./builder-state.ts";
@@ -27,7 +27,6 @@ import {
   LoopLimitExceededError,
   StepError,
   WorkflowError,
-  WorkflowSuspendedError,
   WorkflowTimeoutError,
 } from "./durable-pipeline-error.ts";
 import type { JournalStorageMissingError, JournaledStepBody } from "./journaled-step.ts";
@@ -44,7 +43,7 @@ import type {
   SubworkflowOptions,
   TripwireOptions,
 } from "./step-definition.ts";
-import { createBasicStep, mapStepResult } from "./steps/basic-step.ts";
+import { createBasicStep, createTransformStep } from "./steps/basic-step.ts";
 import { createBranchStep } from "./steps/branch-step.ts";
 import { createGuardStep, createTripwireStep } from "./steps/guard-steps.ts";
 import { createJournaledStep } from "./steps/journaled-step-def.ts";
@@ -71,6 +70,9 @@ import type {
 /** A step function as the overload implementations see it. */
 type AnyStepFn = (ctx: any) => unknown;
 
+/** Step options as the overload implementations see them. */
+type AnyStepOptions = StepOptions<any, any, any>;
+
 /** What `.step()` / `.stepAsync()` resolve their overloaded arguments to. */
 interface StepArgs<F> {
   readonly dependsOn: string[];
@@ -86,8 +88,8 @@ interface StepArgs<F> {
  */
 function parseStepArgs<F extends AnyStepFn>(params: {
   readonly fnOrConfig: F | { dependsOn: string[] };
-  readonly fnOrOptions: F | StepOptions<unknown> | undefined;
-  readonly maybeOptions: StepOptions<unknown> | undefined;
+  readonly fnOrOptions: F | AnyStepOptions | undefined;
+  readonly maybeOptions: AnyStepOptions | undefined;
   /** Dependencies of a linear step (the current head, if any). */
   readonly linearDeps: string[];
 }): StepArgs<F> {
@@ -108,6 +110,27 @@ function parseStepArgs<F extends AnyStepFn>(params: {
   };
 }
 
+/**
+ * `Steps` with step `Name` added. A non-literal `Name` (a `string`) adds
+ * nothing: it would otherwise widen `Steps` to `Record<string, T>`, after
+ * which every `dependsOn` name type-checks.
+ */
+type AddStep<Steps, Name extends string, T> = string extends Name ? Steps : Steps & Record<Name, T>;
+
+/**
+ * The value a DAG step with `dependsOn: DependsOn` receives as `prev`: its
+ * first dependency's result, or the workflow input when it has none.
+ */
+type FirstDepValue<
+  Steps,
+  DependsOn extends readonly unknown[],
+  Input,
+> = DependsOn extends readonly [infer First, ...unknown[]]
+  ? First extends keyof Steps
+    ? Steps[First]
+    : Input
+  : Input;
+
 const duplicateStepError = (name: string): WorkflowError =>
   new WorkflowError({ workflowId: "", message: `Duplicate step name: "${name}"` });
 
@@ -115,13 +138,13 @@ export class WorkflowBuilder<
   Input,
   Steps extends Record<string, unknown> = {},
   Current = Input,
-  Error extends TaggedError = never,
+  Err extends TaggedError = never,
 > {
   /** @internal Use `workflow()` or `flow()`. */
   constructor(private readonly s: BuilderState<Input>) {}
 
   /** Set the workflow version. Used to detect code/state mismatch on resume. */
-  version(v: string): WorkflowBuilder<Input, Steps, Current, Error> {
+  version(v: string): WorkflowBuilder<Input, Steps, Current, Err> {
     return new WorkflowBuilder({ ...this.s, config: { ...this.s.config, version: v } });
   }
 
@@ -133,8 +156,8 @@ export class WorkflowBuilder<
   step<Name extends string, Output, E2 extends TaggedError = never>(
     name: Name,
     fn: (ctx: StepContext<Input, Current>) => StepEff<Output, E2>,
-    options?: StepOptions<Output>,
-  ): WorkflowBuilder<Input, Steps & Record<Name, Output>, Output, Error | E2>;
+    options?: StepOptions<Output, Input, Current>,
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, Output>, Output, Err | E2>;
 
   /** DAG step — Eff-returning. */
   step<
@@ -146,14 +169,14 @@ export class WorkflowBuilder<
     name: Name,
     config: { dependsOn: [...DependsOn] },
     fn: (ctx: DagStepContext<Input, Pick<Steps, DependsOn[number]>>) => StepEff<Output, E2>,
-    options?: StepOptions<Output>,
-  ): WorkflowBuilder<Input, Steps & Record<Name, Output>, Output, Error | E2>;
+    options?: StepOptions<Output, Input, FirstDepValue<Steps, DependsOn, Input>>,
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, Output>, Output, Err | E2>;
 
   step(
     name: string,
     fnOrConfig: AnyStepFn | { dependsOn: string[] },
-    fnOrOptions?: AnyStepFn | StepOptions<unknown>,
-    maybeOptions?: StepOptions<unknown>,
+    fnOrOptions?: AnyStepFn | AnyStepOptions,
+    maybeOptions?: AnyStepOptions,
   ): WorkflowBuilder<Input, any, any, any> {
     return this._basicStep(
       name,
@@ -165,22 +188,22 @@ export class WorkflowBuilder<
   stepAsync<Name extends string, Output>(
     name: Name,
     fn: (ctx: StepContext<Input, Current>) => Promise<Output>,
-    options?: StepOptions<Output>,
-  ): WorkflowBuilder<Input, Steps & Record<Name, Output>, Output, Error>;
+    options?: StepOptions<Output, Input, Current>,
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, Output>, Output, Err>;
 
   /** DAG stepAsync — Promise-returning convenience; a rejection is a defect. */
   stepAsync<Name extends string, DependsOn extends (keyof Steps & string)[], Output>(
     name: Name,
     config: { dependsOn: [...DependsOn] },
     fn: (ctx: DagStepContext<Input, Pick<Steps, DependsOn[number]>>) => Promise<Output>,
-    options?: StepOptions<Output>,
-  ): WorkflowBuilder<Input, Steps & Record<Name, Output>, Output, Error>;
+    options?: StepOptions<Output, Input, FirstDepValue<Steps, DependsOn, Input>>,
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, Output>, Output, Err>;
 
   stepAsync(
     name: string,
     fnOrConfig: AnyStepFn | { dependsOn: string[] },
-    fnOrOptions?: AnyStepFn | StepOptions<unknown>,
-    maybeOptions?: StepOptions<unknown>,
+    fnOrOptions?: AnyStepFn | AnyStepOptions,
+    maybeOptions?: AnyStepOptions,
   ): WorkflowBuilder<Input, any, any, any> {
     const args = parseStepArgs({
       fnOrConfig,
@@ -202,9 +225,17 @@ export class WorkflowBuilder<
   /**
    * Run `fn` for every element of the array produced by step `config.array`
    * (up to `config.concurrency` at a time) and complete with the results in
-   * order. Each element's result is written as a task row. The step-level
-   * options apply to the map step as a whole; `options.element` sets an
-   * element's own codec, timeout and retry (see `MapOverOptions`).
+   * order. Each element's result is written as a task row (encoded with the
+   * element codec), and an element that fails past its retries gets a failed
+   * task row. The step-level options apply to the map step as a whole;
+   * `options.element` sets an element's own codec, timeout and retry (see
+   * `MapOverOptions`).
+   *
+   * Resume: when the map step runs again after a failure or a crash (a
+   * step-level retry, a workflow retry, a resumed run), elements that
+   * already have a completed task row return the saved result and only the
+   * rest run. Element bodies are therefore at-least-once per element, not
+   * per map step.
    *
    * `ctx.attempt` is the step attempt plus the element-level retries so far,
    * so it starts at the step attempt and grows with each element retry.
@@ -221,8 +252,8 @@ export class WorkflowBuilder<
       element: Steps[ArrayStep] extends readonly (infer U)[] ? U : never,
       ctx: MapStepContext<Input>,
     ) => StepEff<Output, E2>,
-    options?: MapOverOptions<Output>,
-  ): WorkflowBuilder<Input, Steps & Record<Name, Output[]>, Output[], Error | E2> {
+    options?: MapOverOptions<Output, Input, Steps[ArrayStep]>,
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, Output[]>, Output[], Err | E2> {
     this._validateName(name);
     return this._append(
       createMapOverStep({
@@ -245,8 +276,8 @@ export class WorkflowBuilder<
       element: Steps[ArrayStep] extends readonly (infer U)[] ? U : never,
       ctx: MapStepContext<Input>,
     ) => Promise<Output>,
-    options?: MapOverOptions<Output>,
-  ): WorkflowBuilder<Input, Steps & Record<Name, Output[]>, Output[], Error> {
+    options?: MapOverOptions<Output, Input, Steps[ArrayStep]>,
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, Output[]>, Output[], Err> {
     return this.mapOver(
       name,
       config,
@@ -263,7 +294,7 @@ export class WorkflowBuilder<
     name: Name,
     predicate: (prev: Current) => boolean,
     options?: { failureMessage?: string },
-  ): WorkflowBuilder<Input, Steps & Record<Name, Current>, Current, Error | GuardError> {
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, Current>, Current, Err | GuardError> {
     this._validateName(name);
     return this._append(
       createGuardStep({
@@ -316,7 +347,7 @@ export class WorkflowBuilder<
       reason: (prev: Current) => unknown;
     },
     options?: TripwireOptions<Current>,
-  ): WorkflowBuilder<Input, Steps & Record<Name, Current>, Current, Error> {
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, Current>, Current, Err> {
     this._validateName(name);
     return this._append(
       createTripwireStep({
@@ -380,8 +411,8 @@ export class WorkflowBuilder<
     name: Name,
     body: (ctx: StepContext<Input, Current>, iter: number) => StepEff<T, E2>,
     condition: (result: T, iter: number) => boolean,
-    options?: LoopOptions<T>,
-  ): WorkflowBuilder<Input, Steps & Record<Name, T>, T, Error | E2 | LoopLimitExceededError> {
+    options?: LoopOptions<T, Input, Current>,
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, T>, T, Err | E2 | LoopLimitExceededError> {
     return this._loop({
       name,
       body,
@@ -409,8 +440,8 @@ export class WorkflowBuilder<
     name: Name,
     body: (ctx: StepContext<Input, Current>, iter: number) => T | PromiseLike<T>,
     condition: (result: T, iter: number) => boolean,
-    options?: LoopOptions<T>,
-  ): WorkflowBuilder<Input, Steps & Record<Name, T>, T, Error | LoopLimitExceededError> {
+    options?: LoopOptions<T, Input, Current>,
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, T>, T, Err | LoopLimitExceededError> {
     return this._loop({
       name,
       body: asyncLoopBody(body),
@@ -440,8 +471,8 @@ export class WorkflowBuilder<
     name: Name,
     body: (ctx: StepContext<Input, Current>, iter: number) => StepEff<T, E2>,
     condition: (result: T, iter: number) => boolean,
-    options?: LoopOptions<T>,
-  ): WorkflowBuilder<Input, Steps & Record<Name, T>, T, Error | E2 | LoopLimitExceededError> {
+    options?: LoopOptions<T, Input, Current>,
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, T>, T, Err | E2 | LoopLimitExceededError> {
     // `dountil(cond) ≡ dowhile(!cond)`.
     return this._loop({
       name,
@@ -457,8 +488,8 @@ export class WorkflowBuilder<
     name: Name,
     body: (ctx: StepContext<Input, Current>, iter: number) => T | PromiseLike<T>,
     condition: (result: T, iter: number) => boolean,
-    options?: LoopOptions<T>,
-  ): WorkflowBuilder<Input, Steps & Record<Name, T>, T, Error | LoopLimitExceededError> {
+    options?: LoopOptions<T, Input, Current>,
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, T>, T, Err | LoopLimitExceededError> {
     return this._loop({
       name,
       body: asyncLoopBody(body),
@@ -526,12 +557,16 @@ export class WorkflowBuilder<
   >(
     name: Name,
     branches: Branches,
-    options?: ParallelStepsOptions<{ [K in keyof Branches]: BranchOutput<Branches[K]> }>,
+    options?: ParallelStepsOptions<
+      { [K in keyof Branches]: BranchOutput<Branches[K]> },
+      Input,
+      Current
+    >,
   ): WorkflowBuilder<
     Input,
-    Steps & Record<Name, { [K in keyof Branches]: BranchOutput<Branches[K]> }>,
+    AddStep<Steps, Name, { [K in keyof Branches]: BranchOutput<Branches[K]> }>,
     { [K in keyof Branches]: BranchOutput<Branches[K]> },
-    Error | BranchError<Branches>
+    Err | BranchError<Branches>
   > {
     this._validateName(name);
     return this._append(
@@ -564,8 +599,8 @@ export class WorkflowBuilder<
       ifTrue: (ctx: StepContext<Input, Current>) => StepEff<Output, E2>;
       ifFalse: (ctx: StepContext<Input, Current>) => StepEff<Output, E2>;
     },
-    options?: StepOptions<Output>,
-  ): WorkflowBuilder<Input, Steps & Record<Name, Output>, Output, Error | E2> {
+    options?: StepOptions<Output, Input, Current>,
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, Output>, Output, Err | E2> {
     this._validateName(name);
     return this._append(
       createBranchStep({
@@ -616,12 +651,12 @@ export class WorkflowBuilder<
   journaled<Name extends string, Output>(
     name: Name,
     body: JournaledStepBody<Input, Current, Output>,
-    options?: JournaledStepOptions<Output>,
+    options?: JournaledStepOptions<Output, Input, Current>,
   ): WorkflowBuilder<
     Input,
-    Steps & Record<Name, Output>,
+    AddStep<Steps, Name, Output>,
     Output,
-    Error | JournalStorageMissingError
+    Err | JournalStorageMissingError
   > {
     this._validateName(name);
     return this._append(
@@ -683,8 +718,8 @@ export class WorkflowBuilder<
   match<Name extends string, Output, E2 extends TaggedError = never>(
     name: Name,
     params: MatchParams<Input, Current, Output, E2>,
-    options?: StepOptions<Output>,
-  ): WorkflowBuilder<Input, Steps & Record<Name, Output>, Output, Error | E2 | MatchError> {
+    options?: StepOptions<Output, Input, Current>,
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, Output>, Output, Err | E2 | MatchError> {
     this._validateName(name);
     return this._append(
       createMatchStep({
@@ -729,8 +764,8 @@ export class WorkflowBuilder<
       input: (prev: Current) => ChildInput;
       workflowId: (prev: Current) => string;
     },
-    options?: SubworkflowOptions<ChildOutput>,
-  ): WorkflowBuilder<Input, Steps & Record<Name, ChildOutput>, ChildOutput, Error | StepError> {
+    options?: SubworkflowOptions<ChildOutput, Input, Current>,
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, ChildOutput>, ChildOutput, Err | StepError> {
     this._validateName(name);
     return this._append(
       createSubworkflowStep({
@@ -755,12 +790,16 @@ export class WorkflowBuilder<
    * resuming early does not move it. On wake the step passes its predecessor's
    * value through unchanged: the next step's `prev` is the value from before
    * the sleep, and the sleep step's own checkpointed result is that same value
-   * (encoded with the predecessor's codec).
+   * (encoded with the predecessor's codec), so a later `dependsOn: [name]`
+   * sees that value too.
+   *
+   * Suspension is engine control flow, not a step failure, so it does not
+   * enter the typed error channel.
    */
-  sleep(
-    name: string,
+  sleep<Name extends string>(
+    name: Name,
     ms: number,
-  ): WorkflowBuilder<Input, Steps, Current, Error | WorkflowSuspendedError> {
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, Current>, Current, Err> {
     this._validateName(name);
     return this._append(
       createSleepStep({
@@ -797,20 +836,23 @@ export class WorkflowBuilder<
    * stored with the step and reused on every resume, so resuming the run
    * before the deadline does not extend it; the first resume at or after the
    * deadline fails the step with `WorkflowTimeoutError`.
+   *
+   * Typing: the step is added to the named steps (for a later `dependsOn`)
+   * only when its name is inferred as a literal. The usual
+   * `.waitForSignal<Payload>("approval", …)` passes `T` explicitly, which
+   * leaves `Name` at `string`, so the step is not addressable by name; pass
+   * both (`.waitForSignal<Payload, "approval">(…)`) or let `codec` infer
+   * `T` to make it addressable. A non-literal name never widens the named
+   * steps to `Record<string, T>`.
    */
-  waitForSignal<T>(
-    name: string,
+  waitForSignal<T, Name extends string = string>(
+    name: Name,
     params: {
       signalName: string;
       timeoutMs?: number;
       codec?: Codec<T>;
     },
-  ): WorkflowBuilder<
-    Input,
-    Steps & Record<string, T>,
-    T,
-    Error | WorkflowSuspendedError | WorkflowTimeoutError
-  > {
+  ): WorkflowBuilder<Input, AddStep<Steps, Name, T>, T, Err | WorkflowTimeoutError> {
     this._validateName(name);
     return this._append(
       createWaitForSignalStep({
@@ -828,19 +870,36 @@ export class WorkflowBuilder<
   // ---------------------------------------------------------------------------
 
   /**
-   * Transform the last step's result. The transform runs inside that step's
-   * body, so the step's checkpointed result is the mapped value.
+   * Transform the current head's value with a pure function. `.map(fn)`
+   * adds a step named `"<head>.map"` (`"<head>.map.2"`, ... when taken)
+   * that applies `fn` to the head's result and checkpoints the mapped value
+   * with the workflow codec; the next step's `prev` is the mapped value.
+   *
+   * The head step itself is unchanged: its checkpointed result, codec and
+   * options stay those of the unmapped value, so `fn` also maps the head's
+   * `skipValue`, `onFailure` fallback and cache hits, the head's
+   * `compensate` receives the unmapped result, and a later
+   * `dependsOn: [head]` sees the unmapped value. A throw from `fn` is a
+   * defect. The map step is not addressable by name in `dependsOn`.
    */
-  map<Output>(fn: (value: Current) => Output): WorkflowBuilder<Input, Steps, Output, Error> {
-    const last = lastStep(this.s.steps);
-    if (last === undefined) {
+  map<Output>(fn: (value: Current) => Output): WorkflowBuilder<Input, Steps, Output, Err> {
+    const head = this.s.lastStepName;
+    if (head === null) {
       throw new WorkflowError({
         workflowId: "",
         message: "Cannot call .map() on a workflow with no steps",
       });
     }
-    const def = mapStepResult({ def: last, fn: fn as (value: unknown) => unknown });
-    return new WorkflowBuilder({ ...this.s, steps: replaceLastStep({ seq: this.s.steps, def }) });
+    let name = `${head}.map`;
+    for (let n = 2; hasStep({ seq: this.s.steps, name }); n++) name = `${head}.map.${n}`;
+    return this._append(
+      createTransformStep({
+        name,
+        head,
+        fn: fn as (value: unknown) => unknown,
+        codec: this._codec(),
+      }),
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -880,8 +939,11 @@ export class WorkflowBuilder<
    * state backend along: one process (the coordinator, a registry) wires
    * storage, and other processes (submitters, HTTP handlers) work off the
    * bare definition.
+   *
+   * The result carries the typed errors the steps declared (`Err`), which
+   * the runner surfaces on `run` / `runSafe` / `start`.
    */
-  build(options?: { idempotency?: IdempotencyConfig }): Workflow<Input, Current> {
+  build(options?: { idempotency?: IdempotencyConfig }): Workflow<Input, Current, Err> {
     const config = options?.idempotency
       ? { ...this.s.config, idempotency: options.idempotency }
       : this.s.config;
@@ -967,7 +1029,7 @@ export class WorkflowBuilder<
     readonly name: string;
     readonly body: (ctx: StepContext<Input, Current>, iter: number) => unknown;
     readonly keepGoing: (result: T, iter: number) => boolean;
-    readonly options: LoopOptions<T> | undefined;
+    readonly options: LoopOptions<T, Input, Current> | undefined;
     readonly asyncVariant: string;
   }): WorkflowBuilder<Input, any, any, any> {
     this._validateName(params.name);

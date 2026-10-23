@@ -2,6 +2,7 @@
 // `.step()` / `.stepAsync()` — one user function as one DAG node.
 // ---------------------------------------------------------------------------
 
+import { sync } from "@spilne/perfect-core";
 import type { Codec } from "@spilne/perfect-core/connect";
 import { withOptionalStepCache } from "../step-cache.ts";
 import {
@@ -52,7 +53,10 @@ export function createBasicStep(params: {
       }
       return withOptionalStepCache({
         cache: options?.cache,
-        ctx: ctx as StepContext<unknown, unknown>,
+        // `cache.key` sees `prev` for a DAG step too (its first dependency).
+        ctx: isLinear
+          ? (ctx as StepContext<unknown, unknown>)
+          : linearStepContext({ dependsOn, exec }),
         runBody: () => asStepEff({ result: fn(ctx), stepName: name }),
         stepName: name,
         namespace: params.cacheNamespace,
@@ -63,15 +67,25 @@ export function createBasicStep(params: {
 }
 
 /**
- * `def` with `fn` applied to its result (the builder's `.map()`). The
- * transform runs inside the step body, so the checkpointed result is the
- * mapped value.
+ * The pure step `.map()` adds after `head`: it applies `fn` to the head's
+ * result and checkpoints the mapped value with `codec` (the workflow
+ * codec). The head step keeps its own result, codec and options, so its
+ * `skipValue`, `onFailure` fallback and cache hits are mapped as well, and
+ * its `compensate` receives the unmapped result. A throw from `fn` is a
+ * defect.
  */
-export function mapStepResult(params: {
-  readonly def: StepDefinition;
+export function createTransformStep(params: {
+  readonly name: string;
+  readonly head: string;
   readonly fn: (value: unknown) => unknown;
+  readonly codec: Codec<unknown>;
 }): StepDefinition {
-  const { def, fn } = params;
-  const originalExecute = def.execute;
-  return { ...def, execute: (exec) => originalExecute(exec).map(fn) };
+  const { head, fn } = params;
+  return {
+    name: params.name,
+    dependsOn: [head],
+    kind: "transform",
+    codec: params.codec,
+    execute: (exec) => sync(() => fn(exec.results[head])),
+  };
 }

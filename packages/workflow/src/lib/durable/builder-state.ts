@@ -81,18 +81,6 @@ export function appendSteps(params: {
   return { store, length: store.defs.length };
 }
 
-/** `seq` with its last step replaced by `def` (same name). Copies the prefix. */
-export function replaceLastStep(params: {
-  readonly seq: StepSeq;
-  readonly def: StepDefinition;
-}): StepSeq {
-  const { seq, def } = params;
-  const store = copyPrefix({ store: seq.store, length: seq.length - 1 });
-  store.index.set(def.name, store.defs.length);
-  store.defs.push(def);
-  return { store, length: store.defs.length };
-}
-
 /** A snapshot array of the steps of `seq` (later appends do not touch it). */
 export function stepsToArray(seq: StepSeq): StepDefinition[] {
   return seq.store.defs.slice(0, seq.length);
