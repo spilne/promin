@@ -1,11 +1,31 @@
 // ---------------------------------------------------------------------------
 // RedisWorkflowStorage — Redis-backed WorkflowStorage, StepAttemptStorage,
-// and ActivityJournalStorage.
+// CompensationLedgerStorage and ActivityJournalStorage.
 // ---------------------------------------------------------------------------
 //
-// Multi-key Lua scripts (terminal transitions, fresh runs) touch keys
-// derived from the prefix, so the storage targets a standalone Redis (or a
-// cluster where the prefix pins every key to one slot).
+// Runs on a standalone Redis and on Redis Cluster. Every key of a workflow
+// shares the hash tag `{wf:<id>}`, and the cross-workflow indexes share
+// `{idx}` (see `redis-workflow-keys.ts`), so each script touches one slot:
+//
+// - A workflow's own writes (step rows, status, journal, fence check) are
+//   one atomic script on its slot.
+// - Index maintenance is a second script on the `{idx}` slot, versioned by
+//   the workflow hash's `iv` field so it converges whatever the order of
+//   concurrent writers. The workflow hash is authoritative; after a crash
+//   between the two scripts the index lags until the next write to that
+//   workflow, or until a reader (scanners, listing, purge) notices and
+//   repairs it.
+// - The sleep schedule is a cross-workflow sorted set. Adding to it follows
+//   the journal write; removing follows the completion. A member left
+//   behind is dropped by `findDueSleeps`, which checks each due member
+//   against its journal entry.
+// - A fenced child create checks the parent's fence in one script and
+//   writes the child's row in another (different slots), so a parent that
+//   loses its lock in between can still create the child. Child ids are
+//   deterministic per parent step, so the new lock holder attaches to it.
+//
+// Keys written before this layout need `migrateLegacyKeys()` once, on the
+// standalone instance, with workers stopped.
 // ---------------------------------------------------------------------------
 
 import type {
@@ -30,6 +50,7 @@ import type {
   WorkflowStatusSnapshot,
   WorkflowStatus,
   WorkflowRunSummary,
+  WorkflowSummary,
   StepState,
   StepTaskState,
   SignalState,
@@ -49,6 +70,37 @@ import {
 } from "@promin/workflow";
 import type { RedisStoreClient } from "./redis-client.ts";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
+import { RedisWorkflowKeys, escapeGlob } from "./redis-workflow-keys.ts";
+import {
+  APPEND_ENTRY_LUA,
+  APPEND_PENDING_LUA,
+  COMPLETE_PENDING_LUA,
+  CREATE_SIGNAL_TOKEN_LUA,
+  DISCARD_ENTRIES_LUA,
+  FENCE_REJECTED,
+  HASH_FIELD_CAS_LUA,
+  HEARTBEAT_LUA,
+  HMGET_LUA,
+  INDEX_FIELDS,
+  INDEX_PAGE_LUA,
+  INTER_CARD_LUA,
+  LOAD_RUN_LUA,
+  LRANGE_ALL_LUA,
+  PTTL_LUA,
+  PURGE_WORKFLOW_LUA,
+  READ_FOR_WRITE_LUA,
+  RELEASE_LOCK_LUA,
+  RESET_STEPS_LUA,
+  START_FRESH_RUN_LUA,
+  SYNC_INDEX_LUA,
+  TRANSITION_STATUS_LUA,
+  TRY_LOCK_AND_LOAD_LUA,
+  TRY_LOCK_LUA,
+  UNINDEX_LUA,
+  WRITE_OPS_LUA,
+  fencedLua,
+} from "./redis-workflow-scripts.ts";
+import { migrateLegacyWorkflowKeys } from "./redis-workflow-migration.ts";
 
 export interface RedisWorkflowStorageConfig {
   redis: RedisStoreClient;
@@ -68,330 +120,8 @@ export interface RedisWorkflowStorageConfig {
   clock?: WallClock;
 }
 
-// -- Lua scripts ----------------------------------------------------------
-
-// Lock is stored as a hash with { lockedBy, token } fields + a PEXPIRE TTL.
-// Token is minted from a global INCR counter so each holder's stamp is
-// strictly greater than any prior one — mutating writes carry it back
-// through every fenced script (`fencedLua`) and a mismatch rejects the stale writer.
-//
-// TRY_LOCK
-// KEYS: [lockKey, counterKey]
-// ARGV: [instanceId, lockDurationMs]
-// Returns: [acquired (0/1), token (string, empty on miss)]
-const TRY_LOCK_LUA = `
-if redis.call('EXISTS', KEYS[1]) == 1 then
-  return {0, ''}
-end
-local token = redis.call('INCR', KEYS[2])
-redis.call('HSET', KEYS[1], 'lockedBy', ARGV[1], 'token', token)
-redis.call('PEXPIRE', KEYS[1], ARGV[2])
-return {1, tostring(token)}
-`;
-
-// PTTL of a lock key (the client surface has no PTTL command).
-// KEYS: [lockKey]
-const PTTL_LUA = `return redis.call('PTTL', KEYS[1])`;
-
-// RELEASE_LOCK: honor the fence token when provided, else fall back to
-// the instanceId check (matches InMemory/Postgres semantics during the
-// migration window where some callers don't yet pass guards).
-// KEYS: [lockKey]
-// ARGV: [instanceId, fenceToken|'']
-const RELEASE_LOCK_LUA = `
-if ARGV[2] ~= '' then
-  if redis.call('HGET', KEYS[1], 'token') == ARGV[2] then
-    return redis.call('DEL', KEYS[1])
-  end
-  return 0
-end
-if redis.call('HGET', KEYS[1], 'lockedBy') == ARGV[1] then
-  return redis.call('DEL', KEYS[1])
-end
-return 0
-`;
-
-// HEARTBEAT: same fence-or-instanceId semantics as RELEASE_LOCK.
-// KEYS: [lockKey]
-// ARGV: [instanceId, lockDurationMs, fenceToken|'']
-const HEARTBEAT_LUA = `
-if ARGV[3] ~= '' then
-  if redis.call('HGET', KEYS[1], 'token') == ARGV[3] then
-    return redis.call('PEXPIRE', KEYS[1], ARGV[2])
-  end
-  return 0
-end
-if redis.call('HGET', KEYS[1], 'lockedBy') == ARGV[1] then
-  return redis.call('PEXPIRE', KEYS[1], ARGV[2])
-end
-return 0
-`;
-
-// Journal: append a COMPLETED activity entry. Idempotent on (wid, step, idx).
-// KEYS: [entryHash, idxZset, stepsSet]
-// ARGV: [idx, activityName, exitJson, createdAt, stepName, branchPath, payloadHash|'']
-const APPEND_ENTRY_LUA = `
-if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
-redis.call('HSET', KEYS[1],
-  'activityName', ARGV[2],
-  'stepType', 'activity',
-  'phase', 'completed',
-  'branchPath', ARGV[6],
-  'exit', ARGV[3],
-  'createdAt', ARGV[4])
-if ARGV[7] ~= '' then
-  redis.call('HSET', KEYS[1], 'payloadHash', ARGV[7])
-end
-redis.call('ZADD', KEYS[2], ARGV[1], ARGV[1] .. '|' .. ARGV[6])
-redis.call('SADD', KEYS[3], ARGV[5])
-return 1
-`;
-
-// Journal: append a PENDING entry (sleep or signal). Idempotent on (wid, step, idx, branch).
-// KEYS: [entryHash, idxZset, stepsSet, sleepsZset (global), signalIdxHash]
-// ARGV: [idx, activityName, stepType, wakeAtMs|'', createdAt, stepName, sleepsMember|'', signalName|'', branchPath, payloadHash|'']
-const APPEND_PENDING_LUA = `
-if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
-redis.call('HSET', KEYS[1],
-  'activityName', ARGV[2],
-  'stepType', ARGV[3],
-  'phase', 'pending',
-  'wakeAt', ARGV[4],
-  'branchPath', ARGV[9],
-  'createdAt', ARGV[5])
-if ARGV[10] ~= '' then
-  redis.call('HSET', KEYS[1], 'payloadHash', ARGV[10])
-end
-redis.call('ZADD', KEYS[2], ARGV[1], ARGV[1] .. '|' .. ARGV[9])
-redis.call('SADD', KEYS[3], ARGV[6])
-if ARGV[3] == 'sleep' and ARGV[7] ~= '' then
-  redis.call('ZADD', KEYS[4], ARGV[4], ARGV[7])
-elseif ARGV[3] == 'signal' and ARGV[8] ~= '' then
-  redis.call('HSET', KEYS[5], ARGV[8], ARGV[1] .. '|' .. ARGV[9])
-end
-return 1
-`;
-
-// Journal: transition pending -> completed atomically. First writer wins: a
-// call on an already-completed (or missing) entry changes nothing.
-// KEYS: [entryHash, sleepsZset (global), signalIdxHash]
-// ARGV: [exitJson, sleepsMember|'', signalName|'']
-// Returns {1, ''} when this call completed the entry, else {0, storedExitJson|''}.
-const COMPLETE_PENDING_LUA = `
-local phase = redis.call('HGET', KEYS[1], 'phase')
-if phase ~= 'pending' then
-  return {0, redis.call('HGET', KEYS[1], 'exit') or ''}
-end
-local stepType = redis.call('HGET', KEYS[1], 'stepType')
-redis.call('HSET', KEYS[1], 'phase', 'completed', 'exit', ARGV[1])
-if stepType == 'sleep' and ARGV[2] ~= '' then
-  redis.call('ZREM', KEYS[2], ARGV[2])
-elseif stepType == 'signal' and ARGV[3] ~= '' then
-  redis.call('HDEL', KEYS[3], ARGV[3])
-end
-return {1, ''}
-`;
-
-// Journal: delete entries of one step and their index memberships.
-// KEYS: [idxZset, sleepsZset (global), signalIdxHash, entryHash_1 .. entryHash_n]
-// ARGV: per entry: idxMember, sleepsMember, legacyIdxMember|''
-const DISCARD_ENTRIES_LUA = `
-for s = 1, #KEYS - 3 do
-  local entry = KEYS[3 + s]
-  local a = (s - 1) * 3
-  local stepType = redis.call('HGET', entry, 'stepType')
-  local name = redis.call('HGET', entry, 'activityName')
-  redis.call('DEL', entry)
-  redis.call('ZREM', KEYS[1], ARGV[a + 1])
-  if ARGV[a + 3] ~= '' then redis.call('ZREM', KEYS[1], ARGV[a + 3]) end
-  if stepType == 'sleep' then redis.call('ZREM', KEYS[2], ARGV[a + 2]) end
-  if stepType == 'signal' and name then
-    if redis.call('HGET', KEYS[3], name) == ARGV[a + 1] then redis.call('HDEL', KEYS[3], name) end
-  end
-end
-return 1
-`;
-
-// Apply a list of writes computed client-side, in order, as one script.
-// ARGV: [opsJson] — a JSON array of ops, each an array of strings:
-//   ["ABSENT", key]      — stop with {0} (nothing written) when key exists;
-//                          must precede every write.
-//   ["STATUS", wfKey, workflowId, statusIdxPrefix, to, from, field, value, ...]
-//                        — when the current status is one of the comma-
-//                          separated \`from\` statuses (or \`from\` is '*'), set
-//                          status = to plus the fields, and move the id
-//                          between the status index sets.
-//   [command, key, ...]  — any other Redis command, run as given.
-// Returns {1, <reply of the last op>}.
-const WRITE_OPS_LUA = `
-local ops = cjson.decode(ARGV[1])
-local last = 1
-for _, op in ipairs(ops) do
-  local name = op[1]
-  if name == 'ABSENT' then
-    if redis.call('EXISTS', op[2]) == 1 then return {0} end
-  elseif name == 'STATUS' then
-    local cur = redis.call('HGET', op[2], 'status')
-    local allowed = false
-    if cur then
-      if op[6] == '*' then
-        allowed = true
-      else
-        for s in string.gmatch(op[6], '[^,]+') do
-          if s == cur then allowed = true end
-        end
-      end
-    end
-    if allowed then
-      redis.call('HSET', op[2], 'status', op[5])
-      for i = 7, #op, 2 do redis.call('HSET', op[2], op[i], op[i + 1]) end
-      if cur ~= op[5] then
-        redis.call('SREM', op[4] .. cur, op[3])
-        redis.call('SADD', op[4] .. op[5], op[3])
-      end
-    end
-  else
-    last = redis.call(unpack(op))
-  end
-end
-return {1, last}
-`;
-
-/** Error-reply prefix a fenced script returns when the fence rejects it. */
-const FENCE_REJECTED = "PROMIN_FENCE_REJECTED";
-
-/**
- * Put the fence check in front of a script, so the check and the script's
- * writes run as one atomic script. The fenced script takes the run's lock
- * key as KEYS[1] and the fence token as ARGV[1] ('' for an unfenced call),
- * then the original keys and args, which the body reads as `K` / `A`. A
- * missing lock key (released, or expired through its TTL) or another
- * token rejects the call before anything is written.
- */
-function fencedLua(script: string): string {
-  return `
-local K = {}
-for i = 2, #KEYS do K[i - 1] = KEYS[i] end
-local A = {}
-for i = 2, #ARGV do A[i - 1] = ARGV[i] end
-if ARGV[1] ~= '' then
-  local held = redis.call('HGET', KEYS[1], 'token')
-  if held ~= ARGV[1] then
-    return redis.error_reply('${FENCE_REJECTED} ' .. (held or ''))
-  end
-end
-${script.replaceAll("KEYS", "K").replaceAll("ARGV", "A")}`;
-}
-
-// Status transition guarded by the current status — the read and the write
-// happen in one script, so a concurrent cancel can't be overwritten by a
-// late completion (or vice versa).
-// KEYS: [wfKey, toStatusIdx, completedZset, fromStatusIdx_1 .. fromStatusIdx_n]
-// ARGV: [workflowId, toStatus, nowIso, nowMs, nFields, field_1, value_1, ...,
-//        fromStatus_1 .. fromStatus_n]
-// Returns the previous status, or false when the workflow is missing or
-// its status isn't one of the allowed `from` statuses.
-const TRANSITION_STATUS_LUA = `
-local status = redis.call('HGET', KEYS[1], 'status')
-if not status then return false end
-local nFields = tonumber(ARGV[5])
-local fromStart = 6 + nFields * 2
-local fromKey = nil
-for i = fromStart, #ARGV do
-  if ARGV[i] == status then fromKey = KEYS[4 + i - fromStart] end
-end
-if not fromKey then return false end
-redis.call('HSET', KEYS[1], 'status', ARGV[2], 'updatedAt', ARGV[3])
-for i = 6, fromStart - 1, 2 do
-  redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
-end
-if fromKey ~= KEYS[2] then
-  redis.call('SREM', fromKey, ARGV[1])
-  redis.call('SADD', KEYS[2], ARGV[1])
-end
-if KEYS[3] ~= '' and ARGV[4] ~= '' then
-  redis.call('ZADD', KEYS[3], ARGV[4], ARGV[1])
-end
-return status
-`;
-
-// Compare-and-set one hash field. Callers read the field, compute the new
-// value client-side (keeping JSON fidelity — no cjson round-trip), and
-// retry when another writer got in between.
-// KEYS: [hash]
-// ARGV: [field, expectMissing ('1'|'0'), expected, newValue, requireField|'',
-//        extraField_1, extraValue_1, ...]
-// Returns 1 on write, 0 on a lost race, -1 when `requireField` is absent.
-const HASH_FIELD_CAS_LUA = `
-if ARGV[5] ~= '' and redis.call('HEXISTS', KEYS[1], ARGV[5]) == 0 then return -1 end
-local cur = redis.call('HGET', KEYS[1], ARGV[1])
-if ARGV[2] == '1' then
-  if cur then return 0 end
-elseif cur ~= ARGV[3] then
-  return 0
-end
-redis.call('HSET', KEYS[1], ARGV[1], ARGV[4])
-for i = 6, #ARGV, 2 do
-  redis.call('HSET', KEYS[1], ARGV[i], ARGV[i + 1])
-end
-return 1
-`;
-
-// Create a signal token, deduplicated on (workflowId, idempotencyKey).
-// KEYS: [tokensHash, lookupKey, idempotencyHash]
-// ARGV: [tokenId, recordJson, workflowId, idempotencyKey|'']
-// Returns {1, existingTokenId} on a dedup hit, {0, tokenId} on insert.
-const CREATE_SIGNAL_TOKEN_LUA = `
-if ARGV[4] ~= '' then
-  local existing = redis.call('HGET', KEYS[3], ARGV[4])
-  if existing then return {1, existing} end
-  redis.call('HSET', KEYS[3], ARGV[4], ARGV[1])
-end
-redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
-redis.call('SET', KEYS[2], ARGV[3])
-return {0, ARGV[1]}
-`;
-
-// Start a fresh run: archive the current run, bump the run counter, reset
-// status, and drop everything the new run must not replay from — the
-// activity journal (every step, plus its members in the global sleeps
-// zset) and the delivered signals — all in one atomic script.
-// KEYS: [wfKey, runsKey, signalsKey, journalStepsKey, sleepsZset, pendingIdx, completedZset]
-// ARGV: [workflowId, expectedRun, summaryJson, maxRuns, nowIso,
-//        journalKeyBase ("<prefix>:<id>:journal:"), statusIdxBase ("<prefix>:idx:status:")]
-// Returns the new run, or -1 when the run moved on since the caller read it.
-const START_FRESH_RUN_LUA = `
-local run = redis.call('HGET', KEYS[1], 'run')
-if run ~= ARGV[2] then return -1 end
-local old = redis.call('HGET', KEYS[1], 'status')
-redis.call('RPUSH', KEYS[2], ARGV[3])
-redis.call('LTRIM', KEYS[2], -tonumber(ARGV[4]), -1)
-local newRun = tonumber(run) + 1
-redis.call('HSET', KEYS[1], 'run', tostring(newRun), 'status', 'pending', 'updatedAt', ARGV[5])
-redis.call('HDEL', KEYS[1], 'result', 'error', 'errorTag', 'tripwire', 'startedAt', 'completedAt')
-redis.call('PERSIST', KEYS[1])
-redis.call('PERSIST', KEYS[2])
-if old and old ~= 'pending' then
-  redis.call('SREM', ARGV[7] .. old, ARGV[1])
-  redis.call('SADD', KEYS[6], ARGV[1])
-end
-redis.call('ZREM', KEYS[7], ARGV[1])
-local steps = redis.call('SMEMBERS', KEYS[4])
-for _, step in ipairs(steps) do
-  local base = ARGV[6] .. step
-  local members = redis.call('ZRANGE', base .. ':idx', 0, -1)
-  for _, m in ipairs(members) do
-    if not string.find(m, '|', 1, true) then m = m .. '|' end
-    redis.call('DEL', base .. ':entry:' .. m)
-    redis.call('ZREM', KEYS[5], ARGV[1] .. '::' .. step .. '::' .. m)
-  end
-  redis.call('DEL', base .. ':idx', base .. ':signal-idx')
-end
-redis.call('DEL', KEYS[4], KEYS[3])
-return newRun
-`;
-
 // Fenced variants of every script a lock holder writes through.
+const FENCED_CHECK_LUA = fencedLua("return 1");
 const FENCED_TRANSITION_STATUS_LUA = fencedLua(TRANSITION_STATUS_LUA);
 const FENCED_HASH_FIELD_CAS_LUA = fencedLua(HASH_FIELD_CAS_LUA);
 const FENCED_START_FRESH_RUN_LUA = fencedLua(START_FRESH_RUN_LUA);
@@ -405,8 +135,74 @@ const FENCED_WRITE_OPS_LUA = fencedLua(WRITE_OPS_LUA);
 const NON_TERMINAL_STATUSES = WORKFLOW_STATUSES.filter((st) => !isTerminalWorkflowStatus(st));
 /** Statuses `cancelWorkflow` may leave. */
 const CANCELLABLE_STATUSES: readonly WorkflowStatus[] = ["pending", "running", "suspended"];
+const TERMINAL_STATUSES_CSV = WORKFLOW_STATUSES.filter(isTerminalWorkflowStatus).join(",");
 /** Bound on compare-and-set retries under contention. */
 const MAX_CAS_ATTEMPTS = 100;
+/** Ids per HMGET when reading index records. */
+const RECORD_CHUNK = 2_000;
+/** Workflows purged concurrently. */
+const PURGE_CONCURRENCY = 16;
+/** SCAN calls (COUNT 1000 each) the purge spends looking for one workflow's untracked streams. */
+const UNTRACKED_STREAM_SCAN_CALLS = 1_000;
+/** "No limit" for the index page script; small enough to print as an integer in Lua. */
+const UNBOUNDED = 2_147_483_647;
+
+/** Hash fields a `listWorkflowSummaries` row is read from. */
+const SUMMARY_FIELDS = [
+  "id",
+  "workflowName",
+  "workflowType",
+  "namespace",
+  "status",
+  "version",
+  "run",
+  "runSource",
+  "runSourceId",
+  "metadata",
+  "createdAt",
+  "startedAt",
+  "updatedAt",
+  "completedAt",
+] as const;
+
+/** Index fields of a workflow hash, as `WRITE_OPS_LUA` & co. return them. */
+type IndexSnapshot = ReadonlyArray<string | null>;
+
+/** A workflow's filter and sort fields as the index stores them. */
+interface IndexRecord {
+  /** workflowName */
+  n: string;
+  t?: string;
+  ns?: string;
+  v?: string;
+  p?: string;
+  rs?: string;
+  rsi?: string;
+  s: WorkflowStatus;
+  /** createdAt / startedAt / completedAt, epoch ms */
+  c: number;
+  st?: number;
+  co?: number;
+}
+
+interface ListFilters {
+  status?: WorkflowStatus;
+  name?: string;
+  version?: string;
+  type?: string;
+  parentId?: string;
+  namespace?: string;
+  runSource?: RunSource;
+  runSourceId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+interface ListParams extends ListFilters {
+  limit?: number;
+  offset?: number;
+  orderBy?: WorkflowOrderBy;
+  orderDir?: "asc" | "desc";
+}
 
 /**
  * The error a rejected fenced write throws. `current` is the lock's token
@@ -434,7 +230,7 @@ export class RedisWorkflowStorage
   implements WorkflowStorage, StepAttemptStorage, CompensationLedgerStorage, ActivityJournalStorage
 {
   private readonly redis: RedisStoreClient;
-  private readonly prefix: string;
+  private readonly keys: RedisWorkflowKeys;
   private readonly namespace: string | null;
   private readonly instanceId: string;
   private readonly completedTtlMs?: number;
@@ -443,7 +239,7 @@ export class RedisWorkflowStorage
 
   constructor(config: RedisWorkflowStorageConfig) {
     this.redis = config.redis;
-    this.prefix = config.prefix ?? "wf";
+    this.keys = new RedisWorkflowKeys(config.prefix ?? "wf");
     this.namespace = config.namespace ?? null;
     this.instanceId = config.instanceId ?? crypto.randomUUID();
     this.completedTtlMs = config.retention?.completedTtlMs;
@@ -451,177 +247,27 @@ export class RedisWorkflowStorage
     this.clock = config.clock ?? SystemWallClock;
   }
 
-  // -- Key helpers ----------------------------------------------------------
-
-  private wfKey(id: string): string {
-    return `${this.prefix}:${id}`;
-  }
-
-  private stepsKey(id: string, run: number): string {
-    return `${this.prefix}:${id}:steps:${run}`;
-  }
-
-  private tasksKey(id: string, run: number, stepName: string): string {
-    return `${this.prefix}:${id}:tasks:${run}:${stepName}`;
-  }
-
-  private signalsKey(id: string): string {
-    return `${this.prefix}:${id}:signals`;
-  }
-
-  /** `(namespace, workflowName, idempotencyKey) → workflowId` index with TTL matching the run's idempotency expiry. */
-  private workflowIdempotencyKeyIndex(
-    namespace: string | undefined,
-    workflowName: string,
-    idempotencyKey: string,
-  ): string {
-    return `${this.prefix}:wf-idempotency:${namespace ?? ""}:${workflowName}:${idempotencyKey}`;
-  }
-
-  /** Hash mapping `${tokenId}` → JSON SignalTokenRecord (stored at the workflow scope). */
-  private signalTokensKey(workflowId: string): string {
-    return `${this.prefix}:${workflowId}:signal_tokens`;
-  }
-
-  /** Reverse index from tokenId → workflowId, so the public completion route can look up by tokenId alone. */
-  private signalTokenLookupKey(tokenId: string): string {
-    return `${this.prefix}:signal_token:${tokenId}`;
-  }
-
-  /** Per-workflow set of (idempotencyKey → tokenId), backing dedup for `createSignalToken`. */
-  private signalTokenIdempotencyKey(workflowId: string): string {
-    return `${this.prefix}:${workflowId}:signal_token_idempotency`;
-  }
-
-  private runsKey(id: string): string {
-    return `${this.prefix}:${id}:runs`;
-  }
-
-  private attemptsKey(id: string): string {
-    return `${this.prefix}:${id}:attempts`;
-  }
-
-  private lockKey(id: string): string {
-    return `${this.prefix}:lock:${id}`;
-  }
-
-  /** Global monotonic counter key for fence tokens. One per prefix. */
-  private get fenceCounterKey(): string {
-    return `${this.prefix}:lock-fence-counter`;
-  }
-
-  private statusIndexKey(status: string): string {
-    return `${this.prefix}:idx:status:${status}`;
-  }
-
-  private nameIndexKey(name: string): string {
-    return `${this.prefix}:idx:name:${name}`;
-  }
-
-  /** Set of workflow ids created with `parentWorkflowId = parentId`. */
-  private childrenIndexKey(parentId: string): string {
-    return `${this.prefix}:idx:children:${parentId}`;
-  }
-
-  /** Set of stream ids a workflow has appended to (for purge). */
-  private streamIdsKey(workflowId: string): string {
-    return `${this.prefix}:${workflowId}:stream-ids`;
-  }
-
-  private get completedIndexKey(): string {
-    return `${this.prefix}:idx:completed`;
-  }
-
-  // Distinct-value indexes — maintained on createWorkflow so the dashboard
-  // dropdowns see every value ever observed, not just rows still in cache.
-  // Per-namespace variants are populated only when the workflow row carries
-  // a namespace; the global ("all") variant is always populated.
-  private get distinctNamesKey(): string {
-    return `${this.prefix}:idx:distinct:names`;
-  }
-  private get distinctTypesKey(): string {
-    return `${this.prefix}:idx:distinct:types`;
-  }
-  private get distinctNamespacesKey(): string {
-    return `${this.prefix}:idx:distinct:namespaces`;
-  }
-  private distinctNamespaceNamesKey(ns: string): string {
-    return `${this.prefix}:idx:distinct:names:ns:${ns}`;
-  }
-  private distinctNamespaceTypesKey(ns: string): string {
-    return `${this.prefix}:idx:distinct:types:ns:${ns}`;
-  }
-
-  // -- Journal key helpers --------------------------------------------------
-
-  /** Per-workflow set of step names that have journal entries (for purge/ttl). */
-  private journalStepsKey(id: string): string {
-    return `${this.prefix}:${id}:journal:steps`;
-  }
-
-  /** Per-step sorted set of activity indices, for ordered loadJournal. */
-  private journalIdxKey(id: string, stepName: string): string {
-    return `${this.prefix}:${id}:journal:${stepName}:idx`;
-  }
-
   /**
-   * Per-entry hash: activityName, stepType, phase, exit, wakeAt, createdAt.
-   * The entry key encodes (activityIndex, branchPath) — branchPath is `""`
-   * for everything pre-`ctx.parallel` (and for sleep/signal yields), so
-   * existing keys still resolve unchanged.
+   * Move keys written by earlier versions of this storage (untagged,
+   * standalone-only layout) to the hash-tagged layout, and rebuild the
+   * cross-workflow indexes from the moved workflow hashes. Streams appended
+   * before stream ids were tracked are found by the same keyspace SCAN and
+   * registered, so `purgeCompleted` removes them.
+   *
+   * Run it once per prefix, against the standalone instance (it renames
+   * keys across slots), with every worker stopped. Re-running it is safe:
+   * keys already in the new layout are left alone.
    */
-  private journalEntryKey(
-    id: string,
-    stepName: string,
-    activityIndex: number,
-    branchPath: string,
-  ): string {
-    // Encoded as `${idx}|${path}` inside the key segment. `|` isn't used
-    // elsewhere in the key schema, so it's a safe separator.
-    return `${this.prefix}:${id}:journal:${stepName}:entry:${activityIndex}|${branchPath}`;
-  }
-
-  /** Per-step hash {signalName → `${activityIndex}|${branchPath}`} for O(1) findPendingSignal. */
-  private journalSignalIdxKey(id: string, stepName: string): string {
-    return `${this.prefix}:${id}:journal:${stepName}:signal-idx`;
-  }
-
-  /** Global sorted set across workflows: score=wakeAt_ms, member="{wid}::{step}::{idx}|{path}". */
-  private get sleepsKey(): string {
-    return `${this.prefix}:sleeps`;
-  }
-
-  private sleepsMember(
-    id: string,
-    stepName: string,
-    activityIndex: number,
-    branchPath: string,
-  ): string {
-    return `${id}::${stepName}::${activityIndex}|${branchPath}`;
-  }
-
-  private parseSleepsMember(member: string): {
-    workflowId: string;
-    stepName: string;
-    activityIndex: number;
-    branchPath: string;
-  } | null {
-    // Parse from the right: last "::" separates idx|branchPath; next-to-last
-    // separates step. Tolerates "::" inside workflowId but not step name.
-    const lastSep = member.lastIndexOf("::");
-    if (lastSep < 0) return null;
-    const idxAndPath = member.slice(lastSep + 2);
-    const rest = member.slice(0, lastSep);
-    const midSep = rest.lastIndexOf("::");
-    if (midSep < 0) return null;
-    const stepName = rest.slice(midSep + 2);
-    const workflowId = rest.slice(0, midSep);
-    const pipe = idxAndPath.indexOf("|");
-    const idxStr = pipe === -1 ? idxAndPath : idxAndPath.slice(0, pipe);
-    const branchPath = pipe === -1 ? "" : idxAndPath.slice(pipe + 1);
-    const activityIndex = Number(idxStr);
-    if (!Number.isFinite(activityIndex)) return null;
-    return { workflowId, stepName, activityIndex, branchPath };
+  async migrateLegacyKeys(params?: {
+    /** SCAN COUNT hint. Default 1000. */
+    scanCount?: number;
+  }): Promise<{ workflows: number; keys: number }> {
+    return migrateLegacyWorkflowKeys({
+      redis: this.redis,
+      keys: this.keys,
+      scanCount: params?.scanCount ?? 1_000,
+      reindex: (workflowId) => this.repairIndex(workflowId),
+    });
   }
 
   // -- Serialization helpers ------------------------------------------------
@@ -638,44 +284,40 @@ export class RedisWorkflowStorage
     return new Date(s);
   }
 
-  /** Build a WorkflowState from the raw workflow hash + steps + tasks. */
-  private async assembleWorkflow(raw: Record<string, string>): Promise<WorkflowState> {
-    const id = raw.id;
-    const run = Number(raw.run);
+  /** Build a WorkflowState from a `LOAD_RUN_LUA` reply. Null for a missing workflow. */
+  private assembleWorkflow(reply: unknown): WorkflowState | null {
+    const parts = (reply ?? []) as unknown[];
+    if (parts.length === 0) return null;
+    const raw = flatToRecord(parts[0] as string[]);
+    if (!raw.id) return null;
+    const stepsRaw = flatToRecord(parts[1] as string[]);
+    const tasksByStep = new Map<string, Record<string, string>>();
+    for (let i = 2; i + 1 < parts.length; i += 2) {
+      tasksByStep.set(parts[i] as string, flatToRecord(parts[i + 1] as string[]));
+    }
 
-    // Load steps for current run
-    const stepsRaw = await this.redis.hgetall(this.stepsKey(id, run));
     const steps: Record<string, StepState> = {};
-
     for (const [stepName, json] of Object.entries(stepsRaw)) {
       const step = this.parseStepState(json);
-
-      // Load tasks if step is a map step
-      if (step.stepType === "map") {
-        const tasksRaw = await this.redis.hgetall(this.tasksKey(id, run, stepName));
-        if (tasksRaw && Object.keys(tasksRaw).length > 0) {
-          const tasks: StepTaskState[] = [];
-          for (const taskJson of Object.values(tasksRaw)) {
-            tasks.push(this.parseTaskState(taskJson));
-          }
-          tasks.sort((a, b) => a.taskIndex - b.taskIndex);
-          steps[stepName] = { ...step, tasks };
-          continue;
-        }
+      const tasksRaw = step.stepType === "map" ? tasksByStep.get(stepName) : undefined;
+      if (tasksRaw && Object.keys(tasksRaw).length > 0) {
+        const tasks = Object.values(tasksRaw).map((t) => this.parseTaskState(t));
+        tasks.sort((a, b) => a.taskIndex - b.taskIndex);
+        steps[stepName] = { ...step, tasks };
+      } else {
+        steps[stepName] = step;
       }
-
-      steps[stepName] = step;
     }
 
     return {
-      workflowId: id,
+      workflowId: raw.id,
       workflowName: raw.workflowName,
       workflowType: raw.workflowType || undefined,
       parentWorkflowId: raw.parentWorkflowId || undefined,
       namespace: raw.namespace || undefined,
       status: raw.status as WorkflowStatus,
       version: raw.version || undefined,
-      run,
+      run: Number(raw.run),
       input: JSON.parse(raw.input),
       result: raw.result ? JSON.parse(raw.result) : undefined,
       error: raw.error || undefined,
@@ -748,38 +390,35 @@ export class RedisWorkflowStorage
     if (guard?.fenceToken && params.parentWorkflowId === undefined) {
       throw new Error("createWorkflow: a fenced create needs parentWorkflowId");
     }
+    const ns = this.resolveNamespace(params.namespace);
     // Idempotency-key path: check the index first. SET-NX below claims it
     // atomically — concurrent creates serialize, the loser falls through
     // to attach to the winning row.
     if (params.idempotencyKey) {
-      const ns = this.resolveNamespace(params.namespace);
-      const idxKey = this.workflowIdempotencyKeyIndex(
-        ns,
-        params.workflowName,
-        params.idempotencyKey,
-      );
+      const idxKey = this.keys.workflowIdempotency(ns, params.workflowName, params.idempotencyKey);
       const cachedId = await this.redis.get(idxKey);
       if (cachedId) {
-        const raw = await this.redis.hgetall(this.wfKey(cachedId));
-        if (raw?.idempotencyExpiresAt) {
-          const expiresAt = new Date(raw.idempotencyExpiresAt);
-          if (expiresAt.getTime() > this.clock.now().getTime()) {
-            const existing = await this.loadWorkflow(cachedId);
-            if (existing) return { created: false, existing };
-          }
+        const expiresAt = await this.redis.hget(this.keys.wf(cachedId), "idempotencyExpiresAt");
+        if (expiresAt && new Date(expiresAt).getTime() > this.clock.now().getTime()) {
+          const existing = await this.loadWorkflow(cachedId);
+          if (existing) return { created: false, existing };
         }
       }
     }
 
-    const existingRaw = await this.redis.hgetall(this.wfKey(params.workflowId));
-    if (existingRaw && existingRaw.id) {
-      const existing = await this.loadWorkflow(params.workflowId);
-      return { created: false, existing: existing! };
+    // A fenced create checks the parent's fence on the parent's slot; the
+    // child's row lives on its own slot.
+    if (guard?.fenceToken && params.parentWorkflowId !== undefined) {
+      await this.evalFenced({
+        script: FENCED_CHECK_LUA,
+        workflowId: params.parentWorkflowId,
+        guard,
+        keys: [],
+        args: [],
+      });
     }
 
     const now = this.serializeDate(this.clock.now());
-    const ns = this.resolveNamespace(params.namespace);
-
     const fields: Record<string, string> = {
       id: params.workflowId,
       workflowName: params.workflowName,
@@ -788,6 +427,9 @@ export class RedisWorkflowStorage
       input: JSON.stringify(params.input),
       createdAt: now,
       updatedAt: now,
+      iv: "1",
+      // Every stream of this row is registered in its stream-ids set.
+      streamsTracked: "1",
     };
     if (params.workflowType) fields.workflowType = params.workflowType;
     if (params.parentWorkflowId) fields.parentWorkflowId = params.parentWorkflowId;
@@ -803,66 +445,49 @@ export class RedisWorkflowStorage
       fields.idempotencyExpiresAt = this.serializeDate(params.idempotencyExpiresAt);
     }
 
-    // The row and its index entries land in one script that first checks
-    // the row is still absent (a concurrent create wins cleanly) and, for
-    // a fenced child create, that the parent's lock is still ours.
-    const { applied } = await this.writeOps({
-      workflowId: params.parentWorkflowId ?? params.workflowId,
-      guard,
+    // The row lands in one script that first checks it is still absent (a
+    // concurrent create wins cleanly). It is indexed once the idempotency
+    // claim below is settled.
+    const wfKey = this.keys.wf(params.workflowId);
+    const { applied, snapshot } = await this.writeOps({
+      workflowId: params.workflowId,
+      deferIndex: true,
       ops: [
-        ["ABSENT", this.wfKey(params.workflowId)],
-        ["HSET", this.wfKey(params.workflowId), ...Object.entries(fields).flat()],
-        ["SADD", this.statusIndexKey("pending"), params.workflowId],
-        ["SADD", this.nameIndexKey(params.workflowName), params.workflowId],
+        ["ABSENT", wfKey],
+        ["HSET", wfKey, ...Object.entries(fields).flat()],
+        ["INDEXED", wfKey],
       ],
     });
     if (!applied) {
       const existing = await this.loadWorkflow(params.workflowId);
-      // Gone again (purged in between): try the create once more.
-      return existing ? { created: false, existing } : this.createWorkflow(params, guard);
+      if (!existing) return this.createWorkflow(params, guard); // purged in between
+      // A create that crashed before indexing its row is healed by the retry.
+      await this.repairIndex(params.workflowId);
+      return { created: false, existing };
     }
 
     // Atomic claim of the idempotency index. SET NX with PX expires the
     // index entry exactly at the run's idempotency_expires_at — concurrent
     // creates that race here lose the SET NX and back out below.
     if (params.idempotencyKey && params.idempotencyExpiresAt) {
-      const idxKey = this.workflowIdempotencyKeyIndex(
-        ns,
-        params.workflowName,
-        params.idempotencyKey,
-      );
+      const idxKey = this.keys.workflowIdempotency(ns, params.workflowName, params.idempotencyKey);
       const ttlMs = params.idempotencyExpiresAt.getTime() - this.clock.now().getTime();
       if (ttlMs > 0) {
         const won = await this.redis.set(idxKey, params.workflowId, "NX", "PX", ttlMs);
         if (!won) {
-          // Lost the race — undo the workflow row and resolve to the winner.
-          await this.redis.del(this.wfKey(params.workflowId));
-          await this.redis.srem(this.statusIndexKey("pending"), params.workflowId);
-          await this.redis.srem(this.nameIndexKey(params.workflowName), params.workflowId);
+          // Lost the race — undo the (not yet indexed) row and resolve to the winner.
+          await this.redis.del(wfKey);
           const winnerId = await this.redis.get(idxKey);
           if (winnerId) {
             const existing = await this.loadWorkflow(winnerId);
             if (existing) return { created: false, existing };
           }
+          return this.createWorkflow(params, guard);
         }
       }
     }
 
-    if (params.parentWorkflowId) {
-      await this.redis.sadd(this.childrenIndexKey(params.parentWorkflowId), params.workflowId);
-    }
-
-    // Distinct-value indexes — record every name/type/namespace ever seen
-    // so the dashboard dropdowns stay correct even after rows are purged.
-    await this.redis.sadd(this.distinctNamesKey, params.workflowName);
-    if (params.workflowType) await this.redis.sadd(this.distinctTypesKey, params.workflowType);
-    if (ns) {
-      await this.redis.sadd(this.distinctNamespacesKey, ns);
-      await this.redis.sadd(this.distinctNamespaceNamesKey(ns), params.workflowName);
-      if (params.workflowType) {
-        await this.redis.sadd(this.distinctNamespaceTypesKey(ns), params.workflowType);
-      }
-    }
+    await this.syncIndex(snapshot);
     return { created: true };
   }
 
@@ -873,45 +498,42 @@ export class RedisWorkflowStorage
     now: Date;
   }): Promise<{ workflowId: string } | null> {
     const ns = this.resolveNamespace(params.namespace);
-    const idxKey = this.workflowIdempotencyKeyIndex(ns, params.workflowName, params.idempotencyKey);
+    const idxKey = this.keys.workflowIdempotency(ns, params.workflowName, params.idempotencyKey);
     const cachedId = await this.redis.get(idxKey);
     if (!cachedId) return null;
     // Defense-in-depth: confirm the workflow's stored expiry is unexpired
     // before returning. The index has its own PEXPIREAT, but a clock skew
     // between Redis and runner could surface a "live" index entry past
     // the row's expiry.
-    const raw = await this.redis.hgetall(this.wfKey(cachedId));
-    if (!raw?.idempotencyExpiresAt) return null;
-    const expiresAt = new Date(raw.idempotencyExpiresAt);
-    if (expiresAt.getTime() <= params.now.getTime()) return null;
+    const expiresAt = await this.redis.hget(this.keys.wf(cachedId), "idempotencyExpiresAt");
+    if (!expiresAt) return null;
+    if (new Date(expiresAt).getTime() <= params.now.getTime()) return null;
     return { workflowId: cachedId };
   }
 
   async distinctWorkflowNames(params?: { namespace?: string }): Promise<string[]> {
     const ns = params?.namespace ?? this.namespace;
-    const key = ns ? this.distinctNamespaceNamesKey(ns) : this.distinctNamesKey;
-    const members = await this.redis.smembers(key);
-    return members.sort();
+    const key = ns ? this.keys.distinctNamespaceNames(ns) : this.keys.distinctNames;
+    return (await this.redis.smembers(key)).sort();
   }
 
   async distinctWorkflowTypes(params?: { namespace?: string }): Promise<string[]> {
     const ns = params?.namespace ?? this.namespace;
-    const key = ns ? this.distinctNamespaceTypesKey(ns) : this.distinctTypesKey;
-    const members = await this.redis.smembers(key);
-    return members.sort();
+    const key = ns ? this.keys.distinctNamespaceTypes(ns) : this.keys.distinctTypes;
+    return (await this.redis.smembers(key)).sort();
   }
 
   async distinctNamespaces(): Promise<string[]> {
-    const members = await this.redis.smembers(this.distinctNamespacesKey);
-    return members.sort();
+    return (await this.redis.smembers(this.keys.distinctNamespaces)).sort();
   }
 
   async loadWorkflowStatus(workflowId: string): Promise<WorkflowStatusSnapshot | null> {
-    const [id, status, error, errorTag] = ((await this.redis.eval(
-      `return redis.call('HMGET', KEYS[1], 'id', 'status', 'error', 'errorTag')`,
-      1,
-      this.wfKey(workflowId),
-    )) ?? []) as Array<string | null | false>;
+    const [id, status, error, errorTag] = await this.hmget(this.keys.wf(workflowId), [
+      "id",
+      "status",
+      "error",
+      "errorTag",
+    ]);
     if (!id || !status) return null;
     return {
       status: status as WorkflowStatus,
@@ -921,127 +543,280 @@ export class RedisWorkflowStorage
   }
 
   async loadWorkflow(workflowId: string): Promise<WorkflowState | null> {
-    const raw = await this.redis.hgetall(this.wfKey(workflowId));
-    if (!raw || !raw.id) return null;
-    return this.assembleWorkflow(raw);
+    const wfKey = this.keys.wf(workflowId);
+    return this.assembleWorkflow(await this.redis.eval(LOAD_RUN_LUA, 1, wfKey, wfKey));
   }
 
-  async listWorkflows(params?: {
-    status?: WorkflowStatus;
-    name?: string;
-    version?: string;
-    type?: string;
-    parentId?: string;
-    namespace?: string;
-    runSource?: RunSource;
-    runSourceId?: string;
-    metadata?: Record<string, unknown>;
-    limit?: number;
-    offset?: number;
-    orderBy?: WorkflowOrderBy;
-    orderDir?: "asc" | "desc";
-  }): Promise<WorkflowState[]> {
-    // We need the full filtered set in memory before sorting + paginating;
-    // streaming-with-early-exit doesn't compose with order-by.
-    const all: WorkflowState[] = [];
-    for (const raw of await this.filteredWorkflowHashes(params)) {
-      all.push(await this.assembleWorkflow(raw));
+  // -- Listing ---------------------------------------------------------------
+  //
+  // Filters on status, name, parent and namespace come from index sets; the
+  // other filters and every sort key come from the compact index records
+  // (one HMGET for all candidates), so no workflow hash is read until the
+  // page is known. Without filters, a createdAt / startedAt / completedAt
+  // page comes straight from its sorted set.
+
+  async listWorkflows(params?: ListParams): Promise<WorkflowState[]> {
+    const ids = await this.pageIds(params);
+    const rows = await Promise.all(ids.map((id) => this.loadWorkflow(id)));
+    return this.keepIndexedRows({ ids, rows, status: params?.status });
+  }
+
+  async listWorkflowSummaries(params?: ListParams): Promise<WorkflowSummary[]> {
+    const ids = await this.pageIds(params);
+    const rows = await Promise.all(
+      ids.map(async (id) => toSummary(await this.hmget(this.keys.wf(id), SUMMARY_FIELDS))),
+    );
+    return this.keepIndexedRows({ ids, rows, status: params?.status });
+  }
+
+  /** Count over the same filters as `listWorkflows`, without reading any workflow. */
+  async countWorkflows(params?: ListFilters): Promise<number> {
+    if (!needsRecords(params)) {
+      const sets = this.filterSets(params);
+      if (sets.length === 0) return this.redis.zcard(this.keys.byCreated);
+      if (sets.length === 1) return this.redis.scard(sets[0]!);
+      return Number(await this.redis.eval(INTER_CARD_LUA, sets.length, ...sets));
     }
-
-    const orderBy = params?.orderBy ?? "startedAt";
-    const orderDir = params?.orderDir ?? "desc";
-    all.sort(makeWorkflowStateComparator(orderBy, orderDir));
-
-    const offset = params?.offset ?? 0;
-    const limit = params?.limit ?? all.length;
-    return all.slice(offset, offset + limit);
-  }
-
-  /** Count over the same filters as `listWorkflows`, without assembling steps. */
-  async countWorkflows(params?: {
-    status?: WorkflowStatus;
-    name?: string;
-    version?: string;
-    type?: string;
-    parentId?: string;
-    namespace?: string;
-    runSource?: RunSource;
-    runSourceId?: string;
-    metadata?: Record<string, unknown>;
-  }): Promise<number> {
-    return (await this.filteredWorkflowHashes(params)).length;
+    return (await this.matchingRecords(params)).length;
   }
 
   /**
-   * Workflow hashes matching the list filters: candidates come from the
-   * status / name / parent index sets, the remaining filters are applied
-   * to each hash.
+   * Drop page rows that are gone (expired through a retention TTL) or no
+   * longer match the status filter (the index lags the row), repairing the
+   * index for each.
    */
-  private async filteredWorkflowHashes(params?: {
+  private async keepIndexedRows<T extends { status: WorkflowStatus }>(params: {
+    ids: readonly string[];
+    rows: ReadonlyArray<T | null>;
     status?: WorkflowStatus;
-    name?: string;
-    version?: string;
-    type?: string;
-    parentId?: string;
-    namespace?: string;
-    runSource?: RunSource;
-    runSourceId?: string;
-    metadata?: Record<string, unknown>;
-  }): Promise<Record<string, string>[]> {
-    // Collect candidate ID sets based on filters
-    const indexKeys: string[] = [];
+  }): Promise<T[]> {
+    const out: T[] = [];
+    const repairs: Promise<void>[] = [];
+    params.rows.forEach((row, i) => {
+      const id = params.ids[i]!;
+      if (row === null) repairs.push(this.unindexMissing(id));
+      else if (params.status !== undefined && row.status !== params.status) {
+        repairs.push(this.repairIndex(id));
+      } else out.push(row);
+    });
+    await Promise.all(repairs);
+    return out;
+  }
 
-    if (params?.status) {
-      indexKeys.push(this.statusIndexKey(params.status));
-    }
-    if (params?.name) {
-      indexKeys.push(this.nameIndexKey(params.name));
-    }
-    if (params?.parentId) {
-      indexKeys.push(this.childrenIndexKey(params.parentId));
+  /** Ids of one page, in order. */
+  private async pageIds(params?: ListParams): Promise<string[]> {
+    const orderBy = params?.orderBy ?? "startedAt";
+    const desc = (params?.orderDir ?? "desc") === "desc";
+    const offset = params?.offset ?? 0;
+    const limit = params?.limit;
+
+    const sets = this.filterSets(params);
+    const zset =
+      orderBy === "createdAt"
+        ? this.keys.byCreated
+        : orderBy === "startedAt"
+          ? this.keys.byStarted
+          : orderBy === "completedAt"
+            ? this.keys.byCompleted
+            : undefined;
+    if (sets.length === 0 && !needsRecords(params) && zset !== undefined) {
+      return (await this.redis.eval(
+        INDEX_PAGE_LUA,
+        2,
+        zset,
+        this.keys.byCreated,
+        String(offset),
+        String(limit ?? UNBOUNDED),
+        desc ? "1" : "0",
+      )) as string[];
     }
 
-    let candidateIds: string[];
+    const rows = await this.matchingRecords(params);
+    rows.sort(makeRecordComparator(orderBy, desc ? "desc" : "asc"));
+    return rows.slice(offset, limit === undefined ? undefined : offset + limit).map((r) => r.id);
+  }
 
-    if (indexKeys.length > 1) {
-      candidateIds = await this.redis.sinter(...indexKeys);
-    } else if (indexKeys.length === 1) {
-      candidateIds = await this.redis.smembers(indexKeys[0]);
-    } else {
-      // No index filters — scan every status set.
-      const idSets = await Promise.all(
-        WORKFLOW_STATUSES.map((s) => this.redis.smembers(this.statusIndexKey(s))),
-      );
-      candidateIds = [...new Set(idSets.flat())];
-    }
-
+  /** Index sets the filters select candidates from. */
+  private filterSets(params?: ListFilters): string[] {
+    const sets: string[] = [];
+    if (params?.status) sets.push(this.keys.status(params.status));
+    if (params?.name) sets.push(this.keys.name(params.name));
+    if (params?.parentId) sets.push(this.keys.children(params.parentId));
     const ns = params?.namespace ?? this.namespace;
-    const metadataFilter = params?.metadata;
+    if (ns) sets.push(this.keys.namespace(ns));
+    return sets;
+  }
 
-    // Load + apply filters not covered by indexes (namespace, version, type,
-    // parentId, run source, metadata).
-    const matched: Record<string, string>[] = [];
-    for (const id of candidateIds) {
-      const raw = await this.redis.hgetall(this.wfKey(id));
-      if (!raw || !raw.id) continue;
-      if (ns && raw.namespace !== ns) continue;
-      if (params?.version !== undefined && (raw.version || undefined) !== params.version) continue;
-      if (params?.type && raw.workflowType !== params.type) continue;
-      if (params?.parentId && raw.parentWorkflowId !== params.parentId) continue;
-      if (
-        params?.runSource !== undefined &&
-        raw.runSource !== String(encodeRunSource(params.runSource))
-      ) {
-        continue;
+  /** Index records of every workflow matching the filters. */
+  private async matchingRecords(
+    params?: ListFilters,
+  ): Promise<Array<{ id: string; rec: IndexRecord }>> {
+    const sets = this.filterSets(params);
+    const ids =
+      sets.length === 0
+        ? await this.redis.zrangebyscore(this.keys.byCreated, "-inf", "+inf")
+        : sets.length === 1
+          ? await this.redis.smembers(sets[0]!)
+          : await this.redis.sinter(...sets);
+    const recs = await this.indexRecords(ids);
+
+    let rows: Array<{ id: string; rec: IndexRecord }> = [];
+    ids.forEach((id, i) => {
+      const rec = recs[i];
+      if (!rec) return;
+      if (params?.version !== undefined && rec.v !== params.version) return;
+      if (params?.type && rec.t !== params.type) return;
+      if (params?.runSource !== undefined && rec.rs !== String(encodeRunSource(params.runSource))) {
+        return;
       }
-      if (params?.runSourceId !== undefined && raw.runSourceId !== params.runSourceId) continue;
-      if (metadataFilter) {
-        const metadata = raw.metadata ? JSON.parse(raw.metadata) : undefined;
-        if (!workflowMetadataMatches(metadata, metadataFilter)) continue;
-      }
-      matched.push(raw);
+      if (params?.runSourceId !== undefined && rec.rsi !== params.runSourceId) return;
+      rows.push({ id, rec });
+    });
+
+    const metadataFilter = params?.metadata;
+    if (metadataFilter) {
+      const metadata = await Promise.all(
+        rows.map((r) => this.redis.hget(this.keys.wf(r.id), "metadata")),
+      );
+      rows = rows.filter((_, i) => {
+        const raw = metadata[i];
+        return workflowMetadataMatches(raw ? JSON.parse(raw) : undefined, metadataFilter);
+      });
     }
-    return matched;
+    return rows;
+  }
+
+  private async indexRecords(ids: readonly string[]): Promise<Array<IndexRecord | null>> {
+    const chunks: Promise<Array<string | null>>[] = [];
+    for (let i = 0; i < ids.length; i += RECORD_CHUNK) {
+      chunks.push(this.hmget(this.keys.indexRecords, ids.slice(i, i + RECORD_CHUNK)));
+    }
+    return (await Promise.all(chunks)).flat().map((json) => (json ? JSON.parse(json) : null));
+  }
+
+  // -- Cross-workflow index ---------------------------------------------------
+
+  /** Apply a workflow's index snapshot (from a write script) to the `{idx}` keys. */
+  private async syncIndex(snapshot: IndexSnapshot | null | undefined): Promise<void> {
+    if (!snapshot) return;
+    const f = snapshotFields(snapshot);
+    if (!f.id || !f.status || !f.createdAt) return;
+    const ms = (iso: string | null | undefined) => (iso ? String(new Date(iso).getTime()) : "");
+    const rec: IndexRecord = {
+      n: f.workflowName ?? "",
+      s: f.status as WorkflowStatus,
+      c: new Date(f.createdAt).getTime(),
+      ...(f.workflowType ? { t: f.workflowType } : {}),
+      ...(f.namespace ? { ns: f.namespace } : {}),
+      ...(f.version ? { v: f.version } : {}),
+      ...(f.parentWorkflowId ? { p: f.parentWorkflowId } : {}),
+      ...(f.runSource ? { rs: f.runSource } : {}),
+      ...(f.runSourceId ? { rsi: f.runSourceId } : {}),
+      ...(f.startedAt ? { st: new Date(f.startedAt).getTime() } : {}),
+      ...(f.completedAt ? { co: new Date(f.completedAt).getTime() } : {}),
+    };
+    const adds = this.memberSets({
+      id: f.id,
+      name: rec.n,
+      type: rec.t,
+      namespace: rec.ns,
+      parentId: rec.p,
+    });
+    await this.redis.eval(
+      SYNC_INDEX_LUA,
+      5 + WORKFLOW_STATUSES.length + adds.length,
+      this.keys.indexVersions,
+      this.keys.indexRecords,
+      this.keys.byCreated,
+      this.keys.byStarted,
+      this.keys.byCompleted,
+      ...WORKFLOW_STATUSES.map((s) => this.keys.status(s)),
+      ...adds.map(([key]) => key),
+      f.id,
+      f.iv ?? "1",
+      JSON.stringify(rec),
+      f.status,
+      String(rec.c),
+      ms(f.startedAt),
+      ms(f.completedAt),
+      String(WORKFLOW_STATUSES.length),
+      ...WORKFLOW_STATUSES,
+      ...adds.map(([, member]) => member),
+    );
+  }
+
+  /** `[set, member]` pairs a workflow belongs to besides its status set. */
+  private memberSets(params: {
+    id: string;
+    name: string;
+    type?: string;
+    namespace?: string;
+    parentId?: string;
+  }): Array<[string, string]> {
+    const { id, name, type, namespace: ns, parentId } = params;
+    const sets: Array<[string, string]> = [
+      [this.keys.name(name), id],
+      // Distinct-value sets keep every value ever seen, even after purge.
+      [this.keys.distinctNames, name],
+    ];
+    if (type) sets.push([this.keys.distinctTypes, type]);
+    if (ns) {
+      sets.push([this.keys.namespace(ns), id], [this.keys.distinctNamespaces, ns]);
+      sets.push([this.keys.distinctNamespaceNames(ns), name]);
+      if (type) sets.push([this.keys.distinctNamespaceTypes(ns), type]);
+    }
+    if (parentId) sets.push([this.keys.children(parentId), id]);
+    return sets;
+  }
+
+  /** Re-apply a workflow's current index fields (read-repair after a lag). */
+  private async repairIndex(workflowId: string): Promise<void> {
+    const snapshot = await this.hmget(this.keys.wf(workflowId), INDEX_FIELDS);
+    if (snapshot[0]) await this.syncIndex(snapshot);
+    else await this.unindexMissing(workflowId);
+  }
+
+  /** Drop a workflow whose hash is gone from the index, using its index record. */
+  private async unindexMissing(workflowId: string): Promise<void> {
+    const [json] = await this.hmget(this.keys.indexRecords, [workflowId]);
+    const rec = json ? (JSON.parse(json) as IndexRecord) : null;
+    await this.unindex({
+      workflowId,
+      name: rec?.n,
+      namespace: rec?.ns,
+      parentId: rec?.p,
+      status: rec?.s,
+    });
+  }
+
+  private async unindex(params: {
+    workflowId: string;
+    name?: string;
+    namespace?: string;
+    parentId?: string;
+    status?: string;
+  }): Promise<void> {
+    const { workflowId } = params;
+    const memberSets = (params.status ? [params.status] : WORKFLOW_STATUSES).map((s) =>
+      this.keys.status(s),
+    );
+    if (params.name) memberSets.push(this.keys.name(params.name));
+    if (params.namespace) memberSets.push(this.keys.namespace(params.namespace));
+    if (params.parentId) memberSets.push(this.keys.children(params.parentId));
+    const owned = [this.keys.children(workflowId)];
+    await this.redis.eval(
+      UNINDEX_LUA,
+      5 + memberSets.length + owned.length,
+      this.keys.indexVersions,
+      this.keys.indexRecords,
+      this.keys.byCreated,
+      this.keys.byStarted,
+      this.keys.byCompleted,
+      ...memberSets,
+      ...owned,
+      workflowId,
+      String(owned.length),
+    );
   }
 
   async cancelWorkflow(
@@ -1058,7 +833,7 @@ export class RedisWorkflowStorage
     });
 
     if (options?.cascade) {
-      const children = await this.redis.smembers(this.childrenIndexKey(workflowId));
+      const children = await this.redis.smembers(this.keys.children(workflowId));
       for (const childId of children) {
         await this.cancelWorkflow(childId, { cascade: true });
       }
@@ -1067,9 +842,10 @@ export class RedisWorkflowStorage
 
   /**
    * Atomically move a workflow to a terminal status when its current
-   * status is one of `from`. Returns the previous status, or null when the
-   * workflow is missing or its status isn't one of `from`. Fenced by
-   * `guard` in the same script.
+   * status is one of `from`, then index the move. Returns the previous
+   * status, or null when the workflow is missing or its status isn't one
+   * of `from`. Fenced by `guard` in the same script; with `ttlMs` the
+   * run's keys get the retention TTL in that script too.
    */
   private async transitionStatus(params: {
     workflowId: string;
@@ -1077,31 +853,29 @@ export class RedisWorkflowStorage
     to: WorkflowStatus;
     from: readonly WorkflowStatus[];
     fields: Record<string, string>;
+    ttlMs?: number;
   }): Promise<WorkflowStatus | null> {
-    const now = this.clock.now();
-    const nowIso = this.serializeDate(now);
+    const nowIso = this.serializeDate(this.clock.now());
     const fieldArgs = Object.entries({ completedAt: nowIso, ...params.fields }).flat();
-    const result = await this.evalFenced({
+    const wfKey = this.keys.wf(params.workflowId);
+    const result = (await this.evalFenced({
       script: FENCED_TRANSITION_STATUS_LUA,
       workflowId: params.workflowId,
       guard: params.guard,
-      keys: [
-        this.wfKey(params.workflowId),
-        this.statusIndexKey(params.to),
-        this.completedIndexKey,
-        ...params.from.map((st) => this.statusIndexKey(st)),
-      ],
+      keys: [wfKey],
       args: [
-        params.workflowId,
         params.to,
         nowIso,
-        String(now.getTime()),
+        params.ttlMs ? String(params.ttlMs) : "",
+        wfKey,
         String(fieldArgs.length / 2),
         ...fieldArgs,
         ...params.from,
       ],
-    });
-    return typeof result === "string" ? (result as WorkflowStatus) : null;
+    })) as [WorkflowStatus, IndexSnapshot] | null;
+    if (!result) return null;
+    await this.syncIndex(result[1]);
+    return result[0];
   }
 
   // -- Step results ---------------------------------------------------------
@@ -1172,10 +946,11 @@ export class RedisWorkflowStorage
     }>,
     guard?: FenceGuard,
   ): Promise<void> {
-    // Reads (the run number and the existing step rows, to keep dependsOn /
-    // stepType / attempt) happen up front; each workflow's writes — the
-    // pending → running move, the step rows and `updatedAt` — then land in
-    // one fenced script. A batch is atomic per workflow.
+    // Per workflow: one script reads the run number and the existing rows
+    // of the batch's steps (to keep dependsOn / stepType / attempt), and one
+    // fenced script writes the pending → running move, the step rows and
+    // `updatedAt`, provided the run is still the one read. A batch is
+    // atomic per workflow.
     const byWf = new Map<string, Array<(typeof records)[number]>>();
     for (const r of records) {
       const bucket = byWf.get(r.workflowId);
@@ -1185,23 +960,24 @@ export class RedisWorkflowStorage
 
     const now = this.clock.now();
     const nowIso = this.serializeDate(now);
-
     for (const [wfId, rs] of byWf) {
-      const raw = await this.redis.hgetall(this.wfKey(wfId));
-      if (!raw || !raw.id) continue;
-      const run = Number(raw.run);
-      const stepsHashKey = this.stepsKey(wfId, run);
-      const existingAll = await this.redis.hgetall(stepsHashKey);
-
-      const ops: string[][] = [this.markRunningOp(wfId, nowIso)];
-      for (const r of rs) {
-        const existingJson = existingAll?.[r.stepName];
-        const existing: Partial<StepState> = existingJson ? JSON.parse(existingJson) : {};
-        const step = this.completedStep({ run, existing, record: r, now });
-        ops.push(["HSET", stepsHashKey, r.stepName, this.serializeStepState(step)]);
-      }
-      ops.push(["HSET", this.wfKey(wfId), "updatedAt", nowIso]);
-      await this.writeOps({ workflowId: wfId, guard, ops });
+      await this.readModifyWrite({
+        workflowId: wfId,
+        guard,
+        stepNames: rs.map((r) => r.stepName),
+        ops: ({ run, steps }) => {
+          const stepsKey = this.keys.steps(wfId, run);
+          const ops: string[][] = [this.markRunningOp(wfId, nowIso)];
+          rs.forEach((r, i) => {
+            const existingJson = steps[i];
+            const existing: Partial<StepState> = existingJson ? JSON.parse(existingJson) : {};
+            const step = this.completedStep({ run, existing, record: r, now });
+            ops.push(["HSET", stepsKey, r.stepName, this.serializeStepState(step)]);
+          });
+          ops.push(["HSET", this.keys.wf(wfId), "updatedAt", nowIso]);
+          return ops;
+        },
+      });
     }
   }
 
@@ -1217,40 +993,39 @@ export class RedisWorkflowStorage
     },
     guard?: FenceGuard,
   ): Promise<void> {
-    const raw = await this.redis.hgetall(this.wfKey(params.workflowId));
-    if (!raw || !raw.id) return;
-
-    const run = Number(raw.run);
     const now = this.clock.now();
     const nowIso = this.serializeDate(now);
-    const stepsHashKey = this.stepsKey(params.workflowId, run);
-
-    const existingJson = await this.redis.hget(stepsHashKey, params.stepName);
-    const existing: Partial<StepState> = existingJson ? JSON.parse(existingJson) : {};
-
-    const step: StepState = {
-      stepName: params.stepName,
-      run,
-      status: "failed",
-      dependsOn: existing.dependsOn ?? [],
-      stepType: existing.stepType ?? "single",
-      error: params.error,
-      ...(params.errorTag !== undefined && { errorTag: params.errorTag }),
-      metadata: params.metadata ?? existing.metadata,
-      startedAt: params.startedAt,
-      completedAt: now,
-      durationMs: params.durationMs,
-      attempt: ((existing.attempt as number) ?? 0) + 1,
-    };
-
-    await this.writeOps({
+    await this.readModifyWrite({
       workflowId: params.workflowId,
       guard,
-      ops: [
-        this.markRunningOp(params.workflowId, nowIso),
-        ["HSET", stepsHashKey, params.stepName, this.serializeStepState(step)],
-        ["HSET", this.wfKey(params.workflowId), "updatedAt", nowIso],
-      ],
+      stepNames: [params.stepName],
+      ops: ({ run, steps }) => {
+        const existing: Partial<StepState> = steps[0] ? JSON.parse(steps[0]) : {};
+        const step: StepState = {
+          stepName: params.stepName,
+          run,
+          status: "failed",
+          dependsOn: existing.dependsOn ?? [],
+          stepType: existing.stepType ?? "single",
+          error: params.error,
+          ...(params.errorTag !== undefined && { errorTag: params.errorTag }),
+          metadata: params.metadata ?? existing.metadata,
+          startedAt: params.startedAt,
+          completedAt: now,
+          durationMs: params.durationMs,
+          attempt: ((existing.attempt as number) ?? 0) + 1,
+        };
+        return [
+          this.markRunningOp(params.workflowId, nowIso),
+          [
+            "HSET",
+            this.keys.steps(params.workflowId, run),
+            params.stepName,
+            this.serializeStepState(step),
+          ],
+          ["HSET", this.keys.wf(params.workflowId), "updatedAt", nowIso],
+        ];
+      },
     });
   }
 
@@ -1303,57 +1078,93 @@ export class RedisWorkflowStorage
     outcome: { status: "completed"; result: unknown } | { status: "failed"; error: string };
     guard?: FenceGuard;
   }): Promise<void> {
-    const raw = await this.redis.hgetall(this.wfKey(params.workflowId));
-    if (!raw || !raw.id) return;
-
-    const run = Number(raw.run);
     const now = this.clock.now();
-    const tasksHashKey = this.tasksKey(params.workflowId, run, params.stepName);
-
     const taskField = String(params.taskIndex);
-    const existingTaskJson = await this.redis.hget(tasksHashKey, taskField);
-    const prev: Partial<StepTaskState> = existingTaskJson ? JSON.parse(existingTaskJson) : {};
-
-    const task: StepTaskState = {
-      taskIndex: params.taskIndex,
-      ...params.outcome,
-      startedAt: prev.startedAt ? new Date(prev.startedAt as unknown as string) : now,
-      completedAt: now,
-      attempt: ((prev.attempt as number) ?? 0) + 1,
-    };
-    const parentStep: StepState = {
-      stepName: params.stepName,
-      run,
-      status: "running",
-      dependsOn: [],
-      stepType: "map",
-      attempt: 1,
-    };
-
-    await this.writeOps({
+    await this.readModifyWrite({
       workflowId: params.workflowId,
       guard: params.guard,
-      ops: [
-        [
-          "HSET",
-          tasksHashKey,
-          taskField,
-          JSON.stringify({
-            ...task,
-            startedAt: task.startedAt ? this.serializeDate(task.startedAt) : undefined,
-            completedAt: task.completedAt ? this.serializeDate(task.completedAt) : undefined,
-          }),
-        ],
-        // Ensure the parent step row exists.
-        [
-          "HSETNX",
-          this.stepsKey(params.workflowId, run),
-          params.stepName,
-          this.serializeStepState(parentStep),
-        ],
-        ["HSET", this.wfKey(params.workflowId), "updatedAt", this.serializeDate(now)],
-      ],
+      stepNames: [],
+      task: { stepName: params.stepName, field: taskField },
+      ops: ({ run, task: existingTaskJson }) => {
+        const prev: Partial<StepTaskState> = existingTaskJson ? JSON.parse(existingTaskJson) : {};
+        const task: StepTaskState = {
+          taskIndex: params.taskIndex,
+          ...params.outcome,
+          startedAt: prev.startedAt ? new Date(prev.startedAt as unknown as string) : now,
+          completedAt: now,
+          attempt: ((prev.attempt as number) ?? 0) + 1,
+        };
+        const parentStep: StepState = {
+          stepName: params.stepName,
+          run,
+          status: "running",
+          dependsOn: [],
+          stepType: "map",
+          attempt: 1,
+        };
+        return [
+          [
+            "HSET",
+            this.keys.tasks(params.workflowId, run, params.stepName),
+            taskField,
+            JSON.stringify({
+              ...task,
+              startedAt: task.startedAt ? this.serializeDate(task.startedAt) : undefined,
+              completedAt: task.completedAt ? this.serializeDate(task.completedAt) : undefined,
+            }),
+          ],
+          // Ensure the parent step row exists.
+          [
+            "HSETNX",
+            this.keys.steps(params.workflowId, run),
+            params.stepName,
+            this.serializeStepState(parentStep),
+          ],
+          ["HSET", this.keys.wf(params.workflowId), "updatedAt", this.serializeDate(now)],
+        ];
+      },
     });
+  }
+
+  /**
+   * Read the run number plus existing step / task rows in one script, then
+   * write the ops computed from them in one fenced script that first checks
+   * the run is unchanged — retrying when a fresh run got in between. A
+   * missing workflow writes nothing.
+   */
+  private async readModifyWrite(params: {
+    workflowId: string;
+    guard?: FenceGuard;
+    stepNames: readonly string[];
+    task?: { stepName: string; field: string };
+    ops: (read: {
+      run: number;
+      steps: ReadonlyArray<string | null>;
+      task: string | null;
+    }) => ReadonlyArray<readonly string[]>;
+  }): Promise<void> {
+    const wfKey = this.keys.wf(params.workflowId);
+    for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
+      const reply = (await this.redis.eval(
+        READ_FOR_WRITE_LUA,
+        1,
+        wfKey,
+        wfKey,
+        params.task?.stepName ?? "",
+        params.task?.field ?? "",
+        ...params.stepNames,
+      )) as Array<string | null>;
+      if (reply.length === 0) return;
+      const [run, task, ...steps] = reply;
+      const ops = params.ops({ run: Number(run), steps, task: task ?? null });
+      const { applied } = await this.writeOps({
+        workflowId: params.workflowId,
+        guard: params.guard,
+        ops: [["HEQ", wfKey, "run", run!], ...ops],
+      });
+      if (applied) return;
+    }
+    throw new Error(`write to "${params.workflowId}" gave up after contention`);
   }
 
   // -- Workflow completion --------------------------------------------------
@@ -1390,59 +1201,18 @@ export class RedisWorkflowStorage
     });
   }
 
-  /** Terminal transition from any non-terminal status, then retention TTLs. */
+  /** Terminal transition from any non-terminal status, with the retention TTL. */
   private async finishWorkflow(params: {
     workflowId: string;
     guard?: FenceGuard;
     to: WorkflowStatus;
     fields: Record<string, string>;
   }): Promise<void> {
-    const previous = await this.transitionStatus({ ...params, from: NON_TERMINAL_STATUSES });
-    if (previous === null || !this.completedTtlMs) return;
-    const run = await this.redis.hget(this.wfKey(params.workflowId), "run");
-    if (run) await this.applyTtl(params.workflowId, Number(run));
-  }
-
-  private async applyTtl(workflowId: string, run: number): Promise<void> {
-    if (!this.completedTtlMs) return;
-    const ttl = this.completedTtlMs;
-
-    // Apply TTL to workflow hash and sub-keys
-    await this.redis.pexpire(this.wfKey(workflowId), ttl);
-    await this.redis.pexpire(this.stepsKey(workflowId, run), ttl);
-    await this.redis.pexpire(this.signalsKey(workflowId), ttl);
-    await this.redis.pexpire(this.runsKey(workflowId), ttl);
-    await this.redis.pexpire(this.attemptsKey(workflowId), ttl);
-
-    // TTL task hashes for current run steps
-    const stepNames = await this.redis.hkeys(this.stepsKey(workflowId, run));
-    for (const stepName of stepNames) {
-      await this.redis.pexpire(this.tasksKey(workflowId, run, stepName), ttl);
-    }
-
-    // TTL journal keys. The global sleeps zset is shared across workflows
-    // and is NOT expired; purgeCompleted + completePendingEntry clean up
-    // this workflow's members.
-    const journalSteps = await this.redis.smembers(this.journalStepsKey(workflowId));
-    if (journalSteps.length > 0) {
-      await this.redis.pexpire(this.journalStepsKey(workflowId), ttl);
-      for (const stepName of journalSteps) {
-        await this.redis.pexpire(this.journalIdxKey(workflowId, stepName), ttl);
-        await this.redis.pexpire(this.journalSignalIdxKey(workflowId, stepName), ttl);
-        const members = await this.redis.zrangebyscore(
-          this.journalIdxKey(workflowId, stepName),
-          "-inf",
-          "+inf",
-        );
-        for (const member of members) {
-          const { activityIndex, branchPath } = parseJournalMember(member);
-          await this.redis.pexpire(
-            this.journalEntryKey(workflowId, stepName, activityIndex, branchPath),
-            ttl,
-          );
-        }
-      }
-    }
+    await this.transitionStatus({
+      ...params,
+      from: NON_TERMINAL_STATUSES,
+      ttlMs: this.completedTtlMs,
+    });
   }
 
   // -- Suspend / Signal -----------------------------------------------------
@@ -1453,49 +1223,37 @@ export class RedisWorkflowStorage
     stepUpdate: Record<string, unknown>,
     guard?: FenceGuard,
   ): Promise<void> {
-    const raw = await this.redis.hgetall(this.wfKey(workflowId));
-    if (!raw || !raw.id) return;
-
-    const run = Number(raw.run);
     const now = this.clock.now();
-
-    // Load existing step
-    const existingJson = await this.redis.hget(this.stepsKey(workflowId, run), stepName);
-    const existing: Partial<StepState> = existingJson ? JSON.parse(existingJson) : {};
-
-    const step = {
-      stepName,
-      run,
-      dependsOn: existing.dependsOn ?? [],
-      stepType: existing.stepType ?? "single",
-      attempt: existing.attempt ?? 1,
-      startedAt: existing.startedAt ?? this.serializeDate(now),
-      ...stepUpdate,
-    };
-
-    // Serialize dates in stepUpdate
-    const serialized: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(step)) {
-      if (v instanceof Date) {
-        serialized[k] = this.serializeDate(v);
-      } else {
-        serialized[k] = v;
-      }
-    }
-
-    // The step row, the status and its index move land in one fenced script.
-    await this.writeOps({
+    // The step row, the status move and `updatedAt` land in one fenced script.
+    await this.readModifyWrite({
       workflowId,
       guard,
-      ops: [
-        ["HSET", this.stepsKey(workflowId, run), stepName, JSON.stringify(serialized)],
-        this.statusOp({
-          workflowId,
-          to: "suspended",
-          from: "*",
-          fields: { updatedAt: this.serializeDate(now) },
-        }),
-      ],
+      stepNames: [stepName],
+      ops: ({ run, steps }) => {
+        const existing: Partial<StepState> = steps[0] ? JSON.parse(steps[0]) : {};
+        const step = {
+          stepName,
+          run,
+          dependsOn: existing.dependsOn ?? [],
+          stepType: existing.stepType ?? "single",
+          attempt: existing.attempt ?? 1,
+          startedAt: existing.startedAt ?? this.serializeDate(now),
+          ...stepUpdate,
+        };
+        const serialized: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(step)) {
+          serialized[k] = v instanceof Date ? this.serializeDate(v) : v;
+        }
+        return [
+          ["HSET", this.keys.steps(workflowId, run), stepName, JSON.stringify(serialized)],
+          this.statusOp({
+            workflowId,
+            to: "suspended",
+            from: "*",
+            fields: { updatedAt: this.serializeDate(now) },
+          }),
+        ];
+      },
     });
   }
 
@@ -1506,7 +1264,7 @@ export class RedisWorkflowStorage
       deliveredAt: this.clock.now(),
     };
     await this.redis.hset(
-      this.signalsKey(workflowId),
+      this.keys.signals(workflowId),
       signalName,
       JSON.stringify({
         ...signal,
@@ -1516,7 +1274,7 @@ export class RedisWorkflowStorage
   }
 
   async loadSignals(workflowId: string): Promise<SignalState[]> {
-    const raw = await this.redis.hgetall(this.signalsKey(workflowId));
+    const raw = await this.redis.hgetall(this.keys.signals(workflowId));
     if (!raw || Object.keys(raw).length === 0) return [];
 
     return Object.values(raw).map((json) => {
@@ -1538,7 +1296,7 @@ export class RedisWorkflowStorage
     // client-side, then compare-and-set against the value we read, retrying
     // when a concurrent patch landed first — so no patch is lost. The fence
     // is checked in the same script as each compare-and-set.
-    const key = this.wfKey(workflowId);
+    const key = this.keys.wf(workflowId);
     for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
       const raw = await this.redis.hget(key, "metadata");
       const merged: Record<string, unknown> = raw ? JSON.parse(raw) : {};
@@ -1592,18 +1350,19 @@ export class RedisWorkflowStorage
       createdAt: this.clock.now(),
     };
     // Dedup check and insert in one script: two concurrent creates with the
-    // same idempotency key resolve to one token.
+    // same idempotency key resolve to one token. The token → workflow lookup
+    // is written next, also on a dedup hit, so a create that crashed in
+    // between is completed by its retry.
     const [cached, tokenId] = (await this.redis.eval(
       CREATE_SIGNAL_TOKEN_LUA,
-      3,
-      this.signalTokensKey(params.workflowId),
-      this.signalTokenLookupKey(params.tokenId),
-      this.signalTokenIdempotencyKey(params.workflowId),
+      2,
+      this.keys.signalTokens(params.workflowId),
+      this.keys.signalTokenIdempotency(params.workflowId),
       params.tokenId,
       serializeSignalToken(record),
-      params.workflowId,
       params.idempotencyKey ?? "",
     )) as [number, string];
+    await this.redis.set(this.keys.signalTokenLookup(tokenId), params.workflowId);
     if (cached === 1) {
       const existing = await this.findSignalTokenById(tokenId);
       if (!existing) throw new Error(`createSignalToken: deduplicated token ${tokenId} missing`);
@@ -1613,9 +1372,9 @@ export class RedisWorkflowStorage
   }
 
   async findSignalTokenById(tokenId: string): Promise<SignalTokenRecord | null> {
-    const workflowId = await this.redis.get(this.signalTokenLookupKey(tokenId));
+    const workflowId = await this.redis.get(this.keys.signalTokenLookup(tokenId));
     if (!workflowId) return null;
-    const raw = await this.redis.hget(this.signalTokensKey(workflowId), tokenId);
+    const raw = await this.redis.hget(this.keys.signalTokens(workflowId), tokenId);
     return raw ? deserializeSignalToken(raw) : null;
   }
 
@@ -1630,9 +1389,9 @@ export class RedisWorkflowStorage
     // Compare-and-set against the pending record we read: exactly one
     // concurrent completer swaps it, every other one re-reads and sees the
     // completed record.
-    const workflowId = await this.redis.get(this.signalTokenLookupKey(params.tokenId));
+    const workflowId = await this.redis.get(this.keys.signalTokenLookup(params.tokenId));
     if (!workflowId) throw new Error(`signal token ${params.tokenId} not found`);
-    const hashKey = this.signalTokensKey(workflowId);
+    const hashKey = this.keys.signalTokens(workflowId);
     for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
       const raw = await this.redis.hget(hashKey, params.tokenId);
       if (!raw) throw new Error(`signal token ${params.tokenId} not found`);
@@ -1661,7 +1420,7 @@ export class RedisWorkflowStorage
   }
 
   async listSignalTokensForWorkflow(workflowId: string): Promise<ReadonlyArray<SignalTokenRecord>> {
-    const raw = await this.redis.hgetall(this.signalTokensKey(workflowId));
+    const raw = await this.redis.hgetall(this.keys.signalTokens(workflowId));
     if (!raw || Object.keys(raw).length === 0) return [];
     return Object.values(raw)
       .map(deserializeSignalToken)
@@ -1672,10 +1431,6 @@ export class RedisWorkflowStorage
   // Streams — append-only chunks per (workflow, stream) via Redis lists.
   // ---------------------------------------------------------------------------
 
-  private streamKey(workflowId: string, streamId: string): string {
-    return `${this.prefix}:${workflowId}:streams:${streamId}`;
-  }
-
   async appendStreamChunk(
     params: {
       workflowId: string;
@@ -1685,15 +1440,14 @@ export class RedisWorkflowStorage
     },
     guard?: FenceGuard,
   ): Promise<{ chunkIndex: number }> {
-    const key = this.streamKey(params.workflowId, params.streamId);
     const { last } = await this.writeOps({
       workflowId: params.workflowId,
       guard,
       ops: [
-        ["SADD", this.streamIdsKey(params.workflowId), params.streamId],
+        ["SADD", this.keys.streamIds(params.workflowId), params.streamId],
         [
           "RPUSH",
-          key,
+          this.keys.stream(params.workflowId, params.streamId),
           JSON.stringify({
             payload: params.payload,
             appendedBy: params.appendedBy,
@@ -1712,7 +1466,7 @@ export class RedisWorkflowStorage
     since?: number;
     limit?: number;
   }): Promise<ReadonlyArray<StreamChunk>> {
-    const key = this.streamKey(params.workflowId, params.streamId);
+    const key = this.keys.stream(params.workflowId, params.streamId);
     const start = params.since !== undefined ? params.since + 1 : 0;
     const stop = params.limit !== undefined ? start + params.limit - 1 : -1;
     const items = await this.redis.lrange(key, start, stop);
@@ -1733,17 +1487,14 @@ export class RedisWorkflowStorage
     workflowId: string,
     lockDurationMs: number,
   ): Promise<{ acquired: boolean; token?: string }> {
-    // Atomic via Lua: EXISTS → INCR (monotonic fence counter) → HSET lock
-    // hash → PEXPIRE. Redis serializes script execution, so no interleave.
-    const result = (await this.redis.eval(
+    const [acquired, token] = (await this.redis.eval(
       TRY_LOCK_LUA,
       2,
-      this.lockKey(workflowId),
-      this.fenceCounterKey,
+      this.keys.lock(workflowId),
+      this.keys.fence(workflowId),
       this.instanceId,
       lockDurationMs.toString(),
     )) as [number, string];
-    const [acquired, token] = result;
     if (acquired !== 1) return { acquired: false };
     return { acquired: true, token };
   }
@@ -1752,23 +1503,27 @@ export class RedisWorkflowStorage
     workflowId: string,
     lockDurationMs: number,
   ): Promise<{ locked: boolean; token?: string; state: WorkflowState | null }> {
-    // Sequenced — a Lua script could do this in one round trip, but
-    // `loadWorkflow` reads from several keys (wf hash, steps hash,
-    // signals hash, per-run history) that don't fit neatly in a single
-    // script without reimplementing the deserialization server-side.
-    // The real win — collapsing two HTTP round-trips to one — is
-    // already captured at the workflow-remote RPC layer (one POST
-    // carries the whole tryLockAndLoad call).
-    const { acquired, token } = await this.tryLock(workflowId, lockDurationMs);
-    const state = await this.loadWorkflow(workflowId);
-    return { locked: acquired, token, state };
+    // One script: the state is read as of the moment the lock was taken.
+    const wfKey = this.keys.wf(workflowId);
+    const [acquired, token, load] = (await this.redis.eval(
+      TRY_LOCK_AND_LOAD_LUA,
+      3,
+      this.keys.lock(workflowId),
+      this.keys.fence(workflowId),
+      wfKey,
+      this.instanceId,
+      lockDurationMs.toString(),
+      wfKey,
+    )) as [number, string, unknown];
+    const state = this.assembleWorkflow(load);
+    return acquired === 1 ? { locked: true, token, state } : { locked: false, state };
   }
 
   async releaseLock(workflowId: string, guard?: FenceGuard): Promise<void> {
     await this.redis.eval(
       RELEASE_LOCK_LUA,
       1,
-      this.lockKey(workflowId),
+      this.keys.lock(workflowId),
       this.instanceId,
       guard?.fenceToken ?? "",
     );
@@ -1778,7 +1533,7 @@ export class RedisWorkflowStorage
     const extended = await this.redis.eval(
       HEARTBEAT_LUA,
       1,
-      this.lockKey(workflowId),
+      this.keys.lock(workflowId),
       this.instanceId,
       lockDurationMs.toString(),
       guard?.fenceToken ?? "",
@@ -1786,7 +1541,7 @@ export class RedisWorkflowStorage
     // A token holder whose lock is gone (released, or expired through its
     // TTL) or re-taken learns it lost the run. The read is for the error only.
     if (guard?.fenceToken && Number(extended) !== 1) {
-      const current = await this.redis.hget(this.lockKey(workflowId), "token");
+      const current = await this.redis.hget(this.keys.lock(workflowId), "token");
       throw fenceMismatch({ workflowId, provided: guard.fenceToken, current });
     }
   }
@@ -1809,7 +1564,7 @@ export class RedisWorkflowStorage
       return await this.redis.eval(
         params.script,
         params.keys.length + 1,
-        this.lockKey(params.workflowId),
+        this.keys.lock(params.workflowId),
         ...params.keys,
         token,
         ...params.args,
@@ -1827,20 +1582,41 @@ export class RedisWorkflowStorage
     }
   }
 
-  /** Run `ops` (see `WRITE_OPS_LUA`) as one fenced script. False when an ABSENT op stopped it. */
+  /**
+   * Run `ops` (see `WRITE_OPS_LUA`) as one fenced script on `workflowId`'s
+   * slot; every op's key (its second element) is passed in KEYS. When a
+   * status op changed the run's index fields, the index is synced next,
+   * unless `deferIndex` hands the snapshot back to the caller.
+   * `applied` is false when an ABSENT or HEQ op stopped the script.
+   */
   private async writeOps(params: {
     workflowId: string;
     guard?: FenceGuard;
     ops: ReadonlyArray<readonly string[]>;
-  }): Promise<{ applied: boolean; last: unknown }> {
+    deferIndex?: boolean;
+  }): Promise<{ applied: boolean; last: unknown; snapshot: IndexSnapshot | null }> {
+    const keys: string[] = [];
+    const position = new Map<string, number>();
+    const encoded = params.ops.map(([command, key, ...rest]) => {
+      let at = position.get(key!);
+      if (at === undefined) {
+        keys.push(key!);
+        at = keys.length;
+        position.set(key!, at);
+      }
+      return [command, at, ...rest];
+    });
     const reply = (await this.evalFenced({
       script: FENCED_WRITE_OPS_LUA,
       workflowId: params.workflowId,
       guard: params.guard,
-      keys: [],
-      args: [JSON.stringify(params.ops)],
-    })) as [number, unknown?];
-    return { applied: Number(reply[0]) === 1, last: reply[1] };
+      keys,
+      args: [JSON.stringify(encoded)],
+    })) as [number, unknown?, IndexSnapshot?];
+    const applied = Number(reply[0]) === 1;
+    const snapshot = applied ? (reply[2] ?? null) : null;
+    if (snapshot && !params.deferIndex) await this.syncIndex(snapshot);
+    return { applied, last: reply[1], snapshot };
   }
 
   /** `STATUS` op of `WRITE_OPS_LUA`. */
@@ -1852,22 +1628,24 @@ export class RedisWorkflowStorage
   }): string[] {
     return [
       "STATUS",
-      this.wfKey(params.workflowId),
-      params.workflowId,
-      `${this.prefix}:idx:status:`,
+      this.keys.wf(params.workflowId),
       params.to,
       params.from === "*" ? "*" : params.from.join(","),
       ...Object.entries(params.fields).flat(),
     ];
   }
 
+  private async hmget(key: string, fields: readonly string[]): Promise<Array<string | null>> {
+    if (fields.length === 0) return [];
+    return ((await this.redis.eval(HMGET_LUA, 1, key, ...fields)) ?? []) as Array<string | null>;
+  }
+
   // -- Scanner / recovery queries -------------------------------------------
   //
   // Candidates come from the status index sets (ids only), sorted and cut at
-  // the keyset cursor client-side; each candidate's workflow hash and
-  // current-run steps hash are then read in parallel chunks, stopping as
-  // soon as `limit` rows match. Full workflow assembly (tasks, history) is
-  // never loaded.
+  // the keyset cursor client-side; each candidate's workflow is then read in
+  // parallel chunks, stopping as soon as `limit` rows match. A candidate
+  // whose hash disagrees with the index has its index entry repaired.
 
   /**
    * Walk the ids in the given status index sets in ascending order after
@@ -1883,7 +1661,7 @@ export class RedisWorkflowStorage
     const limit = Math.max(0, Math.trunc(params.limit));
     if (limit === 0) return [];
     const sets = await Promise.all(
-      params.statuses.map((s) => this.redis.smembers(this.statusIndexKey(s))),
+      params.statuses.map((s) => this.redis.smembers(this.keys.status(s))),
     );
     const after = params.afterWorkflowId;
     const ids = [...new Set(sets.flat())]
@@ -1904,38 +1682,39 @@ export class RedisWorkflowStorage
   }
 
   /** Namespace scoping for the scanners — the same rule `listWorkflows` applies. */
-  private inScannerNamespace(raw: Record<string, string>): boolean {
-    return !this.namespace || raw.namespace === this.namespace;
+  private inScannerNamespace(state: { namespace?: string }): boolean {
+    return !this.namespace || state.namespace === this.namespace;
   }
 
-  /** Workflow hash + current-run steps of a still-suspended run, sorted by step name. */
-  private async loadSuspendedSteps(
+  /** A still-suspended run with its steps sorted by name; repairs a lagging index. */
+  private async loadSuspended(
     workflowId: string,
-  ): Promise<{ raw: Record<string, string>; steps: StepState[] } | undefined> {
-    const raw = await this.redis.hgetall(this.wfKey(workflowId));
-    // The status index can briefly lag the hash; the hash is authoritative.
-    if (!raw || !raw.id || raw.status !== "suspended") return undefined;
-    if (!this.inScannerNamespace(raw)) return undefined;
-    const stepsRaw = await this.redis.hgetall(this.stepsKey(workflowId, Number(raw.run)));
-    const steps = Object.values(stepsRaw ?? {})
-      .map((json) => this.parseStepState(json))
-      .sort((a, b) => (a.stepName < b.stepName ? -1 : a.stepName > b.stepName ? 1 : 0));
-    return { raw, steps };
+  ): Promise<{ state: WorkflowState; steps: StepState[] } | undefined> {
+    const state = await this.loadWorkflow(workflowId);
+    if (!state || state.status !== "suspended") {
+      await this.repairIndex(workflowId);
+      return undefined;
+    }
+    if (!this.inScannerNamespace(state)) return undefined;
+    const steps = Object.values(state.steps).sort((a, b) =>
+      a.stepName < b.stepName ? -1 : a.stepName > b.stepName ? 1 : 0,
+    );
+    return { state, steps };
   }
 
   private toWakeup(params: {
-    raw: Record<string, string>;
+    state: WorkflowState;
     stepName: string;
     reason: WorkflowWakeup["reason"];
     signalName?: string;
     signalPayload?: unknown;
   }): WorkflowWakeup {
-    const { raw } = params;
+    const { state } = params;
     return {
-      workflowId: raw.id,
-      workflowName: raw.workflowName,
-      ...(raw.version ? { version: raw.version } : {}),
-      input: JSON.parse(raw.input),
+      workflowId: state.workflowId,
+      workflowName: state.workflowName,
+      ...(state.version ? { version: state.version } : {}),
+      input: state.input,
       stepName: params.stepName,
       reason: params.reason,
       ...(params.signalName !== undefined ? { signalName: params.signalName } : {}),
@@ -1955,15 +1734,15 @@ export class RedisWorkflowStorage
       limit: params.limit,
       afterWorkflowId: params.afterWorkflowId,
       pick: async (workflowId) => {
-        const loaded = await this.loadSuspendedSteps(workflowId);
+        const loaded = await this.loadSuspended(workflowId);
         if (!loaded) return undefined;
         for (const step of loaded.steps) {
           if (step.status === "sleeping" && due(step.wakeAt)) {
-            return this.toWakeup({ raw: loaded.raw, stepName: step.stepName, reason: "sleep" });
+            return this.toWakeup({ state: loaded.state, stepName: step.stepName, reason: "sleep" });
           }
           if (step.status === "waiting_for_signal" && due(step.signalTimeoutAt)) {
             return this.toWakeup({
-              raw: loaded.raw,
+              state: loaded.state,
               stepName: step.stepName,
               reason: "signal-timeout",
               signalName: step.signalName,
@@ -1986,16 +1765,16 @@ export class RedisWorkflowStorage
       pick: async (workflowId) => {
         // Signals first: most suspended runs have none delivered, and that
         // check is one HGETALL on a usually-missing key.
-        const signals = await this.redis.hgetall(this.signalsKey(workflowId));
+        const signals = await this.redis.hgetall(this.keys.signals(workflowId));
         if (!signals || Object.keys(signals).length === 0) return undefined;
-        const loaded = await this.loadSuspendedSteps(workflowId);
+        const loaded = await this.loadSuspended(workflowId);
         if (!loaded) return undefined;
         for (const step of loaded.steps) {
           if (step.status !== "waiting_for_signal" || step.signalName === undefined) continue;
           const json = signals[step.signalName];
           if (json === undefined) continue;
           return this.toWakeup({
-            raw: loaded.raw,
+            state: loaded.state,
             stepName: step.stepName,
             reason: "signal",
             signalName: step.signalName,
@@ -2026,14 +1805,18 @@ export class RedisWorkflowStorage
       afterWorkflowId: params.afterWorkflowId,
       pick: async (workflowId) => {
         const [raw, pttl] = await Promise.all([
-          this.redis.hgetall(this.wfKey(workflowId)),
-          this.redis.eval(PTTL_LUA, 1, this.lockKey(workflowId)) as Promise<number>,
+          this.redis.hgetall(this.keys.wf(workflowId)),
+          this.redis.eval(PTTL_LUA, 1, this.keys.lock(workflowId)) as Promise<number>,
         ]);
-        if (!raw || !raw.id) return undefined;
-        if (raw.status !== "pending" && raw.status !== "running" && raw.status !== "compensating") {
+        if (!raw || !raw.id) {
+          await this.unindexMissing(workflowId);
           return undefined;
         }
-        if (!this.inScannerNamespace(raw)) return undefined;
+        if (raw.status !== "pending" && raw.status !== "running" && raw.status !== "compensating") {
+          await this.repairIndex(workflowId);
+          return undefined;
+        }
+        if (!this.inScannerNamespace({ namespace: raw.namespace })) return undefined;
         if (this.parseDate(raw.updatedAt).getTime() >= beforeMs) return undefined;
         // PTTL: -2 = no key, -1 = no expiry (treat as held).
         const ttl = Number(pttl);
@@ -2053,108 +1836,126 @@ export class RedisWorkflowStorage
 
   // -- Run history ----------------------------------------------------------
 
-  async startFreshRun(workflowId: string, guard?: FenceGuard): Promise<number> {
-    const raw = await this.redis.hgetall(this.wfKey(workflowId));
-    if (!raw || !raw.id) throw new Error(`Workflow ${workflowId} not found`);
-
-    const currentRun = Number(raw.run);
-
-    // Archive current run — load steps for current run
-    const stepsRaw = await this.redis.hgetall(this.stepsKey(workflowId, currentRun));
+  /** Summary of the current run of a loaded workflow, for history and archiving. */
+  private currentRunSummary(state: WorkflowState): WorkflowRunSummary {
     const steps: Record<string, StepState> = {};
-    for (const [stepName, json] of Object.entries(stepsRaw)) {
-      steps[stepName] = this.parseStepState(json);
+    for (const [name, step] of Object.entries(state.steps)) {
+      const { tasks: _tasks, ...row } = step;
+      steps[name] = row;
     }
-
-    const summary: WorkflowRunSummary = {
-      run: currentRun,
-      version: raw.version || undefined,
-      status: raw.status as WorkflowStatus,
-      result: raw.result ? JSON.parse(raw.result) : undefined,
-      error: raw.error || undefined,
-      tripwire: raw.tripwire ? JSON.parse(raw.tripwire) : undefined,
+    return {
+      run: state.run,
+      version: state.version,
+      status: state.status,
+      result: state.result,
+      error: state.error,
+      tripwire: state.tripwire,
       steps,
-      createdAt: this.parseDate(raw.createdAt),
-      startedAt: raw.startedAt ? this.parseDate(raw.startedAt) : undefined,
-      completedAt: raw.completedAt ? this.parseDate(raw.completedAt) : undefined,
+      createdAt: state.createdAt,
+      startedAt: state.startedAt,
+      completedAt: state.completedAt,
     };
+  }
 
-    const summaryJson = JSON.stringify(summary, (_, v) => {
-      if (v instanceof Date) return v.toISOString();
-      return v;
-    });
+  async startFreshRun(workflowId: string, guard?: FenceGuard): Promise<number> {
+    const state = await this.loadWorkflow(workflowId);
+    if (!state) throw new Error(`Workflow ${workflowId} not found`);
+    const summaryJson = JSON.stringify(this.currentRunSummary(state), (_, v) =>
+      v instanceof Date ? v.toISOString() : v,
+    );
 
     // Archive + run bump + journal and signal cleanup in one script, so the
     // new run can never observe the previous run's journal or signals.
-    const newRun = (await this.evalFenced({
+    const reply = (await this.evalFenced({
       script: FENCED_START_FRESH_RUN_LUA,
       workflowId,
       guard,
       keys: [
-        this.wfKey(workflowId),
-        this.runsKey(workflowId),
-        this.signalsKey(workflowId),
-        this.journalStepsKey(workflowId),
-        this.sleepsKey,
-        this.statusIndexKey("pending"),
-        this.completedIndexKey,
+        this.keys.wf(workflowId),
+        this.keys.runs(workflowId),
+        this.keys.signals(workflowId),
+        this.keys.journalSteps(workflowId),
+        this.keys.attempts(workflowId),
       ],
       args: [
-        workflowId,
-        String(currentRun),
+        String(state.run),
         summaryJson,
         String(this.maxRunsPerWorkflow),
         this.serializeDate(this.clock.now()),
-        `${this.prefix}:${workflowId}:journal:`,
-        `${this.prefix}:idx:status:`,
+        this.keys.journalBase(workflowId),
       ],
-    })) as number;
+    })) as [number, string[]?, IndexSnapshot?];
+    const newRun = Number(reply[0]);
     if (newRun === -1) {
       // A concurrent fresh run moved the counter between our read and the
       // script — start over against the new run.
       return this.startFreshRun(workflowId, guard);
     }
+    await Promise.all([
+      this.unscheduleSleeps({ workflowId, members: reply[1] ?? [] }),
+      this.syncIndex(reply[2]),
+    ]);
     return newRun;
+  }
+
+  /**
+   * Reset step rows of the current run (see `WorkflowStorage.resetSteps`):
+   * the listed steps' rows, task rows and journal go, the kept steps lose
+   * their compensation ledger, and a terminal run moves back to `running`
+   * — one script, compare-and-set against the rows read first.
+   */
+  async resetSteps(workflowId: string, stepNames: readonly string[]): Promise<void> {
+    if (stepNames.length === 0) return;
+    const wfKey = this.keys.wf(workflowId);
+    const reset = new Set(stepNames);
+    for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
+      const load = (await this.redis.eval(LOAD_RUN_LUA, 1, wfKey, wfKey)) as unknown[];
+      if (!load || load.length === 0) throw new Error(`Workflow ${workflowId} not found`);
+      const run = flatToRecord(load[0] as string[]).run!;
+      const ledgerSwaps: string[] = [];
+      for (const [name, json] of Object.entries(flatToRecord(load[1] as string[]))) {
+        if (reset.has(name)) continue;
+        const step = this.parseStepState(json);
+        if (step.compensationStatus === undefined) continue;
+        ledgerSwaps.push(name, json, this.serializeStepState(withoutCompensationLedger(step)));
+      }
+      const reply = (await this.redis.eval(
+        RESET_STEPS_LUA,
+        2,
+        wfKey,
+        this.keys.journalSteps(workflowId),
+        wfKey,
+        this.keys.journalBase(workflowId),
+        run,
+        this.serializeDate(this.clock.now()),
+        String(stepNames.length),
+        ...stepNames,
+        ...ledgerSwaps,
+      )) as [number, string[]?, IndexSnapshot?];
+      const outcome = Number(reply[0]);
+      if (outcome === -1) throw new Error(`Workflow ${workflowId} not found`);
+      if (outcome === 0) continue;
+      await Promise.all([
+        this.unscheduleSleeps({ workflowId, members: reply[1] ?? [] }),
+        this.syncIndex(reply[2]),
+      ]);
+      return;
+    }
+    throw new Error(`resetSteps: gave up on "${workflowId}" after contention`);
   }
 
   async loadRunHistory(
     workflowId: string,
     params?: { limit?: number; offset?: number },
   ): Promise<WorkflowRunSummary[]> {
-    const raw = await this.redis.hgetall(this.wfKey(workflowId));
-    if (!raw || !raw.id) return [];
-
-    // Load current run as a summary
-    const currentRun = Number(raw.run);
-    const stepsRaw = await this.redis.hgetall(this.stepsKey(workflowId, currentRun));
-    const currentSteps: Record<string, StepState> = {};
-    for (const [stepName, json] of Object.entries(stepsRaw)) {
-      currentSteps[stepName] = this.parseStepState(json);
-    }
-
-    const currentSummary: WorkflowRunSummary = {
-      run: currentRun,
-      version: raw.version || undefined,
-      status: raw.status as WorkflowStatus,
-      result: raw.result ? JSON.parse(raw.result) : undefined,
-      error: raw.error || undefined,
-      tripwire: raw.tripwire ? JSON.parse(raw.tripwire) : undefined,
-      steps: currentSteps,
-      createdAt: this.parseDate(raw.createdAt),
-      startedAt: raw.startedAt ? this.parseDate(raw.startedAt) : undefined,
-      completedAt: raw.completedAt ? this.parseDate(raw.completedAt) : undefined,
-    };
-
-    // Load archived runs via eval+LRANGE
-    const archivedRaw = (await this.redis.eval(
-      `return redis.call('LRANGE', KEYS[1], 0, -1)`,
-      1,
-      this.runsKey(workflowId),
-    )) as string[] | null;
+    const [state, archivedRaw] = await Promise.all([
+      this.loadWorkflow(workflowId),
+      this.redis.eval(LRANGE_ALL_LUA, 1, this.keys.runs(workflowId)) as Promise<string[] | null>,
+    ]);
+    if (!state) return [];
 
     const archived: WorkflowRunSummary[] = (archivedRaw ?? []).map((json) => {
       const r = JSON.parse(json);
-      // Parse dates in steps
       const steps: Record<string, StepState> = {};
       if (r.steps) {
         for (const [name, step] of Object.entries(r.steps)) {
@@ -2182,7 +1983,7 @@ export class RedisWorkflowStorage
       };
     });
 
-    const runs = [currentSummary, ...archived];
+    const runs = [this.currentRunSummary(state), ...archived];
     runs.sort((a, b) => b.run - a.run);
 
     const offset = params?.offset ?? 0;
@@ -2197,7 +1998,6 @@ export class RedisWorkflowStorage
   ): Promise<number> {
     let minScore: number;
     let maxScore: number;
-
     if ("olderThanMs" in params) {
       minScore = 0;
       maxScore = this.clock.currentTimeMs() - params.olderThanMs;
@@ -2206,123 +2006,97 @@ export class RedisWorkflowStorage
       maxScore = params.to.getTime();
     }
 
-    // Find candidate workflow IDs from the completed sorted set
     const ids = await this.redis.zrangebyscore(
-      this.completedIndexKey,
+      this.keys.byCompleted,
       minScore,
       maxScore,
       "LIMIT",
       0,
       params.limit,
     );
-
     let deleted = 0;
-
-    for (const id of ids) {
-      // Load workflow to get run count and status for cleanup
-      const raw = await this.redis.hgetall(this.wfKey(id));
-      if (!raw || !raw.id) {
-        // Already gone — just clean up index
-        await this.redis.zrem(this.completedIndexKey, id);
-        continue;
-      }
-
-      const status = raw.status as WorkflowStatus;
-      if (!isTerminalWorkflowStatus(status)) continue;
-
-      const run = Number(raw.run);
-
-      // Collect all keys to delete
-      const keysToDelete = [
-        this.wfKey(id),
-        this.stepsKey(id, run),
-        this.signalsKey(id),
-        this.runsKey(id),
-        this.attemptsKey(id),
-        this.signalTokensKey(id),
-        this.signalTokenIdempotencyKey(id),
-        this.streamIdsKey(id),
-        this.childrenIndexKey(id),
-      ];
-
-      // Signal tokens: drop the tokenId → workflowId reverse lookups too.
-      const tokenIds = await this.redis.hkeys(this.signalTokensKey(id));
-      for (const tokenId of tokenIds) keysToDelete.push(this.signalTokenLookupKey(tokenId));
-
-      // Streams appended through this storage are tracked per workflow.
-      const streamIds = await this.redis.smembers(this.streamIdsKey(id));
-      for (const streamId of streamIds) keysToDelete.push(this.streamKey(id, streamId));
-
-      // Delete task hashes for current run
-      const stepNames = await this.redis.hkeys(this.stepsKey(id, run));
-      for (const stepName of stepNames) {
-        keysToDelete.push(this.tasksKey(id, run, stepName));
-      }
-
-      // Delete archived run step/task keys
-      const archivedRaw = (await this.redis.eval(
-        `return redis.call('LRANGE', KEYS[1], 0, -1)`,
-        1,
-        this.runsKey(id),
-      )) as string[] | null;
-
-      if (archivedRaw) {
-        for (const json of archivedRaw) {
-          const r = JSON.parse(json);
-          const archivedRun = r.run as number;
-          keysToDelete.push(this.stepsKey(id, archivedRun));
-          if (r.steps) {
-            for (const stepName of Object.keys(r.steps)) {
-              keysToDelete.push(this.tasksKey(id, archivedRun, stepName));
-            }
-          }
-        }
-      }
-
-      // Cascade journal: step list, per-step idx zset + signal-idx hash +
-      // entry hashes, plus pending members left in the global sleeps zset.
-      const journalStepNames = await this.redis.smembers(this.journalStepsKey(id));
-      for (const stepName of journalStepNames) {
-        const members = await this.redis.zrangebyscore(
-          this.journalIdxKey(id, stepName),
-          "-inf",
-          "+inf",
-        );
-        for (const member of members) {
-          const { activityIndex, branchPath } = parseJournalMember(member);
-          keysToDelete.push(this.journalEntryKey(id, stepName, activityIndex, branchPath));
-          // Defensive: ZREM is a no-op if not present.
-          await this.redis.zrem(
-            this.sleepsKey,
-            this.sleepsMember(id, stepName, activityIndex, branchPath),
-          );
-        }
-        keysToDelete.push(this.journalIdxKey(id, stepName));
-        keysToDelete.push(this.journalSignalIdxKey(id, stepName));
-      }
-      if (journalStepNames.length > 0) {
-        keysToDelete.push(this.journalStepsKey(id));
-      }
-
-      // Delete all keys
-      if (keysToDelete.length > 0) {
-        await this.redis.del(...keysToDelete);
-      }
-
-      // Remove from indexes
-      await this.redis.srem(this.statusIndexKey(status), id);
-      if (raw.workflowName) {
-        await this.redis.srem(this.nameIndexKey(raw.workflowName), id);
-      }
-      if (raw.parentWorkflowId) {
-        await this.redis.srem(this.childrenIndexKey(raw.parentWorkflowId), id);
-      }
-      await this.redis.zrem(this.completedIndexKey, id);
-
-      deleted++;
+    for (let i = 0; i < ids.length; i += PURGE_CONCURRENCY) {
+      const outcomes = await Promise.all(
+        ids.slice(i, i + PURGE_CONCURRENCY).map((id) => this.purgeWorkflow(id)),
+      );
+      deleted += outcomes.filter(Boolean).length;
     }
-
     return deleted;
+  }
+
+  /** Delete one finished workflow and its index entries. True when it was purged. */
+  private async purgeWorkflow(workflowId: string): Promise<boolean> {
+    const wfKey = this.keys.wf(workflowId);
+    const reply = (await this.redis.eval(
+      PURGE_WORKFLOW_LUA,
+      1,
+      wfKey,
+      wfKey,
+      TERMINAL_STATUSES_CSV,
+    )) as [number, ...unknown[]];
+    const outcome = Number(reply[0]);
+    if (outcome === 0) {
+      // Already gone (retention TTL) — drop what the index still holds.
+      await this.unindexMissing(workflowId);
+      return false;
+    }
+    if (outcome === -1) {
+      await this.repairIndex(workflowId);
+      return false;
+    }
+    const [, status, name, parentId, ns, streamsTracked, tokenIds, sleeps] = reply as [
+      number,
+      string,
+      string,
+      string,
+      string,
+      string,
+      string[],
+      string[],
+    ];
+    await Promise.all([
+      streamsTracked === "1" ? undefined : this.deleteUntrackedStreams(workflowId),
+      // Each lookup key is its own slot: one DEL per key.
+      ...tokenIds.map((tokenId) => this.redis.del(this.keys.signalTokenLookup(tokenId))),
+      this.unscheduleSleeps({ workflowId, members: sleeps }),
+      this.unindex({
+        workflowId,
+        status,
+        name: name || undefined,
+        parentId: parentId || undefined,
+        namespace: ns || undefined,
+      }),
+    ]);
+    return true;
+  }
+
+  /**
+   * Streams appended before their ids were tracked in the stream-ids set
+   * are found by a SCAN for the workflow's stream keys, bounded at
+   * `UNTRACKED_STREAM_SCAN_CALLS` calls. Runs only for rows that predate
+   * the tracking (no `streamsTracked` marker).
+   */
+  private async deleteUntrackedStreams(workflowId: string): Promise<void> {
+    const match = `${escapeGlob(this.keys.wf(workflowId))}:streams:*`;
+    let cursor = "0";
+    for (let calls = 0; calls < UNTRACKED_STREAM_SCAN_CALLS; calls++) {
+      const [next, found] = await this.redis.scan(cursor, "MATCH", match, "COUNT", 1_000);
+      await Promise.all(found.map((key) => this.redis.del(key)));
+      cursor = next;
+      if (cursor === "0") return;
+    }
+  }
+
+  /** Take journal sleeps (`<step>::<idx>|<path>` from a script) off the sleep schedule. */
+  private async unscheduleSleeps(params: {
+    workflowId: string;
+    members: readonly string[];
+  }): Promise<void> {
+    if (params.members.length === 0) return;
+    await this.redis.zrem(
+      this.keys.sleeps,
+      ...params.members.map((m) => `${params.workflowId}::${m}`),
+    );
   }
 
   // -- StepAttemptStorage ---------------------------------------------------
@@ -2334,7 +2108,7 @@ export class RedisWorkflowStorage
       ops: [
         [
           "RPUSH",
-          this.attemptsKey(record.workflowId),
+          this.keys.attempts(record.workflowId),
           JSON.stringify({
             ...record,
             startedAt: this.serializeDate(record.startedAt),
@@ -2346,12 +2120,9 @@ export class RedisWorkflowStorage
   }
 
   async loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]> {
-    const raw = (await this.redis.eval(
-      `return redis.call('LRANGE', KEYS[1], 0, -1)`,
-      1,
-      this.attemptsKey(workflowId),
-    )) as string[] | null;
-
+    const raw = (await this.redis.eval(LRANGE_ALL_LUA, 1, this.keys.attempts(workflowId))) as
+      | string[]
+      | null;
     const items = (raw ?? []).map((json) => {
       const r = JSON.parse(json);
       return {
@@ -2360,7 +2131,6 @@ export class RedisWorkflowStorage
         completedAt: new Date(r.completedAt),
       } as StepAttemptRecord;
     });
-
     return stepName ? items.filter((a) => a.stepName === stepName) : items;
   }
 
@@ -2384,7 +2154,7 @@ export class RedisWorkflowStorage
           from: CANCELLABLE_STATUSES,
           fields: { error: params.error, errorTag: params.errorTag ?? "", updatedAt: nowIso },
         }),
-        ["HGET", this.wfKey(workflowId), "status"],
+        ["HGET", this.keys.wf(workflowId), "status"],
       ],
     });
     return last === "compensating";
@@ -2400,25 +2170,30 @@ export class RedisWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     const { workflowId } = params;
-    const run = await this.redis.hget(this.wfKey(workflowId), "run");
-    if (!run) return;
-    const stepsHashKey = this.stepsKey(workflowId, Number(run));
-    const existingJson = await this.redis.hget(stepsHashKey, params.stepName);
-    if (!existingJson) return;
     const now = this.clock.now();
-    const step: StepState = {
-      ...withoutCompensationLedger(this.parseStepState(existingJson)),
-      compensationStatus: params.status,
-      ...(params.error !== undefined && { compensationError: params.error }),
-      compensatedAt: now,
-    };
-    await this.writeOps({
+    await this.readModifyWrite({
       workflowId,
       guard,
-      ops: [
-        ["HSET", stepsHashKey, params.stepName, this.serializeStepState(step)],
-        ["HSET", this.wfKey(workflowId), "updatedAt", this.serializeDate(now)],
-      ],
+      stepNames: [params.stepName],
+      ops: ({ run, steps }) => {
+        const existingJson = steps[0];
+        if (!existingJson) return [];
+        const step: StepState = {
+          ...withoutCompensationLedger(this.parseStepState(existingJson)),
+          compensationStatus: params.status,
+          ...(params.error !== undefined && { compensationError: params.error }),
+          compensatedAt: now,
+        };
+        return [
+          [
+            "HSET",
+            this.keys.steps(workflowId, run),
+            params.stepName,
+            this.serializeStepState(step),
+          ],
+          ["HSET", this.keys.wf(workflowId), "updatedAt", this.serializeDate(now)],
+        ];
+      },
     });
   }
 
@@ -2426,7 +2201,7 @@ export class RedisWorkflowStorage
 
   async loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]> {
     const members = await this.redis.zrangebyscore(
-      this.journalIdxKey(workflowId, stepName),
+      this.keys.journalIdx(workflowId, stepName),
       "-inf",
       "+inf",
     );
@@ -2436,7 +2211,7 @@ export class RedisWorkflowStorage
       members.map(async (member) => {
         const { activityIndex, branchPath } = parseJournalMember(member);
         const hash = await this.redis.hgetall(
-          this.journalEntryKey(workflowId, stepName, activityIndex, branchPath),
+          this.keys.journalEntry(workflowId, stepName, activityIndex, branchPath),
         );
         if (!hash || Object.keys(hash).length === 0) return null;
         return this.parseJournalEntry(activityIndex, branchPath, hash);
@@ -2458,25 +2233,25 @@ export class RedisWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     const branchPath = params.branchPath ?? "";
-    const entryKey = this.journalEntryKey(
-      params.workflowId,
-      params.stepName,
-      params.activityIndex,
-      branchPath,
-    );
-    const idxKey = this.journalIdxKey(params.workflowId, params.stepName);
-    const stepsKey = this.journalStepsKey(params.workflowId);
-    const createdAt = this.serializeDate(this.clock.now());
     await this.evalFenced({
       script: FENCED_APPEND_ENTRY_LUA,
       workflowId: params.workflowId,
       guard,
-      keys: [entryKey, idxKey, stepsKey],
+      keys: [
+        this.keys.journalEntry(
+          params.workflowId,
+          params.stepName,
+          params.activityIndex,
+          branchPath,
+        ),
+        this.keys.journalIdx(params.workflowId, params.stepName),
+        this.keys.journalSteps(params.workflowId),
+      ],
       args: [
         String(params.activityIndex),
         params.activityName,
         JSON.stringify(params.exit),
-        createdAt,
+        this.serializeDate(this.clock.now()),
         params.stepName,
         branchPath,
         params.payloadHash ?? "",
@@ -2500,31 +2275,26 @@ export class RedisWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     const branchPath = params.branchPath ?? "";
-    const entryKey = this.journalEntryKey(
-      params.workflowId,
-      params.stepName,
-      params.activityIndex,
-      branchPath,
-    );
-    const idxKey = this.journalIdxKey(params.workflowId, params.stepName);
-    const stepsKey = this.journalStepsKey(params.workflowId);
-    const signalIdxKey = this.journalSignalIdxKey(params.workflowId, params.stepName);
     // Persist wakeAt for signals too: it is the signal's timeout deadline,
     // and replay must read the recorded one rather than recompute it.
     const wakeAtMs = params.wakeAt ? String(params.wakeAt.getTime()) : "";
-    // Only register in the global sleeps zset when we have a wakeAt — a sleep
-    // entry without one can't be scanned anyway.
-    const sleepsMember =
-      params.stepType === "sleep" && wakeAtMs
-        ? this.sleepsMember(params.workflowId, params.stepName, params.activityIndex, branchPath)
-        : "";
     const signalName = params.stepType === "signal" ? params.activityName : "";
 
-    await this.evalFenced({
+    const [, phase, storedWakeAt] = (await this.evalFenced({
       script: FENCED_APPEND_PENDING_LUA,
       workflowId: params.workflowId,
       guard,
-      keys: [entryKey, idxKey, stepsKey, this.sleepsKey, signalIdxKey],
+      keys: [
+        this.keys.journalEntry(
+          params.workflowId,
+          params.stepName,
+          params.activityIndex,
+          branchPath,
+        ),
+        this.keys.journalIdx(params.workflowId, params.stepName),
+        this.keys.journalSteps(params.workflowId),
+        this.keys.journalSignalIdx(params.workflowId, params.stepName),
+      ],
       args: [
         String(params.activityIndex),
         params.activityName,
@@ -2532,12 +2302,27 @@ export class RedisWorkflowStorage
         wakeAtMs,
         this.serializeDate(this.clock.now()),
         params.stepName,
-        sleepsMember,
         signalName,
         branchPath,
         params.payloadHash ?? "",
       ],
-    });
+    })) as [number, string, string];
+    // A pending sleep goes on the cross-workflow schedule — also when the
+    // entry already existed, so a replay re-adds a sleep whose first
+    // writer crashed before scheduling it. A sleep without wakeAt can't be
+    // scheduled.
+    if (params.stepType === "sleep" && phase === "pending" && storedWakeAt) {
+      await this.redis.zadd(
+        this.keys.sleeps,
+        storedWakeAt,
+        sleepsMember({
+          workflowId: params.workflowId,
+          stepName: params.stepName,
+          activityIndex: params.activityIndex,
+          branchPath,
+        }),
+      );
+    }
   }
 
   async completePendingEntry(
@@ -2551,33 +2336,37 @@ export class RedisWorkflowStorage
     guard?: FenceGuard,
   ): Promise<CompletePendingResult> {
     const branchPath = params.branchPath ?? "";
-    const entryKey = this.journalEntryKey(
-      params.workflowId,
-      params.stepName,
-      params.activityIndex,
-      branchPath,
-    );
-    const signalIdxKey = this.journalSignalIdxKey(params.workflowId, params.stepName);
-    // Load current entry to learn the signal name (if any) so the Lua script
-    // can remove it from the signal-idx hash. stepType and activityName never
-    // change after the pending write; the Lua phase check makes the
-    // transition itself atomic, so concurrent completers (a signal delivery
-    // racing the body's timeout write) get exactly one winner.
-    const current = await this.redis.hgetall(entryKey);
-    const stepType = current?.stepType;
-    const sleepsMember =
-      stepType === "sleep"
-        ? this.sleepsMember(params.workflowId, params.stepName, params.activityIndex, branchPath)
-        : "";
-    const signalName = stepType === "signal" ? (current?.activityName ?? "") : "";
-
-    const [won, storedExit] = (await this.evalFenced({
+    // The Lua phase check makes the transition atomic, so concurrent
+    // completers (a signal delivery racing the body's timeout write) get
+    // exactly one winner.
+    const [won, storedExit, stepType] = (await this.evalFenced({
       script: FENCED_COMPLETE_PENDING_LUA,
       workflowId: params.workflowId,
       guard,
-      keys: [entryKey, this.sleepsKey, signalIdxKey],
-      args: [JSON.stringify(params.exit), sleepsMember, signalName],
-    })) as [number, string];
+      keys: [
+        this.keys.journalEntry(
+          params.workflowId,
+          params.stepName,
+          params.activityIndex,
+          branchPath,
+        ),
+        this.keys.journalSignalIdx(params.workflowId, params.stepName),
+      ],
+      args: [JSON.stringify(params.exit)],
+    })) as [number, string, string];
+    // Off the schedule whoever won: the loser cleans up after a winner that
+    // crashed before doing it.
+    if (stepType === "sleep") {
+      await this.redis.zrem(
+        this.keys.sleeps,
+        sleepsMember({
+          workflowId: params.workflowId,
+          stepName: params.stepName,
+          activityIndex: params.activityIndex,
+          branchPath,
+        }),
+      );
+    }
     if (Number(won) === 1) return { completed: true, exit: params.exit };
     return {
       completed: false,
@@ -2593,19 +2382,16 @@ export class RedisWorkflowStorage
     },
     guard?: FenceGuard,
   ): Promise<void> {
-    const idxKey = this.journalIdxKey(params.workflowId, params.stepName);
-    const signalIdxKey = this.journalSignalIdxKey(params.workflowId, params.stepName);
-    // Every slot goes in one fenced script.
+    // Every slot goes in one fenced script; the sleeps then leave the schedule.
     await this.evalFenced({
       script: FENCED_DISCARD_ENTRIES_LUA,
       workflowId: params.workflowId,
       guard,
       keys: [
-        idxKey,
-        this.sleepsKey,
-        signalIdxKey,
+        this.keys.journalIdx(params.workflowId, params.stepName),
+        this.keys.journalSignalIdx(params.workflowId, params.stepName),
         ...params.slots.map((slot) =>
-          this.journalEntryKey(
+          this.keys.journalEntry(
             params.workflowId,
             params.stepName,
             slot.activityIndex,
@@ -2615,11 +2401,18 @@ export class RedisWorkflowStorage
       ],
       args: params.slots.flatMap((slot) => [
         `${slot.activityIndex}|${slot.branchPath}`,
-        this.sleepsMember(params.workflowId, params.stepName, slot.activityIndex, slot.branchPath),
         // Index members written before branch paths existed are the bare index.
         slot.branchPath === "" ? String(slot.activityIndex) : "",
       ]),
     });
+    if (params.slots.length > 0) {
+      await this.redis.zrem(
+        this.keys.sleeps,
+        ...params.slots.map((slot) =>
+          sleepsMember({ workflowId: params.workflowId, stepName: params.stepName, ...slot }),
+        ),
+      );
+    }
   }
 
   async findDueSleeps(params: { now: Date; limit: number }): Promise<
@@ -2632,7 +2425,7 @@ export class RedisWorkflowStorage
     }>
   > {
     const raw = await this.redis.zrangebyscore(
-      this.sleepsKey,
+      this.keys.sleeps,
       "-inf",
       params.now.getTime(),
       "WITHSCORES",
@@ -2640,7 +2433,8 @@ export class RedisWorkflowStorage
       0,
       params.limit,
     );
-    const due: Array<{
+    const candidates: Array<{
+      member: string;
       workflowId: string;
       stepName: string;
       activityIndex: number;
@@ -2649,12 +2443,27 @@ export class RedisWorkflowStorage
     }> = [];
     for (let i = 0; i < raw.length; i += 2) {
       const member = raw[i]!;
-      const score = Number(raw[i + 1]);
-      const parsed = this.parseSleepsMember(member);
-      if (!parsed) continue;
-      due.push({ ...parsed, wakeAt: new Date(score) });
+      const parsed = parseSleepsMember(member);
+      if (parsed) candidates.push({ member, ...parsed, wakeAt: new Date(Number(raw[i + 1])) });
     }
-    return due;
+    // The schedule is written next to the journal, not with it: keep only
+    // members whose entry is still a pending sleep, and drop the rest.
+    const phases = await Promise.all(
+      candidates.map((c) =>
+        this.hmget(
+          this.keys.journalEntry(c.workflowId, c.stepName, c.activityIndex, c.branchPath),
+          ["phase", "stepType"],
+        ),
+      ),
+    );
+    const stale = candidates.filter((_, i) => {
+      const [phase, stepType] = phases[i]!;
+      return phase !== "pending" || stepType !== "sleep";
+    });
+    if (stale.length > 0) {
+      await this.redis.zrem(this.keys.sleeps, ...stale.map((c) => c.member));
+    }
+    return candidates.filter((c) => !stale.includes(c)).map(({ member: _member, ...due }) => due);
   }
 
   async findPendingSignal(params: {
@@ -2663,13 +2472,13 @@ export class RedisWorkflowStorage
     signalName: string;
   }): Promise<JournalEntry | null> {
     const composite = await this.redis.hget(
-      this.journalSignalIdxKey(params.workflowId, params.stepName),
+      this.keys.journalSignalIdx(params.workflowId, params.stepName),
       params.signalName,
     );
     if (composite == null) return null;
     const { activityIndex, branchPath } = parseJournalMember(composite);
     const hash = await this.redis.hgetall(
-      this.journalEntryKey(params.workflowId, params.stepName, activityIndex, branchPath),
+      this.keys.journalEntry(params.workflowId, params.stepName, activityIndex, branchPath),
     );
     if (!hash || Object.keys(hash).length === 0) return null;
     const entry = this.parseJournalEntry(activityIndex, branchPath, hash);
@@ -2702,19 +2511,31 @@ export class RedisWorkflowStorage
   }
 }
 
+/** True when a filter needs index records (not just index sets). */
+function needsRecords(params?: ListFilters): boolean {
+  return (
+    params?.version !== undefined ||
+    Boolean(params?.type) ||
+    params?.runSource !== undefined ||
+    params?.runSourceId !== undefined ||
+    params?.metadata !== undefined
+  );
+}
+
 /**
- * Comparator factory for sortable `listWorkflows` columns. NULL values
- * always sort last so still-running rows (no `startedAt` / `completedAt` /
- * `duration`) don't push real data off the first page in either direction.
+ * Comparator for sortable `listWorkflows` columns over index records. NULL
+ * values always sort last so still-running rows (no `startedAt` /
+ * `completedAt` / `duration`) don't push real data off the first page in
+ * either direction.
  */
-function makeWorkflowStateComparator(
+function makeRecordComparator(
   orderBy: WorkflowOrderBy,
   dir: "asc" | "desc",
-): (a: WorkflowState, b: WorkflowState) => number {
+): (a: { rec: IndexRecord }, b: { rec: IndexRecord }) => number {
   const sign = dir === "asc" ? 1 : -1;
   return (a, b) => {
-    const av = workflowStateSortKey(a, orderBy);
-    const bv = workflowStateSortKey(b, orderBy);
+    const av = recordSortKey(a.rec, orderBy);
+    const bv = recordSortKey(b.rec, orderBy);
     if (av === undefined && bv === undefined) return 0;
     if (av === undefined) return 1;
     if (bv === undefined) return -1;
@@ -2724,29 +2545,102 @@ function makeWorkflowStateComparator(
   };
 }
 
-function workflowStateSortKey(
-  wf: WorkflowState,
-  orderBy: WorkflowOrderBy,
-): number | string | undefined {
+function recordSortKey(rec: IndexRecord, orderBy: WorkflowOrderBy): number | string | undefined {
   switch (orderBy) {
     case "createdAt":
-      return wf.createdAt.getTime();
+      return rec.c;
     case "startedAt":
-      return wf.startedAt?.getTime();
+      return rec.st;
     case "completedAt":
-      return wf.completedAt?.getTime();
+      return rec.co;
     case "duration":
-      return wf.completedAt ? wf.completedAt.getTime() - wf.createdAt.getTime() : undefined;
+      return rec.co !== undefined ? rec.co - rec.c : undefined;
     case "status":
-      return wf.status;
+      return rec.s;
     case "name":
-      return wf.workflowName;
+      return rec.n;
   }
 }
 
+/** Name the fields of an `INDEX_FIELDS` snapshot. */
+function snapshotFields(
+  snapshot: IndexSnapshot,
+): Partial<Record<(typeof INDEX_FIELDS)[number], string | null>> {
+  const out: Partial<Record<(typeof INDEX_FIELDS)[number], string | null>> = {};
+  INDEX_FIELDS.forEach((field, i) => {
+    out[field] = snapshot[i] ?? null;
+  });
+  return out;
+}
+
+/** A `listWorkflowSummaries` row from `SUMMARY_FIELDS` values; null for a missing workflow. */
+function toSummary(values: ReadonlyArray<string | null>): WorkflowSummary | null {
+  const f: Partial<Record<(typeof SUMMARY_FIELDS)[number], string>> = {};
+  SUMMARY_FIELDS.forEach((field, i) => {
+    const v = values[i];
+    if (v) f[field] = v;
+  });
+  if (!f.id || !f.status || !f.createdAt) return null;
+  return {
+    workflowId: f.id,
+    workflowName: f.workflowName ?? "",
+    ...(f.workflowType ? { workflowType: f.workflowType } : {}),
+    ...(f.namespace ? { namespace: f.namespace } : {}),
+    status: f.status as WorkflowStatus,
+    ...(f.version ? { version: f.version } : {}),
+    run: Number(f.run),
+    ...(f.runSource ? { runSource: decodeRunSource(Number(f.runSource)) } : {}),
+    ...(f.runSourceId ? { runSourceId: f.runSourceId } : {}),
+    ...(f.metadata ? { metadata: JSON.parse(f.metadata) } : {}),
+    createdAt: new Date(f.createdAt),
+    ...(f.startedAt ? { startedAt: new Date(f.startedAt) } : {}),
+    updatedAt: new Date(f.updatedAt ?? f.createdAt),
+    ...(f.completedAt ? { completedAt: new Date(f.completedAt) } : {}),
+  };
+}
+
+/** `[k1, v1, k2, v2, ...]` (a Lua HGETALL reply) as a record. */
+function flatToRecord(flat: readonly string[] | null | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!flat) return out;
+  for (let i = 0; i + 1 < flat.length; i += 2) out[flat[i]!] = flat[i + 1]!;
+  return out;
+}
+
+/** Sleep schedule member: `{wid}::{step}::{idx}|{path}`. */
+function sleepsMember(params: {
+  workflowId: string;
+  stepName: string;
+  activityIndex: number;
+  branchPath: string;
+}): string {
+  return `${params.workflowId}::${params.stepName}::${params.activityIndex}|${params.branchPath}`;
+}
+
+function parseSleepsMember(member: string): {
+  workflowId: string;
+  stepName: string;
+  activityIndex: number;
+  branchPath: string;
+} | null {
+  // Parse from the right: last "::" separates idx|branchPath; next-to-last
+  // separates step. Tolerates "::" inside workflowId but not step name.
+  const lastSep = member.lastIndexOf("::");
+  if (lastSep < 0) return null;
+  const idxAndPath = member.slice(lastSep + 2);
+  const rest = member.slice(0, lastSep);
+  const midSep = rest.lastIndexOf("::");
+  if (midSep < 0) return null;
+  const stepName = rest.slice(midSep + 2);
+  const workflowId = rest.slice(0, midSep);
+  const { activityIndex, branchPath } = parseJournalMember(idxAndPath);
+  if (!Number.isFinite(activityIndex)) return null;
+  return { workflowId, stepName, activityIndex, branchPath };
+}
+
 /**
- * Parse a composite journal member `${idx}|${branchPath}`. Pre-plif rows
- * have just `${idx}` with no pipe — we tolerate that for backward compat
+ * Parse a composite journal member `${idx}|${branchPath}`. Rows written
+ * before branch paths existed have just `${idx}` with no pipe — tolerated
  * so old workflows keep loading cleanly.
  */
 function parseJournalMember(member: string): { activityIndex: number; branchPath: string } {

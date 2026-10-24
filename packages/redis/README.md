@@ -35,6 +35,29 @@ const storage = new RedisWorkflowStorage({
 });
 ```
 
+`resetSteps` (behind `WorkflowRunner.resume`) is supported. Listing and counting read compact index records, so `countWorkflows` and `listWorkflowSummaries` never load runs.
+
+### Redis Cluster
+
+Every key of one workflow carries the hash tag `{wf:<workflowId>}`, so all of a workflow's keys share a slot. The cross-workflow indexes (status, name, parent and namespace sets, the ordering sorted sets, the sleep schedule) share the tag `{idx}`, so they all sit in one other slot. No script touches both slots:
+
+- A workflow's write (step rows, status, journal, fence check) is one atomic script on its own slot.
+- The index update is a second script on the `{idx}` slot. It is versioned by an `iv` counter on the workflow hash, so concurrent writers converge on the latest state whatever order their updates land in. The workflow hash is authoritative. After a crash between the two scripts, the index lags until the next write to that workflow, or until a scanner, listing or purge notices the lag and repairs it.
+- The sleep schedule is updated after the journal write. `findDueSleeps` drops schedule members whose journal entry is no longer a pending sleep.
+- A fenced child create checks the parent's fence and writes the child's row in two scripts, because they are in different slots. A parent that loses its lock between the two can still create the child. Child ids are deterministic per parent step, so the next lock holder attaches to that child.
+
+The step queue, scheduler and state machine stores are unchanged: they do not hash-tag their keys yet.
+
+### Migrating keys from earlier versions
+
+Earlier versions stored keys without hash tags (`wf:<id>`, `wf:<id>:steps:1`, `wf:lock:<id>`, `wf:idx:status:running` …). Those keys are invisible to this version. To move them, stop every worker and run the migration once per prefix against the standalone instance, before moving to a cluster:
+
+```typescript
+const { workflows, keys } = await storage.migrateLegacyKeys();
+```
+
+The migration renames each workflow's keys under its tag and rebuilds the indexes from the workflow hashes. It also copies the sleep schedule and distinct-value sets, then deletes the old index keys. It scans the keyspace once, which also finds streams appended before stream ids were tracked, so purge removes them. Re-running it is a no-op. For a row that still lacks stream tracking, `purgeCompleted` falls back to a bounded `SCAN` for that workflow's stream keys.
+
 ## RedisStepQueue
 
 Distributed `StepQueue`. Pending tasks sit in a priority-ordered sorted set (higher priority first, FIFO within a priority); enqueue, claim, complete, fail and requeue are Lua scripts, so each is atomic.

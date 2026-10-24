@@ -509,10 +509,22 @@ export interface WorkflowStorage {
    * and keyed by name: a second delivery under the same name replaces the
    * first (last delivery wins), and `startFreshRun` drops every delivered
    * signal so a new run never sees the previous run's deliveries.
+   *
+   * A delivery is a value, not a message: reading it never consumes it.
+   * It stays visible until a later delivery under the same name replaces
+   * it or a fresh run drops it — so a delivery that lands before its
+   * waiter suspends still satisfies the wait, and a wait that runs again
+   * (after `resetSteps`) sees the latest delivery. Child-ended wakeups
+   * (`workflow.child-ended:<id>#<run>`) rely on this: the child may end
+   * before its parent has parked. A workflow that needs one wake per
+   * message uses a distinct signal name per message, or a stream.
    */
   deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void>;
 
-  /** Load the signals delivered to the current run — at most one per name. */
+  /**
+   * Load the signals delivered to the current run — at most one per name,
+   * the latest delivery. Reading does not consume them.
+   */
   loadSignals(workflowId: string): Promise<SignalState[]>;
 
   /**
@@ -714,6 +726,8 @@ export interface WorkflowStorage {
    * status flips back to `running` so the runner picks it up, and the
    * compensation ledger (`CompensationLedgerStorage`) is cleared on every
    * step of the run, so a later failure rolls the kept steps back again.
+   * Delivered signals are kept: the run continues, and a re-run signal wait
+   * sees the latest delivery.
    *
    * Used by `WorkflowRunner.resume(workflowId, fromStep)` for the
    * "rewind to step N and continue" debugging primitive — storage is the

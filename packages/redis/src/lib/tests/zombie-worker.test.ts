@@ -18,7 +18,7 @@ redisDescribe("RedisWorkflowStorage zombie worker", (redis) => {
     createPeer: (storage) =>
       new RedisWorkflowStorage({ redis: redis.client(), prefix: prefixes.get(storage)! }),
     expireLock: async ({ storage, workflowId }) => {
-      await redis.client().del(`${prefixes.get(storage)!}:lock:${workflowId}`);
+      await redis.client().del(`${prefixes.get(storage)!}:{wf:${workflowId}}:lock`);
     },
   });
 });
