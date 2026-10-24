@@ -80,6 +80,9 @@ export function createJournaledStep(params: {
             ...(execParams.clock !== undefined && { clock: execParams.clock }),
             ...(execParams.guard !== undefined && { guard: execParams.guard }),
             ...(execParams.runChild !== undefined && { runChild: execParams.runChild }),
+            ...(execParams.workflowMetadata !== undefined && {
+              workflowMetadata: execParams.workflowMetadata,
+            }),
             body,
           }),
         (err) => err as TaggedError,

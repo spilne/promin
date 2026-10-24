@@ -155,9 +155,10 @@ export interface WorkflowStorage {
 
   /**
    * Load only the run's status, error and error tag — no step rows. The
-   * runner calls it between waves to notice a cancel, so backends should
-   * answer it from the workflow row alone. Returns null if the workflow
-   * doesn't exist.
+   * runner calls it between waves to notice a cancel (unless every step of
+   * the last wave was written by `checkpointStep`, which reports the status
+   * itself), so backends should answer it from the workflow row alone.
+   * Returns null if the workflow doesn't exist.
    */
   loadWorkflowStatus(workflowId: string): Promise<WorkflowStatusSnapshot | null>;
 
@@ -956,6 +957,75 @@ export function isStepAttemptStorage(
   storage: WorkflowStorage,
 ): storage is WorkflowStorage & StepAttemptStorage {
   return "saveStepAttempt" in storage && typeof (storage as any).saveStepAttempt === "function";
+}
+
+// ---------------------------------------------------------------------------
+// StepCheckpointStorage — optional one-call checkpoint of a settled step
+// ---------------------------------------------------------------------------
+
+/** A settled step as `checkpointStep` writes it: its row and its attempt rows. */
+export interface StepCheckpoint {
+  readonly workflowId: string;
+  readonly stepName: string;
+  /**
+   * The step row to write: a `completed` outcome has `saveStepResult`
+   * semantics, a `failed` one `saveStepFailure` semantics (pending →
+   * running, attempt counter bumped, metadata kept when absent).
+   */
+  readonly outcome:
+    | {
+        readonly kind: "completed";
+        readonly result: unknown;
+        readonly durationMs: number;
+        readonly startedAt: Date;
+        readonly metadata?: Record<string, unknown>;
+      }
+    | {
+        readonly kind: "failed";
+        readonly error: string;
+        readonly errorTag?: string;
+        readonly durationMs: number;
+        readonly startedAt: Date;
+        readonly metadata?: Record<string, unknown>;
+      };
+  /**
+   * Attempt rows to append with `saveStepAttempt` semantics, oldest first.
+   * A backend that does not record attempts (or has them switched off)
+   * ignores them.
+   */
+  readonly attempts: readonly StepAttemptRecord[];
+}
+
+/**
+ * Optional storage extension: checkpoint a settled step in one call. Writes
+ * the step row and its attempt rows atomically, fenced by `guard` like each
+ * of the separate writes it replaces, and answers with the run's status as
+ * of the write, so the runner learns about a cancel without a separate
+ * `loadWorkflowStatus` read.
+ *
+ * Equivalent to `saveStepAttempt` for every attempt plus `saveStepResult`
+ * / `saveStepFailure`, except that it is one round trip and lands whole or
+ * not at all. The runner detects it with `isStepCheckpointStorage()` and
+ * falls back to the separate calls without it.
+ */
+export interface StepCheckpointStorage {
+  /**
+   * Write `checkpoint`. Resolves with the run's status, error and error tag
+   * read in the same atomic write, or `null` when the workflow does not
+   * exist (nothing is written then). A rejected fence throws
+   * `FenceTokenMismatchError` and writes nothing.
+   */
+  checkpointStep(
+    checkpoint: StepCheckpoint,
+    guard?: FenceGuard,
+  ): Promise<WorkflowStatusSnapshot | null>;
+}
+
+/** Runtime check for whether a storage implementation has `checkpointStep`. */
+export function isStepCheckpointStorage(
+  storage: WorkflowStorage,
+): storage is WorkflowStorage & StepCheckpointStorage {
+  return typeof (storage as Partial<StepCheckpointStorage>).checkpointStep === "function";
 }
 
 /**

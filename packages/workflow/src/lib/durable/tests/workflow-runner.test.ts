@@ -125,16 +125,17 @@ describe("WorkflowRunner", () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Eager save — saveStepResult fires when each step's body resolves, not
+  // Eager save — a step's checkpoint fires when its body resolves, not
   // after the slowest sibling in the wave finishes. Both runner paths
   // (inline + executor) carry the behavior.
   // ---------------------------------------------------------------------------
 
   describe("eager save", () => {
     /**
-     * Storage decorator that records the wall-clock time of every
-     * saveStepResult call. Lets the timing tests assert that fast steps
-     * persisted long before slow siblings in their wave.
+     * Storage decorator that records the wall-clock time of every step
+     * checkpoint (`checkpointStep` or `saveStepResult`). Lets the timing
+     * tests assert that fast steps persisted long before slow siblings in
+     * their wave.
      */
     class RecordingStorage extends InMemoryWorkflowStorage {
       readonly saves: Array<{ stepName: string; at: number }> = [];
@@ -143,6 +144,12 @@ describe("WorkflowRunner", () => {
       ): Promise<void> {
         this.saves.push({ stepName: args[0].stepName, at: Date.now() });
         return super.saveStepResult(...args);
+      }
+      override async checkpointStep(
+        ...args: Parameters<InMemoryWorkflowStorage["checkpointStep"]>
+      ): ReturnType<InMemoryWorkflowStorage["checkpointStep"]> {
+        this.saves.push({ stepName: args[0].stepName, at: Date.now() });
+        return super.checkpointStep(...args);
       }
     }
 

@@ -69,15 +69,31 @@ export async function executeWorkflowDag(
     }
   }
 
+  // The run's metadata for `.journaled()` steps, so they don't re-read
+  // the run. Only from a loaded run; without one, each step loads it.
+  const workflowMetadata = state ? { current: state.metadata } : undefined;
+
   // Every wave settles before the next ready set is read, so no step is
   // ever in flight then: the ready set is every not-yet-completed step
   // whose dependencies have completed, in definition order.
   const tracker = createReadyTracker({ nodes: dagNodes, completed: Object.keys(results) });
 
+  // The run's status as the last wave's checkpoints read it, if they did.
+  let observed: WaveOutcome["runStatus"];
   for (let wave = 0; tracker.completedCount < ctx.steps.length; wave++) {
     // Between waves: stop on a lost lock or a cancel that landed during the
-    // last wave. The caller checked the run before the first one.
-    if (wave > 0) await assertRunActive({ storage: ctx.storage, workflowId, signal: ctx.signal });
+    // last wave. The caller checked the run before the first one. When
+    // every step of the last wave was checkpointed by `checkpointStep`,
+    // the status those writes read is the check, with no extra read: a
+    // cancel that landed before a step's write is seen there.
+    if (wave > 0) {
+      await assertRunActive({
+        storage: ctx.storage,
+        workflowId,
+        signal: ctx.signal,
+        ...(observed !== undefined && { observed }),
+      });
+    }
 
     // Check workflow-level deadline before each batch
     if (params.deadlineMs != null && clock.currentTimeMs() > params.deadlineMs) {
@@ -117,12 +133,15 @@ export async function executeWorkflowDag(
       stepAttempts: params.stepAttempts,
       clock,
       stepStates: state?.steps ?? {},
+      ...(workflowMetadata !== undefined && { workflowMetadata }),
       stepStarted: notifyStepsStarted({ ctx, workflowId, readySteps }),
     };
     // Every step of the wave has settled and been checkpointed by here.
-    const { outcomes }: WaveOutcome = ctx.stepExecutor
+    const waveOutcome: WaveOutcome = ctx.stepExecutor
       ? await runExecutorWave(waveParams)
       : await runInlineWave(waveParams);
+    const { outcomes } = waveOutcome;
+    observed = "runStatus" in waveOutcome ? waveOutcome.runStatus : undefined;
 
     // Fold completed steps back in. `result` is the codec-encoded form
     // storage keeps; downstream steps and the onStepComplete hook see the

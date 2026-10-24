@@ -11,7 +11,8 @@ import { retryAsync, type RetryPolicy } from "../../shared/retry-policy.ts";
 import type { WallClock } from "../../shared/wall-clock.ts";
 import { CheckpointError } from "../durable-pipeline-error.ts";
 import { isControlFlowExit } from "../step-policy.ts";
-import { isStepAttemptStorage } from "../workflow-storage.ts";
+import type { StepAttemptRecord, WorkflowStatusSnapshot } from "../workflow-state.ts";
+import { isStepAttemptStorage, isStepCheckpointStorage } from "../workflow-storage.ts";
 import type { DagExecutionContext } from "./dag-context.ts";
 import { errorMessage, errorTagOf, type StepAttemptFailure } from "./step-body.ts";
 
@@ -88,6 +89,17 @@ export async function checkpointWrite(params: {
 }
 
 /**
+ * A step outcome after its checkpoint, with the run's status as the
+ * checkpoint read it. `runStatus` is `undefined` when the checkpoint did
+ * not read it (nothing was written, or the storage has no
+ * `checkpointStep`), and `null` when the run was not found.
+ */
+export interface CheckpointedStep {
+  readonly outcome: StepOutcome;
+  readonly runStatus?: WorkflowStatusSnapshot | null;
+}
+
+/**
  * Persist a settled step and return its outcome.
  *
  * - `completed`: one failed attempt row per `failedAttempts` entry, the step
@@ -98,6 +110,10 @@ export async function checkpointWrite(params: {
  *   unless `failedAttempts` already has it.
  * - `suspended` / `continue-as-new`: nothing; the step kind wrote its own
  *   rows.
+ *
+ * A storage with `checkpointStep` gets all of a step's rows in that one
+ * call, which also reports the run's status (`runStatus`); any other
+ * storage gets the separate writes, in the order above.
  *
  * Each write is retried; one that still fails rejects with
  * `CheckpointError`. The step's outcome is never rewritten into a failure
@@ -114,20 +130,73 @@ export async function checkpointStepOutcome(params: {
   readonly outcome: StepOutcome;
   readonly failedAttempts?: readonly StepAttemptFailure[];
   readonly checkpointed?: boolean;
-}): Promise<StepOutcome> {
+}): Promise<CheckpointedStep> {
   const { ctx, clock, workflowId, outcome } = params;
-  if (params.checkpointed === true) return outcome;
-  if (outcome.kind === "suspended" || outcome.kind === "continue-as-new") return outcome;
+  if (params.checkpointed === true) return { outcome };
+  if (outcome.kind === "suspended" || outcome.kind === "continue-as-new") return { outcome };
   const failedAttempts = params.failedAttempts ?? [];
   const lastAttemptRecorded = failedAttempts.some((a) => a.attempt === outcome.attempt);
   const write = (operation: string, fn: () => Promise<void>) =>
     checkpointWrite({ clock, workflowId, operation, stepName: outcome.name, write: fn });
+  const error = outcome.kind === "failed" ? errorMessage(outcome.error) : undefined;
+  const errorTag = outcome.kind === "failed" ? errorTagOf(outcome.error) : undefined;
+  /** The attempt row of the step's last attempt, stamped now. */
+  const lastAttempt = (): StepAttemptRecord => ({
+    workflowId,
+    stepName: outcome.name,
+    attempt: outcome.attempt,
+    type: "execution",
+    ...(outcome.kind === "completed"
+      ? { status: "completed" as const, result: outcome.result }
+      : { status: "failed" as const, error }),
+    durationMs: outcome.durationMs,
+    startedAt: outcome.startedAt,
+    completedAt: clock.now(),
+    ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
+  });
+
+  const storage = ctx.storage;
+  if (isStepCheckpointStorage(storage)) {
+    const attempts = failedAttempts.map((failed) =>
+      failedAttemptRecord({ ctx, workflowId, stepName: outcome.name, failed }),
+    );
+    if (!lastAttemptRecorded) attempts.push(lastAttempt());
+    let runStatus: WorkflowStatusSnapshot | null = null;
+    await write("checkpointStep", async () => {
+      runStatus = await storage.checkpointStep(
+        {
+          workflowId,
+          stepName: outcome.name,
+          outcome:
+            outcome.kind === "completed"
+              ? {
+                  kind: "completed",
+                  result: outcome.result,
+                  durationMs: outcome.durationMs,
+                  startedAt: outcome.startedAt,
+                  ...(outcome.metadata !== undefined && { metadata: outcome.metadata }),
+                }
+              : {
+                  kind: "failed",
+                  error: error!,
+                  ...(errorTag !== undefined && { errorTag }),
+                  durationMs: outcome.durationMs,
+                  startedAt: outcome.startedAt,
+                  ...(outcome.metadata !== undefined && { metadata: outcome.metadata }),
+                },
+          attempts,
+        },
+        ctx.guard,
+      );
+    });
+    return { outcome, runStatus };
+  }
 
   await saveFailedAttempts({ ctx, workflowId, stepName: outcome.name, failedAttempts, write });
 
   if (outcome.kind === "completed") {
     await write("saveStepResult", () =>
-      ctx.storage.saveStepResult(
+      storage.saveStepResult(
         {
           workflowId,
           stepName: outcome.name,
@@ -139,68 +208,49 @@ export async function checkpointStepOutcome(params: {
         ctx.guard,
       ),
     );
-    const storage = ctx.storage;
-    if (!lastAttemptRecorded && isStepAttemptStorage(storage)) {
-      const completedAt = clock.now();
-      await write("saveStepAttempt", () =>
-        storage.saveStepAttempt(
-          {
-            workflowId,
-            stepName: outcome.name,
-            attempt: outcome.attempt,
-            type: "execution",
-            status: "completed",
-            result: outcome.result,
-            durationMs: outcome.durationMs,
-            startedAt: outcome.startedAt,
-            completedAt,
-            ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
-          },
-          ctx.guard,
-        ),
-      );
-    }
-    return outcome;
-  }
-
-  const error = errorMessage(outcome.error);
-  const errorTag = errorTagOf(outcome.error);
-  await write("saveStepFailure", () =>
-    ctx.storage.saveStepFailure(
-      {
-        workflowId,
-        stepName: outcome.name,
-        error,
-        ...(errorTag !== undefined && { errorTag }),
-        durationMs: outcome.durationMs,
-        startedAt: outcome.startedAt,
-        metadata: outcome.metadata,
-      },
-      ctx.guard,
-    ),
-  );
-  const storage = ctx.storage;
-  if (!lastAttemptRecorded && isStepAttemptStorage(storage)) {
-    const completedAt = clock.now();
-    await write("saveStepAttempt", () =>
-      storage.saveStepAttempt(
+  } else {
+    await write("saveStepFailure", () =>
+      storage.saveStepFailure(
         {
           workflowId,
           stepName: outcome.name,
-          attempt: outcome.attempt,
-          type: "execution",
-          status: "failed",
-          error,
+          error: error!,
+          ...(errorTag !== undefined && { errorTag }),
           durationMs: outcome.durationMs,
           startedAt: outcome.startedAt,
-          completedAt,
-          ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
+          metadata: outcome.metadata,
         },
         ctx.guard,
       ),
     );
   }
-  return outcome;
+  if (!lastAttemptRecorded && isStepAttemptStorage(storage)) {
+    const record = lastAttempt();
+    await write("saveStepAttempt", () => storage.saveStepAttempt(record, ctx.guard));
+  }
+  return { outcome };
+}
+
+/** The attempt row of an attempt that failed before the step settled. */
+function failedAttemptRecord(params: {
+  ctx: DagExecutionContext;
+  workflowId: string;
+  stepName: string;
+  failed: StepAttemptFailure;
+}): StepAttemptRecord {
+  const { ctx, failed } = params;
+  return {
+    workflowId: params.workflowId,
+    stepName: params.stepName,
+    attempt: failed.attempt,
+    type: "execution",
+    status: "failed",
+    error: failed.error,
+    durationMs: failed.durationMs,
+    startedAt: failed.startedAt,
+    completedAt: new Date(failed.startedAt.getTime() + failed.durationMs),
+    ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
+  };
 }
 
 async function saveFailedAttempts(params: {
@@ -214,22 +264,7 @@ async function saveFailedAttempts(params: {
   const storage = ctx.storage;
   if (!isStepAttemptStorage(storage)) return;
   for (const failed of params.failedAttempts) {
-    await params.write("saveStepAttempt", () =>
-      storage.saveStepAttempt(
-        {
-          workflowId,
-          stepName,
-          attempt: failed.attempt,
-          type: "execution",
-          status: "failed",
-          error: failed.error,
-          durationMs: failed.durationMs,
-          startedAt: failed.startedAt,
-          completedAt: new Date(failed.startedAt.getTime() + failed.durationMs),
-          ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
-        },
-        ctx.guard,
-      ),
-    );
+    const record = failedAttemptRecord({ ctx, workflowId, stepName, failed });
+    await params.write("saveStepAttempt", () => storage.saveStepAttempt(record, ctx.guard));
   }
 }

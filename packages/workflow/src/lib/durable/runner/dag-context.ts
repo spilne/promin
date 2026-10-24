@@ -12,7 +12,8 @@ import type {
   WorkflowHooks,
   WorkflowQueueConfig,
 } from "../durable-pipeline.ts";
-import type { StepState } from "../workflow-state.ts";
+import type { WorkflowMetadataRef } from "../step-definition.ts";
+import type { StepState, WorkflowStatusSnapshot } from "../workflow-state.ts";
 import type { FenceGuard, WorkflowStorage } from "../workflow-storage.ts";
 import type { StepOutcome } from "./step-checkpoint.ts";
 import type { StepExecutor } from "./step-executor.ts";
@@ -81,18 +82,20 @@ export interface DagExecutionContext {
 /**
  * The runtime fields of `ExecuteParams` for one step of a wave: the run's
  * clock, fence guard, child runner, version and patches, plus the step's
- * stored row as of the last load of the run.
+ * stored row as of the last load of the run and the run's metadata.
  */
 export function stepRuntimeFor(params: {
   readonly ctx: DagExecutionContext;
   readonly clock: WallClock;
   readonly stepStates: Readonly<Record<string, StepState>>;
   readonly stepName: string;
+  readonly workflowMetadata?: WorkflowMetadataRef;
 }): StepRuntime {
   const { ctx, clock } = params;
   return {
     clock,
     stepState: params.stepStates[params.stepName] ?? null,
+    ...(params.workflowMetadata !== undefined && { workflowMetadata: params.workflowMetadata }),
     ...(ctx.guard !== undefined && { guard: ctx.guard }),
     ...(ctx.runChild !== undefined && { runChild: ctx.runChild }),
     ...(ctx.workflowVersion !== undefined && { workflowVersion: ctx.workflowVersion }),
@@ -107,6 +110,13 @@ export function stepRuntimeFor(params: {
  */
 export interface WaveOutcome {
   readonly outcomes: StepOutcome[];
+  /**
+   * The run's status as read by the wave's checkpoint writes, when every
+   * step's checkpoint read it (`null`: the run was not found), so the next
+   * wave can skip its own status read. Absent when any step's checkpoint
+   * did not read it.
+   */
+  readonly runStatus?: WorkflowStatusSnapshot | null;
 }
 
 /** Inputs shared by both wave implementations. */
@@ -126,6 +136,8 @@ export interface WaveParams {
   readonly clock: WallClock;
   /** Stored step rows as of the run's last load, keyed by step name. */
   readonly stepStates: Readonly<Record<string, StepState>>;
+  /** The run's metadata, when the run was loaded (see `StepRuntime.workflowMetadata`). */
+  readonly workflowMetadata?: WorkflowMetadataRef;
   /**
    * Each ready step's pending `step-started` notice (never rejects).
    * A step's outcome is not written before its notice settles, so the

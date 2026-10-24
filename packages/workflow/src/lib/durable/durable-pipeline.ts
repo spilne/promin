@@ -49,6 +49,7 @@ export {
   type StepQueueOption,
   type StepRuntime,
   type SubworkflowOptions,
+  type WorkflowMetadataRef,
   type TripwireOptions,
 } from "./step-definition.ts";
 export { stepCacheKey } from "./step-cache.ts";

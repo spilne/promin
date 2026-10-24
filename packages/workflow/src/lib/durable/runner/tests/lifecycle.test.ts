@@ -70,6 +70,85 @@ describe("cancel during a run", () => {
     await expect(runner.handle("c-1").result()).rejects.toBeInstanceOf(WorkflowCancelledError);
   });
 
+  it.each([
+    { mode: "checkpointStep", split: false },
+    { mode: "separate step writes", split: true },
+  ])(
+    "$mode: a cancel seen by a step's checkpoint stops the run before the next wave",
+    async ({ split }) => {
+      const storage = new InMemoryWorkflowStorage();
+      let statusReads = 0;
+      const loadStatus = storage.loadWorkflowStatus.bind(storage);
+      storage.loadWorkflowStatus = (id) => {
+        statusReads++;
+        return loadStatus(id);
+      };
+      if (split) (storage as unknown as Record<string, unknown>)["checkpointStep"] = undefined;
+      const runner = createWorkflowRunner({ storage });
+      const ran: string[] = [];
+      const wf = workflow<number>({ name: "cancel-seen-by-checkpoint" })
+        .step("a", ({ input }) => succeed(input))
+        .stepAsync("cancels", async ({ prev }) => {
+          ran.push("cancels");
+          // Lands before this step's own checkpoint.
+          await storage.cancelWorkflow("c-ck");
+          return prev as number;
+        })
+        .stepAsync("after", async ({ prev }) => {
+          ran.push("after");
+          return prev as number;
+        })
+        .build();
+
+      const r = await runner.runSafe({ workflow: wf, workflowId: "c-ck", input: 1 });
+
+      expect(r.error).toBeInstanceOf(WorkflowCancelledError);
+      expect(ran).toEqual(["cancels"]);
+      const state = (await storage.loadWorkflow("c-ck"))!;
+      expect(state.errorTag).toBe("WorkflowCancelledError");
+      expect(state.steps["cancels"]!.status).toBe("completed");
+      expect(state.steps["after"]).toBeUndefined();
+      // With checkpointStep the status comes back with each write; the
+      // separate writes need a status read before each later wave.
+      expect(statusReads).toBe(split ? 2 : 0);
+    },
+  );
+
+  it("a cancel between two siblings' checkpoints is seen by the later one", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const firstSaved = deferred();
+    const ran: string[] = [];
+    const wf = workflow<number>({ name: "cancel-between-siblings" })
+      .stepAsync("fast", async ({ input }) => input)
+      .stepAsync(
+        "slow",
+        async ({ input }) => {
+          await firstSaved.promise;
+          await storage.cancelWorkflow("c-sib");
+          return input;
+        },
+        { dependsOn: [] },
+      )
+      .stepAsync(
+        "after",
+        async ({ input }) => {
+          ran.push("after");
+          return input;
+        },
+        { dependsOn: ["fast", "slow"] },
+      )
+      .build();
+
+    const run = runner.runSafe({ workflow: wf, workflowId: "c-sib", input: 1 });
+    await waitFor(() => storage.getWorkflow("c-sib")?.steps["fast"]?.status === "completed");
+    firstSaved.resolve();
+    const r = await run;
+
+    expect(r.error).toBeInstanceOf(WorkflowCancelledError);
+    expect(ran).toEqual([]);
+  });
+
   it("a cancel that lands during the last wave wins over the completion", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });

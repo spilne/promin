@@ -10,13 +10,16 @@ import { describe, it, expect } from "bun:test";
 import {
   isCompensationLedgerStorage,
   isStepAttemptStorage,
+  isStepCheckpointStorage,
   isTripwireCapableStorage,
   type CompensationLedgerStorage,
   type FenceGuard,
   type StepAttemptStorage,
+  type StepCheckpoint,
+  type StepCheckpointStorage,
   type WorkflowStorage,
 } from "./workflow-storage.ts";
-import type { StepAttemptRecord } from "./workflow-state.ts";
+import type { StepAttemptRecord, StepState, WorkflowState } from "./workflow-state.ts";
 import {
   isActivityJournalStorage,
   JOURNAL_STEP_TYPES,
@@ -311,6 +314,184 @@ export function storageTestSuite(
     });
 
     // -------------------------------------------------------------------
+    // checkpointStep (optional StepCheckpointStorage)
+    // -------------------------------------------------------------------
+
+    describe("checkpointStep", () => {
+      const at = new Date("2026-01-01T00:00:00.000Z");
+      const attempt = (
+        workflowId: string,
+        n: number,
+        status: "completed" | "failed",
+      ): StepAttemptRecord => ({
+        workflowId,
+        stepName: "s",
+        attempt: n,
+        type: "execution",
+        status,
+        ...(status === "completed" ? { result: n } : { error: `boom ${n}` }),
+        durationMs: 1,
+        startedAt: at,
+        completedAt: at,
+      });
+      /** A step row without its write timestamps, for comparing two writes. */
+      const rowOf = (state: WorkflowState | null, stepName: string): Partial<StepState> => {
+        const { completedAt: _c, startedAt: _s, ...rest } = state!.steps[stepName]!;
+        return rest;
+      };
+
+      it("writes the same step row as saveStepResult, plus the attempt rows", async () => {
+        const s = await getStorage();
+        if (!isStepCheckpointStorage(s)) return;
+        for (const id of ["ck-ok", "ck-ok-split"]) {
+          await s.createWorkflow({ workflowId: id, workflowName: "t", input: {} });
+        }
+        const metadata = { matchCase: "a" };
+        const status = await s.checkpointStep({
+          workflowId: "ck-ok",
+          stepName: "s",
+          outcome: { kind: "completed", result: { v: 1 }, durationMs: 7, startedAt: at, metadata },
+          attempts: [attempt("ck-ok", 1, "failed"), attempt("ck-ok", 2, "completed")],
+        });
+        await s.saveStepResult({
+          workflowId: "ck-ok-split",
+          stepName: "s",
+          result: { v: 1 },
+          durationMs: 7,
+          startedAt: at,
+          metadata,
+        });
+
+        expect(status).toEqual({ status: "running" });
+        const state = await s.loadWorkflow("ck-ok");
+        expect(state!.status).toBe("running");
+        expect(state!.startedAt).toBeInstanceOf(Date);
+        expect(rowOf(state, "s")).toEqual(rowOf(await s.loadWorkflow("ck-ok-split"), "s"));
+        expect(state!.steps["s"]!.result).toEqual({ v: 1 });
+        if (await recordsAttempts(s)) {
+          const attempts = await attemptsOf(s).loadStepAttempts("ck-ok", "s");
+          expect(attempts.map((a) => [a.attempt, a.status])).toEqual([
+            [1, "failed"],
+            [2, "completed"],
+          ]);
+        }
+      });
+
+      it("writes the same step row as saveStepFailure for a failed step", async () => {
+        const s = await getStorage();
+        if (!isStepCheckpointStorage(s)) return;
+        for (const id of ["ck-fail", "ck-fail-split"]) {
+          await s.createWorkflow({ workflowId: id, workflowName: "t", input: {} });
+        }
+        const status = await s.checkpointStep({
+          workflowId: "ck-fail",
+          stepName: "s",
+          outcome: {
+            kind: "failed",
+            error: "declined",
+            errorTag: "Boom",
+            durationMs: 3,
+            startedAt: at,
+          },
+          attempts: [attempt("ck-fail", 1, "failed")],
+        });
+        await s.saveStepFailure({
+          workflowId: "ck-fail-split",
+          stepName: "s",
+          error: "declined",
+          errorTag: "Boom",
+          durationMs: 3,
+          startedAt: at,
+        });
+
+        expect(status).toEqual({ status: "running" });
+        const state = await s.loadWorkflow("ck-fail");
+        expect(rowOf(state, "s")).toEqual(rowOf(await s.loadWorkflow("ck-fail-split"), "s"));
+        expect(state!.steps["s"]!.status).toBe("failed");
+        expect(state!.steps["s"]!.errorTag).toBe("Boom");
+      });
+
+      it("bumps the step's attempt counter and keeps its task rows", async () => {
+        const s = await getStorage();
+        if (!isStepCheckpointStorage(s)) return;
+        await s.createWorkflow({ workflowId: "ck-map", workflowName: "t", input: {} });
+        await s.saveTaskResult({ workflowId: "ck-map", stepName: "s", taskIndex: 0, result: 1 });
+        const outcome = { kind: "completed" as const, result: [1], durationMs: 1, startedAt: at };
+        await s.checkpointStep({ workflowId: "ck-map", stepName: "s", outcome, attempts: [] });
+        const first = (await s.loadWorkflow("ck-map"))!.steps["s"]!;
+        await s.checkpointStep({ workflowId: "ck-map", stepName: "s", outcome, attempts: [] });
+        const second = (await s.loadWorkflow("ck-map"))!.steps["s"]!;
+
+        expect(second.attempt).toBe(first.attempt + 1);
+        expect(second.tasks?.map((t) => t.result)).toEqual([1]);
+      });
+
+      it("reports a cancel that landed before the write", async () => {
+        const s = await getStorage();
+        if (!isStepCheckpointStorage(s)) return;
+        await s.createWorkflow({ workflowId: "ck-cancel", workflowName: "t", input: {} });
+        await s.saveStepResult({
+          workflowId: "ck-cancel",
+          stepName: "a",
+          result: 1,
+          durationMs: 1,
+          startedAt: at,
+        });
+        await s.cancelWorkflow("ck-cancel");
+
+        const status = await s.checkpointStep({
+          workflowId: "ck-cancel",
+          stepName: "s",
+          outcome: { kind: "completed", result: 2, durationMs: 1, startedAt: at },
+          attempts: [],
+        });
+
+        expect(status).toEqual({
+          status: "failed",
+          error: "Cancelled",
+          errorTag: "WorkflowCancelledError",
+        });
+        expect((await s.loadWorkflowStatus("ck-cancel"))!.status).toBe("failed");
+      });
+
+      it("answers null and writes nothing for a missing workflow", async () => {
+        const s = await getStorage();
+        if (!isStepCheckpointStorage(s)) return;
+        const status = await s.checkpointStep({
+          workflowId: "ck-missing",
+          stepName: "s",
+          outcome: { kind: "completed", result: 1, durationMs: 1, startedAt: at },
+          attempts: [attempt("ck-missing", 1, "completed")],
+        });
+
+        expect(status).toBeNull();
+        expect(await s.loadWorkflow("ck-missing")).toBeNull();
+        if (isStepAttemptStorage(s)) {
+          expect(await s.loadStepAttempts("ck-missing")).toEqual([]);
+        }
+      });
+
+      it("a write under the live lock's token lands", async () => {
+        const s = await getStorage();
+        if (!isStepCheckpointStorage(s)) return;
+        await s.createWorkflow({ workflowId: "ck-fenced", workflowName: "t", input: {} });
+        const lock = await s.tryLock("ck-fenced", 30_000);
+        const checkpoint: StepCheckpoint = {
+          workflowId: "ck-fenced",
+          stepName: "s",
+          outcome: { kind: "completed", result: 1, durationMs: 1, startedAt: at },
+          attempts: [],
+        };
+
+        const status = await s.checkpointStep(checkpoint, { fenceToken: lock.token });
+
+        expect(status).toEqual({ status: "running" });
+        expect((await s.loadWorkflow("ck-fenced"))!.steps["s"]!.status).toBe("completed");
+        await s.releaseLock("ck-fenced", { fenceToken: lock.token });
+      });
+    });
+
+    // -------------------------------------------------------------------
     // batchSaveStepResults
     // -------------------------------------------------------------------
 
@@ -452,6 +633,66 @@ export function storageTestSuite(
         const state = await s.loadWorkflow("task-1");
         expect(state!.steps["map-step"]?.tasks).toHaveLength(2);
         expect(state!.steps["map-step"]?.tasks![0]!.result).toBe("a");
+      });
+
+      it("a loaded state does not change under later task writes", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "task-snap", workflowName: "test", input: {} });
+        const save = (taskIndex: number, result: unknown) =>
+          s.saveTaskResult({ workflowId: "task-snap", stepName: "m", taskIndex, result });
+        await save(0, "a");
+        await save(1, "b");
+        const before = await s.loadWorkflow("task-snap");
+        await save(2, "c");
+        await save(0, "a2");
+        await s.saveTaskFailure({
+          workflowId: "task-snap",
+          stepName: "m",
+          taskIndex: 1,
+          error: "boom",
+        });
+
+        const snapshot = [...before!.steps["m"]!.tasks!].sort((x, y) => x.taskIndex - y.taskIndex);
+        expect(snapshot.map((t) => [t.taskIndex, t.status, t.result])).toEqual([
+          [0, "completed", "a"],
+          [1, "completed", "b"],
+        ]);
+        const after = (await s.loadWorkflow("task-snap"))!.steps["m"]!.tasks!;
+        const byIndex = [...after].sort((x, y) => x.taskIndex - y.taskIndex);
+        expect(
+          byIndex.map((t) => [t.taskIndex, t.status, t.status === "failed" ? t.error : t.result]),
+        ).toEqual([
+          [0, "completed", "a2"],
+          [1, "failed", "boom"],
+          [2, "completed", "c"],
+        ]);
+        expect(byIndex[0]!.attempt).toBe(2);
+        expect(byIndex[1]!.attempt).toBe(2);
+      });
+
+      it("keeps the task rows when the map step's result is saved", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "task-keep", workflowName: "test", input: {} });
+        for (let i = 0; i < 3; i++) {
+          await s.saveTaskResult({
+            workflowId: "task-keep",
+            stepName: "m",
+            taskIndex: i,
+            result: i,
+          });
+        }
+        await s.saveStepResult({
+          workflowId: "task-keep",
+          stepName: "m",
+          result: [0, 1, 2],
+          durationMs: 1,
+          startedAt: new Date(),
+        });
+        await s.saveTaskResult({ workflowId: "task-keep", stepName: "m", taskIndex: 3, result: 3 });
+
+        const step = (await s.loadWorkflow("task-keep"))!.steps["m"]!;
+        expect(step.status).toBe("completed");
+        expect(step.tasks!.map((t) => t.taskIndex).sort()).toEqual([0, 1, 2, 3]);
       });
 
       it("saves task failures", async () => {
@@ -1246,6 +1487,7 @@ export function storageTestSuite(
     const suspendOf = (s: WorkflowStorage) => s as WorkflowStorage & ActivityJournalStorage;
     const attemptsOf = (s: WorkflowStorage) => s as WorkflowStorage & StepAttemptStorage;
     const ledgerOf = (s: WorkflowStorage) => s as WorkflowStorage & CompensationLedgerStorage;
+    const checkpointOf = (s: WorkflowStorage) => s as WorkflowStorage & StepCheckpointStorage;
     const hasSuspend = (s: WorkflowStorage): boolean => isActivityJournalStorage(s);
     const attemptFor = (workflowId: string): StepAttemptRecord => ({
       workflowId,
@@ -1365,6 +1607,20 @@ export function storageTestSuite(
           name: "saveStepAttempt",
           supported: recordsAttempts,
           write: (s, id, g) => attemptsOf(s).saveStepAttempt(attemptFor(id), g),
+        },
+        {
+          name: "checkpointStep",
+          supported: isStepCheckpointStorage,
+          write: (s, id, g) =>
+            checkpointOf(s).checkpointStep(
+              {
+                workflowId: id,
+                stepName: "s",
+                outcome: { kind: "completed", result: 1, durationMs: 1, startedAt: fenceAt },
+                attempts: [attemptFor(id)],
+              },
+              g,
+            ),
         },
         {
           name: "beginCompensation",

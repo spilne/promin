@@ -25,7 +25,8 @@ import { settleWave, skippedOutcome } from "./wave.ts";
  * lock is lost (`ctx.signal`).
  */
 export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> {
-  const { ctx, workflowId, input, readySteps, results, clock, stepStates } = params;
+  const { ctx, workflowId, input, readySteps, results, clock, stepStates, workflowMetadata } =
+    params;
   const abort = new AbortController();
   const lockSignal = ctx.signal;
   const onLockLost = (): void => abort.abort(lockSignal?.reason);
@@ -80,7 +81,13 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
           priority: stepDef.priority,
           signal: abort.signal,
           ...(ctx.workflowVersion !== undefined && { version: ctx.workflowVersion }),
-          runtime: stepRuntimeFor({ ctx, clock, stepStates, stepName: stepDef.name }),
+          runtime: stepRuntimeFor({
+            ctx,
+            clock,
+            stepStates,
+            stepName: stepDef.name,
+            workflowMetadata,
+          }),
           ...(concurrency
             ? {
                 concurrencyKey: concurrency.key,

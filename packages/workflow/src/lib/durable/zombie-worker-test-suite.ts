@@ -41,6 +41,7 @@ export interface ZombieWorkerTestSuiteOptions {
 /** Every storage write a run makes. Fenced ones must reject a stale holder. */
 const WRITE_METHODS: ReadonlySet<string> = new Set([
   "saveStepResult",
+  "checkpointStep",
   "batchSaveStepResults",
   "saveStepFailure",
   "saveTaskResult",

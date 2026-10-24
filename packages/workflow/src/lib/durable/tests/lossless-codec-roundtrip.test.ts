@@ -13,6 +13,8 @@
 import { describe, it, expect } from "bun:test";
 import { workflow } from "../workflow-builder.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
+import type { StepCheckpoint } from "../workflow-storage.ts";
+import type { WorkflowStatusSnapshot } from "../workflow-state.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
 import { JsonCodec } from "@spilne/perfect-core/connect";
 
@@ -32,6 +34,13 @@ class JsonRoundTripStorage extends InMemoryWorkflowStorage {
   }): Promise<void> {
     const roundTripped = JSON.parse(JSON.stringify(params.result));
     await super.saveStepResult({ ...params, result: roundTripped });
+  }
+
+  async checkpointStep(checkpoint: StepCheckpoint): Promise<WorkflowStatusSnapshot | null> {
+    const { outcome } = checkpoint;
+    if (outcome.kind !== "completed") return super.checkpointStep(checkpoint);
+    const result = JSON.parse(JSON.stringify(outcome.result));
+    return super.checkpointStep({ ...checkpoint, outcome: { ...outcome, result } });
   }
 }
 

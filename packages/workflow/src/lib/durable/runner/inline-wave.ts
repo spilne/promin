@@ -16,7 +16,8 @@ import { outcomeOfBody, settleWave, skippedOutcome } from "./wave.ts";
  * own rows.
  */
 export async function runInlineWave(params: WaveParams): Promise<WaveOutcome> {
-  const { ctx, workflowId, input, readySteps, results, clock, stepStates } = params;
+  const { ctx, workflowId, input, readySteps, results, clock, stepStates, workflowMetadata } =
+    params;
 
   return settleWave({
     readySteps,
@@ -42,7 +43,13 @@ export async function runInlineWave(params: WaveParams): Promise<WaveOutcome> {
         firstAttempt: (params.stepAttempts.get(stepDef.name) ?? 0) + 1,
         execute: ({ attempt, metadataRef }) =>
           stepDef.execute({
-            ...stepRuntimeFor({ ctx, clock, stepStates, stepName: stepDef.name }),
+            ...stepRuntimeFor({
+              ctx,
+              clock,
+              stepStates,
+              stepName: stepDef.name,
+              workflowMetadata,
+            }),
             input,
             results,
             workflowId,

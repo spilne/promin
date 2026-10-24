@@ -6,27 +6,38 @@
 
 import type { WallClock } from "../../shared/wall-clock.ts";
 import type { StepDefinition } from "../durable-pipeline.ts";
+import { isCancelledRun, type WorkflowStatusSnapshot } from "../workflow-state.ts";
 import type { WaveOutcome } from "./dag-context.ts";
 import type { StepBodyOutcome } from "./step-body.ts";
-import type { StepOutcome } from "./step-checkpoint.ts";
+import type { CheckpointedStep, StepOutcome } from "./step-checkpoint.ts";
 
 /**
  * Run every ready step and wait for all of them, so no sibling is left in
  * flight (or half-checkpointed) when the wave reports a failure. `runStep`
  * settles body errors into outcomes itself; a rejection means a checkpoint
  * write failed, and the first one is rethrown once every step has settled.
+ *
+ * The wave's `runStatus` is known only when every step's checkpoint read
+ * the run's status; it is a cancelled one if any of them saw a cancel.
  */
 export async function settleWave(params: {
   readonly readySteps: readonly StepDefinition[];
-  readonly runStep: (stepDef: StepDefinition) => Promise<StepOutcome>;
+  readonly runStep: (stepDef: StepDefinition) => Promise<CheckpointedStep>;
 }): Promise<WaveOutcome> {
   const settled = await Promise.allSettled(params.readySteps.map((s) => params.runStep(s)));
   const outcomes: StepOutcome[] = [];
+  let runStatus: WorkflowStatusSnapshot | null = null;
+  let observed = true;
   for (const entry of settled) {
     if (entry.status === "rejected") throw entry.reason;
-    outcomes.push(entry.value);
+    outcomes.push(entry.value.outcome);
+    const status = entry.value.runStatus;
+    if (status === undefined) observed = false;
+    else if (status !== null && (runStatus === null || !isCancelledRun(runStatus))) {
+      runStatus = status;
+    }
   }
-  return { outcomes };
+  return observed ? { outcomes, runStatus } : { outcomes };
 }
 
 /**

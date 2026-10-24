@@ -9,6 +9,9 @@ import { describe, it, expect, beforeEach } from "bun:test";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { runJournaledStep } from "../journaled-step.ts";
 import type { JournaledContext } from "../journaled-step.ts";
+import { succeed } from "@spilne/perfect-core";
+import { workflow } from "../workflow-builder.ts";
+import { createWorkflowRunner } from "../workflow-runner.ts";
 
 describe("ctx.metadata — live-writable surface", () => {
   let storage: InMemoryWorkflowStorage;
@@ -132,5 +135,95 @@ describe("ctx.metadata — live-writable surface", () => {
     })) as Record<string, unknown>;
     expect(result.rogue).toBeUndefined();
     expect(result).toEqual({ tenant: "acme" });
+  });
+});
+
+describe("ctx.metadata — seeded by the runner", () => {
+  /** In-memory storage that counts `loadWorkflow` calls. */
+  class CountingStorage extends InMemoryWorkflowStorage {
+    loads = 0;
+    override async loadWorkflow(workflowId: string) {
+      this.loads++;
+      return super.loadWorkflow(workflowId);
+    }
+  }
+
+  it("a journaled step under the runner reads the run's metadata without loading the run", async () => {
+    const storage = new CountingStorage();
+    let observed: Record<string, unknown> | undefined;
+    const wf = workflow<number>({ name: "meta-seeded" })
+      .step("a", ({ input }) => succeed(input))
+      .journaled("j", function* (ctx) {
+        observed = ctx.metadata.get();
+        return 1;
+      })
+      .build();
+    await storage.createWorkflow({
+      workflowId: "seeded-1",
+      workflowName: wf.name,
+      input: 1,
+      metadata: { tenant: "acme" },
+    });
+    const runner = createWorkflowRunner({ storage });
+    storage.loads = 0;
+
+    await runner.run({ workflow: wf, workflowId: "seeded-1", input: 1 });
+
+    expect(observed).toEqual({ tenant: "acme" });
+    // The one load is the run's state taken with the lock.
+    expect(storage.loads).toBe(1);
+  });
+
+  it("a later journaled step sees what an earlier one wrote", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    let observed: Record<string, unknown> | undefined;
+    const wf = workflow<number>({ name: "meta-chain" })
+      .journaled("first", function* (ctx) {
+        ctx.metadata.merge({ progress: "1/2", drop: null });
+        return 1;
+      })
+      .journaled("second", function* (ctx) {
+        observed = ctx.metadata.get();
+        return 2;
+      })
+      .build();
+    await storage.createWorkflow({
+      workflowId: "chain-1",
+      workflowName: wf.name,
+      input: 1,
+      metadata: { tenant: "acme", drop: true },
+    });
+
+    await createWorkflowRunner({ storage }).run({ workflow: wf, workflowId: "chain-1", input: 1 });
+
+    expect(observed).toEqual({ tenant: "acme", progress: "1/2" });
+    expect((await storage.loadWorkflow("chain-1"))!.metadata).toEqual({
+      tenant: "acme",
+      progress: "1/2",
+    });
+  });
+
+  it("the runner's copy is replaced on a write, never mutated", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    await storage.createWorkflow({ workflowId: "ref-1", workflowName: "t", input: {} });
+    const original = { tenant: "acme" };
+    const ref = { current: original as Record<string, unknown> | undefined };
+
+    await runJournaledStep({
+      input: {},
+      prev: {},
+      workflowId: "ref-1",
+      stepName: "body",
+      storage,
+      workflowStorage: storage,
+      workflowMetadata: ref,
+      body: function* (ctx: JournaledContext<unknown, unknown>) {
+        ctx.metadata.set("progress", 1);
+        return "ok";
+      },
+    });
+
+    expect(original).toEqual({ tenant: "acme" });
+    expect(ref.current).toEqual({ tenant: "acme", progress: 1 });
   });
 });

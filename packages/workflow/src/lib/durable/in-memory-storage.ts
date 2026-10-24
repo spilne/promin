@@ -15,6 +15,8 @@
 import type {
   WorkflowStorage,
   StepAttemptStorage,
+  StepCheckpoint,
+  StepCheckpointStorage,
   CompensationLedgerStorage,
   StepCompensationOutcome,
   FenceGuard,
@@ -120,14 +122,61 @@ interface MutableWorkflow {
   idempotencyKey?: string;
   idempotencyExpiresAt?: Date;
   steps: Map<string, StepState>;
+  /**
+   * Task arrays this storage may still append to in place, by step name
+   * (see `writeTask`). An entry is writable only while it is the step row's
+   * own `tasks` array and no row of the run was handed out since it was
+   * built (`handedOut` still equals its `epoch`).
+   */
+  ownedTasks: Map<string, OwnedTasks>;
+  /** Bumped every time the run's step rows are handed out to a caller. */
+  handedOut: number;
   createdAt: Date;
   startedAt?: Date;
   updatedAt: Date;
   completedAt?: Date;
 }
 
+/**
+ * A map step's task array, owned by the storage, with each task's position
+ * by task index: a task write is a lookup plus an in-place set or push
+ * instead of a copy and a linear search.
+ */
+interface OwnedTasks {
+  readonly tasks: StepTaskState[];
+  readonly position: Map<number, number>;
+  readonly epoch: number;
+}
+
+/** One step's activity journal: entries in write order, positions by slot. */
+interface JournalSlots {
+  entries: JournalEntry[];
+  /** Position in `entries` by `slotKey(activityIndex, branchPath)`. */
+  position: Map<string, number>;
+  /** `entries` sorted by slot, built on the first load after a write. */
+  sorted?: JournalEntry[];
+}
+
+function slotKey(activityIndex: number, branchPath: string): string {
+  return `${activityIndex}:${branchPath}`;
+}
+
+/** Key of the `(namespace, workflowName, idempotencyKey)` index. */
+function idempotencyIndexKey(params: {
+  namespace: string | undefined;
+  workflowName: string;
+  idempotencyKey: string;
+}): string {
+  return JSON.stringify([params.namespace ?? null, params.workflowName, params.idempotencyKey]);
+}
+
 export class InMemoryWorkflowStorage
-  implements WorkflowStorage, StepAttemptStorage, CompensationLedgerStorage, ActivityJournalStorage
+  implements
+    WorkflowStorage,
+    StepAttemptStorage,
+    StepCheckpointStorage,
+    CompensationLedgerStorage,
+    ActivityJournalStorage
 {
   private workflows = new Map<string, MutableWorkflow>();
   /**
@@ -146,8 +195,16 @@ export class InMemoryWorkflowStorage
   private signals = new Map<string, SignalState[]>();
   private attempts = new Map<string, StepAttemptRecord[]>();
   private runHistory = new Map<string, WorkflowRunSummary[]>();
-  /** Activity journal keyed by `${workflowId}::${stepName}` → ordered entries. */
-  private journal = new Map<string, JournalEntry[]>();
+  /** Activity journal keyed by `${workflowId}::${stepName}`. */
+  private journal = new Map<string, JournalSlots>();
+  /** Journal keys by workflow id, so a workflow's journal is dropped without a scan. */
+  private journalKeys = new Map<string, Set<string>>();
+  /** Journal keys that have (or had) a pending sleep entry: what `findDueSleeps` scans. */
+  private sleepKeys = new Set<string>();
+  /** Workflow id by `idempotencyIndexKey`, for the run that last claimed the key. */
+  private idempotencyIndex = new Map<string, string>();
+  /** Child workflow ids by parent workflow id, for cascade cancel. */
+  private children = new Map<string, Set<string>>();
   /** Signal tokens keyed by tokenId — public-bearer auth for deliverSignal. */
   private signalTokens = new Map<string, MutableSignalToken>();
   /** Stream chunks keyed by `${workflowId}::${streamId}` → ordered by chunk_index. */
@@ -198,8 +255,7 @@ export class InMemoryWorkflowStorage
   }
 
   private toState(wf: MutableWorkflow): WorkflowState {
-    const steps: Record<string, StepState> = {};
-    for (const [k, v] of wf.steps) steps[k] = v;
+    const steps = this.handOutSteps(wf);
     return {
       workflowId: wf.workflowId,
       workflowName: wf.workflowName,
@@ -225,6 +281,25 @@ export class InMemoryWorkflowStorage
     };
   }
 
+  /**
+   * The run's step rows as a record for a caller. Their `tasks` arrays are
+   * now shared with the caller, so the next task write copies them first.
+   */
+  private handOutSteps(wf: MutableWorkflow): Record<string, StepState> {
+    wf.handedOut++;
+    const steps: Record<string, StepState> = {};
+    for (const [k, v] of wf.steps) steps[k] = v;
+    return steps;
+  }
+
+  private statusOf(wf: MutableWorkflow): WorkflowStatusSnapshot {
+    return {
+      status: wf.status,
+      ...(wf.error !== undefined && { error: wf.error }),
+      ...(wf.errorTag !== undefined && { errorTag: wf.errorTag }),
+    };
+  }
+
   async loadWorkflow(workflowId: string): Promise<WorkflowState | null> {
     const wf = this.workflows.get(workflowId);
     return wf ? this.toState(wf) : null;
@@ -232,12 +307,7 @@ export class InMemoryWorkflowStorage
 
   async loadWorkflowStatus(workflowId: string): Promise<WorkflowStatusSnapshot | null> {
     const wf = this.workflows.get(workflowId);
-    if (!wf) return null;
-    return {
-      status: wf.status,
-      ...(wf.error !== undefined && { error: wf.error }),
-      ...(wf.errorTag !== undefined && { errorTag: wf.errorTag }),
-    };
+    return wf ? this.statusOf(wf) : null;
   }
 
   async listWorkflows(params?: {
@@ -363,10 +433,8 @@ export class InMemoryWorkflowStorage
     this.emitEvent(workflowId, { type: "workflow-failed", error: CANCELLED_ERROR, at: now }, true);
 
     if (options?.cascade) {
-      for (const [childId, child] of this.workflows) {
-        if (child.parentWorkflowId === workflowId) {
-          await this.cancelWorkflow(childId, { cascade: true });
-        }
+      for (const childId of this.children.get(workflowId) ?? []) {
+        await this.cancelWorkflow(childId, { cascade: true });
       }
     }
   }
@@ -394,31 +462,39 @@ export class InMemoryWorkflowStorage
     // partial-unique-index conflict resolution that postgres does
     // natively, which is what makes the redirect race-safe.
     if (params.idempotencyKey) {
-      const now = this.clock.now();
-      const namespace = this.resolveNamespace(params.namespace);
-      for (const wf of this.workflows.values()) {
-        if (
-          wf.namespace === namespace &&
-          wf.workflowName === params.workflowName &&
-          wf.idempotencyKey === params.idempotencyKey &&
-          wf.idempotencyExpiresAt &&
-          wf.idempotencyExpiresAt.getTime() > now.getTime()
-        ) {
-          return { created: false, existing: this.toState(wf) };
-        }
-      }
+      const claimed = this.idempotencyClaim({
+        namespace: this.resolveNamespace(params.namespace),
+        workflowName: params.workflowName,
+        idempotencyKey: params.idempotencyKey,
+        now: this.clock.now(),
+      });
+      if (claimed) return { created: false, existing: this.toState(claimed) };
     }
 
     const existing = this.workflows.get(params.workflowId);
     if (existing) return { created: false, existing: this.toState(existing) };
 
     const now = this.clock.now();
+    const namespace = this.resolveNamespace(params.namespace);
+    if (params.idempotencyKey) {
+      const key = idempotencyIndexKey({
+        namespace,
+        workflowName: params.workflowName,
+        idempotencyKey: params.idempotencyKey,
+      });
+      this.idempotencyIndex.set(key, params.workflowId);
+    }
+    if (params.parentWorkflowId !== undefined) {
+      const siblings = this.children.get(params.parentWorkflowId) ?? new Set<string>();
+      siblings.add(params.workflowId);
+      this.children.set(params.parentWorkflowId, siblings);
+    }
     this.workflows.set(params.workflowId, {
       workflowId: params.workflowId,
       workflowName: params.workflowName,
       workflowType: params.workflowType,
       parentWorkflowId: params.parentWorkflowId,
-      namespace: this.resolveNamespace(params.namespace),
+      namespace,
       status: "pending",
       version: params.version,
       run: 1,
@@ -429,10 +505,38 @@ export class InMemoryWorkflowStorage
       idempotencyKey: params.idempotencyKey,
       idempotencyExpiresAt: params.idempotencyExpiresAt,
       steps: new Map(),
+      ownedTasks: new Map(),
+      handedOut: 0,
       createdAt: now,
       updatedAt: now,
     });
     return { created: true };
+  }
+
+  /**
+   * The run holding an unexpired claim on `(namespace, workflowName,
+   * idempotencyKey)`, if any. An index lookup; the row is re-checked, since
+   * the indexed run may have been purged or its claim may have expired.
+   */
+  private idempotencyClaim(params: {
+    namespace: string | undefined;
+    workflowName: string;
+    idempotencyKey: string;
+    now: Date;
+  }): MutableWorkflow | undefined {
+    const id = this.idempotencyIndex.get(idempotencyIndexKey(params));
+    const wf = id !== undefined ? this.workflows.get(id) : undefined;
+    if (
+      wf &&
+      wf.namespace === params.namespace &&
+      wf.workflowName === params.workflowName &&
+      wf.idempotencyKey === params.idempotencyKey &&
+      wf.idempotencyExpiresAt &&
+      wf.idempotencyExpiresAt.getTime() > params.now.getTime()
+    ) {
+      return wf;
+    }
+    return undefined;
   }
 
   async findWorkflowByIdempotencyKey(params: {
@@ -441,19 +545,13 @@ export class InMemoryWorkflowStorage
     idempotencyKey: string;
     now: Date;
   }): Promise<{ workflowId: string } | null> {
-    const namespace = this.resolveNamespace(params.namespace);
-    for (const wf of this.workflows.values()) {
-      if (
-        wf.namespace === namespace &&
-        wf.workflowName === params.workflowName &&
-        wf.idempotencyKey === params.idempotencyKey &&
-        wf.idempotencyExpiresAt &&
-        wf.idempotencyExpiresAt.getTime() > params.now.getTime()
-      ) {
-        return { workflowId: wf.workflowId };
-      }
-    }
-    return null;
+    const wf = this.idempotencyClaim({
+      namespace: this.resolveNamespace(params.namespace),
+      workflowName: params.workflowName,
+      idempotencyKey: params.idempotencyKey,
+      now: params.now,
+    });
+    return wf ? { workflowId: wf.workflowId } : null;
   }
 
   /** Transition pending → running on first step activity. */
@@ -552,6 +650,19 @@ export class InMemoryWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     this.checkFence(params.workflowId, guard);
+    this.writeStepFailure(params);
+  }
+
+  /** The unfenced body of `saveStepFailure`. */
+  private writeStepFailure(params: {
+    workflowId: string;
+    stepName: string;
+    error: string;
+    errorTag?: string;
+    durationMs: number;
+    startedAt: Date;
+    metadata?: Record<string, unknown>;
+  }): void {
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return;
     this.markRunning(wf);
@@ -596,38 +707,12 @@ export class InMemoryWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     this.checkFence(params.workflowId, guard);
-    const wf = this.workflows.get(params.workflowId);
-    if (!wf) return;
-
-    const existing = wf.steps.get(params.stepName);
-    const tasks = existing?.tasks ? [...existing.tasks] : [];
-    const now = this.clock.now();
-
-    const idx = tasks.findIndex((t) => t.taskIndex === params.taskIndex);
-    const prev = idx >= 0 ? tasks[idx] : undefined;
-    const task: StepTaskState = {
+    this.writeTask({
+      workflowId: params.workflowId,
+      stepName: params.stepName,
       taskIndex: params.taskIndex,
-      status: "completed",
-      result: params.result,
-      startedAt: prev?.startedAt ?? now,
-      completedAt: now,
-      attempt: (prev?.attempt ?? 0) + 1,
-    };
-    if (idx >= 0) tasks[idx] = task;
-    else tasks.push(task);
-
-    wf.steps.set(params.stepName, {
-      ...(existing ?? {
-        stepName: params.stepName,
-        run: wf.run,
-        status: "running" as const,
-        dependsOn: [],
-        stepType: "map" as const,
-        attempt: 1,
-      }),
-      tasks,
+      outcome: { status: "completed", result: params.result },
     });
-    wf.updatedAt = now;
   }
 
   async saveTaskFailure(
@@ -640,36 +725,69 @@ export class InMemoryWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     this.checkFence(params.workflowId, guard);
+    this.writeTask({
+      workflowId: params.workflowId,
+      stepName: params.stepName,
+      taskIndex: params.taskIndex,
+      outcome: { status: "failed", error: params.error },
+    });
+  }
+
+  /**
+   * Upsert one task row of a map step (creating a `running` map step row
+   * when the step has none). Amortised O(1): the step's task array is
+   * appended to or updated in place while the storage owns it, and copied
+   * once after the run's rows were handed out to a caller, so a caller's
+   * snapshot never changes under it.
+   */
+  private writeTask(params: {
+    workflowId: string;
+    stepName: string;
+    taskIndex: number;
+    outcome:
+      | { readonly status: "completed"; readonly result: unknown }
+      | { readonly status: "failed"; readonly error: string };
+  }): void {
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return;
+    const { stepName, taskIndex, outcome } = params;
+    const existing = wf.steps.get(stepName);
+    let owned = wf.ownedTasks.get(stepName);
+    if (owned === undefined || owned.epoch !== wf.handedOut || existing?.tasks !== owned.tasks) {
+      const tasks = existing?.tasks ? [...existing.tasks] : [];
+      const position = new Map<number, number>();
+      for (let i = 0; i < tasks.length; i++) position.set(tasks[i]!.taskIndex, i);
+      owned = { tasks, position, epoch: wf.handedOut };
+      wf.ownedTasks.set(stepName, owned);
+    }
 
-    const existing = wf.steps.get(params.stepName);
-    const tasks = existing?.tasks ? [...existing.tasks] : [];
     const now = this.clock.now();
-
-    const idx = tasks.findIndex((t) => t.taskIndex === params.taskIndex);
-    const prev = idx >= 0 ? tasks[idx] : undefined;
+    const at = owned.position.get(taskIndex);
+    const prev = at !== undefined ? owned.tasks[at] : undefined;
     const task: StepTaskState = {
-      taskIndex: params.taskIndex,
-      status: "failed",
-      error: params.error,
+      taskIndex,
+      status: outcome.status,
+      ...(outcome.status === "completed" ? { result: outcome.result } : { error: outcome.error }),
       startedAt: prev?.startedAt ?? now,
       completedAt: now,
       attempt: (prev?.attempt ?? 0) + 1,
     };
-    if (idx >= 0) tasks[idx] = task;
-    else tasks.push(task);
+    if (at !== undefined) owned.tasks[at] = task;
+    else {
+      owned.position.set(taskIndex, owned.tasks.length);
+      owned.tasks.push(task);
+    }
 
-    wf.steps.set(params.stepName, {
+    wf.steps.set(stepName, {
       ...(existing ?? {
-        stepName: params.stepName,
+        stepName,
         run: wf.run,
         status: "running" as const,
         dependsOn: [],
         stepType: "map" as const,
         attempt: 1,
       }),
-      tasks,
+      tasks: owned.tasks,
     });
     wf.updatedAt = now;
   }
@@ -946,8 +1064,7 @@ export class InMemoryWorkflowStorage
     if (!wf) throw new Error(`Workflow ${workflowId} not found`);
 
     // Archive current run
-    const steps: Record<string, StepState> = {};
-    for (const [k, v] of wf.steps) steps[k] = v;
+    const steps = this.handOutSteps(wf);
 
     const runs = this.runHistory.get(workflowId) ?? [];
     runs.push({
@@ -973,6 +1090,7 @@ export class InMemoryWorkflowStorage
     wf.startedAt = undefined;
     wf.completedAt = undefined;
     wf.steps = new Map();
+    wf.ownedTasks = new Map();
     wf.updatedAt = this.clock.now();
     // Clear activity journal entries — a fresh run must re-execute all
     // activities from scratch, otherwise replay reads stale entries from
@@ -1170,8 +1288,7 @@ export class InMemoryWorkflowStorage
     if (!wf) return [];
 
     const archived = this.runHistory.get(workflowId) ?? [];
-    const currentSteps: Record<string, StepState> = {};
-    for (const [k, v] of wf.steps) currentSteps[k] = v;
+    const currentSteps = this.handOutSteps(wf);
 
     const runs: WorkflowRunSummary[] = [
       {
@@ -1219,6 +1336,7 @@ export class InMemoryWorkflowStorage
       if (t < fromMs || t >= toMs) continue;
 
       this.workflows.delete(id);
+      this.forgetIndexes(wf);
       this.locks.delete(id);
       this.signals.delete(id);
       this.attempts.delete(id);
@@ -1238,12 +1356,27 @@ export class InMemoryWorkflowStorage
     return deleted;
   }
 
+  /** Drop a deleted run from the idempotency and parent indexes. */
+  private forgetIndexes(wf: MutableWorkflow): void {
+    if (wf.idempotencyKey !== undefined) {
+      const key = idempotencyIndexKey({
+        namespace: wf.namespace,
+        workflowName: wf.workflowName,
+        idempotencyKey: wf.idempotencyKey,
+      });
+      if (this.idempotencyIndex.get(key) === wf.workflowId) this.idempotencyIndex.delete(key);
+    }
+    if (wf.parentWorkflowId !== undefined) {
+      const siblings = this.children.get(wf.parentWorkflowId);
+      siblings?.delete(wf.workflowId);
+      if (siblings?.size === 0) this.children.delete(wf.parentWorkflowId);
+    }
+  }
+
   /** Drop every journal entry of one workflow, across all steps. */
   private deleteJournal(workflowId: string): void {
-    const journalPrefix = `${workflowId}::`;
-    for (const key of this.journal.keys()) {
-      if (key.startsWith(journalPrefix)) this.journal.delete(key);
-    }
+    for (const key of this.journalKeys.get(workflowId) ?? []) this.journal.delete(key);
+    this.journalKeys.delete(workflowId);
   }
 
   /** Get step history across all runs for a workflow. */
@@ -1258,9 +1391,45 @@ export class InMemoryWorkflowStorage
 
   async saveStepAttempt(record: StepAttemptRecord, guard?: FenceGuard): Promise<void> {
     this.checkFence(record.workflowId, guard);
+    this.appendAttempt(record);
+  }
+
+  private appendAttempt(record: StepAttemptRecord): void {
     const existing = this.attempts.get(record.workflowId) ?? [];
     existing.push(record);
     this.attempts.set(record.workflowId, existing);
+  }
+
+  // ---------------------------------------------------------------------------
+  // StepCheckpointStorage
+  // ---------------------------------------------------------------------------
+
+  async checkpointStep(
+    checkpoint: StepCheckpoint,
+    guard?: FenceGuard,
+  ): Promise<WorkflowStatusSnapshot | null> {
+    const { workflowId, stepName, outcome } = checkpoint;
+    // Fence check and every write in one synchronous step.
+    this.checkFence(workflowId, guard);
+    const wf = this.workflows.get(workflowId);
+    if (!wf) return null;
+    for (const attempt of checkpoint.attempts) this.appendAttempt(attempt);
+    const row = {
+      workflowId,
+      stepName,
+      durationMs: outcome.durationMs,
+      startedAt: outcome.startedAt,
+      ...(outcome.metadata !== undefined && { metadata: outcome.metadata }),
+    };
+    if (outcome.kind === "completed") this.writeStepResult({ ...row, result: outcome.result });
+    else {
+      this.writeStepFailure({
+        ...row,
+        error: outcome.error,
+        ...(outcome.errorTag !== undefined && { errorTag: outcome.errorTag }),
+      });
+    }
+    return this.statusOf(wf);
   }
 
   async loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]> {
@@ -1321,26 +1490,60 @@ export class InMemoryWorkflowStorage
     return `${workflowId}::${stepName}`;
   }
 
+  /** The step's journal, if it has one. */
+  private journalOf(workflowId: string, stepName: string): JournalSlots | undefined {
+    return this.journal.get(this.journalKey(workflowId, stepName));
+  }
+
+  /** The step's journal, created empty when it has none. */
+  private openJournal(workflowId: string, stepName: string): JournalSlots {
+    const key = this.journalKey(workflowId, stepName);
+    let slots = this.journal.get(key);
+    if (slots === undefined) {
+      slots = { entries: [], position: new Map() };
+      this.journal.set(key, slots);
+      const keys = this.journalKeys.get(workflowId) ?? new Set<string>();
+      keys.add(key);
+      this.journalKeys.set(workflowId, keys);
+    }
+    return slots;
+  }
+
+  /** Put `entry` at its slot: replaces the entry there, or appends. */
+  private putEntry(slots: JournalSlots, entry: JournalEntry): void {
+    const key = slotKey(entry.activityIndex, entry.branchPath);
+    const at = slots.position.get(key);
+    if (at !== undefined) slots.entries[at] = entry;
+    else {
+      slots.position.set(key, slots.entries.length);
+      slots.entries.push(entry);
+    }
+    slots.sorted = undefined;
+  }
+
+  /** Keep only the entries `keep` accepts, re-indexing the rest. */
+  private filterEntries(slots: JournalSlots, keep: (e: JournalEntry) => boolean): void {
+    slots.entries = slots.entries.filter(keep);
+    slots.position = new Map();
+    for (let i = 0; i < slots.entries.length; i++) {
+      const e = slots.entries[i]!;
+      slots.position.set(slotKey(e.activityIndex, e.branchPath), i);
+    }
+    slots.sorted = undefined;
+  }
+
   async loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]> {
-    const entries = this.journal.get(this.journalKey(workflowId, stepName)) ?? [];
+    const slots = this.journalOf(workflowId, stepName);
+    if (!slots) return [];
     // Defensive copy + stable sort: by activityIndex primarily, then by
     // branchPath so `ctx.parallel` branches have a deterministic replay
-    // order when a consumer iterates the journal directly.
-    return [...entries].sort((a, b) => {
+    // order when a consumer iterates the journal directly. The sorted
+    // order is kept until the next write.
+    slots.sorted ??= [...slots.entries].sort((a, b) => {
       if (a.activityIndex !== b.activityIndex) return a.activityIndex - b.activityIndex;
       return a.branchPath.localeCompare(b.branchPath);
     });
-  }
-
-  /** Locate an entry by its composite (activityIndex, branchPath) key. */
-  private findEntryIndex(
-    entries: JournalEntry[],
-    activityIndex: number,
-    branchPath: string,
-  ): number {
-    return entries.findIndex(
-      (e) => e.activityIndex === activityIndex && e.branchPath === branchPath,
-    );
+    return [...slots.sorted];
   }
 
   async appendEntry(
@@ -1357,27 +1560,23 @@ export class InMemoryWorkflowStorage
   ): Promise<void> {
     this.checkFence(params.workflowId, guard);
     const branchPath = params.branchPath ?? "";
-    const key = this.journalKey(params.workflowId, params.stepName);
-    const entries = this.journal.get(key) ?? [];
+    const slots = this.openJournal(params.workflowId, params.stepName);
     // Idempotent: skip if the same (index, branchPath) is already recorded and completed.
-    const existing = this.findEntryIndex(entries, params.activityIndex, branchPath);
-    if (existing !== -1 && entries[existing]!.phase !== "pending") return;
+    const at = slots.position.get(slotKey(params.activityIndex, branchPath));
+    const existing = at !== undefined ? slots.entries[at] : undefined;
+    if (existing !== undefined && existing.phase !== "pending") return;
     // Preserve payloadHash from the prior pending row if the completer didn't
     // pass one — pending→completed transition shouldn't drop the fingerprint.
-    const priorHash = existing !== -1 ? entries[existing]!.payloadHash : undefined;
-    const entry: JournalEntry = {
+    this.putEntry(slots, {
       activityIndex: params.activityIndex,
       branchPath,
       activityName: params.activityName,
       stepType: "activity",
       phase: "completed",
-      payloadHash: params.payloadHash ?? priorHash,
+      payloadHash: params.payloadHash ?? existing?.payloadHash,
       exit: params.exit,
       createdAt: this.clock.now(),
-    };
-    if (existing !== -1) entries[existing] = entry;
-    else entries.push(entry);
-    this.journal.set(key, entries);
+    });
   }
 
   async appendPendingEntry(
@@ -1395,11 +1594,10 @@ export class InMemoryWorkflowStorage
   ): Promise<void> {
     this.checkFence(params.workflowId, guard);
     const branchPath = params.branchPath ?? "";
-    const key = this.journalKey(params.workflowId, params.stepName);
-    const entries = this.journal.get(key) ?? [];
+    const slots = this.openJournal(params.workflowId, params.stepName);
     // Idempotent: if an entry at this (index, branchPath) already exists, leave it alone.
-    if (this.findEntryIndex(entries, params.activityIndex, branchPath) !== -1) return;
-    entries.push({
+    if (slots.position.has(slotKey(params.activityIndex, branchPath))) return;
+    this.putEntry(slots, {
       activityIndex: params.activityIndex,
       branchPath,
       activityName: params.activityName,
@@ -1409,7 +1607,9 @@ export class InMemoryWorkflowStorage
       wakeAt: params.wakeAt,
       createdAt: this.clock.now(),
     });
-    this.journal.set(key, entries);
+    if (params.stepType === "sleep") {
+      this.sleepKeys.add(this.journalKey(params.workflowId, params.stepName));
+    }
   }
 
   async completePendingEntry(
@@ -1424,20 +1624,13 @@ export class InMemoryWorkflowStorage
   ): Promise<CompletePendingResult> {
     this.checkFence(params.workflowId, guard);
     const branchPath = params.branchPath ?? "";
-    const key = this.journalKey(params.workflowId, params.stepName);
-    const entries = this.journal.get(key);
-    if (!entries) return { completed: false, exit: undefined };
-    const idx = this.findEntryIndex(entries, params.activityIndex, branchPath);
-    if (idx === -1) return { completed: false, exit: undefined };
-    const existing = entries[idx]!;
+    const slots = this.journalOf(params.workflowId, params.stepName);
+    const at = slots?.position.get(slotKey(params.activityIndex, branchPath));
+    if (slots === undefined || at === undefined) return { completed: false, exit: undefined };
+    const existing = slots.entries[at]!;
     // First writer wins — report the stored exit to the loser.
     if (existing.phase !== "pending") return { completed: false, exit: existing.exit };
-    entries[idx] = {
-      ...existing,
-      phase: "completed",
-      exit: params.exit,
-    };
-    this.journal.set(key, entries);
+    this.putEntry(slots, { ...existing, phase: "completed", exit: params.exit });
     return { completed: true, exit: params.exit };
   }
 
@@ -1450,14 +1643,10 @@ export class InMemoryWorkflowStorage
     guard?: FenceGuard,
   ): Promise<void> {
     this.checkFence(params.workflowId, guard);
-    const key = this.journalKey(params.workflowId, params.stepName);
-    const entries = this.journal.get(key);
-    if (!entries) return;
-    const drop = new Set(params.slots.map((s) => `${s.activityIndex}:${s.branchPath}`));
-    this.journal.set(
-      key,
-      entries.filter((e) => !drop.has(`${e.activityIndex}:${e.branchPath}`)),
-    );
+    const slots = this.journalOf(params.workflowId, params.stepName);
+    if (!slots) return;
+    const drop = new Set(params.slots.map((s) => slotKey(s.activityIndex, s.branchPath)));
+    this.filterEntries(slots, (e) => !drop.has(slotKey(e.activityIndex, e.branchPath)));
   }
 
   async findDueSleeps(params: { now: Date; limit: number }): Promise<
@@ -1476,15 +1665,16 @@ export class InMemoryWorkflowStorage
       branchPath: string;
       wakeAt: Date;
     }> = [];
-    for (const [key, entries] of this.journal) {
+    // Only journals that ever held a pending sleep; one found without any
+    // is dropped from the scan set.
+    for (const key of this.sleepKeys) {
+      const slots = this.journal.get(key);
       const [workflowId, stepName] = key.split("::") as [string, string];
-      for (const e of entries) {
-        if (
-          e.stepType === "sleep" &&
-          e.phase === "pending" &&
-          e.wakeAt &&
-          e.wakeAt.getTime() <= params.now.getTime()
-        ) {
+      let pendingSleeps = 0;
+      for (const e of slots?.entries ?? []) {
+        if (e.stepType !== "sleep" || e.phase !== "pending") continue;
+        pendingSleeps++;
+        if (e.wakeAt && e.wakeAt.getTime() <= params.now.getTime()) {
           due.push({
             workflowId,
             stepName,
@@ -1495,6 +1685,7 @@ export class InMemoryWorkflowStorage
           if (due.length >= params.limit) return due;
         }
       }
+      if (pendingSleeps === 0) this.sleepKeys.delete(key);
     }
     return due;
   }
@@ -1504,7 +1695,7 @@ export class InMemoryWorkflowStorage
     stepName: string;
     signalName: string;
   }): Promise<JournalEntry | null> {
-    const entries = this.journal.get(this.journalKey(params.workflowId, params.stepName));
+    const entries = this.journal.get(this.journalKey(params.workflowId, params.stepName))?.entries;
     if (!entries) return null;
     const hit = entries.find(
       (e) =>
@@ -1626,13 +1817,9 @@ export class InMemoryWorkflowStorage
 
   /** Test helper: delete a specific journal entry (simulates crash-before-append). */
   deleteJournalEntry(workflowId: string, stepName: string, activityIndex: number): void {
-    const key = this.journalKey(workflowId, stepName);
-    const entries = this.journal.get(key);
-    if (!entries) return;
-    this.journal.set(
-      key,
-      entries.filter((e) => e.activityIndex !== activityIndex),
-    );
+    const slots = this.journal.get(this.journalKey(workflowId, stepName));
+    if (!slots) return;
+    this.filterEntries(slots, (e) => e.activityIndex !== activityIndex);
   }
 
   /** Test helper: get the raw workflow state. */
@@ -1649,6 +1836,10 @@ export class InMemoryWorkflowStorage
     this.attempts.clear();
     this.runHistory.clear();
     this.journal.clear();
+    this.journalKeys.clear();
+    this.sleepKeys.clear();
+    this.idempotencyIndex.clear();
+    this.children.clear();
     this.signalTokens.clear();
     this.streamChunks.clear();
   }

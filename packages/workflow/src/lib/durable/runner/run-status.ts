@@ -10,7 +10,12 @@ import {
   WorkflowFailedError,
   WorkflowTripwireError,
 } from "../durable-pipeline-error.ts";
-import { isCancelledRun, type StepState, type WorkflowState } from "../workflow-state.ts";
+import {
+  isCancelledRun,
+  type StepState,
+  type WorkflowState,
+  type WorkflowStatusSnapshot,
+} from "../workflow-state.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
 
 /**
@@ -99,15 +104,20 @@ export function rejectEndedRun(state: WorkflowState): void {
  * Stop a run that should no longer go on: rejects with the lock-loss reason
  * once `signal` is aborted, and with `WorkflowCancelledError` once the
  * stored run reads as cancelled.
+ *
+ * `observed` is the run's status as the caller's last write already read it
+ * (`null`: not found); given, it stands in for a `loadWorkflowStatus` read.
  */
 export async function assertRunActive(params: {
   readonly storage: WorkflowStorage;
   readonly workflowId: string;
   readonly signal?: AbortSignal;
+  readonly observed?: WorkflowStatusSnapshot | null;
 }): Promise<void> {
   const { storage, workflowId, signal } = params;
   if (signal?.aborted) throw signal.reason;
-  const status = await storage.loadWorkflowStatus(workflowId);
+  const status =
+    params.observed !== undefined ? params.observed : await storage.loadWorkflowStatus(workflowId);
   if (status !== null && isCancelledRun(status)) throw cancelledError(workflowId);
 }
 
