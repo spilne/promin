@@ -9,34 +9,26 @@
 //   - In-process sleep scanner so suspended runs resume after their
 //     wakeAt passes (without this, ctx.sleep is a no-op-on-restart)
 //   - Optional one-shot recovery on start (cancel/fail stale, resume
-//     orphaned)
+//     orphaned pending / running / compensating runs)
 // ---------------------------------------------------------------------------
 
 import type {
+  IWorkflowVersionRegistry,
   RecoveryStrategy,
   SignalScanner,
   SleepScanner,
+  WallClock,
   Workflow,
   WorkflowRunner,
   WorkflowStorage,
 } from "@promin/workflow";
-import { DefaultSignalScanner, DefaultSleepScanner } from "@promin/workflow";
+import {
+  DefaultSignalScanner,
+  DefaultSleepScanner,
+  SystemWallClock,
+  recoverWorkflows,
+} from "@promin/workflow";
 import { ZoryaWorkflows, type TriggerOptions, type TriggerResult } from "./zorya-workflows.ts";
-
-/**
- * Local mirror of RecoveryStrategy's internal opts shape (not exported by
- * @promin/workflow). Kept here so runRecovery can read its fields without
- * a structural cast at every site.
- */
-interface RecoveryOpts {
-  readonly staleThresholdMs: number | undefined;
-  readonly staleStatuses: ReadonlyArray<"pending" | "running" | "suspended">;
-  readonly staleAction:
-    | { readonly kind: "cancel" }
-    | { readonly kind: "fail"; readonly error: string };
-  readonly resumeRecent: boolean;
-  readonly resumeConcurrency: number;
-}
 
 export interface LocalWorkflowsConfig {
   storage: WorkflowStorage;
@@ -59,6 +51,8 @@ export interface LocalWorkflowsConfig {
    * "use the default-export" behaviour for unversioned workflows).
    */
   versionRegistry?: import("@promin/workflow").IWorkflowVersionRegistry;
+  /** Time source for start-up recovery. Default: `SystemWallClock`. */
+  clock?: WallClock;
 }
 
 export class LocalWorkflows extends ZoryaWorkflows {
@@ -69,6 +63,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
   private readonly sleepScanner?: SleepScanner;
   private readonly signalScanner?: SignalScanner;
   private readonly versionRegistry?: import("@promin/workflow").IWorkflowVersionRegistry;
+  private readonly clock: WallClock;
 
   constructor(config: LocalWorkflowsConfig) {
     super({
@@ -79,6 +74,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
     this.runner = config.runner;
     if (config.recovery !== undefined) this.recovery = config.recovery;
     if (config.versionRegistry !== undefined) this.versionRegistry = config.versionRegistry;
+    this.clock = config.clock ?? SystemWallClock;
 
     const scanIntervalMs = config.sleepScanIntervalMs ?? 2_000;
     if (scanIntervalMs > 0) {
@@ -195,63 +191,53 @@ export class LocalWorkflows extends ZoryaWorkflows {
   }
 
   /**
-   * Recovery using local definitions. Two phases:
-   *   1. Stale termination — delegated to `runner.recover` (uses storage
-   *      only; no registry needed for the stale phase).
-   *   2. Resume recent — done here, walking storage and looking up
-   *      definitions on this layer instead of going through the runner's
-   *      registry. This way the host doesn't have to also register every
-   *      workflow on the runner just to enable resume.
+   * Apply `strategy` with the runner's recovery sweep (`recoverWorkflows`,
+   * the one behind `runner.recover`), resolving definitions from this
+   * layer's `definitions` instead of a runner registry, so the host doesn't
+   * have to also register every workflow on the runner just to enable
+   * resume. Stale runs are terminated first; then every pending / running /
+   * compensating run nobody is driving is resumed through `runner.runSafe`
+   * (keyset-paged `listOrphanedRuns` when the storage has it, at most
+   * `resumeRecent({ concurrent })` in flight). Runs whose workflow this
+   * layer doesn't define are left alone.
    */
   private async runRecovery(strategy: RecoveryStrategy): Promise<void> {
-    const opts = (strategy as unknown as { _opts: RecoveryOpts })._opts;
-
-    // Phase 1 — stale termination via runner.recover with resume disabled.
-    if (opts.staleThresholdMs !== undefined) {
-      const stalePart = {
-        _opts: {
-          ...opts,
-          resumeRecent: false,
-        },
-      } as unknown as RecoveryStrategy;
-      await this.runner.recover(stalePart);
-    }
-
-    // Phase 2 — resume recent using local definitions.
-    if (opts.resumeRecent) {
-      const PAGE = 200;
-      const concurrency = opts.resumeConcurrency ?? 10;
-      for (const status of ["pending", "running"] as const) {
-        let offset = 0;
-        while (true) {
-          const page = await this.storage.listWorkflows({ status, limit: PAGE, offset });
-          if (page.length === 0) break;
-          for (let i = 0; i < page.length; i += concurrency) {
-            const batch = page.slice(i, i + concurrency);
-            for (const wf of batch) {
-              const def = this.definitions[wf.workflowName];
-              if (!def) continue; // unknown to this layer; nothing to resume
-              void this.runner.runSafe({
-                workflow: def,
-                workflowId: wf.workflowId,
-                input: wf.input,
-              });
-            }
-            if (i + concurrency < page.length) {
-              await new Promise<void>((r) => setTimeout(r, 0));
-            }
-          }
-          if (page.length < PAGE) break;
-          offset += PAGE;
-        }
-      }
-    }
+    await recoverWorkflows({
+      strategy,
+      storage: this.storage,
+      registry: definitionsRegistry(this.definitions),
+      clock: this.clock,
+      resume: (run) => this.runner.runSafe(run),
+    });
   }
 
   protected override async onStop(): Promise<void> {
     if (this.sleepScanner) await this.sleepScanner.stop();
     if (this.signalScanner) await this.signalScanner.stop();
   }
+}
+
+/**
+ * Read-only registry view over a name-keyed definition map: every version
+ * of a name resolves to its one local definition.
+ */
+function definitionsRegistry(
+  definitions: Readonly<Record<string, Workflow<unknown, unknown>>>,
+): IWorkflowVersionRegistry {
+  const readOnly = (): never => {
+    throw new Error("LocalWorkflows recovery registry is read-only");
+  };
+  return {
+    resolve: (name) => (Object.hasOwn(definitions, name) ? definitions[name] : undefined),
+    versions: (name) => {
+      const version = Object.hasOwn(definitions, name) ? definitions[name]!.version : undefined;
+      return version !== undefined ? [version] : [];
+    },
+    latest: (name) => (Object.hasOwn(definitions, name) ? definitions[name]!.version : undefined),
+    names: () => Object.keys(definitions),
+    register: readOnly,
+    deregister: readOnly,
+  };
 }
 
 function isTerminal(status: string): boolean {

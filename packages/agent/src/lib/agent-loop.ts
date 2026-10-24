@@ -1119,11 +1119,26 @@ export function agentLoop(config: AgentLoopConfig): AgentLoop {
 
       const builtWorkflow = sessionWorkflow.build();
 
-      await runner.start({
+      // Drive the session run until it suspends at its first `task-N` signal
+      // (or ends) before handing the session out: every later turn re-runs
+      // it under its lock, so the initial run must have released the lock
+      // by then.
+      const { error: startError } = await runner.runSafe({
         workflow: builtWorkflow,
         workflowId: sessionId,
         input: undefined,
       });
+      if (startError) {
+        const surfaced = surfaceAgentError(startError);
+        if (surfaced.kind !== "suspended") throw surfaced.error;
+      }
+      // `runSafe` settles inside the workflow engine's scheduler callback.
+      // Hand the session out from a fresh event-loop task instead, so a
+      // caller that blocks on its next call from there (Bun's
+      // `expect(...).resolves` spins a nested event loop) doesn't wait on a
+      // scheduler that can't dispatch until that callback returns. An
+      // event-loop hop, not time math, so it doesn't go through the clock.
+      await new Promise<void>((resolve) => setImmediate(resolve));
 
       // Restore turn counter from the journal so that recreating the session
       // object (e.g. server restart with persistent storage) doesn't re-deliver
