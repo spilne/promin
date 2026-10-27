@@ -61,7 +61,7 @@ postgresDescribe("PostgresWorkflowStorage round trips", { migrate }, (pg) => {
 
   async function locked(workflowId: string): Promise<{ fenceToken?: string }> {
     await storage.createWorkflow({ workflowId, workflowName: "t", input: {} });
-    const lock = await storage.tryLock(workflowId, 30_000);
+    const lock = await storage.tryLock({ workflowId, lockDurationMs: 30_000 });
     return { fenceToken: lock.token };
   }
 
@@ -69,49 +69,57 @@ postgresDescribe("PostgresWorkflowStorage round trips", { migrate }, (pg) => {
     it("checkpointStep with attempt rows", async () => {
       const guard = await locked("rt-ckpt");
       const n = await count(() =>
-        storage.checkpointStep(
-          {
+        storage.checkpointStep({
+          workflowId: "rt-ckpt",
+          stepName: "s",
+          outcome: { kind: "completed", result: 1, durationMs: 1, startedAt: at },
+          attempts: [1, 2].map((attempt) => ({
             workflowId: "rt-ckpt",
             stepName: "s",
-            outcome: { kind: "completed", result: 1, durationMs: 1, startedAt: at },
-            attempts: [1, 2].map((attempt) => ({
-              workflowId: "rt-ckpt",
-              stepName: "s",
-              attempt,
-              type: "execution" as const,
-              status: attempt === 2 ? ("completed" as const) : ("failed" as const),
-              durationMs: 1,
-              startedAt: at,
-              completedAt: at,
-            })),
-          },
+            attempt,
+            type: "execution" as const,
+            status: attempt === 2 ? ("completed" as const) : ("failed" as const),
+            durationMs: 1,
+            startedAt: at,
+            completedAt: at,
+          })),
           guard,
-        ),
+        }),
       );
       expect(n).toBe(1);
-      expect(await storage.loadStepAttempts("rt-ckpt", "s")).toHaveLength(2);
+      expect(await storage.loadStepAttempts({ workflowId: "rt-ckpt", stepName: "s" })).toHaveLength(
+        2,
+      );
     });
 
     it("saveStepResult, saveStepFailure, saveTaskResult, suspendWorkflow", async () => {
       const guard = await locked("rt-writes");
       const step = { workflowId: "rt-writes", durationMs: 1, startedAt: at };
       expect(
-        await count(() => storage.saveStepResult({ ...step, stepName: "a", result: 1 }, guard)),
+        await count(() => storage.saveStepResult({ ...step, stepName: "a", result: 1, guard })),
       ).toBe(1);
       expect(
-        await count(() => storage.saveStepFailure({ ...step, stepName: "b", error: "x" }, guard)),
+        await count(() => storage.saveStepFailure({ ...step, stepName: "b", error: "x", guard })),
       ).toBe(1);
       expect(
         await count(() =>
-          storage.saveTaskResult(
-            { workflowId: "rt-writes", stepName: "m", taskIndex: 0, result: 1 },
+          storage.saveTaskResult({
+            workflowId: "rt-writes",
+            stepName: "m",
+            taskIndex: 0,
+            result: 1,
             guard,
-          ),
+          }),
         ),
       ).toBe(1);
       expect(
         await count(() =>
-          storage.suspendWorkflow("rt-writes", "z", { status: "sleeping", wakeAt: at }, guard),
+          storage.suspendWorkflow({
+            workflowId: "rt-writes",
+            stepName: "z",
+            stepUpdate: { status: "sleeping", wakeAt: at },
+            guard,
+          }),
         ),
       ).toBe(1);
     });
@@ -121,36 +129,44 @@ postgresDescribe("PostgresWorkflowStorage round trips", { migrate }, (pg) => {
       const slot = { workflowId: "rt-journal", stepName: "j", activityName: "a" };
       expect(
         await count(() =>
-          storage.appendEntry(
-            { ...slot, activityIndex: 0, exit: { tag: "Success", value: 1 } },
+          storage.appendEntry({
+            ...slot,
+            activityIndex: 0,
+            exit: { tag: "Success", value: 1 },
             guard,
-          ),
+          }),
         ),
       ).toBe(1);
       expect(
         await count(() =>
-          storage.appendPendingEntry({ ...slot, activityIndex: 1, stepType: "activity" }, guard),
+          storage.appendPendingEntry({ ...slot, activityIndex: 1, stepType: "activity", guard }),
         ),
       ).toBe(1);
       expect(
         await count(() =>
-          storage.completePendingEntry(
-            { ...slot, activityIndex: 1, exit: { tag: "Success", value: 2 } },
+          storage.completePendingEntry({
+            ...slot,
+            activityIndex: 1,
+            exit: { tag: "Success", value: 2 },
             guard,
-          ),
+          }),
         ),
       ).toBe(1);
     });
 
     it("a rejected token still writes nothing (one statement, then the error read)", async () => {
       const guard = await locked("rt-stale");
-      await storage.releaseLock("rt-stale", guard);
+      await storage.releaseLock({ workflowId: "rt-stale", guard });
       const n = await count(() =>
         expect(
-          storage.saveStepResult(
-            { workflowId: "rt-stale", stepName: "a", result: 1, durationMs: 1, startedAt: at },
+          storage.saveStepResult({
+            workflowId: "rt-stale",
+            stepName: "a",
+            result: 1,
+            durationMs: 1,
+            startedAt: at,
             guard,
-          ),
+          }),
         ).rejects.toMatchObject({ _tag: "FenceTokenMismatchError" }),
       );
       expect(n).toBe(2);
@@ -223,17 +239,25 @@ postgresDescribe("PostgresWorkflowStorage round trips", { migrate }, (pg) => {
       });
       await storage.saveTaskResult({ workflowId: id, stepName: "map", taskIndex: 0, result: "a" });
       await storage.saveTaskFailure({ workflowId: id, stepName: "map", taskIndex: 1, error: "b" });
-      await storage.suspendWorkflow(id, "wait", {
-        status: "waiting_for_signal",
-        stepType: "signal",
-        signalName: "go",
-        signalTimeoutAt: new Date("2026-02-01T00:00:00.000Z"),
-        signalJsonSchema: { type: "object" },
+      await storage.suspendWorkflow({
+        workflowId: id,
+        stepName: "wait",
+        stepUpdate: {
+          status: "waiting_for_signal",
+          stepType: "signal",
+          signalName: "go",
+          signalTimeoutAt: new Date("2026-02-01T00:00:00.000Z"),
+          signalJsonSchema: { type: "object" },
+        },
       });
-      await storage.suspendWorkflow(id, "nap", {
-        status: "sleeping",
-        stepType: "sleep",
-        wakeAt: new Date("2026-03-01T00:00:00.000Z"),
+      await storage.suspendWorkflow({
+        workflowId: id,
+        stepName: "nap",
+        stepUpdate: {
+          status: "sleeping",
+          stepType: "sleep",
+          wakeAt: new Date("2026-03-01T00:00:00.000Z"),
+        },
       });
       await storage.saveStepCompensation({
         workflowId: id,
@@ -310,7 +334,7 @@ postgresDescribe("PostgresWorkflowStorage round trips", { migrate }, (pg) => {
         taskIndex: 0,
         result: 1,
       });
-      await storage.startFreshRun("rt-runs");
+      await storage.startFreshRun({ workflowId: "rt-runs" });
       await storage.saveStepResult({
         workflowId: "rt-runs",
         stepName: "fresh",
@@ -339,7 +363,7 @@ postgresDescribe("PostgresWorkflowStorage round trips", { migrate }, (pg) => {
         runSource: "manual",
       });
     }
-    await storage.completeWorkflow("sum-a", { out: 1 });
+    await storage.completeWorkflow({ workflowId: "sum-a", result: { out: 1 } });
 
     const full = await storage.listWorkflows({ name: "sum", orderBy: "createdAt" });
     const lean = await storage.listWorkflowSummaries({ name: "sum", orderBy: "createdAt" });

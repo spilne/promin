@@ -89,8 +89,9 @@ export interface WithLockOptions {
 export interface LockContext {
   /**
    * Fence token for the lock this callback holds, if the backend supports
-   * fencing. Thread into every mutating call (`storage.saveStepResult(..., { fenceToken })`)
-   * so a stale holder that wakes up after its lock expired is rejected.
+   * fencing. Pass it as the `guard` of every mutating call
+   * (`storage.saveStepResult({ ...result, guard: { fenceToken } })`) so a
+   * stale holder that wakes up after its lock expired is rejected.
    * `undefined` when the backend doesn't issue tokens.
    */
   readonly fenceToken?: FenceToken;
@@ -158,7 +159,7 @@ export async function withLock<T>(params: {
   let released = false;
 
   const heartbeatHandle = clock.setInterval(() => {
-    storage.heartbeat(workflowId, lockDurationMs, guard).then(
+    storage.heartbeat({ workflowId, lockDurationMs, guard }).then(
       () => {
         lastExtendedMs = clock.currentTimeMs();
       },
@@ -200,7 +201,7 @@ export async function withLock<T>(params: {
     released = true;
     heartbeatHandle.clear();
     try {
-      await storage.releaseLock(workflowId, guard);
+      await storage.releaseLock({ workflowId, guard });
     } catch {
       // Never let a failed release replace fn's result or error; the lock
       // expires on its own `lockDurationMs` after the last heartbeat.
@@ -223,10 +224,10 @@ function acquireLock(params: {
   const { storage, workflowId, lockDurationMs } = params;
   if (params.loadState && typeof storage.tryLockAndLoad === "function") {
     return storage
-      .tryLockAndLoad(workflowId, lockDurationMs)
+      .tryLockAndLoad({ workflowId, lockDurationMs })
       .then(({ locked, token, state }) =>
         locked ? { acquired: true, token, state } : { acquired: false },
       );
   }
-  return storage.tryLock(workflowId, lockDurationMs);
+  return storage.tryLock({ workflowId, lockDurationMs });
 }

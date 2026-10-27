@@ -17,6 +17,7 @@ import type { WorkflowState } from "../durable/workflow-state.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type { LeaderElection } from "./leader-election.ts";
 import { ResumeScanner } from "./resume-scanner.ts";
+import { hasCapability } from "../durable/storage/capabilities.ts";
 
 export interface SleepScannerConfig {
   /** Workflow storage to scan for expired sleeps. */
@@ -96,7 +97,7 @@ export class DefaultSleepScanner implements SleepScanner {
       resumeConcurrency: config.resumeConcurrency,
       find: async ({ afterWorkflowId }) => {
         const now = clock.now();
-        if (storage.listDueTimers) {
+        if (hasCapability(storage, "dueTimers")) {
           const rows = await storage.listDueTimers({
             now,
             limit: pageSize,

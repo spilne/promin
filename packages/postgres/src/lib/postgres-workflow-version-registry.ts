@@ -19,14 +19,14 @@ import type {
   Workflow,
   WorkflowDAG,
   IdempotencyConfig,
-  IWorkflowVersionRegistry,
+  WorkflowVersionRegistry,
   VersionRecord,
   VersionStatus,
 } from "@promin/workflow";
 import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { workflowRegistry } from "./schema.ts";
 
-export class PostgresWorkflowVersionRegistry implements IWorkflowVersionRegistry {
+export class PostgresWorkflowVersionRegistry implements WorkflowVersionRegistry {
   constructor(private readonly db: DrizzleDb) {}
 
   async register(

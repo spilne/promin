@@ -10,6 +10,7 @@ import { describe, it, expect } from "bun:test";
 import { succeed, tryPromise } from "@spilne/perfect-core";
 import { workflow, type Workflow } from "../../durable-pipeline.ts";
 import { InMemoryWorkflowStorage } from "../../in-memory-storage.ts";
+import type { SuspendWorkflowParams } from "../../workflow-storage.ts";
 import { FakeWallClock } from "../../../shared/wall-clock.ts";
 import {
   createWorkflowRunner,
@@ -98,7 +99,7 @@ describe("version drain — keeps the runner's executor and clock", () => {
 
     const state = await storage.loadWorkflow("d-1");
     expect(state?.steps["b"]?.completedAt?.toISOString()).toBe("2026-01-01T00:01:00.000Z");
-    const attempts = await storage.loadStepAttempts("d-1");
+    const attempts = await storage.loadStepAttempts({ workflowId: "d-1" });
     expect(attempts.find((a) => a.stepName === "b")?.executorId).toBe("exec-1");
   });
 });
@@ -130,7 +131,7 @@ describe("child workflows — inherit the parent's clock and executor", () => {
     const done = await runner.runSafe({ workflow: parent, workflowId: "sub-1", input: 21 });
     expect(done.error).toBeNull();
     expect(done.data).toBe(42);
-    const attempts = await storage.loadStepAttempts("sub-child-1");
+    const attempts = await storage.loadStepAttempts({ workflowId: "sub-child-1" });
     expect(attempts.find((a) => a.stepName === "double")?.executorId).toBe("exec-1");
   });
 
@@ -156,7 +157,7 @@ describe("child workflows — inherit the parent's clock and executor", () => {
       "2026-01-01T00:00:05.000Z",
     );
     expect(seen.map((r) => `${r.version}:${r.stepName}`)).toEqual(["p1:spawn", "c2:double"]);
-    const attempts = await storage.loadStepAttempts("j-child-1");
+    const attempts = await storage.loadStepAttempts({ workflowId: "j-child-1" });
     expect(attempts.find((a) => a.stepName === "double")?.executorId).toBe("exec-1");
   });
 
@@ -305,14 +306,12 @@ describe("fenced step-side writes — a stale lease cannot suspend the run", () 
    * write arrives with a stale fence token.
    */
   class LeaseLostBeforeSuspend extends InMemoryWorkflowStorage {
-    override async suspendWorkflow(
-      ...args: Parameters<InMemoryWorkflowStorage["suspendWorkflow"]>
-    ): Promise<void> {
-      const [workflowId] = args;
-      await this.releaseLock(workflowId);
-      const taken = await this.tryLock(workflowId, 60_000);
+    override async suspendWorkflow(params: SuspendWorkflowParams): Promise<void> {
+      const { workflowId } = params;
+      await this.releaseLock({ workflowId });
+      const taken = await this.tryLock({ workflowId, lockDurationMs: 60_000 });
       if (!taken.acquired) throw new Error("could not take the lock");
-      return super.suspendWorkflow(...args);
+      return super.suspendWorkflow(params);
     }
   }
 

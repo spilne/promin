@@ -13,7 +13,7 @@
 // a v2 experiment is dispatched.
 // ---------------------------------------------------------------------------
 
-import { createCoordinator, WorkflowVersionRegistry } from "@promin/workflow";
+import { createCoordinator, InMemoryWorkflowVersionRegistry } from "@promin/workflow";
 import { buildStack } from "./shared.ts";
 import { buildModelWorkflow, type ModelInput } from "./workflow.ts";
 
@@ -21,7 +21,7 @@ const SUBMIT_INTERVAL_MS = Number(process.env["SUBMIT_INTERVAL_MS"] ?? 10_000);
 
 const { storage, stepQueue, close } = await buildStack();
 
-const registry = new WorkflowVersionRegistry();
+const registry = new InMemoryWorkflowVersionRegistry();
 registry.register(buildModelWorkflow("1"));
 registry.register(buildModelWorkflow("2"));
 

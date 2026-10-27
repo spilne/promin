@@ -153,7 +153,7 @@ export class DistributedWorkflows extends ZoryaWorkflows {
       if (this.fallback) return this.fallback.rerun(workflowId);
       throw new Error(`rerun: workflow "${workflowId}" not found`);
     }
-    await this.storage.startFreshRun(workflowId);
+    await this.storage.startFreshRun({ workflowId });
     // Re-dispatch with the same id; runner.submit is idempotent on workflowId
     // (it sees the existing row and resumes).
     await this.dispatch(state.workflowName, state.input, {

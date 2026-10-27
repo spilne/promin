@@ -171,7 +171,7 @@ describe("StepQueueExecutor — abandoned waits", () => {
     const { clock, storage, box } = await setup();
     await advancePolls({ clock, done: () => box.result !== undefined, maxMs: 300 });
     expect(box.result).toBeUndefined();
-    await storage.cancelWorkflow("wf");
+    await storage.cancelWorkflow({ workflowId: "wf" });
 
     await advancePolls({ clock, done: () => box.result !== undefined, maxMs: 1_000 });
     expect(box.result).toMatchObject({

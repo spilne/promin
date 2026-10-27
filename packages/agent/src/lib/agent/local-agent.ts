@@ -53,7 +53,7 @@ import {
 import { createLayeredMemoryTool } from "../tools/layered-memory-tools.ts";
 import { createCallAgentTool, createFindAgentTool } from "../network/runtime.ts";
 import { frameTask } from "./frame-task.ts";
-import { completeSignal, isActivityJournalStorage } from "@promin/workflow";
+import { completeSignal, hasCapability } from "@promin/workflow";
 import type { ApprovalDecision } from "../tool.ts";
 import { filterToolsByCapability } from "../tool.ts";
 import { resolveLocalAgent } from "../registry/resolve-local-agent.ts";
@@ -874,7 +874,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     captureIn?: RunCapture,
   ): Promise<{ promise: Promise<AgentResult>; capture: RunCapture }> {
     const storage = this.deps.runner.storage;
-    if (!isActivityJournalStorage(storage)) {
+    if (!hasCapability(storage, "journal")) {
       throw new Error(
         "LocalAgentThread.resume: storage doesn't support journaled signal delivery. " +
           "Approvals require a journaled storage backend (in-memory, sqlite, postgres).",

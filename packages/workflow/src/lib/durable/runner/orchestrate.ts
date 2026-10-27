@@ -29,11 +29,7 @@ import {
   type WorkflowState,
   type WorkflowStatus,
 } from "../workflow-state.ts";
-import {
-  isCompensationLedgerStorage,
-  isTripwireCapableStorage,
-  type FenceGuard,
-} from "../workflow-storage.ts";
+import { hasCapability, type FenceGuard } from "../workflow-storage.ts";
 import type { Workflow } from "../durable-pipeline.ts";
 import { compensateWorkflow } from "./compensation.ts";
 import type { DagExecutionContext } from "./dag-context.ts";
@@ -264,10 +260,10 @@ async function runChain(params: {
       });
     } catch (err) {
       if (errorTag(err) !== "WorkflowContinueAsNewError") throw err;
-      await ctx.storage.startFreshRun(
+      await ctx.storage.startFreshRun({
         workflowId,
-        lock.fenceToken ? { fenceToken: lock.fenceToken } : undefined,
-      );
+        guard: lock.fenceToken ? { fenceToken: lock.fenceToken } : undefined,
+      });
       params.queries.reset();
       input = (err as WorkflowContinueAsNewError).nextInput;
     }
@@ -299,18 +295,16 @@ export async function runChildWorkflow(params: {
 }): Promise<unknown> {
   const { runtime, workflow, workflowId, input } = params;
   const def = workflow._definition;
-  const created = await runtime.storage.createWorkflow(
-    {
-      workflowId,
-      workflowName: workflow.name,
-      input,
-      workflowType: def.type,
-      parentWorkflowId: params.parentWorkflowId,
-      metadata: def.metadata,
-      version: workflow.version,
-    },
-    params.parentGuard,
-  );
+  const created = await runtime.storage.createWorkflow({
+    workflowId,
+    workflowName: workflow.name,
+    input,
+    workflowType: def.type,
+    parentWorkflowId: params.parentWorkflowId,
+    metadata: def.metadata,
+    version: workflow.version,
+    guard: params.parentGuard,
+  });
   // A child that failed is run again from scratch when its parent step is
   // retried; a completed, cancelled or tripwired child answers as stored.
   const existing = created.created ? undefined : created.existing;
@@ -350,7 +344,7 @@ async function runOneOrchestrationCycle(cycle: {
     if (cached) return cached.result;
     const onExpiry = idempotency.onExpiry ?? "fresh-run";
     if (onExpiry === "fresh-run" && (state.status === "completed" || state.status === "failed")) {
-      await ctx.storage.startFreshRun(workflowId, guard);
+      await ctx.storage.startFreshRun({ workflowId, guard });
       state = await ctx.storage.loadWorkflow(workflowId);
     }
   }
@@ -409,7 +403,7 @@ async function runOneOrchestrationCycle(cycle: {
       rejectEndedRun(state);
       return completedRunResult({ ctx, state });
     }
-    await ctx.storage.startFreshRun(workflowId, guard);
+    await ctx.storage.startFreshRun({ workflowId, guard });
     state = await ctx.storage.loadWorkflow(workflowId);
     loaded.state = state;
   }
@@ -499,7 +493,7 @@ async function runOneOrchestrationCycle(cycle: {
         clock,
         workflowId,
         operation: "completeWorkflow",
-        write: () => ctx.storage.completeWorkflow(workflowId, finalResult, guard),
+        write: () => ctx.storage.completeWorkflow({ workflowId, result: finalResult, guard }),
       });
       await assertNotCancelled({ ctx, workflowId });
       await fireHook({
@@ -522,7 +516,7 @@ async function runOneOrchestrationCycle(cycle: {
     if ("tripwire" in dagResult) {
       const { stepName, reason } = dagResult;
       const storage = ctx.storage;
-      if (!isTripwireCapableStorage(storage)) {
+      if (!hasCapability(storage, "tripwire")) {
         throw new TripwireStorageMissingError({
           workflowId,
           stepName,
@@ -537,7 +531,7 @@ async function runOneOrchestrationCycle(cycle: {
         clock,
         workflowId,
         operation: "tripwireWorkflow",
-        write: () => storage.tripwireWorkflow(workflowId, reason, guard),
+        write: () => storage.tripwireWorkflow({ workflowId, reason, guard }),
       });
       await assertNotCancelled({ ctx, workflowId });
       await fireHook({
@@ -642,17 +636,19 @@ async function rollBackAndFail(params: {
   const lastStepError = params.error;
   const storage = ctx.storage;
 
-  if (!params.resumed && isCompensationLedgerStorage(storage)) {
+  if (!params.resumed && hasCapability(storage, "compensationLedger")) {
     let entered = false;
     await checkpointWrite({
       clock,
       workflowId,
       operation: "beginCompensation",
       write: async () => {
-        entered = await storage.beginCompensation(
-          { workflowId, error: errorMsg, ...(failedTag !== undefined && { errorTag: failedTag }) },
+        entered = await storage.beginCompensation({
+          workflowId,
+          error: errorMsg,
+          ...(failedTag !== undefined && { errorTag: failedTag }),
           guard,
-        );
+        });
       },
     });
     if (!entered) {
@@ -696,7 +692,10 @@ async function rollBackAndFail(params: {
     workflowId,
     operation: "failWorkflow",
     write: () =>
-      ctx.storage.failWorkflow(workflowId, errorMsg, guard, {
+      ctx.storage.failWorkflow({
+        workflowId,
+        error: errorMsg,
+        guard,
         ...(failedTag !== undefined && { errorTag: failedTag }),
       }),
   });

@@ -13,7 +13,8 @@ import { describe, it, expect } from "bun:test";
 import { JournalStorageMissingError, runJournaledStep } from "../journaled-step.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import { AmbiguousActivityOutcome } from "../durable-pipeline-error.ts";
-import type { ActivityJournalStorage, JournalEntry } from "../activity-journal.ts";
+import type { JournalEntry, JournalStore } from "../activity-journal.ts";
+import type { LoadJournalParams } from "../workflow-storage.ts";
 
 // ---------------------------------------------------------------------------
 // Crash-injecting storage — stamps a `pending` row like the real engine, then
@@ -51,17 +52,14 @@ class CrashBetweenPhasesStorage extends InMemoryWorkflowStorage {
 // recording without the two-phase guarantee.
 // ---------------------------------------------------------------------------
 
-class SinglePhaseOnlyStorage implements Pick<
-  ActivityJournalStorage,
-  "loadJournal" | "appendEntry"
-> {
+class SinglePhaseOnlyStorage implements Pick<JournalStore, "loadJournal" | "appendEntry"> {
   private readonly entries = new Map<string, JournalEntry[]>();
 
   private key(workflowId: string, stepName: string): string {
     return `${workflowId}\x00${stepName}`;
   }
 
-  async loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]> {
+  async loadJournal({ workflowId, stepName }: LoadJournalParams): Promise<JournalEntry[]> {
     return this.entries.get(this.key(workflowId, stepName)) ?? [];
   }
 
@@ -133,7 +131,7 @@ describe("journaled activity — two-phase record (happy path)", () => {
         return yield* ctx.activity("a", async () => 1);
       },
     });
-    const journal = await storage.loadJournal("wf-phase", "step");
+    const journal = await storage.loadJournal({ workflowId: "wf-phase", stepName: "step" });
     expect(journal).toHaveLength(1);
     expect(journal[0]!.phase ?? "completed").toBe("completed");
     expect(journal[0]!.stepType).toBe("activity");
@@ -165,7 +163,7 @@ describe("journaled activity — crash between phases (non-idempotent)", () => {
     ).rejects.toThrow("simulated worker crash");
 
     // Confirm the row is pending.
-    const journal = await storage.loadJournal("wf-crash", "step");
+    const journal = await storage.loadJournal({ workflowId: "wf-crash", stepName: "step" });
     expect(journal).toHaveLength(1);
     expect(journal[0]!.phase).toBe("pending");
     expect(ranTimes).toBe(1);
@@ -277,7 +275,7 @@ describe("journaled activity — crash between phases (idempotent)", () => {
     expect(replay).toBe(20);
 
     // Journal row is now completed with the re-run result.
-    const journal = await storage.loadJournal("wf-idem", "step");
+    const journal = await storage.loadJournal({ workflowId: "wf-idem", stepName: "step" });
     expect(journal).toHaveLength(1);
     expect(journal[0]!.phase).toBe("completed");
     expect(journal[0]!.exit).toEqual({ tag: "Success", value: 20 });
@@ -352,7 +350,7 @@ describe("journaled activity — failure during first phase", () => {
       }),
     ).rejects.toThrow("business rule violated");
 
-    const journal = await storage.loadJournal("wf-fail", "step");
+    const journal = await storage.loadJournal({ workflowId: "wf-fail", stepName: "step" });
     expect(journal).toHaveLength(1);
     expect(journal[0]!.phase).toBe("completed");
     expect(journal[0]!.exit?.tag).toBe("Failure");
@@ -384,7 +382,7 @@ describe("journaled activity — storage without the two-phase record", () => {
         prev: undefined,
         workflowId: "wf-legacy",
         stepName: "step",
-        storage: storage as unknown as ActivityJournalStorage,
+        storage: storage as unknown as JournalStore,
         body: function* (ctx) {
           return yield* ctx.activity("a", async () => {
             ran++;
@@ -395,6 +393,6 @@ describe("journaled activity — storage without the two-phase record", () => {
     ).rejects.toBeInstanceOf(JournalStorageMissingError);
 
     expect(ran).toBe(0);
-    expect(await storage.loadJournal("wf-legacy", "step")).toEqual([]);
+    expect(await storage.loadJournal({ workflowId: "wf-legacy", stepName: "step" })).toEqual([]);
   });
 });

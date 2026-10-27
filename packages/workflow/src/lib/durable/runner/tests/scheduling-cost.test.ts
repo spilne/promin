@@ -5,7 +5,7 @@ import { InMemoryWorkflowStorage } from "../../in-memory-storage.ts";
 import type { DagNode } from "../../workflow-dag.ts";
 import { createWorkflowRunner, executeWorkflowDag } from "../../workflow-runner.ts";
 import type { WorkflowRunEvent } from "../../workflow-state.ts";
-import type { WorkflowStorage } from "../../workflow-storage.ts";
+import type { WorkflowStorage, NotifyStepStartedParams } from "../../workflow-storage.ts";
 
 const nextMacrotask = () => new Promise<void>((r) => setImmediate(r));
 
@@ -151,11 +151,14 @@ class GatedNotifyStorage extends InMemoryWorkflowStorage {
   readonly pending: { stepName: string; release: () => void }[] = [];
   autoRelease = false;
 
-  override async notifyStepStarted(workflowId: string, stepName: string): Promise<void> {
+  override async notifyStepStarted({
+    workflowId,
+    stepName,
+  }: NotifyStepStartedParams): Promise<void> {
     if (!this.autoRelease) {
       await new Promise<void>((release) => this.pending.push({ stepName, release }));
     }
-    super.notifyStepStarted(workflowId, stepName);
+    super.notifyStepStarted({ workflowId, stepName });
   }
 
   releaseAll(): void {
@@ -232,7 +235,10 @@ describe("step-started notices", () => {
     };
     const storage = new InMemoryWorkflowStorage();
     let calls = 0;
-    storage.notifyStepStarted = (_workflowId: string, stepName: string): any => {
+    storage.notifyStepStarted = ({
+      workflowId: _workflowId,
+      stepName,
+    }: NotifyStepStartedParams): any => {
       calls++;
       if (stepName === "a") throw new Error("bus down (sync)");
       return Promise.reject(new Error("bus down (async)"));

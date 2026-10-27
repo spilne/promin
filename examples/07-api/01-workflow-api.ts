@@ -54,7 +54,11 @@ async function handleGetStatus(userId: string): Promise<{ status: number; body?:
 // POST /webhooks/provider — receive verification callback
 async function handleProviderWebhook(checkId: string, passed: boolean) {
   const workflowId = findWorkflowByCheckId(checkId);
-  await storage.deliverSignal(workflowId, "provider-callback", { passed });
+  await storage.deliverSignal({
+    workflowId,
+    signalName: "provider-callback",
+    payload: { passed },
+  });
   return { status: 200 };
 }
 

@@ -20,7 +20,7 @@
 // need to import `buildVideoWorkflow`.
 // ---------------------------------------------------------------------------
 
-import { createCoordinator, WorkflowVersionRegistry } from "@promin/workflow";
+import { createCoordinator, InMemoryWorkflowVersionRegistry } from "@promin/workflow";
 import { buildStack } from "./shared.ts";
 import { buildVideoWorkflow, type VideoInput } from "./workflow.ts";
 
@@ -30,7 +30,7 @@ const { storage, stepQueue, close } = await buildStack();
 
 // Registry holds pure Workflow definitions — storage lives on the runner /
 // coordinator side now, not on the registry (post-c1ds cleanup).
-const registry = new WorkflowVersionRegistry();
+const registry = new InMemoryWorkflowVersionRegistry();
 registry.register(buildVideoWorkflow());
 
 // Routing lives on the step itself via `needs` (see workflow.ts).

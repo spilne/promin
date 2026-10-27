@@ -112,7 +112,7 @@ describe("a storage write that fails once", () => {
     const state = (await storage.loadWorkflow("b-0"))!;
     expect(state.status).toBe("completed");
     expect(state.steps["charge"]!.status).toBe("completed");
-    const attempts = await storage.loadStepAttempts("b-0", "charge");
+    const attempts = await storage.loadStepAttempts({ workflowId: "b-0", stepName: "charge" });
     expect(attempts.map((a) => a.status)).toEqual(["completed"]);
   });
 
@@ -129,7 +129,7 @@ describe("a storage write that fails once", () => {
     const state = (await storage.loadWorkflow("b-0f"))!;
     expect(state.status).toBe("failed");
     expect(state.steps["pay"]!.errorTag).toBe("Boom");
-    const attempts = await storage.loadStepAttempts("b-0f", "pay");
+    const attempts = await storage.loadStepAttempts({ workflowId: "b-0f", stepName: "pay" });
     expect(attempts.map((a) => a.status)).toEqual(["failed"]);
   });
 
@@ -171,7 +171,7 @@ describe("a storage write that fails once", () => {
     expect(r.error).toBeNull();
     expect(charges).toBe(1);
     expect(writes.failures).toBe(1);
-    const attempts = await storage.loadStepAttempts("b-2", "charge");
+    const attempts = await storage.loadStepAttempts({ workflowId: "b-2", stepName: "charge" });
     expect(attempts.map((a) => a.status)).toEqual(["completed"]);
   });
 
@@ -357,7 +357,7 @@ describe("lost lock", () => {
     const gate = deferred();
     const ran: string[] = [];
     let heartbeats = 0;
-    storage.heartbeat = async (workflowId) => {
+    storage.heartbeat = async ({ workflowId }) => {
       heartbeats++;
       throw new FenceTokenMismatchError({
         workflowId,
@@ -411,8 +411,10 @@ describe("withLock", () => {
     });
     await waitFor(() => signal !== undefined);
     // Another holder takes the lock under a new fence token.
-    await storage.releaseLock("wl-1");
-    expect((await storage.tryLock("wl-1", 1_000)).acquired).toBe(true);
+    await storage.releaseLock({ workflowId: "wl-1" });
+    expect((await storage.tryLock({ workflowId: "wl-1", lockDurationMs: 1_000 })).acquired).toBe(
+      true,
+    );
     expect(signal!.aborted).toBe(false);
     clock.advance(10);
     await waitFor(() => signal!.aborted);

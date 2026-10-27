@@ -48,7 +48,7 @@ describe("SqliteWorkflowStorage — ctx.child with a suspending child", () => {
       .run({ workflow: parent, workflowId: "par-sql", input: { v: 4 } })
       .catch(() => undefined);
 
-    const [entry] = await storage.loadJournal("par-sql", "run");
+    const [entry] = await storage.loadJournal({ workflowId: "par-sql", stepName: "run" });
     expect(entry!.stepType).toBe("child");
     expect(entry!.phase).toBe("pending");
     const parentState = await storage.loadWorkflow("par-sql");
@@ -58,7 +58,9 @@ describe("SqliteWorkflowStorage — ctx.child with a suspending child", () => {
     clock.advance(60_000);
     expect(await runner.run({ workflow: parent, workflowId: "par-sql", input: { v: 4 } })).toBe(8);
     expect(childRuns).toBe(1);
-    expect((await storage.loadJournal("par-sql", "run"))[0]!.exit).toEqual({
+    expect(
+      (await storage.loadJournal({ workflowId: "par-sql", stepName: "run" }))[0]!.exit,
+    ).toEqual({
       tag: "Success",
       value: 8,
     });
@@ -111,14 +113,14 @@ describe("SqliteWorkflowStorage — ctx.child with a suspending child", () => {
     void sleepScanner.start();
     void signalScanner.start();
 
-    await storage.deliverSignal("kid", "approve", true);
+    await storage.deliverSignal({ workflowId: "kid", signalName: "approve", payload: true });
     await waitFor(async () => {
       if (clock.pendingCount() > 0) clock.advance(1_000);
       return (await storage.loadWorkflow("par"))?.status === "completed";
     });
     expect((await storage.loadWorkflow("kid"))?.status).toBe("completed");
     expect((await storage.loadWorkflow("par"))?.result).toBe(41);
-    expect((await storage.loadJournal("par", "run"))[0]!.exit).toEqual({
+    expect((await storage.loadJournal({ workflowId: "par", stepName: "run" }))[0]!.exit).toEqual({
       tag: "Success",
       value: 40,
     });

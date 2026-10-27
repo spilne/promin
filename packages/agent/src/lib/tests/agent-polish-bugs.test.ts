@@ -126,7 +126,7 @@ describe("turn durationMs — journaled start time", () => {
     // Journal lives under the workflowId keyed by step name. Look up the
     // activity journal directly and check for an lc-0-message entry with a
     // numeric success value.
-    const journal = await storage.loadJournal("dur-2", "conversation");
+    const journal = await storage.loadJournal({ workflowId: "dur-2", stepName: "conversation" });
     const lcEntry = journal.find((e) => e.activityName === "lc-0-message");
     expect(lcEntry).toBeDefined();
     expect(lcEntry!.exit?.tag).toBe("Success");
@@ -201,7 +201,10 @@ describe("onApprovalRequired hook — journaled-activity contract", () => {
     // Mechanism invariant: the decision is in the activity journal under
     // approval-${callId}, with the hook's return value journaled. Future
     // replay reads the journaled value and skips the hook entirely.
-    const journal = await storage.loadJournal("approval-replay", "conversation");
+    const journal = await storage.loadJournal({
+      workflowId: "approval-replay",
+      stepName: "conversation",
+    });
     const approval = journal.find((e) => e.activityName === "approval-call-1");
     expect(approval).toBeDefined();
     expect(approval!.exit?.tag).toBe("Success");

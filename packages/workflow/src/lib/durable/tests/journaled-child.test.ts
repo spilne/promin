@@ -140,7 +140,7 @@ describe("ctx.child", () => {
       runner.run({ workflow: parent, workflowId: "fail-par-1", input: undefined }),
     ).rejects.toThrow();
 
-    const journal = await retaining.loadJournal("fail-par-1", "run");
+    const journal = await retaining.loadJournal({ workflowId: "fail-par-1", stepName: "run" });
     const childEntry = journal.find((e) => e.stepType === "child");
     expect(childEntry).toBeDefined();
     expect(childEntry?.exit?.tag).toBe("Failure");

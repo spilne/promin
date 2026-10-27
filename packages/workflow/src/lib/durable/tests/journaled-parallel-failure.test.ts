@@ -48,7 +48,7 @@ describe("ctx.parallel — failure semantics", () => {
     // Let the straggler settle so its journal write lands before we inspect.
     await new Promise((r) => setTimeout(r, 50));
     expect(ranOther.value).toBe(true);
-    const journal = await storage.loadJournal("wf-first-fail", "s");
+    const journal = await storage.loadJournal({ workflowId: "wf-first-fail", stepName: "s" });
     const slower = journal.find((e) => e.activityName === "slower");
     expect(slower).toBeDefined();
     expect(slower!.exit?.tag).toBe("Success");

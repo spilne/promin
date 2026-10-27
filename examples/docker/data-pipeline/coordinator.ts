@@ -14,7 +14,7 @@
 // rather than re-running the workflow from scratch.
 // ---------------------------------------------------------------------------
 
-import { createCoordinator, WorkflowVersionRegistry } from "@promin/workflow";
+import { createCoordinator, InMemoryWorkflowVersionRegistry } from "@promin/workflow";
 import { buildStack } from "./shared.ts";
 import { buildDataPipelineWorkflow, type DatasetInput } from "./workflow.ts";
 
@@ -22,7 +22,7 @@ const SUBMIT_INTERVAL_MS = Number(process.env["SUBMIT_INTERVAL_MS"] ?? 8_000);
 
 const { storage, stepQueue, close } = await buildStack();
 
-const registry = new WorkflowVersionRegistry();
+const registry = new InMemoryWorkflowVersionRegistry();
 registry.register(buildDataPipelineWorkflow());
 
 const coordinator = createCoordinator({

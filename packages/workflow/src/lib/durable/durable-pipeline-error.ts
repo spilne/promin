@@ -114,7 +114,7 @@ export class WorkflowSuspendedError extends TaggedError("WorkflowSuspendedError"
  * Signal that the workflow body is requesting a "continue-as-new" — terminate
  * the current execution and start a fresh run under the same workflowId with
  * new input. Thrown by `ctx.continueAsNew(input)` inside a journaled step
- * body. The runner catches it, calls `storage.startFreshRun(workflowId)`,
+ * body. The runner catches it, calls `storage.startFreshRun({ workflowId })`,
  * and re-runs the workflow from scratch with the carried input.
  *
  * Not a failure — the original execution terminates cleanly. Compensations

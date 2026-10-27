@@ -94,7 +94,7 @@ describe("ctx.parallel — journal indexing", () => {
       },
     });
 
-    const journal = await storage.loadJournal("wf-idx", "s");
+    const journal = await storage.loadJournal({ workflowId: "wf-idx", stepName: "s" });
     // Top-level "a"
     const a = journal.find((e) => e.activityName === "a")!;
     expect(a.activityIndex).toBe(0);
@@ -120,7 +120,7 @@ describe("ctx.parallel — journal indexing", () => {
       },
     });
 
-    const journal = await storage.loadJournal("wf-resume", "s");
+    const journal = await storage.loadJournal({ workflowId: "wf-resume", stepName: "s" });
     const after = journal.find((e) => e.activityName === "after")!;
     // Parallel consumed slot 0; its two branches share 0 with paths "/0.0"/"/1.0";
     // the next top-level yield takes slot 1.
@@ -150,7 +150,7 @@ describe("ctx.parallel — nested parallel", () => {
       },
     });
 
-    const journal = await storage.loadJournal("wf-nested", "s");
+    const journal = await storage.loadJournal({ workflowId: "wf-nested", stepName: "s" });
     const byName = new Map(journal.map((e) => [e.activityName, e]));
 
     // All four entries share the outer parallel's activity_index (0).
@@ -184,7 +184,7 @@ describe("ctx.parallel — sub-generator branches with multiple yields", () => {
       },
     });
 
-    const journal = await storage.loadJournal("wf-sub", "s");
+    const journal = await storage.loadJournal({ workflowId: "wf-sub", stepName: "s" });
     const byName = new Map(journal.map((e) => [e.activityName, e]));
 
     // multiStep runs in branch 0: first yield → "/0.0", second → "/0.1".

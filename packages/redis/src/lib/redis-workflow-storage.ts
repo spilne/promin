@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
-// RedisWorkflowStorage — Redis-backed WorkflowStorage, StepAttemptStorage,
-// CompensationLedgerStorage and ActivityJournalStorage.
+// RedisWorkflowStorage — Redis-backed WorkflowStorage, StepAttemptStore,
+// CompensationLedgerStore and JournalStore.
 // ---------------------------------------------------------------------------
 //
 // Runs on a standalone Redis and on Redis Cluster. Every key of a workflow
@@ -30,13 +30,11 @@
 
 import type {
   WorkflowStorage,
-  StepAttemptStorage,
-  CompensationLedgerStorage,
-  StepCompensationOutcome,
-  ActivityJournalStorage,
+  StepAttemptStore,
+  CompensationLedgerStore,
+  JournalStore,
   JournalEntry,
   JournalExit,
-  JournalSlot,
   CompletePendingResult,
   FenceGuard,
   WorkflowOrderBy,
@@ -44,6 +42,35 @@ import type {
   StreamChunk,
   WorkflowWakeup,
   OrphanedRun,
+  AppendEntryParams,
+  AppendPendingEntryParams,
+  AppendStreamChunkParams,
+  BatchSaveStepResultsParams,
+  BeginCompensationParams,
+  CancelWorkflowParams,
+  CompletePendingEntryParams,
+  CompleteWorkflowParams,
+  CreateWorkflowParams,
+  DeliverSignalParams,
+  DiscardJournalEntriesParams,
+  FailWorkflowParams,
+  HeartbeatParams,
+  LoadJournalParams,
+  LoadRunHistoryParams,
+  LoadStepAttemptsParams,
+  ReleaseLockParams,
+  ResetStepsParams,
+  SaveStepAttemptParams,
+  SaveStepCompensationParams,
+  SaveStepFailureParams,
+  SaveStepResultParams,
+  SaveTaskFailureParams,
+  SaveTaskResultParams,
+  SetWorkflowMetadataParams,
+  StartFreshRunParams,
+  SuspendWorkflowParams,
+  TripwireWorkflowParams,
+  TryLockParams,
 } from "@promin/workflow";
 import type {
   WorkflowState,
@@ -68,6 +95,7 @@ import {
   decodeRunSource,
   withoutCompensationLedger,
 } from "@promin/workflow";
+import { applyMetadataPatch, sortWorkflowRows } from "@promin/workflow/storage-kit";
 import type { RedisStoreClient } from "./redis-client.ts";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { RedisWorkflowKeys, escapeGlob } from "./redis-workflow-keys.ts";
@@ -227,7 +255,7 @@ function fenceMismatch(params: {
 }
 
 export class RedisWorkflowStorage
-  implements WorkflowStorage, StepAttemptStorage, CompensationLedgerStorage, ActivityJournalStorage
+  implements WorkflowStorage, StepAttemptStore, CompensationLedgerStore, JournalStore
 {
   private readonly redis: RedisStoreClient;
   private readonly keys: RedisWorkflowKeys;
@@ -370,23 +398,12 @@ export class RedisWorkflowStorage
 
   // -- Workflow CRUD --------------------------------------------------------
 
-  async createWorkflow(
-    params: {
-      workflowId: string;
-      workflowName: string;
-      input: unknown;
-      workflowType?: string;
-      parentWorkflowId?: string;
-      namespace?: string;
-      metadata?: Record<string, unknown>;
-      version?: string;
-      runSource?: RunSource;
-      runSourceId?: string;
-      idempotencyKey?: string;
-      idempotencyExpiresAt?: Date;
-    },
-    guard?: FenceGuard,
-  ): Promise<{ created: true } | { created: false; existing: WorkflowState }> {
+  async createWorkflow({
+    guard,
+    ...params
+  }: CreateWorkflowParams): Promise<
+    { created: true } | { created: false; existing: WorkflowState }
+  > {
     if (guard?.fenceToken && params.parentWorkflowId === undefined) {
       throw new Error("createWorkflow: a fenced create needs parentWorkflowId");
     }
@@ -460,7 +477,7 @@ export class RedisWorkflowStorage
     });
     if (!applied) {
       const existing = await this.loadWorkflow(params.workflowId);
-      if (!existing) return this.createWorkflow(params, guard); // purged in between
+      if (!existing) return this.createWorkflow({ ...params, guard }); // purged in between
       // A create that crashed before indexing its row is healed by the retry.
       await this.repairIndex(params.workflowId);
       return { created: false, existing };
@@ -482,7 +499,7 @@ export class RedisWorkflowStorage
             const existing = await this.loadWorkflow(winnerId);
             if (existing) return { created: false, existing };
           }
-          return this.createWorkflow(params, guard);
+          return this.createWorkflow({ ...params, guard });
         }
       }
     }
@@ -632,7 +649,18 @@ export class RedisWorkflowStorage
     }
 
     const rows = await this.matchingRecords(params);
-    rows.sort(makeRecordComparator(orderBy, desc ? "desc" : "asc"));
+    sortWorkflowRows({
+      rows,
+      orderBy,
+      orderDir: desc ? "desc" : "asc",
+      fields: ({ rec }) => ({
+        workflowName: rec.n,
+        status: rec.s,
+        createdAtMs: rec.c,
+        startedAtMs: rec.st,
+        completedAtMs: rec.co,
+      }),
+    });
     return rows.slice(offset, limit === undefined ? undefined : offset + limit).map((r) => r.id);
   }
 
@@ -819,11 +847,7 @@ export class RedisWorkflowStorage
     );
   }
 
-  async cancelWorkflow(
-    workflowId: string,
-    options?: { cascade?: boolean },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async cancelWorkflow({ workflowId, cascade, guard }: CancelWorkflowParams): Promise<void> {
     await this.transitionStatus({
       workflowId,
       guard,
@@ -832,10 +856,10 @@ export class RedisWorkflowStorage
       fields: { error: CANCELLED_ERROR, errorTag: CANCELLED_ERROR_TAG },
     });
 
-    if (options?.cascade) {
+    if (cascade) {
       const children = await this.redis.smembers(this.keys.children(workflowId));
       for (const childId of children) {
-        await this.cancelWorkflow(childId, { cascade: true });
+        await this.cancelWorkflow({ workflowId: childId, cascade: true });
       }
     }
   }
@@ -921,31 +945,11 @@ export class RedisWorkflowStorage
     };
   }
 
-  async saveStepResult(
-    params: {
-      workflowId: string;
-      stepName: string;
-      result: unknown;
-      durationMs: number;
-      startedAt: Date;
-      metadata?: Record<string, unknown>;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
-    await this.batchSaveStepResults([params], guard);
+  async saveStepResult({ guard, ...params }: SaveStepResultParams): Promise<void> {
+    await this.batchSaveStepResults({ records: [params], guard });
   }
 
-  async batchSaveStepResults(
-    records: ReadonlyArray<{
-      workflowId: string;
-      stepName: string;
-      result: unknown;
-      durationMs: number;
-      startedAt: Date;
-      metadata?: Record<string, unknown>;
-    }>,
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async batchSaveStepResults({ records, guard }: BatchSaveStepResultsParams): Promise<void> {
     // Per workflow: one script reads the run number and the existing rows
     // of the batch's steps (to keep dependsOn / stepType / attempt), and one
     // fenced script writes the pending → running move, the step rows and
@@ -981,18 +985,7 @@ export class RedisWorkflowStorage
     }
   }
 
-  async saveStepFailure(
-    params: {
-      workflowId: string;
-      stepName: string;
-      error: string;
-      errorTag?: string;
-      durationMs: number;
-      startedAt: Date;
-      metadata?: Record<string, unknown>;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async saveStepFailure({ guard, ...params }: SaveStepFailureParams): Promise<void> {
     const now = this.clock.now();
     const nowIso = this.serializeDate(now);
     await this.readModifyWrite({
@@ -1031,15 +1024,7 @@ export class RedisWorkflowStorage
 
   // -- Task results ---------------------------------------------------------
 
-  async saveTaskResult(
-    params: {
-      workflowId: string;
-      stepName: string;
-      taskIndex: number;
-      result: unknown;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async saveTaskResult({ guard, ...params }: SaveTaskResultParams): Promise<void> {
     await this.saveTask({
       workflowId: params.workflowId,
       stepName: params.stepName,
@@ -1049,15 +1034,7 @@ export class RedisWorkflowStorage
     });
   }
 
-  async saveTaskFailure(
-    params: {
-      workflowId: string;
-      stepName: string;
-      taskIndex: number;
-      error: string;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async saveTaskFailure({ guard, ...params }: SaveTaskFailureParams): Promise<void> {
     await this.saveTask({
       workflowId: params.workflowId,
       stepName: params.stepName,
@@ -1169,7 +1146,7 @@ export class RedisWorkflowStorage
 
   // -- Workflow completion --------------------------------------------------
 
-  async completeWorkflow(workflowId: string, result: unknown, guard?: FenceGuard): Promise<void> {
+  async completeWorkflow({ workflowId, result, guard }: CompleteWorkflowParams): Promise<void> {
     await this.finishWorkflow({
       workflowId,
       guard,
@@ -1178,21 +1155,16 @@ export class RedisWorkflowStorage
     });
   }
 
-  async failWorkflow(
-    workflowId: string,
-    error: string,
-    guard?: FenceGuard,
-    details?: { readonly errorTag?: string },
-  ): Promise<void> {
+  async failWorkflow({ workflowId, error, errorTag, guard }: FailWorkflowParams): Promise<void> {
     await this.finishWorkflow({
       workflowId,
       guard,
       to: "failed",
-      fields: { error, ...(details?.errorTag !== undefined && { errorTag: details.errorTag }) },
+      fields: { error, ...(errorTag !== undefined && { errorTag }) },
     });
   }
 
-  async tripwireWorkflow(workflowId: string, reason: unknown, guard?: FenceGuard): Promise<void> {
+  async tripwireWorkflow({ workflowId, reason, guard }: TripwireWorkflowParams): Promise<void> {
     await this.finishWorkflow({
       workflowId,
       guard,
@@ -1217,12 +1189,12 @@ export class RedisWorkflowStorage
 
   // -- Suspend / Signal -----------------------------------------------------
 
-  async suspendWorkflow(
-    workflowId: string,
-    stepName: string,
-    stepUpdate: Record<string, unknown>,
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async suspendWorkflow({
+    workflowId,
+    stepName,
+    stepUpdate,
+    guard,
+  }: SuspendWorkflowParams): Promise<void> {
     const now = this.clock.now();
     // The step row, the status move and `updatedAt` land in one fenced script.
     await this.readModifyWrite({
@@ -1257,7 +1229,7 @@ export class RedisWorkflowStorage
     });
   }
 
-  async deliverSignal(workflowId: string, signalName: string, payload: unknown): Promise<void> {
+  async deliverSignal({ workflowId, signalName, payload }: DeliverSignalParams): Promise<void> {
     const signal: SignalState = {
       signalName,
       payload,
@@ -1287,11 +1259,11 @@ export class RedisWorkflowStorage
     });
   }
 
-  async setWorkflowMetadata(
-    workflowId: string,
-    patch: Record<string, unknown>,
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async setWorkflowMetadata({
+    workflowId,
+    patch,
+    guard,
+  }: SetWorkflowMetadataParams): Promise<void> {
     // Metadata is one JSON string field on the workflow hash. Merge
     // client-side, then compare-and-set against the value we read, retrying
     // when a concurrent patch landed first — so no patch is lost. The fence
@@ -1299,11 +1271,7 @@ export class RedisWorkflowStorage
     const key = this.keys.wf(workflowId);
     for (let attempt = 0; attempt < MAX_CAS_ATTEMPTS; attempt++) {
       const raw = await this.redis.hget(key, "metadata");
-      const merged: Record<string, unknown> = raw ? JSON.parse(raw) : {};
-      for (const [k, v] of Object.entries(patch)) {
-        if (v === null) delete merged[k];
-        else merged[k] = v;
-      }
+      const merged = applyMetadataPatch({ current: raw ? JSON.parse(raw) : {}, patch });
       const written = await this.evalFenced({
         script: FENCED_HASH_FIELD_CAS_LUA,
         workflowId,
@@ -1431,15 +1399,10 @@ export class RedisWorkflowStorage
   // Streams — append-only chunks per (workflow, stream) via Redis lists.
   // ---------------------------------------------------------------------------
 
-  async appendStreamChunk(
-    params: {
-      workflowId: string;
-      streamId: string;
-      payload: unknown;
-      appendedBy: "workflow" | "external";
-    },
-    guard?: FenceGuard,
-  ): Promise<{ chunkIndex: number }> {
+  async appendStreamChunk({
+    guard,
+    ...params
+  }: AppendStreamChunkParams): Promise<{ chunkIndex: number }> {
     const { last } = await this.writeOps({
       workflowId: params.workflowId,
       guard,
@@ -1483,10 +1446,10 @@ export class RedisWorkflowStorage
 
   // -- Locking --------------------------------------------------------------
 
-  async tryLock(
-    workflowId: string,
-    lockDurationMs: number,
-  ): Promise<{ acquired: boolean; token?: string }> {
+  async tryLock({
+    workflowId,
+    lockDurationMs,
+  }: TryLockParams): Promise<{ acquired: boolean; token?: string }> {
     const [acquired, token] = (await this.redis.eval(
       TRY_LOCK_LUA,
       2,
@@ -1499,10 +1462,10 @@ export class RedisWorkflowStorage
     return { acquired: true, token };
   }
 
-  async tryLockAndLoad(
-    workflowId: string,
-    lockDurationMs: number,
-  ): Promise<{ locked: boolean; token?: string; state: WorkflowState | null }> {
+  async tryLockAndLoad({
+    workflowId,
+    lockDurationMs,
+  }: TryLockParams): Promise<{ locked: boolean; token?: string; state: WorkflowState | null }> {
     // One script: the state is read as of the moment the lock was taken.
     const wfKey = this.keys.wf(workflowId);
     const [acquired, token, load] = (await this.redis.eval(
@@ -1519,7 +1482,7 @@ export class RedisWorkflowStorage
     return acquired === 1 ? { locked: true, token, state } : { locked: false, state };
   }
 
-  async releaseLock(workflowId: string, guard?: FenceGuard): Promise<void> {
+  async releaseLock({ workflowId, guard }: ReleaseLockParams): Promise<void> {
     await this.redis.eval(
       RELEASE_LOCK_LUA,
       1,
@@ -1529,7 +1492,7 @@ export class RedisWorkflowStorage
     );
   }
 
-  async heartbeat(workflowId: string, lockDurationMs: number, guard?: FenceGuard): Promise<void> {
+  async heartbeat({ workflowId, lockDurationMs, guard }: HeartbeatParams): Promise<void> {
     const extended = await this.redis.eval(
       HEARTBEAT_LUA,
       1,
@@ -1857,7 +1820,7 @@ export class RedisWorkflowStorage
     };
   }
 
-  async startFreshRun(workflowId: string, guard?: FenceGuard): Promise<number> {
+  async startFreshRun({ workflowId, guard }: StartFreshRunParams): Promise<number> {
     const state = await this.loadWorkflow(workflowId);
     if (!state) throw new Error(`Workflow ${workflowId} not found`);
     const summaryJson = JSON.stringify(this.currentRunSummary(state), (_, v) =>
@@ -1889,7 +1852,7 @@ export class RedisWorkflowStorage
     if (newRun === -1) {
       // A concurrent fresh run moved the counter between our read and the
       // script — start over against the new run.
-      return this.startFreshRun(workflowId, guard);
+      return this.startFreshRun({ workflowId, guard });
     }
     await Promise.all([
       this.unscheduleSleeps({ workflowId, members: reply[1] ?? [] }),
@@ -1904,7 +1867,7 @@ export class RedisWorkflowStorage
    * their compensation ledger, and a terminal run moves back to `running`
    * — one script, compare-and-set against the rows read first.
    */
-  async resetSteps(workflowId: string, stepNames: readonly string[]): Promise<void> {
+  async resetSteps({ workflowId, stepNames }: ResetStepsParams): Promise<void> {
     if (stepNames.length === 0) return;
     const wfKey = this.keys.wf(workflowId);
     const reset = new Set(stepNames);
@@ -1944,10 +1907,10 @@ export class RedisWorkflowStorage
     throw new Error(`resetSteps: gave up on "${workflowId}" after contention`);
   }
 
-  async loadRunHistory(
-    workflowId: string,
-    params?: { limit?: number; offset?: number },
-  ): Promise<WorkflowRunSummary[]> {
+  async loadRunHistory({
+    workflowId,
+    ...params
+  }: LoadRunHistoryParams): Promise<WorkflowRunSummary[]> {
     const [state, archivedRaw] = await Promise.all([
       this.loadWorkflow(workflowId),
       this.redis.eval(LRANGE_ALL_LUA, 1, this.keys.runs(workflowId)) as Promise<string[] | null>,
@@ -2099,9 +2062,9 @@ export class RedisWorkflowStorage
     );
   }
 
-  // -- StepAttemptStorage ---------------------------------------------------
+  // -- StepAttemptStore ---------------------------------------------------
 
-  async saveStepAttempt(record: StepAttemptRecord, guard?: FenceGuard): Promise<void> {
+  async saveStepAttempt({ record, guard }: SaveStepAttemptParams): Promise<void> {
     await this.writeOps({
       workflowId: record.workflowId,
       guard,
@@ -2119,7 +2082,10 @@ export class RedisWorkflowStorage
     });
   }
 
-  async loadStepAttempts(workflowId: string, stepName?: string): Promise<StepAttemptRecord[]> {
+  async loadStepAttempts({
+    workflowId,
+    stepName,
+  }: LoadStepAttemptsParams): Promise<StepAttemptRecord[]> {
     const raw = (await this.redis.eval(LRANGE_ALL_LUA, 1, this.keys.attempts(workflowId))) as
       | string[]
       | null;
@@ -2134,12 +2100,9 @@ export class RedisWorkflowStorage
     return stepName ? items.filter((a) => a.stepName === stepName) : items;
   }
 
-  // -- CompensationLedgerStorage --------------------------------------------
+  // -- CompensationLedgerStore --------------------------------------------
 
-  async beginCompensation(
-    params: { readonly workflowId: string; readonly error: string; readonly errorTag?: string },
-    guard?: FenceGuard,
-  ): Promise<boolean> {
+  async beginCompensation({ guard, ...params }: BeginCompensationParams): Promise<boolean> {
     const { workflowId } = params;
     const nowIso = this.serializeDate(this.clock.now());
     // The move and the read-back run in one script: the reply is the status
@@ -2160,15 +2123,7 @@ export class RedisWorkflowStorage
     return last === "compensating";
   }
 
-  async saveStepCompensation(
-    params: {
-      readonly workflowId: string;
-      readonly stepName: string;
-      readonly status: StepCompensationOutcome;
-      readonly error?: string;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async saveStepCompensation({ guard, ...params }: SaveStepCompensationParams): Promise<void> {
     const { workflowId } = params;
     const now = this.clock.now();
     await this.readModifyWrite({
@@ -2197,9 +2152,9 @@ export class RedisWorkflowStorage
     });
   }
 
-  // -- ActivityJournalStorage -----------------------------------------------
+  // -- JournalStore -----------------------------------------------
 
-  async loadJournal(workflowId: string, stepName: string): Promise<JournalEntry[]> {
+  async loadJournal({ workflowId, stepName }: LoadJournalParams): Promise<JournalEntry[]> {
     const members = await this.redis.zrangebyscore(
       this.keys.journalIdx(workflowId, stepName),
       "-inf",
@@ -2220,18 +2175,7 @@ export class RedisWorkflowStorage
     return entries.filter((e): e is JournalEntry => e !== null);
   }
 
-  async appendEntry(
-    params: {
-      workflowId: string;
-      stepName: string;
-      activityIndex: number;
-      branchPath?: string;
-      activityName: string;
-      payloadHash?: string;
-      exit: NonNullable<JournalEntry["exit"]>;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async appendEntry({ guard, ...params }: AppendEntryParams): Promise<void> {
     const branchPath = params.branchPath ?? "";
     await this.evalFenced({
       script: FENCED_APPEND_ENTRY_LUA,
@@ -2259,21 +2203,9 @@ export class RedisWorkflowStorage
     });
   }
 
-  // -- ActivityJournalStorage: pending entries -------------------------------
+  // -- JournalStore: pending entries -------------------------------
 
-  async appendPendingEntry(
-    params: {
-      workflowId: string;
-      stepName: string;
-      activityIndex: number;
-      branchPath?: string;
-      activityName: string;
-      payloadHash?: string;
-      stepType: "sleep" | "signal" | "activity" | "compensation" | "child";
-      wakeAt?: Date;
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async appendPendingEntry({ guard, ...params }: AppendPendingEntryParams): Promise<void> {
     const branchPath = params.branchPath ?? "";
     // Persist wakeAt for signals too: it is the signal's timeout deadline,
     // and replay must read the recorded one rather than recompute it.
@@ -2325,16 +2257,10 @@ export class RedisWorkflowStorage
     }
   }
 
-  async completePendingEntry(
-    params: {
-      workflowId: string;
-      stepName: string;
-      activityIndex: number;
-      branchPath?: string;
-      exit: JournalExit;
-    },
-    guard?: FenceGuard,
-  ): Promise<CompletePendingResult> {
+  async completePendingEntry({
+    guard,
+    ...params
+  }: CompletePendingEntryParams): Promise<CompletePendingResult> {
     const branchPath = params.branchPath ?? "";
     // The Lua phase check makes the transition atomic, so concurrent
     // completers (a signal delivery racing the body's timeout write) get
@@ -2374,14 +2300,7 @@ export class RedisWorkflowStorage
     };
   }
 
-  async discardJournalEntries(
-    params: {
-      workflowId: string;
-      stepName: string;
-      slots: readonly JournalSlot[];
-    },
-    guard?: FenceGuard,
-  ): Promise<void> {
+  async discardJournalEntries({ guard, ...params }: DiscardJournalEntriesParams): Promise<void> {
     // Every slot goes in one fenced script; the sleeps then leave the schedule.
     await this.evalFenced({
       script: FENCED_DISCARD_ENTRIES_LUA,
@@ -2520,46 +2439,6 @@ function needsRecords(params?: ListFilters): boolean {
     params?.runSourceId !== undefined ||
     params?.metadata !== undefined
   );
-}
-
-/**
- * Comparator for sortable `listWorkflows` columns over index records. NULL
- * values always sort last so still-running rows (no `startedAt` /
- * `completedAt` / `duration`) don't push real data off the first page in
- * either direction.
- */
-function makeRecordComparator(
-  orderBy: WorkflowOrderBy,
-  dir: "asc" | "desc",
-): (a: { rec: IndexRecord }, b: { rec: IndexRecord }) => number {
-  const sign = dir === "asc" ? 1 : -1;
-  return (a, b) => {
-    const av = recordSortKey(a.rec, orderBy);
-    const bv = recordSortKey(b.rec, orderBy);
-    if (av === undefined && bv === undefined) return 0;
-    if (av === undefined) return 1;
-    if (bv === undefined) return -1;
-    if (av < bv) return -1 * sign;
-    if (av > bv) return 1 * sign;
-    return 0;
-  };
-}
-
-function recordSortKey(rec: IndexRecord, orderBy: WorkflowOrderBy): number | string | undefined {
-  switch (orderBy) {
-    case "createdAt":
-      return rec.c;
-    case "startedAt":
-      return rec.st;
-    case "completedAt":
-      return rec.co;
-    case "duration":
-      return rec.co !== undefined ? rec.co - rec.c : undefined;
-    case "status":
-      return rec.s;
-    case "name":
-      return rec.n;
-  }
 }
 
 /** Name the fields of an `INDEX_FIELDS` snapshot. */

@@ -44,6 +44,12 @@
       "import": "./dist/testing.js",
       "default": "./dist/testing.js"
     },
+    "./storage-kit": {
+      "types": "./dist/storage-kit.d.ts",
+      "@promin/source": "./src/storage-kit.ts",
+      "import": "./dist/storage-kit.js",
+      "default": "./dist/storage-kit.js"
+    },
     "./dev": {
       "types": "./dist/dev.d.ts",
       "@promin/source": "./src/dev.ts",

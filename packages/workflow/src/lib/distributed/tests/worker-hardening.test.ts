@@ -389,7 +389,7 @@ describe("DefaultWorker — storage first, then queue", () => {
     await waitFor(() => queue.getAllTasks().every((t) => t.status === "completed"));
     await worker.stop();
 
-    const attempts = await storage.loadStepAttempts("wf");
+    const attempts = await storage.loadStepAttempts({ workflowId: "wf" });
     expect(attempts.map((a) => [a.stepName, a.status, a.result]).sort()).toEqual([
       ["fellback", "completed", "plan b"],
       ["skipped", "completed", undefined],

@@ -41,7 +41,7 @@ describe("ctx.sleep — wake time follows the injected clock", () => {
       });
 
     await expect(run()).rejects.toBeInstanceOf(WorkflowSuspendedError);
-    const journal = await storage.loadJournal("jc-sleep", "wait");
+    const journal = await storage.loadJournal({ workflowId: "jc-sleep", stepName: "wait" });
     expect(journal[0]!.wakeAt?.toISOString()).toBe("2026-01-01T00:01:00.000Z");
 
     clock.advance(59_999);
@@ -72,7 +72,7 @@ describe("ctx.signal({ timeout }) — deadline follows the injected clock", () =
       });
 
     await expect(run()).rejects.toBeInstanceOf(WorkflowSuspendedError);
-    const journal = await storage.loadJournal("jc-signal", "wait");
+    const journal = await storage.loadJournal({ workflowId: "jc-signal", stepName: "wait" });
     expect(journal[0]!.wakeAt?.toISOString()).toBe("2026-01-01T00:00:05.000Z");
 
     clock.advance(4_999);

@@ -10,7 +10,7 @@ import { runHookValue } from "../shared/eff.ts";
 import { SystemWallClock, type WallClock, type TimerHandle } from "../shared/wall-clock.ts";
 import { PollLoop, type PollTickResult } from "../shared/poll-loop.ts";
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
-import { isStepAttemptStorage } from "../durable/workflow-storage.ts";
+import { hasCapability } from "../durable/workflow-storage.ts";
 import type { StepRegistry, StepContext, StepRegistration } from "./step-registry.ts";
 import type { StepQueue, StepTask } from "./step-queue.ts";
 import type { WorkerMiddleware } from "./middleware.ts";
@@ -526,19 +526,23 @@ export class DefaultWorker implements WorkflowWorker {
       return;
     }
 
-    if (isStepAttemptStorage(this.storage)) {
+    if (hasCapability(this.storage, "stepAttempts")) {
       try {
         await this.storage.saveStepAttempt({
-          workflowId: task.workflowId,
-          stepName: task.stepName,
-          attempt: task.attempt,
-          type: "execution",
-          status: outcome.kind,
-          ...(outcome.kind === "completed" ? { result: outcome.value } : { error: outcome.error }),
-          durationMs,
-          startedAt,
-          completedAt: this.clock.now(),
-          executorId: this.workerId,
+          record: {
+            workflowId: task.workflowId,
+            stepName: task.stepName,
+            attempt: task.attempt,
+            type: "execution",
+            status: outcome.kind,
+            ...(outcome.kind === "completed"
+              ? { result: outcome.value }
+              : { error: outcome.error }),
+            durationMs,
+            startedAt,
+            completedAt: this.clock.now(),
+            executorId: this.workerId,
+          },
         });
       } catch (error) {
         // The audit row is secondary: the step row is written, so carry on.

@@ -174,7 +174,11 @@ export function sendSignal(deps: RunRoutesDeps) {
     if (mismatch) return mismatch;
 
     try {
-      await deps.storage.deliverSignal(id, body.signalName, body.payload ?? null);
+      await deps.storage.deliverSignal({
+        workflowId: id,
+        signalName: body.signalName,
+        payload: body.payload ?? null,
+      });
       return json(200, { ok: true });
     } catch (err) {
       return jsonError(400, "signal_failed", err instanceof Error ? err.message : String(err));

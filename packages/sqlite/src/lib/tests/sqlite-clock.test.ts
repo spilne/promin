@@ -21,7 +21,7 @@ describe("SqliteWorkflowStorage on a FakeWallClock", () => {
 
     await storage.createWorkflow({ workflowId: "wf", workflowName: "n", input: {} });
     clock.advance(5_000);
-    await storage.completeWorkflow("wf", "ok");
+    await storage.completeWorkflow({ workflowId: "wf", result: "ok" });
 
     const wf = await storage.loadWorkflow("wf");
     expect(wf!.createdAt.toISOString()).toBe(T0);
@@ -35,11 +35,11 @@ describe("SqliteWorkflowStorage on a FakeWallClock", () => {
     const b = SqliteWorkflowStorage.make({ db, clock });
     await a.createWorkflow({ workflowId: "wf", workflowName: "n", input: {} });
 
-    expect((await a.tryLock("wf", 1_000)).acquired).toBe(true);
+    expect((await a.tryLock({ workflowId: "wf", lockDurationMs: 1_000 })).acquired).toBe(true);
     clock.advance(999);
-    expect((await b.tryLock("wf", 1_000)).acquired).toBe(false);
+    expect((await b.tryLock({ workflowId: "wf", lockDurationMs: 1_000 })).acquired).toBe(false);
     clock.advance(2);
-    expect((await b.tryLock("wf", 1_000)).acquired).toBe(true);
+    expect((await b.tryLock({ workflowId: "wf", lockDurationMs: 1_000 })).acquired).toBe(true);
   });
 });
 

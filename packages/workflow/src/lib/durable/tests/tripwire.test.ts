@@ -218,7 +218,7 @@ describe("tripwire", () => {
       const storage = new InMemoryWorkflowStorage();
       // Shadow the prototype method with an instance-own undefined to
       // simulate a backend without tripwire support. The type guard
-      // `isTripwireCapableStorage` checks `typeof === "function"`, so an
+      // `hasCapability` checks `typeof === "function"`, so an
       // undefined instance property makes it report not-capable.
       (storage as unknown as { tripwireWorkflow: unknown }).tripwireWorkflow = undefined;
 

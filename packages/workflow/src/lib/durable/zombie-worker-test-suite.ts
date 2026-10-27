@@ -16,7 +16,7 @@ import { describe, it, expect } from "bun:test";
 import { workflow } from "./workflow-builder.ts";
 import type { Workflow } from "./workflow-types.ts";
 import { createWorkflowRunner } from "./workflow-runner.ts";
-import { isActivityJournalStorage } from "./activity-journal.ts";
+import { hasCapability } from "./storage/capabilities.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 
 export interface ZombieWorkerTestSuiteOptions {
@@ -137,8 +137,10 @@ async function waitFor(condition: () => boolean): Promise<void> {
 async function snapshot(storage: WorkflowStorage, workflowId: string): Promise<unknown> {
   return {
     workflow: await storage.loadWorkflow(workflowId),
-    journal: isActivityJournalStorage(storage) ? await storage.loadJournal(workflowId, "body") : [],
-    runs: await storage.loadRunHistory(workflowId),
+    journal: hasCapability(storage, "journal")
+      ? await storage.loadJournal({ workflowId, stepName: "body" })
+      : [],
+    runs: await storage.loadRunHistory({ workflowId }),
   };
 }
 
@@ -239,8 +241,8 @@ export function zombieWorkerTestSuite(options: ZombieWorkerTestSuiteOptions): vo
         const state = (await out.storage.loadWorkflow(workflowId))!;
         expect(state.status).toBe("completed");
         expect(state.result).toBe("fresh");
-        if (isActivityJournalStorage(out.storage)) {
-          const journal = await out.storage.loadJournal(workflowId, "body");
+        if (hasCapability(out.storage, "journal")) {
+          const journal = await out.storage.loadJournal({ workflowId, stepName: "body" });
           expect(journal.map((e) => e.exit)).toEqual([{ tag: "Success", value: "fresh" }]);
         }
       },

@@ -72,11 +72,15 @@ async function fixturePending(opts: {
     exit: { tag: "Success", value: { toolName: opts.toolName, toolInput: opts.toolInput } },
   });
   // The conversation step suspended waiting for the approve signal.
-  await opts.storage.suspendWorkflow(opts.workflowId, "conversation", {
-    status: "waiting_for_signal",
-    signalName: `approve:${opts.toolCallId}`,
-    stepType: "signal",
-    startedAt,
+  await opts.storage.suspendWorkflow({
+    workflowId: opts.workflowId,
+    stepName: "conversation",
+    stepUpdate: {
+      status: "waiting_for_signal",
+      signalName: `approve:${opts.toolCallId}`,
+      stepType: "signal",
+      startedAt,
+    },
   });
 }
 
@@ -162,11 +166,15 @@ describe("listPendingApprovals — fixture coverage", () => {
       workflowName: "other",
       input: undefined,
     });
-    await storage.suspendWorkflow("wf-other", "wait-for-thing", {
-      status: "waiting_for_signal",
-      signalName: "ext:custom-thing",
-      stepType: "signal",
-      startedAt: new Date(),
+    await storage.suspendWorkflow({
+      workflowId: "wf-other",
+      stepName: "wait-for-thing",
+      stepUpdate: {
+        status: "waiting_for_signal",
+        signalName: "ext:custom-thing",
+        stepType: "signal",
+        startedAt: new Date(),
+      },
     });
 
     const pending = await listPendingApprovals(storage);
@@ -188,11 +196,15 @@ describe("listPendingApprovals — fixture coverage", () => {
       workflowName: "bare",
       input: undefined,
     });
-    await storage.suspendWorkflow("wf-bare", "conversation", {
-      status: "waiting_for_signal",
-      signalName: "approve:tc-bare",
-      stepType: "signal",
-      startedAt: new Date(),
+    await storage.suspendWorkflow({
+      workflowId: "wf-bare",
+      stepName: "conversation",
+      stepUpdate: {
+        status: "waiting_for_signal",
+        signalName: "approve:tc-bare",
+        stepType: "signal",
+        startedAt: new Date(),
+      },
     });
 
     const pending = await listPendingApprovals(storage);

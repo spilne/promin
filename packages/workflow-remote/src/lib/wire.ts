@@ -48,7 +48,7 @@ export type StorageMethod =
   | "listDueTimers"
   | "listSignalWakeups"
   | "listOrphanedRuns"
-  // ActivityJournalStorage — forwarded only when
+  // JournalStore — forwarded only when
   // the underlying storage implements them. Lets `.journaled()` workflows
   // (with ctx.activity / ctx.sleep / ctx.signal) run over the wire.
   | "loadJournal"
@@ -58,12 +58,12 @@ export type StorageMethod =
   | "discardJournalEntries"
   | "findDueSleeps"
   | "findPendingSignal"
-  // StepAttemptStorage — forwarded only when the underlying storage
+  // StepAttemptStore — forwarded only when the underlying storage
   // implements it. Lets remote workers populate the audit trail
   // (workerId per attempt) on the central server's storage.
   | "saveStepAttempt"
   | "loadStepAttempts"
-  // CompensationLedgerStorage — forwarded only when the underlying storage
+  // CompensationLedgerStore — forwarded only when the underlying storage
   // implements it, so a rollback interrupted on a remote runner resumes.
   | "beginCompensation"
   | "saveStepCompensation"

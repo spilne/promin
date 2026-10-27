@@ -27,7 +27,7 @@ describe("Step audit log — track every execution attempt for observability", (
 
     await runner.run({ workflow: wf, workflowId: "rec-1", input: "hello" });
 
-    const attempts = await storage.loadStepAttempts("rec-1");
+    const attempts = await storage.loadStepAttempts({ workflowId: "rec-1" });
     expect(attempts).toHaveLength(1);
     expect(attempts[0]!.stepName).toBe("step-1");
     expect(attempts[0]!.type).toBe("execution");
@@ -48,7 +48,7 @@ describe("Step audit log — track every execution attempt for observability", (
 
     await runner.runSafe({ workflow: wf, workflowId: "rec-2", input: "x" });
 
-    const attempts = await storage.loadStepAttempts("rec-2");
+    const attempts = await storage.loadStepAttempts({ workflowId: "rec-2" });
     expect(attempts).toHaveLength(1);
     expect(attempts[0]!.type).toBe("execution");
     expect(attempts[0]!.status).toBe("failed");
@@ -78,7 +78,7 @@ describe("Step audit log — track every execution attempt for observability", (
 
     // Only the final successful attempt is recorded via saveStepResult
     // Step-level retries happen inside the step, only the outcome is checkpointed
-    const attempts = await storage.loadStepAttempts("rec-3");
+    const attempts = await storage.loadStepAttempts({ workflowId: "rec-3" });
     expect(attempts.length).toBeGreaterThanOrEqual(1);
     expect(attempts.some((a) => a.status === "completed")).toBe(true);
   });
@@ -102,7 +102,7 @@ describe("Step audit log — track every execution attempt for observability", (
 
     await runner.run({ workflow: wf, workflowId: "rec-4", input: "x" });
 
-    const allAttempts = await storage.loadStepAttempts("rec-4");
+    const allAttempts = await storage.loadStepAttempts({ workflowId: "rec-4" });
 
     // step-1: 1 successful attempt
     const step1 = allAttempts.filter((a) => a.stepName === "step-1");
@@ -126,10 +126,10 @@ describe("Step audit log — track every execution attempt for observability", (
 
     await runner.run({ workflow: wf, workflowId: "rec-5", input: "x" });
 
-    const all = await storage.loadStepAttempts("rec-5");
+    const all = await storage.loadStepAttempts({ workflowId: "rec-5" });
     expect(all).toHaveLength(2);
 
-    const onlyA = await storage.loadStepAttempts("rec-5", "a");
+    const onlyA = await storage.loadStepAttempts({ workflowId: "rec-5", stepName: "a" });
     expect(onlyA).toHaveLength(1);
     expect(onlyA[0]!.stepName).toBe("a");
   });
@@ -149,7 +149,7 @@ describe("Step audit log — track every execution attempt for observability", (
 
     await runner.run({ workflow: wf, workflowId: "rec-6", input: "x" });
 
-    const all = await storage.loadStepAttempts("rec-6");
+    const all = await storage.loadStepAttempts({ workflowId: "rec-6" });
     expect(all).toHaveLength(4);
     expect(all.every((a) => a.status === "completed")).toBe(true);
     const names = all.map((a) => a.stepName).sort();
@@ -175,7 +175,10 @@ describe("Compensation audit log — track rollback attempts for compliance", ()
 
     await runner.runSafe({ workflow: wf, workflowId: "comp-rec-1", input: "x" });
 
-    const attempts = await storage.loadStepAttempts("comp-rec-1", "step-1");
+    const attempts = await storage.loadStepAttempts({
+      workflowId: "comp-rec-1",
+      stepName: "step-1",
+    });
     const compAttempts = attempts.filter((a) => a.type === "compensation");
     expect(compAttempts).toHaveLength(1);
     expect(compAttempts[0]!.status).toBe("completed");
@@ -197,7 +200,10 @@ describe("Compensation audit log — track rollback attempts for compliance", ()
 
     await runner.runSafe({ workflow: wf, workflowId: "comp-rec-2", input: "x" });
 
-    const attempts = await storage.loadStepAttempts("comp-rec-2", "step-1");
+    const attempts = await storage.loadStepAttempts({
+      workflowId: "comp-rec-2",
+      stepName: "step-1",
+    });
     const compAttempts = attempts.filter((a) => a.type === "compensation");
     expect(compAttempts).toHaveLength(1);
     expect(compAttempts[0]!.status).toBe("failed");
@@ -227,7 +233,10 @@ describe("Compensation audit log — track rollback attempts for compliance", ()
 
     await runner.runSafe({ workflow: wf, workflowId: "comp-rec-3", input: "x" });
 
-    const attempts = await storage.loadStepAttempts("comp-rec-3", "step-1");
+    const attempts = await storage.loadStepAttempts({
+      workflowId: "comp-rec-3",
+      stepName: "step-1",
+    });
     const compAttempts = attempts.filter((a) => a.type === "compensation");
     // 2 failed + 1 successful
     expect(compAttempts).toHaveLength(3);
@@ -253,7 +262,7 @@ describe("Compensation audit log — track rollback attempts for compliance", ()
 
     await runner.runSafe({ workflow: wf, workflowId: "comp-rec-4", input: "x" });
 
-    const all = await storage.loadStepAttempts("comp-rec-4");
+    const all = await storage.loadStepAttempts({ workflowId: "comp-rec-4" });
     const execAttempts = all.filter((a) => a.type === "execution");
     const compAttempts = all.filter((a) => a.type === "compensation");
 

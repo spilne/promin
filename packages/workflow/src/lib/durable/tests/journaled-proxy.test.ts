@@ -51,7 +51,7 @@ describe("ctx.proxy()", () => {
     expect(validateCalls).toBe(1);
     expect(chargeCalls).toBe(1);
 
-    const journal = await storage.loadJournal("checkout-1", "main");
+    const journal = await storage.loadJournal({ workflowId: "checkout-1", stepName: "main" });
     const names = journal.map((e) => e.activityName);
     expect(names).toEqual(["validate", "charge"]);
   });
@@ -124,8 +124,8 @@ describe("ctx.proxy()", () => {
     await runnerA.run({ workflow: longhand, workflowId: "lh-1", input: { id: 10 } });
     await runnerB.run({ workflow: proxied, workflowId: "px-1", input: { id: 10 } });
 
-    const jA = await storageA.loadJournal("lh-1", "main");
-    const jB = await storageB.loadJournal("px-1", "main");
+    const jA = await storageA.loadJournal({ workflowId: "lh-1", stepName: "main" });
+    const jB = await storageB.loadJournal({ workflowId: "px-1", stepName: "main" });
 
     // Same names, same indices, same final values — only the workflowId
     // differs because the storages are separate.

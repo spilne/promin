@@ -224,7 +224,11 @@ export function completeSignalToken(deps: SignalTokenRoutesDeps) {
     // Resume the workflow through the existing signal mechanic. From the
     // signal's perspective, the bearer-completer is indistinguishable from
     // an in-app `storage.deliverSignal` caller.
-    await deps.storage.deliverSignal(token.workflowId, token.signalName, body.value);
+    await deps.storage.deliverSignal({
+      workflowId: token.workflowId,
+      signalName: token.signalName,
+      payload: body.value,
+    });
 
     return json(201, { ok: true, value: body.value });
   };

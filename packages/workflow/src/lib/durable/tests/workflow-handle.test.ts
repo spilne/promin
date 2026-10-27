@@ -64,9 +64,11 @@ describe("WorkflowHandle — cancel()", () => {
     const calls: string[] = [];
     const storage = new InMemoryWorkflowStorage();
     const origCancel = storage.cancelWorkflow.bind(storage);
-    (storage as unknown as { cancelWorkflow: typeof origCancel }).cancelWorkflow = async (id) => {
-      calls.push(id);
-      return origCancel(id);
+    (storage as unknown as { cancelWorkflow: typeof origCancel }).cancelWorkflow = async (
+      params,
+    ) => {
+      calls.push(params.workflowId);
+      return origCancel(params);
     };
 
     const runner = createWorkflowRunner({ storage });

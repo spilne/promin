@@ -63,7 +63,7 @@ describe("ctx.activity.compensate — success path", () => {
 
     expect(result).toBe("done");
     expect(refunds).toEqual([]);
-    const journal = await storage.loadJournal("wf-ok", "s");
+    const journal = await storage.loadJournal({ workflowId: "wf-ok", stepName: "s" });
     for (const e of journal) expect(e.stepType).not.toBe("compensation");
   });
 });
@@ -201,7 +201,7 @@ describe("ctx.activity.compensate — journal entries", () => {
       }),
     ).rejects.toThrow("boom");
 
-    const journal = await storage.loadJournal("wf-journal", "s");
+    const journal = await storage.loadJournal({ workflowId: "wf-journal", stepName: "s" });
     const comps = journal.filter((e) => e.stepType === "compensation");
     expect(comps).toHaveLength(2);
     for (const c of comps) {
@@ -248,7 +248,7 @@ describe("ctx.activity.compensate — replay is idempotent", () => {
     expect(ran).toEqual({ a: 1, b: 1, fail: 1, compA: 1 });
     // a was rolled back and the failure is over: both are gone. b had no
     // compensation, so its effect stands and it stays journaled.
-    const journal = await storage.loadJournal("wf-redrive", "s");
+    const journal = await storage.loadJournal({ workflowId: "wf-redrive", stepName: "s" });
     expect(journal.map((e) => e.activityName)).toEqual(["b"]);
 
     // Next attempt: a runs again (its effect was undone), b replays, the
@@ -346,7 +346,7 @@ describe("ctx.activity.compensate — compensation failure", () => {
     // b's compensation ran first (reverse), threw. Unwind kept going with a.
     expect(events).toEqual(["comp:b", "comp:a"]);
 
-    const journal = await storage.loadJournal("wf-bad-comp", "s");
+    const journal = await storage.loadJournal({ workflowId: "wf-bad-comp", stepName: "s" });
     const comps = journal.filter((e) => e.stepType === "compensation");
     expect(comps).toHaveLength(2);
     // Look up by the diagnostic activityName rather than journal order —

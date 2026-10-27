@@ -29,7 +29,7 @@ import type {
   WorkflowHooks,
   WorkflowStatusInfo,
 } from "./durable-pipeline.ts";
-import { isSubscribableStorage, type WorkflowStorage } from "./workflow-storage.ts";
+import { hasCapability, type WorkflowStorage } from "./workflow-storage.ts";
 import type { WorkflowRunEvent } from "./workflow-state.ts";
 import {
   StepError,
@@ -41,10 +41,7 @@ import {
   TripwireStorageMissingError,
 } from "./durable-pipeline-error.ts";
 import type { WorkflowSuspendedError, WorkflowTimeoutError } from "./durable-pipeline-error.ts";
-import type {
-  IWorkflowVersionRegistry,
-  WorkflowVersionRegistry,
-} from "./workflow-version-registry.ts";
+import type { WorkflowVersionRegistry } from "./workflow-version-registry.ts";
 import type { StepExecutor } from "./runner/step-executor.ts";
 import { recoverWorkflows, type RecoveryResult, type RecoveryStrategy } from "./runner/recovery.ts";
 import { resolveRunDefinition } from "./runner/definition-resolver.ts";
@@ -221,7 +218,7 @@ export interface WorkflowRunnerConfig {
    * definitions by name + version, and drives version-drain-resume on
    * resumes.
    */
-  readonly registry?: WorkflowVersionRegistry | IWorkflowVersionRegistry;
+  readonly registry?: WorkflowVersionRegistry;
   /**
    * Workflow-level lifecycle hooks. Fired on workflow / step boundaries.
    * Overrides any hooks carried by the workflow's own `_definition`, for
@@ -407,7 +404,7 @@ export interface WorkflowRunner {
  */
 export class DefaultWorkflowRunner implements WorkflowRunner {
   readonly storage: WorkflowStorage;
-  private readonly registry?: WorkflowVersionRegistry | IWorkflowVersionRegistry;
+  private readonly registry?: WorkflowVersionRegistry;
   private readonly hooks?: WorkflowHooks;
   private readonly stepExecutor?: StepExecutor;
   private readonly clock: WallClock;
@@ -546,7 +543,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     const { workflow, workflowId, fromStep } = params;
     const storage = this.storage;
 
-    if (typeof storage.resetSteps !== "function") {
+    if (!hasCapability(storage, "resetSteps")) {
       throw new Error(
         `WorkflowRunner.resume requires storage that implements resetSteps. ` +
           `Got ${storage.constructor.name}.`,
@@ -586,7 +583,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       }
     }
 
-    await storage.resetSteps(workflowId, [...downstream]);
+    await storage.resetSteps({ workflowId, stepNames: [...downstream] });
 
     // Re-run with `force: true` so idempotency caching doesn't
     // short-circuit "already completed" — we just reverted the terminal
@@ -619,8 +616,8 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     },
   ): AsyncIterable<WorkflowRunEvent> {
     // Fast path: storage has native push support.
-    if (isSubscribableStorage(this.storage)) {
-      return this.storage.subscribeToWorkflow(workflowId, options);
+    if (hasCapability(this.storage, "runEvents")) {
+      return this.storage.subscribeToWorkflow({ workflowId, ...options });
     }
     // Fallback: poll loadWorkflow, diff step-state map, synthesize events.
     // Works against any storage so user code doesn't have to branch on the

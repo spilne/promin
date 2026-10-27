@@ -6,10 +6,11 @@ import type { Workflow } from "./workflow-types.ts";
 import type { WorkflowStorage } from "./workflow-storage.ts";
 import { WORKFLOW_STATUSES, type WorkflowStatus } from "./workflow-state.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
+import { hasCapability } from "./storage/capabilities.ts";
 
 // ---------------------------------------------------------------------------
-// Async registry interface — implemented by both the local in-memory class
-// and remote backends (Postgres, HTTP). Coordinator + runner accept either.
+// WorkflowVersionRegistry — the async registry interface, implemented by the
+// in-memory class below and by remote backends (Postgres, HTTP).
 // ---------------------------------------------------------------------------
 
 /**
@@ -36,53 +37,45 @@ export interface VersionRecord {
 }
 
 /**
- * Async interface for resolving workflow definitions by name/version.
- * All backends (in-memory, Postgres, HTTP) implement this interface so
- * coordinator and runner code is backend-agnostic.
- *
- * The local `WorkflowVersionRegistry` class also implements this interface
- * (its sync methods are exposed via trivially-async wrappers) so existing
- * code continues to work without changes.
+ * Resolves workflow definitions by name and version. Every backend
+ * (in-memory, Postgres, HTTP) implements it, so coordinator and runner code
+ * is backend-agnostic. Every method is async.
  *
  * Lifecycle methods (`promote`, `rollback`, `findActive`, `getStatus`,
- * `listRecords`) are optional — backends without persistent status throw
- * a clear error when invoked. Callers who only use `register` + `resolve`
- * + `latest` see no change.
+ * `listRecords`) are optional — backends without persistent status leave
+ * them out. Callers who only use `register` + `resolve` + `latest` see no
+ * difference.
  */
-export interface IWorkflowVersionRegistry {
+export interface WorkflowVersionRegistry {
   /** Register a workflow definition (persists for remote backends). */
-  register(definition: Workflow<unknown, unknown>): Promise<void> | void;
-  /** Resolve by name + optional version. `undefined` when not found. */
-  resolve(
-    name: string,
-    version?: string,
-  ): Promise<Workflow<unknown, unknown> | undefined> | Workflow<unknown, unknown> | undefined;
+  register(definition: Workflow<unknown, unknown>): Promise<void>;
+  /** Resolve by name + optional version (latest when absent). `undefined` when not found. */
+  resolve(name: string, version?: string): Promise<Workflow<unknown, unknown> | undefined>;
   /** All registered version strings for a workflow name. */
-  versions(name: string): Promise<readonly string[]> | readonly string[];
+  versions(name: string): Promise<readonly string[]>;
   /** Latest registered version string, or undefined. */
-  latest(name: string): Promise<string | undefined> | string | undefined;
+  latest(name: string): Promise<string | undefined>;
   /** All registered workflow names. */
-  names(): Promise<readonly string[]> | readonly string[];
+  names(): Promise<readonly string[]>;
   /** Remove a specific (name, version) from the registry. */
-  deregister(name: string, version: string): Promise<void> | void;
+  deregister(name: string, version: string): Promise<void>;
 
   /**
    * Lifecycle methods — explicit promote/rollback/inspect. Not all
-   * backends implement these; callers can feature-detect via instanceof
-   * or a try/catch. The dashboard + auto-mint trigger path use
+   * backends implement these. The dashboard + auto-mint trigger path use
    * `findActive` to route new starts to the chosen version instead of
    * always picking `latest`.
    */
   /** Resolve "the active version of workflow X". Null when no version has been promoted. */
-  findActive?(name: string): Promise<VersionRecord | null> | VersionRecord | null;
+  findActive?(name: string): Promise<VersionRecord | null>;
   /** Inspect status + timestamps for one (name, version). */
-  getStatus?(name: string, version: string): Promise<VersionRecord | null> | VersionRecord | null;
+  getStatus?(name: string, version: string): Promise<VersionRecord | null>;
   /**
    * Promote a version to `active`. Atomically demotes the prior active
    * (if any) for the same name to `inactive` (NOT `archived` — we don't
    * presume the demoted version is rolling-back; see `rollback` for that).
    */
-  promote?(name: string, version: string): Promise<VersionRecord> | VersionRecord;
+  promote?(name: string, version: string): Promise<VersionRecord>;
   /**
    * Roll back the current active to `archived` and promote a target to
    * `active`. The archive distinguishes "demoted by promote" (still in
@@ -92,12 +85,13 @@ export interface IWorkflowVersionRegistry {
   rollback?(params: {
     readonly name: string;
     readonly toVersion: string;
-  }):
-    | Promise<{ readonly previous: VersionRecord; readonly active: VersionRecord }>
-    | { readonly previous: VersionRecord; readonly active: VersionRecord };
+  }): Promise<{ readonly previous: VersionRecord; readonly active: VersionRecord }>;
   /** List all version records for one workflow, ordered by registration desc. */
-  listRecords?(name: string): Promise<ReadonlyArray<VersionRecord>> | ReadonlyArray<VersionRecord>;
+  listRecords?(name: string): Promise<ReadonlyArray<VersionRecord>>;
 }
+
+/** @deprecated Use `WorkflowVersionRegistry`. */
+export type IWorkflowVersionRegistry = WorkflowVersionRegistry;
 
 /**
  * Registry mapping (workflowName, version) to pure `Workflow` definitions.
@@ -170,7 +164,8 @@ interface VersionEntry {
   archivedAt: Date | null;
 }
 
-export class WorkflowVersionRegistry {
+/** In-process `WorkflowVersionRegistry`: definitions and lifecycle in plain Maps. */
+export class InMemoryWorkflowVersionRegistry implements WorkflowVersionRegistry {
   // Map: workflowName -> Map<version, entry>
   private definitions = new Map<string, Map<string, VersionEntry>>();
   // Map: workflowName -> latest version string
@@ -205,14 +200,14 @@ export class WorkflowVersionRegistry {
    * the raw constructor when you only care about one workflow name:
    *
    * ```typescript
-   * const orders = WorkflowVersionRegistry.for("orders")
+   * const orders = InMemoryWorkflowVersionRegistry.for("orders")
    *   .register(v1)
    *   .register(v2)
    *   .register(v3);
    * ```
    */
   static for(name: string, config?: WorkflowVersionRegistryConfig): ScopedWorkflowVersionRegistry {
-    const underlying = new WorkflowVersionRegistry(config);
+    const underlying = new InMemoryWorkflowVersionRegistry(config);
     return new ScopedWorkflowVersionRegistry(underlying, name);
   }
 
@@ -222,7 +217,10 @@ export class WorkflowVersionRegistry {
    * `inactive` — promote it explicitly via `promote()` to make it the
    * `findActive()` target.
    */
-  register(definition: Workflow<unknown, unknown>, options?: { contentHash?: string }): void {
+  async register(
+    definition: Workflow<unknown, unknown>,
+    options?: { contentHash?: string },
+  ): Promise<void> {
     const { name, version } = definition;
 
     if (!version) {
@@ -255,7 +253,7 @@ export class WorkflowVersionRegistry {
   }
 
   /** Resolve a definition by name + version. Returns undefined if not found. */
-  resolve(name: string, version?: string): Workflow<unknown, unknown> | undefined {
+  async resolve(name: string, version?: string): Promise<Workflow<unknown, unknown> | undefined> {
     const versions = this.definitions.get(name);
     if (!versions) return undefined;
     if (version) return versions.get(version)?.definition;
@@ -265,18 +263,22 @@ export class WorkflowVersionRegistry {
   }
 
   /** Get the latest registered version string for a workflow name. */
-  latest(name: string): string | undefined {
+  async latest(name: string): Promise<string | undefined> {
     return this.latestVersions.get(name);
   }
 
   /** List all registered versions for a workflow name. */
-  versions(name: string): string[] {
+  async versions(name: string): Promise<string[]> {
+    return this.versionsOf(name);
+  }
+
+  private versionsOf(name: string): string[] {
     const versions = this.definitions.get(name);
     return versions ? [...versions.keys()] : [];
   }
 
   /** List all registered workflow names. */
-  names(): string[] {
+  async names(): Promise<string[]> {
     return [...this.definitions.keys()];
   }
 
@@ -289,7 +291,7 @@ export class WorkflowVersionRegistry {
   // ---------------------------------------------------------------------------
 
   /** Resolve the explicitly-promoted version of a workflow. Null when none. */
-  findActive(name: string): VersionRecord | null {
+  async findActive(name: string): Promise<VersionRecord | null> {
     const versions = this.definitions.get(name);
     if (!versions) return null;
     for (const [version, entry] of versions) {
@@ -299,7 +301,7 @@ export class WorkflowVersionRegistry {
   }
 
   /** Inspect status + timestamps for one (name, version). Null when not registered. */
-  getStatus(name: string, version: string): VersionRecord | null {
+  async getStatus(name: string, version: string): Promise<VersionRecord | null> {
     const entry = this.definitions.get(name)?.get(version);
     return entry ? this.toRecord(name, version, entry) : null;
   }
@@ -311,7 +313,7 @@ export class WorkflowVersionRegistry {
    *
    * Idempotent: promoting an already-active version is a no-op.
    */
-  promote(name: string, version: string): VersionRecord {
+  async promote(name: string, version: string): Promise<VersionRecord> {
     const versions = this.definitions.get(name);
     if (!versions) {
       throw new Error(`promote: workflow "${name}" has no registered versions`);
@@ -341,10 +343,10 @@ export class WorkflowVersionRegistry {
    * rotation, just not chosen) from "explicitly rolled back" (drain
    * expected, out of rotation).
    */
-  rollback(params: { name: string; toVersion: string }): {
-    previous: VersionRecord;
-    active: VersionRecord;
-  } {
+  async rollback(params: {
+    name: string;
+    toVersion: string;
+  }): Promise<{ previous: VersionRecord; active: VersionRecord }> {
     const versions = this.definitions.get(params.name);
     if (!versions) {
       throw new Error(`rollback: workflow "${params.name}" has no registered versions`);
@@ -377,7 +379,7 @@ export class WorkflowVersionRegistry {
   }
 
   /** List every (name, version) record for one workflow, registration-desc. */
-  listRecords(name: string): ReadonlyArray<VersionRecord> {
+  async listRecords(name: string): Promise<ReadonlyArray<VersionRecord>> {
     const versions = this.definitions.get(name);
     if (!versions) return [];
     const records: VersionRecord[] = [];
@@ -409,13 +411,13 @@ export class WorkflowVersionRegistry {
     storage: WorkflowStorage;
   }): Promise<Map<string, VersionRunCounts>> {
     const { name, storage } = params;
-    const registered = this.versions(name);
+    const registered = this.versionsOf(name);
     const result = new Map<string, VersionRunCounts>();
     for (const version of registered) {
       result.set(version, { running: 0, completed: 0, failed: 0, tripwire: 0 });
     }
 
-    if (storage.countWorkflows) {
+    if (hasCapability(storage, "countWorkflows")) {
       const count = storage.countWorkflows.bind(storage);
       await Promise.all(
         registered.flatMap((version) =>
@@ -426,8 +428,9 @@ export class WorkflowVersionRegistry {
         ),
       );
     } else {
-      const list =
-        storage.listWorkflowSummaries?.bind(storage) ?? storage.listWorkflows.bind(storage);
+      const list = hasCapability(storage, "summaries")
+        ? storage.listWorkflowSummaries.bind(storage)
+        : storage.listWorkflows.bind(storage);
       for (const wf of await list({ name })) {
         const counts = wf.version ? result.get(wf.version) : undefined;
         if (counts) addRunCount({ counts, status: wf.status, n: 1 });
@@ -447,7 +450,7 @@ export class WorkflowVersionRegistry {
       this.drainedNotified.add(key);
       if (this.onDrained) await this.onDrained(name, version);
       if (this.autoDeregister && !this.isRoutable(name, version)) {
-        this.deregister(name, version);
+        this.deregisterNow(name, version);
       }
     }
 
@@ -469,7 +472,11 @@ export class WorkflowVersionRegistry {
    * Manually deregister a specific (name, version). Removes it from the
    * registry so it can't be resolved. Doesn't touch stored workflows.
    */
-  deregister(name: string, version: string): void {
+  async deregister(name: string, version: string): Promise<void> {
+    this.deregisterNow(name, version);
+  }
+
+  private deregisterNow(name: string, version: string): void {
     this.definitions.get(name)?.delete(version);
     // If we deregistered the latest, pick a new latest (last remaining).
     if (this.latestVersions.get(name) === version) {
@@ -485,13 +492,13 @@ export class WorkflowVersionRegistry {
 }
 
 /**
- * Thin wrapper over `WorkflowVersionRegistry` scoped to a single workflow
- * name. Returned by `WorkflowVersionRegistry.for(name)` for a fluent API
- * when you only manage one workflow's versions.
+ * Thin wrapper over `InMemoryWorkflowVersionRegistry` scoped to a single
+ * workflow name. Returned by `InMemoryWorkflowVersionRegistry.for(name)` for
+ * a fluent API when you only manage one workflow's versions.
  */
 export class ScopedWorkflowVersionRegistry {
   constructor(
-    private readonly registry: WorkflowVersionRegistry,
+    private readonly registry: InMemoryWorkflowVersionRegistry,
     private readonly name: string,
   ) {}
 
@@ -506,22 +513,29 @@ export class ScopedWorkflowVersionRegistry {
           `use the unscoped registry for cross-name registrations.`,
       );
     }
-    this.registry.register(definition);
+    if (!definition.version) {
+      throw new Error(
+        `Workflow "${definition.name}" must have a version to register in the registry`,
+      );
+    }
+    // Validated above, so the in-memory register can't reject; it records
+    // the definition before it returns.
+    void this.registry.register(definition);
     return this;
   }
 
   /** Resolve a definition by version (or latest if omitted). */
-  resolve(version?: string): Workflow<unknown, unknown> | undefined {
+  resolve(version?: string): Promise<Workflow<unknown, unknown> | undefined> {
     return this.registry.resolve(this.name, version);
   }
 
   /** Latest registered version string, or undefined. */
-  latest(): string | undefined {
+  latest(): Promise<string | undefined> {
     return this.registry.latest(this.name);
   }
 
   /** All registered versions for this workflow. */
-  versions(): string[] {
+  versions(): Promise<string[]> {
     return this.registry.versions(this.name);
   }
 
@@ -531,22 +545,30 @@ export class ScopedWorkflowVersionRegistry {
   }
 
   /** Deregister a specific version. */
-  deregister(version: string): void {
-    this.registry.deregister(this.name, version);
+  deregister(version: string): Promise<void> {
+    return this.registry.deregister(this.name, version);
   }
 
   /** Access the underlying unscoped registry (escape hatch). */
-  get unscoped(): WorkflowVersionRegistry {
+  get unscoped(): InMemoryWorkflowVersionRegistry {
     return this.registry;
   }
 }
 
 /**
- * Convenience factory. Prefer this over `new WorkflowVersionRegistry(...)`
+ * Convenience factory. Prefer this over `new InMemoryWorkflowVersionRegistry(...)`
  * in new code — mirrors how every other promin building block is built.
  */
 export function createWorkflowVersionRegistry(
   config?: WorkflowVersionRegistryConfig,
-): WorkflowVersionRegistry {
-  return new WorkflowVersionRegistry(config);
+): InMemoryWorkflowVersionRegistry {
+  return new InMemoryWorkflowVersionRegistry(config);
 }
+
+/**
+ * @deprecated The in-memory registry class is `InMemoryWorkflowVersionRegistry`;
+ * `WorkflowVersionRegistry` names the registry interface. This value alias
+ * keeps `new WorkflowVersionRegistry()` and `WorkflowVersionRegistry.for()`
+ * working for one release.
+ */
+export const WorkflowVersionRegistry = InMemoryWorkflowVersionRegistry;

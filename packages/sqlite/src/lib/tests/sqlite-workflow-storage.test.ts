@@ -66,7 +66,7 @@ describe("SqliteWorkflowStorage", () => {
       parentWorkflowId: "parent-1",
     });
 
-    await s.cancelWorkflow("parent-1", { cascade: true });
+    await s.cancelWorkflow({ workflowId: "parent-1", cascade: true });
 
     expect((await s.loadWorkflow("parent-1"))!.status).toBe("failed");
     expect((await s.loadWorkflow("child-1"))!.status).toBe("failed");
@@ -75,11 +75,11 @@ describe("SqliteWorkflowStorage", () => {
   it("loadRunHistory reflects archived runs in order", async () => {
     const s = makeStorage();
     await s.createWorkflow({ workflowId: "hist-sqlite", workflowName: "test", input: {} });
-    await s.completeWorkflow("hist-sqlite", "run-1");
-    await s.startFreshRun("hist-sqlite");
-    await s.completeWorkflow("hist-sqlite", "run-2");
+    await s.completeWorkflow({ workflowId: "hist-sqlite", result: "run-1" });
+    await s.startFreshRun({ workflowId: "hist-sqlite" });
+    await s.completeWorkflow({ workflowId: "hist-sqlite", result: "run-2" });
 
-    const history = await s.loadRunHistory("hist-sqlite");
+    const history = await s.loadRunHistory({ workflowId: "hist-sqlite" });
     expect(history).toHaveLength(2);
     expect(history[0]!.run).toBe(2);
     expect(history[0]!.result).toBe("run-2");
@@ -91,13 +91,13 @@ describe("SqliteWorkflowStorage", () => {
     const db = new Database(":memory:");
     const s1 = SqliteWorkflowStorage.make({ db });
     await s1.createWorkflow({ workflowId: "fence-persist", workflowName: "t", input: {} });
-    const { token: t1 } = await s1.tryLock("fence-persist", 60_000);
+    const { token: t1 } = await s1.tryLock({ workflowId: "fence-persist", lockDurationMs: 60_000 });
     expect(t1).toBeDefined();
 
     // A fresh instance on the same db should not reuse the same token
     const s2 = SqliteWorkflowStorage.make({ db });
-    await s1.releaseLock("fence-persist", { fenceToken: t1 });
-    const { token: t2 } = await s2.tryLock("fence-persist", 60_000);
+    await s1.releaseLock({ workflowId: "fence-persist", guard: { fenceToken: t1 } });
+    const { token: t2 } = await s2.tryLock({ workflowId: "fence-persist", lockDurationMs: 60_000 });
     expect(t2).toBeDefined();
     expect(t2).not.toBe(t1);
   });
@@ -107,8 +107,12 @@ describe("SqliteWorkflowStorage", () => {
     const before = new Date();
     await new Promise((r) => setTimeout(r, 10));
     await s.createWorkflow({ workflowId: "purge-sqlite", workflowName: "test", input: {} });
-    await s.deliverSignal("purge-sqlite", "done", { ok: true });
-    await s.completeWorkflow("purge-sqlite", "result");
+    await s.deliverSignal({
+      workflowId: "purge-sqlite",
+      signalName: "done",
+      payload: { ok: true },
+    });
+    await s.completeWorkflow({ workflowId: "purge-sqlite", result: "result" });
     await new Promise((r) => setTimeout(r, 10));
     const after = new Date();
 
@@ -116,7 +120,7 @@ describe("SqliteWorkflowStorage", () => {
 
     expect(await s.loadWorkflow("purge-sqlite")).toBeNull();
     expect(await s.loadSignals("purge-sqlite")).toEqual([]);
-    expect(await s.loadRunHistory("purge-sqlite")).toEqual([]);
+    expect(await s.loadRunHistory({ workflowId: "purge-sqlite" })).toEqual([]);
   });
 
   it("countWorkflows returns exact counts per status", async () => {
@@ -124,7 +128,7 @@ describe("SqliteWorkflowStorage", () => {
     await s.createWorkflow({ workflowId: "cw-1", workflowName: "wf", input: {} });
     await s.createWorkflow({ workflowId: "cw-2", workflowName: "wf", input: {} });
     await s.createWorkflow({ workflowId: "cw-3", workflowName: "wf", input: {} });
-    await s.completeWorkflow("cw-1", "done");
+    await s.completeWorkflow({ workflowId: "cw-1", result: "done" });
 
     expect(await s.countWorkflows({ status: "completed" })).toBe(1);
     expect(await s.countWorkflows({ status: "pending" })).toBe(2);
@@ -159,7 +163,7 @@ describe("SqliteWorkflowStorage", () => {
     await s.createWorkflow({ workflowId: "stale-1", workflowName: "wf", input: {} });
     await s.createWorkflow({ workflowId: "stale-2", workflowName: "wf", input: {} });
     await s.createWorkflow({ workflowId: "stale-3", workflowName: "wf", input: {} });
-    await s.completeWorkflow("stale-3", "done");
+    await s.completeWorkflow({ workflowId: "stale-3", result: "done" });
 
     // Wait a tick so created_at is clearly in the past, then cancel with 0ms cutoff.
     await new Promise((r) => setTimeout(r, 5));

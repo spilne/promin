@@ -12,11 +12,11 @@
 //   POST /api/workflows/:name/rollback                — rollback (body: { toVersion }).
 // ---------------------------------------------------------------------------
 
-import type { IWorkflowVersionRegistry, VersionRecord } from "@promin/workflow";
+import type { WorkflowVersionRegistry, VersionRecord } from "@promin/workflow";
 import { json, jsonError, readJson } from "../router.ts";
 
 export interface WorkflowVersionsRoutesDeps {
-  readonly registry: IWorkflowVersionRegistry;
+  readonly registry: WorkflowVersionRegistry;
 }
 
 export interface WorkflowVersionDto {
@@ -42,10 +42,10 @@ function toDto(record: VersionRecord): WorkflowVersionDto {
 }
 
 function requireLifecycle(deps: WorkflowVersionsRoutesDeps): {
-  readonly findActive: NonNullable<IWorkflowVersionRegistry["findActive"]>;
-  readonly listRecords: NonNullable<IWorkflowVersionRegistry["listRecords"]>;
-  readonly promote: NonNullable<IWorkflowVersionRegistry["promote"]>;
-  readonly rollback: NonNullable<IWorkflowVersionRegistry["rollback"]>;
+  readonly findActive: NonNullable<WorkflowVersionRegistry["findActive"]>;
+  readonly listRecords: NonNullable<WorkflowVersionRegistry["listRecords"]>;
+  readonly promote: NonNullable<WorkflowVersionRegistry["promote"]>;
+  readonly rollback: NonNullable<WorkflowVersionRegistry["rollback"]>;
 } | null {
   const r = deps.registry;
   if (!r.findActive || !r.listRecords || !r.promote || !r.rollback) return null;

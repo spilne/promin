@@ -627,8 +627,8 @@ export const machineLocks = pgTable("sm_machine_locks", {
 //
 // A signal token grants one-shot delivery rights to a public completer for
 // a specific (workflow_id, signal_name). The completion route validates
-// the bearer, then calls `storage.deliverSignal(workflow_id, signal_name,
-// value)` to resume the workflow through the existing signal mechanic —
+// the bearer, then calls `storage.deliverSignal({ workflowId, signalName,
+// payload })` to resume the workflow through the existing signal mechanic —
 // no new suspend semantics.
 // ---------------------------------------------------------------------------
 

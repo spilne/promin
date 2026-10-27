@@ -8,6 +8,8 @@
 //     `completePendingEntry` predates the reported result.
 //   * A failure escaping the body ends the step attempt: recorded failures
 //     are discarded so step-level `retry` on `.journaled` re-runs the
+import type { LoadJournalParams } from "../workflow-storage.ts";
+
 //     activity. Control-flow and engine-integrity exits discard nothing.
 //   * Failures replay as the same kind of error.
 // ---------------------------------------------------------------------------
@@ -167,8 +169,8 @@ describe("live run follows the stored outcome", () => {
 
       const load = storage.loadJournal.bind(storage);
       let armed = true;
-      storage.loadJournal = async (workflowId: string, stepName: string) => {
-        const journal = await load(workflowId, stepName);
+      storage.loadJournal = async ({ workflowId, stepName }: LoadJournalParams) => {
+        const journal = await load({ workflowId, stepName });
         if (armed) {
           armed = false;
           await completeSignal({ storage, workflowId, stepName, signalName: "go", value: 42 });
@@ -352,7 +354,7 @@ describe("failure replay and step attempts", () => {
     await capture(run({ storage, workflowId: "comp-retry", body }));
     expect(charges).toBe(1);
     expect(refundTries).toBe(2);
-    const journal = await storage.loadJournal("comp-retry", "s");
+    const journal = await storage.loadJournal({ workflowId: "comp-retry", stepName: "s" });
     expect(journal).toEqual([]);
   });
 
@@ -379,7 +381,9 @@ describe("failure replay and step attempts", () => {
     };
     const err = await capture(run({ storage, workflowId: "nd-keep", body: renamed }));
     expect((err as { _tag?: string })._tag).toBe("JournalNonDeterminismError");
-    const exits = (await storage.loadJournal("nd-keep", "s")).map((e) => e.exit as JournalExit);
+    const exits = (await storage.loadJournal({ workflowId: "nd-keep", stepName: "s" })).map(
+      (e) => e.exit as JournalExit,
+    );
     expect(exits).toEqual([
       { tag: "Failure", error: "caught" },
       { tag: "Success", value: "b" },

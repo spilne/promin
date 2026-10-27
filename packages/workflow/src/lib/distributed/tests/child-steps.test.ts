@@ -170,7 +170,7 @@ describe("subworkflow steps under the distributed runner", () => {
     void sleepScanner.start();
     void signalScanner.start();
 
-    await storage.deliverSignal("gated-3", "go", 7);
+    await storage.deliverSignal({ workflowId: "gated-3", signalName: "go", payload: 7 });
     await waitFor(async () => {
       if (clock.pendingCount() > 0) clock.advance(10);
       return (await storage.loadWorkflow("gp"))?.status === "completed";

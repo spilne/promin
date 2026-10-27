@@ -7,7 +7,8 @@
 import { tryPromise } from "@spilne/perfect-core";
 import type { Codec } from "@spilne/perfect-core/connect";
 import type { TaggedError } from "../../shared/tagged-error.ts";
-import { isActivityJournalStorage, type ActivityJournalStorage } from "../activity-journal.ts";
+import { type JournalStore } from "../activity-journal.ts";
+import { hasCapability } from "../storage/capabilities.ts";
 import {
   JournalStorageMissingError,
   runJournaledStep,
@@ -30,13 +31,11 @@ export function createJournaledStep(params: {
   // Storage capability check is deferred to execute time — the builder has
   // no storage of its own; validation runs against the runner's storage
   // via `execParams.storage`.
-  const getJournalStorage = (
-    runtimeStorage: WorkflowStorage,
-  ): WorkflowStorage & ActivityJournalStorage => {
-    if (!isActivityJournalStorage(runtimeStorage)) {
+  const getJournalStorage = (runtimeStorage: WorkflowStorage): WorkflowStorage & JournalStore => {
+    if (!hasCapability(runtimeStorage, "journal")) {
       throw new JournalStorageMissingError(name);
     }
-    return runtimeStorage as WorkflowStorage & ActivityJournalStorage;
+    return runtimeStorage as WorkflowStorage & JournalStore;
   };
 
   return {

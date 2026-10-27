@@ -102,7 +102,7 @@ describe("WorkflowStorage.cancelWorkflow", () => {
     const storage = new InMemoryWorkflowStorage();
     await storage.createWorkflow({ workflowId: "cancel-1", workflowName: "test", input: {} });
 
-    await storage.cancelWorkflow("cancel-1");
+    await storage.cancelWorkflow({ workflowId: "cancel-1" });
 
     const state = await storage.loadWorkflow("cancel-1");
     expect(state?.status).toBe("failed");
@@ -113,9 +113,13 @@ describe("WorkflowStorage.cancelWorkflow", () => {
   it("cancels a suspended workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
     await storage.createWorkflow({ workflowId: "cancel-2", workflowName: "test", input: {} });
-    await storage.suspendWorkflow("cancel-2", "wait", { status: "sleeping", stepType: "sleep" });
+    await storage.suspendWorkflow({
+      workflowId: "cancel-2",
+      stepName: "wait",
+      stepUpdate: { status: "sleeping", stepType: "sleep" },
+    });
 
-    await storage.cancelWorkflow("cancel-2");
+    await storage.cancelWorkflow({ workflowId: "cancel-2" });
 
     const state = await storage.loadWorkflow("cancel-2");
     expect(state?.status).toBe("failed");
@@ -125,9 +129,9 @@ describe("WorkflowStorage.cancelWorkflow", () => {
   it("no-ops on already completed workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
     await storage.createWorkflow({ workflowId: "cancel-3", workflowName: "test", input: {} });
-    await storage.completeWorkflow("cancel-3", "done");
+    await storage.completeWorkflow({ workflowId: "cancel-3", result: "done" });
 
-    await storage.cancelWorkflow("cancel-3");
+    await storage.cancelWorkflow({ workflowId: "cancel-3" });
 
     const state = await storage.loadWorkflow("cancel-3");
     expect(state?.status).toBe("completed");
@@ -136,7 +140,7 @@ describe("WorkflowStorage.cancelWorkflow", () => {
   it("no-ops on non-existent workflow", async () => {
     const storage = new InMemoryWorkflowStorage();
     // Should not throw
-    await storage.cancelWorkflow("nonexistent");
+    await storage.cancelWorkflow({ workflowId: "nonexistent" });
   });
 });
 

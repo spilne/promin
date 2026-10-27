@@ -30,7 +30,7 @@
 // ---------------------------------------------------------------------------
 
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
-import { isActivityJournalStorage } from "../durable/activity-journal.ts";
+import { hasCapability } from "../durable/storage/capabilities.ts";
 import type { Workflow } from "../durable/durable-pipeline.ts";
 import { completeSignal } from "../durable/journaled-step.ts";
 import type { WorkflowRunner } from "../durable/workflow-runner.ts";
@@ -88,7 +88,7 @@ export class DefaultSignalScanner implements SignalScanner {
   constructor(config: SignalScannerConfig) {
     const storage = config.storage;
     const pageSize = config.pageSize ?? 100;
-    const journaledSuspend = isActivityJournalStorage(storage) ? storage : undefined;
+    const journaledSuspend = hasCapability(storage, "journal") ? storage : undefined;
 
     this.scanner = new ResumeScanner<WorkflowWakeup>({
       name: "signal-scanner",
@@ -101,7 +101,7 @@ export class DefaultSignalScanner implements SignalScanner {
       leaderElection: config.leaderElection,
       resumeConcurrency: config.resumeConcurrency,
       find: async ({ afterWorkflowId }) => {
-        if (storage.listSignalWakeups) {
+        if (hasCapability(storage, "signalWakeups")) {
           const rows = await storage.listSignalWakeups({
             limit: pageSize,
             ...(afterWorkflowId !== undefined && { afterWorkflowId }),

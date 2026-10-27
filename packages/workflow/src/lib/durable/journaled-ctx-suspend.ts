@@ -76,12 +76,12 @@ export function makeSleep(env: JournaledCtxEnv): JournaledContext<unknown, unkno
       // Still sleeping — mark the WORKFLOW as suspended at step level so the
       // existing DefaultSleepScanner (which scans step.wakeAt) picks it up.
       if (workflowStorage) {
-        await workflowStorage.suspendWorkflow(
+        await workflowStorage.suspendWorkflow({
           workflowId,
           stepName,
-          { status: "sleeping", wakeAt },
+          stepUpdate: { status: "sleeping", wakeAt },
           guard,
-        );
+        });
       }
       throw new WorkflowSuspendedError({
         workflowId,
@@ -197,10 +197,10 @@ export function makeSignalMethods(env: JournaledCtxEnv): SignalMethods {
       }
 
       if (workflowStorage) {
-        await workflowStorage.suspendWorkflow(
+        await workflowStorage.suspendWorkflow({
           workflowId,
           stepName,
-          {
+          stepUpdate: {
             status: "waiting_for_signal",
             signalName,
             ...(wakeAt && { signalTimeoutAt: wakeAt }),
@@ -215,7 +215,7 @@ export function makeSignalMethods(env: JournaledCtxEnv): SignalMethods {
             }),
           },
           guard,
-        );
+        });
       }
       throw new WorkflowSuspendedError({
         workflowId,

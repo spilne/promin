@@ -317,7 +317,7 @@ function AttemptsSection({
       <Section title="Attempts">
         <EmptyState
           message="Attempt history not available"
-          hint="Storage backend doesn't record StepAttemptStorage."
+          hint="Storage backend doesn't record StepAttemptStore."
           pad="py-4"
         />
       </Section>

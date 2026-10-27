@@ -103,28 +103,24 @@ export function createMapOverStep(params: {
             // on its task row; control flow passes through untouched.
             if (isControlFlowExit(error)) return fail(error);
             return promiseOrDie(() =>
-              exec.storage.saveTaskFailure(
-                {
-                  workflowId: exec.workflowId,
-                  stepName: name,
-                  taskIndex,
-                  error: failureMessage(error),
-                },
-                exec.guard,
-              ),
+              exec.storage.saveTaskFailure({
+                workflowId: exec.workflowId,
+                stepName: name,
+                taskIndex,
+                error: failureMessage(error),
+                guard: exec.guard,
+              }),
             ).flatMap(() => fail(error));
           })
           .flatMap((result) =>
             promiseOrDie(() =>
-              exec.storage.saveTaskResult(
-                {
-                  workflowId: exec.workflowId,
-                  stepName: name,
-                  taskIndex,
-                  result: elementCodec.encode(result),
-                },
-                exec.guard,
-              ),
+              exec.storage.saveTaskResult({
+                workflowId: exec.workflowId,
+                stepName: name,
+                taskIndex,
+                result: elementCodec.encode(result),
+                guard: exec.guard,
+              }),
             ).as(result),
           );
       };

@@ -23,7 +23,7 @@
 // ------------------
 // `loadJournal` is required to surface `toolName` / `toolInput` (they
 // live in the activity journal, not in `wf.steps`). When the storage
-// doesn't implement `ActivityJournalStorage`, the helper still returns
+// doesn't implement `JournalStore`, the helper still returns
 // rows but with `toolName`/`toolInput` as `undefined`.
 //
 // Not exhaustive: only surfaces approvals waiting on the **default
@@ -33,13 +33,13 @@
 // ---------------------------------------------------------------------------
 
 import type {
-  ActivityJournalStorage,
+  JournalStore,
   JournalEntry,
   StepState,
   WorkflowState,
   WorkflowStorage,
 } from "@promin/workflow";
-import { isActivityJournalStorage } from "@promin/workflow";
+import { hasCapability } from "@promin/workflow";
 import { parseApprovalSignal } from "./approve-signal.ts";
 
 const APPROVAL_START_SUFFIX = "-start";
@@ -54,7 +54,7 @@ export interface PendingApproval {
   /**
    * Tool name — pulled from the lc-start activity's journal exit value.
    * `undefined` if the journal isn't accessible (no
-   * `ActivityJournalStorage`) or the entry is missing.
+   * `JournalStore`) or the entry is missing.
    */
   readonly toolName: string | undefined;
   /** Tool input — pulled from the lc-start activity's journal exit value. */
@@ -100,7 +100,7 @@ export async function listPendingApprovals(
     orderDir: "desc",
   });
 
-  const journalStorage = isActivityJournalStorage(storage) ? storage : undefined;
+  const journalStorage = hasCapability(storage, "journal") ? storage : undefined;
 
   const out: PendingApproval[] = [];
   for (const wf of suspended) {
@@ -138,14 +138,14 @@ function findSuspendedApprovalStep(
 }
 
 async function readApprovalStartMetadata(
-  storage: ActivityJournalStorage,
+  storage: JournalStore,
   workflowId: string,
   stepName: string,
   toolCallId: string,
 ): Promise<{ toolName: string | undefined; toolInput: unknown }> {
   let entries: JournalEntry[];
   try {
-    entries = await storage.loadJournal(workflowId, stepName);
+    entries = await storage.loadJournal({ workflowId, stepName });
   } catch {
     return { toolName: undefined, toolInput: undefined };
   }

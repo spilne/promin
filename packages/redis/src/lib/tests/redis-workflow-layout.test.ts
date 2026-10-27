@@ -120,7 +120,7 @@ redisDescribe("RedisWorkflowStorage key layout", (redis) => {
       await storage.createWorkflow({ workflowId: "w", workflowName: "n", input: 1 });
       await client.rpush(`${prefix}:{wf:w}:streams:legacy`, JSON.stringify({ payload: 1 }));
       await client.hdel(`${prefix}:{wf:w}`, "streamsTracked");
-      await storage.completeWorkflow("w", 1);
+      await storage.completeWorkflow({ workflowId: "w", result: 1 });
 
       expect(await storage.purgeCompleted({ olderThanMs: -60_000, limit: 10 })).toBe(1);
       expect(Number(await client.exists(`${prefix}:{wf:w}:streams:legacy`))).toBe(0);
@@ -130,12 +130,12 @@ redisDescribe("RedisWorkflowStorage key layout", (redis) => {
     it("fence tokens keep growing across a purge and re-create", async () => {
       const { storage } = setup();
       await storage.createWorkflow({ workflowId: "w", workflowName: "n", input: 1 });
-      const first = await storage.tryLock("w", 30_000);
-      await storage.releaseLock("w", { fenceToken: first.token! });
-      await storage.completeWorkflow("w", 1);
+      const first = await storage.tryLock({ workflowId: "w", lockDurationMs: 30_000 });
+      await storage.releaseLock({ workflowId: "w", guard: { fenceToken: first.token! } });
+      await storage.completeWorkflow({ workflowId: "w", result: 1 });
       await storage.purgeCompleted({ olderThanMs: -60_000, limit: 10 });
       await storage.createWorkflow({ workflowId: "w", workflowName: "n", input: 1 });
-      const second = await storage.tryLock("w", 30_000);
+      const second = await storage.tryLock({ workflowId: "w", lockDurationMs: 30_000 });
       expect(BigInt(second.token!) > BigInt(first.token!)).toBe(true);
     });
   });
@@ -161,12 +161,12 @@ redisDescribe("RedisWorkflowStorage key layout", (redis) => {
         stepType: "sleep",
         wakeAt: new Date(1_000),
       });
-      await storage.completeWorkflow("w", 1);
+      await storage.completeWorkflow({ workflowId: "w", result: 1 });
       expect(await pttl(client, `${prefix}:{wf:w}`)).toBeGreaterThan(0);
 
-      await storage.resetSteps("w", ["redo"]);
+      await storage.resetSteps({ workflowId: "w", stepNames: ["redo"] });
 
-      expect(await storage.loadJournal("w", "redo")).toEqual([]);
+      expect(await storage.loadJournal({ workflowId: "w", stepName: "redo" })).toEqual([]);
       expect(await client.zcard(`${prefix}:{idx}:sleeps`)).toBe(0);
       expect(await pttl(client, `${prefix}:{wf:w}`)).toBe(-1);
       expect(await pttl(client, `${prefix}:{wf:w}:steps:1`)).toBe(-1);
@@ -263,7 +263,7 @@ redisDescribe("RedisWorkflowStorage key layout", (redis) => {
       expect(await storage.countWorkflows({ status: "suspended" })).toBe(1);
       expect(await storage.countWorkflows()).toBe(2);
       expect(await storage.distinctWorkflowNames()).toEqual(["kid", "purged-long-ago", "w"]);
-      expect(await storage.loadJournal("old", "s")).toHaveLength(1);
+      expect(await storage.loadJournal({ workflowId: "old", stepName: "s" })).toHaveLength(1);
       expect(
         (await storage.findDueSleeps({ now: new Date(), limit: 10 })).map((d) => d.workflowId),
       ).toEqual(["old"]);
@@ -271,7 +271,9 @@ redisDescribe("RedisWorkflowStorage key layout", (redis) => {
       expect(await storage.readStreamChunks({ workflowId: "old", streamId: "out" })).toHaveLength(
         1,
       );
-      expect((await storage.tryLock("old", 30_000)).acquired).toBe(false);
+      expect((await storage.tryLock({ workflowId: "old", lockDurationMs: 30_000 })).acquired).toBe(
+        false,
+      );
       expect(
         (await storage.listDueTimers({ now: new Date(), limit: 10 })).map((w) => w.workflowId),
       ).toEqual(["old"]);
@@ -293,7 +295,7 @@ redisDescribe("RedisWorkflowStorage key layout", (redis) => {
       expect(await client.get(`${p}:signal_token:tk`)).toBe("old");
 
       // The backfilled stream is purged with its workflow.
-      await storage.completeWorkflow("old", 1);
+      await storage.completeWorkflow({ workflowId: "old", result: 1 });
       expect(await storage.purgeCompleted({ olderThanMs: -60_000, limit: 10 })).toBe(1);
       expect(Number(await client.exists(`${p}:{wf:old}:streams:out`))).toBe(0);
 

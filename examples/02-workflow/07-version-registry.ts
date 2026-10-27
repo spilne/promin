@@ -57,8 +57,8 @@ const orderV2 = workflow({ name: "order", version: "2" })
 registry.register(orderV1);
 registry.register(orderV2);
 
-console.log("Registered versions:", registry.versions("order")); // ["1", "2"]
-console.log("Latest:", registry.latest("order")); // "2"
+console.log("Registered versions:", await registry.versions("order")); // ["1", "2"]
+console.log("Latest:", await registry.latest("order")); // "2"
 
 // ---------------------------------------------------------------------------
 // 4. New workflows use the latest version (v2)
@@ -86,7 +86,7 @@ await runner.run({
 // Creates with version "1" in storage
 
 // Start a fresh run (simulating resume after crash/restart)
-await storage.startFreshRun("order-legacy");
+await storage.startFreshRun({ workflowId: "order-legacy" });
 
 // Registry picks v1 definition for this workflow (stored version = "1")
 const legacyResult = await runner.run({

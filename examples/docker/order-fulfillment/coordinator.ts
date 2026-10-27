@@ -7,7 +7,7 @@
 // the default worker picks up notify-warehouse + mark-delivered.
 // ---------------------------------------------------------------------------
 
-import { createCoordinator, WorkflowVersionRegistry } from "@promin/workflow";
+import { createCoordinator, InMemoryWorkflowVersionRegistry } from "@promin/workflow";
 import { buildStack } from "./shared.ts";
 import { buildOrderWorkflow, type OrderInput, type ShippedSignal } from "./workflow.ts";
 
@@ -16,7 +16,7 @@ const SHIP_AFTER_MS = Number(process.env["SHIP_AFTER_MS"] ?? 3_000);
 
 const { storage, stepQueue, close } = await buildStack();
 
-const registry = new WorkflowVersionRegistry();
+const registry = new InMemoryWorkflowVersionRegistry();
 registry.register(buildOrderWorkflow());
 
 const coordinator = createCoordinator({
@@ -63,7 +63,7 @@ const submitDemo = async (): Promise<void> => {
       shippedAt: new Date().toISOString(),
     };
     storage
-      .deliverSignal(workflowId, "shipped", payload)
+      .deliverSignal({ workflowId, signalName: "shipped", payload })
       .then(() => console.log(`[coordinator] signal shipped → ${workflowId}`))
       .catch((err) => console.error(`[coordinator] deliverSignal ${workflowId} failed`, err));
   }, SHIP_AFTER_MS);

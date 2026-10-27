@@ -15,7 +15,7 @@ import type { JournaledContext } from "../journaled-step.ts";
 //  - Activity runs once on first execution, result journaled.
 //  - Replay of the same (workflowId, stepName) returns the journaled value
 //    without re-executing the activity fn.
-//  - Storage without ActivityJournalStorage throws at build time.
+//  - Storage without JournalStore throws at build time.
 //  - Activity failure that escapes the body is discarded so the next attempt
 //    re-runs it; a caught failure replays inside the same attempt.
 //  - Retries are applied before journaling the final exit.
@@ -64,7 +64,7 @@ describe("journaled step", () => {
       });
 
       // Journal has two entries with the right names and values.
-      const journal = await storage.loadJournal("wf-happy", "setup");
+      const journal = await storage.loadJournal({ workflowId: "wf-happy", stepName: "setup" });
       expect(journal).toHaveLength(2);
       expect(journal[0]!.activityName).toBe("create");
       expect(journal[0]!.exit).toEqual({
@@ -142,7 +142,7 @@ describe("journaled step", () => {
       expect(bCalls).toBe(1);
 
       // Simulate: second activity's journal entry was lost (crash before append).
-      storage.deleteJournalEntry("wf-crash", "step", 1);
+      storage.deleteJournalEntry({ workflowId: "wf-crash", stepName: "step", activityIndex: 1 });
 
       // Replay re-runs ONLY activity B; A comes from journal.
       const replayed = await runJournaledStep({
@@ -260,7 +260,7 @@ describe("journaled step", () => {
       expect(calls).toBe(1);
 
       // The attempt is over: the success stays, the failure is gone.
-      const journal = await storage.loadJournal("wf-fail", "step");
+      const journal = await storage.loadJournal({ workflowId: "wf-fail", stepName: "step" });
       expect(journal.map((e) => e.activityName)).toEqual(["ok"]);
 
       // Next attempt — the failed activity runs again, the success replays.
@@ -294,7 +294,7 @@ describe("journaled step", () => {
         });
 
       await expect(run()).rejects.toMatchObject({ _tag: "WorkflowSuspendedError" });
-      const journal = await storage.loadJournal("wf-caught", "step");
+      const journal = await storage.loadJournal({ workflowId: "wf-caught", stepName: "step" });
       expect(journal[0]!.exit).toEqual({ tag: "Failure", error: "boom" });
 
       // Resume while still sleeping: the failure replays, fn is not re-run.
@@ -329,7 +329,7 @@ describe("journaled step", () => {
       expect(result).toBe("finally");
       expect(attempts).toBe(3);
 
-      const journal = await storage.loadJournal("wf-retry", "step");
+      const journal = await storage.loadJournal({ workflowId: "wf-retry", stepName: "step" });
       expect(journal).toHaveLength(1);
       expect(journal[0]!.exit).toEqual({ tag: "Success", value: "finally" });
     });
@@ -439,7 +439,7 @@ describe("journaled step", () => {
       const bareRunner = createWorkflowRunner({ storage: bareStorage });
       await expect(
         bareRunner.run({ workflow: bareWf, workflowId: "nope-1", input: undefined }),
-      ).rejects.toThrow(/requires a WorkflowStorage that implements ActivityJournalStorage/);
+      ).rejects.toThrow(/requires a WorkflowStorage that implements JournalStore/);
     });
   });
 

@@ -115,12 +115,12 @@ describe("a child that ends wakes its parked parent", () => {
       clock,
       definitions: [approval, parent] as never,
     });
-    await storage.deliverSignal("kid", "approve", true);
+    await storage.deliverSignal({ workflowId: "kid", signalName: "approve", payload: true });
     await driveUntil({ storage, clock, workflowId: "par", status: "completed" });
 
     expect((await storage.loadWorkflow("kid"))?.status).toBe("completed");
     expect((await storage.loadWorkflow("par"))?.result).toBe(41);
-    const journal = await storage.loadJournal("par", "run");
+    const journal = await storage.loadJournal({ workflowId: "par", stepName: "run" });
     expect(journal[0]!.exit).toEqual({ tag: "Success", value: 40 });
     expect(afterRuns).toBe(1);
     await scanners.stop();
@@ -157,7 +157,7 @@ describe("a child that ends wakes its parked parent", () => {
       clock,
       definitions: [child, parent] as never,
     });
-    await storage.deliverSignal("enrich-3", "go", 7);
+    await storage.deliverSignal({ workflowId: "enrich-3", signalName: "go", payload: 7 });
     await driveUntil({ storage, clock, workflowId: "p", status: "completed" });
 
     expect((await storage.loadWorkflow("enrich-3"))?.status).toBe("completed");

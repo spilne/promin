@@ -25,7 +25,7 @@ Promin supports all three via opt-in primitives.
 | `onVersionMismatch: "strict"` (default)                   | Throws `WorkflowVersionMismatchError` on resume when stored version != current   | Safe default — makes drift impossible to miss        |
 | `onVersionMismatch: "drain"` + `previousVersions: [v1]`   | Delegates resume to the stored version's definition                              | Letting in-flight workflows finish on old code       |
 | `patches: ["X"]` + `ctx.patched("X")` in a journaled body | Inline branches in the same code file, keyed on the currently-running definition | Small code tweaks that don't need a full v1/v2 split |
-| `WorkflowVersionRegistry.for(name)`                       | Central place holding many versions of one workflow, with drain events           | Long-lived workflows with 3+ coexisting versions     |
+| `InMemoryWorkflowVersionRegistry.for(name)`               | Central place holding many versions of one workflow, with drain events           | Long-lived workflows with 3+ coexisting versions     |
 | `supportedVersions: ["1", "2"]` on `createWorker`         | Worker claims only tasks whose version is in the allow-list                      | Rolling distributed deploys                          |
 
 ## Pattern 1 — Strict policy (default)
@@ -81,19 +81,19 @@ const v2 = workflow({
 ```
 
 v1's definition stays in the codebase until all v1 workflows complete. Use
-`WorkflowVersionRegistry.countByVersion()` to monitor drain progress.
+`InMemoryWorkflowVersionRegistry.countByVersion()` to monitor drain progress.
 
 **Full example**: [`examples/versioning/02-drain-inline.ts`](./examples/versioning/02-drain-inline.ts)
 
 ## Pattern 3 — Registry for 3+ coexisting versions
 
 When you have more than 2-3 coexisting versions, managing `previousVersions`
-arrays gets unwieldy. Use `WorkflowVersionRegistry.for(name)` — a scoped
+arrays gets unwieldy. Use `InMemoryWorkflowVersionRegistry.for(name)` — a scoped
 fluent builder that holds all versions, resolves them on resume, and fires
 events when a version drains to zero.
 
 ```typescript
-const registry = WorkflowVersionRegistry.for("job", {
+const registry = InMemoryWorkflowVersionRegistry.for("job", {
   autoDeregister: true,
   onDrained: (_name, version) => {
     console.log(`version "${version}" has drained`);

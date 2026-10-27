@@ -37,23 +37,27 @@ describe("InMemoryWorkflowStorage indexes", () => {
       const s = new InMemoryWorkflowStorage();
       await s.createWorkflow({ workflowId: "r", workflowName: "t", input: {} });
       await s.saveTaskResult({ workflowId: "r", stepName: "map", taskIndex: 0, result: 0 });
-      await s.suspendWorkflow("r", "map", { status: "sleeping" });
+      await s.suspendWorkflow({
+        workflowId: "r",
+        stepName: "map",
+        stepUpdate: { status: "sleeping" },
+      });
       await s.saveTaskResult({ workflowId: "r", stepName: "map", taskIndex: 1, result: 1 });
       expect((await s.loadWorkflow("r"))!.steps["map"]!.tasks!.map((t) => t.taskIndex)).toEqual([
         1,
       ]);
 
-      await s.resetSteps("r", ["map"]);
+      await s.resetSteps({ workflowId: "r", stepNames: ["map"] });
       await s.saveTaskResult({ workflowId: "r", stepName: "map", taskIndex: 2, result: 2 });
       expect((await s.loadWorkflow("r"))!.steps["map"]!.tasks!.map((t) => t.taskIndex)).toEqual([
         2,
       ]);
 
-      await s.startFreshRun("r");
+      await s.startFreshRun({ workflowId: "r" });
       await s.saveTaskResult({ workflowId: "r", stepName: "map", taskIndex: 3, result: 3 });
       const state = (await s.loadWorkflow("r"))!;
       expect(state.steps["map"]!.tasks!.map((t) => t.taskIndex)).toEqual([3]);
-      const [archived] = await s.loadRunHistory("r", { offset: 1 });
+      const [archived] = await s.loadRunHistory({ workflowId: "r", offset: 1 });
       expect(archived!.steps["map"]!.tasks!.map((t) => t.taskIndex)).toEqual([2]);
     });
   });
@@ -81,7 +85,7 @@ describe("InMemoryWorkflowStorage indexes", () => {
       const again = await s.completePendingEntry({ ...slot, activityIndex: 3, exit: success(9) });
       expect(again).toEqual({ completed: false, exit: success(3) });
 
-      const journal = await s.loadJournal("j", "body");
+      const journal = await s.loadJournal({ workflowId: "j", stepName: "body" });
       expect(journal.map((e) => [e.activityIndex, e.phase])).toEqual([
         [0, "completed"],
         [1, "pending"],
@@ -95,14 +99,14 @@ describe("InMemoryWorkflowStorage indexes", () => {
       const slot = { workflowId: "o", stepName: "body", activityName: "a" };
       await s.appendEntry({ ...slot, activityIndex: 1, branchPath: "b", exit: success(1) });
       await s.appendEntry({ ...slot, activityIndex: 1, branchPath: "a", exit: success(2) });
-      const first = await s.loadJournal("o", "body");
+      const first = await s.loadJournal({ workflowId: "o", stepName: "body" });
       await s.appendEntry({ ...slot, activityIndex: 0, exit: success(0) });
-      const second = await s.loadJournal("o", "body");
+      const second = await s.loadJournal({ workflowId: "o", stepName: "body" });
 
       expect(first.map((e) => `${e.activityIndex}${e.branchPath}`)).toEqual(["1a", "1b"]);
       expect(second.map((e) => `${e.activityIndex}${e.branchPath}`)).toEqual(["0", "1a", "1b"]);
       first.pop();
-      expect(await s.loadJournal("o", "body")).toHaveLength(3);
+      expect(await s.loadJournal({ workflowId: "o", stepName: "body" })).toHaveLength(3);
     });
 
     it("findDueSleeps sees pending sleeps only, and not a fresh run's dropped journal", async () => {
@@ -131,7 +135,7 @@ describe("InMemoryWorkflowStorage indexes", () => {
         activityIndex: 0,
         exit: success(null),
       });
-      await s.startFreshRun("s2");
+      await s.startFreshRun({ workflowId: "s2" });
       expect(await s.findDueSleeps({ now, limit: 10 })).toEqual([]);
     });
   });
@@ -148,7 +152,7 @@ describe("InMemoryWorkflowStorage indexes", () => {
         idempotencyKey: "k",
         idempotencyExpiresAt: new Date(100),
       });
-      await s.completeWorkflow("old", 1);
+      await s.completeWorkflow({ workflowId: "old", result: 1 });
       clock.advance(200);
       const created = await s.createWorkflow({
         workflowId: "new",
@@ -212,10 +216,10 @@ describe("InMemoryWorkflowStorage indexes", () => {
         input: {},
         parentWorkflowId: "c1",
       });
-      await s.completeWorkflow("c2", 1);
+      await s.completeWorkflow({ workflowId: "c2", result: 1 });
       expect(await s.purgeCompleted({ olderThanMs: -1_000, limit: 10 })).toBe(1);
 
-      await s.cancelWorkflow("p", { cascade: true });
+      await s.cancelWorkflow({ workflowId: "p", cascade: true });
 
       for (const id of ["p", "c1", "g1"]) {
         expect((await s.loadWorkflowStatus(id))!.errorTag).toBe("WorkflowCancelledError");

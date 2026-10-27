@@ -47,12 +47,12 @@ export function createSleepStep(params: {
 
         const wakeAt = new Date(clock.currentTimeMs() + ms);
         yield* promiseOrDie(() =>
-          exec.storage.suspendWorkflow(
-            exec.workflowId,
-            name,
-            { status: "sleeping", stepType: "sleep", wakeAt },
-            exec.guard,
-          ),
+          exec.storage.suspendWorkflow({
+            workflowId: exec.workflowId,
+            stepName: name,
+            stepUpdate: { status: "sleeping", stepType: "sleep", wakeAt },
+            guard: exec.guard,
+          }),
         );
         return yield* fail(
           new WorkflowSuspendedError({
@@ -119,12 +119,17 @@ export function createWaitForSignalStep(params: {
             ? new Date(clock.currentTimeMs() + timeoutMs)
             : undefined;
         yield* promiseOrDie(() =>
-          execParams.storage.suspendWorkflow(
-            execParams.workflowId,
-            name,
-            { status: "waiting_for_signal", stepType: "signal", signalName, signalTimeoutAt },
-            execParams.guard,
-          ),
+          execParams.storage.suspendWorkflow({
+            workflowId: execParams.workflowId,
+            stepName: name,
+            stepUpdate: {
+              status: "waiting_for_signal",
+              stepType: "signal",
+              signalName,
+              signalTimeoutAt,
+            },
+            guard: execParams.guard,
+          }),
         );
         return yield* fail(
           new WorkflowSuspendedError({

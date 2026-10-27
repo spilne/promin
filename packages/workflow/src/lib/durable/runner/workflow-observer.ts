@@ -39,9 +39,9 @@ export function createWorkflowHandle<Output>(params: {
   return {
     workflowId,
     status: (p) => params.getStatus(p) as Promise<WorkflowStatusInfo<Output> | null>,
-    signal: (signalName, payload) => storage.deliverSignal(workflowId, signalName, payload),
+    signal: (signalName, payload) => storage.deliverSignal({ workflowId, signalName, payload }),
     cancel: async () => {
-      await storage.cancelWorkflow(workflowId);
+      await storage.cancelWorkflow({ workflowId });
       // A cancelled child wakes a parent parked on it.
       const state = await storage.loadWorkflow(workflowId);
       if (state) await wakeParentOfEndedRun({ storage, state });

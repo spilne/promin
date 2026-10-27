@@ -14,7 +14,7 @@ import { describe, it, expect } from "bun:test";
 import {
   InMemoryWorkflowStorage,
   createWorkflowRunner,
-  isSubscribableStorage,
+  hasCapability,
   workflow,
   type WorkflowRunEvent,
 } from "@promin/workflow";
@@ -32,7 +32,7 @@ describe("RemoteWorkflowStorage — polling subscribe fallback", () => {
 
     // Sanity: the wire deliberately omits subscribeToWorkflow, so the
     // runner must fall through to the polling path.
-    expect(isSubscribableStorage(remote)).toBe(false);
+    expect(hasCapability(remote, "runEvents")).toBe(false);
 
     const runner = createWorkflowRunner({ storage: remote });
 

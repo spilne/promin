@@ -11,6 +11,7 @@ import {
 import { InMemoryWorkflowStorage } from "../../in-memory-storage.ts";
 import { invokeQueryHandler } from "../../query-registry.ts";
 import { createWorkflowRunner, type StepExecutor } from "../../workflow-runner.ts";
+import type { StartFreshRunParams } from "../../workflow-storage.ts";
 
 class Boom extends TaggedError("Boom")<{ readonly message: string }>() {}
 
@@ -91,7 +92,7 @@ describe("cancel during a run", () => {
         .stepAsync("cancels", async ({ prev }) => {
           ran.push("cancels");
           // Lands before this step's own checkpoint.
-          await storage.cancelWorkflow("c-ck");
+          await storage.cancelWorkflow({ workflowId: "c-ck" });
           return prev as number;
         })
         .stepAsync("after", async ({ prev }) => {
@@ -125,7 +126,7 @@ describe("cancel during a run", () => {
         "slow",
         async ({ input }) => {
           await firstSaved.promise;
-          await storage.cancelWorkflow("c-sib");
+          await storage.cancelWorkflow({ workflowId: "c-sib" });
           return input;
         },
         { dependsOn: [] },
@@ -269,7 +270,7 @@ describe("re-running an ended run", () => {
       })
       .build();
     await storage.createWorkflow({ workflowId: "cr-1", workflowName: wf.name, input: 1 });
-    await storage.cancelWorkflow("cr-1");
+    await storage.cancelWorkflow({ workflowId: "cr-1" });
 
     const r = await runner.runSafe({ workflow: wf, workflowId: "cr-1", input: 1 });
     expect(r.error).toBeInstanceOf(WorkflowCancelledError);
@@ -512,7 +513,7 @@ describe("workflow deadline", () => {
     const r1 = await runner.runSafe({ workflow: wf, workflowId: "d-1", input: 1 });
     expect(tagOf(r1.error)).toBe("WorkflowSuspendedError");
     clock.advance(60_000);
-    await storage.deliverSignal("d-1", "go", 42);
+    await storage.deliverSignal({ workflowId: "d-1", signalName: "go", payload: 42 });
     const r2 = await runner.runSafe({ workflow: wf, workflowId: "d-1", input: 1 });
 
     expect(r2.error).toBeInstanceOf(WorkflowDeadlineError);
@@ -531,7 +532,7 @@ describe("workflow deadline", () => {
 
     await runner.runSafe({ workflow: wf, workflowId: "d-2", input: 1 });
     clock.advance(500);
-    await storage.deliverSignal("d-2", "go", 42);
+    await storage.deliverSignal({ workflowId: "d-2", signalName: "go", payload: 42 });
     const r2 = await runner.runSafe({ workflow: wf, workflowId: "d-2", input: 1 });
     expect(r2.error).toBeNull();
     expect(r2.data).toBe(42);
@@ -584,9 +585,9 @@ describe("continue-as-new under the lock", () => {
     const runner = createWorkflowRunner({ storage });
     const peerAttempts: boolean[] = [];
     const startFreshRun = storage.startFreshRun.bind(storage);
-    storage.startFreshRun = async (workflowId: string) => {
-      peerAttempts.push((await storage.tryLock(workflowId, 30_000)).acquired);
-      return startFreshRun(workflowId);
+    storage.startFreshRun = async ({ workflowId }: StartFreshRunParams) => {
+      peerAttempts.push((await storage.tryLock({ workflowId, lockDurationMs: 30_000 })).acquired);
+      return startFreshRun({ workflowId });
     };
     const wf = workflow<{ n: number }>({ name: "can-lock" })
       .journaled("loop", function* (ctx) {
@@ -599,7 +600,9 @@ describe("continue-as-new under the lock", () => {
     expect(await runner.run({ workflow: wf, workflowId: "can-1", input: { n: 0 } })).toBe(2);
     expect(peerAttempts).toEqual([false, false]);
     // The lock is released once the chain ends.
-    expect((await storage.tryLock("can-1", 30_000)).acquired).toBe(true);
+    expect((await storage.tryLock({ workflowId: "can-1", lockDurationMs: 30_000 })).acquired).toBe(
+      true,
+    );
   });
 });
 

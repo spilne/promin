@@ -36,7 +36,7 @@ export class JournalNonDeterminismError extends Error {
 
 /**
  * Thrown when a `.journaled()` step runs on a storage that doesn't
- * implement `ActivityJournalStorage`. Checked when the step executes (a
+ * implement `JournalStore`. Checked when the step executes (a
  * built workflow has no storage until a runner binds one), before the body
  * starts, rather than silently losing journal entries.
  */
@@ -45,7 +45,7 @@ export class JournalStorageMissingError extends Error {
   constructor(stepName: string) {
     super(
       `journaled step "${stepName}" requires a WorkflowStorage that implements ` +
-        `ActivityJournalStorage. Supported built-in backends: InMemoryWorkflowStorage, ` +
+        `JournalStore. Supported built-in backends: InMemoryWorkflowStorage, ` +
         `PostgresWorkflowStorage, RedisWorkflowStorage, SqliteWorkflowStorage, ` +
         `RemoteWorkflowStorage. Extend your custom storage with loadJournal, ` +
         `appendEntry, appendPendingEntry, completePendingEntry, findDueSleeps and ` +
