@@ -6,12 +6,21 @@
 // adapter — schedule CRUD via hashes, due-row lookup via per-namespace ZSETs,
 // and fenced leader leases (`RedisLeaderLeaseStore`).
 //
-// Key layout (with namespace `ns` — global namespace = "_"):
-//   {prefix}:ns:{ns}:all          — SET of schedule IDs in that namespace
-//   {prefix}:ns:{ns}:due          — ZSET, score=nextRunMs, member=id (per ns!)
-//   {prefix}:schedule:{id}        — HASH with config + state (namespace-tagged)
-//   {prefix}:lease:{<key>}:holder — STRING with PX TTL, the lease holder
-//   {prefix}:lease:{<key>}:epoch  — STRING counter, the lease's fencing epoch
+// Every key starts with `{<prefix>}`, so on Redis Cluster the whole
+// scheduler sits in one slot: a fenced poll commit checks the lease epoch
+// and writes many schedules and due sets in one script. Schedulers with
+// different prefixes land in different slots.
+//
+// Key layout (base = `{<prefix>}`, namespace `ns` — global namespace = "_"):
+//   <base>:namespaces            — SET of every namespace a schedule was put in
+//   <base>:ns:<ns>:all           — SET of schedule IDs in that namespace
+//   <base>:ns:<ns>:due           — ZSET, score=nextRunMs, member=id (per ns!)
+//   <base>:schedule:<id>         — HASH with config + state (namespace-tagged)
+//   <base>:lease:{<key>}:holder  — STRING with PX TTL, the lease holder
+//   <base>:lease:{<key>}:epoch   — STRING counter, the lease's fencing epoch
+//
+// Keys written before this layout (`<prefix>:schedule:<id>` ...) need
+// `migrateLegacyKeys()` once.
 // ---------------------------------------------------------------------------
 
 import {
@@ -27,6 +36,7 @@ import {
 } from "@promin/workflow";
 import type { RedisStoreClient } from "./redis-client.ts";
 import { RedisLeaderLeaseStore } from "./redis-leader-lease-store.ts";
+import { renameLegacyKeys, storeKeyBase } from "./redis-key-migration.ts";
 
 export interface RedisSchedulerStorageConfig {
   redis: RedisStoreClient;
@@ -37,6 +47,8 @@ export interface RedisSchedulerStorageConfig {
 }
 
 const GLOBAL_NS = "_";
+/** Keys of the untagged layout, after `<prefix>:`. */
+const LEGACY_KEY = /^(schedule:|ns:|lease:)/;
 
 /**
  * Insert or replace a schedule hash atomically.
@@ -48,7 +60,7 @@ const GLOBAL_NS = "_";
  *   from the due set; an enabled one keeps its pending next-run, or is
  *   seeded at ARGV[4] (now, or `startAt` when that is later) if it has none.
  *
- * KEYS: [schedule_key, all_key, due_key]
+ * KEYS: [schedule_key, all_key, due_key, namespaces_key]
  * ARGV: [id, namespace_key_base, namespace, seed_ms, enabled('1'|'0'),
  *        global_ns, field1, value1, ...]
  */
@@ -56,6 +68,7 @@ const UPSERT_LUA = `
 local schedule_key = KEYS[1]
 local all_key = KEYS[2]
 local due_key = KEYS[3]
+redis.call('SADD', KEYS[4], ARGV[3])
 local id = ARGV[1]
 local ns_base = ARGV[2]
 local ns = ARGV[3]
@@ -185,7 +198,8 @@ return out
  * schedule is gone; otherwise advance the fire state and, if requested, set
  * or clear its next run — a disabled schedule always leaves due-tracking.
  *
- * KEYS: [lease_epoch_key] when fenced, else none
+ * KEYS: [lease_epoch_key] when fenced, else [namespaces_key] (only routes
+ *       the script to the scheduler's slot)
  * ARGV: [fenced('1'|'0'), epoch, schedule_key_prefix, namespace_key_base,
  *        global_ns, then per entry: id, fired_at_ms|'', tick_inc,
  *        set_next('1'|'0'), next_run_ms|'', expected_tick_count|'']
@@ -232,6 +246,20 @@ end
 return out
 `;
 
+/**
+ * Delete a schedule and take it out of its namespace's sets.
+ *
+ * KEYS: [schedule_key]
+ * ARGV: [id, namespace_key_base, global_ns]
+ */
+const DELETE_LUA = `
+local ns = redis.call('HGET', KEYS[1], 'namespace') or ARGV[3]
+redis.call('DEL', KEYS[1])
+redis.call('SREM', ARGV[2] .. ns .. ':all', ARGV[1])
+redis.call('ZREM', ARGV[2] .. ns .. ':due', ARGV[1])
+return 1
+`;
+
 /** KEYS: [schedule_key]  ARGV: [fired_at_ms, count] */
 const RECORD_FIRE_LUA = `
 redis.call('HSET', KEYS[1], 'lastFiredAt', ARGV[1])
@@ -242,6 +270,8 @@ return 1
 export class RedisSchedulerStorage implements SchedulerStorage {
   private readonly redis: RedisStoreClient;
   private readonly prefix: string;
+  /** `{<prefix>}`: the start of every key, and the scheduler's slot. */
+  private readonly base: string;
   private readonly clock: WallClock;
   private readonly leases: RedisLeaderLeaseStore;
 
@@ -249,7 +279,40 @@ export class RedisSchedulerStorage implements SchedulerStorage {
     this.redis = config.redis;
     this.prefix = config.prefix ?? "sched";
     this.clock = config.clock ?? SystemWallClock;
-    this.leases = new RedisLeaderLeaseStore({ redis: config.redis, prefix: this.prefix });
+    this.base = storeKeyBase(this.prefix);
+    // Lease keys under the base share its slot, so a fenced commit checks
+    // the epoch in the same script as its writes.
+    this.leases = new RedisLeaderLeaseStore({ redis: config.redis, prefix: this.base });
+  }
+
+  /**
+   * Move keys written by earlier versions of this storage
+   * (`<prefix>:schedule:<id>`, `<prefix>:ns:<ns>:due`, `<prefix>:lease:...`)
+   * under the scheduler's hash tag, and register every namespace found.
+   * Lease epochs move with their keys, so fencing stays monotonic. Run it
+   * once per prefix against the standalone instance (it renames keys across
+   * slots), with every scheduler stopped. Re-running it is a no-op.
+   */
+  async migrateLegacyKeys(params?: {
+    /** SCAN COUNT hint. Default 1000. */
+    scanCount?: number;
+  }): Promise<{ keys: number }> {
+    const { renamed } = await renameLegacyKeys({
+      redis: this.redis,
+      prefix: this.prefix,
+      scanCount: params?.scanCount ?? 1_000,
+      target: (rest) => (LEGACY_KEY.test(rest) ? `${this.base}:${rest}` : null),
+    });
+    const namespaces = new Set<string>();
+    const nsBase = `${this.prefix}:ns:`;
+    for (const [from] of renamed) {
+      if (!from.startsWith(nsBase)) continue;
+      const rest = from.slice(nsBase.length);
+      const at = rest.lastIndexOf(":");
+      if (at > 0) namespaces.add(rest.slice(0, at));
+    }
+    if (namespaces.size > 0) await this.redis.sadd(this.namespacesKey, ...namespaces);
+    return { keys: renamed.length };
   }
 
   // -------------------------------------------------------------------------
@@ -262,15 +325,30 @@ export class RedisSchedulerStorage implements SchedulerStorage {
   }
 
   private allKey(ns: string | undefined): string {
-    return `${this.prefix}:ns:${this.nsKey(ns)}:all`;
+    return `${this.nsBase}${this.nsKey(ns)}:all`;
   }
 
   private dueKey(ns: string | undefined): string {
-    return `${this.prefix}:ns:${this.nsKey(ns)}:due`;
+    return `${this.nsBase}${this.nsKey(ns)}:due`;
   }
 
   private scheduleKey(id: string): string {
-    return `${this.prefix}:schedule:${id}`;
+    return `${this.scheduleBase}${id}`;
+  }
+
+  /** Base the scripts append a namespace and `:all` / `:due` to. */
+  private get nsBase(): string {
+    return `${this.base}:ns:`;
+  }
+
+  /** Base the scripts append a schedule id to. */
+  private get scheduleBase(): string {
+    return `${this.base}:schedule:`;
+  }
+
+  /** Set of every namespace (`_` = global) a schedule was put in. */
+  private get namespacesKey(): string {
+    return `${this.base}:namespaces`;
   }
 
   // -------------------------------------------------------------------------
@@ -288,7 +366,7 @@ export class RedisSchedulerStorage implements SchedulerStorage {
       FIND_DUE_LUA,
       1,
       params.dueKey,
-      `${this.prefix}:schedule:`,
+      this.scheduleBase,
       params.now.getTime(),
       params.limit,
     );
@@ -362,7 +440,7 @@ export class RedisSchedulerStorage implements SchedulerStorage {
       1,
       this.scheduleKey(id),
       id,
-      `${this.prefix}:ns:`,
+      this.nsBase,
       GLOBAL_NS,
       nextRun === null ? "" : nextRun.getTime(),
     );
@@ -383,15 +461,15 @@ export class RedisSchedulerStorage implements SchedulerStorage {
       u.nextRun ? String(u.nextRun.getTime()) : "",
       u.expectedTickCount === undefined ? "" : String(u.expectedTickCount),
     ]);
-    const keys = lease ? [this.leases.keysFor(lease.key).epoch] : [];
+    const keys = lease ? [this.leases.keysFor(lease.key).epoch] : [this.namespacesKey];
     const reply = (await this.redis.eval(
       COMMIT_POLL_LUA,
       keys.length,
       ...keys,
       lease ? "1" : "0",
       lease ? String(lease.epoch) : "",
-      `${this.prefix}:schedule:`,
-      `${this.prefix}:ns:`,
+      this.scheduleBase,
+      this.nsBase,
       GLOBAL_NS,
       ...entries,
     )) as string[];
@@ -427,12 +505,13 @@ export class RedisSchedulerStorage implements SchedulerStorage {
     const seedMs = Math.max(this.clock.currentTimeMs(), config.startAt?.getTime() ?? 0);
     await this.redis.eval(
       UPSERT_LUA,
-      3,
+      4,
       this.scheduleKey(config.id),
       this.allKey(ns),
       this.dueKey(ns),
+      this.namespacesKey,
       config.id,
-      `${this.prefix}:ns:`,
+      this.nsBase,
       this.nsKey(ns),
       seedMs,
       fields.enabled!,
@@ -442,10 +521,7 @@ export class RedisSchedulerStorage implements SchedulerStorage {
   }
 
   async deleteSchedule(id: string): Promise<void> {
-    const ns = (await this.redis.hget(this.scheduleKey(id), "namespace")) ?? undefined;
-    await this.redis.del(this.scheduleKey(id));
-    await this.redis.srem(this.allKey(ns), id);
-    await this.redis.zrem(this.dueKey(ns), id);
+    await this.redis.eval(DELETE_LUA, 1, this.scheduleKey(id), id, this.nsBase, GLOBAL_NS);
   }
 
   async setEnabled(id: string, enabled: boolean): Promise<void> {
@@ -454,7 +530,7 @@ export class RedisSchedulerStorage implements SchedulerStorage {
       1,
       this.scheduleKey(id),
       id,
-      `${this.prefix}:ns:`,
+      this.nsBase,
       GLOBAL_NS,
       enabled ? "1" : "0",
       this.clock.currentTimeMs(),
@@ -515,8 +591,8 @@ export class RedisSchedulerStorage implements SchedulerStorage {
 
   private async scheduleIds(namespace: string | undefined): Promise<string[]> {
     if (namespace !== undefined) return await this.redis.smembers(this.allKey(namespace));
-    const allKeys = await this.redis.keys(`${this.prefix}:ns:*:all`);
-    const sets = await Promise.all(allKeys.map((key) => this.redis.smembers(key)));
+    const namespaces = await this.redis.smembers(this.namespacesKey);
+    const sets = await Promise.all(namespaces.map((ns) => this.redis.smembers(this.allKey(ns))));
     return [...new Set(sets.flat())];
   }
 
@@ -542,9 +618,7 @@ export class RedisSchedulerStorage implements SchedulerStorage {
     namespaces?: readonly (string | undefined)[];
   }): Promise<readonly { id: string; namespace?: string }[]> {
     // Redis layout has one due-ZSET per namespace, so we either union an
-    // explicit list (when supplied) or SCAN to discover. SCAN is one
-    // round trip on key cardinality = tenant count, which is cheap in
-    // practice — and only happens here, not on the per-tenant fast path.
+    // explicit list (when supplied) or every registered namespace's.
     let dueKeys: Array<{ key: string; namespace?: string }>;
     if (params.namespaces) {
       dueKeys = params.namespaces.map((ns) => ({
@@ -552,16 +626,11 @@ export class RedisSchedulerStorage implements SchedulerStorage {
         namespace: ns,
       }));
     } else {
-      // KEYS pattern over the per-namespace `:due` keys. Cardinality =
-      // tenant count (low thousands at most), well within KEYS' budget.
-      // Switch to the client's SCAN if discovery ever needs to scale
-      // beyond that.
-      const pattern = `${this.prefix}:ns:*:due`;
-      const keys = await this.redis.keys(pattern);
-      dueKeys = keys.map((key) => {
-        const stripped = key.slice(`${this.prefix}:ns:`.length, -":due".length);
-        return { key, namespace: stripped === GLOBAL_NS ? undefined : stripped };
-      });
+      const namespaces = await this.redis.smembers(this.namespacesKey);
+      dueKeys = namespaces.map((ns) => ({
+        key: this.dueKey(ns),
+        namespace: ns === GLOBAL_NS ? undefined : ns,
+      }));
     }
     // Score-bounded zrange across each due-set. Run in parallel — the
     // client pipelines them on a single connection.

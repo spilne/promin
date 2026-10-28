@@ -202,7 +202,11 @@ redisDescribe("RedisStateMachineStorage", (ctx) => {
       context: {},
     });
     // Snapshot shape from before revisions were stored.
-    await redis.eval("return redis.call('HDEL', KEYS[1], 'revision')", 1, `${prefix}:machine:m1`);
+    await redis.eval(
+      "return redis.call('HDEL', KEYS[1], 'revision')",
+      1,
+      `${prefix}:{sm:m1}:machine`,
+    );
 
     expect((await storage.load("m1"))?.revision).toBe(2);
     await expect(
@@ -231,7 +235,7 @@ redisDescribe("RedisStateMachineStorage", (ctx) => {
     storage.registerTerminalStates(["done"]);
     await storage.create({ id: "m1", name: "n", initial: "a", context: {} });
 
-    expect(await pttl(redis, `${prefix}:machine:m1`)).toBeGreaterThan(5_000);
+    expect(await pttl(redis, `${prefix}:{sm:m1}:machine`)).toBeGreaterThan(5_000);
 
     await storage.transition({
       id: "m1",
@@ -241,8 +245,8 @@ redisDescribe("RedisStateMachineStorage", (ctx) => {
       event: "go",
       context: {},
     });
-    expect(await pttl(redis, `${prefix}:machine:m1`)).toBeGreaterThan(5_000);
-    expect(await pttl(redis, `${prefix}:events:m1`)).toBeGreaterThan(5_000);
+    expect(await pttl(redis, `${prefix}:{sm:m1}:machine`)).toBeGreaterThan(5_000);
+    expect(await pttl(redis, `${prefix}:{sm:m1}:events`)).toBeGreaterThan(5_000);
 
     await storage.transition({
       id: "m1",
@@ -252,8 +256,8 @@ redisDescribe("RedisStateMachineStorage", (ctx) => {
       event: "finish",
       context: {},
     });
-    expect(await pttl(redis, `${prefix}:machine:m1`)).toBeLessThanOrEqual(5_000);
-    expect(await pttl(redis, `${prefix}:events:m1`)).toBeLessThanOrEqual(5_000);
+    expect(await pttl(redis, `${prefix}:{sm:m1}:machine`)).toBeLessThanOrEqual(5_000);
+    expect(await pttl(redis, `${prefix}:{sm:m1}:events`)).toBeLessThanOrEqual(5_000);
   });
 
   it("leaves keys without expiry when no TTLs are configured", async () => {
@@ -267,8 +271,8 @@ redisDescribe("RedisStateMachineStorage", (ctx) => {
       event: "go",
       context: {},
     });
-    expect(await pttl(redis, `${prefix}:machine:m1`)).toBe(-1);
-    expect(await pttl(redis, `${prefix}:events:m1`)).toBe(-1);
+    expect(await pttl(redis, `${prefix}:{sm:m1}:machine`)).toBe(-1);
+    expect(await pttl(redis, `${prefix}:{sm:m1}:events`)).toBe(-1);
   });
 
   it("tryLock is exclusive until released", async () => {
@@ -299,9 +303,9 @@ redisDescribe("RedisStateMachineStorage", (ctx) => {
   it("extendLock resets the key's PX expiry", async () => {
     const { storage, redis, prefix } = make();
     const token = await storage.tryLock({ id: "m1", durationMs: 1_000 });
-    expect(await pttl(redis, `${prefix}:lock:m1`)).toBeLessThanOrEqual(1_000);
+    expect(await pttl(redis, `${prefix}:{sm:m1}:lock`)).toBeLessThanOrEqual(1_000);
     expect(await storage.extendLock({ id: "m1", token: token!, durationMs: 60_000 })).toBe(true);
-    expect(await pttl(redis, `${prefix}:lock:m1`)).toBeGreaterThan(1_000);
+    expect(await pttl(redis, `${prefix}:{sm:m1}:lock`)).toBeGreaterThan(1_000);
   });
 
   it("drives a stateMachine end to end", async () => {

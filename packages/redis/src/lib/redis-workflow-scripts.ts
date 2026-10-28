@@ -100,6 +100,7 @@ local function expireRun(wfKey, base, run, ttl)
   redis.call('PEXPIRE', base .. ':signals', ttl)
   redis.call('PEXPIRE', base .. ':runs', ttl)
   redis.call('PEXPIRE', base .. ':attempts', ttl)
+  redis.call('PEXPIRE', base .. ':child-intents', ttl)
   local journalSteps = base .. ':journal:steps'
   for _, step in ipairs(redis.call('SMEMBERS', journalSteps)) do
     local jb = base .. ':journal:' .. step
@@ -348,6 +349,42 @@ if changed then return {1, last, snapshot(changed)} end
 return {1, last, false}
 `;
 
+// Checkpoint a settled step: its row, its attempt rows, the pending →
+// running move and `updatedAt`, then read back the run's status — one
+// script. The client builds the row from the existing row it expects (none
+// on the first try); a different existing row stops the script with that
+// row, for the client to rebuild from and retry. The row is sent without
+// its `run` field, which the script prepends from the workflow hash.
+// KEYS: [wfKey, attemptsKey]
+// ARGV: [wfKey (base), stepName, expectsRow ('1'|'0'), expectedRowJson, rowJson,
+//        nowIso, attemptJson_1 .. attemptJson_n]
+// Returns {-1} for a missing workflow (nothing written), {0, existingRow|false}
+// when the step row is not the expected one, else
+// {1, status, error, errorTag, snapshot|false}.
+export const CHECKPOINT_STEP_LUA = `
+${SNAPSHOT_FN}
+local h = redis.call('HMGET', KEYS[1], 'id', 'run', 'status')
+if not h[1] then return {-1} end
+local stepsKey = ARGV[1] .. ':steps:' .. h[2]
+local existing = redis.call('HGET', stepsKey, ARGV[2])
+if ARGV[3] == '0' then
+  if existing then return {0, existing} end
+elseif existing ~= ARGV[4] then
+  return {0, existing}
+end
+redis.call('HSET', stepsKey, ARGV[2], '{"run":' .. h[2] .. ',' .. string.sub(ARGV[5], 2))
+for i = 7, #ARGV do redis.call('RPUSH', KEYS[2], ARGV[i]) end
+local snap = false
+if h[3] == 'pending' then
+  redis.call('HSET', KEYS[1], 'status', 'running', 'startedAt', ARGV[6])
+  redis.call('HINCRBY', KEYS[1], 'iv', 1)
+  snap = snapshot(KEYS[1])
+end
+redis.call('HSET', KEYS[1], 'updatedAt', ARGV[6])
+local s = redis.call('HMGET', KEYS[1], 'status', 'error', 'errorTag')
+return {1, s[1], s[2] or '', s[3] or '', snap}
+`;
+
 /** Error-reply prefix a fenced script returns when the fence rejects it. */
 export const FENCE_REJECTED = "PROMIN_FENCE_REJECTED";
 
@@ -537,6 +574,7 @@ redis.call('PERSIST', stepsKey)
 redis.call('PERSIST', base .. ':signals')
 redis.call('PERSIST', base .. ':runs')
 redis.call('PERSIST', base .. ':attempts')
+redis.call('PERSIST', base .. ':child-intents')
 return {1, sleeps, snap}
 `;
 
@@ -579,7 +617,8 @@ for _, step in ipairs(redis.call('SMEMBERS', journalSteps)) do
   redis.call('DEL', jb .. ':idx', jb .. ':signal-idx')
 end
 redis.call('DEL', KEYS[1], journalSteps, b .. ':signals', b .. ':runs', b .. ':attempts',
-  b .. ':signal_tokens', b .. ':signal_token_idempotency', b .. ':stream-ids', b .. ':fence')
+  b .. ':signal_tokens', b .. ':signal_token_idempotency', b .. ':stream-ids', b .. ':fence',
+  b .. ':child-intents')
 return {1, h[2], h[4] or '', h[5] or '', h[6] or '', h[7] or '', tokenIds, sleeps}
 `;
 

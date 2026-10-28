@@ -11,6 +11,7 @@
 //   <prefix>:{wf:<id>}:tasks:<run>:<step>    map-task rows of a step
 //   <prefix>:{wf:<id>}:lock                  lock hash (lockedBy, token)
 //   <prefix>:{wf:<id>}:fence                 fence-token counter
+//   <prefix>:{wf:<id>}:child-intents         children created under its fence
 //   <prefix>:{wf:<id>}:journal:...           activity journal
 //   ... signals, runs, attempts, signal tokens, streams
 //
@@ -83,6 +84,14 @@ export class RedisWorkflowKeys {
 
   lock(id: string): string {
     return `${this.wf(id)}:lock`;
+  }
+
+  /**
+   * Hash `childId → nonce` of the children this workflow created under its
+   * fence: a fenced child create commits here (see `createWorkflow`).
+   */
+  childIntents(id: string): string {
+    return `${this.wf(id)}:child-intents`;
   }
 
   /** Per-workflow fence-token counter. */

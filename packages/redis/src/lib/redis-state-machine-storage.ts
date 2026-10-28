@@ -1,10 +1,14 @@
 // ---------------------------------------------------------------------------
 // RedisStateMachineStorage — Redis adapter for StateMachineStorage
 //
-// Key layout:
-//   {prefix}:machine:{id}   — HASH with the machine snapshot and revision
-//   {prefix}:events:{id}    — LIST of JSON transition events (append-only)
-//   {prefix}:lock:{id}      — STRING lock token with PX expiry
+// Key layout (every key of one machine carries the hash tag `{sm:<id>}`, so
+// on Redis Cluster they share a slot and a script can touch all of them):
+//   <prefix>:{sm:<id>}:machine   — HASH with the machine snapshot and revision
+//   <prefix>:{sm:<id>}:events    — LIST of JSON transition events (append-only)
+//   <prefix>:{sm:<id>}:lock      — STRING lock token with PX expiry
+//
+// There is no cross-machine key. Keys written before this layout
+// (`<prefix>:machine:<id>` ...) need `migrateLegacyKeys()` once.
 // ---------------------------------------------------------------------------
 
 import {
@@ -16,6 +20,7 @@ import {
   type WallClock,
 } from "@promin/workflow";
 import type { RedisStoreClient } from "./redis-client.ts";
+import { renameLegacyKeys } from "./redis-key-migration.ts";
 
 export interface RedisStateMachineStorageConfig {
   redis: RedisStoreClient;
@@ -92,15 +97,43 @@ export class RedisStateMachineStorage implements StateMachineStorage {
   }
 
   private machineKey(id: string): string {
-    return `${this.prefix}:machine:${id}`;
+    return `${this.prefix}:{sm:${id}}:machine`;
   }
 
   private eventsKey(id: string): string {
-    return `${this.prefix}:events:${id}`;
+    return `${this.prefix}:{sm:${id}}:events`;
   }
 
   private lockKey(id: string): string {
-    return `${this.prefix}:lock:${id}`;
+    return `${this.prefix}:{sm:${id}}:lock`;
+  }
+
+  /**
+   * Move keys written by earlier versions of this storage
+   * (`<prefix>:machine:<id>`, `<prefix>:events:<id>`, `<prefix>:lock:<id>`)
+   * under each machine's hash tag. Run it once per prefix against the
+   * standalone instance (it renames keys across slots), with every worker
+   * stopped. Re-running it is a no-op.
+   */
+  async migrateLegacyKeys(params?: {
+    /** SCAN COUNT hint. Default 1000. */
+    scanCount?: number;
+  }): Promise<{ keys: number }> {
+    const kinds = { "machine:": "machine", "events:": "events", "lock:": "lock" } as const;
+    const { renamed } = await renameLegacyKeys({
+      redis: this.redis,
+      prefix: this.prefix,
+      scanCount: params?.scanCount ?? 1_000,
+      target: (rest) => {
+        for (const [legacy, kind] of Object.entries(kinds)) {
+          if (rest.startsWith(legacy)) {
+            return `${this.prefix}:{sm:${rest.slice(legacy.length)}}:${kind}`;
+          }
+        }
+        return null;
+      },
+    });
+    return { keys: renamed.length };
   }
 
   async create(params: {
