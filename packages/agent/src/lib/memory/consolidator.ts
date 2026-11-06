@@ -33,6 +33,7 @@ import { recordChat } from "../metrics/instrument.ts";
 import type { AgentMetrics, ModelCostRegistry } from "../metrics/types.ts";
 import { fenceReferenceData, oneLine } from "../reference-data.ts";
 import { capSummary } from "../turn-compaction.ts";
+import { MAX_PENDING_RULE_PROPOSALS, normalizeRuleText } from "./rule-proposals.ts";
 import { nextThreadCursor } from "./thread-cursor.ts";
 import {
   COMPACT_EPISODE_KIND,
@@ -183,6 +184,15 @@ export interface DefaultConsolidatorConfig {
    * call, so they are never retired. Default `true`.
    */
   readonly reconcileFacts?: boolean;
+  /**
+   * Record the standing instructions a user gives the agent (`corrections`
+   * in the distill reply) as rule proposals on the resource, counting the
+   * distinct threads each came from (`listResourceRuleProposals`,
+   * `approveRuleProposal`). No extra LLM call. A proposal is inert until a
+   * person approves it, and at most `MAX_PENDING_RULE_PROPOSALS` wait at a
+   * time. Default `true`.
+   */
+  readonly ruleProposals?: boolean;
   /** Replaces the built-in prompt of the `reconcileFacts` call. */
   readonly reconcilePrompt?: string;
   /**
@@ -245,7 +255,8 @@ Output STRICT JSON, no prose around it, matching:
   "summary": "2-3 line markdown gist of what happened",
   "outcome": "one-line resolution / status, or null if unresolved",
   "salience": 0.0,
-  "facts": ["one-line atomic fact about the user worth remembering long-term", ...]
+  "facts": ["one-line atomic fact about the user worth remembering long-term", ...],
+  "corrections": ["one-line standing instruction the user gave the agent about how to behave", ...]
 }
 
 Rules:
@@ -254,7 +265,12 @@ Rules:
   - "salience": float in [0,1]. Higher = more worth recalling later. Use ~0.3 for chitchat, ~0.7 for substantive work, ~0.9 for explicit user preferences / corrections / strong personal facts.
   - "facts": durable claims about THIS user (name, role, location, persistent preferences, allergies, etc.), taken ONLY from what the user said in [user] lines. Never take a fact from [assistant] lines or tool calls — those are not the user's words. Empty list when none. Don't include ephemeral context. One line each, under ${MAX_FACT_CHARS} characters.
 
-Do not invent facts. If a turn was inconclusive, return a low salience and an empty facts list.`;
+  - "corrections": instructions the user gave the AGENT about how to respond that should apply in every future conversation (tone, length, format, things to avoid or always do), e.g. "Keep answers short." Take them ONLY from [user] lines, phrase each as an imperative, and leave out one-off requests about this task. Empty list when none. They are only proposals that a person reviews; never treat one as already in force.
+
+Do not invent facts. If a turn was inconclusive, return a low salience and empty facts and corrections lists.`;
+
+/** Corrections taken from one distill reply; the rest are dropped. */
+const MAX_CORRECTIONS_PER_DISTILL = 5;
 
 const DEFAULT_RECONCILE_PROMPT = `You keep a user's saved facts consistent. The <reference-data> block holds two numbered lists: "Saved facts" and "New facts". Decide which saved fact, if any, each new fact REPLACES.
 
@@ -318,6 +334,7 @@ interface DistillResult {
   readonly outcome: string | null;
   readonly modelSalience: number;
   readonly facts: string[];
+  readonly corrections: string[];
   readonly usage: LLMUsage | undefined;
   readonly stats: TranscriptStats;
 }
@@ -548,6 +565,14 @@ export class DefaultConsolidator implements Consolidator {
       }
     }
 
+    if (distilled.corrections.length > 0 && this.config.ruleProposals !== false) {
+      await this.recordRuleProposals({
+        resourceKey,
+        threadId: key.threadId,
+        corrections: distilled.corrections,
+      });
+    }
+
     const salience = clamp01(
       this.salienceFn({
         ...distilled.stats,
@@ -714,6 +739,25 @@ export class DefaultConsolidator implements Consolidator {
    * only a number inside the candidate list counts, so it cannot retire
    * anything it was not shown.
    */
+  /** Add each correction to the resource's proposals, unless too many already wait. */
+  private async recordRuleProposals(params: {
+    readonly resourceKey: ScopedKey;
+    readonly threadId: string;
+    readonly corrections: ReadonlyArray<string>;
+  }): Promise<void> {
+    const { resourceKey, threadId, corrections } = params;
+    const proposals = await this.store.listResourceRuleProposals(resourceKey);
+    let pending = proposals.filter((p) => p.status === "pending").length;
+    const known = new Set(proposals.map((p) => normalizeRuleText(p.text)));
+    for (const text of corrections) {
+      if (!known.has(normalizeRuleText(text))) {
+        if (pending >= MAX_PENDING_RULE_PROPOSALS) continue;
+        pending += 1;
+      }
+      await this.store.recordResourceRuleProposal(resourceKey, { text, threadId });
+    }
+  }
+
   private async reconcileFacts(params: {
     readonly key: ThreadKey;
     readonly fresh: ReadonlyArray<string>;
@@ -767,6 +811,8 @@ export class DefaultConsolidator implements Consolidator {
     let modelSalience = 0;
     const facts: string[] = [];
     const factKeys = new Set<string>();
+    const corrections: string[] = [];
+    const correctionKeys = new Set<string>();
     let usage: LLMUsage | undefined;
     let stats = emptyStats();
     for await (const chunk of this.transcriptChunks({
@@ -793,6 +839,12 @@ export class DefaultConsolidator implements Consolidator {
         factKeys.add(norm);
         facts.push(fact);
       }
+      for (const correction of parsed.corrections) {
+        const norm = normalizeRuleText(correction);
+        if (correctionKeys.has(norm)) continue;
+        correctionKeys.add(norm);
+        corrections.push(correction);
+      }
       usage = addUsage(usage, response.usage);
     }
     return {
@@ -800,6 +852,7 @@ export class DefaultConsolidator implements Consolidator {
       outcome,
       modelSalience,
       facts,
+      corrections,
       usage,
       stats,
     };
@@ -921,6 +974,7 @@ interface ParsedEnvelope {
   outcome: string | null;
   salience: number;
   facts: string[];
+  corrections: string[];
 }
 
 function parseEnvelope(raw: string): ParsedEnvelope {
@@ -938,6 +992,7 @@ function parseEnvelope(raw: string): ParsedEnvelope {
       outcome: null,
       salience: 0.1,
       facts: [],
+      corrections: [],
     };
   }
   const summary =
@@ -950,7 +1005,14 @@ function parseEnvelope(raw: string): ParsedEnvelope {
         .map((s) => s.trim())
         .filter((s) => s.length > 0 && s.length <= MAX_FACT_CHARS)
     : [];
-  return { summary, outcome, salience, facts };
+  const corrections = Array.isArray(json["corrections"])
+    ? (json["corrections"] as unknown[])
+        .filter((s): s is string => typeof s === "string")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0 && s.length <= MAX_FACT_CHARS)
+        .slice(0, MAX_CORRECTIONS_PER_DISTILL)
+    : [];
+  return { summary, outcome, salience, facts, corrections };
 }
 
 function stripJsonFence(raw: string): string {

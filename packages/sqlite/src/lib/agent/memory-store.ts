@@ -28,6 +28,7 @@ import {
   DEFAULT_THREAD_PAGE_SIZE,
   loadResolvedContext,
   MIN_SALIENCE_RETENTION,
+  normalizeRuleText,
   parseThreadCursor,
   relationKey,
   resolveFactConfidence,
@@ -40,6 +41,9 @@ import type {
   EpisodeListParams,
   Relation,
   RelationInput,
+  RuleProposal,
+  RuleProposalListParams,
+  RuleProposalStatus,
   EpisodicRecord,
   Fact,
   FactInput,
@@ -200,6 +204,22 @@ export class SqliteMemoryStore implements MemoryStore {
     `);
     this.db.run(
       `CREATE UNIQUE INDEX IF NOT EXISTS ${p}_relation_key ON ${p}_relation (namespace_id, resource_id, relation_key)`,
+    );
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS ${p}_rule_proposal (
+        id                  TEXT NOT NULL PRIMARY KEY,
+        namespace_id        TEXT NOT NULL,
+        resource_id         TEXT NOT NULL,
+        text                TEXT NOT NULL,
+        text_key            TEXT NOT NULL,
+        status              TEXT NOT NULL DEFAULT 'pending',
+        evidence_thread_ids TEXT NOT NULL DEFAULT '[]',
+        first_seen_at       INTEGER NOT NULL,
+        last_seen_at        INTEGER NOT NULL
+      )
+    `);
+    this.db.run(
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${p}_rule_proposal_key ON ${p}_rule_proposal (namespace_id, resource_id, text_key)`,
     );
     this.db.run(`
       CREATE TABLE IF NOT EXISTS ${p}_episode (
@@ -521,6 +541,97 @@ export class SqliteMemoryStore implements MemoryStore {
       )
       .get(key.namespaceId, key.resourceId, identity);
     return toRelation(row!);
+  }
+
+  async recordResourceRuleProposal(
+    key: ScopedKey,
+    input: { readonly text: string; readonly threadId: string },
+  ): Promise<RuleProposal> {
+    if (!(await this.getResource(key))) {
+      await this.upsertResource(key, {});
+    }
+    const identity = normalizeRuleText(input.text);
+    const table = `${this.prefix}_rule_proposal`;
+    const tx = this.db.transaction(() => {
+      const now = this.clock();
+      const row = this.db
+        .query<DbRuleProposalRow>(
+          `SELECT * FROM ${table} WHERE namespace_id = ? AND resource_id = ? AND text_key = ?`,
+        )
+        .get(key.namespaceId, key.resourceId, identity);
+      if (!row) {
+        this.db
+          .query(
+            `INSERT INTO ${table}
+               (id, namespace_id, resource_id, text, text_key, status, evidence_thread_ids, first_seen_at, last_seen_at)
+             VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+          )
+          .run(
+            randomUUID(),
+            key.namespaceId,
+            key.resourceId,
+            input.text.trim(),
+            identity,
+            JSON.stringify([input.threadId]),
+            now,
+            now,
+          );
+      } else {
+        const evidence = JSON.parse(row.evidence_thread_ids) as string[];
+        if (!evidence.includes(input.threadId)) evidence.push(input.threadId);
+        this.db
+          .query(`UPDATE ${table} SET evidence_thread_ids = ?, last_seen_at = ? WHERE id = ?`)
+          .run(JSON.stringify(evidence), now, row.id);
+      }
+      return this.db
+        .query<DbRuleProposalRow>(
+          `SELECT * FROM ${table} WHERE namespace_id = ? AND resource_id = ? AND text_key = ?`,
+        )
+        .get(key.namespaceId, key.resourceId, identity)!;
+    });
+    return toRuleProposal(tx());
+  }
+
+  async listResourceRuleProposals(
+    key: ScopedKey,
+    params?: RuleProposalListParams,
+  ): Promise<RuleProposal[]> {
+    const where = ["namespace_id = ?", "resource_id = ?"];
+    const args: string[] = [key.namespaceId, key.resourceId];
+    if (params?.status !== undefined) {
+      where.push("status = ?");
+      args.push(params.status);
+    }
+    return this.db
+      .query<DbRuleProposalRow>(
+        `SELECT * FROM ${this.prefix}_rule_proposal WHERE ${where.join(" AND ")}
+         ORDER BY first_seen_at ASC, rowid ASC`,
+      )
+      .all(...args)
+      .map(toRuleProposal)
+      .filter(
+        (p) => params?.minOccurrences === undefined || p.occurrences >= params.minOccurrences,
+      );
+  }
+
+  async decideResourceRuleProposal(
+    key: ScopedKey,
+    input: { readonly id: string; readonly status: "approved" | "rejected" },
+  ): Promise<RuleProposal | null> {
+    const table = `${this.prefix}_rule_proposal`;
+    const tx = this.db.transaction(() => {
+      const row = this.db
+        .query<DbRuleProposalRow>(
+          `SELECT * FROM ${table}
+           WHERE namespace_id = ? AND resource_id = ? AND id = ? AND status = 'pending'`,
+        )
+        .get(key.namespaceId, key.resourceId, input.id);
+      if (!row) return null;
+      this.db.query(`UPDATE ${table} SET status = ? WHERE id = ?`).run(input.status, row.id);
+      return { ...row, status: input.status };
+    });
+    const decided = tx();
+    return decided ? toRuleProposal(decided) : null;
   }
 
   async listResourceRelations(key: ScopedKey): Promise<Relation[]> {
@@ -1233,6 +1344,28 @@ function toRelation(r: DbRelationRow): Relation {
     source: r.source as FactSource,
     confidence: r.confidence,
     createdAt: r.created_at,
+  };
+}
+
+interface DbRuleProposalRow {
+  id: string;
+  text: string;
+  status: string;
+  evidence_thread_ids: string;
+  first_seen_at: number;
+  last_seen_at: number;
+}
+
+function toRuleProposal(r: DbRuleProposalRow): RuleProposal {
+  const evidenceThreadIds = JSON.parse(r.evidence_thread_ids) as string[];
+  return {
+    id: r.id,
+    text: r.text,
+    status: r.status as RuleProposalStatus,
+    evidenceThreadIds,
+    occurrences: evidenceThreadIds.length,
+    firstSeenAt: r.first_seen_at,
+    lastSeenAt: r.last_seen_at,
   };
 }
 

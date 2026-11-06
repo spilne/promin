@@ -25,6 +25,7 @@ import {
   DEFAULT_THREAD_PAGE_SIZE,
   loadResolvedContext,
   MIN_SALIENCE_RETENTION,
+  normalizeRuleText,
   parseThreadCursor,
   relationKey,
   resolveFactConfidence,
@@ -37,6 +38,9 @@ import type {
   EpisodeListParams,
   Relation,
   RelationInput,
+  RuleProposal,
+  RuleProposalListParams,
+  RuleProposalStatus,
   EpisodicRecord,
   Fact,
   FactInput,
@@ -65,6 +69,7 @@ import {
   agentEpisode,
   agentFact,
   agentRelation,
+  agentRuleProposal,
   agentMessage,
   agentNamespace,
   agentResource,
@@ -389,6 +394,84 @@ export class PostgresMemoryStore implements MemoryStore {
         ),
       );
     return toRelation(row!);
+  }
+
+  async recordResourceRuleProposal(
+    key: ScopedKey,
+    input: { readonly text: string; readonly threadId: string },
+  ): Promise<RuleProposal> {
+    if (!(await this.getResource(key))) {
+      await this.upsertResource(key, {});
+    }
+    const now = this.clock();
+    const evidence = agentRuleProposal.evidenceThreadIds;
+    const [row] = await this.db
+      .insert(agentRuleProposal)
+      .values({
+        id: randomUUID(),
+        namespaceId: key.namespaceId,
+        resourceId: key.resourceId,
+        proposalText: input.text.trim(),
+        textKey: normalizeRuleText(input.text),
+        evidenceThreadIds: [input.threadId],
+        firstSeenAt: now,
+        lastSeenAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [
+          agentRuleProposal.namespaceId,
+          agentRuleProposal.resourceId,
+          agentRuleProposal.textKey,
+        ],
+        set: {
+          // Add the thread to the evidence unless it is already there.
+          evidenceThreadIds: sql`CASE WHEN jsonb_exists(${evidence}, ${input.threadId}) THEN ${evidence} ELSE ${evidence} || to_jsonb(${input.threadId}::text) END`,
+          lastSeenAt: now,
+        },
+      })
+      .returning();
+    return toRuleProposal(row!);
+  }
+
+  async listResourceRuleProposals(
+    key: ScopedKey,
+    params?: RuleProposalListParams,
+  ): Promise<RuleProposal[]> {
+    const rows = await this.db
+      .select()
+      .from(agentRuleProposal)
+      .where(
+        and(
+          eq(agentRuleProposal.namespaceId, key.namespaceId),
+          eq(agentRuleProposal.resourceId, key.resourceId),
+          params?.status !== undefined ? eq(agentRuleProposal.status, params.status) : undefined,
+        ),
+      )
+      .orderBy(asc(agentRuleProposal.firstSeenAt), asc(agentRuleProposal.seq));
+    return rows
+      .map(toRuleProposal)
+      .filter(
+        (p) => params?.minOccurrences === undefined || p.occurrences >= params.minOccurrences,
+      );
+  }
+
+  async decideResourceRuleProposal(
+    key: ScopedKey,
+    input: { readonly id: string; readonly status: "approved" | "rejected" },
+  ): Promise<RuleProposal | null> {
+    const [row] = await this.db
+      .update(agentRuleProposal)
+      .set({ status: input.status })
+      .where(
+        and(
+          eq(agentRuleProposal.namespaceId, key.namespaceId),
+          eq(agentRuleProposal.resourceId, key.resourceId),
+          eq(agentRuleProposal.id, input.id),
+          eq(agentRuleProposal.status, "pending"),
+        ),
+      )
+      .returning();
+    return row ? toRuleProposal(row) : null;
   }
 
   async listResourceRelations(key: ScopedKey): Promise<Relation[]> {
@@ -1143,6 +1226,27 @@ function toRelation(r: DbRelationRow): Relation {
     source: r.source as FactSource,
     confidence: r.confidence,
     createdAt: r.createdAt,
+  };
+}
+
+interface DbRuleProposalRow {
+  id: string;
+  proposalText: string;
+  status: string;
+  evidenceThreadIds: string[];
+  firstSeenAt: number;
+  lastSeenAt: number;
+}
+
+function toRuleProposal(r: DbRuleProposalRow): RuleProposal {
+  return {
+    id: r.id,
+    text: r.proposalText,
+    status: r.status as RuleProposalStatus,
+    evidenceThreadIds: r.evidenceThreadIds,
+    occurrences: r.evidenceThreadIds.length,
+    firstSeenAt: r.firstSeenAt,
+    lastSeenAt: r.lastSeenAt,
   };
 }
 

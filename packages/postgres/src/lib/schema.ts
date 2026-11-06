@@ -997,6 +997,28 @@ export const agentRelation = pgTable(
   (t) => [uniqueIndex("agent_relation_key_idx").on(t.namespaceId, t.resourceId, t.relationKey)],
 );
 
+/** A user instruction the consolidator proposes as a standing rule; inert until approved. */
+export const agentRuleProposal = pgTable(
+  "agent_rule_proposal",
+  {
+    id: text("id").primaryKey(),
+    namespaceId: text("namespace_id").notNull(),
+    resourceId: text("resource_id").notNull(),
+    proposalText: text("text").notNull(),
+    /** Normalized text (`normalizeRuleText`); one proposal per text and resource. */
+    textKey: text("text_key").notNull(),
+    /** 'pending' | 'approved' | 'rejected'. */
+    status: text("status").notNull().default("pending"),
+    /** Distinct thread ids the instruction appeared in. */
+    evidenceThreadIds: jsonb("evidence_thread_ids").$type<string[]>().notNull().default([]),
+    firstSeenAt: bigint("first_seen_at", { mode: "number" }).notNull(),
+    lastSeenAt: bigint("last_seen_at", { mode: "number" }).notNull(),
+    /** Insertion order; breaks ties between proposals with the same `firstSeenAt`. */
+    seq: bigserial("seq", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("agent_rule_proposal_key_idx").on(t.namespaceId, t.resourceId, t.textKey)],
+);
+
 export const agentFact = pgTable(
   "agent_fact",
   {

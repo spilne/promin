@@ -101,6 +101,9 @@ export type {
   EpisodeListParams,
   Relation,
   RelationInput,
+  RuleProposal,
+  RuleProposalListParams,
+  RuleProposalStatus,
   StoredMessage,
   ScopedKey,
   ThreadKey,
@@ -188,6 +191,11 @@ export {
   relationKey,
   relationNeighborhood,
 } from "./memory/relations.ts";
+export {
+  approveRuleProposal,
+  MAX_PENDING_RULE_PROPOSALS,
+  normalizeRuleText,
+} from "./memory/rule-proposals.ts";
 export { capStaticRules, resolveContext } from "./memory/resolve-context.ts";
 export { loadResolvedContext, readMessageTail } from "./memory/load-context.ts";
 export {

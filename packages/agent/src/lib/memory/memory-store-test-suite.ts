@@ -230,6 +230,72 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
       });
     });
 
+    describe("rule proposals", () => {
+      const key = { namespaceId: NS, resourceId: ALICE };
+
+      it("merges the same text, counts distinct threads, and keeps resources apart", async () => {
+        const s = await make();
+        const first = await s.recordResourceRuleProposal(key, {
+          text: " Keep answers short. ",
+          threadId: "t1",
+        });
+        expect(first.status).toBe("pending");
+        expect(first.text).toBe("Keep answers short.");
+        const same = await s.recordResourceRuleProposal(key, {
+          text: "keep  ANSWERS short",
+          threadId: "t1",
+        });
+        expect(same.id).toBe(first.id);
+        expect(same.occurrences).toBe(1);
+        const more = await s.recordResourceRuleProposal(key, {
+          text: "keep answers short!",
+          threadId: "t2",
+        });
+        expect(more.id).toBe(first.id);
+        expect(more.evidenceThreadIds).toEqual(["t1", "t2"]);
+        expect(more.occurrences).toBe(2);
+        expect(more.lastSeenAt).toBeGreaterThanOrEqual(first.lastSeenAt);
+        await s.recordResourceRuleProposal(key, { text: "Never use emoji", threadId: "t1" });
+        await s.recordResourceRuleProposal(
+          { namespaceId: NS, resourceId: "bob" },
+          { text: "Keep answers short", threadId: "t9" },
+        );
+
+        expect((await s.listResourceRuleProposals(key)).map((p) => p.text)).toEqual([
+          "Keep answers short.",
+          "Never use emoji",
+        ]);
+        expect(
+          (await s.listResourceRuleProposals(key, { minOccurrences: 2 })).map((p) => p.text),
+        ).toEqual(["Keep answers short."]);
+      });
+
+      it("decides a pending proposal once, and a decided one keeps its status", async () => {
+        const s = await make();
+        const p = await s.recordResourceRuleProposal(key, { text: "Be formal", threadId: "t1" });
+        expect(
+          await s.decideResourceRuleProposal(
+            { namespaceId: NS, resourceId: "bob" },
+            { id: p.id, status: "approved" },
+          ),
+        ).toBeNull();
+        const approved = await s.decideResourceRuleProposal(key, { id: p.id, status: "approved" });
+        expect(approved?.status).toBe("approved");
+        expect(
+          await s.decideResourceRuleProposal(key, { id: p.id, status: "rejected" }),
+        ).toBeNull();
+        const again = await s.recordResourceRuleProposal(key, {
+          text: "be formal",
+          threadId: "t2",
+        });
+        expect(again.status).toBe("approved");
+        expect(again.occurrences).toBe(2);
+        expect(
+          (await s.listResourceRuleProposals(key, { status: "pending" })).map((x) => x.id),
+        ).toEqual([]);
+      });
+    });
+
     describe("fact confidence", () => {
       it("defaults by source, clamps, caps the model, and survives a re-read in every scope", async () => {
         const s = await make();

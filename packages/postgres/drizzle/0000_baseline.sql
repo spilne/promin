@@ -79,6 +79,20 @@ CREATE TABLE agent_relation (
   CONSTRAINT agent_relation_pkey PRIMARY KEY (id)
 );
 
+CREATE TABLE agent_rule_proposal (
+  id text NOT NULL,
+  namespace_id text NOT NULL,
+  resource_id text NOT NULL,
+  text text NOT NULL,
+  text_key text NOT NULL,
+  status text DEFAULT 'pending' NOT NULL,
+  evidence_thread_ids jsonb DEFAULT '[]'::jsonb NOT NULL,
+  first_seen_at bigint NOT NULL,
+  last_seen_at bigint NOT NULL,
+  seq bigserial NOT NULL,
+  CONSTRAINT agent_rule_proposal_pkey PRIMARY KEY (id)
+);
+
 CREATE TABLE agent_instance (
   id text NOT NULL,
   registered_agent_id text NOT NULL,
@@ -712,6 +726,8 @@ CREATE INDEX agent_fact_res_idx ON agent_fact (scope, namespace_id, resource_id,
 CREATE INDEX agent_fact_thr_idx ON agent_fact (scope, namespace_id, thread_id, created_at);
 
 CREATE UNIQUE INDEX agent_relation_key_idx ON agent_relation (namespace_id, resource_id, relation_key);
+
+CREATE UNIQUE INDEX agent_rule_proposal_key_idx ON agent_rule_proposal (namespace_id, resource_id, text_key);
 
 CREATE INDEX agent_instance_agent_idx ON agent_instance (registered_agent_id);
 

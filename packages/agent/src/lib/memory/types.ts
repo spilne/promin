@@ -167,6 +167,33 @@ export interface RelationInput {
   readonly confidence?: number;
 }
 
+/** Review state of a `RuleProposal`. */
+export type RuleProposalStatus = "pending" | "approved" | "rejected";
+
+/**
+ * An instruction a user gave the agent that the consolidator thinks should
+ * become a standing rule. `evidenceThreadIds` are the distinct threads it
+ * appeared in; `occurrences` is their count, so asking twice in one thread
+ * is one occurrence. A proposal changes nothing until a person approves it
+ * (`approveRuleProposal`).
+ */
+export interface RuleProposal {
+  readonly id: string;
+  readonly text: string;
+  readonly status: RuleProposalStatus;
+  readonly evidenceThreadIds: ReadonlyArray<string>;
+  readonly occurrences: number;
+  readonly firstSeenAt: number;
+  readonly lastSeenAt: number;
+}
+
+/** Filter for `listResourceRuleProposals`. */
+export interface RuleProposalListParams {
+  readonly status?: RuleProposalStatus;
+  /** Only proposals seen in at least this many distinct threads. */
+  readonly minOccurrences?: number;
+}
+
 /** Longest fact the agent's `memory` tool and the consolidator write, in characters. */
 export const MAX_FACT_CHARS = 500;
 
@@ -551,6 +578,26 @@ export interface MemoryStore {
   /** Every relation of the resource, oldest first. */
   listResourceRelations(key: ScopedKey): Promise<Relation[]>;
   deleteResourceRelation(key: ScopedKey, relationId: string): Promise<void>;
+  /**
+   * Note that `text` was asked for in `threadId`. The same text (compared by
+   * `normalizeRuleText`) is one proposal: a new thread adds to its evidence,
+   * the same thread again changes nothing but `lastSeenAt`. A decided
+   * proposal keeps its status.
+   */
+  recordResourceRuleProposal(
+    key: ScopedKey,
+    input: { readonly text: string; readonly threadId: string },
+  ): Promise<RuleProposal>;
+  /** The resource's proposals, oldest first. */
+  listResourceRuleProposals(
+    key: ScopedKey,
+    params?: RuleProposalListParams,
+  ): Promise<RuleProposal[]>;
+  /** Set a pending proposal's status; null when it is unknown or already decided. */
+  decideResourceRuleProposal(
+    key: ScopedKey,
+    input: { readonly id: string; readonly status: "approved" | "rejected" },
+  ): Promise<RuleProposal | null>;
   appendResourceEpisode(key: ScopedKey, input: EpisodeInput): Promise<EpisodicRecord>;
   listResourceEpisodes(key: ScopedKey, params?: EpisodeListParams): Promise<EpisodicRecord[]>;
   deleteResourceEpisode(key: ScopedKey, episodeId: string): Promise<void>;

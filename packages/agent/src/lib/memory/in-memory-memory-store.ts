@@ -16,6 +16,7 @@ import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { Message } from "../message.ts";
 import { resolveFactConfidence } from "./fact-confidence.ts";
 import { relationKey } from "./relations.ts";
+import { normalizeRuleText } from "./rule-proposals.ts";
 import { loadResolvedContext } from "./load-context.ts";
 import { decayedSalience } from "./scoring.ts";
 import { isAfterThreadCursor, parseThreadCursor } from "./thread-cursor.ts";
@@ -40,6 +41,8 @@ import {
   type ResolvedContext,
   type ResourcePatch,
   type ResourceRow,
+  type RuleProposal,
+  type RuleProposalListParams,
   type ScopedKey,
   type StoredMessage,
   type ThreadInit,
@@ -62,6 +65,7 @@ export class InMemoryMemoryStore implements MemoryStore {
   private readonly namespaceFacts = new Map<string, Fact[]>();
   private readonly resourceFacts = new Map<string, Fact[]>();
   private readonly resourceRelations = new Map<string, Relation[]>();
+  private readonly resourceProposals = new Map<string, RuleProposal[]>();
   private readonly threadFacts = new Map<string, Fact[]>();
   private readonly messages = new Map<string, StoredMessage[]>();
   private readonly seqByThread = new Map<string, number>();
@@ -246,6 +250,69 @@ export class InMemoryMemoryStore implements MemoryStore {
     list.push(relation);
     this.resourceRelations.set(k, list);
     return relation;
+  }
+
+  async recordResourceRuleProposal(
+    key: ScopedKey,
+    input: { readonly text: string; readonly threadId: string },
+  ): Promise<RuleProposal> {
+    if (!this.resources.has(this.resourceK(key))) {
+      await this.upsertResource(key, {});
+    }
+    const k = this.resourceK(key);
+    const list = this.resourceProposals.get(k) ?? [];
+    const identity = normalizeRuleText(input.text);
+    const now = this.now();
+    const at = list.findIndex((p) => normalizeRuleText(p.text) === identity);
+    if (at >= 0) {
+      const p = list[at]!;
+      const evidence = p.evidenceThreadIds.includes(input.threadId)
+        ? p.evidenceThreadIds
+        : [...p.evidenceThreadIds, input.threadId];
+      const next = {
+        ...p,
+        evidenceThreadIds: evidence,
+        occurrences: evidence.length,
+        lastSeenAt: now,
+      };
+      list[at] = next;
+      return next;
+    }
+    const proposal: RuleProposal = {
+      id: randomUUID(),
+      text: input.text.trim(),
+      status: "pending",
+      evidenceThreadIds: [input.threadId],
+      occurrences: 1,
+      firstSeenAt: now,
+      lastSeenAt: now,
+    };
+    list.push(proposal);
+    this.resourceProposals.set(k, list);
+    return proposal;
+  }
+
+  async listResourceRuleProposals(
+    key: ScopedKey,
+    params?: RuleProposalListParams,
+  ): Promise<RuleProposal[]> {
+    return (this.resourceProposals.get(this.resourceK(key)) ?? []).filter(
+      (p) =>
+        (params?.status === undefined || p.status === params.status) &&
+        (params?.minOccurrences === undefined || p.occurrences >= params.minOccurrences),
+    );
+  }
+
+  async decideResourceRuleProposal(
+    key: ScopedKey,
+    input: { readonly id: string; readonly status: "approved" | "rejected" },
+  ): Promise<RuleProposal | null> {
+    const list = this.resourceProposals.get(this.resourceK(key)) ?? [];
+    const at = list.findIndex((p) => p.id === input.id && p.status === "pending");
+    if (at < 0) return null;
+    const next = { ...list[at]!, status: input.status };
+    list[at] = next;
+    return next;
   }
 
   async listResourceRelations(key: ScopedKey): Promise<Relation[]> {
