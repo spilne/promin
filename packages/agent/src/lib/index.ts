@@ -94,6 +94,7 @@ export type {
   MemoryStore,
   Fact,
   FactInput,
+  FactListParams,
   FactSource,
   EpisodicRecord,
   EpisodeInput,

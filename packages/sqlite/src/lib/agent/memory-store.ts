@@ -34,6 +34,7 @@ import type {
   EpisodicRecord,
   Fact,
   FactInput,
+  FactListParams,
   FactSource,
   ListThreadsParams,
   MemoryStore,
@@ -159,7 +160,9 @@ export class SqliteMemoryStore implements MemoryStore {
         text         TEXT NOT NULL,
         source       TEXT NOT NULL,
         created_at   INTEGER NOT NULL,
-        updated_at   INTEGER NOT NULL
+        updated_at   INTEGER NOT NULL,
+        retired_at   INTEGER,
+        superseded_by TEXT
       )
     `);
     this.db.run(
@@ -276,21 +279,28 @@ export class SqliteMemoryStore implements MemoryStore {
       await this.upsertNamespace(namespaceId, {});
     }
     const f = this.makeFact(input);
-    this.db
-      .query(
-        `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at)
-         VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
-      )
-      .run(f.id, SCOPE_NS, namespaceId, f.text, f.source, f.createdAt, f.updatedAt);
+    this.insertFact({
+      fact: f,
+      supersedes: input.supersedes,
+      scopeCondition: "scope = ? AND namespace_id = ?",
+      scopeBindings: [SCOPE_NS, namespaceId],
+      insert: (db) =>
+        db
+          .query(
+            `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at)
+             VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
+          )
+          .run(f.id, SCOPE_NS, namespaceId, f.text, f.source, f.createdAt, f.updatedAt),
+    });
     return f;
   }
 
-  async listNamespaceFacts(namespaceId: string): Promise<Fact[]> {
+  async listNamespaceFacts(namespaceId: string, params?: FactListParams): Promise<Fact[]> {
     const rows = this.db
       .query<DbFactRow>(
-        `SELECT id, text, source, created_at, updated_at FROM ${this.prefix}_fact
-         WHERE scope = ? AND namespace_id = ?
-         ORDER BY created_at ASC, rowid ASC`,
+        `SELECT id, text, source, created_at, updated_at, retired_at, superseded_by FROM ${this.prefix}_fact
+         WHERE scope = ? AND namespace_id = ?${retiredFilter(params)}
+         ORDER BY retired_at IS NOT NULL, created_at ASC, rowid ASC`,
       )
       .all(SCOPE_NS, namespaceId);
     return rows.map(toFact);
@@ -398,30 +408,37 @@ export class SqliteMemoryStore implements MemoryStore {
       await this.upsertResource(key, {});
     }
     const f = this.makeFact(input);
-    this.db
-      .query(
-        `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at)
-         VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
-      )
-      .run(
-        f.id,
-        SCOPE_RES,
-        key.namespaceId,
-        key.resourceId,
-        f.text,
-        f.source,
-        f.createdAt,
-        f.updatedAt,
-      );
+    this.insertFact({
+      fact: f,
+      supersedes: input.supersedes,
+      scopeCondition: "scope = ? AND namespace_id = ? AND resource_id = ?",
+      scopeBindings: [SCOPE_RES, key.namespaceId, key.resourceId],
+      insert: (db) =>
+        db
+          .query(
+            `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at)
+             VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+          )
+          .run(
+            f.id,
+            SCOPE_RES,
+            key.namespaceId,
+            key.resourceId,
+            f.text,
+            f.source,
+            f.createdAt,
+            f.updatedAt,
+          ),
+    });
     return f;
   }
 
-  async listResourceFacts(key: ScopedKey): Promise<Fact[]> {
+  async listResourceFacts(key: ScopedKey, params?: FactListParams): Promise<Fact[]> {
     const rows = this.db
       .query<DbFactRow>(
-        `SELECT id, text, source, created_at, updated_at FROM ${this.prefix}_fact
-         WHERE scope = ? AND namespace_id = ? AND resource_id = ?
-         ORDER BY created_at ASC, rowid ASC`,
+        `SELECT id, text, source, created_at, updated_at, retired_at, superseded_by FROM ${this.prefix}_fact
+         WHERE scope = ? AND namespace_id = ? AND resource_id = ?${retiredFilter(params)}
+         ORDER BY retired_at IS NOT NULL, created_at ASC, rowid ASC`,
       )
       .all(SCOPE_RES, key.namespaceId, key.resourceId);
     return rows.map(toFact);
@@ -636,30 +653,37 @@ export class SqliteMemoryStore implements MemoryStore {
       await this.createThread(key);
     }
     const f = this.makeFact(input);
-    this.db
-      .query(
-        `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at)
-         VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        f.id,
-        SCOPE_THR,
-        key.namespaceId,
-        key.threadId,
-        f.text,
-        f.source,
-        f.createdAt,
-        f.updatedAt,
-      );
+    this.insertFact({
+      fact: f,
+      supersedes: input.supersedes,
+      scopeCondition: "scope = ? AND namespace_id = ? AND thread_id = ?",
+      scopeBindings: [SCOPE_THR, key.namespaceId, key.threadId],
+      insert: (db) =>
+        db
+          .query(
+            `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at)
+             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            f.id,
+            SCOPE_THR,
+            key.namespaceId,
+            key.threadId,
+            f.text,
+            f.source,
+            f.createdAt,
+            f.updatedAt,
+          ),
+    });
     return f;
   }
 
-  async listThreadFacts(key: ThreadKey): Promise<Fact[]> {
+  async listThreadFacts(key: ThreadKey, params?: FactListParams): Promise<Fact[]> {
     const rows = this.db
       .query<DbFactRow>(
-        `SELECT id, text, source, created_at, updated_at FROM ${this.prefix}_fact
-         WHERE scope = ? AND namespace_id = ? AND thread_id = ?
-         ORDER BY created_at ASC, rowid ASC`,
+        `SELECT id, text, source, created_at, updated_at, retired_at, superseded_by FROM ${this.prefix}_fact
+         WHERE scope = ? AND namespace_id = ? AND thread_id = ?${retiredFilter(params)}
+         ORDER BY retired_at IS NOT NULL, created_at ASC, rowid ASC`,
       )
       .all(SCOPE_THR, key.namespaceId, key.threadId);
     return rows.map(toFact);
@@ -910,7 +934,35 @@ export class SqliteMemoryStore implements MemoryStore {
       source: input.source,
       createdAt: now,
       updatedAt: now,
+      retiredAt: null,
+      supersededBy: null,
     };
+  }
+
+  /**
+   * Insert `fact` and retire the current fact `supersedes` names inside
+   * `scopeCondition`, in one transaction.
+   */
+  private insertFact(params: {
+    readonly fact: Fact;
+    readonly supersedes: string | undefined;
+    readonly scopeCondition: string;
+    readonly scopeBindings: ReadonlyArray<string>;
+    readonly insert: (db: SqliteDatabase) => void;
+  }): void {
+    const { fact, supersedes, scopeCondition, scopeBindings, insert } = params;
+    const tx = this.db.transaction(() => {
+      if (supersedes !== undefined) {
+        this.db
+          .query(
+            `UPDATE ${this.prefix}_fact SET retired_at = ?, superseded_by = ?
+             WHERE id = ? AND ${scopeCondition} AND retired_at IS NULL`,
+          )
+          .run(fact.createdAt, fact.id, supersedes, ...scopeBindings);
+      }
+      insert(this.db);
+    });
+    tx();
   }
 
   private makeEpisode(input: EpisodeInput): EpisodicRecord {
@@ -1055,6 +1107,8 @@ interface DbFactRow {
   source: string;
   created_at: number;
   updated_at: number;
+  retired_at: number | null;
+  superseded_by: string | null;
 }
 
 interface DbEpisodeRow {
@@ -1129,7 +1183,14 @@ function toFact(r: DbFactRow): Fact {
     source: r.source as FactSource,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+    retiredAt: r.retired_at,
+    supersededBy: r.superseded_by,
   };
+}
+
+/** SQL suffix keeping current facts; with `includeRetired`, every fact. */
+function retiredFilter(params: FactListParams | undefined): string {
+  return params?.includeRetired ? "" : " AND retired_at IS NULL";
 }
 
 function toEpisode(r: DbEpisodeRow): EpisodicRecord {

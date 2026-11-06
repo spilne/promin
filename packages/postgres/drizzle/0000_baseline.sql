@@ -57,6 +57,8 @@ CREATE TABLE agent_fact (
   source text NOT NULL,
   created_at bigint NOT NULL,
   updated_at bigint NOT NULL,
+  retired_at bigint,
+  superseded_by text,
   seq bigserial NOT NULL,
   CONSTRAINT agent_fact_pkey PRIMARY KEY (id)
 );

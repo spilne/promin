@@ -31,6 +31,7 @@ import type {
   EpisodicRecord,
   Fact,
   FactInput,
+  FactListParams,
   FactSource,
   ListThreadsParams,
   MemoryStore,
@@ -142,26 +143,47 @@ export class PostgresMemoryStore implements MemoryStore {
       await this.upsertNamespace(namespaceId, {});
     }
     const f = this.makeFact(input);
-    await this.db.insert(agentFact).values({
-      id: f.id,
-      scope: SCOPE_NS,
-      namespaceId,
-      resourceId: null,
-      threadId: null,
-      factText: f.text,
-      source: f.source,
-      createdAt: f.createdAt,
-      updatedAt: f.updatedAt,
+    await this.db.transaction(async (tx) => {
+      if (input.supersedes !== undefined) {
+        await tx
+          .update(agentFact)
+          .set({ retiredAt: f.createdAt, supersededBy: f.id })
+          .where(
+            and(
+              eq(agentFact.id, input.supersedes),
+              eq(agentFact.scope, SCOPE_NS),
+              eq(agentFact.namespaceId, namespaceId),
+              isNull(agentFact.retiredAt),
+            ),
+          );
+      }
+      await tx.insert(agentFact).values({
+        id: f.id,
+        scope: SCOPE_NS,
+        namespaceId,
+        resourceId: null,
+        threadId: null,
+        factText: f.text,
+        source: f.source,
+        createdAt: f.createdAt,
+        updatedAt: f.updatedAt,
+      });
     });
     return f;
   }
 
-  async listNamespaceFacts(namespaceId: string): Promise<Fact[]> {
+  async listNamespaceFacts(namespaceId: string, params?: FactListParams): Promise<Fact[]> {
     const rows = await this.db
       .select()
       .from(agentFact)
-      .where(and(eq(agentFact.scope, SCOPE_NS), eq(agentFact.namespaceId, namespaceId)))
-      .orderBy(asc(agentFact.createdAt), asc(agentFact.seq));
+      .where(
+        and(
+          eq(agentFact.scope, SCOPE_NS),
+          eq(agentFact.namespaceId, namespaceId),
+          activeFactsOnly(params),
+        ),
+      )
+      .orderBy(...factOrder());
     return rows.map(toFact);
   }
 
@@ -278,21 +300,37 @@ export class PostgresMemoryStore implements MemoryStore {
       await this.upsertResource(key, {});
     }
     const f = this.makeFact(input);
-    await this.db.insert(agentFact).values({
-      id: f.id,
-      scope: SCOPE_RES,
-      namespaceId: key.namespaceId,
-      resourceId: key.resourceId,
-      threadId: null,
-      factText: f.text,
-      source: f.source,
-      createdAt: f.createdAt,
-      updatedAt: f.updatedAt,
+    await this.db.transaction(async (tx) => {
+      if (input.supersedes !== undefined) {
+        await tx
+          .update(agentFact)
+          .set({ retiredAt: f.createdAt, supersededBy: f.id })
+          .where(
+            and(
+              eq(agentFact.id, input.supersedes),
+              eq(agentFact.scope, SCOPE_RES),
+              eq(agentFact.namespaceId, key.namespaceId),
+              eq(agentFact.resourceId, key.resourceId),
+              isNull(agentFact.retiredAt),
+            ),
+          );
+      }
+      await tx.insert(agentFact).values({
+        id: f.id,
+        scope: SCOPE_RES,
+        namespaceId: key.namespaceId,
+        resourceId: key.resourceId,
+        threadId: null,
+        factText: f.text,
+        source: f.source,
+        createdAt: f.createdAt,
+        updatedAt: f.updatedAt,
+      });
     });
     return f;
   }
 
-  async listResourceFacts(key: ScopedKey): Promise<Fact[]> {
+  async listResourceFacts(key: ScopedKey, params?: FactListParams): Promise<Fact[]> {
     const rows = await this.db
       .select()
       .from(agentFact)
@@ -301,9 +339,10 @@ export class PostgresMemoryStore implements MemoryStore {
           eq(agentFact.scope, SCOPE_RES),
           eq(agentFact.namespaceId, key.namespaceId),
           eq(agentFact.resourceId, key.resourceId),
+          activeFactsOnly(params),
         ),
       )
-      .orderBy(asc(agentFact.createdAt), asc(agentFact.seq));
+      .orderBy(...factOrder());
     return rows.map(toFact);
   }
 
@@ -514,21 +553,37 @@ export class PostgresMemoryStore implements MemoryStore {
       await this.createThread(key);
     }
     const f = this.makeFact(input);
-    await this.db.insert(agentFact).values({
-      id: f.id,
-      scope: SCOPE_THR,
-      namespaceId: key.namespaceId,
-      resourceId: null,
-      threadId: key.threadId,
-      factText: f.text,
-      source: f.source,
-      createdAt: f.createdAt,
-      updatedAt: f.updatedAt,
+    await this.db.transaction(async (tx) => {
+      if (input.supersedes !== undefined) {
+        await tx
+          .update(agentFact)
+          .set({ retiredAt: f.createdAt, supersededBy: f.id })
+          .where(
+            and(
+              eq(agentFact.id, input.supersedes),
+              eq(agentFact.scope, SCOPE_THR),
+              eq(agentFact.namespaceId, key.namespaceId),
+              eq(agentFact.threadId, key.threadId),
+              isNull(agentFact.retiredAt),
+            ),
+          );
+      }
+      await tx.insert(agentFact).values({
+        id: f.id,
+        scope: SCOPE_THR,
+        namespaceId: key.namespaceId,
+        resourceId: null,
+        threadId: key.threadId,
+        factText: f.text,
+        source: f.source,
+        createdAt: f.createdAt,
+        updatedAt: f.updatedAt,
+      });
     });
     return f;
   }
 
-  async listThreadFacts(key: ThreadKey): Promise<Fact[]> {
+  async listThreadFacts(key: ThreadKey, params?: FactListParams): Promise<Fact[]> {
     const rows = await this.db
       .select()
       .from(agentFact)
@@ -537,9 +592,10 @@ export class PostgresMemoryStore implements MemoryStore {
           eq(agentFact.scope, SCOPE_THR),
           eq(agentFact.namespaceId, key.namespaceId),
           eq(agentFact.threadId, key.threadId),
+          activeFactsOnly(params),
         ),
       )
-      .orderBy(asc(agentFact.createdAt), asc(agentFact.seq));
+      .orderBy(...factOrder());
     return rows.map(toFact);
   }
 
@@ -893,6 +949,8 @@ export class PostgresMemoryStore implements MemoryStore {
       source: input.source,
       createdAt: now,
       updatedAt: now,
+      retiredAt: null,
+      supersededBy: null,
     };
   }
 
@@ -982,6 +1040,8 @@ interface DbFactRow {
   source: string;
   createdAt: number;
   updatedAt: number;
+  retiredAt: number | null;
+  supersededBy: string | null;
 }
 
 interface DbEpisodeRow {
@@ -1050,7 +1110,19 @@ function toFact(r: DbFactRow): Fact {
     source: r.source as FactSource,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
+    retiredAt: r.retiredAt,
+    supersededBy: r.supersededBy,
   };
+}
+
+/** Condition keeping current facts; with `includeRetired`, every fact. */
+function activeFactsOnly(params: FactListParams | undefined): SQL | undefined {
+  return params?.includeRetired ? undefined : isNull(agentFact.retiredAt);
+}
+
+/** Current facts first, then retired ones; insertion order within each. */
+function factOrder(): SQL[] {
+  return [sql`(${agentFact.retiredAt} IS NOT NULL)`, asc(agentFact.createdAt), asc(agentFact.seq)];
 }
 
 function toEpisode(r: DbEpisodeRow): EpisodicRecord {

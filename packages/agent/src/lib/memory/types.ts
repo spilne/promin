@@ -88,6 +88,14 @@ export interface Fact {
   readonly source: FactSource;
   readonly createdAt: number;
   readonly updatedAt: number;
+  /**
+   * When a newer fact replaced this one (`FactInput.supersedes`), epoch ms;
+   * null while the fact is current. A retired fact stays stored as history
+   * but is left out of `list*Facts` and of the prompt unless asked for.
+   */
+  readonly retiredAt: number | null;
+  /** Id of the fact that replaced this one; null while current. */
+  readonly supersededBy: string | null;
 }
 
 /**
@@ -107,6 +115,20 @@ export type FactSource = "operator" | "user" | "model";
 export interface FactInput {
   readonly text: string;
   readonly source: FactSource;
+  /**
+   * Id of a current fact in the same scope that this one replaces. The store
+   * retires it (`retiredAt`, `supersededBy`) in the same write as the
+   * append, so a changed fact never leaves both versions current. An id that
+   * is unknown, already retired, or in another scope retires nothing and the
+   * fact is still appended.
+   */
+  readonly supersedes?: string;
+}
+
+/** Options of `MemoryStore.list*Facts`. */
+export interface FactListParams {
+  /** Also return facts a newer one replaced, after the current ones. Default `false`. */
+  readonly includeRetired?: boolean;
 }
 
 /** Longest fact the agent's `memory` tool and the consolidator write, in characters. */
@@ -460,7 +482,7 @@ export interface MemoryStore {
   getNamespace(namespaceId: string): Promise<NamespaceRow | null>;
   upsertNamespace(namespaceId: string, patch: NamespacePatch): Promise<NamespaceRow>;
   appendNamespaceFact(namespaceId: string, fact: FactInput): Promise<Fact>;
-  listNamespaceFacts(namespaceId: string): Promise<Fact[]>;
+  listNamespaceFacts(namespaceId: string, params?: FactListParams): Promise<Fact[]>;
   deleteNamespaceFact(namespaceId: string, factId: string): Promise<void>;
   appendNamespaceEpisode(namespaceId: string, input: EpisodeInput): Promise<EpisodicRecord>;
   listNamespaceEpisodes(namespaceId: string, params?: EpisodeListParams): Promise<EpisodicRecord[]>;
@@ -470,7 +492,7 @@ export interface MemoryStore {
   getResource(key: ScopedKey): Promise<ResourceRow | null>;
   upsertResource(key: ScopedKey, patch: ResourcePatch): Promise<ResourceRow>;
   appendResourceFact(key: ScopedKey, fact: FactInput): Promise<Fact>;
-  listResourceFacts(key: ScopedKey): Promise<Fact[]>;
+  listResourceFacts(key: ScopedKey, params?: FactListParams): Promise<Fact[]>;
   deleteResourceFact(key: ScopedKey, factId: string): Promise<void>;
   appendResourceEpisode(key: ScopedKey, input: EpisodeInput): Promise<EpisodicRecord>;
   listResourceEpisodes(key: ScopedKey, params?: EpisodeListParams): Promise<EpisodicRecord[]>;
@@ -493,7 +515,7 @@ export interface MemoryStore {
   /** Archive or restore a thread. Pass `null` to restore (clear archivedAt). */
   setThreadArchived(key: ThreadKey, archivedAt: number | null): Promise<void>;
   appendThreadFact(key: ThreadKey, fact: FactInput): Promise<Fact>;
-  listThreadFacts(key: ThreadKey): Promise<Fact[]>;
+  listThreadFacts(key: ThreadKey, params?: FactListParams): Promise<Fact[]>;
   deleteThreadFact(key: ThreadKey, factId: string): Promise<void>;
   /**
    * Append messages to the thread's transcript (creating the thread row

@@ -12,7 +12,12 @@
 import { describe, it, expect } from "bun:test";
 import type { Message } from "../message.ts";
 import { nextThreadCursor } from "./thread-cursor.ts";
-import { DEFAULT_THREAD_PAGE_SIZE, type MemoryStore } from "./types.ts";
+import {
+  DEFAULT_THREAD_PAGE_SIZE,
+  type FactInput,
+  type FactListParams,
+  type MemoryStore,
+} from "./types.ts";
 
 const NS = "ns-test";
 const ALICE = "alice";
@@ -162,6 +167,83 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
         const bFacts = await s.listResourceFacts({ namespaceId: NS, resourceId: BOB });
         expect(aFacts.map((f) => f.text)).toEqual(["alice-fact"]);
         expect(bFacts.map((f) => f.text)).toEqual(["bob-fact"]);
+      });
+    });
+
+    describe("fact supersession", () => {
+      const aliceKey = { namespaceId: NS, resourceId: ALICE };
+
+      it("retires the superseded fact in every scope, keeping it as history", async () => {
+        const s = await make();
+        const threadKey = { namespaceId: NS, resourceId: ALICE, threadId: "t-sup" };
+        const appenders = [
+          {
+            append: (input: FactInput) => s.appendNamespaceFact(NS, input),
+            list: (params?: FactListParams) => s.listNamespaceFacts(NS, params),
+          },
+          {
+            append: (input: FactInput) => s.appendResourceFact(aliceKey, input),
+            list: (params?: FactListParams) => s.listResourceFacts(aliceKey, params),
+          },
+          {
+            append: (input: FactInput) => s.appendThreadFact(threadKey, input),
+            list: (params?: FactListParams) => s.listThreadFacts(threadKey, params),
+          },
+        ];
+        for (const scope of appenders) {
+          const old = await scope.append({ text: "lives in Berlin", source: "model" });
+          expect(old.retiredAt).toBeNull();
+          const next = await scope.append({
+            text: "lives in Lisbon",
+            source: "user",
+            supersedes: old.id,
+          });
+
+          expect((await scope.list()).map((f) => f.text)).toEqual(["lives in Lisbon"]);
+          const all = await scope.list({ includeRetired: true });
+          expect(all.map((f) => f.text)).toEqual(["lives in Lisbon", "lives in Berlin"]);
+          const retired = all.find((f) => f.id === old.id)!;
+          expect(retired.supersededBy).toBe(next.id);
+          expect(retired.retiredAt).toBe(next.createdAt);
+        }
+      });
+
+      it("appends without retiring when the id is unknown, already retired, or in another scope", async () => {
+        const s = await make();
+        const bobKey = { namespaceId: NS, resourceId: BOB };
+        const bobFact = await s.appendResourceFact(bobKey, { text: "bob-fact", source: "model" });
+        const old = await s.appendResourceFact(aliceKey, { text: "v1", source: "model" });
+        const v2 = await s.appendResourceFact(aliceKey, {
+          text: "v2",
+          source: "model",
+          supersedes: old.id,
+        });
+
+        await s.appendResourceFact(aliceKey, {
+          text: "ghost",
+          source: "model",
+          supersedes: "nope",
+        });
+        await s.appendResourceFact(aliceKey, {
+          text: "again",
+          source: "model",
+          supersedes: old.id,
+        });
+        await s.appendResourceFact(aliceKey, {
+          text: "cross",
+          source: "model",
+          supersedes: bobFact.id,
+        });
+
+        expect((await s.listResourceFacts(aliceKey)).map((f) => f.text)).toEqual([
+          "v2",
+          "ghost",
+          "again",
+          "cross",
+        ]);
+        expect((await s.listResourceFacts(bobKey)).map((f) => f.text)).toEqual(["bob-fact"]);
+        const history = await s.listResourceFacts(aliceKey, { includeRetired: true });
+        expect(history.find((f) => f.id === old.id)!.supersededBy).toBe(v2.id);
       });
     });
 

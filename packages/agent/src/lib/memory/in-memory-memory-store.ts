@@ -26,6 +26,7 @@ import {
   type EpisodicRecord,
   type Fact,
   type FactInput,
+  type FactListParams,
   type ListThreadsParams,
   type MemoryStore,
   type MessageRange,
@@ -126,13 +127,14 @@ export class InMemoryMemoryStore implements MemoryStore {
     }
     const f = this.makeFact(input);
     const list = this.namespaceFacts.get(namespaceId) ?? [];
+    this.retireSuperseded({ list, input, successor: f });
     list.push(f);
     this.namespaceFacts.set(namespaceId, list);
     return f;
   }
 
-  async listNamespaceFacts(namespaceId: string): Promise<Fact[]> {
-    return (this.namespaceFacts.get(namespaceId) ?? []).slice();
+  async listNamespaceFacts(namespaceId: string, params?: FactListParams): Promise<Fact[]> {
+    return listFacts({ facts: this.namespaceFacts.get(namespaceId) ?? [], params });
   }
 
   async deleteNamespaceFact(namespaceId: string, factId: string): Promise<void> {
@@ -211,13 +213,14 @@ export class InMemoryMemoryStore implements MemoryStore {
     }
     const f = this.makeFact(input);
     const list = this.resourceFacts.get(this.resourceK(key)) ?? [];
+    this.retireSuperseded({ list, input, successor: f });
     list.push(f);
     this.resourceFacts.set(this.resourceK(key), list);
     return f;
   }
 
-  async listResourceFacts(key: ScopedKey): Promise<Fact[]> {
-    return (this.resourceFacts.get(this.resourceK(key)) ?? []).slice();
+  async listResourceFacts(key: ScopedKey, params?: FactListParams): Promise<Fact[]> {
+    return listFacts({ facts: this.resourceFacts.get(this.resourceK(key)) ?? [], params });
   }
 
   async deleteResourceFact(key: ScopedKey, factId: string): Promise<void> {
@@ -410,13 +413,14 @@ export class InMemoryMemoryStore implements MemoryStore {
     }
     const f = this.makeFact(input);
     const list = this.threadFacts.get(this.threadK(key)) ?? [];
+    this.retireSuperseded({ list, input, successor: f });
     list.push(f);
     this.threadFacts.set(this.threadK(key), list);
     return f;
   }
 
-  async listThreadFacts(key: ThreadKey): Promise<Fact[]> {
-    return (this.threadFacts.get(this.threadK(key)) ?? []).slice();
+  async listThreadFacts(key: ThreadKey, params?: FactListParams): Promise<Fact[]> {
+    return listFacts({ facts: this.threadFacts.get(this.threadK(key)) ?? [], params });
   }
 
   async deleteThreadFact(key: ThreadKey, factId: string): Promise<void> {
@@ -592,7 +596,22 @@ export class InMemoryMemoryStore implements MemoryStore {
       source: input.source,
       createdAt: now,
       updatedAt: now,
+      retiredAt: null,
+      supersededBy: null,
     };
+  }
+
+  /** Retire the current fact `input.supersedes` names in `list`, in place. */
+  private retireSuperseded(params: {
+    readonly list: Fact[];
+    readonly input: FactInput;
+    readonly successor: Fact;
+  }): void {
+    const { list, input, successor } = params;
+    if (input.supersedes === undefined) return;
+    const at = list.findIndex((f) => f.id === input.supersedes && f.retiredAt === null);
+    if (at < 0) return;
+    list[at] = { ...list[at]!, retiredAt: successor.createdAt, supersededBy: successor.id };
   }
 
   private makeEpisode(input: EpisodeInput): EpisodicRecord {
@@ -651,4 +670,14 @@ function clamp01(n: number): number {
   if (n < 0) return 0;
   if (n > 1) return 1;
   return n;
+}
+
+/** Current facts in insertion order; with `includeRetired`, retired ones follow. */
+function listFacts(params: {
+  readonly facts: ReadonlyArray<Fact>;
+  readonly params: FactListParams | undefined;
+}): Fact[] {
+  const current = params.facts.filter((f) => f.retiredAt === null);
+  if (!params.params?.includeRetired) return current;
+  return [...current, ...params.facts.filter((f) => f.retiredAt !== null)];
 }

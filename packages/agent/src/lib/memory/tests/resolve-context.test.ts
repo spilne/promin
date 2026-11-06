@@ -81,6 +81,8 @@ function fact(params: { id: string; text: string; dayOffset?: number; source?: F
     source: params.source ?? "model",
     createdAt: ts,
     updatedAt: ts,
+    retiredAt: null,
+    supersededBy: null,
   };
 }
 
