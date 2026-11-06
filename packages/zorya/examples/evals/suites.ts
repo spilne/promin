@@ -93,8 +93,13 @@ export const WEATHER_BOT_TRAJECTORY: EvalSuiteSeed = {
 /**
  * Memory fact precision: a scripted conversation with knowledge-bot is
  * distilled, and the facts stored for the user are compared with the ones
- * the user actually stated. Its target is the conversation + distill
- * pipeline (run-ci.ts), not a single agent turn, so it is CI-only.
+ * the user actually stated. `moved-city` also checks that a fact the user
+ * later contradicts is replaced, not kept beside the new one, and
+ * `unrelated-facts-stay` that a new fact leaves other facts alone. The
+ * scripted LLM answers the reconcile call by rule, so these cases cover the
+ * wiring from agent to store, not how a real model judges a contradiction.
+ * Its target is the conversation + distill pipeline (run-ci.ts), not a
+ * single agent turn, so it is CI-only.
  */
 export const MEMORY_FACT_PRECISION: EvalSuiteSeed = {
   id: "memory-fact-precision",
@@ -124,6 +129,22 @@ export const MEMORY_FACT_PRECISION: EvalSuiteSeed = {
           ],
         },
         expected: ["User prefers short answers", "User is allergic to long meetings"],
+      },
+      {
+        id: "moved-city",
+        input: {
+          earlierTurns: ["I live in Berlin."],
+          turns: ["Big news: I moved. I live in Lisbon."],
+        },
+        expected: ["User lives in Lisbon"],
+      },
+      {
+        id: "unrelated-facts-stay",
+        input: {
+          earlierTurns: ["I'm on the SRE team."],
+          turns: ["I live in Lisbon."],
+        },
+        expected: ["User is on the SRE team", "User lives in Lisbon"],
       },
       {
         id: "questions-only",

@@ -89,7 +89,9 @@ export function agentEvalTarget(params: {
 /**
  * The memory suite's target: each case's `turns` are sent to knowledge-bot
  * on a fresh thread of a fresh user, the thread is distilled, and the
- * output is the facts stored for that user.
+ * output is the facts stored for that user. A case's `earlierTurns` run
+ * first, in an earlier thread of the same user that is distilled too, so
+ * the facts it stored can be contradicted.
  */
 export function memoryFactsTarget(params: { readonly harness: EvalHarness }): EvalTarget {
   const { harness } = params;
@@ -97,13 +99,24 @@ export function memoryFactsTarget(params: { readonly harness: EvalHarness }): Ev
   return fnTarget({
     id: "knowledge-bot-memory",
     fn: async (input) => {
-      const turns = (input as { turns?: unknown }).turns;
-      if (!Array.isArray(turns) || !turns.every((t) => typeof t === "string")) {
-        throw new Error('a memory case input needs "turns": string[]');
+      const { turns, earlierTurns = [] } = input as { turns?: unknown; earlierTurns?: unknown };
+      const isTurns = (v: unknown): v is string[] =>
+        Array.isArray(v) && v.every((t) => typeof t === "string");
+      if (!isTurns(turns) || !isTurns(earlierTurns)) {
+        throw new Error(
+          'a memory case input needs "turns": string[] (and optional "earlierTurns")',
+        );
       }
       conversation += 1;
       const resourceId = `user-${conversation}`;
       const agent = await harness.agent({ agentId: "knowledge-bot", resourceId });
+      if (earlierTurns.length > 0) {
+        // An earlier conversation of the same user, distilled before this one starts.
+        const earlierId = `conversation-${conversation}-earlier`;
+        const earlier = await agent.thread(earlierId);
+        for (const task of earlierTurns) await (await earlier.send({ task })).text;
+        await agent.distillThread(earlierId, { force: true });
+      }
       const threadId = `conversation-${conversation}`;
       const thread = await agent.thread(threadId);
       for (const task of turns) await (await thread.send({ task })).text;

@@ -133,14 +133,55 @@ const FACT_PATTERNS: ReadonlyArray<{ readonly pattern: RegExp; readonly fact: st
   { pattern: /^i(?:'m| am) allergic to (.+)$/i, fact: "User is allergic to $1" },
 ];
 
+/** Numbered lines under `## <title>` in a reconcile prompt, in order. */
+function numberedSection(params: { readonly text: string; readonly title: string }): string[] {
+  const start = params.text.indexOf(`## ${params.title}`);
+  if (start < 0) return [];
+  const body = params.text.slice(start + params.title.length + 3).split(/\n## /)[0]!;
+  return body
+    .split("\n")
+    .map((line) => /^\d+\. (.*)$/.exec(line.trim())?.[1])
+    .filter((line): line is string => line !== undefined);
+}
+
+/** "User lives in" for "User lives in Lisbon": the part of a fact that names what it is about. */
+function factAttribute(fact: string): string {
+  return fact.split(" ").slice(0, 3).join(" ").toLowerCase();
+}
+
+/**
+ * The consolidator's reconcile call, answered deterministically: a new fact
+ * replaces the saved fact about the same attribute (same first three words)
+ * when the two differ.
+ */
+function reconcileReply(params: { readonly messages: ReadonlyArray<Message> }): string {
+  const text = lastUserText(params);
+  const saved = numberedSection({ text, title: "Saved facts" });
+  const fresh = numberedSection({ text, title: "New facts" });
+  const replaces: Array<{ new: number; old: number }> = [];
+  fresh.forEach((next, n) => {
+    const old = saved.findIndex(
+      (fact) => factAttribute(fact) === factAttribute(next) && fact !== next,
+    );
+    if (old >= 0) replaces.push({ new: n + 1, old: old + 1 });
+  });
+  return JSON.stringify({ replaces });
+}
+
 /**
  * A distillation LLM that extracts facts the way the distill prompt asks:
  * only from `[user]` transcript lines, one fact per first-person statement
- * it recognises. Answers the consolidator's JSON envelope.
+ * it recognises. Answers the consolidator's JSON envelope, and its
+ * reconcile call (see `reconcileReply`).
  */
 export function factExtractorLLM(): LLMProvider {
   return {
     chat: async (params: LLMChatParams): Promise<LLMResponse> => {
+      if (
+        params.messages[0]?.content?.toString().includes("keep a user's saved facts consistent")
+      ) {
+        return { content: reconcileReply(params), finishReason: "stop" };
+      }
       const transcript = lastUserText(params);
       const facts: string[] = [];
       for (const line of transcript.split("\n")) {
