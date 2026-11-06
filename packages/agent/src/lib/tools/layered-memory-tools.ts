@@ -93,6 +93,10 @@ const SET_DESCRIPTION =
   "  - 'the user lives in PST'\n" +
   "  - 'the user is allergic to peanuts'\n" +
   "  - 'the user prefers terse answers'\n\n" +
+  "When a saved fact changes (the user moved, switched tools), save the new " +
+  "one with `supersedes` set to the old fact's id from `recall`, so the old " +
+  "one stops being shown but stays as history. Facts a person wrote cannot be " +
+  "replaced this way.\n\n" +
   "DO NOT use this for current state, in-progress reasoning, or anything " +
   "that will change soon — that's what `setWorking` is for. Don't repeat " +
   "facts that are already saved.";
@@ -138,6 +142,14 @@ export const LayeredMemoryToolInputSchema = z.discriminatedUnion("command", [
       .min(1)
       .max(MAX_FACT_CHARS)
       .describe(`The fact, in one line (at most ${MAX_FACT_CHARS} characters).`),
+    supersedes: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Id (from a `recall` result) of a fact you saved earlier that this one replaces because " +
+          "it changed or was wrong. Only facts the model saved can be replaced.",
+      ),
   }),
   z.object({
     command: z.literal("setWorking"),
@@ -208,17 +220,29 @@ export function createLayeredMemoryTool(
             if (!resourceKey) {
               return "Cannot write resource-scope memory: no resourceId is bound to this task.";
             }
+            const replaced = resolveSupersedes({
+              facts: await config.store.listResourceFacts(resourceKey),
+              id: input.supersedes,
+            });
+            if (replaced.refusal) return replaced.refusal;
             const f = await config.store.appendResourceFact(resourceKey, {
               text: input.text,
               source: "model",
+              ...(replaced.id && { supersedes: replaced.id }),
             });
-            return `Saved to resource memory (id: ${shortId(f.id)}).`;
+            return `Saved to resource memory (id: ${shortId(f.id)}).${replaced.note}`;
           }
+          const replaced = resolveSupersedes({
+            facts: await config.store.listThreadFacts(threadKey),
+            id: input.supersedes,
+          });
+          if (replaced.refusal) return replaced.refusal;
           const f = await config.store.appendThreadFact(threadKey, {
             text: input.text,
             source: "model",
+            ...(replaced.id && { supersedes: replaced.id }),
           });
-          return `Saved to thread memory (id: ${shortId(f.id)}).`;
+          return `Saved to thread memory (id: ${shortId(f.id)}).${replaced.note}`;
         }
         case "setWorking": {
           if (input.scope === "resource") {
@@ -260,6 +284,33 @@ export function createLayeredMemoryTool(
       }
     },
   });
+}
+
+/**
+ * Check a `supersedes` id against the scope's current facts. The model may
+ * only retire facts it wrote itself: retiring what an operator or user
+ * wrote on the model's say-so would let injected text erase them.
+ */
+function resolveSupersedes(params: {
+  readonly facts: ReadonlyArray<Fact>;
+  readonly id: string | undefined;
+}): { id?: string; note: string; refusal?: string } {
+  const { facts, id } = params;
+  if (id === undefined) return { note: "" };
+  const target = facts.find((f) => f.id === id);
+  if (!target) {
+    return {
+      note: "",
+      refusal: `Nothing saved: no current fact with id ${id} in that scope. Use \`recall\` to find the id, or omit \`supersedes\`.`,
+    };
+  }
+  if (target.source !== "model") {
+    return {
+      note: "",
+      refusal: `Nothing saved: fact ${id} was written by a ${target.source} and cannot be replaced by the model.`,
+    };
+  }
+  return { id: target.id, note: ` Replaced fact ${shortId(target.id)}.` };
 }
 
 function defaultSearchScopes(hasResource: boolean): Array<"thread" | "resource" | "namespace"> {
@@ -359,7 +410,7 @@ function formatHits(hits: ReadonlyArray<MemoryHit>, query: string): string {
       const tag = h.factSource
         ? `${h.scope}/${h.source}, ${h.factSource}`
         : `${h.scope}/${h.source}`;
-      return `${i + 1}. [${tag}] (${h.score.toFixed(2)}) ${oneLine(h.text)}`;
+      return `${i + 1}. [${tag}, id=${h.id}] (${h.score.toFixed(2)}) ${oneLine(h.text)}`;
     })
     .join("\n");
   return fenceReferenceData({
