@@ -174,6 +174,14 @@ export type { InMemoryMemoryStoreConfig } from "./memory/in-memory-memory-store.
 
 export { capStaticRules, resolveContext } from "./memory/resolve-context.ts";
 export { loadResolvedContext, readMessageTail } from "./memory/load-context.ts";
+export {
+  bm25Scores,
+  cosineSimilarity,
+  decayedSalience,
+  rankCandidates,
+  tokenize,
+} from "./memory/scoring.ts";
+export type { RankCandidate } from "./memory/scoring.ts";
 export type { ResolveContextInput } from "./memory/resolve-context.ts";
 
 // RAG — retrievers, chunking, the retriever tool and registry.

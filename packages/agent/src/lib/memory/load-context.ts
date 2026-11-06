@@ -14,8 +14,10 @@
 // ---------------------------------------------------------------------------
 
 import { defaultEstimate, resolveContext } from "./resolve-context.ts";
+import { decayedSalience } from "./scoring.ts";
 import {
   COMPACT_EPISODE_KIND,
+  type EpisodicRecord,
   type MemoryStore,
   type ResolvedContext,
   type StoredMessage,
@@ -86,13 +88,38 @@ export async function loadResolvedContext(params: {
     namespaceFacts,
     resource,
     resourceFacts,
-    resourceEpisodes,
+    resourceEpisodes: rankEpisodesByDecay({ episodes: resourceEpisodes, budget }),
     thread,
     threadFacts,
     compaction,
     messages,
     budget,
   });
+}
+
+/**
+ * `episodes` ordered by decayed salience, best first, when the budget sets
+ * `episodeHalfLifeMs`; otherwise untouched (the store's salience order).
+ * Ties keep the store's order.
+ */
+function rankEpisodesByDecay(params: {
+  readonly episodes: ReadonlyArray<EpisodicRecord>;
+  readonly budget: TokenBudget;
+}): ReadonlyArray<EpisodicRecord> {
+  const { episodes, budget } = params;
+  if (budget.episodeHalfLifeMs === undefined) return episodes;
+  const now = budget.now ?? Date.now();
+  const effective = (e: EpisodicRecord) =>
+    decayedSalience({
+      salience: e.salience,
+      occurredAt: e.occurredAt,
+      now,
+      halfLifeMs: budget.episodeHalfLifeMs,
+    });
+  return episodes
+    .map((e, i) => ({ e, i, s: effective(e) }))
+    .sort((a, b) => b.s - a.s || a.i - b.i)
+    .map(({ e }) => e);
 }
 
 /**

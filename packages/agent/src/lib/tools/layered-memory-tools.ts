@@ -31,6 +31,8 @@ import {
   type ScopedKey,
   type ThreadKey,
 } from "../memory/types.ts";
+import type { EmbeddingProvider } from "../embedding-provider.ts";
+import { rankCandidates } from "../memory/scoring.ts";
 import { fenceReferenceData, oneLine } from "../reference-data.ts";
 import { THREAD_AGENT_METADATA_KEY } from "../agent/types.ts";
 
@@ -51,7 +53,30 @@ export interface LayeredMemoryToolConfig {
    * since recent ones are already in context.
    */
   readonly defaultRecallSources?: ReadonlyArray<"fact" | "episode" | "message">;
+  /**
+   * Adds semantic matching to `recall`: query and candidates are embedded
+   * and ranked by cosine similarity next to BM25. Without it, or when it
+   * throws, recall is lexical only.
+   */
+  readonly embedder?: EmbeddingProvider;
+  /**
+   * Half-life of the recency term in `recall` ranking, in ms.
+   * Default: `DEFAULT_RECALL_RECENCY_HALF_LIFE_MS` (90 days).
+   */
+  readonly recencyHalfLifeMs?: number;
+  /** Clock, epoch ms. Default `Date.now`. */
+  readonly now?: () => number;
 }
+
+/** Default `LayeredMemoryToolConfig.recencyHalfLifeMs`. */
+export const DEFAULT_RECALL_RECENCY_HALF_LIFE_MS = 90 * 24 * 60 * 60 * 1000;
+
+/** Importance prior of a fact by provenance: people's words outrank the model's own notes. */
+const FACT_SOURCE_IMPORTANCE: Record<Fact["source"], number> = {
+  operator: 1,
+  user: 1,
+  model: 0.6,
+};
 
 const ModelScope = z.enum(["thread", "resource"]);
 const RecallScope = z.enum(["thread", "resource", "namespace"]);
@@ -217,8 +242,11 @@ export function createLayeredMemoryTool(
           return "Updated thread working memory.";
         }
         case "recall": {
-          const hits = await keywordSearch({
+          const hits = await recallSearch({
             store: config.store,
+            now: (config.now ?? Date.now)(),
+            recencyHalfLifeMs: config.recencyHalfLifeMs ?? DEFAULT_RECALL_RECENCY_HALF_LIFE_MS,
+            ...(config.embedder && { embedder: config.embedder }),
             namespaceId: config.namespaceId,
             resourceKey,
             threadKey,
@@ -250,7 +278,7 @@ interface MemoryHit {
   readonly createdAt: number;
 }
 
-interface KeywordSearchInput {
+interface RecallSearchInput {
   readonly store: MemoryStore;
   readonly namespaceId: string;
   readonly resourceKey: ScopedKey | null;
@@ -259,114 +287,68 @@ interface KeywordSearchInput {
   readonly scopes: ReadonlyArray<"thread" | "resource" | "namespace">;
   readonly sources: ReadonlyArray<"fact" | "episode" | "message">;
   readonly limit: number;
+  readonly now: number;
+  readonly recencyHalfLifeMs: number;
+  readonly embedder?: EmbeddingProvider;
 }
 
-async function keywordSearch(input: KeywordSearchInput): Promise<MemoryHit[]> {
-  const q = input.query.toLowerCase();
-  const out: MemoryHit[] = [];
-
+/** Hybrid recall: gather every candidate in scope, then rank them as one corpus. */
+async function recallSearch(input: RecallSearchInput): Promise<MemoryHit[]> {
   const wantFacts = input.sources.includes("fact");
   const wantEpisodes = input.sources.includes("episode");
+  const candidates: Array<Omit<MemoryHit, "score"> & { importance: number }> = [];
 
-  // Per scope: load + filter + score by keyword overlap (with salience tiebreak for episodes).
   for (const scope of input.scopes) {
+    let facts: Fact[] = [];
+    let episodes: EpisodicRecord[] = [];
     if (scope === "namespace") {
-      if (wantFacts) {
-        const facts = await input.store.listNamespaceFacts(input.namespaceId);
-        out.push(...factsToHits(facts, "namespace", q));
-      }
-      if (wantEpisodes) {
-        const eps = await input.store.listNamespaceEpisodes(input.namespaceId);
-        out.push(...episodesToHits(eps, "namespace", q));
-      }
+      if (wantFacts) facts = await input.store.listNamespaceFacts(input.namespaceId);
+      if (wantEpisodes) episodes = await input.store.listNamespaceEpisodes(input.namespaceId);
     } else if (scope === "resource" && input.resourceKey) {
-      if (wantFacts) {
-        const facts = await input.store.listResourceFacts(input.resourceKey);
-        out.push(...factsToHits(facts, "resource", q));
-      }
-      if (wantEpisodes) {
-        const eps = await input.store.listResourceEpisodes(input.resourceKey);
-        out.push(...episodesToHits(eps, "resource", q));
-      }
+      if (wantFacts) facts = await input.store.listResourceFacts(input.resourceKey);
+      if (wantEpisodes) episodes = await input.store.listResourceEpisodes(input.resourceKey);
     } else if (scope === "thread") {
-      if (wantFacts) {
-        const facts = await input.store.listThreadFacts(input.threadKey);
-        out.push(...factsToHits(facts, "thread", q));
-      }
-      if (wantEpisodes) {
-        const eps = await input.store.listThreadEpisodes(input.threadKey);
-        out.push(...episodesToHits(eps, "thread", q));
-      }
+      if (wantFacts) facts = await input.store.listThreadFacts(input.threadKey);
+      if (wantEpisodes) episodes = await input.store.listThreadEpisodes(input.threadKey);
     }
-  }
-
-  return out
-    .filter((h) => h.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, input.limit);
-}
-
-function factsToHits(
-  facts: ReadonlyArray<Fact>,
-  scope: MemoryHit["scope"],
-  q: string,
-): MemoryHit[] {
-  return facts.flatMap((f) => {
-    const score = keywordScore(q, f.text);
-    if (score <= 0) return [];
-    return [
-      {
-        source: "fact" as const,
+    for (const f of facts) {
+      candidates.push({
+        source: "fact",
         factSource: f.source,
         scope,
         id: f.id,
         text: f.text,
-        score,
-        createdAt: f.createdAt,
-      },
-    ];
-  });
-}
-
-function episodesToHits(
-  eps: ReadonlyArray<EpisodicRecord>,
-  scope: MemoryHit["scope"],
-  q: string,
-): MemoryHit[] {
-  return eps.flatMap((e) => {
-    const haystack = e.summary + (e.outcome ? ` ${e.outcome}` : "");
-    const overlap = keywordScore(q, haystack);
-    if (overlap <= 0) return [];
-    // Combine keyword overlap (0..1) with salience (0..1). Equal weight.
-    const score = 0.5 * overlap + 0.5 * e.salience;
-    return [
-      {
-        source: "episode" as const,
+        createdAt: f.updatedAt,
+        importance: FACT_SOURCE_IMPORTANCE[f.source],
+      });
+    }
+    for (const e of episodes) {
+      candidates.push({
+        source: "episode",
         scope,
         id: e.id,
         text: e.outcome ? `${e.summary} — ${e.outcome}` : e.summary,
-        score,
-        createdAt: e.createdAt,
-      },
-    ];
-  });
-}
+        createdAt: e.occurredAt,
+        importance: e.salience,
+      });
+    }
+  }
 
-/** Token-level overlap score, 0..1: share of query words (3+ chars) found in `content`. */
-function keywordScore(query: string, content: string): number {
-  const words = (s: string) =>
-    new Set(
-      s
-        .toLowerCase()
-        .split(/\W+/)
-        .filter((w) => w.length > 2),
-    );
-  const queryWords = words(query);
-  const contentWords = words(content);
-  if (queryWords.size === 0) return 0;
-  let matches = 0;
-  for (const w of queryWords) if (contentWords.has(w)) matches++;
-  return matches / queryWords.size;
+  const ranked = await rankCandidates({
+    query: input.query,
+    candidates: candidates.map((c) => ({
+      text: c.text,
+      importance: c.importance,
+      at: c.createdAt,
+    })),
+    now: input.now,
+    recencyHalfLifeMs: input.recencyHalfLifeMs,
+    ...(input.embedder && { embedder: input.embedder }),
+  });
+  return ranked.slice(0, input.limit).map(({ index, score }) => {
+    const { importance: _importance, ...hit } = candidates[index]!;
+    return { ...hit, score };
+  });
 }
 
 /** Recalled memories are stored, untrusted text — returned as fenced reference data. */

@@ -129,6 +129,33 @@ describe("layered memory tool — setWorking", () => {
   });
 });
 
+describe("layered memory tool — recall (semantic)", () => {
+  it("finds a fact by meaning when an embedder is configured, and stays lexical without one", async () => {
+    const store = new InMemoryMemoryStore();
+    await store.appendResourceFact(
+      { namespaceId: NS, resourceId: ALICE },
+      { text: "resides in Lisbon", source: "user" },
+    );
+    const vectors: Record<string, number[]> = {
+      "where do I live": [1, 0],
+      "resides in Lisbon": [0.9, 0.1],
+    };
+    const make = (withEmbedder: boolean) =>
+      createLayeredMemoryTool({
+        store,
+        namespaceId: NS,
+        resourceId: ALICE,
+        threadId: T,
+        ...(withEmbedder && { embedder: { embed: async (t: string) => vectors[t] ?? [0, 0] } }),
+      });
+    const recall = (t: ReturnType<typeof make>) =>
+      t.execute(t.parameters.parse({ command: "recall", query: "where do I live" }));
+
+    expect(await recall(make(true))).toContain("resides in Lisbon");
+    expect(await recall(make(false))).toContain("No memories matched");
+  });
+});
+
 describe("layered memory tool — recall (keyword search)", () => {
   it("returns 'No memories matched' when nothing matches", async () => {
     const { run } = makeTool({ withResource: true });

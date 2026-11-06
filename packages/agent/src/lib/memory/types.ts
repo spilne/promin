@@ -366,6 +366,16 @@ export interface TokenBudget {
    */
   readonly maxEpisodeTokens?: number;
   /**
+   * Half-life of episode salience, in ms. When set, `loadResolvedContext`
+   * ranks resource episodes by `decayedSalience` (older ones fade, down to
+   * a floor) instead of the stored value, so a recent episode can outrank
+   * a stale, higher-salience one. Stored salience is never rewritten.
+   * Unset: stored salience orders episodes, as before.
+   */
+  readonly episodeHalfLifeMs?: number;
+  /** Clock for `episodeHalfLifeMs`, epoch ms. Default `Date.now()`. */
+  readonly now?: number;
+  /**
    * Caller-provided message estimator. Must return a stable, non-negative
    * integer. Defaults to chars/4 when unset.
    */

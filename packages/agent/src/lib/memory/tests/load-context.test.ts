@@ -118,4 +118,34 @@ describe("loadResolvedContext", () => {
 
     expect(store.episodesRead).toBe(50);
   });
+
+  it("ranks episodes by decayed salience when the budget sets a half-life", async () => {
+    const store = new InMemoryMemoryStore();
+    const resource = { namespaceId: KEY.namespaceId, resourceId: KEY.resourceId };
+    const DAY = 24 * 60 * 60 * 1000;
+    const now = 1_800_000_000_000;
+    await store.appendResourceEpisode(resource, {
+      summary: "old but important",
+      salience: 0.9,
+      occurredAt: now - 365 * DAY,
+    });
+    await store.appendResourceEpisode(resource, {
+      summary: "recent and fairly important",
+      salience: 0.6,
+      occurredAt: now - DAY,
+    });
+    const budget = { maxMessageTokens: 100, maxEpisodeTokens: 500, now };
+
+    const plain = await loadResolvedContext({ store, key: KEY, budget });
+    const decayed = await loadResolvedContext({
+      store,
+      key: KEY,
+      budget: { ...budget, episodeHalfLifeMs: 30 * DAY },
+    });
+
+    const order = (reference: string) =>
+      reference.indexOf("old but important") < reference.indexOf("recent and fairly important");
+    expect(order(plain.reference)).toBe(true);
+    expect(order(decayed.reference)).toBe(false);
+  });
 });
