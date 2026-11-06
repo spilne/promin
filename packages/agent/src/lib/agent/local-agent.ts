@@ -94,6 +94,7 @@ import {
   RateLimitedConsolidator,
   type ConsolidatorRateLimitConfig,
 } from "../memory/rate-limited-consolidator.ts";
+import type { EmbeddingProvider } from "../embedding-provider.ts";
 import { isReferenceDataMessage, referenceDataMessage } from "../reference-data.ts";
 import {
   maybeAutoCompact,
@@ -213,6 +214,11 @@ export interface LocalAgentConfig<TOutput = any> {
    * they're stateless by design.
    */
   readonly autoMemoryTool?: boolean;
+  /**
+   * Adds semantic matching to the auto-attached `memory` tool's `recall`
+   * (see `LayeredMemoryToolConfig.embedder`). Without it, recall is lexical.
+   */
+  readonly memoryEmbedder?: EmbeddingProvider;
   /**
    * Memory consolidator backing `compactThread` / `distillThread`.
    * Optional — when omitted AND `memory` is provided, LocalAgent auto-
@@ -554,6 +560,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
         agentId: this.agentId(),
         ...(config.memory && { memory: config.memory }),
         ...(config.autoMemoryTool !== undefined && { autoMemoryTool: config.autoMemoryTool }),
+        ...(config.memoryEmbedder && { memoryEmbedder: config.memoryEmbedder }),
         ...(config.network && { network: config.network }),
         ...(config.resourceId !== undefined && { boundResourceId: config.resourceId }),
         ...(config.ownerId !== undefined && { ownerId: config.ownerId }),

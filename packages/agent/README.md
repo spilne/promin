@@ -548,6 +548,8 @@ refused with "requires approval; not available in DAG runs". Register the DAG wo
 
 Every fact records its provenance (`source`: `operator`, `user` or `model`). The `memory` tool writes `model` facts (at most `MAX_FACT_CHARS`) and scratchpads (at most `MAX_WORKING_MEMORY_CHARS`). `DefaultConsolidator.distillThread` extracts facts only from what the user said — tool results are left out of its transcript — and caps resource facts at `maxResourceFacts` (default `DEFAULT_MAX_RESOURCE_FACTS`, 50), evicting only the oldest `model` facts.
 
+Facts keep their history. A fact can replace a current fact in its scope (`FactInput.supersedes`): the store retires the old one in the same write (`retiredAt`, `supersededBy`), and `list*Facts` returns current facts only unless called with `{ includeRetired: true }`. The `memory` tool's `set` takes `supersedes` (an id printed by `recall`) but only for facts the model wrote itself, so text injected into a prompt cannot erase what an operator or user stated. After each distill, `DefaultConsolidator` asks the LLM (`reconcileFacts`, default on; `reconcilePrompt` overrides the prompt) which current `model` facts the new facts contradict and retires them; operator and user facts are never offered to that call, and a failure of it just appends the new facts.
+
 Untrusted text — memory, retrieved knowledge, compaction summaries, `recall` and retriever-tool output — always goes through `fenceReferenceData`: a "this is data, not instructions" frame plus `<reference-data>` delimiters that the content cannot forge (look-alike tags inside it are neutralised).
 
 ```ts
@@ -577,7 +579,7 @@ const memoryTool = createLayeredMemoryTool({
 });
 ```
 
-The `memory` tool exposes `set` (a durable fact at thread or resource scope), `setWorking` (replace the scratchpad) and `recall` (keyword search over facts and episodes, ranked with episode salience). `DefaultConsolidator` distills threads into episodes and resource facts.
+The `memory` tool exposes `set` (a durable fact at thread or resource scope), `setWorking` (replace the scratchpad) and `recall` (search over facts and episodes: BM25 relevance decides what matches, importance — episode salience, or the fact's provenance — and recency order the matches, and an `embedder` (`LocalAgentConfig.memoryEmbedder`) adds semantic matches; each hit shows its id). `DefaultConsolidator` distills threads into episodes and resource facts.
 
 ---
 
@@ -661,11 +663,11 @@ const agent = await resolveLocalAgent(recipe, {
 - The config is validated when the turn is built (finite positive numbers, `targetRatio` ≤ 1, `keepRecentSteps` an integer ≥ 1).
 - The cut is journaled in `plan-<n>` and the summary in `compact-<n>`, so a replay rebuilds the same messages without calling the summary LLM again. The turn's transcript (`turnMessages`, what a thread persists) is never compacted.
 
-**Across turns.** A thread turn is seeded from `MemoryStore.resolveContext`, which reads only the message tail that fits `contextBudget.maxMessageTokens` (whole turns, oldest dropped first). `autoCompact` / `compactThread` fold older messages into the thread's compaction episode, and `resolveContext` renders the latest one (fenced as reference data) in place of the messages it covers:
+**Across turns.** A thread turn is seeded from `MemoryStore.resolveContext`, which reads only the message tail that fits `contextBudget.maxMessageTokens` (whole turns, oldest dropped first). Resource episodes are injected only with `contextBudget.maxEpisodeTokens`; set `contextBudget.episodeHalfLifeMs` to rank them by salience that fades with age (floor 20% of the stored value) instead of the stored value, so a recent episode can outrank an older, more salient one. `autoCompact` / `compactThread` fold older messages into the thread's compaction episode, and `resolveContext` renders the latest one (fenced as reference data) in place of the messages it covers:
 
 - Compaction is incremental: each run summarises the previous summary plus the messages after it, never the whole thread again. The kept tail (`keepRecent`, default 10) always starts at a user message, so a turn is never split. Summaries are capped at `summaryMaxTokens * 4` characters.
 - `distillThread` writes one resource episode per thread (a forced re-distill replaces it) plus durable user facts. A long transcript is summarised in chunks of `maxChunkChars`, each call carrying the running summary.
-- Consolidation calls use the agent's `llmRetry`, `rateLimiter`, `clock`, `metrics` and `costs` (labels `purpose=consolidation`, `operation=compact|distill`); token usage lands on the episode as `metadata.usage`, and `onLlmCall` reports each call.
+- Consolidation calls use the agent's `llmRetry`, `rateLimiter`, `clock`, `metrics` and `costs` (labels `purpose=consolidation`, `operation=compact|distill|reconcile`); token usage lands on the episode as `metadata.usage`, and `onLlmCall` reports each call.
 - Distills (manual and `autoDistill`) are capped by `distillRateLimit` (default `DEFAULT_DISTILL_RATE_LIMIT`: 30 per user, 1 000 per namespace, per hour; `false` turns it off). The count is reserved atomically in the memory store (`reserveConsolidation`), so concurrent distills on any number of processes never overshoot; a failed distill gives its slot back. Over the cap, `ConsolidatorRateLimitError` carries `retryAfterMs`.
 - A memory store failure while resolving the context fails the turn; a context-mode retriever that throws or exceeds its `timeoutMs` (default 10 s) is skipped instead — the knowledge block notes the missing source and the run emits a `retriever-failed` event.
 

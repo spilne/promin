@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------------
 
 import type { MemoryStore } from "../memory/types.ts";
+import type { EmbeddingProvider } from "../embedding-provider.ts";
 import {
   createCallAgentTool,
   createFindAgentTool,
@@ -29,6 +30,8 @@ export interface AutoToolSources {
   readonly memory?: MemoryStore;
   /** `false` keeps the memory tool off. */
   readonly autoMemoryTool?: boolean;
+  /** Semantic matching for the memory tool's `recall`. */
+  readonly memoryEmbedder?: EmbeddingProvider;
   readonly network?: {
     readonly deps: NetworkRuntimeDeps;
     readonly recipe: RegisteredAgent;
@@ -64,6 +67,7 @@ export function withAutoTools(params: {
       resourceId: scope.resourceId,
       threadId: scope.threadId,
       agentId: sources.agentId,
+      ...(sources.memoryEmbedder && { embedder: sources.memoryEmbedder }),
     });
     tools = { ...tools, memory: memoryTool };
   }
