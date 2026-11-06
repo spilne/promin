@@ -19,6 +19,7 @@ import {
   COMPACT_EPISODE_KIND,
   type EpisodicRecord,
   type MemoryStore,
+  type ScopedKey,
   type ResolvedContext,
   type StoredMessage,
   type ThreadKey,
@@ -57,9 +58,11 @@ export async function loadResolvedContext(params: {
       resourceKey ? store.getResource(resourceKey) : null,
       resourceKey ? store.listResourceFacts(resourceKey) : [],
       resourceKey && maxEpisodeTokens > 0
-        ? store.listResourceEpisodes(resourceKey, {
-            order: "salienceDesc",
+        ? readEpisodeCandidates({
+            store,
+            key: resourceKey,
             limit: Math.min(MAX_EPISODES_READ, Math.ceil(maxEpisodeTokens / MIN_EPISODE_TOKENS)),
+            decays: budget.episodeHalfLifeMs !== undefined,
           })
         : [],
       stored ? store.listThreadFacts(key) : [],
@@ -95,6 +98,29 @@ export async function loadResolvedContext(params: {
     messages,
     budget,
   });
+}
+
+/**
+ * Resource episodes to rank for the prompt: the `limit` most salient. With
+ * decay, the `limit` most recent too: an episode's decayed salience is high
+ * only when its stored salience or its recency is, so the union holds the
+ * episodes decay can promote above a more salient but older one. Candidates
+ * outside both lists are not read, so the ranking is approximate when the
+ * resource has more than `limit` episodes of each kind.
+ */
+async function readEpisodeCandidates(params: {
+  readonly store: MemoryStore;
+  readonly key: ScopedKey;
+  readonly limit: number;
+  readonly decays: boolean;
+}): Promise<EpisodicRecord[]> {
+  const { store, key, limit, decays } = params;
+  const [salient, recent] = await Promise.all([
+    store.listResourceEpisodes(key, { order: "salienceDesc", limit }),
+    decays ? store.listResourceEpisodes(key, { order: "occurredDesc", limit }) : [],
+  ]);
+  const seen = new Set(salient.map((e) => e.id));
+  return [...salient, ...recent.filter((e) => !seen.has(e.id))];
 }
 
 /**

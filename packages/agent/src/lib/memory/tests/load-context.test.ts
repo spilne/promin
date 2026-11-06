@@ -148,4 +148,36 @@ describe("loadResolvedContext", () => {
     expect(order(plain.reference)).toBe(true);
     expect(order(decayed.reference)).toBe(false);
   });
+
+  it("finds a recent episode that stored salience alone would cut off", async () => {
+    const store = new InMemoryMemoryStore();
+    const resource = { namespaceId: KEY.namespaceId, resourceId: KEY.resourceId };
+    const DAY = 24 * 60 * 60 * 1000;
+    const now = 1_800_000_000_000;
+    for (const n of [1, 2, 3]) {
+      await store.appendResourceEpisode(resource, {
+        summary: `old-${n}`,
+        salience: 0.9,
+        occurredAt: now - 365 * DAY,
+      });
+    }
+    await store.appendResourceEpisode(resource, {
+      summary: "fresh",
+      salience: 0.3,
+      occurredAt: now - DAY,
+    });
+    // 16 tokens: the loader reads at most 2 episodes per ordering.
+    const budget = { maxMessageTokens: 100, maxEpisodeTokens: 16, now };
+
+    const plain = await loadResolvedContext({ store, key: KEY, budget });
+    const decayed = await loadResolvedContext({
+      store,
+      key: KEY,
+      budget: { ...budget, episodeHalfLifeMs: 30 * DAY },
+    });
+
+    expect(plain.reference).not.toContain("fresh");
+    expect(decayed.reference.indexOf("fresh")).toBeGreaterThan(-1);
+    expect(decayed.reference.indexOf("fresh")).toBeLessThan(decayed.reference.indexOf("old-"));
+  });
 });
