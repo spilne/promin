@@ -226,6 +226,19 @@ export const MEMORY_RECALL_QUALITY: EvalSuiteSeed = {
         expected: ["likes dogs a lot"],
       },
       {
+        id: "stated-beats-guessed",
+        input: {
+          query: "favourite editor",
+          limit: 1,
+          // The guess is stored first, so only confidence can put the stated one ahead.
+          items: [
+            { text: "favourite editor is vim", source: "model", confidence: 0.1 },
+            { text: "favourite editor is emacs", source: "model", confidence: 0.9 },
+          ],
+        },
+        expected: ["favourite editor is emacs"],
+      },
+      {
         id: "stored-text-cannot-close-the-fence",
         input: {
           query: "kafka topic",

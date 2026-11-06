@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { Message } from "../message.ts";
+import { resolveFactConfidence } from "./fact-confidence.ts";
 import { loadResolvedContext } from "./load-context.ts";
 import { decayedSalience } from "./scoring.ts";
 import { isAfterThreadCursor, parseThreadCursor } from "./thread-cursor.ts";
@@ -599,6 +600,7 @@ export class InMemoryMemoryStore implements MemoryStore {
       updatedAt: now,
       retiredAt: null,
       supersededBy: null,
+      confidence: resolveFactConfidence(input),
     };
   }
 

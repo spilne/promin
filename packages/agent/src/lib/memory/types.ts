@@ -96,6 +96,12 @@ export interface Fact {
   readonly retiredAt: number | null;
   /** Id of the fact that replaced this one; null while current. */
   readonly supersededBy: string | null;
+  /**
+   * How sure the writer was, 0..1. Defaults by source (`DEFAULT_FACT_CONFIDENCE`):
+   * recall uses it as the fact's importance, so a shaky note ranks below a
+   * stated one. It never gates a fact on its own.
+   */
+  readonly confidence: number;
 }
 
 /**
@@ -115,6 +121,8 @@ export type FactSource = "operator" | "user" | "model";
 export interface FactInput {
   readonly text: string;
   readonly source: FactSource;
+  /** 0..1, clamped. Defaults by `source`; see `Fact.confidence`. */
+  readonly confidence?: number;
   /**
    * Id of a current fact in the same scope that this one replaces. The store
    * retires it (`retiredAt`, `supersededBy`) in the same write as the

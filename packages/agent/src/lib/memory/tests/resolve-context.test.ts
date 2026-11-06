@@ -83,6 +83,7 @@ function fact(params: { id: string; text: string; dayOffset?: number; source?: F
     updatedAt: ts,
     retiredAt: null,
     supersededBy: null,
+    confidence: 1,
   };
 }
 

@@ -71,13 +71,6 @@ export interface LayeredMemoryToolConfig {
 /** Default `LayeredMemoryToolConfig.recencyHalfLifeMs`. */
 export const DEFAULT_RECALL_RECENCY_HALF_LIFE_MS = 90 * 24 * 60 * 60 * 1000;
 
-/** Importance prior of a fact by provenance: people's words outrank the model's own notes. */
-const FACT_SOURCE_IMPORTANCE: Record<Fact["source"], number> = {
-  operator: 1,
-  user: 1,
-  model: 0.6,
-};
-
 const ModelScope = z.enum(["thread", "resource"]);
 const RecallScope = z.enum(["thread", "resource", "namespace"]);
 const RecallSource = z.enum(["fact", "episode", "message"]);
@@ -149,6 +142,15 @@ export const LayeredMemoryToolInputSchema = z.discriminatedUnion("command", [
       .describe(
         "Id (from a `recall` result) of a fact you saved earlier that this one replaces because " +
           "it changed or was wrong. Only facts the model saved can be replaced.",
+      ),
+    confidence: z
+      .number()
+      .min(0)
+      .max(1)
+      .optional()
+      .describe(
+        "How sure you are, 0 to 1: lower for a guess or inference, higher for something the " +
+          "user said outright. Shakier facts rank lower in `recall`.",
       ),
   }),
   z.object({
@@ -228,6 +230,7 @@ export function createLayeredMemoryTool(
             const f = await config.store.appendResourceFact(resourceKey, {
               text: input.text,
               source: "model",
+              ...(input.confidence !== undefined && { confidence: input.confidence }),
               ...(replaced.id && { supersedes: replaced.id }),
             });
             return `Saved to resource memory (id: ${shortId(f.id)}).${replaced.note}`;
@@ -240,6 +243,7 @@ export function createLayeredMemoryTool(
           const f = await config.store.appendThreadFact(threadKey, {
             text: input.text,
             source: "model",
+            ...(input.confidence !== undefined && { confidence: input.confidence }),
             ...(replaced.id && { supersedes: replaced.id }),
           });
           return `Saved to thread memory (id: ${shortId(f.id)}).${replaced.note}`;
@@ -370,7 +374,7 @@ async function recallSearch(input: RecallSearchInput): Promise<MemoryHit[]> {
         id: f.id,
         text: f.text,
         createdAt: f.updatedAt,
-        importance: FACT_SOURCE_IMPORTANCE[f.source],
+        importance: f.confidence,
       });
     }
     for (const e of episodes) {

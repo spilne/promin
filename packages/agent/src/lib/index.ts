@@ -173,6 +173,11 @@ export {
 export type { ThreadCursorPosition } from "./memory/thread-cursor.ts";
 export type { InMemoryMemoryStoreConfig } from "./memory/in-memory-memory-store.ts";
 
+export {
+  DEFAULT_FACT_CONFIDENCE,
+  MAX_MODEL_FACT_CONFIDENCE,
+  resolveFactConfidence,
+} from "./memory/fact-confidence.ts";
 export { capStaticRules, resolveContext } from "./memory/resolve-context.ts";
 export { loadResolvedContext, readMessageTail } from "./memory/load-context.ts";
 export {

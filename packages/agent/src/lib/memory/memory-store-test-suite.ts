@@ -170,6 +170,41 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
       });
     });
 
+    describe("fact confidence", () => {
+      it("defaults by source, clamps, caps the model, and survives a re-read in every scope", async () => {
+        const s = await make();
+        const resourceKey = { namespaceId: NS, resourceId: ALICE };
+        const threadKey = { namespaceId: NS, resourceId: ALICE, threadId: "t-conf" };
+        const appenders = [
+          {
+            append: (input: FactInput) => s.appendNamespaceFact(NS, input),
+            list: () => s.listNamespaceFacts(NS),
+          },
+          {
+            append: (input: FactInput) => s.appendResourceFact(resourceKey, input),
+            list: () => s.listResourceFacts(resourceKey),
+          },
+          {
+            append: (input: FactInput) => s.appendThreadFact(threadKey, input),
+            list: () => s.listThreadFacts(threadKey),
+          },
+        ];
+        for (const scope of appenders) {
+          await scope.append({ text: "from the model", source: "model" });
+          await scope.append({ text: "from the user", source: "user" });
+          await scope.append({ text: "shaky guess", source: "model", confidence: 0.25 });
+          await scope.append({ text: "model overclaims", source: "model", confidence: 1 });
+          await scope.append({ text: "operator below zero", source: "operator", confidence: -3 });
+          const byText = new Map((await scope.list()).map((f) => [f.text, f.confidence]));
+          expect(byText.get("from the model")).toBe(0.6);
+          expect(byText.get("from the user")).toBe(1);
+          expect(byText.get("shaky guess")).toBe(0.25);
+          expect(byText.get("model overclaims")).toBe(0.9);
+          expect(byText.get("operator below zero")).toBe(0);
+        }
+      });
+    });
+
     describe("fact supersession", () => {
       const aliceKey = { namespaceId: NS, resourceId: ALICE };
 

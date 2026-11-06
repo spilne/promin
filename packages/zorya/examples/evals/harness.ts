@@ -134,6 +134,8 @@ export function memoryFactsTarget(params: { readonly harness: EvalHarness }): Ev
 interface RecallSeed {
   readonly text: string;
   readonly source?: "operator" | "user" | "model";
+  /** Facts: 0..1 confidence; defaults by source. */
+  readonly confidence?: number;
   /** Set for an episode: its salience. Facts leave it out. */
   readonly salience?: number;
   /** Episodes: how long ago it happened. */
@@ -170,6 +172,7 @@ export function memoryRecallTarget(): EvalTarget {
           await store.appendResourceFact(resource, {
             text: item.text,
             source: item.source ?? "model",
+            ...(item.confidence !== undefined && { confidence: item.confidence }),
           });
         } else {
           await store.appendResourceEpisode(resource, {

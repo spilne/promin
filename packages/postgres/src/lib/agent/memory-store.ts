@@ -26,6 +26,7 @@ import {
   loadResolvedContext,
   MIN_SALIENCE_RETENTION,
   parseThreadCursor,
+  resolveFactConfidence,
 } from "@promin/agent";
 import type {
   AppendMessagesOptions,
@@ -172,6 +173,7 @@ export class PostgresMemoryStore implements MemoryStore {
         source: f.source,
         createdAt: f.createdAt,
         updatedAt: f.updatedAt,
+        confidence: f.confidence,
       });
     });
     return f;
@@ -330,6 +332,7 @@ export class PostgresMemoryStore implements MemoryStore {
         source: f.source,
         createdAt: f.createdAt,
         updatedAt: f.updatedAt,
+        confidence: f.confidence,
       });
     });
     return f;
@@ -583,6 +586,7 @@ export class PostgresMemoryStore implements MemoryStore {
         source: f.source,
         createdAt: f.createdAt,
         updatedAt: f.updatedAt,
+        confidence: f.confidence,
       });
     });
     return f;
@@ -962,6 +966,7 @@ export class PostgresMemoryStore implements MemoryStore {
       updatedAt: now,
       retiredAt: null,
       supersededBy: null,
+      confidence: resolveFactConfidence(input),
     };
   }
 
@@ -1053,6 +1058,7 @@ interface DbFactRow {
   updatedAt: number;
   retiredAt: number | null;
   supersededBy: string | null;
+  confidence: number;
 }
 
 interface DbEpisodeRow {
@@ -1123,6 +1129,7 @@ function toFact(r: DbFactRow): Fact {
     updatedAt: r.updatedAt,
     retiredAt: r.retiredAt,
     supersededBy: r.supersededBy,
+    confidence: r.confidence,
   };
 }
 

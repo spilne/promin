@@ -992,6 +992,8 @@ export const agentFact = pgTable(
     retiredAt: bigint("retired_at", { mode: "number" }),
     /** Id of the fact that replaced this one; null while current. */
     supersededBy: text("superseded_by"),
+    /** 0..1: how sure the writer was; recall's importance for the fact. */
+    confidence: doublePrecision("confidence").notNull().default(1),
     /** Insertion order; breaks ties between facts with the same `createdAt`. */
     seq: bigserial("seq", { mode: "number" }).notNull(),
   },

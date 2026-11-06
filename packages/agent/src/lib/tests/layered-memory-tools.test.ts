@@ -205,6 +205,21 @@ describe("layered memory tool — recall (semantic)", () => {
   });
 });
 
+describe("layered memory tool — set with confidence", () => {
+  it("stores the stated confidence (capped for the model) and recall ranks the surer fact first", async () => {
+    const { store, run } = makeTool({ withResource: true });
+    // The shaky fact is saved first, so a tie would put it ahead.
+    await run({ command: "set", scope: "resource", text: "likes coffee black", confidence: 0.1 });
+    await run({ command: "set", scope: "resource", text: "likes coffee decaf", confidence: 1 });
+    const stored = await store.listResourceFacts({ namespaceId: NS, resourceId: ALICE });
+    expect(stored.map((f) => f.confidence)).toEqual([0.1, 0.9]);
+
+    const out = await run({ command: "recall", query: "coffee", limit: 5 });
+    expect(out.indexOf("decaf")).toBeGreaterThan(-1);
+    expect(out.indexOf("decaf")).toBeLessThan(out.indexOf("black"));
+  });
+});
+
 describe("layered memory tool — recall (keyword search)", () => {
   it("returns 'No memories matched' when nothing matches", async () => {
     const { run } = makeTool({ withResource: true });

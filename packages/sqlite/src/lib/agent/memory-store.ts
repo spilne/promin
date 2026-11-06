@@ -29,6 +29,7 @@ import {
   loadResolvedContext,
   MIN_SALIENCE_RETENTION,
   parseThreadCursor,
+  resolveFactConfidence,
 } from "@promin/agent";
 import type {
   AppendMessagesOptions,
@@ -167,7 +168,8 @@ export class SqliteMemoryStore implements MemoryStore {
         created_at   INTEGER NOT NULL,
         updated_at   INTEGER NOT NULL,
         retired_at   INTEGER,
-        superseded_by TEXT
+        superseded_by TEXT,
+        confidence   REAL NOT NULL DEFAULT 1
       )
     `);
     this.db.run(
@@ -292,10 +294,19 @@ export class SqliteMemoryStore implements MemoryStore {
       insert: (db) =>
         db
           .query(
-            `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at)
-             VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
+            `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at, confidence)
+             VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)`,
           )
-          .run(f.id, SCOPE_NS, namespaceId, f.text, f.source, f.createdAt, f.updatedAt),
+          .run(
+            f.id,
+            SCOPE_NS,
+            namespaceId,
+            f.text,
+            f.source,
+            f.createdAt,
+            f.updatedAt,
+            f.confidence,
+          ),
     });
     return f;
   }
@@ -303,7 +314,7 @@ export class SqliteMemoryStore implements MemoryStore {
   async listNamespaceFacts(namespaceId: string, params?: FactListParams): Promise<Fact[]> {
     const rows = this.db
       .query<DbFactRow>(
-        `SELECT id, text, source, created_at, updated_at, retired_at, superseded_by FROM ${this.prefix}_fact
+        `SELECT id, text, source, created_at, updated_at, retired_at, superseded_by, confidence FROM ${this.prefix}_fact
          WHERE scope = ? AND namespace_id = ?${retiredFilter(params)}
          ORDER BY retired_at IS NOT NULL, created_at ASC, rowid ASC`,
       )
@@ -421,8 +432,8 @@ export class SqliteMemoryStore implements MemoryStore {
       insert: (db) =>
         db
           .query(
-            `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at)
-             VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
+            `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at, confidence)
+             VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
           )
           .run(
             f.id,
@@ -433,6 +444,7 @@ export class SqliteMemoryStore implements MemoryStore {
             f.source,
             f.createdAt,
             f.updatedAt,
+            f.confidence,
           ),
     });
     return f;
@@ -441,7 +453,7 @@ export class SqliteMemoryStore implements MemoryStore {
   async listResourceFacts(key: ScopedKey, params?: FactListParams): Promise<Fact[]> {
     const rows = this.db
       .query<DbFactRow>(
-        `SELECT id, text, source, created_at, updated_at, retired_at, superseded_by FROM ${this.prefix}_fact
+        `SELECT id, text, source, created_at, updated_at, retired_at, superseded_by, confidence FROM ${this.prefix}_fact
          WHERE scope = ? AND namespace_id = ? AND resource_id = ?${retiredFilter(params)}
          ORDER BY retired_at IS NOT NULL, created_at ASC, rowid ASC`,
       )
@@ -666,8 +678,8 @@ export class SqliteMemoryStore implements MemoryStore {
       insert: (db) =>
         db
           .query(
-            `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at)
-             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+            `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at, confidence)
+             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             f.id,
@@ -678,6 +690,7 @@ export class SqliteMemoryStore implements MemoryStore {
             f.source,
             f.createdAt,
             f.updatedAt,
+            f.confidence,
           ),
     });
     return f;
@@ -686,7 +699,7 @@ export class SqliteMemoryStore implements MemoryStore {
   async listThreadFacts(key: ThreadKey, params?: FactListParams): Promise<Fact[]> {
     const rows = this.db
       .query<DbFactRow>(
-        `SELECT id, text, source, created_at, updated_at, retired_at, superseded_by FROM ${this.prefix}_fact
+        `SELECT id, text, source, created_at, updated_at, retired_at, superseded_by, confidence FROM ${this.prefix}_fact
          WHERE scope = ? AND namespace_id = ? AND thread_id = ?${retiredFilter(params)}
          ORDER BY retired_at IS NOT NULL, created_at ASC, rowid ASC`,
       )
@@ -941,6 +954,7 @@ export class SqliteMemoryStore implements MemoryStore {
       updatedAt: now,
       retiredAt: null,
       supersededBy: null,
+      confidence: resolveFactConfidence(input),
     };
   }
 
@@ -1124,6 +1138,7 @@ interface DbFactRow {
   updated_at: number;
   retired_at: number | null;
   superseded_by: string | null;
+  confidence: number;
 }
 
 interface DbEpisodeRow {
@@ -1200,6 +1215,7 @@ function toFact(r: DbFactRow): Fact {
     updatedAt: r.updated_at,
     retiredAt: r.retired_at,
     supersededBy: r.superseded_by,
+    confidence: r.confidence,
   };
 }
 
