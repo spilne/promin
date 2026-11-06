@@ -4,6 +4,7 @@
 // stores. `evalTargets` builds the eval targets the suites run against.
 
 import {
+  createLayeredMemoryTool,
   InMemoryAgentRegistry,
   InMemoryMemoryStore,
   InMemoryRetriever,
@@ -125,6 +126,73 @@ export function memoryFactsTarget(params: { readonly harness: EvalHarness }): Ev
       await agent.distillThread(threadId, { force: true });
       const facts = await harness.memory.listResourceFacts({ namespaceId: NAMESPACE, resourceId });
       return facts.map((fact) => fact.text);
+    },
+  });
+}
+
+/** One remembered item a recall case seeds. */
+interface RecallSeed {
+  readonly text: string;
+  readonly source?: "operator" | "user" | "model";
+  /** Set for an episode: its salience. Facts leave it out. */
+  readonly salience?: number;
+  /** Episodes: how long ago it happened. */
+  readonly ageDays?: number;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The recall suite's target: each case seeds a fresh user's facts and
+ * episodes, runs the `memory` tool's `recall` for `query` (at most `limit`
+ * hits), and outputs the texts it returned. `FENCE-BROKEN` is appended when
+ * the result is not exactly one reference-data block, i.e. stored text
+ * escaped the fence.
+ */
+export function memoryRecallTarget(): EvalTarget {
+  let conversation = 0;
+  return fnTarget({
+    id: "memory-recall",
+    fn: async (input) => {
+      const { items, query, limit } = input as {
+        items?: ReadonlyArray<RecallSeed>;
+        query?: string;
+        limit?: number;
+      };
+      if (!Array.isArray(items) || typeof query !== "string") {
+        throw new Error('a recall case input needs "items": RecallSeed[] and "query": string');
+      }
+      conversation += 1;
+      const store = new InMemoryMemoryStore();
+      const resource = { namespaceId: NAMESPACE, resourceId: `user-${conversation}` };
+      for (const item of items) {
+        if (item.salience === undefined) {
+          await store.appendResourceFact(resource, {
+            text: item.text,
+            source: item.source ?? "model",
+          });
+        } else {
+          await store.appendResourceEpisode(resource, {
+            summary: item.text,
+            salience: item.salience,
+            occurredAt: Date.now() - (item.ageDays ?? 0) * DAY_MS,
+          });
+        }
+      }
+      const memory = createLayeredMemoryTool({
+        store,
+        ...resource,
+        threadId: `thread-${conversation}`,
+      });
+      const out = (await memory.execute(
+        memory.parameters.parse({ command: "recall", query, limit: limit ?? 5 }),
+      )) as string;
+      const hits = out
+        .split("\n")
+        .map((line) => /^\d+\. \[[^\]]*\] \([\d.]+\) (.*)$/.exec(line)?.[1])
+        .filter((text): text is string => text !== undefined);
+      const closings = out.split("</reference-data>").length - 1;
+      return hits.length > 0 && closings !== 1 ? [...hits, "FENCE-BROKEN"] : hits;
     },
   });
 }

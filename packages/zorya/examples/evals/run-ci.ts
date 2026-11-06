@@ -17,10 +17,16 @@ import {
   type EvalTarget,
 } from "@promin/evals";
 import { EVAL_SUITE_KIND } from "@promin/evals";
-import { agentEvalTarget, createEvalHarness, memoryFactsTarget } from "./harness.ts";
+import {
+  agentEvalTarget,
+  createEvalHarness,
+  memoryFactsTarget,
+  memoryRecallTarget,
+} from "./harness.ts";
 import {
   KNOWLEDGE_BOT_RETRIEVAL,
   MEMORY_FACT_PRECISION,
+  MEMORY_RECALL_QUALITY,
   WEATHER_BOT_TRAJECTORY,
 } from "./suites.ts";
 import type { EvalSuiteSeed } from "../../src/index.ts";
@@ -38,6 +44,7 @@ const suites: ReadonlyArray<{ readonly seed: EvalSuiteSeed; readonly target: Eva
   },
   { seed: WEATHER_BOT_TRAJECTORY, target: agentEvalTarget({ harness, agentId: "weather-bot" }) },
   { seed: MEMORY_FACT_PRECISION, target: memoryFactsTarget({ harness }) },
+  { seed: MEMORY_RECALL_QUALITY, target: memoryRecallTarget() },
 ];
 
 const only = argValue("--suite");
