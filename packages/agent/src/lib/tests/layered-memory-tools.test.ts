@@ -220,6 +220,52 @@ describe("layered memory tool — set with confidence", () => {
   });
 });
 
+describe("layered memory tool — link and graph recall", () => {
+  it("recall follows links two hops from an entity the query names", async () => {
+    const { run } = makeTool({ withResource: true });
+    expect(
+      await run({ command: "link", subject: "Anton", predicate: "works at", object: "Acme" }),
+    ).toContain("Linked");
+    await run({ command: "link", subject: "Acme", predicate: "is based in", object: "Berlin" });
+    await run({ command: "link", subject: "Maria", predicate: "lives in", object: "Lisbon" });
+    expect(
+      await run({ command: "link", subject: "anton", predicate: "WORKS at", object: "acme" }),
+    ).toContain("Already linked");
+
+    const out = await run({
+      command: "recall",
+      query: "what city is Anton's employer in",
+      limit: 5,
+    });
+    expect(out).toContain("Anton —works at→ Acme");
+    expect(out).toContain("Acme —is based in→ Berlin");
+    expect(out).not.toContain("Lisbon");
+    expect(out).toContain("<reference-data");
+  });
+
+  it("unlink removes only relations the model wrote, and link needs a resource", async () => {
+    const { store, run } = makeTool({ withResource: true });
+    const key = { namespaceId: NS, resourceId: ALICE };
+    const stated = await store.appendResourceRelation(key, {
+      subject: "Anton",
+      predicate: "married to",
+      object: "Maria",
+      source: "user",
+    });
+    await run({ command: "link", subject: "Anton", predicate: "owns", object: "a dog" });
+    const mine = (await store.listResourceRelations(key)).find((r) => r.source === "model")!;
+
+    expect(await run({ command: "unlink", id: stated.id })).toContain("Nothing removed");
+    expect(await run({ command: "unlink", id: mine.id })).toContain("Removed");
+    expect((await store.listResourceRelations(key)).map((r) => r.id)).toEqual([stated.id]);
+
+    const noResource = makeTool({ withResource: false });
+    expect(
+      await noResource.run({ command: "link", subject: "a", predicate: "b", object: "c" }),
+    ).toContain("no resourceId");
+  });
+});
+
 describe("layered memory tool — recall (keyword search)", () => {
   it("returns 'No memories matched' when nothing matches", async () => {
     const { run } = makeTool({ withResource: true });
@@ -314,9 +360,26 @@ describe("layered memory tool — name + shape", () => {
     };
     expect(schema.type).toBe("object");
     expect(schema.required).toEqual(["command"]);
-    expect(schema.properties["command"]!.enum).toEqual(["set", "setWorking", "recall"]);
+    expect(schema.properties["command"]!.enum).toEqual([
+      "set",
+      "link",
+      "unlink",
+      "setWorking",
+      "recall",
+    ]);
     expect(Object.keys(schema.properties)).toEqual(
-      expect.arrayContaining(["scope", "text", "markdown", "query", "scopes", "sources", "limit"]),
+      expect.arrayContaining([
+        "scope",
+        "text",
+        "markdown",
+        "query",
+        "scopes",
+        "sources",
+        "limit",
+        "subject",
+        "predicate",
+        "object",
+      ]),
     );
   });
 

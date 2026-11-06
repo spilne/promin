@@ -15,6 +15,7 @@ import { isDeepStrictEqual } from "node:util";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { Message } from "../message.ts";
 import { resolveFactConfidence } from "./fact-confidence.ts";
+import { relationKey } from "./relations.ts";
 import { loadResolvedContext } from "./load-context.ts";
 import { decayedSalience } from "./scoring.ts";
 import { isAfterThreadCursor, parseThreadCursor } from "./thread-cursor.ts";
@@ -34,6 +35,8 @@ import {
   type MessageRange,
   type NamespacePatch,
   type NamespaceRow,
+  type Relation,
+  type RelationInput,
   type ResolvedContext,
   type ResourcePatch,
   type ResourceRow,
@@ -58,6 +61,7 @@ export class InMemoryMemoryStore implements MemoryStore {
   private readonly threads = new Map<string, ThreadRow>();
   private readonly namespaceFacts = new Map<string, Fact[]>();
   private readonly resourceFacts = new Map<string, Fact[]>();
+  private readonly resourceRelations = new Map<string, Relation[]>();
   private readonly threadFacts = new Map<string, Fact[]>();
   private readonly messages = new Map<string, StoredMessage[]>();
   private readonly seqByThread = new Map<string, number>();
@@ -219,6 +223,43 @@ export class InMemoryMemoryStore implements MemoryStore {
     list.push(f);
     this.resourceFacts.set(this.resourceK(key), list);
     return f;
+  }
+
+  async appendResourceRelation(key: ScopedKey, input: RelationInput): Promise<Relation> {
+    if (!this.resources.has(this.resourceK(key))) {
+      await this.upsertResource(key, {});
+    }
+    const k = this.resourceK(key);
+    const list = this.resourceRelations.get(k) ?? [];
+    const identity = relationKey(input);
+    const existing = list.find((r) => relationKey(r) === identity);
+    if (existing) return existing;
+    const relation: Relation = {
+      id: randomUUID(),
+      subject: input.subject.trim(),
+      predicate: input.predicate.trim(),
+      object: input.object.trim(),
+      source: input.source,
+      confidence: resolveFactConfidence(input),
+      createdAt: this.now(),
+    };
+    list.push(relation);
+    this.resourceRelations.set(k, list);
+    return relation;
+  }
+
+  async listResourceRelations(key: ScopedKey): Promise<Relation[]> {
+    return [...(this.resourceRelations.get(this.resourceK(key)) ?? [])];
+  }
+
+  async deleteResourceRelation(key: ScopedKey, relationId: string): Promise<void> {
+    const k = this.resourceK(key);
+    const list = this.resourceRelations.get(k);
+    if (!list) return;
+    this.resourceRelations.set(
+      k,
+      list.filter((r) => r.id !== relationId),
+    );
   }
 
   async listResourceFacts(key: ScopedKey, params?: FactListParams): Promise<Fact[]> {

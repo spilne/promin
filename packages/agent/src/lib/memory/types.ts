@@ -139,6 +139,34 @@ export interface FactListParams {
   readonly includeRetired?: boolean;
 }
 
+/**
+ * One edge of a resource's entity graph: `subject` —`predicate`→ `object`
+ * ("Anton" "works at" "Acme"). Entities are the names that appear as subject
+ * or object; they match case-insensitively (see `normalizeEntityName`). The
+ * same triple is stored once.
+ */
+export interface Relation {
+  readonly id: string;
+  readonly subject: string;
+  readonly predicate: string;
+  readonly object: string;
+  /** Who wrote it. See `FactSource`; the model may only delete its own. */
+  readonly source: FactSource;
+  /** 0..1, defaults by source like `Fact.confidence`. */
+  readonly confidence: number;
+  readonly createdAt: number;
+}
+
+/** Caller-facing input to `appendResourceRelation`. The store assigns `id` + `createdAt`. */
+export interface RelationInput {
+  readonly subject: string;
+  readonly predicate: string;
+  readonly object: string;
+  readonly source: FactSource;
+  /** 0..1, clamped. Defaults by `source`. */
+  readonly confidence?: number;
+}
+
 /** Longest fact the agent's `memory` tool and the consolidator write, in characters. */
 export const MAX_FACT_CHARS = 500;
 
@@ -514,6 +542,15 @@ export interface MemoryStore {
   appendResourceFact(key: ScopedKey, fact: FactInput): Promise<Fact>;
   listResourceFacts(key: ScopedKey, params?: FactListParams): Promise<Fact[]>;
   deleteResourceFact(key: ScopedKey, factId: string): Promise<void>;
+  /**
+   * Add an edge to the resource's entity graph. A triple that already exists
+   * (names compared by `normalizeEntityName`) is not stored twice: the
+   * existing relation is returned unchanged.
+   */
+  appendResourceRelation(key: ScopedKey, input: RelationInput): Promise<Relation>;
+  /** Every relation of the resource, oldest first. */
+  listResourceRelations(key: ScopedKey): Promise<Relation[]>;
+  deleteResourceRelation(key: ScopedKey, relationId: string): Promise<void>;
   appendResourceEpisode(key: ScopedKey, input: EpisodeInput): Promise<EpisodicRecord>;
   listResourceEpisodes(key: ScopedKey, params?: EpisodeListParams): Promise<EpisodicRecord[]>;
   deleteResourceEpisode(key: ScopedKey, episodeId: string): Promise<void>;

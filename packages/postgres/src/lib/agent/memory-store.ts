@@ -26,6 +26,7 @@ import {
   loadResolvedContext,
   MIN_SALIENCE_RETENTION,
   parseThreadCursor,
+  relationKey,
   resolveFactConfidence,
 } from "@promin/agent";
 import type {
@@ -34,6 +35,8 @@ import type {
   ConsolidationReservationRequest,
   EpisodeInput,
   EpisodeListParams,
+  Relation,
+  RelationInput,
   EpisodicRecord,
   Fact,
   FactInput,
@@ -61,6 +64,7 @@ import {
   agentConsolidationReservation,
   agentEpisode,
   agentFact,
+  agentRelation,
   agentMessage,
   agentNamespace,
   agentResource,
@@ -352,6 +356,65 @@ export class PostgresMemoryStore implements MemoryStore {
       )
       .orderBy(...factOrder());
     return rows.map(toFact);
+  }
+
+  async appendResourceRelation(key: ScopedKey, input: RelationInput): Promise<Relation> {
+    if (!(await this.getResource(key))) {
+      await this.upsertResource(key, {});
+    }
+    const identity = relationKey(input);
+    await this.db
+      .insert(agentRelation)
+      .values({
+        id: randomUUID(),
+        namespaceId: key.namespaceId,
+        resourceId: key.resourceId,
+        subject: input.subject.trim(),
+        predicate: input.predicate.trim(),
+        object: input.object.trim(),
+        relationKey: identity,
+        source: input.source,
+        confidence: resolveFactConfidence(input),
+        createdAt: this.clock(),
+      })
+      .onConflictDoNothing();
+    const [row] = await this.db
+      .select()
+      .from(agentRelation)
+      .where(
+        and(
+          eq(agentRelation.namespaceId, key.namespaceId),
+          eq(agentRelation.resourceId, key.resourceId),
+          eq(agentRelation.relationKey, identity),
+        ),
+      );
+    return toRelation(row!);
+  }
+
+  async listResourceRelations(key: ScopedKey): Promise<Relation[]> {
+    const rows = await this.db
+      .select()
+      .from(agentRelation)
+      .where(
+        and(
+          eq(agentRelation.namespaceId, key.namespaceId),
+          eq(agentRelation.resourceId, key.resourceId),
+        ),
+      )
+      .orderBy(asc(agentRelation.createdAt), asc(agentRelation.seq));
+    return rows.map(toRelation);
+  }
+
+  async deleteResourceRelation(key: ScopedKey, relationId: string): Promise<void> {
+    await this.db
+      .delete(agentRelation)
+      .where(
+        and(
+          eq(agentRelation.namespaceId, key.namespaceId),
+          eq(agentRelation.resourceId, key.resourceId),
+          eq(agentRelation.id, relationId),
+        ),
+      );
   }
 
   async deleteResourceFact(key: ScopedKey, factId: string): Promise<void> {
@@ -1059,6 +1122,28 @@ interface DbFactRow {
   retiredAt: number | null;
   supersededBy: string | null;
   confidence: number;
+}
+
+interface DbRelationRow {
+  id: string;
+  subject: string;
+  predicate: string;
+  object: string;
+  source: string;
+  confidence: number;
+  createdAt: number;
+}
+
+function toRelation(r: DbRelationRow): Relation {
+  return {
+    id: r.id,
+    subject: r.subject,
+    predicate: r.predicate,
+    object: r.object,
+    source: r.source as FactSource,
+    confidence: r.confidence,
+    createdAt: r.createdAt,
+  };
 }
 
 interface DbEpisodeRow {

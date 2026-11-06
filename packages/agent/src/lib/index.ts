@@ -99,6 +99,8 @@ export type {
   EpisodicRecord,
   EpisodeInput,
   EpisodeListParams,
+  Relation,
+  RelationInput,
   StoredMessage,
   ScopedKey,
   ThreadKey,
@@ -178,6 +180,14 @@ export {
   MAX_MODEL_FACT_CONFIDENCE,
   resolveFactConfidence,
 } from "./memory/fact-confidence.ts";
+export {
+  MAX_ENTITY_CHARS,
+  MAX_PREDICATE_CHARS,
+  MAX_RELATIONS_PER_RESOURCE,
+  normalizeEntityName,
+  relationKey,
+  relationNeighborhood,
+} from "./memory/relations.ts";
 export { capStaticRules, resolveContext } from "./memory/resolve-context.ts";
 export { loadResolvedContext, readMessageTail } from "./memory/load-context.ts";
 export {

@@ -170,6 +170,66 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
       });
     });
 
+    describe("entity relations", () => {
+      const key = { namespaceId: NS, resourceId: ALICE };
+
+      it("stores a triple once, matching names case-insensitively, and keeps resources apart", async () => {
+        const s = await make();
+        const first = await s.appendResourceRelation(key, {
+          subject: "Anton",
+          predicate: "works at",
+          object: "Acme",
+          source: "user",
+        });
+        const again = await s.appendResourceRelation(key, {
+          subject: "  anton ",
+          predicate: "Works  AT",
+          object: "ACME",
+          source: "model",
+        });
+        expect(again.id).toBe(first.id);
+        expect(again.source).toBe("user");
+        await s.appendResourceRelation(key, {
+          subject: "Acme",
+          predicate: "is based in",
+          object: "Berlin",
+          source: "model",
+          confidence: 1,
+        });
+        await s.appendResourceRelation(
+          { namespaceId: NS, resourceId: "bob" },
+          { subject: "Bob", predicate: "knows", object: "Anton", source: "model" },
+        );
+        const list = await s.listResourceRelations(key);
+        expect(list.map((r) => `${r.subject}|${r.predicate}|${r.object}`)).toEqual([
+          "Anton|works at|Acme",
+          "Acme|is based in|Berlin",
+        ]);
+        expect(list.map((r) => r.confidence)).toEqual([1, 0.9]);
+      });
+
+      it("deletes one relation by id inside its resource only", async () => {
+        const s = await make();
+        const bob = { namespaceId: NS, resourceId: "bob" };
+        const mine = await s.appendResourceRelation(key, {
+          subject: "A",
+          predicate: "knows",
+          object: "B",
+          source: "model",
+        });
+        await s.appendResourceRelation(key, {
+          subject: "B",
+          predicate: "knows",
+          object: "C",
+          source: "model",
+        });
+        await s.deleteResourceRelation(bob, mine.id);
+        expect(await s.listResourceRelations(key)).toHaveLength(2);
+        await s.deleteResourceRelation(key, mine.id);
+        expect((await s.listResourceRelations(key)).map((r) => r.subject)).toEqual(["B"]);
+      });
+    });
+
     describe("fact confidence", () => {
       it("defaults by source, clamps, caps the model, and survives a re-read in every scope", async () => {
         const s = await make();

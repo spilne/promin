@@ -975,6 +975,28 @@ export const agentThread = pgTable(
   ],
 );
 
+/** One edge of a resource's entity graph: subject -predicate-> object. */
+export const agentRelation = pgTable(
+  "agent_relation",
+  {
+    id: text("id").primaryKey(),
+    namespaceId: text("namespace_id").notNull(),
+    resourceId: text("resource_id").notNull(),
+    subject: text("subject").notNull(),
+    predicate: text("predicate").notNull(),
+    object: text("object").notNull(),
+    /** Normalized triple (`relationKey`); one relation per triple and resource. */
+    relationKey: text("relation_key").notNull(),
+    /** Provenance: 'operator' | 'user' | 'model'. */
+    source: text("source").notNull(),
+    confidence: doublePrecision("confidence").notNull().default(1),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    /** Insertion order; breaks ties between relations with the same `createdAt`. */
+    seq: bigserial("seq", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("agent_relation_key_idx").on(t.namespaceId, t.resourceId, t.relationKey)],
+);
+
 export const agentFact = pgTable(
   "agent_fact",
   {

@@ -239,6 +239,19 @@ export const MEMORY_RECALL_QUALITY: EvalSuiteSeed = {
         expected: ["favourite editor is emacs"],
       },
       {
+        id: "graph-follows-links-two-hops",
+        input: {
+          query: "what city is Anton's employer in",
+          items: [],
+          relations: [
+            { subject: "Anton", predicate: "works at", object: "Acme" },
+            { subject: "Acme", predicate: "is based in", object: "Berlin" },
+            { subject: "Maria", predicate: "lives in", object: "Lisbon" },
+          ],
+        },
+        expected: ["Anton —works at→ Acme", "Acme —is based in→ Berlin"],
+      },
+      {
         id: "stored-text-cannot-close-the-fence",
         input: {
           query: "kafka topic",

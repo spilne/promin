@@ -64,6 +64,21 @@ CREATE TABLE agent_fact (
   CONSTRAINT agent_fact_pkey PRIMARY KEY (id)
 );
 
+CREATE TABLE agent_relation (
+  id text NOT NULL,
+  namespace_id text NOT NULL,
+  resource_id text NOT NULL,
+  subject text NOT NULL,
+  predicate text NOT NULL,
+  object text NOT NULL,
+  relation_key text NOT NULL,
+  source text NOT NULL,
+  confidence double precision DEFAULT 1 NOT NULL,
+  created_at bigint NOT NULL,
+  seq bigserial NOT NULL,
+  CONSTRAINT agent_relation_pkey PRIMARY KEY (id)
+);
+
 CREATE TABLE agent_instance (
   id text NOT NULL,
   registered_agent_id text NOT NULL,
@@ -695,6 +710,8 @@ CREATE INDEX agent_fact_ns_idx ON agent_fact (scope, namespace_id, created_at);
 CREATE INDEX agent_fact_res_idx ON agent_fact (scope, namespace_id, resource_id, created_at);
 
 CREATE INDEX agent_fact_thr_idx ON agent_fact (scope, namespace_id, thread_id, created_at);
+
+CREATE UNIQUE INDEX agent_relation_key_idx ON agent_relation (namespace_id, resource_id, relation_key);
 
 CREATE INDEX agent_instance_agent_idx ON agent_instance (registered_agent_id);
 

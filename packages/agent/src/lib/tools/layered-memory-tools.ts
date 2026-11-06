@@ -28,11 +28,19 @@ import {
   type EpisodicRecord,
   type Fact,
   type MemoryStore,
+  type Relation,
   type ScopedKey,
   type ThreadKey,
 } from "../memory/types.ts";
 import type { EmbeddingProvider } from "../embedding-provider.ts";
 import { rankCandidates } from "../memory/scoring.ts";
+import {
+  MAX_ENTITY_CHARS,
+  MAX_PREDICATE_CHARS,
+  MAX_RELATIONS_PER_RESOURCE,
+  relationKey,
+  relationNeighborhood,
+} from "../memory/relations.ts";
 import { fenceReferenceData, oneLine } from "../reference-data.ts";
 import { THREAD_AGENT_METADATA_KEY } from "../agent/types.ts";
 
@@ -71,6 +79,10 @@ export interface LayeredMemoryToolConfig {
 /** Default `LayeredMemoryToolConfig.recencyHalfLifeMs`. */
 export const DEFAULT_RECALL_RECENCY_HALF_LIFE_MS = 90 * 24 * 60 * 60 * 1000;
 
+/** How far from a named entity `recall` follows relations, and how many it returns. */
+const RECALL_GRAPH_HOPS = 2;
+const RECALL_GRAPH_LIMIT = 12;
+
 const ModelScope = z.enum(["thread", "resource"]);
 const RecallScope = z.enum(["thread", "resource", "namespace"]);
 const RecallSource = z.enum(["fact", "episode", "message"]);
@@ -93,6 +105,17 @@ const SET_DESCRIPTION =
   "DO NOT use this for current state, in-progress reasoning, or anything " +
   "that will change soon — that's what `setWorking` is for. Don't repeat " +
   "facts that are already saved.";
+
+const LINK_DESCRIPTION =
+  "Record how two things relate, for this user across all conversations: " +
+  "subject, predicate, object.\n" +
+  "  - 'Anton' / 'works at' / 'Acme'\n" +
+  "  - 'Acme' / 'is based in' / 'Berlin'\n" +
+  "Use it for people, places, projects and organisations that come up " +
+  "again; `recall` then follows the links, so asking about Anton also " +
+  "surfaces where Acme is. Names match ignoring case. Use `set` for " +
+  "anything that is not a relation between two named things, and `unlink` " +
+  "(with an id from `recall`) to remove one you saved that is wrong.";
 
 const SET_WORKING_DESCRIPTION =
   "Replace the markdown scratchpad with current state. Use this for " +
@@ -154,6 +177,40 @@ export const LayeredMemoryToolInputSchema = z.discriminatedUnion("command", [
       ),
   }),
   z.object({
+    command: z.literal("link"),
+    subject: z
+      .string()
+      .trim()
+      .min(1)
+      .max(MAX_ENTITY_CHARS)
+      .describe("The entity the relation starts from, e.g. 'Anton'."),
+    predicate: z
+      .string()
+      .trim()
+      .min(1)
+      .max(MAX_PREDICATE_CHARS)
+      .describe("How they are related, a short verb phrase, e.g. 'works at'."),
+    object: z
+      .string()
+      .trim()
+      .min(1)
+      .max(MAX_ENTITY_CHARS)
+      .describe("The entity it points to, e.g. 'Acme'."),
+    confidence: z
+      .number()
+      .min(0)
+      .max(1)
+      .optional()
+      .describe("How sure you are, 0 to 1. Defaults to the usual for a model-written note."),
+  }),
+  z.object({
+    command: z.literal("unlink"),
+    id: z
+      .string()
+      .min(1)
+      .describe("Id of a relation you saved earlier, from a `recall` result's Related section."),
+  }),
+  z.object({
     command: z.literal("setWorking"),
     scope: ModelScope.default("thread").describe(
       "thread = this conversation. resource = persists across this user's conversations.",
@@ -208,10 +265,12 @@ export function createLayeredMemoryTool(
       "of information:\n" +
       "  - `set`: a small, lasting fact about the user or this conversation\n" +
       "  - `setWorking`: current state / focus / scratch — overwrites in place\n" +
+      "  - `link`: how two named things relate (person works at company)\n" +
       "  - `recall`: search past facts and session summaries that aren't already " +
       "in your context.\n\n" +
       "Commands:\n" +
       `  set: ${SET_DESCRIPTION}\n` +
+      `  link: ${LINK_DESCRIPTION}\n` +
       `  setWorking: ${SET_WORKING_DESCRIPTION}\n` +
       `  recall: ${RECALL_DESCRIPTION}`,
     parameters: LayeredMemoryToolInputSchema,
@@ -248,6 +307,43 @@ export function createLayeredMemoryTool(
           });
           return `Saved to thread memory (id: ${shortId(f.id)}).${replaced.note}`;
         }
+        case "link": {
+          if (!resourceKey) {
+            return "Cannot write relations: no resourceId is bound to this task.";
+          }
+          const existing = await config.store.listResourceRelations(resourceKey);
+          const identity = relationKey(input);
+          const already = existing.find((r) => relationKey(r) === identity);
+          if (!already && existing.length >= MAX_RELATIONS_PER_RESOURCE) {
+            return `Nothing saved: this user already has ${MAX_RELATIONS_PER_RESOURCE} relations. Use \`unlink\` on stale ones first.`;
+          }
+          const r = await config.store.appendResourceRelation(resourceKey, {
+            subject: input.subject,
+            predicate: input.predicate,
+            object: input.object,
+            source: "model",
+            ...(input.confidence !== undefined && { confidence: input.confidence }),
+          });
+          return already
+            ? `Already linked (id: ${shortId(r.id)}).`
+            : `Linked (id: ${shortId(r.id)}).`;
+        }
+        case "unlink": {
+          if (!resourceKey) {
+            return "Cannot remove relations: no resourceId is bound to this task.";
+          }
+          const target = (await config.store.listResourceRelations(resourceKey)).find(
+            (r) => r.id === input.id,
+          );
+          if (!target) {
+            return `Nothing removed: no relation with id ${input.id}. Use \`recall\` to find the id.`;
+          }
+          if (target.source !== "model") {
+            return "Nothing removed: that relation was written by a person, not by you.";
+          }
+          await config.store.deleteResourceRelation(resourceKey, target.id);
+          return "Removed the relation.";
+        }
         case "setWorking": {
           if (input.scope === "resource") {
             if (!resourceKey) {
@@ -283,7 +379,17 @@ export function createLayeredMemoryTool(
             sources: input.sources ?? [...defaultSources],
             limit: input.limit,
           });
-          return formatHits(hits, input.query);
+          const scopes = input.scopes ?? defaultSearchScopes(resourceKey != null);
+          const related =
+            resourceKey && scopes.includes("resource")
+              ? relationNeighborhood({
+                  relations: await config.store.listResourceRelations(resourceKey),
+                  query: input.query,
+                  hops: RECALL_GRAPH_HOPS,
+                  limit: RECALL_GRAPH_LIMIT,
+                })
+              : [];
+          return formatHits({ hits, related, query: input.query });
         }
       }
     },
@@ -407,20 +513,41 @@ async function recallSearch(input: RecallSearchInput): Promise<MemoryHit[]> {
 }
 
 /** Recalled memories are stored, untrusted text — returned as fenced reference data. */
-function formatHits(hits: ReadonlyArray<MemoryHit>, query: string): string {
-  if (hits.length === 0) return `No memories matched "${oneLine(query)}".`;
-  const body = hits
-    .map((h, i) => {
-      const tag = h.factSource
-        ? `${h.scope}/${h.source}, ${h.factSource}`
-        : `${h.scope}/${h.source}`;
-      return `${i + 1}. [${tag}, id=${h.id}] (${h.score.toFixed(2)}) ${oneLine(h.text)}`;
-    })
-    .join("\n");
-  return fenceReferenceData({
-    source: "memory-recall",
-    sections: [{ title: "Recalled memories", body }],
-  })!;
+function formatHits(params: {
+  readonly hits: ReadonlyArray<MemoryHit>;
+  readonly related: ReadonlyArray<Relation>;
+  readonly query: string;
+}): string {
+  const { hits, related, query } = params;
+  if (hits.length === 0 && related.length === 0) {
+    return `No memories matched "${oneLine(query)}".`;
+  }
+  const sections: Array<{ title: string; body: string }> = [];
+  if (hits.length > 0) {
+    sections.push({
+      title: "Recalled memories",
+      body: hits
+        .map((h, i) => {
+          const tag = h.factSource
+            ? `${h.scope}/${h.source}, ${h.factSource}`
+            : `${h.scope}/${h.source}`;
+          return `${i + 1}. [${tag}, id=${h.id}] (${h.score.toFixed(2)}) ${oneLine(h.text)}`;
+        })
+        .join("\n"),
+    });
+  }
+  if (related.length > 0) {
+    sections.push({
+      title: "Related entities",
+      body: related
+        .map(
+          (r) =>
+            `- [${r.source}, id=${r.id}] ${oneLine(r.subject)} —${oneLine(r.predicate)}→ ${oneLine(r.object)}`,
+        )
+        .join("\n"),
+    });
+  }
+  return fenceReferenceData({ source: "memory-recall", sections })!;
 }
 
 function shortId(id: string): string {

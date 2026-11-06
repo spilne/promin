@@ -147,7 +147,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /**
  * The recall suite's target: each case seeds a fresh user's facts and
  * episodes, runs the `memory` tool's `recall` for `query` (at most `limit`
- * hits), and outputs the texts it returned. `FENCE-BROKEN` is appended when
+ * hits), and outputs the texts it returned, plus the relations it listed
+ * as `subject —predicate→ object`. `FENCE-BROKEN` is appended when
  * the result is not exactly one reference-data block, i.e. stored text
  * escaped the fence.
  */
@@ -156,8 +157,9 @@ export function memoryRecallTarget(): EvalTarget {
   return fnTarget({
     id: "memory-recall",
     fn: async (input) => {
-      const { items, query, limit } = input as {
+      const { items, query, limit, relations } = input as {
         items?: ReadonlyArray<RecallSeed>;
+        relations?: ReadonlyArray<{ subject: string; predicate: string; object: string }>;
         query?: string;
         limit?: number;
       };
@@ -182,6 +184,9 @@ export function memoryRecallTarget(): EvalTarget {
           });
         }
       }
+      for (const r of relations ?? []) {
+        await store.appendResourceRelation(resource, { ...r, source: "model" });
+      }
       const memory = createLayeredMemoryTool({
         store,
         ...resource,
@@ -192,7 +197,11 @@ export function memoryRecallTarget(): EvalTarget {
       )) as string;
       const hits = out
         .split("\n")
-        .map((line) => /^\d+\. \[[^\]]*\] \([\d.]+\) (.*)$/.exec(line)?.[1])
+        .map(
+          (line) =>
+            /^\d+\. \[[^\]]*\] \([\d.]+\) (.*)$/.exec(line)?.[1] ??
+            /^- \[[^\]]*\] (.* —.*→ .*)$/.exec(line)?.[1],
+        )
         .filter((text): text is string => text !== undefined);
       const closings = out.split("</reference-data>").length - 1;
       return hits.length > 0 && closings !== 1 ? [...hits, "FENCE-BROKEN"] : hits;

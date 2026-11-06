@@ -29,6 +29,7 @@ import {
   loadResolvedContext,
   MIN_SALIENCE_RETENTION,
   parseThreadCursor,
+  relationKey,
   resolveFactConfidence,
 } from "@promin/agent";
 import type {
@@ -37,6 +38,8 @@ import type {
   ConsolidationReservationRequest,
   EpisodeInput,
   EpisodeListParams,
+  Relation,
+  RelationInput,
   EpisodicRecord,
   Fact,
   FactInput,
@@ -180,6 +183,23 @@ export class SqliteMemoryStore implements MemoryStore {
     );
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${p}_fact_thr ON ${p}_fact (scope, namespace_id, thread_id, created_at)`,
+    );
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS ${p}_relation (
+        id           TEXT NOT NULL PRIMARY KEY,
+        namespace_id TEXT NOT NULL,
+        resource_id  TEXT NOT NULL,
+        subject      TEXT NOT NULL,
+        predicate    TEXT NOT NULL,
+        object       TEXT NOT NULL,
+        relation_key TEXT NOT NULL,
+        source       TEXT NOT NULL,
+        confidence   REAL NOT NULL DEFAULT 1,
+        created_at   INTEGER NOT NULL
+      )
+    `);
+    this.db.run(
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${p}_relation_key ON ${p}_relation (namespace_id, resource_id, relation_key)`,
     );
     this.db.run(`
       CREATE TABLE IF NOT EXISTS ${p}_episode (
@@ -468,6 +488,59 @@ export class SqliteMemoryStore implements MemoryStore {
          WHERE scope = ? AND namespace_id = ? AND resource_id = ? AND id = ?`,
       )
       .run(SCOPE_RES, key.namespaceId, key.resourceId, factId);
+  }
+
+  async appendResourceRelation(key: ScopedKey, input: RelationInput): Promise<Relation> {
+    if (!(await this.getResource(key))) {
+      await this.upsertResource(key, {});
+    }
+    const identity = relationKey(input);
+    this.db
+      .query(
+        `INSERT INTO ${this.prefix}_relation
+           (id, namespace_id, resource_id, subject, predicate, object, relation_key, source, confidence, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(namespace_id, resource_id, relation_key) DO NOTHING`,
+      )
+      .run(
+        randomUUID(),
+        key.namespaceId,
+        key.resourceId,
+        input.subject.trim(),
+        input.predicate.trim(),
+        input.object.trim(),
+        identity,
+        input.source,
+        resolveFactConfidence(input),
+        this.clock(),
+      );
+    const row = this.db
+      .query<DbRelationRow>(
+        `SELECT * FROM ${this.prefix}_relation
+         WHERE namespace_id = ? AND resource_id = ? AND relation_key = ?`,
+      )
+      .get(key.namespaceId, key.resourceId, identity);
+    return toRelation(row!);
+  }
+
+  async listResourceRelations(key: ScopedKey): Promise<Relation[]> {
+    return this.db
+      .query<DbRelationRow>(
+        `SELECT * FROM ${this.prefix}_relation
+         WHERE namespace_id = ? AND resource_id = ?
+         ORDER BY created_at ASC, rowid ASC`,
+      )
+      .all(key.namespaceId, key.resourceId)
+      .map(toRelation);
+  }
+
+  async deleteResourceRelation(key: ScopedKey, relationId: string): Promise<void> {
+    this.db
+      .query(
+        `DELETE FROM ${this.prefix}_relation
+         WHERE namespace_id = ? AND resource_id = ? AND id = ?`,
+      )
+      .run(key.namespaceId, key.resourceId, relationId);
   }
 
   async appendResourceEpisode(key: ScopedKey, input: EpisodeInput): Promise<EpisodicRecord> {
@@ -1139,6 +1212,28 @@ interface DbFactRow {
   retired_at: number | null;
   superseded_by: string | null;
   confidence: number;
+}
+
+interface DbRelationRow {
+  id: string;
+  subject: string;
+  predicate: string;
+  object: string;
+  source: string;
+  confidence: number;
+  created_at: number;
+}
+
+function toRelation(r: DbRelationRow): Relation {
+  return {
+    id: r.id,
+    subject: r.subject,
+    predicate: r.predicate,
+    object: r.object,
+    source: r.source as FactSource,
+    confidence: r.confidence,
+    createdAt: r.created_at,
+  };
 }
 
 interface DbEpisodeRow {
