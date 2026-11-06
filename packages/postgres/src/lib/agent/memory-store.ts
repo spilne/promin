@@ -21,7 +21,12 @@
 
 import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gte, isNotNull, isNull, lt, sql, type SQL } from "drizzle-orm";
-import { DEFAULT_THREAD_PAGE_SIZE, loadResolvedContext, parseThreadCursor } from "@promin/agent";
+import {
+  DEFAULT_THREAD_PAGE_SIZE,
+  loadResolvedContext,
+  MIN_SALIENCE_RETENTION,
+  parseThreadCursor,
+} from "@promin/agent";
 import type {
   AppendMessagesOptions,
   ConsolidationReservation,
@@ -915,14 +920,20 @@ export class PostgresMemoryStore implements MemoryStore {
       conditions.push(gte(agentEpisode.salience, params.minSalience));
     }
     const order = params?.order ?? "salienceDesc";
+    const halfLifeMs = params?.halfLifeMs ?? 0;
+    const now = params?.now ?? this.clock();
+    // Same formula as `decayedSalience`: salience * max(0.5^(age/halfLife), floor).
+    const decayed = sql`${agentEpisode.salience} * GREATEST(power(0.5, GREATEST(${now}::double precision - ${agentEpisode.occurredAt}, 0) / ${halfLifeMs}::double precision), ${MIN_SALIENCE_RETENTION}::double precision) DESC`;
     const primary =
-      order === "salienceDesc"
-        ? desc(agentEpisode.salience)
+      order === "decayedSalienceDesc" && halfLifeMs > 0
+        ? decayed
         : order === "createdDesc"
           ? desc(agentEpisode.createdAt)
           : order === "occurredDesc"
             ? desc(agentEpisode.occurredAt)
-            : sql`${agentEpisode.sourceMsgToSeq} DESC NULLS LAST`;
+            : order === "sourceRangeDesc"
+              ? sql`${agentEpisode.sourceMsgToSeq} DESC NULLS LAST`
+              : desc(agentEpisode.salience);
     let q = this.db
       .select()
       .from(agentEpisode)

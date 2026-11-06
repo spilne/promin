@@ -62,7 +62,7 @@ export async function loadResolvedContext(params: {
             store,
             key: resourceKey,
             limit: Math.min(MAX_EPISODES_READ, Math.ceil(maxEpisodeTokens / MIN_EPISODE_TOKENS)),
-            decays: budget.episodeHalfLifeMs !== undefined,
+            budget,
           })
         : [],
       stored ? store.listThreadFacts(key) : [],
@@ -101,26 +101,26 @@ export async function loadResolvedContext(params: {
 }
 
 /**
- * Resource episodes to rank for the prompt: the `limit` most salient. With
- * decay, the `limit` most recent too: an episode's decayed salience is high
- * only when its stored salience or its recency is, so the union holds the
- * episodes decay can promote above a more salient but older one. Candidates
- * outside both lists are not read, so the ranking is approximate when the
- * resource has more than `limit` episodes of each kind.
+ * Resource episodes to rank for the prompt: the `limit` best by salience, or
+ * by decayed salience (sorted in the store, so exact) when the budget sets
+ * `episodeHalfLifeMs`.
  */
 async function readEpisodeCandidates(params: {
   readonly store: MemoryStore;
   readonly key: ScopedKey;
   readonly limit: number;
-  readonly decays: boolean;
+  readonly budget: TokenBudget;
 }): Promise<EpisodicRecord[]> {
-  const { store, key, limit, decays } = params;
-  const [salient, recent] = await Promise.all([
-    store.listResourceEpisodes(key, { order: "salienceDesc", limit }),
-    decays ? store.listResourceEpisodes(key, { order: "occurredDesc", limit }) : [],
-  ]);
-  const seen = new Set(salient.map((e) => e.id));
-  return [...salient, ...recent.filter((e) => !seen.has(e.id))];
+  const { store, key, limit, budget } = params;
+  if (budget.episodeHalfLifeMs === undefined) {
+    return store.listResourceEpisodes(key, { order: "salienceDesc", limit });
+  }
+  return store.listResourceEpisodes(key, {
+    order: "decayedSalienceDesc",
+    halfLifeMs: budget.episodeHalfLifeMs,
+    now: budget.now ?? Date.now(),
+    limit,
+  });
 }
 
 /**

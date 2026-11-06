@@ -758,6 +758,69 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
         expect(out.map((e) => e.summary)).toEqual(["hi", "mid", "lo"]);
       });
 
+      it("decayedSalienceDesc ranks by salience aged from occurredAt, before the limit", async () => {
+        const s = await make();
+        const key = { namespaceId: NS, resourceId: ALICE };
+        const DAY = 86_400_000;
+        const now = 400 * DAY;
+        const halfLifeMs = 30 * DAY;
+        // Stored salience says old > fresh > mid; decayed says fresh > mid > old.
+        await s.appendResourceEpisode(key, {
+          summary: "old",
+          salience: 0.95,
+          occurredAt: now - 300 * DAY,
+        });
+        await s.appendResourceEpisode(key, {
+          summary: "mid",
+          salience: 0.7,
+          occurredAt: now - 30 * DAY,
+        });
+        await s.appendResourceEpisode(key, {
+          summary: "fresh",
+          salience: 0.8,
+          occurredAt: now - DAY,
+        });
+        const all = await s.listResourceEpisodes(key, {
+          order: "decayedSalienceDesc",
+          halfLifeMs,
+          now,
+        });
+        expect(all.map((e) => e.summary)).toEqual(["fresh", "mid", "old"]);
+        const top = await s.listResourceEpisodes(key, {
+          order: "decayedSalienceDesc",
+          halfLifeMs,
+          now,
+          limit: 1,
+        });
+        expect(top.map((e) => e.summary)).toEqual(["fresh"]);
+      });
+
+      it("decayedSalienceDesc floors decay, and equals salienceDesc without a half-life", async () => {
+        const s = await make();
+        const key = { namespaceId: NS, resourceId: ALICE };
+        const DAY = 86_400_000;
+        const now = 4000 * DAY;
+        // Ancient but vital (0.9 * 0.2 floor = 0.18) still beats a fresh trivial 0.1.
+        await s.appendResourceEpisode(key, {
+          summary: "ancient-vital",
+          salience: 0.9,
+          occurredAt: now - 3000 * DAY,
+        });
+        await s.appendResourceEpisode(key, {
+          summary: "fresh-trivial",
+          salience: 0.1,
+          occurredAt: now,
+        });
+        const decayed = await s.listResourceEpisodes(key, {
+          order: "decayedSalienceDesc",
+          halfLifeMs: 30 * DAY,
+          now,
+        });
+        expect(decayed.map((e) => e.summary)).toEqual(["ancient-vital", "fresh-trivial"]);
+        const plain = await s.listResourceEpisodes(key, { order: "decayedSalienceDesc" });
+        expect(plain.map((e) => e.summary)).toEqual(["ancient-vital", "fresh-trivial"]);
+      });
+
       it("respects minSalience filter and limit", async () => {
         const s = await make();
         const key = { namespaceId: NS, resourceId: ALICE };

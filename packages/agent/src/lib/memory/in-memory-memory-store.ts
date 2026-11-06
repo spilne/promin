@@ -15,6 +15,7 @@ import { isDeepStrictEqual } from "node:util";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { Message } from "../message.ts";
 import { loadResolvedContext } from "./load-context.ts";
+import { decayedSalience } from "./scoring.ts";
 import { isAfterThreadCursor, parseThreadCursor } from "./thread-cursor.ts";
 import {
   DEFAULT_THREAD_PAGE_SIZE,
@@ -648,14 +649,22 @@ export class InMemoryMemoryStore implements MemoryStore {
       out = out.filter((e) => e.salience >= threshold);
     }
     const order = params?.order ?? "salienceDesc";
+    const now = params?.now ?? this.clock.currentTimeMs();
     const key = (e: EpisodicRecord): number =>
       order === "salienceDesc"
         ? e.salience
-        : order === "createdDesc"
-          ? e.createdAt
-          : order === "occurredDesc"
-            ? e.occurredAt
-            : (e.sourceMessageRange?.toSeq ?? -1);
+        : order === "decayedSalienceDesc"
+          ? decayedSalience({
+              salience: e.salience,
+              occurredAt: e.occurredAt,
+              now,
+              halfLifeMs: params?.halfLifeMs,
+            })
+          : order === "createdDesc"
+            ? e.createdAt
+            : order === "occurredDesc"
+              ? e.occurredAt
+              : (e.sourceMessageRange?.toSeq ?? -1);
     // Ties go to the later insert, like the SQL stores' insertion sequence.
     const ranked = out.map((e, index) => ({ e, index }));
     ranked.sort((a, b) => key(b.e) - key(a.e) || b.index - a.index);

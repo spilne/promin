@@ -215,8 +215,20 @@ export interface EpisodeListParams {
    * Defaults to "salienceDesc". `sourceRangeDesc` puts the episode covering
    * the newest messages first (highest `sourceMessageRange.toSeq`; episodes
    * without a range last). Ties go to the later insert.
+   * `decayedSalienceDesc` sorts by salience aged from `occurredAt` to `now`
+   * with half-life `halfLifeMs` (see `decayedSalience`), so `limit` keeps the
+   * right episodes; without a positive `halfLifeMs` it equals `salienceDesc`.
    */
-  readonly order?: "salienceDesc" | "createdDesc" | "occurredDesc" | "sourceRangeDesc";
+  readonly order?:
+    | "salienceDesc"
+    | "decayedSalienceDesc"
+    | "createdDesc"
+    | "occurredDesc"
+    | "sourceRangeDesc";
+  /** Half-life for `decayedSalienceDesc`, in ms. */
+  readonly halfLifeMs?: number;
+  /** Age reference for `decayedSalienceDesc`, epoch ms. Defaults to the store clock. */
+  readonly now?: number;
   /** Only episodes whose `metadata.kind` equals this (e.g. `"compact"`, `"distill"`). */
   readonly kind?: string;
   /** Only episodes distilled from this thread (`sourceThreadId`). */

@@ -24,7 +24,12 @@
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from "node:crypto";
-import { DEFAULT_THREAD_PAGE_SIZE, loadResolvedContext, parseThreadCursor } from "@promin/agent";
+import {
+  DEFAULT_THREAD_PAGE_SIZE,
+  loadResolvedContext,
+  MIN_SALIENCE_RETENTION,
+  parseThreadCursor,
+} from "@promin/agent";
 import type {
   AppendMessagesOptions,
   ConsolidationReservation,
@@ -1037,14 +1042,24 @@ export class SqliteMemoryStore implements MemoryStore {
       args.push(params.minSalience);
     }
     const order = params?.order ?? "salienceDesc";
-    const primary =
-      order === "salienceDesc"
-        ? "salience DESC"
-        : order === "createdDesc"
+    const decays = order === "decayedSalienceDesc" && (params?.halfLifeMs ?? 0) > 0;
+    const orderArgs: number[] = [];
+    let primary: string;
+    if (decays) {
+      // Same formula as `decayedSalience`: salience * max(0.5^(age/halfLife), floor).
+      primary = "salience * max(pow(0.5, max(? - occurred_at, 0) * 1.0 / ?), ?) DESC";
+      orderArgs.push(params?.now ?? this.clock(), params?.halfLifeMs ?? 1, MIN_SALIENCE_RETENTION);
+    } else {
+      primary =
+        order === "createdDesc"
           ? "created_at DESC"
           : order === "occurredDesc"
             ? "occurred_at DESC"
-            : "source_msg_to_seq IS NULL, source_msg_to_seq DESC";
+            : order === "sourceRangeDesc"
+              ? "source_msg_to_seq IS NULL, source_msg_to_seq DESC"
+              : "salience DESC";
+    }
+    args.push(...orderArgs);
     let limit = "";
     if (params?.limit !== undefined) {
       limit = " LIMIT ?";

@@ -179,6 +179,7 @@ export {
   bm25Scores,
   cosineSimilarity,
   decayedSalience,
+  MIN_SALIENCE_RETENTION,
   rankCandidates,
   tokenize,
 } from "./memory/scoring.ts";
