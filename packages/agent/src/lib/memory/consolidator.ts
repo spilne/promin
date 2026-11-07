@@ -55,6 +55,9 @@ import {
   type ThreadKey,
 } from "./types.ts";
 
+/** Newest model facts shown to the reconcile call, which keeps its prompt bounded. */
+const MAX_RECONCILE_CANDIDATES = 100;
+
 // ---------------------------------------------------------------------------
 // Public interface
 // ---------------------------------------------------------------------------
@@ -606,7 +609,10 @@ export class DefaultConsolidator implements Consolidator {
       const replaces = await this.reconcileFacts({
         key,
         fresh,
-        candidates: existing.filter((f) => f.source === "model"),
+        candidates: existing
+          .filter((f) => f.source === "model")
+          .sort((a, b) => b.updatedAt - a.updatedAt)
+          .slice(0, MAX_RECONCILE_CANDIDATES),
       });
       for (const [i, text] of fresh.entries()) {
         const supersedes = replaces.get(i);

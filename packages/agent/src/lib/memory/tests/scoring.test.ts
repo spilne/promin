@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { decayedSalience, rankCandidates } from "../scoring.ts";
+import { decayedSalience, memoizeEmbedder, rankCandidates } from "../scoring.ts";
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = 1_800_000_000_000;
@@ -80,5 +80,77 @@ describe("rankCandidates", () => {
     };
     expect(await rank("where do I live", candidates, broken)).toEqual([]);
     expect((await rank("tea", candidates, broken)).map((r) => r.index)).toEqual([0]);
+  });
+});
+
+describe("embedding calls", () => {
+  const candidates = Array.from({ length: 30 }, (_, i) => ({
+    text: `unrelated note ${i}`,
+    importance: 0.5,
+    at: NOW,
+  }));
+
+  it("bounds calls in flight and reports a failing embedder", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const slow = {
+      embed: async () => {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setTimeout(r, 1));
+        inFlight--;
+        return [1, 0];
+      },
+    };
+    await rankCandidates({
+      query: "anything",
+      candidates,
+      now: NOW,
+      recencyHalfLifeMs: 30 * DAY,
+      embedder: slow,
+    });
+    expect(peak).toBeGreaterThan(1);
+    expect(peak).toBeLessThanOrEqual(8);
+
+    const errors: unknown[] = [];
+    const ranked = await rankCandidates({
+      query: "unrelated note",
+      candidates,
+      now: NOW,
+      recencyHalfLifeMs: 30 * DAY,
+      embedder: {
+        embed: async () => {
+          throw new Error("down");
+        },
+      },
+      onEmbedderError: (e) => errors.push(e),
+    });
+    expect(errors).toHaveLength(1);
+    expect(ranked.length).toBeGreaterThan(0);
+  });
+
+  it("memoizeEmbedder embeds each text once, evicts the oldest, and does not cache failures", async () => {
+    const calls: string[] = [];
+    let fail = true;
+    const base = {
+      embed: async (text: string) => {
+        calls.push(text);
+        if (text === "flaky" && fail) throw new Error("boom");
+        return [text.length];
+      },
+    };
+    const cached = memoizeEmbedder({ embedder: base, maxEntries: 2 });
+    await cached.embed("a");
+    await cached.embed("a");
+    expect(calls).toEqual(["a"]);
+
+    await cached.embed("bb");
+    await cached.embed("ccc"); // evicts "a"
+    await cached.embed("a");
+    expect(calls.filter((c) => c === "a")).toHaveLength(2);
+
+    await expect(cached.embed("flaky")).rejects.toThrow("boom");
+    fail = false;
+    expect(await cached.embed("flaky")).toEqual([5]);
   });
 });

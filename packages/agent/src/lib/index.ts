@@ -208,6 +208,7 @@ export {
   decayedSalience,
   MAX_DECAY_HALF_LIVES,
   MIN_SALIENCE_RETENTION,
+  memoizeEmbedder,
   rankCandidates,
   tokenize,
 } from "./memory/scoring.ts";

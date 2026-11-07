@@ -36,6 +36,12 @@ const RECENCY_WEIGHT = 0.2;
 /** Candidates embedded per `rankCandidates` call unless `maxSemanticCandidates` says otherwise. */
 const DEFAULT_MAX_SEMANTIC_CANDIDATES = 64;
 
+/** Embedding calls in flight at once, so a large candidate set does not flood the provider. */
+const EMBED_CONCURRENCY = 8;
+
+/** Texts `memoizeEmbedder` remembers before dropping the oldest. */
+const DEFAULT_EMBEDDING_CACHE_SIZE = 512;
+
 /** Weight of the semantic score within relevance when an embedder is present. */
 const SEMANTIC_SHARE = 0.5;
 
@@ -151,6 +157,8 @@ export async function rankCandidates(params: {
   readonly recencyHalfLifeMs: number;
   readonly embedder?: { embed(text: string): Promise<number[]> };
   readonly maxSemanticCandidates?: number;
+  /** Called when the embedder throws; ranking then falls back to lexical only. */
+  readonly onEmbedderError?: (error: unknown) => void;
 }): Promise<Array<{ readonly index: number; readonly score: number }>> {
   const { query, candidates, now, recencyHalfLifeMs, embedder } = params;
   if (candidates.length === 0) return [];
@@ -165,6 +173,7 @@ export async function rankCandidates(params: {
         now,
         recencyHalfLifeMs,
         max: params.maxSemanticCandidates ?? DEFAULT_MAX_SEMANTIC_CANDIDATES,
+        onError: params.onEmbedderError,
       })
     : null;
 
@@ -196,6 +205,7 @@ async function semanticScores(params: {
   readonly now: number;
   readonly recencyHalfLifeMs: number;
   readonly max: number;
+  readonly onError: ((error: unknown) => void) | undefined;
 }): Promise<number[] | null> {
   const { candidates, lexical, embedder, max } = params;
   const prior = (i: number) =>
@@ -211,14 +221,65 @@ async function semanticScores(params: {
   try {
     const queryVector = await embedder.embed(params.query);
     const scores = candidates.map(() => 0);
-    const vectors = await Promise.all(toEmbed.map((i) => embedder.embed(candidates[i]!.text)));
+    const vectors = await mapWithConcurrency({
+      items: toEmbed,
+      limit: EMBED_CONCURRENCY,
+      run: (i) => embedder.embed(candidates[i]!.text),
+    });
     toEmbed.forEach((candidateIndex, n) => {
       scores[candidateIndex] = Math.max(0, cosineSimilarity(queryVector, vectors[n]!));
     });
     return scores;
-  } catch {
+  } catch (error) {
+    params.onError?.(error);
     return null;
   }
+}
+
+/** `run` over `items` with at most `limit` in flight; results keep the order of `items`. */
+async function mapWithConcurrency<T, R>(params: {
+  readonly items: ReadonlyArray<T>;
+  readonly limit: number;
+  readonly run: (item: T) => Promise<R>;
+}): Promise<R[]> {
+  const results: R[] = new Array(params.items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < params.items.length) {
+      const index = next++;
+      results[index] = await params.run(params.items[index]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(params.limit, params.items.length) }, worker));
+  return results;
+}
+
+/**
+ * `embedder` that remembers the vectors of its most recent `maxEntries`
+ * texts, so repeated recalls over the same memories do not re-embed them.
+ * Failures are not cached.
+ */
+export function memoizeEmbedder(params: {
+  readonly embedder: { embed(text: string): Promise<number[]> };
+  readonly maxEntries?: number;
+}): { embed(text: string): Promise<number[]> } {
+  const maxEntries = params.maxEntries ?? DEFAULT_EMBEDDING_CACHE_SIZE;
+  const cache = new Map<string, Promise<number[]>>();
+  return {
+    embed(text) {
+      const hit = cache.get(text);
+      if (hit) {
+        cache.delete(text);
+        cache.set(text, hit);
+        return hit;
+      }
+      const pending = params.embedder.embed(text);
+      cache.set(text, pending);
+      pending.catch(() => cache.delete(text));
+      if (cache.size > maxEntries) cache.delete(cache.keys().next().value!);
+      return pending;
+    },
+  };
 }
 
 /** `n` limited to 0..1; NaN counts as 0. */

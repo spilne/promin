@@ -33,7 +33,7 @@ import {
   type ThreadKey,
 } from "../memory/types.ts";
 import type { EmbeddingProvider } from "../embedding-provider.ts";
-import { rankCandidates } from "../memory/scoring.ts";
+import { memoizeEmbedder, rankCandidates } from "../memory/scoring.ts";
 import {
   MAX_ENTITY_CHARS,
   MAX_PREDICATE_CHARS,
@@ -67,6 +67,11 @@ export interface LayeredMemoryToolConfig {
    * throws, recall is lexical only.
    */
   readonly embedder?: EmbeddingProvider;
+  /**
+   * Called when the embedder throws during `recall`, which then ranks
+   * lexically. Use it to log or count embedding failures.
+   */
+  readonly onEmbedderError?: (error: unknown) => void;
   /**
    * Half-life of the recency term in `recall` ranking, in ms.
    * Default: `DEFAULT_RECALL_RECENCY_HALF_LIFE_MS` (90 days).
@@ -258,6 +263,8 @@ export function createLayeredMemoryTool(
     ? { namespaceId: config.namespaceId, resourceId: config.resourceId }
     : null;
   const defaultSources = config.defaultRecallSources ?? ["fact", "episode"];
+  // One cache per tool set: recalls over the same memories re-embed nothing.
+  const embedder = config.embedder && memoizeEmbedder({ embedder: config.embedder });
 
   return tool({
     name: "memory",
@@ -370,7 +377,8 @@ export function createLayeredMemoryTool(
             store: config.store,
             now: (config.now ?? Date.now)(),
             recencyHalfLifeMs: config.recencyHalfLifeMs ?? DEFAULT_RECALL_RECENCY_HALF_LIFE_MS,
-            ...(config.embedder && { embedder: config.embedder }),
+            ...(embedder && { embedder }),
+            ...(config.onEmbedderError && { onEmbedderError: config.onEmbedderError }),
             namespaceId: config.namespaceId,
             resourceKey,
             threadKey,
@@ -439,6 +447,9 @@ interface MemoryHit {
   readonly at: number;
 }
 
+/** Episodes `recall` ranks per scope: the best by decayed salience, so a long history stays cheap. */
+const MAX_RECALL_EPISODES_PER_SCOPE = 200;
+
 interface RecallSearchInput {
   readonly store: MemoryStore;
   readonly namespaceId: string;
@@ -451,6 +462,7 @@ interface RecallSearchInput {
   readonly now: number;
   readonly recencyHalfLifeMs: number;
   readonly embedder?: EmbeddingProvider;
+  readonly onEmbedderError?: (error: unknown) => void;
 }
 
 /** Hybrid recall: gather every candidate in scope, then rank them as one corpus. */
@@ -458,19 +470,28 @@ async function recallSearch(input: RecallSearchInput): Promise<MemoryHit[]> {
   const wantFacts = input.sources.includes("fact");
   const wantEpisodes = input.sources.includes("episode");
   const candidates: Array<Omit<MemoryHit, "score"> & { importance: number }> = [];
+  const episodeParams = {
+    order: "decayedSalienceDesc",
+    halfLifeMs: input.recencyHalfLifeMs,
+    now: input.now,
+    limit: MAX_RECALL_EPISODES_PER_SCOPE,
+  } as const;
 
   for (const scope of input.scopes) {
     let facts: Fact[] = [];
     let episodes: EpisodicRecord[] = [];
     if (scope === "namespace") {
       if (wantFacts) facts = await input.store.listNamespaceFacts(input.namespaceId);
-      if (wantEpisodes) episodes = await input.store.listNamespaceEpisodes(input.namespaceId);
+      if (wantEpisodes)
+        episodes = await input.store.listNamespaceEpisodes(input.namespaceId, episodeParams);
     } else if (scope === "resource" && input.resourceKey) {
       if (wantFacts) facts = await input.store.listResourceFacts(input.resourceKey);
-      if (wantEpisodes) episodes = await input.store.listResourceEpisodes(input.resourceKey);
+      if (wantEpisodes)
+        episodes = await input.store.listResourceEpisodes(input.resourceKey, episodeParams);
     } else if (scope === "thread") {
       if (wantFacts) facts = await input.store.listThreadFacts(input.threadKey);
-      if (wantEpisodes) episodes = await input.store.listThreadEpisodes(input.threadKey);
+      if (wantEpisodes)
+        episodes = await input.store.listThreadEpisodes(input.threadKey, episodeParams);
     }
     for (const f of facts) {
       candidates.push({
@@ -505,6 +526,7 @@ async function recallSearch(input: RecallSearchInput): Promise<MemoryHit[]> {
     now: input.now,
     recencyHalfLifeMs: input.recencyHalfLifeMs,
     ...(input.embedder && { embedder: input.embedder }),
+    ...(input.onEmbedderError && { onEmbedderError: input.onEmbedderError }),
   });
   return ranked.slice(0, input.limit).map(({ index, score }) => {
     const { importance: _importance, ...hit } = candidates[index]!;
