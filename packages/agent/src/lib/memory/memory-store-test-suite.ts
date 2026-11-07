@@ -9,7 +9,7 @@
 // pass this suite. Every test creates a fresh store via the factory.
 // ---------------------------------------------------------------------------
 
-import { describe, it, expect } from "bun:test";
+import { beforeEach, describe, it, expect } from "bun:test";
 import type { Message } from "../message.ts";
 import { nextThreadCursor } from "./thread-cursor.ts";
 import {
@@ -171,7 +171,15 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
     });
 
     describe("entity relations", () => {
-      const key = { namespaceId: NS, resourceId: ALICE };
+      // Stores that persist between tests (Postgres) must not see earlier tests' rows.
+      let key = { namespaceId: NS, resourceId: ALICE };
+      let other = { namespaceId: NS, resourceId: "bob" };
+      let n = 0;
+      beforeEach(() => {
+        n += 1;
+        key = { namespaceId: NS, resourceId: `entity-alice-${n}-${Date.now()}` };
+        other = { namespaceId: NS, resourceId: `entity-bob-${n}-${Date.now()}` };
+      });
 
       it("stores a triple once, matching names case-insensitively, and keeps resources apart", async () => {
         const s = await make();
@@ -196,10 +204,12 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
           source: "model",
           confidence: 1,
         });
-        await s.appendResourceRelation(
-          { namespaceId: NS, resourceId: "bob" },
-          { subject: "Bob", predicate: "knows", object: "Anton", source: "model" },
-        );
+        await s.appendResourceRelation(other, {
+          subject: "Bob",
+          predicate: "knows",
+          object: "Anton",
+          source: "model",
+        });
         const list = await s.listResourceRelations(key);
         expect(list.map((r) => `${r.subject}|${r.predicate}|${r.object}`)).toEqual([
           "Anton|works at|Acme",
@@ -210,7 +220,6 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
 
       it("deletes one relation by id inside its resource only", async () => {
         const s = await make();
-        const bob = { namespaceId: NS, resourceId: "bob" };
         const mine = await s.appendResourceRelation(key, {
           subject: "A",
           predicate: "knows",
@@ -223,7 +232,7 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
           object: "C",
           source: "model",
         });
-        await s.deleteResourceRelation(bob, mine.id);
+        await s.deleteResourceRelation(other, mine.id);
         expect(await s.listResourceRelations(key)).toHaveLength(2);
         await s.deleteResourceRelation(key, mine.id);
         expect((await s.listResourceRelations(key)).map((r) => r.subject)).toEqual(["B"]);
@@ -231,7 +240,15 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
     });
 
     describe("rule proposals", () => {
-      const key = { namespaceId: NS, resourceId: ALICE };
+      // Stores that persist between tests (Postgres) must not see earlier tests' rows.
+      let key = { namespaceId: NS, resourceId: ALICE };
+      let other = { namespaceId: NS, resourceId: "bob" };
+      let n = 0;
+      beforeEach(() => {
+        n += 1;
+        key = { namespaceId: NS, resourceId: `rule-alice-${n}-${Date.now()}` };
+        other = { namespaceId: NS, resourceId: `rule-bob-${n}-${Date.now()}` };
+      });
 
       it("merges the same text, counts distinct threads, and keeps resources apart", async () => {
         const s = await make();
@@ -256,10 +273,7 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
         expect(more.occurrences).toBe(2);
         expect(more.lastSeenAt).toBeGreaterThanOrEqual(first.lastSeenAt);
         await s.recordResourceRuleProposal(key, { text: "Never use emoji", threadId: "t1" });
-        await s.recordResourceRuleProposal(
-          { namespaceId: NS, resourceId: "bob" },
-          { text: "Keep answers short", threadId: "t9" },
-        );
+        await s.recordResourceRuleProposal(other, { text: "Keep answers short", threadId: "t9" });
 
         expect((await s.listResourceRuleProposals(key)).map((p) => p.text)).toEqual([
           "Keep answers short.",
@@ -274,10 +288,7 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
         const s = await make();
         const p = await s.recordResourceRuleProposal(key, { text: "Be formal", threadId: "t1" });
         expect(
-          await s.decideResourceRuleProposal(
-            { namespaceId: NS, resourceId: "bob" },
-            { id: p.id, status: "approved" },
-          ),
+          await s.decideResourceRuleProposal(other, { id: p.id, status: "approved" }),
         ).toBeNull();
         const approved = await s.decideResourceRuleProposal(key, { id: p.id, status: "approved" });
         expect(approved?.status).toBe("approved");
