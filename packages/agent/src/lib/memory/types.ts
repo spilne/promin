@@ -206,6 +206,11 @@ export const MAX_WORKING_MEMORY_CHARS = 4_000;
  */
 export const MAX_STATIC_RULES_CHARS = 20_000;
 
+/** A write the store refused because it would pass a limit the caller set. Nothing was written. */
+export class MemoryLimitError extends Error {
+  override readonly name = "MemoryLimitError";
+}
+
 /**
  * Stored thread message — the runtime `Message` shape with storage
  * identity attached. Append paths accept plain `Message`; reads return
@@ -572,9 +577,15 @@ export interface MemoryStore {
   /**
    * Add an edge to the resource's entity graph. A triple that already exists
    * (names compared by `normalizeEntityName`) is not stored twice: the
-   * existing relation is returned unchanged.
+   * existing relation is returned unchanged, even at the cap. With
+   * `maxRelations`, a new triple that would take the resource past it throws
+   * `MemoryLimitError`; the count and the insert are one atomic step.
    */
-  appendResourceRelation(key: ScopedKey, input: RelationInput): Promise<Relation>;
+  appendResourceRelation(
+    key: ScopedKey,
+    input: RelationInput,
+    options?: { readonly maxRelations?: number },
+  ): Promise<Relation>;
   /** Every relation of the resource, oldest first. */
   listResourceRelations(key: ScopedKey): Promise<Relation[]>;
   deleteResourceRelation(key: ScopedKey, relationId: string): Promise<void>;
@@ -582,11 +593,14 @@ export interface MemoryStore {
    * Note that `text` was asked for in `threadId`. The same text (compared by
    * `normalizeRuleText`) is one proposal: a new thread adds to its evidence,
    * the same thread again changes nothing but `lastSeenAt`. A decided
-   * proposal keeps its status.
+   * proposal keeps its status. With `maxPending`, a new proposal that would
+   * take the resource past that many pending ones throws `MemoryLimitError`
+   * (atomically); a text already proposed is always updated.
    */
   recordResourceRuleProposal(
     key: ScopedKey,
     input: { readonly text: string; readonly threadId: string },
+    options?: { readonly maxPending?: number },
   ): Promise<RuleProposal>;
   /** The resource's proposals, oldest first. */
   listResourceRuleProposals(
@@ -598,6 +612,16 @@ export interface MemoryStore {
     key: ScopedKey,
     input: { readonly id: string; readonly status: "approved" | "rejected" },
   ): Promise<RuleProposal | null>;
+  /**
+   * Add `text` to the resource's `staticRules` as a bullet, unless a bullet
+   * already says the same (`appendStaticRule`). The read and the write are one
+   * atomic step, so concurrent appends and edits do not lose each other.
+   * Throws `MemoryLimitError`, changing nothing, past `maxChars`.
+   */
+  appendResourceStaticRule(
+    key: ScopedKey,
+    params: { readonly text: string; readonly maxChars: number },
+  ): Promise<ResourceRow>;
   appendResourceEpisode(key: ScopedKey, input: EpisodeInput): Promise<EpisodicRecord>;
   listResourceEpisodes(key: ScopedKey, params?: EpisodeListParams): Promise<EpisodicRecord[]>;
   deleteResourceEpisode(key: ScopedKey, episodeId: string): Promise<void>;

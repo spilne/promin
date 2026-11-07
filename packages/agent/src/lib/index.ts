@@ -128,6 +128,7 @@ export {
   DISTILL_EPISODE_KIND,
   MAX_FACT_CHARS,
   MAX_STATIC_RULES_CHARS,
+  MemoryLimitError,
   MAX_WORKING_MEMORY_CHARS,
 } from "./memory/types.ts";
 export {
@@ -195,7 +196,9 @@ export {
   relationKey,
   relationNeighborhood,
 } from "./memory/relations.ts";
+export { newEpisode, newFact } from "./memory/record-factories.ts";
 export {
+  appendStaticRule,
   approveRuleProposal,
   MAX_PENDING_RULE_PROPOSALS,
   normalizeRuleText,

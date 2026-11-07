@@ -25,6 +25,7 @@ import { tool, type AgentTool } from "../tool.ts";
 import {
   MAX_FACT_CHARS,
   MAX_WORKING_MEMORY_CHARS,
+  MemoryLimitError,
   type EpisodicRecord,
   type Fact,
   type MemoryStore,
@@ -319,19 +320,29 @@ export function createLayeredMemoryTool(
           if (!resourceKey) {
             return "Cannot write relations: no resourceId is bound to this task.";
           }
-          const existing = await config.store.listResourceRelations(resourceKey);
           const identity = relationKey(input);
-          const already = existing.find((r) => relationKey(r) === identity);
-          if (!already && existing.length >= MAX_RELATIONS_PER_RESOURCE) {
-            return `Nothing saved: this user already has ${MAX_RELATIONS_PER_RESOURCE} relations. Use \`unlink\` on stale ones first.`;
+          const already = (await config.store.listResourceRelations(resourceKey)).find(
+            (r) => relationKey(r) === identity,
+          );
+          let r: Relation;
+          try {
+            r = await config.store.appendResourceRelation(
+              resourceKey,
+              {
+                subject: input.subject,
+                predicate: input.predicate,
+                object: input.object,
+                source: "model",
+                ...(input.confidence !== undefined && { confidence: input.confidence }),
+              },
+              { maxRelations: MAX_RELATIONS_PER_RESOURCE },
+            );
+          } catch (error) {
+            if (error instanceof MemoryLimitError) {
+              return `Nothing saved: this user already has ${MAX_RELATIONS_PER_RESOURCE} relations. Use \`unlink\` on stale ones first.`;
+            }
+            throw error;
           }
-          const r = await config.store.appendResourceRelation(resourceKey, {
-            subject: input.subject,
-            predicate: input.predicate,
-            object: input.object,
-            source: "model",
-            ...(input.confidence !== undefined && { confidence: input.confidence }),
-          });
           return already ? `Already linked (id: ${r.id}).` : `Linked (id: ${r.id}).`;
         }
         case "unlink": {

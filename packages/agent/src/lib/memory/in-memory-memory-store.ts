@@ -16,7 +16,8 @@ import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { Message } from "../message.ts";
 import { resolveFactConfidence } from "./fact-confidence.ts";
 import { relationKey } from "./relations.ts";
-import { normalizeRuleText } from "./rule-proposals.ts";
+import { appendStaticRule, normalizeRuleText } from "./rule-proposals.ts";
+import { newEpisode, newFact } from "./record-factories.ts";
 import { loadResolvedContext } from "./load-context.ts";
 import { decayedSalience } from "./scoring.ts";
 import { isAfterThreadCursor, parseThreadCursor } from "./thread-cursor.ts";
@@ -32,6 +33,7 @@ import {
   type FactInput,
   type FactListParams,
   type ListThreadsParams,
+  MemoryLimitError,
   type MemoryStore,
   type MessageRange,
   type NamespacePatch,
@@ -135,7 +137,7 @@ export class InMemoryMemoryStore implements MemoryStore {
     if (!this.namespaces.has(namespaceId)) {
       await this.upsertNamespace(namespaceId, {});
     }
-    const f = this.makeFact(input);
+    const f = newFact({ input, now: this.now() });
     const list = this.namespaceFacts.get(namespaceId) ?? [];
     this.retireSuperseded({ list, input, successor: f });
     list.push(f);
@@ -160,7 +162,7 @@ export class InMemoryMemoryStore implements MemoryStore {
     if (!this.namespaces.has(namespaceId)) {
       await this.upsertNamespace(namespaceId, {});
     }
-    const ep = this.makeEpisode(input);
+    const ep = newEpisode({ input, now: this.now() });
     const list = this.namespaceEpisodes.get(namespaceId) ?? [];
     list.push(ep);
     this.namespaceEpisodes.set(namespaceId, list);
@@ -217,11 +219,24 @@ export class InMemoryMemoryStore implements MemoryStore {
     return next;
   }
 
+  async appendResourceStaticRule(
+    key: ScopedKey,
+    params: { readonly text: string; readonly maxChars: number },
+  ): Promise<ResourceRow> {
+    const existing = this.resources.get(this.resourceK(key));
+    const staticRules = appendStaticRule({
+      existing: existing?.staticRules ?? null,
+      text: params.text,
+      maxChars: params.maxChars,
+    });
+    return this.upsertResource(key, { staticRules });
+  }
+
   async appendResourceFact(key: ScopedKey, input: FactInput): Promise<Fact> {
     if (!this.resources.has(this.resourceK(key))) {
       await this.upsertResource(key, {});
     }
-    const f = this.makeFact(input);
+    const f = newFact({ input, now: this.now() });
     const list = this.resourceFacts.get(this.resourceK(key)) ?? [];
     this.retireSuperseded({ list, input, successor: f });
     list.push(f);
@@ -229,7 +244,11 @@ export class InMemoryMemoryStore implements MemoryStore {
     return f;
   }
 
-  async appendResourceRelation(key: ScopedKey, input: RelationInput): Promise<Relation> {
+  async appendResourceRelation(
+    key: ScopedKey,
+    input: RelationInput,
+    options?: { readonly maxRelations?: number },
+  ): Promise<Relation> {
     if (!this.resources.has(this.resourceK(key))) {
       await this.upsertResource(key, {});
     }
@@ -238,6 +257,9 @@ export class InMemoryMemoryStore implements MemoryStore {
     const identity = relationKey(input);
     const existing = list.find((r) => relationKey(r) === identity);
     if (existing) return { ...existing };
+    if (options?.maxRelations !== undefined && list.length >= options.maxRelations) {
+      throw new MemoryLimitError(`Resource already has ${options.maxRelations} relations.`);
+    }
     const relation: Relation = {
       id: randomUUID(),
       subject: input.subject.trim(),
@@ -255,6 +277,7 @@ export class InMemoryMemoryStore implements MemoryStore {
   async recordResourceRuleProposal(
     key: ScopedKey,
     input: { readonly text: string; readonly threadId: string },
+    options?: { readonly maxPending?: number },
   ): Promise<RuleProposal> {
     if (!this.resources.has(this.resourceK(key))) {
       await this.upsertResource(key, {});
@@ -277,6 +300,12 @@ export class InMemoryMemoryStore implements MemoryStore {
       };
       list[at] = next;
       return copyProposal(next);
+    }
+    if (
+      options?.maxPending !== undefined &&
+      list.filter((p) => p.status === "pending").length >= options.maxPending
+    ) {
+      throw new MemoryLimitError(`Resource already has ${options.maxPending} pending proposals.`);
     }
     const proposal: RuleProposal = {
       id: randomUUID(),
@@ -349,7 +378,7 @@ export class InMemoryMemoryStore implements MemoryStore {
     if (!this.resources.has(this.resourceK(key))) {
       await this.upsertResource(key, {});
     }
-    const ep = this.makeEpisode(input);
+    const ep = newEpisode({ input, now: this.now() });
     const list = this.resourceEpisodes.get(this.resourceK(key)) ?? [];
     list.push(ep);
     this.resourceEpisodes.set(this.resourceK(key), list);
@@ -523,7 +552,7 @@ export class InMemoryMemoryStore implements MemoryStore {
     if (!this.threads.has(this.threadK(key))) {
       await this.createThread(key);
     }
-    const f = this.makeFact(input);
+    const f = newFact({ input, now: this.now() });
     const list = this.threadFacts.get(this.threadK(key)) ?? [];
     this.retireSuperseded({ list, input, successor: f });
     list.push(f);
@@ -603,7 +632,7 @@ export class InMemoryMemoryStore implements MemoryStore {
     if (!this.threads.has(this.threadK(key))) {
       await this.createThread(key);
     }
-    const ep = this.makeEpisode(input);
+    const ep = newEpisode({ input, now: this.now() });
     const list = this.threadEpisodes.get(this.threadK(key)) ?? [];
     list.push(ep);
     this.threadEpisodes.set(this.threadK(key), list);
@@ -700,20 +729,6 @@ export class InMemoryMemoryStore implements MemoryStore {
     return row;
   }
 
-  private makeFact(input: FactInput): Fact {
-    const now = this.now();
-    return {
-      id: randomUUID(),
-      text: input.text,
-      source: input.source,
-      createdAt: now,
-      updatedAt: now,
-      retiredAt: null,
-      supersededBy: null,
-      confidence: resolveFactConfidence(input),
-    };
-  }
-
   /** Retire the current fact `input.supersedes` names in `list`, in place. */
   private retireSuperseded(params: {
     readonly list: Fact[];
@@ -725,22 +740,6 @@ export class InMemoryMemoryStore implements MemoryStore {
     const at = list.findIndex((f) => f.id === input.supersedes && f.retiredAt === null);
     if (at < 0) return;
     list[at] = { ...list[at]!, retiredAt: successor.createdAt, supersededBy: successor.id };
-  }
-
-  private makeEpisode(input: EpisodeInput): EpisodicRecord {
-    const now = this.now();
-    const salience = clamp01(input.salience ?? 0.5);
-    return {
-      id: randomUUID(),
-      summary: input.summary,
-      outcome: input.outcome ?? null,
-      salience,
-      sourceThreadId: input.sourceThreadId ?? null,
-      sourceMessageRange: input.sourceMessageRange ?? null,
-      occurredAt: input.occurredAt ?? now,
-      createdAt: now,
-      metadata: input.metadata ?? {},
-    };
   }
 
   private queryEpisodes(
@@ -789,13 +788,6 @@ export class InMemoryMemoryStore implements MemoryStore {
 /** A proposal the caller can hold without sharing the store's evidence array. */
 function copyProposal(p: RuleProposal): RuleProposal {
   return { ...p, evidenceThreadIds: [...p.evidenceThreadIds] };
-}
-
-function clamp01(n: number): number {
-  if (Number.isNaN(n)) return 0.5;
-  if (n < 0) return 0;
-  if (n > 1) return 1;
-  return n;
 }
 
 /** Current facts in insertion order; with `includeRetired`, retired ones follow. */

@@ -47,6 +47,7 @@ import {
   COMPACT_EPISODE_KIND,
   DISTILL_EPISODE_KIND,
   MAX_FACT_CHARS,
+  MemoryLimitError,
   type EpisodicRecord,
   type Fact,
   type MemoryStore,
@@ -827,15 +828,17 @@ export class DefaultConsolidator implements Consolidator {
     readonly relations: ReadonlyArray<ParsedRelation>;
   }): Promise<void> {
     const { resourceKey, relations } = params;
-    const existing = await this.store.listResourceRelations(resourceKey);
-    const known = new Set(existing.map((r) => relationKey(r)));
-    let count = existing.length;
     for (const relation of relations) {
-      if (!known.has(relationKey(relation))) {
-        if (count >= MAX_RELATIONS_PER_RESOURCE) continue;
-        count += 1;
+      try {
+        await this.store.appendResourceRelation(
+          resourceKey,
+          { ...relation, source: "model" },
+          { maxRelations: MAX_RELATIONS_PER_RESOURCE },
+        );
+      } catch (error) {
+        if (!(error instanceof MemoryLimitError)) throw error;
+        // At the cap: skip new triples; ones already stored still pass.
       }
-      await this.store.appendResourceRelation(resourceKey, { ...relation, source: "model" });
     }
   }
 
@@ -846,15 +849,17 @@ export class DefaultConsolidator implements Consolidator {
     readonly corrections: ReadonlyArray<string>;
   }): Promise<void> {
     const { resourceKey, threadId, corrections } = params;
-    const proposals = await this.store.listResourceRuleProposals(resourceKey);
-    let pending = proposals.filter((p) => p.status === "pending").length;
-    const known = new Set(proposals.map((p) => normalizeRuleText(p.text)));
     for (const text of corrections) {
-      if (!known.has(normalizeRuleText(text))) {
-        if (pending >= MAX_PENDING_RULE_PROPOSALS) continue;
-        pending += 1;
+      try {
+        await this.store.recordResourceRuleProposal(
+          resourceKey,
+          { text, threadId },
+          { maxPending: MAX_PENDING_RULE_PROPOSALS },
+        );
+      } catch (error) {
+        if (!(error instanceof MemoryLimitError)) throw error;
+        // Too many wait for a decision: skip new texts; known ones still gain evidence.
       }
-      await this.store.recordResourceRuleProposal(resourceKey, { text, threadId });
     }
   }
 

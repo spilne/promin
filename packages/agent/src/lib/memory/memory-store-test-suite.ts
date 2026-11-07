@@ -17,6 +17,7 @@ import {
   type FactInput,
   type FactListParams,
   type MemoryStore,
+  MemoryLimitError,
 } from "./types.ts";
 
 const NS = "ns-test";
@@ -304,6 +305,101 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
         expect(
           (await s.listResourceRuleProposals(key, { status: "pending" })).map((x) => x.id),
         ).toEqual([]);
+      });
+    });
+
+    describe("atomic limits", () => {
+      // Stores that persist between tests (Postgres) must not see earlier tests' rows.
+      let key = { namespaceId: NS, resourceId: ALICE };
+      let n = 0;
+      beforeEach(() => {
+        n += 1;
+        key = { namespaceId: NS, resourceId: `limit-alice-${n}-${Date.now()}` };
+      });
+
+      const settle = (calls: Promise<unknown>[]) => Promise.allSettled(calls);
+      const limitErrors = (results: PromiseSettledResult<unknown>[]) =>
+        results.filter((r) => r.status === "rejected" && r.reason instanceof MemoryLimitError);
+
+      it("holds the relation cap under concurrent writers, and still returns a known triple at the cap", async () => {
+        const s = await make();
+        const results = await settle(
+          Array.from({ length: 8 }, (_, i) =>
+            s.appendResourceRelation(
+              key,
+              { subject: `Person ${i}`, predicate: "knows", object: "Anton", source: "model" },
+              { maxRelations: 3 },
+            ),
+          ),
+        );
+        expect(await s.listResourceRelations(key)).toHaveLength(3);
+        expect(limitErrors(results)).toHaveLength(5);
+
+        const known = (await s.listResourceRelations(key))[0]!;
+        const again = await s.appendResourceRelation(
+          key,
+          {
+            subject: known.subject,
+            predicate: known.predicate,
+            object: known.object,
+            source: "user",
+          },
+          { maxRelations: 3 },
+        );
+        expect(again.id).toBe(known.id);
+      });
+
+      it("holds the pending-proposal cap, keeps updating known texts, and ignores decided ones", async () => {
+        const s = await make();
+        const results = await settle(
+          Array.from({ length: 6 }, (_, i) =>
+            s.recordResourceRuleProposal(
+              key,
+              { text: `rule number ${i}`, threadId: "t1" },
+              { maxPending: 2 },
+            ),
+          ),
+        );
+        const pending = await s.listResourceRuleProposals(key, { status: "pending" });
+        expect(pending).toHaveLength(2);
+        expect(limitErrors(results)).toHaveLength(4);
+
+        const known = pending[0]!;
+        const more = await s.recordResourceRuleProposal(
+          key,
+          { text: known.text, threadId: "t2" },
+          { maxPending: 2 },
+        );
+        expect(more.occurrences).toBe(2);
+
+        await s.decideResourceRuleProposal(key, { id: known.id, status: "rejected" });
+        await s.recordResourceRuleProposal(
+          key,
+          { text: "a fresh rule", threadId: "t1" },
+          { maxPending: 2 },
+        );
+        expect(await s.listResourceRuleProposals(key, { status: "pending" })).toHaveLength(2);
+      });
+
+      it("appends static rules atomically, without duplicates, and refuses past the limit", async () => {
+        const s = await make();
+        await s.upsertResource(key, { staticRules: "- be kind" });
+        await Promise.all(
+          Array.from({ length: 10 }, (_, i) =>
+            s.appendResourceStaticRule(key, { text: `rule ${i}`, maxChars: 1000 }),
+          ),
+        );
+        await s.appendResourceStaticRule(key, { text: "Be kind.", maxChars: 1000 });
+        const lines = (await s.getResource(key))!.staticRules!.split("\n");
+        expect(lines).toHaveLength(11);
+        expect(lines[0]).toBe("- be kind");
+        for (let i = 0; i < 10; i++) expect(lines).toContain(`- rule ${i}`);
+
+        const before = (await s.getResource(key))!.staticRules;
+        await expect(
+          s.appendResourceStaticRule(key, { text: "x".repeat(50), maxChars: 40 }),
+        ).rejects.toBeInstanceOf(MemoryLimitError);
+        expect((await s.getResource(key))!.staticRules).toBe(before);
       });
     });
 

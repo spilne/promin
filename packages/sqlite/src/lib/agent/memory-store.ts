@@ -25,8 +25,12 @@
 
 import { randomUUID } from "node:crypto";
 import {
+  appendStaticRule,
   DEFAULT_THREAD_PAGE_SIZE,
   loadResolvedContext,
+  MemoryLimitError,
+  newEpisode,
+  newFact,
   MIN_SALIENCE_RETENTION,
   normalizeRuleText,
   parseThreadCursor,
@@ -325,7 +329,7 @@ export class SqliteMemoryStore implements MemoryStore {
     if (!(await this.getNamespace(namespaceId))) {
       await this.upsertNamespace(namespaceId, {});
     }
-    const f = this.makeFact(input);
+    const f = newFact({ input, now: this.clock() });
     this.insertFact({
       fact: f,
       supersedes: input.supersedes,
@@ -375,7 +379,7 @@ export class SqliteMemoryStore implements MemoryStore {
     if (!(await this.getNamespace(namespaceId))) {
       await this.upsertNamespace(namespaceId, {});
     }
-    const ep = this.makeEpisode(input);
+    const ep = newEpisode({ input, now: this.clock() });
     this.insertEpisode(SCOPE_NS, namespaceId, null, null, ep);
     return ep;
   }
@@ -463,7 +467,7 @@ export class SqliteMemoryStore implements MemoryStore {
     if (!(await this.getResource(key))) {
       await this.upsertResource(key, {});
     }
-    const f = this.makeFact(input);
+    const f = newFact({ input, now: this.clock() });
     this.insertFact({
       fact: f,
       supersedes: input.supersedes,
@@ -510,43 +514,97 @@ export class SqliteMemoryStore implements MemoryStore {
       .run(SCOPE_RES, key.namespaceId, key.resourceId, factId);
   }
 
-  async appendResourceRelation(key: ScopedKey, input: RelationInput): Promise<Relation> {
+  async appendResourceRelation(
+    key: ScopedKey,
+    input: RelationInput,
+    options?: { readonly maxRelations?: number },
+  ): Promise<Relation> {
     if (!(await this.getResource(key))) {
       await this.upsertResource(key, {});
     }
     const identity = relationKey(input);
-    this.db
-      .query(
-        `INSERT INTO ${this.prefix}_relation
-           (id, namespace_id, resource_id, subject, predicate, object, relation_key, source, confidence, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(namespace_id, resource_id, relation_key) DO NOTHING`,
-      )
-      .run(
-        randomUUID(),
-        key.namespaceId,
-        key.resourceId,
-        input.subject.trim(),
-        input.predicate.trim(),
-        input.object.trim(),
-        identity,
-        input.source,
-        resolveFactConfidence(input),
-        this.clock(),
-      );
-    const row = this.db
-      .query<DbRelationRow>(
-        `SELECT * FROM ${this.prefix}_relation
-         WHERE namespace_id = ? AND resource_id = ? AND relation_key = ?`,
-      )
-      .get(key.namespaceId, key.resourceId, identity);
+    const table = `${this.prefix}_relation`;
+    const tx = this.db.transaction(() => {
+      const find = () =>
+        this.db
+          .query<DbRelationRow>(
+            `SELECT * FROM ${table} WHERE namespace_id = ? AND resource_id = ? AND relation_key = ?`,
+          )
+          .get(key.namespaceId, key.resourceId, identity);
+      const existing = find();
+      if (existing) return existing;
+      if (options?.maxRelations !== undefined) {
+        const count = this.db
+          .query<{ n: number }>(
+            `SELECT COUNT(*) AS n FROM ${table} WHERE namespace_id = ? AND resource_id = ?`,
+          )
+          .get(key.namespaceId, key.resourceId);
+        if ((count?.n ?? 0) >= options.maxRelations) {
+          throw new MemoryLimitError(`Resource already has ${options.maxRelations} relations.`);
+        }
+      }
+      this.db
+        .query(
+          `INSERT INTO ${table}
+             (id, namespace_id, resource_id, subject, predicate, object, relation_key, source, confidence, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          randomUUID(),
+          key.namespaceId,
+          key.resourceId,
+          input.subject.trim(),
+          input.predicate.trim(),
+          input.object.trim(),
+          identity,
+          input.source,
+          resolveFactConfidence(input),
+          this.clock(),
+        );
+      return find();
+    });
+    const row = tx();
     if (!row) throw new Error(`Relation vanished after insert: ${identity}`);
     return toRelation(row);
+  }
+
+  async appendResourceStaticRule(
+    key: ScopedKey,
+    params: { readonly text: string; readonly maxChars: number },
+  ): Promise<ResourceRow> {
+    if (!(await this.getResource(key))) {
+      await this.upsertResource(key, {});
+    }
+    const tx = this.db.transaction(() => {
+      const row = this.db
+        .query<DbResourceRow>(
+          `SELECT * FROM ${this.prefix}_resource WHERE namespace_id = ? AND resource_id = ?`,
+        )
+        .get(key.namespaceId, key.resourceId);
+      if (!row) throw new Error("Resource vanished while appending a rule");
+      const rules = appendStaticRule({
+        existing: row.static_rules,
+        text: params.text,
+        maxChars: params.maxChars,
+      });
+      if (rules !== (row.static_rules?.trim() ?? "")) {
+        this.db
+          .query(
+            `UPDATE ${this.prefix}_resource SET static_rules = ?, updated_at = ? WHERE namespace_id = ? AND resource_id = ?`,
+          )
+          .run(rules, this.clock(), key.namespaceId, key.resourceId);
+      }
+    });
+    tx();
+    const updated = await this.getResource(key);
+    if (!updated) throw new Error("Resource vanished while appending a rule");
+    return updated;
   }
 
   async recordResourceRuleProposal(
     key: ScopedKey,
     input: { readonly text: string; readonly threadId: string },
+    options?: { readonly maxPending?: number },
   ): Promise<RuleProposal> {
     if (!(await this.getResource(key))) {
       await this.upsertResource(key, {});
@@ -561,6 +619,18 @@ export class SqliteMemoryStore implements MemoryStore {
         )
         .get(key.namespaceId, key.resourceId, identity);
       if (!row) {
+        if (options?.maxPending !== undefined) {
+          const pending = this.db
+            .query<{ n: number }>(
+              `SELECT COUNT(*) AS n FROM ${table} WHERE namespace_id = ? AND resource_id = ? AND status = 'pending'`,
+            )
+            .get(key.namespaceId, key.resourceId);
+          if ((pending?.n ?? 0) >= options.maxPending) {
+            throw new MemoryLimitError(
+              `Resource already has ${options.maxPending} pending proposals.`,
+            );
+          }
+        }
         this.db
           .query(
             `INSERT INTO ${table}
@@ -661,7 +731,7 @@ export class SqliteMemoryStore implements MemoryStore {
     if (!(await this.getResource(key))) {
       await this.upsertResource(key, {});
     }
-    const ep = this.makeEpisode(input);
+    const ep = newEpisode({ input, now: this.clock() });
     this.insertEpisode(SCOPE_RES, key.namespaceId, key.resourceId, null, ep);
     return ep;
   }
@@ -856,7 +926,7 @@ export class SqliteMemoryStore implements MemoryStore {
     if (!(await this.getThread(key))) {
       await this.createThread(key);
     }
-    const f = this.makeFact(input);
+    const f = newFact({ input, now: this.clock() });
     this.insertFact({
       fact: f,
       supersedes: input.supersedes,
@@ -1006,7 +1076,7 @@ export class SqliteMemoryStore implements MemoryStore {
     if (!(await this.getThread(key))) {
       await this.createThread(key);
     }
-    const ep = this.makeEpisode(input);
+    const ep = newEpisode({ input, now: this.clock() });
     this.insertEpisode(SCOPE_THR, key.namespaceId, null, key.threadId, ep);
     return ep;
   }
@@ -1131,20 +1201,6 @@ export class SqliteMemoryStore implements MemoryStore {
     return row;
   }
 
-  private makeFact(input: FactInput): Fact {
-    const now = this.clock();
-    return {
-      id: randomUUID(),
-      text: input.text,
-      source: input.source,
-      createdAt: now,
-      updatedAt: now,
-      retiredAt: null,
-      supersededBy: null,
-      confidence: resolveFactConfidence(input),
-    };
-  }
-
   /**
    * Insert `fact` and retire the current fact `supersedes` names inside
    * `scopeCondition`, in one transaction.
@@ -1169,22 +1225,6 @@ export class SqliteMemoryStore implements MemoryStore {
       insert(this.db);
     });
     tx();
-  }
-
-  private makeEpisode(input: EpisodeInput): EpisodicRecord {
-    const now = this.clock();
-    const salience = clamp01(input.salience ?? 0.5);
-    return {
-      id: randomUUID(),
-      summary: input.summary,
-      outcome: input.outcome ?? null,
-      salience,
-      sourceThreadId: input.sourceThreadId ?? null,
-      sourceMessageRange: input.sourceMessageRange ?? null,
-      occurredAt: input.occurredAt ?? now,
-      createdAt: now,
-      metadata: input.metadata ?? {},
-    };
   }
 
   private insertEpisode(
@@ -1477,11 +1517,4 @@ function toEpisode(r: DbEpisodeRow): EpisodicRecord {
     createdAt: r.created_at,
     metadata: r.metadata ? (JSON.parse(r.metadata) as Record<string, unknown>) : {},
   };
-}
-
-function clamp01(n: number): number {
-  if (Number.isNaN(n)) return 0.5;
-  if (n < 0) return 0;
-  if (n > 1) return 1;
-  return n;
 }
