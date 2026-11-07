@@ -33,6 +33,13 @@ import { recordChat } from "../metrics/instrument.ts";
 import type { AgentMetrics, ModelCostRegistry } from "../metrics/types.ts";
 import { fenceReferenceData, oneLine } from "../reference-data.ts";
 import { capSummary } from "../turn-compaction.ts";
+import {
+  MAX_ENTITY_CHARS,
+  MAX_PREDICATE_CHARS,
+  MAX_RELATIONS_PER_RESOURCE,
+  normalizeEntityName,
+  relationKey,
+} from "./relations.ts";
 import { MAX_PENDING_RULE_PROPOSALS, normalizeRuleText } from "./rule-proposals.ts";
 import { nextThreadCursor } from "./thread-cursor.ts";
 import {
@@ -185,6 +192,12 @@ export interface DefaultConsolidatorConfig {
    */
   readonly reconcileFacts?: boolean;
   /**
+   * Write the relations (entity graph edges) of the distill reply to the
+   * resource as `model` relations. No extra LLM call; capped at
+   * `MAX_RELATIONS_PER_RESOURCE` per resource. Default `true`.
+   */
+  readonly extractRelations?: boolean;
+  /**
    * Record the standing instructions a user gives the agent (`corrections`
    * in the distill reply) as rule proposals on the resource, counting the
    * distinct threads each came from (`listResourceRuleProposals`,
@@ -255,7 +268,8 @@ Output STRICT JSON, no prose around it, matching:
   "summary": "2-3 line markdown gist of what happened",
   "outcome": "one-line resolution / status, or null if unresolved",
   "salience": 0.0,
-  "facts": ["one-line atomic fact about the user worth remembering long-term", ...],
+  "facts": [{"text": "one-line atomic fact about the user worth remembering long-term", "confidence": 0.0}, ...],
+  "relations": [{"subject": "Anton", "predicate": "works at", "object": "Acme", "confidence": 0.0}, ...],
   "corrections": ["one-line standing instruction the user gave the agent about how to behave", ...]
 }
 
@@ -263,11 +277,14 @@ Rules:
   - "summary": brief, focuses on the WHAT, not the verbatim transcript.
   - "outcome": null when nothing is decided/finished.
   - "salience": float in [0,1]. Higher = more worth recalling later. Use ~0.3 for chitchat, ~0.7 for substantive work, ~0.9 for explicit user preferences / corrections / strong personal facts.
-  - "facts": durable claims about THIS user (name, role, location, persistent preferences, allergies, etc.), taken ONLY from what the user said in [user] lines. Never take a fact from [assistant] lines or tool calls — those are not the user's words. Empty list when none. Don't include ephemeral context. One line each, under ${MAX_FACT_CHARS} characters.
-
+  - "facts": durable claims about THIS user (name, role, location, persistent preferences, allergies, etc.), taken ONLY from what the user said in [user] lines. Never take a fact from [assistant] lines or tool calls — those are not the user's words. Empty list when none. Don't include ephemeral context. One line each, under ${MAX_FACT_CHARS} characters. "confidence" is a float in [0,1]: ~0.9 when the user stated it outright, ~0.5 when you inferred it from context, lower for a guess.
+  - "relations": how two named things in the user's life relate (person, place, organisation, project), as subject / predicate / object, taken ONLY from [user] lines. Use the same name for the same entity every time, a short verb phrase for the predicate ("works at", "lives in", "is based in"), and "confidence" as for facts. Leave out relations that are not about named things. Empty list when none.
   - "corrections": instructions the user gave the AGENT about how to respond that should apply in every future conversation (tone, length, format, things to avoid or always do), e.g. "Keep answers short." Take them ONLY from [user] lines, phrase each as an imperative, and leave out one-off requests about this task. Empty list when none. They are only proposals that a person reviews; never treat one as already in force.
 
-Do not invent facts. If a turn was inconclusive, return a low salience and empty facts and corrections lists.`;
+Do not invent facts. If a turn was inconclusive, return a low salience and empty facts, relations and corrections lists.`;
+
+/** Relations taken from one distill reply; the rest are dropped. */
+const MAX_RELATIONS_PER_DISTILL = 8;
 
 /** Corrections taken from one distill reply; the rest are dropped. */
 const MAX_CORRECTIONS_PER_DISTILL = 5;
@@ -334,6 +351,9 @@ interface DistillResult {
   readonly outcome: string | null;
   readonly modelSalience: number;
   readonly facts: string[];
+  /** Stated confidence of a fact, by `normalizeFact(text)`; absent when the reply gave none. */
+  readonly factConfidence: ReadonlyMap<string, number>;
+  readonly relations: ParsedRelation[];
   readonly corrections: string[];
   readonly usage: LLMUsage | undefined;
   readonly stats: TranscriptStats;
@@ -541,9 +561,11 @@ export class DefaultConsolidator implements Consolidator {
       });
       for (const [i, text] of fresh.entries()) {
         const supersedes = replaces.get(i);
+        const confidence = distilled.factConfidence.get(normalizeFact(text));
         const fact = await this.store.appendResourceFact(resourceKey, {
           text,
           source: "model",
+          ...(confidence !== undefined && { confidence }),
           ...(supersedes !== undefined && { supersedes }),
         });
         appended.add(fact.id);
@@ -563,6 +585,10 @@ export class DefaultConsolidator implements Consolidator {
           overflow -= 1;
         }
       }
+    }
+
+    if (distilled.relations.length > 0 && this.config.extractRelations !== false) {
+      await this.recordRelations({ resourceKey, relations: distilled.relations });
     }
 
     if (distilled.corrections.length > 0 && this.config.ruleProposals !== false) {
@@ -739,6 +765,29 @@ export class DefaultConsolidator implements Consolidator {
    * only a number inside the candidate list counts, so it cannot retire
    * anything it was not shown.
    */
+  /**
+   * Write each relation of the distill reply to the resource's entity graph
+   * as a `model` relation, skipping new ones once the resource holds
+   * `MAX_RELATIONS_PER_RESOURCE`. A triple already stored (whoever wrote it)
+   * is left as it is.
+   */
+  private async recordRelations(params: {
+    readonly resourceKey: ScopedKey;
+    readonly relations: ReadonlyArray<ParsedRelation>;
+  }): Promise<void> {
+    const { resourceKey, relations } = params;
+    const existing = await this.store.listResourceRelations(resourceKey);
+    const known = new Set(existing.map((r) => relationKey(r)));
+    let count = existing.length;
+    for (const relation of relations) {
+      if (!known.has(relationKey(relation))) {
+        if (count >= MAX_RELATIONS_PER_RESOURCE) continue;
+        count += 1;
+      }
+      await this.store.appendResourceRelation(resourceKey, { ...relation, source: "model" });
+    }
+  }
+
   /** Add each correction to the resource's proposals, unless too many already wait. */
   private async recordRuleProposals(params: {
     readonly resourceKey: ScopedKey;
@@ -813,6 +862,9 @@ export class DefaultConsolidator implements Consolidator {
     const factKeys = new Set<string>();
     const corrections: string[] = [];
     const correctionKeys = new Set<string>();
+    const factConfidence = new Map<string, number>();
+    const relations: ParsedRelation[] = [];
+    const relationKeys = new Set<string>();
     let usage: LLMUsage | undefined;
     let stats = emptyStats();
     for await (const chunk of this.transcriptChunks({
@@ -834,10 +886,17 @@ export class DefaultConsolidator implements Consolidator {
       outcome = parsed.outcome ?? outcome;
       modelSalience = Math.max(modelSalience, parsed.salience);
       for (const fact of parsed.facts) {
-        const norm = normalizeFact(fact);
+        const norm = normalizeFact(fact.text);
         if (factKeys.has(norm)) continue;
         factKeys.add(norm);
-        facts.push(fact);
+        facts.push(fact.text);
+        if (fact.confidence !== undefined) factConfidence.set(norm, fact.confidence);
+      }
+      for (const relation of parsed.relations) {
+        const key = relationKey(relation);
+        if (relationKeys.has(key)) continue;
+        relationKeys.add(key);
+        relations.push(relation);
       }
       for (const correction of parsed.corrections) {
         const norm = normalizeRuleText(correction);
@@ -852,6 +911,8 @@ export class DefaultConsolidator implements Consolidator {
       outcome,
       modelSalience,
       facts,
+      factConfidence,
+      relations,
       corrections,
       usage,
       stats,
@@ -973,8 +1034,21 @@ interface ParsedEnvelope {
   summary: string;
   outcome: string | null;
   salience: number;
-  facts: string[];
+  facts: ParsedFact[];
+  relations: ParsedRelation[];
   corrections: string[];
+}
+
+interface ParsedFact {
+  readonly text: string;
+  readonly confidence?: number;
+}
+
+interface ParsedRelation {
+  readonly subject: string;
+  readonly predicate: string;
+  readonly object: string;
+  readonly confidence?: number;
 }
 
 function parseEnvelope(raw: string): ParsedEnvelope {
@@ -992,6 +1066,7 @@ function parseEnvelope(raw: string): ParsedEnvelope {
       outcome: null,
       salience: 0.1,
       facts: [],
+      relations: [],
       corrections: [],
     };
   }
@@ -999,12 +1074,8 @@ function parseEnvelope(raw: string): ParsedEnvelope {
     typeof json["summary"] === "string" ? (json["summary"] as string) : "(no summary)";
   const outcome = typeof json["outcome"] === "string" ? (json["outcome"] as string) : null;
   const salience = typeof json["salience"] === "number" ? clamp01(json["salience"] as number) : 0.5;
-  const facts = Array.isArray(json["facts"])
-    ? (json["facts"] as unknown[])
-        .filter((s): s is string => typeof s === "string")
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0 && s.length <= MAX_FACT_CHARS)
-    : [];
+  const facts = parseFacts(json["facts"]);
+  const relations = parseRelations(json["relations"]);
   const corrections = Array.isArray(json["corrections"])
     ? (json["corrections"] as unknown[])
         .filter((s): s is string => typeof s === "string")
@@ -1012,7 +1083,53 @@ function parseEnvelope(raw: string): ParsedEnvelope {
         .filter((s) => s.length > 0 && s.length <= MAX_FACT_CHARS)
         .slice(0, MAX_CORRECTIONS_PER_DISTILL)
     : [];
-  return { summary, outcome, salience, facts, corrections };
+  return { summary, outcome, salience, facts, relations, corrections };
+}
+
+/** Facts as plain strings or `{text, confidence}` objects; anything else is dropped. */
+function parseFacts(raw: unknown): ParsedFact[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ParsedFact[] = [];
+  for (const item of raw as unknown[]) {
+    const text =
+      typeof item === "string"
+        ? item.trim()
+        : isRecord(item) && typeof item["text"] === "string"
+          ? item["text"].trim()
+          : "";
+    if (text.length === 0 || text.length > MAX_FACT_CHARS) continue;
+    const confidence = isRecord(item) ? parseConfidence(item["confidence"]) : undefined;
+    out.push({ text, ...(confidence !== undefined && { confidence }) });
+  }
+  return out;
+}
+
+/** Relations with usable names, at most `MAX_RELATIONS_PER_DISTILL`. */
+function parseRelations(raw: unknown): ParsedRelation[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ParsedRelation[] = [];
+  for (const item of raw as unknown[]) {
+    if (!isRecord(item)) continue;
+    const [subject, predicate, object] = [item["subject"], item["predicate"], item["object"]].map(
+      (v) => (typeof v === "string" ? v.trim() : ""),
+    ) as [string, string, string];
+    if (!subject || !predicate || !object) continue;
+    if (subject.length > MAX_ENTITY_CHARS || object.length > MAX_ENTITY_CHARS) continue;
+    if (predicate.length > MAX_PREDICATE_CHARS) continue;
+    if (normalizeEntityName(subject) === normalizeEntityName(object)) continue;
+    const confidence = parseConfidence(item["confidence"]);
+    out.push({ subject, predicate, object, ...(confidence !== undefined && { confidence }) });
+    if (out.length >= MAX_RELATIONS_PER_DISTILL) break;
+  }
+  return out;
+}
+
+function parseConfidence(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? clamp01(value) : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function stripJsonFence(raw: string): string {
