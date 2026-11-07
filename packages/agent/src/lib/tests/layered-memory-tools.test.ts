@@ -220,6 +220,30 @@ describe("layered memory tool — set with confidence", () => {
   });
 });
 
+describe("layered memory tool — ids in replies work as arguments", () => {
+  const idIn = (reply: string) => /id: ([0-9a-f-]{36})/.exec(reply)?.[1] ?? "";
+
+  it("the id `link` returns removes the relation, and the id `set` returns can be superseded", async () => {
+    const { store, run } = makeTool({ withResource: true });
+    const key = { namespaceId: NS, resourceId: ALICE };
+    const linked = idIn(
+      await run({ command: "link", subject: "A", predicate: "knows", object: "B" }),
+    );
+    expect(await run({ command: "unlink", id: linked })).toContain("Removed");
+    expect(await store.listResourceRelations(key)).toEqual([]);
+
+    const saved = idIn(await run({ command: "set", scope: "resource", text: "lives in Paris" }));
+    const next = await run({
+      command: "set",
+      scope: "resource",
+      text: "lives in Rome",
+      supersedes: saved,
+    });
+    expect(next).toContain("Replaced fact");
+    expect((await store.listResourceFacts(key)).map((f) => f.text)).toEqual(["lives in Rome"]);
+  });
+});
+
 describe("layered memory tool — link and graph recall", () => {
   it("recall follows links two hops from an entity the query names", async () => {
     const { run } = makeTool({ withResource: true });

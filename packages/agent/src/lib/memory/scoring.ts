@@ -15,6 +15,13 @@
 /** Salience never decays below this share of its stored value. */
 export const MIN_SALIENCE_RETENTION = 0.2;
 
+/**
+ * Age, in half-lives, past which decay stops counting. Salience is floored at
+ * `MIN_SALIENCE_RETENTION` long before, so this changes no result; it keeps
+ * Postgres `power(0.5, x)` from raising an underflow error for a very old episode.
+ */
+export const MAX_DECAY_HALF_LIVES = 64;
+
 /** Cosine similarity below which an embedding match alone is not relevant. */
 export const MIN_SEMANTIC_SIMILARITY = 0.3;
 
@@ -25,6 +32,9 @@ const BM25_B = 0.75;
 const RELEVANCE_WEIGHT = 0.65;
 const IMPORTANCE_WEIGHT = 0.15;
 const RECENCY_WEIGHT = 0.2;
+
+/** Candidates embedded per `rankCandidates` call unless `maxSemanticCandidates` says otherwise. */
+const DEFAULT_MAX_SEMANTIC_CANDIDATES = 64;
 
 /** Weight of the semantic score within relevance when an embedder is present. */
 const SEMANTIC_SHARE = 0.5;
@@ -53,7 +63,7 @@ export function halfLifeFactor(params: {
   readonly halfLifeMs: number;
 }): number {
   if (params.ageMs <= 0) return 1;
-  return 0.5 ** (params.ageMs / params.halfLifeMs);
+  return 0.5 ** Math.min(params.ageMs / params.halfLifeMs, MAX_DECAY_HALF_LIVES);
 }
 
 /** Lowercased words of 3+ characters, with a trailing plural `s` removed. */
@@ -154,7 +164,7 @@ export async function rankCandidates(params: {
         embedder,
         now,
         recencyHalfLifeMs,
-        max: params.maxSemanticCandidates ?? 64,
+        max: params.maxSemanticCandidates ?? DEFAULT_MAX_SEMANTIC_CANDIDATES,
       })
     : null;
 
@@ -211,6 +221,8 @@ async function semanticScores(params: {
   }
 }
 
-function clamp01(n: number): number {
+/** `n` limited to 0..1; NaN counts as 0. */
+export function clamp01(n: number): number {
+  if (Number.isNaN(n)) return 0;
   return Math.min(1, Math.max(0, n));
 }

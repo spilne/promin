@@ -989,6 +989,13 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
           now,
         });
         expect(decayed.map((e) => e.summary)).toEqual(["ancient-vital", "fresh-trivial"]);
+        // 3000 half-lives: a naive power(0.5, x) underflows in Postgres.
+        const ancient = await s.listResourceEpisodes(key, {
+          order: "decayedSalienceDesc",
+          halfLifeMs: DAY,
+          now,
+        });
+        expect(ancient.map((e) => e.summary)).toEqual(["ancient-vital", "fresh-trivial"]);
         const plain = await s.listResourceEpisodes(key, { order: "decayedSalienceDesc" });
         expect(plain.map((e) => e.summary)).toEqual(["ancient-vital", "fresh-trivial"]);
       });

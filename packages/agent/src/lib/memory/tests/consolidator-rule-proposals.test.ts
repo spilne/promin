@@ -8,6 +8,7 @@ import { describe, expect, it } from "bun:test";
 import { DefaultConsolidator } from "../consolidator.ts";
 import { InMemoryMemoryStore } from "../in-memory-memory-store.ts";
 import { approveRuleProposal, MAX_PENDING_RULE_PROPOSALS } from "../rule-proposals.ts";
+import { MAX_STATIC_RULES_CHARS } from "../types.ts";
 import type { LLMProvider } from "../../llm-provider.ts";
 
 const RESOURCE = { namespaceId: "acme", resourceId: "alice" };
@@ -81,6 +82,20 @@ describe("rule proposals from distillation", () => {
     ).toBeNull();
     const context = await store.resolveContext(thread("t3"), { maxMessageTokens: 100_000 });
     expect(JSON.stringify(context)).toContain("Keep answers short.");
+  });
+
+  it("refuses to approve a rule that would overflow staticRules, and leaves the proposal pending", async () => {
+    const { store, talk } = await setup({ corrections: () => ["Keep answers short."] });
+    await talk("t1");
+    await store.upsertResource(RESOURCE, { staticRules: "x".repeat(MAX_STATIC_RULES_CHARS - 5) });
+    const [p] = await store.listResourceRuleProposals(RESOURCE);
+    await expect(approveRuleProposal({ store, key: RESOURCE, proposalId: p!.id })).rejects.toThrow(
+      "staticRules",
+    );
+    expect((await store.listResourceRuleProposals(RESOURCE))[0]!.status).toBe("pending");
+    expect((await store.getResource(RESOURCE))?.staticRules).toHaveLength(
+      MAX_STATIC_RULES_CHARS - 5,
+    );
   });
 
   it("keeps a rejected proposal rejected when it comes up again", async () => {

@@ -540,7 +540,8 @@ export class SqliteMemoryStore implements MemoryStore {
          WHERE namespace_id = ? AND resource_id = ? AND relation_key = ?`,
       )
       .get(key.namespaceId, key.resourceId, identity);
-    return toRelation(row!);
+    if (!row) throw new Error(`Relation vanished after insert: ${identity}`);
+    return toRelation(row);
   }
 
   async recordResourceRuleProposal(
@@ -577,7 +578,7 @@ export class SqliteMemoryStore implements MemoryStore {
             now,
           );
       } else {
-        const evidence = JSON.parse(row.evidence_thread_ids) as string[];
+        const evidence = parseThreadIds(row.evidence_thread_ids);
         if (!evidence.includes(input.threadId)) evidence.push(input.threadId);
         this.db
           .query(`UPDATE ${table} SET evidence_thread_ids = ?, last_seen_at = ? WHERE id = ?`)
@@ -587,9 +588,11 @@ export class SqliteMemoryStore implements MemoryStore {
         .query<DbRuleProposalRow>(
           `SELECT * FROM ${table} WHERE namespace_id = ? AND resource_id = ? AND text_key = ?`,
         )
-        .get(key.namespaceId, key.resourceId, identity)!;
+        .get(key.namespaceId, key.resourceId, identity);
     });
-    return toRuleProposal(tx());
+    const recorded = tx();
+    if (!recorded) throw new Error(`Rule proposal vanished after insert: ${identity}`);
+    return toRuleProposal(recorded);
   }
 
   async listResourceRuleProposals(
@@ -1356,8 +1359,14 @@ interface DbRuleProposalRow {
   last_seen_at: number;
 }
 
+/** The thread ids of a stored evidence list; anything but a JSON array of strings reads as empty. */
+function parseThreadIds(raw: string): string[] {
+  const parsed: unknown = JSON.parse(raw);
+  return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+}
+
 function toRuleProposal(r: DbRuleProposalRow): RuleProposal {
-  const evidenceThreadIds = JSON.parse(r.evidence_thread_ids) as string[];
+  const evidenceThreadIds = parseThreadIds(r.evidence_thread_ids);
   return {
     id: r.id,
     text: r.text,

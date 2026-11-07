@@ -57,10 +57,10 @@ export interface LayeredMemoryToolConfig {
   readonly agentId?: string;
   /**
    * Default sources searched by `recall` when the model does not specify.
-   * Default: `["fact", "episode"]` — messages are not searched by default
-   * since recent ones are already in context.
+   * Default: `["fact", "episode"]`. Messages are not searchable: recent ones
+   * are already in context.
    */
-  readonly defaultRecallSources?: ReadonlyArray<"fact" | "episode" | "message">;
+  readonly defaultRecallSources?: ReadonlyArray<RecallSourceName>;
   /**
    * Adds semantic matching to `recall`: query and candidates are embedded
    * and ranked by cosine similarity next to BM25. Without it, or when it
@@ -85,7 +85,8 @@ const RECALL_GRAPH_LIMIT = 12;
 
 const ModelScope = z.enum(["thread", "resource"]);
 const RecallScope = z.enum(["thread", "resource", "namespace"]);
-const RecallSource = z.enum(["fact", "episode", "message"]);
+const RecallSource = z.enum(["fact", "episode"]);
+type RecallSourceName = z.infer<typeof RecallSource>;
 
 const SET_DESCRIPTION =
   "Save a small, durable claim that should survive this conversation. " +
@@ -292,7 +293,7 @@ export function createLayeredMemoryTool(
               ...(input.confidence !== undefined && { confidence: input.confidence }),
               ...(replaced.id && { supersedes: replaced.id }),
             });
-            return `Saved to resource memory (id: ${shortId(f.id)}).${replaced.note}`;
+            return `Saved to resource memory (id: ${f.id}).${replaced.note}`;
           }
           const replaced = resolveSupersedes({
             facts: await config.store.listThreadFacts(threadKey),
@@ -305,7 +306,7 @@ export function createLayeredMemoryTool(
             ...(input.confidence !== undefined && { confidence: input.confidence }),
             ...(replaced.id && { supersedes: replaced.id }),
           });
-          return `Saved to thread memory (id: ${shortId(f.id)}).${replaced.note}`;
+          return `Saved to thread memory (id: ${f.id}).${replaced.note}`;
         }
         case "link": {
           if (!resourceKey) {
@@ -324,9 +325,7 @@ export function createLayeredMemoryTool(
             source: "model",
             ...(input.confidence !== undefined && { confidence: input.confidence }),
           });
-          return already
-            ? `Already linked (id: ${shortId(r.id)}).`
-            : `Linked (id: ${shortId(r.id)}).`;
+          return already ? `Already linked (id: ${r.id}).` : `Linked (id: ${r.id}).`;
         }
         case "unlink": {
           if (!resourceKey) {
@@ -366,6 +365,7 @@ export function createLayeredMemoryTool(
           return "Updated thread working memory.";
         }
         case "recall": {
+          const scopes = input.scopes ?? defaultSearchScopes(resourceKey != null);
           const hits = await recallSearch({
             store: config.store,
             now: (config.now ?? Date.now)(),
@@ -375,11 +375,10 @@ export function createLayeredMemoryTool(
             resourceKey,
             threadKey,
             query: input.query,
-            scopes: input.scopes ?? defaultSearchScopes(resourceKey != null),
+            scopes,
             sources: input.sources ?? [...defaultSources],
             limit: input.limit,
           });
-          const scopes = input.scopes ?? defaultSearchScopes(resourceKey != null);
           const related =
             resourceKey && scopes.includes("resource")
               ? relationNeighborhood({
@@ -420,7 +419,7 @@ function resolveSupersedes(params: {
       refusal: `Nothing saved: fact ${id} was written by a ${target.source} and cannot be replaced by the model.`,
     };
   }
-  return { id: target.id, note: ` Replaced fact ${shortId(target.id)}.` };
+  return { id: target.id, note: ` Replaced fact ${target.id}.` };
 }
 
 function defaultSearchScopes(hasResource: boolean): Array<"thread" | "resource" | "namespace"> {
@@ -436,7 +435,8 @@ interface MemoryHit {
   readonly id: string;
   readonly text: string;
   readonly score: number;
-  readonly createdAt: number;
+  /** When the fact was last written, or the episode happened; epoch ms. */
+  readonly at: number;
 }
 
 interface RecallSearchInput {
@@ -446,7 +446,7 @@ interface RecallSearchInput {
   readonly threadKey: ThreadKey;
   readonly query: string;
   readonly scopes: ReadonlyArray<"thread" | "resource" | "namespace">;
-  readonly sources: ReadonlyArray<"fact" | "episode" | "message">;
+  readonly sources: ReadonlyArray<RecallSourceName>;
   readonly limit: number;
   readonly now: number;
   readonly recencyHalfLifeMs: number;
@@ -479,7 +479,7 @@ async function recallSearch(input: RecallSearchInput): Promise<MemoryHit[]> {
         scope,
         id: f.id,
         text: f.text,
-        createdAt: f.updatedAt,
+        at: f.updatedAt,
         importance: f.confidence,
       });
     }
@@ -489,7 +489,7 @@ async function recallSearch(input: RecallSearchInput): Promise<MemoryHit[]> {
         scope,
         id: e.id,
         text: e.outcome ? `${e.summary} — ${e.outcome}` : e.summary,
-        createdAt: e.occurredAt,
+        at: e.occurredAt,
         importance: e.salience,
       });
     }
@@ -500,7 +500,7 @@ async function recallSearch(input: RecallSearchInput): Promise<MemoryHit[]> {
     candidates: candidates.map((c) => ({
       text: c.text,
       importance: c.importance,
-      at: c.createdAt,
+      at: c.at,
     })),
     now: input.now,
     recencyHalfLifeMs: input.recencyHalfLifeMs,
@@ -548,8 +548,4 @@ function formatHits(params: {
     });
   }
   return fenceReferenceData({ source: "memory-recall", sections })!;
-}
-
-function shortId(id: string): string {
-  return id.length > 8 ? id.slice(0, 8) : id;
 }

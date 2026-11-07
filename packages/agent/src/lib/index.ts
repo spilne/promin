@@ -206,6 +206,7 @@ export {
   bm25Scores,
   cosineSimilarity,
   decayedSalience,
+  MAX_DECAY_HALF_LIVES,
   MIN_SALIENCE_RETENTION,
   rankCandidates,
   tokenize,

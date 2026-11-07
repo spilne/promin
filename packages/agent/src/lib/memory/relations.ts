@@ -18,6 +18,13 @@ export function normalizeEntityName(name: string): string {
   return name.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
+/** Lowercased letters and digits of `text` as single-space-separated words, no punctuation. */
+function wordsOf(text: string): string {
+  return normalizeEntityName(text)
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
 /** Identity of a relation: the same triple is the same relation. */
 export function relationKey(params: {
   readonly subject: string;
@@ -44,16 +51,17 @@ export function relationNeighborhood(params: {
   readonly limit: number;
 }): Relation[] {
   const { relations, hops, limit } = params;
-  const query = ` ${normalizeEntityName(params.query).replace(/[^\p{L}\p{N}]+/gu, " ")} `;
+  const query = ` ${wordsOf(params.query)} `;
   const names = new Set<string>();
   for (const r of relations) {
     names.add(normalizeEntityName(r.subject));
     names.add(normalizeEntityName(r.object));
   }
   let frontier = new Set(
-    [...names].filter(
-      (n) => n.length > 0 && query.includes(` ${n.replace(/[^\p{L}\p{N}]+/gu, " ")} `),
-    ),
+    [...names].filter((name) => {
+      const words = wordsOf(name);
+      return words.length > 0 && query.includes(` ${words} `);
+    }),
   );
   const seenEntities = new Set(frontier);
   const out: Relation[] = [];

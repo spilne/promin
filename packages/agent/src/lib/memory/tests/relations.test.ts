@@ -34,6 +34,18 @@ describe("relations", () => {
     expect(ids(3)).toEqual(["1", "2", "3"]);
   });
 
+  it("matches names that begin or end with punctuation, and ignores a trailing dot in the query", () => {
+    const relations = [
+      rel("1", "Acme Inc.", "is based in", "Berlin"),
+      rel("2", "C++", "is used by", "Acme Inc."),
+    ];
+    const ids = (query: string) =>
+      relationNeighborhood({ relations, query, hops: 1, limit: 10 }).map((r) => r.id);
+    expect(ids("what does Acme Inc. do")).toEqual(["1", "2"]);
+    expect(ids("tell me about Acme Inc.")).toEqual(["1", "2"]);
+    expect(ids("who uses C++?")).toEqual(["2"]);
+  });
+
   it("follows relations against their direction, matches whole words only, and respects the limit", () => {
     const query = (q: string, limit = 10) =>
       relationNeighborhood({ relations: GRAPH, query: q, hops: 1, limit }).map((r) => r.id);

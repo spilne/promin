@@ -24,6 +24,7 @@ import { and, asc, desc, eq, gte, isNotNull, isNull, lt, sql, type SQL } from "d
 import {
   DEFAULT_THREAD_PAGE_SIZE,
   loadResolvedContext,
+  MAX_DECAY_HALF_LIVES,
   MIN_SALIENCE_RETENTION,
   normalizeRuleText,
   parseThreadCursor,
@@ -393,7 +394,8 @@ export class PostgresMemoryStore implements MemoryStore {
           eq(agentRelation.relationKey, identity),
         ),
       );
-    return toRelation(row!);
+    if (!row) throw new Error(`Relation vanished after insert: ${identity}`);
+    return toRelation(row);
   }
 
   async recordResourceRuleProposal(
@@ -430,7 +432,8 @@ export class PostgresMemoryStore implements MemoryStore {
         },
       })
       .returning();
-    return toRuleProposal(row!);
+    if (!row) throw new Error("Rule proposal upsert returned no row");
+    return toRuleProposal(row);
   }
 
   async listResourceRuleProposals(
@@ -1073,7 +1076,7 @@ export class PostgresMemoryStore implements MemoryStore {
     const halfLifeMs = params?.halfLifeMs ?? 0;
     const now = params?.now ?? this.clock();
     // Same formula as `decayedSalience`: salience * max(0.5^(age/halfLife), floor).
-    const decayed = sql`${agentEpisode.salience} * GREATEST(power(0.5, GREATEST(${now}::double precision - ${agentEpisode.occurredAt}, 0) / ${halfLifeMs}::double precision), ${MIN_SALIENCE_RETENTION}::double precision) DESC`;
+    const decayed = sql`${agentEpisode.salience} * GREATEST(power(0.5, LEAST(GREATEST(${now}::double precision - ${agentEpisode.occurredAt}, 0) / ${halfLifeMs}::double precision, ${MAX_DECAY_HALF_LIVES}::double precision)), ${MIN_SALIENCE_RETENTION}::double precision) DESC`;
     const primary =
       order === "decayedSalienceDesc" && halfLifeMs > 0
         ? decayed

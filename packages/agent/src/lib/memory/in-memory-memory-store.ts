@@ -237,7 +237,7 @@ export class InMemoryMemoryStore implements MemoryStore {
     const list = this.resourceRelations.get(k) ?? [];
     const identity = relationKey(input);
     const existing = list.find((r) => relationKey(r) === identity);
-    if (existing) return existing;
+    if (existing) return { ...existing };
     const relation: Relation = {
       id: randomUUID(),
       subject: input.subject.trim(),
@@ -249,7 +249,7 @@ export class InMemoryMemoryStore implements MemoryStore {
     };
     list.push(relation);
     this.resourceRelations.set(k, list);
-    return relation;
+    return { ...relation };
   }
 
   async recordResourceRuleProposal(
@@ -276,7 +276,7 @@ export class InMemoryMemoryStore implements MemoryStore {
         lastSeenAt: now,
       };
       list[at] = next;
-      return next;
+      return copyProposal(next);
     }
     const proposal: RuleProposal = {
       id: randomUUID(),
@@ -289,18 +289,20 @@ export class InMemoryMemoryStore implements MemoryStore {
     };
     list.push(proposal);
     this.resourceProposals.set(k, list);
-    return proposal;
+    return copyProposal(proposal);
   }
 
   async listResourceRuleProposals(
     key: ScopedKey,
     params?: RuleProposalListParams,
   ): Promise<RuleProposal[]> {
-    return (this.resourceProposals.get(this.resourceK(key)) ?? []).filter(
-      (p) =>
-        (params?.status === undefined || p.status === params.status) &&
-        (params?.minOccurrences === undefined || p.occurrences >= params.minOccurrences),
-    );
+    return (this.resourceProposals.get(this.resourceK(key)) ?? [])
+      .filter(
+        (p) =>
+          (params?.status === undefined || p.status === params.status) &&
+          (params?.minOccurrences === undefined || p.occurrences >= params.minOccurrences),
+      )
+      .map(copyProposal);
   }
 
   async decideResourceRuleProposal(
@@ -312,7 +314,7 @@ export class InMemoryMemoryStore implements MemoryStore {
     if (at < 0) return null;
     const next = { ...list[at]!, status: input.status };
     list[at] = next;
-    return next;
+    return copyProposal(next);
   }
 
   async listResourceRelations(key: ScopedKey): Promise<Relation[]> {
@@ -782,6 +784,11 @@ export class InMemoryMemoryStore implements MemoryStore {
     if (params?.limit !== undefined) out = out.slice(0, params.limit);
     return out;
   }
+}
+
+/** A proposal the caller can hold without sharing the store's evidence array. */
+function copyProposal(p: RuleProposal): RuleProposal {
+  return { ...p, evidenceThreadIds: [...p.evidenceThreadIds] };
 }
 
 function clamp01(n: number): number {
