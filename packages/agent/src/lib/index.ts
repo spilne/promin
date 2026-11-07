@@ -149,12 +149,16 @@ export type {
   ConsolidationLlmCall,
   ConsolidationSignals,
   DefaultConsolidatorConfig,
+  DistillReply,
   TriggerTurnHandling,
 } from "./memory/consolidator.ts";
 export {
   ConsolidationOutputError,
   sweepResourceThreads,
+  DEFAULT_COMPACT_PROMPT,
   DEFAULT_CONSOLIDATION_CHUNK_CHARS,
+  DEFAULT_DISTILL_PROMPT,
+  DEFAULT_RECONCILE_PROMPT,
   DEFAULT_CONSOLIDATION_SUMMARY_TOKENS,
   DEFAULT_MAX_RESOURCE_FACTS,
   NothingToConsolidateError,
