@@ -128,8 +128,8 @@ import {
   completeSignal,
   hasCapability,
 } from "@promin/workflow";
-import { ThreadNotFoundError, TurnKeyConflictError } from "./errors.ts";
-import { THREAD_AGENT_METADATA_KEY } from "./types.ts";
+import { InvalidForkPointError, ThreadNotFoundError, TurnKeyConflictError } from "./errors.ts";
+import { FORK_IN_PROGRESS_METADATA_KEY, THREAD_AGENT_METADATA_KEY } from "./types.ts";
 import type { AgentTool, ApprovalDecision } from "../tool.ts";
 import { resolveLocalAgent } from "../registry/resolve-local-agent.ts";
 import type { ResolveLocalAgentDeps } from "../registry/resolve-local-agent.ts";
@@ -529,6 +529,10 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       if (!existing && opts.createIfMissing === false) {
         throw new ThreadNotFoundError({ namespaceId, threadId });
       }
+      // An unfinished fork is not a usable thread.
+      if (existing?.metadata[FORK_IN_PROGRESS_METADATA_KEY]) {
+        throw new ThreadNotFoundError({ namespaceId, threadId });
+      }
       // A thread belongs to the resource that created it. A caller scoped
       // to a different resource must not read or extend it: treat the
       // thread as absent for them (same error as a missing thread, so ids
@@ -581,6 +585,133 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       ...(this.config.retrievers !== undefined && { retrievers: this.config.retrievers }),
       ...(this.config.budgets !== undefined && { budgets: this.config.budgets }),
     });
+  }
+
+  /** Snapshot a thread into an independent branch with durable lineage metadata. */
+  async forkThread(
+    parentThreadId: string,
+    newThreadId: string,
+    opts: {
+      readonly atSeq?: number;
+      readonly namespaceId?: string;
+      readonly resourceId?: string;
+    } = {},
+  ): Promise<AgentThread<AgentInput, TOutput>> {
+    const memory = this.config.memory;
+    if (!memory) throw new Error("LocalAgent.forkThread requires a MemoryStore");
+    if (!newThreadId || newThreadId === parentThreadId) {
+      throw new Error("LocalAgent.forkThread requires a different, non-empty thread id");
+    }
+    // thread() enforces both namespace and resource ownership.
+    const parentHandle = await this.thread(parentThreadId, { ...opts, createIfMissing: false });
+    // A suspended turn owns an unfinished tool exchange; the fork would not carry it.
+    const pending = (await parentHandle.pendingApprovals?.()) ?? [];
+    if (pending.length) throw new ThreadAwaitingApprovalError(pending);
+    const namespaceId = opts.namespaceId ?? this.config.namespaceId!;
+    const resourceId = opts.resourceId ?? this.config.resourceId;
+    const parentKey: ThreadKey = { namespaceId, resourceId, threadId: parentThreadId };
+    const childKey: ThreadKey = { namespaceId, resourceId, threadId: newThreadId };
+    const parent = await memory.getThread(parentKey);
+    if (!parent) throw new ThreadNotFoundError({ namespaceId, threadId: parentThreadId });
+    const messages = await memory.getMessages(parentKey);
+    const head = messages.at(-1)?.seq ?? 0;
+    const atSeq = opts.atSeq ?? head;
+    if (
+      !Number.isSafeInteger(atSeq) ||
+      atSeq < 0 ||
+      atSeq > head ||
+      (atSeq !== 0 && !messages.some((message) => message.seq === atSeq))
+    ) {
+      throw new InvalidForkPointError("fork atSeq must name a retained message sequence or 0");
+    }
+    const kept = messages.filter((message) => message.seq <= atSeq);
+    // Reject (never snap) a cut inside a tool exchange: the child would hold a
+    // tool call without its result and the next provider request would fail.
+    const answered = new Set(kept.flatMap((m) => (m.role === "tool" ? [m.toolCallId] : [])));
+    for (const message of kept) {
+      if (message.role === "assistant" && message.toolCalls?.some((c) => !answered.has(c.id))) {
+        throw new InvalidForkPointError(
+          "fork atSeq cuts inside a tool exchange; pick a seq after the tool results",
+        );
+      }
+    }
+    const prefix = kept.map((stored) => {
+      const { seq: _seq, createdAt: _createdAt, ...message } = stored;
+      return message as Message;
+    });
+    const parentEpisodes = (await memory.listThreadEpisodes(parentKey)).filter(
+      (episode) => episode.sourceMessageRange === null || episode.sourceMessageRange.toSeq <= atSeq,
+    );
+    const atHead = atSeq === head;
+    const {
+      branchParentThreadId: _parentId,
+      branchAtSeq: _branchAtSeq,
+      branchDepth: _branchDepth,
+      forkInProgress: _forkInProgress,
+      ...parentMetadata
+    } = parent.metadata;
+    // The child is created marked `forkInProgress` and without lineage; the
+    // marker is cleared (and lineage set) only after everything is copied.
+    // A crash mid-copy leaves a thread that thread() refuses and listings hide.
+    await memory.createThread(childKey, {
+      resourceId,
+      title: parent.title,
+      inheritFromParent: parent.inheritFromParent,
+      workingMemory: atHead ? parent.workingMemory : null,
+      metadata: { ...parentMetadata, [FORK_IN_PROGRESS_METADATA_KEY]: true },
+    });
+    try {
+      // Child messages are renumbered from 1; map parent seq -> child seq.
+      const stored = prefix.length ? await memory.appendMessages(childKey, prefix) : [];
+      const seqMap = new Map<number, number>();
+      kept.forEach((message, index) => {
+        const child = stored[index];
+        if (child) seqMap.set(message.seq, child.seq);
+      });
+      for (const episode of parentEpisodes) {
+        const range = episode.sourceMessageRange;
+        let sourceMessageRange: { fromSeq: number; toSeq: number } | null = null;
+        if (range) {
+          // Compacted or gapped ranges shrink to the retained messages they cover.
+          const covered = kept.filter((m) => m.seq >= range.fromSeq && m.seq <= range.toSeq);
+          const first = covered.length ? seqMap.get(covered[0]!.seq) : undefined;
+          const last = covered.length ? seqMap.get(covered[covered.length - 1]!.seq) : undefined;
+          if (first !== undefined && last !== undefined) {
+            sourceMessageRange = { fromSeq: first, toSeq: last };
+          }
+        }
+        await memory.appendThreadEpisode(childKey, {
+          summary: episode.summary,
+          outcome: episode.outcome,
+          salience: episode.salience,
+          sourceThreadId: newThreadId,
+          sourceMessageRange,
+          occurredAt: episode.occurredAt,
+          metadata: episode.metadata,
+        });
+      }
+      if (atHead) {
+        // FactInput carries only text/source/confidence; retired facts are not listed.
+        for (const fact of await memory.listThreadFacts(parentKey)) {
+          await memory.appendThreadFact(childKey, {
+            text: fact.text,
+            source: fact.source,
+            confidence: fact.confidence,
+          });
+        }
+      }
+      await memory.setThreadMetadata(childKey, {
+        ...parentMetadata,
+        branchParentThreadId: parentThreadId,
+        branchAtSeq: atSeq,
+        branchDepth:
+          (typeof parent.metadata.branchDepth === "number" ? parent.metadata.branchDepth : 0) + 1,
+      });
+    } catch (error) {
+      await memory.deleteThread(childKey);
+      throw error;
+    }
+    return this.thread(newThreadId, { ...opts, createIfMissing: false });
   }
 
   /**
@@ -736,16 +867,18 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       order: params?.order,
       archived: params?.archived,
     });
-    return summaries.map((s) => ({
-      id: s.threadId,
-      resourceId: s.resourceId,
-      title: s.title,
-      metadata: s.metadata,
-      archivedAt: s.archivedAt,
-      messageCount: s.messageCount,
-      lastActiveAt: s.lastActiveAt,
-      createdAt: s.createdAt,
-    }));
+    return summaries
+      .filter((s) => !s.metadata[FORK_IN_PROGRESS_METADATA_KEY])
+      .map((s) => ({
+        id: s.threadId,
+        resourceId: s.resourceId,
+        title: s.title,
+        metadata: s.metadata,
+        archivedAt: s.archivedAt,
+        messageCount: s.messageCount,
+        lastActiveAt: s.lastActiveAt,
+        createdAt: s.createdAt,
+      }));
   }
 
   // --- Delegation (DelegableAgent) ---------------------------------------

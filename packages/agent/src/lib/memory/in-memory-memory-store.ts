@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { Message } from "../message.ts";
+import { ThreadExistsError } from "../agent/errors.ts";
 import { resolveFactConfidence } from "./fact-confidence.ts";
 import { relationKey } from "./relations.ts";
 import { appendStaticRule, normalizeRuleText } from "./rule-proposals.ts";
@@ -440,7 +441,7 @@ export class InMemoryMemoryStore implements MemoryStore {
   async createThread(key: ThreadKey, init: ThreadInit = {}): Promise<ThreadRow> {
     const k = this.threadK(key);
     if (this.threads.has(k)) {
-      throw new Error(`Thread already exists: ${key.namespaceId}/${key.threadId}`);
+      throw new ThreadExistsError(key);
     }
     const now = this.now();
     const row: ThreadRow = {

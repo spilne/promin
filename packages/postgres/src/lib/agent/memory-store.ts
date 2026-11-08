@@ -34,6 +34,7 @@ import {
   parseThreadCursor,
   relationKey,
   resolveFactConfidence,
+  ThreadExistsError,
 } from "@promin/agent";
 import type {
   AppendMessagesOptions,
@@ -749,7 +750,7 @@ export class PostgresMemoryStore implements MemoryStore {
   async createThread(key: ThreadKey, init: ThreadInit = {}): Promise<ThreadRow> {
     const existing = await this.getThread(key);
     if (existing) {
-      throw new Error(`Thread already exists: ${key.namespaceId}/${key.threadId}`);
+      throw new ThreadExistsError(key);
     }
     const now = this.clock();
     const row: ThreadRow = {
@@ -764,20 +765,26 @@ export class PostgresMemoryStore implements MemoryStore {
       createdAt: now,
       updatedAt: now,
     };
-    await this.db.insert(agentThread).values({
-      namespaceId: row.namespaceId,
-      threadId: row.threadId,
-      resourceId: row.resourceId,
-      title: row.title,
-      workingMemory: row.workingMemory,
-      inheritFromParent: row.inheritFromParent,
-      metadata: row.metadata as Record<string, unknown>,
-      archivedAt: row.archivedAt,
-      messageCount: 0,
-      lastActiveAt: row.createdAt,
-      createdAt: row.createdAt,
-      updatedAt: row.updatedAt,
-    });
+    try {
+      await this.db.insert(agentThread).values({
+        namespaceId: row.namespaceId,
+        threadId: row.threadId,
+        resourceId: row.resourceId,
+        title: row.title,
+        workingMemory: row.workingMemory,
+        inheritFromParent: row.inheritFromParent,
+        metadata: row.metadata as Record<string, unknown>,
+        archivedAt: row.archivedAt,
+        messageCount: 0,
+        lastActiveAt: row.createdAt,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+      });
+    } catch (error) {
+      // A concurrent create past the getThread check above violates the primary key.
+      if (isUniqueViolation(error)) throw new ThreadExistsError(key);
+      throw error;
+    }
     return row;
   }
 
@@ -1520,4 +1527,13 @@ function toEpisode(r: DbEpisodeRow): EpisodicRecord {
     createdAt: r.createdAt,
     metadata: (r.metadata as Record<string, unknown>) ?? {},
   };
+}
+
+/** Postgres SQLSTATE 23505, which drizzle may wrap in `cause`. */
+function isUniqueViolation(error: unknown): boolean {
+  for (let e: unknown = error, depth = 0; e && depth < 4; depth++) {
+    if ((e as { code?: unknown }).code === "23505") return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
 }

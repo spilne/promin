@@ -310,7 +310,12 @@ export type {
 
 export { LocalAgent, threadTurnWorkflowId } from "./agent/local-agent.ts";
 export { THREAD_AGENT_METADATA_KEY } from "./agent/types.ts";
-export { ThreadNotFoundError, TurnKeyConflictError } from "./agent/errors.ts";
+export {
+  InvalidForkPointError,
+  ThreadExistsError,
+  ThreadNotFoundError,
+  TurnKeyConflictError,
+} from "./agent/errors.ts";
 export type { LocalAgentConfig } from "./agent/local-agent.ts";
 
 export { frameTask } from "./agent/frame-task.ts";

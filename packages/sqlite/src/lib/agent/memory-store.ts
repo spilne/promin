@@ -36,6 +36,7 @@ import {
   parseThreadCursor,
   relationKey,
   resolveFactConfidence,
+  ThreadExistsError,
 } from "@promin/agent";
 import type {
   AppendMessagesOptions,
@@ -802,7 +803,7 @@ export class SqliteMemoryStore implements MemoryStore {
   async createThread(key: ThreadKey, init: ThreadInit = {}): Promise<ThreadRow> {
     const existing = await this.getThread(key);
     if (existing) {
-      throw new Error(`Thread already exists: ${key.namespaceId}/${key.threadId}`);
+      throw new ThreadExistsError(key);
     }
     const now = this.clock();
     const row: ThreadRow = {
@@ -817,25 +818,36 @@ export class SqliteMemoryStore implements MemoryStore {
       createdAt: now,
       updatedAt: now,
     };
-    this.db
-      .query(
-        `INSERT INTO ${this.prefix}_thread
-           (namespace_id, thread_id, resource_id, title, working_memory, inherit_from_parent, metadata, archived_at, message_count, last_active_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
-      )
-      .run(
-        row.namespaceId,
-        row.threadId,
-        row.resourceId,
-        row.title,
-        row.workingMemory,
-        row.inheritFromParent ? 1 : 0,
-        JSON.stringify(row.metadata),
-        row.archivedAt,
-        row.createdAt,
-        row.createdAt,
-        row.updatedAt,
-      );
+    try {
+      this.db
+        .query(
+          `INSERT INTO ${this.prefix}_thread
+             (namespace_id, thread_id, resource_id, title, working_memory, inherit_from_parent, metadata, archived_at, message_count, last_active_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+        )
+        .run(
+          row.namespaceId,
+          row.threadId,
+          row.resourceId,
+          row.title,
+          row.workingMemory,
+          row.inheritFromParent ? 1 : 0,
+          JSON.stringify(row.metadata),
+          row.archivedAt,
+          row.createdAt,
+          row.createdAt,
+          row.updatedAt,
+        );
+    } catch (error) {
+      // A concurrent create past the getThread check above hits the primary key.
+      if (
+        error instanceof Error &&
+        /UNIQUE constraint failed|SQLITE_CONSTRAINT/.test(error.message)
+      ) {
+        throw new ThreadExistsError(key);
+      }
+      throw error;
+    }
     return row;
   }
 

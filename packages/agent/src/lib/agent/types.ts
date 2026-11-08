@@ -190,6 +190,9 @@ export interface AgentInvokeOpts {
  */
 export const THREAD_AGENT_METADATA_KEY = "agentId";
 
+/** Set on a forked thread while its copy runs; a thread still carrying it is incomplete and hidden. */
+export const FORK_IN_PROGRESS_METADATA_KEY = "forkInProgress";
+
 export interface ThreadOptions {
   /** User / persona key — wires to `MemoryStore` resource layer. */
   readonly resourceId?: string;
@@ -255,6 +258,12 @@ export interface Agent<Input = AgentInput, Output = unknown> {
   stream(input: Input, opts?: AgentInvokeOpts): AgentRunOutput<Output>;
   /** Get or create a persistent thread. */
   thread(threadId: string, opts?: ThreadOptions): Promise<AgentThread<Input, Output>>;
+  /** Fork a persisted thread at a message sequence; local backends support this when memory is configured. */
+  forkThread?(
+    parentThreadId: string,
+    newThreadId: string,
+    opts?: { readonly atSeq?: number; readonly namespaceId?: string; readonly resourceId?: string },
+  ): Promise<AgentThread<Input, Output>>;
   /** List threads visible to this agent (optionally filtered by resource). */
   listThreads(params?: ListThreadsParams): Promise<ThreadSummary[]>;
   /**

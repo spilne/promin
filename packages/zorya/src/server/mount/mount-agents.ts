@@ -14,6 +14,7 @@ import { json, type Router } from "../router.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaEvals } from "../services/evals/index.ts";
 import { evalPromotionGate } from "../routes/evals.ts";
+import { forkAgentThread, getAgentThreadLineage } from "../routes/agents/agent-forks.ts";
 import {
   deleteAgentFeedback,
   getAgentFeedback,
@@ -246,6 +247,15 @@ export function mountAgents(params: {
       .delete(
         "/api/agents/:id/threads/:threadId/feedback",
         deleteAgentFeedback(agentDeps, params.evals.datasets),
+      );
+  }
+
+  if (agents.memory) {
+    router
+      .post("/api/agents/:id/threads/:threadId/fork", forkAgentThread(agentDeps))
+      .get(
+        "/api/agents/:id/threads/:threadId/lineage",
+        getAgentThreadLineage(agentDeps, agents.memory),
       );
   }
 
