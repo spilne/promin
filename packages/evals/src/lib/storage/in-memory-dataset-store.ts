@@ -20,10 +20,31 @@ export class InMemoryEvalDatasetStore implements EvalDatasetStore {
     return cases !== undefined ? [...cases] : null;
   }
 
-  async appendCase(datasetId: string, evalCase: EvalCase): Promise<void> {
+  async appendCase(datasetId: string, evalCase: EvalCase): Promise<boolean> {
     const cases = this.datasets.get(datasetId) ?? [];
-    if (cases.some((item) => item.id === evalCase.id)) return;
+    if (cases.some((item) => item.id === evalCase.id)) return false;
     this.datasets.set(datasetId, [...cases, evalCase]);
+    return true;
+  }
+
+  async replaceCase(datasetId: string, evalCase: EvalCase): Promise<boolean> {
+    const cases = this.datasets.get(datasetId);
+    if (!cases?.some((item) => item.id === evalCase.id)) return false;
+    this.datasets.set(
+      datasetId,
+      cases.map((item) => (item.id === evalCase.id ? evalCase : item)),
+    );
+    return true;
+  }
+
+  async deleteCase(datasetId: string, caseId: string): Promise<boolean> {
+    const cases = this.datasets.get(datasetId);
+    if (!cases?.some((item) => item.id === caseId)) return false;
+    this.datasets.set(
+      datasetId,
+      cases.filter((item) => item.id !== caseId),
+    );
+    return true;
   }
 
   async list(): Promise<string[]> {

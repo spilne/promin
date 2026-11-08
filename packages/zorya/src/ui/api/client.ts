@@ -1273,6 +1273,21 @@ export const api = {
       },
     );
   },
+  deleteThreadFeedback(
+    id: string,
+    threadId: string,
+    params: { namespaceId: string; resourceId?: string; workflowId: string },
+  ): Promise<{ caseId: string; deleted: boolean }> {
+    const qp = new URLSearchParams({
+      namespaceId: params.namespaceId,
+      workflowId: params.workflowId,
+    });
+    if (params.resourceId) qp.set("resourceId", params.resourceId);
+    return req(
+      `/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/feedback?${qp}`,
+      { method: "DELETE" },
+    );
+  },
   listAgentThreads(
     id: string,
     params: { namespaceId: string; resourceId?: string; limit?: number; q?: string },

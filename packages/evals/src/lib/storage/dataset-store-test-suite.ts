@@ -35,17 +35,37 @@ export function evalDatasetStoreTestSuite(makeStore: () => EvalDatasetStore): vo
       expect(got?.[0]?.id).toBe("x");
     });
 
-    it("appends concurrently and ignores a repeated case id", async () => {
+    it("appends concurrently, reporting whether each case was inserted", async () => {
       const store = makeStore();
-      await Promise.all(
+      const inserted = await Promise.all(
         Array.from({ length: 20 }, (_, i) =>
           store.appendCase("feedback", { id: String(i), input: `input ${i}` }),
         ),
       );
-      await store.appendCase("feedback", { id: "3", input: "duplicate" });
+      expect(inserted.every(Boolean)).toBe(true);
+      expect(await store.appendCase("feedback", { id: "3", input: "duplicate" })).toBe(false);
       const cases = await store.get("feedback");
       expect(cases).toHaveLength(20);
       expect(cases?.find((item) => item.id === "3")?.input).toBe("input 3");
+    });
+
+    it("replaces and deletes single cases in place", async () => {
+      const store = makeStore();
+      expect(await store.replaceCase("ds", { id: "a", input: "x" })).toBe(false);
+      expect(await store.deleteCase("ds", "a")).toBe(false);
+      for (const id of ["a", "b", "c"]) await store.appendCase("ds", { id, input: id });
+      expect(await store.replaceCase("ds", { id: "b", input: "new", expected: { n: 1 } })).toBe(
+        true,
+      );
+      expect(await store.replaceCase("ds", { id: "zz", input: "x" })).toBe(false);
+      expect((await store.get("ds"))?.map((item) => item.input)).toEqual(["a", "new", "c"]);
+      expect((await store.get("ds"))?.[1]?.expected).toEqual({ n: 1 });
+      expect(await store.deleteCase("ds", "a")).toBe(true);
+      expect(await store.deleteCase("ds", "a")).toBe(false);
+      expect((await store.get("ds"))?.map((item) => item.id)).toEqual(["b", "c"]);
+      await store.deleteCase("ds", "b");
+      await store.deleteCase("ds", "c");
+      expect(await store.get("ds")).toEqual([]);
     });
 
     it("lists dataset ids in ascending order", async () => {

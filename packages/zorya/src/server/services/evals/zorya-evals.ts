@@ -61,6 +61,7 @@ import {
   type EvalRunWorkflowInput,
   type EvalRunWorkflowOutput,
 } from "./eval-run-workflow.ts";
+import { readsForeignFeedback } from "./feedback-datasets.ts";
 
 /** Default cap on a run's concurrent cases. */
 export const DEFAULT_EVAL_MAX_CONCURRENCY = 4;
@@ -204,6 +205,12 @@ export class ZoryaEvals {
     }
     if (!recipe.enabled) {
       return { error: "agent_disabled", message: `Agent "${recipe.id}" is disabled.` };
+    }
+    if (readsForeignFeedback({ dataset: suite.dataset, namespaceId: params.scope.namespaceId })) {
+      return {
+        error: "invalid_suite",
+        message: `Eval suite "${suite.id}" reads another namespace's feedback dataset.`,
+      };
     }
     let cases: EvalCase[];
     let resolved: ResolvedEvalSuite;

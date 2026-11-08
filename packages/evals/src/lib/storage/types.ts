@@ -130,8 +130,19 @@ export interface EvalDatasetStore {
     readonly datasetId: string;
     readonly cases: ReadonlyArray<EvalCase>;
   }): Promise<void>;
-  /** Atomically add a case, ignoring a repeated case id. Safe for concurrent feedback writers. */
-  appendCase(datasetId: string, evalCase: EvalCase): Promise<void>;
+  /**
+   * Atomically add a case unless one with the same id exists. Resolves
+   * `true` when it inserted, `false` when the id was taken (the stored case
+   * is left untouched). Safe for concurrent writers.
+   */
+  appendCase(datasetId: string, evalCase: EvalCase): Promise<boolean>;
+  /**
+   * Atomically replace the case with the same id. Resolves `false` (and
+   * writes nothing) when the dataset has no such case.
+   */
+  replaceCase(datasetId: string, evalCase: EvalCase): Promise<boolean>;
+  /** Atomically remove one case. Resolves `false` when it was not there. */
+  deleteCase(datasetId: string, caseId: string): Promise<boolean>;
   get(datasetId: string): Promise<EvalCase[] | null>;
   /** All dataset ids, ascending. */
   list(): Promise<string[]>;

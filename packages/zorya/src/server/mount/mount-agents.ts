@@ -15,6 +15,7 @@ import type { ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaEvals } from "../services/evals/index.ts";
 import { evalPromotionGate } from "../routes/evals.ts";
 import {
+  deleteAgentFeedback,
   getAgentFeedback,
   getAgentFeedbackTrend,
   postAgentFeedback,
@@ -241,6 +242,10 @@ export function mountAgents(params: {
       .post(
         "/api/agents/:id/threads/:threadId/feedback",
         postAgentFeedback(agentDeps, params.evals.datasets),
+      )
+      .delete(
+        "/api/agents/:id/threads/:threadId/feedback",
+        deleteAgentFeedback(agentDeps, params.evals.datasets),
       );
   }
 

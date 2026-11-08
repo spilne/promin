@@ -62,16 +62,55 @@ export class SqliteEvalDatasetStore implements EvalDatasetStore {
     return row ? (JSON.parse(row.cases) as EvalCase[]) : null;
   }
 
-  async appendCase(datasetId: string, evalCase: EvalCase): Promise<void> {
-    // One SQL statement keeps the JSON update atomic across writers/processes.
+  async appendCase(datasetId: string, evalCase: EvalCase): Promise<boolean> {
+    // Each statement is atomic, so concurrent writers cannot lose a case or
+    // insert the same id twice.
+    const value = JSON.stringify(evalCase);
     this.db
-      .query(`INSERT INTO ${this.table} (dataset_id, cases) VALUES (?, json_array(json(?)))
-      ON CONFLICT(dataset_id) DO UPDATE SET cases =
-        CASE WHEN EXISTS (SELECT 1 FROM json_each(${this.table}.cases)
-          WHERE json_extract(value, '$.id') = ?)
-        THEN ${this.table}.cases
-        ELSE json_insert(${this.table}.cases, '$[#]', json(?)) END`)
-      .run(datasetId, JSON.stringify(evalCase), evalCase.id, JSON.stringify(evalCase));
+      .query(
+        `INSERT OR IGNORE INTO ${this.table} (dataset_id, cases) VALUES (?, json_array(json(?)))`,
+      )
+      .run(datasetId, value);
+    if (this.changes() > 0) return true;
+    this.db
+      .query(
+        `UPDATE ${this.table} SET cases = json_insert(cases, '$[#]', json(?))
+         WHERE dataset_id = ? AND NOT EXISTS (
+           SELECT 1 FROM json_each(${this.table}.cases) WHERE json_extract(value, '$.id') = ?)`,
+      )
+      .run(value, datasetId, evalCase.id);
+    return this.changes() > 0;
+  }
+
+  async replaceCase(datasetId: string, evalCase: EvalCase): Promise<boolean> {
+    this.db
+      .query(
+        `UPDATE ${this.table} SET cases = (
+           SELECT json_group_array(json(CASE WHEN json_extract(value, '$.id') = ? THEN json(?) ELSE value END))
+           FROM json_each(${this.table}.cases))
+         WHERE dataset_id = ? AND EXISTS (
+           SELECT 1 FROM json_each(${this.table}.cases) WHERE json_extract(value, '$.id') = ?)`,
+      )
+      .run(evalCase.id, JSON.stringify(evalCase), datasetId, evalCase.id);
+    return this.changes() > 0;
+  }
+
+  async deleteCase(datasetId: string, caseId: string): Promise<boolean> {
+    this.db
+      .query(
+        `UPDATE ${this.table} SET cases = (
+           SELECT json_group_array(json(value)) FROM json_each(${this.table}.cases)
+           WHERE json_extract(value, '$.id') <> ?)
+         WHERE dataset_id = ? AND EXISTS (
+           SELECT 1 FROM json_each(${this.table}.cases) WHERE json_extract(value, '$.id') = ?)`,
+      )
+      .run(caseId, datasetId, caseId);
+    return this.changes() > 0;
+  }
+
+  /** Rows touched by this connection's last statement (callers run it synchronously after). */
+  private changes(): number {
+    return this.db.query<{ n: number }>("SELECT changes() AS n").get()?.n ?? 0;
   }
 
   async list(): Promise<string[]> {

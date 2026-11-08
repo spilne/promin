@@ -19,6 +19,7 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import {
   api,
+  ApiError,
   type AgentTraceDto,
   type TraceChildDto,
   type TraceToolCallDto,
@@ -62,6 +63,8 @@ export function AgentTraceModal({ agentId, threadId, namespaceId, resourceId, on
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
   const [toolQuery, setToolQuery] = useState("");
   const [feedback, setFeedback] = useState<Record<string, string>>({});
+  // False once the server answers 404: eval datasets are not configured there.
+  const [feedbackAvailable, setFeedbackAvailable] = useState(true);
   const [feedbackTrend, setFeedbackTrend] = useState<{
     trend: Array<{ day: string; positive: number; negative: number }>;
     alert: { kind: string } | null;
@@ -79,13 +82,15 @@ export function AgentTraceModal({ agentId, threadId, namespaceId, resourceId, on
           ),
         ),
       )
-      .catch(() => {
-        /* Feedback is optional when eval datasets are not configured. */
+      .catch((err) => {
+        if (err instanceof ApiError && err.status === 404) setFeedbackAvailable(false);
       });
     api
       .getAgentFeedbackTrend(agentId, { namespaceId, ...(resourceId && { resourceId }) })
       .then(setFeedbackTrend)
-      .catch(() => {});
+      .catch(() => {
+        /* The trend is optional. */
+      });
   }, [agentId, threadId, namespaceId, resourceId]);
   const rateTurn = async (
     workflowId: string,
@@ -263,7 +268,7 @@ export function AgentTraceModal({ agentId, threadId, namespaceId, resourceId, on
                 hideToolCalls={filterToolCalls}
                 failuresOnly={filterFailuresOnly}
                 rating={turn.timing ? feedback[turn.timing.workflowId] : undefined}
-                onRate={rateTurn}
+                onRate={feedbackAvailable ? rateTurn : undefined}
               />
             ))}
           </div>
@@ -284,7 +289,12 @@ function TurnView({
   hideToolCalls: boolean;
   failuresOnly: boolean;
   rating?: string;
-  onRate: (workflowId: string, rating: "positive" | "negative", expected?: string) => Promise<void>;
+  /** Absent when the server has no feedback API: the rating controls are hidden. */
+  onRate?: (
+    workflowId: string,
+    rating: "positive" | "negative",
+    expected?: string,
+  ) => Promise<void>;
 }) {
   // When "failures only" is on, hide the whole turn unless it contains
   // at least one failed tool call.
@@ -294,7 +304,7 @@ function TurnView({
   const [feedbackError, setFeedbackError] = useState("");
   const [saving, setSaving] = useState(false);
   const submit = async (kind: "positive" | "negative", sample?: string) => {
-    if (!turn.timing) return;
+    if (!turn.timing || !onRate) return;
     setSaving(true);
     setFeedbackError("");
     try {
@@ -317,20 +327,20 @@ function TurnView({
         </span>
       </div>
       {turn.timing && <TurnTimingView timing={turn.timing} />}
-      {turn.timing && (
+      {turn.timing && onRate && (
         <div class="px-3 py-2 border-b border-base-300 text-xs font-sans">
           <div class="flex items-center gap-2">
             <span class="text-base-content/60">Rate this turn</span>
             <button
               class={`btn btn-xs ${rating === "positive" ? "btn-success" : "btn-ghost"}`}
-              disabled={saving || !!rating}
+              disabled={saving || rating === "positive"}
               onClick={() => submit("positive")}
             >
               Helpful
             </button>
             <button
               class={`btn btn-xs ${rating === "negative" ? "btn-error" : "btn-ghost"}`}
-              disabled={saving || !!rating}
+              disabled={saving}
               onClick={() => setShowExpected(true)}
             >
               Needs work
