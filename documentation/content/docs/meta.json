@@ -1,11 +1,4 @@
 {
   "title": "Promin",
-  "pages": [
-    "index",
-    "getting-started",
-    "workflow",
-    "data",
-    "integrations",
-    "reference"
-  ]
+  "pages": ["index", "getting-started", "workflow", "agent", "data", "integrations", "reference"]
 }

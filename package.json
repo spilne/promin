@@ -28,6 +28,7 @@
     "demo:worker": "bun --conditions=@promin/source run packages/zorya/examples/worker.ts",
     "chaos:zorya": "bun --conditions=@promin/source run packages/zorya/e2e/chaos.ts",
     "demo:user-app": "bun --conditions=@promin/source run packages/zorya/examples/user-app.ts",
+    "demo:agent": "bun --conditions=@promin/source run examples/agent-quickstart.ts",
     "docs": "bun run --filter @promin/docs build",
     "docs:dev": "bun run --filter @promin/docs dev",
     "docs:serve": "bunx serve .target/docs -p 4002",

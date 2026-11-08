@@ -7,15 +7,18 @@ TypeScript toolkit for resilient async operations, durable workflows, stream pro
 
 ## Packages
 
-| Package | What it does |
-| --- | --- |
-| [`@promin/workflow`](/docs/workflow/workflows) | Durable workflows, state machines, distributed workers, scheduler |
-| [`@promin/data`](/docs/data/dataframe) | DataFrame, data quality, profiling, diff |
-| [`@promin/redis`](/docs/integrations/redis) | Redis workflow storage, step queue, scheduler, state machines (Cluster-safe) |
-| [`@promin/postgres`](/docs/integrations/postgres) | Postgres stores — workflow storage, step queue, scheduler, leases, registries |
-| [`@promin/sqlite`](/docs/integrations/sqlite) | SQLite workflow storage, step queue, scheduler |
-| [`@promin/workflow-remote`](/docs/integrations/workflow-remote) | Workflow storage and worker RPC over HTTP |
-| [`@promin/duckdb`](/docs/data/dataframe) | DuckDB executor for DataFrame — SQL, Arrow IPC |
+| Package                                                         | What it does                                                                  |
+| --------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| [`@promin/workflow`](/docs/workflow/workflows)                  | Durable workflows, state machines, distributed workers, scheduler             |
+| [`@promin/agent`](/docs/agent/quickstart)                       | Durable agent turns, tools, memory, approvals, MCP and retrieval              |
+| [`@promin/evals`](/docs/agent/evals)                            | Agent datasets, scorers, live scoring and promotion gates                     |
+| [`@promin/zorya`](/docs/agent/zorya)                            | Self-hosted agent and workflow API with dashboard                             |
+| [`@promin/data`](/docs/data/dataframe)                          | DataFrame, data quality, profiling, diff                                      |
+| [`@promin/redis`](/docs/integrations/redis)                     | Redis workflow storage, step queue, scheduler, state machines (Cluster-safe)  |
+| [`@promin/postgres`](/docs/integrations/postgres)               | Postgres stores — workflow storage, step queue, scheduler, leases, registries |
+| [`@promin/sqlite`](/docs/integrations/sqlite)                   | SQLite workflow storage, step queue, scheduler                                |
+| [`@promin/workflow-remote`](/docs/integrations/workflow-remote) | Workflow storage and worker RPC over HTTP                                     |
+| [`@promin/duckdb`](/docs/data/dataframe)                        | DuckDB executor for DataFrame — SQL, Arrow IPC                                |
 
 The effect runtime, streams, retry/timeout, and concurrency primitives (semaphore, queue, circuit breaker, rate limiter, cache) come from [perfect](https://github.com/spilne/perfect) — `@spilne/perfect-core`. HTTP client, Kafka transport, and stateful stream topology live there too: `@spilne/perfect-http`, `@spilne/perfect-kafka`, `@spilne/perfect-topology`.
 
@@ -82,10 +85,10 @@ const result = await DataFrame.fromArray(sales)
 
 ### Additional Modules
 
-| Module | Description |
-| --- | --- |
-| [Data Quality](/docs/data/quality) | Profiling, expectations, diff, contracts |
-| [SQL Models](/docs/workflow/sql-models) | dbt-style SQL model DAG with materialization |
-| [Scheduler](/docs/workflow/scheduler) | Cron / RRULE / interval schedules, at-least-once ticks, fenced leader leases |
-| [Storage](/docs/workflow/storage) | The storage contract, capabilities per backend, fencing |
-| [Versioning](/docs/workflow/versioning) | Strict / drain / `ctx.patched()` / rolling worker deploys |
+| Module                                  | Description                                                                  |
+| --------------------------------------- | ---------------------------------------------------------------------------- |
+| [Data Quality](/docs/data/quality)      | Profiling, expectations, diff, contracts                                     |
+| [SQL Models](/docs/workflow/sql-models) | dbt-style SQL model DAG with materialization                                 |
+| [Scheduler](/docs/workflow/scheduler)   | Cron / RRULE / interval schedules, at-least-once ticks, fenced leader leases |
+| [Storage](/docs/workflow/storage)       | The storage contract, capabilities per backend, fencing                      |
+| [Versioning](/docs/workflow/versioning) | Strict / drain / `ctx.patched()` / rolling worker deploys                    |
