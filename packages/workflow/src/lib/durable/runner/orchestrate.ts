@@ -7,6 +7,7 @@
 // at each of them.
 // ---------------------------------------------------------------------------
 
+import { eventOfWakeSignal } from "../wait-for-event.ts";
 import type { TaggedError } from "../../shared/tagged-error.ts";
 import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
 import { runHookResult } from "../../shared/eff.ts";
@@ -1043,17 +1044,27 @@ function traceRunStart(params: {
   });
   if (params.resumedRun && state != null) {
     for (const [stepName, step] of Object.entries(state.steps)) {
+      const event =
+        step.status === "waiting_for_signal" && step.signalName !== undefined
+          ? eventOfWakeSignal(step.signalName)
+          : undefined;
       const kind =
         step.status === "sleeping"
           ? "sleep"
-          : step.status === "waiting_for_signal"
-            ? "signal"
-            : undefined;
+          : event !== undefined
+            ? "event"
+            : step.status === "waiting_for_signal"
+              ? "signal"
+              : undefined;
       if (kind === undefined) continue;
       emitTrace(tracer, "waitEnd", {
         ...ref,
         stepName,
         kind,
+        ...(event !== undefined && {
+          eventName: event.name,
+          ...(event.key !== undefined && { eventKey: event.key }),
+        }),
         since: state.updatedAt,
         endedAt: startedAt,
         waitedMs: Math.max(0, startedAt.getTime() - state.updatedAt.getTime()),

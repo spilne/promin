@@ -93,6 +93,8 @@ export function runToDto(w: WorkflowState, now: Date = new Date()): RunDto {
       since: wait.since.toISOString(),
       until: iso(wait.until),
       signalName: wait.signalName,
+      eventName: wait.eventName,
+      eventKey: wait.eventKey,
       childWorkflowId: wait.childWorkflowId,
       attempt: wait.attempt,
     })),

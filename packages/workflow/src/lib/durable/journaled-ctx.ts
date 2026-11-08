@@ -16,6 +16,7 @@ import { makeActivity } from "./journaled-ctx-activity.ts";
 import { makeChild } from "./journaled-ctx-child.ts";
 import { makeLoops, makeParallel, makeProxy } from "./journaled-ctx-compose.ts";
 import { makeSignalMethods, makeSleep } from "./journaled-ctx-suspend.ts";
+import { makeWaitForEvent } from "./journaled-ctx-event.ts";
 import type { JournaledContext, JournaledCtxEnv, RunChild } from "./journaled-context.ts";
 import { registerQueryHandler } from "./query-registry.ts";
 import type { WorkflowMetadataRef } from "./step-definition.ts";
@@ -191,6 +192,7 @@ export function makeCtx<Input, Prev>(params: {
     signal,
     validatedSignal,
     approval,
+    waitForEvent: makeWaitForEvent(env),
     // Pure set membership. Returns false (not throws) for names not in the
     // currently-running definition's patches array — this is load-bearing
     // for the "same code file, different versions" pattern:

@@ -187,13 +187,16 @@ export interface StepDto {
 
 /** A wait of a live run (see `WorkflowWait`), with ISO timestamps. */
 export interface RunWaitDto {
-  kind: "sleep" | "signal" | "approval" | "child";
+  kind: "sleep" | "signal" | "approval" | "event" | "child";
   stepName: string;
   /** ISO timestamp. */
   since: string;
   /** ISO timestamp: sleep wake time, signal timeout, or the child's next wake. */
   until?: string;
   signalName?: string;
+  /** The awaited event, for `kind: "event"`. */
+  eventName?: string;
+  eventKey?: string;
   childWorkflowId?: string;
   attempt?: number;
 }

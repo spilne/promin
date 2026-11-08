@@ -5,6 +5,7 @@
 
 import { APPROVAL_NAME_PREFIX } from "../signals/define-signal.ts";
 import { childOfEndedSignal } from "./child-wake.ts";
+import { eventOfWakeSignal } from "./wait-for-event.ts";
 import type { WorkflowState } from "./workflow-state.ts";
 
 /**
@@ -13,6 +14,8 @@ import type { WorkflowState } from "./workflow-state.ts";
  * - `sleep`: a sleeping step; `until` is its wake time.
  * - `signal`: a step waiting for signal `signalName`; `until` is its timeout, when it has one.
  * - `approval`: a signal wait on an `approve:<id>` signal (`ctx.approval`).
+ * - `event`: a step in `ctx.waitForEvent`; `eventName` / `eventKey` address the event and
+ *   `until` is its timeout, when it has one.
  * - `child`: a step parked on child workflow `childWorkflowId`; `until` is the child's
  *   earliest wake time, when it has one (the parent is re-driven then).
  *
@@ -21,11 +24,13 @@ import type { WorkflowState } from "./workflow-state.ts";
  * a step task queued for a worker) are not derivable from storage and are not listed.
  */
 export interface WorkflowWait {
-  readonly kind: "sleep" | "signal" | "approval" | "child";
+  readonly kind: "sleep" | "signal" | "approval" | "event" | "child";
   readonly stepName: string;
   readonly since: Date;
   readonly until?: Date;
   readonly signalName?: string;
+  readonly eventName?: string;
+  readonly eventKey?: string;
   readonly childWorkflowId?: string;
   readonly attempt?: number;
 }
@@ -52,7 +57,16 @@ export function deriveWaitingOn(state: WorkflowState): WorkflowWait[] {
       const signalName = step.signalName;
       const until = step.signalTimeoutAt && { until: step.signalTimeoutAt };
       const childWorkflowId = signalName === undefined ? undefined : childOfEndedSignal(signalName);
-      if (childWorkflowId !== undefined) {
+      const event = signalName === undefined ? undefined : eventOfWakeSignal(signalName);
+      if (event !== undefined) {
+        waits.push({
+          kind: "event",
+          ...common,
+          eventName: event.name,
+          ...(event.key !== undefined && { eventKey: event.key }),
+          ...until,
+        });
+      } else if (childWorkflowId !== undefined) {
         waits.push({ kind: "child", ...common, childWorkflowId, ...until });
       } else if (signalName?.startsWith(APPROVAL_NAME_PREFIX)) {
         waits.push({ kind: "approval", ...common, signalName, ...until });
@@ -99,6 +113,10 @@ function describeWait(params: { wait: WorkflowWait; now: Date }): string {
       return `sleeping (${detail("wakes")})`;
     case "signal":
       return `waiting for signal ${wait.signalName ?? "(unnamed)"} (${detail("times out")})`;
+    case "event":
+      return `waiting for event ${wait.eventName}${
+        wait.eventKey !== undefined ? ` (key ${wait.eventKey})` : ""
+      } (${detail("times out")})`;
     case "approval":
       return `waiting for approval ${wait.signalName ?? ""} (${detail("times out")})`;
     case "child":

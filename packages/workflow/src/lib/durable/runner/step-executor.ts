@@ -125,7 +125,7 @@ export type StepExecutionResult =
   | {
       readonly ok: false;
       readonly kind: "suspended";
-      readonly reason: "sleep" | "signal";
+      readonly reason: "sleep" | "signal" | "event";
       readonly message?: string;
       /** The original `WorkflowSuspendedError`, from in-process executors. */
       readonly cause?: unknown;

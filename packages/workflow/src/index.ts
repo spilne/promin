@@ -34,6 +34,11 @@ export {
   summarizeWaits,
   type WorkflowWait,
 } from "./lib/durable/workflow-waits.ts";
+export {
+  deliverEvent,
+  type DeliverEventParams,
+  type DeliverEventResult,
+} from "./lib/durable/wait-for-event.ts";
 export { workflowClosure } from "./lib/durable/workflow-closure.ts";
 export {
   compareWorkflowVersions,

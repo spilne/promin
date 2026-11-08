@@ -279,6 +279,42 @@ export interface JournaledContext<Input, Prev> {
   >;
 
   /**
+   * Durable wait for an external event, addressed by name and an optional
+   * match `key` and delivered with `deliverEvent`. Unlike a signal (a named
+   * last-wins value), events are buffered: one delivered before the wait
+   * starts is not lost, several delivered in a row each satisfy one wait, and
+   * delivering the same `eventId` twice stores one event.
+   *
+   * A step's Nth wait on an address takes the oldest buffered event of that
+   * address that none of the step's earlier waits took or rejected; which one
+   * it took is journaled, so replay returns the same payload. A wait with no
+   * `key` only matches events delivered without one. `where` takes only
+   * events whose payload it accepts (the others stay buffered for other
+   * waits). With a `timeout` the wait is bounded and returns
+   * `{ ok: true, value } | { ok: false, error: "timeout" }`.
+   *
+   * Waits of one step share its buffer view, so two steps waiting on the same
+   * address each see the event; use distinct keys to route one event to one
+   * step. Concurrent waits on one address inside one step (`ctx.parallel`)
+   * should use distinct keys too.
+   */
+  waitForEvent<T>(
+    event: string | SignalType<T>,
+    options?: {
+      readonly key?: string;
+      readonly where?: (payload: T) => boolean;
+    },
+  ): Generator<ActivityYield, T, T>;
+  waitForEvent<T>(
+    event: string | SignalType<T>,
+    options: {
+      readonly key?: string;
+      readonly where?: (payload: T) => boolean;
+      readonly timeout: number | Date;
+    },
+  ): Generator<ActivityYield, TimedSignalOutcome<T>, TimedSignalOutcome<T>>;
+
+  /**
    * Approval preset — sugar over `validatedSignal(approvalSignal(id))`. The
    * wire-format signal name is `approve:<id>` (matches the existing
    * convention SignalScanner and the dashboard `/signals` Approve/Reject
