@@ -609,6 +609,66 @@ export class PostgresMemoryStore implements MemoryStore {
     return row ? toRuleProposal(row) : null;
   }
 
+  async approveResourceRuleProposal(
+    key: ScopedKey,
+    params: { readonly id: string; readonly maxChars: number },
+  ): Promise<RuleProposal | null> {
+    if (!(await this.getResource(key))) {
+      await this.upsertResource(key, {});
+    }
+    const approved = await this.db.transaction(async (tx) => {
+      // Lock the proposal first, then the resource; every other writer takes
+      // at most one of them, so the order cannot deadlock.
+      const [proposal] = await tx
+        .select()
+        .from(agentRuleProposal)
+        .where(
+          and(
+            eq(agentRuleProposal.namespaceId, key.namespaceId),
+            eq(agentRuleProposal.resourceId, key.resourceId),
+            eq(agentRuleProposal.id, params.id),
+            eq(agentRuleProposal.status, "pending"),
+          ),
+        )
+        .for("update");
+      if (!proposal) return null;
+      const [resource] = await tx
+        .select()
+        .from(agentResource)
+        .where(
+          and(
+            eq(agentResource.namespaceId, key.namespaceId),
+            eq(agentResource.resourceId, key.resourceId),
+          ),
+        )
+        .for("update");
+      if (!resource) throw new Error("Resource vanished while approving a rule");
+      const rules = appendStaticRule({
+        existing: resource.staticRules,
+        text: proposal.proposalText,
+        maxChars: params.maxChars,
+      });
+      if (rules !== (resource.staticRules?.trim() ?? "")) {
+        await tx
+          .update(agentResource)
+          .set({ staticRules: rules, updatedAt: this.clock() })
+          .where(
+            and(
+              eq(agentResource.namespaceId, key.namespaceId),
+              eq(agentResource.resourceId, key.resourceId),
+            ),
+          );
+      }
+      const [updated] = await tx
+        .update(agentRuleProposal)
+        .set({ status: "approved" })
+        .where(eq(agentRuleProposal.id, proposal.id))
+        .returning();
+      return updated ?? null;
+    });
+    return approved ? toRuleProposal(approved) : null;
+  }
+
   async listResourceRelations(key: ScopedKey): Promise<Relation[]> {
     const rows = await this.db
       .select()
@@ -1203,6 +1263,13 @@ export class PostgresMemoryStore implements MemoryStore {
     }
     if (params?.minSalience !== undefined) {
       conditions.push(gte(agentEpisode.salience, params.minSalience));
+    }
+    if (params?.anyTerms && params.anyTerms.length > 0) {
+      const matches = params.anyTerms.map((term) => {
+        const t = term.toLowerCase();
+        return sql`(strpos(lower(${agentEpisode.summary}), ${t}) > 0 OR strpos(lower(COALESCE(${agentEpisode.outcome}, '')), ${t}) > 0)`;
+      });
+      conditions.push(sql`(${sql.join(matches, sql` OR `)})`);
     }
     const order = params?.order ?? "salienceDesc";
     const halfLifeMs = params?.halfLifeMs ?? 0;

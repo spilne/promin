@@ -154,3 +154,27 @@ describe("embedding calls", () => {
     expect(await cached.embed("flaky")).toEqual([5]);
   });
 });
+
+describe("semantic candidate selection", () => {
+  it("still embeds a candidate BM25 missed when many lexical hits compete for the slots", async () => {
+    const lexicalHits = Array.from({ length: 80 }, (_, i) => ({
+      text: `tea note ${i}`,
+      importance: 0.5,
+      at: NOW,
+    }));
+    const semanticOnly = { text: "oolong infusion", importance: 0.5, at: NOW - 10 * DAY };
+    const vectors = new Map<string, number[]>([
+      ["tea", [1, 0]],
+      [semanticOnly.text, [1, 0]],
+    ]);
+    const ranked = await rankCandidates({
+      query: "tea",
+      candidates: [...lexicalHits, semanticOnly],
+      now: NOW,
+      recencyHalfLifeMs: 30 * DAY,
+      embedder: { embed: async (t) => vectors.get(t) ?? [0, 1] },
+      maxSemanticCandidates: 64,
+    });
+    expect(ranked.map((r) => r.index)).toContain(lexicalHits.length);
+  });
+});

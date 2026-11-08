@@ -8,6 +8,7 @@
 // a resource from the base store does not remove its rows in another one.
 // ---------------------------------------------------------------------------
 
+import { appendStaticRule } from "./rule-proposals.ts";
 import type { MemoryStore } from "./types.ts";
 
 /** The entity-graph slice of `MemoryStore`. */
@@ -47,14 +48,48 @@ export function composeMemoryStore(params: {
   if (!relations && !ruleProposals) return base;
 
   const owners = new Map<PropertyKey, object>();
+  const overrides = new Map<PropertyKey, unknown>();
   if (relations) for (const name of RELATION_METHODS) owners.set(name, relations);
-  if (ruleProposals) for (const name of RULE_PROPOSAL_METHODS) owners.set(name, ruleProposals);
+  if (ruleProposals) {
+    for (const name of RULE_PROPOSAL_METHODS) owners.set(name, ruleProposals);
+    overrides.set("approveResourceRuleProposal", approveAcrossStores({ base, ruleProposals }));
+  }
 
   return new Proxy(base, {
     get(target, name) {
+      if (overrides.has(name)) return overrides.get(name);
       const owner = owners.get(name) ?? target;
       const value: unknown = Reflect.get(owner, name);
       return typeof value === "function" ? value.bind(owner) : value;
     },
   });
+}
+
+/**
+ * Approval when proposals live apart from the resource: no transaction spans
+ * both, so the proposal is decided first (its atomic pending check lets only
+ * one approval or rejection win) and the rule is appended after. A failure in
+ * between leaves the proposal approved without its rule, never a rule from a
+ * rejected proposal. The size limit is checked before deciding.
+ */
+function approveAcrossStores(params: {
+  readonly base: MemoryStore;
+  readonly ruleProposals: RuleProposalStore;
+}): MemoryStore["approveResourceRuleProposal"] {
+  const { base, ruleProposals } = params;
+  return async (key, { id, maxChars }) => {
+    const pending = (
+      await ruleProposals.listResourceRuleProposals(key, { status: "pending" })
+    ).find((p) => p.id === id);
+    if (!pending) return null;
+    // Throws MemoryLimitError before anything is decided.
+    appendStaticRule({
+      existing: (await base.getResource(key))?.staticRules ?? null,
+      text: pending.text,
+      maxChars,
+    });
+    const decided = await ruleProposals.decideResourceRuleProposal(key, { id, status: "approved" });
+    if (decided) await base.appendResourceStaticRule(key, { text: decided.text, maxChars });
+    return decided;
+  };
 }

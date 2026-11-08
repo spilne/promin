@@ -27,31 +27,23 @@ export function normalizeRuleText(text: string): string {
 }
 
 /**
- * Approve a proposal: append it to the resource's `staticRules` as a bullet,
- * then mark it approved. Returns the proposal, or null when the id is unknown
- * or already decided. Throws, changing nothing, when the rule would not fit in
- * `MAX_STATIC_RULES_CHARS`. This is the one step that turns learned text into
- * an instruction, so call it only from a person's action.
- *
- * The append is atomic in the store and idempotent (a bullet already there is
- * not added again), so two approvals at once, or one during an operator edit,
- * lose nothing and append the rule once.
+ * Approve a proposal: add it to the resource's `staticRules` as a bullet and
+ * mark it approved, as one atomic store step. Returns the proposal, or null
+ * when the id is unknown or already decided (a proposal someone rejected a
+ * moment earlier never becomes a rule). Throws `MemoryLimitError`, changing
+ * nothing, when the rule would not fit in `MAX_STATIC_RULES_CHARS`. This is
+ * the one step that turns learned text into an instruction, so call it only
+ * from a person's action.
  */
 export async function approveRuleProposal(params: {
   readonly store: MemoryStore;
   readonly key: ScopedKey;
   readonly proposalId: string;
 }): Promise<RuleProposal | null> {
-  const { store, key, proposalId } = params;
-  const pending = (await store.listResourceRuleProposals(key, { status: "pending" })).find(
-    (p) => p.id === proposalId,
-  );
-  if (!pending) return null;
-  await store.appendResourceStaticRule(key, {
-    text: pending.text,
+  return params.store.approveResourceRuleProposal(params.key, {
+    id: params.proposalId,
     maxChars: MAX_STATIC_RULES_CHARS,
   });
-  return store.decideResourceRuleProposal(key, { id: proposalId, status: "approved" });
 }
 
 /**

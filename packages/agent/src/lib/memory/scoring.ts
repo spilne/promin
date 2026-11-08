@@ -147,8 +147,10 @@ export interface RankCandidate {
  * counts as matching on similarity alone (`MIN_SEMANTIC_SIMILARITY`). If
  * the embedder throws, ranking falls back to lexical only.
  *
- * At most `maxSemanticCandidates` candidates are embedded: the ones with
- * the best importance-and-recency prior among those BM25 did not already rank.
+ * At most `maxSemanticCandidates` candidates are embedded. Half the slots
+ * (when there are that many) go to candidates BM25 did not match, those with
+ * the best importance-and-recency prior; the rest go to the best BM25 matches.
+ * Either side gives its unused slots to the other.
  */
 export async function rankCandidates(params: {
   readonly query: string;
@@ -211,12 +213,20 @@ async function semanticScores(params: {
   const prior = (i: number) =>
     clamp01(candidates[i]!.importance) +
     halfLifeFactor({ ageMs: params.now - candidates[i]!.at, halfLifeMs: params.recencyHalfLifeMs });
-  const lexicalHits = candidates.map((_, i) => i).filter((i) => lexical[i]! > 0);
+  const lexicalHits = candidates
+    .map((_, i) => i)
+    .filter((i) => lexical[i]! > 0)
+    .sort((a, b) => lexical[b]! - lexical[a]!);
   const others = candidates
     .map((_, i) => i)
     .filter((i) => !(lexical[i]! > 0))
     .sort((a, b) => prior(b) - prior(a));
-  const toEmbed = [...lexicalHits, ...others].slice(0, max);
+  // Half the slots are held for candidates BM25 missed: they are the ones only
+  // similarity can find, and a crowd of lexical hits must not push them out.
+  // Unused slots on either side go to the other.
+  const reserved = Math.min(others.length, Math.floor(max / 2));
+  const lexicalTaken = Math.min(lexicalHits.length, max - reserved);
+  const toEmbed = [...lexicalHits.slice(0, lexicalTaken), ...others.slice(0, max - lexicalTaken)];
 
   try {
     const queryVector = await embedder.embed(params.query);

@@ -707,6 +707,47 @@ export class SqliteMemoryStore implements MemoryStore {
     return decided ? toRuleProposal(decided) : null;
   }
 
+  async approveResourceRuleProposal(
+    key: ScopedKey,
+    params: { readonly id: string; readonly maxChars: number },
+  ): Promise<RuleProposal | null> {
+    if (!(await this.getResource(key))) {
+      await this.upsertResource(key, {});
+    }
+    const table = `${this.prefix}_rule_proposal`;
+    const tx = this.db.transaction(() => {
+      const proposal = this.db
+        .query<DbRuleProposalRow>(
+          `SELECT * FROM ${table}
+           WHERE namespace_id = ? AND resource_id = ? AND id = ? AND status = 'pending'`,
+        )
+        .get(key.namespaceId, key.resourceId, params.id);
+      if (!proposal) return null;
+      const resource = this.db
+        .query<DbResourceRow>(
+          `SELECT * FROM ${this.prefix}_resource WHERE namespace_id = ? AND resource_id = ?`,
+        )
+        .get(key.namespaceId, key.resourceId);
+      if (!resource) throw new Error("Resource vanished while approving a rule");
+      const rules = appendStaticRule({
+        existing: resource.static_rules,
+        text: proposal.text,
+        maxChars: params.maxChars,
+      });
+      if (rules !== (resource.static_rules?.trim() ?? "")) {
+        this.db
+          .query(
+            `UPDATE ${this.prefix}_resource SET static_rules = ?, updated_at = ? WHERE namespace_id = ? AND resource_id = ?`,
+          )
+          .run(rules, this.clock(), key.namespaceId, key.resourceId);
+      }
+      this.db.query(`UPDATE ${table} SET status = 'approved' WHERE id = ?`).run(proposal.id);
+      return { ...proposal, status: "approved" };
+    });
+    const approved = tx();
+    return approved ? toRuleProposal(approved) : null;
+  }
+
   async listResourceRelations(key: ScopedKey): Promise<Relation[]> {
     return this.db
       .query<DbRelationRow>(
@@ -1281,6 +1322,15 @@ export class SqliteMemoryStore implements MemoryStore {
     if (params?.minSalience !== undefined) {
       where.push("salience >= ?");
       args.push(params.minSalience);
+    }
+    if (params?.anyTerms && params.anyTerms.length > 0) {
+      const terms = params.anyTerms.map((t) => t.toLowerCase());
+      where.push(
+        `(${terms
+          .map(() => "instr(lower(summary), ?) > 0 OR instr(lower(COALESCE(outcome, '')), ?) > 0")
+          .join(" OR ")})`,
+      );
+      for (const term of terms) args.push(term, term);
     }
     const order = params?.order ?? "salienceDesc";
     const decays = order === "decayedSalienceDesc" && (params?.halfLifeMs ?? 0) > 0;

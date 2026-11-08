@@ -26,6 +26,7 @@ import {
   MAX_FACT_CHARS,
   MAX_WORKING_MEMORY_CHARS,
   MemoryLimitError,
+  type EpisodeListParams,
   type EpisodicRecord,
   type Fact,
   type MemoryStore,
@@ -34,7 +35,7 @@ import {
   type ThreadKey,
 } from "../memory/types.ts";
 import type { EmbeddingProvider } from "../embedding-provider.ts";
-import { memoizeEmbedder, rankCandidates } from "../memory/scoring.ts";
+import { memoizeEmbedder, rankCandidates, tokenize } from "../memory/scoring.ts";
 import {
   MAX_ENTITY_CHARS,
   MAX_PREDICATE_CHARS,
@@ -458,8 +459,14 @@ interface MemoryHit {
   readonly at: number;
 }
 
-/** Episodes `recall` ranks per scope: the best by decayed salience, so a long history stays cheap. */
+/**
+ * Episodes `recall` ranks per scope: the best by decayed salience, plus as
+ * many that mention a query word, so a long history stays cheap.
+ */
 const MAX_RECALL_EPISODES_PER_SCOPE = 200;
+
+/** Query words used to find matching episodes beyond the top ones. */
+const MAX_RECALL_QUERY_TERMS = 16;
 
 interface RecallSearchInput {
   readonly store: MemoryStore;
@@ -487,6 +494,18 @@ async function recallSearch(input: RecallSearchInput): Promise<MemoryHit[]> {
     now: input.now,
     limit: MAX_RECALL_EPISODES_PER_SCOPE,
   } as const;
+  // The best episodes by decayed salience, plus every episode that mentions a
+  // query word (also capped): an exact match outside the top is still found.
+  const queryTerms = [...new Set(tokenize(input.query))].slice(0, MAX_RECALL_QUERY_TERMS);
+  const loadEpisodes = async (
+    list: (params: EpisodeListParams) => Promise<EpisodicRecord[]>,
+  ): Promise<EpisodicRecord[]> => {
+    const top = await list(episodeParams);
+    if (queryTerms.length === 0) return top;
+    const seen = new Set(top.map((e) => e.id));
+    const matching = await list({ ...episodeParams, anyTerms: queryTerms });
+    return [...top, ...matching.filter((e) => !seen.has(e.id))];
+  };
 
   for (const scope of input.scopes) {
     let facts: Fact[] = [];
@@ -494,15 +513,18 @@ async function recallSearch(input: RecallSearchInput): Promise<MemoryHit[]> {
     if (scope === "namespace") {
       if (wantFacts) facts = await input.store.listNamespaceFacts(input.namespaceId);
       if (wantEpisodes)
-        episodes = await input.store.listNamespaceEpisodes(input.namespaceId, episodeParams);
+        episodes = await loadEpisodes((p) =>
+          input.store.listNamespaceEpisodes(input.namespaceId, p),
+        );
     } else if (scope === "resource" && input.resourceKey) {
-      if (wantFacts) facts = await input.store.listResourceFacts(input.resourceKey);
+      const resourceKey = input.resourceKey;
+      if (wantFacts) facts = await input.store.listResourceFacts(resourceKey);
       if (wantEpisodes)
-        episodes = await input.store.listResourceEpisodes(input.resourceKey, episodeParams);
+        episodes = await loadEpisodes((p) => input.store.listResourceEpisodes(resourceKey, p));
     } else if (scope === "thread") {
       if (wantFacts) facts = await input.store.listThreadFacts(input.threadKey);
       if (wantEpisodes)
-        episodes = await input.store.listThreadEpisodes(input.threadKey, episodeParams);
+        episodes = await loadEpisodes((p) => input.store.listThreadEpisodes(input.threadKey, p));
     }
     for (const f of facts) {
       candidates.push({

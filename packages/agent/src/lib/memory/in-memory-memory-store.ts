@@ -192,6 +192,10 @@ export class InMemoryMemoryStore implements MemoryStore {
   }
 
   async upsertResource(key: ScopedKey, patch: ResourcePatch): Promise<ResourceRow> {
+    return this.setResource(key, patch);
+  }
+
+  private setResource(key: ScopedKey, patch: ResourcePatch): ResourceRow {
     const k = this.resourceK(key);
     const existing = this.resources.get(k);
     const now = this.now();
@@ -223,13 +227,21 @@ export class InMemoryMemoryStore implements MemoryStore {
     key: ScopedKey,
     params: { readonly text: string; readonly maxChars: number },
   ): Promise<ResourceRow> {
-    const existing = this.resources.get(this.resourceK(key));
+    return this.appendStaticRuleNow({ key, ...params });
+  }
+
+  private appendStaticRuleNow(params: {
+    readonly key: ScopedKey;
+    readonly text: string;
+    readonly maxChars: number;
+  }): ResourceRow {
+    const existing = this.resources.get(this.resourceK(params.key));
     const staticRules = appendStaticRule({
       existing: existing?.staticRules ?? null,
       text: params.text,
       maxChars: params.maxChars,
     });
-    return this.upsertResource(key, { staticRules });
+    return this.setResource(params.key, { staticRules });
   }
 
   async appendResourceFact(key: ScopedKey, input: FactInput): Promise<Fact> {
@@ -338,12 +350,33 @@ export class InMemoryMemoryStore implements MemoryStore {
     key: ScopedKey,
     input: { readonly id: string; readonly status: "approved" | "rejected" },
   ): Promise<RuleProposal | null> {
-    const list = this.resourceProposals.get(this.resourceK(key)) ?? [];
-    const at = list.findIndex((p) => p.id === input.id && p.status === "pending");
+    return this.decideNow({ key, ...input });
+  }
+
+  private decideNow(params: {
+    readonly key: ScopedKey;
+    readonly id: string;
+    readonly status: "approved" | "rejected";
+  }): RuleProposal | null {
+    const list = this.resourceProposals.get(this.resourceK(params.key)) ?? [];
+    const at = list.findIndex((p) => p.id === params.id && p.status === "pending");
     if (at < 0) return null;
-    const next = { ...list[at]!, status: input.status };
+    const next = { ...list[at]!, status: params.status };
     list[at] = next;
     return copyProposal(next);
+  }
+
+  async approveResourceRuleProposal(
+    key: ScopedKey,
+    params: { readonly id: string; readonly maxChars: number },
+  ): Promise<RuleProposal | null> {
+    // No await below: the check and both writes run as one step.
+    const pending = (this.resourceProposals.get(this.resourceK(key)) ?? []).find(
+      (p) => p.id === params.id && p.status === "pending",
+    );
+    if (!pending) return null;
+    this.appendStaticRuleNow({ key, text: pending.text, maxChars: params.maxChars });
+    return this.decideNow({ key, id: params.id, status: "approved" });
   }
 
   async listResourceRelations(key: ScopedKey): Promise<Relation[]> {
@@ -758,6 +791,13 @@ export class InMemoryMemoryStore implements MemoryStore {
     if (params?.minSalience !== undefined) {
       const threshold = params.minSalience;
       out = out.filter((e) => e.salience >= threshold);
+    }
+    if (params?.anyTerms && params.anyTerms.length > 0) {
+      const terms = params.anyTerms.map((t) => t.toLowerCase());
+      out = out.filter((e) => {
+        const text = `${e.summary}\n${e.outcome ?? ""}`.toLowerCase();
+        return terms.some((t) => text.includes(t));
+      });
     }
     const order = params?.order ?? "salienceDesc";
     const now = params?.now ?? this.clock.currentTimeMs();

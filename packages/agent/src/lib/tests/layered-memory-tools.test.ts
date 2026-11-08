@@ -413,3 +413,26 @@ describe("layered memory tool — name + shape", () => {
     expect(() => tool.parameters.parse({ command: "nope", text: "x" })).toThrow();
   });
 });
+
+describe("layered memory tool — recall over a long history", () => {
+  it("finds an episode that mentions the query even when it ranks far below the cutoff", async () => {
+    const { store, run } = makeTool({ withResource: true });
+    const key = { namespaceId: NS, resourceId: ALICE };
+    const now = Date.now();
+    for (let i = 0; i < 250; i++) {
+      await store.appendResourceEpisode(key, {
+        summary: `routine status update ${i}`,
+        salience: 0.9,
+        occurredAt: now,
+      });
+    }
+    await store.appendResourceEpisode(key, {
+      summary: "decided to migrate billing to Stripe",
+      salience: 0.1,
+      occurredAt: now - 400 * 24 * 60 * 60 * 1000,
+    });
+
+    const out = await run({ command: "recall", query: "stripe billing", scopes: ["resource"] });
+    expect(out).toContain("migrate billing to Stripe");
+  });
+});

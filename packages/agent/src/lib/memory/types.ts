@@ -297,6 +297,13 @@ export interface EpisodeListParams {
   readonly halfLifeMs?: number;
   /** Age reference for `decayedSalienceDesc`, epoch ms. Defaults to the store clock. */
   readonly now?: number;
+  /**
+   * Only episodes whose summary or outcome contains at least one of these
+   * terms, compared case-insensitively as substrings (SQLite lowercases ASCII
+   * only). Undefined or empty: no filter. Applied before `limit`, so a match
+   * outside the top by `order` is still found.
+   */
+  readonly anyTerms?: ReadonlyArray<string>;
   /** Only episodes whose `metadata.kind` equals this (e.g. `"compact"`, `"distill"`). */
   readonly kind?: string;
   /** Only episodes distilled from this thread (`sourceThreadId`). */
@@ -607,10 +614,25 @@ export interface MemoryStore {
     key: ScopedKey,
     params?: RuleProposalListParams,
   ): Promise<RuleProposal[]>;
-  /** Set a pending proposal's status; null when it is unknown or already decided. */
+  /**
+   * Set a pending proposal's status; null when it is unknown or already
+   * decided. To approve, use `approveResourceRuleProposal`, which also writes
+   * the rule.
+   */
   decideResourceRuleProposal(
     key: ScopedKey,
     input: { readonly id: string; readonly status: "approved" | "rejected" },
+  ): Promise<RuleProposal | null>;
+  /**
+   * Approve a pending proposal: add its text to the resource's `staticRules`
+   * (`appendStaticRule`) and mark it approved, as one atomic step. Null, with
+   * nothing written, when the id is unknown or already decided, so a proposal
+   * rejected a moment earlier never becomes a rule. Throws `MemoryLimitError`,
+   * changing nothing, when the rule would pass `maxChars`.
+   */
+  approveResourceRuleProposal(
+    key: ScopedKey,
+    params: { readonly id: string; readonly maxChars: number },
   ): Promise<RuleProposal | null>;
   /**
    * Add `text` to the resource's `staticRules` as a bullet, unless a bullet

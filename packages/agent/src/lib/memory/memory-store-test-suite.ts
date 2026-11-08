@@ -401,6 +401,36 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
         ).rejects.toBeInstanceOf(MemoryLimitError);
         expect((await s.getResource(key))!.staticRules).toBe(before);
       });
+      it("approval is one step with the status change: a racing rejection never leaves a rule", async () => {
+        const s = await make();
+        for (let i = 0; i < 10; i++) {
+          const text = `race rule number ${i}`;
+          const p = await s.recordResourceRuleProposal(key, { text, threadId: "t1" });
+          const [approved] = await Promise.all([
+            s.approveResourceRuleProposal(key, { id: p.id, maxChars: 10_000 }),
+            s.decideResourceRuleProposal(key, { id: p.id, status: "rejected" }),
+          ]);
+          const rules = (await s.getResource(key))?.staticRules ?? "";
+          const final = (await s.listResourceRuleProposals(key)).find((x) => x.id === p.id)!;
+          expect(rules.includes(text)).toBe(final.status === "approved");
+          expect(approved !== null).toBe(final.status === "approved");
+        }
+      });
+
+      it("an approval that does not fit changes nothing and leaves the proposal pending", async () => {
+        const s = await make();
+        const p = await s.recordResourceRuleProposal(key, { text: "x".repeat(50), threadId: "t1" });
+        await expect(
+          s.approveResourceRuleProposal(key, { id: p.id, maxChars: 40 }),
+        ).rejects.toBeInstanceOf(MemoryLimitError);
+        expect((await s.getResource(key))?.staticRules ?? null).toBeNull();
+        expect(
+          (await s.listResourceRuleProposals(key, { status: "pending" })).map((x) => x.id),
+        ).toEqual([p.id]);
+        expect(
+          await s.approveResourceRuleProposal(key, { id: "unknown", maxChars: 40 }),
+        ).toBeNull();
+      });
     });
 
     describe("fact confidence", () => {
@@ -1202,6 +1232,33 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
         await s.appendThreadEpisode(key, { summary: "rollup" });
         await s.deleteThread(key);
         expect(await s.listThreadEpisodes(key)).toEqual([]);
+      });
+
+      it("anyTerms keeps only episodes mentioning a term, case-insensitively, before the limit applies", async () => {
+        const s = await make();
+        const key = { namespaceId: NS, resourceId: `terms-${Date.now()}-${Math.random()}` };
+        await s.appendResourceEpisode(key, {
+          summary: "Migrated billing to STRIPE",
+          salience: 0.1,
+        });
+        await s.appendResourceEpisode(key, {
+          summary: "Planning offsite",
+          outcome: "chose Lisbon",
+          salience: 0.2,
+        });
+        for (let i = 0; i < 5; i++) {
+          await s.appendResourceEpisode(key, { summary: `daily standup ${i}`, salience: 0.9 });
+        }
+
+        const summaries = async (anyTerms?: string[]) =>
+          (await s.listResourceEpisodes(key, { limit: 2, order: "salienceDesc", anyTerms })).map(
+            (e) => e.summary,
+          );
+        expect(await summaries(["stripe"])).toEqual(["Migrated billing to STRIPE"]);
+        expect(await summaries(["lisbon", "nothing"])).toEqual(["Planning offsite"]);
+        expect(await summaries(["zzz"])).toEqual([]);
+        expect(await summaries([])).toHaveLength(2);
+        expect(await summaries()).toHaveLength(2);
       });
     });
 
