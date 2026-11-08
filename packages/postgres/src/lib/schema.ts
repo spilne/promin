@@ -74,6 +74,10 @@ export const workflows = pgTable(
     // `_tag` of the error that failed the run; "WorkflowCancelledError"
     // for a cancelled run.
     errorTag: text("error_tag"),
+    // What started the run's rollback: 'failure' or 'cancel'. `cancelWorkflow`
+    // stores 'cancel', so only a really cancelled run can be reopened for a
+    // cancel rollback (the tag alone proves nothing: a step can fail with it).
+    compensationOrigin: text("compensation_origin"),
     // Structured reason attached when the workflow ended via a `.tripwire()`
     // step. Present only for `status_id = tripwire (6)`; null otherwise.
     tripwire: jsonb("tripwire"),

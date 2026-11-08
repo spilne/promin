@@ -39,6 +39,7 @@ exports[`entry points — exported names match the snapshot 1`] = `
     "compareWorkflowVersions",
     "type CompensateConfig",
     "type CompensationLedgerStore",
+    "type CompensationOrigin",
     "type CompensationStatus",
     "compileWorkflow",
     "completeDueSleeps",

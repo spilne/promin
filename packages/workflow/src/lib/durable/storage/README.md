@@ -169,8 +169,15 @@ client may resend after a mid-request disconnect.
   only move a run out of a non-terminal status; on a `completed`, `failed`
   (cancelled included) or `tripwire` run they are no-ops. Only
   `startFreshRun` and `resetSteps` leave a terminal status.
-- `cancelWorkflow` stores the failure with `errorTag: "WorkflowCancelledError"`;
-  `{ cascade: true }` cancels descendants too.
+- `cancelWorkflow` stores the failure with `errorTag: "WorkflowCancelledError"`
+  and a separate `compensationOrigin: "cancel"` marker; `{ cascade: true }`
+  cancels descendants too. The marker, not the tag (a failing step can carry
+  that tag), is what lets `beginCompensation({ origin: "cancel" })` reopen the
+  run for a cancel rollback. `beginCompensation` stores its `origin`
+  (`"failure"` by default) with the phase; `startFreshRun` and `resetSteps`
+  clear it. Postgres keeps it in `wf_workflows.compensation_origin`, SQLite in
+  `compensation_origin` (added to older tables on open), Redis in the run
+  hash's `compensationOrigin` field.
 - `startFreshRun` bumps the run number and, atomically with it, drops the
   journal, the delivered signals and the compensation ledger, so the new run
   never replays the previous one.

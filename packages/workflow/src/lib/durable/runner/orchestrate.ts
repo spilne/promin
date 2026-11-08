@@ -400,8 +400,8 @@ async function runOneOrchestrationCycle(cycle: CycleParams): Promise<unknown> {
 
 /**
  * Roll back a run that was cancelled while this driver held it. Runs only
- * when the stored run reads as cancelled (a step failing with a child's
- * cancelled error was rolled back as a failure already). It goes through
+ * when the stored run carries the cancel marker (a step failing with a
+ * `WorkflowCancelledError`, a child's say, was rolled back as a failure). It goes through
  * `rollBackAndFail` as a cancel rollback: the run re-enters `compensating`
  * (durable, so a driver that stops mid-rollback leaves it for recovery to
  * finish), steps roll back in a failure's order with its retries and ledger,
@@ -416,8 +416,12 @@ async function rollBackCancelled(params: {
 }): Promise<void> {
   const { ctx, lock, clock, workflowId, input } = params;
   if (lock.leaseSignal.aborted) throw lock.leaseSignal.reason;
-  const status = await ctx.storage.loadWorkflowStatus(workflowId);
-  if (status === null || !isCancelledRun(status)) return;
+  // The origin marker `cancelWorkflow` stored, not the error's tag: a step
+  // that failed with `WorkflowCancelledError` ended the run as a failure.
+  const state = await ctx.storage.loadWorkflow(workflowId);
+  if (state === null || state.status !== "failed" || state.compensationOrigin !== "cancel") {
+    return;
+  }
   await rollBackAndFail({
     ctx,
     lock,
@@ -547,7 +551,7 @@ async function runCycleBody(
   // not executed again: its rollback is finished and the run fails with
   // the failure that started it.
   if (state?.status === "compensating") {
-    const cancelled = state.errorTag === CANCELLED_ERROR_TAG;
+    const cancelled = state.compensationOrigin === "cancel";
     // A cancel rollback ends by rejecting with the cancel: that must not
     // start a second one.
     if (cancelled) cycle.phase.executing = false;
@@ -794,6 +798,7 @@ async function rollBackAndFail(params: {
           workflowId,
           error: errorMsg,
           ...(failedTag !== undefined && { errorTag: failedTag }),
+          origin: params.cancelled ? "cancel" : "failure",
           guard,
         });
       },

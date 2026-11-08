@@ -8,6 +8,7 @@ import {
   type FenceGuard,
   type WorkflowOrderBy,
   type RunSource,
+  type CompensationOrigin,
   type SignalTokenRecord,
   type StreamChunk,
   type WorkflowWakeup,
@@ -159,6 +160,7 @@ export class SqliteWorkflowStorage
         result               TEXT,
         error                TEXT,
         error_tag            TEXT,
+        compensation_origin  TEXT,
         metadata             TEXT,
         steps                TEXT    NOT NULL DEFAULT '{}',
         run_source           INTEGER,
@@ -171,6 +173,11 @@ export class SqliteWorkflowStorage
         idempotency_expires_at INTEGER
       )
     `);
+    // Tables created before the compensation origin marker lack its column.
+    const columns = this.db.query<{ name: string }>(`PRAGMA table_info(${t})`).all();
+    if (!columns.some((c) => c.name === "compensation_origin")) {
+      this.db.run(`ALTER TABLE ${t} ADD COLUMN compensation_origin TEXT`);
+    }
     // Partial unique index on namespace-scoped idempotency keys for atomic claim-or-attach.
     this.db.run(
       `CREATE UNIQUE INDEX IF NOT EXISTS ${t}_idempotency_key ON ${t} (COALESCE(namespace, ''), workflow_name, idempotency_key) WHERE idempotency_key IS NOT NULL`,
@@ -430,6 +437,7 @@ export class SqliteWorkflowStorage
       result: row.result != null ? JSON.parse(row.result) : undefined,
       error: row.error ?? undefined,
       errorTag: row.error_tag ?? undefined,
+      compensationOrigin: (row.compensation_origin as CompensationOrigin | null) ?? undefined,
       metadata: row.metadata != null ? JSON.parse(row.metadata) : undefined,
       runSource: decodeRunSource(row.run_source),
       runSourceId: row.run_source_id ?? undefined,
@@ -846,7 +854,8 @@ export class SqliteWorkflowStorage
         this.db
           .query(
             `UPDATE ${this._t}
-             SET status = 'failed', error = ?, error_tag = ?, completed_at = ?, updated_at = ?
+             SET status = 'failed', error = ?, error_tag = ?, compensation_origin = 'cancel',
+                 completed_at = ?, updated_at = ?
              WHERE workflow_id = ? AND status IN ('pending', 'running', 'suspended')`,
           )
           .run(CANCELLED_ERROR, CANCELLED_ERROR_TAG, now, now, workflowId),
@@ -1602,7 +1611,7 @@ export class SqliteWorkflowStorage
       this.db
         .query(
           `UPDATE ${this._t}
-           SET run = ?, status = 'pending', result = NULL, error = NULL, error_tag = NULL,
+           SET run = ?, status = 'pending', result = NULL, error = NULL, error_tag = NULL, compensation_origin = NULL,
                started_at = NULL, completed_at = NULL, steps = '{}', updated_at = ?
            WHERE workflow_id = ?`,
         )
@@ -1662,7 +1671,7 @@ export class SqliteWorkflowStorage
         this.db
           .query(
             `UPDATE ${this._t}
-             SET steps = ?, status = 'running', result = NULL, error = NULL, error_tag = NULL,
+             SET steps = ?, status = 'running', result = NULL, error = NULL, error_tag = NULL, compensation_origin = NULL,
                  completed_at = NULL, updated_at = ?
              WHERE workflow_id = ?`,
           )
@@ -2308,6 +2317,7 @@ export class SqliteWorkflowStorage
   // ---------------------------------------------------------------------------
 
   async beginCompensation({ guard, ...params }: BeginCompensationParams): Promise<boolean> {
+    const origin = params.origin ?? "failure";
     const now = this.clock.currentTimeMs();
     return this._fenced({
       workflowId: params.workflowId,
@@ -2316,19 +2326,20 @@ export class SqliteWorkflowStorage
         this.db
           .query(
             `UPDATE ${this._t}
-             SET status = 'compensating', error = ?, error_tag = ?, updated_at = ?,
+             SET status = 'compensating', error = ?, error_tag = ?, compensation_origin = ?,
+                 updated_at = ?,
                  completed_at = CASE WHEN status = 'failed' THEN NULL ELSE completed_at END
              WHERE workflow_id = ?
                AND (status IN ('pending', 'running', 'suspended')
-                    OR (? AND status = 'failed' AND error_tag = ?))`,
+                    OR (? AND status = 'failed' AND compensation_origin = 'cancel'))`,
           )
           .run(
             params.error,
             params.errorTag ?? null,
+            origin,
             now,
             params.workflowId,
-            params.errorTag === CANCELLED_ERROR_TAG ? 1 : 0,
-            CANCELLED_ERROR_TAG,
+            origin === "cancel" ? 1 : 0,
           );
         const row = this.db
           .query<{ status: string }>(`SELECT status FROM ${this._t} WHERE workflow_id = ?`)
@@ -2382,6 +2393,7 @@ interface WfRow {
   result: string | null;
   error: string | null;
   error_tag: string | null;
+  compensation_origin: string | null;
   metadata: string | null;
   steps: string;
   run_source: number | null;

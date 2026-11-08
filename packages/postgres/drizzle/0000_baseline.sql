@@ -702,6 +702,7 @@ CREATE TABLE wf_workflows (
   run_source smallint,
   run_source_id text,
   error_tag text,
+  compensation_origin text,
   CONSTRAINT wf_workflows_pkey PRIMARY KEY (workflow_id)
 );
 

@@ -11,6 +11,7 @@ import type {
   CompensationLedgerStore,
   StepCompensationOutcome,
   RunSource,
+  CompensationOrigin,
   WorkflowState,
   WorkflowStatusSnapshot,
   WorkflowSummary,
@@ -268,6 +269,7 @@ export class PostgresWorkflowStorage
       result: row.result ?? undefined,
       error: row.error ?? undefined,
       errorTag: row.errorTag ?? undefined,
+      compensationOrigin: (row.compensationOrigin as CompensationOrigin | null) ?? undefined,
       tripwire: row.tripwire ?? undefined,
       metadata: row.metadata ?? undefined,
       steps: stepMap,
@@ -358,19 +360,20 @@ export class PostgresWorkflowStorage
           NULL::int AS attempt, NULL::timestamptz AS wake_at, NULL::text AS signal_name,
           NULL::timestamptz AS signal_timeout_at, NULL::jsonb AS signal_json_schema,
           NULL::text AS compensation_status, NULL::text AS compensation_error,
-          NULL::timestamptz AS compensated_at, NULL::int AS task_index
+          NULL::timestamptz AS compensated_at, NULL::int AS task_index,
+          w.compensation_origin
         FROM w
         UNION ALL
         SELECT 1, s.step_name, NULL, NULL, NULL, NULL, NULL, NULL, s.run, s.status_id, NULL,
           s.metadata, s.result, s.error, s.error_tag, NULL, NULL, s.started_at, NULL,
           s.completed_at, s.step_type_id, s.depends_on, s.duration_ms::float8, s.attempt,
           s.wake_at, s.signal_name, s.signal_timeout_at, s.signal_json_schema,
-          s.compensation_status, s.compensation_error, s.compensated_at, NULL
+          s.compensation_status, s.compensation_error, s.compensated_at, NULL, NULL
         FROM wf_workflow_steps s JOIN w ON s.workflow_id = w.workflow_id AND s.run = w.run
         UNION ALL
         SELECT 2, t.step_name, NULL, NULL, NULL, NULL, NULL, NULL, t.run, t.status_id, t.input,
           NULL, t.result, t.error, NULL, NULL, NULL, t.started_at, NULL, t.completed_at, NULL,
-          NULL, NULL, t.attempt, NULL, NULL, NULL, NULL, NULL, NULL, NULL, t.task_index
+          NULL, NULL, t.attempt, NULL, NULL, NULL, NULL, NULL, NULL, NULL, t.task_index, NULL
         FROM wf_workflow_step_tasks t JOIN w ON t.workflow_id = w.workflow_id AND t.run = w.run`,
     );
 
@@ -442,6 +445,7 @@ export class PostgresWorkflowStorage
         result: wfRow.result,
         error: wfRow.error,
         errorTag: wfRow.error_tag,
+        compensationOrigin: wfRow.compensation_origin,
         tripwire: wfRow.tripwire,
         metadata: wfRow.metadata,
         createdAt: timestampOf(wfRow.created_at),
@@ -650,6 +654,7 @@ export class PostgresWorkflowStorage
       statusId: WorkflowStatusIds.id.failed,
       error: CANCELLED_ERROR,
       errorTag: CANCELLED_ERROR_TAG,
+      compensationOrigin: "cancel" as const,
       completedAt: now,
       updatedAt: now,
     };
@@ -1531,6 +1536,7 @@ export class PostgresWorkflowStorage
           result: null,
           error: null,
           errorTag: null,
+          compensationOrigin: null,
           tripwire: null,
           startedAt: null,
           completedAt: null,
@@ -1612,6 +1618,7 @@ export class PostgresWorkflowStorage
           result: null,
           error: null,
           errorTag: null,
+          compensationOrigin: null,
           tripwire: null,
           completedAt: null,
           updatedAt: this.config.clock.now(),
@@ -2092,6 +2099,7 @@ export class PostgresWorkflowStorage
 
   async beginCompensation({ guard, ...params }: BeginCompensationParams): Promise<boolean> {
     const { workflowId } = params;
+    const origin = params.origin ?? "failure";
     return this.fenced({
       workflowId,
       guard,
@@ -2102,6 +2110,7 @@ export class PostgresWorkflowStorage
             statusId: WorkflowStatusIds.id.compensating,
             error: params.error,
             errorTag: params.errorTag ?? null,
+            compensationOrigin: origin,
             // Reopening a cancelled run: it has not ended until the rollback does.
             completedAt: sql`CASE WHEN ${workflows.statusId} = ${WorkflowStatusIds.id.failed} THEN NULL ELSE ${workflows.completedAt} END`,
             updatedAt: this.config.clock.now(),
@@ -2111,11 +2120,11 @@ export class PostgresWorkflowStorage
               eq(workflows.workflowId, workflowId),
               or(
                 inArray(workflows.statusId, CANCELLABLE_STATUS_IDS),
-                // A cancelled run, when the rollback is a cancel's.
-                params.errorTag === CANCELLED_ERROR_TAG
+                // A run `cancelWorkflow` ended, when the rollback is a cancel's.
+                origin === "cancel"
                   ? and(
                       eq(workflows.statusId, WorkflowStatusIds.id.failed),
-                      eq(workflows.errorTag, CANCELLED_ERROR_TAG),
+                      eq(workflows.compensationOrigin, "cancel"),
                     )
                   : undefined,
               ),
