@@ -165,7 +165,7 @@ export interface StepOptions<T, Input = unknown, Prev = unknown> {
     input: Input;
     workflowId: string;
   }) => Eff<unknown, Throws<unknown>> | Promise<void>;
-  /** Skip this step when the predicate returns true. Skipped steps are recorded as 'skipped' and do not trigger compensation. */
+  /** Skip this step when the predicate returns true. A skipped step is recorded as completed with `metadata.stepOutcome: "skipped"` and is never compensated. */
   readonly skipWhen?: (prev: Prev) => boolean;
   /** Value to pass to the next step when this step is skipped. Defaults to prev. */
   readonly skipValue?: (prev: Prev) => T;

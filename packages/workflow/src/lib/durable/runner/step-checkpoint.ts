@@ -11,7 +11,12 @@ import { retryAsync, type RetryPolicy } from "../../shared/retry-policy.ts";
 import type { WallClock } from "../../shared/wall-clock.ts";
 import { CheckpointError } from "../durable-pipeline-error.ts";
 import { isControlFlowExit } from "../step-policy.ts";
-import type { StepAttemptRecord, WorkflowStatusSnapshot } from "../workflow-state.ts";
+import {
+  STEP_OUTCOME_METADATA_KEY,
+  type StepAttemptRecord,
+  type StepOutcomeMarker,
+  type WorkflowStatusSnapshot,
+} from "../workflow-state.ts";
 import { hasCapability } from "../workflow-storage.ts";
 import type { DagExecutionContext } from "./dag-context.ts";
 import { errorMessage, errorTagOf, type StepAttemptFailure } from "./step-body.ts";
@@ -135,6 +140,19 @@ export async function checkpointStepOutcome(params: {
   if (outcome.kind === "suspended" || outcome.kind === "continue-as-new") return { outcome };
   const failedAttempts = params.failedAttempts ?? [];
   const lastAttemptRecorded = failedAttempts.some((a) => a.attempt === outcome.attempt);
+  // A completed step whose last attempt failed got its result from `onFailure`.
+  const marker: StepOutcomeMarker | undefined =
+    outcome.kind !== "completed"
+      ? undefined
+      : outcome.skipped === true
+        ? "skipped"
+        : lastAttemptRecorded
+          ? "fallback"
+          : undefined;
+  const metadata =
+    marker === undefined
+      ? outcome.metadata
+      : { ...outcome.metadata, [STEP_OUTCOME_METADATA_KEY]: marker };
   const write = (operation: string, fn: () => Promise<void>) =>
     checkpointWrite({ clock, workflowId, operation, stepName: outcome.name, write: fn });
   const error = outcome.kind === "failed" ? errorMessage(outcome.error) : undefined;
@@ -172,7 +190,7 @@ export async function checkpointStepOutcome(params: {
                 result: outcome.result,
                 durationMs: outcome.durationMs,
                 startedAt: outcome.startedAt,
-                ...(outcome.metadata !== undefined && { metadata: outcome.metadata }),
+                ...(metadata !== undefined && { metadata }),
               }
             : {
                 kind: "failed",
@@ -197,7 +215,7 @@ export async function checkpointStepOutcome(params: {
         workflowId,
         stepName: outcome.name,
         result: outcome.result,
-        metadata: outcome.metadata,
+        metadata,
         durationMs: outcome.durationMs,
         startedAt: outcome.startedAt,
         guard: ctx.guard,
