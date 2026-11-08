@@ -197,6 +197,10 @@ const PROVISIONAL_CHILD_TTL_MS = 60 * 60 * 1_000;
 const RECORD_CHUNK = 2_000;
 /** Workflows purged concurrently. */
 const PURGE_CONCURRENCY = 16;
+
+/** Ended runs read per page when purging one namespace out of the shared index. */
+const PURGE_SCAN_PAGE = 200;
+
 /** "No limit" for the index page script; small enough to print as an integer in Lua. */
 const UNBOUNDED = 2_147_483_647;
 
@@ -2261,14 +2265,16 @@ export class RedisWorkflowStorage
       maxScore = params.to.getTime();
     }
 
-    const ids = await this.redis.zrangebyscore(
-      this.keys.byCompleted,
-      minScore,
-      maxScore,
-      "LIMIT",
-      0,
-      params.limit,
-    );
+    const ids = this.namespace
+      ? await this.endedIdsInNamespace({ minScore, maxScore, limit: params.limit })
+      : await this.redis.zrangebyscore(
+          this.keys.byCompleted,
+          minScore,
+          maxScore,
+          "LIMIT",
+          0,
+          params.limit,
+        );
     let deleted = 0;
     for (let i = 0; i < ids.length; i += PURGE_CONCURRENCY) {
       const outcomes = await Promise.all(
@@ -2277,6 +2283,40 @@ export class RedisWorkflowStorage
       deleted += outcomes.filter(Boolean).length;
     }
     return deleted;
+  }
+
+  /**
+   * Up to `limit` ended runs of this storage's namespace in the score window,
+   * oldest first. Ended runs of every namespace share one index, so it is read
+   * in pages and each run's namespace is checked; other namespaces' runs are
+   * skipped, not counted against `limit`.
+   */
+  private async endedIdsInNamespace(params: {
+    readonly minScore: number;
+    readonly maxScore: number;
+    readonly limit: number;
+  }): Promise<string[]> {
+    const found: string[] = [];
+    const page = Math.max(params.limit, PURGE_SCAN_PAGE);
+    for (let offset = 0; found.length < params.limit; offset += page) {
+      const ids = await this.redis.zrangebyscore(
+        this.keys.byCompleted,
+        params.minScore,
+        params.maxScore,
+        "LIMIT",
+        offset,
+        page,
+      );
+      if (ids.length === 0) break;
+      const namespaces = await Promise.all(
+        ids.map((id) => this.redis.hget(this.keys.wf(id), "namespace")),
+      );
+      ids.forEach((id, i) => {
+        if (found.length < params.limit && namespaces[i] === this.namespace) found.push(id);
+      });
+      if (ids.length < page) break;
+    }
+    return found;
   }
 
   /** Delete one finished workflow and its index entries. True when it was purged. */

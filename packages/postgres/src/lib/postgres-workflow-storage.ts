@@ -1944,6 +1944,8 @@ export class PostgresWorkflowStorage
           sql`${workflows.statusId} IN (${WorkflowStatusIds.id.completed}, ${WorkflowStatusIds.id.failed}, ${WorkflowStatusIds.id.tripwire})`,
           gte(workflows.completedAt, from),
           lt(workflows.completedAt, to),
+          // A namespaced storage purges its own namespace only, like its lists and scans.
+          this.config.namespace ? eq(workflows.namespace, this.config.namespace) : undefined,
         ),
       )
       .limit(params.limit);
