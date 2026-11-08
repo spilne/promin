@@ -94,10 +94,16 @@ export type {
   MemoryStore,
   Fact,
   FactInput,
+  FactListParams,
   FactSource,
   EpisodicRecord,
   EpisodeInput,
   EpisodeListParams,
+  Relation,
+  RelationInput,
+  RuleProposal,
+  RuleProposalListParams,
+  RuleProposalStatus,
   StoredMessage,
   ScopedKey,
   ThreadKey,
@@ -122,6 +128,7 @@ export {
   DISTILL_EPISODE_KIND,
   MAX_FACT_CHARS,
   MAX_STATIC_RULES_CHARS,
+  MemoryLimitError,
   MAX_WORKING_MEMORY_CHARS,
 } from "./memory/types.ts";
 export {
@@ -143,12 +150,16 @@ export type {
   ConsolidationLlmCall,
   ConsolidationSignals,
   DefaultConsolidatorConfig,
+  DistillReply,
   TriggerTurnHandling,
 } from "./memory/consolidator.ts";
 export {
   ConsolidationOutputError,
   sweepResourceThreads,
+  DEFAULT_COMPACT_PROMPT,
   DEFAULT_CONSOLIDATION_CHUNK_CHARS,
+  DEFAULT_DISTILL_PROMPT,
+  DEFAULT_RECONCILE_PROMPT,
   DEFAULT_CONSOLIDATION_SUMMARY_TOKENS,
   DEFAULT_MAX_RESOURCE_FACTS,
   NothingToConsolidateError,
@@ -172,8 +183,53 @@ export {
 export type { ThreadCursorPosition } from "./memory/thread-cursor.ts";
 export type { InMemoryMemoryStoreConfig } from "./memory/in-memory-memory-store.ts";
 
+export {
+  DEFAULT_FACT_CONFIDENCE,
+  MAX_MODEL_FACT_CONFIDENCE,
+  resolveFactConfidence,
+} from "./memory/fact-confidence.ts";
+export {
+  MAX_ENTITY_CHARS,
+  MAX_PREDICATE_CHARS,
+  MAX_RELATIONS_PER_RESOURCE,
+  normalizeEntityName,
+  relationKey,
+  relationNeighborhood,
+} from "./memory/relations.ts";
+export {
+  composeMemoryStore,
+  type RelationStore,
+  type RuleProposalStore,
+} from "./memory/compose-memory-store.ts";
+export {
+  memoryProfile,
+  MemoryProfileBuilder,
+  type ConsolidationOptions,
+  type ContextOptions,
+  type MemoryPreset,
+  type MemoryProfile,
+  type RecallOptions,
+} from "./memory/memory-profile.ts";
+export { newEpisode, newFact } from "./memory/record-factories.ts";
+export {
+  appendStaticRule,
+  approveRuleProposal,
+  MAX_PENDING_RULE_PROPOSALS,
+  normalizeRuleText,
+} from "./memory/rule-proposals.ts";
 export { capStaticRules, resolveContext } from "./memory/resolve-context.ts";
 export { loadResolvedContext, readMessageTail } from "./memory/load-context.ts";
+export {
+  bm25Scores,
+  cosineSimilarity,
+  decayedSalience,
+  MAX_DECAY_HALF_LIVES,
+  MIN_SALIENCE_RETENTION,
+  memoizeEmbedder,
+  rankCandidates,
+  tokenize,
+} from "./memory/scoring.ts";
+export type { RankCandidate } from "./memory/scoring.ts";
 export type { ResolveContextInput } from "./memory/resolve-context.ts";
 
 // RAG — retrievers, chunking, the retriever tool and registry.

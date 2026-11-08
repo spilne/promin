@@ -975,6 +975,50 @@ export const agentThread = pgTable(
   ],
 );
 
+/** One edge of a resource's entity graph: subject -predicate-> object. */
+export const agentRelation = pgTable(
+  "agent_relation",
+  {
+    id: text("id").primaryKey(),
+    namespaceId: text("namespace_id").notNull(),
+    resourceId: text("resource_id").notNull(),
+    subject: text("subject").notNull(),
+    predicate: text("predicate").notNull(),
+    object: text("object").notNull(),
+    /** Normalized triple (`relationKey`); one relation per triple and resource. */
+    relationKey: text("relation_key").notNull(),
+    /** Provenance: 'operator' | 'user' | 'model'. */
+    source: text("source").notNull(),
+    confidence: doublePrecision("confidence").notNull().default(1),
+    createdAt: bigint("created_at", { mode: "number" }).notNull(),
+    /** Insertion order; breaks ties between relations with the same `createdAt`. */
+    seq: bigserial("seq", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("agent_relation_key_idx").on(t.namespaceId, t.resourceId, t.relationKey)],
+);
+
+/** A user instruction the consolidator proposes as a standing rule; inert until approved. */
+export const agentRuleProposal = pgTable(
+  "agent_rule_proposal",
+  {
+    id: text("id").primaryKey(),
+    namespaceId: text("namespace_id").notNull(),
+    resourceId: text("resource_id").notNull(),
+    proposalText: text("text").notNull(),
+    /** Normalized text (`normalizeRuleText`); one proposal per text and resource. */
+    textKey: text("text_key").notNull(),
+    /** 'pending' | 'approved' | 'rejected'. */
+    status: text("status").notNull().default("pending"),
+    /** Distinct thread ids the instruction appeared in. */
+    evidenceThreadIds: jsonb("evidence_thread_ids").$type<string[]>().notNull().default([]),
+    firstSeenAt: bigint("first_seen_at", { mode: "number" }).notNull(),
+    lastSeenAt: bigint("last_seen_at", { mode: "number" }).notNull(),
+    /** Insertion order; breaks ties between proposals with the same `firstSeenAt`. */
+    seq: bigserial("seq", { mode: "number" }).notNull(),
+  },
+  (t) => [uniqueIndex("agent_rule_proposal_key_idx").on(t.namespaceId, t.resourceId, t.textKey)],
+);
+
 export const agentFact = pgTable(
   "agent_fact",
   {
@@ -988,6 +1032,12 @@ export const agentFact = pgTable(
     source: text("source").notNull(),
     createdAt: bigint("created_at", { mode: "number" }).notNull(),
     updatedAt: bigint("updated_at", { mode: "number" }).notNull(),
+    /** When a newer fact replaced this one; null while current. */
+    retiredAt: bigint("retired_at", { mode: "number" }),
+    /** Id of the fact that replaced this one; null while current. */
+    supersededBy: text("superseded_by"),
+    /** 0..1: how sure the writer was; recall's importance for the fact. */
+    confidence: doublePrecision("confidence").notNull().default(1),
     /** Insertion order; breaks ties between facts with the same `createdAt`. */
     seq: bigserial("seq", { mode: "number" }).notNull(),
   },

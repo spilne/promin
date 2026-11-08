@@ -21,16 +21,35 @@
 
 import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gte, isNotNull, isNull, lt, sql, type SQL } from "drizzle-orm";
-import { DEFAULT_THREAD_PAGE_SIZE, loadResolvedContext, parseThreadCursor } from "@promin/agent";
+import {
+  appendStaticRule,
+  DEFAULT_THREAD_PAGE_SIZE,
+  loadResolvedContext,
+  MAX_DECAY_HALF_LIVES,
+  MemoryLimitError,
+  newEpisode,
+  newFact,
+  MIN_SALIENCE_RETENTION,
+  normalizeRuleText,
+  parseThreadCursor,
+  relationKey,
+  resolveFactConfidence,
+} from "@promin/agent";
 import type {
   AppendMessagesOptions,
   ConsolidationReservation,
   ConsolidationReservationRequest,
   EpisodeInput,
   EpisodeListParams,
+  Relation,
+  RelationInput,
+  RuleProposal,
+  RuleProposalListParams,
+  RuleProposalStatus,
   EpisodicRecord,
   Fact,
   FactInput,
+  FactListParams,
   FactSource,
   ListThreadsParams,
   MemoryStore,
@@ -54,11 +73,31 @@ import {
   agentConsolidationReservation,
   agentEpisode,
   agentFact,
+  agentRelation,
+  agentRuleProposal,
   agentMessage,
   agentNamespace,
   agentResource,
   agentThread,
 } from "../schema.ts";
+
+/** The transaction handle `DrizzleDb.transaction` passes to its callback. */
+type PgTransaction = Parameters<Parameters<DrizzleDb["transaction"]>[0]>[0];
+
+/**
+ * Serialize writers of one kind of record (`topic`) for one resource until the
+ * transaction ends, so a count taken before an insert stays true through it.
+ */
+async function lockResourceTopic(params: {
+  readonly tx: PgTransaction;
+  readonly key: ScopedKey;
+  readonly topic: string;
+}): Promise<void> {
+  const { tx, key, topic } = params;
+  await tx.execute(
+    sql`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([topic, key.namespaceId, key.resourceId])}, 0))`,
+  );
+}
 
 const SCOPE_NS = "namespace";
 const SCOPE_RES = "resource";
@@ -141,27 +180,49 @@ export class PostgresMemoryStore implements MemoryStore {
     if (!(await this.getNamespace(namespaceId))) {
       await this.upsertNamespace(namespaceId, {});
     }
-    const f = this.makeFact(input);
-    await this.db.insert(agentFact).values({
-      id: f.id,
-      scope: SCOPE_NS,
-      namespaceId,
-      resourceId: null,
-      threadId: null,
-      factText: f.text,
-      source: f.source,
-      createdAt: f.createdAt,
-      updatedAt: f.updatedAt,
+    const f = newFact({ input, now: this.clock() });
+    await this.db.transaction(async (tx) => {
+      if (input.supersedes !== undefined) {
+        await tx
+          .update(agentFact)
+          .set({ retiredAt: f.createdAt, supersededBy: f.id })
+          .where(
+            and(
+              eq(agentFact.id, input.supersedes),
+              eq(agentFact.scope, SCOPE_NS),
+              eq(agentFact.namespaceId, namespaceId),
+              isNull(agentFact.retiredAt),
+            ),
+          );
+      }
+      await tx.insert(agentFact).values({
+        id: f.id,
+        scope: SCOPE_NS,
+        namespaceId,
+        resourceId: null,
+        threadId: null,
+        factText: f.text,
+        source: f.source,
+        createdAt: f.createdAt,
+        updatedAt: f.updatedAt,
+        confidence: f.confidence,
+      });
     });
     return f;
   }
 
-  async listNamespaceFacts(namespaceId: string): Promise<Fact[]> {
+  async listNamespaceFacts(namespaceId: string, params?: FactListParams): Promise<Fact[]> {
     const rows = await this.db
       .select()
       .from(agentFact)
-      .where(and(eq(agentFact.scope, SCOPE_NS), eq(agentFact.namespaceId, namespaceId)))
-      .orderBy(asc(agentFact.createdAt), asc(agentFact.seq));
+      .where(
+        and(
+          eq(agentFact.scope, SCOPE_NS),
+          eq(agentFact.namespaceId, namespaceId),
+          activeFactsOnly(params),
+        ),
+      )
+      .orderBy(...factOrder());
     return rows.map(toFact);
   }
 
@@ -181,7 +242,7 @@ export class PostgresMemoryStore implements MemoryStore {
     if (!(await this.getNamespace(namespaceId))) {
       await this.upsertNamespace(namespaceId, {});
     }
-    const ep = this.makeEpisode(input);
+    const ep = newEpisode({ input, now: this.clock() });
     await this.insertEpisode(SCOPE_NS, namespaceId, null, null, ep);
     return ep;
   }
@@ -277,22 +338,39 @@ export class PostgresMemoryStore implements MemoryStore {
     if (!(await this.getResource(key))) {
       await this.upsertResource(key, {});
     }
-    const f = this.makeFact(input);
-    await this.db.insert(agentFact).values({
-      id: f.id,
-      scope: SCOPE_RES,
-      namespaceId: key.namespaceId,
-      resourceId: key.resourceId,
-      threadId: null,
-      factText: f.text,
-      source: f.source,
-      createdAt: f.createdAt,
-      updatedAt: f.updatedAt,
+    const f = newFact({ input, now: this.clock() });
+    await this.db.transaction(async (tx) => {
+      if (input.supersedes !== undefined) {
+        await tx
+          .update(agentFact)
+          .set({ retiredAt: f.createdAt, supersededBy: f.id })
+          .where(
+            and(
+              eq(agentFact.id, input.supersedes),
+              eq(agentFact.scope, SCOPE_RES),
+              eq(agentFact.namespaceId, key.namespaceId),
+              eq(agentFact.resourceId, key.resourceId),
+              isNull(agentFact.retiredAt),
+            ),
+          );
+      }
+      await tx.insert(agentFact).values({
+        id: f.id,
+        scope: SCOPE_RES,
+        namespaceId: key.namespaceId,
+        resourceId: key.resourceId,
+        threadId: null,
+        factText: f.text,
+        source: f.source,
+        createdAt: f.createdAt,
+        updatedAt: f.updatedAt,
+        confidence: f.confidence,
+      });
     });
     return f;
   }
 
-  async listResourceFacts(key: ScopedKey): Promise<Fact[]> {
+  async listResourceFacts(key: ScopedKey, params?: FactListParams): Promise<Fact[]> {
     const rows = await this.db
       .select()
       .from(agentFact)
@@ -301,10 +379,320 @@ export class PostgresMemoryStore implements MemoryStore {
           eq(agentFact.scope, SCOPE_RES),
           eq(agentFact.namespaceId, key.namespaceId),
           eq(agentFact.resourceId, key.resourceId),
+          activeFactsOnly(params),
         ),
       )
-      .orderBy(asc(agentFact.createdAt), asc(agentFact.seq));
+      .orderBy(...factOrder());
     return rows.map(toFact);
+  }
+
+  async appendResourceRelation(
+    key: ScopedKey,
+    input: RelationInput,
+    options?: { readonly maxRelations?: number },
+  ): Promise<Relation> {
+    if (!(await this.getResource(key))) {
+      await this.upsertResource(key, {});
+    }
+    const identity = relationKey(input);
+    const row = await this.db.transaction(async (tx) => {
+      await lockResourceTopic({ tx, key, topic: "relation" });
+      const find = async () =>
+        (
+          await tx
+            .select()
+            .from(agentRelation)
+            .where(
+              and(
+                eq(agentRelation.namespaceId, key.namespaceId),
+                eq(agentRelation.resourceId, key.resourceId),
+                eq(agentRelation.relationKey, identity),
+              ),
+            )
+        )[0];
+      const existing = await find();
+      if (existing) return existing;
+      if (options?.maxRelations !== undefined) {
+        const [count] = await tx
+          .select({ n: sql<number>`count(*)::int` })
+          .from(agentRelation)
+          .where(
+            and(
+              eq(agentRelation.namespaceId, key.namespaceId),
+              eq(agentRelation.resourceId, key.resourceId),
+            ),
+          );
+        if ((count?.n ?? 0) >= options.maxRelations) {
+          throw new MemoryLimitError(`Resource already has ${options.maxRelations} relations.`);
+        }
+      }
+      await tx.insert(agentRelation).values({
+        id: randomUUID(),
+        namespaceId: key.namespaceId,
+        resourceId: key.resourceId,
+        subject: input.subject.trim(),
+        predicate: input.predicate.trim(),
+        object: input.object.trim(),
+        relationKey: identity,
+        source: input.source,
+        confidence: resolveFactConfidence(input),
+        createdAt: this.clock(),
+      });
+      return find();
+    });
+    if (!row) throw new Error(`Relation vanished after insert: ${identity}`);
+    return toRelation(row);
+  }
+
+  async appendResourceStaticRule(
+    key: ScopedKey,
+    params: { readonly text: string; readonly maxChars: number },
+  ): Promise<ResourceRow> {
+    if (!(await this.getResource(key))) {
+      await this.upsertResource(key, {});
+    }
+    await this.db.transaction(async (tx) => {
+      const [row] = await tx
+        .select()
+        .from(agentResource)
+        .where(
+          and(
+            eq(agentResource.namespaceId, key.namespaceId),
+            eq(agentResource.resourceId, key.resourceId),
+          ),
+        )
+        .for("update");
+      if (!row) throw new Error("Resource vanished while appending a rule");
+      const rules = appendStaticRule({
+        existing: row.staticRules,
+        text: params.text,
+        maxChars: params.maxChars,
+      });
+      if (rules !== (row.staticRules?.trim() ?? "")) {
+        await tx
+          .update(agentResource)
+          .set({ staticRules: rules, updatedAt: this.clock() })
+          .where(
+            and(
+              eq(agentResource.namespaceId, key.namespaceId),
+              eq(agentResource.resourceId, key.resourceId),
+            ),
+          );
+      }
+    });
+    const updated = await this.getResource(key);
+    if (!updated) throw new Error("Resource vanished while appending a rule");
+    return updated;
+  }
+
+  async recordResourceRuleProposal(
+    key: ScopedKey,
+    input: { readonly text: string; readonly threadId: string },
+    options?: { readonly maxPending?: number },
+  ): Promise<RuleProposal> {
+    if (!(await this.getResource(key))) {
+      await this.upsertResource(key, {});
+    }
+    const now = this.clock();
+    const textKey = normalizeRuleText(input.text);
+    const [row] = await this.db.transaction(async (tx) => {
+      await lockResourceTopic({ tx, key, topic: "rule-proposal" });
+      if (options?.maxPending !== undefined) {
+        await this.assertRoomForProposal({ tx, key, textKey, maxPending: options.maxPending });
+      }
+      return this.upsertProposal({ tx, key, input, textKey, now });
+    });
+    if (!row) throw new Error("Rule proposal upsert returned no row");
+    return toRuleProposal(row);
+  }
+
+  /** Throws `MemoryLimitError` when `textKey` is new and `maxPending` proposals already wait. */
+  private async assertRoomForProposal(params: {
+    readonly tx: PgTransaction;
+    readonly key: ScopedKey;
+    readonly textKey: string;
+    readonly maxPending: number;
+  }): Promise<void> {
+    const { tx, key, textKey, maxPending } = params;
+    const owned = and(
+      eq(agentRuleProposal.namespaceId, key.namespaceId),
+      eq(agentRuleProposal.resourceId, key.resourceId),
+    );
+    const [known] = await tx
+      .select({ id: agentRuleProposal.id })
+      .from(agentRuleProposal)
+      .where(and(owned, eq(agentRuleProposal.textKey, textKey)));
+    if (known) return;
+    const [pending] = await tx
+      .select({ n: sql<number>`count(*)::int` })
+      .from(agentRuleProposal)
+      .where(and(owned, eq(agentRuleProposal.status, "pending")));
+    if ((pending?.n ?? 0) >= maxPending) {
+      throw new MemoryLimitError(`Resource already has ${maxPending} pending proposals.`);
+    }
+  }
+
+  private upsertProposal(params: {
+    readonly tx: PgTransaction;
+    readonly key: ScopedKey;
+    readonly input: { readonly text: string; readonly threadId: string };
+    readonly textKey: string;
+    readonly now: number;
+  }) {
+    const { tx, key, input, textKey, now } = params;
+    const evidence = agentRuleProposal.evidenceThreadIds;
+    return tx
+      .insert(agentRuleProposal)
+      .values({
+        id: randomUUID(),
+        namespaceId: key.namespaceId,
+        resourceId: key.resourceId,
+        proposalText: input.text.trim(),
+        textKey,
+        evidenceThreadIds: [input.threadId],
+        firstSeenAt: now,
+        lastSeenAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [
+          agentRuleProposal.namespaceId,
+          agentRuleProposal.resourceId,
+          agentRuleProposal.textKey,
+        ],
+        set: {
+          // Add the thread to the evidence unless it is already there.
+          evidenceThreadIds: sql`CASE WHEN jsonb_exists(${evidence}, ${input.threadId}) THEN ${evidence} ELSE ${evidence} || to_jsonb(${input.threadId}::text) END`,
+          lastSeenAt: now,
+        },
+      })
+      .returning();
+  }
+
+  async listResourceRuleProposals(
+    key: ScopedKey,
+    params?: RuleProposalListParams,
+  ): Promise<RuleProposal[]> {
+    const rows = await this.db
+      .select()
+      .from(agentRuleProposal)
+      .where(
+        and(
+          eq(agentRuleProposal.namespaceId, key.namespaceId),
+          eq(agentRuleProposal.resourceId, key.resourceId),
+          params?.status !== undefined ? eq(agentRuleProposal.status, params.status) : undefined,
+        ),
+      )
+      .orderBy(asc(agentRuleProposal.firstSeenAt), asc(agentRuleProposal.seq));
+    return rows
+      .map(toRuleProposal)
+      .filter(
+        (p) => params?.minOccurrences === undefined || p.occurrences >= params.minOccurrences,
+      );
+  }
+
+  async decideResourceRuleProposal(
+    key: ScopedKey,
+    input: { readonly id: string; readonly status: "approved" | "rejected" },
+  ): Promise<RuleProposal | null> {
+    const [row] = await this.db
+      .update(agentRuleProposal)
+      .set({ status: input.status })
+      .where(
+        and(
+          eq(agentRuleProposal.namespaceId, key.namespaceId),
+          eq(agentRuleProposal.resourceId, key.resourceId),
+          eq(agentRuleProposal.id, input.id),
+          eq(agentRuleProposal.status, "pending"),
+        ),
+      )
+      .returning();
+    return row ? toRuleProposal(row) : null;
+  }
+
+  async approveResourceRuleProposal(
+    key: ScopedKey,
+    params: { readonly id: string; readonly maxChars: number },
+  ): Promise<RuleProposal | null> {
+    if (!(await this.getResource(key))) {
+      await this.upsertResource(key, {});
+    }
+    const approved = await this.db.transaction(async (tx) => {
+      // Lock the proposal first, then the resource; every other writer takes
+      // at most one of them, so the order cannot deadlock.
+      const [proposal] = await tx
+        .select()
+        .from(agentRuleProposal)
+        .where(
+          and(
+            eq(agentRuleProposal.namespaceId, key.namespaceId),
+            eq(agentRuleProposal.resourceId, key.resourceId),
+            eq(agentRuleProposal.id, params.id),
+            eq(agentRuleProposal.status, "pending"),
+          ),
+        )
+        .for("update");
+      if (!proposal) return null;
+      const [resource] = await tx
+        .select()
+        .from(agentResource)
+        .where(
+          and(
+            eq(agentResource.namespaceId, key.namespaceId),
+            eq(agentResource.resourceId, key.resourceId),
+          ),
+        )
+        .for("update");
+      if (!resource) throw new Error("Resource vanished while approving a rule");
+      const rules = appendStaticRule({
+        existing: resource.staticRules,
+        text: proposal.proposalText,
+        maxChars: params.maxChars,
+      });
+      if (rules !== (resource.staticRules?.trim() ?? "")) {
+        await tx
+          .update(agentResource)
+          .set({ staticRules: rules, updatedAt: this.clock() })
+          .where(
+            and(
+              eq(agentResource.namespaceId, key.namespaceId),
+              eq(agentResource.resourceId, key.resourceId),
+            ),
+          );
+      }
+      const [updated] = await tx
+        .update(agentRuleProposal)
+        .set({ status: "approved" })
+        .where(eq(agentRuleProposal.id, proposal.id))
+        .returning();
+      return updated ?? null;
+    });
+    return approved ? toRuleProposal(approved) : null;
+  }
+
+  async listResourceRelations(key: ScopedKey): Promise<Relation[]> {
+    const rows = await this.db
+      .select()
+      .from(agentRelation)
+      .where(
+        and(
+          eq(agentRelation.namespaceId, key.namespaceId),
+          eq(agentRelation.resourceId, key.resourceId),
+        ),
+      )
+      .orderBy(asc(agentRelation.createdAt), asc(agentRelation.seq));
+    return rows.map(toRelation);
+  }
+
+  async deleteResourceRelation(key: ScopedKey, relationId: string): Promise<void> {
+    await this.db
+      .delete(agentRelation)
+      .where(
+        and(
+          eq(agentRelation.namespaceId, key.namespaceId),
+          eq(agentRelation.resourceId, key.resourceId),
+          eq(agentRelation.id, relationId),
+        ),
+      );
   }
 
   async deleteResourceFact(key: ScopedKey, factId: string): Promise<void> {
@@ -324,7 +712,7 @@ export class PostgresMemoryStore implements MemoryStore {
     if (!(await this.getResource(key))) {
       await this.upsertResource(key, {});
     }
-    const ep = this.makeEpisode(input);
+    const ep = newEpisode({ input, now: this.clock() });
     await this.insertEpisode(SCOPE_RES, key.namespaceId, key.resourceId, null, ep);
     return ep;
   }
@@ -513,22 +901,39 @@ export class PostgresMemoryStore implements MemoryStore {
     if (!(await this.getThread(key))) {
       await this.createThread(key);
     }
-    const f = this.makeFact(input);
-    await this.db.insert(agentFact).values({
-      id: f.id,
-      scope: SCOPE_THR,
-      namespaceId: key.namespaceId,
-      resourceId: null,
-      threadId: key.threadId,
-      factText: f.text,
-      source: f.source,
-      createdAt: f.createdAt,
-      updatedAt: f.updatedAt,
+    const f = newFact({ input, now: this.clock() });
+    await this.db.transaction(async (tx) => {
+      if (input.supersedes !== undefined) {
+        await tx
+          .update(agentFact)
+          .set({ retiredAt: f.createdAt, supersededBy: f.id })
+          .where(
+            and(
+              eq(agentFact.id, input.supersedes),
+              eq(agentFact.scope, SCOPE_THR),
+              eq(agentFact.namespaceId, key.namespaceId),
+              eq(agentFact.threadId, key.threadId),
+              isNull(agentFact.retiredAt),
+            ),
+          );
+      }
+      await tx.insert(agentFact).values({
+        id: f.id,
+        scope: SCOPE_THR,
+        namespaceId: key.namespaceId,
+        resourceId: null,
+        threadId: key.threadId,
+        factText: f.text,
+        source: f.source,
+        createdAt: f.createdAt,
+        updatedAt: f.updatedAt,
+        confidence: f.confidence,
+      });
     });
     return f;
   }
 
-  async listThreadFacts(key: ThreadKey): Promise<Fact[]> {
+  async listThreadFacts(key: ThreadKey, params?: FactListParams): Promise<Fact[]> {
     const rows = await this.db
       .select()
       .from(agentFact)
@@ -537,9 +942,10 @@ export class PostgresMemoryStore implements MemoryStore {
           eq(agentFact.scope, SCOPE_THR),
           eq(agentFact.namespaceId, key.namespaceId),
           eq(agentFact.threadId, key.threadId),
+          activeFactsOnly(params),
         ),
       )
-      .orderBy(asc(agentFact.createdAt), asc(agentFact.seq));
+      .orderBy(...factOrder());
     return rows.map(toFact);
   }
 
@@ -682,7 +1088,7 @@ export class PostgresMemoryStore implements MemoryStore {
     if (!(await this.getThread(key))) {
       await this.createThread(key);
     }
-    const ep = this.makeEpisode(input);
+    const ep = newEpisode({ input, now: this.clock() });
     await this.insertEpisode(SCOPE_THR, key.namespaceId, null, key.threadId, ep);
     return ep;
   }
@@ -858,15 +1264,28 @@ export class PostgresMemoryStore implements MemoryStore {
     if (params?.minSalience !== undefined) {
       conditions.push(gte(agentEpisode.salience, params.minSalience));
     }
+    if (params?.anyTerms && params.anyTerms.length > 0) {
+      const matches = params.anyTerms.map((term) => {
+        const t = term.toLowerCase();
+        return sql`(strpos(lower(${agentEpisode.summary}), ${t}) > 0 OR strpos(lower(COALESCE(${agentEpisode.outcome}, '')), ${t}) > 0)`;
+      });
+      conditions.push(sql`(${sql.join(matches, sql` OR `)})`);
+    }
     const order = params?.order ?? "salienceDesc";
+    const halfLifeMs = params?.halfLifeMs ?? 0;
+    const now = params?.now ?? this.clock();
+    // Same formula as `decayedSalience`: salience * max(0.5^(age/halfLife), floor).
+    const decayed = sql`${agentEpisode.salience} * GREATEST(power(0.5, LEAST(GREATEST(${now}::double precision - ${agentEpisode.occurredAt}, 0) / ${halfLifeMs}::double precision, ${MAX_DECAY_HALF_LIVES}::double precision)), ${MIN_SALIENCE_RETENTION}::double precision) DESC`;
     const primary =
-      order === "salienceDesc"
-        ? desc(agentEpisode.salience)
+      order === "decayedSalienceDesc" && halfLifeMs > 0
+        ? decayed
         : order === "createdDesc"
           ? desc(agentEpisode.createdAt)
           : order === "occurredDesc"
             ? desc(agentEpisode.occurredAt)
-            : sql`${agentEpisode.sourceMsgToSeq} DESC NULLS LAST`;
+            : order === "sourceRangeDesc"
+              ? sql`${agentEpisode.sourceMsgToSeq} DESC NULLS LAST`
+              : desc(agentEpisode.salience);
     let q = this.db
       .select()
       .from(agentEpisode)
@@ -883,33 +1302,6 @@ export class PostgresMemoryStore implements MemoryStore {
       throw new Error(`Thread not found: ${key.namespaceId}/${key.threadId}`);
     }
     return row;
-  }
-
-  private makeFact(input: FactInput): Fact {
-    const now = this.clock();
-    return {
-      id: randomUUID(),
-      text: input.text,
-      source: input.source,
-      createdAt: now,
-      updatedAt: now,
-    };
-  }
-
-  private makeEpisode(input: EpisodeInput): EpisodicRecord {
-    const now = this.clock();
-    const salience = clamp01(input.salience ?? 0.5);
-    return {
-      id: randomUUID(),
-      summary: input.summary,
-      outcome: input.outcome ?? null,
-      salience,
-      sourceThreadId: input.sourceThreadId ?? null,
-      sourceMessageRange: input.sourceMessageRange ?? null,
-      occurredAt: input.occurredAt ?? now,
-      createdAt: now,
-      metadata: input.metadata ?? {},
-    };
   }
 
   private async insertEpisode(
@@ -982,6 +1374,52 @@ interface DbFactRow {
   source: string;
   createdAt: number;
   updatedAt: number;
+  retiredAt: number | null;
+  supersededBy: string | null;
+  confidence: number;
+}
+
+interface DbRelationRow {
+  id: string;
+  subject: string;
+  predicate: string;
+  object: string;
+  source: string;
+  confidence: number;
+  createdAt: number;
+}
+
+function toRelation(r: DbRelationRow): Relation {
+  return {
+    id: r.id,
+    subject: r.subject,
+    predicate: r.predicate,
+    object: r.object,
+    source: r.source as FactSource,
+    confidence: r.confidence,
+    createdAt: r.createdAt,
+  };
+}
+
+interface DbRuleProposalRow {
+  id: string;
+  proposalText: string;
+  status: string;
+  evidenceThreadIds: string[];
+  firstSeenAt: number;
+  lastSeenAt: number;
+}
+
+function toRuleProposal(r: DbRuleProposalRow): RuleProposal {
+  return {
+    id: r.id,
+    text: r.proposalText,
+    status: r.status as RuleProposalStatus,
+    evidenceThreadIds: r.evidenceThreadIds,
+    occurrences: r.evidenceThreadIds.length,
+    firstSeenAt: r.firstSeenAt,
+    lastSeenAt: r.lastSeenAt,
+  };
 }
 
 interface DbEpisodeRow {
@@ -1050,7 +1488,20 @@ function toFact(r: DbFactRow): Fact {
     source: r.source as FactSource,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
+    retiredAt: r.retiredAt,
+    supersededBy: r.supersededBy,
+    confidence: r.confidence,
   };
+}
+
+/** Condition keeping current facts; with `includeRetired`, every fact. */
+function activeFactsOnly(params: FactListParams | undefined): SQL | undefined {
+  return params?.includeRetired ? undefined : isNull(agentFact.retiredAt);
+}
+
+/** Current facts first, then retired ones; insertion order within each. */
+function factOrder(): SQL[] {
+  return [sql`(${agentFact.retiredAt} IS NOT NULL)`, asc(agentFact.createdAt), asc(agentFact.seq)];
 }
 
 function toEpisode(r: DbEpisodeRow): EpisodicRecord {
@@ -1069,11 +1520,4 @@ function toEpisode(r: DbEpisodeRow): EpisodicRecord {
     createdAt: r.createdAt,
     metadata: (r.metadata as Record<string, unknown>) ?? {},
   };
-}
-
-function clamp01(n: number): number {
-  if (Number.isNaN(n)) return 0.5;
-  if (n < 0) return 0;
-  if (n > 1) return 1;
-  return n;
 }

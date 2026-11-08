@@ -14,7 +14,12 @@ import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { Message } from "../message.ts";
+import { resolveFactConfidence } from "./fact-confidence.ts";
+import { relationKey } from "./relations.ts";
+import { appendStaticRule, normalizeRuleText } from "./rule-proposals.ts";
+import { newEpisode, newFact } from "./record-factories.ts";
 import { loadResolvedContext } from "./load-context.ts";
+import { decayedSalience } from "./scoring.ts";
 import { isAfterThreadCursor, parseThreadCursor } from "./thread-cursor.ts";
 import {
   DEFAULT_THREAD_PAGE_SIZE,
@@ -26,14 +31,20 @@ import {
   type EpisodicRecord,
   type Fact,
   type FactInput,
+  type FactListParams,
   type ListThreadsParams,
+  MemoryLimitError,
   type MemoryStore,
   type MessageRange,
   type NamespacePatch,
   type NamespaceRow,
+  type Relation,
+  type RelationInput,
   type ResolvedContext,
   type ResourcePatch,
   type ResourceRow,
+  type RuleProposal,
+  type RuleProposalListParams,
   type ScopedKey,
   type StoredMessage,
   type ThreadInit,
@@ -55,6 +66,8 @@ export class InMemoryMemoryStore implements MemoryStore {
   private readonly threads = new Map<string, ThreadRow>();
   private readonly namespaceFacts = new Map<string, Fact[]>();
   private readonly resourceFacts = new Map<string, Fact[]>();
+  private readonly resourceRelations = new Map<string, Relation[]>();
+  private readonly resourceProposals = new Map<string, RuleProposal[]>();
   private readonly threadFacts = new Map<string, Fact[]>();
   private readonly messages = new Map<string, StoredMessage[]>();
   private readonly seqByThread = new Map<string, number>();
@@ -124,15 +137,16 @@ export class InMemoryMemoryStore implements MemoryStore {
     if (!this.namespaces.has(namespaceId)) {
       await this.upsertNamespace(namespaceId, {});
     }
-    const f = this.makeFact(input);
+    const f = newFact({ input, now: this.now() });
     const list = this.namespaceFacts.get(namespaceId) ?? [];
+    this.retireSuperseded({ list, input, successor: f });
     list.push(f);
     this.namespaceFacts.set(namespaceId, list);
     return f;
   }
 
-  async listNamespaceFacts(namespaceId: string): Promise<Fact[]> {
-    return (this.namespaceFacts.get(namespaceId) ?? []).slice();
+  async listNamespaceFacts(namespaceId: string, params?: FactListParams): Promise<Fact[]> {
+    return listFacts({ facts: this.namespaceFacts.get(namespaceId) ?? [], params });
   }
 
   async deleteNamespaceFact(namespaceId: string, factId: string): Promise<void> {
@@ -148,7 +162,7 @@ export class InMemoryMemoryStore implements MemoryStore {
     if (!this.namespaces.has(namespaceId)) {
       await this.upsertNamespace(namespaceId, {});
     }
-    const ep = this.makeEpisode(input);
+    const ep = newEpisode({ input, now: this.now() });
     const list = this.namespaceEpisodes.get(namespaceId) ?? [];
     list.push(ep);
     this.namespaceEpisodes.set(namespaceId, list);
@@ -178,6 +192,10 @@ export class InMemoryMemoryStore implements MemoryStore {
   }
 
   async upsertResource(key: ScopedKey, patch: ResourcePatch): Promise<ResourceRow> {
+    return this.setResource(key, patch);
+  }
+
+  private setResource(key: ScopedKey, patch: ResourcePatch): ResourceRow {
     const k = this.resourceK(key);
     const existing = this.resources.get(k);
     const now = this.now();
@@ -205,19 +223,178 @@ export class InMemoryMemoryStore implements MemoryStore {
     return next;
   }
 
+  async appendResourceStaticRule(
+    key: ScopedKey,
+    params: { readonly text: string; readonly maxChars: number },
+  ): Promise<ResourceRow> {
+    return this.appendStaticRuleNow({ key, ...params });
+  }
+
+  private appendStaticRuleNow(params: {
+    readonly key: ScopedKey;
+    readonly text: string;
+    readonly maxChars: number;
+  }): ResourceRow {
+    const existing = this.resources.get(this.resourceK(params.key));
+    const staticRules = appendStaticRule({
+      existing: existing?.staticRules ?? null,
+      text: params.text,
+      maxChars: params.maxChars,
+    });
+    return this.setResource(params.key, { staticRules });
+  }
+
   async appendResourceFact(key: ScopedKey, input: FactInput): Promise<Fact> {
     if (!this.resources.has(this.resourceK(key))) {
       await this.upsertResource(key, {});
     }
-    const f = this.makeFact(input);
+    const f = newFact({ input, now: this.now() });
     const list = this.resourceFacts.get(this.resourceK(key)) ?? [];
+    this.retireSuperseded({ list, input, successor: f });
     list.push(f);
     this.resourceFacts.set(this.resourceK(key), list);
     return f;
   }
 
-  async listResourceFacts(key: ScopedKey): Promise<Fact[]> {
-    return (this.resourceFacts.get(this.resourceK(key)) ?? []).slice();
+  async appendResourceRelation(
+    key: ScopedKey,
+    input: RelationInput,
+    options?: { readonly maxRelations?: number },
+  ): Promise<Relation> {
+    if (!this.resources.has(this.resourceK(key))) {
+      await this.upsertResource(key, {});
+    }
+    const k = this.resourceK(key);
+    const list = this.resourceRelations.get(k) ?? [];
+    const identity = relationKey(input);
+    const existing = list.find((r) => relationKey(r) === identity);
+    if (existing) return { ...existing };
+    if (options?.maxRelations !== undefined && list.length >= options.maxRelations) {
+      throw new MemoryLimitError(`Resource already has ${options.maxRelations} relations.`);
+    }
+    const relation: Relation = {
+      id: randomUUID(),
+      subject: input.subject.trim(),
+      predicate: input.predicate.trim(),
+      object: input.object.trim(),
+      source: input.source,
+      confidence: resolveFactConfidence(input),
+      createdAt: this.now(),
+    };
+    list.push(relation);
+    this.resourceRelations.set(k, list);
+    return { ...relation };
+  }
+
+  async recordResourceRuleProposal(
+    key: ScopedKey,
+    input: { readonly text: string; readonly threadId: string },
+    options?: { readonly maxPending?: number },
+  ): Promise<RuleProposal> {
+    if (!this.resources.has(this.resourceK(key))) {
+      await this.upsertResource(key, {});
+    }
+    const k = this.resourceK(key);
+    const list = this.resourceProposals.get(k) ?? [];
+    const identity = normalizeRuleText(input.text);
+    const now = this.now();
+    const at = list.findIndex((p) => normalizeRuleText(p.text) === identity);
+    if (at >= 0) {
+      const p = list[at]!;
+      const evidence = p.evidenceThreadIds.includes(input.threadId)
+        ? p.evidenceThreadIds
+        : [...p.evidenceThreadIds, input.threadId];
+      const next = {
+        ...p,
+        evidenceThreadIds: evidence,
+        occurrences: evidence.length,
+        lastSeenAt: now,
+      };
+      list[at] = next;
+      return copyProposal(next);
+    }
+    if (
+      options?.maxPending !== undefined &&
+      list.filter((p) => p.status === "pending").length >= options.maxPending
+    ) {
+      throw new MemoryLimitError(`Resource already has ${options.maxPending} pending proposals.`);
+    }
+    const proposal: RuleProposal = {
+      id: randomUUID(),
+      text: input.text.trim(),
+      status: "pending",
+      evidenceThreadIds: [input.threadId],
+      occurrences: 1,
+      firstSeenAt: now,
+      lastSeenAt: now,
+    };
+    list.push(proposal);
+    this.resourceProposals.set(k, list);
+    return copyProposal(proposal);
+  }
+
+  async listResourceRuleProposals(
+    key: ScopedKey,
+    params?: RuleProposalListParams,
+  ): Promise<RuleProposal[]> {
+    return (this.resourceProposals.get(this.resourceK(key)) ?? [])
+      .filter(
+        (p) =>
+          (params?.status === undefined || p.status === params.status) &&
+          (params?.minOccurrences === undefined || p.occurrences >= params.minOccurrences),
+      )
+      .map(copyProposal);
+  }
+
+  async decideResourceRuleProposal(
+    key: ScopedKey,
+    input: { readonly id: string; readonly status: "approved" | "rejected" },
+  ): Promise<RuleProposal | null> {
+    return this.decideNow({ key, ...input });
+  }
+
+  private decideNow(params: {
+    readonly key: ScopedKey;
+    readonly id: string;
+    readonly status: "approved" | "rejected";
+  }): RuleProposal | null {
+    const list = this.resourceProposals.get(this.resourceK(params.key)) ?? [];
+    const at = list.findIndex((p) => p.id === params.id && p.status === "pending");
+    if (at < 0) return null;
+    const next = { ...list[at]!, status: params.status };
+    list[at] = next;
+    return copyProposal(next);
+  }
+
+  async approveResourceRuleProposal(
+    key: ScopedKey,
+    params: { readonly id: string; readonly maxChars: number },
+  ): Promise<RuleProposal | null> {
+    // No await below: the check and both writes run as one step.
+    const pending = (this.resourceProposals.get(this.resourceK(key)) ?? []).find(
+      (p) => p.id === params.id && p.status === "pending",
+    );
+    if (!pending) return null;
+    this.appendStaticRuleNow({ key, text: pending.text, maxChars: params.maxChars });
+    return this.decideNow({ key, id: params.id, status: "approved" });
+  }
+
+  async listResourceRelations(key: ScopedKey): Promise<Relation[]> {
+    return [...(this.resourceRelations.get(this.resourceK(key)) ?? [])];
+  }
+
+  async deleteResourceRelation(key: ScopedKey, relationId: string): Promise<void> {
+    const k = this.resourceK(key);
+    const list = this.resourceRelations.get(k);
+    if (!list) return;
+    this.resourceRelations.set(
+      k,
+      list.filter((r) => r.id !== relationId),
+    );
+  }
+
+  async listResourceFacts(key: ScopedKey, params?: FactListParams): Promise<Fact[]> {
+    return listFacts({ facts: this.resourceFacts.get(this.resourceK(key)) ?? [], params });
   }
 
   async deleteResourceFact(key: ScopedKey, factId: string): Promise<void> {
@@ -234,7 +411,7 @@ export class InMemoryMemoryStore implements MemoryStore {
     if (!this.resources.has(this.resourceK(key))) {
       await this.upsertResource(key, {});
     }
-    const ep = this.makeEpisode(input);
+    const ep = newEpisode({ input, now: this.now() });
     const list = this.resourceEpisodes.get(this.resourceK(key)) ?? [];
     list.push(ep);
     this.resourceEpisodes.set(this.resourceK(key), list);
@@ -408,15 +585,16 @@ export class InMemoryMemoryStore implements MemoryStore {
     if (!this.threads.has(this.threadK(key))) {
       await this.createThread(key);
     }
-    const f = this.makeFact(input);
+    const f = newFact({ input, now: this.now() });
     const list = this.threadFacts.get(this.threadK(key)) ?? [];
+    this.retireSuperseded({ list, input, successor: f });
     list.push(f);
     this.threadFacts.set(this.threadK(key), list);
     return f;
   }
 
-  async listThreadFacts(key: ThreadKey): Promise<Fact[]> {
-    return (this.threadFacts.get(this.threadK(key)) ?? []).slice();
+  async listThreadFacts(key: ThreadKey, params?: FactListParams): Promise<Fact[]> {
+    return listFacts({ facts: this.threadFacts.get(this.threadK(key)) ?? [], params });
   }
 
   async deleteThreadFact(key: ThreadKey, factId: string): Promise<void> {
@@ -487,7 +665,7 @@ export class InMemoryMemoryStore implements MemoryStore {
     if (!this.threads.has(this.threadK(key))) {
       await this.createThread(key);
     }
-    const ep = this.makeEpisode(input);
+    const ep = newEpisode({ input, now: this.now() });
     const list = this.threadEpisodes.get(this.threadK(key)) ?? [];
     list.push(ep);
     this.threadEpisodes.set(this.threadK(key), list);
@@ -584,31 +762,17 @@ export class InMemoryMemoryStore implements MemoryStore {
     return row;
   }
 
-  private makeFact(input: FactInput): Fact {
-    const now = this.now();
-    return {
-      id: randomUUID(),
-      text: input.text,
-      source: input.source,
-      createdAt: now,
-      updatedAt: now,
-    };
-  }
-
-  private makeEpisode(input: EpisodeInput): EpisodicRecord {
-    const now = this.now();
-    const salience = clamp01(input.salience ?? 0.5);
-    return {
-      id: randomUUID(),
-      summary: input.summary,
-      outcome: input.outcome ?? null,
-      salience,
-      sourceThreadId: input.sourceThreadId ?? null,
-      sourceMessageRange: input.sourceMessageRange ?? null,
-      occurredAt: input.occurredAt ?? now,
-      createdAt: now,
-      metadata: input.metadata ?? {},
-    };
+  /** Retire the current fact `input.supersedes` names in `list`, in place. */
+  private retireSuperseded(params: {
+    readonly list: Fact[];
+    readonly input: FactInput;
+    readonly successor: Fact;
+  }): void {
+    const { list, input, successor } = params;
+    if (input.supersedes === undefined) return;
+    const at = list.findIndex((f) => f.id === input.supersedes && f.retiredAt === null);
+    if (at < 0) return;
+    list[at] = { ...list[at]!, retiredAt: successor.createdAt, supersededBy: successor.id };
   }
 
   private queryEpisodes(
@@ -628,15 +792,30 @@ export class InMemoryMemoryStore implements MemoryStore {
       const threshold = params.minSalience;
       out = out.filter((e) => e.salience >= threshold);
     }
+    if (params?.anyTerms && params.anyTerms.length > 0) {
+      const terms = params.anyTerms.map((t) => t.toLowerCase());
+      out = out.filter((e) => {
+        const text = `${e.summary}\n${e.outcome ?? ""}`.toLowerCase();
+        return terms.some((t) => text.includes(t));
+      });
+    }
     const order = params?.order ?? "salienceDesc";
+    const now = params?.now ?? this.clock.currentTimeMs();
     const key = (e: EpisodicRecord): number =>
       order === "salienceDesc"
         ? e.salience
-        : order === "createdDesc"
-          ? e.createdAt
-          : order === "occurredDesc"
-            ? e.occurredAt
-            : (e.sourceMessageRange?.toSeq ?? -1);
+        : order === "decayedSalienceDesc"
+          ? decayedSalience({
+              salience: e.salience,
+              occurredAt: e.occurredAt,
+              now,
+              halfLifeMs: params?.halfLifeMs,
+            })
+          : order === "createdDesc"
+            ? e.createdAt
+            : order === "occurredDesc"
+              ? e.occurredAt
+              : (e.sourceMessageRange?.toSeq ?? -1);
     // Ties go to the later insert, like the SQL stores' insertion sequence.
     const ranked = out.map((e, index) => ({ e, index }));
     ranked.sort((a, b) => key(b.e) - key(a.e) || b.index - a.index);
@@ -646,9 +825,17 @@ export class InMemoryMemoryStore implements MemoryStore {
   }
 }
 
-function clamp01(n: number): number {
-  if (Number.isNaN(n)) return 0.5;
-  if (n < 0) return 0;
-  if (n > 1) return 1;
-  return n;
+/** A proposal the caller can hold without sharing the store's evidence array. */
+function copyProposal(p: RuleProposal): RuleProposal {
+  return { ...p, evidenceThreadIds: [...p.evidenceThreadIds] };
+}
+
+/** Current facts in insertion order; with `includeRetired`, retired ones follow. */
+function listFacts(params: {
+  readonly facts: ReadonlyArray<Fact>;
+  readonly params: FactListParams | undefined;
+}): Fact[] {
+  const current = params.facts.filter((f) => f.retiredAt === null);
+  if (!params.params?.includeRetired) return current;
+  return [...current, ...params.facts.filter((f) => f.retiredAt !== null)];
 }

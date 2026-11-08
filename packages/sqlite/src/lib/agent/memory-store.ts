@@ -24,16 +24,34 @@
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from "node:crypto";
-import { DEFAULT_THREAD_PAGE_SIZE, loadResolvedContext, parseThreadCursor } from "@promin/agent";
+import {
+  appendStaticRule,
+  DEFAULT_THREAD_PAGE_SIZE,
+  loadResolvedContext,
+  MemoryLimitError,
+  newEpisode,
+  newFact,
+  MIN_SALIENCE_RETENTION,
+  normalizeRuleText,
+  parseThreadCursor,
+  relationKey,
+  resolveFactConfidence,
+} from "@promin/agent";
 import type {
   AppendMessagesOptions,
   ConsolidationReservation,
   ConsolidationReservationRequest,
   EpisodeInput,
   EpisodeListParams,
+  Relation,
+  RelationInput,
+  RuleProposal,
+  RuleProposalListParams,
+  RuleProposalStatus,
   EpisodicRecord,
   Fact,
   FactInput,
+  FactListParams,
   FactSource,
   ListThreadsParams,
   MemoryStore,
@@ -159,7 +177,10 @@ export class SqliteMemoryStore implements MemoryStore {
         text         TEXT NOT NULL,
         source       TEXT NOT NULL,
         created_at   INTEGER NOT NULL,
-        updated_at   INTEGER NOT NULL
+        updated_at   INTEGER NOT NULL,
+        retired_at   INTEGER,
+        superseded_by TEXT,
+        confidence   REAL NOT NULL DEFAULT 1
       )
     `);
     this.db.run(
@@ -170,6 +191,39 @@ export class SqliteMemoryStore implements MemoryStore {
     );
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${p}_fact_thr ON ${p}_fact (scope, namespace_id, thread_id, created_at)`,
+    );
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS ${p}_relation (
+        id           TEXT NOT NULL PRIMARY KEY,
+        namespace_id TEXT NOT NULL,
+        resource_id  TEXT NOT NULL,
+        subject      TEXT NOT NULL,
+        predicate    TEXT NOT NULL,
+        object       TEXT NOT NULL,
+        relation_key TEXT NOT NULL,
+        source       TEXT NOT NULL,
+        confidence   REAL NOT NULL DEFAULT 1,
+        created_at   INTEGER NOT NULL
+      )
+    `);
+    this.db.run(
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${p}_relation_key ON ${p}_relation (namespace_id, resource_id, relation_key)`,
+    );
+    this.db.run(`
+      CREATE TABLE IF NOT EXISTS ${p}_rule_proposal (
+        id                  TEXT NOT NULL PRIMARY KEY,
+        namespace_id        TEXT NOT NULL,
+        resource_id         TEXT NOT NULL,
+        text                TEXT NOT NULL,
+        text_key            TEXT NOT NULL,
+        status              TEXT NOT NULL DEFAULT 'pending',
+        evidence_thread_ids TEXT NOT NULL DEFAULT '[]',
+        first_seen_at       INTEGER NOT NULL,
+        last_seen_at        INTEGER NOT NULL
+      )
+    `);
+    this.db.run(
+      `CREATE UNIQUE INDEX IF NOT EXISTS ${p}_rule_proposal_key ON ${p}_rule_proposal (namespace_id, resource_id, text_key)`,
     );
     this.db.run(`
       CREATE TABLE IF NOT EXISTS ${p}_episode (
@@ -275,22 +329,38 @@ export class SqliteMemoryStore implements MemoryStore {
     if (!(await this.getNamespace(namespaceId))) {
       await this.upsertNamespace(namespaceId, {});
     }
-    const f = this.makeFact(input);
-    this.db
-      .query(
-        `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at)
-         VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
-      )
-      .run(f.id, SCOPE_NS, namespaceId, f.text, f.source, f.createdAt, f.updatedAt);
+    const f = newFact({ input, now: this.clock() });
+    this.insertFact({
+      fact: f,
+      supersedes: input.supersedes,
+      scopeCondition: "scope = ? AND namespace_id = ?",
+      scopeBindings: [SCOPE_NS, namespaceId],
+      insert: (db) =>
+        db
+          .query(
+            `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at, confidence)
+             VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            f.id,
+            SCOPE_NS,
+            namespaceId,
+            f.text,
+            f.source,
+            f.createdAt,
+            f.updatedAt,
+            f.confidence,
+          ),
+    });
     return f;
   }
 
-  async listNamespaceFacts(namespaceId: string): Promise<Fact[]> {
+  async listNamespaceFacts(namespaceId: string, params?: FactListParams): Promise<Fact[]> {
     const rows = this.db
       .query<DbFactRow>(
-        `SELECT id, text, source, created_at, updated_at FROM ${this.prefix}_fact
-         WHERE scope = ? AND namespace_id = ?
-         ORDER BY created_at ASC, rowid ASC`,
+        `SELECT id, text, source, created_at, updated_at, retired_at, superseded_by, confidence FROM ${this.prefix}_fact
+         WHERE scope = ? AND namespace_id = ?${retiredFilter(params)}
+         ORDER BY retired_at IS NOT NULL, created_at ASC, rowid ASC`,
       )
       .all(SCOPE_NS, namespaceId);
     return rows.map(toFact);
@@ -309,7 +379,7 @@ export class SqliteMemoryStore implements MemoryStore {
     if (!(await this.getNamespace(namespaceId))) {
       await this.upsertNamespace(namespaceId, {});
     }
-    const ep = this.makeEpisode(input);
+    const ep = newEpisode({ input, now: this.clock() });
     this.insertEpisode(SCOPE_NS, namespaceId, null, null, ep);
     return ep;
   }
@@ -397,31 +467,39 @@ export class SqliteMemoryStore implements MemoryStore {
     if (!(await this.getResource(key))) {
       await this.upsertResource(key, {});
     }
-    const f = this.makeFact(input);
-    this.db
-      .query(
-        `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at)
-         VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
-      )
-      .run(
-        f.id,
-        SCOPE_RES,
-        key.namespaceId,
-        key.resourceId,
-        f.text,
-        f.source,
-        f.createdAt,
-        f.updatedAt,
-      );
+    const f = newFact({ input, now: this.clock() });
+    this.insertFact({
+      fact: f,
+      supersedes: input.supersedes,
+      scopeCondition: "scope = ? AND namespace_id = ? AND resource_id = ?",
+      scopeBindings: [SCOPE_RES, key.namespaceId, key.resourceId],
+      insert: (db) =>
+        db
+          .query(
+            `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at, confidence)
+             VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            f.id,
+            SCOPE_RES,
+            key.namespaceId,
+            key.resourceId,
+            f.text,
+            f.source,
+            f.createdAt,
+            f.updatedAt,
+            f.confidence,
+          ),
+    });
     return f;
   }
 
-  async listResourceFacts(key: ScopedKey): Promise<Fact[]> {
+  async listResourceFacts(key: ScopedKey, params?: FactListParams): Promise<Fact[]> {
     const rows = this.db
       .query<DbFactRow>(
-        `SELECT id, text, source, created_at, updated_at FROM ${this.prefix}_fact
-         WHERE scope = ? AND namespace_id = ? AND resource_id = ?
-         ORDER BY created_at ASC, rowid ASC`,
+        `SELECT id, text, source, created_at, updated_at, retired_at, superseded_by, confidence FROM ${this.prefix}_fact
+         WHERE scope = ? AND namespace_id = ? AND resource_id = ?${retiredFilter(params)}
+         ORDER BY retired_at IS NOT NULL, created_at ASC, rowid ASC`,
       )
       .all(SCOPE_RES, key.namespaceId, key.resourceId);
     return rows.map(toFact);
@@ -436,11 +514,265 @@ export class SqliteMemoryStore implements MemoryStore {
       .run(SCOPE_RES, key.namespaceId, key.resourceId, factId);
   }
 
+  async appendResourceRelation(
+    key: ScopedKey,
+    input: RelationInput,
+    options?: { readonly maxRelations?: number },
+  ): Promise<Relation> {
+    if (!(await this.getResource(key))) {
+      await this.upsertResource(key, {});
+    }
+    const identity = relationKey(input);
+    const table = `${this.prefix}_relation`;
+    const tx = this.db.transaction(() => {
+      const find = () =>
+        this.db
+          .query<DbRelationRow>(
+            `SELECT * FROM ${table} WHERE namespace_id = ? AND resource_id = ? AND relation_key = ?`,
+          )
+          .get(key.namespaceId, key.resourceId, identity);
+      const existing = find();
+      if (existing) return existing;
+      if (options?.maxRelations !== undefined) {
+        const count = this.db
+          .query<{ n: number }>(
+            `SELECT COUNT(*) AS n FROM ${table} WHERE namespace_id = ? AND resource_id = ?`,
+          )
+          .get(key.namespaceId, key.resourceId);
+        if ((count?.n ?? 0) >= options.maxRelations) {
+          throw new MemoryLimitError(`Resource already has ${options.maxRelations} relations.`);
+        }
+      }
+      this.db
+        .query(
+          `INSERT INTO ${table}
+             (id, namespace_id, resource_id, subject, predicate, object, relation_key, source, confidence, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          randomUUID(),
+          key.namespaceId,
+          key.resourceId,
+          input.subject.trim(),
+          input.predicate.trim(),
+          input.object.trim(),
+          identity,
+          input.source,
+          resolveFactConfidence(input),
+          this.clock(),
+        );
+      return find();
+    });
+    const row = tx();
+    if (!row) throw new Error(`Relation vanished after insert: ${identity}`);
+    return toRelation(row);
+  }
+
+  async appendResourceStaticRule(
+    key: ScopedKey,
+    params: { readonly text: string; readonly maxChars: number },
+  ): Promise<ResourceRow> {
+    if (!(await this.getResource(key))) {
+      await this.upsertResource(key, {});
+    }
+    const tx = this.db.transaction(() => {
+      const row = this.db
+        .query<DbResourceRow>(
+          `SELECT * FROM ${this.prefix}_resource WHERE namespace_id = ? AND resource_id = ?`,
+        )
+        .get(key.namespaceId, key.resourceId);
+      if (!row) throw new Error("Resource vanished while appending a rule");
+      const rules = appendStaticRule({
+        existing: row.static_rules,
+        text: params.text,
+        maxChars: params.maxChars,
+      });
+      if (rules !== (row.static_rules?.trim() ?? "")) {
+        this.db
+          .query(
+            `UPDATE ${this.prefix}_resource SET static_rules = ?, updated_at = ? WHERE namespace_id = ? AND resource_id = ?`,
+          )
+          .run(rules, this.clock(), key.namespaceId, key.resourceId);
+      }
+    });
+    tx();
+    const updated = await this.getResource(key);
+    if (!updated) throw new Error("Resource vanished while appending a rule");
+    return updated;
+  }
+
+  async recordResourceRuleProposal(
+    key: ScopedKey,
+    input: { readonly text: string; readonly threadId: string },
+    options?: { readonly maxPending?: number },
+  ): Promise<RuleProposal> {
+    if (!(await this.getResource(key))) {
+      await this.upsertResource(key, {});
+    }
+    const identity = normalizeRuleText(input.text);
+    const table = `${this.prefix}_rule_proposal`;
+    const tx = this.db.transaction(() => {
+      const now = this.clock();
+      const row = this.db
+        .query<DbRuleProposalRow>(
+          `SELECT * FROM ${table} WHERE namespace_id = ? AND resource_id = ? AND text_key = ?`,
+        )
+        .get(key.namespaceId, key.resourceId, identity);
+      if (!row) {
+        if (options?.maxPending !== undefined) {
+          const pending = this.db
+            .query<{ n: number }>(
+              `SELECT COUNT(*) AS n FROM ${table} WHERE namespace_id = ? AND resource_id = ? AND status = 'pending'`,
+            )
+            .get(key.namespaceId, key.resourceId);
+          if ((pending?.n ?? 0) >= options.maxPending) {
+            throw new MemoryLimitError(
+              `Resource already has ${options.maxPending} pending proposals.`,
+            );
+          }
+        }
+        this.db
+          .query(
+            `INSERT INTO ${table}
+               (id, namespace_id, resource_id, text, text_key, status, evidence_thread_ids, first_seen_at, last_seen_at)
+             VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+          )
+          .run(
+            randomUUID(),
+            key.namespaceId,
+            key.resourceId,
+            input.text.trim(),
+            identity,
+            JSON.stringify([input.threadId]),
+            now,
+            now,
+          );
+      } else {
+        const evidence = parseThreadIds(row.evidence_thread_ids);
+        if (!evidence.includes(input.threadId)) evidence.push(input.threadId);
+        this.db
+          .query(`UPDATE ${table} SET evidence_thread_ids = ?, last_seen_at = ? WHERE id = ?`)
+          .run(JSON.stringify(evidence), now, row.id);
+      }
+      return this.db
+        .query<DbRuleProposalRow>(
+          `SELECT * FROM ${table} WHERE namespace_id = ? AND resource_id = ? AND text_key = ?`,
+        )
+        .get(key.namespaceId, key.resourceId, identity);
+    });
+    const recorded = tx();
+    if (!recorded) throw new Error(`Rule proposal vanished after insert: ${identity}`);
+    return toRuleProposal(recorded);
+  }
+
+  async listResourceRuleProposals(
+    key: ScopedKey,
+    params?: RuleProposalListParams,
+  ): Promise<RuleProposal[]> {
+    const where = ["namespace_id = ?", "resource_id = ?"];
+    const args: string[] = [key.namespaceId, key.resourceId];
+    if (params?.status !== undefined) {
+      where.push("status = ?");
+      args.push(params.status);
+    }
+    return this.db
+      .query<DbRuleProposalRow>(
+        `SELECT * FROM ${this.prefix}_rule_proposal WHERE ${where.join(" AND ")}
+         ORDER BY first_seen_at ASC, rowid ASC`,
+      )
+      .all(...args)
+      .map(toRuleProposal)
+      .filter(
+        (p) => params?.minOccurrences === undefined || p.occurrences >= params.minOccurrences,
+      );
+  }
+
+  async decideResourceRuleProposal(
+    key: ScopedKey,
+    input: { readonly id: string; readonly status: "approved" | "rejected" },
+  ): Promise<RuleProposal | null> {
+    const table = `${this.prefix}_rule_proposal`;
+    const tx = this.db.transaction(() => {
+      const row = this.db
+        .query<DbRuleProposalRow>(
+          `SELECT * FROM ${table}
+           WHERE namespace_id = ? AND resource_id = ? AND id = ? AND status = 'pending'`,
+        )
+        .get(key.namespaceId, key.resourceId, input.id);
+      if (!row) return null;
+      this.db.query(`UPDATE ${table} SET status = ? WHERE id = ?`).run(input.status, row.id);
+      return { ...row, status: input.status };
+    });
+    const decided = tx();
+    return decided ? toRuleProposal(decided) : null;
+  }
+
+  async approveResourceRuleProposal(
+    key: ScopedKey,
+    params: { readonly id: string; readonly maxChars: number },
+  ): Promise<RuleProposal | null> {
+    if (!(await this.getResource(key))) {
+      await this.upsertResource(key, {});
+    }
+    const table = `${this.prefix}_rule_proposal`;
+    const tx = this.db.transaction(() => {
+      const proposal = this.db
+        .query<DbRuleProposalRow>(
+          `SELECT * FROM ${table}
+           WHERE namespace_id = ? AND resource_id = ? AND id = ? AND status = 'pending'`,
+        )
+        .get(key.namespaceId, key.resourceId, params.id);
+      if (!proposal) return null;
+      const resource = this.db
+        .query<DbResourceRow>(
+          `SELECT * FROM ${this.prefix}_resource WHERE namespace_id = ? AND resource_id = ?`,
+        )
+        .get(key.namespaceId, key.resourceId);
+      if (!resource) throw new Error("Resource vanished while approving a rule");
+      const rules = appendStaticRule({
+        existing: resource.static_rules,
+        text: proposal.text,
+        maxChars: params.maxChars,
+      });
+      if (rules !== (resource.static_rules?.trim() ?? "")) {
+        this.db
+          .query(
+            `UPDATE ${this.prefix}_resource SET static_rules = ?, updated_at = ? WHERE namespace_id = ? AND resource_id = ?`,
+          )
+          .run(rules, this.clock(), key.namespaceId, key.resourceId);
+      }
+      this.db.query(`UPDATE ${table} SET status = 'approved' WHERE id = ?`).run(proposal.id);
+      return { ...proposal, status: "approved" };
+    });
+    const approved = tx();
+    return approved ? toRuleProposal(approved) : null;
+  }
+
+  async listResourceRelations(key: ScopedKey): Promise<Relation[]> {
+    return this.db
+      .query<DbRelationRow>(
+        `SELECT * FROM ${this.prefix}_relation
+         WHERE namespace_id = ? AND resource_id = ?
+         ORDER BY created_at ASC, rowid ASC`,
+      )
+      .all(key.namespaceId, key.resourceId)
+      .map(toRelation);
+  }
+
+  async deleteResourceRelation(key: ScopedKey, relationId: string): Promise<void> {
+    this.db
+      .query(
+        `DELETE FROM ${this.prefix}_relation
+         WHERE namespace_id = ? AND resource_id = ? AND id = ?`,
+      )
+      .run(key.namespaceId, key.resourceId, relationId);
+  }
+
   async appendResourceEpisode(key: ScopedKey, input: EpisodeInput): Promise<EpisodicRecord> {
     if (!(await this.getResource(key))) {
       await this.upsertResource(key, {});
     }
-    const ep = this.makeEpisode(input);
+    const ep = newEpisode({ input, now: this.clock() });
     this.insertEpisode(SCOPE_RES, key.namespaceId, key.resourceId, null, ep);
     return ep;
   }
@@ -635,31 +967,39 @@ export class SqliteMemoryStore implements MemoryStore {
     if (!(await this.getThread(key))) {
       await this.createThread(key);
     }
-    const f = this.makeFact(input);
-    this.db
-      .query(
-        `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at)
-         VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        f.id,
-        SCOPE_THR,
-        key.namespaceId,
-        key.threadId,
-        f.text,
-        f.source,
-        f.createdAt,
-        f.updatedAt,
-      );
+    const f = newFact({ input, now: this.clock() });
+    this.insertFact({
+      fact: f,
+      supersedes: input.supersedes,
+      scopeCondition: "scope = ? AND namespace_id = ? AND thread_id = ?",
+      scopeBindings: [SCOPE_THR, key.namespaceId, key.threadId],
+      insert: (db) =>
+        db
+          .query(
+            `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at, confidence)
+             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            f.id,
+            SCOPE_THR,
+            key.namespaceId,
+            key.threadId,
+            f.text,
+            f.source,
+            f.createdAt,
+            f.updatedAt,
+            f.confidence,
+          ),
+    });
     return f;
   }
 
-  async listThreadFacts(key: ThreadKey): Promise<Fact[]> {
+  async listThreadFacts(key: ThreadKey, params?: FactListParams): Promise<Fact[]> {
     const rows = this.db
       .query<DbFactRow>(
-        `SELECT id, text, source, created_at, updated_at FROM ${this.prefix}_fact
-         WHERE scope = ? AND namespace_id = ? AND thread_id = ?
-         ORDER BY created_at ASC, rowid ASC`,
+        `SELECT id, text, source, created_at, updated_at, retired_at, superseded_by, confidence FROM ${this.prefix}_fact
+         WHERE scope = ? AND namespace_id = ? AND thread_id = ?${retiredFilter(params)}
+         ORDER BY retired_at IS NOT NULL, created_at ASC, rowid ASC`,
       )
       .all(SCOPE_THR, key.namespaceId, key.threadId);
     return rows.map(toFact);
@@ -777,7 +1117,7 @@ export class SqliteMemoryStore implements MemoryStore {
     if (!(await this.getThread(key))) {
       await this.createThread(key);
     }
-    const ep = this.makeEpisode(input);
+    const ep = newEpisode({ input, now: this.clock() });
     this.insertEpisode(SCOPE_THR, key.namespaceId, null, key.threadId, ep);
     return ep;
   }
@@ -902,31 +1242,30 @@ export class SqliteMemoryStore implements MemoryStore {
     return row;
   }
 
-  private makeFact(input: FactInput): Fact {
-    const now = this.clock();
-    return {
-      id: randomUUID(),
-      text: input.text,
-      source: input.source,
-      createdAt: now,
-      updatedAt: now,
-    };
-  }
-
-  private makeEpisode(input: EpisodeInput): EpisodicRecord {
-    const now = this.clock();
-    const salience = clamp01(input.salience ?? 0.5);
-    return {
-      id: randomUUID(),
-      summary: input.summary,
-      outcome: input.outcome ?? null,
-      salience,
-      sourceThreadId: input.sourceThreadId ?? null,
-      sourceMessageRange: input.sourceMessageRange ?? null,
-      occurredAt: input.occurredAt ?? now,
-      createdAt: now,
-      metadata: input.metadata ?? {},
-    };
+  /**
+   * Insert `fact` and retire the current fact `supersedes` names inside
+   * `scopeCondition`, in one transaction.
+   */
+  private insertFact(params: {
+    readonly fact: Fact;
+    readonly supersedes: string | undefined;
+    readonly scopeCondition: string;
+    readonly scopeBindings: ReadonlyArray<string>;
+    readonly insert: (db: SqliteDatabase) => void;
+  }): void {
+    const { fact, supersedes, scopeCondition, scopeBindings, insert } = params;
+    const tx = this.db.transaction(() => {
+      if (supersedes !== undefined) {
+        this.db
+          .query(
+            `UPDATE ${this.prefix}_fact SET retired_at = ?, superseded_by = ?
+             WHERE id = ? AND ${scopeCondition} AND retired_at IS NULL`,
+          )
+          .run(fact.createdAt, fact.id, supersedes, ...scopeBindings);
+      }
+      insert(this.db);
+    });
+    tx();
   }
 
   private insertEpisode(
@@ -984,15 +1323,34 @@ export class SqliteMemoryStore implements MemoryStore {
       where.push("salience >= ?");
       args.push(params.minSalience);
     }
+    if (params?.anyTerms && params.anyTerms.length > 0) {
+      const terms = params.anyTerms.map((t) => t.toLowerCase());
+      where.push(
+        `(${terms
+          .map(() => "instr(lower(summary), ?) > 0 OR instr(lower(COALESCE(outcome, '')), ?) > 0")
+          .join(" OR ")})`,
+      );
+      for (const term of terms) args.push(term, term);
+    }
     const order = params?.order ?? "salienceDesc";
-    const primary =
-      order === "salienceDesc"
-        ? "salience DESC"
-        : order === "createdDesc"
+    const decays = order === "decayedSalienceDesc" && (params?.halfLifeMs ?? 0) > 0;
+    const orderArgs: number[] = [];
+    let primary: string;
+    if (decays) {
+      // Same formula as `decayedSalience`: salience * max(0.5^(age/halfLife), floor).
+      primary = "salience * max(pow(0.5, max(? - occurred_at, 0) * 1.0 / ?), ?) DESC";
+      orderArgs.push(params?.now ?? this.clock(), params?.halfLifeMs ?? 1, MIN_SALIENCE_RETENTION);
+    } else {
+      primary =
+        order === "createdDesc"
           ? "created_at DESC"
           : order === "occurredDesc"
             ? "occurred_at DESC"
-            : "source_msg_to_seq IS NULL, source_msg_to_seq DESC";
+            : order === "sourceRangeDesc"
+              ? "source_msg_to_seq IS NULL, source_msg_to_seq DESC"
+              : "salience DESC";
+    }
+    args.push(...orderArgs);
     let limit = "";
     if (params?.limit !== undefined) {
       limit = " LIMIT ?";
@@ -1055,6 +1413,59 @@ interface DbFactRow {
   source: string;
   created_at: number;
   updated_at: number;
+  retired_at: number | null;
+  superseded_by: string | null;
+  confidence: number;
+}
+
+interface DbRelationRow {
+  id: string;
+  subject: string;
+  predicate: string;
+  object: string;
+  source: string;
+  confidence: number;
+  created_at: number;
+}
+
+function toRelation(r: DbRelationRow): Relation {
+  return {
+    id: r.id,
+    subject: r.subject,
+    predicate: r.predicate,
+    object: r.object,
+    source: r.source as FactSource,
+    confidence: r.confidence,
+    createdAt: r.created_at,
+  };
+}
+
+interface DbRuleProposalRow {
+  id: string;
+  text: string;
+  status: string;
+  evidence_thread_ids: string;
+  first_seen_at: number;
+  last_seen_at: number;
+}
+
+/** The thread ids of a stored evidence list; anything but a JSON array of strings reads as empty. */
+function parseThreadIds(raw: string): string[] {
+  const parsed: unknown = JSON.parse(raw);
+  return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : [];
+}
+
+function toRuleProposal(r: DbRuleProposalRow): RuleProposal {
+  const evidenceThreadIds = parseThreadIds(r.evidence_thread_ids);
+  return {
+    id: r.id,
+    text: r.text,
+    status: r.status as RuleProposalStatus,
+    evidenceThreadIds,
+    occurrences: evidenceThreadIds.length,
+    firstSeenAt: r.first_seen_at,
+    lastSeenAt: r.last_seen_at,
+  };
 }
 
 interface DbEpisodeRow {
@@ -1129,7 +1540,15 @@ function toFact(r: DbFactRow): Fact {
     source: r.source as FactSource,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+    retiredAt: r.retired_at,
+    supersededBy: r.superseded_by,
+    confidence: r.confidence,
   };
+}
+
+/** SQL suffix keeping current facts; with `includeRetired`, every fact. */
+function retiredFilter(params: FactListParams | undefined): string {
+  return params?.includeRetired ? "" : " AND retired_at IS NULL";
 }
 
 function toEpisode(r: DbEpisodeRow): EpisodicRecord {
@@ -1148,11 +1567,4 @@ function toEpisode(r: DbEpisodeRow): EpisodicRecord {
     createdAt: r.created_at,
     metadata: r.metadata ? (JSON.parse(r.metadata) as Record<string, unknown>) : {},
   };
-}
-
-function clamp01(n: number): number {
-  if (Number.isNaN(n)) return 0.5;
-  if (n < 0) return 0;
-  if (n > 1) return 1;
-  return n;
 }

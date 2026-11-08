@@ -9,10 +9,16 @@
 // pass this suite. Every test creates a fresh store via the factory.
 // ---------------------------------------------------------------------------
 
-import { describe, it, expect } from "bun:test";
+import { beforeEach, describe, it, expect } from "bun:test";
 import type { Message } from "../message.ts";
 import { nextThreadCursor } from "./thread-cursor.ts";
-import { DEFAULT_THREAD_PAGE_SIZE, type MemoryStore } from "./types.ts";
+import {
+  DEFAULT_THREAD_PAGE_SIZE,
+  type FactInput,
+  type FactListParams,
+  type MemoryStore,
+  MemoryLimitError,
+} from "./types.ts";
 
 const NS = "ns-test";
 const ALICE = "alice";
@@ -162,6 +168,380 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
         const bFacts = await s.listResourceFacts({ namespaceId: NS, resourceId: BOB });
         expect(aFacts.map((f) => f.text)).toEqual(["alice-fact"]);
         expect(bFacts.map((f) => f.text)).toEqual(["bob-fact"]);
+      });
+    });
+
+    describe("entity relations", () => {
+      // Stores that persist between tests (Postgres) must not see earlier tests' rows.
+      let key = { namespaceId: NS, resourceId: ALICE };
+      let other = { namespaceId: NS, resourceId: "bob" };
+      let n = 0;
+      beforeEach(() => {
+        n += 1;
+        key = { namespaceId: NS, resourceId: `entity-alice-${n}-${Date.now()}` };
+        other = { namespaceId: NS, resourceId: `entity-bob-${n}-${Date.now()}` };
+      });
+
+      it("stores a triple once, matching names case-insensitively, and keeps resources apart", async () => {
+        const s = await make();
+        const first = await s.appendResourceRelation(key, {
+          subject: "Anton",
+          predicate: "works at",
+          object: "Acme",
+          source: "user",
+        });
+        const again = await s.appendResourceRelation(key, {
+          subject: "  anton ",
+          predicate: "Works  AT",
+          object: "ACME",
+          source: "model",
+        });
+        expect(again.id).toBe(first.id);
+        expect(again.source).toBe("user");
+        await s.appendResourceRelation(key, {
+          subject: "Acme",
+          predicate: "is based in",
+          object: "Berlin",
+          source: "model",
+          confidence: 1,
+        });
+        await s.appendResourceRelation(other, {
+          subject: "Bob",
+          predicate: "knows",
+          object: "Anton",
+          source: "model",
+        });
+        const list = await s.listResourceRelations(key);
+        expect(list.map((r) => `${r.subject}|${r.predicate}|${r.object}`)).toEqual([
+          "Anton|works at|Acme",
+          "Acme|is based in|Berlin",
+        ]);
+        expect(list.map((r) => r.confidence)).toEqual([1, 0.9]);
+      });
+
+      it("deletes one relation by id inside its resource only", async () => {
+        const s = await make();
+        const mine = await s.appendResourceRelation(key, {
+          subject: "A",
+          predicate: "knows",
+          object: "B",
+          source: "model",
+        });
+        await s.appendResourceRelation(key, {
+          subject: "B",
+          predicate: "knows",
+          object: "C",
+          source: "model",
+        });
+        await s.deleteResourceRelation(other, mine.id);
+        expect(await s.listResourceRelations(key)).toHaveLength(2);
+        await s.deleteResourceRelation(key, mine.id);
+        expect((await s.listResourceRelations(key)).map((r) => r.subject)).toEqual(["B"]);
+      });
+    });
+
+    describe("rule proposals", () => {
+      // Stores that persist between tests (Postgres) must not see earlier tests' rows.
+      let key = { namespaceId: NS, resourceId: ALICE };
+      let other = { namespaceId: NS, resourceId: "bob" };
+      let n = 0;
+      beforeEach(() => {
+        n += 1;
+        key = { namespaceId: NS, resourceId: `rule-alice-${n}-${Date.now()}` };
+        other = { namespaceId: NS, resourceId: `rule-bob-${n}-${Date.now()}` };
+      });
+
+      it("merges the same text, counts distinct threads, and keeps resources apart", async () => {
+        const s = await make();
+        const first = await s.recordResourceRuleProposal(key, {
+          text: " Keep answers short. ",
+          threadId: "t1",
+        });
+        expect(first.status).toBe("pending");
+        expect(first.text).toBe("Keep answers short.");
+        const same = await s.recordResourceRuleProposal(key, {
+          text: "keep  ANSWERS short",
+          threadId: "t1",
+        });
+        expect(same.id).toBe(first.id);
+        expect(same.occurrences).toBe(1);
+        const more = await s.recordResourceRuleProposal(key, {
+          text: "keep answers short!",
+          threadId: "t2",
+        });
+        expect(more.id).toBe(first.id);
+        expect(more.evidenceThreadIds).toEqual(["t1", "t2"]);
+        expect(more.occurrences).toBe(2);
+        expect(more.lastSeenAt).toBeGreaterThanOrEqual(first.lastSeenAt);
+        await s.recordResourceRuleProposal(key, { text: "Never use emoji", threadId: "t1" });
+        await s.recordResourceRuleProposal(other, { text: "Keep answers short", threadId: "t9" });
+
+        expect((await s.listResourceRuleProposals(key)).map((p) => p.text)).toEqual([
+          "Keep answers short.",
+          "Never use emoji",
+        ]);
+        expect(
+          (await s.listResourceRuleProposals(key, { minOccurrences: 2 })).map((p) => p.text),
+        ).toEqual(["Keep answers short."]);
+      });
+
+      it("decides a pending proposal once, and a decided one keeps its status", async () => {
+        const s = await make();
+        const p = await s.recordResourceRuleProposal(key, { text: "Be formal", threadId: "t1" });
+        expect(
+          await s.decideResourceRuleProposal(other, { id: p.id, status: "approved" }),
+        ).toBeNull();
+        const approved = await s.decideResourceRuleProposal(key, { id: p.id, status: "approved" });
+        expect(approved?.status).toBe("approved");
+        expect(
+          await s.decideResourceRuleProposal(key, { id: p.id, status: "rejected" }),
+        ).toBeNull();
+        const again = await s.recordResourceRuleProposal(key, {
+          text: "be formal",
+          threadId: "t2",
+        });
+        expect(again.status).toBe("approved");
+        expect(again.occurrences).toBe(2);
+        expect(
+          (await s.listResourceRuleProposals(key, { status: "pending" })).map((x) => x.id),
+        ).toEqual([]);
+      });
+    });
+
+    describe("atomic limits", () => {
+      // Stores that persist between tests (Postgres) must not see earlier tests' rows.
+      let key = { namespaceId: NS, resourceId: ALICE };
+      let n = 0;
+      beforeEach(() => {
+        n += 1;
+        key = { namespaceId: NS, resourceId: `limit-alice-${n}-${Date.now()}` };
+      });
+
+      const settle = (calls: Promise<unknown>[]) => Promise.allSettled(calls);
+      const limitErrors = (results: PromiseSettledResult<unknown>[]) =>
+        results.filter((r) => r.status === "rejected" && r.reason instanceof MemoryLimitError);
+
+      it("holds the relation cap under concurrent writers, and still returns a known triple at the cap", async () => {
+        const s = await make();
+        const results = await settle(
+          Array.from({ length: 8 }, (_, i) =>
+            s.appendResourceRelation(
+              key,
+              { subject: `Person ${i}`, predicate: "knows", object: "Anton", source: "model" },
+              { maxRelations: 3 },
+            ),
+          ),
+        );
+        expect(await s.listResourceRelations(key)).toHaveLength(3);
+        expect(limitErrors(results)).toHaveLength(5);
+
+        const known = (await s.listResourceRelations(key))[0]!;
+        const again = await s.appendResourceRelation(
+          key,
+          {
+            subject: known.subject,
+            predicate: known.predicate,
+            object: known.object,
+            source: "user",
+          },
+          { maxRelations: 3 },
+        );
+        expect(again.id).toBe(known.id);
+      });
+
+      it("holds the pending-proposal cap, keeps updating known texts, and ignores decided ones", async () => {
+        const s = await make();
+        const results = await settle(
+          Array.from({ length: 6 }, (_, i) =>
+            s.recordResourceRuleProposal(
+              key,
+              { text: `rule number ${i}`, threadId: "t1" },
+              { maxPending: 2 },
+            ),
+          ),
+        );
+        const pending = await s.listResourceRuleProposals(key, { status: "pending" });
+        expect(pending).toHaveLength(2);
+        expect(limitErrors(results)).toHaveLength(4);
+
+        const known = pending[0]!;
+        const more = await s.recordResourceRuleProposal(
+          key,
+          { text: known.text, threadId: "t2" },
+          { maxPending: 2 },
+        );
+        expect(more.occurrences).toBe(2);
+
+        await s.decideResourceRuleProposal(key, { id: known.id, status: "rejected" });
+        await s.recordResourceRuleProposal(
+          key,
+          { text: "a fresh rule", threadId: "t1" },
+          { maxPending: 2 },
+        );
+        expect(await s.listResourceRuleProposals(key, { status: "pending" })).toHaveLength(2);
+      });
+
+      it("appends static rules atomically, without duplicates, and refuses past the limit", async () => {
+        const s = await make();
+        await s.upsertResource(key, { staticRules: "- be kind" });
+        await Promise.all(
+          Array.from({ length: 10 }, (_, i) =>
+            s.appendResourceStaticRule(key, { text: `rule ${i}`, maxChars: 1000 }),
+          ),
+        );
+        await s.appendResourceStaticRule(key, { text: "Be kind.", maxChars: 1000 });
+        const lines = (await s.getResource(key))!.staticRules!.split("\n");
+        expect(lines).toHaveLength(11);
+        expect(lines[0]).toBe("- be kind");
+        for (let i = 0; i < 10; i++) expect(lines).toContain(`- rule ${i}`);
+
+        const before = (await s.getResource(key))!.staticRules;
+        await expect(
+          s.appendResourceStaticRule(key, { text: "x".repeat(50), maxChars: 40 }),
+        ).rejects.toBeInstanceOf(MemoryLimitError);
+        expect((await s.getResource(key))!.staticRules).toBe(before);
+      });
+      it("approval is one step with the status change: a racing rejection never leaves a rule", async () => {
+        const s = await make();
+        for (let i = 0; i < 10; i++) {
+          const text = `race rule number ${i}`;
+          const p = await s.recordResourceRuleProposal(key, { text, threadId: "t1" });
+          const [approved] = await Promise.all([
+            s.approveResourceRuleProposal(key, { id: p.id, maxChars: 10_000 }),
+            s.decideResourceRuleProposal(key, { id: p.id, status: "rejected" }),
+          ]);
+          const rules = (await s.getResource(key))?.staticRules ?? "";
+          const final = (await s.listResourceRuleProposals(key)).find((x) => x.id === p.id)!;
+          expect(rules.includes(text)).toBe(final.status === "approved");
+          expect(approved !== null).toBe(final.status === "approved");
+        }
+      });
+
+      it("an approval that does not fit changes nothing and leaves the proposal pending", async () => {
+        const s = await make();
+        const p = await s.recordResourceRuleProposal(key, { text: "x".repeat(50), threadId: "t1" });
+        await expect(
+          s.approveResourceRuleProposal(key, { id: p.id, maxChars: 40 }),
+        ).rejects.toBeInstanceOf(MemoryLimitError);
+        expect((await s.getResource(key))?.staticRules ?? null).toBeNull();
+        expect(
+          (await s.listResourceRuleProposals(key, { status: "pending" })).map((x) => x.id),
+        ).toEqual([p.id]);
+        expect(
+          await s.approveResourceRuleProposal(key, { id: "unknown", maxChars: 40 }),
+        ).toBeNull();
+      });
+    });
+
+    describe("fact confidence", () => {
+      it("defaults by source, clamps, caps the model, and survives a re-read in every scope", async () => {
+        const s = await make();
+        const resourceKey = { namespaceId: NS, resourceId: ALICE };
+        const threadKey = { namespaceId: NS, resourceId: ALICE, threadId: "t-conf" };
+        const appenders = [
+          {
+            append: (input: FactInput) => s.appendNamespaceFact(NS, input),
+            list: () => s.listNamespaceFacts(NS),
+          },
+          {
+            append: (input: FactInput) => s.appendResourceFact(resourceKey, input),
+            list: () => s.listResourceFacts(resourceKey),
+          },
+          {
+            append: (input: FactInput) => s.appendThreadFact(threadKey, input),
+            list: () => s.listThreadFacts(threadKey),
+          },
+        ];
+        for (const scope of appenders) {
+          await scope.append({ text: "from the model", source: "model" });
+          await scope.append({ text: "from the user", source: "user" });
+          await scope.append({ text: "shaky guess", source: "model", confidence: 0.25 });
+          await scope.append({ text: "model overclaims", source: "model", confidence: 1 });
+          await scope.append({ text: "operator below zero", source: "operator", confidence: -3 });
+          const byText = new Map((await scope.list()).map((f) => [f.text, f.confidence]));
+          expect(byText.get("from the model")).toBe(0.6);
+          expect(byText.get("from the user")).toBe(1);
+          expect(byText.get("shaky guess")).toBe(0.25);
+          expect(byText.get("model overclaims")).toBe(0.9);
+          expect(byText.get("operator below zero")).toBe(0);
+        }
+      });
+    });
+
+    describe("fact supersession", () => {
+      const aliceKey = { namespaceId: NS, resourceId: ALICE };
+
+      it("retires the superseded fact in every scope, keeping it as history", async () => {
+        const s = await make();
+        const threadKey = { namespaceId: NS, resourceId: ALICE, threadId: "t-sup" };
+        const appenders = [
+          {
+            append: (input: FactInput) => s.appendNamespaceFact(NS, input),
+            list: (params?: FactListParams) => s.listNamespaceFacts(NS, params),
+          },
+          {
+            append: (input: FactInput) => s.appendResourceFact(aliceKey, input),
+            list: (params?: FactListParams) => s.listResourceFacts(aliceKey, params),
+          },
+          {
+            append: (input: FactInput) => s.appendThreadFact(threadKey, input),
+            list: (params?: FactListParams) => s.listThreadFacts(threadKey, params),
+          },
+        ];
+        for (const scope of appenders) {
+          const old = await scope.append({ text: "lives in Berlin", source: "model" });
+          expect(old.retiredAt).toBeNull();
+          const next = await scope.append({
+            text: "lives in Lisbon",
+            source: "user",
+            supersedes: old.id,
+          });
+
+          expect((await scope.list()).map((f) => f.text)).toEqual(["lives in Lisbon"]);
+          const all = await scope.list({ includeRetired: true });
+          expect(all.map((f) => f.text)).toEqual(["lives in Lisbon", "lives in Berlin"]);
+          const retired = all.find((f) => f.id === old.id)!;
+          expect(retired.supersededBy).toBe(next.id);
+          expect(retired.retiredAt).toBe(next.createdAt);
+        }
+      });
+
+      it("appends without retiring when the id is unknown, already retired, or in another scope", async () => {
+        const s = await make();
+        const bobKey = { namespaceId: NS, resourceId: BOB };
+        const bobFact = await s.appendResourceFact(bobKey, { text: "bob-fact", source: "model" });
+        const old = await s.appendResourceFact(aliceKey, { text: "v1", source: "model" });
+        const v2 = await s.appendResourceFact(aliceKey, {
+          text: "v2",
+          source: "model",
+          supersedes: old.id,
+        });
+
+        await s.appendResourceFact(aliceKey, {
+          text: "ghost",
+          source: "model",
+          supersedes: "nope",
+        });
+        await s.appendResourceFact(aliceKey, {
+          text: "again",
+          source: "model",
+          supersedes: old.id,
+        });
+        await s.appendResourceFact(aliceKey, {
+          text: "cross",
+          source: "model",
+          supersedes: bobFact.id,
+        });
+
+        expect((await s.listResourceFacts(aliceKey)).map((f) => f.text)).toEqual([
+          "v2",
+          "ghost",
+          "again",
+          "cross",
+        ]);
+        expect((await s.listResourceFacts(bobKey)).map((f) => f.text)).toEqual(["bob-fact"]);
+        const history = await s.listResourceFacts(aliceKey, { includeRetired: true });
+        expect(history.find((f) => f.id === old.id)!.supersededBy).toBe(v2.id);
       });
     });
 
@@ -676,6 +1056,76 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
         expect(out.map((e) => e.summary)).toEqual(["hi", "mid", "lo"]);
       });
 
+      it("decayedSalienceDesc ranks by salience aged from occurredAt, before the limit", async () => {
+        const s = await make();
+        const key = { namespaceId: NS, resourceId: ALICE };
+        const DAY = 86_400_000;
+        const now = 400 * DAY;
+        const halfLifeMs = 30 * DAY;
+        // Stored salience says old > fresh > mid; decayed says fresh > mid > old.
+        await s.appendResourceEpisode(key, {
+          summary: "old",
+          salience: 0.95,
+          occurredAt: now - 300 * DAY,
+        });
+        await s.appendResourceEpisode(key, {
+          summary: "mid",
+          salience: 0.7,
+          occurredAt: now - 30 * DAY,
+        });
+        await s.appendResourceEpisode(key, {
+          summary: "fresh",
+          salience: 0.8,
+          occurredAt: now - DAY,
+        });
+        const all = await s.listResourceEpisodes(key, {
+          order: "decayedSalienceDesc",
+          halfLifeMs,
+          now,
+        });
+        expect(all.map((e) => e.summary)).toEqual(["fresh", "mid", "old"]);
+        const top = await s.listResourceEpisodes(key, {
+          order: "decayedSalienceDesc",
+          halfLifeMs,
+          now,
+          limit: 1,
+        });
+        expect(top.map((e) => e.summary)).toEqual(["fresh"]);
+      });
+
+      it("decayedSalienceDesc floors decay, and equals salienceDesc without a half-life", async () => {
+        const s = await make();
+        const key = { namespaceId: NS, resourceId: ALICE };
+        const DAY = 86_400_000;
+        const now = 4000 * DAY;
+        // Ancient but vital (0.9 * 0.2 floor = 0.18) still beats a fresh trivial 0.1.
+        await s.appendResourceEpisode(key, {
+          summary: "ancient-vital",
+          salience: 0.9,
+          occurredAt: now - 3000 * DAY,
+        });
+        await s.appendResourceEpisode(key, {
+          summary: "fresh-trivial",
+          salience: 0.1,
+          occurredAt: now,
+        });
+        const decayed = await s.listResourceEpisodes(key, {
+          order: "decayedSalienceDesc",
+          halfLifeMs: 30 * DAY,
+          now,
+        });
+        expect(decayed.map((e) => e.summary)).toEqual(["ancient-vital", "fresh-trivial"]);
+        // 3000 half-lives: a naive power(0.5, x) underflows in Postgres.
+        const ancient = await s.listResourceEpisodes(key, {
+          order: "decayedSalienceDesc",
+          halfLifeMs: DAY,
+          now,
+        });
+        expect(ancient.map((e) => e.summary)).toEqual(["ancient-vital", "fresh-trivial"]);
+        const plain = await s.listResourceEpisodes(key, { order: "decayedSalienceDesc" });
+        expect(plain.map((e) => e.summary)).toEqual(["ancient-vital", "fresh-trivial"]);
+      });
+
       it("respects minSalience filter and limit", async () => {
         const s = await make();
         const key = { namespaceId: NS, resourceId: ALICE };
@@ -782,6 +1232,33 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
         await s.appendThreadEpisode(key, { summary: "rollup" });
         await s.deleteThread(key);
         expect(await s.listThreadEpisodes(key)).toEqual([]);
+      });
+
+      it("anyTerms keeps only episodes mentioning a term, case-insensitively, before the limit applies", async () => {
+        const s = await make();
+        const key = { namespaceId: NS, resourceId: `terms-${Date.now()}-${Math.random()}` };
+        await s.appendResourceEpisode(key, {
+          summary: "Migrated billing to STRIPE",
+          salience: 0.1,
+        });
+        await s.appendResourceEpisode(key, {
+          summary: "Planning offsite",
+          outcome: "chose Lisbon",
+          salience: 0.2,
+        });
+        for (let i = 0; i < 5; i++) {
+          await s.appendResourceEpisode(key, { summary: `daily standup ${i}`, salience: 0.9 });
+        }
+
+        const summaries = async (anyTerms?: string[]) =>
+          (await s.listResourceEpisodes(key, { limit: 2, order: "salienceDesc", anyTerms })).map(
+            (e) => e.summary,
+          );
+        expect(await summaries(["stripe"])).toEqual(["Migrated billing to STRIPE"]);
+        expect(await summaries(["lisbon", "nothing"])).toEqual(["Planning offsite"]);
+        expect(await summaries(["zzz"])).toEqual([]);
+        expect(await summaries([])).toHaveLength(2);
+        expect(await summaries()).toHaveLength(2);
       });
     });
 

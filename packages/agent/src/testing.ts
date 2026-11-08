@@ -28,3 +28,11 @@ export {
 } from "./lib/versioned-registry/versioned-registry-test-suite.ts";
 export { mockLLM, echoLLM, streamingMockLLM } from "./lib/testing/mock-llm.ts";
 export type { EchoLLMOptions } from "./lib/testing/mock-llm.ts";
+export {
+  DISTILL_EVAL_CASES,
+  runDistillCases,
+  scoreDistillReply,
+  type DistillEvalCase,
+  type DistillExpectation,
+  type DistillScore,
+} from "./lib/memory/distill-eval-cases.ts";

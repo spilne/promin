@@ -14,9 +14,12 @@
 // ---------------------------------------------------------------------------
 
 import { defaultEstimate, resolveContext } from "./resolve-context.ts";
+import { decayedSalience } from "./scoring.ts";
 import {
   COMPACT_EPISODE_KIND,
+  type EpisodicRecord,
   type MemoryStore,
+  type ScopedKey,
   type ResolvedContext,
   type StoredMessage,
   type ThreadKey,
@@ -55,9 +58,11 @@ export async function loadResolvedContext(params: {
       resourceKey ? store.getResource(resourceKey) : null,
       resourceKey ? store.listResourceFacts(resourceKey) : [],
       resourceKey && maxEpisodeTokens > 0
-        ? store.listResourceEpisodes(resourceKey, {
-            order: "salienceDesc",
+        ? readEpisodeCandidates({
+            store,
+            key: resourceKey,
             limit: Math.min(MAX_EPISODES_READ, Math.ceil(maxEpisodeTokens / MIN_EPISODE_TOKENS)),
+            budget,
           })
         : [],
       stored ? store.listThreadFacts(key) : [],
@@ -86,13 +91,61 @@ export async function loadResolvedContext(params: {
     namespaceFacts,
     resource,
     resourceFacts,
-    resourceEpisodes,
+    resourceEpisodes: rankEpisodesByDecay({ episodes: resourceEpisodes, budget }),
     thread,
     threadFacts,
     compaction,
     messages,
     budget,
   });
+}
+
+/**
+ * Resource episodes to rank for the prompt: the `limit` best by salience, or
+ * by decayed salience (sorted in the store, so exact) when the budget sets
+ * `episodeHalfLifeMs`.
+ */
+async function readEpisodeCandidates(params: {
+  readonly store: MemoryStore;
+  readonly key: ScopedKey;
+  readonly limit: number;
+  readonly budget: TokenBudget;
+}): Promise<EpisodicRecord[]> {
+  const { store, key, limit, budget } = params;
+  if (budget.episodeHalfLifeMs === undefined) {
+    return store.listResourceEpisodes(key, { order: "salienceDesc", limit });
+  }
+  return store.listResourceEpisodes(key, {
+    order: "decayedSalienceDesc",
+    halfLifeMs: budget.episodeHalfLifeMs,
+    now: budget.now ?? Date.now(),
+    limit,
+  });
+}
+
+/**
+ * `episodes` ordered by decayed salience, best first, when the budget sets
+ * `episodeHalfLifeMs`; otherwise untouched (the store's salience order).
+ * Ties keep the store's order.
+ */
+function rankEpisodesByDecay(params: {
+  readonly episodes: ReadonlyArray<EpisodicRecord>;
+  readonly budget: TokenBudget;
+}): ReadonlyArray<EpisodicRecord> {
+  const { episodes, budget } = params;
+  if (budget.episodeHalfLifeMs === undefined) return episodes;
+  const now = budget.now ?? Date.now();
+  const effective = (e: EpisodicRecord) =>
+    decayedSalience({
+      salience: e.salience,
+      occurredAt: e.occurredAt,
+      now,
+      halfLifeMs: budget.episodeHalfLifeMs,
+    });
+  return episodes
+    .map((e, i) => ({ e, i, s: effective(e) }))
+    .sort((a, b) => b.s - a.s || a.i - b.i)
+    .map(({ e }) => e);
 }
 
 /**

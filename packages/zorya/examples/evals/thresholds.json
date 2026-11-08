@@ -10,5 +10,9 @@
   "memory-fact-precision": {
     "minPassRate": 1,
     "minMeanPerScorer": { "factPrecision": 1, "factRecall": 1 }
+  },
+  "memory-recall-quality": {
+    "minPassRate": 1,
+    "minMeanPerScorer": { "recallPrecision": 1, "recallRecall": 1 }
   }
 }

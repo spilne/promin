@@ -88,6 +88,20 @@ export interface Fact {
   readonly source: FactSource;
   readonly createdAt: number;
   readonly updatedAt: number;
+  /**
+   * When a newer fact replaced this one (`FactInput.supersedes`), epoch ms;
+   * null while the fact is current. A retired fact stays stored as history
+   * but is left out of `list*Facts` and of the prompt unless asked for.
+   */
+  readonly retiredAt: number | null;
+  /** Id of the fact that replaced this one; null while current. */
+  readonly supersededBy: string | null;
+  /**
+   * How sure the writer was, 0..1. Defaults by source (`DEFAULT_FACT_CONFIDENCE`):
+   * recall uses it as the fact's importance, so a shaky note ranks below a
+   * stated one. It never gates a fact on its own.
+   */
+  readonly confidence: number;
 }
 
 /**
@@ -107,6 +121,77 @@ export type FactSource = "operator" | "user" | "model";
 export interface FactInput {
   readonly text: string;
   readonly source: FactSource;
+  /** 0..1, clamped. Defaults by `source`; see `Fact.confidence`. */
+  readonly confidence?: number;
+  /**
+   * Id of a current fact in the same scope that this one replaces. The store
+   * retires it (`retiredAt`, `supersededBy`) in the same write as the
+   * append, so a changed fact never leaves both versions current. An id that
+   * is unknown, already retired, or in another scope retires nothing and the
+   * fact is still appended.
+   */
+  readonly supersedes?: string;
+}
+
+/** Options of `MemoryStore.list*Facts`. */
+export interface FactListParams {
+  /** Also return facts a newer one replaced, after the current ones. Default `false`. */
+  readonly includeRetired?: boolean;
+}
+
+/**
+ * One edge of a resource's entity graph: `subject` —`predicate`→ `object`
+ * ("Anton" "works at" "Acme"). Entities are the names that appear as subject
+ * or object; they match case-insensitively (see `normalizeEntityName`). The
+ * same triple is stored once.
+ */
+export interface Relation {
+  readonly id: string;
+  readonly subject: string;
+  readonly predicate: string;
+  readonly object: string;
+  /** Who wrote it. See `FactSource`; the model may only delete its own. */
+  readonly source: FactSource;
+  /** 0..1, defaults by source like `Fact.confidence`. */
+  readonly confidence: number;
+  readonly createdAt: number;
+}
+
+/** Caller-facing input to `appendResourceRelation`. The store assigns `id` + `createdAt`. */
+export interface RelationInput {
+  readonly subject: string;
+  readonly predicate: string;
+  readonly object: string;
+  readonly source: FactSource;
+  /** 0..1, clamped. Defaults by `source`. */
+  readonly confidence?: number;
+}
+
+/** Review state of a `RuleProposal`. */
+export type RuleProposalStatus = "pending" | "approved" | "rejected";
+
+/**
+ * An instruction a user gave the agent that the consolidator thinks should
+ * become a standing rule. `evidenceThreadIds` are the distinct threads it
+ * appeared in; `occurrences` is their count, so asking twice in one thread
+ * is one occurrence. A proposal changes nothing until a person approves it
+ * (`approveRuleProposal`).
+ */
+export interface RuleProposal {
+  readonly id: string;
+  readonly text: string;
+  readonly status: RuleProposalStatus;
+  readonly evidenceThreadIds: ReadonlyArray<string>;
+  readonly occurrences: number;
+  readonly firstSeenAt: number;
+  readonly lastSeenAt: number;
+}
+
+/** Filter for `listResourceRuleProposals`. */
+export interface RuleProposalListParams {
+  readonly status?: RuleProposalStatus;
+  /** Only proposals seen in at least this many distinct threads. */
+  readonly minOccurrences?: number;
 }
 
 /** Longest fact the agent's `memory` tool and the consolidator write, in characters. */
@@ -120,6 +205,11 @@ export const MAX_WORKING_MEMORY_CHARS = 4_000;
  * Longer rules are truncated by `resolveContext`; write paths reject them.
  */
 export const MAX_STATIC_RULES_CHARS = 20_000;
+
+/** A write the store refused because it would pass a limit the caller set. Nothing was written. */
+export class MemoryLimitError extends Error {
+  override readonly name = "MemoryLimitError";
+}
 
 /**
  * Stored thread message — the runtime `Message` shape with storage
@@ -193,8 +283,27 @@ export interface EpisodeListParams {
    * Defaults to "salienceDesc". `sourceRangeDesc` puts the episode covering
    * the newest messages first (highest `sourceMessageRange.toSeq`; episodes
    * without a range last). Ties go to the later insert.
+   * `decayedSalienceDesc` sorts by salience aged from `occurredAt` to `now`
+   * with half-life `halfLifeMs` (see `decayedSalience`), so `limit` keeps the
+   * right episodes; without a positive `halfLifeMs` it equals `salienceDesc`.
    */
-  readonly order?: "salienceDesc" | "createdDesc" | "occurredDesc" | "sourceRangeDesc";
+  readonly order?:
+    | "salienceDesc"
+    | "decayedSalienceDesc"
+    | "createdDesc"
+    | "occurredDesc"
+    | "sourceRangeDesc";
+  /** Half-life for `decayedSalienceDesc`, in ms. */
+  readonly halfLifeMs?: number;
+  /** Age reference for `decayedSalienceDesc`, epoch ms. Defaults to the store clock. */
+  readonly now?: number;
+  /**
+   * Only episodes whose summary or outcome contains at least one of these
+   * terms, compared case-insensitively as substrings (SQLite lowercases ASCII
+   * only). Undefined or empty: no filter. Applied before `limit`, so a match
+   * outside the top by `order` is still found.
+   */
+  readonly anyTerms?: ReadonlyArray<string>;
   /** Only episodes whose `metadata.kind` equals this (e.g. `"compact"`, `"distill"`). */
   readonly kind?: string;
   /** Only episodes distilled from this thread (`sourceThreadId`). */
@@ -366,6 +475,16 @@ export interface TokenBudget {
    */
   readonly maxEpisodeTokens?: number;
   /**
+   * Half-life of episode salience, in ms. When set, `loadResolvedContext`
+   * ranks resource episodes by `decayedSalience` (older ones fade, down to
+   * a floor) instead of the stored value, so a recent episode can outrank
+   * a stale, higher-salience one. Stored salience is never rewritten.
+   * Unset: stored salience orders episodes, as before.
+   */
+  readonly episodeHalfLifeMs?: number;
+  /** Clock for `episodeHalfLifeMs`, epoch ms. Default `Date.now()`. */
+  readonly now?: number;
+  /**
    * Caller-provided message estimator. Must return a stable, non-negative
    * integer. Defaults to chars/4 when unset.
    */
@@ -450,7 +569,7 @@ export interface MemoryStore {
   getNamespace(namespaceId: string): Promise<NamespaceRow | null>;
   upsertNamespace(namespaceId: string, patch: NamespacePatch): Promise<NamespaceRow>;
   appendNamespaceFact(namespaceId: string, fact: FactInput): Promise<Fact>;
-  listNamespaceFacts(namespaceId: string): Promise<Fact[]>;
+  listNamespaceFacts(namespaceId: string, params?: FactListParams): Promise<Fact[]>;
   deleteNamespaceFact(namespaceId: string, factId: string): Promise<void>;
   appendNamespaceEpisode(namespaceId: string, input: EpisodeInput): Promise<EpisodicRecord>;
   listNamespaceEpisodes(namespaceId: string, params?: EpisodeListParams): Promise<EpisodicRecord[]>;
@@ -460,8 +579,71 @@ export interface MemoryStore {
   getResource(key: ScopedKey): Promise<ResourceRow | null>;
   upsertResource(key: ScopedKey, patch: ResourcePatch): Promise<ResourceRow>;
   appendResourceFact(key: ScopedKey, fact: FactInput): Promise<Fact>;
-  listResourceFacts(key: ScopedKey): Promise<Fact[]>;
+  listResourceFacts(key: ScopedKey, params?: FactListParams): Promise<Fact[]>;
   deleteResourceFact(key: ScopedKey, factId: string): Promise<void>;
+  /**
+   * Add an edge to the resource's entity graph. A triple that already exists
+   * (names compared by `normalizeEntityName`) is not stored twice: the
+   * existing relation is returned unchanged, even at the cap. With
+   * `maxRelations`, a new triple that would take the resource past it throws
+   * `MemoryLimitError`; the count and the insert are one atomic step.
+   */
+  appendResourceRelation(
+    key: ScopedKey,
+    input: RelationInput,
+    options?: { readonly maxRelations?: number },
+  ): Promise<Relation>;
+  /** Every relation of the resource, oldest first. */
+  listResourceRelations(key: ScopedKey): Promise<Relation[]>;
+  deleteResourceRelation(key: ScopedKey, relationId: string): Promise<void>;
+  /**
+   * Note that `text` was asked for in `threadId`. The same text (compared by
+   * `normalizeRuleText`) is one proposal: a new thread adds to its evidence,
+   * the same thread again changes nothing but `lastSeenAt`. A decided
+   * proposal keeps its status. With `maxPending`, a new proposal that would
+   * take the resource past that many pending ones throws `MemoryLimitError`
+   * (atomically); a text already proposed is always updated.
+   */
+  recordResourceRuleProposal(
+    key: ScopedKey,
+    input: { readonly text: string; readonly threadId: string },
+    options?: { readonly maxPending?: number },
+  ): Promise<RuleProposal>;
+  /** The resource's proposals, oldest first. */
+  listResourceRuleProposals(
+    key: ScopedKey,
+    params?: RuleProposalListParams,
+  ): Promise<RuleProposal[]>;
+  /**
+   * Set a pending proposal's status; null when it is unknown or already
+   * decided. To approve, use `approveResourceRuleProposal`, which also writes
+   * the rule.
+   */
+  decideResourceRuleProposal(
+    key: ScopedKey,
+    input: { readonly id: string; readonly status: "approved" | "rejected" },
+  ): Promise<RuleProposal | null>;
+  /**
+   * Approve a pending proposal: add its text to the resource's `staticRules`
+   * (`appendStaticRule`) and mark it approved, as one atomic step. Null, with
+   * nothing written, when the id is unknown or already decided, so a proposal
+   * rejected a moment earlier never becomes a rule. Throws `MemoryLimitError`,
+   * changing nothing, when the rule would pass `maxChars`.
+   */
+  approveResourceRuleProposal(
+    key: ScopedKey,
+    params: { readonly id: string; readonly maxChars: number },
+  ): Promise<RuleProposal | null>;
+  /**
+   * Add `text` to the resource's `staticRules` as a bullet, unless a bullet
+   * already says the same (`appendStaticRule`). The read and the write are one
+   * atomic step, so concurrent appends and edits do not lose each other.
+   * Throws `MemoryLimitError`, changing nothing, past `maxChars`.
+   */
+  appendResourceStaticRule(
+    key: ScopedKey,
+    params: { readonly text: string; readonly maxChars: number },
+  ): Promise<ResourceRow>;
   appendResourceEpisode(key: ScopedKey, input: EpisodeInput): Promise<EpisodicRecord>;
   listResourceEpisodes(key: ScopedKey, params?: EpisodeListParams): Promise<EpisodicRecord[]>;
   deleteResourceEpisode(key: ScopedKey, episodeId: string): Promise<void>;
@@ -483,7 +665,7 @@ export interface MemoryStore {
   /** Archive or restore a thread. Pass `null` to restore (clear archivedAt). */
   setThreadArchived(key: ThreadKey, archivedAt: number | null): Promise<void>;
   appendThreadFact(key: ThreadKey, fact: FactInput): Promise<Fact>;
-  listThreadFacts(key: ThreadKey): Promise<Fact[]>;
+  listThreadFacts(key: ThreadKey, params?: FactListParams): Promise<Fact[]>;
   deleteThreadFact(key: ThreadKey, factId: string): Promise<void>;
   /**
    * Append messages to the thread's transcript (creating the thread row
