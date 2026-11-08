@@ -93,8 +93,17 @@ await onboard
   overlap leftovers), and with the run's own signal: a lost lock, or the
   `signal` passed to `runner.run`. Pass it to `fetch` or an SDK call to stop
   in-flight work; a body that ignores it behaves as before. A cancel made
-  through storage (`cancelWorkflow`) is still seen at the next wave boundary,
-  not mid-step.
+  through storage (`cancelWorkflow`) is seen mid-step too: each lock heartbeat
+  (default 30s) checks the run's status (piggybacked on the extension when the
+  storage's `heartbeat` returns it, otherwise one `loadWorkflowStatus` read per
+  beat) and aborts the signal with a `WorkflowCancelledError`, so a cancel
+  takes effect within one beat.
+- `compensate: { onCancel: "rollback" }` rolls the completed steps back when
+  the run is cancelled (same order, retries and durable ledger as a failure
+  rollback, `onComplete` fired), then the run ends cancelled, not failed.
+  Default `"none"`. Only the driver that sees the cancel rolls back; if it
+  loses the lock mid-rollback the rest is not re-driven (a cancelled run is
+  terminal).
 - `.parallel(name, branches)` forks the head into one DAG step per branch
   and joins them into `{ [branch]: result }`;
   `.parallel(name, { dependsOn }, branches)` forks from named steps.

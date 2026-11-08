@@ -43,6 +43,7 @@ import type {
   FindPendingSignalParams,
   FindWorkflowByIdempotencyKeyParams,
   HeartbeatParams,
+  HeartbeatResult,
   JournalStore,
   ListDueTimersParams,
   ListOrphanedRunsParams,
@@ -620,8 +621,10 @@ export class InMemoryWorkflowStorage
     this.leases.release(params);
   }
 
-  async heartbeat(params: HeartbeatParams): Promise<void> {
+  async heartbeat(params: HeartbeatParams): Promise<void | HeartbeatResult> {
     this.leases.extend(params);
+    const wf = this.workflows.get(params.workflowId);
+    return { status: wf ? statusSnapshot(wf) : null };
   }
 
   // -------------------------------------------------------------------------
