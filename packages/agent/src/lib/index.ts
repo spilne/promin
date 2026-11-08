@@ -196,6 +196,20 @@ export {
   relationKey,
   relationNeighborhood,
 } from "./memory/relations.ts";
+export {
+  composeMemoryStore,
+  type RelationStore,
+  type RuleProposalStore,
+} from "./memory/compose-memory-store.ts";
+export {
+  memoryProfile,
+  MemoryProfileBuilder,
+  type ConsolidationOptions,
+  type ContextOptions,
+  type MemoryPreset,
+  type MemoryProfile,
+  type RecallOptions,
+} from "./memory/memory-profile.ts";
 export { newEpisode, newFact } from "./memory/record-factories.ts";
 export {
   appendStaticRule,

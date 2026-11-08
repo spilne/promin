@@ -5,6 +5,7 @@
 // Host tools win on a name collision; the capability gate applies last.
 // ---------------------------------------------------------------------------
 
+import type { RecallOptions } from "../memory/memory-profile.ts";
 import type { MemoryStore } from "../memory/types.ts";
 import type { EmbeddingProvider } from "../embedding-provider.ts";
 import {
@@ -32,6 +33,8 @@ export interface AutoToolSources {
   readonly autoMemoryTool?: boolean;
   /** Semantic matching for the memory tool's `recall`. */
   readonly memoryEmbedder?: EmbeddingProvider;
+  /** Default sources, recency half-life and embedder-failure hook for `recall`. */
+  readonly memoryRecall?: Omit<RecallOptions, "embedder">;
   readonly network?: {
     readonly deps: NetworkRuntimeDeps;
     readonly recipe: RegisteredAgent;
@@ -68,6 +71,13 @@ export function withAutoTools(params: {
       threadId: scope.threadId,
       agentId: sources.agentId,
       ...(sources.memoryEmbedder && { embedder: sources.memoryEmbedder }),
+      ...(sources.memoryRecall?.sources && { defaultRecallSources: sources.memoryRecall.sources }),
+      ...(sources.memoryRecall?.recencyHalfLifeMs !== undefined && {
+        recencyHalfLifeMs: sources.memoryRecall.recencyHalfLifeMs,
+      }),
+      ...(sources.memoryRecall?.onEmbedderError && {
+        onEmbedderError: sources.memoryRecall.onEmbedderError,
+      }),
     });
     tools = { ...tools, memory: memoryTool };
   }

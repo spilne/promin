@@ -83,6 +83,11 @@ import type {
   ThreadRow,
   TokenBudget,
 } from "../memory/types.ts";
+import type {
+  ConsolidationOptions,
+  MemoryProfile,
+  RecallOptions,
+} from "../memory/memory-profile.ts";
 import {
   DefaultConsolidator,
   type CompactThreadOptions,
@@ -158,6 +163,14 @@ export interface LocalAgentConfig<TOutput = any> {
   /** Optional layered memory. When set, thread state persists across processes. */
   readonly memory?: MemoryStore;
   /**
+   * The whole memory setup in one value, from `memoryProfile(...)`: the
+   * store, how `recall` ranks, what the consolidator does and what reaches
+   * the prompt. Replaces `memory`, `memoryEmbedder`, `memoryRecall`,
+   * `consolidatorOptions` and `contextBudget`, so setting any of them next
+   * to it throws.
+   */
+  readonly memoryProfile?: MemoryProfile;
+  /**
    * Index of the tool approvals thread turns are suspended on. Approve /
    * reject (`thread.resume`) looks the suspended turn up here by exact
    * (namespace, thread, tool call) key. Default: an
@@ -219,6 +232,19 @@ export interface LocalAgentConfig<TOutput = any> {
    * (see `LayeredMemoryToolConfig.embedder`). Without it, recall is lexical.
    */
   readonly memoryEmbedder?: EmbeddingProvider;
+  /**
+   * How the auto-attached `memory` tool's `recall` searches and ranks:
+   * default sources, recency half-life, and the embedder-failure hook. The
+   * embedder itself is `memoryEmbedder`.
+   */
+  readonly memoryRecall?: Omit<RecallOptions, "embedder">;
+  /**
+   * Options of the auto-built `DefaultConsolidator` (prompts, reconcile,
+   * relation extraction, rule proposals, caps). `false` turns the
+   * consolidator off: `compactThread` and `distillThread` throw, and
+   * `autoDistill` must be unset. Ignored when `consolidator` is given.
+   */
+  readonly consolidatorOptions?: ConsolidationOptions | false;
   /**
    * Memory consolidator backing `compactThread` / `distillThread`.
    * Optional — when omitted AND `memory` is provided, LocalAgent auto-
@@ -349,13 +375,49 @@ export interface LocalAgentConfig<TOutput = any> {
   readonly budgets?: AgentBudgets;
 }
 
+/**
+ * `config` with its `memoryProfile` (if any) spread into the fields the agent
+ * reads. Throws when the profile is set next to a field it replaces, so there
+ * is one source of truth. The result carries no `memoryProfile`, which keeps
+ * `withScope` (it rebuilds from the resolved config) from expanding twice.
+ */
+function expandMemoryProfile<TOutput>(
+  config: LocalAgentConfig<TOutput>,
+): LocalAgentConfig<TOutput> {
+  const { memoryProfile: profile, ...rest } = config;
+  if (!profile) return config;
+  const clashes = (
+    ["memory", "memoryEmbedder", "memoryRecall", "consolidatorOptions", "contextBudget"] as const
+  ).filter((name) => rest[name] !== undefined);
+  if (clashes.length > 0) {
+    throw new Error(
+      `LocalAgentConfig: \`memoryProfile\` replaces ${clashes.map((c) => `\`${c}\``).join(", ")}; set it in the profile instead.`,
+    );
+  }
+  const { embedder, ...recall } = profile.recall;
+  return {
+    ...rest,
+    memory: profile.store,
+    ...(embedder && { memoryEmbedder: embedder }),
+    memoryRecall: recall,
+    consolidatorOptions: profile.consolidation,
+    contextBudget: profile.context,
+  };
+}
+
 export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>, DelegableAgent {
   private readonly config: LocalAgentConfig<TOutput>;
 
   constructor(config: LocalAgentConfig<TOutput>) {
+    const resolved = expandMemoryProfile(config);
+    if (resolved.consolidatorOptions === false && resolved.autoDistill) {
+      throw new Error(
+        "LocalAgentConfig: the consolidator is turned off (`consolidatorOptions: false`), so `autoDistill` cannot run.",
+      );
+    }
     this.config = {
-      ...config,
-      approvals: config.approvals ?? defaultApprovalStore(config),
+      ...resolved,
+      approvals: config.approvals ?? defaultApprovalStore(resolved),
     };
   }
 
@@ -561,6 +623,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
         ...(config.memory && { memory: config.memory }),
         ...(config.autoMemoryTool !== undefined && { autoMemoryTool: config.autoMemoryTool }),
         ...(config.memoryEmbedder && { memoryEmbedder: config.memoryEmbedder }),
+        ...(config.memoryRecall && { memoryRecall: config.memoryRecall }),
         ...(config.network && { network: config.network }),
         ...(config.resourceId !== undefined && { boundResourceId: config.resourceId }),
         ...(config.ownerId !== undefined && { ownerId: config.ownerId }),
@@ -596,7 +659,13 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       this.config.consolidatorLlmProvider ?? (consolidatorLlm ? undefined : engine.llmProvider);
     const llmModel =
       this.config.consolidatorLlmModel ?? (consolidatorLlm ? undefined : engine.llmModel);
+    if (this.config.consolidatorOptions === false) {
+      throw new Error(
+        "LocalAgent.{compact,distill}Thread: the consolidator is turned off (`consolidatorOptions: false`). Pass `consolidator` or enable it.",
+      );
+    }
     const inner = new DefaultConsolidator({
+      ...this.config.consolidatorOptions,
       store: this.config.memory,
       // Prefer the explicit distill model when set — distillation is
       // summarisation work, often cheaper to run with a faster/smaller

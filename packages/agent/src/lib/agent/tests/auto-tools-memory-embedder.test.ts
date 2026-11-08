@@ -33,3 +33,25 @@ describe("withAutoTools memory tool", () => {
     expect(await recall()).toContain("No memories matched");
   });
 });
+
+describe("withAutoTools memoryRecall", () => {
+  it("applies the configured default recall sources", async () => {
+    const memory = new InMemoryMemoryStore();
+    const key = { namespaceId: "acme", resourceId: "alice" };
+    await memory.appendResourceFact(key, { text: "drinks green tea", source: "user" });
+    await memory.appendResourceEpisode(key, { summary: "talked about green tea brands" });
+    const recall = async (memoryRecall?: { sources?: Array<"fact" | "episode"> }) => {
+      const { memory: tool } = withAutoTools({
+        sources: { agentId: "a1", memory, ...(memoryRecall && { memoryRecall }) },
+        scope: { namespaceId: "acme", resourceId: "alice", threadId: "t1" },
+        userTools: {},
+      });
+      return tool!.execute(tool!.parameters.parse({ command: "recall", query: "green tea" }));
+    };
+
+    const factsOnly = await recall({ sources: ["fact"] });
+    expect(factsOnly).toContain("/fact");
+    expect(factsOnly).not.toContain("/episode");
+    expect(await recall()).toContain("/episode");
+  });
+});
