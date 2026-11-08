@@ -123,21 +123,23 @@ export function withStepTimeout<A>(params: {
   readonly stepName: string;
   /** What timed out, for the message (default `stepName`; `step[3]` for a map element). */
   readonly subject?: string;
+  /** Called with the timeout error just before it fails the step, to abort the attempt's signal. */
+  readonly onTimeout?: (error: StepTimeoutError) => void;
 }): Eff<A, Throws<TaggedError>> {
   const { ms, workflowId, stepName } = params;
   const subject = params.subject ?? stepName;
   return race([
     params.eff,
-    sleepOn(params.clock, ms).flatMap(() =>
-      fail(
-        new StepTimeoutError({
-          workflowId,
-          stepName,
-          timeoutMs: ms,
-          message: `Step "${subject}" timed out after ${ms}ms`,
-        }),
-      ),
-    ),
+    sleepOn(params.clock, ms).flatMap(() => {
+      const error = new StepTimeoutError({
+        workflowId,
+        stepName,
+        timeoutMs: ms,
+        message: `Step "${subject}" timed out after ${ms}ms`,
+      });
+      params.onTimeout?.(error);
+      return fail(error);
+    }),
   ]) as Eff<A, Throws<TaggedError>>;
 }
 

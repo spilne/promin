@@ -10,6 +10,7 @@ import type { TaggedError } from "../../shared/tagged-error.ts";
 import { runEffSafe } from "../../shared/eff.ts";
 import type { WallClock } from "../../shared/wall-clock.ts";
 import type { StepDefinition } from "../durable-pipeline.ts";
+import { createAttemptSignal } from "../step-signal.ts";
 import { applyStepPolicies } from "./step-policies.ts";
 
 /** One attempt of a step body that failed with a typed error. */
@@ -83,10 +84,14 @@ export async function runStepBody(params: {
   readonly workflowId: string;
   readonly clock: WallClock;
   readonly firstAttempt: number;
+  /** The run-level abort signal each attempt's own signal is linked to. */
+  readonly signal?: AbortSignal;
   /** Invoke the step's `execute` for one attempt. */
   readonly execute: (attempt: {
     readonly attempt: number;
     readonly metadataRef: { current?: Record<string, unknown> };
+    /** This attempt's signal: aborts on timeout, on the attempt's failure, or with the run-level signal. */
+    readonly signal: AbortSignal;
   }) => Eff<unknown, Throws<TaggedError>>;
 }): Promise<StepBodyOutcome> {
   const { stepDef, clock } = params;
@@ -97,6 +102,7 @@ export async function runStepBody(params: {
   const failedAttempts: StepAttemptFailure[] = [];
   let attempt = params.firstAttempt - 1;
   let attemptStartedAt = clock.now();
+  let current = createAttemptSignal(params.signal);
 
   const raw = applyStepPolicies({
     stepDef,
@@ -105,9 +111,13 @@ export async function runStepBody(params: {
     invoke: () => {
       attempt++;
       attemptStartedAt = clock.now();
-      return params.execute({ attempt, metadataRef });
+      current = createAttemptSignal(params.signal);
+      return params.execute({ attempt, metadataRef, signal: current.signal });
     },
+    onTimeout: (error) => current.abort(error),
     onAttemptFailed: (error) => {
+      // A failed attempt's leftover work must not overlap its retry.
+      current.abort(error);
       if (isControlFlowError(error)) return;
       failedAttempts.push({
         attempt,
