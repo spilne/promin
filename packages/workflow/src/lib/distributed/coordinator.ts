@@ -33,6 +33,8 @@ import {
   type WorkflowGetStatusParams,
 } from "../durable/workflow-runner.ts";
 import { WorkflowLockError } from "../durable/durable-pipeline-error.ts";
+import { failureOf } from "../durable/workflow-failure.ts";
+import type { WorkflowFailure } from "../durable/workflow-state.ts";
 import type { StepQueue } from "./step-queue.ts";
 import type { WorkerRegistry } from "./worker-registry.ts";
 import type { LeaderElection } from "./leader-election.ts";
@@ -295,12 +297,15 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
 
   async runSafe(
     params: WorkflowRunnerRunParams,
-  ): Promise<{ data: unknown; error: null } | { data: null; error: WorkflowRunSafeError }> {
+  ): Promise<
+    | { data: unknown; error: null }
+    | { data: null; error: WorkflowRunSafeError; failure: WorkflowFailure }
+  > {
     try {
       const data = await this.run(params);
       return { data, error: null };
     } catch (error) {
-      return { data: null, error: error as WorkflowRunSafeError };
+      return { data: null, error: error as WorkflowRunSafeError, failure: failureOf(error) };
     }
   }
 

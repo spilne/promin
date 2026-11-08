@@ -330,6 +330,32 @@ back from storage: it rejects with `WorkflowFailedError` whose `errorTag` is
 the `_tag` of the error that failed the run, or with `WorkflowCancelledError`
 / `WorkflowTripwireError`.
 
+#### One failure shape: `WorkflowFailure`
+
+Every surface reports a failed run as the same `WorkflowFailure`
+(`{ tag, message, stepName?, attempt?, cause? }`):
+
+| Surface                              | How                                                                     |
+| ------------------------------------ | ----------------------------------------------------------------------- |
+| `runSafe()` result                   | `failure` beside `error` (the typed error stays `error`)                |
+| `onWorkflowFailure` hook, DLQ record | `failure` beside the `error` string                                     |
+| `handle.status()` / `getStatus()`    | `failure` beside `error` / `errorTag`                                   |
+| Stored `WorkflowState` (any backend) | `workflowFailure(state)`: derived from `error`, `errorTag`, failed step |
+| `handle.result()`                    | `WorkflowFailedError` with `errorTag`, `stepName`, `attempt`            |
+
+`tag` is the failing error's `_tag` (`"WorkflowCancelledError"` for a cancel,
+`"UnknownError"` for an untagged defect). `cause` is the original error and
+exists only in-process (`runSafe`, hook, DLQ); a failure derived from storage
+has none, since an error does not survive a storage round trip. Nothing new is
+stored, so no backend or migration changes: `error` / `errorTag` stay as they
+were. To turn a stored failure back into a typed error, call
+`rehydrateFailure({ workflowId, failure, errors })`: a tag in `errors` (your
+own typed errors) or a built-in engine error whose fields a failure holds
+(`WorkflowCancelledError`, `WorkflowError`, `WorkflowTimeoutError`,
+`StepError`, `ChildWorkflowGoneError`) gives that error, any other tag a
+`WorkflowFailedError`. It is opt-in: `handle.result()` still rejects with
+`WorkflowFailedError`.
+
 ### Run lifecycle
 
 - **Terminal gate.** A run that already ended is not executed again.

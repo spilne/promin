@@ -6,7 +6,7 @@
 import type { Sinkable } from "../../shared/streamable.ts";
 import { SystemWallClock, type WallClock } from "../../shared/wall-clock.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
-import type { FailedWorkflowRecord } from "../workflow-state.ts";
+import type { FailedWorkflowRecord, WorkflowFailure } from "../workflow-state.ts";
 
 /**
  * Publish a dead-letter record after a workflow exhausts retries +
@@ -23,6 +23,7 @@ export async function publishDlqRecord(params: {
   workflowName: string;
   input: unknown;
   errorMsg: string;
+  failure?: WorkflowFailure;
   compensationReport: {
     compensated: string[];
     failed: { stepName: string; error: unknown }[];
@@ -39,6 +40,7 @@ export async function publishDlqRecord(params: {
       workflowName: params.workflowName,
       input: params.input,
       error: params.errorMsg,
+      ...(params.failure !== undefined && { failure: params.failure }),
       failedAt: clock.now(),
       steps: failedState?.steps ?? {},
       compensatedSteps: params.compensationReport.compensated,

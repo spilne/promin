@@ -11,6 +11,7 @@ import { wakeParentOfEndedRun } from "../child-wake.ts";
 import { createWorkflowEventStream } from "../workflow-event-stream.ts";
 import type { StepState, WorkflowRunEvent, WorkflowState } from "../workflow-state.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
+import { workflowFailure } from "../workflow-failure.ts";
 import { findTripwireStep, storedRunError } from "./run-status.ts";
 
 export { findTripwireStep } from "./run-status.ts";
@@ -99,11 +100,13 @@ export function toStatusInfo(params: {
       : { status: step.status };
   }
 
+  const failure = workflowFailure(state);
   return {
     state: state.status === "compensating" ? "failed" : state.status,
     result: state.status === "completed" ? state.result : undefined,
     error: state.error,
     ...(state.errorTag !== undefined && { errorTag: state.errorTag }),
+    ...(failure !== undefined && { failure }),
     tripwire: state.status === "tripwire" ? state.tripwire : undefined,
     currentStep,
     suspendedReason,

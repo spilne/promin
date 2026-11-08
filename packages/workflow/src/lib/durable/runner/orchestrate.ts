@@ -55,7 +55,14 @@ import {
   runStartMs,
 } from "./run-status.ts";
 import { checkpointWrite } from "./step-checkpoint.ts";
+import type { WorkflowStorage } from "../workflow-storage.ts";
 import { errorMessage, errorTagOf } from "./step-body.ts";
+import {
+  failureFromError,
+  rememberFailure,
+  workflowFailure,
+  type WorkflowFailure,
+} from "../workflow-failure.ts";
 
 /**
  * Default lock extension for orchestration runs. Matches `withLock`'s
@@ -752,12 +759,23 @@ async function rollBackAndFail(params: {
         ...(failedTag !== undefined && { errorTag: failedTag }),
       }),
   });
+  // The structured failure: the stored run's failed step and attempt, the
+  // live error as `cause`. A failed read degrades to the error alone.
+  const failure = await loadRunFailure({
+    storage: ctx.storage,
+    workflowId,
+    errorMsg,
+    errorTag: failedTag,
+    cause: lastStepError,
+  });
+  rememberFailure({ error: lastStepError, failure });
   await fireHook({
     hooks: ctx.hooks,
     name: "onWorkflowFailure",
     event: {
       workflowId,
       error: errorMsg,
+      failure,
       durationMs: clock.currentTimeMs() - workflowStartTime,
     },
   });
@@ -771,6 +789,7 @@ async function rollBackAndFail(params: {
       workflowName: ctx.name,
       input,
       errorMsg,
+      failure,
       clock,
       compensationReport,
       metadata: ctx.metadata,
@@ -778,6 +797,26 @@ async function rollBackAndFail(params: {
   }
 
   throw lastStepError;
+}
+
+async function loadRunFailure(params: {
+  storage: WorkflowStorage;
+  workflowId: string;
+  errorMsg: string;
+  errorTag: string | undefined;
+  cause: unknown;
+}): Promise<WorkflowFailure> {
+  const { storage, workflowId, errorMsg, errorTag, cause } = params;
+  try {
+    const state = await storage.loadWorkflow(workflowId);
+    const stored = state
+      ? workflowFailure({ ...state, status: "failed", error: errorMsg, errorTag }, cause)
+      : undefined;
+    if (stored !== undefined) return stored;
+  } catch {
+    // best effort: the failure is already stored
+  }
+  return failureFromError(cause);
 }
 
 /**

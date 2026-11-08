@@ -12,7 +12,7 @@ import type { Sinkable } from "../shared/streamable.ts";
 import type { TaggedError } from "../shared/tagged-error.ts";
 import type { StepDefinition } from "./step-definition.ts";
 import type { WorkflowDAG } from "./workflow-dag-viz.ts";
-import type { FailedWorkflowRecord, WorkflowRunEvent } from "./workflow-state.ts";
+import type { FailedWorkflowRecord, WorkflowFailure, WorkflowRunEvent } from "./workflow-state.ts";
 
 // ---------------------------------------------------------------------------
 // Queue concurrency config
@@ -225,6 +225,12 @@ export interface WorkflowStatusInfo<Output> {
    */
   readonly errorTag?: string;
   /**
+   * The structured failure of a `failed` run (see `WorkflowFailure`): tag,
+   * message, failed step and attempt. `error` / `errorTag` stay for
+   * compatibility. `cause` is never set here (it does not outlive the run).
+   */
+  readonly failure?: WorkflowFailure;
+  /**
    * Structured tripwire reason — present only when `state === "tripwire"`.
    * Opaque payload returned by the firing `.tripwire()` step's `reason(prev)`.
    */
@@ -265,6 +271,8 @@ export interface WorkflowHooks {
   onWorkflowFailure?: (params: {
     workflowId: string;
     error: string;
+    /** The structured failure, with the original error as `cause`. */
+    failure?: WorkflowFailure;
     durationMs: number;
   }) => void | Promise<void>;
   /**

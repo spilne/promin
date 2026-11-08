@@ -30,7 +30,8 @@ import type {
   WorkflowStatusInfo,
 } from "./durable-pipeline.ts";
 import { hasCapability, type WorkflowStorage } from "./workflow-storage.ts";
-import type { WorkflowRunEvent } from "./workflow-state.ts";
+import type { WorkflowFailure, WorkflowRunEvent } from "./workflow-state.ts";
+import { failureOf } from "./workflow-failure.ts";
 import {
   StepError,
   WorkflowError,
@@ -114,10 +115,15 @@ export type WorkflowRunSafeError =
  */
 export type WorkflowRunError<E extends TaggedError = never> = E | WorkflowRunSafeError;
 
-/** `runSafe`'s result for a workflow with output `Output` and typed errors `E`. */
+/**
+ * `runSafe`'s result for a workflow with output `Output` and typed errors `E`.
+ * On failure, `failure` is the structured `WorkflowFailure` of `error` (tag,
+ * message, failed step and attempt, `cause`), the same shape status, the DLQ
+ * and the hooks report.
+ */
 export type WorkflowRunSafeResult<Output, E extends TaggedError = never> =
-  | { data: Output; error: null }
-  | { data: null; error: WorkflowRunError<E> };
+  | { data: Output; error: null; failure?: undefined }
+  | { data: null; error: WorkflowRunError<E>; failure: WorkflowFailure };
 
 /** `WorkflowRunnerRunParams` for a given definition (the `{ workflow }` shape). */
 export type WorkflowRunParamsFor<W> = Omit<
@@ -335,7 +341,10 @@ export interface WorkflowRunner {
   ): Promise<WorkflowRunSafeResult<Output, E>>;
   runSafe(
     params: WorkflowRunnerRunParams,
-  ): Promise<{ data: unknown; error: null } | { data: null; error: WorkflowRunSafeError }>;
+  ): Promise<
+    | { data: unknown; error: null }
+    | { data: null; error: WorkflowRunSafeError; failure: WorkflowFailure }
+  >;
   /**
    * Start a run and return a `WorkflowHandle` for async inspection. Takes
    * everything `run` takes (namespace, idempotency key, `force`, a
@@ -532,15 +541,21 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   ): Promise<WorkflowRunSafeResult<Output, E>>;
   runSafe(
     params: WorkflowRunnerRunParams,
-  ): Promise<{ data: unknown; error: null } | { data: null; error: WorkflowRunSafeError }>;
+  ): Promise<
+    | { data: unknown; error: null }
+    | { data: null; error: WorkflowRunSafeError; failure: WorkflowFailure }
+  >;
   async runSafe(
     params: WorkflowRunnerRunParams,
-  ): Promise<{ data: unknown; error: null } | { data: null; error: WorkflowRunSafeError }> {
+  ): Promise<
+    | { data: unknown; error: null }
+    | { data: null; error: WorkflowRunSafeError; failure: WorkflowFailure }
+  > {
     try {
       const data = await this.run(params);
       return { data, error: null };
     } catch (error) {
-      return { data: null, error: error as WorkflowRunSafeError };
+      return { data: null, error: error as WorkflowRunSafeError, failure: failureOf(error) };
     }
   }
 
