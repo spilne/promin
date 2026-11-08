@@ -952,7 +952,10 @@ export type { TurnCompactionConfig } from "./turn-compaction.ts";
 
 // Agent run trace — turn-structured tree from stored messages.
 export { buildAgentTrace, TURN_TRACE_META_KEY, turnTraceOf } from "./trace.ts";
-export { createOpenTelemetryAgentTraceExporter } from "./trace-export.ts";
+export {
+  createOpenTelemetryAgentTraceExporter,
+  DEFAULT_TRACE_EXPORT_TIMEOUT_MS,
+} from "./trace-export.ts";
 export type {
   AgentTraceContext,
   AgentTraceExporter,

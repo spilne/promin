@@ -878,20 +878,28 @@ turn; use `onError` to observe them.
 `@opentelemetry/api` without making that package a required dependency:
 
 ```ts
-import { trace } from "@opentelemetry/api";
+import { ROOT_CONTEXT, propagation, trace } from "@opentelemetry/api";
 import { createOpenTelemetryAgentTraceExporter } from "@promin/agent";
 
 const traceExporter = createOpenTelemetryAgentTraceExporter({
   tracer: trace.getTracer("my-agent"),
-  filterAttribute: (key, value) => (key === "agent.resource_id" ? undefined : value),
+  // Optional: join the caller's request trace (config `traceparent` is on `context`).
+  parentContext: (context) =>
+    propagation.extract(ROOT_CONTEXT, { traceparent: context.traceparent }),
+  timeoutMs: 5000, // default; a slow export is reported to onError and the turn moves on
   onError: (error) => console.error("Agent trace export failed", error),
 });
 // Pass traceExporter in LocalAgent's `agent` config or to agentAction.
 ```
 
 Only identifiers, times, counts and tool names are exported. Prompts,
-answers, tool inputs and results are excluded; `filterAttribute` can redact
-identifiers as well. `agent.thread_id` groups turns of one conversation and
+answers, tool inputs and results are excluded. `agent.resource_id` and
+`agent.thread_id` are exported as a stable SHA-256 prefix (add `identifierSalt`
+to make it deployment-specific); set `includeIdentifiers: true` to export them
+raw. `filterAttribute` runs afterwards and can redact anything else. Failed
+tool spans get status ERROR. Set `traceparent` in the agent config to make
+`parentContext` see the caller's W3C trace context; it needs a registered
+propagator (or build the Context yourself). `agent.thread_id` groups turns of one conversation and
 `agent.workflow_id` identifies a turn for deduplication. Configure an
 OpenTelemetry span exporter in your host to send the spans to your collector.
 

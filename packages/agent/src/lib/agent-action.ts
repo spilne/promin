@@ -115,7 +115,7 @@ import { parseDelegationFrame, ROOT_FRAME, type DelegationFrame } from "./delega
 import type { AgentTool, ApprovalDecision, AutoApprove, ToolScope } from "./tool.ts";
 import { shouldAutoApprove } from "./tool.ts";
 import { TURN_TRACE_META_KEY, type TurnSpan, type TurnTrace } from "./trace.ts";
-import type { AgentTraceExporter } from "./trace-export.ts";
+import { runTraceExport, type AgentTraceExporter } from "./trace-export.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
 import { buildToolDefs } from "./tool-registry.ts";
 
@@ -435,6 +435,8 @@ export interface AgentActionConfig<TOutput = any> {
   metrics?: AgentMetrics;
   /** Optional journaled, best-effort export of a completed turn's timed trace. */
   traceExporter?: AgentTraceExporter;
+  /** W3C `traceparent` of the caller's request, handed to the trace exporter as context. */
+  traceparent?: string;
   /** Per-model USD rates: llm.cost.usd and the turn's priced spend (`budget.maxCostUsd`). */
   costs?: ModelCostRegistry;
   /** Provider label for LLM metrics (required with `metrics` for llm.* metrics). */
@@ -1187,12 +1189,17 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
         }
         if (config.traceExporter) {
           const exporter = config.traceExporter;
-          const context = { agentName: config.name, workflowId, scope: config.scope };
+          const context = {
+            agentName: config.name,
+            workflowId,
+            scope: config.scope,
+            ...(config.traceparent && { traceparent: config.traceparent }),
+          };
           yield* ctx.activity(
             "turn-trace-export",
             async () => {
               try {
-                await exporter.exportTurn(trace, context);
+                await runTraceExport({ exporter, trace, context });
               } catch (error) {
                 try {
                   await exporter.onError?.(error, context);
