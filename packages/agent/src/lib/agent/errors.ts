@@ -39,3 +39,31 @@ export class TurnKeyConflictError extends Error {
     this.workflowId = params.workflowId;
   }
 }
+
+/** `createThread` found a thread with that id already stored in the namespace. */
+export class ThreadExistsError extends Error {
+  readonly _tag = "ThreadExists";
+  readonly namespaceId: string;
+  readonly threadId: string;
+
+  constructor(params: { namespaceId: string; threadId: string }) {
+    super(`Thread already exists: ${params.namespaceId}/${params.threadId}`);
+    this.name = "ThreadExistsError";
+    this.namespaceId = params.namespaceId;
+    this.threadId = params.threadId;
+  }
+}
+
+/**
+ * A fork point that cannot yield a valid transcript: `atSeq` names no retained
+ * message, or it falls between an assistant tool call and its result. Forks
+ * are rejected, not snapped, so the caller picks the boundary it means.
+ */
+export class InvalidForkPointError extends RangeError {
+  readonly _tag = "InvalidForkPoint";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidForkPointError";
+  }
+}

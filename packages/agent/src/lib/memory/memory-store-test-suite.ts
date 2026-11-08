@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------
 
 import { beforeEach, describe, it, expect } from "bun:test";
+import { ThreadExistsError } from "../agent/errors.ts";
 import type { Message } from "../message.ts";
 import { nextThreadCursor } from "./thread-cursor.ts";
 import {
@@ -561,7 +562,9 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
       it("createThread on duplicate id throws", async () => {
         const s = await make();
         await s.createThread({ namespaceId: NS, threadId: T_DEFAULT });
-        await expect(s.createThread({ namespaceId: NS, threadId: T_DEFAULT })).rejects.toThrow();
+        await expect(
+          s.createThread({ namespaceId: NS, threadId: T_DEFAULT }),
+        ).rejects.toBeInstanceOf(ThreadExistsError);
       });
 
       it("getThread returns null when absent", async () => {

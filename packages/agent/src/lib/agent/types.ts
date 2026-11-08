@@ -190,6 +190,9 @@ export interface AgentInvokeOpts {
  */
 export const THREAD_AGENT_METADATA_KEY = "agentId";
 
+/** Set on a forked thread while its copy runs; a thread still carrying it is incomplete and hidden. */
+export const FORK_IN_PROGRESS_METADATA_KEY = "forkInProgress";
+
 export interface ThreadOptions {
   /** User / persona key — wires to `MemoryStore` resource layer. */
   readonly resourceId?: string;

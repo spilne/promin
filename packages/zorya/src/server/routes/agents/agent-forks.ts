@@ -1,4 +1,9 @@
-import { THREAD_AGENT_METADATA_KEY, type MemoryStore } from "@promin/agent";
+import {
+  THREAD_AGENT_METADATA_KEY,
+  ThreadAwaitingApprovalError,
+  ThreadExistsError,
+  type MemoryStore,
+} from "@promin/agent";
 import { z } from "zod";
 import { json, jsonError, readJson } from "../../router.ts";
 import { internalError } from "../agent-gateway-kit.ts";
@@ -26,9 +31,6 @@ export function forkAgentThread(deps: AgentGatewayDeps) {
     });
     if (lease instanceof Response) return lease;
     try {
-      if ((await opened.thread.pendingApprovals?.())?.length) {
-        return jsonError(409, "approval_pending");
-      }
       const child = await opened.scoped.agent.forkThread(
         opened.thread.id,
         parsed.data.newThreadId,
@@ -41,12 +43,8 @@ export function forkAgentThread(deps: AgentGatewayDeps) {
       });
     } catch (error) {
       if (error instanceof RangeError) return jsonError(400, "invalid_branch_seq");
-      if (
-        error instanceof Error &&
-        /duplicate|already exists|UNIQUE constraint/i.test(error.message)
-      ) {
-        return jsonError(409, "thread_exists");
-      }
+      if (error instanceof ThreadAwaitingApprovalError) return jsonError(409, "approval_pending");
+      if (error instanceof ThreadExistsError) return jsonError(409, "thread_exists");
       return internalError({ code: "fork_failed", err: error });
     } finally {
       await lease.release();
