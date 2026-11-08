@@ -40,6 +40,8 @@ export class StepError extends TaggedError("StepError")<{
 export class WorkflowFailedError extends TaggedError("WorkflowFailedError")<{
   readonly workflowId: string;
   readonly stepName?: string;
+  /** Attempt the failed step failed on. */
+  readonly attempt?: number;
   readonly message: string;
   readonly errorTag?: string;
 }>() {}

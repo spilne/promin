@@ -56,7 +56,9 @@ import {
   runStartMs,
 } from "./run-status.ts";
 import { checkpointWrite } from "./step-checkpoint.ts";
+import type { WorkflowStorage } from "../workflow-storage.ts";
 import { errorMessage, errorTagOf } from "./step-body.ts";
+import { failureFromError, workflowFailure, type WorkflowFailure } from "../workflow-failure.ts";
 
 /**
  * Default lock extension for orchestration runs. Matches `withLock`'s
@@ -69,6 +71,11 @@ const DEFAULT_LOCK_DURATION_MS = 120_000;
 const MAX_CONTINUE_AS_NEW_CHAIN = 1024;
 
 interface RunParams {
+  /**
+   * Receives the structured failure when this run fails, so `runSafe` reads
+   * the failure of its own run (the thrown error may be shared by runs).
+   */
+  readonly failureSink?: { failure?: WorkflowFailure };
   readonly workflowId: string;
   readonly input: unknown;
   readonly force?: boolean;
@@ -150,6 +157,7 @@ export async function runWorkflowOrchestration(
       force,
       namespace,
       ...(params.drivenByParent && { drivenByParent: true }),
+      ...(params.failureSink !== undefined && { failureSink: params.failureSink }),
       ...(params.onLocked !== undefined && { onLocked: params.onLocked }),
       ...(params.rejectInFlight === true && { rejectInFlight: true }),
       ...(params.signal !== undefined && { signal: params.signal }),
@@ -277,7 +285,15 @@ async function runChain(params: {
         params:
           chain === 0
             ? { ...params.params, input }
-            : { workflowId, input, force: true, namespace: params.params.namespace },
+            : {
+                workflowId,
+                input,
+                force: true,
+                namespace: params.params.namespace,
+                ...(params.params.failureSink !== undefined && {
+                  failureSink: params.params.failureSink,
+                }),
+              },
       });
     } catch (err) {
       if (errorTag(err) !== "WorkflowContinueAsNewError") throw err;
@@ -481,6 +497,7 @@ async function runOneOrchestrationCycle(cycle: {
       errorMsg: state.error ?? `Workflow ${workflowId} failed`,
       errorTag: state.errorTag,
       resumed: true,
+      failureSink: cycle.params.failureSink,
     });
   }
 
@@ -660,6 +677,7 @@ async function runOneOrchestrationCycle(cycle: {
     errorMsg: errorMessage(lastStepError),
     errorTag: errorTagOf(lastStepError),
     resumed: false,
+    failureSink: cycle.params.failureSink,
   });
 }
 
@@ -690,6 +708,7 @@ async function rollBackAndFail(params: {
   errorMsg: string;
   errorTag: string | undefined;
   resumed: boolean;
+  failureSink: { failure?: WorkflowFailure } | undefined;
 }): Promise<never> {
   const { ctx, lock, clock, workflowId, input, dagNodes, guard, workflowStartTime } = params;
   const { errorMsg, errorTag: failedTag } = params;
@@ -759,12 +778,23 @@ async function rollBackAndFail(params: {
         ...(failedTag !== undefined && { errorTag: failedTag }),
       }),
   });
+  // The structured failure: the stored run's failed step and attempt, the
+  // live error as `cause`. A failed read degrades to the error alone.
+  const failure = await loadRunFailure({
+    storage: ctx.storage,
+    workflowId,
+    errorMsg,
+    errorTag: failedTag,
+    cause: lastStepError,
+  });
+  if (params.failureSink !== undefined) params.failureSink.failure = failure;
   await fireHook({
     hooks: ctx.hooks,
     name: "onWorkflowFailure",
     event: {
       workflowId,
       error: errorMsg,
+      failure,
       durationMs: clock.currentTimeMs() - workflowStartTime,
     },
   });
@@ -778,6 +808,7 @@ async function rollBackAndFail(params: {
       workflowName: ctx.name,
       input,
       errorMsg,
+      failure,
       clock,
       compensationReport,
       metadata: ctx.metadata,
@@ -785,6 +816,26 @@ async function rollBackAndFail(params: {
   }
 
   throw lastStepError;
+}
+
+async function loadRunFailure(params: {
+  storage: WorkflowStorage;
+  workflowId: string;
+  errorMsg: string;
+  errorTag: string | undefined;
+  cause: unknown;
+}): Promise<WorkflowFailure> {
+  const { storage, workflowId, errorMsg, errorTag, cause } = params;
+  try {
+    const state = await storage.loadWorkflow(workflowId);
+    const stored = state
+      ? workflowFailure({ ...state, status: "failed", error: errorMsg, errorTag }, cause)
+      : undefined;
+    if (stored !== undefined) return stored;
+  } catch {
+    // best effort: the failure is already stored
+  }
+  return failureFromError(cause);
 }
 
 /**
