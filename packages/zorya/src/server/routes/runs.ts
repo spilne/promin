@@ -9,6 +9,7 @@
 
 import type {
   NamespaceRegistry,
+  WallClock,
   SignalPayloadSchema,
   Workflow,
   WorkflowState,
@@ -66,6 +67,8 @@ export interface RunRoutesDeps {
   advertisements?: WorkflowAdvertisementRegistry;
   /** When set, a run can only be triggered in a registered, active namespace. */
   namespaces?: NamespaceRegistry;
+  /** Time source for a run's `waitingOnSummary`. */
+  clock?: WallClock;
 }
 
 /** `:id` of a run route. */
@@ -78,6 +81,7 @@ function makeService(deps: RunRoutesDeps): RunsService {
     storage: deps.storage,
     workflows: deps.workflows,
     advertisements: deps.advertisements,
+    clock: deps.clock,
   });
 }
 

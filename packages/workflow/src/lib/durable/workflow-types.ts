@@ -13,6 +13,7 @@ import type { TaggedError } from "../shared/tagged-error.ts";
 import type { StepDefinition } from "./step-definition.ts";
 import type { WorkflowDAG } from "./workflow-dag-viz.ts";
 import type { FailedWorkflowRecord, WorkflowFailure, WorkflowRunEvent } from "./workflow-state.ts";
+import type { WorkflowWait } from "./workflow-waits.ts";
 
 // ---------------------------------------------------------------------------
 // Queue concurrency config
@@ -250,6 +251,15 @@ export interface WorkflowStatusInfo<Output> {
   readonly currentStep?: string;
   /** Why the workflow is suspended (if applicable). */
   readonly suspendedReason?: "sleeping" | "waiting_for_signal";
+  /**
+   * What the run is parked on right now (sleeps, signal / approval waits,
+   * child workflows), derived from the stored step rows. Empty for a run with
+   * nothing parked and for every ended run. See `WorkflowWait` for what is
+   * and is not listed.
+   */
+  readonly waitingOn: readonly WorkflowWait[];
+  /** One-line summary of `waitingOn`; absent when it is empty. */
+  readonly waitingOnSummary?: string;
   /** Summary of all step statuses. */
   readonly steps: Record<string, { status: string; result?: unknown }>;
   readonly createdAt: Date;
