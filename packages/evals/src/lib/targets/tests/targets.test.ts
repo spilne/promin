@@ -153,6 +153,41 @@ describe("agentTarget", () => {
     expect(second.error).toBeUndefined();
   });
 
+  it("replays metadata.messages before the task", async () => {
+    let seen: ReadonlyArray<{ role: string; content?: string | null }> = [];
+    const target = agentTarget({
+      id: "bot",
+      agent: () =>
+        resolveLocalAgent(
+          recipe,
+          localDeps(() => ({
+            chat: async (params) => {
+              seen = params.messages;
+              return {
+                content: "ok",
+                finishReason: "stop",
+                usage: { inputTokens: 1, outputTokens: 1 },
+              };
+            },
+          })),
+        ),
+    });
+    const result = await target.run({
+      id: "c1",
+      input: "and in euros?",
+      metadata: {
+        messages: [
+          { role: "user", content: "price in dollars?" },
+          { role: "assistant", content: "10 USD" },
+        ],
+      },
+    });
+    expect(result.error).toBeUndefined();
+    expect(
+      seen.map((m) => m.content).filter((c) => c?.includes("USD") || c?.includes("euros")),
+    ).toEqual(["10 USD", "and in euros?"]);
+  });
+
   it("catches a failing agent factory into EvalOutput.error", async () => {
     const target = agentTarget({
       id: "bot",

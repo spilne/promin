@@ -24,6 +24,12 @@ redisDescribe("RedisWorkflowStorage conformance", (redis) => {
       hasResetSteps: true,
       createPeer: (storage) =>
         new RedisWorkflowStorage({ redis: redis.client(), prefix: prefixes.get(storage)! }),
+      createNamespaced: ({ storage, namespace }) =>
+        new RedisWorkflowStorage({
+          redis: redis.client(),
+          prefix: prefixes.get(storage)!,
+          namespace,
+        }),
       // A lapsed PX key is simply gone; the fence counter lives in its own key.
       expireLock: async ({ storage, workflowId }) => {
         await redis.client().del(new RedisWorkflowKeys(prefixes.get(storage)!).lock(workflowId));

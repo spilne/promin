@@ -75,6 +75,16 @@ export interface StorageTestSuiteOptions {
    * exact for in-process clocks.
    */
   expireLock?: (params: { storage: WorkflowStorage; workflowId: string }) => Promise<void>;
+  /**
+   * Build a storage over the same backend as `storage` whose default
+   * `namespace` is the given one. Enables the case that a namespaced storage
+   * purges only its own namespace. Omit for backends with no default
+   * namespace (SQLite).
+   */
+  createNamespaced?: (params: {
+    storage: WorkflowStorage;
+    namespace: string;
+  }) => WorkflowStorage | Promise<WorkflowStorage>;
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -2476,6 +2486,28 @@ export function storageTestSuite(
     // -------------------------------------------------------------------
 
     describe("purgeCompleted", () => {
+      if (options.createNamespaced) {
+        it("a namespaced storage purges its own namespace only", async () => {
+          const base = await getStorage();
+          const ns = `purge-ns-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          const scoped = await options.createNamespaced!({ storage: base, namespace: ns });
+          await scoped.createWorkflow({ workflowId: `${ns}-mine`, workflowName: "t", input: {} });
+          await scoped.completeWorkflow({ workflowId: `${ns}-mine`, result: "ok" });
+          await scoped.createWorkflow({
+            workflowId: `${ns}-theirs`,
+            workflowName: "t",
+            input: {},
+            namespace: `${ns}-other`,
+          });
+          await scoped.completeWorkflow({ workflowId: `${ns}-theirs`, result: "ok" });
+
+          const everything = { from: new Date(0), to: new Date(Date.now() + 60_000), limit: 100 };
+          expect(await scoped.purgeCompleted(everything)).toBe(1);
+          expect(await scoped.loadWorkflow(`${ns}-mine`)).toBeNull();
+          expect(await scoped.loadWorkflow(`${ns}-theirs`)).not.toBeNull();
+        });
+      }
+
       it("purges completed workflow older than maxAge", async () => {
         const s = await getStorage();
         await s.createWorkflow({ workflowId: "purge-c1", workflowName: "test", input: {} });

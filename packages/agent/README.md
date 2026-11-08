@@ -866,6 +866,43 @@ See `packages/agent/src/examples/console-chat.ts` for a complete REPL example.
 
 ## Turn events
 
+### Export traces
+
+Every completed `agentAction` turn records a timed `TurnTrace` with think,
+tool, approval and compaction spans. Pass a `traceExporter` in the agent config
+to export it once as a journaled, best-effort activity. A crash during export
+may retry it, so deduplicate by `workflowId`. Export failures do not fail the
+turn; use `onError` to observe them.
+
+`createOpenTelemetryAgentTraceExporter` accepts a tracer from
+`@opentelemetry/api` without making that package a required dependency:
+
+```ts
+import { ROOT_CONTEXT, propagation, trace } from "@opentelemetry/api";
+import { createOpenTelemetryAgentTraceExporter } from "@promin/agent";
+
+const traceExporter = createOpenTelemetryAgentTraceExporter({
+  tracer: trace.getTracer("my-agent"),
+  // Optional: join the caller's request trace (config `traceparent` is on `context`).
+  parentContext: (context) =>
+    propagation.extract(ROOT_CONTEXT, { traceparent: context.traceparent }),
+  timeoutMs: 5000, // default; a slow export is reported to onError and the turn moves on
+  onError: (error) => console.error("Agent trace export failed", error),
+});
+// Pass traceExporter in LocalAgent's `agent` config or to agentAction.
+```
+
+Only identifiers, times, counts and tool names are exported. Prompts,
+answers, tool inputs and results are excluded. `agent.resource_id` and
+`agent.thread_id` are exported as a stable SHA-256 prefix (add `identifierSalt`
+to make it deployment-specific); set `includeIdentifiers: true` to export them
+raw. `filterAttribute` runs afterwards and can redact anything else. Failed
+tool spans get status ERROR. Set `traceparent` in the agent config to make
+`parentContext` see the caller's W3C trace context; it needs a registered
+propagator (or build the Context yourself). `agent.thread_id` groups turns of one conversation and
+`agent.workflow_id` identifies a turn for deduplication. Configure an
+OpenTelemetry span exporter in your host to send the spans to your collector.
+
 Pass a `SessionEventBus` as `bus` to `agentAction` (`LocalAgent` wires one per run and turns its events into `fullStream`):
 
 ```ts

@@ -278,6 +278,26 @@ export interface StepState {
   readonly metadata?: Record<string, unknown>;
 }
 
+/** `StepState.metadata` key naming a completed step whose body did not produce its result. */
+export const STEP_OUTCOME_METADATA_KEY = "stepOutcome";
+
+/**
+ * Why a completed step's result is not the body's own: `skipped` (`skipWhen`
+ * matched, the body never ran) or `fallback` (the last attempt failed and
+ * `onFailure` supplied the value).
+ */
+export type StepOutcomeMarker = "skipped" | "fallback";
+
+/**
+ * True for a completed step that a saga rollback leaves alone: it was
+ * skipped, or its result is an `onFailure` fallback, so there is no effect
+ * of its own to undo.
+ */
+export function isCompensationExempt(step: StepState): boolean {
+  const marker = step.metadata?.[STEP_OUTCOME_METADATA_KEY];
+  return marker === "skipped" || marker === "fallback";
+}
+
 /**
  * `step` without its compensation-ledger fields (`compensationStatus`,
  * `compensationError`, `compensatedAt`). For storages that keep step rows

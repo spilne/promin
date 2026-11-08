@@ -739,6 +739,45 @@ namespaceId, resourceId? }` answers 202 with a `runId`. Any agent version
   the suite sets `idempotentCases: true`.
 - **Compare**: `GET /api/evals/compare?baseline=<runId>&candidate=<runId>` diffs
   two runs case by case (e.g. the active version against a draft).
+- **Operator feedback** (when `datasets` is configured; the Trace view hides
+  its rating controls when the server answers 404): rate a completed turn with
+  `POST /api/agents/:id/threads/:threadId/feedback`, body `{ namespaceId,
+resourceId | ownerId, workflowId, rating: "positive" | "negative", comment?,
+expected? }`. The gateway checks thread ownership and that the workflow id is
+  in that thread's trace. A turn has one case: rating again replaces the earlier
+  rating (the identical rating is a no-op 201), and the regression dataset
+  follows the latest rating, holding a case only while it is negative with an
+  `expected` answer. The two writes are separate; repeat the request to heal a
+  failure between them. Each case keeps the earlier messages of the thread in
+  `metadata.messages` (last 40 messages / 60k characters, cut at a user
+  message; `historyTruncated` says so) and is tagged `depends-on-history`;
+  `agentTarget` replays `metadata.messages` before the input, so a turn from
+  mid-conversation runs with its context. Tool results from earlier turns are
+  replayed as text, not re-executed. `DELETE
+.../feedback?namespaceId=...&resourceId=...&workflowId=...` removes the
+  turn's case from both datasets (idempotent). The POST response names both
+  dataset ids; `GET .../feedback` lists this thread's ratings, and
+  `GET /api/agents/:id/feedback?namespaceId=...&resourceId=...` gives daily
+  counts and a rising negative-rate alert (at least five ratings in each of the
+  last two seven-day windows and a rise of 20 points). Each dataset is one row
+  rewritten per write and read whole for the trend, so it suits hundreds, not
+  millions, of ratings per resource.
+  Create a suite with `{ dataset: { kind: "stored", datasetId:
+regressionDatasetId }, scorers: [{ kind: "exactMatch" }] }`, run it against
+  active and candidate recipe versions, then use `/api/evals/compare` and a
+  promotion gate. The stored regression dataset grows as operators add cases;
+  snapshot it to a fixed dataset before using strict comparisons or gates.
+  Writing and deleting feedback needs `{ kind: "operator", resource:
+"agent-feedback" }` from `authorizeScope` (403 otherwise): `expected`
+  answers come from the caller and become pass criteria, so grant it to
+  operators, not end users. Without the hook any caller that passed server
+  auth can write feedback. Feedback and regression dataset ids embed the
+  namespace, and a run refuses (400 `invalid_suite`) a suite that reads a
+  feedback dataset of another namespace.
+  **Breaking for custom stores:** `EvalDatasetStore` gains required
+  `appendCase` (resolves `false` when the id is taken), `replaceCase` and
+  `deleteCase`; external implementers must add them (the Postgres, SQLite and
+  in-memory stores do).
 - **Authorization** (with `ZoryaAgents.authorizeScope`): starting a run checks
   the caller's scope for the agent like an invocation; reading, cancelling
   and comparing a run checks the scope it ran in (otherwise 404);
