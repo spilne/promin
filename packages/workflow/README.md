@@ -104,6 +104,11 @@ await onboard
   Default `"none"`. Only the driver that sees the cancel rolls back; if it
   loses the lock mid-rollback the rest is not re-driven (a cancelled run is
   terminal).
+- A step that never settles holds its run forever unless it has a timeout:
+  set `defaultStepTimeoutMs` on `workflow()` or `createWorkflowRunner` (a
+  step's `timeoutMs` wins, `timeoutMs: null` opts out) and `lock.maxHoldMs` to
+  cap how long one driver holds a run. Both are off by default and
+  recommended in production; see the durable README.
 - `.parallel(name, branches)` forks the head into one DAG step per branch
   and joins them into `{ [branch]: result }`;
   `.parallel(name, { dependsOn }, branches)` forks from named steps.

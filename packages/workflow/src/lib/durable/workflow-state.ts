@@ -145,6 +145,27 @@ export function decodeRunSource(code: number | null | undefined): RunSource | un
   return RUN_SOURCE_BY_CODE_MAP.get(code);
 }
 
+/**
+ * Why a run failed.
+ *
+ * - `tag`: `_tag` of the error that failed the run (a `StepError` from an
+ *   executor reports the tag the executor saw); `"WorkflowCancelledError"`
+ *   for a cancelled run; `UNTAGGED_FAILURE_TAG` for an untagged defect.
+ * - `message`: the error's message, as stored in `error`.
+ * - `stepName` / `attempt`: the failed step and the attempt it failed on,
+ *   when a step failed the run.
+ * - `cause`: the original error. In-process only: present on the failure
+ *   `run`/`runSafe`, the hooks and the DLQ see, absent on one derived from
+ *   stored state (an error does not survive a storage round trip).
+ */
+export interface WorkflowFailure {
+  readonly tag: string;
+  readonly message: string;
+  readonly stepName?: string;
+  readonly attempt?: number;
+  readonly cause?: unknown;
+}
+
 export interface WorkflowState<Input = unknown, Result = unknown> {
   readonly workflowId: string;
   readonly workflowName: string;
@@ -391,6 +412,8 @@ export interface FailedWorkflowRecord {
   readonly workflowName: string;
   readonly input: unknown;
   readonly error: string;
+  /** The structured failure (tag, step, attempt); `error` stays for compatibility. */
+  readonly failure?: WorkflowFailure;
   readonly failedAt: Date;
   readonly steps: Record<string, StepState>;
   readonly compensatedSteps: string[];

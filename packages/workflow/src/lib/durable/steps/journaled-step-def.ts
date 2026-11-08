@@ -82,6 +82,9 @@ export function createJournaledStep(params: {
             ...(execParams.workflowMetadata !== undefined && {
               workflowMetadata: execParams.workflowMetadata,
             }),
+            ...(execParams.onMetadataWriteError !== undefined && {
+              onMetadataWriteError: execParams.onMetadataWriteError,
+            }),
             body,
           }),
         (err) => err as TaggedError,

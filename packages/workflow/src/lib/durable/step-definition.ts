@@ -155,9 +155,10 @@ export interface StepOptions<T, Input = unknown, Prev = unknown> {
   /**
    * Per-attempt timeout. An attempt that does not settle in time is
    * interrupted and fails with `StepTimeoutError` (a typed failure, so
-   * `retry` and `onFailure` apply to it).
+   * `retry` and `onFailure` apply to it). `null` opts the step out of a
+   * workflow or runner `defaultStepTimeoutMs`.
    */
-  readonly timeoutMs?: number;
+  readonly timeoutMs?: number | null;
   /** Retry the step on typed failures. Default delays: 250ms base, doubling, 3 retries. */
   readonly retry?: RetryPolicy<TaggedError>;
   /** What to do when the step fails (after retries exhausted). Default: "fail". */
@@ -225,7 +226,7 @@ export interface MapElementOptions<T> {
   /** Codec for each element's task row. Default: the workflow codec. */
   readonly codec?: Codec<T>;
   /** Per-element attempt timeout (a `StepTimeoutError` whose message names `step[index]`). */
-  readonly timeoutMs?: number;
+  readonly timeoutMs?: number | null;
   /** Retry one element on typed failures. */
   readonly retry?: RetryPolicy<TaggedError>;
 }
@@ -351,7 +352,7 @@ export interface StepDefinition {
   readonly kind: StepKind;
   readonly execute: (params: ExecuteParams) => StepEff<unknown, TaggedError>;
   readonly codec: Codec<unknown>;
-  readonly timeoutMs?: number;
+  readonly timeoutMs?: number | null;
   readonly retry?: RetryPolicy<TaggedError>;
   readonly onFailure?: StepFailureStrategy<unknown>;
   readonly compensate?: (params: {
@@ -458,6 +459,15 @@ export interface StepRuntime {
    * from it instead of re-reading the run; without it, it loads the run.
    */
   readonly workflowMetadata?: WorkflowMetadataRef;
+  /**
+   * Report a `ctx.metadata` write of this step that failed for a reason
+   * other than a lost fence (that fails the step). The runner fires its
+   * `onMetadataWriteError` hook here. Default: `console.warn`.
+   */
+  readonly onMetadataWriteError?: (params: {
+    readonly error: unknown;
+    readonly keys: readonly string[];
+  }) => void;
 }
 
 /**

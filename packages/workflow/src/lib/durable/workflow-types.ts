@@ -12,7 +12,7 @@ import type { Sinkable } from "../shared/streamable.ts";
 import type { TaggedError } from "../shared/tagged-error.ts";
 import type { StepDefinition } from "./step-definition.ts";
 import type { WorkflowDAG } from "./workflow-dag-viz.ts";
-import type { FailedWorkflowRecord, WorkflowRunEvent } from "./workflow-state.ts";
+import type { FailedWorkflowRecord, WorkflowFailure, WorkflowRunEvent } from "./workflow-state.ts";
 
 // ---------------------------------------------------------------------------
 // Queue concurrency config
@@ -151,6 +151,17 @@ export interface WorkflowDefinitionInternals {
   readonly compensateConfig?: CompensateConfig;
   readonly dlq?: Sinkable<FailedWorkflowRecord>;
   readonly timeoutMs?: number;
+  /**
+   * Timeout (ms) applied to every plain, `branch`, `match`, `map` and
+   * `parallel` step that sets no `timeoutMs` of its own, so a handler that
+   * never settles fails with `StepTimeoutError` instead of holding the run
+   * (and its heartbeating lock) forever. A step's own `timeoutMs` wins;
+   * `timeoutMs: null` on a step opts it out. `null` or `0` here turns the
+   * workflow's default off, overriding the runner's `defaultStepTimeoutMs`.
+   * Sleeps, signal waits, children, journaled steps and loops are never
+   * given it. Default: the runner's, which is off.
+   */
+  readonly defaultStepTimeoutMs?: number | null;
   readonly onVersionMismatch: "strict" | "drain";
   readonly previousVersions?: ReadonlyArray<Workflow<unknown, unknown>>;
   readonly hooks?: WorkflowHooks;
@@ -225,6 +236,12 @@ export interface WorkflowStatusInfo<Output> {
    */
   readonly errorTag?: string;
   /**
+   * The structured failure of a `failed` run (see `WorkflowFailure`): tag,
+   * message, failed step and attempt. `error` / `errorTag` stay for
+   * compatibility. `cause` is never set here (it does not outlive the run).
+   */
+  readonly failure?: WorkflowFailure;
+  /**
    * Structured tripwire reason — present only when `state === "tripwire"`.
    * Opaque payload returned by the firing `.tripwire()` step's `reason(prev)`.
    */
@@ -265,6 +282,8 @@ export interface WorkflowHooks {
   onWorkflowFailure?: (params: {
     workflowId: string;
     error: string;
+    /** The structured failure, with the original error as `cause`. */
+    failure?: WorkflowFailure;
     durationMs: number;
   }) => void | Promise<void>;
   /**
@@ -277,6 +296,21 @@ export interface WorkflowHooks {
     stepName: string;
     reason: unknown;
     durationMs: number;
+  }) => void | Promise<void>;
+  /**
+   * A `ctx.metadata` write of a `.journaled()` step failed in storage.
+   * Metadata is a dashboard surface, so the step carries on (the failed
+   * keys stay visible to later steps of this execution, not in storage). A
+   * write that lost the lock's fence fails the step instead and is not
+   * reported here. Without this hook the failure is logged with
+   * `console.warn`.
+   */
+  onMetadataWriteError?: (params: {
+    workflowId: string;
+    stepName: string;
+    error: unknown;
+    /** Metadata keys of the write that failed. */
+    keys: readonly string[];
   }) => void | Promise<void>;
   /**
    * Called when one of the hooks above throws or rejects. Hooks are
@@ -350,6 +384,17 @@ export interface WorkflowParams<Input> {
   readonly version?: string;
   /** Global deadline for the entire workflow execution (ms). Fails with WorkflowDeadlineError if exceeded. */
   readonly timeoutMs?: number;
+  /**
+   * Timeout (ms) applied to every plain, `branch`, `match`, `map` and
+   * `parallel` step that sets no `timeoutMs` of its own, so a handler that
+   * never settles fails with `StepTimeoutError` instead of holding the run
+   * (and its heartbeating lock) forever. A step's own `timeoutMs` wins;
+   * `timeoutMs: null` on a step opts it out. `null` or `0` here turns the
+   * workflow's default off, overriding the runner's `defaultStepTimeoutMs`.
+   * Sleeps, signal waits, children, journaled steps and loops are never
+   * given it. Default: the runner's, which is off.
+   */
+  readonly defaultStepTimeoutMs?: number | null;
   /**
    * How to handle resumes of workflows created with a different `version`:
    * - `"strict"` (default) — throw `WorkflowVersionMismatchError`.

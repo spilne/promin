@@ -137,6 +137,12 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
    * `ctx.metadata` writes. Without it, the run is loaded for its metadata.
    */
   workflowMetadata?: WorkflowMetadataRef;
+  /**
+   * Called with a `ctx.metadata` write that failed for a reason other than a
+   * lost fence (that one fails the step). The runner wires its
+   * `onMetadataWriteError` hook here. Default: `console.warn`.
+   */
+  onMetadataWriteError?: (params: { error: unknown; keys: readonly string[] }) => void;
   body: JournaledStepBody<Input, Prev, Output>;
 }): Promise<Output> {
   const {
@@ -154,6 +160,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     clock,
     guard,
     workflowMetadata,
+    onMetadataWriteError,
     body,
   } = params;
 
@@ -169,7 +176,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
       : workflowStorage
         ? (await workflowStorage.loadWorkflow(workflowId))?.metadata
         : undefined;
-  const { ctx, compensations } = makeCtx({
+  const { ctx, compensations, settleMetadata } = makeCtx({
     input,
     prev,
     workflowId,
@@ -184,6 +191,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     runChild,
     ...(clock !== undefined && { clock }),
     ...(guard !== undefined && { guard }),
+    ...(onMetadataWriteError !== undefined && { onMetadataWriteError }),
     ...(initialMetadata !== undefined && { initialMetadata }),
     ...(workflowMetadata !== undefined && { metadataRef: workflowMetadata }),
   });
@@ -219,8 +227,15 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     // started from a branch (ctx.child → runChild → runJournaledStep) must
     // allocate its slots from its own top-level counter, not the parent's
     // branch.
-    return await activityScope.exit(() => driveBody());
+    const output = await activityScope.exit(() => driveBody());
+    // Metadata writes settle before the step's outcome is checkpointed, so a
+    // write that lost the fence stops the step instead of racing its result.
+    await settleMetadata();
+    return output;
   } catch (bodyError) {
+    // The body's own error wins; a lost fence on a metadata write is
+    // already on its way to the reporter or irrelevant to a failing step.
+    await settleMetadata().catch(() => undefined);
     if (runsCompensations(bodyError)) {
       const rolledBack = await compensations.unwind();
       await discardFailedAttempt({

@@ -59,7 +59,7 @@ export function bindWorkflow<Input, Output, E extends TaggedError = never>(param
     runSafe: (run) => runner.runSafe<Output, E>({ ...run, workflow }),
     start: (run) => runner.start<Input, Output, E>({ ...run, workflow }),
     resume: (resume) => runner.resume<Input, Output>({ ...resume, workflow }),
-    handle: (workflowId) => runner.handle<Output>(workflowId),
+    handle: (workflowId) => runner.handle<Output>(workflowId, { workflow }),
   };
 }
 

@@ -263,6 +263,17 @@ honour is a compile error.
 - `timeoutMs` is per attempt: the attempt is interrupted and fails with the
   typed `StepTimeoutError`, so `retry` / `onFailure` see it. The timer runs on
   the runner's `WallClock`.
+- **Hung handlers.** A step without `timeoutMs` that never settles keeps the
+  run locked and heartbeating forever, so recovery never reclaims it. Set
+  `defaultStepTimeoutMs` on `workflow({ ... })` or on the runner to time out
+  every plain, `branch`, `match`, `map` and `parallel` step that sets no
+  `timeoutMs` (sleeps, signal waits, children, journaled steps and loops are
+  skipped). Precedence: step `timeoutMs`, then the workflow default, then the
+  runner default; `timeoutMs: null` on a step, or `defaultStepTimeoutMs: null`
+  on a workflow, opts out. It is off by default for backward compatibility;
+  **setting it on the runner (with `lock.maxHoldMs`, below) is recommended
+  for production.** The default is per attempt and covers the step as a
+  whole, so size it for the slowest legitimate step, or opt that one out.
 - `onFailure`: `"fail"` (default), `"skip"` (continue with `undefined`) or
   `{ fallback: (error) => value }`. A skipped or fallen-back step is not
   compensated.
@@ -299,7 +310,7 @@ or a cancel, and retries defects only with `retryDefects: true`.
 
 ## Running workflows
 
-`createWorkflowRunner({ storage, clock?, registry?, hooks?, stepExecutor?, executorId?, lock? })`
+`createWorkflowRunner({ storage, clock?, registry?, hooks?, stepExecutor?, executorId?, lock?, defaultStepTimeoutMs? })`
 returns a `WorkflowRunner`:
 
 | Method                                         | What it does                                                                               |
@@ -330,6 +341,32 @@ back from storage: it rejects with `WorkflowFailedError` whose `errorTag` is
 the `_tag` of the error that failed the run, or with `WorkflowCancelledError`
 / `WorkflowTripwireError`.
 
+#### One failure shape: `WorkflowFailure`
+
+Every surface reports a failed run as the same `WorkflowFailure`
+(`{ tag, message, stepName?, attempt?, cause? }`):
+
+| Surface                              | How                                                                     |
+| ------------------------------------ | ----------------------------------------------------------------------- |
+| `runSafe()` result                   | `failure` beside `error` (the typed error stays `error`)                |
+| `onWorkflowFailure` hook, DLQ record | `failure` beside the `error` string                                     |
+| `handle.status()` / `getStatus()`    | `failure` beside `error` / `errorTag`                                   |
+| Stored `WorkflowState` (any backend) | `workflowFailure(state)`: derived from `error`, `errorTag`, failed step |
+| `handle.result()`                    | `WorkflowFailedError` with `errorTag`, `stepName`, `attempt`            |
+
+`tag` is the failing error's `_tag` (`"WorkflowCancelledError"` for a cancel,
+`"UnknownError"` for an untagged defect). `cause` is the original error and
+exists only in-process (`runSafe`, hook, DLQ); a failure derived from storage
+has none, since an error does not survive a storage round trip. Nothing new is
+stored, so no backend or migration changes: `error` / `errorTag` stay as they
+were. To turn a stored failure back into a typed error, call
+`rehydrateFailure({ workflowId, failure, errors })`: a tag in `errors` (your
+own typed errors) or a built-in engine error whose fields a failure holds
+(`WorkflowCancelledError`, `WorkflowError`, `WorkflowTimeoutError`,
+`StepError`, `ChildWorkflowGoneError`) gives that error, any other tag a
+`WorkflowFailedError`. It is opt-in: `handle.result()` still rejects with
+`WorkflowFailedError`.
+
 ### Run lifecycle
 
 - **Terminal gate.** A run that already ended is not executed again.
@@ -354,7 +391,13 @@ the `_tag` of the error that failed the run, or with `WorkflowCancelledError`
   stops at the next wave with `WorkflowLockLostError`. The lease is
   `lock: { durationMs, heartbeatIntervalMs }` on the runner (default 120 s /
   30 s): a dead driver's run is free for another driver that long after its
-  last heartbeat. `run({ signal })` abandons a run: once the signal aborts,
+  last heartbeat. `lock.maxHoldMs` (off by default) bounds how long one driver
+  may hold a run: once reached, the heartbeat stops extending the lease and the
+  run stops at its next safe point with `WorkflowLockLostError` whose `cause`
+  is `WorkflowMaxHoldExceededError`; the lease then expires and recovery can
+  reclaim the run even if a handler never settles (its fenced writes are
+  rejected). Set it above your longest expected run: a legitimately long run is
+  stopped the same way and re-driven from its checkpoints. `run({ signal })` abandons a run: once the signal aborts,
   it stops at its next safe point the same way, releases the lock and stays
   in flight for another driver.
 - **Children held elsewhere.** A parent step whose child run is locked by
@@ -531,6 +574,18 @@ of activity functions), `ctx.patched(name)` (see [Versioning](../../../versionin
 
 Semantics:
 
+- **`ctx.metadata` write errors.** `set` / `merge` update the in-process
+  snapshot at once and write to storage in the background; the step waits
+  for its writes before its outcome is checkpointed. A write that fails with
+  `FenceTokenMismatchError` (the run's lock was lost) fails the step with it,
+  like a journal write under a lost lock: the stale holder stops and the new
+  holder re-drives the step. Any other storage error does not fail the step,
+  because metadata is a dashboard surface and replay re-fires the writes: it
+  is reported to the `onMetadataWriteError({ workflowId, stepName, error,
+keys })` hook (default `console.warn` with the error). The snapshot keeps
+  the value, so later steps of that execution see it though storage does not.
+  A step run by a queue worker has no hook and uses the `console.warn`
+  default.
 - **Ambiguous outcomes.** An activity journals a pending row, runs, then
   completes the row. If the process dies in between, the engine cannot know
   whether the side effect happened: by default the step fails with

@@ -33,6 +33,8 @@ import {
   type WorkflowGetStatusParams,
 } from "../durable/workflow-runner.ts";
 import { WorkflowLockError } from "../durable/durable-pipeline-error.ts";
+import { failureOf } from "../durable/workflow-failure.ts";
+import type { WorkflowFailure } from "../durable/workflow-state.ts";
 import type { StepQueue } from "./step-queue.ts";
 import type { WorkerRegistry } from "./worker-registry.ts";
 import type { LeaderElection } from "./leader-election.ts";
@@ -43,6 +45,7 @@ import {
   sharedReadStorage,
   withoutRequeue,
 } from "./coordinator-step-executor.ts";
+import { decodeWorkflowResult } from "../durable/runner/orchestrate.ts";
 import { buildStubWorkflow } from "./stub-workflow.ts";
 import { isStaleLeaseError } from "../scheduler/leader-lease.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
@@ -164,7 +167,7 @@ const RECOVERABLE_STATUSES = ["pending", "running", "compensating"] as const;
 /** How a run driven by this instance ended up. */
 type LocalOutcome =
   | { readonly kind: "completed"; readonly result: unknown }
-  | { readonly kind: "failed"; readonly error: unknown }
+  | { readonly kind: "failed"; readonly error: unknown; readonly failure: WorkflowFailure }
   /** The run suspended (sleep / signal); a scanner resumes it later. */
   | { readonly kind: "suspended"; readonly error: unknown }
   /** Another instance holds the run's lock and is driving it. */
@@ -281,7 +284,15 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
    */
   async run(params: WorkflowRunnerRunParams): Promise<unknown> {
     const { outcome: running } = await this._submit(params);
-    const outcome = await running;
+    return this._settle({ params, outcome: await running });
+  }
+
+  /** The result of a run's outcome, or its error thrown. */
+  private _settle(params: {
+    params: WorkflowRunnerRunParams;
+    outcome: LocalOutcome;
+  }): Promise<unknown> | unknown {
+    const { outcome } = params;
     switch (outcome.kind) {
       case "completed":
         return outcome.result;
@@ -289,18 +300,30 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
       case "suspended":
         throw outcome.error;
       case "elsewhere":
-        return this._watchResult(params.workflowId);
+        return this._watchResult(params.params.workflowId);
     }
   }
 
   async runSafe(
     params: WorkflowRunnerRunParams,
-  ): Promise<{ data: unknown; error: null } | { data: null; error: WorkflowRunSafeError }> {
+  ): Promise<
+    | { data: unknown; error: null }
+    | { data: null; error: WorkflowRunSafeError; failure: WorkflowFailure }
+  > {
     try {
-      const data = await this.run(params);
-      return { data, error: null };
+      const { outcome: running } = await this._submit(params);
+      const outcome = await running;
+      if (outcome.kind === "failed") {
+        // The failure the run recorded, not one looked up from the error.
+        return {
+          data: null,
+          error: outcome.error as WorkflowRunSafeError,
+          failure: outcome.failure,
+        };
+      }
+      return { data: await this._settle({ params, outcome }), error: null };
     } catch (error) {
-      return { data: null, error: error as WorkflowRunSafeError };
+      return { data: null, error: error as WorkflowRunSafeError, failure: failureOf(error) };
     }
   }
 
@@ -478,17 +501,16 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
   }): Promise<LocalOutcome> {
     const { workflowId } = params;
     const outcome = this.innerRunner
-      .run(params)
-      .then(
-        (result): LocalOutcome => ({ kind: "completed", result }),
-        (error: unknown): LocalOutcome => {
-          if (error instanceof WorkflowLockError || tagOf(error) === "WorkflowLockError") {
-            return { kind: "elsewhere" };
-          }
-          if (tagOf(error) === "WorkflowSuspendedError") return { kind: "suspended", error };
-          return { kind: "failed", error };
-        },
-      )
+      .runSafe(params)
+      .then((res): LocalOutcome => {
+        if (res.error === null) return { kind: "completed", result: res.data };
+        const error: unknown = res.error;
+        if (error instanceof WorkflowLockError || tagOf(error) === "WorkflowLockError") {
+          return { kind: "elsewhere" };
+        }
+        if (tagOf(error) === "WorkflowSuspendedError") return { kind: "suspended", error };
+        return { kind: "failed", error, failure: res.failure };
+      })
       .finally(() => {
         if (this.runningWorkflows.get(workflowId) === outcome) {
           this.runningWorkflows.delete(workflowId);
@@ -533,7 +555,10 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
             error: new Error(`Workflow "${workflowId}" not found`),
           });
         } else if (state.status === "completed") {
-          this._settleWaiters({ workflowId, result: state.result });
+          this._settleWaiters({
+            workflowId,
+            result: decodeWorkflowResult({ stored: state.result }),
+          });
         } else if (state.status === "failed") {
           this._settleWaiters({ workflowId, error: new Error(state.error ?? "Workflow failed") });
         } else if (state.status === "tripwire") {

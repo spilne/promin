@@ -40,6 +40,8 @@ export class StepError extends TaggedError("StepError")<{
 export class WorkflowFailedError extends TaggedError("WorkflowFailedError")<{
   readonly workflowId: string;
   readonly stepName?: string;
+  /** Attempt the failed step failed on. */
+  readonly attempt?: number;
   readonly message: string;
   readonly errorTag?: string;
 }>() {}
@@ -83,6 +85,18 @@ export class WorkflowLockLostError extends TaggedError("WorkflowLockLostError")<
   readonly workflowId: string;
   readonly message: string;
   readonly cause?: unknown;
+}>() {}
+
+/**
+ * A driver held a run's lock for longer than `lock.maxHoldMs`. Carried as the
+ * `cause` of the `WorkflowLockLostError` the run stops with: the heartbeat
+ * stopped extending the lease, so the lock expires and recovery can reclaim
+ * the run (a handler that never settles would otherwise keep it forever).
+ */
+export class WorkflowMaxHoldExceededError extends TaggedError("WorkflowMaxHoldExceededError")<{
+  readonly workflowId: string;
+  readonly maxHoldMs: number;
+  readonly message: string;
 }>() {}
 
 /** A storage backend error. */
