@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import type { TaggedError } from "../../shared/tagged-error.ts";
+import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
 import { runHookResult } from "../../shared/eff.ts";
 import { nextRetryDelayMs, type WorkflowRetryPolicy } from "../../shared/retry-policy.ts";
 import { SystemWallClock, type WallClock } from "../../shared/wall-clock.ts";
@@ -563,7 +564,13 @@ async function runOneOrchestrationCycle(cycle: {
         clock,
         workflowId,
         operation: "completeWorkflow",
-        write: () => ctx.storage.completeWorkflow({ workflowId, result: finalResult, guard }),
+        // Stored in the codec's encoded form, like the step rows.
+        write: () =>
+          ctx.storage.completeWorkflow({
+            workflowId,
+            result: encodeWorkflowResult({ steps: ctx.steps, result: finalResult }),
+            guard,
+          }),
       });
       await assertNotCancelled({ ctx, workflowId });
       await fireHook({
@@ -844,7 +851,29 @@ function completedRunResult(params: {
   const lastStep = ctx.steps[ctx.steps.length - 1];
   const row = lastStep ? state.steps[lastStep.name] : undefined;
   if (lastStep && row?.status === "completed") return lastStep.codec.decode(row.result);
-  return state.result;
+  return decodeWorkflowResult({ steps: ctx.steps, stored: state.result });
+}
+
+/**
+ * The workflow's result as stored: the last step's result through its codec.
+ * Runs completed before this stored the plain value; decoding those through
+ * the codec leaves JSON-plain values as they are.
+ */
+function encodeWorkflowResult(params: {
+  steps: WorkflowOrchestrationContext["steps"];
+  result: unknown;
+}): unknown {
+  const last = params.steps[params.steps.length - 1];
+  return last ? last.codec.encode(params.result) : params.result;
+}
+
+/** The inverse of `encodeWorkflowResult`; `LosslessJsonCodec` when the steps are not at hand. */
+export function decodeWorkflowResult(params: {
+  steps?: WorkflowOrchestrationContext["steps"];
+  stored: unknown;
+}): unknown {
+  const last = params.steps?.[params.steps.length - 1];
+  return (last?.codec ?? LosslessJsonCodec).decode(params.stored);
 }
 
 /**
@@ -886,7 +915,9 @@ function cachedIdempotentOutcome(params: {
   const elapsed = clock.currentTimeMs() - state.completedAt.getTime();
   const ttl = getIdempotencyTtl(ctx.idempotency, state.status);
   if (ttl === undefined || elapsed >= ttl) return undefined;
-  if (state.status === "completed") return { result: state.result };
+  if (state.status === "completed") {
+    return { result: decodeWorkflowResult({ steps: ctx.steps, stored: state.result }) };
+  }
   if (state.status === "failed") {
     throw new WorkflowError({
       workflowId: state.workflowId,

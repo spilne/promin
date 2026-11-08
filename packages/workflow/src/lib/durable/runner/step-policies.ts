@@ -40,6 +40,8 @@ export function applyStepPolicies(params: {
    * reach it.
    */
   onAttemptFailed?: (error: unknown) => void;
+  /** Called when an attempt times out, before it fails; aborts that attempt's signal. */
+  onTimeout?: (error: unknown) => void;
 }): Eff<unknown, Throws<TaggedError>> {
   const { stepDef, workflowId, clock } = params;
   let raw: Eff<unknown, Throws<TaggedError>> = suspend(params.invoke);
@@ -53,6 +55,7 @@ export function applyStepPolicies(params: {
       ms: stepDef.timeoutMs,
       workflowId,
       stepName: stepDef.name,
+      ...(params.onTimeout !== undefined && { onTimeout: params.onTimeout }),
     });
   }
 

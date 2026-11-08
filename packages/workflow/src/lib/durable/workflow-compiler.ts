@@ -230,6 +230,7 @@ function compileMapStep(builder: any, step: MapStepSchema, registry: ActivityReg
         deps: {},
         workflowId: ctx.workflowId,
         attempt: ctx.attempt,
+        signal: ctx.signal,
       }),
     options,
   ) as any;
@@ -328,6 +329,7 @@ function toActivityContext(ctx: any): ActivityContext {
     deps,
     workflowId: ctx.workflowId,
     attempt: ctx.attempt,
+    signal: ctx.signal,
   };
 }
 

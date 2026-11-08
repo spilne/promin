@@ -47,7 +47,7 @@ import type { StepExecutor } from "./runner/step-executor.ts";
 import { recoverWorkflows, type RecoveryResult, type RecoveryStrategy } from "./runner/recovery.ts";
 import { resolveRunDefinition } from "./runner/definition-resolver.ts";
 import { orchestrationContextFor, type RunLockOptions } from "./runner/orchestration-context.ts";
-import { runWorkflowOrchestration } from "./runner/orchestrate.ts";
+import { decodeWorkflowResult, runWorkflowOrchestration } from "./runner/orchestrate.ts";
 import {
   createWorkflowHandle,
   pollWorkflowEvents,
@@ -371,8 +371,15 @@ export interface WorkflowRunner {
    * The returned handle is functionally identical to the one returned by
    * `start()`: same `status` / `signal` / `result` / `cancel` / `events`
    * surface, same polling/subscribe semantics under the hood.
+   *
+   * `result()` decodes the stored result through the codec of the last step
+   * of `options.workflow`; without it, through `LosslessJsonCodec` (the
+   * default workflow codec).
    */
-  handle<Output = unknown>(workflowId: string): WorkflowHandle<Output>;
+  handle<Output = unknown>(
+    workflowId: string,
+    options?: { readonly workflow?: Workflow<any, Output, any> },
+  ): WorkflowHandle<Output>;
   /**
    * Rewind a workflow to `fromStep` and continue executing. Resets that
    * step + everything downstream of it (transitively in the DAG) back to
@@ -581,6 +588,8 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     let onInFlight: "reject" | "join" =
       "workflow" in params ? (params.workflow.idempotency?.onInFlight ?? "reject") : "reject";
     let locked!: () => void;
+    let startedWorkflow =
+      "workflow" in params ? (params.workflow as Workflow<any, Output, any>) : undefined;
     const lockTaken = new Promise<void>((resolve) => (locked = resolve));
 
     // The run itself goes on in the background once it holds the lock; its
@@ -592,6 +601,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
         onResolved: (run) => {
           workflowId = run.workflowId;
           onInFlight = run.workflow.idempotency?.onInFlight ?? "reject";
+          startedWorkflow = run.workflow as Workflow<any, Output, any>;
         },
         onLocked: () => locked(),
       },
@@ -606,7 +616,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     void running.catch(() => undefined);
 
     if (first.error instanceof WorkflowLockError && onInFlight === "reject") throw first.error;
-    return this.handle<Output>(workflowId);
+    return this.handle<Output>(workflowId, { workflow: startedWorkflow });
   }
 
   async resume<Input = unknown, Output = unknown>(params: {
@@ -690,11 +700,16 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     })) as Output;
   }
 
-  handle<Output = unknown>(workflowId: string): WorkflowHandle<Output> {
+  handle<Output = unknown>(
+    workflowId: string,
+    options?: { readonly workflow?: Workflow<any, Output, any> },
+  ): WorkflowHandle<Output> {
     return createWorkflowHandle<Output>({
       workflowId,
       storage: this.storage,
       clock: this.clock,
+      decodeResult: (stored) =>
+        decodeWorkflowResult({ steps: options?.workflow?._definition.steps, stored }),
       getStatus: (p) => this.getStatus({ ...p, workflowId }),
       subscribe: (opts) => this.subscribe({ ...opts, workflowId }),
     });

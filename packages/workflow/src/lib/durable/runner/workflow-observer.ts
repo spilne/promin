@@ -30,6 +30,8 @@ export function createWorkflowHandle<Output>(params: {
   workflowId: string;
   storage: WorkflowStorage;
   clock: WallClock;
+  /** Decodes the stored (codec-encoded) result of a completed run. */
+  decodeResult?: (stored: unknown) => unknown;
   getStatus: (p?: { includeStepResults?: boolean }) => Promise<WorkflowStatusInfo<unknown> | null>;
   subscribe: (options?: {
     signal?: AbortSignal;
@@ -55,7 +57,8 @@ export function createWorkflowHandle<Output>(params: {
 
       while (clock.currentTimeMs() < deadline) {
         const state = await storage.loadWorkflow(workflowId);
-        if (state?.status === "completed") return state.result as Output;
+        if (state?.status === "completed")
+          return (params.decodeResult ? params.decodeResult(state.result) : state.result) as Output;
         const ended = state ? storedRunError(state) : undefined;
         if (ended !== undefined) throw ended;
         await new Promise((r) => clock.setTimeout(() => r(undefined), intervalMs));

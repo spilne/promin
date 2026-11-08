@@ -18,6 +18,7 @@ import { isEff, isThenable, promiseOrDie, promiseOrEff } from "../shared/eff.ts"
 import type { RetryPolicy } from "../shared/retry-policy.ts";
 import type { TaggedError } from "../shared/tagged-error.ts";
 import type { WallClock } from "../shared/wall-clock.ts";
+import { NEVER_ABORTED } from "./step-signal.ts";
 import type { Workflow } from "./workflow-types.ts";
 import type { StepState } from "./workflow-state.ts";
 import type { FenceGuard, WorkflowStorage } from "./workflow-storage.ts";
@@ -32,6 +33,8 @@ export interface StepContext<Input, Prev> {
   readonly prev: Prev;
   readonly workflowId: string;
   readonly attempt: number;
+  /** Aborts when this attempt times out or fails, or the run loses its lock. Pass it to cancellable work. */
+  readonly signal: AbortSignal;
 }
 
 /** Context for DAG steps (with dependsOn). */
@@ -40,6 +43,8 @@ export interface DagStepContext<Input, Deps extends Record<string, unknown>> {
   readonly deps: Deps;
   readonly workflowId: string;
   readonly attempt: number;
+  /** Aborts when this attempt times out or fails, or the run loses its lock. Pass it to cancellable work. */
+  readonly signal: AbortSignal;
 }
 
 /** Context for map steps (one per array element). */
@@ -49,6 +54,8 @@ export interface MapStepContext<Input> {
   readonly taskIndex: number;
   /** The step attempt plus this element's `element.retry` retries so far. */
   readonly attempt: number;
+  /** Aborts when this element's attempt times out or fails, or the run loses its lock. */
+  readonly signal: AbortSignal;
 }
 
 /**
@@ -412,6 +419,12 @@ export interface StepRuntime {
    */
   readonly clock?: WallClock;
   /**
+   * The run-level abort signal (lost lock; on the executor path also a failing
+   * sibling). `runStepBody` links each attempt's own signal to it and hands
+   * the result to the step as `ExecuteParams.signal`.
+   */
+  readonly signal?: AbortSignal;
+  /**
    * Fence guard of the lock the runner holds on this run. Passed on every
    * storage write a step kind makes itself (sleep / signal suspension,
    * `mapOver` task rows, loop iteration rows, journaled suspension), so a
@@ -542,5 +555,6 @@ export function linearStepContext(params: {
     prev: readPrev({ dependsOn: params.dependsOn, results: exec.results, input: exec.input }),
     workflowId: exec.workflowId,
     attempt: exec.attemptRef.current,
+    signal: exec.signal ?? NEVER_ABORTED,
   };
 }

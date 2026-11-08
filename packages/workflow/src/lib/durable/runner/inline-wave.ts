@@ -42,7 +42,8 @@ export async function runInlineWave(params: WaveParams): Promise<WaveOutcome> {
         workflowId,
         clock,
         firstAttempt: (params.stepAttempts.get(stepDef.name) ?? 0) + 1,
-        execute: ({ attempt, metadataRef }) =>
+        ...(ctx.signal !== undefined && { signal: ctx.signal }),
+        execute: ({ attempt, metadataRef, signal }) =>
           stepDef.execute({
             ...stepRuntimeFor({
               ctx,
@@ -67,6 +68,7 @@ export async function runInlineWave(params: WaveParams): Promise<WaveOutcome> {
             storage: ctx.storage,
             attemptRef: { current: attempt },
             metadataRef,
+            signal,
           }),
       });
       params.stepAttempts.set(stepDef.name, body.attempt);

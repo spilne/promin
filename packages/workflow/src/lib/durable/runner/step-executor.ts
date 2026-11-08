@@ -65,9 +65,9 @@ export interface StepExecutionRequest {
   /**
    * Aborted when another step of the same wave fails. Advisory: the runner
    * still waits for this step's result and records whatever it reports,
-   * so an executor that stops early reports the step as failed. The bundled
-   * executors run the step to completion (an in-process body has no
-   * cancellation point, and a queued task cannot be recalled).
+   * so an executor that stops early reports the step as failed. The in-process
+   * executor hands it to the step body as `ctx.signal` (a body that ignores it
+   * runs to completion); a queued task cannot be recalled.
    */
   readonly signal?: AbortSignal;
 }
@@ -244,7 +244,10 @@ export class InProcessStepExecutor implements StepExecutor {
       workflowId: req.workflowId,
       clock,
       firstAttempt: req.attempt,
-      execute: ({ attempt, metadataRef }) =>
+      ...((req.signal ?? runtime.signal) !== undefined && {
+        signal: (req.signal ?? runtime.signal)!,
+      }),
+      execute: ({ attempt, metadataRef, signal }) =>
         stepDef.execute({
           ...runtime,
           clock,
@@ -254,6 +257,7 @@ export class InProcessStepExecutor implements StepExecutor {
           storage: this.storage,
           attemptRef: { current: attempt },
           metadataRef,
+          signal,
         }),
     });
 
