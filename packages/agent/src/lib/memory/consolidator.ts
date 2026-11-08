@@ -610,10 +610,9 @@ export class DefaultConsolidator implements Consolidator {
       const replaces = await this.reconcileFacts({
         key,
         fresh,
-        candidates: existing
-          .filter((f) => f.source === "model")
-          .sort((a, b) => b.updatedAt - a.updatedAt)
-          .slice(0, MAX_RECONCILE_CANDIDATES),
+        // `existing` is oldest first; keep the newest, in that same order, so the
+        // numbers the model sees never depend on timestamps.
+        candidates: existing.filter((f) => f.source === "model").slice(-MAX_RECONCILE_CANDIDATES),
       });
       for (const [i, text] of fresh.entries()) {
         const supersedes = replaces.get(i);

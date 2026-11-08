@@ -134,4 +134,26 @@ describe("distillThread fact reconciliation", () => {
     expect(noModelFacts.reconcileCalls).toEqual([]);
     expect(duplicate.reconcileCalls).toEqual([]);
   });
+
+  it("shows the model only the newest 100 model facts, numbered oldest to newest", async () => {
+    const { store, consolidator, reconcileCalls } = await setup({
+      facts: ["lives in Lisbon"],
+      reconcile: () => JSON.stringify({ replaces: [{ new: 1, old: 100 }] }),
+    });
+    for (let i = 0; i < 105; i++) {
+      await store.appendResourceFact(RESOURCE, { text: `saved fact ${i}`, source: "model" });
+    }
+
+    await consolidator.distillThread(THREAD);
+
+    const prompt = reconcileCalls[0]!;
+    expect(prompt).not.toContain("saved fact 4\n");
+    expect(prompt).toMatch(/\b1\. saved fact 5\b/);
+    expect(prompt).toMatch(/\b100\. saved fact 104\b/);
+    // Number 100 is the newest shown, so that is the fact it retires.
+    const texts = await currentTexts(store);
+    expect(texts).not.toContain("saved fact 104");
+    expect(texts).toContain("saved fact 103");
+    expect(texts).toContain("lives in Lisbon");
+  });
 });
