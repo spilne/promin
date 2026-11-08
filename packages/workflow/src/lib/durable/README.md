@@ -341,6 +341,32 @@ back from storage: it rejects with `WorkflowFailedError` whose `errorTag` is
 the `_tag` of the error that failed the run, or with `WorkflowCancelledError`
 / `WorkflowTripwireError`.
 
+#### One failure shape: `WorkflowFailure`
+
+Every surface reports a failed run as the same `WorkflowFailure`
+(`{ tag, message, stepName?, attempt?, cause? }`):
+
+| Surface                              | How                                                                     |
+| ------------------------------------ | ----------------------------------------------------------------------- |
+| `runSafe()` result                   | `failure` beside `error` (the typed error stays `error`)                |
+| `onWorkflowFailure` hook, DLQ record | `failure` beside the `error` string                                     |
+| `handle.status()` / `getStatus()`    | `failure` beside `error` / `errorTag`                                   |
+| Stored `WorkflowState` (any backend) | `workflowFailure(state)`: derived from `error`, `errorTag`, failed step |
+| `handle.result()`                    | `WorkflowFailedError` with `errorTag`, `stepName`, `attempt`            |
+
+`tag` is the failing error's `_tag` (`"WorkflowCancelledError"` for a cancel,
+`"UnknownError"` for an untagged defect). `cause` is the original error and
+exists only in-process (`runSafe`, hook, DLQ); a failure derived from storage
+has none, since an error does not survive a storage round trip. Nothing new is
+stored, so no backend or migration changes: `error` / `errorTag` stay as they
+were. To turn a stored failure back into a typed error, call
+`rehydrateFailure({ workflowId, failure, errors })`: a tag in `errors` (your
+own typed errors) or a built-in engine error whose fields a failure holds
+(`WorkflowCancelledError`, `WorkflowError`, `WorkflowTimeoutError`,
+`StepError`, `ChildWorkflowGoneError`) gives that error, any other tag a
+`WorkflowFailedError`. It is opt-in: `handle.result()` still rejects with
+`WorkflowFailedError`.
+
 ### Run lifecycle
 
 - **Terminal gate.** A run that already ended is not executed again.
@@ -548,6 +574,18 @@ of activity functions), `ctx.patched(name)` (see [Versioning](../../../versionin
 
 Semantics:
 
+- **`ctx.metadata` write errors.** `set` / `merge` update the in-process
+  snapshot at once and write to storage in the background; the step waits
+  for its writes before its outcome is checkpointed. A write that fails with
+  `FenceTokenMismatchError` (the run's lock was lost) fails the step with it,
+  like a journal write under a lost lock: the stale holder stops and the new
+  holder re-drives the step. Any other storage error does not fail the step,
+  because metadata is a dashboard surface and replay re-fires the writes: it
+  is reported to the `onMetadataWriteError({ workflowId, stepName, error,
+keys })` hook (default `console.warn` with the error). The snapshot keeps
+  the value, so later steps of that execution see it though storage does not.
+  A step run by a queue worker has no hook and uses the `console.warn`
+  default.
 - **Ambiguous outcomes.** An activity journals a pending row, runs, then
   completes the row. If the process dies in between, the engine cannot know
   whether the side effect happened: by default the step fails with

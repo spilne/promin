@@ -459,6 +459,15 @@ export interface StepRuntime {
    * from it instead of re-reading the run; without it, it loads the run.
    */
   readonly workflowMetadata?: WorkflowMetadataRef;
+  /**
+   * Report a `ctx.metadata` write of this step that failed for a reason
+   * other than a lost fence (that fails the step). The runner fires its
+   * `onMetadataWriteError` hook here. Default: `console.warn`.
+   */
+  readonly onMetadataWriteError?: (params: {
+    readonly error: unknown;
+    readonly keys: readonly string[];
+  }) => void;
 }
 
 /**

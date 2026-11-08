@@ -17,6 +17,7 @@ import {
   type WorkflowStatusSnapshot,
 } from "../workflow-state.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
+import { findFailedStep, workflowFailure } from "../workflow-failure.ts";
 
 /**
  * The step whose row carries `metadata.tripwireFired = true` — the
@@ -36,19 +37,7 @@ export function cancelledError(workflowId: string): WorkflowCancelledError {
   });
 }
 
-/**
- * The step whose row is `failed` — the one that failed the run. With
- * several, the latest to finish.
- */
-export function findFailedStep(steps: Record<string, StepState>): StepState | undefined {
-  let latest: StepState | undefined;
-  for (const step of Object.values(steps)) {
-    if (step.status !== "failed") continue;
-    const at = step.completedAt?.getTime() ?? 0;
-    if (latest === undefined || at > (latest.completedAt?.getTime() ?? 0)) latest = step;
-  }
-  return latest;
-}
+export { findFailedStep };
 
 /**
  * The error a stored `failed` / `tripwire` run is reported with: a cancel
@@ -80,12 +69,13 @@ export function storedRunError(state: WorkflowState): Error | undefined {
  */
 export function runFailure(state: WorkflowState): WorkflowFailedError {
   const { workflowId } = state;
-  const failedStep = findFailedStep(state.steps);
-  const errorTag = state.errorTag ?? failedStep?.errorTag;
+  const failure = workflowFailure(state);
+  const errorTag = state.errorTag ?? findFailedStep(state.steps)?.errorTag;
   return new WorkflowFailedError({
     workflowId,
-    ...(failedStep !== undefined && { stepName: failedStep.stepName }),
-    message: state.error ?? `Workflow ${workflowId} failed`,
+    message: failure?.message ?? state.error ?? `Workflow ${workflowId} failed`,
+    ...(failure?.stepName !== undefined && { stepName: failure.stepName }),
+    ...(failure?.attempt !== undefined && { attempt: failure.attempt }),
     ...(errorTag !== undefined && { errorTag }),
   });
 }

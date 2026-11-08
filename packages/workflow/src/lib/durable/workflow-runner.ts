@@ -30,7 +30,8 @@ import type {
   WorkflowStatusInfo,
 } from "./durable-pipeline.ts";
 import { hasCapability, type WorkflowStorage } from "./workflow-storage.ts";
-import type { WorkflowRunEvent } from "./workflow-state.ts";
+import type { WorkflowFailure, WorkflowRunEvent } from "./workflow-state.ts";
+import { failureOf } from "./workflow-failure.ts";
 import {
   StepError,
   WorkflowError,
@@ -46,7 +47,7 @@ import type { StepExecutor } from "./runner/step-executor.ts";
 import { recoverWorkflows, type RecoveryResult, type RecoveryStrategy } from "./runner/recovery.ts";
 import { resolveRunDefinition } from "./runner/definition-resolver.ts";
 import { orchestrationContextFor, type RunLockOptions } from "./runner/orchestration-context.ts";
-import { runWorkflowOrchestration } from "./runner/orchestrate.ts";
+import { decodeWorkflowResult, runWorkflowOrchestration } from "./runner/orchestrate.ts";
 import {
   createWorkflowHandle,
   pollWorkflowEvents,
@@ -114,10 +115,15 @@ export type WorkflowRunSafeError =
  */
 export type WorkflowRunError<E extends TaggedError = never> = E | WorkflowRunSafeError;
 
-/** `runSafe`'s result for a workflow with output `Output` and typed errors `E`. */
+/**
+ * `runSafe`'s result for a workflow with output `Output` and typed errors `E`.
+ * On failure, `failure` is the structured `WorkflowFailure` of `error` (tag,
+ * message, failed step and attempt, `cause`), the same shape status, the DLQ
+ * and the hooks report.
+ */
 export type WorkflowRunSafeResult<Output, E extends TaggedError = never> =
-  | { data: Output; error: null }
-  | { data: null; error: WorkflowRunError<E> };
+  | { data: Output; error: null; failure?: undefined }
+  | { data: null; error: WorkflowRunError<E>; failure: WorkflowFailure };
 
 /** `WorkflowRunnerRunParams` for a given definition (the `{ workflow }` shape). */
 export type WorkflowRunParamsFor<W> = Omit<
@@ -346,7 +352,10 @@ export interface WorkflowRunner {
   ): Promise<WorkflowRunSafeResult<Output, E>>;
   runSafe(
     params: WorkflowRunnerRunParams,
-  ): Promise<{ data: unknown; error: null } | { data: null; error: WorkflowRunSafeError }>;
+  ): Promise<
+    | { data: unknown; error: null }
+    | { data: null; error: WorkflowRunSafeError; failure: WorkflowFailure }
+  >;
   /**
    * Start a run and return a `WorkflowHandle` for async inspection. Takes
    * everything `run` takes (namespace, idempotency key, `force`, a
@@ -373,8 +382,15 @@ export interface WorkflowRunner {
    * The returned handle is functionally identical to the one returned by
    * `start()`: same `status` / `signal` / `result` / `cancel` / `events`
    * surface, same polling/subscribe semantics under the hood.
+   *
+   * `result()` decodes the stored result through the codec of the last step
+   * of `options.workflow`; without it, through `LosslessJsonCodec` (the
+   * default workflow codec).
    */
-  handle<Output = unknown>(workflowId: string): WorkflowHandle<Output>;
+  handle<Output = unknown>(
+    workflowId: string,
+    options?: { readonly workflow?: Workflow<any, Output, any> },
+  ): WorkflowHandle<Output>;
   /**
    * Rewind a workflow to `fromStep` and continue executing. Resets that
    * step + everything downstream of it (transitively in the DAG) back to
@@ -478,13 +494,20 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   ): Promise<Output>;
   run(params: WorkflowRunnerRunParams): Promise<unknown>;
   run(params: WorkflowRunnerRunParams): Promise<unknown> {
-    return this._run(params);
+    return this._run({ run: params });
   }
 
   /** `run`, reporting to `gate` (set by `start`). */
-  private async _run(params: WorkflowRunnerRunParams, gate?: StartGate): Promise<unknown> {
+  private async _run(params: {
+    run: WorkflowRunnerRunParams;
+    gate?: StartGate;
+    /** Receives the failure of this run, for `runSafe`. */
+    failureSink?: { failure?: WorkflowFailure };
+  }): Promise<unknown> {
+    const { gate, failureSink } = params;
+    const runParams = params.run;
     const storage = this.storage;
-    const { input, force, namespace, idempotencyKey, idempotencyKeyTTL } = params;
+    const { input, force, namespace, idempotencyKey, idempotencyKeyTTL } = runParams;
 
     // Per-call idempotency key: resolve to an existing workflowId before
     // dispatching. The supplied workflowId is the create-fallback when the
@@ -492,12 +515,12 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     // flow into createWorkflow so a fresh create attaches the key
     // atomically — the partial-unique index resolves any concurrent-create
     // race by returning the canonical row in the conflict path.
-    const workflowName = "workflow" in params ? params.workflow.name : params.name;
+    const workflowName = "workflow" in runParams ? runParams.workflow.name : runParams.name;
     const idempotencyExpiresAt =
       idempotencyKey && idempotencyKeyTTL !== undefined
         ? new Date(this.clock.currentTimeMs() + idempotencyKeyTTL)
         : undefined;
-    let workflowId = params.workflowId;
+    let workflowId = runParams.workflowId;
     if (idempotencyKey) {
       if (idempotencyKeyTTL === undefined) {
         throw new Error(
@@ -517,13 +540,13 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     // Name-based runs resolve through the registry, including
     // version-drain-resume onto the definition the run was created with.
     const workflow =
-      "workflow" in params
-        ? params.workflow
+      "workflow" in runParams
+        ? runParams.workflow
         : await resolveRunDefinition({
             registry: this.registry,
             storage,
-            name: params.name,
-            version: params.version,
+            name: runParams.name,
+            version: runParams.version,
             workflowId,
           });
     gate?.onResolved({ workflowId, workflow });
@@ -536,8 +559,9 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       force,
       ...(gate !== undefined && { onLocked: gate.onLocked }),
       ...(namespace !== undefined && { namespace }),
-      ...(params.signal !== undefined && { signal: params.signal }),
-      ...(params.useStoredInput === true && { useStoredInput: true }),
+      ...(runParams.signal !== undefined && { signal: runParams.signal }),
+      ...(runParams.useStoredInput === true && { useStoredInput: true }),
+      ...(failureSink !== undefined && { failureSink }),
       ...(idempotencyKey && idempotencyExpiresAt ? { idempotencyKey, idempotencyExpiresAt } : {}),
     });
   }
@@ -547,15 +571,28 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   ): Promise<WorkflowRunSafeResult<Output, E>>;
   runSafe(
     params: WorkflowRunnerRunParams,
-  ): Promise<{ data: unknown; error: null } | { data: null; error: WorkflowRunSafeError }>;
+  ): Promise<
+    | { data: unknown; error: null }
+    | { data: null; error: WorkflowRunSafeError; failure: WorkflowFailure }
+  >;
   async runSafe(
     params: WorkflowRunnerRunParams,
-  ): Promise<{ data: unknown; error: null } | { data: null; error: WorkflowRunSafeError }> {
+  ): Promise<
+    | { data: unknown; error: null }
+    | { data: null; error: WorkflowRunSafeError; failure: WorkflowFailure }
+  > {
+    // The failure is recorded per run, not looked up from the thrown error,
+    // which concurrent runs may share.
+    const failureSink: { failure?: WorkflowFailure } = {};
     try {
-      const data = await this.run(params);
+      const data = await this._run({ run: params, failureSink });
       return { data, error: null };
     } catch (error) {
-      return { data: null, error: error as WorkflowRunSafeError };
+      return {
+        data: null,
+        error: error as WorkflowRunSafeError,
+        failure: failureSink.failure ?? failureOf(error),
+      };
     }
   }
 
@@ -566,17 +603,23 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     let onInFlight: "reject" | "join" =
       "workflow" in params ? (params.workflow.idempotency?.onInFlight ?? "reject") : "reject";
     let locked!: () => void;
+    let startedWorkflow =
+      "workflow" in params ? (params.workflow as Workflow<any, Output, any>) : undefined;
     const lockTaken = new Promise<void>((resolve) => (locked = resolve));
 
     // The run itself goes on in the background once it holds the lock; its
     // outcome is recorded in storage (and the DLQ / hooks), so the handle
     // reports it.
-    const running = this._run(params as WorkflowRunnerRunParams, {
-      onResolved: (run) => {
-        workflowId = run.workflowId;
-        onInFlight = run.workflow.idempotency?.onInFlight ?? "reject";
+    const running = this._run({
+      run: params as WorkflowRunnerRunParams,
+      gate: {
+        onResolved: (run) => {
+          workflowId = run.workflowId;
+          onInFlight = run.workflow.idempotency?.onInFlight ?? "reject";
+          startedWorkflow = run.workflow as Workflow<any, Output, any>;
+        },
+        onLocked: () => locked(),
       },
-      onLocked: () => locked(),
     });
     const first = await Promise.race([
       lockTaken.then(() => ({ error: undefined })),
@@ -588,7 +631,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     void running.catch(() => undefined);
 
     if (first.error instanceof WorkflowLockError && onInFlight === "reject") throw first.error;
-    return this.handle<Output>(workflowId);
+    return this.handle<Output>(workflowId, { workflow: startedWorkflow });
   }
 
   async resume<Input = unknown, Output = unknown>(params: {
@@ -672,11 +715,16 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     })) as Output;
   }
 
-  handle<Output = unknown>(workflowId: string): WorkflowHandle<Output> {
+  handle<Output = unknown>(
+    workflowId: string,
+    options?: { readonly workflow?: Workflow<any, Output, any> },
+  ): WorkflowHandle<Output> {
     return createWorkflowHandle<Output>({
       workflowId,
       storage: this.storage,
       clock: this.clock,
+      decodeResult: (stored) =>
+        decodeWorkflowResult({ steps: options?.workflow?._definition.steps, stored }),
       getStatus: (p) => this.getStatus({ ...p, workflowId }),
       subscribe: (opts) => this.subscribe({ ...opts, workflowId }),
     });
@@ -725,6 +773,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     onLocked?: () => void;
     signal?: AbortSignal;
     useStoredInput?: boolean;
+    failureSink?: { failure?: WorkflowFailure };
   }): Promise<unknown> {
     const ctx = orchestrationContextFor({
       workflow: params.workflow,
@@ -748,6 +797,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       ...(params.onLocked !== undefined && { onLocked: params.onLocked, rejectInFlight: true }),
       ...(params.signal !== undefined && { signal: params.signal }),
       ...(params.useStoredInput === true && { useStoredInput: true }),
+      ...(params.failureSink !== undefined && { failureSink: params.failureSink }),
       ...(params.idempotencyKey && params.idempotencyExpiresAt
         ? {
             idempotencyKey: params.idempotencyKey,

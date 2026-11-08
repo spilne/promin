@@ -65,7 +65,20 @@ export function makeCtx<Input, Prev>(params: {
   clock?: WallClock;
   /** Fence guard of the run's lock, passed on every journal, suspend and metadata write. */
   guard?: FenceGuard;
-}): { ctx: JournaledContext<Input, Prev>; compensations: CompensationStack } {
+  /**
+   * Called when a `ctx.metadata` write fails with an error other than a lost
+   * fence (which fails the step instead). Default: `console.warn`.
+   */
+  onMetadataWriteError?: (params: { error: unknown; keys: readonly string[] }) => void;
+}): {
+  ctx: JournaledContext<Input, Prev>;
+  compensations: CompensationStack;
+  /**
+   * Wait for the `ctx.metadata` writes in flight; rejects with the
+   * `FenceTokenMismatchError` of a write the lock holder lost the fence for.
+   */
+  settleMetadata: () => Promise<void>;
+} {
   const { input, prev, workflowId, stepName, workflowStorage, guard, initialMetadata } = params;
   const cursor = new JournalCursor({
     workflowId,
@@ -94,10 +107,25 @@ export function makeCtx<Input, Prev>(params: {
 
   // ctx.metadata — an in-process snapshot layered with storage writes.
   // Reads return a copy so callers can't mutate the canonical object. Writes
-  // update the snapshot synchronously and dispatch an async storage merge —
-  // fire-and-forget, errors logged. Replay re-fires the same writes (same
-  // values), idempotent against the storage's merge semantics.
+  // update the snapshot synchronously and dispatch an async storage merge,
+  // so the call itself never throws. A failed write is never silent:
+  //   - a `FenceTokenMismatchError` (the run's lock was lost) fails the step
+  //     when the step settles its writes (`settleMetadata`), like a journal
+  //     write under a lost lock: the stale holder must stop, and the new
+  //     holder re-drives the step;
+  //   - any other error is reported through `onMetadataWriteError` (the
+  //     runner's `onMetadataWriteError` hook) and does not fail the step:
+  //     metadata is a dashboard surface, not durable state the run depends
+  //     on, and replay re-fires the same writes. The in-process snapshot
+  //     (and the runner's copy) keep the value, so later steps of this
+  //     execution still see it even though storage does not.
   const metadataState: Record<string, unknown> = { ...initialMetadata };
+  const pendingWrites = new Set<Promise<void>>();
+  let lostFence: unknown;
+  const reportWriteError =
+    params.onMetadataWriteError ??
+    (({ error }: { error: unknown; keys: readonly string[] }) =>
+      console.warn(`[ctx.metadata] failed to persist for workflow ${workflowId}:`, error));
   const writeMetadataPatch = (patch: Record<string, unknown>): void => {
     const ref = params.metadataRef;
     if (ref) {
@@ -109,12 +137,30 @@ export function makeCtx<Input, Prev>(params: {
       ref.current = merged;
     }
     if (!workflowStorage) return; // tests that drive runJournaledStep without WorkflowStorage skip persistence
-    workflowStorage.setWorkflowMetadata({ workflowId, patch, guard }).catch((err) => {
-      console.warn(
-        `[ctx.metadata] failed to persist for workflow ${workflowId}:`,
-        err instanceof Error ? err.message : String(err),
-      );
-    });
+    const write: Promise<void> = workflowStorage
+      .setWorkflowMetadata({ workflowId, patch, guard })
+      .then(
+        () => undefined,
+        (error: unknown) => {
+          if (
+            (error as { _tag?: unknown } | null | undefined)?._tag === "FenceTokenMismatchError"
+          ) {
+            lostFence ??= error;
+            return;
+          }
+          try {
+            reportWriteError({ error, keys: Object.keys(patch) });
+          } catch {
+            // a failing reporter has nowhere left to report to
+          }
+        },
+      )
+      .finally(() => pendingWrites.delete(write));
+    pendingWrites.add(write);
+  };
+  const settleMetadata = async (): Promise<void> => {
+    while (pendingWrites.size > 0) await Promise.all([...pendingWrites]);
+    if (lostFence !== undefined) throw lostFence;
   };
   const metadata = {
     set(key: string, value: unknown): void {
@@ -179,5 +225,5 @@ export function makeCtx<Input, Prev>(params: {
       });
     },
   };
-  return { ctx, compensations };
+  return { ctx, compensations, settleMetadata };
 }
