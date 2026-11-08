@@ -104,7 +104,16 @@ export function getThreadTrace(deps: AgentGatewayDeps) {
     if (opened instanceof Response) return opened;
     const messages = await opened.thread.messages({ limit: TRACE_MESSAGE_LIMIT, order: "desc" });
     const trace = buildAgentTrace([...messages].reverse());
-    return json(200, { threadId: opened.thread.id, trace });
+    const metadata = await opened.thread.metadata();
+    return json(200, {
+      threadId: opened.thread.id,
+      trace,
+      lineage: {
+        parentThreadId: metadata.branchParentThreadId ?? null,
+        branchAtSeq: metadata.branchAtSeq ?? null,
+        branchDepth: metadata.branchDepth ?? 0,
+      },
+    });
   };
 }
 

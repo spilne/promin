@@ -19,6 +19,7 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 import {
   api,
+  ApiError,
   type AgentTraceDto,
   type TraceChildDto,
   type TraceToolCallDto,
@@ -61,6 +62,50 @@ export function AgentTraceModal({ agentId, threadId, namespaceId, resourceId, on
   const [view, setView] = useState<"tree" | "graph">("tree");
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
   const [toolQuery, setToolQuery] = useState("");
+  const [feedback, setFeedback] = useState<Record<string, string>>({});
+  // False once the server answers 404: eval datasets are not configured there.
+  const [feedbackAvailable, setFeedbackAvailable] = useState(true);
+  const [feedbackTrend, setFeedbackTrend] = useState<{
+    trend: Array<{ day: string; positive: number; negative: number }>;
+    alert: { kind: string } | null;
+  } | null>(null);
+  useEffect(() => {
+    api
+      .getThreadFeedback(agentId, threadId, { namespaceId, ...(resourceId && { resourceId }) })
+      .then((result) =>
+        setFeedback(
+          Object.fromEntries(
+            result.feedback.map((item) => [
+              String(item.metadata?.workflowId),
+              String(item.metadata?.rating),
+            ]),
+          ),
+        ),
+      )
+      .catch((err) => {
+        if (err instanceof ApiError && err.status === 404) setFeedbackAvailable(false);
+      });
+    api
+      .getAgentFeedbackTrend(agentId, { namespaceId, ...(resourceId && { resourceId }) })
+      .then(setFeedbackTrend)
+      .catch(() => {
+        /* The trend is optional. */
+      });
+  }, [agentId, threadId, namespaceId, resourceId]);
+  const rateTurn = async (
+    workflowId: string,
+    rating: "positive" | "negative",
+    expected?: string,
+  ) => {
+    await api.postThreadFeedback(agentId, threadId, {
+      namespaceId,
+      ...(resourceId && { resourceId }),
+      workflowId,
+      rating,
+      ...(expected && { expected }),
+    });
+    setFeedback((current) => ({ ...current, [workflowId]: rating }));
+  };
   const graphModel = useMemo(() => (trace ? buildTraceGraph(trace) : { nodes: [] }), [trace]);
   const selectedNode = useMemo(
     () => graphModel.nodes.find((n) => n.id === selectedNodeId),
@@ -108,6 +153,15 @@ export function AgentTraceModal({ agentId, threadId, namespaceId, resourceId, on
                     {" "}
                     · ⚠ {summary.orphanedToolCalls + summary.orphanedToolResults} orphan
                   </span>
+                )}
+              </div>
+            )}
+            {feedbackTrend && feedbackTrend.trend.length > 0 && (
+              <div class="text-[10px] text-base-content/60 mt-1">
+                Latest feedback ({feedbackTrend.trend[0]!.day}): {feedbackTrend.trend[0]!.positive}{" "}
+                helpful · {feedbackTrend.trend[0]!.negative} needs work
+                {feedbackTrend.alert && (
+                  <span class="text-error ml-2">Negative ratings rising</span>
                 )}
               </div>
             )}
@@ -213,6 +267,8 @@ export function AgentTraceModal({ agentId, threadId, namespaceId, resourceId, on
                 turn={turn}
                 hideToolCalls={filterToolCalls}
                 failuresOnly={filterFailuresOnly}
+                rating={turn.timing ? feedback[turn.timing.workflowId] : undefined}
+                onRate={feedbackAvailable ? rateTurn : undefined}
               />
             ))}
           </div>
@@ -226,14 +282,40 @@ function TurnView({
   turn,
   hideToolCalls,
   failuresOnly,
+  rating,
+  onRate,
 }: {
   turn: AgentTraceDto["turns"][number];
   hideToolCalls: boolean;
   failuresOnly: boolean;
+  rating?: string;
+  /** Absent when the server has no feedback API: the rating controls are hidden. */
+  onRate?: (
+    workflowId: string,
+    rating: "positive" | "negative",
+    expected?: string,
+  ) => Promise<void>;
 }) {
   // When "failures only" is on, hide the whole turn unless it contains
   // at least one failed tool call.
   const hasFailure = useMemo(() => containsFailure(turn.children), [turn.children]);
+  const [expected, setExpected] = useState("");
+  const [showExpected, setShowExpected] = useState(false);
+  const [feedbackError, setFeedbackError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const submit = async (kind: "positive" | "negative", sample?: string) => {
+    if (!turn.timing || !onRate) return;
+    setSaving(true);
+    setFeedbackError("");
+    try {
+      await onRate(turn.timing.workflowId, kind, sample);
+      setShowExpected(false);
+    } catch (err) {
+      setFeedbackError(err instanceof Error ? err.message : "Could not save feedback");
+    } finally {
+      setSaving(false);
+    }
+  };
   if (failuresOnly && !hasFailure) return null;
 
   return (
@@ -245,6 +327,45 @@ function TurnView({
         </span>
       </div>
       {turn.timing && <TurnTimingView timing={turn.timing} />}
+      {turn.timing && onRate && (
+        <div class="px-3 py-2 border-b border-base-300 text-xs font-sans">
+          <div class="flex items-center gap-2">
+            <span class="text-base-content/60">Rate this turn</span>
+            <button
+              class={`btn btn-xs ${rating === "positive" ? "btn-success" : "btn-ghost"}`}
+              disabled={saving || rating === "positive"}
+              onClick={() => submit("positive")}
+            >
+              Helpful
+            </button>
+            <button
+              class={`btn btn-xs ${rating === "negative" ? "btn-error" : "btn-ghost"}`}
+              disabled={saving}
+              onClick={() => setShowExpected(true)}
+            >
+              Needs work
+            </button>
+          </div>
+          {showExpected && (
+            <div class="mt-2 space-y-1">
+              <textarea
+                class="textarea textarea-bordered w-full text-xs"
+                value={expected}
+                onInput={(e) => setExpected((e.target as HTMLTextAreaElement).value)}
+                placeholder="Expected answer (optional; include to add a regression case)"
+              />
+              <button
+                class="btn btn-xs btn-primary"
+                disabled={saving}
+                onClick={() => submit("negative", expected.trim() || undefined)}
+              >
+                Save feedback
+              </button>
+            </div>
+          )}
+          {feedbackError && <div class="text-error mt-1">{feedbackError}</div>}
+        </div>
+      )}
       <div class="p-3 space-y-2">
         {turn.children.map((c) => (
           <ChildView child={c} hideToolCalls={hideToolCalls} failuresOnly={failuresOnly} />

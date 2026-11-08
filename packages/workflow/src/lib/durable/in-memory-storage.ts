@@ -720,6 +720,8 @@ export class InMemoryWorkflowStorage
       if (deleted >= params.limit) break;
       if (!isTerminalWorkflowStatus(wf.status)) continue;
       if (!wf.completedAt) continue;
+      // A namespaced storage purges its own namespace only, like its lists and scans.
+      if (this.namespace !== null && wf.namespace !== this.namespace) continue;
       const t = wf.completedAt.getTime();
       if (t < fromMs || t >= toMs) continue;
 

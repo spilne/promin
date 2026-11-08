@@ -8,12 +8,14 @@
 import { describe, expect, it } from "bun:test";
 import {
   InMemoryAgentRegistry,
+  InMemoryMemoryStore,
   InMemoryRoleRegistry,
   resolveLocalAgent,
   type Message,
 } from "@promin/agent";
 import {
   InMemoryEvalRunStore,
+  InMemoryEvalDatasetStore,
   InMemoryEvalSuiteRegistry,
   type RunDiff,
   type StoredEvalRun,
@@ -23,6 +25,7 @@ import { LocalWorkflows, ZoryaAgents, ZoryaEvals } from "../../../index.ts";
 import { ZoryaServer } from "../../server.ts";
 import type { ScopeAuthorizer } from "../agent-gateway-kit.ts";
 import type { EvalGateFailedResponse } from "../evals.ts";
+import { feedbackDatasetId, regressionDatasetId } from "../../services/evals/feedback-datasets.ts";
 
 const SUITE = {
   id: "upper",
@@ -64,14 +67,18 @@ async function boot(opts: { authorizeScope?: ScopeAuthorizer } = {}) {
     signalScanIntervalMs: 0,
   });
   const registry = new InMemoryAgentRegistry();
+  const memory = new InMemoryMemoryStore();
+  const datasets = new InMemoryEvalDatasetStore();
   await registry.register({ id: "bot", backend: backend("v1: shout") }); // active v1
   await registry.register({ id: "bot", backend: backend("v2: whisper") }); // draft v2
   const agents = new ZoryaAgents({
     registry,
+    memory,
     roles: new InMemoryRoleRegistry(),
     resolve: (recipe) =>
       resolveLocalAgent(recipe, {
         runner,
+        memory,
         tools: {},
         // v1 answers right, v2 wrong: the suite tells the versions apart.
         llm: () => ({
@@ -89,6 +96,7 @@ async function boot(opts: { authorizeScope?: ScopeAuthorizer } = {}) {
   const evals = new ZoryaEvals({
     suites: new InMemoryEvalSuiteRegistry(),
     runs: new InMemoryEvalRunStore(),
+    datasets,
     workflows,
     agents,
   });
@@ -106,10 +114,203 @@ async function boot(opts: { authorizeScope?: ScopeAuthorizer } = {}) {
         ...(params.body !== undefined && { body: JSON.stringify(params.body) }),
       }),
     );
-  return { server, send, evals, registry, agents };
+  return { server, send, evals, registry, agents, datasets };
 }
 
 type Harness = Awaited<ReturnType<typeof boot>>;
+
+const FEEDBACK_SCOPE = { namespaceId: "acme", resourceId: "alice" };
+const FEEDBACK_PATH = "/api/agents/bot/threads/t1/feedback";
+
+/** A thread with one answered turn per task; resolves to each turn's workflow id. */
+async function chat(h: Harness, tasks: string[]): Promise<string[]> {
+  for (const task of tasks) {
+    const sent = await h.send({
+      method: "POST",
+      path: "/api/agents/bot/threads/t1",
+      body: { ...FEEDBACK_SCOPE, task },
+    });
+    expect(sent.status).toBe(200);
+  }
+  const trace = (await (
+    await h.send({
+      method: "GET",
+      path: "/api/agents/bot/threads/t1/trace?namespaceId=acme&resourceId=alice",
+    })
+  ).json()) as { trace: { turns: Array<{ timing?: { workflowId: string } }> } };
+  return trace.trace.turns.map((turn) => turn.timing!.workflowId);
+}
+
+function rate(
+  h: Harness,
+  body: { workflowId: string; rating: string; expected?: string; resourceId?: string },
+) {
+  return h.send({ method: "POST", path: FEEDBACK_PATH, body: { ...FEEDBACK_SCOPE, ...body } });
+}
+
+async function waitForRun(h: Harness, runId: string): Promise<StoredEvalRun> {
+  for (let i = 0; i < 1_000; i++) {
+    const run = (await (
+      await h.send({ method: "GET", path: `/api/evals/runs/${runId}` })
+    ).json()) as StoredEvalRun;
+    if (run.status !== "running") return run;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("run never ended");
+}
+
+describe("agent feedback to regression eval", () => {
+  it("samples a rated failure once, then compares a candidate against the active version", async () => {
+    const h = await boot();
+    const [workflowId] = await chat(h, ["hello"]);
+    const body = { workflowId: workflowId!, rating: "negative", expected: "HELLO" };
+    const rated = await rate(h, body);
+    expect(rated.status).toBe(201);
+    expect((await rate(h, body)).status).toBe(201);
+    const ids = (await rated.json()) as { datasetId: string; regressionDatasetId: string };
+    expect(await h.datasets.get(ids.regressionDatasetId)).toHaveLength(1);
+    expect(await h.datasets.get(ids.datasetId)).toHaveLength(1);
+    expect((await rate(h, { ...body, resourceId: "bob" })).status).toBe(404);
+
+    const suite = await h.send({
+      method: "POST",
+      path: "/api/evals/suites",
+      body: {
+        id: "feedback-regression",
+        dataset: { kind: "stored", datasetId: ids.regressionDatasetId },
+        scorers: [{ kind: "exactMatch" }],
+        metadata: { agentIds: ["bot"] },
+      },
+    });
+    expect(suite.status).toBe(201);
+    const run = async (agentVersion: string) => {
+      const started = await h.send({
+        method: "POST",
+        path: "/api/evals/runs",
+        body: {
+          suiteId: "feedback-regression",
+          agentId: "bot",
+          agentVersion,
+          namespaceId: "acme",
+        },
+      });
+      expect(started.status).toBe(202);
+      return waitForRun(h, ((await started.json()) as { runId: string }).runId);
+    };
+    const active = await run("v1");
+    const candidate = await run("v2");
+    expect(active.totals?.passRate).toBe(1);
+    expect(candidate.targetVersion).toBe("v2");
+    expect(candidate.totals?.passRate).toBe(0);
+    const diff = (await (
+      await h.send({
+        method: "GET",
+        path: `/api/evals/compare?baseline=${active.runId}&candidate=${candidate.runId}`,
+      })
+    ).json()) as RunDiff;
+    expect(diff.regressions).toEqual([`t1:${workflowId}`]);
+  });
+
+  it("keeps both datasets in step with the latest rating of a turn", async () => {
+    const h = await boot();
+    const [workflowId] = await chat(h, ["hello"]);
+    const turn = { workflowId: workflowId! };
+    const first = await rate(h, { ...turn, rating: "positive" });
+    expect(first.status).toBe(201);
+    const ids = (await first.json()) as { datasetId: string; regressionDatasetId: string };
+    expect(await h.datasets.get(ids.regressionDatasetId)).toBeNull();
+
+    // Positive, then negative with an expected answer: one case per dataset, both negative.
+    expect((await rate(h, { ...turn, rating: "negative", expected: "HELLO" })).status).toBe(201);
+    const rated = await h.datasets.get(ids.datasetId);
+    expect(rated).toHaveLength(1);
+    expect(rated?.[0]?.metadata?.rating).toBe("negative");
+    expect(rated?.[0]?.expected).toBe("HELLO");
+    expect(await h.datasets.get(ids.regressionDatasetId)).toHaveLength(1);
+
+    // A later answer replaces the expected one rather than adding a second case.
+    expect((await rate(h, { ...turn, rating: "negative", expected: "Hello!" })).status).toBe(201);
+    expect((await h.datasets.get(ids.regressionDatasetId))?.map((c) => c.expected)).toEqual([
+      "Hello!",
+    ]);
+
+    // No longer negative with an expected answer: the regression case goes away.
+    expect((await rate(h, { ...turn, rating: "positive" })).status).toBe(201);
+    expect(await h.datasets.get(ids.regressionDatasetId)).toEqual([]);
+    const final = await h.datasets.get(ids.datasetId);
+    expect(final).toHaveLength(1);
+    expect(final?.[0]?.metadata?.rating).toBe("positive");
+  });
+
+  it("stores the conversation before the rated turn so the case can be replayed", async () => {
+    const h = await boot();
+    const [, second] = await chat(h, ["hello", "again"]);
+    const rated = await rate(h, { workflowId: second!, rating: "negative", expected: "AGAIN" });
+    const ids = (await rated.json()) as { regressionDatasetId: string };
+    const [stored] = (await h.datasets.get(ids.regressionDatasetId)) ?? [];
+    expect(stored?.input).toBe("again");
+    expect(stored?.tags).toContain("depends-on-history");
+    expect(stored?.metadata?.messages).toEqual([
+      { role: "user", content: "hello" },
+      { role: "assistant", content: "HELLO" },
+    ]);
+  });
+
+  it("deletes a turn's rating and regression case", async () => {
+    const h = await boot();
+    const [workflowId] = await chat(h, ["hello"]);
+    const rated = await rate(h, { workflowId: workflowId!, rating: "negative", expected: "HELLO" });
+    const ids = (await rated.json()) as { datasetId: string; regressionDatasetId: string };
+    const remove = () =>
+      h.send({
+        method: "DELETE",
+        path: `${FEEDBACK_PATH}?namespaceId=acme&resourceId=alice&workflowId=${workflowId}`,
+      });
+    expect(((await (await remove()).json()) as { deleted: boolean }).deleted).toBe(true);
+    expect(await h.datasets.get(ids.datasetId)).toEqual([]);
+    expect(await h.datasets.get(ids.regressionDatasetId)).toEqual([]);
+    expect(((await (await remove()).json()) as { deleted: boolean }).deleted).toBe(false);
+  });
+
+  it("needs operator access to write or delete feedback and refuses another tenant's dataset", async () => {
+    let operator = true;
+    const h = await boot({
+      authorizeScope: ({ scope }) => (scope.kind === "operator" ? operator : true),
+    });
+    const [workflowId] = await chat(h, ["hello"]);
+    operator = false;
+    expect((await rate(h, { workflowId: workflowId!, rating: "positive" })).status).toBe(403);
+    expect(
+      (
+        await h.send({
+          method: "DELETE",
+          path: `${FEEDBACK_PATH}?namespaceId=acme&resourceId=alice&workflowId=${workflowId}`,
+        })
+      ).status,
+    ).toBe(403);
+    expect(await h.datasets.get(feedbackDatasetId("acme", "bot", "alice"))).toBeNull();
+
+    operator = true;
+    const otherTenant = regressionDatasetId("globex", "bot", "carol");
+    await h.datasets.save({ datasetId: otherTenant, cases: [{ id: "x", input: "secret" }] });
+    await h.send({
+      method: "POST",
+      path: "/api/evals/suites",
+      body: {
+        id: "spy",
+        dataset: { kind: "stored", datasetId: otherTenant },
+        scorers: [{ kind: "exactMatch" }],
+      },
+    });
+    const started = await h.send({
+      method: "POST",
+      path: "/api/evals/runs",
+      body: { suiteId: "spy", agentId: "bot", namespaceId: "acme" },
+    });
+    expect(started.status).toBe(400);
+    expect(((await started.json()) as { error: string }).error).toBe("invalid_suite");
+  });
+});
 
 async function runToEnd(params: { h: Harness; agentVersion: string }): Promise<StoredEvalRun> {
   const res = await params.h.send({

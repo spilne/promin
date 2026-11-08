@@ -89,6 +89,9 @@ export {
 export { publishDlqRecord } from "./runner/dlq.ts";
 export { getIdempotencyTtl } from "./runner/idempotency.ts";
 
+/** Lease of the lock `resume` holds while it resets steps: one storage round trip or two. */
+const RESUME_RESET_LOCK_MS = 30_000;
+
 export type WorkflowRunSafeError =
   | Error
   | WorkflowError
@@ -621,19 +624,36 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       }
     }
 
-    // Outcomes a queue still holds for these steps belong to the runs being
-    // reset: drop them so the re-run dispatches the steps again.
-    await this.stepExecutor?.discardSettled?.({ workflowId, stepNames: [...downstream] });
-    await storage.resetSteps({ workflowId, stepNames: [...downstream] });
+    // Reset under the run lock: a driver already executing the run would
+    // otherwise have its steps reset under it. The lock is dropped before the
+    // re-run, which takes it again; a driver that slips in between runs the
+    // run from the reset state, and the re-run then joins its outcome.
+    const lock = await storage.tryLock({ workflowId, lockDurationMs: RESUME_RESET_LOCK_MS });
+    if (!lock.acquired) {
+      throw new WorkflowLockError({
+        workflowId,
+        message: `Cannot resume "${workflowId}" from "${fromStep}" — another driver holds the run.`,
+      });
+    }
+    const guard = lock.token !== undefined ? { fenceToken: lock.token } : undefined;
+    try {
+      // Outcomes a queue still holds for these steps belong to the runs being
+      // reset: drop them so the re-run dispatches the steps again.
+      await this.stepExecutor?.discardSettled?.({ workflowId, stepNames: [...downstream] });
+      await storage.resetSteps({ workflowId, stepNames: [...downstream] });
+    } finally {
+      await storage.releaseLock({ workflowId, guard }).catch(() => {});
+    }
 
-    // Re-run with `force: true` so idempotency caching doesn't
-    // short-circuit "already completed" — we just reverted the terminal
-    // status so it shouldn't trip, but `force` makes that explicit.
+    // Re-run without `force`: the reset left the run non-terminal, so it
+    // executes from the reset state. If another driver slipped in after the
+    // lock was dropped and finished the run, this call joins that outcome
+    // (the result, or the stored failure) instead of archiving it and
+    // executing the workflow a second time.
     return (await this.run({
       workflow,
       workflowId,
       input: state.input as Input,
-      force: true,
     })) as Output;
   }
 
