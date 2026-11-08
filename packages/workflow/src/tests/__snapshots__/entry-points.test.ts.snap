@@ -67,6 +67,7 @@ exports[`entry points — exported names match the snapshot 1`] = `
     "defineStream",
     "type DefineStreamOptions",
     "type DeliverSignalParams",
+    "deriveWaitingOn",
     "type DiscardJournalEntriesParams",
     "type DueSleep",
     "type EventData",
@@ -267,6 +268,7 @@ exports[`entry points — exported names match the snapshot 1`] = `
     "type StrictSchemas",
     "type SubscribeToWorkflowParams",
     "type SubworkflowOptions",
+    "summarizeWaits",
     "type SuspendWorkflowParams",
     "SystemWallClock",
     "type TaggedError",
@@ -365,6 +367,7 @@ exports[`entry points — exported names match the snapshot 1`] = `
     "WorkflowVersionMismatchError",
     "type WorkflowVersionRegistry",
     "type WorkflowVersionRegistryConfig",
+    "type WorkflowWait",
     "type WorkflowWakeup",
   ],
   "./dev": [

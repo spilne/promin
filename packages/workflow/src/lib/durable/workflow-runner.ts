@@ -747,7 +747,11 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   async getStatus(params: WorkflowGetStatusParams): Promise<WorkflowStatusInfo<unknown> | null> {
     const state = await this.storage.loadWorkflow(params.workflowId);
     if (!state) return null;
-    return toStatusInfo({ state, includeStepResults: params.includeStepResults ?? false });
+    return toStatusInfo({
+      state,
+      includeStepResults: params.includeStepResults ?? false,
+      now: this.clock.now(),
+    });
   }
 
   recover(strategy: RecoveryStrategy): Promise<RecoveryResult> {

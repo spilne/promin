@@ -29,6 +29,11 @@ export type {
   WorkflowHooks,
   CompensateConfig,
 } from "./lib/durable/workflow-types.ts";
+export {
+  deriveWaitingOn,
+  summarizeWaits,
+  type WorkflowWait,
+} from "./lib/durable/workflow-waits.ts";
 export { workflowClosure } from "./lib/durable/workflow-closure.ts";
 export {
   compareWorkflowVersions,

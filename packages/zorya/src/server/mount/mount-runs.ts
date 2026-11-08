@@ -93,6 +93,7 @@ export function mountRuns(params: MountRunsParams): void {
 
   const deps: RunRoutesDeps = {
     storage,
+    clock,
     trigger: (name, input, opts) => workflows.trigger(name, input, opts),
     ...(definitions !== undefined && { workflows: definitions }),
     ...(advertisements !== undefined && { advertisements }),
@@ -100,6 +101,7 @@ export function mountRuns(params: MountRunsParams): void {
   };
   const runActions = new RunsService({
     storage,
+    clock,
     ...(definitions !== undefined && { workflows: definitions }),
     ...(advertisements !== undefined && { advertisements }),
   });

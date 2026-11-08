@@ -2,6 +2,7 @@
 // Serialisers — WorkflowState / StepState → wire DTOs
 // ---------------------------------------------------------------------------
 
+import { deriveWaitingOn, summarizeWaits } from "@promin/workflow";
 import type { WorkflowState, WorkflowSummary, StepState, StepTaskState } from "@promin/workflow";
 import type {
   ExtendedStepStatus,
@@ -52,7 +53,8 @@ export function stepToDto(s: StepState): StepDto {
   };
 }
 
-export function runToDto(w: WorkflowState): RunDto {
+/** `now` is the reference time of `waitingOnSummary` (default: the current time). */
+export function runToDto(w: WorkflowState, now: Date = new Date()): RunDto {
   const steps = Object.values(w.steps).map(stepToDto);
   // Compute "upstream_failed" — a pending step whose dependency already
   // failed won't run, and surfacing it as just "pending" is misleading.
@@ -70,6 +72,8 @@ export function runToDto(w: WorkflowState): RunDto {
     });
     if (hasFailedDep) s.effectiveStatus = "upstream_failed";
   }
+  const waits = deriveWaitingOn(w);
+  const waitingOnSummary = summarizeWaits({ waits, now });
   return {
     workflowId: w.workflowId,
     workflowName: w.workflowName,
@@ -83,6 +87,16 @@ export function runToDto(w: WorkflowState): RunDto {
     error: w.error,
     metadata: w.metadata,
     steps,
+    waitingOn: waits.map((wait) => ({
+      kind: wait.kind,
+      stepName: wait.stepName,
+      since: wait.since.toISOString(),
+      until: iso(wait.until),
+      signalName: wait.signalName,
+      childWorkflowId: wait.childWorkflowId,
+      attempt: wait.attempt,
+    })),
+    ...(waitingOnSummary !== undefined && { waitingOnSummary }),
     parentWorkflowId: w.parentWorkflowId,
     runSource: w.runSource,
     runSourceId: w.runSourceId,

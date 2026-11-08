@@ -185,6 +185,19 @@ export interface StepDto {
   compensatedAt?: string;
 }
 
+/** A wait of a live run (see `WorkflowWait`), with ISO timestamps. */
+export interface RunWaitDto {
+  kind: "sleep" | "signal" | "approval" | "child";
+  stepName: string;
+  /** ISO timestamp. */
+  since: string;
+  /** ISO timestamp: sleep wake time, signal timeout, or the child's next wake. */
+  until?: string;
+  signalName?: string;
+  childWorkflowId?: string;
+  attempt?: number;
+}
+
 export interface RunDto {
   workflowId: string;
   workflowName: string;
@@ -198,6 +211,10 @@ export interface RunDto {
   error?: string;
   metadata?: Record<string, unknown>;
   steps: StepDto[];
+  /** What the run is parked on right now; empty when nothing, and for ended runs. */
+  waitingOn: RunWaitDto[];
+  /** One-line summary of `waitingOn`; absent when it is empty. */
+  waitingOnSummary?: string;
   /** Parent workflow id, when this run was spawned by another workflow. */
   parentWorkflowId?: string;
   /** What kicked this run off (`"schedule"`, `"manual"`, …). */

@@ -217,6 +217,11 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
         {run.namespace && <span class="badge badge-sm badge-ghost font-mono">{run.namespace}</span>}
         <div class="font-mono text-sm text-base-content/60">{run.workflowId}</div>
         <StatusBadge status={run.status} size="md" />
+        {run.waitingOnSummary && (
+          <span class="text-sm text-base-content/70" data-testid="waiting-on">
+            {run.waitingOnSummary}
+          </span>
+        )}
         {/* Source-back link: schedule-fired runs deep-link to their
             schedule's detail page; agent-fired runs (when supported)
             could deep-link to the agent in the same way. */}
@@ -398,7 +403,13 @@ function RunDetailSkeleton({ onBack }: { onBack: () => void }) {
 function applyEvent(prev: RunDto | undefined, ev: RunEvent): RunDto | undefined {
   if (ev.type === "snapshot") return prev ? mergeSnapshot(prev, ev.run) : ev.run;
   if (!prev) return prev;
-  if (ev.type === "status") return { ...prev, status: ev.status };
+  if (ev.type === "status") {
+    // A run that is no longer live waits on nothing; the next snapshot refreshes live waits.
+    const live = ev.status === "pending" || ev.status === "running" || ev.status === "suspended";
+    return live
+      ? { ...prev, status: ev.status }
+      : { ...prev, status: ev.status, waitingOn: [], waitingOnSummary: undefined };
+  }
   if (ev.type === "step") return { ...prev, steps: mergeStep(prev.steps, ev.stepName, ev.step) };
   return prev;
 }

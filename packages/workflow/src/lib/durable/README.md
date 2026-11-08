@@ -354,6 +354,20 @@ Every surface reports a failed run as the same `WorkflowFailure`
 | Stored `WorkflowState` (any backend) | `workflowFailure(state)`: derived from `error`, `errorTag`, failed step |
 | `handle.result()`                    | `WorkflowFailedError` with `errorTag`, `stepName`, `attempt`            |
 
+### What a run is waiting on
+
+`handle.status()` / `getStatus()` carry `waitingOn`: the live run's parked
+waits, derived from stored step rows (no extra read, no migration). Each is
+`{ kind, stepName, since, until?, signalName?, childWorkflowId?, attempt? }`
+with `kind` one of `sleep` (`until` = wake time), `signal` (`until` = timeout),
+`approval` (an `approve:<id>` signal wait) or `child` (`until` = the child's next
+wake). `waitingOnSummary` is a one-liner, e.g. `waiting for signal
+manager-approved (step approve, times out in 2h)`. Empty for a run with nothing
+parked and for ended runs. An activity in flight, a retry backoff and a step task
+queued for a worker are not stored on a step row, so they are not listed.
+Zorya's `GET /api/runs/:id` returns the same as `waitingOn` (ISO timestamps) and
+`waitingOnSummary`, and the run page shows the summary beside the status badge.
+
 `tag` is the failing error's `_tag` (`"WorkflowCancelledError"` for a cancel,
 `"UnknownError"` for an untagged defect). `cause` is the original error and
 exists only in-process (`runSafe`, hook, DLQ); a failure derived from storage

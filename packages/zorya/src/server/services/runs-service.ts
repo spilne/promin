@@ -7,7 +7,13 @@
 // / RPC layer.
 // ---------------------------------------------------------------------------
 
-import type { Workflow, WorkflowState, WorkflowStatus, WorkflowStorage } from "@promin/workflow";
+import type {
+  WallClock,
+  Workflow,
+  WorkflowState,
+  WorkflowStatus,
+  WorkflowStorage,
+} from "@promin/workflow";
 import {
   MARKED_FAILED_ERROR_TAG,
   hasCapability,
@@ -34,6 +40,8 @@ export interface RunsServiceDeps {
   workflows?: Readonly<Record<string, Workflow<unknown, unknown>>>;
   /** Worker-advertised step defs — used when `workflows` doesn't have the def. */
   advertisements?: WorkflowAdvertisementRegistry;
+  /** Time source for the run's `waitingOnSummary`. Default: the current time. */
+  clock?: WallClock;
 }
 
 /**
@@ -82,7 +90,7 @@ export class RunsService {
   async get(id: string): Promise<RunDto | null> {
     const state = await this.deps.storage.loadWorkflow(id);
     if (!state) return null;
-    const dto = runToDto(state);
+    const dto = runToDto(state, this.deps.clock?.now());
     const stepDefs = await this.resolveStepDefs(state.workflowName);
     if (stepDefs.length > 0) {
       dto.steps = mergePlannedSteps(dto, stepDefs);

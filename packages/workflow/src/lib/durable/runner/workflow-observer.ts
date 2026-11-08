@@ -13,6 +13,7 @@ import type { StepState, WorkflowRunEvent, WorkflowState } from "../workflow-sta
 import type { WorkflowStorage } from "../workflow-storage.ts";
 import { workflowFailure } from "../workflow-failure.ts";
 import { findTripwireStep, storedRunError } from "./run-status.ts";
+import { deriveWaitingOn, summarizeWaits } from "../workflow-waits.ts";
 
 export { findTripwireStep } from "./run-status.ts";
 
@@ -75,6 +76,8 @@ export function createWorkflowHandle<Output>(params: {
 export function toStatusInfo(params: {
   state: WorkflowState;
   includeStepResults: boolean;
+  /** Reference time for the `waitingOnSummary`. Default: the current time. */
+  now?: Date;
 }): WorkflowStatusInfo<unknown> {
   const { state } = params;
   const includeResults = params.includeStepResults;
@@ -104,6 +107,8 @@ export function toStatusInfo(params: {
   }
 
   const failure = workflowFailure(state);
+  const waitingOn = deriveWaitingOn(state);
+  const waitingOnSummary = summarizeWaits({ waits: waitingOn, now: params.now ?? new Date() });
   return {
     state: state.status === "compensating" ? "failed" : state.status,
     result: state.status === "completed" ? state.result : undefined,
@@ -113,6 +118,8 @@ export function toStatusInfo(params: {
     tripwire: state.status === "tripwire" ? state.tripwire : undefined,
     currentStep,
     suspendedReason,
+    waitingOn,
+    ...(waitingOnSummary !== undefined && { waitingOnSummary }),
     steps,
     createdAt: state.createdAt,
     startedAt: state.startedAt,

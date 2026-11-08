@@ -68,6 +68,7 @@ export function WorkflowDetail({
       run: 0,
       input: def.sampleInput,
       steps,
+      waitingOn: [],
       createdAt: now,
       updatedAt: now,
     };
