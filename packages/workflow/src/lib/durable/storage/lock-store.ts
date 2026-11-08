@@ -2,7 +2,7 @@
 // WorkflowLockStore — the per-run lock (lease) and its fence token.
 // ---------------------------------------------------------------------------
 
-import type { WorkflowState } from "../workflow-state.ts";
+import type { WorkflowState, WorkflowStatusSnapshot } from "../workflow-state.ts";
 import type { FencedWrite, FenceToken } from "./fencing.ts";
 
 /** Params of `tryLock` and `tryLockAndLoad`. */
@@ -43,6 +43,17 @@ export interface HeartbeatParams extends FencedWrite {
   readonly workflowId: string;
   /** New lease length, counted from now. */
   readonly lockDurationMs: number;
+}
+
+/**
+ * What a heartbeat may answer. A backend that can read the run's status in
+ * the statement that extends the lease returns it here, so the holder sees
+ * a cancel without a read of its own; one that returns nothing is read with
+ * `loadWorkflowStatus` once per beat.
+ */
+export interface HeartbeatResult {
+  /** The run's status as of the extension; `null` when it has no record. */
+  readonly status?: WorkflowStatusSnapshot | null;
 }
 
 /**
@@ -101,6 +112,8 @@ export interface WorkflowLockStore {
    * lock is gone, expired or held under another token, the call rejects
    * with `FenceTokenMismatchError`, which tells the holder it lost the run.
    * Without a token, a lock not held by this instance is left alone.
+   * May answer with the run's status (`HeartbeatResult`) to save the
+   * holder's cancel check a read.
    */
-  heartbeat(params: HeartbeatParams): Promise<void>;
+  heartbeat(params: HeartbeatParams): Promise<void | HeartbeatResult>;
 }

@@ -186,6 +186,7 @@ export async function runWorkflowOrchestration(
         ...(ctx.lock?.maxHoldMs !== undefined && { maxHoldMs: ctx.lock.maxHoldMs }),
         clock,
         loadState: true,
+        watchCancel: true,
         ...(params.signal !== undefined && { signal: params.signal }),
       },
       fn: async (lock) => {
@@ -372,7 +373,7 @@ export async function runChildWorkflow(params: {
   });
 }
 
-async function runOneOrchestrationCycle(cycle: {
+interface CycleParams {
   ctx: WorkflowOrchestrationContext;
   params: RunParams;
   lock: LockContext;
@@ -380,7 +381,94 @@ async function runOneOrchestrationCycle(cycle: {
   loaded: LoadedRun;
   /** The run's state as read when the lock was taken, if it was. */
   preloaded?: WorkflowState | null;
-}): Promise<unknown> {
+}
+
+/**
+ * One run of the chain. With `compensate.onCancel: "rollback"`, a cancel
+ * seen while the run executes (mid-step through the heartbeat, between
+ * waves, or at a terminal write) rolls the completed steps back before the
+ * run rejects with `WorkflowCancelledError`. A run found already cancelled
+ * at the entry gate is not rolled back here: it ended, and was rolled back
+ * (or not) by the driver that saw the cancel.
+ */
+async function runOneOrchestrationCycle(cycle: CycleParams): Promise<unknown> {
+  const { ctx, lock, clock } = cycle;
+  const phase = { executing: false, input: cycle.params.input };
+  try {
+    return await runCycleBody({ ...cycle, phase });
+  } catch (err) {
+    if (
+      phase.executing &&
+      ctx.compensateConfig?.onCancel === "rollback" &&
+      errorTag(err) === "WorkflowCancelledError"
+    ) {
+      await rollBackCancelled({
+        ctx,
+        lock,
+        clock,
+        workflowId: cycle.params.workflowId,
+        input: phase.input,
+        error: err,
+      });
+    }
+    throw err;
+  }
+}
+
+/**
+ * Roll back a run that was cancelled while this driver held it. Runs only
+ * when the stored run reads as cancelled (a step failing with a child's
+ * cancelled error was rolled back as a failure already). Steps go through
+ * `compensateWorkflow` as in a failure: same order, retries and ledger, so
+ * a step the ledger lists is never rolled back twice. The lock's lease
+ * signal, not the run signal, bounds it: a cancel does not stop the
+ * rollback, a lost lock does (the run is then abandoned, as in a failure
+ * rollback, and nothing more is compensated here).
+ */
+async function rollBackCancelled(params: {
+  ctx: WorkflowOrchestrationContext;
+  lock: LockContext;
+  clock: WallClock;
+  workflowId: string;
+  input: unknown;
+  error: unknown;
+}): Promise<void> {
+  const { ctx, lock, clock, workflowId, input } = params;
+  if (lock.leaseSignal.aborted) throw lock.leaseSignal.reason;
+  const status = await ctx.storage.loadWorkflowStatus(workflowId);
+  if (status === null || !isCancelledRun(status)) return;
+  const guard = lock.fenceToken ? { fenceToken: lock.fenceToken } : undefined;
+  const report = await compensateWorkflow({
+    storage: ctx.storage,
+    steps: ctx.steps,
+    compensateConfig: ctx.compensateConfig,
+    workflowId,
+    input,
+    dagNodes: ctx.steps.map((s) => ({ name: s.name, dependsOn: s.dependsOn })),
+    guard,
+    clock,
+    signal: lock.leaseSignal,
+    ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
+  });
+  if (ctx.compensateConfig?.onComplete) {
+    try {
+      await runHookResult(
+        ctx.compensateConfig.onComplete({
+          input,
+          error: params.error,
+          compensatedSteps: report.compensated,
+          failedCompensations: report.failed,
+        }),
+      );
+    } catch {
+      // As for a failure: the cancel is the outcome that matters.
+    }
+  }
+}
+
+async function runCycleBody(
+  cycle: CycleParams & { phase: { executing: boolean; input: unknown } },
+): Promise<unknown> {
   const { ctx, lock, clock, loaded } = cycle;
   const { workflowId, force, namespace } = cycle.params;
   let input = cycle.params.input;
@@ -473,6 +561,11 @@ async function runOneOrchestrationCycle(cycle: {
     state = await ctx.storage.loadWorkflow(workflowId);
     loaded.state = state;
   }
+
+  // From here the run executes under this driver: a cancel it sees may roll
+  // back (see `runOneOrchestrationCycle`).
+  cycle.phase.executing = true;
+  cycle.phase.input = input;
 
   // 4. Validate DAG
   const dagNodes: DagNode[] = ctx.steps.map((s) => ({
@@ -746,7 +839,7 @@ async function rollBackAndFail(params: {
     dagNodes,
     guard,
     clock,
-    signal: lock.signal,
+    signal: lock.leaseSignal,
     resumed: params.resumed,
     ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
   });

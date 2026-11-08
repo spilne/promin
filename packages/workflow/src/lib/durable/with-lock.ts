@@ -40,6 +40,18 @@
 //   The abort reason is a `WorkflowLockLostError`. `fn` decides where to
 //   stop (the runner checks between waves); `withLock` never interrupts it.
 //
+// Cancels (`watchCancel`):
+//
+//   Each heartbeat that extended the lease also looks at the run's status:
+//   the one the storage returned with the extension (`HeartbeatResult`, no
+//   extra call), or else one `loadWorkflowStatus` read, so at most one read
+//   per beat and none when the backend piggybacks it. A cancelled run aborts
+//   `ctx.signal` with a `WorkflowCancelledError`, which stops in-flight
+//   steps through their own `ctx.signal`. `ctx.leaseSignal` stays up: it
+//   reflects the lock alone, so work that must go on after a cancel (a
+//   rollback) can still tell when it no longer owns the run. A cancel is
+//   noticed up to one beat late; a failed status read is retried next beat.
+//
 // Releasing: a `releaseLock` failure never replaces `fn`'s outcome — its
 // result or its error (including `WorkflowSuspendedError`) is what the
 // caller sees. The lock then expires on its own.
@@ -48,12 +60,14 @@
 // ---------------------------------------------------------------------------
 
 import type { FenceToken, WorkflowStorage } from "./workflow-storage.ts";
-import type { WorkflowState } from "./workflow-state.ts";
+import type { WorkflowState, WorkflowStatusSnapshot } from "./workflow-state.ts";
 import {
+  WorkflowCancelledError,
   WorkflowLockError,
   WorkflowLockLostError,
   WorkflowMaxHoldExceededError,
 } from "./durable-pipeline-error.ts";
+import { isCancelledRun } from "./workflow-state.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 
 /**
@@ -108,6 +122,12 @@ export interface WithLockOptions {
    * and the lock is released for another driver.
    */
   signal?: AbortSignal;
+  /**
+   * Notice a cancel while `fn` runs (see "Cancels" above): `LockContext.signal`
+   * aborts with a `WorkflowCancelledError` once the run reads as cancelled.
+   * Costs at most one status read per heartbeat. Default: false.
+   */
+  watchCancel?: boolean;
 }
 
 /** Context passed to `withLock`'s callback. */
@@ -121,10 +141,17 @@ export interface LockContext {
    */
   readonly fenceToken?: FenceToken;
   /**
-   * Aborted, with a `WorkflowLockLostError` reason, once the lock is known
-   * or presumed lost. Check it at safe points and stop there.
+   * Aborted once the lock is known or presumed lost (reason
+   * `WorkflowLockLostError`), or, with `watchCancel`, once the run is seen
+   * cancelled (reason `WorkflowCancelledError`). Check it at safe points
+   * and stop there.
    */
   readonly signal: AbortSignal;
+  /**
+   * Aborted only when the lock is known or presumed lost (or the run is
+   * abandoned), never by a cancel. For work that outlives a cancel.
+   */
+  readonly leaseSignal: AbortSignal;
   /**
    * The workflow's state as of taking the lock (`null` when it has no
    * record yet). Set only with `WithLockOptions.loadState`.
@@ -192,6 +219,24 @@ export async function withLock<T>(params: {
   let lastExtendedMs = acquiredMs;
   let released = false;
 
+  // `lost` is the lease alone; `run` also aborts on a cancel.
+  const run = new AbortController();
+  const abortRun = (): void => {
+    if (!run.signal.aborted) run.abort(lost.signal.reason);
+  };
+  lost.signal.addEventListener("abort", abortRun, { once: true });
+  const watchCancel = params.options?.watchCancel === true;
+  const cancelObserved = (status: WorkflowStatusSnapshot | null): void => {
+    if (status && isCancelledRun(status) && !run.signal.aborted) {
+      run.abort(
+        new WorkflowCancelledError({
+          workflowId,
+          message: `Workflow "${workflowId}" was cancelled`,
+        }),
+      );
+    }
+  };
+
   const external = params.options?.signal;
   const abandon = (): void => {
     if (lost.signal.aborted) return;
@@ -242,8 +287,21 @@ export async function withLock<T>(params: {
       return;
     }
     storage.heartbeat({ workflowId, lockDurationMs, guard }).then(
-      () => {
+      (beat) => {
         lastExtendedMs = clock.currentTimeMs();
+        if (!watchCancel || run.signal.aborted) return;
+        if (beat && beat.status !== undefined) {
+          cancelObserved(beat.status);
+          return;
+        }
+        storage.loadWorkflowStatus(workflowId).then(
+          (status) => {
+            if (!released) cancelObserved(status);
+          },
+          () => {
+            // A failed read is retried on the next beat.
+          },
+        );
       },
       (error: unknown) => {
         if (released || lost.signal.aborted) return;
@@ -266,13 +324,15 @@ export async function withLock<T>(params: {
   try {
     return await fn({
       fenceToken: token,
-      signal: lost.signal,
+      signal: run.signal,
+      leaseSignal: lost.signal,
       ...(state !== undefined && { state }),
     });
   } finally {
     released = true;
     heartbeatHandle.clear();
     external?.removeEventListener("abort", abandon);
+    lost.signal.removeEventListener("abort", abortRun);
     try {
       await storage.releaseLock({ workflowId, guard });
     } catch {

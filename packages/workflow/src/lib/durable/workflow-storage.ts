@@ -60,6 +60,7 @@ export type {
   TryLockAndLoadResult,
   ReleaseLockParams,
   HeartbeatParams,
+  HeartbeatResult,
 } from "./storage/lock-store.ts";
 export type {
   WorkflowQueryStore,
