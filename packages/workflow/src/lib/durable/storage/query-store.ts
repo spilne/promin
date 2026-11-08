@@ -150,7 +150,9 @@ export interface WorkflowQueryStore {
   /**
    * Delete ended workflows whose `completedAt` falls in the window, at most
    * `limit` of them. Returns the number deleted. Never deletes a running or
-   * suspended workflow.
+   * suspended workflow. A storage built with a default `namespace` deletes
+   * only runs of that namespace, as its lists and scans see only those; one
+   * without a namespace deletes across all of them.
    */
   purgeCompleted(params: PurgeCompletedParams): Promise<number>;
 

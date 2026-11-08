@@ -16,6 +16,9 @@ All of these compose on [perfect](https://github.com/spilne/perfect) (`@spilne/p
 | Package                                                    | Description                                                                                       |
 | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | **[@promin/workflow](./packages/workflow/)**               | Durable workflows, distributed workers, state machines, scheduler, SQL models                     |
+| **[@promin/agent](./packages/agent/)**                     | Durable agent turns, tools, memory, approvals, MCP and retrieval                                  |
+| **[@promin/evals](./packages/evals/)**                     | Agent datasets, scorers, live scoring and promotion gates                                         |
+| **[@promin/zorya](./packages/zorya/)**                     | Self-hosted agent and workflow API with dashboard                                                 |
 | **[@promin/data](./packages/data/)**                       | DataFrame, data quality, profiling, diff, contracts                                               |
 | **[@promin/duckdb](./packages/duckdb/)**                   | DuckDB executor for DataFrame — SQL compilation, file sources                                     |
 | **[@promin/postgres](./packages/postgres/)**               | Postgres workflow storage, step queue (SKIP LOCKED), durable scheduler, leader leases, registries |
@@ -27,6 +30,8 @@ All of these compose on [perfect](https://github.com/spilne/perfect) (`@spilne/p
 The effect runtime, streams and concurrency primitives come from [perfect](https://github.com/spilne/perfect) (`@spilne/perfect-core`); HTTP client, Kafka transport, and stateful stream topology live there too: `@spilne/perfect-http`, `@spilne/perfect-kafka`, `@spilne/perfect-topology`.
 
 ## Quick Start
+
+For a conversational agent with a tool and stored thread history, follow the [agent quickstart](./documentation/content/docs/agent/quickstart.mdx). It runs with `bun run demo:agent` and an OpenAI API key.
 
 ```bash
 bun install

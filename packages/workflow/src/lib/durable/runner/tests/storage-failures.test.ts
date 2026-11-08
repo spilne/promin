@@ -444,8 +444,9 @@ describe("withLock", () => {
     clock.advance(20);
     await waitFor(() => beats.failures === 2);
     expect(signal!.aborted).toBe(false);
+    // The lease runs out on the next tick: the run is abandoned then, without
+    // another heartbeat call that could not revive an expired lock.
     clock.advance(10);
-    await waitFor(() => beats.failures === 3);
     await waitFor(() => signal!.aborted);
     expect(signal!.reason).toBeInstanceOf(WorkflowLockLostError);
     gate.resolve();
