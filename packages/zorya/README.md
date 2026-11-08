@@ -454,6 +454,35 @@ approvals }`. An agent turn's approval is never delivered as a plain signal:
   `agent_approval` for it, and `/api/signals` marks it with `agentThread` —
   only the agent route records the approver, keeps the thread in order and
   resumes the turn.
+- **Retained subagents.** Configure `RetainedSubagents({ agents, workflows,
+memory, canDelegate })` and pass it to
+  `ZoryaServer.builder().retainedSubagents(retained)`. `canDelegate` is the
+  host's explicit parent-to-child capability policy; depth (default 3) and
+  concurrent children per parent (default 8) are bounded. Spawn with
+  `POST /api/agents/:id/threads/:threadId/children` and
+  `{ namespaceId, resourceId | ownerId, agentId, task, childId? }`. The route
+  returns a durable handle (202) after admission, while a workflow runs the
+  child under a pinned recipe version. `GET .../children` lists handles;
+  `GET .../children/:childId/messages` reads its inbox and transcript;
+  `POST .../children/:childId/messages` delivers `{ task, mode?, messageId? }`;
+  `POST .../stop` cancels and `DELETE .../:childId` removes its threads.
+  `queued` and `follow-up` messages run in sequence after the current turn.
+  `canDelegate(parentId, childId, { parent, scope })` also receives the
+  caller's scope, and the spawn route runs `authorizeScope` for the child
+  agent. The worker polls its inbox by sequence (`pollIntervalMs`, default
+  60s), so a lost wake signal delays a message instead of stalling the
+  mailbox. A failed turn is recorded under `outcomes` (as are `superseded`
+  messages) and the child keeps running. A child with no message for
+  `idleTtlMs` (default 1h), or after `maxIterations` journal iterations
+  (default 1000), completes and stops counting against the child limit; spawn
+  a new `childId` to continue. `DELETE` hides the child. The child limit is
+  serialized per parent within a process; use `turnGate` across processes.
+  `steer` supersedes pending queued messages at the next turn boundary.
+  The mailbox lives in `MemoryStore` and the worker in `WorkflowStorage`;
+  startup reconciles mailbox writes whose wake signal was lost in a crash.
+  Configure durable stores and the LocalWorkflows signal scanner for restart
+  recovery. Child ids and thread ownership are checked within the caller's
+  namespace and resource on every route.
 - **Budgets.** A recipe's `backend.budget` caps what one turn spends, its
   sub-agents included (see [Budgets in `@promin/agent`](../agent/README.md#budgets));
   a turn that runs out ends with finishReason `budget_exceeded`. Cost limits

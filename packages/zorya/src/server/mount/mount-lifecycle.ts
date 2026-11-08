@@ -72,6 +72,7 @@ export function managedServices(params: {
   readonly workflows: Lifecycled;
   readonly scheduler: Lifecycled | undefined;
   readonly agents: Lifecycled | undefined;
+  readonly retainedSubagents: Lifecycled | undefined;
   readonly skills: Lifecycled | undefined;
   readonly fragments: Lifecycled | undefined;
   readonly knowledgeBases: Lifecycled | undefined;
@@ -87,6 +88,8 @@ export function managedServices(params: {
   if (params.namespaces) out.push({ name: "namespaces", ...bindLifecycle(params.namespaces) });
   if (params.scheduler) out.push({ name: "scheduler", ...bindLifecycle(params.scheduler) });
   if (params.agents) out.push({ name: "agents", ...bindLifecycle(params.agents) });
+  if (params.retainedSubagents)
+    out.push({ name: "retainedSubagents", ...bindLifecycle(params.retainedSubagents) });
   if (params.skills) out.push({ name: "skills", ...bindLifecycle(params.skills) });
   if (params.fragments) out.push({ name: "fragments", ...bindLifecycle(params.fragments) });
   if (params.knowledgeBases) {

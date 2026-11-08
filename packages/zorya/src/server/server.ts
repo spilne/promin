@@ -41,7 +41,7 @@ import type { RemoteDeploymentSweeper } from "./routes/remote-deployments.ts";
 import type { WebhookDeliveryRecovery } from "./routes/webhooks.ts";
 import { RegistryBackedWorkersProvider } from "./routes/workers.ts";
 import { AgentStreamHub } from "./services/agent-stream-hub.ts";
-import type { ZoryaAgents } from "./services/agents/index.ts";
+import type { RetainedSubagents, ZoryaAgents } from "./services/agents/index.ts";
 import type { ZoryaDags } from "./services/dags/index.ts";
 import type { ZoryaEvals } from "./services/evals/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
@@ -90,6 +90,7 @@ export class ZoryaServer {
   readonly workflows: ZoryaWorkflows;
   readonly scheduler?: ZoryaScheduler;
   readonly agents?: ZoryaAgents;
+  readonly retainedSubagents?: RetainedSubagents;
   readonly skills?: ZoryaSkills;
   readonly fragments?: ZoryaFragments;
   readonly dags?: ZoryaDags;
@@ -167,6 +168,7 @@ export class ZoryaServer {
     this.workflows = config.workflows;
     if (config.scheduler) this.scheduler = config.scheduler;
     if (config.agents) this.agents = config.agents;
+    if (config.retainedSubagents) this.retainedSubagents = config.retainedSubagents;
     if (config.skills) this.skills = config.skills;
     if (config.fragments) this.fragments = config.fragments;
     if (config.dags) this.dags = config.dags;
@@ -246,6 +248,7 @@ export class ZoryaServer {
         workflows: this.workflows,
         scheduler: this.scheduler,
         agents: this.agents,
+        retainedSubagents: this.retainedSubagents,
         skills: this.skills,
         fragments: this.fragments,
         knowledgeBases: this.knowledgeBases,
@@ -355,6 +358,7 @@ export class ZoryaServer {
       mountAgents({
         router,
         agents: this.agents,
+        retainedSubagents: this.retainedSubagents,
         skills: this.skills,
         fragments: this.fragments,
         secrets: this.secrets,

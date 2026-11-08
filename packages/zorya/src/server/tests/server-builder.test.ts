@@ -11,7 +11,7 @@ import type { WorkersProvider } from "../routes/workers.ts";
 import { ZoryaServerBuilder } from "../server-builder.ts";
 import { ZoryaInsecureConfigError, type Logger, type ZoryaServerConfig } from "../server-config.ts";
 import { ZoryaServer } from "../server.ts";
-import type { ZoryaAgents } from "../services/agents/index.ts";
+import type { RetainedSubagents, ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaDags } from "../services/dags/index.ts";
 import type { ZoryaEvals } from "../services/evals/index.ts";
 import type { ZoryaKnowledgeBases } from "../services/knowledge/index.ts";
@@ -62,6 +62,7 @@ describe("ZoryaServer.builder()", () => {
       workflows,
       scheduler: stub<ZoryaScheduler>("scheduler"),
       agents: stub<ZoryaAgents>("agents"),
+      retainedSubagents: stub<RetainedSubagents>("retainedSubagents"),
       skills: stub<ZoryaSkills>("skills"),
       fragments: stub<ZoryaFragments>("fragments"),
       dags: stub<ZoryaDags>("dags"),
@@ -95,6 +96,7 @@ describe("ZoryaServer.builder()", () => {
       .workflows(expected.workflows)
       .scheduler(expected.scheduler)
       .agents(expected.agents)
+      .retainedSubagents(expected.retainedSubagents)
       .skills(expected.skills)
       .fragments(expected.fragments)
       .dags(expected.dags)
