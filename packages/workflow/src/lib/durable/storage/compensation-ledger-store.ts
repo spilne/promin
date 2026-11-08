@@ -13,7 +13,11 @@ export type StepCompensationOutcome = "compensated" | "compensation_failed";
 /** Params of `beginCompensation`. */
 export interface BeginCompensationParams extends FencedWrite {
   readonly workflowId: string;
-  /** The failure that triggered the rollback; the run ends `failed` with it. */
+  /**
+   * The failure that triggered the rollback; the run ends `failed` with it.
+   * `errorTag: CANCELLED_ERROR_TAG` marks a cancel rollback: it is also what
+   * allows an ended cancelled run to enter the phase (see `beginCompensation`).
+   */
   readonly error: string;
   readonly errorTag?: string;
 }
@@ -49,9 +53,17 @@ export interface CompensationLedgerStore {
    * becomes `compensating`, storing `error` / `errorTag`. A run that is
    * already `compensating` is left as it is, ledger and error included.
    *
+   * A cancelled run (`failed` with `errorTag` `CANCELLED_ERROR_TAG`) is
+   * the one ended run this call may reopen, and only when `errorTag` is
+   * `CANCELLED_ERROR_TAG` too: it becomes `compensating` again with
+   * `completedAt` cleared, so a driver that sees a cancel can roll the run
+   * back durably (a crash leaves it `compensating`, for recovery to finish).
+   * The run's final `failWorkflow` with the same tag ends it cancelled again.
+   *
    * Returns `true` when the run is `compensating` after the call, `false`
-   * when it is missing or has ended (completed, failed, cancelled,
-   * tripwire): an ended run is never rolled back by this call.
+   * when it is missing or has ended otherwise (completed, failed, tripwire,
+   * or cancelled when `errorTag` is not the cancelled tag): such a run is
+   * never rolled back by this call.
    */
   beginCompensation(params: BeginCompensationParams): Promise<boolean>;
 

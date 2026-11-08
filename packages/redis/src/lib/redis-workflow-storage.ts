@@ -2432,6 +2432,32 @@ export class RedisWorkflowStorage
   async beginCompensation({ guard, ...params }: BeginCompensationParams): Promise<boolean> {
     const { workflowId } = params;
     const nowIso = this.serializeDate(this.clock.now());
+    if (params.errorTag === CANCELLED_ERROR_TAG) {
+      // A cancel's rollback reopens the cancelled run (completedAt cleared).
+      // Not applied (the run is not cancelled) falls through to the usual move.
+      const wfKey = this.keys.wf(workflowId);
+      const reopened = await this.writeOps({
+        workflowId,
+        guard,
+        ops: [
+          ["HEQ", wfKey, "status", "failed"],
+          ["HEQ", wfKey, "errorTag", CANCELLED_ERROR_TAG],
+          this.statusOp({
+            workflowId,
+            to: "compensating",
+            from: ["failed"],
+            fields: {
+              error: params.error,
+              errorTag: CANCELLED_ERROR_TAG,
+              completedAt: "",
+              updatedAt: nowIso,
+            },
+          }),
+          ["HGET", wfKey, "status"],
+        ],
+      });
+      if (reopened.applied) return reopened.last === "compensating";
+    }
     // The move and the read-back run in one script: the reply is the status
     // the run has after it.
     const { last } = await this.writeOps({

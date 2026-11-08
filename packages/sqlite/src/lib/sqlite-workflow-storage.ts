@@ -2316,10 +2316,20 @@ export class SqliteWorkflowStorage
         this.db
           .query(
             `UPDATE ${this._t}
-             SET status = 'compensating', error = ?, error_tag = ?, updated_at = ?
-             WHERE workflow_id = ? AND status IN ('pending', 'running', 'suspended')`,
+             SET status = 'compensating', error = ?, error_tag = ?, updated_at = ?,
+                 completed_at = CASE WHEN status = 'failed' THEN NULL ELSE completed_at END
+             WHERE workflow_id = ?
+               AND (status IN ('pending', 'running', 'suspended')
+                    OR (? AND status = 'failed' AND error_tag = ?))`,
           )
-          .run(params.error, params.errorTag ?? null, now, params.workflowId);
+          .run(
+            params.error,
+            params.errorTag ?? null,
+            now,
+            params.workflowId,
+            params.errorTag === CANCELLED_ERROR_TAG ? 1 : 0,
+            CANCELLED_ERROR_TAG,
+          );
         const row = this.db
           .query<{ status: string }>(`SELECT status FROM ${this._t} WHERE workflow_id = ?`)
           .get(params.workflowId);

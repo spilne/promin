@@ -2102,12 +2102,23 @@ export class PostgresWorkflowStorage
             statusId: WorkflowStatusIds.id.compensating,
             error: params.error,
             errorTag: params.errorTag ?? null,
+            // Reopening a cancelled run: it has not ended until the rollback does.
+            completedAt: sql`CASE WHEN ${workflows.statusId} = ${WorkflowStatusIds.id.failed} THEN NULL ELSE ${workflows.completedAt} END`,
             updatedAt: this.config.clock.now(),
           })
           .where(
             and(
               eq(workflows.workflowId, workflowId),
-              inArray(workflows.statusId, CANCELLABLE_STATUS_IDS),
+              or(
+                inArray(workflows.statusId, CANCELLABLE_STATUS_IDS),
+                // A cancelled run, when the rollback is a cancel's.
+                params.errorTag === CANCELLED_ERROR_TAG
+                  ? and(
+                      eq(workflows.statusId, WorkflowStatusIds.id.failed),
+                      eq(workflows.errorTag, CANCELLED_ERROR_TAG),
+                    )
+                  : undefined,
+              ),
             ),
           )
           .returning({ workflowId: workflows.workflowId });

@@ -91,6 +91,7 @@ import { sortWorkflowRows } from "./storage/ordering.ts";
 import {
   CANCELLED_ERROR,
   CANCELLED_ERROR_TAG,
+  isCancelledRun,
   isTerminalWorkflowStatus,
   withoutCompensationLedger as withoutLedger,
   type SignalState,
@@ -1043,9 +1044,16 @@ export class InMemoryWorkflowStorage
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return false;
     if (wf.status === "compensating") return true;
-    if (wf.status !== "pending" && wf.status !== "running" && wf.status !== "suspended") {
+    const reopensCancelled = params.errorTag === CANCELLED_ERROR_TAG && isCancelledRun(wf);
+    if (
+      !reopensCancelled &&
+      wf.status !== "pending" &&
+      wf.status !== "running" &&
+      wf.status !== "suspended"
+    ) {
       return false;
     }
+    if (reopensCancelled) delete wf.completedAt;
     wf.status = "compensating";
     wf.error = params.error;
     wf.errorTag = params.errorTag;
