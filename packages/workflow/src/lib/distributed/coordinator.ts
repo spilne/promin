@@ -43,6 +43,7 @@ import {
   sharedReadStorage,
   withoutRequeue,
 } from "./coordinator-step-executor.ts";
+import { decodeWorkflowResult } from "../durable/runner/orchestrate.ts";
 import { buildStubWorkflow } from "./stub-workflow.ts";
 import { isStaleLeaseError } from "../scheduler/leader-lease.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
@@ -533,7 +534,10 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
             error: new Error(`Workflow "${workflowId}" not found`),
           });
         } else if (state.status === "completed") {
-          this._settleWaiters({ workflowId, result: state.result });
+          this._settleWaiters({
+            workflowId,
+            result: decodeWorkflowResult({ stored: state.result }),
+          });
         } else if (state.status === "failed") {
           this._settleWaiters({ workflowId, error: new Error(state.error ?? "Workflow failed") });
         } else if (state.status === "tripwire") {
