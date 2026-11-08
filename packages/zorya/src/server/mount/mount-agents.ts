@@ -14,6 +14,7 @@ import { json, type Router } from "../router.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaEvals } from "../services/evals/index.ts";
 import { evalPromotionGate } from "../routes/evals.ts";
+import { forkAgentThread, getAgentThreadLineage } from "../routes/agents/agent-forks.ts";
 import type { ZoryaFragments } from "../services/fragments/index.ts";
 import type { ZoryaMcpServers } from "../services/mcp/index.ts";
 import type { ZoryaSkills } from "../services/skills/index.ts";
@@ -225,6 +226,15 @@ export function mountAgents(params: {
     .post("/api/agents/:id/threads/:threadId/distill", distillThread(agentDeps))
     .post("/api/agents/:id/threads/:threadId/compact", compactThread(agentDeps))
     .post("/api/agents/:id/threads/:threadId/archive", archiveAgentThread(agentDeps));
+
+  if (agents.memory) {
+    router
+      .post("/api/agents/:id/threads/:threadId/fork", forkAgentThread(agentDeps))
+      .get(
+        "/api/agents/:id/threads/:threadId/lineage",
+        getAgentThreadLineage(agentDeps, agents.memory),
+      );
+  }
 
   if (agents.memory) {
     // Persona resolution piggybacks on the recipe store and fragment

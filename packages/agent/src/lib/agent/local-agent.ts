@@ -583,6 +583,98 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     });
   }
 
+  /** Snapshot a thread into an independent branch with durable lineage metadata. */
+  async forkThread(
+    parentThreadId: string,
+    newThreadId: string,
+    opts: {
+      readonly atSeq?: number;
+      readonly namespaceId?: string;
+      readonly resourceId?: string;
+    } = {},
+  ): Promise<AgentThread<AgentInput, TOutput>> {
+    const memory = this.config.memory;
+    if (!memory) throw new Error("LocalAgent.forkThread requires a MemoryStore");
+    if (!newThreadId || newThreadId === parentThreadId) {
+      throw new Error("LocalAgent.forkThread requires a different, non-empty thread id");
+    }
+    // thread() enforces both namespace and resource ownership.
+    await this.thread(parentThreadId, { ...opts, createIfMissing: false });
+    const namespaceId = opts.namespaceId ?? this.config.namespaceId!;
+    const resourceId = opts.resourceId ?? this.config.resourceId;
+    const parentKey: ThreadKey = { namespaceId, resourceId, threadId: parentThreadId };
+    const childKey: ThreadKey = { namespaceId, resourceId, threadId: newThreadId };
+    const parent = await memory.getThread(parentKey);
+    if (!parent) throw new ThreadNotFoundError({ namespaceId, threadId: parentThreadId });
+    const messages = await memory.getMessages(parentKey);
+    const head = messages.at(-1)?.seq ?? 0;
+    const atSeq = opts.atSeq ?? head;
+    if (
+      !Number.isSafeInteger(atSeq) ||
+      atSeq < 0 ||
+      atSeq > head ||
+      (atSeq !== 0 && !messages.some((message) => message.seq === atSeq))
+    ) {
+      throw new RangeError("fork atSeq must name a retained message sequence or 0");
+    }
+    const prefix = messages
+      .filter((message) => message.seq <= atSeq)
+      .map((stored) => {
+        const { seq: _seq, createdAt: _createdAt, ...message } = stored;
+        return message as Message;
+      });
+    const episodes = (await memory.listThreadEpisodes(parentKey)).filter(
+      (episode) => episode.sourceMessageRange === null || episode.sourceMessageRange.toSeq <= atSeq,
+    );
+    const atHead = atSeq === head;
+    const {
+      branchParentThreadId: _parentId,
+      branchAtSeq: _branchAtSeq,
+      branchDepth: _branchDepth,
+      ...parentMetadata
+    } = parent.metadata;
+    await memory.createThread(childKey, {
+      resourceId,
+      title: parent.title,
+      inheritFromParent: parent.inheritFromParent,
+      workingMemory: atHead ? parent.workingMemory : null,
+      metadata: {
+        ...parentMetadata,
+        branchParentThreadId: parentThreadId,
+        branchAtSeq: atSeq,
+        branchDepth:
+          (typeof parent.metadata.branchDepth === "number" ? parent.metadata.branchDepth : 0) + 1,
+      },
+    });
+    try {
+      if (prefix.length) await memory.appendMessages(childKey, prefix);
+      for (const episode of episodes) {
+        await memory.appendThreadEpisode(childKey, {
+          summary: episode.summary,
+          outcome: episode.outcome,
+          salience: episode.salience,
+          sourceThreadId: newThreadId,
+          sourceMessageRange: episode.sourceMessageRange,
+          occurredAt: episode.occurredAt,
+          metadata: episode.metadata,
+        });
+      }
+      if (atHead) {
+        for (const fact of await memory.listThreadFacts(parentKey)) {
+          await memory.appendThreadFact(childKey, {
+            text: fact.text,
+            source: fact.source,
+            confidence: fact.confidence,
+          });
+        }
+      }
+    } catch (error) {
+      await memory.deleteThread(childKey);
+      throw error;
+    }
+    return this.thread(newThreadId, { ...opts, createIfMissing: false });
+  }
+
   /**
    * Build the per-turn tool source. Used by both the conversational
    * (`thread.send`) path with a full ThreadKey AND the one-shot

@@ -255,6 +255,12 @@ export interface Agent<Input = AgentInput, Output = unknown> {
   stream(input: Input, opts?: AgentInvokeOpts): AgentRunOutput<Output>;
   /** Get or create a persistent thread. */
   thread(threadId: string, opts?: ThreadOptions): Promise<AgentThread<Input, Output>>;
+  /** Fork a persisted thread at a message sequence; local backends support this when memory is configured. */
+  forkThread?(
+    parentThreadId: string,
+    newThreadId: string,
+    opts?: { readonly atSeq?: number; readonly namespaceId?: string; readonly resourceId?: string },
+  ): Promise<AgentThread<Input, Output>>;
   /** List threads visible to this agent (optionally filtered by resource). */
   listThreads(params?: ListThreadsParams): Promise<ThreadSummary[]>;
   /**

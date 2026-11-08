@@ -423,7 +423,20 @@ PostgresLeaseStore({ db }) })`. `turnGate: false` turns it off. Scheduled
   `title_too_long`.
 - **Trace.** `GET .../trace` shows each turn the engine ran with its timing:
   think, approval and tool spans with durations, token usage and the finish
-  reason (stamped on the turn's final assistant message).
+  reason (stamped on the turn's final assistant message). The response also
+  includes branch ancestry when the thread was forked.
+- **Branching.** `POST /api/agents/:id/threads/:threadId/fork` with
+  `{ namespaceId, resourceId | ownerId, newThreadId, atSeq? }` snapshots an
+  owned thread at a retained message sequence (`atSeq` defaults to its head).
+  The new thread has its own transcript and lifecycle, with
+  `branchParentThreadId`, `branchAtSeq` and `branchDepth` stored in durable
+  metadata. `GET .../lineage` returns its parent and direct children within
+  the caller's resource. A head fork copies working memory and current thread
+  facts; an earlier fork clears these derived values because they may include
+  later information. Compaction episodes whose source range ends by the
+  branch point are copied. The fork holds the parent's turn lease and refuses
+  a pending approval. `LocalAgent.forkThread` exposes the same operation to
+  library callers with a configured `MemoryStore`.
 - **Approvals.** A turn suspended on a tool approval is recorded in a
   `PendingApprovalStore`. Pass a durable one to `resolveLocalAgent({ approvals })`
   in `resolve` — `createSqliteZoryaStack` provides `pendingApprovalStore`;
