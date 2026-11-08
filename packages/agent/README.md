@@ -866,6 +866,35 @@ See `packages/agent/src/examples/console-chat.ts` for a complete REPL example.
 
 ## Turn events
 
+### Export traces
+
+Every completed `agentAction` turn records a timed `TurnTrace` with think,
+tool, approval and compaction spans. Pass a `traceExporter` in the agent config
+to export it once as a journaled, best-effort activity. A crash during export
+may retry it, so deduplicate by `workflowId`. Export failures do not fail the
+turn; use `onError` to observe them.
+
+`createOpenTelemetryAgentTraceExporter` accepts a tracer from
+`@opentelemetry/api` without making that package a required dependency:
+
+```ts
+import { trace } from "@opentelemetry/api";
+import { createOpenTelemetryAgentTraceExporter } from "@promin/agent";
+
+const traceExporter = createOpenTelemetryAgentTraceExporter({
+  tracer: trace.getTracer("my-agent"),
+  filterAttribute: (key, value) => (key === "agent.resource_id" ? undefined : value),
+  onError: (error) => console.error("Agent trace export failed", error),
+});
+// Pass traceExporter in LocalAgent's `agent` config or to agentAction.
+```
+
+Only identifiers, times, counts and tool names are exported. Prompts,
+answers, tool inputs and results are excluded; `filterAttribute` can redact
+identifiers as well. `agent.thread_id` groups turns of one conversation and
+`agent.workflow_id` identifies a turn for deduplication. Configure an
+OpenTelemetry span exporter in your host to send the spans to your collector.
+
 Pass a `SessionEventBus` as `bus` to `agentAction` (`LocalAgent` wires one per run and turns its events into `fullStream`):
 
 ```ts
