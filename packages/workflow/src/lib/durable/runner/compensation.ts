@@ -12,7 +12,7 @@ import { retryAsync, type RetryPolicy } from "../../shared/retry-policy.ts";
 import { SystemWallClock, type WallClock } from "../../shared/wall-clock.ts";
 import type { CompensateConfig } from "../durable-pipeline.ts";
 import { isAbandonRunExit } from "../step-policy.ts";
-import type { WorkflowState } from "../workflow-state.ts";
+import { isCompensationExempt, type WorkflowState } from "../workflow-state.ts";
 import {
   hasCapability,
   type FenceGuard,
@@ -77,7 +77,7 @@ export function compensationOrder(params: {
   const entries = new Map<string, Entry>();
   steps.forEach((step, index) => {
     const row = state.steps[step.name];
-    if (row?.status !== "completed") return;
+    if (row?.status !== "completed" || isCompensationExempt(row)) return;
     entries.set(step.name, {
       step,
       index,

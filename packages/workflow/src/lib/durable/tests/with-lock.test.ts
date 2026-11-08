@@ -125,6 +125,27 @@ describe("withLock", () => {
     expect(await done).toBe("done");
   });
 
+  it("aborts the run when a heartbeat never settles and the lease runs out", async () => {
+    const clock = FakeWallClock.create(0);
+    const clockedStorage = new InMemoryWorkflowStorage({ clock });
+    clockedStorage.heartbeat = () => new Promise<void>(() => {});
+
+    const lostReason = withLock({
+      storage: clockedStorage,
+      workflowId: "wf-1",
+      fn: ({ signal }) =>
+        new Promise<unknown>((resolve) =>
+          signal.addEventListener("abort", () => resolve(signal.reason), { once: true }),
+        ),
+      options: { heartbeatIntervalMs: 50, lockDurationMs: 200, clock },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    clock.advance(200);
+
+    expect(await lostReason).toMatchObject({ _tag: "WorkflowLockLostError" });
+  });
+
   it("propagates fn return value", async () => {
     const result = await withLock({
       storage,

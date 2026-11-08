@@ -38,6 +38,8 @@ postgresDescribe("PostgresWorkflowStorage conformance", { migrate }, (pg) => {
       hasCompensationLedger: true,
       hasStepAttempts: true,
       createPeer: () => PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false }),
+      createNamespaced: ({ namespace }) =>
+        PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false, namespace }),
       expireLock: async ({ workflowId }) => {
         await pg.sql`UPDATE wf_workflow_locks SET expires_at = NOW() - interval '1 second'
           WHERE workflow_id = ${workflowId}`;
