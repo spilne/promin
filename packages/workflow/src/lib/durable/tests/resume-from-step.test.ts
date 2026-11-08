@@ -171,4 +171,36 @@ describe("runner.resume — replay from a specific step", () => {
     await runner.resume({ workflow: wf, workflowId: "busy-1", fromStep: "b" });
     expect(runs).toBe(2);
   });
+
+  it("joins a run another driver finished after the reset instead of running it twice", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const other = createWorkflowRunner({ storage });
+    let runs = 0;
+    const wf = workflow<{ x: number }>({ name: "resume-race" })
+      .step("a", ({ input }) => succeed(input.x + 1))
+      .step("b", ({ prev }) => {
+        runs++;
+        return succeed(prev + 1);
+      })
+      .build();
+    await runner.run({ workflow: wf, workflowId: "race-1", input: { x: 0 } });
+    expect(runs).toBe(1);
+
+    // Another recovery worker takes the reset run and completes it in the
+    // window between this resume dropping its lock and re-running.
+    const release = storage.releaseLock.bind(storage);
+    let raced: unknown;
+    storage.releaseLock = async (params) => {
+      await release(params);
+      storage.releaseLock = release;
+      raced = await other.run({ workflow: wf, workflowId: "race-1", input: { x: 0 } });
+    };
+
+    const result = await runner.resume({ workflow: wf, workflowId: "race-1", fromStep: "b" });
+
+    expect(raced).toBe(2 + 0);
+    expect(result).toBe(raced);
+    expect(runs).toBe(2); // the original run plus exactly one re-execution of b
+  });
 });
