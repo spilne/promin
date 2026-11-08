@@ -280,6 +280,17 @@ export interface WorkflowRunnerConfig {
    * runs and version drains use the same lease.
    */
   readonly lock?: RunLockOptions;
+  /**
+   * Timeout (ms) for every plain, branch, match, map and parallel step that
+   * sets no `timeoutMs`, across all workflows this runner drives. Without a
+   * timeout a step handler that never settles holds the run forever: the
+   * driver keeps heartbeating the lock, so recovery never reclaims it.
+   * Recommended for production (pair it with `lock.maxHoldMs`); off by
+   * default for backward compatibility. A workflow's `defaultStepTimeoutMs`
+   * and a step's own `timeoutMs` win; `null` on a step opts it out. Child
+   * runs and version drains inherit it.
+   */
+  readonly defaultStepTimeoutMs?: number | null;
 }
 
 /** What `WorkflowRunner.subscribe` takes. */
@@ -447,6 +458,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   private readonly clock: WallClock;
   private readonly executorId?: string;
   private readonly lock?: RunLockOptions;
+  private readonly defaultStepTimeoutMs?: number | null;
 
   constructor(config: WorkflowRunnerConfig) {
     this.storage = config.storage;
@@ -456,6 +468,9 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     this.clock = config.clock ?? SystemWallClock;
     if (config.executorId !== undefined) this.executorId = config.executorId;
     if (config.lock !== undefined) this.lock = config.lock;
+    if (config.defaultStepTimeoutMs !== undefined) {
+      this.defaultStepTimeoutMs = config.defaultStepTimeoutMs;
+    }
   }
 
   run<Output, E extends TaggedError = never>(
@@ -720,6 +735,9 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
         ...(this.executorId !== undefined && { executorId: this.executorId }),
         ...(this.hooks !== undefined && { hooks: this.hooks }),
         ...(this.lock !== undefined && { lock: this.lock }),
+        ...(this.defaultStepTimeoutMs !== undefined && {
+          defaultStepTimeoutMs: this.defaultStepTimeoutMs,
+        }),
       },
     });
     return runWorkflowOrchestration(ctx, {

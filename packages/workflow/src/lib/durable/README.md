@@ -263,6 +263,17 @@ honour is a compile error.
 - `timeoutMs` is per attempt: the attempt is interrupted and fails with the
   typed `StepTimeoutError`, so `retry` / `onFailure` see it. The timer runs on
   the runner's `WallClock`.
+- **Hung handlers.** A step without `timeoutMs` that never settles keeps the
+  run locked and heartbeating forever, so recovery never reclaims it. Set
+  `defaultStepTimeoutMs` on `workflow({ ... })` or on the runner to time out
+  every plain, `branch`, `match`, `map` and `parallel` step that sets no
+  `timeoutMs` (sleeps, signal waits, children, journaled steps and loops are
+  skipped). Precedence: step `timeoutMs`, then the workflow default, then the
+  runner default; `timeoutMs: null` on a step, or `defaultStepTimeoutMs: null`
+  on a workflow, opts out. It is off by default for backward compatibility;
+  **setting it on the runner (with `lock.maxHoldMs`, below) is recommended
+  for production.** The default is per attempt and covers the step as a
+  whole, so size it for the slowest legitimate step, or opt that one out.
 - `onFailure`: `"fail"` (default), `"skip"` (continue with `undefined`) or
   `{ fallback: (error) => value }`. A skipped or fallen-back step is not
   compensated.
@@ -299,7 +310,7 @@ or a cancel, and retries defects only with `retryDefects: true`.
 
 ## Running workflows
 
-`createWorkflowRunner({ storage, clock?, registry?, hooks?, stepExecutor?, executorId?, lock? })`
+`createWorkflowRunner({ storage, clock?, registry?, hooks?, stepExecutor?, executorId?, lock?, defaultStepTimeoutMs? })`
 returns a `WorkflowRunner`:
 
 | Method                                         | What it does                                                                               |
@@ -354,7 +365,13 @@ the `_tag` of the error that failed the run, or with `WorkflowCancelledError`
   stops at the next wave with `WorkflowLockLostError`. The lease is
   `lock: { durationMs, heartbeatIntervalMs }` on the runner (default 120 s /
   30 s): a dead driver's run is free for another driver that long after its
-  last heartbeat. `run({ signal })` abandons a run: once the signal aborts,
+  last heartbeat. `lock.maxHoldMs` (off by default) bounds how long one driver
+  may hold a run: once reached, the heartbeat stops extending the lease and the
+  run stops at its next safe point with `WorkflowLockLostError` whose `cause`
+  is `WorkflowMaxHoldExceededError`; the lease then expires and recovery can
+  reclaim the run even if a handler never settles (its fenced writes are
+  rejected). Set it above your longest expected run: a legitimately long run is
+  stopped the same way and re-driven from its checkpoints. `run({ signal })` abandons a run: once the signal aborts,
   it stops at its next safe point the same way, releases the lock and stays
   in flight for another driver.
 - **Children held elsewhere.** A parent step whose child run is locked by
