@@ -10,7 +10,7 @@ import type { AuthConfig } from "./auth.ts";
 import type { MetricsProvider } from "./routes/metrics.ts";
 import type { WebhookDeliveryStore, WebhookSourceConfig } from "./routes/webhooks.ts";
 import type { WorkersProvider } from "./routes/workers.ts";
-import type { ZoryaAgents } from "./services/agents/index.ts";
+import type { RetainedSubagents, ZoryaAgents } from "./services/agents/index.ts";
 import type { ZoryaDags } from "./services/dags/index.ts";
 import type { ZoryaEvals } from "./services/evals/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
@@ -91,6 +91,8 @@ export interface ZoryaServerConfig extends AuthConfig {
   scheduler?: ZoryaScheduler;
   /** Optional agent gateway service. */
   agents?: ZoryaAgents;
+  /** Durable retained child agents and their mailbox routes. */
+  retainedSubagents?: RetainedSubagents;
   /**
    * Optional skill registry service. Mounts /api/skills/* CRUD and
    * /api/agents/_catalog/skills (the agent editor's skill picker source).

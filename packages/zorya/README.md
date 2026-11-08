@@ -441,6 +441,25 @@ approvals }`. An agent turn's approval is never delivered as a plain signal:
   `agent_approval` for it, and `/api/signals` marks it with `agentThread` —
   only the agent route records the approver, keeps the thread in order and
   resumes the turn.
+- **Retained subagents.** Configure `RetainedSubagents({ agents, workflows,
+memory, canDelegate })` and pass it to
+  `ZoryaServer.builder().retainedSubagents(retained)`. `canDelegate` is the
+  host's explicit parent-to-child capability policy; depth (default 3) and
+  concurrent children per parent (default 8) are bounded. Spawn with
+  `POST /api/agents/:id/threads/:threadId/children` and
+  `{ namespaceId, resourceId | ownerId, agentId, task, childId? }`. The route
+  returns a durable handle (202) after admission, while a workflow runs the
+  child under a pinned recipe version. `GET .../children` lists handles;
+  `GET .../children/:childId/messages` reads its inbox and transcript;
+  `POST .../children/:childId/messages` delivers `{ task, mode?, messageId? }`;
+  `POST .../stop` cancels and `DELETE .../:childId` removes its threads.
+  `queued` and `follow-up` messages run in sequence after the current turn.
+  `steer` supersedes pending queued messages at the next turn boundary.
+  The mailbox lives in `MemoryStore` and the worker in `WorkflowStorage`;
+  startup reconciles mailbox writes whose wake signal was lost in a crash.
+  Configure durable stores and the LocalWorkflows signal scanner for restart
+  recovery. Child ids and thread ownership are checked within the caller's
+  namespace and resource on every route.
 - **Budgets.** A recipe's `backend.budget` caps what one turn spends, its
   sub-agents included (see [Budgets in `@promin/agent`](../agent/README.md#budgets));
   a turn that runs out ends with finishReason `budget_exceeded`. Cost limits

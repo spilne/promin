@@ -14,7 +14,7 @@ import type {
   RemoteWorkersConfig,
   ZoryaServerConfig,
 } from "./server-config.ts";
-import type { ZoryaAgents } from "./services/agents/index.ts";
+import type { RetainedSubagents, ZoryaAgents } from "./services/agents/index.ts";
 import type { ZoryaDags } from "./services/dags/index.ts";
 import type { ZoryaEvals } from "./services/evals/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
@@ -61,6 +61,10 @@ export class ZoryaServerBuilder {
   /** The agent gateway: agents, memory, roles and threads. */
   agents(agents: ZoryaAgents): this {
     return this.set({ agents });
+  }
+
+  retainedSubagents(retainedSubagents: RetainedSubagents): this {
+    return this.set({ retainedSubagents });
   }
 
   /** Skill registry CRUD and the agent editor's skill catalog. */

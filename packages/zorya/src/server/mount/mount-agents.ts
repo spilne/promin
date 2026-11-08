@@ -11,9 +11,10 @@
 import type { SecretsStorage } from "@promin/agent";
 import type { NamespaceRegistry, WallClock } from "@promin/workflow";
 import { json, type Router } from "../router.ts";
-import type { ZoryaAgents } from "../services/agents/index.ts";
+import type { RetainedSubagents, ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaEvals } from "../services/evals/index.ts";
 import { evalPromotionGate } from "../routes/evals.ts";
+import { mountRetainedAgentRoutes } from "../routes/agents/agent-retained.ts";
 import type { ZoryaFragments } from "../services/fragments/index.ts";
 import type { ZoryaMcpServers } from "../services/mcp/index.ts";
 import type { ZoryaSkills } from "../services/skills/index.ts";
@@ -86,6 +87,7 @@ import {
 export function mountAgents(params: {
   readonly router: Router;
   readonly agents: ZoryaAgents;
+  readonly retainedSubagents: RetainedSubagents | undefined;
   readonly skills: ZoryaSkills | undefined;
   readonly fragments: ZoryaFragments | undefined;
   readonly secrets: SecretsStorage | undefined;
@@ -123,6 +125,8 @@ export function mountAgents(params: {
       ...(agents.streaming !== undefined && { limits: agents.streaming }),
     }),
   };
+  if (params.retainedSubagents)
+    mountRetainedAgentRoutes(agentDeps, params.retainedSubagents, router);
   // The standalone fragments service wins over the registry passed on
   // ZoryaAgents, for the catalog and the memory inspector alike.
   const fragmentRegistry = fragments?.registry ?? agents.fragments;

@@ -59,8 +59,13 @@ export {
 } from "./server/services/scheduler-loop.ts";
 export {
   ZoryaAgents,
+  RetainedSubagents,
+  RETAINED_AGENT_WORKFLOW,
   type ZoryaAgentsConfig,
   type ZoryaAgentsScanConfig,
+  type RetainedSubagentsConfig,
+  type RetainedParent,
+  type RetainedChildHandle,
 } from "./server/services/agents/index.ts";
 export {
   ZoryaSkills,
