@@ -138,4 +138,37 @@ describe("runner.resume — replay from a specific step", () => {
       runner.resume({ workflow: wf, workflowId: "missing", fromStep: "x" }),
     ).rejects.toThrow(/not found in storage/);
   });
+
+  it("refuses while another driver holds the run, and resets nothing", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    let runs = 0;
+    const wf = workflow<{ x: number }>({ name: "locked-resume" })
+      .step("a", ({ input }) => succeed(input.x + 1))
+      .step("b", ({ prev }) => {
+        runs++;
+        return succeed(prev + 1);
+      })
+      .build();
+    await runner.run({ workflow: wf, workflowId: "busy-1", input: { x: 0 } });
+
+    const lock = await storage.tryLock({ workflowId: "busy-1", lockDurationMs: 60_000 });
+    expect(lock.acquired).toBe(true);
+
+    await expect(
+      runner.resume({ workflow: wf, workflowId: "busy-1", fromStep: "b" }),
+    ).rejects.toMatchObject({ _tag: "WorkflowLockError" });
+    // The driver that holds the lock still sees its run as it was.
+    const state = (await storage.loadWorkflow("busy-1"))!;
+    expect(state.status).toBe("completed");
+    expect(state.steps["b"]!.status).toBe("completed");
+    expect(runs).toBe(1);
+
+    await storage.releaseLock({
+      workflowId: "busy-1",
+      guard: lock.token !== undefined ? { fenceToken: lock.token } : undefined,
+    });
+    await runner.resume({ workflow: wf, workflowId: "busy-1", fromStep: "b" });
+    expect(runs).toBe(2);
+  });
 });
