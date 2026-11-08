@@ -287,6 +287,21 @@ export interface WorkflowHooks {
     durationMs: number;
   }) => void | Promise<void>;
   /**
+   * A `ctx.metadata` write of a `.journaled()` step failed in storage.
+   * Metadata is a dashboard surface, so the step carries on (the failed
+   * keys stay visible to later steps of this execution, not in storage). A
+   * write that lost the lock's fence fails the step instead and is not
+   * reported here. Without this hook the failure is logged with
+   * `console.warn`.
+   */
+  onMetadataWriteError?: (params: {
+    workflowId: string;
+    stepName: string;
+    error: unknown;
+    /** Metadata keys of the write that failed. */
+    keys: readonly string[];
+  }) => void | Promise<void>;
+  /**
    * Called when one of the hooks above throws or rejects. Hooks are
    * observers: their errors never change the run's outcome, and the run
    * goes on after the report. Default: `console.error`. An error thrown

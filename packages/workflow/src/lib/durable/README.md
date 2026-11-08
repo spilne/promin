@@ -557,6 +557,18 @@ of activity functions), `ctx.patched(name)` (see [Versioning](../../../versionin
 
 Semantics:
 
+- **`ctx.metadata` write errors.** `set` / `merge` update the in-process
+  snapshot at once and write to storage in the background; the step waits
+  for its writes before its outcome is checkpointed. A write that fails with
+  `FenceTokenMismatchError` (the run's lock was lost) fails the step with it,
+  like a journal write under a lost lock: the stale holder stops and the new
+  holder re-drives the step. Any other storage error does not fail the step,
+  because metadata is a dashboard surface and replay re-fires the writes: it
+  is reported to the `onMetadataWriteError({ workflowId, stepName, error,
+keys })` hook (default `console.warn` with the error). The snapshot keeps
+  the value, so later steps of that execution see it though storage does not.
+  A step run by a queue worker has no hook and uses the `console.warn`
+  default.
 - **Ambiguous outcomes.** An activity journals a pending row, runs, then
   completes the row. If the process dies in between, the engine cannot know
   whether the side effect happened: by default the step fails with
