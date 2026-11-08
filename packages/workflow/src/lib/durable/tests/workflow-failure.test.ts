@@ -129,4 +129,37 @@ describe("WorkflowFailure — one shape for a failed run", () => {
     expect(generic).toBeInstanceOf(WorkflowFailedError);
     expect(generic).toMatchObject({ errorTag: "PaymentDeclined", stepName: "charge", attempt: 2 });
   });
+
+  it("keeps each run's failed step when concurrent runs throw the same error instance", async () => {
+    const shared = new PaymentDeclined({ message: "card declined" });
+    // Both runs hold their failure until both have recorded it, so a
+    // failure keyed by the shared error would be overwritten before either
+    // runSafe reads it.
+    let arrived = 0;
+    let release!: () => void;
+    const bothRecorded = new Promise<void>((resolve) => (release = resolve));
+    const runner = createWorkflowRunner({
+      storage: new InMemoryWorkflowStorage(),
+      hooks: {
+        onWorkflowFailure: async () => {
+          if (++arrived === 2) release();
+          await bothRecorded;
+        },
+      },
+    });
+    const build = (stepName: string) =>
+      workflow<number>({ name: `shared-${stepName}` })
+        .step(stepName, () => fail(shared))
+        .build();
+
+    const [a, b] = await Promise.all([
+      runner.runSafe({ workflow: build("stepA"), workflowId: "sa", input: 1 }),
+      runner.runSafe({ workflow: build("stepB"), workflowId: "sb", input: 1 }),
+    ]);
+
+    expect(a.error).toBe(shared);
+    expect(b.error).toBe(shared);
+    expect(a.failure).toMatchObject({ tag: "PaymentDeclined", stepName: "stepA", attempt: 1 });
+    expect(b.failure).toMatchObject({ tag: "PaymentDeclined", stepName: "stepB", attempt: 1 });
+  });
 });

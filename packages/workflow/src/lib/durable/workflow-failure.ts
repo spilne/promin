@@ -89,27 +89,12 @@ function tagOfError(error: unknown): string | undefined {
   return typeof _tag === "string" ? _tag : undefined;
 }
 
-// The failure the engine recorded for the run that threw each error, so
-// `runSafe` can report the failed step and attempt for a typed step error
-// (which does not carry them itself).
-const failureByError = new WeakMap<object, WorkflowFailure>();
-
-/** Remember the failure recorded for `error`, an error the run is about to throw. */
-export function rememberFailure(params: { error: unknown; failure: WorkflowFailure }): void {
-  if (typeof params.error === "object" && params.error !== null) {
-    failureByError.set(params.error, params.failure);
-  }
-}
-
 /**
- * The failure of an error `run` threw: the one the engine recorded for it
- * (with the failed step and attempt), else one derived from the error.
+ * The failure derived from an error alone (no failed step or attempt unless
+ * the error carries them). `runSafe` reports the engine-recorded failure of
+ * its own run instead, which is never looked up by error identity.
  */
 export function failureOf(error: unknown): WorkflowFailure {
-  if (typeof error === "object" && error !== null) {
-    const remembered = failureByError.get(error);
-    if (remembered !== undefined) return remembered;
-  }
   return failureFromError(error);
 }
 
