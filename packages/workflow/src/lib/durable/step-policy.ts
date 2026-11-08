@@ -27,6 +27,33 @@ export type StepPolicy = Pick<
   | "queue"
 >;
 
+/** Step kinds a `defaultStepTimeoutMs` applies to: those whose body is user code that can hang. */
+const DEFAULT_TIMEOUT_KINDS: ReadonlySet<StepDefinition["kind"]> = new Set([
+  "normal",
+  "branch",
+  "match",
+  "map",
+  "parallel",
+]);
+
+/**
+ * Give every eligible step without a `timeoutMs` the default. `null`, `0` or
+ * an absent default leaves `steps` as they are; a step's own value (a number,
+ * or `null` as an explicit opt-out) always wins.
+ */
+export function withDefaultStepTimeout(params: {
+  steps: ReadonlyArray<StepDefinition>;
+  defaultMs: number | null | undefined;
+}): ReadonlyArray<StepDefinition> {
+  const { steps, defaultMs } = params;
+  if (defaultMs == null || defaultMs <= 0) return steps;
+  return steps.map((s) =>
+    s.timeoutMs === undefined && DEFAULT_TIMEOUT_KINDS.has(s.kind)
+      ? { ...s, timeoutMs: defaultMs }
+      : s,
+  );
+}
+
 /**
  * Map step options onto the policy fields of a `StepDefinition`. Every step
  * kind builds its definition through this, so an option a kind's options

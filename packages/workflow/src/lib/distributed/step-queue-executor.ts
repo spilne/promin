@@ -295,7 +295,7 @@ export class StepQueueExecutor implements StepExecutor {
     readonly dependsOn: readonly string[];
   }): Promise<AttemptOutcome> {
     const { req, attempt } = params;
-    const timeoutMs = req.definition?.timeoutMs;
+    const timeoutMs = req.definition?.timeoutMs ?? undefined;
     const run = req.runtime?.run ?? 1;
     const enqueue = () =>
       this.stepQueue.enqueue({

@@ -151,6 +151,17 @@ export interface WorkflowDefinitionInternals {
   readonly compensateConfig?: CompensateConfig;
   readonly dlq?: Sinkable<FailedWorkflowRecord>;
   readonly timeoutMs?: number;
+  /**
+   * Timeout (ms) applied to every plain, `branch`, `match`, `map` and
+   * `parallel` step that sets no `timeoutMs` of its own, so a handler that
+   * never settles fails with `StepTimeoutError` instead of holding the run
+   * (and its heartbeating lock) forever. A step's own `timeoutMs` wins;
+   * `timeoutMs: null` on a step opts it out. `null` or `0` here turns the
+   * workflow's default off, overriding the runner's `defaultStepTimeoutMs`.
+   * Sleeps, signal waits, children, journaled steps and loops are never
+   * given it. Default: the runner's, which is off.
+   */
+  readonly defaultStepTimeoutMs?: number | null;
   readonly onVersionMismatch: "strict" | "drain";
   readonly previousVersions?: ReadonlyArray<Workflow<unknown, unknown>>;
   readonly hooks?: WorkflowHooks;
@@ -362,6 +373,17 @@ export interface WorkflowParams<Input> {
   readonly version?: string;
   /** Global deadline for the entire workflow execution (ms). Fails with WorkflowDeadlineError if exceeded. */
   readonly timeoutMs?: number;
+  /**
+   * Timeout (ms) applied to every plain, `branch`, `match`, `map` and
+   * `parallel` step that sets no `timeoutMs` of its own, so a handler that
+   * never settles fails with `StepTimeoutError` instead of holding the run
+   * (and its heartbeating lock) forever. A step's own `timeoutMs` wins;
+   * `timeoutMs: null` on a step opts it out. `null` or `0` here turns the
+   * workflow's default off, overriding the runner's `defaultStepTimeoutMs`.
+   * Sleeps, signal waits, children, journaled steps and loops are never
+   * given it. Default: the runner's, which is off.
+   */
+  readonly defaultStepTimeoutMs?: number | null;
   /**
    * How to handle resumes of workflows created with a different `version`:
    * - `"strict"` (default) — throw `WorkflowVersionMismatchError`.

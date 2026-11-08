@@ -183,6 +183,7 @@ export async function runWorkflowOrchestration(
         ...(ctx.lock?.heartbeatIntervalMs !== undefined && {
           heartbeatIntervalMs: ctx.lock.heartbeatIntervalMs,
         }),
+        ...(ctx.lock?.maxHoldMs !== undefined && { maxHoldMs: ctx.lock.maxHoldMs }),
         clock,
         loadState: true,
         ...(params.signal !== undefined && { signal: params.signal }),
