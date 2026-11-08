@@ -190,17 +190,17 @@ describe("runner.resume — replay from a specific step", () => {
     // Another recovery worker takes the reset run and completes it in the
     // window between this resume dropping its lock and re-running.
     const release = storage.releaseLock.bind(storage);
-    let raced: unknown;
+    let raced: number | undefined;
     storage.releaseLock = async (params) => {
       await release(params);
       storage.releaseLock = release;
-      raced = await other.run({ workflow: wf, workflowId: "race-1", input: { x: 0 } });
+      raced = (await other.run({ workflow: wf, workflowId: "race-1", input: { x: 0 } })) as number;
     };
 
     const result = await runner.resume({ workflow: wf, workflowId: "race-1", fromStep: "b" });
 
-    expect(raced).toBe(2 + 0);
-    expect(result).toBe(raced);
+    expect(raced).toBe(2);
+    expect(result).toBe(2);
     expect(runs).toBe(2); // the original run plus exactly one re-execution of b
   });
 });
