@@ -4,6 +4,7 @@
 // step executor, executor id, hooks), and the one factory that builds it.
 // ---------------------------------------------------------------------------
 
+import type { WorkflowBudget } from "../budget.ts";
 import type { Sinkable } from "../../shared/streamable.ts";
 import type { WorkflowRetryPolicy } from "../../shared/retry-policy.ts";
 import type { WallClock } from "../../shared/wall-clock.ts";
@@ -59,6 +60,8 @@ export interface WorkflowOrchestrationContext {
   readonly dlq?: Sinkable<FailedWorkflowRecord>;
   readonly idempotency?: IdempotencyConfig;
   readonly timeoutMs?: number;
+  /** The workflow's budget (`workflow({ budget })`). */
+  readonly budget?: WorkflowBudget;
   readonly onVersionMismatch: "strict" | "drain";
   readonly previousVersions?: ReadonlyArray<Workflow<unknown, unknown>>;
   readonly hooks?: WorkflowHooks;
@@ -166,6 +169,7 @@ export function orchestrationContextFor(params: {
     compensateConfig: def.compensateConfig,
     dlq: def.dlq,
     timeoutMs: def.timeoutMs,
+    ...(def.budget !== undefined && { budget: def.budget }),
     onVersionMismatch: def.onVersionMismatch,
     previousVersions: def.previousVersions,
     hooks: params.hooks ?? runtime.hooks ?? def.hooks,

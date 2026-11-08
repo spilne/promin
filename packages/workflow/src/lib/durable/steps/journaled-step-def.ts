@@ -85,6 +85,11 @@ export function createJournaledStep(params: {
             ...(execParams.onMetadataWriteError !== undefined && {
               onMetadataWriteError: execParams.onMetadataWriteError,
             }),
+            ...(execParams.budget !== undefined && { budget: execParams.budget }),
+            ...(execParams.priorRunUsage !== undefined && {
+              priorRunUsage: execParams.priorRunUsage,
+            }),
+            stepMetadata: execParams.metadataRef,
             body,
           }),
         (err) => err as TaggedError,

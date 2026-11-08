@@ -354,6 +354,46 @@ Every surface reports a failed run as the same `WorkflowFailure`
 | Stored `WorkflowState` (any backend) | `workflowFailure(state)`: derived from `error`, `errorTag`, failed step |
 | `handle.result()`                    | `WorkflowFailedError` with `errorTag`, `stepName`, `attempt`            |
 
+### Budgets and usage
+
+A `.journaled()` step reports what it spent, and the workflow caps it:
+
+```ts
+const wf = workflow({
+  name: "research",
+  budget: {
+    maxTokens: 200_000,
+    maxCostUsd: 2,
+    perStep: { maxCostUsd: 1 },
+    steps: { draft: { maxCostUsd: 1.5 } },
+  },
+})
+  .journaled("draft", function* (ctx) {
+    const reply = yield* ctx.activity("llm", () => model.complete(ctx.input.prompt));
+    yield* ctx.reportUsage({ inputTokens: reply.in, outputTokens: reply.out, costUsd: reply.cost });
+    return reply.text;
+  })
+  .build();
+```
+
+- `ctx.reportUsage` writes a journal entry (activity `__usage`), so a retry, replay or crash recovery
+  re-reads it and never counts it twice. It returns the step's running total. Fields default to 0 and must be
+  finite and >= 0 (`RangeError` otherwise). Spend of an activity that failed cannot be reported.
+- When a step settles (completed or failed) its total is stored in its row's `metadata.usage`, so usage is
+  derived from stored rows on every backend: no column, no migration. `handle.status()` / `getStatus()` carry
+  `usage` (run total) and `steps[name].usage`; `runUsage(state.steps)` / `stepUsage(step)` do the same from a
+  stored `WorkflowState`. A step suspended on a sleep or signal has not stored its usage yet (it is re-derived
+  from the journal when the step resumes).
+- Past a cap (strictly above it) the run fails with `WorkflowBudgetExceededError` (`scope`, `limit`, `max`,
+  `used`, `stepName?`): the failure tag is `WorkflowBudgetExceededError`, compensation runs as for any failure,
+  and neither step `retry`, workflow `retry` nor `onFailure` (`skip` / `fallback`) absorbs it. It is checked at
+  each report (the run total is the step's own plus the other steps' stored usage) and after every wave of
+  steps, and once more when a run resumes, so lowering a budget stops a suspended run at its next orchestration.
+- The tracer's `stepAttemptEnd` (the attempt that settled the step) and `runEnd` carry an additive `usage`.
+- Limits: the budget lives on the definition (not stored with the run, so there is no per-run override); a child
+  workflow has its own budget and its usage is not rolled up into the parent; steps running in parallel on a
+  worker see each other's usage only after the wave.
+
 ### What a run is waiting on
 
 `handle.status()` / `getStatus()` carry `waitingOn`: the live run's parked

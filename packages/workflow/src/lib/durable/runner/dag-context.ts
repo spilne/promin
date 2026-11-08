@@ -12,6 +12,7 @@ import type {
   WorkflowHooks,
   WorkflowQueueConfig,
 } from "../durable-pipeline.ts";
+import { addUsage, ZERO_USAGE, type UsageTotals, type WorkflowBudget } from "../budget.ts";
 import type { WorkflowMetadataRef } from "../step-definition.ts";
 import type { StepState, WorkflowStatusSnapshot } from "../workflow-state.ts";
 import type { FenceGuard, WorkflowStorage } from "../workflow-storage.ts";
@@ -30,6 +31,13 @@ export interface DagExecutionContext {
   readonly steps: ReadonlyArray<StepDefinition>;
   readonly hooks?: WorkflowHooks;
   readonly timeoutMs?: number;
+  /** The workflow's budget (`workflow({ budget })`). */
+  readonly budget?: WorkflowBudget;
+  /**
+   * Receives the run's usage (sum of its step rows) whenever the DAG executor
+   * folds in a settled step; read by the run-end trace.
+   */
+  readonly usageRef?: { current?: UsageTotals };
   /**
    * Workflow name + workflow-level queue config — needed to derive a
    * task's `(concurrencyScope, concurrencyKey, concurrencyLimit)` triple
@@ -96,10 +104,20 @@ export function stepRuntimeFor(params: {
   readonly stepStates: Readonly<Record<string, StepState>>;
   readonly stepName: string;
   readonly workflowMetadata?: WorkflowMetadataRef;
+  /** Usage of the run's settled steps (`WaveParams.usageByStep`). */
+  readonly usageByStep?: ReadonlyMap<string, UsageTotals>;
 }): StepRuntime {
   const { ctx, clock } = params;
+  let priorRunUsage: UsageTotals | undefined;
+  if (ctx.budget !== undefined && params.usageByStep !== undefined) {
+    for (const [name, usage] of params.usageByStep) {
+      if (name !== params.stepName) priorRunUsage = addUsage(priorRunUsage ?? ZERO_USAGE, usage);
+    }
+  }
   return {
     clock,
+    ...(ctx.budget !== undefined && { budget: ctx.budget }),
+    ...(priorRunUsage !== undefined && { priorRunUsage }),
     ...(ctx.signal !== undefined && { signal: ctx.signal }),
     stepState: params.stepStates[params.stepName] ?? null,
     ...(params.workflowMetadata !== undefined && { workflowMetadata: params.workflowMetadata }),
@@ -153,6 +171,11 @@ export interface WaveParams {
    * `notifyStepStarted`.
    */
   readonly stepStarted?: ReadonlyMap<string, Promise<void>>;
+  /**
+   * Usage stored by the run's settled steps (earlier waves and the stored
+   * rows), by step name. Only read when the workflow has a budget.
+   */
+  readonly usageByStep?: ReadonlyMap<string, UsageTotals>;
 }
 
 /** Failure outcome of `executeWorkflowDag` (suspension and continue-as-new included). */

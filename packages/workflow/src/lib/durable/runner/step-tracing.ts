@@ -6,6 +6,7 @@
 // end of a retried attempt is delivered late).
 // ---------------------------------------------------------------------------
 
+import { stepUsage } from "../budget.ts";
 import { SystemWallClock } from "../../shared/wall-clock.ts";
 import {
   emitTrace,
@@ -75,6 +76,8 @@ export function traceStepSettled(params: {
     return;
   }
 
+  const usage =
+    outcome.metadata === undefined ? undefined : stepUsage({ metadata: outcome.metadata });
   const lastRecorded = failedAttempts.some((a) => a.attempt === outcome.attempt);
   for (const failed of failedAttempts) {
     const isLast = failed.attempt === outcome.attempt;
@@ -92,6 +95,7 @@ export function traceStepSettled(params: {
       outcome: "failed",
       error,
       willRetry: !isLast,
+      ...(isLast && usage !== undefined && { usage }),
       ...(failed.executorId !== undefined && { executorId: failed.executorId }),
     });
   }
@@ -115,6 +119,7 @@ export function traceStepSettled(params: {
     outcome: kind,
     ...(outcome.kind === "failed" && { error: traceErrorOf(outcome.error) }),
     willRetry: false,
+    ...(usage !== undefined && { usage }),
     ...(outcome.executorId !== undefined && { executorId: outcome.executorId }),
   });
 }

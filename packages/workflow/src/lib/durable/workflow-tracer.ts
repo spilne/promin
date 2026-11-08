@@ -13,6 +13,7 @@
 // keyed by them. A run end always closes everything the run opened.
 // ---------------------------------------------------------------------------
 
+import type { UsageTotals } from "./budget.ts";
 import type { WorkflowFailure } from "./workflow-state.ts";
 
 /** Identity shared by every event of a run. */
@@ -63,6 +64,8 @@ export interface WorkflowTraceRunEnd extends WorkflowTraceRef {
   readonly outcome: WorkflowTraceRunOutcome;
   /** Set when `outcome` is `failed` (the same shape as `onWorkflowFailure`). */
   readonly failure?: WorkflowFailure;
+  /** Usage the run's steps had stored when this orchestration ended; absent when none reported any. */
+  readonly usage?: UsageTotals;
   readonly executorId?: string;
 }
 
@@ -90,6 +93,8 @@ export interface WorkflowTraceStepAttemptEnd extends WorkflowTraceRef {
   readonly error?: WorkflowTraceError;
   /** The attempt failed and the step's retry policy ran another attempt. */
   readonly willRetry: boolean;
+  /** The step's reported usage (`ctx.reportUsage`), on the attempt that settled the step. */
+  readonly usage?: UsageTotals;
   /** Who ran the attempt, when not this runner (a worker id). */
   readonly executorId?: string;
 }
