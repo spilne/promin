@@ -162,6 +162,7 @@ export {
   type StepAttemptRecord,
   type StepAttemptType,
   type FailedWorkflowRecord,
+  type WorkflowFailure,
   type WorkflowRunEvent,
   WORKFLOW_STATUSES,
   TERMINAL_WORKFLOW_STATUSES,
@@ -216,6 +217,16 @@ export {
   MAX_NAMESPACE_DESCRIPTION_LENGTH,
   isValidNamespaceId,
 } from "./lib/namespaces/namespace-registry.ts";
+
+// Failure shape
+export {
+  workflowFailure,
+  failureOf,
+  failureFromError,
+  rehydrateFailure,
+  UNTAGGED_FAILURE_TAG,
+  type FailureRehydrator,
+} from "./lib/durable/workflow-failure.ts";
 
 // Errors
 export {

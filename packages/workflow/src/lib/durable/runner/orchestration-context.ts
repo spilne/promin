@@ -17,6 +17,7 @@ import type {
 } from "../durable-pipeline.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
 import type { FailedWorkflowRecord } from "../workflow-state.ts";
+import { withDefaultStepTimeout } from "../step-policy.ts";
 import type { StepExecutor } from "./step-executor.ts";
 
 /** The run lock's lease, as `WorkflowRunnerConfig.lock` sets it. */
@@ -28,6 +29,15 @@ export interface RunLockOptions {
   readonly durationMs?: number;
   /** How often the driver extends the lease (ms). Default: 30 000. */
   readonly heartbeatIntervalMs?: number;
+  /**
+   * Longest a driver may hold one run's lock (ms). Past it the heartbeat
+   * stops, the run stops with `WorkflowLockLostError` (cause
+   * `WorkflowMaxHoldExceededError`) and the lease expires, so recovery can
+   * reclaim a run whose step handler never settles. Default: unbounded.
+   * Set it above the longest run you expect: a legitimately long run is
+   * stopped too (and re-driven from its checkpoints).
+   */
+  readonly maxHoldMs?: number;
 }
 
 /**
@@ -88,6 +98,8 @@ export interface WorkflowOrchestrationContext {
   readonly runnerHooks?: WorkflowHooks;
   /** The run lock's lease. Inherited by drains and child runs. */
   readonly lock?: RunLockOptions;
+  /** Runner-level `defaultStepTimeoutMs`, kept for the runs this one starts. */
+  readonly defaultStepTimeoutMs?: number | null;
 }
 
 /**
@@ -107,6 +119,11 @@ export interface OrchestrationRuntime {
   readonly hooks?: WorkflowHooks;
   /** The run lock's lease. */
   readonly lock?: RunLockOptions;
+  /**
+   * Timeout for steps that set none (see `WorkflowRunnerConfig.defaultStepTimeoutMs`).
+   * The workflow's own `defaultStepTimeoutMs` wins over it.
+   */
+  readonly defaultStepTimeoutMs?: number | null;
 }
 
 /**
@@ -133,7 +150,13 @@ export function orchestrationContextFor(params: {
     idempotency: workflow.idempotency,
     type: def.type,
     metadata: def.metadata,
-    steps: def.steps,
+    steps: withDefaultStepTimeout({
+      steps: def.steps,
+      defaultMs:
+        def.defaultStepTimeoutMs !== undefined
+          ? def.defaultStepTimeoutMs
+          : runtime.defaultStepTimeoutMs,
+    }),
     retry: def.retry,
     compensateConfig: def.compensateConfig,
     dlq: def.dlq,
@@ -148,6 +171,9 @@ export function orchestrationContextFor(params: {
     ...(runtime.executorId !== undefined && { executorId: runtime.executorId }),
     ...(runtime.hooks !== undefined && { runnerHooks: runtime.hooks }),
     ...(runtime.lock !== undefined && { lock: runtime.lock }),
+    ...(runtime.defaultStepTimeoutMs !== undefined && {
+      defaultStepTimeoutMs: runtime.defaultStepTimeoutMs,
+    }),
   };
 }
 
@@ -161,5 +187,8 @@ export function runtimeOf(ctx: WorkflowOrchestrationContext): OrchestrationRunti
     ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
     ...(ctx.runnerHooks !== undefined && { hooks: ctx.runnerHooks }),
     ...(ctx.lock !== undefined && { lock: ctx.lock }),
+    ...(ctx.defaultStepTimeoutMs !== undefined && {
+      defaultStepTimeoutMs: ctx.defaultStepTimeoutMs,
+    }),
   };
 }

@@ -234,9 +234,15 @@ export class InProcessStepExecutor implements StepExecutor {
       };
     }
 
+    // The runner's definition carries the resolved default timeout; the
+    // bound one is the raw registration.
+    const withTimeout: StepDefinition =
+      bound.timeoutMs === undefined && req.definition?.timeoutMs !== undefined
+        ? { ...bound, timeoutMs: req.definition.timeoutMs }
+        : bound;
     const stepDef: StepDefinition = this.singleAttempt
-      ? { ...bound, retry: undefined, onFailure: undefined }
-      : bound;
+      ? { ...withTimeout, retry: undefined, onFailure: undefined }
+      : withTimeout;
     const runtime = this.runtimeFor(req);
     const clock = runtime.clock ?? this.clock;
     const body = await runStepBody({

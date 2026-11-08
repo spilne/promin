@@ -12,6 +12,7 @@ import type { JournaledContext } from "../journaled-step.ts";
 import { succeed } from "@spilne/perfect-core";
 import { workflow } from "../workflow-builder.ts";
 import { createWorkflowRunner } from "../workflow-runner.ts";
+import { FenceTokenMismatchError, StorageError } from "../durable-pipeline-error.ts";
 
 describe("ctx.metadata — live-writable surface", () => {
   let storage: InMemoryWorkflowStorage;
@@ -225,5 +226,66 @@ describe("ctx.metadata — seeded by the runner", () => {
 
     expect(original).toEqual({ tenant: "acme" });
     expect(ref.current).toEqual({ tenant: "acme", progress: 1 });
+  });
+});
+
+describe("ctx.metadata — a failed write is not silent", () => {
+  class FlakyMetadataStorage extends InMemoryWorkflowStorage {
+    failWith: Error | undefined;
+    override async setWorkflowMetadata(
+      params: Parameters<InMemoryWorkflowStorage["setWorkflowMetadata"]>[0],
+    ): Promise<void> {
+      if (this.failWith) throw this.failWith;
+      return super.setWorkflowMetadata(params);
+    }
+  }
+
+  const build = () =>
+    workflow<number>({ name: "meta-fail" })
+      .journaled("j", function* (ctx) {
+        ctx.metadata.set("progress", "1/2");
+        return 1;
+      })
+      .build();
+
+  it("a storage error is reported to onMetadataWriteError and the step carries on", async () => {
+    const storage = new FlakyMetadataStorage();
+    storage.failWith = new StorageError({ message: "disk full" });
+    const reports: { stepName: string; keys: readonly string[]; error: unknown }[] = [];
+    const runner = createWorkflowRunner({
+      storage,
+      hooks: { onMetadataWriteError: (e) => void reports.push(e) },
+    });
+
+    const result = await runner.run({ workflow: build(), workflowId: "mf-1", input: 1 });
+
+    expect(result).toBe(1);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]).toMatchObject({
+      stepName: "j",
+      keys: ["progress"],
+      error: storage.failWith,
+    });
+  });
+
+  it("a write that lost the lock's fence fails the step with FenceTokenMismatchError", async () => {
+    const storage = new FlakyMetadataStorage();
+    storage.failWith = new FenceTokenMismatchError({
+      workflowId: "mf-2",
+      expected: "2",
+      provided: "1",
+      message: "stale",
+    });
+    const runner = createWorkflowRunner({ storage });
+
+    const { data, error } = await runner.runSafe({
+      workflow: build(),
+      workflowId: "mf-2",
+      input: 1,
+    });
+
+    expect(data).toBeNull();
+    expect((error as { _tag?: string })._tag).toBe("FenceTokenMismatchError");
+    expect((await storage.loadWorkflow("mf-2"))!.status).not.toBe("completed");
   });
 });

@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import type { TaggedError } from "../../shared/tagged-error.ts";
+import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
 import { runHookResult } from "../../shared/eff.ts";
 import { nextRetryDelayMs, type WorkflowRetryPolicy } from "../../shared/retry-policy.ts";
 import { SystemWallClock, type WallClock } from "../../shared/wall-clock.ts";
@@ -57,7 +58,9 @@ import {
   runStartMs,
 } from "./run-status.ts";
 import { checkpointWrite } from "./step-checkpoint.ts";
+import type { WorkflowStorage } from "../workflow-storage.ts";
 import { errorMessage, errorTagOf } from "./step-body.ts";
+import { failureFromError, workflowFailure, type WorkflowFailure } from "../workflow-failure.ts";
 
 /**
  * Default lock extension for orchestration runs. Matches `withLock`'s
@@ -70,6 +73,11 @@ const DEFAULT_LOCK_DURATION_MS = 120_000;
 const MAX_CONTINUE_AS_NEW_CHAIN = 1024;
 
 interface RunParams {
+  /**
+   * Receives the structured failure when this run fails, so `runSafe` reads
+   * the failure of its own run (the thrown error may be shared by runs).
+   */
+  readonly failureSink?: { failure?: WorkflowFailure };
   readonly workflowId: string;
   readonly input: unknown;
   readonly force?: boolean;
@@ -151,6 +159,7 @@ export async function runWorkflowOrchestration(
       force,
       namespace,
       ...(params.drivenByParent && { drivenByParent: true }),
+      ...(params.failureSink !== undefined && { failureSink: params.failureSink }),
       ...(params.onLocked !== undefined && { onLocked: params.onLocked }),
       ...(params.rejectInFlight === true && { rejectInFlight: true }),
       ...(params.signal !== undefined && { signal: params.signal }),
@@ -176,6 +185,7 @@ export async function runWorkflowOrchestration(
         ...(ctx.lock?.heartbeatIntervalMs !== undefined && {
           heartbeatIntervalMs: ctx.lock.heartbeatIntervalMs,
         }),
+        ...(ctx.lock?.maxHoldMs !== undefined && { maxHoldMs: ctx.lock.maxHoldMs }),
         clock,
         loadState: true,
         watchCancel: true,
@@ -279,7 +289,15 @@ async function runChain(params: {
         params:
           chain === 0
             ? { ...params.params, input }
-            : { workflowId, input, force: true, namespace: params.params.namespace },
+            : {
+                workflowId,
+                input,
+                force: true,
+                namespace: params.params.namespace,
+                ...(params.params.failureSink !== undefined && {
+                  failureSink: params.params.failureSink,
+                }),
+              },
       });
     } catch (err) {
       if (errorTag(err) !== "WorkflowContinueAsNewError") throw err;
@@ -436,6 +454,7 @@ async function rollBackCancelled(params: {
     errorTag: CANCELLED_ERROR_TAG,
     resumed: false,
     cancelled: true,
+    failureSink: undefined,
   });
 }
 
@@ -569,6 +588,7 @@ async function runCycleBody(
       errorTag: state.errorTag,
       resumed: true,
       cancelled,
+      failureSink: cycle.params.failureSink,
     });
   }
 
@@ -635,7 +655,13 @@ async function runCycleBody(
         clock,
         workflowId,
         operation: "completeWorkflow",
-        write: () => ctx.storage.completeWorkflow({ workflowId, result: finalResult, guard }),
+        // Stored in the codec's encoded form, like the step rows.
+        write: () =>
+          ctx.storage.completeWorkflow({
+            workflowId,
+            result: encodeWorkflowResult({ steps: ctx.steps, result: finalResult }),
+            guard,
+          }),
       });
       await assertNotCancelled({ ctx, workflowId });
       await fireHook({
@@ -743,6 +769,7 @@ async function runCycleBody(
     errorTag: errorTagOf(lastStepError),
     resumed: false,
     cancelled: false,
+    failureSink: cycle.params.failureSink,
   });
 }
 
@@ -779,6 +806,7 @@ async function rollBackAndFail(params: {
    * `WorkflowCancelledError`.
    */
   cancelled: boolean;
+  failureSink: { failure?: WorkflowFailure } | undefined;
 }): Promise<never> {
   const { ctx, lock, clock, workflowId, input, dagNodes, guard, workflowStartTime } = params;
   const { errorMsg, errorTag: failedTag } = params;
@@ -855,6 +883,16 @@ async function rollBackAndFail(params: {
         ...(failedTag !== undefined && { errorTag: failedTag }),
       }),
   });
+  // The structured failure: the stored run's failed step and attempt, the
+  // live error as `cause`. A failed read degrades to the error alone.
+  const failure = await loadRunFailure({
+    storage: ctx.storage,
+    workflowId,
+    errorMsg,
+    errorTag: failedTag,
+    cause: lastStepError,
+  });
+  if (params.failureSink !== undefined) params.failureSink.failure = failure;
   if (params.cancelled) throw lastStepError;
   await fireHook({
     hooks: ctx.hooks,
@@ -862,6 +900,7 @@ async function rollBackAndFail(params: {
     event: {
       workflowId,
       error: errorMsg,
+      failure,
       durationMs: clock.currentTimeMs() - workflowStartTime,
     },
   });
@@ -875,6 +914,7 @@ async function rollBackAndFail(params: {
       workflowName: ctx.name,
       input,
       errorMsg,
+      failure,
       clock,
       compensationReport,
       metadata: ctx.metadata,
@@ -882,6 +922,26 @@ async function rollBackAndFail(params: {
   }
 
   throw lastStepError;
+}
+
+async function loadRunFailure(params: {
+  storage: WorkflowStorage;
+  workflowId: string;
+  errorMsg: string;
+  errorTag: string | undefined;
+  cause: unknown;
+}): Promise<WorkflowFailure> {
+  const { storage, workflowId, errorMsg, errorTag, cause } = params;
+  try {
+    const state = await storage.loadWorkflow(workflowId);
+    const stored = state
+      ? workflowFailure({ ...state, status: "failed", error: errorMsg, errorTag }, cause)
+      : undefined;
+    if (stored !== undefined) return stored;
+  } catch {
+    // best effort: the failure is already stored
+  }
+  return failureFromError(cause);
 }
 
 /**
@@ -897,7 +957,29 @@ function completedRunResult(params: {
   const lastStep = ctx.steps[ctx.steps.length - 1];
   const row = lastStep ? state.steps[lastStep.name] : undefined;
   if (lastStep && row?.status === "completed") return lastStep.codec.decode(row.result);
-  return state.result;
+  return decodeWorkflowResult({ steps: ctx.steps, stored: state.result });
+}
+
+/**
+ * The workflow's result as stored: the last step's result through its codec.
+ * Runs completed before this stored the plain value; decoding those through
+ * the codec leaves JSON-plain values as they are.
+ */
+function encodeWorkflowResult(params: {
+  steps: WorkflowOrchestrationContext["steps"];
+  result: unknown;
+}): unknown {
+  const last = params.steps[params.steps.length - 1];
+  return last ? last.codec.encode(params.result) : params.result;
+}
+
+/** The inverse of `encodeWorkflowResult`; `LosslessJsonCodec` when the steps are not at hand. */
+export function decodeWorkflowResult(params: {
+  steps?: WorkflowOrchestrationContext["steps"];
+  stored: unknown;
+}): unknown {
+  const last = params.steps?.[params.steps.length - 1];
+  return (last?.codec ?? LosslessJsonCodec).decode(params.stored);
 }
 
 /**
@@ -939,7 +1021,9 @@ function cachedIdempotentOutcome(params: {
   const elapsed = clock.currentTimeMs() - state.completedAt.getTime();
   const ttl = getIdempotencyTtl(ctx.idempotency, state.status);
   if (ttl === undefined || elapsed >= ttl) return undefined;
-  if (state.status === "completed") return { result: state.result };
+  if (state.status === "completed") {
+    return { result: decodeWorkflowResult({ steps: ctx.steps, stored: state.result }) };
+  }
   if (state.status === "failed") {
     throw new WorkflowError({
       workflowId: state.workflowId,

@@ -109,6 +109,11 @@ await onboard
   holds it (e.g. suspended) is not rolled back: the decision needs the
   workflow definition, which `cancelWorkflow` does not have. Without a ledger
   the rollback still runs but is not resumable.
+- A step that never settles holds its run forever unless it has a timeout:
+  set `defaultStepTimeoutMs` on `workflow()` or `createWorkflowRunner` (a
+  step's `timeoutMs` wins, `timeoutMs: null` opts out) and `lock.maxHoldMs` to
+  cap how long one driver holds a run. Both are off by default and
+  recommended in production; see the durable README.
 - `.parallel(name, branches)` forks the head into one DAG step per branch
   and joins them into `{ [branch]: result }`;
   `.parallel(name, { dependsOn }, branches)` forks from named steps.

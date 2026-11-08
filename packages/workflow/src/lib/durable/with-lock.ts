@@ -32,6 +32,11 @@
 //     until no heartbeat has succeeded for a whole `lockDurationMs`; by
 //     then the lock has expired and may be taken, so `ctx.signal` aborts.
 //
+//   - With `maxHoldMs`, a driver that has held the lock that long stops
+//     heartbeating and `ctx.signal` aborts (cause: `WorkflowMaxHoldExceededError`),
+//     so a handler that never settles cannot keep the run forever: the lease
+//     expires and recovery reclaims it.
+//
 //   The abort reason is a `WorkflowLockLostError`. `fn` decides where to
 //   stop (the runner checks between waves); `withLock` never interrupts it.
 //
@@ -60,6 +65,7 @@ import {
   WorkflowCancelledError,
   WorkflowLockError,
   WorkflowLockLostError,
+  WorkflowMaxHoldExceededError,
 } from "./durable-pipeline-error.ts";
 import { isCancelledRun } from "./workflow-state.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
@@ -86,6 +92,15 @@ export interface WithLockOptions {
   heartbeatIntervalMs?: number;
   /** How long to extend the lock on each heartbeat (ms). Default: 120_000 */
   lockDurationMs?: number;
+  /**
+   * Upper bound on how long this call holds the lock (ms, from acquiring
+   * it). Once reached, the heartbeat stops extending the lease and
+   * `LockContext.signal` aborts with a `WorkflowLockLostError` whose `cause`
+   * is a `WorkflowMaxHoldExceededError`. The lease then expires within
+   * `lockDurationMs` and another driver can reclaim the run, even if `fn`
+   * never settles. Default: unbounded.
+   */
+  maxHoldMs?: number;
   /**
    * Time source. Drives the heartbeat interval via `clock.setInterval`.
    * Default: real system clock. Tests pass a `FakeWallClock` so advancing
@@ -199,7 +214,9 @@ export async function withLock<T>(params: {
 
   const guard = token ? { fenceToken: token } : undefined;
   const lost = new AbortController();
-  let lastExtendedMs = clock.currentTimeMs();
+  const acquiredMs = clock.currentTimeMs();
+  const maxHoldMs = params.options?.maxHoldMs;
+  let lastExtendedMs = acquiredMs;
   let released = false;
 
   // `lost` is the lease alone; `run` also aborts on a cancel.
@@ -247,6 +264,22 @@ export async function withLock<T>(params: {
   };
   const heartbeatHandle = clock.setInterval(() => {
     if (released || lost.signal.aborted) return;
+    if (maxHoldMs !== undefined && clock.currentTimeMs() - acquiredMs >= maxHoldMs) {
+      lost.abort(
+        new WorkflowLockLostError({
+          workflowId,
+          message:
+            `Stopped driving workflow "${workflowId}": it held the lock for ` +
+            `${maxHoldMs}ms (maxHoldMs); the lease is no longer extended`,
+          cause: new WorkflowMaxHoldExceededError({
+            workflowId,
+            maxHoldMs,
+            message: `Workflow "${workflowId}" held its lock longer than ${maxHoldMs}ms`,
+          }),
+        }),
+      );
+      return;
+    }
     // A heartbeat call that never settles must not hide that the lease ran
     // out, so the elapsed time is judged here and not only when a call fails.
     if (clock.currentTimeMs() - lastExtendedMs >= lockDurationMs) {

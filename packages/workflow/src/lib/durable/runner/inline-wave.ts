@@ -7,6 +7,7 @@
 import { stepRuntimeFor, type WaveOutcome, type WaveParams } from "./dag-context.ts";
 import { runStepBody } from "./step-body.ts";
 import { checkpointStepOutcome } from "./step-checkpoint.ts";
+import { fireHook } from "./hooks.ts";
 import { outcomeOfBody, settleWave, skippedOutcome } from "./wave.ts";
 
 /**
@@ -50,6 +51,16 @@ export async function runInlineWave(params: WaveParams): Promise<WaveOutcome> {
               stepStates,
               stepName: stepDef.name,
               workflowMetadata,
+            }),
+            // Inline only: a function does not cross to a queue worker, which
+            // falls back to the default `console.warn`.
+            ...(ctx.hooks?.onMetadataWriteError !== undefined && {
+              onMetadataWriteError: ({ error, keys }) =>
+                void fireHook({
+                  hooks: ctx.hooks,
+                  name: "onMetadataWriteError",
+                  event: { workflowId, stepName: stepDef.name, error, keys },
+                }),
             }),
             input,
             results,
