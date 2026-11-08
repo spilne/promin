@@ -2,6 +2,7 @@
 // CompensationLedgerStore — durable saga rollback.
 // ---------------------------------------------------------------------------
 
+import type { CompensationOrigin } from "../workflow-state.ts";
 import type { FencedWrite } from "./fencing.ts";
 
 /**
@@ -13,9 +14,18 @@ export type StepCompensationOutcome = "compensated" | "compensation_failed";
 /** Params of `beginCompensation`. */
 export interface BeginCompensationParams extends FencedWrite {
   readonly workflowId: string;
-  /** The failure that triggered the rollback; the run ends `failed` with it. */
+  /**
+   * The failure that triggered the rollback; the run ends `failed` with it.
+   */
   readonly error: string;
   readonly errorTag?: string;
+  /**
+   * What starts the rollback, stored with the phase (default `"failure"`).
+   * `"cancel"` is for a driver that observed the run's own cancellation: it
+   * is also what allows an ended cancelled run to enter the phase (see
+   * `beginCompensation`). It is never derived from `errorTag`.
+   */
+  readonly origin?: CompensationOrigin;
 }
 
 /** Params of `saveStepCompensation`. */
@@ -49,9 +59,19 @@ export interface CompensationLedgerStore {
    * becomes `compensating`, storing `error` / `errorTag`. A run that is
    * already `compensating` is left as it is, ledger and error included.
    *
+   * A cancelled run (ended by `cancelWorkflow`, so carrying the `"cancel"`
+   * origin marker; a failed run that merely has the cancelled `errorTag` does
+   * not) is the one ended run this call may reopen, and only when `origin` is
+   * `"cancel"`: it becomes `compensating` again with
+   * `completedAt` cleared, so a driver that sees a cancel can roll the run
+   * back durably (a crash leaves it `compensating`, for recovery to finish).
+   * The run's final `failWorkflow` with the same tag ends it cancelled again.
+   *
    * Returns `true` when the run is `compensating` after the call, `false`
-   * when it is missing or has ended (completed, failed, cancelled,
-   * tripwire): an ended run is never rolled back by this call.
+   * when it is missing or has ended otherwise (completed, failed, tripwire,
+   * or cancelled when `origin` is not `"cancel"`, or failed with only the
+   * cancelled `errorTag`): such a run is
+   * never rolled back by this call.
    */
   beginCompensation(params: BeginCompensationParams): Promise<boolean>;
 

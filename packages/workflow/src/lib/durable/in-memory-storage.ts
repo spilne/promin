@@ -480,6 +480,7 @@ export class InMemoryWorkflowStorage
     wf.status = "failed";
     wf.error = CANCELLED_ERROR;
     wf.errorTag = CANCELLED_ERROR_TAG;
+    wf.compensationOrigin = "cancel";
     wf.completedAt = now;
     wf.updatedAt = now;
     this.emit({
@@ -554,6 +555,7 @@ export class InMemoryWorkflowStorage
     wf.result = undefined;
     wf.error = undefined;
     wf.errorTag = undefined;
+    wf.compensationOrigin = undefined;
     wf.tripwire = undefined;
     wf.startedAt = undefined;
     wf.completedAt = undefined;
@@ -595,6 +597,7 @@ export class InMemoryWorkflowStorage
       wf.result = undefined;
       wf.error = undefined;
       wf.errorTag = undefined;
+      wf.compensationOrigin = undefined;
       wf.tripwire = undefined;
       wf.completedAt = undefined;
     }
@@ -1043,12 +1046,23 @@ export class InMemoryWorkflowStorage
     const wf = this.workflows.get(params.workflowId);
     if (!wf) return false;
     if (wf.status === "compensating") return true;
-    if (wf.status !== "pending" && wf.status !== "running" && wf.status !== "suspended") {
+    const origin = params.origin ?? "failure";
+    // Only a run `cancelWorkflow` ended (its marker, not the tag) reopens.
+    const reopensCancelled =
+      origin === "cancel" && wf.status === "failed" && wf.compensationOrigin === "cancel";
+    if (
+      !reopensCancelled &&
+      wf.status !== "pending" &&
+      wf.status !== "running" &&
+      wf.status !== "suspended"
+    ) {
       return false;
     }
+    if (reopensCancelled) delete wf.completedAt;
     wf.status = "compensating";
     wf.error = params.error;
     wf.errorTag = params.errorTag;
+    wf.compensationOrigin = origin;
     wf.updatedAt = this.clock.now();
     return true;
   }

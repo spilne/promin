@@ -101,9 +101,14 @@ await onboard
 - `compensate: { onCancel: "rollback" }` rolls the completed steps back when
   the run is cancelled (same order, retries and durable ledger as a failure
   rollback, `onComplete` fired), then the run ends cancelled, not failed.
-  Default `"none"`. Only the driver that sees the cancel rolls back; if it
-  loses the lock mid-rollback the rest is not re-driven (a cancelled run is
-  terminal).
+  Default `"none"`. The driver that sees the cancel reopens the run as
+  `compensating` (with a ledger-capable storage) and rolls back from there, so
+  the rollback is crash-safe like a failure's: if the driver crashes or loses
+  the lock, recovery (or the next driver) finishes it, skips the steps already
+  rolled back, and the run ends cancelled. A run cancelled while no driver
+  holds it (e.g. suspended) is not rolled back: the decision needs the
+  workflow definition, which `cancelWorkflow` does not have. Without a ledger
+  the rollback still runs but is not resumable.
 - A step that never settles holds its run forever unless it has a timeout:
   set `defaultStepTimeoutMs` on `workflow()` or `createWorkflowRunner` (a
   step's `timeoutMs` wins, `timeoutMs: null` opts out) and `lock.maxHoldMs` to

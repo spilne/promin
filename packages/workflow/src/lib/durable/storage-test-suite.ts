@@ -16,7 +16,14 @@ import {
   type StepCheckpointStore,
   type WorkflowStorage,
 } from "./workflow-storage.ts";
-import type { StepAttemptRecord, StepState, WorkflowState } from "./workflow-state.ts";
+import {
+  CANCELLED_ERROR,
+  CANCELLED_ERROR_TAG,
+  isCancelledRun,
+  type StepAttemptRecord,
+  type StepState,
+  type WorkflowState,
+} from "./workflow-state.ts";
 import { JOURNAL_STEP_TYPES, type JournalStore } from "./activity-journal.ts";
 
 export interface StorageTestSuiteOptions {
@@ -2938,6 +2945,124 @@ export function storageTestSuite(
             expect(await s.loadWorkflowStatus(id)).toEqual(before);
           }
           expect(await s.beginCompensation({ workflowId: "led-missing", error: "x" })).toBe(false);
+        });
+
+        it("beginCompensation reopens a cancelled run for a cancel rollback, and failWorkflow ends it cancelled", async () => {
+          const s = await getLedgerStorage();
+          await runWithSteps(s, "led-reopen", ["a", "b"]);
+          await s.cancelWorkflow({ workflowId: "led-reopen" });
+          expect(isCancelledRun((await s.loadWorkflowStatus("led-reopen"))!)).toBe(true);
+
+          expect(
+            await s.beginCompensation({
+              workflowId: "led-reopen",
+              error: CANCELLED_ERROR,
+              errorTag: CANCELLED_ERROR_TAG,
+              origin: "cancel",
+            }),
+          ).toBe(true);
+          const open = await s.loadWorkflow("led-reopen");
+          expect(open?.status).toBe("compensating");
+          expect(open?.errorTag).toBe(CANCELLED_ERROR_TAG);
+          expect(open?.compensationOrigin).toBe("cancel");
+          expect(open?.completedAt).toBeUndefined();
+
+          // The reopened run is a compensating run like any other: it keeps
+          // its ledger, is left as it is by a repeat, and is not cancellable.
+          await s.saveStepCompensation({
+            workflowId: "led-reopen",
+            stepName: "b",
+            status: "compensated",
+          });
+          expect(
+            await s.beginCompensation({
+              workflowId: "led-reopen",
+              error: CANCELLED_ERROR,
+              errorTag: CANCELLED_ERROR_TAG,
+              origin: "cancel",
+            }),
+          ).toBe(true);
+          await s.cancelWorkflow({ workflowId: "led-reopen" });
+          const again = await s.loadWorkflow("led-reopen");
+          expect(again?.status).toBe("compensating");
+          expect(again?.steps.b?.compensationStatus).toBe("compensated");
+          expect(again?.steps.a?.compensationStatus).toBeUndefined();
+
+          await s.failWorkflow({
+            workflowId: "led-reopen",
+            error: CANCELLED_ERROR,
+            errorTag: CANCELLED_ERROR_TAG,
+          });
+          const ended = await s.loadWorkflow("led-reopen");
+          expect(isCancelledRun(ended!)).toBe(true);
+          expect(ended?.completedAt).toBeInstanceOf(Date);
+          expect(ended?.steps.b?.compensationStatus).toBe("compensated");
+        });
+
+        it("a cancel rollback reopens only runs cancelWorkflow ended, not any run with the cancelled tag", async () => {
+          const s = await getLedgerStorage();
+          await runWithSteps(s, "led-ro-done", ["a"]);
+          await s.completeWorkflow({ workflowId: "led-ro-done", result: "ok" });
+          await runWithSteps(s, "led-ro-failed", ["a"]);
+          await s.failWorkflow({ workflowId: "led-ro-failed", error: "nope", errorTag: "Boom" });
+
+          for (const id of ["led-ro-done", "led-ro-failed"]) {
+            const before = await s.loadWorkflowStatus(id);
+            expect(
+              await s.beginCompensation({
+                workflowId: id,
+                error: CANCELLED_ERROR,
+                errorTag: CANCELLED_ERROR_TAG,
+                origin: "cancel",
+              }),
+            ).toBe(false);
+            expect(await s.loadWorkflowStatus(id)).toEqual(before);
+          }
+
+          // A run that failed with the cancelled tag but was never cancelled
+          // carries no cancel marker: it stays ended.
+          await runWithSteps(s, "led-ro-tagged", ["a"]);
+          await s.failWorkflow({
+            workflowId: "led-ro-tagged",
+            error: "step threw",
+            errorTag: CANCELLED_ERROR_TAG,
+          });
+          const tagged = await s.loadWorkflowStatus("led-ro-tagged");
+          expect(tagged?.status).toBe("failed");
+          expect(
+            await s.beginCompensation({
+              workflowId: "led-ro-tagged",
+              error: CANCELLED_ERROR,
+              errorTag: CANCELLED_ERROR_TAG,
+              origin: "cancel",
+            }),
+          ).toBe(false);
+          expect(await s.loadWorkflowStatus("led-ro-tagged")).toEqual(tagged);
+
+          // A cancelled run reopens only for the cancel origin: a failure
+          // rollback of it is refused, and so is a repeat without the origin.
+          await runWithSteps(s, "led-ro-cancelled", ["a"]);
+          await s.cancelWorkflow({ workflowId: "led-ro-cancelled" });
+          expect(
+            await s.beginCompensation({
+              workflowId: "led-ro-cancelled",
+              error: CANCELLED_ERROR,
+              errorTag: CANCELLED_ERROR_TAG,
+            }),
+          ).toBe(false);
+          expect(isCancelledRun((await s.loadWorkflowStatus("led-ro-cancelled"))!)).toBe(true);
+
+          // A running run is entered as usual, with the cancel's tag.
+          await runWithSteps(s, "led-ro-running", ["a"]);
+          expect(
+            await s.beginCompensation({
+              workflowId: "led-ro-running",
+              error: CANCELLED_ERROR,
+              errorTag: CANCELLED_ERROR_TAG,
+              origin: "cancel",
+            }),
+          ).toBe(true);
+          expect((await s.loadWorkflowStatus("led-ro-running"))?.status).toBe("compensating");
         });
 
         it("saveStepCompensation records each step's rollback on the current run", async () => {

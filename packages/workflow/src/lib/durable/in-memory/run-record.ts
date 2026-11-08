@@ -6,6 +6,7 @@ import { workflowMetadataMatches } from "../storage/metadata.ts";
 import type { WorkflowSortFields } from "../storage/ordering.ts";
 import type { WorkflowListFilter } from "../storage/query-store.ts";
 import type {
+  CompensationOrigin,
   RunSource,
   StepState,
   StepTaskState,
@@ -29,6 +30,7 @@ export interface MutableWorkflow {
   result?: unknown;
   error?: string;
   errorTag?: string;
+  compensationOrigin?: CompensationOrigin;
   tripwire?: unknown;
   runSource?: RunSource;
   runSourceId?: string;
@@ -89,6 +91,7 @@ export function toWorkflowState(wf: MutableWorkflow): WorkflowState {
     result: wf.result,
     error: wf.error,
     errorTag: wf.errorTag,
+    compensationOrigin: wf.compensationOrigin,
     tripwire: wf.tripwire,
     runSource: wf.runSource,
     runSourceId: wf.runSourceId,

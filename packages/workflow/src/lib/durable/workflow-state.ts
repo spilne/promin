@@ -38,6 +38,15 @@ export function isTerminalWorkflowStatus(status: WorkflowStatus): boolean {
   return status === "completed" || status === "failed" || status === "tripwire";
 }
 
+/**
+ * What started a run's rollback, persisted beside its error (never inferred
+ * from `errorTag`, which a failing step can set to any tag): `"failure"` for
+ * a rollback after a failure, `"cancel"` for one answering a cancel. A run
+ * carries `"cancel"` from `cancelWorkflow` on, so only a real cancellation
+ * can be reopened for a cancel rollback.
+ */
+export type CompensationOrigin = "failure" | "cancel";
+
 /** `errorTag` `cancelWorkflow` stores on a cancelled run. */
 export const CANCELLED_ERROR_TAG = "WorkflowCancelledError";
 
@@ -184,6 +193,12 @@ export interface WorkflowState<Input = unknown, Result = unknown> {
    * not `failed` or the error carried no tag.
    */
   readonly errorTag?: string;
+  /**
+   * What started the run's rollback (`beginCompensation`'s `origin`), or
+   * `"cancel"` on a run `cancelWorkflow` ended. Absent on a run never rolled
+   * back or cancelled. See `CompensationOrigin`.
+   */
+  readonly compensationOrigin?: CompensationOrigin;
   /**
    * Structured reason attached when the workflow ended via a `.tripwire()`
    * step. Present only when `status === "tripwire"`. Opaque payload — the

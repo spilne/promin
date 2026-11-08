@@ -88,6 +88,7 @@ import type {
   SignalState,
   StepAttemptRecord,
   RunSource,
+  CompensationOrigin,
 } from "@promin/workflow";
 import {
   FenceTokenMismatchError,
@@ -361,6 +362,7 @@ export class RedisWorkflowStorage
       result: raw.result ? JSON.parse(raw.result) : undefined,
       error: raw.error || undefined,
       errorTag: raw.errorTag || undefined,
+      compensationOrigin: (raw.compensationOrigin as CompensationOrigin) || undefined,
       tripwire: raw.tripwire ? JSON.parse(raw.tripwire) : undefined,
       runSource: raw.runSource ? decodeRunSource(Number(raw.runSource)) : undefined,
       runSourceId: raw.runSourceId || undefined,
@@ -998,7 +1000,11 @@ export class RedisWorkflowStorage
       guard,
       to: "failed",
       from: CANCELLABLE_STATUSES,
-      fields: { error: CANCELLED_ERROR, errorTag: CANCELLED_ERROR_TAG },
+      fields: {
+        error: CANCELLED_ERROR,
+        errorTag: CANCELLED_ERROR_TAG,
+        compensationOrigin: "cancel",
+      },
     });
 
     if (cascade) {
@@ -2432,6 +2438,35 @@ export class RedisWorkflowStorage
   async beginCompensation({ guard, ...params }: BeginCompensationParams): Promise<boolean> {
     const { workflowId } = params;
     const nowIso = this.serializeDate(this.clock.now());
+    const origin = params.origin ?? "failure";
+    if (origin === "cancel") {
+      // A cancel's rollback reopens the run `cancelWorkflow` ended (marker,
+      // completedAt cleared). Not applied (no such run) falls through to the
+      // usual move.
+      const wfKey = this.keys.wf(workflowId);
+      const reopened = await this.writeOps({
+        workflowId,
+        guard,
+        ops: [
+          ["HEQ", wfKey, "status", "failed"],
+          ["HEQ", wfKey, "compensationOrigin", "cancel"],
+          this.statusOp({
+            workflowId,
+            to: "compensating",
+            from: ["failed"],
+            fields: {
+              error: params.error,
+              errorTag: params.errorTag ?? "",
+              compensationOrigin: origin,
+              completedAt: "",
+              updatedAt: nowIso,
+            },
+          }),
+          ["HGET", wfKey, "status"],
+        ],
+      });
+      if (reopened.applied) return reopened.last === "compensating";
+    }
     // The move and the read-back run in one script: the reply is the status
     // the run has after it.
     const { last } = await this.writeOps({
@@ -2442,7 +2477,12 @@ export class RedisWorkflowStorage
           workflowId,
           to: "compensating",
           from: CANCELLABLE_STATUSES,
-          fields: { error: params.error, errorTag: params.errorTag ?? "", updatedAt: nowIso },
+          fields: {
+            error: params.error,
+            errorTag: params.errorTag ?? "",
+            compensationOrigin: origin,
+            updatedAt: nowIso,
+          },
         }),
         ["HGET", this.keys.wf(workflowId), "status"],
       ],

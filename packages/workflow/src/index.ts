@@ -158,6 +158,7 @@ export {
   type StepStatus,
   type StepType,
   type CompensationStatus,
+  type CompensationOrigin,
   type StepAttemptRecord,
   type StepAttemptType,
   type FailedWorkflowRecord,

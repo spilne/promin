@@ -534,7 +534,7 @@ redis.call('LTRIM', KEYS[2], -tonumber(ARGV[3]), -1)
 local newRun = tonumber(run) + 1
 redis.call('HSET', KEYS[1], 'run', tostring(newRun), 'status', 'pending', 'updatedAt', ARGV[4])
 if ARGV[6] == '1' then redis.call('HSET', KEYS[1], 'input', ARGV[7]) end
-redis.call('HDEL', KEYS[1], 'result', 'error', 'errorTag', 'tripwire', 'startedAt', 'completedAt')
+redis.call('HDEL', KEYS[1], 'result', 'error', 'errorTag', 'compensationOrigin', 'tripwire', 'startedAt', 'completedAt')
 redis.call('HINCRBY', KEYS[1], 'iv', 1)
 redis.call('PERSIST', KEYS[1])
 redis.call('PERSIST', KEYS[2])
@@ -596,7 +596,7 @@ local status = redis.call('HGET', KEYS[1], 'status')
 redis.call('HSET', KEYS[1], 'updatedAt', ARGV[4])
 if status == 'completed' or status == 'failed' or status == 'tripwire' then
   redis.call('HSET', KEYS[1], 'status', 'running')
-  redis.call('HDEL', KEYS[1], 'result', 'error', 'errorTag', 'tripwire', 'completedAt')
+  redis.call('HDEL', KEYS[1], 'result', 'error', 'errorTag', 'compensationOrigin', 'tripwire', 'completedAt')
   redis.call('HINCRBY', KEYS[1], 'iv', 1)
   snap = snapshot(KEYS[1])
 end
