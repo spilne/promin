@@ -13,6 +13,12 @@ import type { StepRegistry, WorkerStepContext, StepRegistration } from "./step-r
 import type { StepQueue, StepTask } from "./step-queue.ts";
 import type { WorkerMiddleware } from "./middleware.ts";
 import type { WorkerRegistry } from "./worker-registry.ts";
+import {
+  emitTrace,
+  traceErrorOf,
+  type WorkflowTracer,
+  type WorkflowTraceWorkerTask,
+} from "../durable/workflow-tracer.ts";
 
 // ---------------------------------------------------------------------------
 // Hooks
@@ -59,6 +65,12 @@ export interface WorkerConfig {
   pollIntervalMs?: number;
   workerId?: string;
   hooks?: WorkerHooks;
+  /**
+   * Lifecycle tracer: `workerTaskStart` / `workerTaskEnd` per claimed task,
+   * carrying the `traceparent` the coordinator stored with it. A tracer that
+   * throws never affects the task.
+   */
+  tracer?: WorkflowTracer;
   middleware?: WorkerMiddleware[];
   /** Worker registry for health monitoring. Optional — without it, no heartbeat/registration. */
   workerRegistry?: WorkerRegistry;
@@ -182,6 +194,7 @@ export class DefaultWorker implements WorkflowWorker {
   private readonly capabilities: readonly string[];
   private readonly concurrency: number;
   private readonly hooks: WorkerHooks;
+  private readonly tracer?: WorkflowTracer;
   private readonly middleware: WorkerMiddleware[];
   private readonly workerRegistry?: WorkerRegistry;
   private readonly heartbeatIntervalMs: number;
@@ -208,6 +221,7 @@ export class DefaultWorker implements WorkflowWorker {
     this.capabilities = config.capabilities ?? [];
     this.concurrency = config.concurrency ?? 1;
     this.hooks = config.hooks ?? {};
+    if (config.tracer !== undefined) this.tracer = config.tracer;
     this.middleware = config.middleware ?? [];
     this.workerRegistry = config.workerRegistry;
     this.heartbeatIntervalMs = config.heartbeatIntervalMs ?? 5000;
@@ -384,6 +398,7 @@ export class DefaultWorker implements WorkflowWorker {
    */
   private async executeTask(task: StepTask, controller: AbortController): Promise<void> {
     const startTime = this.clock.currentTimeMs();
+    const traced = this.tracer !== undefined ? this.traceTaskStart(task) : undefined;
     const taskHeartbeatTimer: TimerHandle = this.clock.setInterval(() => {
       void this.heartbeatTask({ task, controller, timer: taskHeartbeatTimer });
     }, this.heartbeatIntervalMs);
@@ -391,11 +406,52 @@ export class DefaultWorker implements WorkflowWorker {
     try {
       const outcome = await this.computeOutcome({ task, startTime, signal: controller.signal });
       // Lease lost or given back on stop: the task belongs to someone else.
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) {
+        if (traced !== undefined) this.traceTaskEnd({ traced, outcome: "lease-lost" });
+        return;
+      }
+      if (traced !== undefined) {
+        this.traceTaskEnd({
+          traced,
+          outcome: outcome.kind === "completed" ? "completed" : "failed",
+          ...(outcome.kind === "failed" && { cause: outcome.cause }),
+        });
+      }
       await this.commit(task, outcome);
     } finally {
       taskHeartbeatTimer.clear();
     }
+  }
+
+  private traceTaskStart(task: StepTask): WorkflowTraceWorkerTask {
+    const stored = task.metadata?.traceparent;
+    const event: WorkflowTraceWorkerTask = {
+      taskId: task.id,
+      workflowId: task.workflowId,
+      run: task.run,
+      stepName: task.stepName,
+      attempt: task.attempt,
+      workerId: this.workerId,
+      ...(typeof stored === "string" && { traceparent: stored }),
+      startedAt: this.clock.now(),
+    };
+    emitTrace(this.tracer!, "workerTaskStart", event);
+    return event;
+  }
+
+  private traceTaskEnd(params: {
+    readonly traced: WorkflowTraceWorkerTask;
+    readonly outcome: "completed" | "failed" | "lease-lost";
+    readonly cause?: unknown;
+  }): void {
+    const endedAt = this.clock.now();
+    emitTrace(this.tracer!, "workerTaskEnd", {
+      ...params.traced,
+      endedAt,
+      durationMs: endedAt.getTime() - params.traced.startedAt.getTime(),
+      outcome: params.outcome,
+      ...("cause" in params && { error: traceErrorOf(params.cause) }),
+    });
   }
 
   /**

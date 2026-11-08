@@ -18,6 +18,7 @@ import type {
 import type { WorkflowStorage } from "../workflow-storage.ts";
 import type { FailedWorkflowRecord } from "../workflow-state.ts";
 import { withDefaultStepTimeout } from "../step-policy.ts";
+import type { WorkflowTracer } from "../workflow-tracer.ts";
 import type { StepExecutor } from "./step-executor.ts";
 
 /** The run lock's lease, as `WorkflowRunnerConfig.lock` sets it. */
@@ -100,6 +101,8 @@ export interface WorkflowOrchestrationContext {
   readonly lock?: RunLockOptions;
   /** Runner-level `defaultStepTimeoutMs`, kept for the runs this one starts. */
   readonly defaultStepTimeoutMs?: number | null;
+  /** Lifecycle tracer. Inherited by drains and child runs. */
+  readonly tracer?: WorkflowTracer;
 }
 
 /**
@@ -124,6 +127,8 @@ export interface OrchestrationRuntime {
    * The workflow's own `defaultStepTimeoutMs` wins over it.
    */
   readonly defaultStepTimeoutMs?: number | null;
+  /** Lifecycle tracer (see `WorkflowTracer`). */
+  readonly tracer?: WorkflowTracer;
 }
 
 /**
@@ -174,6 +179,7 @@ export function orchestrationContextFor(params: {
     ...(runtime.defaultStepTimeoutMs !== undefined && {
       defaultStepTimeoutMs: runtime.defaultStepTimeoutMs,
     }),
+    ...(runtime.tracer !== undefined && { tracer: runtime.tracer }),
   };
 }
 
@@ -190,5 +196,6 @@ export function runtimeOf(ctx: WorkflowOrchestrationContext): OrchestrationRunti
     ...(ctx.defaultStepTimeoutMs !== undefined && {
       defaultStepTimeoutMs: ctx.defaultStepTimeoutMs,
     }),
+    ...(ctx.tracer !== undefined && { tracer: ctx.tracer }),
   };
 }

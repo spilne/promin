@@ -100,6 +100,6 @@ export function outcomeOfBody(params: {
       };
     case "suspended":
     case "continue-as-new":
-      return { kind: body.kind, name, error: body.error };
+      return { kind: body.kind, name, error: body.error, attempt: body.attempt, startedAt };
   }
 }

@@ -42,6 +42,12 @@ export interface StepExecutionRequest {
   readonly needs?: readonly string[];
   readonly priority?: number;
   /**
+   * W3C `traceparent` of the step attempt's span, when the runner has a
+   * tracer that provides one. Queue-backed executors store it with the
+   * task (`StepTask.metadata.traceparent`) so the worker can join the trace.
+   */
+  readonly traceparent?: string;
+  /**
    * Version of the definition driving the run. Forwarded to the step queue
    * so version-pinned workers (`supportedVersions`) only claim their own.
    */

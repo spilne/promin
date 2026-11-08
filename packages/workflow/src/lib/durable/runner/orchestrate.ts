@@ -61,6 +61,12 @@ import { checkpointWrite } from "./step-checkpoint.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
 import { errorMessage, errorTagOf } from "./step-body.ts";
 import { failureFromError, workflowFailure, type WorkflowFailure } from "../workflow-failure.ts";
+import {
+  emitTrace,
+  traceErrorOf,
+  type WorkflowTraceRef,
+  type WorkflowTraceRunOutcome,
+} from "../workflow-tracer.ts";
 
 /**
  * Default lock extension for orchestration runs. Matches `withLock`'s
@@ -109,6 +115,27 @@ interface RunParams {
   readonly signal?: AbortSignal;
   /** Drive the stored run with its stored input; no stored run → `WorkflowRunNotFoundError`. */
   readonly useStoredInput?: boolean;
+  /**
+   * W3C `traceparent` of the request that starts or resumes the run, for the
+   * tracer's `runStart`. With a tracer, a run created by this call also
+   * stores it as `metadata.traceparent`, so a later resume joins the trace.
+   */
+  readonly traceparent?: string;
+  /** The run is a child workflow of this run (`runChildWorkflow`). */
+  readonly parentWorkflowId?: string;
+}
+
+/** The open trace of a run: its identity and when `runStart` was emitted. */
+interface TraceRun {
+  readonly ref: WorkflowTraceRef;
+  readonly startedAt: Date;
+}
+
+/** Where a cycle is: executing (a cancel may roll back), its input, its trace. */
+interface CyclePhase {
+  executing: boolean;
+  input: unknown;
+  trace?: TraceRun;
 }
 
 /** Statuses `rejectInFlight` treats as a run still in flight. */
@@ -164,6 +191,8 @@ export async function runWorkflowOrchestration(
       ...(params.rejectInFlight === true && { rejectInFlight: true }),
       ...(params.signal !== undefined && { signal: params.signal }),
       ...(params.useStoredInput === true && { useStoredInput: true }),
+      ...(params.traceparent !== undefined && { traceparent: params.traceparent }),
+      ...(params.parentWorkflowId !== undefined && { parentWorkflowId: params.parentWorkflowId }),
     });
   }
 
@@ -205,12 +234,21 @@ export async function runWorkflowOrchestration(
           }
         }
         params.onLocked?.();
+        const stopTracingLock = traceLock({
+          ctx,
+          lock,
+          clock,
+          workflowId,
+          namespace: params.namespace ?? lock.state?.namespace,
+        });
         const queries = openQueryScope(workflowId);
         try {
           const result = await runChain({ ctx, params, lock, clock, loaded, queries });
           queries.close();
+          stopTracingLock();
           return result;
         } catch (err) {
+          stopTracingLock();
           // A suspended run keeps its handlers for a while: a resume here
           // re-registers them on replay, so they stay up across the wait.
           queries.close({ suspended: errorTag(err) === "WorkflowSuspendedError" });
@@ -294,6 +332,9 @@ async function runChain(params: {
                 input,
                 force: true,
                 namespace: params.params.namespace,
+                ...(params.params.parentWorkflowId !== undefined && {
+                  parentWorkflowId: params.params.parentWorkflowId,
+                }),
                 ...(params.params.failureSink !== undefined && {
                   failureSink: params.params.failureSink,
                 }),
@@ -370,6 +411,7 @@ export async function runChildWorkflow(params: {
     workflowId,
     input,
     drivenByParent: true,
+    parentWorkflowId: params.parentWorkflowId,
     ...(rerunFailed && { force: true }),
     ...(params.signal !== undefined && { signal: params.signal }),
   });
@@ -395,22 +437,29 @@ interface CycleParams {
  */
 async function runOneOrchestrationCycle(cycle: CycleParams): Promise<unknown> {
   const { ctx, lock, clock } = cycle;
-  const phase = { executing: false, input: cycle.params.input };
+  const phase: CyclePhase = { executing: false, input: cycle.params.input };
   try {
-    return await runCycleBody({ ...cycle, phase });
+    const result = await runCycleBody({ ...cycle, phase });
+    traceRunEnd({ ctx, clock, phase, params: cycle.params, error: undefined });
+    return result;
   } catch (err) {
-    if (
-      phase.executing &&
-      ctx.compensateConfig?.onCancel === "rollback" &&
-      errorTag(err) === "WorkflowCancelledError"
-    ) {
-      await rollBackCancelled({
-        ctx,
-        lock,
-        clock,
-        workflowId: cycle.params.workflowId,
-        input: phase.input,
-      });
+    try {
+      if (
+        phase.executing &&
+        ctx.compensateConfig?.onCancel === "rollback" &&
+        errorTag(err) === "WorkflowCancelledError"
+      ) {
+        await rollBackCancelled({
+          ctx,
+          lock,
+          clock,
+          workflowId: cycle.params.workflowId,
+          input: phase.input,
+          traceRef: phase.trace?.ref,
+        });
+      }
+    } finally {
+      traceRunEnd({ ctx, clock, phase, params: cycle.params, error: err });
     }
     throw err;
   }
@@ -431,6 +480,7 @@ async function rollBackCancelled(params: {
   clock: WallClock;
   workflowId: string;
   input: unknown;
+  traceRef: WorkflowTraceRef | undefined;
 }): Promise<void> {
   const { ctx, lock, clock, workflowId, input } = params;
   if (lock.leaseSignal.aborted) throw lock.leaseSignal.reason;
@@ -455,12 +505,11 @@ async function rollBackCancelled(params: {
     resumed: false,
     cancelled: true,
     failureSink: undefined,
+    traceRef: params.traceRef,
   });
 }
 
-async function runCycleBody(
-  cycle: CycleParams & { phase: { executing: boolean; input: unknown } },
-): Promise<unknown> {
+async function runCycleBody(cycle: CycleParams & { phase: CyclePhase }): Promise<unknown> {
   const { ctx, lock, clock, loaded } = cycle;
   const { workflowId, force, namespace } = cycle.params;
   let input = cycle.params.input;
@@ -493,6 +542,8 @@ async function runCycleBody(
   }
 
   // 2. Create the run, or check the stored version of an existing one.
+  // A run that never started (created by a parent or a producer) is not a resume.
+  let resumedRun = state != null && state.status !== "pending";
   if (!state) {
     const createResult = await ctx.storage.createWorkflow({
       workflowId,
@@ -500,7 +551,10 @@ async function runCycleBody(
       input,
       workflowType: ctx.type,
       ...(namespace !== undefined ? { namespace } : {}),
-      metadata: ctx.metadata,
+      metadata:
+        ctx.tracer !== undefined && cycle.params.traceparent !== undefined
+          ? { ...ctx.metadata, traceparent: cycle.params.traceparent }
+          : ctx.metadata,
       version: ctx.version,
       ...(cycle.params.idempotencyKey && cycle.params.idempotencyExpiresAt
         ? {
@@ -552,12 +606,15 @@ async function runCycleBody(
     await ctx.storage.startFreshRun({ workflowId, guard, expectedRun: state.run });
     state = await ctx.storage.loadWorkflow(workflowId);
     loaded.state = state;
+    resumedRun = false;
   }
 
   // From here the run executes under this driver: a cancel it sees may roll
   // back (see `runOneOrchestrationCycle`).
   cycle.phase.executing = true;
   cycle.phase.input = input;
+  const traceRef =
+    ctx.tracer !== undefined ? traceRunStart({ cycle, state, resumedRun }) : undefined;
 
   // 4. Validate DAG
   const dagNodes: DagNode[] = ctx.steps.map((s) => ({
@@ -589,6 +646,7 @@ async function runCycleBody(
       resumed: true,
       cancelled,
       failureSink: cycle.params.failureSink,
+      traceRef,
     });
   }
 
@@ -615,6 +673,7 @@ async function runCycleBody(
     guard,
     clock,
     signal: lock.signal,
+    ...(ctx.tracer !== undefined && traceRef !== undefined && { tracer: ctx.tracer, traceRef }),
     workflowName: ctx.name,
     workflowQueue: ctx.queue,
     ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
@@ -770,6 +829,7 @@ async function runCycleBody(
     resumed: false,
     cancelled: false,
     failureSink: cycle.params.failureSink,
+    traceRef,
   });
 }
 
@@ -807,6 +867,7 @@ async function rollBackAndFail(params: {
    */
   cancelled: boolean;
   failureSink: { failure?: WorkflowFailure } | undefined;
+  traceRef: WorkflowTraceRef | undefined;
 }): Promise<never> {
   const { ctx, lock, clock, workflowId, input, dagNodes, guard, workflowStartTime } = params;
   const { errorMsg, errorTag: failedTag } = params;
@@ -837,7 +898,18 @@ async function rollBackAndFail(params: {
     }
   }
 
+  const compensationStartedAt = clock.now();
+  if (ctx.tracer !== undefined && params.traceRef !== undefined) {
+    emitTrace(ctx.tracer, "compensationStart", {
+      ...params.traceRef,
+      at: compensationStartedAt,
+      cancelled: params.cancelled,
+      resumed: params.resumed,
+    });
+  }
   const compensationReport = await compensateWorkflow({
+    ...(ctx.tracer !== undefined &&
+      params.traceRef !== undefined && { tracer: ctx.tracer, traceRef: params.traceRef }),
     storage,
     steps: ctx.steps,
     compensateConfig: ctx.compensateConfig,
@@ -850,6 +922,17 @@ async function rollBackAndFail(params: {
     resumed: params.resumed,
     ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
   });
+  if (ctx.tracer !== undefined && params.traceRef !== undefined) {
+    const endedAt = clock.now();
+    emitTrace(ctx.tracer, "compensationEnd", {
+      ...params.traceRef,
+      startedAt: compensationStartedAt,
+      endedAt,
+      durationMs: endedAt.getTime() - compensationStartedAt.getTime(),
+      compensated: compensationReport.compensated.length,
+      failed: compensationReport.failed.length,
+    });
+  }
 
   // Fire workflow-level onComplete callback
   if (ctx.compensateConfig?.onComplete) {
@@ -923,6 +1006,145 @@ async function rollBackAndFail(params: {
 
   throw lastStepError;
 }
+
+/**
+ * Open the run's trace: emit `runStart`, then `waitEnd` for every wait the
+ * stored run was parked on (this call resumes it). Returns the run's
+ * identity for the events that follow.
+ */
+function traceRunStart(params: {
+  cycle: CycleParams & { phase: CyclePhase };
+  state: WorkflowState | null | undefined;
+  resumedRun: boolean;
+}): WorkflowTraceRef {
+  const { cycle, state } = params;
+  const { ctx, clock } = cycle;
+  const tracer = ctx.tracer!;
+  const namespace = state?.namespace ?? cycle.params.namespace;
+  const ref: WorkflowTraceRef = {
+    workflowId: cycle.params.workflowId,
+    workflowName: ctx.name,
+    ...(namespace !== undefined && { namespace }),
+    ...(state != null && { run: state.run }),
+  };
+  const startedAt = clock.now();
+  cycle.phase.trace = { ref, startedAt };
+  const stored = state?.metadata?.traceparent;
+  const traceparent = cycle.params.traceparent ?? (typeof stored === "string" ? stored : undefined);
+  const parentWorkflowId = cycle.params.parentWorkflowId ?? state?.parentWorkflowId;
+  emitTrace(tracer, "runStart", {
+    ...ref,
+    startedAt,
+    resumed: params.resumedRun,
+    ...(ctx.version !== undefined && { version: ctx.version }),
+    ...(parentWorkflowId !== undefined && { parentWorkflowId }),
+    ...(traceparent !== undefined && { traceparent }),
+    ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
+  });
+  if (params.resumedRun && state != null) {
+    for (const [stepName, step] of Object.entries(state.steps)) {
+      const kind =
+        step.status === "sleeping"
+          ? "sleep"
+          : step.status === "waiting_for_signal"
+            ? "signal"
+            : undefined;
+      if (kind === undefined) continue;
+      emitTrace(tracer, "waitEnd", {
+        ...ref,
+        stepName,
+        kind,
+        since: state.updatedAt,
+        endedAt: startedAt,
+        waitedMs: Math.max(0, startedAt.getTime() - state.updatedAt.getTime()),
+        ...(step.wakeAt !== undefined && { wakeAt: step.wakeAt }),
+      });
+    }
+  }
+  return ref;
+}
+
+/** Close the run's trace (if `runStart` was emitted) with how this orchestration ended. */
+function traceRunEnd(params: {
+  ctx: WorkflowOrchestrationContext;
+  clock: WallClock;
+  phase: CyclePhase;
+  params: RunParams;
+  error: unknown;
+}): void {
+  const { ctx, phase } = params;
+  const trace = phase.trace;
+  if (ctx.tracer === undefined || trace === undefined) return;
+  const endedAt = params.clock.now();
+  const error = params.error;
+  const outcome = traceOutcomeOf(error);
+  const failure =
+    outcome === "failed"
+      ? (params.params.failureSink?.failure ?? failureFromError(error))
+      : undefined;
+  emitTrace(ctx.tracer, "runEnd", {
+    ...trace.ref,
+    startedAt: trace.startedAt,
+    endedAt,
+    durationMs: endedAt.getTime() - trace.startedAt.getTime(),
+    outcome,
+    ...(failure !== undefined && { failure }),
+    ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
+  });
+}
+
+/** How an orchestration that rejected with `error` (or returned, when `undefined`) ended. */
+function traceOutcomeOf(error: unknown): WorkflowTraceRunOutcome {
+  if (error === undefined) return "completed";
+  switch (errorTag(error)) {
+    case "WorkflowSuspendedError":
+      return "suspended";
+    case "WorkflowContinueAsNewError":
+      return "continued";
+    case "WorkflowTripwireError":
+      return "tripwire";
+    case "WorkflowCancelledError":
+      return "cancelled";
+  }
+  return isAbandonRunExit(error) ? "abandoned" : "failed";
+}
+
+/**
+ * Report the lock to the tracer: `lockAcquired` now, `lockLost` if the
+ * lease is lost while the run is driven. Returns the function that stops
+ * listening once the run is done with the lock.
+ */
+function traceLock(params: {
+  ctx: WorkflowOrchestrationContext;
+  lock: LockContext;
+  clock: WallClock;
+  workflowId: string;
+  namespace: string | undefined;
+}): () => void {
+  const { ctx, lock, clock, workflowId, namespace } = params;
+  const tracer = ctx.tracer;
+  if (tracer === undefined) return noop;
+  const base = { workflowId, ...(namespace !== undefined && { namespace }) };
+  emitTrace(tracer, "lockAcquired", {
+    ...base,
+    at: clock.now(),
+    fenced: lock.fenceToken !== undefined,
+  });
+  const onLost = (): void =>
+    emitTrace(tracer, "lockLost", {
+      ...base,
+      at: clock.now(),
+      error: traceErrorOf(lock.leaseSignal.reason),
+    });
+  if (lock.leaseSignal.aborted) {
+    onLost();
+    return noop;
+  }
+  lock.leaseSignal.addEventListener("abort", onLost, { once: true });
+  return () => lock.leaseSignal.removeEventListener("abort", onLost);
+}
+
+function noop(): void {}
 
 async function loadRunFailure(params: {
   storage: WorkflowStorage;

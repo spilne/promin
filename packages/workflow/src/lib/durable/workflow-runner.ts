@@ -44,6 +44,7 @@ import {
 import type { WorkflowSuspendedError, WorkflowTimeoutError } from "./durable-pipeline-error.ts";
 import type { WorkflowVersionRegistry } from "./workflow-version-registry.ts";
 import type { StepExecutor } from "./runner/step-executor.ts";
+import { emitTrace, type WorkflowTracer } from "./workflow-tracer.ts";
 import { recoverWorkflows, type RecoveryResult, type RecoveryStrategy } from "./runner/recovery.ts";
 import { resolveRunDefinition } from "./runner/definition-resolver.ts";
 import { orchestrationContextFor, type RunLockOptions } from "./runner/orchestration-context.ts";
@@ -184,6 +185,13 @@ export type WorkflowRunnerRunParams =
        * run: with none stored it rejects with `WorkflowRunNotFoundError`.
        */
       readonly useStoredInput?: boolean;
+      /**
+       * W3C `traceparent` of the request starting or resuming the run; the
+       * tracer's `runStart` carries it. With a tracer, a run created by this
+       * call stores it as `metadata.traceparent`, so a later resume (another
+       * process, after a sleep) joins the same trace.
+       */
+      readonly traceparent?: string;
     }
   | {
       readonly name: string;
@@ -204,6 +212,8 @@ export type WorkflowRunnerRunParams =
       readonly signal?: AbortSignal;
       /** See the `{ workflow }` shape. */
       readonly useStoredInput?: boolean;
+      /** See the `{ workflow }` shape. */
+      readonly traceparent?: string;
     };
 
 /**
@@ -297,6 +307,13 @@ export interface WorkflowRunnerConfig {
    * runs and version drains inherit it.
    */
   readonly defaultStepTimeoutMs?: number | null;
+  /**
+   * Lifecycle tracer: run, step attempt, wait, child workflow, compensation,
+   * lock and recovery events (see `WorkflowTracer`). Child runs and version
+   * drains inherit it. A tracer that throws never affects a run. Without
+   * one the engine does no tracing work.
+   */
+  readonly tracer?: WorkflowTracer;
 }
 
 /** What `WorkflowRunner.subscribe` takes. */
@@ -475,6 +492,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   private readonly executorId?: string;
   private readonly lock?: RunLockOptions;
   private readonly defaultStepTimeoutMs?: number | null;
+  private readonly tracer?: WorkflowTracer;
 
   constructor(config: WorkflowRunnerConfig) {
     this.storage = config.storage;
@@ -484,6 +502,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     this.clock = config.clock ?? SystemWallClock;
     if (config.executorId !== undefined) this.executorId = config.executorId;
     if (config.lock !== undefined) this.lock = config.lock;
+    if (config.tracer !== undefined) this.tracer = config.tracer;
     if (config.defaultStepTimeoutMs !== undefined) {
       this.defaultStepTimeoutMs = config.defaultStepTimeoutMs;
     }
@@ -561,6 +580,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       ...(namespace !== undefined && { namespace }),
       ...(runParams.signal !== undefined && { signal: runParams.signal }),
       ...(runParams.useStoredInput === true && { useStoredInput: true }),
+      ...(runParams.traceparent !== undefined && { traceparent: runParams.traceparent }),
       ...(failureSink !== undefined && { failureSink }),
       ...(idempotencyKey && idempotencyExpiresAt ? { idempotencyKey, idempotencyExpiresAt } : {}),
     });
@@ -756,7 +776,17 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       storage: this.storage,
       registry: this.registry,
       clock: this.clock,
-      resume: (run) => this.runSafe(run),
+      resume: (run) => {
+        if (this.tracer !== undefined) {
+          emitTrace(this.tracer, "recoveryReclaim", {
+            workflowId: run.workflowId,
+            workflowName: run.workflow.name,
+            ...(run.workflow.version !== undefined && { version: run.workflow.version }),
+            at: this.clock.now(),
+          });
+        }
+        return this.runSafe(run);
+      },
     });
   }
 
@@ -773,6 +803,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     onLocked?: () => void;
     signal?: AbortSignal;
     useStoredInput?: boolean;
+    traceparent?: string;
     failureSink?: { failure?: WorkflowFailure };
   }): Promise<unknown> {
     const ctx = orchestrationContextFor({
@@ -784,6 +815,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
         ...(this.executorId !== undefined && { executorId: this.executorId }),
         ...(this.hooks !== undefined && { hooks: this.hooks }),
         ...(this.lock !== undefined && { lock: this.lock }),
+        ...(this.tracer !== undefined && { tracer: this.tracer }),
         ...(this.defaultStepTimeoutMs !== undefined && {
           defaultStepTimeoutMs: this.defaultStepTimeoutMs,
         }),
@@ -797,6 +829,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       ...(params.onLocked !== undefined && { onLocked: params.onLocked, rejectInFlight: true }),
       ...(params.signal !== undefined && { signal: params.signal }),
       ...(params.useStoredInput === true && { useStoredInput: true }),
+      ...(params.traceparent !== undefined && { traceparent: params.traceparent }),
       ...(params.failureSink !== undefined && { failureSink: params.failureSink }),
       ...(params.idempotencyKey && params.idempotencyExpiresAt
         ? {

@@ -14,6 +14,8 @@ import {
 import { stepRuntimeFor, type WaveOutcome, type WaveParams } from "./dag-context.ts";
 import { errorMessage } from "./step-body.ts";
 import { checkpointStepOutcome, type StepOutcome } from "./step-checkpoint.ts";
+import { traceStepAttemptStart } from "./step-tracing.ts";
+import { tracerTraceparent } from "../workflow-tracer.ts";
 import { resolveStepConcurrency } from "./step-concurrency.ts";
 import type { StepExecutionRequest, StepExecutionResult } from "./step-executor.ts";
 import { settleWave, skippedOutcome } from "./wave.ts";
@@ -53,6 +55,22 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
         const startedAt = clock.now();
         const currentAttempt = (params.stepAttempts.get(stepDef.name) ?? 0) + 1;
         params.stepAttempts.set(stepDef.name, currentAttempt);
+        let traceparent: string | undefined;
+        if (ctx.tracer !== undefined && ctx.traceRef !== undefined) {
+          traceStepAttemptStart({
+            ctx,
+            stepName: stepDef.name,
+            attempt: currentAttempt,
+            startedAt,
+          });
+          // Carried across a queue so a worker's span joins this attempt's.
+          traceparent = tracerTraceparent(ctx.tracer, {
+            workflowId,
+            ...(ctx.run !== undefined && { run: ctx.run }),
+            stepName: stepDef.name,
+            attempt: currentAttempt,
+          });
+        }
 
         // Resolve per-task concurrency cap. Step-level wins over the
         // workflow-level default. The key fn is evaluated against the
@@ -82,6 +100,7 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
           needs: stepDef.needs,
           priority: stepDef.priority,
           signal: abort.signal,
+          ...(traceparent !== undefined && { traceparent }),
           ...(ctx.workflowVersion !== undefined && { version: ctx.workflowVersion }),
           runtime: stepRuntimeFor({
             ctx,
@@ -119,6 +138,7 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
           durationMs: clock.currentTimeMs() - startedAt.getTime(),
           attempt: reported?.attempt ?? currentAttempt,
           executorId: reported?.executorId,
+          dispatchedAttempt: currentAttempt,
         });
         if (outcome.kind === "failed") abort.abort(outcome.error);
 
@@ -179,6 +199,8 @@ function outcomeOfResult(params: {
   durationMs: number;
   attempt: number;
   executorId: string | undefined;
+  /** The attempt this runner dispatched (and traced), for a suspension's trace. */
+  dispatchedAttempt: number;
 }): StepOutcome {
   const { workflowId, name, res, startedAt, durationMs, attempt, executorId } = params;
   if (res.ok) {
@@ -197,6 +219,8 @@ function outcomeOfResult(params: {
     return {
       kind: "suspended",
       name,
+      attempt: params.dispatchedAttempt,
+      startedAt,
       error:
         res.cause ??
         new WorkflowSuspendedError({
@@ -211,6 +235,8 @@ function outcomeOfResult(params: {
     return {
       kind: "continue-as-new",
       name,
+      attempt: params.dispatchedAttempt,
+      startedAt,
       error:
         res.cause ??
         new WorkflowContinueAsNewError({

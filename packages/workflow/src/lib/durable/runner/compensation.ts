@@ -20,6 +20,12 @@ import {
   type WorkflowStorage,
 } from "../workflow-storage.ts";
 import type { DagNode } from "../workflow-dag.ts";
+import {
+  emitTrace,
+  traceErrorOf,
+  type WorkflowTraceRef,
+  type WorkflowTracer,
+} from "../workflow-tracer.ts";
 import { errorMessage } from "./step-body.ts";
 import { checkpointWrite } from "./step-checkpoint.ts";
 
@@ -151,6 +157,10 @@ export async function compensateWorkflow(params: {
   signal?: AbortSignal;
   /** The rollback resumes an interrupted one (attempt rows continue its numbering). */
   resumed?: boolean;
+  /** Reports each `compensate` attempt (`compensationStep`); needs `traceRef`. */
+  tracer?: WorkflowTracer;
+  /** The run the tracer's events belong to. */
+  traceRef?: WorkflowTraceRef;
 }): Promise<CompensationReport> {
   const { storage, compensateConfig, workflowId, input, guard, executorId, signal } = params;
   const clock = params.clock ?? SystemWallClock;
@@ -253,12 +263,28 @@ export async function compensateWorkflow(params: {
         run: async (retry) => {
           const startedAt = clock.now();
           const attempt = firstAttempt + retry + 1;
+          const trace = (failure?: { readonly error: unknown }): void => {
+            if (params.tracer === undefined || params.traceRef === undefined) return;
+            const endedAt = clock.now();
+            emitTrace(params.tracer, "compensationStep", {
+              ...params.traceRef,
+              stepName: step.name,
+              attempt,
+              startedAt,
+              endedAt,
+              durationMs: endedAt.getTime() - startedAt.getTime(),
+              outcome: failure === undefined ? "completed" : "failed",
+              ...(failure !== undefined && { error: traceErrorOf(failure.error) }),
+            });
+          };
           try {
             await runHookResult(step.compensate!({ result, input, workflowId }));
           } catch (err) {
+            trace({ error: err });
             await saveAttempt({ stepName: step.name, attempt, startedAt, error: err });
             throw err;
           }
+          trace();
           await saveAttempt({ stepName: step.name, attempt, startedAt });
         },
       });
