@@ -8,7 +8,7 @@
 // runner's signal (abort, case timeout) is passed to the invocation.
 // ---------------------------------------------------------------------------
 
-import type { Agent, AgentInput, AgentInvokeOpts, ModelCostRates } from "@promin/agent";
+import type { Agent, AgentInput, AgentInvokeOpts, Message, ModelCostRates } from "@promin/agent";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type { EvalCase, EvalTarget } from "../types.ts";
 import { toEvalOutput } from "./to-eval-output.ts";
@@ -59,8 +59,17 @@ export function agentTarget(config: AgentTargetConfig): EvalTarget {
   };
 }
 
-/** The default case → agent input mapping: the input as the task text. */
+/**
+ * The default case → agent input mapping: the input as the task text. A
+ * case whose `metadata.messages` is a non-empty array replays that
+ * conversation before the task (the earlier turns of a thread a case was
+ * sampled from).
+ */
 export function defaultAgentInput(evalCase: EvalCase): AgentInput {
   const { input } = evalCase;
-  return { task: typeof input === "string" ? input : JSON.stringify(input) };
+  const history = evalCase.metadata?.messages;
+  return {
+    task: typeof input === "string" ? input : JSON.stringify(input),
+    ...(Array.isArray(history) && history.length > 0 && { messages: history as Message[] }),
+  };
 }
