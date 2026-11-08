@@ -62,6 +62,18 @@ export class SqliteEvalDatasetStore implements EvalDatasetStore {
     return row ? (JSON.parse(row.cases) as EvalCase[]) : null;
   }
 
+  async appendCase(datasetId: string, evalCase: EvalCase): Promise<void> {
+    // One SQL statement keeps the JSON update atomic across writers/processes.
+    this.db
+      .query(`INSERT INTO ${this.table} (dataset_id, cases) VALUES (?, json_array(json(?)))
+      ON CONFLICT(dataset_id) DO UPDATE SET cases =
+        CASE WHEN EXISTS (SELECT 1 FROM json_each(${this.table}.cases)
+          WHERE json_extract(value, '$.id') = ?)
+        THEN ${this.table}.cases
+        ELSE json_insert(${this.table}.cases, '$[#]', json(?)) END`)
+      .run(datasetId, JSON.stringify(evalCase), evalCase.id, JSON.stringify(evalCase));
+  }
+
   async list(): Promise<string[]> {
     const rows = this.db
       .query<{ dataset_id: string }>(`SELECT dataset_id FROM ${this.table} ORDER BY dataset_id ASC`)

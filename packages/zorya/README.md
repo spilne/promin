@@ -726,6 +726,23 @@ namespaceId, resourceId? }` answers 202 with a `runId`. Any agent version
   the suite sets `idempotentCases: true`.
 - **Compare**: `GET /api/evals/compare?baseline=<runId>&candidate=<runId>` diffs
   two runs case by case (e.g. the active version against a draft).
+- **Operator feedback** (when `datasets` is configured): open a thread's
+  Trace view and rate a completed turn. `POST /api/agents/:id/threads/:threadId/feedback`
+  accepts `{ namespaceId, resourceId | ownerId, workflowId, rating: "positive" | "negative",
+expected? }`. The gateway checks thread ownership and verifies the workflow id
+  is in that thread's trace. Ratings append once per turn to a resource-scoped
+  feedback dataset, with the recipe version and trace identifiers in case
+  metadata. A negative rating with an `expected` answer also appends to a
+  separate regression dataset. The POST response names both dataset ids;
+  `GET .../feedback` lists this thread's ratings, and
+  `GET /api/agents/:id/feedback?namespaceId=...&resourceId=...` gives daily
+  positive/negative counts and a rising negative-rate alert (at least five
+  ratings in each of the last two seven-day windows and a rise of 20 points).
+  Create a suite with `{ dataset: { kind: "stored", datasetId:
+regressionDatasetId }, scorers: [{ kind: "exactMatch" }] }`, run it against
+  active and candidate recipe versions, then use `/api/evals/compare` and a
+  promotion gate. The stored regression dataset grows as operators add cases;
+  snapshot it to a fixed dataset before using strict comparisons or gates.
 - **Authorization** (with `ZoryaAgents.authorizeScope`): starting a run checks
   the caller's scope for the agent like an invocation; reading, cancelling
   and comparing a run checks the scope it ran in (otherwise 404);

@@ -35,6 +35,19 @@ export function evalDatasetStoreTestSuite(makeStore: () => EvalDatasetStore): vo
       expect(got?.[0]?.id).toBe("x");
     });
 
+    it("appends concurrently and ignores a repeated case id", async () => {
+      const store = makeStore();
+      await Promise.all(
+        Array.from({ length: 20 }, (_, i) =>
+          store.appendCase("feedback", { id: String(i), input: `input ${i}` }),
+        ),
+      );
+      await store.appendCase("feedback", { id: "3", input: "duplicate" });
+      const cases = await store.get("feedback");
+      expect(cases).toHaveLength(20);
+      expect(cases?.find((item) => item.id === "3")?.input).toBe("input 3");
+    });
+
     it("lists dataset ids in ascending order", async () => {
       const store = makeStore();
       await store.save({ datasetId: "b", cases: CASES });

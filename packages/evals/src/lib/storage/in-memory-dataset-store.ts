@@ -20,6 +20,12 @@ export class InMemoryEvalDatasetStore implements EvalDatasetStore {
     return cases !== undefined ? [...cases] : null;
   }
 
+  async appendCase(datasetId: string, evalCase: EvalCase): Promise<void> {
+    const cases = this.datasets.get(datasetId) ?? [];
+    if (cases.some((item) => item.id === evalCase.id)) return;
+    this.datasets.set(datasetId, [...cases, evalCase]);
+  }
+
   async list(): Promise<string[]> {
     return [...this.datasets.keys()].sort();
   }

@@ -1227,6 +1227,52 @@ export const api = {
       `/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/trace?${qp}`,
     );
   },
+  getThreadFeedback(
+    id: string,
+    threadId: string,
+    params: { namespaceId: string; resourceId?: string },
+  ): Promise<{
+    datasetId: string;
+    feedback: Array<{ id: string; metadata?: Record<string, unknown> }>;
+  }> {
+    const qp = new URLSearchParams({ namespaceId: params.namespaceId });
+    if (params.resourceId) qp.set("resourceId", params.resourceId);
+    return req(
+      `/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/feedback?${qp}`,
+    );
+  },
+  getAgentFeedbackTrend(
+    id: string,
+    params: { namespaceId: string; resourceId?: string },
+  ): Promise<{
+    total: number;
+    trend: Array<{ day: string; positive: number; negative: number; negativeRate: number }>;
+    alert: { kind: string } | null;
+  }> {
+    const qp = new URLSearchParams({ namespaceId: params.namespaceId });
+    if (params.resourceId) qp.set("resourceId", params.resourceId);
+    return req(`/api/agents/${encodeURIComponent(id)}/feedback?${qp}`);
+  },
+  postThreadFeedback(
+    id: string,
+    threadId: string,
+    body: {
+      namespaceId: string;
+      resourceId?: string;
+      workflowId: string;
+      rating: "positive" | "negative";
+      expected?: string;
+    },
+  ): Promise<{ caseId: string; datasetId: string }> {
+    return req(
+      `/api/agents/${encodeURIComponent(id)}/threads/${encodeURIComponent(threadId)}/feedback`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+  },
   listAgentThreads(
     id: string,
     params: { namespaceId: string; resourceId?: string; limit?: number; q?: string },

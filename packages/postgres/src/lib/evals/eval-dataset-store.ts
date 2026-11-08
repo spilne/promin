@@ -5,7 +5,7 @@
 // `save` upserts, so re-saving a dataset replaces its cases wholesale.
 // ---------------------------------------------------------------------------
 
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, sql } from "drizzle-orm";
 import type { EvalCase, EvalDatasetStore } from "@promin/evals";
 import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { evalDataset } from "../schema.ts";
@@ -39,6 +39,19 @@ export class PostgresEvalDatasetStore implements EvalDatasetStore {
       .from(evalDataset)
       .where(eq(evalDataset.datasetId, datasetId));
     return row ? (row.cases as EvalCase[]) : null;
+  }
+
+  async appendCase(datasetId: string, evalCase: EvalCase): Promise<void> {
+    const value = JSON.stringify(evalCase);
+    await this.db
+      .insert(evalDataset)
+      .values({ datasetId, cases: [evalCase] })
+      .onConflictDoUpdate({
+        target: evalDataset.datasetId,
+        set: {
+          cases: sql`CASE WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(${evalDataset.cases}) AS item WHERE item->>'id' = ${evalCase.id}) THEN ${evalDataset.cases} ELSE ${evalDataset.cases} || ${value}::jsonb END`,
+        },
+      });
   }
 
   async list(): Promise<string[]> {

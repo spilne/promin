@@ -8,12 +8,14 @@
 import { describe, expect, it } from "bun:test";
 import {
   InMemoryAgentRegistry,
+  InMemoryMemoryStore,
   InMemoryRoleRegistry,
   resolveLocalAgent,
   type Message,
 } from "@promin/agent";
 import {
   InMemoryEvalRunStore,
+  InMemoryEvalDatasetStore,
   InMemoryEvalSuiteRegistry,
   type RunDiff,
   type StoredEvalRun,
@@ -64,14 +66,18 @@ async function boot(opts: { authorizeScope?: ScopeAuthorizer } = {}) {
     signalScanIntervalMs: 0,
   });
   const registry = new InMemoryAgentRegistry();
+  const memory = new InMemoryMemoryStore();
+  const datasets = new InMemoryEvalDatasetStore();
   await registry.register({ id: "bot", backend: backend("v1: shout") }); // active v1
   await registry.register({ id: "bot", backend: backend("v2: whisper") }); // draft v2
   const agents = new ZoryaAgents({
     registry,
+    memory,
     roles: new InMemoryRoleRegistry(),
     resolve: (recipe) =>
       resolveLocalAgent(recipe, {
         runner,
+        memory,
         tools: {},
         // v1 answers right, v2 wrong: the suite tells the versions apart.
         llm: () => ({
@@ -89,6 +95,7 @@ async function boot(opts: { authorizeScope?: ScopeAuthorizer } = {}) {
   const evals = new ZoryaEvals({
     suites: new InMemoryEvalSuiteRegistry(),
     runs: new InMemoryEvalRunStore(),
+    datasets,
     workflows,
     agents,
   });
@@ -106,10 +113,78 @@ async function boot(opts: { authorizeScope?: ScopeAuthorizer } = {}) {
         ...(params.body !== undefined && { body: JSON.stringify(params.body) }),
       }),
     );
-  return { server, send, evals, registry, agents };
+  return { server, send, evals, registry, agents, datasets };
 }
 
 type Harness = Awaited<ReturnType<typeof boot>>;
+
+describe("agent feedback to regression eval", () => {
+  it("rates an owned trace, samples the failure once, and runs a candidate against it", async () => {
+    const h = await boot();
+    const scope = { namespaceId: "acme", resourceId: "alice" };
+    expect(
+      (
+        await h.send({
+          method: "POST",
+          path: "/api/agents/bot/threads/t1",
+          body: { ...scope, task: "hello" },
+        })
+      ).status,
+    ).toBe(200);
+    const traceResponse = await h.send({
+      method: "GET",
+      path: "/api/agents/bot/threads/t1/trace?namespaceId=acme&resourceId=alice",
+    });
+    const trace = (await traceResponse.json()) as {
+      trace: { turns: Array<{ timing?: { workflowId: string } }> };
+    };
+    const workflowId = trace.trace.turns[0]?.timing?.workflowId;
+    expect(workflowId).toBeTruthy();
+    const body = { ...scope, workflowId, rating: "negative", expected: "HELLO" };
+    const path = "/api/agents/bot/threads/t1/feedback";
+    const rated = await h.send({ method: "POST", path, body });
+    expect(rated.status).toBe(201);
+    expect((await h.send({ method: "POST", path, body })).status).toBe(201);
+    const ids = (await rated.json()) as { regressionDatasetId: string };
+    expect(await h.datasets.get(ids.regressionDatasetId)).toHaveLength(1);
+    expect(
+      (await h.send({ method: "POST", path, body: { ...body, resourceId: "bob" } })).status,
+    ).toBe(404);
+    const suite = await h.send({
+      method: "POST",
+      path: "/api/evals/suites",
+      body: {
+        id: "feedback-regression",
+        dataset: { kind: "stored", datasetId: ids.regressionDatasetId },
+        scorers: [{ kind: "exactMatch" }],
+        metadata: { agentIds: ["bot"] },
+      },
+    });
+    expect(suite.status).toBe(201);
+    const started = await h.send({
+      method: "POST",
+      path: "/api/evals/runs",
+      body: {
+        suiteId: "feedback-regression",
+        agentId: "bot",
+        agentVersion: "v1",
+        namespaceId: "acme",
+      },
+    });
+    expect(started.status).toBe(202);
+    const { runId } = (await started.json()) as { runId: string };
+    let result: StoredEvalRun | undefined;
+    for (let i = 0; i < 1_000; i++) {
+      result = (await (
+        await h.send({ method: "GET", path: `/api/evals/runs/${runId}` })
+      ).json()) as StoredEvalRun;
+      if (result.status !== "running") break;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(result?.status).toBe("completed");
+    expect(result?.totals?.passRate).toBe(1);
+  });
+});
 
 async function runToEnd(params: { h: Harness; agentVersion: string }): Promise<StoredEvalRun> {
   const res = await params.h.send({

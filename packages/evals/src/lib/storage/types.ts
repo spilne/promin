@@ -130,6 +130,8 @@ export interface EvalDatasetStore {
     readonly datasetId: string;
     readonly cases: ReadonlyArray<EvalCase>;
   }): Promise<void>;
+  /** Atomically add a case, ignoring a repeated case id. Safe for concurrent feedback writers. */
+  appendCase(datasetId: string, evalCase: EvalCase): Promise<void>;
   get(datasetId: string): Promise<EvalCase[] | null>;
   /** All dataset ids, ascending. */
   list(): Promise<string[]>;

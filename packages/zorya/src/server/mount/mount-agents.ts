@@ -14,6 +14,11 @@ import { json, type Router } from "../router.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaEvals } from "../services/evals/index.ts";
 import { evalPromotionGate } from "../routes/evals.ts";
+import {
+  getAgentFeedback,
+  getAgentFeedbackTrend,
+  postAgentFeedback,
+} from "../routes/agents/agent-feedback.ts";
 import type { ZoryaFragments } from "../services/fragments/index.ts";
 import type { ZoryaMcpServers } from "../services/mcp/index.ts";
 import type { ZoryaSkills } from "../services/skills/index.ts";
@@ -225,6 +230,19 @@ export function mountAgents(params: {
     .post("/api/agents/:id/threads/:threadId/distill", distillThread(agentDeps))
     .post("/api/agents/:id/threads/:threadId/compact", compactThread(agentDeps))
     .post("/api/agents/:id/threads/:threadId/archive", archiveAgentThread(agentDeps));
+
+  if (params.evals?.datasets) {
+    router
+      .get("/api/agents/:id/feedback", getAgentFeedbackTrend(agentDeps, params.evals.datasets))
+      .get(
+        "/api/agents/:id/threads/:threadId/feedback",
+        getAgentFeedback(agentDeps, params.evals.datasets),
+      )
+      .post(
+        "/api/agents/:id/threads/:threadId/feedback",
+        postAgentFeedback(agentDeps, params.evals.datasets),
+      );
+  }
 
   if (agents.memory) {
     // Persona resolution piggybacks on the recipe store and fragment
