@@ -186,7 +186,25 @@ export async function withLock<T>(params: {
   if (external?.aborted) abandon();
   else external?.addEventListener("abort", abandon, { once: true });
 
+  const lostLease = (cause?: unknown): void => {
+    lost.abort(
+      new WorkflowLockLostError({
+        workflowId,
+        message:
+          `Lost the lock on workflow "${workflowId}": no heartbeat succeeded ` +
+          `for ${lockDurationMs}ms`,
+        cause,
+      }),
+    );
+  };
   const heartbeatHandle = clock.setInterval(() => {
+    if (released || lost.signal.aborted) return;
+    // A heartbeat call that never settles must not hide that the lease ran
+    // out, so the elapsed time is judged here and not only when a call fails.
+    if (clock.currentTimeMs() - lastExtendedMs >= lockDurationMs) {
+      lostLease();
+      return;
+    }
     storage.heartbeat({ workflowId, lockDurationMs, guard }).then(
       () => {
         lastExtendedMs = clock.currentTimeMs();
@@ -204,17 +222,7 @@ export async function withLock<T>(params: {
           );
           return;
         }
-        if (clock.currentTimeMs() - lastExtendedMs >= lockDurationMs) {
-          lost.abort(
-            new WorkflowLockLostError({
-              workflowId,
-              message:
-                `Lost the lock on workflow "${workflowId}": no heartbeat succeeded ` +
-                `for ${lockDurationMs}ms`,
-              cause: error,
-            }),
-          );
-        }
+        if (clock.currentTimeMs() - lastExtendedMs >= lockDurationMs) lostLease(error);
       },
     );
   }, heartbeatMs);
