@@ -60,6 +60,7 @@ export {
 export {
   ZoryaAgents,
   RetainedSubagents,
+  RetainedSubagentError,
   RETAINED_AGENT_WORKFLOW,
   type ZoryaAgentsConfig,
   type ZoryaAgentsScanConfig,

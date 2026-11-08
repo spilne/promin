@@ -1,9 +1,11 @@
+import { TurnInProgressError } from "@promin/agent";
 import { z } from "zod";
 import { json, jsonError, readJson, type Router } from "../../router.ts";
 import { internalError } from "../agent-gateway-kit.ts";
-import type {
-  RetainedParent,
-  RetainedSubagents,
+import {
+  RetainedSubagentError,
+  type RetainedParent,
+  type RetainedSubagents,
 } from "../../services/agents/retained-subagents.ts";
 import type { AgentGatewayDeps } from "./agent-gateway-deps.ts";
 import { openThreadFromBody, openThreadFromQuery } from "./agent-scope.ts";
@@ -41,15 +43,19 @@ function parentOf(opened: {
 }
 
 function failure(error: unknown): Response {
-  if (error instanceof Error) {
-    if (/not found|not owned|unavailable/i.test(error.message))
-      return jsonError(404, "child_not_found");
-    if (/capability denied/i.test(error.message)) return jsonError(403, "delegation_forbidden");
-    if (
-      /limit exceeded|already exists|has stopped|busy|id conflict|in progress/i.test(error.message)
-    )
-      return jsonError(409, "child_conflict");
+  if (error instanceof RetainedSubagentError) {
+    switch (error.code) {
+      case "not_found":
+        return jsonError(404, "child_not_found");
+      case "forbidden":
+        return jsonError(403, "delegation_forbidden");
+      case "invalid":
+        return jsonError(400, "invalid_child_request");
+      case "conflict":
+        return jsonError(409, "child_conflict");
+    }
   }
+  if (error instanceof TurnInProgressError) return jsonError(409, "child_conflict");
   return internalError({ code: "retained_agent_failed", err: error });
 }
 
@@ -64,6 +70,18 @@ export function mountRetainedAgentRoutes(
     if (!parsed.success) return jsonError(400, "invalid_child_request");
     const opened = await openThreadFromBody({ deps, req, params, body: parsed.data });
     if (opened instanceof Response) return opened;
+    // The child agent is authorized like any agent the caller invokes.
+    if (deps.authorizeScope) {
+      const allowed = await deps.authorizeScope({
+        req,
+        scope: {
+          namespaceId: opened.scoped.namespaceId,
+          resourceId: opened.scoped.resourceId,
+          agentId: parsed.data.agentId,
+        },
+      });
+      if (!allowed) return jsonError(403, "scope_forbidden");
+    }
     try {
       return json(
         202,

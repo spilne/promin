@@ -454,6 +454,16 @@ memory, canDelegate })` and pass it to
   `POST .../children/:childId/messages` delivers `{ task, mode?, messageId? }`;
   `POST .../stop` cancels and `DELETE .../:childId` removes its threads.
   `queued` and `follow-up` messages run in sequence after the current turn.
+  `canDelegate(parentId, childId, { parent, scope })` also receives the
+  caller's scope, and the spawn route runs `authorizeScope` for the child
+  agent. The worker polls its inbox by sequence (`pollIntervalMs`, default
+  60s), so a lost wake signal delays a message instead of stalling the
+  mailbox. A failed turn is recorded under `outcomes` (as are `superseded`
+  messages) and the child keeps running. A child with no message for
+  `idleTtlMs` (default 1h), or after `maxIterations` journal iterations
+  (default 1000), completes and stops counting against the child limit; spawn
+  a new `childId` to continue. `DELETE` hides the child. The child limit is
+  serialized per parent within a process; use `turnGate` across processes.
   `steer` supersedes pending queued messages at the next turn boundary.
   The mailbox lives in `MemoryStore` and the worker in `WorkflowStorage`;
   startup reconciles mailbox writes whose wake signal was lost in a crash.
