@@ -20,6 +20,7 @@ import {
 import { hasCapability } from "../workflow-storage.ts";
 import type { DagExecutionContext } from "./dag-context.ts";
 import { errorMessage, errorTagOf, type StepAttemptFailure } from "./step-body.ts";
+import { traceStepSettled } from "./step-tracing.ts";
 
 /**
  * What one step of a wave came to. `result` is codec-encoded. A `failed`
@@ -52,8 +53,21 @@ export type StepOutcome =
       /** Who ran the last attempt, when not this runner (a worker id). */
       readonly executorId?: string;
     }
-  | { readonly kind: "suspended"; readonly name: string; readonly error: unknown }
-  | { readonly kind: "continue-as-new"; readonly name: string; readonly error: unknown };
+  | {
+      readonly kind: "suspended";
+      readonly name: string;
+      readonly error: unknown;
+      /** The attempt that suspended and when it began, for the trace. */
+      readonly attempt?: number;
+      readonly startedAt?: Date;
+    }
+  | {
+      readonly kind: "continue-as-new";
+      readonly name: string;
+      readonly error: unknown;
+      readonly attempt?: number;
+      readonly startedAt?: Date;
+    };
 
 /**
  * Retry policy for a durable write the run depends on: 3 retries, 250ms
@@ -137,8 +151,9 @@ export async function checkpointStepOutcome(params: {
   readonly failedAttempts?: readonly StepAttemptFailure[];
 }): Promise<CheckpointedStep> {
   const { ctx, clock, workflowId, outcome } = params;
-  if (outcome.kind === "suspended" || outcome.kind === "continue-as-new") return { outcome };
   const failedAttempts = params.failedAttempts ?? [];
+  if (ctx.tracer !== undefined) traceStepSettled({ ctx, outcome, failedAttempts });
+  if (outcome.kind === "suspended" || outcome.kind === "continue-as-new") return { outcome };
   const lastAttemptRecorded = failedAttempts.some((a) => a.attempt === outcome.attempt);
   // A completed step whose last attempt failed got its result from `onFailure`.
   const marker: StepOutcomeMarker | undefined =

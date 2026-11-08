@@ -8,6 +8,7 @@ import { stepRuntimeFor, type WaveOutcome, type WaveParams } from "./dag-context
 import { runStepBody } from "./step-body.ts";
 import { checkpointStepOutcome } from "./step-checkpoint.ts";
 import { fireHook } from "./hooks.ts";
+import { traceStepAttemptStart } from "./step-tracing.ts";
 import { outcomeOfBody, settleWave, skippedOutcome } from "./wave.ts";
 
 /**
@@ -38,6 +39,15 @@ export async function runInlineWave(params: WaveParams): Promise<WaveOutcome> {
       const startedAt = clock.now();
       // Attempt numbers continue across workflow retries.
       const body = await runStepBody({
+        ...(ctx.tracer !== undefined && {
+          onAttemptStart: ({ attempt, startedAt: attemptStartedAt }) =>
+            traceStepAttemptStart({
+              ctx,
+              stepName: stepDef.name,
+              attempt,
+              startedAt: attemptStartedAt,
+            }),
+        }),
         stepDef,
         workflowId,
         clock,

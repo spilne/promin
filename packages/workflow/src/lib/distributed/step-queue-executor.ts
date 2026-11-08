@@ -245,9 +245,11 @@ export class StepQueueExecutor implements StepExecutor {
           if (outcome.kind !== "gave-up") attempt = outcome.attempt;
           if (outcome.kind === "completed") return succeed(new QueuedResult(outcome.result));
           if (outcome.kind === "gave-up" || !outcome.typed) return die(outcome.error);
+          const failedTag = errorTagOf(outcome.error);
           failedAttempts.push({
             attempt,
             error: outcome.error.message,
+            ...(failedTag !== undefined && { errorTag: failedTag }),
             startedAt,
             durationMs: outcome.durationMs ?? clock.currentTimeMs() - startedAt.getTime(),
             ...(outcome.executorId !== undefined && { executorId: outcome.executorId }),
@@ -310,6 +312,7 @@ export class StepQueueExecutor implements StepExecutor {
         version: req.version,
         attempt,
         run,
+        ...(req.traceparent !== undefined && { metadata: { traceparent: req.traceparent } }),
         ...(req.concurrencyKey !== undefined && { concurrencyKey: req.concurrencyKey }),
         ...(req.concurrencyScope !== undefined && { concurrencyScope: req.concurrencyScope }),
         ...(req.concurrencyLimit !== undefined && { concurrencyLimit: req.concurrencyLimit }),

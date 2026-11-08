@@ -126,6 +126,63 @@ await onboard
 - The JSON `WorkflowSchema` that `compileWorkflow` compiles has the same node
   kinds: `step`, `map`, `sleep`, `signal`, `approval`, `branch`, `parallel`.
 
+## Tracing
+
+`tracer` on `createWorkflowRunner`, `createDistributedWorkflowRunner` and
+`createWorker` receives span-shaped lifecycle events: run start / end (outcome,
+and the `WorkflowFailure` of a failed run), step attempts (attempt, duration,
+outcome, whether a retry follows), sleeps and signal waits, child workflows (a
+child's `runStart` names its `parentWorkflowId`), compensation (start, each
+`compensate` attempt, end), run lock acquired / lost, and `recover()` reclaims.
+Every callback is optional and can never change a run: one that throws or
+rejects is reported to `onTracerError` (default `console.error`). Without a
+tracer the engine builds no events.
+
+```ts
+import * as api from "@opentelemetry/api";
+import { createWorkflowRunner } from "@promin/workflow";
+import { createOpenTelemetryWorkflowTracer } from "@promin/workflow/otel";
+
+const tracer = createOpenTelemetryWorkflowTracer({
+  tracer: api.trace.getTracer("my-app"),
+  api, // builds child contexts and extracts `traceparent`
+});
+
+const runner = createWorkflowRunner({ storage, tracer });
+await runner.run({
+  workflow,
+  workflowId,
+  input,
+  traceparent: req.headers.get("traceparent") ?? undefined,
+});
+```
+
+The adapter makes one root span per orchestration of a run with a child span per
+step attempt, wait and compensation, and a child workflow's root under its
+parent's. Spans carry an allowlist of ids, names, tags, counts and durations;
+inputs, results and error messages never reach them, and failures set `ERROR`
+status with the error tag. Workflow, namespace, executor, worker and task ids are
+hashed (SHA-256 prefix, optional `identifierSalt`) unless `includeIdentifiers: true`.
+`filterAttribute` drops or rewrites any attribute and `parentContext` picks a root
+span's parent.
+
+Trace context crosses process boundaries as an opaque W3C `traceparent`:
+
+- `run({ traceparent })` is passed to `runStart`; a run created by that call
+  keeps it in `metadata.traceparent`, so a resume after a sleep or signal wait
+  (another process, hours later) joins the same trace.
+- The distributed runner stores the step attempt's `traceparent` in
+  `StepTask.metadata.traceparent` (an existing slot, no schema change). A worker
+  given the same tracer reports `workerTaskStart` / `workerTaskEnd` with it, and
+  the adapter parents the worker's span under the attempt. `injectTraceparent:
+false` turns the hand-off off.
+
+Limits: step attempts are reported when the step settles (each event carries its
+own start time, so spans are accurate, but a retried attempt's end arrives after
+the next attempt's start); a run resumed without a `traceparent` starts a new
+trace; a failed run always opens a `workflow.compensation` span, empty when no
+step had a `compensate`.
+
 ## Entry points
 
 | Import                         | What                                                                                                                                                                                                                                                        |
@@ -136,6 +193,7 @@ await onboard
 | `@promin/workflow/discovery`   | `WorkflowScanner`, `ScheduleScanner`, `applyDiscoveredSchedules` (needs a Node-compatible runtime)                                                                                                                                                          |
 | `@promin/workflow/sql-models`  | `compileSqlProject`: dbt-style SQL model DAGs                                                                                                                                                                                                               |
 | `@promin/workflow/storage-kit` | helpers for storage backend authors                                                                                                                                                                                                                         |
+| `@promin/workflow/otel`        | `createOpenTelemetryWorkflowTracer`: spans for runs, step attempts, waits, compensation and queue workers (structural types, no OpenTelemetry dependency)                                                                                                   |
 | `@promin/workflow/testing`     | conformance suites (`storageTestSuite`, `stepQueueTestSuite`, `zombieWorkerTestSuite`, …) for `bun:test`                                                                                                                                                    |
 | `@promin/workflow/dev`         | non-determinism instrumentation for journaled bodies                                                                                                                                                                                                        |
 

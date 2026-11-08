@@ -233,6 +233,31 @@ export {
   type FailureRehydrator,
 } from "./lib/durable/workflow-failure.ts";
 
+// Tracing
+export {
+  type WorkflowTracer,
+  type WorkflowTracerCallbacks,
+  type WorkflowTracerErrorEvent,
+  type WorkflowTraceRef,
+  type WorkflowTraceError,
+  type WorkflowTraceRunOutcome,
+  type WorkflowTraceRunStart,
+  type WorkflowTraceRunEnd,
+  type WorkflowTraceStepAttemptStart,
+  type WorkflowTraceStepAttemptEnd,
+  type WorkflowTraceStepOutcome,
+  type WorkflowTraceWaitStart,
+  type WorkflowTraceWaitEnd,
+  type WorkflowTraceLockAcquired,
+  type WorkflowTraceLockLost,
+  type WorkflowTraceCompensationStart,
+  type WorkflowTraceCompensationStep,
+  type WorkflowTraceCompensationEnd,
+  type WorkflowTraceRecoveryReclaim,
+  type WorkflowTraceWorkerTask,
+  type WorkflowTraceWorkerTaskEnd,
+} from "./lib/durable/workflow-tracer.ts";
+
 // Errors
 export {
   ChildWorkflowGoneError,

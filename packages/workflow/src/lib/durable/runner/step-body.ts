@@ -17,6 +17,8 @@ import { applyStepPolicies } from "./step-policies.ts";
 export interface StepAttemptFailure {
   readonly attempt: number;
   readonly error: string;
+  /** `_tag` of the attempt's error, when it had one (a trace attribute; not stored). */
+  readonly errorTag?: string;
   readonly startedAt: Date;
   readonly durationMs: number;
   /** Who ran the attempt, when not the runner itself (a worker id). */
@@ -86,6 +88,11 @@ export async function runStepBody(params: {
   readonly firstAttempt: number;
   /** The run-level abort signal each attempt's own signal is linked to. */
   readonly signal?: AbortSignal;
+  /** Called as each attempt begins (tracing). */
+  readonly onAttemptStart?: (attempt: {
+    readonly attempt: number;
+    readonly startedAt: Date;
+  }) => void;
   /** Invoke the step's `execute` for one attempt. */
   readonly execute: (attempt: {
     readonly attempt: number;
@@ -112,6 +119,7 @@ export async function runStepBody(params: {
       attempt++;
       attemptStartedAt = clock.now();
       current = createAttemptSignal(params.signal);
+      params.onAttemptStart?.({ attempt, startedAt: attemptStartedAt });
       return params.execute({ attempt, metadataRef, signal: current.signal });
     },
     onTimeout: (error) => current.abort(error),
@@ -119,9 +127,11 @@ export async function runStepBody(params: {
       // A failed attempt's leftover work must not overlap its retry.
       current.abort(error);
       if (isControlFlowError(error)) return;
+      const tag = errorTagOf(error);
       failedAttempts.push({
         attempt,
         error: errorMessage(error),
+        ...(tag !== undefined && { errorTag: tag }),
         startedAt: attemptStartedAt,
         durationMs: clock.currentTimeMs() - attemptStartedAt.getTime(),
       });

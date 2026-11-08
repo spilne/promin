@@ -51,12 +51,21 @@ import { isStaleLeaseError } from "../scheduler/leader-lease.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import { PollLoop } from "../shared/poll-loop.ts";
 import { hasCapability } from "../durable/storage/capabilities.ts";
+import { emitTrace, type WorkflowTracer } from "../durable/workflow-tracer.ts";
 
 export { buildStubWorkflow } from "./stub-workflow.ts";
 
 export interface DistributedRunnerConfig {
   /** Workflow storage for state persistence. */
   storage: WorkflowStorage;
+  /**
+   * Lifecycle tracer for the runs this coordinator drives (see
+   * `WorkflowTracer`). The trace context of each dispatched step crosses the
+   * queue in `StepTask.metadata.traceparent` (no schema change); give the
+   * workers the same tracer to join it. Orphaned runs the coordinator adopts
+   * are reported as `recoveryReclaim`.
+   */
+  tracer?: WorkflowTracer;
   /** Step queue for dispatching tasks to workers. */
   stepQueue: StepQueue;
   /**
@@ -190,6 +199,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
   private workerSweepCount = 0;
   private readonly leaderElection: LeaderElection;
   private readonly clock: WallClock;
+  private tracer?: WorkflowTracer;
   private readonly registry?: WorkflowVersionRegistry;
   private readonly recoveryIntervalMs: number;
   private readonly orphanGraceMs: number;
@@ -268,7 +278,9 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
         clock: this.clock,
       }),
       clock: this.clock,
+      ...(config.tracer !== undefined && { tracer: config.tracer }),
     });
+    if (config.tracer !== undefined) this.tracer = config.tracer;
   }
 
   // ---------------------------------------------------------------------------
@@ -723,6 +735,14 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
       return;
     }
     if (this.runningWorkflows.has(run.workflowId)) return;
+    if (this.tracer !== undefined) {
+      emitTrace(this.tracer, "recoveryReclaim", {
+        workflowId: run.workflowId,
+        workflowName: run.workflowName,
+        ...(run.version !== undefined && { version: run.version }),
+        at: this.clock.now(),
+      });
+    }
     void this._launch({ workflow, workflowId: run.workflowId, input: run.input }).then(
       (outcome) => {
         if (outcome.kind === "failed") {

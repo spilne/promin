@@ -29,6 +29,7 @@ const ENTRIES: Record<string, string> = {
   "./sql-models": "sql-models.ts",
   "./storage-kit": "storage-kit.ts",
   "./testing": "testing.ts",
+  "./otel": "otel.ts",
   "./dev": "dev.ts",
 };
 
@@ -40,6 +41,7 @@ const PORTABLE = [
   "./discovery",
   "./sql-models",
   "./storage-kit",
+  "./otel",
 ];
 
 const NODE_BUILTINS = new Set(builtinModules);

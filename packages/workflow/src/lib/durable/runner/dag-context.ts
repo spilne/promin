@@ -15,6 +15,7 @@ import type {
 import type { WorkflowMetadataRef } from "../step-definition.ts";
 import type { StepState, WorkflowStatusSnapshot } from "../workflow-state.ts";
 import type { FenceGuard, WorkflowStorage } from "../workflow-storage.ts";
+import type { WorkflowTraceRef, WorkflowTracer } from "../workflow-tracer.ts";
 import type { StepOutcome } from "./step-checkpoint.ts";
 import type { StepExecutor } from "./step-executor.ts";
 
@@ -79,6 +80,9 @@ export interface DagExecutionContext {
    * to their steps' `StepExecutionRequest.signal`.
    */
   readonly signal?: AbortSignal;
+  /** Lifecycle tracer; with it set, `traceRef` identifies the run its events belong to. */
+  readonly tracer?: WorkflowTracer;
+  readonly traceRef?: WorkflowTraceRef;
 }
 
 /**
