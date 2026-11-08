@@ -313,9 +313,10 @@ export interface CompensateConfig {
    * - `"rollback"` — the driver that sees the cancel rolls the completed
    *   steps back in the order a failure would (durable ledger, retries per
    *   `retry`, `onComplete` fired), then the run ends cancelled, not failed.
-   *   If this driver loses the lock mid-rollback, the run is abandoned; a
-   *   cancelled run is not re-driven, so the rest is not rolled back unless
-   *   the run is started again.
+   *   With a `CompensationLedgerStore` the run is reopened as `compensating`
+   *   first, so a driver that stops mid-rollback leaves it for recovery to
+   *   finish (steps already rolled back are skipped). A run cancelled while
+   *   no driver holds it is not rolled back.
    */
   onCancel?: "none" | "rollback";
   /**

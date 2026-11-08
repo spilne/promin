@@ -25,6 +25,8 @@ import { isAbandonRunExit, isControlFlowExit } from "../step-policy.ts";
 import { withLock, type LockContext } from "../with-lock.ts";
 import { topologicalSort, type DagNode } from "../workflow-dag.ts";
 import {
+  CANCELLED_ERROR,
+  CANCELLED_ERROR_TAG,
   isCancelledRun,
   isFinalFailedRun,
   isTerminalWorkflowStatus,
@@ -390,7 +392,6 @@ async function runOneOrchestrationCycle(cycle: CycleParams): Promise<unknown> {
         clock,
         workflowId: cycle.params.workflowId,
         input: phase.input,
-        error: err,
       });
     }
     throw err;
@@ -400,12 +401,11 @@ async function runOneOrchestrationCycle(cycle: CycleParams): Promise<unknown> {
 /**
  * Roll back a run that was cancelled while this driver held it. Runs only
  * when the stored run reads as cancelled (a step failing with a child's
- * cancelled error was rolled back as a failure already). Steps go through
- * `compensateWorkflow` as in a failure: same order, retries and ledger, so
- * a step the ledger lists is never rolled back twice. The lock's lease
- * signal, not the run signal, bounds it: a cancel does not stop the
- * rollback, a lost lock does (the run is then abandoned, as in a failure
- * rollback, and nothing more is compensated here).
+ * cancelled error was rolled back as a failure already). It goes through
+ * `rollBackAndFail` as a cancel rollback: the run re-enters `compensating`
+ * (durable, so a driver that stops mid-rollback leaves it for recovery to
+ * finish), steps roll back in a failure's order with its retries and ledger,
+ * and the run ends cancelled again.
  */
 async function rollBackCancelled(params: {
   ctx: WorkflowOrchestrationContext;
@@ -413,39 +413,26 @@ async function rollBackCancelled(params: {
   clock: WallClock;
   workflowId: string;
   input: unknown;
-  error: unknown;
 }): Promise<void> {
   const { ctx, lock, clock, workflowId, input } = params;
   if (lock.leaseSignal.aborted) throw lock.leaseSignal.reason;
   const status = await ctx.storage.loadWorkflowStatus(workflowId);
   if (status === null || !isCancelledRun(status)) return;
-  const guard = lock.fenceToken ? { fenceToken: lock.fenceToken } : undefined;
-  const report = await compensateWorkflow({
-    storage: ctx.storage,
-    steps: ctx.steps,
-    compensateConfig: ctx.compensateConfig,
+  await rollBackAndFail({
+    ctx,
+    lock,
+    clock,
     workflowId,
     input,
     dagNodes: ctx.steps.map((s) => ({ name: s.name, dependsOn: s.dependsOn })),
-    guard,
-    clock,
-    signal: lock.leaseSignal,
-    ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
+    guard: lock.fenceToken ? { fenceToken: lock.fenceToken } : undefined,
+    workflowStartTime: clock.currentTimeMs(),
+    error: cancelledError(workflowId),
+    errorMsg: CANCELLED_ERROR,
+    errorTag: CANCELLED_ERROR_TAG,
+    resumed: false,
+    cancelled: true,
   });
-  if (ctx.compensateConfig?.onComplete) {
-    try {
-      await runHookResult(
-        ctx.compensateConfig.onComplete({
-          input,
-          error: params.error,
-          compensatedSteps: report.compensated,
-          failedCompensations: report.failed,
-        }),
-      );
-    } catch {
-      // As for a failure: the cancel is the outcome that matters.
-    }
-  }
 }
 
 async function runCycleBody(
@@ -560,6 +547,10 @@ async function runCycleBody(
   // not executed again: its rollback is finished and the run fails with
   // the failure that started it.
   if (state?.status === "compensating") {
+    const cancelled = state.errorTag === CANCELLED_ERROR_TAG;
+    // A cancel rollback ends by rejecting with the cancel: that must not
+    // start a second one.
+    if (cancelled) cycle.phase.executing = false;
     return rollBackAndFail({
       ctx,
       lock,
@@ -569,10 +560,11 @@ async function runCycleBody(
       dagNodes,
       guard,
       workflowStartTime,
-      error: runFailure(state),
+      error: cancelled ? cancelledError(workflowId) : runFailure(state),
       errorMsg: state.error ?? `Workflow ${workflowId} failed`,
       errorTag: state.errorTag,
       resumed: true,
+      cancelled,
     });
   }
 
@@ -746,6 +738,7 @@ async function runCycleBody(
     errorMsg: errorMessage(lastStepError),
     errorTag: errorTagOf(lastStepError),
     resumed: false,
+    cancelled: false,
   });
 }
 
@@ -776,11 +769,19 @@ async function rollBackAndFail(params: {
   errorMsg: string;
   errorTag: string | undefined;
   resumed: boolean;
+  /**
+   * The rollback answers a cancel: the run ends cancelled again (not as a
+   * failure: no `onWorkflowFailure`, no DLQ record), and `error` is the
+   * `WorkflowCancelledError`.
+   */
+  cancelled: boolean;
 }): Promise<never> {
   const { ctx, lock, clock, workflowId, input, dagNodes, guard, workflowStartTime } = params;
   const { errorMsg, errorTag: failedTag } = params;
   const lastStepError = params.error;
   const storage = ctx.storage;
+  // Without a ledger a cancelled run is never reopened: it stays ended.
+  const reopened = params.cancelled && hasCapability(storage, "compensationLedger");
 
   if (!params.resumed && hasCapability(storage, "compensationLedger")) {
     let entered = false;
@@ -798,7 +799,7 @@ async function rollBackAndFail(params: {
       },
     });
     if (!entered) {
-      await assertNotCancelled({ ctx, workflowId });
+      if (!params.cancelled) await assertNotCancelled({ ctx, workflowId });
       throw lastStepError;
     }
   }
@@ -832,6 +833,10 @@ async function rollBackAndFail(params: {
     }
   }
 
+  // A cancel rollback has no failure to report: the run only ends again
+  // (cancelled) when it was reopened.
+  if (params.cancelled && !reopened) throw lastStepError;
+
   // Fail the workflow, keeping the error's tag with it.
   await checkpointWrite({
     clock,
@@ -845,6 +850,7 @@ async function rollBackAndFail(params: {
         ...(failedTag !== undefined && { errorTag: failedTag }),
       }),
   });
+  if (params.cancelled) throw lastStepError;
   await fireHook({
     hooks: ctx.hooks,
     name: "onWorkflowFailure",
