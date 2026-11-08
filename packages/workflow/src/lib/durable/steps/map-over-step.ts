@@ -26,6 +26,7 @@ import {
   type StepDefinition,
   type StepEff,
 } from "../step-definition.ts";
+import { createAttemptSignal, NEVER_ABORTED } from "../step-signal.ts";
 import { isControlFlowExit, toStepPolicy, withStepRetry, withStepTimeout } from "../step-policy.ts";
 import type { StepState } from "../workflow-state.ts";
 
@@ -74,13 +75,17 @@ export function createMapOverStep(params: {
       const runElement = (element: unknown, taskIndex: number): StepEff<unknown, TaggedError> => {
         // Element retries re-enter this thunk; each entry is one attempt.
         let elementRetries = -1;
+        let current = createAttemptSignal(exec.signal);
         let attemptEff: StepEff<unknown, TaggedError> = suspend(() => {
           elementRetries++;
+          current.abort(new Error("element retried"));
+          current = createAttemptSignal(exec.signal);
           const ctx: MapStepContext<unknown> = {
             input: exec.input,
             workflowId: exec.workflowId,
             taskIndex,
             attempt: stepAttempt + elementRetries,
+            signal: current.signal,
           };
           return asStepEff(fn(element, ctx));
         });
@@ -92,6 +97,7 @@ export function createMapOverStep(params: {
             workflowId: exec.workflowId,
             stepName: name,
             subject: `${name}[${taskIndex}]`,
+            onTimeout: (error) => current.abort(error),
           });
         }
         if (elementOptions?.retry) {
@@ -152,6 +158,7 @@ export function createMapOverStep(params: {
           prev: sourceArray,
           workflowId: exec.workflowId,
           attempt: stepAttempt,
+          signal: exec.signal ?? NEVER_ABORTED,
         },
         runBody: runAll,
         stepName: name,

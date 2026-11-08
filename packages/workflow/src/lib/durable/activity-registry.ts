@@ -52,6 +52,8 @@ export interface ActivityContext {
   readonly workflowId: string;
   /** Execution attempt number (1 on first try, 2+ on retries). */
   readonly attempt: number;
+  /** Aborts when this attempt times out or fails, or the run loses its lock. Pass it to cancellable work. */
+  readonly signal: AbortSignal;
 }
 
 /**

@@ -14,6 +14,7 @@ import {
   type StepOptions,
 } from "../step-definition.ts";
 import { toStepPolicy } from "../step-policy.ts";
+import { NEVER_ABORTED } from "../step-signal.ts";
 
 export function createBasicStep(params: {
   readonly name: string;
@@ -49,6 +50,7 @@ export function createBasicStep(params: {
           deps,
           workflowId: exec.workflowId,
           attempt: exec.attemptRef.current,
+          signal: exec.signal ?? NEVER_ABORTED,
         };
       }
       return withOptionalStepCache({

@@ -87,6 +87,14 @@ await onboard
   .signal({ signalName: "manager-approved", payload: { approved: true } });
 ```
 
+- Every step body (linear, DAG and `mapOver` element) receives `ctx.signal`,
+  one `AbortSignal` per attempt. It aborts when the attempt times out
+  (`timeoutMs`, reason `StepTimeoutError`) or fails (so a retry does not
+  overlap leftovers), and with the run's own signal: a lost lock, or the
+  `signal` passed to `runner.run`. Pass it to `fetch` or an SDK call to stop
+  in-flight work; a body that ignores it behaves as before. A cancel made
+  through storage (`cancelWorkflow`) is still seen at the next wave boundary,
+  not mid-step.
 - `.parallel(name, branches)` forks the head into one DAG step per branch
   and joins them into `{ [branch]: result }`;
   `.parallel(name, { dependsOn }, branches)` forks from named steps.

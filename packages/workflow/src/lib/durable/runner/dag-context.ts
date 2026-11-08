@@ -96,6 +96,7 @@ export function stepRuntimeFor(params: {
   const { ctx, clock } = params;
   return {
     clock,
+    ...(ctx.signal !== undefined && { signal: ctx.signal }),
     stepState: params.stepStates[params.stepName] ?? null,
     ...(params.workflowMetadata !== undefined && { workflowMetadata: params.workflowMetadata }),
     ...(ctx.guard !== undefined && { guard: ctx.guard }),
