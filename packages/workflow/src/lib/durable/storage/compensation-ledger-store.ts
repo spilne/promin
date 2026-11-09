@@ -25,7 +25,7 @@ export interface BeginCompensationParams extends FencedWrite {
    * is also what allows an ended cancelled run to enter the phase (see
    * `beginCompensation`). It is never derived from `errorTag`.
    */
-  readonly origin?: CompensationOrigin;
+  readonly origin?: Exclude<CompensationOrigin, "cancel-settled">;
 }
 
 /** Params of `saveStepCompensation`. */

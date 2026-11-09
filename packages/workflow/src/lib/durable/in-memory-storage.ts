@@ -94,6 +94,7 @@ import {
   CANCELLED_ERROR,
   CANCELLED_ERROR_TAG,
   isTerminalWorkflowStatus,
+  owesCancelRollback,
   withoutCompensationLedger as withoutLedger,
   type SignalState,
   type StepAttemptRecord,
@@ -434,7 +435,13 @@ export class InMemoryWorkflowStorage
     });
   }
 
-  async failWorkflow({ workflowId, error, errorTag, guard }: FailWorkflowParams): Promise<void> {
+  async failWorkflow({
+    workflowId,
+    error,
+    errorTag,
+    compensationOrigin,
+    guard,
+  }: FailWorkflowParams): Promise<void> {
     this.checkFence({ workflowId, guard });
     const wf = this.workflows.get(workflowId);
     if (!wf || isTerminalWorkflowStatus(wf.status)) return;
@@ -442,6 +449,7 @@ export class InMemoryWorkflowStorage
     wf.status = "failed";
     wf.error = error;
     wf.errorTag = errorTag;
+    if (compensationOrigin !== undefined) wf.compensationOrigin = compensationOrigin;
     wf.completedAt = now;
     wf.updatedAt = now;
     this.emit({ workflowId, event: { type: "workflow-failed", error, at: now }, terminal: true });
@@ -900,7 +908,12 @@ export class InMemoryWorkflowStorage
       limit: params.limit,
       afterWorkflowId: params.afterWorkflowId,
       pick: (wf) => {
-        if (wf.status !== "pending" && wf.status !== "running" && wf.status !== "compensating") {
+        if (
+          wf.status !== "pending" &&
+          wf.status !== "running" &&
+          wf.status !== "compensating" &&
+          !owesCancelRollback(wf)
+        ) {
           return undefined;
         }
         if (wf.updatedAt.getTime() >= beforeMs) return undefined;
@@ -909,7 +922,7 @@ export class InMemoryWorkflowStorage
           workflowId: wf.workflowId,
           workflowName: wf.workflowName,
           ...(wf.version !== undefined ? { version: wf.version } : {}),
-          status: wf.status,
+          status: wf.status as OrphanedRun["status"],
           input: wf.input,
           ...(wf.metadata !== undefined ? { metadata: wf.metadata } : {}),
         };

@@ -130,6 +130,12 @@ export const workflows = pgTable(
           ].join(", "),
         )})`,
       ),
+    // Cancelled runs whose cancel is not settled (`listOrphanedRuns`).
+    index("wf_workflows_cancel_owed_idx")
+      .on(t.workflowId)
+      .where(
+        sql`${t.statusId} = ${sql.raw(String(WorkflowStatusIds.id.failed))} AND ${t.compensationOrigin} = 'cancel'`,
+      ),
     index("wf_workflows_run_source_idx")
       .on(t.runSource, t.runSourceId)
       .where(sql`${t.runSource} IS NOT NULL`),

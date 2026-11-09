@@ -3035,6 +3035,46 @@ export function storageTestSuite(
           expect(ended?.steps.b?.compensationStatus).toBe("compensated");
         });
 
+        it("failWorkflow with compensationOrigin settles a cancel: ended cancelled, never reopened again", async () => {
+          const s = await getLedgerStorage();
+          await runWithSteps(s, "led-settle", ["a"]);
+          await s.cancelWorkflow({ workflowId: "led-settle" });
+          expect((await s.loadWorkflow("led-settle"))?.compensationOrigin).toBe("cancel");
+
+          const cancel = {
+            workflowId: "led-settle",
+            error: CANCELLED_ERROR,
+            errorTag: CANCELLED_ERROR_TAG,
+            origin: "cancel" as const,
+          };
+          expect(await s.beginCompensation(cancel)).toBe(true);
+          // Without the origin the marker stays as it is.
+          await runWithSteps(s, "led-settle-keep", ["a"]);
+          await s.cancelWorkflow({ workflowId: "led-settle-keep" });
+          await s.beginCompensation({ ...cancel, workflowId: "led-settle-keep" });
+          await s.failWorkflow({
+            workflowId: "led-settle-keep",
+            error: CANCELLED_ERROR,
+            errorTag: CANCELLED_ERROR_TAG,
+          });
+          expect((await s.loadWorkflow("led-settle-keep"))?.compensationOrigin).toBe("cancel");
+
+          await s.failWorkflow({
+            workflowId: "led-settle",
+            error: CANCELLED_ERROR,
+            errorTag: CANCELLED_ERROR_TAG,
+            compensationOrigin: "cancel-settled",
+          });
+          const ended = (await s.loadWorkflow("led-settle"))!;
+          expect(isCancelledRun(ended)).toBe(true);
+          expect(ended.compensationOrigin).toBe("cancel-settled");
+          expect(ended.completedAt).toBeInstanceOf(Date);
+
+          // Settled: no further rollback may reopen it.
+          expect(await s.beginCompensation(cancel)).toBe(false);
+          expect((await s.loadWorkflow("led-settle"))?.status).toBe("failed");
+        });
+
         it("a cancel rollback reopens only runs cancelWorkflow ended, not any run with the cancelled tag", async () => {
           const s = await getLedgerStorage();
           await runWithSteps(s, "led-ro-done", ["a"]);
@@ -3211,6 +3251,59 @@ export function storageTestSuite(
         }
 
         if (options.hasScannerQueries) {
+          it("listOrphanedRuns returns a cancelled run whose cancel is not settled, until it is", async () => {
+            const s = await getLedgerStorage();
+            const later = new Date(Date.now() + 5_000);
+            const list = async (): Promise<string[]> =>
+              (await s.listOrphanedRuns!({ now: later, updatedBefore: later, limit: 100 }))
+                .map((r) => r.workflowId)
+                .filter((id) => id.startsWith("led-owed"));
+
+            await runWithSteps(s, "led-owed-cancelled", ["a"]);
+            await s.cancelWorkflow({ workflowId: "led-owed-cancelled" });
+            await runWithSteps(s, "led-owed-failed", ["a"]);
+            await s.failWorkflow({ workflowId: "led-owed-failed", error: "x", errorTag: "Boom" });
+            await runWithSteps(s, "led-owed-held", ["a"]);
+            await s.cancelWorkflow({ workflowId: "led-owed-held" });
+            const held = await s.tryLock({ workflowId: "led-owed-held", lockDurationMs: 60_000 });
+            expect(held.acquired).toBe(true);
+
+            // A cancelled run owing its cancel is listed as failed, a failure and
+            // a run a driver still holds are not.
+            const rows = await s.listOrphanedRuns!({
+              now: later,
+              updatedBefore: later,
+              limit: 100,
+            });
+            expect(rows.find((r) => r.workflowId === "led-owed-cancelled")?.status).toBe("failed");
+            expect(await list()).toEqual(["led-owed-cancelled"]);
+
+            // Reopened for its rollback it is listed as compensating, and once
+            // its cancel is settled it is gone.
+            await s.beginCompensation({
+              workflowId: "led-owed-cancelled",
+              error: CANCELLED_ERROR,
+              errorTag: CANCELLED_ERROR_TAG,
+              origin: "cancel",
+            });
+            const midway = await s.listOrphanedRuns!({
+              now: later,
+              updatedBefore: later,
+              limit: 100,
+            });
+            expect(midway.find((r) => r.workflowId === "led-owed-cancelled")?.status).toBe(
+              "compensating",
+            );
+            await s.failWorkflow({
+              workflowId: "led-owed-cancelled",
+              error: CANCELLED_ERROR,
+              errorTag: CANCELLED_ERROR_TAG,
+              compensationOrigin: "cancel-settled",
+            });
+            expect(await list()).toEqual([]);
+            await s.releaseLock({ workflowId: "led-owed-held", guard: { fenceToken: held.token } });
+          });
+
           it("listOrphanedRuns returns a compensating run nobody holds", async () => {
             const s = await getLedgerStorage();
             await runWithSteps(s, "led-orphan", ["a"]);

@@ -189,6 +189,7 @@ export {
   TERMINAL_WORKFLOW_STATUSES,
   isTerminalWorkflowStatus,
   isCancelledRun,
+  owesCancelRollback,
   isFinalFailedRun,
   isMarkedFailedRun,
   MARKED_FAILED_ERROR_TAG,

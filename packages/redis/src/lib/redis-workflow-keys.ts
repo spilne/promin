@@ -169,6 +169,15 @@ export class RedisWorkflowKeys {
     return this.idx("by-completed");
   }
 
+  /**
+   * Set of cancelled runs whose cancel may not be settled yet
+   * (`listOrphanedRuns`). A superset: members that turn out settled, or no
+   * longer cancelled, are dropped when a scan reads them.
+   */
+  get cancelOwed(): string {
+    return this.idx("cancel-owed");
+  }
+
   status(status: string): string {
     return this.idx(`status:${status}`);
   }
