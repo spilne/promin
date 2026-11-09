@@ -6,6 +6,7 @@ import {
   type StepQueueClaimParams,
   type StepQueueCompleteParams,
   type StepQueueFailParams,
+  type StepQueueHeartbeatParams,
   type StepQueueEnqueueParams,
   type StepQueueRequeueParams,
   type StepQueueRequeueResult,
@@ -34,7 +35,7 @@ import type { SqliteDatabase } from "./sqlite-database.ts";
  *     timeout_ms, attempt, deliveries, status, version, namespace, created_at,
  *     claimed_at, claimed_by, claim_token, completed_at, result TEXT (JSON),
  *     error, error_tag, step_metadata TEXT (JSON), duration_ms,
- *     last_heartbeat, run, consumed_at, active_key TEXT UNIQUE WHERE NOT NULL
+ *     last_heartbeat, heartbeat_details TEXT (JSON), run, consumed_at, active_key TEXT UNIQUE WHERE NOT NULL
  *   )
  *
  * @example
@@ -120,9 +121,15 @@ export class SqliteStepQueue implements StepQueue {
         claimed_by     TEXT,
         deliveries     INTEGER NOT NULL DEFAULT 0,
         run            INTEGER NOT NULL DEFAULT 1,
-        consumed_at    INTEGER
+        consumed_at    INTEGER,
+        heartbeat_details TEXT
       )
     `);
+    // Tables created before heartbeat details lack their column.
+    const columns = this.db.query<{ name: string }>(`PRAGMA table_info(${t})`).all();
+    if (!columns.some((c) => c.name === "heartbeat_details")) {
+      this.db.run(`ALTER TABLE ${t} ADD COLUMN heartbeat_details TEXT`);
+    }
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_concurrency_running ON ${t} (concurrency_scope, concurrency_key) WHERE status = 'running' AND concurrency_key IS NOT NULL`,
     );
@@ -323,16 +330,20 @@ export class SqliteStepQueue implements StepQueue {
     return this._changes() > 0;
   }
 
-  async heartbeat(params: { taskId: string; claimToken?: string }): Promise<boolean> {
+  async heartbeat(params: StepQueueHeartbeatParams): Promise<boolean> {
+    // No details keeps the stored ones; `null` clears them.
     this.db
       .query(
         `UPDATE ${this._table}
-         SET last_heartbeat = ?
+         SET last_heartbeat = ?,
+             heartbeat_details = CASE WHEN ? THEN ? ELSE heartbeat_details END
          WHERE id = ? AND status = 'running'
            AND (? IS NULL OR claim_token = ?)`,
       )
       .run(
         this.clock.currentTimeMs(),
+        params.details !== undefined ? 1 : 0,
+        params.details != null ? JSON.stringify(params.details) : null,
         params.taskId,
         params.claimToken ?? null,
         params.claimToken ?? null,
@@ -533,6 +544,7 @@ interface TaskRow {
   step_metadata: string | null;
   duration_ms: number | null;
   last_heartbeat: number | null;
+  heartbeat_details: string | null;
   active_key: string | null;
 }
 
@@ -559,6 +571,9 @@ function rowToTask(row: TaskRow): StepTask {
     concurrencyKey: row.concurrency_key ?? undefined,
     concurrencyScope: row.concurrency_scope ?? undefined,
     concurrencyLimit: row.concurrency_limit ?? undefined,
+    ...(row.heartbeat_details != null && {
+      lastHeartbeatDetails: JSON.parse(row.heartbeat_details) as unknown,
+    }),
   };
 }
 

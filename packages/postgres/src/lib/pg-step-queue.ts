@@ -15,6 +15,7 @@ import {
   type StepQueueClaimParams,
   type StepQueueCompleteParams,
   type StepQueueFailParams,
+  type StepQueueHeartbeatParams,
   type StepQueueEnqueueParams,
   type StepQueueRequeueParams,
   type StepQueueRequeueResult,
@@ -58,7 +59,7 @@ const TASK_COLUMNS = sql.raw(
   `id, workflow_id, step_name, needs, priority, input, deps, depends_on, timeout_ms, ` +
     `attempt, deliveries, status, created_at, version, metadata, concurrency_key, ` +
     `concurrency_scope, concurrency_limit, claim_token, claimed_by, claimed_at, heartbeat_at, ` +
-    `completed_at, result, error, error_tag, step_metadata, duration_ms, run, consumed_at`,
+    `heartbeat_details, completed_at, result, error, error_tag, step_metadata, duration_ms, run, consumed_at`,
 );
 
 export interface PgStepQueueConfig {
@@ -374,10 +375,14 @@ export class PgStepQueue implements StepQueue {
     return rows.length > 0;
   }
 
-  async heartbeat(params: { taskId: string; claimToken?: string }): Promise<boolean> {
+  async heartbeat(params: StepQueueHeartbeatParams): Promise<boolean> {
     const rows = await this.db
       .update(stepQueue)
-      .set({ heartbeatAt: this.clock.now() })
+      .set({
+        heartbeatAt: this.clock.now(),
+        // No details keeps the stored ones (an omitted column is left alone).
+        ...(params.details !== undefined && { heartbeatDetails: params.details }),
+      })
       .where(
         and(
           eq(stepQueue.id, Number(params.taskId)),
@@ -617,6 +622,7 @@ function toTask(r: Row): StepTask {
     concurrencyKey: r.concurrency_key ?? undefined,
     concurrencyScope: r.concurrency_scope ?? undefined,
     concurrencyLimit: r.concurrency_limit ?? undefined,
+    ...(r.heartbeat_details != null && { lastHeartbeatDetails: r.heartbeat_details }),
   };
 }
 

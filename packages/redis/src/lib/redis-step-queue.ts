@@ -43,6 +43,7 @@ import {
   type StepQueueClaimParams,
   type StepQueueCompleteParams,
   type StepQueueFailParams,
+  type StepQueueHeartbeatParams,
   type StepQueueEnqueueParams,
   type StepQueueRequeueParams,
   type StepQueueRequeueResult,
@@ -346,6 +347,10 @@ const HEARTBEAT_LUA = `
 local task_key = KEYS[1]
 local claim_token = ARGV[1]
 local heartbeat_at = ARGV[2]
+-- ARGV[3] = '1' when the heartbeat carries details; ARGV[4] is their JSON
+-- ('' clears them). Without them the stored details stay.
+local set_details = ARGV[3]
+local details = ARGV[4]
 
 local status = redis.call('HGET', task_key, 'status')
 local current_token = redis.call('HGET', task_key, 'claimToken')
@@ -353,6 +358,7 @@ if status ~= 'running' then return 0 end
 if claim_token ~= '' and current_token ~= claim_token then return 0 end
 
 redis.call('HSET', task_key, 'heartbeatAt', heartbeat_at)
+if set_details == '1' then redis.call('HSET', task_key, 'heartbeatDetails', details) end
 return 1
 `;
 
@@ -605,13 +611,15 @@ export class RedisStepQueue implements StepQueue {
     });
   }
 
-  async heartbeat(params: { taskId: string; claimToken?: string }): Promise<boolean> {
+  async heartbeat(params: StepQueueHeartbeatParams): Promise<boolean> {
     const ok = await this.redis.eval(
       HEARTBEAT_LUA,
       1,
       this.taskKey(params.taskId),
       params.claimToken ?? "",
       this.clock.now().toISOString(),
+      params.details !== undefined ? "1" : "",
+      params.details != null ? JSON.stringify(params.details) : "",
     );
     return ok === 1;
   }
@@ -893,6 +901,7 @@ export class RedisStepQueue implements StepQueue {
     if (opt("claimedBy")) record.claimedBy = map.claimedBy;
     if (opt("claimedAt")) record.claimedAt = date("claimedAt");
     if (opt("heartbeatAt")) record.heartbeatAt = date("heartbeatAt");
+    if (opt("heartbeatDetails")) record.lastHeartbeatDetails = json("heartbeatDetails");
     if (opt("completedAt")) record.completedAt = date("completedAt");
     if (opt("result")) record.result = json("result");
     if (opt("error")) record.error = map.error;

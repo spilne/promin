@@ -476,6 +476,7 @@ exports[`entry points — exported names match the snapshot 1`] = `
     "StepQueueExecutor",
     "type StepQueueExecutorConfig",
     "type StepQueueFailParams",
+    "type StepQueueHeartbeatParams",
     "type StepQueueRequeueParams",
     "type StepQueueRequeueResult",
     "type StepRegistration",

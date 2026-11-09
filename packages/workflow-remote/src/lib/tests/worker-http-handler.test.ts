@@ -100,6 +100,24 @@ describe("createWorkerApiHandler", () => {
     expect(res.status).toBe(200);
   });
 
+  it("heartbeat details are stored, and a redelivered claim returns them", async () => {
+    await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {} });
+    const [task] = await queue.claim({ workerId: "w-1", limit: 1 });
+
+    const res = await post(handler, "heartbeat", {
+      taskId: task!.id,
+      claimToken: task!.claimToken,
+      details: { cursor: 7 },
+    });
+    expect(await resultOf(res)).toBe(true);
+    await queue.requeueStuck({ mode: "worker", workerId: "w-1" });
+
+    const claimed = (await resultOf(
+      await post(handler, "claim", { workerId: "w-2", limit: 1 }),
+    )) as StepTask[];
+    expect(claimed[0]!.lastHeartbeatDetails).toEqual({ cursor: 7 });
+  });
+
   it("claim routes by step name and version and records the worker id", async () => {
     await queue.enqueue({
       workflowId: "wf-1",

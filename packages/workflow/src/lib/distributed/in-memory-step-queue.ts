@@ -11,6 +11,7 @@ import {
   type StepQueueCompleteParams,
   type StepQueueEnqueueParams,
   type StepQueueFailParams,
+  type StepQueueHeartbeatParams,
   type StepQueueRequeueParams,
   type StepQueueRequeueResult,
   type StepTask,
@@ -178,10 +179,13 @@ export class InMemoryStepQueue implements StepQueue {
     return true;
   }
 
-  async heartbeat(params: { taskId: string; claimToken?: string }): Promise<boolean> {
+  async heartbeat(params: StepQueueHeartbeatParams): Promise<boolean> {
     const task = this.tasks.get(params.taskId);
     if (!this.isCurrentClaim(task, params.claimToken)) return false;
     task.heartbeatAt = this.clock.now();
+    if (params.details !== undefined) {
+      task.lastHeartbeatDetails = params.details === null ? undefined : detached(params.details);
+    }
     return true;
   }
 
@@ -367,6 +371,9 @@ export class InMemoryStepQueue implements StepQueue {
       concurrencyKey: task.concurrencyKey,
       concurrencyScope: task.concurrencyScope,
       concurrencyLimit: task.concurrencyLimit,
+      ...(task.lastHeartbeatDetails !== undefined && {
+        lastHeartbeatDetails: detached(task.lastHeartbeatDetails),
+      }),
     };
   }
 
@@ -377,4 +384,9 @@ export class InMemoryStepQueue implements StepQueue {
     if (!task || task.status !== "running") return false;
     return claimToken === undefined || task.claimToken === claimToken;
   }
+}
+
+/** A JSON round trip, as the persistent queues store details: no aliasing with the caller's object. */
+function detached(value: unknown): unknown {
+  return JSON.parse(JSON.stringify(value));
 }

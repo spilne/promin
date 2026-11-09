@@ -59,6 +59,15 @@ export interface StepTask {
    * the next `requeueStuck` dead-letters the task instead of requeueing.
    */
   readonly deliveries: number;
+  /**
+   * The progress details of the task's latest heartbeat that carried any
+   * (`heartbeat({ details })`), whichever claim sent it. A task redelivered
+   * after its lease was lost or its worker crashed reaches the next worker
+   * with the previous worker's last details here, so it can resume instead
+   * of starting over. Undefined until a heartbeat sent some. Stored as JSON:
+   * pass JSON-compatible values (a `Date` comes back as a string).
+   */
+  readonly lastHeartbeatDetails?: unknown;
   readonly status: StepTaskStatus;
   readonly createdAt: Date;
   /**
@@ -199,6 +208,14 @@ export interface StepQueueFailParams {
   durationMs: number;
   /** Step audit metadata for the step row (see `StepTaskRecord.stepMetadata`). */
   stepMetadata?: Record<string, unknown>;
+}
+
+/** Parameters for `StepQueue.heartbeat`. */
+export interface StepQueueHeartbeatParams {
+  taskId: string;
+  claimToken?: string;
+  /** Progress details to keep with the lease (JSON-compatible); see `StepTask.lastHeartbeatDetails`. */
+  details?: unknown;
 }
 
 /** Parameters for `StepQueue.claim`. */
@@ -346,8 +363,16 @@ export interface StepQueue {
    * Extend the running lease on a task. Workers call this periodically while
    * executing a long step so `requeueStuck` doesn't reclaim it prematurely.
    * Returns false when the task is not running under this claim.
+   *
+   * With `details` the heartbeat also stores them as the task's
+   * `lastHeartbeatDetails` (replacing any earlier ones; a heartbeat without
+   * `details` leaves them alone; `null` clears them), written atomically with the lease
+   * extension: a heartbeat that returns false stores nothing, so a worker
+   * that lost its claim cannot overwrite the details of the one that holds it.
+   * Details survive `requeueStuck` and `release`, and are cleared with the
+   * task (a retry of the step is a new task).
    */
-  heartbeat(params: { taskId: string; claimToken?: string }): Promise<boolean>;
+  heartbeat(params: StepQueueHeartbeatParams): Promise<boolean>;
 
   /**
    * Put stuck `running` tasks back to `pending` (see

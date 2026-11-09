@@ -399,12 +399,18 @@ export class DefaultWorker implements WorkflowWorker {
   private async executeTask(task: StepTask, controller: AbortController): Promise<void> {
     const startTime = this.clock.currentTimeMs();
     const traced = this.tracer !== undefined ? this.traceTaskStart(task) : undefined;
+    const progress: TaskProgress = { latest: task.lastHeartbeatDetails, seq: 0, sentSeq: 0 };
     const taskHeartbeatTimer: TimerHandle = this.clock.setInterval(() => {
-      void this.heartbeatTask({ task, controller, timer: taskHeartbeatTimer });
+      void this.heartbeatTask({ task, controller, timer: taskHeartbeatTimer, progress });
     }, this.heartbeatIntervalMs);
 
     try {
-      const outcome = await this.computeOutcome({ task, startTime, signal: controller.signal });
+      const outcome = await this.computeOutcome({
+        task,
+        startTime,
+        signal: controller.signal,
+        progress,
+      });
       // Lease lost or given back on stop: the task belongs to someone else.
       if (controller.signal.aborted) {
         if (traced !== undefined) this.traceTaskEnd({ traced, outcome: "lease-lost" });
@@ -464,16 +470,24 @@ export class DefaultWorker implements WorkflowWorker {
     readonly task: StepTask;
     readonly controller: AbortController;
     readonly timer: TimerHandle;
+    readonly progress: TaskProgress;
   }): Promise<void> {
-    const { task, controller, timer } = params;
+    const { task, controller, timer, progress } = params;
     if (controller.signal.aborted) return;
+    // The latest details the handler recorded since the last successful send.
+    const sending = progress.seq > progress.sentSeq ? progress.seq : undefined;
     let held: boolean;
     try {
-      held = await this.stepQueue.heartbeat({ taskId: task.id, claimToken: task.claimToken });
+      held = await this.stepQueue.heartbeat({
+        taskId: task.id,
+        claimToken: task.claimToken,
+        ...(sending !== undefined && { details: progress.latest }),
+      });
     } catch (error) {
       this.report({ phase: "heartbeat", error, task });
       return;
     }
+    if (held && sending !== undefined) progress.sentSeq = Math.max(progress.sentSeq, sending);
     if (held || controller.signal.aborted) return;
     timer.clear();
     controller.abort(new TaskLeaseLostError(`lost the claim on task ${task.id}`));
@@ -488,8 +502,9 @@ export class DefaultWorker implements WorkflowWorker {
     readonly task: StepTask;
     readonly startTime: number;
     readonly signal: AbortSignal;
+    readonly progress: TaskProgress;
   }): Promise<StepOutcome> {
-    const { task, startTime } = params;
+    const { task, startTime, progress } = params;
     const elapsed = () => this.clock.currentTimeMs() - startTime;
     const registration = this.registry.resolve(task.stepName);
 
@@ -516,6 +531,15 @@ export class DefaultWorker implements WorkflowWorker {
       stepName: task.stepName,
       attempt: task.attempt,
       signal: attempt.signal,
+      get lastHeartbeatDetails() {
+        return progress.latest;
+      },
+      heartbeat: (details) => {
+        // Sent with the next lease heartbeat; `undefined` records nothing.
+        if (details === undefined) return;
+        progress.latest = details;
+        progress.seq++;
+      },
     };
 
     let timer: TimerHandle | undefined;
@@ -612,6 +636,17 @@ export class DefaultWorker implements WorkflowWorker {
       base,
     );
   }
+}
+
+/**
+ * The progress details of one running task: `latest` is what `ctx.heartbeat`
+ * last recorded (or the previous delivery's last details, before it recorded
+ * any); `seq` counts recordings and `sentSeq` the last one a heartbeat stored.
+ */
+interface TaskProgress {
+  latest: unknown;
+  seq: number;
+  sentSeq: number;
 }
 
 /** Abort reason when a heartbeat finds the task's claim gone. */

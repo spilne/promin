@@ -294,6 +294,19 @@ from `@promin/workflow/testing`.
   `ctx.signal` with `TaskLeaseLostError`, stops heartbeating, fires
   `hooks.onLeaseLost` and skips settling the task. A heartbeat that throws
   is only reported (`phase: "heartbeat"`); the next one may succeed.
+- **Heartbeat details.** A handler may call `ctx.heartbeat(details)` with
+  JSON-compatible progress (a cursor, a page token). The latest value rides
+  the next lease heartbeat (so it is sent at most every `heartbeatIntervalMs`
+  and a crash loses at most that much progress) and is stored with the task
+  atomically with the lease extension (`StepQueue.heartbeat({ details })`;
+  `null` clears, no `details` keeps). When the task is redelivered — its
+  lease lapsed, its worker was declared dead, or it was released — the next
+  attempt reads them as `ctx.lastHeartbeatDetails` (`undefined` on a first
+  delivery) and resumes from there. A heartbeat that finds the claim gone
+  stores nothing, so a stalled worker cannot overwrite the new holder's
+  progress. A retry of the step after a failure is a new task and starts
+  without details; steps run inline by the runner (no queue) have no lease
+  to keep them with.
 - **Graceful stop.** `stop()` stops claiming and waits for running tasks.
   `stop({ timeoutMs })` waits at most that long, then `release()`s the
   unfinished tasks (another worker claims them at once) and aborts their
