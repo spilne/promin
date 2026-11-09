@@ -34,13 +34,16 @@ export interface WorkflowWakeup {
  * A `pending` / `running` / `compensating` run whose lock is free or
  * expired, returned by `listOrphanedRuns`: nobody is driving it, so a
  * coordinator may adopt it. Adopting a `compensating` run finishes its
- * rollback.
+ * rollback. A `failed` run is a cancelled one whose cancel is not settled
+ * (`compensationOrigin` still `"cancel"`, see `owesCancelRollback`): adopting
+ * it rolls it back when its definition asks for `onCancel: "rollback"`, and
+ * settles it either way.
  */
 export interface OrphanedRun {
   readonly workflowId: string;
   readonly workflowName: string;
   readonly version?: string;
-  readonly status: "pending" | "running" | "compensating";
+  readonly status: "pending" | "running" | "compensating" | "failed";
   readonly input: unknown;
   readonly metadata?: Record<string, unknown>;
 }
@@ -128,8 +131,13 @@ export interface WorkflowScannerStore {
    * `pending` / `running` / `compensating` runs that nobody is driving —
    * no lock, or a lock that expired at or before `now` — and that were last
    * updated before `updatedBefore` (so a run a live coordinator has just
-   * created and not locked yet is left alone). Never returns `suspended`
-   * runs: the scanners own those. Ordered by `workflowId` ascending.
+   * created and not locked yet is left alone). Also returns cancelled runs
+   * whose cancel is not settled: `failed` runs whose `compensationOrigin` is
+   * still `"cancel"` (`cancelWorkflow` stores it; the final `failWorkflow` of
+   * a cancel's rollback settles it), under the same lock and `updatedBefore`
+   * rules: the run was cancelled while no driver held it, or its driver died
+   * before settling. Never returns `suspended` runs: the scanners own those.
+   * Ordered by `workflowId` ascending.
    */
   listOrphanedRuns?(params: ListOrphanedRunsParams): Promise<OrphanedRun[]>;
 

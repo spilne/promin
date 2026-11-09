@@ -43,9 +43,22 @@ export function isTerminalWorkflowStatus(status: WorkflowStatus): boolean {
  * from `errorTag`, which a failing step can set to any tag): `"failure"` for
  * a rollback after a failure, `"cancel"` for one answering a cancel. A run
  * carries `"cancel"` from `cancelWorkflow` on, so only a real cancellation
- * can be reopened for a cancel rollback.
+ * can be reopened for a cancel rollback, and it keeps it until a driver has
+ * settled the cancel (rolled the run back, or found nothing to roll back):
+ * a cancelled run still carrying `"cancel"` owes that, and recovery finds it
+ * (`listOrphanedRuns`). `"cancel-settled"` is what the run's final
+ * `failWorkflow` stores then (`FailWorkflowParams.compensationOrigin`); a
+ * settled run is never reopened or listed again.
  */
-export type CompensationOrigin = "failure" | "cancel";
+export type CompensationOrigin = "failure" | "cancel" | "cancel-settled";
+
+/** A cancelled run whose cancel no driver has settled yet: its rollback may be owed. */
+export function owesCancelRollback(state: {
+  readonly status: WorkflowStatus;
+  readonly compensationOrigin?: CompensationOrigin;
+}): boolean {
+  return state.status === "failed" && state.compensationOrigin === "cancel";
+}
 
 /** `errorTag` `cancelWorkflow` stores on a cancelled run. */
 export const CANCELLED_ERROR_TAG = "WorkflowCancelledError";

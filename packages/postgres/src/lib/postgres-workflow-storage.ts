@@ -1153,11 +1153,22 @@ export class PostgresWorkflowStorage
     });
   }
 
-  async failWorkflow({ workflowId, error, errorTag, guard }: FailWorkflowParams): Promise<void> {
+  async failWorkflow({
+    workflowId,
+    error,
+    errorTag,
+    compensationOrigin,
+    guard,
+  }: FailWorkflowParams): Promise<void> {
     await this.finishWorkflow({
       workflowId,
       guard,
-      set: { statusId: WorkflowStatusIds.id.failed, error, errorTag: errorTag ?? null },
+      set: {
+        statusId: WorkflowStatusIds.id.failed,
+        error,
+        errorTag: errorTag ?? null,
+        ...(compensationOrigin !== undefined && { compensationOrigin }),
+      },
     });
   }
 
@@ -1178,6 +1189,7 @@ export class PostgresWorkflowStorage
       result?: unknown;
       error?: string;
       errorTag?: string | null;
+      compensationOrigin?: string;
       tripwire?: unknown;
     };
   }): Promise<void> {
@@ -1189,6 +1201,9 @@ export class PostgresWorkflowStorage
     if (set.result !== undefined) columns.push(sql`result = ${jsonbParam(set.result)}`);
     if (set.error !== undefined) columns.push(sql`error = ${set.error}::text`);
     if (set.errorTag !== undefined) columns.push(sql`error_tag = ${set.errorTag}::text`);
+    if (set.compensationOrigin !== undefined) {
+      columns.push(sql`compensation_origin = ${set.compensationOrigin}::text`);
+    }
     if (set.tripwire !== undefined) columns.push(sql`tripwire = ${jsonbParam(set.tripwire)}`);
     await this.fencedStatement({
       workflowId,
@@ -1916,7 +1931,8 @@ export class PostgresWorkflowStorage
       SELECT w.workflow_id, w.workflow_name, w.version, w.status_id,
         w.input::text AS input_json, w.metadata::text AS metadata_json
       FROM wf_workflows w
-      WHERE w.status_id IN (${WorkflowStatusIds.id.pending}, ${WorkflowStatusIds.id.running}, ${WorkflowStatusIds.id.compensating})
+      WHERE (w.status_id IN (${WorkflowStatusIds.id.pending}, ${WorkflowStatusIds.id.running}, ${WorkflowStatusIds.id.compensating})
+          OR (w.status_id = ${WorkflowStatusIds.id.failed} AND w.compensation_origin = 'cancel'))
         AND w.updated_at < ${params.updatedBefore.toISOString()}::timestamptz${after}${this.namespaceScope()}
         AND NOT EXISTS (
           SELECT 1 FROM wf_workflow_locks l

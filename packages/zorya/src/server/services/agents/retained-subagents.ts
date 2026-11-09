@@ -1,12 +1,25 @@
 import { randomUUID } from "node:crypto";
 import {
+  admitTurn,
+  addUsage,
+  threadTurnWorkflowId,
   THREAD_AGENT_METADATA_KEY,
   TurnInProgressError,
+  type AgentBudgets,
+  type BudgetUsage,
   type MemoryStore,
   type Message,
   type RegisteredAgent,
 } from "@promin/agent";
-import { workflow, type Workflow } from "@promin/workflow";
+import {
+  hasCapability,
+  runUsage,
+  workflow,
+  type UsageReport,
+  type UsageTotals,
+  type Workflow,
+  type WorkflowBudget,
+} from "@promin/workflow";
 import type { LocalWorkflows } from "../workflows/local-workflows.ts";
 import type { ZoryaAgents } from "./zorya-agents.ts";
 
@@ -41,6 +54,8 @@ export interface RetainedChildHandle {
   readonly threadId: string;
   readonly status: string;
   readonly depth: number;
+  /** What the child's turns spent so far (omitted before its first turn settles, or when the store lists no step rows). */
+  readonly usage?: UsageTotals;
 }
 
 type DeliveryMode = "queued" | "follow-up" | "steer";
@@ -90,6 +105,29 @@ export interface RetainedSubagentsConfig {
    * (default 1000). The child then completes, bounding the journal.
    */
   readonly maxIterations?: number;
+  /**
+   * How often a running child turn checks its inbox for a steer (default
+   * 250ms). A steer aborts the running turn: see `messageAgent`.
+   */
+  readonly steerPollMs?: number;
+  /**
+   * The parent's budgets (the same `AgentBudgets` the host gives its agents:
+   * one ledger, thread and namespace limits). Every child turn is admitted
+   * against the parent thread's standing, as a turn of the parent would be,
+   * and its spend is recorded in the ledger under the parent thread, so it
+   * counts toward the parent's thread budget and the namespace window. A
+   * refused turn is recorded as a failed outcome; the child keeps running.
+   * Give child agents resolved by `agents.resolve` no ledger of their own,
+   * or their spend counts twice in the namespace window.
+   */
+  readonly budgets?: AgentBudgets;
+  /**
+   * Engine budget of each child's run (`workflow({ budget })`): `maxTokens` /
+   * `maxCostUsd` cap everything the child spends over its lifetime. Each turn's
+   * spend is reported with `ctx.reportUsage`; crossing a cap fails the child
+   * run (it stops accepting messages) with `WorkflowBudgetExceededError`.
+   */
+  readonly childBudget?: WorkflowBudget;
 }
 
 /** Durable, retained child agents. One workflow holds each child's ordered inbox. */
@@ -102,15 +140,20 @@ export class RetainedSubagents {
     this.definition = workflow<RetainedInput>({
       name: RETAINED_AGENT_WORKFLOW,
       type: "retained-agent",
+      ...(config.childBudget !== undefined && { budget: config.childBudget }),
     })
       .journaled("retained-agent", function* (ctx, input) {
         const service = config;
         const pollMs = service.pollIntervalMs ?? 60_000;
         const maxIdlePolls = Math.max(1, Math.ceil((service.idleTtlMs ?? 3_600_000) / pollMs));
         const maxIterations = service.maxIterations ?? 1000;
-        yield* ctx.activity("initial", () => runAndRecord(service, input, input.task, 0), {
-          idempotent: true,
-        });
+        // Journals written before spend reporting hold bare strings.
+        const first = yield* ctx.activity(
+          "initial",
+          () => runAndRecord(service, input, input.task, 0),
+          { idempotent: true },
+        );
+        yield* ctx.reportUsage(engineUsageOf(typeof first === "string" ? undefined : first.spend));
         // The inbox is consumed by sequence. `inbox:<seq>` only wakes the
         // worker early; each poll reads the next unconsumed message itself.
         // The workflow completes after idleTtlMs idle or maxIterations
@@ -120,14 +163,17 @@ export class RetainedSubagents {
         let idle = 0;
         for (let i = 0; i < maxIterations; i++) {
           yield* ctx.signal(`inbox:${seq}`, { timeout: pollMs });
-          const outcome = yield* ctx.activity(`poll:${i}`, () => consume(service, input, seq), {
+          const polled = yield* ctx.activity(`poll:${i}`, () => consume(service, input, seq), {
             idempotent: true,
           });
-          if (outcome === "empty") {
+          const outcome =
+            typeof polled === "string" ? { result: polled, spend: undefined } : polled;
+          if (outcome.result === "empty") {
             if (++idle >= maxIdlePolls) return;
           } else {
             idle = 0;
             seq++;
+            if (outcome.spend) yield* ctx.reportUsage(engineUsageOf(outcome.spend));
           }
         }
       })
@@ -278,6 +324,7 @@ export class RetainedSubagents {
       .filter((state) => state.metadata?.deleted !== true)
       .map((state) => {
         const input = state.input as RetainedInput;
+        const usage = state.steps ? runUsage(state.steps) : undefined;
         return {
           childId: input.childId,
           workflowId: state.workflowId,
@@ -285,6 +332,7 @@ export class RetainedSubagents {
           threadId: childThreadId(input.childId),
           status: state.status,
           depth: input.depth,
+          ...(usage && { usage }),
         };
       });
   }
@@ -364,7 +412,13 @@ export class RetainedSubagents {
     const input = await this.ownedChild(parent, childId);
     await this.stopAgent(parent, childId);
     const workflowId = workflowIdOf(childId);
-    const lock = await this.config.workflows.storage.tryLock({ workflowId, lockDurationMs: 5_000 });
+    // A cancelled worker holds the run lock until its current activity
+    // returns (a turn's bookkeeping): wait briefly instead of failing at once.
+    let lock = await this.config.workflows.storage.tryLock({ workflowId, lockDurationMs: 5_000 });
+    for (let attempt = 0; !lock.acquired && attempt < 100; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      lock = await this.config.workflows.storage.tryLock({ workflowId, lockDurationMs: 5_000 });
+    }
     if (!lock.acquired)
       throw new RetainedSubagentError("conflict", "Child agent busy; retry cleanup");
     await this.config.workflows.storage.releaseLock({
@@ -466,7 +520,7 @@ async function recordOutcome(params: {
   readonly config: RetainedSubagentsConfig;
   readonly input: RetainedInput;
   readonly seq: number;
-  readonly status: "done" | "failed" | "superseded";
+  readonly status: "done" | "failed" | "superseded" | "interrupted";
   readonly detail?: string;
 }): Promise<void> {
   const { config, input, seq, status, detail } = params;
@@ -483,18 +537,47 @@ async function recordOutcome(params: {
   );
 }
 
-/** Run one turn; a failure is recorded and never fails the child workflow. */
+/** One settled turn: how it ended, and what it spent (reported to the run's budget). */
+interface TurnReport {
+  readonly result: "done" | "failed" | "interrupted";
+  readonly spend?: BudgetUsage;
+}
+
+/**
+ * Run one turn; a failure is recorded and never fails the child workflow.
+ * A steer that lands in the inbox after `seq` interrupts the turn. The turn
+ * is admitted against the parent's budgets and its spend is charged to them.
+ */
 async function runAndRecord(
   config: RetainedSubagentsConfig,
   input: RetainedInput,
   task: string,
   seq: number,
-): Promise<"done" | "failed"> {
+): Promise<TurnReport> {
+  const abort = new AbortController();
+  const turnKey = `${input.childId}:${seq === 0 ? "initial" : `message:${seq}`}`;
+  const watcher = setInterval(() => {
+    void hasSteerAfter(config, input, seq).then(
+      (steered) => {
+        if (steered) abort.abort();
+      },
+      () => undefined,
+    );
+  }, config.steerPollMs ?? 250);
+  let result: TurnReport["result"];
   try {
-    await runChildTurn(config, input, task, seq === 0 ? "initial" : `message:${seq}`);
-    await recordOutcome({ config, input, seq, status: "done" });
-    return "done";
+    if (config.budgets) {
+      await admitTurn({
+        budgets: config.budgets,
+        namespaceId: input.parent.namespaceId,
+        threadId: input.parent.threadId,
+      });
+    }
+    const finish = await runChildTurn({ config, input, task, turnKey, signal: abort.signal });
+    result = finish === "cancelled" ? "interrupted" : "done";
+    await recordOutcome({ config, input, seq, status: result });
   } catch (error) {
+    result = "failed";
     await recordOutcome({
       config,
       input,
@@ -502,8 +585,88 @@ async function runAndRecord(
       status: "failed",
       detail: error instanceof Error ? error.message : String(error),
     });
-    return "failed";
+  } finally {
+    clearInterval(watcher);
   }
+  const spend = await chargeParent({ config, input, turnKey });
+  return { result, ...(spend && { spend }) };
+}
+
+/**
+ * Read what the child's turn spent from its turn workflow (a failed or
+ * refused turn may have spent nothing: no row) and record it in the parent
+ * thread's ledger, once per turn.
+ */
+async function chargeParent(params: {
+  readonly config: RetainedSubagentsConfig;
+  readonly input: RetainedInput;
+  readonly turnKey: string;
+}): Promise<BudgetUsage | undefined> {
+  const { config, input, turnKey } = params;
+  const turnId = threadTurnWorkflowId({
+    namespaceId: input.parent.namespaceId,
+    threadId: childThreadId(input.childId),
+    turnKey,
+  });
+  const spend = await turnSpend({ config, turnId });
+  if (!spend) return undefined;
+  await config.budgets?.ledger.record({
+    turnId: `retained:${turnId}`,
+    namespaceId: input.parent.namespaceId,
+    threadId: input.parent.threadId,
+    agentId: input.agentId,
+    usage: spend,
+  });
+  return spend;
+}
+
+/**
+ * What a child turn spent. A settled turn carries it in its result. A turn
+ * that failed has no result, so the spend is summed from the model calls
+ * (think and compaction steps) its journal recorded before it failed. Tool
+ * and sub-agent spend of a failed turn is not in the journal values read here.
+ */
+async function turnSpend(params: {
+  readonly config: RetainedSubagentsConfig;
+  readonly turnId: string;
+}): Promise<BudgetUsage | undefined> {
+  const { config, turnId } = params;
+  const state = await config.workflows.storage.loadWorkflow(turnId);
+  const settled = (state?.result as { spend?: BudgetUsage } | undefined)?.spend;
+  if (settled) return settled;
+  const storage = config.workflows.storage;
+  if (!state || !hasCapability(storage, "journal")) return undefined;
+  const entries = await storage.loadJournal({
+    workflowId: turnId,
+    stepName: "agent",
+  });
+  let total: BudgetUsage | undefined;
+  for (const entry of entries) {
+    if (!/^(think|compact)-\d+$/.test(entry.activityName) || entry.exit?.tag !== "Success")
+      continue;
+    const value = (entry.exit.value as { value?: { spend?: BudgetUsage } } | null)?.value;
+    if (value?.spend) total = total ? addUsage(total, value.spend) : value.spend;
+  }
+  return total;
+}
+
+/** One turn's spend as the workflow engine counts it: all prompt tokens, cache included. */
+function engineUsageOf(spend: BudgetUsage | undefined): UsageReport {
+  if (!spend) return {};
+  return {
+    inputTokens: spend.inputTokens + spend.cacheReadTokens + spend.cacheWriteTokens,
+    outputTokens: spend.outputTokens,
+    costUsd: spend.costUsd,
+  };
+}
+
+async function hasSteerAfter(
+  config: RetainedSubagentsConfig,
+  input: RetainedInput,
+  seq: number,
+): Promise<boolean> {
+  const later = await config.memory.getMessages(inboxKey(input), { fromSeq: seq + 1 });
+  return later.some((item) => "metadata" in item && item.metadata?.mode === "steer");
 }
 
 /** Process the inbox message at `seq` if it exists. */
@@ -511,31 +674,36 @@ async function consume(
   config: RetainedSubagentsConfig,
   input: RetainedInput,
   seq: number,
-): Promise<"empty" | "skipped" | "superseded" | "done" | "failed"> {
+): Promise<{
+  readonly result: "empty" | "skipped" | "superseded" | TurnReport["result"];
+  readonly spend?: BudgetUsage;
+}> {
   const key = inboxKey(input);
   const [stored] = await config.memory.getMessages(key, { fromSeq: seq, toSeq: seq });
-  if (!stored) return "empty";
-  if (stored.role !== "user") return "skipped";
+  if (!stored) return { result: "empty" };
+  if (stored.role !== "user") return { result: "skipped" };
   const command = stored.metadata as unknown as MailCommand | undefined;
-  if (!command || typeof command.task !== "string") return "skipped";
-  // A steer supersedes queued work that has not started yet. It takes effect
-  // at the next turn boundary, never inside a tool call.
+  if (!command || typeof command.task !== "string") return { result: "skipped" };
+  // A steer supersedes queued work that has not started yet, and interrupts
+  // a turn that is running (see runAndRecord).
   if (command.mode !== "steer") {
     const later = await config.memory.getMessages(key, { fromSeq: seq + 1 });
     if (later.some((item) => "metadata" in item && item.metadata?.mode === "steer")) {
       await recordOutcome({ config, input, seq, status: "superseded" });
-      return "superseded";
+      return { result: "superseded" };
     }
   }
   return runAndRecord(config, input, command.task, seq);
 }
 
-async function runChildTurn(
-  config: RetainedSubagentsConfig,
-  input: RetainedInput,
-  task: string,
-  turnKey: string,
-): Promise<void> {
+async function runChildTurn(params: {
+  readonly config: RetainedSubagentsConfig;
+  readonly input: RetainedInput;
+  readonly task: string;
+  readonly turnKey: string;
+  readonly signal: AbortSignal;
+}): Promise<string> {
+  const { config, input, task, turnKey, signal } = params;
   const recipe: RegisteredAgent | null = await config.agents.registry.get({
     id: input.agentId,
     version: input.agentVersion,
@@ -552,6 +720,7 @@ async function runChildTurn(
       retainedDepth: input.depth,
     },
   });
-  const result = await thread.send({ task }, { turnKey: `${input.childId}:${turnKey}` });
+  const result = await thread.send({ task }, { turnKey, signal });
   await result.text;
+  return await result.finishReason;
 }

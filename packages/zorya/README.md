@@ -431,8 +431,9 @@ PostgresLeaseStore({ db }) })`. `turnGate: false` turns it off. Scheduled
   The new thread has its own transcript and lifecycle, with
   `branchParentThreadId`, `branchAtSeq` and `branchDepth` stored in durable
   metadata. `GET .../lineage` returns its parent and direct children within
-  the caller's resource. A head fork copies working memory and current thread
-  facts; an earlier fork clears these derived values because they may include
+  the caller's resource. A head fork copies working memory and thread
+  facts whole, retired history, supersession chains, timestamps and confidence
+  included (entity relations are resource-scoped and shared, not copied); an earlier fork clears these derived values because they may include
   later information. Compaction episodes whose source range ends by the
   branch point are copied. The fork holds the parent's turn lease and refuses
   a pending approval. `LocalAgent.forkThread` exposes the same operation to
@@ -477,7 +478,46 @@ memory, canDelegate })` and pass it to
   (default 1000), completes and stops counting against the child limit; spawn
   a new `childId` to continue. `DELETE` hides the child. The child limit is
   serialized per parent within a process; use `turnGate` across processes.
-  `steer` supersedes pending queued messages at the next turn boundary.
+  `steer` supersedes pending queued messages and interrupts a turn that is
+  already running: while a child turn runs, the worker checks its inbox every
+  `steerPollMs` (default 250ms) and aborts the turn through the turn's abort
+  signal when a later `steer` has arrived. The abandoned turn ends with
+  `cancelled` (the in-flight model call is aborted; a tool call already
+  running finishes unless the tool honors its `ctx.signal`), its outcome is
+  recorded as `interrupted`, and the steer then runs as the next turn on the
+  same thread, which keeps the partial transcript. `queued` and `follow-up`
+  never interrupt; they wait for the running turn.
+  **Budgets.** Pass `budgets` (the host's `AgentBudgets`: one `UsageLedger`,
+  thread and namespace limits) so a child's spend counts toward its parent:
+  each child turn is admitted with `admitTurn` against the parent thread's
+  standing (a refused turn is a `failed` outcome and the child keeps
+  running), and its spend (read from the turn workflow's `spend`, cost
+  included) is recorded in the ledger under the parent thread, so it counts
+  toward the parent's thread budget and the namespace window. Resolve child
+  agents without their own ledger, or the namespace window counts the spend
+  twice. A turn that fails is charged too: with no result, its spend is
+  summed from the model calls its journal recorded (tool and sub-agent spend
+  of a failed turn is not counted). A turn is capped only by its own recipe `budget`: admission is
+  checked at turn start, so a thread budget can be overshot by the turns in
+  flight. `childBudget` (a `WorkflowBudget`) caps each child's lifetime
+  spend through `ctx.reportUsage`; crossing it fails the child run (status
+  `failed`, later messages answer 409). `listChildAgents` returns each
+  child's `usage` when the store lists step rows.
+  **Model-callable tools.** `retainedSubagentTools(retained)` returns
+  `spawn_subagent`, `message_subagent`, `list_subagents`, `read_subagent` and
+  `stop_subagent` for `resolveLocalAgent({ tools })`; list
+  `RETAINED_SUBAGENT_TOOL_NAMES` in the recipes that may delegate. Each call
+  acts on the calling turn's own thread (`ctx.scope`: namespace, resource,
+  thread and agent id, all required), so a model reaches only its own
+  children, and spawning goes through `spawnAgent`: `canDelegate`, depth and
+  child limits and the parent's `budgets` apply, and a refusal reaches the
+  model as a tool error. `message_subagent` dedupes on the tool call id;
+  `spawn_subagent` is not re-run after a crash (the model is told the
+  outcome is unknown and checks `list_subagents`). `read_subagent` returns
+  per-message outcomes and the last N transcript messages, truncated.
+  `retained-subagents-postgres.test.ts` runs the whole path (spawn, steer,
+  restart, list, read, delete) on a real Postgres container, where jsonb
+  reorders keys; it needs Docker.
   The mailbox lives in `MemoryStore` and the worker in `WorkflowStorage`;
   startup reconciles mailbox writes whose wake signal was lost in a crash.
   Configure durable stores and the LocalWorkflows signal scanner for restart

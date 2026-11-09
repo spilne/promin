@@ -1,105 +1,14 @@
 import { describe, expect, it } from "bun:test";
-import { InMemoryAgentRegistry, InMemoryMemoryStore, resolveLocalAgent } from "@promin/agent";
-import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
-import { LocalWorkflows } from "../../workflows/local-workflows.ts";
-import { RetainedSubagents, type RetainedParent } from "../retained-subagents.ts";
-import { ZoryaAgents } from "../zorya-agents.ts";
+import {
+  admitTurn,
+  BudgetExceededError,
+  InMemoryUsageLedger,
+  type LLMProvider,
+} from "@promin/agent";
+import { InMemoryWorkflowStorage } from "@promin/workflow";
 import { ZoryaServer } from "../../../server.ts";
-
-const parent: RetainedParent = {
-  namespaceId: "acme",
-  resourceId: "alice",
-  agentId: "parent",
-  threadId: "conversation",
-};
-
-interface HarnessOptions {
-  readonly retained?: Partial<ConstructorParameters<typeof RetainedSubagents>[0]>;
-  readonly wrapStorage?: (storage: InMemoryWorkflowStorage) => InMemoryWorkflowStorage;
-  readonly chat?: (content: string) => string;
-  readonly turnGate?: false;
-}
-
-/** Overrides one storage method, delegating everything else to the real store. */
-function overrideStorage<K extends keyof InMemoryWorkflowStorage>(
-  storage: InMemoryWorkflowStorage,
-  method: K,
-  replacement: (original: InMemoryWorkflowStorage[K]) => InMemoryWorkflowStorage[K],
-): InMemoryWorkflowStorage {
-  return new Proxy(storage, {
-    get(target, prop) {
-      const value = Reflect.get(target, prop, target);
-      if (prop === method) return replacement((value as Function).bind(target) as never);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
-}
-
-async function harness(options: HarnessOptions = {}) {
-  const baseStorage = new InMemoryWorkflowStorage();
-  const storage = options.wrapStorage ? options.wrapStorage(baseStorage) : baseStorage;
-  const memory = new InMemoryMemoryStore();
-  const registry = new InMemoryAgentRegistry();
-  const backend = {
-    type: "local" as const,
-    model: { provider: "test", id: "test" },
-    role: { inline: { systemPrompt: "help", tools: [] as string[] } },
-  };
-  await registry.register({ id: "parent", backend });
-  await registry.register({ id: "worker", backend });
-  let runner = createWorkflowRunner({ storage });
-  const make = () => {
-    runner = createWorkflowRunner({ storage });
-    const workflows = new LocalWorkflows({
-      storage,
-      runner,
-      definitions: {},
-      signalScanIntervalMs: 10,
-      sleepScanIntervalMs: 10,
-      orphanRecovery: false,
-    });
-    const agents = new ZoryaAgents({
-      registry,
-      memory,
-      ...(options.turnGate === false && { turnGate: false as const }),
-      resolve: (recipe) =>
-        resolveLocalAgent(recipe, {
-          runner,
-          memory,
-          tools: {},
-          llm: () => ({
-            chat: async (request) => ({
-              content: options.chat
-                ? options.chat(String(request.messages.findLast((m) => m.role === "user")?.content))
-                : `reply:${request.messages.findLast((m) => m.role === "user")?.content ?? ""}`,
-              finishReason: "stop" as const,
-            }),
-          }),
-        }),
-    });
-    const retained = new RetainedSubagents({
-      agents,
-      workflows,
-      memory,
-      canDelegate: (from, to) => from === "parent" && to === "worker",
-      ...options.retained,
-    });
-    return { workflows, agents, retained };
-  };
-  const current = make();
-  const recipe = await registry.get({ id: "parent" });
-  const agent = (await current.agents.resolve(recipe!, parent)).withScope(parent);
-  await agent.thread(parent.threadId);
-  return { storage, memory, make, ...current };
-}
-
-async function waitFor(predicate: () => Promise<boolean>) {
-  for (let i = 0; i < 200; i++) {
-    if (await predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("condition not reached");
-}
+import { ZoryaAgents } from "../zorya-agents.ts";
+import { harness, overrideStorage, parent, waitFor } from "./retained-harness.ts";
 
 describe("retained subagents", () => {
   it("admits a child, preserves its inbox across a service restart, and isolates ownership", async () => {
@@ -515,5 +424,252 @@ describe("retained subagents", () => {
     await h.retained.reconcileMailboxes();
     expect(delivered).toBe(before);
     await h.workflows.stop();
+  });
+
+  describe("steering a running turn", () => {
+    /** A model that holds the "long" task until released or aborted. */
+    function longTaskModel() {
+      let release: () => void = () => {};
+      const held = new Promise<void>((resolve) => (release = resolve));
+      const seen = { started: 0, aborted: 0 };
+      const chatAsync = async (content: string, signal: AbortSignal | undefined) => {
+        if (!content.includes("long task")) return `reply:${content}`;
+        seen.started++;
+        await Promise.race([
+          held,
+          new Promise<void>((resolve) => {
+            if (signal?.aborted) resolve();
+            signal?.addEventListener("abort", () => resolve(), { once: true });
+          }),
+        ]);
+        if (signal?.aborted) {
+          seen.aborted++;
+          throw new DOMException("aborted", "AbortError");
+        }
+        return "long answer";
+      };
+      return { chatAsync, release, seen };
+    }
+
+    it("interrupts the running turn, records it as interrupted and runs the steer next", async () => {
+      const model = longTaskModel();
+      const h = await harness({
+        chatAsync: model.chatAsync,
+        retained: { steerPollMs: 10, maxIterations: 50 },
+      });
+      await h.workflows.start();
+      const child = await h.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "long task",
+        childId: "interrupted",
+      });
+      await waitFor(async () => model.seen.started === 1);
+      await h.retained.messageAgent({
+        parent,
+        childId: child.childId,
+        task: "new direction",
+        mode: "steer",
+        messageId: "s1",
+      });
+      await waitFor(async () => {
+        const { transcript } = await h.retained.readAgentMessages(parent, child.childId);
+        return transcript.some((m) => m.content === "reply:new direction");
+      });
+      const { outcomes } = await h.retained.readAgentMessages(parent, child.childId);
+      expect(
+        outcomes.map((m) => (m as { metadata?: { status?: string } }).metadata?.status),
+      ).toEqual(["interrupted", "done"]);
+      expect(model.seen.aborted).toBe(1);
+      await h.workflows.stop();
+    });
+
+    it("lets a queued or follow-up message wait for the running turn (negative control)", async () => {
+      const model = longTaskModel();
+      const h = await harness({
+        chatAsync: model.chatAsync,
+        retained: { steerPollMs: 10, maxIterations: 50 },
+      });
+      await h.workflows.start();
+      const child = await h.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "long task",
+        childId: "not-interrupted",
+      });
+      await waitFor(async () => model.seen.started === 1);
+      await h.retained.messageAgent({
+        parent,
+        childId: child.childId,
+        task: "later",
+        mode: "follow-up",
+        messageId: "f1",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(model.seen.aborted).toBe(0);
+      model.release();
+      await waitFor(async () => {
+        const { outcomes } = await h.retained.readAgentMessages(parent, child.childId);
+        return outcomes.length === 2;
+      });
+      const { outcomes } = await h.retained.readAgentMessages(parent, child.childId);
+      expect(
+        outcomes.map((m) => (m as { metadata?: { status?: string } }).metadata?.status),
+      ).toEqual(["done", "done"]);
+      await h.workflows.stop();
+    });
+  });
+
+  describe("budget accounting", () => {
+    const statuses = async (h: Awaited<ReturnType<typeof harness>>, childId: string) =>
+      (await h.retained.readAgentMessages(parent, childId)).outcomes.map(
+        (m) => (m as { metadata?: { status?: string } }).metadata?.status,
+      );
+
+    it("charges a child's turns to the parent thread budget and refuses once it is used up", async () => {
+      const ledger = new InMemoryUsageLedger();
+      const budgets = { ledger, thread: { maxTotalTokens: 250 }, minCallTokens: 1 };
+      const h = await harness({ replyTokens: 100, retained: { budgets } });
+      await h.workflows.start();
+      const child = await h.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "one",
+        childId: "metered",
+      });
+      for (const [i, task] of ["two", "three", "four"].entries()) {
+        await waitFor(async () => (await statuses(h, child.childId)).length === i + 1);
+        await h.retained.messageAgent({ parent, childId: child.childId, task, messageId: task });
+      }
+      await waitFor(async () => (await statuses(h, child.childId)).length === 4);
+      // Turns two and three fit under the cap (admitted while 100 and 200 were spent).
+      expect(await statuses(h, child.childId)).toEqual(["done", "done", "done", "failed"]);
+      const spent = await ledger.total({
+        namespaceId: parent.namespaceId,
+        threadId: parent.threadId,
+      });
+      expect(spent.inputTokens).toBe(300);
+      // The parent's own next turn sees the same standing.
+      await expect(
+        admitTurn({
+          budgets,
+          namespaceId: parent.namespaceId,
+          threadId: parent.threadId,
+        }),
+      ).rejects.toBeInstanceOf(BudgetExceededError);
+      await h.workflows.stop();
+    });
+
+    it("fails the child once its own run budget is crossed, via ctx.reportUsage", async () => {
+      const h = await harness({ replyTokens: 100, retained: { childBudget: { maxTokens: 150 } } });
+      await h.workflows.start();
+      const child = await h.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "one",
+        childId: "capped",
+      });
+      await waitFor(async () => (await statuses(h, child.childId)).length === 1);
+      await h.retained.messageAgent({ parent, childId: child.childId, task: "two" });
+      await waitFor(async () => (await h.retained.listChildAgents(parent))[0]?.status === "failed");
+      const [handle] = await h.retained.listChildAgents(parent);
+      expect(handle?.usage?.totalTokens).toBe(200);
+      await expect(
+        h.retained.messageAgent({ parent, childId: child.childId, task: "three" }),
+      ).rejects.toMatchObject({ code: "conflict" });
+      await h.workflows.stop();
+    });
+
+    it("reports usage and keeps running when no budget is configured (negative control)", async () => {
+      const h = await harness({ replyTokens: 100 });
+      await h.workflows.start();
+      const child = await h.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "one",
+        childId: "free",
+      });
+      await waitFor(async () => (await statuses(h, child.childId)).length === 1);
+      await h.retained.messageAgent({ parent, childId: child.childId, task: "two" });
+      await waitFor(async () => (await statuses(h, child.childId)).length === 2);
+      const [handle] = await h.retained.listChildAgents(parent);
+      expect(handle?.status).not.toBe("failed");
+      expect(await statuses(h, child.childId)).toEqual(["done", "done"]);
+      await h.workflows.stop();
+    });
+
+    describe("a turn that spends and then fails", () => {
+      /** Each turn: one priced call that asks for a tool, then a provider error. */
+      function failingModel() {
+        const seen = { calls: 0 };
+        const rawChat: LLMProvider["chat"] = async (request) => {
+          seen.calls++;
+          if (request.messages.at(-1)?.role === "tool") throw new Error("provider down");
+          return {
+            content: null,
+            finishReason: "tool_calls" as const,
+            toolCalls: [{ id: `c${seen.calls}`, name: "missing", input: {} }],
+            usage: { inputTokens: 100, outputTokens: 0 },
+          };
+        };
+        return { rawChat, seen };
+      }
+
+      it("counts failed turns toward the parent budget and refuses further turns", async () => {
+        const ledger = new InMemoryUsageLedger();
+        const model = failingModel();
+        const h = await harness({
+          rawChat: model.rawChat,
+          retained: {
+            budgets: { ledger, thread: { maxTotalTokens: 250 }, minCallTokens: 1 },
+          },
+        });
+        await h.workflows.start();
+        const child = await h.retained.spawnAgent({
+          parent,
+          agentId: "worker",
+          task: "one",
+          childId: "failing",
+        });
+        for (const [i, task] of ["two", "three", "four"].entries()) {
+          await waitFor(async () => (await statuses(h, child.childId)).length === i + 1);
+          await h.retained.messageAgent({ parent, childId: child.childId, task, messageId: task });
+        }
+        await waitFor(async () => (await statuses(h, child.childId)).length === 4);
+        expect(await statuses(h, child.childId)).toEqual(["failed", "failed", "failed", "failed"]);
+        // Three turns reached the model (two calls each); the fourth was refused up front.
+        expect(model.seen.calls).toBe(6);
+        const spent = await ledger.total({
+          namespaceId: parent.namespaceId,
+          threadId: parent.threadId,
+        });
+        expect(spent.inputTokens).toBe(300);
+        await h.workflows.stop();
+      });
+
+      it("counts failed turns toward the child's run budget", async () => {
+        const model = failingModel();
+        const h = await harness({
+          rawChat: model.rawChat,
+          retained: { childBudget: { maxTokens: 150 } },
+        });
+        await h.workflows.start();
+        const child = await h.retained.spawnAgent({
+          parent,
+          agentId: "worker",
+          task: "one",
+          childId: "failing-capped",
+        });
+        await waitFor(async () => (await statuses(h, child.childId)).length === 1);
+        await h.retained.messageAgent({ parent, childId: child.childId, task: "two" });
+        await waitFor(
+          async () => (await h.retained.listChildAgents(parent))[0]?.status === "failed",
+        );
+        await expect(
+          h.retained.messageAgent({ parent, childId: child.childId, task: "three" }),
+        ).rejects.toMatchObject({ code: "conflict" });
+        await h.workflows.stop();
+      });
+    });
   });
 });

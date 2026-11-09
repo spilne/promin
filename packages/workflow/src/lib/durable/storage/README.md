@@ -183,6 +183,15 @@ client may resend after a mid-request disconnect.
   clear it. Postgres keeps it in `wf_workflows.compensation_origin`, SQLite in
   `compensation_origin` (added to older tables on open), Redis in the run
   hash's `compensationOrigin` field.
+- A cancelled run owes its cancel until a driver settles it: it keeps
+  `compensationOrigin: "cancel"` and `listOrphanedRuns` lists it (`status:
+"failed"`, same lock and `updatedBefore` rules) so recovery rolls it back
+  with its definition's `onCancel`. The final `failWorkflow` of that rollback
+  passes `compensationOrigin: "cancel-settled"`, which takes the run out of the
+  listing and out of reach of `beginCompensation({ origin: "cancel" })`.
+  Backends index it: a partial index on SQLite and Postgres
+  (`wf_workflows_cancel_owed_idx`, created if absent), a `cancel-owed` set on
+  Redis (added before `cancelWorkflow`'s move, dropped lazily by scans).
 - `startFreshRun` bumps the run number and, atomically with it, drops the
   journal, the delivered signals and the compensation ledger, so the new run
   never replays the previous one.

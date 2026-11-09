@@ -713,7 +713,12 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     if (this.runningWorkflows.has(run.workflowId)) return;
     let workflow: Workflow<unknown, unknown> | undefined;
     try {
-      workflow = await this._definitionFor(run);
+      // A cancelled run owing its rollback needs the real compensations: a
+      // stub rebuilt from the stored DAG has none and would settle it unrolled.
+      workflow =
+        run.status === "failed"
+          ? await this.registry?.resolve({ name: run.workflowName, version: run.version })
+          : await this._definitionFor(run);
     } catch (error) {
       this.onError({
         source: "recovery",
@@ -723,6 +728,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
       });
       return;
     }
+    if (!workflow && run.status === "failed") return;
     if (!workflow) {
       this.onError({
         source: "recovery",

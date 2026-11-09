@@ -214,6 +214,11 @@ export class SqliteWorkflowStorage
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_active_runs ON ${t} (workflow_id) WHERE status IN ('pending', 'running', 'compensating')`,
     );
+    // Cancelled runs whose cancel is not settled: recovery lists them
+    // (`listOrphanedRuns`) to finish the rollback they may owe.
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_cancel_owed ON ${t} (workflow_id) WHERE status = 'failed' AND compensation_origin = 'cancel'`,
+    );
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_parent ON ${t} (parent_workflow_id)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_run_source ON ${t} (run_source, run_source_id)`);
     // Sort-order indexes so listWorkflows ORDER BY clauses can use index
@@ -1215,7 +1220,13 @@ export class SqliteWorkflowStorage
     });
   }
 
-  async failWorkflow({ workflowId, error, errorTag, guard }: FailWorkflowParams): Promise<void> {
+  async failWorkflow({
+    workflowId,
+    error,
+    errorTag,
+    compensationOrigin,
+    guard,
+  }: FailWorkflowParams): Promise<void> {
     const now = this.clock.currentTimeMs();
     this._fenced({
       workflowId,
@@ -1224,10 +1235,12 @@ export class SqliteWorkflowStorage
         this.db
           .query(
             `UPDATE ${this._t}
-             SET status = 'failed', error = ?, error_tag = ?, completed_at = ?, updated_at = ?
+             SET status = 'failed', error = ?, error_tag = ?,
+                 compensation_origin = COALESCE(?, compensation_origin),
+                 completed_at = ?, updated_at = ?
              WHERE workflow_id = ? AND status NOT IN ('completed', 'failed', 'tripwire')`,
           )
-          .run(error, errorTag ?? null, now, now, workflowId),
+          .run(error, errorTag ?? null, compensationOrigin ?? null, now, now, workflowId),
     });
   }
 
@@ -1931,7 +1944,8 @@ export class SqliteWorkflowStorage
       }>(
         `SELECT w.workflow_id, w.workflow_name, w.version, w.status, w.input, w.metadata
          FROM ${this._t} w
-         WHERE w.status IN ('pending', 'running', 'compensating')
+         WHERE (w.status IN ('pending', 'running', 'compensating')
+                OR (w.status = 'failed' AND w.compensation_origin = 'cancel'))
            AND w.updated_at < ? ${after}
            AND NOT EXISTS (
              SELECT 1 FROM ${this._t}_locks l

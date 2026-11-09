@@ -3,7 +3,12 @@
 // transitions.
 // ---------------------------------------------------------------------------
 
-import type { RunSource, WorkflowState, WorkflowStatusSnapshot } from "../workflow-state.ts";
+import type {
+  CompensationOrigin,
+  RunSource,
+  WorkflowState,
+  WorkflowStatusSnapshot,
+} from "../workflow-state.ts";
 import type { FencedWrite } from "./fencing.ts";
 
 /** Params of `createWorkflow`. */
@@ -120,6 +125,13 @@ export interface FailWorkflowParams extends FencedWrite {
   readonly error: string;
   /** `_tag` of the error that failed the run, stored on the run row. */
   readonly errorTag?: string;
+  /**
+   * Stored as the run's `compensationOrigin` with the failure. Only
+   * `"cancel-settled"` is used: the end of a cancel's rollback (or of a
+   * cancel with nothing to roll back) marks the cancel settled. Absent: the
+   * origin stays as it is.
+   */
+  readonly compensationOrigin?: CompensationOrigin;
 }
 
 /** Params of `tripwireWorkflow`. */

@@ -133,6 +133,26 @@ export interface FactInput {
   readonly supersedes?: string;
 }
 
+/**
+ * A fact copied whole from another thread (`MemoryStore.importThreadFacts`),
+ * used by `forkThread`. Unlike `FactInput` it carries the stored record:
+ * timestamps, confidence and retirement are kept as given, and the
+ * supersession link is named by `ref` within the same batch because the
+ * store assigns new ids.
+ */
+export interface FactImport {
+  /** Caller-chosen key, unique in the batch (typically the source fact id). */
+  readonly ref: string;
+  readonly text: string;
+  readonly source: FactSource;
+  readonly confidence: number;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly retiredAt: number | null;
+  /** `ref` of the fact that replaced this one; null, or a ref outside the batch, leaves no link. */
+  readonly supersededByRef: string | null;
+}
+
 /** Options of `MemoryStore.list*Facts`. */
 export interface FactListParams {
   /** Also return facts a newer one replaced, after the current ones. Default `false`. */
@@ -667,6 +687,13 @@ export interface MemoryStore {
   appendThreadFact(key: ThreadKey, fact: FactInput): Promise<Fact>;
   listThreadFacts(key: ThreadKey, params?: FactListParams): Promise<Fact[]>;
   deleteThreadFact(key: ThreadKey, factId: string): Promise<void>;
+  /**
+   * Copy facts into a thread keeping their full record (see `FactImport`),
+   * all or nothing, in the given order; creates the thread when missing.
+   * Returns the stored facts in input order. For forks, not for new knowledge:
+   * writers use `appendThreadFact`.
+   */
+  importThreadFacts(key: ThreadKey, facts: ReadonlyArray<FactImport>): Promise<Fact[]>;
   /**
    * Append messages to the thread's transcript (creating the thread row
    * when missing). With `opts.idempotencyKey`, the append happens at most

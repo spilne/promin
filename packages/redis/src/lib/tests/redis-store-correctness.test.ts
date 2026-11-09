@@ -1,5 +1,14 @@
 import { describe, it, expect } from "bun:test";
-import { createWorkflowRunner, runJournaledStep, workflow } from "@promin/workflow";
+import {
+  createWorkflowRunner,
+  InMemoryWorkflowVersionRegistry,
+  isCancelledRun,
+  RecoveryStrategy,
+  runJournaledStep,
+  workflow,
+  type Workflow,
+} from "@promin/workflow";
+import { RedisWorkflowKeys } from "../redis-workflow-keys.ts";
 import { RedisWorkflowStorage } from "../redis-workflow-storage.ts";
 import { redisDescribe, uniquePrefix } from "./redis-test-utils.ts";
 
@@ -14,6 +23,47 @@ import { redisDescribe, uniquePrefix } from "./redis-test-utils.ts";
 redisDescribe("RedisWorkflowStorage store correctness", (redis) => {
   const create = (prefix = uniquePrefix("rsc")) =>
     new RedisWorkflowStorage({ redis: redis.client(), prefix });
+
+  describe("runs cancelled before the cancel-owed index existed", () => {
+    it("are found by recovery and settled once", async () => {
+      const prefix = uniquePrefix("rsc-legacy");
+      const s = create(prefix);
+      const undone: string[] = [];
+      const wf = workflow<number>({
+        name: "legacy-cancel",
+        version: "1",
+        compensate: { onCancel: "rollback" },
+      })
+        .step("a", async () => 1, {
+          compensate: async () => {
+            undone.push("a");
+          },
+        })
+        .sleep("nap", 60_000)
+        .build();
+      const registry = new InMemoryWorkflowVersionRegistry();
+      registry.register(wf as unknown as Workflow<unknown, unknown>);
+      const runner = createWorkflowRunner({ storage: s, registry });
+      await runner.runSafe({ workflow: wf, workflowId: "legacy-1", input: 0 });
+      await s.cancelWorkflow({ workflowId: "legacy-1" });
+      // The state a pre-deploy cancelWorkflow left: failed, origin "cancel",
+      // in no set of the cancel-owed index and no backfill marker.
+      const raw = redis.client();
+      await raw.srem(new RedisWorkflowKeys(prefix).cancelOwed, "legacy-1");
+      await raw.del(new RedisWorkflowKeys(prefix).cancelOwedBackfilled);
+      expect((await s.loadWorkflow("legacy-1"))?.compensationOrigin).toBe("cancel");
+
+      const later = new Date(Date.now() + 5_000);
+      const rows = await s.listOrphanedRuns({ now: later, updatedBefore: later, limit: 10 });
+      expect(rows.map((r) => r.workflowId)).toEqual(["legacy-1"]);
+
+      const recovery = await runner.recover(RecoveryStrategy.builder().resumeRecent().build());
+      await recovery.settled;
+      expect(undone).toEqual(["a"]);
+      expect(isCancelledRun((await s.loadWorkflowStatus("legacy-1"))!)).toBe(true);
+      expect(await s.listOrphanedRuns({ now: later, updatedBefore: later, limit: 10 })).toEqual([]);
+    });
+  });
 
   describe("journal and fresh runs", () => {
     it("startFreshRun makes the next run re-execute its activities", async () => {
