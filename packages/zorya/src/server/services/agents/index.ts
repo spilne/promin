@@ -7,3 +7,4 @@ export {
   type RetainedParent,
   type RetainedChildHandle,
 } from "./retained-subagents.ts";
+export { retainedSubagentTools, RETAINED_SUBAGENT_TOOL_NAMES } from "./retained-subagent-tools.ts";
