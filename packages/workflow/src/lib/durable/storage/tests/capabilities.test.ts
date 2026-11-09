@@ -43,6 +43,7 @@ describe("storage capabilities", () => {
       ["listSignalWakeups", "signalWakeups"],
       ["listOrphanedRuns", "orphanedRuns"],
       ["listChildEndedWaits", "childEndedWaits"],
+      ["listUpdateWakeups", "updateWakeups"],
       ["checkpointStep", "stepCheckpoint"],
       ["saveStepAttempt", "stepAttempts"],
       ["beginCompensation", "compensationLedger"],

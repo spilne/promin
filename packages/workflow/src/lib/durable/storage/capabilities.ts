@@ -47,6 +47,8 @@ export interface StorageCapabilityMap {
   orphanedRuns: Required<Pick<WorkflowScannerStore, "listOrphanedRuns">>;
   /** `listChildEndedWaits`: the indexed scan for parents parked on a child. */
   childEndedWaits: Required<Pick<WorkflowScannerStore, "listChildEndedWaits">>;
+  /** `listUpdateWakeups`: the indexed scan for runs with an unapplied update request. */
+  updateWakeups: Required<Pick<WorkflowScannerStore, "listUpdateWakeups">>;
 }
 
 /** Name of one optional storage capability. */
@@ -80,6 +82,7 @@ const CAPABILITY_METHODS: { readonly [K in StorageCapability]: readonly string[]
   signalWakeups: ["listSignalWakeups"],
   orphanedRuns: ["listOrphanedRuns"],
   childEndedWaits: ["listChildEndedWaits"],
+  updateWakeups: ["listUpdateWakeups"],
 };
 
 /** Every capability name, in declaration order. */

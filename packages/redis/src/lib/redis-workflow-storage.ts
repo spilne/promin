@@ -110,7 +110,11 @@ import {
   sortWorkflowRows,
 } from "@promin/workflow/storage-kit";
 import type { RedisStoreClient } from "./redis-client.ts";
-import { CHILD_ENDED_SIGNAL_PREFIX } from "@promin/workflow/storage-kit";
+import {
+  CHILD_ENDED_SIGNAL_PREFIX,
+  UPDATE_REQUEST_SIGNAL_PREFIX,
+  UPDATE_RESULT_SIGNAL_PREFIX,
+} from "@promin/workflow/storage-kit";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { RedisWorkflowKeys } from "./redis-workflow-keys.ts";
 import {
@@ -2006,6 +2010,38 @@ export class RedisWorkflowStorage
           });
         }
         return undefined;
+      },
+    });
+  }
+
+  async listUpdateWakeups(params: {
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<WorkflowWakeup[]> {
+    return this.scanStatusIndex<WorkflowWakeup>({
+      statuses: ["suspended"],
+      limit: params.limit,
+      afterWorkflowId: params.afterWorkflowId,
+      pick: async (workflowId) => {
+        // One HGETALL on a usually-missing key; then the pending check.
+        const signals = await this.redis.hgetall(this.keys.signals(workflowId));
+        if (!signals) return undefined;
+        const names = Object.keys(signals);
+        const pending = names.some(
+          (name) =>
+            name.startsWith(UPDATE_REQUEST_SIGNAL_PREFIX) &&
+            !names.includes(
+              `${UPDATE_RESULT_SIGNAL_PREFIX}${name.slice(UPDATE_REQUEST_SIGNAL_PREFIX.length)}`,
+            ),
+        );
+        if (!pending) return undefined;
+        const loaded = await this.loadSuspended(workflowId);
+        if (!loaded) return undefined;
+        const step = loaded.steps
+          .filter((x) => x.status === "waiting_for_signal" || x.status === "sleeping")
+          .map((x) => x.stepName)
+          .sort()[0];
+        return this.toWakeup({ state: loaded.state, stepName: step ?? "", reason: "update" });
       },
     });
   }

@@ -744,6 +744,96 @@ await handle.signal({ signalName: "manager-decision", payload: { approved: true 
   running it again under the same `workflowId` (it continues from the
   suspension; a sleep that is not yet due suspends again).
 
+## Updates
+
+An update is a named, typed request to a running run that comes back with the
+handler's validated response (a signal that talks back). A journaled body
+registers handlers; callers use `handle.update(...)`.
+
+```typescript
+import { defineUpdate, s, workflow } from "@promin/workflow";
+
+const SetLimit = defineUpdate({
+  name: "setLimit",
+  input: s.object({ limit: s.integer() }),
+  output: s.object({ previous: s.integer() }),
+});
+
+const batch = workflow<{ limit: number }>({ name: "batch" })
+  .journaled("main", function* (ctx) {
+    let limit = ctx.input.limit;
+    ctx.setUpdateHandler(
+      SetLimit,
+      ({ limit: next }) => {
+        const previous = limit;
+        limit = next;
+        return { previous };
+      },
+      { validate: ({ limit: next }) => (next < 1 ? "limit must be positive" : undefined) },
+    );
+    yield* ctx.signal<string>("go");
+    return { limit };
+  })
+  .build();
+
+const handle = runner.handle("batch-1", { workflow: batch });
+const { previous } = await handle.update({ update: SetLimit, args: { limit: 20 } }); // typed
+```
+
+**Ordering.** A body applies updates only at update points: between its own
+top-level yields, right after a `yield*` settles (a value, or the suspension of
+a sleep or signal wait) and before the generator resumes. Never during an
+activity, never inside a `ctx.parallel` branch, never two handlers at once.
+Pending updates run in delivery order (`deliveredAt`, then update id), at most
+`MAX_UPDATES_PER_POINT` (100) per point; the rest wait for the next point.
+Updates arriving after the body's last yield are answered
+`UpdateRejectedError` (`not_applied`): the step has finished.
+
+**Durability.** Each applied update is one journal entry (an `activity` named
+`workflow.update:<id>`, so no backend schema change) in the slot after the yield
+that preceded it. A replay re-runs the handlers at the same points, in the same
+order, to rebuild the body's state, and keeps the recorded outcome; only past
+the recorded journal does it look at new requests. Handlers must be
+deterministic in their args and the body's state, must not call `ctx`, and may
+be async but not yield. A handler runs at least once (journaled pending before,
+completed after, like an activity). Rejections (unknown name, schema or
+`validate` failure) run no handler and write no journal entry. A handler that
+throws is recorded as failed (`UpdateFailedError`).
+
+**Idempotency.** The request is the signal `workflow.update:<updateId>` (value
+semantics: a repeat is the same signal) and the answer is
+`workflow.update-result:<updateId>`. Repeating `update` / `submitUpdate` with the
+same `updateId` and request returns the recorded outcome without applying it
+again; the same id with another request is `id_conflict`. Without `updateId` a
+random one is used.
+
+**Suspended runs.** The signal scanner also resumes runs holding an unanswered
+update request (`listUpdateWakeups`, capability `updateWakeups`, in every bundled
+backend), so a run parked on a sleep or signal wait applies the update and
+suspends again; run `createSignalScanner` as for signals. Zorya runs it for you.
+
+**Rejections the caller sees** (`UpdateRejectedError.reason`): `run_not_found`,
+`run_terminal` (also when the run ended before applying it), `no_handlers`,
+`unknown_update`, `validation` (the schema, checked by the caller from the
+handler list the body published, and by the body again), `id_conflict`,
+`not_applied`. `UpdateTimeoutError` when no outcome arrives within `timeoutMs`
+(default 60 s, polled every `intervalMs`, 100 ms).
+
+Limits. Handlers are served while the registering journaled step runs or is
+suspended; when it finishes, pending requests are rejected `not_applied` and the
+published handler list is emptied. Register handlers before the first `yield*`
+(a caller racing the very first run start can see `no_handlers`). With several
+journaled steps, the executing one's handlers are the served set. Args and
+results must be JSON-safe. The tracer's `update` event comes from inline
+execution; queue workers do not report it. Read-only queries stay
+`ctx.setQueryHandler` (process-local, not journaled).
+
+`handle.submitUpdate()` delivers without waiting and `handle.updateOutcome(id)` /
+`awaitUpdate()` read the answer; `bindWorkflow(...).update({ workflowId, ... })`
+is the bound form. `submitUpdate`, `awaitUpdate` and `executeUpdate` take any
+`WorkflowStorage` (including `RemoteWorkflowStorage`), so a process without the
+workflow code can send them.
+
 ## Subworkflows and child wake-up
 
 ```typescript

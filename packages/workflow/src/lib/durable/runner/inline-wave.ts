@@ -8,6 +8,7 @@ import { stepRuntimeFor, type WaveOutcome, type WaveParams } from "./dag-context
 import { runStepBody } from "./step-body.ts";
 import { checkpointStepOutcome } from "./step-checkpoint.ts";
 import { fireHook } from "./hooks.ts";
+import { emitTrace } from "../workflow-tracer.ts";
 import { traceStepAttemptStart } from "./step-tracing.ts";
 import { outcomeOfBody, settleWave, skippedOutcome } from "./wave.ts";
 
@@ -73,6 +74,11 @@ export async function runInlineWave(params: WaveParams): Promise<WaveOutcome> {
                   event: { workflowId, stepName: stepDef.name, error, keys },
                 }),
             }),
+            ...(ctx.tracer !== undefined &&
+              ctx.traceRef !== undefined && {
+                onUpdate: (event) =>
+                  emitTrace(ctx.tracer!, "update", { ...ctx.traceRef!, ...event, at: clock.now() }),
+              }),
             input,
             results,
             workflowId,

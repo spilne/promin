@@ -26,6 +26,8 @@ import {
 } from "./workflow-state.ts";
 import { runUsage, stepUsage } from "./budget.ts";
 import { JOURNAL_STEP_TYPES, type JournalStore } from "./activity-journal.ts";
+import { runJournaledStep, type JournaledContext } from "./journaled-step.ts";
+import { awaitUpdate, submitUpdate } from "../updates/update-client.ts";
 
 export interface StorageTestSuiteOptions {
   /**
@@ -3952,7 +3954,11 @@ export function storageTestSuite(
           Required<
             Pick<
               WorkflowStorage,
-              "listDueTimers" | "listSignalWakeups" | "listOrphanedRuns" | "listChildEndedWaits"
+              | "listDueTimers"
+              | "listSignalWakeups"
+              | "listOrphanedRuns"
+              | "listChildEndedWaits"
+              | "listUpdateWakeups"
             >
           >;
 
@@ -3962,12 +3968,13 @@ export function storageTestSuite(
             !s.listDueTimers ||
             !s.listSignalWakeups ||
             !s.listOrphanedRuns ||
-            !s.listChildEndedWaits
+            !s.listChildEndedWaits ||
+            !s.listUpdateWakeups
           ) {
             throw new Error(
               "storageTestSuite was invoked with hasScannerQueries: true, but the factory " +
                 "returned a storage without listDueTimers / listSignalWakeups / " +
-                "listOrphanedRuns / listChildEndedWaits.",
+                "listOrphanedRuns / listChildEndedWaits / listUpdateWakeups.",
             );
           }
           return s as ScannerStorage;
@@ -4311,6 +4318,104 @@ export function storageTestSuite(
             let after: string | undefined;
             for (;;) {
               const page = await s.listChildEndedWaits({ limit: 2, afterWorkflowId: after });
+              if (page.length === 0) break;
+              expect(page.length).toBeLessThanOrEqual(2);
+              seen.push(...page.map((r) => r.workflowId));
+              after = page.at(-1)!.workflowId;
+            }
+            expect(seen).toEqual(ids);
+          });
+        });
+
+        describe("listUpdateWakeups", () => {
+          const request = (id: string): string => `workflow.update:${id}`;
+          const result = (id: string): string => `workflow.update-result:${id}`;
+
+          it("returns suspended runs holding an update request with no result, one row per run", async () => {
+            const s = await getScannerStorage();
+            await createWaiting({ s, workflowId: "uw-pending", signalName: "go", stepName: "b" });
+            await s.suspendWorkflow({
+              workflowId: "uw-pending",
+              stepName: "a",
+              stepUpdate: { status: "waiting_for_signal", stepType: "signal", signalName: "other" },
+            });
+            for (const id of ["u1", "u2"]) {
+              await s.deliverSignal({
+                workflowId: "uw-pending",
+                signalName: request(id),
+                payload: { updateId: id },
+              });
+            }
+            // Answered: nothing to apply.
+            await createWaiting({ s, workflowId: "uw-answered", signalName: "go" });
+            await s.deliverSignal({
+              workflowId: "uw-answered",
+              signalName: request("x"),
+              payload: {},
+            });
+            await s.deliverSignal({
+              workflowId: "uw-answered",
+              signalName: result("x"),
+              payload: {},
+            });
+            // Answered one, pending another: still listed.
+            await createWaiting({ s, workflowId: "uw-partial", signalName: "go" });
+            await s.deliverSignal({
+              workflowId: "uw-partial",
+              signalName: request("x"),
+              payload: {},
+            });
+            await s.deliverSignal({
+              workflowId: "uw-partial",
+              signalName: result("x"),
+              payload: {},
+            });
+            await s.deliverSignal({
+              workflowId: "uw-partial",
+              signalName: request("y"),
+              payload: {},
+            });
+            // Only the handler list, a result, or a look-alike name: not requests.
+            await createWaiting({ s, workflowId: "uw-noise", signalName: "go" });
+            await s.deliverSignal({
+              workflowId: "uw-noise",
+              signalName: "workflow.update-handlers",
+              payload: { updates: [] },
+            });
+            await s.deliverSignal({ workflowId: "uw-noise", signalName: result("z"), payload: {} });
+            await s.deliverSignal({
+              workflowId: "uw-noise",
+              signalName: "workflow.updated",
+              payload: {},
+            });
+            // No request at all.
+            await createWaiting({ s, workflowId: "uw-none", signalName: "go" });
+            // Not suspended.
+            await createWaiting({ s, workflowId: "uw-done", signalName: "go" });
+            await s.deliverSignal({ workflowId: "uw-done", signalName: request("d"), payload: {} });
+            await s.completeWorkflow({ workflowId: "uw-done", result: "ok" });
+
+            const rows = await s.listUpdateWakeups({ limit: 10 });
+            expect(rows.map((r) => r.workflowId)).toEqual(["uw-partial", "uw-pending"]);
+            expect(rows.find((r) => r.workflowId === "uw-pending")).toMatchObject({
+              workflowName: "scan-wf",
+              input: { id: "uw-pending" },
+              stepName: "a",
+              reason: "update",
+            });
+          });
+
+          it("keyset-paginates by run in workflowId order", async () => {
+            const s = await getScannerStorage();
+            const ids = Array.from({ length: 5 }, (_, i) => `uw-page-${i}`);
+            for (const id of ids) {
+              await createWaiting({ s, workflowId: id, signalName: "go" });
+              await s.deliverSignal({ workflowId: id, signalName: request("p"), payload: {} });
+            }
+            const seen: string[] = [];
+            let after: string | undefined;
+            for (;;) {
+              const page = await s.listUpdateWakeups({ limit: 2, afterWorkflowId: after });
               if (page.length === 0) break;
               expect(page.length).toBeLessThanOrEqual(2);
               seen.push(...page.map((r) => r.workflowId));
@@ -5152,6 +5257,85 @@ export function storageTestSuite(
             }),
           ).toBeNull();
           expect(await s.loadJournal({ workflowId: "j-fresh-p", stepName: "wait" })).toEqual([]);
+        });
+      });
+    }
+
+    if (options.hasJournaledSuspend) {
+      describe("workflow updates over the journal and signals", () => {
+        it("applies, journals, answers and replays an update, idempotently by update id", async () => {
+          const s = await getSuspendStorage();
+          const workflowId = "upd-e2e";
+          await s.createWorkflow({ workflowId, workflowName: "upd", input: {} });
+          const seen: number[] = [];
+          const body = function* (ctx: JournaledContext<unknown, unknown>) {
+            let total = 0;
+            ctx.setUpdateHandler("add", (args) => {
+              const { n } = args as { n: number };
+              seen.push(n);
+              total += n;
+              return { total };
+            });
+            yield* ctx.signal<string>("go");
+            return total;
+          };
+          const drive = () =>
+            runJournaledStep<unknown, unknown, number>({
+              input: {},
+              prev: {},
+              workflowId,
+              stepName: "main",
+              storage: s,
+              workflowStorage: s,
+              body: body as never,
+            });
+          await expect(drive()).rejects.toMatchObject({ _tag: "WorkflowSuspendedError" });
+
+          await submitUpdate({
+            storage: s,
+            workflowId,
+            update: "add",
+            args: { n: 2 },
+            updateId: "a",
+          });
+          await submitUpdate({
+            storage: s,
+            workflowId,
+            update: "add",
+            args: { n: 3 },
+            updateId: "b",
+          });
+          await submitUpdate({
+            storage: s,
+            workflowId,
+            update: "add",
+            args: { n: 3 },
+            updateId: "b",
+          });
+          await expect(drive()).rejects.toMatchObject({ _tag: "WorkflowSuspendedError" });
+          expect(await awaitUpdate({ storage: s, workflowId, updateId: "a" })).toEqual({
+            total: 2,
+          });
+          expect(await awaitUpdate({ storage: s, workflowId, updateId: "b" })).toEqual({
+            total: 5,
+          });
+          expect(seen).toEqual([2, 3]);
+
+          // Replay past the wait re-runs the handlers (state rebuilt), not the journal.
+          await s.completePendingEntry({
+            workflowId,
+            stepName: "main",
+            activityIndex: 0,
+            branchPath: "",
+            exit: { tag: "Success", value: { $signal: "delivered", value: "x" } },
+          });
+          seen.length = 0;
+          expect(await drive()).toBe(5);
+          expect(seen).toEqual([2, 3]);
+          const names = (await s.loadJournal({ workflowId, stepName: "main" })).map(
+            (e) => e.activityName,
+          );
+          expect(names).toEqual(["go", "workflow.update:a", "workflow.update:b"]);
         });
       });
     }

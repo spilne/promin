@@ -126,6 +126,20 @@ export interface WorkflowTraceWaitEnd extends WorkflowTraceRef {
 }
 
 /**
+ * A journaled step applied, failed or rejected an update (`ctx.setUpdateHandler`).
+ * Emitted by the inline executor only, at the update point that served it.
+ */
+export interface WorkflowTraceUpdate extends WorkflowTraceRef {
+  readonly stepName: string;
+  readonly updateId: string;
+  readonly updateName: string;
+  /** `completed` / `failed`: the handler ran. `rejected`: it did not (see `reason`). */
+  readonly outcome: "completed" | "failed" | "rejected";
+  readonly reason?: string;
+  readonly at: Date;
+}
+
+/**
  * A queued step is being held back by its rate-limit / concurrency group
  * (`StepGroupOption`): it stays queued, uses no retry attempt, and starts
  * when the group has room. Emitted once per throttle episode, when the
@@ -243,6 +257,7 @@ export interface WorkflowTracerCallbacks {
   stepAttemptEnd(event: WorkflowTraceStepAttemptEnd): void | Promise<void>;
   waitStart(event: WorkflowTraceWaitStart): void | Promise<void>;
   waitEnd(event: WorkflowTraceWaitEnd): void | Promise<void>;
+  update(event: WorkflowTraceUpdate): void | Promise<void>;
   stepThrottled(event: WorkflowTraceStepThrottled): void | Promise<void>;
   stepThrottleEnd(event: WorkflowTraceStepThrottleEnd): void | Promise<void>;
   lockAcquired(event: WorkflowTraceLockAcquired): void | Promise<void>;

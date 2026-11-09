@@ -41,6 +41,7 @@ const ALWAYS_SAFE_STORAGE_METHODS: ReadonlySet<StorageMethod> = new Set<StorageM
   "listSignalWakeups",
   "listOrphanedRuns",
   "listChildEndedWaits",
+  "listUpdateWakeups",
   "loadJournal",
   "findDueSleeps",
   "findPendingSignal",

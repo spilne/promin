@@ -100,7 +100,11 @@ import type { PostgresStorageConfig } from "./config.ts";
 import { resolveConfig } from "./config.ts";
 import { hashToInt32, type DrizzleDb } from "@spilne/perfect-postgres";
 import { execRaw } from "./exec-raw.ts";
-import { CHILD_ENDED_SIGNAL_PREFIX } from "@promin/workflow/storage-kit";
+import {
+  CHILD_ENDED_SIGNAL_PREFIX,
+  UPDATE_REQUEST_SIGNAL_PREFIX,
+  UPDATE_RESULT_SIGNAL_PREFIX,
+} from "@promin/workflow/storage-kit";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1742,6 +1746,52 @@ export class PostgresWorkflowStorage
       reason: "signal" as const,
       signalName: r.signal_name,
       signalPayload: parseJsonText(r.payload_json),
+    }));
+  }
+
+  async listUpdateWakeups(params: {
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<WorkflowWakeup[]> {
+    const after =
+      params.afterWorkflowId !== undefined
+        ? sql` AND w.workflow_id > ${params.afterWorkflowId}`
+        : sql``;
+    // Current, suspended runs holding an update request signal with no
+    // result signal under the same update id. The step is the run's
+    // suspended step with the smallest name.
+    const rows = await execRaw(
+      this.db,
+      sql`
+      SELECT w.workflow_id, w.workflow_name, w.version, w.input::text AS input_json,
+        (SELECT MIN(s.step_name) FROM wf_workflow_steps s
+          WHERE s.workflow_id = w.workflow_id AND s.run = w.run
+            AND s.status_id IN (${StepStatusIds.id.sleeping}, ${StepStatusIds.id.waiting_for_signal})
+        ) AS step_name
+      FROM wf_workflows w
+      WHERE w.status_id = ${WorkflowStatusIds.id.suspended}${after}${this.namespaceScope()}
+        AND EXISTS (
+          SELECT 1 FROM wf_workflow_signals g
+          WHERE g.workflow_id = w.workflow_id
+            AND g.signal_name LIKE ${`${UPDATE_REQUEST_SIGNAL_PREFIX}%`}
+            AND NOT EXISTS (
+              SELECT 1 FROM wf_workflow_signals r
+              WHERE r.workflow_id = g.workflow_id
+                AND r.signal_name = ${UPDATE_RESULT_SIGNAL_PREFIX}
+                  || substr(g.signal_name, ${UPDATE_REQUEST_SIGNAL_PREFIX.length + 1})
+            )
+        )
+      ORDER BY w.workflow_id
+      LIMIT ${Math.max(0, Math.trunc(params.limit))}
+    `,
+    );
+    return rows.map((r) => ({
+      workflowId: r.workflow_id,
+      workflowName: r.workflow_name,
+      ...(r.version != null ? { version: r.version } : {}),
+      input: parseJsonText(r.input_json),
+      stepName: r.step_name ?? "",
+      reason: "update" as const,
     }));
   }
 

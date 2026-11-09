@@ -133,6 +133,7 @@ export {
   type ListOrphanedRunsParams,
   type ChildEndedWaits,
   type ListChildEndedWaitsParams,
+  type ListUpdateWakeupsParams,
   type DeliverSignalParams,
   type SignalTokenRecord,
   type CreateSignalTokenParams,
@@ -263,6 +264,7 @@ export {
   type WorkflowTraceStepOutcome,
   type WorkflowTraceWaitStart,
   type WorkflowTraceWaitEnd,
+  type WorkflowTraceUpdate,
   type WorkflowTraceStepThrottled,
   type WorkflowTraceStepThrottleEnd,
   type WorkflowTraceLockAcquired,
@@ -487,6 +489,46 @@ export {
   type SignalPayload,
   type ApprovalDecision,
 } from "./lib/signals/define-signal.ts";
+
+// Workflow updates: named, typed requests to a running run, answered by a
+// handler its journaled body registers with `ctx.setUpdateHandler`.
+export {
+  defineUpdate,
+  UpdateRejectedError,
+  UpdateFailedError,
+  UpdateTimeoutError,
+  UPDATE_REQUEST_SIGNAL_PREFIX,
+  UPDATE_RESULT_SIGNAL_PREFIX,
+  UPDATE_HANDLERS_SIGNAL,
+  updateRequestSignalName,
+  updateResultSignalName,
+  updateIdOfRequestSignal,
+  type UpdateType,
+  type UpdateLike,
+  type UpdateArgs,
+  type UpdateResult,
+  type UpdateArgsOf,
+  type UpdateResultOf,
+  type UpdateRequest,
+  type UpdateOutcome,
+  type UpdateRejectionReason,
+  type PublishedUpdateHandler,
+  type PublishedUpdateHandlers,
+} from "./lib/updates/update-protocol.ts";
+export {
+  submitUpdate,
+  awaitUpdate,
+  executeUpdate,
+  getUpdateOutcome,
+  type SubmitUpdateParams,
+  type SubmittedUpdate,
+  type AwaitUpdateOptions,
+} from "./lib/updates/update-client.ts";
+export {
+  MAX_UPDATES_PER_POINT,
+  type UpdateHandlerOptions,
+  type UpdateEvent,
+} from "./lib/durable/journaled-updates.ts";
 
 // Injectable wall-clock time source + timer scheduler. `FakeWallClock`
 // drives it in tests.

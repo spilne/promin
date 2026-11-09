@@ -49,6 +49,7 @@ import type {
   ListDueTimersParams,
   ListOrphanedRunsParams,
   ListChildEndedWaitsParams,
+  ListUpdateWakeupsParams,
   ChildEndedWaits,
   ListSignalWakeupsParams,
   ListWorkflowsParams,
@@ -350,6 +351,10 @@ export class RemoteWorkflowStorage
 
   listChildEndedWaits(params: ListChildEndedWaitsParams): Promise<ChildEndedWaits[]> {
     return this.call("listChildEndedWaits", params);
+  }
+
+  listUpdateWakeups(params: ListUpdateWakeupsParams): Promise<WorkflowWakeup[]> {
+    return this.call("listUpdateWakeups", params);
   }
 
   // -------------------------------------------------------------------------

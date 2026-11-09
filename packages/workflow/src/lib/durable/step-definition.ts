@@ -11,6 +11,7 @@
 // the same pattern Effect, Zod and RxJS use for heterogeneous collections.
 // ---------------------------------------------------------------------------
 
+import type { UpdateEvent } from "./journaled-updates.ts";
 import { succeed, type Eff, type ErrorsOf, type Throws } from "@spilne/perfect-core";
 import type { Codec } from "@spilne/perfect-core/connect";
 import type { CacheStore } from "../shared/cache-store.ts";
@@ -522,6 +523,11 @@ export interface StepRuntime {
     readonly error: unknown;
     readonly keys: readonly string[];
   }) => void;
+  /**
+   * Report an update this step's `.journaled()` body applied, failed or
+   * rejected (the tracer's `update` event). Inline execution only.
+   */
+  readonly onUpdate?: (event: UpdateEvent) => void;
 }
 
 /**

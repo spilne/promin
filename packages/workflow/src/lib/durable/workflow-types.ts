@@ -5,6 +5,13 @@
 // runner imports this module and `step-definition.ts`, never the builder.
 // ---------------------------------------------------------------------------
 
+import type { AwaitUpdateOptions, SubmittedUpdate } from "../updates/update-client.ts";
+import type {
+  UpdateArgsOf,
+  UpdateLike,
+  UpdateOutcome,
+  UpdateResultOf,
+} from "../updates/update-protocol.ts";
 import type { Eff, Throws } from "@spilne/perfect-core";
 import type { Codec } from "@spilne/perfect-core/connect";
 import type { WorkflowRetryPolicy } from "../shared/retry-policy.ts";
@@ -204,6 +211,40 @@ export interface WorkflowHandle<Output, E extends TaggedError = never> {
 
   /** Send a signal to the workflow (e.g. from a webhook). */
   signal(params: { signalName: string; payload: unknown }): Promise<void>;
+
+  /**
+   * Send an update to the run and return the handler's result. The run's
+   * journaled body must have registered a handler with
+   * `ctx.setUpdateHandler`; it applies the update at its next update point
+   * (a suspended run is resumed by the signal scanner to do so).
+   *
+   * Rejects with `UpdateRejectedError` (no such handler, the run has ended,
+   * invalid args), `UpdateFailedError` (the handler threw) or
+   * `UpdateTimeoutError`. Idempotent by `updateId`: repeat a call with the
+   * same id to read the same outcome without applying it again.
+   */
+  update<U extends UpdateLike | string>(
+    params: {
+      readonly update: U;
+      readonly args: UpdateArgsOf<U>;
+      readonly updateId?: string;
+    } & AwaitUpdateOptions,
+  ): Promise<UpdateResultOf<U>>;
+
+  /**
+   * Like `update`, without waiting: deliver the request and return its id.
+   * Read the outcome later with `updateOutcome(updateId)` or
+   * `awaitUpdate`. A repeated call with the same `updateId` returns the same
+   * id (and the outcome, once recorded).
+   */
+  submitUpdate(params: {
+    readonly update: UpdateLike | string;
+    readonly args: unknown;
+    readonly updateId?: string;
+  }): Promise<SubmittedUpdate>;
+
+  /** The outcome recorded for an update id, or undefined while the run has not applied it. */
+  updateOutcome(updateId: string): Promise<UpdateOutcome | undefined>;
 
   /**
    * Wait for the workflow to complete by polling storage (it does not

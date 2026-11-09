@@ -80,6 +80,7 @@ export type {
   ListOrphanedRunsParams,
   ChildEndedWaits,
   ListChildEndedWaitsParams,
+  ListUpdateWakeupsParams,
 } from "./storage/scanner-store.ts";
 export type {
   SignalStore,

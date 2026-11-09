@@ -123,6 +123,7 @@ export function createWorkflowStorageHandler(
     listOrphanedRuns: (p) => requireCapability(storage, "orphanedRuns").listOrphanedRuns(p),
     listChildEndedWaits: (p) =>
       requireCapability(storage, "childEndedWaits").listChildEndedWaits(p),
+    listUpdateWakeups: (p) => requireCapability(storage, "updateWakeups").listUpdateWakeups(p),
     // -- Journal.
     loadJournal: (p) => requireCapability(storage, "journal").loadJournal(p),
     appendEntry: (p) => requireCapability(storage, "journal").appendEntry(p),
@@ -239,6 +240,7 @@ const MISSING_CAPABILITY: Record<StorageCapability, string> = {
   signalWakeups: "storage does not implement listSignalWakeups",
   orphanedRuns: "storage does not implement listOrphanedRuns",
   childEndedWaits: "storage does not implement listChildEndedWaits",
+  updateWakeups: "storage does not implement listUpdateWakeups",
 };
 
 /** `storage` narrowed to `capability`, or a clear error when it lacks it. */
