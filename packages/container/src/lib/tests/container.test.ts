@@ -174,6 +174,8 @@ describe("Container step integration — run containerized commands as workflow 
         stepName: "test",
         attempt: 1,
         signal: new AbortController().signal,
+        heartbeat: () => {},
+        lastHeartbeatDetails: undefined,
       }) as Eff<unknown, never>
     ).run();
 

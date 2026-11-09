@@ -12,6 +12,7 @@ import type { UpdateType } from "../updates/update-protocol.ts";
 import type { RetryPolicy } from "../shared/retry-policy.ts";
 import type { WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
+import type { StepUsageMeter, UsageReport, UsageTotals } from "./budget.ts";
 import type { CompensationStack } from "./compensation-stack.ts";
 import type { Workflow } from "./durable-pipeline.ts";
 import type { JournalCursor } from "./journal-cursor.ts";
@@ -281,6 +282,42 @@ export interface JournaledContext<Input, Prev> {
   >;
 
   /**
+   * Durable wait for an external event, addressed by name and an optional
+   * match `key` and delivered with `deliverEvent`. Unlike a signal (a named
+   * last-wins value), events are buffered: one delivered before the wait
+   * starts is not lost, several delivered in a row each satisfy one wait, and
+   * delivering the same `eventId` twice stores one event.
+   *
+   * A step's Nth wait on an address takes the oldest buffered event of that
+   * address that none of the step's earlier waits took or rejected; which one
+   * it took is journaled, so replay returns the same payload. A wait with no
+   * `key` only matches events delivered without one. `where` takes only
+   * events whose payload it accepts (the others stay buffered for other
+   * waits). With a `timeout` the wait is bounded and returns
+   * `{ ok: true, value } | { ok: false, error: "timeout" }`.
+   *
+   * Waits of one step share its buffer view, so two steps waiting on the same
+   * address each see the event; use distinct keys to route one event to one
+   * step. Concurrent waits on one address inside one step (`ctx.parallel`)
+   * should use distinct keys too.
+   */
+  waitForEvent<T>(
+    event: string | SignalType<T>,
+    options?: {
+      readonly key?: string;
+      readonly where?: (payload: T) => boolean;
+    },
+  ): Generator<ActivityYield, T, T>;
+  waitForEvent<T>(
+    event: string | SignalType<T>,
+    options: {
+      readonly key?: string;
+      readonly where?: (payload: T) => boolean;
+      readonly timeout: number | Date;
+    },
+  ): Generator<ActivityYield, TimedSignalOutcome<T>, TimedSignalOutcome<T>>;
+
+  /**
    * Approval preset — sugar over `validatedSignal(approvalSignal(id))`. The
    * wire-format signal name is `approve:<id>` (matches the existing
    * convention SignalScanner and the dashboard `/signals` Approve/Reject
@@ -539,6 +576,23 @@ export interface JournaledContext<Input, Prev> {
   ): void;
 
   /**
+   * Report what this step spent (tokens and/or USD), e.g. after a model call:
+   *
+   * ```ts
+   * const reply = yield* ctx.activity("llm", () => model.complete(prompt));
+   * yield* ctx.reportUsage({ inputTokens: reply.in, outputTokens: reply.out, costUsd: reply.cost });
+   * ```
+   *
+   * Each report is a journal entry, so replay and recovery never count it twice.
+   * Returns the step's running total. Throws `WorkflowBudgetExceededError` when
+   * the report pushes the step or the run past its `workflow({ budget })`; let
+   * it propagate: it is never retried and fails the run. The step's total is
+   * stored on its row when it settles (`WorkflowStatusInfo.usage`). Spend of an
+   * activity that failed cannot be reported, so it is not counted.
+   */
+  reportUsage(usage: UsageReport): Generator<ActivityYield, UsageTotals, unknown>;
+
+  /**
    * Live-writable metadata surfaced on the workflow row. The dashboard reads
    * `WorkflowState.metadata`, so writes through `ctx.metadata.set/merge`
    * appear in the runs view in near-real-time. Useful for progress
@@ -647,4 +701,6 @@ export interface JournaledCtxEnv {
   /** Workflow-level default for `ActivityOptions.payloadHash`. */
   readonly defaultPayloadHash: boolean | undefined;
   readonly runChild: RunChild | undefined;
+  /** Usage reported by this body run (`ctx.reportUsage`), checked against the budget. */
+  readonly usage: StepUsageMeter;
 }

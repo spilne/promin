@@ -5,6 +5,12 @@
 // ctx.patched, ctx.metadata, ctx.setQueryHandler, ctx.continueAsNew.
 // ---------------------------------------------------------------------------
 
+import {
+  createStepUsageMeter,
+  type StepUsageMeter,
+  type UsageTotals,
+  type WorkflowBudget,
+} from "./budget.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
 import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
@@ -15,7 +21,9 @@ import { JournalCursor } from "./journal-cursor.ts";
 import { makeActivity } from "./journaled-ctx-activity.ts";
 import { makeChild } from "./journaled-ctx-child.ts";
 import { makeLoops, makeParallel, makeProxy } from "./journaled-ctx-compose.ts";
+import { makeReportUsage } from "./journaled-ctx-usage.ts";
 import { makeSignalMethods, makeSleep } from "./journaled-ctx-suspend.ts";
+import { makeWaitForEvent } from "./journaled-ctx-event.ts";
 import type { JournaledContext, JournaledCtxEnv, RunChild } from "./journaled-context.ts";
 import { UpdateInbox, type UpdateEvent, type UpdateHandlerOptions } from "./journaled-updates.ts";
 import { registerQueryHandler } from "./query-registry.ts";
@@ -50,6 +58,10 @@ export function makeCtx<Input, Prev>(params: {
    * `payloadHash: false` overrides. The 2-arg form is unaffected.
    */
   defaultPayloadHash?: boolean;
+  /** Budget of the run; `ctx.reportUsage` throws once a cap is crossed. */
+  budget?: WorkflowBudget;
+  /** Usage stored by the run's other steps when this one started. */
+  priorRunUsage?: UsageTotals;
   /** Executes a child workflow inline; `ctx.child()` throws without it. */
   runChild?: RunChild;
   /**
@@ -84,6 +96,8 @@ export function makeCtx<Input, Prev>(params: {
    * `FenceTokenMismatchError` of a write the lock holder lost the fence for.
    */
   settleMetadata: () => Promise<void>;
+  /** What this body run reported. */
+  usage: StepUsageMeter;
 } {
   const { input, prev, workflowId, stepName, workflowStorage, guard, initialMetadata } = params;
   const cursor = new JournalCursor({
@@ -94,6 +108,12 @@ export function makeCtx<Input, Prev>(params: {
     guard,
   });
   const compensations = new CompensationStack(cursor);
+  const usage = createStepUsageMeter({
+    workflowId,
+    stepName,
+    ...(params.budget !== undefined && { budget: params.budget }),
+    ...(params.priorRunUsage !== undefined && { priorRun: params.priorRunUsage }),
+  });
   const env: JournaledCtxEnv = {
     workflowId,
     stepName,
@@ -105,6 +125,7 @@ export function makeCtx<Input, Prev>(params: {
     stepCodec: params.defaultCodec ?? LosslessJsonCodec,
     defaultPayloadHash: params.defaultPayloadHash,
     runChild: params.runChild,
+    usage,
   };
   const updates = new UpdateInbox(env, params.onUpdate);
   const patchSet = new Set(params.patches ?? []);
@@ -198,6 +219,7 @@ export function makeCtx<Input, Prev>(params: {
     signal,
     validatedSignal,
     approval,
+    waitForEvent: makeWaitForEvent(env),
     // Pure set membership. Returns false (not throws) for names not in the
     // currently-running definition's patches array — this is load-bearing
     // for the "same code file, different versions" pattern:
@@ -216,6 +238,7 @@ export function makeCtx<Input, Prev>(params: {
     dowhile,
     dountil,
     metadata,
+    reportUsage: makeReportUsage({ env, activity }),
     proxy: makeProxy(activity),
     setQueryHandler: <R>(name: string, handler: (args?: unknown) => R | Promise<R>): void => {
       // Process-local registry — query handlers close over the body's
@@ -244,5 +267,5 @@ export function makeCtx<Input, Prev>(params: {
       });
     },
   };
-  return { ctx, compensations, updates, settleMetadata };
+  return { ctx, compensations, updates, settleMetadata, usage };
 }

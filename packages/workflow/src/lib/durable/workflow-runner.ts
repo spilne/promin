@@ -767,10 +767,18 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   async getStatus(params: WorkflowGetStatusParams): Promise<WorkflowStatusInfo<unknown> | null> {
     const state = await this.storage.loadWorkflow(params.workflowId);
     if (!state) return null;
+    const live = state.status === "pending" || state.status === "running";
+    // A queued step a group holds back is on no step row; ask the executor.
+    // A failed read must not fail the status call.
+    const extraWaits =
+      live && this.stepExecutor?.queuedWaits
+        ? await this.stepExecutor.queuedWaits({ workflowId: params.workflowId }).catch(() => [])
+        : [];
     return toStatusInfo({
       state,
       includeStepResults: params.includeStepResults ?? false,
       now: this.clock.now(),
+      extraWaits,
     });
   }
 

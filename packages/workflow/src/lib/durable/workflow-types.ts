@@ -17,7 +17,8 @@ import type { Codec } from "@spilne/perfect-core/connect";
 import type { WorkflowRetryPolicy } from "../shared/retry-policy.ts";
 import type { Sinkable } from "../shared/streamable.ts";
 import type { TaggedError } from "../shared/tagged-error.ts";
-import type { StepDefinition } from "./step-definition.ts";
+import type { UsageTotals, WorkflowBudget } from "./budget.ts";
+import type { StepDefinition, StepGroupOption } from "./step-definition.ts";
 import type { WorkflowDAG } from "./workflow-dag-viz.ts";
 import type { FailedWorkflowRecord, WorkflowFailure, WorkflowRunEvent } from "./workflow-state.ts";
 import type { WorkflowWait } from "./workflow-waits.ts";
@@ -49,8 +50,15 @@ import type { WorkflowWait } from "./workflow-waits.ts";
  * step of this workflow regardless of input.
  */
 export interface WorkflowQueueConfig<Input> {
-  readonly concurrencyLimit: number;
+  /** Cap on running tasks per `concurrencyKey`. Optional when `group` is set. */
+  readonly concurrencyLimit?: number;
   readonly concurrencyKey?: (input: Input) => string;
+  /**
+   * Named rate-limit / concurrency group every step of the workflow joins
+   * (a step's own `queue.group` wins). `fairnessKey` takes the workflow
+   * input. See `StepGroupOption`.
+   */
+  readonly group?: StepGroupOption<Input>;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +167,7 @@ export interface WorkflowDefinitionInternals {
   readonly compensateConfig?: CompensateConfig;
   readonly dlq?: Sinkable<FailedWorkflowRecord>;
   readonly timeoutMs?: number;
+  readonly budget?: WorkflowBudget;
   /**
    * Timeout (ms) applied to every plain, `branch`, `match`, `map` and
    * `parallel` step that sets no `timeoutMs` of its own, so a handler that
@@ -301,8 +310,14 @@ export interface WorkflowStatusInfo<Output> {
   readonly waitingOn: readonly WorkflowWait[];
   /** One-line summary of `waitingOn`; absent when it is empty. */
   readonly waitingOnSummary?: string;
-  /** Summary of all step statuses. */
-  readonly steps: Record<string, { status: string; result?: unknown }>;
+  /**
+   * Tokens and cost the run's steps reported (`ctx.reportUsage`), summed from
+   * their stored rows. Absent when no step reported any. A step that is
+   * suspended has not stored its usage yet.
+   */
+  readonly usage?: UsageTotals;
+  /** Summary of all step statuses. `usage` is what that step reported. */
+  readonly steps: Record<string, { status: string; result?: unknown; usage?: UsageTotals }>;
   readonly createdAt: Date;
   readonly startedAt?: Date;
   readonly updatedAt: Date;
@@ -436,6 +451,14 @@ export interface WorkflowParams<Input> {
   readonly version?: string;
   /** Global deadline for the entire workflow execution (ms). Fails with WorkflowDeadlineError if exceeded. */
   readonly timeoutMs?: number;
+  /**
+   * Token / cost caps. Steps report spend with `yield* ctx.reportUsage(...)`
+   * (`.journaled()` steps); exceeding a cap fails the run with
+   * `WorkflowBudgetExceededError` (never retried; compensation runs). The cap
+   * is checked at each report and again after every wave of steps. Usage is in
+   * `WorkflowStatusInfo.usage`. Declared on the definition, not stored with the run.
+   */
+  readonly budget?: WorkflowBudget;
   /**
    * Timeout (ms) applied to every plain, `branch`, `match`, `map` and
    * `parallel` step that sets no `timeoutMs` of its own, so a handler that

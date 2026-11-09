@@ -38,6 +38,23 @@ export interface WorkerStepContext {
    * signal on (fetch, child processes) or check it.
    */
   readonly signal: AbortSignal;
+  /**
+   * Progress details to resume from: the last details a previous delivery of
+   * this task passed to `heartbeat(details)` before its worker crashed or lost
+   * its lease, or what this attempt has passed itself. Undefined when none
+   * was ever sent (a first delivery). JSON-compatible values only.
+   */
+  readonly lastHeartbeatDetails: unknown;
+  /**
+   * Record progress `details` with the task's lease. The latest value is sent
+   * with the worker's next lease heartbeat (every `heartbeatIntervalMs`), so
+   * calling this often is cheap and a crash loses at most that interval of
+   * progress. A later delivery of the task (after a lost lease or a crash)
+   * reads it as `lastHeartbeatDetails`; a retry of the step after a failure
+   * is a new task and starts without it. With a short-lived step the details
+   * may never be sent.
+   */
+  heartbeat(details: unknown): void;
 }
 
 /**

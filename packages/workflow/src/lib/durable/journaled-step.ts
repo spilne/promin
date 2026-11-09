@@ -53,6 +53,7 @@
 
 import type { WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
+import { STEP_USAGE_METADATA_KEY, type UsageTotals, type WorkflowBudget } from "./budget.ts";
 import { type JournalStore } from "./activity-journal.ts";
 import { hasCapability } from "./storage/capabilities.ts";
 import { discardFailedAttempt, runsCompensations } from "./compensation-stack.ts";
@@ -147,6 +148,15 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
   onMetadataWriteError?: (params: { error: unknown; keys: readonly string[] }) => void;
   /** Called with each update this body applies or rejects (the runner wires its tracer here). */
   onUpdate?: (event: UpdateEvent) => void;
+  /** Budget of the run (see `ctx.reportUsage`). */
+  budget?: WorkflowBudget;
+  /** Usage stored by the run's other steps when this one started. */
+  priorRunUsage?: UsageTotals;
+  /**
+   * The step row's metadata slot. When the body reported usage, its total is
+   * stored under `STEP_USAGE_METADATA_KEY` as the step settles (also on failure).
+   */
+  stepMetadata?: { current?: Record<string, unknown> };
   body: JournaledStepBody<Input, Prev, Output>;
 }): Promise<Output> {
   const {
@@ -166,6 +176,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     workflowMetadata,
     onMetadataWriteError,
     onUpdate,
+    stepMetadata,
     body,
   } = params;
 
@@ -181,7 +192,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
       : workflowStorage
         ? (await workflowStorage.loadWorkflow(workflowId))?.metadata
         : undefined;
-  const { ctx, compensations, updates, settleMetadata } = makeCtx({
+  const { ctx, compensations, updates, settleMetadata, usage } = makeCtx({
     input,
     prev,
     workflowId,
@@ -194,6 +205,8 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     defaultCodec: codec,
     defaultPayloadHash: payloadHash,
     runChild,
+    ...(params.budget !== undefined && { budget: params.budget }),
+    ...(params.priorRunUsage !== undefined && { priorRunUsage: params.priorRunUsage }),
     ...(clock !== undefined && { clock }),
     ...(guard !== undefined && { guard }),
     ...(onMetadataWriteError !== undefined && { onMetadataWriteError }),
@@ -240,6 +253,11 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     return step.value;
   };
 
+  const storeUsage = (): void => {
+    if (stepMetadata === undefined || usage.total.totalTokens + usage.total.costUsd === 0) return;
+    stepMetadata.current = { ...stepMetadata.current, [STEP_USAGE_METADATA_KEY]: usage.total };
+  };
+
   try {
     // Drive outside any enclosing parallel-branch scope: a child workflow
     // started from a branch (ctx.child → runChild → runJournaledStep) must
@@ -250,8 +268,10 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     // Metadata writes settle before the step's outcome is checkpointed, so a
     // write that lost the fence stops the step instead of racing its result.
     await settleMetadata();
+    storeUsage();
     return output;
   } catch (bodyError) {
+    storeUsage();
     // The body's own error wins; a lost fence on a metadata write is
     // already on its way to the reporter or irrelevant to a failing step.
     await settleMetadata().catch(() => undefined);

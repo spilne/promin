@@ -100,6 +100,24 @@ describe("createWorkerApiHandler", () => {
     expect(res.status).toBe(200);
   });
 
+  it("heartbeat details are stored, and a redelivered claim returns them", async () => {
+    await queue.enqueue({ workflowId: "wf-1", stepName: "step-a", input: {} });
+    const [task] = await queue.claim({ workerId: "w-1", limit: 1 });
+
+    const res = await post(handler, "heartbeat", {
+      taskId: task!.id,
+      claimToken: task!.claimToken,
+      details: { cursor: 7 },
+    });
+    expect(await resultOf(res)).toBe(true);
+    await queue.requeueStuck({ mode: "worker", workerId: "w-1" });
+
+    const claimed = (await resultOf(
+      await post(handler, "claim", { workerId: "w-2", limit: 1 }),
+    )) as StepTask[];
+    expect(claimed[0]!.lastHeartbeatDetails).toEqual({ cursor: 7 });
+  });
+
   it("claim routes by step name and version and records the worker id", async () => {
     await queue.enqueue({
       workflowId: "wf-1",
@@ -124,6 +142,35 @@ describe("createWorkerApiHandler", () => {
     expect(tasks.map((t) => t.stepName)).toEqual(["step-a"]);
     expect((await queue.get(tasks[0]!.id))?.claimedBy).toBe("remote-7");
     expect((await queue.requeueStuck({ mode: "worker", workerId: "remote-7" })).requeued).toBe(1);
+  });
+
+  it("claim enforces step-group limits server-side for remote workers and returns the group fields", async () => {
+    const group = { groupName: "llm", groupMaxConcurrent: 1, fairnessKey: "t1" };
+    await queue.enqueue({ workflowId: "wf-1", stepName: "a", input: {}, ...group });
+    await queue.enqueue({ workflowId: "wf-2", stepName: "a", input: {}, ...group });
+
+    const first = (await resultOf(
+      await post(handler, "claim", { workerId: "w-1", limit: 5 }),
+    )) as StepTask[];
+    expect(first).toHaveLength(1);
+    expect(first[0]).toMatchObject(group);
+    // A second remote worker finds the group full: the task waits, unfailed.
+    const second = (await resultOf(
+      await post(handler, "claim", { workerId: "w-2", limit: 5 }),
+    )) as StepTask[];
+    expect(second).toHaveLength(0);
+    expect(queue.getAllTasks().filter((t) => t.status === "pending")).toHaveLength(1);
+
+    await post(handler, "complete", {
+      taskId: first[0]!.id,
+      claimToken: first[0]!.claimToken,
+      result: 1,
+      durationMs: 1,
+    });
+    const third = (await resultOf(
+      await post(handler, "claim", { workerId: "w-2", limit: 5 }),
+    )) as StepTask[];
+    expect(third.map((t) => t.workflowId)).toEqual(["wf-2"]);
   });
 
   it("claim without a workerId is rejected", async () => {

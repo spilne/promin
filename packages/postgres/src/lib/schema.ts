@@ -309,6 +309,9 @@ export const stepQueue = pgTable(
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
     claimToken: text("claim_token"),
     heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+    // The latest progress details a heartbeat carried; kept across requeues
+    // so the next delivery of the task can resume from them.
+    heartbeatDetails: jsonb("heartbeat_details"),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     version: text("version"),
@@ -323,6 +326,15 @@ export const stepQueue = pgTable(
     concurrencyKey: text("concurrency_key"),
     concurrencyScope: text("concurrency_scope"),
     concurrencyLimit: integer("concurrency_limit"),
+    // Named rate-limit / concurrency group (see StepGroupOption): at most
+    // `group_max_concurrent` of the group running and `group_max_starts`
+    // claims per `group_window_ms`, across workers; `fairness_key`
+    // interleaves keys of the group round-robin on claim. All null = no group.
+    groupName: text("group_name"),
+    groupMaxConcurrent: integer("group_max_concurrent"),
+    groupMaxStarts: integer("group_max_starts"),
+    groupWindowMs: integer("group_window_ms"),
+    fairnessKey: text("fairness_key"),
   },
   (t) => [
     index("wf_step_queue_dequeue_idx").on(t.status, t.priority, t.createdAt),
@@ -344,6 +356,10 @@ export const stepQueue = pgTable(
     index("wf_step_queue_concurrency_running_idx")
       .on(t.concurrencyScope, t.concurrencyKey)
       .where(sql`${t.status} = 'running' AND ${t.concurrencyKey} IS NOT NULL`),
+    // Group usage during claim: a group's running tasks and recent starts.
+    index("wf_step_queue_group_started_idx")
+      .on(t.groupName, t.claimedAt)
+      .where(sql`${t.groupName} IS NOT NULL`),
     // Claim order: walking this index in order lets the claim stop after
     // `limit` matching rows instead of sorting every pending task.
     index("wf_step_queue_pending_order_idx")

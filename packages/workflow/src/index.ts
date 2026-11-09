@@ -30,10 +30,24 @@ export type {
   CompensateConfig,
 } from "./lib/durable/workflow-types.ts";
 export {
+  runUsage,
+  stepUsage,
+  STEP_USAGE_METADATA_KEY,
+  type StepBudget,
+  type UsageReport,
+  type UsageTotals,
+  type WorkflowBudget,
+} from "./lib/durable/budget.ts";
+export {
   deriveWaitingOn,
   summarizeWaits,
   type WorkflowWait,
 } from "./lib/durable/workflow-waits.ts";
+export {
+  deliverEvent,
+  type DeliverEventParams,
+  type DeliverEventResult,
+} from "./lib/durable/wait-for-event.ts";
 export { workflowClosure } from "./lib/durable/workflow-closure.ts";
 export {
   compareWorkflowVersions,
@@ -57,6 +71,7 @@ export type {
   SubworkflowOptions,
   TripwireOptions,
   StepQueueOption,
+  StepGroupOption,
   StepQueueContext,
   StepRuntime,
   WorkflowMetadataRef,
@@ -250,6 +265,8 @@ export {
   type WorkflowTraceWaitStart,
   type WorkflowTraceWaitEnd,
   type WorkflowTraceUpdate,
+  type WorkflowTraceStepThrottled,
+  type WorkflowTraceStepThrottleEnd,
   type WorkflowTraceLockAcquired,
   type WorkflowTraceLockLost,
   type WorkflowTraceCompensationStart,
@@ -276,6 +293,7 @@ export {
   WorkflowTimeoutError,
   StepTimeoutError,
   WorkflowDeadlineError,
+  WorkflowBudgetExceededError,
   WorkflowVersionMismatchError,
   WorkflowRunNotFoundError,
   FenceTokenMismatchError,

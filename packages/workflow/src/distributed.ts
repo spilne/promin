@@ -24,11 +24,18 @@ export {
   type StepQueueEnqueueParams,
   type StepQueueCompleteParams,
   type StepQueueFailParams,
+  type StepQueueHeartbeatParams,
   type StepQueueClaimParams,
   type StepQueueRequeueParams,
   type StepQueueRequeueResult,
   DEFAULT_MAX_DELIVERIES,
 } from "./lib/distributed/step-queue.ts";
+export {
+  assertValidGroupLimits,
+  type StepGroupFields,
+  type StepThrottleReason,
+  type ThrottledTask,
+} from "./lib/distributed/step-group-limits.ts";
 export {
   InMemoryStepQueue,
   type InMemoryStepQueueConfig,

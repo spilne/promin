@@ -268,6 +268,62 @@ Implementations: `InMemoryStepQueue`, `PgStepQueue` (`@promin/postgres`),
 The in-memory, Postgres, Redis and SQLite queues run `stepQueueTestSuite`
 from `@promin/workflow/testing`.
 
+### Rate-limit and concurrency groups, with fairness
+
+A step opts into a named group, shared by every step and workflow that names it
+(an LLM provider key, a vendor API). The queue enforces it across all workers,
+in the claim itself:
+
+```typescript
+workflow<{ tenantId: string }>({ name: "summarize" })
+  .step("call-llm", handler, {
+    queue: {
+      group: {
+        name: "openai", // the shared key
+        maxConcurrent: 4, // at most 4 tasks of the group running at once
+        maxStarts: 60, // at most 60 claims ...
+        windowMs: 60_000, // ... per sliding minute
+        fairnessKey: (ctx) => (ctx.input as { tenantId: string }).tenantId,
+      },
+    },
+  })
+  .build();
+```
+
+`workflow({ queue: { group } })` gives every step a default group (its
+`fairnessKey` takes the workflow input); a step's own `queue.group` wins. A
+step-level `queue` with only a `group` leaves the workflow's
+`concurrencyLimit` in force. `maxStarts` and `windowMs` go together; limits are
+positive integers; a group with no limits only schedules fairly.
+
+- **Deferred, not failed.** A task its group holds back stays `pending`: no
+  delivery, no retry attempt, no `StepWaitTimeoutError` clock reset (the wait
+  counts toward `stepWaitTimeoutMs`). It is claimed when the group has room.
+- **Visible.** `getStatus().waitingOn` lists it as `{ kind: "step-queue", groupName,
+reason: "concurrency" | "rate", until? }` (`until` = when the rate window frees a
+  slot), and the tracer reports `stepThrottled` / `stepThrottleEnd` (and the
+  OpenTelemetry adapter an event and a span). The waits come from
+  `StepQueue.throttled({ workflowId })`, computed from current queue state, so any
+  process sharing the queue answers; Zorya's run detail derives waits from stored
+  rows only and does not show them.
+- **Fair.** Among the pending tasks of a group, claim order is priority first,
+  then round-robin across `fairnessKey`s (a key's n-th queued task ranks behind
+  every other key's n-th) counting what a key already has running, then age. One
+  tenant with a thousand queued tasks gets one slot per round, and a key already
+  using the group yields to one that is not. Tasks without a key keep plain
+  priority / FIFO order. Round-robin only: there are no per-key weights.
+- **Start counting.** A start is a claim. `release()` gives its start back, as does a
+  `requeueStuck` that puts the task back for another delivery (a dead-lettered task
+  keeps its start). Finished tasks count until they leave the window, so `purge` only
+  tasks older than the longest `windowMs`.
+- **Limits come from the task.** Each task is admitted against the limits it was
+  enqueued with; tasks of one group should agree on them.
+- **A throttled group never blocks the others.** Claim skips held-back groups
+  without spending candidate slots on them, so ungrouped tasks and other groups
+  behind a throttled backlog still claim.
+- `RemoteStepQueue` workers get all of this through the server-side claim;
+  `throttled` is coordinator-side (not on the worker wire).
+
 ## Workers
 
 `createWorker(config)` returns a `WorkflowWorker` (`start()`, `stop()`,
@@ -294,6 +350,19 @@ from `@promin/workflow/testing`.
   `ctx.signal` with `TaskLeaseLostError`, stops heartbeating, fires
   `hooks.onLeaseLost` and skips settling the task. A heartbeat that throws
   is only reported (`phase: "heartbeat"`); the next one may succeed.
+- **Heartbeat details.** A handler may call `ctx.heartbeat(details)` with
+  JSON-compatible progress (a cursor, a page token). The latest value rides
+  the next lease heartbeat (so it is sent at most every `heartbeatIntervalMs`
+  and a crash loses at most that much progress) and is stored with the task
+  atomically with the lease extension (`StepQueue.heartbeat({ details })`;
+  `null` clears, no `details` keeps). When the task is redelivered — its
+  lease lapsed, its worker was declared dead, or it was released — the next
+  attempt reads them as `ctx.lastHeartbeatDetails` (`undefined` on a first
+  delivery) and resumes from there. A heartbeat that finds the claim gone
+  stores nothing, so a stalled worker cannot overwrite the new holder's
+  progress. A retry of the step after a failure is a new task and starts
+  without details; steps run inline by the runner (no queue) have no lease
+  to keep them with.
 - **Graceful stop.** `stop()` stops claiming and waits for running tasks.
   `stop({ timeoutMs })` waits at most that long, then `release()`s the
   unfinished tasks (another worker claims them at once) and aborts their

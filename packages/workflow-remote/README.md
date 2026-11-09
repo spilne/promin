@@ -110,7 +110,8 @@ void worker.start();
   a settled step's row, attempt rows and status check as separate calls (more
   round trips per step; same fencing).
 - **`RemoteStepQueue` is the worker subset.** `claim`, `release`,
-  `complete`, `fail` and `heartbeat` work; `enqueue`, `consume`, `consumeSettled`, `requeueStuck`, `get`
+  `complete`, `fail` and `heartbeat` work (`heartbeat` takes the optional
+  `details` and `claim` returns `lastHeartbeatDetails`); `enqueue`, `consume`, `consumeSettled`, `requeueStuck`, `get`
   and `purge` throw, and `metrics` is not on the worker wire. Enqueueing and
   the dead-worker sweep belong to the coordinator, which uses the real queue
   next to the handler.

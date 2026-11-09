@@ -13,6 +13,7 @@ import type {
   WorkflowSuspendedError,
 } from "../durable-pipeline-error.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
+import type { WorkflowWait } from "../workflow-waits.ts";
 import type { OrchestrationRuntime } from "./orchestration-context.ts";
 import { runChildWorkflow } from "./orchestrate.ts";
 import { errorMessage, runStepBody, type StepAttemptFailure } from "./step-body.ts";
@@ -61,6 +62,17 @@ export interface StepExecutionRequest {
   readonly concurrencyKey?: string;
   readonly concurrencyScope?: string;
   readonly concurrencyLimit?: number;
+  /**
+   * Resolved rate-limit / concurrency group (see `StepGroupOption`),
+   * forwarded to the step queue, which enforces it across workers.
+   */
+  readonly group?: {
+    readonly groupName: string;
+    readonly groupMaxConcurrent?: number;
+    readonly groupMaxStarts?: number;
+    readonly groupWindowMs?: number;
+    readonly fairnessKey?: string;
+  };
   /**
    * In-process runtime of the run that issued the request: clock, fence
    * guard, child runner, stored step row, version and patches. Set by the
@@ -125,7 +137,7 @@ export type StepExecutionResult =
   | {
       readonly ok: false;
       readonly kind: "suspended";
-      readonly reason: "sleep" | "signal";
+      readonly reason: "sleep" | "signal" | "event";
       readonly message?: string;
       /** The original `WorkflowSuspendedError`, from in-process executors. */
       readonly cause?: unknown;
@@ -175,6 +187,13 @@ export interface StepExecutor {
     readonly workflowId: string;
     readonly stepNames: readonly string[];
   }): Promise<void>;
+  /**
+   * Waits of a live run that no step row records: a queued step its
+   * rate-limit / concurrency group is holding back (`kind: "step-queue"`).
+   * `getStatus` merges them into `waitingOn`. Queue-backed executors read
+   * them from the shared queue, so any process answers.
+   */
+  queuedWaits?(params: { readonly workflowId: string }): Promise<WorkflowWait[]>;
 }
 
 /**

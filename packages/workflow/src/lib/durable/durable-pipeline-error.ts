@@ -131,7 +131,10 @@ export class FenceTokenMismatchError extends TaggedError("FenceTokenMismatchErro
 export class WorkflowSuspendedError extends TaggedError("WorkflowSuspendedError")<{
   readonly workflowId: string;
   readonly stepName: string;
-  readonly reason: "sleep" | "signal";
+  readonly reason: "sleep" | "signal" | "event";
+  /** The awaited event, for `reason: "event"`. */
+  readonly eventName?: string;
+  readonly eventKey?: string;
   readonly message: string;
 }>() {}
 
@@ -170,6 +173,22 @@ export class StepTimeoutError extends TaggedError("StepTimeoutError")<{
 export class WorkflowDeadlineError extends TaggedError("WorkflowDeadlineError")<{
   readonly workflowId: string;
   readonly timeoutMs: number;
+  readonly message: string;
+}>() {}
+
+/**
+ * A run (or one step) spent more than its declared budget (`workflow({ budget })`).
+ * `scope` is `"run"` for the workflow-wide cap, `"step"` for a per-step cap
+ * (then `stepName` names the step). Never retried; the run fails and its
+ * compensation runs as for any failure.
+ */
+export class WorkflowBudgetExceededError extends TaggedError("WorkflowBudgetExceededError")<{
+  readonly workflowId: string;
+  readonly scope: "run" | "step";
+  readonly limit: "maxTokens" | "maxCostUsd";
+  readonly max: number;
+  readonly used: number;
+  readonly stepName?: string;
   readonly message: string;
 }>() {}
 

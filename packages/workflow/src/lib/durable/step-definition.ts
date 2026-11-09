@@ -19,6 +19,7 @@ import { isEff, isThenable, promiseOrDie, promiseOrEff } from "../shared/eff.ts"
 import type { RetryPolicy } from "../shared/retry-policy.ts";
 import type { TaggedError } from "../shared/tagged-error.ts";
 import type { WallClock } from "../shared/wall-clock.ts";
+import type { UsageTotals, WorkflowBudget } from "./budget.ts";
 import { NEVER_ABORTED } from "./step-signal.ts";
 import type { Workflow } from "./workflow-types.ts";
 import type { StepState } from "./workflow-state.ts";
@@ -117,8 +118,57 @@ export interface StepQueueContext {
  * with a 3-rps cap, while the rest of the workflow has no cap).
  */
 export interface StepQueueOption {
-  readonly concurrencyLimit: number;
+  /**
+   * Cap on running tasks per `concurrencyKey`. Optional since `group` can
+   * stand alone; without it the workflow-level `queue.concurrencyLimit`
+   * (if any) still applies to this step.
+   */
+  readonly concurrencyLimit?: number;
   readonly concurrencyKey?: (ctx: StepQueueContext) => string;
+  /** Named rate-limit / concurrency group this step belongs to. See `StepGroupOption`. */
+  readonly group?: StepGroupOption<StepQueueContext>;
+}
+
+/**
+ * A named rate-limit / concurrency group, shared by every step (and workflow)
+ * that names it, enforced by the step queue across all workers — for example
+ * one LLM provider key several workflows call:
+ *
+ * ```ts
+ * .step("summarize", fn, {
+ *   queue: {
+ *     group: {
+ *       name: "openai",
+ *       maxConcurrent: 4,
+ *       maxStarts: 60,
+ *       windowMs: 60_000,
+ *       fairnessKey: (ctx) => (ctx.input as { tenantId: string }).tenantId,
+ *     },
+ *   },
+ * })
+ * ```
+ *
+ * A step the group holds back is deferred, not failed: it stays queued, uses
+ * no retry attempt, and shows in `waitingOn` (`kind: "step-queue"`) until the
+ * group has room. The wait counts toward the executor's `stepWaitTimeoutMs`.
+ * Starts are counted from claims, so a `purge` of finished tasks younger than
+ * `windowMs` loosens the rate cap; purge older than the longest window.
+ *
+ * - `maxConcurrent`: tasks of the group running at once.
+ * - `maxStarts` + `windowMs`: claims per sliding window (set both).
+ * - `fairnessKey`: claims interleave the group's keys round-robin and count
+ *   what a key already has running, so one noisy key cannot starve the rest.
+ *   Without it tasks of the group claim in plain priority / age order.
+ *
+ * Tasks of one group should agree on its limits (each is admitted against
+ * its own). Step-level `group` wins over a workflow-level one.
+ */
+export interface StepGroupOption<Ctx> {
+  readonly name: string;
+  readonly maxConcurrent?: number;
+  readonly maxStarts?: number;
+  readonly windowMs?: number;
+  readonly fairnessKey?: (ctx: Ctx) => string;
 }
 
 // ---------------------------------------------------------------------------
@@ -415,6 +465,10 @@ export type RunChildWorkflow = (params: {
  * executors); each step kind documents its fallback.
  */
 export interface StepRuntime {
+  /** The run's budget, for `.journaled()` steps' `ctx.reportUsage`. */
+  readonly budget?: WorkflowBudget;
+  /** Usage stored by the run's other steps when this step started (excludes its own row). */
+  readonly priorRunUsage?: UsageTotals;
   /**
    * The runner's time source. Drives sleep / signal-timeout deadlines and
    * loop-iteration timing. Default: `SystemWallClock`.

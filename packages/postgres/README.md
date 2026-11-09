@@ -146,6 +146,15 @@ Postgres specifics:
   `(scope, key)` in hash order and recounts running tasks under the locks, so
   concurrent claimers with disjoint capabilities cannot both admit past the
   limit.
+- Step groups: columns `group_name`, `group_max_concurrent`, `group_max_starts`,
+  `group_window_ms`, `fairness_key` (in the baseline migration, edited in place as
+  the repo does; `ensureTable` adds them to an older table with `ADD COLUMN IF NOT EXISTS`). Claim pre-checks each
+  group's slots from the snapshot and keeps only as many candidates per group as it
+  has slots, so a throttled backlog cannot crowd out other tasks; admission then
+  takes the same advisory locks (under a `group:` key) and recounts running tasks
+  and window starts under them. With a grouped task pending, candidates are ranked
+  per `(group, fairness_key)` (`ROW_NUMBER` plus running count); with none, the plain
+  index-ordered query is used.
 - `requeueStuck({ lease })` checks the leader lease with
   `assertPgLeaseCurrent` in the same transaction as the writes.
 - `metrics()` with no `until` applies no upper bound, so rows the app stamped

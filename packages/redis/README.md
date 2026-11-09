@@ -124,6 +124,7 @@ await queue.purge({ completedBefore: new Date(Date.now() - 24 * 60 * 60 * 1000) 
 
 - **Routing**: a worker claims a task only when the task's `needs` are a subset of its `capabilities`, its step is in `stepNames` and its version in `versions` (when given). The checks run in the claim script, so tasks a worker can't run never block the ones behind them.
 - **Concurrency keys**: tasks sharing `(concurrencyScope, concurrencyKey)` are capped at `concurrencyLimit` running at once, across all workers. The running count is a Redis set updated in the same script as the claim, and the slot is released on complete, fail, requeue and `release()`.
+- **Step groups**: `groupName`, `groupMaxConcurrent`, `groupMaxStarts` / `groupWindowMs` and `fairnessKey` enforce [rate-limit groups](../workflow/src/lib/distributed/README.md#rate-limit-and-concurrency-groups-with-fairness) in the claim script: a running set per group, a sorted set of claim times per group (the rate window, trimmed on claim and expiring when idle), and a running set per fairness key. While no grouped task is pending the claim takes the plain path; otherwise it ranks the scanned tasks fairly first, so fairness sees the first `claimScanLimit` pending tasks.
 - **Claim scan**: one `claim()` examines at most `claimScanLimit` (default 1000) pending tasks while skipping ones it can't take, which bounds how long a backlog of blocked tasks can hold Redis.
 - **Idempotent enqueue**: while a task for `(workflowId, stepName)` is pending or running, `enqueue()` returns its id instead of adding another.
 

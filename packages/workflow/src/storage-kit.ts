@@ -56,6 +56,11 @@ export {
   percentileCont,
 } from "./lib/distributed/step-queue.ts";
 export {
+  GroupLedger as StepGroupLedger,
+  claimOrder as stepGroupClaimOrder,
+  inGroup as isStepGroupTask,
+} from "./lib/distributed/step-group-limits.ts";
+export {
   normalizeNamespaceCreate,
   normalizeNamespacePatch,
   normalizeNamespaceCapabilities,
