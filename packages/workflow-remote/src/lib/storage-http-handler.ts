@@ -118,6 +118,9 @@ export function createWorkflowStorageHandler(
     resetSteps: (p) => requireCapability(storage, "resetSteps").resetSteps(p),
     checkpointStep: (p) => requireCapability(storage, "stepCheckpoint").checkpointStep(p),
     purgeCompleted: (p) => storage.purgeCompleted(p),
+    listRetentionCandidates: (p) =>
+      requireCapability(storage, "retention").listRetentionCandidates(p),
+    purgeRuns: (p) => requireCapability(storage, "retention").purgeRuns(p),
     // -- Scanner / recovery queries.
     listDueTimers: (p) => requireCapability(storage, "dueTimers").listDueTimers(p),
     listSignalWakeups: (p) => requireCapability(storage, "signalWakeups").listSignalWakeups(p),
@@ -244,6 +247,7 @@ const MISSING_CAPABILITY: Record<StorageCapability, string> = {
   orphanedRuns: "storage does not implement listOrphanedRuns",
   childEndedWaits: "storage does not implement listChildEndedWaits",
   updateWakeups: "storage does not implement listUpdateWakeups",
+  retention: "storage does not implement listRetentionCandidates / purgeRuns",
 };
 
 /** `storage` narrowed to `capability`, or a clear error when it lacks it. */

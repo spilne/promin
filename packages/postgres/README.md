@@ -63,7 +63,7 @@ await migrate(db, {
 The schema is a **baseline migration** (`drizzle/0000_baseline.sql`: every
 table, serial column, primary / unique / CHECK constraint, partial index,
 foreign key and lookup seed) plus the incremental files after it.
-`0001_step_progress` also adds, idempotently, the columns earlier changes put
+`0002_retention_index` adds the partial `(completed_at, workflow_id)` index the retention sweep pages by (`CREATE INDEX IF NOT EXISTS`; on a very large table create it with `CONCURRENTLY` first and the migration finds it). `0001_step_progress` also adds, idempotently, the columns earlier changes put
 into the baseline in place (`wf_workflows.compensation_origin` and the
 `wf_step_queue` group and heartbeat columns). `schema.ts` mirrors the chain and
 a drift test builds a database from it and compares every table, column, index,

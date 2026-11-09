@@ -59,7 +59,11 @@ import type {
   CompleteSignalTokenResult,
   NotifyStepStartedParams,
   OrphanedRun,
+  ListRetentionCandidatesParams,
   PurgeCompletedParams,
+  PurgeRunRef,
+  RetentionCandidate,
+  RetentionStatus,
   ReadStreamChunksParams,
   ReleaseLockParams,
   ResetStepsParams,
@@ -741,7 +745,7 @@ export class InMemoryWorkflowStorage
     }
 
     let deleted = 0;
-    for (const [id, wf] of this.workflows) {
+    for (const wf of this.workflows.values()) {
       if (deleted >= params.limit) break;
       if (!isTerminalWorkflowStatus(wf.status)) continue;
       if (!wf.completedAt) continue;
@@ -750,17 +754,76 @@ export class InMemoryWorkflowStorage
       const t = wf.completedAt.getTime();
       if (t < fromMs || t >= toMs) continue;
 
-      this.workflows.delete(id);
-      this.forgetIndexes(wf);
-      this.leases.forget(id);
-      this.signals.delete(id);
-      this.attempts.delete(id);
-      this.runHistory.delete(id);
-      this.events.forget(id);
-      this.journal.deleteWorkflow(id);
-      this.signalTokens.deleteWorkflow(id);
-      this.streams.deleteWorkflow(id);
+      this.deleteRun(wf);
       deleted++;
+    }
+    return deleted;
+  }
+
+  /** Delete one run and everything stored for it. */
+  private deleteRun(wf: MutableWorkflow): void {
+    const id = wf.workflowId;
+    this.workflows.delete(id);
+    this.forgetIndexes(wf);
+    this.leases.forget(id);
+    this.signals.delete(id);
+    this.attempts.delete(id);
+    this.runHistory.delete(id);
+    this.events.forget(id);
+    this.journal.deleteWorkflow(id);
+    this.signalTokens.deleteWorkflow(id);
+    this.streams.deleteWorkflow(id);
+  }
+
+  async listRetentionCandidates(
+    params: ListRetentionCandidatesParams,
+  ): Promise<RetentionCandidate[]> {
+    const beforeMs = params.completedBefore.getTime();
+    const rows: RetentionCandidate[] = [];
+    for (const wf of this.workflows.values()) {
+      if (!isTerminalWorkflowStatus(wf.status) || !wf.completedAt) continue;
+      if (this.namespace !== null && wf.namespace !== this.namespace) continue;
+      if (params.name !== undefined && wf.workflowName !== params.name) continue;
+      if (
+        params.statuses !== undefined &&
+        !params.statuses.includes(wf.status as RetentionStatus)
+      ) {
+        continue;
+      }
+      const at = wf.completedAt.getTime();
+      if (at >= beforeMs) continue;
+      if (params.after !== undefined) {
+        const afterMs = params.after.completedAt.getTime();
+        if (at < afterMs || (at === afterMs && wf.workflowId <= params.after.workflowId)) continue;
+      }
+      rows.push({
+        workflowId: wf.workflowId,
+        workflowName: wf.workflowName,
+        status: wf.status as RetentionStatus,
+        ...(wf.errorTag !== undefined && { errorTag: wf.errorTag }),
+        ...(wf.parentWorkflowId !== undefined && { parentWorkflowId: wf.parentWorkflowId }),
+        ...(wf.compensationOrigin !== undefined && { compensationOrigin: wf.compensationOrigin }),
+        completedAt: wf.completedAt,
+      });
+    }
+    rows.sort(
+      (a, b) =>
+        a.completedAt.getTime() - b.completedAt.getTime() ||
+        (a.workflowId < b.workflowId ? -1 : a.workflowId > b.workflowId ? 1 : 0),
+    );
+    return rows.slice(0, params.limit);
+  }
+
+  async purgeRuns(params: { readonly runs: readonly PurgeRunRef[] }): Promise<string[]> {
+    const deleted: string[] = [];
+    for (const ref of params.runs) {
+      const wf = this.workflows.get(ref.workflowId);
+      if (!wf || !isTerminalWorkflowStatus(wf.status) || !wf.completedAt) continue;
+      if (this.namespace !== null && wf.namespace !== this.namespace) continue;
+      if (wf.completedAt.getTime() !== ref.completedAt.getTime()) continue;
+      if (owesCancelRollback(wf)) continue;
+      this.deleteRun(wf);
+      deleted.push(ref.workflowId);
     }
     return deleted;
   }

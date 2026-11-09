@@ -450,6 +450,10 @@ a `WorkflowRunner` (`run`, `runSafe`, `start`, `handle`, `resume`,
   definition from `registry`, else rebuilds a stub from the DAG stored with
   the run (`buildStubWorkflow`), whose sleep / signal steps can only resume.
   Suspended runs are never adopted — the scanners resume them when due.
+- **Retention.** With `retention` set, the leader also sweeps ended runs and
+  old step-queue tasks every `retention.intervalMs` (default 1 h), in the
+  background with its own time budget, so a long sweep never delays the
+  dead-worker requeue. See "Retention" in the durable README.
 - **Errors.** A failing sweep, adoption or storage check is reported to
   `onError({ source })` and backed off; nothing there stops the coordinator.
 

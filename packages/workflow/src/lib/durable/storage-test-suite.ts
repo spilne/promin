@@ -11,6 +11,8 @@ import {
   hasCapability,
   type CompensationLedgerStore,
   type FenceGuard,
+  type RetentionCursor,
+  type RetentionStore,
   type StepAttemptStore,
   type StepCheckpoint,
   type StepCheckpointStore,
@@ -75,6 +77,13 @@ export interface StorageTestSuiteOptions {
    * `saveStepProgress` cases run only when the storage reports the capability.
    */
   hasStepProgress?: boolean;
+  /**
+   * Assert the retention section: the storage reports the `retention`
+   * capability (`listRetentionCandidates` + `purgeRuns`). Every bundled
+   * backend sets this; without it the retention cases run only when the
+   * storage reports the capability.
+   */
+  hasRetention?: boolean;
   /**
    * Build a second storage instance over the same backend as `storage` —
    * what another process, pool client or worker would hold. Enables the
@@ -2872,6 +2881,193 @@ export function storageTestSuite(
         expect(await s.loadWorkflow("purge-cascade")).toBeNull();
         expect(await s.loadSignals("purge-cascade")).toEqual([]);
         expect(await s.loadRunHistory({ workflowId: "purge-cascade" })).toEqual([]);
+      });
+    });
+
+    // -------------------------------------------------------------------
+    // retention (listRetentionCandidates / purgeRuns)
+    // -------------------------------------------------------------------
+
+    describe("retention", () => {
+      const FUTURE = () => new Date(Date.now() + 60_000);
+
+      async function getRetentionStorage(): Promise<
+        (WorkflowStorage & Required<RetentionStore>) | undefined
+      > {
+        const s = await getStorage();
+        if (!hasCapability(s, "retention")) {
+          if (options.hasRetention) {
+            throw new Error("storageTestSuite hasRetention: true, but the storage lacks it.");
+          }
+          return undefined;
+        }
+        return s;
+      }
+
+      /** Create a run in `name` and end it; ends are spaced so `completedAt` orders strictly. */
+      async function endRun(params: {
+        s: WorkflowStorage;
+        workflowId: string;
+        name: string;
+        end: "complete" | "fail" | "cancel";
+        parentWorkflowId?: string;
+      }): Promise<void> {
+        const { s, workflowId, name, end } = params;
+        await s.createWorkflow({
+          workflowId,
+          workflowName: name,
+          input: {},
+          ...(params.parentWorkflowId !== undefined && {
+            parentWorkflowId: params.parentWorkflowId,
+          }),
+        });
+        if (end === "complete") await s.completeWorkflow({ workflowId, result: "ok" });
+        else if (end === "fail") await s.failWorkflow({ workflowId, error: "boom" });
+        else await s.cancelWorkflow({ workflowId });
+        await sleep(3);
+      }
+
+      it("pages ended runs by (completedAt, workflowId), filtered by name and status", async () => {
+        const s = await getRetentionStorage();
+        if (!s) return;
+        const name = `ret-page-${Date.now()}`;
+        const ids = ["a", "b", "c", "d", "e"].map((x) => `${name}-${x}`);
+        await endRun({ s, workflowId: ids[0]!, name, end: "complete" });
+        await endRun({ s, workflowId: ids[1]!, name, end: "fail" });
+        await endRun({ s, workflowId: ids[2]!, name, end: "complete" });
+        await endRun({ s, workflowId: ids[3]!, name: `${name}-other`, end: "complete" });
+        // Still running: never a candidate.
+        await s.createWorkflow({ workflowId: ids[4]!, workflowName: name, input: {} });
+
+        const seen: string[] = [];
+        let after: RetentionCursor | undefined;
+        for (let guard = 0; guard < 10; guard++) {
+          const page = await s.listRetentionCandidates({
+            completedBefore: FUTURE(),
+            limit: 2,
+            name,
+            ...(after !== undefined && { after }),
+          });
+          for (const c of page) seen.push(c.workflowId);
+          if (page.length < 2) break;
+          const last = page[page.length - 1]!;
+          after = { completedAt: last.completedAt, workflowId: last.workflowId };
+        }
+        expect(seen).toEqual([ids[0], ids[1], ids[2]]);
+
+        const failedOnly = await s.listRetentionCandidates({
+          completedBefore: FUTURE(),
+          limit: 10,
+          name,
+          statuses: ["failed"],
+        });
+        expect(failedOnly.map((c) => c.workflowId)).toEqual([ids[1]]);
+        expect(failedOnly[0]).toMatchObject({ workflowName: name, status: "failed" });
+
+        // A cutoff before the runs ended matches none of them.
+        expect(
+          await s.listRetentionCandidates({ completedBefore: new Date(0), limit: 10, name }),
+        ).toEqual([]);
+      });
+
+      it("reports the parent and cancel state the sweeper decides on", async () => {
+        const s = await getRetentionStorage();
+        if (!s) return;
+        const name = `ret-info-${Date.now()}`;
+        await s.createWorkflow({ workflowId: `${name}-p`, workflowName: name, input: {} });
+        await endRun({
+          s,
+          workflowId: `${name}-child`,
+          name,
+          end: "complete",
+          parentWorkflowId: `${name}-p`,
+        });
+        await endRun({ s, workflowId: `${name}-cancelled`, name, end: "cancel" });
+
+        const rows = await s.listRetentionCandidates({
+          completedBefore: FUTURE(),
+          limit: 10,
+          name,
+        });
+        const child = rows.find((r) => r.workflowId === `${name}-child`);
+        expect(child?.parentWorkflowId).toBe(`${name}-p`);
+        const cancelled = rows.find((r) => r.workflowId === `${name}-cancelled`);
+        expect(cancelled).toMatchObject({
+          status: "failed",
+          errorTag: "WorkflowCancelledError",
+          compensationOrigin: "cancel",
+        });
+      });
+
+      it("purgeRuns deletes a run with all its data, once, and spares runs that changed", async () => {
+        const s = await getRetentionStorage();
+        if (!s) return;
+        const name = `ret-purge-${Date.now()}`;
+        const doomed = `${name}-doomed`;
+        await s.createWorkflow({ workflowId: doomed, workflowName: name, input: {} });
+        await s.saveStepResult({
+          workflowId: doomed,
+          stepName: "step-a",
+          result: "ok",
+          durationMs: 1,
+          startedAt: new Date(),
+        });
+        await s.deliverSignal({ workflowId: doomed, signalName: "sig", payload: 1 });
+        await s.completeWorkflow({ workflowId: doomed, result: "done" });
+        await sleep(3);
+        await endRun({ s, workflowId: `${name}-stale`, name, end: "complete" });
+        await endRun({ s, workflowId: `${name}-owed`, name, end: "cancel" });
+        await s.createWorkflow({ workflowId: `${name}-live`, workflowName: name, input: {} });
+
+        const rows = await s.listRetentionCandidates({
+          completedBefore: FUTURE(),
+          limit: 10,
+          name,
+        });
+        const ref = (id: string) => {
+          const row = rows.find((r) => r.workflowId === id)!;
+          return { workflowId: id, completedAt: row.completedAt };
+        };
+        const staleRef = ref(`${name}-stale`);
+        const deleted = await s.purgeRuns({
+          runs: [
+            ref(doomed),
+            // `completedAt` no longer matches: the run ended again since it was listed.
+            { ...staleRef, completedAt: new Date(staleRef.completedAt.getTime() - 5_000) },
+            // Owes its cancel rollback, and running: never deleted whatever the ref says.
+            { workflowId: `${name}-owed`, completedAt: ref(`${name}-owed`).completedAt },
+            { workflowId: `${name}-live`, completedAt: new Date() },
+            { workflowId: `${name}-missing`, completedAt: new Date() },
+          ],
+        });
+        expect(deleted).toEqual([doomed]);
+        expect(await s.loadWorkflow(doomed)).toBeNull();
+        expect(await s.loadSignals(doomed)).toEqual([]);
+        expect(await s.loadRunHistory({ workflowId: doomed })).toEqual([]);
+        for (const id of ["stale", "owed", "live"]) {
+          expect(await s.loadWorkflow(`${name}-${id}`)).not.toBeNull();
+        }
+        // A second delete of the same run does nothing and does not throw.
+        expect(await s.purgeRuns({ runs: [ref(doomed)] })).toEqual([]);
+      });
+
+      it("concurrent purgeRuns of the same runs delete each run exactly once", async () => {
+        const s = await getRetentionStorage();
+        if (!s) return;
+        const name = `ret-race-${Date.now()}`;
+        for (let i = 0; i < 6; i++) {
+          await endRun({ s, workflowId: `${name}-${i}`, name, end: "complete" });
+        }
+        const rows = await s.listRetentionCandidates({
+          completedBefore: FUTURE(),
+          limit: 10,
+          name,
+        });
+        const runs = rows.map((r) => ({ workflowId: r.workflowId, completedAt: r.completedAt }));
+        const peerStorage = options.createPeer ? await options.createPeer(s) : s;
+        const peer = hasCapability(peerStorage, "retention") ? peerStorage : s;
+        const [a, b] = await Promise.all([s.purgeRuns({ runs }), peer.purgeRuns({ runs })]);
+        expect([...a, ...b].sort()).toEqual(runs.map((r) => r.workflowId).sort());
       });
     });
 

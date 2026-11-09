@@ -287,17 +287,22 @@ export class InMemoryStepQueue implements StepQueue {
     return { requeued, deadLettered };
   }
 
-  async purge(params: { completedBefore: Date }): Promise<number> {
+  async purge(params: { completedBefore: Date; limit?: number }): Promise<number> {
     const cutoff = params.completedBefore.getTime();
-    let purged = 0;
-    for (const [id, task] of this.tasks) {
-      if (task.status !== "completed" && task.status !== "failed") continue;
-      if (!task.completedAt || task.completedAt.getTime() >= cutoff) continue;
-      this.tasks.delete(id);
+    const due = [...this.tasks.values()]
+      .filter(
+        (task) =>
+          (task.status === "completed" || task.status === "failed") &&
+          task.completedAt !== undefined &&
+          task.completedAt.getTime() < cutoff,
+      )
+      .sort((a, b) => a.completedAt!.getTime() - b.completedAt!.getTime());
+    const doomed = params.limit === undefined ? due : due.slice(0, params.limit);
+    for (const task of doomed) {
+      this.tasks.delete(task.id);
       this.freeSlot(task);
-      purged++;
     }
-    return purged;
+    return doomed.length;
   }
 
   async metrics(params: { since: Date; until?: Date }): Promise<{

@@ -10,6 +10,7 @@
 import type { CompensationLedgerStore } from "./compensation-ledger-store.ts";
 import type { JournalStore } from "./journal-store.ts";
 import type { WorkflowQueryStore } from "./query-store.ts";
+import type { RetentionStore } from "./retention-store.ts";
 import type { RunEventStore } from "./run-event-store.ts";
 import type { WorkflowRunStore } from "./run-store.ts";
 import type { WorkflowScannerStore } from "./scanner-store.ts";
@@ -52,6 +53,8 @@ export interface StorageCapabilityMap {
   childEndedWaits: Required<Pick<WorkflowScannerStore, "listChildEndedWaits">>;
   /** `listUpdateWakeups`: the indexed scan for runs with an unapplied update request. */
   updateWakeups: Required<Pick<WorkflowScannerStore, "listUpdateWakeups">>;
+  /** `listRetentionCandidates` + `purgeRuns`: the `RetentionSweeper`'s primitives. */
+  retention: Required<RetentionStore>;
 }
 
 /** Name of one optional storage capability. */
@@ -87,6 +90,7 @@ const CAPABILITY_METHODS: { readonly [K in StorageCapability]: readonly string[]
   orphanedRuns: ["listOrphanedRuns"],
   childEndedWaits: ["listChildEndedWaits"],
   updateWakeups: ["listUpdateWakeups"],
+  retention: ["listRetentionCandidates", "purgeRuns"],
 };
 
 /** Every capability name, in declaration order. */

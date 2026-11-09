@@ -79,6 +79,10 @@ import type {
   SuspendWorkflowParams,
   TripwireWorkflowParams,
   TryLockParams,
+  ListRetentionCandidatesParams,
+  PurgeRunRef,
+  RetentionCandidate,
+  RetentionStatus,
 } from "@promin/workflow";
 import type {
   WorkflowState,
@@ -205,6 +209,8 @@ const MAX_SETTLE_ATTEMPTS = 3;
 const PROVISIONAL_CHILD_TTL_MS = 60 * 60 * 1_000;
 /** Ids per HMGET when reading index records. */
 const RECORD_CHUNK = 2_000;
+const RETENTION_STATUSES: readonly RetentionStatus[] = ["completed", "failed", "tripwire"];
+
 /** Workflows purged concurrently. */
 const PURGE_CONCURRENCY = 16;
 
@@ -2471,8 +2477,123 @@ export class RedisWorkflowStorage
     return found;
   }
 
-  /** Delete one finished workflow and its index entries. True when it was purged. */
-  private async purgeWorkflow(workflowId: string): Promise<boolean> {
+  async listRetentionCandidates(
+    params: ListRetentionCandidatesParams,
+  ): Promise<RetentionCandidate[]> {
+    const statuses = new Set<string>(params.statuses ?? RETENTION_STATUSES);
+    const after = params.after;
+    const afterMs = after?.completedAt.getTime();
+    const found: RetentionCandidate[] = [];
+    const page = Math.max(params.limit, PURGE_SCAN_PAGE);
+    // The index orders ended runs by (completedAt ms, id): the keyset order.
+    for (let offset = 0; found.length < params.limit; offset += page) {
+      const flat = await this.redis.zrangebyscore(
+        this.keys.byCompleted,
+        afterMs ?? "-inf",
+        `(${params.completedBefore.getTime()}`,
+        "WITHSCORES",
+        "LIMIT",
+        offset,
+        page,
+      );
+      const ids: string[] = [];
+      for (let i = 0; i < flat.length; i += 2) {
+        const id = flat[i]!;
+        if (after !== undefined && Number(flat[i + 1]) === afterMs && id <= after.workflowId) {
+          continue;
+        }
+        ids.push(id);
+      }
+      const rows = await Promise.all(ids.map((id) => this.retentionRow(id)));
+      for (const row of rows) {
+        if (found.length >= params.limit) break;
+        if (row === null || !statuses.has(row.status)) continue;
+        if (params.name !== undefined && row.workflowName !== params.name) continue;
+        if (this.namespace !== null && row.namespace !== this.namespace) continue;
+        found.push(row.candidate);
+      }
+      if (flat.length / 2 < page) break;
+    }
+    return found;
+  }
+
+  /** The run behind an index entry, read from its hash; null (and the entry repaired) when it is not an ended run. */
+  private async retentionRow(workflowId: string): Promise<{
+    candidate: RetentionCandidate;
+    status: RetentionStatus;
+    workflowName: string;
+    namespace: string | undefined;
+  } | null> {
+    const [status, name, parentId, ns, completedAt, errorTag, origin] = await this.hmget(
+      this.keys.wf(workflowId),
+      [
+        "status",
+        "workflowName",
+        "parentWorkflowId",
+        "namespace",
+        "completedAt",
+        "errorTag",
+        "compensationOrigin",
+      ],
+    );
+    if (name === null || name === undefined) {
+      await this.unindexMissing(workflowId);
+      return null;
+    }
+    if ((status !== "completed" && status !== "failed" && status !== "tripwire") || !completedAt) {
+      await this.repairIndex(workflowId);
+      return null;
+    }
+    return {
+      status,
+      workflowName: name,
+      namespace: ns || undefined,
+      candidate: {
+        workflowId,
+        workflowName: name,
+        status,
+        ...(errorTag ? { errorTag } : {}),
+        ...(parentId ? { parentWorkflowId: parentId } : {}),
+        ...(origin ? { compensationOrigin: origin as CompensationOrigin } : {}),
+        completedAt: this.parseDate(completedAt),
+      },
+    };
+  }
+
+  async purgeRuns(params: { readonly runs: readonly PurgeRunRef[] }): Promise<string[]> {
+    const deleted: string[] = [];
+    const runs = this.namespace === null ? params.runs : await this.inNamespace(params.runs);
+    for (let i = 0; i < runs.length; i += PURGE_CONCURRENCY) {
+      const chunk = runs.slice(i, i + PURGE_CONCURRENCY);
+      const outcomes = await Promise.all(
+        chunk.map((run) =>
+          this.purgeWorkflow(run.workflowId, { completedAt: this.serializeDate(run.completedAt) }),
+        ),
+      );
+      chunk.forEach((run, j) => {
+        if (outcomes[j]) deleted.push(run.workflowId);
+      });
+    }
+    return deleted;
+  }
+
+  /** The runs of this storage's namespace. */
+  private async inNamespace(runs: readonly PurgeRunRef[]): Promise<PurgeRunRef[]> {
+    const namespaces = await Promise.all(
+      runs.map((run) => this.redis.hget(this.keys.wf(run.workflowId), "namespace")),
+    );
+    return runs.filter((_, i) => namespaces[i] === this.namespace);
+  }
+
+  /**
+   * Delete one finished workflow and its index entries. True when it was
+   * purged. With `guard`, the run is deleted only if it still completed at
+   * `guard.completedAt` and owes no cancel rollback (checked in the script).
+   */
+  private async purgeWorkflow(
+    workflowId: string,
+    guard?: { readonly completedAt: string },
+  ): Promise<boolean> {
     const wfKey = this.keys.wf(workflowId);
     const reply = (await this.redis.eval(
       PURGE_WORKFLOW_LUA,
@@ -2480,6 +2601,7 @@ export class RedisWorkflowStorage
       wfKey,
       wfKey,
       TERMINAL_STATUSES_CSV,
+      guard?.completedAt ?? "",
     )) as [number, ...unknown[]];
     const outcome = Number(reply[0]);
     if (outcome === 0) {

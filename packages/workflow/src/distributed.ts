@@ -44,6 +44,7 @@ export {
   type DistributedWorkflowRunner,
   createDistributedWorkflowRunner,
   type DistributedRunnerConfig,
+  type DistributedRetentionConfig,
   type DistributedRunnerErrorEvent,
   buildStubWorkflow,
 } from "./lib/distributed/coordinator.ts";

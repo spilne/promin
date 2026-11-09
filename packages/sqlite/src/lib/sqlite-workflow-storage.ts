@@ -68,6 +68,10 @@ import type {
   StartFreshRunParams,
   SuspendWorkflowParams,
   TryLockParams,
+  ListRetentionCandidatesParams,
+  PurgeRunRef,
+  RetentionCandidate,
+  RetentionStatus,
 } from "@promin/workflow";
 import type {
   JournalStore,
@@ -88,6 +92,8 @@ import {
   sameStoredValue,
 } from "@promin/workflow/storage-kit";
 import type { SqliteDatabase } from "./sqlite-database.ts";
+
+const RETENTION_STATUSES: readonly RetentionStatus[] = ["completed", "failed", "tripwire"];
 
 /**
  * Persistent workflow storage backed by SQLite.
@@ -227,6 +233,10 @@ export class SqliteWorkflowStorage
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_started_at ON ${t} (started_at DESC)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_created_at ON ${t} (created_at DESC)`);
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_completed_at ON ${t} (completed_at DESC)`);
+    // The retention sweep pages ended runs oldest first by (completed_at, workflow_id).
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_retention ON ${t} (completed_at, workflow_id) WHERE status IN ('completed', 'failed', 'tripwire')`,
+    );
     // Covers SELECT DISTINCT workflow_name ORDER BY workflow_name
     this.db.run(`CREATE INDEX IF NOT EXISTS ${t}_name ON ${t} (workflow_name)`);
     // The dashboard scopes run pages and its name/type pickers to a
@@ -2029,19 +2039,94 @@ export class SqliteWorkflowStorage
         )
         .all(fromMs, toMs, params.limit);
 
-      for (const { workflow_id } of ids) {
-        this.db.query(`DELETE FROM ${this._t} WHERE workflow_id = ?`).run(workflow_id);
-        this.db.query(`DELETE FROM ${this._t}_signals WHERE workflow_id = ?`).run(workflow_id);
-        this.db.query(`DELETE FROM ${this._t}_locks WHERE workflow_id = ?`).run(workflow_id);
-        this.db.query(`DELETE FROM ${this._t}_runs WHERE workflow_id = ?`).run(workflow_id);
-        this.db.query(`DELETE FROM ${this._t}_journal WHERE workflow_id = ?`).run(workflow_id);
-        this.db.query(`DELETE FROM ${this._t}_attempts WHERE workflow_id = ?`).run(workflow_id);
-        this.db
-          .query(`DELETE FROM ${this._t}_signal_tokens WHERE workflow_id = ?`)
-          .run(workflow_id);
-        this.db.query(`DELETE FROM ${this._t}_streams WHERE workflow_id = ?`).run(workflow_id);
-      }
+      for (const { workflow_id } of ids) this._deleteRunRows(workflow_id);
       return ids.length;
+    })();
+  }
+
+  /** Delete a run's row and every table row stored for it. */
+  private _deleteRunRows(workflowId: string): void {
+    const t = this._t;
+    this.db.query(`DELETE FROM ${t} WHERE workflow_id = ?`).run(workflowId);
+    this.db.query(`DELETE FROM ${t}_signals WHERE workflow_id = ?`).run(workflowId);
+    this.db.query(`DELETE FROM ${t}_locks WHERE workflow_id = ?`).run(workflowId);
+    this.db.query(`DELETE FROM ${t}_runs WHERE workflow_id = ?`).run(workflowId);
+    this.db.query(`DELETE FROM ${t}_journal WHERE workflow_id = ?`).run(workflowId);
+    this.db.query(`DELETE FROM ${t}_attempts WHERE workflow_id = ?`).run(workflowId);
+    this.db.query(`DELETE FROM ${t}_signal_tokens WHERE workflow_id = ?`).run(workflowId);
+    this.db.query(`DELETE FROM ${t}_streams WHERE workflow_id = ?`).run(workflowId);
+  }
+
+  // ---------------------------------------------------------------------------
+  // RetentionStore
+  // ---------------------------------------------------------------------------
+
+  async listRetentionCandidates(
+    params: ListRetentionCandidatesParams,
+  ): Promise<RetentionCandidate[]> {
+    const statuses = params.statuses ?? RETENTION_STATUSES;
+    const conditions = [
+      `status IN (${statuses.map(() => "?").join(", ")})`,
+      "completed_at IS NOT NULL",
+      "completed_at < ?",
+    ];
+    const args: (string | number)[] = [...statuses, params.completedBefore.getTime()];
+    if (params.name !== undefined) {
+      conditions.push("workflow_name = ?");
+      args.push(params.name);
+    }
+    if (params.after !== undefined) {
+      const at = params.after.completedAt.getTime();
+      conditions.push("(completed_at > ? OR (completed_at = ? AND workflow_id > ?))");
+      args.push(at, at, params.after.workflowId);
+    }
+    const rows = this.db
+      .query<{
+        workflow_id: string;
+        workflow_name: string;
+        status: RetentionStatus;
+        error_tag: string | null;
+        parent_workflow_id: string | null;
+        compensation_origin: CompensationOrigin | null;
+        completed_at: number;
+      }>(
+        `SELECT workflow_id, workflow_name, status, error_tag, parent_workflow_id,
+                compensation_origin, completed_at
+         FROM ${this._t}
+         WHERE ${conditions.join(" AND ")}
+         ORDER BY completed_at ASC, workflow_id ASC
+         LIMIT ?`,
+      )
+      .all(...args, params.limit);
+    return rows.map((r) => ({
+      workflowId: r.workflow_id,
+      workflowName: r.workflow_name,
+      status: r.status,
+      ...(r.error_tag !== null && { errorTag: r.error_tag }),
+      ...(r.parent_workflow_id !== null && { parentWorkflowId: r.parent_workflow_id }),
+      ...(r.compensation_origin !== null && { compensationOrigin: r.compensation_origin }),
+      completedAt: new Date(r.completed_at),
+    }));
+  }
+
+  async purgeRuns(params: { readonly runs: readonly PurgeRunRef[] }): Promise<string[]> {
+    return this.db.transaction((): string[] => {
+      const deleted: string[] = [];
+      for (const ref of params.runs) {
+        // The guard is the SELECT: it and the deletes run in one transaction.
+        const row = this.db
+          .query<{ workflow_id: string }>(
+            `SELECT workflow_id FROM ${this._t}
+             WHERE workflow_id = ? AND status IN ('completed', 'failed', 'tripwire')
+               AND completed_at = ?
+               AND NOT (status = 'failed' AND compensation_origin = 'cancel')`,
+          )
+          .get(ref.workflowId, ref.completedAt.getTime());
+        if (row === null || row === undefined) continue;
+        this._deleteRunRows(ref.workflowId);
+        deleted.push(ref.workflowId);
+      }
+      return deleted;
     })();
   }
 

@@ -7,6 +7,7 @@
 //   WorkflowLockStore        run lock (lease) and its fence token
 //   WorkflowQueryStore       listing, counts, run history, retention
 //   WorkflowScannerStore     indexed scanner / recovery queries (optional)
+//   RetentionStore           keyset candidate paging + guarded delete (optional)
 //   SignalStore              signal delivery
 //   SignalTokenStore         public-bearer signal tokens
 //   StreamStore              per-workflow streams
@@ -27,11 +28,20 @@
 import type { WorkflowLockStore } from "./storage/lock-store.ts";
 import type { WorkflowQueryStore } from "./storage/query-store.ts";
 import type { RunEventStore } from "./storage/run-event-store.ts";
+import type { RetentionStore } from "./storage/retention-store.ts";
 import type { WorkflowRunStore } from "./storage/run-store.ts";
 import type { WorkflowScannerStore } from "./storage/scanner-store.ts";
 import type { SignalStore, SignalTokenStore } from "./storage/signal-store.ts";
 import type { StreamStore } from "./storage/stream-store.ts";
 
+export type {
+  RetentionStore,
+  RetentionStatus,
+  RetentionCursor,
+  RetentionCandidate,
+  ListRetentionCandidatesParams,
+  PurgeRunRef,
+} from "./storage/retention-store.ts";
 export type { FenceToken, FenceGuard, FencedWrite } from "./storage/fencing.ts";
 export type {
   WorkflowRunStore,
@@ -149,6 +159,7 @@ export interface WorkflowStorage
     WorkflowLockStore,
     WorkflowQueryStore,
     WorkflowScannerStore,
+    RetentionStore,
     SignalStore,
     SignalTokenStore,
     StreamStore,

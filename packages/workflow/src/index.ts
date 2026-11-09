@@ -127,6 +127,12 @@ export {
   type ListWorkflowsParams,
   type LoadRunHistoryParams,
   type PurgeCompletedParams,
+  type RetentionStore,
+  type RetentionStatus,
+  type RetentionCursor,
+  type RetentionCandidate,
+  type ListRetentionCandidatesParams,
+  type PurgeRunRef,
   type CancelStaleWorkflowsParams,
   type WorkflowWakeup,
   type OrphanedRun,
@@ -278,9 +284,28 @@ export {
   type WorkflowTraceCompensationStep,
   type WorkflowTraceCompensationEnd,
   type WorkflowTraceRecoveryReclaim,
+  type WorkflowTraceRetentionSweep,
   type WorkflowTraceWorkerTask,
   type WorkflowTraceWorkerTaskEnd,
 } from "./lib/durable/workflow-tracer.ts";
+
+// Retention
+export {
+  RetentionSweeper,
+  DEFAULT_RETENTION_BATCH_SIZE,
+  DEFAULT_RETENTION_BUDGET_MS,
+  DEFAULT_RETENTION_INTERVAL_MS,
+  type RetentionSweeperConfig,
+  type RetentionSweepReport,
+  type RetentionKept,
+} from "./lib/durable/retention-sweeper.ts";
+export {
+  validateRetentionPolicy,
+  retentionAgeMs,
+  type RetentionPolicy,
+  type RetentionAge,
+  type RetentionRunClass,
+} from "./lib/durable/retention-policy.ts";
 
 // Errors
 export {
