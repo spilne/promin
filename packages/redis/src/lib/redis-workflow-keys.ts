@@ -178,6 +178,11 @@ export class RedisWorkflowKeys {
     return this.idx("cancel-owed");
   }
 
+  /** Marker: the legacy cancelled runs were added to `cancelOwed` (once, lazily). */
+  get cancelOwedBackfilled(): string {
+    return this.idx("cancel-owed-backfilled");
+  }
+
   status(status: string): string {
     return this.idx(`status:${status}`);
   }

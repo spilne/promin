@@ -2108,6 +2108,7 @@ export class RedisWorkflowStorage
   }): Promise<OrphanedRun[]> {
     const nowMs = params.now.getTime();
     const beforeMs = params.updatedBefore.getTime();
+    await this.backfillCancelOwed();
     return this.scanStatusIndex<OrphanedRun>({
       statuses: ["pending", "running", "compensating"],
       extraSets: [this.keys.cancelOwed],
@@ -2156,6 +2157,36 @@ export class RedisWorkflowStorage
         };
       },
     });
+  }
+
+  /** The backfill is done in this process (the marker key says it for the keyspace). */
+  private cancelOwedBackfilled = false;
+
+  /**
+   * One-time, lazy: runs cancelled before the `cancel-owed` index existed sit
+   * in the `failed` status set with `compensationOrigin: "cancel"` and in no
+   * index a scan reads. The first orphan scan of a keyspace walks the `failed`
+   * set once (chunked reads of one hash field), adds them, then sets a marker
+   * key so no later scan, in any process, pays for it again. Every cancel made
+   * after the deploy indexes itself, so the marker never goes stale. Racing
+   * backfills are harmless (adds are idempotent).
+   */
+  private async backfillCancelOwed(): Promise<void> {
+    if (this.cancelOwedBackfilled) return;
+    if ((await this.redis.exists(this.keys.cancelOwedBackfilled)) === 0) {
+      const failed = await this.redis.smembers(this.keys.status("failed"));
+      const chunkSize = 200;
+      for (let i = 0; i < failed.length; i += chunkSize) {
+        const chunk = failed.slice(i, i + chunkSize);
+        const origins = await Promise.all(
+          chunk.map((id) => this.redis.hget(this.keys.wf(id), "compensationOrigin")),
+        );
+        const owed = chunk.filter((_, n) => origins[n] === "cancel");
+        if (owed.length > 0) await this.redis.sadd(this.keys.cancelOwed, ...owed);
+      }
+      await this.redis.set(this.keys.cancelOwedBackfilled, "1");
+    }
+    this.cancelOwedBackfilled = true;
   }
 
   // -- Run history ----------------------------------------------------------
