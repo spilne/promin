@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { postgresDescribe } from "../test-utils.ts";
 import { migrate } from "../migrate.ts";
+import { PgStepQueue } from "../pg-step-queue.ts";
 import { PostgresWorkflowStorage } from "../postgres-workflow-storage.ts";
 
 // ---------------------------------------------------------------------------
@@ -14,16 +15,19 @@ import { PostgresWorkflowStorage } from "../postgres-workflow-storage.ts";
 
 const DRIZZLE = new URL("../../../drizzle", import.meta.url).pathname;
 
-/** A copy of the migrations folder holding only the baseline (the chain an old database applied). */
-function baselineOnlyFolder(): string {
+/** A copy of the migrations folder holding the first `count` migrations (the chain an old database applied). */
+function chainFolder(count: number): string {
   const dir = mkdtempSync(join(tmpdir(), "promin-pg-baseline-"));
   mkdirSync(join(dir, "meta"));
-  cpSync(join(DRIZZLE, "0000_baseline.sql"), join(dir, "0000_baseline.sql"));
   const journal = JSON.parse(readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"));
-  journal.entries = journal.entries.filter((e: { idx: number }) => e.idx === 0);
+  journal.entries = journal.entries.filter((e: { idx: number }) => e.idx < count);
+  for (const e of journal.entries) cpSync(join(DRIZZLE, `${e.tag}.sql`), join(dir, `${e.tag}.sql`));
   writeFileSync(join(dir, "meta", "_journal.json"), JSON.stringify(journal));
   return dir;
 }
+
+/** Only the baseline. */
+const baselineOnlyFolder = () => chainFolder(1);
 
 postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
   it("adds step_progress to a baseline-only database, idempotently", async () => {
@@ -70,5 +74,33 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
       at,
       run: 1,
     });
+  });
+
+  it("adds claim lanes to a database migrated through 0001, keeping its queued tasks", async () => {
+    await pg.sql`DROP SCHEMA public CASCADE`;
+    await pg.sql`CREATE SCHEMA public`;
+    await pg.sql`DROP SCHEMA IF EXISTS drizzle CASCADE`;
+    await migrate(pg.db, { migrationsFolder: chainFolder(2) });
+    const lane = async () =>
+      pg.sql`SELECT attgenerated FROM pg_attribute
+        WHERE attrelid = 'wf_step_queue'::regclass AND attname = 'lane' AND NOT attisdropped`;
+    expect((await lane()).length).toBe(0);
+    await pg.sql`INSERT INTO wf_step_queue (workflow_id, step_name, concurrency_key, concurrency_scope, concurrency_limit)
+      VALUES ('old-a', 's', 'k', 'sc', 1), ('old-b', 's', 'k', 'sc', 1), ('old-c', 's', NULL, NULL, NULL)`;
+
+    await migrate(pg.db);
+    await migrate(pg.db);
+    expect((await lane())[0]?.attgenerated).toBe("s");
+    const lanes = await pg.sql`SELECT lane, count(*)::int AS n FROM wf_step_queue GROUP BY lane`;
+    expect(lanes.length).toBe(2);
+    expect(lanes.every((l) => l.lane != null)).toBe(true);
+    const indexes = await pg.sql`SELECT indexname FROM pg_indexes
+      WHERE indexname IN ('wf_step_queue_lane_idx', 'wf_step_queue_pending_group_idx')`;
+    expect(indexes.length).toBe(2);
+
+    // Rows queued before the upgrade are claimed by the lane path, key limit honoured.
+    const queue = new PgStepQueue({ db: pg.db });
+    const claimed = await queue.claim({ workerId: "w", limit: 10 });
+    expect(claimed.map((t) => t.workflowId).sort()).toEqual(["old-a", "old-c"]);
   });
 });

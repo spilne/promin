@@ -278,6 +278,19 @@ export const workflowLocks = pgTable("wf_workflow_locks", {
   fenceToken: bigserial("fence_token", { mode: "number" }).notNull(),
 });
 
+/**
+ * SQL of `wf_step_queue.lane`: namespace, concurrency scope/key/limit and
+ * group fields and fairness key, each marked so NULL and '' differ. Tasks of
+ * one lane are indistinguishable to claim's admission checks. Keep in sync
+ * with `drizzle/0002_claim_lanes.sql` (the drift test compares the shape).
+ */
+export const STEP_QUEUE_LANE_SQL =
+  `coalesce('=' || namespace, '~') || chr(31) || coalesce('=' || concurrency_scope, '~') || chr(31) || ` +
+  `coalesce('=' || concurrency_key, '~') || chr(31) || coalesce('=' || concurrency_limit::text, '~') || chr(31) || ` +
+  `coalesce('=' || group_name, '~') || chr(31) || coalesce('=' || group_max_concurrent::text, '~') || chr(31) || ` +
+  `coalesce('=' || group_max_starts::text, '~') || chr(31) || coalesce('=' || group_window_ms::text, '~') || chr(31) || ` +
+  `coalesce('=' || fairness_key, '~')`;
+
 export const stepQueue = pgTable(
   "wf_step_queue",
   {
@@ -344,6 +357,9 @@ export const stepQueue = pgTable(
     groupMaxStarts: integer("group_max_starts"),
     groupWindowMs: integer("group_window_ms"),
     fairnessKey: text("fairness_key"),
+    // The columns claim's admission pre-checks and fair ranking read, joined
+    // (see STEP_QUEUE_LANE_SQL). Generated, so every writer keeps it current.
+    lane: text("lane").generatedAlwaysAs(sql.raw(STEP_QUEUE_LANE_SQL)),
   },
   (t) => [
     index("wf_step_queue_dequeue_idx").on(t.status, t.priority, t.createdAt),
@@ -374,6 +390,15 @@ export const stepQueue = pgTable(
     index("wf_step_queue_pending_order_idx")
       .on(t.priority.desc(), t.createdAt.asc(), t.id.asc())
       .where(sql`${t.status} = 'pending'`),
+    // Claim's lane probe: the pending rows of one lane in claim order, and
+    // the distinct lanes by a skip scan over the leading column.
+    index("wf_step_queue_lane_idx")
+      .on(t.lane, t.priority.desc(), t.createdAt.asc(), t.id.asc())
+      .where(sql`${t.status} = 'pending'`),
+    // "Is any pending task in a group?" without walking the pending rows.
+    index("wf_step_queue_pending_group_idx")
+      .on(t.groupName)
+      .where(sql`${t.status} = 'pending' AND ${t.groupName} IS NOT NULL`),
     // requeueStuck({ mode: "worker" }) — a dead worker's running tasks.
     index("wf_step_queue_running_claimed_by_idx")
       .on(t.claimedBy)

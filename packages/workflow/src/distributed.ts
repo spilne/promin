@@ -133,6 +133,14 @@ export {
   type InMemoryWorkflowStartQueueConfig,
 } from "./lib/distributed/workflow-start-queue.ts";
 export {
+  InMemoryWakeups,
+  NoWakeups,
+  notifyQuietly,
+  type WakeHandler,
+  type WakeTopic,
+  type Wakeups,
+} from "./lib/shared/wakeups.ts";
+export {
   PollLoop,
   type PollLoopConfig,
   type PollLoopErrorInfo,

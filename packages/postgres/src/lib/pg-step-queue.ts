@@ -9,6 +9,7 @@
 
 import { eq, and, sql, type SQL } from "drizzle-orm";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
+import { notifyQuietly, type Wakeups } from "@promin/workflow/distributed";
 import {
   DEFAULT_MAX_DELIVERIES,
   type StepQueue,
@@ -28,7 +29,7 @@ import { deadLetterError, isStepGroupTask, StepGroupLedger } from "@promin/workf
 import { type DrizzleDb, ensureTable as ensureTableFromSchema } from "@spilne/perfect-postgres";
 import { execRaw } from "./exec-raw.ts";
 import { assertPgLeaseCurrent } from "./pg-leader-lease-store.ts";
-import { stepQueue } from "./schema.ts";
+import { STEP_QUEUE_LANE_SQL, stepQueue } from "./schema.ts";
 
 /**
  * Render a JS string[] as a Postgres `text[]` literal:
@@ -81,6 +82,21 @@ export interface PgStepQueueConfig {
    * skew can't drop just-stamped rows from the window.
    */
   clock?: WallClock;
+  /**
+   * How `claim` finds candidates. `"lanes"` (default) probes each concurrency
+   * or group lane's head, so a deep throttled backlog costs nothing; `"scan"`
+   * is the original index-ordered scan with per-row admission pre-checks
+   * (kept as the reference the lane path is tested against).
+   */
+  claimStrategy?: "lanes" | "scan";
+  /**
+   * Told when a task becomes claimable (`"steps"`: enqueue, release, requeue,
+   * and a settle that frees a concurrency or group slot) and when one settles
+   * (`"results"`, keyed by task id), so workers and waiting coordinators can
+   * skip the rest of their poll interval. A latency hint sent after the
+   * statement commits; polling stays the correctness path.
+   */
+  wakeups?: Wakeups;
 }
 
 type Row = Record<string, any>;
@@ -90,12 +106,16 @@ export class PgStepQueue implements StepQueue {
   private readonly namespace: string | null;
   private readonly maxDeliveries: number;
   private readonly clock: WallClock;
+  private readonly claimStrategy: "lanes" | "scan";
+  private readonly wakeups: Wakeups | undefined;
 
   constructor(config: PgStepQueueConfig) {
     this.db = config.db;
     this.namespace = config.namespace ?? null;
     this.maxDeliveries = config.maxDeliveries ?? DEFAULT_MAX_DELIVERIES;
     this.clock = config.clock ?? SystemWallClock;
+    this.claimStrategy = config.claimStrategy ?? "lanes";
+    this.wakeups = config.wakeups;
   }
 
   /**
@@ -166,6 +186,7 @@ export class PgStepQueue implements StepQueue {
     if (id === undefined) {
       throw new Error("PgStepQueue.enqueue: no row returned from INSERT/UPSERT");
     }
+    notifyQuietly(this.wakeups, { topic: "steps" });
     return String(id);
   }
 
@@ -198,53 +219,66 @@ export class PgStepQueue implements StepQueue {
     // Capability filter: `needs <@ caps` = "every element of needs is in
     // caps." Empty caps still matches tasks with empty needs (∅ ⊆ ∅).
     const capsLiteral = sql.raw(textArrayLiteral(params.capabilities ?? []));
-    const filters: SQL[] = [sql`q.status = 'pending'`, sql`q.needs <@ ${capsLiteral}`];
-    if (this.namespace) filters.push(sql`q.namespace = ${this.namespace}`);
-    if (params.stepNames !== undefined) {
-      filters.push(sql`q.step_name = ANY(${sql.raw(textArrayLiteral(params.stepNames))})`);
-    }
-    if (params.versions !== undefined) {
-      filters.push(
-        sql`(q.version IS NULL OR q.version = ANY(${sql.raw(textArrayLiteral(params.versions))}))`,
-      );
-    }
-    // Snapshot pre-check: skip keys that are already full. Only an
-    // optimisation — the locked recount below is what enforces the cap.
-    filters.push(sql`(
-      q.concurrency_limit IS NULL OR q.concurrency_key IS NULL OR q.concurrency_scope IS NULL
+    const now = this.clock.now();
+    const claimedAt = now.toISOString();
+    // Row filters: what this worker can run. Concern one row only.
+    const rowFilters = (a: SQL): SQL[] => {
+      const f: SQL[] = [sql`${a}.status = 'pending'`, sql`${a}.needs <@ ${capsLiteral}`];
+      if (this.namespace) f.push(sql`${a}.namespace = ${this.namespace}`);
+      if (params.stepNames !== undefined) {
+        f.push(sql`${a}.step_name = ANY(${sql.raw(textArrayLiteral(params.stepNames))})`);
+      }
+      if (params.versions !== undefined) {
+        f.push(
+          sql`(${a}.version IS NULL OR ${a}.version = ANY(${sql.raw(textArrayLiteral(params.versions))}))`,
+        );
+      }
+      return f;
+    };
+    // Admission pre-checks (snapshot only: an optimisation — the locked
+    // recounts below enforce the caps). They read only a row's lane columns
+    // (namespace, concurrency key and limit, group fields), so the lane path
+    // evaluates them once per lane instead of once per backlog row.
+    //
+    // A keyed task whose key is already full is skipped up front.
+    const concurrencyPrecheck = (a: SQL): SQL => sql`(
+      ${a}.concurrency_limit IS NULL OR ${a}.concurrency_key IS NULL OR ${a}.concurrency_scope IS NULL
       OR (
         SELECT COUNT(*) FROM wf_step_queue r
         WHERE r.status = 'running'
           AND r.concurrency_key IS NOT NULL
-          AND r.concurrency_scope = q.concurrency_scope
-          AND r.concurrency_key = q.concurrency_key
-      ) < q.concurrency_limit
-    )`);
-
-    const now = this.clock.now();
-    const claimedAt = now.toISOString();
-    // Group snapshot pre-check, like the concurrency one above: a task whose
-    // group is already out of slots or starts never takes a candidate slot,
-    // so it cannot crowd out tasks behind it. The locked recount below is
-    // what enforces the limits.
-    filters.push(sql`(
-      q.group_name IS NULL OR (
-        (q.group_max_concurrent IS NULL OR (
+          AND r.concurrency_scope = ${a}.concurrency_scope
+          AND r.concurrency_key = ${a}.concurrency_key
+      ) < ${a}.concurrency_limit
+    )`;
+    // Group pre-check, likewise: a task whose group is already out of slots
+    // or starts never takes a candidate slot, so it cannot crowd out tasks
+    // behind it.
+    const groupPrecheck = (a: SQL): SQL => sql`(
+      ${a}.group_name IS NULL OR (
+        (${a}.group_max_concurrent IS NULL OR (
           SELECT COUNT(*) FROM wf_step_queue r
-          WHERE r.status = 'running' AND r.group_name = q.group_name
-        ) < q.group_max_concurrent)
-        AND (q.group_max_starts IS NULL OR q.group_window_ms IS NULL OR (
+          WHERE r.status = 'running' AND r.group_name = ${a}.group_name
+        ) < ${a}.group_max_concurrent)
+        AND (${a}.group_max_starts IS NULL OR ${a}.group_window_ms IS NULL OR (
           SELECT COUNT(*) FROM wf_step_queue r
-          WHERE r.group_name = q.group_name AND r.status <> 'pending'
-            AND r.claimed_at > ${claimedAt}::timestamptz - q.group_window_ms * interval '1 millisecond'
-        ) < q.group_max_starts)
+          WHERE r.group_name = ${a}.group_name AND r.status <> 'pending'
+            AND r.claimed_at > ${claimedAt}::timestamptz - ${a}.group_window_ms * interval '1 millisecond'
+        ) < ${a}.group_max_starts)
       )
-    )`);
-    const where = sql.join(filters, sql` AND `);
+    )`;
+    const q = sql.raw("q");
+    const where = sql.join(
+      [...rowFilters(q), concurrencyPrecheck(q), groupPrecheck(q)],
+      sql` AND `,
+    );
 
     let admittedOrder: number[] = [];
     const rows = await this.db.transaction(async (txn) => {
       const tx = txn as unknown as DrizzleDb;
+      // The claim's statements run in well under a millisecond but carry
+      // subplans the planner costs high enough to JIT-compile (~30 ms each).
+      if (this.claimStrategy === "lanes") await execRaw(tx, sql`SET LOCAL jit = off`);
 
       // Fair order is only worth its scan of every pending row when some
       // pending task is in a group; otherwise the plain index-ordered
@@ -257,55 +291,62 @@ export class PgStepQueue implements StepQueue {
           )
         ).length > 0;
 
-      // The status recheck on `q` is what makes a row another claimer took
-      // after our snapshot drop out (READ COMMITTED EvalPlanQual).
-      //
       // Fair order: within a priority, a keyed task of a group ranks at its
       // position among that `(group, fairness_key)`'s pending peers plus the
       // key's running tasks, so keys interleave round-robin and a key
-      // already using the group yields to one that is not.
-      const candidates = fair
-        ? await execRaw(
-            tx,
-            sql`
-              WITH running AS (
-                SELECT group_name, fairness_key, COUNT(*) AS n
-                FROM wf_step_queue
-                WHERE status = 'running' AND group_name IS NOT NULL AND fairness_key IS NOT NULL
-                GROUP BY group_name, fairness_key
-              ),
-              base AS (
-                SELECT q.id, q.priority, q.created_at, q.group_name,
-                  CASE WHEN q.group_name IS NOT NULL AND q.fairness_key IS NOT NULL THEN
-                    ROW_NUMBER() OVER (
-                      PARTITION BY q.group_name, q.fairness_key ORDER BY q.created_at, q.id
-                    ) - 1 + COALESCE(run.n, 0)
-                  ELSE 0 END AS fair_rank,
-                  -- Slots the task's group has left, by this snapshot.
-                  CASE WHEN q.group_name IS NULL THEN NULL ELSE LEAST(
-                    COALESCE(q.group_max_concurrent - (
-                      SELECT COUNT(*) FROM wf_step_queue r
-                      WHERE r.status = 'running' AND r.group_name = q.group_name
-                    ), 2147483647),
-                    COALESCE(q.group_max_starts - (
-                      SELECT COUNT(*) FROM wf_step_queue r
-                      WHERE r.group_name = q.group_name AND r.status <> 'pending'
-                        AND r.claimed_at > ${claimedAt}::timestamptz
-                          - q.group_window_ms * interval '1 millisecond'
-                    ), 2147483647)
-                  ) END AS avail
-                FROM wf_step_queue q
-                LEFT JOIN running run
-                  ON run.group_name = q.group_name AND run.fairness_key = q.fairness_key
-                WHERE ${where}
-              ),
-              ranked AS (
-                SELECT base.*,
-                  CASE WHEN group_name IS NULL THEN 0 ELSE ROW_NUMBER() OVER (
-                    PARTITION BY group_name ORDER BY priority DESC, fair_rank, created_at, id
-                  ) END AS group_pos
-                FROM base
-              )
+      // already using the group yields to one that is not. `source` is the
+      // pending rows to rank: all of them, or the lane heads.
+      const fairRanked = (source: SQL): SQL => sql`
+        running AS (
+          SELECT group_name, fairness_key, COUNT(*) AS n
+          FROM wf_step_queue
+          WHERE status = 'running' AND group_name IS NOT NULL AND fairness_key IS NOT NULL
+          GROUP BY group_name, fairness_key
+        ),
+        base AS (
+          SELECT q.id, q.priority, q.created_at, q.group_name,
+            CASE WHEN q.group_name IS NOT NULL AND q.fairness_key IS NOT NULL THEN
+              ROW_NUMBER() OVER (
+                PARTITION BY q.group_name, q.fairness_key ORDER BY q.created_at, q.id
+              ) - 1 + COALESCE(run.n, 0)
+            ELSE 0 END AS fair_rank,
+            -- Slots the task's group has left, by this snapshot.
+            CASE WHEN q.group_name IS NULL THEN NULL ELSE LEAST(
+              COALESCE(q.group_max_concurrent - (
+                SELECT COUNT(*) FROM wf_step_queue r
+                WHERE r.status = 'running' AND r.group_name = q.group_name
+              ), 2147483647),
+              COALESCE(q.group_max_starts - (
+                SELECT COUNT(*) FROM wf_step_queue r
+                WHERE r.group_name = q.group_name AND r.status <> 'pending'
+                  AND r.claimed_at > ${claimedAt}::timestamptz
+                    - q.group_window_ms * interval '1 millisecond'
+              ), 2147483647)
+            ) END AS avail
+          FROM ${source} q
+          LEFT JOIN running run
+            ON run.group_name = q.group_name AND run.fairness_key = q.fairness_key
+          WHERE ${where}
+        ),
+        ranked AS (
+          SELECT base.*,
+            CASE WHEN group_name IS NULL THEN 0 ELSE ROW_NUMBER() OVER (
+              PARTITION BY group_name ORDER BY priority DESC, fair_rank, created_at, id
+            ) END AS group_pos
+          FROM base
+        )`;
+
+      // The original claim: one index-ordered scan of every pending row,
+      // admission pre-checks per row. Cost grows with a throttled backlog.
+      //
+      // The status recheck on `q` is what makes a row another claimer took
+      // after our snapshot drop out (READ COMMITTED EvalPlanQual).
+      const scanCandidates = async (): Promise<Row[]> =>
+        fair
+          ? execRaw(
+              tx,
+              sql`
+              WITH ${fairRanked(sql`wf_step_queue`)}
               SELECT q.id, q.concurrency_scope, q.concurrency_key, q.concurrency_limit,
                      q.group_name, q.group_max_concurrent, q.group_max_starts,
                      q.group_window_ms, q.fairness_key
@@ -318,10 +359,10 @@ export class PgStepQueue implements StepQueue {
               LIMIT ${limit}
               FOR UPDATE OF q SKIP LOCKED
             `,
-          )
-        : await execRaw(
-            tx,
-            sql`
+            )
+          : execRaw(
+              tx,
+              sql`
               SELECT q.id, q.concurrency_scope, q.concurrency_key, q.concurrency_limit,
                      q.group_name, q.group_max_concurrent, q.group_max_starts,
                      q.group_window_ms, q.fairness_key
@@ -331,7 +372,159 @@ export class PgStepQueue implements StepQueue {
               LIMIT ${limit}
               FOR UPDATE OF q SKIP LOCKED
             `,
+            );
+
+      // Lane path. A lane is the set of pending rows sharing every column the
+      // pre-checks and fair ranking read (`lane`, a generated column). Rows of
+      // one lane are admitted or throttled together, and only its first
+      // `wide` rows by claim order can be among the next claimed, so a lane
+      // costs one pre-check plus a bounded index range, never its depth.
+      //
+      // The lane values go into the probe as parameters (one subquery per
+      // lane) rather than a lateral join over them: with the value known the
+      // planner uses the lane index even for a lane that holds nearly the
+      // whole table, where a lateral falls back to scanning the global order.
+      const LANES_PER_PROBE = 64;
+      const laneHeadIds = async (p: { wide: number; skip: number[] }): Promise<number[]> => {
+        const skipLiteral = sql.raw(`'{${p.skip.join(",")}}'::bigint[]`);
+        // Every lane with pending rows, by a skip scan of the lane index that
+        // carries each lane's first row; keep the lanes that pass the
+        // admission pre-checks.
+        const l = sql.raw("l");
+        const laneRows = await execRaw(
+          tx,
+          sql`
+            WITH RECURSIVE lanes AS (
+              (SELECT n.lane, n.namespace, n.concurrency_scope, n.concurrency_key, n.concurrency_limit,
+                      n.group_name, n.group_max_concurrent, n.group_max_starts, n.group_window_ms
+               FROM wf_step_queue n WHERE n.status = 'pending' ORDER BY n.lane LIMIT 1)
+              UNION ALL
+              SELECT n.lane, n.namespace, n.concurrency_scope, n.concurrency_key, n.concurrency_limit,
+                     n.group_name, n.group_max_concurrent, n.group_max_starts, n.group_window_ms
+              FROM lanes l CROSS JOIN LATERAL (
+                SELECT x.* FROM wf_step_queue x
+                WHERE x.status = 'pending' AND x.lane > l.lane ORDER BY x.lane LIMIT 1
+              ) n
+            )
+            SELECT l.lane FROM lanes l
+            WHERE ${sql.join(
+              [
+                ...(this.namespace ? [sql`l.namespace = ${this.namespace}`] : []),
+                concurrencyPrecheck(l),
+                groupPrecheck(l),
+              ],
+              sql` AND `,
+            )}
+          `,
+        );
+        const ids: number[] = [];
+        for (let i = 0; i < laneRows.length; i += LANES_PER_PROBE) {
+          const probes = laneRows.slice(i, i + LANES_PER_PROBE).map(
+            (r) => sql`(
+              SELECT h.id FROM wf_step_queue h
+              WHERE h.lane = ${String(r.lane)} AND ${sql.join(rowFilters(sql.raw("h")), sql` AND `)}
+                AND h.id <> ALL(${skipLiteral})
+              ORDER BY h.priority DESC, h.created_at ASC, h.id ASC
+              LIMIT ${p.wide}
+            )`,
           );
+          const rows = await execRaw(tx, sql.join(probes, sql` UNION ALL `));
+          for (const r of rows) ids.push(Number(r.id));
+        }
+        return ids;
+      };
+
+      // Eligible ids in claim order (a superset of the next `need`, to
+      // survive rows other claimers lock meanwhile); the locking step takes
+      // the first unlocked ones.
+      const candidateIds = async (p: { need: number; wide: number; skip: number[] }) => {
+        const skipLiteral = sql.raw(`'{${p.skip.join(",")}}'::bigint[]`);
+        const rank = async (ids: number[]): Promise<number[]> => {
+          if (ids.length === 0) return [];
+          const source = sql`(SELECT * FROM wf_step_queue WHERE id = ANY(${sql.raw(`'{${ids.join(",")}}'::bigint[]`)}))`;
+          const rows = fair
+            ? await execRaw(
+                tx,
+                sql`
+                  WITH ${fairRanked(source)}
+                  SELECT ranked.id FROM ranked
+                  WHERE ranked.group_pos <= COALESCE(ranked.avail, 2147483647)
+                  ORDER BY ranked.priority DESC, ranked.fair_rank ASC, ranked.created_at ASC, ranked.id ASC
+                  LIMIT ${p.wide}
+                `,
+              )
+            : await execRaw(
+                tx,
+                sql`
+                  SELECT q.id FROM ${source} q
+                  ORDER BY q.priority DESC, q.created_at ASC, q.id ASC
+                  LIMIT ${p.wide}
+                `,
+              );
+          return rows.map((r) => Number(r.id));
+        };
+        if (fair) return rank(await laneHeadIds(p));
+        // Plain order: the head of the global index answers in one cheap
+        // range when it holds enough eligible rows (or all of them); only a
+        // head clogged by throttled rows falls through to the lane probe.
+        const window = Math.max(256, p.wide * 8);
+        const head = await execRaw(
+          tx,
+          sql`
+            WITH w AS MATERIALIZED (
+              SELECT * FROM wf_step_queue
+              WHERE status = 'pending' AND id <> ALL(${skipLiteral})
+              ORDER BY priority DESC, created_at ASC, id ASC
+              LIMIT ${window}
+            )
+            SELECT s.n, f.id FROM (SELECT COUNT(*) AS n FROM w) s
+            LEFT JOIN LATERAL (
+              SELECT q.id FROM w q
+              WHERE ${where}
+              ORDER BY q.priority DESC, q.created_at ASC, q.id ASC
+              LIMIT ${p.wide}
+            ) f ON true
+          `,
+        );
+        const found = head.filter((r) => r.id != null).map((r) => Number(r.id));
+        if (found.length >= p.need || Number(head[0]?.n ?? 0) < window) return found;
+        return rank(await laneHeadIds(p));
+      };
+
+      const laneCandidates = async (): Promise<Row[]> => {
+        const collected: Row[] = [];
+        const seen: number[] = [];
+        for (let round = 0; round < 3 && collected.length < limit; round++) {
+          const need = limit - collected.length;
+          const wide = need * 2 + 8;
+          const ids = await candidateIds({ need, wide, skip: seen });
+          if (ids.length === 0) break;
+          const idsLiteral = sql.raw(`'{${ids.join(",")}}'::bigint[]`);
+          // Re-checks status after the lock, like the scan: a row another
+          // claimer took in between drops out.
+          const locked = await execRaw(
+            tx,
+            sql`
+              SELECT q.id, q.concurrency_scope, q.concurrency_key, q.concurrency_limit,
+                     q.group_name, q.group_max_concurrent, q.group_max_starts,
+                     q.group_window_ms, q.fairness_key
+              FROM wf_step_queue q
+              WHERE q.id = ANY(${idsLiteral}) AND q.status = 'pending'
+              ORDER BY array_position(${idsLiteral}, q.id)
+              LIMIT ${need}
+              FOR UPDATE OF q SKIP LOCKED
+            `,
+          );
+          collected.push(...locked);
+          seen.push(...ids);
+          // Fewer ids than asked for and none lost to another claimer: all found.
+          if (ids.length < wide && locked.length === Math.min(ids.length, need)) break;
+        }
+        return collected;
+      };
+
+      const candidates =
+        this.claimStrategy === "scan" ? await scanCandidates() : await laneCandidates();
       if (candidates.length === 0) return [];
 
       const keyOf = (c: Row): string | undefined =>
@@ -506,6 +699,7 @@ export class PgStepQueue implements StepQueue {
         RETURNING id
       `,
     );
+    if (rows.length > 0) notifyQuietly(this.wakeups, { topic: "steps" });
     return rows.length > 0;
   }
 
@@ -538,6 +732,7 @@ export class PgStepQueue implements StepQueue {
         ),
       )
       .returning({ id: stepQueue.id });
+    if (rows.length > 0) this.notifySettled(params.taskId);
     return rows.length > 0;
   }
 
@@ -561,7 +756,14 @@ export class PgStepQueue implements StepQueue {
         ),
       )
       .returning({ id: stepQueue.id });
+    if (rows.length > 0) this.notifySettled(params.taskId);
     return rows.length > 0;
+  }
+
+  private notifySettled(taskId: string): void {
+    notifyQuietly(this.wakeups, { topic: "results", key: taskId });
+    // A settle frees a concurrency or group slot a throttled task waits for.
+    notifyQuietly(this.wakeups, { topic: "steps" });
   }
 
   async heartbeat(params: StepQueueHeartbeatParams): Promise<boolean> {
@@ -628,6 +830,7 @@ export class PgStepQueue implements StepQueue {
       : await execRaw(this.db, update);
     let deadLettered = 0;
     for (const r of rows) if (r.status === "failed") deadLettered++;
+    if (rows.length - deadLettered > 0) notifyQuietly(this.wakeups, { topic: "steps" });
     return { requeued: rows.length - deadLettered, deadLettered };
   }
 
@@ -792,7 +995,34 @@ export class PgStepQueue implements StepQueue {
         sql.raw(`ALTER TABLE IF EXISTS wf_step_queue ADD COLUMN IF NOT EXISTS ${column} ${type}`),
       );
     }
+    // A table from before claim lanes lacks the generated `lane` column.
+    const addLane = sql.raw(
+      `ADD COLUMN IF NOT EXISTS lane text GENERATED ALWAYS AS (${STEP_QUEUE_LANE_SQL}) STORED`,
+    );
+    await execRaw(this.db, sql`ALTER TABLE IF EXISTS wf_step_queue ${addLane}`);
     await ensureTableFromSchema(this.db, stepQueue);
+    // A table created just now got `lane` as a plain column (the generic
+    // creator does not render generated columns): make it generated, and
+    // create the lane indexes with their real ordering.
+    const generated = await execRaw(
+      this.db,
+      sql`SELECT attgenerated FROM pg_attribute
+          WHERE attrelid = 'wf_step_queue'::regclass AND attname = 'lane' AND NOT attisdropped`,
+    );
+    if (generated[0]?.attgenerated !== "s") {
+      await execRaw(this.db, sql`ALTER TABLE wf_step_queue DROP COLUMN lane`);
+      await execRaw(this.db, sql`ALTER TABLE wf_step_queue ${addLane}`);
+    }
+    await execRaw(
+      this.db,
+      sql`CREATE INDEX IF NOT EXISTS wf_step_queue_lane_idx
+          ON wf_step_queue (lane, priority DESC, created_at, id) WHERE status = 'pending'`,
+    );
+    await execRaw(
+      this.db,
+      sql`CREATE INDEX IF NOT EXISTS wf_step_queue_pending_group_idx
+          ON wf_step_queue (group_name) WHERE status = 'pending' AND group_name IS NOT NULL`,
+    );
   }
 }
 

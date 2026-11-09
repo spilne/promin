@@ -19,6 +19,7 @@ import {
 } from "./step-queue.ts";
 import { claimOrder, GroupLedger, inGroup, type ThrottledTask } from "./step-group-limits.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
+import { notifyQuietly, type Wakeups } from "../shared/wakeups.ts";
 import type { InMemoryLeaderLeases } from "../scheduler/leader-lease.ts";
 
 type MutableTask = {
@@ -42,6 +43,12 @@ export interface InMemoryStepQueueConfig {
    * still current here. Without it the `lease` param is ignored.
    */
   leaderLeases?: InMemoryLeaderLeases;
+  /**
+   * Told when a task becomes claimable (`"steps"`) or settles (`"results"`,
+   * keyed by task id), so workers and waiting coordinators can skip the rest
+   * of their poll interval. A hint only: polling still finds everything.
+   */
+  wakeups?: Wakeups;
 }
 
 export class InMemoryStepQueue implements StepQueue {
@@ -57,11 +64,13 @@ export class InMemoryStepQueue implements StepQueue {
   private readonly clock: WallClock;
   private readonly maxDeliveries: number;
   private readonly leaderLeases: InMemoryLeaderLeases | undefined;
+  private readonly wakeups: Wakeups | undefined;
 
   constructor(config?: InMemoryStepQueueConfig) {
     this.clock = config?.clock ?? SystemWallClock;
     this.maxDeliveries = config?.maxDeliveries ?? DEFAULT_MAX_DELIVERIES;
     this.leaderLeases = config?.leaderLeases;
+    this.wakeups = config?.wakeups;
   }
 
   private activeKey(workflowId: string, stepName: string): string {
@@ -102,6 +111,7 @@ export class InMemoryStepQueue implements StepQueue {
       fairnessKey: params.fairnessKey,
     });
     this.activeByKey.set(key, id);
+    notifyQuietly(this.wakeups, { topic: "steps" });
     return id;
   }
 
@@ -212,6 +222,7 @@ export class InMemoryStepQueue implements StepQueue {
     if (!this.isCurrentClaim(task, params.claimToken)) return false;
     this.backToPending(task);
     task.deliveries = Math.max(0, task.deliveries - 1);
+    notifyQuietly(this.wakeups, { topic: "steps" });
     return true;
   }
 
@@ -230,6 +241,7 @@ export class InMemoryStepQueue implements StepQueue {
     task.stepMetadata = params.stepMetadata;
     task.durationMs = params.durationMs;
     task.completedAt = this.clock.now();
+    notifyQuietly(this.wakeups, { topic: "results", key: params.taskId });
     return true;
   }
 
@@ -252,6 +264,7 @@ export class InMemoryStepQueue implements StepQueue {
     task.stepMetadata = params.stepMetadata;
     task.durationMs = params.durationMs;
     task.completedAt = this.clock.now();
+    notifyQuietly(this.wakeups, { topic: "results", key: params.taskId });
     return true;
   }
 
@@ -279,11 +292,13 @@ export class InMemoryStepQueue implements StepQueue {
         task.completedAt = this.clock.now();
         task.claimToken = undefined;
         deadLettered++;
+        notifyQuietly(this.wakeups, { topic: "results", key: task.id });
       } else {
         this.backToPending(task);
         requeued++;
       }
     }
+    if (requeued > 0) notifyQuietly(this.wakeups, { topic: "steps" });
     return { requeued, deadLettered };
   }
 
