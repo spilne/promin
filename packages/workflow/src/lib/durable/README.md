@@ -423,8 +423,9 @@ are advisory: written in
 the background (a failed write is dropped and never fails a step, and one is
 settled before the step's own write), kept one per step and read with the
 run, so a status call costs no extra read and stays bounded by the step count.
-Postgres keeps them in `wf_workflows.step_progress` (jsonb); SQLite adds the
-same column to a table that lacks it.
+Postgres keeps them in `wf_workflows.step_progress` (jsonb), added to an
+existing database by the incremental migration `0001_step_progress` (run by
+`migrate()`); SQLite adds the same column to a table that lacks it on open.
 A record counts only while it still describes the step: not for a settled,
 earlier-run or parked step, and a failed or parked step shows it only when it
 is newer than the failure or the park (a workflow retry, a re-execution after a

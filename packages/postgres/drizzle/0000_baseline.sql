@@ -709,7 +709,6 @@ CREATE TABLE wf_workflows (
   run_source_id text,
   error_tag text,
   compensation_origin text,
-  step_progress jsonb,
   CONSTRAINT wf_workflows_pkey PRIMARY KEY (workflow_id)
 );
 

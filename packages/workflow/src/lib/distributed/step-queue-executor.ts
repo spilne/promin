@@ -349,7 +349,7 @@ export class StepQueueExecutor implements StepExecutor {
     const deadline = this.clock.currentTimeMs() + this.stepWaitTimeoutMs;
     const requeueEveryNPolls = Math.max(1, Math.ceil(this.staleTimeoutMs / this.pollIntervalMs));
     let polls = -1;
-    let reportedRunning = false;
+    let reportedClaim: string | undefined;
     let outcome: AttemptOutcome | undefined;
     // The throttle episode being reported to the tracer, if any.
     let throttle:
@@ -440,8 +440,10 @@ export class StepQueueExecutor implements StepExecutor {
         }
 
         // A worker has claimed the task: the attempt is running, on its worker.
-        if (task?.status === "running" && !reportedRunning) {
-          reportedRunning = true;
+        // A task put back and claimed again reports again, for its new holder.
+        const claim = `${task?.claimedBy ?? ""}@${task?.claimedAt?.getTime() ?? ""}`;
+        if (task?.status === "running" && claim !== reportedClaim) {
+          reportedClaim = claim;
           req.progress?.({
             phase: "running",
             attempt: task.attempt,
