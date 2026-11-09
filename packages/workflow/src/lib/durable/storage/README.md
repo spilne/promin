@@ -96,8 +96,13 @@ console.log(storageCapabilities(storage)); // { journal: true, stepAttempts: tru
 
 Every backend with `stepAttempts` writes one attempt row per step attempt,
 whether the step ran inline or on a worker (the runner writes them, with the
-worker's id as `executorId` for a queued attempt). Without a scanner capability the scanners and recovery fall back to paging
-`listWorkflows`; without `countWorkflows` callers count listed rows.
+worker's id as `executorId` for a queued attempt). Every scanner query pages by `workflowId` with `limit` and a keyset
+`afterWorkflowId` cursor (never an offset), and each backend answers a page from an index that walks ids in order and stops
+at the limit (Postgres: partial `(workflow_id, step_name, …)` indexes from `0002_timer_scan_indexes.sql`; SQLite: the
+partial `suspended` index; Redis: score-0 sorted sets read with `ZRANGEBYLEX`), so a page costs its own rows however many
+runs are suspended. Without a scanner capability the scanners and recovery fall back to paging
+`listWorkflows` (offset paging by creation time, collected before anything is resumed: for storages that lack the
+capabilities only); without `countWorkflows` callers count listed rows.
 
 ## Fencing
 

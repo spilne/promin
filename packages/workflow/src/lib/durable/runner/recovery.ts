@@ -178,11 +178,15 @@ interface ResumeCandidate {
  *   terminate leaves a row listed cannot loop it forever).
  * - Resume candidates come from `listOrphanedRuns` (keyset-paginated on
  *   `workflowId`, so runs changing status meanwhile never shift a page),
- *   or, without it, from a snapshot of every listing page taken before the
+ *   read one page at a time: the next page is read once the pool has room
+ *   for it, so a backlog of any size is never held in memory. Without it,
+ *   candidates come from a snapshot of every listing page taken before the
  *   first run is resumed.
  * - At most `resumeRecent({ concurrent })` resumed runs are in flight at
- *   once. The result comes back once every run is accepted; its
- *   `settled` resolves when they have all finished.
+ *   once. The result comes back once every run is accepted (a backlog
+ *   larger than the pool therefore waits for earlier runs to finish before
+ *   the later ones are accepted); its `settled` resolves when they have all
+ *   finished.
  */
 export async function recoverWorkflows(params: {
   strategy: RecoveryStrategy;
@@ -215,25 +219,30 @@ export async function recoverWorkflows(params: {
     );
   }
 
-  const candidates = await listResumeCandidates({ storage, clock });
   const pool = createRunPool(Math.max(1, opts.resumeConcurrency));
-  for (const run of candidates) {
-    const def = await registry.resolve({ name: run.workflowName, version: run.version });
-    if (!def) {
-      skipped.push({
-        workflowId: run.workflowId,
-        name: run.workflowName,
-        reason:
-          `No definition found for "${run.workflowName}"` +
-          (run.version ? ` v${run.version}` : "") +
-          " in registry",
-      });
-      continue;
+  for await (const page of resumeCandidatePages({ storage, clock })) {
+    // Backpressure: the next page is read only once the previous one has
+    // drained to the pool's width, so a backlog of any size never sits in
+    // memory or in the pool's queue all at once.
+    await pool.whenBelow(Math.max(1, opts.resumeConcurrency));
+    for (const run of page) {
+      const def = await registry.resolve({ name: run.workflowName, version: run.version });
+      if (!def) {
+        skipped.push({
+          workflowId: run.workflowId,
+          name: run.workflowName,
+          reason:
+            `No definition found for "${run.workflowName}"` +
+            (run.version ? ` v${run.version}` : "") +
+            " in registry",
+        });
+        continue;
+      }
+      resumed++;
+      pool.submit(() =>
+        params.resume({ workflow: def, workflowId: run.workflowId, input: run.input }),
+      );
     }
-    resumed++;
-    pool.submit(() =>
-      params.resume({ workflow: def, workflowId: run.workflowId, input: run.input }),
-    );
   }
   return { terminated, resumed, skipped, settled: pool.drained() };
 }
@@ -322,16 +331,17 @@ async function terminateStaleRuns(params: {
 }
 
 /**
- * Every run `resumeRecent` should resume, listed in full before any is
- * resumed: `listOrphanedRuns` (runs without a live lock, keyset-paged),
- * else every pending / running / compensating row from `listWorkflows`.
+ * The runs `resumeRecent` should resume, one page at a time: with
+ * `listOrphanedRuns`, keyset pages (runs without a live lock, ordered by
+ * `workflowId`, so resumes changing statuses meanwhile never shift a later
+ * page and nothing is read twice or skipped); otherwise one snapshot of
+ * every pending / running / compensating row from `listWorkflows`.
  */
-async function listResumeCandidates(params: {
+async function* resumeCandidatePages(params: {
   storage: WorkflowStorage;
   clock: WallClock;
-}): Promise<ResumeCandidate[]> {
+}): AsyncGenerator<ResumeCandidate[]> {
   const { storage, clock } = params;
-  const out: ResumeCandidate[] = [];
   if (hasCapability(storage, "orphanedRuns")) {
     const now = clock.now();
     let afterWorkflowId: string | undefined;
@@ -342,11 +352,12 @@ async function listResumeCandidates(params: {
         limit: RECOVERY_PAGE_SIZE,
         ...(afterWorkflowId !== undefined && { afterWorkflowId }),
       });
-      out.push(...page);
-      if (page.length < RECOVERY_PAGE_SIZE) return out;
+      if (page.length > 0) yield page;
+      if (page.length < RECOVERY_PAGE_SIZE) return;
       afterWorkflowId = page[page.length - 1]!.workflowId;
     }
   }
+  const out: ResumeCandidate[] = [];
   const seen = new Set<string>();
   for (const status of RESUMABLE_STATUSES) {
     for (let offset = 0; ; offset += RECOVERY_PAGE_SIZE) {
@@ -365,7 +376,7 @@ async function listResumeCandidates(params: {
       if (page.length < RECOVERY_PAGE_SIZE) break;
     }
   }
-  return out;
+  if (out.length > 0) yield out;
 }
 
 /**
@@ -376,11 +387,14 @@ async function listResumeCandidates(params: {
 function createRunPool(concurrency: number): {
   submit: (task: () => Promise<unknown> | void) => void;
   drained: () => Promise<void>;
+  /** Resolves once at most `n` tasks are queued or running. */
+  whenBelow: (n: number) => Promise<void>;
 } {
   const queue: Array<() => Promise<unknown> | void> = [];
   let active = 0;
   let onDrained: (() => void) | undefined;
   let drainedPromise: Promise<void> | undefined;
+  const levelWaiters: Array<{ n: number; resolve: () => void }> = [];
 
   const pump = (): void => {
     while (active < concurrency && queue.length > 0) {
@@ -395,6 +409,13 @@ function createRunPool(concurrency: number): {
         });
     }
     if (active === 0 && queue.length === 0) onDrained?.();
+    for (let i = levelWaiters.length - 1; i >= 0; i--) {
+      const waiter = levelWaiters[i]!;
+      if (active + queue.length <= waiter.n) {
+        levelWaiters.splice(i, 1);
+        waiter.resolve();
+      }
+    }
   };
 
   return {
@@ -402,6 +423,10 @@ function createRunPool(concurrency: number): {
       queue.push(task);
       pump();
     },
+    whenBelow: (n) =>
+      active + queue.length <= n
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => levelWaiters.push({ n, resolve })),
     drained: () => {
       drainedPromise ??= new Promise<void>((resolve) => {
         onDrained = resolve;

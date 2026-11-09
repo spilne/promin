@@ -450,6 +450,9 @@ a `WorkflowRunner` (`run`, `runSafe`, `start`, `handle`, `resume`,
   definition from `registry`, else rebuilds a stub from the DAG stored with
   the run (`buildStubWorkflow`), whose sleep / signal steps can only resume.
   Suspended runs are never adopted — the scanners resume them when due.
+  A pass adopts at most `maxAdoptionsPerSweep` runs (default 500); the next
+  pass, one poll later, continues after the last run adopted, so a backlog of
+  orphans is adopted in bounded steps instead of starting every run at once.
 - **Errors.** A failing sweep, adoption or storage check is reported to
   `onError({ source })` and backed off; nothing there stops the coordinator.
 
@@ -487,7 +490,10 @@ void coordinator.startLoop();
 `createSleepScanner` resumes runs whose sleep (or signal deadline) is due;
 `createSignalScanner` resumes runs whose awaited signal has been delivered.
 They query storage with keyset paging (`listDueTimers`,
-`listSignalWakeups`), resume with bounded concurrency
+`listSignalWakeups`: `pageSize` rows per read after an id cursor, so a scan
+of 100 000 due runs is a thousand bounded reads, never one big one), end a
+sweep after `maxRunsPerSweep` runs (default 1000) and continue the backlog in
+the next sweep from where it stopped, resume with bounded concurrency
 (`resumeConcurrency`, default 10), skip runs they are already resuming,
 report a workflow name and version `resolveWorkflow` doesn't know once, and
 back off on storage errors. `resolveWorkflow({ workflowName, version })`

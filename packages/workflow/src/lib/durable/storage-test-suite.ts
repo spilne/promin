@@ -4821,6 +4821,186 @@ export function storageTestSuite(
             expect(seen).toEqual(ids);
           });
         });
+
+        // Keyset paging while rows change between pages: every query walks
+        // the rows in id order past a cursor, so a row present throughout is
+        // returned exactly once, a row that appears ahead of the cursor is
+        // returned, and nothing is returned twice, whatever is resumed,
+        // finished, or added meanwhile.
+        describe("keyset paging while rows change between pages", () => {
+          const LIMIT = 4;
+          const ROWS = 3 * LIMIT + 3;
+          const idOf = (prefix: string, n: number): string =>
+            `${prefix}-${String(n).padStart(5, "0")}`;
+
+          interface Scenario {
+            prefix: string;
+            /** Make `id` a row the query returns. */
+            create(s: ScannerStorage, id: string): Promise<unknown>;
+            /** Make `id` leave the query (a resumed or finished run). */
+            retire(s: ScannerStorage, id: string): Promise<unknown>;
+            fetch(s: ScannerStorage, params: { after?: string }): Promise<string[]>;
+          }
+
+          const scenarios: Record<string, Scenario> = {
+            listDueTimers: {
+              prefix: "churn-due",
+              create: (s, id) => createSleeping({ s, workflowId: id, wakeAt: past() }),
+              retire: (s, id) => s.completeWorkflow({ workflowId: id, result: null }),
+              fetch: async (s, { after }) =>
+                (
+                  await s.listDueTimers({
+                    now: new Date(),
+                    limit: LIMIT,
+                    ...(after !== undefined && { afterWorkflowId: after }),
+                  })
+                ).map((r) => r.workflowId),
+            },
+            listSignalWakeups: {
+              prefix: "churn-sig",
+              create: async (s, id) => {
+                await createWaiting({ s, workflowId: id, signalName: "go" });
+                await s.deliverSignal({ workflowId: id, signalName: "go", payload: 1 });
+              },
+              retire: (s, id) => s.completeWorkflow({ workflowId: id, result: null }),
+              fetch: async (s, { after }) =>
+                (
+                  await s.listSignalWakeups({
+                    limit: LIMIT,
+                    ...(after !== undefined && { afterWorkflowId: after }),
+                  })
+                ).map((r) => r.workflowId),
+            },
+            listUpdateWakeups: {
+              prefix: "churn-upd",
+              create: async (s, id) => {
+                await createWaiting({ s, workflowId: id, signalName: "go" });
+                await s.deliverSignal({
+                  workflowId: id,
+                  signalName: "workflow.update:u",
+                  payload: {},
+                });
+              },
+              retire: (s, id) => s.completeWorkflow({ workflowId: id, result: null }),
+              fetch: async (s, { after }) =>
+                (
+                  await s.listUpdateWakeups({
+                    limit: LIMIT,
+                    ...(after !== undefined && { afterWorkflowId: after }),
+                  })
+                ).map((r) => r.workflowId),
+            },
+            listChildEndedWaits: {
+              prefix: "churn-child",
+              create: (s, id) =>
+                createWaiting({
+                  s,
+                  workflowId: id,
+                  signalName: `workflow.child-ended:${id}-kid#1`,
+                }),
+              retire: (s, id) => s.completeWorkflow({ workflowId: id, result: null }),
+              fetch: async (s, { after }) =>
+                (
+                  await s.listChildEndedWaits({
+                    limit: LIMIT,
+                    ...(after !== undefined && { afterWorkflowId: after }),
+                  })
+                ).map((r) => r.workflowId),
+            },
+            listOrphanedRuns: {
+              prefix: "churn-orph",
+              create: (s, id) =>
+                s.createWorkflow({ workflowId: id, workflowName: "orph-wf", input: {} }),
+              retire: (s, id) => s.completeWorkflow({ workflowId: id, result: null }),
+              fetch: async (s, { after }) => {
+                const later = new Date(Date.now() + 5_000);
+                return (
+                  await s.listOrphanedRuns({
+                    now: later,
+                    updatedBefore: later,
+                    limit: LIMIT,
+                    ...(after !== undefined && { afterWorkflowId: after }),
+                  })
+                ).map((r) => r.workflowId);
+              },
+            },
+          };
+
+          async function drain(params: {
+            s: ScannerStorage;
+            sc: Scenario;
+            afterPage?: (page: string[], pageNo: number) => Promise<void>;
+          }): Promise<string[]> {
+            const seen: string[] = [];
+            let after: string | undefined;
+            for (let pageNo = 0; ; pageNo++) {
+              const page = await params.sc.fetch(params.s, { after });
+              if (page.length === 0) return seen;
+              // A cursor that does not advance would page forever.
+              expect(pageNo).toBeLessThan(10 * ROWS);
+              expect(page.length).toBeLessThanOrEqual(LIMIT);
+              seen.push(...page);
+              after = page.at(-1)!;
+              await params.afterPage?.(page, pageNo);
+            }
+          }
+
+          for (const [method, sc] of Object.entries(scenarios)) {
+            it(`${method} returns each surviving row exactly once while rows are resumed and added`, async () => {
+              const s = await getScannerStorage();
+              const initial = Array.from({ length: ROWS }, (_, i) => idOf(sc.prefix, 100 * i));
+              for (const id of initial) await sc.create(s, id);
+              const present = new Set(initial);
+              const retiredAhead = new Set<string>();
+              const addedAhead: string[] = [];
+              const addedBehind: string[] = [];
+
+              const seen = await drain({
+                s,
+                sc,
+                afterPage: async (page, pageNo) => {
+                  const cursor = page.at(-1)!;
+                  // Resume the rows just returned: they leave the set.
+                  for (const id of page) {
+                    await sc.retire(s, id);
+                    present.delete(id);
+                  }
+                  // Finish a row that is still ahead of the cursor.
+                  const ahead = initial.find((id) => id > cursor && present.has(id));
+                  if (pageNo === 1 && ahead !== undefined) {
+                    await sc.retire(s, ahead);
+                    present.delete(ahead);
+                    retiredAhead.add(ahead);
+                  }
+                  // A new row just ahead of the cursor, and one behind it
+                  // (only for the first pages, so the walk ends).
+                  if (pageNo >= 3) return;
+                  const n = Number(cursor.slice(sc.prefix.length + 1));
+                  const justAhead = idOf(sc.prefix, n + 1);
+                  await sc.create(s, justAhead);
+                  present.add(justAhead);
+                  addedAhead.push(justAhead);
+                  if (n >= 100) {
+                    const behind = idOf(sc.prefix, n - 50);
+                    await sc.create(s, behind);
+                    present.add(behind);
+                    addedBehind.push(behind);
+                  }
+                },
+              });
+
+              expect(seen).toEqual([...new Set(seen)].sort());
+              for (const id of initial) {
+                if (!retiredAhead.has(id)) expect(seen).toContain(id);
+              }
+              for (const id of addedAhead) expect(seen).toContain(id);
+              // A row added behind the cursor is for the next sweep.
+              for (const id of addedBehind) expect(seen).not.toContain(id);
+              // The next sweep sees exactly what is left.
+              expect(await drain({ s, sc })).toEqual([...present].sort());
+            });
+          }
+        });
       });
     }
 

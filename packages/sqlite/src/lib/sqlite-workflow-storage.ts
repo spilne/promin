@@ -1755,44 +1755,49 @@ export class SqliteWorkflowStorage
   }): Promise<WorkflowWakeup[]> {
     const now = params.now.toISOString();
     const after = params.afterWorkflowId !== undefined ? "AND w.workflow_id > ?" : "";
-    const args: unknown[] = params.afterWorkflowId !== undefined ? [params.afterWorkflowId] : [];
-    args.push(now, now, Math.max(0, Math.trunc(params.limit)));
+    const args: unknown[] = [now, now];
+    if (params.afterWorkflowId !== undefined) args.push(params.afterWorkflowId);
+    args.push(Math.max(0, Math.trunc(params.limit)));
+    // Walks the suspended runs in id order and stops at `limit` due ones, so
+    // a page costs its own rows, not every due run after the cursor. The due
+    // step (smallest name) is picked per run by a correlated subquery.
     const rows = this.db
-      .query<ScanWakeupRow>(
-        `SELECT workflow_id, workflow_name, version, input, step_name, reason, signal_name
-         FROM (
-           SELECT w.workflow_id, w.workflow_name, w.version, w.input,
-             j.key AS step_name,
-             CASE json_extract(j.value, '$.status')
-               WHEN 'sleeping' THEN 'sleep' ELSE 'signal-timeout' END AS reason,
-             json_extract(j.value, '$.signalName') AS signal_name,
-             ROW_NUMBER() OVER (PARTITION BY w.workflow_id ORDER BY j.key) AS rn
-           FROM ${this._t} w, json_each(w.steps) j
-           WHERE w.status = 'suspended' ${after}
-             AND (
-               (json_extract(j.value, '$.status') = 'sleeping'
-                 AND julianday(json_extract(j.value, '$.wakeAt')) <= julianday(?))
-               OR (json_extract(j.value, '$.status') = 'waiting_for_signal'
-                 AND json_extract(j.value, '$.signalTimeoutAt') IS NOT NULL
-                 AND julianday(json_extract(j.value, '$.signalTimeoutAt')) <= julianday(?))
-             )
-         )
-         WHERE rn = 1
-         ORDER BY workflow_id
+      .query<ScanWakeupRow & { pick: string | null }>(
+        `SELECT w.workflow_id, w.workflow_name, w.version, w.input,
+           (SELECT json_array(
+              j.key,
+              CASE json_extract(j.value, '$.status')
+                WHEN 'sleeping' THEN 'sleep' ELSE 'signal-timeout' END,
+              json_extract(j.value, '$.signalName'))
+            FROM json_each(w.steps) j
+            WHERE (json_extract(j.value, '$.status') = 'sleeping'
+                AND julianday(json_extract(j.value, '$.wakeAt')) <= julianday(?))
+              OR (json_extract(j.value, '$.status') = 'waiting_for_signal'
+                AND json_extract(j.value, '$.signalTimeoutAt') IS NOT NULL
+                AND julianday(json_extract(j.value, '$.signalTimeoutAt')) <= julianday(?))
+            ORDER BY j.key LIMIT 1) AS pick
+         FROM ${this._t} w INDEXED BY ${this._t}_suspended
+         WHERE w.status = 'suspended' ${after} AND pick IS NOT NULL
+         ORDER BY w.workflow_id
          LIMIT ?`,
       )
       .all(...args);
-    return rows.map((r) => ({
-      workflowId: r.workflow_id,
-      workflowName: r.workflow_name,
-      ...(r.version != null ? { version: r.version } : {}),
-      input: JSON.parse(r.input),
-      stepName: r.step_name,
-      reason: r.reason as "sleep" | "signal-timeout",
-      ...(r.reason === "signal-timeout" && r.signal_name != null
-        ? { signalName: r.signal_name }
-        : {}),
-    }));
+    return rows.map((r) => {
+      const [stepName, reason, signalName] = JSON.parse(r.pick!) as [
+        string,
+        "sleep" | "signal-timeout",
+        string | null,
+      ];
+      return {
+        workflowId: r.workflow_id,
+        workflowName: r.workflow_name,
+        ...(r.version != null ? { version: r.version } : {}),
+        input: JSON.parse(r.input),
+        stepName,
+        reason,
+        ...(reason === "signal-timeout" && signalName != null ? { signalName } : {}),
+      };
+    });
   }
 
   async listSignalWakeups(params: {
@@ -1802,39 +1807,42 @@ export class SqliteWorkflowStorage
     const after = params.afterWorkflowId !== undefined ? "AND w.workflow_id > ?" : "";
     const args: unknown[] = params.afterWorkflowId !== undefined ? [params.afterWorkflowId] : [];
     args.push(Math.max(0, Math.trunc(params.limit)));
+    // Same shape as `listDueTimers`: id-ordered walk of the suspended runs
+    // that stops at `limit`; the matching step (smallest name) and its
+    // latest delivered signal come from a correlated subquery.
     const rows = this.db
-      .query<ScanWakeupRow & { payload: string }>(
-        `SELECT workflow_id, workflow_name, version, input, step_name, signal_name, payload
-         FROM (
-           SELECT w.workflow_id, w.workflow_name, w.version, w.input,
-             j.key AS step_name, g.signal_name, g.payload,
-             ROW_NUMBER() OVER (PARTITION BY w.workflow_id ORDER BY j.key) AS rn
-           FROM ${this._t} w, json_each(w.steps) j
-           JOIN ${this._t}_signals g
-             ON g.workflow_id = w.workflow_id
-            AND g.signal_name = json_extract(j.value, '$.signalName')
-           WHERE w.status = 'suspended' ${after}
-             AND json_extract(j.value, '$.status') = 'waiting_for_signal'
-             AND g.id = (
-               SELECT MAX(g2.id) FROM ${this._t}_signals g2
-               WHERE g2.workflow_id = g.workflow_id AND g2.signal_name = g.signal_name
-             )
-         )
-         WHERE rn = 1
-         ORDER BY workflow_id
+      .query<ScanWakeupRow & { pick: string | null }>(
+        `SELECT w.workflow_id, w.workflow_name, w.version, w.input,
+           (SELECT json_array(j.key, g.signal_name, g.payload)
+            FROM json_each(w.steps) j
+            JOIN ${this._t}_signals g
+              ON g.workflow_id = w.workflow_id
+             AND g.signal_name = json_extract(j.value, '$.signalName')
+            WHERE json_extract(j.value, '$.status') = 'waiting_for_signal'
+              AND g.id = (
+                SELECT MAX(g2.id) FROM ${this._t}_signals g2
+                WHERE g2.workflow_id = g.workflow_id AND g2.signal_name = g.signal_name
+              )
+            ORDER BY j.key LIMIT 1) AS pick
+         FROM ${this._t} w INDEXED BY ${this._t}_suspended
+         WHERE w.status = 'suspended' ${after} AND pick IS NOT NULL
+         ORDER BY w.workflow_id
          LIMIT ?`,
       )
       .all(...args);
-    return rows.map((r) => ({
-      workflowId: r.workflow_id,
-      workflowName: r.workflow_name,
-      ...(r.version != null ? { version: r.version } : {}),
-      input: JSON.parse(r.input),
-      stepName: r.step_name,
-      reason: "signal" as const,
-      signalName: r.signal_name!,
-      signalPayload: JSON.parse(r.payload),
-    }));
+    return rows.map((r) => {
+      const [stepName, signalName, payload] = JSON.parse(r.pick!) as [string, string, string];
+      return {
+        workflowId: r.workflow_id,
+        workflowName: r.workflow_name,
+        ...(r.version != null ? { version: r.version } : {}),
+        input: JSON.parse(r.input),
+        stepName,
+        reason: "signal" as const,
+        signalName,
+        signalPayload: JSON.parse(payload),
+      };
+    });
   }
 
   async listUpdateWakeups(params: {
@@ -1855,7 +1863,7 @@ export class SqliteWorkflowStorage
         `SELECT w.workflow_id, w.workflow_name, w.version, w.input,
            (SELECT MIN(j.key) FROM json_each(w.steps) j
              WHERE json_extract(j.value, '$.status') IN ('sleeping', 'waiting_for_signal')) AS step_name
-         FROM ${this._t} w
+         FROM ${this._t} w INDEXED BY ${this._t}_suspended
          WHERE w.status = 'suspended' ${after}
            AND EXISTS (
              SELECT 1 FROM ${this._t}_signals g
@@ -1887,39 +1895,43 @@ export class SqliteWorkflowStorage
   }): Promise<
     Array<{ workflowId: string; waits: Array<{ stepName: string; signalName: string }> }>
   > {
-    const after = params.afterWorkflowId !== undefined ? "AND w.workflow_id > ?" : "";
+    const prefix = [CHILD_ENDED_SIGNAL_PREFIX.length, CHILD_ENDED_SIGNAL_PREFIX];
     const waiting = `
-           FROM ${this._t} w, json_each(w.steps) j
-           WHERE w.status = 'suspended' __AFTER__
-             AND json_extract(j.value, '$.status') = 'waiting_for_signal'
+             json_extract(j.value, '$.status') = 'waiting_for_signal'
              AND substr(json_extract(j.value, '$.signalName'), 1, ?) = ?
              AND NOT EXISTS (
                SELECT 1 FROM ${this._t}_signals g
-               WHERE g.workflow_id = w.workflow_id
+               WHERE g.workflow_id = ?
                  AND g.signal_name = json_extract(j.value, '$.signalName')
              )`;
-    const prefix = [CHILD_ENDED_SIGNAL_PREFIX.length, CHILD_ENDED_SIGNAL_PREFIX];
-    // Placeholders in order: the outer filter, then the inner one and its limit.
-    const args: unknown[] = [
-      ...prefix,
-      ...(params.afterWorkflowId !== undefined ? [params.afterWorkflowId] : []),
-      ...prefix,
-      Math.max(0, Math.trunc(params.limit)),
-    ];
-    // The first `limit` runs with such a wait, then every such wait of each.
+    // The first `limit` runs with such a wait (an id-ordered walk that stops
+    // at `limit`), then every such wait of each.
+    const runIds = this.db
+      .query<{ workflow_id: string }>(
+        `SELECT w.workflow_id
+         FROM ${this._t} w INDEXED BY ${this._t}_suspended
+         WHERE w.status = 'suspended' ${params.afterWorkflowId !== undefined ? "AND w.workflow_id > ?" : ""}
+           AND EXISTS (SELECT 1 FROM json_each(w.steps) j WHERE ${waiting.replace("g.workflow_id = ?", "g.workflow_id = w.workflow_id")})
+         ORDER BY w.workflow_id
+         LIMIT ?`,
+      )
+      .all(
+        ...(params.afterWorkflowId !== undefined ? [params.afterWorkflowId] : []),
+        ...prefix,
+        Math.max(0, Math.trunc(params.limit)),
+      ) as Array<{ workflow_id: string }>;
+    if (runIds.length === 0) return [];
+    const marks = runIds.map(() => "?").join(", ");
     const rows = this.db
       .query<{ workflow_id: string; step_name: string; signal_name: string }>(
         `SELECT w.workflow_id, j.key AS step_name,
            json_extract(j.value, '$.signalName') AS signal_name
-         ${waiting.replace("__AFTER__", "")}
-           AND w.workflow_id IN (
-             SELECT DISTINCT w.workflow_id ${waiting.replace("__AFTER__", after)}
-             ORDER BY w.workflow_id
-             LIMIT ?
-           )
+         FROM ${this._t} w, json_each(w.steps) j
+         WHERE w.workflow_id IN (${marks})
+           AND ${waiting.replace("g.workflow_id = ?", "g.workflow_id = w.workflow_id")}
          ORDER BY w.workflow_id, j.key`,
       )
-      .all(...(args as Array<string | number>));
+      .all(...runIds.map((r) => r.workflow_id), ...prefix);
     return groupChildEndedWaits(rows);
   }
 

@@ -147,6 +147,9 @@ import {
   SAVE_STEP_PROGRESS_LUA,
   START_FRESH_RUN_LUA,
   SYNC_INDEX_LUA,
+  SCAN_PAGE_LUA,
+  BACKFILL_SCAN_LUA,
+  SSCAN_LUA,
   TRANSITION_STATUS_LUA,
   TRY_LOCK_AND_LOAD_LUA,
   TRY_LOCK_LUA,
@@ -193,6 +196,19 @@ const NON_TERMINAL_STATUSES = WORKFLOW_STATUSES.filter((st) => !isTerminalWorkfl
 /** Statuses `cancelWorkflow` may leave. */
 const CANCELLABLE_STATUSES: readonly WorkflowStatus[] = ["pending", "running", "suspended"];
 const TERMINAL_STATUSES_CSV = WORKFLOW_STATUSES.filter(isTerminalWorkflowStatus).join(",");
+/**
+ * Statuses the scanners walk (`listDueTimers`, `listSignalWakeups`, wake-up
+ * queries, `listOrphanedRuns`): each also lives in an id-ordered sorted set
+ * (`keys.statusScan`) so a scan reads a page of ids at a time.
+ */
+const SCAN_STATUSES: readonly WorkflowStatus[] = [
+  "pending",
+  "running",
+  "compensating",
+  "suspended",
+];
+/** Members read per `SSCAN` step while backfilling an index. */
+const BACKFILL_CHUNK = 200;
 /** Bound on compare-and-set retries under contention. */
 const MAX_CAS_ATTEMPTS = 100;
 /** Bound on re-reads while a provisional child row is being replaced under a reader. */
@@ -928,13 +944,14 @@ export class RedisWorkflowStorage
     });
     await this.redis.eval(
       SYNC_INDEX_LUA,
-      5 + WORKFLOW_STATUSES.length + adds.length,
+      5 + WORKFLOW_STATUSES.length + SCAN_STATUSES.length + adds.length,
       this.keys.indexVersions,
       this.keys.indexRecords,
       this.keys.byCreated,
       this.keys.byStarted,
       this.keys.byCompleted,
       ...WORKFLOW_STATUSES.map((s) => this.keys.status(s)),
+      ...SCAN_STATUSES.map((s) => this.keys.statusScan(s)),
       ...adds.map(([key]) => key),
       f.id,
       f.iv ?? "1",
@@ -944,7 +961,9 @@ export class RedisWorkflowStorage
       ms(f.startedAt),
       ms(f.completedAt),
       String(WORKFLOW_STATUSES.length),
+      String(SCAN_STATUSES.length),
       ...WORKFLOW_STATUSES,
+      ...SCAN_STATUSES,
       ...adds.map(([, member]) => member),
     );
   }
@@ -1007,26 +1026,31 @@ export class RedisWorkflowStorage
     if (params.name) memberSets.push(this.keys.name(params.name));
     if (params.namespace) memberSets.push(this.keys.namespace(params.namespace));
     if (params.parentId) memberSets.push(this.keys.children(params.parentId));
+    const scanSets = (
+      params.status ? SCAN_STATUSES.filter((st) => st === params.status) : SCAN_STATUSES
+    ).map((st) => this.keys.statusScan(st));
     const owned = [this.keys.children(workflowId)];
     await this.redis.eval(
       UNINDEX_LUA,
-      5 + memberSets.length + owned.length,
+      5 + memberSets.length + scanSets.length + owned.length,
       this.keys.indexVersions,
       this.keys.indexRecords,
       this.keys.byCreated,
       this.keys.byStarted,
       this.keys.byCompleted,
       ...memberSets,
+      ...scanSets,
       ...owned,
       workflowId,
       String(owned.length),
+      String(scanSets.length),
     );
   }
 
   async cancelWorkflow({ workflowId, cascade, guard }: CancelWorkflowParams): Promise<void> {
     // Indexed before the move, so a crash between the two leaves a member
     // the scan drops, never a cancelled run recovery cannot find.
-    await this.redis.sadd(this.keys.cancelOwed, workflowId);
+    await this.redis.zadd(this.keys.cancelOwed, 0, workflowId);
     await this.transitionStatus({
       workflowId,
       guard,
@@ -1478,7 +1502,7 @@ export class RedisWorkflowStorage
     // A settled cancel leaves the recovery index (a stale member would only
     // be dropped by the next scan that reads it).
     if (compensationOrigin === "cancel-settled") {
-      await this.redis.srem(this.keys.cancelOwed, workflowId);
+      await this.redis.zrem(this.keys.cancelOwed, workflowId);
     }
   }
 
@@ -1931,19 +1955,21 @@ export class RedisWorkflowStorage
 
   // -- Scanner / recovery queries -------------------------------------------
   //
-  // Candidates come from the status index sets (ids only), sorted and cut at
-  // the keyset cursor client-side; each candidate's workflow is then read in
-  // parallel chunks, stopping as soon as `limit` rows match. A candidate
-  // whose hash disagrees with the index has its index entry repaired.
+  // Candidates come from the id-ordered scan sets (`keys.statusScan`), one
+  // chunk of ids after the keyset cursor at a time (`ZRANGEBYLEX`), so no
+  // reply or sweep ever holds the whole set. Each chunk's workflows are read
+  // in parallel, stopping as soon as `limit` rows match. A candidate whose
+  // hash disagrees with the index has its index entry repaired.
 
   /**
-   * Walk the ids in the given status index sets in ascending order after
-   * `afterWorkflowId`, resolving `pick` for each in parallel chunks, and
-   * return the first `limit` non-undefined results in id order.
+   * Walk the ids in the given scan sets (and `extraSets`, score-0 sorted
+   * sets) in ascending order after `afterWorkflowId`, resolving `pick` for
+   * each chunk in parallel, and return the first `limit` non-undefined
+   * results in id order.
    */
   private async scanStatusIndex<T>(params: {
     statuses: readonly WorkflowStatus[];
-    /** Further index sets whose members are candidates too. */
+    /** Further score-0 sorted sets whose members are candidates too. */
     extraSets?: readonly string[];
     limit: number;
     afterWorkflowId?: string;
@@ -1951,26 +1977,70 @@ export class RedisWorkflowStorage
   }): Promise<T[]> {
     const limit = Math.max(0, Math.trunc(params.limit));
     if (limit === 0) return [];
-    const sets = await Promise.all([
-      ...params.statuses.map((s) => this.redis.smembers(this.keys.status(s))),
-      ...(params.extraSets ?? []).map((key) => this.redis.smembers(key)),
-    ]);
-    const after = params.afterWorkflowId;
-    const ids = [...new Set(sets.flat())]
-      .filter((id) => after === undefined || id > after)
-      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-
-    const out: T[] = [];
+    await this.ensureScanIndex();
+    const keys = [
+      ...params.statuses.map((st) => this.keys.statusScan(st)),
+      ...(params.extraSets ?? []),
+    ];
     const chunkSize = Math.max(limit, 32);
-    for (let i = 0; i < ids.length && out.length < limit; i += chunkSize) {
-      const picked = await Promise.all(ids.slice(i, i + chunkSize).map((id) => params.pick(id)));
+    const out: T[] = [];
+    let after = params.afterWorkflowId;
+    while (out.length < limit) {
+      const ids = (await this.redis.eval(
+        SCAN_PAGE_LUA,
+        keys.length,
+        ...keys,
+        after ?? "",
+        String(chunkSize),
+      )) as string[];
+      if (ids.length === 0) break;
+      const picked = await Promise.all(ids.map((id) => params.pick(id)));
       for (const row of picked) {
         if (row === undefined) continue;
         out.push(row);
         if (out.length >= limit) break;
       }
+      if (ids.length < chunkSize) break;
+      after = ids[ids.length - 1];
     }
     return out;
+  }
+
+  /** The scan index is filled from the status sets in this process (the marker says it for the keyspace). */
+  private scanIndexFilled = false;
+
+  /**
+   * One-time, lazy: runs indexed before the scan sets existed sit in the
+   * status sets only. The first scan of a keyspace copies each scanned
+   * status set into its scan set in `SSCAN` chunks (one atomic script per
+   * chunk, so a run that left the status meanwhile is not added back), then
+   * sets a marker so no later scan, in any process, pays for it again.
+   * Writes after the deploy keep both in step. Racing backfills are
+   * harmless (adds are idempotent). A writer still on the older version
+   * adds runs to the status sets only: they reach the scan set at their
+   * next status change.
+   */
+  private async ensureScanIndex(): Promise<void> {
+    if (this.scanIndexFilled) return;
+    if ((await this.redis.exists(this.keys.statusScanBackfilled)) === 0) {
+      for (const status of SCAN_STATUSES) {
+        let cursor = "0";
+        do {
+          cursor = String(
+            await this.redis.eval(
+              BACKFILL_SCAN_LUA,
+              2,
+              this.keys.status(status),
+              this.keys.statusScan(status),
+              cursor,
+              String(BACKFILL_CHUNK),
+            ),
+          );
+        } while (cursor !== "0");
+      }
+      await this.redis.set(this.keys.statusScanBackfilled, "1");
+    }
+    this.scanIndexFilled = true;
   }
 
   /** Namespace scoping for the scanners — the same rule `listWorkflows` applies. */
@@ -2164,7 +2234,7 @@ export class RedisWorkflowStorage
         ]);
         if (!raw || !raw.id) {
           await this.unindexMissing(workflowId);
-          await this.redis.srem(this.keys.cancelOwed, workflowId);
+          await this.redis.zrem(this.keys.cancelOwed, workflowId);
           return undefined;
         }
         const owed = raw.status === "failed" && raw.compensationOrigin === "cancel";
@@ -2174,7 +2244,7 @@ export class RedisWorkflowStorage
           raw.status === "completed" ||
           raw.status === "tripwire" ||
           (raw.status === "failed" && !owed);
-        if (done) await this.redis.srem(this.keys.cancelOwed, workflowId);
+        if (done) await this.redis.zrem(this.keys.cancelOwed, workflowId);
         if (
           !owed &&
           raw.status !== "pending" &&
@@ -2217,16 +2287,23 @@ export class RedisWorkflowStorage
   private async backfillCancelOwed(): Promise<void> {
     if (this.cancelOwedBackfilled) return;
     if ((await this.redis.exists(this.keys.cancelOwedBackfilled)) === 0) {
-      const failed = await this.redis.smembers(this.keys.status("failed"));
-      const chunkSize = 200;
-      for (let i = 0; i < failed.length; i += chunkSize) {
-        const chunk = failed.slice(i, i + chunkSize);
+      let cursor = "0";
+      do {
+        const [next, chunk] = (await this.redis.eval(
+          SSCAN_LUA,
+          1,
+          this.keys.status("failed"),
+          cursor,
+          String(BACKFILL_CHUNK),
+        )) as [string, string[]];
+        cursor = String(next);
         const origins = await Promise.all(
           chunk.map((id) => this.redis.hget(this.keys.wf(id), "compensationOrigin")),
         );
         const owed = chunk.filter((_, n) => origins[n] === "cancel");
-        if (owed.length > 0) await this.redis.sadd(this.keys.cancelOwed, ...owed);
-      }
+        if (owed.length > 0)
+          await this.redis.zadd(this.keys.cancelOwed, ...owed.flatMap((id) => [0, id]));
+      } while (cursor !== "0");
       await this.redis.set(this.keys.cancelOwedBackfilled, "1");
     }
     this.cancelOwedBackfilled = true;

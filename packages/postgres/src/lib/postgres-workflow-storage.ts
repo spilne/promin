@@ -1728,8 +1728,10 @@ export class PostgresWorkflowStorage
    * `AND w.namespace = …` when the storage has a configured namespace —
    * the same scoping `listWorkflows` applies.
    */
-  private namespaceScope() {
-    return this.config.namespace ? sql` AND w.namespace = ${this.config.namespace}` : sql``;
+  private namespaceScope(alias = "w") {
+    return this.config.namespace
+      ? sql` AND ${sql.raw(alias)}.namespace = ${this.config.namespace}`
+      : sql``;
   }
 
   async listDueTimers(params: {
@@ -1742,9 +1744,19 @@ export class PostgresWorkflowStorage
       params.afterWorkflowId !== undefined
         ? sql` AND s.workflow_id > ${params.afterWorkflowId}`
         : sql``;
-    // Both branches hit their own partial index (wake_at / signal_timeout_at),
-    // then join the workflow on its current run while suspended. DISTINCT ON
-    // keeps the smallest due step name per run.
+    // The cursor is repeated on the workflow side of each branch's join, so
+    // the planner starts both sides of a merge join at the cursor.
+    const afterSw =
+      params.afterWorkflowId !== undefined
+        ? sql` AND sw.workflow_id > ${params.afterWorkflowId}`
+        : sql``;
+    // Each branch walks its keyset index in (workflow_id, step_name) order,
+    // joins the workflow (current run, suspended) and keeps the smallest due
+    // step per run, stopping at `limit` runs, so a page costs its own rows
+    // and not every due step after the cursor. The first `limit` runs of
+    // the merged branches are the first `limit` runs overall, since each
+    // branch contributes its own first `limit`.
+    const limit = Math.max(0, Math.trunc(params.limit));
     const rows = await execRaw(
       this.db,
       sql`
@@ -1752,23 +1764,36 @@ export class PostgresWorkflowStorage
         d.workflow_id, w.workflow_name, w.version, w.input::text AS input_json,
         d.step_name, d.reason, d.signal_name
       FROM (
-        SELECT s.workflow_id, s.run, s.step_name, 'sleep' AS reason, NULL::text AS signal_name
+        (SELECT DISTINCT ON (s.workflow_id)
+          s.workflow_id, s.run, s.step_name, 'sleep' AS reason, NULL::text AS signal_name
         FROM wf_workflow_steps s
+        JOIN wf_workflows sw
+          ON sw.workflow_id = s.workflow_id
+         AND sw.run = s.run
+         AND sw.status_id = ${WorkflowStatusIds.id.suspended}${this.namespaceScope("sw")}${afterSw}
         WHERE s.status_id = ${StepStatusIds.id.sleeping}
           AND s.wake_at <= ${now}::timestamptz${after}
+        ORDER BY s.workflow_id, s.step_name
+        LIMIT ${limit})
         UNION ALL
-        SELECT s.workflow_id, s.run, s.step_name, 'signal-timeout' AS reason, s.signal_name
+        (SELECT DISTINCT ON (s.workflow_id)
+          s.workflow_id, s.run, s.step_name, 'signal-timeout' AS reason, s.signal_name
         FROM wf_workflow_steps s
+        JOIN wf_workflows sw
+          ON sw.workflow_id = s.workflow_id
+         AND sw.run = s.run
+         AND sw.status_id = ${WorkflowStatusIds.id.suspended}${this.namespaceScope("sw")}${afterSw}
         WHERE s.status_id = ${StepStatusIds.id.waiting_for_signal}
           AND s.signal_timeout_at IS NOT NULL
           AND s.signal_timeout_at <= ${now}::timestamptz${after}
+        ORDER BY s.workflow_id, s.step_name
+        LIMIT ${limit})
       ) d
       JOIN wf_workflows w
         ON w.workflow_id = d.workflow_id
        AND w.run = d.run
-       AND w.status_id = ${WorkflowStatusIds.id.suspended}${this.namespaceScope()}
       ORDER BY d.workflow_id, d.step_name
-      LIMIT ${Math.max(0, Math.trunc(params.limit))}
+      LIMIT ${limit}
     `,
     );
     return rows.map((r) => ({
