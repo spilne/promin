@@ -30,6 +30,12 @@ export {
   DEFAULT_MAX_DELIVERIES,
 } from "./lib/distributed/step-queue.ts";
 export {
+  assertValidGroupLimits,
+  type StepGroupFields,
+  type StepThrottleReason,
+  type ThrottledTask,
+} from "./lib/distributed/step-group-limits.ts";
+export {
   InMemoryStepQueue,
   type InMemoryStepQueueConfig,
 } from "./lib/distributed/in-memory-step-queue.ts";

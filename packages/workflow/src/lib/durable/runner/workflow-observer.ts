@@ -14,7 +14,12 @@ import type { WorkflowStorage } from "../workflow-storage.ts";
 import { workflowFailure } from "../workflow-failure.ts";
 import { findTripwireStep, storedRunError } from "./run-status.ts";
 import { runUsage, stepUsage, type UsageTotals } from "../budget.ts";
-import { deriveWaitingOn, summarizeWaits } from "../workflow-waits.ts";
+import {
+  deriveWaitingOn,
+  mergeWaits,
+  summarizeWaits,
+  type WorkflowWait,
+} from "../workflow-waits.ts";
 
 export { findTripwireStep } from "./run-status.ts";
 
@@ -79,6 +84,8 @@ export function toStatusInfo(params: {
   includeStepResults: boolean;
   /** Reference time for the `waitingOnSummary`. Default: the current time. */
   now?: Date;
+  /** Waits not stored on step rows (`StepExecutor.queuedWaits`), merged into `waitingOn`. */
+  extraWaits?: readonly WorkflowWait[];
 }): WorkflowStatusInfo<unknown> {
   const { state } = params;
   const includeResults = params.includeStepResults;
@@ -112,7 +119,11 @@ export function toStatusInfo(params: {
   const usage = runUsage(state.steps);
 
   const failure = workflowFailure(state);
-  const waitingOn = deriveWaitingOn(state);
+  const stored = deriveWaitingOn(state);
+  const waitingOn =
+    params.extraWaits !== undefined && params.extraWaits.length > 0
+      ? mergeWaits({ stored, extra: params.extraWaits })
+      : stored;
   const waitingOnSummary = summarizeWaits({ waits: waitingOn, now: params.now ?? new Date() });
   return {
     state: state.status === "compensating" ? "failed" : state.status,

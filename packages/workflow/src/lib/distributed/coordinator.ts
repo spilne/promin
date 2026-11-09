@@ -265,6 +265,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
         stepWaitTimeoutMs: config.stepWaitTimeoutMs,
       }),
       clock: this.clock,
+      ...(config.tracer !== undefined && { tracer: config.tracer }),
       onError: (error, info) =>
         onError({ source: "step-wait", error, consecutiveFailures: info.consecutiveFailures }),
     });

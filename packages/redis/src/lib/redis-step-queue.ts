@@ -32,6 +32,23 @@
 //                                                    claim checks against
 //                                                    the task's limit
 //
+//   <base>:grp:pending                             → Sorted Set of the pending
+//                                                    tasks that are in a step
+//                                                    group (same scores as
+//                                                    `pending`); empty means
+//                                                    claim takes the plain,
+//                                                    ungrouped path
+//   <base>:grp:wf:<workflowId>                     → Set of that run's pending
+//                                                    grouped task IDs
+//                                                    (`throttled()`)
+//   <base>:grp:run:<len(name)>:<name>              → Set of the group's
+//                                                    running task IDs
+//   <base>:grp:starts:<len(name)>:<name>           → Sorted Set of task IDs
+//                                                    scored by claim time
+//                                                    (ms): the rate window
+//   <base>:grp:frun:<len(name)>:<name>:<key>       → Set of running task IDs
+//                                                    of a fairness key
+//
 // A lease store that fences `requeueStuck` must keep its keys in the same
 // slot: construct it with `prefix: "{<prefix>}"`.
 // ---------------------------------------------------------------------------
@@ -49,6 +66,7 @@ import {
   type StepTask,
   type StepTaskRecord,
   type StepTaskStatus,
+  type ThrottledTask,
 } from "@promin/workflow/distributed";
 import { StaleLeaseError, type LeaderLease } from "@promin/workflow/scheduler";
 import { deadLetterError, percentileCont } from "@promin/workflow/storage-kit";
@@ -71,22 +89,59 @@ end
 `;
 
 /**
+ * Lua helpers for step groups (named rate-limit / concurrency groups, see
+ * \`step-group-limits.ts\`): the keys of a group's running set, start window
+ * and fairness-key running sets, and the admission verdict. A start is a
+ * claim: a member of the starts zset scored by claim time in ms.
+ */
+const GROUP_LUA = `
+local function grp_run_key(prefix, name) return prefix .. ':grp:run:' .. #name .. ':' .. name end
+local function grp_starts_key(prefix, name) return prefix .. ':grp:starts:' .. #name .. ':' .. name end
+local function grp_fair_key(prefix, name, key)
+  return prefix .. ':grp:frun:' .. #name .. ':' .. name .. ':' .. key
+end
+
+-- nil when the group has room, else 'concurrency' or 'rate' and, for 'rate',
+-- the ms the window frees a slot. With mutate, expired starts are trimmed.
+local function grp_verdict(prefix, name, max_c, max_s, win, now_ms, mutate)
+  if max_c and max_c ~= '' and redis.call('SCARD', grp_run_key(prefix, name)) >= tonumber(max_c) then
+    return 'concurrency', nil
+  end
+  if max_s and max_s ~= '' and win and win ~= '' then
+    local starts = grp_starts_key(prefix, name)
+    local cutoff = now_ms - tonumber(win)
+    if mutate then redis.call('ZREMRANGEBYSCORE', starts, '-inf', cutoff) end
+    local live = redis.call('ZRANGEBYSCORE', starts, '(' .. cutoff, '+inf', 'WITHSCORES')
+    local n = #live / 2
+    if n >= tonumber(max_s) then
+      -- The start whose expiry frees a slot: n - max_s entries from the oldest.
+      local freeing = tonumber(live[(n - tonumber(max_s)) * 2 + 2])
+      return 'rate', freeing + tonumber(win)
+    end
+  end
+  return nil, nil
+end
+`;
+
+/**
  * Atomically enqueue a task with idempotency on (workflow_id, step_name).
  * If an active task exists for the same pair (active key present), return
  * its id. Otherwise: INCR counter, HSET task hash (including needs as
  * JSON), ZADD to the global pending set keyed by priority + FIFO, SET
  * active key to the new task id.
  *
- * KEYS: [active_key, pending_key, counter_key]
+ * KEYS: [active_key, pending_key, counter_key, grp_pending_key]
  * ARGV: [task_key_prefix, workflowId, stepName, priority, inputJson,
  *        depsJson, needsJson, createdAt, version, namespace,
  *        metadataJson, concurrencyKey, concurrencyScope, concurrencyLimit,
- *        attempt, dependsOnJson, timeoutMs, run] — optional values are '' when unset
+ *        attempt, dependsOnJson, timeoutMs, run, groupName, groupMaxConcurrent,
+ *        groupMaxStarts, groupWindowMs, fairnessKey, base] — optional values are '' when unset
  */
 const ENQUEUE_LUA = `
 local active_key = KEYS[1]
 local pending_key = KEYS[2]
 local counter_key = KEYS[3]
+local grp_pending_key = KEYS[4]
 
 local existing = redis.call('GET', active_key)
 if existing then return existing end
@@ -114,6 +169,8 @@ local optional = {
   {9, 'version'}, {10, 'namespace'}, {11, 'metadata'},
   {12, 'concurrencyKey'}, {13, 'concurrencyScope'}, {14, 'concurrencyLimit'},
   {17, 'timeoutMs'},
+  {19, 'groupName'}, {20, 'groupMaxConcurrent'}, {21, 'groupMaxStarts'}, {22, 'groupWindowMs'},
+  {23, 'fairnessKey'},
 }
 for _, o in ipairs(optional) do
   if ARGV[o[1]] ~= '' then
@@ -126,6 +183,10 @@ redis.call('HSET', task_key, unpack(fields))
 local priority = tonumber(ARGV[4])
 local score = priority * 1e12 + (1e12 - seq)
 redis.call('ZADD', pending_key, score, id)
+if ARGV[19] ~= '' then
+  redis.call('ZADD', grp_pending_key, score, id)
+  redis.call('SADD', ARGV[24] .. ':grp:wf:' .. ARGV[2], id)
+end
 redis.call('SET', active_key, id)
 
 return id
@@ -134,32 +195,42 @@ return id
 /**
  * Claim up to `limit` pending tasks the worker can run: needs ⊆
  * capabilities, step name in `step_names` (when given), version in
- * `versions` or unset (when given), and the (concurrency scope, key) under
- * its limit. Walks the pending zset in priority order a page at a time,
- * skipping everything else, so tasks the worker can't run never block the
- * ones behind them. Every claimed keyed task joins its (scope, key) running
- * set inside the same script, so the cap holds within one call and across
- * concurrent claimers.
+ * `versions` or unset (when given), the (concurrency scope, key) under its
+ * limit and the task's step group (if any) with room. Walks the pending zset
+ * in priority order a page at a time, skipping everything else, so tasks the
+ * worker can't run never block the ones behind them. Every claimed task
+ * joins its running sets inside the same script, so the caps hold within one
+ * call and across concurrent claimers.
+ *
+ * With no grouped task pending (`grp_pending` empty) that is the whole
+ * story. Otherwise the scan first collects every claimable-by-routing task
+ * (up to `scan_budget`), orders them by priority, then fairness rank (a keyed
+ * task ranks at its position among its `(group, fairness key)` peers plus
+ * the key's running tasks, so keys interleave round-robin), then queue
+ * order, and admits in that order against the live limits.
  *
  * At most `scan_budget` pending entries are examined per call so a large
  * backlog of blocked tasks can't stall Redis.
  *
- * KEYS: [pending_key, running_key, claimseq_key]
+ * KEYS: [pending_key, running_key, claimseq_key, grp_pending_key]
  * ARGV: [worker_id, now, limit, prefix, caps_json, scan_budget,
- *        step_names_json ('' = any), versions_json ('' = any)]
+ *        step_names_json ('' = any), versions_json ('' = any), now_ms]
  */
 const CLAIM_LUA =
   CONC_KEY_LUA +
+  GROUP_LUA +
   `
 local pending_key = KEYS[1]
 local running_key = KEYS[2]
 local claimseq_key = KEYS[3]
+local grp_pending_key = KEYS[4]
 local worker_id = ARGV[1]
 local now = ARGV[2]
 local limit = tonumber(ARGV[3])
 local prefix = ARGV[4]
 local caps = cjson.decode(ARGV[5])
 local scan_budget = tonumber(ARGV[6])
+local now_ms = tonumber(ARGV[9])
 
 local caps_set = {}
 for _, c in ipairs(caps) do caps_set[c] = true end
@@ -178,56 +249,135 @@ local page = limit * 4
 if page < 16 then page = 16 end
 
 local results = {}
-local start = 0
+
+-- Hand the task to the worker: leave pending, join every running set.
+local function admit(id, task_key, conc, g)
+  local claim_token = worker_id .. ':' .. id .. ':' .. redis.call('INCR', claimseq_key)
+  redis.call('ZREM', pending_key, id)
+  redis.call('SADD', running_key, id)
+  if conc then redis.call('SADD', conc, id) end
+  if g.name and g.name ~= '' then
+    redis.call('ZREM', grp_pending_key, id)
+    redis.call('SREM', prefix .. ':grp:wf:' .. g.workflow_id, id)
+    redis.call('SADD', grp_run_key(prefix, g.name), id)
+    if g.fair and g.fair ~= '' then redis.call('SADD', grp_fair_key(prefix, g.name, g.fair), id) end
+    if g.max_s and g.max_s ~= '' and g.win and g.win ~= '' then
+      local starts = grp_starts_key(prefix, g.name)
+      redis.call('ZADD', starts, now_ms, id)
+      redis.call('PEXPIRE', starts, tonumber(g.win) * 2)
+    end
+  end
+  redis.call('HINCRBY', task_key, 'deliveries', 1)
+  redis.call('HSET', task_key, 'status', 'running', 'claimedBy', worker_id, 'claimedAt', now,
+    'claimToken', claim_token, 'heartbeatAt', '')
+  table.insert(results, redis.call('HGETALL', task_key))
+end
+
+local function routable(f)
+  local needs_json, step_name, version = f.needs, f.step_name, f.version
+  if step_set and not step_set[step_name] then return false end
+  if version_set and version and version ~= '' and not version_set[version] then return false end
+  if needs_json and needs_json ~= '' and needs_json ~= '[]' then
+    for _, n in ipairs(cjson.decode(needs_json)) do
+      if not caps_set[n] then return false end
+    end
+  end
+  return true
+end
+
+local function fields_of(task_key)
+  local h = redis.call('HMGET', task_key, 'needs', 'concurrencyKey', 'concurrencyScope',
+    'concurrencyLimit', 'stepName', 'version', 'priority', 'groupName', 'groupMaxConcurrent',
+    'groupMaxStarts', 'groupWindowMs', 'fairnessKey', 'workflowId')
+  return {
+    needs = h[1], c_key = h[2], c_scope = h[3], c_limit = h[4], step_name = h[5], version = h[6],
+    priority = tonumber(h[7]) or 5,
+    g = { name = h[8], max_c = h[9], max_s = h[10], win = h[11], fair = h[12], workflow_id = h[13] },
+  }
+end
+
+local grouped = redis.call('ZCARD', grp_pending_key) > 0
 local examined = 0
 
-while #results < limit and examined < scan_budget do
-  local candidates = redis.call('ZREVRANGE', pending_key, start, start + page - 1)
-  if #candidates == 0 then break end
-  local claimed_in_page = 0
+if not grouped then
+  local start = 0
+  while #results < limit and examined < scan_budget do
+    local candidates = redis.call('ZREVRANGE', pending_key, start, start + page - 1)
+    if #candidates == 0 then break end
+    local claimed_in_page = 0
 
-  for _, id in ipairs(candidates) do
-    if #results >= limit or examined >= scan_budget then break end
-    examined = examined + 1
-    local task_key = prefix .. ':task:' .. id
-    local f = redis.call('HMGET', task_key, 'needs', 'concurrencyKey', 'concurrencyScope',
-      'concurrencyLimit', 'stepName', 'version')
-    local needs_json, c_key, c_scope, c_limit, step_name, version = f[1], f[2], f[3], f[4], f[5], f[6]
-
-    local ok = true
-    if step_set and not step_set[step_name] then ok = false end
-    if ok and version_set and version and version ~= '' and not version_set[version] then
-      ok = false
-    end
-    if ok and needs_json and needs_json ~= '' and needs_json ~= '[]' then
-      for _, n in ipairs(cjson.decode(needs_json)) do
-        if not caps_set[n] then
-          ok = false
-          break
-        end
+    for _, id in ipairs(candidates) do
+      if #results >= limit or examined >= scan_budget then break end
+      examined = examined + 1
+      local task_key = prefix .. ':task:' .. id
+      local f = fields_of(task_key)
+      local ok = routable(f)
+      local conc = conc_key(prefix, f.c_scope, f.c_key)
+      if ok and conc and f.c_limit then
+        if redis.call('SCARD', conc) >= tonumber(f.c_limit) then ok = false end
+      end
+      if ok then
+        admit(id, task_key, conc, f.g)
+        claimed_in_page = claimed_in_page + 1
       end
     end
 
-    local conc = conc_key(prefix, c_scope, c_key)
-    if ok and conc and c_limit then
-      if redis.call('SCARD', conc) >= tonumber(c_limit) then ok = false end
-    end
+    -- Claimed entries left the zset, shifting later ranks down.
+    start = start + #candidates - claimed_in_page
+  end
+  return results
+end
 
-    if ok then
-      local claim_token = worker_id .. ':' .. id .. ':' .. redis.call('INCR', claimseq_key)
-      redis.call('ZREM', pending_key, id)
-      redis.call('SADD', running_key, id)
-      if conc then redis.call('SADD', conc, id) end
-      redis.call('HINCRBY', task_key, 'deliveries', 1)
-      redis.call('HSET', task_key, 'status', 'running', 'claimedBy', worker_id, 'claimedAt', now,
-        'claimToken', claim_token, 'heartbeatAt', '')
-      table.insert(results, redis.call('HGETALL', task_key))
-      claimed_in_page = claimed_in_page + 1
+-- Grouped path: collect, rank fairly, then admit in that order.
+local cands = {}
+local start = 0
+while examined < scan_budget do
+  local ids = redis.call('ZREVRANGE', pending_key, start, start + page - 1)
+  if #ids == 0 then break end
+  for _, id in ipairs(ids) do
+    if examined >= scan_budget then break end
+    examined = examined + 1
+    local task_key = prefix .. ':task:' .. id
+    local f = fields_of(task_key)
+    if routable(f) then
+      f.id = id
+      f.task_key = task_key
+      f.idx = examined
+      table.insert(cands, f)
     end
   end
+  start = start + #ids
+end
 
-  -- Claimed entries left the zset, shifting later ranks down.
-  start = start + #candidates - claimed_in_page
+local seen = {}
+local running_of = {}
+for _, c in ipairs(cands) do
+  c.rank = 0
+  if c.g.name and c.g.name ~= '' and c.g.fair and c.g.fair ~= '' then
+    local k = #c.g.name .. ':' .. c.g.name .. ':' .. c.g.fair
+    local pos = seen[k] or 0
+    seen[k] = pos + 1
+    if running_of[k] == nil then
+      running_of[k] = redis.call('SCARD', grp_fair_key(prefix, c.g.name, c.g.fair))
+    end
+    c.rank = pos + running_of[k]
+  end
+end
+table.sort(cands, function(a, b)
+  if a.priority ~= b.priority then return a.priority > b.priority end
+  if a.rank ~= b.rank then return a.rank < b.rank end
+  return a.idx < b.idx
+end)
+
+for _, c in ipairs(cands) do
+  if #results >= limit then break end
+  local conc = conc_key(prefix, c.c_scope, c.c_key)
+  local ok = true
+  if conc and c.c_limit and redis.call('SCARD', conc) >= tonumber(c.c_limit) then ok = false end
+  if ok and c.g.name and c.g.name ~= '' then
+    if grp_verdict(prefix, c.g.name, c.g.max_c, c.g.max_s, c.g.win, now_ms, true) then ok = false end
+  end
+  if ok then admit(c.id, c.task_key, conc, c.g) end
 end
 
 return results
@@ -245,9 +395,13 @@ return results
  * dead-letters, and gives the delivery back).
  *
  * Fenced when ARGV[9] is non-empty: nothing is written, and -1 returned,
- * unless the lease epoch key (KEYS[5]) still holds ARGV[9].
+ * unless the lease epoch key (KEYS[6]) still holds ARGV[9].
  *
- * KEYS: [task_key, running_key, pending_key, done_key, lease_epoch_key?]
+ * A grouped task also leaves its group's running sets; going back to pending
+ * it gives its start back (a dead-lettered task keeps it) and rejoins
+ * the grouped pending index.
+ *
+ * KEYS: [task_key, running_key, pending_key, done_key, grp_pending_key, lease_epoch_key?]
  * ARGV: [id, prefix, claim_token, mode, max_deliveries, dead_letter_error,
  *        completed_at_iso, completed_at_ms, lease_epoch|'']
  * Returns -1 (stale lease), 0 (not running under the token), 1 (back to
@@ -255,6 +409,7 @@ return results
  */
 const REQUEUE_LUA =
   CONC_KEY_LUA +
+  GROUP_LUA +
   `
 local task_key = KEYS[1]
 local running_key = KEYS[2]
@@ -265,16 +420,21 @@ local prefix = ARGV[2]
 local claim_token = ARGV[3]
 local mode = ARGV[4]
 
-if ARGV[9] and ARGV[9] ~= '' and redis.call('GET', KEYS[5]) ~= ARGV[9] then return -1 end
+if ARGV[9] and ARGV[9] ~= '' and redis.call('GET', KEYS[6]) ~= ARGV[9] then return -1 end
 
 local f = redis.call('HMGET', task_key, 'status', 'claimToken', 'priority', 'concurrencyKey',
-  'concurrencyScope', 'deliveries', 'workflowId', 'stepName')
+  'concurrencyScope', 'deliveries', 'workflowId', 'stepName', 'groupName', 'fairnessKey')
 if f[1] ~= 'running' then return 0 end
 if claim_token ~= '' and f[2] ~= claim_token then return 0 end
 
 redis.call('SREM', running_key, id)
 local conc = conc_key(prefix, f[5], f[4])
 if conc then redis.call('SREM', conc, id) end
+local group = f[9]
+if group and group ~= '' then
+  redis.call('SREM', grp_run_key(prefix, group), id)
+  if f[10] and f[10] ~= '' then redis.call('SREM', grp_fair_key(prefix, group, f[10]), id) end
+end
 
 local deliveries = tonumber(f[6]) or 0
 if mode == 'requeue' and deliveries >= tonumber(ARGV[5]) then
@@ -298,7 +458,13 @@ redis.call('HSET', task_key,
   'claimToken', '',
   'heartbeatAt', '')
 local priority = tonumber(f[3]) or 5
-redis.call('ZADD', pending_key, priority * 1e12 + (1e12 - tonumber(id)), id)
+local score = priority * 1e12 + (1e12 - tonumber(id))
+redis.call('ZADD', pending_key, score, id)
+if group and group ~= '' then
+  redis.call('ZREM', grp_starts_key(prefix, group), id)
+  redis.call('ZADD', KEYS[5], score, id)
+  redis.call('SADD', prefix .. ':grp:wf:' .. f[7], id)
+end
 return 1
 `;
 
@@ -313,6 +479,7 @@ return 1
  */
 const SETTLE_LUA =
   CONC_KEY_LUA +
+  GROUP_LUA +
   `
 local task_key = KEYS[1]
 local running_key = KEYS[2]
@@ -322,7 +489,7 @@ local claim_token = ARGV[2]
 local prefix = ARGV[8]
 
 local f = redis.call('HMGET', task_key, 'status', 'claimToken', 'workflowId', 'stepName',
-  'concurrencyScope', 'concurrencyKey')
+  'concurrencyScope', 'concurrencyKey', 'groupName', 'fairnessKey')
 if f[1] ~= 'running' then return 0 end
 if claim_token ~= '' and f[2] ~= claim_token then return 0 end
 
@@ -338,6 +505,11 @@ redis.call('SREM', running_key, id)
 -- The task keeps its (workflowId, stepName) active slot until consumed.
 local conc = conc_key(prefix, f[5], f[6])
 if conc then redis.call('SREM', conc, id) end
+-- A grouped task frees its group slot; its start stays in the rate window.
+if f[7] and f[7] ~= '' then
+  redis.call('SREM', grp_run_key(prefix, f[7]), id)
+  if f[8] and f[8] ~= '' then redis.call('SREM', grp_fair_key(prefix, f[7], f[8]), id) end
+end
 redis.call('ZADD', done_key, tonumber(ARGV[9]), id)
 return 1
 `;
@@ -385,6 +557,34 @@ for _, id in ipairs(ids) do
   redis.call('ZREM', done_key, id)
 end
 return {purged, #ids}
+`;
+
+/**
+ * The grouped pending tasks of one run that their group holds back right now:
+ * flat `[id, reason, retryAtMs | '']` triples.
+ *
+ * KEYS: [grp_wf_key]
+ * ARGV: [prefix, now_ms]
+ */
+const THROTTLED_LUA =
+  GROUP_LUA +
+  `
+local prefix = ARGV[1]
+local now_ms = tonumber(ARGV[2])
+local out = {}
+for _, id in ipairs(redis.call('SMEMBERS', KEYS[1])) do
+  local h = redis.call('HMGET', prefix .. ':task:' .. id, 'status', 'groupName',
+    'groupMaxConcurrent', 'groupMaxStarts', 'groupWindowMs')
+  if h[1] == 'pending' and h[2] and h[2] ~= '' then
+    local reason, retry = grp_verdict(prefix, h[2], h[3], h[4], h[5], now_ms, false)
+    if reason then
+      table.insert(out, id)
+      table.insert(out, reason)
+      table.insert(out, retry and string.format('%.0f', retry) or '')
+    end
+  end
+end
+return out
 `;
 
 /**
@@ -483,6 +683,10 @@ export class RedisStepQueue implements StepQueue {
     return `${this.base}:running`;
   }
 
+  private get groupPendingKey(): string {
+    return `${this.base}:grp:pending`;
+  }
+
   private get doneKey(): string {
     return `${this.base}:done`;
   }
@@ -503,10 +707,11 @@ export class RedisStepQueue implements StepQueue {
     // One Lua round-trip: check active, maybe insert, atomic.
     const id = (await this.redis.eval(
       ENQUEUE_LUA,
-      3,
+      4,
       this.activeKey(params.workflowId, params.stepName),
       this.pendingKey,
       `${this.base}:counter`,
+      this.groupPendingKey,
       `${this.base}:task:`,
       params.workflowId,
       params.stepName,
@@ -525,6 +730,12 @@ export class RedisStepQueue implements StepQueue {
       JSON.stringify(params.dependsOn ?? []),
       params.timeoutMs !== undefined ? String(params.timeoutMs) : "",
       String(params.run ?? 1),
+      params.groupName ?? "",
+      params.groupMaxConcurrent !== undefined ? String(params.groupMaxConcurrent) : "",
+      params.groupMaxStarts !== undefined ? String(params.groupMaxStarts) : "",
+      params.groupWindowMs !== undefined ? String(params.groupWindowMs) : "",
+      params.fairnessKey ?? "",
+      this.base,
     )) as string;
     return String(id);
   }
@@ -535,10 +746,11 @@ export class RedisStepQueue implements StepQueue {
 
     const raw = (await this.redis.eval(
       CLAIM_LUA,
-      3,
+      4,
       this.pendingKey,
       this.runningKey,
       `${this.base}:claimseq`,
+      this.groupPendingKey,
       params.workerId,
       this.clock.now().toISOString(),
       String(limit),
@@ -547,6 +759,7 @@ export class RedisStepQueue implements StepQueue {
       String(Math.max(limit, this.claimScanLimit)),
       params.stepNames !== undefined ? JSON.stringify(params.stepNames) : "",
       params.versions !== undefined ? JSON.stringify(params.versions) : "",
+      String(this.clock.currentTimeMs()),
     )) as string[][];
 
     const claimed: StepTask[] = [];
@@ -662,6 +875,34 @@ export class RedisStepQueue implements StepQueue {
     }
 
     return { requeued, deadLettered };
+  }
+
+  async throttled(params: { workflowId: string }): Promise<ThrottledTask[]> {
+    const flat = (await this.redis.eval(
+      THROTTLED_LUA,
+      1,
+      `${this.base}:grp:wf:${params.workflowId}`,
+      this.base,
+      String(this.clock.currentTimeMs()),
+    )) as string[];
+    const out: ThrottledTask[] = [];
+    for (let i = 0; i < flat.length; i += 3) {
+      const record = await this.get(String(flat[i]));
+      if (record === undefined || record.groupName === undefined) continue;
+      const retryAt = flat[i + 2];
+      out.push({
+        taskId: record.id,
+        workflowId: record.workflowId,
+        run: record.run,
+        stepName: record.stepName,
+        attempt: record.attempt,
+        groupName: record.groupName,
+        reason: flat[i + 1] === "rate" ? "rate" : "concurrency",
+        since: record.createdAt,
+        ...(retryAt ? { retryAt: new Date(Number(retryAt)) } : {}),
+      });
+    }
+    return out.sort((a, b) => Number(a.taskId) - Number(b.taskId));
   }
 
   async consume(params: { taskId: string }): Promise<boolean> {
@@ -841,11 +1082,12 @@ export class RedisStepQueue implements StepQueue {
     const leaseKeys = params.lease ? [this.leaseStore!.keysFor(params.lease.key).epoch] : [];
     const code = await this.redis.eval(
       REQUEUE_LUA,
-      4 + leaseKeys.length,
+      5 + leaseKeys.length,
       this.taskKey(params.id),
       this.runningKey,
       this.pendingKey,
       this.doneKey,
+      this.groupPendingKey,
       ...leaseKeys,
       params.id,
       this.base,
@@ -890,6 +1132,11 @@ export class RedisStepQueue implements StepQueue {
     if (opt("concurrencyScope")) record.concurrencyScope = map.concurrencyScope;
     if (opt("concurrencyLimit")) record.concurrencyLimit = Number(map.concurrencyLimit);
     if (opt("timeoutMs")) record.timeoutMs = Number(map.timeoutMs);
+    if (opt("groupName")) record.groupName = map.groupName;
+    if (opt("groupMaxConcurrent")) record.groupMaxConcurrent = Number(map.groupMaxConcurrent);
+    if (opt("groupMaxStarts")) record.groupMaxStarts = Number(map.groupMaxStarts);
+    if (opt("groupWindowMs")) record.groupWindowMs = Number(map.groupWindowMs);
+    if (opt("fairnessKey")) record.fairnessKey = map.fairnessKey;
     if (opt("claimedBy")) record.claimedBy = map.claimedBy;
     if (opt("claimedAt")) record.claimedAt = date("claimedAt");
     if (opt("heartbeatAt")) record.heartbeatAt = date("heartbeatAt");

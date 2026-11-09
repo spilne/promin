@@ -77,6 +77,10 @@ export class CoordinatorStepExecutor implements StepExecutor {
     await this.queueExecutor.discardSettled?.(params);
   }
 
+  queuedWaits(params: { readonly workflowId: string }) {
+    return this.queueExecutor.queuedWaits?.(params) ?? Promise.resolve([]);
+  }
+
   executeStep(req: StepExecutionRequest): Promise<StepExecutionResult> {
     const workflow = this.workflow;
     const stepDef = workflow?._definition.steps.find((s) => s.name === req.stepName);

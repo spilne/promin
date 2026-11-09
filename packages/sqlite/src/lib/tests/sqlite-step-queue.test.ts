@@ -17,6 +17,42 @@ stepQueueTestSuite(({ maxDeliveries, clock }) => makeQueue({ maxDeliveries, cloc
 // ---- SQLite-specific tests ----
 
 describe("SqliteStepQueue", () => {
+  it("adds the step-group columns to a table created before them, and reopens idempotently", async () => {
+    const db = new Database(":memory:");
+    // A task table as an earlier release created it: no group columns.
+    db.run(`
+      CREATE TABLE promin_step_tasks (
+        id TEXT NOT NULL PRIMARY KEY, workflow_id TEXT NOT NULL, step_name TEXT NOT NULL,
+        needs TEXT NOT NULL DEFAULT '[]', priority INTEGER NOT NULL DEFAULT 5, input TEXT NOT NULL,
+        deps TEXT NOT NULL DEFAULT '{}', depends_on TEXT NOT NULL DEFAULT '[]', timeout_ms INTEGER,
+        attempt INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'pending', version TEXT,
+        namespace TEXT, metadata TEXT, created_at INTEGER NOT NULL, claimed_at INTEGER,
+        claim_token TEXT, completed_at INTEGER, result TEXT, error TEXT, error_tag TEXT,
+        step_metadata TEXT, duration_ms INTEGER, last_heartbeat INTEGER, active_key TEXT,
+        concurrency_key TEXT, concurrency_scope TEXT, concurrency_limit INTEGER, claimed_by TEXT,
+        deliveries INTEGER NOT NULL DEFAULT 0, run INTEGER NOT NULL DEFAULT 1, consumed_at INTEGER
+      )
+    `);
+    db.run(
+      `INSERT INTO promin_step_tasks (id, workflow_id, step_name, input, created_at, active_key)
+       VALUES ('old', 'wf-old', 's', '{}', 1, 'wf-old::s')`,
+    );
+
+    const q = SqliteStepQueue.make({ db });
+    SqliteStepQueue.make({ db });
+    await q.enqueue({
+      workflowId: "wf-new",
+      stepName: "s",
+      input: {},
+      groupName: "g",
+      groupMaxConcurrent: 1,
+    });
+    const claimed = await q.claim({ workerId: "w", limit: 5 });
+    // The pre-existing ungrouped row and the grouped one both work.
+    expect(claimed.map((t) => t.workflowId).sort()).toEqual(["wf-new", "wf-old"]);
+    expect(claimed.find((t) => t.workflowId === "wf-new")!.groupName).toBe("g");
+  });
+
   it("persists across instances sharing the same db", async () => {
     const db = new Database(":memory:");
     const q1 = SqliteStepQueue.make({ db });

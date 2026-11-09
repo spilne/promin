@@ -120,6 +120,32 @@ export interface WorkflowTraceWaitEnd extends WorkflowTraceRef {
   readonly wakeAt?: Date;
 }
 
+/**
+ * A queued step is being held back by its rate-limit / concurrency group
+ * (`StepGroupOption`): it stays queued, uses no retry attempt, and starts
+ * when the group has room. Emitted once per throttle episode, when the
+ * coordinator first sees the step held back.
+ */
+export interface WorkflowTraceStepThrottled extends WorkflowTraceRef {
+  readonly stepName: string;
+  readonly attempt: number;
+  readonly groupName: string;
+  readonly reason: "concurrency" | "rate";
+  readonly at: Date;
+  /** Earliest time the rate window frees a slot (`reason: "rate"`); a hint. */
+  readonly retryAt?: Date;
+}
+
+/** The step a group held back was claimed (or its wait ended another way). */
+export interface WorkflowTraceStepThrottleEnd extends WorkflowTraceRef {
+  readonly stepName: string;
+  readonly attempt: number;
+  readonly groupName: string;
+  readonly since: Date;
+  readonly endedAt: Date;
+  readonly waitedMs: number;
+}
+
 export interface WorkflowTraceLockAcquired {
   readonly workflowId: string;
   readonly namespace?: string;
@@ -212,6 +238,8 @@ export interface WorkflowTracerCallbacks {
   stepAttemptEnd(event: WorkflowTraceStepAttemptEnd): void | Promise<void>;
   waitStart(event: WorkflowTraceWaitStart): void | Promise<void>;
   waitEnd(event: WorkflowTraceWaitEnd): void | Promise<void>;
+  stepThrottled(event: WorkflowTraceStepThrottled): void | Promise<void>;
+  stepThrottleEnd(event: WorkflowTraceStepThrottleEnd): void | Promise<void>;
   lockAcquired(event: WorkflowTraceLockAcquired): void | Promise<void>;
   lockLost(event: WorkflowTraceLockLost): void | Promise<void>;
   compensationStart(event: WorkflowTraceCompensationStart): void | Promise<void>;

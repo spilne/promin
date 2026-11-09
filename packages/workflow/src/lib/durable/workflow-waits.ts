@@ -15,18 +15,26 @@ import type { WorkflowState } from "./workflow-state.ts";
  * - `approval`: a signal wait on an `approve:<id>` signal (`ctx.approval`).
  * - `child`: a step parked on child workflow `childWorkflowId`; `until` is the child's
  *   earliest wake time, when it has one (the parent is re-driven then).
+ * - `step-queue`: a queued step its rate-limit / concurrency group (`groupName`) is
+ *   holding back; `until` is when the rate window frees a slot (absent while it
+ *   waits on a running task, `reason: "concurrency"`). Not stored on a step
+ *   row: `getStatus` reads it from the step executor (`StepExecutor.queuedWaits`).
  *
  * `since` is when the step started (the run's last update when the step row has no start).
  * Waits that are not persisted on a step row (an activity in flight, a retry backoff,
  * a step task queued for a worker) are not derivable from storage and are not listed.
  */
 export interface WorkflowWait {
-  readonly kind: "sleep" | "signal" | "approval" | "child";
+  readonly kind: "sleep" | "signal" | "approval" | "child" | "step-queue";
   readonly stepName: string;
   readonly since: Date;
   readonly until?: Date;
   readonly signalName?: string;
   readonly childWorkflowId?: string;
+  /** `step-queue` waits: the group holding the step back. */
+  readonly groupName?: string;
+  /** `step-queue` waits: out of concurrent slots, or out of starts for the window. */
+  readonly reason?: "concurrency" | "rate";
   readonly attempt?: number;
 }
 
@@ -66,7 +74,26 @@ export function deriveWaitingOn(state: WorkflowState): WorkflowWait[] {
       }
     }
   }
+  return sortWaits(waits);
+}
+
+function sortWaits(waits: WorkflowWait[]): WorkflowWait[] {
   return waits.sort((a, b) => (a.stepName < b.stepName ? -1 : a.stepName > b.stepName ? 1 : 0));
+}
+
+/**
+ * `stored` waits plus `extra` ones from outside the step rows (a queued step
+ * its group holds back), ordered by step name. A step already parked in
+ * storage is not also reported as queued. Live runs only: `stored` empty
+ * for an ended run still yields `extra`, so callers pass extras only for a
+ * live run.
+ */
+export function mergeWaits(params: {
+  stored: readonly WorkflowWait[];
+  extra: readonly WorkflowWait[];
+}): WorkflowWait[] {
+  const parked = new Set(params.stored.map((w) => w.stepName));
+  return sortWaits([...params.stored, ...params.extra.filter((w) => !parked.has(w.stepName))]);
 }
 
 /** `1500000` → `"25m"`; the two largest non-zero units at most, `"now"` for <= 0. */
@@ -103,6 +130,8 @@ function describeWait(params: { wait: WorkflowWait; now: Date }): string {
       return `waiting for approval ${wait.signalName ?? ""} (${detail("times out")})`;
     case "child":
       return `waiting for child workflow ${wait.childWorkflowId} (${detail("wakes")})`;
+    case "step-queue":
+      return `queued behind ${wait.reason === "rate" ? "rate limit" : "concurrency limit"} of group ${wait.groupName} (${detail("next slot")})`;
   }
 }
 

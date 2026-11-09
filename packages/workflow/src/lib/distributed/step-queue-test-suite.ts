@@ -1012,6 +1012,219 @@ export function stepQueueTestSuite(
     });
 
     // -------------------------------------------------------------------
+    // step groups — named rate-limit / concurrency groups with fairness
+    // -------------------------------------------------------------------
+
+    describe("step groups", () => {
+      const grouped = (
+        workflowId: string,
+        stepName: string,
+        group: Partial<StepQueueEnqueueParams> & { groupName: string },
+      ) => task(workflowId, stepName, group);
+
+      it("caps running tasks of a group across workers, steps and workflows", async () => {
+        const q = await getQueue();
+        // Two workflows, two steps: one group, so they share the cap.
+        await q.enqueue(grouped("g1-a", "s1", { groupName: "g1", groupMaxConcurrent: 2 }));
+        await q.enqueue(grouped("g1-b", "s2", { groupName: "g1", groupMaxConcurrent: 2 }));
+        await q.enqueue(grouped("g1-c", "s1", { groupName: "g1", groupMaxConcurrent: 2 }));
+
+        const [a, b] = await Promise.all([
+          q.claim({ workerId: "w-1", limit: 1 }),
+          q.claim({ workerId: "w-2", limit: 1 }),
+        ]);
+        expect([...a, ...b]).toHaveLength(2);
+        expect(await q.claim({ workerId: "w-3", limit: 5 })).toHaveLength(0);
+
+        // The held task was deferred, not failed, and no delivery was spent.
+        const held = (await q.get(await q.enqueue(grouped("g1-c", "s1", { groupName: "g1" }))))!;
+        expect(held.status).toBe("pending");
+        expect(held.deliveries).toBe(0);
+
+        // A settled task frees a slot.
+        const first = [...a, ...b][0]!;
+        await q.complete({
+          taskId: first.id,
+          claimToken: first.claimToken!,
+          result: 1,
+          durationMs: 1,
+        });
+        const [third] = await q.claim({ workerId: "w-3", limit: 5 });
+        expect(third!.workflowId).toBe("g1-c");
+        expect(third!.deliveries).toBe(1);
+        expect(third!.groupName).toBe("g1");
+        expect(third!.groupMaxConcurrent).toBe(2);
+      });
+
+      it("groups are independent, and ungrouped tasks are never held back by a full group", async () => {
+        const q = await getQueue();
+        await q.enqueue(
+          grouped("ind-a1", "s", { groupName: "ind-a", groupMaxConcurrent: 1, priority: 9 }),
+        );
+        await q.enqueue(
+          grouped("ind-a2", "s", { groupName: "ind-a", groupMaxConcurrent: 1, priority: 9 }),
+        );
+        await q.enqueue(grouped("ind-b1", "s", { groupName: "ind-b", groupMaxConcurrent: 1 }));
+        await q.enqueue(task("ind-free", "s", { priority: 1 }));
+
+        // limit 2 would be filled by the two held-back priority-9 tasks of
+        // a claim-then-filter backend.
+        const claimed = await q.claim({ workerId: "w-1", limit: 2 });
+        expect(claimed.map((t) => t.workflowId).sort()).toEqual(["ind-a1", "ind-b1"]);
+        const rest = await q.claim({ workerId: "w-2", limit: 5 });
+        expect(rest.map((t) => t.workflowId)).toEqual(["ind-free"]);
+      });
+
+      it("limits starts per window across claimers; the window slides and release gives a start back", async () => {
+        const q = await getQueue();
+        const windowMs = suiteOptions.fakeClock ? 60_000 : 600;
+        const limits = { groupName: "rate", groupMaxStarts: 2, groupWindowMs: windowMs };
+        for (let i = 0; i < 4; i++) await q.enqueue(grouped(`rate-${i}`, "s", limits));
+
+        const [a, b] = await Promise.all([
+          q.claim({ workerId: "w-1", limit: 2 }),
+          q.claim({ workerId: "w-2", limit: 2 }),
+        ]);
+        const started = [...a, ...b];
+        expect(started).toHaveLength(2);
+
+        // Finished tasks still count against the window.
+        for (const t of started) {
+          await q.complete({ taskId: t.id, claimToken: t.claimToken!, result: 1, durationMs: 1 });
+        }
+        expect(await q.claim({ workerId: "w-3", limit: 5 })).toHaveLength(0);
+
+        await elapse(windowMs + 100);
+        const next = await q.claim({ workerId: "w-3", limit: 5 });
+        expect(next).toHaveLength(2);
+
+        // Giving a claim back returns its start: the freed slot is usable now.
+        await q.release({ taskId: next[0]!.id, claimToken: next[0]!.claimToken! });
+        const again = await q.claim({ workerId: "w-4", limit: 5 });
+        expect(again.map((t) => t.id)).toEqual([next[0]!.id]);
+      });
+
+      it("a rate- and concurrency-limited group honours both", async () => {
+        const q = await getQueue();
+        const limits = {
+          groupName: "both",
+          groupMaxConcurrent: 1,
+          groupMaxStarts: 5,
+          groupWindowMs: 60_000,
+        };
+        await q.enqueue(grouped("both-1", "s", limits));
+        await q.enqueue(grouped("both-2", "s", limits));
+        const [first] = await q.claim({ workerId: "w-1", limit: 5 });
+        expect(first).toBeDefined();
+        expect(await q.claim({ workerId: "w-2", limit: 5 })).toHaveLength(0);
+      });
+
+      it("claims a group fairly across fairness keys, however many a key has queued", async () => {
+        const q = await getQueue();
+        const g = { groupName: "fair", groupMaxConcurrent: 100 };
+        for (let i = 0; i < 6; i++) {
+          await q.enqueue(grouped(`noisy-${i}`, "s", { ...g, fairnessKey: "noisy" }));
+        }
+        for (let i = 0; i < 2; i++) {
+          await q.enqueue(grouped(`quiet-${i}`, "s", { ...g, fairnessKey: "quiet" }));
+        }
+
+        const claimed = await q.claim({ workerId: "w-1", limit: 4 });
+        const byKey = (key: string) => claimed.filter((t) => t.fairnessKey === key).length;
+        // Plain FIFO would give noisy all four; round-robin gives each key two.
+        expect(byKey("quiet")).toBe(2);
+        expect(byKey("noisy")).toBe(2);
+        // Within a key, FIFO still holds.
+        expect(claimed.filter((t) => t.fairnessKey === "noisy").map((t) => t.workflowId)).toEqual([
+          "noisy-0",
+          "noisy-1",
+        ]);
+      });
+
+      it("a key already running in the group yields to one that is not", async () => {
+        const q = await getQueue();
+        const g = { groupName: "share", groupMaxConcurrent: 100 };
+        for (let i = 0; i < 3; i++) {
+          await q.enqueue(grouped(`hog-${i}`, "s", { ...g, fairnessKey: "hog" }));
+        }
+        expect(await q.claim({ workerId: "w-1", limit: 2 })).toHaveLength(2);
+        // hog has two running and one queued; a newcomer arrives behind it.
+        await q.enqueue(grouped("new-0", "s", { ...g, fairnessKey: "new" }));
+        const [next] = await q.claim({ workerId: "w-2", limit: 1 });
+        expect(next!.workflowId).toBe("new-0");
+      });
+
+      it("priority still outranks fairness", async () => {
+        const q = await getQueue();
+        const g = { groupName: "prio", groupMaxConcurrent: 100 };
+        await q.enqueue(grouped("p-lo", "s", { ...g, fairnessKey: "a", priority: 1 }));
+        await q.enqueue(grouped("p-hi-0", "s", { ...g, fairnessKey: "b", priority: 9 }));
+        await q.enqueue(grouped("p-hi-1", "s", { ...g, fairnessKey: "b", priority: 9 }));
+        const claimed = await q.claim({ workerId: "w-1", limit: 2 });
+        expect(claimed.map((t) => t.workflowId)).toEqual(["p-hi-0", "p-hi-1"]);
+      });
+
+      it("throttled reports a workflow's held-back tasks with the reason, and nothing once they run", async () => {
+        const q = await getQueue();
+        const windowMs = 60_000;
+        // Concurrency-held.
+        await q.enqueue(grouped("th-c1", "s", { groupName: "th-c", groupMaxConcurrent: 1 }));
+        await q.enqueue(grouped("th-c2", "s", { groupName: "th-c", groupMaxConcurrent: 1 }));
+        // Rate-held.
+        await q.enqueue(
+          grouped("th-r1", "s", { groupName: "th-r", groupMaxStarts: 1, groupWindowMs: windowMs }),
+        );
+        await q.enqueue(
+          grouped("th-r2", "s", { groupName: "th-r", groupMaxStarts: 1, groupWindowMs: windowMs }),
+        );
+        // Not in a group.
+        await q.enqueue(task("th-free", "s"));
+        expect(await q.throttled!({ workflowId: "th-c2" })).toHaveLength(0);
+
+        const first = await q.claim({ workerId: "w-1", limit: 1, stepNames: ["s"] });
+        expect(first).toHaveLength(1);
+        await q.claim({ workerId: "w-1", limit: 10 });
+
+        const conc = await q.throttled!({ workflowId: "th-c2" });
+        const rate = await q.throttled!({ workflowId: "th-r2" });
+        expect(conc.map((t) => [t.stepName, t.groupName, t.reason])).toEqual([
+          ["s", "th-c", "concurrency"],
+        ]);
+        expect(conc[0]!.retryAt).toBeUndefined();
+        expect(rate.map((t) => [t.groupName, t.reason])).toEqual([["th-r", "rate"]]);
+        expect(rate[0]!.retryAt!.getTime()).toBeGreaterThan(Date.now() - 5 * 60_000);
+        expect(rate[0]!.attempt).toBe(1);
+        expect(rate[0]!.run).toBe(1);
+        // Workflows that have nothing held, and the claimed ones, report nothing.
+        expect(await q.throttled!({ workflowId: "th-c1" })).toHaveLength(0);
+        expect(await q.throttled!({ workflowId: "th-free" })).toHaveLength(0);
+      });
+
+      it("throttled drains as the group frees up", async () => {
+        const q = await getQueue();
+        await q.enqueue(grouped("dr-1", "s", { groupName: "dr", groupMaxConcurrent: 1 }));
+        await q.enqueue(grouped("dr-2", "s", { groupName: "dr", groupMaxConcurrent: 1 }));
+        const [running] = await q.claim({ workerId: "w-1", limit: 5 });
+        expect(await q.throttled!({ workflowId: "dr-2" })).toHaveLength(1);
+        await q.complete({
+          taskId: running!.id,
+          claimToken: running!.claimToken!,
+          result: 1,
+          durationMs: 1,
+        });
+        expect(await q.throttled!({ workflowId: "dr-2" })).toHaveLength(0);
+      });
+
+      it("a group without a fairness key and without limits claims in plain order", async () => {
+        const q = await getQueue();
+        await q.enqueue(grouped("pl-0", "s", { groupName: "plain" }));
+        await q.enqueue(grouped("pl-1", "s", { groupName: "plain" }));
+        const claimed = await q.claim({ workerId: "w-1", limit: 5 });
+        expect(claimed.map((t) => t.workflowId)).toEqual(["pl-0", "pl-1"]);
+      });
+    });
+
+    // -------------------------------------------------------------------
     // claim routing — stepNames / versions run inside the claim
     // -------------------------------------------------------------------
 

@@ -66,7 +66,9 @@ event capabilities (`runEvents`, `stepStartedEvents`; the runner polls).
   process to one connection; several processes on one file coordinate through
   SQLite's file locks, but there is no network distribution.
 - **Step queue.** `claim` runs in one transaction with routing (step names,
-  versions, capabilities) applied before the claim, concurrency keys,
+  versions, capabilities) applied before the claim, concurrency keys, step
+  groups (rate limit, concurrency and fair claim order; the five `group_*` /
+  `fairness_key` columns are added to older tables on open),
   `claimedBy`, deliveries and dead-lettering — the full contract from
   [Distributed execution](../workflow/src/lib/distributed/README.md#step-queue-contract-v2).
   `SqliteStepQueue` has no lease store, so `requeueStuck({ lease })` is not
