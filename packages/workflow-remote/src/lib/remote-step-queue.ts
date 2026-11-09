@@ -13,6 +13,7 @@ import type {
   StepQueueClaimParams,
   StepQueueCompleteParams,
   StepQueueFailParams,
+  StepQueueHeartbeatParams,
   StepQueueRequeueResult,
   StepTask,
   StepTaskRecord,
@@ -126,7 +127,7 @@ export class RemoteStepQueue implements StepQueue {
     return this.call("fail", params);
   }
 
-  heartbeat(params: { taskId: string; claimToken?: string }): Promise<boolean> {
+  heartbeat(params: StepQueueHeartbeatParams): Promise<boolean> {
     return this.call("heartbeat", params);
   }
 

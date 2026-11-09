@@ -69,8 +69,14 @@ export function traceStepSettled(params: {
     }
     if (outcome.kind === "suspended") {
       const reason = (outcome.error as { reason?: unknown } | null)?.reason;
-      if (reason === "sleep" || reason === "signal") {
-        emitTrace(tracer, "waitStart", { ...ref, stepName: outcome.name, kind: reason, at: now });
+      if (reason === "sleep" || reason === "signal" || reason === "event") {
+        emitTrace(tracer, "waitStart", {
+          ...ref,
+          stepName: outcome.name,
+          kind: reason,
+          ...(reason === "event" && eventFieldsOf(outcome.error)),
+          at: now,
+        });
       }
     }
     return;
@@ -122,4 +128,13 @@ export function traceStepSettled(params: {
     ...(usage !== undefined && { usage }),
     ...(outcome.executorId !== undefined && { executorId: outcome.executorId }),
   });
+}
+
+/** The awaited event a suspension reports, as the tracer's wait fields. */
+function eventFieldsOf(error: unknown): { eventName?: string; eventKey?: string } {
+  const { eventName, eventKey } = (error ?? {}) as { eventName?: unknown; eventKey?: unknown };
+  return {
+    ...(typeof eventName === "string" && { eventName }),
+    ...(typeof eventKey === "string" && { eventKey }),
+  };
 }

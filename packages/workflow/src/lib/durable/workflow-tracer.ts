@@ -99,10 +99,13 @@ export interface WorkflowTraceStepAttemptEnd extends WorkflowTraceRef {
   readonly executorId?: string;
 }
 
-/** A step parked on a sleep or a signal wait. */
+/** A step parked on a sleep, a signal wait or an event wait. */
 export interface WorkflowTraceWaitStart extends WorkflowTraceRef {
   readonly stepName: string;
-  readonly kind: "sleep" | "signal";
+  readonly kind: "sleep" | "signal" | "event";
+  /** The awaited event, for `kind: "event"`. */
+  readonly eventName?: string;
+  readonly eventKey?: string;
   readonly at: Date;
 }
 
@@ -113,7 +116,9 @@ export interface WorkflowTraceWaitStart extends WorkflowTraceRef {
  */
 export interface WorkflowTraceWaitEnd extends WorkflowTraceRef {
   readonly stepName: string;
-  readonly kind: "sleep" | "signal";
+  readonly kind: "sleep" | "signal" | "event";
+  readonly eventName?: string;
+  readonly eventKey?: string;
   readonly since?: Date;
   readonly endedAt: Date;
   readonly waitedMs?: number;

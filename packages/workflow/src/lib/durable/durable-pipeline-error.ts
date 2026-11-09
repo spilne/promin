@@ -131,7 +131,10 @@ export class FenceTokenMismatchError extends TaggedError("FenceTokenMismatchErro
 export class WorkflowSuspendedError extends TaggedError("WorkflowSuspendedError")<{
   readonly workflowId: string;
   readonly stepName: string;
-  readonly reason: "sleep" | "signal";
+  readonly reason: "sleep" | "signal" | "event";
+  /** The awaited event, for `reason: "event"`. */
+  readonly eventName?: string;
+  readonly eventKey?: string;
   readonly message: string;
 }>() {}
 

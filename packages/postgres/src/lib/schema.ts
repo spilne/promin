@@ -309,6 +309,9 @@ export const stepQueue = pgTable(
     claimedAt: timestamp("claimed_at", { withTimezone: true }),
     claimToken: text("claim_token"),
     heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+    // The latest progress details a heartbeat carried; kept across requeues
+    // so the next delivery of the task can resume from them.
+    heartbeatDetails: jsonb("heartbeat_details"),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     version: text("version"),

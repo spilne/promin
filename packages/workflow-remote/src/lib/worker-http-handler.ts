@@ -91,7 +91,12 @@ export function createWorkerApiHandler(config: {
         durationMs: p.durationMs,
         ...(p.stepMetadata !== undefined && { stepMetadata: p.stepMetadata }),
       }),
-    heartbeat: (p) => requireQueue().heartbeat({ taskId: p.taskId, claimToken: p.claimToken }),
+    heartbeat: (p) =>
+      requireQueue().heartbeat({
+        taskId: p.taskId,
+        claimToken: p.claimToken,
+        ...(p.details !== undefined && { details: p.details }),
+      }),
     // WorkerRegistry
     registerWorker: (p) =>
       requireRegistry((r) =>

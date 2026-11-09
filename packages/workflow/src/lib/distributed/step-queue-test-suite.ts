@@ -673,6 +673,102 @@ export function stepQueueTestSuite(
     // metrics
     // -------------------------------------------------------------------
 
+    // -------------------------------------------------------------------
+    // heartbeat details — progress kept with the lease
+    // -------------------------------------------------------------------
+    describe("heartbeat details", () => {
+      const details = { cursor: 42, page: ["a", { b: null }], done: false };
+
+      it("a task has no details until a heartbeat sends some", async () => {
+        const q = await getQueue();
+        await q.enqueue(task("wf-hb", "s"));
+        const [claimed] = await q.claim({ workerId: "w-1", limit: 1 });
+        expect(claimed!.lastHeartbeatDetails).toBeUndefined();
+        await q.heartbeat({ taskId: claimed!.id, claimToken: claimed!.claimToken });
+        expect((await q.get(claimed!.id))?.lastHeartbeatDetails).toBeUndefined();
+      });
+
+      it("stores details with the lease, replaces them, and keeps them across a heartbeat without any", async () => {
+        const q = await getQueue();
+        await q.enqueue(task("wf-hb", "s"));
+        const [claimed] = await q.claim({ workerId: "w-1", limit: 1 });
+        const claim = { taskId: claimed!.id, claimToken: claimed!.claimToken };
+
+        expect(await q.heartbeat({ ...claim, details })).toBe(true);
+        expect((await q.get(claimed!.id))?.lastHeartbeatDetails).toEqual(details);
+
+        expect(await q.heartbeat(claim)).toBe(true);
+        expect((await q.get(claimed!.id))?.lastHeartbeatDetails).toEqual(details);
+
+        expect(await q.heartbeat({ ...claim, details: { cursor: 43 } })).toBe(true);
+        expect((await q.get(claimed!.id))?.lastHeartbeatDetails).toEqual({ cursor: 43 });
+
+        // `null` clears them.
+        expect(await q.heartbeat({ ...claim, details: null })).toBe(true);
+        expect((await q.get(claimed!.id))?.lastHeartbeatDetails).toBeUndefined();
+      });
+
+      it("the next delivery after a lost lease reads the last details", async () => {
+        const q = await getQueue();
+        await q.enqueue(task("wf-hb", "s"));
+        const [first] = await q.claim({ workerId: "w-1", limit: 1 });
+        await q.heartbeat({ taskId: first!.id, claimToken: first!.claimToken, details });
+
+        await elapse(300);
+        expect((await q.requeueStuck({ mode: "stale", olderThanMs: 250 })).requeued).toBe(1);
+        const [second] = await q.claim({ workerId: "w-2", limit: 1 });
+        expect(second!.id).toBe(first!.id);
+        expect(second!.lastHeartbeatDetails).toEqual(details);
+
+        // A worker taken over by a crashed one's sweep ("worker" mode) too.
+        await q.heartbeat({
+          taskId: second!.id,
+          claimToken: second!.claimToken,
+          details: { cursor: 99 },
+        });
+        expect((await q.requeueStuck({ mode: "worker", workerId: "w-2" })).requeued).toBe(1);
+        const [third] = await q.claim({ workerId: "w-3", limit: 1 });
+        expect(third!.lastHeartbeatDetails).toEqual({ cursor: 99 });
+      });
+
+      it("a heartbeat that lost its claim stores nothing", async () => {
+        const q = await getQueue();
+        await q.enqueue(task("wf-hb", "s"));
+        const [first] = await q.claim({ workerId: "w-1", limit: 1 });
+        await q.heartbeat({ taskId: first!.id, claimToken: first!.claimToken, details });
+        await elapse(300);
+        await q.requeueStuck({ mode: "stale", olderThanMs: 250 });
+        const [second] = await q.claim({ workerId: "w-2", limit: 1 });
+
+        // The stalled first worker wakes up and heartbeats with stale progress.
+        expect(
+          await q.heartbeat({
+            taskId: first!.id,
+            claimToken: first!.claimToken,
+            details: { cursor: -1 },
+          }),
+        ).toBe(false);
+        expect((await q.get(second!.id))?.lastHeartbeatDetails).toEqual(details);
+      });
+
+      it("details survive release and are gone with a fresh task for the step", async () => {
+        const q = await getQueue();
+        const id = await q.enqueue(task("wf-hb", "s"));
+        const [claimed] = await q.claim({ workerId: "w-1", limit: 1 });
+        await q.heartbeat({ taskId: id, claimToken: claimed!.claimToken, details });
+        await q.release({ taskId: id, claimToken: claimed!.claimToken! });
+        const [again] = await q.claim({ workerId: "w-1", limit: 1 });
+        expect(again!.lastHeartbeatDetails).toEqual(details);
+
+        // A settled and consumed task's retry is a new task: no carried progress.
+        await q.fail({ taskId: id, claimToken: again!.claimToken, error: "x", durationMs: 1 });
+        await q.consume({ taskId: id });
+        await q.enqueue(task("wf-hb", "s", { attempt: 2 }));
+        const [retry] = await q.claim({ workerId: "w-1", limit: 1 });
+        expect(retry!.lastHeartbeatDetails).toBeUndefined();
+      });
+    });
+
     describe("metrics", () => {
       it("returns counts scoped to the requested time window", async () => {
         const q = await getQueue();

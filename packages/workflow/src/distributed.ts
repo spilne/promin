@@ -24,6 +24,7 @@ export {
   type StepQueueEnqueueParams,
   type StepQueueCompleteParams,
   type StepQueueFailParams,
+  type StepQueueHeartbeatParams,
   type StepQueueClaimParams,
   type StepQueueRequeueParams,
   type StepQueueRequeueResult,

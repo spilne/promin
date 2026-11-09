@@ -505,6 +505,7 @@ CREATE TABLE wf_step_queue (
   deliveries integer DEFAULT 0 NOT NULL,
   run integer DEFAULT 1 NOT NULL,
   consumed_at timestamp with time zone,
+  heartbeat_details jsonb,
   CONSTRAINT wf_step_queue_pkey PRIMARY KEY (id)
 );
 

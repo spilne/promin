@@ -17,6 +17,18 @@ stepQueueTestSuite(({ maxDeliveries, clock }) => makeQueue({ maxDeliveries, cloc
 // ---- SQLite-specific tests ----
 
 describe("SqliteStepQueue", () => {
+  it("adds the heartbeat details column to a table created before it, and opening twice is harmless", async () => {
+    const db = new Database(":memory:");
+    SqliteStepQueue.make({ db }); // current layout
+    db.run("ALTER TABLE promin_step_tasks DROP COLUMN heartbeat_details");
+    const queue = SqliteStepQueue.make({ db });
+    SqliteStepQueue.make({ db });
+    await queue.enqueue({ workflowId: "wf", stepName: "s", input: {} });
+    const [task] = await queue.claim({ workerId: "w", limit: 1 });
+    expect(await queue.heartbeat({ taskId: task!.id, details: { n: 1 } })).toBe(true);
+    expect((await queue.get(task!.id))?.lastHeartbeatDetails).toEqual({ n: 1 });
+  });
+
   it("adds the step-group columns to a table created before them, and reopens idempotently", async () => {
     const db = new Database(":memory:");
     // A task table as an earlier release created it: no group columns.

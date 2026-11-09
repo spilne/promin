@@ -633,6 +633,25 @@ of activity functions), `ctx.patched(name)` (see [Versioning](../../../versionin
 
 Semantics:
 
+- **`ctx.waitForEvent(name | SignalType, { key?, where?, timeout? })`** parks
+  until an event addressed `(name, key)` arrives; `deliverEvent({ storage,
+workflowId, event, key?, payload, eventId? })` sends one. Unlike a signal
+  (one last-wins value per name), events are **buffered**: one delivered
+  before the wait starts is not lost, and several delivered in a row satisfy
+  one wait each, oldest first (delivery order, ties by event id). The same
+  `eventId` delivered twice stores one event (`duplicate: true`), and a retry
+  of a half-finished delivery still wakes the wait. Which event a wait took
+  is journaled, so replay returns the same payload. `where` takes only events
+  whose payload it accepts (the others stay buffered for later waits); with a
+  `timeout` the result is `{ ok, value } | { ok: false, error: "timeout" }`
+  with the deadline fixed at the first call. A wait without `key` matches only
+  unkeyed events. The buffer is per run and each step body reads it from the
+  start, so two steps waiting on one address both see the event: use distinct
+  keys to route one event to one step (likewise for concurrent waits on one
+  address inside one step). It rides on the signal store, so every backend
+  supports it with no schema change; a parked wait shows up in `waitingOn` as
+  `kind: "event"` (`eventName`, `eventKey`) and in the tracer's `waitStart` /
+  `waitEnd` events as `kind: "event"`.
 - **`ctx.metadata` write errors.** `set` / `merge` update the in-process
   snapshot at once and write to storage in the background; the step waits
   for its writes before its outcome is checkpointed. A write that fails with
