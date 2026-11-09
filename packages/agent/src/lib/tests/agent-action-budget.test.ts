@@ -434,3 +434,59 @@ describe("agentAction — budget replay", () => {
     expect(result.spend?.llmCalls).toBe(2);
   });
 });
+
+describe("agentAction — engine usage and budget", () => {
+  const llm = () => loopingLLM({ inputTokens: 1_000, outputTokens: 10 }, 1);
+
+  it("reports each LLM call's usage to the run's status when asked", async () => {
+    const { runner } = freshRunner();
+    const { lookup } = lookupTool();
+    await runner.run({
+      workflow: agentAction({
+        name: "engine-usage",
+        llm: llm(),
+        tools: { lookup },
+        budget: { maxLlmCalls: 2 },
+        reportEngineUsage: true,
+      }),
+      workflowId: "eu-1",
+      input: { task: "go" },
+    });
+    const status = await runner.getStatus({ workflowId: "eu-1" });
+    expect(status?.usage).toMatchObject({ inputTokens: 2_000, outputTokens: 20 });
+  });
+
+  it("fails the run with WorkflowBudgetExceededError past engineBudget", async () => {
+    const { runner } = freshRunner();
+    const { lookup, runs } = lookupTool();
+    const r = await runner.runSafe({
+      workflow: agentAction({
+        name: "engine-budget",
+        llm: llm(),
+        tools: { lookup },
+        engineBudget: { maxTokens: 1_500 },
+      }),
+      workflowId: "eu-2",
+      input: { task: "go" },
+    });
+    expect(r.error).toMatchObject({ _tag: "WorkflowBudgetExceededError", limit: "maxTokens" });
+    // The second call's spend trips the cap before its tool call runs.
+    expect(runs()).toBe(1);
+  });
+
+  it("reports nothing by default", async () => {
+    const { runner } = freshRunner();
+    const { lookup } = lookupTool();
+    await runner.run({
+      workflow: agentAction({
+        name: "no-engine-usage",
+        llm: llm(),
+        tools: { lookup },
+        budget: { maxLlmCalls: 2 },
+      }),
+      workflowId: "eu-3",
+      input: { task: "go" },
+    });
+    expect((await runner.getStatus({ workflowId: "eu-3" }))?.usage).toBeUndefined();
+  });
+});

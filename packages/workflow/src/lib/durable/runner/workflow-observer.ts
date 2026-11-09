@@ -13,6 +13,7 @@ import type { StepState, WorkflowRunEvent, WorkflowState } from "../workflow-sta
 import type { WorkflowStorage } from "../workflow-storage.ts";
 import { workflowFailure } from "../workflow-failure.ts";
 import { findTripwireStep, storedRunError } from "./run-status.ts";
+import { runUsage, stepUsage, type UsageTotals } from "../budget.ts";
 import { deriveWaitingOn, summarizeWaits } from "../workflow-waits.ts";
 
 export { findTripwireStep } from "./run-status.ts";
@@ -99,12 +100,16 @@ export function toStatusInfo(params: {
     }
   }
 
-  const steps: Record<string, { status: string; result?: unknown }> = {};
+  const steps: Record<string, { status: string; result?: unknown; usage?: UsageTotals }> = {};
   for (const [name, step] of Object.entries(state.steps)) {
-    steps[name] = includeResults
-      ? { status: step.status, result: step.result }
-      : { status: step.status };
+    const usage = stepUsage(step);
+    steps[name] = {
+      status: step.status,
+      ...(includeResults && { result: step.result }),
+      ...(usage !== undefined && { usage }),
+    };
   }
+  const usage = runUsage(state.steps);
 
   const failure = workflowFailure(state);
   const waitingOn = deriveWaitingOn(state);
@@ -118,6 +123,7 @@ export function toStatusInfo(params: {
     tripwire: state.status === "tripwire" ? state.tripwire : undefined,
     currentStep,
     suspendedReason,
+    ...(usage !== undefined && { usage }),
     waitingOn,
     ...(waitingOnSummary !== undefined && { waitingOnSummary }),
     steps,

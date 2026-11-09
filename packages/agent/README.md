@@ -209,6 +209,14 @@ input's `AgentInput.budget` ceiling — so a resumed or replayed turn makes the
 same decisions under an edited config. `AgentResult.spend` (and
 `trace.spend`) is what the turn spent: tokens, cost, LLM and tool calls.
 
+**Engine budget.** `engineBudget` (a `WorkflowBudget`: `maxTokens`, `maxCostUsd`, `perStep`, `steps`) is the
+workflow engine's cap on the whole run, and `reportEngineUsage: true` only reports
+usage without a cap. Both journal one `usage` entry after each think and compaction
+(`ctx.reportUsage`; input tokens include cache reads and writes), so the run's
+`status().usage` carries the spend. Past `engineBudget` the run fails with
+`WorkflowBudgetExceededError` (no `budget_exceeded` answer: use `budget` for a graceful
+end). Set either before turns start: toggling it changes the journal of a turn in flight.
+
 **Call tree.** A sub-agent call gets the caller's remaining budget in its
 child input (`AgentInput.budget`), split evenly between the sub-agent calls of
 one step, and the caller is charged the child's `spend` from the child's
