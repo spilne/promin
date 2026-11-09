@@ -195,6 +195,35 @@ describe("SqliteStepQueue claim at scale", () => {
     );
   });
 
+  it("a grouped task whose concurrency key is full does not hide the group's other tasks, and runs once the key frees", async () => {
+    const { queue } = open();
+    const both = (workflowId: string, key: string): StepQueueEnqueueParams => ({
+      workflowId,
+      stepName: "s",
+      input: {},
+      groupName: "g",
+      groupMaxConcurrent: 5,
+      concurrencyKey: key,
+      concurrencyScope: "s",
+      concurrencyLimit: 1,
+    });
+    await queue.enqueue(both("a", "k1"));
+    await queue.enqueue(both("b", "k1"));
+    await queue.enqueue(both("c", "k2"));
+
+    const first = await queue.claim({ workerId: "w", limit: 3 });
+    expect(first.map((t) => t.workflowId)).toEqual(["a", "c"]);
+    await queue.complete({
+      taskId: first[0]!.id,
+      claimToken: first[0]!.claimToken!,
+      result: 1,
+      durationMs: 1,
+    });
+    expect((await queue.claim({ workerId: "w", limit: 3 })).map((t) => t.workflowId)).toEqual([
+      "b",
+    ]);
+  });
+
   it("reads a task an older release inserted after the upgrade", async () => {
     const { db, queue } = open();
     // An older release has no `lane` column to write; the column is generated.

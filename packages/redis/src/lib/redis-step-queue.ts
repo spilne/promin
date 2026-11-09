@@ -2,18 +2,16 @@
 // RedisStepQueue — Redis-backed StepQueue for distributed step dispatch
 //
 // Every key of a queue starts with `{<prefix>}`, so on Redis Cluster the
-// whole queue sits in one slot: a claim walks the shared pending set and
+// whole queue sits in one slot: a claim merges the heads of the claim lanes and
 // moves tasks, running sets and concurrency sets in one script, so there is
 // no per-task key worth spreading. Queues with different prefixes land in
 // different slots.
 //
 // Key structure (base = `{<prefix>}`):
 //   <base>:task:<id>                               → Hash (task fields)
-//   <base>:pending                                 → Sorted Set (all pending
-//                                                    tasks, priority-scored;
-//                                                    claim filters by needs,
-//                                                    step name and version
-//                                                    in Lua)
+//   <base>:pending                                 → Sorted Set of all pending
+//                                                    tasks, priority-scored
+//                                                    (metrics; lane backfill)
 //   <base>:running                                 → Set of task IDs
 //   <base>:done                                    → Sorted Set of terminal
 //                                                    task IDs scored by
@@ -32,12 +30,32 @@
 //                                                    claim checks against
 //                                                    the task's limit
 //
-//   <base>:grp:pending                             → Sorted Set of the pending
-//                                                    tasks that are in a step
-//                                                    group (same scores as
-//                                                    `pending`); empty means
-//                                                    claim takes the plain,
-//                                                    ungrouped path
+//   <base>:lane:p, :lane:c:<sfx>, :lane:f:<sfx>:<key>, :lane:n:<sfx>
+//                                                  → Sorted Sets, one per
+//                                                    claim lane (plain tasks;
+//                                                    one concurrency key;
+//                                                    one fairness key of a
+//                                                    group; a group's tasks
+//                                                    without one). Every
+//                                                    pending task is in
+//                                                    `pending` and in exactly
+//                                                    one lane.
+//   <base>:ready, <base>:rmem                      → lexicographic Sorted Set
+//                                                    of the lanes a claim may
+//                                                    take from (priority,
+//                                                    fairness rank, age of the
+//                                                    lane's head) and a Hash of
+//                                                    each lane's member. Lanes
+//                                                    held back by a full key
+//                                                    or group are absent.
+//   <base>:gready:<sfx>, <base>:gmem:<sfx>         → the same per group, over
+//                                                    its fairness-key lanes
+//   <base>:gtimers                                 → Sorted Set of groups
+//                                                    parked until their rate
+//                                                    window frees a slot
+//   <base>:lanes:v2                                → marker: queues written
+//                                                    before the lanes are
+//                                                    indexed by the first claim
 //   <base>:grp:wf:<workflowId>                     → Set of that run's pending
 //                                                    grouped task IDs
 //                                                    (`throttled()`)
@@ -125,24 +143,222 @@ end
 `;
 
 /**
+ * Lua helpers for the claim lanes. A pending task sits in exactly one lane
+ * zset (score = priority * 1e12 + 1e12 - seq, so highest first):
+ *
+ *   P            <base>:lane:p                      tasks with no group and no
+ *                                                   limited concurrency key
+ *   C:<sfx>      <base>:lane:c:<sfx>                one (scope, key) with a limit;
+ *                                                   sfx = <len(scope)>:<scope>:<key>
+ *   G:<sfx>      a step group, sfx = <len(name)>:<name>, made of one child
+ *                lane per fairness key: <base>:lane:f:<sfx>:<key>, plus
+ *                <base>:lane:n:<sfx> for tasks without one
+ *
+ * `<base>:ready` is a lexicographic zset (all scores 0) of the lanes a claim
+ * may take from, one member per lane:
+ * `<priority><rank><seq>|<lane>` with fixed-width digits, so member order is
+ * claim order: priority (high first), fairness rank (the fairness key's
+ * running count, 0 elsewhere), then age. The member describes the lane's
+ * head task. A lane is in `ready` only when it has a pending task and is not
+ * held back: a full concurrency key, or a group out of slots or starts, is
+ * absent, so a claim never reads the backlog behind it. A group's own
+ * `<base>:gready:<sfx>` indexes its child lanes the same way, and its node
+ * stands in `ready` with its best child's member.
+ *
+ * Whatever changes a lane or what holds it back calls `after_add`,
+ * `after_free` or `after_admit` on the task concerned. A group held back by
+ * its rate window is parked in `<base>:gtimers` (score = when a slot frees)
+ * and re-checked by the next claim.
+ *
+ * Every script sets PFX (the `{<prefix>}` base) and NOW_MS first.
+ */
+const LANES_LUA = `
+local PFX = nil
+local NOW_MS = 0
+
+local function ready_key() return PFX .. ':ready' end
+local function ready_mem() return PFX .. ':rmem' end
+local function timers_key() return PFX .. ':gtimers' end
+
+local function prefix_of(priority, rank, id)
+  local p = tonumber(priority) or 5
+  if p > 1073741823 then p = 1073741823 elseif p < -1073741823 then p = -1073741823 end
+  return string.format('%010d%010d%012d', 1073741823 - p, rank, tonumber(id))
+end
+
+local function child_zkey(suffix, child)
+  if child == 'N' then return PFX .. ':lane:n:' .. suffix end
+  return PFX .. ':lane:f:' .. suffix .. ':' .. string.sub(child, 3)
+end
+
+local function set_nonempty(v) return v and v ~= '' end
+
+-- The lane of a task, from its (immutable) concurrency and group fields:
+-- f.c_scope, f.c_key, f.c_limit, f.g.name, f.g.fair.
+local function desc_of(f)
+  if set_nonempty(f.g.name) then
+    local suffix = #f.g.name .. ':' .. f.g.name
+    local child = set_nonempty(f.g.fair) and ('F:' .. f.g.fair) or 'N'
+    return { kind = 'g', suffix = suffix, child = child, zkey = child_zkey(suffix, child), node = 'G:' .. suffix }
+  end
+  if set_nonempty(f.c_scope) and set_nonempty(f.c_key) and set_nonempty(f.c_limit) then
+    local suffix = #f.c_scope .. ':' .. f.c_scope .. ':' .. f.c_key
+    return { kind = 'c', suffix = suffix, zkey = PFX .. ':lane:c:' .. suffix, node = 'C:' .. suffix }
+  end
+  return { kind = 'p', zkey = PFX .. ':lane:p', node = 'P' }
+end
+
+local function conc_desc_of(f)
+  if set_nonempty(f.c_scope) and set_nonempty(f.c_key) and set_nonempty(f.c_limit) then
+    local suffix = #f.c_scope .. ':' .. f.c_scope .. ':' .. f.c_key
+    return { kind = 'c', suffix = suffix, zkey = PFX .. ':lane:c:' .. suffix, node = 'C:' .. suffix }
+  end
+  return nil
+end
+
+local function ix_set(index, mem, ref, member)
+  local old = redis.call('HGET', mem, ref)
+  if old == member then return end
+  if old then redis.call('ZREM', index, old) end
+  redis.call('ZADD', index, 0, member)
+  redis.call('HSET', mem, ref, member)
+end
+
+local function ix_clear(index, mem, ref)
+  local old = redis.call('HGET', mem, ref)
+  if old then
+    redis.call('ZREM', index, old)
+    redis.call('HDEL', mem, ref)
+  end
+end
+
+local function head_of(zkey) return redis.call('ZREVRANGE', zkey, 0, 0)[1] end
+
+local function refresh_plain()
+  local head = head_of(PFX .. ':lane:p')
+  if not head then ix_clear(ready_key(), ready_mem(), 'P') return end
+  local prio = redis.call('HGET', PFX .. ':task:' .. head, 'priority')
+  ix_set(ready_key(), ready_mem(), 'P', prefix_of(prio, 0, head) .. '|P')
+end
+
+local function refresh_conc(d)
+  local head = head_of(d.zkey)
+  if not head then ix_clear(ready_key(), ready_mem(), d.node) return end
+  local h = redis.call('HMGET', PFX .. ':task:' .. head, 'priority', 'concurrencyLimit')
+  if redis.call('SCARD', PFX .. ':conc:' .. d.suffix) >= tonumber(h[2]) then
+    ix_clear(ready_key(), ready_mem(), d.node)
+    return
+  end
+  ix_set(ready_key(), ready_mem(), d.node, prefix_of(h[1], 0, head) .. '|' .. d.node)
+end
+
+local function refresh_child(d)
+  local gready = PFX .. ':gready:' .. d.suffix
+  local gmem = PFX .. ':gmem:' .. d.suffix
+  local head = head_of(d.zkey)
+  if not head then ix_clear(gready, gmem, d.child) return end
+  local prio = redis.call('HGET', PFX .. ':task:' .. head, 'priority')
+  local rank = 0
+  if d.child ~= 'N' then
+    rank = redis.call('SCARD', PFX .. ':grp:frun:' .. d.suffix .. ':' .. string.sub(d.child, 3))
+  end
+  ix_set(gready, gmem, d.child, prefix_of(prio, rank, head) .. '|' .. d.child)
+end
+
+local function refresh_group(suffix)
+  local node = 'G:' .. suffix
+  local best = redis.call('ZRANGEBYLEX', PFX .. ':gready:' .. suffix, '-', '+', 'LIMIT', 0, 1)[1]
+  if not best then
+    ix_clear(ready_key(), ready_mem(), node)
+    redis.call('ZREM', timers_key(), suffix)
+    return
+  end
+  local head = string.format('%d', tonumber(string.sub(best, 21, 32)))
+  local h = redis.call('HMGET', PFX .. ':task:' .. head, 'groupName', 'groupMaxConcurrent',
+    'groupMaxStarts', 'groupWindowMs')
+  local reason, retry = grp_verdict(PFX, h[1], h[2], h[3], h[4], NOW_MS, false)
+  if reason then
+    ix_clear(ready_key(), ready_mem(), node)
+    if reason == 'rate' then
+      redis.call('ZADD', timers_key(), retry, suffix)
+    else
+      redis.call('ZREM', timers_key(), suffix)
+    end
+    return
+  end
+  redis.call('ZREM', timers_key(), suffix)
+  ix_set(ready_key(), ready_mem(), node, string.sub(best, 1, 32) .. '|' .. node)
+end
+
+local function refresh(d)
+  if d.kind == 'p' then refresh_plain()
+  elseif d.kind == 'c' then refresh_conc(d)
+  else
+    refresh_child(d)
+    refresh_group(d.suffix)
+  end
+end
+
+-- A task joined its lane: only a new head changes what the lane offers.
+local function after_add(f, id)
+  local d = desc_of(f)
+  if head_of(d.zkey) == id then refresh(d) end
+end
+
+-- A task left a running set: its group slot, fairness-key slot and concurrency slot are free.
+local function after_free(f)
+  local d = desc_of(f)
+  if d.kind == 'g' then
+    refresh_child(d)
+    refresh_group(d.suffix)
+  end
+  local c = conc_desc_of(f)
+  if c then refresh_conc(c) end
+end
+
+-- A task left its lane for a running set.
+local function after_admit(f)
+  local d = desc_of(f)
+  refresh(d)
+  if d.kind ~= 'c' then
+    local c = conc_desc_of(f)
+    if c then refresh_conc(c) end
+  end
+end
+
+-- Re-check the groups whose rate window has been parked until now.
+local function wake_timers()
+  for _, suffix in ipairs(redis.call('ZRANGEBYSCORE', timers_key(), '-inf', NOW_MS)) do
+    redis.call('ZREM', timers_key(), suffix)
+    refresh_group(suffix)
+  end
+end
+`;
+
+/**
  * Atomically enqueue a task with idempotency on (workflow_id, step_name).
  * If an active task exists for the same pair (active key present), return
  * its id. Otherwise: INCR counter, HSET task hash (including needs as
- * JSON), ZADD to the global pending set keyed by priority + FIFO, SET
- * active key to the new task id.
+ * JSON), ZADD to the pending set and to the task's claim lane (priority +
+ * FIFO), SET active key to the new task id.
  *
- * KEYS: [active_key, pending_key, counter_key, grp_pending_key]
+ * KEYS: [active_key, pending_key, counter_key, ready_key]
  * ARGV: [task_key_prefix, workflowId, stepName, priority, inputJson,
  *        depsJson, needsJson, createdAt, version, namespace,
  *        metadataJson, concurrencyKey, concurrencyScope, concurrencyLimit,
  *        attempt, dependsOnJson, timeoutMs, run, groupName, groupMaxConcurrent,
- *        groupMaxStarts, groupWindowMs, fairnessKey, base] — optional values are '' when unset
+ *        groupMaxStarts, groupWindowMs, fairnessKey, base, now_ms] — optional values are '' when unset
  */
-const ENQUEUE_LUA = `
+const ENQUEUE_LUA =
+  CONC_KEY_LUA +
+  GROUP_LUA +
+  LANES_LUA +
+  `
 local active_key = KEYS[1]
 local pending_key = KEYS[2]
 local counter_key = KEYS[3]
-local grp_pending_key = KEYS[4]
+PFX = ARGV[24]
+NOW_MS = tonumber(ARGV[25])
 
 local existing = redis.call('GET', active_key)
 if existing then return existing end
@@ -184,11 +400,16 @@ redis.call('HSET', task_key, unpack(fields))
 local priority = tonumber(ARGV[4])
 local score = priority * 1e12 + (1e12 - seq)
 redis.call('ZADD', pending_key, score, id)
+local f = {
+  c_key = ARGV[12], c_scope = ARGV[13], c_limit = ARGV[14],
+  g = { name = ARGV[19], fair = ARGV[23] },
+}
+redis.call('ZADD', desc_of(f).zkey, score, id)
 if ARGV[19] ~= '' then
-  redis.call('ZADD', grp_pending_key, score, id)
-  redis.call('SADD', ARGV[24] .. ':grp:wf:' .. ARGV[2], id)
+  redis.call('SADD', PFX .. ':grp:wf:' .. ARGV[2], id)
 end
 redis.call('SET', active_key, id)
+after_add(f, id)
 
 return id
 `;
@@ -197,41 +418,43 @@ return id
  * Claim up to `limit` pending tasks the worker can run: needs ⊆
  * capabilities, step name in `step_names` (when given), version in
  * `versions` or unset (when given), the (concurrency scope, key) under its
- * limit and the task's step group (if any) with room. Walks the pending zset
- * in priority order a page at a time, skipping everything else, so tasks the
- * worker can't run never block the ones behind them. Every claimed task
+ * limit and the task's step group (if any) with room. Every claimed task
  * joins its running sets inside the same script, so the caps hold within one
  * call and across concurrent claimers.
  *
- * With no grouped task pending (`grp_pending` empty) that is the whole
- * story. Otherwise the scan first collects every claimable-by-routing task
- * (up to `scan_budget`), orders them by priority, then fairness rank (a keyed
- * task ranks at its position among its `(group, fairness key)` peers plus
- * the key's running tasks, so keys interleave round-robin), then queue
- * order, and admits in that order against the live limits.
+ * Tasks are read from the claim lanes (see LANES_LUA), merged through the
+ * `ready` index in claim order: priority, fairness rank (a keyed task of a
+ * group ranks at its fairness key's running count, so keys interleave
+ * round-robin), age. Full concurrency keys and groups are not in `ready`, so
+ * a throttled backlog is never read and fairness is exact however deep the
+ * queues are. The one thing that still costs per task is routing: a lane
+ * whose head this worker can't run is walked past it, at most `scan_budget`
+ * tasks per call, so a backlog of other workers' tasks can't hold Redis.
  *
- * At most `scan_budget` pending entries are examined per call so a large
- * backlog of blocked tasks can't stall Redis.
+ * Queues written before the lanes existed are indexed once, by the first
+ * claim (marker key `lanes:v2`).
  *
- * KEYS: [pending_key, running_key, claimseq_key, grp_pending_key]
+ * KEYS: [pending_key, running_key, claimseq_key, ready_key]
  * ARGV: [worker_id, now, limit, prefix, caps_json, scan_budget,
  *        step_names_json ('' = any), versions_json ('' = any), now_ms]
  */
 const CLAIM_LUA =
   CONC_KEY_LUA +
   GROUP_LUA +
+  LANES_LUA +
   `
 local pending_key = KEYS[1]
 local running_key = KEYS[2]
 local claimseq_key = KEYS[3]
-local grp_pending_key = KEYS[4]
 local worker_id = ARGV[1]
 local now = ARGV[2]
 local limit = tonumber(ARGV[3])
 local prefix = ARGV[4]
 local caps = cjson.decode(ARGV[5])
 local scan_budget = tonumber(ARGV[6])
-local now_ms = tonumber(ARGV[9])
+PFX = prefix
+NOW_MS = tonumber(ARGV[9])
+local now_ms = NOW_MS
 
 local caps_set = {}
 for _, c in ipairs(caps) do caps_set[c] = true end
@@ -249,30 +472,54 @@ end
 local page = limit * 4
 if page < 16 then page = 16 end
 
-local results = {}
+local function fields_of(task_key)
+  local h = redis.call('HMGET', task_key, 'needs', 'concurrencyKey', 'concurrencyScope',
+    'concurrencyLimit', 'stepName', 'version', 'priority', 'groupName', 'groupMaxConcurrent',
+    'groupMaxStarts', 'groupWindowMs', 'fairnessKey', 'workflowId')
+  return {
+    needs = h[1], c_key = h[2], c_scope = h[3], c_limit = h[4], step_name = h[5], version = h[6],
+    priority = tonumber(h[7]) or 5,
+    g = { name = h[8], max_c = h[9], max_s = h[10], win = h[11], fair = h[12], workflow_id = h[13] },
+  }
+end
 
--- Hand the task to the worker: leave pending, join every running set.
-local function admit(id, task_key, conc, g)
-  local claim_token = worker_id .. ':' .. id .. ':' .. redis.call('INCR', claimseq_key)
-  redis.call('ZREM', pending_key, id)
-  redis.call('SADD', running_key, id)
-  if conc then redis.call('SADD', conc, id) end
-  if g.name and g.name ~= '' then
-    redis.call('ZREM', grp_pending_key, id)
-    redis.call('SREM', prefix .. ':grp:wf:' .. g.workflow_id, id)
-    redis.call('SADD', grp_run_key(prefix, g.name), id)
-    if g.fair and g.fair ~= '' then redis.call('SADD', grp_fair_key(prefix, g.name, g.fair), id) end
-    if g.max_s and g.max_s ~= '' and g.win and g.win ~= '' then
-      local starts = grp_starts_key(prefix, g.name)
-      redis.call('ZADD', starts, now_ms, id)
-      redis.call('PEXPIRE', starts, tonumber(g.win) * 2)
+-- First claim on a queue that predates the lanes: index every pending task.
+if redis.call('EXISTS', PFX .. ':lanes:v2') == 0 then
+  local seen = {}
+  for _, id in ipairs(redis.call('ZRANGE', pending_key, 0, -1, 'WITHSCORES') ) do
+    seen[#seen + 1] = id
+  end
+  for i = 1, #seen, 2 do
+    local id, score = seen[i], seen[i + 1]
+    local task_key = PFX .. ':task:' .. id
+    if redis.call('HGET', task_key, 'status') == 'pending' then
+      local f = fields_of(task_key)
+      redis.call('ZADD', desc_of(f).zkey, score, id)
     end
   end
-  redis.call('HINCRBY', task_key, 'deliveries', 1)
-  redis.call('HSET', task_key, 'status', 'running', 'claimedBy', worker_id, 'claimedAt', now,
-    'claimToken', claim_token, 'heartbeatAt', '')
-  table.insert(results, redis.call('HGETALL', task_key))
+  local refreshed = {}
+  for i = 1, #seen, 2 do
+    local task_key = PFX .. ':task:' .. seen[i]
+    if redis.call('HGET', task_key, 'status') == 'pending' then
+      local d = desc_of(fields_of(task_key))
+      if not refreshed[d.zkey] then
+        refreshed[d.zkey] = true
+        refresh(d)
+      end
+    end
+  end
+  redis.call('DEL', PFX .. ':grp:pending')
+  redis.call('SET', PFX .. ':lanes:v2', '1')
 end
+
+wake_timers()
+
+local results = {}
+local examined = 0
+-- Per call: lanes with nothing left to take, and how many leading tasks of a
+-- lane this worker can't run (they stay unroutable, so they are not re-read).
+local dead = {}
+local skip_off = {}
 
 local function routable(f)
   local needs_json, step_name, version = f.needs, f.step_name, f.version
@@ -286,99 +533,160 @@ local function routable(f)
   return true
 end
 
-local function fields_of(task_key)
-  local h = redis.call('HMGET', task_key, 'needs', 'concurrencyKey', 'concurrencyScope',
-    'concurrencyLimit', 'stepName', 'version', 'priority', 'groupName', 'groupMaxConcurrent',
-    'groupMaxStarts', 'groupWindowMs', 'fairnessKey', 'workflowId')
-  return {
-    needs = h[1], c_key = h[2], c_scope = h[3], c_limit = h[4], step_name = h[5], version = h[6],
-    priority = tonumber(h[7]) or 5,
-    g = { name = h[8], max_c = h[9], max_s = h[10], win = h[11], fair = h[12], workflow_id = h[13] },
-  }
+-- Whether the task's own caps have room right now.
+local function has_room(f)
+  local conc = conc_key(PFX, f.c_scope, f.c_key)
+  if conc and f.c_limit and redis.call('SCARD', conc) >= tonumber(f.c_limit) then return false end
+  if set_nonempty(f.g.name) then
+    if grp_verdict(PFX, f.g.name, f.g.max_c, f.g.max_s, f.g.win, now_ms, true) then return false end
+  end
+  return true
 end
 
-local grouped = redis.call('ZCARD', grp_pending_key) > 0
-local examined = 0
+-- Hand the task to the worker: leave pending and its lane, join every running set.
+local function admit(id, f)
+  local task_key = PFX .. ':task:' .. id
+  local conc = conc_key(PFX, f.c_scope, f.c_key)
+  local g = f.g
+  local claim_token = worker_id .. ':' .. id .. ':' .. redis.call('INCR', claimseq_key)
+  redis.call('ZREM', pending_key, id)
+  redis.call('ZREM', desc_of(f).zkey, id)
+  redis.call('SADD', running_key, id)
+  if conc then redis.call('SADD', conc, id) end
+  if g.name and g.name ~= '' then
+    redis.call('SREM', PFX .. ':grp:wf:' .. g.workflow_id, id)
+    redis.call('SADD', grp_run_key(PFX, g.name), id)
+    if g.fair and g.fair ~= '' then redis.call('SADD', grp_fair_key(PFX, g.name, g.fair), id) end
+    if g.max_s and g.max_s ~= '' and g.win and g.win ~= '' then
+      local starts = grp_starts_key(PFX, g.name)
+      redis.call('ZADD', starts, now_ms, id)
+      redis.call('PEXPIRE', starts, tonumber(g.win) * 2)
+    end
+  end
+  redis.call('HINCRBY', task_key, 'deliveries', 1)
+  redis.call('HSET', task_key, 'status', 'running', 'claimedBy', worker_id, 'claimedAt', now,
+    'claimToken', claim_token, 'heartbeatAt', '')
+  table.insert(results, redis.call('HGETALL', task_key))
+  after_admit(f)
+end
 
-if not grouped then
-  local start = 0
-  while #results < limit and examined < scan_budget do
-    local candidates = redis.call('ZREVRANGE', pending_key, start, start + page - 1)
-    if #candidates == 0 then break end
-    local claimed_in_page = 0
-
-    for _, id in ipairs(candidates) do
-      if #results >= limit or examined >= scan_budget then break end
+-- First task of a lane this worker can take now, from its leading unroutable
+-- run on. Returns id, fields; nil when the lane has none (or the budget ran out).
+local function peek_lane(zkey)
+  if dead[zkey] then return nil end
+  local pos = skip_off[zkey] or 0
+  local leading = true
+  while examined < scan_budget do
+    local ids = redis.call('ZREVRANGE', zkey, pos, pos + page - 1)
+    if #ids == 0 then
+      dead[zkey] = true
+      return nil
+    end
+    for _, id in ipairs(ids) do
+      if examined >= scan_budget then return nil end
       examined = examined + 1
-      local task_key = prefix .. ':task:' .. id
-      local f = fields_of(task_key)
-      local ok = routable(f)
-      local conc = conc_key(prefix, f.c_scope, f.c_key)
-      if ok and conc and f.c_limit then
-        if redis.call('SCARD', conc) >= tonumber(f.c_limit) then ok = false end
+      local f = fields_of(PFX .. ':task:' .. id)
+      if routable(f) then
+        leading = false
+        if has_room(f) then return id, f end
+      elseif leading then
+        skip_off[zkey] = pos + 1
       end
-      if ok then
-        admit(id, task_key, conc, f.g)
-        claimed_in_page = claimed_in_page + 1
+      pos = pos + 1
+    end
+  end
+  return nil
+end
+
+local function rank_of(suffix, child)
+  if child == 'N' then return 0 end
+  return redis.call('SCARD', PFX .. ':grp:frun:' .. suffix .. ':' .. string.sub(child, 3))
+end
+
+-- Best task of a group: the lowest candidate among its child lanes, which
+-- are read in index order until none can beat the best found.
+local function peek_group(suffix)
+  local node = 'G:' .. suffix
+  if dead[node] then return nil end
+  local gready = PFX .. ':gready:' .. suffix
+  local best = nil
+  local lo = '-'
+  local exhausted = false
+  while true do
+    local entries = redis.call('ZRANGEBYLEX', gready, lo, '+', 'LIMIT', 0, 16)
+    if #entries == 0 then
+      exhausted = true
+      break
+    end
+    local stop = false
+    for _, e in ipairs(entries) do
+      if best and best.pfx < string.sub(e, 1, 32) then
+        stop = true
+        break
+      end
+      local child = string.sub(e, 34)
+      local id, f = peek_lane(child_zkey(suffix, child))
+      if id then
+        local p = prefix_of(f.priority, rank_of(suffix, child), id)
+        if not best or p < best.pfx then best = { id = id, f = f, pfx = p } end
+      end
+      if examined >= scan_budget then
+        stop = true
+        break
       end
     end
-
-    -- Claimed entries left the zset, shifting later ranks down.
-    start = start + #candidates - claimed_in_page
+    if stop then break end
+    lo = '(' .. entries[#entries]
   end
-  return results
+  if not best and exhausted then dead[node] = true end
+  return best
 end
 
--- Grouped path: collect, rank fairly, then admit in that order.
-local cands = {}
-local start = 0
-while examined < scan_budget do
-  local ids = redis.call('ZREVRANGE', pending_key, start, start + page - 1)
-  if #ids == 0 then break end
-  for _, id in ipairs(ids) do
-    if examined >= scan_budget then break end
-    examined = examined + 1
-    local task_key = prefix .. ':task:' .. id
-    local f = fields_of(task_key)
-    if routable(f) then
-      f.id = id
-      f.task_key = task_key
-      f.idx = examined
-      table.insert(cands, f)
+local function peek_node(ref)
+  if ref == 'P' then
+    local id, f = peek_lane(PFX .. ':lane:p')
+    if id then return { id = id, f = f, pfx = prefix_of(f.priority, 0, id) } end
+    return nil
+  end
+  local suffix = string.sub(ref, 3)
+  if string.sub(ref, 1, 2) == 'C:' then
+    local id, f = peek_lane(PFX .. ':lane:c:' .. suffix)
+    if id then return { id = id, f = f, pfx = prefix_of(f.priority, 0, id) } end
+    return nil
+  end
+  return peek_group(suffix)
+end
+
+-- The next task to claim: the lowest candidate among the ready lanes.
+local function select_next()
+  local best = nil
+  local lo = '-'
+  while true do
+    local entries = redis.call('ZRANGEBYLEX', ready_key(), lo, '+', 'LIMIT', 0, 16)
+    if #entries == 0 then break end
+    local stop = false
+    for _, e in ipairs(entries) do
+      if best and best.pfx < string.sub(e, 1, 32) then
+        stop = true
+        break
+      end
+      local cand = peek_node(string.sub(e, 34))
+      if cand and (not best or cand.pfx < best.pfx) then best = cand end
+      if examined >= scan_budget then
+        stop = true
+        break
+      end
     end
+    if stop then break end
+    lo = '(' .. entries[#entries]
   end
-  start = start + #ids
+  return best
 end
 
-local seen = {}
-local running_of = {}
-for _, c in ipairs(cands) do
-  c.rank = 0
-  if c.g.name and c.g.name ~= '' and c.g.fair and c.g.fair ~= '' then
-    local k = #c.g.name .. ':' .. c.g.name .. ':' .. c.g.fair
-    local pos = seen[k] or 0
-    seen[k] = pos + 1
-    if running_of[k] == nil then
-      running_of[k] = redis.call('SCARD', grp_fair_key(prefix, c.g.name, c.g.fair))
-    end
-    c.rank = pos + running_of[k]
-  end
-end
-table.sort(cands, function(a, b)
-  if a.priority ~= b.priority then return a.priority > b.priority end
-  if a.rank ~= b.rank then return a.rank < b.rank end
-  return a.idx < b.idx
-end)
-
-for _, c in ipairs(cands) do
-  if #results >= limit then break end
-  local conc = conc_key(prefix, c.c_scope, c.c_key)
-  local ok = true
-  if conc and c.c_limit and redis.call('SCARD', conc) >= tonumber(c.c_limit) then ok = false end
-  if ok and c.g.name and c.g.name ~= '' then
-    if grp_verdict(prefix, c.g.name, c.g.max_c, c.g.max_s, c.g.win, now_ms, true) then ok = false end
-  end
-  if ok then admit(c.id, c.task_key, conc, c.g) end
+while #results < limit and examined < scan_budget do
+  local c = select_next()
+  if not c then break end
+  admit(c.id, c.f)
 end
 
 return results
@@ -399,10 +707,11 @@ return results
  * unless the lease epoch key (KEYS[6]) still holds ARGV[9].
  *
  * A grouped task also leaves its group's running sets; going back to pending
- * it gives its start back (a dead-lettered task keeps it) and rejoins
- * the grouped pending index.
+ * it gives its start back (a dead-lettered task keeps it). Either way the
+ * lanes its slots held back are re-checked, and a task going back to pending
+ * rejoins its lane.
  *
- * KEYS: [task_key, running_key, pending_key, done_key, grp_pending_key, lease_epoch_key?]
+ * KEYS: [task_key, running_key, pending_key, done_key, ready_key, lease_epoch_key?]
  * ARGV: [id, prefix, claim_token, mode, max_deliveries, dead_letter_error,
  *        completed_at_iso, completed_at_ms, lease_epoch|'']
  * Returns -1 (stale lease), 0 (not running under the token), 1 (back to
@@ -411,6 +720,7 @@ return results
 const REQUEUE_LUA =
   CONC_KEY_LUA +
   GROUP_LUA +
+  LANES_LUA +
   `
 local task_key = KEYS[1]
 local running_key = KEYS[2]
@@ -420,13 +730,17 @@ local id = ARGV[1]
 local prefix = ARGV[2]
 local claim_token = ARGV[3]
 local mode = ARGV[4]
+PFX = prefix
+NOW_MS = tonumber(ARGV[8])
 
 if ARGV[9] and ARGV[9] ~= '' and redis.call('GET', KEYS[6]) ~= ARGV[9] then return -1 end
 
 local f = redis.call('HMGET', task_key, 'status', 'claimToken', 'priority', 'concurrencyKey',
-  'concurrencyScope', 'deliveries', 'workflowId', 'stepName', 'groupName', 'fairnessKey')
+  'concurrencyScope', 'deliveries', 'workflowId', 'stepName', 'groupName', 'fairnessKey',
+  'concurrencyLimit')
 if f[1] ~= 'running' then return 0 end
 if claim_token ~= '' and f[2] ~= claim_token then return 0 end
+local lf = { c_key = f[4], c_scope = f[5], c_limit = f[11], g = { name = f[9], fair = f[10] } }
 
 redis.call('SREM', running_key, id)
 local conc = conc_key(prefix, f[5], f[4])
@@ -446,6 +760,7 @@ if mode == 'requeue' and deliveries >= tonumber(ARGV[5]) then
     'claimToken', '',
     'heartbeatAt', '')
   redis.call('ZADD', done_key, tonumber(ARGV[8]), id)
+  after_free(lf)
   return 2
 end
 
@@ -461,11 +776,13 @@ redis.call('HSET', task_key,
 local priority = tonumber(f[3]) or 5
 local score = priority * 1e12 + (1e12 - tonumber(id))
 redis.call('ZADD', pending_key, score, id)
+redis.call('ZADD', desc_of(lf).zkey, score, id)
 if group and group ~= '' then
   redis.call('ZREM', grp_starts_key(prefix, group), id)
-  redis.call('ZADD', KEYS[5], score, id)
   redis.call('SADD', prefix .. ':grp:wf:' .. f[7], id)
 end
+after_free(lf)
+after_add(lf, id)
 return 1
 `;
 
@@ -481,6 +798,7 @@ return 1
 const SETTLE_LUA =
   CONC_KEY_LUA +
   GROUP_LUA +
+  LANES_LUA +
   `
 local task_key = KEYS[1]
 local running_key = KEYS[2]
@@ -488,9 +806,11 @@ local done_key = KEYS[3]
 local id = ARGV[1]
 local claim_token = ARGV[2]
 local prefix = ARGV[8]
+PFX = prefix
+NOW_MS = tonumber(ARGV[9])
 
 local f = redis.call('HMGET', task_key, 'status', 'claimToken', 'workflowId', 'stepName',
-  'concurrencyScope', 'concurrencyKey', 'groupName', 'fairnessKey')
+  'concurrencyScope', 'concurrencyKey', 'groupName', 'fairnessKey', 'concurrencyLimit')
 if f[1] ~= 'running' then return 0 end
 if claim_token ~= '' and f[2] ~= claim_token then return 0 end
 
@@ -512,6 +832,7 @@ if f[7] and f[7] ~= '' then
   if f[8] and f[8] ~= '' then redis.call('SREM', grp_fair_key(prefix, f[7], f[8]), id) end
 end
 redis.call('ZADD', done_key, tonumber(ARGV[9]), id)
+after_free({ c_scope = f[5], c_key = f[6], c_limit = f[9], g = { name = f[7], fair = f[8] } })
 return 1
 `;
 
@@ -620,8 +941,9 @@ export interface RedisStepQueueConfig {
   prefix?: string;
   /**
    * Upper bound on pending entries one `claim()` examines while skipping
-   * tasks the worker can't take (unmet `needs`, other steps or versions,
-   * full concurrency key). Default: 1000.
+   * tasks the worker can't take (unmet `needs`, other steps or versions).
+   * Full concurrency keys and step groups are not scanned at all: they are
+   * out of the ready index until they have room. Default: 1000.
    */
   claimScanLimit?: number;
   /**
@@ -689,8 +1011,8 @@ export class RedisStepQueue implements StepQueue {
     return `${this.base}:running`;
   }
 
-  private get groupPendingKey(): string {
-    return `${this.base}:grp:pending`;
+  private get readyKey(): string {
+    return `${this.base}:ready`;
   }
 
   private get doneKey(): string {
@@ -717,7 +1039,7 @@ export class RedisStepQueue implements StepQueue {
       this.activeKey(params.workflowId, params.stepName),
       this.pendingKey,
       `${this.base}:counter`,
-      this.groupPendingKey,
+      this.readyKey,
       `${this.base}:task:`,
       params.workflowId,
       params.stepName,
@@ -742,6 +1064,7 @@ export class RedisStepQueue implements StepQueue {
       params.groupWindowMs !== undefined ? String(params.groupWindowMs) : "",
       params.fairnessKey ?? "",
       this.base,
+      String(this.clock.currentTimeMs()),
     )) as string;
     return String(id);
   }
@@ -756,13 +1079,13 @@ export class RedisStepQueue implements StepQueue {
       this.pendingKey,
       this.runningKey,
       `${this.base}:claimseq`,
-      this.groupPendingKey,
+      this.readyKey,
       params.workerId,
       this.clock.now().toISOString(),
       String(limit),
       this.base,
       JSON.stringify(params.capabilities ?? []),
-      String(Math.max(limit, this.claimScanLimit)),
+      String(Math.max(limit * 4, this.claimScanLimit)),
       params.stepNames !== undefined ? JSON.stringify(params.stepNames) : "",
       params.versions !== undefined ? JSON.stringify(params.versions) : "",
       String(this.clock.currentTimeMs()),
@@ -1095,7 +1418,7 @@ export class RedisStepQueue implements StepQueue {
       this.runningKey,
       this.pendingKey,
       this.doneKey,
-      this.groupPendingKey,
+      this.readyKey,
       ...leaseKeys,
       params.id,
       this.base,
