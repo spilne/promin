@@ -106,9 +106,19 @@ await onboard
   the rollback is crash-safe like a failure's: if the driver crashes or loses
   the lock, recovery (or the next driver) finishes it, skips the steps already
   rolled back, and the run ends cancelled. A run cancelled while no driver
-  holds it (e.g. suspended) is not rolled back: the decision needs the
-  workflow definition, which `cancelWorkflow` does not have. Without a ledger
-  the rollback still runs but is not resumable.
+  holds it (suspended, or its worker died, or cancelled straight through
+  storage) keeps a "cancel not settled" marker (`compensationOrigin: "cancel"`)
+  that `listOrphanedRuns` lists: `runner.recover({ resumeRecent })`, the
+  distributed coordinator and a driver that resumes the run reopen it, roll it
+  back with its definition's `onCancel` (settling it without compensating when
+  that is not `"rollback"`), and end it cancelled with `compensationOrigin:
+"cancel-settled"`, after which it is never listed or reopened again. Needs a
+  registry (a stub rebuilt from a stored DAG has no compensations, so the
+  coordinator leaves such runs alone). A compensation interrupted between its
+  `compensate` call and its ledger entry runs again; every step already in the
+  ledger is skipped. Cancelled runs from before this marker existed are settled
+  once, when first found. Without a ledger the rollback still runs but is not
+  resumable.
 - A step that never settles holds its run forever unless it has a timeout:
   set `defaultStepTimeoutMs` on `workflow()` or `createWorkflowRunner` (a
   step's `timeoutMs` wins, `timeoutMs: null` opts out) and `lock.maxHoldMs` to

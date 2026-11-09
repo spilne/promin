@@ -999,6 +999,9 @@ export class RedisWorkflowStorage
   }
 
   async cancelWorkflow({ workflowId, cascade, guard }: CancelWorkflowParams): Promise<void> {
+    // Indexed before the move, so a crash between the two leaves a member
+    // the scan drops, never a cancelled run recovery cannot find.
+    await this.redis.sadd(this.keys.cancelOwed, workflowId);
     await this.transitionStatus({
       workflowId,
       guard,
@@ -1412,13 +1415,28 @@ export class RedisWorkflowStorage
     });
   }
 
-  async failWorkflow({ workflowId, error, errorTag, guard }: FailWorkflowParams): Promise<void> {
+  async failWorkflow({
+    workflowId,
+    error,
+    errorTag,
+    compensationOrigin,
+    guard,
+  }: FailWorkflowParams): Promise<void> {
     await this.finishWorkflow({
       workflowId,
       guard,
       to: "failed",
-      fields: { error, ...(errorTag !== undefined && { errorTag }) },
+      fields: {
+        error,
+        ...(errorTag !== undefined && { errorTag }),
+        ...(compensationOrigin !== undefined && { compensationOrigin }),
+      },
     });
+    // A settled cancel leaves the recovery index (a stale member would only
+    // be dropped by the next scan that reads it).
+    if (compensationOrigin === "cancel-settled") {
+      await this.redis.srem(this.keys.cancelOwed, workflowId);
+    }
   }
 
   async tripwireWorkflow({ workflowId, reason, guard }: TripwireWorkflowParams): Promise<void> {
@@ -1882,15 +1900,18 @@ export class RedisWorkflowStorage
    */
   private async scanStatusIndex<T>(params: {
     statuses: readonly WorkflowStatus[];
+    /** Further index sets whose members are candidates too. */
+    extraSets?: readonly string[];
     limit: number;
     afterWorkflowId?: string;
     pick: (workflowId: string) => Promise<T | undefined>;
   }): Promise<T[]> {
     const limit = Math.max(0, Math.trunc(params.limit));
     if (limit === 0) return [];
-    const sets = await Promise.all(
-      params.statuses.map((s) => this.redis.smembers(this.keys.status(s))),
-    );
+    const sets = await Promise.all([
+      ...params.statuses.map((s) => this.redis.smembers(this.keys.status(s))),
+      ...(params.extraSets ?? []).map((key) => this.redis.smembers(key)),
+    ]);
     const after = params.afterWorkflowId;
     const ids = [...new Set(sets.flat())]
       .filter((id) => after === undefined || id > after)
@@ -2087,8 +2108,10 @@ export class RedisWorkflowStorage
   }): Promise<OrphanedRun[]> {
     const nowMs = params.now.getTime();
     const beforeMs = params.updatedBefore.getTime();
+    await this.backfillCancelOwed();
     return this.scanStatusIndex<OrphanedRun>({
       statuses: ["pending", "running", "compensating"],
+      extraSets: [this.keys.cancelOwed],
       limit: params.limit,
       afterWorkflowId: params.afterWorkflowId,
       pick: async (workflowId) => {
@@ -2098,9 +2121,23 @@ export class RedisWorkflowStorage
         ]);
         if (!raw || !raw.id) {
           await this.unindexMissing(workflowId);
+          await this.redis.srem(this.keys.cancelOwed, workflowId);
           return undefined;
         }
-        if (raw.status !== "pending" && raw.status !== "running" && raw.status !== "compensating") {
+        const owed = raw.status === "failed" && raw.compensationOrigin === "cancel";
+        // Dropped once the run has ended with nothing owed. A run still
+        // moving may be about to be cancelled (the member is added first).
+        const done =
+          raw.status === "completed" ||
+          raw.status === "tripwire" ||
+          (raw.status === "failed" && !owed);
+        if (done) await this.redis.srem(this.keys.cancelOwed, workflowId);
+        if (
+          !owed &&
+          raw.status !== "pending" &&
+          raw.status !== "running" &&
+          raw.status !== "compensating"
+        ) {
           await this.repairIndex(workflowId);
           return undefined;
         }
@@ -2114,12 +2151,42 @@ export class RedisWorkflowStorage
           workflowId: raw.id,
           workflowName: raw.workflowName,
           ...(raw.version ? { version: raw.version } : {}),
-          status: raw.status,
+          status: raw.status as OrphanedRun["status"],
           input: JSON.parse(raw.input),
           ...(raw.metadata ? { metadata: JSON.parse(raw.metadata) } : {}),
         };
       },
     });
+  }
+
+  /** The backfill is done in this process (the marker key says it for the keyspace). */
+  private cancelOwedBackfilled = false;
+
+  /**
+   * One-time, lazy: runs cancelled before the `cancel-owed` index existed sit
+   * in the `failed` status set with `compensationOrigin: "cancel"` and in no
+   * index a scan reads. The first orphan scan of a keyspace walks the `failed`
+   * set once (chunked reads of one hash field), adds them, then sets a marker
+   * key so no later scan, in any process, pays for it again. Every cancel made
+   * after the deploy indexes itself, so the marker never goes stale. Racing
+   * backfills are harmless (adds are idempotent).
+   */
+  private async backfillCancelOwed(): Promise<void> {
+    if (this.cancelOwedBackfilled) return;
+    if ((await this.redis.exists(this.keys.cancelOwedBackfilled)) === 0) {
+      const failed = await this.redis.smembers(this.keys.status("failed"));
+      const chunkSize = 200;
+      for (let i = 0; i < failed.length; i += chunkSize) {
+        const chunk = failed.slice(i, i + chunkSize);
+        const origins = await Promise.all(
+          chunk.map((id) => this.redis.hget(this.keys.wf(id), "compensationOrigin")),
+        );
+        const owed = chunk.filter((_, n) => origins[n] === "cancel");
+        if (owed.length > 0) await this.redis.sadd(this.keys.cancelOwed, ...owed);
+      }
+      await this.redis.set(this.keys.cancelOwedBackfilled, "1");
+    }
+    this.cancelOwedBackfilled = true;
   }
 
   // -- Run history ----------------------------------------------------------

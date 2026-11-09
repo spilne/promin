@@ -866,6 +866,8 @@ CREATE INDEX wf_workflow_steps_wake_at_idx ON wf_workflow_steps (wake_at) WHERE 
 
 CREATE INDEX wf_workflows_active_idx ON wf_workflows (workflow_id) WHERE (status_id = ANY (ARRAY[0, 1, 5]));
 
+CREATE INDEX wf_workflows_cancel_owed_idx ON wf_workflows (workflow_id) WHERE ((status_id = 3) AND (compensation_origin = 'cancel'::text));
+
 CREATE UNIQUE INDEX wf_workflows_idempotency_key_idx ON wf_workflows (COALESCE(namespace, ''::text), workflow_name, idempotency_key) WHERE (idempotency_key IS NOT NULL);
 
 CREATE INDEX wf_workflows_name_status_idx ON wf_workflows (workflow_name, status_id);

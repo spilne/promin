@@ -33,6 +33,7 @@ import {
   isCancelledRun,
   isFinalFailedRun,
   isTerminalWorkflowStatus,
+  owesCancelRollback,
   type WorkflowState,
   type WorkflowStatus,
 } from "../workflow-state.ts";
@@ -448,12 +449,8 @@ async function runOneOrchestrationCycle(cycle: CycleParams): Promise<unknown> {
     return result;
   } catch (err) {
     try {
-      if (
-        phase.executing &&
-        ctx.compensateConfig?.onCancel === "rollback" &&
-        errorTag(err) === "WorkflowCancelledError"
-      ) {
-        await rollBackCancelled({
+      if (phase.executing && errorTag(err) === "WorkflowCancelledError") {
+        const settle = rollBackCancelled({
           ctx,
           lock,
           clock,
@@ -461,6 +458,11 @@ async function runOneOrchestrationCycle(cycle: CycleParams): Promise<unknown> {
           input: phase.input,
           traceRef: phase.trace?.ref,
         });
+        // Without `onCancel: "rollback"` there is nothing to undo: settling
+        // is best effort (recovery settles a run left unsettled), and never
+        // replaces the cancel the caller sees.
+        if (ctx.compensateConfig?.onCancel === "rollback") await settle;
+        else await settle.catch(() => undefined);
       }
     } finally {
       traceRunEnd({ ctx, clock, phase, params: cycle.params, error: err });
@@ -476,7 +478,7 @@ async function runOneOrchestrationCycle(cycle: CycleParams): Promise<unknown> {
  * `rollBackAndFail` as a cancel rollback: the run re-enters `compensating`
  * (durable, so a driver that stops mid-rollback leaves it for recovery to
  * finish), steps roll back in a failure's order with its retries and ledger,
- * and the run ends cancelled again.
+ * and the run ends cancelled again, its cancel settled.
  */
 async function rollBackCancelled(params: {
   ctx: WorkflowOrchestrationContext;
@@ -486,15 +488,31 @@ async function rollBackCancelled(params: {
   input: unknown;
   traceRef: WorkflowTraceRef | undefined;
 }): Promise<void> {
-  const { ctx, lock, clock, workflowId, input } = params;
+  const { ctx, lock, workflowId } = params;
   if (lock.leaseSignal.aborted) throw lock.leaseSignal.reason;
   // The origin marker `cancelWorkflow` stored, not the error's tag: a step
   // that failed with `WorkflowCancelledError` ended the run as a failure.
   const state = await ctx.storage.loadWorkflow(workflowId);
-  if (state === null || state.status !== "failed" || state.compensationOrigin !== "cancel") {
-    return;
-  }
-  await rollBackAndFail({
+  if (state === null || !owesCancelRollback(state)) return;
+  await settleCancelledRun(params);
+}
+
+/**
+ * Settle the cancel of a cancelled run this driver holds the lock of: roll
+ * its completed steps back when `compensate.onCancel` is `"rollback"`, end
+ * it cancelled again, and reject with the cancel. Without that option the
+ * run only passes through the phase, so recovery does not find it again.
+ */
+async function settleCancelledRun(params: {
+  ctx: WorkflowOrchestrationContext;
+  lock: LockContext;
+  clock: WallClock;
+  workflowId: string;
+  input: unknown;
+  traceRef: WorkflowTraceRef | undefined;
+}): Promise<never> {
+  const { ctx, lock, clock, workflowId, input } = params;
+  return rollBackAndFail({
     ctx,
     lock,
     clock,
@@ -604,6 +622,21 @@ async function runCycleBody(cycle: CycleParams & { phase: CyclePhase }): Promise
   loaded.state = state;
   if (state && isTerminalWorkflowStatus(state.status)) {
     if (!force) {
+      // A run cancelled while no driver held it (suspended, or its worker
+      // died) still owes its cancel: finish the rollback, or settle it when
+      // the definition asks for none, and reject with the cancel.
+      if (owesCancelRollback(state) && hasCapability(ctx.storage, "compensationLedger")) {
+        const traceRef =
+          ctx.tracer !== undefined ? traceRunStart({ cycle, state, resumedRun: true }) : undefined;
+        return settleCancelledRun({
+          ctx,
+          lock,
+          clock,
+          workflowId,
+          input: state.input,
+          traceRef,
+        });
+      }
       rejectEndedRun(state);
       return completedRunResult({ ctx, state });
     }
@@ -904,8 +937,11 @@ async function rollBackAndFail(params: {
     }
   }
 
+  // A cancel only rolls steps back when asked to; otherwise the run just
+  // passes through the phase so its cancel is settled.
+  const rollBack = !params.cancelled || ctx.compensateConfig?.onCancel === "rollback";
   const compensationStartedAt = clock.now();
-  if (ctx.tracer !== undefined && params.traceRef !== undefined) {
+  if (rollBack && ctx.tracer !== undefined && params.traceRef !== undefined) {
     emitTrace(ctx.tracer, "compensationStart", {
       ...params.traceRef,
       at: compensationStartedAt,
@@ -913,22 +949,24 @@ async function rollBackAndFail(params: {
       resumed: params.resumed,
     });
   }
-  const compensationReport = await compensateWorkflow({
-    ...(ctx.tracer !== undefined &&
-      params.traceRef !== undefined && { tracer: ctx.tracer, traceRef: params.traceRef }),
-    storage,
-    steps: ctx.steps,
-    compensateConfig: ctx.compensateConfig,
-    workflowId,
-    input,
-    dagNodes,
-    guard,
-    clock,
-    signal: lock.leaseSignal,
-    resumed: params.resumed,
-    ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
-  });
-  if (ctx.tracer !== undefined && params.traceRef !== undefined) {
+  const compensationReport = !rollBack
+    ? { compensated: [], failed: [] }
+    : await compensateWorkflow({
+        ...(ctx.tracer !== undefined &&
+          params.traceRef !== undefined && { tracer: ctx.tracer, traceRef: params.traceRef }),
+        storage,
+        steps: ctx.steps,
+        compensateConfig: ctx.compensateConfig,
+        workflowId,
+        input,
+        dagNodes,
+        guard,
+        clock,
+        signal: lock.leaseSignal,
+        resumed: params.resumed,
+        ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
+      });
+  if (rollBack && ctx.tracer !== undefined && params.traceRef !== undefined) {
     const endedAt = clock.now();
     emitTrace(ctx.tracer, "compensationEnd", {
       ...params.traceRef,
@@ -941,7 +979,7 @@ async function rollBackAndFail(params: {
   }
 
   // Fire workflow-level onComplete callback
-  if (ctx.compensateConfig?.onComplete) {
+  if (rollBack && ctx.compensateConfig?.onComplete) {
     try {
       const result = ctx.compensateConfig.onComplete({
         input,
@@ -970,6 +1008,8 @@ async function rollBackAndFail(params: {
         error: errorMsg,
         guard,
         ...(failedTag !== undefined && { errorTag: failedTag }),
+        // The end of a cancel's rollback settles the cancel.
+        ...(params.cancelled && { compensationOrigin: "cancel-settled" as const }),
       }),
   });
   // The structured failure: the stored run's failed step and attempt, the
