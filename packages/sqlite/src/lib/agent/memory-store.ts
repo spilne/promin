@@ -30,6 +30,7 @@ import {
   loadResolvedContext,
   MemoryLimitError,
   newEpisode,
+  importedFacts,
   newFact,
   MIN_SALIENCE_RETENTION,
   normalizeRuleText,
@@ -51,6 +52,7 @@ import type {
   RuleProposalStatus,
   EpisodicRecord,
   Fact,
+  FactImport,
   FactInput,
   FactListParams,
   FactSource,
@@ -1004,6 +1006,36 @@ export class SqliteMemoryStore implements MemoryStore {
           ),
     });
     return f;
+  }
+
+  async importThreadFacts(key: ThreadKey, facts: ReadonlyArray<FactImport>): Promise<Fact[]> {
+    const stored = importedFacts(facts);
+    if (!(await this.getThread(key))) {
+      await this.createThread(key);
+    }
+    this.db.transaction(() => {
+      for (const f of stored) {
+        this.db
+          .query(
+            `INSERT INTO ${this.prefix}_fact (id, scope, namespace_id, resource_id, thread_id, text, source, created_at, updated_at, retired_at, superseded_by, confidence)
+             VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(
+            f.id,
+            SCOPE_THR,
+            key.namespaceId,
+            key.threadId,
+            f.text,
+            f.source,
+            f.createdAt,
+            f.updatedAt,
+            f.retiredAt,
+            f.supersededBy,
+            f.confidence,
+          );
+      }
+    })();
+    return stored;
   }
 
   async listThreadFacts(key: ThreadKey, params?: FactListParams): Promise<Fact[]> {

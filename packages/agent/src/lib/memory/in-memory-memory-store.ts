@@ -18,7 +18,7 @@ import { ThreadExistsError } from "../agent/errors.ts";
 import { resolveFactConfidence } from "./fact-confidence.ts";
 import { relationKey } from "./relations.ts";
 import { appendStaticRule, normalizeRuleText } from "./rule-proposals.ts";
-import { newEpisode, newFact } from "./record-factories.ts";
+import { importedFacts, newEpisode, newFact } from "./record-factories.ts";
 import { loadResolvedContext } from "./load-context.ts";
 import { decayedSalience } from "./scoring.ts";
 import { isAfterThreadCursor, parseThreadCursor } from "./thread-cursor.ts";
@@ -31,6 +31,7 @@ import {
   type EpisodeListParams,
   type EpisodicRecord,
   type Fact,
+  type FactImport,
   type FactInput,
   type FactListParams,
   type ListThreadsParams,
@@ -592,6 +593,17 @@ export class InMemoryMemoryStore implements MemoryStore {
     list.push(f);
     this.threadFacts.set(this.threadK(key), list);
     return f;
+  }
+
+  async importThreadFacts(key: ThreadKey, facts: ReadonlyArray<FactImport>): Promise<Fact[]> {
+    const stored = importedFacts(facts);
+    if (!this.threads.has(this.threadK(key))) {
+      await this.createThread(key);
+    }
+    const list = this.threadFacts.get(this.threadK(key)) ?? [];
+    list.push(...stored);
+    this.threadFacts.set(this.threadK(key), list);
+    return stored;
   }
 
   async listThreadFacts(key: ThreadKey, params?: FactListParams): Promise<Fact[]> {

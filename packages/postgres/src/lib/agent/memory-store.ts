@@ -28,6 +28,7 @@ import {
   MAX_DECAY_HALF_LIVES,
   MemoryLimitError,
   newEpisode,
+  importedFacts,
   newFact,
   MIN_SALIENCE_RETENTION,
   normalizeRuleText,
@@ -49,6 +50,7 @@ import type {
   RuleProposalStatus,
   EpisodicRecord,
   Fact,
+  FactImport,
   FactInput,
   FactListParams,
   FactSource,
@@ -938,6 +940,34 @@ export class PostgresMemoryStore implements MemoryStore {
       });
     });
     return f;
+  }
+
+  async importThreadFacts(key: ThreadKey, facts: ReadonlyArray<FactImport>): Promise<Fact[]> {
+    const stored = importedFacts(facts);
+    if (!(await this.getThread(key))) {
+      await this.createThread(key);
+    }
+    if (stored.length === 0) return stored;
+    await this.db.transaction(async (tx) => {
+      // One statement per fact keeps insertion `seq` in input order.
+      for (const f of stored) {
+        await tx.insert(agentFact).values({
+          id: f.id,
+          scope: SCOPE_THR,
+          namespaceId: key.namespaceId,
+          resourceId: null,
+          threadId: key.threadId,
+          factText: f.text,
+          source: f.source,
+          createdAt: f.createdAt,
+          updatedAt: f.updatedAt,
+          retiredAt: f.retiredAt,
+          supersededBy: f.supersededBy,
+          confidence: f.confidence,
+        });
+      }
+    });
+    return stored;
   }
 
   async listThreadFacts(key: ThreadKey, params?: FactListParams): Promise<Fact[]> {

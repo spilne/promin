@@ -601,6 +601,110 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
       });
     });
 
+    describe("importThreadFacts", () => {
+      const key = { namespaceId: NS, threadId: "imp" };
+      const base = {
+        source: "model" as const,
+        updatedAt: 0,
+        retiredAt: null,
+        supersededByRef: null,
+      };
+
+      it("keeps timestamps, confidence and retired history, with fresh ids and remapped chains", async () => {
+        const s = await make();
+        const imported = await s.importThreadFacts(key, [
+          {
+            ...base,
+            ref: "a",
+            text: "v1",
+            createdAt: 100,
+            updatedAt: 150,
+            confidence: 0.3,
+            retiredAt: 200,
+            supersededByRef: "b",
+          },
+          {
+            ...base,
+            ref: "b",
+            text: "v2",
+            createdAt: 200,
+            updatedAt: 260,
+            confidence: 0.9,
+            retiredAt: 300,
+            supersededByRef: "c",
+            source: "user",
+          },
+          { ...base, ref: "c", text: "v3", createdAt: 300, updatedAt: 310, confidence: 0.6 },
+          {
+            ...base,
+            ref: "d",
+            text: "orphan",
+            createdAt: 400,
+            confidence: 0.5,
+            retiredAt: 450,
+            supersededByRef: "gone",
+          },
+        ]);
+        expect(imported.map((f) => f.text)).toEqual(["v1", "v2", "v3", "orphan"]);
+        expect(new Set(imported.map((f) => f.id)).size).toBe(4);
+        expect(imported.map((f) => f.id)).not.toContain("a");
+
+        const all = await s.listThreadFacts(key, { includeRetired: true });
+        const byText = new Map(all.map((f) => [f.text, f]));
+        const [v1, v2, v3, orphan] = ["v1", "v2", "v3", "orphan"].map((t) => byText.get(t)!);
+        expect(v1).toMatchObject({
+          createdAt: 100,
+          updatedAt: 150,
+          retiredAt: 200,
+          confidence: 0.3,
+        });
+        expect(v2).toMatchObject({
+          createdAt: 200,
+          updatedAt: 260,
+          retiredAt: 300,
+          confidence: 0.9,
+          source: "user",
+        });
+        expect(v3).toMatchObject({
+          createdAt: 300,
+          updatedAt: 310,
+          retiredAt: null,
+          supersededBy: null,
+        });
+        expect(v1.supersededBy).toBe(v2.id);
+        expect(v2.supersededBy).toBe(v3.id);
+        // A successor outside the imported set leaves the fact retired with no link.
+        expect(orphan).toMatchObject({ retiredAt: 450, supersededBy: null });
+        expect((await s.listThreadFacts(key)).map((f) => f.text)).toEqual(["v3"]);
+      });
+
+      it("can supersede an imported fact afterwards and creates the thread when missing", async () => {
+        const s = await make();
+        const [first] = await s.importThreadFacts(key, [
+          { ...base, ref: "a", text: "old", createdAt: 1, confidence: 0.5 },
+        ]);
+        expect(await s.getThread(key)).not.toBeNull();
+        const next = await s.appendThreadFact(key, {
+          text: "new",
+          source: "model",
+          supersedes: first!.id,
+        });
+        const all = await s.listThreadFacts(key, { includeRetired: true });
+        expect(all.find((f) => f.id === first!.id)?.supersededBy).toBe(next.id);
+      });
+
+      it("rejects duplicate refs and writes nothing", async () => {
+        const s = await make();
+        await expect(
+          s.importThreadFacts(key, [
+            { ...base, ref: "a", text: "x", createdAt: 1, confidence: 0.5 },
+            { ...base, ref: "a", text: "y", createdAt: 2, confidence: 0.5 },
+          ]),
+        ).rejects.toThrow();
+        expect(await s.listThreadFacts(key, { includeRetired: true })).toEqual([]);
+      });
+    });
+
     describe("thread messages", () => {
       it("appendMessages assigns monotonic seq numbers + createdAt", async () => {
         const s = await make();
