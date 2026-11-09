@@ -500,6 +500,18 @@ memory, canDelegate })` and pass it to
   spend through `ctx.reportUsage`; crossing it fails the child run (status
   `failed`, later messages answer 409). `listChildAgents` returns each
   child's `usage` when the store lists step rows.
+  **Model-callable tools.** `retainedSubagentTools(retained)` returns
+  `spawn_subagent`, `message_subagent`, `list_subagents`, `read_subagent` and
+  `stop_subagent` for `resolveLocalAgent({ tools })`; list
+  `RETAINED_SUBAGENT_TOOL_NAMES` in the recipes that may delegate. Each call
+  acts on the calling turn's own thread (`ctx.scope`: namespace, resource,
+  thread and agent id, all required), so a model reaches only its own
+  children, and spawning goes through `spawnAgent`: `canDelegate`, depth and
+  child limits and the parent's `budgets` apply, and a refusal reaches the
+  model as a tool error. `message_subagent` dedupes on the tool call id;
+  `spawn_subagent` is not re-run after a crash (the model is told the
+  outcome is unknown and checks `list_subagents`). `read_subagent` returns
+  per-message outcomes and the last N transcript messages, truncated.
   The mailbox lives in `MemoryStore` and the worker in `WorkflowStorage`;
   startup reconciles mailbox writes whose wake signal was lost in a crash.
   Configure durable stores and the LocalWorkflows signal scanner for restart
