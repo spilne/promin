@@ -124,6 +124,13 @@ export interface DistributedRunnerConfig {
    */
   orphanGraceMs?: number;
   /**
+   * Orphaned runs one recovery pass adopts before it ends; the next pass
+   * (one poll later) continues after the last of them, so a huge backlog of
+   * orphans is adopted in bounded steps instead of starting every run at
+   * once. Default: 500.
+   */
+  maxAdoptionsPerSweep?: number;
+  /**
    * How often `run()` / `waitForResult()` check storage for a run that is
    * driven elsewhere (another instance holds its lock, or it is suspended
    * and a scanner will resume it). Default: 1000.
@@ -203,6 +210,9 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
   private readonly registry?: WorkflowVersionRegistry;
   private readonly recoveryIntervalMs: number;
   private readonly orphanGraceMs: number;
+  private readonly maxAdoptionsPerSweep: number;
+  /** Where the next recovery pass continues after one that ran out of budget. */
+  private recoveryCursor?: string;
   private readonly sweepLoop: PollLoop;
   private readonly resultLoop: PollLoop;
   private resultLoopRunning = false;
@@ -228,6 +238,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     this.registry = config.registry;
     this.recoveryIntervalMs = config.recoveryIntervalMs ?? 60_000;
     this.orphanGraceMs = config.orphanGraceMs ?? this.workerTimeoutMs;
+    this.maxAdoptionsPerSweep = Math.max(1, Math.trunc(config.maxAdoptionsPerSweep ?? 500));
     const onError = config.onError ?? defaultOnError;
     this.onError = onError;
 
@@ -450,6 +461,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     this.isLeader = await this.leaderElection.tryAcquire();
     if (!this.isLeader) {
       this.nextRecoveryAtMs = undefined;
+      this.recoveryCursor = undefined;
       return;
     }
     try {
@@ -457,8 +469,9 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
       // leader may have died with runs in flight), then at a coarse cadence.
       const now = this.clock.currentTimeMs();
       if (!wasLeader || this.nextRecoveryAtMs === undefined || now >= this.nextRecoveryAtMs) {
-        await this._recoverOrphanedRuns();
-        this.nextRecoveryAtMs = now + this.recoveryIntervalMs;
+        const finished = await this._recoverOrphanedRuns();
+        // A pass that ran out of budget continues on the next tick.
+        this.nextRecoveryAtMs = finished ? now + this.recoveryIntervalMs : now;
       }
       await this._tickDeadWorkers();
     } catch (error) {
@@ -466,6 +479,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
       if (isStaleLeaseError(error)) {
         this.isLeader = false;
         this.nextRecoveryAtMs = undefined;
+        this.recoveryCursor = undefined;
       }
       throw error;
     }
@@ -654,14 +668,15 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
    * statuses before adopting any run, and lets the run lock turn away the
    * ones still owned.
    */
-  private async _recoverOrphanedRuns(): Promise<void> {
+  private async _recoverOrphanedRuns(): Promise<boolean> {
     const nowMs = this.clock.currentTimeMs();
     const now = new Date(nowMs);
     const updatedBefore = new Date(nowMs - this.orphanGraceMs);
 
     const storage = this.storage;
     if (hasCapability(storage, "orphanedRuns")) {
-      let afterWorkflowId: string | undefined;
+      let afterWorkflowId = this.recoveryCursor;
+      let adopted = 0;
       while (true) {
         const page = await storage.listOrphanedRuns({
           now,
@@ -669,9 +684,23 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
           limit: RECOVERY_PAGE_SIZE,
           ...(afterWorkflowId !== undefined && { afterWorkflowId }),
         });
-        for (const run of page) await this._adopt(run);
-        if (page.length < RECOVERY_PAGE_SIZE) return;
-        afterWorkflowId = page[page.length - 1]!.workflowId;
+        for (const run of page) {
+          await this._adopt(run);
+          afterWorkflowId = run.workflowId;
+          // Out of budget: the next pass continues after this run.
+          if (++adopted >= this.maxAdoptionsPerSweep && run !== page[page.length - 1]) {
+            this.recoveryCursor = run.workflowId;
+            return false;
+          }
+        }
+        if (page.length < RECOVERY_PAGE_SIZE) {
+          this.recoveryCursor = undefined;
+          return true;
+        }
+        if (adopted >= this.maxAdoptionsPerSweep) {
+          this.recoveryCursor = afterWorkflowId;
+          return false;
+        }
       }
     }
 
@@ -706,6 +735,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
       }
     }
     for (const run of candidates) await this._adopt(run);
+    return true;
   }
 
   /** Start driving an orphaned run here. Failures are reported, never thrown. */

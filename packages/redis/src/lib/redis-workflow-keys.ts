@@ -170,17 +170,33 @@ export class RedisWorkflowKeys {
   }
 
   /**
-   * Set of cancelled runs whose cancel may not be settled yet
-   * (`listOrphanedRuns`). A superset: members that turn out settled, or no
-   * longer cancelled, are dropped when a scan reads them.
+   * Sorted set (every score 0, so members sort lexicographically) of
+   * cancelled runs whose cancel may not be settled yet (`listOrphanedRuns`).
+   * A superset: members that turn out settled, or no longer cancelled, are
+   * dropped when a scan reads them. A sorted set, not a set, so a scan reads
+   * it a page of ids at a time (`ZRANGEBYLEX`).
    */
   get cancelOwed(): string {
-    return this.idx("cancel-owed");
+    return this.idx("cancel-owed-z");
   }
 
   /** Marker: the legacy cancelled runs were added to `cancelOwed` (once, lazily). */
   get cancelOwedBackfilled(): string {
-    return this.idx("cancel-owed-backfilled");
+    return this.idx("cancel-owed-z-backfilled");
+  }
+
+  /**
+   * Sorted set (every score 0) of the runs in one scanned status (see
+   * `SCAN_STATUSES`), kept beside the status set so the scanners read ids a
+   * page at a time in id order (`ZRANGEBYLEX`) instead of loading the set.
+   */
+  statusScan(status: string): string {
+    return this.idx(`scan:${status}`);
+  }
+
+  /** Marker: the `statusScan` sets were filled from the status sets (once, lazily). */
+  get statusScanBackfilled(): string {
+    return this.idx("scan-backfilled");
   }
 
   status(status: string): string {

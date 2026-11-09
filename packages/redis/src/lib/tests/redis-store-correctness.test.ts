@@ -49,7 +49,7 @@ redisDescribe("RedisWorkflowStorage store correctness", (redis) => {
       // The state a pre-deploy cancelWorkflow left: failed, origin "cancel",
       // in no set of the cancel-owed index and no backfill marker.
       const raw = redis.client();
-      await raw.srem(new RedisWorkflowKeys(prefix).cancelOwed, "legacy-1");
+      await raw.zrem(new RedisWorkflowKeys(prefix).cancelOwed, "legacy-1");
       await raw.del(new RedisWorkflowKeys(prefix).cancelOwedBackfilled);
       expect((await s.loadWorkflow("legacy-1"))?.compensationOrigin).toBe("cancel");
 
@@ -62,6 +62,31 @@ redisDescribe("RedisWorkflowStorage store correctness", (redis) => {
       expect(undone).toEqual(["a"]);
       expect(isCancelledRun((await s.loadWorkflowStatus("legacy-1"))!)).toBe(true);
       expect(await s.listOrphanedRuns({ now: later, updatedBefore: later, limit: 10 })).toEqual([]);
+    });
+  });
+
+  describe("runs indexed before the scan sets existed", () => {
+    it("are scanned after the first scan fills the sets from the status sets", async () => {
+      const prefix = uniquePrefix("rsc-scan");
+      const s = create(prefix);
+      const past = new Date(Date.now() - 60_000);
+      const ids = Array.from({ length: 5 }, (_, i) => `old-${i}`);
+      for (const workflowId of ids) {
+        await s.createWorkflow({ workflowId, workflowName: "w", input: {} });
+        await s.suspendWorkflow({
+          workflowId,
+          stepName: "nap",
+          stepUpdate: { status: "sleeping", stepType: "sleep", wakeAt: past },
+        });
+      }
+      // The keyspace a pre-deploy writer left: status sets only.
+      const raw = redis.client();
+      const keys = new RedisWorkflowKeys(prefix);
+      await raw.del(keys.statusScan("suspended"), keys.statusScanBackfilled);
+
+      const found = await create(prefix).listDueTimers({ now: new Date(), limit: 100 });
+      expect(found.map((r) => r.workflowId)).toEqual(ids);
+      expect(await raw.zcard(keys.statusScan("suspended"))).toBe(ids.length);
     });
   });
 

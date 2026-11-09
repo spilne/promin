@@ -54,6 +54,13 @@ export interface SleepScannerOptions {
   leaderElection?: LeaderElection;
   /** Runs fetched per storage query. Default: 100. */
   pageSize?: number;
+  /**
+   * Due runs one sweep hands out before it ends and the next sweep
+   * continues after the last of them, immediately: a backlog of any size is
+   * worked off in bounded sweeps that each re-check leadership and take a
+   * fresh clock reading. Default: 1000.
+   */
+  maxRunsPerSweep?: number;
 }
 
 export interface SleepScanner {
@@ -88,6 +95,7 @@ export class DefaultSleepScanner implements SleepScanner {
       onError: config.onError,
       leaderElection: config.leaderElection,
       resumeConcurrency: config.resumeConcurrency,
+      maxRunsPerSweep: config.maxRunsPerSweep,
       find: async ({ afterWorkflowId }) => {
         const now = clock.now();
         if (hasCapability(storage, "dueTimers")) {

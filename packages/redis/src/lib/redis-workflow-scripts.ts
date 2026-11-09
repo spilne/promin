@@ -678,10 +678,12 @@ return {1, h[2], h[4] or '', h[5] or '', h[6] or '', tokenIds, sleeps}
 // index already holds `iv` or a newer version, so out-of-order or repeated
 // syncs converge on the latest write.
 // KEYS: [versionsHash, recordsHash, byCreated, byStarted, byCompleted,
-//        statusSet_1 .. statusSet_S, addSet_1 .. addSet_m]
+//        statusSet_1 .. statusSet_S, scanSet_1 .. scanSet_L, addSet_1 .. addSet_m]
 // ARGV: [workflowId, iv, recordJson, status, createdMs, startedMs|'', completedMs|'',
-//        S, status_1 .. status_S, addMember_1 .. addMember_m]
-// Returns 1 when applied, 0 when skipped.
+//        S, L, status_1 .. status_S, scanStatus_1 .. scanStatus_L,
+//        addMember_1 .. addMember_m]
+// A scan set is a score-0 sorted set holding the run while its status is
+// the set's `scanStatus`. Returns 1 when applied, 0 when skipped.
 export const SYNC_INDEX_LUA = `
 local id = ARGV[1]
 local cur = redis.call('HGET', KEYS[1], id)
@@ -692,30 +694,80 @@ redis.call('ZADD', KEYS[3], ARGV[5], id)
 if ARGV[6] ~= '' then redis.call('ZADD', KEYS[4], ARGV[6], id) else redis.call('ZREM', KEYS[4], id) end
 if ARGV[7] ~= '' then redis.call('ZADD', KEYS[5], ARGV[7], id) else redis.call('ZREM', KEYS[5], id) end
 local S = tonumber(ARGV[8])
+local L = tonumber(ARGV[9])
 for i = 1, S do
-  if ARGV[8 + i] == ARGV[4] then redis.call('SADD', KEYS[5 + i], id) else redis.call('SREM', KEYS[5 + i], id) end
+  if ARGV[9 + i] == ARGV[4] then redis.call('SADD', KEYS[5 + i], id) else redis.call('SREM', KEYS[5 + i], id) end
 end
-for i = 6 + S, #KEYS do
-  redis.call('SADD', KEYS[i], ARGV[i + 3])
+for i = 1, L do
+  if ARGV[9 + S + i] == ARGV[4] then redis.call('ZADD', KEYS[5 + S + i], 0, id) else redis.call('ZREM', KEYS[5 + S + i], id) end
+end
+for i = 6 + S + L, #KEYS do
+  redis.call('SADD', KEYS[i], ARGV[i + 4])
 end
 return 1
 `;
 
 // Drop one workflow from the index.
 // KEYS: [versionsHash, recordsHash, byCreated, byStarted, byCompleted,
-//        memberSet_1 .. memberSet_m, ownedKey_1 .. ownedKey_d]
-// ARGV: [workflowId, d] — the last d keys are deleted outright (the
-//        workflow's own children set).
+//        memberSet_1 .. memberSet_m, scanSet_1 .. scanSet_z, ownedKey_1 .. ownedKey_d]
+// ARGV: [workflowId, d, z] — the last d keys are deleted outright (the
+//        workflow's own children set); the z before them are score-0 sorted
+//        sets the workflow leaves.
 export const UNINDEX_LUA = `
 local id = ARGV[1]
 local d = tonumber(ARGV[2])
+local z = tonumber(ARGV[3])
 redis.call('HDEL', KEYS[1], id)
 redis.call('HDEL', KEYS[2], id)
 for i = 3, 5 do redis.call('ZREM', KEYS[i], id) end
-for i = 6, #KEYS - d do redis.call('SREM', KEYS[i], id) end
+for i = 6, #KEYS - d - z do redis.call('SREM', KEYS[i], id) end
+for i = #KEYS - d - z + 1, #KEYS - d do redis.call('ZREM', KEYS[i], id) end
 for i = #KEYS - d + 1, #KEYS do redis.call('DEL', KEYS[i]) end
 return 1
 `;
+
+// The next `count` members, in ascending order, after `after` across score-0
+// sorted sets: one page of a keyset scan over their union.
+// KEYS: [scanSet_1 .. scanSet_k]
+// ARGV: [after|'' , count]
+export const SCAN_PAGE_LUA = `
+local count = tonumber(ARGV[2])
+local min = '-'
+if ARGV[1] ~= '' then min = '(' .. ARGV[1] end
+local seen = {}
+local out = {}
+for i = 1, #KEYS do
+  for _, id in ipairs(redis.call('ZRANGEBYLEX', KEYS[i], min, '+', 'LIMIT', 0, count)) do
+    if not seen[id] then
+      seen[id] = true
+      out[#out + 1] = id
+    end
+  end
+end
+table.sort(out)
+local page = {}
+for i = 1, math.min(count, #out) do page[i] = out[i] end
+return page
+`;
+
+// Copy one chunk of a status set into its scan set: only members still in
+// the status set, checked in the same script that adds them, so a run that
+// moved on meanwhile is never added back.
+// KEYS: [statusSet, scanSet]
+// ARGV: [cursor, count]
+// Returns the next cursor ('0' when the walk is complete).
+export const BACKFILL_SCAN_LUA = `
+local res = redis.call('SSCAN', KEYS[1], ARGV[1], 'COUNT', ARGV[2])
+for _, id in ipairs(res[2]) do
+  redis.call('ZADD', KEYS[2], 0, id)
+end
+return res[1]
+`;
+
+// One SSCAN step: {nextCursor, members}.
+// KEYS: [set]
+// ARGV: [cursor, count]
+export const SSCAN_LUA = `return redis.call('SSCAN', KEYS[1], ARGV[1], 'COUNT', ARGV[2])`;
 
 // One page of an ordering sorted set, followed by the members missing from
 // it (NULL sort values sort last) in creation order.

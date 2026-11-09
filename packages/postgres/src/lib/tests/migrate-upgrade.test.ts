@@ -14,16 +14,21 @@ import { PostgresWorkflowStorage } from "../postgres-workflow-storage.ts";
 
 const DRIZZLE = new URL("../../../drizzle", import.meta.url).pathname;
 
-/** A copy of the migrations folder holding only the baseline (the chain an old database applied). */
-function baselineOnlyFolder(): string {
-  const dir = mkdtempSync(join(tmpdir(), "promin-pg-baseline-"));
+/** A copy of the migrations folder holding the chain up to migration `lastIdx` (what an old database applied). */
+function chainUpTo(lastIdx: number): string {
+  const dir = mkdtempSync(join(tmpdir(), "promin-pg-chain-"));
   mkdirSync(join(dir, "meta"));
-  cpSync(join(DRIZZLE, "0000_baseline.sql"), join(dir, "0000_baseline.sql"));
   const journal = JSON.parse(readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"));
-  journal.entries = journal.entries.filter((e: { idx: number }) => e.idx === 0);
+  journal.entries = journal.entries.filter((e: { idx: number }) => e.idx <= lastIdx);
+  for (const e of journal.entries as Array<{ tag: string }>) {
+    cpSync(join(DRIZZLE, `${e.tag}.sql`), join(dir, `${e.tag}.sql`));
+  }
   writeFileSync(join(dir, "meta", "_journal.json"), JSON.stringify(journal));
   return dir;
 }
+
+/** The baseline alone (the chain the oldest databases applied). */
+const baselineOnlyFolder = (): string => chainUpTo(0);
 
 postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
   it("adds step_progress to a baseline-only database, idempotently", async () => {
@@ -72,3 +77,64 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
     });
   });
 });
+
+const TIMER_SCAN_INDEXES = [
+  "wf_workflow_steps_sleep_keyset_idx",
+  "wf_workflow_steps_signal_timeout_keyset_idx",
+  "wf_workflows_suspended_idx",
+];
+
+postgresDescribe(
+  "migrate() adds the timer scan indexes to a database from before them",
+  {},
+  (pg) => {
+    it("creates the keyset indexes on upgrade, idempotently, and keeps scanning the old rows", async () => {
+      const present = async (): Promise<string[]> =>
+        (
+          (await pg.sql`SELECT indexname FROM pg_indexes WHERE indexname = ANY(${TIMER_SCAN_INDEXES})`) as unknown as Array<{
+            indexname: string;
+          }>
+        )
+          .map((r) => r.indexname)
+          .sort();
+
+      // A database that applied every migration up to the one before the indexes.
+      await migrate(pg.db, { migrationsFolder: chainUpTo(1) });
+      expect(await present()).toEqual([]);
+
+      const storage = await PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false });
+      for (const workflowId of ["old-a", "old-b", "old-c"]) {
+        await storage.createWorkflow({ workflowId, workflowName: "w", input: {} });
+        await storage.suspendWorkflow({
+          workflowId,
+          stepName: "nap",
+          stepUpdate: {
+            status: "sleeping",
+            stepType: "sleep",
+            wakeAt: new Date(Date.now() - 60_000),
+          },
+        });
+      }
+
+      await migrate(pg.db);
+      await migrate(pg.db);
+      expect(await present()).toEqual([...TIMER_SCAN_INDEXES].sort());
+
+      // Re-running the migration's statements (a database that already has
+      // some of the indexes) changes nothing and does not fail.
+      const statements = readFileSync(join(DRIZZLE, "0002_timer_scan_indexes.sql"), "utf8");
+      await pg.sql.unsafe(statements);
+      expect(await present()).toEqual([...TIMER_SCAN_INDEXES].sort());
+
+      // The rows written before the upgrade are still scanned, in pages.
+      const first = await storage.listDueTimers({ now: new Date(), limit: 2 });
+      expect(first.map((r) => r.workflowId)).toEqual(["old-a", "old-b"]);
+      const rest = await storage.listDueTimers({
+        now: new Date(),
+        limit: 2,
+        afterWorkflowId: "old-b",
+      });
+      expect(rest.map((r) => r.workflowId)).toEqual(["old-c"]);
+    });
+  },
+);

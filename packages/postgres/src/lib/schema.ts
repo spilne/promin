@@ -133,6 +133,10 @@ export const workflows = pgTable(
           ].join(", "),
         )})`,
       ),
+    // Suspended runs in workflow-id order (`listUpdateWakeups`).
+    index("wf_workflows_suspended_idx")
+      .on(t.workflowId)
+      .where(sql`${t.statusId} = ${sql.raw(String(WorkflowStatusIds.id.suspended))}`),
     // Cancelled runs whose cancel is not settled (`listOrphanedRuns`).
     index("wf_workflows_cancel_owed_idx")
       .on(t.workflowId)
@@ -220,6 +224,16 @@ export const workflowSteps = pgTable(
     // Sleep scanner (`listDueTimers`): signal waits by their timeout.
     index("wf_workflow_steps_signal_timeout_idx")
       .on(t.signalTimeoutAt)
+      .where(
+        sql`${t.statusId} = ${sql.raw(String(StepStatusIds.id.waiting_for_signal))} AND ${t.signalTimeoutAt} IS NOT NULL`,
+      ),
+    // Sleep scanner keyset walks (`listDueTimers`): due steps in
+    // (workflow_id, step_name) order, so a page stops at its limit.
+    index("wf_workflow_steps_sleep_keyset_idx")
+      .on(t.workflowId, t.stepName, t.wakeAt, t.run)
+      .where(sql`${t.statusId} = ${sql.raw(String(StepStatusIds.id.sleeping))}`),
+    index("wf_workflow_steps_signal_timeout_keyset_idx")
+      .on(t.workflowId, t.stepName, t.signalTimeoutAt, t.run)
       .where(
         sql`${t.statusId} = ${sql.raw(String(StepStatusIds.id.waiting_for_signal))} AND ${t.signalTimeoutAt} IS NOT NULL`,
       ),
