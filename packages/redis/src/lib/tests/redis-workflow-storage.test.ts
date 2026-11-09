@@ -21,6 +21,7 @@ redisDescribe("RedisWorkflowStorage conformance", (redis) => {
       hasScannerQueries: true,
       hasCompensationLedger: true,
       hasStepAttempts: true,
+      hasStepProgress: true,
       hasResetSteps: true,
       createPeer: (storage) =>
         new RedisWorkflowStorage({ redis: redis.client(), prefix: prefixes.get(storage)! }),

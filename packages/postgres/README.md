@@ -39,6 +39,7 @@ Workflow storage capabilities (see the [storage contract](../workflow/src/lib/du
 | `journal`                | yes | `summaries`                                    |         yes          |
 | `stepAttempts`           | yes | `countWorkflows`                               |         yes          |
 | `stepCheckpoint`         | yes | `dueTimers` / `signalWakeups` / `orphanedRuns` |    yes (indexed)     |
+| `stepProgress`           | yes | (`wf_workflows.step_progress`, jsonb)          |                      |
 | `compensationLedger`     | yes | `runEvents` / `stepStartedEvents`              | – (the runner polls) |
 | `tripwire`, `resetSteps` | yes | `cancelStale`                                  |          –           |
 
@@ -57,12 +58,17 @@ await migrate(db, {
 });
 ```
 
-The schema ships as **one baseline migration** (`drizzle/0000_baseline.sql`):
-every table, serial column, primary / unique / CHECK constraint, partial
-index, foreign key and lookup seed in its final shape. There is no upgrade
-chain from older layouts. `schema.ts` mirrors it and a drift test builds a
-database from the migration and compares every table, column, index, FK and
-named CHECK against it.
+`migrate()` applies the migrations in `drizzle/` in order. `0000_baseline` is the schema as first shipped; later changes are incremental, idempotent files (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`) such as `0001_step_progress`, so a database migrated by an older version upgrades by running `migrate()` again. Add a new numbered file and a `meta/_journal.json` entry for every schema change; do not edit an applied one.
+
+The schema is a **baseline migration** (`drizzle/0000_baseline.sql`: every
+table, serial column, primary / unique / CHECK constraint, partial index,
+foreign key and lookup seed) plus the incremental files after it.
+`0001_step_progress` also adds, idempotently, the columns earlier changes put
+into the baseline in place (`wf_workflows.compensation_origin` and the
+`wf_step_queue` group and heartbeat columns). `schema.ts` mirrors the chain and
+a drift test builds a database from it and compares every table, column, index,
+FK and named CHECK against it; an upgrade test applies the baseline alone and
+then the full chain.
 
 ## Workflow storage
 

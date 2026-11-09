@@ -14,6 +14,7 @@ import {
 import { stepRuntimeFor, type WaveOutcome, type WaveParams } from "./dag-context.ts";
 import { errorMessage } from "./step-body.ts";
 import { checkpointStepOutcome, type StepOutcome } from "./step-checkpoint.ts";
+import { createStepProgressReporter } from "./step-progress.ts";
 import { traceStepAttemptStart } from "./step-tracing.ts";
 import { tracerTraceparent } from "../workflow-tracer.ts";
 import { resolveStepConcurrency, resolveStepGroup } from "./step-concurrency.ts";
@@ -98,6 +99,13 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
           results,
         });
 
+        const progress = createStepProgressReporter({
+          storage: ctx.storage,
+          workflowId,
+          stepName: stepDef.name,
+          ...(ctx.guard !== undefined && { guard: ctx.guard }),
+          clock,
+        });
         const req: StepExecutionRequest = {
           workflowId,
           stepName: stepDef.name,
@@ -110,6 +118,14 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
           needs: stepDef.needs,
           priority: stepDef.priority,
           signal: abort.signal,
+          ...(progress !== undefined && {
+            progress: (p) =>
+              progress.report(
+                p.phase === "running" && p.holder === undefined && ctx.executorId !== undefined
+                  ? { ...p, holder: ctx.executorId }
+                  : p,
+              ),
+          }),
           ...(traceparent !== undefined && { traceparent }),
           ...(ctx.workflowVersion !== undefined && { version: ctx.workflowVersion }),
           runtime: stepRuntimeFor({
@@ -136,6 +152,8 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
         } catch (thrown) {
           res = resultOfThrown(thrown);
         }
+        // No progress record lands after the step's own write.
+        await progress?.drain();
 
         const reported =
           res.ok || res.kind === undefined || res.kind === "failed" ? res : undefined;

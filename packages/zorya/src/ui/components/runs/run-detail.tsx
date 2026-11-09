@@ -18,6 +18,7 @@ import { ChildrenTab } from "./tabs/children-tab.tsx";
 import { CalendarTab } from "./tabs/calendar-tab.tsx";
 import { SignalModal } from "./signal-modal.tsx";
 import { formatDuration } from "../../lib/format.ts";
+import { waitChip } from "../../lib/run-waits.ts";
 import { confirm, prompt, toast } from "../../lib/dialogs.ts";
 import { Page } from "../ui/page.tsx";
 
@@ -221,6 +222,28 @@ export function RunDetail({ id, onBack, onOpenRun, queryParams, onQueryChange }:
           <span class="text-sm text-base-content/70" data-testid="waiting-on">
             {run.waitingOnSummary}
           </span>
+        )}
+        {run.waitingOn.length > 0 && (
+          <div class="flex gap-1 flex-wrap" data-testid="waiting-on-chips">
+            {run.waitingOn.map((wait) => {
+              const chip = waitChip(wait);
+              return (
+                <span
+                  key={`${wait.kind}:${wait.stepName}`}
+                  class={`badge badge-sm badge-outline ${
+                    chip.tone === "info"
+                      ? "badge-info"
+                      : chip.tone === "warning"
+                        ? "badge-warning"
+                        : "badge-ghost"
+                  }`}
+                  data-wait-kind={wait.kind}
+                >
+                  {chip.label}
+                </span>
+              );
+            })}
+          </div>
         )}
         {/* Source-back link: schedule-fired runs deep-link to their
             schedule's detail page; agent-fired runs (when supported)

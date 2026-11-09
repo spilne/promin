@@ -14,6 +14,7 @@ import {
   type StepAttemptStore,
   type StepCheckpoint,
   type StepCheckpointStore,
+  type StepProgressStore,
   type WorkflowStorage,
 } from "./workflow-storage.ts";
 import {
@@ -68,6 +69,12 @@ export interface StorageTestSuiteOptions {
    * storage reports the capability.
    */
   hasStepAttempts?: boolean;
+  /**
+   * Assert the step-progress section: the storage reports the `stepProgress`
+   * capability. Every bundled backend sets this; without it the
+   * `saveStepProgress` cases run only when the storage reports the capability.
+   */
+  hasStepProgress?: boolean;
   /**
    * Build a second storage instance over the same backend as `storage` —
    * what another process, pool client or worker would hold. Enables the
@@ -803,6 +810,164 @@ export function storageTestSuite(
         const step = (await s.loadWorkflow("step-meta-fail"))!.steps["route"]!;
         expect(step.status).toBe("failed");
         expect(step.metadata).toEqual({ matchCase: "express", matchMode: "selector" });
+      });
+    });
+
+    // -------------------------------------------------------------------
+    // saveStepProgress (optional capability `stepProgress`)
+    // -------------------------------------------------------------------
+
+    describe("saveStepProgress", () => {
+      const at = new Date("2026-02-03T04:05:06.000Z");
+      const nextAttemptAt = new Date("2026-02-03T04:05:16.000Z");
+
+      /** The storage, or `undefined` (skip the case) when it does not record progress. */
+      async function progressStorage(): Promise<(WorkflowStorage & StepProgressStore) | undefined> {
+        const s = await getStorage();
+        return hasCapability(s, "stepProgress") ? s : undefined;
+      }
+
+      it("reports the stepProgress capability", async () => {
+        if (!options.hasStepProgress) return;
+        expect(hasCapability(await getStorage(), "stepProgress")).toBe(true);
+      });
+
+      it("keeps the latest record of each step, with its dates, holder and run", async () => {
+        const s = await progressStorage();
+        if (s === undefined) return;
+        await s.createWorkflow({ workflowId: "prog-1", workflowName: "t", input: {} });
+        await s.saveStepProgress({
+          workflowId: "prog-1",
+          stepName: "a",
+          progress: { phase: "running", attempt: 1, at, holder: "worker-1" },
+        });
+        await s.saveStepProgress({
+          workflowId: "prog-1",
+          stepName: "b",
+          progress: { phase: "running", attempt: 1, at },
+        });
+        // A later record of the same step replaces the earlier one.
+        const failedAt = new Date(at.getTime() + 1_000);
+        await s.saveStepProgress({
+          workflowId: "prog-1",
+          stepName: "a",
+          progress: { phase: "backoff", attempt: 1, at: failedAt, nextAttemptAt },
+        });
+
+        const state = (await s.loadWorkflow("prog-1"))!;
+        expect(state.stepProgress).toEqual({
+          a: { phase: "backoff", attempt: 1, at: failedAt, nextAttemptAt, run: 1 },
+          b: { phase: "running", attempt: 1, at, run: 1 },
+        });
+        expect(state.stepProgress!["a"]!.at).toBeInstanceOf(Date);
+        expect(state.stepProgress!["a"]!.nextAttemptAt).toBeInstanceOf(Date);
+
+        await s.saveStepProgress({
+          workflowId: "prog-1",
+          stepName: "a",
+          progress: { phase: "running", attempt: 2, at, holder: "worker-2" },
+        });
+        const again = (await s.loadWorkflow("prog-1"))!.stepProgress!["a"]!;
+        expect(again).toEqual({ phase: "running", attempt: 2, at, holder: "worker-2", run: 1 });
+        expect(again.nextAttemptAt).toBeUndefined();
+      });
+
+      it("is idempotent and leaves step rows, status and updatedAt alone", async () => {
+        const s = await progressStorage();
+        if (s === undefined) return;
+        await s.createWorkflow({ workflowId: "prog-2", workflowName: "t", input: {} });
+        const before = (await s.loadWorkflow("prog-2"))!;
+        const write = () =>
+          s.saveStepProgress({
+            workflowId: "prog-2",
+            stepName: "a",
+            progress: { phase: "running", attempt: 1, at },
+          });
+        await write();
+        const once = (await s.loadWorkflow("prog-2"))!;
+        await write();
+        expect(await s.loadWorkflow("prog-2")).toEqual(once);
+        expect(once.status).toBe("pending");
+        expect(once.steps).toEqual({});
+        expect(once.updatedAt).toEqual(before.updatedAt);
+        expect(once.startedAt).toBeUndefined();
+      });
+
+      it("a settled step keeps its own row: a later settle does not depend on the record", async () => {
+        const s = await progressStorage();
+        if (s === undefined) return;
+        await s.createWorkflow({ workflowId: "prog-3", workflowName: "t", input: {} });
+        await s.saveStepProgress({
+          workflowId: "prog-3",
+          stepName: "a",
+          progress: { phase: "running", attempt: 1, at },
+        });
+        await s.saveStepResult({
+          workflowId: "prog-3",
+          stepName: "a",
+          result: 7,
+          durationMs: 5,
+          startedAt: at,
+        });
+        const step = (await s.loadWorkflow("prog-3"))!.steps["a"]!;
+        expect(step.status).toBe("completed");
+        expect(step.result).toBe(7);
+        expect(step.attempt).toBe(1);
+      });
+
+      it("writes nothing for a parked or ended run, or one that does not exist", async () => {
+        const s = await progressStorage();
+        if (s === undefined) return;
+        await s.createWorkflow({ workflowId: "prog-parked", workflowName: "t", input: {} });
+        await s.suspendWorkflow({
+          workflowId: "prog-parked",
+          stepName: "wait",
+          stepUpdate: { status: "sleeping", stepType: "sleep", wakeAt: nextAttemptAt },
+        });
+        await s.createWorkflow({ workflowId: "prog-done", workflowName: "t", input: {} });
+        await s.completeWorkflow({ workflowId: "prog-done", result: 1 });
+        for (const workflowId of ["prog-parked", "prog-done", "prog-missing"]) {
+          await s.saveStepProgress({
+            workflowId,
+            stepName: "a",
+            progress: { phase: "running", attempt: 1, at },
+          });
+        }
+        expect((await s.loadWorkflow("prog-parked"))!.stepProgress).toBeUndefined();
+        expect((await s.loadWorkflow("prog-done"))!.stepProgress).toBeUndefined();
+        expect(await s.loadWorkflow("prog-missing")).toBeNull();
+      });
+
+      it("a record of an earlier run keeps that run's number", async () => {
+        const s = await progressStorage();
+        if (s === undefined) return;
+        await s.createWorkflow({ workflowId: "prog-fresh", workflowName: "t", input: {} });
+        await s.saveStepProgress({
+          workflowId: "prog-fresh",
+          stepName: "a",
+          progress: { phase: "running", attempt: 1, at },
+        });
+        const run = await s.startFreshRun({ workflowId: "prog-fresh" });
+        expect(run).toBe(2);
+        const state = (await s.loadWorkflow("prog-fresh"))!;
+        expect(Object.values(state.stepProgress ?? {}).map((p) => p.run)).not.toContain(2);
+      });
+
+      it("resetSteps drops the reset steps' records and keeps the others", async () => {
+        const s = await progressStorage();
+        if (s === undefined) return;
+        if (!s.resetSteps) throw new Error("factory storage lacks resetSteps");
+        await s.createWorkflow({ workflowId: "prog-reset", workflowName: "t", input: {} });
+        for (const stepName of ["a", "b"]) {
+          await s.saveStepProgress({
+            workflowId: "prog-reset",
+            stepName,
+            progress: { phase: "running", attempt: 1, at },
+          });
+        }
+        await s.resetSteps({ workflowId: "prog-reset", stepNames: ["a"] });
+        const state = (await s.loadWorkflow("prog-reset"))!;
+        expect(Object.keys(state.stepProgress ?? {})).toEqual(["b"]);
       });
     });
 
@@ -1741,6 +1906,7 @@ export function storageTestSuite(
     const attemptsOf = (s: WorkflowStorage) => s as WorkflowStorage & StepAttemptStore;
     const ledgerOf = (s: WorkflowStorage) => s as WorkflowStorage & CompensationLedgerStore;
     const checkpointOf = (s: WorkflowStorage) => s as WorkflowStorage & StepCheckpointStore;
+    const progressOf = (s: WorkflowStorage) => s as WorkflowStorage & StepProgressStore;
     const hasSuspend = (s: WorkflowStorage): boolean => hasCapability(s, "journal");
     const attemptFor = (workflowId: string): StepAttemptRecord => ({
       workflowId,
@@ -1906,6 +2072,17 @@ export function storageTestSuite(
               stepName: "s",
               outcome: { kind: "completed", result: 1, durationMs: 1, startedAt: fenceAt },
               attempts: [attemptFor(id)],
+              guard: g,
+            }),
+        },
+        {
+          name: "saveStepProgress",
+          supported: (st) => hasCapability(st, "stepProgress"),
+          write: (s, id, g) =>
+            progressOf(s).saveStepProgress({
+              workflowId: id,
+              stepName: "s",
+              progress: { phase: "running", attempt: 1, at: fenceAt },
               guard: g,
             }),
         },

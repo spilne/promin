@@ -75,23 +75,24 @@ if (hasCapability(storage, "journal")) {
 console.log(storageCapabilities(storage)); // { journal: true, stepAttempts: true, ... }
 ```
 
-| Capability           | What it enables                                                      | In-memory | Postgres | Redis | SQLite | Remote |
-| -------------------- | -------------------------------------------------------------------- | :-------: | :------: | :---: | :----: | :----: |
-| `journal`            | `.journaled()` steps (required by them)                              |    yes    |   yes    |  yes  |  yes   |  yes   |
-| `stepAttempts`       | per-attempt history rows                                             |    yes    |   yes    |  yes  |  yes   |  yes   |
-| `stepCheckpoint`     | one fenced call per settled step (row + attempts + run status)       |    yes    |   yes    |  yes  |  yes   |   –    |
-| `compensationLedger` | durable saga rollback (`compensating` status, per-step ledger)       |    yes    |   yes    |  yes  |  yes   |  yes   |
-| `tripwire`           | the `.tripwire()` step                                               |    yes    |   yes    |  yes  |   –    |  yes   |
-| `resetSteps`         | `runner.resume({ fromStep })`                                        |    yes    |   yes    |  yes  |  yes   |  yes   |
-| `runEvents`          | push `runner.subscribe` (otherwise polling)                          |    yes    |    –     |   –   |   –    |   –    |
-| `stepStartedEvents`  | `step-started` events                                                |    yes    |    –     |   –   |   –    |   –    |
-| `summaries`          | `listWorkflowSummaries` (no input/result blobs)                      |    yes    |   yes    |  yes  |  yes   |   –    |
-| `countWorkflows`     | counts without loading rows                                          |    yes    |   yes    |  yes  |  yes   |   –    |
-| `cancelStale`        | one-statement stale-run termination for `recover()`                  |     –     |    –     |   –   |  yes   |   –    |
-| `dueTimers`          | indexed sleep / signal-timeout scan for the sleep scanner            |    yes    |   yes    |  yes  |  yes   |  yes   |
-| `signalWakeups`      | indexed delivered-signal scan for the signal scanner                 |    yes    |   yes    |  yes  |  yes   |  yes   |
-| `orphanedRuns`       | keyset recovery scan for `recover()` and the distributed coordinator |    yes    |   yes    |  yes  |  yes   |  yes   |
-| `childEndedWaits`    | keyset scan for parents parked on an undelivered child wake-up       |    yes    |   yes    |  yes  |  yes   |  yes   |
+| Capability           | What it enables                                                                | In-memory | Postgres | Redis | SQLite | Remote |
+| -------------------- | ------------------------------------------------------------------------------ | :-------: | :------: | :---: | :----: | :----: |
+| `journal`            | `.journaled()` steps (required by them)                                        |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `stepAttempts`       | per-attempt history rows                                                       |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `stepCheckpoint`     | one fenced call per settled step (row + attempts + run status)                 |    yes    |   yes    |  yes  |  yes   |   –    |
+| `stepProgress`       | running / retry-backoff step records (`waitingOn` `activity`, `retry-backoff`) |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `compensationLedger` | durable saga rollback (`compensating` status, per-step ledger)                 |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `tripwire`           | the `.tripwire()` step                                                         |    yes    |   yes    |  yes  |   –    |  yes   |
+| `resetSteps`         | `runner.resume({ fromStep })`                                                  |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `runEvents`          | push `runner.subscribe` (otherwise polling)                                    |    yes    |    –     |   –   |   –    |   –    |
+| `stepStartedEvents`  | `step-started` events                                                          |    yes    |    –     |   –   |   –    |   –    |
+| `summaries`          | `listWorkflowSummaries` (no input/result blobs)                                |    yes    |   yes    |  yes  |  yes   |   –    |
+| `countWorkflows`     | counts without loading rows                                                    |    yes    |   yes    |  yes  |  yes   |   –    |
+| `cancelStale`        | one-statement stale-run termination for `recover()`                            |     –     |    –     |   –   |  yes   |   –    |
+| `dueTimers`          | indexed sleep / signal-timeout scan for the sleep scanner                      |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `signalWakeups`      | indexed delivered-signal scan for the signal scanner                           |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `orphanedRuns`       | keyset recovery scan for `recover()` and the distributed coordinator           |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `childEndedWaits`    | keyset scan for parents parked on an undelivered child wake-up                 |    yes    |   yes    |  yes  |  yes   |  yes   |
 
 Every backend with `stepAttempts` writes one attempt row per step attempt,
 whether the step ran inline or on a worker (the runner writes them, with the
@@ -106,7 +107,7 @@ heartbeats the lock, and every write it makes carries the token in `guard`.
 
 - **Fenced methods**: `saveStepResult`, `batchSaveStepResults`,
   `saveStepFailure`, `saveTaskResult`, `saveTaskFailure`, `checkpointStep`,
-  `saveStepAttempt`, `completeWorkflow`, `failWorkflow`, `tripwireWorkflow`,
+  `saveStepAttempt`, `saveStepProgress`, `completeWorkflow`, `failWorkflow`, `tripwireWorkflow`,
   `cancelWorkflow`, `suspendWorkflow`, `setWorkflowMetadata`,
   `startFreshRun`, `appendStreamChunk`, `createWorkflow` (a child, fenced on
   the parent's lock), `beginCompensation`, `saveStepCompensation`,
@@ -158,6 +159,10 @@ the first, durably — by its own data, not a response cache:
   `(workflow, step, run, attempt, type)` — the run's current number is
   stamped by the store, so reruns, resumes and continue-as-new never
   collide with earlier rows.
+
+- `saveStepProgress` keeps one record per step (the latest wins), stamped
+  with the run it was written for, and writes nothing for a parked or ended
+  run; it never touches step rows, the run's status or `updatedAt`.
 
 `RemoteWorkflowStorage` stamps `attemptId` and `chunkId` on every call;
 `isRetrySafeStorageCall` (`@promin/workflow-remote`) says which calls a

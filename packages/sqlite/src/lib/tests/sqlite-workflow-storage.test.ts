@@ -27,6 +27,7 @@ storageTestSuite(
     hasScannerQueries: true,
     hasCompensationLedger: true,
     hasStepAttempts: true,
+    hasStepProgress: true,
     createPeer: (storage) => SqliteWorkflowStorage.make({ db: dbs.get(storage)! }),
   },
 );
@@ -43,6 +44,34 @@ describe("SqliteWorkflowStorage", () => {
     const state = await s2.loadWorkflow("persist-1");
     expect(state).not.toBeNull();
     expect(state!.input).toEqual({ x: 1 });
+  });
+
+  it("adds the step_progress column to a table created without it, and keeps its rows", async () => {
+    const db = new Database(":memory:");
+    // The workflow table as an earlier version created it.
+    db.run(`CREATE TABLE promin_wf (
+      workflow_id TEXT NOT NULL PRIMARY KEY, workflow_name TEXT NOT NULL, workflow_type TEXT,
+      parent_workflow_id TEXT, namespace TEXT, status TEXT NOT NULL DEFAULT 'pending', version TEXT,
+      run INTEGER NOT NULL DEFAULT 1, input TEXT NOT NULL, result TEXT, error TEXT, error_tag TEXT,
+      compensation_origin TEXT, metadata TEXT, steps TEXT NOT NULL DEFAULT '{}', run_source INTEGER,
+      run_source_id TEXT, created_at INTEGER NOT NULL, started_at INTEGER,
+      updated_at INTEGER NOT NULL, completed_at INTEGER, idempotency_key TEXT,
+      idempotency_expires_at INTEGER)`);
+    db.run(
+      `INSERT INTO promin_wf (workflow_id, workflow_name, input, created_at, updated_at)
+       VALUES ('old-1', 'old', '{}', 1, 1)`,
+    );
+    for (const open of [1, 2]) {
+      // Opening twice: the migration is idempotent.
+      const storage = SqliteWorkflowStorage.make({ db });
+      expect((await storage.loadWorkflow("old-1"))?.workflowName).toBe("old");
+      await storage.saveStepProgress({
+        workflowId: "old-1",
+        stepName: "a",
+        progress: { phase: "running", attempt: open, at: new Date(5) },
+      });
+      expect((await storage.loadWorkflow("old-1"))?.stepProgress?.["a"]?.attempt).toBe(open);
+    }
   });
 
   it("custom table prefix avoids conflicts", async () => {

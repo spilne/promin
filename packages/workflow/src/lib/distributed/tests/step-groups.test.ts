@@ -124,8 +124,13 @@ describe("step groups: a throttled step is deferred, visible and then runs", () 
       attempt: 1,
     });
     expect(status?.waitingOnSummary ?? "").toContain("group openai");
-    // The run that holds the slot is not waiting on the queue.
-    expect((await t.coordinator.getStatus({ workflowId: t.started[0]! }))?.waitingOn).toEqual([]);
+    // The run that holds the slot is not waiting on the queue: its step is
+    // running, on the worker that claimed it (once it has run for a moment).
+    t.clock.advance(1_000);
+    await flush();
+    expect((await t.coordinator.getStatus({ workflowId: t.started[0]! }))?.waitingOn).toEqual([
+      expect.objectContaining({ kind: "activity", stepName: "call", holder: "w-1" }),
+    ]);
     expect(t.thrown[0]).toMatchObject({
       workflowId: heldId,
       workflowName: "call-llm",

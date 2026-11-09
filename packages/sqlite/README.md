@@ -46,7 +46,8 @@ tool-call approvals thread turns are suspended on, keyed by
 (namespace, thread, tool call), with the decision and approver recorded on
 the row.
 
-Workflow storage capabilities: `journal`, `stepAttempts`, `stepCheckpoint`,
+Workflow storage capabilities: `journal`, `stepAttempts`, `stepCheckpoint`, `stepProgress`
+(a `step_progress` column, added to older tables on open),
 `compensationLedger`, `resetSteps`, `summaries`, `countWorkflows`,
 `cancelStale` (one-statement stale termination for `recover()`),
 `dueTimers`, `signalWakeups` and `orphanedRuns`. Not supported: `tripwire`

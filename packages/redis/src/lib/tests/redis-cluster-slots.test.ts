@@ -163,6 +163,12 @@ redisDescribe("RedisWorkflowStorage on Redis Cluster", (redis) => {
       attempts: [],
       guard,
     });
+    await s.saveStepProgress({
+      workflowId: "p",
+      stepName: "b",
+      progress: { phase: "running", attempt: 1, at: new Date() },
+      guard,
+    });
     await s.setWorkflowMetadata({ workflowId: "p", patch: { k: 1 }, guard });
     await s.appendStreamChunk({
       workflowId: "p",

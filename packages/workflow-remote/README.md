@@ -93,13 +93,13 @@ void worker.start();
 
 ## Capabilities and limits
 
-| Capability                                                                | Remote |
-| ------------------------------------------------------------------------- | :----: |
-| `journal`, `stepAttempts`, `compensationLedger`, `tripwire`, `resetSteps` |  yes   |
-| `dueTimers`, `signalWakeups`, `orphanedRuns` (scanners and recovery)      |  yes   |
-| `stepCheckpoint`                                                          |   –    |
-| `summaries`, `countWorkflows`, `cancelStale`                              |   –    |
-| `runEvents`, `stepStartedEvents`                                          |   –    |
+| Capability                                                                                | Remote |
+| ----------------------------------------------------------------------------------------- | :----: |
+| `journal`, `stepAttempts`, `stepProgress`, `compensationLedger`, `tripwire`, `resetSteps` |  yes   |
+| `dueTimers`, `signalWakeups`, `orphanedRuns` (scanners and recovery)                      |  yes   |
+| `stepCheckpoint`                                                                          |   –    |
+| `summaries`, `countWorkflows`, `cancelStale`                                              |   –    |
+| `runEvents`, `stepStartedEvents`                                                          |   –    |
 
 - **No push events.** A single request/response can't carry a live stream,
   so `subscribeToWorkflow` and `notifyStepStarted` are not on the wire. The

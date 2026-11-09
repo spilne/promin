@@ -46,6 +46,7 @@ describe("storage capabilities", () => {
       ["listUpdateWakeups", "updateWakeups"],
       ["checkpointStep", "stepCheckpoint"],
       ["saveStepAttempt", "stepAttempts"],
+      ["saveStepProgress", "stepProgress"],
       ["beginCompensation", "compensationLedger"],
       ["discardJournalEntries", "journal"],
     ];

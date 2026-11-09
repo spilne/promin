@@ -33,6 +33,8 @@ import type {
   WorkflowStorage,
   StepAttemptStore,
   StepCheckpointStore,
+  StepProgressStore,
+  StoredStepProgress,
   CompensationLedgerStore,
   JournalStore,
   JournalEntry,
@@ -68,6 +70,7 @@ import type {
   SaveStepAttemptParams,
   SaveStepCompensationParams,
   SaveStepFailureParams,
+  SaveStepProgressParams,
   SaveStepResultParams,
   SaveTaskFailureParams,
   SaveTaskResultParams,
@@ -141,6 +144,7 @@ import {
   READ_FOR_WRITE_LUA,
   RELEASE_LOCK_LUA,
   RESET_STEPS_LUA,
+  SAVE_STEP_PROGRESS_LUA,
   START_FRESH_RUN_LUA,
   SYNC_INDEX_LUA,
   TRANSITION_STATUS_LUA,
@@ -173,6 +177,7 @@ export interface RedisWorkflowStorageConfig {
 const FENCED_CHECK_LUA = fencedLua("return 1");
 const FENCED_CHECKPOINT_STEP_LUA = fencedLua(CHECKPOINT_STEP_LUA);
 const FENCED_SAVE_ATTEMPT_LUA = fencedLua(SAVE_ATTEMPT_LUA);
+const FENCED_SAVE_STEP_PROGRESS_LUA = fencedLua(SAVE_STEP_PROGRESS_LUA);
 const FENCED_APPEND_STREAM_CHUNK_LUA = fencedLua(APPEND_STREAM_CHUNK_LUA);
 const FENCED_TRANSITION_STATUS_LUA = fencedLua(TRANSITION_STATUS_LUA);
 const FENCED_HASH_FIELD_CAS_LUA = fencedLua(HASH_FIELD_CAS_LUA);
@@ -293,6 +298,7 @@ export class RedisWorkflowStorage
     WorkflowStorage,
     StepAttemptStore,
     StepCheckpointStore,
+    StepProgressStore,
     CompensationLedgerStore,
     JournalStore
 {
@@ -353,6 +359,7 @@ export class RedisWorkflowStorage
       }
     }
 
+    const stepProgress = this.parseStepProgress(raw);
     return {
       workflowId: raw.id,
       workflowName: raw.workflowName,
@@ -372,11 +379,29 @@ export class RedisWorkflowStorage
       runSourceId: raw.runSourceId || undefined,
       metadata: raw.metadata ? JSON.parse(raw.metadata) : undefined,
       steps,
+      ...(stepProgress !== undefined && { stepProgress }),
       createdAt: this.parseDate(raw.createdAt),
       startedAt: raw.startedAt ? this.parseDate(raw.startedAt) : undefined,
       updatedAt: this.parseDate(raw.updatedAt),
       completedAt: raw.completedAt ? this.parseDate(raw.completedAt) : undefined,
     };
+  }
+
+  /** The `progress:<step>` fields of a workflow hash, or `undefined` when it has none. */
+  private parseStepProgress(
+    raw: Record<string, string>,
+  ): Record<string, StoredStepProgress> | undefined {
+    let out: Record<string, StoredStepProgress> | undefined;
+    for (const [field, json] of Object.entries(raw)) {
+      if (!field.startsWith("progress:")) continue;
+      const p = JSON.parse(json);
+      (out ??= {})[field.slice("progress:".length)] = {
+        ...p,
+        at: new Date(p.at),
+        ...(p.nextAttemptAt != null && { nextAttemptAt: new Date(p.nextAttemptAt) }),
+      };
+    }
+    return out;
   }
 
   private parseStepState(json: string): StepState {
@@ -1206,6 +1231,24 @@ export class RedisWorkflowStorage
           ["HSET", this.keys.wf(params.workflowId), "updatedAt", nowIso],
         ];
       },
+    });
+  }
+
+  async saveStepProgress({ guard, ...params }: SaveStepProgressParams): Promise<void> {
+    const { at, nextAttemptAt, ...rest } = params.progress;
+    await this.evalFenced({
+      script: FENCED_SAVE_STEP_PROGRESS_LUA,
+      workflowId: params.workflowId,
+      guard,
+      keys: [this.keys.wf(params.workflowId)],
+      args: [
+        params.stepName,
+        JSON.stringify({
+          ...rest,
+          at: this.serializeDate(at),
+          ...(nextAttemptAt !== undefined && { nextAttemptAt: this.serializeDate(nextAttemptAt) }),
+        }),
+      ],
     });
   }
 

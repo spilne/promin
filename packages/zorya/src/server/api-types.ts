@@ -187,11 +187,22 @@ export interface StepDto {
 
 /** A wait of a live run (see `WorkflowWait`), with ISO timestamps. */
 export interface RunWaitDto {
-  kind: "sleep" | "signal" | "approval" | "event" | "child" | "step-queue";
+  kind:
+    | "sleep"
+    | "signal"
+    | "approval"
+    | "event"
+    | "child"
+    | "step-queue"
+    | "activity"
+    | "retry-backoff";
   stepName: string;
   /** ISO timestamp. */
   since: string;
-  /** ISO timestamp: sleep wake time, signal timeout, or the child's next wake. */
+  /**
+   * ISO timestamp: sleep wake time, signal timeout, the child's next wake, or
+   * (`retry-backoff`) when the next attempt starts.
+   */
   until?: string;
   signalName?: string;
   /** The awaited event, for `kind: "event"`. */
@@ -201,6 +212,9 @@ export interface RunWaitDto {
   /** `step-queue` waits: the rate-limit / concurrency group holding the step back. */
   groupName?: string;
   reason?: "concurrency" | "rate";
+  /** `activity` waits: who runs the attempt (a worker id), when known. */
+  holder?: string;
+  /** The attempt a step is running (`activity`) or that just failed (`retry-backoff`). */
   attempt?: number;
 }
 
@@ -217,7 +231,10 @@ export interface RunDto {
   error?: string;
   metadata?: Record<string, unknown>;
   steps: StepDto[];
-  /** What the run is parked on right now; empty when nothing, and for ended runs. */
+  /**
+   * What the run is parked on or busy with right now (a sleep, a signal, a
+   * running step, a retry backoff, ...); empty when nothing, and for ended runs.
+   */
   waitingOn: RunWaitDto[];
   /** One-line summary of `waitingOn`; absent when it is empty. */
   waitingOnSummary?: string;

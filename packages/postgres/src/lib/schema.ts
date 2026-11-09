@@ -78,6 +78,9 @@ export const workflows = pgTable(
     // stores 'cancel', so only a really cancelled run can be reopened for a
     // cancel rollback (the tag alone proves nothing: a step can fail with it).
     compensationOrigin: text("compensation_origin"),
+    // `saveStepProgress` records of the run's steps: `{ <step>: { run, phase,
+    // attempt, at, nextAttemptAt?, holder? } }`. Null until a step reports.
+    stepProgress: jsonb("step_progress"),
     // Structured reason attached when the workflow ended via a `.tripwire()`
     // step. Present only for `status_id = tripwire (6)`; null otherwise.
     tripwire: jsonb("tripwire"),

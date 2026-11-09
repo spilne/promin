@@ -21,12 +21,12 @@ const redis = new Redis("redis://localhost:6379") as unknown as RedisStoreClient
 
 Full `WorkflowStorage` for the `@promin/workflow` engine. Workflow state, step results, the activity journal, signals, sleeps and fenced locks live in hashes and sorted sets; every fenced write is one Lua script that compares the fence token before writing, and a lock is a key with a `PX` expiry, so an expired lock fences nothing.
 
-| Capability                                  |     | Capability                                     |                      |
-| ------------------------------------------- | :-: | ---------------------------------------------- | :------------------: |
-| `journal`, `stepAttempts`, `stepCheckpoint` | yes | `summaries`, `countWorkflows`                  | yes (index records)  |
-| `compensationLedger`                        | yes | `dueTimers` / `signalWakeups` / `orphanedRuns` |         yes          |
-| `tripwire`, `resetSteps`                    | yes | `runEvents` / `stepStartedEvents`              | – (the runner polls) |
-|                                             |     | `cancelStale`                                  |          –           |
+| Capability                                                  |     | Capability                                     |                      |
+| ----------------------------------------------------------- | :-: | ---------------------------------------------- | :------------------: |
+| `journal`, `stepAttempts`, `stepCheckpoint`, `stepProgress` | yes | `summaries`, `countWorkflows`                  | yes (index records)  |
+| `compensationLedger`                                        | yes | `dueTimers` / `signalWakeups` / `orphanedRuns` |         yes          |
+| `tripwire`, `resetSteps`                                    | yes | `runEvents` / `stepStartedEvents`              | – (the runner polls) |
+|                                                             |     | `cancelStale`                                  |          –           |
 
 ```typescript
 import { RedisWorkflowStorage, type RedisStoreClient } from "@promin/redis";

@@ -61,6 +61,7 @@ export const RUNNER_STORAGE_METHODS: ReadonlySet<StorageMethod> = new Set<Storag
   "findPendingSignal",
   "saveStepAttempt",
   "loadStepAttempts",
+  "saveStepProgress",
   "beginCompensation",
   "saveStepCompensation",
   "appendStreamChunk",
@@ -134,6 +135,7 @@ export function createWorkflowStorageHandler(
     findPendingSignal: (p) => requireCapability(storage, "journal").findPendingSignal(p),
     // -- Step attempts.
     saveStepAttempt: (p) => requireCapability(storage, "stepAttempts").saveStepAttempt(p),
+    saveStepProgress: (p) => requireCapability(storage, "stepProgress").saveStepProgress(p),
     loadStepAttempts: (p) => requireCapability(storage, "stepAttempts").loadStepAttempts(p),
     // -- Compensation ledger.
     beginCompensation: (p) => requireCapability(storage, "compensationLedger").beginCompensation(p),
@@ -227,6 +229,7 @@ const MISSING_CAPABILITY: Record<StorageCapability, string> = {
   stepAttempts:
     "storage does not implement StepAttemptStore — step attempt history is unsupported on this backend",
   stepCheckpoint: "storage does not implement checkpointStep",
+  stepProgress: "storage does not implement saveStepProgress",
   compensationLedger:
     "storage does not implement CompensationLedgerStore — durable compensation is unsupported on this backend",
   tripwire: "storage does not implement tripwireWorkflow",

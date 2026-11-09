@@ -58,6 +58,7 @@ const ALWAYS_SAFE_STORAGE_METHODS: ReadonlySet<StorageMethod> = new Set<StorageM
   "saveTaskFailure",
   "checkpointStep",
   "saveStepAttempt",
+  "saveStepProgress",
   "completeWorkflow",
   "failWorkflow",
   "tripwireWorkflow",

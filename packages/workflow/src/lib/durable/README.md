@@ -396,22 +396,47 @@ const wf = workflow({
 
 ### What a run is waiting on
 
-`handle.status()` / `getStatus()` carry `waitingOn`: the live run's parked
-waits, derived from stored step rows (no extra read, no migration). Each is
-`{ kind, stepName, since, until?, signalName?, childWorkflowId?, groupName?, reason?, attempt? }`
+`handle.status()` / `getStatus()` carry `waitingOn`: what the live run is
+parked on or busy with, derived from the stored run (no extra read). Each is
+`{ kind, stepName, since, until?, signalName?, childWorkflowId?, groupName?, reason?, holder?, attempt? }`
 with `kind` one of `sleep` (`until` = wake time), `signal` (`until` = timeout),
 `approval` (an `approve:<id>` signal wait), `child` (`until` = the child's next
-wake) or `step-queue` (a queued step its rate-limit / concurrency group holds back:
+wake), `activity` (a step body is executing: `attempt`, `since` = when the
+attempt began, `holder` = the worker id, or the runner's `executorId`, when known),
+`retry-backoff` (attempt `attempt` failed and the next one starts at `until`)
+or `step-queue` (a queued step its rate-limit / concurrency group holds back:
 `groupName`, `reason`, `until` = when the rate window frees a slot; read from the
 step executor / queue, not a step row, so only `getStatus` on a coordinator over a
 queue that implements `throttled` reports it — see
 [rate-limit groups](../distributed/README.md#rate-limit-and-concurrency-groups-with-fairness)). `waitingOnSummary` is a one-liner, e.g. `waiting for signal
 manager-approved (step approve, times out in 2h)`. Empty for a run with nothing
-parked and for ended runs. An activity in flight, a retry backoff and a step task
-queued for a worker are not stored on a step row, so they are not listed (apart
-from a task held back by a step group, above).
+parked and for ended runs.
+
+`activity` and `retry-backoff` come from the optional storage capability
+`stepProgress` (`saveStepProgress`, in memory, Postgres, SQLite, Redis and
+`workflow-remote`): the runner records, per step, that an attempt started
+(on a queue executor: when a worker claimed the task, with its id) or that a
+failed attempt is waiting for its retry. An attempt is recorded once it has
+run for a second on the run's clock (`STEP_PROGRESS_DELAY_MS`), so a step that
+settles sooner costs no write; a retry backoff is recorded at once. The records
+are advisory: written in
+the background (a failed write is dropped and never fails a step, and one is
+settled before the step's own write), kept one per step and read with the
+run, so a status call costs no extra read and stays bounded by the step count.
+Postgres keeps them in `wf_workflows.step_progress` (jsonb), added to an
+existing database by the incremental migration `0001_step_progress` (run by
+`migrate()`); SQLite adds the same column to a table that lacks it on open.
+A record counts only while it still describes the step: not for a settled,
+earlier-run or parked step, and a failed or parked step shows it only when it
+is newer than the failure or the park (a workflow retry, a re-execution after a
+wake). Limits: a storage without the capability lists neither kind; only the
+step body is covered, not a retry inside `ctx.activity`; a task queued for a
+worker nobody has claimed yet shows nothing (apart from one held back by a step
+group, above, which replaces an older record); a worker that dies mid-step
+leaves its `activity` until the run is re-driven.
 Zorya's `GET /api/runs/:id` returns the same as `waitingOn` (ISO timestamps) and
-`waitingOnSummary`, and the run page shows the summary beside the status badge.
+`waitingOnSummary`; the run page shows the summary beside the status badge and
+one chip per wait.
 
 `tag` is the failing error's `_tag` (`"WorkflowCancelledError"` for a cancel,
 `"UnknownError"` for an untagged defect). `cause` is the original error and

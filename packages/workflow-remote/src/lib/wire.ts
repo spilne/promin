@@ -66,6 +66,9 @@ export type StorageMethod =
   // (workerId per attempt) on the central server's storage.
   | "saveStepAttempt"
   | "loadStepAttempts"
+  // StepProgressStore — running / retry-backoff step progress, forwarded only
+  // when the underlying storage implements it.
+  | "saveStepProgress"
   // CompensationLedgerStore — forwarded only when the underlying storage
   // implements it, so a rollback interrupted on a remote runner resumes.
   | "beginCompensation"

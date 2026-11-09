@@ -8,6 +8,8 @@ import type {
   StepAttemptStore,
   StepCheckpoint,
   StepCheckpointStore,
+  StepProgressStore,
+  StoredStepProgress,
   CompensationLedgerStore,
   StepCompensationOutcome,
   RunSource,
@@ -57,6 +59,7 @@ import type {
   SaveStepAttemptParams,
   SaveStepCompensationParams,
   SaveStepFailureParams,
+  SaveStepProgressParams,
   SaveStepResultParams,
   SaveTaskFailureParams,
   SaveTaskResultParams,
@@ -174,6 +177,23 @@ function timestampOf(value: Date | string | null | undefined): Date | null {
   return value instanceof Date ? value : new Date(value);
 }
 
+/** The `step_progress` jsonb of a run, with its dates revived. */
+function reviveStepProgress(value: unknown): Record<string, StoredStepProgress> {
+  const raw = (typeof value === "string" ? JSON.parse(value) : value) as Record<
+    string,
+    Record<string, unknown>
+  >;
+  const out: Record<string, StoredStepProgress> = {};
+  for (const [name, p] of Object.entries(raw)) {
+    out[name] = {
+      ...p,
+      at: new Date(p.at as string),
+      ...(p.nextAttemptAt != null && { nextAttemptAt: new Date(p.nextAttemptAt as string) }),
+    } as StoredStepProgress;
+  }
+  return out;
+}
+
 /** Parse a jsonb column selected as `::text`; SQL NULL stays `null`. */
 function parseJsonText(text: string | null | undefined): unknown {
   return text == null ? null : JSON.parse(text);
@@ -188,6 +208,7 @@ export class PostgresWorkflowStorage
     WorkflowStorage,
     StepAttemptStore,
     StepCheckpointStore,
+    StepProgressStore,
     CompensationLedgerStore,
     JournalStore
 {
@@ -277,6 +298,7 @@ export class PostgresWorkflowStorage
       tripwire: row.tripwire ?? undefined,
       metadata: row.metadata ?? undefined,
       steps: stepMap,
+      ...(row.stepProgress != null && { stepProgress: reviveStepProgress(row.stepProgress) }),
       createdAt: row.createdAt,
       startedAt: row.startedAt ?? undefined,
       updatedAt: row.updatedAt,
@@ -365,19 +387,19 @@ export class PostgresWorkflowStorage
           NULL::timestamptz AS signal_timeout_at, NULL::jsonb AS signal_json_schema,
           NULL::text AS compensation_status, NULL::text AS compensation_error,
           NULL::timestamptz AS compensated_at, NULL::int AS task_index,
-          w.compensation_origin
+          w.compensation_origin, w.step_progress
         FROM w
         UNION ALL
         SELECT 1, s.step_name, NULL, NULL, NULL, NULL, NULL, NULL, s.run, s.status_id, NULL,
           s.metadata, s.result, s.error, s.error_tag, NULL, NULL, s.started_at, NULL,
           s.completed_at, s.step_type_id, s.depends_on, s.duration_ms::float8, s.attempt,
           s.wake_at, s.signal_name, s.signal_timeout_at, s.signal_json_schema,
-          s.compensation_status, s.compensation_error, s.compensated_at, NULL, NULL
+          s.compensation_status, s.compensation_error, s.compensated_at, NULL, NULL, NULL
         FROM wf_workflow_steps s JOIN w ON s.workflow_id = w.workflow_id AND s.run = w.run
         UNION ALL
         SELECT 2, t.step_name, NULL, NULL, NULL, NULL, NULL, NULL, t.run, t.status_id, t.input,
           NULL, t.result, t.error, NULL, NULL, NULL, t.started_at, NULL, t.completed_at, NULL,
-          NULL, NULL, t.attempt, NULL, NULL, NULL, NULL, NULL, NULL, NULL, t.task_index, NULL
+          NULL, NULL, t.attempt, NULL, NULL, NULL, NULL, NULL, NULL, NULL, t.task_index, NULL, NULL
         FROM wf_workflow_step_tasks t JOIN w ON t.workflow_id = w.workflow_id AND t.run = w.run`,
     );
 
@@ -450,6 +472,7 @@ export class PostgresWorkflowStorage
         error: wfRow.error,
         errorTag: wfRow.error_tag,
         compensationOrigin: wfRow.compensation_origin,
+        stepProgress: wfRow.step_progress,
         tripwire: wfRow.tripwire,
         metadata: wfRow.metadata,
         createdAt: timestampOf(wfRow.created_at),
@@ -1025,6 +1048,33 @@ export class PostgresWorkflowStorage
     await this.writeStep({
       checkpoint: { workflowId, stepName, outcome: { kind: "failed", ...outcome }, attempts: [] },
       guard,
+    });
+  }
+
+  async saveStepProgress({ guard, ...params }: SaveStepProgressParams): Promise<void> {
+    const { at, nextAttemptAt, ...rest } = params.progress;
+    const record = {
+      ...rest,
+      at: at.toISOString(),
+      ...(nextAttemptAt !== undefined && { nextAttemptAt: nextAttemptAt.toISOString() }),
+    };
+    const ids = WorkflowStatusIds.id;
+    // Stamps the record with the run it is written for; a parked or ended run
+    // is left alone. Step rows, status and updated_at are not touched.
+    await this.fencedStatement({
+      workflowId: params.workflowId,
+      guard,
+      statement: (ok) => sql`
+        upd AS (
+          UPDATE wf_workflows SET step_progress = jsonb_set(
+            COALESCE(step_progress, '{}'::jsonb),
+            ARRAY[${params.stepName}]::text[],
+            jsonb_build_object('run', run) || ${JSON.stringify(record)}::jsonb)
+          WHERE workflow_id = ${params.workflowId}
+            AND status_id IN (${ids.pending}::int, ${ids.running}::int) AND ${ok}
+          RETURNING 1
+        )`,
+      select: sql`(SELECT count(*) FROM upd) AS written`,
     });
   }
 
@@ -1621,6 +1671,16 @@ export class PostgresWorkflowStorage
             sql`${workflowSteps.compensationStatus} IS NOT NULL`,
           ),
         );
+      // A reset step starts over: its progress record goes with its row.
+      await tx
+        .update(workflows)
+        .set({
+          stepProgress: sql`step_progress - ARRAY[${sql.join(
+            names.map((n) => sql`${n}`),
+            sql`, `,
+          )}]::text[]`,
+        })
+        .where(and(eq(workflows.workflowId, workflowId), sql`step_progress IS NOT NULL`));
       // Clear journal entries so the activities re-fire on replay rather
       // than returning stale recorded values.
       await tx

@@ -42,6 +42,11 @@ export function applyStepPolicies(params: {
   onAttemptFailed?: (error: unknown) => void;
   /** Called when an attempt times out, before it fails; aborts that attempt's signal. */
   onTimeout?: (error: unknown) => void;
+  /**
+   * Called when a failed attempt is going to be retried, before the backoff
+   * wait: `delayMs` is the wait and `at` when the next attempt starts.
+   */
+  onRetryScheduled?: (retry: { readonly delayMs: number; readonly at: Date }) => void;
 }): Eff<unknown, Throws<TaggedError>> {
   const { stepDef, workflowId, clock } = params;
   let raw: Eff<unknown, Throws<TaggedError>> = suspend(params.invoke);
@@ -68,7 +73,15 @@ export function applyStepPolicies(params: {
   }
 
   if (stepDef.retry) {
-    raw = withStepRetry({ eff: raw, policy: stepDef.retry, clock });
+    const onRetryScheduled = params.onRetryScheduled;
+    raw = withStepRetry({
+      eff: raw,
+      policy: stepDef.retry,
+      clock,
+      ...(onRetryScheduled !== undefined && {
+        onRetry: ({ delayMs, at }) => onRetryScheduled({ delayMs, at }),
+      }),
+    });
   }
 
   return withFailureStrategy({ eff: raw, strategy: stepDef.onFailure });
