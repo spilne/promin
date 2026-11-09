@@ -153,4 +153,53 @@ describe("LocalAgent.forkThread", () => {
     });
     expect(metadata).not.toHaveProperty(FORK_IN_PROGRESS_METADATA_KEY);
   });
+
+  it("copies facts whole: retired history, supersession chain, timestamps, confidence", async () => {
+    const { agent, memory } = await setup();
+    const [old, mid, cur] = await memory.importThreadFacts(parentKey, [
+      {
+        ref: "1",
+        text: "v1",
+        source: "user",
+        confidence: 0.2,
+        createdAt: 10,
+        updatedAt: 11,
+        retiredAt: 20,
+        supersededByRef: "2",
+      },
+      {
+        ref: "2",
+        text: "v2",
+        source: "model",
+        confidence: 0.7,
+        createdAt: 20,
+        updatedAt: 25,
+        retiredAt: 30,
+        supersededByRef: "3",
+      },
+      {
+        ref: "3",
+        text: "v3",
+        source: "operator",
+        confidence: 0.95,
+        createdAt: 30,
+        updatedAt: 33,
+        retiredAt: null,
+        supersededByRef: null,
+      },
+    ]);
+    await agent.forkThread!("parent", "child");
+
+    const listed = await memory.listThreadFacts(childKey("child"), { includeRetired: true });
+    const byText = new Map(listed.map((f) => [f.text, f]));
+    const [c1, c2, c3] = ["v1", "v2", "v3"].map((t) => byText.get(t)!);
+    const record = ({ id: _id, supersededBy: _s, ...rest }: typeof old & {}) => rest;
+    expect([c1, c2, c3].map((f) => record(f!))).toEqual([old, mid, cur].map((f) => record(f!)));
+    expect(c1!.supersededBy).toBe(c2!.id);
+    expect(c2!.supersededBy).toBe(c3!.id);
+    expect(c3!.supersededBy).toBeNull();
+    expect([c1!.id, c2!.id, c3!.id]).not.toContain(old!.id);
+    // The parent keeps its own current fact.
+    expect((await memory.listThreadFacts(parentKey)).map((f) => f.id)).toEqual([cur!.id]);
+  });
 });

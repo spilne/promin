@@ -431,8 +431,9 @@ PostgresLeaseStore({ db }) })`. `turnGate: false` turns it off. Scheduled
   The new thread has its own transcript and lifecycle, with
   `branchParentThreadId`, `branchAtSeq` and `branchDepth` stored in durable
   metadata. `GET .../lineage` returns its parent and direct children within
-  the caller's resource. A head fork copies working memory and current thread
-  facts; an earlier fork clears these derived values because they may include
+  the caller's resource. A head fork copies working memory and thread
+  facts whole, retired history, supersession chains, timestamps and confidence
+  included (entity relations are resource-scoped and shared, not copied); an earlier fork clears these derived values because they may include
   later information. Compaction episodes whose source range ends by the
   branch point are copied. The fork holds the parent's turn lease and refuses
   a pending approval. `LocalAgent.forkThread` exposes the same operation to

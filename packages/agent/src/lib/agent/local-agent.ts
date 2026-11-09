@@ -691,14 +691,27 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
         });
       }
       if (atHead) {
-        // FactInput carries only text/source/confidence; retired facts are not listed.
-        for (const fact of await memory.listThreadFacts(parentKey)) {
-          await memory.appendThreadFact(childKey, {
+        // Copy whole records, retired history included, so supersession chains,
+        // timestamps and confidence survive. Entity relations are scoped to the
+        // resource, which the child shares, so there is nothing to copy for them.
+        const facts = await memory.listThreadFacts(parentKey, { includeRetired: true });
+        // Listing puts retired facts last; restore write order for the child.
+        const ordered = facts
+          .map((fact, index) => ({ fact, index }))
+          .sort((x, y) => x.fact.createdAt - y.fact.createdAt || x.index - y.index);
+        await memory.importThreadFacts(
+          childKey,
+          ordered.map(({ fact }) => ({
+            ref: fact.id,
             text: fact.text,
             source: fact.source,
             confidence: fact.confidence,
-          });
-        }
+            createdAt: fact.createdAt,
+            updatedAt: fact.updatedAt,
+            retiredAt: fact.retiredAt,
+            supersededByRef: fact.supersededBy,
+          })),
+        );
       }
       await memory.setThreadMetadata(childKey, {
         ...parentMetadata,

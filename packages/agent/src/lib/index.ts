@@ -93,6 +93,7 @@ export type { EmbeddingProvider } from "./embedding-provider.ts";
 export type {
   MemoryStore,
   Fact,
+  FactImport,
   FactInput,
   FactListParams,
   FactSource,
@@ -210,7 +211,7 @@ export {
   type MemoryProfile,
   type RecallOptions,
 } from "./memory/memory-profile.ts";
-export { newEpisode, newFact } from "./memory/record-factories.ts";
+export { importedFacts, newEpisode, newFact } from "./memory/record-factories.ts";
 export {
   appendStaticRule,
   approveRuleProposal,

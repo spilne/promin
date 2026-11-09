@@ -7,7 +7,7 @@
 import { randomUUID } from "node:crypto";
 import { resolveFactConfidence } from "./fact-confidence.ts";
 import { clamp01 } from "./scoring.ts";
-import type { EpisodeInput, EpisodicRecord, Fact, FactInput } from "./types.ts";
+import type { EpisodeInput, EpisodicRecord, Fact, FactImport, FactInput } from "./types.ts";
 
 const DEFAULT_EPISODE_SALIENCE = 0.5;
 
@@ -24,6 +24,28 @@ export function newFact(params: { readonly input: FactInput; readonly now: numbe
     supersededBy: null,
     confidence: resolveFactConfidence(input),
   };
+}
+
+/**
+ * Stored facts for an import batch: fresh ids, the given record otherwise,
+ * `supersededByRef` resolved to the new id. Throws on a repeated ref.
+ */
+export function importedFacts(facts: ReadonlyArray<FactImport>): Fact[] {
+  const ids = new Map<string, string>();
+  for (const f of facts) {
+    if (ids.has(f.ref)) throw new Error(`importThreadFacts: duplicate ref ${f.ref}`);
+    ids.set(f.ref, randomUUID());
+  }
+  return facts.map((f) => ({
+    id: ids.get(f.ref)!,
+    text: f.text,
+    source: f.source,
+    createdAt: f.createdAt,
+    updatedAt: f.updatedAt,
+    retiredAt: f.retiredAt,
+    supersededBy: f.supersededByRef === null ? null : (ids.get(f.supersededByRef) ?? null),
+    confidence: clamp01(f.confidence),
+  }));
 }
 
 /** A new episode written at `now`: salience defaults to 0.5 (also for NaN) and is clamped to 0..1. */
