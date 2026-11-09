@@ -29,6 +29,8 @@ export interface HarnessOptions {
   /** Async model reply; `signal` aborts when the turn is interrupted. */
   readonly chatAsync?: (content: string, signal: AbortSignal | undefined) => Promise<string>;
   readonly turnGate?: false;
+  /** Full control of the worker model's reply; wins over `chat` / `chatAsync`. */
+  readonly rawChat?: LLMProvider["chat"];
   /** Real stores (e.g. Postgres) instead of the in-memory ones. */
   readonly stores?: { readonly storage: WorkflowStorage; readonly memory: MemoryStore };
   /** Model of the "orchestrator" recipe, which gets the retained subagent tools. */
@@ -100,6 +102,7 @@ export async function harness(options: HarnessOptions = {}) {
               ? options.orchestratorLlm
               : {
                   chat: async (request) => {
+                    if (options.rawChat) return options.rawChat(request);
                     const last = String(
                       request.messages.findLast((m) => m.role === "user")?.content,
                     );

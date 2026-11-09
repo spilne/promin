@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   admitTurn,
+  addUsage,
   threadTurnWorkflowId,
   THREAD_AGENT_METADATA_KEY,
   TurnInProgressError,
@@ -11,6 +12,7 @@ import {
   type RegisteredAgent,
 } from "@promin/agent";
 import {
+  hasCapability,
   runUsage,
   workflow,
   type UsageReport,
@@ -606,8 +608,7 @@ async function chargeParent(params: {
     threadId: childThreadId(input.childId),
     turnKey,
   });
-  const state = await config.workflows.storage.loadWorkflow(turnId);
-  const spend = (state?.result as { spend?: BudgetUsage } | undefined)?.spend;
+  const spend = await turnSpend({ config, turnId });
   if (!spend) return undefined;
   await config.budgets?.ledger.record({
     turnId: `retained:${turnId}`,
@@ -617,6 +618,36 @@ async function chargeParent(params: {
     usage: spend,
   });
   return spend;
+}
+
+/**
+ * What a child turn spent. A settled turn carries it in its result. A turn
+ * that failed has no result, so the spend is summed from the model calls
+ * (think and compaction steps) its journal recorded before it failed. Tool
+ * and sub-agent spend of a failed turn is not in the journal values read here.
+ */
+async function turnSpend(params: {
+  readonly config: RetainedSubagentsConfig;
+  readonly turnId: string;
+}): Promise<BudgetUsage | undefined> {
+  const { config, turnId } = params;
+  const state = await config.workflows.storage.loadWorkflow(turnId);
+  const settled = (state?.result as { spend?: BudgetUsage } | undefined)?.spend;
+  if (settled) return settled;
+  const storage = config.workflows.storage;
+  if (!state || !hasCapability(storage, "journal")) return undefined;
+  const entries = await storage.loadJournal({
+    workflowId: turnId,
+    stepName: "agent",
+  });
+  let total: BudgetUsage | undefined;
+  for (const entry of entries) {
+    if (!/^(think|compact)-\d+$/.test(entry.activityName) || entry.exit?.tag !== "Success")
+      continue;
+    const value = (entry.exit.value as { value?: { spend?: BudgetUsage } } | null)?.value;
+    if (value?.spend) total = total ? addUsage(total, value.spend) : value.spend;
+  }
+  return total;
 }
 
 /** One turn's spend as the workflow engine counts it: all prompt tokens, cache included. */

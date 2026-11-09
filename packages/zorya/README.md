@@ -494,7 +494,9 @@ memory, canDelegate })` and pass it to
   included) is recorded in the ledger under the parent thread, so it counts
   toward the parent's thread budget and the namespace window. Resolve child
   agents without their own ledger, or the namespace window counts the spend
-  twice. A turn is capped only by its own recipe `budget`: admission is
+  twice. A turn that fails is charged too: with no result, its spend is
+  summed from the model calls its journal recorded (tool and sub-agent spend
+  of a failed turn is not counted). A turn is capped only by its own recipe `budget`: admission is
   checked at turn start, so a thread budget can be overshot by the turns in
   flight. `childBudget` (a `WorkflowBudget`) caps each child's lifetime
   spend through `ctx.reportUsage`; crossing it fails the child run (status

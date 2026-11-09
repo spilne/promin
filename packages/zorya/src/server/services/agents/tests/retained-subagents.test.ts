@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { admitTurn, BudgetExceededError, InMemoryUsageLedger } from "@promin/agent";
+import {
+  admitTurn,
+  BudgetExceededError,
+  InMemoryUsageLedger,
+  type LLMProvider,
+} from "@promin/agent";
 import { InMemoryWorkflowStorage } from "@promin/workflow";
 import { ZoryaServer } from "../../../server.ts";
 import { ZoryaAgents } from "../zorya-agents.ts";
@@ -591,6 +596,80 @@ describe("retained subagents", () => {
       expect(handle?.status).not.toBe("failed");
       expect(await statuses(h, child.childId)).toEqual(["done", "done"]);
       await h.workflows.stop();
+    });
+
+    describe("a turn that spends and then fails", () => {
+      /** Each turn: one priced call that asks for a tool, then a provider error. */
+      function failingModel() {
+        const seen = { calls: 0 };
+        const rawChat: LLMProvider["chat"] = async (request) => {
+          seen.calls++;
+          if (request.messages.at(-1)?.role === "tool") throw new Error("provider down");
+          return {
+            content: null,
+            finishReason: "tool_calls" as const,
+            toolCalls: [{ id: `c${seen.calls}`, name: "missing", input: {} }],
+            usage: { inputTokens: 100, outputTokens: 0 },
+          };
+        };
+        return { rawChat, seen };
+      }
+
+      it("counts failed turns toward the parent budget and refuses further turns", async () => {
+        const ledger = new InMemoryUsageLedger();
+        const model = failingModel();
+        const h = await harness({
+          rawChat: model.rawChat,
+          retained: {
+            budgets: { ledger, thread: { maxTotalTokens: 250 }, minCallTokens: 1 },
+          },
+        });
+        await h.workflows.start();
+        const child = await h.retained.spawnAgent({
+          parent,
+          agentId: "worker",
+          task: "one",
+          childId: "failing",
+        });
+        for (const [i, task] of ["two", "three", "four"].entries()) {
+          await waitFor(async () => (await statuses(h, child.childId)).length === i + 1);
+          await h.retained.messageAgent({ parent, childId: child.childId, task, messageId: task });
+        }
+        await waitFor(async () => (await statuses(h, child.childId)).length === 4);
+        expect(await statuses(h, child.childId)).toEqual(["failed", "failed", "failed", "failed"]);
+        // Three turns reached the model (two calls each); the fourth was refused up front.
+        expect(model.seen.calls).toBe(6);
+        const spent = await ledger.total({
+          namespaceId: parent.namespaceId,
+          threadId: parent.threadId,
+        });
+        expect(spent.inputTokens).toBe(300);
+        await h.workflows.stop();
+      });
+
+      it("counts failed turns toward the child's run budget", async () => {
+        const model = failingModel();
+        const h = await harness({
+          rawChat: model.rawChat,
+          retained: { childBudget: { maxTokens: 150 } },
+        });
+        await h.workflows.start();
+        const child = await h.retained.spawnAgent({
+          parent,
+          agentId: "worker",
+          task: "one",
+          childId: "failing-capped",
+        });
+        await waitFor(async () => (await statuses(h, child.childId)).length === 1);
+        await h.retained.messageAgent({ parent, childId: child.childId, task: "two" });
+        await waitFor(
+          async () => (await h.retained.listChildAgents(parent))[0]?.status === "failed",
+        );
+        await expect(
+          h.retained.messageAgent({ parent, childId: child.childId, task: "three" }),
+        ).rejects.toMatchObject({ code: "conflict" });
+        await h.workflows.stop();
+      });
     });
   });
 });
