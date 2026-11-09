@@ -10,10 +10,18 @@ import {
   type StepQueueEnqueueParams,
   type StepQueueRequeueParams,
   type StepQueueRequeueResult,
+  type StepGroupFields,
   type StepTask,
   type StepTaskRecord,
+  type ThrottledTask,
 } from "@promin/workflow/distributed";
-import { deadLetterError, percentileCont } from "@promin/workflow/storage-kit";
+import {
+  deadLetterError,
+  isStepGroupTask,
+  percentileCont,
+  StepGroupLedger,
+  stepGroupClaimOrder,
+} from "@promin/workflow/storage-kit";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
 /**
@@ -118,6 +126,11 @@ export class SqliteStepQueue implements StepQueue {
         concurrency_key   TEXT,
         concurrency_scope TEXT,
         concurrency_limit INTEGER,
+        group_name        TEXT,
+        group_max_concurrent INTEGER,
+        group_max_starts  INTEGER,
+        group_window_ms   INTEGER,
+        fairness_key      TEXT,
         claimed_by     TEXT,
         deliveries     INTEGER NOT NULL DEFAULT 0,
         run            INTEGER NOT NULL DEFAULT 1,
@@ -130,6 +143,21 @@ export class SqliteStepQueue implements StepQueue {
     if (!columns.some((c) => c.name === "heartbeat_details")) {
       this.db.run(`ALTER TABLE ${t} ADD COLUMN heartbeat_details TEXT`);
     }
+    // Tables created before step groups lack their columns.
+    for (const [name, type] of [
+      ["group_name", "TEXT"],
+      ["group_max_concurrent", "INTEGER"],
+      ["group_max_starts", "INTEGER"],
+      ["group_window_ms", "INTEGER"],
+      ["fairness_key", "TEXT"],
+    ] as const) {
+      if (!columns.some((c) => c.name === name)) {
+        this.db.run(`ALTER TABLE ${t} ADD COLUMN ${name} ${type}`);
+      }
+    }
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_group_started ON ${t} (group_name, claimed_at) WHERE group_name IS NOT NULL`,
+    );
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_concurrency_running ON ${t} (concurrency_scope, concurrency_key) WHERE status = 'running' AND concurrency_key IS NOT NULL`,
     );
@@ -164,8 +192,9 @@ export class SqliteStepQueue implements StepQueue {
            (id, workflow_id, step_name, needs, priority, input, deps, depends_on, timeout_ms,
             attempt, run, deliveries, status, version, namespace, metadata,
             concurrency_key, concurrency_scope, concurrency_limit,
+            group_name, group_max_concurrent, group_max_starts, group_window_ms, fairness_key,
             created_at, active_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -185,6 +214,11 @@ export class SqliteStepQueue implements StepQueue {
           params.concurrencyKey ?? null,
           params.concurrencyScope ?? null,
           params.concurrencyLimit ?? null,
+          params.groupName ?? null,
+          params.groupMaxConcurrent ?? null,
+          params.groupMaxStarts ?? null,
+          params.groupWindowMs ?? null,
+          params.fairnessKey ?? null,
           this.clock.currentTimeMs(),
           key,
         );
@@ -210,12 +244,22 @@ export class SqliteStepQueue implements StepQueue {
     // One write transaction: no other connection can claim between our
     // read of the pending rows and the updates below.
     return this.db.transaction((): StepTask[] => {
-      const rows = this.db
+      const pending = this.db
         .query<TaskRow>(
           `SELECT * FROM ${this._table} WHERE status = 'pending'
-           ORDER BY priority DESC, created_at ASC`,
+           ORDER BY priority DESC, created_at ASC, rowid ASC`,
         )
         .all();
+      const groups = this._groupLedger();
+      const rows = stepGroupClaimOrder({
+        pending: pending.map((row) => ({
+          row,
+          priority: row.priority,
+          createdAt: new Date(row.created_at),
+          ...groupFieldsOf(row),
+        })),
+        runningByKey: groups.runningByFairKey(),
+      }).map((entry) => entry.row);
 
       // Per-(scope, key) running counter — counts both already-running
       // tasks and tasks claimed earlier in this call so a single `claim()`
@@ -239,12 +283,22 @@ export class SqliteStepQueue implements StepQueue {
       for (const row of rows) {
         if (claimed.length >= params.limit) break;
         if (!claimable(row)) continue;
-        if (row.concurrency_key && row.concurrency_scope && row.concurrency_limit != null) {
-          const k = `${row.concurrency_scope}::${row.concurrency_key}`;
-          const running = runningPerKey.get(k) ?? 0;
-          if (running >= row.concurrency_limit) continue;
-          runningPerKey.set(k, running + 1);
+        const concurrencyKey =
+          row.concurrency_key && row.concurrency_scope && row.concurrency_limit != null
+            ? `${row.concurrency_scope}::${row.concurrency_key}`
+            : undefined;
+        if (
+          concurrencyKey !== undefined &&
+          (runningPerKey.get(concurrencyKey) ?? 0) >= row.concurrency_limit!
+        ) {
+          continue;
         }
+        const group = groupFieldsOf(row);
+        if (isStepGroupTask(group) && !groups.check(group).ok) continue;
+        if (concurrencyKey !== undefined) {
+          runningPerKey.set(concurrencyKey, (runningPerKey.get(concurrencyKey) ?? 0) + 1);
+        }
+        if (isStepGroupTask(group)) groups.admit(group);
 
         const claimToken = randomUUID();
         this.db
@@ -266,6 +320,54 @@ export class SqliteStepQueue implements StepQueue {
       }
       return claimed;
     })();
+  }
+
+  async throttled(params: { workflowId: string }): Promise<ThrottledTask[]> {
+    const groups = this._groupLedger();
+    const rows = this.db
+      .query<TaskRow>(
+        `SELECT * FROM ${this._table}
+         WHERE workflow_id = ? AND status = 'pending' AND group_name IS NOT NULL`,
+      )
+      .all(params.workflowId);
+    const out: ThrottledTask[] = [];
+    for (const row of rows) {
+      const group = groupFieldsOf(row);
+      if (!isStepGroupTask(group)) continue;
+      const verdict = groups.check(group);
+      if (verdict.ok) continue;
+      out.push({
+        taskId: row.id,
+        workflowId: row.workflow_id,
+        run: row.run,
+        stepName: row.step_name,
+        attempt: row.attempt,
+        groupName: group.groupName,
+        reason: verdict.reason,
+        since: new Date(row.created_at),
+        ...(verdict.retryAtMs !== undefined && { retryAt: new Date(verdict.retryAtMs) }),
+      });
+    }
+    return out;
+  }
+
+  /** Running tasks and window starts of every group, read from the table. */
+  private _groupLedger(): StepGroupLedger {
+    const ledger = new StepGroupLedger(this.clock.currentTimeMs());
+    const rows = this.db
+      .query<TaskRow>(
+        `SELECT * FROM ${this._table}
+         WHERE group_name IS NOT NULL AND status != 'pending'`,
+      )
+      .all();
+    for (const row of rows) {
+      ledger.record({
+        ...groupFieldsOf(row),
+        running: row.status === "running",
+        ...(row.claimed_at != null && { startedAtMs: row.claimed_at }),
+      });
+    }
+    return ledger;
   }
 
   async release(params: { taskId: string; claimToken: string }): Promise<boolean> {
@@ -533,6 +635,11 @@ interface TaskRow {
   concurrency_key: string | null;
   concurrency_scope: string | null;
   concurrency_limit: number | null;
+  group_name: string | null;
+  group_max_concurrent: number | null;
+  group_max_starts: number | null;
+  group_window_ms: number | null;
+  fairness_key: string | null;
   created_at: number;
   claimed_at: number | null;
   claimed_by: string | null;
@@ -574,6 +681,17 @@ function rowToTask(row: TaskRow): StepTask {
     ...(row.heartbeat_details != null && {
       lastHeartbeatDetails: JSON.parse(row.heartbeat_details) as unknown,
     }),
+    ...groupFieldsOf(row),
+  };
+}
+
+function groupFieldsOf(row: TaskRow): StepGroupFields {
+  return {
+    ...(row.group_name != null && { groupName: row.group_name }),
+    ...(row.group_max_concurrent != null && { groupMaxConcurrent: row.group_max_concurrent }),
+    ...(row.group_max_starts != null && { groupMaxStarts: row.group_max_starts }),
+    ...(row.group_window_ms != null && { groupWindowMs: row.group_window_ms }),
+    ...(row.fairness_key != null && { fairnessKey: row.fairness_key }),
   };
 }
 

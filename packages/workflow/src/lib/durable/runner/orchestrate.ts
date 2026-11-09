@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 
 import { eventOfWakeSignal } from "../wait-for-event.ts";
+import type { UsageTotals } from "../budget.ts";
 import type { TaggedError } from "../../shared/tagged-error.ts";
 import { LosslessJsonCodec } from "@spilne/perfect-core/connect";
 import { runHookResult } from "../../shared/eff.ts";
@@ -137,6 +138,8 @@ interface CyclePhase {
   executing: boolean;
   input: unknown;
   trace?: TraceRun;
+  /** The run's usage as the DAG executor last folded it (for the run-end trace). */
+  readonly usage: { current?: UsageTotals };
 }
 
 /** Statuses `rejectInFlight` treats as a run still in flight. */
@@ -438,7 +441,7 @@ interface CycleParams {
  */
 async function runOneOrchestrationCycle(cycle: CycleParams): Promise<unknown> {
   const { ctx, lock, clock } = cycle;
-  const phase: CyclePhase = { executing: false, input: cycle.params.input };
+  const phase: CyclePhase = { executing: false, input: cycle.params.input, usage: {} };
   try {
     const result = await runCycleBody({ ...cycle, phase });
     traceRunEnd({ ctx, clock, phase, params: cycle.params, error: undefined });
@@ -670,6 +673,8 @@ async function runCycleBody(cycle: CycleParams & { phase: CyclePhase }): Promise
     steps: ctx.steps,
     hooks: ctx.hooks,
     timeoutMs: ctx.timeoutMs,
+    ...(ctx.budget !== undefined && { budget: ctx.budget }),
+    usageRef: cycle.phase.usage,
     stepExecutor: ctx.stepExecutor,
     guard,
     clock,
@@ -1100,6 +1105,7 @@ function traceRunEnd(params: {
     durationMs: endedAt.getTime() - trace.startedAt.getTime(),
     outcome,
     ...(failure !== undefined && { failure }),
+    ...(phase.usage.current !== undefined && { usage: phase.usage.current }),
     ...(ctx.executorId !== undefined && { executorId: ctx.executorId }),
   });
 }
@@ -1232,7 +1238,12 @@ function workflowRetryPolicy(
     when: (error) => {
       if (isControlFlowExit(error)) return false;
       const tag = errorTag(error);
-      if (tag === "WorkflowDeadlineError" || tag === "WorkflowCancelledError") return false;
+      if (
+        tag === "WorkflowDeadlineError" ||
+        tag === "WorkflowCancelledError" ||
+        tag === "WorkflowBudgetExceededError"
+      )
+        return false;
       if (tag === undefined && policy.retryDefects !== true) return false;
       return userWhen === undefined || userWhen(error);
     },

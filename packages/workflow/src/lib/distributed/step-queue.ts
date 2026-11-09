@@ -9,10 +9,11 @@
 // ---------------------------------------------------------------------------
 
 import type { LeaderLease } from "../scheduler/leader-lease.ts";
+import type { StepGroupFields, ThrottledTask } from "./step-group-limits.ts";
 
 export type StepTaskStatus = "pending" | "running" | "completed" | "failed";
 
-export interface StepTask {
+export interface StepTask extends StepGroupFields {
   readonly id: string;
   readonly workflowId: string;
   readonly stepName: string;
@@ -103,6 +104,11 @@ export interface StepTask {
   readonly concurrencyKey?: string;
   readonly concurrencyScope?: string;
   readonly concurrencyLimit?: number;
+  // Group fields (`StepGroupFields`): `groupName`, `groupMaxConcurrent`,
+  // `groupMaxStarts` + `groupWindowMs`, `fairnessKey`. A group's limits are
+  // shared by every task naming it, across workflows; `claim()` enforces
+  // them. A task held back by its group stays `pending` (no delivery, no
+  // attempt used) — see `StepQueue.throttled`.
 }
 
 /**
@@ -184,6 +190,18 @@ export interface StepQueueEnqueueParams {
   concurrencyKey?: string;
   concurrencyScope?: string;
   concurrencyLimit?: number;
+  /**
+   * Named rate-limit / concurrency group (see `step-group-limits.ts`): at
+   * most `groupMaxConcurrent` of the group running, at most `groupMaxStarts`
+   * claims per `groupWindowMs`, across every worker. `fairnessKey`
+   * interleaves keys of the group round-robin when claiming. The tasks of a
+   * group should agree on its limits; each task is admitted against its own.
+   */
+  groupName?: string;
+  groupMaxConcurrent?: number;
+  groupMaxStarts?: number;
+  groupWindowMs?: number;
+  fairnessKey?: string;
 }
 
 /** Parameters for `StepQueue.complete`. */
@@ -328,7 +346,10 @@ export interface StepQueue {
    * `capabilities`, `stepNames` and `versions` — in priority order (higher
    * first, FIFO within a priority). Each claimed task is `running`, carries
    * a fresh `claimToken`, records `workerId`, and has its `deliveries`
-   * incremented. Tasks whose concurrency key is at its limit are skipped.
+   * incremented. Tasks whose concurrency key is at its limit, or whose
+   * group is out of concurrent slots or starts for the window, are skipped
+   * and stay `pending`. Tasks of one group are claimed fairly across their
+   * `fairnessKey`s (round-robin) within a priority.
    */
   claim(params: StepQueueClaimParams): Promise<StepTask[]>;
 
@@ -340,6 +361,15 @@ export interface StepQueue {
    * current.
    */
   release(params: { taskId: string; claimToken: string }): Promise<boolean>;
+
+  /**
+   * The pending tasks of `workflowId` that their group is holding back right
+   * now (`reason`: out of concurrent slots, or out of starts for the rate
+   * window). Computed from current queue state, so it answers from any
+   * process sharing the queue. Optional: a queue that does not implement it
+   * reports nothing as throttled.
+   */
+  throttled?(params: { workflowId: string }): Promise<ThrottledTask[]>;
 
   /** Read one task, or `undefined` when it doesn't exist (or was purged). */
   get(taskId: string): Promise<StepTaskRecord | undefined>;

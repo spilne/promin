@@ -16,7 +16,7 @@ import { errorMessage } from "./step-body.ts";
 import { checkpointStepOutcome, type StepOutcome } from "./step-checkpoint.ts";
 import { traceStepAttemptStart } from "./step-tracing.ts";
 import { tracerTraceparent } from "../workflow-tracer.ts";
-import { resolveStepConcurrency } from "./step-concurrency.ts";
+import { resolveStepConcurrency, resolveStepGroup } from "./step-concurrency.ts";
 import type { StepExecutionRequest, StepExecutionResult } from "./step-executor.ts";
 import { settleWave, skippedOutcome } from "./wave.ts";
 
@@ -88,6 +88,16 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
           results,
         });
 
+        const group = resolveStepGroup({
+          workflowQueue: ctx.workflowQueue,
+          stepDef,
+          workflowInput: input,
+          stepInput: prevStepName != null ? results[prevStepName] : input,
+          workflowId,
+          attempt: currentAttempt,
+          results,
+        });
+
         const req: StepExecutionRequest = {
           workflowId,
           stepName: stepDef.name,
@@ -107,6 +117,7 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
             clock,
             stepStates,
             stepName: stepDef.name,
+            usageByStep: params.usageByStep,
             workflowMetadata,
           }),
           ...(concurrency
@@ -116,6 +127,7 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
                 concurrencyLimit: concurrency.limit,
               }
             : {}),
+          ...(group && { group }),
         };
 
         let res: StepExecutionResult;

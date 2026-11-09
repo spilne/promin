@@ -6,6 +6,14 @@
 // workflow deadline and tripwire.
 // ---------------------------------------------------------------------------
 
+import {
+  addUsage,
+  exceededLimit,
+  stepLimits,
+  stepUsage,
+  ZERO_USAGE,
+  type UsageTotals,
+} from "../budget.ts";
 import { SystemWallClock } from "../../shared/wall-clock.ts";
 import { WorkflowDeadlineError, WorkflowError } from "../durable-pipeline-error.ts";
 import type { StepDefinition } from "../durable-pipeline.ts";
@@ -69,6 +77,37 @@ export async function executeWorkflowDag(
       results[stepName] = stepDef.codec.decode(stepState.result);
     }
   }
+
+  // Usage stored on step rows, by step; a settled step's replaces its row.
+  const usageByStep = new Map<string, UsageTotals>();
+  for (const [stepName, stepState] of Object.entries(state?.steps ?? {})) {
+    const u = stepUsage(stepState);
+    if (u !== undefined) usageByStep.set(stepName, u);
+  }
+  const currentUsage = (): UsageTotals | undefined => {
+    let total: UsageTotals | undefined;
+    for (const u of usageByStep.values()) total = addUsage(total ?? ZERO_USAGE, u);
+    if (ctx.usageRef !== undefined) ctx.usageRef.current = total;
+    return total;
+  };
+  /** The budget error once the run's stored usage is over a cap. */
+  const budgetError = (): unknown => {
+    const total = currentUsage();
+    if (ctx.budget === undefined || total === undefined) return undefined;
+    for (const [stepName, u] of usageByStep) {
+      const error = exceededLimit({
+        workflowId,
+        scope: "step",
+        limits: stepLimits({ budget: ctx.budget, stepName }),
+        used: u,
+        stepName,
+      });
+      if (error !== undefined) return error;
+    }
+    return exceededLimit({ workflowId, scope: "run", limits: ctx.budget, used: total });
+  };
+  const overBudget = budgetError();
+  if (overBudget !== undefined) return { success: false, error: overBudget, suspension: false };
 
   // The run's metadata for `.journaled()` steps, so they don't re-read
   // the run. Only from a loaded run; without one, each step loads it.
@@ -134,6 +173,7 @@ export async function executeWorkflowDag(
       stepAttempts: params.stepAttempts,
       clock,
       stepStates: state?.steps ?? {},
+      usageByStep,
       ...(workflowMetadata !== undefined && { workflowMetadata }),
       stepStarted: notifyStepsStarted({ ctx, workflowId, readySteps }),
     };
@@ -150,6 +190,12 @@ export async function executeWorkflowDag(
     // identical. Siblings of a failed step count too: their rows are
     // `completed`, so compensation reverses them and a workflow retry does
     // not run them again.
+    for (const outcome of outcomes) {
+      if (outcome.kind !== "completed" && outcome.kind !== "failed") continue;
+      const u =
+        outcome.metadata === undefined ? undefined : stepUsage({ metadata: outcome.metadata });
+      if (u !== undefined) usageByStep.set(outcome.name, u);
+    }
     let tripwireFire: { stepName: string; reason: unknown } | null = null;
     for (const outcome of outcomes) {
       if (outcome.kind !== "completed") continue;
@@ -203,6 +249,11 @@ export async function executeWorkflowDag(
       failed = true;
     }
     if (failed) return { success: false, error: firstFailure, suspension: false };
+
+    // Stop spending: a cap crossed by the wave (siblings together, or a
+    // step's total) ends the run before any further step starts.
+    const exceeded = budgetError();
+    if (exceeded !== undefined) return { success: false, error: exceeded, suspension: false };
 
     // Continue-as-new unwinds cleanly — no compensation, no failure
     // recording. The orchestration wrapper catches the error and chains a

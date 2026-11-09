@@ -13,6 +13,7 @@
 // keyed by them. A run end always closes everything the run opened.
 // ---------------------------------------------------------------------------
 
+import type { UsageTotals } from "./budget.ts";
 import type { WorkflowFailure } from "./workflow-state.ts";
 
 /** Identity shared by every event of a run. */
@@ -63,6 +64,8 @@ export interface WorkflowTraceRunEnd extends WorkflowTraceRef {
   readonly outcome: WorkflowTraceRunOutcome;
   /** Set when `outcome` is `failed` (the same shape as `onWorkflowFailure`). */
   readonly failure?: WorkflowFailure;
+  /** Usage the run's steps had stored when this orchestration ended; absent when none reported any. */
+  readonly usage?: UsageTotals;
   readonly executorId?: string;
 }
 
@@ -90,6 +93,8 @@ export interface WorkflowTraceStepAttemptEnd extends WorkflowTraceRef {
   readonly error?: WorkflowTraceError;
   /** The attempt failed and the step's retry policy ran another attempt. */
   readonly willRetry: boolean;
+  /** The step's reported usage (`ctx.reportUsage`), on the attempt that settled the step. */
+  readonly usage?: UsageTotals;
   /** Who ran the attempt, when not this runner (a worker id). */
   readonly executorId?: string;
 }
@@ -118,6 +123,32 @@ export interface WorkflowTraceWaitEnd extends WorkflowTraceRef {
   readonly endedAt: Date;
   readonly waitedMs?: number;
   readonly wakeAt?: Date;
+}
+
+/**
+ * A queued step is being held back by its rate-limit / concurrency group
+ * (`StepGroupOption`): it stays queued, uses no retry attempt, and starts
+ * when the group has room. Emitted once per throttle episode, when the
+ * coordinator first sees the step held back.
+ */
+export interface WorkflowTraceStepThrottled extends WorkflowTraceRef {
+  readonly stepName: string;
+  readonly attempt: number;
+  readonly groupName: string;
+  readonly reason: "concurrency" | "rate";
+  readonly at: Date;
+  /** Earliest time the rate window frees a slot (`reason: "rate"`); a hint. */
+  readonly retryAt?: Date;
+}
+
+/** The step a group held back was claimed (or its wait ended another way). */
+export interface WorkflowTraceStepThrottleEnd extends WorkflowTraceRef {
+  readonly stepName: string;
+  readonly attempt: number;
+  readonly groupName: string;
+  readonly since: Date;
+  readonly endedAt: Date;
+  readonly waitedMs: number;
 }
 
 export interface WorkflowTraceLockAcquired {
@@ -212,6 +243,8 @@ export interface WorkflowTracerCallbacks {
   stepAttemptEnd(event: WorkflowTraceStepAttemptEnd): void | Promise<void>;
   waitStart(event: WorkflowTraceWaitStart): void | Promise<void>;
   waitEnd(event: WorkflowTraceWaitEnd): void | Promise<void>;
+  stepThrottled(event: WorkflowTraceStepThrottled): void | Promise<void>;
+  stepThrottleEnd(event: WorkflowTraceStepThrottleEnd): void | Promise<void>;
   lockAcquired(event: WorkflowTraceLockAcquired): void | Promise<void>;
   lockLost(event: WorkflowTraceLockLost): void | Promise<void>;
   compensationStart(event: WorkflowTraceCompensationStart): void | Promise<void>;

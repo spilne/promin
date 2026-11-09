@@ -496,6 +496,11 @@ CREATE TABLE wf_step_queue (
   concurrency_key text,
   concurrency_scope text,
   concurrency_limit integer,
+  group_name text,
+  group_max_concurrent integer,
+  group_max_starts integer,
+  group_window_ms integer,
+  fairness_key text,
   claim_token text,
   deliveries integer DEFAULT 0 NOT NULL,
   run integer DEFAULT 1 NOT NULL,
@@ -808,6 +813,8 @@ CREATE UNIQUE INDEX wf_step_queue_active_uniq ON wf_step_queue (workflow_id, ste
 CREATE INDEX wf_step_queue_concurrency_running_idx ON wf_step_queue (concurrency_scope, concurrency_key) WHERE ((status = 'running'::text) AND (concurrency_key IS NOT NULL));
 
 CREATE INDEX wf_step_queue_dequeue_idx ON wf_step_queue (status, priority, created_at);
+
+CREATE INDEX wf_step_queue_group_started_idx ON wf_step_queue (group_name, claimed_at) WHERE (group_name IS NOT NULL);
 
 CREATE INDEX wf_step_queue_namespace_idx ON wf_step_queue (namespace);
 

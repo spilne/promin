@@ -176,6 +176,22 @@ export class WorkflowDeadlineError extends TaggedError("WorkflowDeadlineError")<
   readonly message: string;
 }>() {}
 
+/**
+ * A run (or one step) spent more than its declared budget (`workflow({ budget })`).
+ * `scope` is `"run"` for the workflow-wide cap, `"step"` for a per-step cap
+ * (then `stepName` names the step). Never retried; the run fails and its
+ * compensation runs as for any failure.
+ */
+export class WorkflowBudgetExceededError extends TaggedError("WorkflowBudgetExceededError")<{
+  readonly workflowId: string;
+  readonly scope: "run" | "step";
+  readonly limit: "maxTokens" | "maxCostUsd";
+  readonly max: number;
+  readonly used: number;
+  readonly stepName?: string;
+  readonly message: string;
+}>() {}
+
 /** Workflow version mismatch — stored version differs from code version. */
 export class WorkflowVersionMismatchError extends TaggedError("WorkflowVersionMismatchError")<{
   readonly workflowId: string;

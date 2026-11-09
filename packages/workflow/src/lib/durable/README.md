@@ -354,17 +354,62 @@ Every surface reports a failed run as the same `WorkflowFailure`
 | Stored `WorkflowState` (any backend) | `workflowFailure(state)`: derived from `error`, `errorTag`, failed step |
 | `handle.result()`                    | `WorkflowFailedError` with `errorTag`, `stepName`, `attempt`            |
 
+### Budgets and usage
+
+A `.journaled()` step reports what it spent, and the workflow caps it:
+
+```ts
+const wf = workflow({
+  name: "research",
+  budget: {
+    maxTokens: 200_000,
+    maxCostUsd: 2,
+    perStep: { maxCostUsd: 1 },
+    steps: { draft: { maxCostUsd: 1.5 } },
+  },
+})
+  .journaled("draft", function* (ctx) {
+    const reply = yield* ctx.activity("llm", () => model.complete(ctx.input.prompt));
+    yield* ctx.reportUsage({ inputTokens: reply.in, outputTokens: reply.out, costUsd: reply.cost });
+    return reply.text;
+  })
+  .build();
+```
+
+- `ctx.reportUsage` writes a journal entry (activity `__usage`), so a retry, replay or crash recovery
+  re-reads it and never counts it twice. It returns the step's running total. Fields default to 0 and must be
+  finite and >= 0 (`RangeError` otherwise). Spend of an activity that failed cannot be reported.
+- When a step settles (completed or failed) its total is stored in its row's `metadata.usage`, so usage is
+  derived from stored rows on every backend: no column, no migration. `handle.status()` / `getStatus()` carry
+  `usage` (run total) and `steps[name].usage`; `runUsage(state.steps)` / `stepUsage(step)` do the same from a
+  stored `WorkflowState`. A step suspended on a sleep or signal has not stored its usage yet (it is re-derived
+  from the journal when the step resumes).
+- Past a cap (strictly above it) the run fails with `WorkflowBudgetExceededError` (`scope`, `limit`, `max`,
+  `used`, `stepName?`): the failure tag is `WorkflowBudgetExceededError`, compensation runs as for any failure,
+  and neither step `retry`, workflow `retry` nor `onFailure` (`skip` / `fallback`) absorbs it. It is checked at
+  each report (the run total is the step's own plus the other steps' stored usage) and after every wave of
+  steps, and once more when a run resumes, so lowering a budget stops a suspended run at its next orchestration.
+- The tracer's `stepAttemptEnd` (the attempt that settled the step) and `runEnd` carry an additive `usage`.
+- Limits: the budget lives on the definition (not stored with the run, so there is no per-run override); a child
+  workflow has its own budget and its usage is not rolled up into the parent; steps running in parallel on a
+  worker see each other's usage only after the wave.
+
 ### What a run is waiting on
 
 `handle.status()` / `getStatus()` carry `waitingOn`: the live run's parked
 waits, derived from stored step rows (no extra read, no migration). Each is
-`{ kind, stepName, since, until?, signalName?, childWorkflowId?, attempt? }`
+`{ kind, stepName, since, until?, signalName?, childWorkflowId?, groupName?, reason?, attempt? }`
 with `kind` one of `sleep` (`until` = wake time), `signal` (`until` = timeout),
-`approval` (an `approve:<id>` signal wait) or `child` (`until` = the child's next
-wake). `waitingOnSummary` is a one-liner, e.g. `waiting for signal
+`approval` (an `approve:<id>` signal wait), `child` (`until` = the child's next
+wake) or `step-queue` (a queued step its rate-limit / concurrency group holds back:
+`groupName`, `reason`, `until` = when the rate window frees a slot; read from the
+step executor / queue, not a step row, so only `getStatus` on a coordinator over a
+queue that implements `throttled` reports it — see
+[rate-limit groups](../distributed/README.md#rate-limit-and-concurrency-groups-with-fairness)). `waitingOnSummary` is a one-liner, e.g. `waiting for signal
 manager-approved (step approve, times out in 2h)`. Empty for a run with nothing
 parked and for ended runs. An activity in flight, a retry backoff and a step task
-queued for a worker are not stored on a step row, so they are not listed.
+queued for a worker are not stored on a step row, so they are not listed (apart
+from a task held back by a step group, above).
 Zorya's `GET /api/runs/:id` returns the same as `waitingOn` (ISO timestamps) and
 `waitingOnSummary`, and the run page shows the summary beside the status badge.
 

@@ -61,7 +61,7 @@
 // ---------------------------------------------------------------------------
 
 import { SystemWallClock, workflow } from "@promin/workflow";
-import type { ActivityYield, WallClock, Workflow } from "@promin/workflow";
+import type { ActivityYield, WallClock, Workflow, WorkflowBudget } from "@promin/workflow";
 import type { z } from "zod";
 import type { RateLimiter, LlmRetryOptions, RunLlmCallResult } from "./agent-shared.ts";
 import {
@@ -336,6 +336,23 @@ export interface AgentActionConfig<TOutput = any> {
    */
   budget?: TurnBudget;
   /**
+   * Engine-level cap on the whole run (`workflow({ budget })`): `maxTokens`
+   * and `maxCostUsd` over the run's reported usage, plus the per-step form.
+   * Unlike `budget`, which ends a turn gracefully with `budget_exceeded`, a run
+   * past this fails with `WorkflowBudgetExceededError`: a hard backstop for a
+   * run that spans turns (or a recipe's DAG node). Setting it turns
+   * `reportEngineUsage` on.
+   */
+  engineBudget?: WorkflowBudget;
+  /**
+   * Report every LLM call's usage (think and compaction; input tokens count
+   * cache reads and writes, cost is the priced cost) to the engine with
+   * `ctx.reportUsage`, so the run's status carries it. Adds one journal
+   * entry after each call, so turning it on or off changes the journal of a
+   * turn in flight: set it before turns start. Default: off.
+   */
+  reportEngineUsage?: boolean;
+  /**
    * With a budget: the smallest output allowance worth an LLM call. A call
    * that could produce fewer tokens than this before a limit is not made
    * (the turn ends with `budget_exceeded`); otherwise the call's
@@ -591,7 +608,11 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
   };
   const metricLabels = config.metricLabels ?? {};
 
-  return workflow<AgentInput>({ name: config.name })
+  const reportEngineUsage = config.reportEngineUsage === true || config.engineBudget !== undefined;
+  return workflow<AgentInput>({
+    name: config.name,
+    ...(config.engineBudget !== undefined && { budget: config.engineBudget }),
+  })
     .journaled("agent", function* (ctx, input) {
       const workflowId = ctx.workflowId;
       // The frame arrives in the run's input, which a caller may forge:
@@ -825,6 +846,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
               usage.cacheWriteTokens += result.usage.cacheWriteTokens ?? 0;
             }
             spend = addUsage(spend, result.spend);
+            if (reportEngineUsage) yield* ctx.reportUsage(engineUsageOf(result.spend));
             if (ineffective) ineffectiveAt = step;
             messages = applyCompaction({ messages: planned, stepStart, cut, summary });
             reported = undefined;
@@ -859,6 +881,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
             ...(response.usage && { usage: response.usage }),
           });
           spend = addUsage(spend, response.spend);
+          if (reportEngineUsage) yield* ctx.reportUsage(engineUsageOf(response.spend));
           if (response.usage) {
             usage.inputTokens += response.usage.inputTokens;
             usage.outputTokens += response.usage.outputTokens;
@@ -1753,6 +1776,15 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
  * Steps a turn waits after a compaction that left it over budget before
  * compacting again: one summary per few steps instead of one per step.
  */
+/** One call's spend as the engine counts it: all prompt tokens, cache included. */
+function engineUsageOf(spend: BudgetUsage) {
+  return {
+    inputTokens: spend.inputTokens + spend.cacheReadTokens + spend.cacheWriteTokens,
+    outputTokens: spend.outputTokens,
+    costUsd: spend.costUsd,
+  };
+}
+
 function ineffectiveBackoff(compaction: TurnCompactionConfig): number {
   return Math.max(4, (compaction.keepRecentSteps ?? 2) + 1);
 }

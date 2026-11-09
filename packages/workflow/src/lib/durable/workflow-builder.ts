@@ -1036,6 +1036,7 @@ export class WorkflowBuilder<
       compensateConfig: config.compensate,
       dlq: config.dlq,
       timeoutMs: config.timeoutMs,
+      ...(config.budget !== undefined && { budget: config.budget }),
       defaultStepTimeoutMs: config.defaultStepTimeoutMs,
       onVersionMismatch: config.onVersionMismatch,
       previousVersions: config.previousVersions,

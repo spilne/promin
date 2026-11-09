@@ -19,10 +19,12 @@ import {
   type StepQueueEnqueueParams,
   type StepQueueRequeueParams,
   type StepQueueRequeueResult,
+  type StepGroupFields,
   type StepTask,
   type StepTaskRecord,
+  type ThrottledTask,
 } from "@promin/workflow/distributed";
-import { deadLetterError } from "@promin/workflow/storage-kit";
+import { deadLetterError, isStepGroupTask, StepGroupLedger } from "@promin/workflow/storage-kit";
 import { type DrizzleDb, ensureTable as ensureTableFromSchema } from "@spilne/perfect-postgres";
 import { execRaw } from "./exec-raw.ts";
 import { assertPgLeaseCurrent } from "./pg-leader-lease-store.ts";
@@ -58,7 +60,8 @@ const CONCURRENCY_LOCK_CLASS = sql.raw(`hashtext('promin.wf_step_queue.concurren
 const TASK_COLUMNS = sql.raw(
   `id, workflow_id, step_name, needs, priority, input, deps, depends_on, timeout_ms, ` +
     `attempt, deliveries, status, created_at, version, metadata, concurrency_key, ` +
-    `concurrency_scope, concurrency_limit, claim_token, claimed_by, claimed_at, heartbeat_at, ` +
+    `concurrency_scope, concurrency_limit, group_name, group_max_concurrent, group_max_starts, ` +
+    `group_window_ms, fairness_key, claim_token, claimed_by, claimed_at, heartbeat_at, ` +
     `heartbeat_details, completed_at, result, error, error_tag, step_metadata, duration_ms, run, consumed_at`,
 );
 
@@ -128,7 +131,8 @@ export class PgStepQueue implements StepQueue {
         INSERT INTO wf_step_queue (
           workflow_id, step_name, namespace, needs, priority, input, deps, depends_on,
           timeout_ms, version, metadata, attempt, run, concurrency_key, concurrency_scope,
-          concurrency_limit
+          concurrency_limit, group_name, group_max_concurrent, group_max_starts, group_window_ms,
+          fairness_key
         )
         VALUES (
           ${params.workflowId},
@@ -146,7 +150,12 @@ export class PgStepQueue implements StepQueue {
           ${params.run ?? 1},
           ${params.concurrencyKey ?? null},
           ${params.concurrencyScope ?? null},
-          ${params.concurrencyLimit ?? null}
+          ${params.concurrencyLimit ?? null},
+          ${params.groupName ?? null},
+          ${params.groupMaxConcurrent ?? null},
+          ${params.groupMaxStarts ?? null},
+          ${params.groupWindowMs ?? null},
+          ${params.fairnessKey ?? null}
         )
         ON CONFLICT (workflow_id, step_name) WHERE consumed_at IS NULL
         DO UPDATE SET workflow_id = wf_step_queue.workflow_id
@@ -212,24 +221,117 @@ export class PgStepQueue implements StepQueue {
       ) < q.concurrency_limit
     )`);
 
-    const claimedAt = this.clock.now().toISOString();
+    const now = this.clock.now();
+    const claimedAt = now.toISOString();
+    // Group snapshot pre-check, like the concurrency one above: a task whose
+    // group is already out of slots or starts never takes a candidate slot,
+    // so it cannot crowd out tasks behind it. The locked recount below is
+    // what enforces the limits.
+    filters.push(sql`(
+      q.group_name IS NULL OR (
+        (q.group_max_concurrent IS NULL OR (
+          SELECT COUNT(*) FROM wf_step_queue r
+          WHERE r.status = 'running' AND r.group_name = q.group_name
+        ) < q.group_max_concurrent)
+        AND (q.group_max_starts IS NULL OR q.group_window_ms IS NULL OR (
+          SELECT COUNT(*) FROM wf_step_queue r
+          WHERE r.group_name = q.group_name AND r.status <> 'pending'
+            AND r.claimed_at > ${claimedAt}::timestamptz - q.group_window_ms * interval '1 millisecond'
+        ) < q.group_max_starts)
+      )
+    )`);
+    const where = sql.join(filters, sql` AND `);
 
+    let admittedOrder: number[] = [];
     const rows = await this.db.transaction(async (txn) => {
       const tx = txn as unknown as DrizzleDb;
 
+      // Fair order is only worth its scan of every pending row when some
+      // pending task is in a group; otherwise the plain index-ordered
+      // query below stops after `limit` rows.
+      const fair =
+        (
+          await execRaw(
+            tx,
+            sql`SELECT 1 FROM wf_step_queue WHERE status = 'pending' AND group_name IS NOT NULL LIMIT 1`,
+          )
+        ).length > 0;
+
       // The status recheck on `q` is what makes a row another claimer took
       // after our snapshot drop out (READ COMMITTED EvalPlanQual).
-      const candidates = await execRaw(
-        tx,
-        sql`
-          SELECT q.id, q.concurrency_scope, q.concurrency_key, q.concurrency_limit
-          FROM wf_step_queue q
-          WHERE ${sql.join(filters, sql` AND `)}
-          ORDER BY q.priority DESC, q.created_at ASC, q.id ASC
-          LIMIT ${limit}
-          FOR UPDATE OF q SKIP LOCKED
-        `,
-      );
+      //
+      // Fair order: within a priority, a keyed task of a group ranks at its
+      // position among that `(group, fairness_key)`'s pending peers plus the
+      // key's running tasks, so keys interleave round-robin and a key
+      // already using the group yields to one that is not.
+      const candidates = fair
+        ? await execRaw(
+            tx,
+            sql`
+              WITH running AS (
+                SELECT group_name, fairness_key, COUNT(*) AS n
+                FROM wf_step_queue
+                WHERE status = 'running' AND group_name IS NOT NULL AND fairness_key IS NOT NULL
+                GROUP BY group_name, fairness_key
+              ),
+              base AS (
+                SELECT q.id, q.priority, q.created_at, q.group_name,
+                  CASE WHEN q.group_name IS NOT NULL AND q.fairness_key IS NOT NULL THEN
+                    ROW_NUMBER() OVER (
+                      PARTITION BY q.group_name, q.fairness_key ORDER BY q.created_at, q.id
+                    ) - 1 + COALESCE(run.n, 0)
+                  ELSE 0 END AS fair_rank,
+                  -- Slots the task's group has left, by this snapshot.
+                  CASE WHEN q.group_name IS NULL THEN NULL ELSE LEAST(
+                    COALESCE(q.group_max_concurrent - (
+                      SELECT COUNT(*) FROM wf_step_queue r
+                      WHERE r.status = 'running' AND r.group_name = q.group_name
+                    ), 2147483647),
+                    COALESCE(q.group_max_starts - (
+                      SELECT COUNT(*) FROM wf_step_queue r
+                      WHERE r.group_name = q.group_name AND r.status <> 'pending'
+                        AND r.claimed_at > ${claimedAt}::timestamptz
+                          - q.group_window_ms * interval '1 millisecond'
+                    ), 2147483647)
+                  ) END AS avail
+                FROM wf_step_queue q
+                LEFT JOIN running run
+                  ON run.group_name = q.group_name AND run.fairness_key = q.fairness_key
+                WHERE ${where}
+              ),
+              ranked AS (
+                SELECT base.*,
+                  CASE WHEN group_name IS NULL THEN 0 ELSE ROW_NUMBER() OVER (
+                    PARTITION BY group_name ORDER BY priority DESC, fair_rank, created_at, id
+                  ) END AS group_pos
+                FROM base
+              )
+              SELECT q.id, q.concurrency_scope, q.concurrency_key, q.concurrency_limit,
+                     q.group_name, q.group_max_concurrent, q.group_max_starts,
+                     q.group_window_ms, q.fairness_key
+              FROM wf_step_queue q
+              JOIN ranked ON ranked.id = q.id
+              -- Only as many of a group as it has slots for, so a group's
+              -- backlog cannot fill the candidate slots and starve the rest.
+              WHERE q.status = 'pending' AND ranked.group_pos <= COALESCE(ranked.avail, 2147483647)
+              ORDER BY q.priority DESC, ranked.fair_rank ASC, q.created_at ASC, q.id ASC
+              LIMIT ${limit}
+              FOR UPDATE OF q SKIP LOCKED
+            `,
+          )
+        : await execRaw(
+            tx,
+            sql`
+              SELECT q.id, q.concurrency_scope, q.concurrency_key, q.concurrency_limit,
+                     q.group_name, q.group_max_concurrent, q.group_max_starts,
+                     q.group_window_ms, q.fairness_key
+              FROM wf_step_queue q
+              WHERE ${where}
+              ORDER BY q.priority DESC, q.created_at ASC, q.id ASC
+              LIMIT ${limit}
+              FOR UPDATE OF q SKIP LOCKED
+            `,
+          );
       if (candidates.length === 0) return [];
 
       const keyOf = (c: Row): string | undefined =>
@@ -240,43 +342,59 @@ export class PgStepQueue implements StepQueue {
 
       const admitted: number[] = [];
       const keys = [...new Set(candidates.map(keyOf).filter((k): k is string => k !== undefined))];
-      if (keys.length === 0) {
+      const groupNames = [
+        ...new Set(candidates.filter((c) => c.group_name != null).map((c) => String(c.group_name))),
+      ];
+      // Group admissions are serialised per group by the same advisory locks
+      // (under a `group:` prefix no concurrency key can start with).
+      const lockKeys = [...keys, ...groupNames.map((n) => `group:${n}`)];
+      if (lockKeys.length === 0) {
         for (const c of candidates) admitted.push(Number(c.id));
       } else {
-        const keysLiteral = sql.raw(textArrayLiteral(keys));
         // Lock in hash order so concurrent claimers can't deadlock.
         await execRaw(
           tx,
           sql`
             SELECT pg_advisory_xact_lock(${CONCURRENCY_LOCK_CLASS}, h)
-            FROM (SELECT DISTINCT hashtext(k) AS h FROM unnest(${keysLiteral}) AS k ORDER BY h) s
+            FROM (
+              SELECT DISTINCT hashtext(k) AS h
+              FROM unnest(${sql.raw(textArrayLiteral(lockKeys))}) AS k ORDER BY h
+            ) s
           `,
         );
-        const counts = await execRaw(
-          tx,
-          sql`
-            SELECT char_length(concurrency_scope) || ':' || concurrency_scope || ':' || concurrency_key AS k,
-                   COUNT(*) AS n
-            FROM wf_step_queue
-            WHERE status = 'running'
-              AND concurrency_key IS NOT NULL
-              AND char_length(concurrency_scope) || ':' || concurrency_scope || ':' || concurrency_key
-                  = ANY(${keysLiteral})
-            GROUP BY 1
-          `,
-        );
-        const running = new Map<string, number>(counts.map((r) => [String(r.k), Number(r.n)]));
+        const running = new Map<string, number>();
+        if (keys.length > 0) {
+          const keysLiteral = sql.raw(textArrayLiteral(keys));
+          const counts = await execRaw(
+            tx,
+            sql`
+              SELECT char_length(concurrency_scope) || ':' || concurrency_scope || ':' || concurrency_key AS k,
+                     COUNT(*) AS n
+              FROM wf_step_queue
+              WHERE status = 'running'
+                AND concurrency_key IS NOT NULL
+                AND char_length(concurrency_scope) || ':' || concurrency_scope || ':' || concurrency_key
+                    = ANY(${keysLiteral})
+              GROUP BY 1
+            `,
+          );
+          for (const r of counts) running.set(String(r.k), Number(r.n));
+        }
+        // Recounted after the locks, so the snapshot includes every group
+        // admission committed before ours.
+        const ledger = await this.groupLedger({ tx, now, candidates });
         for (const c of candidates) {
           const key = keyOf(c);
-          if (key !== undefined) {
-            const n = running.get(key) ?? 0;
-            if (n >= Number(c.concurrency_limit)) continue;
-            running.set(key, n + 1);
-          }
+          const group = groupFields(c);
+          if (key !== undefined && (running.get(key) ?? 0) >= Number(c.concurrency_limit)) continue;
+          if (isStepGroupTask(group) && !ledger.check(group).ok) continue;
+          if (key !== undefined) running.set(key, (running.get(key) ?? 0) + 1);
+          if (isStepGroupTask(group)) ledger.admit(group);
           admitted.push(Number(c.id));
         }
       }
       if (admitted.length === 0) return [];
+      admittedOrder = admitted;
 
       return execRaw(
         tx,
@@ -294,14 +412,85 @@ export class PgStepQueue implements StepQueue {
       );
     });
 
+    // Claim order: priority, fairness rank, age (the order they were admitted in).
+    const order = new Map(admittedOrder.map((id, i) => [id, i]));
     return rows
       .map((r) => toTask(r))
-      .sort(
-        (a, b) =>
-          b.priority - a.priority ||
-          a.createdAt.getTime() - b.createdAt.getTime() ||
-          Number(a.id) - Number(b.id),
-      );
+      .sort((a, b) => order.get(Number(a.id))! - order.get(Number(b.id))!);
+  }
+
+  /**
+   * Running tasks and window starts of the groups in `candidates` (or of
+   * `groups`), read inside `tx`.
+   */
+  private async groupLedger(params: {
+    tx: DrizzleDb;
+    now: Date;
+    candidates: readonly Row[];
+  }): Promise<StepGroupLedger> {
+    const { tx, now, candidates } = params;
+    const ledger = new StepGroupLedger(now.getTime());
+    const grouped = candidates.filter((c) => c.group_name != null);
+    if (grouped.length === 0) return ledger;
+    const names = [...new Set(grouped.map((c) => String(c.group_name)))];
+    const maxWindowMs = Math.max(0, ...grouped.map((c) => Number(c.group_window_ms ?? 0)));
+    const cutoff = new Date(now.getTime() - maxWindowMs).toISOString();
+    const rows = await execRaw(
+      tx,
+      sql`
+        SELECT group_name, status, claimed_at
+        FROM wf_step_queue
+        WHERE group_name = ANY(${sql.raw(textArrayLiteral(names))})
+          AND (status = 'running'
+               OR (status <> 'pending' AND claimed_at > ${cutoff}::timestamptz))
+      `,
+    );
+    for (const r of rows) {
+      ledger.record({
+        groupName: String(r.group_name),
+        running: r.status === "running",
+        ...(r.claimed_at != null && { startedAtMs: toDate(r.claimed_at)!.getTime() }),
+      });
+    }
+    return ledger;
+  }
+
+  async throttled(params: { workflowId: string }): Promise<ThrottledTask[]> {
+    const pending = await execRaw(
+      this.db,
+      sql`
+        SELECT id, workflow_id, run, step_name, attempt, created_at, group_name,
+               group_max_concurrent, group_max_starts, group_window_ms, fairness_key
+        FROM wf_step_queue
+        WHERE workflow_id = ${params.workflowId} AND status = 'pending' AND group_name IS NOT NULL
+        ORDER BY id
+      `,
+    );
+    if (pending.length === 0) return [];
+    const ledger = await this.groupLedger({
+      tx: this.db,
+      now: this.clock.now(),
+      candidates: pending,
+    });
+    const out: ThrottledTask[] = [];
+    for (const r of pending) {
+      const group = groupFields(r);
+      if (!isStepGroupTask(group)) continue;
+      const verdict = ledger.check(group);
+      if (verdict.ok) continue;
+      out.push({
+        taskId: String(r.id),
+        workflowId: r.workflow_id,
+        run: Number(r.run ?? 1),
+        stepName: r.step_name,
+        attempt: Number(r.attempt),
+        groupName: group.groupName,
+        reason: verdict.reason,
+        since: toDate(r.created_at)!,
+        ...(verdict.retryAtMs !== undefined && { retryAt: new Date(verdict.retryAtMs) }),
+      });
+    }
+    return out;
   }
 
   async release(params: { taskId: string; claimToken: string }): Promise<boolean> {
@@ -587,6 +776,22 @@ export class PgStepQueue implements StepQueue {
    * For production, prefer using migrations instead.
    */
   async ensureTable(): Promise<void> {
+    // A table from before step groups lacks their columns, and the index
+    // `ensureTableFromSchema` creates on them would fail: add them first.
+    // Idempotent, and a no-op when the table does not exist yet.
+    for (const [column, type] of [
+      ["group_name", "text"],
+      ["group_max_concurrent", "integer"],
+      ["group_max_starts", "integer"],
+      ["group_window_ms", "integer"],
+      ["fairness_key", "text"],
+      ["heartbeat_details", "jsonb"],
+    ] as const) {
+      await execRaw(
+        this.db,
+        sql.raw(`ALTER TABLE IF EXISTS wf_step_queue ADD COLUMN IF NOT EXISTS ${column} ${type}`),
+      );
+    }
     await ensureTableFromSchema(this.db, stepQueue);
   }
 }
@@ -598,6 +803,16 @@ export class PgStepQueue implements StepQueue {
 function toDate(v: unknown): Date | undefined {
   if (v === null || v === undefined) return undefined;
   return v instanceof Date ? v : new Date(v as string);
+}
+
+function groupFields(r: Row): StepGroupFields {
+  return {
+    ...(r.group_name != null && { groupName: String(r.group_name) }),
+    ...(r.group_max_concurrent != null && { groupMaxConcurrent: Number(r.group_max_concurrent) }),
+    ...(r.group_max_starts != null && { groupMaxStarts: Number(r.group_max_starts) }),
+    ...(r.group_window_ms != null && { groupWindowMs: Number(r.group_window_ms) }),
+    ...(r.fairness_key != null && { fairnessKey: String(r.fairness_key) }),
+  };
 }
 
 function toTask(r: Row): StepTask {
@@ -623,6 +838,7 @@ function toTask(r: Row): StepTask {
     concurrencyScope: r.concurrency_scope ?? undefined,
     concurrencyLimit: r.concurrency_limit ?? undefined,
     ...(r.heartbeat_details != null && { lastHeartbeatDetails: r.heartbeat_details }),
+    ...groupFields(r),
   };
 }
 

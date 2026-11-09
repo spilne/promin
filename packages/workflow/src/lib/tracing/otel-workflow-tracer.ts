@@ -27,6 +27,8 @@ import type {
   WorkflowTraceRunStart,
   WorkflowTraceStepAttemptEnd,
   WorkflowTraceStepAttemptStart,
+  WorkflowTraceStepThrottleEnd,
+  WorkflowTraceStepThrottled,
   WorkflowTraceWaitEnd,
   WorkflowTraceWaitStart,
   WorkflowTraceWorkerTask,
@@ -355,6 +357,36 @@ export function createOpenTelemetryWorkflowTracer(
           ...identity(e),
           "workflow.step.name": e.stepName,
           "workflow.wait.kind": e.kind,
+          "workflow.wait.waited_ms": e.waitedMs,
+        }),
+      });
+      span.end(e.endedAt);
+    },
+
+    stepThrottled(e: WorkflowTraceStepThrottled): void {
+      runs.get(e.workflowId)?.span.addEvent?.(
+        "workflow.step.throttled",
+        attrs({
+          "workflow.step.name": e.stepName,
+          "workflow.step.group": e.groupName,
+          "workflow.step.throttle.reason": e.reason,
+        }),
+        e.at,
+      );
+    },
+
+    stepThrottleEnd(e: WorkflowTraceStepThrottleEnd): void {
+      const run = runs.get(e.workflowId);
+      if (run === undefined) return;
+      const { span } = start({
+        name: "workflow.step.throttle",
+        startTime: e.since,
+        parent: run.context,
+        attributes: attrs({
+          ...identity(e),
+          "workflow.step.name": e.stepName,
+          "workflow.step.group": e.groupName,
+          "workflow.step.attempt": e.attempt,
           "workflow.wait.waited_ms": e.waitedMs,
         }),
       });

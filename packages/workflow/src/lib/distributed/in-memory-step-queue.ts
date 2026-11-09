@@ -17,6 +17,7 @@ import {
   type StepTask,
   type StepTaskRecord,
 } from "./step-queue.ts";
+import { claimOrder, GroupLedger, inGroup, type ThrottledTask } from "./step-group-limits.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import type { InMemoryLeaderLeases } from "../scheduler/leader-lease.ts";
 
@@ -94,6 +95,11 @@ export class InMemoryStepQueue implements StepQueue {
       concurrencyKey: params.concurrencyKey,
       concurrencyScope: params.concurrencyScope,
       concurrencyLimit: params.concurrencyLimit,
+      groupName: params.groupName,
+      groupMaxConcurrent: params.groupMaxConcurrent,
+      groupMaxStarts: params.groupMaxStarts,
+      groupWindowMs: params.groupWindowMs,
+      fairnessKey: params.fairnessKey,
     });
     this.activeByKey.set(key, id);
     return id;
@@ -115,9 +121,11 @@ export class InMemoryStepQueue implements StepQueue {
       return true;
     };
 
-    const ordered = [...this.tasks.values()]
-      .filter(claimable)
-      .sort((a, b) => b.priority - a.priority || a.createdAt.getTime() - b.createdAt.getTime());
+    const groups = this.groupLedger();
+    const ordered = claimOrder({
+      pending: [...this.tasks.values()].filter(claimable),
+      runningByKey: groups.runningByFairKey(),
+    });
 
     // Per-(scope,key) running counter, counting both already-running tasks
     // and tasks claimed earlier in this batch (so one claim() can't itself
@@ -133,12 +141,22 @@ export class InMemoryStepQueue implements StepQueue {
     const claimed: StepTask[] = [];
     for (const task of ordered) {
       if (claimed.length >= params.limit) break;
-      if (task.concurrencyKey && task.concurrencyScope && task.concurrencyLimit !== undefined) {
-        const k = `${task.concurrencyScope}::${task.concurrencyKey}`;
-        const running = runningPerKey.get(k) ?? 0;
-        if (running >= task.concurrencyLimit) continue;
-        runningPerKey.set(k, running + 1);
+      const concurrencyKey =
+        task.concurrencyKey && task.concurrencyScope && task.concurrencyLimit !== undefined
+          ? `${task.concurrencyScope}::${task.concurrencyKey}`
+          : undefined;
+      if (
+        concurrencyKey !== undefined &&
+        (runningPerKey.get(concurrencyKey) ?? 0) >= task.concurrencyLimit!
+      ) {
+        continue;
       }
+      if (inGroup(task) && !groups.check(task).ok) continue;
+      // Admitted by both: count it, so one claim() cannot itself break a cap.
+      if (concurrencyKey !== undefined) {
+        runningPerKey.set(concurrencyKey, (runningPerKey.get(concurrencyKey) ?? 0) + 1);
+      }
+      if (inGroup(task)) groups.admit(task);
       task.status = "running";
       task.claimedBy = params.workerId;
       task.claimedAt = this.clock.now();
@@ -151,6 +169,42 @@ export class InMemoryStepQueue implements StepQueue {
     }
 
     return claimed;
+  }
+
+  async throttled(params: { workflowId: string }): Promise<ThrottledTask[]> {
+    const groups = this.groupLedger();
+    const out: ThrottledTask[] = [];
+    for (const task of this.tasks.values()) {
+      if (task.workflowId !== params.workflowId || task.status !== "pending") continue;
+      if (!inGroup(task)) continue;
+      const verdict = groups.check(task);
+      if (verdict.ok) continue;
+      out.push({
+        taskId: task.id,
+        workflowId: task.workflowId,
+        run: task.run,
+        stepName: task.stepName,
+        attempt: task.attempt,
+        groupName: task.groupName,
+        reason: verdict.reason,
+        since: task.createdAt,
+        ...(verdict.retryAtMs !== undefined && { retryAt: new Date(verdict.retryAtMs) }),
+      });
+    }
+    return out;
+  }
+
+  /** Group usage from the task table: running tasks and the starts still in a window. */
+  private groupLedger(): GroupLedger {
+    const ledger = new GroupLedger(this.clock.currentTimeMs());
+    for (const t of this.tasks.values()) {
+      ledger.record({
+        ...t,
+        running: t.status === "running",
+        ...(t.status !== "pending" && t.claimedAt && { startedAtMs: t.claimedAt.getTime() }),
+      });
+    }
+    return ledger;
   }
 
   async release(params: { taskId: string; claimToken: string }): Promise<boolean> {
@@ -374,6 +428,13 @@ export class InMemoryStepQueue implements StepQueue {
       ...(task.lastHeartbeatDetails !== undefined && {
         lastHeartbeatDetails: detached(task.lastHeartbeatDetails),
       }),
+      ...(task.groupName !== undefined && { groupName: task.groupName }),
+      ...(task.groupMaxConcurrent !== undefined && {
+        groupMaxConcurrent: task.groupMaxConcurrent,
+      }),
+      ...(task.groupMaxStarts !== undefined && { groupMaxStarts: task.groupMaxStarts }),
+      ...(task.groupWindowMs !== undefined && { groupWindowMs: task.groupWindowMs }),
+      ...(task.fairnessKey !== undefined && { fairnessKey: task.fairnessKey }),
     };
   }
 
