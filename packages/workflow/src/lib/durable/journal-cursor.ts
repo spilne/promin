@@ -81,6 +81,14 @@ export class JournalCursor {
     return { activityIndex: this.nextIndex++, branchPath: "" };
   }
 
+  /**
+   * The entry the journal recorded at the next top-level slot, without
+   * allocating it: what a replaying body is about to meet.
+   */
+  peekTopLevel(): JournalEntry | undefined {
+    return this.entries.get(slotKey({ activityIndex: this.nextIndex, branchPath: "" }));
+  }
+
   /** Reserve the next top-level slot index (a compensation's row). */
   reserveTopLevelIndex(): number {
     return this.nextIndex++;

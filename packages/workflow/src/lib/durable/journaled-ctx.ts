@@ -17,7 +17,9 @@ import { makeChild } from "./journaled-ctx-child.ts";
 import { makeLoops, makeParallel, makeProxy } from "./journaled-ctx-compose.ts";
 import { makeSignalMethods, makeSleep } from "./journaled-ctx-suspend.ts";
 import type { JournaledContext, JournaledCtxEnv, RunChild } from "./journaled-context.ts";
+import { UpdateInbox, type UpdateEvent, type UpdateHandlerOptions } from "./journaled-updates.ts";
 import { registerQueryHandler } from "./query-registry.ts";
+import type { UpdateType } from "../updates/update-protocol.ts";
 import type { WorkflowMetadataRef } from "./step-definition.ts";
 import type { FenceGuard, WorkflowStorage } from "./workflow-storage.ts";
 
@@ -70,9 +72,13 @@ export function makeCtx<Input, Prev>(params: {
    * fence (which fails the step instead). Default: `console.warn`.
    */
   onMetadataWriteError?: (params: { error: unknown; keys: readonly string[] }) => void;
+  /** Called with each update this body applies or rejects (the runner's tracer). */
+  onUpdate?: (event: UpdateEvent) => void;
 }): {
   ctx: JournaledContext<Input, Prev>;
   compensations: CompensationStack;
+  /** The body's update handlers and update points (see `journaled-updates.ts`). */
+  updates: UpdateInbox;
   /**
    * Wait for the `ctx.metadata` writes in flight; rejects with the
    * `FenceTokenMismatchError` of a write the lock holder lost the fence for.
@@ -100,6 +106,7 @@ export function makeCtx<Input, Prev>(params: {
     defaultPayloadHash: params.defaultPayloadHash,
     runChild: params.runChild,
   };
+  const updates = new UpdateInbox(env, params.onUpdate);
   const patchSet = new Set(params.patches ?? []);
   const activity = makeActivity(env);
   const { signal, validatedSignal, approval } = makeSignalMethods(env);
@@ -217,6 +224,18 @@ export function makeCtx<Input, Prev>(params: {
       // routed in from the server.
       registerQueryHandler(workflowId, name, handler as (args?: unknown) => unknown);
     },
+    setUpdateHandler: (
+      target: UpdateType<unknown, unknown> | string,
+      handler: (args: never) => unknown,
+      options?: UpdateHandlerOptions<never>,
+    ): void => {
+      updates.register({
+        name: typeof target === "string" ? target : target.name,
+        ...(typeof target !== "string" && { update: target as UpdateType<never, unknown> }),
+        handler,
+        ...(options !== undefined && { options }),
+      });
+    },
     continueAsNew: (nextInput: unknown): never => {
       throw new WorkflowContinueAsNewError({
         workflowId,
@@ -225,5 +244,5 @@ export function makeCtx<Input, Prev>(params: {
       });
     },
   };
-  return { ctx, compensations, settleMetadata };
+  return { ctx, compensations, updates, settleMetadata };
 }

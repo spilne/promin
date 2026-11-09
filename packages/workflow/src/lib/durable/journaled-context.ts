@@ -7,6 +7,8 @@
 // and are assembled by `journaled-ctx.ts`, which share `JournaledCtxEnv`.
 // ---------------------------------------------------------------------------
 
+import type { UpdateHandlerOptions } from "./journaled-updates.ts";
+import type { UpdateType } from "../updates/update-protocol.ts";
 import type { RetryPolicy } from "../shared/retry-policy.ts";
 import type { WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
@@ -485,6 +487,56 @@ export interface JournaledContext<Input, Prev> {
    * - Return value must be JSON-safe — sent back over the wire.
    */
   setQueryHandler<R>(name: string, handler: (args?: unknown) => R | Promise<R>): void;
+
+  /**
+   * Register an update handler: a named, typed request that external callers
+   * make of this run through `handle.update(...)` and answer with the
+   * handler's validated result. Register at the top of the body, before the
+   * first `yield*`.
+   *
+   * ```ts
+   * const SetLimit = defineUpdate({
+   *   name: "setLimit",
+   *   input: s.object({ limit: s.integer() }),
+   *   output: s.object({ previous: s.integer() }),
+   * });
+   *
+   * .journaled("batch", function* (ctx) {
+   *   let limit = 10;
+   *   ctx.setUpdateHandler(SetLimit, ({ limit: next }) => {
+   *     const previous = limit;
+   *     limit = next;
+   *     return { previous };
+   *   });
+   *   // ... yield* ctx.activity(...), yield* ctx.signal(...) — the run is
+   *   // updatable at every one of these boundaries, suspended or not.
+   * });
+   * ```
+   *
+   * Semantics (details in `journaled-updates.ts`):
+   * - Applied only between top-level yields of this body, in delivery
+   *   order, one at a time, never during an activity or inside a
+   *   `ctx.parallel` branch; a suspended run is resumed to apply them.
+   * - Each application is journaled; a replay re-runs the handler at the
+   *   same point to rebuild the body's state and keeps the recorded outcome.
+   *   The handler must be deterministic in its args and the body's state,
+   *   and must not call `ctx`. It may be async but not yield.
+   * - `options.validate` (after the schema) rejects an update before the
+   *   handler runs: the caller gets `UpdateRejectedError`, nothing is
+   *   journaled. A handler that throws is recorded as failed
+   *   (`UpdateFailedError` to the caller).
+   * - A string `name` takes untyped args and result.
+   */
+  setUpdateHandler<Args, Result>(
+    update: UpdateType<Args, Result>,
+    handler: (args: Args) => Result | Promise<Result>,
+    options?: UpdateHandlerOptions<Args>,
+  ): void;
+  setUpdateHandler<Result = unknown>(
+    name: string,
+    handler: (args: unknown) => Result | Promise<Result>,
+    options?: UpdateHandlerOptions<unknown>,
+  ): void;
 
   /**
    * Live-writable metadata surfaced on the workflow row. The dashboard reads

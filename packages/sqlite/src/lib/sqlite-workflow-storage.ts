@@ -22,7 +22,11 @@ import {
   decodeRunSource,
   withoutCompensationLedger,
 } from "@promin/workflow/storage-kit";
-import { CHILD_ENDED_SIGNAL_PREFIX } from "@promin/workflow/storage-kit";
+import {
+  CHILD_ENDED_SIGNAL_PREFIX,
+  UPDATE_REQUEST_SIGNAL_PREFIX,
+  UPDATE_RESULT_SIGNAL_PREFIX,
+} from "@promin/workflow/storage-kit";
 import type {
   WorkflowState,
   WorkflowStatusSnapshot,
@@ -1779,6 +1783,50 @@ export class SqliteWorkflowStorage
       reason: "signal" as const,
       signalName: r.signal_name!,
       signalPayload: JSON.parse(r.payload),
+    }));
+  }
+
+  async listUpdateWakeups(params: {
+    limit: number;
+    afterWorkflowId?: string;
+  }): Promise<WorkflowWakeup[]> {
+    const after = params.afterWorkflowId !== undefined ? "AND w.workflow_id > ?" : "";
+    const reqLen = UPDATE_REQUEST_SIGNAL_PREFIX.length;
+    const args: Array<string | number> = [];
+    if (params.afterWorkflowId !== undefined) args.push(params.afterWorkflowId);
+    args.push(reqLen, UPDATE_REQUEST_SIGNAL_PREFIX, UPDATE_RESULT_SIGNAL_PREFIX, reqLen + 1);
+    args.push(Math.max(0, Math.trunc(params.limit)));
+    // Suspended runs holding an update request signal with no result signal
+    // under the same update id; the step is the suspended one with the
+    // smallest name.
+    const rows = this.db
+      .query<ScanWakeupRow>(
+        `SELECT w.workflow_id, w.workflow_name, w.version, w.input,
+           (SELECT MIN(j.key) FROM json_each(w.steps) j
+             WHERE json_extract(j.value, '$.status') IN ('sleeping', 'waiting_for_signal')) AS step_name
+         FROM ${this._t} w
+         WHERE w.status = 'suspended' ${after}
+           AND EXISTS (
+             SELECT 1 FROM ${this._t}_signals g
+             WHERE g.workflow_id = w.workflow_id
+               AND substr(g.signal_name, 1, ?) = ?
+               AND NOT EXISTS (
+                 SELECT 1 FROM ${this._t}_signals r
+                 WHERE r.workflow_id = g.workflow_id
+                   AND r.signal_name = ? || substr(g.signal_name, ?)
+               )
+           )
+         ORDER BY w.workflow_id
+         LIMIT ?`,
+      )
+      .all(...args);
+    return rows.map((r) => ({
+      workflowId: r.workflow_id,
+      workflowName: r.workflow_name,
+      ...(r.version != null ? { version: r.version } : {}),
+      input: JSON.parse(r.input),
+      stepName: r.step_name ?? "",
+      reason: "update" as const,
     }));
   }
 

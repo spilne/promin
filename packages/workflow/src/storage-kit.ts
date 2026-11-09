@@ -45,6 +45,10 @@ export {
 } from "./lib/durable/storage/capabilities.ts";
 export { FenceTokenMismatchError } from "./lib/durable/durable-pipeline-error.ts";
 export { CHILD_ENDED_SIGNAL_PREFIX, childEndedSignalName } from "./lib/durable/child-wake.ts";
+export {
+  UPDATE_REQUEST_SIGNAL_PREFIX,
+  UPDATE_RESULT_SIGNAL_PREFIX,
+} from "./lib/updates/update-protocol.ts";
 export { scheduleMetadataContains, flattenLeafPaths } from "./lib/scheduler/metadata-filter.ts";
 export {
   DEFAULT_MAX_DELIVERIES,

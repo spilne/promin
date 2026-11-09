@@ -50,6 +50,7 @@ import type {
   ListChildEndedWaitsParams,
   ChildEndedWaits,
   ListSignalWakeupsParams,
+  ListUpdateWakeupsParams,
   ListWorkflowsParams,
   LoadJournalParams,
   LoadRunHistoryParams,
@@ -87,6 +88,7 @@ import type {
 } from "./workflow-storage.ts";
 import { applyMetadataPatch } from "./storage/metadata.ts";
 import { CHILD_ENDED_SIGNAL_PREFIX } from "./child-wake.ts";
+import { updateIdOfRequestSignal, updateResultSignalName } from "../updates/update-protocol.ts";
 import { sortWorkflowRows } from "./storage/ordering.ts";
 import {
   CANCELLED_ERROR,
@@ -865,6 +867,28 @@ export class InMemoryWorkflowStorage
           waits.push({ stepName: step.stepName, signalName: name });
         }
         return waits.length > 0 ? { workflowId: wf.workflowId, waits } : undefined;
+      },
+    });
+  }
+
+  async listUpdateWakeups(params: ListUpdateWakeupsParams): Promise<WorkflowWakeup[]> {
+    return this.scanWorkflows<WorkflowWakeup>({
+      limit: params.limit,
+      afterWorkflowId: params.afterWorkflowId,
+      pick: (wf) => {
+        if (wf.status !== "suspended") return undefined;
+        const delivered = this.signals.get(wf.workflowId);
+        if (!delivered || delivered.length === 0) return undefined;
+        const answered = new Set(delivered.map((s) => s.signalName));
+        const pending = delivered.some((s) => {
+          const id = updateIdOfRequestSignal(s.signalName);
+          return id !== undefined && !answered.has(updateResultSignalName(id));
+        });
+        if (!pending) return undefined;
+        const step = stepsByName(wf).find(
+          (s) => s.status === "waiting_for_signal" || s.status === "sleeping",
+        );
+        return toWakeup({ wf, stepName: step?.stepName ?? "", reason: "update" });
       },
     });
   }

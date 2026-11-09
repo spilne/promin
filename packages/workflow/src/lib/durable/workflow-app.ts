@@ -12,6 +12,8 @@ import {
   type WorkflowRunSafeResult,
 } from "./workflow-runner.ts";
 import type { Workflow, WorkflowHandle } from "./workflow-types.ts";
+import type { AwaitUpdateOptions } from "../updates/update-client.ts";
+import type { UpdateArgsOf, UpdateLike, UpdateResultOf } from "../updates/update-protocol.ts";
 
 /**
  * What a bound workflow's `run` / `runSafe` / `start` take: everything
@@ -36,6 +38,15 @@ export interface BoundWorkflow<Input, Output, E extends TaggedError = never> {
   resume(params: { readonly workflowId: string; readonly fromStep: string }): Promise<Output>;
   /** `runner.handle(workflowId)`, typed by the workflow's output. */
   handle(workflowId: string): WorkflowHandle<Output>;
+  /** `handle(workflowId).update(...)`: send an update to a run and return the handler's result. */
+  update<U extends UpdateLike | string>(
+    params: {
+      readonly workflowId: string;
+      readonly update: U;
+      readonly args: UpdateArgsOf<U>;
+      readonly updateId?: string;
+    } & AwaitUpdateOptions,
+  ): Promise<UpdateResultOf<U>>;
 }
 
 /**
@@ -60,6 +71,8 @@ export function bindWorkflow<Input, Output, E extends TaggedError = never>(param
     start: (run) => runner.start<Input, Output, E>({ ...run, workflow }),
     resume: (resume) => runner.resume<Input, Output>({ ...resume, workflow }),
     handle: (workflowId) => runner.handle<Output>(workflowId, { workflow }),
+    update: ({ workflowId, ...rest }) =>
+      runner.handle<Output>(workflowId, { workflow }).update(rest as never) as never,
   };
 }
 

@@ -8,6 +8,7 @@
 import type { WallClock } from "../../shared/wall-clock.ts";
 import type { WorkflowHandle, WorkflowStatusInfo } from "../durable-pipeline.ts";
 import { wakeParentOfEndedRun } from "../child-wake.ts";
+import { executeUpdate, getUpdateOutcome, submitUpdate } from "../../updates/update-client.ts";
 import { createWorkflowEventStream } from "../workflow-event-stream.ts";
 import type { StepState, WorkflowRunEvent, WorkflowState } from "../workflow-state.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
@@ -44,6 +45,9 @@ export function createWorkflowHandle<Output>(params: {
     workflowId,
     status: (p) => params.getStatus(p) as Promise<WorkflowStatusInfo<Output> | null>,
     signal: ({ signalName, payload }) => storage.deliverSignal({ workflowId, signalName, payload }),
+    update: (p) => executeUpdate({ ...p, storage, workflowId, clock: p.clock ?? clock }),
+    submitUpdate: (p) => submitUpdate({ ...p, storage, workflowId }),
+    updateOutcome: (updateId) => getUpdateOutcome({ storage, workflowId, updateId }),
     cancel: async () => {
       await storage.cancelWorkflow({ workflowId });
       // A cancelled child wakes a parent parked on it.

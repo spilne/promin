@@ -133,7 +133,9 @@ await onboard
 and the `WorkflowFailure` of a failed run), step attempts (attempt, duration,
 outcome, whether a retry follows), sleeps and signal waits, child workflows (a
 child's `runStart` names its `parentWorkflowId`), compensation (start, each
-`compensate` attempt, end), run lock acquired / lost, and `recover()` reclaims.
+`compensate` attempt, end), run lock acquired / lost, `recover()` reclaims, and
+`update` (a journaled step applied, failed or rejected an update; inline
+execution only).
 Every callback is optional and can never change a run: one that throws or
 rejects is reported to `onTracerError` (default `console.error`). Without a
 tracer the engine builds no events.

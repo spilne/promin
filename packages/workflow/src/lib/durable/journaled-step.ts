@@ -60,6 +60,8 @@ import { JournalStorageMissingError } from "./journal-errors.ts";
 import { activityScope, journaledBodyScope } from "./journaled-body-scope.ts";
 import type { ActivityYield, JournaledStepBody, RunChild } from "./journaled-context.ts";
 import { makeCtx } from "./journaled-ctx.ts";
+import type { UpdateEvent } from "./journaled-updates.ts";
+import { WorkflowSuspendedError } from "./durable-pipeline-error.ts";
 import type { WorkflowMetadataRef } from "./step-definition.ts";
 import type { FenceGuard, WorkflowStorage } from "./workflow-storage.ts";
 
@@ -143,6 +145,8 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
    * `onMetadataWriteError` hook here. Default: `console.warn`.
    */
   onMetadataWriteError?: (params: { error: unknown; keys: readonly string[] }) => void;
+  /** Called with each update this body applies or rejects (the runner wires its tracer here). */
+  onUpdate?: (event: UpdateEvent) => void;
   body: JournaledStepBody<Input, Prev, Output>;
 }): Promise<Output> {
   const {
@@ -161,6 +165,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     guard,
     workflowMetadata,
     onMetadataWriteError,
+    onUpdate,
     body,
   } = params;
 
@@ -176,7 +181,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
       : workflowStorage
         ? (await workflowStorage.loadWorkflow(workflowId))?.metadata
         : undefined;
-  const { ctx, compensations, settleMetadata } = makeCtx({
+  const { ctx, compensations, updates, settleMetadata } = makeCtx({
     input,
     prev,
     workflowId,
@@ -192,6 +197,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     ...(clock !== undefined && { clock }),
     ...(guard !== undefined && { guard }),
     ...(onMetadataWriteError !== undefined && { onMetadataWriteError }),
+    ...(onUpdate !== undefined && { onUpdate }),
     ...(initialMetadata !== undefined && { initialMetadata }),
     ...(workflowMetadata !== undefined && { metadataRef: workflowMetadata }),
   });
@@ -211,12 +217,24 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     step = tick(() => gen.next());
     while (!step.done) {
       const yielded = step.value;
-      try {
-        const resolved = await yielded.promise;
-        step = tick(() => gen.next(resolved as never));
-      } catch (err) {
+      // Handlers are registered by now (the body runs up to its first yield
+      // synchronously): publish them. The yielded promise is observed first so a
+      // rejection while publishing is not unhandled.
+      const settled = yielded.promise.then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      await updates.publish();
+      const result = await settled;
+      // Update point: after the yield settles, before the body resumes. A
+      // suspension counts (the run is parked, applying what has arrived); any
+      // other failure is not a boundary the journal can place updates at.
+      if (result.ok || isSuspension(result.error)) await updates.applyAtUpdatePoint();
+      if (result.ok) {
+        step = tick(() => gen.next(result.value as never));
+      } else {
         // Let the body's try/catch handle it if it wants; otherwise re-throw.
-        step = tick(() => gen.throw(err));
+        step = tick(() => gen.throw(result.error));
       }
     }
     return step.value;
@@ -228,6 +246,7 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     // allocate its slots from its own top-level counter, not the parent's
     // branch.
     const output = await activityScope.exit(() => driveBody());
+    await updates.close();
     // Metadata writes settle before the step's outcome is checkpointed, so a
     // write that lost the fence stops the step instead of racing its result.
     await settleMetadata();
@@ -248,4 +267,8 @@ export async function runJournaledStep<Input, Prev, Output>(params: {
     }
     throw bodyError;
   }
+}
+
+function isSuspension(error: unknown): boolean {
+  return error instanceof WorkflowSuspendedError;
 }

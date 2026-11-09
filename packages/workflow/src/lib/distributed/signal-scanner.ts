@@ -19,6 +19,15 @@
 // forget, easy to half-implement. The scanner closes the loop generically
 // so a `deliverSignal` call from anywhere just works.
 //
+// Updates
+// -------
+// A run holding an unanswered update request (`workflow.update:<id>`, see
+// `updates/update-protocol.ts`) is resumed too, when the storage can list
+// them (`listUpdateWakeups`): the journaled body applies the update at its
+// next update point and answers it, so the run is found only until then. A
+// storage without that query serves updates to runs that are running, and
+// to suspended ones once something else resumes them.
+//
 // Repeated signal names
 // ---------------------
 // Signals are a named value on the run: a second delivery under the same
@@ -100,14 +109,31 @@ export class DefaultSignalScanner implements SignalScanner {
       leaderElection: config.leaderElection,
       resumeConcurrency: config.resumeConcurrency,
       find: async ({ afterWorkflowId }) => {
+        // Runs holding an update request nobody has applied are woken too,
+        // so the journaled body applies it at its next update point. Both
+        // queries page by `workflowId`; their rows are merged in that order
+        // (a run in both is resumed once, as a signal wake).
+        const updates = await findUpdateWakeups({ storage, pageSize, afterWorkflowId, config });
         if (hasCapability(storage, "signalWakeups")) {
-          const rows = await storage.listSignalWakeups({
+          const signals = await storage.listSignalWakeups({
             limit: pageSize,
             ...(afterWorkflowId !== undefined && { afterWorkflowId }),
           });
-          return { rows, done: rows.length < pageSize };
+          if (updates.length === 0) return { rows: signals, done: signals.length < pageSize };
+          const merged = mergeByWorkflowId({ primary: signals, secondary: updates });
+          return {
+            rows: merged.slice(0, pageSize),
+            done:
+              signals.length < pageSize && updates.length < pageSize && merged.length <= pageSize,
+          };
         }
-        return { rows: await signalWakeupsByListing({ storage, pageSize }), done: true };
+        const rows = await signalWakeupsByListing({ storage, pageSize });
+        if (updates.length === 0) return { rows, done: true };
+        const merged = mergeByWorkflowId({ primary: rows, secondary: updates });
+        return {
+          rows: merged.slice(0, pageSize),
+          done: updates.length < pageSize && merged.length <= pageSize,
+        };
       },
       prepare: async (row) => {
         // Journaled `ctx.signal` waits read the value from their pending
@@ -142,6 +168,42 @@ export class DefaultSignalScanner implements SignalScanner {
 
 export function createSignalScanner(config: SignalScannerConfig): SignalScanner {
   return new DefaultSignalScanner(config);
+}
+
+/**
+ * Runs with an unapplied update request. A failing query (a remote server
+ * that predates updates) is reported and skipped, so signal wakes go on.
+ */
+async function findUpdateWakeups(params: {
+  readonly storage: WorkflowStorage;
+  readonly pageSize: number;
+  readonly afterWorkflowId: string | undefined;
+  readonly config: SignalScannerOptions;
+}): Promise<WorkflowWakeup[]> {
+  const { storage, pageSize, afterWorkflowId } = params;
+  if (!hasCapability(storage, "updateWakeups")) return [];
+  try {
+    return await storage.listUpdateWakeups({
+      limit: pageSize,
+      ...(afterWorkflowId !== undefined && { afterWorkflowId }),
+    });
+  } catch (error) {
+    params.config.onError?.("(update-wakeups)", error);
+    return [];
+  }
+}
+
+/** `primary` and `secondary` rows in `workflowId` order, one row per run (the primary's wins). */
+function mergeByWorkflowId(params: {
+  readonly primary: readonly WorkflowWakeup[];
+  readonly secondary: readonly WorkflowWakeup[];
+}): WorkflowWakeup[] {
+  const byRun = new Map<string, WorkflowWakeup>();
+  for (const row of params.secondary) byRun.set(row.workflowId, row);
+  for (const row of params.primary) byRun.set(row.workflowId, row);
+  return [...byRun.values()].sort((a, b) =>
+    a.workflowId < b.workflowId ? -1 : a.workflowId > b.workflowId ? 1 : 0,
+  );
 }
 
 /**

@@ -15,7 +15,16 @@ import type {
   WorkflowState,
   WorkflowStorage,
 } from "@promin/workflow";
-import { isTerminalWorkflowStatus, validate } from "@promin/workflow";
+import {
+  awaitUpdate,
+  getUpdateOutcome,
+  isTerminalWorkflowStatus,
+  submitUpdate,
+  validate,
+  UpdateFailedError,
+  UpdateRejectedError,
+  UpdateTimeoutError,
+} from "@promin/workflow";
 import { z } from "zod";
 import { accepted, json, jsonError } from "../router.ts";
 import {
@@ -27,6 +36,8 @@ import {
   RunListQuerySchema,
   SignalRequestSchema,
   TriggerRunRequestSchema,
+  UpdateRequestSchema,
+  type UpdateResponse,
   type RunActionResponse,
   type SignalDeliveryResponse,
   type TriggerRunResponse,
@@ -273,6 +284,102 @@ export function sendSignal(deps: RunRoutesDeps) {
     const response: SignalDeliveryResponse = { workflowId: id, signalName: body.signalName };
     return accepted(response, runLocation(id));
   };
+}
+
+/** HTTP status of an update the caller could not deliver. */
+const UPDATE_REJECTION_STATUS: Record<string, number> = {
+  validation: 400,
+  run_not_found: 404,
+  run_terminal: 409,
+  unknown_update: 409,
+  no_handlers: 409,
+  id_conflict: 409,
+  not_applied: 409,
+};
+
+/**
+ * POST /api/runs/:id/updates — send an update to the run's journaled body.
+ *
+ * Delivery stores the request (202); the run applies it at its next update
+ * point (a suspended run is resumed by the signal scanner) and records an
+ * outcome. With `wait: true` the answer is that outcome (200). Repeating
+ * the call with the same `updateId` is idempotent. 404 for an unknown run;
+ * 409 `run_terminal` / `unknown_update` / `no_handlers` / `id_conflict`
+ * when it cannot be delivered; 400 `validation` when the args fail the
+ * handler's schema.
+ */
+export function sendUpdate(deps: RunRoutesDeps) {
+  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+    const { id } = parseParams({ params, schema: RunParamsSchema });
+    const body = await parseBody({ req, schema: UpdateRequestSchema });
+    let submitted;
+    try {
+      submitted = await submitUpdate({
+        storage: deps.storage,
+        workflowId: id,
+        update: body.updateName,
+        args: body.args ?? null,
+        ...(body.updateId !== undefined && { updateId: body.updateId }),
+      });
+    } catch (error) {
+      if (error instanceof UpdateRejectedError) return updateRejection(error);
+      throw error;
+    }
+    const base = { workflowId: id, updateId: submitted.updateId };
+    if (submitted.outcome !== undefined) {
+      return json(200, { ...base, outcome: submitted.outcome } satisfies UpdateResponse);
+    }
+    if (body.wait !== true) return accepted(base satisfies UpdateResponse, runLocation(id));
+    try {
+      await awaitUpdate({
+        storage: deps.storage,
+        workflowId: id,
+        updateId: submitted.updateId,
+        timeoutMs: body.timeoutMs ?? 30_000,
+        ...(deps.clock !== undefined && { clock: deps.clock }),
+      });
+    } catch (error) {
+      if (error instanceof UpdateTimeoutError) return accepted(base satisfies UpdateResponse);
+      if (error instanceof UpdateRejectedError && error.reason === "run_terminal") {
+        return updateRejection(error);
+      }
+      // A failed or rejected outcome is the answer, not a transport error.
+      if (!(error instanceof UpdateFailedError || error instanceof UpdateRejectedError))
+        throw error;
+    }
+    const outcome = await getUpdateOutcome({
+      storage: deps.storage,
+      workflowId: id,
+      updateId: submitted.updateId,
+    });
+    return json(200, {
+      ...base,
+      ...(outcome !== undefined && { outcome }),
+    } satisfies UpdateResponse);
+  };
+}
+
+/** GET /api/runs/:id/updates/:updateId — the outcome of an update (200), or 202 while it is pending. */
+export function getUpdate(deps: RunRoutesDeps) {
+  return async (_req: Request, params: Record<string, string>): Promise<Response> => {
+    const { id } = parseParams({ params, schema: RunParamsSchema });
+    const { updateId } = parseParams({ params, schema: z.object({ updateId: IdSchema }) });
+    let outcome;
+    try {
+      outcome = await getUpdateOutcome({ storage: deps.storage, workflowId: id, updateId });
+    } catch (error) {
+      if (error instanceof UpdateRejectedError) return jsonError(404, "not_found", error.message);
+      throw error;
+    }
+    const base = { workflowId: id, updateId };
+    return outcome === undefined
+      ? accepted(base satisfies UpdateResponse)
+      : json(200, { ...base, outcome } satisfies UpdateResponse);
+  };
+}
+
+function updateRejection(error: UpdateRejectedError): Response {
+  return jsonError(UPDATE_REJECTION_STATUS[error.reason] ?? 409, error.reason, error.message);
 }
 
 /**

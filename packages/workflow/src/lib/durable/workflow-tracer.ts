@@ -115,6 +115,20 @@ export interface WorkflowTraceWaitEnd extends WorkflowTraceRef {
   readonly wakeAt?: Date;
 }
 
+/**
+ * A journaled step applied, failed or rejected an update (`ctx.setUpdateHandler`).
+ * Emitted by the inline executor only, at the update point that served it.
+ */
+export interface WorkflowTraceUpdate extends WorkflowTraceRef {
+  readonly stepName: string;
+  readonly updateId: string;
+  readonly updateName: string;
+  /** `completed` / `failed`: the handler ran. `rejected`: it did not (see `reason`). */
+  readonly outcome: "completed" | "failed" | "rejected";
+  readonly reason?: string;
+  readonly at: Date;
+}
+
 export interface WorkflowTraceLockAcquired {
   readonly workflowId: string;
   readonly namespace?: string;
@@ -207,6 +221,7 @@ export interface WorkflowTracerCallbacks {
   stepAttemptEnd(event: WorkflowTraceStepAttemptEnd): void | Promise<void>;
   waitStart(event: WorkflowTraceWaitStart): void | Promise<void>;
   waitEnd(event: WorkflowTraceWaitEnd): void | Promise<void>;
+  update(event: WorkflowTraceUpdate): void | Promise<void>;
   lockAcquired(event: WorkflowTraceLockAcquired): void | Promise<void>;
   lockLost(event: WorkflowTraceLockLost): void | Promise<void>;
   compensationStart(event: WorkflowTraceCompensationStart): void | Promise<void>;

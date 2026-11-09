@@ -475,13 +475,16 @@ export class QueuedWorkflows extends ZoryaWorkflows {
     readonly workflowId: string;
     readonly workflowName: string;
     readonly version?: string;
-    readonly reason: "sleep" | "signal-timeout" | "signal";
+    readonly reason: "sleep" | "signal-timeout" | "signal" | "update";
   }): Promise<void> {
     if (!(await this.owns(run.workflowName))) return;
     // A timer due by this instance's clock keeps a worker's hold (it set
     // the delay because the timer isn't due yet by its own); a delivered
-    // signal is claimable at once.
-    await this.enqueue({ run, keepAvailableAt: run.reason !== "signal" });
+    // signal or an update request is claimable at once.
+    await this.enqueue({
+      run,
+      keepAvailableAt: run.reason !== "signal" && run.reason !== "update",
+    });
   }
 
   /**

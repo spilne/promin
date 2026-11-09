@@ -35,11 +35,13 @@ import {
 import {
   cancelRun,
   getRun,
+  getUpdate,
   listRuns,
   listWorkflowNames,
   markRunFailed,
   markRunSuccess,
   sendSignal,
+  sendUpdate,
   triggerRun,
   type RunRoutesDeps,
 } from "../routes/runs.ts";
@@ -150,6 +152,8 @@ export function mountRuns(params: MountRunsParams): void {
     .get("/api/workflows/:name/definition", getWorkflowDef(defDeps))
     .post("/api/runs/:id/cancel", cancelRun(deps))
     .post("/api/runs/:id/signal", sendSignal(deps))
+    .post("/api/runs/:id/updates", sendUpdate(deps))
+    .get("/api/runs/:id/updates/:updateId", getUpdate(deps))
     // Signal tokens — public-bearer auth for deliverSignal. Mint and list
     // are auth-gated through the regular /api auth layer; /describe and
     // /complete are reachable without Zorya credentials and validate the

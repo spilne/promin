@@ -453,6 +453,41 @@ export interface SignalDeliveryResponse {
   signalName: string;
 }
 
+/** Body of `POST /api/runs/:id/updates`. */
+export const UpdateRequestSchema = z
+  .object({
+    updateName: Name,
+    args: z.unknown().optional(),
+    /** Idempotency key; a repeat of the same request is answered, not applied twice. */
+    updateId: IdSchema.optional(),
+    /**
+     * Wait for the run to apply the update and answer with its outcome
+     * (200) instead of returning once it is stored (202). With no outcome
+     * after `timeoutMs` the answer is 202 anyway: read it later from
+     * `GET /api/runs/:id/updates/:updateId`.
+     */
+    wait: z.boolean().optional(),
+    timeoutMs: z.number().int().min(1).max(60_000).optional(),
+  })
+  .strict();
+
+export type UpdateRequestBody = z.infer<typeof UpdateRequestSchema>;
+
+/**
+ * Answer of `POST /api/runs/:id/updates` and `GET /api/runs/:id/updates/:updateId`.
+ * `outcome` is absent until the run has applied the update (`completed`
+ * with the handler's `result`, `failed` when the handler threw, `rejected`
+ * with a `reason`).
+ */
+export interface UpdateResponse {
+  workflowId: string;
+  updateId: string;
+  outcome?:
+    | { status: "completed"; result: unknown }
+    | { status: "failed"; error: { tag?: string; message: string } }
+    | { status: "rejected"; reason: string; message: string };
+}
+
 /** Body of `POST /api/runs/:id/mark-failed`. Optional. */
 export const MarkFailedRequestSchema = z
   .object({ reason: z.string().min(1).max(4096).optional() })
