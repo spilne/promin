@@ -477,7 +477,15 @@ memory, canDelegate })` and pass it to
   (default 1000), completes and stops counting against the child limit; spawn
   a new `childId` to continue. `DELETE` hides the child. The child limit is
   serialized per parent within a process; use `turnGate` across processes.
-  `steer` supersedes pending queued messages at the next turn boundary.
+  `steer` supersedes pending queued messages and interrupts a turn that is
+  already running: while a child turn runs, the worker checks its inbox every
+  `steerPollMs` (default 250ms) and aborts the turn through the turn's abort
+  signal when a later `steer` has arrived. The abandoned turn ends with
+  `cancelled` (the in-flight model call is aborted; a tool call already
+  running finishes unless the tool honors its `ctx.signal`), its outcome is
+  recorded as `interrupted`, and the steer then runs as the next turn on the
+  same thread, which keeps the partial transcript. `queued` and `follow-up`
+  never interrupt; they wait for the running turn.
   The mailbox lives in `MemoryStore` and the worker in `WorkflowStorage`;
   startup reconciles mailbox writes whose wake signal was lost in a crash.
   Configure durable stores and the LocalWorkflows signal scanner for restart

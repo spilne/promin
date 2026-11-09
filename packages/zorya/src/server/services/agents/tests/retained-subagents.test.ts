@@ -17,6 +17,8 @@ interface HarnessOptions {
   readonly retained?: Partial<ConstructorParameters<typeof RetainedSubagents>[0]>;
   readonly wrapStorage?: (storage: InMemoryWorkflowStorage) => InMemoryWorkflowStorage;
   readonly chat?: (content: string) => string;
+  /** Async model reply; `signal` aborts when the turn is interrupted. */
+  readonly chatAsync?: (content: string, signal: AbortSignal | undefined) => Promise<string>;
   readonly turnGate?: false;
 }
 
@@ -68,12 +70,19 @@ async function harness(options: HarnessOptions = {}) {
           memory,
           tools: {},
           llm: () => ({
-            chat: async (request) => ({
-              content: options.chat
-                ? options.chat(String(request.messages.findLast((m) => m.role === "user")?.content))
-                : `reply:${request.messages.findLast((m) => m.role === "user")?.content ?? ""}`,
-              finishReason: "stop" as const,
-            }),
+            chat: async (request) => {
+              const last = String(request.messages.findLast((m) => m.role === "user")?.content);
+              if (options.chatAsync) {
+                return {
+                  content: await options.chatAsync(last, request.signal),
+                  finishReason: "stop" as const,
+                };
+              }
+              return {
+                content: options.chat ? options.chat(last) : `reply:${last}`,
+                finishReason: "stop" as const,
+              };
+            },
           }),
         }),
     });
@@ -515,5 +524,99 @@ describe("retained subagents", () => {
     await h.retained.reconcileMailboxes();
     expect(delivered).toBe(before);
     await h.workflows.stop();
+  });
+
+  describe("steering a running turn", () => {
+    /** A model that holds the "long" task until released or aborted. */
+    function longTaskModel() {
+      let release: () => void = () => {};
+      const held = new Promise<void>((resolve) => (release = resolve));
+      const seen = { started: 0, aborted: 0 };
+      const chatAsync = async (content: string, signal: AbortSignal | undefined) => {
+        if (!content.includes("long task")) return `reply:${content}`;
+        seen.started++;
+        await Promise.race([
+          held,
+          new Promise<void>((resolve) => {
+            if (signal?.aborted) resolve();
+            signal?.addEventListener("abort", () => resolve(), { once: true });
+          }),
+        ]);
+        if (signal?.aborted) {
+          seen.aborted++;
+          throw new DOMException("aborted", "AbortError");
+        }
+        return "long answer";
+      };
+      return { chatAsync, release, seen };
+    }
+
+    it("interrupts the running turn, records it as interrupted and runs the steer next", async () => {
+      const model = longTaskModel();
+      const h = await harness({
+        chatAsync: model.chatAsync,
+        retained: { steerPollMs: 10, maxIterations: 50 },
+      });
+      await h.workflows.start();
+      const child = await h.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "long task",
+        childId: "interrupted",
+      });
+      await waitFor(async () => model.seen.started === 1);
+      await h.retained.messageAgent({
+        parent,
+        childId: child.childId,
+        task: "new direction",
+        mode: "steer",
+        messageId: "s1",
+      });
+      await waitFor(async () => {
+        const { transcript } = await h.retained.readAgentMessages(parent, child.childId);
+        return transcript.some((m) => m.content === "reply:new direction");
+      });
+      const { outcomes } = await h.retained.readAgentMessages(parent, child.childId);
+      expect(
+        outcomes.map((m) => (m as { metadata?: { status?: string } }).metadata?.status),
+      ).toEqual(["interrupted", "done"]);
+      expect(model.seen.aborted).toBe(1);
+      await h.workflows.stop();
+    });
+
+    it("lets a queued or follow-up message wait for the running turn (negative control)", async () => {
+      const model = longTaskModel();
+      const h = await harness({
+        chatAsync: model.chatAsync,
+        retained: { steerPollMs: 10, maxIterations: 50 },
+      });
+      await h.workflows.start();
+      const child = await h.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "long task",
+        childId: "not-interrupted",
+      });
+      await waitFor(async () => model.seen.started === 1);
+      await h.retained.messageAgent({
+        parent,
+        childId: child.childId,
+        task: "later",
+        mode: "follow-up",
+        messageId: "f1",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(model.seen.aborted).toBe(0);
+      model.release();
+      await waitFor(async () => {
+        const { outcomes } = await h.retained.readAgentMessages(parent, child.childId);
+        return outcomes.length === 2;
+      });
+      const { outcomes } = await h.retained.readAgentMessages(parent, child.childId);
+      expect(
+        outcomes.map((m) => (m as { metadata?: { status?: string } }).metadata?.status),
+      ).toEqual(["done", "done"]);
+      await h.workflows.stop();
+    });
   });
 });

@@ -90,6 +90,11 @@ export interface RetainedSubagentsConfig {
    * (default 1000). The child then completes, bounding the journal.
    */
   readonly maxIterations?: number;
+  /**
+   * How often a running child turn checks its inbox for a steer (default
+   * 250ms). A steer aborts the running turn: see `messageAgent`.
+   */
+  readonly steerPollMs?: number;
 }
 
 /** Durable, retained child agents. One workflow holds each child's ordered inbox. */
@@ -466,7 +471,7 @@ async function recordOutcome(params: {
   readonly config: RetainedSubagentsConfig;
   readonly input: RetainedInput;
   readonly seq: number;
-  readonly status: "done" | "failed" | "superseded";
+  readonly status: "done" | "failed" | "superseded" | "interrupted";
   readonly detail?: string;
 }): Promise<void> {
   const { config, input, seq, status, detail } = params;
@@ -483,17 +488,36 @@ async function recordOutcome(params: {
   );
 }
 
-/** Run one turn; a failure is recorded and never fails the child workflow. */
+/**
+ * Run one turn; a failure is recorded and never fails the child workflow.
+ * A steer that lands in the inbox after `seq` interrupts the turn.
+ */
 async function runAndRecord(
   config: RetainedSubagentsConfig,
   input: RetainedInput,
   task: string,
   seq: number,
-): Promise<"done" | "failed"> {
+): Promise<"done" | "failed" | "interrupted"> {
+  const abort = new AbortController();
+  const watcher = setInterval(() => {
+    void hasSteerAfter(config, input, seq).then(
+      (steered) => {
+        if (steered) abort.abort();
+      },
+      () => undefined,
+    );
+  }, config.steerPollMs ?? 250);
   try {
-    await runChildTurn(config, input, task, seq === 0 ? "initial" : `message:${seq}`);
-    await recordOutcome({ config, input, seq, status: "done" });
-    return "done";
+    const finish = await runChildTurn(
+      config,
+      input,
+      task,
+      seq === 0 ? "initial" : `message:${seq}`,
+      abort.signal,
+    );
+    const status = finish === "cancelled" ? "interrupted" : "done";
+    await recordOutcome({ config, input, seq, status });
+    return status;
   } catch (error) {
     await recordOutcome({
       config,
@@ -503,7 +527,18 @@ async function runAndRecord(
       detail: error instanceof Error ? error.message : String(error),
     });
     return "failed";
+  } finally {
+    clearInterval(watcher);
   }
+}
+
+async function hasSteerAfter(
+  config: RetainedSubagentsConfig,
+  input: RetainedInput,
+  seq: number,
+): Promise<boolean> {
+  const later = await config.memory.getMessages(inboxKey(input), { fromSeq: seq + 1 });
+  return later.some((item) => "metadata" in item && item.metadata?.mode === "steer");
 }
 
 /** Process the inbox message at `seq` if it exists. */
@@ -511,15 +546,15 @@ async function consume(
   config: RetainedSubagentsConfig,
   input: RetainedInput,
   seq: number,
-): Promise<"empty" | "skipped" | "superseded" | "done" | "failed"> {
+): Promise<"empty" | "skipped" | "superseded" | "done" | "failed" | "interrupted"> {
   const key = inboxKey(input);
   const [stored] = await config.memory.getMessages(key, { fromSeq: seq, toSeq: seq });
   if (!stored) return "empty";
   if (stored.role !== "user") return "skipped";
   const command = stored.metadata as unknown as MailCommand | undefined;
   if (!command || typeof command.task !== "string") return "skipped";
-  // A steer supersedes queued work that has not started yet. It takes effect
-  // at the next turn boundary, never inside a tool call.
+  // A steer supersedes queued work that has not started yet, and interrupts
+  // a turn that is running (see runAndRecord).
   if (command.mode !== "steer") {
     const later = await config.memory.getMessages(key, { fromSeq: seq + 1 });
     if (later.some((item) => "metadata" in item && item.metadata?.mode === "steer")) {
@@ -535,7 +570,8 @@ async function runChildTurn(
   input: RetainedInput,
   task: string,
   turnKey: string,
-): Promise<void> {
+  signal: AbortSignal,
+): Promise<string> {
   const recipe: RegisteredAgent | null = await config.agents.registry.get({
     id: input.agentId,
     version: input.agentVersion,
@@ -552,6 +588,7 @@ async function runChildTurn(
       retainedDepth: input.depth,
     },
   });
-  const result = await thread.send({ task }, { turnKey: `${input.childId}:${turnKey}` });
+  const result = await thread.send({ task }, { turnKey: `${input.childId}:${turnKey}`, signal });
   await result.text;
+  return await result.finishReason;
 }
