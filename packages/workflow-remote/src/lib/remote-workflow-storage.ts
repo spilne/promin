@@ -59,6 +59,9 @@ import type {
   CompleteSignalTokenParams,
   CompleteSignalTokenResult,
   PurgeCompletedParams,
+  ListRetentionCandidatesParams,
+  PurgeRunRef,
+  RetentionCandidate,
   ReadStreamChunksParams,
   ReleaseLockParams,
   ResetStepsParams,
@@ -328,6 +331,15 @@ export class RemoteWorkflowStorage
 
   purgeCompleted(params: PurgeCompletedParams): Promise<number> {
     return this.call("purgeCompleted", params);
+  }
+
+  /** Retention primitives, forwarded to the server's storage (operator-only, see `RUNNER_STORAGE_METHODS`). */
+  listRetentionCandidates(params: ListRetentionCandidatesParams): Promise<RetentionCandidate[]> {
+    return this.call("listRetentionCandidates", params);
+  }
+
+  purgeRuns(params: { readonly runs: readonly PurgeRunRef[] }): Promise<string[]> {
+    return this.call("purgeRuns", params);
   }
 
   // -------------------------------------------------------------------------

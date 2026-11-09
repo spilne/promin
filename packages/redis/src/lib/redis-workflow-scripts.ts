@@ -631,18 +631,25 @@ return {1, sleeps, snap}
 
 // Delete every key of one finished workflow.
 // KEYS: [wfKey]
-// ARGV: [wfKey (base), terminalStatusesCsv]
-// Returns {0} when the workflow is gone, {-1} when it isn't terminal, else
+// ARGV: [wfKey (base), terminalStatusesCsv, expectedCompletedAt?]
+// With expectedCompletedAt (the ISO string the run was listed with) the run
+// is also kept when it completed at another time, or when it is a cancelled
+// run still owing its cancel rollback.
+// Returns {0} when the workflow is gone, {-1} when it isn't deletable, else
 // {1, status, workflowName, parentWorkflowId, namespace,
 //  {tokenId ...}, {"<step>::<idx>|<path>" ...}}.
 export const PURGE_WORKFLOW_LUA = `
-local h = redis.call('HMGET', KEYS[1], 'id', 'status', 'run', 'workflowName', 'parentWorkflowId', 'namespace')
+local h = redis.call('HMGET', KEYS[1], 'id', 'status', 'run', 'workflowName', 'parentWorkflowId', 'namespace', 'completedAt', 'compensationOrigin')
 if not h[1] then return {0} end
 local terminal = false
 for s in string.gmatch(ARGV[2], '[^,]+') do
   if s == h[2] then terminal = true end
 end
 if not terminal then return {-1} end
+if ARGV[3] and ARGV[3] ~= '' then
+  if h[7] ~= ARGV[3] then return {-1} end
+  if h[2] == 'failed' and h[8] == 'cancel' then return {-1} end
+end
 local b = ARGV[1]
 for r = 1, tonumber(h[3]) do
   local stepsKey = b .. ':steps:' .. r

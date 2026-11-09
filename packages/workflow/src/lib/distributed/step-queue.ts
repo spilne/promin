@@ -416,9 +416,11 @@ export interface StepQueue {
   /**
    * Delete terminal (`completed` / `failed`) tasks that finished before
    * `completedBefore`. Pending and running tasks are never touched. Returns
-   * the number of tasks deleted.
+   * the number of tasks deleted. With `limit`, at most that many are deleted
+   * (oldest first), so a caller can drain a backlog in bounded batches:
+   * repeat while the result equals `limit`.
    */
-  purge(params: { completedBefore: Date }): Promise<number>;
+  purge(params: { completedBefore: Date; limit?: number }): Promise<number>;
 
   /**
    * Queue metrics over a time window, with wait / exec latency stats.

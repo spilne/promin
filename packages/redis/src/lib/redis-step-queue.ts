@@ -942,19 +942,22 @@ export class RedisStepQueue implements StepQueue {
    * indexed in `{prefix}:done` — every task settled by this version — are
    * found.
    */
-  async purge(params: { completedBefore: Date }): Promise<number> {
+  async purge(params: { completedBefore: Date; limit?: number }): Promise<number> {
     let purged = 0;
     for (;;) {
+      const batch =
+        params.limit === undefined ? PURGE_BATCH : Math.min(PURGE_BATCH, params.limit - purged);
+      if (batch <= 0) return purged;
       const [n, scanned] = (await this.redis.eval(
         PURGE_LUA,
         1,
         this.doneKey,
         this.base,
         String(params.completedBefore.getTime()),
-        String(PURGE_BATCH),
+        String(batch),
       )) as [number, number];
       purged += Number(n);
-      if (Number(scanned) < PURGE_BATCH) return purged;
+      if (Number(scanned) < batch) return purged;
     }
   }
 

@@ -70,6 +70,12 @@ import type {
   TryLockParams,
 } from "@promin/workflow";
 import { FenceTokenMismatchError, type JournalStepType } from "@promin/workflow";
+import type {
+  ListRetentionCandidatesParams,
+  PurgeRunRef,
+  RetentionCandidate,
+  RetentionStatus,
+} from "@promin/workflow";
 import {
   CANCELLED_ERROR,
   CANCELLED_ERROR_TAG,
@@ -114,6 +120,8 @@ import {
 // ---------------------------------------------------------------------------
 
 /** Status ids a terminal transition (complete / fail / tripwire) may leave. */
+const RETENTION_STATUSES: readonly RetentionStatus[] = ["completed", "failed", "tripwire"];
+
 const NON_TERMINAL_STATUS_IDS = [
   WorkflowStatusIds.id.pending,
   WorkflowStatusIds.id.running,
@@ -2087,26 +2095,121 @@ export class PostgresWorkflowStorage
 
     const ids = expired.map((r) => r.workflowId);
 
-    // One transaction: a crash mid-purge never leaves a workflow row with
-    // half its dependents gone. Signals, steps, runs, journal, signal tokens
-    // and streams follow the workflow row through their ON DELETE CASCADE
-    // foreign keys; the tables without one are cleared explicitly.
-    await this.db.transaction(async (tx) => {
-      await tx.delete(workflowStepTasks).where(inArray(workflowStepTasks.workflowId, ids));
-      await tx.delete(stepAttempts).where(inArray(stepAttempts.workflowId, ids));
-      await tx
-        .delete(stepQueue)
-        .where(
-          and(
-            inArray(stepQueue.workflowId, ids),
-            sql`${stepQueue.status} IN ('completed', 'failed')`,
-          ),
-        );
-      await tx.delete(workflowLocks).where(inArray(workflowLocks.workflowId, ids));
-      await tx.delete(workflows).where(inArray(workflows.workflowId, ids));
-    });
+    await this.db.transaction(async (tx) => this.deleteRunsInTx(tx, ids));
 
     return ids.length;
+  }
+
+  /**
+   * Delete runs and everything stored for them, inside `tx`. One transaction:
+   * a crash mid-purge never leaves a workflow row with half its dependents
+   * gone. Signals, steps, runs, journal, signal tokens and streams follow the
+   * workflow row through their ON DELETE CASCADE foreign keys; the tables
+   * without one are cleared explicitly.
+   */
+  private async deleteRunsInTx(
+    tx: Parameters<Parameters<PostgresWorkflowStorage["db"]["transaction"]>[0]>[0],
+    ids: readonly string[],
+  ): Promise<void> {
+    if (ids.length === 0) return;
+    const list = [...ids];
+    await tx.delete(workflowStepTasks).where(inArray(workflowStepTasks.workflowId, list));
+    await tx.delete(stepAttempts).where(inArray(stepAttempts.workflowId, list));
+    await tx
+      .delete(stepQueue)
+      .where(
+        and(
+          inArray(stepQueue.workflowId, list),
+          sql`${stepQueue.status} IN ('completed', 'failed')`,
+        ),
+      );
+    await tx.delete(workflowLocks).where(inArray(workflowLocks.workflowId, list));
+    await tx.delete(workflows).where(inArray(workflows.workflowId, list));
+  }
+
+  async listRetentionCandidates(
+    params: ListRetentionCandidatesParams,
+  ): Promise<RetentionCandidate[]> {
+    const statuses = params.statuses ?? RETENTION_STATUSES;
+    const after = params.after;
+    const rows = await this.db
+      .select({
+        workflowId: workflows.workflowId,
+        workflowName: workflows.workflowName,
+        statusId: workflows.statusId,
+        errorTag: workflows.errorTag,
+        parentWorkflowId: workflows.parentWorkflowId,
+        compensationOrigin: workflows.compensationOrigin,
+        completedAt: workflows.completedAt,
+      })
+      .from(workflows)
+      .where(
+        and(
+          inArray(
+            workflows.statusId,
+            statuses.map((st) => WorkflowStatusIds.id[st]),
+          ),
+          lt(workflows.completedAt, params.completedBefore),
+          params.name !== undefined ? eq(workflows.workflowName, params.name) : undefined,
+          this.config.namespace ? eq(workflows.namespace, this.config.namespace) : undefined,
+          after !== undefined
+            ? sql`(${workflows.completedAt}, ${workflows.workflowId}) > (${after.completedAt.toISOString()}::timestamptz, ${after.workflowId})`
+            : undefined,
+        ),
+      )
+      .orderBy(asc(workflows.completedAt), asc(workflows.workflowId))
+      .limit(params.limit);
+    return rows.flatMap((r) =>
+      r.completedAt === null
+        ? []
+        : [
+            {
+              workflowId: r.workflowId,
+              workflowName: r.workflowName,
+              status: WorkflowStatusIds.toName(r.statusId) as RetentionStatus,
+              ...(r.errorTag !== null && { errorTag: r.errorTag }),
+              ...(r.parentWorkflowId !== null && { parentWorkflowId: r.parentWorkflowId }),
+              ...(r.compensationOrigin !== null && {
+                compensationOrigin: r.compensationOrigin as CompensationOrigin,
+              }),
+              completedAt: r.completedAt,
+            },
+          ],
+    );
+  }
+
+  async purgeRuns(params: { readonly runs: readonly PurgeRunRef[] }): Promise<string[]> {
+    if (params.runs.length === 0) return [];
+    const refs = sql.join(
+      params.runs.map((r) => sql`(${r.workflowId}, ${r.completedAt.toISOString()}::timestamptz)`),
+      sql`, `,
+    );
+    const ended = sql.join(
+      RETENTION_STATUSES.map((st) => sql`${WorkflowStatusIds.id[st]}::int`),
+      sql`, `,
+    );
+    const namespaceFilter = this.config.namespace
+      ? sql` AND w.namespace = ${this.config.namespace}`
+      : sql``;
+    return this.db.transaction(async (tx) => {
+      // The guard runs under the row lock: a concurrent resume or purge of the
+      // same run waits here and the guard is re-evaluated on what it left.
+      // Locking in workflow-id order keeps two sweepers from deadlocking.
+      const locked = await execRaw(
+        tx,
+        sql`SELECT w.workflow_id FROM wf_workflows w
+            JOIN (VALUES ${refs}) AS r(id, at) ON r.id = w.workflow_id
+            WHERE w.status_id IN (${ended})
+              AND date_trunc('milliseconds', w.completed_at) = date_trunc('milliseconds', r.at)
+              AND NOT (w.status_id = ${WorkflowStatusIds.id.failed}::int
+                       AND w.compensation_origin = 'cancel')${namespaceFilter}
+            ORDER BY w.workflow_id
+            FOR UPDATE OF w`,
+      );
+      const ids = locked.map((row) => String(row.workflow_id));
+      await this.deleteRunsInTx(tx, ids);
+      return ids;
+    });
   }
 
   private async tryRowLock(params: {

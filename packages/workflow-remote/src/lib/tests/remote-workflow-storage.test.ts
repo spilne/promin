@@ -40,6 +40,7 @@ storageTestSuite(
     hasCompensationLedger: true,
     hasStepAttempts: true,
     hasStepProgress: true,
+    hasRetention: true,
     createPeer: (storage) =>
       new RemoteWorkflowStorage({
         url: "http://test.local/storage",

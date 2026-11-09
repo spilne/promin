@@ -11,6 +11,7 @@
 // builder value can be branched and every append returns a new builder.
 // ---------------------------------------------------------------------------
 
+import { validateRetentionPolicy } from "./retention-policy.ts";
 import { LosslessJsonCodec, type Codec } from "@spilne/perfect-core/connect";
 import type { TaggedError } from "../shared/tagged-error.ts";
 import {
@@ -1033,6 +1034,7 @@ export class WorkflowBuilder<
       type: config.type,
       metadata: config.metadata,
       retry: config.retry,
+      ...(config.retention !== undefined && { retention: config.retention }),
       compensateConfig: config.compensate,
       dlq: config.dlq,
       timeoutMs: config.timeoutMs,
@@ -1146,6 +1148,9 @@ export function workflow<Input>(params: WorkflowParams<Input>): WorkflowBuilder<
         });
       }
     }
+  }
+  if (params.retention !== undefined) {
+    validateRetentionPolicy({ policy: params.retention, where: `workflow "${params.name}"` });
   }
   return new WorkflowBuilder({
     config: { ...params, onVersionMismatch: params.onVersionMismatch ?? "strict" },
