@@ -20,7 +20,6 @@ import {
   isStepGroupTask,
   percentileCont,
   StepGroupLedger,
-  stepGroupClaimOrder,
 } from "@promin/workflow/storage-kit";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
@@ -155,11 +154,41 @@ export class SqliteStepQueue implements StepQueue {
         this.db.run(`ALTER TABLE ${t} ADD COLUMN ${name} ${type}`);
       }
     }
+    // `lane` sorts a task into the queue it is claimed from (see `claim`): a
+    // generated column, so older tables upgrade in place and a release that
+    // predates it can still insert rows. Needs SQLite 3.31+.
+    const withHidden = this.db.query<{ name: string }>(`PRAGMA table_xinfo(${t})`).all();
+    if (!withHidden.some((c) => c.name === "lane")) {
+      this.db.run(
+        `ALTER TABLE ${t} ADD COLUMN lane TEXT GENERATED ALWAYS AS (${LANE_EXPR}) VIRTUAL`,
+      );
+    }
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_group_started ON ${t} (group_name, claimed_at) WHERE group_name IS NOT NULL`,
     );
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_concurrency_running ON ${t} (concurrency_scope, concurrency_key) WHERE status = 'running' AND concurrency_key IS NOT NULL`,
+    );
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_group_running ON ${t} (group_name, fairness_key) WHERE status = 'running' AND group_name IS NOT NULL`,
+    );
+    // One partial index per claim lane, in claim order, so a claim reads the
+    // head of each lane and never the backlog behind it.
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_lane_plain ON ${t} (priority DESC, created_at ASC) WHERE status = 'pending' AND lane = 'p'`,
+    );
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_lane_conc ON ${t} (concurrency_scope, concurrency_key, priority DESC, created_at ASC) WHERE status = 'pending' AND lane = 'c'`,
+    );
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_lane_group ON ${t} (group_name, fairness_key, priority DESC, created_at ASC) WHERE status = 'pending' AND lane = 'g'`,
+    );
+    // Ranks a task among the pending peers of its fairness key by age.
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_lane_group_age ON ${t} (group_name, fairness_key, created_at ASC, priority DESC) WHERE status = 'pending' AND lane = 'g'`,
+    );
+    this.db.run(
+      `CREATE INDEX IF NOT EXISTS ${t}_throttled ON ${t} (workflow_id) WHERE status = 'pending' AND group_name IS NOT NULL`,
     );
     this.db.run(
       `CREATE UNIQUE INDEX IF NOT EXISTS ${t}_active ON ${t} (active_key) WHERE active_key IS NOT NULL`,
@@ -226,110 +255,339 @@ export class SqliteStepQueue implements StepQueue {
     })();
   }
 
+  /**
+   * Claim in one write transaction, reading only the head of each lane.
+   *
+   * Pending tasks sit in three lanes (the `lane` column, each with a partial
+   * index in claim order): plain tasks, tasks of one (scope, key) with a
+   * concurrency limit, and the tasks of one fairness key of a step group. A
+   * lane whose cap is already full (key at its limit, group out of slots or
+   * starts) is never read, so a throttled backlog costs nothing per claim.
+   * The heads of the open lanes are merged in claim order (priority, fairness
+   * rank, age); claiming a task reads the next row of its lane.
+   *
+   * Cost is the number of open lanes plus `limit`, not the pending count.
+   * Tasks of one group or one concurrency key are assumed to carry the same
+   * limits, as the steps that enqueue them do.
+   */
   async claim(params: StepQueueClaimParams): Promise<StepTask[]> {
-    const caps = new Set(params.capabilities ?? []);
-    const stepNames = params.stepNames ? new Set(params.stepNames) : undefined;
-    const versions = params.versions ? new Set(params.versions) : undefined;
-    if (stepNames && stepNames.size === 0) return [];
-
-    const claimable = (row: TaskRow): boolean => {
-      if (stepNames && !stepNames.has(row.step_name)) return false;
-      if (versions && row.version !== null && !versions.has(row.version)) return false;
-      for (const n of JSON.parse(row.needs) as string[]) {
-        if (!caps.has(n)) return false;
-      }
-      return true;
-    };
+    if (params.stepNames && params.stepNames.length === 0) return [];
+    const limit = Math.floor(params.limit);
+    if (!(limit >= 1)) return [];
+    const routing = routingFilter(params);
 
     // One write transaction: no other connection can claim between our
-    // read of the pending rows and the updates below.
+    // reads and the updates below.
     return this.db.transaction((): StepTask[] => {
-      const pending = this.db
-        .query<TaskRow>(
-          `SELECT * FROM ${this._table} WHERE status = 'pending'
-           ORDER BY priority DESC, created_at ASC, rowid ASC`,
-        )
-        .all();
-      const groups = this._groupLedger();
-      const rows = stepGroupClaimOrder({
-        pending: pending.map((row) => ({
-          row,
-          priority: row.priority,
-          createdAt: new Date(row.created_at),
-          ...groupFieldsOf(row),
-        })),
-        runningByKey: groups.runningByFairKey(),
-      }).map((entry) => entry.row);
-
-      // Per-(scope, key) running counter — counts both already-running
-      // tasks and tasks claimed earlier in this call so a single `claim()`
-      // batch can't itself violate a limit.
+      const now = this.clock.currentTimeMs();
+      const t = this._table;
+      const heap = new MinHeap<Candidate>(compareCandidates);
+      const lanes = new ClaimLanes();
+      const ledgers = new Map<string, StepGroupLedger>();
       const runningPerKey = new Map<string, number>();
-      const runningRows = this.db
-        .query<{ concurrency_scope: string | null; concurrency_key: string | null }>(
-          `SELECT concurrency_scope, concurrency_key FROM ${this._table}
-           WHERE status = 'running' AND concurrency_key IS NOT NULL`,
-        )
-        .all();
-      for (const r of runningRows) {
-        if (!r.concurrency_scope || !r.concurrency_key) continue;
-        const k = `${r.concurrency_scope}::${r.concurrency_key}`;
-        runningPerKey.set(k, (runningPerKey.get(k) ?? 0) + 1);
+      const deadGroups = new Set<string>();
+      const deadKeys = new Set<string>();
+
+      const runningOf = (row: Head): number => {
+        const k = concurrencyKeyOf(row)!;
+        let n = runningPerKey.get(k);
+        if (n === undefined) {
+          n = this.db
+            .query<{ n: number }>(
+              `SELECT COUNT(*) AS n FROM ${t}
+               WHERE status = 'running' AND concurrency_scope = ? AND concurrency_key = ?`,
+            )
+            .get(row.concurrency_scope, row.concurrency_key)!.n;
+          runningPerKey.set(k, n);
+        }
+        return n;
+      };
+      const ledgerOf = (row: Head): StepGroupLedger => {
+        let l = ledgers.get(row.group_name!);
+        if (!l) {
+          l = this._groupLedger({ now, groups: [groupWindow(row)] });
+          ledgers.set(row.group_name!, l);
+        }
+        return l;
+      };
+
+      // Push the next row of `lane` after `after` (or its head) onto the heap.
+      const advance = (lane: Lane, after?: Head): void => {
+        const row = this._nextOf({ lane, after, routing });
+        if (row) heap.push(this._candidate({ lane, row, lanes }));
+      };
+
+      // Seed: the plain lane, then the open concurrency lanes, then the open groups.
+      advance(lanes.plain());
+      for (const row of this._concurrencyHeads(routing)) {
+        const lane = lanes.conc(row);
+        heap.push(this._candidate({ lane, row, lanes }));
+      }
+      for (const name of this._pendingGroups()) {
+        const first = this._groupSample(name);
+        if (!first) continue;
+        const ledger = ledgerOf(first);
+        if (!ledger.check({ ...groupFieldsOfHead(first), groupName: name }).ok) continue;
+        for (const { row, lane } of this._groupHeads({ name, routing, lanes })) {
+          heap.push(this._candidate({ lane, row, lanes }));
+        }
       }
 
       const claimed: StepTask[] = [];
-      const now = this.clock.currentTimeMs();
-
-      for (const row of rows) {
-        if (claimed.length >= params.limit) break;
-        if (!claimable(row)) continue;
-        const concurrencyKey =
-          row.concurrency_key && row.concurrency_scope && row.concurrency_limit != null
-            ? `${row.concurrency_scope}::${row.concurrency_key}`
-            : undefined;
-        if (
-          concurrencyKey !== undefined &&
-          (runningPerKey.get(concurrencyKey) ?? 0) >= row.concurrency_limit!
-        ) {
+      while (claimed.length < limit) {
+        const c = heap.pop();
+        if (!c) break;
+        const { row, lane } = c;
+        if (row.group_name && deadGroups.has(row.group_name)) continue;
+        const ckey = concurrencyKeyOf(row);
+        if (ckey !== undefined) {
+          if (deadKeys.has(ckey)) continue;
+          if (runningOf(row) >= row.concurrency_limit!) {
+            // Every row of a concurrency lane has this key; a grouped row's
+            // key says nothing about the rest of its group lane.
+            if (lane.kind === "c") deadKeys.add(ckey);
+            else advance(lane, row);
+            continue;
+          }
+        }
+        const group = groupFieldsOfHead(row);
+        const ledger = isStepGroupTask(group) ? ledgerOf(row) : undefined;
+        if (isStepGroupTask(group) && !ledger!.check(group).ok) {
+          deadGroups.add(group.groupName);
           continue;
         }
-        const group = groupFieldsOf(row);
-        if (isStepGroupTask(group) && !groups.check(group).ok) continue;
-        if (concurrencyKey !== undefined) {
-          runningPerKey.set(concurrencyKey, (runningPerKey.get(concurrencyKey) ?? 0) + 1);
-        }
-        if (isStepGroupTask(group)) groups.admit(group);
+        if (ckey !== undefined) runningPerKey.set(ckey, runningOf(row) + 1);
+        if (isStepGroupTask(group)) ledger!.admit(group);
+        lanes.claimedFrom({ lane, row });
 
         const claimToken = randomUUID();
         this.db
           .query(
-            `UPDATE ${this._table}
+            `UPDATE ${t}
              SET status = 'running', claimed_at = ?, claimed_by = ?, last_heartbeat = ?,
                  claim_token = ?, deliveries = deliveries + 1
              WHERE id = ? AND status = 'pending'`,
           )
           .run(now, params.workerId, now, claimToken, row.id);
-        if (this._changes() === 0) continue;
-
-        claimed.push({
-          ...rowToTask(row),
-          status: "running",
-          claimToken,
-          deliveries: row.deliveries + 1,
-        });
+        const full = this.db.query<TaskRow>(`SELECT * FROM ${t} WHERE id = ?`).get(row.id)!;
+        claimed.push(rowToTask(full));
+        advance(lane, row);
       }
       return claimed;
     })();
   }
 
+  /** The row of `lane` after `after` (its head when absent), in claim order. */
+  private _nextOf(params: { lane: Lane; after?: Head; routing: Routing }): Head | undefined {
+    const { lane, after, routing } = params;
+    const conds = [`t.status = 'pending'`, `t.lane = '${lane.kind}'`];
+    const args: unknown[] = [];
+    if (lane.kind === "c") {
+      conds.push(`t.concurrency_scope = ? AND t.concurrency_key = ?`);
+      args.push(lane.scope, lane.key);
+    } else if (lane.kind === "g") {
+      conds.push(`t.group_name = ?`);
+      args.push(lane.group);
+      if (lane.fair === null) conds.push(`t.fairness_key IS NULL`);
+      else {
+        conds.push(`t.fairness_key = ?`);
+        args.push(lane.fair);
+      }
+    }
+    if (after) {
+      conds.push(`(t.priority < ? OR (t.priority = ? AND (t.created_at, t.rowid) > (?, ?)))`);
+      args.push(after.priority, after.priority, after.created_at, after._rowid);
+    }
+    conds.push(routing.sql("t"));
+    args.push(...routing.args);
+    const row = this.db
+      .query<Head>(
+        `SELECT ${HEAD_COLS} FROM ${this._table} t INDEXED BY ${this._table}_lane_${LANE_INDEX[lane.kind]}
+         WHERE ${conds.join(" AND ")}
+         ORDER BY t.priority DESC, t.created_at ASC, t.rowid ASC LIMIT 1`,
+      )
+      .get(...args);
+    return row ?? undefined;
+  }
+
+  /**
+   * Heap entry for `row`: its fairness rank is its position by age among the
+   * pending peers of its `(group, fairness key)` (counting what an earlier
+   * claim of this call already took) plus the key's running tasks, so keys
+   * interleave round-robin and a key already running yields to one that is not.
+   */
+  private _candidate(params: { lane: Lane; row: Head; lanes: ClaimLanes }): Candidate {
+    const { lane, row, lanes } = params;
+    let rank = 0;
+    if (lane.kind === "g" && lane.fair !== null) {
+      const t = this._table;
+      const peers = `p.status = 'pending' AND p.lane = 'g' AND p.group_name = ? AND p.fairness_key = ?`;
+      const older = this.db
+        .query<{ n: number }>(
+          `SELECT (SELECT COUNT(*) FROM ${t} p INDEXED BY ${t}_lane_group_age WHERE ${peers} AND p.created_at < ?)
+                + (SELECT COUNT(*) FROM ${t} p INDEXED BY ${t}_lane_group_age WHERE ${peers} AND p.created_at = ?
+                     AND (p.priority > ? OR (p.priority = ? AND p.rowid < ?))) AS n`,
+        )
+        .get(
+          lane.group,
+          lane.fair,
+          row.created_at,
+          lane.group,
+          lane.fair,
+          row.created_at,
+          row.priority,
+          row.priority,
+          row._rowid,
+        )!.n;
+      if (lane.runningAtStart === undefined) {
+        lane.runningAtStart = this.db
+          .query<{ n: number }>(
+            `SELECT COUNT(*) AS n FROM ${t}
+             WHERE status = 'running' AND group_name = ? AND fairness_key = ?`,
+          )
+          .get(lane.group, lane.fair)!.n;
+      }
+      rank = older + lanes.claimedBefore({ lane, row }) + lane.runningAtStart;
+    }
+    return { row, lane, rank };
+  }
+
+  /** Open concurrency lanes: each routable key's head, keys already at their limit left out. */
+  private _concurrencyHeads(routing: Routing): Head[] {
+    const t = this._table;
+    // Scopes (one per step, a handful) by loose index scan; the keys of one
+    // scope the same way, each step seeking past the previous key.
+    const scopes = this.db
+      .query<{ s: string | null }>(
+        `WITH RECURSIVE s(name) AS (
+           SELECT (SELECT concurrency_scope FROM ${t} INDEXED BY ${t}_lane_conc
+                   WHERE status = 'pending' AND lane = 'c' ORDER BY concurrency_scope LIMIT 1)
+           UNION ALL
+           SELECT (SELECT concurrency_scope FROM ${t} INDEXED BY ${t}_lane_conc
+                   WHERE status = 'pending' AND lane = 'c' AND concurrency_scope > s.name
+                   ORDER BY concurrency_scope LIMIT 1)
+           FROM s WHERE s.name IS NOT NULL
+         )
+         SELECT name AS s FROM s WHERE name IS NOT NULL`,
+      )
+      .all()
+      .map((r) => r.s!);
+    const keys = this.db.query<Head>(
+      `WITH RECURSIVE k(rid) AS (
+         SELECT (SELECT t.rowid FROM ${t} t INDEXED BY ${t}_lane_conc
+                 WHERE t.status = 'pending' AND t.lane = 'c' AND t.concurrency_scope = ?
+                 ORDER BY t.concurrency_key LIMIT 1)
+         UNION ALL
+         SELECT (SELECT t.rowid FROM ${t} t INDEXED BY ${t}_lane_conc
+                 WHERE t.status = 'pending' AND t.lane = 'c' AND t.concurrency_scope = ?
+                   AND t.concurrency_key >
+                       (SELECT n.concurrency_key FROM ${t} n WHERE n.rowid = k.rid)
+                 ORDER BY t.concurrency_key LIMIT 1)
+         FROM k WHERE k.rid IS NOT NULL
+       )
+       SELECT ${HEAD_COLS} FROM k
+       JOIN ${t} k0 ON k0.rowid = k.rid
+       JOIN ${t} t ON t.rowid = (
+         SELECT t2.rowid FROM ${t} t2 INDEXED BY ${t}_lane_conc
+         WHERE t2.status = 'pending' AND t2.lane = 'c'
+           AND t2.concurrency_scope = k0.concurrency_scope AND t2.concurrency_key = k0.concurrency_key
+           AND ${routing.sql("t2")}
+         ORDER BY t2.priority DESC, t2.created_at ASC, t2.rowid ASC LIMIT 1)
+       WHERE (SELECT COUNT(*) FROM ${t} r
+              WHERE r.status = 'running' AND r.concurrency_scope = t.concurrency_scope
+                AND r.concurrency_key = t.concurrency_key) < t.concurrency_limit`,
+    );
+    return scopes.flatMap((scope) => keys.all(scope, scope, ...routing.args));
+  }
+
+  /** Names of the groups with pending tasks. */
+  private _pendingGroups(): string[] {
+    const t = this._table;
+    return this.db
+      .query<{ g: string | null }>(
+        `WITH RECURSIVE g(name) AS (
+           SELECT (SELECT group_name FROM ${t} INDEXED BY ${t}_lane_group WHERE status = 'pending' AND lane = 'g'
+                   ORDER BY group_name LIMIT 1)
+           UNION ALL
+           SELECT (SELECT group_name FROM ${t} INDEXED BY ${t}_lane_group
+                   WHERE status = 'pending' AND lane = 'g' AND group_name > g.name
+                   ORDER BY group_name LIMIT 1)
+           FROM g WHERE g.name IS NOT NULL
+         )
+         SELECT name AS g FROM g WHERE name IS NOT NULL`,
+      )
+      .all()
+      .map((r) => r.g!);
+  }
+
+  /** One pending task of a group, for the limits its tasks carry. */
+  private _groupSample(name: string): Head | undefined {
+    return (
+      this.db
+        .query<Head>(
+          `SELECT ${HEAD_COLS} FROM ${this._table} t INDEXED BY ${this._table}_lane_group
+           WHERE t.status = 'pending' AND t.lane = 'g' AND t.group_name = ? LIMIT 1`,
+        )
+        .get(name) ?? undefined
+    );
+  }
+
+  /** The head of each routable fairness-key lane of a group, with its lane. */
+  private _groupHeads(params: {
+    name: string;
+    routing: Routing;
+    lanes: ClaimLanes;
+  }): Array<{ row: Head; lane: Lane }> {
+    const { name, routing, lanes } = params;
+    const t = this._table;
+    const keyed = this.db
+      .query<Head>(
+        `WITH RECURSIVE k(rid) AS (
+           SELECT (SELECT t.rowid FROM ${t} t INDEXED BY ${t}_lane_group
+                   WHERE t.status = 'pending' AND t.lane = 'g' AND t.group_name = ?
+                     AND t.fairness_key IS NOT NULL
+                   ORDER BY t.fairness_key LIMIT 1)
+           UNION ALL
+           SELECT (SELECT t.rowid FROM ${t} t INDEXED BY ${t}_lane_group
+                   WHERE t.status = 'pending' AND t.lane = 'g' AND t.group_name = ?
+                     AND t.fairness_key > (SELECT n.fairness_key FROM ${t} n WHERE n.rowid = k.rid)
+                   ORDER BY t.fairness_key LIMIT 1)
+           FROM k WHERE k.rid IS NOT NULL
+         )
+         SELECT ${HEAD_COLS} FROM k
+         JOIN ${t} k0 ON k0.rowid = k.rid
+         JOIN ${t} t ON t.rowid = (
+           SELECT t2.rowid FROM ${t} t2 INDEXED BY ${t}_lane_group
+           WHERE t2.status = 'pending' AND t2.lane = 'g' AND t2.group_name = k0.group_name
+             AND t2.fairness_key = k0.fairness_key AND ${routing.sql("t2")}
+           ORDER BY t2.priority DESC, t2.created_at ASC, t2.rowid ASC LIMIT 1)`,
+      )
+      .all(name, name, ...routing.args);
+    const out = keyed.map((row) => ({
+      row,
+      lane: lanes.group({ group: name, fair: row.fairness_key }),
+    }));
+    const unkeyed = lanes.group({ group: name, fair: null });
+    const head = this._nextOf({ lane: unkeyed, routing });
+    if (head) out.push({ row: head, lane: unkeyed });
+    return out;
+  }
+
   async throttled(params: { workflowId: string }): Promise<ThrottledTask[]> {
-    const groups = this._groupLedger();
     const rows = this.db
       .query<TaskRow>(
         `SELECT * FROM ${this._table}
          WHERE workflow_id = ? AND status = 'pending' AND group_name IS NOT NULL`,
       )
       .all(params.workflowId);
+    const windows = new Map<string, GroupWindow>();
+    for (const row of rows) {
+      if (row.group_name) windows.set(row.group_name, groupWindow(row));
+    }
+    const groups = this._groupLedger({
+      now: this.clock.currentTimeMs(),
+      groups: [...windows.values()],
+    });
     const out: ThrottledTask[] = [];
     for (const row of rows) {
       const group = groupFieldsOf(row);
@@ -351,21 +609,38 @@ export class SqliteStepQueue implements StepQueue {
     return out;
   }
 
-  /** Running tasks and window starts of every group, read from the table. */
-  private _groupLedger(): StepGroupLedger {
-    const ledger = new StepGroupLedger(this.clock.currentTimeMs());
-    const rows = this.db
-      .query<TaskRow>(
-        `SELECT * FROM ${this._table}
-         WHERE group_name IS NOT NULL AND status != 'pending'`,
-      )
-      .all();
-    for (const row of rows) {
-      ledger.record({
-        ...groupFieldsOf(row),
-        running: row.status === "running",
-        ...(row.claimed_at != null && { startedAtMs: row.claimed_at }),
-      });
+  /**
+   * Running tasks and window starts of the given groups, read through the
+   * group indexes: the running rows, and the starts inside the window, never
+   * the group's settled history.
+   */
+  private _groupLedger(params: { now: number; groups: readonly GroupWindow[] }): StepGroupLedger {
+    const ledger = new StepGroupLedger(params.now);
+    for (const g of params.groups) {
+      const running = this.db
+        .query<{ group_name: string; fairness_key: string | null; claimed_at: number | null }>(
+          `SELECT group_name, fairness_key, claimed_at FROM ${this._table}
+           WHERE group_name = ? AND status = 'running'`,
+        )
+        .all(g.name);
+      for (const r of running) {
+        ledger.record({
+          groupName: r.group_name,
+          ...(r.fairness_key != null && { fairnessKey: r.fairness_key }),
+          running: true,
+          ...(r.claimed_at != null && { startedAtMs: r.claimed_at }),
+        });
+      }
+      if (g.windowMs === undefined) continue;
+      const settled = this.db
+        .query<{ claimed_at: number }>(
+          `SELECT claimed_at FROM ${this._table}
+           WHERE group_name = ? AND claimed_at > ? AND status NOT IN ('pending', 'running')`,
+        )
+        .all(g.name, params.now - g.windowMs);
+      for (const r of settled) {
+        ledger.record({ groupName: g.name, running: false, startedAtMs: r.claimed_at });
+      }
     }
     return ledger;
   }
@@ -608,6 +883,213 @@ export class SqliteStepQueue implements StepQueue {
   private _changes(): number {
     return this.db.query<{ changes: number }>(`SELECT changes() AS changes`).get()?.changes ?? 0;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Claim lanes
+// ---------------------------------------------------------------------------
+
+/** Which claim lane a task is read from; the generated `lane` column. */
+const LANE_EXPR = `CASE
+  WHEN group_name IS NOT NULL AND group_name != '' THEN 'g'
+  WHEN concurrency_key IS NOT NULL AND concurrency_key != ''
+    AND concurrency_scope IS NOT NULL AND concurrency_scope != ''
+    AND concurrency_limit IS NOT NULL THEN 'c'
+  ELSE 'p' END`;
+
+/** The index each lane is read through. */
+const LANE_INDEX = { p: "plain", c: "conc", g: "group" } as const;
+
+/** What the claim reads of a pending row until it wins its turn. */
+const HEAD_COLS = `t.id, t.priority, t.created_at, t.rowid AS _rowid, t.concurrency_key,
+  t.concurrency_scope, t.concurrency_limit, t.group_name, t.group_max_concurrent,
+  t.group_max_starts, t.group_window_ms, t.fairness_key`;
+
+interface Head {
+  id: string;
+  priority: number;
+  created_at: number;
+  _rowid: number;
+  concurrency_key: string | null;
+  concurrency_scope: string | null;
+  concurrency_limit: number | null;
+  group_name: string | null;
+  group_max_concurrent: number | null;
+  group_max_starts: number | null;
+  group_window_ms: number | null;
+  fairness_key: string | null;
+}
+
+type Lane =
+  | { kind: "p" }
+  | { kind: "c"; scope: string; key: string }
+  | { kind: "g"; group: string; fair: string | null; runningAtStart?: number };
+
+interface Candidate {
+  row: Head;
+  lane: Lane;
+  /** Fairness rank within the group; 0 outside a fairness key. */
+  rank: number;
+}
+
+/** Claim order: priority, fairness rank, age, enqueue order. */
+function compareCandidates(a: Candidate, b: Candidate): number {
+  return (
+    b.row.priority - a.row.priority ||
+    a.rank - b.rank ||
+    a.row.created_at - b.row.created_at ||
+    a.row._rowid - b.row._rowid
+  );
+}
+
+/** The lanes of one claim, and what the claim has taken from each. */
+class ClaimLanes {
+  private readonly byId = new Map<string, Lane>();
+  private readonly taken = new Map<Lane, Head[]>();
+
+  plain(): Lane {
+    return this.get({ id: "p", make: () => ({ kind: "p" }) });
+  }
+
+  conc(row: Head): Lane {
+    const scope = row.concurrency_scope!;
+    const key = row.concurrency_key!;
+    return this.get({
+      id: `c:${[...scope].length}:${scope}:${key}`,
+      make: () => ({ kind: "c", scope, key }),
+    });
+  }
+
+  group(params: { group: string; fair: string | null }): Lane {
+    const { group, fair } = params;
+    return this.get({
+      id: `g:${[...group].length}:${group}:${fair === null ? "-" : `+${fair}`}`,
+      make: () => ({ kind: "g", group, fair }),
+    });
+  }
+
+  claimedFrom(params: { lane: Lane; row: Head }): void {
+    const list = this.taken.get(params.lane) ?? [];
+    list.push(params.row);
+    this.taken.set(params.lane, list);
+  }
+
+  /** Rows this claim already took from `lane` that sort before `row` by age. */
+  claimedBefore(params: { lane: Lane; row: Head }): number {
+    const { row } = params;
+    return (this.taken.get(params.lane) ?? []).filter(
+      (c) =>
+        c.created_at < row.created_at ||
+        (c.created_at === row.created_at &&
+          (c.priority > row.priority || (c.priority === row.priority && c._rowid < row._rowid))),
+    ).length;
+  }
+
+  private get(params: { id: string; make: () => Lane }): Lane {
+    let lane = this.byId.get(params.id);
+    if (!lane) {
+      lane = params.make();
+      this.byId.set(params.id, lane);
+    }
+    return lane;
+  }
+}
+
+/** Binary min-heap, for merging the heads of many lanes. */
+class MinHeap<T> {
+  private readonly items: T[] = [];
+  constructor(private readonly compare: (a: T, b: T) => number) {}
+
+  push(item: T): void {
+    const a = this.items;
+    a.push(item);
+    let i = a.length - 1;
+    while (i > 0) {
+      const parent = (i - 1) >> 1;
+      if (this.compare(a[i]!, a[parent]!) >= 0) break;
+      [a[i], a[parent]] = [a[parent]!, a[i]!];
+      i = parent;
+    }
+  }
+
+  pop(): T | undefined {
+    const a = this.items;
+    if (a.length === 0) return undefined;
+    const top = a[0]!;
+    const last = a.pop()!;
+    if (a.length > 0) {
+      a[0] = last;
+      let i = 0;
+      for (;;) {
+        const l = 2 * i + 1;
+        const r = l + 1;
+        let m = i;
+        if (l < a.length && this.compare(a[l]!, a[m]!) < 0) m = l;
+        if (r < a.length && this.compare(a[r]!, a[m]!) < 0) m = r;
+        if (m === i) break;
+        [a[i], a[m]] = [a[m]!, a[i]!];
+        i = m;
+      }
+    }
+    return top;
+  }
+}
+
+interface Routing {
+  /** Conditions for rows aliased `alias`: step, version and capability routing. */
+  sql(alias: string): string;
+  args: unknown[];
+}
+
+/** What this worker can run, as SQL over the table alias. */
+function routingFilter(params: StepQueueClaimParams): Routing {
+  const conds: Array<(a: string) => string> = [
+    (a) =>
+      `(${a}.needs = '[]' OR NOT EXISTS (SELECT 1 FROM json_each(${a}.needs) WHERE value NOT IN (SELECT value FROM json_each(?))))`,
+  ];
+  const args: unknown[] = [JSON.stringify(params.capabilities ?? [])];
+  if (params.stepNames) {
+    conds.push((a) => `${a}.step_name IN (SELECT value FROM json_each(?))`);
+    args.push(JSON.stringify(params.stepNames));
+  }
+  if (params.versions) {
+    conds.push((a) => `(${a}.version IS NULL OR ${a}.version IN (SELECT value FROM json_each(?)))`);
+    args.push(JSON.stringify(params.versions));
+  }
+  return { sql: (alias) => conds.map((c) => c(alias)).join(" AND "), args };
+}
+
+interface GroupWindow {
+  name: string;
+  windowMs?: number;
+}
+
+function groupWindow(row: {
+  group_name: string | null;
+  group_max_starts: number | null;
+  group_window_ms: number | null;
+}): GroupWindow {
+  return {
+    name: row.group_name!,
+    ...(row.group_max_starts != null &&
+      row.group_window_ms != null && { windowMs: row.group_window_ms }),
+  };
+}
+
+function concurrencyKeyOf(row: Head): string | undefined {
+  return row.concurrency_key && row.concurrency_scope && row.concurrency_limit != null
+    ? `${row.concurrency_scope}::${row.concurrency_key}`
+    : undefined;
+}
+
+function groupFieldsOfHead(row: Head): StepGroupFields {
+  return {
+    ...(row.group_name != null && { groupName: row.group_name }),
+    ...(row.group_max_concurrent != null && { groupMaxConcurrent: row.group_max_concurrent }),
+    ...(row.group_max_starts != null && { groupMaxStarts: row.group_max_starts }),
+    ...(row.group_window_ms != null && { groupWindowMs: row.group_window_ms }),
+    ...(row.fairness_key != null && { fairnessKey: row.fairness_key }),
+  };
 }
 
 // ---------------------------------------------------------------------------
