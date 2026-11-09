@@ -10,7 +10,7 @@ import type { Codec } from "@spilne/perfect-core/connect";
 import type { WorkflowRetryPolicy } from "../shared/retry-policy.ts";
 import type { Sinkable } from "../shared/streamable.ts";
 import type { TaggedError } from "../shared/tagged-error.ts";
-import type { StepDefinition } from "./step-definition.ts";
+import type { StepDefinition, StepGroupOption } from "./step-definition.ts";
 import type { WorkflowDAG } from "./workflow-dag-viz.ts";
 import type { FailedWorkflowRecord, WorkflowFailure, WorkflowRunEvent } from "./workflow-state.ts";
 import type { WorkflowWait } from "./workflow-waits.ts";
@@ -42,8 +42,15 @@ import type { WorkflowWait } from "./workflow-waits.ts";
  * step of this workflow regardless of input.
  */
 export interface WorkflowQueueConfig<Input> {
-  readonly concurrencyLimit: number;
+  /** Cap on running tasks per `concurrencyKey`. Optional when `group` is set. */
+  readonly concurrencyLimit?: number;
   readonly concurrencyKey?: (input: Input) => string;
+  /**
+   * Named rate-limit / concurrency group every step of the workflow joins
+   * (a step's own `queue.group` wins). `fairnessKey` takes the workflow
+   * input. See `StepGroupOption`.
+   */
+  readonly group?: StepGroupOption<Input>;
 }
 
 // ---------------------------------------------------------------------------

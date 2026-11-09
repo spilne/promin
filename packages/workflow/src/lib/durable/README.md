@@ -358,13 +358,18 @@ Every surface reports a failed run as the same `WorkflowFailure`
 
 `handle.status()` / `getStatus()` carry `waitingOn`: the live run's parked
 waits, derived from stored step rows (no extra read, no migration). Each is
-`{ kind, stepName, since, until?, signalName?, childWorkflowId?, attempt? }`
+`{ kind, stepName, since, until?, signalName?, childWorkflowId?, groupName?, reason?, attempt? }`
 with `kind` one of `sleep` (`until` = wake time), `signal` (`until` = timeout),
-`approval` (an `approve:<id>` signal wait) or `child` (`until` = the child's next
-wake). `waitingOnSummary` is a one-liner, e.g. `waiting for signal
+`approval` (an `approve:<id>` signal wait), `child` (`until` = the child's next
+wake) or `step-queue` (a queued step its rate-limit / concurrency group holds back:
+`groupName`, `reason`, `until` = when the rate window frees a slot; read from the
+step executor / queue, not a step row, so only `getStatus` on a coordinator over a
+queue that implements `throttled` reports it — see
+[rate-limit groups](../distributed/README.md#rate-limit-and-concurrency-groups-with-fairness)). `waitingOnSummary` is a one-liner, e.g. `waiting for signal
 manager-approved (step approve, times out in 2h)`. Empty for a run with nothing
 parked and for ended runs. An activity in flight, a retry backoff and a step task
-queued for a worker are not stored on a step row, so they are not listed.
+queued for a worker are not stored on a step row, so they are not listed (apart
+from a task held back by a step group, above).
 Zorya's `GET /api/runs/:id` returns the same as `waitingOn` (ISO timestamps) and
 `waitingOnSummary`, and the run page shows the summary beside the status badge.
 

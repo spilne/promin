@@ -236,6 +236,45 @@ describe("OpenTelemetry workflow tracer — span tree", () => {
     expect(parentOf(wait!)).toBe(idOf(roots[1]!));
   });
 
+  it("a step held back by its group is an event on the run and a span covering the wait", () => {
+    const h = harness();
+    const ref = { workflowId: "w1", workflowName: "llm", run: 1 };
+    const at = new Date(T0_MS);
+    const end = new Date(T0_MS + 4_000);
+    h.tracer.runStart!({ ...ref, startedAt: at, resumed: false });
+    h.tracer.stepThrottled!({
+      ...ref,
+      stepName: "call",
+      attempt: 1,
+      groupName: "openai",
+      reason: "rate",
+      at,
+    });
+    h.tracer.stepThrottleEnd!({
+      ...ref,
+      stepName: "call",
+      attempt: 1,
+      groupName: "openai",
+      since: at,
+      endedAt: end,
+      waitedMs: 4_000,
+    });
+    h.tracer.runEnd!({
+      ...ref,
+      startedAt: at,
+      endedAt: end,
+      durationMs: 4_000,
+      outcome: "completed",
+    });
+
+    const [root] = h.named("workflow.run");
+    expect(root!.events.map((e) => e.name)).toContain("workflow.step.throttled");
+    const [span] = h.named("workflow.step.throttle");
+    expect(span!.attributes["workflow.step.group"]).toBe("openai");
+    expect(ms(span!.endTime) - ms(span!.startTime)).toBe(4_000);
+    expect(parentOf(span!)).toBe(idOf(root!));
+  });
+
   it("negative control: without a traceparent a run starts its own trace", async () => {
     const h = harness();
     const wf = workflow<number>({ name: "ok" })

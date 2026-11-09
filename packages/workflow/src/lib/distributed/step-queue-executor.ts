@@ -15,6 +15,9 @@ import type {
 import { errorMessage, errorTagOf, type StepAttemptFailure } from "../durable/runner/step-body.ts";
 import { applyStepPolicies } from "../durable/runner/step-policies.ts";
 import type { StepQueue } from "./step-queue.ts";
+import type { ThrottledTask } from "./step-group-limits.ts";
+import { emitTrace, type WorkflowTracer } from "../durable/workflow-tracer.ts";
+import type { WorkflowWait } from "../durable/workflow-waits.ts";
 
 /** Default `stepWaitTimeoutMs`: 24 hours. */
 export const DEFAULT_STEP_WAIT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
@@ -63,6 +66,11 @@ export interface StepQueueExecutorConfig {
   stepWaitTimeoutMs?: number;
   /** Time source for polling, wait deadlines and retry backoff. Default: `SystemWallClock`. */
   clock?: WallClock;
+  /**
+   * Tracer for `stepThrottled` / `stepThrottleEnd`: reported while a queued
+   * step waits on its rate-limit / concurrency group (`StepGroupOption`).
+   */
+  tracer?: WorkflowTracer;
   /**
    * Called when a storage / queue read fails while waiting for a step.
    * The wait retries with backoff. Default: `console.error`.
@@ -184,6 +192,7 @@ export class StepQueueExecutor implements StepExecutor {
   private readonly stepWaitTimeoutMs: number;
   private readonly clock: WallClock;
   private readonly onError?: (error: unknown, info: PollLoopErrorInfo) => void;
+  private readonly tracer?: WorkflowTracer;
 
   constructor(config: StepQueueExecutorConfig) {
     this.stepQueue = config.stepQueue;
@@ -198,6 +207,17 @@ export class StepQueueExecutor implements StepExecutor {
     }
     this.clock = config.clock ?? SystemWallClock;
     this.onError = config.onError;
+    if (config.tracer !== undefined) this.tracer = config.tracer;
+  }
+
+  /**
+   * Queued steps of `workflowId` that their group holds back, as `waitingOn`
+   * waits. Read from the shared queue, so any process answers. Empty for a
+   * queue without `throttled`.
+   */
+  async queuedWaits(params: { readonly workflowId: string }): Promise<WorkflowWait[]> {
+    const held = (await this.stepQueue.throttled?.(params)) ?? [];
+    return held.map(throttleWait);
   }
 
   /** Consume the steps' settled tasks, so a reset step is dispatched afresh. */
@@ -316,6 +336,7 @@ export class StepQueueExecutor implements StepExecutor {
         ...(req.concurrencyKey !== undefined && { concurrencyKey: req.concurrencyKey }),
         ...(req.concurrencyScope !== undefined && { concurrencyScope: req.concurrencyScope }),
         ...(req.concurrencyLimit !== undefined && { concurrencyLimit: req.concurrencyLimit }),
+        ...req.group,
       });
     // Idempotent: a task the step already has (pending, running, or settled
     // and not yet consumed) comes back instead of a new one.
@@ -325,7 +346,26 @@ export class StepQueueExecutor implements StepExecutor {
     const requeueEveryNPolls = Math.max(1, Math.ceil(this.staleTimeoutMs / this.pollIntervalMs));
     let polls = -1;
     let outcome: AttemptOutcome | undefined;
+    // The throttle episode being reported to the tracer, if any.
+    let throttle:
+      | { readonly ref: ThrottleRef; readonly groupName: string; readonly since: Date }
+      | undefined;
+    const endThrottle = () => {
+      if (throttle === undefined || this.tracer === undefined) return;
+      const now = this.clock.now();
+      emitTrace(this.tracer, "stepThrottleEnd", {
+        ...throttle.ref,
+        stepName: req.stepName,
+        attempt,
+        groupName: throttle.groupName,
+        since: throttle.since,
+        endedAt: now,
+        waitedMs: now.getTime() - throttle.since.getTime(),
+      });
+      throttle = undefined;
+    };
     const gaveUp = (error: StepWaitTimeoutError | StepWaitAbandonedError): "stop" => {
+      endThrottle();
       outcome = { kind: "gave-up", error };
       return "stop";
     };
@@ -358,7 +398,10 @@ export class StepQueueExecutor implements StepExecutor {
         }
         // Take the outcome: from here the next enqueue for the step makes a
         // new task. Consumed before the runner writes the step row.
-        if (settled) await this.stepQueue.consume({ taskId });
+        if (settled) {
+          endThrottle();
+          await this.stepQueue.consume({ taskId });
+        }
         if (task?.status === "completed") {
           outcome = {
             kind: "completed",
@@ -408,6 +451,35 @@ export class StepQueueExecutor implements StepExecutor {
             }),
           );
         }
+        if (this.tracer !== undefined && req.group !== undefined) {
+          const held =
+            task?.status === "pending"
+              ? (await this.stepQueue.throttled?.({ workflowId: req.workflowId }))?.find(
+                  (t) => t.taskId === taskId,
+                )
+              : undefined;
+          if (held !== undefined && throttle === undefined) {
+            const at = this.clock.now();
+            const ref: ThrottleRef = {
+              workflowId: req.workflowId,
+              workflowName: state.workflowName,
+              ...(state.namespace !== undefined && { namespace: state.namespace }),
+              run: state.run,
+            };
+            throttle = { ref, groupName: held.groupName, since: at };
+            emitTrace(this.tracer, "stepThrottled", {
+              ...ref,
+              stepName: req.stepName,
+              attempt,
+              groupName: held.groupName,
+              reason: held.reason,
+              at,
+              ...(held.retryAt !== undefined && { retryAt: held.retryAt }),
+            });
+          } else if (held === undefined) {
+            endThrottle();
+          }
+        }
         if (this.clock.currentTimeMs() >= deadline) {
           const error = new StepWaitTimeoutError({
             workflowId: req.workflowId,
@@ -432,6 +504,25 @@ export class StepQueueExecutor implements StepExecutor {
     await wait.start();
     return outcome!;
   }
+}
+
+type ThrottleRef = {
+  readonly workflowId: string;
+  readonly workflowName: string;
+  readonly namespace?: string;
+  readonly run: number;
+};
+
+function throttleWait(held: ThrottledTask): WorkflowWait {
+  return {
+    kind: "step-queue",
+    stepName: held.stepName,
+    since: held.since,
+    attempt: held.attempt,
+    groupName: held.groupName,
+    reason: held.reason,
+    ...(held.retryAt !== undefined && { until: held.retryAt }),
+  };
 }
 
 /** The error an attempt failed with, rebuilt from what the worker reported. */

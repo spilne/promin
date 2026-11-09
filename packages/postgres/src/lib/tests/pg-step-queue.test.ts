@@ -411,6 +411,84 @@ describe("Postgres step queue — claim under contention", () => {
     expect(violations).toBe(0);
   });
 
+  it("a group's concurrency and start-rate caps hold for racing claimers with different needs (30 rounds)", async () => {
+    let violations = 0;
+    for (let round = 0; round < 30; round++) {
+      await pg.sql`TRUNCATE wf_step_queue RESTART IDENTITY`;
+      const e = new PgStepQueue({ db: pg.db });
+      const group = {
+        groupName: "shared-key",
+        groupMaxConcurrent: 1,
+        groupMaxStarts: 1,
+        groupWindowMs: 60_000,
+      };
+      await e.enqueue({ workflowId: "w1", stepName: "a", needs: ["cpu"], input: {}, ...group });
+      await e.enqueue({ workflowId: "w2", stepName: "b", needs: ["gpu"], input: {}, ...group });
+      const [ra, rb] = await Promise.all([
+        new PgStepQueue({ db: pg.db }).claim({ workerId: "cpu", limit: 1, capabilities: ["cpu"] }),
+        new PgStepQueue({ db: pg.db }).claim({ workerId: "gpu", limit: 1, capabilities: ["gpu"] }),
+      ]);
+      expect(ra.length + rb.length).toBeGreaterThanOrEqual(1);
+      if (ra.length + rb.length > 1) violations++;
+    }
+    expect(violations).toBe(0);
+  });
+
+  it("many claimers racing over many groups never exceed any group's cap", async () => {
+    const e = new PgStepQueue({ db: pg.db });
+    for (let g = 0; g < 4; g++) {
+      for (let i = 0; i < 8; i++) {
+        await e.enqueue({
+          workflowId: `g${g}-wf${i}`,
+          stepName: "s",
+          input: {},
+          groupName: `race-${g}`,
+          groupMaxConcurrent: 3,
+          fairnessKey: `t${i % 2}`,
+        });
+      }
+    }
+    const claimed = (
+      await Promise.all(
+        Array.from({ length: 8 }, (_, i) =>
+          new PgStepQueue({ db: pg.db }).claim({ workerId: `w-${i}`, limit: 5 }),
+        ),
+      )
+    ).flat();
+    const perGroup = new Map<string, number>();
+    for (const t of claimed) perGroup.set(t.groupName!, (perGroup.get(t.groupName!) ?? 0) + 1);
+    expect(perGroup.size).toBe(4);
+    for (const n of perGroup.values()) expect(n).toBe(3);
+  });
+
+  it("ensureTable upgrades a queue table created before step groups, and is idempotent", async () => {
+    await pg.sql`DROP TABLE wf_step_queue`;
+    await pg.sql`CREATE TABLE wf_step_queue (
+      id bigserial PRIMARY KEY, workflow_id text NOT NULL, step_name text NOT NULL, input jsonb,
+      deps jsonb, depends_on text[] NOT NULL DEFAULT '{}', timeout_ms integer,
+      attempt integer NOT NULL DEFAULT 1, status text NOT NULL DEFAULT 'pending', result jsonb,
+      error text, error_tag text, step_metadata jsonb, duration_ms bigint, claimed_by text,
+      claimed_at timestamptz, completed_at timestamptz, created_at timestamptz NOT NULL DEFAULT now(),
+      priority integer NOT NULL DEFAULT 5, namespace text, version text,
+      needs text[] NOT NULL DEFAULT '{}', heartbeat_at timestamptz, metadata jsonb,
+      concurrency_key text, concurrency_scope text, concurrency_limit integer, claim_token text,
+      deliveries integer NOT NULL DEFAULT 0, run integer NOT NULL DEFAULT 1, consumed_at timestamptz
+    )`;
+    await pg.sql`INSERT INTO wf_step_queue (workflow_id, step_name) VALUES ('old', 's')`;
+    const q = new PgStepQueue({ db: pg.db });
+    await q.ensureTable();
+    await q.ensureTable();
+    await q.enqueue({
+      workflowId: "new",
+      stepName: "s",
+      input: {},
+      groupName: "g",
+      groupMaxConcurrent: 1,
+    });
+    const claimed = await q.claim({ workerId: "w", limit: 5 });
+    expect(claimed.map((t) => t.workflowId).sort()).toEqual(["new", "old"]);
+  });
+
   it("the cap holds with many claimers racing over many keys", async () => {
     const e = new PgStepQueue({ db: pg.db });
     for (let k = 0; k < 5; k++) {

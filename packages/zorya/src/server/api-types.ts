@@ -187,7 +187,7 @@ export interface StepDto {
 
 /** A wait of a live run (see `WorkflowWait`), with ISO timestamps. */
 export interface RunWaitDto {
-  kind: "sleep" | "signal" | "approval" | "child";
+  kind: "sleep" | "signal" | "approval" | "child" | "step-queue";
   stepName: string;
   /** ISO timestamp. */
   since: string;
@@ -195,6 +195,9 @@ export interface RunWaitDto {
   until?: string;
   signalName?: string;
   childWorkflowId?: string;
+  /** `step-queue` waits: the rate-limit / concurrency group holding the step back. */
+  groupName?: string;
+  reason?: "concurrency" | "rate";
   attempt?: number;
 }
 

@@ -94,6 +94,8 @@ export function runToDto(w: WorkflowState, now: Date = new Date()): RunDto {
       until: iso(wait.until),
       signalName: wait.signalName,
       childWorkflowId: wait.childWorkflowId,
+      groupName: wait.groupName,
+      reason: wait.reason,
       attempt: wait.attempt,
     })),
     ...(waitingOnSummary !== undefined && { waitingOnSummary }),
