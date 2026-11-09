@@ -3,8 +3,13 @@ import {
   InMemoryMemoryStore,
   resolveLocalAgent,
   type LLMProvider,
+  type MemoryStore,
 } from "@promin/agent";
-import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
+import {
+  InMemoryWorkflowStorage,
+  createWorkflowRunner,
+  type WorkflowStorage,
+} from "@promin/workflow";
 import { LocalWorkflows } from "../../workflows/local-workflows.ts";
 import { RetainedSubagents, type RetainedParent } from "../retained-subagents.ts";
 import { ZoryaAgents } from "../zorya-agents.ts";
@@ -24,6 +29,8 @@ export interface HarnessOptions {
   /** Async model reply; `signal` aborts when the turn is interrupted. */
   readonly chatAsync?: (content: string, signal: AbortSignal | undefined) => Promise<string>;
   readonly turnGate?: false;
+  /** Real stores (e.g. Postgres) instead of the in-memory ones. */
+  readonly stores?: { readonly storage: WorkflowStorage; readonly memory: MemoryStore };
   /** Model of the "orchestrator" recipe, which gets the retained subagent tools. */
   readonly orchestratorLlm?: LLMProvider;
   /** Input tokens each model reply reports. */
@@ -46,9 +53,11 @@ export function overrideStorage<K extends keyof InMemoryWorkflowStorage>(
 }
 
 export async function harness(options: HarnessOptions = {}) {
-  const baseStorage = new InMemoryWorkflowStorage();
+  // A real store stands in under the in-memory type; only overrideStorage needs the class.
+  const baseStorage = (options.stores?.storage ??
+    new InMemoryWorkflowStorage()) as InMemoryWorkflowStorage;
   const storage = options.wrapStorage ? options.wrapStorage(baseStorage) : baseStorage;
-  const memory = new InMemoryMemoryStore();
+  const memory = options.stores?.memory ?? new InMemoryMemoryStore();
   const registry = new InMemoryAgentRegistry();
   const backend = {
     type: "local" as const,

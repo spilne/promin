@@ -410,7 +410,13 @@ export class RetainedSubagents {
     const input = await this.ownedChild(parent, childId);
     await this.stopAgent(parent, childId);
     const workflowId = workflowIdOf(childId);
-    const lock = await this.config.workflows.storage.tryLock({ workflowId, lockDurationMs: 5_000 });
+    // A cancelled worker holds the run lock until its current activity
+    // returns (a turn's bookkeeping): wait briefly instead of failing at once.
+    let lock = await this.config.workflows.storage.tryLock({ workflowId, lockDurationMs: 5_000 });
+    for (let attempt = 0; !lock.acquired && attempt < 100; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      lock = await this.config.workflows.storage.tryLock({ workflowId, lockDurationMs: 5_000 });
+    }
     if (!lock.acquired)
       throw new RetainedSubagentError("conflict", "Child agent busy; retry cleanup");
     await this.config.workflows.storage.releaseLock({

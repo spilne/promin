@@ -512,6 +512,9 @@ memory, canDelegate })` and pass it to
   `spawn_subagent` is not re-run after a crash (the model is told the
   outcome is unknown and checks `list_subagents`). `read_subagent` returns
   per-message outcomes and the last N transcript messages, truncated.
+  `retained-subagents-postgres.test.ts` runs the whole path (spawn, steer,
+  restart, list, read, delete) on a real Postgres container, where jsonb
+  reorders keys; it needs Docker.
   The mailbox lives in `MemoryStore` and the worker in `WorkflowStorage`;
   startup reconciles mailbox writes whose wake signal was lost in a crash.
   Configure durable stores and the LocalWorkflows signal scanner for restart
