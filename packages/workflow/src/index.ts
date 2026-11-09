@@ -30,6 +30,15 @@ export type {
   CompensateConfig,
 } from "./lib/durable/workflow-types.ts";
 export {
+  runUsage,
+  stepUsage,
+  STEP_USAGE_METADATA_KEY,
+  type StepBudget,
+  type UsageReport,
+  type UsageTotals,
+  type WorkflowBudget,
+} from "./lib/durable/budget.ts";
+export {
   deriveWaitingOn,
   summarizeWaits,
   type WorkflowWait,
@@ -277,6 +286,7 @@ export {
   WorkflowTimeoutError,
   StepTimeoutError,
   WorkflowDeadlineError,
+  WorkflowBudgetExceededError,
   WorkflowVersionMismatchError,
   WorkflowRunNotFoundError,
   FenceTokenMismatchError,

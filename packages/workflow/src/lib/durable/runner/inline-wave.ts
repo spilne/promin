@@ -60,6 +60,7 @@ export async function runInlineWave(params: WaveParams): Promise<WaveOutcome> {
               clock,
               stepStates,
               stepName: stepDef.name,
+              usageByStep: params.usageByStep,
               workflowMetadata,
             }),
             // Inline only: a function does not cross to a queue worker, which

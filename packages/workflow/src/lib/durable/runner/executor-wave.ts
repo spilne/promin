@@ -117,6 +117,7 @@ export async function runExecutorWave(params: WaveParams): Promise<WaveOutcome> 
             clock,
             stepStates,
             stepName: stepDef.name,
+            usageByStep: params.usageByStep,
             workflowMetadata,
           }),
           ...(concurrency

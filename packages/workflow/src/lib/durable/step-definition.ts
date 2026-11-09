@@ -18,6 +18,7 @@ import { isEff, isThenable, promiseOrDie, promiseOrEff } from "../shared/eff.ts"
 import type { RetryPolicy } from "../shared/retry-policy.ts";
 import type { TaggedError } from "../shared/tagged-error.ts";
 import type { WallClock } from "../shared/wall-clock.ts";
+import type { UsageTotals, WorkflowBudget } from "./budget.ts";
 import { NEVER_ABORTED } from "./step-signal.ts";
 import type { Workflow } from "./workflow-types.ts";
 import type { StepState } from "./workflow-state.ts";
@@ -463,6 +464,10 @@ export type RunChildWorkflow = (params: {
  * executors); each step kind documents its fallback.
  */
 export interface StepRuntime {
+  /** The run's budget, for `.journaled()` steps' `ctx.reportUsage`. */
+  readonly budget?: WorkflowBudget;
+  /** Usage stored by the run's other steps when this step started (excludes its own row). */
+  readonly priorRunUsage?: UsageTotals;
   /**
    * The runner's time source. Drives sleep / signal-timeout deadlines and
    * loop-iteration timing. Default: `SystemWallClock`.

@@ -129,6 +129,15 @@ export function isAbandonRunExit(error: unknown): boolean {
   return typeof tag === "string" && ABANDON_RUN_EXITS.has(tag);
 }
 
+/** Whether `error` is a spent budget: never retried, never absorbed by `onFailure`. */
+export function isBudgetExceeded(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { readonly _tag?: unknown })._tag === "WorkflowBudgetExceededError"
+  );
+}
+
 /** Whether `error` is an engine control-flow exit rather than a step failure. */
 export function isControlFlowExit(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
@@ -186,7 +195,9 @@ export function withStepRetry<A>(params: {
     policy: {
       ...policy,
       when: (error: TaggedError) =>
-        !isControlFlowExit(error) && (userWhen === undefined || userWhen(error)),
+        !isControlFlowExit(error) &&
+        !isBudgetExceeded(error) &&
+        (userWhen === undefined || userWhen(error)),
     },
     clock: params.clock,
   });
@@ -203,7 +214,7 @@ export function withFailureStrategy(params: {
   const strategy = params.strategy ?? "fail";
   if (strategy === "fail") return params.eff;
   return params.eff.catch((error): Eff<unknown, Throws<TaggedError>> => {
-    if (isControlFlowExit(error)) return fail(error);
+    if (isControlFlowExit(error) || isBudgetExceeded(error)) return fail(error);
     if (strategy === "skip") return succeed(undefined);
     return sync(() => strategy.fallback(error));
   });

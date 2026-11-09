@@ -24,6 +24,7 @@ import {
   type StepState,
   type WorkflowState,
 } from "./workflow-state.ts";
+import { runUsage, stepUsage } from "./budget.ts";
 import { JOURNAL_STEP_TYPES, type JournalStore } from "./activity-journal.ts";
 
 export interface StorageTestSuiteOptions {
@@ -336,6 +337,39 @@ export function storageTestSuite(
 
         const step = (await s.loadWorkflow("step-meta-ok"))!.steps["route"]!;
         expect(step.metadata).toEqual({ matchCase: "express", matchMode: "selector" });
+      });
+
+      it("keeps a step's reported usage in metadata, so runUsage derives the run total", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({ workflowId: "step-usage", workflowName: "test", input: {} });
+        const usage = (inputTokens: number, costUsd: number) => ({
+          usage: { inputTokens, outputTokens: 2, totalTokens: inputTokens + 2, costUsd },
+        });
+        await s.saveStepResult({
+          workflowId: "step-usage",
+          stepName: "a",
+          result: 1,
+          durationMs: 1,
+          startedAt: new Date(),
+          metadata: usage(10, 0.25),
+        });
+        await s.saveStepFailure({
+          workflowId: "step-usage",
+          stepName: "b",
+          error: "over budget",
+          durationMs: 1,
+          startedAt: new Date(),
+          metadata: usage(5, 0.5),
+        });
+
+        const state = (await s.loadWorkflow("step-usage"))!;
+        expect(stepUsage(state.steps["a"]!)?.totalTokens).toBe(12);
+        expect(runUsage(state.steps)).toEqual({
+          inputTokens: 15,
+          outputTokens: 4,
+          totalTokens: 19,
+          costUsd: 0.75,
+        });
       });
     });
 

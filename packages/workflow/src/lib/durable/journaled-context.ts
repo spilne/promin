@@ -10,6 +10,7 @@
 import type { RetryPolicy } from "../shared/retry-policy.ts";
 import type { WallClock } from "../shared/wall-clock.ts";
 import type { Codec } from "@spilne/perfect-core/connect";
+import type { StepUsageMeter, UsageReport, UsageTotals } from "./budget.ts";
 import type { CompensationStack } from "./compensation-stack.ts";
 import type { Workflow } from "./durable-pipeline.ts";
 import type { JournalCursor } from "./journal-cursor.ts";
@@ -487,6 +488,23 @@ export interface JournaledContext<Input, Prev> {
   setQueryHandler<R>(name: string, handler: (args?: unknown) => R | Promise<R>): void;
 
   /**
+   * Report what this step spent (tokens and/or USD), e.g. after a model call:
+   *
+   * ```ts
+   * const reply = yield* ctx.activity("llm", () => model.complete(prompt));
+   * yield* ctx.reportUsage({ inputTokens: reply.in, outputTokens: reply.out, costUsd: reply.cost });
+   * ```
+   *
+   * Each report is a journal entry, so replay and recovery never count it twice.
+   * Returns the step's running total. Throws `WorkflowBudgetExceededError` when
+   * the report pushes the step or the run past its `workflow({ budget })`; let
+   * it propagate: it is never retried and fails the run. The step's total is
+   * stored on its row when it settles (`WorkflowStatusInfo.usage`). Spend of an
+   * activity that failed cannot be reported, so it is not counted.
+   */
+  reportUsage(usage: UsageReport): Generator<ActivityYield, UsageTotals, unknown>;
+
+  /**
    * Live-writable metadata surfaced on the workflow row. The dashboard reads
    * `WorkflowState.metadata`, so writes through `ctx.metadata.set/merge`
    * appear in the runs view in near-real-time. Useful for progress
@@ -595,4 +613,6 @@ export interface JournaledCtxEnv {
   /** Workflow-level default for `ActivityOptions.payloadHash`. */
   readonly defaultPayloadHash: boolean | undefined;
   readonly runChild: RunChild | undefined;
+  /** Usage reported by this body run (`ctx.reportUsage`), checked against the budget. */
+  readonly usage: StepUsageMeter;
 }
