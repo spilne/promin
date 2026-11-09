@@ -486,6 +486,20 @@ memory, canDelegate })` and pass it to
   recorded as `interrupted`, and the steer then runs as the next turn on the
   same thread, which keeps the partial transcript. `queued` and `follow-up`
   never interrupt; they wait for the running turn.
+  **Budgets.** Pass `budgets` (the host's `AgentBudgets`: one `UsageLedger`,
+  thread and namespace limits) so a child's spend counts toward its parent:
+  each child turn is admitted with `admitTurn` against the parent thread's
+  standing (a refused turn is a `failed` outcome and the child keeps
+  running), and its spend (read from the turn workflow's `spend`, cost
+  included) is recorded in the ledger under the parent thread, so it counts
+  toward the parent's thread budget and the namespace window. Resolve child
+  agents without their own ledger, or the namespace window counts the spend
+  twice. A turn is capped only by its own recipe `budget`: admission is
+  checked at turn start, so a thread budget can be overshot by the turns in
+  flight. `childBudget` (a `WorkflowBudget`) caps each child's lifetime
+  spend through `ctx.reportUsage`; crossing it fails the child run (status
+  `failed`, later messages answer 409). `listChildAgents` returns each
+  child's `usage` when the store lists step rows.
   The mailbox lives in `MemoryStore` and the worker in `WorkflowStorage`;
   startup reconciles mailbox writes whose wake signal was lost in a crash.
   Configure durable stores and the LocalWorkflows signal scanner for restart

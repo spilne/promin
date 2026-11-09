@@ -1,5 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { InMemoryAgentRegistry, InMemoryMemoryStore, resolveLocalAgent } from "@promin/agent";
+import {
+  admitTurn,
+  BudgetExceededError,
+  InMemoryAgentRegistry,
+  InMemoryMemoryStore,
+  InMemoryUsageLedger,
+  resolveLocalAgent,
+} from "@promin/agent";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { LocalWorkflows } from "../../workflows/local-workflows.ts";
 import { RetainedSubagents, type RetainedParent } from "../retained-subagents.ts";
@@ -20,6 +27,8 @@ interface HarnessOptions {
   /** Async model reply; `signal` aborts when the turn is interrupted. */
   readonly chatAsync?: (content: string, signal: AbortSignal | undefined) => Promise<string>;
   readonly turnGate?: false;
+  /** Input tokens each model reply reports. */
+  readonly replyTokens?: number;
 }
 
 /** Overrides one storage method, delegating everything else to the real store. */
@@ -81,6 +90,9 @@ async function harness(options: HarnessOptions = {}) {
               return {
                 content: options.chat ? options.chat(last) : `reply:${last}`,
                 finishReason: "stop" as const,
+                ...(options.replyTokens !== undefined && {
+                  usage: { inputTokens: options.replyTokens, outputTokens: 0 },
+                }),
               };
             },
           }),
@@ -616,6 +628,85 @@ describe("retained subagents", () => {
       expect(
         outcomes.map((m) => (m as { metadata?: { status?: string } }).metadata?.status),
       ).toEqual(["done", "done"]);
+      await h.workflows.stop();
+    });
+  });
+
+  describe("budget accounting", () => {
+    const statuses = async (h: Awaited<ReturnType<typeof harness>>, childId: string) =>
+      (await h.retained.readAgentMessages(parent, childId)).outcomes.map(
+        (m) => (m as { metadata?: { status?: string } }).metadata?.status,
+      );
+
+    it("charges a child's turns to the parent thread budget and refuses once it is used up", async () => {
+      const ledger = new InMemoryUsageLedger();
+      const budgets = { ledger, thread: { maxTotalTokens: 250 }, minCallTokens: 1 };
+      const h = await harness({ replyTokens: 100, retained: { budgets } });
+      await h.workflows.start();
+      const child = await h.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "one",
+        childId: "metered",
+      });
+      for (const [i, task] of ["two", "three", "four"].entries()) {
+        await waitFor(async () => (await statuses(h, child.childId)).length === i + 1);
+        await h.retained.messageAgent({ parent, childId: child.childId, task, messageId: task });
+      }
+      await waitFor(async () => (await statuses(h, child.childId)).length === 4);
+      // Turns two and three fit under the cap (admitted while 100 and 200 were spent).
+      expect(await statuses(h, child.childId)).toEqual(["done", "done", "done", "failed"]);
+      const spent = await ledger.total({
+        namespaceId: parent.namespaceId,
+        threadId: parent.threadId,
+      });
+      expect(spent.inputTokens).toBe(300);
+      // The parent's own next turn sees the same standing.
+      await expect(
+        admitTurn({
+          budgets,
+          namespaceId: parent.namespaceId,
+          threadId: parent.threadId,
+        }),
+      ).rejects.toBeInstanceOf(BudgetExceededError);
+      await h.workflows.stop();
+    });
+
+    it("fails the child once its own run budget is crossed, via ctx.reportUsage", async () => {
+      const h = await harness({ replyTokens: 100, retained: { childBudget: { maxTokens: 150 } } });
+      await h.workflows.start();
+      const child = await h.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "one",
+        childId: "capped",
+      });
+      await waitFor(async () => (await statuses(h, child.childId)).length === 1);
+      await h.retained.messageAgent({ parent, childId: child.childId, task: "two" });
+      await waitFor(async () => (await h.retained.listChildAgents(parent))[0]?.status === "failed");
+      const [handle] = await h.retained.listChildAgents(parent);
+      expect(handle?.usage?.totalTokens).toBe(200);
+      await expect(
+        h.retained.messageAgent({ parent, childId: child.childId, task: "three" }),
+      ).rejects.toMatchObject({ code: "conflict" });
+      await h.workflows.stop();
+    });
+
+    it("reports usage and keeps running when no budget is configured (negative control)", async () => {
+      const h = await harness({ replyTokens: 100 });
+      await h.workflows.start();
+      const child = await h.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "one",
+        childId: "free",
+      });
+      await waitFor(async () => (await statuses(h, child.childId)).length === 1);
+      await h.retained.messageAgent({ parent, childId: child.childId, task: "two" });
+      await waitFor(async () => (await statuses(h, child.childId)).length === 2);
+      const [handle] = await h.retained.listChildAgents(parent);
+      expect(handle?.status).not.toBe("failed");
+      expect(await statuses(h, child.childId)).toEqual(["done", "done"]);
       await h.workflows.stop();
     });
   });
