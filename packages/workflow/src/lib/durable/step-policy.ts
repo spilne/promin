@@ -187,6 +187,8 @@ export function withStepRetry<A>(params: {
   readonly eff: Eff<A, Throws<TaggedError>>;
   readonly policy: RetryPolicy<TaggedError>;
   readonly clock: WallClock;
+  /** See `retryWithPolicy`'s `onRetry`. */
+  readonly onRetry?: Parameters<typeof retryWithPolicy>[0]["onRetry"];
 }): Eff<A, Throws<TaggedError>> {
   const { policy } = params;
   const userWhen = policy.when;
@@ -200,6 +202,7 @@ export function withStepRetry<A>(params: {
         (userWhen === undefined || userWhen(error)),
     },
     clock: params.clock,
+    ...(params.onRetry !== undefined && { onRetry: params.onRetry }),
   });
 }
 

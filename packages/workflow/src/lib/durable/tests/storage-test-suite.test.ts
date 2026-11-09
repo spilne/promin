@@ -9,5 +9,6 @@ storageTestSuite(() => new InMemoryWorkflowStorage(), {
   hasScannerQueries: true,
   hasCompensationLedger: true,
   hasStepAttempts: true,
+  hasStepProgress: true,
   createNamespaced: ({ namespace }) => new InMemoryWorkflowStorage({ namespace }),
 });

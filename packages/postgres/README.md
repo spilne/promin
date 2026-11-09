@@ -39,6 +39,7 @@ Workflow storage capabilities (see the [storage contract](../workflow/src/lib/du
 | `journal`                | yes | `summaries`                                    |         yes          |
 | `stepAttempts`           | yes | `countWorkflows`                               |         yes          |
 | `stepCheckpoint`         | yes | `dueTimers` / `signalWakeups` / `orphanedRuns` |    yes (indexed)     |
+| `stepProgress`           | yes | (`wf_workflows.step_progress`, jsonb)          |                      |
 | `compensationLedger`     | yes | `runEvents` / `stepStartedEvents`              | – (the runner polls) |
 | `tripwire`, `resetSteps` | yes | `cancelStale`                                  |          –           |
 

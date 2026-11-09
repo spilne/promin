@@ -66,6 +66,7 @@ import type {
   SaveStepAttemptParams,
   SaveStepCompensationParams,
   SaveStepFailureParams,
+  SaveStepProgressParams,
   SaveStepResultParams,
   SaveTaskFailureParams,
   SaveTaskResultParams,
@@ -388,6 +389,13 @@ export class InMemoryWorkflowStorage
     wf.updatedAt = now;
   }
 
+  async saveStepProgress({ guard, ...params }: SaveStepProgressParams): Promise<void> {
+    this.checkFence({ workflowId: params.workflowId, guard });
+    const wf = this.workflows.get(params.workflowId);
+    if (!wf || (wf.status !== "pending" && wf.status !== "running")) return;
+    (wf.stepProgress ??= new Map()).set(params.stepName, { ...params.progress, run: wf.run });
+  }
+
   async saveTaskResult({ result, ...params }: SaveTaskResultParams): Promise<void> {
     this.saveTask({ ...params, outcome: { status: "completed", result } });
   }
@@ -584,6 +592,7 @@ export class InMemoryWorkflowStorage
     // not in `wf.steps`). This matches how brand-new workflows look.
     for (const stepName of stepNames) {
       wf.steps.delete(stepName);
+      wf.stepProgress?.delete(stepName);
       this.journal.deleteStep({ workflowId, stepName });
     }
     // The kept steps start a fresh compensation ledger.

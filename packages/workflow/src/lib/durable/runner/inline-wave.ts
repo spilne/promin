@@ -6,6 +6,7 @@
 
 import { stepRuntimeFor, type WaveOutcome, type WaveParams } from "./dag-context.ts";
 import { runStepBody } from "./step-body.ts";
+import { createStepProgressReporter } from "./step-progress.ts";
 import { checkpointStepOutcome } from "./step-checkpoint.ts";
 import { fireHook } from "./hooks.ts";
 import { emitTrace } from "../workflow-tracer.ts";
@@ -38,15 +39,40 @@ export async function runInlineWave(params: WaveParams): Promise<WaveOutcome> {
       }
 
       const startedAt = clock.now();
+      const progress = createStepProgressReporter({
+        storage: ctx.storage,
+        workflowId,
+        stepName: stepDef.name,
+        ...(ctx.guard !== undefined && { guard: ctx.guard }),
+        clock,
+      });
       // Attempt numbers continue across workflow retries.
       const body = await runStepBody({
-        ...(ctx.tracer !== undefined && {
-          onAttemptStart: ({ attempt, startedAt: attemptStartedAt }) =>
-            traceStepAttemptStart({
-              ctx,
-              stepName: stepDef.name,
+        ...((ctx.tracer !== undefined || progress !== undefined) && {
+          onAttemptStart: ({ attempt, startedAt: attemptStartedAt }) => {
+            progress?.report({
+              phase: "running",
               attempt,
-              startedAt: attemptStartedAt,
+              at: attemptStartedAt,
+              ...(ctx.executorId !== undefined && { holder: ctx.executorId }),
+            });
+            if (ctx.tracer !== undefined) {
+              traceStepAttemptStart({
+                ctx,
+                stepName: stepDef.name,
+                attempt,
+                startedAt: attemptStartedAt,
+              });
+            }
+          },
+        }),
+        ...(progress !== undefined && {
+          onRetryScheduled: ({ attempt, at }) =>
+            progress.report({
+              phase: "backoff",
+              attempt,
+              at: clock.now(),
+              nextAttemptAt: at,
             }),
         }),
         stepDef,
@@ -89,6 +115,8 @@ export async function runInlineWave(params: WaveParams): Promise<WaveOutcome> {
           }),
       });
       params.stepAttempts.set(stepDef.name, body.attempt);
+      // No progress record lands after the step's own write.
+      await progress?.drain();
       const outcome = outcomeOfBody({ name: stepDef.name, body, startedAt, clock });
 
       // The step's `step-started` notice goes out before its outcome row.

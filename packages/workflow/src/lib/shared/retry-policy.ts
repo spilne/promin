@@ -131,6 +131,15 @@ export function retryWithPolicy<A, S>(params: {
   clock?: WallClock;
   /** Uniform `[0, 1)` source for jitter. Default: `Math.random`. */
   random?: () => number;
+  /** Called when a failure is going to be retried, before the backoff wait starts. */
+  onRetry?: (retry: {
+    /** Number of the retry about to run (0 = the first retry). */
+    readonly retry: number;
+    readonly error: unknown;
+    readonly delayMs: number;
+    /** When the retry starts, on `clock`. */
+    readonly at: Date;
+  }) => void;
 }): Eff<A, S> {
   const { eff, policy } = params;
   const clock = params.clock ?? SystemWallClock;
@@ -151,6 +160,12 @@ export function retryWithPolicy<A, S>(params: {
         });
         // Re-raising the caught error keeps the original `S`.
         if (delay === undefined) return fail(error) as unknown as Eff<A, S>;
+        params.onRetry?.({
+          retry,
+          error,
+          delayMs: delay,
+          at: new Date(nowMs + delay),
+        });
         return sleepOn(clock, delay).flatMap(() => attempt(retry + 1));
       }) as Eff<A, S>;
     return attempt(0);

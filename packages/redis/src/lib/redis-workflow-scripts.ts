@@ -408,6 +408,21 @@ local s = redis.call('HMGET', KEYS[1], 'status', 'error', 'errorTag')
 return {1, s[1], s[2] or '', s[3] or '', snap}
 `;
 
+// Record a step's progress as the workflow hash field `progress:<step>`, when
+// the run is pending or running. The row is sent without its `run` field,
+// which the script prepends from the workflow hash, so it is stamped with the
+// run it was written for.
+// KEYS: [wfKey]
+// ARGV: [stepName, progressJson]
+// Returns 1 when written, 0 when the run is missing or parked / ended.
+export const SAVE_STEP_PROGRESS_LUA = `
+local h = redis.call('HMGET', KEYS[1], 'run', 'status')
+if not h[1] then return 0 end
+if h[2] ~= 'pending' and h[2] ~= 'running' then return 0 end
+redis.call('HSET', KEYS[1], 'progress:' .. ARGV[1], '{"run":' .. h[1] .. ',' .. string.sub(ARGV[2], 2))
+return 1
+`;
+
 /** Error-reply prefix a fenced script returns when the fence rejects it. */
 export const FENCE_REJECTED = "PROMIN_FENCE_REJECTED";
 
@@ -578,6 +593,7 @@ local sleeps = {}
 for i = 6, 5 + n do
   local name = ARGV[i]
   redis.call('HDEL', stepsKey, name)
+  redis.call('HDEL', KEYS[1], 'progress:' .. name)
   redis.call('DEL', base .. ':tasks:' .. run .. ':' .. name)
   local jb = ARGV[2] .. name
   for _, m in ipairs(redis.call('ZRANGE', jb .. ':idx', 0, -1)) do

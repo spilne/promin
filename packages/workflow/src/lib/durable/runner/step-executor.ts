@@ -12,6 +12,7 @@ import type {
   WorkflowContinueAsNewError,
   WorkflowSuspendedError,
 } from "../durable-pipeline-error.ts";
+import type { StepProgress } from "../workflow-state.ts";
 import type { WorkflowStorage } from "../workflow-storage.ts";
 import type { WorkflowWait } from "../workflow-waits.ts";
 import type { OrchestrationRuntime } from "./orchestration-context.ts";
@@ -88,6 +89,15 @@ export interface StepExecutionRequest {
    * runs to completion); a queued task cannot be recalled.
    */
   readonly signal?: AbortSignal;
+  /**
+   * Reports what the step is doing between its settled writes: call it when
+   * an attempt starts running (`holder`: who runs it; the runner's `executorId` when left out) and when a failed
+   * attempt goes into retry backoff. Advisory and fire-and-forget: it never
+   * throws, and an executor that does not call it only loses the run's
+   * `activity` / `retry-backoff` entries in `waitingOn`. Set by the runner on
+   * storage that records progress (`stepProgress`); never serialized.
+   */
+  readonly progress?: (progress: StepProgress) => void;
 }
 
 /**
@@ -275,6 +285,12 @@ export class InProcessStepExecutor implements StepExecutor {
       workflowId: req.workflowId,
       clock,
       firstAttempt: req.attempt,
+      ...(req.progress !== undefined && {
+        onAttemptStart: ({ attempt, startedAt }) =>
+          req.progress!({ phase: "running", attempt, at: startedAt }),
+        onRetryScheduled: ({ attempt, at }) =>
+          req.progress!({ phase: "backoff", attempt, at: clock.now(), nextAttemptAt: at }),
+      }),
       ...((req.signal ?? runtime.signal) !== undefined && {
         signal: (req.signal ?? runtime.signal)!,
       }),

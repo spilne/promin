@@ -175,6 +175,30 @@ export interface WorkflowFailure {
   readonly cause?: unknown;
 }
 
+/**
+ * Where a step is between its settled writes, as `saveStepProgress` stores
+ * it (and `WorkflowState.stepProgress` returns it): the one fact a step row
+ * does not carry while the step is executing.
+ *
+ * - `running`: an attempt began at `at`; `holder` is who runs it (a worker
+ *   id, or the run's `executorId`) when known.
+ * - `backoff`: attempt `attempt` failed at `at` and the next one is due at
+ *   `nextAttemptAt`.
+ */
+export interface StepProgress {
+  readonly phase: "running" | "backoff";
+  /** The attempt that is running, or that just failed. */
+  readonly attempt: number;
+  readonly at: Date;
+  readonly nextAttemptAt?: Date;
+  readonly holder?: string;
+}
+
+/** A `StepProgress` as stored: stamped with the run it was written for. */
+export interface StoredStepProgress extends StepProgress {
+  readonly run: number;
+}
+
 export interface WorkflowState<Input = unknown, Result = unknown> {
   readonly workflowId: string;
   readonly workflowName: string;
@@ -214,6 +238,13 @@ export interface WorkflowState<Input = unknown, Result = unknown> {
   readonly runSourceId?: string;
   readonly metadata?: Record<string, unknown>;
   readonly steps: Record<string, StepState>;
+  /**
+   * Latest `saveStepProgress` record of each step, by step name, stamped with
+   * the run it was written for. May hold entries of an earlier run or of steps
+   * that have since settled: read it through `deriveWaitingOn`, which discards
+   * those. Absent when nothing was recorded.
+   */
+  readonly stepProgress?: Record<string, StoredStepProgress>;
   readonly workflowAttempt?: number;
   readonly compensationStatus?: CompensationStatus;
   readonly createdAt: Date;

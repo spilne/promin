@@ -10,6 +10,7 @@ import type {
   RunSource,
   StepState,
   StepTaskState,
+  StoredStepProgress,
   WorkflowRunSummary,
   WorkflowState,
   WorkflowStatus,
@@ -38,6 +39,8 @@ export interface MutableWorkflow {
   idempotencyKey?: string;
   idempotencyExpiresAt?: Date;
   steps: Map<string, StepState>;
+  /** `saveStepProgress` records by step name. */
+  stepProgress?: Map<string, StoredStepProgress>;
   /**
    * Task arrays this storage may still append to in place, by step name
    * (see `writeTaskRow`). An entry is writable only while it is the step
@@ -97,6 +100,8 @@ export function toWorkflowState(wf: MutableWorkflow): WorkflowState {
     runSourceId: wf.runSourceId,
     metadata: wf.metadata,
     steps,
+    ...(wf.stepProgress !== undefined &&
+      wf.stepProgress.size > 0 && { stepProgress: Object.fromEntries(wf.stepProgress) }),
     createdAt: wf.createdAt,
     startedAt: wf.startedAt,
     updatedAt: wf.updatedAt,

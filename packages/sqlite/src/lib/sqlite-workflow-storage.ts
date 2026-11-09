@@ -35,6 +35,7 @@ import type {
   WorkflowRunSummary,
   SignalState,
   StepState,
+  StoredStepProgress,
   AppendEntryParams,
   AppendPendingEntryParams,
   AppendStreamChunkParams,
@@ -59,6 +60,7 @@ import type {
   SaveStepAttemptParams,
   SaveStepCompensationParams,
   SaveStepFailureParams,
+  SaveStepProgressParams,
   SaveStepResultParams,
   SaveTaskFailureParams,
   SaveTaskResultParams,
@@ -78,6 +80,7 @@ import type {
   StepAttemptRecord,
   StepAttemptType,
   StepCheckpointStore,
+  StepProgressStore,
 } from "@promin/workflow";
 import {
   applyMetadataPatch,
@@ -115,6 +118,7 @@ export class SqliteWorkflowStorage
     JournalStore,
     StepAttemptStore,
     StepCheckpointStore,
+    StepProgressStore,
     CompensationLedgerStore
 {
   private readonly _t: string;
@@ -167,6 +171,7 @@ export class SqliteWorkflowStorage
         compensation_origin  TEXT,
         metadata             TEXT,
         steps                TEXT    NOT NULL DEFAULT '{}',
+        step_progress        TEXT,
         run_source           INTEGER,
         run_source_id        TEXT,
         created_at           INTEGER NOT NULL,
@@ -181,6 +186,10 @@ export class SqliteWorkflowStorage
     const columns = this.db.query<{ name: string }>(`PRAGMA table_info(${t})`).all();
     if (!columns.some((c) => c.name === "compensation_origin")) {
       this.db.run(`ALTER TABLE ${t} ADD COLUMN compensation_origin TEXT`);
+    }
+    // Tables created before step progress records lack theirs.
+    if (!columns.some((c) => c.name === "step_progress")) {
+      this.db.run(`ALTER TABLE ${t} ADD COLUMN step_progress TEXT`);
     }
     // Partial unique index on namespace-scoped idempotency keys for atomic claim-or-attach.
     this.db.run(
@@ -446,6 +455,7 @@ export class SqliteWorkflowStorage
       runSource: decodeRunSource(row.run_source),
       runSourceId: row.run_source_id ?? undefined,
       steps: parseSteps(row.steps),
+      ...(row.step_progress != null && { stepProgress: parseStepProgress(row.step_progress) }),
       createdAt: new Date(row.created_at),
       startedAt: row.started_at != null ? new Date(row.started_at) : undefined,
       updatedAt: new Date(row.updated_at),
@@ -1099,6 +1109,26 @@ export class SqliteWorkflowStorage
     })();
   }
 
+  async saveStepProgress({ guard, ...params }: SaveStepProgressParams): Promise<void> {
+    this._fenced({
+      workflowId: params.workflowId,
+      guard,
+      write: () => {
+        const row = this.db
+          .query<{ status: string; run: number; step_progress: string | null }>(
+            `SELECT status, run, step_progress FROM ${this._t} WHERE workflow_id = ?`,
+          )
+          .get(params.workflowId);
+        if (!row || (row.status !== "pending" && row.status !== "running")) return;
+        const progress = row.step_progress != null ? JSON.parse(row.step_progress) : {};
+        progress[params.stepName] = { ...params.progress, run: row.run };
+        this.db
+          .query(`UPDATE ${this._t} SET step_progress = ? WHERE workflow_id = ?`)
+          .run(JSON.stringify(progress), params.workflowId);
+      },
+    });
+  }
+
   async saveTaskResult({ result, ...params }: SaveTaskResultParams): Promise<void> {
     this._saveTask({ ...params, outcome: { status: "completed", result } });
   }
@@ -1641,8 +1671,8 @@ export class SqliteWorkflowStorage
       // every backend shares one contract (the runner guards existence
       // before calling, so this is a defensive check).
       const row = this.db
-        .query<{ status: string; steps: string }>(
-          `SELECT status, steps FROM ${this._t} WHERE workflow_id = ?`,
+        .query<{ status: string; steps: string; step_progress: string | null }>(
+          `SELECT status, steps, step_progress FROM ${this._t} WHERE workflow_id = ?`,
         )
         .get(workflowId);
       if (!row) throw new Error(`Workflow ${workflowId} not found`);
@@ -1684,6 +1714,14 @@ export class SqliteWorkflowStorage
         this.db
           .query(`UPDATE ${this._t} SET steps = ?, updated_at = ? WHERE workflow_id = ?`)
           .run(JSON.stringify(steps), now, workflowId);
+      }
+      // A reset step starts over: its progress record goes with its row.
+      if (row.step_progress != null) {
+        const progress = JSON.parse(row.step_progress) as Record<string, unknown>;
+        for (const name of names) delete progress[name];
+        this.db
+          .query(`UPDATE ${this._t} SET step_progress = ? WHERE workflow_id = ?`)
+          .run(JSON.stringify(progress), workflowId);
       }
     })();
   }
@@ -2444,6 +2482,7 @@ interface WfRow {
   compensation_origin: string | null;
   metadata: string | null;
   steps: string;
+  step_progress: string | null;
   run_source: number | null;
   run_source_id: string | null;
   created_at: number;
@@ -2575,6 +2614,20 @@ function parseSteps(json: string): Record<string, StepState> {
         completedAt: t.completedAt != null ? new Date(t.completedAt as string) : undefined,
       })),
     } as StepState;
+  }
+  return result;
+}
+
+/** Revive the dates of a stored `step_progress` JSON map. */
+function parseStepProgress(json: string): Record<string, StoredStepProgress> {
+  const raw: Record<string, Record<string, unknown>> = JSON.parse(json);
+  const result: Record<string, StoredStepProgress> = {};
+  for (const [name, p] of Object.entries(raw)) {
+    result[name] = {
+      ...p,
+      at: new Date(p.at as string),
+      ...(p.nextAttemptAt != null && { nextAttemptAt: new Date(p.nextAttemptAt as string) }),
+    } as StoredStepProgress;
   }
   return result;
 }

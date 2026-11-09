@@ -98,6 +98,7 @@ export function runToDto(w: WorkflowState, now: Date = new Date()): RunDto {
       childWorkflowId: wait.childWorkflowId,
       groupName: wait.groupName,
       reason: wait.reason,
+      holder: wait.holder,
       attempt: wait.attempt,
     })),
     ...(waitingOnSummary !== undefined && { waitingOnSummary }),

@@ -14,7 +14,7 @@
 //
 // `WorkflowStorage` is their composition and what everything accepts. The
 // optional capabilities — the members marked optional above plus the
-// `JournalStore`, `StepAttemptStore`, `StepCheckpointStore` and
+// `JournalStore`, `StepAttemptStore`, `StepCheckpointStore`, `StepProgressStore` and
 // `CompensationLedgerStore` extensions — are named in
 // `StorageCapabilityMap`; `hasCapability()` / `storageCapabilities()` detect
 // them.
@@ -110,6 +110,7 @@ export type {
   StepCheckpointStore,
   CheckpointStepParams,
 } from "./storage/step-attempt-store.ts";
+export type { StepProgressStore, SaveStepProgressParams } from "./storage/step-progress-store.ts";
 export type {
   CompensationLedgerStore,
   StepCompensationOutcome,

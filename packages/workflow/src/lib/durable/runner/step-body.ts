@@ -93,6 +93,11 @@ export async function runStepBody(params: {
     readonly attempt: number;
     readonly startedAt: Date;
   }) => void;
+  /**
+   * Called when attempt `attempt` failed and a retry is scheduled, before the
+   * backoff wait: `at` is when the next attempt starts.
+   */
+  readonly onRetryScheduled?: (retry: { readonly attempt: number; readonly at: Date }) => void;
   /** Invoke the step's `execute` for one attempt. */
   readonly execute: (attempt: {
     readonly attempt: number;
@@ -123,6 +128,9 @@ export async function runStepBody(params: {
       return params.execute({ attempt, metadataRef, signal: current.signal });
     },
     onTimeout: (error) => current.abort(error),
+    ...(params.onRetryScheduled !== undefined && {
+      onRetryScheduled: ({ at }: { at: Date }) => params.onRetryScheduled!({ attempt, at }),
+    }),
     onAttemptFailed: (error) => {
       // A failed attempt's leftover work must not overlap its retry.
       current.abort(error);

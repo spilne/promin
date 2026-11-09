@@ -255,6 +255,10 @@ export class StepQueueExecutor implements StepExecutor {
       stepDef: policy,
       workflowId: req.workflowId,
       clock,
+      ...(req.progress !== undefined && {
+        onRetryScheduled: ({ at }: { at: Date }) =>
+          req.progress!({ phase: "backoff", attempt, at: clock.now(), nextAttemptAt: at }),
+      }),
       invoke: () =>
         promiseOrEff(async (): Promise<Eff<unknown, Throws<TaggedErrorShape>>> => {
           attempt++;
@@ -345,6 +349,7 @@ export class StepQueueExecutor implements StepExecutor {
     const deadline = this.clock.currentTimeMs() + this.stepWaitTimeoutMs;
     const requeueEveryNPolls = Math.max(1, Math.ceil(this.staleTimeoutMs / this.pollIntervalMs));
     let polls = -1;
+    let reportedRunning = false;
     let outcome: AttemptOutcome | undefined;
     // The throttle episode being reported to the tracer, if any.
     let throttle:
@@ -432,6 +437,17 @@ export class StepQueueExecutor implements StepExecutor {
             ...(task.durationMs !== undefined && { durationMs: task.durationMs }),
           };
           return "stop";
+        }
+
+        // A worker has claimed the task: the attempt is running, on its worker.
+        if (task?.status === "running" && !reportedRunning) {
+          reportedRunning = true;
+          req.progress?.({
+            phase: "running",
+            attempt: task.attempt,
+            at: task.claimedAt ?? this.clock.now(),
+            ...(task.claimedBy !== undefined && { holder: task.claimedBy }),
+          });
         }
 
         // Nobody will settle a step for a run that is gone or over.

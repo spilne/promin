@@ -14,6 +14,7 @@ import type { RunEventStore } from "./run-event-store.ts";
 import type { WorkflowRunStore } from "./run-store.ts";
 import type { WorkflowScannerStore } from "./scanner-store.ts";
 import type { StepAttemptStore, StepCheckpointStore } from "./step-attempt-store.ts";
+import type { StepProgressStore } from "./step-progress-store.ts";
 
 /** The interface each capability adds to a storage. */
 export interface StorageCapabilityMap {
@@ -23,6 +24,8 @@ export interface StorageCapabilityMap {
   stepAttempts: StepAttemptStore;
   /** One-call step checkpoint (`StepCheckpointStore`). */
   stepCheckpoint: StepCheckpointStore;
+  /** Running / retry-backoff step progress (`StepProgressStore`). */
+  stepProgress: StepProgressStore;
   /** Durable saga rollback (`CompensationLedgerStore`). */
   compensationLedger: CompensationLedgerStore;
   /** `tripwireWorkflow`: the `.tripwire()` builder primitive. */
@@ -70,6 +73,7 @@ const CAPABILITY_METHODS: { readonly [K in StorageCapability]: readonly string[]
   ],
   stepAttempts: ["saveStepAttempt", "loadStepAttempts"],
   stepCheckpoint: ["checkpointStep"],
+  stepProgress: ["saveStepProgress"],
   compensationLedger: ["beginCompensation", "saveStepCompensation"],
   tripwire: ["tripwireWorkflow"],
   resetSteps: ["resetSteps"],

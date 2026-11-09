@@ -63,6 +63,7 @@ import type {
   ReleaseLockParams,
   ResetStepsParams,
   SaveStepAttemptParams,
+  SaveStepProgressParams,
   SaveStepCompensationParams,
   SaveStepFailureParams,
   SaveStepResultParams,
@@ -399,6 +400,10 @@ export class RemoteWorkflowStorage
 
   saveStepAttempt(params: SaveStepAttemptParams): Promise<void> {
     return this.call("saveStepAttempt", params);
+  }
+
+  saveStepProgress(params: SaveStepProgressParams): Promise<void> {
+    return this.call("saveStepProgress", params);
   }
 
   loadStepAttempts(params: LoadStepAttemptsParams): Promise<StepAttemptRecord[]> {
