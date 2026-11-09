@@ -39,6 +39,7 @@
 // ---------------------------------------------------------------------------
 
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
+import type { Wakeups } from "../shared/wakeups.ts";
 import { hasCapability } from "../durable/storage/capabilities.ts";
 import { completeSignal } from "../durable/journaled-step.ts";
 import type { WorkflowStorage, WorkflowWakeup } from "../durable/workflow-storage.ts";
@@ -73,6 +74,12 @@ export interface SignalScannerOptions {
   readonly leaderElection?: LeaderElection;
   /** Runs fetched per storage query. Default: 100. */
   readonly pageSize?: number;
+  /**
+   * A `"signals"` wake (a signal was delivered) scans now instead of after
+   * `scanIntervalMs`. A latency hint only: the interval scan still finds
+   * every delivery.
+   */
+  readonly wakeups?: Wakeups;
 }
 
 export interface SignalScanner {
@@ -93,9 +100,11 @@ export interface SignalScanner {
 
 export class DefaultSignalScanner implements SignalScanner {
   private readonly scanner: ResumeScanner<WorkflowWakeup>;
+  private readonly wakeups: Wakeups | undefined;
 
   constructor(config: SignalScannerConfig) {
     const storage = config.storage;
+    this.wakeups = config.wakeups;
     const pageSize = config.pageSize ?? 100;
     const journaledSuspend = hasCapability(storage, "journal") ? storage : undefined;
 
@@ -153,8 +162,13 @@ export class DefaultSignalScanner implements SignalScanner {
     });
   }
 
-  start(): Promise<void> {
-    return this.scanner.start();
+  async start(): Promise<void> {
+    const unsubscribe = this.wakeups?.onWake({ topic: "signals", handler: () => this.wake() });
+    try {
+      await this.scanner.start();
+    } finally {
+      unsubscribe?.();
+    }
   }
 
   stop(): Promise<void> {

@@ -113,6 +113,13 @@ export {
 
 // Distributed step queue (SKIP LOCKED)
 export { PgStepQueue, type PgStepQueueConfig } from "./lib/pg-step-queue.ts";
+export {
+  PgWakeups,
+  postgresJsListen,
+  type PgWakeupsConfig,
+  type PgListenConnect,
+  type PgListenConnection,
+} from "./lib/pg-wakeups.ts";
 
 // Workflow advertisements + start queue — Postgres-backed for multi-replica
 // coordination. Same `WorkflowAdvertisementRegistry` / `WorkflowStartQueue`

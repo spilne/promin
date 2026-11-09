@@ -553,6 +553,21 @@ const wakeups = createSleepScanner({
 void wakeups.start();
 ```
 
+## Wakeups
+
+Every loop above polls. Pass a `Wakeups` (`wakeups` on `createWorker`,
+`createDistributedWorkflowRunner` and `createSignalScanner`; on the queue and
+storage that raise the events) and a wake cuts the current wait short: a task
+enqueued, released or requeued wakes workers (`"steps"`), a task settling wakes
+the coordinator waiting on that task (`"results"`, keyed by task id), a signal
+delivery wakes the signal scanner (`"signals"`). Wakes are hints that may be
+lost, late or repeated, and senders never fail on them, so polling stays the
+correctness path and the intervals stay your worst-case latency.
+`InMemoryWakeups` works within one process (`new InMemoryStepQueue({ wakeups })`);
+`PgWakeups` in `@promin/postgres` uses LISTEN/NOTIFY across processes. Another
+store implements the two-method `Wakeups` interface (`notify`, `onWake`) and
+calls `notifyQuietly` where it makes work; the loops need no change.
+
 ## Time
 
 Workers, the coordinator, its step waits and result poller, the scanners,

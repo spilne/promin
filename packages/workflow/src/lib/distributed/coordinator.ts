@@ -50,6 +50,7 @@ import { buildStubWorkflow } from "./stub-workflow.ts";
 import { isStaleLeaseError } from "../scheduler/leader-lease.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import { PollLoop } from "../shared/poll-loop.ts";
+import type { Wakeups } from "../shared/wakeups.ts";
 import { hasCapability } from "../durable/storage/capabilities.ts";
 import { emitTrace, type WorkflowTracer } from "../durable/workflow-tracer.ts";
 
@@ -135,6 +136,11 @@ export interface DistributedRunnerConfig {
    * `FakeWallClock`.
    */
   clock?: WallClock;
+  /**
+   * Lets a step's settle (`"results"`) cut the executor's wait for the next
+   * poll short. A latency hint only; polling still finds every outcome.
+   */
+  wakeups?: Wakeups;
   /**
    * Called when background work fails: a sweep (`"sweep"`), adopting an
    * orphaned run (`"recovery"`), a step executor's storage check
@@ -260,6 +266,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
         maxAgeMs: Math.max(1, Math.floor(stepPollIntervalMs / 2)),
       }),
       pollIntervalMs: stepPollIntervalMs,
+      ...(config.wakeups !== undefined && { wakeups: config.wakeups }),
       staleTimeoutMs: this.workerTimeoutMs,
       ...(config.stepWaitTimeoutMs !== undefined && {
         stepWaitTimeoutMs: config.stepWaitTimeoutMs,

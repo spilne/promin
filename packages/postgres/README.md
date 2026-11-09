@@ -65,10 +65,12 @@ table, serial column, primary / unique / CHECK constraint, partial index,
 foreign key and lookup seed) plus the incremental files after it.
 `0001_step_progress` also adds, idempotently, the columns earlier changes put
 into the baseline in place (`wf_workflows.compensation_origin` and the
-`wf_step_queue` group and heartbeat columns). `schema.ts` mirrors the chain and
+`wf_step_queue` group and heartbeat columns). `0002_claim_lanes` adds the generated `wf_step_queue.lane` column and the
+indexes `claim` probes (a one-time table rewrite for the stored column; old
+writers need no change). `schema.ts` mirrors the chain and
 a drift test builds a database from it and compares every table, column, index,
-FK and named CHECK against it; an upgrade test applies the baseline alone and
-then the full chain.
+FK and named CHECK against it; upgrade tests apply the baseline alone and the chain through `0001`, then
+the full chain.
 
 ## Workflow storage
 
@@ -143,11 +145,23 @@ The full contract — routing, `release`, deliveries and dead-lettering,
 [Distributed execution](../workflow/src/lib/distributed/README.md#step-queue-contract-v2).
 Postgres specifics:
 
-- `claim` is one transaction: it walks the pending-order partial index, locks
-  up to `limit` matching rows with `FOR UPDATE SKIP LOCKED` (repeating
-  `status = 'pending'` in the locking scan so a row claimed concurrently is
-  rejected on recheck), and stops after `limit` rows. Step-name, version and
-  capability filters are part of that query.
+- `claim` is one transaction: it finds candidate ids, locks the first `limit`
+  still-pending ones with `FOR UPDATE SKIP LOCKED` (repeating `status = 'pending'`
+  so a row claimed concurrently is rejected on recheck), then admits them. Step-name,
+  version, capability and namespace filters are part of the candidate query.
+- Candidate search costs the same however deep a throttled backlog is. A _lane_ is
+  the set of pending rows sharing everything admission reads (namespace, concurrency
+  scope / key / limit, group fields, fairness key; the generated `lane` column).
+  Rows of a lane are admitted or throttled together, and only its first few by claim
+  order can be among the next claimed. Plain order first tries a bounded window of
+  the global index (enough when the head is claimable). Otherwise, and always when a
+  grouped task is pending, `claim` skip-scans the lane index for the distinct lanes,
+  runs the admission pre-checks once per lane, and takes each open lane's head
+  (a probe per lane, bounded by `limit`); fair ranking and the group-slot cutoff are
+  applied to those heads. The cost is the number of open lanes, not the backlog.
+  `claimStrategy: "scan"` keeps the original per-row scan; tests compare the two on
+  random queues and `scripts/pg-claim-bench.ts` measures them (50k pending, one hot
+  key or group: about 1.1 s with the scan against 10 ms with lanes).
 - Concurrency keys: admission takes `pg_advisory_xact_lock` per
   `(scope, key)` in hash order and recounts running tasks under the locks, so
   concurrent claimers with disjoint capabilities cannot both admit past the
@@ -161,10 +175,48 @@ Postgres specifics:
   and window starts under them. With a grouped task pending, candidates are ranked
   per `(group, fairness_key)` (`ROW_NUMBER` plus running count); with none, the plain
   index-ordered query is used.
+- Wakeups: `new PgStepQueue({ db, wakeups })` tells a `Wakeups` backend when a task
+  becomes claimable (enqueue, release, requeue, a settle that frees a slot) or
+  settles; see [Wakeups](#wakeups-listennotify).
 - `requeueStuck({ lease })` checks the leader lease with
   `assertPgLeaseCurrent` in the same transaction as the writes.
 - `metrics()` with no `until` applies no upper bound, so rows the app stamped
   with its own clock are never dropped by a database-clock bound.
+
+## Wakeups (LISTEN/NOTIFY)
+
+Workers, the coordinator's step waits and the signal scanner poll; a wake makes
+one of them run its next iteration now. `PgWakeups` carries wakes between
+processes over `pg_notify`:
+
+```typescript
+import {
+  PgWakeups,
+  PgStepQueue,
+  PostgresWorkflowStorage,
+  postgresJsListen,
+} from "@promin/postgres";
+
+const wakeups = new PgWakeups({
+  db,
+  connect: postgresJsListen({ url: process.env.DATABASE_URL! }), // its own connection, only while something listens
+});
+const queue = new PgStepQueue({ db, wakeups });
+const storage = await PostgresWorkflowStorage.create({ db, wakeups }); // deliverSignal notifies
+const worker = createWorker({ stepQueue: queue, registry, wakeups });
+const coordinator = createDistributedWorkflowRunner({ storage, stepQueue: queue, wakeups });
+const scanner = createSignalScanner({ storage, wakeups, ...target });
+```
+
+A wake is only a latency hint: polling stays the correctness path, so a lost,
+late or duplicate NOTIFY costs time, never correctness. The LISTEN connection
+opens with the first subscriber and closes with the last; a lost one is reopened
+with capped, jittered exponential backoff and every subscriber is woken once
+after a reconnect. Topics are `steps` (a task is claimable), `results` (keyed by
+task id: the awaited task settled) and `signals` (keyed by workflow id). Behind a
+transaction-pooling proxy, point `connect` at a direct connection (LISTEN needs a
+session). `InMemoryWakeups` (from `@promin/workflow/distributed`) does the same in
+one process, and any other backend implements `notify` and `onWake`.
 
 ## Scheduler and leader leases
 
