@@ -60,6 +60,29 @@ const result = await runner.run({ workflow: orderFlow, workflowId: "order-1", in
 
 If "ship" fails for good, the run compensates the completed "charge" step (refund) and then fails — a saga with no extra code. Running the same `workflowId` again after a crash resumes from the last checkpointed step; running a completed one returns its stored result. Swap `InMemoryWorkflowStorage` for Postgres, Redis or SQLite storage to survive restarts.
 
+## Runnable example
+
+This example uses in-memory storage and needs no external services. CI runs it and checks this embedded copy against its source.
+
+{/* @embed examples/docs-workflow.ts */}
+
+```ts
+import { createWorkflowRunner, InMemoryWorkflowStorage, workflow } from "@promin/workflow";
+import { succeed } from "@spilne/perfect-core";
+
+export async function double(input: number): Promise<number> {
+  const flow = workflow<number>({ name: "double" })
+    .step("multiply", ({ input }) => succeed(input * 2))
+    .build();
+  const runner = createWorkflowRunner({ storage: new InMemoryWorkflowStorage() });
+  return runner.run({ workflow: flow, workflowId: "double-1", input });
+}
+
+if (import.meta.main) console.log(await double(21)); // 42
+```
+
+{/* @end */}
+
 ## Next steps
 
 - [Workflows](/docs/workflow/workflows) — the builder, run lifecycle, retries, compensation, journaled steps

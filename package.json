@@ -12,7 +12,7 @@
     "test:src": "bun --conditions=@promin/source test",
     "test:e2e": "bunx nx run-many -t e2e",
     "evals:ci": "bun --conditions=@promin/source run packages/zorya/examples/evals/run-ci.ts",
-    "fmt": "bunx nx run-many -t format",
+    "fmt": "bunx nx run-many -t format && oxfmt -c .oxfmtrc.json scripts documentation/build.ts",
     "ff": "bun run fmt",
     "format": "bun run fmt",
     "bench": "bun run benchmarks/cross-language/run-all.ts",
@@ -29,11 +29,27 @@
     "chaos:zorya": "bun --conditions=@promin/source run packages/zorya/e2e/chaos.ts",
     "demo:user-app": "bun --conditions=@promin/source run packages/zorya/examples/user-app.ts",
     "demo:agent": "bun --conditions=@promin/source run examples/agent-quickstart.ts",
-    "docs": "bun run --filter @promin/docs build",
-    "docs:dev": "bun run --filter @promin/docs dev",
+    "docs": "bun run documentation:build:html",
+    "docs:dev": "bun run documentation:build && bun run --filter @promin/docs dev",
     "docs:serve": "bunx serve .target/docs -p 4002",
     "clean": "rm -rf node_modules packages/*/node_modules .nx/cache .nx/workspace-data .target packages/*/dist packages/*/dist-examples packages/*/dist-spec documentation/generator/.next documentation/generator/node_modules",
-    "prepare": "git config core.hooksPath .githooks || true"
+    "prepare": "git config core.hooksPath .githooks || true",
+    "build:packages": "bunx nx run-many -t build --exclude=@promin/docs",
+    "build:release": "bun run build:packages && bun run build:ui",
+    "fmt:check": "bunx nx run-many -t format-check && oxfmt -c .oxfmtrc.check.json --check scripts documentation/build.ts",
+    "typecheck:scripts": "tsc -p tsconfig.scripts.json --noEmit",
+    "lint:scripts": "oxlint -c .oxlintrc.json scripts documentation/build.ts",
+    "release": "bun scripts/release.ts",
+    "release:verify": "bun scripts/release.ts --verify-tag",
+    "release:check": "bun run build:release && bun scripts/smoke-package-exports.ts",
+    "release:publish": "bun run release:check && bun scripts/publish-packages.ts",
+    "release:dry": "bun scripts/release.ts --dry-run",
+    "test:release": "bun --conditions=@promin/source test scripts/test",
+    "documentation:build": "bun documentation/build.ts",
+    "documentation:check": "bun documentation/build.ts --check",
+    "documentation:build:html": "bun run documentation:build && bun run --filter @promin/docs build",
+    "ci": "bun run fmt:check && bun run lint && bun run lint:scripts && bun run typecheck && bun run typecheck:scripts && bun run test:release && bun run test && bun run evals:ci && bun run documentation:check",
+    "test:packages": "bun --conditions=@promin/source test scripts/integration"
   },
   "private": true,
   "devDependencies": {
@@ -58,5 +74,9 @@
       "@types/bun": "^1.3.3",
       "zod": "^4.6.6"
     }
+  },
+  "packageManager": "bun@1.4.4",
+  "engines": {
+    "node": ">=22.19"
   }
 }

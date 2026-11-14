@@ -152,6 +152,7 @@ condition, so tests and the UI build need no prior `build`.
 ## Documentation
 
 - **[Docs](./documentation/)** — full documentation (build with `bun run docs`)
+- **[Releasing](./RELEASING.md)** — prepare shared versions, validate package artifacts, publish and deploy docs
 - **[Examples](./examples/)** — real-world scenarios, ordered simple → advanced
 - **[Glossary](./documentation/content/docs/reference/glossary.mdx)** — Promin concepts mapped to Temporal, Airflow, Spark, Pandas/Polars
 - **[perfect](https://github.com/spilne/perfect)** — the effect runtime promin is built on, with its own guide and examples

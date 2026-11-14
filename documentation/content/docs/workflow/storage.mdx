@@ -3,4 +3,266 @@ title: Storage
 description: "The WorkflowStorage contract: sub-stores, capabilities per backend, params objects, fencing, signals."
 ---
 
-<include>../../../../packages/workflow/src/lib/durable/storage/README.md</include>
+{/* @embed packages/workflow/src/lib/durable/storage/README.md */}
+
+# Workflow storage
+
+`WorkflowStorage` is everything the engine persists: run rows, step and task
+rows, locks, signals, the activity journal and more. It is the composition of
+small stores, plus optional parts that are named **capabilities**. The
+bundled backends are `InMemoryWorkflowStorage` (`@promin/workflow`),
+`PostgresWorkflowStorage` (`@promin/postgres`), `RedisWorkflowStorage`
+(`@promin/redis`), `SqliteWorkflowStorage` (`@promin/sqlite`) and
+`RemoteWorkflowStorage` (`@promin/workflow-remote`, over HTTP to any of the
+others).
+
+## The stores
+
+| Store                  | Methods                                                                                                                                                                                                                                                                                                                                       |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WorkflowRunStore`     | `loadWorkflow`, `loadWorkflowStatus`, `createWorkflow`, `findWorkflowByIdempotencyKey`, `saveStepResult`, `batchSaveStepResults`, `saveStepFailure`, `saveTaskResult`, `saveTaskFailure`, `completeWorkflow`, `failWorkflow`, `cancelWorkflow`, `suspendWorkflow`, `setWorkflowMetadata`, `startFreshRun`, `tripwireWorkflow?`, `resetSteps?` |
+| `WorkflowLockStore`    | `tryLock`, `tryLockAndLoad`, `releaseLock`, `heartbeat`                                                                                                                                                                                                                                                                                       |
+| `WorkflowQueryStore`   | `listWorkflows`, `distinctWorkflowNames`, `distinctWorkflowTypes`, `distinctNamespaces`, `loadRunHistory`, `purgeCompleted`, `listWorkflowSummaries?`, `countWorkflows?`, `cancelStaleWorkflows?`                                                                                                                                             |
+| `WorkflowScannerStore` | `listDueTimers?`, `listSignalWakeups?`, `listOrphanedRuns?`, `listChildEndedWaits?`, `listUpdateWakeups?`                                                                                                                                                                                                                                     |
+| `SignalStore`          | `deliverSignal`, `loadSignals`                                                                                                                                                                                                                                                                                                                |
+| `SignalTokenStore`     | `createSignalToken`, `findSignalTokenById`, `completeSignalToken`, `listSignalTokensForWorkflow`                                                                                                                                                                                                                                              |
+| `StreamStore`          | `appendStreamChunk`, `readStreamChunks`                                                                                                                                                                                                                                                                                                       |
+| `RunEventStore`        | `notifyStepStarted?`, `subscribeToWorkflow?`                                                                                                                                                                                                                                                                                                  |
+
+Optional extensions: `JournalStore` (`loadJournal`, `appendEntry`,
+`appendPendingEntry`, `completePendingEntry`, `discardJournalEntries`,
+`findDueSleeps`, `findPendingSignal`), `StepAttemptStore`
+(`saveStepAttempt`, `loadStepAttempts`), `StepCheckpointStore`
+(`checkpointStep`) and `CompensationLedgerStore` (`beginCompensation`,
+`saveStepCompensation`), and `RetentionStore` (`listRetentionCandidates`,
+`purgeRuns`; capability `retention`): a keyset page of ended runs by
+`(completedAt, workflowId)` and a guarded delete that re-checks each run
+(still ended, same `completedAt`, no cancel rollback owed) in the same
+atomic step as the delete. `RetentionSweeper` is built on them; every
+bundled backend implements them and `storageTestSuite` covers them
+(`hasRetention`).
+
+## Params objects
+
+Every storage method takes at most one argument, a params object. A fenced
+write carries the lock holder's fence in that object's `guard` field:
+
+```typescript
+import { InMemoryWorkflowStorage } from "@promin/workflow";
+
+const storage = new InMemoryWorkflowStorage();
+await storage.createWorkflow({ workflowId: "wf-1", workflowName: "demo", input: {} });
+
+const lock = await storage.tryLock({ workflowId: "wf-1", lockDurationMs: 30_000 });
+if (lock.acquired) {
+  const guard = { fenceToken: lock.token };
+  await storage.saveStepResult({
+    workflowId: "wf-1",
+    stepName: "a",
+    result: 1,
+    durationMs: 3,
+    startedAt: new Date(),
+    guard,
+  });
+  await storage.completeWorkflow({ workflowId: "wf-1", result: 1, guard });
+  await storage.releaseLock({ workflowId: "wf-1", guard });
+}
+```
+
+## Capabilities
+
+The optional parts of the contract are named capabilities.
+`hasCapability(storage, name)` is true when the storage implements every
+method of that capability, and narrows it to the interface the capability
+adds; `storageCapabilities(storage)` returns all the flags. The engine uses
+them instead of probing methods.
+
+```typescript
+import { hasCapability, InMemoryWorkflowStorage, storageCapabilities } from "@promin/workflow";
+
+const storage = new InMemoryWorkflowStorage();
+if (hasCapability(storage, "journal")) {
+  const entries = await storage.loadJournal({ workflowId: "wf-1", stepName: "checkout" });
+  console.log(entries.length);
+}
+console.log(storageCapabilities(storage)); // { journal: true, stepAttempts: true, ... }
+```
+
+| Capability           | What it enables                                                                | In-memory | Postgres | Redis | SQLite | Remote |
+| -------------------- | ------------------------------------------------------------------------------ | :-------: | :------: | :---: | :----: | :----: |
+| `journal`            | `.journaled()` steps (required by them)                                        |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `stepAttempts`       | per-attempt history rows                                                       |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `stepCheckpoint`     | one fenced call per settled step (row + attempts + run status)                 |    yes    |   yes    |  yes  |  yes   |   –    |
+| `stepProgress`       | running / retry-backoff step records (`waitingOn` `activity`, `retry-backoff`) |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `compensationLedger` | durable saga rollback (`compensating` status, per-step ledger)                 |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `tripwire`           | the `.tripwire()` step                                                         |    yes    |   yes    |  yes  |   –    |  yes   |
+| `resetSteps`         | `runner.resume({ fromStep })`                                                  |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `runEvents`          | push `runner.subscribe` (otherwise polling)                                    |    yes    |    –     |   –   |   –    |   –    |
+| `stepStartedEvents`  | `step-started` events                                                          |    yes    |    –     |   –   |   –    |   –    |
+| `summaries`          | `listWorkflowSummaries` (no input/result blobs)                                |    yes    |   yes    |  yes  |  yes   |   –    |
+| `countWorkflows`     | counts without loading rows                                                    |    yes    |   yes    |  yes  |  yes   |   –    |
+| `cancelStale`        | one-statement stale-run termination for `recover()`                            |     –     |    –     |   –   |  yes   |   –    |
+| `dueTimers`          | indexed sleep / signal-timeout scan for the sleep scanner                      |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `signalWakeups`      | indexed delivered-signal scan for the signal scanner                           |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `orphanedRuns`       | keyset recovery scan for `recover()` and the distributed coordinator           |    yes    |   yes    |  yes  |  yes   |  yes   |
+| `childEndedWaits`    | keyset scan for parents parked on an undelivered child wake-up                 |    yes    |   yes    |  yes  |  yes   |  yes   |
+
+Every backend with `stepAttempts` writes one attempt row per step attempt,
+whether the step ran inline or on a worker (the runner writes them, with the
+worker's id as `executorId` for a queued attempt). Every scanner query pages by `workflowId` with `limit` and a keyset
+`afterWorkflowId` cursor (never an offset), and each backend answers a page from an index that walks ids in order and stops
+at the limit (Postgres: partial `(workflow_id, step_name, …)` indexes from `0002_timer_scan_indexes.sql`; SQLite: the
+partial `suspended` index; Redis: score-0 sorted sets read with `ZRANGEBYLEX`), so a page costs its own rows however many
+runs are suspended. Without a scanner capability the scanners and recovery fall back to paging
+`listWorkflows` (offset paging by creation time, collected before anything is resumed: for storages that lack the
+capabilities only); without `countWorkflows` callers count listed rows.
+
+## Fencing
+
+A run is driven under a lease lock. `tryLock` / `tryLockAndLoad` return a
+fence token (an opaque, monotonically increasing string), the driver
+heartbeats the lock, and every write it makes carries the token in `guard`.
+
+- **Fenced methods**: `saveStepResult`, `batchSaveStepResults`,
+  `saveStepFailure`, `saveTaskResult`, `saveTaskFailure`, `checkpointStep`,
+  `saveStepAttempt`, `saveStepProgress`, `completeWorkflow`, `failWorkflow`, `tripwireWorkflow`,
+  `cancelWorkflow`, `suspendWorkflow`, `setWorkflowMetadata`,
+  `startFreshRun`, `appendStreamChunk`, `createWorkflow` (a child, fenced on
+  the parent's lock), `beginCompensation`, `saveStepCompensation`,
+  `heartbeat`, `releaseLock`, and the journal writes `appendEntry`,
+  `appendPendingEntry`, `completePendingEntry`, `discardJournalEntries`.
+- **Atomic check.** The token is checked in the same step as the write: one
+  SQL statement or transaction holding the lock row `FOR SHARE` (Postgres,
+  against the server clock `NOW()`), one Lua script (Redis), one transaction
+  (SQLite), one synchronous step (in-memory), forwarded with the RPC
+  (remote). A takeover cannot land between the check and the write.
+- **Mismatch.** A fenced write whose token is not the current one rejects
+  with `FenceTokenMismatchError` and writes nothing.
+- **Expired locks fence nothing.** A lock past its expiry rejects every
+  fenced write carrying its token, `heartbeat` included, whether or not
+  another driver has taken it over yet. A stale `releaseLock` never frees a
+  newer holder's lock. So a driver that stalled past its lease learns it lost
+  the run at its next write, and the runner stops with `WorkflowLockLostError`.
+- **Unfenced writes.** A write without a token is accepted. Operator actions,
+  `deliverSignal` and the scanners write unfenced.
+- **Distributed steps are fenced twice.** A distributed worker writes no
+  storage: it settles its queue task with `complete` / `fail`, which the
+  queue rejects unless the worker's claim token is still the current one
+  (checked atomically with the write). The coordinator then writes the step
+  row and its attempt rows from the settled task, fenced by its run lock like
+  any other step. A worker that lost its claim can't settle the task, so its
+  outcome never reaches a row (see
+  [Distributed → Delivery guarantees](https://github.com/spilne/promin/blob/main/packages/workflow/src/lib/distributed/README.md#delivery-guarantees)).
+
+Fencing limits what a stale driver can **write**; it cannot stop a stale
+driver's step body from running. Anything a step does outside storage can
+happen twice.
+
+## Repeated calls
+
+A remote client may resend a call whose answer was lost (the connection
+dropped mid-request). Every store makes these calls answer the resend like
+the first, durably — by its own data, not a response cache:
+
+- `tryLock` / `tryLockAndLoad` with an `attemptId`: a repeat while the lock
+  it took is held gets that lock (and token) back.
+- `startFreshRun` with `expectedRun`: only bumps a run still at that
+  number; a repeat changes nothing and answers the current number.
+- `appendStreamChunk` with a `chunkId`: a repeat answers the first index.
+- `createSignalToken` repeated with the same `tokenId`, workflow, signal
+  and bearer answers the stored token; `completeSignalToken` and
+  `completePendingEntry` repeated with the winning value answer like the
+  winning call (`delivered` / `completed: true`) without writing again.
+- `saveStepAttempt` and `checkpointStep` attempt rows are upserts keyed by
+  `(workflow, step, run, attempt, type)` — the run's current number is
+  stamped by the store, so reruns, resumes and continue-as-new never
+  collide with earlier rows.
+
+- `saveStepProgress` keeps one record per step (the latest wins), stamped
+  with the run it was written for, and writes nothing for a parked or ended
+  run; it never touches step rows, the run's status or `updatedAt`.
+
+`RemoteWorkflowStorage` stamps `attemptId` and `chunkId` on every call;
+`isRetrySafeStorageCall` (`@promin/workflow-remote`) says which calls a
+client may resend after a mid-request disconnect.
+
+## Lifecycle semantics
+
+- `completeWorkflow`, `failWorkflow`, `tripwireWorkflow` and `cancelWorkflow`
+  only move a run out of a non-terminal status; on a `completed`, `failed`
+  (cancelled included) or `tripwire` run they are no-ops. Only
+  `startFreshRun` and `resetSteps` leave a terminal status.
+- `cancelWorkflow` stores the failure with `errorTag: "WorkflowCancelledError"`
+  and a separate `compensationOrigin: "cancel"` marker; `{ cascade: true }`
+  cancels descendants too. The marker, not the tag (a failing step can carry
+  that tag), is what lets `beginCompensation({ origin: "cancel" })` reopen the
+  run for a cancel rollback. `beginCompensation` stores its `origin`
+  (`"failure"` by default) with the phase; `startFreshRun` and `resetSteps`
+  clear it. Postgres keeps it in `wf_workflows.compensation_origin`, SQLite in
+  `compensation_origin` (added to older tables on open), Redis in the run
+  hash's `compensationOrigin` field.
+- A cancelled run owes its cancel until a driver settles it: it keeps
+  `compensationOrigin: "cancel"` and `listOrphanedRuns` lists it (`status:
+"failed"`, same lock and `updatedBefore` rules) so recovery rolls it back
+  with its definition's `onCancel`. The final `failWorkflow` of that rollback
+  passes `compensationOrigin: "cancel-settled"`, which takes the run out of the
+  listing and out of reach of `beginCompensation({ origin: "cancel" })`.
+  Backends index it: a partial index on SQLite and Postgres
+  (`wf_workflows_cancel_owed_idx`, created if absent), a `cancel-owed` set on
+  Redis (added before `cancelWorkflow`'s move, dropped lazily by scans).
+- `startFreshRun` bumps the run number and, atomically with it, drops the
+  journal, the delivered signals and the compensation ledger, so the new run
+  never replays the previous one.
+- `createWorkflow` is create-if-absent and reports `{ created }`.
+- An idempotency key past its expiry is released when a new run claims it.
+
+## Signals
+
+`deliverSignal({ workflowId, signalName, payload })` stores a named value on
+the current run. A second delivery under the same name replaces the first
+(last delivery wins); `loadSignals` never consumes them; `startFreshRun`
+clears them; `resetSteps` keeps them. Delivery is unfenced and does not
+resume the run — the signal scanner does (or the next `runner.run` of that
+`workflowId`).
+
+## Journal
+
+`completePendingEntry` reports `{ completed, exit }`: whether this call
+completed the entry and the exit stored on it. A signal delivery and a signal
+timeout race on that call; both sides continue with the stored winner.
+Signal exits are stored tagged (`{ $signal: "delivered", value }` /
+`{ $signal: "timeout" }`). `discardJournalEntries` removes the failed attempt's
+entries so the next attempt re-runs them.
+
+## Writing a backend
+
+1. Implement `WorkflowStorage` (plus the capabilities you want) with the
+   params shapes exported from `@promin/workflow` (`SaveStepResultParams`,
+   `CompleteWorkflowParams`, `FencedWrite`, …). Check every fenced write's
+   `guard.fenceToken` atomically with the write.
+2. Reuse `@promin/workflow/storage-kit`: metadata patch semantics
+   (`applyMetadataPatch`), list ordering (`sortWorkflowRows`,
+   `workflowSortKey`), `tryLockAndLoadDefault`, `batchSaveStepResultsDefault`,
+   status and journal enums, run-source codecs and the child-wake signal name.
+3. Run the conformance suites from `@promin/workflow/testing` under
+   `bun:test`: `storageTestSuite` (CRUD, locks, fencing matrix, lifecycle,
+   signals, journal, step attempts with `hasStepAttempts`, capabilities),
+   `journalReplayTestSuite`,
+   `zombieWorkerTestSuite` (a stalled runner loses its lock and every later
+   write fails), and, for the other stores, `stepQueueTestSuite`,
+   `schedulerStorageTestSuite`, `stateMachineStorageTestSuite`,
+   `versionRegistryTestSuite` / `versionDrainTestSuite`,
+   `workerRegistryConformance`, `workflowStartQueueTestSuite` and
+   `workflowAdvertisementRegistryTestSuite`.
+
+```typescript
+import { describe } from "bun:test";
+import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { storageTestSuite } from "@promin/workflow/testing";
+
+describe("my storage", () => {
+  storageTestSuite(() => new InMemoryWorkflowStorage());
+});
+```
+
+{/* @end */}

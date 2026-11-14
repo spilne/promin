@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "types": [
+      "bun"
+    ],
+    "lib": [
+      "ES2023",
+      "DOM"
+    ],
+    "disableSourceOfProjectReferenceRedirect": false
+  },
+  "include": [
+    "scripts/**/*.ts",
+    "documentation/build.ts"
+  ]
+}

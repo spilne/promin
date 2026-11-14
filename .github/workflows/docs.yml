@@ -1,0 +1,74 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "documentation/**"
+      - "examples/**"
+      - "packages/**/*.md"
+      - "packages/*/package.json"
+      - "scripts/workspace.ts"
+      - ".github/workflows/docs.yml"
+      - "package.json"
+      - "bun.lock"
+  pull_request:
+    paths:
+      - "documentation/**"
+      - "examples/**"
+      - "packages/**/*.md"
+      - "packages/*/package.json"
+      - "scripts/workspace.ts"
+      - ".github/workflows/docs.yml"
+      - "package.json"
+      - "bun.lock"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  NX_DAEMON: "false"
+  NX_ISOLATE_PLUGINS: "false"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.4"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22.23.5"
+      - run: bun install --frozen-lockfile
+      - name: Check generated examples and package coverage
+        run: bun run documentation:check
+      - run: bun run test:release
+      - run: bun run documentation:build:html
+      # Normal deployments come from published release tags. Dispatch is the
+      # explicit escape hatch for a documentation-only correction.
+      - uses: actions/configure-pages@v5
+        if: github.event_name == 'workflow_dispatch'
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          path: .target/docs
+
+  deploy:
+    needs: check
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
