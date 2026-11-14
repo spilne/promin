@@ -554,6 +554,53 @@ console.log(`resumed ${resumed}`);
 `listOrphanedRuns`, and resumes at most `concurrent` at once. A
 `compensating` run finishes its rollback.
 
+### Retention
+
+Ended runs, their steps, journals, signals, compensation ledgers, step
+progress and attempts stay until something deletes them. Declare how long on
+the definition and let a `RetentionSweeper` (or the distributed runner's
+`retention` option) carry it out:
+
+```typescript
+import { RetentionSweeper, workflow } from "@promin/workflow";
+
+const audited = workflow<{ id: string }>({
+  name: "audited",
+  retention: { completed: 7 * DAY, failed: null, keepAtLeast: 50 }, // failures: forever
+}).build();
+
+const sweeper = new RetentionSweeper({
+  storage,
+  workflows: [audited], // and/or `registry`
+  retention: { completed: DAY, failed: 14 * DAY, cancelled: DAY, stepQueue: DAY },
+  stepQueue, // what `retention.stepQueue` purges
+  batchSize: 500, // runs per delete
+  perSweepBudgetMs: 30_000, // a sweep stops starting batches after this
+  tracer, // `retentionSweep`
+  onSweep: (report) => metrics.record(report),
+});
+await sweeper.sweep({ dryRun: true }); // counts, deletes nothing
+void sweeper.start(); // sweep every intervalMs (default 1 h); stop() ends it
+```
+
+A definition's policy wins field by field over the sweeper's default (`null`
+keeps a class forever). Classes: `completed` (including tripwired), `failed`,
+`cancelled` (settled cancels only). A sweep pages ended runs oldest first with
+a keyset cursor and, per run, keeps it when: it is younger than its class's
+age; it is one of the newest `keepAtLeast` of its workflow; it is a cancelled
+run still owing its rollback; its parent still runs or owes a rollback; or one
+of its children has not ended. The rest are deleted in one guarded
+`purgeRuns` call per batch, which re-checks each run atomically, so a run
+resumed or ended again since it was listed survives, and any number of
+sweepers over one storage delete each run exactly once. When the budget ends a
+sweep (`report.complete === false`) the cursor is kept and the next sweep
+resumes there. Limits: the parent / child checks are snapshots (a parent
+resumed in the instant after its child is deleted is not protected), the
+step queue is not counted in a dry run, and the dead-letter sink
+(`workflow({ dlq })`) is user-owned and not swept. With the distributed runner,
+pass `retention: { completed: DAY, ... }` and the leader sweeps in the
+background on its sweep loop (`onError` source `"retention"`).
+
 ## Compensation (sagas)
 
 ```typescript

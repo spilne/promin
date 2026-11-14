@@ -43,6 +43,9 @@ export type StorageMethod =
   | "resetSteps"
   | "checkpointStep"
   | "purgeCompleted"
+  // RetentionStore — forwarded only when the underlying storage implements it.
+  | "listRetentionCandidates"
+  | "purgeRuns"
   // Scanner / recovery queries — forwarded only when the underlying storage
   // implements them, so the sleep / signal scanners and coordinator
   // recovery query the backend's indexes instead of paging listWorkflows.

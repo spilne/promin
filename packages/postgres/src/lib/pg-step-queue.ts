@@ -664,15 +664,21 @@ export class PgStepQueue implements StepQueue {
     return rows.length;
   }
 
-  async purge(params: { completedBefore: Date }): Promise<number> {
+  async purge(params: { completedBefore: Date; limit?: number }): Promise<number> {
     const nsFilter = this.namespace ? sql` AND namespace = ${this.namespace}` : sql``;
+    const batch =
+      params.limit !== undefined ? sql` ORDER BY completed_at, id LIMIT ${params.limit}` : sql``;
     const rows = await execRaw(
       this.db,
       sql`
         WITH purged AS (
           DELETE FROM wf_step_queue
-          WHERE status IN ('completed', 'failed')
-            AND completed_at < ${params.completedBefore.toISOString()}::timestamptz${nsFilter}
+          WHERE id IN (
+            SELECT id FROM wf_step_queue
+            WHERE status IN ('completed', 'failed')
+              AND completed_at < ${params.completedBefore.toISOString()}::timestamptz${nsFilter}${batch}
+            FOR UPDATE SKIP LOCKED
+          )
           RETURNING 1
         )
         SELECT COUNT(*) AS n FROM purged

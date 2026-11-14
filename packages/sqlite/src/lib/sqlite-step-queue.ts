@@ -511,13 +511,18 @@ export class SqliteStepQueue implements StepQueue {
     return this._changes();
   }
 
-  async purge(params: { completedBefore: Date }): Promise<number> {
+  async purge(params: { completedBefore: Date; limit?: number }): Promise<number> {
     this.db
       .query(
         `DELETE FROM ${this._table}
-         WHERE status IN ('completed', 'failed') AND completed_at < ?`,
+         WHERE id IN (
+           SELECT id FROM ${this._table}
+           WHERE status IN ('completed', 'failed') AND completed_at < ?
+           ORDER BY completed_at ASC
+           LIMIT ?)`,
       )
-      .run(params.completedBefore.getTime());
+      // SQLite reads a negative LIMIT as no limit.
+      .run(params.completedBefore.getTime(), params.limit ?? -1);
     return this._changes();
   }
 
