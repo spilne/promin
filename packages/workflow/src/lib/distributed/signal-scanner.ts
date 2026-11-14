@@ -80,6 +80,12 @@ export interface SignalScannerOptions {
    * every delivery.
    */
   readonly wakeups?: Wakeups;
+  /**
+   * Due runs one sweep hands out before it ends and the next sweep
+   * continues after the last of them, immediately: a backlog of any size is
+   * worked off in bounded sweeps that each re-check leadership. Default: 1000.
+   */
+  readonly maxRunsPerSweep?: number;
 }
 
 export interface SignalScanner {
@@ -117,6 +123,7 @@ export class DefaultSignalScanner implements SignalScanner {
       onError: config.onError,
       leaderElection: config.leaderElection,
       resumeConcurrency: config.resumeConcurrency,
+      maxRunsPerSweep: config.maxRunsPerSweep,
       find: async ({ afterWorkflowId }) => {
         // Runs holding an update request nobody has applied are woken too,
         // so the journaled body applies it at its next update point. Both

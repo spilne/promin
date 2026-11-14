@@ -29,6 +29,13 @@
       "when": 1765324800000,
       "tag": "0003_claim_lanes",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1765411200000,
+      "tag": "0004_timer_scan_indexes",
+      "breakpoints": true
     }
   ]
 }

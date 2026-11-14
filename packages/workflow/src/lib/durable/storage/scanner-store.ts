@@ -104,8 +104,12 @@ export interface ListOrphanedRunsParams {
  * `dueTimers`, `signalWakeups`, `orphanedRuns`, `childEndedWaits`): without one, its scanner
  * pages through `listWorkflows` instead. All three are scoped to the
  * storage's namespace, like `listWorkflows`, and keyset-paginated on
- * `workflowId`, so resuming rows between pages never makes a later page
- * skip one.
+ * `workflowId` (`limit` rows after the `afterWorkflowId` cursor), so resuming
+ * rows between pages never makes a later page skip one or return one twice.
+ * A page must cost its own rows, not the rows behind it: a backend answers
+ * it from an index that walks `workflowId` in order and stops at `limit`
+ * (never by sorting every match, and never by an offset), so a scan of
+ * 100 000 due runs is a thousand bounded reads.
  */
 export interface WorkflowScannerStore {
   /**

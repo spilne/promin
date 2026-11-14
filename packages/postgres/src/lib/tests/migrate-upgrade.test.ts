@@ -136,3 +136,64 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
     expect(claimed.map((t) => t.workflowId).sort()).toEqual(["old-a", "old-c"]);
   });
 });
+
+const TIMER_SCAN_INDEXES = [
+  "wf_workflow_steps_sleep_keyset_idx",
+  "wf_workflow_steps_signal_timeout_keyset_idx",
+  "wf_workflows_suspended_idx",
+];
+
+postgresDescribe(
+  "migrate() adds the timer scan indexes to a database from before them",
+  {},
+  (pg) => {
+    it("creates the keyset indexes on upgrade, idempotently, and keeps scanning the old rows", async () => {
+      const present = async (): Promise<string[]> =>
+        (
+          (await pg.sql`SELECT indexname FROM pg_indexes WHERE indexname = ANY(${TIMER_SCAN_INDEXES})`) as unknown as Array<{
+            indexname: string;
+          }>
+        )
+          .map((r) => r.indexname)
+          .sort();
+
+      // A database that applied every migration up to the one before the indexes.
+      await migrate(pg.db, { migrationsFolder: chainFolder(3) });
+      expect(await present()).toEqual([]);
+
+      const storage = await PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false });
+      for (const workflowId of ["old-a", "old-b", "old-c"]) {
+        await storage.createWorkflow({ workflowId, workflowName: "w", input: {} });
+        await storage.suspendWorkflow({
+          workflowId,
+          stepName: "nap",
+          stepUpdate: {
+            status: "sleeping",
+            stepType: "sleep",
+            wakeAt: new Date(Date.now() - 60_000),
+          },
+        });
+      }
+
+      await migrate(pg.db);
+      await migrate(pg.db);
+      expect(await present()).toEqual([...TIMER_SCAN_INDEXES].sort());
+
+      // Re-running the migration's statements (a database that already has
+      // some of the indexes) changes nothing and does not fail.
+      const statements = readFileSync(join(DRIZZLE, "0004_timer_scan_indexes.sql"), "utf8");
+      await pg.sql.unsafe(statements);
+      expect(await present()).toEqual([...TIMER_SCAN_INDEXES].sort());
+
+      // The rows written before the upgrade are still scanned, in pages.
+      const first = await storage.listDueTimers({ now: new Date(), limit: 2 });
+      expect(first.map((r) => r.workflowId)).toEqual(["old-a", "old-b"]);
+      const rest = await storage.listDueTimers({
+        now: new Date(),
+        limit: 2,
+        afterWorkflowId: "old-b",
+      });
+      expect(rest.map((r) => r.workflowId)).toEqual(["old-c"]);
+    });
+  },
+);

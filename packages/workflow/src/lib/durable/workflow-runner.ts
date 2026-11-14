@@ -467,14 +467,16 @@ export interface WorkflowRunner {
    *
    * 2. **Resume recent runs** (`resumeRecent`): lists the remaining
    *    pending / running / compensating workflows nobody is driving
-   *    (keyset-paginated `listOrphanedRuns` when the storage has it), looks
+   *    (keyset-paginated `listOrphanedRuns` when the storage has it, one page
+   *    at a time as the pool drains), looks
    *    up their definition in the runner's registry, and runs each through
    *    `runSafe`, at most `resumeRecent({ concurrent })` at a time. A
    *    `compensating` run finishes its rollback. Requires the runner to have
    *    been configured with a `registry`; throws otherwise.
    *
    * @returns counts of terminated / resumed / skipped workflows, once every
-   *   resumed run is accepted; `settled` resolves when they have finished.
+   *   resumed run is accepted (a backlog larger than `concurrent` waits for
+   *   earlier runs to finish); `settled` resolves when they have finished.
    */
   recover(strategy: RecoveryStrategy): Promise<RecoveryResult>;
 }

@@ -191,7 +191,9 @@ describe.skipIf(NODE === null)("entry points — load under Node", () => {
       join(outDir, "register.mjs"),
       'import { register } from "node:module";\nregister("./hooks.mjs", import.meta.url);\n',
     );
-  });
+    // Transpiling the portable graph can exceed Bun's default five seconds
+    // while CI runs all package suites in parallel.
+  }, 30_000);
 
   afterAll(async () => {
     if (outDir) await rm(outDir, { recursive: true, force: true });

@@ -20,7 +20,12 @@
 import type { Workflow } from "../durable/durable-pipeline.ts";
 import type { WorkflowRunner } from "../durable/workflow-runner.ts";
 import type { WorkflowWakeup } from "../durable/workflow-storage.ts";
-import { PollLoop, describeError, isNetworkError } from "../shared/poll-loop.ts";
+import {
+  PollLoop,
+  describeError,
+  isNetworkError,
+  type PollTickResult,
+} from "../shared/poll-loop.ts";
 import type { WallClock } from "../shared/wall-clock.ts";
 import type { LeaderElection } from "./leader-election.ts";
 
@@ -86,6 +91,9 @@ export function scannerTargetOf(config: ScannerTarget): ScannerTarget {
 /** Default number of resumes a scanner runs at once. */
 export const DEFAULT_RESUME_CONCURRENCY = 10;
 
+/** Default number of due runs one scan sweep hands out before it yields. */
+export const DEFAULT_MAX_RUNS_PER_SWEEP = 1_000;
+
 export class ResumeScanner<Row extends DueRun> {
   private readonly name: string;
   private readonly target: ScannerTarget;
@@ -98,6 +106,12 @@ export class ResumeScanner<Row extends DueRun> {
   private readonly onError?: (workflowId: string, error: unknown) => void;
   private readonly leaderElection?: LeaderElection;
   private readonly concurrency: number;
+  private readonly maxRunsPerSweep: number;
+  /**
+   * Where the next sweep continues after one that ran out of its budget:
+   * the last run it handed out. Unset when the last sweep reached the end.
+   */
+  private cursor: string | undefined;
   private readonly loop: PollLoop;
   private isLeader = false;
   /** Runs being resumed now, by workflow id. */
@@ -128,6 +142,14 @@ export class ResumeScanner<Row extends DueRun> {
     readonly onError?: (workflowId: string, error: unknown) => void;
     readonly leaderElection?: LeaderElection;
     readonly resumeConcurrency?: number;
+    /**
+     * Due runs one sweep hands out before it ends and the next sweep
+     * continues after the last of them (at once, without waiting the
+     * interval), so one sweep over a huge backlog re-checks leadership and
+     * stop requests, and takes a fresh `now`, every this many runs. Default
+     * `DEFAULT_MAX_RUNS_PER_SWEEP`.
+     */
+    readonly maxRunsPerSweep?: number;
   }) {
     this.name = params.name;
     this.target = params.target;
@@ -137,6 +159,10 @@ export class ResumeScanner<Row extends DueRun> {
     this.onError = params.onError;
     this.leaderElection = params.leaderElection;
     this.concurrency = Math.max(1, params.resumeConcurrency ?? DEFAULT_RESUME_CONCURRENCY);
+    this.maxRunsPerSweep = Math.max(
+      1,
+      Math.trunc(params.maxRunsPerSweep ?? DEFAULT_MAX_RUNS_PER_SWEEP),
+    );
     this.loop = new PollLoop({
       name: params.name,
       intervalMs: params.intervalMs,
@@ -193,28 +219,50 @@ export class ResumeScanner<Row extends DueRun> {
     }
   }
 
-  private async scan(): Promise<void> {
+  private async scan(): Promise<PollTickResult> {
     if (this.leaderElection) {
       this.isLeader = await this.leaderElection.tryAcquire();
-      if (!this.isLeader) return;
+      if (!this.isLeader) {
+        this.cursor = undefined;
+        return;
+      }
     }
-    let afterWorkflowId: string | undefined;
+    let afterWorkflowId = this.cursor;
+    let handedOut = 0;
     while (!this.loop.stopRequested) {
       // Renew the lease before every further page: a long scan stops as soon
       // as another instance has taken over instead of overlapping its scan.
-      if (afterWorkflowId !== undefined && this.leaderElection) {
+      if (afterWorkflowId !== this.cursor && this.leaderElection) {
         this.isLeader = await this.leaderElection.tryAcquire();
-        if (!this.isLeader) return;
+        if (!this.isLeader) {
+          this.cursor = undefined;
+          return;
+        }
       }
       const page = await this.find(afterWorkflowId === undefined ? {} : { afterWorkflowId });
       for (const row of page.rows) {
         if (this.loop.stopRequested) return;
         await this.dispatch(row);
+        handedOut++;
+        afterWorkflowId = row.workflowId;
+        // Out of budget: end the sweep here; the next one continues after
+        // this run, so a backlog is worked off in bounded sweeps.
+        if (handedOut >= this.maxRunsPerSweep) {
+          const last = page.rows[page.rows.length - 1];
+          if (row !== last || !page.done) {
+            this.cursor = row.workflowId;
+            return "again";
+          }
+        }
       }
       const last = page.rows[page.rows.length - 1];
-      if (page.done || !last) return;
+      if (page.done || !last) {
+        this.cursor = undefined;
+        return;
+      }
       afterWorkflowId = last.workflowId;
     }
+    this.cursor = afterWorkflowId;
   }
 
   /** Start resuming `row` once a slot is free; doesn't wait for the resume. */
