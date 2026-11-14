@@ -23,6 +23,7 @@ import type {
   WorkflowTraceLockAcquired,
   WorkflowTraceLockLost,
   WorkflowTraceRecoveryReclaim,
+  WorkflowTraceRetentionSweep,
   WorkflowTraceRunEnd,
   WorkflowTraceRunStart,
   WorkflowTraceStepAttemptEnd,
@@ -476,6 +477,23 @@ export function createOpenTelemetryWorkflowTracer(
         }),
       });
       span.end(e.at);
+    },
+
+    retentionSweep(e: WorkflowTraceRetentionSweep): void {
+      const { span } = start({
+        name: "workflow.retention.sweep",
+        startTime: e.startedAt,
+        parent: undefined,
+        attributes: attrs({
+          "workflow.retention.dry_run": e.dryRun,
+          "workflow.retention.deleted_runs": e.deletedRuns,
+          "workflow.retention.deleted_step_tasks": e.deletedStepTasks,
+          "workflow.retention.kept_runs": e.keptRuns,
+          "workflow.retention.complete": e.complete,
+          "workflow.duration_ms": e.durationMs,
+        }),
+      });
+      span.end(e.endedAt);
     },
 
     workerTaskStart(e: WorkflowTraceWorkerTask): void {

@@ -139,20 +139,28 @@ redisDescribe("RedisStepQueue concurrency keys", (redis) => {
   });
 
   describe("claimScanLimit", () => {
-    it("bounds how far one claim looks past blocked tasks", async () => {
+    it("bounds how far one claim looks past tasks the worker can't run", async () => {
+      const prefix = uniquePrefix("sq");
+      const q = new RedisStepQueue({ redis: redis.client(), prefix, claimScanLimit: 10 });
+      for (let i = 0; i < 20; i++) {
+        await q.enqueue({ workflowId: `foreign-${i}`, stepName: "other", input: {}, priority: 9 });
+      }
+      await q.enqueue({ workflowId: "mine", stepName: "send", input: {}, priority: 1 });
+
+      expect(await q.claim({ workerId: "w-1", limit: 5, stepNames: ["send"] })).toEqual([]);
+      const wide = new RedisStepQueue({ redis: redis.client(), prefix, claimScanLimit: 100 });
+      const claimed = await wide.claim({ workerId: "w-1", limit: 5, stepNames: ["send"] });
+      expect(claimed.map((t) => t.workflowId)).toEqual(["mine"]);
+    });
+
+    it("does not limit a backlog held back by a full concurrency key", async () => {
       const prefix = uniquePrefix("sq");
       const q = new RedisStepQueue({ redis: redis.client(), prefix, claimScanLimit: 10 });
       for (let i = 0; i < 20; i++) await q.enqueue({ ...keyed(i), priority: 9 });
-      await q.enqueue({
-        workflowId: "other",
-        stepName: "send",
-        input: {},
-        priority: 1,
-      });
+      await q.enqueue({ workflowId: "other", stepName: "send", input: {}, priority: 1 });
 
-      expect((await q.claim({ workerId: "w-1", limit: 5 })).map((t) => t.workflowId)).toEqual([
-        "wf-0",
-      ]);
+      const claimed = await q.claim({ workerId: "w-1", limit: 5 });
+      expect(claimed.map((t) => t.workflowId)).toEqual(["wf-0", "other"]);
     });
   });
 });

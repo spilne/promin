@@ -1,4 +1,4 @@
-import { it, expect } from "bun:test";
+import { beforeEach, it, expect } from "bun:test";
 import { cpSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,21 +15,32 @@ import { PostgresWorkflowStorage } from "../postgres-workflow-storage.ts";
 
 const DRIZZLE = new URL("../../../drizzle", import.meta.url).pathname;
 
-/** A copy of the migrations folder holding the first `count` migrations (the chain an old database applied). */
-function chainFolder(count: number): string {
-  const dir = mkdtempSync(join(tmpdir(), "promin-pg-baseline-"));
+/** A copy of the migrations folder holding the chain up to `lastIdx` (what an old database applied). */
+function chainFolder(lastIdx: number): string {
+  const dir = mkdtempSync(join(tmpdir(), "promin-pg-chain-"));
   mkdirSync(join(dir, "meta"));
   const journal = JSON.parse(readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"));
-  journal.entries = journal.entries.filter((e: { idx: number }) => e.idx < count);
-  for (const e of journal.entries) cpSync(join(DRIZZLE, `${e.tag}.sql`), join(dir, `${e.tag}.sql`));
+  journal.entries = journal.entries.filter((e: { idx: number }) => e.idx <= lastIdx);
+  for (const entry of journal.entries as { tag: string }[]) {
+    cpSync(join(DRIZZLE, `${entry.tag}.sql`), join(dir, `${entry.tag}.sql`));
+  }
   writeFileSync(join(dir, "meta", "_journal.json"), JSON.stringify(journal));
   return dir;
 }
 
-/** Only the baseline. */
-const baselineOnlyFolder = () => chainFolder(1);
+/** The chain an old database applied: the baseline alone. */
+function baselineOnlyFolder(): string {
+  return chainFolder(0);
+}
 
 postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
+  beforeEach(async () => {
+    // Each test must start with its own historical chain, including the ledger.
+    await pg.sql`DROP SCHEMA public CASCADE`;
+    await pg.sql`CREATE SCHEMA public`;
+    await pg.sql`DROP SCHEMA IF EXISTS drizzle CASCADE`;
+  });
+
   it("adds step_progress to a baseline-only database, idempotently", async () => {
     await migrate(pg.db, { migrationsFolder: baselineOnlyFolder() });
     const has = async () =>
@@ -76,10 +87,31 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
     });
   });
 
-  it("adds claim lanes to a database migrated through 0001, keeping its queued tasks", async () => {
-    await pg.sql`DROP SCHEMA public CASCADE`;
-    await pg.sql`CREATE SCHEMA public`;
-    await pg.sql`DROP SCHEMA IF EXISTS drizzle CASCADE`;
+  it("adds the retention index to a database at 0001, idempotently, and the sweep reads work", async () => {
+    // Bring the database to the chain's state at 0001: everything through 0001 applied, 0002 not.
+    await migrate(pg.db, { migrationsFolder: chainFolder(1) });
+    await pg.sql`DROP INDEX IF EXISTS wf_workflows_retention_idx`;
+    const hasIndex = async () =>
+      (await pg.sql`SELECT 1 FROM pg_indexes WHERE indexname = 'wf_workflows_retention_idx'`)
+        .length === 1;
+    expect(await hasIndex()).toBe(false);
+
+    await migrate(pg.db);
+    await migrate(pg.db);
+    expect(await hasIndex()).toBe(true);
+
+    const storage = await PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false });
+    await storage.createWorkflow({ workflowId: "ret-up-1", workflowName: "w", input: {} });
+    await storage.completeWorkflow({ workflowId: "ret-up-1", result: 1 });
+    const rows = await storage.listRetentionCandidates({
+      completedBefore: new Date(Date.now() + 60_000),
+      limit: 10,
+      name: "w",
+    });
+    expect(rows.map((r) => r.workflowId)).toEqual(["ret-up-1"]);
+  });
+
+  it("adds claim lanes to a database migrated through 0002, keeping its queued tasks", async () => {
     await migrate(pg.db, { migrationsFolder: chainFolder(2) });
     const lane = async () =>
       pg.sql`SELECT attgenerated FROM pg_attribute

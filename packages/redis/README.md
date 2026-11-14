@@ -57,7 +57,7 @@ Key layout (`<p>` is the store's `prefix`):
 | `RedisWorkflowStorage`     | `<p>:{wf:<id>}` (run hash) and `<p>:{wf:<id>}:steps:<run>`, `:tasks:…`, `:lock`, `:fence`, `:journal:…`, `:signals`, `:signal_tokens`, `:streams:…`, `:child-intents`, … | one per workflow           |
 |                            | `<p>:{idx}:status:<s>`, `:name:<n>`, `:ns:<ns>`, `:children:<id>`, ordering sets, the sleep schedule                                                                     | one for all indexes        |
 |                            | `<p>:wf-idempotency:<ns>:<name>:<key>`, `<p>:signal_token:<tokenId>` (single-key lookups)                                                                                | any                        |
-| `RedisStepQueue`           | `{<p>}:task:<id>`, `{<p>}:pending`, running / done sets, concurrency-key sets                                                                                            | one per queue              |
+| `RedisStepQueue`           | `{<p>}:task:<id>`, `{<p>}:pending`, claim lanes and `ready` index, running / done sets, concurrency-key sets                                                             | one per queue              |
 | `RedisSchedulerStorage`    | `{<p>}:schedule:<id>`, per-namespace due sets, the namespace set, leader leases                                                                                          | one per scheduler prefix   |
 | `RedisStateMachineStorage` | `<p>:{sm:<id>}:machine`, `:events`, `:lock`                                                                                                                              | one per machine            |
 | `RedisLeaderLeaseStore`    | `<p>:{<key>}:…` (holder with `PX`, persistent epoch counter); a prefix with its own tag keeps that tag                                                                   | per lease, or the prefix's |
@@ -71,14 +71,14 @@ Every key of one workflow carries the hash tag `{wf:<workflowId>}`, so all of a 
 
 The other stores are Cluster-safe too:
 
-- **Step queue**: every key starts with `{<prefix>}`, so a whole queue sits in one slot. A claim walks the shared pending set and moves tasks between sets in one script. Queues with different prefixes land in different slots. A lease store that fences `requeueStuck` must keep its keys in the queue's slot: construct it with `prefix: "{<queue prefix>}"`. The queue's constructor rejects a lease store in another slot.
+- **Step queue**: every key starts with `{<prefix>}`, so a whole queue sits in one slot. A claim merges the heads of the claim lanes and moves tasks between sets in one script. Queues with different prefixes land in different slots. A lease store that fences `requeueStuck` must keep its keys in the queue's slot: construct it with `prefix: "{<queue prefix>}"`. The queue's constructor rejects a lease store in another slot.
 - **Scheduler**: every key, leader leases included, starts with `{<prefix>}`. A fenced poll commit checks the lease epoch and writes many schedules and due sets in one script. Namespaces are tracked in a set, so `findDueAcross` and listing every namespace need no `KEYS`.
 - **State machines**: each machine's keys carry the tag `{sm:<id>}`. There is no cross-machine key.
 - **Leader leases**: `RedisLeaderLeaseStore` tags each lease's keys with `{<key>}`. A prefix that carries its own hash tag wins, which is how the scheduler and step queue keep leases in their slot.
 
 ## RedisStepQueue
 
-Distributed `StepQueue`. Pending tasks sit in a priority-ordered sorted set (higher priority first, FIFO within a priority); enqueue, claim, complete, fail and requeue are Lua scripts, so each is atomic.
+Distributed `StepQueue`. Pending tasks sit in claim lanes, priority-ordered sorted sets (higher priority first, FIFO within a priority): one for plain tasks, one per concurrency key, one per fairness key of each step group. A lexicographic `ready` index holds the lanes a claim may take from; enqueue, claim, complete, fail and requeue are Lua scripts that keep it current, so each is atomic.
 
 ```typescript
 import { RedisStepQueue, type RedisStoreClient } from "@promin/redis";
@@ -124,8 +124,10 @@ await queue.purge({ completedBefore: new Date(Date.now() - 24 * 60 * 60 * 1000) 
 
 - **Routing**: a worker claims a task only when the task's `needs` are a subset of its `capabilities`, its step is in `stepNames` and its version in `versions` (when given). The checks run in the claim script, so tasks a worker can't run never block the ones behind them.
 - **Concurrency keys**: tasks sharing `(concurrencyScope, concurrencyKey)` are capped at `concurrencyLimit` running at once, across all workers. The running count is a Redis set updated in the same script as the claim, and the slot is released on complete, fail, requeue and `release()`.
-- **Step groups**: `groupName`, `groupMaxConcurrent`, `groupMaxStarts` / `groupWindowMs` and `fairnessKey` enforce [rate-limit groups](../workflow/src/lib/distributed/README.md#rate-limit-and-concurrency-groups-with-fairness) in the claim script: a running set per group, a sorted set of claim times per group (the rate window, trimmed on claim and expiring when idle), and a running set per fairness key. While no grouped task is pending the claim takes the plain path; otherwise it ranks the scanned tasks fairly first, so fairness sees the first `claimScanLimit` pending tasks.
-- **Claim scan**: one `claim()` examines at most `claimScanLimit` (default 1000) pending tasks while skipping ones it can't take, which bounds how long a backlog of blocked tasks can hold Redis.
+- **Step groups**: `groupName`, `groupMaxConcurrent`, `groupMaxStarts` / `groupWindowMs` and `fairnessKey` enforce [rate-limit groups](../workflow/src/lib/distributed/README.md#rate-limit-and-concurrency-groups-with-fairness) in the claim script: a running set per group, a sorted set of claim times per group (the rate window, trimmed on claim and expiring when idle), and a running set per fairness key. Each fairness key has its own lane and each group its own index of lanes, ranked by priority, then the key's running count (so keys interleave round-robin and one already running yields), then age. Fairness is therefore exact however deep a key's queue is.
+- **Held-back work is not scanned**: a concurrency key at its limit, or a group out of slots or starts, is absent from the `ready` index until a settle, release or requeue (or, for a rate window, the next claim after the window frees a slot, via the `gtimers` index) gives it room. A claim never reads the backlog behind it, so its cost follows the number of open lanes and the claim `limit`, not the pending count. Tasks of one group or key are assumed to carry the same limits. A grouped task that also has a full concurrency key is the exception: it is stepped over inside its lane (bounded by `claimScanLimit`).
+- **Claim scan**: routing is the one thing a claim still pays per task. When a lane's head is a step, version or capability the worker can't run, the claim walks past it, examining at most `claimScanLimit` (default 1000) pending tasks per call, which bounds how long a backlog of other workers' tasks can hold Redis.
+- **Upgrading**: a queue written by an earlier release is indexed by the first claim (one script pass over `pending`, then marker key `{<p>}:lanes:v2`); running tasks need nothing. Run old and new workers against one queue only briefly: an old worker's enqueue does not join a lane, so the new claim does not see it until the next first-claim backfill (delete the marker to redo it).
 - **Idempotent enqueue**: while a task for `(workflowId, stepName)` is pending or running, `enqueue()` returns its id instead of adding another.
 
 ## RedisDurableScheduler

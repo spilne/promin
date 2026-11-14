@@ -19,8 +19,15 @@
     {
       "idx": 2,
       "version": "7",
-      "when": 1762732800000,
-      "tag": "0002_claim_lanes",
+      "when": 1765238400000,
+      "tag": "0002_retention_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1765324800000,
+      "tag": "0003_claim_lanes",
       "breakpoints": true
     }
   ]

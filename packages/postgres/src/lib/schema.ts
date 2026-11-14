@@ -117,6 +117,18 @@ export const workflows = pgTable(
           ].join(", "),
         )})`,
       ),
+    // The retention sweep pages ended runs oldest first by (completed_at, workflow_id).
+    index("wf_workflows_retention_idx")
+      .on(t.completedAt, t.workflowId)
+      .where(
+        sql`${t.statusId} IN (${sql.raw(
+          [
+            WorkflowStatusIds.id.completed,
+            WorkflowStatusIds.id.failed,
+            WorkflowStatusIds.id.tripwire,
+          ].join(", "),
+        )})`,
+      ),
     index("wf_workflows_parent_idx")
       .on(t.parentWorkflowId)
       .where(sql`${t.parentWorkflowId} IS NOT NULL`),
@@ -282,7 +294,7 @@ export const workflowLocks = pgTable("wf_workflow_locks", {
  * SQL of `wf_step_queue.lane`: namespace, concurrency scope/key/limit and
  * group fields and fairness key, each marked so NULL and '' differ. Tasks of
  * one lane are indistinguishable to claim's admission checks. Keep in sync
- * with `drizzle/0002_claim_lanes.sql` (the drift test compares the shape).
+ * with `drizzle/0003_claim_lanes.sql` (the drift test compares the shape).
  */
 export const STEP_QUEUE_LANE_SQL =
   `coalesce('=' || namespace, '~') || chr(31) || coalesce('=' || concurrency_scope, '~') || chr(31) || ` +
