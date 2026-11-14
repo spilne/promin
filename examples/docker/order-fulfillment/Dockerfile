@@ -10,7 +10,6 @@ WORKDIR /app
 COPY package.json bun.lock ./
 COPY packages packages
 COPY examples examples
-COPY documentation documentation
 
 RUN bun install
 

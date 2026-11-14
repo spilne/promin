@@ -76,8 +76,8 @@ bun run test:packages    # requires Docker; uses the builds above
 
 ## Documentation
 
-Fumadocs/Next.js renders the checked-in MDX pages as a static site in
-`.target/docs`, served under `/promin`. Source READMEs and executable examples
+VitePress renders the checked-in Markdown pages as a static site in
+`documentation/.vitepress/dist`, served under `/promin`. Source READMEs and executable examples
 are embedded by `documentation/build.ts`; see
 [documentation/README.md](documentation/README.md) for authoring commands.
 

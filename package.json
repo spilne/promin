@@ -12,7 +12,7 @@
     "test:src": "bun --conditions=@promin/source test",
     "test:e2e": "bunx nx run-many -t e2e",
     "evals:ci": "bun --conditions=@promin/source run packages/zorya/examples/evals/run-ci.ts",
-    "fmt": "bunx nx run-many -t format && oxfmt -c .oxfmtrc.json scripts documentation/build.ts",
+    "fmt": "bunx nx run-many -t format && oxfmt -c .oxfmtrc.json scripts documentation/build.ts documentation/.vitepress",
     "ff": "bun run fmt",
     "format": "bun run fmt",
     "bench": "bun run benchmarks/cross-language/run-all.ts",
@@ -30,15 +30,15 @@
     "demo:user-app": "bun --conditions=@promin/source run packages/zorya/examples/user-app.ts",
     "demo:agent": "bun --conditions=@promin/source run examples/agent-quickstart.ts",
     "docs": "bun run documentation:build:html",
-    "docs:dev": "bun run documentation:build && bun run --filter @promin/docs dev",
-    "docs:serve": "bunx serve .target/docs -p 4002",
-    "clean": "rm -rf node_modules packages/*/node_modules .nx/cache .nx/workspace-data .target packages/*/dist packages/*/dist-examples packages/*/dist-spec documentation/generator/.next documentation/generator/node_modules",
+    "docs:dev": "bun run documentation:dev",
+    "docs:serve": "bun run documentation:preview",
+    "clean": "rm -rf node_modules packages/*/node_modules .nx/cache .nx/workspace-data .target packages/*/dist packages/*/dist-examples packages/*/dist-spec documentation/.vitepress/cache documentation/.vitepress/dist",
     "prepare": "git config core.hooksPath .githooks || true",
-    "build:packages": "bunx nx run-many -t build --exclude=@promin/docs",
+    "build:packages": "bunx nx run-many -t build",
     "build:release": "bun run build:packages && bun run build:ui",
-    "fmt:check": "bunx nx run-many -t format-check && oxfmt -c .oxfmtrc.check.json --check scripts documentation/build.ts",
+    "fmt:check": "bunx nx run-many -t format-check && oxfmt -c .oxfmtrc.check.json --check scripts documentation/build.ts documentation/.vitepress",
     "typecheck:scripts": "tsc -p tsconfig.scripts.json --noEmit",
-    "lint:scripts": "oxlint -c .oxlintrc.json scripts documentation/build.ts",
+    "lint:scripts": "oxlint -c .oxlintrc.json scripts documentation/build.ts documentation/.vitepress",
     "release": "bun scripts/release.ts",
     "release:verify": "bun scripts/release.ts --verify-tag",
     "release:check": "bun run build:release && bun scripts/smoke-package-exports.ts",
@@ -47,25 +47,28 @@
     "test:release": "bun --conditions=@promin/source test scripts/test",
     "documentation:build": "bun documentation/build.ts",
     "documentation:check": "bun documentation/build.ts --check",
-    "documentation:build:html": "bun run documentation:build && bun run --filter @promin/docs build",
+    "documentation:build:html": "bun run documentation:build && vitepress build documentation && bun scripts/check-documentation.ts",
     "ci": "bun run fmt:check && bun run lint && bun run lint:scripts && bun run typecheck && bun run typecheck:scripts && bun run test:release && bun run test && bun run evals:ci && bun run documentation:check",
-    "test:packages": "bun --conditions=@promin/source test scripts/integration"
+    "test:packages": "bun --conditions=@promin/source test scripts/integration",
+    "documentation:dev": "bun run documentation:build && vitepress dev documentation",
+    "documentation:preview": "vitepress preview documentation --port 4002"
   },
   "private": true,
   "devDependencies": {
     "@nx/js": "21.4.1",
     "@types/bun": "^1.3.3",
+    "github-slugger": "^2.0.0",
     "mitata": "^1.0.34",
     "nx": "21.4.1",
     "oxfmt": "^0.26.0",
     "oxlint": "^1.41.0",
-    "typescript": "~5.9.2"
+    "typescript": "~5.9.2",
+    "vitepress": "^1.6.4"
   },
   "workspaces": {
     "packages": [
       "packages/*",
-      "examples",
-      "documentation/generator"
+      "examples"
     ],
     "catalog": {
       "@spilne/perfect-core": "^0.3.0",

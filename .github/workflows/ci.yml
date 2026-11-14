@@ -293,7 +293,7 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck:scripts
       - run: bun run lint:scripts
-      - run: bunx oxfmt -c .oxfmtrc.check.json --check scripts documentation/build.ts
+      - run: bunx oxfmt -c .oxfmtrc.check.json --check scripts documentation/build.ts documentation/.vitepress
       - run: bun run test:release
       - run: bun run release:check
       - run: bun run test:packages

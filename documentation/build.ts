@@ -2,10 +2,10 @@ import { readFile, readdir, writeFile } from "node:fs/promises";
 import { relative, resolve, dirname, sep } from "node:path";
 import { ROOT, workspacePackages } from "../scripts/workspace.ts";
 
-const DOCS = resolve(ROOT, "documentation/content/docs");
+const DOCS = resolve(ROOT, "documentation/docs");
 const GITHUB = "https://github.com/spilne/promin/blob/main/";
 
-export function markdownToMdx(markdown: string, file: string): string {
+export function markdownForSite(markdown: string, file: string): string {
   let fence: string | undefined;
   return markdown
     .split("\n")
@@ -17,25 +17,33 @@ export function markdownToMdx(markdown: string, file: string): string {
         return line;
       }
       if (fence) return line;
-      // Imported READMEs are Markdown, not JSX. Preserve code spans while
-      // escaping type parameters and braces that MDX would treat as code.
-      return line
-        .split(/(`+[^`]*`+)/g)
-        .map((part, i) => {
-          if (i % 2) return part;
-          return part
-            .replace(/\]\((\.{1,2}\/[^\s)]+)([^)]*)\)/g, (_all, target: string, title: string) => {
-              const path = relative(ROOT, resolve(dirname(file), target))
-                .split(sep)
-                .join("/");
-              return `](${GITHUB}${path}${title})`;
-            })
-            .replaceAll("{", "&#123;")
-            .replaceAll("}", "&#125;")
-            .replaceAll("<", "&lt;")
-            .replaceAll(">", "&gt;");
-        })
-        .join("");
+      // VitePress renders Markdown through Vue. Preserve code spans while
+      // escaping type parameters and template expressions in prose.
+      const quote = line.match(/^(\s*(?:> ?)+)/)?.[0] ?? "";
+      return (
+        quote +
+        line
+          .slice(quote.length)
+          .split(/(`+[^`]*`+)/g)
+          .map((part, i) => {
+            if (i % 2) return part;
+            return part
+              .replace(
+                /\]\((\.{1,2}\/[^\s)]+)([^)]*)\)/g,
+                (_all, target: string, title: string) => {
+                  const path = relative(ROOT, resolve(dirname(file), target))
+                    .split(sep)
+                    .join("/");
+                  return `](${GITHUB}${path}${title})`;
+                },
+              )
+              .replaceAll("{", "&#123;")
+              .replaceAll("}", "&#125;")
+              .replaceAll("<", "&lt;")
+              .replaceAll(">", "&gt;");
+          })
+          .join("")
+      );
     })
     .join("\n");
 }
@@ -57,11 +65,11 @@ export function renderEmbed(source: string, file: string, region?: string): stri
     );
     return `${fence}ts\n${content}\n${fence}`;
   }
-  return markdownToMdx(content, file);
+  return markdownForSite(content, file);
 }
 
 export async function rewriteEmbeds(markdown: string, root = ROOT): Promise<string> {
-  const pattern = /\{\/\* @embed ([^\s]+) \*\/\}[\s\S]*?\{\/\* @end \*\/\}/g;
+  const pattern = /<!-- @embed ([^\s]+) -->[\s\S]*?<!-- @end -->/g;
   const matches = [...markdown.matchAll(pattern)];
   if (
     matches.length !== [...markdown.matchAll(/@embed\b/g)].length ||
@@ -76,7 +84,7 @@ export async function rewriteEmbeds(markdown: string, root = ROOT): Promise<stri
     const content = renderEmbed(await readFile(file, "utf8"), file, region);
     markdown = markdown.replace(
       match[0],
-      `{/* @embed ${match[1]} */}\n\n${content}\n\n{/* @end */}`,
+      `<!-- @embed ${match[1]} -->\n\n${content}\n\n<!-- @end -->`,
     );
   }
   return markdown;
@@ -86,13 +94,13 @@ async function* pages(dir: string): AsyncGenerator<string> {
   for (const entry of await readdir(dir, { withFileTypes: true })) {
     const path = resolve(dir, entry.name);
     if (entry.isDirectory()) yield* pages(path);
-    else if (/\.mdx?$/.test(entry.name)) yield path;
+    else if (entry.name.endsWith(".md")) yield path;
   }
 }
 
 async function main(): Promise<void> {
   const check = process.argv.includes("--check");
-  const coverage = await readFile(resolve(DOCS, "index.mdx"), "utf8");
+  const coverage = await readFile(resolve(DOCS, "index.md"), "utf8");
   const packages = await workspacePackages();
   for (const { manifest, directory } of packages) {
     if (!coverage.includes(`\`${manifest.name}\``))

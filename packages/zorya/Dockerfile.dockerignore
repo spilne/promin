@@ -23,8 +23,8 @@ docs
 .claude
 benchmarks
 
-documentation/generator/.next
-documentation/generator/node_modules
+documentation/.vitepress/cache
+documentation/.vitepress/dist
 
 *.log
 .env

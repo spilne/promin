@@ -31,7 +31,7 @@ The effect runtime, streams and concurrency primitives come from [perfect](https
 
 ## Quick Start
 
-For a conversational agent with a tool and stored thread history, follow the [agent quickstart](./documentation/content/docs/agent/quickstart.mdx). It runs with `bun run demo:agent` and an OpenAI API key.
+For a conversational agent with a tool and stored thread history, follow the [agent quickstart](./documentation/docs/agent/quickstart.md). It runs with `bun run demo:agent` and an OpenAI API key.
 
 ```bash
 bun install
@@ -151,8 +151,8 @@ condition, so tests and the UI build need no prior `build`.
 
 ## Documentation
 
-- **[Docs](./documentation/)** — full documentation (build with `bun run docs`)
+- **[Docs](https://spilne.github.io/promin/)** — full documentation (build with `bun run docs`)
 - **[Releasing](./RELEASING.md)** — prepare shared versions, validate package artifacts, publish and deploy docs
 - **[Examples](./examples/)** — real-world scenarios, ordered simple → advanced
-- **[Glossary](./documentation/content/docs/reference/glossary.mdx)** — Promin concepts mapped to Temporal, Airflow, Spark, Pandas/Polars
+- **[Glossary](./documentation/docs/reference/glossary.md)** — Promin concepts mapped to Temporal, Airflow, Spark, Pandas/Polars
 - **[perfect](https://github.com/spilne/perfect)** — the effect runtime promin is built on, with its own guide and examples

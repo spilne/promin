@@ -1,0 +1,59 @@
+---
+title: "Order processing workflow \u2014 validate, charge, ship"
+description: "If it crashes after charging, it resumes from shipping (not re-charges)."
+---
+
+<!-- @embed examples/02-workflow/01-order-processing.ts -->
+
+```ts
+/**
+ * Order processing workflow — validate, charge, ship.
+ * If it crashes after charging, it resumes from shipping (not re-charges).
+ */
+
+import { workflow, createWorkflowRunner } from "@promin/workflow";
+import { PostgresWorkflowStorage, migrate } from "@promin/postgres";
+import { createPostgresDb } from "@spilne/perfect-postgres";
+
+const db = createPostgresDb(process.env["DATABASE_URL"] ?? "postgres://localhost:5432/promin");
+
+await migrate(db);
+const storage = await PostgresWorkflowStorage.create({ db });
+const runner = createWorkflowRunner({ storage });
+
+const processOrder = workflow<{ orderId: string; amount: number }>({
+  name: "process-order",
+})
+  .step("validate", async ({ input }) => {
+    if (input.amount <= 0) throw new Error("Invalid amount");
+    return { valid: true, orderId: input.orderId };
+  })
+  .step("charge", async ({ prev }) => {
+    const tx = await chargeCard(prev.orderId, 99.99);
+    return { txId: tx.id };
+  })
+  .step("ship", async ({ prev }) => {
+    const tracking = await createShipment(prev.txId);
+    return { trackingNumber: tracking.number };
+  })
+  .build();
+
+// Run — crashes resume from last completed step
+const result = await runner.run({
+  workflow: processOrder,
+  workflowId: "order-123",
+  input: { orderId: "ord_42", amount: 99.99 },
+});
+
+console.log(result); // { trackingNumber: "1Z..." }
+
+// Stubs
+async function chargeCard(_id: string, _amount: number) {
+  return { id: "tx_1" };
+}
+async function createShipment(_txId: string) {
+  return { number: "1Z999" };
+}
+```
+
+<!-- @end -->
