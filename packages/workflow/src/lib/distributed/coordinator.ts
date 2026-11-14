@@ -50,14 +50,44 @@ import { buildStubWorkflow } from "./stub-workflow.ts";
 import { isStaleLeaseError } from "../scheduler/leader-lease.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import { PollLoop } from "../shared/poll-loop.ts";
+import type { Wakeups } from "../shared/wakeups.ts";
 import { hasCapability } from "../durable/storage/capabilities.ts";
 import { emitTrace, type WorkflowTracer } from "../durable/workflow-tracer.ts";
+import {
+  DEFAULT_RETENTION_INTERVAL_MS,
+  RetentionSweeper,
+  type RetentionSweeperConfig,
+} from "../durable/retention-sweeper.ts";
+import type { RetentionPolicy } from "../durable/retention-policy.ts";
 
 export { buildStubWorkflow } from "./stub-workflow.ts";
+
+/**
+ * Retention of the distributed runner: the default `RetentionPolicy` fields
+ * plus the sweeper's knobs. The leader sweeps every `intervalMs` (default one
+ * hour) on the sweep loop, with this runner's storage, step queue, registry,
+ * clock and tracer.
+ */
+export interface DistributedRetentionConfig
+  extends
+    RetentionPolicy,
+    Pick<
+      RetentionSweeperConfig,
+      "workflows" | "batchSize" | "perSweepBudgetMs" | "intervalMs" | "onSweep"
+    > {}
 
 export interface DistributedRunnerConfig {
   /** Workflow storage for state persistence. */
   storage: WorkflowStorage;
+  /**
+   * Retention of ended runs and step-queue tasks, carried out by the leader's
+   * sweep loop (`startLoop()`). Needs a storage with the `retention`
+   * capability. Per-workflow policies come from `workflow({ retention })` of
+   * the `registry`'s workflows and of `retention.workflows`. Off by default:
+   * nothing is deleted. Failures are reported through `onError` with source
+   * `"retention"` and never stop the loop.
+   */
+  retention?: DistributedRetentionConfig;
   /**
    * Lifecycle tracer for the runs this coordinator drives (see
    * `WorkflowTracer`). The trace context of each dispatched step crosses the
@@ -143,6 +173,11 @@ export interface DistributedRunnerConfig {
    */
   clock?: WallClock;
   /**
+   * Lets a step's settle (`"results"`) cut the executor's wait for the next
+   * poll short. A latency hint only; polling still finds every outcome.
+   */
+  wakeups?: Wakeups;
+  /**
    * Called when background work fails: a sweep (`"sweep"`), adopting an
    * orphaned run (`"recovery"`), a step executor's storage check
    * (`"step-wait"`) or a result wait's storage check (`"result-wait"`).
@@ -159,7 +194,7 @@ export interface DistributedRunnerConfig {
 
 /** A background-loop failure reported through `DistributedRunnerConfig.onError`. */
 export interface DistributedRunnerErrorEvent {
-  readonly source: "sweep" | "recovery" | "step-wait" | "result-wait";
+  readonly source: "sweep" | "recovery" | "retention" | "step-wait" | "result-wait";
   readonly error: unknown;
   /** Failures in a row for this loop, including this one. */
   readonly consecutiveFailures: number;
@@ -221,6 +256,11 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
   private isLeader = false;
   /** When the leader next scans for orphaned runs; unset until it has led. */
   private nextRecoveryAtMs?: number;
+  private readonly retentionSweeper?: RetentionSweeper;
+  private readonly retentionIntervalMs: number;
+  /** When the leader next sweeps retention; unset until it has led. */
+  private nextRetentionAtMs?: number;
+  private retentionInFlight?: Promise<void>;
   /** Runs this instance is driving, by workflow id. */
   private runningWorkflows = new Map<string, Promise<LocalOutcome>>();
   /** Result waits on runs driven elsewhere, checked by `resultLoop`. */
@@ -241,6 +281,29 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     this.maxAdoptionsPerSweep = Math.max(1, Math.trunc(config.maxAdoptionsPerSweep ?? 500));
     const onError = config.onError ?? defaultOnError;
     this.onError = onError;
+    this.retentionIntervalMs = config.retention?.intervalMs ?? DEFAULT_RETENTION_INTERVAL_MS;
+    if (config.retention !== undefined) {
+      const {
+        workflows,
+        batchSize,
+        perSweepBudgetMs,
+        onSweep,
+        intervalMs: _i,
+        ...policy
+      } = config.retention;
+      this.retentionSweeper = new RetentionSweeper({
+        storage: config.storage,
+        stepQueue: config.stepQueue,
+        retention: policy,
+        clock: this.clock,
+        ...(config.registry !== undefined && { registry: config.registry }),
+        ...(config.tracer !== undefined && { tracer: config.tracer }),
+        ...(workflows !== undefined && { workflows }),
+        ...(batchSize !== undefined && { batchSize }),
+        ...(perSweepBudgetMs !== undefined && { perSweepBudgetMs }),
+        ...(onSweep !== undefined && { onSweep }),
+      });
+    }
 
     this.sweepLoop = new PollLoop({
       name: "distributed-runner-sweep",
@@ -271,6 +334,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
         maxAgeMs: Math.max(1, Math.floor(stepPollIntervalMs / 2)),
       }),
       pollIntervalMs: stepPollIntervalMs,
+      ...(config.wakeups !== undefined && { wakeups: config.wakeups }),
       staleTimeoutMs: this.workerTimeoutMs,
       ...(config.stepWaitTimeoutMs !== undefined && {
         stepWaitTimeoutMs: config.stepWaitTimeoutMs,
@@ -432,6 +496,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
         if (this.isLeader) {
           this.isLeader = false;
           this.nextRecoveryAtMs = undefined;
+          this.nextRetentionAtMs = undefined;
           try {
             await this.leaderElection.release();
           } catch (error) {
@@ -454,6 +519,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     const done = this.sweepLoopDone;
     await this.sweepLoop.stop();
     await done;
+    await this.retentionInFlight;
   }
 
   private async _sweepOnce(): Promise<void> {
@@ -461,6 +527,7 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
     this.isLeader = await this.leaderElection.tryAcquire();
     if (!this.isLeader) {
       this.nextRecoveryAtMs = undefined;
+      this.nextRetentionAtMs = undefined;
       this.recoveryCursor = undefined;
       return;
     }
@@ -474,11 +541,13 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
         this.nextRecoveryAtMs = finished ? now + this.recoveryIntervalMs : now;
       }
       await this._tickDeadWorkers();
+      await this._sweepRetention();
     } catch (error) {
       // A fenced write was rejected: another instance leads now.
       if (isStaleLeaseError(error)) {
         this.isLeader = false;
         this.nextRecoveryAtMs = undefined;
+        this.nextRetentionAtMs = undefined;
         this.recoveryCursor = undefined;
       }
       throw error;
@@ -633,6 +702,35 @@ export class DistributedWorkflowRunner implements WorkflowRunner {
       );
     }
     return def;
+  }
+
+  /** The leader's retention sweep, on its own cadence. Its failures never fail the sweep loop. */
+  private async _sweepRetention(): Promise<void> {
+    const sweeper = this.retentionSweeper;
+    if (sweeper === undefined) return;
+    const now = this.clock.currentTimeMs();
+    // Not at the moment of taking over: recovery comes first.
+    if (this.nextRetentionAtMs === undefined) {
+      this.nextRetentionAtMs = now + this.retentionIntervalMs;
+      return;
+    }
+    if (now < this.nextRetentionAtMs) return;
+    this.nextRetentionAtMs = now + this.retentionIntervalMs;
+    // In the background: a sweep may run for its whole budget, and the loop must
+    // keep requeueing the steps of dead workers meanwhile. One at a time.
+    if (this.retentionInFlight !== undefined) return;
+    const inFlight: Promise<void> = sweeper
+      .sweep()
+      .then(
+        () => undefined,
+        (error: unknown) => {
+          this.onError({ source: "retention", error, consecutiveFailures: 1 });
+        },
+      )
+      .finally(() => {
+        if (this.retentionInFlight === inFlight) this.retentionInFlight = undefined;
+      });
+    this.retentionInFlight = inFlight;
   }
 
   private async _tickDeadWorkers(): Promise<void> {

@@ -1757,6 +1757,23 @@ export function stepQueueTestSuite(
         expect((await q.get(running))?.status).toBe("running");
         expect((await q.get(pending))?.status).toBe("pending");
       });
+
+      it("deletes at most `limit` tasks per call, oldest first, until none are left", async () => {
+        const q = await getQueue();
+        const ids: string[] = [];
+        for (let n = 0; n < 5; n++) ids.push(await q.enqueue(task(`lim-${n}`, "s")));
+        const claimed = await q.claim({ workerId: "w-1", limit: 5 });
+        for (const t of claimed) {
+          await q.complete({ taskId: t.id, claimToken: t.claimToken, result: 1, durationMs: 1 });
+          await new Promise((r) => setTimeout(r, 3));
+        }
+        const cutoff = new Date(Date.now() + 60_000);
+        expect(await q.purge({ completedBefore: cutoff, limit: 2 })).toBe(2);
+        expect(await q.purge({ completedBefore: cutoff, limit: 2 })).toBe(2);
+        expect(await q.purge({ completedBefore: cutoff, limit: 2 })).toBe(1);
+        expect(await q.purge({ completedBefore: cutoff, limit: 2 })).toBe(0);
+        for (const id of ids) expect(await q.get(id)).toBeUndefined();
+      });
     });
 
     // -------------------------------------------------------------------

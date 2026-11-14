@@ -216,6 +216,23 @@ export interface WorkflowTraceRecoveryReclaim {
   readonly at: Date;
 }
 
+/** One `RetentionSweeper` sweep ended (or, with `dryRun`, finished counting). */
+export interface WorkflowTraceRetentionSweep {
+  readonly startedAt: Date;
+  readonly endedAt: Date;
+  readonly durationMs: number;
+  /** Nothing was deleted: the counts are what a real sweep would have deleted. */
+  readonly dryRun: boolean;
+  /** Runs deleted (or, with `dryRun`, that would be). */
+  readonly deletedRuns: number;
+  /** Terminal step-queue tasks deleted. */
+  readonly deletedStepTasks: number;
+  /** Ended runs the sweeper looked at and kept (relations, owed rollbacks, keep-at-least, changed since listed). */
+  readonly keptRuns: number;
+  /** False when the per-sweep budget ended the sweep before the backlog was drained. */
+  readonly complete: boolean;
+}
+
 /** A worker claimed a queued step task and starts its attempt. */
 export interface WorkflowTraceWorkerTask {
   readonly taskId: string;
@@ -266,6 +283,7 @@ export interface WorkflowTracerCallbacks {
   compensationStep(event: WorkflowTraceCompensationStep): void | Promise<void>;
   compensationEnd(event: WorkflowTraceCompensationEnd): void | Promise<void>;
   recoveryReclaim(event: WorkflowTraceRecoveryReclaim): void | Promise<void>;
+  retentionSweep(event: WorkflowTraceRetentionSweep): void | Promise<void>;
   workerTaskStart(event: WorkflowTraceWorkerTask): void | Promise<void>;
   workerTaskEnd(event: WorkflowTraceWorkerTaskEnd): void | Promise<void>;
 }

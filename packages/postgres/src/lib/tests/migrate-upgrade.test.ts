@@ -1,9 +1,10 @@
-import { it, expect } from "bun:test";
+import { beforeEach, it, expect } from "bun:test";
 import { cpSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { postgresDescribe } from "../test-utils.ts";
 import { migrate } from "../migrate.ts";
+import { PgStepQueue } from "../pg-step-queue.ts";
 import { PostgresWorkflowStorage } from "../postgres-workflow-storage.ts";
 
 // ---------------------------------------------------------------------------
@@ -14,23 +15,32 @@ import { PostgresWorkflowStorage } from "../postgres-workflow-storage.ts";
 
 const DRIZZLE = new URL("../../../drizzle", import.meta.url).pathname;
 
-/** A copy of the migrations folder holding the chain up to migration `lastIdx` (what an old database applied). */
-function chainUpTo(lastIdx: number): string {
+/** A copy of the migrations folder holding the chain up to `lastIdx` (what an old database applied). */
+function chainFolder(lastIdx: number): string {
   const dir = mkdtempSync(join(tmpdir(), "promin-pg-chain-"));
   mkdirSync(join(dir, "meta"));
   const journal = JSON.parse(readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"));
   journal.entries = journal.entries.filter((e: { idx: number }) => e.idx <= lastIdx);
-  for (const e of journal.entries as Array<{ tag: string }>) {
-    cpSync(join(DRIZZLE, `${e.tag}.sql`), join(dir, `${e.tag}.sql`));
+  for (const entry of journal.entries as { tag: string }[]) {
+    cpSync(join(DRIZZLE, `${entry.tag}.sql`), join(dir, `${entry.tag}.sql`));
   }
   writeFileSync(join(dir, "meta", "_journal.json"), JSON.stringify(journal));
   return dir;
 }
 
-/** The baseline alone (the chain the oldest databases applied). */
-const baselineOnlyFolder = (): string => chainUpTo(0);
+/** The chain an old database applied: the baseline alone. */
+function baselineOnlyFolder(): string {
+  return chainFolder(0);
+}
 
 postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
+  beforeEach(async () => {
+    // Each test must start with its own historical chain, including the ledger.
+    await pg.sql`DROP SCHEMA public CASCADE`;
+    await pg.sql`CREATE SCHEMA public`;
+    await pg.sql`DROP SCHEMA IF EXISTS drizzle CASCADE`;
+  });
+
   it("adds step_progress to a baseline-only database, idempotently", async () => {
     await migrate(pg.db, { migrationsFolder: baselineOnlyFolder() });
     const has = async () =>
@@ -76,6 +86,55 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
       run: 1,
     });
   });
+
+  it("adds the retention index to a database at 0001, idempotently, and the sweep reads work", async () => {
+    // Bring the database to the chain's state at 0001: everything through 0001 applied, 0002 not.
+    await migrate(pg.db, { migrationsFolder: chainFolder(1) });
+    await pg.sql`DROP INDEX IF EXISTS wf_workflows_retention_idx`;
+    const hasIndex = async () =>
+      (await pg.sql`SELECT 1 FROM pg_indexes WHERE indexname = 'wf_workflows_retention_idx'`)
+        .length === 1;
+    expect(await hasIndex()).toBe(false);
+
+    await migrate(pg.db);
+    await migrate(pg.db);
+    expect(await hasIndex()).toBe(true);
+
+    const storage = await PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false });
+    await storage.createWorkflow({ workflowId: "ret-up-1", workflowName: "w", input: {} });
+    await storage.completeWorkflow({ workflowId: "ret-up-1", result: 1 });
+    const rows = await storage.listRetentionCandidates({
+      completedBefore: new Date(Date.now() + 60_000),
+      limit: 10,
+      name: "w",
+    });
+    expect(rows.map((r) => r.workflowId)).toEqual(["ret-up-1"]);
+  });
+
+  it("adds claim lanes to a database migrated through 0002, keeping its queued tasks", async () => {
+    await migrate(pg.db, { migrationsFolder: chainFolder(2) });
+    const lane = async () =>
+      pg.sql`SELECT attgenerated FROM pg_attribute
+        WHERE attrelid = 'wf_step_queue'::regclass AND attname = 'lane' AND NOT attisdropped`;
+    expect((await lane()).length).toBe(0);
+    await pg.sql`INSERT INTO wf_step_queue (workflow_id, step_name, concurrency_key, concurrency_scope, concurrency_limit)
+      VALUES ('old-a', 's', 'k', 'sc', 1), ('old-b', 's', 'k', 'sc', 1), ('old-c', 's', NULL, NULL, NULL)`;
+
+    await migrate(pg.db);
+    await migrate(pg.db);
+    expect((await lane())[0]?.attgenerated).toBe("s");
+    const lanes = await pg.sql`SELECT lane, count(*)::int AS n FROM wf_step_queue GROUP BY lane`;
+    expect(lanes.length).toBe(2);
+    expect(lanes.every((l) => l.lane != null)).toBe(true);
+    const indexes = await pg.sql`SELECT indexname FROM pg_indexes
+      WHERE indexname IN ('wf_step_queue_lane_idx', 'wf_step_queue_pending_group_idx')`;
+    expect(indexes.length).toBe(2);
+
+    // Rows queued before the upgrade are claimed by the lane path, key limit honoured.
+    const queue = new PgStepQueue({ db: pg.db });
+    const claimed = await queue.claim({ workerId: "w", limit: 10 });
+    expect(claimed.map((t) => t.workflowId).sort()).toEqual(["old-a", "old-c"]);
+  });
 });
 
 const TIMER_SCAN_INDEXES = [
@@ -99,7 +158,7 @@ postgresDescribe(
           .sort();
 
       // A database that applied every migration up to the one before the indexes.
-      await migrate(pg.db, { migrationsFolder: chainUpTo(1) });
+      await migrate(pg.db, { migrationsFolder: chainFolder(3) });
       expect(await present()).toEqual([]);
 
       const storage = await PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false });
@@ -122,7 +181,7 @@ postgresDescribe(
 
       // Re-running the migration's statements (a database that already has
       // some of the indexes) changes nothing and does not fail.
-      const statements = readFileSync(join(DRIZZLE, "0002_timer_scan_indexes.sql"), "utf8");
+      const statements = readFileSync(join(DRIZZLE, "0004_timer_scan_indexes.sql"), "utf8");
       await pg.sql.unsafe(statements);
       expect(await present()).toEqual([...TIMER_SCAN_INDEXES].sort());
 

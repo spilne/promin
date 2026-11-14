@@ -15,6 +15,7 @@ import type {
 import type { Eff, Throws } from "@spilne/perfect-core";
 import type { Codec } from "@spilne/perfect-core/connect";
 import type { WorkflowRetryPolicy } from "../shared/retry-policy.ts";
+import type { RetentionPolicy } from "./retention-policy.ts";
 import type { Sinkable } from "../shared/streamable.ts";
 import type { TaggedError } from "../shared/tagged-error.ts";
 import type { UsageTotals, WorkflowBudget } from "./budget.ts";
@@ -164,6 +165,8 @@ export interface WorkflowDefinitionInternals {
   readonly type?: string;
   readonly metadata?: Record<string, unknown>;
   readonly retry?: WorkflowRetryPolicy;
+  /** How long this workflow's ended runs are kept (`RetentionSweeper`). */
+  readonly retention?: RetentionPolicy;
   readonly compensateConfig?: CompensateConfig;
   readonly dlq?: Sinkable<FailedWorkflowRecord>;
   readonly timeoutMs?: number;
@@ -443,6 +446,13 @@ export interface WorkflowParams<Input> {
   readonly metadata?: Record<string, unknown>;
   /** Workflow-level retry policy. Re-runs from the failed step (completed steps are checkpointed). */
   readonly retry?: WorkflowRetryPolicy;
+  /**
+   * How long this workflow's ended runs are kept. Carried out by a
+   * `RetentionSweeper` (or the distributed runner's `retention` option); a
+   * run is never deleted otherwise. Fields left out inherit the sweeper's
+   * default policy. See `RetentionPolicy`.
+   */
+  readonly retention?: RetentionPolicy;
   /** Compensation configuration — controls when and how saga rollback runs. */
   readonly compensate?: CompensateConfig;
   /** Dead letter queue — failed workflows are published here after all retries + compensation. */

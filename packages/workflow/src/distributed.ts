@@ -44,6 +44,7 @@ export {
   type DistributedWorkflowRunner,
   createDistributedWorkflowRunner,
   type DistributedRunnerConfig,
+  type DistributedRetentionConfig,
   type DistributedRunnerErrorEvent,
   buildStubWorkflow,
 } from "./lib/distributed/coordinator.ts";
@@ -132,6 +133,14 @@ export {
   InMemoryWorkflowStartQueue,
   type InMemoryWorkflowStartQueueConfig,
 } from "./lib/distributed/workflow-start-queue.ts";
+export {
+  InMemoryWakeups,
+  NoWakeups,
+  notifyQuietly,
+  type WakeHandler,
+  type WakeTopic,
+  type Wakeups,
+} from "./lib/shared/wakeups.ts";
 export {
   PollLoop,
   type PollLoopConfig,

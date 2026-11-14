@@ -10,5 +10,6 @@ storageTestSuite(() => new InMemoryWorkflowStorage(), {
   hasCompensationLedger: true,
   hasStepAttempts: true,
   hasStepProgress: true,
+  hasRetention: true,
   createNamespaced: ({ namespace }) => new InMemoryWorkflowStorage({ namespace }),
 });

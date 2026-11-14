@@ -27,7 +27,13 @@ Optional extensions: `JournalStore` (`loadJournal`, `appendEntry`,
 `findDueSleeps`, `findPendingSignal`), `StepAttemptStore`
 (`saveStepAttempt`, `loadStepAttempts`), `StepCheckpointStore`
 (`checkpointStep`) and `CompensationLedgerStore` (`beginCompensation`,
-`saveStepCompensation`).
+`saveStepCompensation`), and `RetentionStore` (`listRetentionCandidates`,
+`purgeRuns`; capability `retention`): a keyset page of ended runs by
+`(completedAt, workflowId)` and a guarded delete that re-checks each run
+(still ended, same `completedAt`, no cancel rollback owed) in the same
+atomic step as the delete. `RetentionSweeper` is built on them; every
+bundled backend implements them and `storageTestSuite` covers them
+(`hasRetention`).
 
 ## Params objects
 

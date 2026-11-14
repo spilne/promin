@@ -72,6 +72,13 @@ event capabilities (`runEvents`, `stepStartedEvents`; the runner polls).
   `fairness_key` columns are added to older tables on open),
   `claimedBy`, deliveries and dead-lettering — the full contract from
   [Distributed execution](../workflow/src/lib/distributed/README.md#step-queue-contract-v2).
+  A claim reads the head of each open lane (plain tasks, one lane per
+  concurrency key, one per step group fairness key; the generated `lane`
+  column and its partial indexes are added to older tables on open, so it
+  needs SQLite 3.31 or later) and merges them in claim order. A key or group
+  that is full is not read at all, so claim cost follows the number of open
+  lanes, never the throttled backlog or the settled history. Tasks of one
+  group or concurrency key are assumed to carry the same limits.
   `SqliteStepQueue` has no lease store, so `requeueStuck({ lease })` is not
   fenced by the lease.
 - **Scheduler.** Leases live in `<prefix>_leases` with a single-statement

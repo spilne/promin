@@ -38,6 +38,7 @@ postgresDescribe("PostgresWorkflowStorage conformance", { migrate }, (pg) => {
       hasCompensationLedger: true,
       hasStepAttempts: true,
       hasStepProgress: true,
+      hasRetention: true,
       createPeer: () => PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false }),
       createNamespaced: ({ namespace }) =>
         PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false, namespace }),
