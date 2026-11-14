@@ -320,11 +320,44 @@ redisDescribe("RedisStepQueue on Redis Cluster", (redis) => {
     await q.metrics({ since: new Date(0) });
     await q.purge({ completedBefore: new Date(Date.now() + 60_000) });
 
+    // Step groups: fairness lanes, the rate window and its timer.
+    const grouped = (workflowId: string, fairnessKey: string) => ({
+      workflowId,
+      stepName: "g",
+      input: {},
+      groupName: "openai",
+      groupMaxConcurrent: 2,
+      groupMaxStarts: 1,
+      groupWindowMs: 60_000,
+      fairnessKey,
+    });
+    await q.enqueue(grouped("g1", "t1"));
+    await q.enqueue(grouped("g2", "t2"));
+    await q.enqueue({
+      ...grouped("g3", "t1"),
+      groupMaxStarts: undefined,
+      groupWindowMs: undefined,
+    });
+    const [g1] = await q.claim({ workerId: "w", limit: 1, stepNames: ["g"] });
+    await q.claim({ workerId: "w", limit: 1, stepNames: ["g"] });
+    await q.throttled({ workflowId: "g2" });
+    await q.release({ taskId: g1!.id, claimToken: g1!.claimToken! });
+
     expect(offenders(calls)).toEqual([]);
     const slots = new Set(calls.flatMap((c) => [...c.keys, ...c.derivedBases]).map(keySlot));
     expect(slots).toEqual(new Set([keySlot(`{${prefix}}`)]));
-    // Enqueue, claim, heartbeat, settle, requeue, purge, lease acquire / release.
-    expect(new Set(calls.map((c) => c.script)).size).toBe(8);
+    // Enqueue, claim, heartbeat, settle, requeue, purge, lease acquire / release, throttled.
+    expect(new Set(calls.map((c) => c.script)).size).toBe(9);
+
+    // Keys the scripts derive themselves (lanes, indexes, timers) carry the queue's tag too.
+    const own = (await client.eval(
+      "return redis.call('KEYS', ARGV[1])",
+      1,
+      `{${prefix}}:counter`,
+      `*${prefix}*`,
+    )) as string[];
+    expect(own.length).toBeGreaterThan(10);
+    expect(own.filter((k) => !k.startsWith(`{${prefix}}`))).toEqual([]);
   });
 });
 
