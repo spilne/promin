@@ -8,6 +8,7 @@
 import { runHookValue } from "../shared/eff.ts";
 import { SystemWallClock, type WallClock, type TimerHandle } from "../shared/wall-clock.ts";
 import { PollLoop, type PollTickResult } from "../shared/poll-loop.ts";
+import type { Wakeups } from "../shared/wakeups.ts";
 import { StepTimeoutError } from "../durable/durable-pipeline-error.ts";
 import type { StepRegistry, WorkerStepContext, StepRegistration } from "./step-registry.ts";
 import type { StepQueue, StepTask } from "./step-queue.ts";
@@ -105,6 +106,12 @@ export interface WorkerConfig {
    * Default: `SystemWallClock`.
    */
   clock?: WallClock;
+  /**
+   * A `"steps"` wake (a task became claimable) makes the claim loop claim
+   * now instead of after `pollIntervalMs`. A latency hint only: polling
+   * stays the correctness path, so lost or late wakes cost nothing but time.
+   */
+  wakeups?: Wakeups;
   /**
    * Called for failures that don't belong to a step body: a failed claim,
    * a failed `complete` / `fail` (the task is then redelivered), a throwing
@@ -204,6 +211,8 @@ export class DefaultWorker implements WorkflowWorker {
   private readonly clock: WallClock;
   private readonly onError: (event: WorkerErrorEvent) => void;
   private readonly pollLoop: PollLoop;
+  private readonly wakeups: Wakeups | undefined;
+  private unsubscribeWake: (() => void) | undefined;
   /** Running tasks, by task id, with the controller behind their `ctx.signal`. */
   private readonly active = new Map<
     string,
@@ -232,6 +241,7 @@ export class DefaultWorker implements WorkflowWorker {
     this.supportedVersions = config.supportedVersions;
     this.taskFilter = config.taskFilter;
 
+    this.wakeups = config.wakeups;
     this.pollLoop = new PollLoop({
       name: "worker",
       intervalMs: config.pollIntervalMs ?? 1000,
@@ -258,12 +268,18 @@ export class DefaultWorker implements WorkflowWorker {
       }, this.heartbeatIntervalMs);
     }
 
+    this.unsubscribeWake ??= this.wakeups?.onWake({
+      topic: "steps",
+      handler: () => this.pollLoop.wake(),
+    });
     await this.pollLoop.start();
   }
 
   async stop(params?: { readonly timeoutMs?: number }): Promise<void> {
     // Stop claiming first. Awaiting the loop means a claim already in
     // flight has handed its tasks to `launch` before we wait for them.
+    this.unsubscribeWake?.();
+    this.unsubscribeWake = undefined;
     await this.pollLoop.stop();
 
     // Mark as draining, then wait for active tasks

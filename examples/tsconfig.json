@@ -13,6 +13,9 @@
       "path": "../packages/container"
     },
     {
+      "path": "../packages/agent"
+    },
+    {
       "path": "../packages/duckdb"
     },
     {

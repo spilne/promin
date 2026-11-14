@@ -2,6 +2,7 @@
 // PostgresWorkflowStorage — production-grade WorkflowStorage backed by Postgres
 // ---------------------------------------------------------------------------
 
+import { notifyQuietly } from "@promin/workflow/distributed";
 import { eq, and, or, sql, desc, asc, inArray, gte, lt, type SQL } from "drizzle-orm";
 import type {
   WorkflowStorage,
@@ -1294,6 +1295,7 @@ export class PostgresWorkflowStorage
 
   async deliverSignal(params: DeliverSignalParams): Promise<void> {
     await this.writeSignal({ db: this.db, ...params });
+    notifyQuietly(this.config.wakeups, { topic: "signals", key: params.workflowId });
   }
 
   /** Upsert a run's signal row: the last delivery per name wins. */
@@ -2684,7 +2686,10 @@ export class PostgresWorkflowStorage
       });
       return row;
     });
-    if (won) return { outcome: "delivered", record: rowToSignalToken(won) };
+    if (won) {
+      notifyQuietly(this.config.wakeups, { topic: "signals", key: won.workflowId });
+      return { outcome: "delivered", record: rowToSignalToken(won) };
+    }
     const current = await this.findSignalTokenById(params.tokenId);
     if (!current) {
       throw new Error(`signal token ${params.tokenId} not found`);

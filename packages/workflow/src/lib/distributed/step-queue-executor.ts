@@ -3,6 +3,7 @@ import type { TaggedError as TaggedErrorShape } from "../shared/tagged-error.ts"
 import { promiseOrEff, runEffSafe } from "../shared/eff.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import { PollLoop, type PollLoopErrorInfo } from "../shared/poll-loop.ts";
+import type { Wakeups } from "../shared/wakeups.ts";
 import { StepTimeoutError } from "../durable/durable-pipeline-error.ts";
 import type { StepDefinition } from "../durable/step-definition.ts";
 import type { WorkflowStorage } from "../durable/workflow-storage.ts";
@@ -76,6 +77,11 @@ export interface StepQueueExecutorConfig {
    * The wait retries with backoff. Default: `console.error`.
    */
   onError?: (error: unknown, info: PollLoopErrorInfo) => void;
+  /**
+   * A settle of the awaited task (`"results"`) cuts the wait for the next
+   * poll short. A latency hint only: the poll finds the outcome regardless.
+   */
+  wakeups?: Wakeups;
 }
 
 /**
@@ -192,12 +198,14 @@ export class StepQueueExecutor implements StepExecutor {
   private readonly stepWaitTimeoutMs: number;
   private readonly clock: WallClock;
   private readonly onError?: (error: unknown, info: PollLoopErrorInfo) => void;
+  private readonly wakeups: Wakeups | undefined;
   private readonly tracer?: WorkflowTracer;
 
   constructor(config: StepQueueExecutorConfig) {
     this.stepQueue = config.stepQueue;
     this.storage = config.storage;
     this.pollIntervalMs = config.pollIntervalMs ?? 500;
+    this.wakeups = config.wakeups;
     this.staleTimeoutMs = config.staleTimeoutMs ?? 30_000;
     this.stepWaitTimeoutMs = config.stepWaitTimeoutMs ?? DEFAULT_STEP_WAIT_TIMEOUT_MS;
     if (!(this.stepWaitTimeoutMs > 0)) {
@@ -379,6 +387,7 @@ export class StepQueueExecutor implements StepExecutor {
     // one a full interval after the enqueue. A failed check (storage or
     // queue blip) is reported and retried with backoff instead of failing
     // the step.
+    let woken = false;
     const wait = new PollLoop({
       name: "step-queue-executor",
       intervalMs: this.pollIntervalMs,
@@ -386,7 +395,10 @@ export class StepQueueExecutor implements StepExecutor {
       onError: this.onError,
       tick: async () => {
         polls++;
-        if (polls === 0) return "idle";
+        // The first check comes a full interval after the enqueue, unless
+        // the task's settle already woke us.
+        if (polls === 0 && !woken) return "idle";
+        woken = false;
         if (polls % requeueEveryNPolls === 0) {
           await this.stepQueue.requeueStuck({ mode: "stale", olderThanMs: this.staleTimeoutMs });
         }
@@ -519,7 +531,20 @@ export class StepQueueExecutor implements StepExecutor {
         return "idle";
       },
     });
-    await wait.start();
+    const unsubscribe = this.wakeups?.onWake({
+      topic: "results",
+      handler: (key) => {
+        // A wake without a key (a reconnect) may concern any task.
+        if (key !== undefined && key !== taskId) return;
+        woken = true;
+        wait.wake();
+      },
+    });
+    try {
+      await wait.start();
+    } finally {
+      unsubscribe?.();
+    }
     return outcome!;
   }
 }
