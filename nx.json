@@ -117,19 +117,6 @@
         "{workspaceRoot}/.oxfmtrc.check.json"
       ]
     },
-    "publish": {
-      "executor": "nx:run-commands",
-      "dependsOn": [
-        "build",
-        "^publish"
-      ],
-      "options": {
-        "commands": [
-          "npm publish --access public --provenance"
-        ],
-        "cwd": "{projectRoot}"
-      }
-    },
     "ci": {
       "executor": "nx:noop",
       "dependsOn": [
@@ -139,6 +126,36 @@
         "test",
         "^ci"
       ]
+    }
+  },
+  "release": {
+    "projects": [
+      "packages/*"
+    ],
+    "projectsRelationship": "fixed",
+    "releaseTagPattern": "v{version}",
+    "version": {
+      "currentVersionResolver": "disk",
+      "preserveLocalDependencyProtocols": false,
+      "versionPrefix": "^",
+      "versionActionsOptions": {
+        "installIgnoreScripts": true
+      }
+    },
+    "changelog": {
+      "workspaceChangelog": {
+        "createRelease": false,
+        "renderOptions": {
+          "authors": false
+        }
+      },
+      "projectChangelogs": false
+    },
+    "git": {
+      "commit": true,
+      "tag": true,
+      "push": false,
+      "commitMessage": "chore(release): {version}"
     }
   }
 }

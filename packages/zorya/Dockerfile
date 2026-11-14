@@ -44,7 +44,6 @@ WORKDIR /src
 COPY package.json bun.lock tsconfig.base.json tsconfig.json nx.json ./
 COPY packages ./packages
 COPY examples ./examples
-COPY documentation ./documentation
 
 RUN bun install --frozen-lockfile
 # Outputs packages/zorya/dist/public/.

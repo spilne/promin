@@ -144,7 +144,6 @@
       "format": {},
       "format-check": {},
       "ci": {},
-      "publish": {},
       "build-ui": {
         "executor": "nx:run-commands",
         "options": {

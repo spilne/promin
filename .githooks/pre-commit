@@ -28,7 +28,7 @@ run_quiet "Running format..." bun fmt
 # changed them). Every path here is already in the index, so `-f` cannot
 # pull in new untracked files; it only stops ignore rules — including
 # per-user ones such as a global `docs` pattern matching
-# documentation/content/docs — from making `git add` exit non-zero.
+# documentation/docs — from making `git add` exit non-zero.
 if [ -s "$STAGED_LIST" ]; then
   xargs -0 git add -f -- <"$STAGED_LIST" || {
     echo "pre-commit: failed to re-stage formatted files" >&2
