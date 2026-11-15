@@ -57,7 +57,7 @@ export type RouteAccess =
   | ProtectedRouteAccess
   | {
       readonly kind: "public";
-      readonly purpose: "lifecycle" | "login" | "static-ui";
+      readonly purpose: "lifecycle" | "login" | "static-ui" | "not-found";
     }
   | { readonly kind: "worker" }
   | { readonly kind: "signed-webhook" }
@@ -142,7 +142,9 @@ export class Router {
   private readonly logger: RouterErrorLogger;
   private staticHandler?: Handler | DeclaredRouteHandler;
   private staticAccess?: RouteAccess;
-  private notFoundHandler: Handler = () => notFound();
+  private notFoundHandler: Handler | DeclaredRouteHandler = () => notFound();
+  private notFoundAccess?: RouteAccess;
+  private hasCustomNotFound = false;
 
   constructor(config: RouterConfig = {}) {
     this.logger = config.logger ?? console;
@@ -158,7 +160,7 @@ export class Router {
       method: definition.method,
       pattern: definition.path,
       handler: definition.handler,
-      access: definition.access,
+      access: normalizeRouteAccess(definition.access),
     });
   }
 
@@ -181,12 +183,7 @@ export class Router {
     readonly handler: Handler | DeclaredRouteHandler;
     readonly access?: RouteAccess;
   }): this {
-    const keys: string[] = [];
-    const regexSrc = params.pattern.replace(/:([^/]+)/g, (_m, k) => {
-      keys.push(k);
-      return "([^/]+)";
-    });
-    const regex = new RegExp(`^${regexSrc}$`);
+    const { keys, regex } = compileRoutePattern(params.pattern);
     this.routes.push({
       method: params.method.toUpperCase(),
       pattern: params.pattern,
@@ -220,6 +217,7 @@ export class Router {
       .filter((route) => route.access === undefined)
       .map((route) => `${route.method} ${route.pattern}`);
     if (this.staticHandler && this.staticAccess === undefined) routes.push("STATIC *");
+    if (this.hasCustomNotFound && this.notFoundAccess === undefined) routes.push("NOT_FOUND *");
     return routes.sort();
   }
 
@@ -239,14 +237,23 @@ export class Router {
 
   /** Declared static fallback; normally explicit public `static-ui` access. */
   setStaticRoute(access: RouteAccess, handler: DeclaredRouteHandler): this {
-    validateRouteAccess(access);
     this.staticHandler = handler;
-    this.staticAccess = access;
+    this.staticAccess = normalizeRouteAccess(access);
     return this;
   }
 
   setNotFound(handler: Handler): this {
     this.notFoundHandler = handler;
+    this.notFoundAccess = undefined;
+    this.hasCustomNotFound = true;
+    return this;
+  }
+
+  /** Declared custom fallback for paths that match no route. */
+  setNotFoundRoute(access: RouteAccess, handler: DeclaredRouteHandler): this {
+    this.notFoundHandler = handler;
+    this.notFoundAccess = normalizeRouteAccess(access);
+    this.hasCustomNotFound = true;
     return this;
   }
 
@@ -268,7 +275,7 @@ export class Router {
         allowed.add(r.method);
         continue;
       }
-      const params: Record<string, string> = {};
+      const params = emptyRouteParams();
       for (let i = 0; i < r.keys.length; i++) {
         const decoded = safeDecode(m[i + 1]!);
         if (decoded === undefined) return badRequest("bad_path", "Malformed URL encoding");
@@ -284,15 +291,27 @@ export class Router {
     }
     if (allowed.size > 0) return methodNotAllowed([...allowed]);
     if (this.staticHandler) {
-      if (this.staticAccess === undefined) return await (this.staticHandler as Handler)(req, {});
+      const params = emptyRouteParams();
+      if (this.staticAccess === undefined) {
+        return await (this.staticHandler as Handler)(req, params);
+      }
       const access = await resolveRouteAccess({
         access: this.staticAccess,
         request: req,
-        params: {},
+        params,
       });
-      return await (this.staticHandler as DeclaredRouteHandler)(req, {}, access);
+      return await (this.staticHandler as DeclaredRouteHandler)(req, params, access);
     }
-    return await this.notFoundHandler(req, {});
+    const params = emptyRouteParams();
+    if (this.notFoundAccess === undefined) {
+      return await (this.notFoundHandler as Handler)(req, params);
+    }
+    const access = await resolveRouteAccess({
+      access: this.notFoundAccess,
+      request: req,
+      params,
+    });
+    return await (this.notFoundHandler as DeclaredRouteHandler)(req, params, access);
   }
 }
 
@@ -333,7 +352,7 @@ function validateRouteAccess(access: RouteAccess): void {
     return;
   }
   if (access.kind === "public") {
-    if (!(["lifecycle", "login", "static-ui"] as const).includes(access.purpose)) {
+    if (!(["lifecycle", "login", "static-ui", "not-found"] as const).includes(access.purpose)) {
       throw new TypeError("Public route requires an approved purpose");
     }
     return;
@@ -347,6 +366,25 @@ function validateRouteAccess(access: RouteAccess): void {
   }
 }
 
+function normalizeRouteAccess(access: RouteAccess): RouteAccess {
+  validateRouteAccess(access);
+  if (access.kind === "protected") {
+    const permission = Object.freeze({
+      resource: access.permission.resource,
+      action: access.permission.action,
+    });
+    return Object.freeze({
+      kind: "protected",
+      permission,
+      resolveTarget: access.resolveTarget,
+    }) as ProtectedRouteAccess;
+  }
+  if (access.kind === "public") {
+    return Object.freeze({ kind: "public", purpose: access.purpose });
+  }
+  return Object.freeze({ kind: access.kind });
+}
+
 async function resolveRouteAccess(params: {
   readonly access: RouteAccess;
   readonly request: Request;
@@ -357,21 +395,56 @@ async function resolveRouteAccess(params: {
     request: params.request,
     params: params.params,
   });
+  const resource = target?.resource;
   if (
     !target ||
     typeof target !== "object" ||
-    !target.resource ||
-    target.resource.kind !== params.access.permission.resource ||
-    typeof target.resource.namespaceId !== "string" ||
-    target.resource.namespaceId.length === 0
+    !resource ||
+    resource.kind !== params.access.permission.resource ||
+    typeof resource.namespaceId !== "string" ||
+    resource.namespaceId.length === 0 ||
+    (resource.id !== undefined && (typeof resource.id !== "string" || resource.id.length === 0))
   ) {
     throw new Error("Protected route target does not match its permission");
   }
-  return {
+  const normalizedResource = Object.freeze({
+    kind: resource.kind,
+    namespaceId: resource.namespaceId,
+    ...(resource.id !== undefined && { id: resource.id }),
+  });
+  const normalizedTarget = Object.freeze({
+    resource: normalizedResource,
+    ...(Object.hasOwn(target, "value") && { value: target.value }),
+  });
+  return Object.freeze({
     kind: "protected",
     permission: params.access.permission,
-    target,
-  } as ResolvedProtectedRouteAccess;
+    target: normalizedTarget,
+  }) as ResolvedProtectedRouteAccess;
+}
+
+const UNSAFE_ROUTE_PARAM_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
+function compileRoutePattern(pattern: string): { readonly keys: string[]; readonly regex: RegExp } {
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  const regexSrc = pattern.replace(/:([^/]+)/g, (_match, key: string) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new TypeError("Invalid route parameter name: " + key);
+    }
+    if (UNSAFE_ROUTE_PARAM_KEYS.has(key)) {
+      throw new TypeError("Unsafe route parameter name: " + key);
+    }
+    if (seen.has(key)) throw new TypeError("Duplicate route parameter name: " + key);
+    seen.add(key);
+    keys.push(key);
+    return "([^/]+)";
+  });
+  return { keys, regex: new RegExp("^" + regexSrc + "$") };
+}
+
+function emptyRouteParams(): Record<string, string> {
+  return Object.create(null) as Record<string, string>;
 }
 
 /**

@@ -44,16 +44,37 @@ describe("Router security declarations", () => {
     );
   });
 
-  it("tracks an undeclared static fallback and accepts an explicit static-ui fallback", () => {
+  it("tracks an undeclared static fallback and accepts an explicit static-ui fallback", async () => {
     const router = new Router().setStatic(() => new Response("legacy"));
     expect(router.uncoveredRoutes()).toEqual(["STATIC *"]);
 
-    router.setStaticRoute({ kind: "public", purpose: "static-ui" }, (_req, _params, access) => {
+    const metadata = { kind: "public", purpose: "static-ui" };
+    router.setStaticRoute(metadata as unknown as RouteAccess, (_req, _params, access) => {
       expect(access).toEqual({ kind: "public", purpose: "static-ui" });
+      expect(Object.isFrozen(access)).toBeTrue();
       return new Response("declared");
     });
+    metadata.purpose = "login";
     expect(router.uncoveredRoutes()).toEqual([]);
     expect(() => router.assertSecurityCoverage()).not.toThrow();
+    expect(await (await router.handle(new Request("http://zorya.test/dashboard"))).text()).toBe(
+      "declared",
+    );
+  });
+
+  it("tracks a custom not-found handler until it has an explicit declaration", async () => {
+    const router = new Router().setNotFound(() => new Response("legacy", { status: 404 }));
+    expect(router.uncoveredRoutes()).toEqual(["NOT_FOUND *"]);
+    expect(() => router.assertSecurityCoverage()).toThrow("NOT_FOUND *");
+
+    router.setNotFoundRoute({ kind: "public", purpose: "not-found" }, (_req, params, access) => {
+      expect(Object.getPrototypeOf(params)).toBeNull();
+      expect(access).toEqual({ kind: "public", purpose: "not-found" });
+      expect(Object.isFrozen(access)).toBeTrue();
+      return new Response("declared", { status: 404 });
+    });
+    expect(router.uncoveredRoutes()).toEqual([]);
+    expect((await router.handle(new Request("http://zorya.test/missing"))).status).toBe(404);
   });
 
   it("resolves a stored resource before dispatch and passes through the preloaded value", async () => {
@@ -83,6 +104,10 @@ describe("Router security declarations", () => {
         events.push("handler");
         expect(access.kind).toBe("protected");
         if (access.kind !== "protected") throw new Error("unreachable");
+        expect(Object.isFrozen(access)).toBeTrue();
+        expect(Object.isFrozen(access.permission)).toBeTrue();
+        expect(Object.isFrozen(access.target)).toBeTrue();
+        expect(Object.isFrozen(access.target.resource)).toBeTrue();
         return Response.json(access.target.value);
       },
     });
@@ -95,6 +120,37 @@ describe("Router security declarations", () => {
     });
     expect(events).toEqual(["resolve", "handler"]);
     expect(router.uncoveredRoutes()).toEqual([]);
+  });
+
+  it("clones protected metadata so caller mutation cannot change the admitted boundary", async () => {
+    const events: string[] = [];
+    const permission = { resource: "agent", action: "read" };
+    const metadata = {
+      kind: "protected",
+      permission,
+      resolveTarget: () => {
+        events.push("resolve");
+        return { resource: { kind: "agent", namespaceId: "team-a", id: "agent-1" } };
+      },
+    };
+    const router = new Router().route({
+      method: "GET",
+      path: "/agents/agent-1",
+      access: metadata as unknown as RouteAccess,
+      handler: (_req, _params, access) => {
+        expect(access.kind).toBe("protected");
+        if (access.kind !== "protected") throw new Error("unreachable");
+        expect(access.permission).toEqual({ resource: "agent", action: "read" });
+        return new Response(null, { status: 204 });
+      },
+    });
+
+    metadata.kind = "public";
+    permission.resource = "knowledge";
+    permission.action = "delete";
+    expect(() => router.assertSecurityCoverage()).not.toThrow();
+    expect((await router.handle(new Request("http://zorya.test/agents/agent-1"))).status).toBe(204);
+    expect(events).toEqual(["resolve"]);
   });
 
   it("fails closed before the handler when a resolver returns the wrong resource kind", async () => {
@@ -119,6 +175,61 @@ describe("Router security declarations", () => {
     const response = await router.handle(new Request("http://zorya.test/agents/agent-1"));
     expect(response.status).toBe(500);
     expect(handled).toBeFalse();
+  });
+
+  it("fails closed on empty or non-string resolved resource ids", async () => {
+    for (const id of ["", 42, null]) {
+      let handled = false;
+      const router = new Router({ logger: quietLogger }).route({
+        method: "GET",
+        path: "/agents/current",
+        access: {
+          kind: "protected",
+          permission: { resource: "agent", action: "read" },
+          resolveTarget: () => ({
+            resource: { kind: "agent", namespaceId: "team-a", id },
+          }),
+        } as unknown as RouteAccess,
+        handler: () => {
+          handled = true;
+          return Response.json({});
+        },
+      });
+
+      expect((await router.handle(new Request("http://zorya.test/agents/current"))).status).toBe(
+        500,
+      );
+      expect(handled).toBeFalse();
+    }
+  });
+
+  it("uses null-prototype params and rejects unsafe or duplicate parameter names", async () => {
+    let observed: Record<string, string> | undefined;
+    const router = new Router().route({
+      method: "GET",
+      path: "/safe/:id",
+      access: { kind: "public", purpose: "lifecycle" },
+      handler: (_req, params) => {
+        observed = params;
+        return new Response(null, { status: 204 });
+      },
+    });
+    expect((await router.handle(new Request("http://zorya.test/safe/__proto__"))).status).toBe(204);
+    expect(Object.getPrototypeOf(observed!)).toBeNull();
+    expect(observed).toEqual({ id: "__proto__" });
+    expect(Object.hasOwn(observed!, "id")).toBeTrue();
+
+    for (const pattern of ["/:__proto__", "/:prototype", "/:constructor"]) {
+      expect(() => new Router().get(pattern, () => Response.json({}))).toThrow(
+        "Unsafe route parameter name",
+      );
+    }
+    expect(() => new Router().get("/:id/:id", () => Response.json({}))).toThrow(
+      "Duplicate route parameter name",
+    );
+    expect(() => new Router().get("/:not-valid", () => Response.json({}))).toThrow(
+      "Invalid route parameter name",
+    );
   });
 
   it("requires valid access metadata at runtime for untyped callers", () => {
