@@ -8,12 +8,14 @@ import type { AgentTool } from "../tool.ts";
 import { fenceReferenceData } from "../reference-data.ts";
 import { createRetrieverTool, formatRetrievedChunks } from "../rag/retriever-tool.ts";
 import { retrieverToolName } from "../rag/retriever-tool-name.ts";
-import type { Retriever, RetrieverFilter } from "../rag/types.ts";
+import type { Retriever, RetrieverCaller, RetrieverFilter } from "../rag/types.ts";
 import type { AgentKnowledgeMode } from "../registry/types.ts";
 
 /** A retriever plus how it is exposed to the model. */
 export interface AgentRetrieverBinding {
   readonly retriever: Retriever;
+  /** Authenticated caller passed to tool and context-mode retrievals. */
+  readonly caller?: RetrieverCaller;
   /** LLM-facing tool name. Default `retrieverToolName(id)`. */
   readonly name?: string;
   /** LLM-facing tool description. */
@@ -78,6 +80,7 @@ export function withRetrieverTools(params: {
     if (binding.toolName in merged) continue;
     merged[binding.toolName] = createRetrieverTool({
       retriever: binding.retriever,
+      ...(binding.caller !== undefined && { caller: binding.caller }),
       name: binding.toolName,
       ...(binding.description !== undefined && { description: binding.description }),
       ...(binding.topK !== undefined && { topK: binding.topK }),
@@ -136,6 +139,7 @@ export async function buildRetrieverContext(params: {
           run: (signal) =>
             binding.retriever.retrieve({
               query: params.query,
+              ...(binding.caller !== undefined && { caller: binding.caller }),
               signal,
               ...(binding.topK !== undefined && { topK: binding.topK }),
               ...(binding.filter !== undefined && { filter: binding.filter }),

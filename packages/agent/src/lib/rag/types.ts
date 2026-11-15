@@ -50,8 +50,18 @@ export interface RetrieverFilter {
   readonly metadata?: Readonly<Record<string, string | number | boolean>>;
 }
 
+/** The authenticated caller whose access rules a retriever must enforce. */
+export interface RetrieverCaller {
+  readonly userId: string;
+  readonly email?: string;
+  readonly accessRoles: ReadonlyArray<string>;
+  readonly teams: ReadonlyArray<string>;
+}
+
 export interface RetrieveRequest {
   readonly query: string;
+  /** Caller identity for backends that enforce document-level access. */
+  readonly caller?: RetrieverCaller;
   /** Number of chunks to return. Default is retriever-specific. */
   readonly topK?: number;
   /** Optional metadata/tag restriction. */

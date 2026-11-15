@@ -42,5 +42,6 @@ export type {
   RetrieveRequest,
   RetrieveResult,
   Retriever,
+  RetrieverCaller,
   RetrieverFilter,
 } from "./types.ts";

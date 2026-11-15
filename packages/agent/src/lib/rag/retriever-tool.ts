@@ -2,10 +2,12 @@ import { z } from "zod";
 import { fenceReferenceData, oneLine } from "../reference-data.ts";
 import { tool, type AgentTool } from "../tool.ts";
 import { DEFAULT_RETRIEVER_TOOL_NAME } from "./retriever-tool-name.ts";
-import type { RetrieveResult, Retriever, RetrieverFilter } from "./types.ts";
+import type { RetrieveResult, Retriever, RetrieverCaller, RetrieverFilter } from "./types.ts";
 
 export interface RetrieverToolConfig {
   readonly retriever: Retriever;
+  /** Authenticated caller passed to every retrieval; never model-controlled. */
+  readonly caller?: RetrieverCaller;
   /** LLM-facing tool name. Default: `search_knowledge_base`. */
   readonly name?: string;
   /** LLM-facing tool description. */
@@ -84,6 +86,7 @@ export function createRetrieverTool(
     execute: async ({ query, topK, filter }) => {
       const results = await config.retriever.retrieve({
         query,
+        ...(config.caller !== undefined && { caller: config.caller }),
         ...((topK ?? config.topK) !== undefined && { topK: topK ?? config.topK }),
         ...mergeFilter({ base: config.filter, requested: filter }),
         ...(config.maxChunkCharacters !== undefined && {

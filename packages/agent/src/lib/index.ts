@@ -270,6 +270,7 @@ export type {
   RetrieveRequest,
   RetrieveResult,
   Retriever,
+  RetrieverCaller,
   RetrieverFilter,
   RetrieverKey,
   RetrieverRegistry,
