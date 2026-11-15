@@ -249,6 +249,7 @@ describe("RunExecutionSecurity", () => {
     });
     await storage.cancelWorkflow({ workflowId: "cancelled-recovery" });
     const runner = createWorkflowRunner({ storage, runAdmissionGuard: guard.admissionGuard });
+    runner.exemptInternalWorkflowFromRunAdmission?.(secured);
 
     await runner.runSafe({
       workflow: secured,

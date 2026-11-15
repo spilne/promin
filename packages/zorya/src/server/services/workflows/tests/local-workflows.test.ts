@@ -97,6 +97,52 @@ describe("LocalWorkflows.trigger", () => {
   });
 });
 
+describe("LocalWorkflows.define admission exemptions", () => {
+  it("accepts only internal exemptions and an invalid redefine cannot make one public", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const workflows = new LocalWorkflows({
+      storage,
+      runner: createWorkflowRunner({ storage }),
+      definitions: {},
+      sleepScanIntervalMs: 0,
+      signalScanIntervalMs: 0,
+    });
+    const internal = workflow<void>({ name: "owned-internal" })
+      .step("body", () => succeed(undefined))
+      .build();
+    const replacement = workflow<void>({ name: "owned-internal" })
+      .step("replacement", () => succeed(undefined))
+      .build();
+    const publicWorkflow = workflow<void>({ name: "public-exempt" })
+      .step("body", () => succeed(undefined))
+      .build();
+
+    workflows.define(internal, { internal: true, admissionExempt: true });
+    expect(workflows.isInternal(internal.name)).toBe(true);
+    expect(() =>
+      (
+        workflows.define as (
+          workflow: typeof internal,
+          options: { admissionExempt: boolean },
+        ) => void
+      )(replacement, { admissionExempt: true }),
+    ).toThrow("admissionExempt requires internal: true");
+    expect(workflows.definitions?.[internal.name]).toBe(internal);
+    expect(workflows.isInternal(internal.name)).toBe(true);
+    await expect(workflows.trigger(internal.name, undefined)).rejects.toThrow("Unknown workflow");
+
+    expect(() =>
+      (
+        workflows.define as (
+          workflow: typeof publicWorkflow,
+          options: { admissionExempt: boolean },
+        ) => void
+      )(publicWorkflow, { admissionExempt: true }),
+    ).toThrow("admissionExempt requires internal: true");
+    expect(workflows.definitions?.[publicWorkflow.name]).toBeUndefined();
+  });
+});
+
 describe("LocalWorkflows.trigger — existing workflowId", () => {
   const settle = async () => {
     for (let i = 0; i < 50; i++) await new Promise((r) => setTimeout(r, 0));

@@ -94,6 +94,11 @@ export interface LocalWorkflowsConfig {
   onError?: (event: LocalWorkflowsErrorEvent) => void;
 }
 
+/** Only trusted internal definitions may opt out of the host admission hook. */
+export type LocalWorkflowDefinitionOptions =
+  | { readonly internal?: false; readonly admissionExempt?: never }
+  | { readonly internal: true; readonly admissionExempt?: boolean };
+
 const DEFAULT_SCAN_MS = 2_000;
 const DEFAULT_RECOVERY_MS = 10_000;
 const DEFAULT_ORPHAN_GRACE_MS = 10_000;
@@ -226,20 +231,24 @@ export class LocalWorkflows extends ZoryaWorkflows {
    * with the promoted version; runs of other versions resolve through the
    * version registry, so register every version a run may need there.
    */
-  define(
-    workflow: Workflow<unknown, unknown>,
-    opts?: { readonly internal?: boolean; readonly admissionExempt?: boolean },
-  ): void {
+  define(workflow: Workflow<unknown, unknown>, opts?: LocalWorkflowDefinitionOptions): void {
+    // Keep the runtime boundary for JavaScript and deliberately untyped
+    // callers too. Validate before changing the definition map or the
+    // internal-name set, so an invalid redefinition cannot downgrade an
+    // already exempt internal workflow into a public one.
+    if (opts?.admissionExempt === true && opts.internal !== true) {
+      throw new Error("LocalWorkflows: admissionExempt requires internal: true");
+    }
+    if (opts?.admissionExempt === true && !this.runner.exemptInternalWorkflowFromRunAdmission) {
+      throw new Error(
+        "LocalWorkflows: admission-exempt internal workflows require a compatible runner",
+      );
+    }
     (this.definitions as Record<string, Workflow<unknown, unknown>>)[workflow.name] = workflow;
     if (opts?.internal === true) this.internalNames.add(workflow.name);
     else this.internalNames.delete(workflow.name);
     if (opts?.admissionExempt === true) {
-      if (!this.runner.exemptInternalWorkflowFromRunAdmission) {
-        throw new Error(
-          "LocalWorkflows: admission-exempt internal workflows require a compatible runner",
-        );
-      }
-      this.runner.exemptInternalWorkflowFromRunAdmission(workflow);
+      this.runner.exemptInternalWorkflowFromRunAdmission!(workflow);
     }
   }
 

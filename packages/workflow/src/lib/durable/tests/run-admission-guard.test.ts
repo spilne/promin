@@ -146,13 +146,23 @@ describe("WorkflowRunAdmissionGuard", () => {
       runner.run({ workflow: owned, workflowId: "owned-internal", input: undefined }),
     ).resolves.toBeUndefined();
     await runner.runSafe({
+      workflow: owned,
+      workflowId: "secured-owned-internal",
+      input: undefined,
+      securityContext: { actor: { kind: "service-account", id: "internal-owner" } },
+    });
+    await runner.runSafe({
       workflow: sameDefinitionFields,
       workflowId: "forged-internal",
       input: undefined,
     });
 
     expect(bodies).toEqual(["owned"]);
-    expect(checked).toEqual(["forged-internal"]);
+    expect(checked).toEqual(["secured-owned-internal", "forged-internal"]);
+    expect(await storage.loadWorkflow("secured-owned-internal")).toMatchObject({
+      status: "failed",
+      errorTag: "HostBlocked",
+    });
     expect(await storage.loadWorkflow("forged-internal")).toMatchObject({
       status: "failed",
       errorTag: "HostBlocked",
