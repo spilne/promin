@@ -16,6 +16,7 @@ import { nextRetryDelayMs, type WorkflowRetryPolicy } from "../../shared/retry-p
 import { SystemWallClock, type WallClock } from "../../shared/wall-clock.ts";
 import {
   TripwireStorageMissingError,
+  RunSecurityContextConflictError,
   WorkflowError,
   WorkflowLockError,
   WorkflowTripwireError,
@@ -82,6 +83,10 @@ import {
  * with a ~90s grace window for transient network hiccups.
  */
 const DEFAULT_LOCK_DURATION_MS = 120_000;
+
+/** Bounded wait for a lock winner to persist the row a secured join must validate. */
+const SECURITY_CONTEXT_JOIN_ROW_ATTEMPTS = 100;
+const SECURITY_CONTEXT_JOIN_ROW_DELAY_MS = 1;
 
 /** Hard cap on chained continue-as-new restarts, to catch infinite loops in user code. */
 const MAX_CONTINUE_AS_NEW_CHAIN = 1024;
@@ -295,20 +300,46 @@ export async function runWorkflowOrchestration(
     // The lock may have been lost before `fn` ran, so validate against a
     // fresh row here before the caller is allowed to join that run.
     if (error instanceof WorkflowLockError && runParams.rejectInFlight === true) {
-      const stored = await ctx.storage.loadWorkflow(workflowId);
-      if (stored) {
-        assertRunSecurityContextCompatible({
-          workflowId,
-          stored: stored.securityContext,
-          requested: runParams.securityContext,
-        });
-      }
+      await assertSecuredJoinCompatible({
+        storage: ctx.storage,
+        workflowId,
+        requested: runParams.securityContext,
+      });
     }
     throw error;
   } finally {
     // After the lock is released, so the woken parent can drive the child.
     if (!runParams.drivenByParent) await wakeParentIfEnded({ ctx, loaded, clock });
   }
+}
+
+/**
+ * A lock loser can observe no row while the winner is between lock acquire
+ * and create. A caller that supplied identity may join only after that row
+ * exists and matches. If the winner dies before create, fail closed.
+ */
+async function assertSecuredJoinCompatible(params: {
+  storage: WorkflowStorage;
+  workflowId: string;
+  requested: RunSecurityContext | undefined;
+}): Promise<void> {
+  if (params.requested === undefined) return;
+  for (let attempt = 0; attempt < SECURITY_CONTEXT_JOIN_ROW_ATTEMPTS; attempt++) {
+    const stored = await params.storage.loadWorkflow(params.workflowId);
+    if (stored) {
+      assertRunSecurityContextCompatible({
+        workflowId: params.workflowId,
+        stored: stored.securityContext,
+        requested: params.requested,
+      });
+      return;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, SECURITY_CONTEXT_JOIN_ROW_DELAY_MS));
+  }
+  throw new RunSecurityContextConflictError({
+    workflowId: params.workflowId,
+    message: `Cannot join workflow "${params.workflowId}" before its security context is durably available`,
+  });
 }
 
 /**

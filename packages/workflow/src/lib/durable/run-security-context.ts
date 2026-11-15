@@ -23,11 +23,14 @@ export interface RunSecurityContext {
 
 /** Validate and copy the exact persistable shape, dropping extra runtime fields. */
 export function normalizeRunSecurityContext(context: RunSecurityContext): RunSecurityContext {
-  const actor = normalizePrincipalRef(context.actor, "actor");
+  // Snapshot every caller-controlled property once. Apart from making the
+  // stored shape exact, this prevents getters/proxies from returning one
+  // value for validation and another for persistence.
+  const actorRef = context.actor;
+  const effectiveRef = context.effective;
+  const actor = normalizePrincipalRef(actorRef, "actor");
   const requestedEffective =
-    context.effective === undefined
-      ? undefined
-      : normalizePrincipalRef(context.effective, "effective");
+    effectiveRef === undefined ? undefined : normalizePrincipalRef(effectiveRef, "effective");
   // There is one canonical representation for acting as self. This keeps a
   // caller that spells out `effective: actor` compatible with stored rows
   // that correctly omit the redundant effective reference.
@@ -84,20 +87,22 @@ export function assertRunSecurityContextCompatible(params: {
 }
 
 function normalizePrincipalRef(ref: RunPrincipalRef, label: string): RunPrincipalRef {
+  const kind = ref?.kind;
+  const id = ref?.id;
   if (
     ref === null ||
     typeof ref !== "object" ||
-    typeof ref.kind !== "string" ||
-    !isRunPrincipalKind(ref.kind) ||
-    typeof ref.id !== "string" ||
-    ref.id.length === 0 ||
-    INVALID_PRINCIPAL_ID.test(ref.id)
+    typeof kind !== "string" ||
+    !isRunPrincipalKind(kind) ||
+    typeof id !== "string" ||
+    id.trim().length === 0 ||
+    INVALID_PRINCIPAL_ID.test(id)
   ) {
     throw new TypeError(
-      `run security context ${label} must contain a supported kind and a non-empty id without whitespace or control characters`,
+      `run security context ${label} must contain a supported kind and a non-blank id without control or format characters`,
     );
   }
-  return Object.freeze({ kind: ref.kind, id: ref.id });
+  return Object.freeze({ kind, id });
 }
 
 const RUN_PRINCIPAL_KINDS: ReadonlySet<string> = new Set([
@@ -107,7 +112,7 @@ const RUN_PRINCIPAL_KINDS: ReadonlySet<string> = new Set([
   "service-account",
 ]);
 
-const INVALID_PRINCIPAL_ID = /[\s\p{Cc}\p{Cf}]/u;
+const INVALID_PRINCIPAL_ID = /[\p{Cc}\p{Cf}]/u;
 
 function isRunPrincipalKind(value: string): value is RunPrincipalKind {
   return RUN_PRINCIPAL_KINDS.has(value);
