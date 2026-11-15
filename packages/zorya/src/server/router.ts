@@ -237,8 +237,9 @@ export class Router {
 
   /** Declared static fallback; normally explicit public `static-ui` access. */
   setStaticRoute(access: RouteAccess, handler: DeclaredRouteHandler): this {
-    this.staticHandler = handler;
-    this.staticAccess = normalizeRouteAccess(access);
+    const normalized = normalizeDeclaredFallback({ access, handler });
+    this.staticHandler = normalized.handler;
+    this.staticAccess = normalized.access;
     return this;
   }
 
@@ -251,8 +252,9 @@ export class Router {
 
   /** Declared custom fallback for paths that match no route. */
   setNotFoundRoute(access: RouteAccess, handler: DeclaredRouteHandler): this {
-    this.notFoundHandler = handler;
-    this.notFoundAccess = normalizeRouteAccess(access);
+    const normalized = normalizeDeclaredFallback({ access, handler });
+    this.notFoundHandler = normalized.handler;
+    this.notFoundAccess = normalized.access;
     this.hasCustomNotFound = true;
     return this;
   }
@@ -339,6 +341,19 @@ function normalizeRouteDefinition(definition: RouteDefinition): RouteDefinition 
     handler: handler as DeclaredRouteHandler,
     access: normalizeRouteAccess(access as RouteAccess),
   });
+}
+
+function normalizeDeclaredFallback(params: {
+  readonly access: RouteAccess;
+  readonly handler: DeclaredRouteHandler;
+}): { readonly access: RouteAccess; readonly handler: DeclaredRouteHandler } {
+  const handler = params.handler;
+  const access = params.access;
+  if (typeof handler !== "function") {
+    throw new TypeError("Declared fallback requires a handler");
+  }
+  const normalizedAccess = normalizeRouteAccess(access);
+  return Object.freeze({ access: normalizedAccess, handler });
 }
 
 function normalizeRouteAccess(access: RouteAccess): RouteAccess {

@@ -62,6 +62,40 @@ describe("Router security declarations", () => {
     );
   });
 
+  it("updates declared static fallbacks atomically", async () => {
+    const invalidAccess = { kind: "public", purpose: "because" } as unknown as RouteAccess;
+    let rejectedHandlerCalled = false;
+    const fresh = new Router();
+    expect(() =>
+      fresh.setStaticRoute(invalidAccess, () => {
+        rejectedHandlerCalled = true;
+        return new Response("rejected");
+      }),
+    ).toThrow("requires an approved purpose");
+    expect(fresh.uncoveredRoutes()).toEqual([]);
+    expect((await fresh.handle(new Request("http://zorya.test/fresh"))).status).toBe(404);
+    expect(rejectedHandlerCalled).toBeFalse();
+
+    const existing = new Router().setStaticRoute(
+      { kind: "public", purpose: "static-ui" },
+      () => new Response("original"),
+    );
+    expect(() =>
+      existing.setStaticRoute(invalidAccess, () => {
+        rejectedHandlerCalled = true;
+        return new Response("replacement");
+      }),
+    ).toThrow("requires an approved purpose");
+    expect(() =>
+      existing.setStaticRoute({ kind: "public", purpose: "static-ui" }, undefined as never),
+    ).toThrow("requires a handler");
+    expect(existing.uncoveredRoutes()).toEqual([]);
+    expect(await (await existing.handle(new Request("http://zorya.test/existing"))).text()).toBe(
+      "original",
+    );
+    expect(rejectedHandlerCalled).toBeFalse();
+  });
+
   it("tracks a custom not-found handler until it has an explicit declaration", async () => {
     const router = new Router().setNotFound(() => new Response("legacy", { status: 404 }));
     expect(router.uncoveredRoutes()).toEqual(["NOT_FOUND *"]);
@@ -75,6 +109,42 @@ describe("Router security declarations", () => {
     });
     expect(router.uncoveredRoutes()).toEqual([]);
     expect((await router.handle(new Request("http://zorya.test/missing"))).status).toBe(404);
+  });
+
+  it("updates declared not-found fallbacks atomically", async () => {
+    const invalidAccess = { kind: "public", purpose: "because" } as unknown as RouteAccess;
+    let rejectedHandlerCalled = false;
+    const fresh = new Router();
+    expect(() =>
+      fresh.setNotFoundRoute(invalidAccess, () => {
+        rejectedHandlerCalled = true;
+        return new Response("rejected", { status: 404 });
+      }),
+    ).toThrow("requires an approved purpose");
+    expect(fresh.uncoveredRoutes()).toEqual([]);
+    expect(await (await fresh.handle(new Request("http://zorya.test/fresh"))).json()).toEqual({
+      error: "not_found",
+    });
+    expect(rejectedHandlerCalled).toBeFalse();
+
+    const existing = new Router().setNotFoundRoute(
+      { kind: "public", purpose: "not-found" },
+      () => new Response("original", { status: 404 }),
+    );
+    expect(() =>
+      existing.setNotFoundRoute(invalidAccess, () => {
+        rejectedHandlerCalled = true;
+        return new Response("replacement", { status: 404 });
+      }),
+    ).toThrow("requires an approved purpose");
+    expect(() =>
+      existing.setNotFoundRoute({ kind: "public", purpose: "not-found" }, null as never),
+    ).toThrow("requires a handler");
+    expect(existing.uncoveredRoutes()).toEqual([]);
+    expect(await (await existing.handle(new Request("http://zorya.test/existing"))).text()).toBe(
+      "original",
+    );
+    expect(rejectedHandlerCalled).toBeFalse();
   });
 
   it("resolves a stored resource before dispatch and passes through the preloaded value", async () => {
