@@ -204,15 +204,19 @@ class RemoteTransport {
       body: params.body,
       signal: ctrl.signal,
     });
-    const out = buildSseRunOutput({
-      pending,
-      ctrl,
-      ...(params.cancelRemote !== undefined && { cancelRemote: params.cancelRemote }),
-      onSettled: () => deadline.release(),
-    });
+    let out: AgentRunOutput;
     const stop = (): void => {
       out.cancel().catch(() => {});
     };
+    out = buildSseRunOutput({
+      pending,
+      ctrl,
+      ...(params.cancelRemote !== undefined && { cancelRemote: params.cancelRemote }),
+      onSettled: () => {
+        deadline.ctrl.signal.removeEventListener("abort", stop);
+        deadline.release();
+      },
+    });
     if (deadline.ctrl.signal.aborted) stop();
     else deadline.ctrl.signal.addEventListener("abort", stop, { once: true });
     return out;
@@ -533,8 +537,12 @@ function buildSseRunOutput(params: {
   let textNotify: (() => void) | null = null;
   let fullNotify: (() => void) | null = null;
   let eof = false;
+  let settled = false;
+  let accumulatedText = "";
+  const emptyUsage: UsageStats = { inputTokens: 0, outputTokens: 0 };
 
   const pushText = (d: string) => {
+    accumulatedText += d;
     textBuf.push(d);
     const fn = textNotify;
     textNotify = null;
@@ -552,15 +560,40 @@ function buildSseRunOutput(params: {
     fullNotify?.();
   };
 
+  const settleFinish = (params: {
+    text: string;
+    reason: FinishReason;
+    usage: UsageStats;
+  }): void => {
+    if (settled) return;
+    settled = true;
+    resolveText(params.text);
+    resolveFinish(params.reason);
+    resolveUsage(params.usage);
+    pushFull({ type: "finish", reason: params.reason, usage: params.usage });
+  };
+
+  const settleError = (error: unknown): void => {
+    if (settled) return;
+    settled = true;
+    const cause = error instanceof Error ? error : new Error(String(error));
+    rejectText(cause);
+    resolveFinish("error");
+    resolveUsage(emptyUsage);
+    pushFull({ type: "error", error: { message: cause.message } });
+  };
+
+  const settleCancelled = (): void => {
+    settleFinish({ text: accumulatedText, reason: "cancelled", usage: emptyUsage });
+  };
+
   // Background SSE reader.
   void (async () => {
     try {
       const res = await pending;
       if (!res.ok || !res.body) {
         const msg = res.ok ? "no body" : `HTTP ${res.status}`;
-        rejectText(new Error(`RemoteAgent stream failed: ${msg}`));
-        resolveFinish("error");
-        resolveUsage({ inputTokens: 0, outputTokens: 0 });
+        settleError(new Error(`RemoteAgent stream failed: ${msg}`));
         return;
       }
       for await (const { event, data } of parseSseFrames(res)) {
@@ -582,20 +615,14 @@ function buildSseRunOutput(params: {
               finishReason: FinishReason;
               usage: UsageStats;
             };
-            resolveText(p.text);
-            resolveFinish(p.finishReason);
-            resolveUsage(p.usage);
-            pushFull({ type: "finish", reason: p.finishReason, usage: p.usage });
+            settleFinish({ text: p.text, reason: p.finishReason, usage: p.usage });
           } catch {
             /* skip malformed */
           }
         } else if (event === "error") {
           try {
             const p = JSON.parse(data) as { message: string };
-            rejectText(new Error(p.message));
-            resolveFinish("error");
-            resolveUsage({ inputTokens: 0, outputTokens: 0 });
-            pushFull({ type: "error", error: { message: p.message } });
+            settleError(new Error(p.message));
           } catch {
             /* skip malformed */
           }
@@ -603,19 +630,16 @@ function buildSseRunOutput(params: {
         // thread / approval-requested / suspended frames are informational;
         // no AgentRunOutput surface for them in v1.
       }
-    } catch (err) {
-      if ((err as Error).name !== "AbortError") {
-        rejectText(err);
-        resolveFinish("error");
-        resolveUsage({ inputTokens: 0, outputTokens: 0 });
+      if (!settled) {
+        settleError(new Error("RemoteAgent stream ended without a terminal event"));
       }
-      // On abort (cancel, upstream signal or timeout) the fetch rejects
-      // with AbortError; the finally below settles every deferred promise.
+    } catch (err) {
+      if (ctrl.signal.aborted) settleCancelled();
+      else settleError(err);
     } finally {
-      // Ensure all deferred promises are settled so callers don't hang.
-      resolveText?.("");
-      resolveFinish?.("stop");
-      resolveUsage?.({ inputTokens: 0, outputTokens: 0 });
+      // A reader must always produce an explicit terminal state. This is a
+      // protocol error rather than a successful empty answer.
+      if (!settled) settleError(new Error("RemoteAgent stream ended without settling"));
       onSettled?.();
       close();
     }
@@ -643,6 +667,7 @@ function buildSseRunOutput(params: {
     }
   }
 
+  let cancellation: Promise<void> | undefined;
   return {
     textStream: textStream(),
     fullStream: fullStream(),
@@ -654,12 +679,15 @@ function buildSseRunOutput(params: {
     usage: usagePromise,
     finishReason: finishPromise,
     messages: Promise.resolve([] as Message[]),
-    cancel: async () => {
-      try {
-        if (cancelRemote) await cancelRemote(await turnId);
-      } finally {
-        ctrl.abort();
-      }
+    cancel: () => {
+      cancellation ??= (async () => {
+        try {
+          if (cancelRemote) await cancelRemote(await turnId);
+        } finally {
+          ctrl.abort();
+        }
+      })();
+      return cancellation;
     },
   };
 }

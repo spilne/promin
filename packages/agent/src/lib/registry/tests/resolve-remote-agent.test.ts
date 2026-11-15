@@ -19,6 +19,12 @@ async function until(cond: () => boolean): Promise<void> {
   throw new Error("condition never held");
 }
 
+async function collect<T>(stream: AsyncIterable<T>): Promise<T[]> {
+  const values: T[] = [];
+  for await (const value of stream) values.push(value);
+  return values;
+}
+
 /**
  * A peer whose thread stream stays open (naming its turn `turn-9`) until
  * the client aborts, and whose cancel route answers `cancelStatus`.
@@ -77,13 +83,17 @@ describe("resolveRemoteAgent", () => {
     const peer = fakePeer();
     const thread = await peer.agent.thread("t1");
     const out = thread.stream({ task: "hello" });
-    out.text.catch(() => {});
+    const events = collect(out.fullStream);
     await out.cancel();
     expect(peer.seen).toEqual([
       { url: "https://peer.example/api/agents/peer/threads/t1/stream", body: { task: "hello" } },
       { url: "https://peer.example/api/agents/peer/threads/t1/cancel", body: { turnId: "turn-9" } },
     ]);
     expect(peer.streamAborted()).toBe(true);
+    expect(await out.text).toBe("");
+    expect(await out.finishReason).toBe("cancelled");
+    expect(await out.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
+    expect((await events).at(-1)).toMatchObject({ type: "finish", reason: "cancelled" });
   });
 
   it("the caller's signal cancels the remote turn, not just the connection", async () => {
@@ -91,7 +101,6 @@ describe("resolveRemoteAgent", () => {
     const thread = await peer.agent.thread("t1");
     const abort = new AbortController();
     const out = thread.stream({ task: "hello" }, { signal: abort.signal });
-    out.text.catch(() => {});
     await until(() => peer.seen.length === 1);
     abort.abort();
     await until(() => peer.seen.length === 2);
@@ -100,28 +109,35 @@ describe("resolveRemoteAgent", () => {
       body: { turnId: "turn-9" },
     });
     await until(() => peer.streamAborted());
+    expect(await out.text).toBe("");
+    expect(await out.finishReason).toBe("cancelled");
+    expect(await out.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
   });
 
   it("the call timeout cancels the remote turn", async () => {
     const peer = fakePeer({ timeoutMs: 1 });
     const thread = await peer.agent.thread("t1");
     const out = thread.stream({ task: "hello" });
-    out.text.catch(() => {});
     await until(() => peer.seen.length === 2);
     expect(peer.seen[1]!.url).toBe("https://peer.example/api/agents/peer/threads/t1/cancel");
+    expect(await out.text).toBe("");
+    expect(await out.finishReason).toBe("cancelled");
+    expect(await out.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
   });
 
   it("cancel() rejects when the server refuses the cancel; a turn already ended is fine", async () => {
     const refused = fakePeer({ cancelStatus: 500 });
     const out = (await refused.agent.thread("t1")).stream({ task: "hello" });
-    out.text.catch(() => {});
     await expect(out.cancel()).rejects.toThrow("RemoteAgent cancel failed: 500");
     expect(refused.streamAborted()).toBe(true);
+    expect(await out.text).toBe("");
+    expect(await out.finishReason).toBe("cancelled");
 
     const ended = fakePeer({ cancelStatus: 404 });
     const out2 = (await ended.agent.thread("t1")).stream({ task: "hello" });
-    out2.text.catch(() => {});
     await out2.cancel();
+    expect(await out2.text).toBe("");
+    expect(await out2.finishReason).toBe("cancelled");
   });
 
   it("refuses an endpoint that re-resolves to a private address under an outbound policy", async () => {
