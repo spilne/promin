@@ -19,6 +19,7 @@ import {
   sessionCookie,
   sessionToken,
 } from "./sessions.ts";
+import { mountAccessRoutes } from "./access-routes.ts";
 
 const DEFAULT_SESSION_TTL_MS = 8 * 60 * 60 * 1_000;
 
@@ -135,13 +136,16 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
       const user = await config.store.getUser(id);
       return user ? principalForUser(user) : undefined;
     },
-    canActIn: async () => {
-      throw new Error("createZoryaSecurity.canActIn is not implemented");
+    canActIn: async ({ principal, namespaceId }) => {
+      return rolesFor(principal, namespaceId).size > 0;
     },
-    canUseKnowledge: async () => {
-      throw new Error("createZoryaSecurity.canUseKnowledge is not implemented");
+    canUseKnowledge: async ({ principal, namespaceId, baseId }) => {
+      const roles = rolesFor(principal, namespaceId);
+      if (roles.has("admin") || roles.has("knowledge-manager")) return true;
+      const grants = await config.store.listKnowledgeGrants({ namespaceId, baseId });
+      return grants.some((grant) => roles.has(grant.accessRole));
     },
-    mount: (router) =>
+    mount: (router) => {
       mountLoginRoutes({
         router,
         config,
@@ -151,8 +155,17 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
         clock,
         secure,
         sessionTtlMs,
-      }),
+      });
+      mountAccessRoutes({ router, store: config.store });
+    },
   };
+}
+
+function rolesFor(principal: Principal, namespaceId: string): Set<string> {
+  return new Set([
+    ...(principal.accessRoles[ORG_WIDE_NAMESPACE] ?? []),
+    ...(principal.accessRoles[namespaceId] ?? []),
+  ]);
 }
 
 function mountLoginRoutes(params: {
