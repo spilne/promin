@@ -496,6 +496,65 @@ function buildStaticRunOutput(data: {
   };
 }
 
+const FINISH_REASONS: ReadonlySet<FinishReason> = new Set([
+  "stop",
+  "tool_use",
+  "length",
+  "max_steps",
+  "budget_exceeded",
+  "stalled",
+  "cancelled",
+  "error",
+]);
+
+function isFinishReason(value: unknown): value is FinishReason {
+  return typeof value === "string" && FINISH_REASONS.has(value as FinishReason);
+}
+
+function isUsageNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isUsageStats(value: unknown): value is UsageStats {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const usage = value as Record<string, unknown>;
+  return (
+    isUsageNumber(usage.inputTokens) &&
+    isUsageNumber(usage.outputTokens) &&
+    (usage.cacheReadTokens === undefined || isUsageNumber(usage.cacheReadTokens)) &&
+    (usage.cacheWriteTokens === undefined || isUsageNumber(usage.cacheWriteTokens))
+  );
+}
+
+function parseFinishFrame(data: string): {
+  readonly text: string;
+  readonly finishReason: FinishReason;
+  readonly usage: UsageStats;
+} {
+  let value: unknown;
+  try {
+    value = JSON.parse(data);
+  } catch {
+    throw new Error("RemoteAgent stream received malformed finish data");
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("RemoteAgent stream received invalid finish data");
+  }
+  const finish = value as Record<string, unknown>;
+  if (
+    typeof finish.text !== "string" ||
+    !isFinishReason(finish.finishReason) ||
+    !isUsageStats(finish.usage)
+  ) {
+    throw new Error("RemoteAgent stream received invalid finish data");
+  }
+  return {
+    text: finish.text,
+    finishReason: finish.finishReason,
+    usage: finish.usage,
+  };
+}
+
 /**
  * Build a live `AgentRunOutput` from a pending SSE fetch response.
  * Starts a background reader that fans events to:
@@ -511,12 +570,9 @@ function buildSseRunOutput(params: {
   onSettled?: () => void;
 }): AgentRunOutput {
   const { pending, ctrl, cancelRemote, onSettled } = params;
-  let observedTurnId: string | undefined;
-  void pending.then(
-    (res) => {
-      observedTurnId = res.headers.get("x-turn-id") ?? undefined;
-    },
-    () => {},
+  const turnId = pending.then(
+    (res) => res.headers.get("x-turn-id") ?? undefined,
+    () => undefined,
   );
   // Deferred promise handles
   let resolveText!: (t: string) => void;
@@ -612,7 +668,14 @@ function buildSseRunOutput(params: {
       // `cancelRemote` uses RemoteTransport.call, so it has the bounded
       // non-turn request deadline. It is deliberately best-effort: a peer
       // refusing or outliving that request must not reopen local settlement.
-      void cancelRemote(observedTurnId).catch(() => {});
+      const turnIdAvailableNow = Promise.race([
+        turnId,
+        // Give an already-resolved response one microtask to publish its
+        // headers, then fall back to a thread-wide cancel. A fetch that
+        // ignores abort must never hold remote cancellation open forever.
+        Promise.resolve().then(() => undefined),
+      ]);
+      void turnIdAvailableNow.then(cancelRemote).catch(() => {});
     }
     return Promise.resolve();
   };
@@ -644,14 +707,10 @@ function buildSseRunOutput(params: {
           }
         } else if (event === "finish") {
           try {
-            const p = JSON.parse(data) as {
-              text: string;
-              finishReason: FinishReason;
-              usage: UsageStats;
-            };
+            const p = parseFinishFrame(data);
             settleFinish({ text: p.text, reason: p.finishReason, usage: p.usage });
-          } catch {
-            /* skip malformed */
+          } catch (error) {
+            settleError(error);
           }
         } else if (event === "error") {
           try {

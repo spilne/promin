@@ -280,6 +280,52 @@ describe("RemoteAgent timeouts", () => {
     }
   });
 
+  it("rejects semantically invalid finish frames instead of producing undefined success", async () => {
+    const invalidFinishData = [
+      {},
+      {
+        text: 42,
+        finishReason: "stop",
+        usage: { inputTokens: 1, outputTokens: 2 },
+      },
+      {
+        text: "done",
+        finishReason: "unknown",
+        usage: { inputTokens: 1, outputTokens: 2 },
+      },
+      {
+        text: "done",
+        finishReason: "stop",
+        usage: { inputTokens: "1", outputTokens: 2 },
+      },
+      {
+        text: "done",
+        finishReason: "stop",
+        usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: "3" },
+      },
+    ];
+
+    for (const finish of invalidFinishData) {
+      const agent = new RemoteAgent({
+        endpoint: "https://peer.example",
+        remoteAgentId: "peer",
+        fetch: async () =>
+          new Response(`event: finish\ndata: ${JSON.stringify(finish)}\n\n`, {
+            headers: { "content-type": "text/event-stream" },
+          }),
+      });
+      const out = agent.stream({ task: "hello" });
+      const textDeltas = collect(out.textStream);
+      const events = collect(out.fullStream);
+
+      expect(String((await settle(out.text)).error)).toContain("invalid finish data");
+      expect(await out.finishReason).toBe("error");
+      expect(await out.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
+      expect(await textDeltas).toEqual([]);
+      expect((await events).at(-1)).toMatchObject({ type: "error" });
+    }
+  });
+
   it("thread cancel settles before initial response headers and sends one best-effort cancel", async () => {
     const seen: Array<{ readonly url: string; readonly body: string | undefined }> = [];
     const agent = new RemoteAgent({

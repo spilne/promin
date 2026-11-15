@@ -79,13 +79,13 @@ describe("resolveRemoteAgent", () => {
     expect(seen).toEqual(["https://peer.example/api/agents/peer/invoke"]);
   });
 
-  it("cancelling a thread stream cancels the turn it named on the server, then closes", async () => {
+  it("immediate thread cancel uses an already-resolving turn id, then closes", async () => {
     const peer = fakePeer();
     const thread = await peer.agent.thread("t1");
     const out = thread.stream({ task: "hello" });
     const events = collect(out.fullStream);
-    await new Promise((resolve) => setTimeout(resolve, 0));
     await out.cancel();
+    await until(() => peer.seen.length === 2);
     expect(peer.seen).toEqual([
       { url: "https://peer.example/api/agents/peer/threads/t1/stream", body: { task: "hello" } },
       { url: "https://peer.example/api/agents/peer/threads/t1/cancel", body: { turnId: "turn-9" } },
