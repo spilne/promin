@@ -725,6 +725,32 @@ describe("webhook enterprise identity", () => {
     expect(await storage.listWorkflows({ name: WEBHOOK_DELIVERY_WORKFLOW, limit: 10 })).toEqual([]);
   });
 
+  it("rechecks revocation after the claim and runs no initial agent code", async () => {
+    let active = true;
+    const audits: SecurityAuditEvent[] = [];
+    const inner = new InMemoryWebhookDeliveryStore();
+    const deliveries: WebhookDeliveryStore = {
+      claim: async (params) => {
+        const claim = await inner.claim(params);
+        active = false;
+        return claim;
+      },
+      renew: (params) => inner.renew(params),
+      complete: (params) => inner.complete(params),
+      fail: (params) => inner.fail(params),
+      listUnfinished: (params) => inner.listUnfinished(params),
+    };
+    const { server, dispatched } = await boot({
+      security: assignedSecurity({ active: () => active, audits }),
+      sources: { github: { secret: SECRET, securityContext: assignment } },
+      deliveries,
+    });
+    expect((await server.handle(delivery())).status).toBe(403);
+    expect(dispatched).toEqual([]);
+    expect(await deliveries.listUnfinished({ limit: 10 })).toEqual([]);
+    expect(audits.map((event) => event.decision.allowed)).toEqual([true, false]);
+  });
+
   it("persists the assigned context and audits ingest plus dispatch", async () => {
     const audits: SecurityAuditEvent[] = [];
     const { server, storage, dispatched } = await boot({
