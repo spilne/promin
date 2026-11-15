@@ -59,6 +59,7 @@ function environment(
         clientId: oidcIssuer.clientId,
         clientSecret: oidcIssuer.clientSecret,
         ...(params.fetch !== undefined && { fetch: params.fetch }),
+        clock,
       }),
     ],
     publicBaseUrl: params.publicBaseUrl ?? PUBLIC_BASE_URL,
@@ -117,6 +118,25 @@ async function errorCode(response: Response): Promise<string | undefined> {
   const body: unknown = await response.json();
   if (!body || typeof body !== "object" || !("error" in body)) return undefined;
   return typeof body.error === "string" ? body.error : undefined;
+}
+
+function jwksTrackingFetch(): {
+  readonly fetcher: typeof fetch;
+  readonly requestCount: () => number;
+} {
+  let requests = 0;
+  const fetcher = Object.assign(
+    async (
+      input: Parameters<typeof fetch>[0],
+      init?: Parameters<typeof fetch>[1],
+    ): Promise<Response> => {
+      const url = input instanceof Request ? input.url : input.toString();
+      if (new URL(url).pathname === "/jwks") requests += 1;
+      return fetch(input, init);
+    },
+    { preconnect: fetch.preconnect },
+  );
+  return { fetcher, requestCount: () => requests };
 }
 
 describe("OIDC security module", () => {
@@ -220,34 +240,81 @@ describe("OIDC security module", () => {
     }
   });
 
+  it("rejects discovery issuer values that differ only by a trailing slash", async () => {
+    for (const trailingSlash of [false, true]) {
+      const mismatchedIssuer = await startFakeOidcIssuer({
+        trailingSlash,
+        discoveryIssuerTrailingSlashMismatch: true,
+      });
+      try {
+        const provider = oidcLoginProvider({
+          issuer: mismatchedIssuer.issuer,
+          clientId: mismatchedIssuer.clientId,
+          clientSecret: mismatchedIssuer.clientSecret,
+        });
+        await expect(
+          provider.authorizationUrl({
+            state: "state",
+            codeChallenge: "challenge",
+            redirectUri: `${PUBLIC_BASE_URL}/auth/callback/oidc`,
+          }),
+        ).rejects.toThrow("discovery issuer does not match configured issuer");
+      } finally {
+        await mismatchedIssuer.stop();
+      }
+    }
+  });
+
   it("refreshes the JWKS when the issuer rotates to an unknown signing key", async () => {
     const rotatingIssuer = await startFakeOidcIssuer();
-    let jwksRequests = 0;
-    const trackingFetch = Object.assign(
-      async (
-        input: Parameters<typeof fetch>[0],
-        init?: Parameters<typeof fetch>[1],
-      ): Promise<Response> => {
-        const url = input instanceof Request ? input.url : input.toString();
-        if (new URL(url).pathname === "/jwks") jwksRequests += 1;
-        return fetch(input, init);
-      },
-      { preconnect: fetch.preconnect },
-    );
+    const tracking = jwksTrackingFetch();
     try {
       const env = environment({
         oidcIssuer: rotatingIssuer,
-        fetch: trackingFetch,
+        fetch: tracking.fetcher,
       });
       expect((await login({ env, email: "before@example.com" })).response.status).toBe(302);
-      expect(jwksRequests).toBe(1);
+      expect(tracking.requestCount()).toBe(1);
 
       await rotatingIssuer.rotateSigningKey();
       expect((await login({ env, email: "after@example.com" })).response.status).toBe(302);
-      expect(jwksRequests).toBe(2);
+      expect(tracking.requestCount()).toBe(2);
       expect(await env.store.listUsers()).toHaveLength(2);
     } finally {
       await rotatingIssuer.stop();
+    }
+  });
+
+  it("bounds JWKS refreshes across repeated distinct unknown kids", async () => {
+    const attackedIssuer = await startFakeOidcIssuer();
+    const tracking = jwksTrackingFetch();
+    try {
+      const env = environment({
+        oidcIssuer: attackedIssuer,
+        fetch: tracking.fetcher,
+      });
+      expect((await login({ env, email: "valid@example.com" })).response.status).toBe(302);
+      expect(tracking.requestCount()).toBe(1);
+
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const rejected = await login({
+          env,
+          email: `unknown-${attempt}@example.com`,
+          mode: "wrong-key",
+        });
+        expect(rejected.response.status).toBe(401);
+        expect(await errorCode(rejected.response)).toBe("invalid_identity_token");
+      }
+      expect(tracking.requestCount()).toBe(2);
+      expect(await env.store.listUsers()).toHaveLength(1);
+
+      env.clock.advance(30_000);
+      await attackedIssuer.rotateSigningKey();
+      expect((await login({ env, email: "rotated@example.com" })).response.status).toBe(302);
+      expect(tracking.requestCount()).toBe(3);
+      expect(await env.store.listUsers()).toHaveLength(2);
+    } finally {
+      await attackedIssuer.stop();
     }
   });
 

@@ -1,4 +1,5 @@
-import { createRemoteJWKSet, customFetch, jwtVerify } from "jose";
+import { createRemoteJWKSet, customFetch, errors, jwtVerify } from "jose";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { z } from "zod";
 import type { LoginIdentity, LoginProvider } from "./login-provider.ts";
 
@@ -15,6 +16,7 @@ const IdentityClaimsSchema = z.object({
   email: z.string().min(1),
   email_verified: z.boolean(),
 });
+const FORCED_JWKS_REFRESH_INTERVAL_MS = 30_000;
 
 export interface OidcLoginProviderConfig {
   readonly id?: string;
@@ -22,6 +24,7 @@ export interface OidcLoginProviderConfig {
   readonly clientId: string;
   readonly clientSecret: string;
   readonly fetch?: typeof fetch;
+  readonly clock?: WallClock;
 }
 
 /** Generic authorization-code OIDC provider with PKCE and verified ID tokens. */
@@ -29,8 +32,9 @@ export function oidcLoginProvider(config: OidcLoginProviderConfig): LoginProvide
   const id = config.id ?? "oidc";
   const issuer = config.issuer;
   const fetcher = config.fetch ?? fetch;
+  const clock = config.clock ?? SystemWallClock;
   let discoveryPromise: Promise<z.infer<typeof DiscoverySchema>> | undefined;
-  let jwksPromise: Promise<ReturnType<typeof createRemoteJWKSet>> | undefined;
+  let jwksPromise: Promise<ReturnType<typeof refreshableRemoteJwks>> | undefined;
 
   const discovery = () => {
     discoveryPromise ??= (async () => {
@@ -51,11 +55,10 @@ export function oidcLoginProvider(config: OidcLoginProviderConfig): LoginProvide
   const verifier = async () => {
     jwksPromise ??= (async () => {
       const metadata = await discovery();
-      return createRemoteJWKSet(new URL(metadata.jwks_uri), {
-        // On an unknown kid, immediately reload once so planned provider key
-        // rotations do not require a Zorya restart.
-        cooldownDuration: 0,
-        [customFetch]: (url, options) => fetcher(url, options),
+      return refreshableRemoteJwks({
+        url: new URL(metadata.jwks_uri),
+        fetcher,
+        clock,
       });
     })();
     return jwksPromise;
@@ -104,6 +107,53 @@ export function oidcLoginProvider(config: OidcLoginProviderConfig): LoginProvide
         emailVerified: claims.email_verified,
       };
     },
+  };
+}
+
+function refreshableRemoteJwks(params: {
+  readonly url: URL;
+  readonly fetcher: typeof fetch;
+  readonly clock: WallClock;
+}) {
+  const remote = createRemoteJWKSet(params.url, {
+    // Unknown-kid refreshes are budgeted below. Keep jose from performing an
+    // additional automatic reload outside that provider-wide budget. Jose's
+    // default cache age still periodically refreshes the set.
+    cooldownDuration: Number.POSITIVE_INFINITY,
+    [customFetch]: (url, options) => params.fetcher(url, options),
+  });
+  let nextForcedRefreshAt = 0;
+  let forcedRefresh: Promise<void> | undefined;
+
+  return async (...args: Parameters<typeof remote>): ReturnType<typeof remote> => {
+    const hadFreshJwks = remote.jwks() !== undefined && remote.fresh;
+    try {
+      return await remote(...args);
+    } catch (error) {
+      if (!(error instanceof errors.JWKSNoMatchingKey)) throw error;
+
+      const now = params.clock.currentTimeMs();
+      if (!hadFreshJwks) {
+        // The initial or periodic jose fetch already observed this unknown kid.
+        // Suppress an immediate duplicate forced download.
+        nextForcedRefreshAt = Math.max(nextForcedRefreshAt, now + FORCED_JWKS_REFRESH_INTERVAL_MS);
+        throw error;
+      }
+
+      if (forcedRefresh) {
+        await forcedRefresh;
+      } else {
+        if (now < nextForcedRefreshAt) throw error;
+        // Reserve the single refresh before awaiting so concurrent and
+        // attacker-chosen kids share one global provider budget.
+        nextForcedRefreshAt = now + FORCED_JWKS_REFRESH_INTERVAL_MS;
+        forcedRefresh = remote.reload().finally(() => {
+          forcedRefresh = undefined;
+        });
+        await forcedRefresh;
+      }
+      return remote(...args);
+    }
   };
 }
 

@@ -28,6 +28,7 @@ export interface FakeOidcIssuer {
 
 export interface FakeOidcIssuerOptions {
   readonly trailingSlash?: boolean;
+  readonly discoveryIssuerTrailingSlashMismatch?: boolean;
 }
 
 /** Small authorization-code issuer used to exercise discovery, PKCE and JWT verification. */
@@ -58,7 +59,9 @@ export async function startFakeOidcIssuer(
       const url = new URL(req.url);
       if (url.pathname === "/.well-known/openid-configuration") {
         return Response.json({
-          issuer,
+          issuer: options.discoveryIssuerTrailingSlashMismatch
+            ? toggleTrailingSlash(issuer)
+            : issuer,
           authorization_endpoint: `${origin}/authorize`,
           token_endpoint: `${origin}/token`,
           jwks_uri: `${origin}/jwks`,
@@ -117,7 +120,7 @@ export async function startFakeOidcIssuer(
         })
           .setProtectedHeader({
             alg: "RS256",
-            kid: wrongKey ? "wrong" : `valid-${validKid}`,
+            kid: wrongKey ? `wrong-${randomUUID()}` : `valid-${validKid}`,
           })
           .setSubject(authorization.identity.subject)
           .setIssuer(tokenIssuer)
@@ -165,4 +168,8 @@ export async function startFakeOidcIssuer(
       await server.stop(true);
     },
   };
+}
+
+function toggleTrailingSlash(value: string): string {
+  return value.endsWith("/") ? value.slice(0, -1) : `${value}/`;
 }
