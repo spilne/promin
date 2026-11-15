@@ -8,6 +8,7 @@ import {
   loadScopedAgent,
   openThreadFromBody,
   openThreadFromQuery,
+  refusalResponse,
   scopeFromQuery,
 } from "./agent-scope.ts";
 
@@ -231,8 +232,8 @@ export function getAgentFeedback(deps: AgentGatewayDeps, datasets: EvalDatasetSt
 export function getAgentFeedbackTrend(deps: AgentGatewayDeps, datasets: EvalDatasetStore) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     if (!params.id) return jsonError(400, "missing_id");
-    const scope = scopeFromQuery(new URL(req.url));
-    if ("error" in scope) return jsonError(400, scope.error);
+    const scope = scopeFromQuery({ req, url: new URL(req.url) });
+    if ("error" in scope) return refusalResponse(scope);
     const scoped = await loadScopedAgent({ deps, req, id: params.id, scope, invoking: false });
     if (scoped instanceof Response) return scoped;
     const datasetId = feedbackDatasetId(scoped.namespaceId, scoped.recipe.id, scoped.resourceId);

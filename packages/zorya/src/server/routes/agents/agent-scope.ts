@@ -16,6 +16,7 @@ import { z } from "zod";
 import { json, jsonError, parseIntParam } from "../../router.ts";
 import { requireActiveNamespace } from "../../namespace-guard.ts";
 import { internalError } from "../agent-gateway-kit.ts";
+import { requestPrincipal, type Principal } from "../../security/index.ts";
 import type { AgentGatewayDeps } from "./agent-gateway-deps.ts";
 
 /**
@@ -132,6 +133,37 @@ export interface RequestRefusal {
   readonly message?: string;
 }
 
+/** Derive the scope a request may act in from its authenticated principal. */
+export function deriveScope(params: {
+  readonly principal: Principal | undefined;
+  readonly requested: {
+    readonly namespaceId?: unknown;
+    readonly resourceId?: unknown;
+    readonly ownerId?: unknown;
+  };
+}): ScopeFields | RequestRefusal {
+  const { principal, requested } = params;
+  if (!principal || principal.canActFor) {
+    const scope = parseScopeFields(requested);
+    return "error" in scope ? { error: scope.error, status: 400 } : scope;
+  }
+  if (typeof requested.namespaceId !== "string" || requested.namespaceId.length === 0) {
+    return { error: "missing_namespaceId", status: 400 };
+  }
+  const ownerId =
+    typeof requested.ownerId === "string" && requested.ownerId.length > 0
+      ? requested.ownerId
+      : undefined;
+  const resourceId =
+    typeof requested.resourceId === "string" && requested.resourceId.length > 0
+      ? requested.resourceId
+      : undefined;
+  if (ownerId !== undefined || (resourceId !== undefined && resourceId !== principal.id)) {
+    return { error: "identity_forbidden", status: 403 };
+  }
+  return { namespaceId: requested.namespaceId, resourceId: principal.id };
+}
+
 /** The JSON error answer of a refusal. */
 export function refusalResponse(refusal: RequestRefusal): Response {
   return jsonError(refusal.status, refusal.error, refusal.message);
@@ -141,7 +173,11 @@ export function refusalResponse(refusal: RequestRefusal): Response {
  * Parse an invoke / send body. A missing task answers 400 `missing_task`,
  * one longer than `MAX_AGENT_TASK_CHARS` 413 `task_too_large`.
  */
-export function parseInvokeBody(body: InvokeRequest | null): ParsedInvoke | RequestRefusal {
+export function parseInvokeBody(params: {
+  readonly req: Request;
+  readonly body: InvokeRequest | null;
+}): ParsedInvoke | RequestRefusal {
+  const { req, body } = params;
   if (!body) return { error: "missing_body", status: 400 };
   const task = AgentTaskSchema.safeParse(body.task);
   if (!task.success) {
@@ -153,8 +189,8 @@ export function parseInvokeBody(body: InvokeRequest | null): ParsedInvoke | Requ
         }
       : { error: "missing_task", status: 400 };
   }
-  const scope = parseScopeFields(body);
-  if ("error" in scope) return { error: scope.error, status: 400 };
+  const scope = deriveScope({ principal: requestPrincipal(req), requested: body });
+  if ("error" in scope) return scope;
   return { task: task.data, ...scope };
 }
 
@@ -181,11 +217,17 @@ export function parseTurnKey(params: {
 }
 
 /** Scope fields from a GET route's query string. */
-export function scopeFromQuery(url: URL): ScopeFields | { error: string } {
-  return parseScopeFields({
-    namespaceId: url.searchParams.get("namespaceId") ?? undefined,
-    resourceId: url.searchParams.get("resourceId") ?? undefined,
-    ownerId: url.searchParams.get("ownerId") ?? undefined,
+export function scopeFromQuery(params: {
+  readonly req: Request;
+  readonly url: URL;
+}): ScopeFields | RequestRefusal {
+  return deriveScope({
+    principal: requestPrincipal(params.req),
+    requested: {
+      namespaceId: params.url.searchParams.get("namespaceId") ?? undefined,
+      resourceId: params.url.searchParams.get("resourceId") ?? undefined,
+      ownerId: params.url.searchParams.get("ownerId") ?? undefined,
+    },
   });
 }
 
@@ -215,6 +257,25 @@ export async function loadScopedAgent(params: {
   const { deps, req, id, scope, invoking } = params;
   const recipe = await deps.registry.get({ id });
   if (!recipe) return agentNotFound(id);
+
+  const actor = requestPrincipal(req);
+  let effectivePrincipal = actor;
+  if (actor?.kind === "service-account" && actor.canActFor) {
+    if (!scope.resourceId || !deps.security) return jsonError(403, "unknown_user");
+    effectivePrincipal = await deps.security.principalById(scope.resourceId);
+    if (!effectivePrincipal) return jsonError(403, "unknown_user");
+  }
+  if (
+    deps.security &&
+    effectivePrincipal &&
+    !(await deps.security.canActIn({
+      principal: effectivePrincipal,
+      namespaceId: scope.namespaceId,
+    }))
+  ) {
+    return jsonError(403, "namespace_forbidden");
+  }
+
   if (invoking) {
     const disabled = disabled410(recipe);
     if (disabled) return disabled;
@@ -256,7 +317,11 @@ export async function loadScopedAgent(params: {
 
   let agent: Agent;
   try {
-    const resolved = await deps.resolve(recipe, { namespaceId: scope.namespaceId, resourceId });
+    const resolved = await deps.resolve(recipe, {
+      namespaceId: scope.namespaceId,
+      resourceId,
+      ...(effectivePrincipal !== undefined && { principal: effectivePrincipal }),
+    });
     // The owner comes from the authorized request, never from parsing
     // the instance id, so peer delegation runs under the same owner.
     agent = resolved.withScope({
@@ -373,8 +438,8 @@ export async function openThreadFromQuery(args: {
   if (!id) return jsonError(400, "missing_id");
   if (!threadId) return jsonError(400, "missing_threadId");
   const url = new URL(req.url);
-  const scope = scopeFromQuery(url);
-  if ("error" in scope) return jsonError(400, scope.error);
+  const scope = scopeFromQuery({ req, url });
+  if ("error" in scope) return refusalResponse(scope);
   const scoped = await loadScopedAgent({ deps, req, id, scope, invoking: false });
   if (scoped instanceof Response) return scoped;
   const thread = await openOwnedThread({ scoped, threadId, create: false });
@@ -398,8 +463,8 @@ export async function openThreadFromBody(args: {
   const threadId = params.threadId;
   if (!id) return jsonError(400, "missing_id");
   if (!threadId) return jsonError(400, "missing_threadId");
-  const scope = parseScopeFields(body);
-  if ("error" in scope) return jsonError(400, scope.error);
+  const scope = deriveScope({ principal: requestPrincipal(req), requested: body });
+  if ("error" in scope) return refusalResponse(scope);
   const scoped = await loadScopedAgent({ deps, req, id, scope, invoking: false });
   if (scoped instanceof Response) return scoped;
   const thread = await openOwnedThread({ scoped, threadId, create: false });

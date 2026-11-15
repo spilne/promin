@@ -92,6 +92,7 @@ import type { NamespaceRegistry, WallClock } from "@promin/workflow";
 import type { McpRecipeChecker, ScopeAuthorizer } from "../agent-gateway-kit.ts";
 import type { PromotionGate } from "../evals.ts";
 import type { TurnStreamHub } from "./agent-sse.ts";
+import type { Principal, ZoryaSecurity } from "../../security/index.ts";
 
 // ---------------------------------------------------------------------------
 // Response DTOs — UI imports these for typing API responses. Re-export the
@@ -252,8 +253,14 @@ export interface AgentGatewayDeps {
    */
   readonly resolve: (
     recipe: RegisteredAgent,
-    scope?: { readonly namespaceId?: string; readonly resourceId?: string },
+    scope?: {
+      readonly namespaceId?: string;
+      readonly resourceId?: string;
+      readonly principal?: Principal;
+    },
   ) => Agent | Promise<Agent>;
+  /** Authentication and coarse access policy for principal-derived agent scopes. */
+  readonly security?: ZoryaSecurity;
   /**
    * Optional. When set, callers may pass `ownerId` instead of
    * `resourceId`. The gateway resolves-or-creates an AgentInstance via

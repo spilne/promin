@@ -381,6 +381,7 @@ export class ZoryaServer {
         mcp: this.mcp,
         namespaces,
         evals: this.evals,
+        security: this.security,
         clock,
       });
     }

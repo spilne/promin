@@ -35,6 +35,7 @@ import {
 } from "@promin/agent";
 import type { DurableScheduleConfig, ScheduleTick } from "@promin/workflow/scheduler";
 import type { ScopeAuthorizer } from "../../routes/agent-gateway-kit.ts";
+import type { Principal } from "../../security/index.ts";
 import type { TurnStreamLimits } from "../../routes/agents/agent-sse.ts";
 import type { AgentScheduleDispatcher, AgentScheduleStart } from "../scheduler/index.ts";
 
@@ -61,7 +62,11 @@ export interface ZoryaAgentsConfig {
    */
   resolve: (
     recipe: RegisteredAgent,
-    scope?: { readonly namespaceId?: string; readonly resourceId?: string },
+    scope?: {
+      readonly namespaceId?: string;
+      readonly resourceId?: string;
+      readonly principal?: Principal;
+    },
   ) => Agent | Promise<Agent>;
   memory?: MemoryStore;
   instances?: AgentInstanceRegistry;
@@ -169,7 +174,11 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   readonly registry: AgentRegistry;
   readonly resolve: (
     recipe: RegisteredAgent,
-    scope?: { readonly namespaceId?: string; readonly resourceId?: string },
+    scope?: {
+      readonly namespaceId?: string;
+      readonly resourceId?: string;
+      readonly principal?: Principal;
+    },
   ) => Agent | Promise<Agent>;
   readonly memory?: MemoryStore;
   readonly instances?: AgentInstanceRegistry;

@@ -20,6 +20,7 @@ import {
 } from "@promin/agent";
 import { WorkflowSuspendedError } from "@promin/workflow";
 import { json, jsonError, readJson } from "../../router.ts";
+import { requestPrincipal } from "../../security/index.ts";
 import { internalError } from "../agent-gateway-kit.ts";
 import type {
   AgentGatewayDeps,
@@ -31,15 +32,16 @@ import type {
 } from "./agent-gateway-deps.ts";
 import {
   acquireTurnLease,
+  deriveScope,
   loadScopedAgent,
   openOwnedThread,
   openThreadFromBody,
   openThreadFromQuery,
   parseInvokeBody,
-  parseScopeFields,
   parseTurnKey,
   refusalResponse,
   type InvokeRequest,
+  type RequestRefusal,
   type ScopeFields,
   type ScopedAgent,
 } from "./agent-scope.ts";
@@ -81,7 +83,7 @@ export function invokeAgent(deps: AgentGatewayDeps) {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
 
-    const parsed = parseInvokeBody(await readJson<InvokeRequest>(req));
+    const parsed = parseInvokeBody({ req, body: await readJson<InvokeRequest>(req) });
     if ("error" in parsed) return refusalResponse(parsed);
     const scoped = await loadScopedAgent({ deps, req, id, scope: parsed, invoking: true });
     if (scoped instanceof Response) return scoped;
@@ -110,7 +112,7 @@ export function streamAgent(deps: AgentGatewayDeps) {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
 
-    const parsed = parseInvokeBody(await readJson<InvokeRequest>(req));
+    const parsed = parseInvokeBody({ req, body: await readJson<InvokeRequest>(req) });
     if ("error" in parsed) return refusalResponse(parsed);
     const scoped = await loadScopedAgent({ deps, req, id, scope: parsed, invoking: true });
     if (scoped instanceof Response) return scoped;
@@ -140,7 +142,7 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
     if (!threadId) return jsonError(400, "missing_threadId");
 
     const body = await readJson<InvokeRequest>(req);
-    const parsed = parseInvokeBody(body);
+    const parsed = parseInvokeBody({ req, body });
     if ("error" in parsed) return refusalResponse(parsed);
     const turn = parseTurnKey({ req, body });
     if ("error" in turn) return jsonError(400, turn.error);
@@ -206,7 +208,7 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
     if (!threadId) return jsonError(400, "missing_threadId");
 
     const body = await readJson<InvokeRequest>(req);
-    const parsed = parseInvokeBody(body);
+    const parsed = parseInvokeBody({ req, body });
     if ("error" in parsed) return refusalResponse(parsed);
     const turn = parseTurnKey({ req, body });
     if ("error" in turn) return jsonError(400, turn.error);
@@ -404,8 +406,8 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
     if (!id) return jsonError(400, "missing_id");
     if (!threadId) return jsonError(400, "missing_threadId");
 
-    const parsed = parseApprovalBody(await readJson<ApprovalRequest>(req));
-    if ("error" in parsed) return jsonError(400, parsed.error);
+    const parsed = parseApprovalBody({ req, body: await readJson<ApprovalRequest>(req) });
+    if ("error" in parsed) return refusalResponse(parsed);
     const scoped = await loadScopedAgent({ deps, req, id, scope: parsed, invoking: true });
     if (scoped instanceof Response) return scoped;
 
@@ -476,13 +478,17 @@ interface ParsedApproval extends ScopeFields {
   readonly reason?: string;
 }
 
-function parseApprovalBody(body: ApprovalRequest | null): ParsedApproval | { error: string } {
-  if (!body) return { error: "missing_body" };
+function parseApprovalBody(params: {
+  readonly req: Request;
+  readonly body: ApprovalRequest | null;
+}): ParsedApproval | RequestRefusal {
+  const { req, body } = params;
+  if (!body) return { error: "missing_body", status: 400 };
   if (typeof body.toolCallId !== "string" || body.toolCallId.length === 0) {
-    return { error: "missing_toolCallId" };
+    return { error: "missing_toolCallId", status: 400 };
   }
-  if (typeof body.approved !== "boolean") return { error: "missing_approved" };
-  const scope = parseScopeFields(body);
+  if (typeof body.approved !== "boolean") return { error: "missing_approved", status: 400 };
+  const scope = deriveScope({ principal: requestPrincipal(req), requested: body });
   if ("error" in scope) return scope;
   const reason = typeof body.reason === "string" ? body.reason : undefined;
   return {

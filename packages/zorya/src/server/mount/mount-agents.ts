@@ -25,6 +25,7 @@ import {
 import type { ZoryaFragments } from "../services/fragments/index.ts";
 import type { ZoryaMcpServers } from "../services/mcp/index.ts";
 import type { ZoryaSkills } from "../services/skills/index.ts";
+import type { ZoryaSecurity } from "../security/index.ts";
 import {
   getToolCatalogHealth,
   listCatalogFragments,
@@ -104,6 +105,7 @@ export function mountAgents(params: {
   readonly namespaces: NamespaceRegistry | undefined;
   /** Evals service whose gates guard agent promotion. */
   readonly evals: ZoryaEvals | undefined;
+  readonly security: ZoryaSecurity | undefined;
   readonly clock: WallClock;
 }): void {
   const { router, agents, skills, fragments, clock } = params;
@@ -111,6 +113,7 @@ export function mountAgents(params: {
   const agentDeps: AgentGatewayDeps = {
     registry: agents.registry,
     resolve: agents.resolve,
+    ...(params.security !== undefined && { security: params.security }),
     ...(agents.instances !== undefined && { instanceRegistry: agents.instances }),
     ...(agents.roles !== undefined && { roles: agents.roles }),
     ...(agents.turnGate !== undefined && { turnGate: agents.turnGate }),
