@@ -105,7 +105,10 @@ export function existingRunResult(params: {
  * workflow doesn't have.
  */
 export function stepsFrom(params: {
-  readonly steps: ReadonlyArray<{ readonly name: string; readonly dependsOn: readonly string[] }>;
+  readonly steps: ReadonlyArray<{
+    readonly name: string;
+    readonly dependsOn: readonly string[];
+  }>;
   readonly fromStep: string;
   readonly workflowName: string;
 }): string[] {
@@ -247,6 +250,19 @@ export abstract class ZoryaWorkflows {
     requested: RunSecurityContext | undefined,
   ): RunSecurityContext | undefined {
     return this.executionSecurity?.contextForTrigger(requested) ?? requested;
+  }
+
+  /**
+   * Recheck the durable starter before an HTTP/capability route mutates a
+   * run. Unlike execution admission, this check never terminalizes the run.
+   */
+  async checkStoredRunSecurity(params: {
+    readonly workflowId: string;
+    readonly source: import("../../security/run-execution-security.ts").RunExecutionSource;
+    readonly tokenId?: string;
+  }): Promise<boolean> {
+    if (!this.executionSecurity) return false;
+    return this.executionSecurity.checkStoredRun(params);
   }
 
   /**

@@ -96,6 +96,37 @@ export class RunExecutionSecurity {
     return this.authorizeState({ state, source });
   }
 
+  /**
+   * Recheck a stored starter without changing the run's terminal state.
+   *
+   * HTTP signal and public capability routes call this before they mutate
+   * signal/token state. A revoked starter is denied, but the route must not
+   * consume a token (or turn a run terminal) merely by checking it.
+   */
+  async checkStoredRun(params: {
+    readonly workflowId: string;
+    readonly source: RunExecutionSource;
+    readonly tokenId?: string;
+  }): Promise<boolean> {
+    const workflowId = params.workflowId;
+    const source = params.source;
+    const tokenId = params.tokenId;
+    const state = await this.storage.loadWorkflow(workflowId);
+    if (!state) return false;
+    const runContext = this.contextForStored(state.securityContext);
+    if (!runContext) {
+      this.report("missing durable security context", workflowId);
+      return false;
+    }
+    return this.decide({
+      workflowId,
+      namespaceId: state.namespace ?? ORG_WIDE_NAMESPACE,
+      runContext,
+      source,
+      ...(tokenId !== undefined && { tokenId }),
+    });
+  }
+
   /** Authorize a child create before a remote worker may persist it. */
   async authorizeContext(params: {
     readonly workflowId: string;
@@ -153,7 +184,9 @@ export class RunExecutionSecurity {
       workflowId: params.state.workflowId,
       error: RUN_SECURITY_BLOCKED_MESSAGE,
       errorTag: RUN_SECURITY_BLOCKED_ERROR_TAG,
-      ...(replacesOwedCancel && { compensationOrigin: "cancel-settled" as const }),
+      ...(replacesOwedCancel && {
+        compensationOrigin: "cancel-settled" as const,
+      }),
       ...(params.guard !== undefined && { guard: params.guard }),
     });
     return false;
@@ -168,6 +201,7 @@ export class RunExecutionSecurity {
     readonly namespaceId: string;
     readonly runContext: RunSecurityContext;
     readonly source: RunExecutionSource;
+    readonly tokenId?: string;
   }): Promise<boolean> {
     const actorRef = toPrincipalRef(params.runContext.actor);
     const effectiveRef = toPrincipalRef(params.runContext.effective ?? params.runContext.actor);
@@ -179,7 +213,10 @@ export class RunExecutionSecurity {
       actor: actor ?? unresolvedPrincipal(actorRef),
       effective: effectiveRef,
     });
-    const permission = snapshotSecurityPermission({ resource: "run", action: "trigger" });
+    const permission = snapshotSecurityPermission({
+      resource: "run",
+      action: "trigger",
+    });
     const resource = snapshotSecurityResource({
       kind: "run",
       namespaceId: params.namespaceId,
@@ -187,7 +224,11 @@ export class RunExecutionSecurity {
     });
 
     const decision: AuthorizationDecision = snapshotAuthorizationDecision(
-      await this.security.authorize({ context, permission, resource } as AuthorizationRequest),
+      await this.security.authorize({
+        context,
+        permission,
+        resource,
+      } as AuthorizationRequest),
     );
 
     const event: SecurityAuditEvent = Object.freeze({
@@ -198,7 +239,10 @@ export class RunExecutionSecurity {
       resource,
       permission,
       decision,
-      metadata: Object.freeze({ source: params.source }),
+      metadata: Object.freeze({
+        source: params.source,
+        ...(params.tokenId !== undefined && { tokenId: params.tokenId }),
+      }),
     });
     await this.security.recordAudit(event);
     return decision.allowed;
@@ -223,7 +267,12 @@ export type RunExecutionSource =
   | "recovery"
   | "worker-claim"
   | "worker-lock"
-  | "child-create";
+  | "child-create"
+  | "http-signal"
+  | "signal-token-mint"
+  | "signal-token-list"
+  | "signal-token-describe"
+  | "signal-token-complete";
 
 function toPrincipalRef(ref: RunPrincipalRef): PrincipalRef {
   return Object.freeze({ kind: ref.kind, id: ref.id });

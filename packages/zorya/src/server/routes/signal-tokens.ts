@@ -25,12 +25,15 @@ import { parseBody, parseParams } from "../request-validation.ts";
 import { requireRun } from "./run-extras.ts";
 import { RunParamsSchema, signalSchemaMismatch } from "./runs.ts";
 import { agentApprovalRefusal } from "./signals.ts";
+import type { RunContinuationAuthorizer } from "./runs.ts";
 
 /** Default cap on a minted token's validity window: 90 days. */
 export const DEFAULT_MAX_SIGNAL_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 
 export interface SignalTokenRoutesDeps {
   storage: WorkflowStorage;
+  /** Freshly reauthorize the stored run starter before metadata or mutation. */
+  authorizeRunContinuation?: RunContinuationAuthorizer;
   /**
    * Optional base URL the mint route prepends to the relative completion
    * path when building the token's `url`. Absent → token returns no URL,
@@ -144,6 +147,15 @@ export function mintSignalToken(deps: SignalTokenRoutesDeps) {
     if (isTerminalWorkflowStatus(status.status)) {
       return jsonError(409, "run_ended", `Run has already ended (status: ${status.status})`);
     }
+    if (
+      deps.authorizeRunContinuation &&
+      !(await deps.authorizeRunContinuation({
+        workflowId,
+        source: "signal-token-mint",
+      }))
+    ) {
+      return jsonError(403, "forbidden");
+    }
     const agentApproval = await agentApprovalRefusal({
       storage: deps.storage,
       workflowId,
@@ -216,6 +228,19 @@ export function completeSignalToken(deps: SignalTokenRoutesDeps) {
       return jsonError(401, "invalid_bearer");
     }
 
+    const wf = await deps.storage.loadWorkflow(token.workflowId);
+    if (!wf) return jsonError(404, "workflow_not_found");
+    if (
+      deps.authorizeRunContinuation &&
+      !(await deps.authorizeRunContinuation({
+        workflowId: token.workflowId,
+        source: "signal-token-complete",
+        tokenId,
+      }))
+    ) {
+      return jsonError(403, "forbidden");
+    }
+
     if (token.completedAt) {
       // Idempotent re-submission: same bearer accepted, original value returned.
       const response: CompleteTokenResponse = {
@@ -231,15 +256,16 @@ export function completeSignalToken(deps: SignalTokenRoutesDeps) {
       return jsonError(410, "token_expired", "The signal token has expired");
     }
 
-    const body = await parseBody({ req, schema: CompleteSignalTokenRequestSchema });
+    const body = await parseBody({
+      req,
+      schema: CompleteSignalTokenRequestSchema,
+    });
 
     // Schema check — when the suspend point was set up via
     // `ctx.validatedSignal` / `ctx.approval`, the StepState carries a
     // JSON Schema snapshot. Reject mismatching payloads here so a webhook
     // or share-link recipient can't smuggle the wrong shape through. Plain
     // `ctx.signal` suspends leave the schema undefined → pass-through.
-    const wf = await deps.storage.loadWorkflow(token.workflowId);
-    if (!wf) return jsonError(404, "workflow_not_found");
     // An ended run can't consume the signal; leave the token unclaimed.
     if (isTerminalWorkflowStatus(wf.status)) {
       return jsonError(409, "run_ended", `Run has already ended (status: ${wf.status})`);
@@ -295,6 +321,16 @@ export function describeSignalToken(deps: SignalTokenRoutesDeps) {
 
     const wf = await deps.storage.loadWorkflow(token.workflowId);
     if (!wf) return jsonError(404, "workflow_not_found");
+    if (
+      deps.authorizeRunContinuation &&
+      !(await deps.authorizeRunContinuation({
+        workflowId: token.workflowId,
+        source: "signal-token-describe",
+        tokenId,
+      }))
+    ) {
+      return jsonError(403, "forbidden");
+    }
 
     // Pending check — the workflow could have resumed via another delivery
     // between mint and now. Surface that explicitly so the share page renders
@@ -335,6 +371,15 @@ export function listSignalTokensForRun(deps: SignalTokenRoutesDeps) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
     const { id: workflowId } = parseParams({ params, schema: RunParamsSchema });
     await requireRun({ storage: deps.storage, workflowId });
+    if (
+      deps.authorizeRunContinuation &&
+      !(await deps.authorizeRunContinuation({
+        workflowId,
+        source: "signal-token-list",
+      }))
+    ) {
+      return jsonError(403, "forbidden");
+    }
     const records = await deps.storage.listSignalTokensForWorkflow(workflowId);
     return json(200, { tokens: records.map(toDto) });
   };

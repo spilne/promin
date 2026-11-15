@@ -44,7 +44,10 @@ function security(
       actor,
       effective: asserted ?? principalRef(actor),
     }),
-    identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
+    identityFilter: async ({ namespaceId }) => ({
+      kind: "namespace",
+      namespaceId,
+    }),
     authorize: async ({ context }) => {
       const current = await resolve(context.actor);
       if (!current) return { allowed: false, reason: "identity_unknown" };
@@ -69,7 +72,9 @@ async function storedRun(params: {
     workflowName: "secured",
     input: null,
     namespace: "team",
-    ...(params.securityContext !== undefined && { securityContext: params.securityContext }),
+    ...(params.securityContext !== undefined && {
+      securityContext: params.securityContext,
+    }),
   });
   return (await params.storage.loadWorkflow(params.id))!;
 }
@@ -144,6 +149,46 @@ describe("RunExecutionSecurity", () => {
     expect(await storage.loadWorkflow("revoked")).toMatchObject({
       status: "failed",
       errorTag: RUN_SECURITY_BLOCKED_ERROR_TAG,
+    });
+  });
+
+  it("checks signal-token access without consuming or terminalizing the denied run", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const audits: SecurityAuditEvent[] = [];
+    const starter = principal({ kind: "user", id: "alice" });
+    const guard = new RunExecutionSecurity({
+      storage,
+      security: security({
+        principals: new Map([["user:alice", starter]]),
+        allowed: () => false,
+        audit: async (event) => void audits.push(event),
+      }),
+      clock: SystemWallClock,
+      logger: quietLogger,
+    });
+    await storedRun({
+      storage,
+      id: "signal-denied",
+      securityContext: { actor: { kind: "user", id: "alice" } },
+    });
+
+    await expect(
+      guard.checkStoredRun({
+        workflowId: "signal-denied",
+        source: "signal-token-complete",
+        tokenId: "token-1",
+      }),
+    ).resolves.toBe(false);
+
+    expect((await storage.loadWorkflow("signal-denied"))?.status).toBe("pending");
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      event: "run.execution.authorization",
+      context: { actor: { kind: "user", id: "alice" } },
+      resource: { kind: "run", namespaceId: "team", id: "signal-denied" },
+      permission: { resource: "run", action: "trigger" },
+      decision: { allowed: false, reason: "permission_denied" },
+      metadata: { source: "signal-token-complete", tokenId: "token-1" },
     });
   });
 
@@ -227,7 +272,9 @@ describe("RunExecutionSecurity", () => {
       name: "cancelled-recovery",
       compensate: { onCancel: "rollback" },
     })
-      .step("effect", () => succeed("done"), { compensate: async () => void compensations++ })
+      .step("effect", () => succeed("done"), {
+        compensate: async () => void compensations++,
+      })
       .build();
     await storage.createWorkflow({
       workflowId: "cancelled-recovery",
@@ -245,10 +292,17 @@ describe("RunExecutionSecurity", () => {
     await storage.suspendWorkflow({
       workflowId: "cancelled-recovery",
       stepName: "wait",
-      stepUpdate: { status: "waiting", stepType: "signal", signalName: "resume" },
+      stepUpdate: {
+        status: "waiting",
+        stepType: "signal",
+        signalName: "resume",
+      },
     });
     await storage.cancelWorkflow({ workflowId: "cancelled-recovery" });
-    const runner = createWorkflowRunner({ storage, runAdmissionGuard: guard.admissionGuard });
+    const runner = createWorkflowRunner({
+      storage,
+      runAdmissionGuard: guard.admissionGuard,
+    });
     runner.exemptInternalWorkflowFromRunAdmission?.(secured);
 
     await runner.runSafe({
