@@ -104,11 +104,16 @@ export interface AuthenticationRequest {
   readonly plane: SecurityPlane;
 }
 
-export interface AuthorizationRequest<K extends SecurityResourceKind = SecurityResourceKind> {
+export interface AuthorizationRequestFor<K extends SecurityResourceKind> {
   readonly context: SecurityContext;
   readonly permission: SecurityPermissionFor<K>;
   readonly resource: SecurityResourceRef<K>;
 }
+
+/** Correlated permission/resource request; no union inference can pair different kinds. */
+export type AuthorizationRequest = {
+  readonly [K in SecurityResourceKind]: AuthorizationRequestFor<K>;
+}[SecurityResourceKind];
 
 export interface ResolveIdentityRequest {
   readonly actor: Principal;
@@ -137,9 +142,7 @@ export interface RequestAuthenticator {
 }
 
 export interface Authorizer {
-  authorize<K extends SecurityResourceKind>(
-    request: AuthorizationRequest<K>,
-  ): Promise<AuthorizationDecision>;
+  authorize(request: AuthorizationRequest): Promise<AuthorizationDecision>;
 }
 
 export interface IdentityResolver {

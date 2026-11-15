@@ -19,6 +19,7 @@ export {
   type AuthorizationDecision,
   type AuthorizationReason,
   type AuthorizationRequest,
+  type AuthorizationRequestFor,
   type Authorizer,
   type DashboardLoginIdentity,
   type DashboardLoginProvider,

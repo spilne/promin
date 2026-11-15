@@ -368,8 +368,62 @@ describe("namespace and knowledge access", () => {
         context: { actor: admin, effective: principalRef(admin) },
         permission: { resource: "agent", action: "invoke" },
         resource: { kind: "knowledge", namespaceId: "team-a", id: "docs" },
-      } as unknown as AuthorizationRequest<"agent">),
+      } as unknown as AuthorizationRequest),
     ).toEqual({ allowed: false, reason: "permission_denied" });
+  });
+
+  it("revalidates the actor and its current act-for authority", async () => {
+    const account = {
+      id: "channel",
+      token: "channel-token",
+      canActFor: true,
+      accessRoles: { "team-a": ["member"] },
+    };
+    const env = environment({ serviceAccounts: [account] });
+    const user = await createUser({
+      env,
+      email: "represented@example.com",
+      bindings: [{ namespaceId: "team-a", accessRole: "member" }],
+    });
+    const effective = await principal(env, user);
+    const actor = await env.security.resolvePrincipal({ kind: "service-account", id: account.id });
+    if (!actor) throw new Error("configured service account did not resolve");
+    const context = await env.security.resolveIdentity({
+      actor,
+      asserted: principalRef(effective),
+    });
+    if (!context) throw new Error("configured act-for identity did not resolve");
+    const request = {
+      context,
+      permission: { resource: "agent", action: "invoke" },
+      resource: { kind: "agent", namespaceId: "team-a" },
+    } as const;
+
+    expect(await env.security.authorize(request)).toEqual({
+      allowed: true,
+      reason: "access_role_allow",
+    });
+    account.canActFor = false;
+    expect(
+      await env.security.resolveIdentity({ actor, asserted: principalRef(effective) }),
+    ).toBeUndefined();
+    expect(await env.security.authorize(request)).toEqual({
+      allowed: false,
+      reason: "act_for_required",
+    });
+
+    const missingActor: Principal = {
+      kind: "service-account",
+      id: "removed-channel",
+      accessRoles: { "team-a": ["admin"] },
+      canActFor: true,
+    };
+    expect(
+      await env.security.authorize({
+        ...request,
+        context: { actor: missingActor, effective: principalRef(effective) },
+      }),
+    ).toEqual({ allowed: false, reason: "identity_unknown" });
   });
 
   it("principal construction safely preserves stored prototype-like namespace keys", async () => {

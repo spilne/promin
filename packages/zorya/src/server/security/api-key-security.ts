@@ -33,20 +33,32 @@ export function createApiKeySecurity(config: ApiKeySecurityConfig): ZoryaSecurit
     },
     resolvePrincipal: async (ref) => principal(ref),
     resolveIdentity: async ({ actor, asserted }) => {
-      if (!asserted || samePrincipal(actor, asserted)) return selfSecurityContext(actor);
-      if (!actor.canActFor) return undefined;
+      const currentActor = principal(actor);
+      if (!currentActor) return undefined;
+      if (!asserted || samePrincipal(currentActor, asserted)) {
+        return selfSecurityContext(currentActor);
+      }
+      if (!currentActor.canActFor || !validEffectiveRef(asserted, principal)) return undefined;
       // A key-only deployment has no user directory, so its operator may act
       // for an otherwise unprovisioned identity by explicit reference.
-      if (actor.kind === "operator") return { actor, effective: asserted };
+      if (currentActor.kind === "operator") return { actor: currentActor, effective: asserted };
       const effective = principal(asserted);
-      return effective ? { actor, effective: principalRef(effective) } : undefined;
+      return effective ? { actor: currentActor, effective: principalRef(effective) } : undefined;
     },
     identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
     authorize: async ({ context, permission, resource }) => {
+      const currentActor = principal(context.actor);
+      if (!currentActor) return { allowed: false, reason: "identity_unknown" };
       if (permission.resource !== resource.kind) {
         return { allowed: false, reason: "permission_denied" };
       }
-      if (context.actor.kind === "operator") return { allowed: true, reason: "operator_allow" };
+      if (!samePrincipal(currentActor, context.effective)) {
+        if (!currentActor.canActFor) return { allowed: false, reason: "act_for_required" };
+        if (!validEffectiveRef(context.effective, principal)) {
+          return { allowed: false, reason: "identity_unknown" };
+        }
+      }
+      if (currentActor.kind === "operator") return { allowed: true, reason: "operator_allow" };
       return { allowed: false, reason: "wrong_plane" };
     },
     recordAudit: async (event) => {
@@ -61,4 +73,11 @@ export function selfSecurityContext(actor: Principal): SecurityContext {
 
 function samePrincipal(left: PrincipalRef, right: PrincipalRef): boolean {
   return left.kind === right.kind && left.id === right.id;
+}
+
+function validEffectiveRef(
+  ref: PrincipalRef,
+  resolve: (ref: PrincipalRef) => Principal | undefined,
+): boolean {
+  return ref.kind === "operator" || ref.kind === "worker" ? resolve(ref) !== undefined : true;
 }

@@ -126,6 +126,21 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
     return undefined;
   };
 
+  const resolveCurrent = async (
+    ref: PrincipalRef,
+  ): Promise<
+    | { readonly principal: Principal }
+    | { readonly reason: "principal_disabled" | "identity_unknown" }
+  > => {
+    const principal = await resolvePrincipal(ref);
+    if (principal) return { principal };
+    if (ref.kind === "user") {
+      const user = await config.store.getUser(ref.id);
+      if (user?.status === "disabled") return { reason: "principal_disabled" };
+    }
+    return { reason: "identity_unknown" };
+  };
+
   return {
     authenticate: async ({ request: req, plane }) => {
       if (plane !== "operator") return undefined;
@@ -152,29 +167,34 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
     },
     resolvePrincipal,
     resolveIdentity: async ({ actor, asserted }) => {
-      if (!asserted || samePrincipal(actor, asserted)) {
-        return { actor, effective: principalRef(actor) };
+      const actorResult = await resolveCurrent(actor);
+      if ("reason" in actorResult) return undefined;
+      const currentActor = actorResult.principal;
+      if (!asserted || samePrincipal(currentActor, asserted)) {
+        return { actor: currentActor, effective: principalRef(currentActor) };
       }
-      if (!actor.canActFor) return undefined;
+      if (!currentActor.canActFor) return undefined;
       const effective = await resolvePrincipal(asserted);
-      return effective ? { actor, effective: principalRef(effective) } : undefined;
+      return effective ? { actor: currentActor, effective: principalRef(effective) } : undefined;
     },
     identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
     authorize: async ({ context, permission, resource }) => {
+      const actorResult = await resolveCurrent(context.actor);
+      if ("reason" in actorResult) return { allowed: false, reason: actorResult.reason };
+      const currentActor = actorResult.principal;
       if (permission.resource !== resource.kind) {
         return { allowed: false, reason: "permission_denied" };
       }
-      // Re-resolve on every check so role removal and user disable take
-      // effect even when the request context carries a stale actor snapshot.
-      const principal = await resolvePrincipal(context.effective);
-      if (!principal) {
-        if (context.effective.kind === "user") {
-          const user = await config.store.getUser(context.effective.id);
-          if (user?.status === "disabled") {
-            return { allowed: false, reason: "principal_disabled" };
-          }
+      let principal = currentActor;
+      if (!samePrincipal(currentActor, context.effective)) {
+        if (!currentActor.canActFor) {
+          return { allowed: false, reason: "act_for_required" };
         }
-        return { allowed: false, reason: "identity_unknown" };
+        const effectiveResult = await resolveCurrent(context.effective);
+        if ("reason" in effectiveResult) {
+          return { allowed: false, reason: effectiveResult.reason };
+        }
+        principal = effectiveResult.principal;
       }
       const roles = rolesFor(principal, resource.namespaceId);
       if (roles.has("admin")) return { allowed: true, reason: "access_role_allow" };

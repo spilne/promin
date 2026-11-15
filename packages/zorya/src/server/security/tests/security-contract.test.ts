@@ -9,8 +9,8 @@ import {
   requestSecurityContext,
   setRequestSecurityContext,
   type AuthorizationRequest,
-  type SecurityPermission,
-  type SecurityResourceRef,
+  type Principal,
+  type SecurityContext,
 } from "../index.ts";
 
 const OPERATOR_KEY = "operator-key";
@@ -84,40 +84,77 @@ describe("security contract", () => {
     const adapter = security();
     for (const [resource, actions] of Object.entries(SECURITY_ACTIONS)) {
       for (const action of actions) {
-        const permission = { resource, action } as SecurityPermission;
-        const target = {
-          kind: resource,
-          namespaceId: "team-a",
-          id: "resource-1",
-        } as SecurityResourceRef;
         expect(
           await adapter.authorize({
             context: { actor: OPERATOR_PRINCIPAL, effective: OPERATOR_PRINCIPAL },
-            permission,
-            resource: target,
-          }),
+            permission: { resource, action },
+            resource: { kind: resource, namespaceId: "team-a", id: "resource-1" },
+          } as unknown as AuthorizationRequest),
         ).toEqual({ allowed: true, reason: "operator_allow" });
         expect(
           await adapter.authorize({
             context: { actor: WORKER_PRINCIPAL, effective: WORKER_PRINCIPAL },
-            permission,
-            resource: target,
-          }),
+            permission: { resource, action },
+            resource: { kind: resource, namespaceId: "team-a", id: "resource-1" },
+          } as unknown as AuthorizationRequest),
         ).toEqual({ allowed: false, reason: "wrong_plane" });
       }
     }
   });
 
   it("denies a forged permission/resource mismatch even for the operator", async () => {
+    type MismatchAccepted = {
+      readonly context: SecurityContext;
+      readonly permission: { readonly resource: "agent"; readonly action: "invoke" };
+      readonly resource: { readonly kind: "knowledge"; readonly namespaceId: string };
+    } extends AuthorizationRequest
+      ? true
+      : false;
+    const mismatchAccepted: MismatchAccepted = false;
+    expect(mismatchAccepted).toBeFalse();
+
     const forged = {
       context: { actor: OPERATOR_PRINCIPAL, effective: OPERATOR_PRINCIPAL },
       permission: { resource: "agent", action: "invoke" },
       resource: { kind: "knowledge", namespaceId: "team-a", id: "docs" },
-    } as unknown as AuthorizationRequest<"agent">;
+    } as unknown as AuthorizationRequest;
     expect(await security().authorize(forged)).toEqual({
       allowed: false,
       reason: "permission_denied",
     });
+  });
+
+  it("rejects forged operator and worker principal ids", async () => {
+    const adapter = security();
+    for (const forged of [
+      {
+        ...OPERATOR_PRINCIPAL,
+        id: "forged-operator",
+      },
+      {
+        ...WORKER_PRINCIPAL,
+        id: "forged-worker",
+      },
+    ] satisfies Principal[]) {
+      expect(
+        await adapter.authorize({
+          context: { actor: forged, effective: forged },
+          permission: { resource: "agent", action: "invoke" },
+          resource: { kind: "agent", namespaceId: "team-a" },
+        }),
+      ).toEqual({ allowed: false, reason: "identity_unknown" });
+      expect(await adapter.resolveIdentity({ actor: forged })).toBeUndefined();
+    }
+    expect(
+      await adapter.authorize({
+        context: {
+          actor: OPERATOR_PRINCIPAL,
+          effective: { kind: "operator", id: "forged-operator" },
+        },
+        permission: { resource: "agent", action: "invoke" },
+        resource: { kind: "agent", namespaceId: "team-a" },
+      }),
+    ).toEqual({ allowed: false, reason: "identity_unknown" });
   });
 
   it("requires act-for and keeps actor separate from effective identity", async () => {
