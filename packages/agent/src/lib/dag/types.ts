@@ -79,6 +79,23 @@ export interface AgentNode extends NodeBase {
   readonly agentId: string;
 }
 
+export type TransformOp =
+  | { readonly op: "collect"; readonly fields: ReadonlyArray<string> }
+  | { readonly op: "pick"; readonly path: string }
+  | { readonly op: "flatten" }
+  | { readonly op: "compact" }
+  | { readonly op: "count" }
+  | { readonly op: "dedupe"; readonly by?: string }
+  | { readonly op: "filter"; readonly where: Condition }
+  | { readonly op: "sort"; readonly by: string; readonly order?: "asc" | "desc" }
+  | { readonly op: "take"; readonly count: number };
+
+export interface TransformNode extends NodeBase {
+  readonly kind: "transform";
+  readonly from?: string;
+  readonly ops: ReadonlyArray<TransformOp>;
+}
+
 export type DagNode = AgentNode;
 
 /** Durable accounting and timing for one settled DAG node. */
