@@ -215,7 +215,7 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
         return { allowed: true, reason: "self_identity_allow" };
       }
       if (permission.resource === "agent" && permission.action === "invoke") {
-        return roles.size > 0
+        return roles.has("member")
           ? { allowed: true, reason: "access_role_allow" }
           : { allowed: false, reason: "namespace_denied" };
       }
@@ -314,7 +314,7 @@ function isMemberPermission(params: {
   if (permission.resource === "agent" && permission.action === "read") {
     return hasAnyAccessRole(principal);
   }
-  if (roles.size === 0) return false;
+  if (!roles.has("member")) return false;
   if (permission.resource === "thread") {
     return (
       permission.action === "read" ||
@@ -323,6 +323,7 @@ function isMemberPermission(params: {
       permission.action === "archive"
     );
   }
+  if (permission.resource === "run" && permission.action === "trigger") return true;
   if (permission.resource === "memory") {
     return resource.id === principal.id;
   }

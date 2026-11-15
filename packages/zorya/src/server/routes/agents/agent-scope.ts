@@ -259,15 +259,22 @@ export async function loadScopedAgent(params: {
   readonly scope: ScopeFields;
   /** Invocation routes reject a disabled recipe with 410. */
   readonly invoking: boolean;
+  /** Pre-authorized stored scope used only after a dynamic protected-route guard. */
+  readonly authoritativeScope?: boolean;
+  /** Freshly resolved effective principal for an authoritative stored scope. */
+  readonly effectivePrincipal?: Principal;
 }): Promise<ScopedAgent | Response> {
   const { deps, req, id, scope, invoking } = params;
   const recipe = await deps.registry.get({ id });
   if (!recipe) return agentNotFound(id);
 
   const actor = requestPrincipal(req);
-  let effectivePrincipal = actor;
+  let effectivePrincipal = params.effectivePrincipal ?? actor;
   let securityContext: SecurityContext | undefined = requestSecurityContext(req);
-  if (!securityContext && actor?.canActFor && scope.resourceId !== undefined) {
+  if (params.authoritativeScope) {
+    // The central guard admitted a preloaded stored object. Do not replace
+    // its starter identity with the current approver's identity.
+  } else if (!securityContext && actor?.canActFor && scope.resourceId !== undefined) {
     if (!deps.security) return jsonError(403, "unknown_user");
     securityContext = await deps.security.resolveIdentity({
       actor,
@@ -280,7 +287,7 @@ export async function loadScopedAgent(params: {
     securityContext = await deps.security.resolveIdentity({ actor });
     if (!securityContext) return jsonError(403, "unknown_user");
   }
-  if (deps.security && securityContext) {
+  if (!params.authoritativeScope && deps.security && securityContext) {
     setRequestSecurityContext({ req, context: securityContext });
     const represented =
       securityContext.actor.kind === securityContext.effective.kind &&
@@ -295,7 +302,7 @@ export async function loadScopedAgent(params: {
     const disabled = disabled410(recipe);
     if (disabled) return disabled;
   }
-  if (deps.authorizeScope) {
+  if (!params.authoritativeScope && deps.authorizeScope) {
     const allowed = await deps.authorizeScope({ req, scope: { ...scope, agentId: id } });
     if (!allowed) return jsonError(403, "scope_forbidden");
   }
@@ -365,6 +372,7 @@ export async function openOwnedThread(params: {
   readonly scoped: ScopedAgent;
   readonly threadId: string;
   readonly create: boolean;
+  readonly securityContext?: SecurityContext;
 }): Promise<AgentThread | Response> {
   const { scoped, threadId, create } = params;
   const agentId = scoped.recipe.id;
@@ -372,7 +380,23 @@ export async function openOwnedThread(params: {
   try {
     thread = await scoped.agent.thread(
       threadId,
-      create ? { metadata: { [THREAD_AGENT_METADATA_KEY]: agentId } } : { createIfMissing: false },
+      create
+        ? {
+            metadata: { [THREAD_AGENT_METADATA_KEY]: agentId },
+            ...(params.securityContext !== undefined && {
+              securityContext: {
+                actor: {
+                  kind: params.securityContext.actor.kind,
+                  id: params.securityContext.actor.id,
+                },
+                ...(params.securityContext.actor.kind !== params.securityContext.effective.kind ||
+                params.securityContext.actor.id !== params.securityContext.effective.id
+                  ? { effective: params.securityContext.effective }
+                  : {}),
+              },
+            }),
+          }
+        : { createIfMissing: false },
     );
   } catch (err) {
     if (err instanceof ThreadNotFoundError) return threadNotFound();

@@ -21,6 +21,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createLookupTable, type LookupBinding } from "./lookup-table.ts";
+import type { RunSecurityContext } from "@promin/workflow";
 import {
   WorkflowStatusIds,
   StepStatusIds,
@@ -1200,7 +1201,9 @@ export const agentPendingApproval = pgTable(
     workflowId: text("workflow_id").notNull(),
     toolName: text("tool_name").notNull(),
     input: jsonb("input"),
-    elevated: boolean("elevated").notNull().default(false),
+    // Nullable only for rows created before the approval-security migration.
+    elevated: boolean("elevated"),
+    requestContext: jsonb("request_context").$type<RunSecurityContext>(),
     requestedAt: bigint("requested_at", { mode: "number" }).notNull(),
     expiresAt: bigint("expires_at", { mode: "number" }),
     status: text("status").notNull(),

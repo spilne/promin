@@ -28,6 +28,7 @@ import type { PendingApproval } from "../approvals/pending-approval-store.ts";
 import type { ApprovalDecision } from "../tool.ts";
 import type { CompactThreadOptions, DistillThreadOptions } from "../memory/consolidator.ts";
 import type { EpisodicRecord } from "../memory/types.ts";
+import type { RunSecurityContext } from "@promin/workflow";
 
 /** Streaming + resolved view of one agent run. */
 export interface AgentRunOutput<Output = unknown> {
@@ -198,6 +199,8 @@ export interface ThreadOptions {
   readonly resourceId?: string;
   /** Tenant key — wires to `MemoryStore` namespace layer. Defaults to the agent's bound namespace. */
   readonly namespaceId?: string;
+  /** Durable initiating identity for newly-created turns on this thread. */
+  readonly securityContext?: RunSecurityContext;
   /** Default `true`. When `false`, refuses to create a thread that doesn't exist. */
   readonly createIfMissing?: boolean;
   /**

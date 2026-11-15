@@ -1,6 +1,6 @@
 import { TurnInProgressError } from "@promin/agent";
 import { z } from "zod";
-import { json, jsonError, readJson, type Router } from "../../router.ts";
+import { json, jsonError, readJson, type RouteTargetRequest, type Router } from "../../router.ts";
 import { internalError } from "../agent-gateway-kit.ts";
 import {
   RetainedSubagentError,
@@ -67,6 +67,58 @@ export function mountRetainedAgentRoutes(
   router: Router,
 ) {
   const base = "/api/agents/:id/threads/:threadId/children";
+  const retainedBodyTarget = async (request: RouteTargetRequest) => {
+    const fallback = await agentBodyTarget({
+      kind: "agent",
+      security: deps.security,
+      idParam: "childId",
+    })(request);
+    const raw = (await request.request
+      .clone()
+      .json()
+      .catch(() => null)) as z.infer<typeof ScopeBody> | null;
+    if (!raw) return fallback;
+    const opened = await openThreadFromBody({
+      deps,
+      req: request.request,
+      params: request.params as Record<string, string>,
+      body: raw,
+    });
+    if (opened instanceof Response || !request.params.childId) return fallback;
+    try {
+      const agentId = await retained.resolveOwnedChildAgentId(
+        parentOf(opened),
+        request.params.childId,
+      );
+      return { kind: "agent" as const, namespaceId: opened.scoped.namespaceId, id: agentId };
+    } catch (error) {
+      if (error instanceof RetainedSubagentError && error.code === "not_found") return fallback;
+      throw error;
+    }
+  };
+  const retainedQueryTarget = async (request: RouteTargetRequest) => {
+    const fallback = await agentQueryTarget({
+      kind: "agent",
+      security: deps.security,
+      idParam: "childId",
+    })(request);
+    const opened = await openThreadFromQuery({
+      deps,
+      req: request.request,
+      params: request.params as Record<string, string>,
+    });
+    if (opened instanceof Response || !request.params.childId) return fallback;
+    try {
+      const agentId = await retained.resolveOwnedChildAgentId(
+        parentOf(opened),
+        request.params.childId,
+      );
+      return { kind: "agent" as const, namespaceId: opened.scoped.namespaceId, id: agentId };
+    } catch (error) {
+      if (error instanceof RetainedSubagentError && error.code === "not_found") return fallback;
+      throw error;
+    }
+  };
   router.route({
     method: "POST",
     path: base,
@@ -150,7 +202,7 @@ export function mountRetainedAgentRoutes(
     access: protectedAccess({
       resource: "agent",
       action: "invoke",
-      target: agentBodyTarget({ kind: "agent", security: deps.security, idParam: "childId" }),
+      target: retainedBodyTarget,
     }),
     handler: async (req, params) => {
       const parsed = MessageBody.safeParse(await readJson<unknown>(req));
@@ -179,7 +231,7 @@ export function mountRetainedAgentRoutes(
     access: protectedAccess({
       resource: "agent",
       action: "invoke",
-      target: agentBodyTarget({ kind: "agent", security: deps.security, idParam: "childId" }),
+      target: retainedBodyTarget,
     }),
     handler: async (req, params) => {
       const parsed = ScopeBody.safeParse(await readJson<unknown>(req));
@@ -200,7 +252,7 @@ export function mountRetainedAgentRoutes(
     access: protectedAccess({
       resource: "agent",
       action: "invoke",
-      target: agentQueryTarget({ kind: "agent", security: deps.security, idParam: "childId" }),
+      target: retainedQueryTarget,
     }),
     handler: async (req, params) => {
       const opened = await openThreadFromQuery({ deps, req, params });

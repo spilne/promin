@@ -16,6 +16,7 @@ import type {
   FragmentRegistry,
   MemoryStore,
   ModelCatalog,
+  PendingApprovalStore,
   RegisteredAgent,
   RetrieverRegistry,
   RoleRegistry,
@@ -69,6 +70,8 @@ export interface ZoryaAgentsConfig {
     },
   ) => Agent | Promise<Agent>;
   memory?: MemoryStore;
+  /** Durable approval index shared with the LocalAgents this service resolves. */
+  approvals?: PendingApprovalStore;
   instances?: AgentInstanceRegistry;
   /**
    * Catalog of available LLM models, keyed by `(provider, id)`. When set,
@@ -181,6 +184,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     },
   ) => Agent | Promise<Agent>;
   readonly memory?: MemoryStore;
+  readonly approvals?: PendingApprovalStore;
   readonly instances?: AgentInstanceRegistry;
   readonly models?: ModelCatalog;
   readonly toolCatalog?: AgentToolCatalog;
@@ -223,6 +227,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
       this.resolve = config.resolve;
     }
     if (config.memory) this.memory = config.memory;
+    if (config.approvals) this.approvals = config.approvals;
     if (config.instances) this.instances = config.instances;
     if (config.models) this.models = config.models;
     if (config.toolCatalog) this.toolCatalog = config.toolCatalog;

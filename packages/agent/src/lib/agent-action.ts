@@ -617,6 +617,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
   const reportEngineUsage = config.reportEngineUsage === true || config.engineBudget !== undefined;
   return workflow<AgentInput>({
     name: config.name,
+    ...(config.scope?.namespaceId !== undefined && { namespace: config.scope.namespaceId }),
     ...(config.engineBudget !== undefined && { budget: config.engineBudget }),
   })
     .journaled("agent", function* (ctx, input) {
@@ -757,7 +758,10 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
               tools: Object.entries(resolveTools(config)).map(
                 ([name, t]): ToolSnapshotEntry => ({
                   name,
-                  requireApproval: t.requireApproval === true,
+                  // Elevated tools are approval-gated by definition. Journal
+                  // that boundary even when an author omitted the redundant
+                  // flag, so replay can never observe a live config downgrade.
+                  requireApproval: t.kind === "elevated" || t.requireApproval === true,
                   idempotent: t.idempotent === true,
                   delegated: t.delegation !== undefined,
                   elevated: t.kind === "elevated",
@@ -1585,6 +1589,9 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
   }
 
   function autoApproved(call: ToolCall, entry: ToolSnapshotEntry): boolean {
+    // Elevated approval must always come from a distinct authenticated
+    // principal; a local auto-approval policy cannot satisfy that contract.
+    if (entry.elevated) return false;
     const live = resolveTools(config)[call.name];
     const toolDef: AgentTool<any, any> = live ?? {
       name: entry.name,

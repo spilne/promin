@@ -185,6 +185,63 @@ describe("agentAction — replay-safe events", () => {
 });
 
 describe("agentAction — tool-set snapshot", () => {
+  it("journals elevated tools as approval-gated before any execution", async () => {
+    const { runner, storage } = freshRunner();
+    let executions = 0;
+    const elevated = {
+      ...tool({
+        name: "elevated",
+        description: "cross-scope action",
+        parameters: z.object({}),
+        execute: async () => {
+          executions++;
+          return "done";
+        },
+      }),
+      kind: "elevated" as const,
+    };
+    const build = () =>
+      agentAction({
+        name: "elevated-snapshot",
+        llm: actThenAnswer({ name: "elevated", input: {} }),
+        tools: { elevated },
+        autoApprove: () => true,
+      });
+
+    const first = await runner.runSafe({
+      workflow: build(),
+      workflowId: "elevated-snapshot-1",
+      input: { task: "act" },
+    });
+    expect(first.error).toBeTruthy();
+    expect(executions).toBe(0);
+
+    const state = await storage.loadWorkflow("elevated-snapshot-1");
+    const waiting = Object.values(state!.steps).find(
+      (step) => step.status === "waiting_for_signal",
+    );
+    expect(waiting).toBeDefined();
+    expect(executions).toBe(0);
+
+    await completeSignal({
+      storage,
+      workflowId: "elevated-snapshot-1",
+      stepName: waiting!.stepName,
+      signalName: "approve:call-1",
+      value: { approved: true },
+    });
+    expect(
+      (
+        await runner.run({
+          workflow: build(),
+          workflowId: "elevated-snapshot-1",
+          input: { task: "act" },
+        })
+      ).answer,
+    ).toBe("done");
+    expect(executions).toBe(1);
+  });
+
   it("replays the journaled approval path after the live tool stops requiring approval", async () => {
     const { runner, storage } = freshRunner();
     let requireApproval = true;

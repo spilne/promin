@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { InMemoryAgentRegistry, type Agent, type RegisteredAgent } from "@promin/agent";
+import {
+  InMemoryAgentInstanceRegistry,
+  InMemoryAgentRegistry,
+  type Agent,
+  type RegisteredAgent,
+} from "@promin/agent";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { ZoryaServer } from "../../../server.ts";
 import { ZoryaAgents } from "../../../services/agents/zorya-agents.ts";
@@ -29,7 +34,7 @@ const user: Principal = {
 const serviceAccount: Principal = {
   kind: "service-account",
   id: "slack-bot",
-  accessRoles: { acme: ["agent"] },
+  accessRoles: { acme: ["member"] },
   canActFor: true,
 };
 
@@ -127,6 +132,7 @@ async function boot(params: {
   const resolved: ResolveScope[] = [];
   const agents = new ZoryaAgents({
     registry,
+    instances: new InMemoryAgentInstanceRegistry(),
     resolve: (_recipe: RegisteredAgent, scope?: ResolveScope) => {
       resolved.push(scope ?? {});
       return fakeAgent();
@@ -264,6 +270,34 @@ describe("agent HTTP scope derives from the authenticated principal", () => {
     expect(resolved).toEqual([
       { namespaceId: "acme", resourceId: represented.id, principal: represented },
     ]);
+  });
+
+  it("resolves an act-for service account's ownerId to the represented user", async () => {
+    const represented = { ...user, id: "alice" };
+    const { server, resolved } = await boot({
+      security: security({
+        actor: serviceAccount,
+        users: new Map([[represented.id, represented]]),
+      }),
+    });
+
+    const response = await server.handle(request({ namespaceId: "acme", ownerId: "alice" }));
+
+    expect(response.status).toBe(200);
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]?.principal).toEqual(represented);
+    expect(resolved[0]?.principal).not.toEqual(serviceAccount);
+  });
+
+  it("rejects an act-for service account's unknown owner before agent resolution", async () => {
+    const { server, resolved } = await boot({
+      security: security({ actor: serviceAccount, users: new Map() }),
+    });
+
+    const response = await server.handle(request({ namespaceId: "acme", ownerId: "alice" }));
+
+    expect(response.status).toBe(403);
+    expect(resolved).toHaveLength(0);
   });
 
   it("refuses unknown or disabled represented users", async () => {

@@ -44,7 +44,12 @@
 // ---------------------------------------------------------------------------
 
 import { createHash, randomUUID } from "node:crypto";
-import type { WorkflowRunner, WorkflowState, WorkflowStatus } from "@promin/workflow";
+import type {
+  RunSecurityContext,
+  WorkflowRunner,
+  WorkflowState,
+  WorkflowStatus,
+} from "@promin/workflow";
 import type { z } from "zod";
 import {
   agentAction,
@@ -578,6 +583,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       ...(this.config.approvalTtlMs !== undefined && { approvalTtlMs: this.config.approvalTtlMs }),
       created,
       agentId: this.agentId(),
+      ...(opts.securityContext !== undefined && { securityContext: opts.securityContext }),
       autoCompact: this.config.autoCompact === false ? undefined : this.config.autoCompact,
       autoDistill: this.config.autoDistill === false ? undefined : this.config.autoDistill,
       consolidator: () => this.resolveConsolidator(),
@@ -1088,6 +1094,8 @@ interface LocalAgentThreadDeps<TOutput> {
   readonly created: boolean;
   /** Recipe id surfaced as `ctx.scope.agentId` to scope-aware tools. */
   readonly agentId: string;
+  /** Identity persisted with newly-started durable turns. */
+  readonly securityContext?: RunSecurityContext;
   /** Auto-compaction config inherited from `LocalAgentConfig.autoCompact`. */
   readonly autoCompact?: AutoCompactConfig;
   /** Auto-distillation config inherited from `LocalAgentConfig.autoDistill`. */
@@ -1705,7 +1713,14 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       }),
     });
     this.deps.runner.exemptInternalWorkflowFromRunAdmission?.(wf);
-    return (await this.deps.runner.run({ workflow: wf, workflowId, input })) as AgentResult;
+    return (await this.deps.runner.run({
+      workflow: wf,
+      workflowId,
+      input,
+      ...(this.deps.securityContext !== undefined && {
+        securityContext: this.deps.securityContext,
+      }),
+    })) as AgentResult;
   }
 
   /**
@@ -1765,6 +1780,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
         agentId: this.deps.agentId,
       },
       requested: async ({ workflowId, call, elevated }) => {
+        const run = await this.deps.runner.storage.loadWorkflow(workflowId);
         await this.deps.approvals.record({
           namespaceId: this.deps.key.namespaceId,
           threadId: this.deps.key.threadId,
@@ -1775,6 +1791,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
           toolName: call.name,
           input: call.input,
           elevated,
+          requestContext: run?.securityContext ?? null,
           ...(this.deps.approvalTtlMs !== undefined && { ttlMs: this.deps.approvalTtlMs }),
         });
       },

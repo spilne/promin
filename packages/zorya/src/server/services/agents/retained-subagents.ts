@@ -406,6 +406,11 @@ export class RetainedSubagents {
     return { inbox, transcript, outcomes };
   }
 
+  /** Authoritative recipe behind an owned retained child, for route admission. */
+  async resolveOwnedChildAgentId(parent: RetainedParent, childId: string): Promise<string> {
+    return (await this.ownedChild(parent, childId)).agentId;
+  }
+
   async stopAgent(parent: RetainedParent, childId: string): Promise<void> {
     await this.ownedChild(parent, childId);
     await this.config.workflows.storage.cancelWorkflow({ workflowId: workflowIdOf(childId) });

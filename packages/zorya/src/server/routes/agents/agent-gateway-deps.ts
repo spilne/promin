@@ -81,6 +81,7 @@ import type {
   AgentThreadSummary,
   AgentTurnGate,
   AgentTurnPolicy,
+  PendingApprovalStore,
   BudgetUsage,
   Message,
   RegisteredAgent,
@@ -208,7 +209,7 @@ export interface PendingApprovalDto {
   toolName: string;
   input: unknown;
   /** Elevated approvals require a distinct approver principal. */
-  elevated: boolean;
+  elevated: boolean | null;
   /** Unix ms. */
   requestedAt: number;
   /** Unix ms; null when it never expires. */
@@ -234,6 +235,8 @@ export interface ThreadApprovalsResponse {
 
 export interface AgentGatewayDeps {
   readonly registry: AgentRegistry;
+  /** Durable approval index used for authoritative pre-authorization lookup. */
+  readonly approvals?: PendingApprovalStore;
   /**
    * Optional role registry. When set, `extract-role` can lift an agent's
    * inline role into it (and rebind the agent to a ref). Agent resolution

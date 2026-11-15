@@ -120,11 +120,19 @@ describe("retained subagents", () => {
 
   it("exposes scoped HTTP admission and mailbox routes", async () => {
     const h = await harness();
+    const audit: Array<Record<string, unknown>> = [];
     const server = new ZoryaServer({
       insecure: true,
       workflows: h.workflows,
       agents: h.agents,
       retainedSubagents: h.retained,
+      logger: {
+        log: (message) => {
+          if (message.startsWith("{")) audit.push(JSON.parse(message) as Record<string, unknown>);
+        },
+        warn: () => {},
+        error: () => {},
+      },
     });
     const send = (method: string, path: string, body?: unknown) =>
       server.handle(
@@ -142,6 +150,40 @@ describe("retained subagents", () => {
     });
     expect(created.status).toBe(202);
     const { childId } = (await created.json()) as { childId: string };
+    expect(
+      (
+        await send("POST", `/api/agents/parent/threads/conversation/children/${childId}/messages`, {
+          namespaceId: "acme",
+          resourceId: "alice",
+          task: "follow up",
+        })
+      ).status,
+    ).toBe(202);
+    expect(
+      (
+        await send("POST", `/api/agents/parent/threads/conversation/children/${childId}/stop`, {
+          namespaceId: "acme",
+          resourceId: "alice",
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await send(
+          "DELETE",
+          `/api/agents/parent/threads/conversation/children/${childId}?namespaceId=acme&resourceId=alice`,
+        )
+      ).status,
+    ).toBe(200);
+    const mutationAudits = audit.filter((event) =>
+      ["/messages", "/stop", `/${childId}`].some((suffix) =>
+        String((event.metadata as { path?: string } | undefined)?.path).endsWith(suffix),
+      ),
+    );
+    expect(mutationAudits).toHaveLength(3);
+    expect(
+      mutationAudits.map((event) => (event.resource as { id?: string } | undefined)?.id),
+    ).toEqual(["worker", "worker", "worker"]);
     expect(
       (
         await send(

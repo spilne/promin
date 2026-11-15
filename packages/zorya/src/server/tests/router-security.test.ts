@@ -235,6 +235,62 @@ describe("Router security declarations", () => {
     expect(router.uncoveredRoutes()).toEqual([]);
   });
 
+  it("selects only a declared dynamic permission from the preloaded target", async () => {
+    const seen: string[] = [];
+    const router = new Router({
+      accessGuard: ({ access }) => {
+        if (access.kind === "protected") seen.push(access.permission.action);
+        return undefined;
+      },
+    }).route({
+      method: "POST",
+      path: "/approval",
+      access: {
+        kind: "protected",
+        permissions: [
+          { resource: "approval", action: "decide" },
+          { resource: "approval", action: "decide-elevated" },
+        ],
+        resolveTarget: async ({ request }) => ({
+          permission: {
+            resource: "approval",
+            action: (await request.text()) === "elevated" ? "decide-elevated" : "decide",
+          },
+          resource: { kind: "approval", namespaceId: "team-a", id: "call-1" },
+        }),
+      } as ProtectedRouteAccess,
+      handler: (_request, _params, access) =>
+        Response.json(access.kind === "protected" ? access.permission : null),
+    });
+
+    expect(
+      await (
+        await router.handle(
+          new Request("http://zorya.test/approval", { method: "POST", body: "elevated" }),
+        )
+      ).json(),
+    ).toEqual({ resource: "approval", action: "decide-elevated" });
+    expect(seen).toEqual(["decide-elevated"]);
+
+    const hostile = new Router().route({
+      method: "POST",
+      path: "/approval",
+      access: {
+        kind: "protected",
+        permissions: [{ resource: "approval", action: "decide" }],
+        resolveTarget: () => ({
+          permission: { resource: "approval", action: "decide-elevated" },
+          resource: { kind: "approval", namespaceId: "team-a", id: "call-1" },
+        }),
+      } as unknown as RouteAccess,
+      handler: () => Response.json({ leaked: true }),
+    });
+    const refused = await hostile.handle(
+      new Request("http://zorya.test/approval", { method: "POST" }),
+    );
+    expect(refused.status).toBe(500);
+  });
+
   it("clones protected metadata so caller mutation cannot change the admitted boundary", async () => {
     const events: string[] = [];
     const permission = { resource: "agent", action: "read" };

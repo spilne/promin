@@ -1,4 +1,5 @@
-import { HttpError, type RouteTargetRequest } from "../router.ts";
+import type { PendingApprovalStore } from "@promin/agent";
+import { HttpError, type DynamicRouteTarget, type RouteTargetRequest } from "../router.ts";
 import { assertUniqueQueryParameters } from "../request-validation.ts";
 import {
   requestPrincipal,
@@ -36,10 +37,11 @@ async function secureScope(params: {
   }
   if (!actor || !params.security) return scope;
 
+  const representedId = scope.resourceId ?? scope.ownerId;
   const context = await params.security.resolveIdentity({
     actor,
-    ...(actor.canActFor && scope.resourceId !== undefined
-      ? { asserted: { kind: "user" as const, id: scope.resourceId } }
+    ...(actor.canActFor && representedId !== undefined
+      ? { asserted: { kind: "user" as const, id: representedId } }
       : {}),
   });
   if (!context) throw new HttpError({ status: 403, code: "unknown_user" });
@@ -154,5 +156,48 @@ export function namespaceQueryTarget<K extends SecurityResourceKind>(params: {
     const identity = identityQuery === undefined ? undefined : url.searchParams.get(identityQuery);
     const id = routeId ?? identity ?? undefined;
     return { kind: params.kind, namespaceId, ...(id !== undefined && { id }) };
+  };
+}
+
+/** Resolve the stored approval before the guard selects ordinary or elevated permission. */
+export function approvalBodyTarget(params: { readonly approvals?: PendingApprovalStore }) {
+  return async ({
+    request,
+    params: route,
+  }: RouteTargetRequest): Promise<DynamicRouteTarget<"approval">> => {
+    let body: Readonly<Record<string, unknown>> = {};
+    try {
+      const raw = (await request.clone().json()) as unknown;
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        body = raw as Readonly<Record<string, unknown>>;
+      }
+    } catch {
+      // Handler validation owns malformed-body responses.
+    }
+    const namespaceId = typeof body.namespaceId === "string" ? body.namespaceId : "org";
+    const toolCallId = typeof body.toolCallId === "string" ? body.toolCallId : "unknown";
+    const threadId = route.threadId;
+    const found =
+      params.approvals && threadId && namespaceId !== "org" && toolCallId !== "unknown"
+        ? await params.approvals.get({ namespaceId, threadId, toolCallId })
+        : null;
+    const approval = found && (found.agentId === null || found.agentId === route.id) ? found : null;
+    // Unknown legacy rows cannot be treated as ordinary. They take the
+    // elevated path, and the handler rejects them if requester identity is absent.
+    const elevated = approval?.elevated !== false;
+    return {
+      permission: {
+        resource: "approval",
+        action: elevated ? "decide-elevated" : "decide",
+      },
+      resource: {
+        kind: "approval",
+        namespaceId: approval?.namespaceId ?? namespaceId,
+        id: elevated
+          ? (approval?.toolCallId ?? toolCallId)
+          : (approval?.requestContext?.actor.id ?? "legacy-requester"),
+      },
+      value: approval,
+    };
   };
 }

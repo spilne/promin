@@ -20,6 +20,43 @@ pendingApprovalStoreTestSuite(async () => {
 });
 
 describe("SqlitePendingApprovalStore — persistence", () => {
+  it("upgrades legacy rows with an unknown, fail-closed approval boundary", async () => {
+    const db = new Database(":memory:");
+    db.run(`CREATE TABLE promin_pending_approval (
+      namespace_id TEXT NOT NULL, thread_id TEXT NOT NULL, tool_call_id TEXT NOT NULL,
+      resource_id TEXT, agent_id TEXT, workflow_id TEXT NOT NULL, tool_name TEXT NOT NULL,
+      input TEXT NOT NULL, requested_at INTEGER NOT NULL, expires_at INTEGER,
+      status TEXT NOT NULL, decided_by TEXT, decided_at INTEGER, reason TEXT, delivered_at INTEGER,
+      PRIMARY KEY (namespace_id, thread_id, tool_call_id)
+    )`);
+    db.run(`INSERT INTO promin_pending_approval
+      (namespace_id, thread_id, tool_call_id, workflow_id, tool_name, input, requested_at, status)
+      VALUES ('acme', 't', 'legacy', 'wf-old', 'deploy', '{}', 1, 'pending')`);
+
+    const store = SqlitePendingApprovalStore.make({ db });
+    expect(
+      await store.get({ namespaceId: "acme", threadId: "t", toolCallId: "legacy" }),
+    ).toMatchObject({
+      elevated: null,
+      requestContext: null,
+    });
+    expect(
+      await store.record({
+        namespaceId: "acme",
+        threadId: "t",
+        toolCallId: "new",
+        workflowId: "wf-new",
+        toolName: "deploy",
+        input: {},
+        elevated: false,
+        requestContext: { actor: { kind: "user", id: "alice" } },
+      }),
+    ).toMatchObject({
+      elevated: false,
+      requestContext: { actor: { kind: "user", id: "alice" } },
+    });
+  });
+
   it("survives a new store instance on the same database", async () => {
     const db = new Database(":memory:");
     const first = SqlitePendingApprovalStore.make({ db });
@@ -30,6 +67,8 @@ describe("SqlitePendingApprovalStore — persistence", () => {
       workflowId: "wf",
       toolName: "deploy",
       input: { env: "prod" },
+      elevated: false,
+      requestContext: null,
     });
     const second = SqlitePendingApprovalStore.make({ db });
     const row = await second.get({ namespaceId: "acme", threadId: "t", toolCallId: "c" });

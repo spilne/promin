@@ -8,6 +8,7 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { tool, type LLMProvider } from "@promin/agent";
+import { principalRef, type Principal, type ZoryaSecurity } from "../../security/index.ts";
 import { bootAgents, jsonOf, localBackend, req } from "./agent-gateway-harness.ts";
 
 interface SseFrame {
@@ -32,6 +33,70 @@ async function readSse(res: Response): Promise<SseFrame[]> {
 }
 
 const scope = { namespaceId: "ns", resourceId: "alice" };
+
+function enterpriseApprovalSecurity(): ZoryaSecurity {
+  const principals = new Map<string, Principal>([
+    [
+      "requester-sa",
+      {
+        kind: "service-account",
+        id: "requester-sa",
+        accessRoles: { ns: ["member", "approver"] },
+        canActFor: true,
+      },
+    ],
+    ["alice", { kind: "user", id: "alice", accessRoles: { ns: ["member"] }, canActFor: false }],
+    [
+      "human-approver",
+      {
+        kind: "user",
+        id: "human-approver",
+        accessRoles: { ns: ["approver"] },
+        canActFor: false,
+      },
+    ],
+  ]);
+  return {
+    authenticate: async ({ request }) => principals.get(request.headers.get("x-actor") ?? ""),
+    resolvePrincipal: async (ref) => {
+      const value = principals.get(ref.id);
+      return value?.kind === ref.kind ? value : undefined;
+    },
+    resolveIdentity: async ({ actor, asserted }) => {
+      if (!asserted) return { actor, effective: principalRef(actor) };
+      if (!actor.canActFor) return undefined;
+      const effective = principals.get(asserted.id);
+      return effective ? { actor, effective: principalRef(effective) } : undefined;
+    },
+    identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
+    authorize: async ({ context, permission }) => {
+      if (
+        permission.resource === "run" &&
+        permission.action === "trigger" &&
+        context.actor.id === "requester-sa"
+      ) {
+        return { allowed: true, reason: "access_role_allow" };
+      }
+      if (
+        permission.resource === "approval" &&
+        permission.action === "decide-elevated" &&
+        context.actor.accessRoles.ns?.includes("approver")
+      ) {
+        return { allowed: true, reason: "access_role_allow" };
+      }
+      if (
+        context.effective.kind === "user" &&
+        context.effective.id === "alice" &&
+        ((permission.resource === "thread" && permission.action === "send") ||
+          (permission.resource === "agent" && permission.action === "invoke"))
+      ) {
+        return { allowed: true, reason: "access_role_allow" };
+      }
+      return { allowed: false, reason: "permission_denied" };
+    },
+    recordAudit: async () => {},
+  };
+}
 
 describe("agent SSE — approval resume", () => {
   it("streams the resumed turn to finish without re-sending the approval request", async () => {
@@ -61,7 +126,11 @@ describe("agent SSE — approval resume", () => {
             };
       },
     };
-    const { server, registry, approvals } = await bootAgents({ llm, tools: { deploy } });
+    const { server, registry, approvals } = await bootAgents({
+      llm,
+      tools: { deploy },
+      security: enterpriseApprovalSecurity(),
+    });
     await registry.register({
       id: "deployer",
       backend: {
@@ -78,7 +147,12 @@ describe("agent SSE — approval resume", () => {
 
     const first = await readSse(
       await server.handle(
-        req("POST", "/api/agents/deployer/threads/t1/stream", { task: "ship it", ...scope }),
+        req(
+          "POST",
+          "/api/agents/deployer/threads/t1/stream",
+          { task: "ship it", ...scope },
+          { "x-actor": "requester-sa" },
+        ),
       ),
     );
     const firstEvents = first.map((f) => f.event);
@@ -92,15 +166,37 @@ describe("agent SSE — approval resume", () => {
     expect(deployed).toBe(0);
     expect(
       await approvals.get({ namespaceId: "ns", threadId: "t1", toolCallId: "call-1" }),
-    ).toMatchObject({ elevated: true });
+    ).toMatchObject({
+      elevated: true,
+      requestContext: {
+        actor: { kind: "service-account", id: "requester-sa" },
+        effective: { kind: "user", id: "alice" },
+      },
+    });
+
+    const selfApproval = await server.handle(
+      req(
+        "POST",
+        "/api/agents/deployer/threads/t1/approve",
+        { toolCallId: "call-1", approved: true, ...scope },
+        { "x-actor": "requester-sa" },
+      ),
+    );
+    expect(selfApproval.status).toBe(403);
+    expect(deployed).toBe(0);
 
     const resumed = await readSse(
       await server.handle(
-        req("POST", "/api/agents/deployer/threads/t1/approve", {
-          toolCallId: "call-1",
-          approved: true,
-          ...scope,
-        }),
+        req(
+          "POST",
+          "/api/agents/deployer/threads/t1/approve",
+          {
+            toolCallId: "call-1",
+            approved: true,
+            ...scope,
+          },
+          { "x-actor": "human-approver" },
+        ),
       ),
     );
     const resumedEvents = resumed.map((f) => f.event);
@@ -112,6 +208,9 @@ describe("agent SSE — approval resume", () => {
       finishReason: "stop",
     });
     expect(deployed).toBe(1);
+    expect(
+      await approvals.get({ namespaceId: "ns", threadId: "t1", toolCallId: "call-1" }),
+    ).toMatchObject({ decidedBy: "human-approver" });
   });
 });
 

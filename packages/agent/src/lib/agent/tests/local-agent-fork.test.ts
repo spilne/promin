@@ -72,6 +72,8 @@ describe("LocalAgent.forkThread", () => {
       workflowId: "wf",
       toolName: "deploy",
       input: {},
+      elevated: false,
+      requestContext: null,
     });
     await expect(agent.forkThread!("parent", "child")).rejects.toBeInstanceOf(
       ThreadAwaitingApprovalError,

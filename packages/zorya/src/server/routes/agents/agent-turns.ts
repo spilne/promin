@@ -18,16 +18,9 @@ import {
   type AgentThread,
   type PendingApproval,
 } from "@promin/agent";
-import { SystemWallClock, WorkflowSuspendedError } from "@promin/workflow";
-import { json, jsonError, readJson } from "../../router.ts";
-import {
-  requestPrincipal,
-  requestSecurityContext,
-  snapshotAuthorizationDecision,
-  snapshotSecurityContext,
-  snapshotSecurityPermission,
-  snapshotSecurityResource,
-} from "../../security/index.ts";
+import { WorkflowSuspendedError } from "@promin/workflow";
+import { json, jsonError, readJson, type ResolvedRouteAccess } from "../../router.ts";
+import { requestPrincipal, requestSecurityContext } from "../../security/index.ts";
 import { internalError } from "../agent-gateway-kit.ts";
 import type {
   AgentGatewayDeps,
@@ -39,12 +32,12 @@ import type {
 } from "./agent-gateway-deps.ts";
 import {
   acquireTurnLease,
-  deriveScope,
   loadScopedAgent,
   openOwnedThread,
   openThreadFromBody,
   openThreadFromQuery,
   parseInvokeBody,
+  parseScopeFields,
   parseTurnKey,
   refusalResponse,
   type InvokeRequest,
@@ -79,6 +72,33 @@ async function budgetPreflight(params: {
     if (refused) return refused;
     throw err;
   }
+}
+
+/**
+ * The route guard authorizes an immutable approval identity snapshot before
+ * the handler opens the thread. Refuse if the backend reports a different
+ * approval at the same key: otherwise a replacement between those steps
+ * could inherit the first row's permission decision.
+ */
+function sameApprovalSecurityBoundary(
+  authorized: PendingApproval,
+  current: PendingApproval,
+): boolean {
+  const samePrincipal = (
+    left: { readonly kind: string; readonly id: string } | undefined,
+    right: { readonly kind: string; readonly id: string } | undefined,
+  ) => left?.kind === right?.kind && left?.id === right?.id;
+  return (
+    authorized.namespaceId === current.namespaceId &&
+    authorized.threadId === current.threadId &&
+    authorized.toolCallId === current.toolCallId &&
+    authorized.agentId === current.agentId &&
+    authorized.resourceId === current.resourceId &&
+    authorized.workflowId === current.workflowId &&
+    authorized.elevated === current.elevated &&
+    samePrincipal(authorized.requestContext?.actor, current.requestContext?.actor) &&
+    samePrincipal(authorized.requestContext?.effective, current.requestContext?.effective)
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +182,14 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
     });
     if (lease instanceof Response) return lease;
     try {
-      const thread = await openOwnedThread({ scoped, threadId, create: true });
+      const thread = await openOwnedThread({
+        scoped,
+        threadId,
+        create: true,
+        ...(requestSecurityContext(req) !== undefined && {
+          securityContext: requestSecurityContext(req),
+        }),
+      });
       if (thread instanceof Response) return thread;
       const out = await thread.send({ task: parsed.task }, turn);
       const response: ThreadInvokeResponse = {
@@ -245,7 +272,14 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
     });
     if (lease instanceof Response) return lease;
     try {
-      const thread = await openOwnedThread({ scoped, threadId, create: true });
+      const thread = await openOwnedThread({
+        scoped,
+        threadId,
+        create: true,
+        ...(requestSecurityContext(req) !== undefined && {
+          securityContext: requestSecurityContext(req),
+        }),
+      });
       if (thread instanceof Response) {
         await lease.release();
         return thread;
@@ -406,7 +440,11 @@ function threadMetaOf(params: {
  * is recorded with the authenticated actor, never the represented user.
  */
 export function streamThreadApproval(deps: AgentGatewayDeps) {
-  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+  return async (
+    req: Request,
+    params: Record<string, string>,
+    access?: ResolvedRouteAccess,
+  ): Promise<Response> => {
     const id = params.id;
     const threadId = params.threadId;
     if (!id) return jsonError(400, "missing_id");
@@ -414,7 +452,34 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
 
     const parsed = parseApprovalBody({ req, body: await readJson<ApprovalRequest>(req) });
     if ("error" in parsed) return refusalResponse(parsed);
-    const scoped = await loadScopedAgent({ deps, req, id, scope: parsed, invoking: true });
+    const entry =
+      access?.kind === "protected" ? (access.target.value as PendingApproval | null) : null;
+    if (!entry || entry.toolCallId !== parsed.toolCallId)
+      return jsonError(404, "approval_not_found");
+    if (!entry.requestContext) return jsonError(403, "forbidden");
+    const effectiveRef = entry.requestContext.effective ?? entry.requestContext.actor;
+    const currentActor = requestPrincipal(req);
+    const resolvedEffective = await deps.security?.resolvePrincipal(effectiveRef);
+    const effectivePrincipal =
+      resolvedEffective ??
+      (entry.requestContext.actor.kind === "operator" && currentActor?.kind === "operator"
+        ? currentActor
+        : undefined);
+    if (!effectivePrincipal) return jsonError(403, "forbidden");
+    const scoped = await loadScopedAgent({
+      deps,
+      req,
+      id,
+      scope: {
+        namespaceId: entry.namespaceId,
+        ...(entry.resourceId !== null && entry.resourceId !== effectiveRef.id
+          ? { ownerId: effectiveRef.id }
+          : { resourceId: entry.resourceId ?? effectiveRef.id }),
+      },
+      invoking: true,
+      authoritativeScope: true,
+      ...(effectivePrincipal !== undefined && { effectivePrincipal }),
+    });
     if (scoped instanceof Response) return scoped;
 
     const lease = await acquireTurnLease({
@@ -441,19 +506,26 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
       let turnId = `approve-${crypto.randomUUID()}`;
       if (thread.pendingApprovals) {
         const pending = await thread.pendingApprovals();
-        const entry = pending.find((p) => p.toolCallId === parsed.toolCallId);
-        if (!entry) {
+        const currentEntry = pending.find((p) => p.toolCallId === parsed.toolCallId);
+        if (!currentEntry) {
           await lease.release();
           return jsonError(404, "approval_not_found");
         }
-        if (entry.elevated) {
-          const refused = await requireElevatedApproval({ deps, req, approval: entry });
-          if (refused) {
-            await lease.release();
-            return refused;
-          }
+        if (!sameApprovalSecurityBoundary(entry, currentEntry)) {
+          await lease.release();
+          return jsonError(409, "approval_changed");
         }
-        turnId = `${entry.workflowId}/approve/${entry.toolCallId}`;
+        const approver = requestPrincipal(req);
+        if (
+          currentEntry.elevated !== false &&
+          (!approver ||
+            (approver.kind === currentEntry.requestContext?.actor.kind &&
+              approver.id === currentEntry.requestContext.actor.id))
+        ) {
+          await lease.release();
+          return jsonError(403, "forbidden");
+        }
+        turnId = `${currentEntry.workflowId}/approve/${currentEntry.toolCallId}`;
       }
       const out = thread.resumeStream(parsed.toolCallId, {
         approved: parsed.approved,
@@ -476,55 +548,6 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
   };
 }
 
-async function requireElevatedApproval(params: {
-  readonly deps: AgentGatewayDeps;
-  readonly req: Request;
-  readonly approval: PendingApproval;
-}): Promise<Response | null> {
-  const { security } = params.deps;
-  const requestContext = requestSecurityContext(params.req);
-  if (!security || !requestContext) return jsonError(403, "forbidden");
-  // An elevated call must be decided by somebody other than the requester.
-  if (requestContext.actor.id === params.approval.resourceId) return jsonError(403, "forbidden");
-  const context = snapshotSecurityContext(requestContext);
-  const permission = snapshotSecurityPermission({
-    resource: "approval",
-    action: "decide-elevated",
-  });
-  const resource = snapshotSecurityResource({
-    kind: "approval",
-    namespaceId: params.approval.namespaceId,
-    id: params.approval.toolCallId,
-  });
-  const decision = snapshotAuthorizationDecision(
-    await security.authorize({ context, permission, resource } as never),
-  );
-  const event = Object.freeze({
-    event: "authorization",
-    occurredAt: (params.deps.clock ?? SystemWallClock).now().toISOString(),
-    context,
-    namespaceId: resource.namespaceId,
-    resource,
-    permission,
-    decision,
-    metadata: Object.freeze({
-      method: params.req.method,
-      path: new URL(params.req.url).pathname,
-      stepUp: "approval.decide-elevated",
-    }),
-  });
-  if (!decision.allowed) {
-    await security.recordAudit(event).catch(() => {});
-    return jsonError(403, "forbidden");
-  }
-  try {
-    await security.recordAudit(event);
-  } catch {
-    return jsonError(503, "security_audit_unavailable");
-  }
-  return null;
-}
-
 interface ApprovalRequest {
   readonly toolCallId?: unknown;
   readonly approved?: unknown;
@@ -544,14 +567,14 @@ function parseApprovalBody(params: {
   readonly req: Request;
   readonly body: ApprovalRequest | null;
 }): ParsedApproval | RequestRefusal {
-  const { req, body } = params;
+  const { body } = params;
   if (!body) return { error: "missing_body", status: 400 };
   if (typeof body.toolCallId !== "string" || body.toolCallId.length === 0) {
     return { error: "missing_toolCallId", status: 400 };
   }
   if (typeof body.approved !== "boolean") return { error: "missing_approved", status: 400 };
-  const scope = deriveScope({ principal: requestPrincipal(req), requested: body });
-  if ("error" in scope) return scope;
+  const scope = parseScopeFields(body);
+  if ("error" in scope) return { error: scope.error, status: 400 };
   const reason = typeof body.reason === "string" ? body.reason : undefined;
   return {
     toolCallId: body.toolCallId,

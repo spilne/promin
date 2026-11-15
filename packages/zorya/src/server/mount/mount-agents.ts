@@ -92,7 +92,12 @@ import {
   updateRole,
 } from "../routes/roles.ts";
 import { protectedAccess, orgTarget } from "./route-security.ts";
-import { agentBodyTarget, agentQueryTarget, namespaceQueryTarget } from "./agent-route-security.ts";
+import {
+  agentBodyTarget,
+  agentQueryTarget,
+  approvalBodyTarget,
+  namespaceQueryTarget,
+} from "./agent-route-security.ts";
 import type { SecurityAction, SecurityResourceKind } from "../security/index.ts";
 
 function declareRoute(params: {
@@ -146,6 +151,7 @@ export function mountAgents(params: {
   const agentDeps: AgentGatewayDeps = {
     registry: agents.registry,
     resolve: agents.resolve,
+    ...(agents.approvals !== undefined && { approvals: agents.approvals }),
     ...(params.security !== undefined && { security: params.security }),
     ...(agents.instances !== undefined && { instanceRegistry: agents.instances }),
     ...(agents.roles !== undefined && { roles: agents.roles }),
@@ -387,13 +393,18 @@ export function mountAgents(params: {
     cancelThreadTurn(agentDeps),
     { idParam: "threadId" },
   );
-  body(
+  route(
     "POST",
     "/api/agents/:id/threads/:threadId/approve",
-    "approval",
-    "decide",
+    {
+      kind: "protected",
+      permissions: [
+        { resource: "approval", action: "decide" },
+        { resource: "approval", action: "decide-elevated" },
+      ],
+      resolveTarget: approvalBodyTarget({ approvals: agentDeps.approvals }),
+    },
     streamThreadApproval(agentDeps),
-    { identityId: true },
   );
   query(
     "GET",

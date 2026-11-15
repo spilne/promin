@@ -31,6 +31,13 @@ export interface RouteTarget<K extends SecurityResourceKind = SecurityResourceKi
   readonly value?: unknown;
 }
 
+/** A target that selects one permission from a route's declared allowlist. */
+export interface DynamicRouteTarget<
+  K extends SecurityResourceKind = SecurityResourceKind,
+> extends RouteTarget<K> {
+  readonly permission: SecurityPermissionFor<K>;
+}
+
 export interface RouteTargetRequest {
   readonly request: Request;
   readonly params: Readonly<Record<string, string>>;
@@ -40,13 +47,23 @@ export type RouteTargetResolver<K extends SecurityResourceKind> = (
   request: RouteTargetRequest,
 ) => RouteTarget<K> | Promise<RouteTarget<K>>;
 
+export type DynamicRouteTargetResolver<K extends SecurityResourceKind> = (
+  request: RouteTargetRequest,
+) => DynamicRouteTarget<K> | Promise<DynamicRouteTarget<K>>;
+
 /** A protected declaration keeps its permission and resolved resource kind correlated. */
 export type ProtectedRouteAccess = {
-  readonly [K in SecurityResourceKind]: {
-    readonly kind: "protected";
-    readonly permission: SecurityPermissionFor<K>;
-    readonly resolveTarget: RouteTargetResolver<K>;
-  };
+  readonly [K in SecurityResourceKind]:
+    | {
+        readonly kind: "protected";
+        readonly permission: SecurityPermissionFor<K>;
+        readonly resolveTarget: RouteTargetResolver<K>;
+      }
+    | {
+        readonly kind: "protected";
+        readonly permissions: readonly [SecurityPermissionFor<K>, ...SecurityPermissionFor<K>[]];
+        readonly resolveTarget: DynamicRouteTargetResolver<K>;
+      };
 }[SecurityResourceKind];
 
 /**
@@ -397,27 +414,33 @@ function normalizeRouteAccess(access: RouteAccess): RouteAccess {
   }
   if (kind === "protected") {
     const permissionSource = source.permission;
+    const permissionsSource = source.permissions;
     const resolveTarget = source.resolveTarget;
-    if (!permissionSource || typeof permissionSource !== "object") {
-      throw new TypeError("Protected route requires a permission");
-    }
-    const permissionRecord = permissionSource as Record<string, unknown>;
-    const resource = permissionRecord.resource;
-    const action = permissionRecord.action;
-    const permission = Object.freeze({ resource, action });
-    const actions =
-      typeof resource === "string" && Object.hasOwn(SECURITY_ACTIONS, resource)
-        ? SECURITY_ACTIONS[resource as SecurityResourceKind]
-        : undefined;
-    if (!actions?.includes(action as never)) {
-      throw new TypeError("Protected route permission is not in the approved vocabulary");
-    }
     if (typeof resolveTarget !== "function") {
       throw new TypeError("Protected route requires a target resolver");
     }
+    if (permissionSource !== undefined && permissionsSource !== undefined) {
+      throw new TypeError("Protected route cannot declare both permission forms");
+    }
+    if (permissionSource !== undefined) {
+      const permission = normalizeSecurityPermission(permissionSource);
+      return Object.freeze({
+        kind,
+        permission,
+        resolveTarget: resolveTarget as ProtectedRouteAccess["resolveTarget"],
+      }) as ProtectedRouteAccess;
+    }
+    if (!Array.isArray(permissionsSource) || permissionsSource.length === 0) {
+      throw new TypeError("Protected route requires a permission");
+    }
+    const permissions = Object.freeze(permissionsSource.map(normalizeSecurityPermission));
+    const resource = permissions[0]!.resource;
+    if (permissions.some((permission) => permission.resource !== resource)) {
+      throw new TypeError("Protected route dynamic permissions must share one resource");
+    }
     return Object.freeze({
       kind,
-      permission,
+      permissions,
       resolveTarget: resolveTarget as ProtectedRouteAccess["resolveTarget"],
     }) as ProtectedRouteAccess;
   }
@@ -440,6 +463,23 @@ function normalizeRouteAccess(access: RouteAccess): RouteAccess {
   return normalized as RouteAccess;
 }
 
+function normalizeSecurityPermission(source: unknown) {
+  if (!source || typeof source !== "object") {
+    throw new TypeError("Protected route requires a permission");
+  }
+  const record = source as Record<string, unknown>;
+  const resource = record.resource;
+  const action = record.action;
+  const actions =
+    typeof resource === "string" && Object.hasOwn(SECURITY_ACTIONS, resource)
+      ? SECURITY_ACTIONS[resource as SecurityResourceKind]
+      : undefined;
+  if (!actions?.includes(action as never)) {
+    throw new TypeError("Protected route permission is not in the approved vocabulary");
+  }
+  return Object.freeze({ resource, action }) as SecurityPermissionFor<SecurityResourceKind>;
+}
+
 async function resolveRouteAccess(params: {
   readonly access: RouteAccess;
   readonly request: Request;
@@ -454,6 +494,18 @@ async function resolveRouteAccess(params: {
     throw new Error("Protected route target does not match its permission");
   }
   const targetRecord = target as unknown as Record<string, unknown>;
+  const permission =
+    "permission" in params.access
+      ? params.access.permission
+      : normalizeSecurityPermission(targetRecord.permission);
+  if (
+    "permissions" in params.access &&
+    !params.access.permissions.some(
+      (allowed) => allowed.resource === permission.resource && allowed.action === permission.action,
+    )
+  ) {
+    throw new Error("Protected route selected an undeclared permission");
+  }
   const resourceSource = targetRecord.resource;
   const value = targetRecord.value;
   if (!resourceSource || typeof resourceSource !== "object") {
@@ -466,7 +518,7 @@ async function resolveRouteAccess(params: {
   const resourceSnapshot = { kind, namespaceId, id };
   const targetSnapshot = { resource: resourceSnapshot, value };
   if (
-    resourceSnapshot.kind !== params.access.permission.resource ||
+    resourceSnapshot.kind !== permission.resource ||
     typeof resourceSnapshot.namespaceId !== "string" ||
     resourceSnapshot.namespaceId.length === 0 ||
     (resourceSnapshot.id !== undefined &&
@@ -485,7 +537,7 @@ async function resolveRouteAccess(params: {
   });
   return Object.freeze({
     kind: "protected",
-    permission: params.access.permission,
+    permission,
     target: normalizedTarget,
   }) as ResolvedProtectedRouteAccess;
 }

@@ -29,6 +29,7 @@ import type {
   RecordPendingApprovalParams,
 } from "@promin/agent";
 import type { DrizzleDb } from "@spilne/perfect-postgres";
+import { decodeRunSecurityContext } from "@promin/workflow";
 import { agentPendingApproval as t } from "../schema.ts";
 
 export interface PostgresPendingApprovalStoreConfig {
@@ -61,7 +62,8 @@ export class PostgresPendingApprovalStore implements PendingApprovalStore {
         workflowId: params.workflowId,
         toolName: params.toolName,
         input: params.input ?? null,
-        elevated: params.elevated ?? false,
+        elevated: params.elevated,
+        requestContext: params.requestContext,
         requestedAt: DB_NOW_MS,
         expiresAt,
         status: "pending",
@@ -75,6 +77,7 @@ export class PostgresPendingApprovalStore implements PendingApprovalStore {
           toolName: sql`excluded.tool_name`,
           input: sql`excluded.input`,
           elevated: sql`excluded.elevated`,
+          requestContext: sql`excluded.request_context`,
           requestedAt: sql`excluded.requested_at`,
           expiresAt: sql`excluded.expires_at`,
           status: "pending",
@@ -170,6 +173,7 @@ function toApproval(row: Row): PendingApproval {
     toolName: row.toolName,
     input: row.input,
     elevated: row.elevated,
+    requestContext: decodeRunSecurityContext(row.requestContext) ?? null,
     requestedAt: Number(row.requestedAt),
     expiresAt: row.expiresAt === null ? null : Number(row.expiresAt),
     status: row.status as PendingApprovalStatus,

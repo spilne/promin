@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import type { PendingApproval, PendingApprovalStore } from "@promin/agent";
 import { SystemWallClock } from "@promin/workflow";
 import { Router, type RouteAccessGuard } from "../../router.ts";
+import { approvalBodyTarget } from "../agent-route-security.ts";
 import { mountAgents } from "../mount-agents.ts";
 
 function mounted(accessGuard?: RouteAccessGuard): Router {
@@ -54,5 +56,45 @@ describe("agent route security declarations", () => {
     );
     expect(response.status).toBe(400);
     expect(guarded).toBe(false);
+  });
+
+  it("treats a legacy approval with an unknown boundary as elevated", async () => {
+    const legacy: PendingApproval = {
+      namespaceId: "team-a",
+      threadId: "thread-1",
+      toolCallId: "call-1",
+      resourceId: "alice",
+      agentId: "support",
+      workflowId: "wf-1",
+      toolName: "deploy",
+      input: {},
+      elevated: null,
+      requestContext: null,
+      requestedAt: 1,
+      expiresAt: null,
+      status: "pending",
+      decidedBy: null,
+      decidedAt: null,
+      reason: null,
+      deliveredAt: null,
+    };
+    const resolve = approvalBodyTarget({
+      approvals: { get: async () => legacy } as unknown as PendingApprovalStore,
+    });
+    const target = await resolve({
+      request: new Request("http://zorya.test/approve", {
+        method: "POST",
+        body: JSON.stringify({ namespaceId: "team-a", toolCallId: "call-1" }),
+      }),
+      params: { id: "support", threadId: "thread-1" },
+    });
+
+    expect(target.permission).toEqual({ resource: "approval", action: "decide-elevated" });
+    expect(target.resource).toEqual({
+      kind: "approval",
+      namespaceId: "team-a",
+      id: "call-1",
+    });
+    expect(target.value).toBe(legacy);
   });
 });

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { postgresDescribe } from "../test-utils.ts";
 import { migrate } from "../migrate.ts";
 import { PostgresWorkflowStorage } from "../postgres-workflow-storage.ts";
+import { PostgresPendingApprovalStore } from "../agent/pending-approval-store.ts";
 
 // ---------------------------------------------------------------------------
 // A database that applied an earlier migration chain (the baseline alone, no
@@ -136,6 +137,44 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
     expect((await storage.loadWorkflow("secured-1"))?.securityContext).toEqual({
       actor: { kind: "service-account", id: "sa-1" },
       effective: { kind: "user", id: "user-7" },
+    });
+  });
+
+  it("preserves legacy approvals as unknown while new rows are explicit", async () => {
+    await migrate(pg.db, { migrationsFolder: chainFolder(3) });
+    const approvalMigration = JSON.parse(
+      readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"),
+    ).entries.find((entry: { idx: number }) => entry.idx === 4) as { when: number };
+    await pg.sql`DELETE FROM drizzle.__drizzle_migrations
+      WHERE created_at >= ${approvalMigration.when}`;
+    await pg.sql`ALTER TABLE agent_pending_approval
+      DROP COLUMN IF EXISTS elevated, DROP COLUMN IF EXISTS request_context`;
+    await pg.sql`INSERT INTO agent_pending_approval
+      (namespace_id, thread_id, tool_call_id, workflow_id, tool_name, input, requested_at, status)
+      VALUES ('acme', 't', 'legacy', 'wf-old', 'deploy', '{}'::jsonb, 1, 'pending')`;
+
+    await migrate(pg.db);
+    const store = new PostgresPendingApprovalStore({ db: pg.db });
+    expect(
+      await store.get({ namespaceId: "acme", threadId: "t", toolCallId: "legacy" }),
+    ).toMatchObject({
+      elevated: null,
+      requestContext: null,
+    });
+    expect(
+      await store.record({
+        namespaceId: "acme",
+        threadId: "t",
+        toolCallId: "new",
+        workflowId: "wf-new",
+        toolName: "deploy",
+        input: {},
+        elevated: false,
+        requestContext: { actor: { kind: "user", id: "alice" } },
+      }),
+    ).toMatchObject({
+      elevated: false,
+      requestContext: { actor: { kind: "user", id: "alice" } },
     });
   });
 });

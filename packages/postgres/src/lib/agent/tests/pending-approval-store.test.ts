@@ -37,6 +37,8 @@ describe("PostgresPendingApprovalStore — Postgres-specific", () => {
       workflowId: "wf",
       toolName: "deploy",
       input: null,
+      elevated: false,
+      requestContext: null,
     });
     const key = { namespaceId: "acme", threadId: "t", toolCallId: "c" };
     expect((await b.decide({ ...key, approved: true, decidedBy: "bob" })).outcome).toBe("decided");

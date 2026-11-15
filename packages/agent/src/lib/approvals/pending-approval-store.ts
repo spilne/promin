@@ -32,6 +32,8 @@
 // agrees on whether an approval has expired.
 // ---------------------------------------------------------------------------
 
+import type { RunSecurityContext } from "@promin/workflow";
+
 /** Identifies one approval: the tool call a thread turn is waiting on. */
 export interface PendingApprovalKey {
   readonly namespaceId: string;
@@ -55,8 +57,13 @@ export interface PendingApproval extends PendingApprovalKey {
   readonly workflowId: string;
   readonly toolName: string;
   readonly input: unknown;
-  /** Elevated tools require a different principal with approval.decide-elevated. */
-  readonly elevated: boolean;
+  /**
+   * Elevated tools require approval.decide-elevated. Null marks a legacy
+   * row whose boundary is unknown and must be handled fail-closed.
+   */
+  readonly elevated: boolean | null;
+  /** Actor/effective identity that initiated the durable turn. Null only for legacy runs. */
+  readonly requestContext: RunSecurityContext | null;
   /** Unix ms, store time. */
   readonly requestedAt: number;
   /** Unix ms, store time. Null: never expires. */
@@ -82,8 +89,10 @@ export interface RecordPendingApprovalParams extends PendingApprovalKey {
   readonly workflowId: string;
   readonly toolName: string;
   readonly input: unknown;
-  /** Whether the requested tool is an elevated cross-scope tool. Default false. */
-  readonly elevated?: boolean;
+  /** Whether the requested tool is an elevated cross-scope tool. */
+  readonly elevated: boolean;
+  /** Durable initiating actor/effective identity, or null for an explicitly legacy run. */
+  readonly requestContext: RunSecurityContext | null;
   /** Expire the approval this long after it is recorded. Omitted: never. */
   readonly ttlMs?: number;
 }

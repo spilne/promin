@@ -29,6 +29,7 @@ import { LocalWorkflows, ZoryaAgents, ZoryaDags } from "../../../index.ts";
 import { ZoryaServer } from "../../server.ts";
 import type { ScopeAuthorizer } from "../agent-gateway-kit.ts";
 import type { TurnStreamLimits } from "../agents/agent-sse.ts";
+import type { ZoryaSecurity } from "../../security/index.ts";
 
 export const localBackend = {
   type: "local" as const,
@@ -59,6 +60,8 @@ export interface HarnessOpts {
   registry?: InMemoryAgentRegistry;
   /** Thread and namespace budgets. */
   budgets?: AgentBudgets;
+  /** Enterprise security adapter; omitted uses the API-key insecure harness. */
+  security?: ZoryaSecurity;
 }
 
 export async function bootAgents(opts: HarnessOpts = {}) {
@@ -92,6 +95,7 @@ export async function bootAgents(opts: HarnessOpts = {}) {
   });
   const agents = new ZoryaAgents({
     registry,
+    approvals,
     resolve: async (recipe: RegisteredAgent) => {
       const agent = await resolveLocalAgent(recipe, {
         runner,
@@ -115,7 +119,7 @@ export async function bootAgents(opts: HarnessOpts = {}) {
     ? new ZoryaDags({ registry: new InMemoryDagRegistry({ clock }), workflows, agents })
     : undefined;
   const server = new ZoryaServer({
-    insecure: true,
+    ...(opts.security ? { security: opts.security } : { insecure: true }),
     workflows,
     agents,
     clock,

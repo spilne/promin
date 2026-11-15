@@ -40,6 +40,10 @@ function request(
     workflowId: "wf-1",
     toolName: "deploy",
     input: { env: "prod" },
+    elevated: false,
+    requestContext: {
+      actor: { kind: "user", id: "alice" },
+    },
     ...overrides,
   };
 }
@@ -62,6 +66,7 @@ export function pendingApprovalStoreTestSuite(factory: PendingApprovalStoreFacto
           toolName: "deploy",
           input: { env: "prod", n: 2 },
           elevated: false,
+          requestContext: { actor: { kind: "user", id: "alice" } },
           status: "pending",
           expiresAt: null,
           decidedBy: null,

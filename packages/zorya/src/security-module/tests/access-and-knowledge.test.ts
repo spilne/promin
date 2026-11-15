@@ -541,7 +541,7 @@ describe("namespace and knowledge access", () => {
     expect(rolesAt(byId, "__proto__")).toEqual(["legacy"]);
     expect(rolesAt(byId, "toString")).toEqual(["view"]);
     for (const namespaceId of ["constructor", "__proto__", "toString"]) {
-      expect(await canInvokeAgent(env, byId, namespaceId)).toBeTrue();
+      expect(await canInvokeAgent(env, byId, namespaceId)).toBeFalse();
     }
 
     const token = "prototype-namespace-session";
@@ -590,7 +590,7 @@ describe("namespace and knowledge access", () => {
       accessRoles: ownAccessRoles,
     };
     for (const namespaceId of ["constructor", "__proto__", "toString"]) {
-      expect(await canInvokeAgent(env, own, namespaceId)).toBeTrue();
+      expect(await canInvokeAgent(env, own, namespaceId)).toBeFalse();
     }
   });
 
@@ -599,7 +599,7 @@ describe("namespace and knowledge access", () => {
     const scopedUser = await createUser({
       env,
       email: "scoped@example.com",
-      bindings: [{ namespaceId: "team-a", accessRole: "analyst" }],
+      bindings: [{ namespaceId: "team-a", accessRole: "member" }],
     });
     const orgUser = await createUser({
       env,
@@ -735,6 +735,14 @@ describe("namespace and knowledge access", () => {
       reason: "permission_denied",
     });
     expect(await authorize(auditor, { resource: "secret", action: "list" })).toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
+    expect(await authorize(auditor, { resource: "agent", action: "invoke" })).toEqual({
+      allowed: false,
+      reason: "namespace_denied",
+    });
+    expect(await authorize(auditor, { resource: "thread", action: "send" })).toEqual({
       allowed: false,
       reason: "permission_denied",
     });
