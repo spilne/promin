@@ -90,16 +90,21 @@ async function boot(opts: BootOpts = {}) {
     task: string;
     scope: unknown;
     runId?: string;
+    securityContext?: unknown;
   }> = [];
   const makeAgent = (agentId: string, scope?: unknown) => {
     const agent = {
-      invoke: async (input: { task: string }, invokeOpts?: { runId?: string }) => {
+      invoke: async (
+        input: { task: string },
+        invokeOpts?: { runId?: string; securityContext?: unknown },
+      ) => {
         if (opts.failInvoke?.()) throw new Error("db password=hunter2 leaked in error");
         dispatched.push({
           agentId,
           task: input.task,
           scope,
           runId: invokeOpts?.runId,
+          securityContext: invokeOpts?.securityContext,
         });
         return { text: Promise.resolve("ok") };
       },
@@ -731,8 +736,39 @@ describe("webhook enterprise identity", () => {
     const rows = await storage.listWorkflows({ name: WEBHOOK_DELIVERY_WORKFLOW, limit: 10 });
     expect(rows).toHaveLength(1);
     expect(rows[0]?.securityContext).toEqual(assignment);
-    expect((rows[0]?.input as { securityContext?: unknown }).securityContext).toEqual(assignment);
+    expect((rows[0]!.input as { securityContext?: unknown }).securityContext).toEqual(assignment);
+    expect(dispatched[0]?.securityContext).toEqual(assignment);
     expect(audits.map((event) => event.metadata?.stage)).toEqual(["ingest", "dispatch"]);
+  });
+
+  it("keeps the first assigned identity immutable across sender retries", async () => {
+    const deliveries: WebhookDeliveryStore = new InMemoryWebhookDeliveryStore();
+    const original: WebhookDelivery = {
+      key: "immutable",
+      task: "t",
+      securityContext: assignment,
+      scope: {
+        source: "github",
+        agentId: "echo-bot",
+        namespaceId: "acme",
+        deliveryId: "immutable",
+        timestamp: T0,
+      },
+    };
+    const first = await deliveries.claim({ delivery: original, leaseMs: 100 });
+    expect(first.outcome).toBe("claimed");
+    if (first.outcome !== "claimed") throw new Error("expected claim");
+    await deliveries.fail({ key: original.key, error: "retry", token: first.token });
+    const retried = await deliveries.claim({
+      delivery: {
+        ...original,
+        securityContext: { actor: { kind: "service-account", id: "attacker" } },
+      },
+      leaseMs: 100,
+    });
+    expect(retried.outcome).toBe("claimed");
+    if (retried.outcome !== "claimed") throw new Error("expected retry claim");
+    expect(retried.delivery.securityContext).toEqual(assignment);
   });
 
   it("rechecks a recovered assignment and terminally fails it after revocation", async () => {
@@ -781,6 +817,64 @@ describe("webhook enterprise identity", () => {
     expect(invocations).toEqual([]);
     expect(errors).toHaveLength(1);
     expect(errors[0]).toBeInstanceOf(Error);
+    expect(await deliveries.listUnfinished({ limit: 10 })).toEqual([]);
+  });
+
+  it("leaves authorization infrastructure failures retryable for recovery", async () => {
+    let available = false;
+    const clock = FakeWallClock.create(T0);
+    const deliveries = new InMemoryWebhookDeliveryStore({ clock });
+    const registry = new InMemoryAgentRegistry();
+    await registry.register({ id: "echo-bot", backend });
+    const invocations: string[] = [];
+    const agent = {
+      invoke: async () => {
+        invocations.push("ran");
+        return { text: Promise.resolve("ok") };
+      },
+      withScope: () => agent,
+    };
+    const recorded: WebhookDelivery = {
+      key: "security-infra",
+      task: "t",
+      securityContext: assignment,
+      scope: {
+        source: "github",
+        agentId: "echo-bot",
+        namespaceId: "acme",
+        deliveryId: "security-infra",
+        timestamp: T0,
+      },
+    };
+    await deliveries.claim({ delivery: recorded, leaseMs: 100 });
+    clock.advance(101);
+    const baseSecurity = assignedSecurity({ active: () => true });
+    const security: ZoryaSecurity = {
+      ...baseSecurity,
+      authorize: async (request) => {
+        if (!available) throw new Error("policy store unavailable");
+        return baseSecurity.authorize(request);
+      },
+    };
+    const errors: unknown[] = [];
+    const recovery = new WebhookDeliveryRecovery({
+      registry,
+      resolve: async () => agent,
+      sources: { github: { secret: SECRET, securityContext: assignment } },
+      deliveries,
+      security,
+      clock,
+      claimLeaseMs: 100,
+      onError: (error) => errors.push(error),
+    });
+    await recovery.tick();
+    expect(invocations).toEqual([]);
+    expect(await deliveries.listUnfinished({ limit: 10 })).toHaveLength(1);
+    available = true;
+    clock.advance(101);
+    await recovery.tick();
+    expect(invocations).toEqual(["ran"]);
+    expect(errors).toHaveLength(1);
     expect(await deliveries.listUnfinished({ limit: 10 })).toEqual([]);
   });
 });

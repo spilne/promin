@@ -797,12 +797,31 @@ async function dispatchDelivery(params: {
     Math.max(1, Math.floor(leaseMs / 2)),
   );
   renewal.unref?.();
+  let authorized: Awaited<ReturnType<typeof authorizeWebhookDelivery>>;
   try {
-    const authorized = await authorizeWebhookDelivery({
+    authorized = await authorizeWebhookDelivery({
       deps,
       delivery,
       stage: params.stage,
     });
+  } catch (err) {
+    renewal.clear();
+    if (err instanceof WebhookSecurityDeniedError) {
+      // A policy denial is stable for this immutable delivery identity. Mark
+      // it failed so recovery cannot turn revocation into repeated work.
+      await deps.deliveries
+        .fail({
+          key,
+          error: err.message,
+          ...(token !== undefined && { token }),
+        })
+        .catch(() => {});
+    }
+    // Security directory, policy, and allow-audit failures are retryable:
+    // leave the row unfinished so it can be reclaimed after the lease lapses.
+    throw err;
+  }
+  try {
     const recipe = await deps.registry.get({ id: scope.agentId });
     if (!recipe) throw new Error(`agent "${scope.agentId}" is not registered`);
     // The kill switch holds for deliveries accepted before it was flipped.
@@ -907,10 +926,7 @@ export class WebhookDeliveryRecovery {
       // Page through every unfinished delivery: live ones (still claimed by
       // their dispatcher) stay in the list, so a lapsed one may sit beyond
       // the first page.
-      const lapsed: Array<{
-        delivery: WebhookDelivery;
-        claim: Extract<WebhookClaim, { outcome: "claimed" }>;
-      }> = [];
+      const lapsed: Array<Extract<WebhookClaim, { outcome: "claimed" }>> = [];
       for (let offset = 0; ; offset += this.batch) {
         const page = await this.deps.deliveries.listUnfinished({
           limit: this.batch,
@@ -918,12 +934,12 @@ export class WebhookDeliveryRecovery {
         });
         for (const delivery of page) {
           const claim = await this.deps.deliveries.claim({ delivery, leaseMs });
-          if (claim.outcome === "claimed") lapsed.push({ delivery, claim });
+          if (claim.outcome === "claimed") lapsed.push(claim);
         }
         if (page.length < this.batch) break;
       }
       await Promise.all(
-        lapsed.map(({ delivery, claim }) =>
+        lapsed.map((claim) =>
           dispatchDelivery({
             deps: this.deps,
             delivery: claim.delivery,
