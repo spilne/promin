@@ -41,6 +41,12 @@
       "import": "./dist/sqlite.js",
       "default": "./dist/sqlite.js"
     },
+    "./security": {
+      "types": "./dist/security.d.ts",
+      "@promin/source": "./src/security.ts",
+      "import": "./dist/security.js",
+      "default": "./dist/security.js"
+    },
     "./package.json": "./package.json"
   },
   "publishConfig": {
