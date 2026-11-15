@@ -87,8 +87,10 @@ import { mountStatic } from "./mount/mount-static.ts";
 import { mountWorkflowBuilder } from "./mount/mount-workflow-builder.ts";
 import { ZoryaServerBuilder } from "./server-builder.ts";
 import {
+  OPERATOR_PRINCIPAL,
   createApiKeySecurity,
   createSecurityRouteAccessGuard,
+  principalRef,
   setRequestPrincipal,
   type ZoryaSecurity,
 } from "./security/index.ts";
@@ -229,6 +231,14 @@ export class ZoryaServer {
       insecure: config.insecure === true,
       operatorSecurity: config.security !== undefined,
       logger: this.logger,
+    });
+    this.workflows.configureExecutionSecurity({
+      security: this.security,
+      clock,
+      logger: this.logger,
+      ...(config.security === undefined && {
+        legacyPrincipal: principalRef(OPERATOR_PRINCIPAL),
+      }),
     });
     const readinessTimeoutMs = config.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
     this.shutdownTimeoutMs = config.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
@@ -458,6 +468,12 @@ export class ZoryaServer {
         workerRegistry: this.workerRegistry,
         advertisements,
         workflowStarts: queued?.workflowStarts,
+        ...(queued && {
+          authorizeWorkerStart: (workflowId: string) => queued.authorizeWorkerStart(workflowId),
+          authorizeWorkerLock: (workflowId: string) => queued.authorizeWorkerLock(workflowId),
+          authorizeWorkerChild: (child: Parameters<QueuedWorkflows["authorizeWorkerChild"]>[0]) =>
+            queued.authorizeWorkerChild(child),
+        }),
         storageCaller: (req) => this.planes.storageCaller(req),
         ...(this.workerWakeups && {
           onStartsClaimed: (starts: ReadonlyArray<{ readonly workflowId: string }>) =>

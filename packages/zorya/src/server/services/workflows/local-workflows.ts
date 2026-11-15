@@ -45,6 +45,7 @@ import {
   type TriggerOptions,
   type TriggerResult,
 } from "./zorya-workflows.ts";
+import type { RunExecutionSecurity } from "../../security/run-execution-security.ts";
 
 /** Where a background failure of `LocalWorkflows` came from. */
 export type LocalWorkflowsErrorSource = "sleep-scanner" | "signal-scanner" | "recovery";
@@ -210,6 +211,28 @@ export class LocalWorkflows extends ZoryaWorkflows {
     return Object.hasOwn(this.definitions, name);
   }
 
+  protected override onExecutionSecurityConfigured(security: RunExecutionSecurity): void {
+    if (!this.runner.setRunAdmissionGuard) {
+      throw new Error(
+        "LocalWorkflows: configured security requires a runner with setRunAdmissionGuard",
+      );
+    }
+    this.runner.setRunAdmissionGuard(async (request) => {
+      // A host may share this runner with agent/knowledge internals that are
+      // not owned by this ZoryaWorkflows layer. Those paths gain their own
+      // durable identity in later security slices; do not accidentally
+      // classify them as legacy generic workflow runs here. Any explicitly
+      // secured run (including an inherited child) is always checked.
+      if (
+        request.state.securityContext === undefined &&
+        !Object.hasOwn(this.definitions, request.state.workflowName)
+      ) {
+        return;
+      }
+      await security.admissionGuard(request);
+    });
+  }
+
   /**
    * Add or replace the in-process definition of `workflow.name` at runtime
    * (the workflow builder publishes this way). New runs start with it, or
@@ -256,6 +279,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
     // The definition's own type and metadata, as the runner would record them.
     const workflowType = opts?.workflowType ?? def._definition.type;
     const metadata = opts?.metadata ?? def._definition.metadata;
+    const securityContext = this.securityContextForTrigger(opts?.securityContext);
 
     // Create the row first, with the typed fields (namespace, metadata,
     // runSource) the runner's own create doesn't take. An id that already
@@ -271,6 +295,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
       ...(metadata !== undefined && { metadata }),
       ...(opts?.runSource !== undefined && { runSource: opts.runSource }),
       ...(opts?.runSourceId !== undefined && { runSourceId: opts.runSourceId }),
+      ...(securityContext !== undefined && { securityContext }),
       ...(version !== undefined && { version }),
     });
     const existing = existingRunResult({ workflowName: name, workflowId, created });

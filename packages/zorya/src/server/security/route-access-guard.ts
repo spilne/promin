@@ -35,14 +35,14 @@ export function createSecurityRouteAccessGuard(
     // Use one immutable snapshot for both policy and audit. A configured
     // adapter must not be able to change identity between those two steps.
     const context = snapshotSecurityContext(requestContext);
-    const permission = snapshotPermission(access.permission);
-    const resource = snapshotResource(access.target.resource);
+    const permission = snapshotSecurityPermission(access.permission);
+    const resource = snapshotSecurityResource(access.target.resource);
     const metadata = Object.freeze({
       method: request.method,
       path: new URL(request.url).pathname,
     });
 
-    const decision = snapshotDecision(
+    const decision = snapshotAuthorizationDecision(
       await config.security.authorize({
         context,
         permission,
@@ -89,7 +89,9 @@ const PRINCIPAL_KINDS: ReadonlySet<string> = new Set<PrincipalKind>([
 ]);
 const REASONS: ReadonlySet<string> = new Set(AUTHORIZATION_REASONS);
 
-function snapshotDecision(source: AuthorizationDecision): AuthorizationDecision {
+export function snapshotAuthorizationDecision(
+  source: AuthorizationDecision,
+): AuthorizationDecision {
   if (!source || typeof source !== "object") throw new TypeError("Invalid authorization decision");
   const record = source as unknown as Record<string, unknown>;
   const allowed = record.allowed;
@@ -100,7 +102,7 @@ function snapshotDecision(source: AuthorizationDecision): AuthorizationDecision 
   return Object.freeze({ allowed, reason }) as AuthorizationDecision;
 }
 
-function snapshotSecurityContext(source: SecurityContext): SecurityContext {
+export function snapshotSecurityContext(source: SecurityContext): SecurityContext {
   if (!source || typeof source !== "object") throw new TypeError("Invalid security context");
   const record = source as unknown as Record<string, unknown>;
   const actor = snapshotPrincipal(record.actor as Principal);
@@ -175,14 +177,14 @@ function snapshotAccessRoles(source: unknown): Readonly<Record<string, ReadonlyA
   return Object.freeze(output) as Readonly<Record<string, ReadonlyArray<string>>>;
 }
 
-function snapshotPermission(source: SecurityPermission): SecurityPermission {
+export function snapshotSecurityPermission(source: SecurityPermission): SecurityPermission {
   const record = source as unknown as Record<string, unknown>;
   const resource = record.resource;
   const action = record.action;
   return Object.freeze({ resource, action }) as SecurityPermission;
 }
 
-function snapshotResource(source: SecurityResourceRef): SecurityResourceRef {
+export function snapshotSecurityResource(source: SecurityResourceRef): SecurityResourceRef {
   const record = source as unknown as Record<string, unknown>;
   const kind = record.kind;
   const namespaceId = record.namespaceId;

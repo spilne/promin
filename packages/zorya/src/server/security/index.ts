@@ -6,6 +6,7 @@ export {
 export {
   requestPrincipal,
   requestSecurityContext,
+  requestRunSecurityContext,
   setRequestPrincipal,
   setRequestSecurityContext,
 } from "./request-principal.ts";
@@ -13,6 +14,13 @@ export {
   createSecurityRouteAccessGuard,
   type SecurityRouteAccessGuardConfig,
 } from "./route-access-guard.ts";
+export {
+  RUN_SECURITY_BLOCKED_ERROR_TAG,
+  RunExecutionSecurity,
+  RunSecurityBlockedError,
+  type RunExecutionSecurityConfig,
+  type RunExecutionSource,
+} from "./run-execution-security.ts";
 export {
   AUTHORIZATION_REASONS,
   OPERATOR_PRINCIPAL,

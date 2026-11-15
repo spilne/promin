@@ -19,6 +19,7 @@ import {
 } from "@promin/workflow-remote";
 import type { Router } from "../router.ts";
 import type { StorageCaller } from "./mount-auth.ts";
+import type { RunSecurityContext } from "@promin/workflow";
 import {
   listAdvertisements,
   removeAdvertisements,
@@ -43,6 +44,17 @@ export function mountRpc(params: {
   readonly storageCaller: (req: Request) => StorageCaller | undefined;
   /** Hears claimed starts (the worker wake-ups). */
   readonly onStartsClaimed?: (starts: ReadonlyArray<{ readonly workflowId: string }>) => void;
+  /** Reauthorize a claimed start before it is exposed to a worker. */
+  readonly authorizeWorkerStart?: (workflowId: string) => Promise<boolean>;
+  /** Reauthorize a worker immediately before it takes a run lock. */
+  readonly authorizeWorkerLock?: (workflowId: string) => Promise<boolean>;
+  /** Validate inherited identity on remote child creation. */
+  readonly authorizeWorkerChild?: (params: {
+    readonly workflowId: string;
+    readonly parentWorkflowId: string;
+    readonly namespace?: string;
+    readonly securityContext?: RunSecurityContext;
+  }) => Promise<boolean>;
 }): void {
   const { router, advertisements, workflowStarts, storageCaller } = params;
 
@@ -51,6 +63,34 @@ export function mountRpc(params: {
   const storageHandler = createWorkflowStorageHandler(params.storage, {
     allow: ({ method, req }) =>
       storageCaller(req) === "operator" || RUNNER_STORAGE_METHODS.has(method),
+    authorize: async ({ method, params: rpcParams, req }) => {
+      const caller = storageCaller(req);
+      if (!caller) return false;
+      const record = rpcParams as Record<string, unknown>;
+      if (method === "tryLock" || method === "tryLockAndLoad") {
+        const workflowId = record.workflowId;
+        return (
+          typeof workflowId === "string" &&
+          (params.authorizeWorkerLock ? params.authorizeWorkerLock(workflowId) : true)
+        );
+      }
+      if (method === "createWorkflow" && caller === "worker") {
+        const workflowId = record.workflowId;
+        const parentWorkflowId = record.parentWorkflowId;
+        if (typeof workflowId !== "string" || typeof parentWorkflowId !== "string") return false;
+        return params.authorizeWorkerChild
+          ? params.authorizeWorkerChild({
+              workflowId,
+              parentWorkflowId,
+              ...(typeof record.namespace === "string" && { namespace: record.namespace }),
+              ...(record.securityContext !== undefined && {
+                securityContext: record.securityContext as RunSecurityContext,
+              }),
+            })
+          : true;
+      }
+      return true;
+    },
   });
   router.post("/rpc/storage", (req) => storageHandler(req));
 
@@ -70,7 +110,13 @@ export function mountRpc(params: {
     router
       .post(
         "/api/worker-protocol/claim-starts",
-        claimWorkflowStarts(workflowStarts, params.onStartsClaimed),
+        claimWorkflowStarts(
+          workflowStarts,
+          params.onStartsClaimed,
+          params.authorizeWorkerStart
+            ? (start) => params.authorizeWorkerStart!(start.workflowId)
+            : undefined,
+        ),
       )
       .post("/api/worker-protocol/heartbeat-start/:id", heartbeatWorkflowStart(workflowStarts))
       .post("/api/worker-protocol/complete-start/:id", completeWorkflowStart(workflowStarts))

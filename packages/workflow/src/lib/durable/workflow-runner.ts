@@ -29,8 +29,8 @@ import type {
   WorkflowHooks,
   WorkflowStatusInfo,
 } from "./durable-pipeline.ts";
-import { hasCapability, type WorkflowStorage } from "./workflow-storage.ts";
-import type { WorkflowFailure, WorkflowRunEvent } from "./workflow-state.ts";
+import { hasCapability, type FenceGuard, type WorkflowStorage } from "./workflow-storage.ts";
+import type { WorkflowFailure, WorkflowRunEvent, WorkflowState } from "./workflow-state.ts";
 import { failureOf } from "./workflow-failure.ts";
 import {
   StepError,
@@ -320,7 +320,24 @@ export interface WorkflowRunnerConfig {
    * one the engine does no tracing work.
    */
   readonly tracer?: WorkflowTracer;
+  /**
+   * Host admission check run under the workflow lock immediately before
+   * user code executes. Version drains, recovery and child workflows inherit
+   * it. Hosts may terminate the stored run and throw to refuse execution.
+   */
+  readonly runAdmissionGuard?: WorkflowRunAdmissionGuard;
 }
+
+export interface WorkflowRunAdmissionRequest {
+  /** Fresh state of the run that is about to execute. */
+  readonly state: WorkflowState;
+  /** Fence held by this driver, when the backend supplies one. */
+  readonly guard?: FenceGuard;
+}
+
+export type WorkflowRunAdmissionGuard = (
+  request: WorkflowRunAdmissionRequest,
+) => void | Promise<void>;
 
 /** What `WorkflowRunner.subscribe` takes. */
 export interface WorkflowSubscribeParams {
@@ -356,6 +373,12 @@ export interface WorkflowGetStatusParams {
 export interface WorkflowRunner {
   /** Storage the runner writes workflow state to. */
   readonly storage: WorkflowStorage;
+  /**
+   * Install or replace the host admission guard. Optional for custom runner
+   * implementations; hosts that require guarded execution must refuse a
+   * runner that does not expose it.
+   */
+  setRunAdmissionGuard?(guard: WorkflowRunAdmissionGuard | undefined): void;
   /**
    * Run a workflow and throw on failure. For a `{ workflow }` call the result
    * is typed by the workflow's output, and it rejects with a
@@ -499,6 +522,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   private readonly lock?: RunLockOptions;
   private readonly defaultStepTimeoutMs?: number | null;
   private readonly tracer?: WorkflowTracer;
+  private runAdmissionGuard?: WorkflowRunAdmissionGuard;
 
   constructor(config: WorkflowRunnerConfig) {
     this.storage = config.storage;
@@ -509,9 +533,16 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     if (config.executorId !== undefined) this.executorId = config.executorId;
     if (config.lock !== undefined) this.lock = config.lock;
     if (config.tracer !== undefined) this.tracer = config.tracer;
+    if (config.runAdmissionGuard !== undefined) {
+      this.runAdmissionGuard = config.runAdmissionGuard;
+    }
     if (config.defaultStepTimeoutMs !== undefined) {
       this.defaultStepTimeoutMs = config.defaultStepTimeoutMs;
     }
+  }
+
+  setRunAdmissionGuard(guard: WorkflowRunAdmissionGuard | undefined): void {
+    this.runAdmissionGuard = guard;
   }
 
   run<Output, E extends TaggedError = never>(
@@ -859,6 +890,9 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
         ...(this.hooks !== undefined && { hooks: this.hooks }),
         ...(this.lock !== undefined && { lock: this.lock }),
         ...(this.tracer !== undefined && { tracer: this.tracer }),
+        ...(this.runAdmissionGuard !== undefined && {
+          runAdmissionGuard: this.runAdmissionGuard,
+        }),
         ...(this.defaultStepTimeoutMs !== undefined && {
           defaultStepTimeoutMs: this.defaultStepTimeoutMs,
         }),

@@ -48,6 +48,7 @@ import { agentApprovalRefusal } from "./signals.ts";
 import type { WorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
 import { RunsService, type RunActionResult } from "../services/runs-service.ts";
 import { UnknownWorkflowError, WorkflowIdConflictError } from "../services/workflows/errors.ts";
+import { requestRunSecurityContext } from "../security/index.ts";
 
 export interface RunTrigger {
   (
@@ -64,6 +65,7 @@ export interface RunTrigger {
       runSource?: import("@promin/workflow").RunSource;
       /** Producer id corresponding to `runSource` (e.g. `scheduleId`). */
       runSourceId?: string;
+      securityContext?: import("@promin/workflow").RunSecurityContext;
     },
   ): Promise<{ workflowId: string; existing?: boolean }>;
 }
@@ -151,6 +153,7 @@ export function triggerRun(deps: RunRoutesDeps) {
         // A run started over HTTP without a tag is a manual fire.
         runSource: body.runSource ?? "manual",
         runSourceId: body.runSourceId,
+        securityContext: requestRunSecurityContext(req),
       });
     } catch (err) {
       if (err instanceof UnknownWorkflowError) {

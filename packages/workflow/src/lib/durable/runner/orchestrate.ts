@@ -746,6 +746,14 @@ async function runCycleBody(cycle: CycleParams & { phase: CyclePhase }): Promise
     resumedRun = false;
   }
 
+  // Host policy is checked after the authoritative row is loaded/created
+  // and after terminal replay handling, but before any user step executes.
+  // The callback runs under this driver's fence and is inherited by drains
+  // and children through the orchestration runtime.
+  if (state && ctx.runAdmissionGuard) {
+    await ctx.runAdmissionGuard({ state, ...(guard !== undefined && { guard }) });
+  }
+
   // From here the run executes under this driver: a cancel it sees may roll
   // back (see `runOneOrchestrationCycle`).
   cycle.phase.executing = true;

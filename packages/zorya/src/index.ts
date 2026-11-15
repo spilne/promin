@@ -161,9 +161,13 @@ export {
   principalRef,
   requestPrincipal,
   requestSecurityContext,
+  requestRunSecurityContext,
   selfSecurityContext,
   setRequestPrincipal,
   setRequestSecurityContext,
+  RUN_SECURITY_BLOCKED_ERROR_TAG,
+  RunExecutionSecurity,
+  RunSecurityBlockedError,
   type ApiKeySecurityConfig,
   type AuthenticationRequest,
   type AuthorizationDecision,
@@ -191,6 +195,8 @@ export {
   type SecurityResourceKind,
   type SecurityResourceRef,
   type SecurityRouteAccessGuardConfig,
+  type RunExecutionSecurityConfig,
+  type RunExecutionSource,
   type ZoryaSecurity,
 } from "./server/security/index.ts";
 export { RunEventBus } from "./server/run-event-bus.ts";

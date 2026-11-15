@@ -349,6 +349,8 @@ export {
   recoverWorkflows,
   type WorkflowRunner,
   type WorkflowRunnerConfig,
+  type WorkflowRunAdmissionGuard,
+  type WorkflowRunAdmissionRequest,
   type RunLockOptions,
   type WorkflowRunnerRunParams,
   type WorkflowRunnerStartParams,
