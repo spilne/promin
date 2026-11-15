@@ -82,6 +82,10 @@ function environment(
   };
 }
 
+function authenticate(env: Environment, request: Request) {
+  return env.security.authenticate({ request, plane: "operator" });
+}
+
 async function login(params: {
   readonly env: Environment;
   readonly email: string;
@@ -149,7 +153,8 @@ describe("OIDC security module", () => {
     expect(result.response.headers.get("set-cookie")).toMatch(
       /zorya_session=[^;]+; Path=\/; Max-Age=60; HttpOnly; SameSite=Lax/,
     );
-    const principal = await env.security.authenticate(
+    const principal = await authenticate(
+      env,
       new Request(`${PUBLIC_BASE_URL}/api/agents`, {
         headers: { cookie: result.sessionCookie! },
       }),
@@ -166,7 +171,8 @@ describe("OIDC security module", () => {
   it("an admin email gets the admin access role", async () => {
     const env = environment({ adminEmails: ["Admin@Example.com"] });
     const result = await login({ env, email: "ADMIN@example.COM" });
-    const principal = await env.security.authenticate(
+    const principal = await authenticate(
+      env,
       new Request(`${PUBLIC_BASE_URL}/`, { headers: { cookie: result.sessionCookie! } }),
     );
     expect(principal?.accessRoles).toEqual({ org: ["admin"] });
@@ -176,10 +182,12 @@ describe("OIDC security module", () => {
     const env = environment();
     const first = await login({ env, email: "user@example.com" });
     const second = await login({ env, email: "USER@EXAMPLE.COM" });
-    const firstPrincipal = await env.security.authenticate(
+    const firstPrincipal = await authenticate(
+      env,
       new Request(`${PUBLIC_BASE_URL}/`, { headers: { cookie: first.sessionCookie! } }),
     );
-    const secondPrincipal = await env.security.authenticate(
+    const secondPrincipal = await authenticate(
+      env,
       new Request(`${PUBLIC_BASE_URL}/`, { headers: { cookie: second.sessionCookie! } }),
     );
     expect(secondPrincipal?.id).toBe(firstPrincipal?.id);
@@ -387,9 +395,9 @@ describe("OIDC security module", () => {
     const result = await login({ env, email: "user@example.com" });
     const request = () =>
       new Request(`${PUBLIC_BASE_URL}/`, { headers: { cookie: result.sessionCookie! } });
-    expect(await env.security.authenticate(request())).toBeDefined();
+    expect(await authenticate(env, request())).toBeDefined();
     env.clock.advance(SESSION_TTL_MS + 1);
-    expect(await env.security.authenticate(request())).toBeUndefined();
+    expect(await authenticate(env, request())).toBeUndefined();
   });
 
   it("a disabled user cannot authenticate, be resolved, or log in again", async () => {
@@ -407,11 +415,12 @@ describe("OIDC security module", () => {
       ttlMs: SESSION_TTL_MS,
     });
     expect(
-      await env.security.authenticate(
+      await authenticate(
+        env,
         new Request(`${PUBLIC_BASE_URL}/`, { headers: { cookie: active.sessionCookie! } }),
       ),
     ).toBeUndefined();
-    expect(await env.security.principalById(user.id)).toBeUndefined();
+    expect(await env.security.resolvePrincipal({ kind: "user", id: user.id })).toBeUndefined();
 
     const retry = await login({ env, email: "USER@EXAMPLE.COM" });
     expect(retry.response.status).toBe(403);
@@ -423,7 +432,7 @@ describe("OIDC security module", () => {
     const result = await login({ env, email: "user@example.com" });
     const request = () =>
       new Request(`${PUBLIC_BASE_URL}/`, { headers: { cookie: result.sessionCookie! } });
-    expect(await env.security.authenticate(request())).toBeDefined();
+    expect(await authenticate(env, request())).toBeDefined();
     const logout = await env.router.handle(
       new Request(`${PUBLIC_BASE_URL}/auth/logout`, {
         method: "POST",
@@ -431,19 +440,21 @@ describe("OIDC security module", () => {
       }),
     );
     expect(logout.status).toBe(204);
-    expect(await env.security.authenticate(request())).toBeUndefined();
+    expect(await authenticate(env, request())).toBeUndefined();
   });
 
   it("a service account token authenticates; a wrong token does not", async () => {
     const env = environment({
       serviceAccounts: [{ id: "slack", token: "correct-token", canActFor: true }],
     });
-    const accepted = await env.security.authenticate(
+    const accepted = await authenticate(
+      env,
       new Request(`${PUBLIC_BASE_URL}/api/agents`, {
         headers: { authorization: "Bearer correct-token" },
       }),
     );
-    const denied = await env.security.authenticate(
+    const denied = await authenticate(
+      env,
       new Request(`${PUBLIC_BASE_URL}/api/agents`, {
         headers: { authorization: "Bearer wrong-token" },
       }),
@@ -461,7 +472,8 @@ describe("OIDC security module", () => {
     const env = environment({
       serviceAccounts: [{ id: "service", token: "correct-token" }],
     });
-    const principal = await env.security.authenticate(
+    const principal = await authenticate(
+      env,
       new Request(`${PUBLIC_BASE_URL}/api/agents`, {
         headers: {
           cookie: "zorya_session=stale",

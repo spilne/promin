@@ -4,7 +4,10 @@ import { bearerToken } from "../server/auth.ts";
 import { jsonError, notFound, type Router } from "../server/router.ts";
 import {
   ORG_WIDE_NAMESPACE,
+  principalRef,
   type Principal,
+  type PrincipalRef,
+  type SecurityContext,
   type ZoryaSecurity,
 } from "../server/security/index.ts";
 import type { LoginIdentity, LoginProvider } from "./login-provider.ts";
@@ -104,8 +107,29 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
     };
   };
 
+  const principalForServiceAccount = (id: string): Principal | undefined => {
+    const matched = serviceAccounts.find((account) => account.config.id === id)?.config;
+    if (!matched) return undefined;
+    return {
+      kind: "service-account",
+      id: matched.id,
+      accessRoles: matched.accessRoles ?? {},
+      canActFor: matched.canActFor ?? false,
+    };
+  };
+
+  const resolvePrincipal = async (ref: PrincipalRef): Promise<Principal | undefined> => {
+    if (ref.kind === "user") {
+      const user = await config.store.getUser(ref.id);
+      return user ? principalForUser(user) : undefined;
+    }
+    if (ref.kind === "service-account") return principalForServiceAccount(ref.id);
+    return undefined;
+  };
+
   return {
-    authenticate: async (req) => {
+    authenticate: async ({ request: req, plane }) => {
+      if (plane !== "operator") return undefined;
       const cookieToken = sessionToken(req.headers.get("cookie"));
       // A presented browser session is authoritative. Invalid or stale
       // sessions fail closed instead of falling through to bearer auth.
@@ -125,26 +149,47 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
         if (equal) matched = account.config;
       }
       if (!matched) return undefined;
-      return {
-        kind: "service-account",
-        id: matched.id,
-        accessRoles: matched.accessRoles ?? {},
-        canActFor: matched.canActFor ?? false,
-      };
+      return principalForServiceAccount(matched.id);
     },
-    principalById: async (id) => {
-      const user = await config.store.getUser(id);
-      return user ? principalForUser(user) : undefined;
+    resolvePrincipal,
+    resolveIdentity: async ({ actor, asserted }) => {
+      if (!asserted || samePrincipal(actor, asserted)) {
+        return { actor, effective: principalRef(actor) };
+      }
+      if (!actor.canActFor) return undefined;
+      const effective = await resolvePrincipal(asserted);
+      return effective ? { actor, effective: principalRef(effective) } : undefined;
     },
-    canActIn: async ({ principal, namespaceId }) => {
-      return rolesFor(principal, namespaceId).size > 0;
+    identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
+    authorize: async ({ context, permission, resource }) => {
+      if (permission.resource !== resource.kind) {
+        return { allowed: false, reason: "permission_denied" };
+      }
+      const principal = await effectivePrincipal(context, resolvePrincipal);
+      if (!principal) return { allowed: false, reason: "identity_unknown" };
+      const roles = rolesFor(principal, resource.namespaceId);
+      if (roles.has("admin")) return { allowed: true, reason: "access_role_allow" };
+      if (permission.resource === "agent" && permission.action === "invoke") {
+        return roles.size > 0
+          ? { allowed: true, reason: "access_role_allow" }
+          : { allowed: false, reason: "namespace_denied" };
+      }
+      if (permission.resource === "knowledge" && permission.action === "use") {
+        if (roles.has("knowledge-manager")) {
+          return { allowed: true, reason: "access_role_allow" };
+        }
+        if (!resource.id) return { allowed: false, reason: "permission_denied" };
+        const grants = await config.store.listKnowledgeGrants({
+          namespaceId: resource.namespaceId,
+          baseId: resource.id,
+        });
+        return grants.some((grant) => roles.has(grant.accessRole))
+          ? { allowed: true, reason: "knowledge_grant_allow" }
+          : { allowed: false, reason: "permission_denied" };
+      }
+      return { allowed: false, reason: "permission_denied" };
     },
-    canUseKnowledge: async ({ principal, namespaceId, baseId }) => {
-      const roles = rolesFor(principal, namespaceId);
-      if (roles.has("admin") || roles.has("knowledge-manager")) return true;
-      const grants = await config.store.listKnowledgeGrants({ namespaceId, baseId });
-      return grants.some((grant) => roles.has(grant.accessRole));
-    },
+    recordAudit: async () => {},
     mount: (router) => {
       mountLoginRoutes({
         router,
@@ -159,6 +204,19 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
       mountAccessRoutes({ router, store: config.store });
     },
   };
+}
+
+function samePrincipal(left: PrincipalRef, right: PrincipalRef): boolean {
+  return left.kind === right.kind && left.id === right.id;
+}
+
+async function effectivePrincipal(
+  context: SecurityContext,
+  resolve: (ref: PrincipalRef) => Promise<Principal | undefined>,
+): Promise<Principal | undefined> {
+  return samePrincipal(context.actor, context.effective)
+    ? context.actor
+    : resolve(context.effective);
 }
 
 function rolesFor(principal: Principal, namespaceId: string): Set<string> {

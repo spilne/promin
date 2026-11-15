@@ -19,10 +19,11 @@
 
 import { Auth, bearerToken } from "../auth.ts";
 import { jsonError } from "../router.ts";
+import type { PrincipalKind } from "../security/index.ts";
 import { ZoryaInsecureConfigError, type Logger } from "../server-config.ts";
 
 /** Who may call `/rpc/storage`: the full contract or the runner's methods only. */
-export type StorageCaller = "operator" | "worker";
+export type StorageCaller = Extract<PrincipalKind, "operator" | "worker">;
 
 export class AuthPlanes {
   /** Operator plane: `/api/*`. */

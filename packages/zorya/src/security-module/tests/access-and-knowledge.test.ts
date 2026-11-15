@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { Router } from "../../server/router.ts";
 import {
   ORG_WIDE_NAMESPACE,
+  principalRef,
   setRequestPrincipal,
   type Principal,
   type ZoryaSecurity,
@@ -57,9 +58,42 @@ async function createUser(params: {
 }
 
 async function principal(env: Environment, user: SecurityUser): Promise<Principal> {
-  const result = await env.security.principalById(user.id);
+  const result = await env.security.resolvePrincipal({ kind: "user", id: user.id });
   if (!result) throw new Error(`user ${user.id} has no principal`);
   return result;
+}
+
+async function canInvokeAgent(
+  env: Environment,
+  value: Principal,
+  namespaceId: string,
+): Promise<boolean> {
+  return (
+    await env.security.authorize({
+      context: { actor: value, effective: principalRef(value) },
+      permission: { resource: "agent", action: "invoke" },
+      resource: { kind: "agent", namespaceId },
+    })
+  ).allowed;
+}
+
+async function canUseKnowledgeBase(
+  env: Environment,
+  value: Principal,
+  namespaceId: string,
+  baseId: string,
+): Promise<boolean> {
+  return (
+    await env.security.authorize({
+      context: { actor: value, effective: principalRef(value) },
+      permission: { resource: "knowledge", action: "use" },
+      resource: { kind: "knowledge", namespaceId, id: baseId },
+    })
+  ).allowed;
+}
+
+function authenticate(env: Environment, request: Request): Promise<Principal | undefined> {
+  return env.security.authenticate({ request, plane: "operator" });
 }
 
 function rolesAt(
@@ -177,7 +211,9 @@ describe("access-role administration", () => {
       body,
     });
     expect(put.status).toBe(204);
-    expect((await env.security.principalById(user.id))?.accessRoles).toEqual({
+    expect(
+      (await env.security.resolvePrincipal({ kind: "user", id: user.id }))?.accessRoles,
+    ).toEqual({
       "team-a": ["analyst"],
     });
 
@@ -189,7 +225,9 @@ describe("access-role administration", () => {
       body,
     });
     expect(remove.status).toBe(204);
-    expect((await env.security.principalById(user.id))?.accessRoles).toEqual({});
+    expect(
+      (await env.security.resolvePrincipal({ kind: "user", id: user.id }))?.accessRoles,
+    ).toEqual({});
   });
 
   it("a bad body answers 400 with issues", async () => {
@@ -272,7 +310,9 @@ describe("access-role administration", () => {
       body: { namespaceId: "constructor", accessRole: "builder" },
     });
     expect(prototypeNamed.status).toBe(204);
-    expect(rolesAt(await env.security.principalById(user.id), "constructor")).toEqual(["builder"]);
+    expect(
+      rolesAt(await env.security.resolvePrincipal({ kind: "user", id: user.id }), "constructor"),
+    ).toEqual(["builder"]);
   });
 });
 
@@ -295,7 +335,7 @@ describe("namespace and knowledge access", () => {
     expect(rolesAt(byId, "__proto__")).toEqual(["legacy"]);
     expect(rolesAt(byId, "toString")).toEqual(["view"]);
     for (const namespaceId of ["constructor", "__proto__", "toString"]) {
-      expect(await env.security.canActIn({ principal: byId, namespaceId })).toBeTrue();
+      expect(await canInvokeAgent(env, byId, namespaceId)).toBeTrue();
     }
 
     const token = "prototype-namespace-session";
@@ -304,7 +344,8 @@ describe("namespace and knowledge access", () => {
       userId: user.id,
       ttlMs: 60_000,
     });
-    const authenticated = await env.security.authenticate(
+    const authenticated = await authenticate(
+      env,
       new Request(`${BASE_URL}/api/agents`, {
         headers: { cookie: `zorya_session=${token}` },
       }),
@@ -325,14 +366,8 @@ describe("namespace and knowledge access", () => {
       canActFor: false,
     };
     for (const namespaceId of ["constructor", "__proto__", "toString"]) {
-      expect(await env.security.canActIn({ principal: inherited, namespaceId })).toBeFalse();
-      expect(
-        await env.security.canUseKnowledge({
-          principal: inherited,
-          namespaceId,
-          baseId: "docs",
-        }),
-      ).toBeFalse();
+      expect(await canInvokeAgent(env, inherited, namespaceId)).toBeFalse();
+      expect(await canUseKnowledgeBase(env, inherited, namespaceId, "docs")).toBeFalse();
     }
 
     const ownAccessRoles = JSON.parse(
@@ -344,11 +379,11 @@ describe("namespace and knowledge access", () => {
       accessRoles: ownAccessRoles,
     };
     for (const namespaceId of ["constructor", "__proto__", "toString"]) {
-      expect(await env.security.canActIn({ principal: own, namespaceId })).toBeTrue();
+      expect(await canInvokeAgent(env, own, namespaceId)).toBeTrue();
     }
   });
 
-  it("canActIn: bound namespace and org-wide are allowed, others are not", async () => {
+  it("agent.invoke: bound namespace and org-wide are allowed, others are not", async () => {
     const env = environment();
     const scopedUser = await createUser({
       env,
@@ -363,12 +398,12 @@ describe("namespace and knowledge access", () => {
     const scoped = await principal(env, scopedUser);
     const org = await principal(env, orgUser);
 
-    expect(await env.security.canActIn({ principal: scoped, namespaceId: "team-a" })).toBeTrue();
-    expect(await env.security.canActIn({ principal: scoped, namespaceId: "team-b" })).toBeFalse();
-    expect(await env.security.canActIn({ principal: org, namespaceId: "team-b" })).toBeTrue();
+    expect(await canInvokeAgent(env, scoped, "team-a")).toBeTrue();
+    expect(await canInvokeAgent(env, scoped, "team-b")).toBeFalse();
+    expect(await canInvokeAgent(env, org, "team-b")).toBeTrue();
   });
 
-  it("canUseKnowledge: no grant means no access for a member", async () => {
+  it("knowledge.use: no grant means no access for a member", async () => {
     const env = environment();
     const user = await createUser({
       env,
@@ -376,15 +411,11 @@ describe("namespace and knowledge access", () => {
       bindings: [{ namespaceId: "team-a", accessRole: "member" }],
     });
     expect(
-      await env.security.canUseKnowledge({
-        principal: await principal(env, user),
-        namespaceId: "team-a",
-        baseId: "docs",
-      }),
+      await canUseKnowledgeBase(env, await principal(env, user), "team-a", "docs"),
     ).toBeFalse();
   });
 
-  it("canUseKnowledge: admin and knowledge-manager always have access", async () => {
+  it("knowledge.use: admin and knowledge-manager always have access", async () => {
     const env = environment();
     const adminUser = await createUser({
       env,
@@ -399,30 +430,12 @@ describe("namespace and knowledge access", () => {
     const admin = await principal(env, adminUser);
     const manager = await principal(env, managerUser);
 
-    expect(
-      await env.security.canUseKnowledge({
-        principal: admin,
-        namespaceId: "any-team",
-        baseId: "ungranted",
-      }),
-    ).toBeTrue();
-    expect(
-      await env.security.canUseKnowledge({
-        principal: manager,
-        namespaceId: "team-a",
-        baseId: "ungranted",
-      }),
-    ).toBeTrue();
-    expect(
-      await env.security.canUseKnowledge({
-        principal: manager,
-        namespaceId: "team-b",
-        baseId: "ungranted",
-      }),
-    ).toBeFalse();
+    expect(await canUseKnowledgeBase(env, admin, "any-team", "ungranted")).toBeTrue();
+    expect(await canUseKnowledgeBase(env, manager, "team-a", "ungranted")).toBeTrue();
+    expect(await canUseKnowledgeBase(env, manager, "team-b", "ungranted")).toBeFalse();
   });
 
-  it("canUseKnowledge: granting a caller role allows it; revoking denies the next call", async () => {
+  it("knowledge.use: granting a caller role allows it; revoking denies the next call", async () => {
     const env = environment();
     const adminUser = await createUser({
       env,
@@ -438,13 +451,7 @@ describe("namespace and knowledge access", () => {
     const member = await principal(env, memberUser);
     const grant = { namespaceId: "team-a", baseId: "docs", accessRole: "analyst" };
 
-    expect(
-      await env.security.canUseKnowledge({
-        principal: member,
-        namespaceId: "team-a",
-        baseId: "docs",
-      }),
-    ).toBeFalse();
+    expect(await canUseKnowledgeBase(env, member, "team-a", "docs")).toBeFalse();
     expect(
       (
         await handleAs({
@@ -456,13 +463,7 @@ describe("namespace and knowledge access", () => {
         })
       ).status,
     ).toBe(204);
-    expect(
-      await env.security.canUseKnowledge({
-        principal: member,
-        namespaceId: "team-a",
-        baseId: "docs",
-      }),
-    ).toBeTrue();
+    expect(await canUseKnowledgeBase(env, member, "team-a", "docs")).toBeTrue();
     expect(
       (
         await handleAs({
@@ -474,16 +475,10 @@ describe("namespace and knowledge access", () => {
         })
       ).status,
     ).toBe(204);
-    expect(
-      await env.security.canUseKnowledge({
-        principal: member,
-        namespaceId: "team-a",
-        baseId: "docs",
-      }),
-    ).toBeFalse();
+    expect(await canUseKnowledgeBase(env, member, "team-a", "docs")).toBeFalse();
   });
 
-  it("canUseKnowledge: an org-wide grant applies in every namespace", async () => {
+  it("knowledge.use: an org-wide grant applies in every namespace", async () => {
     const env = environment();
     const user = await createUser({
       env,
@@ -500,27 +495,9 @@ describe("namespace and knowledge access", () => {
       accessRole: "member",
     });
 
-    expect(
-      await env.security.canUseKnowledge({
-        principal: member,
-        namespaceId: "team-a",
-        baseId: "handbook",
-      }),
-    ).toBeTrue();
-    expect(
-      await env.security.canUseKnowledge({
-        principal: member,
-        namespaceId: "team-b",
-        baseId: "handbook",
-      }),
-    ).toBeTrue();
-    expect(
-      await env.security.canUseKnowledge({
-        principal: member,
-        namespaceId: "team-c",
-        baseId: "handbook",
-      }),
-    ).toBeFalse();
+    expect(await canUseKnowledgeBase(env, member, "team-a", "handbook")).toBeTrue();
+    expect(await canUseKnowledgeBase(env, member, "team-b", "handbook")).toBeTrue();
+    expect(await canUseKnowledgeBase(env, member, "team-c", "handbook")).toBeFalse();
   });
 });
 
@@ -544,7 +521,8 @@ describe("disabled users", () => {
       ttlMs: 60_000,
     });
     const authenticated = () =>
-      env.security.authenticate(
+      authenticate(
+        env,
         new Request(`${BASE_URL}/api/agents`, {
           headers: { cookie: `zorya_session=${token}` },
         }),
@@ -559,6 +537,6 @@ describe("disabled users", () => {
     });
     expect(response.status).toBe(204);
     expect(await authenticated()).toBeUndefined();
-    expect(await env.security.principalById(user.id)).toBeUndefined();
+    expect(await env.security.resolvePrincipal({ kind: "user", id: user.id })).toBeUndefined();
   });
 });

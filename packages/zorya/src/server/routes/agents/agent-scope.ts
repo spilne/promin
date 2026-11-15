@@ -16,7 +16,12 @@ import { z } from "zod";
 import { json, jsonError, parseIntParam } from "../../router.ts";
 import { requireActiveNamespace } from "../../namespace-guard.ts";
 import { internalError } from "../agent-gateway-kit.ts";
-import { requestPrincipal, type Principal } from "../../security/index.ts";
+import {
+  requestPrincipal,
+  setRequestSecurityContext,
+  type Principal,
+  type SecurityContext,
+} from "../../security/index.ts";
 import type { AgentGatewayDeps } from "./agent-gateway-deps.ts";
 
 /**
@@ -260,20 +265,28 @@ export async function loadScopedAgent(params: {
 
   const actor = requestPrincipal(req);
   let effectivePrincipal = actor;
+  let securityContext: SecurityContext | undefined;
   if (actor?.kind === "service-account" && actor.canActFor) {
     if (!scope.resourceId || !deps.security) return jsonError(403, "unknown_user");
-    effectivePrincipal = await deps.security.principalById(scope.resourceId);
+    securityContext = await deps.security.resolveIdentity({
+      actor,
+      asserted: { kind: "user", id: scope.resourceId },
+    });
+    if (!securityContext) return jsonError(403, "unknown_user");
+    effectivePrincipal = await deps.security.resolvePrincipal(securityContext.effective);
     if (!effectivePrincipal) return jsonError(403, "unknown_user");
+  } else if (actor && deps.security) {
+    securityContext = await deps.security.resolveIdentity({ actor });
+    if (!securityContext) return jsonError(403, "unknown_user");
   }
-  if (
-    deps.security &&
-    effectivePrincipal &&
-    !(await deps.security.canActIn({
-      principal: effectivePrincipal,
-      namespaceId: scope.namespaceId,
-    }))
-  ) {
-    return jsonError(403, "namespace_forbidden");
+  if (deps.security && securityContext) {
+    setRequestSecurityContext({ req, context: securityContext });
+    const decision = await deps.security.authorize({
+      context: securityContext,
+      permission: { resource: "agent", action: "invoke" },
+      resource: { kind: "agent", namespaceId: scope.namespaceId, id },
+    });
+    if (!decision.allowed) return jsonError(403, "namespace_forbidden");
   }
 
   if (invoking) {

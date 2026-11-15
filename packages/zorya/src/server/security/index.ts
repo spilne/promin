@@ -1,8 +1,42 @@
-export { createApiKeySecurity } from "./api-key-security.ts";
-export { requestPrincipal, setRequestPrincipal } from "./request-principal.ts";
+export {
+  createApiKeySecurity,
+  selfSecurityContext,
+  type ApiKeySecurityConfig,
+} from "./api-key-security.ts";
+export {
+  requestPrincipal,
+  requestSecurityContext,
+  setRequestPrincipal,
+  setRequestSecurityContext,
+} from "./request-principal.ts";
 export {
   OPERATOR_PRINCIPAL,
   ORG_WIDE_NAMESPACE,
+  SECURITY_ACTIONS,
+  WORKER_PRINCIPAL,
+  principalRef,
+  type AuthenticationRequest,
+  type AuthorizationDecision,
+  type AuthorizationReason,
+  type AuthorizationRequest,
+  type Authorizer,
+  type DashboardLoginIdentity,
+  type DashboardLoginProvider,
+  type IdentityFilter,
+  type IdentityFilterRequest,
+  type IdentityResolver,
   type Principal,
+  type PrincipalKind,
+  type PrincipalRef,
+  type RequestAuthenticator,
+  type ResolveIdentityRequest,
+  type SecurityAction,
+  type SecurityAuditEvent,
+  type SecurityAuditSink,
+  type SecurityContext,
+  type SecurityPermission,
+  type SecurityPlane,
+  type SecurityResourceKind,
+  type SecurityResourceRef,
   type ZoryaSecurity,
 } from "./security.ts";

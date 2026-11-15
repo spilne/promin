@@ -212,7 +212,13 @@ export class ZoryaServer {
       apiKeys: config.apiKeys,
       workerApiKeys: config.remoteWorkers?.apiKeys,
     });
-    this.security = config.security ?? createApiKeySecurity({ auth: this.planes.operator });
+    this.security =
+      config.security ??
+      createApiKeySecurity({
+        operatorAuth: this.planes.operator,
+        workerAuth: this.planes.worker,
+        logger: this.logger,
+      });
     this.planes.assertConfigured({
       remoteWorkers: config.remoteWorkers !== undefined,
       insecure: config.insecure === true,
@@ -461,7 +467,7 @@ export class ZoryaServer {
     if (this.stopping && !isProbePath(path)) return jsonError(503, "shutting_down");
 
     if (isOperatorApiPath({ method: req.method, path })) {
-      const principal = await this.security.authenticate(req);
+      const principal = await this.security.authenticate({ request: req, plane: "operator" });
       if (!principal) return jsonError(401, "unauthorized");
       setRequestPrincipal({ req, principal });
     } else {

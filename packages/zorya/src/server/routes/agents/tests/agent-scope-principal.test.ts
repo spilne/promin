@@ -4,7 +4,7 @@ import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow"
 import { ZoryaServer } from "../../../server.ts";
 import { ZoryaAgents } from "../../../services/agents/zorya-agents.ts";
 import { LocalWorkflows } from "../../../services/workflows/local-workflows.ts";
-import type { Principal, ZoryaSecurity } from "../../../security/index.ts";
+import { principalRef, type Principal, type ZoryaSecurity } from "../../../security/index.ts";
 import { deriveScope } from "../agent-scope.ts";
 
 const operator: Principal = {
@@ -151,14 +151,28 @@ function request(body: Record<string, unknown>, key?: string): Request {
 function security(params: {
   readonly actor: Principal;
   readonly users?: ReadonlyMap<string, Principal>;
-  readonly canActIn?: (principal: Principal, namespaceId: string) => boolean;
+  readonly authorize?: (principal: Principal, namespaceId: string) => boolean;
 }): ZoryaSecurity {
   return {
     authenticate: async () => params.actor,
-    principalById: async (id) => params.users?.get(id),
-    canActIn: async ({ principal, namespaceId }) =>
-      params.canActIn?.(principal, namespaceId) ?? true,
-    canUseKnowledge: async () => true,
+    resolvePrincipal: async ({ id }) => params.users?.get(id),
+    resolveIdentity: async ({ actor, asserted }) => {
+      if (!asserted) return { actor, effective: principalRef(actor) };
+      if (!actor.canActFor) return undefined;
+      const effective = params.users?.get(asserted.id);
+      return effective ? { actor, effective: principalRef(effective) } : undefined;
+    },
+    identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
+    authorize: async ({ context, resource }) => {
+      const principal =
+        context.effective.id === context.actor.id
+          ? context.actor
+          : params.users?.get(context.effective.id);
+      return params.authorize?.(principal ?? context.actor, resource.namespaceId) === false
+        ? { allowed: false, reason: "namespace_denied" }
+        : { allowed: true, reason: "access_role_allow" };
+    },
+    recordAudit: async () => {},
   };
 }
 
@@ -217,7 +231,7 @@ describe("agent HTTP scope derives from the authenticated principal", () => {
 
   it("refuses a principal denied by namespace policy", async () => {
     const { server, resolved } = await boot({
-      security: security({ actor: user, canActIn: () => false }),
+      security: security({ actor: user, authorize: () => false }),
     });
 
     const response = await server.handle(request({ namespaceId: "acme" }));

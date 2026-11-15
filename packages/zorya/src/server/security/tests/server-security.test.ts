@@ -8,6 +8,7 @@ import { LocalWorkflows } from "../../services/workflows/local-workflows.ts";
 import {
   OPERATOR_PRINCIPAL,
   createApiKeySecurity,
+  principalRef,
   requestPrincipal,
   type Principal,
   type ZoryaSecurity,
@@ -51,10 +52,13 @@ function fakeSecurity(
   } = {},
 ): ZoryaSecurity {
   return {
-    authenticate: params.authenticate ?? (async () => userPrincipal()),
-    principalById: async () => undefined,
-    canActIn: async () => true,
-    canUseKnowledge: async () => true,
+    authenticate: async ({ request }) =>
+      params.authenticate?.(request) ?? Promise.resolve(userPrincipal()),
+    resolvePrincipal: async () => undefined,
+    resolveIdentity: async ({ actor }) => ({ actor, effective: principalRef(actor) }),
+    identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
+    authorize: async () => ({ allowed: true, reason: "access_role_allow" }),
+    recordAudit: async () => {},
     ...(params.mount !== undefined && { mount: params.mount }),
     ...(params.start !== undefined && { start: params.start }),
     ...(params.stop !== undefined && { stop: params.stop }),
@@ -85,13 +89,23 @@ describe("ZoryaServer security", () => {
   });
 
   it("API keys: the principal of an authenticated request is the operator", async () => {
-    const security = createApiKeySecurity({ auth: new Auth({ apiKeys: [API_KEY] }) });
+    const security = createApiKeySecurity({
+      operatorAuth: new Auth({ apiKeys: [API_KEY] }),
+      workerAuth: new Auth({ apiKeys: [WORKER_KEY] }),
+    });
     const authenticated = new Request("http://zorya/api/namespaces", {
       headers: bearer(API_KEY),
     });
 
-    expect(await security.authenticate(authenticated)).toEqual(OPERATOR_PRINCIPAL);
-    expect(await security.authenticate(new Request("http://zorya/api/namespaces"))).toBeUndefined();
+    expect(await security.authenticate({ request: authenticated, plane: "operator" })).toEqual(
+      OPERATOR_PRINCIPAL,
+    );
+    expect(
+      await security.authenticate({
+        request: new Request("http://zorya/api/namespaces"),
+        plane: "operator",
+      }),
+    ).toBeUndefined();
   });
 
   it("module: authenticate decides; undefined answers 401", async () => {

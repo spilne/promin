@@ -12,6 +12,7 @@ import {
 import {
   LocalWorkflows,
   ORG_WIDE_NAMESPACE,
+  principalRef,
   ZoryaAgents,
   ZoryaKnowledgeBases,
   ZoryaServer,
@@ -146,7 +147,13 @@ async function buildServer(mode: "module" | "api-keys"): Promise<ScenarioEnviron
           ...(principal !== undefined &&
             namespaceId !== undefined && {
               knowledgeAccess: ({ id }: { readonly id: string }) =>
-                requestSecurity.canUseKnowledge({ principal, namespaceId, baseId: id }),
+                requestSecurity
+                  .authorize({
+                    context: { actor: principal, effective: principalRef(principal) },
+                    permission: { resource: "knowledge", action: "use" },
+                    resource: { kind: "knowledge", namespaceId, id },
+                  })
+                  .then((decision) => decision.allowed),
               knowledgeCaller: callerFor({ principal, namespaceId }),
             }),
         });
