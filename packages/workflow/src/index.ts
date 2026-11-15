@@ -205,6 +205,7 @@ export {
   MARKED_FAILED_ERROR_TAG,
 } from "./lib/durable/workflow-state.ts";
 export {
+  type RunPrincipalKind,
   type RunPrincipalRef,
   type RunSecurityContext,
 } from "./lib/durable/run-security-context.ts";

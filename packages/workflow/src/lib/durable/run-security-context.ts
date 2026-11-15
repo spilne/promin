@@ -1,8 +1,11 @@
 import { RunSecurityContextConflictError } from "./durable-pipeline-error.ts";
 
+/** Principal kinds shared by durable workflow hosts without importing a host package. */
+export type RunPrincipalKind = "operator" | "worker" | "user" | "service-account";
+
 /** Dependency-neutral reference to a security principal. */
 export interface RunPrincipalRef {
-  readonly kind: string;
+  readonly kind: RunPrincipalKind;
   readonly id: string;
 }
 
@@ -21,10 +24,17 @@ export interface RunSecurityContext {
 /** Validate and copy the exact persistable shape, dropping extra runtime fields. */
 export function normalizeRunSecurityContext(context: RunSecurityContext): RunSecurityContext {
   const actor = normalizePrincipalRef(context.actor, "actor");
-  const effective =
+  const requestedEffective =
     context.effective === undefined
       ? undefined
       : normalizePrincipalRef(context.effective, "effective");
+  // There is one canonical representation for acting as self. This keeps a
+  // caller that spells out `effective: actor` compatible with stored rows
+  // that correctly omit the redundant effective reference.
+  const effective =
+    requestedEffective !== undefined && !samePrincipalRef(actor, requestedEffective)
+      ? requestedEffective
+      : undefined;
   return Object.freeze({
     actor,
     ...(effective !== undefined && { effective }),
@@ -78,13 +88,29 @@ function normalizePrincipalRef(ref: RunPrincipalRef, label: string): RunPrincipa
     ref === null ||
     typeof ref !== "object" ||
     typeof ref.kind !== "string" ||
-    ref.kind.length === 0 ||
+    !isRunPrincipalKind(ref.kind) ||
     typeof ref.id !== "string" ||
-    ref.id.length === 0
+    ref.id.length === 0 ||
+    INVALID_PRINCIPAL_ID.test(ref.id)
   ) {
-    throw new TypeError(`run security context ${label} must contain non-empty kind and id`);
+    throw new TypeError(
+      `run security context ${label} must contain a supported kind and a non-empty id without whitespace or control characters`,
+    );
   }
   return Object.freeze({ kind: ref.kind, id: ref.id });
+}
+
+const RUN_PRINCIPAL_KINDS: ReadonlySet<string> = new Set([
+  "operator",
+  "worker",
+  "user",
+  "service-account",
+]);
+
+const INVALID_PRINCIPAL_ID = /[\s\p{Cc}\p{Cf}]/u;
+
+function isRunPrincipalKind(value: string): value is RunPrincipalKind {
+  return RUN_PRINCIPAL_KINDS.has(value);
 }
 
 function samePrincipalRef(left: RunPrincipalRef, right: RunPrincipalRef): boolean {

@@ -214,8 +214,16 @@ export function storageTestSuite(
 
       it("round-trips only immutable actor/effective security references", async () => {
         const s = await getStorage();
-        const actor = { kind: "service-account", id: "sa-1", token: "must-not-persist" };
-        const effective = { kind: "user", id: "user-7", email: "must-not-persist@example.test" };
+        const actor: {
+          kind: "service-account";
+          id: string;
+          token: string;
+        } = { kind: "service-account", id: "sa-1", token: "must-not-persist" };
+        const effective: {
+          kind: "user";
+          id: string;
+          email: string;
+        } = { kind: "user", id: "user-7", email: "must-not-persist@example.test" };
         const requested = { actor, effective };
         await s.createWorkflow({
           workflowId: "security-context-1",
@@ -251,6 +259,26 @@ export function storageTestSuite(
           actor: { kind: "service-account", id: "sa-1" },
           effective: { kind: "user", id: "user-7" },
         });
+
+        await s.createWorkflow({
+          workflowId: "security-context-self",
+          workflowName: "secured",
+          input: {},
+          securityContext: {
+            actor: { kind: "user", id: "user-9" },
+            effective: { kind: "user", id: "user-9" },
+          },
+        });
+        expect((await s.loadWorkflow("security-context-self"))?.securityContext).toEqual({
+          actor: { kind: "user", id: "user-9" },
+        });
+        const canonicalRepeat = await s.createWorkflow({
+          workflowId: "security-context-self",
+          workflowName: "secured",
+          input: {},
+          securityContext: { actor: { kind: "user", id: "user-9" } },
+        });
+        expect(canonicalRepeat.created).toBe(false);
       });
 
       it("rejects deterministic and idempotency-key attachment under another identity", async () => {

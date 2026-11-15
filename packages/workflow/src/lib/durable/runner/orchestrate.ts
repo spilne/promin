@@ -66,6 +66,7 @@ import { errorMessage, errorTagOf } from "./step-body.ts";
 import { failureFromError, workflowFailure, type WorkflowFailure } from "../workflow-failure.ts";
 import {
   assertRunSecurityContextCompatible,
+  normalizeRunSecurityContext,
   type RunSecurityContext,
 } from "../run-security-context.ts";
 import {
@@ -182,7 +183,11 @@ export async function runWorkflowOrchestration(
   ctx: WorkflowOrchestrationContext,
   params: RunParams,
 ): Promise<unknown> {
-  const { workflowId, input, force, namespace } = params;
+  const runParams: RunParams =
+    params.securityContext === undefined
+      ? params
+      : { ...params, securityContext: normalizeRunSecurityContext(params.securityContext) };
+  const { workflowId, input, force, namespace } = runParams;
   const clock = ctx.clock ?? SystemWallClock;
   const idempotency = force ? undefined : ctx.idempotency;
 
@@ -195,20 +200,32 @@ export async function runWorkflowOrchestration(
       input,
       force,
       namespace,
-      ...(params.drivenByParent && { drivenByParent: true }),
-      ...(params.failureSink !== undefined && { failureSink: params.failureSink }),
-      ...(params.onLocked !== undefined && { onLocked: params.onLocked }),
-      ...(params.rejectInFlight === true && { rejectInFlight: true }),
-      ...(params.signal !== undefined && { signal: params.signal }),
-      ...(params.useStoredInput === true && { useStoredInput: true }),
-      ...(params.traceparent !== undefined && { traceparent: params.traceparent }),
-      ...(params.parentWorkflowId !== undefined && { parentWorkflowId: params.parentWorkflowId }),
+      ...(runParams.securityContext !== undefined && {
+        securityContext: runParams.securityContext,
+      }),
+      ...(runParams.drivenByParent && { drivenByParent: true }),
+      ...(runParams.failureSink !== undefined && { failureSink: runParams.failureSink }),
+      ...(runParams.onLocked !== undefined && { onLocked: runParams.onLocked }),
+      ...(runParams.rejectInFlight === true && { rejectInFlight: true }),
+      ...(runParams.signal !== undefined && { signal: runParams.signal }),
+      ...(runParams.useStoredInput === true && { useStoredInput: true }),
+      ...(runParams.traceparent !== undefined && { traceparent: runParams.traceparent }),
+      ...(runParams.parentWorkflowId !== undefined && {
+        parentWorkflowId: runParams.parentWorkflowId,
+      }),
     });
   }
 
   // Idempotency check — return the cached outcome if within TTL.
   if (idempotency) {
     const existing = await ctx.storage.loadWorkflow(workflowId);
+    if (existing) {
+      assertRunSecurityContextCompatible({
+        workflowId,
+        stored: existing.securityContext,
+        requested: runParams.securityContext,
+      });
+    }
     const cached = existing ? cachedIdempotentOutcome({ ctx, state: existing, clock }) : undefined;
     if (cached) return cached.result;
   }
@@ -228,14 +245,21 @@ export async function runWorkflowOrchestration(
         clock,
         loadState: true,
         watchCancel: true,
-        ...(params.signal !== undefined && { signal: params.signal }),
+        ...(runParams.signal !== undefined && { signal: runParams.signal }),
       },
       fn: async (lock) => {
         // Before the try: a rejected in-flight run is someone else's, and
         // its query handlers stay registered.
-        if (params.rejectInFlight === true) {
+        if (runParams.rejectInFlight === true) {
           const stored =
             lock.state !== undefined ? lock.state : await ctx.storage.loadWorkflow(workflowId);
+          if (stored) {
+            assertRunSecurityContextCompatible({
+              workflowId,
+              stored: stored.securityContext,
+              requested: runParams.securityContext,
+            });
+          }
           if (stored && IN_FLIGHT_STATUSES.has(stored.status)) {
             throw new WorkflowLockError({
               workflowId,
@@ -243,17 +267,17 @@ export async function runWorkflowOrchestration(
             });
           }
         }
-        params.onLocked?.();
+        runParams.onLocked?.();
         const stopTracingLock = traceLock({
           ctx,
           lock,
           clock,
           workflowId,
-          namespace: params.namespace ?? lock.state?.namespace,
+          namespace: runParams.namespace ?? lock.state?.namespace,
         });
         const queries = openQueryScope(workflowId);
         try {
-          const result = await runChain({ ctx, params, lock, clock, loaded, queries });
+          const result = await runChain({ ctx, params: runParams, lock, clock, loaded, queries });
           queries.close();
           stopTracingLock();
           return result;
@@ -266,9 +290,24 @@ export async function runWorkflowOrchestration(
         }
       },
     });
+  } catch (error) {
+    // `start({ onInFlight: "join" })` turns a lock conflict into a handle.
+    // The lock may have been lost before `fn` ran, so validate against a
+    // fresh row here before the caller is allowed to join that run.
+    if (error instanceof WorkflowLockError && runParams.rejectInFlight === true) {
+      const stored = await ctx.storage.loadWorkflow(workflowId);
+      if (stored) {
+        assertRunSecurityContextCompatible({
+          workflowId,
+          stored: stored.securityContext,
+          requested: runParams.securityContext,
+        });
+      }
+    }
+    throw error;
   } finally {
     // After the lock is released, so the woken parent can drive the child.
-    if (!params.drivenByParent) await wakeParentIfEnded({ ctx, loaded, clock });
+    if (!runParams.drivenByParent) await wakeParentIfEnded({ ctx, loaded, clock });
   }
 }
 
@@ -342,6 +381,9 @@ async function runChain(params: {
                 input,
                 force: true,
                 namespace: params.params.namespace,
+                ...(params.params.securityContext !== undefined && {
+                  securityContext: params.params.securityContext,
+                }),
                 ...(params.params.parentWorkflowId !== undefined && {
                   parentWorkflowId: params.params.parentWorkflowId,
                 }),

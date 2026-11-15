@@ -37,6 +37,7 @@ import {
   WorkflowError,
   WorkflowDeadlineError,
   StepTimeoutError,
+  RunSecurityContextConflictError,
   WorkflowLockError,
   WorkflowTripwireError,
   TripwireStorageMissingError,
@@ -660,6 +661,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     ]);
     void running.catch(() => undefined);
 
+    if (first.error instanceof RunSecurityContextConflictError) throw first.error;
     if (first.error instanceof WorkflowLockError && onInFlight === "reject") throw first.error;
     return this.handle<Output>(workflowId, { workflow: startedWorkflow });
   }
