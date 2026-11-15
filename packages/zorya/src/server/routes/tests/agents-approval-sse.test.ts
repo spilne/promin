@@ -36,16 +36,19 @@ const scope = { namespaceId: "ns", resourceId: "alice" };
 describe("agent SSE — approval resume", () => {
   it("streams the resumed turn to finish without re-sending the approval request", async () => {
     let deployed = 0;
-    const deploy = tool({
-      name: "deploy",
-      description: "deploy a service",
-      parameters: z.object({ env: z.string() }),
-      requireApproval: true,
-      execute: async ({ env }) => {
-        deployed++;
-        return `deployed to ${env}`;
-      },
-    });
+    const deploy = {
+      ...tool({
+        name: "deploy",
+        description: "deploy a service",
+        parameters: z.object({ env: z.string() }),
+        requireApproval: true,
+        execute: async ({ env }) => {
+          deployed++;
+          return `deployed to ${env}`;
+        },
+      }),
+      kind: "elevated" as const,
+    };
     const llm: LLMProvider = {
       chat: async ({ messages }) => {
         const last = messages[messages.length - 1];
@@ -58,12 +61,18 @@ describe("agent SSE — approval resume", () => {
             };
       },
     };
-    const { server, registry } = await bootAgents({ llm, tools: { deploy } });
+    const { server, registry, approvals } = await bootAgents({ llm, tools: { deploy } });
     await registry.register({
       id: "deployer",
       backend: {
         ...localBackend,
-        role: { inline: { systemPrompt: "Deploys things", tools: ["deploy"] } },
+        role: {
+          inline: {
+            systemPrompt: "Deploys things",
+            tools: ["deploy"],
+            capabilities: ["elevated"],
+          },
+        },
       },
     });
 
@@ -81,6 +90,9 @@ describe("agent SSE — approval resume", () => {
     expect(firstEvents).toContain("suspended");
     expect(firstEvents).not.toContain("finish");
     expect(deployed).toBe(0);
+    expect(
+      await approvals.get({ namespaceId: "ns", threadId: "t1", toolCallId: "call-1" }),
+    ).toMatchObject({ elevated: true });
 
     const resumed = await readSse(
       await server.handle(
@@ -180,7 +192,7 @@ describe("agent routes — pending-approval index", () => {
     );
     expect(
       await approvals.get({ namespaceId: "ns", threadId: "t1", toolCallId: "call-1" }),
-    ).toMatchObject({ status: "approved", decidedBy: "alice" });
+    ).toMatchObject({ status: "approved", decidedBy: "operator" });
     const after = await server.handle(
       req("GET", `/api/agents/deployer/threads/t1/approvals?${query}`),
     );

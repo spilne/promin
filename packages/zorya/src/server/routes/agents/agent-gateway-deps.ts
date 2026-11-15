@@ -207,6 +207,8 @@ export interface PendingApprovalDto {
   toolCallId: string;
   toolName: string;
   input: unknown;
+  /** Elevated approvals require a distinct approver principal. */
+  elevated: boolean;
   /** Unix ms. */
   requestedAt: number;
   /** Unix ms; null when it never expires. */

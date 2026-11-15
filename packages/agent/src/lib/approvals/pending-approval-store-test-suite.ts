@@ -61,6 +61,7 @@ export function pendingApprovalStoreTestSuite(factory: PendingApprovalStoreFacto
           workflowId: "wf-1",
           toolName: "deploy",
           input: { env: "prod", n: 2 },
+          elevated: false,
           status: "pending",
           expiresAt: null,
           decidedBy: null,
@@ -69,6 +70,15 @@ export function pendingApprovalStoreTestSuite(factory: PendingApprovalStoreFacto
           deliveredAt: null,
         });
         expect(row.requestedAt).toBeGreaterThan(0);
+        expect(
+          await store.get({ namespaceId: "acme", threadId: "t", toolCallId: "call-1" }),
+        ).toEqual(row);
+      });
+
+      it("persists the elevated approval boundary", async () => {
+        const { store } = await factory();
+        const row = await store.record(request({ elevated: true }));
+        expect(row.elevated).toBe(true);
         expect(
           await store.get({ namespaceId: "acme", threadId: "t", toolCallId: "call-1" }),
         ).toEqual(row);

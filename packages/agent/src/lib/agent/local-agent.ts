@@ -1764,7 +1764,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
         threadId: this.deps.key.threadId,
         agentId: this.deps.agentId,
       },
-      requested: async ({ workflowId, call }) => {
+      requested: async ({ workflowId, call, elevated }) => {
         await this.deps.approvals.record({
           namespaceId: this.deps.key.namespaceId,
           threadId: this.deps.key.threadId,
@@ -1774,6 +1774,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
           workflowId,
           toolName: call.name,
           input: call.input,
+          elevated,
           ...(this.deps.approvalTtlMs !== undefined && { ttlMs: this.deps.approvalTtlMs }),
         });
       },

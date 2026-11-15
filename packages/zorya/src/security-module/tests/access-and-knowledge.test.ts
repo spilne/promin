@@ -748,6 +748,70 @@ describe("namespace and knowledge access", () => {
     });
   });
 
+  it("members own their scoped agents, threads, memory and ordinary approvals", async () => {
+    const env = environment();
+    const memberUser = await createUser({
+      env,
+      email: "member@example.com",
+      bindings: [{ namespaceId: "team-a", accessRole: "member" }],
+    });
+    const approverUser = await createUser({
+      env,
+      email: "approver@example.com",
+      bindings: [{ namespaceId: "team-a", accessRole: "approver" }],
+    });
+    const member = await principal(env, memberUser);
+    const approver = await principal(env, approverUser);
+    const authorize = (
+      value: Principal,
+      permission: AuthorizationRequest["permission"],
+      namespaceId: string,
+      id?: string,
+    ) =>
+      env.security.authorize({
+        context: { actor: value, effective: principalRef(value) },
+        permission,
+        resource: { kind: permission.resource, namespaceId, ...(id !== undefined && { id }) },
+      } as AuthorizationRequest);
+
+    expect(await authorize(member, { resource: "agent", action: "read" }, "org")).toEqual({
+      allowed: true,
+      reason: "self_identity_allow",
+    });
+    expect(await authorize(member, { resource: "thread", action: "send" }, "team-a", "t")).toEqual({
+      allowed: true,
+      reason: "self_identity_allow",
+    });
+    expect(
+      await authorize(member, { resource: "thread", action: "view-trace" }, "team-a", "t"),
+    ).toEqual({ allowed: false, reason: "permission_denied" });
+    expect(
+      await authorize(member, { resource: "memory", action: "read" }, "team-a", member.id),
+    ).toEqual({ allowed: true, reason: "self_identity_allow" });
+    expect(
+      await authorize(member, { resource: "memory", action: "read" }, "team-a", "peer"),
+    ).toEqual({ allowed: false, reason: "permission_denied" });
+    expect(
+      await authorize(member, { resource: "approval", action: "decide" }, "team-a", member.id),
+    ).toEqual({ allowed: true, reason: "self_identity_allow" });
+    expect(
+      await authorize(
+        member,
+        { resource: "approval", action: "decide-elevated" },
+        "team-a",
+        member.id,
+      ),
+    ).toEqual({ allowed: false, reason: "permission_denied" });
+    expect(
+      await authorize(
+        approver,
+        { resource: "approval", action: "decide-elevated" },
+        "team-a",
+        member.id,
+      ),
+    ).toEqual({ allowed: true, reason: "access_role_allow" });
+  });
+
   it("knowledge.use: granting a caller role allows it; revoking denies the next call", async () => {
     const env = environment();
     const adminUser = await createUser({

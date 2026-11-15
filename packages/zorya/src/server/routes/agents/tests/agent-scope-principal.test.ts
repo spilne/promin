@@ -243,7 +243,7 @@ describe("agent HTTP scope derives from the authenticated principal", () => {
     const response = await server.handle(request({ namespaceId: "acme" }));
 
     expect(response.status).toBe(403);
-    expect(await errorOf(response)).toBe("namespace_forbidden");
+    expect(await errorOf(response)).toBe("forbidden");
     expect(resolved).toHaveLength(0);
   });
 

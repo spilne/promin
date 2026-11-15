@@ -204,6 +204,16 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
       if (roles.has("agent-manager") && isAgentManagerPermission(permission)) {
         return { allowed: true, reason: "access_role_allow" };
       }
+      if (
+        roles.has("approver") &&
+        permission.resource === "approval" &&
+        permission.action === "decide-elevated"
+      ) {
+        return { allowed: true, reason: "access_role_allow" };
+      }
+      if (isMemberPermission({ principal, roles, permission, resource })) {
+        return { allowed: true, reason: "self_identity_allow" };
+      }
       if (permission.resource === "agent" && permission.action === "invoke") {
         return roles.size > 0
           ? { allowed: true, reason: "access_role_allow" }
@@ -292,6 +302,41 @@ function isAuditorPermission(permission: {
     return permission.action === "search" || permission.action === "export";
   if (permission.resource === "thread") return permission.action === "view-trace";
   return permission.action === "read" && AUDITOR_CONFIG_RESOURCES.has(permission.resource);
+}
+
+function isMemberPermission(params: {
+  readonly principal: Principal;
+  readonly roles: ReadonlySet<string>;
+  readonly permission: { readonly resource: string; readonly action: string };
+  readonly resource: { readonly id?: string };
+}): boolean {
+  const { principal, roles, permission, resource } = params;
+  if (permission.resource === "agent" && permission.action === "read") {
+    return hasAnyAccessRole(principal);
+  }
+  if (roles.size === 0) return false;
+  if (permission.resource === "thread") {
+    return (
+      permission.action === "read" ||
+      permission.action === "send" ||
+      permission.action === "rename" ||
+      permission.action === "archive"
+    );
+  }
+  if (permission.resource === "memory") {
+    return resource.id === principal.id;
+  }
+  return (
+    permission.resource === "approval" &&
+    permission.action === "decide" &&
+    resource.id === principal.id
+  );
+}
+
+function hasAnyAccessRole(principal: Principal): boolean {
+  return Object.keys(principal.accessRoles).some(
+    (namespaceId) => ownRoles(principal.accessRoles, namespaceId).length > 0,
+  );
 }
 
 function samePrincipal(left: PrincipalRef, right: PrincipalRef): boolean {

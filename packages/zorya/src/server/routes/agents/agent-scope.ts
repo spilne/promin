@@ -18,6 +18,7 @@ import { requireActiveNamespace } from "../../namespace-guard.ts";
 import { internalError } from "../agent-gateway-kit.ts";
 import {
   requestPrincipal,
+  requestSecurityContext,
   setRequestSecurityContext,
   type Principal,
   type SecurityContext,
@@ -265,31 +266,29 @@ export async function loadScopedAgent(params: {
 
   const actor = requestPrincipal(req);
   let effectivePrincipal = actor;
-  let securityContext: SecurityContext | undefined;
-  if (actor?.canActFor && scope.resourceId !== undefined) {
+  let securityContext: SecurityContext | undefined = requestSecurityContext(req);
+  if (!securityContext && actor?.canActFor && scope.resourceId !== undefined) {
     if (!deps.security) return jsonError(403, "unknown_user");
     securityContext = await deps.security.resolveIdentity({
       actor,
       asserted: { kind: "user", id: scope.resourceId },
     });
     if (!securityContext) return jsonError(403, "unknown_user");
-    const represented = await deps.security.resolvePrincipal(securityContext.effective);
-    if (represented) effectivePrincipal = represented;
-    else if (actor.kind !== "operator") return jsonError(403, "unknown_user");
-  } else if (actor?.kind === "service-account" && actor.canActFor) {
+  } else if (!securityContext && actor?.kind === "service-account" && actor.canActFor) {
     return jsonError(403, "unknown_user");
-  } else if (actor && deps.security) {
+  } else if (!securityContext && actor && deps.security) {
     securityContext = await deps.security.resolveIdentity({ actor });
     if (!securityContext) return jsonError(403, "unknown_user");
   }
   if (deps.security && securityContext) {
     setRequestSecurityContext({ req, context: securityContext });
-    const decision = await deps.security.authorize({
-      context: securityContext,
-      permission: { resource: "agent", action: "invoke" },
-      resource: { kind: "agent", namespaceId: scope.namespaceId, id },
-    });
-    if (!decision.allowed) return jsonError(403, "namespace_forbidden");
+    const represented =
+      securityContext.actor.kind === securityContext.effective.kind &&
+      securityContext.actor.id === securityContext.effective.id
+        ? securityContext.actor
+        : await deps.security.resolvePrincipal(securityContext.effective);
+    if (represented) effectivePrincipal = represented;
+    else if (securityContext.actor.kind !== "operator") return jsonError(403, "unknown_user");
   }
 
   if (invoking) {

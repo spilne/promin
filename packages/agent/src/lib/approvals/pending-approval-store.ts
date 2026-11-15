@@ -55,6 +55,8 @@ export interface PendingApproval extends PendingApprovalKey {
   readonly workflowId: string;
   readonly toolName: string;
   readonly input: unknown;
+  /** Elevated tools require a different principal with approval.decide-elevated. */
+  readonly elevated: boolean;
   /** Unix ms, store time. */
   readonly requestedAt: number;
   /** Unix ms, store time. Null: never expires. */
@@ -80,6 +82,8 @@ export interface RecordPendingApprovalParams extends PendingApprovalKey {
   readonly workflowId: string;
   readonly toolName: string;
   readonly input: unknown;
+  /** Whether the requested tool is an elevated cross-scope tool. Default false. */
+  readonly elevated?: boolean;
   /** Expire the approval this long after it is recorded. Omitted: never. */
   readonly ttlMs?: number;
 }

@@ -42,6 +42,7 @@ export class InMemoryPendingApprovalStore implements PendingApprovalStore {
       workflowId: params.workflowId,
       toolName: params.toolName,
       input: params.input,
+      elevated: params.elevated ?? false,
       requestedAt: now,
       expiresAt: params.ttlMs !== undefined ? now + params.ttlMs : null,
       status: "pending",

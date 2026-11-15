@@ -287,7 +287,11 @@ export interface TurnUsageRecorder {
  * `(workflowId, call.id)`.
  */
 export interface TurnApprovalIndex {
-  requested(params: { readonly workflowId: string; readonly call: ToolCall }): Promise<void>;
+  requested(params: {
+    readonly workflowId: string;
+    readonly call: ToolCall;
+    readonly elevated: boolean;
+  }): Promise<void>;
   /**
    * The agent thread the indexed approvals belong to — recorded with each
    * approval's start entry so signal routes can send a decider to the
@@ -519,6 +523,8 @@ interface ToolSnapshotEntry {
   readonly idempotent: boolean;
   /** A sub-agent tool: its calls run as child workflows. */
   readonly delegated: boolean;
+  /** Cross-scope tool requiring a different elevated approver. */
+  readonly elevated: boolean;
 }
 
 type RoundMode = "normal" | "force-respond" | "force-answer";
@@ -754,6 +760,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
                   requireApproval: t.requireApproval === true,
                   idempotent: t.idempotent === true,
                   delegated: t.delegation !== undefined,
+                  elevated: t.kind === "elevated",
                 }),
               ),
               compaction:
@@ -1083,7 +1090,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
               continue;
             }
             if (needsApproval[index]) {
-              const decision = yield* approve({ step, call });
+              const decision = yield* approve({ step, call, entry });
               if (!decision.approved) {
                 results[index] = errorResult(
                   call,
@@ -1293,8 +1300,9 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
       function* approve(params: {
         step: number;
         call: ToolCall;
+        entry: ToolSnapshotEntry;
       }): Generator<ActivityYield, ApprovalDecision, any> {
-        const { step, call } = params;
+        const { step, call, entry } = params;
         const prefix = `step-${step}-approval-${call.id}`;
         // The `-start` record carries the tool name + input:
         // `listPendingSignals` reads it to describe the pending approval.
@@ -1304,7 +1312,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
           `${prefix}-start`,
           async () => {
             const requestedAt = clock.currentTimeMs();
-            await approvalIndex?.requested({ workflowId, call });
+            await approvalIndex?.requested({ workflowId, call, elevated: entry.elevated });
             emit({
               type: "approval.requested",
               turn: 0,

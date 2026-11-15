@@ -44,6 +44,7 @@ interface DbRow {
   workflow_id: string;
   tool_name: string;
   input: string;
+  elevated: number;
   requested_at: number;
   expires_at: number | null;
   status: string;
@@ -81,6 +82,7 @@ export class SqlitePendingApprovalStore implements PendingApprovalStore {
         workflow_id  TEXT NOT NULL,
         tool_name    TEXT NOT NULL,
         input        TEXT NOT NULL,
+        elevated     INTEGER NOT NULL DEFAULT 0,
         requested_at INTEGER NOT NULL,
         expires_at   INTEGER,
         status       TEXT NOT NULL,
@@ -91,6 +93,10 @@ export class SqlitePendingApprovalStore implements PendingApprovalStore {
         PRIMARY KEY (namespace_id, thread_id, tool_call_id)
       )
     `);
+    const columns = this.db.query<{ name: string }>(`PRAGMA table_info(${t})`).all();
+    if (!columns.some((column) => column.name === "elevated")) {
+      this.db.run(`ALTER TABLE ${t} ADD COLUMN elevated INTEGER NOT NULL DEFAULT 0`);
+    }
     this.db.run(
       `CREATE INDEX IF NOT EXISTS ${t}_ns_status ON ${t} (namespace_id, status, requested_at)`,
     );
@@ -111,9 +117,9 @@ export class SqlitePendingApprovalStore implements PendingApprovalStore {
         .query(
           `INSERT OR REPLACE INTO ${this.table}
              (namespace_id, thread_id, tool_call_id, resource_id, agent_id, workflow_id,
-              tool_name, input, requested_at, expires_at, status, decided_by, decided_at, reason,
+              tool_name, input, elevated, requested_at, expires_at, status, decided_by, decided_at, reason,
               delivered_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL)`,
         )
         .run(
           params.namespaceId,
@@ -124,6 +130,7 @@ export class SqlitePendingApprovalStore implements PendingApprovalStore {
           params.workflowId,
           params.toolName,
           JSON.stringify(params.input ?? null),
+          params.elevated ? 1 : 0,
           now,
           params.ttlMs !== undefined ? now + params.ttlMs : null,
         );
@@ -238,6 +245,7 @@ function toApproval(row: DbRow): PendingApproval {
     workflowId: row.workflow_id,
     toolName: row.tool_name,
     input: JSON.parse(row.input) as unknown,
+    elevated: row.elevated === 1,
     requestedAt: row.requested_at,
     expiresAt: row.expires_at,
     status: row.status as PendingApprovalStatus,

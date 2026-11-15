@@ -12,6 +12,10 @@ export {
 } from "./request-principal.ts";
 export {
   createSecurityRouteAccessGuard,
+  snapshotAuthorizationDecision,
+  snapshotSecurityContext,
+  snapshotSecurityPermission,
+  snapshotSecurityResource,
   type SecurityRouteAccessGuardConfig,
 } from "./route-access-guard.ts";
 export {

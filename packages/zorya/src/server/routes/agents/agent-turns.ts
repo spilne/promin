@@ -18,9 +18,16 @@ import {
   type AgentThread,
   type PendingApproval,
 } from "@promin/agent";
-import { WorkflowSuspendedError } from "@promin/workflow";
+import { SystemWallClock, WorkflowSuspendedError } from "@promin/workflow";
 import { json, jsonError, readJson } from "../../router.ts";
-import { requestPrincipal } from "../../security/index.ts";
+import {
+  requestPrincipal,
+  requestSecurityContext,
+  snapshotAuthorizationDecision,
+  snapshotSecurityContext,
+  snapshotSecurityPermission,
+  snapshotSecurityResource,
+} from "../../security/index.ts";
 import { internalError } from "../agent-gateway-kit.ts";
 import type {
   AgentGatewayDeps,
@@ -396,8 +403,7 @@ function threadMetaOf(params: {
  * then streams the resumed turn's events in the same SSE shape as the
  * user-task stream; an approval decided meanwhile, or approved after it
  * expired, ends the stream with an `error` frame naming why. The decision
- * is recorded with the identity the request was authorized as
- * (`ownerId`, else `resourceId`).
+ * is recorded with the authenticated actor, never the represented user.
  */
 export function streamThreadApproval(deps: AgentGatewayDeps) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
@@ -440,11 +446,18 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
           await lease.release();
           return jsonError(404, "approval_not_found");
         }
+        if (entry.elevated) {
+          const refused = await requireElevatedApproval({ deps, req, approval: entry });
+          if (refused) {
+            await lease.release();
+            return refused;
+          }
+        }
         turnId = `${entry.workflowId}/approve/${entry.toolCallId}`;
       }
       const out = thread.resumeStream(parsed.toolCallId, {
         approved: parsed.approved,
-        by: parsed.ownerId ?? scoped.resourceId,
+        by: requestPrincipal(req)?.id ?? parsed.ownerId ?? scoped.resourceId,
         ...(parsed.reason !== undefined && { reason: parsed.reason }),
       });
       const stream = deps.turnStreams.start({
@@ -461,6 +474,55 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
       return internalError({ code: "resume_failed", err });
     }
   };
+}
+
+async function requireElevatedApproval(params: {
+  readonly deps: AgentGatewayDeps;
+  readonly req: Request;
+  readonly approval: PendingApproval;
+}): Promise<Response | null> {
+  const { security } = params.deps;
+  const requestContext = requestSecurityContext(params.req);
+  if (!security || !requestContext) return jsonError(403, "forbidden");
+  // An elevated call must be decided by somebody other than the requester.
+  if (requestContext.actor.id === params.approval.resourceId) return jsonError(403, "forbidden");
+  const context = snapshotSecurityContext(requestContext);
+  const permission = snapshotSecurityPermission({
+    resource: "approval",
+    action: "decide-elevated",
+  });
+  const resource = snapshotSecurityResource({
+    kind: "approval",
+    namespaceId: params.approval.namespaceId,
+    id: params.approval.toolCallId,
+  });
+  const decision = snapshotAuthorizationDecision(
+    await security.authorize({ context, permission, resource } as never),
+  );
+  const event = Object.freeze({
+    event: "authorization",
+    occurredAt: (params.deps.clock ?? SystemWallClock).now().toISOString(),
+    context,
+    namespaceId: resource.namespaceId,
+    resource,
+    permission,
+    decision,
+    metadata: Object.freeze({
+      method: params.req.method,
+      path: new URL(params.req.url).pathname,
+      stepUp: "approval.decide-elevated",
+    }),
+  });
+  if (!decision.allowed) {
+    await security.recordAudit(event).catch(() => {});
+    return jsonError(403, "forbidden");
+  }
+  try {
+    await security.recordAudit(event);
+  } catch {
+    return jsonError(503, "security_audit_unavailable");
+  }
+  return null;
 }
 
 interface ApprovalRequest {
@@ -519,6 +581,7 @@ function toPendingApprovalDto(p: PendingApproval): PendingApprovalDto {
     toolCallId: p.toolCallId,
     toolName: p.toolName,
     input: p.input,
+    elevated: p.elevated,
     requestedAt: p.requestedAt,
     expiresAt: p.expiresAt,
     status: p.status,

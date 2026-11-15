@@ -10,7 +10,7 @@
 
 import type { SecretsStorage } from "@promin/agent";
 import type { NamespaceRegistry, WallClock } from "@promin/workflow";
-import { json, type Router } from "../router.ts";
+import { json, type Handler, type ProtectedRouteAccess, type Router } from "../router.ts";
 import type { RetainedSubagents, ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaEvals } from "../services/evals/index.ts";
 import { evalPromotionGate } from "../routes/evals.ts";
@@ -91,6 +91,39 @@ import {
   promoteRole,
   updateRole,
 } from "../routes/roles.ts";
+import { protectedAccess, orgTarget } from "./route-security.ts";
+import { agentBodyTarget, agentQueryTarget, namespaceQueryTarget } from "./agent-route-security.ts";
+import type { SecurityAction, SecurityResourceKind } from "../security/index.ts";
+
+function declareRoute(params: {
+  readonly router: Router;
+  readonly method: string;
+  readonly path: string;
+  readonly access: ProtectedRouteAccess;
+  readonly handler: Handler;
+}): void {
+  params.router.route({
+    method: params.method,
+    path: params.path,
+    access: params.access,
+    handler: params.handler,
+  });
+}
+
+function orgAccess<K extends SecurityResourceKind>(params: {
+  readonly resource: K;
+  readonly action: SecurityAction<K>;
+  readonly idParam?: string;
+}): ProtectedRouteAccess {
+  return protectedAccess({
+    resource: params.resource,
+    action: params.action,
+    target: orgTarget({
+      kind: params.resource,
+      ...(params.idParam !== undefined && { idParam: params.idParam }),
+    }),
+  });
+}
 
 export function mountAgents(params: {
   readonly router: Router;
@@ -141,129 +174,336 @@ export function mountAgents(params: {
   // ZoryaAgents, for the catalog and the memory inspector alike.
   const fragmentRegistry = fragments?.registry ?? agents.fragments;
 
-  router
-    .get("/api/agents", listAgents(agentDeps))
-    // A namespace's spend against its budget (before `/api/agents/:id`).
-    .get("/api/agents/_usage", getNamespaceUsage(agentDeps))
-    // Read-only metadata — the designer UI's model dropdown source.
-    .get(
-      "/api/agents/_catalog/models",
-      agents.models
-        ? listCatalogModels({ models: agents.models })
-        : async () => json(200, { models: [] }),
-    )
-    .get(
-      "/api/agents/_catalog/tools",
-      listCatalogTools({
-        ...(agents.toolCatalog !== undefined && { tools: agents.toolCatalog }),
-        ...(params.mcp !== undefined && { mcp: params.mcp }),
+  const route = (method: string, path: string, access: ProtectedRouteAccess, handler: Handler) =>
+    declareRoute({ router, method, path, access, handler });
+  const org = <K extends SecurityResourceKind>(
+    method: string,
+    path: string,
+    resource: K,
+    action: SecurityAction<K>,
+    handler: Handler,
+    idParam?: string,
+  ) => route(method, path, orgAccess({ resource, action, ...(idParam && { idParam }) }), handler);
+  const body = <K extends SecurityResourceKind>(
+    method: string,
+    path: string,
+    resource: K,
+    action: SecurityAction<K>,
+    handler: Handler,
+    options: { idParam?: string; idField?: string; identityId?: boolean } = {},
+  ) =>
+    route(
+      method,
+      path,
+      protectedAccess({
+        resource,
+        action,
+        target: agentBodyTarget({ kind: resource, security: params.security, ...options }),
       }),
-    )
-    // The agent editor's MCP picker: the operator's allowlisted servers.
-    .get("/api/agents/_catalog/mcp-servers", listCatalogMcpServers({ mcp: params.mcp }))
-    // Reconciliation health: which recipe tool refs don't resolve? A pure
-    // query at view time — no persistence, no audit trail.
-    .get(
-      "/api/agents/_catalog/tools/health",
-      agents.toolCatalog
-        ? getToolCatalogHealth({ tools: agents.toolCatalog, agents: agents.registry })
-        : async () => json(200, { recipes: [], orphans: [] }),
-    )
-    // Durable audit trail of exposed tools over time, when a tool-history
-    // store is wired.
-    .get(
-      "/api/agents/_catalog/tools/history",
-      agents.toolHistory
-        ? listToolHistory({ history: agents.toolHistory })
-        : async () => json(200, { history: [] }),
-    )
-    // The agent editor's skill picker, backed by the skills service.
-    .get(
-      "/api/agents/_catalog/skills",
-      skills
-        ? listCatalogSkills({ skills: skills.registry })
-        : async () => json(200, { skills: [] }),
-    )
-    // The agent editor's layered-prompt editor source.
-    .get(
-      "/api/agents/_catalog/fragments",
-      fragmentRegistry
-        ? listCatalogFragments({ fragments: fragmentRegistry })
-        : async () => json(200, { fragments: [] }),
-    )
-    // The agent editor's knowledge picker: host-wired retrievers.
-    .get(
-      "/api/agents/_catalog/retrievers",
-      agents.retrievers
-        ? listCatalogRetrievers({
-            retrievers: agents.retrievers,
-            ...(agents.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
-          })
-        : async () => json(200, { retrievers: [] }),
-    )
-    // Which recipes are backed by a file on disk (the editor disables
-    // in-place Save for them and the list badges them).
-    .get("/api/agents/_sources", listAgentSources({ registry: agents.registry }))
-    // Draft recipes — test a recipe edit before committing it.
-    .post(
-      "/api/agents/_draft",
-      createDraft({
-        registry: agents.registry,
-        clock,
-        ...(params.mcp !== undefined && { mcp: params.mcp }),
+      handler,
+    );
+  const query = <K extends SecurityResourceKind>(
+    method: string,
+    path: string,
+    resource: K,
+    action: SecurityAction<K>,
+    handler: Handler,
+    options: { idParam?: string; identityId?: boolean } = {},
+  ) =>
+    route(
+      method,
+      path,
+      protectedAccess({
+        resource,
+        action,
+        target: agentQueryTarget({ kind: resource, security: params.security, ...options }),
       }),
-    )
-    .delete("/api/agents/_draft/:id", deleteDraft({ registry: agents.registry }))
-    // Recipe CRUD — author, edit and clone agents over HTTP.
-    .post("/api/agents", createAgent(agentDeps))
-    .get("/api/agents/:id", getAgent(agentDeps))
-    .patch("/api/agents/:id", updateAgent(agentDeps))
-    .delete("/api/agents/:id", deleteAgent(agentDeps))
-    .get("/api/agents/:id/versions", listAgentVersions(agentDeps))
-    .post("/api/agents/:id/promote", promoteAgent(agentDeps))
-    .post("/api/agents/:id/clone", cloneAgent(agentDeps))
-    .post("/api/agents/:id/extract-role", extractRole(agentDeps))
-    .post("/api/agents/:id/invoke", invokeAgent(agentDeps))
-    .post("/api/agents/:id/stream", streamAgent(agentDeps))
-    .get("/api/agents/:id/threads", listAgentThreads(agentDeps))
-    .patch("/api/agents/:id/threads/:threadId", renameAgentThread(agentDeps))
-    .post("/api/agents/:id/threads/:threadId", sendThreadMessage(agentDeps))
-    .post("/api/agents/:id/threads/:threadId/stream", streamThreadMessage(agentDeps))
-    .get("/api/agents/:id/threads/:threadId/stream", reattachThreadStream(agentDeps))
-    .post("/api/agents/:id/threads/:threadId/cancel", cancelThreadTurn(agentDeps))
-    .post("/api/agents/:id/threads/:threadId/approve", streamThreadApproval(agentDeps))
-    .get("/api/agents/:id/threads/:threadId/approvals", listThreadApprovals(agentDeps))
-    .get("/api/agents/:id/threads/:threadId/messages", listThreadMessages(agentDeps))
-    .get("/api/agents/:id/threads/:threadId/trace", getThreadTrace(agentDeps))
-    .get("/api/agents/:id/threads/:threadId/usage", getThreadUsage(agentDeps))
-    .post("/api/agents/:id/threads/:threadId/distill", distillThread(agentDeps))
-    .post("/api/agents/:id/threads/:threadId/compact", compactThread(agentDeps))
-    .post("/api/agents/:id/threads/:threadId/archive", archiveAgentThread(agentDeps));
+      handler,
+    );
+
+  org("GET", "/api/agents", "agent", "read", listAgents(agentDeps));
+  route(
+    "GET",
+    "/api/agents/_usage",
+    protectedAccess({
+      resource: "usage",
+      action: "read",
+      target: namespaceQueryTarget({ kind: "usage" }),
+    }),
+    getNamespaceUsage(agentDeps),
+  );
+  org(
+    "GET",
+    "/api/agents/_catalog/models",
+    "toolset",
+    "read",
+    agents.models
+      ? listCatalogModels({ models: agents.models })
+      : async () => json(200, { models: [] }),
+  );
+  org(
+    "GET",
+    "/api/agents/_catalog/tools",
+    "toolset",
+    "read",
+    listCatalogTools({
+      ...(agents.toolCatalog !== undefined && { tools: agents.toolCatalog }),
+      ...(params.mcp !== undefined && { mcp: params.mcp }),
+    }),
+  );
+  org(
+    "GET",
+    "/api/agents/_catalog/mcp-servers",
+    "connector",
+    "read",
+    listCatalogMcpServers({ mcp: params.mcp }),
+  );
+  org(
+    "GET",
+    "/api/agents/_catalog/tools/health",
+    "toolset",
+    "read",
+    agents.toolCatalog
+      ? getToolCatalogHealth({ tools: agents.toolCatalog, agents: agents.registry })
+      : async () => json(200, { recipes: [], orphans: [] }),
+  );
+  org(
+    "GET",
+    "/api/agents/_catalog/tools/history",
+    "audit",
+    "search",
+    agents.toolHistory
+      ? listToolHistory({ history: agents.toolHistory })
+      : async () => json(200, { history: [] }),
+  );
+  org(
+    "GET",
+    "/api/agents/_catalog/skills",
+    "skill",
+    "read",
+    skills ? listCatalogSkills({ skills: skills.registry }) : async () => json(200, { skills: [] }),
+  );
+  org(
+    "GET",
+    "/api/agents/_catalog/fragments",
+    "fragment",
+    "read",
+    fragmentRegistry
+      ? listCatalogFragments({ fragments: fragmentRegistry })
+      : async () => json(200, { fragments: [] }),
+  );
+  org(
+    "GET",
+    "/api/agents/_catalog/retrievers",
+    "knowledge",
+    "read",
+    agents.retrievers
+      ? listCatalogRetrievers({
+          retrievers: agents.retrievers,
+          ...(agents.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
+        })
+      : async () => json(200, { retrievers: [] }),
+  );
+  org(
+    "GET",
+    "/api/agents/_sources",
+    "agent",
+    "read",
+    listAgentSources({ registry: agents.registry }),
+  );
+  org(
+    "POST",
+    "/api/agents/_draft",
+    "agent",
+    "create",
+    createDraft({
+      registry: agents.registry,
+      clock,
+      ...(params.mcp !== undefined && { mcp: params.mcp }),
+    }),
+  );
+  org(
+    "DELETE",
+    "/api/agents/_draft/:id",
+    "agent",
+    "update",
+    deleteDraft({ registry: agents.registry }),
+    "id",
+  );
+  org("POST", "/api/agents", "agent", "create", createAgent(agentDeps));
+  org("GET", "/api/agents/:id", "agent", "read", getAgent(agentDeps), "id");
+  org("PATCH", "/api/agents/:id", "agent", "update", updateAgent(agentDeps), "id");
+  org("DELETE", "/api/agents/:id", "agent", "disable", deleteAgent(agentDeps), "id");
+  org("GET", "/api/agents/:id/versions", "agent", "read", listAgentVersions(agentDeps), "id");
+  org("POST", "/api/agents/:id/promote", "agent", "promote", promoteAgent(agentDeps), "id");
+  org("POST", "/api/agents/:id/clone", "agent", "create", cloneAgent(agentDeps), "id");
+  org("POST", "/api/agents/:id/extract-role", "agent-role", "create", extractRole(agentDeps), "id");
+  body("POST", "/api/agents/:id/invoke", "agent", "invoke", invokeAgent(agentDeps), {
+    idParam: "id",
+  });
+  body("POST", "/api/agents/:id/stream", "agent", "invoke", streamAgent(agentDeps), {
+    idParam: "id",
+  });
+  query("GET", "/api/agents/:id/threads", "thread", "read", listAgentThreads(agentDeps), {
+    identityId: true,
+  });
+  body(
+    "PATCH",
+    "/api/agents/:id/threads/:threadId",
+    "thread",
+    "rename",
+    renameAgentThread(agentDeps),
+    { idParam: "threadId" },
+  );
+  body(
+    "POST",
+    "/api/agents/:id/threads/:threadId",
+    "thread",
+    "send",
+    sendThreadMessage(agentDeps),
+    { idParam: "threadId" },
+  );
+  body(
+    "POST",
+    "/api/agents/:id/threads/:threadId/stream",
+    "thread",
+    "send",
+    streamThreadMessage(agentDeps),
+    { idParam: "threadId" },
+  );
+  query(
+    "GET",
+    "/api/agents/:id/threads/:threadId/stream",
+    "thread",
+    "read",
+    reattachThreadStream(agentDeps),
+    { idParam: "threadId" },
+  );
+  body(
+    "POST",
+    "/api/agents/:id/threads/:threadId/cancel",
+    "thread",
+    "send",
+    cancelThreadTurn(agentDeps),
+    { idParam: "threadId" },
+  );
+  body(
+    "POST",
+    "/api/agents/:id/threads/:threadId/approve",
+    "approval",
+    "decide",
+    streamThreadApproval(agentDeps),
+    { identityId: true },
+  );
+  query(
+    "GET",
+    "/api/agents/:id/threads/:threadId/approvals",
+    "thread",
+    "read",
+    listThreadApprovals(agentDeps),
+    { idParam: "threadId" },
+  );
+  query(
+    "GET",
+    "/api/agents/:id/threads/:threadId/messages",
+    "thread",
+    "read",
+    listThreadMessages(agentDeps),
+    { idParam: "threadId" },
+  );
+  query(
+    "GET",
+    "/api/agents/:id/threads/:threadId/trace",
+    "thread",
+    "view-trace",
+    getThreadTrace(agentDeps),
+    { idParam: "threadId" },
+  );
+  query(
+    "GET",
+    "/api/agents/:id/threads/:threadId/usage",
+    "usage",
+    "read",
+    getThreadUsage(agentDeps),
+    { idParam: "threadId" },
+  );
+  body(
+    "POST",
+    "/api/agents/:id/threads/:threadId/distill",
+    "memory",
+    "write",
+    distillThread(agentDeps),
+    { identityId: true },
+  );
+  body(
+    "POST",
+    "/api/agents/:id/threads/:threadId/compact",
+    "memory",
+    "write",
+    compactThread(agentDeps),
+    { identityId: true },
+  );
+  body(
+    "POST",
+    "/api/agents/:id/threads/:threadId/archive",
+    "thread",
+    "archive",
+    archiveAgentThread(agentDeps),
+    { idParam: "threadId" },
+  );
 
   if (params.evals?.datasets) {
-    router
-      .get("/api/agents/:id/feedback", getAgentFeedbackTrend(agentDeps, params.evals.datasets))
-      .get(
-        "/api/agents/:id/threads/:threadId/feedback",
-        getAgentFeedback(agentDeps, params.evals.datasets),
-      )
-      .post(
-        "/api/agents/:id/threads/:threadId/feedback",
-        postAgentFeedback(agentDeps, params.evals.datasets),
-      )
-      .delete(
-        "/api/agents/:id/threads/:threadId/feedback",
-        deleteAgentFeedback(agentDeps, params.evals.datasets),
-      );
+    org(
+      "GET",
+      "/api/agents/:id/feedback",
+      "agent",
+      "read",
+      getAgentFeedbackTrend(agentDeps, params.evals.datasets),
+      "id",
+    );
+    query(
+      "GET",
+      "/api/agents/:id/threads/:threadId/feedback",
+      "thread",
+      "read",
+      getAgentFeedback(agentDeps, params.evals.datasets),
+      { idParam: "threadId" },
+    );
+    body(
+      "POST",
+      "/api/agents/:id/threads/:threadId/feedback",
+      "thread",
+      "send",
+      postAgentFeedback(agentDeps, params.evals.datasets),
+      { idParam: "threadId" },
+    );
+    query(
+      "DELETE",
+      "/api/agents/:id/threads/:threadId/feedback",
+      "thread",
+      "send",
+      deleteAgentFeedback(agentDeps, params.evals.datasets),
+      { idParam: "threadId" },
+    );
   }
 
   if (agents.memory) {
-    router
-      .post("/api/agents/:id/threads/:threadId/fork", forkAgentThread(agentDeps))
-      .get(
-        "/api/agents/:id/threads/:threadId/lineage",
-        getAgentThreadLineage(agentDeps, agents.memory),
-      );
+    body(
+      "POST",
+      "/api/agents/:id/threads/:threadId/fork",
+      "thread",
+      "send",
+      forkAgentThread(agentDeps),
+      { idParam: "threadId" },
+    );
+    query(
+      "GET",
+      "/api/agents/:id/threads/:threadId/lineage",
+      "thread",
+      "read",
+      getAgentThreadLineage(agentDeps, agents.memory),
+      { idParam: "threadId" },
+    );
   }
 
   if (agents.memory) {
@@ -278,11 +518,56 @@ export function mountAgents(params: {
       ...(agents.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
       ...namespaced,
     };
-    router
-      .get("/api/memory/inspect", inspectMemory(mem))
-      .patch("/api/memory/namespace/:namespaceId", patchNamespace(mem))
-      .post("/api/memory/namespace/:namespaceId/facts", addNamespaceFact(mem))
-      .delete("/api/memory/namespace/:namespaceId/facts/:factId", deleteNamespaceFact(mem));
+    route(
+      "GET",
+      "/api/memory/inspect",
+      protectedAccess({
+        resource: "memory",
+        action: "read",
+        target: namespaceQueryTarget({ kind: "memory", identityQuery: "resourceId" }),
+      }),
+      inspectMemory(mem),
+    );
+    route(
+      "PATCH",
+      "/api/memory/namespace/:namespaceId",
+      protectedAccess({
+        resource: "memory",
+        action: "write",
+        target: ({ params: route }) => ({
+          kind: "memory",
+          namespaceId: route.namespaceId!,
+        }),
+      }),
+      patchNamespace(mem),
+    );
+    route(
+      "POST",
+      "/api/memory/namespace/:namespaceId/facts",
+      protectedAccess({
+        resource: "memory",
+        action: "write",
+        target: ({ params: route }) => ({
+          kind: "memory",
+          namespaceId: route.namespaceId!,
+        }),
+      }),
+      addNamespaceFact(mem),
+    );
+    route(
+      "DELETE",
+      "/api/memory/namespace/:namespaceId/facts/:factId",
+      protectedAccess({
+        resource: "memory",
+        action: "erase",
+        target: ({ params: route }) => ({
+          kind: "memory",
+          namespaceId: route.namespaceId!,
+          id: route.factId,
+        }),
+      }),
+      deleteNamespaceFact(mem),
+    );
   }
 
   if (agents.instances && agents.memory) {
@@ -293,24 +578,95 @@ export function mountAgents(params: {
       ...(agents.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
       ...namespaced,
     };
-    router
-      .get("/api/agents/:id/instances", listAgentInstances(inDeps))
-      .post("/api/agents/:id/instances", resolveAgentInstance(inDeps))
-      .get("/api/agents/:id/instances/:instanceId", getAgentInstance(inDeps))
-      .patch("/api/agents/:id/instances/:instanceId", updateAgentInstance(inDeps))
-      .delete("/api/agents/:id/instances/:instanceId", deleteAgentInstance(inDeps))
-      .get("/api/instances", listInstancesAcrossAgents(inDeps));
+    const instancePointTarget = async ({
+      params: routeParams,
+    }: {
+      params: Readonly<Record<string, string>>;
+    }) => {
+      const instanceId = routeParams.instanceId;
+      const instance = instanceId ? await agents.instances!.get(instanceId) : undefined;
+      return {
+        kind: "memory" as const,
+        namespaceId: instance?.namespaceId ?? "org",
+        ...(instance?.ownerId !== undefined ? { id: instance.ownerId } : {}),
+      };
+    };
+    route(
+      "GET",
+      "/api/agents/:id/instances",
+      protectedAccess({
+        resource: "memory",
+        action: "read",
+        target: namespaceQueryTarget({ kind: "memory", identityQuery: "ownerId" }),
+      }),
+      listAgentInstances(inDeps),
+    );
+    route(
+      "POST",
+      "/api/agents/:id/instances",
+      protectedAccess({
+        resource: "memory",
+        action: "write",
+        target: async ({ request }) => {
+          const raw = (await request
+            .clone()
+            .json()
+            .catch(() => null)) as {
+            namespaceId?: unknown;
+            ownerId?: unknown;
+          } | null;
+          return {
+            kind: "memory",
+            namespaceId:
+              typeof raw?.namespaceId === "string" && raw.namespaceId.length > 0
+                ? raw.namespaceId
+                : "org",
+            ...(typeof raw?.ownerId === "string" && raw.ownerId.length > 0
+              ? { id: raw.ownerId }
+              : {}),
+          };
+        },
+      }),
+      resolveAgentInstance(inDeps),
+    );
+    route(
+      "GET",
+      "/api/agents/:id/instances/:instanceId",
+      protectedAccess({ resource: "memory", action: "read", target: instancePointTarget }),
+      getAgentInstance(inDeps),
+    );
+    route(
+      "PATCH",
+      "/api/agents/:id/instances/:instanceId",
+      protectedAccess({ resource: "memory", action: "write", target: instancePointTarget }),
+      updateAgentInstance(inDeps),
+    );
+    route(
+      "DELETE",
+      "/api/agents/:id/instances/:instanceId",
+      protectedAccess({ resource: "memory", action: "erase", target: instancePointTarget }),
+      deleteAgentInstance(inDeps),
+    );
+    route(
+      "GET",
+      "/api/instances",
+      protectedAccess({
+        resource: "memory",
+        action: "read",
+        target: namespaceQueryTarget({ kind: "memory", identityQuery: "ownerId" }),
+      }),
+      listInstancesAcrossAgents(inDeps),
+    );
   }
 
   if (agents.roles) {
     const roleDeps = { registry: agents.roles, agents: agents.registry };
-    router
-      .get("/api/roles", listRoles(roleDeps))
-      .post("/api/roles", createRole(roleDeps))
-      .get("/api/roles/:id", getRole(roleDeps))
-      .patch("/api/roles/:id", updateRole(roleDeps))
-      .delete("/api/roles/:id", deleteRole(roleDeps))
-      .get("/api/roles/:id/versions", listRoleVersions(roleDeps))
-      .post("/api/roles/:id/promote", promoteRole(roleDeps));
+    org("GET", "/api/roles", "agent-role", "read", listRoles(roleDeps));
+    org("POST", "/api/roles", "agent-role", "create", createRole(roleDeps));
+    org("GET", "/api/roles/:id", "agent-role", "read", getRole(roleDeps), "id");
+    org("PATCH", "/api/roles/:id", "agent-role", "update", updateRole(roleDeps), "id");
+    org("DELETE", "/api/roles/:id", "agent-role", "disable", deleteRole(roleDeps), "id");
+    org("GET", "/api/roles/:id/versions", "agent-role", "read", listRoleVersions(roleDeps), "id");
+    org("POST", "/api/roles/:id/promote", "agent-role", "update", promoteRole(roleDeps), "id");
   }
 }

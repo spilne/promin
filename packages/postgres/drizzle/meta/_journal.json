@@ -29,6 +29,13 @@
       "when": 1794710400000,
       "tag": "0003_run_security_context",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794796800000,
+      "tag": "0004_approval_elevation",
+      "breakpoints": true
     }
   ]
 }

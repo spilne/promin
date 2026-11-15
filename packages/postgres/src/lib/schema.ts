@@ -1200,6 +1200,7 @@ export const agentPendingApproval = pgTable(
     workflowId: text("workflow_id").notNull(),
     toolName: text("tool_name").notNull(),
     input: jsonb("input"),
+    elevated: boolean("elevated").notNull().default(false),
     requestedAt: bigint("requested_at", { mode: "number" }).notNull(),
     expiresAt: bigint("expires_at", { mode: "number" }),
     status: text("status").notNull(),
