@@ -49,6 +49,8 @@ function fakeSecurity(
     readonly mount?: (router: Router) => void;
     readonly start?: () => Promise<void>;
     readonly stop?: () => Promise<void>;
+    readonly authorize?: ZoryaSecurity["authorize"];
+    readonly recordAudit?: ZoryaSecurity["recordAudit"];
   } = {},
 ): ZoryaSecurity {
   return {
@@ -57,8 +59,8 @@ function fakeSecurity(
     resolvePrincipal: async () => undefined,
     resolveIdentity: async ({ actor }) => ({ actor, effective: principalRef(actor) }),
     identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
-    authorize: async () => ({ allowed: true, reason: "access_role_allow" }),
-    recordAudit: async () => {},
+    authorize: params.authorize ?? (async () => ({ allowed: true, reason: "access_role_allow" })),
+    recordAudit: params.recordAudit ?? (async () => {}),
     ...(params.mount !== undefined && { mount: params.mount }),
     ...(params.start !== undefined && { start: params.start }),
     ...(params.stop !== undefined && { stop: params.stop }),
@@ -168,6 +170,42 @@ describe("ZoryaServer security", () => {
     const response = await server.handle(new Request("http://zorya/auth/ping"));
     expect(response.status).toBe(200);
     expect(await response.json()).toBe("pong");
+  });
+
+  it("module: declared protected routes use central authorization and audit", async () => {
+    const events: string[] = [];
+    const security = fakeSecurity({
+      authorize: async ({ resource }) => {
+        events.push("authorize:" + resource.id);
+        return { allowed: true, reason: "access_role_allow" };
+      },
+      recordAudit: async ({ decision }) => {
+        events.push("audit:" + decision?.reason);
+      },
+      mount: (router) => {
+        router.route({
+          method: "GET",
+          path: "/api/declared-agent/:id",
+          access: {
+            kind: "protected",
+            permission: { resource: "agent", action: "read" },
+            resolveTarget: ({ params }) => ({
+              resource: { kind: "agent", namespaceId: "acme", id: params.id },
+            }),
+          },
+          handler: () => {
+            events.push("handler");
+            return new Response(null, { status: 204 });
+          },
+        });
+      },
+    });
+    const server = new ZoryaServer({ workflows: workflows(), security, logger: quietLogger });
+
+    expect(
+      (await server.handle(new Request("http://zorya/api/declared-agent/agent-1"))).status,
+    ).toBe(204);
+    expect(events).toEqual(["authorize:agent-1", "audit:access_role_allow", "handler"]);
   });
 
   it("module: a rejecting start keeps startup unready", async () => {

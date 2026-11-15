@@ -26,6 +26,49 @@ const mismatchedAccessIsRejected: MismatchedProtectedAccess extends ProtectedRou
 const quietLogger = { error: () => {} };
 
 describe("Router security declarations", () => {
+  it("runs the access guard after target resolution and before the declared handler", async () => {
+    const events: string[] = [];
+    const router = new Router({
+      accessGuard: ({ access }) => {
+        events.push("guard");
+        expect(access.kind).toBe("protected");
+        return new Response("denied", { status: 403 });
+      },
+    }).route({
+      method: "GET",
+      path: "/guarded/:id",
+      access: {
+        kind: "protected",
+        permission: { resource: "agent", action: "read" },
+        resolveTarget: ({ params }) => {
+          events.push("resolve:" + params.id);
+          return { resource: { kind: "agent", namespaceId: "team-a", id: params.id } };
+        },
+      },
+      handler: () => {
+        events.push("handler");
+        return new Response("allowed");
+      },
+    });
+
+    const response = await router.handle(new Request("http://zorya.test/guarded/agent-1"));
+    expect(response.status).toBe(403);
+    expect(events).toEqual(["resolve:agent-1", "guard"]);
+  });
+
+  it("does not run the access guard for uncovered legacy routes", async () => {
+    let guardCalls = 0;
+    const router = new Router({
+      accessGuard: () => {
+        guardCalls++;
+        return new Response(null, { status: 403 });
+      },
+    }).get("/legacy", () => new Response("legacy"));
+
+    expect((await router.handle(new Request("http://zorya.test/legacy"))).status).toBe(200);
+    expect(guardCalls).toBe(0);
+  });
+
   it("keeps legacy registrations visible in deterministic coverage reports", () => {
     const router = new Router()
       .post("/z", () => Response.json({}))

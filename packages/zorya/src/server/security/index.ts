@@ -10,6 +10,10 @@ export {
   setRequestSecurityContext,
 } from "./request-principal.ts";
 export {
+  createSecurityRouteAccessGuard,
+  type SecurityRouteAccessGuardConfig,
+} from "./route-access-guard.ts";
+export {
   OPERATOR_PRINCIPAL,
   ORG_WIDE_NAMESPACE,
   SECURITY_ACTIONS,

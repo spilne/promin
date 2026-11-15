@@ -88,6 +88,17 @@ export interface RouteDefinition {
   readonly handler: DeclaredRouteHandler;
 }
 
+export interface RouteAccessGuardRequest {
+  readonly request: Request;
+  readonly params: Readonly<Record<string, string>>;
+  readonly access: ResolvedRouteAccess;
+}
+
+/** Adapter-neutral admission hook run after target resolution and before a declared handler. */
+export type RouteAccessGuard = (
+  request: RouteAccessGuardRequest,
+) => Response | undefined | Promise<Response | undefined>;
+
 interface CompiledRoute {
   method: string;
   pattern: string;
@@ -105,6 +116,8 @@ export interface RouterErrorLogger {
 export interface RouterConfig {
   /** Where unexpected handler errors are reported. Default: console. */
   logger?: RouterErrorLogger;
+  /** Admission policy for routes carrying explicit access metadata. */
+  accessGuard?: RouteAccessGuard;
 }
 
 /**
@@ -140,6 +153,7 @@ export interface ApiIssue {
 export class Router {
   private readonly routes: CompiledRoute[] = [];
   private readonly logger: RouterErrorLogger;
+  private readonly accessGuard?: RouteAccessGuard;
   private staticHandler?: Handler | DeclaredRouteHandler;
   private staticAccess?: RouteAccess;
   private notFoundHandler: Handler | DeclaredRouteHandler = () => notFound();
@@ -148,6 +162,7 @@ export class Router {
 
   constructor(config: RouterConfig = {}) {
     this.logger = config.logger ?? console;
+    this.accessGuard = config.accessGuard;
   }
 
   /**
@@ -289,6 +304,8 @@ export class Router {
         request: req,
         params,
       });
+      const denied = await this.guardDeclaredRoute({ request: req, params, access });
+      if (denied) return denied;
       return await (r.handler as DeclaredRouteHandler)(req, params, access);
     }
     if (allowed.size > 0) return methodNotAllowed([...allowed]);
@@ -302,6 +319,8 @@ export class Router {
         request: req,
         params,
       });
+      const denied = await this.guardDeclaredRoute({ request: req, params, access });
+      if (denied) return denied;
       return await (this.staticHandler as DeclaredRouteHandler)(req, params, access);
     }
     const params = emptyRouteParams();
@@ -313,7 +332,18 @@ export class Router {
       request: req,
       params,
     });
+    const denied = await this.guardDeclaredRoute({ request: req, params, access });
+    if (denied) return denied;
     return await (this.notFoundHandler as DeclaredRouteHandler)(req, params, access);
+  }
+
+  private async guardDeclaredRoute(
+    request: RouteAccessGuardRequest,
+  ): Promise<Response | undefined> {
+    if (!this.accessGuard) return undefined;
+    const result = await this.accessGuard(request);
+    if (result === undefined || result instanceof Response) return result;
+    throw new TypeError("Route access guard must return a Response or undefined");
   }
 }
 

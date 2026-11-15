@@ -86,7 +86,12 @@ import { mountSchedules } from "./mount/mount-schedules.ts";
 import { mountStatic } from "./mount/mount-static.ts";
 import { mountWorkflowBuilder } from "./mount/mount-workflow-builder.ts";
 import { ZoryaServerBuilder } from "./server-builder.ts";
-import { createApiKeySecurity, setRequestPrincipal, type ZoryaSecurity } from "./security/index.ts";
+import {
+  createApiKeySecurity,
+  createSecurityRouteAccessGuard,
+  setRequestPrincipal,
+  type ZoryaSecurity,
+} from "./security/index.ts";
 
 export class ZoryaServer {
   readonly workflows: ZoryaWorkflows;
@@ -337,7 +342,14 @@ export class ZoryaServer {
       ...(config.sseIntervalMs !== undefined && { intervalMs: config.sseIntervalMs }),
     });
 
-    const router = (this.router = new Router({ logger: this.logger }));
+    const router = (this.router = new Router({
+      logger: this.logger,
+      accessGuard: createSecurityRouteAccessGuard({
+        security: this.security,
+        clock,
+        logger: this.logger,
+      }),
+    }));
     this.security.mount?.(router);
     mountProbes({
       router,

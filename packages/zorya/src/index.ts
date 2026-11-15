@@ -156,6 +156,7 @@ export {
   SECURITY_ACTIONS,
   WORKER_PRINCIPAL,
   createApiKeySecurity,
+  createSecurityRouteAccessGuard,
   principalRef,
   requestPrincipal,
   requestSecurityContext,
@@ -188,6 +189,7 @@ export {
   type SecurityPlane,
   type SecurityResourceKind,
   type SecurityResourceRef,
+  type SecurityRouteAccessGuardConfig,
   type ZoryaSecurity,
 } from "./server/security/index.ts";
 export { RunEventBus } from "./server/run-event-bus.ts";
@@ -211,6 +213,8 @@ export {
   type ResolvedProtectedRouteAccess,
   type ResolvedRouteAccess,
   type RouteAccess,
+  type RouteAccessGuard,
+  type RouteAccessGuardRequest,
   type RouteDefinition,
   type RouteTarget,
   type RouteTargetRequest,
