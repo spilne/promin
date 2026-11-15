@@ -109,6 +109,10 @@ export interface WorkflowOrchestrationContext {
   readonly tracer?: WorkflowTracer;
   /** Host admission check inherited by drains and child workflows. */
   readonly runAdmissionGuard?: WorkflowRunAdmissionGuard;
+  /** Exact workflow identities explicitly exempted by their trusted owner. */
+  readonly runAdmissionExemptions?: WeakSet<Workflow<unknown, unknown>>;
+  /** Whether this exact definition was explicitly exempted. */
+  readonly runAdmissionExempt?: boolean;
 }
 
 /**
@@ -137,6 +141,8 @@ export interface OrchestrationRuntime {
   readonly tracer?: WorkflowTracer;
   /** Host admission check inherited by drains and child workflows. */
   readonly runAdmissionGuard?: WorkflowRunAdmissionGuard;
+  /** Exact workflow identities explicitly exempted by their trusted owner. */
+  readonly runAdmissionExemptions?: WeakSet<Workflow<unknown, unknown>>;
 }
 
 /**
@@ -192,6 +198,10 @@ export function orchestrationContextFor(params: {
     ...(runtime.runAdmissionGuard !== undefined && {
       runAdmissionGuard: runtime.runAdmissionGuard,
     }),
+    ...(runtime.runAdmissionExemptions !== undefined && {
+      runAdmissionExemptions: runtime.runAdmissionExemptions,
+      runAdmissionExempt: runtime.runAdmissionExemptions.has(workflow),
+    }),
   };
 }
 
@@ -211,6 +221,9 @@ export function runtimeOf(ctx: WorkflowOrchestrationContext): OrchestrationRunti
     ...(ctx.tracer !== undefined && { tracer: ctx.tracer }),
     ...(ctx.runAdmissionGuard !== undefined && {
       runAdmissionGuard: ctx.runAdmissionGuard,
+    }),
+    ...(ctx.runAdmissionExemptions !== undefined && {
+      runAdmissionExemptions: ctx.runAdmissionExemptions,
     }),
   };
 }

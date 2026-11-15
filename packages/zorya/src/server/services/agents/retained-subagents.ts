@@ -178,7 +178,10 @@ export class RetainedSubagents {
         }
       })
       .build();
-    config.workflows.define(this.definition as Workflow<unknown, unknown>, { internal: true });
+    config.workflows.define(this.definition as Workflow<unknown, unknown>, {
+      internal: true,
+      admissionExempt: true,
+    });
   }
 
   async start(): Promise<void> {

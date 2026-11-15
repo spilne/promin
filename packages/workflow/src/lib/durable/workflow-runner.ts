@@ -374,6 +374,13 @@ export interface WorkflowRunner {
   /** Storage the runner writes workflow state to. */
   readonly storage: WorkflowStorage;
   /**
+   * Exempt one exact, host-owned workflow object from the admission hook.
+   * The exemption is identity-based: names, metadata and cloned/mutated
+   * definitions cannot select it. Intended only for internal workflows
+   * whose owner supplies an equivalent security boundary.
+   */
+  exemptInternalWorkflowFromRunAdmission?(workflow: Workflow<unknown, unknown>): void;
+  /**
    * Install or replace the host admission guard. Optional for custom runner
    * implementations; hosts that require guarded execution must refuse a
    * runner that does not expose it.
@@ -523,6 +530,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   private readonly defaultStepTimeoutMs?: number | null;
   private readonly tracer?: WorkflowTracer;
   private runAdmissionGuard?: WorkflowRunAdmissionGuard;
+  private readonly runAdmissionExemptions = new WeakSet<Workflow<unknown, unknown>>();
 
   constructor(config: WorkflowRunnerConfig) {
     this.storage = config.storage;
@@ -543,6 +551,10 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
 
   setRunAdmissionGuard(guard: WorkflowRunAdmissionGuard | undefined): void {
     this.runAdmissionGuard = guard;
+  }
+
+  exemptInternalWorkflowFromRunAdmission(workflow: Workflow<unknown, unknown>): void {
+    this.runAdmissionExemptions.add(workflow);
   }
 
   run<Output, E extends TaggedError = never>(
@@ -893,6 +905,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
         ...(this.runAdmissionGuard !== undefined && {
           runAdmissionGuard: this.runAdmissionGuard,
         }),
+        runAdmissionExemptions: this.runAdmissionExemptions,
         ...(this.defaultStepTimeoutMs !== undefined && {
           defaultStepTimeoutMs: this.defaultStepTimeoutMs,
         }),

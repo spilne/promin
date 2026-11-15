@@ -954,7 +954,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       }),
       ...(params.onApprovalRequired && { onApprovalRequired: params.onApprovalRequired }),
     };
-    return buildTurnWorkflow<TOutput>({
+    const workflow = buildTurnWorkflow<TOutput>({
       engine,
       bus: params.bus,
       scope: {
@@ -966,6 +966,8 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       ...(params.approvalIndex && { approvalIndex: params.approvalIndex }),
       ...(params.usageRecorder && { usageRecorder: params.usageRecorder }),
     });
+    this.config.runner.exemptInternalWorkflowFromRunAdmission?.(workflow);
+    return workflow;
   }
 
   /**
@@ -1702,6 +1704,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
         }),
       }),
     });
+    this.deps.runner.exemptInternalWorkflowFromRunAdmission?.(wf);
     return (await this.deps.runner.run({ workflow: wf, workflowId, input })) as AgentResult;
   }
 

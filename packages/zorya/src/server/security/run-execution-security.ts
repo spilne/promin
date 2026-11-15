@@ -1,4 +1,6 @@
 import {
+  hasCapability,
+  owesCancelRollback,
   type FenceGuard,
   type RunPrincipalRef,
   type RunSecurityContext,
@@ -132,10 +134,26 @@ export class RunExecutionSecurity {
     if (!runContext) {
       this.report("missing durable security context", params.state.workflowId);
     }
+    // A cancelled run that still owes rollback is already terminal, so a
+    // plain failWorkflow would be ignored. Reopen only its storage phase,
+    // execute no compensation, then replace the cancellation outcome with
+    // the stable security block and mark the cancel settled.
+    const replacesOwedCancel =
+      owesCancelRollback(params.state) && hasCapability(this.storage, "compensationLedger");
+    if (replacesOwedCancel) {
+      await this.storage.beginCompensation({
+        workflowId: params.state.workflowId,
+        error: RUN_SECURITY_BLOCKED_MESSAGE,
+        errorTag: RUN_SECURITY_BLOCKED_ERROR_TAG,
+        origin: "cancel",
+        ...(params.guard !== undefined && { guard: params.guard }),
+      });
+    }
     await this.storage.failWorkflow({
       workflowId: params.state.workflowId,
       error: RUN_SECURITY_BLOCKED_MESSAGE,
       errorTag: RUN_SECURITY_BLOCKED_ERROR_TAG,
+      ...(replacesOwedCancel && { compensationOrigin: "cancel-settled" as const }),
       ...(params.guard !== undefined && { guard: params.guard }),
     });
     return false;
@@ -153,12 +171,10 @@ export class RunExecutionSecurity {
   }): Promise<boolean> {
     const actorRef = toPrincipalRef(params.runContext.actor);
     const effectiveRef = toPrincipalRef(params.runContext.effective ?? params.runContext.actor);
-    let actor: Principal | undefined;
-    try {
-      actor = await this.security.resolvePrincipal(actorRef);
-    } catch (error) {
-      this.report("principal resolution failed", params.workflowId, error);
-    }
+    // Availability failures are operational, not policy denials. Let them
+    // propagate so a queued claim is released or local recovery retries;
+    // only an explicit, validated deny decision becomes terminal.
+    const actor: Principal | undefined = await this.security.resolvePrincipal(actorRef);
     const context = snapshotSecurityContext({
       actor: actor ?? unresolvedPrincipal(actorRef),
       effective: effectiveRef,
@@ -170,15 +186,9 @@ export class RunExecutionSecurity {
       id: params.workflowId,
     });
 
-    let decision: AuthorizationDecision;
-    try {
-      decision = snapshotAuthorizationDecision(
-        await this.security.authorize({ context, permission, resource } as AuthorizationRequest),
-      );
-    } catch (error) {
-      this.report("authorization failed", params.workflowId, error);
-      decision = Object.freeze({ allowed: false, reason: "permission_denied" });
-    }
+    const decision: AuthorizationDecision = snapshotAuthorizationDecision(
+      await this.security.authorize({ context, permission, resource } as AuthorizationRequest),
+    );
 
     const event: SecurityAuditEvent = Object.freeze({
       event: "run.execution.authorization",
@@ -190,13 +200,7 @@ export class RunExecutionSecurity {
       decision,
       metadata: Object.freeze({ source: params.source }),
     });
-    try {
-      await this.security.recordAudit(event);
-    } catch (error) {
-      this.report("audit failed", params.workflowId, error);
-      // Allowed execution without its audit record is a fail-open.
-      return false;
-    }
+    await this.security.recordAudit(event);
     return decision.allowed;
   }
 

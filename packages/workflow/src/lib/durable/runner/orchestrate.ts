@@ -726,6 +726,11 @@ async function runCycleBody(cycle: CycleParams & { phase: CyclePhase }): Promise
       // died) still owes its cancel: finish the rollback, or settle it when
       // the definition asks for none, and reject with the cancel.
       if (owesCancelRollback(state) && hasCapability(ctx.storage, "compensationLedger")) {
+        // Compensation callbacks are user code too. Reauthorize before
+        // reopening the cancelled run or executing any rollback handler.
+        if (ctx.runAdmissionGuard && !ctx.runAdmissionExempt) {
+          await ctx.runAdmissionGuard({ state, ...(guard !== undefined && { guard }) });
+        }
         const traceRef =
           ctx.tracer !== undefined ? traceRunStart({ cycle, state, resumedRun: true }) : undefined;
         return settleCancelledRun({
@@ -750,7 +755,7 @@ async function runCycleBody(cycle: CycleParams & { phase: CyclePhase }): Promise
   // and after terminal replay handling, but before any user step executes.
   // The callback runs under this driver's fence and is inherited by drains
   // and children through the orchestration runtime.
-  if (state && ctx.runAdmissionGuard) {
+  if (state && ctx.runAdmissionGuard && !ctx.runAdmissionExempt) {
     await ctx.runAdmissionGuard({ state, ...(guard !== undefined && { guard }) });
   }
 

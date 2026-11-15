@@ -217,20 +217,7 @@ export class LocalWorkflows extends ZoryaWorkflows {
         "LocalWorkflows: configured security requires a runner with setRunAdmissionGuard",
       );
     }
-    this.runner.setRunAdmissionGuard(async (request) => {
-      // A host may share this runner with agent/knowledge internals that are
-      // not owned by this ZoryaWorkflows layer. Those paths gain their own
-      // durable identity in later security slices; do not accidentally
-      // classify them as legacy generic workflow runs here. Any explicitly
-      // secured run (including an inherited child) is always checked.
-      if (
-        request.state.securityContext === undefined &&
-        !Object.hasOwn(this.definitions, request.state.workflowName)
-      ) {
-        return;
-      }
-      await security.admissionGuard(request);
-    });
+    this.runner.setRunAdmissionGuard(security.admissionGuard);
   }
 
   /**
@@ -239,10 +226,21 @@ export class LocalWorkflows extends ZoryaWorkflows {
    * with the promoted version; runs of other versions resolve through the
    * version registry, so register every version a run may need there.
    */
-  define(workflow: Workflow<unknown, unknown>, opts?: { readonly internal?: boolean }): void {
+  define(
+    workflow: Workflow<unknown, unknown>,
+    opts?: { readonly internal?: boolean; readonly admissionExempt?: boolean },
+  ): void {
     (this.definitions as Record<string, Workflow<unknown, unknown>>)[workflow.name] = workflow;
     if (opts?.internal === true) this.internalNames.add(workflow.name);
     else this.internalNames.delete(workflow.name);
+    if (opts?.admissionExempt === true) {
+      if (!this.runner.exemptInternalWorkflowFromRunAdmission) {
+        throw new Error(
+          "LocalWorkflows: admission-exempt internal workflows require a compatible runner",
+        );
+      }
+      this.runner.exemptInternalWorkflowFromRunAdmission(workflow);
+    }
   }
 
   /**

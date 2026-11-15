@@ -83,4 +83,79 @@ describe("WorkflowRunAdmissionGuard", () => {
       errorTag: "HostBlocked",
     });
   });
+
+  it("retries a run safely when admission infrastructure is temporarily unavailable", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    let unavailable = true;
+    let bodies = 0;
+    const runner = createWorkflowRunner({
+      storage,
+      runAdmissionGuard: () => {
+        if (unavailable) throw new Error("directory unavailable");
+      },
+    });
+    const secured = workflow<void>({ name: "retry-admission" })
+      .step("body", () => {
+        bodies++;
+        return succeed(undefined);
+      })
+      .build();
+
+    await expect(
+      runner.run({ workflow: secured, workflowId: "retry-admission", input: undefined }),
+    ).rejects.toThrow("directory unavailable");
+    expect((await storage.loadWorkflow("retry-admission"))?.status).toBe("pending");
+    expect(bodies).toBe(0);
+
+    unavailable = false;
+    await expect(
+      runner.run({ workflow: secured, workflowId: "retry-admission", input: undefined }),
+    ).resolves.toBeUndefined();
+    expect(bodies).toBe(1);
+  });
+
+  it("exempts only the exact workflow object explicitly supplied by its owner", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const checked: string[] = [];
+    const bodies: string[] = [];
+    const runner = createWorkflowRunner({
+      storage,
+      runAdmissionGuard: async ({ state, guard }) => {
+        checked.push(state.workflowId);
+        await storage.failWorkflow({
+          workflowId: state.workflowId,
+          error: "blocked",
+          errorTag: "HostBlocked",
+          ...(guard !== undefined && { guard }),
+        });
+        throw new Error("blocked");
+      },
+    });
+    const owned = workflow<void>({ name: "internal", metadata: { internal: true } })
+      .step("body", () => void bodies.push("owned"))
+      .build();
+    const sameDefinitionFields = workflow<void>({
+      name: "internal",
+      metadata: { internal: true },
+    })
+      .step("body", () => void bodies.push("clone"))
+      .build();
+    runner.exemptInternalWorkflowFromRunAdmission?.(owned);
+
+    await expect(
+      runner.run({ workflow: owned, workflowId: "owned-internal", input: undefined }),
+    ).resolves.toBeUndefined();
+    await runner.runSafe({
+      workflow: sameDefinitionFields,
+      workflowId: "forged-internal",
+      input: undefined,
+    });
+
+    expect(bodies).toEqual(["owned"]);
+    expect(checked).toEqual(["forged-internal"]);
+    expect(await storage.loadWorkflow("forged-internal")).toMatchObject({
+      status: "failed",
+      errorTag: "HostBlocked",
+    });
+  });
 });

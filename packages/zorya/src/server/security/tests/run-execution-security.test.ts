@@ -1,10 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import {
+  createWorkflowRunner,
   InMemoryWorkflowStorage,
   SystemWallClock,
+  workflow,
   type RunSecurityContext,
   type WorkflowState,
 } from "@promin/workflow";
+import { succeed } from "@spilne/perfect-core";
 import {
   RUN_SECURITY_BLOCKED_ERROR_TAG,
   RunExecutionSecurity,
@@ -144,21 +147,120 @@ describe("RunExecutionSecurity", () => {
     });
   });
 
-  it("fails an allowed run closed when its audit record cannot be persisted", async () => {
+  it("propagates a temporary principal-directory failure without terminalizing the run", async () => {
     const storage = new InMemoryWorkflowStorage();
     const guard = new RunExecutionSecurity({
       storage,
-      security: security({ audit: async () => Promise.reject(new Error("audit down")) }),
+      security: {
+        ...security(),
+        resolvePrincipal: async () => {
+          throw new Error("directory down");
+        },
+      },
+      clock: SystemWallClock,
+      logger: quietLogger,
+      legacyPrincipal: principalRef(OPERATOR_PRINCIPAL),
+    });
+    const state = await storedRun({ storage, id: "directory-down" });
+
+    await expect(guard.admissionGuard({ state })).rejects.toThrow("directory down");
+    expect((await storage.loadWorkflow("directory-down"))?.status).toBe("pending");
+  });
+
+  it("propagates a temporary authorizer failure without terminalizing the run", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const guard = new RunExecutionSecurity({
+      storage,
+      security: {
+        ...security(),
+        authorize: async () => {
+          throw new Error("policy down");
+        },
+      },
+      clock: SystemWallClock,
+      logger: quietLogger,
+      legacyPrincipal: principalRef(OPERATOR_PRINCIPAL),
+    });
+    const state = await storedRun({ storage, id: "policy-down" });
+
+    await expect(guard.admissionGuard({ state })).rejects.toThrow("policy down");
+    expect((await storage.loadWorkflow("policy-down"))?.status).toBe("pending");
+  });
+
+  it("retries safely after a temporary audit failure instead of recording a denial", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    let auditDown = true;
+    const guard = new RunExecutionSecurity({
+      storage,
+      security: security({
+        audit: async () => {
+          if (auditDown) throw new Error("audit down");
+        },
+      }),
       clock: SystemWallClock,
       logger: quietLogger,
       legacyPrincipal: principalRef(OPERATOR_PRINCIPAL),
     });
     const state = await storedRun({ storage, id: "audit-down" });
 
-    await expect(guard.admissionGuard({ state })).rejects.toBeInstanceOf(RunSecurityBlockedError);
-    expect(await storage.loadWorkflow("audit-down")).toMatchObject({
+    await expect(guard.admissionGuard({ state })).rejects.toThrow("audit down");
+    expect((await storage.loadWorkflow("audit-down"))?.status).toBe("pending");
+
+    auditDown = false;
+    await expect(guard.admissionGuard({ state })).resolves.toBeUndefined();
+  });
+
+  it("blocks an owed cancelled recovery before any compensation user code runs", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const actor = principal({ kind: "service-account", id: "cancelled-owner" });
+    const guard = new RunExecutionSecurity({
+      storage,
+      security: security({
+        principals: new Map([["service-account:cancelled-owner", actor]]),
+        allowed: () => false,
+      }),
+      clock: SystemWallClock,
+      logger: quietLogger,
+    });
+    let compensations = 0;
+    const secured = workflow<void>({
+      name: "cancelled-recovery",
+      compensate: { onCancel: "rollback" },
+    })
+      .step("effect", () => succeed("done"), { compensate: async () => void compensations++ })
+      .build();
+    await storage.createWorkflow({
+      workflowId: "cancelled-recovery",
+      workflowName: secured.name,
+      input: undefined,
+      securityContext: { actor: principalRef(actor) },
+    });
+    await storage.saveStepResult({
+      workflowId: "cancelled-recovery",
+      stepName: "effect",
+      result: "done",
+      durationMs: 1,
+      startedAt: new Date(),
+    });
+    await storage.suspendWorkflow({
+      workflowId: "cancelled-recovery",
+      stepName: "wait",
+      stepUpdate: { status: "waiting", stepType: "signal", signalName: "resume" },
+    });
+    await storage.cancelWorkflow({ workflowId: "cancelled-recovery" });
+    const runner = createWorkflowRunner({ storage, runAdmissionGuard: guard.admissionGuard });
+
+    await runner.runSafe({
+      workflow: secured,
+      workflowId: "cancelled-recovery",
+      input: undefined,
+    });
+
+    expect(compensations).toBe(0);
+    expect(await storage.loadWorkflow("cancelled-recovery")).toMatchObject({
       status: "failed",
       errorTag: RUN_SECURITY_BLOCKED_ERROR_TAG,
+      compensationOrigin: "cancel-settled",
     });
   });
 });
