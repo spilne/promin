@@ -153,6 +153,197 @@ describe("Router security declarations", () => {
     expect(events).toEqual(["resolve"]);
   });
 
+  it("snapshots stateful access and permission getters exactly once", async () => {
+    const reads = { kind: 0, permission: 0, resource: 0, action: 0, resolver: 0 };
+    let goodResolverCalls = 0;
+    const permission = {
+      get resource() {
+        reads.resource++;
+        return reads.resource === 1 ? "agent" : "knowledge";
+      },
+      get action() {
+        reads.action++;
+        return reads.action === 1 ? "read" : "delete";
+      },
+    };
+    const metadata = {
+      get kind() {
+        reads.kind++;
+        return reads.kind === 1 ? "protected" : "public";
+      },
+      get permission() {
+        reads.permission++;
+        return permission;
+      },
+      get resolveTarget() {
+        reads.resolver++;
+        if (reads.resolver !== 1) {
+          return () => ({ resource: { kind: "knowledge", namespaceId: "" } });
+        }
+        return () => {
+          goodResolverCalls++;
+          return { resource: { kind: "agent", namespaceId: "team-a", id: "agent-1" } };
+        };
+      },
+    };
+    const router = new Router().route({
+      method: "GET",
+      path: "/stateful-access",
+      access: metadata as unknown as RouteAccess,
+      handler: (_req, _params, access) => {
+        expect(access.kind).toBe("protected");
+        if (access.kind !== "protected") throw new Error("unreachable");
+        expect(access.permission).toEqual({ resource: "agent", action: "read" });
+        return new Response(null, { status: 204 });
+      },
+    });
+
+    expect(reads).toEqual({ kind: 1, permission: 1, resource: 1, action: 1, resolver: 1 });
+    expect((await router.handle(new Request("http://zorya.test/stateful-access"))).status).toBe(
+      204,
+    );
+    expect(goodResolverCalls).toBe(1);
+
+    let publicKindReads = 0;
+    let purposeReads = 0;
+    const publicMetadata = new Proxy<Record<string, unknown>>(
+      {},
+      {
+        get: (_target, property) => {
+          if (property === "kind") {
+            publicKindReads++;
+            return publicKindReads === 1 ? "public" : "protected";
+          }
+          if (property === "purpose") {
+            purposeReads++;
+            return purposeReads === 1 ? "lifecycle" : "because";
+          }
+          return undefined;
+        },
+      },
+    );
+    const publicRouter = new Router().route({
+      method: "GET",
+      path: "/stateful-public",
+      access: publicMetadata as unknown as RouteAccess,
+      handler: (_req, _params, access) => {
+        expect(access).toEqual({ kind: "public", purpose: "lifecycle" });
+        return new Response(null, { status: 204 });
+      },
+    });
+    expect(publicKindReads).toBe(1);
+    expect(purposeReads).toBe(1);
+    expect(
+      (await publicRouter.handle(new Request("http://zorya.test/stateful-public"))).status,
+    ).toBe(204);
+
+    let badActionReads = 0;
+    expect(() =>
+      new Router().route({
+        method: "GET",
+        path: "/bad-action",
+        access: {
+          kind: "protected",
+          permission: {
+            resource: "agent",
+            get action() {
+              badActionReads++;
+              return badActionReads === 1 ? "delete" : "read";
+            },
+          },
+          resolveTarget: () => ({ resource: { kind: "agent", namespaceId: "team-a" } }),
+        } as unknown as RouteAccess,
+        handler: () => Response.json({}),
+      }),
+    ).toThrow("permission is not in the approved vocabulary");
+    expect(badActionReads).toBe(1);
+  });
+
+  it("snapshots stateful resolved resource fields before validation", async () => {
+    const reads = { resource: 0, kind: 0, namespace: 0, id: 0, value: 0 };
+    const resource = {
+      get kind() {
+        reads.kind++;
+        return reads.kind === 1 ? "agent" : "knowledge";
+      },
+      get namespaceId() {
+        reads.namespace++;
+        return reads.namespace === 1 ? "team-a" : "";
+      },
+      get id() {
+        reads.id++;
+        return reads.id === 1 ? "agent-1" : "";
+      },
+    };
+    const target = {
+      get resource() {
+        reads.resource++;
+        return resource;
+      },
+      get value() {
+        reads.value++;
+        return reads.value === 1 ? "safe" : "changed";
+      },
+    };
+    const router = new Router().route({
+      method: "GET",
+      path: "/stateful-target",
+      access: {
+        kind: "protected",
+        permission: { resource: "agent", action: "read" },
+        resolveTarget: () => target as never,
+      },
+      handler: (_req, _params, access) => {
+        expect(access.kind).toBe("protected");
+        if (access.kind !== "protected") throw new Error("unreachable");
+        expect(access.target).toEqual({
+          resource: { kind: "agent", namespaceId: "team-a", id: "agent-1" },
+          value: "safe",
+        });
+        return new Response(null, { status: 204 });
+      },
+    });
+
+    expect((await router.handle(new Request("http://zorya.test/stateful-target"))).status).toBe(
+      204,
+    );
+    expect(reads).toEqual({ resource: 1, kind: 1, namespace: 1, id: 1, value: 1 });
+
+    for (const resourceWithBadFirstSnapshot of [
+      {
+        get kind() {
+          return "knowledge";
+        },
+        namespaceId: "team-a",
+      },
+      {
+        kind: "agent",
+        get namespaceId() {
+          return "";
+        },
+      },
+    ]) {
+      let handled = false;
+      const rejecting = new Router({ logger: quietLogger }).route({
+        method: "GET",
+        path: "/bad-target",
+        access: {
+          kind: "protected",
+          permission: { resource: "agent", action: "read" },
+          resolveTarget: () => ({ resource: resourceWithBadFirstSnapshot }) as never,
+        },
+        handler: () => {
+          handled = true;
+          return Response.json({});
+        },
+      });
+      expect((await rejecting.handle(new Request("http://zorya.test/bad-target"))).status).toBe(
+        500,
+      );
+      expect(handled).toBeFalse();
+    }
+  });
+
   it("fails closed before the handler when a resolver returns the wrong resource kind", async () => {
     let handled = false;
     const mismatched = {

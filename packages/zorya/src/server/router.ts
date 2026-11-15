@@ -155,12 +155,12 @@ export class Router {
    * New production routes should use this API.
    */
   route(definition: RouteDefinition): this {
-    validateRouteDefinition(definition);
+    const normalized = normalizeRouteDefinition(definition);
     return this.compile({
-      method: definition.method,
-      pattern: definition.path,
-      handler: definition.handler,
-      access: normalizeRouteAccess(definition.access),
+      method: normalized.method,
+      pattern: normalized.path,
+      handler: normalized.handler,
+      access: normalized.access,
     });
   }
 
@@ -315,74 +315,84 @@ export class Router {
   }
 }
 
-function validateRouteDefinition(definition: RouteDefinition): void {
+function normalizeRouteDefinition(definition: RouteDefinition): RouteDefinition {
   if (!definition || typeof definition !== "object") {
     throw new TypeError("Route definition must be an object");
   }
-  if (typeof definition.method !== "string" || definition.method.length === 0) {
+  const source = definition as unknown as Record<string, unknown>;
+  const method = source.method;
+  const path = source.path;
+  const handler = source.handler;
+  const access = source.access;
+  if (typeof method !== "string" || method.length === 0) {
     throw new TypeError("Route definition requires a method");
   }
-  if (typeof definition.path !== "string" || !definition.path.startsWith("/")) {
+  if (typeof path !== "string" || !path.startsWith("/")) {
     throw new TypeError("Route definition requires an absolute path");
   }
-  if (typeof definition.handler !== "function") {
+  if (typeof handler !== "function") {
     throw new TypeError("Route definition requires a handler");
   }
-  validateRouteAccess(definition.access);
-}
-
-function validateRouteAccess(access: RouteAccess): void {
-  if (!access || typeof access !== "object" || typeof access.kind !== "string") {
-    throw new TypeError("Route definition requires access metadata");
-  }
-  if (access.kind === "protected") {
-    const permission = (access as Partial<ProtectedRouteAccess>).permission;
-    if (!permission || typeof permission !== "object") {
-      throw new TypeError("Protected route requires a permission");
-    }
-    const actions = Object.hasOwn(SECURITY_ACTIONS, permission.resource)
-      ? SECURITY_ACTIONS[permission.resource as SecurityResourceKind]
-      : undefined;
-    if (!actions?.includes(permission.action as never)) {
-      throw new TypeError("Protected route permission is not in the approved vocabulary");
-    }
-    if (typeof (access as Partial<ProtectedRouteAccess>).resolveTarget !== "function") {
-      throw new TypeError("Protected route requires a target resolver");
-    }
-    return;
-  }
-  if (access.kind === "public") {
-    if (!(["lifecycle", "login", "static-ui", "not-found"] as const).includes(access.purpose)) {
-      throw new TypeError("Public route requires an approved purpose");
-    }
-    return;
-  }
-  if (
-    access.kind !== "worker" &&
-    access.kind !== "signed-webhook" &&
-    access.kind !== "signal-token"
-  ) {
-    throw new TypeError("Unknown route access kind");
-  }
+  return Object.freeze({
+    method,
+    path,
+    handler: handler as DeclaredRouteHandler,
+    access: normalizeRouteAccess(access as RouteAccess),
+  });
 }
 
 function normalizeRouteAccess(access: RouteAccess): RouteAccess {
-  validateRouteAccess(access);
-  if (access.kind === "protected") {
-    const permission = Object.freeze({
-      resource: access.permission.resource,
-      action: access.permission.action,
-    });
+  if (!access || typeof access !== "object") {
+    throw new TypeError("Route definition requires access metadata");
+  }
+  const source = access as unknown as Record<string, unknown>;
+  const kind = source.kind;
+  if (typeof kind !== "string") {
+    throw new TypeError("Route definition requires access metadata");
+  }
+  if (kind === "protected") {
+    const permissionSource = source.permission;
+    const resolveTarget = source.resolveTarget;
+    if (!permissionSource || typeof permissionSource !== "object") {
+      throw new TypeError("Protected route requires a permission");
+    }
+    const permissionRecord = permissionSource as Record<string, unknown>;
+    const resource = permissionRecord.resource;
+    const action = permissionRecord.action;
+    const permission = Object.freeze({ resource, action });
+    const actions =
+      typeof resource === "string" && Object.hasOwn(SECURITY_ACTIONS, resource)
+        ? SECURITY_ACTIONS[resource as SecurityResourceKind]
+        : undefined;
+    if (!actions?.includes(action as never)) {
+      throw new TypeError("Protected route permission is not in the approved vocabulary");
+    }
+    if (typeof resolveTarget !== "function") {
+      throw new TypeError("Protected route requires a target resolver");
+    }
     return Object.freeze({
-      kind: "protected",
+      kind,
       permission,
-      resolveTarget: access.resolveTarget,
+      resolveTarget: resolveTarget as ProtectedRouteAccess["resolveTarget"],
     }) as ProtectedRouteAccess;
   }
-  if (access.kind === "public") {
-    return Object.freeze({ kind: "public", purpose: access.purpose });
+  if (kind === "public") {
+    const purpose = source.purpose;
+    const normalized = Object.freeze({ kind, purpose });
+    if (
+      !(["lifecycle", "login", "static-ui", "not-found"] as ReadonlyArray<unknown>).includes(
+        purpose,
+      )
+    ) {
+      throw new TypeError("Public route requires an approved purpose");
+    }
+    return normalized as RouteAccess;
   }
-  return Object.freeze({ kind: access.kind });
+  const normalized = Object.freeze({ kind });
+  if (kind !== "worker" && kind !== "signed-webhook" && kind !== "signal-token") {
+    throw new TypeError("Unknown route access kind");
+  }
+  return normalized as RouteAccess;
 }
 
 async function resolveRouteAccess(params: {
@@ -395,26 +405,38 @@ async function resolveRouteAccess(params: {
     request: params.request,
     params: params.params,
   });
-  const resource = target?.resource;
+  if (!target || typeof target !== "object") {
+    throw new Error("Protected route target does not match its permission");
+  }
+  const targetRecord = target as unknown as Record<string, unknown>;
+  const resourceSource = targetRecord.resource;
+  const value = targetRecord.value;
+  if (!resourceSource || typeof resourceSource !== "object") {
+    throw new Error("Protected route target does not match its permission");
+  }
+  const resourceRecord = resourceSource as Record<string, unknown>;
+  const kind = resourceRecord.kind;
+  const namespaceId = resourceRecord.namespaceId;
+  const id = resourceRecord.id;
+  const resourceSnapshot = { kind, namespaceId, id };
+  const targetSnapshot = { resource: resourceSnapshot, value };
   if (
-    !target ||
-    typeof target !== "object" ||
-    !resource ||
-    resource.kind !== params.access.permission.resource ||
-    typeof resource.namespaceId !== "string" ||
-    resource.namespaceId.length === 0 ||
-    (resource.id !== undefined && (typeof resource.id !== "string" || resource.id.length === 0))
+    resourceSnapshot.kind !== params.access.permission.resource ||
+    typeof resourceSnapshot.namespaceId !== "string" ||
+    resourceSnapshot.namespaceId.length === 0 ||
+    (resourceSnapshot.id !== undefined &&
+      (typeof resourceSnapshot.id !== "string" || resourceSnapshot.id.length === 0))
   ) {
     throw new Error("Protected route target does not match its permission");
   }
   const normalizedResource = Object.freeze({
-    kind: resource.kind,
-    namespaceId: resource.namespaceId,
-    ...(resource.id !== undefined && { id: resource.id }),
+    kind: resourceSnapshot.kind,
+    namespaceId: resourceSnapshot.namespaceId,
+    ...(resourceSnapshot.id !== undefined && { id: resourceSnapshot.id }),
   });
   const normalizedTarget = Object.freeze({
     resource: normalizedResource,
-    ...(Object.hasOwn(target, "value") && { value: target.value }),
+    ...(targetSnapshot.value !== undefined && { value: targetSnapshot.value }),
   });
   return Object.freeze({
     kind: "protected",
