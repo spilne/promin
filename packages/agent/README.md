@@ -539,13 +539,15 @@ undoes an operator's promote). With `sync` they remove only versions they
 wrote — never an operator's — and nothing after a scan that could not read
 every file (an empty, unparsable or misnamed file is a scan error).
 
-Agentic DAGs (`createDagWorkflow`) run each node the same way, as a child run
-`<dag run>.node-<id>`. A run names a registered DAG (`{ dagId, version,
-initialInput, scope }`) and reads the recipe from the `DagRegistry` in its first
-journaled step. A node starts as soon as its own upstream nodes have settled; a
-node failing with `onError: "abort"` stops the running nodes and starts no new
-ones. Node turns never suspend on approvals: an approval-gated tool call is
-refused with "requires approval; not available in DAG runs". Register the DAG workflow once at boot under its fixed name
+Agentic DAGs (`createDagWorkflow`) give every node a required `kind`; agent nodes
+run as child runs named `<dag run>.node-<id>`. A run names a registered DAG
+(`{ dagId, version, initialInput, scope }`) and reads the recipe from the
+`DagRegistry` in its first journaled step. A node starts as soon as its own
+upstream nodes have settled, and the result reports each node's spend and
+duration in `nodeStats`. A node failing with `onError: "abort"` stops the running
+nodes and starts no new ones. Node turns never suspend on approvals: an
+approval-gated tool call is refused with "requires approval; not available in
+DAG runs". Register the DAG workflow once at boot under its fixed name
 (`DAG_WORKFLOW_NAME`) so recovery resumes a run after a restart.
 
 ---

@@ -1001,6 +1001,7 @@ export type {
   RegisterDagInput,
   DagRunScope,
   DagNode,
+  DagNodeStats,
   AgentNode,
   NodeBase,
   DagEdge,
@@ -1008,6 +1009,9 @@ export type {
   Condition,
   ConditionScalar,
 } from "./dag/types.ts";
+export { childRunId, nodeKey } from "./dag/runners/env.ts";
+export type { AttemptOutcome, AttemptParams, NodeRunEnv, RunAttempt } from "./dag/runners/env.ts";
+export { runAgentAttempt } from "./dag/runners/agent-attempt.ts";
 export { createDagWorkflow, DAG_WORKFLOW_NAME, dagNodeRunId } from "./dag/durable-executor.ts";
 export type {
   DurableDagInput,

@@ -14,6 +14,7 @@ import type {
   TriggerRunRequest,
   TriggerRunResponse,
 } from "../../server/api-types.ts";
+import type { DagNodeStats } from "@promin/agent";
 import type {
   ScheduleCreateRequest,
   ScheduleEmitResponse,
@@ -1689,6 +1690,7 @@ export interface DagRunResultDto {
     nodeOutputs: Record<string, unknown>;
     errors: Record<string, string>;
     skipped: string[];
+    nodeStats?: Record<string, DagNodeStats>;
   };
 }
 

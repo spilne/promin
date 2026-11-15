@@ -1,4 +1,5 @@
 import type { Agent, AgentScope } from "../agent/types.ts";
+import type { BudgetUsage } from "../budget/budget.ts";
 import type {
   RegisterVersionInput,
   Versioned,
@@ -79,6 +80,16 @@ export interface AgentNode extends NodeBase {
 }
 
 export type DagNode = AgentNode;
+
+/** Durable accounting and timing for one settled DAG node. */
+export interface DagNodeStats {
+  readonly spend: BudgetUsage;
+  readonly durationMs: number;
+  readonly items?: number;
+  readonly failedItems?: number;
+  readonly iterations?: number;
+  readonly attempts?: number;
+}
 
 export interface DagEdge {
   readonly from: string;

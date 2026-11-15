@@ -49,86 +49,50 @@
 // ---------------------------------------------------------------------------
 
 import {
-  ChildWorkflowGoneError,
+  SystemWallClock,
   workflow,
   type ActivityYield,
+  type WallClock,
   type Workflow,
 } from "@promin/workflow";
-import type { AgentInput, AgentResult } from "../agent-action.ts";
-import type { Agent, AgentScope } from "../agent/types.ts";
 import { formatToolError, isEngineControl } from "../agent-shared.ts";
-import type { ApprovalDecision } from "../tool.ts";
-import { childSpend, isChildControlFlow } from "../delegation/run-delegated-call.ts";
 import {
   addUsage,
-  budgetAsUsage,
   EMPTY_USAGE,
   parseTurnBudget,
   remainingBudget,
   shareOfBudget,
   subtractBudget,
-  tightenBudget,
   type BudgetUsage,
   type TurnBudget,
 } from "../budget/budget.ts";
-import { agentTurnWorkflow } from "../delegation/sub-agent-tool.ts";
-import { isDelegableAgent } from "../delegation/types.ts";
-import { composeAgentInstanceId, type AgentInstanceRegistry } from "../instance/types.ts";
-import { checkBlockers, resolveNodeInputs, stringifyTask } from "./dag-helpers.ts";
+import type { AgentInstanceRegistry } from "../instance/types.ts";
+import { checkBlockers, resolveNodeInputs } from "./dag-helpers.ts";
+import { recipeIssues } from "./recipe-schema.ts";
+import { runAgentAttempt } from "./runners/agent-attempt.ts";
+import { childRunId, nodeKey, type NodeRunEnv } from "./runners/env.ts";
 import type { DagRegistry } from "./types.ts";
 import {
-  isAgentRefusal,
   type AgentResolver,
   type AgenticDagRecipe,
   type DagEdge,
   type DagNode,
+  type DagNodeStats,
   type DagRunScope,
 } from "./types.ts";
 import { topologicalOrder, validateDag } from "./validate.ts";
 
-/** The tool result a DAG node's model gets for an approval-gated call. */
-export const DAG_APPROVAL_REFUSED = "requires approval; not available in DAG runs";
-
-async function refuseApproval(): Promise<ApprovalDecision> {
-  return { approved: false, reason: DAG_APPROVAL_REFUSED };
-}
+export { DAG_APPROVAL_REFUSED } from "./runners/agent-attempt.ts";
 
 /** Name the DAG workflow is registered under unless configured otherwise. */
 export const DAG_WORKFLOW_NAME = "agentic-dag";
-
-/**
- * The scope one node runs in: the run's scope, with an owner-scoped run
- * placed at the owner's instance of the node's agent.
- */
-async function nodeScope(params: {
-  readonly runScope: DagRunScope;
-  readonly agentId: string;
-  readonly instances: AgentInstanceRegistry | undefined;
-}): Promise<AgentScope> {
-  const { runScope, agentId, instances } = params;
-  if (runScope.ownerId === undefined) {
-    return {
-      namespaceId: runScope.namespaceId,
-      ...(runScope.resourceId !== undefined && { resourceId: runScope.resourceId }),
-    };
-  }
-  const key = {
-    namespaceId: runScope.namespaceId,
-    registeredAgentId: agentId,
-    ownerId: runScope.ownerId,
-  };
-  const resourceId = instances
-    ? (await instances.resolveOrCreate(key)).id
-    : composeAgentInstanceId(key);
-  return { namespaceId: runScope.namespaceId, resourceId, ownerId: runScope.ownerId };
-}
 
 /** The child run id of a node: DAG run id + node id. */
 export function dagNodeRunId(params: {
   readonly dagRunId: string;
   readonly nodeId: string;
 }): string {
-  return `${params.dagRunId}.node-${params.nodeId}`;
+  return childRunId({ runId: params.dagRunId, key: nodeKey(params.nodeId) });
 }
 
 /** What a DAG run is started with: a registered DAG, by reference. */
@@ -153,6 +117,8 @@ export interface DurableDagOutput {
   readonly errors: Readonly<Record<string, string>>;
   /** Node ids that were skipped (upstream blocker / failed condition / onError). */
   readonly skipped: ReadonlyArray<string>;
+  /** Per-node spend and duration, including skipped and not-started nodes. */
+  readonly nodeStats: Readonly<Record<string, DagNodeStats>>;
   /**
    * What the run's nodes spent. A node that failed without a result is
    * counted at its whole share of the budget.
@@ -164,6 +130,8 @@ export interface CreateDagWorkflowConfig {
   /** Registry the run's DAG is read from (by `dagId` + `version`). */
   readonly registry: DagRegistry;
   readonly resolver: AgentResolver;
+  /** Time source used for journaled node start and settlement timestamps. */
+  readonly clock?: WallClock;
   /**
    * Instance registry. With it, a run scoped by `ownerId` resolves (or
    * creates) the owner's instance of each node's agent and runs the node
@@ -203,18 +171,16 @@ type NodeState =
   | { readonly kind: "skipped" }
   | { readonly kind: "not-started" };
 
-type NodeOutcome =
-  | { readonly ok: true; readonly output: unknown }
-  | { readonly ok: false; readonly error: string };
+type SettlementStats = Pick<DagNodeStats, "items" | "failedItems" | "iterations" | "attempts">;
 
-type NodeRoute =
-  | {
-      readonly ok: true;
-      readonly scope: AgentScope;
-      readonly input: AgentInput;
-      readonly kind: "turn" | "invoke";
-    }
-  | { readonly ok: false; readonly error: string };
+interface NodeSettlement {
+  readonly state: NodeState["kind"];
+  readonly error?: string;
+  readonly spend: BudgetUsage;
+  readonly startedAt: number | null;
+  readonly endedAt: number;
+  readonly stats?: SettlementStats;
+}
 
 interface Settled {
   readonly promise: Promise<NodeState>;
@@ -254,7 +220,12 @@ function recipeOf(dag: AgenticDagRecipe): AgenticDagRecipe {
 export function createDagWorkflow(
   config: CreateDagWorkflowConfig,
 ): Workflow<DurableDagInput, DurableDagOutput> {
-  const { registry, resolver, instances, name = DAG_WORKFLOW_NAME, type = "agentic-dag" } = config;
+  const {
+    registry,
+    name = DAG_WORKFLOW_NAME,
+    type = "agentic-dag",
+    clock = SystemWallClock,
+  } = config;
   const usageRecorder = config.usageRecorder;
 
   return workflow<DurableDagInput>({ name, type })
@@ -270,6 +241,14 @@ export function createDagWorkflow(
         },
         { idempotent: true },
       );
+      const issues = recipeIssues({
+        nodes: dag.nodes,
+        edges: dag.edges,
+        entry: dag.entry,
+        terminals: dag.terminals,
+        ...(dag.metadata !== undefined && { metadata: dag.metadata }),
+      });
+      if (issues.length > 0) throw new Error(`dag_invalid: ${issues.join("; ")}`);
       // Validation + ordering are pure; safe to re-run on every replay.
       validateDag({ dag });
       const order = topologicalOrder(dag);
@@ -280,10 +259,18 @@ export function createDagWorkflow(
       for (const e of dag.edges) incoming.get(e.to)!.push(e);
 
       const states = new Map<string, NodeState>();
+      const settlements = new Map<string, NodeSettlement>();
       const settles = new Map<string, Settled>(order.map((id) => [id, settled()]));
       // Live abort: set when a node fails with onError "abort". It only
       // steers what happens next; whether a node started is journaled.
       const abort = new AbortController();
+      const env: NodeRunEnv = {
+        ctx,
+        input,
+        config,
+        clock,
+        runSignal: abort.signal,
+      };
 
       // Run budget: what settled nodes spent, and the shares running nodes hold.
       const runBudget = input.budget === undefined ? undefined : parseTurnBudget(input.budget);
@@ -312,8 +299,29 @@ export function createDagWorkflow(
       const skippedIds = (): Set<string> =>
         new Set([...states].filter(([, s]) => s.kind === "skipped").map(([id]) => id));
 
-      function settle(node: DagNode, state: NodeState): void {
+      function* settleNode(params: {
+        node: DagNode;
+        state: NodeState;
+        spend?: BudgetUsage;
+        startedAt: number | null;
+        stats?: SettlementStats;
+      }): Generator<ActivityYield, void, any> {
+        const { node, state } = params;
+        const settlement = yield* ctx.activity(
+          `${nodeKey(node.id)}-settle`,
+          async (): Promise<NodeSettlement> => ({
+            state: state.kind,
+            ...(state.kind === "error" && { error: state.error }),
+            spend: params.spend ?? EMPTY_USAGE,
+            startedAt: params.startedAt,
+            endedAt: clock.currentTimeMs(),
+            ...(params.stats && { stats: params.stats }),
+          }),
+          { idempotent: true },
+        );
+        settlements.set(node.id, settlement);
         states.set(node.id, state);
+        spent = addUsage(spent, settlement.spend);
         if (state.kind === "error" && (node.onError ?? "abort") === "abort") abort.abort();
         settles.get(node.id)!.resolve(state);
       }
@@ -333,14 +341,22 @@ export function createDagWorkflow(
               (from?.kind === "error" && (nodeById.get(e.from)!.onError ?? "abort") === "abort")
             );
           });
-          if (stopped) return settle(node, { kind: "not-started" });
+          if (stopped) {
+            return yield* settleNode({
+              node,
+              state: { kind: "not-started" },
+              startedAt: null,
+            });
+          }
           const blocked = checkBlockers({
             incomingEdges: incoming.get(node.id)!,
             outputs: outputs(),
             errors: errors(),
             skipped: skippedIds(),
           });
-          if (blocked) return settle(node, { kind: "skipped" });
+          if (blocked) {
+            return yield* settleNode({ node, state: { kind: "skipped" }, startedAt: null });
+          }
           let nodeInput: Record<string, unknown>;
           try {
             nodeInput = resolveNodeInputs({
@@ -349,144 +365,51 @@ export function createDagWorkflow(
               outputs: outputs(),
             });
           } catch (err) {
-            return settle(node, { kind: "error", error: formatToolError(err) });
+            return yield* settleNode({
+              node,
+              state: { kind: "error", error: formatToolError(err) },
+              startedAt: null,
+            });
           }
+          const key = nodeKey(node.id);
           const start = yield* ctx.activity(
-            `node-${node.id}-start`,
+            `${key}-start`,
             async () =>
               abort.signal.aborted
-                ? { start: false, budget: null }
-                : { start: true, budget: shareFor() },
+                ? { start: false, budget: null, startedAt: clock.currentTimeMs() }
+                : { start: true, budget: shareFor(), startedAt: clock.currentTimeMs() },
             { idempotent: true },
           );
-          if (!start.start) return settle(node, { kind: "not-started" });
+          if (!start.start) {
+            return yield* settleNode({
+              node,
+              state: { kind: "not-started" },
+              startedAt: null,
+            });
+          }
           const share = start.budget ?? undefined;
           if (share) held.set(node.id, share);
-          const outcome = yield* runNode({
+          const outcome = yield* runAgentAttempt(env, {
             node,
             nodeInput,
-            scope: input.scope,
+            key,
             ...(share && { budget: share }),
+            signal: abort.signal,
           });
           held.delete(node.id);
-          if (outcome.spend) spent = addUsage(spent, outcome.spend);
-          settle(
+          yield* settleNode({
             node,
-            outcome.ok
+            state: outcome.ok
               ? { kind: "output", value: outcome.output }
               : { kind: "error", error: outcome.error },
-          );
+            spend: outcome.spend,
+            startedAt: start.startedAt,
+          });
         } catch (err) {
           // Engine control flow (a suspended child): waiting branches end too.
           settles.get(node.id)!.reject(err);
           throw err;
         }
-      }
-
-      /** One node: route it (journaled), then run its agent's turn as a child. */
-      function* runNode(params: {
-        node: DagNode;
-        nodeInput: Record<string, unknown>;
-        scope: DagRunScope;
-        /** The node's share of the run's budget. */
-        budget?: TurnBudget;
-      }): Generator<ActivityYield, NodeOutcome & { readonly spend?: BudgetUsage }, any> {
-        const { node, nodeInput } = params;
-        const task = stringifyTask(nodeInput);
-        const routed: NodeRoute = yield* ctx.activity(
-          `node-${node.id}-route`,
-          async (): Promise<NodeRoute> => {
-            const scope = await nodeScope({
-              runScope: params.scope,
-              agentId: node.agentId,
-              instances,
-            });
-            let agent: Agent;
-            try {
-              agent = (await resolver({ agentId: node.agentId, scope })).withScope(scope);
-            } catch (err) {
-              // A refusal (unknown / disabled agent) is the node's outcome; any
-              // other error (a store that is down) fails this activity.
-              if (isAgentRefusal(err)) return { ok: false, error: err.message };
-              throw err;
-            }
-            if (isDelegableAgent(agent)) {
-              const turnInput = (await agent.prepareTurn({ task })).input;
-              return { ok: true, scope, input: turnInput, kind: "turn" };
-            }
-            return { ok: true, scope, input: { task }, kind: "invoke" };
-          },
-          { idempotent: true },
-        );
-        if (!routed.ok) return routed;
-
-        let result: AgentResult;
-        try {
-          result = yield* ctx.child<AgentResult>(
-            {
-              name: `node-${node.id}`,
-              load: async () => {
-                // Checked again when the node (re)starts: an agent disabled
-                // since the node was routed does not run, and a run left in
-                // flight is never driven by another kind of backend.
-                let resolved: Agent;
-                try {
-                  resolved = await resolver({ agentId: node.agentId, scope: routed.scope });
-                } catch (err) {
-                  // A refusal now is final; anything else is retried later.
-                  if (isAgentRefusal(err))
-                    throw new ChildWorkflowGoneError({ message: err.message });
-                  throw err;
-                }
-                const agent = resolved.withScope(routed.scope);
-                const kind = isDelegableAgent(agent) ? "turn" : "invoke";
-                if (kind !== routed.kind) {
-                  throw new ChildWorkflowGoneError({
-                    message: `agent_backend_changed: "${node.agentId}" was routed as ${routed.kind}, now resolves as ${kind}`,
-                  });
-                }
-                // Nobody can decide an approval inside a DAG run: an
-                // approval-gated tool call is refused instead of suspending.
-                const turn = agentTurnWorkflow({
-                  agent,
-                  agentId: node.agentId,
-                  signal: abort.signal,
-                  onApprovalRequired: refuseApproval,
-                });
-                return turn as unknown as Workflow<unknown, AgentResult>;
-              },
-            },
-            {
-              workflowId: dagNodeRunId({ dagRunId: ctx.workflowId, nodeId: node.id }),
-              input: {
-                ...routed.input,
-                ...(params.budget && {
-                  budget: tightenBudget(routed.input.budget, params.budget),
-                }),
-              },
-            },
-          );
-        } catch (err) {
-          if (isChildControlFlow(err)) throw err;
-          return {
-            ok: false,
-            error: formatToolError(err),
-            ...(params.budget && { spend: budgetAsUsage(params.budget) }),
-          };
-        }
-        const spend = childSpend(result);
-        if (result.finishReason === "cancelled") {
-          return { ok: false, error: `node "${node.id}" was cancelled`, spend };
-        }
-        if (result.finishReason === "budget_exceeded") {
-          return {
-            ok: false,
-            error: `budget_exceeded: node "${node.id}" ran out of budget`,
-            spend,
-          };
-        }
-        const text = result.answer;
-        return { spend, ok: true, output: text };
       }
 
       try {
@@ -533,11 +456,21 @@ export function createDagWorkflow(
       // Assembled in topological order, so live runs and replays agree.
       const nodeOutputs: Record<string, unknown> = {};
       const nodeErrors: Record<string, string> = {};
+      const nodeStats: Record<string, DagNodeStats> = {};
       const skipped: string[] = [];
       let aborted = false;
       for (const id of order) {
         const state = states.get(id);
+        const settlement = settlements.get(id)!;
         const node = nodeById.get(id)!;
+        nodeStats[id] = {
+          spend: settlement.spend,
+          durationMs:
+            settlement.startedAt === null
+              ? 0
+              : Math.max(0, settlement.endedAt - settlement.startedAt),
+          ...settlement.stats,
+        };
         if (state?.kind === "output") nodeOutputs[id] = state.value;
         if (state?.kind === "error") {
           nodeErrors[id] = state.error;
@@ -556,6 +489,7 @@ export function createDagWorkflow(
         nodeOutputs,
         errors: nodeErrors,
         skipped,
+        nodeStats,
         spend: spent,
       };
     })
