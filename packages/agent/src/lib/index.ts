@@ -299,6 +299,7 @@ export type {
   AgentRunOutput,
   AgentEvent,
   AgentInvokeOpts,
+  ApprovalResumeOpts,
   ThreadOptions,
   ListThreadsParams as AgentListThreadsParams,
   ThreadSummary as AgentThreadSummary,
@@ -791,6 +792,7 @@ export {
 export type {
   PendingApprovalStore,
   PendingApproval,
+  PendingApprovalBoundary,
   PendingApprovalKey,
   PendingApprovalStatus,
   RecordPendingApprovalParams,
@@ -799,6 +801,8 @@ export type {
   ListPendingApprovalsParams,
 } from "./approvals/pending-approval-store.ts";
 export {
+  snapshotPendingApprovalBoundary,
+  ApprovalBoundaryConflictError,
   ApprovalNotFoundError,
   ApprovalNotReadyError,
   ApprovalAlreadyDecidedError,

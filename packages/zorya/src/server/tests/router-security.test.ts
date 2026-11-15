@@ -429,7 +429,26 @@ describe("Router security declarations", () => {
   });
 
   it("snapshots stateful resolved resource fields before validation", async () => {
-    const reads = { resource: 0, kind: 0, namespace: 0, id: 0, value: 0 };
+    const reads = {
+      resource: 0,
+      kind: 0,
+      namespace: 0,
+      id: 0,
+      principal: 0,
+      principalKind: 0,
+      principalId: 0,
+      value: 0,
+    };
+    const principal = {
+      get kind() {
+        reads.principalKind++;
+        return reads.principalKind === 1 ? "user" : "service-account";
+      },
+      get id() {
+        reads.principalId++;
+        return reads.principalId === 1 ? "alice" : "mallory";
+      },
+    };
     const resource = {
       get kind() {
         reads.kind++;
@@ -442,6 +461,10 @@ describe("Router security declarations", () => {
       get id() {
         reads.id++;
         return reads.id === 1 ? "agent-1" : "";
+      },
+      get principal() {
+        reads.principal++;
+        return principal;
       },
     };
     const target = {
@@ -466,7 +489,12 @@ describe("Router security declarations", () => {
         expect(access.kind).toBe("protected");
         if (access.kind !== "protected") throw new Error("unreachable");
         expect(access.target).toEqual({
-          resource: { kind: "agent", namespaceId: "team-a", id: "agent-1" },
+          resource: {
+            kind: "agent",
+            namespaceId: "team-a",
+            id: "agent-1",
+            principal: { kind: "user", id: "alice" },
+          },
           value: "safe",
         });
         return new Response(null, { status: 204 });
@@ -476,7 +504,16 @@ describe("Router security declarations", () => {
     expect((await router.handle(new Request("http://zorya.test/stateful-target"))).status).toBe(
       204,
     );
-    expect(reads).toEqual({ resource: 1, kind: 1, namespace: 1, id: 1, value: 1 });
+    expect(reads).toEqual({
+      resource: 1,
+      kind: 1,
+      namespace: 1,
+      id: 1,
+      principal: 1,
+      principalKind: 1,
+      principalId: 1,
+      value: 1,
+    });
 
     for (const resourceWithBadFirstSnapshot of [
       {

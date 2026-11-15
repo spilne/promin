@@ -9,6 +9,7 @@
 import {
   admitTurn,
   ApprovalAlreadyDecidedError,
+  ApprovalBoundaryConflictError,
   ApprovalExpiredError,
   ApprovalNotFoundError,
   ApprovalNotReadyError,
@@ -17,8 +18,10 @@ import {
   TurnKeyConflictError,
   type AgentThread,
   type PendingApproval,
+  type PendingApprovalBoundary,
 } from "@promin/agent";
 import { WorkflowSuspendedError } from "@promin/workflow";
+import { sameRunSecurityContext } from "@promin/workflow/storage-kit";
 import { json, jsonError, readJson, type ResolvedRouteAccess } from "../../router.ts";
 import { requestPrincipal, requestSecurityContext } from "../../security/index.ts";
 import { internalError } from "../agent-gateway-kit.ts";
@@ -47,6 +50,7 @@ import {
 } from "./agent-scope.ts";
 import { parseEventId, type TurnStream, type TurnStreamOwner } from "./agent-sse.ts";
 import { budgetRefusal } from "./agent-usage.ts";
+import type { ApprovalRouteTargetValue } from "../../mount/agent-route-security.ts";
 
 /**
  * Refuse a turn whose thread or namespace budget is used up (429) before a
@@ -81,13 +85,9 @@ async function budgetPreflight(params: {
  * could inherit the first row's permission decision.
  */
 function sameApprovalSecurityBoundary(
-  authorized: PendingApproval,
+  authorized: PendingApprovalBoundary,
   current: PendingApproval,
 ): boolean {
-  const samePrincipal = (
-    left: { readonly kind: string; readonly id: string } | undefined,
-    right: { readonly kind: string; readonly id: string } | undefined,
-  ) => left?.kind === right?.kind && left?.id === right?.id;
   return (
     authorized.namespaceId === current.namespaceId &&
     authorized.threadId === current.threadId &&
@@ -96,8 +96,10 @@ function sameApprovalSecurityBoundary(
     authorized.resourceId === current.resourceId &&
     authorized.workflowId === current.workflowId &&
     authorized.elevated === current.elevated &&
-    samePrincipal(authorized.requestContext?.actor, current.requestContext?.actor) &&
-    samePrincipal(authorized.requestContext?.effective, current.requestContext?.effective)
+    ((authorized.requestContext === null && current.requestContext === null) ||
+      (authorized.requestContext !== null &&
+        current.requestContext !== null &&
+        sameRunSecurityContext(authorized.requestContext, current.requestContext)))
   );
 }
 
@@ -452,17 +454,20 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
 
     const parsed = parseApprovalBody({ req, body: await readJson<ApprovalRequest>(req) });
     if ("error" in parsed) return refusalResponse(parsed);
-    const entry =
-      access?.kind === "protected" ? (access.target.value as PendingApproval | null) : null;
-    if (!entry || entry.toolCallId !== parsed.toolCallId)
+    const authorized =
+      access?.kind === "protected"
+        ? (access.target.value as ApprovalRouteTargetValue | null)
+        : null;
+    const entry = authorized?.approval ?? null;
+    if (!authorized || !entry || entry.toolCallId !== parsed.toolCallId)
       return jsonError(404, "approval_not_found");
     if (!entry.requestContext) return jsonError(403, "forbidden");
     const currentActor = requestPrincipal(req);
+    if (!currentActor) return jsonError(403, "forbidden");
     if (
       entry.elevated !== false &&
-      (!currentActor ||
-        (currentActor.kind === entry.requestContext.actor.kind &&
-          currentActor.id === entry.requestContext.actor.id))
+      currentActor.kind === entry.requestContext.actor.kind &&
+      currentActor.id === entry.requestContext.actor.id
     ) {
       return jsonError(403, "forbidden");
     }
@@ -519,17 +524,24 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
           await lease.release();
           return jsonError(404, "approval_not_found");
         }
-        if (!sameApprovalSecurityBoundary(entry, currentEntry)) {
+        if (!sameApprovalSecurityBoundary(authorized.expected, currentEntry)) {
           await lease.release();
           return jsonError(409, "approval_changed");
         }
         turnId = `${currentEntry.workflowId}/approve/${currentEntry.toolCallId}`;
       }
-      const out = thread.resumeStream(parsed.toolCallId, {
-        approved: parsed.approved,
-        by: requestPrincipal(req)?.id ?? parsed.ownerId ?? scoped.resourceId,
-        ...(parsed.reason !== undefined && { reason: parsed.reason }),
-      });
+      const out = thread.resumeStream(
+        parsed.toolCallId,
+        {
+          approved: parsed.approved,
+          by: currentActor.id,
+          byPrincipal: { kind: currentActor.kind, id: currentActor.id },
+          ...(parsed.reason !== undefined && { reason: parsed.reason }),
+        },
+        {
+          expectedApproval: authorized.expected,
+        },
+      );
       const stream = deps.turnStreams.start({
         id: turnId,
         owner: turnOwner({ scoped, threadId }),
@@ -622,6 +634,7 @@ function approvalError(err: unknown): Response | null {
   if (err instanceof ThreadAwaitingApprovalError) return awaitingApproval409(err.pending);
   if (err instanceof ApprovalNotFoundError) return jsonError(404, "approval_not_found");
   if (err instanceof ApprovalAlreadyDecidedError) return jsonError(409, "approval_already_decided");
+  if (err instanceof ApprovalBoundaryConflictError) return jsonError(409, "approval_changed");
   if (err instanceof ApprovalExpiredError) return jsonError(410, "approval_expired");
   if (err instanceof ApprovalNotReadyError) {
     return jsonError(409, "approval_not_ready", "The turn is not ready for a decision yet; retry.");

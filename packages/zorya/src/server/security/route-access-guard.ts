@@ -189,10 +189,15 @@ export function snapshotSecurityResource(source: SecurityResourceRef): SecurityR
   const kind = record.kind;
   const namespaceId = record.namespaceId;
   const id = record.id;
+  const principal =
+    record.principal === undefined
+      ? undefined
+      : snapshotPrincipalRef(record.principal as PrincipalRef);
   return Object.freeze({
     kind,
     namespaceId,
     ...(id !== undefined && { id }),
+    ...(principal !== undefined && { principal }),
   }) as SecurityResourceRef;
 }
 

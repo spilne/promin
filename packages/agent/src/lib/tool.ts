@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { RunPrincipalRef } from "@promin/workflow";
 import type { SubAgentDelegation } from "./delegation/types.ts";
 import type { ToolAuditEntry, ToolAuditLogger } from "./tool-audit/types.ts";
 import type {
@@ -733,8 +734,10 @@ export function tool<TInput, TOutput>(
 export interface ApprovalDecision {
   approved: boolean;
   reason?: string;
-  /** Who decided — recorded with the decision (the approval signal's `by`). */
+  /** Legacy display/audit id retained for signal compatibility. */
   by?: string;
+  /** Collision-safe identity of the authenticated approver. */
+  byPrincipal?: RunPrincipalRef;
 }
 
 export type AutoApprove =

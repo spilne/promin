@@ -193,18 +193,26 @@ export interface PendingApprovalStore {
 export function snapshotPendingApprovalBoundary(
   approval: PendingApproval,
 ): PendingApprovalBoundary {
-  if (approval.agentId === null || approval.requestContext === null) {
-    throw new TypeError("legacy approval has no authoritative agent/requester boundary");
+  const namespaceId = approval.namespaceId;
+  const agentId = approval.agentId;
+  const resourceId = approval.resourceId;
+  const threadId = approval.threadId;
+  const toolCallId = approval.toolCallId;
+  const workflowId = approval.workflowId;
+  const elevated = approval.elevated;
+  const requestContext = approval.requestContext;
+  if (agentId === null) {
+    throw new TypeError("legacy approval has no authoritative agent boundary");
   }
   return Object.freeze({
-    namespaceId: approval.namespaceId,
-    agentId: approval.agentId,
-    resourceId: approval.resourceId,
-    threadId: approval.threadId,
-    toolCallId: approval.toolCallId,
-    workflowId: approval.workflowId,
-    elevated: approval.elevated,
-    requestContext: normalizeRunSecurityContext(approval.requestContext),
+    namespaceId,
+    agentId,
+    resourceId,
+    threadId,
+    toolCallId,
+    workflowId,
+    elevated,
+    requestContext: requestContext === null ? null : normalizeRunSecurityContext(requestContext),
   });
 }
 

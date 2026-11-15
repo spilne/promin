@@ -12,6 +12,7 @@ import {
   setRequestPrincipal,
   type AuthorizationRequest,
   type Principal,
+  type PrincipalRef,
   type ZoryaSecurity,
 } from "../../server/security/index.ts";
 import { InMemorySecurityStore } from "../in-memory-security-store.ts";
@@ -796,11 +797,17 @@ describe("namespace and knowledge access", () => {
       permission: AuthorizationRequest["permission"],
       namespaceId: string,
       id?: string,
+      owner?: PrincipalRef,
     ) =>
       env.security.authorize({
         context: { actor: value, effective: principalRef(value) },
         permission,
-        resource: { kind: permission.resource, namespaceId, ...(id !== undefined && { id }) },
+        resource: {
+          kind: permission.resource,
+          namespaceId,
+          ...(id !== undefined && { id }),
+          ...(owner !== undefined && { principal: owner }),
+        },
       } as AuthorizationRequest);
 
     expect(await authorize(member, { resource: "agent", action: "read" }, "org")).toEqual({
@@ -821,8 +828,48 @@ describe("namespace and knowledge access", () => {
       await authorize(member, { resource: "memory", action: "read" }, "team-a", "peer"),
     ).toEqual({ allowed: false, reason: "permission_denied" });
     expect(
-      await authorize(member, { resource: "approval", action: "decide" }, "team-a", member.id),
+      await authorize(
+        member,
+        { resource: "approval", action: "decide" },
+        "team-a",
+        member.id,
+        principalRef(member),
+      ),
     ).toEqual({ allowed: true, reason: "self_identity_allow" });
+    const collisionSecurity = createZoryaSecurity({
+      store: env.store,
+      loginProviders: [unusedLoginProvider],
+      publicBaseUrl: BASE_URL,
+      allowedDomains: ["example.com"],
+      serviceAccounts: [
+        {
+          id: member.id,
+          token: "colliding-service-token",
+          accessRoles: { "team-a": ["member"] },
+        },
+      ],
+      secret: SECRET,
+    });
+    const collidingServiceAccount = await collisionSecurity.resolvePrincipal({
+      kind: "service-account",
+      id: member.id,
+    });
+    if (!collidingServiceAccount) throw new Error("colliding service account not resolved");
+    expect(
+      await collisionSecurity.authorize({
+        context: {
+          actor: collidingServiceAccount,
+          effective: principalRef(collidingServiceAccount),
+        },
+        permission: { resource: "approval", action: "decide" },
+        resource: {
+          kind: "approval",
+          namespaceId: "team-a",
+          id: member.id,
+          principal: principalRef(member),
+        },
+      }),
+    ).toEqual({ allowed: false, reason: "permission_denied" });
     expect(
       await authorize(
         member,

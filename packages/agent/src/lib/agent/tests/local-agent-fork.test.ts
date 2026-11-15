@@ -67,8 +67,8 @@ describe("LocalAgent.forkThread", () => {
     const { agent, memory, approvals } = await setup();
     await approvals.record({
       namespaceId: "ns",
-      agentId: null,
-      resourceId: null,
+      agentId: "writer",
+      resourceId: "alice",
       threadId: "parent",
       toolCallId: "c1",
       workflowId: "wf",

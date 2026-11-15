@@ -71,6 +71,8 @@ export interface SecurityResourceRef<K extends SecurityResourceKind = SecurityRe
   readonly kind: K;
   readonly namespaceId: string;
   readonly id?: string;
+  /** Structured owner identity when string ids are ambiguous across principal kinds. */
+  readonly principal?: PrincipalRef;
 }
 
 /** Stable, audit-safe authorization reason codes and their runtime vocabulary. */

@@ -1,4 +1,10 @@
-import type { PendingApprovalStore } from "@promin/agent";
+import {
+  composeAgentInstanceId,
+  snapshotPendingApprovalBoundary,
+  type PendingApproval,
+  type PendingApprovalBoundary,
+  type PendingApprovalStore,
+} from "@promin/agent";
 import { HttpError, type DynamicRouteTarget, type RouteTargetRequest } from "../router.ts";
 import { assertUniqueQueryParameters } from "../request-validation.ts";
 import {
@@ -177,11 +183,34 @@ export function approvalBodyTarget(params: { readonly approvals?: PendingApprova
     const namespaceId = typeof body.namespaceId === "string" ? body.namespaceId : "org";
     const toolCallId = typeof body.toolCallId === "string" ? body.toolCallId : "unknown";
     const threadId = route.threadId;
+    const agentId = route.id;
+    const resourceId =
+      typeof body.resourceId === "string"
+        ? body.resourceId
+        : typeof body.ownerId === "string" && agentId
+          ? composeAgentInstanceId({
+              namespaceId,
+              registeredAgentId: agentId,
+              ownerId: body.ownerId,
+            })
+          : undefined;
     const found =
-      params.approvals && threadId && namespaceId !== "org" && toolCallId !== "unknown"
-        ? await params.approvals.get({ namespaceId, threadId, toolCallId })
+      params.approvals &&
+      agentId &&
+      resourceId &&
+      threadId &&
+      namespaceId !== "org" &&
+      toolCallId !== "unknown"
+        ? await params.approvals.get({
+            namespaceId,
+            agentId,
+            resourceId,
+            threadId,
+            toolCallId,
+          })
         : null;
-    const approval = found && (found.agentId === null || found.agentId === route.id) ? found : null;
+    const authorized = found ? snapshotApprovalTarget(found) : null;
+    const approval = authorized?.approval ?? found;
     // Unknown legacy rows cannot be treated as ordinary. They take the
     // elevated path, and the handler rejects them if requester identity is absent.
     const elevated = approval?.elevated !== false;
@@ -196,8 +225,56 @@ export function approvalBodyTarget(params: { readonly approvals?: PendingApprova
         id: elevated
           ? (approval?.toolCallId ?? toolCallId)
           : (approval?.requestContext?.actor.id ?? "legacy-requester"),
+        ...(!elevated && approval?.requestContext?.actor !== undefined
+          ? { principal: approval.requestContext.actor }
+          : {}),
       },
-      value: approval,
+      value: authorized,
     };
   };
+}
+
+export interface ApprovalRouteTargetValue {
+  readonly approval: PendingApproval;
+  readonly expected: PendingApprovalBoundary;
+}
+
+/** Copy every field once so stateful store objects cannot cross the guard boundary. */
+function snapshotApprovalTarget(found: PendingApproval): ApprovalRouteTargetValue | null {
+  let expected: PendingApprovalBoundary;
+  try {
+    expected = snapshotPendingApprovalBoundary(found);
+  } catch {
+    // Legacy rows without an authoritative requester remain elevated for
+    // permission selection, but are never handed to the handler to resume.
+    return null;
+  }
+  if (expected.requestContext === null) return null;
+  const approval = Object.freeze({
+    namespaceId: expected.namespaceId,
+    agentId: expected.agentId,
+    resourceId: expected.resourceId,
+    threadId: expected.threadId,
+    toolCallId: expected.toolCallId,
+    workflowId: expected.workflowId,
+    toolName: found.toolName,
+    input: found.input,
+    elevated: expected.elevated,
+    requestContext: expected.requestContext,
+    requestedAt: found.requestedAt,
+    expiresAt: found.expiresAt,
+    status: found.status,
+    decidedBy: found.decidedBy,
+    decidedByPrincipal:
+      found.decidedByPrincipal === null
+        ? null
+        : Object.freeze({
+            kind: found.decidedByPrincipal.kind,
+            id: found.decidedByPrincipal.id,
+          }),
+    decidedAt: found.decidedAt,
+    reason: found.reason,
+    deliveredAt: found.deliveredAt,
+  } satisfies PendingApproval);
+  return Object.freeze({ approval, expected });
 }

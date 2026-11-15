@@ -20,6 +20,7 @@ import type { LLMProvider, LLMResponse } from "../../llm-provider.ts";
 import { InMemoryMemoryStore } from "../../memory/in-memory-memory-store.ts";
 import { InMemoryPendingApprovalStore } from "../../approvals/in-memory-pending-approval-store.ts";
 import {
+  snapshotPendingApprovalBoundary,
   ThreadAwaitingApprovalError,
   type PendingApproval,
   type RecordPendingApprovalParams,
@@ -97,7 +98,13 @@ function build(params: {
   return { agent, approvals, memory, storage };
 }
 
-const KEY = { namespaceId: "acme", threadId: "t", toolCallId: "tc-1" };
+const KEY = {
+  namespaceId: "acme",
+  agentId: "races",
+  resourceId: "alice",
+  threadId: "t",
+  toolCallId: "tc-1",
+};
 
 async function history(memory: InMemoryMemoryStore): Promise<Array<[string, unknown]>> {
   return (await memory.getMessages({ namespaceId: "acme", threadId: "t" })).map((m) => [
@@ -155,7 +162,13 @@ describe("LocalAgent approvals — interrupted resume", () => {
     const thread = await agent.thread("t");
     await expect(thread.send({ task: "first" })).rejects.toThrow(/suspend|signal/i);
     // A resume recorded its decision, then crashed before delivering it.
-    await approvals.decide({ ...KEY, approved: true, decidedBy: "bob" });
+    const pending = await approvals.get(KEY);
+    if (!pending) throw new Error("approval was not recorded");
+    await approvals.decide({
+      expected: snapshotPendingApprovalBoundary(pending),
+      approved: true,
+      decidedBy: "bob",
+    });
 
     expect((await thread.pendingApprovals!()).map((p) => [p.toolCallId, p.status])).toEqual([
       ["tc-1", "approved"],

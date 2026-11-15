@@ -24,7 +24,10 @@
 // ---------------------------------------------------------------------------
 
 import type { Message, ToolCall } from "../message.ts";
-import type { PendingApproval } from "../approvals/pending-approval-store.ts";
+import type {
+  PendingApproval,
+  PendingApprovalBoundary,
+} from "../approvals/pending-approval-store.ts";
 import type { ApprovalDecision } from "../tool.ts";
 import type { CompactThreadOptions, DistillThreadOptions } from "../memory/consolidator.ts";
 import type { EpisodicRecord } from "../memory/types.ts";
@@ -179,6 +182,14 @@ export interface AgentInvokeOpts {
    * tool). Omitted: every tool of the agent.
    */
   readonly allowedTools?: ReadonlyArray<string>;
+}
+
+/**
+ * Resume-only options. Gateways pass the immutable approval boundary they
+ * authorized so a backend cannot decide a replacement that arrived later.
+ */
+export interface ApprovalResumeOpts extends AgentInvokeOpts {
+  readonly expectedApproval?: PendingApprovalBoundary;
 }
 
 /**
@@ -401,7 +412,7 @@ export interface AgentThread<Input = AgentInput, Output = unknown> {
   resume?(
     callId: string,
     decision: ApprovalDecision,
-    opts?: AgentInvokeOpts,
+    opts?: ApprovalResumeOpts,
   ): Promise<AgentRunOutput<Output>>;
   /**
    * Approvals this thread's turns are suspended on, oldest first — lets a
@@ -421,7 +432,7 @@ export interface AgentThread<Input = AgentInput, Output = unknown> {
   resumeStream?(
     callId: string,
     decision: ApprovalDecision,
-    opts?: AgentInvokeOpts,
+    opts?: ApprovalResumeOpts,
   ): AgentRunOutput<Output>;
 
   /** Read the persisted message history (paginated). */

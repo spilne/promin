@@ -23,8 +23,10 @@ import { InMemoryMemoryStore } from "../../memory/in-memory-memory-store.ts";
 import { InMemoryPendingApprovalStore } from "../../approvals/in-memory-pending-approval-store.ts";
 import {
   ApprovalAlreadyDecidedError,
+  ApprovalBoundaryConflictError,
   ApprovalExpiredError,
   ApprovalNotFoundError,
+  snapshotPendingApprovalBoundary,
   ThreadAwaitingApprovalError,
 } from "../../approvals/pending-approval-store.ts";
 
@@ -113,6 +115,8 @@ describe("LocalAgentThread.resume", () => {
     ]);
     const decided = await approvals.get({
       namespaceId: "acme",
+      agentId: "approval-resume-test",
+      resourceId: "alice",
       threadId: "t-resume-1",
       toolCallId: "tc-1",
     });
@@ -277,10 +281,16 @@ describe("LocalAgentThread.resume", () => {
     const thread = await agent.thread("t-resume-10");
     await expect(thread.send({ task: "go" })).rejects.toThrow(/suspended|signal/i);
     // Simulate the crash: the decision is recorded, the turn never resumed.
-    await approvals.decide({
+    const pending = await approvals.get({
       namespaceId: "acme",
+      agentId: "approval-resume-test",
+      resourceId: "alice",
       threadId: "t-resume-10",
       toolCallId: "tc-10",
+    });
+    if (!pending) throw new Error("approval was not recorded");
+    await approvals.decide({
+      expected: snapshotPendingApprovalBoundary(pending),
       approved: true,
       decidedBy: "bob",
     });
@@ -289,5 +299,55 @@ describe("LocalAgentThread.resume", () => {
     );
     const out = await thread.resume!("tc-10", { approved: true, by: "bob" });
     expect(await out.text).toBe("ok");
+  });
+
+  it("refuses a replacement approval after the gateway authorized the original boundary", async () => {
+    const { agent, approvals, memory } = buildAgent({
+      llmResponses: guardedThenAnswer("tc-race", "must not run"),
+    });
+    const thread = await agent.thread("t-race");
+    await expect(thread.send({ task: "go" })).rejects.toThrow(/suspended|signal/i);
+    const [original] = await thread.pendingApprovals!();
+    if (!original) throw new Error("approval was not recorded");
+    const expectedApproval = snapshotPendingApprovalBoundary(original);
+    const key = {
+      namespaceId: original.namespaceId,
+      agentId: original.agentId,
+      resourceId: original.resourceId,
+      threadId: original.threadId,
+      toolCallId: original.toolCallId,
+    };
+
+    // Simulate another process closing the row and a later workflow taking
+    // the same key after route authorization but before backend resume.
+    await approvals.markDelivered(key);
+    await approvals.record({
+      ...key,
+      workflowId: "replacement-workflow",
+      toolName: "guarded",
+      input: { x: "replacement" },
+      elevated: true,
+      requestContext: {
+        actor: { kind: "service-account", id: "different-requester" },
+      },
+    });
+
+    await expect(
+      thread.resume!("tc-race", { approved: true, by: "approver" }, { expectedApproval }),
+    ).rejects.toBeInstanceOf(ApprovalBoundaryConflictError);
+    expect(await approvals.get(key)).toMatchObject({
+      workflowId: "replacement-workflow",
+      status: "pending",
+      elevated: true,
+    });
+    expect(
+      (
+        await memory.getMessages({
+          namespaceId: "acme",
+          resourceId: "alice",
+          threadId: "t-race",
+        })
+      ).map((message) => [message.role, message.content]),
+    ).toEqual([["user", "go"]]);
   });
 });

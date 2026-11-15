@@ -51,6 +51,7 @@ import type {
   WorkflowStatus,
 } from "@promin/workflow";
 import type { z } from "zod";
+import { normalizeRunSecurityContext, sameRunSecurityContext } from "@promin/workflow/storage-kit";
 import {
   agentAction,
   type AgentActionConfig,
@@ -68,11 +69,14 @@ import { composeApprovalSignal } from "../approvals/approve-signal.ts";
 import { InMemoryPendingApprovalStore } from "../approvals/in-memory-pending-approval-store.ts";
 import {
   ApprovalAlreadyDecidedError,
+  ApprovalBoundaryConflictError,
   ApprovalExpiredError,
   ApprovalNotFoundError,
   ApprovalNotReadyError,
   ThreadAwaitingApprovalError,
+  snapshotPendingApprovalBoundary,
   type PendingApproval,
+  type PendingApprovalBoundary,
   type PendingApprovalKey,
   type PendingApprovalStore,
 } from "../approvals/pending-approval-store.ts";
@@ -144,6 +148,7 @@ import type {
   AgentInput,
   AgentInputSource,
   AgentInvokeOpts,
+  ApprovalResumeOpts,
   AgentRunOutput,
   AgentScope,
   AgentThread,
@@ -1169,21 +1174,31 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
   async resume(
     callId: string,
     decision: ApprovalDecision,
-    opts?: AgentInvokeOpts,
+    opts?: ApprovalResumeOpts,
   ): Promise<AgentRunOutput<TOutput>> {
     const capture = makeCapture(opts?.signal);
-    const result = await this.resumeTurn({ callId, decision, capture });
+    const result = await this.resumeTurn({
+      callId,
+      decision,
+      capture,
+      ...(opts?.expectedApproval !== undefined && { expectedApproval: opts.expectedApproval }),
+    });
     return resolvedOutput<TOutput>({ result, capture });
   }
 
   resumeStream(
     callId: string,
     decision: ApprovalDecision,
-    opts?: AgentInvokeOpts,
+    opts?: ApprovalResumeOpts,
   ): AgentRunOutput<TOutput> {
     const capture = makeCapture(opts?.signal);
     return liveOutput<TOutput>({
-      promise: this.resumeTurn({ callId, decision, capture }),
+      promise: this.resumeTurn({
+        callId,
+        decision,
+        capture,
+        ...(opts?.expectedApproval !== undefined && { expectedApproval: opts.expectedApproval }),
+      }),
       capture,
     });
   }
@@ -1197,6 +1212,8 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
   async pendingApprovals(): Promise<PendingApproval[]> {
     return this.deps.approvals.list({
       namespaceId: this.deps.key.namespaceId,
+      agentId: this.deps.agentId,
+      resourceId: this.deps.key.resourceId ?? null,
       threadId: this.deps.key.threadId,
       open: true,
     });
@@ -1222,6 +1239,8 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     for (const row of await this.pendingApprovals()) {
       const key = {
         namespaceId: row.namespaceId,
+        agentId: row.agentId,
+        resourceId: row.resourceId,
         threadId: row.threadId,
         toolCallId: row.toolCallId,
       };
@@ -1248,7 +1267,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       let current = row;
       if (current.status === "pending") {
         const expired = await this.deps.approvals.decide({
-          ...key,
+          expected: snapshotPendingApprovalBoundary(current),
           approved: false,
           decidedBy: SYSTEM_DECIDER,
           reason: "approval expired",
@@ -1267,9 +1286,13 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
           decision: {
             approved: false,
             by: current.decidedBy ?? SYSTEM_DECIDER,
+            ...(current.decidedByPrincipal !== null && {
+              byPrincipal: current.decidedByPrincipal,
+            }),
             reason: "approval expired",
           },
           capture: makeCapture(),
+          expectedApproval: snapshotPendingApprovalBoundary(current),
         }).catch((err: unknown) => {
           // Not yet suspended on it: the turn still blocks this send (below).
           if (err instanceof ApprovalNotReadyError) return;
@@ -1348,12 +1371,14 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     }
     const key = {
       namespaceId: row.namespaceId,
+      agentId: row.agentId,
+      resourceId: row.resourceId,
       threadId: row.threadId,
       toolCallId: row.toolCallId,
     };
     if (row.status === "pending") {
       await this.deps.approvals.decide({
-        ...key,
+        expected: snapshotPendingApprovalBoundary(row),
         approved: false,
         decidedBy: SYSTEM_DECIDER,
         reason: "the turn ended without this approval",
@@ -1387,6 +1412,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     callId: string;
     decision: ApprovalDecision;
     capture: RunCapture;
+    expectedApproval?: PendingApprovalBoundary;
   }): Promise<AgentResult> {
     const { callId, decision, capture } = params;
     const storage = this.deps.runner.storage;
@@ -1399,11 +1425,19 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
 
     const key = {
       namespaceId: this.deps.key.namespaceId,
+      agentId: this.deps.agentId,
+      resourceId: this.deps.key.resourceId ?? null,
       threadId: this.deps.key.threadId,
       toolCallId: callId,
     };
     let entry = await this.deps.approvals.get(key);
     if (!entry) throw new ApprovalNotFoundError(key);
+    const expected = params.expectedApproval
+      ? snapshotExpectedApproval(params.expectedApproval)
+      : snapshotPendingApprovalBoundary(entry);
+    if (!sameApprovalBoundary(expected, entry)) {
+      throw new ApprovalBoundaryConflictError(entry);
+    }
     // The decision reached the turn already; the turn has moved on.
     if (entry.deliveredAt !== null) throw new ApprovalAlreadyDecidedError(entry);
     // An approval carried up from a sub-agent names the child's run and a
@@ -1437,12 +1471,18 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
 
     if (entry.status === "pending") {
       const decided = await this.deps.approvals.decide({
-        ...key,
+        expected,
         approved: decision.approved,
         ...(decision.by !== undefined && { decidedBy: decision.by }),
+        ...(decision.byPrincipal !== undefined && {
+          decidedByPrincipal: decision.byPrincipal,
+        }),
         ...(decision.reason !== undefined && { reason: decision.reason }),
       });
       if (decided.outcome === "not_found") throw new ApprovalNotFoundError(key);
+      if (decided.outcome === "conflict") {
+        throw new ApprovalBoundaryConflictError(decided.approval);
+      }
       if (decided.outcome === "expired") throw new ApprovalExpiredError(decided.approval);
       if (decided.outcome !== "decided") {
         throw new ApprovalAlreadyDecidedError(decided.approval);
@@ -1466,6 +1506,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       approved: entry.status === "approved",
       ...(entry.reason !== null && { reason: entry.reason }),
       ...(entry.decidedBy !== null && { by: entry.decidedBy }),
+      ...(entry.decidedByPrincipal !== null && { byPrincipal: entry.decidedByPrincipal }),
     };
     const waiting = waitingStep({ wf, signalName });
     if (waiting) {
@@ -1783,9 +1824,9 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
         const run = await this.deps.runner.storage.loadWorkflow(workflowId);
         await this.deps.approvals.record({
           namespaceId: this.deps.key.namespaceId,
+          resourceId: this.deps.key.resourceId ?? null,
           threadId: this.deps.key.threadId,
           toolCallId: call.id,
-          ...(this.deps.key.resourceId !== undefined && { resourceId: this.deps.key.resourceId }),
           agentId: this.deps.agentId,
           workflowId,
           toolName: call.name,
@@ -1939,11 +1980,55 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     }
     await this.deps.approvals.deleteThread({
       namespaceId: this.deps.key.namespaceId,
+      agentId: this.deps.agentId,
+      resourceId: this.deps.key.resourceId ?? null,
       threadId: this.deps.key.threadId,
     });
     this.inMemoryMessages = [];
     this.inMemoryAppends.clear();
   }
+}
+
+// ---------------------------------------------------------------------------
+
+function snapshotExpectedApproval(value: PendingApprovalBoundary): PendingApprovalBoundary {
+  const namespaceId = value.namespaceId;
+  const agentId = value.agentId;
+  const resourceId = value.resourceId;
+  const threadId = value.threadId;
+  const toolCallId = value.toolCallId;
+  const workflowId = value.workflowId;
+  const elevated = value.elevated;
+  const requestContext = value.requestContext;
+  return Object.freeze({
+    namespaceId,
+    agentId,
+    resourceId,
+    threadId,
+    toolCallId,
+    workflowId,
+    elevated,
+    requestContext: requestContext === null ? null : normalizeRunSecurityContext(requestContext),
+  });
+}
+
+function sameApprovalBoundary(
+  expected: PendingApprovalBoundary,
+  current: PendingApproval,
+): boolean {
+  return (
+    expected.namespaceId === current.namespaceId &&
+    expected.agentId === current.agentId &&
+    expected.resourceId === current.resourceId &&
+    expected.threadId === current.threadId &&
+    expected.toolCallId === current.toolCallId &&
+    expected.workflowId === current.workflowId &&
+    expected.elevated === current.elevated &&
+    ((expected.requestContext === null && current.requestContext === null) ||
+      (expected.requestContext !== null &&
+        current.requestContext !== null &&
+        sameRunSecurityContext(expected.requestContext, current.requestContext)))
+  );
 }
 
 // ---------------------------------------------------------------------------

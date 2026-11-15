@@ -15,6 +15,7 @@
 
 import {
   SECURITY_ACTIONS,
+  type PrincipalRef,
   type SecurityPermissionFor,
   type SecurityResourceKind,
   type SecurityResourceRef,
@@ -515,14 +516,26 @@ async function resolveRouteAccess(params: {
   const kind = resourceRecord.kind;
   const namespaceId = resourceRecord.namespaceId;
   const id = resourceRecord.id;
-  const resourceSnapshot = { kind, namespaceId, id };
+  const principalSource = resourceRecord.principal;
+  const principalRecord =
+    principalSource !== null && typeof principalSource === "object"
+      ? (principalSource as Record<string, unknown>)
+      : undefined;
+  const principalKind = principalRecord?.kind;
+  const principalId = principalRecord?.id;
+  const resourceSnapshot = { kind, namespaceId, id, principalSource };
   const targetSnapshot = { resource: resourceSnapshot, value };
   if (
     resourceSnapshot.kind !== permission.resource ||
     typeof resourceSnapshot.namespaceId !== "string" ||
     resourceSnapshot.namespaceId.length === 0 ||
     (resourceSnapshot.id !== undefined &&
-      (typeof resourceSnapshot.id !== "string" || resourceSnapshot.id.length === 0))
+      (typeof resourceSnapshot.id !== "string" || resourceSnapshot.id.length === 0)) ||
+    (resourceSnapshot.principalSource !== undefined &&
+      (!principalRecord ||
+        typeof principalKind !== "string" ||
+        typeof principalId !== "string" ||
+        principalId.length === 0))
   ) {
     throw new Error("Protected route target does not match its permission");
   }
@@ -530,6 +543,9 @@ async function resolveRouteAccess(params: {
     kind: resourceSnapshot.kind,
     namespaceId: resourceSnapshot.namespaceId,
     ...(resourceSnapshot.id !== undefined && { id: resourceSnapshot.id }),
+    ...(principalRecord !== undefined && {
+      principal: Object.freeze({ kind: principalKind, id: principalId }) as PrincipalRef,
+    }),
   });
   const normalizedTarget = Object.freeze({
     resource: normalizedResource,

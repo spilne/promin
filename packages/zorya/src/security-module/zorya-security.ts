@@ -197,6 +197,7 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
         principal = effectiveResult.principal;
       }
       const roles = rolesFor(principal, resource.namespaceId);
+      const actorRoles = rolesFor(currentActor, resource.namespaceId);
       if (roles.has("admin")) return { allowed: true, reason: "access_role_allow" };
       if (roles.has("auditor") && isAuditorPermission(permission)) {
         return { allowed: true, reason: "access_role_allow" };
@@ -211,7 +212,16 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
       ) {
         return { allowed: true, reason: "access_role_allow" };
       }
-      if (isMemberPermission({ principal, roles, permission, resource })) {
+      if (
+        isMemberPermission({
+          principal,
+          roles,
+          actor: currentActor,
+          actorRoles,
+          permission,
+          resource,
+        })
+      ) {
         return { allowed: true, reason: "self_identity_allow" };
       }
       if (permission.resource === "agent" && permission.action === "invoke") {
@@ -312,12 +322,21 @@ function isAuditorPermission(permission: {
 function isMemberPermission(params: {
   readonly principal: Principal;
   readonly roles: ReadonlySet<string>;
+  readonly actor: Principal;
+  readonly actorRoles: ReadonlySet<string>;
   readonly permission: { readonly resource: string; readonly action: string };
-  readonly resource: { readonly id?: string };
+  readonly resource: { readonly id?: string; readonly principal?: PrincipalRef };
 }): boolean {
-  const { principal, roles, permission, resource } = params;
+  const { principal, roles, actor, actorRoles, permission, resource } = params;
   if (permission.resource === "agent" && permission.action === "read") {
     return hasAnyAccessRole(principal);
+  }
+  if (permission.resource === "approval" && permission.action === "decide") {
+    return (
+      actorRoles.has("member") &&
+      resource.principal !== undefined &&
+      samePrincipal(resource.principal, actor)
+    );
   }
   if (!roles.has("member")) return false;
   if (permission.resource === "thread") {
@@ -332,11 +351,7 @@ function isMemberPermission(params: {
   if (permission.resource === "memory") {
     return resource.id === principal.id;
   }
-  return (
-    permission.resource === "approval" &&
-    permission.action === "decide" &&
-    resource.id === principal.id
-  );
+  return false;
 }
 
 function hasAnyAccessRole(principal: Principal): boolean {
