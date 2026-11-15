@@ -21,6 +21,7 @@
   },
   "files": [
     "dist",
+    "drizzle",
     "package.json"
   ],
   "type": "module",
@@ -66,8 +67,7 @@
       "lint": {},
       "format": {},
       "format-check": {},
-      "ci": {},
-      "publish": {}
+      "ci": {}
     }
   }
 }

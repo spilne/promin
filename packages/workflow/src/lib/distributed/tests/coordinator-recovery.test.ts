@@ -406,6 +406,73 @@ describe("recovery without listOrphanedRuns", () => {
   });
 });
 
+describe("orphan adoption budget", () => {
+  it("adopts a backlog in bounded passes, each continuing after the last run adopted", async () => {
+    const clock = FakeWallClock.create(0);
+    const inner = new InMemoryWorkflowStorage({ clock });
+    const ids = Array.from({ length: 350 }, (_, i) => `p-${String(i).padStart(3, "0")}`);
+    for (const [i, workflowId] of ids.entries()) {
+      await inner.createWorkflow({
+        workflowId,
+        workflowName: "saga",
+        input: { n: i },
+        version: "1",
+      });
+    }
+    clock.advance(60_000);
+
+    // The cursors recovery listed after, with how many runs it had adopted.
+    const queue = new InMemoryStepQueue({ clock });
+    const listings: Array<{ after: string | undefined; adopted: number }> = [];
+    const storage = new Proxy(inner, {
+      get(target, prop, receiver) {
+        if (prop === "listOrphanedRuns") {
+          return (p: Parameters<InMemoryWorkflowStorage["listOrphanedRuns"]>[0]) => {
+            listings.push({
+              after: p.afterWorkflowId,
+              adopted: new Set(queue.getAllTasks().map((t) => t.workflowId)).size,
+            });
+            return target.listOrphanedRuns(p);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as WorkflowStorage;
+
+    const registry = new InMemoryWorkflowVersionRegistry();
+    registry.register(
+      workflow<{ n: number }>({ name: "saga", version: "1" })
+        .step("charge", ({ input }) => succeed(input.n))
+        .build() as never,
+    );
+    const runner = new DistributedWorkflowRunner({
+      storage,
+      stepQueue: queue,
+      registry,
+      orphanGraceMs: 30_000,
+      maxAdoptionsPerSweep: 150,
+      clock,
+      onError: () => undefined,
+    });
+    const loop = runner.startLoop();
+    for (let tick = 0; tick < 20; tick++) {
+      await flush();
+      if (new Set(queue.getAllTasks().map((t) => t.workflowId)).size === ids.length) break;
+      clock.advance(1_000);
+    }
+    await runner.stopLoop();
+    await loop;
+
+    const dispatched = queue.getAllTasks().map((t) => t.workflowId);
+    expect([...new Set(dispatched)].sort()).toEqual(ids);
+    expect(dispatched.length).toBe(ids.length);
+    // A pass ended after 150 adoptions; the next listed after the 150th run.
+    const continuation = listings.find((l) => l.after === "p-149");
+    expect(continuation?.adopted).toBe(150);
+  });
+});
+
 describe("result waits", () => {
   it("waitForResult() waits through a suspension and resolves once the run completes", async () => {
     const clock = FakeWallClock.create(0);

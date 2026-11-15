@@ -25,9 +25,9 @@
 docs
 .beads
 
-# Next.js build output for the documentation site — unrelated to workers.
-documentation/generator/.next
-documentation/generator/node_modules
+# Documentation build output is unrelated to workers.
+documentation/.vitepress/cache
+documentation/.vitepress/dist
 
 # Testcontainer / runtime artifacts that may accumulate.
 .env

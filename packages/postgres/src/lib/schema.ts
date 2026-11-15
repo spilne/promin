@@ -149,6 +149,10 @@ export const workflows = pgTable(
           ].join(", "),
         )})`,
       ),
+    // Suspended runs in workflow-id order (`listUpdateWakeups`).
+    index("wf_workflows_suspended_idx")
+      .on(t.workflowId)
+      .where(sql`${t.statusId} = ${sql.raw(String(WorkflowStatusIds.id.suspended))}`),
     // Cancelled runs whose cancel is not settled (`listOrphanedRuns`).
     index("wf_workflows_cancel_owed_idx")
       .on(t.workflowId)
@@ -239,6 +243,16 @@ export const workflowSteps = pgTable(
       .where(
         sql`${t.statusId} = ${sql.raw(String(StepStatusIds.id.waiting_for_signal))} AND ${t.signalTimeoutAt} IS NOT NULL`,
       ),
+    // Sleep scanner keyset walks (`listDueTimers`): due steps in
+    // (workflow_id, step_name) order, so a page stops at its limit.
+    index("wf_workflow_steps_sleep_keyset_idx")
+      .on(t.workflowId, t.stepName, t.wakeAt, t.run)
+      .where(sql`${t.statusId} = ${sql.raw(String(StepStatusIds.id.sleeping))}`),
+    index("wf_workflow_steps_signal_timeout_keyset_idx")
+      .on(t.workflowId, t.stepName, t.signalTimeoutAt, t.run)
+      .where(
+        sql`${t.statusId} = ${sql.raw(String(StepStatusIds.id.waiting_for_signal))} AND ${t.signalTimeoutAt} IS NOT NULL`,
+      ),
     // Signal scanner (`listSignalWakeups`): waiting steps, joined to
     // delivered signals on (workflow_id, signal_name).
     index("wf_workflow_steps_waiting_signal_idx")
@@ -293,6 +307,19 @@ export const workflowLocks = pgTable("wf_workflow_locks", {
    */
   fenceToken: bigserial("fence_token", { mode: "number" }).notNull(),
 });
+
+/**
+ * SQL of `wf_step_queue.lane`: namespace, concurrency scope/key/limit and
+ * group fields and fairness key, each marked so NULL and '' differ. Tasks of
+ * one lane are indistinguishable to claim's admission checks. Keep in sync
+ * with `drizzle/0003_claim_lanes.sql` (the drift test compares the shape).
+ */
+export const STEP_QUEUE_LANE_SQL =
+  `coalesce('=' || namespace, '~') || chr(31) || coalesce('=' || concurrency_scope, '~') || chr(31) || ` +
+  `coalesce('=' || concurrency_key, '~') || chr(31) || coalesce('=' || concurrency_limit::text, '~') || chr(31) || ` +
+  `coalesce('=' || group_name, '~') || chr(31) || coalesce('=' || group_max_concurrent::text, '~') || chr(31) || ` +
+  `coalesce('=' || group_max_starts::text, '~') || chr(31) || coalesce('=' || group_window_ms::text, '~') || chr(31) || ` +
+  `coalesce('=' || fairness_key, '~')`;
 
 export const stepQueue = pgTable(
   "wf_step_queue",
@@ -360,6 +387,9 @@ export const stepQueue = pgTable(
     groupMaxStarts: integer("group_max_starts"),
     groupWindowMs: integer("group_window_ms"),
     fairnessKey: text("fairness_key"),
+    // The columns claim's admission pre-checks and fair ranking read, joined
+    // (see STEP_QUEUE_LANE_SQL). Generated, so every writer keeps it current.
+    lane: text("lane").generatedAlwaysAs(sql.raw(STEP_QUEUE_LANE_SQL)),
   },
   (t) => [
     index("wf_step_queue_dequeue_idx").on(t.status, t.priority, t.createdAt),
@@ -390,6 +420,15 @@ export const stepQueue = pgTable(
     index("wf_step_queue_pending_order_idx")
       .on(t.priority.desc(), t.createdAt.asc(), t.id.asc())
       .where(sql`${t.status} = 'pending'`),
+    // Claim's lane probe: the pending rows of one lane in claim order, and
+    // the distinct lanes by a skip scan over the leading column.
+    index("wf_step_queue_lane_idx")
+      .on(t.lane, t.priority.desc(), t.createdAt.asc(), t.id.asc())
+      .where(sql`${t.status} = 'pending'`),
+    // "Is any pending task in a group?" without walking the pending rows.
+    index("wf_step_queue_pending_group_idx")
+      .on(t.groupName)
+      .where(sql`${t.status} = 'pending' AND ${t.groupName} IS NOT NULL`),
     // requeueStuck({ mode: "worker" }) — a dead worker's running tasks.
     index("wf_step_queue_running_claimed_by_idx")
       .on(t.claimedBy)

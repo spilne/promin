@@ -60,8 +60,7 @@
       "lint": {},
       "format": {},
       "format-check": {},
-      "ci": {},
-      "publish": {}
+      "ci": {}
     }
   }
 }

@@ -1,9 +1,10 @@
-import { it, expect } from "bun:test";
+import { beforeEach, it, expect } from "bun:test";
 import { cpSync, readFileSync, mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { postgresDescribe } from "../test-utils.ts";
 import { migrate } from "../migrate.ts";
+import { PgStepQueue } from "../pg-step-queue.ts";
 import { PostgresWorkflowStorage } from "../postgres-workflow-storage.ts";
 import { PostgresPendingApprovalStore } from "../agent/pending-approval-store.ts";
 
@@ -34,6 +35,13 @@ function baselineOnlyFolder(): string {
 }
 
 postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
+  beforeEach(async () => {
+    // Each test must start with its own historical chain, including the ledger.
+    await pg.sql`DROP SCHEMA public CASCADE`;
+    await pg.sql`CREATE SCHEMA public`;
+    await pg.sql`DROP SCHEMA IF EXISTS drizzle CASCADE`;
+  });
+
   it("adds step_progress to a baseline-only database, idempotently", async () => {
     await migrate(pg.db, { migrationsFolder: baselineOnlyFolder() });
     const has = async () =>
@@ -109,11 +117,36 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
     expect(rows.map((r) => r.workflowId)).toEqual(["ret-up-1"]);
   });
 
-  it("adds nullable run security context to a database at 0002", async () => {
+  it("adds claim lanes to a database migrated through 0002, keeping its queued tasks", async () => {
     await migrate(pg.db, { migrationsFolder: chainFolder(2) });
+    const lane = async () =>
+      pg.sql`SELECT attgenerated FROM pg_attribute
+        WHERE attrelid = 'wf_step_queue'::regclass AND attname = 'lane' AND NOT attisdropped`;
+    expect((await lane()).length).toBe(0);
+    await pg.sql`INSERT INTO wf_step_queue (workflow_id, step_name, concurrency_key, concurrency_scope, concurrency_limit)
+      VALUES ('old-a', 's', 'k', 'sc', 1), ('old-b', 's', 'k', 'sc', 1), ('old-c', 's', NULL, NULL, NULL)`;
+
+    await migrate(pg.db);
+    await migrate(pg.db);
+    expect((await lane())[0]?.attgenerated).toBe("s");
+    const lanes = await pg.sql`SELECT lane, count(*)::int AS n FROM wf_step_queue GROUP BY lane`;
+    expect(lanes.length).toBe(2);
+    expect(lanes.every((l) => l.lane != null)).toBe(true);
+    const indexes = await pg.sql`SELECT indexname FROM pg_indexes
+      WHERE indexname IN ('wf_step_queue_lane_idx', 'wf_step_queue_pending_group_idx')`;
+    expect(indexes.length).toBe(2);
+
+    // Rows queued before the upgrade are claimed by the lane path, key limit honoured.
+    const queue = new PgStepQueue({ db: pg.db });
+    const claimed = await queue.claim({ workerId: "w", limit: 10 });
+    expect(claimed.map((t) => t.workflowId).sort()).toEqual(["old-a", "old-c"]);
+  });
+
+  it("adds nullable run security context to a database at 0004", async () => {
+    await migrate(pg.db, { migrationsFolder: chainFolder(4) });
     const contextMigration = JSON.parse(
       readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"),
-    ).entries.find((entry: { idx: number }) => entry.idx === 3) as { when: number };
+    ).entries.find((entry: { idx: number }) => entry.idx === 5) as { when: number };
     await pg.sql`DELETE FROM drizzle.__drizzle_migrations
       WHERE created_at >= ${contextMigration.when}`;
     await pg.sql`ALTER TABLE wf_workflows DROP COLUMN IF EXISTS security_context`;
@@ -141,10 +174,10 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
   });
 
   it("preserves legacy approvals as unknown while new rows are explicit", async () => {
-    await migrate(pg.db, { migrationsFolder: chainFolder(3) });
+    await migrate(pg.db, { migrationsFolder: chainFolder(5) });
     const approvalMigration = JSON.parse(
       readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"),
-    ).entries.find((entry: { idx: number }) => entry.idx === 4) as { when: number };
+    ).entries.find((entry: { idx: number }) => entry.idx === 6) as { when: number };
     await pg.sql`DELETE FROM drizzle.__drizzle_migrations
       WHERE created_at >= ${approvalMigration.when}`;
     await pg.sql`ALTER TABLE agent_pending_approval
@@ -187,10 +220,10 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
   });
 
   it("migrates approval identity into the key without losing legacy rows", async () => {
-    await migrate(pg.db, { migrationsFolder: chainFolder(4) });
+    await migrate(pg.db, { migrationsFolder: chainFolder(6) });
     const scopeMigration = JSON.parse(
       readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"),
-    ).entries.find((entry: { idx: number }) => entry.idx === 5) as { when: number };
+    ).entries.find((entry: { idx: number }) => entry.idx === 7) as { when: number };
     await pg.sql`DELETE FROM drizzle.__drizzle_migrations
       WHERE created_at >= ${scopeMigration.when}`;
     await pg.sql`INSERT INTO agent_pending_approval
@@ -253,3 +286,68 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
     ).toMatchObject({ workflowId: "wf-bob" });
   });
 });
+
+const TIMER_SCAN_INDEXES = [
+  "wf_workflow_steps_sleep_keyset_idx",
+  "wf_workflow_steps_signal_timeout_keyset_idx",
+  "wf_workflows_suspended_idx",
+];
+
+postgresDescribe(
+  "migrate() adds the timer scan indexes to a database from before them",
+  {},
+  (pg) => {
+    it("creates the keyset indexes on upgrade, idempotently, and keeps scanning the old rows", async () => {
+      const present = async (): Promise<string[]> =>
+        (
+          (await pg.sql`SELECT indexname FROM pg_indexes WHERE indexname = ANY(${TIMER_SCAN_INDEXES})`) as unknown as Array<{
+            indexname: string;
+          }>
+        )
+          .map((r) => r.indexname)
+          .sort();
+
+      // A database that applied every migration up to the one before the indexes.
+      await migrate(pg.db, { migrationsFolder: chainFolder(3) });
+      expect(await present()).toEqual([]);
+
+      // The current storage adapter also selects the later security-context
+      // column; add it without recording its migration so this test can keep
+      // exercising the pre-index database shape.
+      await pg.sql`ALTER TABLE wf_workflows ADD COLUMN IF NOT EXISTS security_context jsonb`;
+      const storage = await PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false });
+      for (const workflowId of ["old-a", "old-b", "old-c"]) {
+        await storage.createWorkflow({ workflowId, workflowName: "w", input: {} });
+        await storage.suspendWorkflow({
+          workflowId,
+          stepName: "nap",
+          stepUpdate: {
+            status: "sleeping",
+            stepType: "sleep",
+            wakeAt: new Date(Date.now() - 60_000),
+          },
+        });
+      }
+
+      await migrate(pg.db);
+      await migrate(pg.db);
+      expect(await present()).toEqual([...TIMER_SCAN_INDEXES].sort());
+
+      // Re-running the migration's statements (a database that already has
+      // some of the indexes) changes nothing and does not fail.
+      const statements = readFileSync(join(DRIZZLE, "0004_timer_scan_indexes.sql"), "utf8");
+      await pg.sql.unsafe(statements);
+      expect(await present()).toEqual([...TIMER_SCAN_INDEXES].sort());
+
+      // The rows written before the upgrade are still scanned, in pages.
+      const first = await storage.listDueTimers({ now: new Date(), limit: 2 });
+      expect(first.map((r) => r.workflowId)).toEqual(["old-a", "old-b"]);
+      const rest = await storage.listDueTimers({
+        now: new Date(),
+        limit: 2,
+        afterWorkflowId: "old-b",
+      });
+      expect(rest.map((r) => r.workflowId)).toEqual(["old-c"]);
+    });
+  },
+);

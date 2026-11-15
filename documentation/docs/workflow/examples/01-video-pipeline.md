@@ -1,0 +1,61 @@
+---
+title: Video processing across specialized machines
+description: "Download on default workers, transcribe on GPU, summarize on AI workers. Same workflow runs in-process (dev) or distributed (prod)."
+---
+
+<!-- @embed examples/05-distributed/01-video-pipeline.ts -->
+
+```ts
+/**
+ * Video processing across specialized machines.
+ * Download on default workers, transcribe on GPU, summarize on AI workers.
+ * Same workflow runs in-process (dev) or distributed (prod).
+ */
+
+import { workflow, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
+
+const storage = new InMemoryWorkflowStorage();
+const runner = createWorkflowRunner({ storage });
+
+// Define the workflow — same code for both modes
+const processVideo = workflow<{ videoId: string }>({
+  name: "process-video",
+})
+  .step("download", async ({ input }) => {
+    const path = await downloadVideo(input.videoId);
+    return { path };
+  })
+  .step("transcribe", { dependsOn: ["download"] }, async ({ deps }) => {
+    const text = await transcribe(deps.download.path);
+    return { text };
+  })
+  .step("summarize", { dependsOn: ["transcribe"] }, async ({ deps }) => {
+    const summary = await summarize(deps.transcribe.text);
+    return { summary };
+  })
+  .build();
+
+// Dev: run everything in-process
+const result = await runner.run({
+  workflow: processVideo,
+  workflowId: "video-abc",
+  input: { videoId: "abc" },
+});
+
+console.log(result); // { summary: "..." }
+
+// Prod: distributed across machines (see 02-multi-queue-workers.ts)
+
+// Stubs
+async function downloadVideo(_id: string) {
+  return "/tmp/video.mp4";
+}
+async function transcribe(_path: string) {
+  return "Hello world, this is a test video.";
+}
+async function summarize(_text: string) {
+  return "A test video greeting.";
+}
+```
+
+<!-- @end -->

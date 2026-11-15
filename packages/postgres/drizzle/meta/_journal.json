@@ -26,22 +26,36 @@
     {
       "idx": 3,
       "version": "7",
-      "when": 1794710400000,
-      "tag": "0003_run_security_context",
+      "when": 1765324800000,
+      "tag": "0003_claim_lanes",
       "breakpoints": true
     },
     {
       "idx": 4,
       "version": "7",
-      "when": 1794796800000,
-      "tag": "0004_approval_elevation",
+      "when": 1765411200000,
+      "tag": "0004_timer_scan_indexes",
       "breakpoints": true
     },
     {
       "idx": 5,
       "version": "7",
+      "when": 1794710400000,
+      "tag": "0005_run_security_context",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794796800000,
+      "tag": "0006_approval_elevation",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
       "when": 1794883200000,
-      "tag": "0005_approval_scope_key",
+      "tag": "0007_approval_scope_key",
       "breakpoints": true
     }
   ]

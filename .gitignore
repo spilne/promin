@@ -79,4 +79,8 @@ package-lock.json
 /docs/
 # Published documentation pages. Re-include explicitly so a per-user global
 # `docs` ignore pattern does not hide new pages or break `git add`.
-!/documentation/content/docs/
+!/documentation/docs/
+
+# VitePress generated output
+/documentation/.vitepress/cache/
+/documentation/.vitepress/dist/

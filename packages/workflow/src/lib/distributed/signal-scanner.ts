@@ -39,6 +39,7 @@
 // ---------------------------------------------------------------------------
 
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
+import type { Wakeups } from "../shared/wakeups.ts";
 import { hasCapability } from "../durable/storage/capabilities.ts";
 import { completeSignal } from "../durable/journaled-step.ts";
 import type { WorkflowStorage, WorkflowWakeup } from "../durable/workflow-storage.ts";
@@ -73,6 +74,18 @@ export interface SignalScannerOptions {
   readonly leaderElection?: LeaderElection;
   /** Runs fetched per storage query. Default: 100. */
   readonly pageSize?: number;
+  /**
+   * A `"signals"` wake (a signal was delivered) scans now instead of after
+   * `scanIntervalMs`. A latency hint only: the interval scan still finds
+   * every delivery.
+   */
+  readonly wakeups?: Wakeups;
+  /**
+   * Due runs one sweep hands out before it ends and the next sweep
+   * continues after the last of them, immediately: a backlog of any size is
+   * worked off in bounded sweeps that each re-check leadership. Default: 1000.
+   */
+  readonly maxRunsPerSweep?: number;
 }
 
 export interface SignalScanner {
@@ -93,9 +106,11 @@ export interface SignalScanner {
 
 export class DefaultSignalScanner implements SignalScanner {
   private readonly scanner: ResumeScanner<WorkflowWakeup>;
+  private readonly wakeups: Wakeups | undefined;
 
   constructor(config: SignalScannerConfig) {
     const storage = config.storage;
+    this.wakeups = config.wakeups;
     const pageSize = config.pageSize ?? 100;
     const journaledSuspend = hasCapability(storage, "journal") ? storage : undefined;
 
@@ -108,6 +123,7 @@ export class DefaultSignalScanner implements SignalScanner {
       onError: config.onError,
       leaderElection: config.leaderElection,
       resumeConcurrency: config.resumeConcurrency,
+      maxRunsPerSweep: config.maxRunsPerSweep,
       find: async ({ afterWorkflowId }) => {
         // Runs holding an update request nobody has applied are woken too,
         // so the journaled body applies it at its next update point. Both
@@ -153,8 +169,13 @@ export class DefaultSignalScanner implements SignalScanner {
     });
   }
 
-  start(): Promise<void> {
-    return this.scanner.start();
+  async start(): Promise<void> {
+    const unsubscribe = this.wakeups?.onWake({ topic: "signals", handler: () => this.wake() });
+    try {
+      await this.scanner.start();
+    } finally {
+      unsubscribe?.();
+    }
   }
 
   stop(): Promise<void> {

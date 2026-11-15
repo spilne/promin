@@ -1,9 +1,0 @@
-{
-  "title": "Integrations",
-  "pages": [
-    "postgres",
-    "redis",
-    "sqlite",
-    "workflow-remote"
-  ]
-}
