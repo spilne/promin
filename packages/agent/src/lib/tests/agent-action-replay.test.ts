@@ -242,6 +242,111 @@ describe("agentAction — tool-set snapshot", () => {
     expect(executions).toBe(1);
   });
 
+  it("fail-closes a pre-upgrade elevated snapshot whose approval flag was false", async () => {
+    let executions = 0;
+    const elevated = {
+      ...tool({
+        name: "legacy-elevated",
+        description: "cross-scope action",
+        parameters: z.object({}),
+        execute: async () => {
+          executions++;
+          return "done";
+        },
+      }),
+      kind: "elevated" as const,
+    };
+    const build = () =>
+      agentAction({
+        name: "legacy-elevated-snapshot",
+        llm: actThenAnswer({ name: "legacy-elevated", input: {} }),
+        tools: { "legacy-elevated": elevated },
+        autoApprove: () => true,
+      });
+
+    // Produce a valid journal prefix, then rewrite only its plan value to
+    // the shape emitted before elevated tools implied requireApproval.
+    const template = freshRunner();
+    await template.runner.runSafe({
+      workflow: build(),
+      workflowId: "legacy-elevated-replay",
+      input: { task: "act" },
+    });
+    const templateState = await template.storage.loadWorkflow("legacy-elevated-replay");
+    const stepName = Object.values(templateState!.steps).find(
+      (step) => step.status === "waiting_for_signal",
+    )!.stepName;
+    const journal = await template.storage.loadJournal({
+      workflowId: "legacy-elevated-replay",
+      stepName,
+    });
+    const planAt = journal.findIndex((entry) => entry.activityName === "plan-0");
+    expect(planAt).toBeGreaterThanOrEqual(0);
+
+    const replay = freshRunner();
+    for (const entry of journal.slice(0, planAt + 1)) {
+      if (!entry.exit) throw new Error("expected completed journal prefix");
+      let exit = entry.exit;
+      if (entry.activityName === "plan-0") {
+        if (exit.tag !== "Success" || !exit.value || typeof exit.value !== "object") {
+          throw new Error("expected a successful plan snapshot");
+        }
+        const plan = exit.value as {
+          tools: Array<Record<string, unknown>>;
+          compaction: unknown;
+        };
+        exit = {
+          tag: "Success",
+          value: {
+            ...plan,
+            tools: plan.tools.map((toolEntry) =>
+              toolEntry.name === "legacy-elevated"
+                ? { ...toolEntry, elevated: true, requireApproval: false }
+                : toolEntry,
+            ),
+          },
+        };
+      }
+      await replay.storage.appendEntry({
+        workflowId: "legacy-elevated-replay",
+        stepName,
+        activityIndex: entry.activityIndex,
+        branchPath: entry.branchPath,
+        activityName: entry.activityName,
+        ...(entry.payloadHash !== undefined && { payloadHash: entry.payloadHash }),
+        exit,
+      });
+    }
+
+    const first = await replay.runner.runSafe({
+      workflow: build(),
+      workflowId: "legacy-elevated-replay",
+      input: { task: "act" },
+    });
+    expect(first.error).toBeTruthy();
+    expect(executions).toBe(0);
+    const state = await replay.storage.loadWorkflow("legacy-elevated-replay");
+    const waiting = Object.values(state!.steps).find(
+      (step) => step.status === "waiting_for_signal",
+    );
+    expect(waiting).toBeDefined();
+
+    await completeSignal({
+      storage: replay.storage,
+      workflowId: "legacy-elevated-replay",
+      stepName: waiting!.stepName,
+      signalName: "approve:call-1",
+      value: { approved: true },
+    });
+    const result = await replay.runner.run({
+      workflow: build(),
+      workflowId: "legacy-elevated-replay",
+      input: { task: "act" },
+    });
+    expect(result.answer).toBe("done");
+    expect(executions).toBe(1);
+  });
+
   it("replays the journaled approval path after the live tool stops requiring approval", async () => {
     const { runner, storage } = freshRunner();
     let requireApproval = true;

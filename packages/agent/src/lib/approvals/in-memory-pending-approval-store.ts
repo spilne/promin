@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { SystemWallClock, type WallClock } from "@promin/workflow";
+import { normalizeRunSecurityContext } from "@promin/workflow/storage-kit";
 import type {
   DecidePendingApprovalParams,
   DecidePendingApprovalResult,
@@ -29,35 +30,37 @@ export class InMemoryPendingApprovalStore implements PendingApprovalStore {
   }
 
   async record(params: RecordPendingApprovalParams): Promise<PendingApproval> {
-    const k = encodeKey(params);
+    const request = snapshotRecordRequest(params);
+    const k = encodeKey(request);
     const existing = this.rows.get(k);
-    if (existing && existing.workflowId === params.workflowId) return existing;
+    if (existing && existing.workflowId === request.workflowId) return detached(existing);
     const now = this.clock.currentTimeMs();
-    const row: PendingApproval = {
-      namespaceId: params.namespaceId,
-      threadId: params.threadId,
-      toolCallId: params.toolCallId,
-      resourceId: params.resourceId ?? null,
-      agentId: params.agentId ?? null,
-      workflowId: params.workflowId,
-      toolName: params.toolName,
-      input: params.input,
-      elevated: params.elevated,
-      requestContext: params.requestContext,
+    const row = immutable({
+      namespaceId: request.namespaceId,
+      threadId: request.threadId,
+      toolCallId: request.toolCallId,
+      resourceId: request.resourceId ?? null,
+      agentId: request.agentId ?? null,
+      workflowId: request.workflowId,
+      toolName: request.toolName,
+      input: request.input,
+      elevated: request.elevated,
+      requestContext: request.requestContext,
       requestedAt: now,
-      expiresAt: params.ttlMs !== undefined ? now + params.ttlMs : null,
+      expiresAt: request.ttlMs !== undefined ? now + request.ttlMs : null,
       status: "pending",
       decidedBy: null,
       decidedAt: null,
       reason: null,
       deliveredAt: null,
-    };
+    });
     this.rows.set(k, row);
-    return row;
+    return detached(row);
   }
 
   async get(key: PendingApprovalKey): Promise<PendingApproval | null> {
-    return this.rows.get(encodeKey(key)) ?? null;
+    const row = this.rows.get(encodeKey(key));
+    return row ? detached(row) : null;
   }
 
   async list(params: ListPendingApprovalsParams): Promise<PendingApproval[]> {
@@ -71,34 +74,36 @@ export class InMemoryPendingApprovalStore implements PendingApprovalStore {
           (params.open ? r.deliveredAt === null : r.status === status),
       )
       .sort((a, b) => a.requestedAt - b.requestedAt)
-      .slice(0, limit);
+      .slice(0, limit)
+      .map(detached);
   }
 
   async decide(params: DecidePendingApprovalParams): Promise<DecidePendingApprovalResult> {
     const k = encodeKey(params);
     const row = this.rows.get(k);
     if (!row) return { outcome: "not_found" };
-    if (row.status !== "pending") return { outcome: "already_decided", approval: row };
+    if (row.status !== "pending") return { outcome: "already_decided", approval: detached(row) };
     const now = this.clock.currentTimeMs();
     const expired = row.expiresAt !== null && row.expiresAt <= now;
-    if (params.onlyIfExpired && !expired) return { outcome: "not_expired", approval: row };
-    if (params.approved && expired) return { outcome: "expired", approval: row };
-    const decided: PendingApproval = {
+    if (params.onlyIfExpired && !expired)
+      return { outcome: "not_expired", approval: detached(row) };
+    if (params.approved && expired) return { outcome: "expired", approval: detached(row) };
+    const decided = immutable({
       ...row,
       status: expired ? "expired" : params.approved ? "approved" : "rejected",
       decidedBy: params.decidedBy ?? null,
       decidedAt: now,
       reason: params.reason ?? null,
-    };
+    });
     this.rows.set(k, decided);
-    return { outcome: "decided", approval: decided };
+    return { outcome: "decided", approval: detached(decided) };
   }
 
   async markDelivered(key: PendingApprovalKey): Promise<void> {
     const k = encodeKey(key);
     const row = this.rows.get(k);
     if (row && row.deliveredAt === null) {
-      this.rows.set(k, { ...row, deliveredAt: this.clock.currentTimeMs() });
+      this.rows.set(k, immutable({ ...row, deliveredAt: this.clock.currentTimeMs() }));
     }
   }
 
@@ -113,4 +118,57 @@ export class InMemoryPendingApprovalStore implements PendingApprovalStore {
 
 function encodeKey(key: PendingApprovalKey): string {
   return JSON.stringify([key.namespaceId, key.threadId, key.toolCallId]);
+}
+
+function snapshotRecordRequest(params: RecordPendingApprovalParams): RecordPendingApprovalParams {
+  const namespaceId = params.namespaceId;
+  const threadId = params.threadId;
+  const toolCallId = params.toolCallId;
+  const resourceId = params.resourceId;
+  const agentId = params.agentId;
+  const workflowId = params.workflowId;
+  const toolName = params.toolName;
+  const input = params.input;
+  const elevated = params.elevated;
+  const requestContext = params.requestContext;
+  const ttlMs = params.ttlMs;
+  return Object.freeze({
+    namespaceId,
+    threadId,
+    toolCallId,
+    ...(resourceId !== undefined && { resourceId }),
+    ...(agentId !== undefined && { agentId }),
+    workflowId,
+    toolName,
+    input: cloneAndFreeze(input),
+    elevated,
+    requestContext: requestContext === null ? null : normalizeRunSecurityContext(requestContext),
+    ...(ttlMs !== undefined && { ttlMs }),
+  });
+}
+
+/** Copy the exact security boundary and never expose the stored object. */
+function detached(row: PendingApproval): PendingApproval {
+  return immutable({
+    ...row,
+    input: cloneAndFreeze(row.input),
+    requestContext:
+      row.requestContext === null ? null : normalizeRunSecurityContext(row.requestContext),
+  });
+}
+
+function immutable(row: PendingApproval): PendingApproval {
+  return Object.freeze(row);
+}
+
+function cloneAndFreeze<T>(value: T): T {
+  return deepFreeze(structuredClone(value));
+}
+
+function deepFreeze<T>(value: T, seen: WeakSet<object> = new WeakSet()): T {
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
+  if (seen.has(value)) return value;
+  seen.add(value);
+  for (const nested of Object.values(value)) deepFreeze(nested, seen);
+  return Object.freeze(value);
 }

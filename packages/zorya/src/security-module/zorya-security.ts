@@ -259,17 +259,18 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
   };
 }
 
-const AGENT_MANAGER_RESOURCES = new Set([
-  "agent",
-  "agent-role",
-  "skill",
-  "fragment",
-  "toolset",
-  "eval",
-  "schedule",
-  "workflow",
-  "dag",
-]);
+/** Configuration authority only; runtime actions require their own role. */
+const AGENT_MANAGER_ACTIONS: Readonly<Record<string, ReadonlyArray<string>>> = Object.freeze({
+  agent: Object.freeze(["read", "create", "update", "promote", "rollback", "disable"]),
+  "agent-role": Object.freeze(["read", "create", "update", "disable"]),
+  skill: Object.freeze(["read", "create", "update", "disable"]),
+  fragment: Object.freeze(["read", "create", "update", "disable"]),
+  toolset: Object.freeze(["read", "create", "promote", "rollback"]),
+  eval: Object.freeze(["read", "create"]),
+  schedule: Object.freeze(["read", "create", "update", "delete"]),
+  workflow: Object.freeze(["read", "create", "update"]),
+  dag: Object.freeze(["read", "create", "update"]),
+});
 
 const AUDITOR_CONFIG_RESOURCES = new Set([
   "namespace",
@@ -290,8 +291,12 @@ const AUDITOR_CONFIG_RESOURCES = new Set([
   "worker",
 ]);
 
-function isAgentManagerPermission(permission: { readonly resource: string }): boolean {
-  return AGENT_MANAGER_RESOURCES.has(permission.resource);
+function isAgentManagerPermission(permission: {
+  readonly resource: string;
+  readonly action: string;
+}): boolean {
+  if (!Object.hasOwn(AGENT_MANAGER_ACTIONS, permission.resource)) return false;
+  return AGENT_MANAGER_ACTIONS[permission.resource]?.includes(permission.action) === true;
 }
 
 function isAuditorPermission(permission: {

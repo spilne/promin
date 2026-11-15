@@ -1076,13 +1076,20 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
           const toRun: Array<{ index: number; call: ToolCall; entry: ToolSnapshotEntry }> = [];
           // The autoApprove policy reads live config; journal its verdicts so
           // a policy changed while the turn is suspended can't alter replay.
-          const needsApproval = calls.some((c) => snapshotByName.get(c.name)?.requireApproval)
+          const needsApproval = calls.some((c) => {
+            const entry = snapshotByName.get(c.name);
+            return entry?.elevated === true || entry?.requireApproval === true;
+          })
             ? yield* ctx.activity(
                 `step-${step}-approvals`,
                 async () =>
                   calls.map((c) => {
                     const entry = snapshotByName.get(c.name);
-                    return entry?.requireApproval === true && !autoApproved(c, entry);
+                    return (
+                      entry !== undefined &&
+                      (entry.elevated || entry.requireApproval) &&
+                      !autoApproved(c, entry)
+                    );
                   }),
                 { idempotent: true },
               )

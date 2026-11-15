@@ -130,6 +130,38 @@ describe("agent SSE — approval resume", () => {
       llm,
       tools: { deploy },
       security: enterpriseApprovalSecurity(),
+      // Model a backend that can resume but cannot list pending approvals.
+      // Requester separation must be enforced from the preloaded durable row.
+      wrapAgent: (agent) =>
+        new Proxy(agent, {
+          get(target, property, receiver) {
+            if (property === "withScope") {
+              return (agentScope: unknown) => {
+                const scoped = target.withScope(agentScope as never);
+                return new Proxy(scoped, {
+                  get(scopedTarget, scopedProperty, scopedReceiver) {
+                    if (scopedProperty === "thread") {
+                      return async (...args: unknown[]) => {
+                        const thread = await scopedTarget.thread(...(args as [string, never]));
+                        return new Proxy(thread, {
+                          get(threadTarget, threadProperty, threadReceiver) {
+                            if (threadProperty === "pendingApprovals") return undefined;
+                            const value = Reflect.get(threadTarget, threadProperty, threadReceiver);
+                            return typeof value === "function" ? value.bind(threadTarget) : value;
+                          },
+                        });
+                      };
+                    }
+                    const value = Reflect.get(scopedTarget, scopedProperty, scopedReceiver);
+                    return typeof value === "function" ? value.bind(scopedTarget) : value;
+                  },
+                });
+              };
+            }
+            const value = Reflect.get(target, property, receiver);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        }),
     });
     await registry.register({
       id: "deployer",

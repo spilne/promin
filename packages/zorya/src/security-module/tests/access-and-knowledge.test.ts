@@ -709,8 +709,17 @@ describe("namespace and knowledge access", () => {
       email: "auditor@example.com",
       bindings: [{ namespaceId: ORG_WIDE_NAMESPACE, accessRole: "auditor" }],
     });
+    const managerMemberUser = await createUser({
+      env,
+      email: "agent-member@example.com",
+      bindings: [
+        { namespaceId: ORG_WIDE_NAMESPACE, accessRole: "agent-manager" },
+        { namespaceId: ORG_WIDE_NAMESPACE, accessRole: "member" },
+      ],
+    });
     const manager = await principal(env, managerUser);
     const auditor = await principal(env, auditorUser);
+    const managerMember = await principal(env, managerMemberUser);
     const authorize = (value: Principal, permission: AuthorizationRequest["permission"]) =>
       env.security.authorize({
         context: { actor: value, effective: principalRef(value) },
@@ -721,6 +730,18 @@ describe("namespace and knowledge access", () => {
     expect(await authorize(manager, { resource: "skill", action: "update" })).toEqual({
       allowed: true,
       reason: "access_role_allow",
+    });
+    expect(await authorize(manager, { resource: "agent", action: "invoke" })).toEqual({
+      allowed: false,
+      reason: "namespace_denied",
+    });
+    expect(await authorize(managerMember, { resource: "agent", action: "invoke" })).toEqual({
+      allowed: true,
+      reason: "access_role_allow",
+    });
+    expect(await authorize(manager, { resource: "eval", action: "run" })).toEqual({
+      allowed: false,
+      reason: "permission_denied",
     });
     expect(await authorize(manager, { resource: "namespace", action: "update" })).toEqual({
       allowed: false,

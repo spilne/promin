@@ -89,6 +89,52 @@ export function pendingApprovalStoreTestSuite(factory: PendingApprovalStoreFacto
         ).toEqual(row);
       });
 
+      it("detaches the stored security boundary from request and result mutation", async () => {
+        const { store } = await factory();
+        const actor = { kind: "service-account" as const, id: "requester-sa" };
+        const effective = { kind: "user" as const, id: "alice" };
+        const input = { env: "prod" };
+        const params = {
+          ...request({
+            elevated: true,
+            requestContext: { actor, effective },
+            input,
+          }),
+        };
+        const recorded = await store.record(params);
+
+        params.elevated = false;
+        actor.id = "mutated-actor";
+        effective.id = "mutated-user";
+        input.env = "mutated";
+        Reflect.set(recorded, "elevated", false);
+        Reflect.set(recorded.requestContext!.actor, "id", "mutated-result");
+
+        const read = (await store.get({
+          namespaceId: "acme",
+          threadId: "t",
+          toolCallId: "call-1",
+        }))!;
+        expect(read).not.toBe(recorded);
+        expect(read).toMatchObject({
+          elevated: true,
+          input: { env: "prod" },
+          requestContext: {
+            actor: { kind: "service-account", id: "requester-sa" },
+            effective: { kind: "user", id: "alice" },
+          },
+        });
+
+        Reflect.set(read, "elevated", false);
+        Reflect.set(read.requestContext!.actor, "id", "mutated-read");
+        expect(
+          await store.get({ namespaceId: "acme", threadId: "t", toolCallId: "call-1" }),
+        ).toMatchObject({
+          elevated: true,
+          requestContext: { actor: { id: "requester-sa" } },
+        });
+      });
+
       it("returns null for an unknown key", async () => {
         const { store } = await factory();
         expect(

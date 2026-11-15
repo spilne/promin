@@ -457,8 +457,16 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
     if (!entry || entry.toolCallId !== parsed.toolCallId)
       return jsonError(404, "approval_not_found");
     if (!entry.requestContext) return jsonError(403, "forbidden");
-    const effectiveRef = entry.requestContext.effective ?? entry.requestContext.actor;
     const currentActor = requestPrincipal(req);
+    if (
+      entry.elevated !== false &&
+      (!currentActor ||
+        (currentActor.kind === entry.requestContext.actor.kind &&
+          currentActor.id === entry.requestContext.actor.id))
+    ) {
+      return jsonError(403, "forbidden");
+    }
+    const effectiveRef = entry.requestContext.effective ?? entry.requestContext.actor;
     const resolvedEffective = await deps.security?.resolvePrincipal(effectiveRef);
     const effectivePrincipal =
       resolvedEffective ??
@@ -514,16 +522,6 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
         if (!sameApprovalSecurityBoundary(entry, currentEntry)) {
           await lease.release();
           return jsonError(409, "approval_changed");
-        }
-        const approver = requestPrincipal(req);
-        if (
-          currentEntry.elevated !== false &&
-          (!approver ||
-            (approver.kind === currentEntry.requestContext?.actor.kind &&
-              approver.id === currentEntry.requestContext.actor.id))
-        ) {
-          await lease.release();
-          return jsonError(403, "forbidden");
         }
         turnId = `${currentEntry.workflowId}/approve/${currentEntry.toolCallId}`;
       }
