@@ -4,6 +4,8 @@ import { postgresDescribe } from "@promin/postgres/testing";
 import { type DrizzleDb, execRaw } from "@spilne/perfect-postgres";
 import { sql } from "drizzle-orm";
 import { securityStoreV2TestSuite } from "../../security-module/tests/security-store-v2-test-suite.ts";
+import { BreakGlassAccessManager } from "../../security-module/break-glass.ts";
+import { DurableSecurityAudit } from "../../security-module/security-audit.ts";
 import { issueServiceAccountCredential } from "../../security-module/service-account-credentials.ts";
 import { hashCsrfToken, hashSessionToken } from "../../security-module/sessions.ts";
 import { createZoryaSecurity } from "../../security-module/zorya-security.ts";
@@ -106,6 +108,88 @@ postgresDescribe(
       expect(
         await security.authenticate({ request: request(), plane: "operator" }),
       ).toBeUndefined();
+    });
+
+    it("issues, authenticates and revokes break-glass access across store instances", async () => {
+      await reset();
+      const clock = FakeWallClock.create(1_000);
+      const writer = new PostgresSecurityStore({ db: pg.db, clock });
+      const { user } = await writer.findOrCreateProviderUser({
+        identity: {
+          providerId: "test",
+          issuer: "https://identity.test",
+          subject: "emergency-admin",
+        },
+        email: "emergency-admin@example.com",
+        bindings: [{ namespaceId: "org", accessRole: "admin" }],
+      });
+      let nextAuditId = 0;
+      const writerAudit = new DurableSecurityAudit({
+        store: writer,
+        activeKeyId: "audit-key",
+        keys: { "audit-key": "a".repeat(32) },
+        clock,
+        idFactory: () => `break-glass-${++nextAuditId}`,
+      });
+      const issued = await new BreakGlassAccessManager({
+        store: writer,
+        audit: writerAudit,
+        publicBaseUrl: "https://zorya.test",
+        clock,
+        idFactory: () => "postgres_grant",
+        tokenSecretFactory: () => "s".repeat(43),
+      }).issue({
+        principal: { kind: "user", id: user.id },
+        reason: "OIDC outage",
+        createdBy: "host-operator",
+      });
+
+      const reader = new PostgresSecurityStore({ db: pg.db, clock });
+      const readerAudit = new DurableSecurityAudit({
+        store: reader,
+        activeKeyId: "audit-key",
+        keys: { "audit-key": "a".repeat(32) },
+        clock,
+      });
+      const security = createZoryaSecurity({
+        store: reader,
+        loginProviders: [
+          {
+            id: "unused",
+            authorizationUrl: async () => "https://identity.test/authorize",
+            exchange: async () => {
+              throw new Error("not used");
+            },
+          },
+        ],
+        publicBaseUrl: "https://zorya.test",
+        allowedDomains: ["example.com"],
+        auditSink: readerAudit,
+        secret: "0123456789abcdef0123456789abcdef",
+        clock,
+      });
+      const request = () =>
+        new Request("https://zorya.test/api/agents", {
+          headers: { authorization: issued.authorizationHeader },
+        });
+      expect(await security.authenticate({ request: request(), plane: "operator" })).toMatchObject({
+        id: user.id,
+        accessRoles: { org: ["admin"] },
+      });
+
+      const restartedManager = new BreakGlassAccessManager({
+        store: reader,
+        audit: readerAudit,
+        publicBaseUrl: "https://zorya.test",
+        clock,
+      });
+      expect(
+        await restartedManager.revoke({ grantId: issued.grantId, revokedBy: "recovery-operator" }),
+      ).toBe("revoked");
+      expect(
+        await security.authenticate({ request: request(), plane: "operator" }),
+      ).toBeUndefined();
+      expect(await readerAudit.verify("org")).toMatchObject({ valid: true });
     });
 
     it("authenticates and invalidates a CSRF-bound OIDC session across store instances", async () => {

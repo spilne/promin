@@ -21,6 +21,7 @@ import {
   type ZoryaSecurity,
 } from "../server/security/index.ts";
 import type { LoginIdentity, LoginProvider } from "./login-provider.ts";
+import { breakGlassGrantIdFromToken } from "./break-glass.ts";
 import type { SecuritySession, SecurityStoreV2, SecurityUser } from "./security-store.ts";
 import { authenticateServiceAccountCredential } from "./service-account-credentials.ts";
 import {
@@ -194,6 +195,45 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
     }
     if (ref.kind === "service-account") return principalForServiceAccount(ref.id);
     return undefined;
+  };
+
+  const authenticateBreakGlass = async (params: {
+    readonly request: Request;
+    readonly token: string;
+    readonly session: SecuritySession;
+  }): Promise<Principal | undefined> => {
+    const grantId = breakGlassGrantIdFromToken(params.token);
+    if (!grantId || params.session.authMethod !== "break-glass") return undefined;
+    const grant = await config.store.getBreakGlassGrant(grantId);
+    const tokenHash = hashSessionToken(params.token);
+    if (
+      !grant ||
+      grant.revokedAt !== undefined ||
+      grant.expiresAt <= clock.currentTimeMs() ||
+      grant.tokenHash !== tokenHash ||
+      params.session.tokenHash !== tokenHash ||
+      !samePrincipal(grant.principal, params.session.principal)
+    ) {
+      return undefined;
+    }
+    const principal = await resolvePrincipal(grant.principal);
+    if (!principal || !rolesFor(principal, ORG_WIDE_NAMESPACE).has("admin")) return undefined;
+    await recordAudit(
+      snapshotAuditEvent({
+        event: "break-glass.used",
+        occurredAt: new Date(clock.currentTimeMs()).toISOString(),
+        context: { actor: principal, effective: principalRef(principal) },
+        namespaceId: ORG_WIDE_NAMESPACE,
+        decision: { allowed: true, reason: "operator_allow" },
+        metadata: {
+          authMethod: "break-glass",
+          breakGlassGrantId: grant.id,
+          method: params.request.method,
+          path: new URL(params.request.url).pathname,
+        },
+      }),
+    );
+    return principal;
   };
 
   const resolveCurrent = async (
@@ -374,11 +414,14 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
           return undefined;
         }
         const session = await config.store.getSessionRecord(hashSessionToken(cookieToken.value));
-        if (!session || session.authMethod !== "oidc" || session.principal.kind !== "user") {
-          return undefined;
-        }
+        if (!session) return undefined;
         if (!validCookieRequest({ request: req, session, secure, trustedOrigin })) return undefined;
-        const principal = await resolvePrincipal(session.principal);
+        const principal =
+          session.authMethod === "break-glass"
+            ? await authenticateBreakGlass({ request: req, token: cookieToken.value, session })
+            : session.authMethod === "oidc" && session.principal.kind === "user"
+              ? await resolvePrincipal(session.principal)
+              : undefined;
         if (!principal) return undefined;
         cookieAuthenticated.add(req);
         return principal;
@@ -386,6 +429,10 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
 
       const token = bearerToken(req);
       if (!token) return undefined;
+      if (token.startsWith("zbg_")) {
+        const session = await config.store.getSessionRecord(hashSessionToken(token));
+        return session ? authenticateBreakGlass({ request: req, token, session }) : undefined;
+      }
       const durable = await authenticateServiceAccountCredential({
         store: config.store,
         token,

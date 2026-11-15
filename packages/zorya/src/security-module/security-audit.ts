@@ -12,9 +12,11 @@ import type {
 } from "../server/security/security.ts";
 import {
   SECURITY_STORE_LIMITS,
+  type BreakGlassGrant,
   type SecurityAuditCorrelation,
   type SecurityAuditRecord,
   type SecurityAuditScalar,
+  type SecuritySession,
   type SecurityStorePage,
   type SecurityStoreV2,
 } from "./security-store.ts";
@@ -128,6 +130,85 @@ export class DurableSecurityAudit implements SecurityAuditSink {
   }
 
   async append(envelope: SecurityAuditEnvelope): Promise<SecurityAuditRecord> {
+    return this.appendAtomically(envelope, async ({ record, outbox }) => {
+      await this.store.appendAuditWithOutbox({
+        record,
+        ...(outbox !== undefined && { outbox }),
+      });
+      return record;
+    });
+  }
+
+  /** Atomically creates the grant, session and first audit-chain row. */
+  async createBreakGlassAccess(params: {
+    readonly grant: BreakGlassGrant;
+    readonly session: SecuritySession;
+  }): Promise<"created" | "already-exists"> {
+    return this.appendAtomically(
+      {
+        namespaceId: "org",
+        occurredAt: params.grant.createdAt,
+        event: "break-glass.created",
+        actor: { kind: "operator", id: params.grant.createdBy },
+        effective: params.grant.principal,
+        decision: { allowed: true, reason: "operator_allow" },
+        metadata: {
+          breakGlassGrantId: params.grant.id,
+          authMethod: "break-glass",
+          createdBy: params.grant.createdBy,
+          reason: params.grant.reason,
+          expiresAt: params.grant.expiresAt,
+        },
+      },
+      ({ record, outbox }) =>
+        this.store.createBreakGlassAccess({
+          grant: params.grant,
+          session: params.session,
+          audit: record,
+          ...(outbox !== undefined && { outbox }),
+        }),
+    );
+  }
+
+  /** Atomically revokes a grant/session pair and appends its audit-chain row. */
+  async revokeBreakGlassAccess(params: {
+    readonly grant: BreakGlassGrant;
+    readonly revokedAt: number;
+    readonly revokedBy: string;
+  }): Promise<"revoked" | "already-revoked"> {
+    return this.appendAtomically(
+      {
+        namespaceId: "org",
+        occurredAt: params.revokedAt,
+        event: "break-glass.revoked",
+        actor: { kind: "operator", id: params.revokedBy },
+        effective: params.grant.principal,
+        decision: { allowed: true, reason: "operator_allow" },
+        metadata: {
+          breakGlassGrantId: params.grant.id,
+          authMethod: "break-glass",
+          createdBy: params.grant.createdBy,
+          revokedBy: params.revokedBy,
+          reason: params.grant.reason,
+        },
+      },
+      ({ record, outbox }) =>
+        this.store.revokeBreakGlassAccess({
+          grantId: params.grant.id,
+          revokedAt: params.revokedAt,
+          audit: record,
+          ...(outbox !== undefined && { outbox }),
+        }),
+    );
+  }
+
+  private async appendAtomically<T>(
+    envelope: SecurityAuditEnvelope,
+    commit: (params: {
+      readonly record: SecurityAuditRecord;
+      readonly outbox?: { readonly nextAttemptAt: number };
+    }) => Promise<T>,
+  ): Promise<T> {
     const id = boundedRequired(
       envelope.id ?? this.idFactory(),
       "audit event id",
@@ -196,7 +277,12 @@ export class DurableSecurityAudit implements SecurityAuditSink {
             keyId: this.activeKeyId,
           })
         ) {
-          return existing;
+          return commit({
+            record: existing,
+            ...(this.outbox !== undefined && {
+              outbox: { nextAttemptAt: this.outbox.nextAttemptAt?.(recordedAt) ?? recordedAt },
+            }),
+          });
         }
         throw new Error(`Conflicting audit event: ${id}`);
       }
@@ -223,13 +309,12 @@ export class DurableSecurityAudit implements SecurityAuditSink {
         hash: computeSecurityAuditHash(unsigned, activeKey),
       });
       try {
-        await this.store.appendAuditWithOutbox({
+        return await commit({
           record,
           ...(this.outbox !== undefined && {
             outbox: { nextAttemptAt: this.outbox.nextAttemptAt?.(recordedAt) ?? recordedAt },
           }),
         });
-        return record;
       } catch (error) {
         if (!isChainBoundaryConflict(error)) throw error;
       }

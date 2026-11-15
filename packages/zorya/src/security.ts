@@ -54,6 +54,13 @@ export {
   type SecurityAuditVerification,
 } from "./security-module/security-audit.ts";
 export {
+  breakGlassGrantIdFromToken,
+  BreakGlassAccessManager,
+  type BreakGlassAccessManagerConfig,
+  type IssueBreakGlassAccessParams,
+  type IssuedBreakGlassAccess,
+} from "./security-module/break-glass.ts";
+export {
   createZoryaSecurity,
   type ServiceAccountConfig,
   type ZoryaSecurityConfig,

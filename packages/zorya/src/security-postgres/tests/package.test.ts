@@ -55,12 +55,14 @@ describe("PostgreSQL security package", () => {
 
   it("publishes only the opt-in PostgreSQL subpath", async () => {
     const manifest = (await Bun.file(join(PACKAGE, "package.json")).json()) as {
+      bin: Record<string, string>;
       exports: Record<string, Record<string, string>>;
       files: string[];
       peerDependenciesMeta: Record<string, { optional?: boolean }>;
     };
 
     expect(manifest.files).toContain("security-drizzle");
+    expect(manifest.bin["zorya-break-glass"]).toBe("./dist/security-break-glass-cli.js");
     expect(manifest.exports["./security/postgres"]).toEqual({
       types: "./dist/security-postgres.d.ts",
       "@promin/source": "./src/security-postgres.ts",

@@ -20,6 +20,9 @@
     "url": "https://github.com/spilne/promin.git",
     "directory": "packages/zorya"
   },
+  "bin": {
+    "zorya-break-glass": "./dist/security-break-glass-cli.js"
+  },
   "files": [
     "dist",
     "package.json",

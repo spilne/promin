@@ -1532,11 +1532,13 @@ function validateBreakGlassAudit(
   if (
     audit.event !== event ||
     audit.namespaceId !== ORG_WIDE_NAMESPACE ||
-    audit.actor?.id !== grant.createdBy ||
+    audit.actor?.kind !== "operator" ||
+    (event === "break-glass.created" && audit.actor.id !== grant.createdBy) ||
     audit.effective === undefined ||
     !samePrincipal(grant.principal, audit.effective as SecurityPrincipalRef) ||
     audit.decision?.allowed !== true ||
-    audit.metadata?.breakGlassGrantId !== grant.id
+    audit.metadata?.breakGlassGrantId !== grant.id ||
+    (event === "break-glass.revoked" && audit.metadata.revokedBy !== audit.actor.id)
   ) {
     throw new TypeError("break-glass audit does not identify the grant and principal");
   }

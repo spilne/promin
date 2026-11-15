@@ -1065,7 +1065,10 @@ function breakGlassAudit(params: {
     actor: { kind: "operator", id: params.grant.createdBy },
     effective: params.grant.principal,
     decision: { allowed: true, reason: "operator_allow" },
-    metadata: { breakGlassGrantId: params.grant.id },
+    metadata: {
+      breakGlassGrantId: params.grant.id,
+      ...(params.event === "break-glass.revoked" && { revokedBy: params.grant.createdBy }),
+    },
     ...(params.previousHash !== undefined && {
       previousHash: params.previousHash,
     }),
