@@ -432,6 +432,10 @@ export class ZoryaServer {
         clock,
         namespaces,
         logger: this.logger,
+        security: this.security,
+        ...(config.security === undefined && {
+          legacySecurityContext: { actor: principalRef(OPERATOR_PRINCIPAL) },
+        }),
       });
     }
     if (config.remoteDeployments && this.agents) {

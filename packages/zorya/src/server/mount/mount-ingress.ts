@@ -3,10 +3,17 @@
 // remote-deployment self-registration.
 // ---------------------------------------------------------------------------
 
-import type { NamespaceRegistry, WallClock, WorkflowStorage } from "@promin/workflow";
+import type {
+  NamespaceRegistry,
+  RunSecurityContext,
+  WallClock,
+  WorkflowStorage,
+} from "@promin/workflow";
 import type { Router } from "../router.ts";
 import type { Logger, ZoryaServerConfig } from "../server-config.ts";
+import type { ZoryaSecurity } from "../security/index.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
+import { protectedAccess, orgTarget } from "./route-security.ts";
 import {
   heartbeatDeployment,
   listDeployments,
@@ -36,6 +43,8 @@ export function mountWebhooks(params: {
   /** Registry a delivery's namespace is checked against. */
   readonly namespaces: NamespaceRegistry | undefined;
   readonly logger: Logger;
+  readonly security: ZoryaSecurity;
+  readonly legacySecurityContext?: RunSecurityContext;
 }): WebhookDeliveryRecovery {
   const { webhooks, agents } = params;
   const webhookDeps: WebhookGatewayDeps = {
@@ -45,12 +54,21 @@ export function mountWebhooks(params: {
     // the methods they use.
     resolve: agents.resolve as unknown as WebhookGatewayDeps["resolve"],
     sources: webhooks.sources,
+    security: params.security,
+    ...(params.legacySecurityContext !== undefined && {
+      legacySecurityContext: params.legacySecurityContext,
+    }),
     deliveries:
       webhooks.deliveries ?? new WorkflowStorageWebhookDeliveryStore({ storage: params.storage }),
     clock: params.clock,
     ...(params.namespaces !== undefined && { namespaces: params.namespaces }),
   };
-  params.router.post("/webhooks/:source/:agentId", ingestWebhook(webhookDeps));
+  params.router.route({
+    method: "POST",
+    path: "/webhooks/:source/:agentId",
+    access: { kind: "signed-webhook" },
+    handler: ingestWebhook(webhookDeps),
+  });
   return new WebhookDeliveryRecovery({
     ...webhookDeps,
     ...(params.webhooks.recoveryIntervalMs !== undefined && {
@@ -89,9 +107,53 @@ export function mountRemoteDeployments(params: {
     onError: (err) => logger.error("[zorya] remote-deployment sweep failed", err),
   });
   params.router
-    .post("/api/remote-deployments/register", registerDeployment(remoteDeps))
-    .post("/api/remote-deployments/:deploymentId/heartbeat", heartbeatDeployment(remoteDeps))
-    .delete("/api/remote-deployments/:deploymentId", unregisterDeployment(remoteDeps))
-    .get("/api/remote-deployments", listDeployments(remoteDeps));
+    .route({
+      method: "POST",
+      path: "/api/remote-deployments/register",
+      access: protectedAccess({ resource: "agent", action: "create" }),
+      handler: registerDeployment(remoteDeps),
+    })
+    .route({
+      method: "POST",
+      path: "/api/remote-deployments/:deploymentId/heartbeat",
+      access: protectedAccess({
+        resource: "agent",
+        action: "update",
+        target: deploymentTarget(remoteDeps),
+      }),
+      handler: heartbeatDeployment(remoteDeps),
+    })
+    .route({
+      method: "DELETE",
+      path: "/api/remote-deployments/:deploymentId",
+      access: protectedAccess({
+        resource: "agent",
+        action: "disable",
+        target: deploymentTarget(remoteDeps),
+      }),
+      handler: unregisterDeployment(remoteDeps),
+    })
+    .route({
+      method: "GET",
+      path: "/api/remote-deployments",
+      access: protectedAccess({
+        resource: "agent",
+        action: "read",
+        target: orgTarget({ kind: "agent" }),
+      }),
+      handler: listDeployments(remoteDeps),
+    });
   return sweeper;
+}
+
+function deploymentTarget(deps: RemoteDeploymentsGatewayDeps) {
+  return async ({ params }: { readonly params: Readonly<Record<string, string>> }) => {
+    const deploymentId = params.deploymentId;
+    const deployment = deploymentId ? await deps.registry.get(deploymentId) : null;
+    return {
+      kind: "agent" as const,
+      namespaceId: "org",
+      id: deployment ? JSON.stringify([...deployment.agents].sort()) : deploymentId,
+    };
+  };
 }
