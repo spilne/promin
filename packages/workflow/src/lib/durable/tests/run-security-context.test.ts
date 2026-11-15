@@ -120,6 +120,63 @@ describe("durable run security context", () => {
     ).rejects.toMatchObject({ _tag: "RunSecurityContextConflictError" });
   });
 
+  it("rejects malformed and hostile contexts before exposing a cached secured run", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const wf = workflow({ name: "secured-cached-malformed-start" })
+      .step("done", async () => "secret")
+      .build({ idempotency: { ttl: 60_000, onInFlight: "join" } });
+    const workflowId = "secured-cached-malformed-start-1";
+
+    expect(await runner.run({ workflow: wf, workflowId, input: {}, securityContext: actor1 })).toBe(
+      "secret",
+    );
+
+    for (const securityContext of [
+      { actor: { kind: "admin", id: "admin-1" } },
+      { actor: { kind: "service-account", id: "bad\nid" } },
+    ]) {
+      await expect(
+        runner.start({
+          workflow: wf,
+          workflowId,
+          input: {},
+          securityContext: securityContext as unknown as RunSecurityContext,
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+    }
+
+    let throwingReads = 0;
+    await expect(
+      runner.start({
+        workflow: wf,
+        workflowId,
+        input: {},
+        get securityContext(): RunSecurityContext {
+          throwingReads++;
+          throw new TypeError("hostile cached context getter");
+        },
+      }),
+    ).rejects.toThrow("hostile cached context getter");
+    expect(throwingReads).toBe(1);
+
+    let statefulReads = 0;
+    await expect(
+      runner.start({
+        workflow: wf,
+        workflowId,
+        input: {},
+        get securityContext(): RunSecurityContext {
+          statefulReads++;
+          return statefulReads === 1
+            ? ({ actor: { kind: "admin", id: "admin-1" } } as unknown as RunSecurityContext)
+            : actor1;
+        },
+      }),
+    ).rejects.toBeInstanceOf(TypeError);
+    expect(statefulReads).toBe(1);
+  });
+
   it("rejects a different actor before joining an in-flight start", async () => {
     const storage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage });
@@ -150,6 +207,76 @@ describe("durable run security context", () => {
       release.open();
     }
     expect(await first.result({ intervalMs: 1 })).toBe("ok");
+  });
+
+  it("rejects malformed and hostile contexts before exposing an in-flight secured run", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const release = gate();
+    const wf = workflow({ name: "secured-in-flight-malformed-start" })
+      .step("wait", async () => {
+        await release.promise;
+        return "secret";
+      })
+      .build({ idempotency: { ttl: 60_000, onInFlight: "join" } });
+    const workflowId = "secured-in-flight-malformed-start-1";
+    const first = await runner.start({
+      workflow: wf,
+      workflowId,
+      input: {},
+      securityContext: actor1,
+    });
+
+    try {
+      for (const securityContext of [
+        { actor: { kind: "admin", id: "admin-1" } },
+        { actor: { kind: "service-account", id: "bad\u0000id" } },
+      ]) {
+        await expect(
+          runner.start({
+            workflow: wf,
+            workflowId,
+            input: {},
+            securityContext: securityContext as unknown as RunSecurityContext,
+          }),
+        ).rejects.toBeInstanceOf(TypeError);
+      }
+
+      let throwingReads = 0;
+      await expect(
+        runner.start({
+          workflow: wf,
+          workflowId,
+          input: {},
+          get securityContext(): RunSecurityContext {
+            throwingReads++;
+            throw new TypeError("hostile in-flight context getter");
+          },
+        }),
+      ).rejects.toThrow("hostile in-flight context getter");
+      expect(throwingReads).toBe(1);
+
+      let statefulReads = 0;
+      await expect(
+        runner.start({
+          workflow: wf,
+          workflowId,
+          input: {},
+          get securityContext(): RunSecurityContext {
+            statefulReads++;
+            return statefulReads === 1
+              ? ({
+                  actor: { kind: "service-account", id: "bad\u200Bid" },
+                } as unknown as RunSecurityContext)
+              : actor1;
+          },
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+      expect(statefulReads).toBe(1);
+    } finally {
+      release.open();
+    }
+    expect(await first.result({ intervalMs: 1 })).toBe("secret");
   });
 
   it("waits for a lock winner's row and denies a mismatched pre-create join", async () => {

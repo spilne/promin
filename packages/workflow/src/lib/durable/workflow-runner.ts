@@ -526,6 +526,8 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   private async _run(params: {
     run: WorkflowRunnerRunParams;
     gate?: StartGate;
+    /** A public boundary already snapshotted and normalized the caller's context. */
+    normalizedSecurityContext?: { readonly value: RunSecurityContext | undefined };
     /** Receives the failure of this run, for `runSafe`. */
     failureSink?: { failure?: WorkflowFailure };
   }): Promise<unknown> {
@@ -533,10 +535,16 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     const runParams = params.run;
     const storage = this.storage;
     const { input, force, namespace, idempotencyKey, idempotencyKeyTTL } = runParams;
-    const securityContext =
-      runParams.securityContext === undefined
-        ? undefined
-        : normalizeRunSecurityContext(runParams.securityContext);
+    const securityContext = (() => {
+      if (params.normalizedSecurityContext !== undefined) {
+        return params.normalizedSecurityContext.value;
+      }
+      // Snapshot the caller-controlled property before validation. A getter
+      // must not supply one value to the undefined check and another to the
+      // normalizer.
+      const requested = runParams.securityContext;
+      return requested === undefined ? undefined : normalizeRunSecurityContext(requested);
+    })();
 
     // Per-call idempotency key: resolve to an existing workflowId before
     // dispatching. The supplied workflowId is the create-fallback when the
@@ -630,6 +638,15 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   async start<Input = unknown, Output = unknown, E extends TaggedError = never>(
     params: WorkflowRunnerStartParams<Input, Output, E>,
   ): Promise<WorkflowHandle<Output, E>> {
+    // Validate before launching the background promise. Otherwise start's
+    // lock/result race can turn a malformed or throwing caller-controlled
+    // context into an ignored background failure and still return a handle
+    // capable of observing another principal's stored result.
+    const requestedSecurityContext = params.securityContext;
+    const securityContext =
+      requestedSecurityContext === undefined
+        ? undefined
+        : normalizeRunSecurityContext(requestedSecurityContext);
     let workflowId = params.workflowId;
     let onInFlight: "reject" | "join" =
       "workflow" in params ? (params.workflow.idempotency?.onInFlight ?? "reject") : "reject";
@@ -643,6 +660,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     // reports it.
     const running = this._run({
       run: params as WorkflowRunnerRunParams,
+      normalizedSecurityContext: { value: securityContext },
       gate: {
         onResolved: (run) => {
           workflowId = run.workflowId;
