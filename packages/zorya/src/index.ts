@@ -205,7 +205,16 @@ export {
   notFound,
   ok,
   readJson,
+  type DeclaredRouteHandler,
   type Handler,
+  type ProtectedRouteAccess,
+  type ResolvedProtectedRouteAccess,
+  type ResolvedRouteAccess,
+  type RouteAccess,
+  type RouteDefinition,
+  type RouteTarget,
+  type RouteTargetRequest,
+  type RouteTargetResolver,
 } from "./server/router.ts";
 export { runToDto, runToSummaryDto, stepToDto } from "./server/serialize.ts";
 export {
