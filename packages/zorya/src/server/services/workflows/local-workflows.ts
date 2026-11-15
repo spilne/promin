@@ -232,24 +232,36 @@ export class LocalWorkflows extends ZoryaWorkflows {
    * version registry, so register every version a run may need there.
    */
   define(workflow: Workflow<unknown, unknown>, opts?: LocalWorkflowDefinitionOptions): void {
+    // Options can come from JavaScript, proxies or deliberately untyped
+    // callers. Snapshot each getter once so validation and commit cannot
+    // observe different values from the same object.
+    const internal = opts?.internal === true;
+    const admissionExempt = opts?.admissionExempt === true;
     // Keep the runtime boundary for JavaScript and deliberately untyped
     // callers too. Validate before changing the definition map or the
     // internal-name set, so an invalid redefinition cannot downgrade an
     // already exempt internal workflow into a public one.
-    if (opts?.admissionExempt === true && opts.internal !== true) {
+    if (admissionExempt && !internal) {
       throw new Error("LocalWorkflows: admissionExempt requires internal: true");
     }
-    if (opts?.admissionExempt === true && !this.runner.exemptInternalWorkflowFromRunAdmission) {
+    if (admissionExempt && !this.runner.exemptInternalWorkflowFromRunAdmission) {
       throw new Error(
         "LocalWorkflows: admission-exempt internal workflows require a compatible runner",
       );
     }
-    (this.definitions as Record<string, Workflow<unknown, unknown>>)[workflow.name] = workflow;
-    if (opts?.internal === true) this.internalNames.add(workflow.name);
-    else this.internalNames.delete(workflow.name);
-    if (opts?.admissionExempt === true) {
+
+    // A custom runner hook may throw. Register the exact-object exemption
+    // before publishing the definition or changing its internal visibility,
+    // so a failed hook leaves the prior definition state intact.
+    if (admissionExempt) {
       this.runner.exemptInternalWorkflowFromRunAdmission!(workflow);
     }
+
+    // No potentially throwing extension point remains: publish the new
+    // definition and its visibility together from the snapshotted values.
+    (this.definitions as Record<string, Workflow<unknown, unknown>>)[workflow.name] = workflow;
+    if (internal) this.internalNames.add(workflow.name);
+    else this.internalNames.delete(workflow.name);
   }
 
   /**

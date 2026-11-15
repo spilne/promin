@@ -141,6 +141,97 @@ describe("LocalWorkflows.define admission exemptions", () => {
     ).toThrow("admissionExempt requires internal: true");
     expect(workflows.definitions?.[publicWorkflow.name]).toBeUndefined();
   });
+
+  it("snapshots stateful option getters exactly once", () => {
+    const storage = new InMemoryWorkflowStorage();
+    const workflows = new LocalWorkflows({
+      storage,
+      runner: createWorkflowRunner({ storage }),
+      definitions: {},
+      sleepScanIntervalMs: 0,
+      signalScanIntervalMs: 0,
+    });
+    const internal = workflow<void>({ name: "stateful-options" })
+      .step("body", () => succeed(undefined))
+      .build();
+    let internalReads = 0;
+    let exemptionReads = 0;
+    const stateful = Object.defineProperties(
+      {},
+      {
+        internal: {
+          get: () => ++internalReads === 1,
+        },
+        admissionExempt: {
+          get: () => ++exemptionReads === 1,
+        },
+      },
+    );
+
+    (
+      workflows.define as (
+        workflow: typeof internal,
+        options: { internal: boolean; admissionExempt: boolean },
+      ) => void
+    )(internal, stateful as { internal: boolean; admissionExempt: boolean });
+
+    expect({ internalReads, exemptionReads }).toEqual({ internalReads: 1, exemptionReads: 1 });
+    expect(workflows.definitions?.[internal.name]).toBe(internal);
+    expect(workflows.isInternal(internal.name)).toBe(true);
+  });
+
+  it("leaves the prior definition and visibility unchanged when a getter or hook throws", () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const prior = workflow<void>({ name: "atomic-internal" })
+      .step("prior", () => succeed(undefined))
+      .build();
+    const replacement = workflow<void>({ name: "atomic-internal" })
+      .step("replacement", () => succeed(undefined))
+      .build();
+    const workflows = new LocalWorkflows({
+      storage,
+      runner,
+      definitions: {},
+      sleepScanIntervalMs: 0,
+      signalScanIntervalMs: 0,
+    });
+    workflows.define(prior, { internal: true });
+
+    const throwingOptions = Object.defineProperties(
+      {},
+      {
+        internal: { get: () => true },
+        admissionExempt: {
+          get: () => {
+            throw new Error("getter failed");
+          },
+        },
+      },
+    );
+    expect(() =>
+      (
+        workflows.define as (
+          workflow: typeof replacement,
+          options: { internal: boolean; admissionExempt: boolean },
+        ) => void
+      )(replacement, throwingOptions as { internal: boolean; admissionExempt: boolean }),
+    ).toThrow("getter failed");
+    expect(workflows.definitions?.[prior.name]).toBe(prior);
+    expect(workflows.isInternal(prior.name)).toBe(true);
+
+    Object.defineProperty(runner, "exemptInternalWorkflowFromRunAdmission", {
+      configurable: true,
+      value: () => {
+        throw new Error("hook failed");
+      },
+    });
+    expect(() => workflows.define(replacement, { internal: true, admissionExempt: true })).toThrow(
+      "hook failed",
+    );
+    expect(workflows.definitions?.[prior.name]).toBe(prior);
+    expect(workflows.isInternal(prior.name)).toBe(true);
+  });
 });
 
 describe("LocalWorkflows.trigger — existing workflowId", () => {
