@@ -20,11 +20,27 @@ const diamond: AgenticDagRecipe = {
   id: "diamond-budget",
   version: "v1",
   nodes: [
-    { id: "n1", agentId: "worker", inputs: { task: { kind: "initial", path: "task" } } },
-    { id: "a", agentId: "worker", inputs: { task: { kind: "node", nodeId: "n1", path: "" } } },
-    { id: "b", agentId: "worker", inputs: { task: { kind: "node", nodeId: "n1", path: "" } } },
+    {
+      id: "n1",
+      kind: "agent",
+      agentId: "worker",
+      inputs: { task: { kind: "initial", path: "task" } },
+    },
+    {
+      id: "a",
+      kind: "agent",
+      agentId: "worker",
+      inputs: { task: { kind: "node", nodeId: "n1", path: "" } },
+    },
+    {
+      id: "b",
+      kind: "agent",
+      agentId: "worker",
+      inputs: { task: { kind: "node", nodeId: "n1", path: "" } },
+    },
     {
       id: "c",
+      kind: "agent",
       agentId: "worker",
       inputs: {
         left: { kind: "node", nodeId: "a", path: "" },

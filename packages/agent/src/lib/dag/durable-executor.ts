@@ -74,7 +74,7 @@ import {
 import { agentTurnWorkflow } from "../delegation/sub-agent-tool.ts";
 import { isDelegableAgent } from "../delegation/types.ts";
 import { composeAgentInstanceId, type AgentInstanceRegistry } from "../instance/types.ts";
-import { checkBlockers, pickPath, resolveNodeInputs, stringifyTask } from "./dag-helpers.ts";
+import { checkBlockers, resolveNodeInputs, stringifyTask } from "./dag-helpers.ts";
 import type { DagRegistry } from "./types.ts";
 import {
   isAgentRefusal,
@@ -271,7 +271,7 @@ export function createDagWorkflow(
         { idempotent: true },
       );
       // Validation + ordering are pure; safe to re-run on every replay.
-      validateDag(dag);
+      validateDag({ dag });
       const order = topologicalOrder(dag);
 
       const nodeById = new Map<string, DagNode>(dag.nodes.map((n) => [n.id, n]));
@@ -486,14 +486,7 @@ export function createDagWorkflow(
           };
         }
         const text = result.answer;
-        return {
-          spend,
-          ok: true,
-          output:
-            node.outputPath !== undefined
-              ? pickPath({ text, ...nodeInput }, node.outputPath)
-              : text,
-        };
+        return { spend, ok: true, output: text };
       }
 
       try {

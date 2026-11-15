@@ -7,7 +7,8 @@
 // ---------------------------------------------------------------------------
 
 import { validateDag } from "../dag/validate.ts";
-import type { DagFilter, DagRecipe } from "../dag/types.ts";
+import { recipeIssues } from "../dag/recipe-schema.ts";
+import { DagValidationError, type DagFilter, type DagRecipe } from "../dag/types.ts";
 import {
   FRAGMENT_VERSION_SEPARATOR,
   type FragmentFilter,
@@ -133,7 +134,7 @@ export const SKILL_KIND: RegistryKind<SkillRecipe, SkillFilter, SkillRecipeInput
 export const DAG_KIND: RegistryKind<DagRecipe, DagFilter> = {
   name: "dag",
   // Bad graphs never enter the store: `validateDag` throws DagValidationError.
-  prepare: ({ input }) => {
+  prepare: ({ id, input }) => {
     const recipe: DagRecipe = {
       nodes: input.nodes,
       edges: input.edges,
@@ -141,7 +142,9 @@ export const DAG_KIND: RegistryKind<DagRecipe, DagFilter> = {
       terminals: input.terminals,
       ...(input.metadata !== undefined && { metadata: input.metadata }),
     };
-    validateDag(recipe);
+    const issues = recipeIssues(recipe);
+    if (issues.length > 0) throw new DagValidationError(issues);
+    validateDag({ dag: recipe, dagId: id });
     return recipe;
   },
   facets: ({ body }) => facetsOf({ tags: body.metadata?.tags }),

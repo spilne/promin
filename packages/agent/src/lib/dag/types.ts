@@ -54,24 +54,14 @@ export type Condition =
   | { readonly kind: "or"; readonly any: ReadonlyArray<Condition> }
   | { readonly kind: "not"; readonly of: Condition };
 
-export interface DagNode {
+export interface NodeBase {
   readonly id: string;
-  /**
-   * Recipe id in the AgentRegistry. Required for `kind: "agent"`.
-   * The executor resolves this to an Agent at run time.
-   */
-  readonly agentId: string;
   /**
    * How to build this node's input. Keys are field names on the agent's
    * input shape; values describe where to fetch them from. The executor
    * assembles `{ [field]: <resolved value> }` and passes it as input.
    */
   readonly inputs: Readonly<Record<string, NodeInputSource>>;
-  /**
-   * Optional: when the agent's output isn't a string, project a field
-   * out of the structured output. Defaults to `text` (matches AgentRunOutput).
-   */
-  readonly outputPath?: string;
   /**
    * Failure policy. Default `"abort"` halts the whole run.
    *   - `"skip"` — record the failure, mark this node's output null,
@@ -82,16 +72,19 @@ export interface DagNode {
   readonly onError?: "abort" | "skip";
 }
 
+export interface AgentNode extends NodeBase {
+  readonly kind: "agent";
+  /** Recipe id in the AgentRegistry. The executor resolves it at run time. */
+  readonly agentId: string;
+}
+
+export type DagNode = AgentNode;
+
 export interface DagEdge {
   readonly from: string;
   readonly to: string;
-  /**
-   * Optional condition. When unset, the edge always fires. When set,
-   * the executor evaluates the condition against the source node's
-   * output before activating the target. v0 supports a string-equals
-   * shape only; richer conditions land later as a dedicated node kind.
-   */
-  readonly condition?: { readonly kind: "equals"; readonly path: string; readonly value: string };
+  /** Optional condition evaluated against the source node's output. */
+  readonly condition?: Condition;
 }
 
 export interface AgenticDagRecipe {

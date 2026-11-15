@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import type { DagEdge, DagNode, NodeInputSource } from "./types.ts";
+import { evaluateCondition } from "./conditions.ts";
 
 /**
  * Dotted-path getter on a plain object/string. `""` returns the root.
@@ -47,8 +48,7 @@ export function checkBlockers(args: {
       return `upstream node ${e.from} failed`;
     }
     if (e.condition) {
-      const observed = pickPath(args.outputs[e.from], e.condition.path);
-      if (observed !== e.condition.value) {
+      if (!evaluateCondition({ condition: e.condition, value: args.outputs[e.from] })) {
         return `edge condition not met from ${e.from}`;
       }
     }

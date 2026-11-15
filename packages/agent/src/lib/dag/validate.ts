@@ -13,7 +13,8 @@
 
 import { type DagGraph, DagValidationError } from "./types.ts";
 
-export function validateDag(dag: DagGraph): void {
+export function validateDag(params: { dag: DagGraph; dagId?: string }): void {
+  const { dag } = params;
   const issues: string[] = [];
   const nodeIds = new Set(dag.nodes.map((n) => n.id));
 

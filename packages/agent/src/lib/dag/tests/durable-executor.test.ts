@@ -21,7 +21,7 @@ import { createDagWorkflow, type DurableDagInput } from "../durable-executor.ts"
 import { createRegistryAgentResolver } from "../registry-agent-resolver.ts";
 import type { AgentResolver, AgenticDagRecipe, DagRunScope } from "../types.ts";
 import { InMemoryDagRegistry } from "../../versioned-registry/in-memory-registries.ts";
-import { SCOPE, makeResolver, stubAgent, textOnly } from "./dag-test-kit.ts";
+import { SCOPE, makeResolver, runDag, stubAgent, textOnly } from "./dag-test-kit.ts";
 
 /** DAGs run by reference: register `dag` and name it in the run input. */
 const dags = new InMemoryDagRegistry();
@@ -51,9 +51,24 @@ const linear: AgenticDagRecipe = {
   id: "linear",
   version: "v1",
   nodes: [
-    { id: "n1", agentId: "upper", inputs: { task: { kind: "initial", path: "task" } } },
-    { id: "n2", agentId: "exclaim", inputs: { task: { kind: "node", nodeId: "n1", path: "" } } },
-    { id: "n3", agentId: "wrap", inputs: { task: { kind: "node", nodeId: "n2", path: "" } } },
+    {
+      id: "n1",
+      kind: "agent",
+      agentId: "upper",
+      inputs: { task: { kind: "initial", path: "task" } },
+    },
+    {
+      id: "n2",
+      kind: "agent",
+      agentId: "exclaim",
+      inputs: { task: { kind: "node", nodeId: "n1", path: "" } },
+    },
+    {
+      id: "n3",
+      kind: "agent",
+      agentId: "wrap",
+      inputs: { task: { kind: "node", nodeId: "n2", path: "" } },
+    },
   ],
   edges: [
     { from: "n1", to: "n2" },
@@ -100,12 +115,23 @@ describe("createDagWorkflow — basic", () => {
       nodes: [
         {
           id: "a",
+          kind: "agent",
           agentId: "fails",
           inputs: { task: { kind: "initial", path: "task" } },
           onError: "skip",
         },
-        { id: "b", agentId: "id", inputs: { task: { kind: "node", nodeId: "a", path: "" } } },
-        { id: "c", agentId: "id", inputs: { task: { kind: "initial", path: "task" } } },
+        {
+          id: "b",
+          kind: "agent",
+          agentId: "id",
+          inputs: { task: { kind: "node", nodeId: "a", path: "" } },
+        },
+        {
+          id: "c",
+          kind: "agent",
+          agentId: "id",
+          inputs: { task: { kind: "initial", path: "task" } },
+        },
       ],
       edges: [{ from: "a", to: "b" }],
       entry: ["a", "c"],
@@ -136,6 +162,50 @@ describe("createDagWorkflow — basic", () => {
     expect(result.skipped).toContain("b");
     expect(result.outputs.c).toBe("x");
     expect(result.outputs.b).toBeUndefined();
+  });
+
+  it("routes on an `in` edge condition", async () => {
+    const dag: AgenticDagRecipe = {
+      id: "in-condition",
+      version: "v1",
+      nodes: [
+        {
+          id: "n1",
+          kind: "agent",
+          agentId: "say",
+          inputs: { task: { kind: "initial", path: "task" } },
+        },
+        {
+          id: "a",
+          kind: "agent",
+          agentId: "id",
+          inputs: { task: { kind: "node", nodeId: "n1", path: "" } },
+        },
+        {
+          id: "b",
+          kind: "agent",
+          agentId: "id",
+          inputs: { task: { kind: "node", nodeId: "n1", path: "" } },
+        },
+      ],
+      edges: [
+        {
+          from: "n1",
+          to: "a",
+          condition: { kind: "in", path: "", values: ["yes", "maybe"] },
+        },
+        { from: "n1", to: "b", condition: { kind: "equals", path: "", value: "no" } },
+      ],
+      entry: ["n1"],
+      terminals: ["a", "b"],
+    };
+    const { result } = await runDag({
+      dag,
+      initialInput: { task: "x" },
+      resolver: makeResolver({ say: stubAgent(() => "maybe"), id: stubAgent() }),
+    });
+    expect(Object.keys(result.nodeOutputs)).toEqual(["n1", "a"]);
+    expect(result.skipped).toEqual(["b"]);
   });
 });
 
@@ -224,7 +294,14 @@ describe("createDagWorkflow — scope", () => {
   const single: AgenticDagRecipe = {
     id: "single",
     version: "v1",
-    nodes: [{ id: "n1", agentId: "writer", inputs: { task: { kind: "initial", path: "task" } } }],
+    nodes: [
+      {
+        id: "n1",
+        kind: "agent",
+        agentId: "writer",
+        inputs: { task: { kind: "initial", path: "task" } },
+      },
+    ],
     edges: [],
     entry: ["n1"],
     terminals: ["n1"],

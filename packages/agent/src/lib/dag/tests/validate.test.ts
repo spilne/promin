@@ -8,8 +8,8 @@ describe("validateDag", () => {
       id: "cyc",
       version: "v1",
       nodes: [
-        { id: "a", agentId: "x", inputs: {} },
-        { id: "b", agentId: "x", inputs: {} },
+        { id: "a", kind: "agent", agentId: "x", inputs: {} },
+        { id: "b", kind: "agent", agentId: "x", inputs: {} },
       ],
       edges: [
         { from: "a", to: "b" },
@@ -18,19 +18,19 @@ describe("validateDag", () => {
       entry: ["a"],
       terminals: ["b"],
     };
-    expect(() => validateDag(dag)).toThrow(DagValidationError);
+    expect(() => validateDag({ dag })).toThrow(DagValidationError);
   });
 
   it("rejects edges to unknown nodes", () => {
     const dag: AgenticDagRecipe = {
       id: "bad",
       version: "v1",
-      nodes: [{ id: "a", agentId: "x", inputs: {} }],
+      nodes: [{ id: "a", kind: "agent", agentId: "x", inputs: {} }],
       edges: [{ from: "a", to: "ghost" }],
       entry: ["a"],
       terminals: ["a"],
     };
-    expect(() => validateDag(dag)).toThrow(/edge.to not in nodes/);
+    expect(() => validateDag({ dag })).toThrow(/edge.to not in nodes/);
   });
 
   it("rejects entry node pulling from another node's output", () => {
@@ -40,16 +40,17 @@ describe("validateDag", () => {
       nodes: [
         {
           id: "a",
+          kind: "agent",
           agentId: "x",
           inputs: { task: { kind: "node", nodeId: "b", path: "" } },
         },
-        { id: "b", agentId: "x", inputs: {} },
+        { id: "b", kind: "agent", agentId: "x", inputs: {} },
       ],
       edges: [{ from: "b", to: "a" }],
       entry: ["a"],
       terminals: ["a"],
     };
-    expect(() => validateDag(dag)).toThrow(/entry node a input task pulls from another node/);
+    expect(() => validateDag({ dag })).toThrow(/entry node a input task pulls from another node/);
   });
 
   it("rejects unreachable nodes", () => {
@@ -57,13 +58,13 @@ describe("validateDag", () => {
       id: "unreach",
       version: "v1",
       nodes: [
-        { id: "a", agentId: "x", inputs: {} },
-        { id: "b", agentId: "x", inputs: {} },
+        { id: "a", kind: "agent", agentId: "x", inputs: {} },
+        { id: "b", kind: "agent", agentId: "x", inputs: {} },
       ],
       edges: [],
       entry: ["a"],
       terminals: ["a"],
     };
-    expect(() => validateDag(dag)).toThrow(/not reachable from entry: b/);
+    expect(() => validateDag({ dag })).toThrow(/not reachable from entry: b/);
   });
 });

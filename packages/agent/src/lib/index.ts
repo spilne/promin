@@ -985,6 +985,8 @@ export type {
 
 // Agentic DAG — operator-authored multi-agent execution graph.
 export { pickPath } from "./dag/dag-helpers.ts";
+export { evaluateCondition, conditionDepth, MAX_CONDITION_DEPTH } from "./dag/conditions.ts";
+export { DagRecipeSchema, recipeIssues, NODE_ID_PATTERN } from "./dag/recipe-schema.ts";
 export { validateDag, topologicalOrder } from "./dag/validate.ts";
 export { AgentRefusedError, DagValidationError, isAgentRefusal } from "./dag/types.ts";
 export { createRegistryAgentResolver } from "./dag/registry-agent-resolver.ts";
@@ -999,8 +1001,12 @@ export type {
   RegisterDagInput,
   DagRunScope,
   DagNode,
+  AgentNode,
+  NodeBase,
   DagEdge,
   NodeInputSource,
+  Condition,
+  ConditionScalar,
 } from "./dag/types.ts";
 export { createDagWorkflow, DAG_WORKFLOW_NAME, dagNodeRunId } from "./dag/durable-executor.ts";
 export type {
