@@ -23,6 +23,8 @@ describe("InMemoryPendingApprovalStore — immutable snapshots", () => {
     const store = new InMemoryPendingApprovalStore();
     const recorded = await store.record({
       namespaceId: "acme",
+      agentId: "ops-bot",
+      resourceId: "alice",
       threadId: "t",
       toolCallId: "call-1",
       workflowId: "wf-1",
@@ -36,6 +38,8 @@ describe("InMemoryPendingApprovalStore — immutable snapshots", () => {
     });
     const read = await store.get({
       namespaceId: "acme",
+      agentId: "ops-bot",
+      resourceId: "alice",
       threadId: "t",
       toolCallId: "call-1",
     });

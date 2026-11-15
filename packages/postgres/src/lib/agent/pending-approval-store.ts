@@ -30,6 +30,7 @@ import type {
 } from "@promin/agent";
 import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { decodeRunSecurityContext } from "@promin/workflow";
+import { normalizeRunSecurityContext, sameRunSecurityContext } from "@promin/workflow/storage-kit";
 import { agentPendingApproval as t } from "../schema.ts";
 
 export interface PostgresPendingApprovalStoreConfig {
@@ -57,19 +58,22 @@ export class PostgresPendingApprovalStore implements PendingApprovalStore {
         namespaceId: params.namespaceId,
         threadId: params.threadId,
         toolCallId: params.toolCallId,
-        resourceId: params.resourceId ?? null,
-        agentId: params.agentId ?? null,
+        resourceId: params.resourceId,
+        agentId: params.agentId,
         workflowId: params.workflowId,
         toolName: params.toolName,
         input: params.input ?? null,
         elevated: params.elevated,
-        requestContext: params.requestContext,
+        requestContext:
+          params.requestContext === null
+            ? null
+            : normalizeRunSecurityContext(params.requestContext),
         requestedAt: DB_NOW_MS,
         expiresAt,
         status: "pending",
       })
       .onConflictDoUpdate({
-        target: [t.namespaceId, t.threadId, t.toolCallId],
+        target: [t.namespaceId, t.agentId, t.resourceId, t.threadId, t.toolCallId],
         set: {
           resourceId: sql`excluded.resource_id`,
           agentId: sql`excluded.agent_id`,
@@ -82,11 +86,12 @@ export class PostgresPendingApprovalStore implements PendingApprovalStore {
           expiresAt: sql`excluded.expires_at`,
           status: "pending",
           decidedBy: null,
+          decidedByPrincipal: null,
           decidedAt: null,
           reason: null,
           deliveredAt: null,
         },
-        setWhere: sql`${t.workflowId} <> excluded.workflow_id`,
+        setWhere: sql`${t.workflowId} <> excluded.workflow_id AND ${t.deliveredAt} IS NOT NULL`,
       });
     const row = await this.get(params);
     if (!row) throw new Error("PostgresPendingApprovalStore.record: row vanished after upsert");
@@ -101,6 +106,8 @@ export class PostgresPendingApprovalStore implements PendingApprovalStore {
   async list(params: ListPendingApprovalsParams): Promise<PendingApproval[]> {
     const conditions = [
       eq(t.namespaceId, params.namespaceId),
+      nullableEq(t.agentId, params.agentId),
+      nullableEq(t.resourceId, params.resourceId),
       params.open ? isNull(t.deliveredAt) : eq(t.status, params.status ?? "pending"),
     ];
     if (params.threadId !== undefined) conditions.push(eq(t.threadId, params.threadId));
@@ -114,6 +121,7 @@ export class PostgresPendingApprovalStore implements PendingApprovalStore {
   }
 
   async decide(params: DecidePendingApprovalParams): Promise<DecidePendingApprovalResult> {
+    const expected = snapshotExpected(params.expected);
     const isExpired = sql`(${t.expiresAt} IS NOT NULL AND ${t.expiresAt} <= ${DB_NOW_MS})`;
     const notExpired = params.approved ? sql`NOT ${isExpired}` : sql`TRUE`;
     const onlyExpired = params.onlyIfExpired ? isExpired : sql`TRUE`;
@@ -123,16 +131,31 @@ export class PostgresPendingApprovalStore implements PendingApprovalStore {
         status: sql`CASE WHEN ${isExpired} THEN 'expired' ELSE ${
           params.approved ? "approved" : "rejected"
         } END`,
-        decidedBy: params.decidedBy ?? null,
+        decidedBy: params.decidedBy ?? params.decidedByPrincipal?.id ?? null,
+        decidedByPrincipal:
+          params.decidedByPrincipal === undefined
+            ? null
+            : normalizeRunSecurityContext({ actor: params.decidedByPrincipal }).actor,
         decidedAt: DB_NOW_MS,
         reason: params.reason ?? null,
       })
-      .where(and(keyWhere(params), eq(t.status, "pending"), notExpired, onlyExpired))
+      .where(
+        and(
+          keyWhere(expected),
+          eq(t.workflowId, expected.workflowId),
+          nullableEq(t.elevated, expected.elevated),
+          nullableEq(t.requestContext, expected.requestContext),
+          eq(t.status, "pending"),
+          notExpired,
+          onlyExpired,
+        ),
+      )
       .returning();
     if (updated[0]) return { outcome: "decided", approval: toApproval(updated[0]) };
 
-    const row = await this.get(params);
+    const row = await this.get(expected);
     if (!row) return { outcome: "not_found" };
+    if (!matchesExpected(row, expected)) return { outcome: "conflict", approval: row };
     if (row.status !== "pending") return { outcome: "already_decided", approval: row };
     // Still pending, yet the update matched nothing: a live row under
     // onlyIfExpired, or an approval of an expired one.
@@ -147,16 +170,30 @@ export class PostgresPendingApprovalStore implements PendingApprovalStore {
       .where(and(keyWhere(key), isNull(t.deliveredAt)));
   }
 
-  async deleteThread(params: { namespaceId: string; threadId: string }): Promise<void> {
+  async deleteThread(params: {
+    namespaceId: string;
+    agentId: string | null;
+    resourceId: string | null;
+    threadId: string;
+  }): Promise<void> {
     await this.db
       .delete(t)
-      .where(and(eq(t.namespaceId, params.namespaceId), eq(t.threadId, params.threadId)));
+      .where(
+        and(
+          eq(t.namespaceId, params.namespaceId),
+          nullableEq(t.agentId, params.agentId),
+          nullableEq(t.resourceId, params.resourceId),
+          eq(t.threadId, params.threadId),
+        ),
+      );
   }
 }
 
 function keyWhere(key: PendingApprovalKey) {
   return and(
     eq(t.namespaceId, key.namespaceId),
+    nullableEq(t.agentId, key.agentId),
+    nullableEq(t.resourceId, key.resourceId),
     eq(t.threadId, key.threadId),
     eq(t.toolCallId, key.toolCallId),
   );
@@ -178,8 +215,43 @@ function toApproval(row: Row): PendingApproval {
     expiresAt: row.expiresAt === null ? null : Number(row.expiresAt),
     status: row.status as PendingApprovalStatus,
     decidedBy: row.decidedBy,
+    decidedByPrincipal:
+      row.decidedByPrincipal === null
+        ? null
+        : (decodeRunSecurityContext({ actor: row.decidedByPrincipal })?.actor ?? null),
     decidedAt: row.decidedAt === null ? null : Number(row.decidedAt),
     reason: row.reason,
     deliveredAt: row.deliveredAt === null ? null : Number(row.deliveredAt),
   };
+}
+
+function nullableEq(column: Parameters<typeof eq>[0], value: unknown) {
+  return value === null ? isNull(column) : eq(column, value);
+}
+
+function snapshotExpected(expected: DecidePendingApprovalParams["expected"]) {
+  return Object.freeze({
+    namespaceId: expected.namespaceId,
+    agentId: expected.agentId,
+    resourceId: expected.resourceId,
+    threadId: expected.threadId,
+    toolCallId: expected.toolCallId,
+    workflowId: expected.workflowId,
+    elevated: expected.elevated,
+    requestContext:
+      expected.requestContext === null
+        ? null
+        : normalizeRunSecurityContext(expected.requestContext),
+  });
+}
+
+function matchesExpected(
+  row: PendingApproval,
+  expected: DecidePendingApprovalParams["expected"],
+): boolean {
+  return (
+    row.workflowId === expected.workflowId &&
+    row.elevated === expected.elevated &&
+    sameRunSecurityContext(row.requestContext ?? undefined, expected.requestContext ?? undefined)
+  );
 }

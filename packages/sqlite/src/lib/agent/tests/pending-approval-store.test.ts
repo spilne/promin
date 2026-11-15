@@ -35,14 +35,23 @@ describe("SqlitePendingApprovalStore — persistence", () => {
 
     const store = SqlitePendingApprovalStore.make({ db });
     expect(
-      await store.get({ namespaceId: "acme", threadId: "t", toolCallId: "legacy" }),
+      await store.get({
+        namespaceId: "acme",
+        agentId: null,
+        resourceId: null,
+        threadId: "t",
+        toolCallId: "legacy",
+      }),
     ).toMatchObject({
       elevated: null,
       requestContext: null,
+      decidedByPrincipal: null,
     });
     expect(
       await store.record({
         namespaceId: "acme",
+        agentId: "ops-bot",
+        resourceId: "alice",
         threadId: "t",
         toolCallId: "new",
         workflowId: "wf-new",
@@ -55,6 +64,27 @@ describe("SqlitePendingApprovalStore — persistence", () => {
       elevated: false,
       requestContext: { actor: { kind: "user", id: "alice" } },
     });
+    await store.record({
+      namespaceId: "acme",
+      agentId: "other-bot",
+      resourceId: "bob",
+      threadId: "t",
+      toolCallId: "new",
+      workflowId: "wf-bob",
+      toolName: "deploy",
+      input: {},
+      elevated: false,
+      requestContext: { actor: { kind: "user", id: "bob" } },
+    });
+    expect(
+      await store.get({
+        namespaceId: "acme",
+        agentId: "other-bot",
+        resourceId: "bob",
+        threadId: "t",
+        toolCallId: "new",
+      }),
+    ).toMatchObject({ workflowId: "wf-bob" });
   });
 
   it("survives a new store instance on the same database", async () => {
@@ -62,6 +92,8 @@ describe("SqlitePendingApprovalStore — persistence", () => {
     const first = SqlitePendingApprovalStore.make({ db });
     await first.record({
       namespaceId: "acme",
+      agentId: null,
+      resourceId: null,
       threadId: "t",
       toolCallId: "c",
       workflowId: "wf",
@@ -71,7 +103,13 @@ describe("SqlitePendingApprovalStore — persistence", () => {
       requestContext: null,
     });
     const second = SqlitePendingApprovalStore.make({ db });
-    const row = await second.get({ namespaceId: "acme", threadId: "t", toolCallId: "c" });
+    const row = await second.get({
+      namespaceId: "acme",
+      agentId: null,
+      resourceId: null,
+      threadId: "t",
+      toolCallId: "c",
+    });
     expect(row).toMatchObject({ workflowId: "wf", input: { env: "prod" }, status: "pending" });
   });
 });

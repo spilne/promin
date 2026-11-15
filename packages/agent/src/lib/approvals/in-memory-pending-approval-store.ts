@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { SystemWallClock, type WallClock } from "@promin/workflow";
-import { normalizeRunSecurityContext } from "@promin/workflow/storage-kit";
+import { normalizeRunSecurityContext, sameRunSecurityContext } from "@promin/workflow/storage-kit";
 import type {
   DecidePendingApprovalParams,
   DecidePendingApprovalResult,
@@ -33,7 +33,9 @@ export class InMemoryPendingApprovalStore implements PendingApprovalStore {
     const request = snapshotRecordRequest(params);
     const k = encodeKey(request);
     const existing = this.rows.get(k);
-    if (existing && existing.workflowId === request.workflowId) return detached(existing);
+    if (existing && (existing.workflowId === request.workflowId || existing.deliveredAt === null)) {
+      return detached(existing);
+    }
     const now = this.clock.currentTimeMs();
     const row = immutable({
       namespaceId: request.namespaceId,
@@ -50,6 +52,7 @@ export class InMemoryPendingApprovalStore implements PendingApprovalStore {
       expiresAt: request.ttlMs !== undefined ? now + request.ttlMs : null,
       status: "pending",
       decidedBy: null,
+      decidedByPrincipal: null,
       decidedAt: null,
       reason: null,
       deliveredAt: null,
@@ -70,6 +73,8 @@ export class InMemoryPendingApprovalStore implements PendingApprovalStore {
       .filter(
         (r) =>
           r.namespaceId === params.namespaceId &&
+          r.agentId === params.agentId &&
+          r.resourceId === params.resourceId &&
           (params.threadId === undefined || r.threadId === params.threadId) &&
           (params.open ? r.deliveredAt === null : r.status === status),
       )
@@ -79,9 +84,11 @@ export class InMemoryPendingApprovalStore implements PendingApprovalStore {
   }
 
   async decide(params: DecidePendingApprovalParams): Promise<DecidePendingApprovalResult> {
-    const k = encodeKey(params);
+    const expected = snapshotExpected(params.expected);
+    const k = encodeKey(expected);
     const row = this.rows.get(k);
     if (!row) return { outcome: "not_found" };
+    if (!matchesExpected(row, expected)) return { outcome: "conflict", approval: detached(row) };
     if (row.status !== "pending") return { outcome: "already_decided", approval: detached(row) };
     const now = this.clock.currentTimeMs();
     const expired = row.expiresAt !== null && row.expiresAt <= now;
@@ -91,7 +98,11 @@ export class InMemoryPendingApprovalStore implements PendingApprovalStore {
     const decided = immutable({
       ...row,
       status: expired ? "expired" : params.approved ? "approved" : "rejected",
-      decidedBy: params.decidedBy ?? null,
+      decidedBy: params.decidedBy ?? params.decidedByPrincipal?.id ?? null,
+      decidedByPrincipal:
+        params.decidedByPrincipal === undefined
+          ? null
+          : normalizeRunSecurityContext({ actor: params.decidedByPrincipal }).actor,
       decidedAt: now,
       reason: params.reason ?? null,
     });
@@ -107,9 +118,19 @@ export class InMemoryPendingApprovalStore implements PendingApprovalStore {
     }
   }
 
-  async deleteThread(params: { namespaceId: string; threadId: string }): Promise<void> {
+  async deleteThread(params: {
+    namespaceId: string;
+    agentId: string | null;
+    resourceId: string | null;
+    threadId: string;
+  }): Promise<void> {
     for (const [k, r] of this.rows) {
-      if (r.namespaceId === params.namespaceId && r.threadId === params.threadId) {
+      if (
+        r.namespaceId === params.namespaceId &&
+        r.agentId === params.agentId &&
+        r.resourceId === params.resourceId &&
+        r.threadId === params.threadId
+      ) {
         this.rows.delete(k);
       }
     }
@@ -117,7 +138,13 @@ export class InMemoryPendingApprovalStore implements PendingApprovalStore {
 }
 
 function encodeKey(key: PendingApprovalKey): string {
-  return JSON.stringify([key.namespaceId, key.threadId, key.toolCallId]);
+  return JSON.stringify([
+    key.namespaceId,
+    key.agentId,
+    key.resourceId,
+    key.threadId,
+    key.toolCallId,
+  ]);
 }
 
 function snapshotRecordRequest(params: RecordPendingApprovalParams): RecordPendingApprovalParams {
@@ -136,8 +163,8 @@ function snapshotRecordRequest(params: RecordPendingApprovalParams): RecordPendi
     namespaceId,
     threadId,
     toolCallId,
-    ...(resourceId !== undefined && { resourceId }),
-    ...(agentId !== undefined && { agentId }),
+    resourceId,
+    agentId,
     workflowId,
     toolName,
     input: cloneAndFreeze(input),
@@ -154,7 +181,35 @@ function detached(row: PendingApproval): PendingApproval {
     input: cloneAndFreeze(row.input),
     requestContext:
       row.requestContext === null ? null : normalizeRunSecurityContext(row.requestContext),
+    decidedByPrincipal:
+      row.decidedByPrincipal === null
+        ? null
+        : normalizeRunSecurityContext({ actor: row.decidedByPrincipal }).actor,
   });
+}
+
+function snapshotExpected(expected: DecidePendingApprovalParams["expected"]) {
+  return Object.freeze({
+    namespaceId: expected.namespaceId,
+    agentId: expected.agentId,
+    resourceId: expected.resourceId,
+    threadId: expected.threadId,
+    toolCallId: expected.toolCallId,
+    workflowId: expected.workflowId,
+    elevated: expected.elevated,
+    requestContext:
+      expected.requestContext === null
+        ? null
+        : normalizeRunSecurityContext(expected.requestContext),
+  });
+}
+
+function matchesExpected(row: PendingApproval, expected: DecidePendingApprovalParams["expected"]) {
+  return (
+    row.workflowId === expected.workflowId &&
+    row.elevated === expected.elevated &&
+    sameRunSecurityContext(row.requestContext ?? undefined, expected.requestContext ?? undefined)
+  );
 }
 
 function immutable(row: PendingApproval): PendingApproval {

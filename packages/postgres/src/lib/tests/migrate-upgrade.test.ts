@@ -156,7 +156,13 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
     await migrate(pg.db);
     const store = new PostgresPendingApprovalStore({ db: pg.db });
     expect(
-      await store.get({ namespaceId: "acme", threadId: "t", toolCallId: "legacy" }),
+      await store.get({
+        namespaceId: "acme",
+        agentId: null,
+        resourceId: null,
+        threadId: "t",
+        toolCallId: "legacy",
+      }),
     ).toMatchObject({
       elevated: null,
       requestContext: null,
@@ -164,6 +170,8 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
     expect(
       await store.record({
         namespaceId: "acme",
+        agentId: "ops-bot",
+        resourceId: "alice",
         threadId: "t",
         toolCallId: "new",
         workflowId: "wf-new",
@@ -176,5 +184,72 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
       elevated: false,
       requestContext: { actor: { kind: "user", id: "alice" } },
     });
+  });
+
+  it("migrates approval identity into the key without losing legacy rows", async () => {
+    await migrate(pg.db, { migrationsFolder: chainFolder(4) });
+    const scopeMigration = JSON.parse(
+      readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"),
+    ).entries.find((entry: { idx: number }) => entry.idx === 5) as { when: number };
+    await pg.sql`DELETE FROM drizzle.__drizzle_migrations
+      WHERE created_at >= ${scopeMigration.when}`;
+    await pg.sql`INSERT INTO agent_pending_approval
+      (namespace_id, thread_id, tool_call_id, workflow_id, tool_name, input,
+       elevated, request_context, requested_at, status)
+      VALUES ('acme', 'legacy-thread', 'same-call', 'wf-legacy', 'deploy', '{}'::jsonb,
+       NULL, NULL, 1, 'pending')`;
+
+    await migrate(pg.db);
+    await migrate(pg.db);
+    const store = new PostgresPendingApprovalStore({ db: pg.db });
+    expect(
+      await store.get({
+        namespaceId: "acme",
+        agentId: null,
+        resourceId: null,
+        threadId: "legacy-thread",
+        toolCallId: "same-call",
+      }),
+    ).toMatchObject({ workflowId: "wf-legacy", elevated: null, requestContext: null });
+
+    const base = {
+      namespaceId: "acme",
+      threadId: "shared",
+      toolCallId: "same-call",
+      toolName: "deploy",
+      input: {},
+      elevated: false,
+      requestContext: { actor: { kind: "user" as const, id: "alice" } },
+    };
+    await store.record({
+      ...base,
+      agentId: "ops-bot",
+      resourceId: "alice",
+      workflowId: "wf-alice",
+    });
+    await store.record({
+      ...base,
+      agentId: "other-bot",
+      resourceId: "bob",
+      workflowId: "wf-bob",
+    });
+    expect(
+      await store.get({
+        namespaceId: "acme",
+        agentId: "ops-bot",
+        resourceId: "alice",
+        threadId: "shared",
+        toolCallId: "same-call",
+      }),
+    ).toMatchObject({ workflowId: "wf-alice" });
+    expect(
+      await store.get({
+        namespaceId: "acme",
+        agentId: "other-bot",
+        resourceId: "bob",
+        threadId: "shared",
+        toolCallId: "same-call",
+      }),
+    ).toMatchObject({ workflowId: "wf-bob" });
   });
 });
