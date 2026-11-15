@@ -32,6 +32,7 @@ interface Environment {
   readonly router: Router;
   readonly clock: ReturnType<typeof FakeWallClock.create>;
   readonly publicBaseUrl: string;
+  readonly oidcIssuer: FakeOidcIssuer;
 }
 
 function environment(
@@ -43,17 +44,21 @@ function environment(
       readonly canActFor?: boolean;
     }>;
     readonly publicBaseUrl?: string;
+    readonly oidcIssuer?: FakeOidcIssuer;
+    readonly fetch?: typeof fetch;
   } = {},
 ): Environment {
   const clock = FakeWallClock.create(1_000);
   const store = new InMemorySecurityStore({ clock });
+  const oidcIssuer = params.oidcIssuer ?? issuer;
   const security = createZoryaSecurity({
     store,
     loginProviders: [
       oidcLoginProvider({
-        issuer: issuer.issuer,
-        clientId: issuer.clientId,
-        clientSecret: issuer.clientSecret,
+        issuer: oidcIssuer.issuer,
+        clientId: oidcIssuer.clientId,
+        clientSecret: oidcIssuer.clientSecret,
+        ...(params.fetch !== undefined && { fetch: params.fetch }),
       }),
     ],
     publicBaseUrl: params.publicBaseUrl ?? PUBLIC_BASE_URL,
@@ -72,6 +77,7 @@ function environment(
     router,
     clock,
     publicBaseUrl: params.publicBaseUrl ?? PUBLIC_BASE_URL,
+    oidcIssuer,
   };
 }
 
@@ -81,8 +87,11 @@ async function login(params: {
   readonly mode?: FakeTokenMode;
   readonly emailVerified?: boolean;
 }): Promise<{ readonly response: Response; readonly sessionCookie?: string }> {
-  issuer.nextLogin({ email: params.email, emailVerified: params.emailVerified });
-  issuer.signWith(params.mode ?? "valid");
+  params.env.oidcIssuer.nextLogin({
+    email: params.email,
+    emailVerified: params.emailVerified,
+  });
+  params.env.oidcIssuer.signWith(params.mode ?? "valid");
   const start = await params.env.router.handle(
     new Request(`${params.env.publicBaseUrl}/auth/login/oidc`),
   );
@@ -174,7 +183,13 @@ describe("OIDC security module", () => {
   });
 
   it("bad tokens", async () => {
-    for (const mode of ["wrong-key", "wrong-issuer", "wrong-audience", "expired"] as const) {
+    for (const mode of [
+      "wrong-key",
+      "wrong-issuer",
+      "wrong-audience",
+      "expired",
+      "missing-exp",
+    ] as const) {
       const env = environment();
       const result = await login({ env, email: `${mode}@example.com`, mode });
       expect(result.response.status).toBe(401);
@@ -190,6 +205,50 @@ describe("OIDC security module", () => {
     expect(unverified.response.status).toBe(403);
     expect(await errorCode(unverified.response)).toBe("email_not_verified");
     expect(await env.store.listUsers()).toEqual([]);
+  });
+
+  it("preserves a trailing slash in the configured, discovered, and token issuer", async () => {
+    const trailingSlashIssuer = await startFakeOidcIssuer({ trailingSlash: true });
+    try {
+      expect(trailingSlashIssuer.issuer.endsWith("/")).toBeTrue();
+      const env = environment({ oidcIssuer: trailingSlashIssuer });
+      const result = await login({ env, email: "slash@example.com" });
+      expect(result.response.status).toBe(302);
+      expect(await env.store.listUsers()).toHaveLength(1);
+    } finally {
+      await trailingSlashIssuer.stop();
+    }
+  });
+
+  it("refreshes the JWKS when the issuer rotates to an unknown signing key", async () => {
+    const rotatingIssuer = await startFakeOidcIssuer();
+    let jwksRequests = 0;
+    const trackingFetch = Object.assign(
+      async (
+        input: Parameters<typeof fetch>[0],
+        init?: Parameters<typeof fetch>[1],
+      ): Promise<Response> => {
+        const url = input instanceof Request ? input.url : input.toString();
+        if (new URL(url).pathname === "/jwks") jwksRequests += 1;
+        return fetch(input, init);
+      },
+      { preconnect: fetch.preconnect },
+    );
+    try {
+      const env = environment({
+        oidcIssuer: rotatingIssuer,
+        fetch: trackingFetch,
+      });
+      expect((await login({ env, email: "before@example.com" })).response.status).toBe(302);
+      expect(jwksRequests).toBe(1);
+
+      await rotatingIssuer.rotateSigningKey();
+      expect((await login({ env, email: "after@example.com" })).response.status).toBe(302);
+      expect(jwksRequests).toBe(2);
+      expect(await env.store.listUsers()).toHaveLength(2);
+    } finally {
+      await rotatingIssuer.stop();
+    }
   });
 
   it("state mismatch answers 400 invalid_state", async () => {

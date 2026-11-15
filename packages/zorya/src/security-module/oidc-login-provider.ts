@@ -1,4 +1,4 @@
-import { createLocalJWKSet, jwtVerify } from "jose";
+import { createRemoteJWKSet, customFetch, jwtVerify } from "jose";
 import { z } from "zod";
 import type { LoginIdentity, LoginProvider } from "./login-provider.ts";
 
@@ -10,33 +10,6 @@ const DiscoverySchema = z.object({
 });
 
 const TokenResponseSchema = z.object({ id_token: z.string().min(1) });
-const JwkSchema = z.object({
-  kty: z.string().min(1),
-  alg: z.string().optional(),
-  key_ops: z.array(z.string()).optional(),
-  ext: z.boolean().optional(),
-  use: z.string().optional(),
-  x5c: z.array(z.string()).optional(),
-  x5t: z.string().optional(),
-  "x5t#S256": z.string().optional(),
-  x5u: z.string().optional(),
-  kid: z.string().optional(),
-  crv: z.string().optional(),
-  d: z.string().optional(),
-  dp: z.string().optional(),
-  dq: z.string().optional(),
-  e: z.string().optional(),
-  k: z.string().optional(),
-  n: z.string().optional(),
-  p: z.string().optional(),
-  q: z.string().optional(),
-  qi: z.string().optional(),
-  x: z.string().optional(),
-  y: z.string().optional(),
-  pub: z.string().optional(),
-  priv: z.string().optional(),
-});
-const JwksSchema = z.object({ keys: z.array(JwkSchema) });
 const IdentityClaimsSchema = z.object({
   sub: z.string().min(1),
   email: z.string().min(1),
@@ -54,20 +27,20 @@ export interface OidcLoginProviderConfig {
 /** Generic authorization-code OIDC provider with PKCE and verified ID tokens. */
 export function oidcLoginProvider(config: OidcLoginProviderConfig): LoginProvider {
   const id = config.id ?? "oidc";
-  const issuer = config.issuer.replace(/\/$/, "");
+  const issuer = config.issuer;
   const fetcher = config.fetch ?? fetch;
   let discoveryPromise: Promise<z.infer<typeof DiscoverySchema>> | undefined;
-  let jwksPromise: Promise<ReturnType<typeof createLocalJWKSet>> | undefined;
+  let jwksPromise: Promise<ReturnType<typeof createRemoteJWKSet>> | undefined;
 
   const discovery = () => {
     discoveryPromise ??= (async () => {
       const metadata = await fetchJson({
         fetcher,
-        url: `${issuer}/.well-known/openid-configuration`,
+        url: discoveryUrl(issuer),
         schema: DiscoverySchema,
         label: "OIDC discovery",
       });
-      if (metadata.issuer.replace(/\/$/, "") !== issuer) {
+      if (metadata.issuer !== issuer) {
         throw new Error("OIDC discovery issuer does not match configured issuer");
       }
       return metadata;
@@ -78,13 +51,12 @@ export function oidcLoginProvider(config: OidcLoginProviderConfig): LoginProvide
   const verifier = async () => {
     jwksPromise ??= (async () => {
       const metadata = await discovery();
-      const parsed = await fetchJson({
-        fetcher,
-        url: metadata.jwks_uri,
-        schema: JwksSchema,
-        label: "OIDC JWKS",
+      return createRemoteJWKSet(new URL(metadata.jwks_uri), {
+        // On an unknown kid, immediately reload once so planned provider key
+        // rotations do not require a Zorya restart.
+        cooldownDuration: 0,
+        [customFetch]: (url, options) => fetcher(url, options),
       });
-      return createLocalJWKSet(parsed);
     })();
     return jwksPromise;
   };
@@ -123,6 +95,7 @@ export function oidcLoginProvider(config: OidcLoginProviderConfig): LoginProvide
       const verified = await jwtVerify(tokenResponse.id_token, await verifier(), {
         issuer,
         audience: config.clientId,
+        requiredClaims: ["exp"],
       });
       const claims = IdentityClaimsSchema.parse(verified.payload);
       return {
@@ -132,6 +105,11 @@ export function oidcLoginProvider(config: OidcLoginProviderConfig): LoginProvide
       };
     },
   };
+}
+
+function discoveryUrl(issuer: string): string {
+  const base = issuer.endsWith("/") ? issuer : `${issuer}/`;
+  return new URL(".well-known/openid-configuration", base).toString();
 }
 
 async function fetchJson<S extends z.ZodType>(params: {
