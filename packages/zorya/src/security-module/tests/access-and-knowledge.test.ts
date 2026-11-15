@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { SystemWallClock } from "@promin/workflow";
 import { Router } from "../../server/router.ts";
 import {
+  createSecurityRouteAccessGuard,
   ORG_WIDE_NAMESPACE,
   principalRef,
   setRequestPrincipal,
@@ -43,7 +45,11 @@ function environment(
     ...(params.serviceAccounts && { serviceAccounts: params.serviceAccounts }),
     secret: SECRET,
   });
-  const router = new Router({ logger: { error() {} } });
+  const logger = { error() {} };
+  const router = new Router({
+    logger,
+    accessGuard: createSecurityRouteAccessGuard({ security, clock: SystemWallClock, logger }),
+  });
   security.mount?.(router);
   return { store, security, router };
 }
@@ -318,6 +324,35 @@ describe("access-role administration", () => {
       rolesAt(await env.security.resolvePrincipal({ kind: "user", id: user.id }), "constructor"),
     ).toEqual(["builder"]);
   });
+
+  it("a knowledge-manager grants only inside the bound namespace", async () => {
+    const env = environment();
+    const user = await createUser({
+      env,
+      email: "manager@example.com",
+      bindings: [{ namespaceId: "team-a", accessRole: "knowledge-manager" }],
+    });
+    const manager = await principal(env, user);
+    const allowed = await handleAs({
+      env,
+      principal: manager,
+      method: "PUT",
+      path: "/api/access/knowledge-grants",
+      body: { namespaceId: "team-a", baseId: "docs", accessRole: "member" },
+    });
+    expect(allowed.status).toBe(204);
+    const denied = await handleAs({
+      env,
+      principal: manager,
+      method: "PUT",
+      path: "/api/access/knowledge-grants",
+      body: { namespaceId: "team-b", baseId: "docs", accessRole: "member" },
+    });
+    expect(denied.status).toBe(403);
+    expect(await env.store.listKnowledgeGrants({ namespaceId: "team-b", baseId: "docs" })).toEqual(
+      [],
+    );
+  });
 });
 
 describe("namespace and knowledge access", () => {
@@ -529,7 +564,7 @@ describe("namespace and knowledge access", () => {
     ).toBeFalse();
   });
 
-  it("knowledge.use: admin and knowledge-manager always have access", async () => {
+  it("knowledge.use: admin is unrestricted; knowledge-manager still needs a text grant", async () => {
     const env = environment();
     const adminUser = await createUser({
       env,
@@ -545,8 +580,102 @@ describe("namespace and knowledge access", () => {
     const manager = await principal(env, managerUser);
 
     expect(await canUseKnowledgeBase(env, admin, "any-team", "ungranted")).toBeTrue();
-    expect(await canUseKnowledgeBase(env, manager, "team-a", "ungranted")).toBeTrue();
+    expect(await canUseKnowledgeBase(env, manager, "team-a", "ungranted")).toBeFalse();
+    await env.store.putKnowledgeGrant({
+      namespaceId: "team-a",
+      baseId: "docs",
+      accessRole: "knowledge-manager",
+    });
+    expect(await canUseKnowledgeBase(env, manager, "team-a", "docs")).toBeTrue();
     expect(await canUseKnowledgeBase(env, manager, "team-b", "ungranted")).toBeFalse();
+  });
+
+  it("knowledge-manager may manage knowledge only in the bound namespace", async () => {
+    const env = environment();
+    const managerUser = await createUser({
+      env,
+      email: "manager@example.com",
+      bindings: [{ namespaceId: "team-a", accessRole: "knowledge-manager" }],
+    });
+    const unboundUser = await createUser({ env, email: "unbound@example.com" });
+    const manager = await principal(env, managerUser);
+    const unbound = await principal(env, unboundUser);
+    for (const action of ["read", "create", "update", "delete", "grant"] as const) {
+      const permission = { resource: "knowledge" as const, action };
+      expect(
+        await env.security.authorize({
+          context: { actor: manager, effective: principalRef(manager) },
+          permission,
+          resource: { kind: "knowledge", namespaceId: "team-a", id: "docs" },
+        }),
+      ).toEqual({ allowed: true, reason: "access_role_allow" });
+      expect(
+        await env.security.authorize({
+          context: { actor: manager, effective: principalRef(manager) },
+          permission,
+          resource: { kind: "knowledge", namespaceId: "team-b", id: "docs" },
+        }),
+      ).toEqual({ allowed: false, reason: "permission_denied" });
+      expect(
+        await env.security.authorize({
+          context: { actor: unbound, effective: principalRef(unbound) },
+          permission,
+          resource: { kind: "knowledge", namespaceId: "team-a", id: "docs" },
+        }),
+      ).toEqual({ allowed: false, reason: "permission_denied" });
+    }
+    for (const action of ["use", "inspect-text"] as const) {
+      expect(
+        await env.security.authorize({
+          context: { actor: manager, effective: principalRef(manager) },
+          permission: { resource: "knowledge", action },
+          resource: { kind: "knowledge", namespaceId: "team-a", id: "docs" },
+        }),
+      ).toEqual({ allowed: false, reason: "permission_denied" });
+    }
+  });
+
+  it("agent-manager and auditor follow the built-in route permission matrix", async () => {
+    const env = environment();
+    const managerUser = await createUser({
+      env,
+      email: "agents@example.com",
+      bindings: [{ namespaceId: ORG_WIDE_NAMESPACE, accessRole: "agent-manager" }],
+    });
+    const auditorUser = await createUser({
+      env,
+      email: "auditor@example.com",
+      bindings: [{ namespaceId: ORG_WIDE_NAMESPACE, accessRole: "auditor" }],
+    });
+    const manager = await principal(env, managerUser);
+    const auditor = await principal(env, auditorUser);
+    const authorize = (value: Principal, permission: AuthorizationRequest["permission"]) =>
+      env.security.authorize({
+        context: { actor: value, effective: principalRef(value) },
+        permission,
+        resource: { kind: permission.resource, namespaceId: ORG_WIDE_NAMESPACE } as never,
+      } as AuthorizationRequest);
+
+    expect(await authorize(manager, { resource: "skill", action: "update" })).toEqual({
+      allowed: true,
+      reason: "access_role_allow",
+    });
+    expect(await authorize(manager, { resource: "namespace", action: "update" })).toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
+    expect(await authorize(auditor, { resource: "workflow", action: "read" })).toEqual({
+      allowed: true,
+      reason: "access_role_allow",
+    });
+    expect(await authorize(auditor, { resource: "workflow", action: "update" })).toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
+    expect(await authorize(auditor, { resource: "secret", action: "list" })).toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
   });
 
   it("knowledge.use: granting a caller role allows it; revoking denies the next call", async () => {

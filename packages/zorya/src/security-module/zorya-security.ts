@@ -198,15 +198,29 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
       }
       const roles = rolesFor(principal, resource.namespaceId);
       if (roles.has("admin")) return { allowed: true, reason: "access_role_allow" };
+      if (roles.has("auditor") && isAuditorPermission(permission)) {
+        return { allowed: true, reason: "access_role_allow" };
+      }
+      if (roles.has("agent-manager") && isAgentManagerPermission(permission)) {
+        return { allowed: true, reason: "access_role_allow" };
+      }
       if (permission.resource === "agent" && permission.action === "invoke") {
         return roles.size > 0
           ? { allowed: true, reason: "access_role_allow" }
           : { allowed: false, reason: "namespace_denied" };
       }
-      if (permission.resource === "knowledge" && permission.action === "use") {
-        if (roles.has("knowledge-manager")) {
-          return { allowed: true, reason: "access_role_allow" };
-        }
+      if (
+        permission.resource === "knowledge" &&
+        permission.action !== "use" &&
+        permission.action !== "inspect-text" &&
+        roles.has("knowledge-manager")
+      ) {
+        return { allowed: true, reason: "access_role_allow" };
+      }
+      if (
+        permission.resource === "knowledge" &&
+        (permission.action === "use" || permission.action === "inspect-text")
+      ) {
         if (!resource.id) return { allowed: false, reason: "permission_denied" };
         const grants = await config.store.listKnowledgeGrants({
           namespaceId: resource.namespaceId,
@@ -233,6 +247,34 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
       mountAccessRoutes({ router, store: config.store });
     },
   };
+}
+
+const AGENT_MANAGER_RESOURCES = new Set([
+  "agent",
+  "agent-role",
+  "skill",
+  "fragment",
+  "toolset",
+  "eval",
+  "schedule",
+  "workflow",
+  "dag",
+]);
+
+function isAgentManagerPermission(permission: { readonly resource: string }): boolean {
+  return AGENT_MANAGER_RESOURCES.has(permission.resource);
+}
+
+function isAuditorPermission(permission: {
+  readonly resource: string;
+  readonly action: string;
+}): boolean {
+  if (permission.resource === "audit")
+    return permission.action === "search" || permission.action === "export";
+  if (permission.resource === "thread")
+    return permission.action === "read" || permission.action === "view-trace";
+  if (permission.resource === "secret") return false;
+  return permission.action === "read" || permission.action === "list";
 }
 
 function samePrincipal(left: PrincipalRef, right: PrincipalRef): boolean {

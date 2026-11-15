@@ -5,7 +5,7 @@
 
 import type { SecretsStorage } from "@promin/agent";
 import type { NamespaceRegistry } from "@promin/workflow";
-import type { Router } from "../router.ts";
+import type { RouteTargetRequest, Router } from "../router.ts";
 import type { ScopeAuthorizer } from "../routes/agent-gateway-kit.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaDags } from "../services/dags/index.ts";
@@ -60,6 +60,12 @@ import {
   promoteSkill,
   updateSkill,
 } from "../routes/skills.ts";
+import {
+  bodyNamespaceTarget,
+  orgTarget,
+  protectedAccess,
+  queryNamespaceTarget,
+} from "./route-security.ts";
 
 export function mountSkills(params: {
   readonly router: Router;
@@ -72,17 +78,64 @@ export function mountSkills(params: {
     ...(agents !== undefined && { agents: agents.registry }),
     ...(agents?.roles !== undefined && { roles: agents.roles }),
   };
-  router
-    .get("/api/skills", listSkills(skillDeps))
-    .post("/api/skills", createSkill(skillDeps))
-    // `_sources` before `:id` so the literal segment isn't shadowed (skill
-    // ids starting with `_` are rejected at create time).
-    .get("/api/skills/_sources", listSkillSources({ registry: skills.registry }))
-    .get("/api/skills/:id", getSkill(skillDeps))
-    .patch("/api/skills/:id", updateSkill(skillDeps))
-    .delete("/api/skills/:id", deleteSkill(skillDeps))
-    .get("/api/skills/:id/versions", listSkillVersions(skillDeps))
-    .post("/api/skills/:id/promote", promoteSkill(skillDeps));
+  const route = (
+    method: string,
+    path: string,
+    access: Parameters<Router["route"]>[0]["access"],
+    handler: Parameters<Router["route"]>[0]["handler"],
+  ) => router.route({ method, path, access, handler });
+  route(
+    "GET",
+    "/api/skills",
+    protectedAccess({ resource: "skill", action: "read" }),
+    listSkills(skillDeps),
+  );
+  route(
+    "POST",
+    "/api/skills",
+    protectedAccess({ resource: "skill", action: "create" }),
+    createSkill(skillDeps),
+  );
+  // `_sources` before `:id` so the literal segment isn't shadowed (skill
+  // ids starting with `_` are rejected at create time).
+  route(
+    "GET",
+    "/api/skills/_sources",
+    protectedAccess({ resource: "skill", action: "read" }),
+    listSkillSources({ registry: skills.registry }),
+  );
+  const skill = orgTarget({ kind: "skill", idParam: "id" });
+  route(
+    "GET",
+    "/api/skills/:id",
+    protectedAccess({ resource: "skill", action: "read", target: skill }),
+    getSkill(skillDeps),
+  );
+  route(
+    "PATCH",
+    "/api/skills/:id",
+    protectedAccess({ resource: "skill", action: "update", target: skill }),
+    updateSkill(skillDeps),
+  );
+  // The vocabulary models removal through the kill-switch permission.
+  route(
+    "DELETE",
+    "/api/skills/:id",
+    protectedAccess({ resource: "skill", action: "disable", target: skill }),
+    deleteSkill(skillDeps),
+  );
+  route(
+    "GET",
+    "/api/skills/:id/versions",
+    protectedAccess({ resource: "skill", action: "read", target: skill }),
+    listSkillVersions(skillDeps),
+  );
+  route(
+    "POST",
+    "/api/skills/:id/promote",
+    protectedAccess({ resource: "skill", action: "update", target: skill }),
+    promoteSkill(skillDeps),
+  );
 }
 
 export function mountFragments(params: {
@@ -96,17 +149,64 @@ export function mountFragments(params: {
     ...(agents !== undefined && { agents: agents.registry }),
     ...(agents?.roles !== undefined && { roles: agents.roles }),
   };
-  router
-    .get("/api/fragments", listFragments(fragmentDeps))
-    .post("/api/fragments", createFragment(fragmentDeps))
-    // `_sources` before `:id` so the literal segment isn't shadowed
-    // (operator-supplied fragment ids starting with `_` are rejected).
-    .get("/api/fragments/_sources", listFragmentSources({ registry: fragments.registry }))
-    .get("/api/fragments/:id", getFragment(fragmentDeps))
-    .patch("/api/fragments/:id", updateFragment(fragmentDeps))
-    .delete("/api/fragments/:id", deleteFragment(fragmentDeps))
-    .get("/api/fragments/:id/versions", listFragmentVersions(fragmentDeps))
-    .post("/api/fragments/:id/promote", promoteFragment(fragmentDeps));
+  const route = (
+    method: string,
+    path: string,
+    access: Parameters<Router["route"]>[0]["access"],
+    handler: Parameters<Router["route"]>[0]["handler"],
+  ) => router.route({ method, path, access, handler });
+  route(
+    "GET",
+    "/api/fragments",
+    protectedAccess({ resource: "fragment", action: "read" }),
+    listFragments(fragmentDeps),
+  );
+  route(
+    "POST",
+    "/api/fragments",
+    protectedAccess({ resource: "fragment", action: "create" }),
+    createFragment(fragmentDeps),
+  );
+  // `_sources` before `:id` so the literal segment isn't shadowed
+  // (operator-supplied fragment ids starting with `_` are rejected).
+  route(
+    "GET",
+    "/api/fragments/_sources",
+    protectedAccess({ resource: "fragment", action: "read" }),
+    listFragmentSources({ registry: fragments.registry }),
+  );
+  const fragment = orgTarget({ kind: "fragment", idParam: "id" });
+  route(
+    "GET",
+    "/api/fragments/:id",
+    protectedAccess({ resource: "fragment", action: "read", target: fragment }),
+    getFragment(fragmentDeps),
+  );
+  route(
+    "PATCH",
+    "/api/fragments/:id",
+    protectedAccess({ resource: "fragment", action: "update", target: fragment }),
+    updateFragment(fragmentDeps),
+  );
+  route(
+    "DELETE",
+    "/api/fragments/:id",
+    // Fragment removal is governed by the vocabulary's lifecycle/disable permission.
+    protectedAccess({ resource: "fragment", action: "disable", target: fragment }),
+    deleteFragment(fragmentDeps),
+  );
+  route(
+    "GET",
+    "/api/fragments/:id/versions",
+    protectedAccess({ resource: "fragment", action: "read", target: fragment }),
+    listFragmentVersions(fragmentDeps),
+  );
+  route(
+    "POST",
+    "/api/fragments/:id/promote",
+    protectedAccess({ resource: "fragment", action: "update", target: fragment }),
+    promoteFragment(fragmentDeps),
+  );
 }
 
 export function mountSecrets(params: {
@@ -122,10 +222,51 @@ export function mountSecrets(params: {
     ...(params.namespaces !== undefined && { namespaces: params.namespaces }),
     ...(params.authorizeScope !== undefined && { authorizeScope: params.authorizeScope }),
   };
-  params.router
-    .post("/api/secrets", createSecret(sec))
-    .get("/api/secrets", listSecrets(sec))
-    .delete("/api/secrets/:key", deleteSecret(sec));
+  const createTarget = async ({ request }: RouteTargetRequest) => {
+    let namespaceId = "org";
+    try {
+      const body = (await request.clone().json()) as {
+        scope?: { kind?: unknown; namespaceId?: unknown };
+      };
+      if (
+        (body.scope?.kind === "namespace" || body.scope?.kind === "resource") &&
+        typeof body.scope.namespaceId === "string" &&
+        body.scope.namespaceId.length > 0
+      )
+        namespaceId = body.scope.namespaceId;
+    } catch {}
+    return { kind: "secret" as const, namespaceId };
+  };
+  const queryTarget = ({ request, params: route }: RouteTargetRequest) => {
+    const query = new URL(request.url).searchParams;
+    const scope = query.get("scope") ?? "global";
+    const namedNamespace = query.get("namespaceId");
+    const namespaceId =
+      (scope === "namespace" || scope === "resource") && namedNamespace ? namedNamespace : "org";
+    return {
+      kind: "secret" as const,
+      namespaceId,
+      ...(route.key !== undefined && { id: route.key }),
+    };
+  };
+  params.router.route({
+    method: "POST",
+    path: "/api/secrets",
+    access: protectedAccess({ resource: "secret", action: "write", target: createTarget }),
+    handler: createSecret(sec),
+  });
+  params.router.route({
+    method: "GET",
+    path: "/api/secrets",
+    access: protectedAccess({ resource: "secret", action: "list", target: queryTarget }),
+    handler: listSecrets(sec),
+  });
+  params.router.route({
+    method: "DELETE",
+    path: "/api/secrets/:key",
+    access: protectedAccess({ resource: "secret", action: "delete", target: queryTarget }),
+    handler: deleteSecret(sec),
+  });
 }
 
 export function mountDags(params: {
@@ -145,15 +286,60 @@ export function mountDags(params: {
     ...(agents.budgets !== undefined && { budgets: agents.budgets }),
     ...(params.namespaces !== undefined && { namespaces: params.namespaces }),
   };
-  params.router
-    .get("/api/dags", listDags(dagDeps))
-    .post("/api/dags", createDag(dagDeps))
-    .get("/api/dags/:id", getDag(dagDeps))
-    .patch("/api/dags/:id", updateDag(dagDeps))
-    .delete("/api/dags/:id", deleteDag(dagDeps))
-    .get("/api/dags/:id/versions", listDagVersions(dagDeps))
-    .post("/api/dags/:id/promote", promoteDag(dagDeps))
-    .post("/api/dags/:id/run", runDag(dagDeps));
+  const dag = orgTarget({ kind: "dag", idParam: "id" });
+  params.router.route({
+    method: "GET",
+    path: "/api/dags",
+    access: protectedAccess({ resource: "dag", action: "read" }),
+    handler: listDags(dagDeps),
+  });
+  params.router.route({
+    method: "POST",
+    path: "/api/dags",
+    access: protectedAccess({ resource: "dag", action: "create" }),
+    handler: createDag(dagDeps),
+  });
+  params.router.route({
+    method: "GET",
+    path: "/api/dags/:id",
+    access: protectedAccess({ resource: "dag", action: "read", target: dag }),
+    handler: getDag(dagDeps),
+  });
+  params.router.route({
+    method: "PATCH",
+    path: "/api/dags/:id",
+    access: protectedAccess({ resource: "dag", action: "update", target: dag }),
+    handler: updateDag(dagDeps),
+  });
+  params.router.route({
+    method: "DELETE",
+    path: "/api/dags/:id",
+    // DAG removal changes the registered definition; the vocabulary has no separate delete verb.
+    access: protectedAccess({ resource: "dag", action: "update", target: dag }),
+    handler: deleteDag(dagDeps),
+  });
+  params.router.route({
+    method: "GET",
+    path: "/api/dags/:id/versions",
+    access: protectedAccess({ resource: "dag", action: "read", target: dag }),
+    handler: listDagVersions(dagDeps),
+  });
+  params.router.route({
+    method: "POST",
+    path: "/api/dags/:id/promote",
+    access: protectedAccess({ resource: "dag", action: "update", target: dag }),
+    handler: promoteDag(dagDeps),
+  });
+  params.router.route({
+    method: "POST",
+    path: "/api/dags/:id/run",
+    access: protectedAccess({
+      resource: "run",
+      action: "trigger",
+      target: bodyNamespaceTarget({ kind: "run", idParam: "id" }),
+    }),
+    handler: runDag(dagDeps),
+  });
 }
 
 export function mountKnowledgeBases(params: {
@@ -170,20 +356,93 @@ export function mountKnowledgeBases(params: {
     ...(agents?.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
     ...(params.namespaces !== undefined && { namespaces: params.namespaces }),
   };
-  params.router
-    .get("/api/knowledge-bases", listKnowledgeBases(deps))
-    .post("/api/knowledge-bases", createKnowledgeBase(deps))
-    // `_adapters` before `:id` so the literal segment isn't shadowed
-    // (knowledge base ids cannot start with `_`).
-    .get("/api/knowledge-bases/_adapters", listKnowledgeSourceAdapters(deps))
-    .get("/api/knowledge-bases/:id", getKnowledgeBase(deps))
-    .patch("/api/knowledge-bases/:id", updateKnowledgeBase(deps))
-    .delete("/api/knowledge-bases/:id", deleteKnowledgeBase(deps))
-    .get("/api/knowledge-bases/:id/sources", listKnowledgeSources(deps))
-    .post("/api/knowledge-bases/:id/sources", ingestKnowledgeSource(deps))
-    .post("/api/knowledge-bases/:id/sources/import", importKnowledgeSources(deps))
-    .post("/api/knowledge-bases/:id/sources/:sourceId/reindex", reindexKnowledgeSource(deps))
-    .delete("/api/knowledge-bases/:id/sources/:sourceId", deleteKnowledgeSource(deps))
-    .get("/api/knowledge-bases/:id/chunks", listKnowledgeChunks(deps))
-    .post("/api/knowledge-bases/:id/search", searchKnowledgeBase(deps));
+  const knowledge = queryNamespaceTarget({ kind: "knowledge", idParam: "id" });
+  params.router.route({
+    method: "GET",
+    path: "/api/knowledge-bases",
+    access: protectedAccess({
+      resource: "knowledge",
+      action: "read",
+      target: queryNamespaceTarget({ kind: "knowledge" }),
+    }),
+    handler: listKnowledgeBases(deps),
+  });
+  params.router.route({
+    method: "POST",
+    path: "/api/knowledge-bases",
+    access: protectedAccess({
+      resource: "knowledge",
+      action: "create",
+      target: queryNamespaceTarget({ kind: "knowledge" }),
+    }),
+    handler: createKnowledgeBase(deps),
+  });
+  // `_adapters` before `:id` so the literal segment isn't shadowed
+  // (knowledge base ids cannot start with `_`).
+  params.router.route({
+    method: "GET",
+    path: "/api/knowledge-bases/_adapters",
+    access: protectedAccess({ resource: "knowledge", action: "read" }),
+    handler: listKnowledgeSourceAdapters(deps),
+  });
+  params.router.route({
+    method: "GET",
+    path: "/api/knowledge-bases/:id",
+    access: protectedAccess({ resource: "knowledge", action: "read", target: knowledge }),
+    handler: getKnowledgeBase(deps),
+  });
+  params.router.route({
+    method: "PATCH",
+    path: "/api/knowledge-bases/:id",
+    access: protectedAccess({ resource: "knowledge", action: "update", target: knowledge }),
+    handler: updateKnowledgeBase(deps),
+  });
+  params.router.route({
+    method: "DELETE",
+    path: "/api/knowledge-bases/:id",
+    access: protectedAccess({ resource: "knowledge", action: "delete", target: knowledge }),
+    handler: deleteKnowledgeBase(deps),
+  });
+  params.router.route({
+    method: "GET",
+    path: "/api/knowledge-bases/:id/sources",
+    access: protectedAccess({ resource: "knowledge", action: "read", target: knowledge }),
+    handler: listKnowledgeSources(deps),
+  });
+  params.router.route({
+    method: "POST",
+    path: "/api/knowledge-bases/:id/sources",
+    access: protectedAccess({ resource: "knowledge", action: "update", target: knowledge }),
+    handler: ingestKnowledgeSource(deps),
+  });
+  params.router.route({
+    method: "POST",
+    path: "/api/knowledge-bases/:id/sources/import",
+    access: protectedAccess({ resource: "knowledge", action: "update", target: knowledge }),
+    handler: importKnowledgeSources(deps),
+  });
+  params.router.route({
+    method: "POST",
+    path: "/api/knowledge-bases/:id/sources/:sourceId/reindex",
+    access: protectedAccess({ resource: "knowledge", action: "update", target: knowledge }),
+    handler: reindexKnowledgeSource(deps),
+  });
+  params.router.route({
+    method: "DELETE",
+    path: "/api/knowledge-bases/:id/sources/:sourceId",
+    access: protectedAccess({ resource: "knowledge", action: "delete", target: knowledge }),
+    handler: deleteKnowledgeSource(deps),
+  });
+  params.router.route({
+    method: "GET",
+    path: "/api/knowledge-bases/:id/chunks",
+    access: protectedAccess({ resource: "knowledge", action: "inspect-text", target: knowledge }),
+    handler: listKnowledgeChunks(deps),
+  });
+  params.router.route({
+    method: "POST",
+    path: "/api/knowledge-bases/:id/search",
+    access: protectedAccess({ resource: "knowledge", action: "inspect-text", target: knowledge }),
+    handler: searchKnowledgeBase(deps),
+  });
 }
