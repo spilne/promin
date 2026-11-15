@@ -84,6 +84,7 @@ describe("resolveRemoteAgent", () => {
     const thread = await peer.agent.thread("t1");
     const out = thread.stream({ task: "hello" });
     const events = collect(out.fullStream);
+    await new Promise((resolve) => setTimeout(resolve, 0));
     await out.cancel();
     expect(peer.seen).toEqual([
       { url: "https://peer.example/api/agents/peer/threads/t1/stream", body: { task: "hello" } },
@@ -125,10 +126,10 @@ describe("resolveRemoteAgent", () => {
     expect(await out.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
   });
 
-  it("cancel() rejects when the server refuses the cancel; a turn already ended is fine", async () => {
+  it("cancel() settles locally when the best-effort remote cancel is refused or already ended", async () => {
     const refused = fakePeer({ cancelStatus: 500 });
     const out = (await refused.agent.thread("t1")).stream({ task: "hello" });
-    await expect(out.cancel()).rejects.toThrow("RemoteAgent cancel failed: 500");
+    await out.cancel();
     expect(refused.streamAborted()).toBe(true);
     expect(await out.text).toBe("");
     expect(await out.finishReason).toBe("cancelled");

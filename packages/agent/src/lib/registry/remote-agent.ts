@@ -182,9 +182,10 @@ class RemoteTransport {
 
   /**
    * A streamed turn. The caller's `signal` or the turn timeout cancels it
-   * (`cancel()`); the deadline runs until the stream ends. `cancelRemote`
-   * cancels the run on the server first — for a thread stream, where
-   * closing the stream only detaches from the turn.
+   * (`cancel()`); the deadline runs until the stream ends. For a thread
+   * stream, `cancelRemote` also asks the server to cancel the turn. That
+   * best-effort request is bounded by the normal request timeout and never
+   * delays local cancellation or stream settlement.
    */
   stream(params: {
     path: string;
@@ -510,9 +511,12 @@ function buildSseRunOutput(params: {
   onSettled?: () => void;
 }): AgentRunOutput {
   const { pending, ctrl, cancelRemote, onSettled } = params;
-  const turnId = pending.then(
-    (res) => res.headers.get("x-turn-id") ?? undefined,
-    () => undefined,
+  let observedTurnId: string | undefined;
+  void pending.then(
+    (res) => {
+      observedTurnId = res.headers.get("x-turn-id") ?? undefined;
+    },
+    () => {},
   );
   // Deferred promise handles
   let resolveText!: (t: string) => void;
@@ -538,6 +542,8 @@ function buildSseRunOutput(params: {
   let fullNotify: (() => void) | null = null;
   let eof = false;
   let settled = false;
+  let finalized = false;
+  let cancellationStarted = false;
   let accumulatedText = "";
   const emptyUsage: UsageStats = { inputTokens: 0, outputTokens: 0 };
 
@@ -558,6 +564,13 @@ function buildSseRunOutput(params: {
     eof = true;
     textNotify?.();
     fullNotify?.();
+  };
+
+  const finalize = (): void => {
+    if (finalized) return;
+    finalized = true;
+    onSettled?.();
+    close();
   };
 
   const settleFinish = (params: {
@@ -587,10 +600,31 @@ function buildSseRunOutput(params: {
     settleFinish({ text: accumulatedText, reason: "cancelled", usage: emptyUsage });
   };
 
+  const cancel = (): Promise<void> => {
+    if (settled || cancellationStarted) return Promise.resolve();
+    cancellationStarted = true;
+    // Settle locally before any network work. The initial fetch may not have
+    // returned headers yet, and the remote cancel endpoint may be unavailable.
+    ctrl.abort();
+    settleCancelled();
+    finalize();
+    if (cancelRemote) {
+      // `cancelRemote` uses RemoteTransport.call, so it has the bounded
+      // non-turn request deadline. It is deliberately best-effort: a peer
+      // refusing or outliving that request must not reopen local settlement.
+      void cancelRemote(observedTurnId).catch(() => {});
+    }
+    return Promise.resolve();
+  };
+
   // Background SSE reader.
   void (async () => {
     try {
       const res = await pending;
+      if (settled) {
+        await res.body?.cancel().catch(() => {});
+        return;
+      }
       if (!res.ok || !res.body) {
         const msg = res.ok ? "no body" : `HTTP ${res.status}`;
         settleError(new Error(`RemoteAgent stream failed: ${msg}`));
@@ -629,6 +663,7 @@ function buildSseRunOutput(params: {
         }
         // thread / approval-requested / suspended frames are informational;
         // no AgentRunOutput surface for them in v1.
+        if (settled) break;
       }
       if (!settled) {
         settleError(new Error("RemoteAgent stream ended without a terminal event"));
@@ -640,8 +675,7 @@ function buildSseRunOutput(params: {
       // A reader must always produce an explicit terminal state. This is a
       // protocol error rather than a successful empty answer.
       if (!settled) settleError(new Error("RemoteAgent stream ended without settling"));
-      onSettled?.();
-      close();
+      finalize();
     }
   })();
 
@@ -667,7 +701,6 @@ function buildSseRunOutput(params: {
     }
   }
 
-  let cancellation: Promise<void> | undefined;
   return {
     textStream: textStream(),
     fullStream: fullStream(),
@@ -679,16 +712,7 @@ function buildSseRunOutput(params: {
     usage: usagePromise,
     finishReason: finishPromise,
     messages: Promise.resolve([] as Message[]),
-    cancel: () => {
-      cancellation ??= (async () => {
-        try {
-          if (cancelRemote) await cancelRemote(await turnId);
-        } finally {
-          ctrl.abort();
-        }
-      })();
-      return cancellation;
-    },
+    cancel,
   };
 }
 
@@ -722,6 +746,13 @@ async function* parseSseFrames(
       }
     }
   } finally {
+    try {
+      // Initiate cancellation, but do not let a non-compliant underlying body
+      // hold stream settlement open by never resolving its cancel promise.
+      void reader.cancel().catch(() => {});
+    } catch {
+      // The body may already have failed or been cancelled by the transport.
+    }
     reader.releaseLock();
   }
 }
