@@ -326,6 +326,18 @@ export function sendSignal(deps: RunRoutesDeps) {
       }
     }
 
+    // The checks above intentionally do asynchronous validation. Recheck at
+    // the write boundary so a revocation during that work cannot race a
+    // durable delivery.
+    if (
+      deps.authorizeRunContinuation &&
+      !(await deps.authorizeRunContinuation({
+        workflowId: id,
+        source: "http-signal",
+      }))
+    ) {
+      return jsonError(403, "forbidden");
+    }
     await deps.storage.deliverSignal({
       workflowId: id,
       signalName: body.signalName,

@@ -19,6 +19,7 @@ import { sendSignal } from "../runs.ts";
 import { LocalWorkflows, QueuedWorkflows } from "../../services/workflows/index.ts";
 import { InMemoryWorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
 import { InMemoryWorkflowStartQueue } from "@promin/workflow/distributed";
+import { invoke } from "./invoke-handler.ts";
 
 /** Yield to the event loop until `predicate` holds, bounded by iterations. */
 async function until(predicate: () => boolean | Promise<boolean>): Promise<void> {
@@ -546,6 +547,20 @@ describe("POST /api/runs/:id/resume", () => {
 });
 
 describe("POST /api/runs/:id/signal", () => {
+  class SignalAuthorizationGateStorage extends InMemoryWorkflowStorage {
+    revokeOnNextSignalRead = false;
+    authorized = true;
+
+    override async loadSignals(workflowId: string) {
+      const signals = await super.loadSignals(workflowId);
+      if (this.revokeOnNextSignalRead) {
+        this.revokeOnNextSignalRead = false;
+        this.authorized = false;
+      }
+      return signals;
+    }
+  }
+
   it("does not mutate signal state when the stored starter is revoked", async () => {
     const storage = new InMemoryWorkflowStorage();
     await storage.createWorkflow({
@@ -569,6 +584,74 @@ describe("POST /api/runs/:id/signal", () => {
 
     expect(response.status).toBe(403);
     expect(await storage.loadSignals("revoked")).toEqual([]);
+  });
+
+  it("rechecks after async validation and closes a revocation race at delivery", async () => {
+    const storage = new SignalAuthorizationGateStorage();
+    await storage.createWorkflow({
+      workflowId: "revoked-at-delivery",
+      workflowName: "waiting",
+      input: null,
+    });
+    let checks = 0;
+    const handler = sendSignal({
+      storage,
+      authorizeRunContinuation: async () => {
+        checks++;
+        if (checks === 1) storage.revokeOnNextSignalRead = true;
+        return storage.authorized;
+      },
+    });
+
+    const response = await handler(
+      new Request("http://x/api/runs/revoked-at-delivery/signal", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ signalName: "go", payload: "blocked", ifAbsent: true }),
+      }),
+      { id: "revoked-at-delivery" },
+    );
+
+    expect(response.status).toBe(403);
+    expect(checks).toBe(2);
+    expect(await storage.loadSignals("revoked-at-delivery")).toEqual([]);
+  });
+
+  it("keeps a final authorization outage retryable without delivering", async () => {
+    const storage = new SignalAuthorizationGateStorage();
+    await storage.createWorkflow({
+      workflowId: "signal-auth-outage",
+      workflowName: "waiting",
+      input: null,
+    });
+    let checks = 0;
+    let failFinal = true;
+    const handler = sendSignal({
+      storage,
+      authorizeRunContinuation: async () => {
+        checks++;
+        if (checks % 2 === 1) storage.revokeOnNextSignalRead = true;
+        if (checks % 2 === 0 && failFinal) throw new Error("authorizer unavailable");
+        return true;
+      },
+    });
+    const request = () =>
+      new Request("http://x/api/runs/signal-auth-outage/signal", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ signalName: "go", payload: "retry", ifAbsent: true }),
+      });
+
+    const failed = await invoke(handler, request(), { id: "signal-auth-outage" });
+    expect(failed.status).toBe(500);
+    expect(await storage.loadSignals("signal-auth-outage")).toEqual([]);
+
+    failFinal = false;
+    const retried = await invoke(handler, request(), { id: "signal-auth-outage" });
+    expect(retried.status).toBe(202);
+    expect((await storage.loadSignals("signal-auth-outage")).map((s) => s.payload)).toEqual([
+      "retry",
+    ]);
   });
 
   it("404 for an unknown run, and no orphan signal is stored", async () => {

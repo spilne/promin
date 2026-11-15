@@ -167,6 +167,17 @@ export function mintSignalToken(deps: SignalTokenRoutesDeps) {
     const bearer = randomToken(32);
     const expiresAt = new Date((deps.clock ?? SystemWallClock).currentTimeMs() + ttl);
 
+    // Agent-approval lookup above is asynchronous. Close the revocation
+    // window immediately before token state can be created or replayed.
+    if (
+      deps.authorizeRunContinuation &&
+      !(await deps.authorizeRunContinuation({
+        workflowId,
+        source: "signal-token-mint",
+      }))
+    ) {
+      return jsonError(403, "forbidden");
+    }
     const { record, isCached } = await deps.storage.createSignalToken({
       tokenId,
       workflowId,
@@ -281,6 +292,16 @@ export function completeSignalToken(deps: SignalTokenRoutesDeps) {
     // the signal's perspective, the bearer-completer is indistinguishable
     // from an in-app `storage.deliverSignal` caller. A write that throws
     // changed nothing: the token stays completable.
+    if (
+      deps.authorizeRunContinuation &&
+      !(await deps.authorizeRunContinuation({
+        workflowId: token.workflowId,
+        source: "signal-token-complete",
+        tokenId,
+      }))
+    ) {
+      return jsonError(403, "forbidden");
+    }
     const claim = await deps.storage.completeSignalToken({
       tokenId,
       value: body.value,
