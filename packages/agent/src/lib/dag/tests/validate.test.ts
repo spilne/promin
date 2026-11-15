@@ -67,4 +67,64 @@ describe("validateDag", () => {
     };
     expect(() => validateDag({ dag })).toThrow(/not reachable from entry: b/);
   });
+
+  it("rejects a transform from that is not an input", () => {
+    const dag: AgenticDagRecipe = {
+      id: "bad-transform-from",
+      version: "v1",
+      nodes: [
+        {
+          id: "t",
+          kind: "transform",
+          inputs: { x: { kind: "literal", value: [] } },
+          from: "missing",
+          ops: [{ op: "count" }],
+        },
+      ],
+      edges: [],
+      entry: ["t"],
+      terminals: ["t"],
+    };
+    expect(() => validateDag({ dag })).toThrow(DagValidationError);
+  });
+
+  it("rejects collect after the first operation", () => {
+    const dag: AgenticDagRecipe = {
+      id: "bad-transform-collect-order",
+      version: "v1",
+      nodes: [
+        {
+          id: "t",
+          kind: "transform",
+          inputs: { x: { kind: "literal", value: [] } },
+          from: "x",
+          ops: [{ op: "compact" }, { op: "collect", fields: ["x"] }],
+        },
+      ],
+      edges: [],
+      entry: ["t"],
+      terminals: ["t"],
+    };
+    expect(() => validateDag({ dag })).toThrow(DagValidationError);
+  });
+
+  it("rejects collect when from is set", () => {
+    const dag: AgenticDagRecipe = {
+      id: "bad-transform-collect-from",
+      version: "v1",
+      nodes: [
+        {
+          id: "t",
+          kind: "transform",
+          inputs: { x: { kind: "literal", value: [] } },
+          from: "x",
+          ops: [{ op: "collect", fields: ["x"] }],
+        },
+      ],
+      edges: [],
+      entry: ["t"],
+      terminals: ["t"],
+    };
+    expect(() => validateDag({ dag })).toThrow(DagValidationError);
+  });
 });

@@ -70,7 +70,8 @@ import type { AgentInstanceRegistry } from "../instance/types.ts";
 import { checkBlockers, resolveNodeInputs } from "./dag-helpers.ts";
 import { recipeIssues } from "./recipe-schema.ts";
 import { runAgentAttempt } from "./runners/agent-attempt.ts";
-import { childRunId, nodeKey, type NodeRunEnv } from "./runners/env.ts";
+import { childRunId, nodeKey, type AttemptOutcome, type NodeRunEnv } from "./runners/env.ts";
+import { applyTransform } from "./transform.ts";
 import type { DagRegistry } from "./types.ts";
 import {
   type AgentResolver,
@@ -282,7 +283,9 @@ export function createDagWorkflow(
         let free = remainingBudget({ budget: runBudget, usage: spent });
         for (const taken of held.values()) free = subtractBudget({ budget: free, taken });
         // Includes the starting node: it is neither settled nor holding a share yet.
-        const waiting = order.filter((id) => !states.has(id) && !held.has(id)).length;
+        const waiting = order.filter(
+          (id) => nodeById.get(id)!.kind === "agent" && !states.has(id) && !held.has(id),
+        ).length;
         return shareOfBudget({ budget: free, parts: Math.max(1, waiting) });
       };
 
@@ -350,6 +353,7 @@ export function createDagWorkflow(
           }
           const blocked = checkBlockers({
             incomingEdges: incoming.get(node.id)!,
+            join: node.join ?? "all",
             outputs: outputs(),
             errors: errors(),
             skipped: skippedIds(),
@@ -377,7 +381,11 @@ export function createDagWorkflow(
             async () =>
               abort.signal.aborted
                 ? { start: false, budget: null, startedAt: clock.currentTimeMs() }
-                : { start: true, budget: shareFor(), startedAt: clock.currentTimeMs() },
+                : {
+                    start: true,
+                    budget: node.kind === "agent" ? shareFor() : null,
+                    startedAt: clock.currentTimeMs(),
+                  },
             { idempotent: true },
           );
           if (!start.start) {
@@ -389,13 +397,34 @@ export function createDagWorkflow(
           }
           const share = start.budget ?? undefined;
           if (share) held.set(node.id, share);
-          const outcome = yield* runAgentAttempt(env, {
-            node,
-            nodeInput,
-            key,
-            ...(share && { budget: share }),
-            signal: abort.signal,
-          });
+          let outcome: AttemptOutcome;
+          if (node.kind === "agent") {
+            outcome = yield* runAgentAttempt(env, {
+              node,
+              nodeInput,
+              key,
+              ...(share && { budget: share }),
+              signal: abort.signal,
+            });
+          } else {
+            const transformed = yield* ctx.activity(
+              `${key}-transform`,
+              async (): Promise<
+                | { readonly ok: true; readonly output: unknown }
+                | { readonly ok: false; readonly error: string }
+              > => {
+                try {
+                  return { ok: true, output: applyTransform({ node, inputs: nodeInput }) };
+                } catch (error) {
+                  return { ok: false, error: formatToolError(error) };
+                }
+              },
+              { idempotent: true },
+            );
+            outcome = transformed.ok
+              ? { ...transformed, spend: EMPTY_USAGE }
+              : { ...transformed, retryable: false, spend: EMPTY_USAGE };
+          }
           held.delete(node.id);
           yield* settleNode({
             node,

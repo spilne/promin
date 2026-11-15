@@ -125,6 +125,29 @@ export function validateDag(params: { dag: DagGraph; dagId?: string }): void {
         }
       }
     }
+    if (node.kind === "transform") {
+      const inputFields = new Set(Object.keys(node.inputs));
+      if (node.from !== undefined && !inputFields.has(node.from)) {
+        issues.push(`transform node ${node.id} from references missing input ${node.from}`);
+      }
+      for (const [index, op] of node.ops.entries()) {
+        if (op.op !== "collect") continue;
+        if (index !== 0) {
+          issues.push(`transform node ${node.id} collect is only allowed at ops[0]`);
+        }
+        if (node.from !== undefined) {
+          issues.push(`transform node ${node.id} collect requires from to be omitted`);
+        }
+        for (const field of op.fields) {
+          if (!inputFields.has(field)) {
+            issues.push(`transform node ${node.id} collect references missing input ${field}`);
+          }
+        }
+      }
+      if (node.from === undefined && node.ops[0]?.op !== "collect" && node.ops[0]?.op !== "pick") {
+        issues.push(`transform node ${node.id} must start with pick when from is omitted`);
+      }
+    }
   }
 
   // Entry nodes can only depend on `initial` / `literal` inputs.

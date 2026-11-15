@@ -56,4 +56,22 @@ describe("DAG recipe schema", () => {
     });
     expect(issues.some((issue) => issue.startsWith("edges[0].condition"))).toBe(true);
   });
+
+  it("rejects invalid transform sizes and join modes at the node", () => {
+    const transform = {
+      id: "t",
+      kind: "transform",
+      inputs: { x: { kind: "literal", value: [] } },
+      from: "x",
+    };
+    for (const node of [
+      { ...transform, ops: Array.from({ length: 17 }, () => ({ op: "count" })) },
+      { ...transform, ops: [] },
+      { ...ok.nodes[0], join: "some" },
+    ]) {
+      expect(
+        recipeIssues({ ...ok, nodes: [node] }).some((issue) => issue.startsWith("nodes[0]")),
+      ).toBe(true);
+    }
+  });
 });

@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import { conditionDepth, MAX_CONDITION_DEPTH } from "./conditions.ts";
-import type { Condition, DagRecipe, NodeInputSource } from "./types.ts";
+import type { Condition, DagNode, DagRecipe, NodeInputSource, TransformOp } from "./types.ts";
 
 export const NODE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -57,9 +57,45 @@ const AgentNodeSchema = z
     kind: z.literal("agent"),
     agentId: z.string(),
     inputs: z.record(z.string(), NodeInputSourceSchema),
+    join: z.enum(["all", "any"]).optional(),
     onError: z.enum(["abort", "skip"]).optional(),
   })
   .strict();
+
+const TransformOpSchema: z.ZodType<TransformOp> = z.discriminatedUnion("op", [
+  z.object({ op: z.literal("collect"), fields: z.array(z.string()) }).strict(),
+  z.object({ op: z.literal("pick"), path: z.string() }).strict(),
+  z.object({ op: z.literal("flatten") }).strict(),
+  z.object({ op: z.literal("compact") }).strict(),
+  z.object({ op: z.literal("count") }).strict(),
+  z.object({ op: z.literal("dedupe"), by: z.string().optional() }).strict(),
+  z.object({ op: z.literal("filter"), where: ConditionSchema }).strict(),
+  z
+    .object({
+      op: z.literal("sort"),
+      by: z.string(),
+      order: z.enum(["asc", "desc"]).optional(),
+    })
+    .strict(),
+  z.object({ op: z.literal("take"), count: z.number().int().nonnegative() }).strict(),
+]);
+
+const TransformNodeSchema = z
+  .object({
+    id: z.string().regex(NODE_ID_PATTERN),
+    kind: z.literal("transform"),
+    inputs: z.record(z.string(), NodeInputSourceSchema),
+    join: z.enum(["all", "any"]).optional(),
+    onError: z.enum(["abort", "skip"]).optional(),
+    from: z.string().optional(),
+    ops: z.array(TransformOpSchema).min(1).max(16),
+  })
+  .strict();
+
+const DagNodeSchema: z.ZodType<DagNode> = z.discriminatedUnion("kind", [
+  AgentNodeSchema,
+  TransformNodeSchema,
+]);
 
 const DagEdgeSchema = z
   .object({
@@ -71,7 +107,7 @@ const DagEdgeSchema = z
 
 export const DagRecipeSchema: z.ZodType<DagRecipe> = z
   .object({
-    nodes: z.array(AgentNodeSchema),
+    nodes: z.array(DagNodeSchema),
     edges: z.array(DagEdgeSchema),
     entry: z.array(z.string()),
     terminals: z.array(z.string()),

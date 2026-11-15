@@ -57,6 +57,7 @@ export type Condition =
 
 export interface NodeBase {
   readonly id: string;
+  readonly join?: "all" | "any";
   /**
    * How to build this node's input. Keys are field names on the agent's
    * input shape; values describe where to fetch them from. The executor
@@ -96,7 +97,7 @@ export interface TransformNode extends NodeBase {
   readonly ops: ReadonlyArray<TransformOp>;
 }
 
-export type DagNode = AgentNode;
+export type DagNode = AgentNode | TransformNode;
 
 /** Durable accounting and timing for one settled DAG node. */
 export interface DagNodeStats {

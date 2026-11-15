@@ -36,10 +36,20 @@ export function pickPath(value: unknown, path: string): unknown {
  */
 export function checkBlockers(args: {
   incomingEdges: ReadonlyArray<DagEdge>;
+  join: "all" | "any";
   outputs: Readonly<Record<string, unknown>>;
   errors: Readonly<Record<string, string>>;
   skipped: ReadonlySet<string>;
 }): string | null {
+  if (args.join === "any" && args.incomingEdges.length > 0) {
+    const eligible = args.incomingEdges.some(
+      (edge) =>
+        edge.from in args.outputs &&
+        (edge.condition === undefined ||
+          evaluateCondition({ condition: edge.condition, value: args.outputs[edge.from] })),
+    );
+    if (eligible) return null;
+  }
   for (const e of args.incomingEdges) {
     if (args.skipped.has(e.from)) {
       return `upstream node ${e.from} was skipped`;
@@ -80,7 +90,7 @@ function resolveSource(args: {
       return pickPath(args.initial, src.path);
     case "node": {
       if (!(src.nodeId in args.outputs)) {
-        throw new Error(`Upstream node "${src.nodeId}" has no output yet`);
+        return null;
       }
       return pickPath(args.outputs[src.nodeId], src.path);
     }
