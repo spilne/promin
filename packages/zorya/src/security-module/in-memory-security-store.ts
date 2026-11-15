@@ -1,12 +1,11 @@
 import { SystemWallClock, type WallClock } from "@promin/workflow";
+import { ORG_WIDE_NAMESPACE } from "../server/security/index.ts";
 import type {
   AccessBinding,
   KnowledgeGrant,
   SecurityStore,
   SecurityUser,
 } from "./security-store.ts";
-
-const ORG_WIDE_NAMESPACE = "org";
 
 interface StoredSession {
   readonly userId: string;
