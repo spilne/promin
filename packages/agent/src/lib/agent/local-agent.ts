@@ -523,6 +523,10 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     threadId: string,
     opts: ThreadOptions = {},
   ): Promise<AgentThread<AgentInput, TOutput>> {
+    const securityContext =
+      opts.securityContext === undefined
+        ? undefined
+        : normalizeRunSecurityContext(opts.securityContext);
     const namespaceId = opts.namespaceId ?? this.config.namespaceId;
     const resourceId = opts.resourceId ?? this.config.resourceId;
     if (!namespaceId) {
@@ -588,7 +592,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       ...(this.config.approvalTtlMs !== undefined && { approvalTtlMs: this.config.approvalTtlMs }),
       created,
       agentId: this.agentId(),
-      ...(opts.securityContext !== undefined && { securityContext: opts.securityContext }),
+      ...(securityContext !== undefined && { securityContext }),
       autoCompact: this.config.autoCompact === false ? undefined : this.config.autoCompact,
       autoDistill: this.config.autoDistill === false ? undefined : this.config.autoDistill,
       consolidator: () => this.resolveConsolidator(),
@@ -942,6 +946,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
 
   private oneShotWorkflow(params: {
     namespaceId: string | undefined;
+    securityContext?: RunSecurityContext;
     bus: SessionEventBus;
     signal: AbortSignal;
     approvalIndex?: TurnApprovalIndex;
@@ -972,6 +977,9 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
         ...(namespaceId !== undefined && { namespaceId }),
         ...(resourceId !== undefined && { resourceId }),
         agentId: this.agentId(),
+        ...(params.securityContext !== undefined && {
+          securityContext: params.securityContext,
+        }),
       },
       signal: params.signal,
       ...(params.approvalIndex && { approvalIndex: params.approvalIndex }),
@@ -1013,10 +1021,15 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     bus.subscribe((e) => recordEvent(capture, e));
 
     const namespaceId = opts?.namespaceId ?? this.config.namespaceId;
+    const securityContext =
+      opts?.securityContext === undefined
+        ? undefined
+        : normalizeRunSecurityContext(opts.securityContext);
     // A one-shot run counts against its namespace's budget (it has no thread).
     const budgets = namespaceId !== undefined ? this.config.budgets : undefined;
     const wf = this.oneShotWorkflow({
       namespaceId,
+      ...(securityContext !== undefined && { securityContext }),
       bus,
       signal: capture.abort.signal,
       ...(opts?.onApprovalRequired && { onApprovalRequired: opts.onApprovalRequired }),
@@ -1044,7 +1057,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
         workflow: wf,
         workflowId,
         input: existing.input,
-        ...(opts?.securityContext !== undefined && { securityContext: opts.securityContext }),
+        ...(securityContext !== undefined && { securityContext }),
       })) as AgentResult;
     }
     const ceiling =
@@ -1055,7 +1068,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       workflow: wf,
       workflowId,
       input: ceiling ? { ...prepared.input, budget: ceiling } : prepared.input,
-      ...(opts?.securityContext !== undefined && { securityContext: opts.securityContext }),
+      ...(securityContext !== undefined && { securityContext }),
     })) as AgentResult;
   }
 }
@@ -1156,6 +1169,9 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       ...(this.deps.key.resourceId !== undefined && { resourceId: this.deps.key.resourceId }),
       threadId: this.deps.key.threadId,
       agentId: this.deps.agentId,
+      ...(this.deps.securityContext !== undefined && {
+        securityContext: this.deps.securityContext,
+      }),
     };
   }
 

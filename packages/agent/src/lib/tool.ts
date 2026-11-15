@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { RunPrincipalRef } from "@promin/workflow";
+import type { RunPrincipalRef, RunSecurityContext } from "@promin/workflow";
 import type { SubAgentDelegation } from "./delegation/types.ts";
 import type { ToolAuditEntry, ToolAuditLogger } from "./tool-audit/types.ts";
 import type {
@@ -64,6 +64,8 @@ export interface ToolScope {
   readonly threadId?: string;
   /** Recipe id of the agent the tool is executing under. */
   readonly agentId?: string;
+  /** Immutable identity of the durable turn executing this tool. */
+  readonly securityContext?: RunSecurityContext;
 }
 
 /** Per-call execution context handed to `tool.execute` as an optional second arg. */

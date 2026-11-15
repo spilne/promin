@@ -56,6 +56,7 @@ export interface AgentScheduleDispatcher {
     tick: ScheduleTick,
     schedule: DurableScheduleConfig,
     identity?: AuthorizedScheduleIdentity,
+    reauthorize?: () => Promise<void>,
   ): Promise<AgentScheduleStart>;
 }
 
@@ -147,11 +148,17 @@ export class ZoryaScheduler {
         if (handled) return { handled: true };
       }
       if (agents && isAgentSchedule(schedule)) {
+        const executionSecurity = this.executionSecurity;
         await this.startTurn({
           agents,
           tick,
           schedule,
           identity: this.dispatchIdentities.get(schedule),
+          ...(executionSecurity !== undefined && {
+            reauthorize: async () => {
+              await executionSecurity.authorizeDispatch(schedule);
+            },
+          }),
         });
         return { handled: true };
       }
@@ -243,6 +250,7 @@ export class ZoryaScheduler {
     tick: ScheduleTick;
     schedule: DurableScheduleConfig;
     identity?: AuthorizedScheduleIdentity;
+    reauthorize?: () => Promise<void>;
   }): Promise<void> {
     const { agents, tick, schedule } = params;
     const runId = scheduleTickRunId(tick);
@@ -250,7 +258,7 @@ export class ZoryaScheduler {
     this.turns.add(runId);
     let started: AgentScheduleStart;
     try {
-      started = await agents.dispatchSchedule(tick, schedule, params.identity);
+      started = await agents.dispatchSchedule(tick, schedule, params.identity, params.reauthorize);
     } catch (error) {
       this.turns.delete(runId);
       throw error;

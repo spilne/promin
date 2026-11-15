@@ -75,6 +75,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { shortestFireGapMs, validateScheduleConfig } from "@promin/workflow/scheduler";
+import { normalizeRunSecurityContext } from "@promin/workflow/storage-kit";
 import { tool } from "../tool.ts";
 import type { AgentTool, ToolScope } from "../tool.ts";
 import type { SchedulerClient, SchedulerClientScope } from "./scheduler-client.ts";
@@ -294,11 +295,16 @@ function resolveSchedulerScope(scope: ToolScope | undefined): SchedulerClientSco
   if (!scope.agentId) {
     return { ok: false, error: "scheduler tool: ctx.scope.agentId is required." };
   }
+  const securityContext =
+    scope.securityContext === undefined
+      ? undefined
+      : normalizeRunSecurityContext(scope.securityContext);
   return {
     namespaceId: scope.namespaceId,
     ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
     ...(scope.threadId !== undefined && { threadId: scope.threadId }),
     agentId: scope.agentId,
+    ...(securityContext !== undefined && { securityContext }),
   };
 }
 

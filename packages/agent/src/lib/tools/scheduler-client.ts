@@ -14,7 +14,9 @@
 // The tool consumes the interface; consumers pick which impl to wire.
 // ---------------------------------------------------------------------------
 
+import type { RunSecurityContext } from "@promin/workflow";
 import type { DurableScheduleConfig, SchedulerStorage } from "@promin/workflow/scheduler";
+import { normalizeRunSecurityContext } from "@promin/workflow/storage-kit";
 
 /** Minimal scope label every client carries — used to gate ownership. */
 export interface SchedulerClientScope {
@@ -23,6 +25,8 @@ export interface SchedulerClientScope {
   readonly threadId?: string;
   /** Recipe id of the agent the tool is bound to. */
   readonly agentId: string;
+  /** Durable identity inherited from the turn creating the schedule. */
+  readonly securityContext?: RunSecurityContext;
 }
 
 export interface SchedulerCreateInput {
@@ -92,8 +96,15 @@ export interface InProcessSchedulerClientConfig {
 
 export function inProcessSchedulerClient(config: InProcessSchedulerClientConfig): SchedulerClient {
   const { storage, scope } = config;
+  const securityContext =
+    scope.securityContext === undefined
+      ? undefined
+      : normalizeRunSecurityContext(scope.securityContext);
   return {
     async create(input) {
+      if (securityContext === undefined) {
+        throw new Error("scheduler create requires a durable security context");
+      }
       const dsConfig: DurableScheduleConfig = {
         id: input.id,
         ...(input.name !== undefined && { name: input.name }),
@@ -106,6 +117,7 @@ export function inProcessSchedulerClient(config: InProcessSchedulerClientConfig)
         ...(input.endAt !== undefined && { endAt: input.endAt }),
         enabled: true,
         metadata: input.metadata,
+        securityContext,
       };
       // Insert-if-absent; it also seeds nextRun (now, or a later startAt)
       // so the schedule is visible to findDue right away.
@@ -194,6 +206,10 @@ interface HttpSchedulesResponse {
 
 export function httpSchedulerClient(config: HttpSchedulerClientConfig): SchedulerClient {
   const fetchImpl = config.fetch ?? globalThis.fetch;
+  const securityContext =
+    config.scope.securityContext === undefined
+      ? undefined
+      : normalizeRunSecurityContext(config.scope.securityContext);
   const headers = (extra: Record<string, string> = {}): Record<string, string> => ({
     "content-type": "application/json",
     ...config.authHeader?.(),
@@ -215,6 +231,13 @@ export function httpSchedulerClient(config: HttpSchedulerClientConfig): Schedule
         ...(input.endAt !== undefined && { endAt: input.endAt.toISOString() }),
         enabled: true,
         metadata: input.metadata,
+        ...(securityContext?.actor.kind === "service-account" && {
+          serviceAccountId: securityContext.actor.id,
+        }),
+        ...(securityContext?.actor.kind === "service-account" &&
+          securityContext.effective?.kind === "user" && {
+            runAsUserId: securityContext.effective.id,
+          }),
       };
       const res = await fetchImpl(url("/api/schedules"), {
         method: "POST",

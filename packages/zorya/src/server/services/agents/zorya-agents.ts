@@ -269,6 +269,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     tick: ScheduleTick,
     schedule: DurableScheduleConfig,
     identity?: AuthorizedScheduleIdentity,
+    reauthorize?: () => Promise<void>,
   ): Promise<AgentScheduleStart> {
     const started = await startAgentSchedule(tick, schedule, {
       registry: this.registry,
@@ -278,6 +279,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
           ...(scope?.resourceId !== undefined && { resourceId: scope.resourceId }),
           ...(identity?.principal !== undefined && { principal: identity.principal }),
         }),
+      ...(reauthorize !== undefined && { beforeInvoke: reauthorize }),
       // A scheduled turn on a thread takes the thread's turn lease like a
       // gateway send, so it never interleaves with a live conversation.
       ...(this.turnGate !== undefined && { turnGate: this.turnGate }),

@@ -92,6 +92,11 @@ export interface DispatchAgentScheduleDeps {
    */
   readonly beforeFire?: (ctx: ScheduleFireContext) => Promise<boolean | void> | boolean | void;
   /**
+   * Final admission gate after recipe resolution, agent materialization,
+   * thread lookup and lease acquisition, immediately before invoke/send.
+   */
+  readonly beforeInvoke?: (ctx: ScheduleFireContext) => Promise<void> | void;
+  /**
    * Optional hook fired after the agent invocation completes (or fails).
    */
   readonly afterFire?: (
@@ -222,6 +227,7 @@ export async function startAgentSchedule(
           }),
         })
       : undefined;
+    await deps.beforeInvoke?.(ctx);
     // Kick the turn off; only its outcome is awaited, in `done`.
     turn = Promise.resolve(
       thread

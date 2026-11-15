@@ -686,7 +686,7 @@ export class SchedulerLoop {
     schedule: DurableScheduleConfig;
   }): Promise<void> {
     const { tick } = params;
-    const schedule = this.prepareDispatch
+    let schedule = this.prepareDispatch
       ? await this.prepareDispatch(tick, params.schedule)
       : params.schedule;
     if (this.fireOverride) {
@@ -703,6 +703,7 @@ export class SchedulerLoop {
         `SchedulerLoop: no \`trigger\` or \`fire\` configured — tick for "${tick.scheduleId}" can't be dispatched`,
       );
     }
+    schedule = this.prepareDispatch ? await this.prepareDispatch(tick, schedule) : schedule;
     const meta = (schedule.metadata ?? {}) as {
       workflowName?: string;
       input?: unknown;

@@ -33,6 +33,10 @@ const SCOPE = {
   resourceId: "alice",
   threadId: "t1",
   agentId: "writer",
+  securityContext: {
+    actor: { kind: "service-account", id: "writer-scheduler" },
+    effective: { kind: "user", id: "alice" },
+  },
 } as const;
 
 /** Mimic the agent runtime: build the tools with a per-call client factory. */
@@ -71,6 +75,7 @@ describe("createDurableSchedulerTools — schedulerCreate", () => {
     expect(stored?.cron).toBe("0 * * * *");
     expect(stored?.name).toBe("hourly twitter");
     expect(stored?.namespace).toBe("acme");
+    expect(stored?.securityContext).toEqual(SCOPE.securityContext);
     expect(stored?.metadata).toMatchObject({
       agentTrigger: true,
       agentId: "writer",
@@ -523,6 +528,75 @@ describe("dispatchAgentSchedule", () => {
     expect(captures[0]?.thread).toBeUndefined();
   });
 
+  it("runs final admission after resolver and thread awaits but before agent code", async () => {
+    const captures: Capture[] = [];
+    const registry = new InMemoryAgentRegistry();
+    await registry.register({
+      id: "writer",
+      backend: {
+        type: "local",
+        model: { provider: "x", id: "y" },
+        role: { inline: { systemPrompt: null, tools: [] } },
+      },
+    });
+    const base = fakeAgent(captures);
+    let resolved = false;
+    let threadOpened = false;
+    let agent!: Agent;
+    agent = {
+      ...base,
+      withScope: () => agent,
+      thread: async (id, opts) => {
+        threadOpened = true;
+        return await base.thread(id, opts);
+      },
+    };
+    const schedule = {
+      id: "s-1",
+      cron: "* * * * *",
+      metadata: {
+        agentTrigger: true as const,
+        agentId: "writer",
+        task: "must not run",
+        namespaceId: "acme",
+        resourceId: "alice",
+        threadId: "t1",
+        createdByAgent: "writer",
+      },
+      securityContext: {
+        actor: { kind: "service-account" as const, id: "schedule-sa" },
+        effective: { kind: "user" as const, id: "alice" },
+      },
+    };
+
+    await expect(
+      dispatchAgentSchedule(
+        {
+          scheduleId: "s-1",
+          scheduledAt: new Date(0),
+          firedAt: new Date(0),
+          incarnation: "inc1",
+          tickNumber: 0,
+        },
+        schedule,
+        {
+          registry,
+          resolve: async () => {
+            await Promise.resolve();
+            resolved = true;
+            return agent;
+          },
+          beforeInvoke: async () => {
+            expect(resolved).toBe(true);
+            expect(threadOpened).toBe(true);
+            throw new Error("assigned service account revoked");
+          },
+        },
+      ),
+    ).rejects.toThrow("assigned service account revoked");
+    expect(captures).toEqual([]);
+  });
+
   it("skips non-agent schedules", async () => {
     const result = await dispatchAgentSchedule(
       {
@@ -624,5 +698,60 @@ describe("httpSchedulerClient.create", () => {
     expect(await client.create({ id: "slot-1", intervalMs: 60_000, metadata: {} })).toEqual({
       created: false,
     });
+  });
+
+  it("projects the inherited durable identity into the schedule assignment fields", async () => {
+    let body: Record<string, unknown> | undefined;
+    const client = httpSchedulerClient({
+      baseUrl: "http://zorya.test",
+      scope: SCOPE,
+      fetch: (async (_url: string, init?: RequestInit) => {
+        body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return Response.json({ id: "slot-1" }, { status: 201 });
+      }) as unknown as typeof fetch,
+    });
+
+    await client.create({ id: "slot-1", intervalMs: 60_000, metadata: {} });
+    expect(body).toMatchObject({
+      serviceAccountId: "writer-scheduler",
+      runAsUserId: "alice",
+    });
+  });
+
+  it("leaves key-mode operator assignment implicit for server compatibility", async () => {
+    let body: Record<string, unknown> | undefined;
+    const client = httpSchedulerClient({
+      baseUrl: "http://zorya.test",
+      scope: {
+        ...SCOPE,
+        securityContext: {
+          actor: { kind: "operator", id: "operator" },
+          effective: { kind: "user", id: "alice" },
+        },
+      },
+      fetch: (async (_url: string, init?: RequestInit) => {
+        body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return Response.json({ id: "slot-1" }, { status: 201 });
+      }) as unknown as typeof fetch,
+    });
+
+    await client.create({ id: "slot-1", intervalMs: 60_000, metadata: {} });
+    expect(body).not.toHaveProperty("serviceAccountId");
+    expect(body).not.toHaveProperty("runAsUserId");
+  });
+
+  it("refuses an in-process create without a durable identity", async () => {
+    const client = inProcessSchedulerClient({
+      storage: new InMemorySchedulerStorage(),
+      scope: {
+        namespaceId: "acme",
+        resourceId: "alice",
+        threadId: "t1",
+        agentId: "writer",
+      },
+    });
+    await expect(client.create({ id: "slot-1", intervalMs: 60_000, metadata: {} })).rejects.toThrow(
+      "durable security context",
+    );
   });
 });

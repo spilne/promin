@@ -101,20 +101,34 @@ export class ScheduleExecutionSecurity {
     readonly schedule: DurableScheduleConfig;
     readonly identity: AuthorizedScheduleIdentity;
   }> {
+    const snapshot = snapshotSchedule(schedule);
     const requested =
-      schedule.securityContext ??
+      snapshot.securityContext ??
       (this.legacyPrincipal !== undefined ? { actor: this.legacyPrincipal } : undefined);
-    if (!requested) throw new ScheduleSecurityDeniedError(schedule.id);
+    if (!requested) throw new ScheduleSecurityDeniedError(snapshot.id);
+    const resourceBound = bindAgentResource(snapshot, requested);
+    if (!resourceBound) {
+      await this.auditDenied({
+        params: {
+          scheduleId: snapshot.id,
+          namespaceId: snapshot.namespace ?? ORG_WIDE_NAMESPACE,
+          event: "schedule.execution.authorization",
+        },
+        runContext: requested,
+        reason: "act_for_required",
+      });
+      throw new ScheduleSecurityDeniedError(snapshot.id);
+    }
     const identity = await this.resolveAndAuthorize({
-      scheduleId: schedule.id,
-      namespaceId: schedule.namespace ?? ORG_WIDE_NAMESPACE,
-      runContext: requested,
+      scheduleId: snapshot.id,
+      namespaceId: snapshot.namespace ?? ORG_WIDE_NAMESPACE,
+      runContext: resourceBound,
       event: "schedule.execution.authorization",
     });
-    if (!identity) throw new ScheduleSecurityDeniedError(schedule.id);
+    if (!identity) throw new ScheduleSecurityDeniedError(snapshot.id);
     return {
       schedule: Object.freeze({
-        ...schedule,
+        ...snapshot,
         securityContext: identity.runContext,
       }),
       identity,
@@ -189,7 +203,17 @@ export class ScheduleExecutionSecurity {
       decision,
       metadata: Object.freeze({ scheduleId: params.scheduleId }),
     });
-    await this.security.recordAudit(event);
+    try {
+      await this.security.recordAudit(event);
+    } catch (error) {
+      if (decision.allowed) throw error;
+      try {
+        this.logger.error("[zorya] schedule security denial audit failed", error);
+      } catch {
+        // An explicit denial stays denied even when observability is unavailable.
+      }
+      return undefined;
+    }
     if (!decision.allowed) return undefined;
     return Object.freeze({
       context,
@@ -240,6 +264,131 @@ export class ScheduleExecutionSecurity {
         // Denial stays denied even if observability is unavailable.
       }
     }
+  }
+}
+
+/**
+ * Bind agent-owned memory/thread scope to the effective user. A service
+ * account without an explicit effective identity may assert the resource
+ * user, but `resolveIdentity` still has to approve its current act-for grant.
+ */
+function bindAgentResource(
+  schedule: DurableScheduleConfig,
+  context: RunSecurityContext,
+): RunSecurityContext | undefined {
+  const resourceId =
+    schedule.metadata?.agentTrigger === true && typeof schedule.metadata.resourceId === "string"
+      ? schedule.metadata.resourceId
+      : undefined;
+  if (resourceId === undefined) return normalizeRunSecurityContext(context);
+  const normalized = normalizeRunSecurityContext(context);
+  if (
+    normalized.effective !== undefined &&
+    (normalized.effective.kind !== "user" || normalized.effective.id !== resourceId)
+  ) {
+    return undefined;
+  }
+  if (
+    normalized.effective === undefined &&
+    normalized.actor.kind === "user" &&
+    normalized.actor.id !== resourceId
+  ) {
+    return undefined;
+  }
+  return normalizeRunSecurityContext({
+    actor: normalized.actor,
+    effective: { kind: "user", id: resourceId },
+  });
+}
+
+/** Read every schedule field once, detach caller-owned data, and freeze it before any await. */
+function snapshotSchedule(source: DurableScheduleConfig): DurableScheduleConfig {
+  const id = source.id;
+  const name = source.name;
+  const namespace = source.namespace;
+  const cron = source.cron;
+  const rrule = source.rrule;
+  const intervalMs = source.intervalMs;
+  const timezone = source.timezone;
+  const enabled = source.enabled;
+  const startAt = source.startAt;
+  const endAt = source.endAt;
+  const jitterMs = source.jitterMs;
+  const metadata = source.metadata;
+  const securityContext = source.securityContext;
+  const maxCatchUp = source.maxCatchUp;
+  return Object.freeze({
+    id,
+    ...(name !== undefined && { name }),
+    ...(namespace !== undefined && { namespace }),
+    ...(cron !== undefined && { cron }),
+    ...(rrule !== undefined && { rrule }),
+    ...(intervalMs !== undefined && { intervalMs }),
+    ...(timezone !== undefined && { timezone }),
+    ...(enabled !== undefined && { enabled }),
+    ...(startAt !== undefined && { startAt: snapshotDate(startAt, "startAt") }),
+    ...(endAt !== undefined && { endAt: snapshotDate(endAt, "endAt") }),
+    ...(jitterMs !== undefined && { jitterMs }),
+    ...(metadata !== undefined && { metadata: snapshotMetadata(metadata) }),
+    ...(securityContext !== undefined && {
+      securityContext: normalizeRunSecurityContext(securityContext),
+    }),
+    ...(maxCatchUp !== undefined && { maxCatchUp }),
+  });
+}
+
+function snapshotDate(value: Date, field: string): Date {
+  const time = Date.prototype.getTime.call(value);
+  if (!Number.isFinite(time)) throw new TypeError(`schedule ${field} must be a valid Date`);
+  return Object.freeze(new Date(time));
+}
+
+function snapshotMetadata(source: Record<string, unknown>): Record<string, unknown> {
+  const seen = new WeakSet<object>();
+  const detached = snapshotMetadataValue(source, seen, "metadata");
+  if (detached === null || typeof detached !== "object" || Array.isArray(detached)) {
+    throw new TypeError("schedule metadata must be an object");
+  }
+  return detached as Record<string, unknown>;
+}
+
+function snapshotMetadataValue(value: unknown, seen: WeakSet<object>, path: string): unknown {
+  if (
+    value === undefined ||
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+  if (typeof value !== "object") {
+    throw new TypeError(`schedule ${path} contains a non-data value`);
+  }
+  if (seen.has(value)) throw new TypeError(`schedule ${path} contains a cycle`);
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const out = value.map((entry, index) =>
+        snapshotMetadataValue(entry, seen, `${path}[${index}]`),
+      );
+      return Object.freeze(out);
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError(`schedule ${path} must contain plain data`);
+    }
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value)) {
+      out[key] = snapshotMetadataValue(
+        (value as Record<string, unknown>)[key],
+        seen,
+        `${path}.${key}`,
+      );
+    }
+    return Object.freeze(out);
+  } finally {
+    seen.delete(value);
   }
 }
 

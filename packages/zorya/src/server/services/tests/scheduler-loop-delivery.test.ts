@@ -112,6 +112,41 @@ describe("SchedulerLoop — dispatch admission", () => {
     expect((await loop.tickOnce()).map((tick) => tick.scheduleId)).toEqual(["allowed"]);
     expect(seen).toEqual([context]);
   });
+
+  it("reauthorizes after a custom fire await and immediately before workflow trigger", async () => {
+    const { clock, storage, errors, onError } = await setup();
+    await due({ storage, id: "revoked-after-fire" });
+    let authorized = true;
+    let admissionCalls = 0;
+    let workflowCalls = 0;
+    const loop = new SchedulerLoop({
+      storage,
+      clock,
+      onError,
+      prepareDispatch: async (_tick, schedule) => {
+        admissionCalls++;
+        if (!authorized) throw new Error("assigned service account revoked");
+        return schedule;
+      },
+      fire: async () => {
+        await Promise.resolve();
+        authorized = false;
+        return { handled: false };
+      },
+      trigger: async () => {
+        workflowCalls++;
+        return { workflowId: "must-not-run" };
+      },
+    });
+
+    expect(await loop.tickOnce()).toEqual([]);
+    expect(admissionCalls).toBe(2);
+    expect(workflowCalls).toBe(0);
+    expect(await tickCount(storage, "revoked-after-fire")).toBe(0);
+    expect(errors).toMatchObject([
+      { phase: "dispatch", scheduleId: "revoked-after-fire", tickNumber: 0 },
+    ]);
+  });
 });
 
 describe("SchedulerLoop — commit only dispatched ticks", () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { SystemWallClock } from "@promin/workflow";
+import type { DurableScheduleConfig } from "@promin/workflow/scheduler";
 import {
   ScheduleExecutionSecurity,
   ScheduleSecurityDeniedError,
@@ -143,5 +144,138 @@ describe("ScheduleExecutionSecurity", () => {
     await expect(guard.authorizeDispatch(schedule)).rejects.toBeInstanceOf(
       ScheduleSecurityDeniedError,
     );
+  });
+
+  it("binds agent resource scope to a freshly authorized effective user", async () => {
+    const serviceAccount = principal({ kind: "service-account", id: "nightly-sa" }, false);
+    const user = principal({ kind: "user", id: "alice" });
+    const principals = new Map([
+      ["service-account:nightly-sa", serviceAccount],
+      ["user:alice", user],
+    ]);
+    const guard = new ScheduleExecutionSecurity({
+      security: security({ principals }),
+      clock: SystemWallClock,
+      logger: quietLogger,
+    });
+    const schedule = {
+      id: "nightly",
+      intervalMs: 60_000,
+      namespace: "team",
+      metadata: {
+        agentTrigger: true,
+        agentId: "writer",
+        task: "summarize",
+        namespaceId: "team",
+        resourceId: "alice",
+        createdByAgent: "writer",
+      },
+      securityContext: { actor: { kind: "service-account" as const, id: "nightly-sa" } },
+    };
+
+    await expect(guard.authorizeDispatch(schedule)).rejects.toBeInstanceOf(
+      ScheduleSecurityDeniedError,
+    );
+
+    principals.set("service-account:nightly-sa", { ...serviceAccount, canActFor: true });
+    await expect(guard.authorizeDispatch(schedule)).resolves.toMatchObject({
+      identity: {
+        principal: { kind: "user", id: "alice" },
+        runContext: {
+          actor: { kind: "service-account", id: "nightly-sa" },
+          effective: { kind: "user", id: "alice" },
+        },
+      },
+    });
+  });
+
+  it("keeps explicit denial denied when denial audit fails, but fails closed on allow audit failure", async () => {
+    const serviceAccount = principal({ kind: "service-account", id: "nightly-sa" });
+    const auditError = new Error("audit unavailable");
+    const makeGuard = (allowed: boolean) =>
+      new ScheduleExecutionSecurity({
+        security: {
+          ...security({
+            principals: new Map([["service-account:nightly-sa", serviceAccount]]),
+            allowed: () => allowed,
+          }),
+          recordAudit: async () => {
+            throw auditError;
+          },
+        },
+        clock: SystemWallClock,
+        logger: quietLogger,
+      });
+    const schedule = {
+      id: "nightly",
+      intervalMs: 60_000,
+      namespace: "team",
+      securityContext: { actor: { kind: "service-account" as const, id: "nightly-sa" } },
+    };
+
+    await expect(makeGuard(false).authorizeDispatch(schedule)).rejects.toBeInstanceOf(
+      ScheduleSecurityDeniedError,
+    );
+    await expect(makeGuard(true).authorizeDispatch(schedule)).rejects.toBe(auditError);
+  });
+
+  it("snapshots hostile schedule fields exactly once and deeply freezes detached dispatch data", async () => {
+    const principals = new Map([
+      ["service-account:nightly-sa", principal({ kind: "service-account", id: "nightly-sa" })],
+    ]);
+    const guard = new ScheduleExecutionSecurity({
+      security: security({ principals }),
+      clock: SystemWallClock,
+      logger: quietLogger,
+    });
+    let namespaceReads = 0;
+    let contextReads = 0;
+    let metadataReads = 0;
+    let payloadReads = 0;
+    const safeMetadata = {
+      workflowName: "nightly-workflow",
+      get payload() {
+        payloadReads++;
+        return payloadReads === 1 ? { nested: ["safe"] } : { nested: ["changed"] };
+      },
+    };
+    const hostile = {
+      id: "nightly",
+      intervalMs: 60_000,
+      get namespace() {
+        namespaceReads++;
+        return namespaceReads === 1 ? "team" : "other-team";
+      },
+      get securityContext() {
+        contextReads++;
+        return contextReads === 1
+          ? { actor: { kind: "service-account" as const, id: "nightly-sa" } }
+          : { actor: { kind: "operator" as const, id: "operator" } };
+      },
+      get metadata() {
+        metadataReads++;
+        return metadataReads === 1 ? safeMetadata : { workflowName: "changed" };
+      },
+    } as unknown as DurableScheduleConfig;
+
+    const authorized = await guard.authorizeDispatch(hostile);
+    expect({ namespaceReads, contextReads, metadataReads, payloadReads }).toEqual({
+      namespaceReads: 1,
+      contextReads: 1,
+      metadataReads: 1,
+      payloadReads: 1,
+    });
+    expect(authorized.schedule).toMatchObject({
+      namespace: "team",
+      metadata: { workflowName: "nightly-workflow", payload: { nested: ["safe"] } },
+      securityContext: { actor: { kind: "service-account", id: "nightly-sa" } },
+    });
+    expect(Object.isFrozen(authorized.schedule)).toBe(true);
+    expect(Object.isFrozen(authorized.schedule.metadata)).toBe(true);
+    const payload = authorized.schedule.metadata?.payload as {
+      nested: ReadonlyArray<string>;
+    };
+    expect(Object.isFrozen(payload)).toBe(true);
+    expect(Object.isFrozen(payload.nested)).toBe(true);
   });
 });
