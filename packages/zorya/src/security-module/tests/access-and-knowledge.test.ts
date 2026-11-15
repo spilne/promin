@@ -783,15 +783,21 @@ describe("namespace and knowledge access", () => {
     const memberUser = await createUser({
       env,
       email: "member@example.com",
-      bindings: [{ namespaceId: "team-a", accessRole: "member" }],
+      bindings: [{ namespaceId: ORG_WIDE_NAMESPACE, accessRole: "member" }],
     });
     const approverUser = await createUser({
       env,
       email: "approver@example.com",
       bindings: [{ namespaceId: "team-a", accessRole: "approver" }],
     });
+    const knowledgeManagerUser = await createUser({
+      env,
+      email: "knowledge-manager@example.com",
+      bindings: [{ namespaceId: "team-a", accessRole: "knowledge-manager" }],
+    });
     const member = await principal(env, memberUser);
     const approver = await principal(env, approverUser);
+    const knowledgeManager = await principal(env, knowledgeManagerUser);
     const authorize = (
       value: Principal,
       permission: AuthorizationRequest["permission"],
@@ -814,6 +820,16 @@ describe("namespace and knowledge access", () => {
       allowed: true,
       reason: "self_identity_allow",
     });
+    expect(await authorize(approver, { resource: "agent", action: "read" }, "org")).toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
+    expect(await authorize(knowledgeManager, { resource: "agent", action: "read" }, "org")).toEqual(
+      {
+        allowed: false,
+        reason: "permission_denied",
+      },
+    );
     expect(await authorize(member, { resource: "thread", action: "send" }, "team-a", "t")).toEqual({
       allowed: true,
       reason: "self_identity_allow",

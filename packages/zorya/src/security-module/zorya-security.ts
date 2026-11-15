@@ -328,9 +328,6 @@ function isMemberPermission(params: {
   readonly resource: { readonly id?: string; readonly principal?: PrincipalRef };
 }): boolean {
   const { principal, roles, actor, actorRoles, permission, resource } = params;
-  if (permission.resource === "agent" && permission.action === "read") {
-    return hasAnyAccessRole(principal);
-  }
   if (permission.resource === "approval" && permission.action === "decide") {
     return (
       actorRoles.has("member") &&
@@ -339,6 +336,7 @@ function isMemberPermission(params: {
     );
   }
   if (!roles.has("member")) return false;
+  if (permission.resource === "agent" && permission.action === "read") return true;
   if (permission.resource === "thread") {
     return (
       permission.action === "read" ||
@@ -352,12 +350,6 @@ function isMemberPermission(params: {
     return resource.id === principal.id;
   }
   return false;
-}
-
-function hasAnyAccessRole(principal: Principal): boolean {
-  return Object.keys(principal.accessRoles).some(
-    (namespaceId) => ownRoles(principal.accessRoles, namespaceId).length > 0,
-  );
 }
 
 function samePrincipal(left: PrincipalRef, right: PrincipalRef): boolean {
