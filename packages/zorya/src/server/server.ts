@@ -31,6 +31,7 @@ import { RunWatcherPool } from "./run-poll-watcher.ts";
 import {
   DEFAULT_READINESS_TIMEOUT_MS,
   DEFAULT_SHUTDOWN_TIMEOUT_MS,
+  ZoryaInsecureConfigError,
   type ListenOptions,
   type Logger,
   type ZoryaServerConfig,
@@ -61,7 +62,7 @@ import {
   type ZoryaCluster,
 } from "./services/workflows/index.ts";
 import { mountAgents } from "./mount/mount-agents.ts";
-import { AuthPlanes, isProbePath } from "./mount/mount-auth.ts";
+import { AuthPlanes, isOperatorApiPath, isProbePath } from "./mount/mount-auth.ts";
 import { mountRemoteDeployments, mountWebhooks } from "./mount/mount-ingress.ts";
 import {
   InFlightRequests,
@@ -85,6 +86,7 @@ import { mountSchedules } from "./mount/mount-schedules.ts";
 import { mountStatic } from "./mount/mount-static.ts";
 import { mountWorkflowBuilder } from "./mount/mount-workflow-builder.ts";
 import { ZoryaServerBuilder } from "./server-builder.ts";
+import { createApiKeySecurity, setRequestPrincipal, type ZoryaSecurity } from "./security/index.ts";
 
 export class ZoryaServer {
   readonly workflows: ZoryaWorkflows;
@@ -143,6 +145,8 @@ export class ZoryaServer {
   readonly namespaces?: NamespaceRegistry;
   /** Deletes ended runs past their retention age. Present with `config.retention`. */
   readonly retention?: RunRetention;
+  /** Authentication and access policy for the operator API. */
+  readonly security: ZoryaSecurity;
 
   private readonly planes: AuthPlanes;
   private readonly lifecycle: ServiceLifecycle;
@@ -199,13 +203,20 @@ export class ZoryaServer {
     }
 
     this.logger = config.logger ?? console;
+    if (config.security && config.apiKeys !== undefined) {
+      throw new ZoryaInsecureConfigError(
+        "ZoryaServer: the security module replaces apiKeys; configure only one operator authentication path.",
+      );
+    }
     this.planes = new AuthPlanes({
       apiKeys: config.apiKeys,
       workerApiKeys: config.remoteWorkers?.apiKeys,
     });
+    this.security = config.security ?? createApiKeySecurity({ auth: this.planes.operator });
     this.planes.assertConfigured({
       remoteWorkers: config.remoteWorkers !== undefined,
       insecure: config.insecure === true,
+      operatorSecurity: config.security !== undefined,
       logger: this.logger,
     });
     const readinessTimeoutMs = config.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
@@ -246,6 +257,10 @@ export class ZoryaServer {
     this.lifecycle = new ServiceLifecycle({
       services: managedServices({
         workflows: this.workflows,
+        security: config.security && {
+          start: async () => this.security.start?.(),
+          stop: async () => this.security.stop?.(),
+        },
         scheduler: this.scheduler,
         agents: this.agents,
         retainedSubagents: this.retainedSubagents,
@@ -317,6 +332,7 @@ export class ZoryaServer {
     });
 
     const router = (this.router = new Router({ logger: this.logger }));
+    this.security.mount?.(router);
     mountProbes({
       router,
       storage,
@@ -443,8 +459,14 @@ export class ZoryaServer {
     const path = new URL(req.url).pathname;
     if (this.stopping && !isProbePath(path)) return jsonError(503, "shutting_down");
 
-    const denied = this.planes.authenticate({ req, path });
-    if (denied) return denied;
+    if (isOperatorApiPath({ method: req.method, path })) {
+      const principal = await this.security.authenticate(req);
+      if (!principal) return jsonError(401, "unauthorized");
+      setRequestPrincipal({ req, principal });
+    } else {
+      const denied = this.planes.authenticate({ req, path });
+      if (denied) return denied;
+    }
 
     return this.liveStreams.track(await this.router.handle(req));
   }

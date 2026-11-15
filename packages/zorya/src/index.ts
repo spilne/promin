@@ -150,6 +150,15 @@ export {
   type ZoryaWorkflowBuilderConfig,
 } from "./server/services/workflow-builder/index.ts";
 export { Auth, bearerToken, type AuthConfig } from "./server/auth.ts";
+export {
+  OPERATOR_PRINCIPAL,
+  ORG_WIDE_NAMESPACE,
+  createApiKeySecurity,
+  requestPrincipal,
+  setRequestPrincipal,
+  type Principal,
+  type ZoryaSecurity,
+} from "./server/security/index.ts";
 export { RunEventBus } from "./server/run-event-bus.ts";
 export { RunPollWatcher, RunWatcherPool } from "./server/run-poll-watcher.ts";
 export {

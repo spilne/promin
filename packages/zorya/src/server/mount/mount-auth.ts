@@ -43,9 +43,14 @@ export class AuthPlanes {
    * the operator opted into insecure mode; in insecure mode, warn about
    * each open plane.
    */
-  assertConfigured(params: { remoteWorkers: boolean; insecure: boolean; logger: Logger }): void {
+  assertConfigured(params: {
+    remoteWorkers: boolean;
+    insecure: boolean;
+    operatorSecurity: boolean;
+    logger: Logger;
+  }): void {
     const open: string[] = [];
-    if (!this.operator.isEnabled) open.push("/api (apiKeys)");
+    if (!params.operatorSecurity && !this.operator.isEnabled) open.push("/api (apiKeys)");
     if (params.remoteWorkers && !this.worker.isEnabled) {
       open.push("worker planes /ws/worker, /rpc/* (remoteWorkers.apiKeys)");
     }
@@ -100,6 +105,11 @@ export class AuthPlanes {
 /** Liveness and readiness probes: public, and answered while shutting down. */
 export function isProbePath(path: string): boolean {
   return path === "/api/health" || path === "/api/ready";
+}
+
+/** A non-public operator API path, excluding endpoints on the worker plane. */
+export function isOperatorApiPath(params: { method: string; path: string }): boolean {
+  return params.path.startsWith("/api/") && !isPublicRoute(params) && !isWorkerPath(params.path);
 }
 
 /** Routes that need no Zorya key: the probes and the bearer-checked signal-token routes. */

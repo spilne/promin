@@ -24,6 +24,7 @@ import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
 import type { ZoryaWorkflowBuilder } from "./services/workflow-builder/index.ts";
 import type { RunRetentionConfig, ZoryaWorkflows } from "./services/workflows/index.ts";
+import type { ZoryaSecurity } from "./security/index.ts";
 
 /**
  * Fluent builder for a `ZoryaServer`; start one with `ZoryaServer.builder()`.
@@ -98,6 +99,11 @@ export class ZoryaServerBuilder {
   /** Operator API keys for the dashboard and `/api`. */
   apiKeys(apiKeys: ReadonlyArray<string>): this {
     return this.set({ apiKeys });
+  }
+
+  /** Pluggable operator authentication and access policy. Replaces `apiKeys`. */
+  security(security: ZoryaSecurity): this {
+    return this.set({ security });
   }
 
   /** Allow planes without keys. Local development only. */

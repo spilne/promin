@@ -21,6 +21,7 @@ import type { ZoryaScheduler } from "../services/scheduler/index.ts";
 import type { ZoryaSkills } from "../services/skills/index.ts";
 import type { ZoryaWorkflowBuilder } from "../services/workflow-builder/index.ts";
 import { LocalWorkflows } from "../services/workflows/local-workflows.ts";
+import type { ZoryaSecurity } from "../security/index.ts";
 
 const quietLogger: Logger = { log() {}, warn() {}, error() {} };
 
@@ -58,6 +59,7 @@ describe("ZoryaServer.builder()", () => {
     const workflows = localWorkflows();
     const expected: Required<ZoryaServerConfig> = {
       apiKeys: ["operator-key"],
+      security: stub<ZoryaSecurity>("security"),
       insecure: false,
       workflows,
       scheduler: stub<ZoryaScheduler>("scheduler"),
@@ -92,6 +94,7 @@ describe("ZoryaServer.builder()", () => {
 
     const config = ZoryaServer.builder()
       .apiKeys(expected.apiKeys)
+      .security(expected.security)
       .insecure(expected.insecure)
       .workflows(expected.workflows)
       .scheduler(expected.scheduler)

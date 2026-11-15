@@ -70,6 +70,7 @@ interface Lifecycled {
 /** The background services the server starts, in start order. */
 export function managedServices(params: {
   readonly workflows: Lifecycled;
+  readonly security: Lifecycled | undefined;
   readonly scheduler: Lifecycled | undefined;
   readonly agents: Lifecycled | undefined;
   readonly retainedSubagents: Lifecycled | undefined;
@@ -85,6 +86,7 @@ export function managedServices(params: {
   readonly namespaces: Lifecycled | undefined;
 }): ManagedService[] {
   const out: ManagedService[] = [{ name: "workflows", ...bindLifecycle(params.workflows) }];
+  if (params.security) out.push({ name: "security", ...bindLifecycle(params.security) });
   if (params.namespaces) out.push({ name: "namespaces", ...bindLifecycle(params.namespaces) });
   if (params.scheduler) out.push({ name: "scheduler", ...bindLifecycle(params.scheduler) });
   if (params.agents) out.push({ name: "agents", ...bindLifecycle(params.agents) });
