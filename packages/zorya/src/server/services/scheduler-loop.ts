@@ -133,6 +133,16 @@ export interface SchedulerLoopConfig {
     tick: ScheduleTick,
     schedule: DurableScheduleConfig,
   ) => Promise<{ handled: boolean } | void>;
+  /**
+   * Host admission immediately before any custom, agent or workflow
+   * dispatch. It may return an immutable normalized config (for example a
+   * key-mode legacy assignment adopted as operator). A rejection leaves the
+   * tick due and no user work is started.
+   */
+  prepareDispatch?: (
+    tick: ScheduleTick,
+    schedule: DurableScheduleConfig,
+  ) => Promise<DurableScheduleConfig>;
   /** Stable id used for leader election. Default: random UUID. */
   instanceId?: string;
   /** Poll interval in ms. Default: 1000. */
@@ -213,6 +223,7 @@ export class SchedulerLoop {
   private readonly storage: SchedulerStorage;
   private readonly trigger?: RunTrigger;
   private readonly fireOverride?: SchedulerLoopConfig["fire"];
+  private readonly prepareDispatch?: SchedulerLoopConfig["prepareDispatch"];
   private readonly pollIntervalMs: number;
   private readonly leaderLockTtlMs: number;
   private readonly dispatchTimeoutMs: number;
@@ -240,6 +251,7 @@ export class SchedulerLoop {
     this.storage = config.storage;
     this.trigger = config.trigger;
     this.fireOverride = config.fire;
+    this.prepareDispatch = config.prepareDispatch;
     this.instanceId = config.instanceId ?? crypto.randomUUID();
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
     this.leaderLockTtlMs = config.leaderLockTtlMs ?? this.pollIntervalMs * 3;
@@ -673,7 +685,10 @@ export class SchedulerLoop {
     tick: ScheduleTick;
     schedule: DurableScheduleConfig;
   }): Promise<void> {
-    const { tick, schedule } = params;
+    const { tick } = params;
+    const schedule = this.prepareDispatch
+      ? await this.prepareDispatch(tick, params.schedule)
+      : params.schedule;
     if (this.fireOverride) {
       const result = await this.fireOverride(tick, schedule);
       // `void` keeps the "fire fully replaces dispatch" contract.
@@ -720,6 +735,7 @@ export class SchedulerLoop {
       // breakdown — `scheduledAt` vs `firedAt` is still useful info.
       runSource: "schedule",
       runSourceId: tick.scheduleId,
+      securityContext: schedule.securityContext,
       metadata: {
         ...schedule.metadata,
         scheduleId: tick.scheduleId,

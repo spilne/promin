@@ -36,7 +36,7 @@ import {
 } from "@promin/agent";
 import type { DurableScheduleConfig, ScheduleTick } from "@promin/workflow/scheduler";
 import type { ScopeAuthorizer } from "../../routes/agent-gateway-kit.ts";
-import type { Principal } from "../../security/index.ts";
+import type { AuthorizedScheduleIdentity, Principal } from "../../security/index.ts";
 import type { TurnStreamLimits } from "../../routes/agents/agent-sse.ts";
 import type { AgentScheduleDispatcher, AgentScheduleStart } from "../scheduler/index.ts";
 
@@ -268,10 +268,16 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
   async dispatchSchedule(
     tick: ScheduleTick,
     schedule: DurableScheduleConfig,
+    identity?: AuthorizedScheduleIdentity,
   ): Promise<AgentScheduleStart> {
     const started = await startAgentSchedule(tick, schedule, {
       registry: this.registry,
-      resolve: this.resolve,
+      resolve: (recipe, scope) =>
+        this.resolve(recipe, {
+          ...(scope?.namespaceId !== undefined && { namespaceId: scope.namespaceId }),
+          ...(scope?.resourceId !== undefined && { resourceId: scope.resourceId }),
+          ...(identity?.principal !== undefined && { principal: identity.principal }),
+        }),
       // A scheduled turn on a thread takes the thread's turn lease like a
       // gateway send, so it never interleaves with a live conversation.
       ...(this.turnGate !== undefined && { turnGate: this.turnGate }),

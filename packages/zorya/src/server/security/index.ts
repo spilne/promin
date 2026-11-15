@@ -26,6 +26,13 @@ export {
   type RunExecutionSource,
 } from "./run-execution-security.ts";
 export {
+  ScheduleAssignmentError,
+  ScheduleExecutionSecurity,
+  ScheduleSecurityDeniedError,
+  type AuthorizedScheduleIdentity,
+  type ScheduleExecutionSecurityConfig,
+} from "./schedule-execution-security.ts";
+export {
   AUTHORIZATION_REASONS,
   OPERATOR_PRINCIPAL,
   ORG_WIDE_NAMESPACE,

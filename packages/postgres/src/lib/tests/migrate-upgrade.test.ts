@@ -7,6 +7,7 @@ import { migrate } from "../migrate.ts";
 import { PgStepQueue } from "../pg-step-queue.ts";
 import { PostgresWorkflowStorage } from "../postgres-workflow-storage.ts";
 import { PostgresPendingApprovalStore } from "../agent/pending-approval-store.ts";
+import { PgSchedulerStorage } from "../pg-scheduler-storage.ts";
 
 // ---------------------------------------------------------------------------
 // A database that applied an earlier migration chain (the baseline alone, no
@@ -170,6 +171,36 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
     expect((await storage.loadWorkflow("secured-1"))?.securityContext).toEqual({
       actor: { kind: "service-account", id: "sa-1" },
       effective: { kind: "user", id: "user-7" },
+    });
+  });
+
+  it("adds nullable schedule security context to a database at 0007", async () => {
+    await migrate(pg.db, { migrationsFolder: chainFolder(7) });
+    const contextMigration = JSON.parse(
+      readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"),
+    ).entries.find((entry: { idx: number }) => entry.idx === 8) as { when: number };
+    await pg.sql`DELETE FROM drizzle.__drizzle_migrations
+      WHERE created_at >= ${contextMigration.when}`;
+    await pg.sql`ALTER TABLE wf_schedules DROP COLUMN IF EXISTS security_context`;
+    await pg.sql`INSERT INTO wf_schedules (id, interval_ms, incarnation)
+      VALUES ('legacy-schedule', 60000, 'legacy-incarnation')`;
+
+    await migrate(pg.db);
+    await migrate(pg.db);
+    const storage = new PgSchedulerStorage({ db: pg.db });
+    expect((await storage.loadSchedule("legacy-schedule"))?.securityContext).toBeUndefined();
+
+    await storage.upsertSchedule({
+      id: "secured-schedule",
+      intervalMs: 60_000,
+      securityContext: {
+        actor: { kind: "service-account", id: "schedule-sa" },
+        effective: { kind: "user", id: "schedule-owner" },
+      },
+    });
+    expect((await storage.loadSchedule("secured-schedule"))?.securityContext).toEqual({
+      actor: { kind: "service-account", id: "schedule-sa" },
+      effective: { kind: "user", id: "schedule-owner" },
     });
   });
 

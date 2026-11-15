@@ -15,6 +15,24 @@ schedulerStorageTestSuite(async () =>
 // ---- SQLite-specific tests ----
 
 describe("SqliteSchedulerStorage", () => {
+  it("upgrades and reads a schedule table created before identity assignments", async () => {
+    const db = new Database(":memory:");
+    SqliteSchedulerStorage.make({ db });
+    db.run(`ALTER TABLE promin_wf_schedules DROP COLUMN security_context`);
+    db.run(`
+      INSERT INTO promin_wf_schedules
+        (id, interval_ms, incarnation, created_at, updated_at)
+      VALUES ('legacy', 60000, 'old-incarnation', 1, 1)
+    `);
+
+    const upgraded = SqliteSchedulerStorage.make({ db });
+    expect(await upgraded.loadSchedule("legacy")).toMatchObject({
+      id: "legacy",
+      intervalMs: 60_000,
+      securityContext: undefined,
+    });
+  });
+
   it("persists state across instances sharing the same db", async () => {
     const db = new Database(":memory:");
     const a = SqliteSchedulerStorage.make({ db });

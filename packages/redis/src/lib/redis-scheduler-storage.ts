@@ -31,7 +31,11 @@ import {
   type ScheduleState,
   type SchedulerStorage,
 } from "@promin/workflow/scheduler";
-import { scheduleMetadataContains } from "@promin/workflow/storage-kit";
+import {
+  decodeRunSecurityContext,
+  normalizeRunSecurityContext,
+  scheduleMetadataContains,
+} from "@promin/workflow/storage-kit";
 import type { RedisStoreClient } from "./redis-client.ts";
 import { RedisLeaderLeaseStore } from "./redis-leader-lease-store.ts";
 import { storeKeyBase } from "./redis-key-tags.ts";
@@ -493,6 +497,9 @@ export class RedisSchedulerStorage implements SchedulerStorage {
     if (config.startAt) fields.startAt = String(config.startAt.getTime());
     if (config.endAt) fields.endAt = String(config.endAt.getTime());
     if (config.metadata) fields.metadata = JSON.stringify(config.metadata);
+    if (config.securityContext) {
+      fields.securityContext = JSON.stringify(normalizeRunSecurityContext(config.securityContext));
+    }
 
     const seedMs = Math.max(this.clock.currentTimeMs(), config.startAt?.getTime() ?? 0);
     const inserted = await this.redis.eval(
@@ -673,6 +680,9 @@ function rawToConfig(raw: Record<string, string>): DurableScheduleConfig {
     startAt: raw.startAt ? new Date(Number(raw.startAt)) : undefined,
     endAt: raw.endAt ? new Date(Number(raw.endAt)) : undefined,
     metadata: raw.metadata ? JSON.parse(raw.metadata) : undefined,
+    securityContext: raw.securityContext
+      ? decodeRunSecurityContext(JSON.parse(raw.securityContext))
+      : undefined,
     maxCatchUp: raw.maxCatchUp !== undefined ? Number(raw.maxCatchUp) : 0,
     jitterMs: raw.jitterMs !== undefined ? Number(raw.jitterMs) : 0,
   };

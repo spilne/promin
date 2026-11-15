@@ -6,7 +6,7 @@
 // their InMemorySchedulerStorage / PgSchedulerStorage / etc.
 // ---------------------------------------------------------------------------
 
-import type { NamespaceRegistry, WorkflowStorage } from "@promin/workflow";
+import type { NamespaceRegistry, RunSecurityContext, WorkflowStorage } from "@promin/workflow";
 import type {
   DurableScheduleConfig,
   ScheduleState,
@@ -33,6 +33,7 @@ import { requireActiveNamespace } from "../namespace-guard.ts";
 import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
 import { assertIfMatch, contentEtag, withEtag } from "../preconditions.ts";
 import { runLocation } from "./runs.ts";
+import { ORG_WIDE_NAMESPACE, ScheduleAssignmentError } from "../security/index.ts";
 
 export interface ScheduleDto {
   id: string;
@@ -48,6 +49,10 @@ export interface ScheduleDto {
   jitterMs?: number;
   metadata?: Record<string, unknown>;
   maxCatchUp?: number;
+  /** Service account assigned to unattended ticks. */
+  serviceAccountId?: string;
+  /** User represented by that service account, when configured. */
+  runAsUserId?: string;
   /** ISO timestamp of last fire. */
   lastFiredAt?: string;
   /** Running fire counter. */
@@ -190,6 +195,8 @@ export const ScheduleCreateRequestSchema = z
     /** Input for triggered runs. Stored in metadata.input. */
     input: z.unknown().optional(),
     metadata: optional(z.record(z.string(), z.unknown())),
+    serviceAccountId: optional(z.string().min(1).max(256)),
+    runAsUserId: optional(z.string().min(1).max(256)),
   })
   .strict();
 
@@ -217,6 +224,8 @@ export const SchedulePatchRequestSchema = z
     workflowName: z.string().min(1).max(256).nullable().optional(),
     input: z.unknown().optional(),
     metadata: z.record(z.string(), z.unknown()).optional(),
+    serviceAccountId: z.string().min(1).max(256).nullable().optional(),
+    runAsUserId: z.string().min(1).max(256).nullable().optional(),
   })
   .strict()
   .refine(
@@ -286,6 +295,13 @@ export interface ScheduleRoutesDeps {
    * here and active (404 `namespace_not_found`, 409 `namespace_archived`).
    */
   readonly namespaces?: NamespaceRegistry;
+  /** Resolve and authorize the durable identity assigned to a schedule. */
+  readonly assignedSecurityContext?: (params: {
+    readonly scheduleId: string;
+    readonly namespaceId: string;
+    readonly serviceAccountId?: string;
+    readonly runAsUserId?: string;
+  }) => Promise<RunSecurityContext | undefined>;
 }
 
 /** A clock frozen at `when` — `computeNextRun` only reads the time. */
@@ -336,6 +352,14 @@ function toDto(params: {
     jitterMs: config.jitterMs,
     metadata: config.metadata,
     maxCatchUp: config.maxCatchUp,
+    serviceAccountId:
+      config.securityContext?.actor.kind === "service-account"
+        ? config.securityContext.actor.id
+        : undefined,
+    runAsUserId:
+      config.securityContext?.effective?.kind === "user"
+        ? config.securityContext.effective.id
+        : undefined,
     lastFiredAt: state?.lastFired ? iso(state.lastFired) : undefined,
     tickCount: state?.tickCount,
     nextRunAt: nextRunIso({ config, clock }),
@@ -403,6 +427,34 @@ export function getSchedule(deps: ScheduleRoutesDeps) {
   };
 }
 
+async function assignmentForWrite(params: {
+  readonly deps: ScheduleRoutesDeps;
+  readonly scheduleId: string;
+  readonly namespaceId: string;
+  readonly serviceAccountId?: string;
+  readonly runAsUserId?: string;
+}): Promise<{ readonly securityContext?: RunSecurityContext } | Response> {
+  if (!params.deps.assignedSecurityContext) {
+    if (params.serviceAccountId === undefined && params.runAsUserId === undefined) return {};
+    return jsonError(503, "schedule_identity_unavailable");
+  }
+  try {
+    const context = await params.deps.assignedSecurityContext({
+      scheduleId: params.scheduleId,
+      namespaceId: params.namespaceId,
+      ...(params.serviceAccountId !== undefined && {
+        serviceAccountId: params.serviceAccountId,
+      }),
+      ...(params.runAsUserId !== undefined && { runAsUserId: params.runAsUserId }),
+    });
+    return context ? { securityContext: context } : {};
+  } catch (error) {
+    if (!(error instanceof ScheduleAssignmentError)) throw error;
+    const status = error.code === "assignment_required" ? 400 : 403;
+    return jsonError(status, error.code);
+  }
+}
+
 /**
  * POST /api/schedules — create a schedule: 201 + the schedule. Create-only:
  * an existing id is a 409 `schedule_exists` (change it with PATCH). The
@@ -427,9 +479,18 @@ export function createSchedule(deps: ScheduleRoutesDeps) {
       );
     }
 
-    const metadata: Record<string, unknown> = { ...(body.metadata ?? {}) };
+    const metadata: Record<string, unknown> = { ...body.metadata };
     if (body.workflowName) metadata.workflowName = body.workflowName;
     if (body.input !== undefined) metadata.input = body.input;
+
+    const assignment = await assignmentForWrite({
+      deps,
+      scheduleId: body.id,
+      namespaceId: namespace ?? ORG_WIDE_NAMESPACE,
+      serviceAccountId: body.serviceAccountId,
+      runAsUserId: body.runAsUserId,
+    });
+    if (assignment instanceof Response) return assignment;
 
     const config: DurableScheduleConfig = {
       id: body.id,
@@ -445,6 +506,7 @@ export function createSchedule(deps: ScheduleRoutesDeps) {
       jitterMs: body.jitterMs,
       metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
       maxCatchUp: body.maxCatchUp,
+      ...assignment,
     };
     const invalid = invalidConfig(config);
     if (invalid !== undefined) return jsonError(400, "invalid_schedule", invalid);
@@ -490,10 +552,38 @@ export function patchSchedule(deps: ScheduleRoutesDeps) {
     });
 
     const merged = applySchedulePatch({ current, patch });
-    const invalid = invalidConfig(merged);
+    const assignmentChanged =
+      patch.serviceAccountId !== undefined || patch.runAsUserId !== undefined;
+    let securedMerged = merged;
+    if (assignmentChanged) {
+      const assignment = await assignmentForWrite({
+        deps,
+        scheduleId: id,
+        namespaceId: current.namespace ?? ORG_WIDE_NAMESPACE,
+        serviceAccountId:
+          patch.serviceAccountId === undefined
+            ? current.securityContext?.actor.kind === "service-account"
+              ? current.securityContext.actor.id
+              : undefined
+            : (patch.serviceAccountId ?? undefined),
+        runAsUserId:
+          patch.runAsUserId === undefined
+            ? current.securityContext?.effective?.kind === "user"
+              ? current.securityContext.effective.id
+              : undefined
+            : (patch.runAsUserId ?? undefined),
+      });
+      if (assignment instanceof Response) return assignment;
+      securedMerged = { ...merged, ...assignment };
+      if (assignment.securityContext === undefined) {
+        const { securityContext: _removed, ...withoutAssignment } = securedMerged;
+        securedMerged = withoutAssignment;
+      }
+    }
+    const invalid = invalidConfig(securedMerged);
     if (invalid !== undefined) return jsonError(400, "invalid_schedule", invalid);
 
-    await storage.upsertSchedule(merged);
+    await storage.upsertSchedule(securedMerged);
     const timingChanged =
       patch.cron !== undefined ||
       patch.rrule !== undefined ||
@@ -501,13 +591,13 @@ export function patchSchedule(deps: ScheduleRoutesDeps) {
       patch.timezone !== undefined ||
       patch.startAt !== undefined ||
       patch.endAt !== undefined;
-    const resumed = current.enabled === false && merged.enabled !== false;
-    if (merged.enabled !== false && timingChanged && !resumed) {
+    const resumed = current.enabled === false && securedMerged.enabled !== false;
+    if (securedMerged.enabled !== false && timingChanged && !resumed) {
       // Same as `DurableScheduler.update`: the next fire follows the new timing.
-      await storage.setNextRun(id, computeNextRun({ config: merged, clock }));
+      await storage.setNextRun(id, computeNextRun({ config: securedMerged, clock }));
     }
     const state = await storage.loadScheduleState(id);
-    const stored = (await storage.loadSchedule(id)) ?? merged;
+    const stored = (await storage.loadSchedule(id)) ?? securedMerged;
     return scheduleResponse(200, toDto({ config: stored, state, clock }));
   };
 }
@@ -546,7 +636,7 @@ function applySchedulePatch(params: {
   set("jitterMs", patch.jitterMs);
   set("maxCatchUp", patch.maxCatchUp);
 
-  const metadata: Record<string, unknown> = { ...(current.metadata ?? {}) };
+  const metadata: Record<string, unknown> = { ...current.metadata };
   for (const [key, value] of Object.entries(patch.metadata ?? {})) {
     if (value === null) delete metadata[key];
     else metadata[key] = value;

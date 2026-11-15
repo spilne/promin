@@ -152,6 +152,8 @@ export interface AgentInvokeOpts {
   readonly namespaceId?: string;
   /** Free-form metadata that adapters may surface back on events. */
   readonly metadata?: Readonly<Record<string, unknown>>;
+  /** Durable initiating identity for unattended one-shot runs. */
+  readonly securityContext?: RunSecurityContext;
   /**
    * Deterministic identity for this run. Backends map this to their own
    * primitive (durable agents → workflow id; remote agents → forwarded as

@@ -23,6 +23,10 @@ import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { assertPgLeaseCurrent, PgLeaderLeaseStore } from "./pg-leader-lease-store.ts";
 import { execRaw } from "./exec-raw.ts";
+import {
+  decodeRunSecurityContext,
+  normalizeRunSecurityContext,
+} from "@promin/workflow/storage-kit";
 
 export interface PgSchedulerStorageConfig {
   db: DrizzleDb;
@@ -262,6 +266,10 @@ export class PgSchedulerStorage implements SchedulerStorage {
       startAt: config.startAt,
       endAt: config.endAt,
       metadata: config.metadata,
+      securityContext:
+        config.securityContext === undefined
+          ? null
+          : normalizeRunSecurityContext(config.securityContext),
     };
     // Due-tracking follows the enabled flag. A disabled schedule gets
     // `nextRun = NULL`. An enabled one keeps an existing `nextRun` (the
@@ -421,5 +429,6 @@ function rowToConfig(row: any): DurableScheduleConfig {
     startAt: row.startAt ?? undefined,
     endAt: row.endAt ?? undefined,
     metadata: row.metadata as Record<string, unknown> | undefined,
+    securityContext: decodeRunSecurityContext(row.securityContext),
   };
 }

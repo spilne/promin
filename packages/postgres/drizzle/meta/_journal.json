@@ -57,6 +57,13 @@
       "when": 1794883200000,
       "tag": "0007_approval_scope_key",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794969600000,
+      "tag": "0008_schedule_security_context",
+      "breakpoints": true
     }
   ]
 }

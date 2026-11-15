@@ -1044,6 +1044,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
         workflow: wf,
         workflowId,
         input: existing.input,
+        ...(opts?.securityContext !== undefined && { securityContext: opts.securityContext }),
       })) as AgentResult;
     }
     const ceiling =
@@ -1054,6 +1055,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       workflow: wf,
       workflowId,
       input: ceiling ? { ...prepared.input, budget: ceiling } : prepared.input,
+      ...(opts?.securityContext !== undefined && { securityContext: opts.securityContext }),
     })) as AgentResult;
   }
 }

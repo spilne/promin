@@ -11,7 +11,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, expect, it } from "bun:test";
-import { FakeWallClock } from "@promin/workflow";
+import { FakeWallClock, type RunSecurityContext } from "@promin/workflow";
 import { InMemorySchedulerStorage } from "@promin/workflow/scheduler";
 import { InMemoryAgentRegistry } from "../../versioned-registry/in-memory-registries.ts";
 import {
@@ -20,7 +20,13 @@ import {
 } from "../durable-scheduler-tool.ts";
 import { dispatchAgentSchedule, isAgentSchedule } from "../dispatch-agent-schedule.ts";
 import { httpSchedulerClient, inProcessSchedulerClient } from "../scheduler-client.ts";
-import type { Agent, AgentInput, AgentRunOutput } from "../../agent/types.ts";
+import type {
+  Agent,
+  AgentInput,
+  AgentInvokeOpts,
+  AgentRunOutput,
+  ThreadOptions,
+} from "../../agent/types.ts";
 
 const SCOPE = {
   namespaceId: "acme",
@@ -334,7 +340,12 @@ describe("createDurableSchedulerTools — schedulerList / schedulerCancel", () =
 });
 
 describe("dispatchAgentSchedule", () => {
-  type Capture = { task: string; thread?: string; source?: AgentInput["source"] };
+  type Capture = {
+    task: string;
+    thread?: string;
+    source?: AgentInput["source"];
+    securityContext?: RunSecurityContext;
+  };
   function fakeAgent(captures: Capture[]): Agent {
     const noopOutput: AgentRunOutput = {
       text: Promise.resolve("ok"),
@@ -351,16 +362,25 @@ describe("dispatchAgentSchedule", () => {
     };
     const agent: Agent = {
       withScope: () => agent,
-      invoke: async (input: AgentInput) => {
-        captures.push({ task: input.task, source: input.source });
+      invoke: async (input: AgentInput, opts?: AgentInvokeOpts) => {
+        captures.push({
+          task: input.task,
+          source: input.source,
+          securityContext: opts?.securityContext,
+        });
         return noopOutput;
       },
       stream: () => noopOutput,
-      thread: async (id: string) => ({
+      thread: async (id: string, threadOpts?: ThreadOptions) => ({
         id,
         isNew: false,
         send: async (input: AgentInput) => {
-          captures.push({ task: input.task, thread: id, source: input.source });
+          captures.push({
+            task: input.task,
+            thread: id,
+            source: input.source,
+            securityContext: threadOpts?.securityContext,
+          });
           return noopOutput;
         },
         stream: () => noopOutput,
@@ -446,6 +466,10 @@ describe("dispatchAgentSchedule", () => {
         threadId: "t1",
         createdByAgent: "writer",
       },
+      securityContext: {
+        actor: { kind: "service-account" as const, id: "schedule-sa" },
+        effective: { kind: "user" as const, id: "alice" },
+      },
     };
     const result = await dispatchAgentSchedule(tick, schedule, {
       registry,
@@ -460,6 +484,7 @@ describe("dispatchAgentSchedule", () => {
       firedAt: tick.scheduledAt,
       scheduleId: "s-1",
     });
+    expect(captures[0]?.securityContext).toEqual(schedule.securityContext);
   });
 
   it("falls back to invoke (no thread) when threadId isn't set", async () => {

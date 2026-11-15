@@ -13,6 +13,7 @@ import {
   createWorkflowRunner,
   workflow,
   type Workflow,
+  type RunSecurityContext,
 } from "@promin/workflow";
 import { InMemorySchedulerStorage, type ScheduleTick } from "@promin/workflow/scheduler";
 import {
@@ -54,16 +55,64 @@ async function due(params: {
   id: string;
   intervalMs?: number;
   metadata?: Record<string, unknown>;
+  securityContext?: RunSecurityContext;
 }): Promise<void> {
   await params.storage.upsertSchedule({
     id: params.id,
     intervalMs: params.intervalMs ?? 60_000,
     metadata: params.metadata ?? { workflowName: "wf" },
+    securityContext: params.securityContext,
   });
 }
 
 const tickCount = async (storage: InMemorySchedulerStorage, id: string) =>
   (await storage.loadScheduleState(id))?.tickCount;
+
+describe("SchedulerLoop — dispatch admission", () => {
+  it("runs admission before custom dispatch and leaves a denied tick due", async () => {
+    const { clock, storage, errors, onError } = await setup();
+    await due({ storage, id: "denied" });
+    let userCodeCalls = 0;
+    const loop = new SchedulerLoop({
+      storage,
+      clock,
+      onError,
+      prepareDispatch: async () => {
+        throw new Error("assigned service account revoked");
+      },
+      fire: async () => {
+        userCodeCalls++;
+      },
+    });
+
+    expect(await loop.tickOnce()).toEqual([]);
+    expect(userCodeCalls).toBe(0);
+    expect(await tickCount(storage, "denied")).toBe(0);
+    expect(errors).toMatchObject([{ phase: "dispatch", scheduleId: "denied", tickNumber: 0 }]);
+  });
+
+  it("passes the admitted immutable context into the workflow trigger", async () => {
+    const { clock, storage } = await setup();
+    const context: RunSecurityContext = {
+      actor: { kind: "service-account", id: "nightly-sa" },
+      effective: { kind: "user", id: "alice" },
+    };
+    await due({ storage, id: "allowed", securityContext: context });
+    const seen: Array<RunSecurityContext | undefined> = [];
+    const loop = new SchedulerLoop({
+      storage,
+      clock,
+      prepareDispatch: async (_tick, schedule) => Object.freeze(schedule),
+      trigger: async (_name, _input, opts) => {
+        seen.push(opts?.securityContext);
+        return { workflowId: opts!.workflowId! };
+      },
+    });
+
+    expect((await loop.tickOnce()).map((tick) => tick.scheduleId)).toEqual(["allowed"]);
+    expect(seen).toEqual([context]);
+  });
+});
 
 describe("SchedulerLoop — commit only dispatched ticks", () => {
   it("a failed dispatch is reported, not committed, and redelivered with the same tickNumber", async () => {
