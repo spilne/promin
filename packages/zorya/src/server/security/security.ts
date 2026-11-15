@@ -73,18 +73,21 @@ export interface SecurityResourceRef<K extends SecurityResourceKind = SecurityRe
   readonly id?: string;
 }
 
-/** Stable, audit-safe authorization reason codes. */
-export type AuthorizationReason =
-  | "operator_allow"
-  | "access_role_allow"
-  | "knowledge_grant_allow"
-  | "self_identity_allow"
-  | "permission_denied"
-  | "namespace_denied"
-  | "principal_disabled"
-  | "identity_unknown"
-  | "act_for_required"
-  | "wrong_plane";
+/** Stable, audit-safe authorization reason codes and their runtime vocabulary. */
+export const AUTHORIZATION_REASONS = Object.freeze([
+  "operator_allow",
+  "access_role_allow",
+  "knowledge_grant_allow",
+  "self_identity_allow",
+  "permission_denied",
+  "namespace_denied",
+  "principal_disabled",
+  "identity_unknown",
+  "act_for_required",
+  "wrong_plane",
+] as const);
+
+export type AuthorizationReason = (typeof AUTHORIZATION_REASONS)[number];
 
 export type AuthorizationDecision =
   | { readonly allowed: true; readonly reason: AuthorizationReason }

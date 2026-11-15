@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { Auth } from "../../auth.ts";
 import {
+  AUTHORIZATION_REASONS,
   OPERATOR_PRINCIPAL,
   SECURITY_ACTIONS,
   WORKER_PRINCIPAL,
@@ -31,6 +32,22 @@ function security(log?: (message: string) => void) {
 }
 
 describe("security contract", () => {
+  it("publishes an immutable stable authorization reason vocabulary", () => {
+    expect(AUTHORIZATION_REASONS).toEqual([
+      "operator_allow",
+      "access_role_allow",
+      "knowledge_grant_allow",
+      "self_identity_allow",
+      "permission_denied",
+      "namespace_denied",
+      "principal_disabled",
+      "identity_unknown",
+      "act_for_required",
+      "wrong_plane",
+    ]);
+    expect(Object.isFrozen(AUTHORIZATION_REASONS)).toBeTrue();
+  });
+
   it("publishes exactly the approved resource/action vocabulary", () => {
     expect(SECURITY_ACTIONS).toEqual({
       namespace: ["read", "create", "update", "archive"],

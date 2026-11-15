@@ -14,6 +14,7 @@ export {
   type SecurityRouteAccessGuardConfig,
 } from "./route-access-guard.ts";
 export {
+  AUTHORIZATION_REASONS,
   OPERATOR_PRINCIPAL,
   ORG_WIDE_NAMESPACE,
   SECURITY_ACTIONS,
