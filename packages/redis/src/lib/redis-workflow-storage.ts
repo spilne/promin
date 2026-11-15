@@ -115,6 +115,9 @@ import {
   sameSignalTokenCreate,
   sameStoredValue,
   sortWorkflowRows,
+  normalizeRunSecurityContext,
+  decodeRunSecurityContext,
+  assertRunSecurityContextCompatible,
 } from "@promin/workflow/storage-kit";
 import type { RedisStoreClient } from "./redis-client.ts";
 import {
@@ -372,6 +375,9 @@ export class RedisWorkflowStorage
       workflowType: raw.workflowType || undefined,
       parentWorkflowId: raw.parentWorkflowId || undefined,
       namespace: raw.namespace || undefined,
+      ...(raw.securityContext && {
+        securityContext: decodeRunSecurityContext(JSON.parse(raw.securityContext)),
+      }),
       status: raw.status as WorkflowStatus,
       version: raw.version || undefined,
       run: Number(raw.run),
@@ -455,6 +461,10 @@ export class RedisWorkflowStorage
     if (guard?.fenceToken && params.parentWorkflowId === undefined) {
       throw new Error("createWorkflow: a fenced create needs parentWorkflowId");
     }
+    const securityContext =
+      params.securityContext === undefined
+        ? undefined
+        : normalizeRunSecurityContext(params.securityContext);
     const ns = this.resolveNamespace(params.namespace);
     // Idempotency-key path: check the index first. SET-NX below claims it
     // atomically — concurrent creates serialize, the loser falls through
@@ -466,7 +476,14 @@ export class RedisWorkflowStorage
         const expiresAt = await this.redis.hget(this.keys.wf(cachedId), "idempotencyExpiresAt");
         if (expiresAt && new Date(expiresAt).getTime() > this.clock.now().getTime()) {
           const existing = await this.loadWorkflow(cachedId);
-          if (existing) return { created: false, existing };
+          if (existing) {
+            assertRunSecurityContextCompatible({
+              workflowId: existing.workflowId,
+              stored: existing.securityContext,
+              requested: securityContext,
+            });
+            return { created: false, existing };
+          }
         }
       }
     }
@@ -486,6 +503,9 @@ export class RedisWorkflowStorage
     if (params.parentWorkflowId) fields.parentWorkflowId = params.parentWorkflowId;
     if (ns) fields.namespace = ns;
     if (params.metadata) fields.metadata = JSON.stringify(params.metadata);
+    if (securityContext !== undefined) {
+      fields.securityContext = JSON.stringify(securityContext);
+    }
     if (params.version) fields.version = params.version;
     if (params.runSource !== undefined) {
       fields.runSource = String(encodeRunSource(params.runSource));
@@ -521,6 +541,11 @@ export class RedisWorkflowStorage
       if (!applied) {
         const existing = await this.loadWorkflow(params.workflowId);
         if (existing) {
+          assertRunSecurityContextCompatible({
+            workflowId: existing.workflowId,
+            stored: existing.securityContext,
+            requested: securityContext,
+          });
           // A stale parent learns it lost the run here too, as on any other
           // fenced call.
           if (parentId !== undefined) {
@@ -591,7 +616,14 @@ export class RedisWorkflowStorage
             const winnerId = await this.redis.get(idxKey);
             if (winnerId) {
               const existing = await this.loadWorkflow(winnerId);
-              if (existing) return { created: false, existing };
+              if (existing) {
+                assertRunSecurityContextCompatible({
+                  workflowId: existing.workflowId,
+                  stored: existing.securityContext,
+                  requested: securityContext,
+                });
+                return { created: false, existing };
+              }
             }
             return this.createWorkflow({ ...params, guard });
           }

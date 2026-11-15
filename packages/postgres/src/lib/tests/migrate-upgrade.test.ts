@@ -82,10 +82,11 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
   it("adds the retention index to a database at 0001, idempotently, and the sweep reads work", async () => {
     // Bring the database to the chain's state at 0001: everything through 0001 applied, 0002 not.
     await migrate(pg.db, { migrationsFolder: chainFolder(1) });
-    const last = JSON.parse(
+    const retentionMigration = JSON.parse(
       readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"),
-    ).entries.at(-1) as { when: number };
-    await pg.sql`DELETE FROM drizzle.__drizzle_migrations WHERE created_at = ${last.when}`;
+    ).entries.find((entry: { idx: number }) => entry.idx === 2) as { when: number };
+    await pg.sql`DELETE FROM drizzle.__drizzle_migrations
+      WHERE created_at >= ${retentionMigration.when}`;
     await pg.sql`DROP INDEX IF EXISTS wf_workflows_retention_idx`;
     const hasIndex = async () =>
       (await pg.sql`SELECT 1 FROM pg_indexes WHERE indexname = 'wf_workflows_retention_idx'`)
@@ -105,5 +106,36 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
       name: "w",
     });
     expect(rows.map((r) => r.workflowId)).toEqual(["ret-up-1"]);
+  });
+
+  it("adds nullable run security context to a database at 0002", async () => {
+    await migrate(pg.db, { migrationsFolder: chainFolder(2) });
+    const contextMigration = JSON.parse(
+      readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"),
+    ).entries.find((entry: { idx: number }) => entry.idx === 3) as { when: number };
+    await pg.sql`DELETE FROM drizzle.__drizzle_migrations
+      WHERE created_at >= ${contextMigration.when}`;
+    await pg.sql`ALTER TABLE wf_workflows DROP COLUMN IF EXISTS security_context`;
+    await pg.sql`INSERT INTO wf_workflows (workflow_id, workflow_name, input)
+      VALUES ('legacy-security-1', 'w', '{}'::jsonb)`;
+
+    await migrate(pg.db);
+    await migrate(pg.db);
+    const storage = await PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false });
+    expect((await storage.loadWorkflow("legacy-security-1"))?.securityContext).toBeUndefined();
+
+    await storage.createWorkflow({
+      workflowId: "secured-1",
+      workflowName: "w",
+      input: {},
+      securityContext: {
+        actor: { kind: "service-account", id: "sa-1" },
+        effective: { kind: "user", id: "user-7" },
+      },
+    });
+    expect((await storage.loadWorkflow("secured-1"))?.securityContext).toEqual({
+      actor: { kind: "service-account", id: "sa-1" },
+      effective: { kind: "user", id: "user-7" },
+    });
   });
 });

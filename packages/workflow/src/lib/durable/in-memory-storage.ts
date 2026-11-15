@@ -127,6 +127,10 @@ import {
   writeTaskRow,
   type MutableWorkflow,
 } from "./in-memory/run-record.ts";
+import {
+  assertRunSecurityContextCompatible,
+  normalizeRunSecurityContext,
+} from "./run-security-context.ts";
 
 export class InMemoryWorkflowStorage
   implements
@@ -217,11 +221,25 @@ export class InMemoryWorkflowStorage
         idempotencyKey: params.idempotencyKey,
         now: this.clock.now(),
       });
-      if (claimed) return { created: false, existing: toWorkflowState(claimed) };
+      if (claimed) {
+        assertRunSecurityContextCompatible({
+          workflowId: claimed.workflowId,
+          stored: claimed.securityContext,
+          requested: params.securityContext,
+        });
+        return { created: false, existing: toWorkflowState(claimed) };
+      }
     }
 
     const existing = this.workflows.get(params.workflowId);
-    if (existing) return { created: false, existing: toWorkflowState(existing) };
+    if (existing) {
+      assertRunSecurityContextCompatible({
+        workflowId: existing.workflowId,
+        stored: existing.securityContext,
+        requested: params.securityContext,
+      });
+      return { created: false, existing: toWorkflowState(existing) };
+    }
 
     const now = this.clock.now();
     const namespace = this.resolveNamespace(params.namespace);
@@ -244,6 +262,9 @@ export class InMemoryWorkflowStorage
       workflowType: params.workflowType,
       parentWorkflowId: params.parentWorkflowId,
       namespace,
+      ...(params.securityContext !== undefined && {
+        securityContext: normalizeRunSecurityContext(params.securityContext),
+      }),
       status: "pending",
       version: params.version,
       run: 1,

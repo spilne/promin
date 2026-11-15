@@ -43,6 +43,7 @@ import {
 } from "./durable-pipeline-error.ts";
 import type { WorkflowSuspendedError, WorkflowTimeoutError } from "./durable-pipeline-error.ts";
 import type { WorkflowVersionRegistry } from "./workflow-version-registry.ts";
+import { normalizeRunSecurityContext, type RunSecurityContext } from "./run-security-context.ts";
 import type { StepExecutor } from "./runner/step-executor.ts";
 import { emitTrace, type WorkflowTracer } from "./workflow-tracer.ts";
 import { recoverWorkflows, type RecoveryResult, type RecoveryStrategy } from "./runner/recovery.ts";
@@ -155,6 +156,8 @@ export type WorkflowRunnerRunParams =
       readonly force?: boolean;
       /** Optional namespace used for workflow creation and idempotency-key scoping. */
       readonly namespace?: string;
+      /** Stable actor/effective references persisted on first creation. */
+      readonly securityContext?: RunSecurityContext;
       /**
        * Per-call dedup key. The runner first looks up an existing workflow
        * by `(namespace, workflow.name, idempotencyKey)`; if a non-expired match
@@ -206,6 +209,8 @@ export type WorkflowRunnerRunParams =
       readonly force?: boolean;
       /** Optional namespace used for workflow creation and idempotency-key scoping. */
       readonly namespace?: string;
+      /** See the `{ workflow }` shape. */
+      readonly securityContext?: RunSecurityContext;
       readonly idempotencyKey?: string;
       readonly idempotencyKeyTTL?: number;
       /** See the `{ workflow }` shape. */
@@ -527,6 +532,10 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     const runParams = params.run;
     const storage = this.storage;
     const { input, force, namespace, idempotencyKey, idempotencyKeyTTL } = runParams;
+    const securityContext =
+      runParams.securityContext === undefined
+        ? undefined
+        : normalizeRunSecurityContext(runParams.securityContext);
 
     // Per-call idempotency key: resolve to an existing workflowId before
     // dispatching. The supplied workflowId is the create-fallback when the
@@ -578,6 +587,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       force,
       ...(gate !== undefined && { onLocked: gate.onLocked }),
       ...(namespace !== undefined && { namespace }),
+      ...(securityContext !== undefined && { securityContext }),
       ...(runParams.signal !== undefined && { signal: runParams.signal }),
       ...(runParams.useStoredInput === true && { useStoredInput: true }),
       ...(runParams.traceparent !== undefined && { traceparent: runParams.traceparent }),
@@ -809,6 +819,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     input: unknown;
     force?: boolean;
     namespace?: string;
+    securityContext?: RunSecurityContext;
     idempotencyKey?: string;
     idempotencyExpiresAt?: Date;
     /** Set by `start`: leave an in-flight run alone, and report taking the lock. */
@@ -838,6 +849,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       input: params.input,
       force: params.force,
       namespace: params.namespace,
+      ...(params.securityContext !== undefined && { securityContext: params.securityContext }),
       ...(params.onLocked !== undefined && { onLocked: params.onLocked, rejectInFlight: true }),
       ...(params.signal !== undefined && { signal: params.signal }),
       ...(params.useStoredInput === true && { useStoredInput: true }),

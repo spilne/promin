@@ -204,6 +204,10 @@ export {
   isMarkedFailedRun,
   MARKED_FAILED_ERROR_TAG,
 } from "./lib/durable/workflow-state.ts";
+export {
+  type RunPrincipalRef,
+  type RunSecurityContext,
+} from "./lib/durable/run-security-context.ts";
 export { InMemoryWorkflowStorage } from "./lib/durable/in-memory-storage.ts";
 
 // Streams
@@ -325,6 +329,7 @@ export {
   WorkflowDeadlineError,
   WorkflowBudgetExceededError,
   WorkflowVersionMismatchError,
+  RunSecurityContextConflictError,
   WorkflowRunNotFoundError,
   FenceTokenMismatchError,
   GuardError,

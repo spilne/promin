@@ -59,6 +59,8 @@ export const workflows = pgTable(
     workflowName: text("workflow_name").notNull(),
     workflowType: text("workflow_type"),
     namespace: text("namespace"),
+    // Stable actor/effective references only; roles and credentials never persist here.
+    securityContext: jsonb("security_context"),
     version: text("version"),
     // Lineage: the parent run (child workflows) and what started this run.
     // `run_source` holds the small-int `RUN_SOURCE_CODES` value.

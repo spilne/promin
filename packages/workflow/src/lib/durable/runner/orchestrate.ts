@@ -65,6 +65,10 @@ import type { WorkflowStorage } from "../workflow-storage.ts";
 import { errorMessage, errorTagOf } from "./step-body.ts";
 import { failureFromError, workflowFailure, type WorkflowFailure } from "../workflow-failure.ts";
 import {
+  assertRunSecurityContextCompatible,
+  type RunSecurityContext,
+} from "../run-security-context.ts";
+import {
   emitTrace,
   traceErrorOf,
   type WorkflowTraceRef,
@@ -91,6 +95,7 @@ interface RunParams {
   readonly input: unknown;
   readonly force?: boolean;
   readonly namespace?: string;
+  readonly securityContext?: RunSecurityContext;
   readonly idempotencyKey?: string;
   readonly idempotencyExpiresAt?: Date;
   /**
@@ -389,11 +394,16 @@ export async function runChildWorkflow(params: {
   readonly input: unknown;
   /** The parent's namespace; a child created here is stored under it. */
   readonly namespace?: string;
+  /** The parent's stored identity; loaded from storage when omitted. */
+  readonly securityContext?: RunSecurityContext;
   /** The parent's lock signal: the child stops when the parent loses (or abandons) its run. */
   readonly signal?: AbortSignal;
 }): Promise<unknown> {
   const { runtime, workflow, workflowId, input } = params;
   const def = workflow._definition;
+  const inheritedSecurityContext =
+    params.securityContext ??
+    (await runtime.storage.loadWorkflow(params.parentWorkflowId))?.securityContext;
   const created = await runtime.storage.createWorkflow({
     workflowId,
     workflowName: workflow.name,
@@ -401,6 +411,9 @@ export async function runChildWorkflow(params: {
     workflowType: def.type,
     parentWorkflowId: params.parentWorkflowId,
     ...(params.namespace !== undefined && { namespace: params.namespace }),
+    ...(inheritedSecurityContext !== undefined && {
+      securityContext: inheritedSecurityContext,
+    }),
     metadata: def.metadata,
     version: workflow.version,
     guard: params.parentGuard,
@@ -417,6 +430,9 @@ export async function runChildWorkflow(params: {
     input,
     drivenByParent: true,
     parentWorkflowId: params.parentWorkflowId,
+    ...(inheritedSecurityContext !== undefined && {
+      securityContext: inheritedSecurityContext,
+    }),
     ...(rerunFailed && { force: true }),
     ...(params.signal !== undefined && { signal: params.signal }),
   });
@@ -543,6 +559,14 @@ async function runCycleBody(cycle: CycleParams & { phase: CyclePhase }): Promise
   let state =
     cycle.preloaded !== undefined ? cycle.preloaded : await ctx.storage.loadWorkflow(workflowId);
 
+  if (state !== null) {
+    assertRunSecurityContextCompatible({
+      workflowId,
+      stored: state.securityContext,
+      requested: cycle.params.securityContext,
+    });
+  }
+
   // Double-check idempotency under the lock — prevents a race with a
   // concurrent run that completed after the pre-check.
   if (idempotency && state?.completedAt) {
@@ -573,6 +597,9 @@ async function runCycleBody(cycle: CycleParams & { phase: CyclePhase }): Promise
       input,
       workflowType: ctx.type,
       ...(namespace !== undefined ? { namespace } : {}),
+      ...(cycle.params.securityContext !== undefined
+        ? { securityContext: cycle.params.securityContext }
+        : {}),
       metadata:
         ctx.tracer !== undefined && cycle.params.traceparent !== undefined
           ? { ...ctx.metadata, traceparent: cycle.params.traceparent }
@@ -726,6 +753,9 @@ async function runCycleBody(cycle: CycleParams & { phase: CyclePhase }): Promise
         ...(guard !== undefined && { parentGuard: guard }),
         ...((state?.namespace ?? namespace) !== undefined && {
           namespace: state?.namespace ?? namespace,
+        }),
+        ...(state?.securityContext !== undefined && {
+          securityContext: state.securityContext,
         }),
         signal: lock.signal,
         ...child,

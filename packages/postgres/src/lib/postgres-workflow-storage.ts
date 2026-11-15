@@ -83,6 +83,9 @@ import {
   decodeRunSource,
   sameSignalTokenCreate,
   sameStoredValue,
+  normalizeRunSecurityContext,
+  decodeRunSecurityContext,
+  assertRunSecurityContextCompatible,
 } from "@promin/workflow/storage-kit";
 import {
   workflows,
@@ -293,6 +296,9 @@ export class PostgresWorkflowStorage
       workflowType: row.workflowType ?? undefined,
       parentWorkflowId: row.parentWorkflowId ?? undefined,
       namespace: row.namespace ?? undefined,
+      ...(row.securityContext != null && {
+        securityContext: decodeRunSecurityContext(row.securityContext),
+      }),
       version: row.version ?? undefined,
       run: row.run ?? 1,
       runSource: decodeRunSource(row.runSource),
@@ -388,7 +394,7 @@ export class PostgresWorkflowStorage
       sql`WITH w AS (SELECT * FROM wf_workflows WHERE workflow_id = ${workflowId})
         SELECT 0 AS kind, w.workflow_name AS name, w.workflow_type, w.namespace, w.version,
           w.parent_workflow_id, w.run_source, w.run_source_id, w.run, w.status_id, w.input,
-          w.metadata, w.result, w.error, w.error_tag, w.tripwire, w.created_at, w.started_at,
+          w.metadata, w.security_context, w.result, w.error, w.error_tag, w.tripwire, w.created_at, w.started_at,
           w.updated_at, w.completed_at,
           NULL::int AS step_type_id, NULL::jsonb AS depends_on, NULL::float8 AS duration_ms,
           NULL::int AS attempt, NULL::timestamptz AS wake_at, NULL::text AS signal_name,
@@ -399,14 +405,14 @@ export class PostgresWorkflowStorage
         FROM w
         UNION ALL
         SELECT 1, s.step_name, NULL, NULL, NULL, NULL, NULL, NULL, s.run, s.status_id, NULL,
-          s.metadata, s.result, s.error, s.error_tag, NULL, NULL, s.started_at, NULL,
+          s.metadata, NULL::jsonb, s.result, s.error, s.error_tag, NULL, NULL, s.started_at, NULL,
           s.completed_at, s.step_type_id, s.depends_on, s.duration_ms::float8, s.attempt,
           s.wake_at, s.signal_name, s.signal_timeout_at, s.signal_json_schema,
           s.compensation_status, s.compensation_error, s.compensated_at, NULL, NULL, NULL
         FROM wf_workflow_steps s JOIN w ON s.workflow_id = w.workflow_id AND s.run = w.run
         UNION ALL
         SELECT 2, t.step_name, NULL, NULL, NULL, NULL, NULL, NULL, t.run, t.status_id, t.input,
-          NULL, t.result, t.error, NULL, NULL, NULL, t.started_at, NULL, t.completed_at, NULL,
+          NULL, NULL::jsonb, t.result, t.error, NULL, NULL, NULL, t.started_at, NULL, t.completed_at, NULL,
           NULL, NULL, t.attempt, NULL, NULL, NULL, NULL, NULL, NULL, NULL, t.task_index, NULL, NULL
         FROM wf_workflow_step_tasks t JOIN w ON t.workflow_id = w.workflow_id AND t.run = w.run`,
     );
@@ -483,6 +489,7 @@ export class PostgresWorkflowStorage
         stepProgress: wfRow.step_progress,
         tripwire: wfRow.tripwire,
         metadata: wfRow.metadata,
+        securityContext: wfRow.security_context,
         createdAt: timestampOf(wfRow.created_at),
         startedAt: timestampOf(wfRow.started_at),
         updatedAt: timestampOf(wfRow.updated_at),
@@ -735,6 +742,10 @@ export class PostgresWorkflowStorage
     { created: true } | { created: false; existing: WorkflowState }
   > {
     const ns = this.resolveNamespace(params.namespace);
+    const securityContext =
+      params.securityContext === undefined
+        ? undefined
+        : normalizeRunSecurityContext(params.securityContext);
     const parentToken = this.fenceTokenOf(guard);
     if (parentToken !== undefined && params.parentWorkflowId === undefined) {
       throw new Error("createWorkflow: a fenced create needs parentWorkflowId");
@@ -779,6 +790,7 @@ export class PostgresWorkflowStorage
           statusId: WorkflowStatusIds.id.pending,
           input: params.input,
           metadata: params.metadata,
+          securityContext,
           idempotencyKey: params.idempotencyKey,
           idempotencyExpiresAt: params.idempotencyExpiresAt,
         })
@@ -793,7 +805,14 @@ export class PostgresWorkflowStorage
       // (another caller registered the key first). Resolve to whichever
       // row exists by id first, then by key.
       const existingById = await this.loadWorkflow(params.workflowId);
-      if (existingById) return { created: false, existing: existingById };
+      if (existingById) {
+        assertRunSecurityContextCompatible({
+          workflowId: existingById.workflowId,
+          stored: existingById.securityContext,
+          requested: securityContext,
+        });
+        return { created: false, existing: existingById };
+      }
 
       if (params.idempotencyKey) {
         const hit = await this.findWorkflowByIdempotencyKey({
@@ -804,7 +823,14 @@ export class PostgresWorkflowStorage
         });
         if (hit) {
           const existing = await this.loadWorkflow(hit.workflowId);
-          if (existing) return { created: false, existing };
+          if (existing) {
+            assertRunSecurityContextCompatible({
+              workflowId: existing.workflowId,
+              stored: existing.securityContext,
+              requested: securityContext,
+            });
+            return { created: false, existing };
+          }
         }
       }
       throw new Error(
