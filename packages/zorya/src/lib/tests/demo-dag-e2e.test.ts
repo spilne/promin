@@ -113,6 +113,31 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
   });
 
   describe("DAG gateway — /api/dags/*", () => {
+    it("refuses a recipe whose node has no kind, naming the field", async () => {
+      const res = await fetch(`${baseUrl}/api/dags`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: `e2e-nokind-${crypto.randomUUID()}`,
+          version: "v1",
+          nodes: [
+            {
+              id: "n1",
+              agentId: "echo-bot",
+              inputs: { task: { kind: "initial", path: "task" } },
+            },
+          ],
+          edges: [],
+          entry: ["n1"],
+          terminals: ["n1"],
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; issues: string[] };
+      expect(body.error).toBe("invalid_dag");
+      expect(body.issues.some((issue) => issue.startsWith("nodes[0]"))).toBe(true);
+    });
+
     it("GET /api/dags lists the pre-registered research-synthesis recipe", async () => {
       const res = await fetch(`${baseUrl}/api/dags`);
       expect(res.status).toBe(200);
@@ -128,7 +153,7 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
       const body = (await res.json()) as {
         id: string;
         version: string;
-        nodes: ReadonlyArray<{ id: string; agentId: string }>;
+        nodes: ReadonlyArray<{ id: string; kind: string; agentId?: string }>;
         edges: ReadonlyArray<{ from: string; to: string }>;
         entry: ReadonlyArray<string>;
         terminals: ReadonlyArray<string>;
@@ -170,6 +195,7 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
           nodes: [
             {
               id: "n1",
+              kind: "agent",
               agentId: "echo-bot",
               inputs: { task: { kind: "initial", path: "task" } },
             },
@@ -204,8 +230,8 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
           version: "v1",
           // Cycle: a → b → a — the validator must reject.
           nodes: [
-            { id: "a", agentId: "echo-bot", inputs: {} },
-            { id: "b", agentId: "echo-bot", inputs: {} },
+            { id: "a", kind: "agent", agentId: "echo-bot", inputs: {} },
+            { id: "b", kind: "agent", agentId: "echo-bot", inputs: {} },
           ],
           edges: [
             { from: "a", to: "b" },
@@ -233,6 +259,7 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
           nodes: [
             {
               id: "echo",
+              kind: "agent",
               agentId: "echo-bot",
               inputs: { task: { kind: "initial", path: "topic" } },
             },

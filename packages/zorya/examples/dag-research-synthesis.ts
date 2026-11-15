@@ -61,6 +61,7 @@ const researchSynthesisDag: Omit<AgenticDagRecipe, "id" | "version"> = {
   nodes: [
     {
       id: "planner",
+      kind: "agent",
       agentId: "planner",
       // The planner gets the raw topic and is asked to emit 3 sub-questions.
       inputs: {
@@ -69,6 +70,7 @@ const researchSynthesisDag: Omit<AgenticDagRecipe, "id" | "version"> = {
     },
     {
       id: "research-1",
+      kind: "agent",
       agentId: "researcher",
       inputs: {
         // For demo simplicity we route the whole planner output to each
@@ -80,6 +82,7 @@ const researchSynthesisDag: Omit<AgenticDagRecipe, "id" | "version"> = {
     },
     {
       id: "research-2",
+      kind: "agent",
       agentId: "researcher",
       inputs: {
         task: { kind: "node", nodeId: "planner", path: "" },
@@ -88,6 +91,7 @@ const researchSynthesisDag: Omit<AgenticDagRecipe, "id" | "version"> = {
     },
     {
       id: "research-3",
+      kind: "agent",
       agentId: "researcher",
       inputs: {
         task: { kind: "node", nodeId: "planner", path: "" },
@@ -96,6 +100,7 @@ const researchSynthesisDag: Omit<AgenticDagRecipe, "id" | "version"> = {
     },
     {
       id: "synthesizer",
+      kind: "agent",
       agentId: "synthesizer",
       inputs: {
         topic: { kind: "initial", path: "topic" },

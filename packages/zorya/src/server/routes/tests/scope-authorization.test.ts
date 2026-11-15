@@ -303,7 +303,9 @@ describe("DAG runs", () => {
   const dagOf = (agentId: string): RegisterDagInput => ({
     id: `dag-${agentId}`,
     version: "v1",
-    nodes: [{ id: "n1", agentId, inputs: { task: { kind: "initial", path: "task" } } }],
+    nodes: [
+      { id: "n1", kind: "agent", agentId, inputs: { task: { kind: "initial", path: "task" } } },
+    ],
     edges: [],
     entry: ["n1"],
     terminals: ["n1"],
@@ -392,7 +394,12 @@ describe("DAG runs", () => {
       );
     const graph = {
       nodes: [
-        { id: "n2", agentId: "support", inputs: { task: { kind: "initial", path: "task" } } },
+        {
+          id: "n2",
+          kind: "agent",
+          agentId: "support",
+          inputs: { task: { kind: "initial", path: "task" } },
+        },
       ],
       edges: [],
       entry: ["n2"],

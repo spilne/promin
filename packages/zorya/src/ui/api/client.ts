@@ -1643,16 +1643,17 @@ export type DagNodeInputSourceDto =
 
 export interface DagNodeDto {
   id: string;
-  agentId: string;
+  kind: string;
+  agentId?: string;
   inputs: Record<string, DagNodeInputSourceDto>;
-  outputPath?: string;
   onError?: "abort" | "skip";
+  [key: string]: unknown;
 }
 
 export interface DagEdgeDto {
   from: string;
   to: string;
-  condition?: { kind: "equals"; path: string; value: string };
+  condition?: unknown;
 }
 
 export interface DagDto {

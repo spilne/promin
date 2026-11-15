@@ -35,8 +35,18 @@ const chain: AgenticDagRecipe = {
   id: "chain",
   version: "v1",
   nodes: [
-    { id: "n1", agentId: "upper", inputs: { task: { kind: "initial", path: "task" } } },
-    { id: "n2", agentId: "exclaim", inputs: { task: { kind: "node", nodeId: "n1", path: "" } } },
+    {
+      id: "n1",
+      kind: "agent",
+      agentId: "upper",
+      inputs: { task: { kind: "initial", path: "task" } },
+    },
+    {
+      id: "n2",
+      kind: "agent",
+      agentId: "exclaim",
+      inputs: { task: { kind: "node", nodeId: "n1", path: "" } },
+    },
   ],
   edges: [{ from: "n1", to: "n2" }],
   entry: ["n1"],

@@ -198,7 +198,12 @@ describe("DAG runs — budget", () => {
       id: "one",
       version: "v1",
       nodes: [
-        { id: "n1", agentId: "support", inputs: { task: { kind: "initial", path: "task" } } },
+        {
+          id: "n1",
+          kind: "agent",
+          agentId: "support",
+          inputs: { task: { kind: "initial", path: "task" } },
+        },
       ],
       edges: [],
       entry: ["n1"],
@@ -252,7 +257,12 @@ describe("DAG runs — budget", () => {
       id: "one",
       version: "v1",
       nodes: [
-        { id: "n1", agentId: "support", inputs: { task: { kind: "initial", path: "task" } } },
+        {
+          id: "n1",
+          kind: "agent",
+          agentId: "support",
+          inputs: { task: { kind: "initial", path: "task" } },
+        },
       ],
       edges: [],
       entry: ["n1"],

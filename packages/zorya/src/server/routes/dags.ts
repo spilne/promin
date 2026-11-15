@@ -40,6 +40,7 @@ import {
   tightenBudget,
   TurnBudgetSchema,
   type AgentBudgets,
+  type AgentNode,
   type TurnBudget,
   type AgentRegistry,
   type DagRecipe,
@@ -285,7 +286,10 @@ export function runDag(deps: DagGatewayDeps) {
     // Every node runs in the caller's scope, so the caller must be allowed
     // to invoke each node's agent there — the same checks as a direct
     // invocation. Nodes are re-checked for the kill switch as they run.
-    for (const agentId of new Set(dag.nodes.map((n) => n.agentId))) {
+    const agentIds = dag.nodes
+      .filter((node): node is AgentNode => node.kind === "agent")
+      .map((node) => node.agentId);
+    for (const agentId of new Set(agentIds)) {
       const recipe = await deps.agents.get({ id: agentId });
       if (!recipe) return agentNotFound(agentId);
       const disabled = disabled410(recipe);

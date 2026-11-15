@@ -17,7 +17,7 @@ import type { RegisterDagInput } from "@promin/agent";
 
 export const researchSynthesisRecipe: RegisterDagInput = {
   id: "research-synthesis",
-  version: "v1",
+  version: "v2",
   metadata: {
     description: "Diamond-shape research synthesis: split topic → parallel research → join.",
     tags: ["demo", "research"],
@@ -25,6 +25,7 @@ export const researchSynthesisRecipe: RegisterDagInput = {
   nodes: [
     {
       id: "planner",
+      kind: "agent",
       agentId: "dag-planner",
       inputs: {
         task: { kind: "initial", path: "topic" },
@@ -32,6 +33,7 @@ export const researchSynthesisRecipe: RegisterDagInput = {
     },
     {
       id: "research-1",
+      kind: "agent",
       agentId: "dag-researcher",
       inputs: {
         task: { kind: "node", nodeId: "planner", path: "" },
@@ -40,6 +42,7 @@ export const researchSynthesisRecipe: RegisterDagInput = {
     },
     {
       id: "research-2",
+      kind: "agent",
       agentId: "dag-researcher",
       inputs: {
         task: { kind: "node", nodeId: "planner", path: "" },
@@ -48,6 +51,7 @@ export const researchSynthesisRecipe: RegisterDagInput = {
     },
     {
       id: "research-3",
+      kind: "agent",
       agentId: "dag-researcher",
       inputs: {
         task: { kind: "node", nodeId: "planner", path: "" },
@@ -56,6 +60,7 @@ export const researchSynthesisRecipe: RegisterDagInput = {
     },
     {
       id: "synthesizer",
+      kind: "agent",
       agentId: "dag-synthesizer",
       inputs: {
         topic: { kind: "initial", path: "topic" },
