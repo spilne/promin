@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { SystemWallClock } from "@promin/workflow";
+import { z } from "zod";
+import { mountSecrets } from "../../server/mount/mount-registries.ts";
+import { protectedAccess, queryNamespaceTarget } from "../../server/mount/route-security.ts";
+import { parseQuery } from "../../server/request-validation.ts";
 import { Router } from "../../server/router.ts";
 import {
   createSecurityRouteAccessGuard,
@@ -353,6 +357,64 @@ describe("access-role administration", () => {
       [],
     );
   });
+
+  it("rejects duplicate knowledge and secret scope queries before authorization can diverge", async () => {
+    const env = environment();
+    const managerUser = await createUser({
+      env,
+      email: "manager@example.com",
+      bindings: [{ namespaceId: "team-a", accessRole: "knowledge-manager" }],
+    });
+    const scopedAdminUser = await createUser({
+      env,
+      email: "team-admin@example.com",
+      bindings: [{ namespaceId: "team-a", accessRole: "admin" }],
+    });
+    const manager = await principal(env, managerUser);
+    const scopedAdmin = await principal(env, scopedAdminUser);
+    let knowledgeReads = 0;
+    let secretReads = 0;
+    env.router.route({
+      method: "GET",
+      path: "/api/test-knowledge",
+      access: protectedAccess({
+        resource: "knowledge",
+        action: "read",
+        target: queryNamespaceTarget({ kind: "knowledge" }),
+      }),
+      handler: (req) => {
+        parseQuery({ req, schema: z.object({ namespaceId: z.string() }) });
+        knowledgeReads += 1;
+        return new Response(null, { status: 204 });
+      },
+    });
+    mountSecrets({
+      router: env.router,
+      secrets: {
+        list: async () => {
+          secretReads += 1;
+          return [];
+        },
+      } as never,
+      namespaces: undefined,
+      authorizeScope: undefined,
+    });
+
+    const duplicateKnowledge = await handleAs({
+      env,
+      principal: manager,
+      path: "/api/test-knowledge?namespaceId=team-a&namespaceId=team-b",
+    });
+    expect(duplicateKnowledge.status).toBe(400);
+    for (const path of [
+      "/api/secrets?scope=namespace&scope=global&namespaceId=team-a",
+      "/api/secrets?scope=namespace&namespaceId=team-a&namespaceId=org",
+    ]) {
+      expect((await handleAs({ env, principal: scopedAdmin, path })).status).toBe(400);
+    }
+    expect(knowledgeReads).toBe(0);
+    expect(secretReads).toBe(0);
+  });
 });
 
 describe("namespace and knowledge access", () => {
@@ -673,6 +735,14 @@ describe("namespace and knowledge access", () => {
       reason: "permission_denied",
     });
     expect(await authorize(auditor, { resource: "secret", action: "list" })).toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
+    expect(await authorize(auditor, { resource: "memory", action: "read" })).toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
+    expect(await authorize(auditor, { resource: "run", action: "read" })).toEqual({
       allowed: false,
       reason: "permission_denied",
     });

@@ -6,6 +6,7 @@
 import type { SecretsStorage } from "@promin/agent";
 import type { NamespaceRegistry } from "@promin/workflow";
 import type { RouteTargetRequest, Router } from "../router.ts";
+import { assertUniqueQueryParameters } from "../request-validation.ts";
 import type { ScopeAuthorizer } from "../routes/agent-gateway-kit.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
 import type { ZoryaDags } from "../services/dags/index.ts";
@@ -238,7 +239,12 @@ export function mountSecrets(params: {
     return { kind: "secret" as const, namespaceId };
   };
   const queryTarget = ({ request, params: route }: RouteTargetRequest) => {
-    const query = new URL(request.url).searchParams;
+    const url = new URL(request.url);
+    assertUniqueQueryParameters({
+      url,
+      names: new Set(["scope", "namespaceId", "resourceId"]),
+    });
+    const query = url.searchParams;
     const scope = query.get("scope") ?? "global";
     const namedNamespace = query.get("namespaceId");
     const namespaceId =

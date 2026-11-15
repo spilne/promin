@@ -1,4 +1,5 @@
 import type { ProtectedRouteAccess, RouteTargetRequest } from "../router.ts";
+import { assertUniqueQueryParameters } from "../request-validation.ts";
 import {
   ORG_WIDE_NAMESPACE,
   type SecurityAction,
@@ -49,8 +50,10 @@ export function queryNamespaceTarget<K extends SecurityResourceKind>(params: {
   readonly query?: string;
 }): Target<K> {
   return ({ request, params: route }) => {
-    const namespaceId =
-      new URL(request.url).searchParams.get(params.query ?? "namespaceId") || ORG_WIDE_NAMESPACE;
+    const query = params.query ?? "namespaceId";
+    const url = new URL(request.url);
+    assertUniqueQueryParameters({ url, names: new Set([query]) });
+    const namespaceId = url.searchParams.get(query) || ORG_WIDE_NAMESPACE;
     return {
       kind: params.kind,
       namespaceId,

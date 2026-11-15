@@ -261,6 +261,25 @@ const AGENT_MANAGER_RESOURCES = new Set([
   "dag",
 ]);
 
+const AUDITOR_CONFIG_RESOURCES = new Set([
+  "namespace",
+  "user",
+  "service-account",
+  "agent",
+  "agent-role",
+  "skill",
+  "fragment",
+  "toolset",
+  "knowledge",
+  "connector",
+  "workflow",
+  "dag",
+  "schedule",
+  "eval",
+  "webhook",
+  "worker",
+]);
+
 function isAgentManagerPermission(permission: { readonly resource: string }): boolean {
   return AGENT_MANAGER_RESOURCES.has(permission.resource);
 }
@@ -271,10 +290,8 @@ function isAuditorPermission(permission: {
 }): boolean {
   if (permission.resource === "audit")
     return permission.action === "search" || permission.action === "export";
-  if (permission.resource === "thread")
-    return permission.action === "read" || permission.action === "view-trace";
-  if (permission.resource === "secret") return false;
-  return permission.action === "read" || permission.action === "list";
+  if (permission.resource === "thread") return permission.action === "view-trace";
+  return permission.action === "read" && AUDITOR_CONFIG_RESOURCES.has(permission.resource);
 }
 
 function samePrincipal(left: PrincipalRef, right: PrincipalRef): boolean {
