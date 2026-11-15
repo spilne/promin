@@ -181,6 +181,7 @@ export type WebhookClaim =
       readonly attempt: number;
     }
   | { readonly outcome: "duplicate" }
+  | { readonly outcome: "terminal" }
   | { readonly outcome: "in_flight" };
 
 /**
@@ -210,6 +211,14 @@ export interface WebhookDeliveryStore {
     readonly token?: FenceToken;
     readonly error: string;
   }): Promise<void>;
+  /** Persist an explicit permanent denial/outcome that recovery must not retry. */
+  terminate(params: {
+    readonly key: string;
+    readonly token?: FenceToken;
+    readonly error: string;
+  }): Promise<void>;
+  /** Release a retryable claim without changing its durable attempt or outcome. */
+  release(params: { readonly key: string; readonly token?: FenceToken }): Promise<void>;
   /**
    * Deliveries claimed but neither completed nor failed — dispatches in
    * flight, or interrupted by a crash. Claiming one answers `in_flight`
@@ -224,6 +233,7 @@ export interface WebhookDeliveryStore {
 
 /** Workflow name of the run rows `WorkflowStorageWebhookDeliveryStore` keeps. */
 export const WEBHOOK_DELIVERY_WORKFLOW = "zorya.webhook-delivery";
+const WEBHOOK_TERMINAL_ERROR_TAG = "WebhookPermanentDeliveryError";
 
 /** What a delivery run row stores as its input. */
 interface DeliveryRowInput {
@@ -263,9 +273,9 @@ export class WorkflowStorageWebhookDeliveryStore implements WebhookDeliveryStore
     });
     if (!locked.locked) return { outcome: "in_flight" };
     const guard = locked.token !== undefined ? { fenceToken: locked.token } : undefined;
-    const release = async (): Promise<WebhookClaim> => {
+    const release = async (outcome: "duplicate" | "terminal"): Promise<WebhookClaim> => {
       await this.storage.releaseLock({ workflowId, ...(guard && { guard }) });
-      return { outcome: "duplicate" };
+      return { outcome };
     };
     let state = locked.state;
     let attempt = 1;
@@ -300,7 +310,10 @@ export class WorkflowStorageWebhookDeliveryStore implements WebhookDeliveryStore
       if (!created.created) state = created.existing;
     }
     if (state) {
-      if (state.status === "completed") return release();
+      if (state.status === "completed") return release("duplicate");
+      if (state.status === "failed" && state.errorTag === WEBHOOK_TERMINAL_ERROR_TAG) {
+        return release("terminal");
+      }
       const stored = state.input as DeliveryRowInput;
       claimedDelivery = deliveryFromInput(stored);
       // A failed dispatch starts the next attempt; one whose dispatcher
@@ -363,6 +376,26 @@ export class WorkflowStorageWebhookDeliveryStore implements WebhookDeliveryStore
     await this.storage.releaseLock({ workflowId, ...guard });
   }
 
+  async terminate(params: { key: string; token?: FenceToken; error: string }): Promise<void> {
+    const workflowId = deliveryWorkflowId(params.key);
+    const guard = params.token !== undefined ? { guard: { fenceToken: params.token } } : {};
+    await this.storage.failWorkflow({
+      workflowId,
+      error: params.error,
+      errorTag: WEBHOOK_TERMINAL_ERROR_TAG,
+      ...guard,
+    });
+    await this.storage.releaseLock({ workflowId, ...guard });
+  }
+
+  async release(params: { key: string; token?: FenceToken }): Promise<void> {
+    const workflowId = deliveryWorkflowId(params.key);
+    await this.storage.releaseLock({
+      workflowId,
+      ...(params.token !== undefined && { guard: { fenceToken: params.token } }),
+    });
+  }
+
   async listUnfinished(params: { limit: number; offset?: number }): Promise<WebhookDelivery[]> {
     const rows = await this.storage.listWorkflows({
       status: "suspended",
@@ -400,19 +433,28 @@ function deliveryWorkflowId(key: string): string {
 
 function snapshotWebhookDelivery(source: WebhookDelivery): WebhookDelivery {
   const scope = source.scope;
+  const key = source.key;
+  const task = source.task;
+  const securityContext = source.securityContext;
+  const sourceId = scope.source;
+  const agentId = scope.agentId;
+  const namespaceId = scope.namespaceId;
+  const resourceId = scope.resourceId;
+  const deliveryId = scope.deliveryId;
+  const timestamp = scope.timestamp;
   const snapshot = {
-    key: source.key,
-    task: source.task,
+    key,
+    task,
     scope: Object.freeze({
-      source: scope.source,
-      agentId: scope.agentId,
-      namespaceId: scope.namespaceId,
-      ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
-      deliveryId: scope.deliveryId,
-      timestamp: scope.timestamp,
+      source: sourceId,
+      agentId,
+      namespaceId,
+      ...(resourceId !== undefined && { resourceId }),
+      deliveryId,
+      timestamp,
     }),
-    ...(source.securityContext !== undefined && {
-      securityContext: normalizeRunSecurityContext(source.securityContext),
+    ...(securityContext !== undefined && {
+      securityContext: normalizeRunSecurityContext(securityContext),
     }),
   };
   return Object.freeze(snapshot);
@@ -444,7 +486,7 @@ export class InMemoryWebhookDeliveryStore implements WebhookDeliveryStore {
   private readonly rows = new Map<
     string,
     {
-      readonly state: "in_flight" | "done" | "failed";
+      readonly state: "in_flight" | "done" | "failed" | "terminal";
       readonly expiresAt: number;
       readonly delivery: WebhookDelivery;
       readonly attempt: number;
@@ -468,7 +510,11 @@ export class InMemoryWebhookDeliveryStore implements WebhookDeliveryStore {
     const now = this.clock.currentTimeMs();
     const row = this.rows.get(delivery.key);
     if (row && row.state !== "failed" && row.expiresAt > now) {
-      return row.state === "done" ? { outcome: "duplicate" } : { outcome: "in_flight" };
+      return row.state === "done"
+        ? { outcome: "duplicate" }
+        : row.state === "terminal"
+          ? { outcome: "terminal" }
+          : { outcome: "in_flight" };
     }
     // A lapsed in-flight claim continues its attempt; a failed one starts
     // the next; anything else (none, or a forgotten done) starts afresh.
@@ -513,6 +559,25 @@ export class InMemoryWebhookDeliveryStore implements WebhookDeliveryStore {
     });
   }
 
+  async terminate(params: { key: string }): Promise<void> {
+    const row = this.rows.get(params.key);
+    if (!row) return;
+    this.set(params.key, {
+      ...row,
+      state: "terminal",
+      expiresAt: this.clock.currentTimeMs() + this.retainMs,
+    });
+  }
+
+  async release(params: { key: string }): Promise<void> {
+    const row = this.rows.get(params.key);
+    if (!row || row.state !== "in_flight") return;
+    this.set(params.key, {
+      ...row,
+      expiresAt: this.clock.currentTimeMs(),
+    });
+  }
+
   async listUnfinished(params: { limit: number; offset?: number }): Promise<WebhookDelivery[]> {
     const offset = params.offset ?? 0;
     return [...this.rows.values()]
@@ -524,7 +589,7 @@ export class InMemoryWebhookDeliveryStore implements WebhookDeliveryStore {
   private set(
     key: string,
     row: {
-      state: "in_flight" | "done" | "failed";
+      state: "in_flight" | "done" | "failed" | "terminal";
       expiresAt: number;
       delivery: WebhookDelivery;
       attempt: number;
@@ -619,10 +684,16 @@ export class WebhookSecurityDeniedError extends Error {
   }
 }
 
+class WebhookPermanentDeliveryError extends Error {
+  readonly _tag = "WebhookPermanentDeliveryError";
+}
+
+type WebhookAuthorizationStage = "ingest" | "dispatch" | "recovery" | "invoke";
+
 async function authorizeWebhookDelivery(params: {
   readonly deps: WebhookGatewayDeps;
   readonly delivery: WebhookDelivery;
-  readonly stage: "ingest" | "dispatch" | "recovery";
+  readonly stage: WebhookAuthorizationStage;
 }): Promise<{
   readonly context: SecurityContext;
   readonly effective: Principal;
@@ -632,7 +703,11 @@ async function authorizeWebhookDelivery(params: {
   if (!assigned) throw new WebhookSecurityDeniedError();
   const normalized = normalizeRunSecurityContext(assigned);
   const actorRef = toPrincipalRef(normalized.actor);
-  const effectiveRef = toPrincipalRef(normalized.effective ?? normalized.actor);
+  const assignedEffective = toPrincipalRef(normalized.effective ?? normalized.actor);
+  const effectiveRef =
+    delivery.scope.resourceId !== undefined && delivery.scope.resourceId !== assignedEffective.id
+      ? Object.freeze({ kind: "user" as const, id: delivery.scope.resourceId })
+      : assignedEffective;
   const actor = await deps.security.resolvePrincipal(actorRef);
   if (!actor) {
     await auditWebhookDecision({
@@ -698,7 +773,7 @@ async function authorizeWebhookDelivery(params: {
 async function auditWebhookDecision(params: {
   readonly deps: WebhookGatewayDeps;
   readonly delivery: WebhookDelivery;
-  readonly stage: "ingest" | "dispatch" | "recovery";
+  readonly stage: WebhookAuthorizationStage;
   readonly context: SecurityContext;
   readonly decision: {
     readonly allowed: boolean;
@@ -783,11 +858,15 @@ async function dispatchDelivery(params: {
   readonly claim: Extract<WebhookClaim, { outcome: "claimed" }>;
   readonly stage: "dispatch" | "recovery";
 }): Promise<void> {
-  const { deps, delivery, claim } = params;
+  const { deps, claim } = params;
+  // Delivery stores are injectable. Copy every field once before using any
+  // of it so getters cannot swap scope or identity between checks and use.
+  const delivery = snapshotWebhookDelivery(params.delivery);
   const clock = deps.clock ?? SystemWallClock;
   const leaseMs = deps.claimLeaseMs ?? DEFAULT_CLAIM_LEASE_MS;
   const { key, scope } = delivery;
   const token = claim.token;
+  const attempt = claim.attempt;
   const renewal = clock.setInterval(
     () => {
       deps.deliveries
@@ -797,35 +876,20 @@ async function dispatchDelivery(params: {
     Math.max(1, Math.floor(leaseMs / 2)),
   );
   renewal.unref?.();
-  let authorized: Awaited<ReturnType<typeof authorizeWebhookDelivery>>;
   try {
-    authorized = await authorizeWebhookDelivery({
+    const authorized = await authorizeWebhookDelivery({
       deps,
       delivery,
       stage: params.stage,
     });
-  } catch (err) {
-    renewal.clear();
-    if (err instanceof WebhookSecurityDeniedError) {
-      // A policy denial is stable for this immutable delivery identity. Mark
-      // it failed so recovery cannot turn revocation into repeated work.
-      await deps.deliveries
-        .fail({
-          key,
-          error: err.message,
-          ...(token !== undefined && { token }),
-        })
-        .catch(() => {});
-    }
-    // Security directory, policy, and allow-audit failures are retryable:
-    // leave the row unfinished so it can be reclaimed after the lease lapses.
-    throw err;
-  }
-  try {
     const recipe = await deps.registry.get({ id: scope.agentId });
-    if (!recipe) throw new Error(`agent "${scope.agentId}" is not registered`);
+    if (!recipe) {
+      throw new WebhookPermanentDeliveryError(`agent "${scope.agentId}" is not registered`);
+    }
     // The kill switch holds for deliveries accepted before it was flipped.
-    if (!recipe.enabled) throw new Error(`agent_disabled: "${scope.agentId}" is disabled`);
+    if (!recipe.enabled) {
+      throw new WebhookPermanentDeliveryError(`agent_disabled: "${scope.agentId}" is disabled`);
+    }
     const resolved = await deps.resolve(recipe, {
       namespaceId: scope.namespaceId,
       ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
@@ -835,11 +899,18 @@ async function dispatchDelivery(params: {
       namespaceId: scope.namespaceId,
       ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
     });
+    // Registry and resolver work can block. Re-resolve current identity and
+    // policy after both, immediately before the irreversible agent turn.
+    const finalAuthorization = await authorizeWebhookDelivery({
+      deps,
+      delivery,
+      stage: "invoke",
+    });
     const out = await agent.invoke(
       { task: delivery.task },
       {
-        runId: webhookRunId({ key, attempt: claim.attempt }),
-        securityContext: toRunSecurityContext(authorized.context),
+        runId: webhookRunId({ key, attempt }),
+        securityContext: toRunSecurityContext(finalAuthorization.context),
       },
     );
     // The delivery is done when the turn is, whatever the backend's
@@ -851,13 +922,21 @@ async function dispatchDelivery(params: {
       // Not a failure: the turn runs elsewhere. Our claim lapses on its own.
       throw new WebhookDispatchBusyError();
     }
-    await deps.deliveries
-      .fail({
-        key,
-        error: err instanceof Error ? err.message : String(err),
-        ...(token !== undefined && { token }),
-      })
-      .catch(() => {});
+    const claimParams = { key, ...(token !== undefined && { token }) };
+    if (err instanceof WebhookSecurityDeniedError || err instanceof WebhookPermanentDeliveryError) {
+      // Explicit policy and permanent target outcomes are terminal. Recovery
+      // must not spin on them forever.
+      await deps.deliveries
+        .terminate({
+          ...claimParams,
+          error: err.message,
+        })
+        .catch(() => {});
+    } else {
+      // Registry, resolver, audit, and invocation infrastructure failures are
+      // retryable without advancing or permanently failing the delivery.
+      await deps.deliveries.release(claimParams).catch(() => {});
+    }
     throw err;
   }
   renewal.clear();
@@ -1083,6 +1162,7 @@ export function ingestWebhook(deps: WebhookGatewayDeps) {
     if (claim.outcome === "in_flight") {
       return jsonError(409, "delivery_in_progress", "This delivery is being processed.");
     }
+    if (claim.outcome === "terminal") return jsonError(403, "webhook_forbidden");
 
     try {
       await dispatchDelivery({

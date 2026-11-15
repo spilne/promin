@@ -68,6 +68,8 @@ interface BootOpts {
   register?: boolean;
   namespaces?: NamespaceRegistry;
   security?: ZoryaSecurity;
+  afterRegistryGet?: (count: number) => void | Promise<void>;
+  beforeResolve?: () => void | Promise<void>;
 }
 
 async function boot(opts: BootOpts = {}) {
@@ -79,6 +81,23 @@ async function boot(opts: BootOpts = {}) {
     await registry.register({ id: "echo-bot", backend });
     await registry.register({ id: "other-bot", backend });
   }
+  let registryGets = 0;
+  const routedRegistry =
+    opts.afterRegistryGet === undefined
+      ? registry
+      : new Proxy(registry, {
+          get(target, property, receiver) {
+            if (property === "get") {
+              return async (params: { id: string; version?: string }) => {
+                const result = await target.get(params);
+                await opts.afterRegistryGet?.(++registryGets);
+                return result;
+              };
+            }
+            const value = Reflect.get(target, property, receiver);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
   const workflows = new LocalWorkflows({
     storage,
     runner,
@@ -113,8 +132,11 @@ async function boot(opts: BootOpts = {}) {
     return agent;
   };
   const agents = new ZoryaAgents({
-    registry,
-    resolve: (recipe) => makeAgent(recipe.id) as never,
+    registry: routedRegistry,
+    resolve: async (recipe) => {
+      await opts.beforeResolve?.();
+      return makeAgent(recipe.id) as never;
+    },
   });
   const server = new ZoryaServer({
     insecure: true,
@@ -134,11 +156,22 @@ async function boot(opts: BootOpts = {}) {
 function assignedSecurity(params: {
   readonly active: () => boolean;
   readonly audits?: SecurityAuditEvent[];
+  readonly canActFor?: boolean;
+  readonly users?: ReadonlySet<string>;
 }): ZoryaSecurity {
   const current = (id: string): Principal | undefined =>
     params.active()
       ? {
           kind: "service-account",
+          id,
+          accessRoles: { acme: ["member"] },
+          canActFor: params.canActFor ?? false,
+        }
+      : undefined;
+  const user = (id: string): Principal | undefined =>
+    params.active() && params.users?.has(id)
+      ? {
+          kind: "user",
           id,
           accessRoles: { acme: ["member"] },
           canActFor: false,
@@ -147,14 +180,20 @@ function assignedSecurity(params: {
   return {
     authenticate: async () => undefined,
     resolvePrincipal: async (ref) =>
-      ref.kind === "service-account" && ref.id === "hook" ? current(ref.id) : undefined,
+      ref.kind === "service-account" && ref.id === "hook"
+        ? current(ref.id)
+        : ref.kind === "user"
+          ? user(ref.id)
+          : undefined,
     resolveIdentity: async ({ actor, asserted }) => {
       const resolved = current(actor.id);
       if (!resolved) return undefined;
-      if (asserted && (asserted.kind !== resolved.kind || asserted.id !== resolved.id)) {
-        return undefined;
+      if (!asserted || (asserted.kind === resolved.kind && asserted.id === resolved.id)) {
+        return { actor: resolved, effective: principalRef(resolved) };
       }
-      return { actor: resolved, effective: principalRef(resolved) };
+      const effective =
+        resolved.canActFor && asserted.kind === "user" ? user(asserted.id) : undefined;
+      return effective ? { actor: resolved, effective: principalRef(effective) } : undefined;
     },
     identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
     authorize: async ({ context, permission, resource }) =>
@@ -515,10 +554,9 @@ describe("webhook ingress — durable dispatch", () => {
     expect((await server.handle(delivery())).status).toBe(500);
     failing = false;
     expect((await server.handle(delivery())).status).toBe(200);
-    // The first (failed) attempt never reached the agent's record; the
-    // retry ran as attempt 2.
-    expect(dispatched.map((d) => d.runId)).toEqual([webhookRunId({ key, attempt: 2 })]);
-    expect(webhookRunId({ key, attempt: 1 })).not.toBe(webhookRunId({ key, attempt: 2 }));
+    // Infrastructure failure releases the claim without advancing its
+    // durable attempt, so a partially-started turn resumes under one run id.
+    expect(dispatched.map((d) => d.runId)).toEqual([webhookRunId({ key, attempt: 1 })]);
   });
 
   it("finishes a delivery whose dispatcher died, under the same run id, exactly once", async () => {
@@ -725,6 +763,48 @@ describe("webhook enterprise identity", () => {
     expect(await storage.listWorkflows({ name: WEBHOOK_DELIVERY_WORKFLOW, limit: 10 })).toEqual([]);
   });
 
+  it("denies pinned and requested cross-user resources without act-for", async () => {
+    for (const pinned of [false, true]) {
+      const audits: SecurityAuditEvent[] = [];
+      const { server, dispatched } = await boot({
+        security: assignedSecurity({
+          active: () => true,
+          audits,
+          users: new Set(["victim"]),
+        }),
+        sources: {
+          github: {
+            secret: SECRET,
+            securityContext: assignment,
+            ...(pinned && { namespaceId: "acme", resourceId: "victim" }),
+          },
+        },
+      });
+      const response = await server.handle(
+        delivery({ resourceId: "victim", deliveryId: pinned ? "pinned" : "requested" }),
+      );
+      expect(response.status).toBe(403);
+      expect(dispatched).toEqual([]);
+      expect(audits.at(-1)?.decision?.reason).toBe("act_for_required");
+    }
+  });
+
+  it("resolves an asserted resource user when the service account may act for it", async () => {
+    const { server, dispatched } = await boot({
+      security: assignedSecurity({
+        active: () => true,
+        canActFor: true,
+        users: new Set(["alice"]),
+      }),
+      sources: { github: { secret: SECRET, securityContext: assignment } },
+    });
+    expect((await server.handle(delivery({ resourceId: "alice" }))).status).toBe(200);
+    expect(dispatched[0]?.securityContext).toEqual({
+      actor: { kind: "service-account", id: "hook" },
+      effective: { kind: "user", id: "alice" },
+    });
+  });
+
   it("rechecks revocation after the claim and runs no initial agent code", async () => {
     let active = true;
     const audits: SecurityAuditEvent[] = [];
@@ -738,6 +818,8 @@ describe("webhook enterprise identity", () => {
       renew: (params) => inner.renew(params),
       complete: (params) => inner.complete(params),
       fail: (params) => inner.fail(params),
+      terminate: (params) => inner.terminate(params),
+      release: (params) => inner.release(params),
       listUnfinished: (params) => inner.listUnfinished(params),
     };
     const { server, dispatched } = await boot({
@@ -748,7 +830,33 @@ describe("webhook enterprise identity", () => {
     expect((await server.handle(delivery())).status).toBe(403);
     expect(dispatched).toEqual([]);
     expect(await deliveries.listUnfinished({ limit: 10 })).toEqual([]);
-    expect(audits.map((event) => event.decision.allowed)).toEqual([true, false]);
+    expect(audits.map((event) => event.decision?.allowed)).toEqual([true, false]);
+  });
+
+  it("reauthorizes after gated registry and resolver awaits before invoke", async () => {
+    for (const gate of ["registry", "resolver"] as const) {
+      let active = true;
+      const audits: SecurityAuditEvent[] = [];
+      const { server, dispatched } = await boot({
+        security: assignedSecurity({ active: () => active, audits }),
+        sources: { github: { secret: SECRET, securityContext: assignment } },
+        ...(gate === "registry" && {
+          afterRegistryGet: (count: number) => {
+            if (count === 2) active = false;
+          },
+        }),
+        ...(gate === "resolver" && {
+          beforeResolve: () => {
+            active = false;
+          },
+        }),
+      });
+      const response = await server.handle(delivery({ deliveryId: gate }));
+      expect(response.status).toBe(403);
+      expect(dispatched).toEqual([]);
+      expect(audits.at(-1)?.metadata?.stage).toBe("invoke");
+      expect(audits.at(-1)?.decision?.allowed).toBe(false);
+    }
   });
 
   it("persists the assigned context and audits ingest plus dispatch", async () => {
@@ -764,7 +872,7 @@ describe("webhook enterprise identity", () => {
     expect(rows[0]?.securityContext).toEqual(assignment);
     expect((rows[0]!.input as { securityContext?: unknown }).securityContext).toEqual(assignment);
     expect(dispatched[0]?.securityContext).toEqual(assignment);
-    expect(audits.map((event) => event.metadata?.stage)).toEqual(["ingest", "dispatch"]);
+    expect(audits.map((event) => event.metadata?.stage)).toEqual(["ingest", "dispatch", "invoke"]);
   });
 
   it("keeps the first assigned identity immutable across sender retries", async () => {
@@ -795,6 +903,56 @@ describe("webhook enterprise identity", () => {
     expect(retried.outcome).toBe("claimed");
     if (retried.outcome !== "claimed") throw new Error("expected retry claim");
     expect(retried.delivery.securityContext).toEqual(assignment);
+  });
+
+  it("snapshots a hostile claimed delivery once before authorization and dispatch", async () => {
+    let scopeReads = 0;
+    let contextReads = 0;
+    const safeScope = {
+      source: "github",
+      agentId: "echo-bot",
+      namespaceId: "acme",
+      deliveryId: "hostile",
+      timestamp: T0,
+    };
+    const hostile = {
+      key: JSON.stringify(["github", "echo-bot", "acme", null, "hostile"]),
+      task: "safe task",
+      get scope() {
+        scopeReads++;
+        return scopeReads === 1
+          ? safeScope
+          : { ...safeScope, agentId: "other-bot", namespaceId: "other" };
+      },
+      get securityContext() {
+        contextReads++;
+        return contextReads === 1
+          ? assignment
+          : { actor: { kind: "service-account" as const, id: "attacker" } };
+      },
+    } as WebhookDelivery;
+    const deliveries: WebhookDeliveryStore = {
+      claim: async () => ({ outcome: "claimed", delivery: hostile, attempt: 1 }),
+      renew: async () => {},
+      complete: async () => {},
+      fail: async () => {},
+      terminate: async () => {},
+      release: async () => {},
+      listUnfinished: async () => [],
+    };
+    const audits: SecurityAuditEvent[] = [];
+    const { server, dispatched } = await boot({
+      deliveries,
+      security: assignedSecurity({ active: () => true, audits }),
+      sources: { github: { secret: SECRET, securityContext: assignment } },
+    });
+    expect((await server.handle(delivery({ deliveryId: "hostile" }))).status).toBe(200);
+    expect(scopeReads).toBe(1);
+    expect(contextReads).toBe(1);
+    expect(dispatched).toHaveLength(1);
+    expect(dispatched[0]?.agentId).toBe("echo-bot");
+    expect(dispatched[0]?.scope).toEqual({ namespaceId: "acme" });
+    expect(audits.map((event) => event.resource?.id)).toEqual(["echo-bot", "echo-bot", "echo-bot"]);
   });
 
   it("rechecks a recovered assignment and terminally fails it after revocation", async () => {
@@ -844,6 +1002,9 @@ describe("webhook enterprise identity", () => {
     expect(errors).toHaveLength(1);
     expect(errors[0]).toBeInstanceOf(Error);
     expect(await deliveries.listUnfinished({ limit: 10 })).toEqual([]);
+    expect((await deliveries.claim({ delivery: recorded, leaseMs: 100 })).outcome).toBe(
+      "terminal",
+    );
   });
 
   it("leaves authorization infrastructure failures retryable for recovery", async () => {
@@ -902,5 +1063,60 @@ describe("webhook enterprise identity", () => {
     expect(invocations).toEqual(["ran"]);
     expect(errors).toHaveLength(1);
     expect(await deliveries.listUnfinished({ limit: 10 })).toEqual([]);
+  });
+
+  it("releases registry, resolver, and invoke infrastructure failures for immediate retry", async () => {
+    for (const failure of ["registry", "resolver", "invoke"] as const) {
+      let failing = true;
+      let releases = 0;
+      let failures = 0;
+      const inner = new InMemoryWebhookDeliveryStore();
+      const deliveries: WebhookDeliveryStore = {
+        claim: (params) => inner.claim(params),
+        renew: (params) => inner.renew(params),
+        complete: (params) => inner.complete(params),
+        fail: async (params) => {
+          failures++;
+          await inner.fail(params);
+        },
+        terminate: async (params) => {
+          failures++;
+          await inner.terminate(params);
+        },
+        release: async (params) => {
+          releases++;
+          await inner.release(params);
+        },
+        listUnfinished: (params) => inner.listUnfinished(params),
+      };
+      const { server, dispatched } = await boot({
+        deliveries,
+        security: assignedSecurity({ active: () => true }),
+        sources: { github: { secret: SECRET, securityContext: assignment } },
+        ...(failure === "registry" && {
+          afterRegistryGet: (count: number) => {
+            if (failing && count === 2) throw new Error("registry unavailable");
+          },
+        }),
+        ...(failure === "resolver" && {
+          beforeResolve: () => {
+            if (failing) throw new Error("resolver unavailable");
+          },
+        }),
+        ...(failure === "invoke" && { failInvoke: () => failing }),
+      });
+      const request = () => delivery({ deliveryId: `retry-${failure}` });
+      expect((await server.handle(request())).status).toBe(500);
+      expect(releases).toBe(1);
+      expect(failures).toBe(0);
+      failing = false;
+      expect((await server.handle(request())).status).toBe(200);
+      expect(dispatched.map((entry) => entry.runId)).toEqual([
+        webhookRunId({
+          key: JSON.stringify(["github", "echo-bot", "acme", null, `retry-${failure}`]),
+          attempt: 1,
+        }),
+      ]);
+    }
   });
 });

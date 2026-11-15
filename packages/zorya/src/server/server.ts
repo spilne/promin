@@ -453,6 +453,7 @@ export class ZoryaServer {
         agents: this.agents,
         clock,
         logger: this.logger,
+        security: this.security,
       });
     }
     if (this.dags) mountDags({ router, dags: this.dags, namespaces });

@@ -9,9 +9,19 @@ import type {
   WallClock,
   WorkflowStorage,
 } from "@promin/workflow";
-import type { Router } from "../router.ts";
+import { HttpError, type Router } from "../router.ts";
 import type { Logger, ZoryaServerConfig } from "../server-config.ts";
-import type { ZoryaSecurity } from "../security/index.ts";
+import {
+  requestSecurityContext,
+  snapshotAuthorizationDecision,
+  snapshotSecurityContext,
+  snapshotSecurityPermission,
+  snapshotSecurityResource,
+  type AuthorizationRequest,
+  type SecurityAction,
+  type SecurityAuditEvent,
+  type ZoryaSecurity,
+} from "../security/index.ts";
 import type { ZoryaAgents } from "../services/agents/index.ts";
 import { protectedAccess, orgTarget } from "./route-security.ts";
 import {
@@ -88,6 +98,7 @@ export function mountRemoteDeployments(params: {
   readonly agents: ZoryaAgents;
   readonly clock: WallClock;
   readonly logger: Logger;
+  readonly security: ZoryaSecurity;
 }): RemoteDeploymentSweeper {
   const { remoteDeployments, logger } = params;
   const remoteDeps: RemoteDeploymentsGatewayDeps = {
@@ -106,6 +117,12 @@ export function mountRemoteDeployments(params: {
     }),
     onError: (err) => logger.error("[zorya] remote-deployment sweep failed", err),
   });
+  const deploymentSecurity = {
+    deps: remoteDeps,
+    security: params.security,
+    clock: params.clock,
+    logger,
+  };
   params.router
     .route({
       method: "POST",
@@ -119,7 +136,7 @@ export function mountRemoteDeployments(params: {
       access: protectedAccess({
         resource: "agent",
         action: "update",
-        target: deploymentTarget(remoteDeps),
+        target: deploymentTarget({ ...deploymentSecurity, action: "update" }),
       }),
       handler: heartbeatDeployment(remoteDeps),
     })
@@ -129,7 +146,7 @@ export function mountRemoteDeployments(params: {
       access: protectedAccess({
         resource: "agent",
         action: "disable",
-        target: deploymentTarget(remoteDeps),
+        target: deploymentTarget({ ...deploymentSecurity, action: "disable" }),
       }),
       handler: unregisterDeployment(remoteDeps),
     })
@@ -146,14 +163,87 @@ export function mountRemoteDeployments(params: {
   return sweeper;
 }
 
-function deploymentTarget(deps: RemoteDeploymentsGatewayDeps) {
-  return async ({ params }: { readonly params: Readonly<Record<string, string>> }) => {
-    const deploymentId = params.deploymentId;
-    const deployment = deploymentId ? await deps.registry.get(deploymentId) : null;
+function deploymentTarget(params: {
+  readonly deps: RemoteDeploymentsGatewayDeps;
+  readonly security: ZoryaSecurity;
+  readonly clock: WallClock;
+  readonly logger: Logger;
+  readonly action: SecurityAction<"agent">;
+}) {
+  return async ({
+    request,
+    params: route,
+  }: {
+    readonly request: Request;
+    readonly params: Readonly<Record<string, string>>;
+  }) => {
+    const deploymentId = route.deploymentId;
+    const deployment = deploymentId ? await params.deps.registry.get(deploymentId) : null;
+    const agentIds = deployment ? [...new Set(deployment.agents)].sort() : [];
+    // The route guard authorizes the first authoritative target. Resolve and
+    // authorize every additional stored agent here, still before the handler.
+    // Never invent a deployment id or aggregate JSON as an agent identity.
+    for (const agentId of agentIds.slice(1)) {
+      await authorizeDeploymentAgent({
+        security: params.security,
+        clock: params.clock,
+        logger: params.logger,
+        action: params.action,
+        request,
+        agentId,
+      });
+    }
     return {
       kind: "agent" as const,
       namespaceId: "org",
-      id: deployment ? JSON.stringify([...deployment.agents].sort()) : deploymentId,
+      ...(agentIds[0] !== undefined && { id: agentIds[0] }),
     };
   };
+}
+
+async function authorizeDeploymentAgent(params: {
+  readonly security: ZoryaSecurity;
+  readonly clock: WallClock;
+  readonly logger: Logger;
+  readonly action: SecurityAction<"agent">;
+  readonly request: Request;
+  readonly agentId: string;
+}): Promise<void> {
+  const requestContext = requestSecurityContext(params.request);
+  if (!requestContext) return;
+  const context = snapshotSecurityContext(requestContext);
+  const permission = snapshotSecurityPermission({ resource: "agent", action: params.action });
+  const resource = snapshotSecurityResource({
+    kind: "agent",
+    namespaceId: "org",
+    id: params.agentId,
+  });
+  const decision = snapshotAuthorizationDecision(
+    await params.security.authorize({ context, permission, resource } as AuthorizationRequest),
+  );
+  const event: SecurityAuditEvent = Object.freeze({
+    event: "authorization",
+    occurredAt: params.clock.now().toISOString(),
+    context,
+    namespaceId: resource.namespaceId,
+    resource,
+    permission,
+    decision,
+    metadata: Object.freeze({
+      method: params.request.method,
+      path: new URL(params.request.url).pathname,
+      batch: true,
+    }),
+  });
+  try {
+    await params.security.recordAudit(event);
+  } catch (error) {
+    try {
+      params.logger.error("[zorya] remote deployment authorization audit failed", error);
+    } catch {}
+    if (decision.allowed) {
+      throw new HttpError({ status: 503, code: "security_audit_unavailable" });
+    }
+  }
+  if (!decision.allowed) throw new HttpError({ status: 403, code: "forbidden" });
 }
