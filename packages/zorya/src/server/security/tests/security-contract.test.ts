@@ -8,6 +8,7 @@ import {
   requestPrincipal,
   requestSecurityContext,
   setRequestSecurityContext,
+  type AuthorizationRequest,
   type SecurityPermission,
   type SecurityResourceRef,
 } from "../index.ts";
@@ -56,6 +57,11 @@ describe("security contract", () => {
       audit: ["search", "export"],
       usage: ["read"],
     });
+    expect(Object.isFrozen(SECURITY_ACTIONS)).toBeTrue();
+    expect(Object.values(SECURITY_ACTIONS).every(Object.isFrozen)).toBeTrue();
+    expect(() => {
+      (SECURITY_ACTIONS.agent as unknown as string[]).push("forged-action");
+    }).toThrow();
   });
 
   it("keeps operator and worker authentication on separate planes", async () => {
@@ -100,6 +106,18 @@ describe("security contract", () => {
         ).toEqual({ allowed: false, reason: "wrong_plane" });
       }
     }
+  });
+
+  it("denies a forged permission/resource mismatch even for the operator", async () => {
+    const forged = {
+      context: { actor: OPERATOR_PRINCIPAL, effective: OPERATOR_PRINCIPAL },
+      permission: { resource: "agent", action: "invoke" },
+      resource: { kind: "knowledge", namespaceId: "team-a", id: "docs" },
+    } as unknown as AuthorizationRequest<"agent">;
+    expect(await security().authorize(forged)).toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
   });
 
   it("requires act-for and keeps actor separate from effective identity", async () => {

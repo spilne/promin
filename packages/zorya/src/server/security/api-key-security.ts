@@ -42,7 +42,10 @@ export function createApiKeySecurity(config: ApiKeySecurityConfig): ZoryaSecurit
       return effective ? { actor, effective: principalRef(effective) } : undefined;
     },
     identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
-    authorize: async ({ context }) => {
+    authorize: async ({ context, permission, resource }) => {
+      if (permission.resource !== resource.kind) {
+        return { allowed: false, reason: "permission_denied" };
+      }
       if (context.actor.kind === "operator") return { allowed: true, reason: "operator_allow" };
       return { allowed: false, reason: "wrong_plane" };
     },

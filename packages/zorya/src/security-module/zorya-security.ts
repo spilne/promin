@@ -7,7 +7,6 @@ import {
   principalRef,
   type Principal,
   type PrincipalRef,
-  type SecurityContext,
   type ZoryaSecurity,
 } from "../server/security/index.ts";
 import type { LoginIdentity, LoginProvider } from "./login-provider.ts";
@@ -165,8 +164,18 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
       if (permission.resource !== resource.kind) {
         return { allowed: false, reason: "permission_denied" };
       }
-      const principal = await effectivePrincipal(context, resolvePrincipal);
-      if (!principal) return { allowed: false, reason: "identity_unknown" };
+      // Re-resolve on every check so role removal and user disable take
+      // effect even when the request context carries a stale actor snapshot.
+      const principal = await resolvePrincipal(context.effective);
+      if (!principal) {
+        if (context.effective.kind === "user") {
+          const user = await config.store.getUser(context.effective.id);
+          if (user?.status === "disabled") {
+            return { allowed: false, reason: "principal_disabled" };
+          }
+        }
+        return { allowed: false, reason: "identity_unknown" };
+      }
       const roles = rolesFor(principal, resource.namespaceId);
       if (roles.has("admin")) return { allowed: true, reason: "access_role_allow" };
       if (permission.resource === "agent" && permission.action === "invoke") {
@@ -208,15 +217,6 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
 
 function samePrincipal(left: PrincipalRef, right: PrincipalRef): boolean {
   return left.kind === right.kind && left.id === right.id;
-}
-
-async function effectivePrincipal(
-  context: SecurityContext,
-  resolve: (ref: PrincipalRef) => Promise<Principal | undefined>,
-): Promise<Principal | undefined> {
-  return samePrincipal(context.actor, context.effective)
-    ? context.actor
-    : resolve(context.effective);
 }
 
 function rolesFor(principal: Principal, namespaceId: string): Set<string> {

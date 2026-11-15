@@ -183,6 +183,7 @@ export {
   type SecurityAuditSink,
   type SecurityContext,
   type SecurityPermission,
+  type SecurityPermissionFor,
   type SecurityPlane,
   type SecurityResourceKind,
   type SecurityResourceRef,

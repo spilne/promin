@@ -4,7 +4,12 @@ import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow"
 import { ZoryaServer } from "../../../server.ts";
 import { ZoryaAgents } from "../../../services/agents/zorya-agents.ts";
 import { LocalWorkflows } from "../../../services/workflows/local-workflows.ts";
-import { principalRef, type Principal, type ZoryaSecurity } from "../../../security/index.ts";
+import {
+  principalRef,
+  requestSecurityContext,
+  type Principal,
+  type ZoryaSecurity,
+} from "../../../security/index.ts";
 import { deriveScope } from "../agent-scope.ts";
 
 const operator: Principal = {
@@ -159,6 +164,7 @@ function security(params: {
     resolveIdentity: async ({ actor, asserted }) => {
       if (!asserted) return { actor, effective: principalRef(actor) };
       if (!actor.canActFor) return undefined;
+      if (actor.kind === "operator") return { actor, effective: asserted };
       const effective = params.users?.get(asserted.id);
       return effective ? { actor, effective: principalRef(effective) } : undefined;
     },
@@ -278,9 +284,8 @@ describe("agent HTTP scope derives from the authenticated principal", () => {
     const key = "operator-key-0123456789";
     const { server, resolved } = await boot({ apiKeys: [key] });
 
-    const response = await server.handle(
-      request({ namespaceId: "acme", resourceId: "named-user" }, key),
-    );
+    const req = request({ namespaceId: "acme", resourceId: "named-user" }, key);
+    const response = await server.handle(req);
 
     expect(response.status).toBe(200);
     expect(resolved).toEqual([
@@ -290,5 +295,9 @@ describe("agent HTTP scope derives from the authenticated principal", () => {
         principal: expect.objectContaining({ kind: "operator", id: "operator" }),
       },
     ]);
+    expect(requestSecurityContext(req)).toEqual({
+      actor: expect.objectContaining({ kind: "operator", id: "operator" }),
+      effective: { kind: "user", id: "named-user" },
+    });
   });
 });

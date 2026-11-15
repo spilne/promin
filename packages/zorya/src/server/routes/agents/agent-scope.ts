@@ -266,15 +266,18 @@ export async function loadScopedAgent(params: {
   const actor = requestPrincipal(req);
   let effectivePrincipal = actor;
   let securityContext: SecurityContext | undefined;
-  if (actor?.kind === "service-account" && actor.canActFor) {
-    if (!scope.resourceId || !deps.security) return jsonError(403, "unknown_user");
+  if (actor?.canActFor && scope.resourceId !== undefined) {
+    if (!deps.security) return jsonError(403, "unknown_user");
     securityContext = await deps.security.resolveIdentity({
       actor,
       asserted: { kind: "user", id: scope.resourceId },
     });
     if (!securityContext) return jsonError(403, "unknown_user");
-    effectivePrincipal = await deps.security.resolvePrincipal(securityContext.effective);
-    if (!effectivePrincipal) return jsonError(403, "unknown_user");
+    const represented = await deps.security.resolvePrincipal(securityContext.effective);
+    if (represented) effectivePrincipal = represented;
+    else if (actor.kind !== "operator") return jsonError(403, "unknown_user");
+  } else if (actor?.kind === "service-account" && actor.canActFor) {
+    return jsonError(403, "unknown_user");
   } else if (actor && deps.security) {
     securityContext = await deps.security.resolveIdentity({ actor });
     if (!securityContext) return jsonError(403, "unknown_user");

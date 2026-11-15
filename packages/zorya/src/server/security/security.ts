@@ -29,8 +29,8 @@ export interface SecurityContext {
   readonly effective: PrincipalRef;
 }
 
-/** Approved resource/action vocabulary. Kept as data for route conformance checks. */
-export const SECURITY_ACTIONS = {
+/** Approved resource/action vocabulary. Kept as immutable data for conformance checks. */
+export const SECURITY_ACTIONS = deepFreezeActions({
   namespace: ["read", "create", "update", "archive"],
   user: ["read", "disable", "bind"],
   "service-account": ["read", "create", "rotate", "delete"],
@@ -54,15 +54,16 @@ export const SECURITY_ACTIONS = {
   worker: ["read", "drain"],
   audit: ["search", "export"],
   usage: ["read"],
-} as const;
+} as const);
 
 export type SecurityResourceKind = keyof typeof SECURITY_ACTIONS;
 export type SecurityAction<K extends SecurityResourceKind> = (typeof SECURITY_ACTIONS)[K][number];
+export type SecurityPermissionFor<K extends SecurityResourceKind> = {
+  readonly resource: K;
+  readonly action: SecurityAction<K>;
+};
 export type SecurityPermission = {
-  readonly [K in SecurityResourceKind]: {
-    readonly resource: K;
-    readonly action: SecurityAction<K>;
-  };
+  readonly [K in SecurityResourceKind]: SecurityPermissionFor<K>;
 }[SecurityResourceKind];
 
 /** Resource under an authorization check. Namespace is mandatory, including for org resources. */
@@ -103,10 +104,10 @@ export interface AuthenticationRequest {
   readonly plane: SecurityPlane;
 }
 
-export interface AuthorizationRequest {
+export interface AuthorizationRequest<K extends SecurityResourceKind = SecurityResourceKind> {
   readonly context: SecurityContext;
-  readonly permission: SecurityPermission;
-  readonly resource: SecurityResourceRef;
+  readonly permission: SecurityPermissionFor<K>;
+  readonly resource: SecurityResourceRef<K>;
 }
 
 export interface ResolveIdentityRequest {
@@ -136,7 +137,9 @@ export interface RequestAuthenticator {
 }
 
 export interface Authorizer {
-  authorize(request: AuthorizationRequest): Promise<AuthorizationDecision>;
+  authorize<K extends SecurityResourceKind>(
+    request: AuthorizationRequest<K>,
+  ): Promise<AuthorizationDecision>;
 }
 
 export interface IdentityResolver {
@@ -200,3 +203,10 @@ export const WORKER_PRINCIPAL: Principal = Object.freeze({
   accessRoles: Object.freeze({}),
   canActFor: false,
 });
+
+function deepFreezeActions<const T extends Readonly<Record<string, ReadonlyArray<string>>>>(
+  actions: T,
+): T {
+  for (const values of Object.values(actions)) Object.freeze(values);
+  return Object.freeze(actions) as T;
+}

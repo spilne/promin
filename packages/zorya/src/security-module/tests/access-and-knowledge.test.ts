@@ -4,6 +4,7 @@ import {
   ORG_WIDE_NAMESPACE,
   principalRef,
   setRequestPrincipal,
+  type AuthorizationRequest,
   type Principal,
   type ZoryaSecurity,
 } from "../../server/security/index.ts";
@@ -11,7 +12,7 @@ import { InMemorySecurityStore } from "../in-memory-security-store.ts";
 import type { LoginProvider } from "../login-provider.ts";
 import type { SecurityUser } from "../security-store.ts";
 import { hashSessionToken } from "../sessions.ts";
-import { createZoryaSecurity } from "../zorya-security.ts";
+import { createZoryaSecurity, type ServiceAccountConfig } from "../zorya-security.ts";
 
 const SECRET = "0123456789abcdef0123456789abcdef";
 const BASE_URL = "http://zorya.test";
@@ -30,13 +31,16 @@ interface Environment {
   readonly router: Router;
 }
 
-function environment(): Environment {
+function environment(
+  params: { readonly serviceAccounts?: ReadonlyArray<ServiceAccountConfig> } = {},
+): Environment {
   const store = new InMemorySecurityStore();
   const security = createZoryaSecurity({
     store,
     loginProviders: [unusedLoginProvider],
     publicBaseUrl: BASE_URL,
     allowedDomains: ["example.com"],
+    ...(params.serviceAccounts && { serviceAccounts: params.serviceAccounts }),
     secret: SECRET,
   });
   const router = new Router({ logger: { error() {} } });
@@ -317,6 +321,57 @@ describe("access-role administration", () => {
 });
 
 describe("namespace and knowledge access", () => {
+  it("revalidates stale roles and disabled users on every authorization", async () => {
+    const env = environment();
+    const user = await createUser({
+      env,
+      email: "stale@example.com",
+      bindings: [{ namespaceId: "team-a", accessRole: "member" }],
+    });
+    const stale = await principal(env, user);
+    const request = {
+      context: { actor: stale, effective: principalRef(stale) },
+      permission: { resource: "agent", action: "invoke" },
+      resource: { kind: "agent", namespaceId: "team-a" },
+    } as const;
+
+    expect(await env.security.authorize(request)).toEqual({
+      allowed: true,
+      reason: "access_role_allow",
+    });
+    await env.store.removeBinding({
+      userId: user.id,
+      namespaceId: "team-a",
+      accessRole: "member",
+    });
+    expect(await env.security.authorize(request)).toEqual({
+      allowed: false,
+      reason: "namespace_denied",
+    });
+    await env.store.setUserStatus({ id: user.id, status: "disabled" });
+    expect(await env.security.authorize(request)).toEqual({
+      allowed: false,
+      reason: "principal_disabled",
+    });
+  });
+
+  it("denies mismatched permission and resource kinds before role evaluation", async () => {
+    const env = environment();
+    const user = await createUser({
+      env,
+      email: "admin@example.com",
+      bindings: [{ namespaceId: ORG_WIDE_NAMESPACE, accessRole: "admin" }],
+    });
+    const admin = await principal(env, user);
+    expect(
+      await env.security.authorize({
+        context: { actor: admin, effective: principalRef(admin) },
+        permission: { resource: "agent", action: "invoke" },
+        resource: { kind: "knowledge", namespaceId: "team-a", id: "docs" },
+      } as unknown as AuthorizationRequest<"agent">),
+    ).toEqual({ allowed: false, reason: "permission_denied" });
+  });
+
   it("principal construction safely preserves stored prototype-like namespace keys", async () => {
     const env = environment();
     const user = await createUser({
@@ -358,7 +413,15 @@ describe("namespace and knowledge access", () => {
   });
 
   it("authorization never treats inherited prototype properties as roles", async () => {
-    const env = environment();
+    const ownAccessRoles = JSON.parse(
+      '{"constructor":["build"],"__proto__":["legacy"],"toString":["view"]}',
+    ) as Record<string, ReadonlyArray<string>>;
+    const env = environment({
+      serviceAccounts: [
+        { id: "plain-object", token: "plain-token", accessRoles: {} },
+        { id: "own-properties", token: "own-token", accessRoles: ownAccessRoles },
+      ],
+    });
     const inherited: Principal = {
       kind: "service-account",
       id: "plain-object",
@@ -370,9 +433,6 @@ describe("namespace and knowledge access", () => {
       expect(await canUseKnowledgeBase(env, inherited, namespaceId, "docs")).toBeFalse();
     }
 
-    const ownAccessRoles = JSON.parse(
-      '{"constructor":["build"],"__proto__":["legacy"],"toString":["view"]}',
-    ) as Record<string, ReadonlyArray<string>>;
     const own: Principal = {
       ...inherited,
       id: "own-properties",
