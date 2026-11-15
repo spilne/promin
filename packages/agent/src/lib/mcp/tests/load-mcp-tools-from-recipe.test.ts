@@ -177,6 +177,25 @@ describe("loadMcpToolsFromRecipe", () => {
     await pool.closeAll();
   });
 
+  it("does not pool a global credential across two caller resources", async () => {
+    const secrets = new InMemorySecretsStorage();
+    await secrets.set({ scope: SecretScope.global(), key: "GITHUB_TOKEN", value: "shared" });
+    const { pool, connections } = testPool();
+    const load = (resourceId: string) =>
+      loadMcpToolsFromRecipe({
+        recipe: recipe([{ server: "github" }]),
+        servers: [GITHUB],
+        pool,
+        secrets,
+        scope: { namespaceId: "acme", resourceId },
+      });
+
+    await load("alice");
+    await load("bob");
+    expect(connections.map((connection) => connection.credential)).toEqual(["shared", "shared"]);
+    await pool.closeAll();
+  });
+
   it("never hands a tenant secret to a recipe-chosen endpoint", async () => {
     // The tenant's own BYOK key sits at namespace scope; a recipe naming it
     // as a credential for its own URL is refused before anything connects.

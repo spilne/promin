@@ -32,15 +32,57 @@ function echoServer() {
 const github: McpServerConfig = { name: "github", transport: "stdio", command: "gh-mcp" };
 
 describe("McpClientPool — keys", () => {
-  it("reuses one client for the same config, namespace and credential", async () => {
+  it("reuses one client for the same config, caller scope and credential", async () => {
     const { connect, connections } = inMemoryConnect(() => echoServer());
     const pool = new McpClientPool({ connect });
-    const a = pool.server({ server: github, namespaceId: "acme" });
-    const b = pool.server({ server: { ...github }, namespaceId: "acme" });
+    const scope = {
+      namespaceId: "acme",
+      resourceId: "u-1",
+      credential: "shared",
+      credentialScope: "global",
+    };
+    const a = pool.server({ server: github, ...scope });
+    const b = pool.server({ server: { ...github }, ...scope });
     expect(a.key).toBe(b.key);
     await a.callTool({ name: "echo", arguments: { v: "1" } });
     await b.callTool({ name: "echo", arguments: { v: "2" } });
     expect(connections).toHaveLength(1);
+    await pool.closeAll();
+  });
+
+  it("isolates resources even when they resolve the same global credential", async () => {
+    const { connect, connections } = inMemoryConnect(() => echoServer());
+    const pool = new McpClientPool({ connect });
+    const shared = {
+      server: github,
+      namespaceId: "acme",
+      credential: "shared",
+      credentialScope: "global",
+    };
+    const alice = pool.server({ ...shared, resourceId: "alice" });
+    const bob = pool.server({ ...shared, resourceId: "bob" });
+    expect(alice.key).not.toBe(bob.key);
+    await alice.callTool({ name: "echo", arguments: { v: "a" } });
+    await bob.callTool({ name: "echo", arguments: { v: "b" } });
+    expect(connections).toHaveLength(2);
+    await pool.closeAll();
+  });
+
+  it("includes the resolved credential scope in connection identity", async () => {
+    const { connect, connections } = inMemoryConnect(() => echoServer());
+    const pool = new McpClientPool({ connect });
+    const shared = {
+      server: github,
+      namespaceId: "acme",
+      resourceId: "alice",
+      credential: "shared",
+    };
+    const global = pool.server({ ...shared, credentialScope: "global" });
+    const resource = pool.server({ ...shared, credentialScope: "resource:acme:alice" });
+    expect(global.key).not.toBe(resource.key);
+    await global.listTools();
+    await resource.listTools();
+    expect(connections).toHaveLength(2);
     await pool.closeAll();
   });
 
