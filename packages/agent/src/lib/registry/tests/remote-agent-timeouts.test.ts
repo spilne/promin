@@ -273,10 +273,43 @@ describe("RemoteAgent timeouts", () => {
       const out = agent.stream({ task: "hello" });
       const events = collect(out.fullStream);
 
-      expect((await settle(out.text)).error).toBeDefined();
+      await expect(out.text).rejects.toThrow();
       expect(await out.finishReason).toBe("error");
       expect(await out.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
       expect((await events).at(-1)?.type).toBe("error");
+    }
+  });
+
+  it("does not leak an unhandled text rejection when error surfaces are fully consumed", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      for (const fetcher of [
+        async () => {
+          throw new Error("connection lost");
+        },
+        async () =>
+          new Response('data: {"delta":"unterminated"}\n\n', {
+            headers: { "content-type": "text/event-stream" },
+          }),
+      ]) {
+        const agent = new RemoteAgent({
+          endpoint: "https://peer.example",
+          remoteAgentId: "peer",
+          fetch: fetcher,
+        });
+        const out = agent.stream({ task: "hello" });
+
+        expect((await collect(out.fullStream)).at(-1)?.type).toBe("error");
+        expect(await out.finishReason).toBe("error");
+        // Deliberately do not read `out.text`: fullStream and finishReason are
+        // valid complete consumption paths for a failed run.
+      }
+      for (let i = 0; i < 10; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
     }
   });
 

@@ -584,6 +584,10 @@ function buildSseRunOutput(params: {
     resolveText = res;
     rejectText = rej;
   });
+  // `fullStream` and `finishReason` are complete error surfaces on their own.
+  // Mark the original text promise as observed for callers that choose those
+  // surfaces, without wrapping it: callers awaiting `text` still see rejection.
+  void textPromise.catch(() => {});
   const finishPromise = new Promise<FinishReason>((res) => {
     resolveFinish = res;
   });
