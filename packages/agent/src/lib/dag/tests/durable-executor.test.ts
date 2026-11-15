@@ -13,7 +13,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
-import type { Agent, AgentInput, AgentRunOutput, AgentScope } from "../../agent/types.ts";
+import type { Agent, AgentInput, AgentScope } from "../../agent/types.ts";
 import { InMemoryAgentInstanceRegistry } from "../../instance/in-memory-agent-instance-registry.ts";
 import { composeAgentInstanceId } from "../../instance/types.ts";
 import { InMemoryAgentRegistry } from "../../versioned-registry/in-memory-registries.ts";
@@ -21,6 +21,7 @@ import { createDagWorkflow, type DurableDagInput } from "../durable-executor.ts"
 import { createRegistryAgentResolver } from "../registry-agent-resolver.ts";
 import type { AgentResolver, AgenticDagRecipe, DagRunScope } from "../types.ts";
 import { InMemoryDagRegistry } from "../../versioned-registry/in-memory-registries.ts";
+import { SCOPE, makeResolver, stubAgent, textOnly } from "./dag-test-kit.ts";
 
 /** DAGs run by reference: register `dag` and name it in the run input. */
 const dags = new InMemoryDagRegistry();
@@ -45,43 +46,6 @@ async function runInput(params: {
     scope: params.scope,
   };
 }
-
-function textOnly(text: string): AgentRunOutput<unknown> {
-  return {
-    text: Promise.resolve(text),
-    finishReason: Promise.resolve("stop" as const),
-    messages: Promise.resolve([]),
-    usage: Promise.resolve({ inputTokens: 0, outputTokens: 0 }),
-    steps: Promise.resolve([]),
-    output: Promise.resolve(undefined),
-    events: (async function* () {})(),
-    abort: () => {},
-  } as unknown as AgentRunOutput<unknown>;
-}
-
-function stubAgent(transform: (s: string) => string = (s) => s): Agent {
-  return {
-    invoke: async (input: AgentInput) => textOnly(transform(input.task)),
-    stream: () => textOnly("not used"),
-    thread: async () => {
-      throw new Error("stub: thread");
-    },
-    listThreads: async () => [],
-    withScope() {
-      return this;
-    },
-  } as unknown as Agent;
-}
-
-function makeResolver(byId: Record<string, Agent>): AgentResolver {
-  return async ({ agentId: id }) => {
-    const a = byId[id];
-    if (!a) throw new Error(`unknown agent: ${id}`);
-    return a;
-  };
-}
-
-const SCOPE = { namespaceId: "acme", resourceId: "r-1" } as const;
 
 const linear: AgenticDagRecipe = {
   id: "linear",

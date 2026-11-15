@@ -14,8 +14,7 @@ import { createDagWorkflow, dagNodeRunId } from "../durable-executor.ts";
 import { createRegistryAgentResolver } from "../registry-agent-resolver.ts";
 import { InMemoryDagRegistry } from "../../versioned-registry/in-memory-registries.ts";
 import type { AgenticDagRecipe } from "../types.ts";
-
-const SCOPE = { namespaceId: "acme", resourceId: "r-1" } as const;
+import { SCOPE } from "./dag-test-kit.ts";
 
 const diamond: AgenticDagRecipe = {
   id: "diamond-budget",

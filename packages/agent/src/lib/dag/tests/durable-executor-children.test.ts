@@ -30,6 +30,7 @@ import {
 import { createRegistryAgentResolver } from "../registry-agent-resolver.ts";
 import type { AgentResolver, AgenticDagRecipe, DagRunScope } from "../types.ts";
 import { InMemoryDagRegistry } from "../../versioned-registry/in-memory-registries.ts";
+import { SCOPE, invokeAgent, taskOf, textOnly } from "./dag-test-kit.ts";
 
 /** DAGs run by reference: register `dag` and name it in the run input. */
 const dags = new InMemoryDagRegistry();
@@ -55,34 +56,8 @@ async function runInput(params: {
   };
 }
 
-const SCOPE = { namespaceId: "acme", resourceId: "r-1" } as const;
-
 /** Lock lease of `InMemoryWorkflowStorage` runs, plus a margin. */
 const PAST_LOCK_LEASE_MS = 121_000;
-
-function textOnly(text: string): AgentRunOutput {
-  return {
-    text: Promise.resolve(text),
-    finishReason: Promise.resolve("stop" as const),
-    messages: Promise.resolve([]),
-    usage: Promise.resolve({ inputTokens: 0, outputTokens: 0 }),
-    steps: Promise.resolve([]),
-  } as unknown as AgentRunOutput;
-}
-
-function invokeAgent(invoke: (input: AgentInput) => Promise<AgentRunOutput>): Agent {
-  const agent = {
-    invoke,
-    withScope: () => agent,
-  } as unknown as Agent;
-  return agent;
-}
-
-/** The user message the LLM was asked to answer. */
-function taskOf(messages: Parameters<Parameters<typeof reactiveLLM>[0]>[0]): string {
-  const last = lastMessage(messages);
-  return typeof last?.content === "string" ? last.content : "";
-}
 
 const linear: AgenticDagRecipe = {
   id: "linear",

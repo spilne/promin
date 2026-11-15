@@ -34,6 +34,26 @@ export type NodeInputSource =
   | { readonly kind: "node"; readonly nodeId: string; readonly path: string }
   | { readonly kind: "literal"; readonly value: unknown };
 
+export type ConditionScalar = string | number | boolean | null;
+
+export type Condition =
+  | { readonly kind: "equals"; readonly path: string; readonly value: ConditionScalar }
+  | {
+      readonly kind: "in";
+      readonly path: string;
+      readonly values: ReadonlyArray<ConditionScalar>;
+    }
+  | { readonly kind: "exists"; readonly path: string }
+  | {
+      readonly kind: "compare";
+      readonly path: string;
+      readonly op: "gt" | "gte" | "lt" | "lte";
+      readonly value: number;
+    }
+  | { readonly kind: "and"; readonly all: ReadonlyArray<Condition> }
+  | { readonly kind: "or"; readonly any: ReadonlyArray<Condition> }
+  | { readonly kind: "not"; readonly of: Condition };
+
 export interface DagNode {
   readonly id: string;
   /**
