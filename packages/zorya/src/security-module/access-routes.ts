@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { NamespaceIdSchema } from "../server/api-types.ts";
 import { parseBody } from "../server/request-validation.ts";
 import { json, jsonError, noContent, type Handler, type Router } from "../server/router.ts";
 import { ORG_WIDE_NAMESPACE, requestPrincipal } from "../server/security/index.ts";
@@ -6,7 +7,7 @@ import type { SecurityStore } from "./security-store.ts";
 
 const BindingBodySchema = z
   .object({
-    namespaceId: z.string().min(1),
+    namespaceId: NamespaceIdSchema,
     accessRole: z.string().min(1),
   })
   .strict();
@@ -22,7 +23,11 @@ export function mountAccessRoutes(params: {
     (handler: Handler): Handler =>
     async (req, route) => {
       const principal = requestPrincipal(req);
-      if (!principal?.accessRoles[ORG_WIDE_NAMESPACE]?.includes("admin")) {
+      const orgRoles =
+        principal && Object.hasOwn(principal.accessRoles, ORG_WIDE_NAMESPACE)
+          ? principal.accessRoles[ORG_WIDE_NAMESPACE]
+          : undefined;
+      if (!orgRoles?.includes("admin")) {
         return jsonError(403, "forbidden");
       }
       return handler(req, route);

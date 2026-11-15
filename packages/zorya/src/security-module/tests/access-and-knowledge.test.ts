@@ -62,6 +62,13 @@ async function principal(env: Environment, user: SecurityUser): Promise<Principa
   return result;
 }
 
+function rolesAt(
+  value: Principal | undefined,
+  namespaceId: string,
+): ReadonlyArray<string> | undefined {
+  return value?.accessRoles[namespaceId];
+}
+
 async function handleAs(params: {
   readonly env: Environment;
   readonly principal: Principal;
@@ -101,6 +108,23 @@ describe("access-role administration", () => {
     const unauthenticated = await env.router.handle(new Request(`${BASE_URL}/api/access/users`));
     expect(unauthenticated.status).toBe(403);
     expect(await unauthenticated.json()).toEqual({ error: "forbidden" });
+
+    const inheritedAdmin = {
+      kind: "service-account",
+      id: "inherited-admin",
+      accessRoles: Object.create({ [ORG_WIDE_NAMESPACE]: ["admin"] }) as Record<
+        string,
+        ReadonlyArray<string>
+      >,
+      canActFor: false,
+    } satisfies Principal;
+    const inheritedAdminResponse = await handleAs({
+      env,
+      principal: inheritedAdmin,
+      path: "/api/access/users",
+    });
+    expect(inheritedAdminResponse.status).toBe(403);
+    expect(await inheritedAdminResponse.json()).toEqual({ error: "forbidden" });
 
     for (const request of [
       { path: "/api/access/users" },
@@ -190,9 +214,140 @@ describe("access-role administration", () => {
       issues: [{ path: "accessRole" }],
     });
   });
+
+  it("invalid namespace bodies answer 400 with structured issues; org remains valid", async () => {
+    const env = environment();
+    const adminUser = await createUser({
+      env,
+      email: "admin@example.com",
+      bindings: [{ namespaceId: ORG_WIDE_NAMESPACE, accessRole: "admin" }],
+    });
+    const user = await createUser({ env, email: "user@example.com" });
+    const admin = await principal(env, adminUser);
+
+    for (const request of [
+      {
+        method: "PUT",
+        path: `/api/access/users/${user.id}/bindings`,
+        body: { namespaceId: "_private", accessRole: "member" },
+      },
+      {
+        method: "DELETE",
+        path: `/api/access/users/${user.id}/bindings`,
+        body: { namespaceId: "bad namespace", accessRole: "member" },
+      },
+      {
+        method: "PUT",
+        path: "/api/access/knowledge-grants",
+        body: { namespaceId: "__proto__", baseId: "docs", accessRole: "member" },
+      },
+      {
+        method: "DELETE",
+        path: "/api/access/knowledge-grants",
+        body: { namespaceId: "/root", baseId: "docs", accessRole: "member" },
+      },
+    ]) {
+      const response = await handleAs({ env, principal: admin, ...request });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: "invalid_request",
+        issues: [{ path: "namespaceId" }],
+      });
+    }
+
+    const orgWide = await handleAs({
+      env,
+      principal: admin,
+      method: "PUT",
+      path: "/api/access/knowledge-grants",
+      body: { namespaceId: ORG_WIDE_NAMESPACE, baseId: "docs", accessRole: "member" },
+    });
+    expect(orgWide.status).toBe(204);
+
+    const prototypeNamed = await handleAs({
+      env,
+      principal: admin,
+      method: "PUT",
+      path: `/api/access/users/${user.id}/bindings`,
+      body: { namespaceId: "constructor", accessRole: "builder" },
+    });
+    expect(prototypeNamed.status).toBe(204);
+    expect(rolesAt(await env.security.principalById(user.id), "constructor")).toEqual(["builder"]);
+  });
 });
 
 describe("namespace and knowledge access", () => {
+  it("principal construction safely preserves stored prototype-like namespace keys", async () => {
+    const env = environment();
+    const user = await createUser({
+      env,
+      email: "legacy@example.com",
+      bindings: [
+        { namespaceId: "constructor", accessRole: "build" },
+        { namespaceId: "__proto__", accessRole: "legacy" },
+        { namespaceId: "toString", accessRole: "view" },
+      ],
+    });
+    const byId = await principal(env, user);
+
+    expect(Object.getPrototypeOf(byId.accessRoles)).toBeNull();
+    expect(rolesAt(byId, "constructor")).toEqual(["build"]);
+    expect(rolesAt(byId, "__proto__")).toEqual(["legacy"]);
+    expect(rolesAt(byId, "toString")).toEqual(["view"]);
+    for (const namespaceId of ["constructor", "__proto__", "toString"]) {
+      expect(await env.security.canActIn({ principal: byId, namespaceId })).toBeTrue();
+    }
+
+    const token = "prototype-namespace-session";
+    await env.store.createSession({
+      tokenHash: hashSessionToken(token),
+      userId: user.id,
+      ttlMs: 60_000,
+    });
+    const authenticated = await env.security.authenticate(
+      new Request(`${BASE_URL}/api/agents`, {
+        headers: { cookie: `zorya_session=${token}` },
+      }),
+    );
+    expect(authenticated?.id).toBe(user.id);
+    expect(Object.getPrototypeOf(authenticated?.accessRoles)).toBeNull();
+    expect(rolesAt(authenticated, "constructor")).toEqual(["build"]);
+    expect(rolesAt(authenticated, "__proto__")).toEqual(["legacy"]);
+    expect(rolesAt(authenticated, "toString")).toEqual(["view"]);
+  });
+
+  it("authorization never treats inherited prototype properties as roles", async () => {
+    const env = environment();
+    const inherited: Principal = {
+      kind: "service-account",
+      id: "plain-object",
+      accessRoles: {},
+      canActFor: false,
+    };
+    for (const namespaceId of ["constructor", "__proto__", "toString"]) {
+      expect(await env.security.canActIn({ principal: inherited, namespaceId })).toBeFalse();
+      expect(
+        await env.security.canUseKnowledge({
+          principal: inherited,
+          namespaceId,
+          baseId: "docs",
+        }),
+      ).toBeFalse();
+    }
+
+    const ownAccessRoles = JSON.parse(
+      '{"constructor":["build"],"__proto__":["legacy"],"toString":["view"]}',
+    ) as Record<string, ReadonlyArray<string>>;
+    const own: Principal = {
+      ...inherited,
+      id: "own-properties",
+      accessRoles: ownAccessRoles,
+    };
+    for (const namespaceId of ["constructor", "__proto__", "toString"]) {
+      expect(await env.security.canActIn({ principal: own, namespaceId })).toBeTrue();
+    }
+  });
+
   it("canActIn: bound namespace and org-wide are allowed, others are not", async () => {
     const env = environment();
     const scopedUser = await createUser({

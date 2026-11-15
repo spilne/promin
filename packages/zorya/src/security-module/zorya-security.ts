@@ -91,7 +91,7 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
 
   const principalForUser = async (user: SecurityUser): Promise<Principal | undefined> => {
     if (user.status !== "active") return undefined;
-    const accessRoles: Record<string, string[]> = {};
+    const accessRoles = Object.create(null) as Record<string, string[]>;
     for (const binding of await config.store.listBindings(user.id)) {
       (accessRoles[binding.namespaceId] ??= []).push(binding.accessRole);
     }
@@ -163,9 +163,16 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
 
 function rolesFor(principal: Principal, namespaceId: string): Set<string> {
   return new Set([
-    ...(principal.accessRoles[ORG_WIDE_NAMESPACE] ?? []),
-    ...(principal.accessRoles[namespaceId] ?? []),
+    ...ownRoles(principal.accessRoles, ORG_WIDE_NAMESPACE),
+    ...ownRoles(principal.accessRoles, namespaceId),
   ]);
+}
+
+function ownRoles(
+  accessRoles: Principal["accessRoles"],
+  namespaceId: string,
+): ReadonlyArray<string> {
+  return Object.hasOwn(accessRoles, namespaceId) ? (accessRoles[namespaceId] ?? []) : [];
 }
 
 function mountLoginRoutes(params: {
