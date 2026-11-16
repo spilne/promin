@@ -14,10 +14,25 @@ export {
   type OidcLoginProviderConfig,
 } from "./security-module/oidc-login-provider.ts";
 export type {
+  AccessGroup,
   AccessBinding,
+  AccessSubjectRef,
+  BreakGlassGrant,
+  GroupMembership,
+  KnowledgeAudienceGrant,
   KnowledgeGrant,
+  ProviderIdentity,
+  SecurityAuditOutboxRecord,
+  SecurityAuditRecord,
+  SecurityDenialBucket,
+  SecurityPrincipalRef,
+  SecurityServiceAccount,
+  SecuritySession,
   SecurityStore,
+  SecurityStoreV2,
   SecurityUser,
+  ServiceAccountCredential,
+  SubjectAccessBinding,
 } from "./security-module/security-store.ts";
 export {
   createZoryaSecurity,
