@@ -403,7 +403,12 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
       // A durable account owns its id completely. Never let a legacy static
       // token bypass that account's credential rotation or revocation.
       if (await config.store.getServiceAccount(matched.id)) return undefined;
-      return principalForServiceAccount(matched.id);
+      return {
+        kind: "service-account",
+        id: matched.id,
+        accessRoles: matched.accessRoles ?? {},
+        canActFor: matched.canActFor ?? false,
+      };
     },
     secureResponse: ({ request, response }) =>
       cookieAuthenticated.has(request)
