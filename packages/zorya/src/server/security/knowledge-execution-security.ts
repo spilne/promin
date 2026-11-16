@@ -5,6 +5,7 @@ import type { Logger } from "../server-config.ts";
 import {
   ORG_WIDE_NAMESPACE,
   type AuthorizationDecision,
+  type EffectiveAuthorizationResult,
   type IdentityFilter,
   type Principal,
   type PrincipalRef,
@@ -110,8 +111,19 @@ export class KnowledgeExecutionSecurity {
         ? authorization.decision
         : snapshotAuthorizationDecision({ allowed: false, reason: "permission_denied" });
     await this.auditDecision({ params, context, decision });
-    if (!decision.allowed) return undefined;
-    return this.finalAccess({ params, runContext });
+    if (
+      !decision.allowed ||
+      !authorization?.decision.allowed ||
+      authorization.effective === undefined
+    ) {
+      return undefined;
+    }
+    return this.finalAccess({
+      params,
+      runContext,
+      auditedAuthorization: authorization,
+      auditedIdentityFilter: identityFilter,
+    });
   }
 
   /**
@@ -126,6 +138,8 @@ export class KnowledgeExecutionSecurity {
       readonly baseId: string;
     };
     readonly runContext: RunSecurityContext;
+    readonly auditedAuthorization: EffectiveAuthorizationResult;
+    readonly auditedIdentityFilter: IdentityFilter;
   }): Promise<RetrieverSearchAccess | undefined> {
     const { params, runContext } = input;
     const actor = await this.security.resolvePrincipal(toPrincipalRef(runContext.actor));
@@ -174,6 +188,13 @@ export class KnowledgeExecutionSecurity {
           ? authorization.decision
           : snapshotAuthorizationDecision({ allowed: false, reason: "permission_denied" });
       await this.auditDecision({ params, context, decision });
+      return undefined;
+    }
+    if (
+      !sameAuthorizationSnapshot(authorization, input.auditedAuthorization) ||
+      !sameIdentityFilter(identityFilter, input.auditedIdentityFilter)
+    ) {
+      await this.auditResolved({ params, context, reason: "permission_denied" });
       return undefined;
     }
     return Object.freeze({ caller: callerFor(authorization.effective, params.namespaceId) });
@@ -343,6 +364,8 @@ function samePrincipal(
   return left.kind === right.kind && left.id === right.id;
 }
 
+const MAX_IDENTITY_FILTER_IDENTITIES = 10_000;
+
 function snapshotIdentityFilter(source: unknown): IdentityFilter {
   if ((typeof source !== "object" && typeof source !== "function") || source === null) {
     throw new TypeError("Invalid identity filter");
@@ -356,7 +379,15 @@ function snapshotIdentityFilter(source: unknown): IdentityFilter {
   if (kind !== "identities") throw new TypeError("Invalid identity filter kind");
   const identitiesValue = Reflect.get(source, "identities") as unknown;
   if (!Array.isArray(identitiesValue)) throw new TypeError("Invalid identity filter identities");
-  const length = identitiesValue.length;
+  const length = Reflect.get(identitiesValue, "length") as unknown;
+  if (
+    typeof length !== "number" ||
+    !Number.isSafeInteger(length) ||
+    length < 0 ||
+    length > MAX_IDENTITY_FILTER_IDENTITIES
+  ) {
+    throw new TypeError("Invalid identity filter identities length");
+  }
   const identities: PrincipalRef[] = [];
   for (let index = 0; index < length; index++) {
     identities.push(
@@ -364,6 +395,50 @@ function snapshotIdentityFilter(source: unknown): IdentityFilter {
     );
   }
   return Object.freeze({ kind, namespaceId, identities: Object.freeze(identities) });
+}
+
+function sameAuthorizationSnapshot(
+  current: EffectiveAuthorizationResult,
+  audited: EffectiveAuthorizationResult,
+): boolean {
+  return (
+    current.decision.allowed === audited.decision.allowed &&
+    current.decision.reason === audited.decision.reason &&
+    current.effective !== undefined &&
+    audited.effective !== undefined &&
+    samePrincipalSnapshot(current.effective, audited.effective)
+  );
+}
+
+function samePrincipalSnapshot(left: Principal, right: Principal): boolean {
+  if (
+    !samePrincipal(left, right) ||
+    left.email !== right.email ||
+    left.canActFor !== right.canActFor
+  ) {
+    return false;
+  }
+  const leftNamespaces = Object.keys(left.accessRoles);
+  const rightNamespaces = Object.keys(right.accessRoles);
+  if (leftNamespaces.length !== rightNamespaces.length) return false;
+  return leftNamespaces.every((namespaceId) => {
+    if (!Object.hasOwn(right.accessRoles, namespaceId)) return false;
+    const leftRoles = left.accessRoles[namespaceId] ?? [];
+    const rightRoles = right.accessRoles[namespaceId] ?? [];
+    return (
+      leftRoles.length === rightRoles.length &&
+      leftRoles.every((role, index) => role === rightRoles[index])
+    );
+  });
+}
+
+function sameIdentityFilter(left: IdentityFilter, right: IdentityFilter): boolean {
+  if (left.kind !== right.kind || left.namespaceId !== right.namespaceId) return false;
+  if (left.kind === "namespace" || right.kind === "namespace") return true;
+  return (
+    left.identities.length === right.identities.length &&
+    left.identities.every((identity, index) => samePrincipal(identity, right.identities[index]!))
+  );
 }
 
 function filterIncludes(filter: IdentityFilter, effective: PrincipalRef): boolean {

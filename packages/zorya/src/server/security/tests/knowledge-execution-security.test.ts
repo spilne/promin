@@ -131,13 +131,17 @@ describe("KnowledgeExecutionSecurity", () => {
     expect(audits.map((event) => event.decision?.allowed)).toEqual([true, false]);
   });
 
-  it("builds the returned caller from the principal refreshed after audit", async () => {
+  it("denies when the principal snapshot changes during the allow audit", async () => {
+    const audits: SecurityAuditEvent[] = [];
     const principals = new Map<string, Principal>([["user:alice", user("alice", ["member"])]]);
     const guard = new KnowledgeExecutionSecurity({
       security: fakeSecurity({
         principals,
-        audit: async () => {
-          principals.set("user:alice", user("alice", ["finance"]));
+        audit: async (event) => {
+          audits.push(event);
+          if (event.decision?.allowed) {
+            principals.set("user:alice", user("alice", ["finance"]));
+          }
         },
       }),
       clock,
@@ -150,14 +154,47 @@ describe("KnowledgeExecutionSecurity", () => {
       baseId: "handbook",
     });
 
-    expect(access?.caller).toMatchObject({
-      subject: { kind: "user", id: "alice" },
-      userId: "alice",
-      accessRoles: ["finance"],
-    });
+    expect(access).toBeUndefined();
+    expect(audits.map((event) => event.decision?.allowed)).toEqual([true, false]);
+    expect(audits[1]?.decision).toEqual({ allowed: false, reason: "permission_denied" });
+    expect(Object.isFrozen(audits[1])).toBeTrue();
+    expect(Object.isFrozen(audits[1]?.decision)).toBeTrue();
   });
 
-  it("returns the exact effective principal snapshot used by final authorization", async () => {
+  it("denies when the normalized identity filter changes during the allow audit", async () => {
+    const audits: SecurityAuditEvent[] = [];
+    const principals = new Map<string, Principal>([["user:alice", user("alice", ["member"])]]);
+    let expanded = false;
+    const guard = new KnowledgeExecutionSecurity({
+      security: fakeSecurity({
+        principals,
+        identityFilter: ({ context, namespaceId }) => ({
+          kind: "identities",
+          namespaceId,
+          identities: expanded
+            ? [context.effective, { kind: "user", id: "bob" }]
+            : [context.effective],
+        }),
+        audit: async (event) => {
+          audits.push(event);
+          if (event.decision?.allowed) expanded = true;
+        },
+      }),
+      clock,
+      logger,
+    });
+
+    const access = await guard.access({
+      securityContext: { actor: { kind: "user", id: "alice" } },
+      namespaceId: "team",
+      baseId: "handbook",
+    });
+
+    expect(access).toBeUndefined();
+    expect(audits.map((event) => event.decision?.allowed)).toEqual([true, false]);
+  });
+
+  it("denies when final authorization differs from the audited principal snapshot", async () => {
     const principals = new Map<string, Principal>([["user:alice", user("alice", ["member"])]]);
     let authorizationCalls = 0;
     const guard = new KnowledgeExecutionSecurity({
@@ -181,7 +218,7 @@ describe("KnowledgeExecutionSecurity", () => {
     });
 
     expect(authorizationCalls).toBe(2);
-    expect(access?.caller?.accessRoles).toEqual(["finance"]);
+    expect(access).toBeUndefined();
   });
 
   it("rejects an allowed result bound to a different effective identity", async () => {
@@ -283,6 +320,7 @@ describe("KnowledgeExecutionSecurity", () => {
     let namespaceReads = 0;
     let identitiesReads = 0;
     let idReads = 0;
+    let lengthReads = 0;
     const guard = new KnowledgeExecutionSecurity({
       security: fakeSecurity({
         principals,
@@ -316,7 +354,16 @@ describe("KnowledgeExecutionSecurity", () => {
                 }
                 if (property === "identities") {
                   identitiesReads++;
-                  return [identity];
+                  let localLengthReads = 0;
+                  return new Proxy([identity], {
+                    get: (target, arrayProperty, receiver) => {
+                      if (arrayProperty === "length") {
+                        lengthReads++;
+                        return ++localLengthReads === 1 ? 1 : Number.MAX_SAFE_INTEGER;
+                      }
+                      return Reflect.get(target, arrayProperty, receiver);
+                    },
+                  });
                 }
                 return undefined;
               },
@@ -335,12 +382,50 @@ describe("KnowledgeExecutionSecurity", () => {
     });
 
     expect(access?.caller?.userId).toBe("alice");
-    expect({ kindReads, namespaceReads, identitiesReads, idReads }).toEqual({
+    expect({ kindReads, namespaceReads, identitiesReads, idReads, lengthReads }).toEqual({
       kindReads: 2,
       namespaceReads: 2,
       identitiesReads: 2,
       idReads: 2,
+      lengthReads: 2,
     });
+  });
+
+  it("fails closed for infinite and oversized proxy identity-array lengths", async () => {
+    const principals = new Map<string, Principal>([["user:alice", user("alice", ["member"])]]);
+    for (const length of [Number.POSITIVE_INFINITY, 10_001]) {
+      let lengthReads = 0;
+      const identities = new Proxy([{ kind: "user", id: "alice" }], {
+        get: (target, property, receiver) => {
+          if (property === "length") {
+            lengthReads++;
+            return length;
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      const guard = new KnowledgeExecutionSecurity({
+        security: fakeSecurity({
+          principals,
+          identityFilter: ({ namespaceId }) => ({
+            kind: "identities",
+            namespaceId,
+            identities,
+          }),
+        }),
+        clock,
+        logger,
+      });
+
+      await expect(
+        guard.access({
+          securityContext: { actor: { kind: "user", id: "alice" } },
+          namespaceId: "team",
+          baseId: "handbook",
+        }),
+      ).resolves.toBeUndefined();
+      expect(lengthReads).toBe(1);
+    }
   });
 
   it("keeps same-id users and service accounts distinct for retriever ACLs", async () => {
