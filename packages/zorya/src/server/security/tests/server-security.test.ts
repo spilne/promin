@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { FakeWallClock, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { Auth } from "../../auth.ts";
 import { json, type Router } from "../../router.ts";
-import { ZoryaInsecureConfigError, type Logger } from "../../server-config.ts";
+import {
+  ZoryaInsecureConfigError,
+  type Logger,
+  type ZoryaServerConfig,
+} from "../../server-config.ts";
 import { ZoryaServer } from "../../server.ts";
 import { LocalWorkflows } from "../../services/workflows/local-workflows.ts";
 import {
@@ -202,25 +206,53 @@ describe("ZoryaServer security", () => {
     ).toThrow("Routes missing access declarations:\nGET /auth/legacy");
   });
 
-  it("strict coverage accepts worker, module and static mounts when every route is declared", () => {
-    expect(
-      () =>
-        new ZoryaServer({
-          workflows: workflows(),
-          security: fakeSecurity({
-            mount: (router) =>
-              router.route({
-                method: "GET",
-                path: "/auth/declared",
-                access: { kind: "public", purpose: "login" },
-                handler: () => new Response(null, { status: 204 }),
-              }),
+  it("strict coverage accepts the minimal, worker, module, UI and maximal startup matrix", () => {
+    const security = () =>
+      fakeSecurity({
+        mount: (router) =>
+          router.route({
+            method: "GET",
+            path: "/auth/declared",
+            access: { kind: "public", purpose: "login" },
+            handler: () => new Response(null, { status: 204 }),
           }),
+      });
+    const cases: ReadonlyArray<readonly [string, ZoryaServerConfig]> = [
+      ["minimal", { workflows: workflows(), apiKeys: [API_KEY], logger: quietLogger }],
+      [
+        "worker",
+        {
+          workflows: workflows(),
+          apiKeys: [API_KEY],
+          remoteWorkers: { apiKeys: [WORKER_KEY] },
+          logger: quietLogger,
+        },
+      ],
+      ["module", { workflows: workflows(), security: security(), logger: quietLogger }],
+      [
+        "UI",
+        {
+          workflows: workflows(),
+          apiKeys: [API_KEY],
+          uiDir: "/unused",
+          logger: quietLogger,
+        },
+      ],
+      [
+        "maximal",
+        {
+          workflows: workflows(),
+          security: security(),
           remoteWorkers: { apiKeys: [WORKER_KEY] },
           uiDir: "/unused",
           logger: quietLogger,
-        }),
-    ).not.toThrow();
+        },
+      ],
+    ];
+
+    for (const [name, config] of cases) {
+      expect(() => new ZoryaServer(config), name).not.toThrow();
+    }
   });
 
   it("module: declared protected routes use central authorization and audit", async () => {
