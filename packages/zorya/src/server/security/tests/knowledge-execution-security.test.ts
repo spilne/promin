@@ -89,6 +89,97 @@ describe("KnowledgeExecutionSecurity", () => {
     });
   });
 
+  it("reauthorizes after an awaited allow audit before returning caller access", async () => {
+    const audits: SecurityAuditEvent[] = [];
+    const principals = new Map<string, Principal>([["user:alice", user("alice", ["member"])]]);
+    let allowed = true;
+    const guard = new KnowledgeExecutionSecurity({
+      security: fakeSecurity({
+        principals,
+        allowed: () => allowed,
+        audit: async (event) => {
+          audits.push(event);
+          if (event.decision?.allowed) allowed = false;
+        },
+      }),
+      clock,
+      logger,
+    });
+
+    const access = await guard.access({
+      securityContext: { actor: { kind: "user", id: "alice" } },
+      namespaceId: "team",
+      baseId: "handbook",
+    });
+
+    expect(access).toBeUndefined();
+    expect(audits.map((event) => event.decision?.allowed)).toEqual([true, false]);
+  });
+
+  it("builds the returned caller from the principal refreshed after audit", async () => {
+    const principals = new Map<string, Principal>([["user:alice", user("alice", ["member"])]]);
+    const guard = new KnowledgeExecutionSecurity({
+      security: fakeSecurity({
+        principals,
+        audit: async () => {
+          principals.set("user:alice", user("alice", ["finance"]));
+        },
+      }),
+      clock,
+      logger,
+    });
+
+    const access = await guard.access({
+      securityContext: { actor: { kind: "user", id: "alice" } },
+      namespaceId: "team",
+      baseId: "handbook",
+    });
+
+    expect(access?.caller).toMatchObject({
+      subject: { kind: "user", id: "alice" },
+      userId: "alice",
+      accessRoles: ["finance"],
+    });
+  });
+
+  it("keeps same-id users and service accounts distinct for retriever ACLs", async () => {
+    const principals = new Map<string, Principal>([
+      ["user:shared", user("shared", ["member"])],
+      [
+        "service-account:shared",
+        {
+          kind: "service-account",
+          id: "shared",
+          accessRoles: { team: ["automation"] },
+          canActFor: false,
+        },
+      ],
+    ]);
+    const guard = new KnowledgeExecutionSecurity({
+      security: fakeSecurity({ principals }),
+      clock,
+      logger,
+    });
+
+    const userAccess = await guard.access({
+      securityContext: { actor: { kind: "user", id: "shared" } },
+      namespaceId: "team",
+      baseId: "handbook",
+    });
+    const serviceAccess = await guard.access({
+      securityContext: { actor: { kind: "service-account", id: "shared" } },
+      namespaceId: "team",
+      baseId: "handbook",
+    });
+
+    expect(userAccess?.caller?.subject).toEqual({ kind: "user", id: "shared" });
+    expect(serviceAccess?.caller?.subject).toEqual({
+      kind: "service-account",
+      id: "shared",
+    });
+    expect(userAccess?.caller?.userId).toBe(serviceAccess?.caller?.userId);
+  });
+
   it("fails closed for missing or filtered enterprise identities", async () => {
     const audits: SecurityAuditEvent[] = [];
     const principals = new Map<string, Principal>([["user:alice", user("alice", ["member"])]]);
@@ -139,7 +230,7 @@ describe("KnowledgeExecutionSecurity", () => {
     });
 
     expect(access?.caller).toMatchObject({ userId: "operator", accessRoles: ["admin"] });
-    expect(audits[0]?.context.effective).toEqual({ kind: "operator", id: "operator" });
+    expect(audits[0]?.context?.effective).toEqual({ kind: "operator", id: "operator" });
   });
 
   it("never turns an authorization denial into access when its audit sink is down", async () => {

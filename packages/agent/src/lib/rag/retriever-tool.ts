@@ -2,6 +2,12 @@ import { z } from "zod";
 import type { RunSecurityContext } from "@promin/workflow";
 import { fenceReferenceData, oneLine } from "../reference-data.ts";
 import { tool, type AgentTool } from "../tool.ts";
+import {
+  mergeSnapshotFilters,
+  snapshotRetrieverAccess,
+  snapshotRetrieverCaller,
+  snapshotRetrieverFilter,
+} from "./retrieval-access.ts";
 import { DEFAULT_RETRIEVER_TOOL_NAME } from "./retriever-tool-name.ts";
 import type { RetrieveResult, Retriever, RetrieverCaller, RetrieverFilter } from "./types.ts";
 
@@ -80,6 +86,17 @@ export function createRetrieverTool(
 ): AgentTool<RetrieverToolInput, RetrieverToolOutput> {
   const includeSources = config.includeSources ?? true;
   const includeScores = config.includeScores ?? false;
+  const resolveAccess = config.resolveAccess;
+  const configuredCallerValue = config.caller;
+  const configuredCaller =
+    configuredCallerValue === undefined
+      ? undefined
+      : snapshotRetrieverCaller(configuredCallerValue);
+  const configuredFilterValue = config.filter;
+  const configuredFilter =
+    configuredFilterValue === undefined
+      ? undefined
+      : snapshotRetrieverFilter(configuredFilterValue);
   return tool<RetrieverToolInput, RetrieverToolOutput>({
     name: config.name ?? DEFAULT_RETRIEVER_TOOL_NAME,
     description:
@@ -91,20 +108,20 @@ export function createRetrieverTool(
       filter: RetrieverToolFilterSchema.describe("Optional tag or metadata filters."),
     }),
     execute: async ({ query, topK, filter }, ctx) => {
-      const access = config.resolveAccess
-        ? await config.resolveAccess(ctx?.scope?.securityContext)
+      const accessValue = resolveAccess
+        ? await resolveAccess(ctx?.scope?.securityContext)
         : undefined;
-      if (config.resolveAccess && access === undefined) return { results: [] };
+      if (resolveAccess && accessValue === undefined) return { results: [] };
+      const access = accessValue === undefined ? undefined : snapshotRetrieverAccess(accessValue);
+      const requestedFilter = filter === undefined ? undefined : snapshotRetrieverFilter(filter);
+      const mergedFilter = mergeSnapshotFilters(requestedFilter, configuredFilter, access?.filter);
       const results = await config.retriever.retrieve({
         query,
-        ...((access?.caller ?? config.caller) !== undefined && {
-          caller: access?.caller ?? config.caller,
+        ...((access?.caller ?? configuredCaller) !== undefined && {
+          caller: access?.caller ?? configuredCaller,
         }),
         ...((topK ?? config.topK) !== undefined && { topK: topK ?? config.topK }),
-        ...mergeFilter({
-          base: mergeSecurityFilter(config.filter, access?.filter),
-          requested: filter,
-        }),
+        ...(mergedFilter !== undefined && { filter: mergedFilter }),
         ...(config.maxChunkCharacters !== undefined && {
           maxChunkCharacters: config.maxChunkCharacters,
         }),
@@ -118,35 +135,6 @@ export function createRetrieverTool(
         .filter((source): source is RetrieverToolSource => source !== undefined),
     }),
   });
-}
-
-function mergeSecurityFilter(
-  base: RetrieverFilter | undefined,
-  security: RetrieverFilter | undefined,
-): RetrieverFilter | undefined {
-  if (!base && !security) return undefined;
-  const tags = [...new Set([...(base?.tags ?? []), ...(security?.tags ?? [])])];
-  const metadata = { ...base?.metadata, ...security?.metadata };
-  return {
-    ...(tags.length > 0 && { tags }),
-    ...(Object.keys(metadata).length > 0 && { metadata }),
-  };
-}
-
-function mergeFilter(params: {
-  base: RetrieverFilter | undefined;
-  requested: RetrieverToolInput["filter"];
-}): { filter?: RetrieverFilter } {
-  const { base, requested } = params;
-  if (!base && !requested) return {};
-  const tags = [...new Set([...(requested?.tags ?? []), ...(base?.tags ?? [])])];
-  const metadata = { ...requested?.metadata, ...base?.metadata };
-  return {
-    filter: {
-      ...(tags.length > 0 && { tags }),
-      ...(Object.keys(metadata).length > 0 && { metadata }),
-    },
-  };
 }
 
 function toToolResult(params: {

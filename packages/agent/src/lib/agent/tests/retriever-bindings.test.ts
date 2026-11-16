@@ -63,4 +63,75 @@ describe("buildRetrieverContext", () => {
       "cancelled",
     );
   });
+
+  it("snapshots hostile context-access getters once before retrieval", async () => {
+    const requests: RetrieveRequest[] = [];
+    const retriever: Retriever = {
+      retrieve: async (request) => {
+        requests.push(request);
+        return [];
+      },
+    };
+    let callerReads = 0;
+    let filterReads = 0;
+    let roleReads = 0;
+    const safeCaller = new Proxy(
+      {},
+      {
+        get: (_target, property) => {
+          if (property === "subject") return { kind: "service-account", id: "alice" };
+          if (property === "userId") return "alice";
+          if (property === "email") return undefined;
+          if (property === "accessRoles") return ++roleReads === 1 ? ["automation"] : ["admin"];
+          if (property === "teams") return [];
+          return undefined;
+        },
+      },
+    );
+    const access = new Proxy(
+      {},
+      {
+        get: (_target, property) => {
+          if (property === "caller") {
+            callerReads++;
+            return callerReads === 1
+              ? safeCaller
+              : { userId: "mallory", accessRoles: ["admin"], teams: [] };
+          }
+          if (property === "filter") {
+            filterReads++;
+            return filterReads === 1
+              ? { tags: ["internal"], metadata: { tenant: "acme" } }
+              : { metadata: { tenant: "evil" } };
+          }
+          return undefined;
+        },
+      },
+    );
+
+    await buildRetrieverContext({
+      retrievers: {
+        docs: {
+          mode: "context",
+          retriever,
+          resolveAccess: async () => access as never,
+        },
+      },
+      query: "q",
+    });
+
+    expect(callerReads).toBe(1);
+    expect(filterReads).toBe(1);
+    expect(roleReads).toBe(1);
+    expect(requests[0]).toMatchObject({
+      caller: {
+        subject: { kind: "service-account", id: "alice" },
+        userId: "alice",
+        accessRoles: ["automation"],
+      },
+      filter: { tags: ["internal"], metadata: { tenant: "acme" } },
+    });
+    expect(Object.isFrozen(requests[0]!.caller)).toBe(true);
+    expect(Object.isFrozen(requests[0]!.filter)).toBe(true);
+  });
 });

@@ -272,6 +272,8 @@ export type {
   Retriever,
   RetrieverCaller,
   RetrieverFilter,
+  RetrieverSubject,
+  RetrieverSubjectKind,
   RetrieverKey,
   RetrieverRegistry,
   RetrieverToolConfig,

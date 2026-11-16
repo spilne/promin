@@ -853,10 +853,8 @@ export class RetainedSubagents {
       allowed: false,
       reason: "identity_unknown",
     });
-    // SecurityAuditEvent normally carries a resolved context. This denial is
-    // the one honest exception: absence is the fact being audited, so the
-    // runtime record intentionally omits `context` instead of inventing one.
-    const event = Object.freeze({
+    // Absence is the fact being audited, so never invent a context.
+    const event: SecurityAuditEvent = Object.freeze({
       event: "retained-agent.authorization",
       occurredAt: executionSecurity.clock.now().toISOString(),
       namespaceId: input.parent.namespaceId,
@@ -877,7 +875,7 @@ export class RetainedSubagents {
       }),
     });
     try {
-      await executionSecurity.security.recordAudit(event as unknown as SecurityAuditEvent);
+      await executionSecurity.security.recordAudit(event);
     } catch (error) {
       try {
         executionSecurity.logger.error(

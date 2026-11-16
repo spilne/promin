@@ -109,15 +109,75 @@ export class KnowledgeExecutionSecurity {
         resource,
       } as import("./security.ts").AuthorizationRequest),
     );
-    const event = this.event({ params, context, decision });
-    try {
-      await this.security.recordAudit(event);
-    } catch (error) {
-      if (decision.allowed) throw error;
-      this.logDeniedAudit(error);
+    await this.auditDecision({ params, context, decision });
+    if (!decision.allowed) return undefined;
+    return this.finalAccess({ params, runContext });
+  }
+
+  /**
+   * Audit is an awaited external sink and can race revocation. Repeat the
+   * whole identity/filter/authorization chain after it, then return without
+   * another await on the allowed path.
+   */
+  private async finalAccess(input: {
+    readonly params: {
+      readonly securityContext?: RunSecurityContext;
+      readonly namespaceId: string;
+      readonly baseId: string;
+    };
+    readonly runContext: RunSecurityContext;
+  }): Promise<RetrieverSearchAccess | undefined> {
+    const { params, runContext } = input;
+    const actor = await this.security.resolvePrincipal(toPrincipalRef(runContext.actor));
+    if (!actor) {
+      await this.auditUnresolved({ params, runContext });
       return undefined;
     }
-    if (!decision.allowed) return undefined;
+    const asserted = runContext.effective ? toPrincipalRef(runContext.effective) : undefined;
+    const resolved = await this.security.resolveIdentity({ actor, ...(asserted && { asserted }) });
+    if (!resolved) {
+      await this.auditResolved({
+        params,
+        context: snapshotSecurityContext({ actor, effective: asserted ?? toPrincipalRef(actor) }),
+        reason: "permission_denied",
+      });
+      return undefined;
+    }
+    const context = snapshotSecurityContext(resolved);
+    const effective = samePrincipal(context.actor, context.effective)
+      ? context.actor
+      : await this.security.resolvePrincipal(context.effective);
+    if (!effective) {
+      await this.auditResolved({ params, context, reason: "identity_unknown" });
+      return undefined;
+    }
+    const identityFilter = await this.security.identityFilter({
+      context,
+      namespaceId: params.namespaceId,
+    });
+    if (
+      identityFilter.namespaceId !== params.namespaceId ||
+      (identityFilter.kind === "identities" &&
+        !identityFilter.identities.some((identity) => samePrincipal(identity, context.effective)))
+    ) {
+      await this.auditResolved({ params, context, reason: "permission_denied" });
+      return undefined;
+    }
+    const decision = snapshotAuthorizationDecision(
+      await this.security.authorize({
+        context,
+        permission: snapshotSecurityPermission({ resource: "knowledge", action: "use" }),
+        resource: snapshotSecurityResource({
+          kind: "knowledge",
+          namespaceId: params.namespaceId,
+          id: params.baseId,
+        }),
+      } as import("./security.ts").AuthorizationRequest),
+    );
+    if (!decision.allowed) {
+      await this.auditDecision({ params, context, decision });
+      return undefined;
+    }
     return Object.freeze({ caller: callerFor(effective, params.namespaceId) });
   }
 
@@ -149,14 +209,23 @@ export class KnowledgeExecutionSecurity {
     readonly context: SecurityContext;
     readonly reason: "identity_unknown" | "permission_denied";
   }): Promise<void> {
-    const event = this.event({
+    await this.auditDecision({
       params: params.params,
       context: params.context,
       decision: Object.freeze({ allowed: false, reason: params.reason }),
     });
+  }
+
+  private async auditDecision(params: {
+    readonly params: { readonly namespaceId: string; readonly baseId: string };
+    readonly context: SecurityContext;
+    readonly decision: AuthorizationDecision;
+  }): Promise<void> {
+    const event = this.event(params);
     try {
       await this.security.recordAudit(event);
     } catch (error) {
+      if (params.decision.allowed) throw error;
       this.logDeniedAudit(error);
     }
   }
@@ -173,7 +242,7 @@ export class KnowledgeExecutionSecurity {
     });
     const actor = toPrincipalRef(params.runContext.actor);
     const effective = toPrincipalRef(params.runContext.effective ?? params.runContext.actor);
-    const event = Object.freeze({
+    const event: SecurityAuditEvent = Object.freeze({
       event: "knowledge.retrieval.authorization",
       occurredAt: this.clock.now().toISOString(),
       namespaceId: params.params.namespaceId,
@@ -190,7 +259,7 @@ export class KnowledgeExecutionSecurity {
       }),
     });
     try {
-      await this.security.recordAudit(event as unknown as SecurityAuditEvent);
+      await this.security.recordAudit(event);
     } catch (error) {
       this.logDeniedAudit(error);
     }
@@ -206,7 +275,7 @@ export class KnowledgeExecutionSecurity {
       namespaceId: params.namespaceId,
       id: params.baseId,
     });
-    const event = Object.freeze({
+    const event: SecurityAuditEvent = Object.freeze({
       event: "knowledge.retrieval.authorization",
       occurredAt: this.clock.now().toISOString(),
       namespaceId: params.namespaceId,
@@ -216,7 +285,7 @@ export class KnowledgeExecutionSecurity {
       metadata: Object.freeze({ baseId: params.baseId, denialReason: "missing_identity" }),
     });
     try {
-      await this.security.recordAudit(event as unknown as SecurityAuditEvent);
+      await this.security.recordAudit(event);
     } catch (error) {
       this.logDeniedAudit(error);
     }
@@ -234,6 +303,7 @@ export class KnowledgeExecutionSecurity {
 function callerFor(principal: Principal, namespaceId: string): RetrieverCaller {
   const roles = [...ownRoles(principal, namespaceId), ...ownRoles(principal, ORG_WIDE_NAMESPACE)];
   return Object.freeze({
+    subject: Object.freeze({ kind: principal.kind, id: principal.id }),
     userId: principal.id,
     ...(principal.email !== undefined && { email: principal.email }),
     accessRoles: Object.freeze([...new Set(roles)]),

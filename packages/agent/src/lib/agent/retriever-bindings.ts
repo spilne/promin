@@ -8,6 +8,12 @@ import type { AgentTool } from "../tool.ts";
 import { fenceReferenceData } from "../reference-data.ts";
 import { createRetrieverTool, formatRetrievedChunks } from "../rag/retriever-tool.ts";
 import { retrieverToolName } from "../rag/retriever-tool-name.ts";
+import {
+  mergeSnapshotFilters,
+  snapshotRetrieverAccess,
+  snapshotRetrieverCaller,
+  snapshotRetrieverFilter,
+} from "../rag/retrieval-access.ts";
 import type { Retriever, RetrieverCaller, RetrieverFilter } from "../rag/types.ts";
 import type { AgentKnowledgeMode } from "../registry/types.ts";
 
@@ -155,24 +161,35 @@ export async function buildRetrieverContext(params: {
   const batches = await Promise.all(
     contextBindings.map(async (binding) => {
       try {
-        const access = binding.resolveAccess
-          ? await binding.resolveAccess(params.securityContext)
-          : undefined;
-        if (binding.resolveAccess && access === undefined) {
+        const resolveAccess = binding.resolveAccess;
+        const accessValue = resolveAccess ? await resolveAccess(params.securityContext) : undefined;
+        if (resolveAccess && accessValue === undefined) {
           return { binding, results: [], failure: undefined };
         }
+        const access = accessValue === undefined ? undefined : snapshotRetrieverAccess(accessValue);
+        const configuredCallerValue = binding.caller;
+        const configuredCaller =
+          configuredCallerValue === undefined
+            ? undefined
+            : snapshotRetrieverCaller(configuredCallerValue);
+        const configuredFilterValue = binding.filter;
+        const configuredFilter =
+          configuredFilterValue === undefined
+            ? undefined
+            : snapshotRetrieverFilter(configuredFilterValue);
+        const filter = mergeSnapshotFilters(configuredFilter, access?.filter);
         const results = await withTimeout({
           clock,
           ms: binding.timeoutMs ?? DEFAULT_RETRIEVER_TIMEOUT_MS,
           run: (signal) =>
             binding.retriever.retrieve({
               query: params.query,
-              ...((access?.caller ?? binding.caller) !== undefined && {
-                caller: access?.caller ?? binding.caller,
+              ...((access?.caller ?? configuredCaller) !== undefined && {
+                caller: access?.caller ?? configuredCaller,
               }),
               signal,
               ...(binding.topK !== undefined && { topK: binding.topK }),
-              ...mergedFilter(binding.filter, access?.filter),
+              ...(filter !== undefined && { filter }),
               ...(binding.maxChunkCharacters !== undefined && {
                 maxChunkCharacters: binding.maxChunkCharacters,
               }),
@@ -216,21 +233,6 @@ export async function buildRetrieverContext(params: {
     });
   }
   return { text: fenceReferenceData({ source: "knowledge", sections }), failures };
-}
-
-function mergedFilter(
-  base: RetrieverFilter | undefined,
-  security: RetrieverFilter | undefined,
-): { readonly filter?: RetrieverFilter } {
-  if (!base && !security) return {};
-  const tags = [...new Set([...(base?.tags ?? []), ...(security?.tags ?? [])])];
-  const metadata = { ...base?.metadata, ...security?.metadata };
-  return {
-    filter: Object.freeze({
-      ...(tags.length > 0 && { tags: Object.freeze(tags) }),
-      ...(Object.keys(metadata).length > 0 && { metadata: Object.freeze(metadata) }),
-    }),
-  };
 }
 
 class RetrieverTimeoutError extends Error {

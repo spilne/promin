@@ -284,13 +284,13 @@ describe("security route access guard", () => {
     roles.push("admin");
     (actor as { email: string }).email = "after@example.com";
     expect(response.status).toBe(204);
-    expect(retained?.context.actor.email).toBe("before@example.com");
-    expect(retained?.context.actor.accessRoles["team-a"]).toEqual(["member"]);
+    expect(retained?.context?.actor.email).toBe("before@example.com");
+    expect(retained?.context?.actor.accessRoles["team-a"]).toEqual(["member"]);
     expect(Object.isFrozen(retained)).toBeTrue();
     expect(Object.isFrozen(retained?.context)).toBeTrue();
-    expect(Object.isFrozen(retained?.context.actor)).toBeTrue();
-    expect(Object.isFrozen(retained?.context.actor.accessRoles)).toBeTrue();
-    expect(Object.isFrozen(retained?.context.actor.accessRoles["team-a"])).toBeTrue();
+    expect(Object.isFrozen(retained?.context?.actor)).toBeTrue();
+    expect(Object.isFrozen(retained?.context?.actor.accessRoles)).toBeTrue();
+    expect(Object.isFrozen(retained?.context?.actor.accessRoles["team-a"])).toBeTrue();
     expect(Object.isFrozen(retained?.permission)).toBeTrue();
     expect(Object.isFrozen(retained?.resource)).toBeTrue();
     expect(Object.isFrozen(retained?.metadata)).toBeTrue();

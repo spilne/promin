@@ -44,4 +44,6 @@ export type {
   Retriever,
   RetrieverCaller,
   RetrieverFilter,
+  RetrieverSubject,
+  RetrieverSubjectKind,
 } from "./types.ts";

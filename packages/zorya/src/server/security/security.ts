@@ -134,7 +134,8 @@ export interface IdentityFilterRequest {
 export interface SecurityAuditEvent {
   readonly event: string;
   readonly occurredAt: string;
-  readonly context: SecurityContext;
+  /** Absent only when denial is caused by a missing or unresolvable identity. */
+  readonly context?: SecurityContext;
   readonly namespaceId: string;
   readonly resource?: SecurityResourceRef;
   readonly permission?: SecurityPermission;
