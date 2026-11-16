@@ -133,6 +133,7 @@ describe("retained subagents", () => {
       canActFor: false,
     };
     let enabled = true;
+    const audits: SecurityAuditEvent[] = [];
     const security: ZoryaSecurity = {
       authenticate: async () => (enabled ? user : undefined),
       resolvePrincipal: async (ref) =>
@@ -144,7 +145,7 @@ describe("retained subagents", () => {
         enabled
           ? { allowed: true, reason: "access_role_allow" }
           : { allowed: false, reason: "principal_disabled" },
-      recordAudit: async () => {},
+      recordAudit: async (event) => void audits.push(event),
     };
     h.workflows.configureExecutionSecurity({
       security,
@@ -160,6 +161,52 @@ describe("retained subagents", () => {
         childId: "missing-retained-identity",
       }),
     ).rejects.toMatchObject({ code: "forbidden" });
+    const missingIdentityAudit = audits.at(-1) as unknown as Record<string, unknown>;
+    expect(missingIdentityAudit.event).toBe("retained-agent.authorization");
+    expect("context" in missingIdentityAudit).toBe(false);
+    expect(missingIdentityAudit.decision).toEqual({
+      allowed: false,
+      reason: "identity_unknown",
+    });
+    expect(missingIdentityAudit.metadata).toMatchObject({
+      operation: "spawn",
+      denialReason: "missing_identity",
+      childId: "missing-retained-identity",
+      parentAgentId: "parent",
+      parentThreadId: "conversation",
+      actorId: null,
+      effectiveId: null,
+    });
+    expect(Object.isFrozen(missingIdentityAudit)).toBe(true);
+    expect(Object.isFrozen(missingIdentityAudit.metadata)).toBe(true);
+
+    const legacy = await harness();
+    const legacyChild = await legacy.retained.spawnAgent({
+      parent,
+      agentId: "worker",
+      task: "legacy contextless",
+      childId: "legacy-contextless-module-turn",
+    });
+    legacy.retained.configureExecutionSecurity({ security });
+    await expect(
+      legacy.retained.messageAgent({
+        parent,
+        childId: legacyChild.childId,
+        task: "must stay blocked",
+        messageId: "legacy-contextless-message",
+      }),
+    ).rejects.toMatchObject({ code: "forbidden" });
+    const missingTurnAudit = audits.findLast(
+      (event) =>
+        event.metadata?.childId === "legacy-contextless-module-turn" &&
+        event.metadata.operation === "message",
+    ) as unknown as Record<string, unknown>;
+    expect("context" in missingTurnAudit).toBe(false);
+    expect(missingTurnAudit.metadata).toMatchObject({
+      operation: "message",
+      denialReason: "missing_identity",
+      childId: "legacy-contextless-module-turn",
+    });
     await h.workflows.start();
     const child = await h.retained.spawnAgent({
       parent,
@@ -383,6 +430,20 @@ describe("retained subagents", () => {
       }),
     ).rejects.toMatchObject({ code: "forbidden" });
     expect(auditDown.state.events.at(-1)?.decision?.allowed).toBe(false);
+    await expect(
+      failClosed.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "missing and unauditable",
+        childId: "audit-down-missing",
+      }),
+    ).rejects.toMatchObject({ code: "forbidden" });
+    const missingAudit = auditDown.state.events.at(-1) as unknown as Record<string, unknown>;
+    expect("context" in missingAudit).toBe(false);
+    expect(missingAudit.metadata).toMatchObject({
+      denialReason: "missing_identity",
+      childId: "audit-down-missing",
+    });
   });
 
   it("enforces capability and depth policy", async () => {

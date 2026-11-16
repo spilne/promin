@@ -339,15 +339,17 @@ export class RetainedSubagents {
       // thread or delegation-policy work can run.
       const securityContext = this.contextForSpawn(params.securityContext);
       const childId = params.childId ?? randomUUID();
-      await this.authorizeIdentity(
-        {
-          childId,
-          agentId: params.agentId,
-          parent,
-          ...(securityContext !== undefined && { securityContext }),
-        },
-        "spawn",
-      );
+      const target: RetainedAuthorizationTarget = {
+        childId,
+        agentId: params.agentId,
+        parent,
+        ...(securityContext !== undefined && { securityContext }),
+      };
+      if (this.executionSecurity && securityContext === undefined) {
+        await this.auditMissingIdentity(target, "spawn");
+        throw new RetainedSubagentError("forbidden", "Retained subagent identity is required");
+      }
+      await this.authorizeIdentity(target, "spawn");
       const parentThread = await this.ownedParent(parent);
       const allowed = await this.config.canDelegate(parent.agentId, params.agentId, {
         parent,
@@ -628,7 +630,7 @@ export class RetainedSubagents {
     if (this.executionSecurity.legacySecurityContext !== undefined) {
       return this.executionSecurity.legacySecurityContext;
     }
-    throw new RetainedSubagentError("forbidden", "Retained subagent identity is required");
+    return undefined;
   }
 
   /** Reload and bind the workflow's durable input/context at every side-effect boundary. */
@@ -664,7 +666,10 @@ export class RetainedSubagents {
   ): Promise<void> {
     if (!this.executionSecurity) return;
     const runContext = this.contextForSpawn(input.securityContext);
-    if (!runContext) return;
+    if (!runContext) {
+      await this.auditMissingIdentity(input, operation);
+      return;
+    }
     const actorRef = toPrincipalRef(runContext.actor);
     await this.auditRetainedAuthorization(
       input,
@@ -691,7 +696,10 @@ export class RetainedSubagents {
         : { securityContext: normalizeRunSecurityContext(input.securityContext) };
     }
     const runContext = this.contextForSpawn(input.securityContext);
-    if (!runContext) return {};
+    if (!runContext) {
+      await this.auditMissingIdentity(input, operation);
+      throw new RetainedSubagentError("forbidden", "Retained subagent identity is required");
+    }
     const actorRef = toPrincipalRef(runContext.actor);
     const effectiveRef = toPrincipalRef(runContext.effective ?? runContext.actor);
     const unresolved = snapshotSecurityContext({
@@ -824,6 +832,60 @@ export class RetainedSubagents {
       }
       if (decision.allowed) {
         throw new RetainedSubagentError("forbidden", "Retained security audit unavailable");
+      }
+    }
+  }
+
+  /** Missing durable identity has no honest SecurityContext; never invent one for audit. */
+  private async auditMissingIdentity(
+    input: RetainedAuthorizationTarget,
+    operation: RetainedSecurityOperation,
+  ): Promise<void> {
+    const executionSecurity = this.executionSecurity;
+    if (!executionSecurity) return;
+    const permission = snapshotSecurityPermission({ resource: "agent", action: "invoke" });
+    const resource = snapshotSecurityResource({
+      kind: "agent",
+      namespaceId: input.parent.namespaceId,
+      id: input.agentId,
+    });
+    const decision = snapshotAuthorizationDecision({
+      allowed: false,
+      reason: "identity_unknown",
+    });
+    // SecurityAuditEvent normally carries a resolved context. This denial is
+    // the one honest exception: absence is the fact being audited, so the
+    // runtime record intentionally omits `context` instead of inventing one.
+    const event = Object.freeze({
+      event: "retained-agent.authorization",
+      occurredAt: executionSecurity.clock.now().toISOString(),
+      namespaceId: input.parent.namespaceId,
+      resource,
+      permission,
+      decision,
+      metadata: Object.freeze({
+        operation,
+        denialReason: "missing_identity",
+        childId: input.childId,
+        parentAgentId: input.parent.agentId,
+        parentThreadId: input.parent.threadId,
+        parentResourceId: input.parent.resourceId,
+        actorKind: null,
+        actorId: null,
+        effectiveKind: null,
+        effectiveId: null,
+      }),
+    });
+    try {
+      await executionSecurity.security.recordAudit(event as unknown as SecurityAuditEvent);
+    } catch (error) {
+      try {
+        executionSecurity.logger.error(
+          `[zorya] retained security audit failed for denied ${operation}`,
+          error,
+        );
+      } catch {
+        // Audit failure never changes the missing-identity denial.
       }
     }
   }
