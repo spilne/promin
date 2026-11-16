@@ -250,6 +250,8 @@ export class ZoryaServer {
     });
     this.retainedSubagents?.configureExecutionSecurity({
       security: this.security,
+      clock,
+      logger: this.logger,
       ...(config.security === undefined && {
         legacySecurityContext: { actor: principalRef(OPERATOR_PRINCIPAL) },
       }),
