@@ -47,6 +47,7 @@ function environment(
     loginProviders: [unusedLoginProvider],
     publicBaseUrl: BASE_URL,
     allowedDomains: ["example.com"],
+    auditSink: { recordAudit: async () => {} },
     ...(params.serviceAccounts && { serviceAccounts: params.serviceAccounts }),
     secret: SECRET,
   });
@@ -864,6 +865,7 @@ describe("namespace and knowledge access", () => {
       loginProviders: [unusedLoginProvider],
       publicBaseUrl: BASE_URL,
       allowedDomains: ["example.com"],
+      auditSink: { recordAudit: async () => {} },
       serviceAccounts: [
         {
           id: member.id,

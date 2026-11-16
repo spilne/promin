@@ -64,6 +64,7 @@ function environment(
     ],
     publicBaseUrl: params.publicBaseUrl ?? PUBLIC_BASE_URL,
     allowedDomains: ["example.com"],
+    auditSink: { recordAudit: async () => {} },
     ...(params.adminEmails !== undefined && { adminEmails: params.adminEmails }),
     ...(params.serviceAccounts !== undefined && { serviceAccounts: params.serviceAccounts }),
     secret: SECRET,
@@ -501,6 +502,7 @@ describe("OIDC security module", () => {
         loginProviders: [provider],
         publicBaseUrl: PUBLIC_BASE_URL,
         allowedDomains: [],
+        auditSink: { recordAudit: async () => {} },
         secret: SECRET,
       }),
     ).toThrow(/allowedDomains/);
@@ -510,6 +512,7 @@ describe("OIDC security module", () => {
         loginProviders: [],
         publicBaseUrl: PUBLIC_BASE_URL,
         allowedDomains: ["example.com"],
+        auditSink: { recordAudit: async () => {} },
         secret: SECRET,
       }),
     ).toThrow(/loginProviders/);
@@ -519,6 +522,7 @@ describe("OIDC security module", () => {
         loginProviders: [provider],
         publicBaseUrl: PUBLIC_BASE_URL,
         allowedDomains: ["example.com"],
+        auditSink: { recordAudit: async () => {} },
         secret: "too-short",
       }),
     ).toThrow(/secret/);

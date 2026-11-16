@@ -5,10 +5,16 @@ import { jsonError, notFound, type Router } from "../server/router.ts";
 import {
   ORG_WIDE_NAMESPACE,
   principalRef,
+  snapshotAuthorizationDecision,
   snapshotPrincipal,
+  snapshotSecurityContext,
+  snapshotSecurityPermission,
+  snapshotSecurityResource,
   type EffectiveAuthorizationResult,
   type Principal,
   type PrincipalRef,
+  type SecurityAuditEvent,
+  type SecurityAuditSink,
   type ZoryaSecurity,
 } from "../server/security/index.ts";
 import type { LoginIdentity, LoginProvider } from "./login-provider.ts";
@@ -42,6 +48,8 @@ export interface ZoryaSecurityConfig {
   readonly defaultAccessRole?: string;
   readonly adminEmails?: ReadonlyArray<string>;
   readonly serviceAccounts?: ReadonlyArray<ServiceAccountConfig>;
+  /** Required enterprise audit destination. Security events are never silently discarded. */
+  readonly auditSink: SecurityAuditSink;
   readonly secret: string;
   readonly sessionTtlMs?: number;
   readonly clock?: WallClock;
@@ -63,6 +71,12 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
   if (config.secret.length < 32) {
     throw new Error("createZoryaSecurity: secret must be at least 32 characters");
   }
+  const auditSink = config.auditSink;
+  const auditRecord = auditSink?.recordAudit;
+  if (!auditSink || typeof auditRecord !== "function") {
+    throw new Error("createZoryaSecurity: auditSink is required");
+  }
+  const recordAudit = auditRecord.bind(auditSink);
 
   const clock = config.clock ?? SystemWallClock;
   const publicBaseUrl = new URL(config.publicBaseUrl);
@@ -309,7 +323,7 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
     identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
     authorize: async (request) => (await authorizeEffective(request)).decision,
     authorizeEffective,
-    recordAudit: async () => {},
+    recordAudit: async (event) => recordAudit(snapshotAuditEvent(event)),
     mount: (router) => {
       mountLoginRoutes({
         router,
@@ -324,6 +338,83 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
       mountAccessRoutes({ router, store: config.store });
     },
   };
+}
+
+function snapshotAuditEvent(source: SecurityAuditEvent): SecurityAuditEvent {
+  if (!source || typeof source !== "object") throw new TypeError("Invalid security audit event");
+  const record = source as unknown as Record<string, unknown>;
+  const event = record.event;
+  const occurredAt = record.occurredAt;
+  const namespaceId = record.namespaceId;
+  const contextSource = record.context;
+  const resourceSource = record.resource;
+  const permissionSource = record.permission;
+  const decisionSource = record.decision;
+  const metadataSource = record.metadata;
+  if (
+    typeof event !== "string" ||
+    event.length === 0 ||
+    typeof occurredAt !== "string" ||
+    occurredAt.length === 0 ||
+    typeof namespaceId !== "string" ||
+    namespaceId.length === 0
+  ) {
+    throw new TypeError("Invalid security audit event");
+  }
+  const context =
+    contextSource === undefined
+      ? undefined
+      : snapshotSecurityContext(contextSource as NonNullable<SecurityAuditEvent["context"]>);
+  const resource =
+    resourceSource === undefined
+      ? undefined
+      : snapshotSecurityResource(resourceSource as NonNullable<SecurityAuditEvent["resource"]>);
+  const permission =
+    permissionSource === undefined
+      ? undefined
+      : snapshotSecurityPermission(
+          permissionSource as NonNullable<SecurityAuditEvent["permission"]>,
+        );
+  const decision =
+    decisionSource === undefined
+      ? undefined
+      : snapshotAuthorizationDecision(
+          decisionSource as NonNullable<SecurityAuditEvent["decision"]>,
+        );
+  const metadata = snapshotAuditMetadata(metadataSource);
+  return Object.freeze({
+    event,
+    occurredAt,
+    ...(context !== undefined && { context }),
+    namespaceId,
+    ...(resource !== undefined && { resource }),
+    ...(permission !== undefined && { permission }),
+    ...(decision !== undefined && { decision }),
+    ...(metadata !== undefined && { metadata }),
+  });
+}
+
+function snapshotAuditMetadata(
+  source: unknown,
+): Readonly<Record<string, string | number | boolean | null>> | undefined {
+  if (source === undefined) return undefined;
+  if (!source || typeof source !== "object" || Array.isArray(source)) {
+    throw new TypeError("Invalid security audit metadata");
+  }
+  const result = Object.create(null) as Record<string, string | number | boolean | null>;
+  for (const key of Object.keys(source)) {
+    const value = (source as Record<string, unknown>)[key];
+    if (
+      value !== null &&
+      typeof value !== "string" &&
+      typeof value !== "number" &&
+      typeof value !== "boolean"
+    ) {
+      throw new TypeError("Invalid security audit metadata");
+    }
+    result[key] = value;
+  }
+  return Object.freeze(result);
 }
 
 /** Configuration authority only; runtime actions require their own role. */

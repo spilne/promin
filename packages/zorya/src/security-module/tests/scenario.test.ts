@@ -163,6 +163,7 @@ async function buildServer(mode: "module" | "api-keys"): Promise<ScenarioEnviron
           ],
           publicBaseUrl: PUBLIC_BASE_URL,
           allowedDomains: ["example.com"],
+          auditSink: { recordAudit: async () => {} },
           adminEmails: ["admin@example.com"],
           serviceAccounts: [{ id: "channel", token: SERVICE_ACCOUNT_TOKEN, canActFor: true }],
           secret: SECRET,

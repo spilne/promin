@@ -1,0 +1,432 @@
+import { describe, expect, it } from "bun:test";
+import { Auth } from "../../server/auth.ts";
+import { Router } from "../../server/router.ts";
+import {
+  OPERATOR_PRINCIPAL,
+  WORKER_PRINCIPAL,
+  createApiKeySecurity,
+  createSecurityRouteAccessGuard,
+  principalRef,
+  setRequestPrincipal,
+  type AuthorizationDecision,
+  type AuthorizationRequest,
+  type Principal,
+  type SecurityAuditEvent,
+  type SecurityAuditSink,
+  type SecurityContext,
+  type SecurityPermission,
+  type SecurityResourceRef,
+} from "../../server/security/index.ts";
+import {
+  securityConformanceSuite,
+  selfContext,
+  type SecurityConformanceFactory,
+} from "../../server/security/tests/security-conformance-suite.ts";
+import { InMemorySecurityStore } from "../in-memory-security-store.ts";
+import type { LoginProvider } from "../login-provider.ts";
+import { createZoryaSecurity } from "../zorya-security.ts";
+
+const SECRET = "0123456789abcdef0123456789abcdef";
+const SERVICE_TOKEN = "channel-token";
+
+const unusedLoginProvider: LoginProvider = {
+  id: "test",
+  authorizationUrl: async () => "http://identity.test/authorize",
+  exchange: async () => {
+    throw new Error("not used");
+  },
+};
+
+const apiKeyFactory: SecurityConformanceFactory = {
+  create: async (params = {}) => {
+    const auditEvents: SecurityAuditEvent[] = [];
+    const security = createApiKeySecurity({
+      operatorAuth: new Auth({ apiKeys: ["operator-key"] }),
+      workerAuth: new Auth({ apiKeys: ["worker-key"] }),
+      logger: {
+        log(message) {
+          if (params.auditFailure) throw params.auditFailure;
+          const parsed = JSON.parse(message) as SecurityAuditEvent & { component?: string };
+          const { component: _component, ...event } = parsed;
+          auditEvents.push(event);
+        },
+      },
+    });
+    return {
+      security,
+      validRequest: bearerRequest("operator-key"),
+      invalidRequest: bearerRequest("invalid"),
+      authenticated: principalRef(OPERATOR_PRINCIPAL),
+      actor: OPERATOR_PRINCIPAL,
+      nonActingPrincipal: WORKER_PRINCIPAL,
+      asserted: { kind: "user", id: "represented-user" },
+      allowed: {
+        context: selfContext(OPERATOR_PRINCIPAL),
+        permission: { resource: "agent", action: "invoke" },
+        resource: { kind: "agent", namespaceId: "team-a", id: "assistant" },
+      },
+      allowedReason: "operator_allow",
+      allowedEffective: principalRef(OPERATOR_PRINCIPAL),
+      denied: {
+        context: selfContext(WORKER_PRINCIPAL),
+        permission: { resource: "agent", action: "invoke" },
+        resource: { kind: "agent", namespaceId: "team-a", id: "assistant" },
+      },
+      deniedReason: "wrong_plane",
+      permissionMatrix: [
+        permissionCase(
+          "agent invoke",
+          selfContext(OPERATOR_PRINCIPAL),
+          { resource: "agent", action: "invoke" },
+          { kind: "agent", namespaceId: "team-a", id: "assistant" },
+          { allowed: true, reason: "operator_allow" },
+        ),
+        permissionCase(
+          "agent point read",
+          selfContext(OPERATOR_PRINCIPAL),
+          { resource: "agent", action: "read" },
+          { kind: "agent", namespaceId: "team-a", id: "assistant" },
+          { allowed: true, reason: "operator_allow" },
+        ),
+        permissionCase(
+          "agent list",
+          selfContext(OPERATOR_PRINCIPAL),
+          { resource: "agent", action: "read" },
+          { kind: "agent", namespaceId: "team-a" },
+          { allowed: true, reason: "operator_allow" },
+        ),
+        permissionCase(
+          "knowledge use",
+          selfContext(OPERATOR_PRINCIPAL),
+          { resource: "knowledge", action: "use" },
+          { kind: "knowledge", namespaceId: "team-a", id: "docs" },
+          { allowed: true, reason: "operator_allow" },
+        ),
+        permissionCase(
+          "ordinary approval",
+          selfContext(OPERATOR_PRINCIPAL),
+          { resource: "approval", action: "decide" },
+          {
+            kind: "approval",
+            namespaceId: "team-a",
+            id: "approval-1",
+            principal: principalRef(OPERATOR_PRINCIPAL),
+          },
+          { allowed: true, reason: "operator_allow" },
+        ),
+        permissionCase(
+          "elevated approval",
+          selfContext(OPERATOR_PRINCIPAL),
+          { resource: "approval", action: "decide-elevated" },
+          { kind: "approval", namespaceId: "team-a", id: "approval-1" },
+          { allowed: true, reason: "operator_allow" },
+        ),
+      ],
+      auditEvents,
+    };
+  },
+};
+
+const moduleFactory: SecurityConformanceFactory = {
+  create: async (params = {}) => {
+    const store = new InMemorySecurityStore();
+    const represented = (
+      await store.findOrCreateUser({
+        email: "represented@example.com",
+        bindings: [{ namespaceId: "team-a", accessRole: "member" }],
+      })
+    ).user;
+    const unbound = (await store.findOrCreateUser({ email: "unbound@example.com", bindings: [] }))
+      .user;
+    await store.putKnowledgeGrant({
+      namespaceId: "team-a",
+      baseId: "docs",
+      accessRole: "member",
+    });
+    const auditEvents: SecurityAuditEvent[] = [];
+    const security = createZoryaSecurity({
+      store,
+      loginProviders: [unusedLoginProvider],
+      publicBaseUrl: "http://zorya.test",
+      allowedDomains: ["example.com"],
+      serviceAccounts: [
+        {
+          id: "channel",
+          token: SERVICE_TOKEN,
+          canActFor: true,
+          accessRoles: { "team-a": ["member"] },
+        },
+      ],
+      auditSink: {
+        recordAudit: async (event) => {
+          if (params.auditFailure) throw params.auditFailure;
+          auditEvents.push(event);
+        },
+      },
+      secret: SECRET,
+    });
+    const actor = await requiredPrincipal(security, { kind: "service-account", id: "channel" });
+    const effective = await requiredPrincipal(security, { kind: "user", id: represented.id });
+    const denied = await requiredPrincipal(security, { kind: "user", id: unbound.id });
+    return {
+      security,
+      validRequest: bearerRequest(SERVICE_TOKEN),
+      invalidRequest: bearerRequest("invalid"),
+      authenticated: principalRef(actor),
+      actor,
+      nonActingPrincipal: denied,
+      asserted: principalRef(effective),
+      allowed: {
+        context: { actor, effective: principalRef(effective) },
+        permission: { resource: "agent", action: "invoke" },
+        resource: { kind: "agent", namespaceId: "team-a", id: "assistant" },
+      },
+      allowedReason: "access_role_allow",
+      allowedEffective: principalRef(effective),
+      denied: {
+        context: selfContext(denied),
+        permission: { resource: "agent", action: "invoke" },
+        resource: { kind: "agent", namespaceId: "team-a", id: "assistant" },
+      },
+      deniedReason: "namespace_denied",
+      permissionMatrix: [
+        permissionCase(
+          "agent invoke",
+          { actor, effective: principalRef(effective) },
+          { resource: "agent", action: "invoke" },
+          { kind: "agent", namespaceId: "team-a", id: "assistant" },
+          { allowed: true, reason: "access_role_allow" },
+        ),
+        permissionCase(
+          "agent point read",
+          { actor, effective: principalRef(effective) },
+          { resource: "agent", action: "read" },
+          { kind: "agent", namespaceId: "team-a", id: "assistant" },
+          { allowed: true, reason: "self_identity_allow" },
+        ),
+        permissionCase(
+          "agent list",
+          { actor, effective: principalRef(effective) },
+          { resource: "agent", action: "read" },
+          { kind: "agent", namespaceId: "team-a" },
+          { allowed: true, reason: "self_identity_allow" },
+        ),
+        permissionCase(
+          "knowledge use",
+          { actor, effective: principalRef(effective) },
+          { resource: "knowledge", action: "use" },
+          { kind: "knowledge", namespaceId: "team-a", id: "docs" },
+          { allowed: true, reason: "knowledge_grant_allow" },
+        ),
+        permissionCase(
+          "ordinary approval",
+          { actor, effective: principalRef(effective) },
+          { resource: "approval", action: "decide" },
+          {
+            kind: "approval",
+            namespaceId: "team-a",
+            id: "approval-1",
+            principal: principalRef(actor),
+          },
+          { allowed: true, reason: "self_identity_allow" },
+        ),
+        permissionCase(
+          "elevated approval",
+          { actor, effective: principalRef(effective) },
+          { resource: "approval", action: "decide-elevated" },
+          { kind: "approval", namespaceId: "team-a", id: "approval-1" },
+          { allowed: false, reason: "permission_denied" },
+        ),
+      ],
+      auditEvents,
+      revokeAllowedIdentity: async () =>
+        store.setUserStatus({ id: represented.id, status: "disabled" }),
+    };
+  },
+};
+
+securityConformanceSuite("API-key adapter", apiKeyFactory);
+securityConformanceSuite("optional security module", moduleFactory);
+
+describe("optional security module audit sink", () => {
+  it("requires an audit sink instead of silently discarding events", () => {
+    expect(() =>
+      createZoryaSecurity({
+        store: new InMemorySecurityStore(),
+        loginProviders: [unusedLoginProvider],
+        publicBaseUrl: "http://zorya.test",
+        allowedDomains: ["example.com"],
+        secret: SECRET,
+      } as never),
+    ).toThrow(/auditSink is required/);
+  });
+
+  it("detaches and freezes forwarded audit records", async () => {
+    let retained: SecurityAuditEvent | undefined;
+    const security = createZoryaSecurity({
+      store: new InMemorySecurityStore(),
+      loginProviders: [unusedLoginProvider],
+      publicBaseUrl: "http://zorya.test",
+      allowedDomains: ["example.com"],
+      auditSink: { recordAudit: async (event) => void (retained = event) },
+      secret: SECRET,
+    });
+    const roles = ["member"];
+    const metadata = { source: "test" };
+    await security.recordAudit({
+      event: "authorization",
+      occurredAt: "2026-11-16T00:00:00.000Z",
+      context: {
+        actor: {
+          kind: "user",
+          id: "alice",
+          accessRoles: { "team-a": roles },
+          canActFor: false,
+        },
+        effective: { kind: "user", id: "alice" },
+      },
+      namespaceId: "team-a",
+      decision: { allowed: true, reason: "self_identity_allow" },
+      metadata,
+    });
+    roles.push("admin");
+    metadata.source = "mutated";
+
+    expect(retained?.context?.actor.accessRoles["team-a"]).toEqual(["member"]);
+    expect(retained?.metadata).toEqual({ source: "test" });
+    expect(Object.isFrozen(retained)).toBeTrue();
+    expect(Object.isFrozen(retained?.context?.actor.accessRoles["team-a"])).toBeTrue();
+    expect(Object.isFrozen(retained?.metadata)).toBeTrue();
+  });
+
+  it("snapshots the sink method and event fields once", async () => {
+    const events: SecurityAuditEvent[] = [];
+    let sinkReads = 0;
+    const sink = Object.defineProperty({}, "recordAudit", {
+      get() {
+        sinkReads += 1;
+        if (sinkReads > 1) throw new Error("audit sink method reread");
+        return async (event: SecurityAuditEvent) => void events.push(event);
+      },
+    }) as SecurityAuditSink;
+    const security = createZoryaSecurity({
+      store: new InMemorySecurityStore(),
+      loginProviders: [unusedLoginProvider],
+      publicBaseUrl: "http://zorya.test",
+      allowedDomains: ["example.com"],
+      auditSink: sink,
+      secret: SECRET,
+    });
+    let contextReads = 0;
+    const source = {
+      event: "authorization",
+      occurredAt: "2026-11-16T00:00:00.000Z",
+      get context() {
+        contextReads += 1;
+        if (contextReads > 1) throw new Error("audit context reread");
+        return selfContext(OPERATOR_PRINCIPAL);
+      },
+      namespaceId: "team-a",
+      decision: { allowed: true, reason: "operator_allow" },
+    } as SecurityAuditEvent;
+
+    await security.recordAudit(source);
+    expect(sinkReads).toBe(1);
+    expect(contextReads).toBe(1);
+    expect(events).toHaveLength(1);
+  });
+
+  it("fails closed for allowed audit failure and preserves denial", async () => {
+    const store = new InMemorySecurityStore();
+    const adminUser = (
+      await store.findOrCreateUser({
+        email: "admin@example.com",
+        bindings: [{ namespaceId: "team-a", accessRole: "admin" }],
+      })
+    ).user;
+    const deniedUser = (await store.findOrCreateUser({ email: "denied@example.com", bindings: [] }))
+      .user;
+    const security = createZoryaSecurity({
+      store,
+      loginProviders: [unusedLoginProvider],
+      publicBaseUrl: "http://zorya.test",
+      allowedDomains: ["example.com"],
+      auditSink: {
+        recordAudit: async () => {
+          throw new Error("audit unavailable");
+        },
+      },
+      secret: SECRET,
+    });
+    let handled = 0;
+    const router = new Router({
+      logger: { error() {} },
+      accessGuard: createSecurityRouteAccessGuard({
+        security,
+        clock: { now: () => new Date("2026-11-16T00:00:00.000Z") },
+        logger: { error() {} },
+      }),
+    }).route({
+      method: "POST",
+      path: "/api/agents/:id/invoke",
+      access: {
+        kind: "protected",
+        permission: { resource: "agent", action: "invoke" },
+        resolveTarget: ({ params }) => ({
+          resource: { kind: "agent", namespaceId: "team-a", id: params.id },
+        }),
+      },
+      handler: () => {
+        handled += 1;
+        return new Response(null, { status: 204 });
+      },
+    });
+
+    const admin = await requiredPrincipal(security, { kind: "user", id: adminUser.id });
+    const allowed = new Request("http://zorya.test/api/agents/helper/invoke", { method: "POST" });
+    setRequestPrincipal({ req: allowed, principal: admin });
+    expect((await router.handle(allowed)).status).toBe(503);
+
+    const deniedPrincipal = await requiredPrincipal(security, {
+      kind: "user",
+      id: deniedUser.id,
+    });
+    const denied = new Request("http://zorya.test/api/agents/helper/invoke", { method: "POST" });
+    setRequestPrincipal({ req: denied, principal: deniedPrincipal });
+    expect((await router.handle(denied)).status).toBe(403);
+    expect(handled).toBe(0);
+  });
+});
+
+function bearerRequest(token: string): Request {
+  return new Request("http://zorya.test/api/agents", {
+    headers: { authorization: `Bearer ${token}` },
+  });
+}
+
+async function requiredPrincipal(
+  security: ReturnType<typeof createZoryaSecurity>,
+  ref: { readonly kind: "user" | "service-account"; readonly id: string },
+): Promise<Principal> {
+  const value = await security.resolvePrincipal(ref);
+  if (!value) throw new Error(`missing principal ${ref.kind}:${ref.id}`);
+  return value;
+}
+
+function permissionCase(
+  name: string,
+  context: SecurityContext,
+  permission: SecurityPermission,
+  resource: SecurityResourceRef,
+  expected: AuthorizationDecision,
+): {
+  readonly name: string;
+  readonly request: AuthorizationRequest;
+  readonly expected: AuthorizationDecision;
+} {
+  return {
+    name,
+    request: { context, permission, resource } as unknown as AuthorizationRequest,
+    expected,
+  };
+}

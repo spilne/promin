@@ -1002,9 +1002,7 @@ describe("webhook enterprise identity", () => {
     expect(errors).toHaveLength(1);
     expect(errors[0]).toBeInstanceOf(Error);
     expect(await deliveries.listUnfinished({ limit: 10 })).toEqual([]);
-    expect((await deliveries.claim({ delivery: recorded, leaseMs: 100 })).outcome).toBe(
-      "terminal",
-    );
+    expect((await deliveries.claim({ delivery: recorded, leaseMs: 100 })).outcome).toBe("terminal");
   });
 
   it("leaves authorization infrastructure failures retryable for recovery", async () => {
