@@ -53,7 +53,7 @@ export const securityUsers = securityData.table(
     check("zsec_user_kind_ck", sql`${t.subjectKind} = 'user'`),
     check(
       "zsec_user_email_ck",
-      sql`${textBoundary(t.email, 320, 640)} AND ${t.email} = lower(btrim(${t.email})) AND strpos(${t.email}, '@') > 0`,
+      sql`${textBoundary(t.email, 320, 640)} AND ${t.email} = pg_catalog.lower(pg_catalog.btrim(${t.email})) AND pg_catalog.strpos(${t.email}, '@') > 0`,
     ),
     foreignKey({
       columns: [t.subjectKind, t.id],
