@@ -97,6 +97,76 @@ postgresDescribe("PostgreSQL security migrations", { timeout: 120_000 }, (pg) =>
     expect(historyAfterRerun[0]?.count).toBe(2);
   }, 120_000);
 
+  it("installs into an empty database despite a hostile initial search_path", async () => {
+    const databaseName = `zsec_hostile_${crypto.randomUUID().replaceAll("-", "")}`;
+    await execRaw(pg.db, sql`CREATE DATABASE ${sql.identifier(databaseName)}`);
+    const hostileUrl = new URL(pg.url);
+    hostileUrl.pathname = `/${databaseName}`;
+    let hostileClient: ReturnType<typeof postgres> | undefined;
+
+    try {
+      hostileClient = postgres(hostileUrl.toString(), {
+        max: 8,
+        connection: { search_path: "attacker,pg_catalog,public" },
+      });
+      const hostileDb = drizzle(hostileClient) as unknown as DrizzleDb;
+      await execRaw(hostileDb, sql`CREATE SCHEMA attacker`);
+      await execRaw(
+        hostileDb,
+        sql.raw(`
+          CREATE FUNCTION attacker.set_config(text, text, boolean) RETURNS text
+          LANGUAGE plpgsql AS $shadow$
+          BEGIN RAISE EXCEPTION 'attacker set_config called'; END
+          $shadow$;
+          CREATE FUNCTION attacker.hashtextextended(text, bigint) RETURNS bigint
+          LANGUAGE plpgsql AS $shadow$
+          BEGIN RAISE EXCEPTION 'attacker hashtextextended called'; END
+          $shadow$;
+          CREATE FUNCTION attacker.pg_advisory_xact_lock(bigint) RETURNS void
+          LANGUAGE plpgsql AS $shadow$
+          BEGIN RAISE EXCEPTION 'attacker pg_advisory_xact_lock called'; END
+          $shadow$;
+        `),
+      );
+      const [path] = await execRaw(hostileDb, sql`SHOW search_path`);
+      expect(path?.search_path).toBe("attacker,pg_catalog,public");
+
+      await Promise.all(Array.from({ length: 8 }, () => migrateSecurityStore(hostileDb)));
+
+      const [history] = await execRaw(
+        hostileDb,
+        sql`SELECT pg_catalog.count(*)::pg_catalog.int4 AS count
+            FROM zorya_security.__zorya_security_migrations`,
+      );
+      expect(history?.count).toBe(2);
+      const [tables] = await execRaw(
+        hostileDb,
+        sql`SELECT pg_catalog.count(*)::pg_catalog.int4 AS count
+            FROM information_schema.tables
+            WHERE table_schema='zorya_security_data' AND table_name LIKE 'zsec_%'`,
+      );
+      expect(tables?.count).toBe(14);
+      const publicTables = await execRaw(
+        hostileDb,
+        sql`SELECT table_name FROM information_schema.tables
+            WHERE table_schema='public' AND table_name LIKE 'zsec_%'`,
+      );
+      expect(publicTables).toHaveLength(0);
+      const attackerTables = await execRaw(
+        hostileDb,
+        sql`SELECT table_name FROM information_schema.tables
+            WHERE table_schema='attacker' AND table_name LIKE 'zsec_%'`,
+      );
+      expect(attackerTables).toHaveLength(0);
+    } finally {
+      await hostileClient?.end({ timeout: 1 });
+      await execRaw(
+        pg.db,
+        sql`DROP DATABASE IF EXISTS ${sql.identifier(databaseName)} WITH (FORCE)`,
+      );
+    }
+  }, 120_000);
+
   it("ignores a hostile search_path and rejects rows outside shared boundaries", async () => {
     await migrateSecurityStore(pg.db);
     await execRaw(pg.db, sql`CREATE SCHEMA hostile_security`);

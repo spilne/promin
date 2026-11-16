@@ -38,9 +38,14 @@ export async function migrateSecurityStore(
     logger.info("Starting security store migrations...");
     await db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as DrizzleDb;
+      // `0000` predates the dedicated data schema and intentionally remains
+      // immutable. Pin its unqualified DDL to the trusted public schema before
+      // taking the migration lock; pg_catalog remains implicitly first for
+      // resolution because it is omitted from this path.
+      await execRaw(tx, sql.raw("SET LOCAL search_path = public"));
       await execRaw(
         tx,
-        sql`SELECT pg_advisory_xact_lock(hashtextextended('zorya-security-migrations', 0))`,
+        sql`SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('zorya-security-migrations', 0))`,
       );
       await execRaw(tx, sql`CREATE SCHEMA IF NOT EXISTS ${sql.identifier(migrationsSchema)}`);
       await execRaw(
