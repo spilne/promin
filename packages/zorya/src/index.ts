@@ -3,6 +3,36 @@
 export { ZoryaServer } from "./server/server.ts";
 export { ZoryaServerBuilder } from "./server/server-builder.ts";
 export {
+  CoreChannelRuntime,
+  InMemoryChannelStateStore,
+  channelCorrelationId,
+  channelThreadId,
+  type ChannelConversationKind,
+  type ChannelEventCompletionStatus,
+  type ChannelIdentityKey,
+  type ChannelInboundEvent,
+  type ChannelKnowledgeAudience,
+  type ChannelRuntimeResult,
+  type ChannelSenderKind,
+  type ChannelStateStore,
+  type ChannelTurnInvocation,
+  type ChannelTurnInvoker,
+  type CoreChannelRuntimeConfig,
+  type InMemoryChannelEventRecord,
+  type ZoryaChannelRuntime,
+} from "./server/channel-runtime.ts";
+export type {
+  ExtensionRouteDefinition,
+  LlmPolicyDecision,
+  LlmPolicyRequest,
+  ZoryaChannel,
+  ZoryaExtensionRouter,
+  ZoryaLlmPolicy,
+  ZoryaRetrieverExtension,
+  ZoryaRoutesExtension,
+  ZoryaServerExtension,
+} from "./server/extensions.ts";
+export {
   type ZoryaServerConfig,
   type ListenOptions,
   type Logger,

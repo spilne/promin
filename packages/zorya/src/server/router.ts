@@ -197,6 +197,12 @@ export class Router {
     });
   }
 
+  /** Exact method/path registration check used to reject extension collisions. */
+  hasRoute(method: string, pattern: string): boolean {
+    const normalized = method.toUpperCase();
+    return this.routes.some((route) => route.method === normalized && route.pattern === pattern);
+  }
+
   /**
    * Compatibility registration for route groups not migrated yet. It is
    * deliberately visible to `uncoveredRoutes`/`assertSecurityCoverage`.

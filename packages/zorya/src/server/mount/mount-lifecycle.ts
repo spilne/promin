@@ -80,6 +80,7 @@ interface Lifecycled {
 export function managedServices(params: {
   readonly workflows: Lifecycled;
   readonly security: Lifecycled | undefined;
+  readonly channels: ReadonlyArray<Lifecycled & { readonly id: string }>;
   readonly scheduler: Lifecycled | undefined;
   readonly agents: Lifecycled | undefined;
   readonly retainedSubagents: Lifecycled | undefined;
@@ -96,6 +97,9 @@ export function managedServices(params: {
 }): ManagedService[] {
   const out: ManagedService[] = [{ name: "workflows", ...bindLifecycle(params.workflows) }];
   if (params.security) out.push({ name: "security", ...bindLifecycle(params.security) });
+  for (const channel of params.channels) {
+    out.push({ name: `channel:${channel.id}`, ...bindLifecycle(channel) });
+  }
   if (params.namespaces) out.push({ name: "namespaces", ...bindLifecycle(params.namespaces) });
   if (params.scheduler) out.push({ name: "scheduler", ...bindLifecycle(params.scheduler) });
   if (params.agents) out.push({ name: "agents", ...bindLifecycle(params.agents) });

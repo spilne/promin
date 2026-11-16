@@ -87,6 +87,13 @@ import { mountStatic } from "./mount/mount-static.ts";
 import { mountWorkflowBuilder } from "./mount/mount-workflow-builder.ts";
 import { ZoryaServerBuilder } from "./server-builder.ts";
 import {
+  mountExtensionRoutes,
+  registerExtensionRetrievers,
+  validateChannel,
+  type ZoryaChannel,
+  type ZoryaLlmPolicy,
+} from "./extensions.ts";
+import {
   OPERATOR_PRINCIPAL,
   createApiKeySecurity,
   createSecurityRouteAccessGuard,
@@ -154,6 +161,10 @@ export class ZoryaServer {
   readonly retention?: RunRetention;
   /** Authentication and access policy for the operator API. */
   readonly security: ZoryaSecurity;
+  /** Trusted channel packages attached to this server. */
+  readonly channels: ReadonlyArray<ZoryaChannel>;
+  /** Host-wide provider/model admission policy, when configured. */
+  readonly llmPolicy?: ZoryaLlmPolicy;
 
   private readonly planes: AuthPlanes;
   private readonly lifecycle: ServiceLifecycle;
@@ -189,6 +200,20 @@ export class ZoryaServer {
     if (config.workflowBuilder) this.workflowBuilder = config.workflowBuilder;
     if (config.secrets) this.secrets = config.secrets;
     if (config.namespaces) this.namespaces = config.namespaces;
+    this.channels = Object.freeze([...(config.channels ?? [])]);
+    const channelIds = new Set<string>();
+    for (const channel of this.channels) {
+      const id = validateChannel(channel);
+      if (channelIds.has(id)) throw new Error(`ZoryaServer: duplicate channel '${id}'`);
+      channelIds.add(id);
+    }
+    if (this.channels.some((channel) => channel.mapsExternalUsers) && !config.security) {
+      throw new Error("ZoryaServer: a channel that maps external users requires security");
+    }
+    if (this.channels.some((channel) => channel.mapsExternalUsers && !channel.runtime)) {
+      throw new Error("ZoryaServer: a channel that maps external users requires a channel runtime");
+    }
+    if (config.llmPolicy) this.llmPolicy = config.llmPolicy;
     const namespaces = this.namespaces;
     const clock: WallClock = config.clock ?? SystemWallClock;
     this.inFlight = new InFlightRequests(clock);
@@ -307,6 +332,11 @@ export class ZoryaServer {
           start: async () => this.security.start?.(),
           stop: async () => this.security.stop?.(),
         },
+        channels: this.channels.map((channel) => ({
+          id: channel.id,
+          start: async () => channel.start?.({ runtime: channel.runtime }),
+          stop: async () => channel.stop?.(),
+        })),
         scheduler: this.scheduler,
         agents: this.agents,
         retainedSubagents: this.retainedSubagents,
@@ -512,8 +542,13 @@ export class ZoryaServer {
       });
     }
     if (this.workflowBuilder) mountWorkflowBuilder({ router, builder: this.workflowBuilder });
+    mountExtensionRoutes(router, config.extensionRoutes ?? []);
     if (config.uiDir) mountStatic({ router, uiDir: config.uiDir });
     router.assertSecurityCoverage();
+    registerExtensionRetrievers({
+      registry: this.agents?.retrievers,
+      entries: config.retrievers ?? [],
+    });
   }
 
   /**

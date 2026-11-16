@@ -22,6 +22,12 @@ import type { ZoryaSkills } from "./services/skills/index.ts";
 import type { ZoryaWorkflows } from "./services/workflows/index.ts";
 import type { RunRetentionConfig } from "./services/workflows/run-retention.ts";
 import type { ZoryaSecurity } from "./security/index.ts";
+import type {
+  ZoryaChannel,
+  ZoryaLlmPolicy,
+  ZoryaRetrieverExtension,
+  ZoryaRoutesExtension,
+} from "./extensions.ts";
 
 export interface Logger {
   log(message: string, ...args: unknown[]): void;
@@ -84,6 +90,14 @@ export interface ZoryaServerConfig extends AuthConfig {
    * `remoteWorkers.apiKeys`.
    */
   security?: ZoryaSecurity;
+  /** Trusted in-process channels, started and stopped with the server. */
+  channels?: ReadonlyArray<ZoryaChannel>;
+  /** Host-wired external knowledge backends registered into the agents registry. */
+  retrievers?: ReadonlyArray<ZoryaRetrieverExtension>;
+  /** Protected route groups contributed by trusted extensions. */
+  extensionRoutes?: ReadonlyArray<ZoryaRoutesExtension>;
+  /** Host-wide provider/model admission policy. */
+  llmPolicy?: ZoryaLlmPolicy;
   /**
    * Allow running without operator keys or a security module. Without it
    * the constructor throws `ZoryaInsecureConfigError` when neither operator
