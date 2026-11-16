@@ -50,7 +50,7 @@ BEGIN
     END IF;
     kind := jsonb_typeof(entry.value);
     IF kind = 'string' THEN
-      IF NOT zorya_security_data.zsec_safe_text(entry.value #>> '{}', 4096, 8192) THEN
+      IF (entry.value #>> '{}') <> '' AND NOT zorya_security_data.zsec_safe_text(entry.value #>> '{}', 4096, 8192) THEN
         RETURN false;
       END IF;
     ELSIF kind = 'number' THEN

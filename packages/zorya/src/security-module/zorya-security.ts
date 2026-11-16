@@ -458,7 +458,7 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
       };
     },
     secureResponse: ({ request, response }) =>
-      cookieAuthenticated.has(request)
+      cookieAuthenticated.has(request) && isSafeMethod(request.method)
         ? limitEventStreamLifetime({
             response,
             clock,

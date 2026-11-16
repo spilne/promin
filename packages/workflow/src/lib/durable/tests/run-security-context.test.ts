@@ -1,5 +1,6 @@
 import { TaggedError, fail } from "@spilne/perfect-core";
 import { describe, expect, it } from "bun:test";
+import { FakeWallClock } from "../../shared/wall-clock.ts";
 import { InMemoryWorkflowStorage } from "../in-memory-storage.ts";
 import {
   decodeRunSecurityContext,
@@ -333,8 +334,9 @@ describe("durable run security context", () => {
   });
 
   it("fails a secured join closed when the lock winner never creates a row", async () => {
+    const clock = FakeWallClock.create(1_000);
     const storage = new GatedCreateStorage(true);
-    const runner = createWorkflowRunner({ storage });
+    const runner = createWorkflowRunner({ storage, clock });
     const wf = joinWorkflow();
     await runner.start({
       workflow: wf,
@@ -353,6 +355,21 @@ describe("durable run security context", () => {
     void loser.catch(() => undefined);
     await storage.loserLockAttempted;
     storage.allowCreate();
+
+    let settled = false;
+    void loser.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    for (let attempt = 0; attempt < 1_000 && !settled; attempt += 1) {
+      await Promise.resolve();
+      clock.advance(1);
+    }
+    expect(settled).toBe(true);
 
     await expect(loser).rejects.toMatchObject({ _tag: "RunSecurityContextConflictError" });
     expect(await storage.loadWorkflow("secured-pre-create-no-row")).toBeNull();

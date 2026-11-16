@@ -101,14 +101,17 @@ function enterpriseApprovalSecurity(): ZoryaSecurity {
 describe("agent SSE — approval resume", () => {
   it("streams the resumed turn to finish without re-sending the approval request", async () => {
     let deployed = 0;
+    let resumedToolContext: unknown;
+    const authorizedScopes: Array<{ readonly actor: string | null; readonly scope: unknown }> = [];
     const deploy = {
       ...tool({
         name: "deploy",
         description: "deploy a service",
         parameters: z.object({ env: z.string() }),
         requireApproval: true,
-        execute: async ({ env }) => {
+        execute: async ({ env }, context) => {
           deployed++;
+          resumedToolContext = context?.scope?.securityContext;
           return `deployed to ${env}`;
         },
       }),
@@ -130,6 +133,10 @@ describe("agent SSE — approval resume", () => {
       llm,
       tools: { deploy },
       security: enterpriseApprovalSecurity(),
+      authorizeScope: ({ req, scope: checkedScope }) => {
+        authorizedScopes.push({ actor: req.headers.get("x-actor"), scope: checkedScope });
+        return true;
+      },
       // Model a backend that can resume but cannot list pending approvals.
       // Requester separation must be enforced from the preloaded durable row.
       wrapAgent: (agent) => {
@@ -257,6 +264,18 @@ describe("agent SSE — approval resume", () => {
       finishReason: "stop",
     });
     expect(deployed).toBe(1);
+    expect(resumedToolContext).toEqual({
+      actor: { kind: "service-account", id: "requester-sa" },
+      effective: { kind: "user", id: "alice" },
+    });
+    expect(authorizedScopes).toContainEqual({
+      actor: "human-approver",
+      scope: {
+        namespaceId: "ns",
+        resourceId: "alice",
+        agentId: "deployer",
+      },
+    });
     expect(
       await approvals.get({
         namespaceId: "ns",
@@ -416,13 +435,16 @@ describe("agent SSE — approval resume", () => {
 /** A deployer agent whose model asks to deploy on "ship it" and answers "hi" plainly. */
 async function bootDeployer() {
   let llmCalls = 0;
-  const deploy = tool({
-    name: "deploy",
-    description: "deploy a service",
-    parameters: z.object({ env: z.string() }),
-    requireApproval: true,
-    execute: async ({ env }) => `deployed to ${env}`,
-  });
+  const deploy = {
+    ...tool({
+      name: "deploy",
+      description: "deploy a service",
+      parameters: z.object({ env: z.string() }),
+      requireApproval: true,
+      execute: async ({ env }) => `deployed to ${env}`,
+    }),
+    kind: "elevated" as const,
+  };
   const llm: LLMProvider = {
     chat: async ({ messages }) => {
       llmCalls++;
@@ -443,7 +465,13 @@ async function bootDeployer() {
     id: "deployer",
     backend: {
       ...localBackend,
-      role: { inline: { systemPrompt: "Deploys things", tools: ["deploy"] } },
+      role: {
+        inline: {
+          systemPrompt: "Deploys things",
+          tools: ["deploy"],
+          capabilities: ["elevated"],
+        },
+      },
     },
   });
   return { ...booted, llmCalls: () => llmCalls };

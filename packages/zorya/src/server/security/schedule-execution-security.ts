@@ -69,15 +69,55 @@ export class ScheduleExecutionSecurity {
   async assignedContext(params: {
     readonly scheduleId: string;
     readonly namespaceId: string;
+    readonly caller?: SecurityContext;
     readonly serviceAccountId?: string;
     readonly runAsUserId?: string;
+    readonly resourceId?: string;
   }): Promise<RunSecurityContext> {
     let requested: RunSecurityContext | undefined;
     if (params.serviceAccountId !== undefined) {
+      if (!params.caller) throw new ScheduleAssignmentError("assignment_denied");
+      const context = snapshotSecurityContext(params.caller);
+      const permission = snapshotSecurityPermission({
+        resource: "service-account",
+        action: "use",
+      });
+      const resource = snapshotSecurityResource({
+        kind: "service-account",
+        namespaceId: params.namespaceId,
+        id: params.serviceAccountId,
+        principal: { kind: "service-account", id: params.serviceAccountId },
+      });
+      const decision = snapshotAuthorizationDecision(
+        await this.security.authorize({ context, permission, resource } as AuthorizationRequest),
+      );
+      try {
+        await this.security.recordAudit(
+          Object.freeze({
+            event: "schedule.service-account.authorization",
+            occurredAt: this.clock.now().toISOString(),
+            context,
+            namespaceId: params.namespaceId,
+            resource,
+            permission,
+            decision,
+            metadata: Object.freeze({ scheduleId: params.scheduleId }),
+          }),
+        );
+      } catch (error) {
+        if (decision.allowed) throw error;
+        try {
+          this.logger.error("[zorya] schedule service-account denial audit failed", error);
+        } catch {
+          // An explicit denial stays denied when observability is unavailable.
+        }
+      }
+      if (!decision.allowed) throw new ScheduleAssignmentError("assignment_denied");
+      const representedUser = params.runAsUserId ?? params.resourceId;
       requested = {
         actor: { kind: "service-account", id: params.serviceAccountId },
-        ...(params.runAsUserId !== undefined && {
-          effective: { kind: "user", id: params.runAsUserId },
+        ...(representedUser !== undefined && {
+          effective: { kind: "user", id: representedUser },
         }),
       };
     } else if (params.runAsUserId !== undefined) {

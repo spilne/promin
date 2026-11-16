@@ -1,6 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import type { ToolAuditEntry, ToolAuditLogger } from "@promin/agent";
-import type { RunSecurityContext } from "@promin/workflow";
+import { SystemWallClock, type RunSecurityContext } from "@promin/workflow";
 import type {
   Authorizer,
   PrincipalRef,
@@ -101,7 +101,7 @@ export class DurableSecurityAudit implements SecurityAuditSink {
     this.keys = Object.freeze(copiedKeys);
     if (this.keys[this.activeKeyId] === undefined)
       throw new TypeError("active audit HMAC key is missing");
-    this.clock = config.clock ?? { currentTimeMs: () => Date.now() };
+    this.clock = config.clock ?? SystemWallClock;
     this.idFactory = config.idFactory ?? (() => crypto.randomUUID());
     this.maxAppendAttempts = config.maxAppendAttempts ?? 128;
     if (!Number.isSafeInteger(this.maxAppendAttempts) || this.maxAppendAttempts < 1) {
@@ -286,7 +286,7 @@ export class DurableSecurityAudit implements SecurityAuditSink {
         }
         throw new Error(`Conflicting audit event: ${id}`);
       }
-      const head = await auditHead(this.store, namespaceId);
+      const head = await this.store.getAuditHead(namespaceId);
       const unsigned = {
         id,
         namespaceId,
@@ -416,7 +416,7 @@ export class SecurityAuditReader {
     private readonly authorizer: Authorizer,
     private readonly audit: DurableSecurityAudit,
     private readonly clock: { readonly currentTimeMs: () => number } = {
-      currentTimeMs: () => Date.now(),
+      currentTimeMs: () => SystemWallClock.currentTimeMs(),
     },
   ) {}
 
@@ -506,7 +506,7 @@ export class SecurityToolAuditBridge implements ToolAuditLogger {
   constructor(
     private readonly audit: DurableSecurityAudit,
     private readonly clock: { readonly currentTimeMs: () => number } = {
-      currentTimeMs: () => Date.now(),
+      currentTimeMs: () => SystemWallClock.currentTimeMs(),
     },
   ) {}
 
@@ -542,24 +542,6 @@ export class SecurityToolAuditBridge implements ToolAuditLogger {
       },
     });
   }
-}
-
-async function auditHead(
-  store: SecurityStoreV2,
-  namespaceId: string,
-): Promise<SecurityAuditRecord | undefined> {
-  let cursor: string | undefined;
-  let head: SecurityAuditRecord | undefined;
-  do {
-    const page = await store.listAuditRecords({
-      namespaceId,
-      ...(cursor !== undefined && { cursor }),
-      limit: SECURITY_STORE_LIMITS.pageSize,
-    });
-    head = page.items.at(-1) ?? head;
-    cursor = page.nextCursor;
-  } while (cursor !== undefined);
-  return head;
 }
 
 async function allAuditRows(

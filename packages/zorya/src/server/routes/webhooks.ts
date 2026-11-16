@@ -868,6 +868,7 @@ async function dispatchDelivery(params: {
   const { key, scope } = delivery;
   const token = claim.token;
   const attempt = claim.attempt;
+  let invocationStarted = false;
   const renewal = clock.setInterval(
     () => {
       deps.deliveries
@@ -908,6 +909,7 @@ async function dispatchDelivery(params: {
       delivery,
       stage: "invoke",
     });
+    invocationStarted = true;
     const out = await agent.invoke(
       { task: delivery.task },
       {
@@ -934,9 +936,19 @@ async function dispatchDelivery(params: {
           error: err.message,
         })
         .catch(() => {});
+    } else if (invocationStarted) {
+      // Once an agent turn has started, a retry must advance the durable
+      // attempt so it receives a fresh run id. Reusing the failed run id
+      // would only replay its terminal failure forever.
+      await deps.deliveries
+        .fail({
+          ...claimParams,
+          error: "webhook dispatch failed",
+        })
+        .catch(() => {});
     } else {
-      // Registry, resolver, audit, and invocation infrastructure failures are
-      // retryable without advancing or permanently failing the delivery.
+      // Pre-invocation infrastructure failures are safe to retry under the
+      // same attempt: no agent turn was started.
       await deps.deliveries.release(claimParams).catch(() => {});
     }
     throw err;

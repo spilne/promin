@@ -19,7 +19,7 @@
 // cascade through the fallback.
 // ---------------------------------------------------------------------------
 
-import { WorkflowLockError } from "@promin/workflow";
+import { RunSecurityContextConflictError, WorkflowLockError } from "@promin/workflow";
 import type {
   CreateWorkflowResult,
   RunSecurityContext,
@@ -97,6 +97,26 @@ export function existingRunResult(params: {
     });
   }
   return { workflowId: params.workflowId, existing: true };
+}
+
+/**
+ * Preserve trigger idempotency when a redelivery presents a different
+ * identity for an already-created run. The existing row is authoritative;
+ * callers may observe it, but never replace its durable starter identity.
+ */
+export async function createIdempotentRun(params: {
+  readonly storage: WorkflowStorage;
+  readonly workflowId: string;
+  readonly create: () => Promise<CreateWorkflowResult>;
+}): Promise<CreateWorkflowResult> {
+  try {
+    return await params.create();
+  } catch (error) {
+    if (!(error instanceof RunSecurityContextConflictError)) throw error;
+    const existing = await params.storage.loadWorkflow(params.workflowId);
+    if (!existing) throw error;
+    return { created: false, existing };
+  }
 }
 
 /**

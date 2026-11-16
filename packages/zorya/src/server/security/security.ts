@@ -35,7 +35,7 @@ export interface SecurityContext {
 export const SECURITY_ACTIONS = deepFreezeActions({
   namespace: ["read", "create", "update", "archive"],
   user: ["read", "disable", "bind"],
-  "service-account": ["read", "create", "rotate", "delete"],
+  "service-account": ["read", "create", "use", "rotate", "delete"],
   agent: ["read", "create", "update", "promote", "rollback", "disable", "invoke"],
   "agent-role": ["read", "create", "update", "disable"],
   skill: ["read", "create", "update", "disable"],

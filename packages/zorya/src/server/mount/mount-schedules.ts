@@ -18,6 +18,7 @@ import {
 } from "../routes/schedules.ts";
 import { protectedAccess } from "./route-security.ts";
 import { ORG_WIDE_NAMESPACE } from "../security/index.ts";
+import type { SecurityContext } from "../security/index.ts";
 import { assertUniqueQueryParameters } from "../request-validation.ts";
 
 export function mountSchedules(params: {
@@ -50,8 +51,10 @@ export function mountSchedules(params: {
     assignedSecurityContext: (assignment: {
       readonly scheduleId: string;
       readonly namespaceId: string;
+      readonly caller?: SecurityContext;
       readonly serviceAccountId?: string;
       readonly runAsUserId?: string;
+      readonly resourceId?: string;
     }) => scheduler.assignedSecurityContext(assignment),
   };
   const storedTarget = async ({ params: route }: { params: Readonly<Record<string, string>> }) => {

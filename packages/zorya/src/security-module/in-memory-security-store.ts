@@ -517,6 +517,12 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     return row && clone(row);
   }
 
+  async getAuditHead(namespaceId: string): Promise<SecurityAuditRecord | undefined> {
+    const rows = this.auditRecords.get(requiredString(namespaceId, "namespace id")) ?? [];
+    const row = rows.at(-1);
+    return row && clone(row);
+  }
+
   async listAuditRecords(params: {
     readonly namespaceId: string;
     readonly cursor?: string;

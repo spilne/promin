@@ -39,6 +39,7 @@ import { LeaderLoop, forEachOrphanedRun, redeliverChildEndedSignals } from "./ru
 import {
   ZoryaWorkflows,
   existingRunResult,
+  createIdempotentRun,
   findDefinition,
   resetStepsUnderLock,
   stepsFrom,
@@ -305,17 +306,22 @@ export class LocalWorkflows extends ZoryaWorkflows {
     // exists is answered from storage: a redelivered schedule tick or a
     // retried trigger never runs the body again, and an id of another
     // workflow is a conflict. A fresh run of an ended one is `rerun`.
-    const created = await this.storage.createWorkflow({
+    const created = await createIdempotentRun({
+      storage: this.storage,
       workflowId,
-      workflowName: name,
-      input,
-      ...(workflowType !== undefined && { workflowType }),
-      ...(opts?.namespace !== undefined && { namespace: opts.namespace }),
-      ...(metadata !== undefined && { metadata }),
-      ...(opts?.runSource !== undefined && { runSource: opts.runSource }),
-      ...(opts?.runSourceId !== undefined && { runSourceId: opts.runSourceId }),
-      ...(securityContext !== undefined && { securityContext }),
-      ...(version !== undefined && { version }),
+      create: () =>
+        this.storage.createWorkflow({
+          workflowId,
+          workflowName: name,
+          input,
+          ...(workflowType !== undefined && { workflowType }),
+          ...(opts?.namespace !== undefined && { namespace: opts.namespace }),
+          ...(metadata !== undefined && { metadata }),
+          ...(opts?.runSource !== undefined && { runSource: opts.runSource }),
+          ...(opts?.runSourceId !== undefined && { runSourceId: opts.runSourceId }),
+          ...(securityContext !== undefined && { securityContext }),
+          ...(version !== undefined && { version }),
+        }),
     });
     const existing = existingRunResult({ workflowName: name, workflowId, created });
     if (existing) return existing;

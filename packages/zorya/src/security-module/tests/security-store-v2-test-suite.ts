@@ -361,7 +361,12 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
 
     it("atomically appends structured audit rows and rejects chain races/conflicts", async () => {
       const store = await factory.create();
-      const first = auditRecord({ id: "event-1", sequence: 1, hash: "hash-1" });
+      const first = auditRecord({
+        id: "event-1",
+        sequence: 1,
+        hash: "hash-1",
+        metadata: { optionalDetail: "" },
+      });
       expect(
         await store.appendAuditWithOutbox({
           record: first,
@@ -423,6 +428,7 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       expect(Object.isFrozen(firstPage.items)).toBe(true);
       expect(Object.isFrozen(firstPage.items[0]?.metadata)).toBe(true);
       expect(await store.getAuditRecord(first.id)).toEqual(first);
+      expect((await store.getAuditHead("team"))?.sequence).toBe(2);
       expect((await store.listAuditOutbox()).items).toHaveLength(1);
     });
 

@@ -554,9 +554,9 @@ describe("webhook ingress — durable dispatch", () => {
     expect((await server.handle(delivery())).status).toBe(500);
     failing = false;
     expect((await server.handle(delivery())).status).toBe(200);
-    // Infrastructure failure releases the claim without advancing its
-    // durable attempt, so a partially-started turn resumes under one run id.
-    expect(dispatched.map((d) => d.runId)).toEqual([webhookRunId({ key, attempt: 1 })]);
+    // A started turn that fails advances the attempt, so retry receives a
+    // fresh run id instead of replaying the terminal failure forever.
+    expect(dispatched.map((d) => d.runId)).toEqual([webhookRunId({ key, attempt: 2 })]);
   });
 
   it("finishes a delivery whose dispatcher died, under the same run id, exactly once", async () => {
@@ -1063,7 +1063,7 @@ describe("webhook enterprise identity", () => {
     expect(await deliveries.listUnfinished({ limit: 10 })).toEqual([]);
   });
 
-  it("releases registry, resolver, and invoke infrastructure failures for immediate retry", async () => {
+  it("releases pre-invoke failures but advances failed agent turns", async () => {
     for (const failure of ["registry", "resolver", "invoke"] as const) {
       let failing = true;
       let releases = 0;
@@ -1105,14 +1105,14 @@ describe("webhook enterprise identity", () => {
       });
       const request = () => delivery({ deliveryId: `retry-${failure}` });
       expect((await server.handle(request())).status).toBe(500);
-      expect(releases).toBe(1);
-      expect(failures).toBe(0);
+      expect(releases).toBe(failure === "invoke" ? 0 : 1);
+      expect(failures).toBe(failure === "invoke" ? 1 : 0);
       failing = false;
       expect((await server.handle(request())).status).toBe(200);
       expect(dispatched.map((entry) => entry.runId)).toEqual([
         webhookRunId({
           key: JSON.stringify(["github", "echo-bot", "acme", null, `retry-${failure}`]),
-          attempt: 1,
+          attempt: failure === "invoke" ? 2 : 1,
         }),
       ]);
     }

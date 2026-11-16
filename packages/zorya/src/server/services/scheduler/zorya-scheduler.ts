@@ -32,6 +32,7 @@ import {
 import type { ZoryaWorkflows } from "../workflows/index.ts";
 import {
   ScheduleExecutionSecurity,
+  type SecurityContext,
   type AuthorizedScheduleIdentity,
   type ScheduleExecutionSecurityConfig,
 } from "../../security/index.ts";
@@ -204,8 +205,10 @@ export class ZoryaScheduler {
   async assignedSecurityContext(params: {
     readonly scheduleId: string;
     readonly namespaceId: string;
+    readonly caller?: SecurityContext;
     readonly serviceAccountId?: string;
     readonly runAsUserId?: string;
+    readonly resourceId?: string;
   }): Promise<RunSecurityContext | undefined> {
     if (!this.executionSecurity) return undefined;
     return await this.executionSecurity.assignedContext(params);

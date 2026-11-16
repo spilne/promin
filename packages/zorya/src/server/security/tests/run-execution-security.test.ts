@@ -103,7 +103,7 @@ describe("RunExecutionSecurity", () => {
     });
   });
 
-  it("terminalizes a contextless enterprise run instead of retrying it", async () => {
+  it("preserves trusted embedder and pre-security contextless runs", async () => {
     const storage = new InMemoryWorkflowStorage();
     const guard = new RunExecutionSecurity({
       storage,
@@ -113,11 +113,13 @@ describe("RunExecutionSecurity", () => {
     });
     const state = await storedRun({ storage, id: "missing" });
 
-    await expect(guard.admissionGuard({ state })).rejects.toBeInstanceOf(RunSecurityBlockedError);
+    await expect(guard.admissionGuard({ state })).resolves.toBeUndefined();
     expect(await storage.loadWorkflow("missing")).toMatchObject({
-      status: "failed",
-      errorTag: RUN_SECURITY_BLOCKED_ERROR_TAG,
+      status: "pending",
     });
+    await expect(
+      guard.checkStoredRun({ workflowId: "missing", source: "http-signal" }),
+    ).resolves.toBe(true);
   });
 
   it("freshly rechecks actor and current act-for authority", async () => {

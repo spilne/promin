@@ -115,8 +115,12 @@ export class RunExecutionSecurity {
     if (!state) return false;
     const runContext = this.contextForStored(state.securityContext);
     if (!runContext) {
-      this.report("missing durable security context", workflowId);
-      return false;
+      // A contextless row can only originate from trusted embedder code or
+      // pre-security durable state: HTTP triggers always stamp the request
+      // identity. Preserve those legacy/system runs instead of destroying
+      // them merely because module security was enabled later.
+      this.report("admitting trusted contextless run", workflowId);
+      return true;
     }
     return this.decide({
       workflowId,
@@ -136,8 +140,8 @@ export class RunExecutionSecurity {
   }): Promise<boolean> {
     const runContext = this.contextForStored(params.securityContext);
     if (!runContext) {
-      this.report("missing durable security context", params.workflowId);
-      return false;
+      this.report("admitting trusted contextless child run", params.workflowId);
+      return true;
     }
     return this.decide({
       workflowId: params.workflowId,
@@ -153,18 +157,17 @@ export class RunExecutionSecurity {
     readonly guard?: FenceGuard;
   }): Promise<boolean> {
     const runContext = this.contextForStored(params.state.securityContext);
-    const allowed =
-      runContext !== undefined &&
-      (await this.decide({
-        workflowId: params.state.workflowId,
-        namespaceId: params.state.namespace ?? ORG_WIDE_NAMESPACE,
-        runContext,
-        source: params.source,
-      }));
-    if (allowed) return true;
     if (!runContext) {
-      this.report("missing durable security context", params.state.workflowId);
+      this.report("admitting trusted contextless run", params.state.workflowId);
+      return true;
     }
+    const allowed = await this.decide({
+      workflowId: params.state.workflowId,
+      namespaceId: params.state.namespace ?? ORG_WIDE_NAMESPACE,
+      runContext,
+      source: params.source,
+    });
+    if (allowed) return true;
     // A cancelled run that still owes rollback is already terminal, so a
     // plain failWorkflow would be ignored. Reopen only its storage phase,
     // execute no compensation, then replace the cancellation outcome with

@@ -304,7 +304,7 @@ export async function loadScopedAgent(params: {
     const disabled = disabled410(recipe);
     if (disabled) return disabled;
   }
-  if (!params.authoritativeScope && deps.authorizeScope) {
+  if (deps.authorizeScope) {
     const allowed = await deps.authorizeScope({ req, scope: { ...scope, agentId: id } });
     if (!allowed) return jsonError(403, "scope_forbidden");
   }
@@ -389,7 +389,7 @@ export async function openOwnedThread(params: {
   readonly scoped: ScopedAgent;
   readonly threadId: string;
   readonly create: boolean;
-  readonly securityContext?: SecurityContext;
+  readonly securityContext?: SecurityContext | RunSecurityContext;
 }): Promise<AgentThread | Response> {
   const { scoped, threadId, create } = params;
   const agentId = scoped.recipe.id;
@@ -401,19 +401,15 @@ export async function openOwnedThread(params: {
         ? {
             metadata: { [THREAD_AGENT_METADATA_KEY]: agentId },
             ...(params.securityContext !== undefined && {
-              securityContext: {
-                actor: {
-                  kind: params.securityContext.actor.kind,
-                  id: params.securityContext.actor.id,
-                },
-                ...(params.securityContext.actor.kind !== params.securityContext.effective.kind ||
-                params.securityContext.actor.id !== params.securityContext.effective.id
-                  ? { effective: params.securityContext.effective }
-                  : {}),
-              },
+              securityContext: threadSecurityContext(params.securityContext),
             }),
           }
-        : { createIfMissing: false },
+        : {
+            createIfMissing: false,
+            ...(params.securityContext !== undefined && {
+              securityContext: threadSecurityContext(params.securityContext),
+            }),
+          },
     );
   } catch (err) {
     if (err instanceof ThreadNotFoundError) return threadNotFound();
@@ -426,6 +422,17 @@ export async function openOwnedThread(params: {
     if (metadata[THREAD_AGENT_METADATA_KEY] !== agentId) return threadNotFound();
   }
   return thread;
+}
+
+function threadSecurityContext(context: SecurityContext | RunSecurityContext): RunSecurityContext {
+  const effective = "effective" in context ? context.effective : undefined;
+  return {
+    actor: { kind: context.actor.kind, id: context.actor.id },
+    ...(effective !== undefined &&
+    (context.actor.kind !== effective.kind || context.actor.id !== effective.id)
+      ? { effective: { kind: effective.kind, id: effective.id } }
+      : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------

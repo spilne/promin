@@ -270,6 +270,40 @@ describe("LocalWorkflows.trigger — existing workflowId", () => {
       expect([executions, run?.run, run?.status]).toEqual([1, 1, "completed"]);
     });
   }
+
+  it("returns an existing secured run without replacing its starter identity", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    await storage.createWorkflow({
+      workflowId: "secured-existing",
+      workflowName: "w",
+      input: {},
+      securityContext: { actor: { kind: "user", id: "alice" } },
+    });
+    const wf = workflow<unknown>({ name: "w" })
+      .step("a", () => succeed("ok"))
+      .build();
+    const workflows = new LocalWorkflows({
+      storage,
+      runner: createWorkflowRunner({ storage }),
+      definitions: { w: wf as never },
+      sleepScanIntervalMs: 0,
+      signalScanIntervalMs: 0,
+    });
+
+    await expect(
+      workflows.trigger(
+        "w",
+        {},
+        {
+          workflowId: "secured-existing",
+          securityContext: { actor: { kind: "user", id: "mallory" } },
+        },
+      ),
+    ).resolves.toEqual({ workflowId: "secured-existing", existing: true });
+    expect((await storage.loadWorkflow("secured-existing"))?.securityContext).toEqual({
+      actor: { kind: "user", id: "alice" },
+    });
+  });
 });
 
 describe("LocalWorkflows.rerun", () => {

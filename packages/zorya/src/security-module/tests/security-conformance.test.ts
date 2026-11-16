@@ -238,6 +238,20 @@ const moduleFactory: SecurityConformanceFactory = {
           { kind: "approval", namespaceId: "team-a", id: "approval-1" },
           { allowed: false, reason: "permission_denied" },
         ),
+        permissionCase(
+          "member run trigger",
+          { actor, effective: principalRef(effective) },
+          { resource: "run", action: "trigger" },
+          { kind: "run", namespaceId: "team-a", id: "other-run" },
+          { allowed: true, reason: "self_identity_allow" },
+        ),
+        permissionCase(
+          "member run administration",
+          { actor, effective: principalRef(effective) },
+          { resource: "run", action: "cancel" },
+          { kind: "run", namespaceId: "team-a", id: "other-run" },
+          { allowed: false, reason: "permission_denied" },
+        ),
       ],
       auditEvents,
       revokeAllowedIdentity: async () =>

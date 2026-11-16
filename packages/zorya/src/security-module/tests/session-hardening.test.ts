@@ -281,4 +281,28 @@ describe("browser cookie policy and SSE reauthorization", () => {
     });
     expect(env.security.secureResponse?.({ request, response })).toBe(response);
   });
+
+  it("does not cancel cookie-authenticated POST agent streams mid-turn", async () => {
+    const env = await fixture({ sseMaxAgeMs: 10 });
+    const request = cookieRequest({
+      cookie: env.cookie,
+      method: "POST",
+      origin: BASE_URL,
+      csrf: CSRF_TOKEN,
+    });
+    expect(await authenticate(env.security, request)).toBeDefined();
+    let cancelled = false;
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        cancel: () => {
+          cancelled = true;
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+
+    expect(env.security.secureResponse?.({ request, response })).toBe(response);
+    env.clock.advance(10);
+    expect(cancelled).toBe(false);
+  });
 });

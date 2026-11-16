@@ -172,6 +172,43 @@ describe("DurableSecurityAudit", () => {
       sink.append({ namespaceId: "acme", occurredAt: 1_000, event: "second" }),
     ).rejects.toThrow("Conflicting audit event: collision");
   });
+
+  test("looks up only the latest chain head and preserves empty metadata strings", async () => {
+    const inner = new InMemorySecurityStore();
+    let headReads = 0;
+    let listReads = 0;
+    const store = new Proxy(inner, {
+      get(target, property, receiver) {
+        if (property === "getAuditHead") {
+          return async (namespaceId: string) => {
+            headReads++;
+            return target.getAuditHead(namespaceId);
+          };
+        }
+        if (property === "listAuditRecords") {
+          return async (params: Parameters<SecurityStoreV2["listAuditRecords"]>[0]) => {
+            listReads++;
+            return target.listAuditRecords(params);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as SecurityStoreV2;
+    const sink = audit(store);
+
+    await sink.append({
+      namespaceId: "acme",
+      occurredAt: 1_000,
+      event: "empty.metadata",
+      metadata: { optionalDetail: "" },
+    });
+    await sink.append({ namespaceId: "acme", occurredAt: 1_001, event: "next" });
+
+    expect(headReads).toBe(2);
+    expect(listReads).toBe(0);
+    expect((await inner.getAuditRecord("event-1"))?.metadata).toEqual({ optionalDetail: "" });
+  });
 });
 
 describe("SecurityToolAuditBridge", () => {

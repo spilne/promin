@@ -218,6 +218,7 @@ export class ZoryaServer {
     this.planes = new AuthPlanes({
       apiKeys: config.apiKeys,
       workerApiKeys: config.remoteWorkers?.apiKeys,
+      operatorSecurity: config.security !== undefined,
     });
     this.security =
       config.security ??

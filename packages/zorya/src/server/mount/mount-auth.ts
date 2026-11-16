@@ -31,13 +31,16 @@ export class AuthPlanes {
   readonly operator: Auth;
   /** Worker plane: `/ws/worker`, `/rpc/*`, advertisements, worker protocol. */
   readonly worker: Auth;
+  private readonly operatorSecurity: boolean;
 
   constructor(params: {
     apiKeys: ReadonlyArray<string> | undefined;
     workerApiKeys: ReadonlyArray<string> | undefined;
+    operatorSecurity?: boolean;
   }) {
     this.operator = new Auth({ apiKeys: params.apiKeys });
     this.worker = new Auth({ apiKeys: params.workerApiKeys });
+    this.operatorSecurity = params.operatorSecurity === true;
   }
 
   /**
@@ -100,7 +103,7 @@ export class AuthPlanes {
     if (this.worker.isEnabled) return this.worker.matches(token) ? "worker" : undefined;
     // Insecure: the worker plane is open. Everything is open when the
     // operator plane is too; otherwise anonymous callers get worker scope.
-    return this.operator.isEnabled ? "worker" : "operator";
+    return this.operator.isEnabled || this.operatorSecurity ? "worker" : "operator";
   }
 }
 

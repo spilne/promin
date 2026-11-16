@@ -737,6 +737,15 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     return row && auditFromRow(row);
   }
 
+  async getAuditHead(namespaceId: string): Promise<SecurityAuditRecord | undefined> {
+    const value = requiredString(namespaceId, "namespace id", SECURITY_STORE_LIMITS.namespace);
+    const [row] = await execRaw(
+      this.db,
+      sql`SELECT * FROM zorya_security_data.zsec_audit_record WHERE namespace_id=${value} ORDER BY sequence DESC LIMIT 1`,
+    );
+    return row && auditFromRow(row);
+  }
+
   async listAuditRecords(params: {
     readonly namespaceId: string;
     readonly cursor?: string;

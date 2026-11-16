@@ -277,7 +277,7 @@ export function mountRuns(params: MountRunsParams): void {
     path: "/api/runs/:id/mark-success",
     access: protectedAccess({
       resource: "run",
-      action: "trigger",
+      action: "cancel",
       target: storedRun,
     }),
     handler: markRunSuccess(runActions),
@@ -287,7 +287,7 @@ export function mountRuns(params: MountRunsParams): void {
     path: "/api/runs/:id/mark-failed",
     access: protectedAccess({
       resource: "run",
-      action: "trigger",
+      action: "cancel",
       target: storedRun,
     }),
     handler: markRunFailed(runActions),
@@ -297,7 +297,7 @@ export function mountRuns(params: MountRunsParams): void {
     path: "/api/runs/:id/rerun",
     access: protectedAccess({
       resource: "run",
-      action: "trigger",
+      action: "cancel",
       target: storedRun,
     }),
     handler: rerunRun({ storage, rerun: (id) => workflows.rerun(id) }),
@@ -307,7 +307,7 @@ export function mountRuns(params: MountRunsParams): void {
     path: "/api/runs/:id/resume",
     access: protectedAccess({
       resource: "run",
-      action: "trigger",
+      action: "cancel",
       target: storedRun,
     }),
     handler: resumeRun({ storage, runs: runActions, resume }),

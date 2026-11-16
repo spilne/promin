@@ -112,6 +112,7 @@ describe("ScheduleExecutionSecurity", () => {
     const context = await guard.assignedContext({
       scheduleId: "nightly",
       namespaceId: "team",
+      caller: { actor: OPERATOR_PRINCIPAL, effective: principalRef(OPERATOR_PRINCIPAL) },
       serviceAccountId: "nightly-sa",
       runAsUserId: "alice",
     });
@@ -144,6 +145,41 @@ describe("ScheduleExecutionSecurity", () => {
     await expect(guard.authorizeDispatch(schedule)).rejects.toBeInstanceOf(
       ScheduleSecurityDeniedError,
     );
+  });
+
+  it("requires the caller to be authorized to use the assigned service account", async () => {
+    const account = principal({ kind: "service-account", id: "victim-sa" }, true);
+    const caller = principal({ kind: "user", id: "manager" });
+    const alice = principal({ kind: "user", id: "alice" });
+    let allowUse = false;
+    const guard = new ScheduleExecutionSecurity({
+      security: security({
+        principals: new Map([
+          ["service-account:victim-sa", account],
+          ["user:manager", caller],
+          ["user:alice", alice],
+        ]),
+        allowed: () => allowUse,
+      }),
+      clock: SystemWallClock,
+      logger: quietLogger,
+    });
+    const assignment = {
+      scheduleId: "nightly",
+      namespaceId: "team",
+      caller: { actor: caller, effective: principalRef(caller) },
+      serviceAccountId: "victim-sa",
+      resourceId: "alice",
+    } as const;
+
+    await expect(guard.assignedContext(assignment)).rejects.toMatchObject({
+      code: "assignment_denied",
+    });
+    allowUse = true;
+    await expect(guard.assignedContext(assignment)).resolves.toEqual({
+      actor: { kind: "service-account", id: "victim-sa" },
+      effective: { kind: "user", id: "alice" },
+    });
   });
 
   it("binds agent resource scope to a freshly authorized effective user", async () => {

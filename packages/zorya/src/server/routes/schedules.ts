@@ -33,7 +33,12 @@ import { requireActiveNamespace } from "../namespace-guard.ts";
 import { parseBody, parseParams, parseQuery } from "../request-validation.ts";
 import { assertIfMatch, contentEtag, withEtag } from "../preconditions.ts";
 import { runLocation } from "./runs.ts";
-import { ORG_WIDE_NAMESPACE, ScheduleAssignmentError } from "../security/index.ts";
+import {
+  ORG_WIDE_NAMESPACE,
+  ScheduleAssignmentError,
+  requestSecurityContext,
+  type SecurityContext,
+} from "../security/index.ts";
 
 export interface ScheduleDto {
   id: string;
@@ -299,8 +304,10 @@ export interface ScheduleRoutesDeps {
   readonly assignedSecurityContext?: (params: {
     readonly scheduleId: string;
     readonly namespaceId: string;
+    readonly caller?: SecurityContext;
     readonly serviceAccountId?: string;
     readonly runAsUserId?: string;
+    readonly resourceId?: string;
   }) => Promise<RunSecurityContext | undefined>;
 }
 
@@ -429,10 +436,12 @@ export function getSchedule(deps: ScheduleRoutesDeps) {
 
 async function assignmentForWrite(params: {
   readonly deps: ScheduleRoutesDeps;
+  readonly req: Request;
   readonly scheduleId: string;
   readonly namespaceId: string;
   readonly serviceAccountId?: string;
   readonly runAsUserId?: string;
+  readonly resourceId?: string;
 }): Promise<{ readonly securityContext?: RunSecurityContext } | Response> {
   if (!params.deps.assignedSecurityContext) {
     if (params.serviceAccountId === undefined && params.runAsUserId === undefined) return {};
@@ -442,10 +451,14 @@ async function assignmentForWrite(params: {
     const context = await params.deps.assignedSecurityContext({
       scheduleId: params.scheduleId,
       namespaceId: params.namespaceId,
+      ...(requestSecurityContext(params.req) !== undefined && {
+        caller: requestSecurityContext(params.req),
+      }),
       ...(params.serviceAccountId !== undefined && {
         serviceAccountId: params.serviceAccountId,
       }),
       ...(params.runAsUserId !== undefined && { runAsUserId: params.runAsUserId }),
+      ...(params.resourceId !== undefined && { resourceId: params.resourceId }),
     });
     return context ? { securityContext: context } : {};
   } catch (error) {
@@ -485,10 +498,15 @@ export function createSchedule(deps: ScheduleRoutesDeps) {
 
     const assignment = await assignmentForWrite({
       deps,
+      req,
       scheduleId: body.id,
       namespaceId: namespace ?? ORG_WIDE_NAMESPACE,
       serviceAccountId: body.serviceAccountId,
       runAsUserId: body.runAsUserId,
+      resourceId:
+        metadata.agentTrigger === true && typeof metadata.resourceId === "string"
+          ? metadata.resourceId
+          : undefined,
     });
     if (assignment instanceof Response) return assignment;
 
@@ -553,11 +571,14 @@ export function patchSchedule(deps: ScheduleRoutesDeps) {
 
     const merged = applySchedulePatch({ current, patch });
     const assignmentChanged =
-      patch.serviceAccountId !== undefined || patch.runAsUserId !== undefined;
+      patch.serviceAccountId !== undefined ||
+      patch.runAsUserId !== undefined ||
+      (patch.metadata !== undefined && current.securityContext?.actor.kind === "service-account");
     let securedMerged = merged;
     if (assignmentChanged) {
       const assignment = await assignmentForWrite({
         deps,
+        req,
         scheduleId: id,
         namespaceId: current.namespace ?? ORG_WIDE_NAMESPACE,
         serviceAccountId:
@@ -572,6 +593,10 @@ export function patchSchedule(deps: ScheduleRoutesDeps) {
               ? current.securityContext.effective.id
               : undefined
             : (patch.runAsUserId ?? undefined),
+        resourceId:
+          merged.metadata?.agentTrigger === true && typeof merged.metadata.resourceId === "string"
+            ? merged.metadata.resourceId
+            : undefined,
       });
       if (assignment instanceof Response) return assignment;
       securedMerged = { ...merged, ...assignment };

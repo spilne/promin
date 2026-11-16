@@ -60,6 +60,7 @@ import { LeaderLoop, forEachOrphanedRun, redeliverChildEndedSignals } from "./ru
 import {
   ZoryaWorkflows,
   existingRunResult,
+  createIdempotentRun,
   findDefinition,
   resetStepsUnderLock,
   stepsFrom,
@@ -278,17 +279,22 @@ export class QueuedWorkflows extends ZoryaWorkflows {
     const version = await this.resolveVersion({ name, requested: opts?.version });
     const securityContext = this.securityContextForTrigger(opts?.securityContext);
 
-    const created = await this.storage.createWorkflow({
+    const created = await createIdempotentRun({
+      storage: this.storage,
       workflowId,
-      workflowName: name,
-      input,
-      ...(opts?.workflowType !== undefined && { workflowType: opts.workflowType }),
-      ...(opts?.namespace !== undefined && { namespace: opts.namespace }),
-      ...(opts?.metadata !== undefined && { metadata: opts.metadata }),
-      ...(opts?.runSource !== undefined && { runSource: opts.runSource }),
-      ...(opts?.runSourceId !== undefined && { runSourceId: opts.runSourceId }),
-      ...(securityContext !== undefined && { securityContext }),
-      ...(version !== undefined && { version }),
+      create: () =>
+        this.storage.createWorkflow({
+          workflowId,
+          workflowName: name,
+          input,
+          ...(opts?.workflowType !== undefined && { workflowType: opts.workflowType }),
+          ...(opts?.namespace !== undefined && { namespace: opts.namespace }),
+          ...(opts?.metadata !== undefined && { metadata: opts.metadata }),
+          ...(opts?.runSource !== undefined && { runSource: opts.runSource }),
+          ...(opts?.runSourceId !== undefined && { runSourceId: opts.runSourceId }),
+          ...(securityContext !== undefined && { securityContext }),
+          ...(version !== undefined && { version }),
+        }),
     });
     // An existing run is answered as-is. One still pending may have lost
     // its start (a crash between the create and the enqueue): queue it

@@ -338,6 +338,48 @@ describe("OIDC security module", () => {
     }
   });
 
+  it("retries discovery after a transient failure", async () => {
+    let failDiscovery = true;
+    const provider = oidcLoginProvider({
+      issuer: issuer.issuer,
+      clientId: issuer.clientId,
+      clientSecret: issuer.clientSecret,
+      fetch: ((input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (failDiscovery && url.pathname === "/.well-known/openid-configuration") {
+          failDiscovery = false;
+          return Promise.resolve(new Response(null, { status: 503 }));
+        }
+        return fetch(input, init);
+      }) as typeof fetch,
+    });
+    const request = {
+      state: "state",
+      codeChallenge: "challenge",
+      redirectUri: `${PUBLIC_BASE_URL}/auth/callback/oidc`,
+    };
+
+    await expect(provider.authorizationUrl(request)).rejects.toThrow("OIDC discovery failed (503)");
+    await expect(provider.authorizationUrl(request)).resolves.toContain(issuer.issuer);
+  });
+
+  it("retries JWKS initialization after a transient failure", async () => {
+    let failJwks = true;
+    const env = environment({
+      fetch: ((input, init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (failJwks && url.pathname === "/jwks") {
+          failJwks = false;
+          return Promise.resolve(new Response(null, { status: 503 }));
+        }
+        return fetch(input, init);
+      }) as typeof fetch,
+    });
+
+    expect((await login({ env, email: "first@example.com" })).response.status).toBe(401);
+    expect((await login({ env, email: "second@example.com" })).response.status).toBe(302);
+  });
+
   it("refreshes the JWKS when the issuer rotates to an unknown signing key", async () => {
     const rotatingIssuer = await startFakeOidcIssuer();
     const tracking = jwksTrackingFetch();

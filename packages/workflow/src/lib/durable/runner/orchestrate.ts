@@ -304,6 +304,7 @@ export async function runWorkflowOrchestration(
         storage: ctx.storage,
         workflowId,
         requested: runParams.securityContext,
+        clock,
       });
     }
     throw error;
@@ -322,6 +323,7 @@ async function assertSecuredJoinCompatible(params: {
   storage: WorkflowStorage;
   workflowId: string;
   requested: RunSecurityContext | undefined;
+  clock: WallClock;
 }): Promise<void> {
   if (params.requested === undefined) return;
   for (let attempt = 0; attempt < SECURITY_CONTEXT_JOIN_ROW_ATTEMPTS; attempt++) {
@@ -334,7 +336,10 @@ async function assertSecuredJoinCompatible(params: {
       });
       return;
     }
-    await new Promise<void>((resolve) => setTimeout(resolve, SECURITY_CONTEXT_JOIN_ROW_DELAY_MS));
+    await new Promise<void>((resolve) => {
+      const timer = params.clock.setTimeout(resolve, SECURITY_CONTEXT_JOIN_ROW_DELAY_MS);
+      timer.unref?.();
+    });
   }
   throw new RunSecurityContextConflictError({
     workflowId: params.workflowId,

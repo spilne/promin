@@ -36,8 +36,8 @@ export function oidcLoginProvider(config: OidcLoginProviderConfig): LoginProvide
   let discoveryPromise: Promise<z.infer<typeof DiscoverySchema>> | undefined;
   let jwksPromise: Promise<ReturnType<typeof refreshableRemoteJwks>> | undefined;
 
-  const discovery = () => {
-    discoveryPromise ??= (async () => {
+  const discovery = async () => {
+    const pending = (discoveryPromise ??= (async () => {
       const metadata = await fetchJson({
         fetcher,
         url: discoveryUrl(issuer),
@@ -48,20 +48,30 @@ export function oidcLoginProvider(config: OidcLoginProviderConfig): LoginProvide
         throw new Error("OIDC discovery issuer does not match configured issuer");
       }
       return metadata;
-    })();
-    return discoveryPromise;
+    })());
+    try {
+      return await pending;
+    } catch (error) {
+      if (discoveryPromise === pending) discoveryPromise = undefined;
+      throw error;
+    }
   };
 
   const verifier = async () => {
-    jwksPromise ??= (async () => {
+    const pending = (jwksPromise ??= (async () => {
       const metadata = await discovery();
       return refreshableRemoteJwks({
         url: new URL(metadata.jwks_uri),
         fetcher,
         clock,
       });
-    })();
-    return jwksPromise;
+    })());
+    try {
+      return await pending;
+    } catch (error) {
+      if (jwksPromise === pending) jwksPromise = undefined;
+      throw error;
+    }
   };
 
   return {

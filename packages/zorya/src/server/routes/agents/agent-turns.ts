@@ -466,6 +466,7 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
     if (!currentActor) return jsonError(403, "forbidden");
     if (
       entry.elevated !== false &&
+      currentActor.kind !== "operator" &&
       currentActor.kind === entry.requestContext.actor.kind &&
       currentActor.id === entry.requestContext.actor.id
     ) {
@@ -502,7 +503,12 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
     });
     if (lease instanceof Response) return lease;
     try {
-      const thread = await openOwnedThread({ scoped, threadId, create: false });
+      const thread = await openOwnedThread({
+        scoped,
+        threadId,
+        create: false,
+        securityContext: entry.requestContext,
+      });
       if (thread instanceof Response) {
         await lease.release();
         return thread;

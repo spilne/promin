@@ -291,6 +291,8 @@ export interface SecurityStoreV2 extends SecurityStore {
     readonly outbox?: { readonly nextAttemptAt: number };
   }): Promise<"appended" | "already-exists">;
   getAuditRecord(eventId: string): Promise<SecurityAuditRecord | undefined>;
+  /** Latest row in a namespace chain, obtained without paging its history. */
+  getAuditHead(namespaceId: string): Promise<SecurityAuditRecord | undefined>;
   listAuditRecords(params: {
     readonly namespaceId: string;
     readonly cursor?: string;
