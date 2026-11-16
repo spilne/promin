@@ -101,18 +101,99 @@ postgresDescribe(
             CREATE SCHEMA zsec_attacker;
             CREATE TABLE zsec_attacker.zsec_subject
               (kind text, id text, status text, created_at bigint, updated_at bigint);
-            CREATE TABLE zsec_attacker.zsec_access_group (subject_kind text, id text)`,
+            CREATE TABLE zsec_attacker.zsec_access_group (subject_kind text, id text);
+            CREATE DOMAIN zsec_attacker.text AS pg_catalog.text CHECK (VALUE IS NULL);
+            CREATE DOMAIN zsec_attacker.int8 AS pg_catalog.int8 CHECK (VALUE IS NULL);
+            CREATE DOMAIN zsec_attacker.float8 AS pg_catalog.float8 CHECK (VALUE IS NULL);
+            CREATE DOMAIN zsec_attacker.jsonb AS pg_catalog.jsonb CHECK (VALUE IS NULL);
+            CREATE FUNCTION zsec_attacker.clock_timestamp()
+              RETURNS pg_catalog.timestamptz LANGUAGE sql IMMUTABLE
+              AS 'SELECT ''1970-01-01 UTC''::pg_catalog.timestamptz';
+            CREATE FUNCTION zsec_attacker.random()
+              RETURNS pg_catalog.float8 LANGUAGE sql IMMUTABLE
+              AS 'SELECT 0::pg_catalog.float8';
+            CREATE FUNCTION zsec_attacker.md5(pg_catalog.text)
+              RETURNS pg_catalog.text LANGUAGE sql IMMUTABLE
+              AS 'SELECT ''attacker-token''::pg_catalog.text';
+            CREATE FUNCTION zsec_attacker.date_part(pg_catalog.text, pg_catalog.timestamptz)
+              RETURNS pg_catalog.float8 LANGUAGE sql IMMUTABLE
+              AS 'SELECT 0::pg_catalog.float8';
+            CREATE FUNCTION zsec_attacker.floor(pg_catalog.float8)
+              RETURNS pg_catalog.float8 LANGUAGE sql IMMUTABLE
+              AS 'SELECT 0::pg_catalog.float8';
+            CREATE FUNCTION zsec_attacker.hashtextextended(pg_catalog.text, pg_catalog.int8)
+              RETURNS pg_catalog.int8 LANGUAGE sql IMMUTABLE
+              AS 'SELECT 0::pg_catalog.int8';
+            CREATE FUNCTION zsec_attacker.pg_advisory_xact_lock(pg_catalog.int8)
+              RETURNS pg_catalog.void LANGUAGE plpgsql
+              AS 'BEGIN RAISE EXCEPTION ''attacker advisory lock called''; END';
+            CREATE FUNCTION zsec_attacker.poison_array(pg_catalog.text[], pg_catalog.text)
+              RETURNS pg_catalog.text[] LANGUAGE sql IMMUTABLE
+              AS 'SELECT ARRAY[''attacker-value'']::pg_catalog.text[]';
+            CREATE AGGREGATE zsec_attacker.array_agg(pg_catalog.text) (
+              SFUNC = zsec_attacker.poison_array,
+              STYPE = pg_catalog.text[],
+              INITCOND = '{}'
+            )`,
       );
       try {
         await pg.db.transaction(async (rawTx) => {
           const tx = rawTx as unknown as DrizzleDb;
-          await execRaw(tx, sql`SET LOCAL search_path = zsec_attacker, public`);
+          await execRaw(tx, sql`SET LOCAL search_path = zsec_attacker, pg_catalog, public`);
           const store = new PostgresSecurityStore({ db: tx });
           await store.putGroup({ id: "qualified-group", status: "active" });
           expect(await store.getGroup("qualified-group")).toEqual({
             id: "qualified-group",
             status: "active",
           });
+          const { user } = await store.findOrCreateProviderUser({
+            identity: {
+              providerId: "qualified-builtins",
+              issuer: "https://qualified.example",
+              subject: "qualified-builtins",
+            },
+            email: "qualified-builtins@example.com",
+          });
+          await store.putSubjectBinding({
+            subject: { kind: "user", id: user.id },
+            namespaceId: "team",
+            accessRole: "member",
+          });
+          expect(
+            await store.resolveAccess({
+              subject: { kind: "user", id: user.id },
+              namespaceId: "team",
+            }),
+          ).toEqual({ accessRoles: ["member"], groups: [] });
+
+          await store.appendAuditWithOutbox({
+            record: {
+              id: "qualified-builtins",
+              namespaceId: "qualified-builtins",
+              sequence: 1,
+              occurredAt: 1,
+              recordedAt: 1,
+              event: "qualified-builtins",
+              metadata: { source: "qualified-builtins" },
+              hash: "qualified-builtins-hash",
+              keyId: "test-key",
+            },
+            outbox: { nextAttemptAt: 0 },
+          });
+          const [lease] = await store.claimAuditOutbox({
+            owner: "qualified-worker",
+            leaseMs: 100,
+            limit: 1,
+          });
+          expect(lease?.leaseToken).not.toBe("attacker-token");
+          expect(lease?.leaseExpiresAt).toBeGreaterThan(Date.now());
+          await Bun.sleep(150);
+          expect(
+            await store.ackAuditOutbox({
+              eventId: lease!.eventId,
+              leaseToken: lease!.leaseToken!,
+            }),
+          ).toBe(false);
         });
 
         const [real] = await execRaw(

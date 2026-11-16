@@ -412,12 +412,12 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
         )
         SELECT
           COALESCE(
-            (SELECT array_agg(group_id ORDER BY group_id) FROM active_groups),
-            ARRAY[]::text[]
+            (SELECT pg_catalog.array_agg(group_id ORDER BY group_id) FROM active_groups),
+            ARRAY[]::pg_catalog.text[]
           ) AS groups,
           COALESCE(
             (
-              SELECT array_agg(DISTINCT b.access_role ORDER BY b.access_role)
+              SELECT pg_catalog.array_agg(DISTINCT b.access_role ORDER BY b.access_role)
               FROM zorya_security_data.zsec_access_binding b
               WHERE EXISTS (SELECT 1 FROM active_subject)
                 AND b.namespace_id IN (${namespaceId},${ORG_WIDE_NAMESPACE})
@@ -426,7 +426,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
                   OR (b.subject_kind='group' AND b.subject_id IN (SELECT group_id FROM active_groups))
                 )
             ),
-            ARRAY[]::text[]
+            ARRAY[]::pg_catalog.text[]
           ) AS access_roles
       `,
     );
@@ -746,11 +746,11 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       status === undefined
         ? await execRaw(
             this.db,
-            sql`SELECT * FROM zorya_security_data.zsec_audit_outbox WHERE (${cursor ?? null}::text IS NULL OR event_id>${cursor ?? ""}) ORDER BY event_id LIMIT ${limit + 1}`,
+            sql`SELECT * FROM zorya_security_data.zsec_audit_outbox WHERE (${cursor ?? null}::pg_catalog.text IS NULL OR event_id>${cursor ?? ""}) ORDER BY event_id LIMIT ${limit + 1}`,
           )
         : await execRaw(
             this.db,
-            sql`SELECT * FROM zorya_security_data.zsec_audit_outbox WHERE status=${status} AND (${cursor ?? null}::text IS NULL OR event_id>${cursor ?? ""}) ORDER BY event_id LIMIT ${limit + 1}`,
+            sql`SELECT * FROM zorya_security_data.zsec_audit_outbox WHERE status=${status} AND (${cursor ?? null}::pg_catalog.text IS NULL OR event_id>${cursor ?? ""}) ORDER BY event_id LIMIT ${limit + 1}`,
           );
     return makePage(rows.map(outboxFromRow), limit, (row) => row.eventId);
   }
@@ -772,7 +772,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
         tx,
         sql`
         WITH store_clock AS (
-          SELECT ${now}::bigint AS now
+          SELECT ${now}::pg_catalog.int8 AS now
         ), candidates AS (
           SELECT event_id
           FROM zorya_security_data.zsec_audit_outbox, store_clock
@@ -784,7 +784,11 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
         )
         UPDATE zorya_security_data.zsec_audit_outbox o
         SET status='leased', attempts=o.attempts+1,
-            lease_token=md5(random()::text || clock_timestamp()::text || o.event_id),
+            lease_token=pg_catalog.md5(
+              pg_catalog.random()::pg_catalog.text
+              || pg_catalog.clock_timestamp()::pg_catalog.text
+              || o.event_id
+            ),
             lease_owner=${owner}, lease_expires_at=store_clock.now+${leaseMs}, delivered_at=NULL
         FROM candidates c, store_clock WHERE o.event_id=c.event_id
         RETURNING o.*`,
@@ -808,7 +812,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       const now = this.nowExpression();
       const rows = await execRaw(
         tx,
-        sql`WITH store_clock AS (SELECT ${now}::bigint AS now)
+        sql`WITH store_clock AS (SELECT ${now}::pg_catalog.int8 AS now)
           UPDATE zorya_security_data.zsec_audit_outbox o
           SET status='delivered',delivered_at=COALESCE(o.delivered_at,store_clock.now)
           FROM store_clock
@@ -843,7 +847,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       const now = this.nowExpression();
       const rows = await execRaw(
         tx,
-        sql`WITH store_clock AS (SELECT ${now}::bigint AS now)
+        sql`WITH store_clock AS (SELECT ${now}::pg_catalog.int8 AS now)
           UPDATE zorya_security_data.zsec_audit_outbox o
           SET status='pending',next_attempt_at=${nextAttemptAt},lease_owner=NULL,
               lease_expires_at=NULL,last_error=${lastError ?? null}
@@ -1041,14 +1045,18 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     if (this.clock !== undefined) return integerMs(this.clock.currentTimeMs(), "store clock");
     const [row] = await execRaw(
       db,
-      sql`SELECT floor(extract(epoch from clock_timestamp()) * 1000)::double precision AS now`,
+      sql`SELECT pg_catalog.floor(
+        pg_catalog.date_part('epoch', pg_catalog.clock_timestamp()) * 1000
+      )::pg_catalog.float8 AS now`,
     );
     return integerMs(Number(row!.now), "database clock");
   }
 
   private nowExpression(): ReturnType<typeof sql> {
     return this.clock === undefined
-      ? sql`floor(extract(epoch from clock_timestamp()) * 1000)::double precision`
+      ? sql`pg_catalog.floor(
+          pg_catalog.date_part('epoch', pg_catalog.clock_timestamp()) * 1000
+        )::pg_catalog.float8`
       : sql`${integerMs(this.clock.currentTimeMs(), "store clock")}`;
   }
 
@@ -1104,7 +1112,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       throw new Error("Audit chain boundary mismatch");
     await execRaw(
       db,
-      sql`INSERT INTO zorya_security_data.zsec_audit_record(id,namespace_id,sequence,occurred_at,recorded_at,event,actor_kind,actor_id,effective_kind,effective_id,permission_resource,permission_action,resource_kind,resource_namespace_id,resource_id,resource_principal_kind,resource_principal_id,decision_allowed,decision_reason,request_id,run_id,thread_id,tool_call_id,metadata,previous_hash,hash,key_id) VALUES (${record.id},${record.namespaceId},${record.sequence},${record.occurredAt},${record.recordedAt},${record.event},${record.actor?.kind ?? null},${record.actor?.id ?? null},${record.effective?.kind ?? null},${record.effective?.id ?? null},${record.permission?.resource ?? null},${record.permission?.action ?? null},${record.resource?.kind ?? null},${record.resource?.namespaceId ?? null},${record.resource?.id ?? null},${record.resource?.principal?.kind ?? null},${record.resource?.principal?.id ?? null},${record.decision?.allowed ?? null},${record.decision?.reason ?? null},${record.correlation?.requestId ?? null},${record.correlation?.runId ?? null},${record.correlation?.threadId ?? null},${record.correlation?.toolCallId ?? null},${record.metadata ? JSON.stringify(record.metadata) : null}::jsonb,${record.previousHash ?? null},${record.hash},${record.keyId})`,
+      sql`INSERT INTO zorya_security_data.zsec_audit_record(id,namespace_id,sequence,occurred_at,recorded_at,event,actor_kind,actor_id,effective_kind,effective_id,permission_resource,permission_action,resource_kind,resource_namespace_id,resource_id,resource_principal_kind,resource_principal_id,decision_allowed,decision_reason,request_id,run_id,thread_id,tool_call_id,metadata,previous_hash,hash,key_id) VALUES (${record.id},${record.namespaceId},${record.sequence},${record.occurredAt},${record.recordedAt},${record.event},${record.actor?.kind ?? null},${record.actor?.id ?? null},${record.effective?.kind ?? null},${record.effective?.id ?? null},${record.permission?.resource ?? null},${record.permission?.action ?? null},${record.resource?.kind ?? null},${record.resource?.namespaceId ?? null},${record.resource?.id ?? null},${record.resource?.principal?.kind ?? null},${record.resource?.principal?.id ?? null},${record.decision?.allowed ?? null},${record.decision?.reason ?? null},${record.correlation?.requestId ?? null},${record.correlation?.runId ?? null},${record.correlation?.threadId ?? null},${record.correlation?.toolCallId ?? null},${record.metadata ? JSON.stringify(record.metadata) : null}::pg_catalog.jsonb,${record.previousHash ?? null},${record.hash},${record.keyId})`,
     );
     if (outbox)
       await execRaw(
@@ -1130,7 +1138,10 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
 }
 
 async function lock(db: DrizzleDb, key: string): Promise<void> {
-  await execRaw(db, sql`SELECT pg_advisory_xact_lock(hashtextextended(${key},0))`);
+  await execRaw(
+    db,
+    sql`SELECT pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(${key},0))`,
+  );
 }
 
 function userFromRow(row: DbRow): SecurityUser {
