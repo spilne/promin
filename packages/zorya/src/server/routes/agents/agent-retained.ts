@@ -11,6 +11,7 @@ import type { AgentGatewayDeps } from "./agent-gateway-deps.ts";
 import { openThreadFromBody, openThreadFromQuery } from "./agent-scope.ts";
 import { protectedAccess } from "../../mount/route-security.ts";
 import { agentBodyTarget, agentQueryTarget } from "../../mount/agent-route-security.ts";
+import { requestRunSecurityContext } from "../../security/index.ts";
 
 const ScopeBody = z.object({
   namespaceId: z.string(),
@@ -144,6 +145,7 @@ export function mountRetainedAgentRoutes(
         });
         if (!allowed) return jsonError(403, "scope_forbidden");
       }
+      const securityContext = requestRunSecurityContext(req);
       try {
         return json(
           202,
@@ -152,6 +154,7 @@ export function mountRetainedAgentRoutes(
             agentId: parsed.data.agentId,
             task: parsed.data.task,
             ...(parsed.data.childId && { childId: parsed.data.childId }),
+            ...(securityContext !== undefined && { securityContext }),
           }),
         );
       } catch (error) {

@@ -248,6 +248,12 @@ export class ZoryaServer {
         legacyPrincipal: principalRef(OPERATOR_PRINCIPAL),
       }),
     });
+    this.retainedSubagents?.configureExecutionSecurity({
+      security: this.security,
+      ...(config.security === undefined && {
+        legacySecurityContext: { actor: principalRef(OPERATOR_PRINCIPAL) },
+      }),
+    });
     const readinessTimeoutMs = config.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
     this.shutdownTimeoutMs = config.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
     this.workerWs = new WorkerWebSocketServer({

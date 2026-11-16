@@ -5,8 +5,9 @@ import {
   InMemoryUsageLedger,
   type LLMProvider,
 } from "@promin/agent";
-import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { InMemoryWorkflowStorage, SystemWallClock } from "@promin/workflow";
 import { ZoryaServer } from "../../../server.ts";
+import { principalRef, type Principal, type ZoryaSecurity } from "../../../security/index.ts";
 import { ZoryaAgents } from "../zorya-agents.ts";
 import { harness, overrideStorage, parent, waitFor } from "./retained-harness.ts";
 
@@ -14,11 +15,13 @@ describe("retained subagents", () => {
   it("admits a child, preserves its inbox across a service restart, and isolates ownership", async () => {
     const h = await harness();
     await h.workflows.start();
+    const securityContext = { actor: { kind: "user" as const, id: "alice" } };
     const child = await h.retained.spawnAgent({
       parent,
       agentId: "worker",
       task: "initial",
       childId: "child-1",
+      securityContext,
     });
     expect(child.status).toBe("admitted");
     await waitFor(
@@ -27,6 +30,12 @@ describe("retained subagents", () => {
     );
     expect(await h.retained.listChildAgents(parent)).toHaveLength(1);
     await h.workflows.stop();
+    const storedBeforeRestart = await h.storage.loadWorkflow(child.workflowId);
+    expect(storedBeforeRestart).toBeDefined();
+    expect(storedBeforeRestart!.securityContext).toEqual(securityContext);
+    expect((storedBeforeRestart!.input as { securityContext?: unknown }).securityContext).toEqual(
+      securityContext,
+    );
     const restarted = h.make();
     await restarted.retained.reconcileMailboxes();
     await restarted.workflows.start();
@@ -68,6 +77,71 @@ describe("retained subagents", () => {
     ).rejects.toThrow();
     await restarted.retained.stopAgent(parent, child.childId);
     await restarted.workflows.stop();
+  });
+
+  it("blocks a retained mailbox turn after starter revocation before agent code runs", async () => {
+    const h = await harness();
+    const user: Principal = {
+      kind: "user",
+      id: "alice",
+      accessRoles: { acme: ["member"] },
+      canActFor: false,
+    };
+    let enabled = true;
+    const security: ZoryaSecurity = {
+      authenticate: async () => (enabled ? user : undefined),
+      resolvePrincipal: async (ref) =>
+        enabled && ref.kind === user.kind && ref.id === user.id ? user : undefined,
+      resolveIdentity: async ({ actor, asserted }) =>
+        enabled ? { actor, effective: asserted ?? principalRef(actor) } : undefined,
+      identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
+      authorize: async () =>
+        enabled
+          ? { allowed: true, reason: "access_role_allow" }
+          : { allowed: false, reason: "principal_disabled" },
+      recordAudit: async () => {},
+    };
+    h.workflows.configureExecutionSecurity({
+      security,
+      clock: SystemWallClock,
+      logger: { error: () => {} },
+    });
+    h.retained.configureExecutionSecurity({ security });
+    await expect(
+      h.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "missing identity",
+        childId: "missing-retained-identity",
+      }),
+    ).rejects.toMatchObject({ code: "forbidden" });
+    await h.workflows.start();
+    const child = await h.retained.spawnAgent({
+      parent,
+      agentId: "worker",
+      task: "initial",
+      childId: "revoked-starter",
+      securityContext: { actor: principalRef(user) },
+    });
+    await waitFor(
+      async () =>
+        (await h.retained.readAgentMessages(parent, child.childId)).transcript.length >= 2,
+    );
+    const before = (await h.retained.readAgentMessages(parent, child.childId)).transcript.length;
+    enabled = false;
+    await h.retained.messageAgent({
+      parent,
+      childId: child.childId,
+      task: "must not run",
+      messageId: "revoked-message",
+    });
+    await waitFor(
+      async () => (await h.storage.loadWorkflow(child.workflowId))?.status === "failed",
+    );
+    expect((await h.retained.readAgentMessages(parent, child.childId)).transcript).toHaveLength(
+      before,
+    );
+    await h.workflows.stop();
   });
 
   it("enforces capability and depth policy", async () => {
@@ -150,6 +224,15 @@ describe("retained subagents", () => {
     });
     expect(created.status).toBe(202);
     const { childId } = (await created.json()) as { childId: string };
+    const createdState = await h.storage.loadWorkflow(`retained-agent:${childId}`);
+    expect(createdState).toBeDefined();
+    expect(createdState!.securityContext).toEqual({
+      actor: { kind: "operator", id: "operator" },
+      effective: { kind: "user", id: "alice" },
+    });
+    expect((createdState!.input as { securityContext?: unknown }).securityContext).toEqual(
+      createdState!.securityContext,
+    );
     expect(
       (
         await send("POST", `/api/agents/parent/threads/conversation/children/${childId}/messages`, {

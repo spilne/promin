@@ -15,11 +15,14 @@ import {
   hasCapability,
   runUsage,
   workflow,
+  type RunSecurityContext,
   type UsageReport,
   type UsageTotals,
   type Workflow,
   type WorkflowBudget,
 } from "@promin/workflow";
+import { normalizeRunSecurityContext, sameRunSecurityContext } from "@promin/workflow/storage-kit";
+import type { Principal, PrincipalRef, ZoryaSecurity } from "../../security/index.ts";
 import type { LocalWorkflows } from "../workflows/local-workflows.ts";
 import type { ZoryaAgents } from "./zorya-agents.ts";
 
@@ -71,6 +74,14 @@ interface RetainedInput {
   readonly parent: RetainedParent;
   readonly depth: number;
   readonly task: string;
+  /** Starter identity persisted with both the retained input and durable run. */
+  readonly securityContext?: RunSecurityContext;
+}
+
+export interface RetainedExecutionSecurityConfig {
+  readonly security: ZoryaSecurity;
+  /** Built-in key mode adopts contextless legacy/direct children as operator. */
+  readonly legacySecurityContext?: RunSecurityContext;
 }
 
 export interface RetainedSubagentsConfig {
@@ -130,20 +141,34 @@ export interface RetainedSubagentsConfig {
   readonly childBudget?: WorkflowBudget;
 }
 
+type RetainedRuntimeConfig = RetainedSubagentsConfig & {
+  readonly identityFor: (input: RetainedInput) => Promise<{
+    readonly securityContext?: RunSecurityContext;
+    readonly principal?: Principal;
+  }>;
+};
+
 /** Durable, retained child agents. One workflow holds each child's ordered inbox. */
 export class RetainedSubagents {
   private readonly config: RetainedSubagentsConfig;
+  private executionSecurity?: {
+    readonly security: ZoryaSecurity;
+    readonly legacySecurityContext?: RunSecurityContext;
+  };
   readonly definition: Workflow<RetainedInput, void>;
 
   constructor(config: RetainedSubagentsConfig) {
     this.config = config;
+    const service: RetainedRuntimeConfig = {
+      ...config,
+      identityFor: (input) => this.identityFor(input),
+    };
     this.definition = workflow<RetainedInput>({
       name: RETAINED_AGENT_WORKFLOW,
       type: "retained-agent",
       ...(config.childBudget !== undefined && { budget: config.childBudget }),
     })
       .journaled("retained-agent", function* (ctx, input) {
-        const service = config;
         const pollMs = service.pollIntervalMs ?? 60_000;
         const maxIdlePolls = Math.max(1, Math.ceil((service.idleTtlMs ?? 3_600_000) / pollMs));
         const maxIterations = service.maxIterations ?? 1000;
@@ -180,7 +205,18 @@ export class RetainedSubagents {
       .build();
     config.workflows.define(this.definition as Workflow<unknown, unknown>, {
       internal: true,
-      admissionExempt: true,
+    });
+  }
+
+  /** Installed by ZoryaServer once its pluggable security implementation is known. */
+  configureExecutionSecurity(config: RetainedExecutionSecurityConfig): void {
+    const legacySecurityContext =
+      config.legacySecurityContext === undefined
+        ? undefined
+        : normalizeRunSecurityContext(config.legacySecurityContext);
+    this.executionSecurity = Object.freeze({
+      security: config.security,
+      ...(legacySecurityContext !== undefined && { legacySecurityContext }),
     });
   }
 
@@ -200,12 +236,30 @@ export class RetainedSubagents {
     readonly agentId: string;
     readonly task: string;
     readonly childId?: string;
+    /** Trusted caller identity; never read from model or HTTP request bodies. */
+    readonly securityContext?: RunSecurityContext;
   }): Promise<RetainedChildHandle> {
-    const key = `${params.parent.namespaceId}\u0000${params.parent.threadId}`;
+    const parent = Object.freeze({
+      namespaceId: params.parent.namespaceId,
+      resourceId: params.parent.resourceId,
+      agentId: params.parent.agentId,
+      threadId: params.parent.threadId,
+    });
+    const requestedSecurityContext = params.securityContext;
+    const admitted = Object.freeze({
+      parent,
+      agentId: params.agentId,
+      task: params.task,
+      ...(params.childId !== undefined && { childId: params.childId }),
+      ...(requestedSecurityContext !== undefined && {
+        securityContext: normalizeRunSecurityContext(requestedSecurityContext),
+      }),
+    });
+    const key = `${parent.namespaceId}\u0000${parent.threadId}`;
     const previous = this.spawnChains.get(key) ?? Promise.resolve();
     const run = previous.then(
-      () => this.admit(params),
-      () => this.admit(params),
+      () => this.admit(admitted),
+      () => this.admit(admitted),
     );
     const tail = run.catch(() => undefined);
     this.spawnChains.set(key, tail);
@@ -220,6 +274,7 @@ export class RetainedSubagents {
     readonly agentId: string;
     readonly task: string;
     readonly childId?: string;
+    readonly securityContext?: RunSecurityContext;
   }): Promise<RetainedChildHandle> {
     const { parent } = params;
     const gate = this.config.agents.turnGate;
@@ -240,6 +295,9 @@ export class RetainedSubagents {
     try {
       if (!params.task.trim())
         throw new RetainedSubagentError("invalid", "Subagent task must not be empty");
+      // Snapshot/validate the trusted starter identity before any registry,
+      // thread or delegation-policy work can run.
+      const securityContext = this.contextForSpawn(params.securityContext);
       const parentThread = await this.ownedParent(parent);
       const allowed = await this.config.canDelegate(parent.agentId, params.agentId, {
         parent,
@@ -264,18 +322,20 @@ export class RetainedSubagents {
       if (await this.config.workflows.storage.loadWorkflow(workflowId)) {
         throw new RetainedSubagentError("conflict", "Child id already exists");
       }
-      const input: RetainedInput = {
+      const input: RetainedInput = Object.freeze({
         childId,
         agentId: params.agentId,
         agentVersion: recipe.version,
-        parent,
+        parent: Object.freeze({ ...parent }),
         depth,
         task: params.task,
-      };
+        ...(securityContext !== undefined && { securityContext }),
+      });
       await this.config.workflows.trigger(RETAINED_AGENT_WORKFLOW, input, {
         workflowId,
         namespace: parent.namespaceId,
         internal: true,
+        ...(securityContext !== undefined && { securityContext }),
         metadata: {
           childId,
           agentId: params.agentId,
@@ -298,6 +358,9 @@ export class RetainedSubagents {
           stored.parent?.threadId !== parent.threadId)
       ) {
         throw new RetainedSubagentError("conflict", "Child id already exists");
+      }
+      if (!sameRunSecurityContext(admitted?.securityContext, input.securityContext)) {
+        throw new RetainedSubagentError("conflict", "Child security context mismatch");
       }
       return {
         childId,
@@ -492,8 +555,68 @@ export class RetainedSubagents {
       state.metadata?.deleted === true
     )
       throw new RetainedSubagentError("not_found", "Child agent not found");
-    return state.input as RetainedInput;
+    const input = state.input as RetainedInput;
+    if (!sameRunSecurityContext(state.securityContext, input.securityContext)) {
+      throw new RetainedSubagentError("not_found", "Child agent not found");
+    }
+    return input;
   }
+
+  private contextForSpawn(
+    requested: RunSecurityContext | undefined,
+  ): RunSecurityContext | undefined {
+    if (requested !== undefined) return normalizeRunSecurityContext(requested);
+    if (!this.executionSecurity) return undefined;
+    if (this.executionSecurity.legacySecurityContext !== undefined) {
+      return this.executionSecurity.legacySecurityContext;
+    }
+    throw new RetainedSubagentError("forbidden", "Retained subagent identity is required");
+  }
+
+  /** Freshly re-resolve actor/effective identity before every retained turn. */
+  private async identityFor(input: RetainedInput): Promise<{
+    readonly securityContext?: RunSecurityContext;
+    readonly principal?: Principal;
+  }> {
+    if (!this.executionSecurity) {
+      return input.securityContext === undefined
+        ? {}
+        : { securityContext: normalizeRunSecurityContext(input.securityContext) };
+    }
+    const runContext = this.contextForSpawn(input.securityContext);
+    if (!runContext) return {};
+    const actorRef = toPrincipalRef(runContext.actor);
+    const effectiveRef = toPrincipalRef(runContext.effective ?? runContext.actor);
+    const actor = await this.executionSecurity.security.resolvePrincipal(actorRef);
+    if (!actor) throw new RetainedSubagentError("forbidden", "Retained starter unavailable");
+    const resolved = await this.executionSecurity.security.resolveIdentity({
+      actor,
+      asserted: effectiveRef,
+    });
+    if (!resolved || !samePrincipalRef(resolved.effective, effectiveRef)) {
+      throw new RetainedSubagentError("forbidden", "Retained starter unavailable");
+    }
+    if (samePrincipalRef(actor, resolved.effective)) {
+      return { securityContext: runContext, principal: actor };
+    }
+    const effective = await this.executionSecurity.security.resolvePrincipal(resolved.effective);
+    // Key-only mode intentionally has no user directory. The canonical
+    // operator remains the resolver principal while the durable effective
+    // reference still identifies who the work is for.
+    if (!effective && actor.kind === "operator") {
+      return { securityContext: runContext, principal: actor };
+    }
+    if (!effective) throw new RetainedSubagentError("forbidden", "Retained subject unavailable");
+    return { securityContext: runContext, principal: effective };
+  }
+}
+
+function toPrincipalRef(ref: { readonly kind: string; readonly id: string }): PrincipalRef {
+  return { kind: ref.kind as PrincipalRef["kind"], id: ref.id };
+}
+
+function samePrincipalRef(left: PrincipalRef, right: PrincipalRef): boolean {
+  return left.kind === right.kind && left.id === right.id;
 }
 
 function workflowIdOf(childId: string): string {
@@ -557,7 +680,7 @@ interface TurnReport {
  * is admitted against the parent's budgets and its spend is charged to them.
  */
 async function runAndRecord(
-  config: RetainedSubagentsConfig,
+  config: RetainedRuntimeConfig,
   input: RetainedInput,
   task: string,
   seq: number,
@@ -679,7 +802,7 @@ async function hasSteerAfter(
 
 /** Process the inbox message at `seq` if it exists. */
 async function consume(
-  config: RetainedSubagentsConfig,
+  config: RetainedRuntimeConfig,
   input: RetainedInput,
   seq: number,
 ): Promise<{
@@ -705,30 +828,54 @@ async function consume(
 }
 
 async function runChildTurn(params: {
-  readonly config: RetainedSubagentsConfig;
+  readonly config: RetainedRuntimeConfig;
   readonly input: RetainedInput;
   readonly task: string;
   readonly turnKey: string;
   readonly signal: AbortSignal;
 }): Promise<string> {
   const { config, input, task, turnKey, signal } = params;
+  // Resolve current actor/effective identity before touching the recipe or
+  // host resolver. A revoked starter cannot reach agent/retrieval code.
+  const identity = await config.identityFor(input);
   const recipe: RegisteredAgent | null = await config.agents.registry.get({
     id: input.agentId,
     version: input.agentVersion,
   });
   if (!recipe) throw new Error("Pinned child agent recipe unavailable");
-  const agent = (await config.agents.resolve(recipe, input.parent)).withScope({
+  const agent = (
+    await config.agents.resolve(recipe, {
+      ...input.parent,
+      ...(identity.principal !== undefined && { principal: identity.principal }),
+    })
+  ).withScope({
     namespaceId: input.parent.namespaceId,
     resourceId: input.parent.resourceId,
   });
   const thread = await agent.thread(childThreadId(input.childId), {
+    ...(identity.securityContext !== undefined && {
+      securityContext: identity.securityContext,
+    }),
     metadata: {
       retainedParentAgentId: input.parent.agentId,
       retainedParentThreadId: input.parent.threadId,
       retainedDepth: input.depth,
     },
   });
-  const result = await thread.send({ task }, { turnKey, signal });
+  // Close the registry/resolver/thread await window immediately before the
+  // irreversible turn boundary. The durable admission hook also checks at
+  // workflow resume; this second check catches revocation during resolution.
+  await config.identityFor(input);
+  const result = await thread.send(
+    { task },
+    {
+      turnKey,
+      signal,
+      ...(identity.securityContext !== undefined && {
+        securityContext: identity.securityContext,
+      }),
+    },
+  );
   await result.text;
   return await result.finishReason;
 }

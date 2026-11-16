@@ -67,6 +67,7 @@ export {
   type ZoryaAgentsConfig,
   type ZoryaAgentsScanConfig,
   type RetainedSubagentsConfig,
+  type RetainedExecutionSecurityConfig,
   type RetainedParent,
   type RetainedChildHandle,
 } from "./server/services/agents/index.ts";

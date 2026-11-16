@@ -9,6 +9,10 @@ const scopeOf = (p: typeof parent): ToolExecuteContext => ({
     resourceId: p.resourceId,
     threadId: p.threadId,
     agentId: p.agentId,
+    securityContext: {
+      actor: { kind: "service-account", id: "delegator" },
+      effective: { kind: "user", id: "alice" },
+    },
   },
   toolCallId: "call-1",
 });
@@ -21,6 +25,12 @@ describe("retained subagent tools", () => {
     const ctx = scopeOf(parent);
 
     const handle = await tools.spawn_subagent!.execute({ agentId: "worker", task: "first" }, ctx);
+    const stored = await h.storage.loadWorkflow(handle.workflowId);
+    expect(stored).toBeDefined();
+    expect(stored!.securityContext).toEqual(ctx.scope?.securityContext);
+    expect((stored!.input as { securityContext?: unknown }).securityContext).toEqual(
+      ctx.scope?.securityContext,
+    );
     await waitFor(async () => {
       const read = await tools.read_subagent!.execute({ childId: handle.childId }, ctx);
       return read.outcomes.length === 1;
