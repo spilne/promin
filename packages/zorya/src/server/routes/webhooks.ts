@@ -634,6 +634,7 @@ export interface WebhookGatewayDeps {
       readonly namespaceId?: string;
       readonly resourceId?: string;
       readonly principal?: Principal;
+      readonly securityContext?: RunSecurityContext;
     },
   ) => Promise<
     WebhookAgent & {
@@ -894,6 +895,7 @@ async function dispatchDelivery(params: {
       namespaceId: scope.namespaceId,
       ...(scope.resourceId !== undefined && { resourceId: scope.resourceId }),
       principal: authorized.effective,
+      securityContext: toRunSecurityContext(authorized.context),
     });
     const agent = resolved.withScope({
       namespaceId: scope.namespaceId,

@@ -89,7 +89,7 @@ import type {
   SecretsStorage,
   TurnBudget,
 } from "@promin/agent";
-import type { NamespaceRegistry, WallClock } from "@promin/workflow";
+import type { NamespaceRegistry, RunSecurityContext, WallClock } from "@promin/workflow";
 import type { McpRecipeChecker, ScopeAuthorizer } from "../agent-gateway-kit.ts";
 import type { PromotionGate } from "../evals.ts";
 import type { TurnStreamHub } from "./agent-sse.ts";
@@ -262,6 +262,7 @@ export interface AgentGatewayDeps {
       readonly namespaceId?: string;
       readonly resourceId?: string;
       readonly principal?: Principal;
+      readonly securityContext?: RunSecurityContext;
     },
   ) => Agent | Promise<Agent>;
   /** Authentication and coarse access policy for principal-derived agent scopes. */

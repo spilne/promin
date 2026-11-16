@@ -12,12 +12,9 @@ import {
 import {
   LocalWorkflows,
   ORG_WIDE_NAMESPACE,
-  principalRef,
   ZoryaAgents,
   ZoryaKnowledgeBases,
   ZoryaServer,
-  type Principal,
-  type ZoryaSecurity,
 } from "../../index.ts";
 import { createSqliteZoryaStack } from "../../server/sqlite-stack.ts";
 import { InMemorySecurityStore } from "../in-memory-security-store.ts";
@@ -127,13 +124,11 @@ async function buildServer(mode: "module" | "api-keys"): Promise<ScenarioEnviron
     const memory = new InMemoryMemoryStore();
     const approvals = new InMemoryPendingApprovalStore();
     const llm = searchEverythingLlm();
-    let requestSecurity: ZoryaSecurity;
     const agents = new ZoryaAgents({
       registry,
       retrievers,
       memory,
       resolve: async (recipe: RegisteredAgent, scope) => {
-        const principal = scope?.principal;
         const namespaceId = scope?.namespaceId;
         return resolveLocalAgent(recipe, {
           runner: stack.runner,
@@ -144,18 +139,6 @@ async function buildServer(mode: "module" | "api-keys"): Promise<ScenarioEnviron
           retrievers,
           ...(namespaceId !== undefined && { namespaceId }),
           ...(scope?.resourceId !== undefined && { resourceId: scope.resourceId }),
-          ...(principal !== undefined &&
-            namespaceId !== undefined && {
-              knowledgeAccess: ({ id }: { readonly id: string }) =>
-                requestSecurity
-                  .authorize({
-                    context: { actor: principal, effective: principalRef(principal) },
-                    permission: { resource: "knowledge", action: "use" },
-                    resource: { kind: "knowledge", namespaceId, id },
-                  })
-                  .then((decision) => decision.allowed),
-              knowledgeCaller: callerFor({ principal, namespaceId }),
-            }),
         });
       },
     });
@@ -189,7 +172,6 @@ async function buildServer(mode: "module" | "api-keys"): Promise<ScenarioEnviron
       builder.apiKeys([OPERATOR_KEY]);
     }
     const server = builder.build();
-    requestSecurity = server.security;
 
     const environment: ScenarioEnvironment = {
       server,
@@ -206,22 +188,6 @@ async function buildServer(mode: "module" | "api-keys"): Promise<ScenarioEnviron
     stack.db.close();
     throw error;
   }
-}
-
-function callerFor(params: { principal: Principal; namespaceId: string }) {
-  const { principal, namespaceId } = params;
-  return {
-    userId: principal.id,
-    ...(principal.email !== undefined && { email: principal.email }),
-    accessRoles: [...ownRoles(principal, namespaceId), ...ownRoles(principal, ORG_WIDE_NAMESPACE)],
-    teams: [],
-  };
-}
-
-function ownRoles(principal: Principal, namespaceId: string): ReadonlyArray<string> {
-  return Object.hasOwn(principal.accessRoles, namespaceId)
-    ? (principal.accessRoles[namespaceId] ?? [])
-    : [];
 }
 
 async function waitForReady(knowledgeBases: ZoryaKnowledgeBases): Promise<void> {

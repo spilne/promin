@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { RunSecurityContext } from "@promin/workflow";
 import { fenceReferenceData, oneLine } from "../reference-data.ts";
 import { tool, type AgentTool } from "../tool.ts";
 import { DEFAULT_RETRIEVER_TOOL_NAME } from "./retriever-tool-name.ts";
@@ -8,6 +9,12 @@ export interface RetrieverToolConfig {
   readonly retriever: Retriever;
   /** Authenticated caller passed to every retrieval; never model-controlled. */
   readonly caller?: RetrieverCaller;
+  /** Fresh host authorization immediately before every retrieval. */
+  readonly resolveAccess?: (
+    securityContext?: RunSecurityContext,
+  ) => Promise<
+    { readonly caller?: RetrieverCaller; readonly filter?: RetrieverFilter } | undefined
+  >;
   /** LLM-facing tool name. Default: `search_knowledge_base`. */
   readonly name?: string;
   /** LLM-facing tool description. */
@@ -83,12 +90,21 @@ export function createRetrieverTool(
       topK: z.number().int().positive().max(50).optional().describe("Maximum chunks to return."),
       filter: RetrieverToolFilterSchema.describe("Optional tag or metadata filters."),
     }),
-    execute: async ({ query, topK, filter }) => {
+    execute: async ({ query, topK, filter }, ctx) => {
+      const access = config.resolveAccess
+        ? await config.resolveAccess(ctx?.scope?.securityContext)
+        : undefined;
+      if (config.resolveAccess && access === undefined) return { results: [] };
       const results = await config.retriever.retrieve({
         query,
-        ...(config.caller !== undefined && { caller: config.caller }),
+        ...((access?.caller ?? config.caller) !== undefined && {
+          caller: access?.caller ?? config.caller,
+        }),
         ...((topK ?? config.topK) !== undefined && { topK: topK ?? config.topK }),
-        ...mergeFilter({ base: config.filter, requested: filter }),
+        ...mergeFilter({
+          base: mergeSecurityFilter(config.filter, access?.filter),
+          requested: filter,
+        }),
         ...(config.maxChunkCharacters !== undefined && {
           maxChunkCharacters: config.maxChunkCharacters,
         }),
@@ -102,6 +118,19 @@ export function createRetrieverTool(
         .filter((source): source is RetrieverToolSource => source !== undefined),
     }),
   });
+}
+
+function mergeSecurityFilter(
+  base: RetrieverFilter | undefined,
+  security: RetrieverFilter | undefined,
+): RetrieverFilter | undefined {
+  if (!base && !security) return undefined;
+  const tags = [...new Set([...(base?.tags ?? []), ...(security?.tags ?? [])])];
+  const metadata = { ...base?.metadata, ...security?.metadata };
+  return {
+    ...(tags.length > 0 && { tags }),
+    ...(Object.keys(metadata).length > 0 && { metadata }),
+  };
 }
 
 function mergeFilter(params: {

@@ -121,6 +121,7 @@ import { frameTask } from "./frame-task.ts";
 import {
   buildRetrieverContext,
   type AgentRetrievers,
+  type RetrieverAccessResolver,
   type RetrieverFailure,
 } from "./retriever-bindings.ts";
 import {
@@ -510,6 +511,21 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
   /** This agent with thread and namespace budgets (see `LocalAgentConfig.budgets`). */
   withBudgets(budgets: AgentBudgets): LocalAgent<TOutput> {
     return new LocalAgent<TOutput>({ ...this.config, budgets });
+  }
+
+  /** Attach a fresh, per-search authorization callback to every knowledge binding. */
+  withRetrieverAccess(resolveAccess: RetrieverAccessResolver): LocalAgent<TOutput> {
+    const retrievers = this.config.retrievers;
+    if (!retrievers || Object.keys(retrievers).length === 0) return this;
+    const secured: Record<string, import("./retriever-bindings.ts").AgentRetrieverBinding> = {};
+    for (const [id, bindingLike] of Object.entries(retrievers)) {
+      const binding = "retrieve" in bindingLike ? { retriever: bindingLike } : bindingLike;
+      secured[id] = Object.freeze({
+        ...binding,
+        resolveAccess: (securityContext?: RunSecurityContext) => resolveAccess(id, securityContext),
+      });
+    }
+    return new LocalAgent<TOutput>({ ...this.config, retrievers: Object.freeze(secured) });
   }
 
   /** Recipe id this agent runs as (`config.agentId`, else the loop name). */
@@ -997,10 +1013,12 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
    */
   private async turnInput(
     input: AgentInput,
+    securityContext?: RunSecurityContext,
   ): Promise<{ input: TurnInput; retrieverFailures: ReadonlyArray<RetrieverFailure> }> {
     const knowledge = await buildRetrieverContext({
       retrievers: this.config.retrievers,
       query: input.task,
+      ...(securityContext !== undefined && { securityContext }),
       ...(this.config.agent.clock && { clock: this.config.agent.clock }),
     });
     const messages: Message[] = [...(input.messages ?? [])];
@@ -1062,7 +1080,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     }
     const ceiling =
       budgets && namespaceId !== undefined ? await admitTurn({ budgets, namespaceId }) : undefined;
-    const prepared = await this.turnInput(input);
+    const prepared = await this.turnInput(input, securityContext);
     emitRetrieverFailures({ bus, failures: prepared.retrieverFailures });
     return (await this.config.runner.run({
       workflow: wf,
@@ -1720,6 +1738,9 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     const knowledge = await buildRetrieverContext({
       retrievers: this.deps.retrievers,
       query: input.task,
+      ...(this.deps.securityContext !== undefined && {
+        securityContext: this.deps.securityContext,
+      }),
       ...(this.deps.engine.clock && { clock: this.deps.engine.clock }),
     });
     const seed: Message[] = [];

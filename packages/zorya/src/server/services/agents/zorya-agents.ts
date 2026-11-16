@@ -34,9 +34,14 @@ import {
   startAgentSchedule,
   startAgentScanLoop,
 } from "@promin/agent";
+import type { RunSecurityContext } from "@promin/workflow";
 import type { DurableScheduleConfig, ScheduleTick } from "@promin/workflow/scheduler";
 import type { ScopeAuthorizer } from "../../routes/agent-gateway-kit.ts";
 import type { AuthorizedScheduleIdentity, Principal } from "../../security/index.ts";
+import {
+  KnowledgeExecutionSecurity,
+  type KnowledgeExecutionSecurityConfig,
+} from "../../security/index.ts";
 import type { TurnStreamLimits } from "../../routes/agents/agent-sse.ts";
 import type { AgentScheduleDispatcher, AgentScheduleStart } from "../scheduler/index.ts";
 
@@ -67,6 +72,7 @@ export interface ZoryaAgentsConfig {
       readonly namespaceId?: string;
       readonly resourceId?: string;
       readonly principal?: Principal;
+      readonly securityContext?: RunSecurityContext;
     },
   ) => Agent | Promise<Agent>;
   memory?: MemoryStore;
@@ -181,6 +187,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
       readonly namespaceId?: string;
       readonly resourceId?: string;
       readonly principal?: Principal;
+      readonly securityContext?: RunSecurityContext;
     },
   ) => Agent | Promise<Agent>;
   readonly memory?: MemoryStore;
@@ -211,21 +218,33 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
    */
   canAutoPromote?: (params: { readonly id: string }) => boolean | Promise<boolean>;
   private readonly scanConfig?: ZoryaAgentsScanConfig;
+  private knowledgeSecurity?: KnowledgeExecutionSecurity;
   private scanHandle?: ScanLoopHandle<ScanLoopTick>;
 
   constructor(config: ZoryaAgentsConfig) {
     this.registry = config.registry;
     const budgets = config.budgets;
-    if (budgets) {
-      this.budgets = budgets;
-      const resolve = config.resolve;
-      this.resolve = async (recipe, scope) => {
-        const agent = await resolve(recipe, scope);
-        return agent instanceof LocalAgent ? agent.withBudgets(budgets) : agent;
-      };
-    } else {
-      this.resolve = config.resolve;
-    }
+    if (budgets) this.budgets = budgets;
+    const resolve = config.resolve;
+    this.resolve = async (recipe, scope) => {
+      let agent = await resolve(recipe, scope);
+      if (agent instanceof LocalAgent && budgets) agent = agent.withBudgets(budgets);
+      const knowledgeSecurity = this.knowledgeSecurity;
+      if (agent instanceof LocalAgent && knowledgeSecurity && scope?.namespaceId) {
+        const namespaceId = scope.namespaceId;
+        const securityContext = scope.securityContext;
+        agent = agent.withRetrieverAccess((baseId, boundarySecurityContext) =>
+          knowledgeSecurity.access({
+            namespaceId,
+            baseId,
+            ...((boundarySecurityContext ?? securityContext) !== undefined && {
+              securityContext: boundarySecurityContext ?? securityContext,
+            }),
+          }),
+        );
+      }
+      return agent;
+    };
     if (config.memory) this.memory = config.memory;
     if (config.approvals) this.approvals = config.approvals;
     if (config.instances) this.instances = config.instances;
@@ -259,6 +278,11 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
     if (config.streaming) this.streaming = config.streaming;
   }
 
+  /** Installed by ZoryaServer so every LocalAgent knowledge search reauthorizes freshly. */
+  configureKnowledgeSecurity(config: KnowledgeExecutionSecurityConfig): void {
+    this.knowledgeSecurity = new KnowledgeExecutionSecurity(config);
+  }
+
   /**
    * Called by ZoryaScheduler when isAgentSchedule(schedule) is true. Starts
    * the turn through `startAgentSchedule` and returns once it is under way;
@@ -278,6 +302,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
           ...(scope?.namespaceId !== undefined && { namespaceId: scope.namespaceId }),
           ...(scope?.resourceId !== undefined && { resourceId: scope.resourceId }),
           ...(identity?.principal !== undefined && { principal: identity.principal }),
+          ...(identity?.runContext !== undefined && { securityContext: identity.runContext }),
         }),
       ...(reauthorize !== undefined && { beforeInvoke: reauthorize }),
       // A scheduled turn on a thread takes the thread's turn lease like a

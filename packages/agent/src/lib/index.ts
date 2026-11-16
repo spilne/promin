@@ -288,7 +288,11 @@ export type {
   AutoDistillConfig,
   AutoDistillSignals,
 } from "./agent/auto-consolidation.ts";
-export type { AgentRetrieverBinding } from "./agent/retriever-bindings.ts";
+export type {
+  AgentRetrieverBinding,
+  RetrieverAccessResolver,
+  RetrieverSearchAccess,
+} from "./agent/retriever-bindings.ts";
 
 // Universal Agent interface + LocalAgent backend.
 export type {

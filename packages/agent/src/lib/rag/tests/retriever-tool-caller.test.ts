@@ -43,4 +43,40 @@ describe("createRetrieverTool caller", () => {
     await search.execute(parsed);
     expect(requests[0]?.caller).toEqual(CALLER);
   });
+
+  it("reauthorizes at each tool search and observes revocation after construction", async () => {
+    const requests: RetrieveRequest[] = [];
+    const retriever: Retriever = {
+      retrieve: async (request) => {
+        requests.push(request);
+        return [];
+      },
+    };
+    let allowed = true;
+    let roles: ReadonlyArray<string> = ["member"];
+    const securityContexts: unknown[] = [];
+    const search = createRetrieverTool({
+      retriever,
+      resolveAccess: async (securityContext) => {
+        securityContexts.push(securityContext);
+        return allowed ? { caller: { userId: "u1", accessRoles: roles, teams: [] } } : undefined;
+      },
+    });
+
+    await search.execute(
+      { query: "first" },
+      { scope: { securityContext: { actor: { kind: "user", id: "alice" } } } },
+    );
+    roles = ["finance"];
+    await search.execute({ query: "second" });
+    allowed = false;
+    expect(await search.execute({ query: "revoked" })).toEqual({ results: [] });
+
+    expect(requests.map((request) => request.caller?.accessRoles)).toEqual([
+      ["member"],
+      ["finance"],
+    ]);
+    expect(requests.map((request) => request.query)).toEqual(["first", "second"]);
+    expect(securityContexts[0]).toEqual({ actor: { kind: "user", id: "alice" } });
+  });
 });

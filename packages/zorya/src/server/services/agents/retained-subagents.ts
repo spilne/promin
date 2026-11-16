@@ -1265,6 +1265,9 @@ async function runChildTurn(params: {
   const resolvedAgent = await config.agents.resolve(recipe, {
     ...input.parent,
     ...(resolverIdentity.principal !== undefined && { principal: resolverIdentity.principal }),
+    ...(resolverIdentity.securityContext !== undefined && {
+      securityContext: resolverIdentity.securityContext,
+    }),
   });
   await config.authorizeTurn(input, "turn.thread");
   const agent = resolvedAgent.withScope({

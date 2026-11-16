@@ -132,36 +132,47 @@ describe("agent SSE — approval resume", () => {
       security: enterpriseApprovalSecurity(),
       // Model a backend that can resume but cannot list pending approvals.
       // Requester separation must be enforced from the preloaded durable row.
-      wrapAgent: (agent) =>
-        new Proxy(agent, {
-          get(target, property, receiver) {
-            if (property === "withScope") {
-              return (agentScope: unknown) => {
-                const scoped = target.withScope(agentScope as never);
-                return new Proxy(scoped, {
-                  get(scopedTarget, scopedProperty, scopedReceiver) {
-                    if (scopedProperty === "thread") {
-                      return async (...args: unknown[]) => {
-                        const thread = await scopedTarget.thread(...(args as [string, never]));
-                        return new Proxy(thread, {
-                          get(threadTarget, threadProperty, threadReceiver) {
-                            if (threadProperty === "pendingApprovals") return undefined;
-                            const value = Reflect.get(threadTarget, threadProperty, threadReceiver);
-                            return typeof value === "function" ? value.bind(threadTarget) : value;
-                          },
-                        });
-                      };
-                    }
-                    const value = Reflect.get(scopedTarget, scopedProperty, scopedReceiver);
-                    return typeof value === "function" ? value.bind(scopedTarget) : value;
-                  },
-                });
-              };
-            }
-            const value = Reflect.get(target, property, receiver);
-            return typeof value === "function" ? value.bind(target) : value;
-          },
-        }),
+      wrapAgent: (agent) => {
+        const wrap = (current: typeof agent): typeof agent =>
+          new Proxy(current, {
+            get(target, property, receiver) {
+              if (property === "withRetrieverAccess") {
+                return (...args: unknown[]) =>
+                  wrap(Reflect.apply(target.withRetrieverAccess, target, args));
+              }
+              if (property === "withScope") {
+                return (agentScope: unknown) => {
+                  const scoped = target.withScope(agentScope as never);
+                  return new Proxy(scoped, {
+                    get(scopedTarget, scopedProperty, scopedReceiver) {
+                      if (scopedProperty === "thread") {
+                        return async (...args: unknown[]) => {
+                          const thread = await scopedTarget.thread(...(args as [string, never]));
+                          return new Proxy(thread, {
+                            get(threadTarget, threadProperty, threadReceiver) {
+                              if (threadProperty === "pendingApprovals") return undefined;
+                              const value = Reflect.get(
+                                threadTarget,
+                                threadProperty,
+                                threadReceiver,
+                              );
+                              return typeof value === "function" ? value.bind(threadTarget) : value;
+                            },
+                          });
+                        };
+                      }
+                      const value = Reflect.get(scopedTarget, scopedProperty, scopedReceiver);
+                      return typeof value === "function" ? value.bind(scopedTarget) : value;
+                    },
+                  });
+                };
+              }
+              const value = Reflect.get(target, property, receiver);
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+        return wrap(agent);
+      },
     });
     await registry.register({
       id: "deployer",
@@ -287,64 +298,78 @@ describe("agent SSE — approval resume", () => {
       llm,
       tools: { deploy },
       security: enterpriseApprovalSecurity(),
-      wrapAgent: (agent) =>
-        new Proxy(agent, {
-          get(target, property, receiver) {
-            if (property === "withScope") {
-              return (agentScope: unknown) => {
-                const scoped = target.withScope(agentScope as never);
-                return new Proxy(scoped, {
-                  get(scopedTarget, scopedProperty, scopedReceiver) {
-                    if (scopedProperty === "thread") {
-                      return async (...args: unknown[]) => {
-                        const thread = await scopedTarget.thread(...(args as [string, never]));
-                        return new Proxy(thread, {
-                          get(threadTarget, threadProperty, threadReceiver) {
-                            if (threadProperty === "pendingApprovals") return undefined;
-                            const value = Reflect.get(threadTarget, threadProperty, threadReceiver);
-                            if (threadProperty === "resumeStream" && typeof value === "function") {
-                              return (...resumeArgs: unknown[]) => {
-                                const store = approvalStore;
-                                if (!store) throw new Error("approval store not initialized");
-                                const key = {
-                                  namespaceId: "ns",
-                                  agentId: "deployer",
-                                  resourceId: "alice",
-                                  threadId: "t-race",
-                                  toolCallId: "call-race",
-                                };
-                                void store.markDelivered(key);
-                                void store.record({
-                                  ...key,
-                                  workflowId: "replacement-workflow",
-                                  toolName: "deploy",
-                                  input: { env: "stage" },
-                                  elevated: true,
-                                  requestContext: {
-                                    actor: {
-                                      kind: "service-account",
-                                      id: "different-requester",
+      wrapAgent: (agent) => {
+        const wrap = (current: typeof agent): typeof agent =>
+          new Proxy(current, {
+            get(target, property, receiver) {
+              if (property === "withRetrieverAccess") {
+                return (...args: unknown[]) =>
+                  wrap(Reflect.apply(target.withRetrieverAccess, target, args));
+              }
+              if (property === "withScope") {
+                return (agentScope: unknown) => {
+                  const scoped = target.withScope(agentScope as never);
+                  return new Proxy(scoped, {
+                    get(scopedTarget, scopedProperty, scopedReceiver) {
+                      if (scopedProperty === "thread") {
+                        return async (...args: unknown[]) => {
+                          const thread = await scopedTarget.thread(...(args as [string, never]));
+                          return new Proxy(thread, {
+                            get(threadTarget, threadProperty, threadReceiver) {
+                              if (threadProperty === "pendingApprovals") return undefined;
+                              const value = Reflect.get(
+                                threadTarget,
+                                threadProperty,
+                                threadReceiver,
+                              );
+                              if (
+                                threadProperty === "resumeStream" &&
+                                typeof value === "function"
+                              ) {
+                                return (...resumeArgs: unknown[]) => {
+                                  const store = approvalStore;
+                                  if (!store) throw new Error("approval store not initialized");
+                                  const key = {
+                                    namespaceId: "ns",
+                                    agentId: "deployer",
+                                    resourceId: "alice",
+                                    threadId: "t-race",
+                                    toolCallId: "call-race",
+                                  };
+                                  void store.markDelivered(key);
+                                  void store.record({
+                                    ...key,
+                                    workflowId: "replacement-workflow",
+                                    toolName: "deploy",
+                                    input: { env: "stage" },
+                                    elevated: true,
+                                    requestContext: {
+                                      actor: {
+                                        kind: "service-account",
+                                        id: "different-requester",
+                                      },
                                     },
-                                  },
-                                });
-                                return Reflect.apply(value, threadTarget, resumeArgs);
-                              };
-                            }
-                            return typeof value === "function" ? value.bind(threadTarget) : value;
-                          },
-                        });
-                      };
-                    }
-                    const value = Reflect.get(scopedTarget, scopedProperty, scopedReceiver);
-                    return typeof value === "function" ? value.bind(scopedTarget) : value;
-                  },
-                });
-              };
-            }
-            const value = Reflect.get(target, property, receiver);
-            return typeof value === "function" ? value.bind(target) : value;
-          },
-        }),
+                                  });
+                                  return Reflect.apply(value, threadTarget, resumeArgs);
+                                };
+                              }
+                              return typeof value === "function" ? value.bind(threadTarget) : value;
+                            },
+                          });
+                        };
+                      }
+                      const value = Reflect.get(scopedTarget, scopedProperty, scopedReceiver);
+                      return typeof value === "function" ? value.bind(scopedTarget) : value;
+                    },
+                  });
+                };
+              }
+              const value = Reflect.get(target, property, receiver);
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+        return wrap(agent);
+      },
     });
     approvalStore = booted.approvals;
     await booted.registry.register({

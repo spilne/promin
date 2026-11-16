@@ -491,6 +491,7 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
       },
       invoking: true,
       authoritativeScope: true,
+      authoritativeSecurityContext: entry.requestContext,
       ...(effectivePrincipal !== undefined && { effectivePrincipal }),
     });
     if (scoped instanceof Response) return scoped;

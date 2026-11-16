@@ -5,7 +5,11 @@ import {
   type Agent,
   type RegisteredAgent,
 } from "@promin/agent";
-import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
+import {
+  InMemoryWorkflowStorage,
+  createWorkflowRunner,
+  type RunSecurityContext,
+} from "@promin/workflow";
 import { ZoryaServer } from "../../../server.ts";
 import { ZoryaAgents } from "../../../services/agents/zorya-agents.ts";
 import { LocalWorkflows } from "../../../services/workflows/local-workflows.ts";
@@ -95,6 +99,7 @@ interface ResolveScope {
   readonly namespaceId?: string;
   readonly resourceId?: string;
   readonly principal?: Principal;
+  readonly securityContext?: RunSecurityContext;
 }
 
 function fakeAgent(): Agent {
@@ -199,7 +204,17 @@ describe("agent HTTP scope derives from the authenticated principal", () => {
     const response = await server.handle(request({ namespaceId: "acme", resourceId: "user-7" }));
 
     expect(response.status).toBe(200);
-    expect(resolved).toEqual([{ namespaceId: "acme", resourceId: "user-7", principal: operator }]);
+    expect(resolved).toEqual([
+      {
+        namespaceId: "acme",
+        resourceId: "user-7",
+        principal: operator,
+        securityContext: {
+          actor: { kind: "operator", id: "operator-1" },
+          effective: { kind: "user", id: "user-7" },
+        },
+      },
+    ]);
   });
 
   it("derives a normal user's own identity", async () => {
@@ -208,7 +223,14 @@ describe("agent HTTP scope derives from the authenticated principal", () => {
     const response = await server.handle(request({ namespaceId: "acme" }));
 
     expect(response.status).toBe(200);
-    expect(resolved).toEqual([{ namespaceId: "acme", resourceId: "user-1", principal: user }]);
+    expect(resolved).toEqual([
+      {
+        namespaceId: "acme",
+        resourceId: "user-1",
+        principal: user,
+        securityContext: { actor: { kind: "user", id: "user-1" } },
+      },
+    ]);
   });
 
   it("forbids a normal user's other resource identity", async () => {
@@ -268,7 +290,15 @@ describe("agent HTTP scope derives from the authenticated principal", () => {
 
     expect(response.status).toBe(200);
     expect(resolved).toEqual([
-      { namespaceId: "acme", resourceId: represented.id, principal: represented },
+      {
+        namespaceId: "acme",
+        resourceId: represented.id,
+        principal: represented,
+        securityContext: {
+          actor: { kind: "service-account", id: "slack-bot" },
+          effective: { kind: "user", id: represented.id },
+        },
+      },
     ]);
   });
 
@@ -327,6 +357,10 @@ describe("agent HTTP scope derives from the authenticated principal", () => {
         namespaceId: "acme",
         resourceId: "named-user",
         principal: expect.objectContaining({ kind: "operator", id: "operator" }),
+        securityContext: {
+          actor: { kind: "operator", id: "operator" },
+          effective: { kind: "user", id: "named-user" },
+        },
       },
     ]);
     expect(requestSecurityContext(req)).toEqual({

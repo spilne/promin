@@ -11,7 +11,7 @@ import {
   ThreadNotFoundError,
   TurnInProgressError,
 } from "@promin/agent";
-import { SystemWallClock } from "@promin/workflow";
+import { SystemWallClock, type RunSecurityContext } from "@promin/workflow";
 import { z } from "zod";
 import { json, jsonError, parseIntParam } from "../../router.ts";
 import { requireActiveNamespace } from "../../namespace-guard.ts";
@@ -263,6 +263,8 @@ export async function loadScopedAgent(params: {
   readonly authoritativeScope?: boolean;
   /** Freshly resolved effective principal for an authoritative stored scope. */
   readonly effectivePrincipal?: Principal;
+  /** Durable starter identity for an authoritative resume; never the approver. */
+  readonly authoritativeSecurityContext?: RunSecurityContext;
 }): Promise<ScopedAgent | Response> {
   const { deps, req, id, scope, invoking } = params;
   const recipe = await deps.registry.get({ id });
@@ -339,10 +341,25 @@ export async function loadScopedAgent(params: {
 
   let agent: Agent;
   try {
+    const resolverSecurityContext = params.authoritativeScope
+      ? params.authoritativeSecurityContext
+      : securityContext !== undefined
+        ? {
+            actor: {
+              kind: securityContext.actor.kind,
+              id: securityContext.actor.id,
+            },
+            ...(securityContext.actor.kind !== securityContext.effective.kind ||
+            securityContext.actor.id !== securityContext.effective.id
+              ? { effective: securityContext.effective }
+              : {}),
+          }
+        : undefined;
     const resolved = await deps.resolve(recipe, {
       namespaceId: scope.namespaceId,
       resourceId,
       ...(effectivePrincipal !== undefined && { principal: effectivePrincipal }),
+      ...(resolverSecurityContext !== undefined && { securityContext: resolverSecurityContext }),
     });
     // The owner comes from the authorized request, never from parsing
     // the instance id, so peer delegation runs under the same owner.

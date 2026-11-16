@@ -19,6 +19,10 @@ export {
   type SecurityRouteAccessGuardConfig,
 } from "./route-access-guard.ts";
 export {
+  KnowledgeExecutionSecurity,
+  type KnowledgeExecutionSecurityConfig,
+} from "./knowledge-execution-security.ts";
+export {
   RUN_SECURITY_BLOCKED_ERROR_TAG,
   RunExecutionSecurity,
   RunSecurityBlockedError,
