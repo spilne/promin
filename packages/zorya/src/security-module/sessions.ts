@@ -2,6 +2,10 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import type { WallClock } from "@promin/workflow";
 
 export const SESSION_COOKIE = "zorya_session";
+export const SECURE_SESSION_COOKIE = "__Host-zorya_session";
+export const CSRF_COOKIE = "zorya_csrf";
+export const SECURE_CSRF_COOKIE = "__Host-zorya_csrf";
+export const CSRF_HEADER = "x-zorya-csrf";
 export const LOGIN_STATE_COOKIE = "zorya_login_state";
 const LOGIN_STATE_TTL_MS = 10 * 60 * 1_000;
 
@@ -10,6 +14,11 @@ interface LoginStatePayload {
   readonly codeVerifier: string;
   readonly issuedAt: number;
 }
+
+export type CookieValue =
+  | { readonly kind: "absent" }
+  | { readonly kind: "duplicate" }
+  | { readonly kind: "value"; readonly value: string };
 
 export function createLoginState(params: {
   readonly secret: string;
@@ -38,6 +47,8 @@ export function createLoginState(params: {
       maxAgeSeconds: LOGIN_STATE_TTL_MS / 1_000,
       path: "/auth",
       secure: params.secure,
+      httpOnly: true,
+      sameSite: "Lax",
     }),
   };
 }
@@ -47,9 +58,9 @@ export function readLoginState(params: {
   readonly secret: string;
   readonly clock: WallClock;
 }): LoginStatePayload | undefined {
-  const value = readCookie(params.cookieHeader, LOGIN_STATE_COOKIE);
-  if (!value) return undefined;
-  const payload = verifyPayload({ value, secret: params.secret });
+  const parsed = readCookie(params.cookieHeader, LOGIN_STATE_COOKIE);
+  if (parsed.kind !== "value" || parsed.value.length === 0) return undefined;
+  const payload = verifyPayload({ value: parsed.value, secret: params.secret });
   if (!payload) return undefined;
   if (payload.issuedAt > params.clock.currentTimeMs()) return undefined;
   if (params.clock.currentTimeMs() - payload.issuedAt > LOGIN_STATE_TTL_MS) return undefined;
@@ -57,14 +68,30 @@ export function readLoginState(params: {
 }
 
 export function clearLoginStateCookie(secure: boolean): string {
-  return cookie({ name: LOGIN_STATE_COOKIE, value: "", maxAgeSeconds: 0, path: "/auth", secure });
+  return cookie({
+    name: LOGIN_STATE_COOKIE,
+    value: "",
+    maxAgeSeconds: 0,
+    path: "/auth",
+    secure,
+    httpOnly: true,
+    sameSite: "Lax",
+  });
 }
 
 export function newSessionToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
+export function newCsrfToken(): string {
+  return randomBytes(32).toString("base64url");
+}
+
 export function hashSessionToken(token: string): string {
+  return createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+export function hashCsrfToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
@@ -74,20 +101,87 @@ export function sessionCookie(params: {
   readonly secure: boolean;
 }): string {
   return cookie({
-    name: SESSION_COOKIE,
+    name: sessionCookieName(params.secure),
     value: params.token,
     maxAgeSeconds: Math.max(0, Math.floor(params.ttlMs / 1_000)),
     path: "/",
     secure: params.secure,
+    httpOnly: true,
+    sameSite: "Lax",
   });
 }
 
-export function clearSessionCookie(secure: boolean): string {
-  return cookie({ name: SESSION_COOKIE, value: "", maxAgeSeconds: 0, path: "/", secure });
+export function csrfCookie(params: {
+  readonly token: string;
+  readonly ttlMs: number;
+  readonly secure: boolean;
+}): string {
+  return cookie({
+    name: csrfCookieName(params.secure),
+    value: params.token,
+    maxAgeSeconds: Math.max(0, Math.floor(params.ttlMs / 1_000)),
+    path: "/",
+    secure: params.secure,
+    // The dashboard must copy this value into CSRF_HEADER. It is not a credential.
+    httpOnly: false,
+    sameSite: "Strict",
+  });
 }
 
-export function sessionToken(cookieHeader: string | null): string | undefined {
-  return readCookie(cookieHeader, SESSION_COOKIE);
+export function clearSessionCookies(secure: boolean): ReadonlyArray<string> {
+  return [
+    cookie({
+      name: sessionCookieName(secure),
+      value: "",
+      maxAgeSeconds: 0,
+      path: "/",
+      secure,
+      httpOnly: true,
+      sameSite: "Lax",
+    }),
+    cookie({
+      name: csrfCookieName(secure),
+      value: "",
+      maxAgeSeconds: 0,
+      path: "/",
+      secure,
+      httpOnly: false,
+      sameSite: "Strict",
+    }),
+  ];
+}
+
+/** @deprecated Use clearSessionCookies so the readable CSRF cookie is cleared too. */
+export function clearSessionCookie(secure: boolean): string {
+  return clearSessionCookies(secure)[0]!;
+}
+
+/**
+ * Reads exactly one configured session cookie. Duplicate cookies are kept
+ * distinct from an absent cookie so callers cannot fall through to bearer auth.
+ */
+export function sessionToken(cookieHeader: string | null, secure = false): CookieValue {
+  return readCookie(cookieHeader, sessionCookieName(secure));
+}
+
+export function csrfToken(cookieHeader: string | null, secure = false): CookieValue {
+  return readCookie(cookieHeader, csrfCookieName(secure));
+}
+
+export function sessionCookieName(secure: boolean): string {
+  return secure ? SECURE_SESSION_COOKIE : SESSION_COOKIE;
+}
+
+export function csrfCookieName(secure: boolean): string {
+  return secure ? SECURE_CSRF_COOKIE : CSRF_COOKIE;
+}
+
+/** Constant-time verification of a presented CSRF token against its session digest. */
+export function csrfTokenMatches(token: string, expectedHash: string | undefined): boolean {
+  if (!expectedHash || token.length > 256 || !/^[0-9a-f]{64}$/.test(expectedHash)) return false;
+  const actual = Buffer.from(hashCsrfToken(token), "hex");
+  const expected = Buffer.from(expectedHash, "hex");
+  return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
 function signPayload(params: {
@@ -137,15 +231,17 @@ function isLoginStatePayload(value: unknown): value is LoginStatePayload {
   );
 }
 
-function readCookie(header: string | null, name: string): string | undefined {
-  if (!header) return undefined;
+function readCookie(header: string | null, name: string): CookieValue {
+  if (!header) return { kind: "absent" };
+  let value: string | undefined;
   for (const part of header.split(";")) {
     const trimmed = part.trim();
     const splitAt = trimmed.indexOf("=");
     if (splitAt < 0 || trimmed.slice(0, splitAt) !== name) continue;
-    return trimmed.slice(splitAt + 1);
+    if (value !== undefined) return { kind: "duplicate" };
+    value = trimmed.slice(splitAt + 1);
   }
-  return undefined;
+  return value === undefined ? { kind: "absent" } : { kind: "value", value };
 }
 
 function cookie(params: {
@@ -154,13 +250,15 @@ function cookie(params: {
   readonly maxAgeSeconds: number;
   readonly path: string;
   readonly secure: boolean;
+  readonly httpOnly: boolean;
+  readonly sameSite: "Lax" | "Strict";
 }): string {
   return [
     `${params.name}=${params.value}`,
     `Path=${params.path}`,
     `Max-Age=${params.maxAgeSeconds}`,
-    "HttpOnly",
-    "SameSite=Lax",
+    ...(params.httpOnly ? ["HttpOnly"] : []),
+    `SameSite=${params.sameSite}`,
     ...(params.secure ? ["Secure"] : []),
   ].join("; ");
 }

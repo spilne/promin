@@ -148,6 +148,7 @@ const moduleFactory: SecurityConformanceFactory = {
       store,
       loginProviders: [unusedLoginProvider],
       publicBaseUrl: "http://zorya.test",
+      allowInsecureHttp: true,
       allowedDomains: ["example.com"],
       serviceAccounts: [
         {
@@ -255,6 +256,7 @@ describe("optional security module audit sink", () => {
         store: new InMemorySecurityStore(),
         loginProviders: [unusedLoginProvider],
         publicBaseUrl: "http://zorya.test",
+        allowInsecureHttp: true,
         allowedDomains: ["example.com"],
         secret: SECRET,
       } as never),
@@ -267,6 +269,7 @@ describe("optional security module audit sink", () => {
       store: new InMemorySecurityStore(),
       loginProviders: [unusedLoginProvider],
       publicBaseUrl: "http://zorya.test",
+      allowInsecureHttp: true,
       allowedDomains: ["example.com"],
       auditSink: { recordAudit: async (event) => void (retained = event) },
       secret: SECRET,
@@ -313,6 +316,7 @@ describe("optional security module audit sink", () => {
       store: new InMemorySecurityStore(),
       loginProviders: [unusedLoginProvider],
       publicBaseUrl: "http://zorya.test",
+      allowInsecureHttp: true,
       allowedDomains: ["example.com"],
       auditSink: sink,
       secret: SECRET,
@@ -409,6 +413,7 @@ describe("optional security module audit sink", () => {
       store: new InMemorySecurityStore(),
       loginProviders: [unusedLoginProvider],
       publicBaseUrl: "http://zorya.test",
+      allowInsecureHttp: true,
       allowedDomains: ["example.com"],
       auditSink: { recordAudit: async () => void (sinkCalls += 1) },
       secret: SECRET,
@@ -467,6 +472,7 @@ describe("optional security module audit sink", () => {
       store,
       loginProviders: [unusedLoginProvider],
       publicBaseUrl: "http://zorya.test",
+      allowInsecureHttp: true,
       allowedDomains: ["example.com"],
       auditSink: {
         recordAudit: async () => {

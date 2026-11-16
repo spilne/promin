@@ -16,6 +16,8 @@ import { ZoryaWorkflows, type TriggerResult } from "../services/workflows/zorya-
 import { ZoryaServer } from "../server.ts";
 import { ZoryaInsecureConfigError, type Logger, type ZoryaServerConfig } from "../server-config.ts";
 import { readSse, SseHttpError, type SseMessage } from "../../ui/api/sse.ts";
+import { Auth } from "../auth.ts";
+import { createApiKeySecurity } from "../security/index.ts";
 
 const OPERATOR_KEY = "operator-key-0123456789";
 const WORKER_KEY = "worker-key-0123456789";
@@ -388,6 +390,38 @@ describe("readiness", () => {
 });
 
 describe("browser auth", () => {
+  it("passes authenticated SSE responses through the security response hook", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    await storage.createWorkflow({ workflowId: "wf-hook", workflowName: "demo", input: {} });
+    const baseSecurity = createApiKeySecurity({
+      operatorAuth: new Auth({ apiKeys: [OPERATOR_KEY] }),
+      workerAuth: new Auth({ apiKeys: [] }),
+      logger: quietLogger,
+    });
+    const server = new ZoryaServer({
+      workflows: new ProbeWorkflows(storage),
+      security: {
+        ...baseSecurity,
+        secureResponse: ({ response }) => {
+          const headers = new Headers(response.headers);
+          headers.set("x-security-response-hook", "applied");
+          return new Response(response.body, {
+            status: response.status,
+            statusText: response.statusText,
+            headers,
+          });
+        },
+      },
+      logger: quietLogger,
+    });
+    const response = await server.handle(
+      new Request("http://zorya/api/runs/wf-hook/events", { headers: bearer(OPERATOR_KEY) }),
+    );
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    expect(response.headers.get("x-security-response-hook")).toBe("applied");
+    await response.body?.cancel();
+  });
+
   it("streams run events over fetch-based SSE with an API key", async () => {
     const storage = new InMemoryWorkflowStorage();
     await storage.createWorkflow({ workflowId: "wf-sse", workflowName: "demo", input: {} });

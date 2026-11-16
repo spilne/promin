@@ -19,6 +19,8 @@ export interface Principal extends PrincipalRef {
   readonly email?: string;
   /** Access roles keyed by namespace id; `org` applies in every namespace. */
   readonly accessRoles: Readonly<Record<string, ReadonlyArray<string>>>;
+  /** Active directory/access groups, exposed as retriever teams for document ACLs. */
+  readonly teams?: ReadonlyArray<string>;
   /** Whether this principal may start work on behalf of another identity. */
   readonly canActFor: boolean;
 }
@@ -184,6 +186,8 @@ export interface SecurityAuditSink {
 }
 
 export interface DashboardLoginIdentity {
+  /** Verified issuer used with provider id + subject as the durable identity key. */
+  readonly issuer?: string;
   readonly subject: string;
   readonly email: string;
   readonly emailVerified: boolean;
@@ -213,6 +217,12 @@ export interface ZoryaSecurity
   start?(): Promise<void>;
   /** Stop implementation-specific background work. */
   stop?(): Promise<void>;
+  /**
+   * Apply adapter-specific response security after routing. Browser-session
+   * adapters use this to bound event-stream lifetimes so reconnecting repeats
+   * authentication and authorization against current durable state.
+   */
+  secureResponse?(params: { readonly request: Request; readonly response: Response }): Response;
 }
 
 export function principalRef(principal: Principal): PrincipalRef {

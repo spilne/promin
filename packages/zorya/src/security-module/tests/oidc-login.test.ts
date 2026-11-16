@@ -63,10 +63,15 @@ function environment(
       }),
     ],
     publicBaseUrl: params.publicBaseUrl ?? PUBLIC_BASE_URL,
+    allowInsecureHttp: true,
     allowedDomains: ["example.com"],
     auditSink: { recordAudit: async () => {} },
-    ...(params.adminEmails !== undefined && { adminEmails: params.adminEmails }),
-    ...(params.serviceAccounts !== undefined && { serviceAccounts: params.serviceAccounts }),
+    ...(params.adminEmails !== undefined && {
+      adminEmails: params.adminEmails,
+    }),
+    ...(params.serviceAccounts !== undefined && {
+      serviceAccounts: params.serviceAccounts,
+    }),
     secret: SECRET,
     sessionTtlMs: SESSION_TTL_MS,
     clock,
@@ -90,11 +95,17 @@ function authenticate(env: Environment, request: Request) {
 async function login(params: {
   readonly env: Environment;
   readonly email: string;
+  readonly subject?: string;
   readonly mode?: FakeTokenMode;
   readonly emailVerified?: boolean;
-}): Promise<{ readonly response: Response; readonly sessionCookie?: string }> {
+}): Promise<{
+  readonly response: Response;
+  readonly sessionCookie?: string;
+  readonly csrfCookie?: string;
+}> {
   params.env.oidcIssuer.nextLogin({
     email: params.email,
+    ...(params.subject !== undefined && { subject: params.subject }),
     emailVerified: params.emailVerified,
   });
   params.env.oidcIssuer.signWith(params.mode ?? "valid");
@@ -110,7 +121,12 @@ async function login(params: {
   const response = await params.env.router.handle(
     new Request(callbackUrl, { headers: { cookie: stateCookie } }),
   );
-  return { response, sessionCookie: cookiePair(response, "zorya_session") };
+  const secure = params.env.publicBaseUrl.startsWith("https:");
+  return {
+    response,
+    sessionCookie: cookiePair(response, secure ? "__Host-zorya_session" : "zorya_session"),
+    csrfCookie: cookiePair(response, secure ? "__Host-zorya_csrf" : "zorya_csrf"),
+  };
 }
 
 function cookiePair(response: Response, name: string): string | undefined {
@@ -158,6 +174,7 @@ describe("OIDC security module", () => {
     expect(result.response.headers.get("set-cookie")).toMatch(
       /zorya_session=[^;]+; Path=\/; Max-Age=60; HttpOnly; SameSite=Lax/,
     );
+    expect(result.csrfCookie).toBeDefined();
     const principal = await authenticate(
       env,
       new Request(`${PUBLIC_BASE_URL}/api/agents`, {
@@ -178,7 +195,9 @@ describe("OIDC security module", () => {
     const result = await login({ env, email: "ADMIN@example.COM" });
     const principal = await authenticate(
       env,
-      new Request(`${PUBLIC_BASE_URL}/`, { headers: { cookie: result.sessionCookie! } }),
+      new Request(`${PUBLIC_BASE_URL}/`, {
+        headers: { cookie: result.sessionCookie! },
+      }),
     );
     expect(principal?.accessRoles).toEqual({ org: ["admin"] });
   });
@@ -189,14 +208,53 @@ describe("OIDC security module", () => {
     const second = await login({ env, email: "USER@EXAMPLE.COM" });
     const firstPrincipal = await authenticate(
       env,
-      new Request(`${PUBLIC_BASE_URL}/`, { headers: { cookie: first.sessionCookie! } }),
+      new Request(`${PUBLIC_BASE_URL}/`, {
+        headers: { cookie: first.sessionCookie! },
+      }),
     );
     const secondPrincipal = await authenticate(
       env,
-      new Request(`${PUBLIC_BASE_URL}/`, { headers: { cookie: second.sessionCookie! } }),
+      new Request(`${PUBLIC_BASE_URL}/`, {
+        headers: { cookie: second.sessionCookie! },
+      }),
     );
     expect(secondPrincipal?.id).toBe(firstPrincipal?.id);
     expect(await env.store.listUsers()).toHaveLength(1);
+  });
+
+  it("keys users by provider issuer and subject while treating email as mutable", async () => {
+    const env = environment();
+    const first = await login({
+      env,
+      subject: "subject-a",
+      email: "shared@example.com",
+    });
+    const renamed = await login({
+      env,
+      subject: "subject-a",
+      email: "renamed@example.com",
+    });
+    const distinct = await login({
+      env,
+      subject: "subject-b",
+      email: "renamed@example.com",
+    });
+    const principalFor = (cookie: string) =>
+      authenticate(env, new Request(`${PUBLIC_BASE_URL}/`, { headers: { cookie } }));
+    const firstPrincipal = await principalFor(first.sessionCookie!);
+    const renamedPrincipal = await principalFor(renamed.sessionCookie!);
+    const distinctPrincipal = await principalFor(distinct.sessionCookie!);
+    expect(renamedPrincipal?.id).toBe(firstPrincipal?.id);
+    expect(renamedPrincipal?.email).toBe("renamed@example.com");
+    expect(distinctPrincipal?.id).not.toBe(firstPrincipal?.id);
+    expect(await env.store.listUsers()).toHaveLength(2);
+    expect(
+      await env.store.getProviderIdentity({
+        providerId: "oidc",
+        issuer: env.oidcIssuer.issuer,
+        subject: "subject-a",
+      }),
+    ).toMatchObject({ userId: firstPrincipal?.id });
   });
 
   it("domains", async () => {
@@ -241,7 +299,9 @@ describe("OIDC security module", () => {
   });
 
   it("preserves a trailing slash in the configured, discovered, and token issuer", async () => {
-    const trailingSlashIssuer = await startFakeOidcIssuer({ trailingSlash: true });
+    const trailingSlashIssuer = await startFakeOidcIssuer({
+      trailingSlash: true,
+    });
     try {
       expect(trailingSlashIssuer.issuer.endsWith("/")).toBeTrue();
       const env = environment({ oidcIssuer: trailingSlashIssuer });
@@ -336,7 +396,9 @@ describe("OIDC security module", () => {
     issuer.nextLogin({ email: "user@example.com" });
     const start = await env.router.handle(new Request(`${PUBLIC_BASE_URL}/auth/login/oidc`));
     const stateCookie = cookiePair(start, "zorya_login_state")!;
-    const authorization = await fetch(start.headers.get("location")!, { redirect: "manual" });
+    const authorization = await fetch(start.headers.get("location")!, {
+      redirect: "manual",
+    });
     const callback = new URL(authorization.headers.get("location")!);
     callback.searchParams.set("state", "attacker-state");
 
@@ -383,7 +445,10 @@ describe("OIDC security module", () => {
 
     const secureLogin = await login({ env, email: "user@example.com" });
     expect(secureLogin.response.headers.get("set-cookie")).toMatch(
-      /zorya_session=[^;]+; Path=\/; Max-Age=60; HttpOnly; SameSite=Lax; Secure/,
+      /__Host-zorya_session=[^;]+; Path=\/; Max-Age=60; HttpOnly; SameSite=Lax; Secure/,
+    );
+    expect(secureLogin.response.headers.get("set-cookie")).toMatch(
+      /__Host-zorya_csrf=[^;]+; Path=\/; Max-Age=60; SameSite=Strict; Secure/,
     );
   });
 
@@ -399,7 +464,9 @@ describe("OIDC security module", () => {
     const env = environment();
     const result = await login({ env, email: "user@example.com" });
     const request = () =>
-      new Request(`${PUBLIC_BASE_URL}/`, { headers: { cookie: result.sessionCookie! } });
+      new Request(`${PUBLIC_BASE_URL}/`, {
+        headers: { cookie: result.sessionCookie! },
+      });
     expect(await authenticate(env, request())).toBeDefined();
     env.clock.advance(SESSION_TTL_MS + 1);
     expect(await authenticate(env, request())).toBeUndefined();
@@ -422,7 +489,9 @@ describe("OIDC security module", () => {
     expect(
       await authenticate(
         env,
-        new Request(`${PUBLIC_BASE_URL}/`, { headers: { cookie: active.sessionCookie! } }),
+        new Request(`${PUBLIC_BASE_URL}/`, {
+          headers: { cookie: active.sessionCookie! },
+        }),
       ),
     ).toBeUndefined();
     expect(await env.security.resolvePrincipal({ kind: "user", id: user.id })).toBeUndefined();
@@ -436,12 +505,18 @@ describe("OIDC security module", () => {
     const env = environment();
     const result = await login({ env, email: "user@example.com" });
     const request = () =>
-      new Request(`${PUBLIC_BASE_URL}/`, { headers: { cookie: result.sessionCookie! } });
+      new Request(`${PUBLIC_BASE_URL}/`, {
+        headers: { cookie: result.sessionCookie! },
+      });
     expect(await authenticate(env, request())).toBeDefined();
     const logout = await env.router.handle(
       new Request(`${PUBLIC_BASE_URL}/auth/logout`, {
         method: "POST",
-        headers: { cookie: result.sessionCookie! },
+        headers: {
+          cookie: `${result.sessionCookie!}; ${result.csrfCookie!}`,
+          origin: PUBLIC_BASE_URL,
+          "x-zorya-csrf": result.csrfCookie!.slice("zorya_csrf=".length),
+        },
       }),
     );
     expect(logout.status).toBe(204);

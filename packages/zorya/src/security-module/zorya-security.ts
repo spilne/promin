@@ -21,12 +21,19 @@ import {
   type ZoryaSecurity,
 } from "../server/security/index.ts";
 import type { LoginIdentity, LoginProvider } from "./login-provider.ts";
-import type { SecurityStore, SecurityUser } from "./security-store.ts";
+import type { SecuritySession, SecurityStoreV2, SecurityUser } from "./security-store.ts";
+import { authenticateServiceAccountCredential } from "./service-account-credentials.ts";
 import {
   clearLoginStateCookie,
-  clearSessionCookie,
+  clearSessionCookies,
   createLoginState,
+  csrfCookie,
+  CSRF_HEADER,
+  csrfToken,
+  csrfTokenMatches,
+  hashCsrfToken,
   hashSessionToken,
+  newCsrfToken,
   newSessionToken,
   readLoginState,
   sessionCookie,
@@ -35,6 +42,8 @@ import {
 import { mountAccessRoutes } from "./access-routes.ts";
 
 const DEFAULT_SESSION_TTL_MS = 8 * 60 * 60 * 1_000;
+/** Cookie-authenticated SSE clients reconnect and fully reauthorize at least this often. */
+export const DEFAULT_SESSION_SSE_MAX_AGE_MS = 30_000;
 
 export interface ServiceAccountConfig {
   readonly id: string;
@@ -44,17 +53,23 @@ export interface ServiceAccountConfig {
 }
 
 export interface ZoryaSecurityConfig {
-  readonly store: SecurityStore;
+  readonly store: SecurityStoreV2;
   readonly loginProviders: ReadonlyArray<LoginProvider>;
   readonly publicBaseUrl: string;
   readonly allowedDomains: ReadonlyArray<string>;
   readonly defaultAccessRole?: string;
   readonly adminEmails?: ReadonlyArray<string>;
   readonly serviceAccounts?: ReadonlyArray<ServiceAccountConfig>;
+  /** Host-local pepper for durable service-account credential digests. Defaults to `secret`. */
+  readonly serviceAccountCredentialPepper?: string;
   /** Required enterprise audit destination. Security events are never silently discarded. */
   readonly auditSink: SecurityAuditSink;
   readonly secret: string;
   readonly sessionTtlMs?: number;
+  /** Maximum lifetime of one cookie-authenticated SSE connection. Default: 30 seconds. */
+  readonly sessionSseMaxAgeMs?: number;
+  /** Explicit development-only opt-in for non-Secure cookies on an HTTP public URL. */
+  readonly allowInsecureHttp?: boolean;
   readonly clock?: WallClock;
 }
 
@@ -74,6 +89,12 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
   if (config.secret.length < 32) {
     throw new Error("createZoryaSecurity: secret must be at least 32 characters");
   }
+  const serviceAccountCredentialPepper = config.serviceAccountCredentialPepper ?? config.secret;
+  if (serviceAccountCredentialPepper.length < 32) {
+    throw new Error(
+      "createZoryaSecurity: serviceAccountCredentialPepper must be at least 32 characters",
+    );
+  }
   const auditSink = config.auditSink;
   const auditRecord = auditSink?.recordAudit;
   if (!auditSink || typeof auditRecord !== "function") {
@@ -83,11 +104,24 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
 
   const clock = config.clock ?? SystemWallClock;
   const publicBaseUrl = new URL(config.publicBaseUrl);
-  const secure = publicBaseUrl.protocol === "https:";
-  const sessionTtlMs = config.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
-  if (!Number.isFinite(sessionTtlMs) || sessionTtlMs <= 0) {
-    throw new Error("createZoryaSecurity: sessionTtlMs must be positive");
+  if (publicBaseUrl.protocol !== "https:" && publicBaseUrl.protocol !== "http:") {
+    throw new Error("createZoryaSecurity: publicBaseUrl must use http or https");
   }
+  const secure = publicBaseUrl.protocol === "https:";
+  if (!secure && config.allowInsecureHttp !== true) {
+    throw new Error(
+      "createZoryaSecurity: an HTTP publicBaseUrl requires allowInsecureHttp: true for development",
+    );
+  }
+  const sessionTtlMs = config.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
+  if (!Number.isSafeInteger(sessionTtlMs) || sessionTtlMs <= 0) {
+    throw new Error("createZoryaSecurity: sessionTtlMs must be a positive integer");
+  }
+  const sessionSseMaxAgeMs = config.sessionSseMaxAgeMs ?? DEFAULT_SESSION_SSE_MAX_AGE_MS;
+  if (!Number.isSafeInteger(sessionSseMaxAgeMs) || sessionSseMaxAgeMs <= 0) {
+    throw new Error("createZoryaSecurity: sessionSseMaxAgeMs must be a positive integer");
+  }
+  const trustedOrigin = publicBaseUrl.origin;
   const domains = new Set(config.allowedDomains.map(normalize));
   if ([...domains].some((domain) => domain.length === 0 || domain.includes("@"))) {
     throw new Error("createZoryaSecurity: allowedDomains must be domain names");
@@ -101,6 +135,7 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
     providers.set(provider.id, provider);
   }
   const serviceAccounts: StoredServiceAccount[] = [];
+  const cookieAuthenticated = new WeakSet<Request>();
   const serviceAccountIds = new Set<string>();
   for (const account of config.serviceAccounts ?? []) {
     if (!account.id || !account.token || serviceAccountIds.has(account.id)) {
@@ -112,20 +147,33 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
 
   const principalForUser = async (user: SecurityUser): Promise<Principal | undefined> => {
     if (user.status !== "active") return undefined;
-    const accessRoles = Object.create(null) as Record<string, string[]>;
-    for (const binding of await config.store.listBindings(user.id)) {
-      (accessRoles[binding.namespaceId] ??= []).push(binding.accessRole);
-    }
+    const access = await principalAccessFor(config.store, { kind: "user", id: user.id });
     return {
       kind: "user",
       id: user.id,
       email: user.email,
-      accessRoles,
+      accessRoles: access.accessRoles,
+      ...(access.teams.length > 0 && { teams: access.teams }),
       canActFor: false,
     };
   };
 
-  const principalForServiceAccount = (id: string): Principal | undefined => {
+  const principalForServiceAccount = async (id: string): Promise<Principal | undefined> => {
+    const durable = await config.store.getServiceAccount(id);
+    if (durable) {
+      if (durable.status !== "active") return undefined;
+      const access = await principalAccessFor(config.store, {
+        kind: "service-account",
+        id: durable.id,
+      });
+      return {
+        kind: "service-account",
+        id: durable.id,
+        accessRoles: access.accessRoles,
+        ...(access.teams.length > 0 && { teams: access.teams }),
+        canActFor: durable.canActFor,
+      };
+    }
     const matched = serviceAccounts.find((account) => account.config.id === id)?.config;
     if (!matched) return undefined;
     return {
@@ -156,6 +204,10 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
     if (ref.kind === "user") {
       const user = await config.store.getUser(ref.id);
       if (user?.status === "disabled") return { reason: "principal_disabled" };
+    }
+    if (ref.kind === "service-account") {
+      const account = await config.store.getServiceAccount(ref.id);
+      if (account?.status === "disabled") return { reason: "principal_disabled" };
     }
     return { reason: "identity_unknown" };
   };
@@ -190,8 +242,18 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
       }
       principal = snapshotPrincipal(effectiveResult.principal);
     }
-    const roles = rolesFor(principal, resource.namespaceId);
-    const actorRoles = rolesFor(currentActor, resource.namespaceId);
+    const principalAccess = await accessAt(config.store, principal, resource.namespaceId);
+    const actorAccess = samePrincipal(currentActor, principal)
+      ? principalAccess
+      : await accessAt(config.store, currentActor, resource.namespaceId);
+    const { teams: _priorTeams, ...principalWithoutTeams } = principal;
+    principal = snapshotPrincipal({
+      ...principalWithoutTeams,
+      accessRoles: { [resource.namespaceId]: principalAccess.accessRoles },
+      ...(principalAccess.groups.length > 0 && { teams: principalAccess.groups }),
+    });
+    const roles = new Set(principalAccess.accessRoles);
+    const actorRoles = new Set(actorAccess.accessRoles);
     if (roles.has("admin")) {
       return {
         decision: { allowed: true, reason: "access_role_allow" },
@@ -267,11 +329,16 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
           effective: principal,
         };
       }
-      const grants = await config.store.listKnowledgeGrants({
+      const grants = await config.store.listKnowledgeAudienceGrants({
         namespaceId: resource.namespaceId,
         baseId: resource.id,
       });
-      return grants.some((grant) => roles.has(grant.accessRole))
+      const groups = new Set(principalAccess.groups);
+      return grants.some((grant) =>
+        grant.audience.kind === "access-role"
+          ? roles.has(grant.audience.id)
+          : groups.has(grant.audience.id),
+      )
         ? {
             decision: { allowed: true, reason: "knowledge_grant_allow" },
             effective: principal,
@@ -290,18 +357,37 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
   return {
     authenticate: async ({ request: req, plane }) => {
       if (plane !== "operator") return undefined;
-      const cookieToken = sessionToken(req.headers.get("cookie"));
+      const cookieToken = sessionToken(req.headers.get("cookie"), secure);
       // A presented browser session is authoritative. Invalid or stale
       // sessions fail closed instead of falling through to bearer auth.
-      if (cookieToken !== undefined) {
-        const session = await config.store.getSession(hashSessionToken(cookieToken));
-        if (!session) return undefined;
-        const user = await config.store.getUser(session.userId);
-        return user ? principalForUser(user) : undefined;
+      if (cookieToken.kind !== "absent") {
+        if (
+          cookieToken.kind !== "value" ||
+          cookieToken.value.length === 0 ||
+          cookieToken.value.length > 256
+        ) {
+          return undefined;
+        }
+        const session = await config.store.getSessionRecord(hashSessionToken(cookieToken.value));
+        if (!session || session.authMethod !== "oidc" || session.principal.kind !== "user") {
+          return undefined;
+        }
+        if (!validCookieRequest({ request: req, session, secure, trustedOrigin })) return undefined;
+        const principal = await resolvePrincipal(session.principal);
+        if (!principal) return undefined;
+        cookieAuthenticated.add(req);
+        return principal;
       }
 
       const token = bearerToken(req);
       if (!token) return undefined;
+      const durable = await authenticateServiceAccountCredential({
+        store: config.store,
+        token,
+        pepper: serviceAccountCredentialPepper,
+        clock,
+      });
+      if (durable) return principalForServiceAccount(durable.id);
       const presented = digest(token);
       let matched: ServiceAccountConfig | undefined;
       for (const account of serviceAccounts) {
@@ -311,6 +397,10 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
       if (!matched) return undefined;
       return principalForServiceAccount(matched.id);
     },
+    secureResponse: ({ request, response }) =>
+      cookieAuthenticated.has(request)
+        ? limitEventStreamLifetime({ response, clock, maxAgeMs: sessionSseMaxAgeMs })
+        : response,
     resolvePrincipal,
     resolveIdentity: async ({ actor, asserted }) => {
       const actorResult = await resolveCurrent(actor);
@@ -337,8 +427,14 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
         clock,
         secure,
         sessionTtlMs,
+        trustedOrigin,
       });
-      mountAccessRoutes({ router, store: config.store });
+      mountAccessRoutes({
+        router,
+        store: config.store,
+        credentialPepper: serviceAccountCredentialPepper,
+        clock,
+      });
     },
   };
 }
@@ -551,6 +647,50 @@ function samePrincipal(left: PrincipalRef, right: PrincipalRef): boolean {
   return left.kind === right.kind && left.id === right.id;
 }
 
+async function principalAccessFor(
+  store: SecurityStoreV2,
+  subject: { readonly kind: "user" | "service-account"; readonly id: string },
+): Promise<{
+  readonly accessRoles: Readonly<Record<string, ReadonlyArray<string>>>;
+  readonly teams: ReadonlyArray<string>;
+}> {
+  const groups = await store.listGroupsForSubject(subject);
+  const bindings = [
+    ...(await store.listSubjectBindings(subject)),
+    ...(
+      await Promise.all(
+        groups.map((group) => store.listSubjectBindings({ kind: "group", id: group.id })),
+      )
+    ).flat(),
+  ];
+  const roles = Object.create(null) as Record<string, string[]>;
+  for (const binding of bindings) {
+    const namespaceRoles = (roles[binding.namespaceId] ??= []);
+    if (!namespaceRoles.includes(binding.accessRole)) namespaceRoles.push(binding.accessRole);
+  }
+  return { accessRoles: roles, teams: groups.map((group) => group.id) };
+}
+
+async function accessAt(
+  store: SecurityStoreV2,
+  principal: Principal,
+  namespaceId: string,
+): Promise<{
+  readonly accessRoles: ReadonlyArray<string>;
+  readonly groups: ReadonlyArray<string>;
+}> {
+  if (principal.kind === "user") {
+    return store.resolveAccess({ subject: { kind: "user", id: principal.id }, namespaceId });
+  }
+  if (principal.kind === "service-account" && (await store.getServiceAccount(principal.id))) {
+    return store.resolveAccess({
+      subject: { kind: "service-account", id: principal.id },
+      namespaceId,
+    });
+  }
+  return { accessRoles: [...rolesFor(principal, namespaceId)], groups: principal.teams ?? [] };
+}
+
 function rolesFor(principal: Principal, namespaceId: string): Set<string> {
   return new Set([
     ...ownRoles(principal.accessRoles, ORG_WIDE_NAMESPACE),
@@ -574,6 +714,7 @@ function mountLoginRoutes(params: {
   readonly clock: WallClock;
   readonly secure: boolean;
   readonly sessionTtlMs: number;
+  readonly trustedOrigin: string;
 }): void {
   params.router.route({
     method: "GET",
@@ -635,21 +776,32 @@ function mountLoginRoutes(params: {
       const accessRole = params.admins.has(email)
         ? "admin"
         : (params.config.defaultAccessRole ?? "member");
-      const result = await params.config.store.findOrCreateUser({
+      const result = await params.config.store.findOrCreateProviderUser({
+        identity: {
+          providerId: provider.id,
+          issuer: identity.issuer ?? `provider:${provider.id}`,
+          subject: identity.subject,
+        },
         email,
         bindings: [{ namespaceId: ORG_WIDE_NAMESPACE, accessRole }],
       });
       if (result.user.status !== "active") return jsonError(403, "user_disabled");
 
       const token = newSessionToken();
-      await params.config.store.createSession({
+      const csrf = newCsrfToken();
+      const createdAt = params.clock.currentTimeMs();
+      await params.config.store.putSession({
         tokenHash: hashSessionToken(token),
-        userId: result.user.id,
-        ttlMs: params.sessionTtlMs,
+        principal: { kind: "user", id: result.user.id },
+        createdAt,
+        expiresAt: createdAt + params.sessionTtlMs,
+        csrfTokenHash: hashCsrfToken(csrf),
+        authMethod: "oidc",
       });
       return redirect(new URL("/", params.config.publicBaseUrl).toString(), [
         clearLoginStateCookie(params.secure),
         sessionCookie({ token, ttlMs: params.sessionTtlMs, secure: params.secure }),
+        csrfCookie({ token: csrf, ttlMs: params.sessionTtlMs, secure: params.secure }),
       ]);
     },
   });
@@ -658,11 +810,33 @@ function mountLoginRoutes(params: {
     path: "/auth/logout",
     access: { kind: "public", purpose: "login" },
     handler: async (req) => {
-      const token = sessionToken(req.headers.get("cookie"));
-      if (token) await params.config.store.deleteSession(hashSessionToken(token));
+      const token = sessionToken(req.headers.get("cookie"), params.secure);
+      if (token.kind !== "value" || token.value.length === 0 || token.value.length > 256) {
+        return jsonError(401, "unauthorized");
+      }
+      const tokenHash = hashSessionToken(token.value);
+      const session = await params.config.store.getSessionRecord(tokenHash);
+      if (
+        !session ||
+        session.authMethod !== "oidc" ||
+        !validCookieRequest({
+          request: req,
+          session,
+          secure: params.secure,
+          trustedOrigin: params.trustedOrigin,
+        })
+      ) {
+        return jsonError(403, "csrf_failed");
+      }
+      await params.config.store.revokeSession({
+        tokenHash,
+        revokedAt: params.clock.currentTimeMs(),
+      });
+      const headers = new Headers();
+      for (const value of clearSessionCookies(params.secure)) headers.append("set-cookie", value);
       return new Response(null, {
         status: 204,
-        headers: { "set-cookie": clearSessionCookie(params.secure) },
+        headers,
       });
     },
   });
@@ -686,6 +860,89 @@ function emailDomain(email: string): string | undefined {
 
 function normalize(value: string): string {
   return value.toLowerCase();
+}
+
+function validCookieRequest(params: {
+  readonly request: Request;
+  readonly session: SecuritySession;
+  readonly secure: boolean;
+  readonly trustedOrigin: string;
+}): boolean {
+  if (isSafeMethod(params.request.method)) return true;
+  if (params.request.headers.get("origin") !== params.trustedOrigin) return false;
+  const fromCookie = csrfToken(params.request.headers.get("cookie"), params.secure);
+  if (fromCookie.kind !== "value" || fromCookie.value.length === 0) return false;
+  const fromHeader = params.request.headers.get(CSRF_HEADER);
+  if (!fromHeader) return false;
+  return (
+    csrfTokenMatches(fromCookie.value, params.session.csrfTokenHash) &&
+    csrfTokenMatches(fromHeader, params.session.csrfTokenHash)
+  );
+}
+
+function isSafeMethod(method: string): boolean {
+  return method === "GET" || method === "HEAD" || method === "OPTIONS" || method === "TRACE";
+}
+
+function limitEventStreamLifetime(params: {
+  readonly response: Response;
+  readonly clock: WallClock;
+  readonly maxAgeMs: number;
+}): Response {
+  if (!(params.response.headers.get("content-type") ?? "").startsWith("text/event-stream")) {
+    return params.response;
+  }
+  const source = params.response.body;
+  if (!source) return params.response;
+  const reader = source.getReader();
+  let closed = false;
+  let timer: ReturnType<WallClock["setTimeout"]> | undefined;
+  const body = new ReadableStream<Uint8Array>({
+    start: (controller) => {
+      timer = params.clock.setTimeout(() => {
+        if (closed) return;
+        closed = true;
+        void reader.cancel("session_revalidation_required").catch(() => {});
+        try {
+          controller.close();
+        } catch {
+          // The source or client may have ended the stream concurrently.
+        }
+      }, params.maxAgeMs);
+      timer.unref?.();
+    },
+    pull: async (controller) => {
+      if (closed) return;
+      try {
+        const { value, done } = await reader.read();
+        if (closed) return;
+        if (done) {
+          closed = true;
+          timer?.clear();
+          controller.close();
+          return;
+        }
+        controller.enqueue(value);
+      } catch (error) {
+        if (closed) return;
+        closed = true;
+        timer?.clear();
+        controller.error(error);
+      }
+    },
+    cancel: async (reason) => {
+      if (!closed) {
+        closed = true;
+        timer?.clear();
+      }
+      await reader.cancel(reason).catch(() => {});
+    },
+  });
+  return new Response(body, {
+    status: params.response.status,
+    statusText: params.response.statusText,
+    headers: params.response.headers,
+  });
 }
 
 function digest(value: string): Buffer {

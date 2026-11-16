@@ -46,6 +46,7 @@ function environment(
     store,
     loginProviders: [unusedLoginProvider],
     publicBaseUrl: BASE_URL,
+    allowInsecureHttp: true,
     allowedDomains: ["example.com"],
     auditSink: { recordAudit: async () => {} },
     ...(params.serviceAccounts && { serviceAccounts: params.serviceAccounts }),
@@ -864,6 +865,7 @@ describe("namespace and knowledge access", () => {
       store: env.store,
       loginProviders: [unusedLoginProvider],
       publicBaseUrl: BASE_URL,
+      allowInsecureHttp: true,
       allowedDomains: ["example.com"],
       auditSink: { recordAudit: async () => {} },
       serviceAccounts: [

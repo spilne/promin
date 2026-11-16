@@ -533,7 +533,9 @@ export class ZoryaServer {
       if (denied) return denied;
     }
 
-    return this.liveStreams.track(await this.router.handle(req));
+    const routed = await this.router.handle(req);
+    const secured = this.security.secureResponse?.({ request: req, response: routed }) ?? routed;
+    return this.liveStreams.track(secured);
   }
 
   /**

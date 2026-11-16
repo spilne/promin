@@ -162,6 +162,7 @@ async function buildServer(mode: "module" | "api-keys"): Promise<ScenarioEnviron
             }),
           ],
           publicBaseUrl: PUBLIC_BASE_URL,
+          allowInsecureHttp: true,
           allowedDomains: ["example.com"],
           auditSink: { recordAudit: async () => {} },
           adminEmails: ["admin@example.com"],
@@ -222,8 +223,9 @@ async function login(
   );
   expect(callback.status).toBe(302);
   const cookie = cookiePair(callback, "zorya_session");
-  if (!cookie) throw new Error("OIDC callback did not create a session");
-  return { cookie };
+  const csrf = cookiePair(callback, "zorya_csrf");
+  if (!cookie || !csrf) throw new Error("OIDC callback did not create a session");
+  return { cookie: `${cookie}; ${csrf}` };
 }
 
 function cookiePair(response: Response, name: string): string | undefined {
@@ -239,11 +241,16 @@ function request(params: {
   readonly cookie?: string;
   readonly bearer?: string;
 }): Request {
+  const method = params.method ?? "GET";
+  const csrf = params.cookie?.match(/(?:^|;\s*)zorya_csrf=([^;]+)/)?.[1];
+  const unsafe = !["GET", "HEAD", "OPTIONS", "TRACE"].includes(method);
   return new Request(`${PUBLIC_BASE_URL}${params.path}`, {
-    method: params.method ?? "GET",
+    method,
     headers: {
       ...(params.body !== undefined && { "content-type": "application/json" }),
       ...(params.cookie !== undefined && { cookie: params.cookie }),
+      ...(params.cookie !== undefined && unsafe && { origin: PUBLIC_BASE_URL }),
+      ...(csrf !== undefined && unsafe && { "x-zorya-csrf": csrf }),
       ...(params.bearer !== undefined && { authorization: `Bearer ${params.bearer}` }),
     },
     ...(params.body !== undefined && { body: JSON.stringify(params.body) }),
