@@ -7,16 +7,23 @@ import {
   index,
   integer,
   jsonb,
-  pgTable,
+  pgSchema,
   primaryKey,
   text,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
 
 const time = (name: string) => bigint(name, { mode: "number" });
+export const SECURITY_DATA_SCHEMA = "zorya_security_data";
+const securityData = pgSchema(SECURITY_DATA_SCHEMA);
+const safeInteger = (column: unknown) =>
+  sql`${column} BETWEEN -9007199254740991 AND 9007199254740991`;
+const nonNegativeSafeInteger = (column: unknown) => sql`${column} BETWEEN 0 AND 9007199254740991`;
+const textBoundary = (column: unknown, characters: number, bytes: number) =>
+  sql`zorya_security_data.zsec_safe_text(${column}, ${characters}, ${bytes})`;
 
 /** Collision-safe user/service-account/group namespace. */
-export const securitySubjects = pgTable(
+export const securitySubjects = securityData.table(
   "zsec_subject",
   {
     kind: text("kind").notNull(),
@@ -29,14 +36,13 @@ export const securitySubjects = pgTable(
     primaryKey({ columns: [t.kind, t.id] }),
     check("zsec_subject_kind_ck", sql`${t.kind} IN ('user', 'service-account', 'group')`),
     check("zsec_subject_status_ck", sql`${t.status} IN ('active', 'disabled')`),
-    check(
-      "zsec_subject_id_ck",
-      sql`char_length(${t.id}) BETWEEN 1 AND 256 AND octet_length(${t.id}) <= 512`,
-    ),
+    check("zsec_subject_id_ck", textBoundary(t.id, 256, 512)),
+    check("zsec_subject_created_at_ck", safeInteger(t.createdAt)),
+    check("zsec_subject_updated_at_ck", safeInteger(t.updatedAt)),
   ],
 );
 
-export const securityUsers = pgTable(
+export const securityUsers = securityData.table(
   "zsec_user",
   {
     subjectKind: text("subject_kind").notNull().default("user"),
@@ -47,7 +53,7 @@ export const securityUsers = pgTable(
     check("zsec_user_kind_ck", sql`${t.subjectKind} = 'user'`),
     check(
       "zsec_user_email_ck",
-      sql`char_length(${t.email}) BETWEEN 1 AND 320 AND octet_length(${t.email}) <= 640`,
+      sql`${textBoundary(t.email, 320, 640)} AND ${t.email} = lower(btrim(${t.email})) AND strpos(${t.email}, '@') > 0`,
     ),
     foreignKey({
       columns: [t.subjectKind, t.id],
@@ -57,7 +63,7 @@ export const securityUsers = pgTable(
   ],
 );
 
-export const securityProviderIdentities = pgTable(
+export const securityProviderIdentities = securityData.table(
   "zsec_provider_identity",
   {
     providerId: text("provider_id").notNull(),
@@ -69,23 +75,14 @@ export const securityProviderIdentities = pgTable(
   },
   (t) => [
     primaryKey({ columns: [t.providerId, t.issuer, t.subject] }),
-    check(
-      "zsec_provider_identity_provider_ck",
-      sql`char_length(${t.providerId}) BETWEEN 1 AND 256 AND octet_length(${t.providerId}) <= 512`,
-    ),
-    check(
-      "zsec_provider_identity_issuer_ck",
-      sql`char_length(${t.issuer}) BETWEEN 1 AND 2048 AND octet_length(${t.issuer}) <= 4096`,
-    ),
-    check(
-      "zsec_provider_identity_subject_ck",
-      sql`char_length(${t.subject}) BETWEEN 1 AND 256 AND octet_length(${t.subject}) <= 512`,
-    ),
+    check("zsec_provider_identity_provider_ck", textBoundary(t.providerId, 256, 512)),
+    check("zsec_provider_identity_issuer_ck", textBoundary(t.issuer, 2048, 4096)),
+    check("zsec_provider_identity_subject_ck", textBoundary(t.subject, 256, 512)),
     index("zsec_provider_identity_user_idx").on(t.userId),
   ],
 );
 
-export const securityServiceAccounts = pgTable(
+export const securityServiceAccounts = securityData.table(
   "zsec_service_account",
   {
     subjectKind: text("subject_kind").notNull().default("service-account"),
@@ -102,7 +99,7 @@ export const securityServiceAccounts = pgTable(
   ],
 );
 
-export const securityServiceAccountCredentials = pgTable(
+export const securityServiceAccountCredentials = securityData.table(
   "zsec_service_account_credential",
   {
     id: text("id").primaryKey(),
@@ -116,19 +113,20 @@ export const securityServiceAccountCredentials = pgTable(
   },
   (t) => [
     uniqueIndex("zsec_service_account_credential_hash_uq").on(t.secretHash),
+    check("zsec_service_account_credential_id_ck", textBoundary(t.id, 256, 512)),
+    check("zsec_service_account_credential_hash_ck", textBoundary(t.secretHash, 512, 1024)),
+    check("zsec_service_account_credential_created_at_ck", safeInteger(t.createdAt)),
+    check("zsec_service_account_credential_expires_at_ck", safeInteger(t.expiresAt)),
+    check("zsec_service_account_credential_revoked_at_ck", safeInteger(t.revokedAt)),
     check(
-      "zsec_service_account_credential_id_ck",
-      sql`char_length(${t.id}) BETWEEN 1 AND 256 AND octet_length(${t.id}) <= 512`,
-    ),
-    check(
-      "zsec_service_account_credential_hash_ck",
-      sql`char_length(${t.secretHash}) BETWEEN 1 AND 512 AND octet_length(${t.secretHash}) <= 1024`,
+      "zsec_service_account_credential_expiry_ck",
+      sql`${t.expiresAt} IS NULL OR ${t.expiresAt} > ${t.createdAt}`,
     ),
     index("zsec_service_account_credential_account_idx").on(t.serviceAccountId),
   ],
 );
 
-export const securityGroups = pgTable(
+export const securityGroups = securityData.table(
   "zsec_access_group",
   {
     subjectKind: text("subject_kind").notNull().default("group"),
@@ -144,7 +142,7 @@ export const securityGroups = pgTable(
   ],
 );
 
-export const securityGroupMemberships = pgTable(
+export const securityGroupMemberships = securityData.table(
   "zsec_group_membership",
   {
     groupId: text("group_id")
@@ -168,7 +166,7 @@ export const securityGroupMemberships = pgTable(
   ],
 );
 
-export const securityAccessBindings = pgTable(
+export const securityAccessBindings = securityData.table(
   "zsec_access_binding",
   {
     subjectKind: text("subject_kind").notNull(),
@@ -183,19 +181,13 @@ export const securityAccessBindings = pgTable(
       foreignColumns: [securitySubjects.kind, securitySubjects.id],
       name: "zsec_access_binding_subject_fk",
     }).onDelete("cascade"),
-    check(
-      "zsec_access_binding_namespace_ck",
-      sql`char_length(${t.namespaceId}) BETWEEN 1 AND 256 AND octet_length(${t.namespaceId}) <= 512`,
-    ),
-    check(
-      "zsec_access_binding_role_ck",
-      sql`char_length(${t.accessRole}) BETWEEN 1 AND 256 AND octet_length(${t.accessRole}) <= 512`,
-    ),
+    check("zsec_access_binding_namespace_ck", textBoundary(t.namespaceId, 256, 512)),
+    check("zsec_access_binding_role_ck", textBoundary(t.accessRole, 256, 512)),
     index("zsec_access_binding_scope_idx").on(t.namespaceId, t.accessRole),
   ],
 );
 
-export const securityKnowledgeAudienceGrants = pgTable(
+export const securityKnowledgeAudienceGrants = securityData.table(
   "zsec_knowledge_audience_grant",
   {
     namespaceId: text("namespace_id").notNull(),
@@ -206,15 +198,14 @@ export const securityKnowledgeAudienceGrants = pgTable(
   (t) => [
     primaryKey({ columns: [t.namespaceId, t.baseId, t.audienceKind, t.audienceId] }),
     check("zsec_knowledge_audience_kind_ck", sql`${t.audienceKind} IN ('access-role', 'group')`),
-    check(
-      "zsec_knowledge_audience_namespace_ck",
-      sql`char_length(${t.namespaceId}) BETWEEN 1 AND 256 AND octet_length(${t.namespaceId}) <= 512`,
-    ),
+    check("zsec_knowledge_audience_namespace_ck", textBoundary(t.namespaceId, 256, 512)),
+    check("zsec_knowledge_audience_base_ck", textBoundary(t.baseId, 256, 512)),
+    check("zsec_knowledge_audience_id_ck", textBoundary(t.audienceId, 256, 512)),
     index("zsec_knowledge_audience_base_idx").on(t.namespaceId, t.baseId),
   ],
 );
 
-export const securitySessions = pgTable(
+export const securitySessions = securityData.table(
   "zsec_session",
   {
     tokenHash: text("token_hash").primaryKey(),
@@ -228,6 +219,7 @@ export const securitySessions = pgTable(
     authMethod: text("auth_method").notNull(),
   },
   (t) => [
+    check("zsec_session_principal_kind_ck", sql`${t.principalKind} IN ('user', 'service-account')`),
     foreignKey({
       columns: [t.principalKind, t.principalId],
       foreignColumns: [securitySubjects.kind, securitySubjects.id],
@@ -237,16 +229,19 @@ export const securitySessions = pgTable(
       "zsec_session_auth_method_ck",
       sql`${t.authMethod} IN ('oidc', 'service-account', 'break-glass')`,
     ),
-    check(
-      "zsec_session_hash_ck",
-      sql`char_length(${t.tokenHash}) BETWEEN 1 AND 512 AND octet_length(${t.tokenHash}) <= 1024`,
-    ),
+    check("zsec_session_hash_ck", textBoundary(t.tokenHash, 512, 1024)),
+    check("zsec_session_csrf_hash_ck", textBoundary(t.csrfTokenHash, 512, 1024)),
+    check("zsec_session_created_at_ck", safeInteger(t.createdAt)),
+    check("zsec_session_expires_at_ck", safeInteger(t.expiresAt)),
+    check("zsec_session_revoked_at_ck", safeInteger(t.revokedAt)),
+    check("zsec_session_invalidated_at_ck", safeInteger(t.invalidatedAt)),
+    check("zsec_session_expiry_ck", sql`${t.expiresAt} > ${t.createdAt}`),
     index("zsec_session_principal_idx").on(t.principalKind, t.principalId),
     index("zsec_session_expiry_idx").on(t.expiresAt),
   ],
 );
 
-export const securityAuditRecords = pgTable(
+export const securityAuditRecords = securityData.table(
   "zsec_audit_record",
   {
     id: text("id").primaryKey(),
@@ -279,18 +274,92 @@ export const securityAuditRecords = pgTable(
   },
   (t) => [
     uniqueIndex("zsec_audit_record_chain_uq").on(t.namespaceId, t.sequence),
+    check("zsec_audit_record_namespace_ck", textBoundary(t.namespaceId, 256, 512)),
+    check("zsec_audit_record_event_ck", textBoundary(t.event, 256, 512)),
+    check("zsec_audit_record_hash_ck", textBoundary(t.hash, 512, 1024)),
+    check("zsec_audit_record_id_ck", textBoundary(t.id, 256, 512)),
+    check("zsec_audit_record_sequence_ck", nonNegativeSafeInteger(t.sequence)),
+    check("zsec_audit_record_occurred_at_ck", safeInteger(t.occurredAt)),
+    check("zsec_audit_record_recorded_at_ck", safeInteger(t.recordedAt)),
+    check("zsec_audit_record_actor_id_ck", textBoundary(t.actorId, 256, 512)),
     check(
-      "zsec_audit_record_namespace_ck",
-      sql`char_length(${t.namespaceId}) BETWEEN 1 AND 256 AND octet_length(${t.namespaceId}) <= 512`,
+      "zsec_audit_record_actor_kind_ck",
+      sql`${t.actorKind} IN ('operator', 'worker', 'user', 'service-account')`,
     ),
     check(
-      "zsec_audit_record_event_ck",
-      sql`char_length(${t.event}) BETWEEN 1 AND 256 AND octet_length(${t.event}) <= 512`,
+      "zsec_audit_record_actor_pair_ck",
+      sql`(${t.actorKind} IS NULL) = (${t.actorId} IS NULL)`,
+    ),
+    check("zsec_audit_record_effective_id_ck", textBoundary(t.effectiveId, 256, 512)),
+    check(
+      "zsec_audit_record_effective_kind_ck",
+      sql`${t.effectiveKind} IN ('operator', 'worker', 'user', 'service-account')`,
     ),
     check(
-      "zsec_audit_record_hash_ck",
-      sql`char_length(${t.hash}) BETWEEN 1 AND 512 AND octet_length(${t.hash}) <= 1024`,
+      "zsec_audit_record_effective_pair_ck",
+      sql`(${t.effectiveKind} IS NULL) = (${t.effectiveId} IS NULL)`,
     ),
+    check(
+      "zsec_audit_record_principals_pair_ck",
+      sql`(${t.actorKind} IS NULL) = (${t.effectiveKind} IS NULL)`,
+    ),
+    check("zsec_audit_record_permission_resource_ck", textBoundary(t.permissionResource, 256, 512)),
+    check("zsec_audit_record_permission_action_ck", textBoundary(t.permissionAction, 256, 512)),
+    check(
+      "zsec_audit_record_permission_pair_ck",
+      sql`(${t.permissionResource} IS NULL) = (${t.permissionAction} IS NULL)`,
+    ),
+    check(
+      "zsec_audit_record_permission_value_ck",
+      sql`zorya_security_data.zsec_valid_permission(${t.permissionResource}, ${t.permissionAction})`,
+    ),
+    check("zsec_audit_record_resource_kind_ck", textBoundary(t.resourceKind, 256, 512)),
+    check(
+      "zsec_audit_record_resource_value_ck",
+      sql`zorya_security_data.zsec_valid_resource(${t.resourceKind})`,
+    ),
+    check("zsec_audit_record_resource_namespace_ck", textBoundary(t.resourceNamespaceId, 256, 512)),
+    check(
+      "zsec_audit_record_resource_pair_ck",
+      sql`(${t.resourceKind} IS NULL) = (${t.resourceNamespaceId} IS NULL)`,
+    ),
+    check("zsec_audit_record_resource_id_ck", textBoundary(t.resourceId, 256, 512)),
+    check(
+      "zsec_audit_record_resource_principal_id_ck",
+      textBoundary(t.resourcePrincipalId, 256, 512),
+    ),
+    check(
+      "zsec_audit_record_resource_principal_kind_ck",
+      sql`${t.resourcePrincipalKind} IN ('operator', 'worker', 'user', 'service-account')`,
+    ),
+    check(
+      "zsec_audit_record_resource_principal_pair_ck",
+      sql`(${t.resourcePrincipalKind} IS NULL) = (${t.resourcePrincipalId} IS NULL)`,
+    ),
+    check(
+      "zsec_audit_record_resource_children_ck",
+      sql`${t.resourceKind} IS NOT NULL OR (${t.resourceId} IS NULL AND ${t.resourcePrincipalKind} IS NULL)`,
+    ),
+    check("zsec_audit_record_decision_reason_ck", textBoundary(t.decisionReason, 256, 512)),
+    check(
+      "zsec_audit_record_decision_value_ck",
+      sql`${t.decisionReason} IN ('operator_allow','access_role_allow','knowledge_grant_allow','self_identity_allow','permission_denied','namespace_denied','principal_disabled','identity_unknown','act_for_required','wrong_plane')`,
+    ),
+    check(
+      "zsec_audit_record_decision_pair_ck",
+      sql`(${t.decisionAllowed} IS NULL) = (${t.decisionReason} IS NULL)`,
+    ),
+    check("zsec_audit_record_request_id_ck", textBoundary(t.requestId, 256, 512)),
+    check("zsec_audit_record_run_id_ck", textBoundary(t.runId, 256, 512)),
+    check("zsec_audit_record_thread_id_ck", textBoundary(t.threadId, 256, 512)),
+    check("zsec_audit_record_tool_call_id_ck", textBoundary(t.toolCallId, 256, 512)),
+    check("zsec_audit_record_previous_hash_ck", textBoundary(t.previousHash, 512, 1024)),
+    check("zsec_audit_record_key_id_ck", textBoundary(t.keyId, 256, 512)),
+    check(
+      "zsec_audit_record_metadata_ck",
+      sql`zorya_security_data.zsec_valid_metadata(${t.metadata})`,
+    ),
+    check("zsec_audit_record_time_order_ck", sql`${t.recordedAt} >= ${t.occurredAt}`),
     index("zsec_audit_record_recorded_idx").on(t.namespaceId, t.recordedAt, t.id),
     index("zsec_audit_record_actor_idx").on(t.actorKind, t.actorId, t.recordedAt),
     index("zsec_audit_record_permission_idx").on(
@@ -301,7 +370,7 @@ export const securityAuditRecords = pgTable(
   ],
 );
 
-export const securityAuditOutbox = pgTable(
+export const securityAuditOutbox = securityData.table(
   "zsec_audit_outbox",
   {
     eventId: text("event_id")
@@ -319,20 +388,39 @@ export const securityAuditOutbox = pgTable(
   },
   (t) => [
     check("zsec_audit_outbox_status_ck", sql`${t.status} IN ('pending', 'leased', 'delivered')`),
+    check("zsec_audit_outbox_attempts_ck", sql`${t.attempts} >= 0`),
+    check("zsec_audit_outbox_initial_next_attempt_at_ck", safeInteger(t.initialNextAttemptAt)),
+    check("zsec_audit_outbox_next_attempt_at_ck", safeInteger(t.nextAttemptAt)),
+    check("zsec_audit_outbox_lease_token_ck", textBoundary(t.leaseToken, 256, 512)),
+    check("zsec_audit_outbox_lease_owner_ck", textBoundary(t.leaseOwner, 256, 512)),
+    check("zsec_audit_outbox_lease_expires_at_ck", safeInteger(t.leaseExpiresAt)),
+    check("zsec_audit_outbox_delivered_at_ck", safeInteger(t.deliveredAt)),
+    check("zsec_audit_outbox_last_error_ck", textBoundary(t.lastError, 2048, 4096)),
     index("zsec_audit_outbox_due_idx").on(t.status, t.nextAttemptAt, t.eventId),
     index("zsec_audit_outbox_lease_idx").on(t.status, t.leaseExpiresAt),
   ],
 );
 
-export const securityDenialBuckets = pgTable("zsec_denial_bucket", {
-  key: text("key").primaryKey(),
-  windowStartedAt: time("window_started_at").notNull(),
-  windowEndsAt: time("window_ends_at").notNull(),
-  count: bigint("count", { mode: "number" }).notNull(),
-  suppressed: bigint("suppressed", { mode: "number" }).notNull(),
-});
+export const securityDenialBuckets = securityData.table(
+  "zsec_denial_bucket",
+  {
+    key: text("key").primaryKey(),
+    windowStartedAt: time("window_started_at").notNull(),
+    windowEndsAt: time("window_ends_at").notNull(),
+    count: bigint("count", { mode: "number" }).notNull(),
+    suppressed: bigint("suppressed", { mode: "number" }).notNull(),
+  },
+  (t) => [
+    check("zsec_denial_bucket_key_ck", textBoundary(t.key, 256, 512)),
+    check("zsec_denial_bucket_window_started_at_ck", safeInteger(t.windowStartedAt)),
+    check("zsec_denial_bucket_window_ends_at_ck", safeInteger(t.windowEndsAt)),
+    check("zsec_denial_bucket_count_ck", nonNegativeSafeInteger(t.count)),
+    check("zsec_denial_bucket_suppressed_ck", nonNegativeSafeInteger(t.suppressed)),
+    check("zsec_denial_bucket_window_order_ck", sql`${t.windowEndsAt} > ${t.windowStartedAt}`),
+  ],
+);
 
-export const securityBreakGlassGrants = pgTable(
+export const securityBreakGlassGrants = securityData.table(
   "zsec_break_glass_grant",
   {
     id: text("id").primaryKey(),
@@ -347,15 +435,23 @@ export const securityBreakGlassGrants = pgTable(
   },
   (t) => [
     uniqueIndex("zsec_break_glass_grant_token_uq").on(t.tokenHash),
+    check(
+      "zsec_break_glass_grant_principal_kind_ck",
+      sql`${t.principalKind} IN ('user', 'service-account')`,
+    ),
     foreignKey({
       columns: [t.principalKind, t.principalId],
       foreignColumns: [securitySubjects.kind, securitySubjects.id],
       name: "zsec_break_glass_grant_principal_fk",
     }).onDelete("restrict"),
-    check(
-      "zsec_break_glass_reason_ck",
-      sql`char_length(${t.reason}) BETWEEN 1 AND 2048 AND octet_length(${t.reason}) <= 4096`,
-    ),
+    check("zsec_break_glass_reason_ck", textBoundary(t.reason, 2048, 4096)),
+    check("zsec_break_glass_grant_id_ck", textBoundary(t.id, 256, 512)),
+    check("zsec_break_glass_grant_token_ck", textBoundary(t.tokenHash, 512, 1024)),
+    check("zsec_break_glass_grant_creator_ck", textBoundary(t.createdBy, 256, 512)),
+    check("zsec_break_glass_grant_created_at_ck", safeInteger(t.createdAt)),
+    check("zsec_break_glass_grant_expires_at_ck", safeInteger(t.expiresAt)),
+    check("zsec_break_glass_grant_revoked_at_ck", safeInteger(t.revokedAt)),
+    check("zsec_break_glass_grant_expiry_ck", sql`${t.expiresAt} > ${t.createdAt}`),
     index("zsec_break_glass_grant_expiry_idx").on(t.expiresAt),
   ],
 );

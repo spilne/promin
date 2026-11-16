@@ -49,6 +49,7 @@ describe("PostgreSQL security package", () => {
 
   it("ships the dedicated migration stream", () => {
     expect(packedFiles).toContain("package/security-drizzle/0000_security_baseline.sql");
+    expect(packedFiles).toContain("package/security-drizzle/0001_security_schema_hardening.sql");
     expect(packedFiles).toContain("package/security-drizzle/meta/_journal.json");
   });
 
