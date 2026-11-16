@@ -174,7 +174,7 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
       tokenHash: params.tokenHash,
       principal: { kind: "user", id: params.userId },
       createdAt: now,
-      expiresAt: now + positiveNumber(params.ttlMs, "session ttl"),
+      expiresAt: finiteTimeSum(now, positiveTime(params.ttlMs, "session ttl"), "session expiry"),
       authMethod: "oidc",
     });
   }
@@ -409,7 +409,7 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     if (!existing) return;
     this.serviceAccountCredentials.set(
       id,
-      freeze({ ...existing, revokedAt: finiteNumber(params.revokedAt, "revoked at") }),
+      freeze({ ...existing, revokedAt: integerTime(params.revokedAt, "revoked at") }),
     );
   }
 
@@ -455,7 +455,7 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     if (existing.authMethod === "break-glass") {
       throw new Error("Break-glass sessions must be revoked transactionally");
     }
-    const revokedAt = finiteNumber(params.revokedAt, "revoked at");
+    const revokedAt = integerTime(params.revokedAt, "revoked at");
     if (existing.revokedAt !== undefined) {
       if (existing.revokedAt === revokedAt) return;
       throw new Error(`Session is already revoked: ${key}`);
@@ -542,8 +542,8 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     readonly limit: number;
   }): Promise<ReadonlyArray<SecurityAuditOutboxRecord>> {
     const owner = requiredString(params.owner, "outbox lease owner");
-    const now = finiteNumber(this.clock.currentTimeMs(), "outbox claim time");
-    const leaseMs = positiveNumber(params.leaseMs, "outbox lease duration");
+    const now = integerTime(this.clock.currentTimeMs(), "outbox claim time");
+    const leaseMs = positiveTime(params.leaseMs, "outbox lease duration");
     const limit = positiveInteger(params.limit, "outbox claim limit");
     if (limit > SECURITY_STORE_LIMITS.outboxBatch) {
       throw new TypeError("outbox claim limit is too large");
@@ -561,7 +561,7 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
           left.nextAttemptAt - right.nextAttemptAt || left.eventId.localeCompare(right.eventId),
       )
       .slice(0, limit);
-    const leaseExpiresAt = finiteSum(now, leaseMs, "outbox lease expiry");
+    const leaseExpiresAt = finiteTimeSum(now, leaseMs, "outbox lease expiry");
     const claimed = due.map((row) =>
       freeze<SecurityAuditOutboxRecord>({
         eventId: row.eventId,
@@ -586,7 +586,7 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
   }): Promise<boolean> {
     const eventId = requiredString(params.eventId, "event id");
     const leaseToken = requiredString(params.leaseToken, "outbox lease token");
-    const now = finiteNumber(this.clock.currentTimeMs(), "outbox delivery time");
+    const now = integerTime(this.clock.currentTimeMs(), "outbox delivery time");
     const row = this.auditOutbox.get(eventId);
     if (!row) return false;
     if (row.status === "delivered") {
@@ -612,13 +612,13 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
   }): Promise<boolean> {
     const eventId = requiredString(params.eventId, "event id");
     const leaseToken = requiredString(params.leaseToken, "outbox lease token");
-    const nextAttemptAt = finiteNumber(params.nextAttemptAt, "outbox next attempt");
+    const nextAttemptAt = integerTime(params.nextAttemptAt, "outbox next attempt");
     const lastError = optionalBoundedString(
       params.lastError,
       "outbox last error",
       SECURITY_STORE_LIMITS.reason,
     );
-    const now = finiteNumber(this.clock.currentTimeMs(), "outbox release time");
+    const now = integerTime(this.clock.currentTimeMs(), "outbox release time");
     const row = this.auditOutbox.get(eventId);
     if (!row) return false;
     if (row.status === "pending") {
@@ -657,8 +657,8 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     readonly emitLimit: number;
   }): Promise<{ readonly bucket: SecurityDenialBucket; readonly shouldEmit: boolean }> {
     const key = requiredString(params.key, "denial bucket key");
-    const now = finiteNumber(params.now, "denial time");
-    const windowMs = positiveNumber(params.windowMs, "denial window");
+    const now = integerTime(params.now, "denial time");
+    const windowMs = positiveTime(params.windowMs, "denial window");
     const emitLimit = nonNegativeInteger(params.emitLimit, "denial emit limit");
     const existing = this.denialBuckets.get(key);
     if (existing !== undefined && now < existing.windowStartedAt) {
@@ -677,7 +677,9 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     const row = freeze<SecurityDenialBucket>({
       key,
       windowStartedAt: resets ? now : existing.windowStartedAt,
-      windowEndsAt: resets ? finiteSum(now, windowMs, "denial window end") : existing.windowEndsAt,
+      windowEndsAt: resets
+        ? finiteTimeSum(now, windowMs, "denial window end")
+        : existing.windowEndsAt,
       count,
       suppressed,
     });
@@ -745,7 +747,7 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     readonly outbox?: { readonly nextAttemptAt: number };
   }): Promise<"revoked" | "already-revoked"> {
     const grantId = requiredString(params.grantId, "break-glass grant id");
-    const revokedAt = finiteNumber(params.revokedAt, "break-glass revoked at");
+    const revokedAt = integerTime(params.revokedAt, "break-glass revoked at");
     const grant = this.breakGlassGrants.get(grantId);
     if (!grant) throw new Error(`Unknown break-glass grant: ${grantId}`);
     const session = this.sessions.get(grant.tokenHash);
@@ -943,15 +945,24 @@ function finiteNumber(value: unknown, label: string): number {
   return value;
 }
 
-function positiveNumber(value: unknown, label: string): number {
-  const normalized = finiteNumber(value, label);
+function integerTime(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) {
+    throw new TypeError(`${label} must be safe integer milliseconds`);
+  }
+  return value;
+}
+
+function positiveTime(value: unknown, label: string): number {
+  const normalized = integerTime(value, label);
   if (normalized <= 0) throw new TypeError(`${label} must be positive`);
   return normalized;
 }
 
-function finiteSum(left: number, right: number, label: string): number {
+function finiteTimeSum(left: number, right: number, label: string): number {
   const result = left + right;
-  if (!Number.isFinite(result)) throw new TypeError(`${label} must be finite`);
+  if (!Number.isSafeInteger(result)) {
+    throw new TypeError(`${label} must be safe integer milliseconds`);
+  }
   return result;
 }
 
@@ -1153,9 +1164,9 @@ function normalizeCredential(value: ServiceAccountCredential): ServiceAccountCre
     id: requiredString(id, "credential id"),
     serviceAccountId: requiredString(serviceAccountId, "service account id"),
     secretHash: requiredString(secretHash, "credential hash", SECURITY_STORE_LIMITS.hash),
-    createdAt: finiteNumber(createdAt, "credential created at"),
-    ...(expiresAt !== undefined && { expiresAt: finiteNumber(expiresAt, "credential expires at") }),
-    ...(revokedAt !== undefined && { revokedAt: finiteNumber(revokedAt, "credential revoked at") }),
+    createdAt: integerTime(createdAt, "credential created at"),
+    ...(expiresAt !== undefined && { expiresAt: integerTime(expiresAt, "credential expires at") }),
+    ...(revokedAt !== undefined && { revokedAt: integerTime(revokedAt, "credential revoked at") }),
   };
   if (row.expiresAt !== undefined && row.expiresAt <= row.createdAt) {
     throw new TypeError("credential expiry must follow creation");
@@ -1178,12 +1189,12 @@ function normalizeSession(value: SecuritySession): SecuritySession {
   const row: SecuritySession = {
     tokenHash: requiredString(tokenHash, "session token hash", SECURITY_STORE_LIMITS.hash),
     principal: normalizePrincipalRef(principal as SecurityPrincipalRef),
-    createdAt: finiteNumber(createdAt, "session created at"),
-    expiresAt: finiteNumber(expiresAt, "session expires at"),
+    createdAt: integerTime(createdAt, "session created at"),
+    expiresAt: integerTime(expiresAt, "session expires at"),
     ...(csrfTokenHash !== undefined && {
       csrfTokenHash: requiredString(csrfTokenHash, "csrf token hash", SECURITY_STORE_LIMITS.hash),
     }),
-    ...(revokedAt !== undefined && { revokedAt: finiteNumber(revokedAt, "session revoked at") }),
+    ...(revokedAt !== undefined && { revokedAt: integerTime(revokedAt, "session revoked at") }),
     authMethod,
   };
   if (row.expiresAt <= row.createdAt) throw new TypeError("session expiry must follow creation");
@@ -1213,8 +1224,8 @@ function normalizeAuditRecord(value: SecurityAuditRecord): SecurityAuditRecord {
     id: requiredString(id, "audit event id"),
     namespaceId: requiredString(namespaceId, "namespace id", SECURITY_STORE_LIMITS.namespace),
     sequence: nonNegativeInteger(sequence, "audit sequence"),
-    occurredAt: finiteNumber(occurredAt, "audit occurrence"),
-    recordedAt: finiteNumber(recordedAt, "audit recorded time"),
+    occurredAt: integerTime(occurredAt, "audit occurrence"),
+    recordedAt: integerTime(recordedAt, "audit recorded time"),
     event: requiredString(event, "audit event", SECURITY_STORE_LIMITS.event),
     ...(actor !== undefined && { actor: normalizeAuditPrincipal(actor, "audit actor") }),
     ...(effective !== undefined && {
@@ -1268,10 +1279,10 @@ function normalizeBreakGlassGrant(value: BreakGlassGrant): BreakGlassGrant {
     tokenHash: requiredString(tokenHash, "break-glass token hash", SECURITY_STORE_LIMITS.hash),
     reason: requiredString(reason, "break-glass reason", SECURITY_STORE_LIMITS.reason),
     createdBy: requiredString(createdBy, "break-glass creator"),
-    createdAt: finiteNumber(createdAt, "break-glass created at"),
-    expiresAt: finiteNumber(expiresAt, "break-glass expires at"),
+    createdAt: integerTime(createdAt, "break-glass created at"),
+    expiresAt: integerTime(expiresAt, "break-glass expires at"),
     ...(revokedAt !== undefined && {
-      revokedAt: finiteNumber(revokedAt, "break-glass revoked at"),
+      revokedAt: integerTime(revokedAt, "break-glass revoked at"),
     }),
   };
   if (row.expiresAt <= row.createdAt)
@@ -1407,7 +1418,7 @@ function pendingAuditOutbox(eventId: string, nextAttemptAt: unknown): SecurityAu
     eventId: requiredString(eventId, "event id"),
     status: "pending",
     attempts: 0,
-    nextAttemptAt: finiteNumber(nextAttemptAt, "outbox next attempt"),
+    nextAttemptAt: integerTime(nextAttemptAt, "outbox next attempt"),
   });
 }
 
@@ -1484,5 +1495,17 @@ function clone<T>(value: T): T {
 }
 
 function recordsEqual(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return stableJson(left) === stableJson(right);
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const source = value as Record<string, unknown>;
+    return `{${Object.keys(source)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(source[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
 }

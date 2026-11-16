@@ -128,6 +128,12 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       const access = await store.resolveAccess({ subject, namespaceId: "team" });
       expect(new Set(access.accessRoles)).toEqual(new Set(["member", "approver", "auditor"]));
       expect(new Set(access.groups)).toEqual(new Set(["finance"]));
+      await store.putGroup({ id: "finance", status: "disabled" });
+      expect(await store.resolveAccess({ subject, namespaceId: "team" })).toEqual({
+        accessRoles: ["member"],
+        groups: [],
+      });
+      await store.putGroup({ id: "finance", status: "active" });
       await store.removeGroupMembership({ groupId: "finance", subject });
       expect(await store.resolveAccess({ subject, namespaceId: "team" })).toEqual({
         accessRoles: ["member"],
@@ -226,7 +232,14 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       ).rejects.toThrow("Conflicting session token hash");
       await store.revokeSession({ tokenHash: session.tokenHash, revokedAt: now + 1 });
       expect(await store.getSessionRecord(session.tokenHash)).toBeUndefined();
+      await store.putSession({ ...session, revokedAt: now + 1 });
       await expect(store.putSession(session)).rejects.toThrow("Conflicting session token hash");
+
+      const deleted = { ...session, tokenHash: "deleted-session-hash" };
+      await store.putSession(deleted);
+      await store.deleteSession(deleted.tokenHash);
+      await store.deleteSession(deleted.tokenHash);
+      expect(await store.getSessionRecord(deleted.tokenHash)).toBeUndefined();
 
       const expired = {
         ...session,
@@ -795,6 +808,40 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       expect(await store.getBreakGlassGrant(grant.id)).toBeUndefined();
       expect(await store.getSessionRecord(grant.tokenHash)).toBeUndefined();
       expect((await store.listAuditRecords({ namespaceId: "org" })).items).toEqual([]);
+    });
+
+    it("rejects fractional milliseconds before durable mutation", async () => {
+      const store = await factory.create();
+      const user = await createUser(store, "integer-milliseconds");
+
+      await expect(
+        store.putSession({
+          tokenHash: "fractional-session",
+          principal: { kind: "user", id: user.id },
+          createdAt: 1.5,
+          expiresAt: 2_000,
+          authMethod: "oidc",
+        }),
+      ).rejects.toThrow("safe integer");
+      expect(await store.getSessionRecord("fractional-session")).toBeUndefined();
+
+      await expect(
+        store.appendAuditWithOutbox({
+          record: auditRecord({ id: "fractional-outbox", sequence: 1, hash: "hash" }),
+          outbox: { nextAttemptAt: 1.5 },
+        }),
+      ).rejects.toThrow("safe integer");
+      expect(await store.getAuditRecord("fractional-outbox")).toBeUndefined();
+
+      await expect(
+        store.incrementDenialBucket({
+          key: "fractional-denial",
+          now: 1.5,
+          windowMs: 100,
+          emitLimit: 1,
+        }),
+      ).rejects.toThrow("safe integer");
+      expect(await store.getDenialBucket("fractional-denial")).toBeUndefined();
     });
   });
 }

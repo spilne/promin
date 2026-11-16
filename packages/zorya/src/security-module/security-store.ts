@@ -207,13 +207,16 @@ export interface SecurityStore {
   createSession(params: { tokenHash: string; userId: string; ttlMs: number }): Promise<void>;
   /** The session owner, or undefined when the session is absent or expired. */
   getSession(tokenHash: string): Promise<{ userId: string } | undefined>;
+  /** Idempotently revoke a non-break-glass session, including an existing tombstone. */
   deleteSession(tokenHash: string): Promise<void>;
 }
 
 /**
  * Production-capable security persistence.  The legacy `SecurityStore`
  * methods remain while the module is migrated; new stores implement this
- * complete contract and may adapt the legacy user-only calls.
+ * complete contract and may adapt the legacy user-only calls. Every timestamp
+ * and duration is represented as safe-integer milliseconds; fractional or
+ * unsafe numeric values must be rejected before mutation.
  */
 export interface SecurityStoreV2 extends SecurityStore {
   findOrCreateProviderUser(params: {
@@ -266,7 +269,10 @@ export interface SecurityStoreV2 extends SecurityStore {
     readonly revokedAt: number;
   }): Promise<void>;
 
-  /** Insert-or-identical for an existing active principal; a token hash is never reassigned. */
+  /**
+   * Insert-or-identical for an existing active principal; a token hash is never reassigned.
+   * An exact retry of an already-revoked row is idempotent.
+   */
   putSession(session: SecuritySession): Promise<void>;
   getSessionRecord(tokenHash: string): Promise<SecuritySession | undefined>;
   revokeSession(params: { readonly tokenHash: string; readonly revokedAt: number }): Promise<void>;
