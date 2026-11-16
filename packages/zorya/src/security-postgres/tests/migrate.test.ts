@@ -2,6 +2,7 @@ import { expect, it } from "bun:test";
 import { postgresDescribe } from "@promin/postgres/testing";
 import { type DrizzleDb, execRaw } from "@spilne/perfect-postgres";
 import { getTableColumns, getTableName, sql } from "drizzle-orm";
+import { getTableConfig, PgDialect, type PgTable } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -72,23 +73,30 @@ postgresDescribe("PostgreSQL security migrations", { timeout: 120_000 }, (pg) =>
     const expectedColumns = Object.values(SECURITY_POSTGRES_SCHEMA)
       .flatMap((table) =>
         Object.values(getTableColumns(table)).map(
-          (column) => `${getTableName(table)}.${column.name}`,
+          (column) =>
+            `${getTableName(table)}.${column.name}:${column.getSQLType()}:${column.notNull}`,
         ),
       )
       .sort();
     const databaseColumns = await execRaw(
       pg.db,
       sql`
-      SELECT table_name, column_name
-      FROM information_schema.columns
+      SELECT table_name, column_name, format_type(c.udt_name::regtype, NULL) AS sql_type,
+             (is_nullable = 'NO') AS not_null
+      FROM information_schema.columns c
       WHERE table_schema = ${SECURITY_DATA_SCHEMA} AND table_name LIKE 'zsec_%'
       ORDER BY table_name, ordinal_position
     `,
     );
     const actualColumns = databaseColumns
-      .map((row) => `${String(row.table_name)}.${String(row.column_name)}`)
+      .map(
+        (row) =>
+          `${String(row.table_name)}.${String(row.column_name)}:${String(row.sql_type)}:${String(row.not_null)}`,
+      )
       .sort();
     expect(actualColumns).toEqual(expectedColumns);
+
+    await expectCatalogMatchesSchema(pg.db, Object.values(SECURITY_POSTGRES_SCHEMA));
 
     const historyAfterRerun = await execRaw(
       pg.db,
@@ -265,3 +273,256 @@ postgresDescribe("PostgreSQL security migrations", { timeout: 120_000 }, (pg) =>
     expect(publicTables).toHaveLength(0);
   }, 120_000);
 });
+
+async function expectCatalogMatchesSchema(db: DrizzleDb, tables: PgTable[]): Promise<void> {
+  const configs = tables.map((table) => getTableConfig(table));
+
+  const expectedDefaults = configs
+    .flatMap((config) =>
+      config.columns
+        .filter((column) => column.hasDefault && column.default !== undefined)
+        .map(
+          (column) =>
+            `${config.name}.${column.name}:${renderDefault(column.default as string | number | boolean)}`,
+        ),
+    )
+    .sort();
+  const actualDefaults = (
+    await execRaw(
+      db,
+      sql`SELECT r.relname AS table_name, a.attname AS column_name,
+                 pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) AS default_expr
+          FROM pg_catalog.pg_attrdef d
+          JOIN pg_catalog.pg_class r ON r.oid=d.adrelid
+          JOIN pg_catalog.pg_namespace n ON n.oid=r.relnamespace
+          JOIN pg_catalog.pg_attribute a ON a.attrelid=r.oid AND a.attnum=d.adnum
+          WHERE n.nspname=${SECURITY_DATA_SCHEMA} AND r.relname LIKE 'zsec_%'
+          ORDER BY r.relname,a.attname`,
+    )
+  )
+    .map(
+      (row) => `${String(row.table_name)}.${String(row.column_name)}:${String(row.default_expr)}`,
+    )
+    .sort();
+  expect(actualDefaults).toEqual(expectedDefaults);
+
+  const expectedPrimaryKeys = configs
+    .flatMap((config) =>
+      config.primaryKeys.map((key) => ({
+        table: config.name,
+        name: key.getName(),
+        columns: key.columns.map((column) => column.name),
+      })),
+    )
+    .sort(byCatalogIdentity);
+  const actualPrimaryKeys = (
+    await execRaw(
+      db,
+      sql`SELECT r.relname AS table, c.conname AS name,
+                 ARRAY(
+                   SELECT a.attname
+                   FROM pg_catalog.unnest(c.conkey) WITH ORDINALITY AS key(attnum,ord)
+                   JOIN pg_catalog.pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=key.attnum
+                   ORDER BY key.ord
+                 ) AS columns
+          FROM pg_catalog.pg_constraint c
+          JOIN pg_catalog.pg_class r ON r.oid=c.conrelid
+          JOIN pg_catalog.pg_namespace n ON n.oid=r.relnamespace
+          WHERE n.nspname=${SECURITY_DATA_SCHEMA} AND r.relname LIKE 'zsec_%' AND c.contype='p'
+          ORDER BY r.relname,c.conname`,
+    )
+  )
+    .map((row) => ({
+      table: String(row.table),
+      name: String(row.name),
+      columns: row.columns as string[],
+    }))
+    .sort(byCatalogIdentity);
+  expect(actualPrimaryKeys).toEqual(expectedPrimaryKeys);
+
+  const expectedForeignKeys = configs
+    .flatMap((config) =>
+      config.foreignKeys.map((key) => {
+        const reference = key.reference();
+        const foreign = getTableConfig(reference.foreignTable);
+        return {
+          table: config.name,
+          name: key.getName(),
+          columns: reference.columns.map((column) => column.name),
+          foreignSchema: foreign.schema ?? "public",
+          foreignTable: foreign.name,
+          foreignColumns: reference.foreignColumns.map((column) => column.name),
+          onDelete: key.onDelete ?? "no action",
+          onUpdate: key.onUpdate ?? "no action",
+        };
+      }),
+    )
+    .sort(byCatalogIdentity);
+  const actualForeignKeys = (
+    await execRaw(
+      db,
+      sql`SELECT r.relname AS table, c.conname AS name,
+                 ARRAY(
+                   SELECT a.attname
+                   FROM pg_catalog.unnest(c.conkey) WITH ORDINALITY AS key(attnum,ord)
+                   JOIN pg_catalog.pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=key.attnum
+                   ORDER BY key.ord
+                 ) AS columns,
+                 fn.nspname AS foreign_schema, fr.relname AS foreign_table,
+                 ARRAY(
+                   SELECT a.attname
+                   FROM pg_catalog.unnest(c.confkey) WITH ORDINALITY AS key(attnum,ord)
+                   JOIN pg_catalog.pg_attribute a ON a.attrelid=c.confrelid AND a.attnum=key.attnum
+                   ORDER BY key.ord
+                 ) AS foreign_columns,
+                 CASE c.confdeltype WHEN 'c' THEN 'cascade' WHEN 'r' THEN 'restrict'
+                   WHEN 'n' THEN 'set null' WHEN 'd' THEN 'set default' ELSE 'no action' END AS on_delete,
+                 CASE c.confupdtype WHEN 'c' THEN 'cascade' WHEN 'r' THEN 'restrict'
+                   WHEN 'n' THEN 'set null' WHEN 'd' THEN 'set default' ELSE 'no action' END AS on_update
+          FROM pg_catalog.pg_constraint c
+          JOIN pg_catalog.pg_class r ON r.oid=c.conrelid
+          JOIN pg_catalog.pg_namespace n ON n.oid=r.relnamespace
+          JOIN pg_catalog.pg_class fr ON fr.oid=c.confrelid
+          JOIN pg_catalog.pg_namespace fn ON fn.oid=fr.relnamespace
+          WHERE n.nspname=${SECURITY_DATA_SCHEMA} AND r.relname LIKE 'zsec_%' AND c.contype='f'
+          ORDER BY r.relname,c.conname`,
+    )
+  )
+    .map((row) => ({
+      table: String(row.table),
+      name: String(row.name),
+      columns: row.columns as string[],
+      foreignSchema: String(row.foreign_schema),
+      foreignTable: String(row.foreign_table),
+      foreignColumns: row.foreign_columns as string[],
+      onDelete: String(row.on_delete),
+      onUpdate: String(row.on_update),
+    }))
+    .sort(byCatalogIdentity);
+  expect(actualForeignKeys).toEqual(expectedForeignKeys);
+
+  const expectedIndexes = configs
+    .flatMap((config) => [
+      ...config.primaryKeys.map((key) => ({
+        table: config.name,
+        name: key.getName(),
+        unique: true,
+        primary: true,
+        method: "btree",
+        columns: key.columns.map((column) => column.name),
+      })),
+      ...config.indexes.map((value) => ({
+        table: config.name,
+        name: value.config.name!,
+        unique: value.config.unique,
+        primary: false,
+        method: value.config.method ?? "btree",
+        columns: value.config.columns.map((column) => (column as { name: string }).name),
+      })),
+    ])
+    .sort(byCatalogIdentity);
+  const actualIndexes = (
+    await execRaw(
+      db,
+      sql`SELECT r.relname AS table, idx.relname AS name, i.indisunique AS unique,
+                 i.indisprimary AS primary, am.amname AS method,
+                 ARRAY(
+                   SELECT a.attname
+                   FROM pg_catalog.unnest(i.indkey::pg_catalog.int2[]) WITH ORDINALITY AS key(attnum,ord)
+                   JOIN pg_catalog.pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=key.attnum
+                   WHERE key.ord <= i.indnkeyatts
+                   ORDER BY key.ord
+                 ) AS columns
+          FROM pg_catalog.pg_index i
+          JOIN pg_catalog.pg_class r ON r.oid=i.indrelid
+          JOIN pg_catalog.pg_namespace n ON n.oid=r.relnamespace
+          JOIN pg_catalog.pg_class idx ON idx.oid=i.indexrelid
+          JOIN pg_catalog.pg_am am ON am.oid=idx.relam
+          WHERE n.nspname=${SECURITY_DATA_SCHEMA} AND r.relname LIKE 'zsec_%'
+          ORDER BY r.relname,idx.relname`,
+    )
+  )
+    .map((row) => ({
+      table: String(row.table),
+      name: String(row.name),
+      unique: Boolean(row.unique),
+      primary: Boolean(row.primary),
+      method: String(row.method),
+      columns: row.columns as string[],
+    }))
+    .sort(byCatalogIdentity);
+  expect(actualIndexes).toEqual(expectedIndexes);
+
+  const expectedCheckNames = configs
+    .flatMap((config) => config.checks.map((value) => `${config.name}.${value.name}`))
+    .sort();
+  const actualCheckNames = (
+    await execRaw(
+      db,
+      sql`SELECT r.relname AS table_name,c.conname AS constraint_name
+          FROM pg_catalog.pg_constraint c
+          JOIN pg_catalog.pg_class r ON r.oid=c.conrelid
+          JOIN pg_catalog.pg_namespace n ON n.oid=r.relnamespace
+          WHERE n.nspname=${SECURITY_DATA_SCHEMA} AND r.relname LIKE 'zsec_%' AND c.contype='c'
+          ORDER BY r.relname,c.conname`,
+    )
+  ).map((row) => `${String(row.table_name)}.${String(row.constraint_name)}`);
+  expect(actualCheckNames).toEqual(expectedCheckNames);
+
+  const dialect = new PgDialect();
+  await db.transaction(async (rawTx) => {
+    const tx = rawTx as unknown as DrizzleDb;
+    let probeIndex = 0;
+    for (const config of configs) {
+      const qualifier = `"${SECURITY_DATA_SCHEMA}"."${config.name}".`;
+      for (const value of config.checks) {
+        const rendered = dialect.sqlToQuery(value.value);
+        expect(rendered.params).toEqual([]);
+        const expression = rendered.sql.replaceAll(qualifier, "");
+        const probe = `zcp_${probeIndex++}`;
+        await execRaw(
+          tx,
+          sql.raw(
+            `ALTER TABLE ${quoteIdentifier(SECURITY_DATA_SCHEMA)}.${quoteIdentifier(config.name)} ADD CONSTRAINT ${quoteIdentifier(probe)} CHECK (${expression}) NOT VALID`,
+          ),
+        );
+        const definitions = await execRaw(
+          tx,
+          sql`SELECT c.conname AS name,
+                     pg_catalog.pg_get_expr(c.conbin,c.conrelid,true) AS expression
+              FROM pg_catalog.pg_constraint c
+              JOIN pg_catalog.pg_class r ON r.oid=c.conrelid
+              JOIN pg_catalog.pg_namespace n ON n.oid=r.relnamespace
+              WHERE n.nspname=${SECURITY_DATA_SCHEMA} AND r.relname=${config.name}
+                AND c.conname IN (${value.name},${probe})`,
+        );
+        const byName = new Map(
+          definitions.map((row) => [String(row.name), String(row.expression)] as const),
+        );
+        expect(byName.get(probe), `${config.name}.${value.name}`).toBe(byName.get(value.name));
+        await execRaw(
+          tx,
+          sql.raw(
+            `ALTER TABLE ${quoteIdentifier(SECURITY_DATA_SCHEMA)}.${quoteIdentifier(config.name)} DROP CONSTRAINT ${quoteIdentifier(probe)}`,
+          ),
+        );
+      }
+    }
+  });
+}
+
+function renderDefault(value: string | number | boolean): string {
+  if (typeof value === "string") return `'${value.replaceAll("'", "''")}'::text`;
+  return String(value);
+}
+
+function quoteIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+function byCatalogIdentity(
+  left: { table: string; name: string },
+  right: { table: string; name: string },
+) {
+  return `${left.table}.${left.name}`.localeCompare(`${right.table}.${right.name}`);
+}

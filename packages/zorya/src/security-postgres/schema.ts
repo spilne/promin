@@ -20,7 +20,9 @@ const safeInteger = (column: unknown) =>
   sql`${column} BETWEEN -9007199254740991 AND 9007199254740991`;
 const nonNegativeSafeInteger = (column: unknown) => sql`${column} BETWEEN 0 AND 9007199254740991`;
 const textBoundary = (column: unknown, characters: number, bytes: number) =>
-  sql`zorya_security_data.zsec_safe_text(${column}, ${characters}, ${bytes})`;
+  sql`zorya_security_data.zsec_safe_text(${column}, ${sql.raw(String(characters))}, ${sql.raw(String(bytes))})`;
+const legacyTextBoundary = (column: unknown, characters: number, bytes: number) =>
+  sql`pg_catalog.char_length(${column}) BETWEEN 1 AND ${sql.raw(String(characters))} AND pg_catalog.octet_length(${column}) <= ${sql.raw(String(bytes))}`;
 
 /** Collision-safe user/service-account/group namespace. */
 export const securitySubjects = securityData.table(
@@ -33,10 +35,11 @@ export const securitySubjects = securityData.table(
     updatedAt: time("updated_at").notNull(),
   },
   (t) => [
-    primaryKey({ columns: [t.kind, t.id] }),
+    primaryKey({ name: "zsec_subject_pkey", columns: [t.kind, t.id] }),
     check("zsec_subject_kind_ck", sql`${t.kind} IN ('user', 'service-account', 'group')`),
     check("zsec_subject_status_ck", sql`${t.status} IN ('active', 'disabled')`),
-    check("zsec_subject_id_ck", textBoundary(t.id, 256, 512)),
+    check("zsec_subject_id_ck", legacyTextBoundary(t.id, 256, 512)),
+    check("zsec_subject_id_safe_ck", textBoundary(t.id, 256, 512)),
     check("zsec_subject_created_at_ck", safeInteger(t.createdAt)),
     check("zsec_subject_updated_at_ck", safeInteger(t.updatedAt)),
   ],
@@ -46,13 +49,15 @@ export const securityUsers = securityData.table(
   "zsec_user",
   {
     subjectKind: text("subject_kind").notNull().default("user"),
-    id: text("id").primaryKey(),
+    id: text("id").notNull(),
     email: text("email").notNull(),
   },
   (t) => [
     check("zsec_user_kind_ck", sql`${t.subjectKind} = 'user'`),
+    primaryKey({ name: "zsec_user_pkey", columns: [t.id] }),
+    check("zsec_user_email_ck", legacyTextBoundary(t.email, 320, 640)),
     check(
-      "zsec_user_email_ck",
+      "zsec_user_email_safe_ck",
       sql`${textBoundary(t.email, 320, 640)} AND ${t.email} = pg_catalog.lower(pg_catalog.btrim(${t.email})) AND pg_catalog.strpos(${t.email}, '@') > 0`,
     ),
     foreignKey({
@@ -69,15 +74,24 @@ export const securityProviderIdentities = securityData.table(
     providerId: text("provider_id").notNull(),
     issuer: text("issuer").notNull(),
     subject: text("subject").notNull(),
-    userId: text("user_id")
-      .notNull()
-      .references(() => securityUsers.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull(),
   },
   (t) => [
-    primaryKey({ columns: [t.providerId, t.issuer, t.subject] }),
-    check("zsec_provider_identity_provider_ck", textBoundary(t.providerId, 256, 512)),
-    check("zsec_provider_identity_issuer_ck", textBoundary(t.issuer, 2048, 4096)),
-    check("zsec_provider_identity_subject_ck", textBoundary(t.subject, 256, 512)),
+    primaryKey({
+      name: "zsec_provider_identity_pkey",
+      columns: [t.providerId, t.issuer, t.subject],
+    }),
+    foreignKey({
+      columns: [t.userId],
+      foreignColumns: [securityUsers.id],
+      name: "zsec_provider_identity_user_id_fkey",
+    }).onDelete("cascade"),
+    check("zsec_provider_identity_provider_ck", legacyTextBoundary(t.providerId, 256, 512)),
+    check("zsec_provider_identity_provider_safe_ck", textBoundary(t.providerId, 256, 512)),
+    check("zsec_provider_identity_issuer_ck", legacyTextBoundary(t.issuer, 2048, 4096)),
+    check("zsec_provider_identity_issuer_safe_ck", textBoundary(t.issuer, 2048, 4096)),
+    check("zsec_provider_identity_subject_ck", legacyTextBoundary(t.subject, 256, 512)),
+    check("zsec_provider_identity_subject_safe_ck", textBoundary(t.subject, 256, 512)),
     index("zsec_provider_identity_user_idx").on(t.userId),
   ],
 );
@@ -86,10 +100,11 @@ export const securityServiceAccounts = securityData.table(
   "zsec_service_account",
   {
     subjectKind: text("subject_kind").notNull().default("service-account"),
-    id: text("id").primaryKey(),
+    id: text("id").notNull(),
     canActFor: boolean("can_act_for").notNull().default(false),
   },
   (t) => [
+    primaryKey({ name: "zsec_service_account_pkey", columns: [t.id] }),
     check("zsec_service_account_kind_ck", sql`${t.subjectKind} = 'service-account'`),
     foreignKey({
       columns: [t.subjectKind, t.id],
@@ -102,19 +117,25 @@ export const securityServiceAccounts = securityData.table(
 export const securityServiceAccountCredentials = securityData.table(
   "zsec_service_account_credential",
   {
-    id: text("id").primaryKey(),
-    serviceAccountId: text("service_account_id")
-      .notNull()
-      .references(() => securityServiceAccounts.id, { onDelete: "cascade" }),
+    id: text("id").notNull(),
+    serviceAccountId: text("service_account_id").notNull(),
     secretHash: text("secret_hash").notNull(),
     createdAt: time("created_at").notNull(),
     expiresAt: time("expires_at"),
     revokedAt: time("revoked_at"),
   },
   (t) => [
+    primaryKey({ name: "zsec_service_account_credential_pkey", columns: [t.id] }),
+    foreignKey({
+      columns: [t.serviceAccountId],
+      foreignColumns: [securityServiceAccounts.id],
+      name: "zsec_service_account_credential_service_account_id_fkey",
+    }).onDelete("cascade"),
     uniqueIndex("zsec_service_account_credential_hash_uq").on(t.secretHash),
-    check("zsec_service_account_credential_id_ck", textBoundary(t.id, 256, 512)),
-    check("zsec_service_account_credential_hash_ck", textBoundary(t.secretHash, 512, 1024)),
+    check("zsec_service_account_credential_id_ck", legacyTextBoundary(t.id, 256, 512)),
+    check("zsec_service_account_credential_id_safe_ck", textBoundary(t.id, 256, 512)),
+    check("zsec_service_account_credential_hash_ck", legacyTextBoundary(t.secretHash, 512, 1024)),
+    check("zsec_service_account_credential_hash_safe_ck", textBoundary(t.secretHash, 512, 1024)),
     check("zsec_service_account_credential_created_at_ck", safeInteger(t.createdAt)),
     check("zsec_service_account_credential_expires_at_ck", safeInteger(t.expiresAt)),
     check("zsec_service_account_credential_revoked_at_ck", safeInteger(t.revokedAt)),
@@ -130,9 +151,10 @@ export const securityGroups = securityData.table(
   "zsec_access_group",
   {
     subjectKind: text("subject_kind").notNull().default("group"),
-    id: text("id").primaryKey(),
+    id: text("id").notNull(),
   },
   (t) => [
+    primaryKey({ name: "zsec_access_group_pkey", columns: [t.id] }),
     check("zsec_access_group_kind_ck", sql`${t.subjectKind} = 'group'`),
     foreignKey({
       columns: [t.subjectKind, t.id],
@@ -145,14 +167,20 @@ export const securityGroups = securityData.table(
 export const securityGroupMemberships = securityData.table(
   "zsec_group_membership",
   {
-    groupId: text("group_id")
-      .notNull()
-      .references(() => securityGroups.id, { onDelete: "cascade" }),
+    groupId: text("group_id").notNull(),
     subjectKind: text("subject_kind").notNull(),
     subjectId: text("subject_id").notNull(),
   },
   (t) => [
-    primaryKey({ columns: [t.groupId, t.subjectKind, t.subjectId] }),
+    primaryKey({
+      name: "zsec_group_membership_pkey",
+      columns: [t.groupId, t.subjectKind, t.subjectId],
+    }),
+    foreignKey({
+      columns: [t.groupId],
+      foreignColumns: [securityGroups.id],
+      name: "zsec_group_membership_group_id_fkey",
+    }).onDelete("cascade"),
     check(
       "zsec_group_membership_subject_kind_ck",
       sql`${t.subjectKind} IN ('user', 'service-account')`,
@@ -175,14 +203,19 @@ export const securityAccessBindings = securityData.table(
     accessRole: text("access_role").notNull(),
   },
   (t) => [
-    primaryKey({ columns: [t.subjectKind, t.subjectId, t.namespaceId, t.accessRole] }),
+    primaryKey({
+      name: "zsec_access_binding_pkey",
+      columns: [t.subjectKind, t.subjectId, t.namespaceId, t.accessRole],
+    }),
     foreignKey({
       columns: [t.subjectKind, t.subjectId],
       foreignColumns: [securitySubjects.kind, securitySubjects.id],
       name: "zsec_access_binding_subject_fk",
     }).onDelete("cascade"),
-    check("zsec_access_binding_namespace_ck", textBoundary(t.namespaceId, 256, 512)),
-    check("zsec_access_binding_role_ck", textBoundary(t.accessRole, 256, 512)),
+    check("zsec_access_binding_namespace_ck", legacyTextBoundary(t.namespaceId, 256, 512)),
+    check("zsec_access_binding_namespace_safe_ck", textBoundary(t.namespaceId, 256, 512)),
+    check("zsec_access_binding_role_ck", legacyTextBoundary(t.accessRole, 256, 512)),
+    check("zsec_access_binding_role_safe_ck", textBoundary(t.accessRole, 256, 512)),
     index("zsec_access_binding_scope_idx").on(t.namespaceId, t.accessRole),
   ],
 );
@@ -196,9 +229,13 @@ export const securityKnowledgeAudienceGrants = securityData.table(
     audienceId: text("audience_id").notNull(),
   },
   (t) => [
-    primaryKey({ columns: [t.namespaceId, t.baseId, t.audienceKind, t.audienceId] }),
+    primaryKey({
+      name: "zsec_knowledge_audience_grant_pkey",
+      columns: [t.namespaceId, t.baseId, t.audienceKind, t.audienceId],
+    }),
     check("zsec_knowledge_audience_kind_ck", sql`${t.audienceKind} IN ('access-role', 'group')`),
-    check("zsec_knowledge_audience_namespace_ck", textBoundary(t.namespaceId, 256, 512)),
+    check("zsec_knowledge_audience_namespace_ck", legacyTextBoundary(t.namespaceId, 256, 512)),
+    check("zsec_knowledge_audience_namespace_safe_ck", textBoundary(t.namespaceId, 256, 512)),
     check("zsec_knowledge_audience_base_ck", textBoundary(t.baseId, 256, 512)),
     check("zsec_knowledge_audience_id_ck", textBoundary(t.audienceId, 256, 512)),
     index("zsec_knowledge_audience_base_idx").on(t.namespaceId, t.baseId),
@@ -208,7 +245,7 @@ export const securityKnowledgeAudienceGrants = securityData.table(
 export const securitySessions = securityData.table(
   "zsec_session",
   {
-    tokenHash: text("token_hash").primaryKey(),
+    tokenHash: text("token_hash").notNull(),
     principalKind: text("principal_kind").notNull(),
     principalId: text("principal_id").notNull(),
     createdAt: time("created_at").notNull(),
@@ -219,6 +256,7 @@ export const securitySessions = securityData.table(
     authMethod: text("auth_method").notNull(),
   },
   (t) => [
+    primaryKey({ name: "zsec_session_pkey", columns: [t.tokenHash] }),
     check("zsec_session_principal_kind_ck", sql`${t.principalKind} IN ('user', 'service-account')`),
     foreignKey({
       columns: [t.principalKind, t.principalId],
@@ -229,7 +267,8 @@ export const securitySessions = securityData.table(
       "zsec_session_auth_method_ck",
       sql`${t.authMethod} IN ('oidc', 'service-account', 'break-glass')`,
     ),
-    check("zsec_session_hash_ck", textBoundary(t.tokenHash, 512, 1024)),
+    check("zsec_session_hash_ck", legacyTextBoundary(t.tokenHash, 512, 1024)),
+    check("zsec_session_hash_safe_ck", textBoundary(t.tokenHash, 512, 1024)),
     check("zsec_session_csrf_hash_ck", textBoundary(t.csrfTokenHash, 512, 1024)),
     check("zsec_session_created_at_ck", safeInteger(t.createdAt)),
     check("zsec_session_expires_at_ck", safeInteger(t.expiresAt)),
@@ -244,7 +283,7 @@ export const securitySessions = securityData.table(
 export const securityAuditRecords = securityData.table(
   "zsec_audit_record",
   {
-    id: text("id").primaryKey(),
+    id: text("id").notNull(),
     namespaceId: text("namespace_id").notNull(),
     sequence: bigint("sequence", { mode: "number" }).notNull(),
     occurredAt: time("occurred_at").notNull(),
@@ -273,10 +312,14 @@ export const securityAuditRecords = securityData.table(
     keyId: text("key_id").notNull(),
   },
   (t) => [
+    primaryKey({ name: "zsec_audit_record_pkey", columns: [t.id] }),
     uniqueIndex("zsec_audit_record_chain_uq").on(t.namespaceId, t.sequence),
-    check("zsec_audit_record_namespace_ck", textBoundary(t.namespaceId, 256, 512)),
-    check("zsec_audit_record_event_ck", textBoundary(t.event, 256, 512)),
-    check("zsec_audit_record_hash_ck", textBoundary(t.hash, 512, 1024)),
+    check("zsec_audit_record_namespace_ck", legacyTextBoundary(t.namespaceId, 256, 512)),
+    check("zsec_audit_record_namespace_safe_ck", textBoundary(t.namespaceId, 256, 512)),
+    check("zsec_audit_record_event_ck", legacyTextBoundary(t.event, 256, 512)),
+    check("zsec_audit_record_event_safe_ck", textBoundary(t.event, 256, 512)),
+    check("zsec_audit_record_hash_ck", legacyTextBoundary(t.hash, 512, 1024)),
+    check("zsec_audit_record_hash_safe_ck", textBoundary(t.hash, 512, 1024)),
     check("zsec_audit_record_id_ck", textBoundary(t.id, 256, 512)),
     check("zsec_audit_record_sequence_ck", nonNegativeSafeInteger(t.sequence)),
     check("zsec_audit_record_occurred_at_ck", safeInteger(t.occurredAt)),
@@ -373,9 +416,7 @@ export const securityAuditRecords = securityData.table(
 export const securityAuditOutbox = securityData.table(
   "zsec_audit_outbox",
   {
-    eventId: text("event_id")
-      .primaryKey()
-      .references(() => securityAuditRecords.id, { onDelete: "cascade" }),
+    eventId: text("event_id").notNull(),
     status: text("status").notNull(),
     attempts: integer("attempts").notNull().default(0),
     initialNextAttemptAt: time("initial_next_attempt_at").notNull(),
@@ -387,6 +428,12 @@ export const securityAuditOutbox = securityData.table(
     lastError: text("last_error"),
   },
   (t) => [
+    primaryKey({ name: "zsec_audit_outbox_pkey", columns: [t.eventId] }),
+    foreignKey({
+      columns: [t.eventId],
+      foreignColumns: [securityAuditRecords.id],
+      name: "zsec_audit_outbox_event_id_fkey",
+    }).onDelete("cascade"),
     check("zsec_audit_outbox_status_ck", sql`${t.status} IN ('pending', 'leased', 'delivered')`),
     check("zsec_audit_outbox_attempts_ck", sql`${t.attempts} >= 0`),
     check("zsec_audit_outbox_initial_next_attempt_at_ck", safeInteger(t.initialNextAttemptAt)),
@@ -404,13 +451,14 @@ export const securityAuditOutbox = securityData.table(
 export const securityDenialBuckets = securityData.table(
   "zsec_denial_bucket",
   {
-    key: text("key").primaryKey(),
+    key: text("key").notNull(),
     windowStartedAt: time("window_started_at").notNull(),
     windowEndsAt: time("window_ends_at").notNull(),
     count: bigint("count", { mode: "number" }).notNull(),
     suppressed: bigint("suppressed", { mode: "number" }).notNull(),
   },
   (t) => [
+    primaryKey({ name: "zsec_denial_bucket_pkey", columns: [t.key] }),
     check("zsec_denial_bucket_key_ck", textBoundary(t.key, 256, 512)),
     check("zsec_denial_bucket_window_started_at_ck", safeInteger(t.windowStartedAt)),
     check("zsec_denial_bucket_window_ends_at_ck", safeInteger(t.windowEndsAt)),
@@ -423,7 +471,7 @@ export const securityDenialBuckets = securityData.table(
 export const securityBreakGlassGrants = securityData.table(
   "zsec_break_glass_grant",
   {
-    id: text("id").primaryKey(),
+    id: text("id").notNull(),
     principalKind: text("principal_kind").notNull(),
     principalId: text("principal_id").notNull(),
     tokenHash: text("token_hash").notNull(),
@@ -434,6 +482,7 @@ export const securityBreakGlassGrants = securityData.table(
     revokedAt: time("revoked_at"),
   },
   (t) => [
+    primaryKey({ name: "zsec_break_glass_grant_pkey", columns: [t.id] }),
     uniqueIndex("zsec_break_glass_grant_token_uq").on(t.tokenHash),
     check(
       "zsec_break_glass_grant_principal_kind_ck",
@@ -444,7 +493,8 @@ export const securityBreakGlassGrants = securityData.table(
       foreignColumns: [securitySubjects.kind, securitySubjects.id],
       name: "zsec_break_glass_grant_principal_fk",
     }).onDelete("restrict"),
-    check("zsec_break_glass_reason_ck", textBoundary(t.reason, 2048, 4096)),
+    check("zsec_break_glass_reason_ck", legacyTextBoundary(t.reason, 2048, 4096)),
+    check("zsec_break_glass_reason_safe_ck", textBoundary(t.reason, 2048, 4096)),
     check("zsec_break_glass_grant_id_ck", textBoundary(t.id, 256, 512)),
     check("zsec_break_glass_grant_token_ck", textBoundary(t.tokenHash, 512, 1024)),
     check("zsec_break_glass_grant_creator_ck", textBoundary(t.createdBy, 256, 512)),
