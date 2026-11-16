@@ -502,6 +502,9 @@ export function createElevatedTool<TInput, TOutput>(
           namespaceId: scoped.namespaceId,
           resourceId: scoped.resourceId,
           ...(scoped.agentId !== undefined && { agentId: scoped.agentId }),
+          ...(ctx?.scope?.securityContext !== undefined && {
+            securityContext: ctx.scope.securityContext,
+          }),
           toolName: config.name,
           ...(ctx?.toolCallId !== undefined && { toolCallId: ctx.toolCallId }),
           action: entry.action,

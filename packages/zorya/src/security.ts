@@ -40,6 +40,20 @@ export type {
 } from "./security-module/security-store.ts";
 export { SECURITY_STORE_LIMITS } from "./security-module/security-store.ts";
 export {
+  computeSecurityAuditHash,
+  DurableSecurityAudit,
+  SecurityAuditAccessDeniedError,
+  SecurityAuditReader,
+  SecurityToolAuditBridge,
+  verifySecurityAuditRecords,
+  type DurableSecurityAuditConfig,
+  type SecurityAuditCheckpoint,
+  type SecurityAuditEnvelope,
+  type SecurityAuditHmacKey,
+  type SecurityAuditSearchFilter,
+  type SecurityAuditVerification,
+} from "./security-module/security-audit.ts";
+export {
   createZoryaSecurity,
   type ServiceAccountConfig,
   type ZoryaSecurityConfig,

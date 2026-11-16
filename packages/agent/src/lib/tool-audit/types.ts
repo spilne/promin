@@ -1,3 +1,5 @@
+import type { RunSecurityContext } from "@promin/workflow";
+
 // ---------------------------------------------------------------------------
 // Audit log — durable record of elevated (cross-scope) tool invocations.
 //
@@ -32,6 +34,8 @@ export interface ToolAuditEntry {
   readonly resourceId: string;
   /** Recipe id of the agent the tool executed under, when known. */
   readonly agentId?: string;
+  /** Immutable actor/effective identity copied from the live ToolScope. */
+  readonly securityContext?: RunSecurityContext;
   /** Tool that performed the action. */
   readonly toolName: string;
   /** What cross-scope action was taken — free-form, tool-defined. */
