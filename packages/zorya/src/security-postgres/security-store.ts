@@ -121,7 +121,11 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
   async listBindings(userId: string): Promise<AccessBinding[]> {
     const rows = await this.listSubjectBindings({ kind: "user", id: userId });
     return rows.map((row) =>
-      freeze({ userId: row.subject.id, namespaceId: row.namespaceId, accessRole: row.accessRole }),
+      freeze({
+        userId: row.subject.id,
+        namespaceId: row.namespaceId,
+        accessRole: row.accessRole,
+      }),
     );
   }
 
@@ -164,7 +168,11 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     return (await this.listKnowledgeAudienceGrants(params))
       .filter((row) => row.audience.kind === "access-role")
       .map((row) =>
-        freeze({ namespaceId: row.namespaceId, baseId: row.baseId, accessRole: row.audience.id }),
+        freeze({
+          namespaceId: row.namespaceId,
+          baseId: row.baseId,
+          accessRole: row.audience.id,
+        }),
       );
   }
 
@@ -236,7 +244,10 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
           tx,
           sql`UPDATE zorya_security_data.zsec_user SET email=${email} WHERE id=${existing.user_id as string}`,
         );
-        const provider = freeze({ ...identity, userId: existing.user_id as string });
+        const provider = freeze({
+          ...identity,
+          userId: existing.user_id as string,
+        });
         return {
           user: freeze({
             id: provider.userId,
@@ -318,7 +329,13 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       this.db,
       sql`SELECT g.id,s.status FROM zorya_security_data.zsec_access_group g JOIN zorya_security_data.zsec_subject s ON s.kind='group' AND s.id=g.id WHERE g.id=${value}`,
     );
-    return row && freeze({ id: row.id as string, status: row.status as AccessGroup["status"] });
+    return (
+      row &&
+      freeze({
+        id: row.id as string,
+        status: row.status as AccessGroup["status"],
+      })
+    );
   }
 
   async putGroupMembership(value: GroupMembership): Promise<void> {
@@ -346,7 +363,10 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       sql`SELECT g.id,s.status FROM zorya_security_data.zsec_group_membership m JOIN zorya_security_data.zsec_access_group g ON g.id=m.group_id JOIN zorya_security_data.zsec_subject s ON s.kind='group' AND s.id=g.id WHERE m.subject_kind=${subject.kind} AND m.subject_id=${subject.id} ORDER BY g.id`,
     );
     return rows.map((row) =>
-      freeze({ id: row.id as string, status: row.status as AccessGroup["status"] }),
+      freeze({
+        id: row.id as string,
+        status: row.status as AccessGroup["status"],
+      }),
     );
   }
 
@@ -500,6 +520,45 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
           sql`UPDATE zorya_security_data.zsec_session SET invalidated_at=COALESCE(invalidated_at,${now}) WHERE principal_kind='service-account' AND principal_id=${account.id}`,
         );
       }
+    });
+  }
+
+  async createServiceAccountWithCredential(params: {
+    readonly account: SecurityServiceAccount;
+    readonly credential: ServiceAccountCredential;
+  }): Promise<boolean> {
+    const account = normalizeServiceAccount(params.account);
+    const credential = normalizeCredential(params.credential);
+    if (credential.serviceAccountId !== account.id) {
+      throw new Error("Credential service account does not match account");
+    }
+    return this.db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as DrizzleDb;
+      await lock(tx, `service-account:${account.id}`);
+      const [existing] = await execRaw(
+        tx,
+        sql`SELECT id FROM zorya_security_data.zsec_service_account WHERE id=${account.id}`,
+      );
+      if (existing) return false;
+      const now = await this.now(tx);
+      await execRaw(
+        tx,
+        sql`INSERT INTO zorya_security_data.zsec_subject(kind,id,status,created_at,updated_at) VALUES ('service-account',${account.id},${account.status},${now},${now})`,
+      );
+      await execRaw(
+        tx,
+        sql`INSERT INTO zorya_security_data.zsec_service_account(subject_kind,id,can_act_for) VALUES ('service-account',${account.id},${account.canActFor})`,
+      );
+      try {
+        await execRaw(
+          tx,
+          sql`INSERT INTO zorya_security_data.zsec_service_account_credential(id,service_account_id,secret_hash,created_at,expires_at,revoked_at) VALUES (${credential.id},${credential.serviceAccountId},${credential.secretHash},${credential.createdAt},${credential.expiresAt ?? null},${credential.revokedAt ?? null})`,
+        );
+      } catch (error) {
+        if (isUniqueViolation(error)) throw new Error("Credential hash is already used");
+        throw error;
+      }
+      return true;
     });
   }
 
@@ -869,7 +928,10 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     readonly now: number;
     readonly windowMs: number;
     readonly emitLimit: number;
-  }): Promise<{ readonly bucket: SecurityDenialBucket; readonly shouldEmit: boolean }> {
+  }): Promise<{
+    readonly bucket: SecurityDenialBucket;
+    readonly shouldEmit: boolean;
+  }> {
     const key = requiredString(params.key, "denial bucket key");
     const now = integerMs(params.now, "denial time");
     const windowMs = positiveIntegerMs(params.windowMs, "denial window");
@@ -1183,7 +1245,9 @@ function sessionFromRow(row: DbRow): SecuritySession {
     createdAt: Number(row.created_at),
     expiresAt: Number(row.expires_at),
     ...(row.csrf_token_hash !== null &&
-      row.csrf_token_hash !== undefined && { csrfTokenHash: row.csrf_token_hash as string }),
+      row.csrf_token_hash !== undefined && {
+        csrfTokenHash: row.csrf_token_hash as string,
+      }),
     ...(row.revoked_at !== null &&
       row.revoked_at !== undefined && { revokedAt: Number(row.revoked_at) }),
     authMethod: row.auth_method as SecuritySession["authMethod"],
@@ -1252,18 +1316,28 @@ function auditFromRow(row: DbRow): SecurityAuditRecord {
       (row.request_id ?? row.run_id ?? row.thread_id ?? row.tool_call_id) !== undefined && {
         correlation: freeze({
           ...(row.request_id !== null &&
-            row.request_id !== undefined && { requestId: row.request_id as string }),
+            row.request_id !== undefined && {
+              requestId: row.request_id as string,
+            }),
           ...(row.run_id !== null && row.run_id !== undefined && { runId: row.run_id as string }),
           ...(row.thread_id !== null &&
-            row.thread_id !== undefined && { threadId: row.thread_id as string }),
+            row.thread_id !== undefined && {
+              threadId: row.thread_id as string,
+            }),
           ...(row.tool_call_id !== null &&
-            row.tool_call_id !== undefined && { toolCallId: row.tool_call_id as string }),
+            row.tool_call_id !== undefined && {
+              toolCallId: row.tool_call_id as string,
+            }),
         }),
       }),
     ...(metadata !== null &&
-      metadata !== undefined && { metadata: freeze(structuredClone(metadata)) }),
+      metadata !== undefined && {
+        metadata: freeze(structuredClone(metadata)),
+      }),
     ...(row.previous_hash !== null &&
-      row.previous_hash !== undefined && { previousHash: row.previous_hash as string }),
+      row.previous_hash !== undefined && {
+        previousHash: row.previous_hash as string,
+      }),
     hash: row.hash as string,
     keyId: row.key_id as string,
   });
@@ -1276,13 +1350,21 @@ function outboxFromRow(row: DbRow): SecurityAuditOutboxRecord {
     attempts: Number(row.attempts),
     nextAttemptAt: Number(row.next_attempt_at),
     ...(row.lease_token !== null &&
-      row.lease_token !== undefined && { leaseToken: row.lease_token as string }),
+      row.lease_token !== undefined && {
+        leaseToken: row.lease_token as string,
+      }),
     ...(row.lease_owner !== null &&
-      row.lease_owner !== undefined && { leaseOwner: row.lease_owner as string }),
+      row.lease_owner !== undefined && {
+        leaseOwner: row.lease_owner as string,
+      }),
     ...(row.lease_expires_at !== null &&
-      row.lease_expires_at !== undefined && { leaseExpiresAt: Number(row.lease_expires_at) }),
+      row.lease_expires_at !== undefined && {
+        leaseExpiresAt: Number(row.lease_expires_at),
+      }),
     ...(row.delivered_at !== null &&
-      row.delivered_at !== undefined && { deliveredAt: Number(row.delivered_at) }),
+      row.delivered_at !== undefined && {
+        deliveredAt: Number(row.delivered_at),
+      }),
     ...(row.last_error !== null &&
       row.last_error !== undefined && { lastError: row.last_error as string }),
   });
@@ -1419,8 +1501,14 @@ function pageLimit(value: unknown, label: string): number {
 }
 
 function normalizeInitialBindings(
-  value: ReadonlyArray<{ readonly namespaceId: string; readonly accessRole: string }>,
-): ReadonlyArray<{ readonly namespaceId: string; readonly accessRole: string }> {
+  value: ReadonlyArray<{
+    readonly namespaceId: string;
+    readonly accessRole: string;
+  }>,
+): ReadonlyArray<{
+  readonly namespaceId: string;
+  readonly accessRole: string;
+}> {
   if (!Array.isArray(value) || value.length > SECURITY_STORE_LIMITS.initialBindings)
     throw new TypeError("initial bindings is too large");
   return Array.from(value, (binding) => {
@@ -1459,7 +1547,10 @@ function normalizeAccessSubject(value: AccessSubjectRef): AccessSubjectRef {
   const id = source.id;
   if (kind !== "user" && kind !== "service-account" && kind !== "group")
     throw new TypeError("invalid access subject kind");
-  return freeze({ kind, id: requiredString(id, "access subject id") }) as AccessSubjectRef;
+  return freeze({
+    kind,
+    id: requiredString(id, "access subject id"),
+  }) as AccessSubjectRef;
 }
 
 function normalizeProviderIdentity(
@@ -1477,7 +1568,10 @@ function normalizeProviderIdentity(
 
 function normalizeGroup(value: AccessGroup): AccessGroup {
   const source = value as unknown as Record<string, unknown>;
-  return freeze({ id: requiredString(source.id, "group id"), status: statusValue(source.status) });
+  return freeze({
+    id: requiredString(source.id, "group id"),
+    status: statusValue(source.status),
+  });
 }
 function normalizeMembership(value: GroupMembership): GroupMembership {
   const source = value as unknown as Record<string, unknown>;
@@ -1511,7 +1605,10 @@ function normalizeKnowledgeAudienceGrant(value: KnowledgeAudienceGrant): Knowled
       SECURITY_STORE_LIMITS.namespace,
     ),
     baseId: requiredString(source.baseId, "knowledge base id"),
-    audience: freeze({ kind: audience.kind, id: requiredString(audience.id, "audience id") }),
+    audience: freeze({
+      kind: audience.kind,
+      id: requiredString(audience.id, "audience id"),
+    }),
   });
 }
 
@@ -1534,8 +1631,12 @@ function normalizeCredential(value: ServiceAccountCredential): ServiceAccountCre
     serviceAccountId: requiredString(source.serviceAccountId, "service account id"),
     secretHash: requiredString(source.secretHash, "credential hash", SECURITY_STORE_LIMITS.hash),
     createdAt: integerMs(source.createdAt, "credential created at"),
-    ...(expiresAt !== undefined && { expiresAt: integerMs(expiresAt, "credential expires at") }),
-    ...(revokedAt !== undefined && { revokedAt: integerMs(revokedAt, "credential revoked at") }),
+    ...(expiresAt !== undefined && {
+      expiresAt: integerMs(expiresAt, "credential expires at"),
+    }),
+    ...(revokedAt !== undefined && {
+      revokedAt: integerMs(revokedAt, "credential revoked at"),
+    }),
   });
   if (row.expiresAt !== undefined && row.expiresAt <= row.createdAt)
     throw new TypeError("credential expiry must follow creation");
@@ -1557,7 +1658,9 @@ function normalizeSession(value: SecuritySession): SecuritySession {
     ...(csrf !== undefined && {
       csrfTokenHash: requiredString(csrf, "csrf token hash", SECURITY_STORE_LIMITS.hash),
     }),
-    ...(revoked !== undefined && { revokedAt: integerMs(revoked, "session revoked at") }),
+    ...(revoked !== undefined && {
+      revokedAt: integerMs(revoked, "session revoked at"),
+    }),
     authMethod,
   });
   if (row.expiresAt <= row.createdAt) throw new TypeError("session expiry must follow creation");
@@ -1586,15 +1689,27 @@ function normalizeAuditRecord(value: SecurityAuditRecord): SecurityAuditRecord {
     occurredAt: integerMs(source.occurredAt, "audit occurrence"),
     recordedAt: integerMs(source.recordedAt, "audit recorded time"),
     event: requiredString(source.event, "audit event", SECURITY_STORE_LIMITS.event),
-    ...(actor !== undefined && { actor: normalizeAuditPrincipal(actor, "audit actor") }),
+    ...(actor !== undefined && {
+      actor: normalizeAuditPrincipal(actor, "audit actor"),
+    }),
     ...(effective !== undefined && {
       effective: normalizeAuditPrincipal(effective, "audit effective principal"),
     }),
-    ...(permission !== undefined && { permission: normalizeAuditPermission(permission) }),
-    ...(resource !== undefined && { resource: normalizeAuditResource(resource) }),
-    ...(decision !== undefined && { decision: normalizeAuditDecision(decision) }),
-    ...(correlation !== undefined && { correlation: normalizeAuditCorrelation(correlation) }),
-    ...(metadata !== undefined && { metadata: normalizeAuditMetadata(metadata) }),
+    ...(permission !== undefined && {
+      permission: normalizeAuditPermission(permission),
+    }),
+    ...(resource !== undefined && {
+      resource: normalizeAuditResource(resource),
+    }),
+    ...(decision !== undefined && {
+      decision: normalizeAuditDecision(decision),
+    }),
+    ...(correlation !== undefined && {
+      correlation: normalizeAuditCorrelation(correlation),
+    }),
+    ...(metadata !== undefined && {
+      metadata: normalizeAuditMetadata(metadata),
+    }),
     ...(previousHash !== undefined && {
       previousHash: requiredString(previousHash, "previous audit hash", SECURITY_STORE_LIMITS.hash),
     }),
@@ -1655,7 +1770,9 @@ function normalizeAuditResource(value: unknown): SecurityAuditRecord["resource"]
       "audit resource namespace",
       SECURITY_STORE_LIMITS.namespace,
     ),
-    ...(source.id !== undefined && { id: requiredString(source.id, "audit resource id") }),
+    ...(source.id !== undefined && {
+      id: requiredString(source.id, "audit resource id"),
+    }),
     ...(source.principal !== undefined && {
       principal: normalizeAuditPrincipal(source.principal, "audit resource principal"),
     }),
@@ -1683,7 +1800,9 @@ function normalizeAuditCorrelation(
     ...(source.requestId !== undefined && {
       requestId: requiredString(source.requestId, "request id"),
     }),
-    ...(source.runId !== undefined && { runId: requiredString(source.runId, "run id") }),
+    ...(source.runId !== undefined && {
+      runId: requiredString(source.runId, "run id"),
+    }),
     ...(source.threadId !== undefined && {
       threadId: requiredString(source.threadId, "thread id"),
     }),

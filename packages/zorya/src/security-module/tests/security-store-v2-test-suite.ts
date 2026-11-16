@@ -25,10 +25,20 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
   describe(name, () => {
     it("keys OIDC identity by provider, issuer and subject instead of email", async () => {
       const store = await factory.create();
-      const identity = { providerId: "oidc", issuer: "https://id.example", subject: "sub-1" };
+      const identity = {
+        providerId: "oidc",
+        issuer: "https://id.example",
+        subject: "sub-1",
+      };
       const [first, concurrent] = await Promise.all([
-        store.findOrCreateProviderUser({ identity, email: "first@example.com" }),
-        store.findOrCreateProviderUser({ identity, email: "first@example.com" }),
+        store.findOrCreateProviderUser({
+          identity,
+          email: "first@example.com",
+        }),
+        store.findOrCreateProviderUser({
+          identity,
+          email: "first@example.com",
+        }),
       ]);
       expect(first.user.id).toBe(concurrent.user.id);
       expect([first.created, concurrent.created].filter(Boolean)).toHaveLength(1);
@@ -36,7 +46,10 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
         identity,
         email: "renamed@example.com",
       });
-      expect(renamed.user).toMatchObject({ id: first.user.id, email: "renamed@example.com" });
+      expect(renamed.user).toMatchObject({
+        id: first.user.id,
+        email: "renamed@example.com",
+      });
       const otherSubject = await store.findOrCreateProviderUser({
         identity: { ...identity, subject: "sub-2" },
         email: "renamed@example.com",
@@ -57,7 +70,11 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
     it("requires existing collision-safe principals for every privilege-bearing edge", async () => {
       const store = await factory.create();
       const user = await createUser(store, "same-id-user");
-      await store.putServiceAccount({ id: user.id, status: "active", canActFor: false });
+      await store.putServiceAccount({
+        id: user.id,
+        status: "active",
+        canActFor: false,
+      });
       await store.putSubjectBinding({
         subject: { kind: "user", id: user.id },
         namespaceId: "team",
@@ -69,7 +86,10 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
         accessRole: "agent-manager",
       });
       expect(
-        await store.resolveAccess({ subject: { kind: "user", id: user.id }, namespaceId: "team" }),
+        await store.resolveAccess({
+          subject: { kind: "user", id: user.id },
+          namespaceId: "team",
+        }),
       ).toEqual({ accessRoles: ["member"], groups: [] });
       expect(
         await store.resolveAccess({
@@ -80,7 +100,11 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
 
       const orphan = { kind: "service-account", id: "future-admin" } as const;
       await expect(
-        store.putSubjectBinding({ subject: orphan, namespaceId: "org", accessRole: "admin" }),
+        store.putSubjectBinding({
+          subject: orphan,
+          namespaceId: "org",
+          accessRole: "admin",
+        }),
       ).rejects.toThrow("Unknown service-account");
       await store.putGroup({ id: "admins", status: "active" });
       await expect(
@@ -114,7 +138,11 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       const subject = { kind: "user", id: user.id } as const;
       await store.putGroup({ id: "finance", status: "active" });
       await store.putGroupMembership({ groupId: "finance", subject });
-      await store.putSubjectBinding({ subject, namespaceId: "team", accessRole: "member" });
+      await store.putSubjectBinding({
+        subject,
+        namespaceId: "team",
+        accessRole: "member",
+      });
       await store.putSubjectBinding({
         subject: { kind: "group", id: "finance" },
         namespaceId: "team",
@@ -125,7 +153,10 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
         namespaceId: "org",
         accessRole: "auditor",
       });
-      const access = await store.resolveAccess({ subject, namespaceId: "team" });
+      const access = await store.resolveAccess({
+        subject,
+        namespaceId: "team",
+      });
       expect(new Set(access.accessRoles)).toEqual(new Set(["member", "approver", "auditor"]));
       expect(new Set(access.groups)).toEqual(new Set(["finance"]));
       await store.putGroup({ id: "finance", status: "disabled" });
@@ -164,13 +195,20 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       expect(grants).toEqual(expect.arrayContaining([role, group]));
       await store.removeKnowledgeAudienceGrant(group);
       expect(
-        await store.listKnowledgeAudienceGrants({ namespaceId: "team", baseId: "docs" }),
+        await store.listKnowledgeAudienceGrants({
+          namespaceId: "team",
+          baseId: "docs",
+        }),
       ).toEqual([role]);
     });
 
     it("stores hash-only overlapping service-account credentials and supports revoke/disable", async () => {
       const store = await factory.create();
-      await store.putServiceAccount({ id: "slack", status: "active", canActFor: true });
+      await store.putServiceAccount({
+        id: "slack",
+        status: "active",
+        canActFor: true,
+      });
       await store.putServiceAccountCredential({
         id: "old",
         serviceAccountId: "slack",
@@ -197,10 +235,19 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
             expiresAt: 100,
             revokedAt: 3,
           },
-          { id: "new", serviceAccountId: "slack", secretHash: "hash-new", createdAt: 2 },
+          {
+            id: "new",
+            serviceAccountId: "slack",
+            secretHash: "hash-new",
+            createdAt: 2,
+          },
         ]),
       );
-      await store.putServiceAccount({ id: "slack", status: "disabled", canActFor: true });
+      await store.putServiceAccount({
+        id: "slack",
+        status: "disabled",
+        canActFor: true,
+      });
       expect(await store.getServiceAccount("slack")).toEqual({
         id: "slack",
         status: "disabled",
@@ -208,10 +255,46 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       });
     });
 
+    it("atomically creates a service account with exactly one initial credential", async () => {
+      const store = await factory.create();
+      const attempts = await Promise.all(
+        [false, true].map((canActFor, index) =>
+          store.createServiceAccountWithCredential({
+            account: { id: "concurrent", status: "active", canActFor },
+            credential: {
+              id: `credential-${index}`,
+              serviceAccountId: "concurrent",
+              secretHash: `hash-${index}`,
+              createdAt: index + 1,
+            },
+          }),
+        ),
+      );
+      expect(attempts.filter(Boolean)).toHaveLength(1);
+      const winner = attempts.findIndex(Boolean);
+      expect(await store.getServiceAccount("concurrent")).toEqual({
+        id: "concurrent",
+        status: "active",
+        canActFor: winner === 1,
+      });
+      expect(await store.listServiceAccountCredentials("concurrent")).toEqual([
+        {
+          id: `credential-${winner}`,
+          serviceAccountId: "concurrent",
+          secretHash: `hash-${winner}`,
+          createdAt: winner + 1,
+        },
+      ]);
+    });
+
     it("makes session hashes immutable across reassignment, revoke and expiry", async () => {
       const store = await factory.create();
       const user = await createUser(store, "session-user");
-      await store.putServiceAccount({ id: user.id, status: "active", canActFor: false });
+      await store.putServiceAccount({
+        id: user.id,
+        status: "active",
+        canActFor: false,
+      });
       const now = Date.now();
       const session = {
         tokenHash: "session-hash",
@@ -230,7 +313,10 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
           authMethod: "service-account",
         }),
       ).rejects.toThrow("Conflicting session token hash");
-      await store.revokeSession({ tokenHash: session.tokenHash, revokedAt: now + 1 });
+      await store.revokeSession({
+        tokenHash: session.tokenHash,
+        revokedAt: now + 1,
+      });
       expect(await store.getSessionRecord(session.tokenHash)).toBeUndefined();
       await store.putSession({ ...session, revokedAt: now + 1 });
       await expect(store.putSession(session)).rejects.toThrow("Conflicting session token hash");
@@ -253,7 +339,10 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
         "Conflicting session token hash",
       );
 
-      const disabledSession = { ...session, tokenHash: "disabled-session-hash" };
+      const disabledSession = {
+        ...session,
+        tokenHash: "disabled-session-hash",
+      };
       await store.putSession(disabledSession);
       await store.setUserStatus({ id: user.id, status: "disabled" });
       await expect(
@@ -274,13 +363,22 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       const store = await factory.create();
       const first = auditRecord({ id: "event-1", sequence: 1, hash: "hash-1" });
       expect(
-        await store.appendAuditWithOutbox({ record: first, outbox: { nextAttemptAt: 1 } }),
+        await store.appendAuditWithOutbox({
+          record: first,
+          outbox: { nextAttemptAt: 1 },
+        }),
       ).toBe("appended");
       expect(
-        await store.appendAuditWithOutbox({ record: first, outbox: { nextAttemptAt: 1 } }),
+        await store.appendAuditWithOutbox({
+          record: first,
+          outbox: { nextAttemptAt: 1 },
+        }),
       ).toBe("already-exists");
       await expect(
-        store.appendAuditWithOutbox({ record: first, outbox: { nextAttemptAt: 2 } }),
+        store.appendAuditWithOutbox({
+          record: first,
+          outbox: { nextAttemptAt: 2 },
+        }),
       ).rejects.toThrow("Conflicting audit event");
       await expect(
         store.appendAuditWithOutbox({
@@ -290,15 +388,28 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       ).rejects.toThrow("Conflicting audit event");
 
       const contenders = [
-        auditRecord({ id: "event-2a", sequence: 2, previousHash: "hash-1", hash: "hash-2a" }),
-        auditRecord({ id: "event-2b", sequence: 2, previousHash: "hash-1", hash: "hash-2b" }),
+        auditRecord({
+          id: "event-2a",
+          sequence: 2,
+          previousHash: "hash-1",
+          hash: "hash-2a",
+        }),
+        auditRecord({
+          id: "event-2b",
+          sequence: 2,
+          previousHash: "hash-1",
+          hash: "hash-2b",
+        }),
       ];
       const outcomes = await Promise.allSettled(
         contenders.map((record) => store.appendAuditWithOutbox({ record })),
       );
       expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
       expect(outcomes.filter((outcome) => outcome.status === "rejected")).toHaveLength(1);
-      const firstPage = await store.listAuditRecords({ namespaceId: "team", limit: 1 });
+      const firstPage = await store.listAuditRecords({
+        namespaceId: "team",
+        limit: 1,
+      });
       expect(firstPage.items).toEqual([first]);
       expect(firstPage.nextCursor).toBe(first.id);
       const secondPage = await store.listAuditRecords({
@@ -378,7 +489,11 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
         outbox: { nextAttemptAt: fixture.currentTimeMs() },
       });
       const releaseLease = (
-        await store.claimAuditOutbox({ owner: "worker-4", leaseMs: 10, limit: 1 })
+        await store.claimAuditOutbox({
+          owner: "worker-4",
+          leaseMs: 10,
+          limit: 1,
+        })
       )[0]!;
       const retryAt = fixture.currentTimeMs() + 30;
       expect(
@@ -410,7 +525,12 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       const store = await factory.create();
       const results = await Promise.all(
         Array.from({ length: 10 }, () =>
-          store.incrementDenialBucket({ key: "actor:action", now: 1, windowMs: 100, emitLimit: 3 }),
+          store.incrementDenialBucket({
+            key: "actor:action",
+            now: 1,
+            windowMs: 100,
+            emitLimit: 3,
+          }),
         ),
       );
       expect(new Set(results.map((result) => result.bucket.count))).toEqual(
@@ -550,7 +670,9 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
           outbox: { nextAttemptAt: 2 },
         }),
       ).toBe("already-revoked");
-      expect(await store.getBreakGlassGrant(grant.id)).toMatchObject({ revokedAt });
+      expect(await store.getBreakGlassGrant(grant.id)).toMatchObject({
+        revokedAt,
+      });
       expect(await store.getSessionRecord(session.tokenHash)).toBeUndefined();
       await expect(
         store.createBreakGlassAccess({
@@ -583,12 +705,20 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       });
 
       await store.appendAuditWithOutbox({
-        record: auditRecord({ id: "stress-event", sequence: 1, hash: "stress-hash" }),
+        record: auditRecord({
+          id: "stress-event",
+          sequence: 1,
+          hash: "stress-hash",
+        }),
         outbox: { nextAttemptAt: fixture.currentTimeMs() },
       });
       const claims = await Promise.all(
         Array.from({ length: 100 }, (_, index) =>
-          store.claimAuditOutbox({ owner: `worker-${index}`, leaseMs: 1_000, limit: 1 }),
+          store.claimAuditOutbox({
+            owner: `worker-${index}`,
+            leaseMs: 1_000,
+            limit: 1,
+          }),
         ),
       );
       expect(claims.flat()).toHaveLength(1);
@@ -609,7 +739,11 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
           return user.id;
         },
       };
-      await store.putSubjectBinding({ subject, namespaceId: "team", accessRole: "member" });
+      await store.putSubjectBinding({
+        subject,
+        namespaceId: "team",
+        accessRole: "member",
+      });
       expect(reads).toBe(2);
       await expect(
         store.putSubjectBinding({
@@ -629,7 +763,11 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
 
       let eventReads = 0;
       let metadataReads = 0;
-      const baseAudit = auditRecord({ id: "hostile-audit", sequence: 1, hash: "hostile-hash" });
+      const baseAudit = auditRecord({
+        id: "hostile-audit",
+        sequence: 1,
+        hash: "hostile-hash",
+      });
       const hostileAudit = {
         ...baseAudit,
         get event() {
@@ -673,7 +811,11 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       const user = await createUser(store, "limit-user");
       const emailAtLimit = `${"e".repeat(SECURITY_STORE_LIMITS.email.maxCharacters - 2)}@x`;
       await store.findOrCreateProviderUser({
-        identity: { providerId: "test", issuer: "email-limit", subject: "email-limit" },
+        identity: {
+          providerId: "test",
+          issuer: "email-limit",
+          subject: "email-limit",
+        },
         email: emailAtLimit,
       });
       const rejectedEmailIdentity = {
@@ -691,12 +833,20 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
 
       const issuerAtLimit = "u".repeat(SECURITY_STORE_LIMITS.issuer.maxCharacters);
       await store.findOrCreateProviderUser({
-        identity: { providerId: "test", issuer: issuerAtLimit, subject: "issuer-limit" },
+        identity: {
+          providerId: "test",
+          issuer: issuerAtLimit,
+          subject: "issuer-limit",
+        },
         email: "issuer-limit@example.com",
       });
       await expect(
         store.findOrCreateProviderUser({
-          identity: { providerId: "test", issuer: `${issuerAtLimit}u`, subject: "issuer-overflow" },
+          identity: {
+            providerId: "test",
+            issuer: `${issuerAtLimit}u`,
+            subject: "issuer-overflow",
+          },
           email: "issuer-overflow@example.com",
         }),
       ).rejects.toThrow("character limit");
@@ -715,7 +865,11 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
         }),
       ).rejects.toThrow("character limit");
 
-      await store.putServiceAccount({ id: "limit-sa", status: "active", canActFor: false });
+      await store.putServiceAccount({
+        id: "limit-sa",
+        status: "active",
+        canActFor: false,
+      });
       const hashAtLimit = "h".repeat(SECURITY_STORE_LIMITS.hash.maxCharacters);
       await store.putServiceAccountCredential({
         id: "limit-credential",
@@ -744,7 +898,12 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       const eventAtLimit = "a".repeat(SECURITY_STORE_LIMITS.event.maxCharacters);
       await store.appendAuditWithOutbox({
         record: {
-          ...auditRecord({ id: "bounded-audit", sequence: 1, hash: "bounded-hash", metadata }),
+          ...auditRecord({
+            id: "bounded-audit",
+            sequence: 1,
+            hash: "bounded-hash",
+            metadata,
+          }),
           event: eventAtLimit,
         },
         outbox: { nextAttemptAt: 1 },
@@ -827,7 +986,11 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
 
       await expect(
         store.appendAuditWithOutbox({
-          record: auditRecord({ id: "fractional-outbox", sequence: 1, hash: "hash" }),
+          record: auditRecord({
+            id: "fractional-outbox",
+            sequence: 1,
+            hash: "hash",
+          }),
           outbox: { nextAttemptAt: 1.5 },
         }),
       ).rejects.toThrow("safe integer");
@@ -876,7 +1039,9 @@ function auditRecord(params: {
     decision: { allowed: true, reason: "operator_allow" },
     correlation: { requestId: `request-${params.id}` },
     metadata: params.metadata ?? { method: "POST" },
-    ...(params.previousHash !== undefined && { previousHash: params.previousHash }),
+    ...(params.previousHash !== undefined && {
+      previousHash: params.previousHash,
+    }),
     hash: params.hash,
     keyId: "audit-key",
   };
@@ -901,7 +1066,9 @@ function breakGlassAudit(params: {
     effective: params.grant.principal,
     decision: { allowed: true, reason: "operator_allow" },
     metadata: { breakGlassGrantId: params.grant.id },
-    ...(params.previousHash !== undefined && { previousHash: params.previousHash }),
+    ...(params.previousHash !== undefined && {
+      previousHash: params.previousHash,
+    }),
     hash: params.hash,
     keyId: "audit-key",
   };

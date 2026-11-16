@@ -147,7 +147,10 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
 
   const principalForUser = async (user: SecurityUser): Promise<Principal | undefined> => {
     if (user.status !== "active") return undefined;
-    const access = await principalAccessFor(config.store, { kind: "user", id: user.id });
+    const access = await principalAccessFor(config.store, {
+      kind: "user",
+      id: user.id,
+    });
     return {
       kind: "user",
       id: user.id,
@@ -250,7 +253,9 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
     principal = snapshotPrincipal({
       ...principalWithoutTeams,
       accessRoles: { [resource.namespaceId]: principalAccess.accessRoles },
-      ...(principalAccess.groups.length > 0 && { teams: principalAccess.groups }),
+      ...(principalAccess.groups.length > 0 && {
+        teams: principalAccess.groups,
+      }),
     });
     const roles = new Set(principalAccess.accessRoles);
     const actorRoles = new Set(actorAccess.accessRoles);
@@ -395,11 +400,18 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
         if (equal) matched = account.config;
       }
       if (!matched) return undefined;
+      // A durable account owns its id completely. Never let a legacy static
+      // token bypass that account's credential rotation or revocation.
+      if (await config.store.getServiceAccount(matched.id)) return undefined;
       return principalForServiceAccount(matched.id);
     },
     secureResponse: ({ request, response }) =>
       cookieAuthenticated.has(request)
-        ? limitEventStreamLifetime({ response, clock, maxAgeMs: sessionSseMaxAgeMs })
+        ? limitEventStreamLifetime({
+            response,
+            clock,
+            maxAgeMs: sessionSseMaxAgeMs,
+          })
         : response,
     resolvePrincipal,
     resolveIdentity: async ({ actor, asserted }) => {
@@ -413,7 +425,10 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
       const effective = await resolvePrincipal(asserted);
       return effective ? { actor: currentActor, effective: principalRef(effective) } : undefined;
     },
-    identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
+    identityFilter: async ({ namespaceId }) => ({
+      kind: "namespace",
+      namespaceId,
+    }),
     authorize: async (request) => (await authorizeEffective(request)).decision,
     authorizeEffective,
     recordAudit: async (event) => recordAudit(snapshotAuditEvent(event)),
@@ -616,7 +631,10 @@ function isMemberPermission(params: {
   readonly actor: Principal;
   readonly actorRoles: ReadonlySet<string>;
   readonly permission: { readonly resource: string; readonly action: string };
-  readonly resource: { readonly id?: string; readonly principal?: PrincipalRef };
+  readonly resource: {
+    readonly id?: string;
+    readonly principal?: PrincipalRef;
+  };
 }): boolean {
   const { principal, roles, actor, actorRoles, permission, resource } = params;
   if (permission.resource === "approval" && permission.action === "decide") {
@@ -680,7 +698,10 @@ async function accessAt(
   readonly groups: ReadonlyArray<string>;
 }> {
   if (principal.kind === "user") {
-    return store.resolveAccess({ subject: { kind: "user", id: principal.id }, namespaceId });
+    return store.resolveAccess({
+      subject: { kind: "user", id: principal.id },
+      namespaceId,
+    });
   }
   if (principal.kind === "service-account" && (await store.getServiceAccount(principal.id))) {
     return store.resolveAccess({
@@ -688,7 +709,10 @@ async function accessAt(
       namespaceId,
     });
   }
-  return { accessRoles: [...rolesFor(principal, namespaceId)], groups: principal.teams ?? [] };
+  return {
+    accessRoles: [...rolesFor(principal, namespaceId)],
+    groups: principal.teams ?? [],
+  };
 }
 
 function rolesFor(principal: Principal, namespaceId: string): Set<string> {
@@ -800,8 +824,16 @@ function mountLoginRoutes(params: {
       });
       return redirect(new URL("/", params.config.publicBaseUrl).toString(), [
         clearLoginStateCookie(params.secure),
-        sessionCookie({ token, ttlMs: params.sessionTtlMs, secure: params.secure }),
-        csrfCookie({ token: csrf, ttlMs: params.sessionTtlMs, secure: params.secure }),
+        sessionCookie({
+          token,
+          ttlMs: params.sessionTtlMs,
+          secure: params.secure,
+        }),
+        csrfCookie({
+          token: csrf,
+          ttlMs: params.sessionTtlMs,
+          secure: params.secure,
+        }),
       ]);
     },
   });

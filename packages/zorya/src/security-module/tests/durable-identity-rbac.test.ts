@@ -22,7 +22,14 @@ const provider: LoginProvider = {
   },
 };
 
-function environment() {
+function environment(
+  params: {
+    readonly serviceAccounts?: ReadonlyArray<{
+      readonly id: string;
+      readonly token: string;
+    }>;
+  } = {},
+) {
   const clock = FakeWallClock.create(1_000);
   const store = new InMemorySecurityStore({ clock });
   const security = createZoryaSecurity({
@@ -31,6 +38,9 @@ function environment() {
     publicBaseUrl: BASE_URL,
     allowedDomains: ["example.com"],
     auditSink: { recordAudit: async () => {} },
+    ...(params.serviceAccounts !== undefined && {
+      serviceAccounts: params.serviceAccounts,
+    }),
     secret: SECRET,
     clock,
   });
@@ -165,6 +175,43 @@ describe("durable identity, groups, and service accounts", () => {
     const account = await resolve(env, "service-account", user.id);
     expect(account.accessRoles["team-a"]).toEqual(["agent-manager"]);
     expect(account.canActFor).toBeTrue();
+  });
+
+  it("never falls back to a colliding legacy token and rejects malformed tokens", async () => {
+    const env = environment({
+      serviceAccounts: [{ id: "colliding", token: "legacy-token" }],
+    });
+    await env.store.putServiceAccount({
+      id: "colliding",
+      status: "active",
+      canActFor: true,
+    });
+    await env.store.putSubjectBinding({
+      subject: { kind: "service-account", id: "colliding" },
+      namespaceId: ORG_WIDE_NAMESPACE,
+      accessRole: "admin",
+    });
+    expect(await authenticate(env, "legacy-token")).toBeUndefined();
+    expect(await authenticate(env, `zsa_${"a".repeat(1_000)}.x`)).toBeUndefined();
+  });
+
+  it("creates one account and credential under concurrent API requests", async () => {
+    const env = environment();
+    const adminUser = await createUser(env, "admin-concurrent@example.com", "admin");
+    const admin = await resolve(env, "user", adminUser.id);
+    const responses = await Promise.all(
+      [false, true].map((canActFor) =>
+        handleAs({
+          env,
+          principal: admin,
+          method: "POST",
+          path: "/api/access/service-accounts",
+          body: { id: "concurrent-agent", canActFor },
+        }),
+      ),
+    );
+    expect(responses.map((response) => response.status).sort()).toEqual([201, 409]);
+    expect(await env.store.listServiceAccountCredentials("concurrent-agent")).toHaveLength(1);
   });
 
   it("creates, overlaps, revokes, expires, and disables hash-only credentials", async () => {

@@ -8,6 +8,8 @@ import type {
 
 const TOKEN_PREFIX = "zsa_";
 const SECRET_BYTES = 32;
+const TOKEN_PATTERN =
+  /^zsa_([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.([A-Za-z0-9_-]{43})$/u;
 
 export interface IssuedServiceAccountCredential {
   readonly id: string;
@@ -25,6 +27,38 @@ export async function issueServiceAccountCredential(params: {
   readonly clock: WallClock;
   readonly expiresAt?: number;
 }): Promise<IssuedServiceAccountCredential> {
+  const material = credentialMaterial(params);
+  await params.store.putServiceAccountCredential(material.stored);
+  return material.issued;
+}
+
+export async function createServiceAccountWithCredential(params: {
+  readonly store: SecurityStoreV2;
+  readonly account: SecurityServiceAccount;
+  readonly pepper: string;
+  readonly clock: WallClock;
+  readonly expiresAt?: number;
+}): Promise<IssuedServiceAccountCredential | undefined> {
+  const material = credentialMaterial({
+    ...params,
+    serviceAccountId: params.account.id,
+  });
+  const created = await params.store.createServiceAccountWithCredential({
+    account: params.account,
+    credential: material.stored,
+  });
+  return created ? material.issued : undefined;
+}
+
+function credentialMaterial(params: {
+  readonly serviceAccountId: string;
+  readonly pepper: string;
+  readonly clock: WallClock;
+  readonly expiresAt?: number;
+}): {
+  readonly stored: ServiceAccountCredential;
+  readonly issued: IssuedServiceAccountCredential;
+} {
   const createdAt = params.clock.currentTimeMs();
   if (
     params.expiresAt !== undefined &&
@@ -34,20 +68,22 @@ export async function issueServiceAccountCredential(params: {
   }
   const id = randomUUID();
   const secret = randomBytes(SECRET_BYTES).toString("base64url");
-  const credential: ServiceAccountCredential = {
+  const stored: ServiceAccountCredential = {
     id,
     serviceAccountId: params.serviceAccountId,
     secretHash: credentialDigest(params.pepper, id, secret),
     createdAt,
     ...(params.expiresAt !== undefined && { expiresAt: params.expiresAt }),
   };
-  await params.store.putServiceAccountCredential(credential);
   return {
-    id,
-    serviceAccountId: params.serviceAccountId,
-    token: `${TOKEN_PREFIX}${id}.${secret}`,
-    createdAt,
-    ...(params.expiresAt !== undefined && { expiresAt: params.expiresAt }),
+    stored,
+    issued: {
+      id,
+      serviceAccountId: params.serviceAccountId,
+      token: `${TOKEN_PREFIX}${id}.${secret}`,
+      createdAt,
+      ...(params.expiresAt !== undefined && { expiresAt: params.expiresAt }),
+    },
   };
 }
 
@@ -85,14 +121,8 @@ function credentialDigest(pepper: string, id: string, secret: string): string {
 }
 
 function parseToken(token: string): { readonly id: string; readonly secret: string } | undefined {
-  if (!token.startsWith(TOKEN_PREFIX)) return undefined;
-  const separator = token.indexOf(".", TOKEN_PREFIX.length);
-  if (separator <= TOKEN_PREFIX.length || separator === token.length - 1) return undefined;
-  if (token.indexOf(".", separator + 1) !== -1) return undefined;
-  return {
-    id: token.slice(TOKEN_PREFIX.length, separator),
-    secret: token.slice(separator + 1),
-  };
+  const matched = TOKEN_PATTERN.exec(token);
+  return matched ? { id: matched[1]!, secret: matched[2]! } : undefined;
 }
 
 function digestBuffer(value: string): Buffer | undefined {

@@ -202,7 +202,11 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     readonly identity: Omit<ProviderIdentity, "userId">;
     readonly email: string;
     readonly bindings?: ReadonlyArray<Omit<SubjectAccessBinding, "subject">>;
-  }): Promise<{ user: SecurityUser; identity: ProviderIdentity; created: boolean }> {
+  }): Promise<{
+    user: SecurityUser;
+    identity: ProviderIdentity;
+    created: boolean;
+  }> {
     const identity = normalizeProviderIdentity(params.identity);
     const key = providerIdentityKey(identity);
     const existingIdentity = this.providerIdentities.get(key);
@@ -219,12 +223,20 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
         }
         if (!this.userIdByEmail.has(email)) this.userIdByEmail.set(email, user.id);
       }
-      return { user: clone(user), identity: clone(existingIdentity), created: false };
+      return {
+        user: clone(user),
+        identity: clone(existingIdentity),
+        created: false,
+      };
     }
 
     const initialBindings = normalizeInitialBindings(params.bindings ?? []);
     const email = normalizeEmail(params.email);
-    const user = freeze<SecurityUser>({ id: crypto.randomUUID(), email, status: "active" });
+    const user = freeze<SecurityUser>({
+      id: crypto.randomUUID(),
+      email,
+      status: "active",
+    });
     const row = freeze<ProviderIdentity>({ ...identity, userId: user.id });
     this.usersById.set(user.id, user);
     if (!this.userIdByEmail.has(email)) this.userIdByEmail.set(email, user.id);
@@ -305,7 +317,10 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
   async resolveAccess(params: {
     readonly subject: SecurityPrincipalRef;
     readonly namespaceId: string;
-  }): Promise<{ accessRoles: ReadonlyArray<string>; groups: ReadonlyArray<string> }> {
+  }): Promise<{
+    accessRoles: ReadonlyArray<string>;
+    groups: ReadonlyArray<string>;
+  }> {
     const subject = normalizePrincipalRef(params.subject);
     const namespaceId = requiredString(params.namespaceId, "namespace id");
     if (!this.principalActive(subject)) {
@@ -361,8 +376,29 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     const row = normalizeServiceAccount(account);
     this.serviceAccounts.set(row.id, row);
     if (row.status === "disabled") {
-      this.invalidateSessionsForPrincipal({ kind: "service-account", id: row.id });
+      this.invalidateSessionsForPrincipal({
+        kind: "service-account",
+        id: row.id,
+      });
     }
+  }
+
+  async createServiceAccountWithCredential(params: {
+    readonly account: SecurityServiceAccount;
+    readonly credential: ServiceAccountCredential;
+  }): Promise<boolean> {
+    const account = normalizeServiceAccount(params.account);
+    const credential = normalizeCredential(params.credential);
+    if (credential.serviceAccountId !== account.id) {
+      throw new Error("Credential service account does not match account");
+    }
+    if (this.serviceAccounts.has(account.id)) return false;
+    if (this.serviceAccountCredentials.has(credential.id)) {
+      throw new Error(`Conflicting credential id: ${credential.id}`);
+    }
+    this.serviceAccounts.set(account.id, account);
+    this.serviceAccountCredentials.set(credential.id, credential);
+    return true;
   }
 
   async getServiceAccount(id: string): Promise<SecurityServiceAccount | undefined> {
@@ -409,7 +445,10 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     if (!existing) return;
     this.serviceAccountCredentials.set(
       id,
-      freeze({ ...existing, revokedAt: integerTime(params.revokedAt, "revoked at") }),
+      freeze({
+        ...existing,
+        revokedAt: integerTime(params.revokedAt, "revoked at"),
+      }),
     );
   }
 
@@ -655,7 +694,10 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     readonly now: number;
     readonly windowMs: number;
     readonly emitLimit: number;
-  }): Promise<{ readonly bucket: SecurityDenialBucket; readonly shouldEmit: boolean }> {
+  }): Promise<{
+    readonly bucket: SecurityDenialBucket;
+    readonly shouldEmit: boolean;
+  }> {
     const key = requiredString(params.key, "denial bucket key");
     const now = integerTime(params.now, "denial time");
     const windowMs = positiveTime(params.windowMs, "denial window");
@@ -707,7 +749,10 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     const session = normalizeSession(params.session);
     this.assertPrincipalActive(grant.principal);
     validateBreakGlassSession(grant, session);
-    const audit = this.prepareAuditAppend({ record: params.audit, outbox: params.outbox });
+    const audit = this.prepareAuditAppend({
+      record: params.audit,
+      outbox: params.outbox,
+    });
     validateBreakGlassAudit(audit.row, grant, "break-glass.created");
 
     const tokenGrantId = this.breakGlassGrantIdByTokenHash.get(grant.tokenHash);
@@ -754,7 +799,10 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     if (!session || session.authMethod !== "break-glass") {
       throw new Error("Break-glass grant has no matching session");
     }
-    const audit = this.prepareAuditAppend({ record: params.audit, outbox: params.outbox });
+    const audit = this.prepareAuditAppend({
+      record: params.audit,
+      outbox: params.outbox,
+    });
     validateBreakGlassAudit(audit.row, grant, "break-glass.revoked");
     if (grant.revokedAt !== undefined || session.revokedAt !== undefined) {
       if (
@@ -1034,8 +1082,14 @@ function boundedArray<T>(value: ReadonlyArray<T>, label: string): ReadonlyArray<
 }
 
 function normalizeInitialBindings(
-  value: ReadonlyArray<{ readonly namespaceId: string; readonly accessRole: string }>,
-): ReadonlyArray<{ readonly namespaceId: string; readonly accessRole: string }> {
+  value: ReadonlyArray<{
+    readonly namespaceId: string;
+    readonly accessRole: string;
+  }>,
+): ReadonlyArray<{
+  readonly namespaceId: string;
+  readonly accessRole: string;
+}> {
   return boundedArray(value, "initial bindings").map((binding) => {
     if (!binding || typeof binding !== "object") {
       throw new TypeError("initial binding must be an object");
@@ -1072,7 +1126,10 @@ function normalizeAccessSubject(value: AccessSubjectRef): AccessSubjectRef {
   if (kind !== "user" && kind !== "service-account" && kind !== "group") {
     throw new TypeError("invalid access subject kind");
   }
-  return freeze({ kind, id: requiredString(id, "access subject id") }) as AccessSubjectRef;
+  return freeze({
+    kind,
+    id: requiredString(id, "access subject id"),
+  }) as AccessSubjectRef;
 }
 
 function normalizeProviderIdentity(
@@ -1095,7 +1152,10 @@ function normalizeGroup(value: AccessGroup): AccessGroup {
   const source = value as unknown as Record<string, unknown>;
   const id = source.id;
   const status = source.status;
-  return freeze({ id: requiredString(id, "group id"), status: statusValue(status) });
+  return freeze({
+    id: requiredString(id, "group id"),
+    status: statusValue(status),
+  });
 }
 
 function normalizeMembership(value: GroupMembership): GroupMembership {
@@ -1165,8 +1225,12 @@ function normalizeCredential(value: ServiceAccountCredential): ServiceAccountCre
     serviceAccountId: requiredString(serviceAccountId, "service account id"),
     secretHash: requiredString(secretHash, "credential hash", SECURITY_STORE_LIMITS.hash),
     createdAt: integerTime(createdAt, "credential created at"),
-    ...(expiresAt !== undefined && { expiresAt: integerTime(expiresAt, "credential expires at") }),
-    ...(revokedAt !== undefined && { revokedAt: integerTime(revokedAt, "credential revoked at") }),
+    ...(expiresAt !== undefined && {
+      expiresAt: integerTime(expiresAt, "credential expires at"),
+    }),
+    ...(revokedAt !== undefined && {
+      revokedAt: integerTime(revokedAt, "credential revoked at"),
+    }),
   };
   if (row.expiresAt !== undefined && row.expiresAt <= row.createdAt) {
     throw new TypeError("credential expiry must follow creation");
@@ -1194,7 +1258,9 @@ function normalizeSession(value: SecuritySession): SecuritySession {
     ...(csrfTokenHash !== undefined && {
       csrfTokenHash: requiredString(csrfTokenHash, "csrf token hash", SECURITY_STORE_LIMITS.hash),
     }),
-    ...(revokedAt !== undefined && { revokedAt: integerTime(revokedAt, "session revoked at") }),
+    ...(revokedAt !== undefined && {
+      revokedAt: integerTime(revokedAt, "session revoked at"),
+    }),
     authMethod,
   };
   if (row.expiresAt <= row.createdAt) throw new TypeError("session expiry must follow creation");
@@ -1227,15 +1293,27 @@ function normalizeAuditRecord(value: SecurityAuditRecord): SecurityAuditRecord {
     occurredAt: integerTime(occurredAt, "audit occurrence"),
     recordedAt: integerTime(recordedAt, "audit recorded time"),
     event: requiredString(event, "audit event", SECURITY_STORE_LIMITS.event),
-    ...(actor !== undefined && { actor: normalizeAuditPrincipal(actor, "audit actor") }),
+    ...(actor !== undefined && {
+      actor: normalizeAuditPrincipal(actor, "audit actor"),
+    }),
     ...(effective !== undefined && {
       effective: normalizeAuditPrincipal(effective, "audit effective principal"),
     }),
-    ...(permission !== undefined && { permission: normalizeAuditPermission(permission) }),
-    ...(resource !== undefined && { resource: normalizeAuditResource(resource) }),
-    ...(decision !== undefined && { decision: normalizeAuditDecision(decision) }),
-    ...(correlation !== undefined && { correlation: normalizeAuditCorrelation(correlation) }),
-    ...(metadata !== undefined && { metadata: normalizeAuditMetadata(metadata) }),
+    ...(permission !== undefined && {
+      permission: normalizeAuditPermission(permission),
+    }),
+    ...(resource !== undefined && {
+      resource: normalizeAuditResource(resource),
+    }),
+    ...(decision !== undefined && {
+      decision: normalizeAuditDecision(decision),
+    }),
+    ...(correlation !== undefined && {
+      correlation: normalizeAuditCorrelation(correlation),
+    }),
+    ...(metadata !== undefined && {
+      metadata: normalizeAuditMetadata(metadata),
+    }),
     ...(previousHash !== undefined && {
       previousHash: requiredString(previousHash, "previous audit hash", SECURITY_STORE_LIMITS.hash),
     }),
@@ -1376,10 +1454,16 @@ function normalizeAuditCorrelation(
   const threadId = source.threadId;
   const toolCallId = source.toolCallId;
   return freeze({
-    ...(requestId !== undefined && { requestId: requiredString(requestId, "request id") }),
+    ...(requestId !== undefined && {
+      requestId: requiredString(requestId, "request id"),
+    }),
     ...(runId !== undefined && { runId: requiredString(runId, "run id") }),
-    ...(threadId !== undefined && { threadId: requiredString(threadId, "thread id") }),
-    ...(toolCallId !== undefined && { toolCallId: requiredString(toolCallId, "tool call id") }),
+    ...(threadId !== undefined && {
+      threadId: requiredString(threadId, "thread id"),
+    }),
+    ...(toolCallId !== undefined && {
+      toolCallId: requiredString(toolCallId, "tool call id"),
+    }),
   });
 }
 

@@ -259,6 +259,11 @@ export interface SecurityStoreV2 extends SecurityStore {
   }): Promise<KnowledgeAudienceGrant[]>;
 
   putServiceAccount(account: SecurityServiceAccount): Promise<void>;
+  /** Atomically creates an account and its first credential; returns false when the id exists. */
+  createServiceAccountWithCredential(params: {
+    readonly account: SecurityServiceAccount;
+    readonly credential: ServiceAccountCredential;
+  }): Promise<boolean>;
   getServiceAccount(id: string): Promise<SecurityServiceAccount | undefined>;
   listServiceAccounts(): Promise<SecurityServiceAccount[]>;
   putServiceAccountCredential(credential: ServiceAccountCredential): Promise<void>;
@@ -322,7 +327,10 @@ export interface SecurityStoreV2 extends SecurityStore {
     readonly now: number;
     readonly windowMs: number;
     readonly emitLimit: number;
-  }): Promise<{ readonly bucket: SecurityDenialBucket; readonly shouldEmit: boolean }>;
+  }): Promise<{
+    readonly bucket: SecurityDenialBucket;
+    readonly shouldEmit: boolean;
+  }>;
   getDenialBucket(key: string): Promise<SecurityDenialBucket | undefined>;
 
   /** Atomically creates one grant, its same-token session, audit row and optional outbox row. */

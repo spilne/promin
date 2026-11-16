@@ -4,7 +4,10 @@ import { NamespaceIdSchema } from "../server/api-types.ts";
 import { bodyNamespaceTarget, orgTarget, protectedAccess } from "../server/mount/route-security.ts";
 import { parseBody } from "../server/request-validation.ts";
 import { json, noContent, type Router } from "../server/router.ts";
-import { issueServiceAccountCredential } from "./service-account-credentials.ts";
+import {
+  createServiceAccountWithCredential,
+  issueServiceAccountCredential,
+} from "./service-account-credentials.ts";
 import type { SecurityStoreV2 } from "./security-store.ts";
 
 const BindingBodySchema = z
@@ -221,22 +224,19 @@ export function mountAccessRoutes(params: {
       if (body.expiresAt !== undefined && body.expiresAt <= params.clock.currentTimeMs()) {
         return json(400, { error: "invalid_credential_expiry" });
       }
-      if (await params.store.getServiceAccount(body.id)) {
-        return json(409, { error: "service_account_exists" });
-      }
       const serviceAccount = {
         id: body.id,
         status: "active" as const,
         canActFor: body.canActFor,
       };
-      await params.store.putServiceAccount(serviceAccount);
-      const credential = await issueServiceAccountCredential({
+      const credential = await createServiceAccountWithCredential({
         store: params.store,
-        serviceAccountId: body.id,
+        account: serviceAccount,
         pepper: params.credentialPepper,
         clock: params.clock,
         ...(body.expiresAt !== undefined && { expiresAt: body.expiresAt }),
       });
+      if (!credential) return json(409, { error: "service_account_exists" });
       return json(201, { serviceAccount, credential });
     },
   });
