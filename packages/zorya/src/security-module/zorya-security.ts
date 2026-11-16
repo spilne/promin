@@ -4,17 +4,20 @@ import { bearerToken } from "../server/auth.ts";
 import { jsonError, notFound, type Router } from "../server/router.ts";
 import {
   ORG_WIDE_NAMESPACE,
+  SECURITY_ACTIONS,
   principalRef,
   snapshotAuthorizationDecision,
   snapshotPrincipal,
+  snapshotPrincipalRef,
   snapshotSecurityContext,
-  snapshotSecurityPermission,
-  snapshotSecurityResource,
   type EffectiveAuthorizationResult,
   type Principal,
   type PrincipalRef,
   type SecurityAuditEvent,
   type SecurityAuditSink,
+  type SecurityPermission,
+  type SecurityResourceKind,
+  type SecurityResourceRef,
   type ZoryaSecurity,
 } from "../server/security/index.ts";
 import type { LoginIdentity, LoginProvider } from "./login-provider.ts";
@@ -365,16 +368,12 @@ function snapshotAuditEvent(source: SecurityAuditEvent): SecurityAuditEvent {
     contextSource === undefined
       ? undefined
       : snapshotSecurityContext(contextSource as NonNullable<SecurityAuditEvent["context"]>);
-  const resource =
-    resourceSource === undefined
-      ? undefined
-      : snapshotSecurityResource(resourceSource as NonNullable<SecurityAuditEvent["resource"]>);
+  const resource = resourceSource === undefined ? undefined : snapshotAuditResource(resourceSource);
   const permission =
-    permissionSource === undefined
-      ? undefined
-      : snapshotSecurityPermission(
-          permissionSource as NonNullable<SecurityAuditEvent["permission"]>,
-        );
+    permissionSource === undefined ? undefined : snapshotAuditPermission(permissionSource);
+  if (permission !== undefined && resource !== undefined && permission.resource !== resource.kind) {
+    throw new TypeError("Security audit permission and resource do not match");
+  }
   const decision =
     decisionSource === undefined
       ? undefined
@@ -392,6 +391,54 @@ function snapshotAuditEvent(source: SecurityAuditEvent): SecurityAuditEvent {
     ...(decision !== undefined && { decision }),
     ...(metadata !== undefined && { metadata }),
   });
+}
+
+function snapshotAuditPermission(source: unknown): SecurityPermission {
+  if (!source || typeof source !== "object") {
+    throw new TypeError("Invalid security audit permission");
+  }
+  const record = source as Record<string, unknown>;
+  const resource = record.resource;
+  const action = record.action;
+  if (
+    typeof resource !== "string" ||
+    !Object.hasOwn(SECURITY_ACTIONS, resource) ||
+    typeof action !== "string" ||
+    !(SECURITY_ACTIONS[resource as SecurityResourceKind] as readonly string[]).includes(action)
+  ) {
+    throw new TypeError("Invalid security audit permission");
+  }
+  return Object.freeze({ resource, action }) as SecurityPermission;
+}
+
+function snapshotAuditResource(source: unknown): SecurityResourceRef {
+  if (!source || typeof source !== "object") {
+    throw new TypeError("Invalid security audit resource");
+  }
+  const record = source as Record<string, unknown>;
+  const kind = record.kind;
+  const namespaceId = record.namespaceId;
+  const id = record.id;
+  const principalSource = record.principal;
+  if (
+    typeof kind !== "string" ||
+    !Object.hasOwn(SECURITY_ACTIONS, kind) ||
+    typeof namespaceId !== "string" ||
+    namespaceId.length === 0 ||
+    (id !== undefined && (typeof id !== "string" || id.length === 0))
+  ) {
+    throw new TypeError("Invalid security audit resource");
+  }
+  const principal =
+    principalSource === undefined
+      ? undefined
+      : snapshotPrincipalRef(principalSource as PrincipalRef);
+  return Object.freeze({
+    kind: kind as SecurityResourceKind,
+    namespaceId,
+    ...(id !== undefined && { id }),
+    ...(principal !== undefined && { principal }),
+  }) as SecurityResourceRef;
 }
 
 function snapshotAuditMetadata(

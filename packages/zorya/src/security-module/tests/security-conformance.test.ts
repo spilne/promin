@@ -317,23 +317,140 @@ describe("optional security module audit sink", () => {
       auditSink: sink,
       secret: SECRET,
     });
-    let contextReads = 0;
-    const source = {
-      event: "authorization",
-      occurredAt: "2026-11-16T00:00:00.000Z",
-      get context() {
-        contextReads += 1;
-        if (contextReads > 1) throw new Error("audit context reread");
-        return selfContext(OPERATOR_PRINCIPAL);
+    const reads = new Map<string, number>();
+    const once = <T>(field: string, value: T): T => {
+      const count = (reads.get(field) ?? 0) + 1;
+      reads.set(field, count);
+      if (count > 1) throw new Error(`audit ${field} reread`);
+      return value;
+    };
+    let permissionAction = "read";
+    let resourceId = "assistant";
+    let principalId = "alice";
+    const permission = {
+      get resource() {
+        return once("permission.resource", "agent");
       },
-      namespaceId: "team-a",
-      decision: { allowed: true, reason: "operator_allow" },
+      get action() {
+        return once("permission.action", permissionAction);
+      },
+    } as SecurityPermission;
+    const principal = {
+      get kind() {
+        return once("resource.principal.kind", "user");
+      },
+      get id() {
+        return once("resource.principal.id", principalId);
+      },
+    };
+    const resource = {
+      get kind() {
+        return once("resource.kind", "agent");
+      },
+      get namespaceId() {
+        return once("resource.namespaceId", "team-a");
+      },
+      get id() {
+        return once("resource.id", resourceId);
+      },
+      get principal() {
+        return once("resource.principal", principal);
+      },
+    } as SecurityResourceRef;
+    const source = {
+      get event() {
+        return once("event", "authorization");
+      },
+      get occurredAt() {
+        return once("occurredAt", "2026-11-16T00:00:00.000Z");
+      },
+      get context() {
+        return once("context", undefined);
+      },
+      get namespaceId() {
+        return once("namespaceId", "team-a");
+      },
+      get resource() {
+        return once("resource", resource);
+      },
+      get permission() {
+        return once("permission", permission);
+      },
+      get decision() {
+        return once("decision", undefined);
+      },
+      get metadata() {
+        return once("metadata", undefined);
+      },
     } as SecurityAuditEvent;
 
     await security.recordAudit(source);
+    permissionAction = "create";
+    resourceId = "mutated";
+    principalId = "mallory";
     expect(sinkReads).toBe(1);
-    expect(contextReads).toBe(1);
+    expect([...reads.values()].every((count) => count === 1)).toBeTrue();
     expect(events).toHaveLength(1);
+    expect(events[0]?.permission).toEqual({ resource: "agent", action: "read" });
+    expect(events[0]?.resource).toEqual({
+      kind: "agent",
+      namespaceId: "team-a",
+      id: "assistant",
+      principal: { kind: "user", id: "alice" },
+    });
+    expect(Object.isFrozen(events[0]?.permission)).toBeTrue();
+    expect(Object.isFrozen(events[0]?.resource)).toBeTrue();
+    expect(Object.isFrozen(events[0]?.resource?.principal)).toBeTrue();
+  });
+
+  it("rejects malformed or uncorrelated audit permission and resource fields before the sink", async () => {
+    let sinkCalls = 0;
+    const security = createZoryaSecurity({
+      store: new InMemorySecurityStore(),
+      loginProviders: [unusedLoginProvider],
+      publicBaseUrl: "http://zorya.test",
+      allowedDomains: ["example.com"],
+      auditSink: { recordAudit: async () => void (sinkCalls += 1) },
+      secret: SECRET,
+    });
+    const base = {
+      event: "authorization",
+      occurredAt: "2026-11-16T00:00:00.000Z",
+      namespaceId: "team-a",
+    };
+    const malformed = [
+      { permission: { resource: "agent", action: "unknown" } },
+      { permission: { resource: "unknown", action: "read" } },
+      { resource: { kind: "unknown", namespaceId: "team-a" } },
+      { resource: { kind: "agent", namespaceId: "" } },
+      { resource: { kind: "agent", namespaceId: "team-a", id: "" } },
+      { resource: { kind: "agent", namespaceId: "team-a", id: 42 } },
+      {
+        resource: {
+          kind: "agent",
+          namespaceId: "team-a",
+          principal: { kind: "unknown", id: "alice" },
+        },
+      },
+      {
+        resource: {
+          kind: "agent",
+          namespaceId: "team-a",
+          principal: { kind: "user", id: "" },
+        },
+      },
+      {
+        permission: { resource: "agent", action: "read" },
+        resource: { kind: "knowledge", namespaceId: "team-a", id: "docs" },
+      },
+    ];
+
+    for (const fields of malformed) {
+      await expect(
+        security.recordAudit({ ...base, ...fields } as unknown as SecurityAuditEvent),
+      ).rejects.toBeInstanceOf(TypeError);
+    }
+    expect(sinkCalls).toBe(0);
   });
 
   it("fails closed for allowed audit failure and preserves denial", async () => {
