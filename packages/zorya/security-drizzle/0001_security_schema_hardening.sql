@@ -227,7 +227,15 @@ ALTER TABLE zorya_security_data.zsec_denial_bucket
   ADD CONSTRAINT zsec_denial_bucket_window_ends_at_ck CHECK (window_ends_at BETWEEN -9007199254740991 AND 9007199254740991),
   ADD CONSTRAINT zsec_denial_bucket_count_ck CHECK (count BETWEEN 0 AND 9007199254740991),
   ADD CONSTRAINT zsec_denial_bucket_suppressed_ck CHECK (suppressed BETWEEN 0 AND 9007199254740991),
-  ADD CONSTRAINT zsec_denial_bucket_window_order_ck CHECK (window_ends_at > window_started_at);
+  ADD CONSTRAINT zsec_denial_bucket_window_order_ck CHECK (window_ends_at > window_started_at),
+  ADD CONSTRAINT zsec_denial_bucket_closed_started_ck CHECK (closed_window_started_at BETWEEN -9007199254740991 AND 9007199254740991),
+  ADD CONSTRAINT zsec_denial_bucket_closed_ends_ck CHECK (closed_window_ends_at BETWEEN -9007199254740991 AND 9007199254740991),
+  ADD CONSTRAINT zsec_denial_bucket_closed_count_ck CHECK (closed_count BETWEEN 0 AND 9007199254740991),
+  ADD CONSTRAINT zsec_denial_bucket_closed_suppressed_ck CHECK (closed_suppressed BETWEEN 0 AND 9007199254740991),
+  ADD CONSTRAINT zsec_denial_bucket_closed_shape_ck CHECK (
+    (closed_window_started_at IS NULL AND closed_window_ends_at IS NULL AND closed_count IS NULL AND closed_suppressed IS NULL)
+    OR (closed_window_started_at IS NOT NULL AND closed_window_ends_at IS NOT NULL AND closed_count IS NOT NULL AND closed_suppressed IS NOT NULL AND closed_window_ends_at > closed_window_started_at)
+  );
 
 ALTER TABLE zorya_security_data.zsec_break_glass_grant
   ADD CONSTRAINT zsec_break_glass_grant_principal_kind_ck CHECK (principal_kind IN ('user', 'service-account')),

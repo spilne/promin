@@ -1,6 +1,6 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { ToolAuditEntry, ToolAuditLogger } from "@promin/agent";
-import { SystemWallClock, type RunSecurityContext } from "@promin/workflow";
+import { SystemWallClock, type RunSecurityContext, type WallClock } from "@promin/workflow";
 import type {
   Authorizer,
   PrincipalRef,
@@ -53,6 +53,70 @@ export interface DurableSecurityAuditConfig {
   readonly maxAppendAttempts?: number;
   /** When set, the audit row and a pending external-delivery row are committed atomically. */
   readonly outbox?: { readonly nextAttemptAt?: (recordedAt: number) => number };
+}
+
+export interface BoundedDenialAuditConfig {
+  readonly store: SecurityStoreV2;
+  readonly sink: SecurityAuditSink;
+  /** Duration of one equivalence bucket. Default: 60 seconds. */
+  readonly windowMs?: number;
+  /** Detailed denials retained per bucket before suppression. Default: 10. */
+  readonly emitLimit?: number;
+  readonly clock?: WallClock;
+}
+
+/**
+ * Bounds repeated denial rows without weakening the denial itself. The bucket key is a digest of
+ * validated identity/permission/resource fields, never request metadata or payload content.
+ */
+export class BoundedDenialAudit implements SecurityAuditSink {
+  private readonly store: SecurityStoreV2;
+  private readonly sink: SecurityAuditSink;
+  private readonly windowMs: number;
+  private readonly emitLimit: number;
+  private readonly clock: WallClock;
+
+  constructor(config: BoundedDenialAuditConfig) {
+    this.store = config.store;
+    this.sink = config.sink;
+    this.windowMs = positiveSafeInteger(config.windowMs ?? 60_000, "denial audit window");
+    this.emitLimit = nonNegativeSafeInteger(config.emitLimit ?? 10, "denial audit emit limit");
+    this.clock = config.clock ?? SystemWallClock;
+  }
+
+  async recordAudit(event: SecurityAuditEvent): Promise<void> {
+    if (event.decision?.allowed !== false) {
+      await this.sink.recordAudit(event);
+      return;
+    }
+    const result = await this.store.incrementDenialBucket({
+      key: denialBucketKey(event),
+      now: safeTime(this.clock.currentTimeMs(), "denial audit time"),
+      windowMs: this.windowMs,
+      emitLimit: this.emitLimit,
+    });
+    const closed = result.closedBucket;
+    if (closed !== undefined && closed.suppressed > 0) {
+      await this.sink.recordAudit({
+        event: "authorization.denial-suppressed",
+        occurredAt: new Date(closed.windowEndsAt).toISOString(),
+        namespaceId: event.namespaceId,
+        ...(event.context !== undefined && { context: event.context }),
+        ...(event.permission !== undefined && { permission: event.permission }),
+        ...(event.resource !== undefined && { resource: event.resource }),
+        ...(event.decision !== undefined && { decision: event.decision }),
+        metadata: Object.freeze({
+          summary: "equivalent-denials",
+          windowStartedAt: closed.windowStartedAt,
+          windowEndsAt: closed.windowEndsAt,
+          totalCount: closed.count,
+          detailedCount: closed.count - closed.suppressed,
+          suppressedCount: closed.suppressed,
+        }),
+      });
+    }
+    if (result.shouldEmit) await this.sink.recordAudit(event);
+  }
 }
 
 export type SecurityAuditVerification =
@@ -707,6 +771,45 @@ function principalRef(value: { readonly kind: string; readonly id: string }): Pr
 
 function samePrincipal(left: PrincipalRef | undefined, right: PrincipalRef): boolean {
   return left?.kind === right.kind && left.id === right.id;
+}
+
+function denialBucketKey(event: SecurityAuditEvent): string {
+  const context = event.context;
+  const resource = event.resource;
+  const digest = createHash("sha256")
+    .update(
+      canonicalJson({
+        version: 1,
+        event: event.event,
+        namespaceId: event.namespaceId,
+        actor: context && principalRef(context.actor),
+        effective: context?.effective,
+        permission: event.permission,
+        resource: resource && {
+          kind: resource.kind,
+          namespaceId: resource.namespaceId,
+          id: resource.id,
+          principal: resource.principal,
+        },
+        reason: event.decision?.reason,
+      }),
+    )
+    .digest("base64url");
+  return `denial:v1:${digest}`;
+}
+
+function positiveSafeInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${label} must be a positive safe integer`);
+  }
+  return value;
+}
+
+function nonNegativeSafeInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(`${label} must be a non-negative safe integer`);
+  }
+  return value;
 }
 
 function parseOccurredAt(value: string): number {

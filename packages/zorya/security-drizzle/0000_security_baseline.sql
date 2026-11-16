@@ -187,7 +187,11 @@ CREATE TABLE zsec_denial_bucket (
   window_started_at bigint NOT NULL,
   window_ends_at bigint NOT NULL,
   count bigint NOT NULL,
-  suppressed bigint NOT NULL
+  suppressed bigint NOT NULL,
+  closed_window_started_at bigint,
+  closed_window_ends_at bigint,
+  closed_count bigint,
+  closed_suppressed bigint
 );
 
 CREATE TABLE zsec_break_glass_grant (

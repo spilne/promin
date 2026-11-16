@@ -332,6 +332,8 @@ export interface SecurityStoreV2 extends SecurityStore {
   }): Promise<{
     readonly bucket: SecurityDenialBucket;
     readonly shouldEmit: boolean;
+    /** The elapsed window replaced by this increment, for one deterministic summary emission. */
+    readonly closedBucket?: SecurityDenialBucket;
   }>;
   getDenialBucket(key: string): Promise<SecurityDenialBucket | undefined>;
 

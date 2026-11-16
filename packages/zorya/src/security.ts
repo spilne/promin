@@ -40,6 +40,7 @@ export type {
 } from "./security-module/security-store.ts";
 export { SECURITY_STORE_LIMITS } from "./security-module/security-store.ts";
 export {
+  BoundedDenialAudit,
   computeSecurityAuditHash,
   DurableSecurityAudit,
   SecurityAuditAccessDeniedError,
@@ -47,12 +48,20 @@ export {
   SecurityToolAuditBridge,
   verifySecurityAuditRecords,
   type DurableSecurityAuditConfig,
+  type BoundedDenialAuditConfig,
   type SecurityAuditCheckpoint,
   type SecurityAuditEnvelope,
   type SecurityAuditHmacKey,
   type SecurityAuditSearchFilter,
   type SecurityAuditVerification,
 } from "./security-module/security-audit.ts";
+export {
+  SecurityAuditOutboxWorker,
+  type SecurityAuditDestination,
+  type SecurityAuditOutboxMetrics,
+  type SecurityAuditOutboxReport,
+  type SecurityAuditOutboxWorkerConfig,
+} from "./security-module/security-audit-outbox.ts";
 export {
   breakGlassGrantIdFromToken,
   BreakGlassAccessManager,

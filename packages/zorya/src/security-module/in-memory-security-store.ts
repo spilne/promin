@@ -732,7 +732,11 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
       suppressed,
     });
     this.denialBuckets.set(key, row);
-    return freeze({ bucket: clone(row), shouldEmit });
+    return freeze({
+      bucket: clone(row),
+      shouldEmit,
+      ...(resets && existing !== undefined && { closedBucket: clone(existing) }),
+    });
   }
 
   async getDenialBucket(key: string): Promise<SecurityDenialBucket | undefined> {

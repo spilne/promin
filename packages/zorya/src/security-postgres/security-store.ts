@@ -940,6 +940,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
   }): Promise<{
     readonly bucket: SecurityDenialBucket;
     readonly shouldEmit: boolean;
+    readonly closedBucket?: SecurityDenialBucket;
   }> {
     const key = requiredString(params.key, "denial bucket key");
     const now = integerMs(params.now, "denial time");
@@ -953,6 +954,10 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
         INSERT INTO zorya_security_data.zsec_denial_bucket(key,window_started_at,window_ends_at,count,suppressed)
         VALUES (${key},${now},${windowEnd},1,${emitLimit < 1 ? 1 : 0})
         ON CONFLICT (key) DO UPDATE SET
+          closed_window_started_at=CASE WHEN ${now}>=zorya_security_data.zsec_denial_bucket.window_ends_at THEN zorya_security_data.zsec_denial_bucket.window_started_at ELSE NULL END,
+          closed_window_ends_at=CASE WHEN ${now}>=zorya_security_data.zsec_denial_bucket.window_ends_at THEN zorya_security_data.zsec_denial_bucket.window_ends_at ELSE NULL END,
+          closed_count=CASE WHEN ${now}>=zorya_security_data.zsec_denial_bucket.window_ends_at THEN zorya_security_data.zsec_denial_bucket.count ELSE NULL END,
+          closed_suppressed=CASE WHEN ${now}>=zorya_security_data.zsec_denial_bucket.window_ends_at THEN zorya_security_data.zsec_denial_bucket.suppressed ELSE NULL END,
           window_started_at=CASE WHEN ${now}>=zorya_security_data.zsec_denial_bucket.window_ends_at THEN ${now} ELSE zorya_security_data.zsec_denial_bucket.window_started_at END,
           window_ends_at=CASE WHEN ${now}>=zorya_security_data.zsec_denial_bucket.window_ends_at THEN ${windowEnd} ELSE zorya_security_data.zsec_denial_bucket.window_ends_at END,
           count=CASE WHEN ${now}>=zorya_security_data.zsec_denial_bucket.window_ends_at THEN 1 ELSE zorya_security_data.zsec_denial_bucket.count+1 END,
@@ -962,7 +967,12 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       );
       if (!row) throw new Error("Denial time precedes the current window");
       const bucket = denialFromRow(row);
-      return freeze({ bucket, shouldEmit: bucket.count <= emitLimit });
+      const closedBucket = closedDenialFromRow(row, key);
+      return freeze({
+        bucket,
+        shouldEmit: bucket.count <= emitLimit,
+        ...(closedBucket !== undefined && { closedBucket }),
+      });
     } catch (error) {
       if (isNumericOverflow(error)) throw new Error("denial count overflow");
       throw error;
@@ -1386,6 +1396,28 @@ function denialFromRow(row: DbRow): SecurityDenialBucket {
     windowEndsAt: Number(row.window_ends_at),
     count: Number(row.count),
     suppressed: Number(row.suppressed),
+  });
+}
+
+function closedDenialFromRow(row: DbRow, key: string): SecurityDenialBucket | undefined {
+  if (
+    row.closed_window_started_at === null ||
+    row.closed_window_started_at === undefined ||
+    row.closed_window_ends_at === null ||
+    row.closed_window_ends_at === undefined ||
+    row.closed_count === null ||
+    row.closed_count === undefined ||
+    row.closed_suppressed === null ||
+    row.closed_suppressed === undefined
+  ) {
+    return undefined;
+  }
+  return freeze({
+    key,
+    windowStartedAt: Number(row.closed_window_started_at),
+    windowEndsAt: Number(row.closed_window_ends_at),
+    count: Number(row.closed_count),
+    suppressed: Number(row.closed_suppressed),
   });
 }
 

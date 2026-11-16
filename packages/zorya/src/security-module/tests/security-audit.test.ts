@@ -1,16 +1,26 @@
 import { describe, expect, test } from "bun:test";
 import { createElevatedTool } from "@promin/agent";
+import { FakeWallClock } from "@promin/workflow";
 import { z } from "zod";
-import type { Authorizer, SecurityContext } from "../../server/security/security.ts";
+import type {
+  Authorizer,
+  SecurityAuditEvent,
+  SecurityContext,
+} from "../../server/security/security.ts";
 import { InMemorySecurityStore } from "../in-memory-security-store.ts";
 import {
+  BoundedDenialAudit,
   DurableSecurityAudit,
   SecurityAuditAccessDeniedError,
   SecurityAuditReader,
   SecurityToolAuditBridge,
   verifySecurityAuditRecords,
 } from "../security-audit.ts";
-import type { SecurityAuditRecord, SecurityStoreV2 } from "../security-store.ts";
+import type {
+  SecurityAuditRecord,
+  SecurityAuditScalar,
+  SecurityStoreV2,
+} from "../security-store.ts";
 
 const KEY_A = "a".repeat(32);
 const KEY_B = "b".repeat(32);
@@ -211,6 +221,58 @@ describe("DurableSecurityAudit", () => {
   });
 });
 
+describe("BoundedDenialAudit", () => {
+  test("bounds equivalent denials and emits an accurate tamper-evident rollover summary", async () => {
+    const clock = FakeWallClock.create(2_000);
+    const store = new InMemorySecurityStore({ clock });
+    let nextId = 0;
+    const durable = new DurableSecurityAudit({
+      store,
+      activeKeyId: "key-a",
+      keys: { "key-a": KEY_A },
+      clock,
+      idFactory: () => `bounded-${++nextId}`,
+    });
+    const sink = new BoundedDenialAudit({
+      store,
+      sink: durable,
+      clock,
+      windowMs: 100,
+      emitLimit: 2,
+    });
+    const denied = denialEvent();
+
+    for (let index = 0; index < 5; index += 1) await sink.recordAudit(denied);
+    expect((await rows(store)).filter((row) => row.event === "authorization")).toHaveLength(2);
+
+    await sink.recordAudit(
+      denialEvent({ resourceId: "agent-2", metadata: { query: "different-secret" } }),
+    );
+    await sink.recordAudit(denialEvent({ actorId: "bob" }));
+    await sink.recordAudit(denialEvent({ namespaceId: "other" }));
+
+    clock.advance(100);
+    await sink.recordAudit(denied);
+
+    const acme = await rows(store);
+    const summary = acme.find((row) => row.event === "authorization.denial-suppressed");
+    expect(summary?.metadata).toEqual({
+      summary: "equivalent-denials",
+      windowStartedAt: 2_000,
+      windowEndsAt: 2_100,
+      totalCount: 5,
+      detailedCount: 2,
+      suppressedCount: 3,
+    });
+    expect(acme.filter((row) => row.event === "authorization")).toHaveLength(5);
+    expect(
+      (await rows(store, "other")).filter((row) => row.event === "authorization"),
+    ).toHaveLength(1);
+    expect(await durable.verify("acme")).toMatchObject({ valid: true });
+    expect(JSON.stringify(acme)).not.toContain("different-secret");
+  });
+});
+
 describe("SecurityToolAuditBridge", () => {
   test("copies ToolScope identity into intent/outcome and never stores raw sensitive/error payloads", async () => {
     const store = new InMemorySecurityStore();
@@ -399,3 +461,32 @@ const context: SecurityContext = {
   },
   effective: { kind: "service-account", id: "research-bot" },
 };
+
+function denialEvent(
+  options: {
+    readonly namespaceId?: string;
+    readonly actorId?: string;
+    readonly resourceId?: string;
+    readonly metadata?: Readonly<Record<string, SecurityAuditScalar>>;
+  } = {},
+): SecurityAuditEvent {
+  const namespaceId = options.namespaceId ?? "acme";
+  return {
+    event: "authorization",
+    occurredAt: new Date(1_000).toISOString(),
+    namespaceId,
+    context: {
+      actor: {
+        kind: "user",
+        id: options.actorId ?? "alice",
+        accessRoles: { [namespaceId]: ["member"] },
+        canActFor: false,
+      },
+      effective: { kind: "user", id: options.actorId ?? "alice" },
+    },
+    permission: { resource: "agent", action: "invoke" },
+    resource: { kind: "agent", namespaceId, id: options.resourceId ?? "agent-1" },
+    decision: { allowed: false, reason: "permission_denied" },
+    metadata: options.metadata ?? { query: "raw-secret" },
+  };
+}

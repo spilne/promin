@@ -41,6 +41,11 @@ import {
   sessionToken,
 } from "./sessions.ts";
 import { mountAccessRoutes } from "./access-routes.ts";
+import { BoundedDenialAudit } from "./security-audit.ts";
+import {
+  SecurityAuditOutboxWorker,
+  type SecurityAuditOutboxWorkerConfig,
+} from "./security-audit-outbox.ts";
 
 const DEFAULT_SESSION_TTL_MS = 8 * 60 * 60 * 1_000;
 /** Cookie-authenticated SSE clients reconnect and fully reauthorize at least this often. */
@@ -65,6 +70,10 @@ export interface ZoryaSecurityConfig {
   readonly serviceAccountCredentialPepper?: string;
   /** Required enterprise audit destination. Security events are never silently discarded. */
   readonly auditSink: SecurityAuditSink;
+  /** Repeated equivalent denials retain this many details per window before aggregation. */
+  readonly denialAudit?: { readonly windowMs?: number; readonly emitLimit?: number };
+  /** Optional external audit delivery; the server lifecycle starts and stops its durable worker. */
+  readonly auditOutbox?: Omit<SecurityAuditOutboxWorkerConfig, "store" | "clock">;
   readonly secret: string;
   readonly sessionTtlMs?: number;
   /** Maximum lifetime of one cookie-authenticated SSE connection. Default: 30 seconds. */
@@ -96,14 +105,33 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
       "createZoryaSecurity: serviceAccountCredentialPepper must be at least 32 characters",
     );
   }
+  const clock = config.clock ?? SystemWallClock;
   const auditSink = config.auditSink;
   const auditRecord = auditSink?.recordAudit;
   if (!auditSink || typeof auditRecord !== "function") {
     throw new Error("createZoryaSecurity: auditSink is required");
   }
-  const recordAudit = auditRecord.bind(auditSink);
+  const boundedAudit = new BoundedDenialAudit({
+    store: config.store,
+    sink: { recordAudit: auditRecord.bind(auditSink) },
+    clock,
+    ...(config.denialAudit?.windowMs !== undefined && {
+      windowMs: config.denialAudit.windowMs,
+    }),
+    ...(config.denialAudit?.emitLimit !== undefined && {
+      emitLimit: config.denialAudit.emitLimit,
+    }),
+  });
+  const recordAudit = boundedAudit.recordAudit.bind(boundedAudit);
+  const auditOutboxWorker =
+    config.auditOutbox === undefined
+      ? undefined
+      : new SecurityAuditOutboxWorker({
+          ...config.auditOutbox,
+          store: config.store,
+          clock,
+        });
 
-  const clock = config.clock ?? SystemWallClock;
   const publicBaseUrl = new URL(config.publicBaseUrl);
   if (publicBaseUrl.protocol !== "https:" && publicBaseUrl.protocol !== "http:") {
     throw new Error("createZoryaSecurity: publicBaseUrl must use http or https");
@@ -484,6 +512,8 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
     authorize: async (request) => (await authorizeEffective(request)).decision,
     authorizeEffective,
     recordAudit: async (event) => recordAudit(snapshotAuditEvent(event)),
+    start: async () => auditOutboxWorker?.start(),
+    stop: async () => auditOutboxWorker?.stop(),
     mount: (router) => {
       mountLoginRoutes({
         router,

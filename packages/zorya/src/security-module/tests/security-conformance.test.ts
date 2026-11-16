@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { FakeWallClock } from "@promin/workflow";
 import { Auth } from "../../server/auth.ts";
 import { Router } from "../../server/router.ts";
 import {
@@ -24,6 +25,7 @@ import {
 } from "../../server/security/tests/security-conformance-suite.ts";
 import { InMemorySecurityStore } from "../in-memory-security-store.ts";
 import type { LoginProvider } from "../login-provider.ts";
+import { DurableSecurityAudit } from "../security-audit.ts";
 import { createZoryaSecurity } from "../zorya-security.ts";
 
 const SECRET = "0123456789abcdef0123456789abcdef";
@@ -314,6 +316,95 @@ describe("optional security module audit sink", () => {
     expect(Object.isFrozen(retained)).toBeTrue();
     expect(Object.isFrozen(retained?.context?.actor.accessRoles["team-a"])).toBeTrue();
     expect(Object.isFrozen(retained?.metadata)).toBeTrue();
+  });
+
+  it("bounds denial emission in the security adapter and separates resource buckets", async () => {
+    const clock = FakeWallClock.create("2026-11-16T00:00:00.000Z");
+    const events: SecurityAuditEvent[] = [];
+    const security = createZoryaSecurity({
+      store: new InMemorySecurityStore({ clock }),
+      loginProviders: [unusedLoginProvider],
+      publicBaseUrl: "http://zorya.test",
+      allowInsecureHttp: true,
+      allowedDomains: ["example.com"],
+      auditSink: { recordAudit: async (event) => void events.push(event) },
+      denialAudit: { windowMs: 100, emitLimit: 1 },
+      clock,
+      secret: SECRET,
+    });
+    const denied = {
+      event: "authorization",
+      occurredAt: clock.now().toISOString(),
+      namespaceId: "team-a",
+      context: selfContext(OPERATOR_PRINCIPAL),
+      permission: { resource: "agent", action: "invoke" },
+      resource: { kind: "agent", namespaceId: "team-a", id: "agent-1" },
+      decision: { allowed: false, reason: "permission_denied" },
+    } as const satisfies SecurityAuditEvent;
+
+    await security.recordAudit(denied);
+    await security.recordAudit(denied);
+    await security.recordAudit(denied);
+    expect(events).toHaveLength(1);
+    await security.recordAudit({
+      ...denied,
+      resource: { ...denied.resource, id: "agent-2" },
+    });
+    expect(events).toHaveLength(2);
+
+    clock.advance(100);
+    await security.recordAudit({ ...denied, occurredAt: clock.now().toISOString() });
+    expect(events.map((event) => event.event)).toEqual([
+      "authorization",
+      "authorization",
+      "authorization.denial-suppressed",
+      "authorization",
+    ]);
+    expect(events[2]?.metadata).toMatchObject({
+      totalCount: 3,
+      detailedCount: 1,
+      suppressedCount: 2,
+    });
+  });
+
+  it("starts and stops configured durable outbox delivery with the security lifecycle", async () => {
+    const clock = FakeWallClock.create(1_000);
+    const store = new InMemorySecurityStore({ clock });
+    const audit = new DurableSecurityAudit({
+      store,
+      activeKeyId: "key",
+      keys: { key: "a".repeat(32) },
+      clock,
+      idFactory: () => "lifecycle-event",
+      outbox: {},
+    });
+    const delivered: string[] = [];
+    const security = createZoryaSecurity({
+      store,
+      loginProviders: [unusedLoginProvider],
+      publicBaseUrl: "http://zorya.test",
+      allowInsecureHttp: true,
+      allowedDomains: ["example.com"],
+      auditSink: audit,
+      auditOutbox: {
+        owner: "security-1",
+        destination: {
+          deliver: async ({ idempotencyKey }) => void delivered.push(idempotencyKey),
+        },
+      },
+      clock,
+      secret: SECRET,
+    });
+    await security.recordAudit({
+      event: "server.started",
+      occurredAt: clock.now().toISOString(),
+      namespaceId: "org",
+    });
+
+    await security.start?.();
+    await security.stop?.();
+    expect(delivered).toEqual(["lifecycle-event"]);
+    expect(await store.getAuditOutbox("lifecycle-event")).toMatchObject({ status: "delivered" });
   });
 
   it("snapshots the sink method and event fields once", async () => {

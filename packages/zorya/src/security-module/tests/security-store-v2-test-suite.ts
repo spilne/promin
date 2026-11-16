@@ -565,6 +565,13 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
           count: 1,
           suppressed: 0,
         },
+        closedBucket: {
+          key: "actor:action",
+          windowStartedAt: 1,
+          windowEndsAt: 101,
+          count: 10,
+          suppressed: 7,
+        },
         shouldEmit: true,
       });
     });

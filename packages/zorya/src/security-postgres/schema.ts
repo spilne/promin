@@ -456,6 +456,10 @@ export const securityDenialBuckets = securityData.table(
     windowEndsAt: time("window_ends_at").notNull(),
     count: bigint("count", { mode: "number" }).notNull(),
     suppressed: bigint("suppressed", { mode: "number" }).notNull(),
+    closedWindowStartedAt: time("closed_window_started_at"),
+    closedWindowEndsAt: time("closed_window_ends_at"),
+    closedCount: bigint("closed_count", { mode: "number" }),
+    closedSuppressed: bigint("closed_suppressed", { mode: "number" }),
   },
   (t) => [
     primaryKey({ name: "zsec_denial_bucket_pkey", columns: [t.key] }),
@@ -465,6 +469,14 @@ export const securityDenialBuckets = securityData.table(
     check("zsec_denial_bucket_count_ck", nonNegativeSafeInteger(t.count)),
     check("zsec_denial_bucket_suppressed_ck", nonNegativeSafeInteger(t.suppressed)),
     check("zsec_denial_bucket_window_order_ck", sql`${t.windowEndsAt} > ${t.windowStartedAt}`),
+    check("zsec_denial_bucket_closed_started_ck", safeInteger(t.closedWindowStartedAt)),
+    check("zsec_denial_bucket_closed_ends_ck", safeInteger(t.closedWindowEndsAt)),
+    check("zsec_denial_bucket_closed_count_ck", nonNegativeSafeInteger(t.closedCount)),
+    check("zsec_denial_bucket_closed_suppressed_ck", nonNegativeSafeInteger(t.closedSuppressed)),
+    check(
+      "zsec_denial_bucket_closed_shape_ck",
+      sql`(${t.closedWindowStartedAt} IS NULL AND ${t.closedWindowEndsAt} IS NULL AND ${t.closedCount} IS NULL AND ${t.closedSuppressed} IS NULL) OR (${t.closedWindowStartedAt} IS NOT NULL AND ${t.closedWindowEndsAt} IS NOT NULL AND ${t.closedCount} IS NOT NULL AND ${t.closedSuppressed} IS NOT NULL AND ${t.closedWindowEndsAt} > ${t.closedWindowStartedAt})`,
+    ),
   ],
 );
 
