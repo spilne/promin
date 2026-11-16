@@ -138,6 +138,7 @@ export function snapshotPrincipal(source: Principal): Principal {
   const id = record.id;
   const email = record.email;
   const accessRoles = record.accessRoles;
+  const teams = record.teams;
   const canActFor = record.canActFor;
   if (
     typeof kind !== "string" ||
@@ -154,6 +155,9 @@ export function snapshotPrincipal(source: Principal): Principal {
     id,
     ...(email !== undefined && { email }),
     accessRoles: snapshotAccessRoles(accessRoles),
+    ...(teams !== undefined && {
+      teams: snapshotStringArray(teams, "principal teams"),
+    }),
     canActFor,
   };
   return Object.freeze(snapshot);
@@ -173,6 +177,18 @@ export function snapshotPrincipalRef(source: PrincipalRef): PrincipalRef {
     throw new TypeError("Invalid principal reference");
   }
   return Object.freeze({ kind: kind as PrincipalKind, id });
+}
+
+function snapshotStringArray(source: unknown, label: string): ReadonlyArray<string> {
+  if (!Array.isArray(source) || source.length > 10_000) {
+    throw new TypeError(`Invalid ${label}`);
+  }
+  const result: string[] = [];
+  for (const value of source) {
+    if (typeof value !== "string" || value.length === 0) throw new TypeError(`Invalid ${label}`);
+    result.push(value);
+  }
+  return Object.freeze(result);
 }
 
 function snapshotAccessRoles(source: unknown): Readonly<Record<string, ReadonlyArray<string>>> {

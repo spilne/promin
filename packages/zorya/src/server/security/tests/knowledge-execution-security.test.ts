@@ -6,12 +6,13 @@ import { KnowledgeExecutionSecurity } from "../knowledge-execution-security.ts";
 const clock = { now: () => new Date("2026-01-02T03:04:05.000Z") };
 const logger = { error() {} };
 
-function user(id: string, roles: ReadonlyArray<string>): Principal {
+function user(id: string, roles: ReadonlyArray<string>, teams?: ReadonlyArray<string>): Principal {
   return {
     kind: "user",
     id,
     email: `${id}@example.test`,
     accessRoles: { team: roles },
+    ...(teams !== undefined && { teams }),
     canActFor: false,
   };
 }
@@ -36,9 +37,15 @@ function fakeSecurity(params: {
     const effective = await resolve(context.effective);
     if (!effective) return { decision: { allowed: false, reason: "identity_unknown" } };
     if (params.allowed?.() === false) {
-      return { decision: { allowed: false, reason: "permission_denied" }, effective };
+      return {
+        decision: { allowed: false, reason: "permission_denied" },
+        effective,
+      };
     }
-    return { decision: { allowed: true, reason: "access_role_allow" }, effective };
+    return {
+      decision: { allowed: true, reason: "access_role_allow" },
+      effective,
+    };
   };
   return {
     authenticate: async () => undefined,
@@ -65,7 +72,9 @@ function fakeSecurity(params: {
 describe("KnowledgeExecutionSecurity", () => {
   it("freshly resolves caller roles and observes grant revocation before the next search", async () => {
     const audits: SecurityAuditEvent[] = [];
-    const principals = new Map<string, Principal>([["user:alice", user("alice", ["member"])]]);
+    const principals = new Map<string, Principal>([
+      ["user:alice", user("alice", ["member"], ["finance"])],
+    ]);
     let allowed = true;
     const guard = new KnowledgeExecutionSecurity({
       security: fakeSecurity({ principals, audits, allowed: () => allowed }),
@@ -91,8 +100,15 @@ describe("KnowledgeExecutionSecurity", () => {
       baseId: "handbook",
     });
 
-    expect(first?.caller).toMatchObject({ userId: "alice", accessRoles: ["member"] });
-    expect(second?.caller).toMatchObject({ userId: "alice", accessRoles: ["finance"] });
+    expect(first?.caller).toMatchObject({
+      userId: "alice",
+      accessRoles: ["member"],
+      teams: ["finance"],
+    });
+    expect(second?.caller).toMatchObject({
+      userId: "alice",
+      accessRoles: ["finance"],
+    });
     expect(revoked).toBeUndefined();
     expect(audits.map((event) => event.decision?.allowed)).toEqual([true, true, false]);
     expect(JSON.stringify(audits)).not.toContain("query");
@@ -156,7 +172,10 @@ describe("KnowledgeExecutionSecurity", () => {
 
     expect(access).toBeUndefined();
     expect(audits.map((event) => event.decision?.allowed)).toEqual([true, false]);
-    expect(audits[1]?.decision).toEqual({ allowed: false, reason: "permission_denied" });
+    expect(audits[1]?.decision).toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
     expect(Object.isFrozen(audits[1])).toBeTrue();
     expect(Object.isFrozen(audits[1]?.decision)).toBeTrue();
   });
@@ -241,7 +260,10 @@ describe("KnowledgeExecutionSecurity", () => {
     });
 
     expect(access).toBeUndefined();
-    expect(audits[0]?.decision).toEqual({ allowed: false, reason: "permission_denied" });
+    expect(audits[0]?.decision).toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
   });
 
   it("fails closed for malformed identity-filter discriminators", async () => {
@@ -251,7 +273,10 @@ describe("KnowledgeExecutionSecurity", () => {
       security: fakeSecurity({
         principals,
         audits,
-        identityFilter: ({ namespaceId }) => ({ kind: "totally-unapproved", namespaceId }),
+        identityFilter: ({ namespaceId }) => ({
+          kind: "totally-unapproved",
+          namespaceId,
+        }),
       }),
       clock,
       logger,
@@ -265,7 +290,10 @@ describe("KnowledgeExecutionSecurity", () => {
 
     expect(access).toBeUndefined();
     expect(audits).toHaveLength(1);
-    expect(audits[0]?.decision).toEqual({ allowed: false, reason: "permission_denied" });
+    expect(audits[0]?.decision).toEqual({
+      allowed: false,
+      reason: "permission_denied",
+    });
   });
 
   it("fails closed for wrong namespaces and malformed identity allow-lists", async () => {
@@ -282,7 +310,10 @@ describe("KnowledgeExecutionSecurity", () => {
 
     for (const identityFilter of malformed) {
       const guard = new KnowledgeExecutionSecurity({
-        security: fakeSecurity({ principals, identityFilter: () => identityFilter }),
+        security: fakeSecurity({
+          principals,
+          identityFilter: () => identityFilter,
+        }),
         clock,
         logger,
       });
@@ -382,7 +413,13 @@ describe("KnowledgeExecutionSecurity", () => {
     });
 
     expect(access?.caller?.userId).toBe("alice");
-    expect({ kindReads, namespaceReads, identitiesReads, idReads, lengthReads }).toEqual({
+    expect({
+      kindReads,
+      namespaceReads,
+      identitiesReads,
+      idReads,
+      lengthReads,
+    }).toEqual({
       kindReads: 2,
       namespaceReads: 2,
       identitiesReads: 2,
@@ -493,7 +530,10 @@ describe("KnowledgeExecutionSecurity", () => {
     expect(audits).toHaveLength(3);
     expect(audits.every((event) => event.decision?.allowed === false)).toBe(true);
     expect("context" in audits[2]!).toBe(false);
-    expect(audits[2]?.metadata).toMatchObject({ actorKind: "user", actorId: "unknown" });
+    expect(audits[2]?.metadata).toMatchObject({
+      actorKind: "user",
+      actorId: "unknown",
+    });
   });
 
   it("keeps key mode namespace-only even when a body names an unknown user", async () => {
@@ -515,8 +555,14 @@ describe("KnowledgeExecutionSecurity", () => {
       baseId: "handbook",
     });
 
-    expect(access?.caller).toMatchObject({ userId: "operator", accessRoles: ["admin"] });
-    expect(audits[0]?.context?.effective).toEqual({ kind: "operator", id: "operator" });
+    expect(access?.caller).toMatchObject({
+      userId: "operator",
+      accessRoles: ["admin"],
+    });
+    expect(audits[0]?.context?.effective).toEqual({
+      kind: "operator",
+      id: "operator",
+    });
   });
 
   it("never turns an authorization denial into access when its audit sink is down", async () => {

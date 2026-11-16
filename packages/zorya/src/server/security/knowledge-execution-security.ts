@@ -71,22 +71,38 @@ export class KnowledgeExecutionSecurity {
       return undefined;
     }
     const asserted = runContext.effective ? toPrincipalRef(runContext.effective) : undefined;
-    const resolved = await this.security.resolveIdentity({ actor, ...(asserted && { asserted }) });
+    const resolved = await this.security.resolveIdentity({
+      actor,
+      ...(asserted && { asserted }),
+    });
     if (!resolved) {
       await this.auditResolved({
         params,
-        context: snapshotSecurityContext({ actor, effective: asserted ?? toPrincipalRef(actor) }),
+        context: snapshotSecurityContext({
+          actor,
+          effective: asserted ?? toPrincipalRef(actor),
+        }),
         reason: "permission_denied",
       });
       return undefined;
     }
     const context = snapshotSecurityContext(resolved);
-    const identityFilter = await this.currentIdentityFilter({ context, params });
+    const identityFilter = await this.currentIdentityFilter({
+      context,
+      params,
+    });
     if (!identityFilter || !filterIncludes(identityFilter, context.effective)) {
-      await this.auditResolved({ params, context, reason: "permission_denied" });
+      await this.auditResolved({
+        params,
+        context,
+        reason: "permission_denied",
+      });
       return undefined;
     }
-    const permission = snapshotSecurityPermission({ resource: "knowledge", action: "use" });
+    const permission = snapshotSecurityPermission({
+      resource: "knowledge",
+      action: "use",
+    });
     const resource = snapshotSecurityResource({
       kind: "knowledge",
       namespaceId: params.namespaceId,
@@ -109,7 +125,10 @@ export class KnowledgeExecutionSecurity {
     const decision =
       authorization && bound
         ? authorization.decision
-        : snapshotAuthorizationDecision({ allowed: false, reason: "permission_denied" });
+        : snapshotAuthorizationDecision({
+            allowed: false,
+            reason: "permission_denied",
+          });
     await this.auditDecision({ params, context, decision });
     if (
       !decision.allowed ||
@@ -148,19 +167,32 @@ export class KnowledgeExecutionSecurity {
       return undefined;
     }
     const asserted = runContext.effective ? toPrincipalRef(runContext.effective) : undefined;
-    const resolved = await this.security.resolveIdentity({ actor, ...(asserted && { asserted }) });
+    const resolved = await this.security.resolveIdentity({
+      actor,
+      ...(asserted && { asserted }),
+    });
     if (!resolved) {
       await this.auditResolved({
         params,
-        context: snapshotSecurityContext({ actor, effective: asserted ?? toPrincipalRef(actor) }),
+        context: snapshotSecurityContext({
+          actor,
+          effective: asserted ?? toPrincipalRef(actor),
+        }),
         reason: "permission_denied",
       });
       return undefined;
     }
     const context = snapshotSecurityContext(resolved);
-    const identityFilter = await this.currentIdentityFilter({ context, params });
+    const identityFilter = await this.currentIdentityFilter({
+      context,
+      params,
+    });
     if (!identityFilter || !filterIncludes(identityFilter, context.effective)) {
-      await this.auditResolved({ params, context, reason: "permission_denied" });
+      await this.auditResolved({
+        params,
+        context,
+        reason: "permission_denied",
+      });
       return undefined;
     }
     const authorizeEffective = this.security.authorizeEffective;
@@ -168,7 +200,10 @@ export class KnowledgeExecutionSecurity {
       ? snapshotEffectiveAuthorizationResult(
           await authorizeEffective({
             context,
-            permission: snapshotSecurityPermission({ resource: "knowledge", action: "use" }),
+            permission: snapshotSecurityPermission({
+              resource: "knowledge",
+              action: "use",
+            }),
             resource: snapshotSecurityResource({
               kind: "knowledge",
               namespaceId: params.namespaceId,
@@ -186,7 +221,10 @@ export class KnowledgeExecutionSecurity {
       const decision =
         authorization?.decision.allowed === false
           ? authorization.decision
-          : snapshotAuthorizationDecision({ allowed: false, reason: "permission_denied" });
+          : snapshotAuthorizationDecision({
+              allowed: false,
+              reason: "permission_denied",
+            });
       await this.auditDecision({ params, context, decision });
       return undefined;
     }
@@ -194,10 +232,16 @@ export class KnowledgeExecutionSecurity {
       !sameAuthorizationSnapshot(authorization, input.auditedAuthorization) ||
       !sameIdentityFilter(identityFilter, input.auditedIdentityFilter)
     ) {
-      await this.auditResolved({ params, context, reason: "permission_denied" });
+      await this.auditResolved({
+        params,
+        context,
+        reason: "permission_denied",
+      });
       return undefined;
     }
-    return Object.freeze({ caller: callerFor(authorization.effective, params.namespaceId) });
+    return Object.freeze({
+      caller: callerFor(authorization.effective, params.namespaceId),
+    });
   }
 
   private async currentIdentityFilter(input: {
@@ -222,7 +266,10 @@ export class KnowledgeExecutionSecurity {
     readonly context: SecurityContext;
     readonly decision: AuthorizationDecision;
   }): SecurityAuditEvent {
-    const permission = snapshotSecurityPermission({ resource: "knowledge", action: "use" });
+    const permission = snapshotSecurityPermission({
+      resource: "knowledge",
+      action: "use",
+    });
     const resource = snapshotSecurityResource({
       kind: "knowledge",
       namespaceId: params.params.namespaceId,
@@ -270,7 +317,10 @@ export class KnowledgeExecutionSecurity {
     readonly params: { readonly namespaceId: string; readonly baseId: string };
     readonly runContext: RunSecurityContext;
   }): Promise<void> {
-    const permission = snapshotSecurityPermission({ resource: "knowledge", action: "use" });
+    const permission = snapshotSecurityPermission({
+      resource: "knowledge",
+      action: "use",
+    });
     const resource = snapshotSecurityResource({
       kind: "knowledge",
       namespaceId: params.params.namespaceId,
@@ -305,7 +355,10 @@ export class KnowledgeExecutionSecurity {
     readonly namespaceId: string;
     readonly baseId: string;
   }): Promise<void> {
-    const permission = snapshotSecurityPermission({ resource: "knowledge", action: "use" });
+    const permission = snapshotSecurityPermission({
+      resource: "knowledge",
+      action: "use",
+    });
     const resource = snapshotSecurityResource({
       kind: "knowledge",
       namespaceId: params.namespaceId,
@@ -318,7 +371,10 @@ export class KnowledgeExecutionSecurity {
       resource,
       permission,
       decision: Object.freeze({ allowed: false, reason: "identity_unknown" }),
-      metadata: Object.freeze({ baseId: params.baseId, denialReason: "missing_identity" }),
+      metadata: Object.freeze({
+        baseId: params.baseId,
+        denialReason: "missing_identity",
+      }),
     });
     try {
       await this.security.recordAudit(event);
@@ -343,7 +399,7 @@ function callerFor(principal: Principal, namespaceId: string): RetrieverCaller {
     userId: principal.id,
     ...(principal.email !== undefined && { email: principal.email }),
     accessRoles: Object.freeze([...new Set(roles)]),
-    teams: Object.freeze([]),
+    teams: Object.freeze([...(principal.teams ?? [])]),
   });
 }
 
@@ -394,7 +450,11 @@ function snapshotIdentityFilter(source: unknown): IdentityFilter {
       snapshotPrincipalRef(Reflect.get(identitiesValue, String(index)) as PrincipalRef),
     );
   }
-  return Object.freeze({ kind, namespaceId, identities: Object.freeze(identities) });
+  return Object.freeze({
+    kind,
+    namespaceId,
+    identities: Object.freeze(identities),
+  });
 }
 
 function sameAuthorizationSnapshot(
@@ -421,7 +481,7 @@ function samePrincipalSnapshot(left: Principal, right: Principal): boolean {
   const leftNamespaces = Object.keys(left.accessRoles);
   const rightNamespaces = Object.keys(right.accessRoles);
   if (leftNamespaces.length !== rightNamespaces.length) return false;
-  return leftNamespaces.every((namespaceId) => {
+  const sameRoles = leftNamespaces.every((namespaceId) => {
     if (!Object.hasOwn(right.accessRoles, namespaceId)) return false;
     const leftRoles = left.accessRoles[namespaceId] ?? [];
     const rightRoles = right.accessRoles[namespaceId] ?? [];
@@ -430,6 +490,13 @@ function samePrincipalSnapshot(left: Principal, right: Principal): boolean {
       leftRoles.every((role, index) => role === rightRoles[index])
     );
   });
+  if (!sameRoles) return false;
+  const leftTeams = left.teams ?? [];
+  const rightTeams = right.teams ?? [];
+  return (
+    leftTeams.length === rightTeams.length &&
+    leftTeams.every((team, index) => team === rightTeams[index])
+  );
 }
 
 function sameIdentityFilter(left: IdentityFilter, right: IdentityFilter): boolean {

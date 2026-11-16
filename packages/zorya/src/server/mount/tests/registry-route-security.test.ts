@@ -134,7 +134,12 @@ describe("registry and administration route security", () => {
     });
     mountNamespaces({ router, registry, storage: {} as never, schedulerStorage: undefined });
     mountWorkflowBuilder({ router, builder: {} as never });
-    mountAccessRoutes({ router, store: {} as never });
+    mountAccessRoutes({
+      router,
+      store: {} as never,
+      credentialPepper: "test",
+      clock: {} as never,
+    });
 
     expect(router.uncoveredRoutes()).toEqual([]);
     for (const [method, path] of routes) {

@@ -4,6 +4,9 @@ import { postgresDescribe } from "@promin/postgres/testing";
 import { type DrizzleDb, execRaw } from "@spilne/perfect-postgres";
 import { sql } from "drizzle-orm";
 import { securityStoreV2TestSuite } from "../../security-module/tests/security-store-v2-test-suite.ts";
+import { issueServiceAccountCredential } from "../../security-module/service-account-credentials.ts";
+import { hashCsrfToken, hashSessionToken } from "../../security-module/sessions.ts";
+import { createZoryaSecurity } from "../../security-module/zorya-security.ts";
 import { migrateSecurityStore } from "../migrate.ts";
 import { PostgresSecurityStore } from "../security-store.ts";
 
@@ -47,11 +50,156 @@ postgresDescribe(
       },
     });
 
+    it("authenticates and revokes a durable credential across store instances", async () => {
+      await reset();
+      const clock = FakeWallClock.create(1_000);
+      const writer = new PostgresSecurityStore({ db: pg.db, clock });
+      await writer.putServiceAccount({
+        id: "restart-agent",
+        status: "active",
+        canActFor: true,
+      });
+      await writer.putSubjectBinding({
+        subject: { kind: "service-account", id: "restart-agent" },
+        namespaceId: "team",
+        accessRole: "member",
+      });
+      const issued = await issueServiceAccountCredential({
+        store: writer,
+        serviceAccountId: "restart-agent",
+        pepper: "0123456789abcdef0123456789abcdef",
+        clock,
+      });
+
+      const reader = new PostgresSecurityStore({ db: pg.db, clock });
+      const security = createZoryaSecurity({
+        store: reader,
+        loginProviders: [
+          {
+            id: "unused",
+            authorizationUrl: async () => "https://identity.test/authorize",
+            exchange: async () => {
+              throw new Error("not used");
+            },
+          },
+        ],
+        publicBaseUrl: "https://zorya.test",
+        allowedDomains: ["example.com"],
+        auditSink: { recordAudit: async () => {} },
+        secret: "0123456789abcdef0123456789abcdef",
+        clock,
+      });
+      const request = () =>
+        new Request("https://zorya.test/api/agents", {
+          headers: { authorization: `Bearer ${issued.token}` },
+        });
+      expect(await security.authenticate({ request: request(), plane: "operator" })).toMatchObject({
+        id: "restart-agent",
+        accessRoles: { team: ["member"] },
+        canActFor: true,
+      });
+
+      await writer.revokeServiceAccountCredential({
+        id: issued.id,
+        revokedAt: 1_001,
+      });
+      expect(
+        await security.authenticate({ request: request(), plane: "operator" }),
+      ).toBeUndefined();
+    });
+
+    it("authenticates and invalidates a CSRF-bound OIDC session across store instances", async () => {
+      await reset();
+      const clock = FakeWallClock.create(1_000);
+      const writer = new PostgresSecurityStore({ db: pg.db, clock });
+      const { user } = await writer.findOrCreateProviderUser({
+        identity: {
+          providerId: "oidc",
+          issuer: "https://identity.test",
+          subject: "restart-user",
+        },
+        email: "restart-user@example.com",
+        bindings: [{ namespaceId: "team", accessRole: "member" }],
+      });
+      const csrf = "csrf-restart-token";
+      const firstToken = "session-restart-token";
+      await writer.putSession({
+        tokenHash: hashSessionToken(firstToken),
+        principal: { kind: "user", id: user.id },
+        createdAt: 1_000,
+        expiresAt: 2_000,
+        csrfTokenHash: hashCsrfToken(csrf),
+        authMethod: "oidc",
+      });
+
+      const reader = new PostgresSecurityStore({ db: pg.db, clock });
+      const security = createZoryaSecurity({
+        store: reader,
+        loginProviders: [
+          {
+            id: "unused",
+            authorizationUrl: async () => "https://identity.test/authorize",
+            exchange: async () => {
+              throw new Error("not used");
+            },
+          },
+        ],
+        publicBaseUrl: "https://zorya.test",
+        allowedDomains: ["example.com"],
+        auditSink: { recordAudit: async () => {} },
+        secret: "0123456789abcdef0123456789abcdef",
+        clock,
+      });
+      const request = (token: string) =>
+        new Request("https://zorya.test/api/agents", {
+          headers: {
+            cookie: `__Host-zorya_session=${token}; __Host-zorya_csrf=${csrf}`,
+          },
+        });
+      expect(
+        await security.authenticate({
+          request: request(firstToken),
+          plane: "operator",
+        }),
+      ).toMatchObject({ id: user.id, accessRoles: { team: ["member"] } });
+      await writer.revokeSession({
+        tokenHash: hashSessionToken(firstToken),
+        revokedAt: 1_001,
+      });
+      expect(
+        await security.authenticate({
+          request: request(firstToken),
+          plane: "operator",
+        }),
+      ).toBeUndefined();
+
+      const secondToken = "session-disabled-user-token";
+      await writer.putSession({
+        tokenHash: hashSessionToken(secondToken),
+        principal: { kind: "user", id: user.id },
+        createdAt: 1_001,
+        expiresAt: 2_000,
+        csrfTokenHash: hashCsrfToken(csrf),
+        authMethod: "oidc",
+      });
+      await writer.setUserStatus({ id: user.id, status: "disabled" });
+      expect(
+        await security.authenticate({
+          request: request(secondToken),
+          plane: "operator",
+        }),
+      ).toBeUndefined();
+    });
+
     it("resolves access from one snapshot across a concurrent disable", async () => {
       await reset();
       const admin = new PostgresSecurityStore({ db: pg.db });
       const { user } = await admin.findOrCreateProviderUser({
-        identity: { providerId: "test", issuer: "snapshot", subject: "subject" },
+        identity: {
+          providerId: "test",
+          issuer: "snapshot",
+          subject: "subject",
+        },
         email: "snapshot@example.com",
       });
       await admin.putGroup({ id: "snapshot-group", status: "active" });
@@ -85,11 +233,20 @@ postgresDescribe(
       const raced = new PostgresSecurityStore({ db: racedDb });
 
       expect(
-        await raced.resolveAccess({ subject: { kind: "user", id: user.id }, namespaceId: "team" }),
-      ).toEqual({ accessRoles: ["direct", "group-role"], groups: ["snapshot-group"] });
+        await raced.resolveAccess({
+          subject: { kind: "user", id: user.id },
+          namespaceId: "team",
+        }),
+      ).toEqual({
+        accessRoles: ["direct", "group-role"],
+        groups: ["snapshot-group"],
+      });
       expect(statements).toBe(1);
       expect(
-        await admin.resolveAccess({ subject: { kind: "user", id: user.id }, namespaceId: "team" }),
+        await admin.resolveAccess({
+          subject: { kind: "user", id: user.id },
+          namespaceId: "team",
+        }),
       ).toEqual({ accessRoles: [], groups: [] });
     });
 
@@ -231,7 +388,11 @@ postgresDescribe(
           },
           outbox: { nextAttemptAt: 0 },
         });
-        const [lease] = await store.claimAuditOutbox({ owner: "worker", leaseMs: 200, limit: 1 });
+        const [lease] = await store.claimAuditOutbox({
+          owner: "worker",
+          leaseMs: 200,
+          limit: 1,
+        });
         return { eventId, leaseToken: lease!.leaseToken! };
       }
 

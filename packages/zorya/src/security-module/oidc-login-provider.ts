@@ -102,6 +102,7 @@ export function oidcLoginProvider(config: OidcLoginProviderConfig): LoginProvide
       });
       const claims = IdentityClaimsSchema.parse(verified.payload);
       return {
+        issuer,
         subject: claims.sub,
         email: claims.email,
         emailVerified: claims.email_verified,
