@@ -1,3 +1,33 @@
+import type {
+  AuthorizationDecision,
+  PrincipalRef,
+  SecurityPermission,
+  SecurityResourceRef,
+} from "../server/security/security.ts";
+
+export interface SecurityStoreTextLimit {
+  /** Unicode code points, not UTF-16 code units. */
+  readonly maxCharacters: number;
+  /** Bytes after UTF-8 encoding. */
+  readonly maxBytes: number;
+}
+
+/** Shared storage limits; PostgreSQL schemas and every store adapter must match these boundaries. */
+export const SECURITY_STORE_LIMITS = Object.freeze({
+  identifier: Object.freeze({ maxCharacters: 256, maxBytes: 512 }),
+  namespace: Object.freeze({ maxCharacters: 256, maxBytes: 512 }),
+  issuer: Object.freeze({ maxCharacters: 2_048, maxBytes: 4_096 }),
+  email: Object.freeze({ maxCharacters: 320, maxBytes: 640 }),
+  hash: Object.freeze({ maxCharacters: 512, maxBytes: 1_024 }),
+  reason: Object.freeze({ maxCharacters: 2_048, maxBytes: 4_096 }),
+  event: Object.freeze({ maxCharacters: 256, maxBytes: 512 }),
+  metadataKey: Object.freeze({ maxCharacters: 128, maxBytes: 256 }),
+  metadataString: Object.freeze({ maxCharacters: 4_096, maxBytes: 8_192 }),
+  metadataEntries: 64,
+  initialBindings: 10_000,
+  outboxBatch: 1_000,
+} as const);
+
 export interface SecurityUser {
   readonly id: string;
   /** Canonical lower-case email address. */
@@ -84,13 +114,30 @@ export interface SecuritySession {
   readonly authMethod: "oidc" | "service-account" | "break-glass";
 }
 
-/** Canonical, already-hashed audit-chain row. PostgreSQL will verify/append atomically. */
+export type SecurityAuditScalar = string | number | boolean | null;
+
+export interface SecurityAuditCorrelation {
+  readonly requestId?: string;
+  readonly runId?: string;
+  readonly threadId?: string;
+  readonly toolCallId?: string;
+}
+
+/** Canonical, structured and already-hashed audit-chain row. */
 export interface SecurityAuditRecord {
   readonly id: string;
   readonly namespaceId: string;
   readonly sequence: number;
   readonly occurredAt: number;
-  readonly eventJson: string;
+  readonly recordedAt: number;
+  readonly event: string;
+  readonly actor?: PrincipalRef;
+  readonly effective?: PrincipalRef;
+  readonly permission?: SecurityPermission;
+  readonly resource?: SecurityResourceRef;
+  readonly decision?: AuthorizationDecision;
+  readonly correlation?: SecurityAuditCorrelation;
+  readonly metadata?: Readonly<Record<string, SecurityAuditScalar>>;
   readonly previousHash?: string;
   readonly hash: string;
   readonly keyId: string;
@@ -98,20 +145,27 @@ export interface SecurityAuditRecord {
 
 export interface SecurityAuditOutboxRecord {
   readonly eventId: string;
-  readonly status: "pending" | "delivered";
+  readonly status: "pending" | "leased" | "delivered";
   readonly attempts: number;
   readonly nextAttemptAt: number;
+  readonly leaseToken?: string;
+  readonly leaseOwner?: string;
+  readonly leaseExpiresAt?: number;
+  readonly deliveredAt?: number;
+  readonly lastError?: string;
 }
 
 export interface SecurityDenialBucket {
   readonly key: string;
   readonly windowStartedAt: number;
+  readonly windowEndsAt: number;
   readonly count: number;
   readonly suppressed: number;
 }
 
 export interface BreakGlassGrant {
   readonly id: string;
+  readonly principal: SecurityPrincipalRef;
   readonly tokenHash: string;
   readonly reason: string;
   readonly createdBy: string;
@@ -202,19 +256,66 @@ export interface SecurityStoreV2 extends SecurityStore {
     readonly revokedAt: number;
   }): Promise<void>;
 
+  /** Insert-or-identical for an existing active principal; a token hash is never reassigned. */
   putSession(session: SecuritySession): Promise<void>;
   getSessionRecord(tokenHash: string): Promise<SecuritySession | undefined>;
   revokeSession(params: { readonly tokenHash: string; readonly revokedAt: number }): Promise<void>;
 
-  /** Append the chain row and optional delivery row atomically. */
-  appendAuditRecord(record: SecurityAuditRecord, outbox?: SecurityAuditOutboxRecord): Promise<void>;
+  /**
+   * Atomically verify the chain head and append the row plus optional pending delivery.
+   * An exact retry is idempotent; reuse of the event id with any conflicting field fails.
+   */
+  appendAuditWithOutbox(params: {
+    readonly record: SecurityAuditRecord;
+    readonly outbox?: { readonly nextAttemptAt: number };
+  }): Promise<"appended" | "already-exists">;
   listAuditRecords(namespaceId: string): Promise<SecurityAuditRecord[]>;
-  putAuditOutbox(record: SecurityAuditOutboxRecord): Promise<void>;
   getAuditOutbox(eventId: string): Promise<SecurityAuditOutboxRecord | undefined>;
-  putDenialBucket(bucket: SecurityDenialBucket): Promise<void>;
+  listAuditOutbox(params?: {
+    readonly status?: SecurityAuditOutboxRecord["status"];
+    readonly limit?: number;
+  }): Promise<SecurityAuditOutboxRecord[]>;
+  /** Atomically leases due pending rows and rows whose prior lease expired. */
+  claimAuditOutbox(params: {
+    readonly owner: string;
+    readonly now: number;
+    readonly leaseMs: number;
+    readonly limit: number;
+  }): Promise<ReadonlyArray<SecurityAuditOutboxRecord>>;
+  ackAuditOutbox(params: {
+    readonly eventId: string;
+    readonly leaseToken: string;
+    readonly deliveredAt: number;
+  }): Promise<boolean>;
+  releaseAuditOutbox(params: {
+    readonly eventId: string;
+    readonly leaseToken: string;
+    readonly nextAttemptAt: number;
+    readonly lastError?: string;
+  }): Promise<boolean>;
+
+  /** Atomically reset an elapsed window or increment its monotonic denial/suppression counts. */
+  incrementDenialBucket(params: {
+    readonly key: string;
+    readonly now: number;
+    readonly windowMs: number;
+    readonly emitLimit: number;
+  }): Promise<{ readonly bucket: SecurityDenialBucket; readonly shouldEmit: boolean }>;
   getDenialBucket(key: string): Promise<SecurityDenialBucket | undefined>;
 
-  putBreakGlassGrant(grant: BreakGlassGrant): Promise<void>;
+  /** Atomically creates one grant, its same-token session, audit row and optional outbox row. */
+  createBreakGlassAccess(params: {
+    readonly grant: BreakGlassGrant;
+    readonly session: SecuritySession;
+    readonly audit: SecurityAuditRecord;
+    readonly outbox?: { readonly nextAttemptAt: number };
+  }): Promise<"created" | "already-exists">;
   getBreakGlassGrant(id: string): Promise<BreakGlassGrant | undefined>;
-  revokeBreakGlassGrant(params: { readonly id: string; readonly revokedAt: number }): Promise<void>;
+  /** Atomically revokes the grant/session pair and appends its audit/outbox record. */
+  revokeBreakGlassAccess(params: {
+    readonly grantId: string;
+    readonly revokedAt: number;
+    readonly audit: SecurityAuditRecord;
+    readonly outbox?: { readonly nextAttemptAt: number };
+  }): Promise<"revoked" | "already-revoked">;
 }

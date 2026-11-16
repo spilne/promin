@@ -23,17 +23,21 @@ export type {
   KnowledgeGrant,
   ProviderIdentity,
   SecurityAuditOutboxRecord,
+  SecurityAuditCorrelation,
   SecurityAuditRecord,
+  SecurityAuditScalar,
   SecurityDenialBucket,
   SecurityPrincipalRef,
   SecurityServiceAccount,
   SecuritySession,
   SecurityStore,
+  SecurityStoreTextLimit,
   SecurityStoreV2,
   SecurityUser,
   ServiceAccountCredential,
   SubjectAccessBinding,
 } from "./security-module/security-store.ts";
+export { SECURITY_STORE_LIMITS } from "./security-module/security-store.ts";
 export {
   createZoryaSecurity,
   type ServiceAccountConfig,

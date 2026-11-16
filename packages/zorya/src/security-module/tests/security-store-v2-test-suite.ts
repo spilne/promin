@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import type { SecurityStoreV2 } from "../security-store.ts";
+import {
+  SECURITY_STORE_LIMITS,
+  type BreakGlassGrant,
+  type SecurityAuditRecord,
+  type SecuritySession,
+  type SecurityStoreV2,
+} from "../security-store.ts";
 
 export interface SecurityStoreV2TestFactory {
   readonly create: () => SecurityStoreV2 | Promise<SecurityStoreV2>;
@@ -17,7 +23,6 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       ]);
       expect(first.user.id).toBe(concurrent.user.id);
       expect([first.created, concurrent.created].filter(Boolean)).toHaveLength(1);
-
       const renamed = await store.findOrCreateProviderUser({
         identity,
         email: "renamed@example.com",
@@ -40,36 +45,57 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       expect(await store.getProviderIdentity(rejectedIdentity)).toBeUndefined();
     });
 
-    it("keeps same-id user and service-account bindings collision safe", async () => {
+    it("requires existing collision-safe principals for every privilege-bearing edge", async () => {
       const store = await factory.create();
+      const user = await createUser(store, "same-id-user");
+      await store.putServiceAccount({ id: user.id, status: "active", canActFor: false });
       await store.putSubjectBinding({
-        subject: { kind: "user", id: "same" },
+        subject: { kind: "user", id: user.id },
         namespaceId: "team",
         accessRole: "member",
       });
       await store.putSubjectBinding({
-        subject: { kind: "service-account", id: "same" },
+        subject: { kind: "service-account", id: user.id },
         namespaceId: "team",
         accessRole: "agent-manager",
       });
-
       expect(
-        await store.resolveAccess({ subject: { kind: "user", id: "same" }, namespaceId: "team" }),
-      ).toEqual({
-        accessRoles: ["member"],
-        groups: [],
-      });
+        await store.resolveAccess({ subject: { kind: "user", id: user.id }, namespaceId: "team" }),
+      ).toEqual({ accessRoles: ["member"], groups: [] });
       expect(
         await store.resolveAccess({
-          subject: { kind: "service-account", id: "same" },
+          subject: { kind: "service-account", id: user.id },
           namespaceId: "team",
         }),
       ).toEqual({ accessRoles: ["agent-manager"], groups: [] });
+
+      const orphan = { kind: "service-account", id: "future-admin" } as const;
+      await expect(
+        store.putSubjectBinding({ subject: orphan, namespaceId: "org", accessRole: "admin" }),
+      ).rejects.toThrow("Unknown service-account");
+      await store.putGroup({ id: "admins", status: "active" });
+      await expect(
+        store.putGroupMembership({ groupId: "admins", subject: orphan }),
+      ).rejects.toThrow("Unknown service-account");
+      await expect(
+        store.putSession({
+          tokenHash: "orphan-session",
+          principal: orphan,
+          createdAt: 1,
+          expiresAt: 2,
+          authMethod: "service-account",
+        }),
+      ).rejects.toThrow("Unknown or disabled service-account");
+      expect(await store.resolveAccess({ subject: orphan, namespaceId: "team" })).toEqual({
+        accessRoles: [],
+        groups: [],
+      });
     });
 
     it("unions direct, group and org roles and revokes membership immediately", async () => {
       const store = await factory.create();
-      const subject = { kind: "user", id: "alice" } as const;
+      const user = await createUser(store, "group-user");
+      const subject = { kind: "user", id: user.id } as const;
       await store.putGroup({ id: "finance", status: "active" });
       await store.putGroupMembership({ groupId: "finance", subject });
       await store.putSubjectBinding({ subject, namespaceId: "team", accessRole: "member" });
@@ -83,7 +109,6 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
         namespaceId: "org",
         accessRole: "auditor",
       });
-
       const access = await store.resolveAccess({ subject, namespaceId: "team" });
       expect(new Set(access.accessRoles)).toEqual(new Set(["member", "approver", "auditor"]));
       expect(new Set(access.groups)).toEqual(new Set(["finance"]));
@@ -161,97 +186,327 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       });
     });
 
-    it("preserves session CSRF/auth metadata and enforces revocation and expiry", async () => {
+    it("makes session hashes immutable across reassignment, revoke and expiry", async () => {
       const store = await factory.create();
+      const user = await createUser(store, "session-user");
+      await store.putServiceAccount({ id: user.id, status: "active", canActFor: false });
       const now = Date.now();
-      await store.putSession({
+      const session = {
         tokenHash: "session-hash",
-        principal: { kind: "user", id: "alice" },
+        principal: { kind: "user", id: user.id },
         createdAt: now,
         expiresAt: now + 10_000,
         csrfTokenHash: "csrf-hash",
         authMethod: "oidc",
-      });
-      expect(await store.getSessionRecord("session-hash")).toMatchObject({
-        principal: { kind: "user", id: "alice" },
-        csrfTokenHash: "csrf-hash",
-        authMethod: "oidc",
-      });
-      await store.revokeSession({ tokenHash: "session-hash", revokedAt: now + 1 });
-      expect(await store.getSessionRecord("session-hash")).toBeUndefined();
-      await store.putSession({
+      } as const;
+      await store.putSession(session);
+      await store.putSession(session);
+      await expect(
+        store.putSession({
+          ...session,
+          principal: { kind: "service-account", id: user.id },
+          authMethod: "service-account",
+        }),
+      ).rejects.toThrow("Conflicting session token hash");
+      await store.revokeSession({ tokenHash: session.tokenHash, revokedAt: now + 1 });
+      expect(await store.getSessionRecord(session.tokenHash)).toBeUndefined();
+      await expect(store.putSession(session)).rejects.toThrow("Conflicting session token hash");
+
+      const expired = {
+        ...session,
         tokenHash: "expired-session-hash",
-        principal: { kind: "user", id: "alice" },
         createdAt: now - 2_000,
         expiresAt: now - 1_000,
-        authMethod: "oidc",
-      });
-      expect(await store.getSessionRecord("expired-session-hash")).toBeUndefined();
+      };
+      await store.putSession(expired);
+      expect(await store.getSessionRecord(expired.tokenHash)).toBeUndefined();
+      await expect(store.putSession({ ...expired, expiresAt: now + 1_000 })).rejects.toThrow(
+        "Conflicting session token hash",
+      );
+
+      const disabledSession = { ...session, tokenHash: "disabled-session-hash" };
+      await store.putSession(disabledSession);
+      await store.setUserStatus({ id: user.id, status: "disabled" });
+      await store.setUserStatus({ id: user.id, status: "active" });
+      expect(await store.getSessionRecord(disabledSession.tokenHash)).toBeUndefined();
+      await store.putSession(disabledSession);
+      expect(await store.getSessionRecord(disabledSession.tokenHash)).toBeUndefined();
     });
 
-    it("appends an audit row and outbox atomically and preserves chain order", async () => {
+    it("atomically appends structured audit rows and rejects chain races/conflicts", async () => {
       const store = await factory.create();
-      const first = {
-        id: "event-1",
-        namespaceId: "team",
-        sequence: 1,
-        occurredAt: 1,
-        eventJson: "{}",
-        hash: "hash-1",
-        keyId: "key-1",
-      } as const;
-      await store.appendAuditRecord(first, {
-        eventId: first.id,
-        status: "pending",
-        attempts: 0,
-        nextAttemptAt: 1,
-      });
-      await store.appendAuditRecord({
-        ...first,
-        id: "event-2",
-        sequence: 2,
-        previousHash: "hash-1",
-        hash: "hash-2",
-      });
-      expect(await store.listAuditRecords("team")).toHaveLength(2);
-      expect(await store.getAuditOutbox("event-1")).toMatchObject({
-        eventId: "event-1",
-        status: "pending",
-      });
+      const first = auditRecord({ id: "event-1", sequence: 1, hash: "hash-1" });
+      expect(
+        await store.appendAuditWithOutbox({ record: first, outbox: { nextAttemptAt: 1 } }),
+      ).toBe("appended");
+      expect(
+        await store.appendAuditWithOutbox({ record: first, outbox: { nextAttemptAt: 1 } }),
+      ).toBe("already-exists");
       await expect(
-        store.appendAuditRecord({ ...first, id: "bad", sequence: 4, previousHash: "wrong" }),
-      ).rejects.toThrow("Audit chain boundary mismatch");
-      expect(await store.listAuditRecords("team")).toHaveLength(2);
+        store.appendAuditWithOutbox({ record: first, outbox: { nextAttemptAt: 2 } }),
+      ).rejects.toThrow("Conflicting audit event");
+      await expect(
+        store.appendAuditWithOutbox({
+          record: { ...first, event: "changed" },
+          outbox: { nextAttemptAt: 1 },
+        }),
+      ).rejects.toThrow("Conflicting audit event");
+
+      const contenders = [
+        auditRecord({ id: "event-2a", sequence: 2, previousHash: "hash-1", hash: "hash-2a" }),
+        auditRecord({ id: "event-2b", sequence: 2, previousHash: "hash-1", hash: "hash-2b" }),
+      ];
+      const outcomes = await Promise.allSettled(
+        contenders.map((record) => store.appendAuditWithOutbox({ record })),
+      );
+      expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+      expect(outcomes.filter((outcome) => outcome.status === "rejected")).toHaveLength(1);
+      const records = await store.listAuditRecords("team");
+      expect(records).toHaveLength(2);
+      expect(records[0]).toEqual(first);
+      expect(Object.isFrozen(records[0]?.metadata)).toBe(true);
+      expect(await store.listAuditOutbox()).toHaveLength(1);
     });
 
-    it("round-trips denial and break-glass records with detached immutable reads", async () => {
+    it("leases outbox rows exclusively and rejects stale acknowledgements", async () => {
       const store = await factory.create();
-      const bucket = { key: "actor:action", windowStartedAt: 1, count: 2, suppressed: 1 };
-      await store.putDenialBucket(bucket);
-      bucket.count = 99;
+      await store.appendAuditWithOutbox({
+        record: auditRecord({ id: "event-1", sequence: 1, hash: "hash-1" }),
+        outbox: { nextAttemptAt: 1 },
+      });
+      const [one, two] = await Promise.all([
+        store.claimAuditOutbox({ owner: "worker-1", now: 1, leaseMs: 10, limit: 1 }),
+        store.claimAuditOutbox({ owner: "worker-2", now: 1, leaseMs: 10, limit: 1 }),
+      ]);
+      expect(one.length + two.length).toBe(1);
+      const firstLease = (one[0] ?? two[0])!;
+      expect(Object.isFrozen(one.length > 0 ? one : two)).toBe(true);
+      expect(Object.isFrozen(firstLease)).toBe(true);
+      const reclaimed = await store.claimAuditOutbox({
+        owner: "worker-3",
+        now: 11,
+        leaseMs: 10,
+        limit: 1,
+      });
+      expect(reclaimed).toHaveLength(1);
+      expect(reclaimed[0]?.leaseToken).not.toBe(firstLease.leaseToken);
+      expect(
+        await store.ackAuditOutbox({
+          eventId: firstLease.eventId,
+          leaseToken: firstLease.leaseToken!,
+          deliveredAt: 12,
+        }),
+      ).toBe(false);
+      expect(
+        await store.releaseAuditOutbox({
+          eventId: firstLease.eventId,
+          leaseToken: firstLease.leaseToken!,
+          nextAttemptAt: 20,
+        }),
+      ).toBe(false);
+      const current = reclaimed[0]!;
+      expect(
+        await store.ackAuditOutbox({
+          eventId: current.eventId,
+          leaseToken: current.leaseToken!,
+          deliveredAt: 12,
+        }),
+      ).toBe(true);
+      expect(
+        await store.ackAuditOutbox({
+          eventId: current.eventId,
+          leaseToken: current.leaseToken!,
+          deliveredAt: 12,
+        }),
+      ).toBe(true);
+
+      await store.appendAuditWithOutbox({
+        record: auditRecord({
+          id: "event-2",
+          sequence: 2,
+          previousHash: "hash-1",
+          hash: "hash-2",
+        }),
+        outbox: { nextAttemptAt: 20 },
+      });
+      const releaseLease = (
+        await store.claimAuditOutbox({ owner: "worker-4", now: 20, leaseMs: 10, limit: 1 })
+      )[0]!;
+      expect(
+        await store.releaseAuditOutbox({
+          eventId: releaseLease.eventId,
+          leaseToken: releaseLease.leaseToken!,
+          nextAttemptAt: 50,
+          lastError: "temporary",
+        }),
+      ).toBe(true);
+      expect(
+        await store.claimAuditOutbox({ owner: "early", now: 49, leaseMs: 10, limit: 1 }),
+      ).toEqual([]);
+      expect(
+        await store.claimAuditOutbox({ owner: "due", now: 50, leaseMs: 10, limit: 1 }),
+      ).toHaveLength(1);
+    });
+
+    it("increments and rolls denial windows atomically", async () => {
+      const store = await factory.create();
+      const results = await Promise.all(
+        Array.from({ length: 10 }, () =>
+          store.incrementDenialBucket({ key: "actor:action", now: 1, windowMs: 100, emitLimit: 3 }),
+        ),
+      );
+      expect(new Set(results.map((result) => result.bucket.count))).toEqual(
+        new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
+      );
+      expect(results.filter((result) => result.shouldEmit)).toHaveLength(3);
       expect(await store.getDenialBucket("actor:action")).toEqual({
         key: "actor:action",
         windowStartedAt: 1,
-        count: 2,
-        suppressed: 1,
+        windowEndsAt: 101,
+        count: 10,
+        suppressed: 7,
       });
-      const grant = {
-        id: "grant-1",
-        tokenHash: "hash-only",
-        reason: "incident-42",
-        createdBy: "host:alice",
-        createdAt: 1,
-        expiresAt: 100,
-      };
-      await store.putBreakGlassGrant(grant);
-      await store.revokeBreakGlassGrant({ id: grant.id, revokedAt: 2 });
-      const stored = await store.getBreakGlassGrant(grant.id);
-      expect(stored).toEqual({ ...grant, revokedAt: 2 });
-      expect(Object.isFrozen(stored)).toBe(true);
+      expect(
+        await store.incrementDenialBucket({
+          key: "actor:action",
+          now: 101,
+          windowMs: 100,
+          emitLimit: 3,
+        }),
+      ).toEqual({
+        bucket: {
+          key: "actor:action",
+          windowStartedAt: 101,
+          windowEndsAt: 201,
+          count: 1,
+          suppressed: 0,
+        },
+        shouldEmit: true,
+      });
     });
 
-    it("snapshots hostile fields once and rejects unsafe identifiers", async () => {
+    it("mints and revokes break-glass access as one idempotent transaction", async () => {
       const store = await factory.create();
+      const user = await createUser(store, "break-glass-user");
+      const principal = { kind: "user", id: user.id } as const;
+      const grant: BreakGlassGrant = {
+        id: "grant-1",
+        principal,
+        tokenHash: "break-glass-hash",
+        reason: "r".repeat(SECURITY_STORE_LIMITS.reason.maxCharacters),
+        createdBy: "operator",
+        createdAt: 10,
+        expiresAt: Date.now() + 10_000,
+      };
+      const session: SecuritySession = {
+        tokenHash: grant.tokenHash,
+        principal,
+        createdAt: grant.createdAt,
+        expiresAt: grant.expiresAt,
+        authMethod: "break-glass",
+      };
+      const createdAudit = breakGlassAudit({
+        id: "bg-created",
+        sequence: 1,
+        hash: "bg-hash-1",
+        event: "break-glass.created",
+        grant,
+      });
+      await expect(
+        store.createBreakGlassAccess({
+          grant,
+          session: { ...session, tokenHash: "wrong" },
+          audit: createdAudit,
+          outbox: { nextAttemptAt: 1 },
+        }),
+      ).rejects.toThrow("token must match");
+      expect(await store.getBreakGlassGrant(grant.id)).toBeUndefined();
+      expect(await store.listAuditRecords("org")).toEqual([]);
+
+      const outcomes = await Promise.all([
+        store.createBreakGlassAccess({
+          grant,
+          session,
+          audit: createdAudit,
+          outbox: { nextAttemptAt: 1 },
+        }),
+        store.createBreakGlassAccess({
+          grant,
+          session,
+          audit: createdAudit,
+          outbox: { nextAttemptAt: 1 },
+        }),
+      ]);
+      expect(new Set(outcomes)).toEqual(new Set(["created", "already-exists"]));
+      const storedGrant = await store.getBreakGlassGrant(grant.id);
+      expect(storedGrant).toEqual(grant);
+      expect(Object.isFrozen(storedGrant)).toBe(true);
+      expect(Object.isFrozen(storedGrant?.principal)).toBe(true);
+      const storedSession = await store.getSessionRecord(session.tokenHash);
+      expect(storedSession).toMatchObject({
+        authMethod: "break-glass",
+      });
+      expect(Object.isFrozen(storedSession)).toBe(true);
+      expect(await store.listAuditRecords("org")).toHaveLength(1);
+      expect(await store.listAuditOutbox()).toHaveLength(1);
+      await expect(store.putSession(session)).rejects.toThrow("transactionally");
+
+      const duplicateTokenGrant = { ...grant, id: "grant-2" };
+      await expect(
+        store.createBreakGlassAccess({
+          grant: duplicateTokenGrant,
+          session,
+          audit: breakGlassAudit({
+            id: "bg-duplicate-token",
+            sequence: 2,
+            previousHash: "bg-hash-1",
+            hash: "bg-duplicate-hash",
+            event: "break-glass.created",
+            grant: duplicateTokenGrant,
+          }),
+        }),
+      ).rejects.toThrow("already used");
+
+      const revokedAt = 20;
+      const revokedAudit = breakGlassAudit({
+        id: "bg-revoked",
+        sequence: 2,
+        previousHash: "bg-hash-1",
+        hash: "bg-hash-2",
+        event: "break-glass.revoked",
+        grant,
+      });
+      expect(
+        await store.revokeBreakGlassAccess({
+          grantId: grant.id,
+          revokedAt,
+          audit: revokedAudit,
+          outbox: { nextAttemptAt: 2 },
+        }),
+      ).toBe("revoked");
+      expect(
+        await store.revokeBreakGlassAccess({
+          grantId: grant.id,
+          revokedAt,
+          audit: revokedAudit,
+          outbox: { nextAttemptAt: 2 },
+        }),
+      ).toBe("already-revoked");
+      expect(await store.getBreakGlassGrant(grant.id)).toMatchObject({ revokedAt });
+      expect(await store.getSessionRecord(session.tokenHash)).toBeUndefined();
+      await expect(
+        store.createBreakGlassAccess({
+          grant,
+          session,
+          audit: createdAudit,
+          outbox: { nextAttemptAt: 1 },
+        }),
+      ).rejects.toThrow("Conflicting or incomplete");
+    });
+
+    it("snapshots hostile fields once and returns detached immutable records", async () => {
+      const store = await factory.create();
+      const user = await createUser(store, "hostile-user");
       let reads = 0;
       const subject = {
         get kind() {
@@ -260,7 +515,7 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
         },
         get id() {
           reads += 1;
-          return "alice";
+          return user.id;
         },
       };
       await store.putSubjectBinding({ subject, namespaceId: "team", accessRole: "member" });
@@ -272,6 +527,252 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
           accessRole: "member",
         }),
       ).rejects.toThrow("safe string");
+      const result = await store.incrementDenialBucket({
+        key: "immutable",
+        now: 1,
+        windowMs: 10,
+        emitLimit: 1,
+      });
+      expect(Object.isFrozen(result)).toBe(true);
+      expect(Object.isFrozen(result.bucket)).toBe(true);
+
+      let eventReads = 0;
+      let metadataReads = 0;
+      const baseAudit = auditRecord({ id: "hostile-audit", sequence: 1, hash: "hostile-hash" });
+      const hostileAudit = {
+        ...baseAudit,
+        get event() {
+          eventReads += 1;
+          return baseAudit.event;
+        },
+        metadata: {
+          get method() {
+            metadataReads += 1;
+            return "POST";
+          },
+        },
+      };
+      await store.appendAuditWithOutbox({ record: hostileAudit });
+      expect(eventReads).toBe(1);
+      expect(metadataReads).toBe(1);
+      const storedAudit = (await store.listAuditRecords("team"))[0];
+      expect(Object.isFrozen(storedAudit)).toBe(true);
+      expect(Object.isFrozen(storedAudit?.metadata)).toBe(true);
+    });
+
+    it("enforces shared character, UTF-8 byte and metadata limits atomically", async () => {
+      const store = await factory.create();
+      const idAtLimit = "i".repeat(SECURITY_STORE_LIMITS.identifier.maxCharacters);
+      await store.putGroup({ id: idAtLimit, status: "active" });
+      expect(await store.getGroup(idAtLimit)).toBeDefined();
+      await expect(store.putGroup({ id: `${idAtLimit}i`, status: "active" })).rejects.toThrow(
+        "character limit",
+      );
+      const idAtByteLimit = "😀".repeat(SECURITY_STORE_LIMITS.identifier.maxBytes / 4);
+      await store.putGroup({ id: idAtByteLimit, status: "active" });
+      await expect(store.putGroup({ id: `${idAtByteLimit}😀`, status: "active" })).rejects.toThrow(
+        "byte limit",
+      );
+
+      const user = await createUser(store, "limit-user");
+      const emailAtLimit = `${"e".repeat(SECURITY_STORE_LIMITS.email.maxCharacters - 2)}@x`;
+      await store.findOrCreateProviderUser({
+        identity: { providerId: "test", issuer: "email-limit", subject: "email-limit" },
+        email: emailAtLimit,
+      });
+      const rejectedEmailIdentity = {
+        providerId: "test",
+        issuer: "email-limit",
+        subject: "email-overflow",
+      };
+      await expect(
+        store.findOrCreateProviderUser({
+          identity: rejectedEmailIdentity,
+          email: `e${emailAtLimit}`,
+        }),
+      ).rejects.toThrow("character limit");
+      expect(await store.getProviderIdentity(rejectedEmailIdentity)).toBeUndefined();
+
+      const issuerAtLimit = "u".repeat(SECURITY_STORE_LIMITS.issuer.maxCharacters);
+      await store.findOrCreateProviderUser({
+        identity: { providerId: "test", issuer: issuerAtLimit, subject: "issuer-limit" },
+        email: "issuer-limit@example.com",
+      });
+      await expect(
+        store.findOrCreateProviderUser({
+          identity: { providerId: "test", issuer: `${issuerAtLimit}u`, subject: "issuer-overflow" },
+          email: "issuer-overflow@example.com",
+        }),
+      ).rejects.toThrow("character limit");
+
+      const namespaceAtLimit = "n".repeat(SECURITY_STORE_LIMITS.namespace.maxCharacters);
+      await store.putSubjectBinding({
+        subject: { kind: "user", id: user.id },
+        namespaceId: namespaceAtLimit,
+        accessRole: "member",
+      });
+      await expect(
+        store.putSubjectBinding({
+          subject: { kind: "user", id: user.id },
+          namespaceId: `${namespaceAtLimit}n`,
+          accessRole: "member",
+        }),
+      ).rejects.toThrow("character limit");
+
+      await store.putServiceAccount({ id: "limit-sa", status: "active", canActFor: false });
+      const hashAtLimit = "h".repeat(SECURITY_STORE_LIMITS.hash.maxCharacters);
+      await store.putServiceAccountCredential({
+        id: "limit-credential",
+        serviceAccountId: "limit-sa",
+        secretHash: hashAtLimit,
+        createdAt: 1,
+      });
+      await expect(
+        store.putServiceAccountCredential({
+          id: "too-large-credential",
+          serviceAccountId: "limit-sa",
+          secretHash: `${hashAtLimit}h`,
+          createdAt: 1,
+        }),
+      ).rejects.toThrow("character limit");
+
+      const metadataKeyAtLimit = "k".repeat(SECURITY_STORE_LIMITS.metadataKey.maxCharacters);
+      const metadataStringAtLimit = "m".repeat(SECURITY_STORE_LIMITS.metadataString.maxCharacters);
+      const metadata = Object.fromEntries([
+        [metadataKeyAtLimit, metadataStringAtLimit],
+        ...Array.from({ length: SECURITY_STORE_LIMITS.metadataEntries - 1 }, (_, index) => [
+          `k${index}`,
+          index,
+        ]),
+      ]);
+      const eventAtLimit = "a".repeat(SECURITY_STORE_LIMITS.event.maxCharacters);
+      await store.appendAuditWithOutbox({
+        record: {
+          ...auditRecord({ id: "bounded-audit", sequence: 1, hash: "bounded-hash", metadata }),
+          event: eventAtLimit,
+        },
+        outbox: { nextAttemptAt: 1 },
+      });
+      await expect(
+        store.appendAuditWithOutbox({
+          record: {
+            ...auditRecord({
+              id: "oversized-event",
+              sequence: 2,
+              previousHash: "bounded-hash",
+              hash: "oversized-event-hash",
+            }),
+            event: `${eventAtLimit}a`,
+          },
+        }),
+      ).rejects.toThrow("character limit");
+      await expect(
+        store.appendAuditWithOutbox({
+          record: auditRecord({
+            id: "oversized-audit",
+            sequence: 2,
+            previousHash: "bounded-hash",
+            hash: "oversized-hash",
+            metadata: { ...metadata, overflow: true },
+          }),
+          outbox: { nextAttemptAt: 1 },
+        }),
+      ).rejects.toThrow("too many entries");
+      expect(await store.listAuditRecords("team")).toHaveLength(1);
+      expect(await store.listAuditOutbox()).toHaveLength(1);
+
+      const grant: BreakGlassGrant = {
+        id: "oversized-grant",
+        principal: { kind: "user", id: user.id },
+        tokenHash: "oversized-grant-hash",
+        reason: "r".repeat(SECURITY_STORE_LIMITS.reason.maxCharacters + 1),
+        createdBy: "operator",
+        createdAt: 1,
+        expiresAt: 100,
+      };
+      await expect(
+        store.createBreakGlassAccess({
+          grant,
+          session: {
+            tokenHash: grant.tokenHash,
+            principal: grant.principal,
+            createdAt: 1,
+            expiresAt: 100,
+            authMethod: "break-glass",
+          },
+          audit: breakGlassAudit({
+            id: "oversized-grant-audit",
+            sequence: 1,
+            hash: "oversized-grant-audit-hash",
+            event: "break-glass.created",
+            grant,
+          }),
+        }),
+      ).rejects.toThrow("character limit");
+      expect(await store.getBreakGlassGrant(grant.id)).toBeUndefined();
+      expect(await store.getSessionRecord(grant.tokenHash)).toBeUndefined();
+      expect(await store.listAuditRecords("org")).toEqual([]);
     });
   });
+}
+
+async function createUser(store: SecurityStoreV2, subject: string) {
+  return (
+    await store.findOrCreateProviderUser({
+      identity: { providerId: "test", issuer: "https://id.example", subject },
+      email: `${subject}@example.com`,
+    })
+  ).user;
+}
+
+function auditRecord(params: {
+  readonly id: string;
+  readonly sequence: number;
+  readonly hash: string;
+  readonly previousHash?: string;
+  readonly metadata?: Readonly<Record<string, string | number | boolean | null>>;
+}): SecurityAuditRecord {
+  return {
+    id: params.id,
+    namespaceId: "team",
+    sequence: params.sequence,
+    occurredAt: params.sequence,
+    recordedAt: params.sequence,
+    event: "authorization",
+    actor: { kind: "operator", id: "operator" },
+    effective: { kind: "user", id: "alice" },
+    permission: { resource: "agent", action: "invoke" },
+    resource: { kind: "agent", namespaceId: "team", id: "helper" },
+    decision: { allowed: true, reason: "operator_allow" },
+    correlation: { requestId: `request-${params.id}` },
+    metadata: params.metadata ?? { method: "POST" },
+    ...(params.previousHash !== undefined && { previousHash: params.previousHash }),
+    hash: params.hash,
+    keyId: "audit-key",
+  };
+}
+
+function breakGlassAudit(params: {
+  readonly id: string;
+  readonly sequence: number;
+  readonly hash: string;
+  readonly previousHash?: string;
+  readonly event: "break-glass.created" | "break-glass.revoked";
+  readonly grant: BreakGlassGrant;
+}): SecurityAuditRecord {
+  return {
+    id: params.id,
+    namespaceId: "org",
+    sequence: params.sequence,
+    occurredAt: params.sequence,
+    recordedAt: params.sequence,
+    event: params.event,
+    actor: { kind: "operator", id: params.grant.createdBy },
+    effective: params.grant.principal,
+    decision: { allowed: true, reason: "operator_allow" },
+    metadata: { breakGlassGrantId: params.grant.id },
+    ...(params.previousHash !== undefined && { previousHash: params.previousHash }),
+    hash: params.hash,
+    keyId: "audit-key",
+  };
 }
