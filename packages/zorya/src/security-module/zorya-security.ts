@@ -380,8 +380,11 @@ function mountLoginRoutes(params: {
   readonly secure: boolean;
   readonly sessionTtlMs: number;
 }): void {
-  params.router
-    .get("/auth/login/:provider", async (_req, route) => {
+  params.router.route({
+    method: "GET",
+    path: "/auth/login/:provider",
+    access: { kind: "public", purpose: "login" },
+    handler: async (_req, route) => {
       const providerId = route.provider;
       const provider = providerId ? params.providers.get(providerId) : undefined;
       if (!provider) return notFound("provider_not_found");
@@ -397,8 +400,13 @@ function mountLoginRoutes(params: {
         redirectUri,
       });
       return redirect(location, [login.cookie]);
-    })
-    .get("/auth/callback/:provider", async (req, route) => {
+    },
+  });
+  params.router.route({
+    method: "GET",
+    path: "/auth/callback/:provider",
+    access: { kind: "public", purpose: "login" },
+    handler: async (req, route) => {
       const providerId = route.provider;
       const provider = providerId ? params.providers.get(providerId) : undefined;
       if (!provider) return notFound("provider_not_found");
@@ -448,15 +456,21 @@ function mountLoginRoutes(params: {
         clearLoginStateCookie(params.secure),
         sessionCookie({ token, ttlMs: params.sessionTtlMs, secure: params.secure }),
       ]);
-    })
-    .post("/auth/logout", async (req) => {
+    },
+  });
+  params.router.route({
+    method: "POST",
+    path: "/auth/logout",
+    access: { kind: "public", purpose: "login" },
+    handler: async (req) => {
       const token = sessionToken(req.headers.get("cookie"));
       if (token) await params.config.store.deleteSession(hashSessionToken(token));
       return new Response(null, {
         status: 204,
         headers: { "set-cookie": clearSessionCookie(params.secure) },
       });
-    });
+    },
+  });
 }
 
 function redirect(location: string, cookies: ReadonlyArray<string>): Response {

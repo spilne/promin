@@ -144,6 +144,10 @@ function jwksTrackingFetch(): {
 }
 
 describe("OIDC security module", () => {
+  it("declares every login route as explicitly public", () => {
+    expect(environment().router.uncoveredRoutes()).toEqual([]);
+  });
+
   it("first login creates the user with the default access role and a session", async () => {
     const env = environment();
     const result = await login({ env, email: "user@example.com" });

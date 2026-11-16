@@ -21,6 +21,7 @@ import { Auth, bearerToken } from "../auth.ts";
 import { jsonError } from "../router.ts";
 import type { PrincipalKind } from "../security/index.ts";
 import { ZoryaInsecureConfigError, type Logger } from "../server-config.ts";
+import { isWorkerWebSocketPath } from "../worker-plane.ts";
 
 /** Who may call `/rpc/storage`: the full contract or the runner's methods only. */
 export type StorageCaller = Extract<PrincipalKind, "operator" | "worker">;
@@ -125,6 +126,7 @@ function isPublicRoute(params: { method: string; path: string }): boolean {
 /** Paths on the worker plane, gated by worker keys (`/rpc/storage` is handled separately). */
 function isWorkerPath(path: string): boolean {
   return (
+    isWorkerWebSocketPath(path) ||
     path.startsWith("/rpc/") ||
     path === "/api/advertisements" ||
     path.startsWith("/api/advertisements/") ||

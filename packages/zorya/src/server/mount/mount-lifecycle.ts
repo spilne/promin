@@ -25,9 +25,17 @@ export function mountProbes(params: {
   readonly isStopping: () => boolean;
 }): void {
   const { router, lifecycle } = params;
-  router
-    .get("/api/health", () => Response.json({ ok: true }))
-    .get("/api/ready", async () => {
+  router.route({
+    method: "GET",
+    path: "/api/health",
+    access: { kind: "public", purpose: "lifecycle" },
+    handler: () => Response.json({ ok: true }),
+  });
+  router.route({
+    method: "GET",
+    path: "/api/ready",
+    access: { kind: "public", purpose: "lifecycle" },
+    handler: async () => {
       const services = lifecycle.statuses();
       if (params.isStopping()) {
         return Response.json({ ready: false, reason: "stopping", services }, { status: 503 });
@@ -35,7 +43,8 @@ export function mountProbes(params: {
       const storage = await probeStorage(params);
       const ready = storage.ok && lifecycle.isReady;
       return Response.json({ ready, storage, services }, { status: ready ? 200 : 503 });
-    });
+    },
+  });
 }
 
 /** One cheap storage read, bounded by `readinessTimeoutMs`. */

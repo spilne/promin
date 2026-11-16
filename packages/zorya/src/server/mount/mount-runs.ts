@@ -557,6 +557,24 @@ export function mountRuns(params: MountRunsParams): void {
     }),
     handler: queryRun({ workerWs: params.workerWs, clock }),
   });
-  router.get("/api/workers", listWorkers(params.workers));
-  router.get("/api/metrics", getMetrics(params.metrics));
+  declared({
+    method: "GET",
+    path: "/api/workers",
+    access: protectedAccess({
+      resource: "worker",
+      action: "read",
+      target: orgTarget({ kind: "worker" }),
+    }),
+    handler: listWorkers(params.workers),
+  });
+  declared({
+    method: "GET",
+    path: "/api/metrics",
+    access: protectedAccess({
+      resource: "usage",
+      action: "read",
+      target: orgTarget({ kind: "usage" }),
+    }),
+    handler: getMetrics(params.metrics),
+  });
 }

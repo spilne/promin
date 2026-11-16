@@ -175,6 +175,10 @@ describe("every plane is authenticated", () => {
       req: (key) =>
         rpc({ path: "/rpc/storage", method: "loadWorkflow", body: { workflowId: "x" }, key }),
     },
+    {
+      name: "/ws/worker listener classification",
+      req: (key) => new Request("http://zorya/ws/worker", { headers: key ? bearer(key) : {} }),
+    },
   ];
 
   for (const c of cases) {

@@ -115,7 +115,18 @@ describe("ZoryaServer security", () => {
     const security = fakeSecurity({
       authenticate: async () => principal,
       mount: (router) => {
-        router.get("/api/whoami", (req) => json(200, requestPrincipal(req)));
+        router.route({
+          method: "GET",
+          path: "/api/whoami",
+          access: {
+            kind: "protected",
+            permission: { resource: "user", action: "read" },
+            resolveTarget: () => ({
+              resource: { kind: "user", namespaceId: "org", id: "self" },
+            }),
+          },
+          handler: (req) => json(200, requestPrincipal(req)),
+        });
       },
     });
     const server = new ZoryaServer({ workflows: workflows(), security, logger: quietLogger });
@@ -158,11 +169,17 @@ describe("ZoryaServer security", () => {
     ).toThrow(ZoryaInsecureConfigError);
   });
 
-  it("module: mount adds routes", async () => {
+  it("module: mount adds declared routes", async () => {
     const server = new ZoryaServer({
       workflows: workflows(),
       security: fakeSecurity({
-        mount: (router) => router.get("/auth/ping", () => json(200, "pong")),
+        mount: (router) =>
+          router.route({
+            method: "GET",
+            path: "/auth/ping",
+            access: { kind: "public", purpose: "login" },
+            handler: () => json(200, "pong"),
+          }),
       }),
       logger: quietLogger,
     });
@@ -170,6 +187,40 @@ describe("ZoryaServer security", () => {
     const response = await server.handle(new Request("http://zorya/auth/ping"));
     expect(response.status).toBe(200);
     expect(await response.json()).toBe("pong");
+  });
+
+  it("module: legacy route registration refuses server construction", () => {
+    expect(
+      () =>
+        new ZoryaServer({
+          workflows: workflows(),
+          security: fakeSecurity({
+            mount: (router) => router.get("/auth/legacy", () => json(200, "unsafe")),
+          }),
+          logger: quietLogger,
+        }),
+    ).toThrow("Routes missing access declarations:\nGET /auth/legacy");
+  });
+
+  it("strict coverage accepts worker, module and static mounts when every route is declared", () => {
+    expect(
+      () =>
+        new ZoryaServer({
+          workflows: workflows(),
+          security: fakeSecurity({
+            mount: (router) =>
+              router.route({
+                method: "GET",
+                path: "/auth/declared",
+                access: { kind: "public", purpose: "login" },
+                handler: () => new Response(null, { status: 204 }),
+              }),
+          }),
+          remoteWorkers: { apiKeys: [WORKER_KEY] },
+          uiDir: "/unused",
+          logger: quietLogger,
+        }),
+    ).not.toThrow();
   });
 
   it("module: declared protected routes use central authorization and audit", async () => {

@@ -44,6 +44,7 @@
 import type { ServerWebSocket, WebSocketHandler } from "bun";
 import { z } from "zod";
 import { SystemWallClock, type TimerHandle, type WallClock } from "@promin/workflow";
+import { isWorkerWebSocketPath } from "../worker-plane.ts";
 
 /** Default cap on one inbound frame (bytes). */
 export const DEFAULT_MAX_WORKER_FRAME_BYTES = 1_048_576;
@@ -216,7 +217,7 @@ export class WorkerWebSocketServer {
   upgradeIfWorkerWs(params: { req: Request; server: any }): Response | undefined {
     const { req, server } = params;
     const url = new URL(req.url);
-    if (url.pathname !== "/ws/worker") return undefined;
+    if (!isWorkerWebSocketPath(url.pathname)) return undefined;
     if (this.stopped) return Response.json({ error: "shutting_down" }, { status: 503 });
     if (this.authorize && !this.authorize(req)) {
       return Response.json({ error: "unauthorized_worker" }, { status: 401 });

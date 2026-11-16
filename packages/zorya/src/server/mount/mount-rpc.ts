@@ -92,35 +92,80 @@ export function mountRpc(params: {
       return true;
     },
   });
-  router.post("/rpc/storage", (req) => storageHandler(req));
+  router.route({
+    method: "POST",
+    path: "/rpc/storage",
+    access: { kind: "worker" },
+    handler: (req) => storageHandler(req),
+  });
 
   // Every worker registers and heartbeats here, whatever it runs; the
   // Workers page reads the same registry.
   const workerHandler = createWorkerApiHandler({ workerRegistry: params.workerRegistry });
-  router.post("/rpc/worker", (req) => workerHandler(req));
+  router.route({
+    method: "POST",
+    path: "/rpc/worker",
+    access: { kind: "worker" },
+    handler: (req) => workerHandler(req),
+  });
 
   if (advertisements) {
-    router
-      .post("/api/advertisements", upsertAdvertisements(advertisements))
-      .delete("/api/advertisements/:workerId", removeAdvertisements(advertisements))
-      .get("/api/advertisements", listAdvertisements(advertisements));
+    router.route({
+      method: "POST",
+      path: "/api/advertisements",
+      access: { kind: "worker" },
+      handler: upsertAdvertisements(advertisements),
+    });
+    router.route({
+      method: "DELETE",
+      path: "/api/advertisements/:workerId",
+      access: { kind: "worker" },
+      handler: removeAdvertisements(advertisements),
+    });
+    router.route({
+      method: "GET",
+      path: "/api/advertisements",
+      access: { kind: "worker" },
+      handler: listAdvertisements(advertisements),
+    });
   }
 
   if (workflowStarts) {
-    router
-      .post(
-        "/api/worker-protocol/claim-starts",
-        claimWorkflowStarts(
-          workflowStarts,
-          params.onStartsClaimed,
-          params.authorizeWorkerStart
-            ? (start) => params.authorizeWorkerStart!(start.workflowId)
-            : undefined,
-        ),
-      )
-      .post("/api/worker-protocol/heartbeat-start/:id", heartbeatWorkflowStart(workflowStarts))
-      .post("/api/worker-protocol/complete-start/:id", completeWorkflowStart(workflowStarts))
-      .post("/api/worker-protocol/release-start/:id", releaseWorkflowStart(workflowStarts))
-      .get("/api/worker-protocol/starts", listWorkflowStarts(workflowStarts));
+    router.route({
+      method: "POST",
+      path: "/api/worker-protocol/claim-starts",
+      access: { kind: "worker" },
+      handler: claimWorkflowStarts(
+        workflowStarts,
+        params.onStartsClaimed,
+        params.authorizeWorkerStart
+          ? (start) => params.authorizeWorkerStart!(start.workflowId)
+          : undefined,
+      ),
+    });
+    router.route({
+      method: "POST",
+      path: "/api/worker-protocol/heartbeat-start/:id",
+      access: { kind: "worker" },
+      handler: heartbeatWorkflowStart(workflowStarts),
+    });
+    router.route({
+      method: "POST",
+      path: "/api/worker-protocol/complete-start/:id",
+      access: { kind: "worker" },
+      handler: completeWorkflowStart(workflowStarts),
+    });
+    router.route({
+      method: "POST",
+      path: "/api/worker-protocol/release-start/:id",
+      access: { kind: "worker" },
+      handler: releaseWorkflowStart(workflowStarts),
+    });
+    router.route({
+      method: "GET",
+      path: "/api/worker-protocol/starts",
+      access: { kind: "worker" },
+      handler: listWorkflowStarts(workflowStarts),
+    });
   }
 }

@@ -46,11 +46,11 @@ function mounted(
 }
 
 describe("run route security declarations", () => {
-  it("declares every run/workflow/signal route and leaves only workers and metrics legacy", () => {
-    expect(mounted().uncoveredRoutes()).toEqual(["GET /api/metrics", "GET /api/workers"]);
+  it("declares every run/workflow/signal/worker/metrics route", () => {
+    expect(mounted().uncoveredRoutes()).toEqual([]);
   });
 
-  it("uses the approved permission and capability mapping for all 37 routes", async () => {
+  it("uses the approved permission and capability mapping for all 39 routes", async () => {
     const protectedRoutes = [
       ["GET", "/api/runs", "run", "read"],
       ["GET", "/api/workflows", "workflow", "read"],
@@ -87,6 +87,8 @@ describe("run route security declarations", () => {
       ["GET", "/api/runs/run-1/events", "run", "read"],
       ["GET", "/api/runs/run-1/agent-stream", "run", "read"],
       ["POST", "/api/runs/run-1/query", "run", "signal"],
+      ["GET", "/api/workers", "worker", "read"],
+      ["GET", "/api/metrics", "usage", "read"],
     ] as const;
     const signalTokenRoutes = [
       ["GET", "/api/signal-tokens/token/describe"],
