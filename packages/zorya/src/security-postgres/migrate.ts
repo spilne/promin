@@ -1,5 +1,6 @@
 import type { DrizzleDb } from "@spilne/perfect-postgres";
 import { migrate as drizzleMigrate } from "drizzle-orm/postgres-js/migrator";
+import { fileURLToPath } from "node:url";
 
 export interface SecurityMigrateOptions {
   /** Override the packaged `security-drizzle/` migration directory. */
@@ -27,7 +28,7 @@ export async function migrateSecurityStore(
 ): Promise<void> {
   const logger = options?.logger ?? { info: () => {}, error: () => {} };
   const migrationsFolder =
-    options?.migrationsFolder ?? new URL("../../security-drizzle", import.meta.url).pathname;
+    options?.migrationsFolder ?? fileURLToPath(new URL("../../security-drizzle", import.meta.url));
 
   try {
     logger.info("Starting security store migrations...");
