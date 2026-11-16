@@ -59,23 +59,23 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       await lock(tx, `legacy-user:${email}`);
       const [existing] = await execRaw(
         tx,
-        sql`SELECT u.id, u.email, s.status FROM zsec_user u JOIN zsec_subject s ON s.kind = 'user' AND s.id = u.id WHERE u.email = ${email} ORDER BY u.id LIMIT 1`,
+        sql`SELECT u.id, u.email, s.status FROM zorya_security_data.zsec_user u JOIN zorya_security_data.zsec_subject s ON s.kind = 'user' AND s.id = u.id WHERE u.email = ${email} ORDER BY u.id LIMIT 1`,
       );
       if (existing) return { user: userFromRow(existing), created: false };
       const id = crypto.randomUUID();
       const now = await this.now(tx);
       await execRaw(
         tx,
-        sql`INSERT INTO zsec_subject(kind,id,status,created_at,updated_at) VALUES ('user',${id},'active',${now},${now})`,
+        sql`INSERT INTO zorya_security_data.zsec_subject(kind,id,status,created_at,updated_at) VALUES ('user',${id},'active',${now},${now})`,
       );
       await execRaw(
         tx,
-        sql`INSERT INTO zsec_user(subject_kind,id,email) VALUES ('user',${id},${email})`,
+        sql`INSERT INTO zorya_security_data.zsec_user(subject_kind,id,email) VALUES ('user',${id},${email})`,
       );
       for (const binding of bindings) {
         await execRaw(
           tx,
-          sql`INSERT INTO zsec_access_binding(subject_kind,subject_id,namespace_id,access_role) VALUES ('user',${id},${binding.namespaceId},${binding.accessRole}) ON CONFLICT DO NOTHING`,
+          sql`INSERT INTO zorya_security_data.zsec_access_binding(subject_kind,subject_id,namespace_id,access_role) VALUES ('user',${id},${binding.namespaceId},${binding.accessRole}) ON CONFLICT DO NOTHING`,
         );
       }
       return { user: freeze({ id, email, status: "active" }), created: true };
@@ -86,7 +86,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     const value = requiredString(id, "user id");
     const [row] = await execRaw(
       this.db,
-      sql`SELECT u.id,u.email,s.status FROM zsec_user u JOIN zsec_subject s ON s.kind='user' AND s.id=u.id WHERE u.id=${value}`,
+      sql`SELECT u.id,u.email,s.status FROM zorya_security_data.zsec_user u JOIN zorya_security_data.zsec_subject s ON s.kind='user' AND s.id=u.id WHERE u.id=${value}`,
     );
     return row && userFromRow(row);
   }
@@ -94,7 +94,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
   async listUsers(): Promise<SecurityUser[]> {
     const rows = await execRaw(
       this.db,
-      sql`SELECT u.id,u.email,s.status FROM zsec_user u JOIN zsec_subject s ON s.kind='user' AND s.id=u.id ORDER BY u.id`,
+      sql`SELECT u.id,u.email,s.status FROM zorya_security_data.zsec_user u JOIN zorya_security_data.zsec_subject s ON s.kind='user' AND s.id=u.id ORDER BY u.id`,
     );
     return rows.map(userFromRow);
   }
@@ -107,12 +107,12 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       const now = await this.now(tx);
       await execRaw(
         tx,
-        sql`UPDATE zsec_subject SET status=${status},updated_at=${now} WHERE kind='user' AND id=${id}`,
+        sql`UPDATE zorya_security_data.zsec_subject SET status=${status},updated_at=${now} WHERE kind='user' AND id=${id}`,
       );
       if (status === "disabled") {
         await execRaw(
           tx,
-          sql`UPDATE zsec_session SET invalidated_at=COALESCE(invalidated_at,${now}) WHERE principal_kind='user' AND principal_id=${id}`,
+          sql`UPDATE zorya_security_data.zsec_session SET invalidated_at=COALESCE(invalidated_at,${now}) WHERE principal_kind='user' AND principal_id=${id}`,
         );
       }
     });
@@ -175,7 +175,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       SECURITY_STORE_LIMITS.hash,
     );
     const userId = requiredString(params.userId, "user id");
-    const ttl = positiveNumber(params.ttlMs, "session ttl");
+    const ttl = positiveIntegerMs(params.ttlMs, "session ttl");
     const now = await this.now(this.db);
     await this.putSession({
       tokenHash,
@@ -192,7 +192,24 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
   }
 
   async deleteSession(tokenHash: string): Promise<void> {
-    await this.revokeSession({ tokenHash, revokedAt: await this.now(this.db) });
+    const hash = requiredString(tokenHash, "session token hash", SECURITY_STORE_LIMITS.hash);
+    await this.db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as DrizzleDb;
+      await lock(tx, `session:${hash}`);
+      const [row] = await execRaw(
+        tx,
+        sql`SELECT auth_method FROM zorya_security_data.zsec_session WHERE token_hash=${hash}`,
+      );
+      if (!row) return;
+      if (row.auth_method === "break-glass") {
+        throw new Error("Break-glass sessions must be revoked transactionally");
+      }
+      const now = await this.now(tx);
+      await execRaw(
+        tx,
+        sql`UPDATE zorya_security_data.zsec_session SET revoked_at=COALESCE(revoked_at,${now}) WHERE token_hash=${hash}`,
+      );
+    });
   }
 
   async findOrCreateProviderUser(params: {
@@ -212,12 +229,12 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       await lock(tx, `provider:${identity.providerId}:${identity.issuer}:${identity.subject}`);
       const [existing] = await execRaw(
         tx,
-        sql`SELECT p.provider_id,p.issuer,p.subject,p.user_id,u.email,s.status FROM zsec_provider_identity p JOIN zsec_user u ON u.id=p.user_id JOIN zsec_subject s ON s.kind='user' AND s.id=u.id WHERE p.provider_id=${identity.providerId} AND p.issuer=${identity.issuer} AND p.subject=${identity.subject}`,
+        sql`SELECT p.provider_id,p.issuer,p.subject,p.user_id,u.email,s.status FROM zorya_security_data.zsec_provider_identity p JOIN zorya_security_data.zsec_user u ON u.id=p.user_id JOIN zorya_security_data.zsec_subject s ON s.kind='user' AND s.id=u.id WHERE p.provider_id=${identity.providerId} AND p.issuer=${identity.issuer} AND p.subject=${identity.subject}`,
       );
       if (existing) {
         await execRaw(
           tx,
-          sql`UPDATE zsec_user SET email=${email} WHERE id=${existing.user_id as string}`,
+          sql`UPDATE zorya_security_data.zsec_user SET email=${email} WHERE id=${existing.user_id as string}`,
         );
         const provider = freeze({ ...identity, userId: existing.user_id as string });
         return {
@@ -234,20 +251,20 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       const now = await this.now(tx);
       await execRaw(
         tx,
-        sql`INSERT INTO zsec_subject(kind,id,status,created_at,updated_at) VALUES ('user',${userId},'active',${now},${now})`,
+        sql`INSERT INTO zorya_security_data.zsec_subject(kind,id,status,created_at,updated_at) VALUES ('user',${userId},'active',${now},${now})`,
       );
       await execRaw(
         tx,
-        sql`INSERT INTO zsec_user(subject_kind,id,email) VALUES ('user',${userId},${email})`,
+        sql`INSERT INTO zorya_security_data.zsec_user(subject_kind,id,email) VALUES ('user',${userId},${email})`,
       );
       await execRaw(
         tx,
-        sql`INSERT INTO zsec_provider_identity(provider_id,issuer,subject,user_id) VALUES (${identity.providerId},${identity.issuer},${identity.subject},${userId})`,
+        sql`INSERT INTO zorya_security_data.zsec_provider_identity(provider_id,issuer,subject,user_id) VALUES (${identity.providerId},${identity.issuer},${identity.subject},${userId})`,
       );
       for (const binding of bindings) {
         await execRaw(
           tx,
-          sql`INSERT INTO zsec_access_binding(subject_kind,subject_id,namespace_id,access_role) VALUES ('user',${userId},${binding.namespaceId},${binding.accessRole}) ON CONFLICT DO NOTHING`,
+          sql`INSERT INTO zorya_security_data.zsec_access_binding(subject_kind,subject_id,namespace_id,access_role) VALUES ('user',${userId},${binding.namespaceId},${binding.accessRole}) ON CONFLICT DO NOTHING`,
         );
       }
       return {
@@ -266,7 +283,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     const identity = normalizeProviderIdentity(params);
     const [row] = await execRaw(
       this.db,
-      sql`SELECT provider_id,issuer,subject,user_id FROM zsec_provider_identity WHERE provider_id=${identity.providerId} AND issuer=${identity.issuer} AND subject=${identity.subject}`,
+      sql`SELECT provider_id,issuer,subject,user_id FROM zorya_security_data.zsec_provider_identity WHERE provider_id=${identity.providerId} AND issuer=${identity.issuer} AND subject=${identity.subject}`,
     );
     return (
       row &&
@@ -286,11 +303,11 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       const now = await this.now(tx);
       await execRaw(
         tx,
-        sql`INSERT INTO zsec_subject(kind,id,status,created_at,updated_at) VALUES ('group',${group.id},${group.status},${now},${now}) ON CONFLICT (kind,id) DO UPDATE SET status=EXCLUDED.status,updated_at=EXCLUDED.updated_at`,
+        sql`INSERT INTO zorya_security_data.zsec_subject(kind,id,status,created_at,updated_at) VALUES ('group',${group.id},${group.status},${now},${now}) ON CONFLICT (kind,id) DO UPDATE SET status=EXCLUDED.status,updated_at=EXCLUDED.updated_at`,
       );
       await execRaw(
         tx,
-        sql`INSERT INTO zsec_access_group(subject_kind,id) VALUES ('group',${group.id}) ON CONFLICT DO NOTHING`,
+        sql`INSERT INTO zorya_security_data.zsec_access_group(subject_kind,id) VALUES ('group',${group.id}) ON CONFLICT DO NOTHING`,
       );
     });
   }
@@ -299,7 +316,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     const value = requiredString(id, "group id");
     const [row] = await execRaw(
       this.db,
-      sql`SELECT g.id,s.status FROM zsec_access_group g JOIN zsec_subject s ON s.kind='group' AND s.id=g.id WHERE g.id=${value}`,
+      sql`SELECT g.id,s.status FROM zorya_security_data.zsec_access_group g JOIN zorya_security_data.zsec_subject s ON s.kind='group' AND s.id=g.id WHERE g.id=${value}`,
     );
     return row && freeze({ id: row.id as string, status: row.status as AccessGroup["status"] });
   }
@@ -310,7 +327,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     await this.assertSubjectExists(this.db, row.subject, `Unknown ${row.subject.kind}`);
     await execRaw(
       this.db,
-      sql`INSERT INTO zsec_group_membership(group_id,subject_kind,subject_id) VALUES (${row.groupId},${row.subject.kind},${row.subject.id}) ON CONFLICT DO NOTHING`,
+      sql`INSERT INTO zorya_security_data.zsec_group_membership(group_id,subject_kind,subject_id) VALUES (${row.groupId},${row.subject.kind},${row.subject.id}) ON CONFLICT DO NOTHING`,
     );
   }
 
@@ -318,7 +335,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     const row = normalizeMembership(value);
     await execRaw(
       this.db,
-      sql`DELETE FROM zsec_group_membership WHERE group_id=${row.groupId} AND subject_kind=${row.subject.kind} AND subject_id=${row.subject.id}`,
+      sql`DELETE FROM zorya_security_data.zsec_group_membership WHERE group_id=${row.groupId} AND subject_kind=${row.subject.kind} AND subject_id=${row.subject.id}`,
     );
   }
 
@@ -326,7 +343,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     const subject = normalizePrincipalRef(value);
     const rows = await execRaw(
       this.db,
-      sql`SELECT g.id,s.status FROM zsec_group_membership m JOIN zsec_access_group g ON g.id=m.group_id JOIN zsec_subject s ON s.kind='group' AND s.id=g.id WHERE m.subject_kind=${subject.kind} AND m.subject_id=${subject.id} ORDER BY g.id`,
+      sql`SELECT g.id,s.status FROM zorya_security_data.zsec_group_membership m JOIN zorya_security_data.zsec_access_group g ON g.id=m.group_id JOIN zorya_security_data.zsec_subject s ON s.kind='group' AND s.id=g.id WHERE m.subject_kind=${subject.kind} AND m.subject_id=${subject.id} ORDER BY g.id`,
     );
     return rows.map((row) =>
       freeze({ id: row.id as string, status: row.status as AccessGroup["status"] }),
@@ -338,7 +355,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     await this.assertSubjectExists(this.db, row.subject, `Unknown ${row.subject.kind}`);
     await execRaw(
       this.db,
-      sql`INSERT INTO zsec_access_binding(subject_kind,subject_id,namespace_id,access_role) VALUES (${row.subject.kind},${row.subject.id},${row.namespaceId},${row.accessRole}) ON CONFLICT DO NOTHING`,
+      sql`INSERT INTO zorya_security_data.zsec_access_binding(subject_kind,subject_id,namespace_id,access_role) VALUES (${row.subject.kind},${row.subject.id},${row.namespaceId},${row.accessRole}) ON CONFLICT DO NOTHING`,
     );
   }
 
@@ -346,7 +363,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     const row = normalizeSubjectBinding(value);
     await execRaw(
       this.db,
-      sql`DELETE FROM zsec_access_binding WHERE subject_kind=${row.subject.kind} AND subject_id=${row.subject.id} AND namespace_id=${row.namespaceId} AND access_role=${row.accessRole}`,
+      sql`DELETE FROM zorya_security_data.zsec_access_binding WHERE subject_kind=${row.subject.kind} AND subject_id=${row.subject.id} AND namespace_id=${row.namespaceId} AND access_role=${row.accessRole}`,
     );
   }
 
@@ -354,7 +371,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     const subject = normalizeAccessSubject(value);
     const rows = await execRaw(
       this.db,
-      sql`SELECT namespace_id,access_role FROM zsec_access_binding WHERE subject_kind=${subject.kind} AND subject_id=${subject.id} ORDER BY namespace_id,access_role`,
+      sql`SELECT namespace_id,access_role FROM zorya_security_data.zsec_access_binding WHERE subject_kind=${subject.kind} AND subject_id=${subject.id} ORDER BY namespace_id,access_role`,
     );
     return rows.map((row) =>
       freeze({
@@ -378,23 +395,44 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       "namespace id",
       SECURITY_STORE_LIMITS.namespace,
     );
-    const [active] = await execRaw(
+    const [row] = await execRaw(
       this.db,
-      sql`SELECT 1 FROM zsec_subject WHERE kind=${subject.kind} AND id=${subject.id} AND status='active'`,
-    );
-    if (!active) return freeze({ accessRoles: freeze([]), groups: freeze([]) });
-    const groupRows = await execRaw(
-      this.db,
-      sql`SELECT m.group_id FROM zsec_group_membership m JOIN zsec_subject s ON s.kind='group' AND s.id=m.group_id AND s.status='active' WHERE m.subject_kind=${subject.kind} AND m.subject_id=${subject.id} ORDER BY m.group_id`,
-    );
-    const groups = groupRows.map((row) => row.group_id as string);
-    const roleRows = await execRaw(
-      this.db,
-      sql`SELECT DISTINCT b.access_role FROM zsec_access_binding b WHERE b.namespace_id IN (${namespaceId},${ORG_WIDE_NAMESPACE}) AND ((b.subject_kind=${subject.kind} AND b.subject_id=${subject.id}) OR (b.subject_kind='group' AND b.subject_id IN (SELECT m.group_id FROM zsec_group_membership m JOIN zsec_subject s ON s.kind='group' AND s.id=m.group_id AND s.status='active' WHERE m.subject_kind=${subject.kind} AND m.subject_id=${subject.id}))) ORDER BY b.access_role`,
+      sql`
+        WITH active_subject AS (
+          SELECT id
+          FROM zorya_security_data.zsec_subject
+          WHERE kind=${subject.kind} AND id=${subject.id} AND status='active'
+        ), active_groups AS (
+          SELECT m.group_id
+          FROM active_subject
+          JOIN zorya_security_data.zsec_group_membership m
+            ON m.subject_kind=${subject.kind} AND m.subject_id=active_subject.id
+          JOIN zorya_security_data.zsec_subject g
+            ON g.kind='group' AND g.id=m.group_id AND g.status='active'
+        )
+        SELECT
+          COALESCE(
+            (SELECT array_agg(group_id ORDER BY group_id) FROM active_groups),
+            ARRAY[]::text[]
+          ) AS groups,
+          COALESCE(
+            (
+              SELECT array_agg(DISTINCT b.access_role ORDER BY b.access_role)
+              FROM zorya_security_data.zsec_access_binding b
+              WHERE EXISTS (SELECT 1 FROM active_subject)
+                AND b.namespace_id IN (${namespaceId},${ORG_WIDE_NAMESPACE})
+                AND (
+                  (b.subject_kind=${subject.kind} AND b.subject_id=${subject.id})
+                  OR (b.subject_kind='group' AND b.subject_id IN (SELECT group_id FROM active_groups))
+                )
+            ),
+            ARRAY[]::text[]
+          ) AS access_roles
+      `,
     );
     return freeze({
-      accessRoles: freeze(roleRows.map((row) => row.access_role as string)),
-      groups: freeze(groups),
+      accessRoles: freeze((row?.access_roles as string[] | undefined) ?? []),
+      groups: freeze((row?.groups as string[] | undefined) ?? []),
     });
   }
 
@@ -405,7 +443,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     }
     await execRaw(
       this.db,
-      sql`INSERT INTO zsec_knowledge_audience_grant(namespace_id,base_id,audience_kind,audience_id) VALUES (${row.namespaceId},${row.baseId},${row.audience.kind},${row.audience.id}) ON CONFLICT DO NOTHING`,
+      sql`INSERT INTO zorya_security_data.zsec_knowledge_audience_grant(namespace_id,base_id,audience_kind,audience_id) VALUES (${row.namespaceId},${row.baseId},${row.audience.kind},${row.audience.id}) ON CONFLICT DO NOTHING`,
     );
   }
 
@@ -413,7 +451,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     const row = normalizeKnowledgeAudienceGrant(value);
     await execRaw(
       this.db,
-      sql`DELETE FROM zsec_knowledge_audience_grant WHERE namespace_id=${row.namespaceId} AND base_id=${row.baseId} AND audience_kind=${row.audience.kind} AND audience_id=${row.audience.id}`,
+      sql`DELETE FROM zorya_security_data.zsec_knowledge_audience_grant WHERE namespace_id=${row.namespaceId} AND base_id=${row.baseId} AND audience_kind=${row.audience.kind} AND audience_id=${row.audience.id}`,
     );
   }
 
@@ -429,7 +467,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     const baseId = requiredString(params.baseId, "knowledge base id");
     const rows = await execRaw(
       this.db,
-      sql`SELECT namespace_id,base_id,audience_kind,audience_id FROM zsec_knowledge_audience_grant WHERE namespace_id IN (${namespaceId},${ORG_WIDE_NAMESPACE}) AND base_id=${baseId} ORDER BY namespace_id,audience_kind,audience_id`,
+      sql`SELECT namespace_id,base_id,audience_kind,audience_id FROM zorya_security_data.zsec_knowledge_audience_grant WHERE namespace_id IN (${namespaceId},${ORG_WIDE_NAMESPACE}) AND base_id=${baseId} ORDER BY namespace_id,audience_kind,audience_id`,
     );
     return rows.map((row) =>
       freeze({
@@ -450,16 +488,16 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       const now = await this.now(tx);
       await execRaw(
         tx,
-        sql`INSERT INTO zsec_subject(kind,id,status,created_at,updated_at) VALUES ('service-account',${account.id},${account.status},${now},${now}) ON CONFLICT (kind,id) DO UPDATE SET status=EXCLUDED.status,updated_at=EXCLUDED.updated_at`,
+        sql`INSERT INTO zorya_security_data.zsec_subject(kind,id,status,created_at,updated_at) VALUES ('service-account',${account.id},${account.status},${now},${now}) ON CONFLICT (kind,id) DO UPDATE SET status=EXCLUDED.status,updated_at=EXCLUDED.updated_at`,
       );
       await execRaw(
         tx,
-        sql`INSERT INTO zsec_service_account(subject_kind,id,can_act_for) VALUES ('service-account',${account.id},${account.canActFor}) ON CONFLICT (id) DO UPDATE SET can_act_for=EXCLUDED.can_act_for`,
+        sql`INSERT INTO zorya_security_data.zsec_service_account(subject_kind,id,can_act_for) VALUES ('service-account',${account.id},${account.canActFor}) ON CONFLICT (id) DO UPDATE SET can_act_for=EXCLUDED.can_act_for`,
       );
       if (account.status === "disabled") {
         await execRaw(
           tx,
-          sql`UPDATE zsec_session SET invalidated_at=COALESCE(invalidated_at,${now}) WHERE principal_kind='service-account' AND principal_id=${account.id}`,
+          sql`UPDATE zorya_security_data.zsec_session SET invalidated_at=COALESCE(invalidated_at,${now}) WHERE principal_kind='service-account' AND principal_id=${account.id}`,
         );
       }
     });
@@ -469,7 +507,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     const value = requiredString(id, "service account id");
     const [row] = await execRaw(
       this.db,
-      sql`SELECT a.id,a.can_act_for,s.status FROM zsec_service_account a JOIN zsec_subject s ON s.kind='service-account' AND s.id=a.id WHERE a.id=${value}`,
+      sql`SELECT a.id,a.can_act_for,s.status FROM zorya_security_data.zsec_service_account a JOIN zorya_security_data.zsec_subject s ON s.kind='service-account' AND s.id=a.id WHERE a.id=${value}`,
     );
     return row && serviceAccountFromRow(row);
   }
@@ -477,7 +515,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
   async listServiceAccounts(): Promise<SecurityServiceAccount[]> {
     const rows = await execRaw(
       this.db,
-      sql`SELECT a.id,a.can_act_for,s.status FROM zsec_service_account a JOIN zsec_subject s ON s.kind='service-account' AND s.id=a.id ORDER BY a.id`,
+      sql`SELECT a.id,a.can_act_for,s.status FROM zorya_security_data.zsec_service_account a JOIN zorya_security_data.zsec_subject s ON s.kind='service-account' AND s.id=a.id ORDER BY a.id`,
     );
     return rows.map(serviceAccountFromRow);
   }
@@ -491,7 +529,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     );
     const [existing] = await execRaw(
       this.db,
-      sql`SELECT * FROM zsec_service_account_credential WHERE id=${credential.id}`,
+      sql`SELECT * FROM zorya_security_data.zsec_service_account_credential WHERE id=${credential.id}`,
     );
     if (existing) {
       if (!recordsEqual(credentialFromRow(existing), credential))
@@ -501,7 +539,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     try {
       await execRaw(
         this.db,
-        sql`INSERT INTO zsec_service_account_credential(id,service_account_id,secret_hash,created_at,expires_at,revoked_at) VALUES (${credential.id},${credential.serviceAccountId},${credential.secretHash},${credential.createdAt},${credential.expiresAt ?? null},${credential.revokedAt ?? null})`,
+        sql`INSERT INTO zorya_security_data.zsec_service_account_credential(id,service_account_id,secret_hash,created_at,expires_at,revoked_at) VALUES (${credential.id},${credential.serviceAccountId},${credential.secretHash},${credential.createdAt},${credential.expiresAt ?? null},${credential.revokedAt ?? null})`,
       );
     } catch (error) {
       if (isUniqueViolation(error)) throw new Error("Credential hash is already used");
@@ -513,7 +551,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     const value = requiredString(id, "credential id");
     const [row] = await execRaw(
       this.db,
-      sql`SELECT * FROM zsec_service_account_credential WHERE id=${value}`,
+      sql`SELECT * FROM zorya_security_data.zsec_service_account_credential WHERE id=${value}`,
     );
     return row && credentialFromRow(row);
   }
@@ -524,7 +562,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     const id = requiredString(serviceAccountId, "service account id");
     const rows = await execRaw(
       this.db,
-      sql`SELECT * FROM zsec_service_account_credential WHERE service_account_id=${id} ORDER BY created_at,id`,
+      sql`SELECT * FROM zorya_security_data.zsec_service_account_credential WHERE service_account_id=${id} ORDER BY created_at,id`,
     );
     return rows.map(credentialFromRow);
   }
@@ -534,10 +572,10 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     readonly revokedAt: number;
   }): Promise<void> {
     const id = requiredString(params.id, "credential id");
-    const revokedAt = finiteNumber(params.revokedAt, "credential revoked at");
+    const revokedAt = integerMs(params.revokedAt, "credential revoked at");
     await execRaw(
       this.db,
-      sql`UPDATE zsec_service_account_credential SET revoked_at=COALESCE(revoked_at,${revokedAt}) WHERE id=${id}`,
+      sql`UPDATE zorya_security_data.zsec_service_account_credential SET revoked_at=COALESCE(revoked_at,${revokedAt}) WHERE id=${id}`,
     );
   }
 
@@ -556,23 +594,23 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       );
       const [breakGlass] = await execRaw(
         tx,
-        sql`SELECT 1 FROM zsec_break_glass_grant WHERE token_hash=${session.tokenHash}`,
+        sql`SELECT 1 FROM zorya_security_data.zsec_break_glass_grant WHERE token_hash=${session.tokenHash}`,
       );
       if (breakGlass) throw new Error("Break-glass sessions must be created transactionally");
       const [existing] = await execRaw(
         tx,
-        sql`SELECT * FROM zsec_session WHERE token_hash=${session.tokenHash}`,
+        sql`SELECT * FROM zorya_security_data.zsec_session WHERE token_hash=${session.tokenHash}`,
       );
       if (existing) {
         const stored = sessionFromRow(existing);
-        if (stored.revokedAt !== undefined || !recordsEqual(stored, session)) {
+        if (!recordsEqual(stored, session)) {
           throw new Error("Conflicting session token hash");
         }
         return;
       }
       await execRaw(
         tx,
-        sql`INSERT INTO zsec_session(token_hash,principal_kind,principal_id,created_at,expires_at,csrf_token_hash,revoked_at,auth_method) VALUES (${session.tokenHash},${session.principal.kind},${session.principal.id},${session.createdAt},${session.expiresAt},${session.csrfTokenHash ?? null},${session.revokedAt ?? null},${session.authMethod})`,
+        sql`INSERT INTO zorya_security_data.zsec_session(token_hash,principal_kind,principal_id,created_at,expires_at,csrf_token_hash,revoked_at,auth_method) VALUES (${session.tokenHash},${session.principal.kind},${session.principal.id},${session.createdAt},${session.expiresAt},${session.csrfTokenHash ?? null},${session.revokedAt ?? null},${session.authMethod})`,
       );
     });
   }
@@ -582,7 +620,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     const now = await this.now(this.db);
     const [row] = await execRaw(
       this.db,
-      sql`SELECT x.* FROM zsec_session x JOIN zsec_subject s ON s.kind=x.principal_kind AND s.id=x.principal_id AND s.status='active' WHERE x.token_hash=${hash} AND x.revoked_at IS NULL AND x.invalidated_at IS NULL AND x.expires_at>${now}`,
+      sql`SELECT x.* FROM zorya_security_data.zsec_session x JOIN zorya_security_data.zsec_subject s ON s.kind=x.principal_kind AND s.id=x.principal_id AND s.status='active' WHERE x.token_hash=${hash} AND x.revoked_at IS NULL AND x.invalidated_at IS NULL AND x.expires_at>${now}`,
     );
     return row && sessionFromRow(row);
   }
@@ -596,13 +634,13 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       "session token hash",
       SECURITY_STORE_LIMITS.hash,
     );
-    const revokedAt = finiteNumber(params.revokedAt, "session revoked at");
+    const revokedAt = integerMs(params.revokedAt, "session revoked at");
     await this.db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as DrizzleDb;
       await lock(tx, `session:${tokenHash}`);
       const [row] = await execRaw(
         tx,
-        sql`SELECT auth_method,revoked_at FROM zsec_session WHERE token_hash=${tokenHash}`,
+        sql`SELECT auth_method,revoked_at FROM zorya_security_data.zsec_session WHERE token_hash=${tokenHash}`,
       );
       if (!row) return;
       if (row.auth_method === "break-glass") {
@@ -614,7 +652,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       }
       await execRaw(
         tx,
-        sql`UPDATE zsec_session SET revoked_at=${revokedAt} WHERE token_hash=${tokenHash}`,
+        sql`UPDATE zorya_security_data.zsec_session SET revoked_at=${revokedAt} WHERE token_hash=${tokenHash}`,
       );
     });
   }
@@ -633,7 +671,10 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
 
   async getAuditRecord(eventId: string): Promise<SecurityAuditRecord | undefined> {
     const id = requiredString(eventId, "audit event id");
-    const [row] = await execRaw(this.db, sql`SELECT * FROM zsec_audit_record WHERE id=${id}`);
+    const [row] = await execRaw(
+      this.db,
+      sql`SELECT * FROM zorya_security_data.zsec_audit_record WHERE id=${id}`,
+    );
     return row && auditFromRow(row);
   }
 
@@ -654,7 +695,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     if (cursor !== undefined) {
       const [row] = await execRaw(
         this.db,
-        sql`SELECT sequence,namespace_id FROM zsec_audit_record WHERE id=${cursor}`,
+        sql`SELECT sequence,namespace_id FROM zorya_security_data.zsec_audit_record WHERE id=${cursor}`,
       );
       if (!row || row.namespace_id !== namespaceId)
         throw new Error(`Unknown audit cursor: ${cursor}`);
@@ -662,14 +703,17 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     }
     const rows = await execRaw(
       this.db,
-      sql`SELECT * FROM zsec_audit_record WHERE namespace_id=${namespaceId} AND sequence>${afterSequence} ORDER BY sequence,id LIMIT ${limit + 1}`,
+      sql`SELECT * FROM zorya_security_data.zsec_audit_record WHERE namespace_id=${namespaceId} AND sequence>${afterSequence} ORDER BY sequence,id LIMIT ${limit + 1}`,
     );
     return makePage(rows.map(auditFromRow), limit, (row) => row.id);
   }
 
   async getAuditOutbox(eventId: string): Promise<SecurityAuditOutboxRecord | undefined> {
     const id = requiredString(eventId, "event id");
-    const [row] = await execRaw(this.db, sql`SELECT * FROM zsec_audit_outbox WHERE event_id=${id}`);
+    const [row] = await execRaw(
+      this.db,
+      sql`SELECT * FROM zorya_security_data.zsec_audit_outbox WHERE event_id=${id}`,
+    );
     return row && outboxFromRow(row);
   }
 
@@ -694,7 +738,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     if (cursor !== undefined) {
       const [exists] = await execRaw(
         this.db,
-        sql`SELECT 1 FROM zsec_audit_outbox WHERE event_id=${cursor}`,
+        sql`SELECT 1 FROM zorya_security_data.zsec_audit_outbox WHERE event_id=${cursor}`,
       );
       if (!exists) throw new Error(`Unknown outbox cursor: ${cursor}`);
     }
@@ -702,11 +746,11 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       status === undefined
         ? await execRaw(
             this.db,
-            sql`SELECT * FROM zsec_audit_outbox WHERE (${cursor ?? null}::text IS NULL OR event_id>${cursor ?? ""}) ORDER BY event_id LIMIT ${limit + 1}`,
+            sql`SELECT * FROM zorya_security_data.zsec_audit_outbox WHERE (${cursor ?? null}::text IS NULL OR event_id>${cursor ?? ""}) ORDER BY event_id LIMIT ${limit + 1}`,
           )
         : await execRaw(
             this.db,
-            sql`SELECT * FROM zsec_audit_outbox WHERE status=${status} AND (${cursor ?? null}::text IS NULL OR event_id>${cursor ?? ""}) ORDER BY event_id LIMIT ${limit + 1}`,
+            sql`SELECT * FROM zorya_security_data.zsec_audit_outbox WHERE status=${status} AND (${cursor ?? null}::text IS NULL OR event_id>${cursor ?? ""}) ORDER BY event_id LIMIT ${limit + 1}`,
           );
     return makePage(rows.map(outboxFromRow), limit, (row) => row.eventId);
   }
@@ -717,30 +761,32 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     readonly limit: number;
   }): Promise<ReadonlyArray<SecurityAuditOutboxRecord>> {
     const owner = requiredString(params.owner, "outbox lease owner");
-    const leaseMs = positiveNumber(params.leaseMs, "outbox lease duration");
+    const leaseMs = positiveIntegerMs(params.leaseMs, "outbox lease duration");
     const limit = positiveInteger(params.limit, "outbox claim limit");
     if (limit > SECURITY_STORE_LIMITS.outboxBatch)
       throw new TypeError("outbox claim limit is too large");
     return this.db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as DrizzleDb;
-      const now = await this.now(tx);
-      const leaseExpiresAt = finiteSum(now, leaseMs, "outbox lease expiry");
+      const now = this.nowExpression();
       const rows = await execRaw(
         tx,
         sql`
-        WITH candidates AS (
-          SELECT event_id FROM zsec_audit_outbox
-          WHERE (status='pending' AND next_attempt_at<=${now})
-             OR (status='leased' AND lease_expires_at<=${now})
+        WITH store_clock AS (
+          SELECT ${now}::bigint AS now
+        ), candidates AS (
+          SELECT event_id
+          FROM zorya_security_data.zsec_audit_outbox, store_clock
+          WHERE (status='pending' AND next_attempt_at<=store_clock.now)
+             OR (status='leased' AND lease_expires_at<=store_clock.now)
           ORDER BY next_attempt_at,event_id
           LIMIT ${limit}
           FOR UPDATE SKIP LOCKED
         )
-        UPDATE zsec_audit_outbox o
+        UPDATE zorya_security_data.zsec_audit_outbox o
         SET status='leased', attempts=o.attempts+1,
             lease_token=md5(random()::text || clock_timestamp()::text || o.event_id),
-            lease_owner=${owner}, lease_expires_at=${leaseExpiresAt}, delivered_at=NULL
-        FROM candidates c WHERE o.event_id=c.event_id
+            lease_owner=${owner}, lease_expires_at=store_clock.now+${leaseMs}, delivered_at=NULL
+        FROM candidates c, store_clock WHERE o.event_id=c.event_id
         RETURNING o.*`,
       );
       return freeze(rows.map(outboxFromRow));
@@ -753,12 +799,25 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
   }): Promise<boolean> {
     const eventId = requiredString(params.eventId, "event id");
     const leaseToken = requiredString(params.leaseToken, "outbox lease token");
-    const now = await this.now(this.db);
-    const rows = await execRaw(
-      this.db,
-      sql`UPDATE zsec_audit_outbox SET status='delivered',delivered_at=COALESCE(delivered_at,${now}) WHERE event_id=${eventId} AND lease_token=${leaseToken} AND ((status='leased' AND lease_expires_at>${now}) OR status='delivered') RETURNING event_id`,
-    );
-    return rows.length > 0;
+    return this.db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as DrizzleDb;
+      await execRaw(
+        tx,
+        sql`SELECT event_id FROM zorya_security_data.zsec_audit_outbox WHERE event_id=${eventId} FOR UPDATE`,
+      );
+      const now = this.nowExpression();
+      const rows = await execRaw(
+        tx,
+        sql`WITH store_clock AS (SELECT ${now}::bigint AS now)
+          UPDATE zorya_security_data.zsec_audit_outbox o
+          SET status='delivered',delivered_at=COALESCE(o.delivered_at,store_clock.now)
+          FROM store_clock
+          WHERE o.event_id=${eventId} AND o.lease_token=${leaseToken}
+            AND ((o.status='leased' AND o.lease_expires_at>store_clock.now) OR o.status='delivered')
+          RETURNING o.event_id`,
+      );
+      return rows.length > 0;
+    });
   }
 
   async releaseAuditOutbox(params: {
@@ -769,18 +828,36 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
   }): Promise<boolean> {
     const eventId = requiredString(params.eventId, "event id");
     const leaseToken = requiredString(params.leaseToken, "outbox lease token");
-    const nextAttemptAt = finiteNumber(params.nextAttemptAt, "outbox next attempt");
+    const nextAttemptAt = integerMs(params.nextAttemptAt, "outbox next attempt");
     const lastError = optionalBoundedString(
       params.lastError,
       "outbox last error",
       SECURITY_STORE_LIMITS.reason,
     );
-    const now = await this.now(this.db);
-    const rows = await execRaw(
-      this.db,
-      sql`UPDATE zsec_audit_outbox SET status='pending',next_attempt_at=${nextAttemptAt},lease_owner=NULL,lease_expires_at=NULL,last_error=${lastError ?? null} WHERE event_id=${eventId} AND lease_token=${leaseToken} AND ((status='leased' AND lease_expires_at>${now}) OR (status='pending' AND next_attempt_at=${nextAttemptAt} AND last_error IS NOT DISTINCT FROM ${lastError ?? null})) RETURNING event_id`,
-    );
-    return rows.length > 0;
+    return this.db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as DrizzleDb;
+      await execRaw(
+        tx,
+        sql`SELECT event_id FROM zorya_security_data.zsec_audit_outbox WHERE event_id=${eventId} FOR UPDATE`,
+      );
+      const now = this.nowExpression();
+      const rows = await execRaw(
+        tx,
+        sql`WITH store_clock AS (SELECT ${now}::bigint AS now)
+          UPDATE zorya_security_data.zsec_audit_outbox o
+          SET status='pending',next_attempt_at=${nextAttemptAt},lease_owner=NULL,
+              lease_expires_at=NULL,last_error=${lastError ?? null}
+          FROM store_clock
+          WHERE o.event_id=${eventId} AND o.lease_token=${leaseToken}
+            AND (
+              (o.status='leased' AND o.lease_expires_at>store_clock.now)
+              OR (o.status='pending' AND o.next_attempt_at=${nextAttemptAt}
+                  AND o.last_error IS NOT DISTINCT FROM ${lastError ?? null})
+            )
+          RETURNING o.event_id`,
+      );
+      return rows.length > 0;
+    });
   }
 
   async incrementDenialBucket(params: {
@@ -790,22 +867,22 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     readonly emitLimit: number;
   }): Promise<{ readonly bucket: SecurityDenialBucket; readonly shouldEmit: boolean }> {
     const key = requiredString(params.key, "denial bucket key");
-    const now = finiteNumber(params.now, "denial time");
-    const windowMs = positiveNumber(params.windowMs, "denial window");
+    const now = integerMs(params.now, "denial time");
+    const windowMs = positiveIntegerMs(params.windowMs, "denial window");
     const emitLimit = nonNegativeInteger(params.emitLimit, "denial emit limit");
     const windowEnd = finiteSum(now, windowMs, "denial window end");
     try {
       const [row] = await execRaw(
         this.db,
         sql`
-        INSERT INTO zsec_denial_bucket(key,window_started_at,window_ends_at,count,suppressed)
+        INSERT INTO zorya_security_data.zsec_denial_bucket(key,window_started_at,window_ends_at,count,suppressed)
         VALUES (${key},${now},${windowEnd},1,${emitLimit < 1 ? 1 : 0})
         ON CONFLICT (key) DO UPDATE SET
-          window_started_at=CASE WHEN ${now}>=zsec_denial_bucket.window_ends_at THEN ${now} ELSE zsec_denial_bucket.window_started_at END,
-          window_ends_at=CASE WHEN ${now}>=zsec_denial_bucket.window_ends_at THEN ${windowEnd} ELSE zsec_denial_bucket.window_ends_at END,
-          count=CASE WHEN ${now}>=zsec_denial_bucket.window_ends_at THEN 1 ELSE zsec_denial_bucket.count+1 END,
-          suppressed=CASE WHEN ${now}>=zsec_denial_bucket.window_ends_at THEN ${emitLimit < 1 ? 1 : 0} WHEN zsec_denial_bucket.count+1>${emitLimit} THEN zsec_denial_bucket.suppressed+1 ELSE zsec_denial_bucket.suppressed END
-        WHERE ${now}>=zsec_denial_bucket.window_started_at
+          window_started_at=CASE WHEN ${now}>=zorya_security_data.zsec_denial_bucket.window_ends_at THEN ${now} ELSE zorya_security_data.zsec_denial_bucket.window_started_at END,
+          window_ends_at=CASE WHEN ${now}>=zorya_security_data.zsec_denial_bucket.window_ends_at THEN ${windowEnd} ELSE zorya_security_data.zsec_denial_bucket.window_ends_at END,
+          count=CASE WHEN ${now}>=zorya_security_data.zsec_denial_bucket.window_ends_at THEN 1 ELSE zorya_security_data.zsec_denial_bucket.count+1 END,
+          suppressed=CASE WHEN ${now}>=zorya_security_data.zsec_denial_bucket.window_ends_at THEN ${emitLimit < 1 ? 1 : 0} WHEN zorya_security_data.zsec_denial_bucket.count+1>${emitLimit} THEN zorya_security_data.zsec_denial_bucket.suppressed+1 ELSE zorya_security_data.zsec_denial_bucket.suppressed END
+        WHERE ${now}>=zorya_security_data.zsec_denial_bucket.window_started_at
         RETURNING *`,
       );
       if (!row) throw new Error("Denial time precedes the current window");
@@ -819,7 +896,10 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
 
   async getDenialBucket(key: string): Promise<SecurityDenialBucket | undefined> {
     const value = requiredString(key, "denial bucket key");
-    const [row] = await execRaw(this.db, sql`SELECT * FROM zsec_denial_bucket WHERE key=${value}`);
+    const [row] = await execRaw(
+      this.db,
+      sql`SELECT * FROM zorya_security_data.zsec_denial_bucket WHERE key=${value}`,
+    );
     return row && denialFromRow(row);
   }
 
@@ -847,7 +927,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       );
       const [tokenGrant] = await execRaw(
         tx,
-        sql`SELECT id FROM zsec_break_glass_grant WHERE token_hash=${grant.tokenHash}`,
+        sql`SELECT id FROM zorya_security_data.zsec_break_glass_grant WHERE token_hash=${grant.tokenHash}`,
       );
       if (tokenGrant && tokenGrant.id !== grant.id)
         throw new Error(
@@ -855,15 +935,15 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
         );
       const [existingGrant] = await execRaw(
         tx,
-        sql`SELECT * FROM zsec_break_glass_grant WHERE id=${grant.id}`,
+        sql`SELECT * FROM zorya_security_data.zsec_break_glass_grant WHERE id=${grant.id}`,
       );
       const [existingSession] = await execRaw(
         tx,
-        sql`SELECT * FROM zsec_session WHERE token_hash=${session.tokenHash}`,
+        sql`SELECT * FROM zorya_security_data.zsec_session WHERE token_hash=${session.tokenHash}`,
       );
       const [existingAudit] = await execRaw(
         tx,
-        sql`SELECT * FROM zsec_audit_record WHERE id=${audit.id}`,
+        sql`SELECT * FROM zorya_security_data.zsec_audit_record WHERE id=${audit.id}`,
       );
       if (existingGrant || existingSession || existingAudit) {
         if (
@@ -880,11 +960,11 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       }
       await execRaw(
         tx,
-        sql`INSERT INTO zsec_break_glass_grant(id,principal_kind,principal_id,token_hash,reason,created_by,created_at,expires_at,revoked_at) VALUES (${grant.id},${grant.principal.kind},${grant.principal.id},${grant.tokenHash},${grant.reason},${grant.createdBy},${grant.createdAt},${grant.expiresAt},NULL)`,
+        sql`INSERT INTO zorya_security_data.zsec_break_glass_grant(id,principal_kind,principal_id,token_hash,reason,created_by,created_at,expires_at,revoked_at) VALUES (${grant.id},${grant.principal.kind},${grant.principal.id},${grant.tokenHash},${grant.reason},${grant.createdBy},${grant.createdAt},${grant.expiresAt},NULL)`,
       );
       await execRaw(
         tx,
-        sql`INSERT INTO zsec_session(token_hash,principal_kind,principal_id,created_at,expires_at,csrf_token_hash,revoked_at,auth_method) VALUES (${session.tokenHash},${session.principal.kind},${session.principal.id},${session.createdAt},${session.expiresAt},${session.csrfTokenHash ?? null},NULL,'break-glass')`,
+        sql`INSERT INTO zorya_security_data.zsec_session(token_hash,principal_kind,principal_id,created_at,expires_at,csrf_token_hash,revoked_at,auth_method) VALUES (${session.tokenHash},${session.principal.kind},${session.principal.id},${session.createdAt},${session.expiresAt},${session.csrfTokenHash ?? null},NULL,'break-glass')`,
       );
       await this.appendAuditInTx(tx, audit, outbox);
       return "created";
@@ -895,7 +975,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     const value = requiredString(id, "break-glass grant id");
     const [row] = await execRaw(
       this.db,
-      sql`SELECT * FROM zsec_break_glass_grant WHERE id=${value}`,
+      sql`SELECT * FROM zorya_security_data.zsec_break_glass_grant WHERE id=${value}`,
     );
     return row && grantFromRow(row);
   }
@@ -907,7 +987,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     readonly outbox?: { readonly nextAttemptAt: number };
   }): Promise<"revoked" | "already-revoked"> {
     const grantId = requiredString(params.grantId, "break-glass grant id");
-    const revokedAt = finiteNumber(params.revokedAt, "break-glass revoked at");
+    const revokedAt = integerMs(params.revokedAt, "break-glass revoked at");
     const audit = normalizeAuditRecord(params.audit);
     const outbox = params.outbox && pendingAuditOutbox(audit.id, params.outbox.nextAttemptAt);
     return this.db.transaction(async (rawTx) => {
@@ -915,21 +995,21 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       await lock(tx, `break-glass:${grantId}`);
       const [grantRow] = await execRaw(
         tx,
-        sql`SELECT * FROM zsec_break_glass_grant WHERE id=${grantId}`,
+        sql`SELECT * FROM zorya_security_data.zsec_break_glass_grant WHERE id=${grantId}`,
       );
       if (!grantRow) throw new Error(`Unknown break-glass grant: ${grantId}`);
       const grant = grantFromRow(grantRow);
       validateBreakGlassAudit(audit, grant, "break-glass.revoked");
       const [sessionRow] = await execRaw(
         tx,
-        sql`SELECT * FROM zsec_session WHERE token_hash=${grant.tokenHash}`,
+        sql`SELECT * FROM zorya_security_data.zsec_session WHERE token_hash=${grant.tokenHash}`,
       );
       if (!sessionRow || sessionRow.auth_method !== "break-glass")
         throw new Error("Break-glass grant has no matching session");
       const session = sessionFromRow(sessionRow);
       const [existingAudit] = await execRaw(
         tx,
-        sql`SELECT * FROM zsec_audit_record WHERE id=${audit.id}`,
+        sql`SELECT * FROM zorya_security_data.zsec_audit_record WHERE id=${audit.id}`,
       );
       if (grant.revokedAt !== undefined || session.revokedAt !== undefined) {
         if (
@@ -946,11 +1026,11 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
         throw new Error("Audit event already exists for an unrevoked break-glass grant");
       await execRaw(
         tx,
-        sql`UPDATE zsec_break_glass_grant SET revoked_at=${revokedAt} WHERE id=${grantId}`,
+        sql`UPDATE zorya_security_data.zsec_break_glass_grant SET revoked_at=${revokedAt} WHERE id=${grantId}`,
       );
       await execRaw(
         tx,
-        sql`UPDATE zsec_session SET revoked_at=${revokedAt} WHERE token_hash=${grant.tokenHash}`,
+        sql`UPDATE zorya_security_data.zsec_session SET revoked_at=${revokedAt} WHERE token_hash=${grant.tokenHash}`,
       );
       await this.appendAuditInTx(tx, audit, outbox);
       return "revoked";
@@ -958,12 +1038,18 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
   }
 
   private async now(db: DrizzleDb): Promise<number> {
-    if (this.clock !== undefined) return finiteNumber(this.clock.currentTimeMs(), "store clock");
+    if (this.clock !== undefined) return integerMs(this.clock.currentTimeMs(), "store clock");
     const [row] = await execRaw(
       db,
       sql`SELECT floor(extract(epoch from clock_timestamp()) * 1000)::double precision AS now`,
     );
-    return Number(row!.now);
+    return integerMs(Number(row!.now), "database clock");
+  }
+
+  private nowExpression(): ReturnType<typeof sql> {
+    return this.clock === undefined
+      ? sql`floor(extract(epoch from clock_timestamp()) * 1000)::double precision`
+      : sql`${integerMs(this.clock.currentTimeMs(), "store clock")}`;
   }
 
   private async assertActiveSubject(
@@ -973,7 +1059,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
   ): Promise<void> {
     const [row] = await execRaw(
       db,
-      sql`SELECT 1 FROM zsec_subject WHERE kind=${subject.kind} AND id=${subject.id} AND status='active' FOR SHARE`,
+      sql`SELECT 1 FROM zorya_security_data.zsec_subject WHERE kind=${subject.kind} AND id=${subject.id} AND status='active' FOR SHARE`,
     );
     if (!row) throw new Error(`${message}: ${subject.id}`);
   }
@@ -985,7 +1071,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
   ): Promise<void> {
     const [row] = await execRaw(
       db,
-      sql`SELECT 1 FROM zsec_subject WHERE kind=${subject.kind} AND id=${subject.id}`,
+      sql`SELECT 1 FROM zorya_security_data.zsec_subject WHERE kind=${subject.kind} AND id=${subject.id}`,
     );
     if (!row) throw new Error(`${message}: ${subject.id}`);
   }
@@ -998,7 +1084,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     await lock(db, `audit:${record.namespaceId}`);
     const [existing] = await execRaw(
       db,
-      sql`SELECT * FROM zsec_audit_record WHERE id=${record.id}`,
+      sql`SELECT * FROM zorya_security_data.zsec_audit_record WHERE id=${record.id}`,
     );
     if (existing) {
       if (
@@ -1010,7 +1096,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     }
     const [head] = await execRaw(
       db,
-      sql`SELECT sequence,hash FROM zsec_audit_record WHERE namespace_id=${record.namespaceId} ORDER BY sequence DESC LIMIT 1`,
+      sql`SELECT sequence,hash FROM zorya_security_data.zsec_audit_record WHERE namespace_id=${record.namespaceId} ORDER BY sequence DESC LIMIT 1`,
     );
     const expectedSequence = head ? Number(head.sequence) + 1 : 1;
     const expectedPrevious = head?.hash as string | undefined;
@@ -1018,12 +1104,12 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       throw new Error("Audit chain boundary mismatch");
     await execRaw(
       db,
-      sql`INSERT INTO zsec_audit_record(id,namespace_id,sequence,occurred_at,recorded_at,event,actor_kind,actor_id,effective_kind,effective_id,permission_resource,permission_action,resource_kind,resource_namespace_id,resource_id,resource_principal_kind,resource_principal_id,decision_allowed,decision_reason,request_id,run_id,thread_id,tool_call_id,metadata,previous_hash,hash,key_id) VALUES (${record.id},${record.namespaceId},${record.sequence},${record.occurredAt},${record.recordedAt},${record.event},${record.actor?.kind ?? null},${record.actor?.id ?? null},${record.effective?.kind ?? null},${record.effective?.id ?? null},${record.permission?.resource ?? null},${record.permission?.action ?? null},${record.resource?.kind ?? null},${record.resource?.namespaceId ?? null},${record.resource?.id ?? null},${record.resource?.principal?.kind ?? null},${record.resource?.principal?.id ?? null},${record.decision?.allowed ?? null},${record.decision?.reason ?? null},${record.correlation?.requestId ?? null},${record.correlation?.runId ?? null},${record.correlation?.threadId ?? null},${record.correlation?.toolCallId ?? null},${record.metadata ? JSON.stringify(record.metadata) : null}::jsonb,${record.previousHash ?? null},${record.hash},${record.keyId})`,
+      sql`INSERT INTO zorya_security_data.zsec_audit_record(id,namespace_id,sequence,occurred_at,recorded_at,event,actor_kind,actor_id,effective_kind,effective_id,permission_resource,permission_action,resource_kind,resource_namespace_id,resource_id,resource_principal_kind,resource_principal_id,decision_allowed,decision_reason,request_id,run_id,thread_id,tool_call_id,metadata,previous_hash,hash,key_id) VALUES (${record.id},${record.namespaceId},${record.sequence},${record.occurredAt},${record.recordedAt},${record.event},${record.actor?.kind ?? null},${record.actor?.id ?? null},${record.effective?.kind ?? null},${record.effective?.id ?? null},${record.permission?.resource ?? null},${record.permission?.action ?? null},${record.resource?.kind ?? null},${record.resource?.namespaceId ?? null},${record.resource?.id ?? null},${record.resource?.principal?.kind ?? null},${record.resource?.principal?.id ?? null},${record.decision?.allowed ?? null},${record.decision?.reason ?? null},${record.correlation?.requestId ?? null},${record.correlation?.runId ?? null},${record.correlation?.threadId ?? null},${record.correlation?.toolCallId ?? null},${record.metadata ? JSON.stringify(record.metadata) : null}::jsonb,${record.previousHash ?? null},${record.hash},${record.keyId})`,
     );
     if (outbox)
       await execRaw(
         db,
-        sql`INSERT INTO zsec_audit_outbox(event_id,status,attempts,next_attempt_at,initial_next_attempt_at) VALUES (${record.id},'pending',0,${outbox.nextAttemptAt},${outbox.nextAttemptAt})`,
+        sql`INSERT INTO zorya_security_data.zsec_audit_outbox(event_id,status,attempts,next_attempt_at,initial_next_attempt_at) VALUES (${record.id},'pending',0,${outbox.nextAttemptAt},${outbox.nextAttemptAt})`,
       );
     return "appended";
   }
@@ -1035,7 +1121,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
   ): Promise<boolean> {
     const [existing] = await execRaw(
       db,
-      sql`SELECT initial_next_attempt_at FROM zsec_audit_outbox WHERE event_id=${eventId}`,
+      sql`SELECT initial_next_attempt_at FROM zorya_security_data.zsec_audit_outbox WHERE event_id=${eventId}`,
     );
     return outbox === undefined
       ? existing === undefined
@@ -1289,14 +1375,19 @@ function finiteNumber(value: unknown, label: string): number {
     throw new TypeError(`${label} must be finite`);
   return value;
 }
-function positiveNumber(value: unknown, label: string): number {
-  const row = finiteNumber(value, label);
+function integerMs(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value))
+    throw new TypeError(`${label} must be a safe integer number of milliseconds`);
+  return value;
+}
+function positiveIntegerMs(value: unknown, label: string): number {
+  const row = integerMs(value, label);
   if (row <= 0) throw new TypeError(`${label} must be positive`);
   return row;
 }
 function finiteSum(a: number, b: number, label: string): number {
   const row = a + b;
-  if (!Number.isFinite(row)) throw new TypeError(`${label} must be finite`);
+  if (!Number.isSafeInteger(row)) throw new TypeError(`${label} must be a safe integer`);
   return row;
 }
 function nonNegativeInteger(value: unknown, label: string): number {
@@ -1431,9 +1522,9 @@ function normalizeCredential(value: ServiceAccountCredential): ServiceAccountCre
     id: requiredString(source.id, "credential id"),
     serviceAccountId: requiredString(source.serviceAccountId, "service account id"),
     secretHash: requiredString(source.secretHash, "credential hash", SECURITY_STORE_LIMITS.hash),
-    createdAt: finiteNumber(source.createdAt, "credential created at"),
-    ...(expiresAt !== undefined && { expiresAt: finiteNumber(expiresAt, "credential expires at") }),
-    ...(revokedAt !== undefined && { revokedAt: finiteNumber(revokedAt, "credential revoked at") }),
+    createdAt: integerMs(source.createdAt, "credential created at"),
+    ...(expiresAt !== undefined && { expiresAt: integerMs(expiresAt, "credential expires at") }),
+    ...(revokedAt !== undefined && { revokedAt: integerMs(revokedAt, "credential revoked at") }),
   });
   if (row.expiresAt !== undefined && row.expiresAt <= row.createdAt)
     throw new TypeError("credential expiry must follow creation");
@@ -1450,12 +1541,12 @@ function normalizeSession(value: SecuritySession): SecuritySession {
   const row: SecuritySession = freeze({
     tokenHash: requiredString(source.tokenHash, "session token hash", SECURITY_STORE_LIMITS.hash),
     principal: normalizePrincipalRef(source.principal as SecurityPrincipalRef),
-    createdAt: finiteNumber(source.createdAt, "session created at"),
-    expiresAt: finiteNumber(source.expiresAt, "session expires at"),
+    createdAt: integerMs(source.createdAt, "session created at"),
+    expiresAt: integerMs(source.expiresAt, "session expires at"),
     ...(csrf !== undefined && {
       csrfTokenHash: requiredString(csrf, "csrf token hash", SECURITY_STORE_LIMITS.hash),
     }),
-    ...(revoked !== undefined && { revokedAt: finiteNumber(revoked, "session revoked at") }),
+    ...(revoked !== undefined && { revokedAt: integerMs(revoked, "session revoked at") }),
     authMethod,
   });
   if (row.expiresAt <= row.createdAt) throw new TypeError("session expiry must follow creation");
@@ -1481,8 +1572,8 @@ function normalizeAuditRecord(value: SecurityAuditRecord): SecurityAuditRecord {
       SECURITY_STORE_LIMITS.namespace,
     ),
     sequence: nonNegativeInteger(source.sequence, "audit sequence"),
-    occurredAt: finiteNumber(source.occurredAt, "audit occurrence"),
-    recordedAt: finiteNumber(source.recordedAt, "audit recorded time"),
+    occurredAt: integerMs(source.occurredAt, "audit occurrence"),
+    recordedAt: integerMs(source.recordedAt, "audit recorded time"),
     event: requiredString(source.event, "audit event", SECURITY_STORE_LIMITS.event),
     ...(actor !== undefined && { actor: normalizeAuditPrincipal(actor, "audit actor") }),
     ...(effective !== undefined && {
@@ -1630,10 +1721,10 @@ function normalizeBreakGlassGrant(value: BreakGlassGrant): BreakGlassGrant {
     ),
     reason: requiredString(source.reason, "break-glass reason", SECURITY_STORE_LIMITS.reason),
     createdBy: requiredString(source.createdBy, "break-glass creator"),
-    createdAt: finiteNumber(source.createdAt, "break-glass created at"),
-    expiresAt: finiteNumber(source.expiresAt, "break-glass expires at"),
+    createdAt: integerMs(source.createdAt, "break-glass created at"),
+    expiresAt: integerMs(source.expiresAt, "break-glass expires at"),
     ...(source.revokedAt !== undefined && {
-      revokedAt: finiteNumber(source.revokedAt, "break-glass revoked at"),
+      revokedAt: integerMs(source.revokedAt, "break-glass revoked at"),
     }),
   });
   if (row.expiresAt <= row.createdAt)
@@ -1646,7 +1737,7 @@ function pendingAuditOutbox(eventId: string, value: unknown): SecurityAuditOutbo
     eventId: requiredString(eventId, "event id"),
     status: "pending",
     attempts: 0,
-    nextAttemptAt: finiteNumber(value, "outbox next attempt"),
+    nextAttemptAt: integerMs(value, "outbox next attempt"),
   });
 }
 
