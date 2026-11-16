@@ -95,6 +95,22 @@ export type AuthorizationDecision =
   | { readonly allowed: true; readonly reason: AuthorizationReason }
   | { readonly allowed: false; readonly reason: AuthorizationReason };
 
+/**
+ * A permission decision bound to the exact effective-principal snapshot used
+ * to make it. Allowed results always carry that detached snapshot so a
+ * downstream ACL check cannot accidentally use identity state from a
+ * different point in time.
+ */
+export type EffectiveAuthorizationResult =
+  | {
+      readonly decision: Extract<AuthorizationDecision, { readonly allowed: true }>;
+      readonly effective: Principal;
+    }
+  | {
+      readonly decision: Extract<AuthorizationDecision, { readonly allowed: false }>;
+      readonly effective?: Principal;
+    };
+
 /** Backends may receive either namespace-only scope or a narrower identity allow-list. */
 export type IdentityFilter =
   | { readonly kind: "namespace"; readonly namespaceId: string }
@@ -149,6 +165,12 @@ export interface RequestAuthenticator {
 
 export interface Authorizer {
   authorize(request: AuthorizationRequest): Promise<AuthorizationDecision>;
+  /**
+   * Atomically/logically bind authorization to its effective principal.
+   * Older custom adapters may omit this capability; knowledge retrieval then
+   * fails closed rather than composing separate, racy resolve/authorize calls.
+   */
+  authorizeEffective?(request: AuthorizationRequest): Promise<EffectiveAuthorizationResult>;
 }
 
 export interface IdentityResolver {

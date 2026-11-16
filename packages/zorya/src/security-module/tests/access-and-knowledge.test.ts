@@ -437,6 +437,13 @@ describe("namespace and knowledge access", () => {
       allowed: true,
       reason: "access_role_allow",
     });
+    const bound = await env.security.authorizeEffective?.(request);
+    expect(bound).toMatchObject({
+      decision: { allowed: true, reason: "access_role_allow" },
+      effective: { kind: "user", id: user.id, accessRoles: { "team-a": ["member"] } },
+    });
+    expect(Object.isFrozen(bound?.effective)).toBeTrue();
+    expect(Object.isFrozen(bound?.effective?.accessRoles["team-a"])).toBeTrue();
     await env.store.removeBinding({
       userId: user.id,
       namespaceId: "team-a",

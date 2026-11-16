@@ -13,6 +13,9 @@ export {
 export {
   createSecurityRouteAccessGuard,
   snapshotAuthorizationDecision,
+  snapshotEffectiveAuthorizationResult,
+  snapshotPrincipal,
+  snapshotPrincipalRef,
   snapshotSecurityContext,
   snapshotSecurityPermission,
   snapshotSecurityResource,
@@ -45,6 +48,7 @@ export {
   principalRef,
   type AuthenticationRequest,
   type AuthorizationDecision,
+  type EffectiveAuthorizationResult,
   type AuthorizationReason,
   type AuthorizationRequest,
   type AuthorizationRequestFor,

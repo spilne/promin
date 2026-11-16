@@ -6,6 +6,7 @@ import {
   AUTHORIZATION_REASONS,
   type AuthorizationDecision,
   type AuthorizationRequest,
+  type EffectiveAuthorizationResult,
   type Principal,
   type PrincipalKind,
   type PrincipalRef,
@@ -102,6 +103,26 @@ export function snapshotAuthorizationDecision(
   return Object.freeze({ allowed, reason }) as AuthorizationDecision;
 }
 
+export function snapshotEffectiveAuthorizationResult(
+  source: EffectiveAuthorizationResult,
+): EffectiveAuthorizationResult {
+  if (!source || typeof source !== "object") {
+    throw new TypeError("Invalid effective authorization result");
+  }
+  const record = source as unknown as Record<string, unknown>;
+  const decision = snapshotAuthorizationDecision(record.decision as AuthorizationDecision);
+  const effectiveValue = record.effective;
+  const effective =
+    effectiveValue === undefined ? undefined : snapshotPrincipal(effectiveValue as Principal);
+  if (decision.allowed && effective === undefined) {
+    throw new TypeError("Allowed authorization result requires an effective principal");
+  }
+  return Object.freeze({
+    decision,
+    ...(effective !== undefined && { effective }),
+  }) as EffectiveAuthorizationResult;
+}
+
 export function snapshotSecurityContext(source: SecurityContext): SecurityContext {
   if (!source || typeof source !== "object") throw new TypeError("Invalid security context");
   const record = source as unknown as Record<string, unknown>;
@@ -110,7 +131,7 @@ export function snapshotSecurityContext(source: SecurityContext): SecurityContex
   return Object.freeze({ actor, effective });
 }
 
-function snapshotPrincipal(source: Principal): Principal {
+export function snapshotPrincipal(source: Principal): Principal {
   if (!source || typeof source !== "object") throw new TypeError("Invalid security principal");
   const record = source as unknown as Record<string, unknown>;
   const kind = record.kind;
@@ -138,7 +159,7 @@ function snapshotPrincipal(source: Principal): Principal {
   return Object.freeze(snapshot);
 }
 
-function snapshotPrincipalRef(source: PrincipalRef): PrincipalRef {
+export function snapshotPrincipalRef(source: PrincipalRef): PrincipalRef {
   if (!source || typeof source !== "object") throw new TypeError("Invalid principal reference");
   const record = source as unknown as Record<string, unknown>;
   const kind = record.kind;

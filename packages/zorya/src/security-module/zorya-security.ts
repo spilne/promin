@@ -5,6 +5,8 @@ import { jsonError, notFound, type Router } from "../server/router.ts";
 import {
   ORG_WIDE_NAMESPACE,
   principalRef,
+  snapshotPrincipal,
+  type EffectiveAuthorizationResult,
   type Principal,
   type PrincipalRef,
   type ZoryaSecurity,
@@ -141,6 +143,133 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
     return { reason: "identity_unknown" };
   };
 
+  const authorizeEffective: NonNullable<ZoryaSecurity["authorizeEffective"]> = async ({
+    context,
+    permission,
+    resource,
+  }): Promise<EffectiveAuthorizationResult> => {
+    const actorResult = await resolveCurrent(context.actor);
+    if ("reason" in actorResult)
+      return { decision: { allowed: false, reason: actorResult.reason } };
+    // Policy and the returned ACL caller consume this same detached snapshot.
+    const currentActor = snapshotPrincipal(actorResult.principal);
+    if (permission.resource !== resource.kind) {
+      return {
+        decision: { allowed: false, reason: "permission_denied" },
+        effective: currentActor,
+      };
+    }
+    let principal = currentActor;
+    if (!samePrincipal(currentActor, context.effective)) {
+      if (!currentActor.canActFor) {
+        return {
+          decision: { allowed: false, reason: "act_for_required" },
+          effective: currentActor,
+        };
+      }
+      const effectiveResult = await resolveCurrent(context.effective);
+      if ("reason" in effectiveResult) {
+        return { decision: { allowed: false, reason: effectiveResult.reason } };
+      }
+      principal = snapshotPrincipal(effectiveResult.principal);
+    }
+    const roles = rolesFor(principal, resource.namespaceId);
+    const actorRoles = rolesFor(currentActor, resource.namespaceId);
+    if (roles.has("admin")) {
+      return {
+        decision: { allowed: true, reason: "access_role_allow" },
+        effective: principal,
+      };
+    }
+    if (roles.has("auditor") && isAuditorPermission(permission)) {
+      return {
+        decision: { allowed: true, reason: "access_role_allow" },
+        effective: principal,
+      };
+    }
+    if (roles.has("agent-manager") && isAgentManagerPermission(permission)) {
+      return {
+        decision: { allowed: true, reason: "access_role_allow" },
+        effective: principal,
+      };
+    }
+    if (
+      roles.has("approver") &&
+      permission.resource === "approval" &&
+      permission.action === "decide-elevated"
+    ) {
+      return {
+        decision: { allowed: true, reason: "access_role_allow" },
+        effective: principal,
+      };
+    }
+    if (
+      isMemberPermission({
+        principal,
+        roles,
+        actor: currentActor,
+        actorRoles,
+        permission,
+        resource,
+      })
+    ) {
+      return {
+        decision: { allowed: true, reason: "self_identity_allow" },
+        effective: principal,
+      };
+    }
+    if (permission.resource === "agent" && permission.action === "invoke") {
+      return roles.has("member")
+        ? {
+            decision: { allowed: true, reason: "access_role_allow" },
+            effective: principal,
+          }
+        : {
+            decision: { allowed: false, reason: "namespace_denied" },
+            effective: principal,
+          };
+    }
+    if (
+      permission.resource === "knowledge" &&
+      permission.action !== "use" &&
+      permission.action !== "inspect-text" &&
+      roles.has("knowledge-manager")
+    ) {
+      return {
+        decision: { allowed: true, reason: "access_role_allow" },
+        effective: principal,
+      };
+    }
+    if (
+      permission.resource === "knowledge" &&
+      (permission.action === "use" || permission.action === "inspect-text")
+    ) {
+      if (!resource.id) {
+        return {
+          decision: { allowed: false, reason: "permission_denied" },
+          effective: principal,
+        };
+      }
+      const grants = await config.store.listKnowledgeGrants({
+        namespaceId: resource.namespaceId,
+        baseId: resource.id,
+      });
+      return grants.some((grant) => roles.has(grant.accessRole))
+        ? {
+            decision: { allowed: true, reason: "knowledge_grant_allow" },
+            effective: principal,
+          }
+        : {
+            decision: { allowed: false, reason: "permission_denied" },
+            effective: principal,
+          };
+    }
+    return {
+      decision: { allowed: false, reason: "permission_denied" },
+      effective: principal,
+    };
+  };
+
   return {
     authenticate: async ({ request: req, plane }) => {
       if (plane !== "operator") return undefined;
@@ -178,80 +307,8 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
       return effective ? { actor: currentActor, effective: principalRef(effective) } : undefined;
     },
     identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
-    authorize: async ({ context, permission, resource }) => {
-      const actorResult = await resolveCurrent(context.actor);
-      if ("reason" in actorResult) return { allowed: false, reason: actorResult.reason };
-      const currentActor = actorResult.principal;
-      if (permission.resource !== resource.kind) {
-        return { allowed: false, reason: "permission_denied" };
-      }
-      let principal = currentActor;
-      if (!samePrincipal(currentActor, context.effective)) {
-        if (!currentActor.canActFor) {
-          return { allowed: false, reason: "act_for_required" };
-        }
-        const effectiveResult = await resolveCurrent(context.effective);
-        if ("reason" in effectiveResult) {
-          return { allowed: false, reason: effectiveResult.reason };
-        }
-        principal = effectiveResult.principal;
-      }
-      const roles = rolesFor(principal, resource.namespaceId);
-      const actorRoles = rolesFor(currentActor, resource.namespaceId);
-      if (roles.has("admin")) return { allowed: true, reason: "access_role_allow" };
-      if (roles.has("auditor") && isAuditorPermission(permission)) {
-        return { allowed: true, reason: "access_role_allow" };
-      }
-      if (roles.has("agent-manager") && isAgentManagerPermission(permission)) {
-        return { allowed: true, reason: "access_role_allow" };
-      }
-      if (
-        roles.has("approver") &&
-        permission.resource === "approval" &&
-        permission.action === "decide-elevated"
-      ) {
-        return { allowed: true, reason: "access_role_allow" };
-      }
-      if (
-        isMemberPermission({
-          principal,
-          roles,
-          actor: currentActor,
-          actorRoles,
-          permission,
-          resource,
-        })
-      ) {
-        return { allowed: true, reason: "self_identity_allow" };
-      }
-      if (permission.resource === "agent" && permission.action === "invoke") {
-        return roles.has("member")
-          ? { allowed: true, reason: "access_role_allow" }
-          : { allowed: false, reason: "namespace_denied" };
-      }
-      if (
-        permission.resource === "knowledge" &&
-        permission.action !== "use" &&
-        permission.action !== "inspect-text" &&
-        roles.has("knowledge-manager")
-      ) {
-        return { allowed: true, reason: "access_role_allow" };
-      }
-      if (
-        permission.resource === "knowledge" &&
-        (permission.action === "use" || permission.action === "inspect-text")
-      ) {
-        if (!resource.id) return { allowed: false, reason: "permission_denied" };
-        const grants = await config.store.listKnowledgeGrants({
-          namespaceId: resource.namespaceId,
-          baseId: resource.id,
-        });
-        return grants.some((grant) => roles.has(grant.accessRole))
-          ? { allowed: true, reason: "knowledge_grant_allow" }
-          : { allowed: false, reason: "permission_denied" };
-      }
-      return { allowed: false, reason: "permission_denied" };
-    },
+    authorize: async (request) => (await authorizeEffective(request)).decision,
+    authorizeEffective,
     recordAudit: async () => {},
     mount: (router) => {
       mountLoginRoutes({

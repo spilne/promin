@@ -22,8 +22,24 @@ function fakeSecurity(params: {
   included?: () => boolean;
   audits?: SecurityAuditEvent[];
   audit?: (event: SecurityAuditEvent) => Promise<void>;
+  beforeAuthorize?: () => void;
+  identityFilter?: (input: {
+    readonly context: { readonly effective: PrincipalRef };
+    readonly namespaceId: string;
+  }) => unknown;
 }): ZoryaSecurity {
   const resolve = async (ref: PrincipalRef) => params.principals.get(`${ref.kind}:${ref.id}`);
+  const authorizeEffective: NonNullable<ZoryaSecurity["authorizeEffective"]> = async ({
+    context,
+  }) => {
+    params.beforeAuthorize?.();
+    const effective = await resolve(context.effective);
+    if (!effective) return { decision: { allowed: false, reason: "identity_unknown" } };
+    if (params.allowed?.() === false) {
+      return { decision: { allowed: false, reason: "permission_denied" }, effective };
+    }
+    return { decision: { allowed: true, reason: "access_role_allow" }, effective };
+  };
   return {
     authenticate: async () => undefined,
     resolvePrincipal: resolve,
@@ -34,15 +50,14 @@ function fakeSecurity(params: {
       }
       return { actor, effective };
     },
-    identityFilter: async ({ context, namespaceId }) => ({
-      kind: "identities",
-      namespaceId,
-      identities: params.included?.() === false ? [] : [context.effective],
-    }),
-    authorize: async () =>
-      params.allowed?.() === false
-        ? { allowed: false, reason: "permission_denied" }
-        : { allowed: true, reason: "access_role_allow" },
+    identityFilter: async ({ context, namespaceId }) =>
+      (params.identityFilter?.({ context, namespaceId }) ?? {
+        kind: "identities",
+        namespaceId,
+        identities: params.included?.() === false ? [] : [context.effective],
+      }) as never,
+    authorize: async (request) => (await authorizeEffective(request)).decision,
+    authorizeEffective,
     recordAudit: params.audit ?? (async (event) => void params.audits?.push(event)),
   };
 }
@@ -139,6 +154,192 @@ describe("KnowledgeExecutionSecurity", () => {
       subject: { kind: "user", id: "alice" },
       userId: "alice",
       accessRoles: ["finance"],
+    });
+  });
+
+  it("returns the exact effective principal snapshot used by final authorization", async () => {
+    const principals = new Map<string, Principal>([["user:alice", user("alice", ["member"])]]);
+    let authorizationCalls = 0;
+    const guard = new KnowledgeExecutionSecurity({
+      security: fakeSecurity({
+        principals,
+        beforeAuthorize: () => {
+          authorizationCalls++;
+          if (authorizationCalls === 2) {
+            principals.set("user:alice", user("alice", ["finance"]));
+          }
+        },
+      }),
+      clock,
+      logger,
+    });
+
+    const access = await guard.access({
+      securityContext: { actor: { kind: "user", id: "alice" } },
+      namespaceId: "team",
+      baseId: "handbook",
+    });
+
+    expect(authorizationCalls).toBe(2);
+    expect(access?.caller?.accessRoles).toEqual(["finance"]);
+  });
+
+  it("rejects an allowed result bound to a different effective identity", async () => {
+    const audits: SecurityAuditEvent[] = [];
+    const principals = new Map<string, Principal>([
+      ["user:alice", user("alice", ["member"])],
+      ["user:mallory", user("mallory", ["admin"])],
+    ]);
+    const security = fakeSecurity({ principals, audits });
+    security.authorizeEffective = async () => ({
+      decision: { allowed: true, reason: "access_role_allow" },
+      effective: user("mallory", ["admin"]),
+    });
+    const guard = new KnowledgeExecutionSecurity({ security, clock, logger });
+
+    const access = await guard.access({
+      securityContext: { actor: { kind: "user", id: "alice" } },
+      namespaceId: "team",
+      baseId: "handbook",
+    });
+
+    expect(access).toBeUndefined();
+    expect(audits[0]?.decision).toEqual({ allowed: false, reason: "permission_denied" });
+  });
+
+  it("fails closed for malformed identity-filter discriminators", async () => {
+    const audits: SecurityAuditEvent[] = [];
+    const principals = new Map<string, Principal>([["user:alice", user("alice", ["member"])]]);
+    const guard = new KnowledgeExecutionSecurity({
+      security: fakeSecurity({
+        principals,
+        audits,
+        identityFilter: ({ namespaceId }) => ({ kind: "totally-unapproved", namespaceId }),
+      }),
+      clock,
+      logger,
+    });
+
+    const access = await guard.access({
+      securityContext: { actor: { kind: "user", id: "alice" } },
+      namespaceId: "team",
+      baseId: "handbook",
+    });
+
+    expect(access).toBeUndefined();
+    expect(audits).toHaveLength(1);
+    expect(audits[0]?.decision).toEqual({ allowed: false, reason: "permission_denied" });
+  });
+
+  it("fails closed for wrong namespaces and malformed identity allow-lists", async () => {
+    const principals = new Map<string, Principal>([["user:alice", user("alice", ["member"])]]);
+    const malformed = [
+      { kind: "namespace", namespaceId: "other-team" },
+      { kind: "identities", namespaceId: "team", identities: "alice" },
+      {
+        kind: "identities",
+        namespaceId: "team",
+        identities: [{ kind: "unapproved-kind", id: "alice" }],
+      },
+    ];
+
+    for (const identityFilter of malformed) {
+      const guard = new KnowledgeExecutionSecurity({
+        security: fakeSecurity({ principals, identityFilter: () => identityFilter }),
+        clock,
+        logger,
+      });
+      await expect(
+        guard.access({
+          securityContext: { actor: { kind: "user", id: "alice" } },
+          namespaceId: "team",
+          baseId: "handbook",
+        }),
+      ).resolves.toBeUndefined();
+    }
+  });
+
+  it("fails closed when a custom security adapter lacks bound authorization", async () => {
+    const principals = new Map<string, Principal>([["user:alice", user("alice", ["member"])]]);
+    const legacy = fakeSecurity({ principals });
+    const guard = new KnowledgeExecutionSecurity({
+      security: { ...legacy, authorizeEffective: undefined },
+      clock,
+      logger,
+    });
+
+    await expect(
+      guard.access({
+        securityContext: { actor: { kind: "user", id: "alice" } },
+        namespaceId: "team",
+        baseId: "handbook",
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("snapshots hostile identity-filter getters exactly once on both passes", async () => {
+    const principals = new Map<string, Principal>([["user:alice", user("alice", ["member"])]]);
+    let kindReads = 0;
+    let namespaceReads = 0;
+    let identitiesReads = 0;
+    let idReads = 0;
+    const guard = new KnowledgeExecutionSecurity({
+      security: fakeSecurity({
+        principals,
+        identityFilter: ({ namespaceId }) => {
+          let localKindReads = 0;
+          let localIdReads = 0;
+          const identity = new Proxy(
+            {},
+            {
+              get: (_target, property) => {
+                if (property === "kind") return "user";
+                if (property === "id") {
+                  idReads++;
+                  return ++localIdReads === 1 ? "alice" : "mallory";
+                }
+                return undefined;
+              },
+            },
+          );
+          return new Proxy(
+            {},
+            {
+              get: (_target, property) => {
+                if (property === "kind") {
+                  kindReads++;
+                  return ++localKindReads === 1 ? "identities" : "totally-unapproved";
+                }
+                if (property === "namespaceId") {
+                  namespaceReads++;
+                  return namespaceId;
+                }
+                if (property === "identities") {
+                  identitiesReads++;
+                  return [identity];
+                }
+                return undefined;
+              },
+            },
+          );
+        },
+      }),
+      clock,
+      logger,
+    });
+
+    const access = await guard.access({
+      securityContext: { actor: { kind: "user", id: "alice" } },
+      namespaceId: "team",
+      baseId: "handbook",
+    });
+
+    expect(access?.caller?.userId).toBe("alice");
+    expect({ kindReads, namespaceReads, identitiesReads, idReads }).toEqual({
+      kindReads: 2,
+      namespaceReads: 2,
+      identitiesReads: 2,
+      idReads: 2,
     });
   });
 

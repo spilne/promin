@@ -172,6 +172,7 @@ export {
   type ApiKeySecurityConfig,
   type AuthenticationRequest,
   type AuthorizationDecision,
+  type EffectiveAuthorizationResult,
   type AuthorizationReason,
   type AuthorizationRequest,
   type AuthorizationRequestFor,

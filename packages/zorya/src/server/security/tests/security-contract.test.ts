@@ -141,6 +141,21 @@ describe("security contract", () => {
     });
   });
 
+  it("binds an allowed key-mode decision to the operator snapshot it evaluated", async () => {
+    const adapter = security();
+    const result = await adapter.authorizeEffective?.({
+      context: { actor: OPERATOR_PRINCIPAL, effective: OPERATOR_PRINCIPAL },
+      permission: { resource: "knowledge", action: "use" },
+      resource: { kind: "knowledge", namespaceId: "team-a", id: "handbook" },
+    });
+
+    expect(result).toEqual({
+      decision: { allowed: true, reason: "operator_allow" },
+      effective: OPERATOR_PRINCIPAL,
+    });
+    expect(Object.isFrozen(result?.effective)).toBeTrue();
+  });
+
   it("rejects forged operator and worker principal ids", async () => {
     const adapter = security();
     for (const forged of [

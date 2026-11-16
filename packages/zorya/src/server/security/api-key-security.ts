@@ -24,6 +24,46 @@ export function createApiKeySecurity(config: ApiKeySecurityConfig): ZoryaSecurit
     return undefined;
   };
 
+  const authorizeEffective: NonNullable<ZoryaSecurity["authorizeEffective"]> = async ({
+    context,
+    permission,
+    resource,
+  }) => {
+    const currentActor = principal(context.actor);
+    if (!currentActor) {
+      return { decision: { allowed: false, reason: "identity_unknown" } };
+    }
+    if (permission.resource !== resource.kind) {
+      return {
+        decision: { allowed: false, reason: "permission_denied" },
+        effective: currentActor,
+      };
+    }
+    if (!samePrincipal(currentActor, context.effective)) {
+      if (!currentActor.canActFor) {
+        return {
+          decision: { allowed: false, reason: "act_for_required" },
+          effective: currentActor,
+        };
+      }
+      if (!validEffectiveRef(context.effective, principal)) {
+        return {
+          decision: { allowed: false, reason: "identity_unknown" },
+          effective: currentActor,
+        };
+      }
+    }
+    if (currentActor.kind === "operator") {
+      // Key mode authorizes as its namespace-wide operator. This is also the
+      // exact principal the knowledge ACL caller must receive.
+      return {
+        decision: { allowed: true, reason: "operator_allow" },
+        effective: currentActor,
+      };
+    }
+    return { decision: { allowed: false, reason: "wrong_plane" }, effective: currentActor };
+  };
+
   return {
     authenticate: async ({ request, plane }) => {
       if (plane === "operator") {
@@ -46,21 +86,8 @@ export function createApiKeySecurity(config: ApiKeySecurityConfig): ZoryaSecurit
       return effective ? { actor: currentActor, effective: principalRef(effective) } : undefined;
     },
     identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
-    authorize: async ({ context, permission, resource }) => {
-      const currentActor = principal(context.actor);
-      if (!currentActor) return { allowed: false, reason: "identity_unknown" };
-      if (permission.resource !== resource.kind) {
-        return { allowed: false, reason: "permission_denied" };
-      }
-      if (!samePrincipal(currentActor, context.effective)) {
-        if (!currentActor.canActFor) return { allowed: false, reason: "act_for_required" };
-        if (!validEffectiveRef(context.effective, principal)) {
-          return { allowed: false, reason: "identity_unknown" };
-        }
-      }
-      if (currentActor.kind === "operator") return { allowed: true, reason: "operator_allow" };
-      return { allowed: false, reason: "wrong_plane" };
-    },
+    authorize: async (request) => (await authorizeEffective(request)).decision,
+    authorizeEffective,
     recordAudit: async (event) => {
       config.logger?.log(JSON.stringify({ component: "zorya.security", ...event }));
     },

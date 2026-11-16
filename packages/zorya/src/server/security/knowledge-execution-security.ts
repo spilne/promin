@@ -5,6 +5,7 @@ import type { Logger } from "../server-config.ts";
 import {
   ORG_WIDE_NAMESPACE,
   type AuthorizationDecision,
+  type IdentityFilter,
   type Principal,
   type PrincipalRef,
   type SecurityAuditEvent,
@@ -13,6 +14,8 @@ import {
 } from "./security.ts";
 import {
   snapshotAuthorizationDecision,
+  snapshotEffectiveAuthorizationResult,
+  snapshotPrincipalRef,
   snapshotSecurityContext,
   snapshotSecurityPermission,
   snapshotSecurityResource,
@@ -77,22 +80,8 @@ export class KnowledgeExecutionSecurity {
       return undefined;
     }
     const context = snapshotSecurityContext(resolved);
-    const effective = samePrincipal(context.actor, context.effective)
-      ? context.actor
-      : await this.security.resolvePrincipal(context.effective);
-    if (!effective) {
-      await this.auditResolved({ params, context, reason: "identity_unknown" });
-      return undefined;
-    }
-    const identityFilter = await this.security.identityFilter({
-      context,
-      namespaceId: params.namespaceId,
-    });
-    if (
-      identityFilter.namespaceId !== params.namespaceId ||
-      (identityFilter.kind === "identities" &&
-        !identityFilter.identities.some((identity) => samePrincipal(identity, context.effective)))
-    ) {
+    const identityFilter = await this.currentIdentityFilter({ context, params });
+    if (!identityFilter || !filterIncludes(identityFilter, context.effective)) {
       await this.auditResolved({ params, context, reason: "permission_denied" });
       return undefined;
     }
@@ -102,13 +91,24 @@ export class KnowledgeExecutionSecurity {
       namespaceId: params.namespaceId,
       id: params.baseId,
     });
-    const decision = snapshotAuthorizationDecision(
-      await this.security.authorize({
-        context,
-        permission,
-        resource,
-      } as import("./security.ts").AuthorizationRequest),
-    );
+    const authorizeEffective = this.security.authorizeEffective;
+    const authorization = authorizeEffective
+      ? snapshotEffectiveAuthorizationResult(
+          await authorizeEffective({
+            context,
+            permission,
+            resource,
+          } as import("./security.ts").AuthorizationRequest),
+        )
+      : undefined;
+    const bound =
+      !authorization?.decision.allowed ||
+      (authorization.effective !== undefined &&
+        samePrincipal(authorization.effective, context.effective));
+    const decision =
+      authorization && bound
+        ? authorization.decision
+        : snapshotAuthorizationDecision({ allowed: false, reason: "permission_denied" });
     await this.auditDecision({ params, context, decision });
     if (!decision.allowed) return undefined;
     return this.finalAccess({ params, runContext });
@@ -144,41 +144,56 @@ export class KnowledgeExecutionSecurity {
       return undefined;
     }
     const context = snapshotSecurityContext(resolved);
-    const effective = samePrincipal(context.actor, context.effective)
-      ? context.actor
-      : await this.security.resolvePrincipal(context.effective);
-    if (!effective) {
-      await this.auditResolved({ params, context, reason: "identity_unknown" });
-      return undefined;
-    }
-    const identityFilter = await this.security.identityFilter({
-      context,
-      namespaceId: params.namespaceId,
-    });
-    if (
-      identityFilter.namespaceId !== params.namespaceId ||
-      (identityFilter.kind === "identities" &&
-        !identityFilter.identities.some((identity) => samePrincipal(identity, context.effective)))
-    ) {
+    const identityFilter = await this.currentIdentityFilter({ context, params });
+    if (!identityFilter || !filterIncludes(identityFilter, context.effective)) {
       await this.auditResolved({ params, context, reason: "permission_denied" });
       return undefined;
     }
-    const decision = snapshotAuthorizationDecision(
-      await this.security.authorize({
-        context,
-        permission: snapshotSecurityPermission({ resource: "knowledge", action: "use" }),
-        resource: snapshotSecurityResource({
-          kind: "knowledge",
-          namespaceId: params.namespaceId,
-          id: params.baseId,
-        }),
-      } as import("./security.ts").AuthorizationRequest),
-    );
-    if (!decision.allowed) {
+    const authorizeEffective = this.security.authorizeEffective;
+    const authorization = authorizeEffective
+      ? snapshotEffectiveAuthorizationResult(
+          await authorizeEffective({
+            context,
+            permission: snapshotSecurityPermission({ resource: "knowledge", action: "use" }),
+            resource: snapshotSecurityResource({
+              kind: "knowledge",
+              namespaceId: params.namespaceId,
+              id: params.baseId,
+            }),
+          } as import("./security.ts").AuthorizationRequest),
+        )
+      : undefined;
+    if (
+      !authorization ||
+      !authorization.decision.allowed ||
+      !authorization.effective ||
+      !samePrincipal(authorization.effective, context.effective)
+    ) {
+      const decision =
+        authorization?.decision.allowed === false
+          ? authorization.decision
+          : snapshotAuthorizationDecision({ allowed: false, reason: "permission_denied" });
       await this.auditDecision({ params, context, decision });
       return undefined;
     }
-    return Object.freeze({ caller: callerFor(effective, params.namespaceId) });
+    return Object.freeze({ caller: callerFor(authorization.effective, params.namespaceId) });
+  }
+
+  private async currentIdentityFilter(input: {
+    readonly context: SecurityContext;
+    readonly params: { readonly namespaceId: string; readonly baseId: string };
+  }): Promise<IdentityFilter | undefined> {
+    try {
+      const filter = snapshotIdentityFilter(
+        await this.security.identityFilter({
+          context: input.context,
+          namespaceId: input.params.namespaceId,
+        }),
+      );
+      return filter.namespaceId === input.params.namespaceId ? filter : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   private event(params: {
@@ -326,4 +341,34 @@ function samePrincipal(
   right: { readonly kind: string; readonly id: string },
 ): boolean {
   return left.kind === right.kind && left.id === right.id;
+}
+
+function snapshotIdentityFilter(source: unknown): IdentityFilter {
+  if ((typeof source !== "object" && typeof source !== "function") || source === null) {
+    throw new TypeError("Invalid identity filter");
+  }
+  const kind = Reflect.get(source, "kind") as unknown;
+  const namespaceId = Reflect.get(source, "namespaceId") as unknown;
+  if (typeof namespaceId !== "string" || namespaceId.length === 0) {
+    throw new TypeError("Invalid identity filter namespace");
+  }
+  if (kind === "namespace") return Object.freeze({ kind, namespaceId });
+  if (kind !== "identities") throw new TypeError("Invalid identity filter kind");
+  const identitiesValue = Reflect.get(source, "identities") as unknown;
+  if (!Array.isArray(identitiesValue)) throw new TypeError("Invalid identity filter identities");
+  const length = identitiesValue.length;
+  const identities: PrincipalRef[] = [];
+  for (let index = 0; index < length; index++) {
+    identities.push(
+      snapshotPrincipalRef(Reflect.get(identitiesValue, String(index)) as PrincipalRef),
+    );
+  }
+  return Object.freeze({ kind, namespaceId, identities: Object.freeze(identities) });
+}
+
+function filterIncludes(filter: IdentityFilter, effective: PrincipalRef): boolean {
+  return (
+    filter.kind === "namespace" ||
+    filter.identities.some((identity) => samePrincipal(identity, effective))
+  );
 }
