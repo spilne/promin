@@ -118,10 +118,13 @@ import { TURN_TRACE_META_KEY, type TurnSpan, type TurnTrace } from "./trace.ts";
 import { runTraceExport, type AgentTraceExporter } from "./trace-export.ts";
 import type { ToolRegistry } from "./tool-registry.ts";
 import { buildToolDefs } from "./tool-registry.ts";
+import { compileOutputSchema } from "./dag/output-schema.ts";
 
 export interface AgentInput {
   task: string;
   messages?: Message[];
+  /** JSON Schema used for this turn's structured response, replacing the configured schema. */
+  outputJsonSchema?: Record<string, unknown>;
   /**
    * Where this turn sits in a delegation chain; set by the engine on a
    * sub-agent's turn (`subAgentTool`). Absent: a turn nobody delegated to.
@@ -145,14 +148,21 @@ export interface AgentInput {
  * - `cancelled` — the turn's `signal` aborted.
  * - `budget_exceeded` — the turn's budget ran out; the answer is
  *   `BUDGET_EXCEEDED_ANSWER`.
+ * - `output_invalid` — a per-turn output schema exhausted its repair budget.
  */
-export type AgentFinishReason = "stop" | "max_steps" | "stalled" | "cancelled" | "budget_exceeded";
+export type AgentFinishReason =
+  | "stop"
+  | "max_steps"
+  | "stalled"
+  | "cancelled"
+  | "budget_exceeded"
+  | "output_invalid";
 
 export interface AgentResult<TOutput = unknown> {
   answer: string;
   /**
-   * The schema-validated `_respond` payload when `outputSchema` is set and
-   * the turn finished with `stop`; undefined otherwise.
+   * The schema-validated `_respond` payload when a configured or per-turn
+   * output schema is set and the turn finished with `stop`; undefined otherwise.
    */
   output?: TOutput;
   /**
@@ -491,6 +501,8 @@ export const CANCELLED_ANSWER = "(cancelled)";
 export const STALLED_ANSWER = "(no answer: the agent stopped making progress)";
 /** Final assistant message of a turn that ran out of budget. */
 export const BUDGET_EXCEEDED_ANSWER = "(budget exhausted)";
+/** Final answer when a per-turn output schema exhausts its repair budget. */
+export const OUTPUT_INVALID_ANSWER = "The response did not match the required output schema.";
 
 /** Tool result of a call the engine did not run because the budget ran out. */
 const BUDGET_SKIPPED = "Not run: the turn's budget is exhausted.";
@@ -582,16 +594,6 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
   const bus = config.bus;
   const repairBudget = config.structuredOutputRepairs ?? 2;
   const redactPriorThinking = config.redactPriorThinking ?? true;
-  const schema = config.outputSchema;
-  const respondDef: LLMToolDefinition | undefined = schema
-    ? {
-        name: RESPOND_TOOL_NAME,
-        description:
-          "Provide your final structured response. Call this when you have all the information needed.",
-        parameters: zodToToolJsonSchema(schema),
-      }
-    : undefined;
-
   type EventBody = Parameters<SessionEventBus["emit"]>[0];
   const emit = (event: EventBody): void => {
     bus?.emit({ ...event, ts: clock.currentTimeMs() } as EventBody);
@@ -615,6 +617,18 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
   })
     .journaled("agent", function* (ctx, input) {
       const workflowId = ctx.workflowId;
+      const perTurnSchema = input.outputJsonSchema !== undefined;
+      const schema = perTurnSchema
+        ? compileOutputSchema(input.outputJsonSchema)
+        : config.outputSchema;
+      const respondDef: LLMToolDefinition | undefined = schema
+        ? {
+            name: RESPOND_TOOL_NAME,
+            description:
+              "Provide your final structured response. Call this when you have all the information needed.",
+            parameters: perTurnSchema ? input.outputJsonSchema! : zodToToolJsonSchema(schema),
+          }
+        : undefined;
       // The frame arrives in the run's input, which a caller may forge:
       // a malformed one fails the run before anything happens.
       const frame: DelegationFrame =
@@ -865,6 +879,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
                   messages: conversation,
                   snapshot,
                   roundMode,
+                  respondDef,
                   ...(callMaxTokens !== undefined && { maxTokens: callMaxTokens }),
                   isReplay: ctx.isReplay,
                   workflowId,
@@ -932,7 +947,24 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
               outcome = { answer, finishReason: "stop", output: parsed.data };
               break;
             }
-            if (repairsLeft === 0) throw new StructuredOutputParseError(parsed.error);
+            if (repairsLeft === 0) {
+              if (!perTurnSchema) throw new StructuredOutputParseError(parsed.error);
+              record(
+                ...skippedResults(
+                  others,
+                  `Not run: ${RESPOND_TOOL_NAME} was called in the same response.`,
+                ),
+                {
+                  role: "tool",
+                  toolCallId: respondCall.id,
+                  content: `Invalid response: ${formatToolError(parsed.error)}`,
+                  isError: true,
+                },
+                { role: "assistant", content: OUTPUT_INVALID_ANSWER },
+              );
+              outcome = { answer: OUTPUT_INVALID_ANSWER, finishReason: "output_invalid" };
+              break;
+            }
             repairsLeft--;
             record(
               ...skippedResults(
@@ -1018,9 +1050,19 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
               // The model answered in prose; the answer must come through `_respond`.
               if (roundMode === "force-respond") {
                 if (repairsLeft === 0) {
-                  throw new StructuredOutputParseError(
-                    new Error(`the model did not call ${RESPOND_TOOL_NAME}`),
-                  );
+                  if (!perTurnSchema) {
+                    throw new StructuredOutputParseError(
+                      new Error(`the model did not call ${RESPOND_TOOL_NAME}`),
+                    );
+                  }
+                  const sentinel: Message = {
+                    role: "assistant",
+                    content: OUTPUT_INVALID_ANSWER,
+                  };
+                  messages = [...messages.slice(0, -1), sentinel];
+                  produced = [...produced.slice(0, -1), sentinel];
+                  outcome = { answer: OUTPUT_INVALID_ANSWER, finishReason: "output_invalid" };
+                  break;
                 }
                 repairsLeft--;
               }
@@ -1592,6 +1634,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
     step: number;
     messages: Message[];
     snapshot: ReadonlyArray<ToolSnapshotEntry>;
+    respondDef?: LLMToolDefinition;
     roundMode: RoundMode;
     /** Output cap of this call: `maxTokens`, lowered to what the budget leaves. */
     maxTokens?: number;
@@ -1606,7 +1649,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
     const offered = Object.fromEntries(
       params.snapshot.flatMap((e) => (live[e.name] ? [[e.name, live[e.name]!]] : [])),
     );
-    const tools = [...buildToolDefs(offered), ...(respondDef ? [respondDef] : [])];
+    const tools = [...buildToolDefs(offered), ...(params.respondDef ? [params.respondDef] : [])];
     const toolChoice: LLMToolChoice | undefined =
       tools.length === 0
         ? undefined

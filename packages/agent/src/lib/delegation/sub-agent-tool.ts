@@ -274,6 +274,7 @@ function engineFinishReason(reason: FinishReason): AgentFinishReason {
     case "cancelled":
     case "max_steps":
     case "budget_exceeded":
+    case "output_invalid":
     case "stalled":
       return reason;
     default:
