@@ -9,6 +9,15 @@ import {
 
 export interface SecurityStoreV2TestFactory {
   readonly create: () => SecurityStoreV2 | Promise<SecurityStoreV2>;
+  readonly createClocked: () =>
+    | SecurityStoreV2ClockedFixture
+    | Promise<SecurityStoreV2ClockedFixture>;
+}
+
+export interface SecurityStoreV2ClockedFixture {
+  readonly store: SecurityStoreV2;
+  readonly currentTimeMs: () => number;
+  readonly advance: (ms: number) => void | Promise<void>;
 }
 
 /** Reusable contract suite for the in-memory and future PostgreSQL stores. */
@@ -86,6 +95,13 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
           authMethod: "service-account",
         }),
       ).rejects.toThrow("Unknown or disabled service-account");
+      await expect(
+        store.createSession({
+          tokenHash: "legacy-orphan-session",
+          userId: orphan.id,
+          ttlMs: 1_000,
+        }),
+      ).rejects.toThrow("Unknown or disabled user");
       expect(await store.resolveAccess({ subject: orphan, namespaceId: "team" })).toEqual({
         accessRoles: [],
         groups: [],
@@ -227,10 +243,18 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       const disabledSession = { ...session, tokenHash: "disabled-session-hash" };
       await store.putSession(disabledSession);
       await store.setUserStatus({ id: user.id, status: "disabled" });
+      await expect(
+        store.createSession({
+          tokenHash: "attempted-while-disabled",
+          userId: user.id,
+          ttlMs: 1_000,
+        }),
+      ).rejects.toThrow("Unknown or disabled user");
       await store.setUserStatus({ id: user.id, status: "active" });
       expect(await store.getSessionRecord(disabledSession.tokenHash)).toBeUndefined();
       await store.putSession(disabledSession);
       expect(await store.getSessionRecord(disabledSession.tokenHash)).toBeUndefined();
+      expect(await store.getSession("attempted-while-disabled")).toBeUndefined();
     });
 
     it("atomically appends structured audit rows and rejects chain races/conflicts", async () => {
@@ -261,40 +285,46 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       );
       expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
       expect(outcomes.filter((outcome) => outcome.status === "rejected")).toHaveLength(1);
-      const records = await store.listAuditRecords("team");
-      expect(records).toHaveLength(2);
-      expect(records[0]).toEqual(first);
-      expect(Object.isFrozen(records[0]?.metadata)).toBe(true);
-      expect(await store.listAuditOutbox()).toHaveLength(1);
+      const firstPage = await store.listAuditRecords({ namespaceId: "team", limit: 1 });
+      expect(firstPage.items).toEqual([first]);
+      expect(firstPage.nextCursor).toBe(first.id);
+      const secondPage = await store.listAuditRecords({
+        namespaceId: "team",
+        cursor: firstPage.nextCursor,
+        limit: 1,
+      });
+      expect(secondPage.items).toHaveLength(1);
+      expect(secondPage.nextCursor).toBeUndefined();
+      expect(Object.isFrozen(firstPage)).toBe(true);
+      expect(Object.isFrozen(firstPage.items)).toBe(true);
+      expect(Object.isFrozen(firstPage.items[0]?.metadata)).toBe(true);
+      expect(await store.getAuditRecord(first.id)).toEqual(first);
+      expect((await store.listAuditOutbox()).items).toHaveLength(1);
     });
 
     it("leases outbox rows exclusively and rejects stale acknowledgements", async () => {
-      const store = await factory.create();
+      const fixture = await factory.createClocked();
+      const { store } = fixture;
       await store.appendAuditWithOutbox({
         record: auditRecord({ id: "event-1", sequence: 1, hash: "hash-1" }),
-        outbox: { nextAttemptAt: 1 },
+        outbox: { nextAttemptAt: fixture.currentTimeMs() },
       });
       const [one, two] = await Promise.all([
-        store.claimAuditOutbox({ owner: "worker-1", now: 1, leaseMs: 10, limit: 1 }),
-        store.claimAuditOutbox({ owner: "worker-2", now: 1, leaseMs: 10, limit: 1 }),
+        store.claimAuditOutbox({ owner: "worker-1", leaseMs: 10, limit: 1 }),
+        store.claimAuditOutbox({ owner: "worker-2", leaseMs: 10, limit: 1 }),
       ]);
       expect(one.length + two.length).toBe(1);
       const firstLease = (one[0] ?? two[0])!;
       expect(Object.isFrozen(one.length > 0 ? one : two)).toBe(true);
       expect(Object.isFrozen(firstLease)).toBe(true);
-      const reclaimed = await store.claimAuditOutbox({
-        owner: "worker-3",
-        now: 11,
-        leaseMs: 10,
-        limit: 1,
+      expect(await store.getAuditRecord(firstLease.eventId)).toMatchObject({
+        event: "authorization",
       });
-      expect(reclaimed).toHaveLength(1);
-      expect(reclaimed[0]?.leaseToken).not.toBe(firstLease.leaseToken);
+      await fixture.advance(10);
       expect(
         await store.ackAuditOutbox({
           eventId: firstLease.eventId,
           leaseToken: firstLease.leaseToken!,
-          deliveredAt: 12,
         }),
       ).toBe(false);
       expect(
@@ -304,19 +334,24 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
           nextAttemptAt: 20,
         }),
       ).toBe(false);
+      const reclaimed = await store.claimAuditOutbox({
+        owner: "worker-3",
+        leaseMs: 10,
+        limit: 1,
+      });
+      expect(reclaimed).toHaveLength(1);
+      expect(reclaimed[0]?.leaseToken).not.toBe(firstLease.leaseToken);
       const current = reclaimed[0]!;
       expect(
         await store.ackAuditOutbox({
           eventId: current.eventId,
           leaseToken: current.leaseToken!,
-          deliveredAt: 12,
         }),
       ).toBe(true);
       expect(
         await store.ackAuditOutbox({
           eventId: current.eventId,
           leaseToken: current.leaseToken!,
-          deliveredAt: 12,
         }),
       ).toBe(true);
 
@@ -327,25 +362,35 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
           previousHash: "hash-1",
           hash: "hash-2",
         }),
-        outbox: { nextAttemptAt: 20 },
+        outbox: { nextAttemptAt: fixture.currentTimeMs() },
       });
       const releaseLease = (
-        await store.claimAuditOutbox({ owner: "worker-4", now: 20, leaseMs: 10, limit: 1 })
+        await store.claimAuditOutbox({ owner: "worker-4", leaseMs: 10, limit: 1 })
       )[0]!;
+      const retryAt = fixture.currentTimeMs() + 30;
       expect(
         await store.releaseAuditOutbox({
           eventId: releaseLease.eventId,
           leaseToken: releaseLease.leaseToken!,
-          nextAttemptAt: 50,
+          nextAttemptAt: retryAt,
           lastError: "temporary",
         }),
       ).toBe(true);
-      expect(
-        await store.claimAuditOutbox({ owner: "early", now: 49, leaseMs: 10, limit: 1 }),
-      ).toEqual([]);
-      expect(
-        await store.claimAuditOutbox({ owner: "due", now: 50, leaseMs: 10, limit: 1 }),
-      ).toHaveLength(1);
+      expect(await store.claimAuditOutbox({ owner: "early", leaseMs: 10, limit: 1 })).toEqual([]);
+      await fixture.advance(29);
+      expect(await store.claimAuditOutbox({ owner: "early", leaseMs: 10, limit: 1 })).toEqual([]);
+      await fixture.advance(1);
+      expect(await store.claimAuditOutbox({ owner: "due", leaseMs: 10, limit: 1 })).toHaveLength(1);
+
+      const outboxPage = await store.listAuditOutbox({ limit: 1 });
+      expect(outboxPage.items).toHaveLength(1);
+      expect(outboxPage.nextCursor).toBeDefined();
+      const outboxPage2 = await store.listAuditOutbox({
+        cursor: outboxPage.nextCursor,
+        limit: 1,
+      });
+      expect(outboxPage2.items).toHaveLength(1);
+      expect(outboxPage2.nextCursor).toBeUndefined();
     });
 
     it("increments and rolls denial windows atomically", async () => {
@@ -421,7 +466,7 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
         }),
       ).rejects.toThrow("token must match");
       expect(await store.getBreakGlassGrant(grant.id)).toBeUndefined();
-      expect(await store.listAuditRecords("org")).toEqual([]);
+      expect((await store.listAuditRecords({ namespaceId: "org" })).items).toEqual([]);
 
       const outcomes = await Promise.all([
         store.createBreakGlassAccess({
@@ -447,8 +492,8 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
         authMethod: "break-glass",
       });
       expect(Object.isFrozen(storedSession)).toBe(true);
-      expect(await store.listAuditRecords("org")).toHaveLength(1);
-      expect(await store.listAuditOutbox()).toHaveLength(1);
+      expect((await store.listAuditRecords({ namespaceId: "org" })).items).toHaveLength(1);
+      expect((await store.listAuditOutbox()).items).toHaveLength(1);
       await expect(store.putSession(session)).rejects.toThrow("transactionally");
 
       const duplicateTokenGrant = { ...grant, id: "grant-2" };
@@ -504,6 +549,39 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       ).rejects.toThrow("Conflicting or incomplete");
     });
 
+    it("serializes high-contention denial increments and outbox claims", async () => {
+      const fixture = await factory.createClocked();
+      const { store } = fixture;
+      const increments = await Promise.all(
+        Array.from({ length: 5_000 }, () =>
+          store.incrementDenialBucket({
+            key: "stress",
+            now: 1,
+            windowMs: 1_000,
+            emitLimit: 17,
+          }),
+        ),
+      );
+      expect(new Set(increments.map((result) => result.bucket.count)).size).toBe(5_000);
+      expect(increments.filter((result) => result.shouldEmit)).toHaveLength(17);
+      expect(await store.getDenialBucket("stress")).toMatchObject({
+        count: 5_000,
+        suppressed: 4_983,
+      });
+
+      await store.appendAuditWithOutbox({
+        record: auditRecord({ id: "stress-event", sequence: 1, hash: "stress-hash" }),
+        outbox: { nextAttemptAt: fixture.currentTimeMs() },
+      });
+      const claims = await Promise.all(
+        Array.from({ length: 100 }, (_, index) =>
+          store.claimAuditOutbox({ owner: `worker-${index}`, leaseMs: 1_000, limit: 1 }),
+        ),
+      );
+      expect(claims.flat()).toHaveLength(1);
+      expect(new Set(claims.flat().map((row) => row.eventId))).toEqual(new Set(["stress-event"]));
+    });
+
     it("snapshots hostile fields once and returns detached immutable records", async () => {
       const store = await factory.create();
       const user = await createUser(store, "hostile-user");
@@ -555,7 +633,7 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       await store.appendAuditWithOutbox({ record: hostileAudit });
       expect(eventReads).toBe(1);
       expect(metadataReads).toBe(1);
-      const storedAudit = (await store.listAuditRecords("team"))[0];
+      const storedAudit = (await store.listAuditRecords({ namespaceId: "team" })).items[0];
       expect(Object.isFrozen(storedAudit)).toBe(true);
       expect(Object.isFrozen(storedAudit?.metadata)).toBe(true);
     });
@@ -573,6 +651,11 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       await expect(store.putGroup({ id: `${idAtByteLimit}😀`, status: "active" })).rejects.toThrow(
         "byte limit",
       );
+      await expect(store.putGroup({ id: "\ud800", status: "active" })).rejects.toThrow(
+        "safe string",
+      );
+      await store.putGroup({ id: "\ufffd", status: "active" });
+      expect(await store.getGroup("\ufffd")).toBeDefined();
 
       const user = await createUser(store, "limit-user");
       const emailAtLimit = `${"e".repeat(SECURITY_STORE_LIMITS.email.maxCharacters - 2)}@x`;
@@ -678,8 +761,8 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
           outbox: { nextAttemptAt: 1 },
         }),
       ).rejects.toThrow("too many entries");
-      expect(await store.listAuditRecords("team")).toHaveLength(1);
-      expect(await store.listAuditOutbox()).toHaveLength(1);
+      expect((await store.listAuditRecords({ namespaceId: "team" })).items).toHaveLength(1);
+      expect((await store.listAuditOutbox()).items).toHaveLength(1);
 
       const grant: BreakGlassGrant = {
         id: "oversized-grant",
@@ -711,7 +794,7 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       ).rejects.toThrow("character limit");
       expect(await store.getBreakGlassGrant(grant.id)).toBeUndefined();
       expect(await store.getSessionRecord(grant.tokenHash)).toBeUndefined();
-      expect(await store.listAuditRecords("org")).toEqual([]);
+      expect((await store.listAuditRecords({ namespaceId: "org" })).items).toEqual([]);
     });
   });
 }

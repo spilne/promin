@@ -31,6 +31,7 @@ export type {
   SecurityServiceAccount,
   SecuritySession,
   SecurityStore,
+  SecurityStorePage,
   SecurityStoreTextLimit,
   SecurityStoreV2,
   SecurityUser,

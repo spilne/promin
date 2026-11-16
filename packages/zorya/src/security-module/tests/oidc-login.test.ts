@@ -412,13 +412,13 @@ describe("OIDC security module", () => {
     await env.store.setUserStatus({ id: user.id, status: "disabled" });
     const rawToken = active.sessionCookie?.slice("zorya_session=".length);
     if (!rawToken) throw new Error("login did not return a session cookie");
-    // Recreate a stale session to prove authenticate checks user status even
-    // when a backing store has not yet completed session invalidation.
-    await env.store.createSession({
-      tokenHash: hashSessionToken(rawToken),
-      userId: user.id,
-      ttlMs: SESSION_TTL_MS,
-    });
+    await expect(
+      env.store.createSession({
+        tokenHash: hashSessionToken(rawToken),
+        userId: user.id,
+        ttlMs: SESSION_TTL_MS,
+      }),
+    ).rejects.toThrow("Unknown or disabled user");
     expect(
       await authenticate(
         env,

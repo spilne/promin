@@ -106,9 +106,12 @@ describe("InMemorySecurityStore", () => {
   it("a session is found until its ttl passes, then not", async () => {
     const clock = FakeWallClock.create(1_000);
     const store = new InMemorySecurityStore({ clock });
-    await store.createSession({ tokenHash: "hash", userId: "u1", ttlMs: 500 });
+    const user = (
+      await store.findOrCreateUser({ email: "session@example.com", bindings: INITIAL_BINDINGS })
+    ).user;
+    await store.createSession({ tokenHash: "hash", userId: user.id, ttlMs: 500 });
 
-    expect(await store.getSession("hash")).toEqual({ userId: "u1" });
+    expect(await store.getSession("hash")).toEqual({ userId: user.id });
     clock.advance(501);
     expect(await store.getSession("hash")).toBeUndefined();
   });
@@ -118,13 +121,34 @@ describe("InMemorySecurityStore", () => {
     const user = (
       await store.findOrCreateUser({ email: "user@example.com", bindings: INITIAL_BINDINGS })
     ).user;
+    const other = (
+      await store.findOrCreateUser({ email: "other@example.com", bindings: INITIAL_BINDINGS })
+    ).user;
     await store.createSession({ tokenHash: "one", userId: user.id, ttlMs: 10_000 });
-    await store.createSession({ tokenHash: "two", userId: "other", ttlMs: 10_000 });
+    await store.createSession({ tokenHash: "two", userId: other.id, ttlMs: 10_000 });
 
     await store.setUserStatus({ id: user.id, status: "disabled" });
 
     expect(await store.getSession("one")).toBeUndefined();
-    expect(await store.getSession("two")).toEqual({ userId: "other" });
+    expect(await store.getSession("two")).toEqual({ userId: other.id });
     expect(await store.getUser(user.id)).toEqual({ ...user, status: "disabled" });
+  });
+
+  it("legacy session adapters reject missing and disabled users without delayed revival", async () => {
+    const store = new InMemorySecurityStore();
+    await expect(
+      store.createSession({ tokenHash: "missing", userId: "missing", ttlMs: 10_000 }),
+    ).rejects.toThrow("Unknown or disabled user");
+    expect(await store.getSession("missing")).toBeUndefined();
+
+    const user = (
+      await store.findOrCreateUser({ email: "disabled@example.com", bindings: INITIAL_BINDINGS })
+    ).user;
+    await store.setUserStatus({ id: user.id, status: "disabled" });
+    await expect(
+      store.createSession({ tokenHash: "disabled", userId: user.id, ttlMs: 10_000 }),
+    ).rejects.toThrow("Unknown or disabled user");
+    await store.setUserStatus({ id: user.id, status: "active" });
+    expect(await store.getSession("disabled")).toBeUndefined();
   });
 });

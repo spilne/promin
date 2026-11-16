@@ -22,6 +22,7 @@ import type {
   SecuritySession,
   SecurityStoreV2,
   SecurityStoreTextLimit,
+  SecurityStorePage,
   SecurityUser,
   ServiceAccountCredential,
   SubjectAccessBinding,
@@ -44,9 +45,9 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
   private readonly serviceAccounts = new Map<string, SecurityServiceAccount>();
   private readonly serviceAccountCredentials = new Map<string, ServiceAccountCredential>();
   private readonly sessions = new Map<string, SecuritySession>();
-  private readonly legacySessionTokenHashes = new Set<string>();
   private readonly invalidatedSessionTokenHashes = new Set<string>();
   private readonly auditRecords = new Map<string, SecurityAuditRecord[]>();
+  private readonly auditById = new Map<string, SecurityAuditRecord>();
   private readonly auditIds = new Set<string>();
   private readonly auditIdsWithOutbox = new Set<string>();
   private readonly auditOutboxInitialNextAttemptAt = new Map<string, number>();
@@ -169,37 +170,16 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
 
   async createSession(params: { tokenHash: string; userId: string; ttlMs: number }): Promise<void> {
     const now = this.clock.currentTimeMs();
-    const row = normalizeSession({
+    await this.putSession({
       tokenHash: params.tokenHash,
       principal: { kind: "user", id: params.userId },
       createdAt: now,
       expiresAt: now + positiveNumber(params.ttlMs, "session ttl"),
       authMethod: "oidc",
     });
-    const existing = this.sessions.get(row.tokenHash);
-    if (existing !== undefined && !recordsEqual(existing, row)) {
-      throw new Error(`Conflicting session token hash: ${row.tokenHash}`);
-    }
-    this.sessions.set(row.tokenHash, row);
-    this.legacySessionTokenHashes.add(row.tokenHash);
   }
 
   async getSession(tokenHash: string): Promise<{ userId: string } | undefined> {
-    const key = requiredString(tokenHash, "session token hash", SECURITY_STORE_LIMITS.hash);
-    if (this.legacySessionTokenHashes.has(key)) {
-      const legacy = this.sessions.get(key);
-      if (
-        legacy === undefined ||
-        this.invalidatedSessionTokenHashes.has(key) ||
-        legacy.revokedAt !== undefined ||
-        legacy.expiresAt <= this.clock.currentTimeMs() ||
-        (legacy.principal.kind === "user" &&
-          this.usersById.get(legacy.principal.id)?.status === "disabled")
-      ) {
-        return undefined;
-      }
-      return freeze({ userId: legacy.principal.id });
-    }
     const session = await this.getSessionRecord(tokenHash);
     if (session === undefined) return undefined;
     if (session.principal.kind !== "user") return undefined;
@@ -493,8 +473,30 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     return "appended";
   }
 
-  async listAuditRecords(namespaceId: string): Promise<SecurityAuditRecord[]> {
-    return (this.auditRecords.get(requiredString(namespaceId, "namespace id")) ?? []).map(clone);
+  async getAuditRecord(eventId: string): Promise<SecurityAuditRecord | undefined> {
+    const row = this.auditById.get(requiredString(eventId, "event id"));
+    return row && clone(row);
+  }
+
+  async listAuditRecords(params: {
+    readonly namespaceId: string;
+    readonly cursor?: string;
+    readonly limit?: number;
+  }): Promise<SecurityStorePage<SecurityAuditRecord>> {
+    const namespaceId = requiredString(params.namespaceId, "namespace id");
+    const cursor = optionalBoundedString(
+      params.cursor,
+      "audit cursor",
+      SECURITY_STORE_LIMITS.identifier,
+    );
+    const limit = pageLimit(params.limit, "audit page limit");
+    return pageRows(
+      this.auditRecords.get(namespaceId) ?? [],
+      cursor,
+      limit,
+      (row) => row.id,
+      "audit cursor",
+    );
   }
 
   async getAuditOutbox(eventId: string): Promise<SecurityAuditOutboxRecord | undefined> {
@@ -505,10 +507,16 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
   async listAuditOutbox(
     params: {
       readonly status?: SecurityAuditOutboxRecord["status"];
+      readonly cursor?: string;
       readonly limit?: number;
     } = {},
-  ): Promise<SecurityAuditOutboxRecord[]> {
+  ): Promise<SecurityStorePage<SecurityAuditOutboxRecord>> {
     const status = params.status;
+    const cursor = optionalBoundedString(
+      params.cursor,
+      "outbox cursor",
+      SECURITY_STORE_LIMITS.identifier,
+    );
     if (
       status !== undefined &&
       status !== "pending" &&
@@ -517,27 +525,24 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     ) {
       throw new TypeError("invalid outbox status");
     }
-    const limit =
-      params.limit === undefined
-        ? SECURITY_STORE_LIMITS.outboxBatch
-        : positiveInteger(params.limit, "outbox list limit");
-    if (limit > SECURITY_STORE_LIMITS.outboxBatch) {
-      throw new TypeError("outbox list limit is too large");
-    }
-    return [...this.auditOutbox.values()]
-      .filter((row) => status === undefined || row.status === status)
-      .slice(0, limit)
-      .map(clone);
+    const limit = pageLimit(params.limit, "outbox page limit");
+    return pageRows(
+      [...this.auditOutbox.values()],
+      cursor,
+      limit,
+      (row) => row.eventId,
+      "outbox cursor",
+      (row) => status === undefined || row.status === status,
+    );
   }
 
   async claimAuditOutbox(params: {
     readonly owner: string;
-    readonly now: number;
     readonly leaseMs: number;
     readonly limit: number;
   }): Promise<ReadonlyArray<SecurityAuditOutboxRecord>> {
     const owner = requiredString(params.owner, "outbox lease owner");
-    const now = finiteNumber(params.now, "outbox claim time");
+    const now = finiteNumber(this.clock.currentTimeMs(), "outbox claim time");
     const leaseMs = positiveNumber(params.leaseMs, "outbox lease duration");
     const limit = positiveInteger(params.limit, "outbox claim limit");
     if (limit > SECURITY_STORE_LIMITS.outboxBatch) {
@@ -556,46 +561,46 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
           left.nextAttemptAt - right.nextAttemptAt || left.eventId.localeCompare(right.eventId),
       )
       .slice(0, limit);
-    const claimed: SecurityAuditOutboxRecord[] = [];
-    for (const row of due) {
-      const next = freeze<SecurityAuditOutboxRecord>({
+    const leaseExpiresAt = finiteSum(now, leaseMs, "outbox lease expiry");
+    const claimed = due.map((row) =>
+      freeze<SecurityAuditOutboxRecord>({
         eventId: row.eventId,
         status: "leased",
         attempts: safeIncrement(row.attempts, "outbox attempts"),
         nextAttemptAt: row.nextAttemptAt,
         leaseToken: crypto.randomUUID(),
         leaseOwner: owner,
-        leaseExpiresAt: finiteSum(now, leaseMs, "outbox lease expiry"),
+        leaseExpiresAt,
         ...(row.lastError !== undefined && { lastError: row.lastError }),
-      });
+      }),
+    );
+    for (const next of claimed) {
       this.auditOutbox.set(next.eventId, next);
-      claimed.push(clone(next));
     }
-    return freeze(claimed);
+    return freeze(claimed.map(clone));
   }
 
   async ackAuditOutbox(params: {
     readonly eventId: string;
     readonly leaseToken: string;
-    readonly deliveredAt: number;
   }): Promise<boolean> {
     const eventId = requiredString(params.eventId, "event id");
     const leaseToken = requiredString(params.leaseToken, "outbox lease token");
-    const deliveredAt = finiteNumber(params.deliveredAt, "outbox delivery time");
+    const now = finiteNumber(this.clock.currentTimeMs(), "outbox delivery time");
     const row = this.auditOutbox.get(eventId);
     if (!row) return false;
     if (row.status === "delivered") {
-      return row.leaseToken === leaseToken && row.deliveredAt === deliveredAt;
+      return row.leaseToken === leaseToken;
     }
     if (
       row.status !== "leased" ||
       row.leaseToken !== leaseToken ||
       row.leaseExpiresAt === undefined ||
-      deliveredAt > row.leaseExpiresAt
+      now >= row.leaseExpiresAt
     ) {
       return false;
     }
-    this.auditOutbox.set(eventId, freeze({ ...row, status: "delivered", deliveredAt }));
+    this.auditOutbox.set(eventId, freeze({ ...row, status: "delivered", deliveredAt: now }));
     return true;
   }
 
@@ -613,6 +618,7 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
       "outbox last error",
       SECURITY_STORE_LIMITS.reason,
     );
+    const now = finiteNumber(this.clock.currentTimeMs(), "outbox release time");
     const row = this.auditOutbox.get(eventId);
     if (!row) return false;
     if (row.status === "pending") {
@@ -622,7 +628,14 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
         row.lastError === lastError
       );
     }
-    if (row.status !== "leased" || row.leaseToken !== leaseToken) return false;
+    if (
+      row.status !== "leased" ||
+      row.leaseToken !== leaseToken ||
+      row.leaseExpiresAt === undefined ||
+      now >= row.leaseExpiresAt
+    ) {
+      return false;
+    }
     this.auditOutbox.set(
       eventId,
       freeze({
@@ -805,9 +818,7 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     const row = normalizeAuditRecord(recordInput);
     const outbox =
       outboxInput === undefined ? undefined : pendingAuditOutbox(row.id, outboxInput.nextAttemptAt);
-    const existing = this.auditRecords
-      .get(row.namespaceId)
-      ?.find((candidate) => candidate.id === row.id);
+    const existing = this.auditById.get(row.id);
     if (this.auditIds.has(row.id)) {
       const expectedOutbox = this.auditIdsWithOutbox.has(row.id);
       const expectedNextAttemptAt = this.auditOutboxInitialNextAttemptAt.get(row.id);
@@ -837,6 +848,7 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     if (prepared.result !== "appended") return;
     const chain = this.auditRecords.get(prepared.row.namespaceId) ?? [];
     this.auditIds.add(prepared.row.id);
+    this.auditById.set(prepared.row.id, prepared.row);
     this.auditRecords.set(prepared.row.namespaceId, [...chain, prepared.row]);
     if (prepared.outbox !== undefined) {
       this.auditIdsWithOutbox.add(prepared.row.id);
@@ -915,6 +927,7 @@ function hasUnsafeStringCharacter(value: string): boolean {
       (point >= 0x200b && point <= 0x200f) ||
       (point >= 0x202a && point <= 0x202e) ||
       (point >= 0x2060 && point <= 0x206f) ||
+      (point >= 0xd800 && point <= 0xdfff) ||
       point === 0xfeff
     ) {
       return true;
@@ -961,6 +974,41 @@ function safeIncrement(value: number, label: string): number {
     throw new Error(`${label} overflow`);
   }
   return value + 1;
+}
+
+function pageLimit(value: unknown, label: string): number {
+  const limit =
+    value === undefined ? SECURITY_STORE_LIMITS.pageSize : positiveInteger(value, label);
+  if (limit > SECURITY_STORE_LIMITS.pageSize) {
+    throw new TypeError(`${label} is too large`);
+  }
+  return limit;
+}
+
+function pageRows<T>(
+  rows: ReadonlyArray<T>,
+  cursor: string | undefined,
+  limit: number,
+  keyOf: (row: T) => string,
+  cursorLabel: string,
+  include: (row: T) => boolean = () => true,
+): SecurityStorePage<T> {
+  let start = 0;
+  if (cursor !== undefined) {
+    const index = rows.findIndex((row) => keyOf(row) === cursor);
+    if (index < 0) throw new Error(`Unknown ${cursorLabel}: ${cursor}`);
+    start = index + 1;
+  }
+  const candidates = rows.slice(start).filter(include);
+  const selected = candidates.slice(0, limit);
+  const items = freeze(selected.map(clone));
+  return freeze({
+    items,
+    ...(candidates.length > limit &&
+      selected.length > 0 && {
+        nextCursor: keyOf(selected[selected.length - 1]!),
+      }),
+  });
 }
 
 function boundedArray<T>(value: ReadonlyArray<T>, label: string): ReadonlyArray<T> {

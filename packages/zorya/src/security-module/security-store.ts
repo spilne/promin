@@ -12,7 +12,10 @@ export interface SecurityStoreTextLimit {
   readonly maxBytes: number;
 }
 
-/** Shared storage limits; PostgreSQL schemas and every store adapter must match these boundaries. */
+/**
+ * Shared storage limits; PostgreSQL schemas and every store adapter must match these boundaries.
+ * Stored text must also be well-formed Unicode so UTF-8 persistence is identity preserving.
+ */
 export const SECURITY_STORE_LIMITS = Object.freeze({
   identifier: Object.freeze({ maxCharacters: 256, maxBytes: 512 }),
   namespace: Object.freeze({ maxCharacters: 256, maxBytes: 512 }),
@@ -25,6 +28,7 @@ export const SECURITY_STORE_LIMITS = Object.freeze({
   metadataString: Object.freeze({ maxCharacters: 4_096, maxBytes: 8_192 }),
   metadataEntries: 64,
   initialBindings: 10_000,
+  pageSize: 1_000,
   outboxBatch: 1_000,
 } as const);
 
@@ -155,6 +159,12 @@ export interface SecurityAuditOutboxRecord {
   readonly lastError?: string;
 }
 
+export interface SecurityStorePage<T> {
+  readonly items: ReadonlyArray<T>;
+  /** Opaque stable cursor supplied unchanged to the next request. */
+  readonly nextCursor?: string;
+}
+
 export interface SecurityDenialBucket {
   readonly key: string;
   readonly windowStartedAt: number;
@@ -269,24 +279,30 @@ export interface SecurityStoreV2 extends SecurityStore {
     readonly record: SecurityAuditRecord;
     readonly outbox?: { readonly nextAttemptAt: number };
   }): Promise<"appended" | "already-exists">;
-  listAuditRecords(namespaceId: string): Promise<SecurityAuditRecord[]>;
+  getAuditRecord(eventId: string): Promise<SecurityAuditRecord | undefined>;
+  listAuditRecords(params: {
+    readonly namespaceId: string;
+    readonly cursor?: string;
+    readonly limit?: number;
+  }): Promise<SecurityStorePage<SecurityAuditRecord>>;
   getAuditOutbox(eventId: string): Promise<SecurityAuditOutboxRecord | undefined>;
   listAuditOutbox(params?: {
     readonly status?: SecurityAuditOutboxRecord["status"];
+    readonly cursor?: string;
     readonly limit?: number;
-  }): Promise<SecurityAuditOutboxRecord[]>;
-  /** Atomically leases due pending rows and rows whose prior lease expired. */
+  }): Promise<SecurityStorePage<SecurityAuditOutboxRecord>>;
+  /** Atomically leases rows due at the store/DB clock and rows whose prior lease expired. */
   claimAuditOutbox(params: {
     readonly owner: string;
-    readonly now: number;
     readonly leaseMs: number;
     readonly limit: number;
   }): Promise<ReadonlyArray<SecurityAuditOutboxRecord>>;
+  /** Acknowledges only a currently live lease, timestamped by the store/DB clock. */
   ackAuditOutbox(params: {
     readonly eventId: string;
     readonly leaseToken: string;
-    readonly deliveredAt: number;
   }): Promise<boolean>;
+  /** Releases only a currently live lease; an expired token is always fenced out. */
   releaseAuditOutbox(params: {
     readonly eventId: string;
     readonly leaseToken: string;
