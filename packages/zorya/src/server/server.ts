@@ -502,6 +502,7 @@ export class ZoryaServer {
     }
     if (this.workflowBuilder) mountWorkflowBuilder({ router, builder: this.workflowBuilder });
     if (config.uiDir) mountStatic({ router, uiDir: config.uiDir });
+    router.assertSecurityCoverage();
   }
 
   /**
