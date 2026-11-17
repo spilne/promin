@@ -496,14 +496,16 @@ export function buildDagWorkflow(
             weight = resolved.length;
           }
           const key = nodeKey(node.id);
+          const attemptsPerRun =
+            node.kind === "agent" || node.kind === "dag" ? (node.retry?.maxAttempts ?? 1) : 1;
           const subDagSlots =
             node.kind !== "dag"
               ? 0
               : node.forEach !== undefined
-                ? (fanOutItems?.length ?? 0)
+                ? (fanOutItems?.length ?? 0) * attemptsPerRun
                 : node.repeat !== undefined
-                  ? node.repeat.maxIterations
-                  : 1;
+                  ? node.repeat.maxIterations * attemptsPerRun
+                  : attemptsPerRun;
           const proposedStart = abort.signal.aborted;
           const proposedGrantPerRun =
             !proposedStart && subDagSlots > 0
@@ -703,6 +705,9 @@ export function buildDagWorkflow(
             outcome = transformed.ok
               ? { ...transformed, spend: EMPTY_USAGE }
               : { ...transformed, retryable: false, spend: EMPTY_USAGE };
+          }
+          if (outcome.attempts !== undefined) {
+            stats = { ...stats, attempts: outcome.attempts };
           }
           held.delete(node.id);
           releaseUnusedSubDagGrants(node.id);

@@ -107,10 +107,14 @@ export function* runFanOut<N extends DagNode>(
   }
 
   let spend: BudgetUsage = EMPTY_USAGE;
+  let attempts = 0;
+  let retried = false;
   const itemErrors: Record<number, string> = {};
   const output: unknown[] = [];
   for (const [index, outcome] of outcomes.entries()) {
     spend = addUsage(spend, outcome.spend);
+    attempts += outcome.attempts ?? 1;
+    retried ||= outcome.attempts !== undefined;
     if (outcome.ok) output[index] = outcome.output;
     else {
       output[index] = null;
@@ -124,7 +128,8 @@ export function* runFanOut<N extends DagNode>(
       (entry): entry is { outcome: Extract<AttemptOutcome, { ok: false }>; index: number } =>
         !entry.outcome.ok,
     );
-  if (failures.length === 0) return { ok: true, output, spend, itemErrors };
+  if (failures.length === 0)
+    return { ok: true, output, spend, itemErrors, ...(retried && { attempts }) };
 
   const substantive = failures.filter(({ outcome }) => !outcome.error.endsWith("was cancelled"));
   const first = (substantive[0] ?? failures[0])!;
@@ -135,6 +140,7 @@ export function* runFanOut<N extends DagNode>(
       retryable: first.outcome.retryable,
       spend,
       itemErrors,
+      ...(retried && { attempts }),
     };
   }
   if (failures.length === params.items.length) {
@@ -144,7 +150,8 @@ export function* runFanOut<N extends DagNode>(
       retryable: first.outcome.retryable,
       spend,
       itemErrors,
+      ...(retried && { attempts }),
     };
   }
-  return { ok: true, output, spend, itemErrors };
+  return { ok: true, output, spend, itemErrors, ...(retried && { attempts }) };
 }

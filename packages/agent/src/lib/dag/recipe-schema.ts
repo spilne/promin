@@ -11,6 +11,7 @@ import type {
   ForEach,
   NodeInputSource,
   Repeat,
+  Retry,
   TransformOp,
 } from "./types.ts";
 
@@ -80,6 +81,13 @@ const RepeatSchema: z.ZodType<Repeat> = z
   })
   .strict();
 
+const RetrySchema: z.ZodType<Retry> = z
+  .object({
+    maxAttempts: z.number().int().min(2).max(5),
+    backoffMs: z.number().int().min(0).max(60_000).optional(),
+  })
+  .strict();
+
 const AgentNodeSchema = z
   .object({
     id: z.string().regex(NODE_ID_PATTERN),
@@ -93,6 +101,7 @@ const AgentNodeSchema = z
     forEach: ForEachSchema.optional(),
     repeat: RepeatSchema.optional(),
     timeoutMs: z.number().int().min(1_000).max(86_400_000).optional(),
+    retry: RetrySchema.optional(),
     join: z.enum(["all", "any"]).optional(),
     onError: z.enum(["abort", "skip"]).optional(),
   })
@@ -138,6 +147,7 @@ const SubDagNodeSchema = z
     forEach: ForEachSchema.optional(),
     repeat: RepeatSchema.optional(),
     timeoutMs: z.number().int().min(1_000).max(86_400_000).optional(),
+    retry: RetrySchema.optional(),
     join: z.enum(["all", "any"]).optional(),
     onError: z.enum(["abort", "skip"]).optional(),
   })

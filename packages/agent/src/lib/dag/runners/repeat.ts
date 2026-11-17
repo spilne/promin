@@ -20,6 +20,7 @@ function exhausted(params: {
   readonly spend: BudgetUsage;
   readonly iterations: number;
   readonly reason: string;
+  readonly attempts?: number;
 }): AttemptOutcome & { readonly iterations: number } {
   if (params.repeat.onExhausted === "continue" && params.hasOutput) {
     return {
@@ -27,6 +28,7 @@ function exhausted(params: {
       output: params.output,
       spend: params.spend,
       iterations: params.iterations,
+      ...(params.attempts !== undefined && { attempts: params.attempts }),
     };
   }
   return {
@@ -35,6 +37,7 @@ function exhausted(params: {
     retryable: false,
     spend: params.spend,
     iterations: params.iterations,
+    ...(params.attempts !== undefined && { attempts: params.attempts }),
   };
 }
 
@@ -53,6 +56,8 @@ export function* runRepeat<N extends DagNode>(
   let spend: BudgetUsage = EMPTY_USAGE;
   let previous: unknown;
   let hasPrevious = false;
+  let attempts = 0;
+  let retried = false;
 
   for (let iteration = 0; iteration < params.repeat.maxIterations; iteration++) {
     const budget = params.share
@@ -68,6 +73,7 @@ export function* runRepeat<N extends DagNode>(
         spend,
         iterations: iteration,
         reason: `ran out of ${empty} before iteration ${iteration}`,
+        ...(retried && { attempts }),
       });
     }
 
@@ -83,7 +89,15 @@ export function* runRepeat<N extends DagNode>(
       signal: params.signal,
     });
     spend = addUsage(spend, outcome.spend);
-    if (!outcome.ok) return { ...outcome, spend, iterations: iteration + 1 };
+    attempts += outcome.attempts ?? 1;
+    retried ||= outcome.attempts !== undefined;
+    if (!outcome.ok)
+      return {
+        ...outcome,
+        spend,
+        iterations: iteration + 1,
+        ...(retried && { attempts }),
+      };
 
     previous = outcome.output;
     hasPrevious = true;
@@ -98,6 +112,7 @@ export function* runRepeat<N extends DagNode>(
         output: outcome.output,
         spend,
         iterations: iteration + 1,
+        ...(retried && { attempts }),
       };
     }
   }
@@ -110,5 +125,6 @@ export function* runRepeat<N extends DagNode>(
     spend,
     iterations: params.repeat.maxIterations,
     reason: `did not satisfy its condition after ${params.repeat.maxIterations} iterations`,
+    ...(retried && { attempts }),
   });
 }

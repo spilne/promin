@@ -19,6 +19,7 @@ export type AttemptOutcome =
       readonly output: unknown;
       readonly spend: BudgetUsage;
       readonly childRuns?: number;
+      readonly attempts?: number;
     }
   | {
       readonly ok: false;
@@ -26,6 +27,7 @@ export type AttemptOutcome =
       readonly retryable: boolean;
       readonly spend: BudgetUsage;
       readonly childRuns?: number;
+      readonly attempts?: number;
     };
 
 export interface AttemptParams<N extends DagNode = DagNode> {

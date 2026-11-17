@@ -93,6 +93,11 @@ export interface Repeat {
   readonly onExhausted?: "fail" | "continue";
 }
 
+export interface Retry {
+  readonly maxAttempts: number;
+  readonly backoffMs?: number;
+}
+
 export interface AgentNode extends NodeBase {
   readonly kind: "agent";
   /** Recipe id in the AgentRegistry. The executor resolves it at run time. */
@@ -103,6 +108,8 @@ export interface AgentNode extends NodeBase {
   readonly repeat?: Repeat;
   /** Maximum wall-clock time for each attempt. */
   readonly timeoutMs?: number;
+  /** Retry failed attempts that explicitly report a retryable error. */
+  readonly retry?: Retry;
 }
 
 export interface SubDagNode extends NodeBase {
@@ -113,6 +120,8 @@ export interface SubDagNode extends NodeBase {
   readonly repeat?: Repeat;
   /** Maximum wall-clock time for each attempt. */
   readonly timeoutMs?: number;
+  /** Retry failed attempts that explicitly report a retryable error. */
+  readonly retry?: Retry;
 }
 
 export interface DecisionModelRef {

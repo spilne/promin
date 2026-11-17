@@ -232,6 +232,33 @@ repeat: {
 Exhausting the iteration or budget limit normally produces `repeat_exhausted`. With
 `onExhausted: "continue"`, the last completed output is used instead.
 
+## Timeouts and retries
+
+Agent and sub-graph nodes can bound each attempt with `timeoutMs` and retry failures that are safe
+to repeat. Decision nodes support `timeoutMs` but not graph-level retries because their provider
+already applies its own transient retry policy.
+
+```ts
+{
+  id: "research",
+  kind: "agent",
+  agentId: "researcher",
+  inputs: { topic: { kind: "initial", path: "topic" } },
+  timeoutMs: 30_000,
+  retry: { maxAttempts: 3, backoffMs: 2_000 },
+}
+```
+
+A timeout is measured separately for every plain, fan-out, or repeat attempt. Its start is
+journaled, so recovery does not grant a fresh deadline. Timing out cancels the child and reports
+`node_timeout`. The allowed range is 1 second through 24 hours.
+
+Retries use a distinct durable child run for every attempt. They apply to child failures, timeouts,
+and output-schema mismatches, but not to missing or disabled agents, exhausted budgets, child-run
+limits, unrelated cancellation, or rejected approvals. Later attempts receive the node budget
+minus all earlier spend. `maxAttempts` is 2 through 5, and `backoffMs` is a durable wait between 0
+and 60 seconds. With `forEach` or `repeat`, each item or iteration owns its retry sequence.
+
 ## Sub-graphs
 
 A `dag` node runs another registered graph and uses that child graph's terminal outputs as its
@@ -362,8 +389,8 @@ after earlier iterations' spend.
 ## `nodeStats`
 
 `DurableDagOutput.nodeStats` reports every node's `spend` and `durationMs`. Fan-out nodes also report
-`items` and `failedItems`; repeated nodes report `iterations`. The run's `spend` is the sum of node
-spend.
+`items` and `failedItems`; repeated nodes report `iterations`. A node that retried also reports
+`attempts`. The run's `spend` is the sum of all attempts.
 
 ## Full recipe
 
