@@ -101,6 +101,8 @@ export interface AgentNode extends NodeBase {
   readonly output?: { readonly schema: Record<string, unknown> };
   readonly forEach?: ForEach;
   readonly repeat?: Repeat;
+  /** Maximum wall-clock time for each attempt. */
+  readonly timeoutMs?: number;
 }
 
 export interface SubDagNode extends NodeBase {
@@ -109,6 +111,8 @@ export interface SubDagNode extends NodeBase {
   readonly version: string;
   readonly forEach?: ForEach;
   readonly repeat?: Repeat;
+  /** Maximum wall-clock time for each attempt. */
+  readonly timeoutMs?: number;
 }
 
 export interface DecisionModelRef {
@@ -121,6 +125,8 @@ export interface DecideNode extends NodeBase {
   readonly kind: "decide";
   readonly model: DecisionModelRef;
   readonly questions: Readonly<Record<string, DecisionQuestion>>;
+  /** Maximum wall-clock time for the decision call. */
+  readonly timeoutMs?: number;
 }
 
 /** Set on the input of a DAG run started by another DAG run. */

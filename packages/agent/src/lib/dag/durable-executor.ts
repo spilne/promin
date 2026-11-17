@@ -72,6 +72,7 @@ import { checkBlockers, resolveNodeInputs, resolveNodeInputSource } from "./dag-
 import { emptyDimension, startShare, waitingWeight } from "./node-budget.ts";
 import { recipeIssues } from "./recipe-schema.ts";
 import { runAgentAttempt } from "./runners/agent-attempt.ts";
+import { withAttempts } from "./runners/attempts.ts";
 import { runDecide } from "./runners/decide.ts";
 import { childRunId, nodeKey, type AttemptOutcome, type NodeRunEnv } from "./runners/env.ts";
 import { runFanOut } from "./runners/fan-out.ts";
@@ -314,7 +315,10 @@ export function buildDagWorkflow(
       const abort = new AbortController();
       const abortFromParent = (): void => abort.abort();
       if (options.signal?.aborted) abortFromParent();
-      else options.signal?.addEventListener("abort", abortFromParent, { once: true });
+      else
+        options.signal?.addEventListener("abort", abortFromParent, {
+          once: true,
+        });
       const env: NodeRunEnv = {
         ctx,
         input,
@@ -560,7 +564,7 @@ export function buildDagWorkflow(
           let outcome: AttemptOutcome;
           let stats: SettlementStats | undefined;
           if (node.kind === "agent") {
-            const attempt = function* (
+            const attempt = withAttempts(function* (
               attemptEnv: NodeRunEnv,
               attemptParams: Parameters<typeof runAgentAttempt>[1],
             ): Generator<ActivityYield, AttemptOutcome, any> {
@@ -570,7 +574,7 @@ export function buildDagWorkflow(
                   return yield* claimChildRun(attemptParams.key);
                 },
               });
-            };
+            });
             if (node.forEach !== undefined && fanOutItems !== undefined) {
               const fanOut = yield* runFanOut(env, {
                 node,
@@ -607,7 +611,7 @@ export function buildDagWorkflow(
               });
             }
           } else if (node.kind === "dag") {
-            const attempt = function* (
+            const attempt = withAttempts(function* (
               attemptEnv: NodeRunEnv,
               attemptParams: {
                 readonly node: SubDagNode;
@@ -634,7 +638,7 @@ export function buildDagWorkflow(
                 childRunsAvailable += Math.max(0, reservation.perRun - nested);
               }
               return result;
-            };
+            });
             if (node.forEach !== undefined && fanOutItems !== undefined) {
               const fanOut = yield* runFanOut(env, {
                 node,
@@ -724,7 +728,10 @@ export function buildDagWorkflow(
         if (isEngineControl(err) || !usageRecorder) throw err;
         // What the nodes spent before the run failed still counts. Recorded
         // as a failure, like the run's other failed entries.
-        const failedSpend = subtractUsage({ usage: spent, excluded: subDagSpend });
+        const failedSpend = subtractUsage({
+          usage: spent,
+          excluded: subDagSpend,
+        });
         yield* ctx.activity(
           "record-usage-failed",
           async (): Promise<void> => {

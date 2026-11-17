@@ -92,6 +92,7 @@ const AgentNodeSchema = z
       .optional(),
     forEach: ForEachSchema.optional(),
     repeat: RepeatSchema.optional(),
+    timeoutMs: z.number().int().min(1_000).max(86_400_000).optional(),
     join: z.enum(["all", "any"]).optional(),
     onError: z.enum(["abort", "skip"]).optional(),
   })
@@ -136,6 +137,7 @@ const SubDagNodeSchema = z
     inputs: z.record(z.string(), NodeInputSourceSchema),
     forEach: ForEachSchema.optional(),
     repeat: RepeatSchema.optional(),
+    timeoutMs: z.number().int().min(1_000).max(86_400_000).optional(),
     join: z.enum(["all", "any"]).optional(),
     onError: z.enum(["abort", "skip"]).optional(),
   })
@@ -197,7 +199,10 @@ const DecisionQuestionsSchema = z
   .superRefine((questions, ctx) => {
     const count = Object.keys(questions).length;
     if (count < 1 || count > 16) {
-      ctx.addIssue({ code: "custom", message: "questions must contain between 1 and 16 entries" });
+      ctx.addIssue({
+        code: "custom",
+        message: "questions must contain between 1 and 16 entries",
+      });
     }
   });
 
@@ -207,6 +212,7 @@ const DecideNodeSchema = z
     kind: z.literal("decide"),
     model: DecisionModelRefSchema,
     questions: DecisionQuestionsSchema,
+    timeoutMs: z.number().int().min(1_000).max(86_400_000).optional(),
     inputs: z.record(z.string(), NodeInputSourceSchema),
     join: z.enum(["all", "any"]).optional(),
     onError: z.enum(["abort", "skip"]).optional(),
