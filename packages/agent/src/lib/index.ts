@@ -1041,3 +1041,14 @@ export type {
   CreateDagWorkflowConfig,
   DagUsageRecorder,
 } from "./dag/durable-executor.ts";
+
+// Typed decision providers.
+export { checkAnswers, DecisionAnswerError } from "./decision/types.ts";
+export type {
+  DecisionAnswer,
+  DecisionProvider,
+  DecisionQuestion,
+  DecisionRequest,
+  DecisionResult,
+  ProbabilitySource,
+} from "./decision/types.ts";
