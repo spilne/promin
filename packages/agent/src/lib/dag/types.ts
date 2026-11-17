@@ -102,6 +102,24 @@ export interface AgentNode extends NodeBase {
   readonly repeat?: Repeat;
 }
 
+export interface SubDagNode extends NodeBase {
+  readonly kind: "dag";
+  readonly dagId: string;
+  readonly version: string;
+  readonly forEach?: ForEach;
+  readonly repeat?: Repeat;
+}
+
+/** Set on the input of a DAG run started by another DAG run. */
+export interface DagParentFrame {
+  /** One for a child of a root run. */
+  readonly depth: number;
+  /** DAG ids from the root down to the direct parent. */
+  readonly ancestors: ReadonlyArray<string>;
+  /** Child runs this run and its descendants may still start. */
+  readonly childRunsAllowed: number;
+}
+
 export type TransformOp =
   | { readonly op: "collect"; readonly fields: ReadonlyArray<string> }
   | { readonly op: "pick"; readonly path: string }
@@ -123,7 +141,7 @@ export interface TransformNode extends NodeBase {
   readonly ops: ReadonlyArray<TransformOp>;
 }
 
-export type DagNode = AgentNode | TransformNode;
+export type DagNode = AgentNode | TransformNode | SubDagNode;
 
 /** Durable accounting and timing for one settled DAG node. */
 export interface DagNodeStats {

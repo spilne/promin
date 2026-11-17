@@ -125,9 +125,24 @@ const TransformNodeSchema = z
   })
   .strict();
 
+const SubDagNodeSchema = z
+  .object({
+    id: z.string().regex(NODE_ID_PATTERN),
+    kind: z.literal("dag"),
+    dagId: z.string(),
+    version: z.string(),
+    inputs: z.record(z.string(), NodeInputSourceSchema),
+    forEach: ForEachSchema.optional(),
+    repeat: RepeatSchema.optional(),
+    join: z.enum(["all", "any"]).optional(),
+    onError: z.enum(["abort", "skip"]).optional(),
+  })
+  .strict();
+
 const DagNodeSchema: z.ZodType<DagNode> = z.discriminatedUnion("kind", [
   AgentNodeSchema,
   TransformNodeSchema,
+  SubDagNodeSchema,
 ]);
 
 const DagEdgeSchema = z

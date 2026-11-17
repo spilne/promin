@@ -89,6 +89,14 @@ export const runAgentAttempt: RunAttempt<AgentNode> = function* (env, params) {
   if (!routed.ok) {
     return { ok: false, error: routed.error, retryable: false, spend: EMPTY_USAGE };
   }
+  if (params.claimChildRun && !(yield* params.claimChildRun())) {
+    return {
+      ok: false,
+      error: "too_many_child_runs: root DAG run may start at most 500 child runs",
+      retryable: false,
+      spend: EMPTY_USAGE,
+    };
+  }
 
   let result: AgentResult;
   try {

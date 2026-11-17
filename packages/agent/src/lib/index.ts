@@ -1011,6 +1011,8 @@ export type {
   DagRunScope,
   DagNode,
   DagNodeStats,
+  DagParentFrame,
+  SubDagNode,
   AgentNode,
   ForEach,
   Repeat,
@@ -1025,7 +1027,14 @@ export type {
 export { childRunId, nodeKey } from "./dag/runners/env.ts";
 export type { AttemptOutcome, AttemptParams, NodeRunEnv, RunAttempt } from "./dag/runners/env.ts";
 export { runAgentAttempt } from "./dag/runners/agent-attempt.ts";
-export { createDagWorkflow, DAG_WORKFLOW_NAME, dagNodeRunId } from "./dag/durable-executor.ts";
+export { runSubDagAttempt } from "./dag/runners/sub-dag-attempt.ts";
+export {
+  createDagWorkflow,
+  DAG_WORKFLOW_NAME,
+  dagNodeRunId,
+  MAX_CHILD_RUNS,
+  MAX_DAG_DEPTH,
+} from "./dag/durable-executor.ts";
 export type {
   DurableDagInput,
   DurableDagOutput,

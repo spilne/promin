@@ -125,7 +125,10 @@ export function validateDag(params: { dag: DagGraph; dagId?: string }): void {
         }
       }
     }
-    if (node.kind === "agent" && node.forEach !== undefined) {
+    if (node.kind === "dag" && params.dagId !== undefined && node.dagId === params.dagId) {
+      issues.push(`dag node ${node.id} cannot reference its own DAG ${params.dagId}`);
+    }
+    if (node.kind !== "transform" && node.forEach !== undefined) {
       const src = node.forEach.items;
       if (src.kind === "node") {
         if (!nodeIds.has(src.nodeId)) {
@@ -145,7 +148,7 @@ export function validateDag(params: { dag: DagGraph; dagId?: string }): void {
         }
       }
     }
-    if (node.kind === "agent" && node.repeat !== undefined) {
+    if (node.kind !== "transform" && node.repeat !== undefined) {
       if (node.forEach !== undefined) {
         issues.push(`node ${node.id} cannot set both forEach and repeat`);
       }

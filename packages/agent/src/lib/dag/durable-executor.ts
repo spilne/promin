@@ -73,6 +73,7 @@ import { runAgentAttempt } from "./runners/agent-attempt.ts";
 import { childRunId, nodeKey, type AttemptOutcome, type NodeRunEnv } from "./runners/env.ts";
 import { runFanOut } from "./runners/fan-out.ts";
 import { runRepeat } from "./runners/repeat.ts";
+import { runSubDagAttempt } from "./runners/sub-dag-attempt.ts";
 import { applyTransform } from "./transform.ts";
 import type { DagRegistry } from "./types.ts";
 import {
@@ -81,7 +82,9 @@ import {
   type DagEdge,
   type DagNode,
   type DagNodeStats,
+  type DagParentFrame,
   type DagRunScope,
+  type SubDagNode,
 } from "./types.ts";
 import { topologicalOrder, validateDag } from "./validate.ts";
 
@@ -89,6 +92,12 @@ export { DAG_APPROVAL_REFUSED } from "./runners/agent-attempt.ts";
 
 /** Name the DAG workflow is registered under unless configured otherwise. */
 export const DAG_WORKFLOW_NAME = "agentic-dag";
+
+/** Maximum nesting depth below a root DAG run. */
+export const MAX_DAG_DEPTH = 4;
+
+/** Maximum child workflows a root DAG run and all descendants may start. */
+export const MAX_CHILD_RUNS = 500;
 
 /** The child run id of a node: DAG run id + node id. */
 export function dagNodeRunId(params: {
@@ -107,6 +116,8 @@ export interface DurableDagInput {
   readonly scope: DagRunScope;
   /** What the whole run may spend, shared between its nodes. Unset: unlimited. */
   readonly budget?: TurnBudget;
+  /** Present when another DAG run started this run. */
+  readonly parent?: DagParentFrame;
 }
 
 export interface DurableDagOutput {
@@ -127,6 +138,8 @@ export interface DurableDagOutput {
    * counted at its whole share of the budget.
    */
   readonly spend: BudgetUsage;
+  /** Child workflows this run and all descendant DAG runs started. */
+  readonly childRuns: number;
 }
 
 export interface CreateDagWorkflowConfig {
@@ -202,6 +215,21 @@ function settled(): Settled {
   return { promise, resolve, reject };
 }
 
+function subtractUsage(params: {
+  readonly usage: BudgetUsage;
+  readonly excluded: BudgetUsage;
+}): BudgetUsage {
+  return {
+    inputTokens: Math.max(0, params.usage.inputTokens - params.excluded.inputTokens),
+    outputTokens: Math.max(0, params.usage.outputTokens - params.excluded.outputTokens),
+    cacheReadTokens: Math.max(0, params.usage.cacheReadTokens - params.excluded.cacheReadTokens),
+    cacheWriteTokens: Math.max(0, params.usage.cacheWriteTokens - params.excluded.cacheWriteTokens),
+    costUsd: Math.max(0, params.usage.costUsd - params.excluded.costUsd),
+    llmCalls: Math.max(0, params.usage.llmCalls - params.excluded.llmCalls),
+    toolCalls: Math.max(0, params.usage.toolCalls - params.excluded.toolCalls),
+  };
+}
+
 /** The recipe without the registry's timestamps. */
 function recipeOf(dag: AgenticDagRecipe): AgenticDagRecipe {
   return {
@@ -222,6 +250,14 @@ function recipeOf(dag: AgenticDagRecipe): AgenticDagRecipe {
  */
 export function createDagWorkflow(
   config: CreateDagWorkflowConfig,
+): Workflow<DurableDagInput, DurableDagOutput> {
+  return buildDagWorkflow(config);
+}
+
+/** Build a DAG workflow, optionally wired to a parent node's abort signal. */
+export function buildDagWorkflow(
+  config: CreateDagWorkflowConfig,
+  options: { readonly signal?: AbortSignal } = {},
 ): Workflow<DurableDagInput, DurableDagOutput> {
   const {
     registry,
@@ -256,7 +292,7 @@ export function createDagWorkflow(
       });
       if (issues.length > 0) throw new Error(`dag_invalid: ${issues.join("; ")}`);
       // Validation + ordering are pure; safe to re-run on every replay.
-      validateDag({ dag });
+      validateDag({ dag, dagId: dag.id });
       const order = topologicalOrder(dag);
 
       const nodeById = new Map<string, DagNode>(dag.nodes.map((n) => [n.id, n]));
@@ -271,6 +307,9 @@ export function createDagWorkflow(
       // Live abort: set when a node fails with onError "abort". It only
       // steers what happens next; whether a node started is journaled.
       const abort = new AbortController();
+      const abortFromParent = (): void => abort.abort();
+      if (options.signal?.aborted) abortFromParent();
+      else options.signal?.addEventListener("abort", abortFromParent, { once: true });
       const env: NodeRunEnv = {
         ctx,
         input,
@@ -282,7 +321,35 @@ export function createDagWorkflow(
       // Run budget: what settled nodes spent, and the shares running nodes hold.
       const runBudget = input.budget === undefined ? undefined : parseTurnBudget(input.budget);
       let spent: BudgetUsage = EMPTY_USAGE;
+      let subDagSpend: BudgetUsage = EMPTY_USAGE;
       const held = new Map<string, TurnBudget>();
+      let childRunsAvailable = input.parent?.childRunsAllowed ?? MAX_CHILD_RUNS;
+      let childRuns = 0;
+      interface SubDagReservation {
+        readonly perRun: number;
+        readonly total: number;
+        readonly slots: number;
+        readonly claimed: Set<string>;
+      }
+      const subDagReservations = new Map<string, SubDagReservation>();
+
+      function* claimChildRun(key: string): Generator<ActivityYield, boolean, any> {
+        const provisional = childRunsAvailable > 0;
+        if (provisional) childRunsAvailable--;
+        const recorded = yield* ctx.activity(`${key}-child-run`, async () => provisional, {
+          idempotent: true,
+        });
+        if (provisional !== recorded) childRunsAvailable += provisional ? 1 : -1;
+        if (recorded) childRuns++;
+        return recorded;
+      }
+
+      const releaseUnusedSubDagGrants = (nodeId: string): void => {
+        const reservation = subDagReservations.get(nodeId);
+        if (!reservation) return;
+        childRunsAvailable += reservation.total - reservation.claimed.size * reservation.perRun;
+        subDagReservations.delete(nodeId);
+      };
       /** A starting node's share: what is free, split with the nodes not started yet. */
       const shareFor = (node: DagNode, weight = waitingWeight(node)): TurnBudget | null => {
         if (!runBudget) return null;
@@ -390,7 +457,7 @@ export function createDagWorkflow(
           }
           let fanOutItems: ReadonlyArray<unknown> | undefined;
           let weight = waitingWeight(node);
-          if (node.kind === "agent" && node.forEach !== undefined) {
+          if (node.kind !== "transform" && node.forEach !== undefined) {
             const resolved = resolveNodeInputSource({
               src: node.forEach.items,
               initial: input.initialInput,
@@ -420,22 +487,39 @@ export function createDagWorkflow(
             weight = resolved.length;
           }
           const key = nodeKey(node.id);
+          const subDagSlots =
+            node.kind !== "dag"
+              ? 0
+              : node.forEach !== undefined
+                ? (fanOutItems?.length ?? 0)
+                : node.repeat !== undefined
+                  ? node.repeat.maxIterations
+                  : 1;
+          const proposedStart = abort.signal.aborted;
+          const proposedGrantPerRun =
+            !proposedStart && subDagSlots > 0
+              ? Math.floor(Math.floor(childRunsAvailable / 2) / subDagSlots)
+              : 0;
+          const proposedGrantTotal = proposedGrantPerRun * subDagSlots;
+          childRunsAvailable -= proposedGrantTotal;
           const start = yield* ctx.activity(
             `${key}-start`,
-            async () =>
-              abort.signal.aborted
-                ? {
-                    start: false,
-                    budget: null,
-                    startedAt: clock.currentTimeMs(),
-                  }
-                : {
-                    start: true,
-                    budget: node.kind === "agent" && weight > 0 ? shareFor(node, weight) : null,
-                    startedAt: clock.currentTimeMs(),
-                  },
+            async () => ({
+              start: !proposedStart,
+              budget:
+                !proposedStart && node.kind !== "transform" && weight > 0
+                  ? shareFor(node, weight)
+                  : null,
+              startedAt: clock.currentTimeMs(),
+              childGrant: {
+                perRun: proposedGrantPerRun,
+                total: proposedGrantTotal,
+                slots: subDagSlots,
+              },
+            }),
             { idempotent: true },
           );
+          childRunsAvailable += proposedGrantTotal - start.childGrant.total;
           if (!start.start) {
             return yield* settleNode({
               node,
@@ -443,12 +527,19 @@ export function createDagWorkflow(
               startedAt: null,
             });
           }
+          if (node.kind === "dag") {
+            subDagReservations.set(node.id, {
+              ...start.childGrant,
+              claimed: new Set(),
+            });
+          }
           const share = start.budget ?? undefined;
           const empty =
-            weight > 0 && share && !(node.kind === "agent" && node.repeat !== undefined)
+            weight > 0 && share && !(node.kind !== "transform" && node.repeat !== undefined)
               ? emptyDimension(share)
               : undefined;
           if (empty) {
+            releaseUnusedSubDagGrants(node.id);
             return yield* settleNode({
               node,
               state: {
@@ -462,6 +553,17 @@ export function createDagWorkflow(
           let outcome: AttemptOutcome;
           let stats: SettlementStats | undefined;
           if (node.kind === "agent") {
+            const attempt = function* (
+              attemptEnv: NodeRunEnv,
+              attemptParams: Parameters<typeof runAgentAttempt>[1],
+            ): Generator<ActivityYield, AttemptOutcome, any> {
+              return yield* runAgentAttempt(attemptEnv, {
+                ...attemptParams,
+                claimChildRun: function* () {
+                  return yield* claimChildRun(attemptParams.key);
+                },
+              });
+            };
             if (node.forEach !== undefined && fanOutItems !== undefined) {
               const fanOut = yield* runFanOut(env, {
                 node,
@@ -469,7 +571,7 @@ export function createDagWorkflow(
                 items: fanOutItems,
                 nodeInput,
                 ...(share && { share }),
-                attempt: runAgentAttempt,
+                attempt,
               });
               outcome = fanOut;
               fanOutErrors.set(node.id, fanOut.itemErrors);
@@ -484,12 +586,12 @@ export function createDagWorkflow(
                 nodeInput,
                 ...(share && { share }),
                 signal: abort.signal,
-                attempt: runAgentAttempt,
+                attempt,
               });
               outcome = repeated;
               stats = { iterations: repeated.iterations };
             } else {
-              outcome = yield* runAgentAttempt(env, {
+              outcome = yield* attempt(env, {
                 node,
                 nodeInput,
                 key,
@@ -497,6 +599,71 @@ export function createDagWorkflow(
                 signal: abort.signal,
               });
             }
+          } else if (node.kind === "dag") {
+            const attempt = function* (
+              attemptEnv: NodeRunEnv,
+              attemptParams: {
+                readonly node: SubDagNode;
+                readonly nodeInput: Record<string, unknown>;
+                readonly key: string;
+                readonly budget?: TurnBudget;
+                readonly signal: AbortSignal;
+              },
+            ): Generator<ActivityYield, AttemptOutcome, any> {
+              const reservation = subDagReservations.get(node.id)!;
+              const claimed = function* (): Generator<ActivityYield, boolean, any> {
+                const allowed = yield* claimChildRun(attemptParams.key);
+                if (allowed) reservation.claimed.add(attemptParams.key);
+                return allowed;
+              };
+              const result = yield* runSubDagAttempt(attemptEnv, {
+                ...attemptParams,
+                claimChildRun: claimed,
+                childRunsAllowed: reservation.perRun,
+              });
+              if (reservation.claimed.has(attemptParams.key)) {
+                const nested = result.childRuns ?? 0;
+                childRuns += nested;
+                childRunsAvailable += Math.max(0, reservation.perRun - nested);
+              }
+              return result;
+            };
+            if (node.forEach !== undefined && fanOutItems !== undefined) {
+              const fanOut = yield* runFanOut(env, {
+                node,
+                forEach: node.forEach,
+                items: fanOutItems,
+                nodeInput,
+                ...(share && { share }),
+                attempt,
+              });
+              outcome = fanOut;
+              fanOutErrors.set(node.id, fanOut.itemErrors);
+              stats = {
+                items: fanOutItems.length,
+                failedItems: Object.keys(fanOut.itemErrors).length,
+              };
+            } else if (node.repeat !== undefined) {
+              const repeated = yield* runRepeat(env, {
+                node,
+                repeat: node.repeat,
+                nodeInput,
+                ...(share && { share }),
+                signal: abort.signal,
+                attempt,
+              });
+              outcome = repeated;
+              stats = { iterations: repeated.iterations };
+            } else {
+              outcome = yield* attempt(env, {
+                node,
+                nodeInput,
+                key,
+                ...(share && { budget: share }),
+                signal: abort.signal,
+              });
+            }
+            subDagSpend = addUsage(subDagSpend, outcome.spend);
           } else {
             const transformed = yield* ctx.activity(
               `${key}-transform`,
@@ -520,6 +687,7 @@ export function createDagWorkflow(
               : { ...transformed, retryable: false, spend: EMPTY_USAGE };
           }
           held.delete(node.id);
+          releaseUnusedSubDagGrants(node.id);
           yield* settleNode({
             node,
             state: outcome.ok
@@ -542,7 +710,7 @@ export function createDagWorkflow(
         if (isEngineControl(err) || !usageRecorder) throw err;
         // What the nodes spent before the run failed still counts. Recorded
         // as a failure, like the run's other failed entries.
-        const failedSpend = spent;
+        const failedSpend = subtractUsage({ usage: spent, excluded: subDagSpend });
         yield* ctx.activity(
           "record-usage-failed",
           async (): Promise<void> => {
@@ -561,9 +729,11 @@ export function createDagWorkflow(
           { idempotent: true },
         );
         throw err;
+      } finally {
+        options.signal?.removeEventListener("abort", abortFromParent);
       }
       if (usageRecorder) {
-        const runSpend = spent;
+        const runSpend = subtractUsage({ usage: spent, excluded: subDagSpend });
         yield* ctx.activity(
           "record-usage",
           () =>
@@ -618,6 +788,7 @@ export function createDagWorkflow(
         skipped,
         nodeStats,
         spend: spent,
+        childRuns,
       };
     })
     .build();

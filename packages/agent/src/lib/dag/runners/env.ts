@@ -14,12 +14,18 @@ export interface NodeRunEnv {
 }
 
 export type AttemptOutcome =
-  | { readonly ok: true; readonly output: unknown; readonly spend: BudgetUsage }
+  | {
+      readonly ok: true;
+      readonly output: unknown;
+      readonly spend: BudgetUsage;
+      readonly childRuns?: number;
+    }
   | {
       readonly ok: false;
       readonly error: string;
       readonly retryable: boolean;
       readonly spend: BudgetUsage;
+      readonly childRuns?: number;
     };
 
 export interface AttemptParams<N extends DagNode = DagNode> {
@@ -29,6 +35,10 @@ export interface AttemptParams<N extends DagNode = DagNode> {
   readonly key: string;
   readonly budget?: TurnBudget;
   readonly signal: AbortSignal;
+  /** Allow this attempt to create its child workflow. */
+  readonly claimChildRun?: () => Generator<ActivityYield, boolean, any>;
+  /** Descendant-run allowance handed to a sub-DAG child. */
+  readonly childRunsAllowed?: number;
 }
 
 export type RunAttempt<N extends DagNode> = (
