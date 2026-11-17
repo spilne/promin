@@ -66,11 +66,12 @@ import {
   type TurnBudget,
 } from "../budget/budget.ts";
 import type { AgentInstanceRegistry } from "../instance/types.ts";
-import { checkBlockers, resolveNodeInputs } from "./dag-helpers.ts";
+import { checkBlockers, resolveNodeInputs, resolveNodeInputSource } from "./dag-helpers.ts";
 import { emptyDimension, startShare, waitingWeight } from "./node-budget.ts";
 import { recipeIssues } from "./recipe-schema.ts";
 import { runAgentAttempt } from "./runners/agent-attempt.ts";
 import { childRunId, nodeKey, type AttemptOutcome, type NodeRunEnv } from "./runners/env.ts";
+import { runFanOut } from "./runners/fan-out.ts";
 import { applyTransform } from "./transform.ts";
 import type { DagRegistry } from "./types.ts";
 import {
@@ -261,6 +262,7 @@ export function createDagWorkflow(
 
       const states = new Map<string, NodeState>();
       const settlements = new Map<string, NodeSettlement>();
+      const fanOutErrors = new Map<string, Readonly<Record<number, string>>>();
       const settles = new Map<string, Settled>(order.map((id) => [id, settled()]));
       // Live abort: set when a node fails with onError "abort". It only
       // steers what happens next; whether a node started is journaled.
@@ -278,14 +280,14 @@ export function createDagWorkflow(
       let spent: BudgetUsage = EMPTY_USAGE;
       const held = new Map<string, TurnBudget>();
       /** A starting node's share: what is free, split with the nodes not started yet. */
-      const shareFor = (node: DagNode): TurnBudget | null => {
+      const shareFor = (node: DagNode, weight = waitingWeight(node)): TurnBudget | null => {
         if (!runBudget) return null;
         let free = remainingBudget({ budget: runBudget, usage: spent });
         for (const taken of held.values()) free = subtractBudget({ budget: free, taken });
         const othersWaiting = order
           .filter((id) => id !== node.id && !states.has(id) && !held.has(id))
           .reduce((sum, id) => sum + waitingWeight(nodeById.get(id)!), 0);
-        return startShare({ free, weight: waitingWeight(node), othersWaiting });
+        return startShare({ free, weight, othersWaiting });
       };
 
       const outputs = (): Record<string, unknown> => {
@@ -374,6 +376,37 @@ export function createDagWorkflow(
               startedAt: null,
             });
           }
+          let fanOutItems: ReadonlyArray<unknown> | undefined;
+          let weight = waitingWeight(node);
+          if (node.kind === "agent" && node.forEach !== undefined) {
+            const resolved = resolveNodeInputSource({
+              src: node.forEach.items,
+              initial: input.initialInput,
+              outputs: outputs(),
+            });
+            if (!Array.isArray(resolved)) {
+              return yield* settleNode({
+                node,
+                state: {
+                  kind: "error",
+                  error: `not_an_array: forEach.items of node "${node.id}" is not an array`,
+                },
+                startedAt: null,
+              });
+            }
+            if (resolved.length > node.forEach.maxItems) {
+              return yield* settleNode({
+                node,
+                state: {
+                  kind: "error",
+                  error: `too_many_items: ${resolved.length} > ${node.forEach.maxItems} for node "${node.id}"`,
+                },
+                startedAt: null,
+              });
+            }
+            fanOutItems = resolved;
+            weight = resolved.length;
+          }
           const key = nodeKey(node.id);
           const start = yield* ctx.activity(
             `${key}-start`,
@@ -382,7 +415,7 @@ export function createDagWorkflow(
                 ? { start: false, budget: null, startedAt: clock.currentTimeMs() }
                 : {
                     start: true,
-                    budget: node.kind === "agent" ? shareFor(node) : null,
+                    budget: node.kind === "agent" && weight > 0 ? shareFor(node, weight) : null,
                     startedAt: clock.currentTimeMs(),
                   },
             { idempotent: true },
@@ -395,7 +428,7 @@ export function createDagWorkflow(
             });
           }
           const share = start.budget ?? undefined;
-          const empty = share && emptyDimension(share);
+          const empty = weight > 0 && share ? emptyDimension(share) : undefined;
           if (empty) {
             return yield* settleNode({
               node,
@@ -408,14 +441,32 @@ export function createDagWorkflow(
           }
           if (share) held.set(node.id, share);
           let outcome: AttemptOutcome;
+          let stats: SettlementStats | undefined;
           if (node.kind === "agent") {
-            outcome = yield* runAgentAttempt(env, {
-              node,
-              nodeInput,
-              key,
-              ...(share && { budget: share }),
-              signal: abort.signal,
-            });
+            if (node.forEach !== undefined && fanOutItems !== undefined) {
+              const fanOut = yield* runFanOut(env, {
+                node,
+                forEach: node.forEach,
+                items: fanOutItems,
+                nodeInput,
+                ...(share && { share }),
+                attempt: runAgentAttempt,
+              });
+              outcome = fanOut;
+              fanOutErrors.set(node.id, fanOut.itemErrors);
+              stats = {
+                items: fanOutItems.length,
+                failedItems: Object.keys(fanOut.itemErrors).length,
+              };
+            } else {
+              outcome = yield* runAgentAttempt(env, {
+                node,
+                nodeInput,
+                key,
+                ...(share && { budget: share }),
+                signal: abort.signal,
+              });
+            }
           } else {
             const transformed = yield* ctx.activity(
               `${key}-transform`,
@@ -443,6 +494,7 @@ export function createDagWorkflow(
               : { kind: "error", error: outcome.error },
             spend: outcome.spend,
             startedAt: start.startedAt,
+            ...(stats && { stats }),
           });
         } catch (err) {
           // Engine control flow (a suspended child): waiting branches end too.
@@ -502,6 +554,9 @@ export function createDagWorkflow(
         const state = states.get(id);
         const settlement = settlements.get(id)!;
         const node = nodeById.get(id)!;
+        for (const [index, error] of Object.entries(fanOutErrors.get(id) ?? {})) {
+          nodeErrors[`${id}.item-${index}`] = error;
+        }
         nodeStats[id] = {
           spend: settlement.spend,
           durationMs:

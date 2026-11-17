@@ -2,7 +2,14 @@ import { z } from "zod";
 
 import { conditionDepth, MAX_CONDITION_DEPTH } from "./conditions.ts";
 import { compileOutputSchema, OutputSchemaError } from "./output-schema.ts";
-import type { Condition, DagNode, DagRecipe, NodeInputSource, TransformOp } from "./types.ts";
+import type {
+  Condition,
+  DagNode,
+  DagRecipe,
+  ForEach,
+  NodeInputSource,
+  TransformOp,
+} from "./types.ts";
 
 export const NODE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
 
@@ -52,6 +59,16 @@ const ConditionSchema: z.ZodType<Condition> = z
     }
   });
 
+const ForEachSchema: z.ZodType<ForEach> = z
+  .object({
+    items: NodeInputSourceSchema,
+    as: z.string(),
+    maxItems: z.number().int().min(1).max(100),
+    concurrency: z.number().int().min(1).max(16).optional(),
+    onItemError: z.enum(["null", "fail"]).optional(),
+  })
+  .strict();
+
 const AgentNodeSchema = z
   .object({
     id: z.string().regex(NODE_ID_PATTERN),
@@ -62,6 +79,7 @@ const AgentNodeSchema = z
       .object({ schema: z.record(z.string(), z.unknown()) })
       .strict()
       .optional(),
+    forEach: ForEachSchema.optional(),
     join: z.enum(["all", "any"]).optional(),
     onError: z.enum(["abort", "skip"]).optional(),
   })

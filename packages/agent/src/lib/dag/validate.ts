@@ -125,6 +125,26 @@ export function validateDag(params: { dag: DagGraph; dagId?: string }): void {
         }
       }
     }
+    if (node.kind === "agent" && node.forEach !== undefined) {
+      const src = node.forEach.items;
+      if (src.kind === "node") {
+        if (!nodeIds.has(src.nodeId)) {
+          issues.push(`node ${node.id} forEach.items → unknown node ${src.nodeId}`);
+        } else if (!incoming.get(node.id)!.has(src.nodeId)) {
+          issues.push(
+            `node ${node.id} forEach.items reads ${src.nodeId} but ${src.nodeId} isn't reachable upstream`,
+          );
+        }
+      }
+      if (node.forEach.as === "index") {
+        issues.push(`node ${node.id} forEach.as cannot be the reserved field index`);
+      }
+      for (const reserved of [node.forEach.as, "index"]) {
+        if (reserved in node.inputs) {
+          issues.push(`node ${node.id} forEach input ${reserved} collides with a generated field`);
+        }
+      }
+    }
     if (node.kind === "transform") {
       const inputFields = new Set(Object.keys(node.inputs));
       if (node.from !== undefined && !inputFields.has(node.from)) {

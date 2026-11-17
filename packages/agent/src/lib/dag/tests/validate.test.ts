@@ -127,4 +127,43 @@ describe("validateDag", () => {
     };
     expect(() => validateDag({ dag })).toThrow(DagValidationError);
   });
+
+  it("checks forEach upstream references and reserved input fields", () => {
+    const bad: AgenticDagRecipe = {
+      id: "bad-foreach",
+      version: "v1",
+      nodes: [
+        { id: "a", kind: "agent", agentId: "x", inputs: {} },
+        {
+          id: "b",
+          kind: "agent",
+          agentId: "x",
+          inputs: {
+            item: { kind: "literal", value: "collision" },
+            index: { kind: "literal", value: 0 },
+          },
+          forEach: {
+            items: { kind: "node", nodeId: "c", path: "items" },
+            as: "item",
+            maxItems: 4,
+          },
+        },
+        { id: "c", kind: "agent", agentId: "x", inputs: {} },
+      ],
+      edges: [{ from: "a", to: "b" }],
+      entry: ["a", "c"],
+      terminals: ["b", "c"],
+    };
+
+    expect(() => validateDag({ dag: bad })).toThrow(DagValidationError);
+    try {
+      validateDag({ dag: bad });
+    } catch (error) {
+      expect(error).toBeInstanceOf(DagValidationError);
+      const issues = (error as DagValidationError).issues;
+      expect(issues.some((issue) => issue.includes("forEach.items"))).toBe(true);
+      expect(issues.some((issue) => issue.includes("input item"))).toBe(true);
+      expect(issues.some((issue) => issue.includes("input index"))).toBe(true);
+    }
+  });
 });

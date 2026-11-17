@@ -74,12 +74,12 @@ export function resolveNodeInputs(args: {
 }): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [field, src] of Object.entries(args.node.inputs)) {
-    out[field] = resolveSource({ src, initial: args.initial, outputs: args.outputs });
+    out[field] = resolveNodeInputSource({ src, initial: args.initial, outputs: args.outputs });
   }
   return out;
 }
 
-function resolveSource(args: {
+export function resolveNodeInputSource(args: {
   src: NodeInputSource;
   initial: Readonly<Record<string, unknown>>;
   outputs: Readonly<Record<string, unknown>>;

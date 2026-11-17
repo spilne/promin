@@ -89,4 +89,25 @@ describe("DAG recipe schema", () => {
       expect(issues.some((issue) => issue.startsWith("nodes[0].output.schema"))).toBe(true);
     }
   });
+
+  it("checks forEach bounds and required fields", () => {
+    for (const forEach of [
+      { items: { kind: "initial", path: "items" }, as: "item", maxItems: 0 },
+      { items: { kind: "initial", path: "items" }, as: "item", maxItems: 101 },
+      { items: { kind: "initial", path: "items" }, as: "item", maxItems: "8" },
+      {
+        items: { kind: "initial", path: "items" },
+        as: "item",
+        maxItems: 8,
+        concurrency: 17,
+      },
+      { items: { kind: "initial", path: "items" }, maxItems: 8 },
+    ]) {
+      const issues = recipeIssues({
+        ...ok,
+        nodes: [{ ...ok.nodes[0], forEach }],
+      });
+      expect(issues.some((issue) => issue.startsWith("nodes[0].forEach"))).toBe(true);
+    }
+  });
 });
