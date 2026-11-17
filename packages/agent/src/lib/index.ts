@@ -1052,3 +1052,9 @@ export type {
   DecisionResult,
   ProbabilitySource,
 } from "./decision/types.ts";
+export {
+  createSystemOneDecisionProvider,
+  DEFAULT_DECISION_TIMEOUT_MS,
+} from "./decision/system-one-provider.ts";
+export type { SystemOneOptions } from "./decision/system-one-provider.ts";
+export { decideWithRetry } from "./decision/decide-with-retry.ts";
