@@ -30,6 +30,7 @@ import {
 import { createRegistryAgentResolver } from "../registry-agent-resolver.ts";
 import type { AgentResolver, AgenticDagRecipe, DagRunScope } from "../types.ts";
 import { InMemoryDagRegistry } from "../../versioned-registry/in-memory-registries.ts";
+import { SCOPE, invokeAgent, taskOf, textOnly } from "./dag-test-kit.ts";
 
 /** DAGs run by reference: register `dag` and name it in the run input. */
 const dags = new InMemoryDagRegistry();
@@ -55,42 +56,31 @@ async function runInput(params: {
   };
 }
 
-const SCOPE = { namespaceId: "acme", resourceId: "r-1" } as const;
-
 /** Lock lease of `InMemoryWorkflowStorage` runs, plus a margin. */
 const PAST_LOCK_LEASE_MS = 121_000;
-
-function textOnly(text: string): AgentRunOutput {
-  return {
-    text: Promise.resolve(text),
-    finishReason: Promise.resolve("stop" as const),
-    messages: Promise.resolve([]),
-    usage: Promise.resolve({ inputTokens: 0, outputTokens: 0 }),
-    steps: Promise.resolve([]),
-  } as unknown as AgentRunOutput;
-}
-
-function invokeAgent(invoke: (input: AgentInput) => Promise<AgentRunOutput>): Agent {
-  const agent = {
-    invoke,
-    withScope: () => agent,
-  } as unknown as Agent;
-  return agent;
-}
-
-/** The user message the LLM was asked to answer. */
-function taskOf(messages: Parameters<Parameters<typeof reactiveLLM>[0]>[0]): string {
-  const last = lastMessage(messages);
-  return typeof last?.content === "string" ? last.content : "";
-}
 
 const linear: AgenticDagRecipe = {
   id: "linear",
   version: "v1",
   nodes: [
-    { id: "n1", agentId: "upper", inputs: { task: { kind: "initial", path: "task" } } },
-    { id: "n2", agentId: "exclaim", inputs: { task: { kind: "node", nodeId: "n1", path: "" } } },
-    { id: "n3", agentId: "wrap", inputs: { task: { kind: "node", nodeId: "n2", path: "" } } },
+    {
+      id: "n1",
+      kind: "agent",
+      agentId: "upper",
+      inputs: { task: { kind: "initial", path: "task" } },
+    },
+    {
+      id: "n2",
+      kind: "agent",
+      agentId: "exclaim",
+      inputs: { task: { kind: "node", nodeId: "n1", path: "" } },
+    },
+    {
+      id: "n3",
+      kind: "agent",
+      agentId: "wrap",
+      inputs: { task: { kind: "node", nodeId: "n2", path: "" } },
+    },
   ],
   edges: [
     { from: "n1", to: "n2" },
@@ -109,11 +99,27 @@ describe("createDagWorkflow — nodes as child runs", () => {
       id: "diamond",
       version: "v1",
       nodes: [
-        { id: "n1", agentId: "echo", inputs: { task: { kind: "initial", path: "task" } } },
-        { id: "a", agentId: "side", inputs: { task: { kind: "node", nodeId: "n1", path: "" } } },
-        { id: "b", agentId: "side", inputs: { task: { kind: "node", nodeId: "n1", path: "" } } },
+        {
+          id: "n1",
+          kind: "agent",
+          agentId: "echo",
+          inputs: { task: { kind: "initial", path: "task" } },
+        },
+        {
+          id: "a",
+          kind: "agent",
+          agentId: "side",
+          inputs: { task: { kind: "node", nodeId: "n1", path: "" } },
+        },
+        {
+          id: "b",
+          kind: "agent",
+          agentId: "side",
+          inputs: { task: { kind: "node", nodeId: "n1", path: "" } },
+        },
         {
           id: "c",
+          kind: "agent",
           agentId: "echo",
           inputs: {
             left: { kind: "node", nodeId: "a", path: "" },
@@ -248,9 +254,24 @@ describe("createDagWorkflow — scheduling and abort", () => {
       id: "ready",
       version: "v1",
       nodes: [
-        { id: "a", agentId: "echo", inputs: { task: { kind: "initial", path: "task" } } },
-        { id: "b", agentId: "slow", inputs: { task: { kind: "initial", path: "task" } } },
-        { id: "c", agentId: "echo", inputs: { task: { kind: "node", nodeId: "a", path: "" } } },
+        {
+          id: "a",
+          kind: "agent",
+          agentId: "echo",
+          inputs: { task: { kind: "initial", path: "task" } },
+        },
+        {
+          id: "b",
+          kind: "agent",
+          agentId: "slow",
+          inputs: { task: { kind: "initial", path: "task" } },
+        },
+        {
+          id: "c",
+          kind: "agent",
+          agentId: "echo",
+          inputs: { task: { kind: "node", nodeId: "a", path: "" } },
+        },
       ],
       edges: [{ from: "a", to: "c" }],
       entry: ["a", "b"],
@@ -284,10 +305,30 @@ describe("createDagWorkflow — scheduling and abort", () => {
       id: "abort",
       version: "v1",
       nodes: [
-        { id: "a", agentId: "fails", inputs: { task: { kind: "initial", path: "task" } } },
-        { id: "b", agentId: "waits", inputs: { task: { kind: "initial", path: "task" } } },
-        { id: "c", agentId: "echo", inputs: { task: { kind: "node", nodeId: "b", path: "" } } },
-        { id: "d", agentId: "echo", inputs: { task: { kind: "node", nodeId: "a", path: "" } } },
+        {
+          id: "a",
+          kind: "agent",
+          agentId: "fails",
+          inputs: { task: { kind: "initial", path: "task" } },
+        },
+        {
+          id: "b",
+          kind: "agent",
+          agentId: "waits",
+          inputs: { task: { kind: "initial", path: "task" } },
+        },
+        {
+          id: "c",
+          kind: "agent",
+          agentId: "echo",
+          inputs: { task: { kind: "node", nodeId: "b", path: "" } },
+        },
+        {
+          id: "d",
+          kind: "agent",
+          agentId: "echo",
+          inputs: { task: { kind: "node", nodeId: "a", path: "" } },
+        },
       ],
       edges: [
         { from: "b", to: "c" },
@@ -349,7 +390,14 @@ describe("createDagWorkflow — scheduling and abort", () => {
     const dag: AgenticDagRecipe = {
       id: "infra",
       version: "v1",
-      nodes: [{ id: "n1", agentId: "x", inputs: { task: { kind: "initial", path: "task" } } }],
+      nodes: [
+        {
+          id: "n1",
+          kind: "agent",
+          agentId: "x",
+          inputs: { task: { kind: "initial", path: "task" } },
+        },
+      ],
       edges: [],
       entry: ["n1"],
       terminals: ["n1"],
@@ -413,7 +461,14 @@ describe("createDagWorkflow — approvals", () => {
     const dag: AgenticDagRecipe = {
       id: "gated",
       version: "v1",
-      nodes: [{ id: "n1", agentId: "worker", inputs: { task: { kind: "initial", path: "task" } } }],
+      nodes: [
+        {
+          id: "n1",
+          kind: "agent",
+          agentId: "worker",
+          inputs: { task: { kind: "initial", path: "task" } },
+        },
+      ],
       edges: [],
       entry: ["n1"],
       terminals: ["n1"],

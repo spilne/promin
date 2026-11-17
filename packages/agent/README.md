@@ -539,14 +539,23 @@ undoes an operator's promote). With `sync` they remove only versions they
 wrote — never an operator's — and nothing after a scan that could not read
 every file (an empty, unparsable or misnamed file is a scan error).
 
-Agentic DAGs (`createDagWorkflow`) run each node the same way, as a child run
-`<dag run>.node-<id>`. A run names a registered DAG (`{ dagId, version,
-initialInput, scope }`) and reads the recipe from the `DagRegistry` in its first
-journaled step. A node starts as soon as its own upstream nodes have settled; a
-node failing with `onError: "abort"` stops the running nodes and starts no new
-ones. Node turns never suspend on approvals: an approval-gated tool call is
-refused with "requires approval; not available in DAG runs". Register the DAG workflow once at boot under its fixed name
-(`DAG_WORKFLOW_NAME`) so recovery resumes a run after a restart.
+Agentic DAGs (`createDagWorkflow`) give every node a required `kind`. Agent nodes
+run as child runs named `<dag run>.node-<id>`; transform nodes do deterministic
+plumbing without an LLM. Agent nodes may declare a JSON Schema `output`, fan out
+over an array with `forEach`, or run a bounded `repeat` loop. Edges use the same
+condition language as transform filters and repeat termination, while `join`
+selects all-or-any incoming routing.
+
+A run names a registered DAG (`{ dagId, version, initialInput, scope }`) and reads
+the recipe from the `DagRegistry` in its first journaled step. A node starts as
+soon as its own upstream nodes have settled, and the result reports spend,
+duration, item counts and iteration counts in `nodeStats`. A node failing with
+`onError: "abort"` stops the running nodes and starts no new ones. Node turns
+refuse approval-gated tool calls by default with "requires approval; not
+available in DAG runs". Set `approvals: "wait"` to suspend the node's child turn
+and decide it from the signals inbox. Graphs can also use an `approval` node as
+a zero-budget human gate. Register the DAG workflow once at boot under its fixed
+name (`DAG_WORKFLOW_NAME`) so recovery resumes a run after a restart.
 
 ---
 

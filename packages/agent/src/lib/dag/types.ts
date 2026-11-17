@@ -1,4 +1,6 @@
 import type { Agent, AgentScope } from "../agent/types.ts";
+import type { BudgetUsage } from "../budget/budget.ts";
+import type { DecisionQuestion } from "../decision/types.ts";
 import type {
   RegisterVersionInput,
   Versioned,
@@ -34,24 +36,39 @@ export type NodeInputSource =
   | { readonly kind: "node"; readonly nodeId: string; readonly path: string }
   | { readonly kind: "literal"; readonly value: unknown };
 
-export interface DagNode {
+export type ConditionScalar = string | number | boolean | null;
+
+export type Condition =
+  | {
+      readonly kind: "equals";
+      readonly path: string;
+      readonly value: ConditionScalar;
+    }
+  | {
+      readonly kind: "in";
+      readonly path: string;
+      readonly values: ReadonlyArray<ConditionScalar>;
+    }
+  | { readonly kind: "exists"; readonly path: string }
+  | {
+      readonly kind: "compare";
+      readonly path: string;
+      readonly op: "gt" | "gte" | "lt" | "lte";
+      readonly value: number;
+    }
+  | { readonly kind: "and"; readonly all: ReadonlyArray<Condition> }
+  | { readonly kind: "or"; readonly any: ReadonlyArray<Condition> }
+  | { readonly kind: "not"; readonly of: Condition };
+
+export interface NodeBase {
   readonly id: string;
-  /**
-   * Recipe id in the AgentRegistry. Required for `kind: "agent"`.
-   * The executor resolves this to an Agent at run time.
-   */
-  readonly agentId: string;
+  readonly join?: "all" | "any";
   /**
    * How to build this node's input. Keys are field names on the agent's
    * input shape; values describe where to fetch them from. The executor
    * assembles `{ [field]: <resolved value> }` and passes it as input.
    */
   readonly inputs: Readonly<Record<string, NodeInputSource>>;
-  /**
-   * Optional: when the agent's output isn't a string, project a field
-   * out of the structured output. Defaults to `text` (matches AgentRunOutput).
-   */
-  readonly outputPath?: string;
   /**
    * Failure policy. Default `"abort"` halts the whole run.
    *   - `"skip"` — record the failure, mark this node's output null,
@@ -62,16 +79,124 @@ export interface DagNode {
   readonly onError?: "abort" | "skip";
 }
 
+export interface ForEach {
+  readonly items: NodeInputSource;
+  readonly as: string;
+  readonly maxItems: number;
+  readonly concurrency?: number;
+  readonly onItemError?: "null" | "fail";
+}
+
+export interface Repeat {
+  readonly until: Condition;
+  readonly maxIterations: number;
+  readonly onExhausted?: "fail" | "continue";
+}
+
+export interface Retry {
+  readonly maxAttempts: number;
+  readonly backoffMs?: number;
+}
+
+export interface AgentNode extends NodeBase {
+  readonly kind: "agent";
+  /** Recipe id in the AgentRegistry. The executor resolves it at run time. */
+  readonly agentId: string;
+  /** Approval-gated tools are refused by default; opt in to suspending the node turn. */
+  readonly approvals?: "refuse" | "wait";
+  /** A JSON Schema whose validated object becomes this node's output. */
+  readonly output?: { readonly schema: Record<string, unknown> };
+  readonly forEach?: ForEach;
+  readonly repeat?: Repeat;
+  /** Maximum wall-clock time for each attempt. */
+  readonly timeoutMs?: number;
+  /** Retry failed attempts that explicitly report a retryable error. */
+  readonly retry?: Retry;
+}
+
+export interface SubDagNode extends NodeBase {
+  readonly kind: "dag";
+  readonly dagId: string;
+  readonly version: string;
+  readonly forEach?: ForEach;
+  readonly repeat?: Repeat;
+  /** Maximum wall-clock time for each attempt. */
+  readonly timeoutMs?: number;
+  /** Retry failed attempts that explicitly report a retryable error. */
+  readonly retry?: Retry;
+}
+
+export interface DecisionModelRef {
+  readonly provider: string;
+  readonly id: string;
+  readonly credentialRef?: string;
+}
+
+export interface DecideNode extends NodeBase {
+  readonly kind: "decide";
+  readonly model: DecisionModelRef;
+  readonly questions: Readonly<Record<string, DecisionQuestion>>;
+  /** Maximum wall-clock time for the decision call. */
+  readonly timeoutMs?: number;
+}
+
+export interface ApprovalNode extends NodeBase {
+  readonly kind: "approval";
+  readonly prompt?: string;
+  /** How long to wait for a decision, from one minute through thirty days. */
+  readonly timeoutMs?: number;
+  /** A timeout is a rejection by default; opt in to failing the node. */
+  readonly onTimeout?: "reject" | "fail";
+}
+
+/** Set on the input of a DAG run started by another DAG run. */
+export interface DagParentFrame {
+  /** One for a child of a root run. */
+  readonly depth: number;
+  /** DAG ids from the root down to the direct parent. */
+  readonly ancestors: ReadonlyArray<string>;
+  /** Child runs this run and its descendants may still start. */
+  readonly childRunsAllowed: number;
+}
+
+export type TransformOp =
+  | { readonly op: "collect"; readonly fields: ReadonlyArray<string> }
+  | { readonly op: "pick"; readonly path: string }
+  | { readonly op: "flatten" }
+  | { readonly op: "compact" }
+  | { readonly op: "count" }
+  | { readonly op: "dedupe"; readonly by?: string }
+  | { readonly op: "filter"; readonly where: Condition }
+  | {
+      readonly op: "sort";
+      readonly by: string;
+      readonly order?: "asc" | "desc";
+    }
+  | { readonly op: "take"; readonly count: number };
+
+export interface TransformNode extends NodeBase {
+  readonly kind: "transform";
+  readonly from?: string;
+  readonly ops: ReadonlyArray<TransformOp>;
+}
+
+export type DagNode = AgentNode | TransformNode | SubDagNode | DecideNode | ApprovalNode;
+
+/** Durable accounting and timing for one settled DAG node. */
+export interface DagNodeStats {
+  readonly spend: BudgetUsage;
+  readonly durationMs: number;
+  readonly items?: number;
+  readonly failedItems?: number;
+  readonly iterations?: number;
+  readonly attempts?: number;
+}
+
 export interface DagEdge {
   readonly from: string;
   readonly to: string;
-  /**
-   * Optional condition. When unset, the edge always fires. When set,
-   * the executor evaluates the condition against the source node's
-   * output before activating the target. v0 supports a string-equals
-   * shape only; richer conditions land later as a dedicated node kind.
-   */
-  readonly condition?: { readonly kind: "equals"; readonly path: string; readonly value: string };
+  /** Optional condition evaluated against the source node's output. */
+  readonly condition?: Condition;
 }
 
 export interface AgenticDagRecipe {

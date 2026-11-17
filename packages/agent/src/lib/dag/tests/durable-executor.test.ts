@@ -13,7 +13,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
-import type { Agent, AgentInput, AgentRunOutput, AgentScope } from "../../agent/types.ts";
+import type { Agent, AgentInput, AgentScope } from "../../agent/types.ts";
 import { InMemoryAgentInstanceRegistry } from "../../instance/in-memory-agent-instance-registry.ts";
 import { composeAgentInstanceId } from "../../instance/types.ts";
 import { InMemoryAgentRegistry } from "../../versioned-registry/in-memory-registries.ts";
@@ -21,6 +21,7 @@ import { createDagWorkflow, type DurableDagInput } from "../durable-executor.ts"
 import { createRegistryAgentResolver } from "../registry-agent-resolver.ts";
 import type { AgentResolver, AgenticDagRecipe, DagRunScope } from "../types.ts";
 import { InMemoryDagRegistry } from "../../versioned-registry/in-memory-registries.ts";
+import { SCOPE, makeResolver, runDag, stubAgent, textOnly } from "./dag-test-kit.ts";
 
 /** DAGs run by reference: register `dag` and name it in the run input. */
 const dags = new InMemoryDagRegistry();
@@ -46,50 +47,28 @@ async function runInput(params: {
   };
 }
 
-function textOnly(text: string): AgentRunOutput<unknown> {
-  return {
-    text: Promise.resolve(text),
-    finishReason: Promise.resolve("stop" as const),
-    messages: Promise.resolve([]),
-    usage: Promise.resolve({ inputTokens: 0, outputTokens: 0 }),
-    steps: Promise.resolve([]),
-    output: Promise.resolve(undefined),
-    events: (async function* () {})(),
-    abort: () => {},
-  } as unknown as AgentRunOutput<unknown>;
-}
-
-function stubAgent(transform: (s: string) => string = (s) => s): Agent {
-  return {
-    invoke: async (input: AgentInput) => textOnly(transform(input.task)),
-    stream: () => textOnly("not used"),
-    thread: async () => {
-      throw new Error("stub: thread");
-    },
-    listThreads: async () => [],
-    withScope() {
-      return this;
-    },
-  } as unknown as Agent;
-}
-
-function makeResolver(byId: Record<string, Agent>): AgentResolver {
-  return async ({ agentId: id }) => {
-    const a = byId[id];
-    if (!a) throw new Error(`unknown agent: ${id}`);
-    return a;
-  };
-}
-
-const SCOPE = { namespaceId: "acme", resourceId: "r-1" } as const;
-
 const linear: AgenticDagRecipe = {
   id: "linear",
   version: "v1",
   nodes: [
-    { id: "n1", agentId: "upper", inputs: { task: { kind: "initial", path: "task" } } },
-    { id: "n2", agentId: "exclaim", inputs: { task: { kind: "node", nodeId: "n1", path: "" } } },
-    { id: "n3", agentId: "wrap", inputs: { task: { kind: "node", nodeId: "n2", path: "" } } },
+    {
+      id: "n1",
+      kind: "agent",
+      agentId: "upper",
+      inputs: { task: { kind: "initial", path: "task" } },
+    },
+    {
+      id: "n2",
+      kind: "agent",
+      agentId: "exclaim",
+      inputs: { task: { kind: "node", nodeId: "n1", path: "" } },
+    },
+    {
+      id: "n3",
+      kind: "agent",
+      agentId: "wrap",
+      inputs: { task: { kind: "node", nodeId: "n2", path: "" } },
+    },
   ],
   edges: [
     { from: "n1", to: "n2" },
@@ -136,12 +115,23 @@ describe("createDagWorkflow — basic", () => {
       nodes: [
         {
           id: "a",
+          kind: "agent",
           agentId: "fails",
           inputs: { task: { kind: "initial", path: "task" } },
           onError: "skip",
         },
-        { id: "b", agentId: "id", inputs: { task: { kind: "node", nodeId: "a", path: "" } } },
-        { id: "c", agentId: "id", inputs: { task: { kind: "initial", path: "task" } } },
+        {
+          id: "b",
+          kind: "agent",
+          agentId: "id",
+          inputs: { task: { kind: "node", nodeId: "a", path: "" } },
+        },
+        {
+          id: "c",
+          kind: "agent",
+          agentId: "id",
+          inputs: { task: { kind: "initial", path: "task" } },
+        },
       ],
       edges: [{ from: "a", to: "b" }],
       entry: ["a", "c"],
@@ -172,6 +162,50 @@ describe("createDagWorkflow — basic", () => {
     expect(result.skipped).toContain("b");
     expect(result.outputs.c).toBe("x");
     expect(result.outputs.b).toBeUndefined();
+  });
+
+  it("routes on an `in` edge condition", async () => {
+    const dag: AgenticDagRecipe = {
+      id: "in-condition",
+      version: "v1",
+      nodes: [
+        {
+          id: "n1",
+          kind: "agent",
+          agentId: "say",
+          inputs: { task: { kind: "initial", path: "task" } },
+        },
+        {
+          id: "a",
+          kind: "agent",
+          agentId: "id",
+          inputs: { task: { kind: "node", nodeId: "n1", path: "" } },
+        },
+        {
+          id: "b",
+          kind: "agent",
+          agentId: "id",
+          inputs: { task: { kind: "node", nodeId: "n1", path: "" } },
+        },
+      ],
+      edges: [
+        {
+          from: "n1",
+          to: "a",
+          condition: { kind: "in", path: "", values: ["yes", "maybe"] },
+        },
+        { from: "n1", to: "b", condition: { kind: "equals", path: "", value: "no" } },
+      ],
+      entry: ["n1"],
+      terminals: ["a", "b"],
+    };
+    const { result } = await runDag({
+      dag,
+      initialInput: { task: "x" },
+      resolver: makeResolver({ say: stubAgent(() => "maybe"), id: stubAgent() }),
+    });
+    expect(Object.keys(result.nodeOutputs)).toEqual(["n1", "a"]);
+    expect(result.skipped).toEqual(["b"]);
   });
 });
 
@@ -260,7 +294,14 @@ describe("createDagWorkflow — scope", () => {
   const single: AgenticDagRecipe = {
     id: "single",
     version: "v1",
-    nodes: [{ id: "n1", agentId: "writer", inputs: { task: { kind: "initial", path: "task" } } }],
+    nodes: [
+      {
+        id: "n1",
+        kind: "agent",
+        agentId: "writer",
+        inputs: { task: { kind: "initial", path: "task" } },
+      },
+    ],
     edges: [],
     entry: ["n1"],
     terminals: ["n1"],

@@ -303,7 +303,9 @@ describe("DAG runs", () => {
   const dagOf = (agentId: string): RegisterDagInput => ({
     id: `dag-${agentId}`,
     version: "v1",
-    nodes: [{ id: "n1", agentId, inputs: { task: { kind: "initial", path: "task" } } }],
+    nodes: [
+      { id: "n1", kind: "agent", agentId, inputs: { task: { kind: "initial", path: "task" } } },
+    ],
     edges: [],
     entry: ["n1"],
     terminals: ["n1"],
@@ -318,6 +320,42 @@ describe("DAG runs", () => {
       enabled: false,
     });
     for (const id of ["support", "restricted", "off"]) await h.dags!.registry.register(dagOf(id));
+    for (const id of ["restricted", "off"]) {
+      const childId = `child-${id}`;
+      await h.dags!.registry.register({ ...dagOf(id), id: childId });
+      await h.dags!.registry.register({
+        id: `dag-sub-${id}`,
+        version: "v1",
+        nodes: [
+          {
+            id: "sub",
+            kind: "dag",
+            dagId: childId,
+            version: "v1",
+            inputs: { task: { kind: "initial", path: "task" } },
+          },
+        ],
+        edges: [],
+        entry: ["sub"],
+        terminals: ["sub"],
+      });
+    }
+    await h.dags!.registry.register({
+      id: "dag-sub-missing",
+      version: "v1",
+      nodes: [
+        {
+          id: "sub",
+          kind: "dag",
+          dagId: "missing-child",
+          version: "v1",
+          inputs: { task: { kind: "initial", path: "task" } },
+        },
+      ],
+      edges: [],
+      entry: ["sub"],
+      terminals: ["sub"],
+    });
     return h;
   }
 
@@ -348,6 +386,25 @@ describe("DAG runs", () => {
     expect(off.status).toBe(410);
     expect(await errorOf(off)).toBe("agent_disabled");
     expect(bound).toEqual([]);
+  });
+
+  it("checks restricted and disabled agents across sub-DAGs and rejects a missing sub-DAG", async () => {
+    const { server } = await bootDags();
+    const body = { namespaceId: "acme", resourceId: "alice", initialInput: { task: "hi" } };
+
+    const restricted = await server.handle(
+      req("POST", "/api/dags/dag-sub-restricted/run", body, asAcme),
+    );
+    expect(restricted.status).toBe(403);
+    expect(await errorOf(restricted)).toBe("scope_forbidden");
+
+    const off = await server.handle(req("POST", "/api/dags/dag-sub-off/run", body, asAcme));
+    expect(off.status).toBe(410);
+    expect(await errorOf(off)).toBe("agent_disabled");
+
+    const missing = await server.handle(req("POST", "/api/dags/dag-sub-missing/run", body, asAcme));
+    expect(missing.status).toBe(404);
+    expect(await errorOf(missing)).toBe("dag_not_found");
   });
 
   it("starts a run and answers with its id; every node runs bound to the caller's scope", async () => {
@@ -392,7 +449,12 @@ describe("DAG runs", () => {
       );
     const graph = {
       nodes: [
-        { id: "n2", agentId: "support", inputs: { task: { kind: "initial", path: "task" } } },
+        {
+          id: "n2",
+          kind: "agent",
+          agentId: "support",
+          inputs: { task: { kind: "initial", path: "task" } },
+        },
       ],
       edges: [],
       entry: ["n2"],

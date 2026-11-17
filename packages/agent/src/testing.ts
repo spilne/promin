@@ -28,6 +28,7 @@ export {
 } from "./lib/versioned-registry/versioned-registry-test-suite.ts";
 export { mockLLM, echoLLM, streamingMockLLM } from "./lib/testing/mock-llm.ts";
 export type { EchoLLMOptions } from "./lib/testing/mock-llm.ts";
+export { scriptedDecisionProvider } from "./lib/testing/scripted-decision-provider.ts";
 export {
   DISTILL_EVAL_CASES,
   runDistillCases,

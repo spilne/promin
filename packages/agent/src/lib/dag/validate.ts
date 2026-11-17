@@ -13,7 +13,8 @@
 
 import { type DagGraph, DagValidationError } from "./types.ts";
 
-export function validateDag(dag: DagGraph): void {
+export function validateDag(params: { dag: DagGraph; dagId?: string }): void {
+  const { dag } = params;
   const issues: string[] = [];
   const nodeIds = new Set(dag.nodes.map((n) => n.id));
 
@@ -122,6 +123,62 @@ export function validateDag(dag: DagGraph): void {
             `node ${node.id} input ${field} reads ${src.nodeId} but ${src.nodeId} isn't reachable upstream`,
           );
         }
+      }
+    }
+    if (node.kind === "dag" && params.dagId !== undefined && node.dagId === params.dagId) {
+      issues.push(`dag node ${node.id} cannot reference its own DAG ${params.dagId}`);
+    }
+    if ((node.kind === "agent" || node.kind === "dag") && node.forEach !== undefined) {
+      const src = node.forEach.items;
+      if (src.kind === "node") {
+        if (!nodeIds.has(src.nodeId)) {
+          issues.push(`node ${node.id} forEach.items → unknown node ${src.nodeId}`);
+        } else if (!incoming.get(node.id)!.has(src.nodeId)) {
+          issues.push(
+            `node ${node.id} forEach.items reads ${src.nodeId} but ${src.nodeId} isn't reachable upstream`,
+          );
+        }
+      }
+      if (node.forEach.as === "index") {
+        issues.push(`node ${node.id} forEach.as cannot be the reserved field index`);
+      }
+      for (const reserved of [node.forEach.as, "index"]) {
+        if (reserved in node.inputs) {
+          issues.push(`node ${node.id} forEach input ${reserved} collides with a generated field`);
+        }
+      }
+    }
+    if ((node.kind === "agent" || node.kind === "dag") && node.repeat !== undefined) {
+      if (node.forEach !== undefined) {
+        issues.push(`node ${node.id} cannot set both forEach and repeat`);
+      }
+      for (const reserved of ["iteration", "previous"]) {
+        if (reserved in node.inputs) {
+          issues.push(`node ${node.id} repeat input ${reserved} collides with a generated field`);
+        }
+      }
+    }
+    if (node.kind === "transform") {
+      const inputFields = new Set(Object.keys(node.inputs));
+      if (node.from !== undefined && !inputFields.has(node.from)) {
+        issues.push(`transform node ${node.id} from references missing input ${node.from}`);
+      }
+      for (const [index, op] of node.ops.entries()) {
+        if (op.op !== "collect") continue;
+        if (index !== 0) {
+          issues.push(`transform node ${node.id} collect is only allowed at ops[0]`);
+        }
+        if (node.from !== undefined) {
+          issues.push(`transform node ${node.id} collect requires from to be omitted`);
+        }
+        for (const field of op.fields) {
+          if (!inputFields.has(field)) {
+            issues.push(`transform node ${node.id} collect references missing input ${field}`);
+          }
+        }
+      }
+      if (node.from === undefined && node.ops[0]?.op !== "collect" && node.ops[0]?.op !== "pick") {
+        issues.push(`transform node ${node.id} must start with pick when from is omitted`);
       }
     }
   }

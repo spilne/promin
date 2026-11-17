@@ -340,7 +340,7 @@ function RunResult({ result, dag }: { result: DagRunResultDto; dag: DagDto }) {
                 <span class="badge badge-xs badge-success">ok</span>
               )}
               <span class="font-mono">{n.id}</span>
-              <span class="text-[10px] text-base-content/40">→ {n.agentId}</span>
+              <span class="text-[10px] text-base-content/40">→ {n.agentId ?? n.kind}</span>
             </summary>
             <pre class="bg-base-200 p-2 text-[11px] font-mono whitespace-pre-wrap break-words">
               {err
@@ -376,7 +376,17 @@ function DagStructure({ dag }: { dag: DagDto }) {
               {dag.entry.includes(n.id) ? "▶" : "·"}
             </span>{" "}
             <span class="font-semibold">{n.id}</span>
-            <span class="text-base-content/40"> ({n.agentId})</span>
+            <span class="text-base-content/40"> ({n.agentId ?? n.kind})</span>
+            {n.forEach !== undefined && (
+              <span class="ml-1 text-info" title="Runs once per item">
+                ×forEach
+              </span>
+            )}
+            {n.repeat !== undefined && (
+              <span class="ml-1 text-warning" title="Runs until its condition holds">
+                ↻repeat
+              </span>
+            )}
             {dag.terminals.includes(n.id) && (
               <span class="ml-2 badge badge-xs badge-outline">terminal</span>
             )}

@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import type { DagEdge, DagNode, NodeInputSource } from "./types.ts";
+import { evaluateCondition } from "./conditions.ts";
 
 /**
  * Dotted-path getter on a plain object/string. `""` returns the root.
@@ -35,10 +36,20 @@ export function pickPath(value: unknown, path: string): unknown {
  */
 export function checkBlockers(args: {
   incomingEdges: ReadonlyArray<DagEdge>;
+  join: "all" | "any";
   outputs: Readonly<Record<string, unknown>>;
   errors: Readonly<Record<string, string>>;
   skipped: ReadonlySet<string>;
 }): string | null {
+  if (args.join === "any" && args.incomingEdges.length > 0) {
+    const eligible = args.incomingEdges.some(
+      (edge) =>
+        edge.from in args.outputs &&
+        (edge.condition === undefined ||
+          evaluateCondition({ condition: edge.condition, value: args.outputs[edge.from] })),
+    );
+    if (eligible) return null;
+  }
   for (const e of args.incomingEdges) {
     if (args.skipped.has(e.from)) {
       return `upstream node ${e.from} was skipped`;
@@ -47,8 +58,7 @@ export function checkBlockers(args: {
       return `upstream node ${e.from} failed`;
     }
     if (e.condition) {
-      const observed = pickPath(args.outputs[e.from], e.condition.path);
-      if (observed !== e.condition.value) {
+      if (!evaluateCondition({ condition: e.condition, value: args.outputs[e.from] })) {
         return `edge condition not met from ${e.from}`;
       }
     }
@@ -64,12 +74,12 @@ export function resolveNodeInputs(args: {
 }): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [field, src] of Object.entries(args.node.inputs)) {
-    out[field] = resolveSource({ src, initial: args.initial, outputs: args.outputs });
+    out[field] = resolveNodeInputSource({ src, initial: args.initial, outputs: args.outputs });
   }
   return out;
 }
 
-function resolveSource(args: {
+export function resolveNodeInputSource(args: {
   src: NodeInputSource;
   initial: Readonly<Record<string, unknown>>;
   outputs: Readonly<Record<string, unknown>>;
@@ -80,7 +90,7 @@ function resolveSource(args: {
       return pickPath(args.initial, src.path);
     case "node": {
       if (!(src.nodeId in args.outputs)) {
-        throw new Error(`Upstream node "${src.nodeId}" has no output yet`);
+        return null;
       }
       return pickPath(args.outputs[src.nodeId], src.path);
     }
