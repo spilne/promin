@@ -74,4 +74,19 @@ describe("DAG recipe schema", () => {
       ).toBe(true);
     }
   });
+
+  it("refuses a recipe whose output schema is unusable", () => {
+    for (const schema of [
+      { type: "objct" },
+      { type: "array" },
+      "x",
+      { type: "object", description: "x".repeat(17_000) },
+    ]) {
+      const issues = recipeIssues({
+        ...ok,
+        nodes: [{ ...ok.nodes[0], output: { schema } }],
+      });
+      expect(issues.some((issue) => issue.startsWith("nodes[0].output.schema"))).toBe(true);
+    }
+  });
 });

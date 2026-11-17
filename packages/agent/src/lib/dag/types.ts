@@ -78,6 +78,8 @@ export interface AgentNode extends NodeBase {
   readonly kind: "agent";
   /** Recipe id in the AgentRegistry. The executor resolves it at run time. */
   readonly agentId: string;
+  /** A JSON Schema whose validated object becomes this node's output. */
+  readonly output?: { readonly schema: Record<string, unknown> };
 }
 
 export type TransformOp =

@@ -991,6 +991,13 @@ export { DagRecipeSchema, recipeIssues, NODE_ID_PATTERN } from "./dag/recipe-sch
 export { validateDag, topologicalOrder } from "./dag/validate.ts";
 export { AgentRefusedError, DagValidationError, isAgentRefusal } from "./dag/types.ts";
 export { applyTransform, TransformError } from "./dag/transform.ts";
+export {
+  compileOutputSchema,
+  extractJson,
+  MAX_OUTPUT_SCHEMA_BYTES,
+  OutputSchemaError,
+  schemaInstruction,
+} from "./dag/output-schema.ts";
 export { createRegistryAgentResolver } from "./dag/registry-agent-resolver.ts";
 export type {
   AgentResolver,

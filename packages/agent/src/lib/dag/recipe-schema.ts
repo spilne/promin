@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { conditionDepth, MAX_CONDITION_DEPTH } from "./conditions.ts";
+import { compileOutputSchema, OutputSchemaError } from "./output-schema.ts";
 import type { Condition, DagNode, DagRecipe, NodeInputSource, TransformOp } from "./types.ts";
 
 export const NODE_ID_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -57,6 +58,10 @@ const AgentNodeSchema = z
     kind: z.literal("agent"),
     agentId: z.string(),
     inputs: z.record(z.string(), NodeInputSourceSchema),
+    output: z
+      .object({ schema: z.record(z.string(), z.unknown()) })
+      .strict()
+      .optional(),
     join: z.enum(["all", "any"]).optional(),
     onError: z.enum(["abort", "skip"]).optional(),
   })
@@ -132,6 +137,18 @@ function issuePath(path: ReadonlyArray<PropertyKey>): string {
 
 export function recipeIssues(input: unknown): string[] {
   const parsed = DagRecipeSchema.safeParse(input);
-  if (parsed.success) return [];
-  return parsed.error.issues.map((issue) => `${issuePath(issue.path)}: ${issue.message}`);
+  if (!parsed.success) {
+    return parsed.error.issues.map((issue) => `${issuePath(issue.path)}: ${issue.message}`);
+  }
+  const issues: string[] = [];
+  for (const [index, node] of parsed.data.nodes.entries()) {
+    if (node.kind !== "agent" || node.output === undefined) continue;
+    try {
+      compileOutputSchema(node.output.schema);
+    } catch (error) {
+      if (!(error instanceof OutputSchemaError)) throw error;
+      issues.push(`nodes[${index}].output.schema: ${error.message}`);
+    }
+  }
+  return issues;
 }

@@ -9,6 +9,7 @@ import { isDelegableAgent } from "../../delegation/types.ts";
 import { composeAgentInstanceId } from "../../instance/types.ts";
 import type { ApprovalDecision } from "../../tool.ts";
 import { stringifyTask } from "../dag-helpers.ts";
+import { compileOutputSchema, extractJson, schemaInstruction } from "../output-schema.ts";
 import { isAgentRefusal, type AgentNode } from "../types.ts";
 import { childRunId, type RunAttempt } from "./env.ts";
 
@@ -68,9 +69,20 @@ export const runAgentAttempt: RunAttempt<AgentNode> = function* (env, params) {
       }
       if (isDelegableAgent(agent)) {
         const turnInput = (await agent.prepareTurn({ task })).input;
-        return { ok: true, scope, input: turnInput, kind: "turn" };
+        return {
+          ok: true,
+          scope,
+          input: {
+            ...turnInput,
+            ...(node.output && { outputJsonSchema: node.output.schema }),
+          },
+          kind: "turn",
+        };
       }
-      return { ok: true, scope, input: { task }, kind: "invoke" };
+      const invokeTask = node.output
+        ? `${JSON.stringify(nodeInput, null, 2)}\n\n${schemaInstruction(node.output.schema)}`
+        : task;
+      return { ok: true, scope, input: { task: invokeTask }, kind: "invoke" };
     },
     { idempotent: true },
   );
@@ -131,6 +143,57 @@ export const runAgentAttempt: RunAttempt<AgentNode> = function* (env, params) {
   }
 
   const spend = childSpend(result);
+  if (node.output !== undefined) {
+    if (routed.kind === "turn") {
+      if (result.finishReason === "output_invalid") {
+        return {
+          ok: false,
+          error: `output_schema_mismatch: ${result.answer}`,
+          retryable: true,
+          spend,
+        };
+      }
+      if (result.finishReason !== "stop") {
+        return {
+          ok: false,
+          error: `node "${node.id}" finished with ${result.finishReason}`,
+          retryable: true,
+          spend,
+        };
+      }
+      if (result.output === undefined) {
+        return {
+          ok: false,
+          error: `output_schema_mismatch: node "${node.id}" returned no structured output`,
+          retryable: true,
+          spend,
+        };
+      }
+      return { ok: true, output: result.output, spend };
+    }
+
+    if (result.finishReason !== "stop") {
+      return {
+        ok: false,
+        error: `node "${node.id}" finished with ${result.finishReason}`,
+        retryable: true,
+        spend,
+      };
+    }
+    try {
+      const value = extractJson(result.answer);
+      const parsed = compileOutputSchema(node.output.schema).safeParse(value);
+      if (!parsed.success) throw parsed.error;
+      return { ok: true, output: parsed.data, spend };
+    } catch (error) {
+      return {
+        ok: false,
+        error: `output_schema_mismatch: ${formatToolError(error)}`,
+        retryable: true,
+        spend,
+      };
+    }
+  }
   if (result.finishReason === "cancelled") {
     return {
       ok: false,
