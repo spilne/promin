@@ -46,6 +46,7 @@ import {
   parseMcpServersConfig,
 } from "../src/index.ts";
 import { researchSynthesisRecipe } from "./dags/research-synthesis.ts";
+import { scriptedDagLlms } from "./dags/scripted-dag-llms.ts";
 import { MapActivityCatalog } from "@promin/workflow";
 import { ZoryaWorkflowBuilder } from "../src/index.ts";
 import { demoActivities } from "./workflow-steps/index.ts";
@@ -480,6 +481,7 @@ const agentLlms: Record<string, LLMProvider> = {
   // chosen model has been pulled. Fast tiny model; good enough for the
   // demo and free.
   "ollama-bot": ollama({ model: OLLAMA_MODEL, baseURL: OLLAMA_URL }),
+  ...(process.env["ZORYA_DEMO_SCRIPTED_DAG"] === "1" ? scriptedDagLlms() : {}),
 };
 
 // Model catalog — bridge between recipes that pin `backend.model = { provider, id }`
@@ -1190,7 +1192,7 @@ await seedInitialRuns((name, input, opts) => workflows.trigger(name, input, opts
 
 // ---------------------------------------------------------------------------
 // Agentic DAG demo wiring — register 3 specialist recipes (planner /
-// researcher / synthesizer) + the diamond-shape research-synthesis DAG
+// researcher / synthesizer) + the fan-out research-synthesis DAG
 // the recipes power. Each node references one of these agentIds; the
 // dag executor resolves them via the same resolveAgent path the chat
 // gateway uses, so credentialRefs / tools / memory all flow through.
@@ -1201,14 +1203,14 @@ const dagAgentRecipes = [
     id: "dag-planner",
     description: "Splits a topic into 3 research sub-questions.",
     systemPrompt:
-      "You are a research planner. Given a topic, emit exactly 3 sub-questions (one per line) " +
-      "covering different angles: historical, current, contrarian. Be concise — sub-questions only, no preamble.",
+      "You are a research planner. Given a topic, return exactly 3 concise sub-questions " +
+      "covering historical, current and contrarian angles.",
   },
   {
     id: "dag-researcher",
     description: "Produces a focused finding for one sub-question.",
     systemPrompt:
-      "You are a research specialist. Given a topic and a focus directive, produce a 4-6 sentence " +
+      "You are a research specialist. Given a topic and one question, produce a 4-6 sentence " +
       "finding that's factual and concrete. No filler.",
   },
   {

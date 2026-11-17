@@ -77,6 +77,33 @@ async function waitForHealth(url: string, timeoutMs = 30_000): Promise<void> {
   );
 }
 
+async function post(pathname: string, body: unknown): Promise<Response> {
+  return fetch(`${baseUrl}${pathname}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+interface EndedRun {
+  status: string;
+  result?: {
+    ok: boolean;
+    outputs: Record<string, unknown>;
+    nodeOutputs: Record<string, unknown>;
+    nodeStats: Record<string, { items?: number }>;
+  };
+}
+
+async function waitForRun(workflowId: string): Promise<EndedRun> {
+  let ended: EndedRun = { status: "pending" };
+  for (let i = 0; i < 200 && ended.status !== "completed" && ended.status !== "failed"; i++) {
+    await Bun.sleep(50);
+    ended = (await (await fetch(`${baseUrl}/api/runs/${workflowId}`)).json()) as typeof ended;
+  }
+  return ended;
+}
+
 describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
   beforeAll(async () => {
     const port = await pickFreePort();
@@ -88,6 +115,7 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
         PORT: String(port),
         ZORYA_DB: ":memory:",
         ZORYA_INSECURE: "1",
+        ZORYA_DEMO_SCRIPTED_DAG: "1",
         // Unreachable Ollama URL — the demo only calls it lazily on a
         // chat turn, so this is safe and avoids hanging on real probes.
         OLLAMA_URL: "http://127.0.0.1:1",
@@ -159,8 +187,8 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
         terminals: ReadonlyArray<string>;
       };
       expect(body.id).toBe("research-synthesis");
-      expect(body.nodes.length).toBeGreaterThanOrEqual(5);
-      expect(body.edges.length).toBeGreaterThanOrEqual(5);
+      expect(body.nodes).toHaveLength(4);
+      expect(body.edges).toHaveLength(3);
       expect(body.entry).toContain("planner");
       expect(body.terminals).toContain("synthesizer");
       const agentIds = new Set(body.nodes.map((n) => n.agentId));
@@ -296,6 +324,22 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
       // demo.ts's echo-bot template: "echo-bot says: I heard '{task}' (turn #{n})"
       expect(echoOutput).toContain("echo-bot says");
       expect(echoOutput).toContain("hello dag");
+    });
+
+    it("runs the research-synthesis recipe end to end", async () => {
+      const run = await post("/api/dags/research-synthesis/run", {
+        namespaceId: "default",
+        resourceId: "e2e",
+        initialInput: { topic: "tea" },
+      });
+      expect(run.status).toBe(202);
+      const ended = await waitForRun(((await run.json()) as { workflowId: string }).workflowId);
+
+      expect(ended.status).toBe("completed");
+      expect(ended.result?.ok).toBe(true);
+      expect(ended.result?.nodeOutputs.research).toHaveLength(3);
+      expect(String(ended.result?.outputs.synthesizer)).toContain("3 findings");
+      expect(ended.result?.nodeStats.research?.items).toBe(3);
     });
   });
 

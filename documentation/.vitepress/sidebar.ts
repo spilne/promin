@@ -98,6 +98,10 @@ export const sidebar = [
         link: "/docs/agent/overview",
       },
       {
+        text: "Agent graphs",
+        link: "/docs/agent/dags",
+      },
+      {
         text: "Agent evaluations",
         link: "/docs/agent/evals",
       },

@@ -1,28 +1,20 @@
 // ---------------------------------------------------------------------------
 // dag-research-synthesis — runnable demo of operator-authored agentic DAG.
 //
-//   ┌──────────┐
-//   │ planner  │   cheap fast model — splits topic into 3 sub-questions
-//   └──┬───────┘
-//      ├──────────────────────┬──────────────────────┐
-//      ▼                      ▼                      ▼
-//   ┌──────────┐         ┌──────────┐           ┌──────────┐
-//   │researcher│         │researcher│           │researcher│   parallel — each
-//   │   #1     │         │   #2     │           │   #3     │   gets one sub-question
-//   └────┬─────┘         └────┬─────┘           └────┬─────┘
-//        └─────────────────┬──┴───────────────────┘
-//                          ▼
-//                    ┌──────────────┐
-//                    │ synthesizer  │   higher-quality model — joins findings
-//                    └──────────────┘   into a single report
+//   planner (typed questions)
+//      ↓
+//   research × forEach(question)
+//      ↓
+//   findings (compact transform)
+//      ↓
+//   synthesizer
 //
 // Why this is a good fit for the operator-authored DAG primitive:
 //   - Different agents at different cost tiers (cheap planner + cheap
 //     researchers + expensive synthesizer). One generic agent can't make
 //     the cost / quality tradeoffs operators want at each station.
-//   - Genuine parallelism (3 researchers run independently — without the
-//     DAG's per-node journaling, a worker crash mid-run loses all the
-//     completed researcher output and re-bills you for re-running them).
+//   - Genuine parallelism (`forEach` researcher attempts run independently;
+//     a worker crash replays finished item children instead of re-running them).
 //   - Replay-safety actually matters: by the time you reach the
 //     synthesizer node, you've already paid for 4 LLM calls. A worker
 //     restart there shouldn't re-do them.
@@ -31,8 +23,8 @@
 //   bun --conditions=@promin/source run packages/zorya/examples/dag-research-synthesis.ts "your topic here"
 //
 // The demo auto-detects whether you have ANTHROPIC_API_KEY set:
-//   - Without key: every node uses a mock echo LLM, so it always runs +
-//     prints the DAG-level structure without making real calls.
+//   - Without key: every node uses a deterministic scripted LLM, so it always
+//     runs and prints the DAG-level structure without making real calls.
 //   - With key: planner + researchers use Haiku (fast/cheap), synthesizer
 //     uses Sonnet (quality), so you can see real model-tier mixing.
 // ---------------------------------------------------------------------------
@@ -43,12 +35,12 @@ import {
   InMemoryDagRegistry,
   LocalAgent,
   createDagWorkflow,
-  type AgenticDagRecipe,
   type Agent,
   type AgentResolver,
   type LLMProvider,
 } from "@promin/agent";
-import { echoLLM } from "@promin/agent/testing";
+import { researchSynthesisRecipe } from "./dags/research-synthesis.ts";
+import { scriptedDagLlms } from "./dags/scripted-dag-llms.ts";
 
 const haveAnthropic = !!process.env["ANTHROPIC_API_KEY"];
 const topic = process.argv[2] ?? "what makes a good engineering culture";
@@ -57,74 +49,8 @@ const topic = process.argv[2] ?? "what makes a good engineering culture";
 // 1. The DAG recipe — operator-authored, not LLM-generated.
 // ---------------------------------------------------------------------------
 
-const researchSynthesisDag: Omit<AgenticDagRecipe, "id" | "version"> = {
-  nodes: [
-    {
-      id: "planner",
-      kind: "agent",
-      agentId: "planner",
-      // The planner gets the raw topic and is asked to emit 3 sub-questions.
-      inputs: {
-        task: { kind: "initial", path: "topic" },
-      },
-    },
-    {
-      id: "research-1",
-      kind: "agent",
-      agentId: "researcher",
-      inputs: {
-        // For demo simplicity we route the whole planner output to each
-        // researcher; in production a `pickPath` against a structured
-        // planner output would route specific sub-questions per branch.
-        task: { kind: "node", nodeId: "planner", path: "" },
-        focus: { kind: "literal", value: "1st sub-question" },
-      },
-    },
-    {
-      id: "research-2",
-      kind: "agent",
-      agentId: "researcher",
-      inputs: {
-        task: { kind: "node", nodeId: "planner", path: "" },
-        focus: { kind: "literal", value: "2nd sub-question" },
-      },
-    },
-    {
-      id: "research-3",
-      kind: "agent",
-      agentId: "researcher",
-      inputs: {
-        task: { kind: "node", nodeId: "planner", path: "" },
-        focus: { kind: "literal", value: "3rd sub-question" },
-      },
-    },
-    {
-      id: "synthesizer",
-      kind: "agent",
-      agentId: "synthesizer",
-      inputs: {
-        topic: { kind: "initial", path: "topic" },
-        finding1: { kind: "node", nodeId: "research-1", path: "" },
-        finding2: { kind: "node", nodeId: "research-2", path: "" },
-        finding3: { kind: "node", nodeId: "research-3", path: "" },
-      },
-    },
-  ],
-  edges: [
-    { from: "planner", to: "research-1" },
-    { from: "planner", to: "research-2" },
-    { from: "planner", to: "research-3" },
-    { from: "research-1", to: "synthesizer" },
-    { from: "research-2", to: "synthesizer" },
-    { from: "research-3", to: "synthesizer" },
-  ],
-  entry: ["planner"],
-  terminals: ["synthesizer"],
-  metadata: {
-    description: "Diamond-shape research synthesis: split → parallel research → join",
-    tags: ["research", "demo"],
-  },
-};
+const researchSynthesisDag = researchSynthesisRecipe;
+const scripted = scriptedDagLlms();
 
 // ---------------------------------------------------------------------------
 // 2. Wire the agents the DAG references.
@@ -134,26 +60,19 @@ const researchSynthesisDag: Omit<AgenticDagRecipe, "id" | "version"> = {
 function plannerLlm(): LLMProvider {
   // Cheap fast model — planner job is structured + short
   if (haveAnthropic) return anthropic("claude-haiku-4-5-20251001");
-  return echoLLM({
-    template:
-      "Sub-questions:\n1. What's the historical context of '{task}'?\n2. Who are the leading voices on '{task}'?\n3. What's the contrarian view on '{task}'?",
-  });
+  return scripted["dag-planner"];
 }
 
 function researcherLlm(): LLMProvider {
   if (haveAnthropic) return anthropic("claude-haiku-4-5-20251001");
-  return echoLLM({
-    template: "Research finding (mock): brief takeaway on '{task}'.",
-  });
+  return scripted["dag-researcher"];
 }
 
 function synthesizerLlm(): LLMProvider {
   // Quality model — synthesizer reads 3 inputs, decides what's important,
   // drops contradictions, writes the final piece.
   if (haveAnthropic) return anthropic("claude-sonnet-4-6");
-  return echoLLM({
-    template: "Final synthesis (mock): rolled up the 3 findings into one summary.",
-  });
+  return scripted["dag-synthesizer"];
 }
 
 // ---------------------------------------------------------------------------
@@ -172,19 +91,19 @@ function makeAgent(name: string, llm: LLMProvider, systemPrompt: string): Agent 
 }
 
 const agents: Record<string, Agent> = {
-  planner: makeAgent(
+  "dag-planner": makeAgent(
     "planner",
     plannerLlm(),
     "You are a research planner. Given a topic, emit exactly 3 sub-questions, one per line, " +
-      "covering different angles (historical, current, contrarian). Be concise — sub-questions only.",
+      "covering different angles (historical, current, contrarian).",
   ),
-  researcher: makeAgent(
+  "dag-researcher": makeAgent(
     "researcher",
     researcherLlm(),
-    "You are a research specialist. Given a topic + a focus directive, produce a 4-6 sentence " +
+    "You are a research specialist. Given a topic and one question, produce a 4-6 sentence " +
       "research finding. Be factual and concrete.",
   ),
-  synthesizer: makeAgent(
+  "dag-synthesizer": makeAgent(
     "synthesizer",
     synthesizerLlm(),
     "You are a senior research editor. Given a topic and 3 research findings, produce a " +
@@ -205,14 +124,12 @@ const resolver: AgentResolver = async ({ agentId }) => {
 async function main() {
   console.log(`\n=== Agentic DAG demo: research-synthesis ===`);
   console.log(`Topic: ${topic}`);
-  console.log(`Live LLMs: ${haveAnthropic ? "yes (Haiku + Sonnet)" : "no — using echo mocks"}`);
+  console.log(
+    `Live LLMs: ${haveAnthropic ? "yes (Haiku + Sonnet)" : "no — using scripted models"}`,
+  );
 
   const dagRegistry = new InMemoryDagRegistry();
-  const dag = await dagRegistry.register({
-    id: "research-synthesis",
-    version: "v1",
-    ...researchSynthesisDag,
-  });
+  const dag = await dagRegistry.register(researchSynthesisDag);
   console.log(`\nRegistered DAG: ${dag.id}@${dag.version}`);
   console.log(`  ${dag.nodes.length} nodes, ${dag.edges.length} edges`);
   console.log(`  entry: ${dag.entry.join(",")}  terminals: ${dag.terminals.join(",")}\n`);
@@ -242,12 +159,10 @@ async function main() {
 
   console.log(`\n--- planner output ---`);
   console.log(result.nodeOutputs.planner);
-  console.log(`\n--- research-1 ---`);
-  console.log(result.nodeOutputs["research-1"]);
-  console.log(`\n--- research-2 ---`);
-  console.log(result.nodeOutputs["research-2"]);
-  console.log(`\n--- research-3 ---`);
-  console.log(result.nodeOutputs["research-3"]);
+  console.log(`\n--- research fan-out ---`);
+  console.log(result.nodeOutputs.research);
+  console.log(`\n--- compact findings ---`);
+  console.log(result.nodeOutputs.findings);
   console.log(`\n--- synthesizer (final) ---`);
   console.log(result.outputs.synthesizer);
 

@@ -1,26 +1,19 @@
 // ---------------------------------------------------------------------------
-// research-synthesis DAG recipe — diamond-shape multi-specialist pipeline.
+// research-synthesis DAG recipe — typed planning, fan-out and synthesis.
 //
-// 1 planner → 3 parallel researchers → 1 synthesizer
-//
-// References agents by id:
-//   - "dag-planner"      — splits topic into 3 sub-questions
-//   - "dag-researcher"   — produces a finding for each sub-question
-//   - "dag-synthesizer"  — joins findings into a single report
-//
-// Caller is expected to register these agent recipes (with their own
-// system prompts + LLM bindings) before running the DAG. demo.ts wires
-// them up against the host's existing model catalog.
+// One planner returns a typed question list. `forEach` runs the researcher
+// once per question, then a transform compacts successful findings before
+// the synthesizer writes the terminal report.
 // ---------------------------------------------------------------------------
 
 import type { RegisterDagInput } from "@promin/agent";
 
 export const researchSynthesisRecipe: RegisterDagInput = {
   id: "research-synthesis",
-  version: "v2",
+  version: "v3",
   metadata: {
-    description: "Diamond-shape research synthesis: split topic → parallel research → join.",
-    tags: ["demo", "research"],
+    description: "Typed research plan → fan-out research → compact findings → synthesis.",
+    tags: ["demo", "research", "fan-out"],
   },
   nodes: [
     {
@@ -28,35 +21,39 @@ export const researchSynthesisRecipe: RegisterDagInput = {
       kind: "agent",
       agentId: "dag-planner",
       inputs: {
-        task: { kind: "initial", path: "topic" },
+        topic: { kind: "initial", path: "topic" },
+      },
+      output: {
+        schema: {
+          type: "object",
+          properties: {
+            questions: { type: "array", items: { type: "string" } },
+          },
+          required: ["questions"],
+        },
       },
     },
     {
-      id: "research-1",
+      id: "research",
       kind: "agent",
       agentId: "dag-researcher",
       inputs: {
-        task: { kind: "node", nodeId: "planner", path: "" },
-        focus: { kind: "literal", value: "1st sub-question" },
+        topic: { kind: "initial", path: "topic" },
+      },
+      forEach: {
+        items: { kind: "node", nodeId: "planner", path: "questions" },
+        as: "question",
+        maxItems: 8,
       },
     },
     {
-      id: "research-2",
-      kind: "agent",
-      agentId: "dag-researcher",
+      id: "findings",
+      kind: "transform",
       inputs: {
-        task: { kind: "node", nodeId: "planner", path: "" },
-        focus: { kind: "literal", value: "2nd sub-question" },
+        research: { kind: "node", nodeId: "research", path: "" },
       },
-    },
-    {
-      id: "research-3",
-      kind: "agent",
-      agentId: "dag-researcher",
-      inputs: {
-        task: { kind: "node", nodeId: "planner", path: "" },
-        focus: { kind: "literal", value: "3rd sub-question" },
-      },
+      from: "research",
+      ops: [{ op: "compact" }],
     },
     {
       id: "synthesizer",
@@ -64,19 +61,14 @@ export const researchSynthesisRecipe: RegisterDagInput = {
       agentId: "dag-synthesizer",
       inputs: {
         topic: { kind: "initial", path: "topic" },
-        finding1: { kind: "node", nodeId: "research-1", path: "" },
-        finding2: { kind: "node", nodeId: "research-2", path: "" },
-        finding3: { kind: "node", nodeId: "research-3", path: "" },
+        findings: { kind: "node", nodeId: "findings", path: "" },
       },
     },
   ],
   edges: [
-    { from: "planner", to: "research-1" },
-    { from: "planner", to: "research-2" },
-    { from: "planner", to: "research-3" },
-    { from: "research-1", to: "synthesizer" },
-    { from: "research-2", to: "synthesizer" },
-    { from: "research-3", to: "synthesizer" },
+    { from: "planner", to: "research" },
+    { from: "research", to: "findings" },
+    { from: "findings", to: "synthesizer" },
   ],
   entry: ["planner"],
   terminals: ["synthesizer"],

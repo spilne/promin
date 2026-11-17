@@ -377,6 +377,16 @@ function DagStructure({ dag }: { dag: DagDto }) {
             </span>{" "}
             <span class="font-semibold">{n.id}</span>
             <span class="text-base-content/40"> ({n.agentId ?? n.kind})</span>
+            {n.forEach !== undefined && (
+              <span class="ml-1 text-info" title="Runs once per item">
+                ×forEach
+              </span>
+            )}
+            {n.repeat !== undefined && (
+              <span class="ml-1 text-warning" title="Runs until its condition holds">
+                ↻repeat
+              </span>
+            )}
             {dag.terminals.includes(n.id) && (
               <span class="ml-2 badge badge-xs badge-outline">terminal</span>
             )}
