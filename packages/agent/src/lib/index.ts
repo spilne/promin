@@ -1058,3 +1058,4 @@ export {
 } from "./decision/system-one-provider.ts";
 export type { SystemOneOptions } from "./decision/system-one-provider.ts";
 export { decideWithRetry } from "./decision/decide-with-retry.ts";
+export { createLlmDecisionProvider, DECIDE_TOOL_NAME } from "./decision/llm-decision-provider.ts";
