@@ -47,7 +47,7 @@ describe("SqliteWorkflowStorage", () => {
     expect(state!.input).toEqual({ x: 1 });
   });
 
-  it("adds the step_progress column to a table created without it, and keeps its rows", async () => {
+  it("adds step progress and security context columns to an old table, and keeps its rows", async () => {
     const db = new Database(":memory:");
     // The workflow table as an earlier version created it.
     db.run(`CREATE TABLE promin_wf (
@@ -66,6 +66,7 @@ describe("SqliteWorkflowStorage", () => {
       // Opening twice: the migration is idempotent.
       const storage = SqliteWorkflowStorage.make({ db });
       expect((await storage.loadWorkflow("old-1"))?.workflowName).toBe("old");
+      expect((await storage.loadWorkflow("old-1"))?.securityContext).toBeUndefined();
       await storage.saveStepProgress({
         workflowId: "old-1",
         stepName: "a",
@@ -73,6 +74,8 @@ describe("SqliteWorkflowStorage", () => {
       });
       expect((await storage.loadWorkflow("old-1"))?.stepProgress?.["a"]?.attempt).toBe(open);
     }
+    const columns = db.query<{ name: string }, []>("PRAGMA table_info(promin_wf)").all();
+    expect(columns.map((column) => column.name)).toContain("security_context");
   });
 
   it("custom table prefix avoids conflicts", async () => {

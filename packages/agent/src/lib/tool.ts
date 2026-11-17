@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { RunPrincipalRef, RunSecurityContext } from "@promin/workflow";
 import type { SubAgentDelegation } from "./delegation/types.ts";
 import type { ToolAuditEntry, ToolAuditLogger } from "./tool-audit/types.ts";
 import type {
@@ -63,6 +64,8 @@ export interface ToolScope {
   readonly threadId?: string;
   /** Recipe id of the agent the tool is executing under. */
   readonly agentId?: string;
+  /** Immutable identity of the durable turn executing this tool. */
+  readonly securityContext?: RunSecurityContext;
 }
 
 /** Per-call execution context handed to `tool.execute` as an optional second arg. */
@@ -499,6 +502,9 @@ export function createElevatedTool<TInput, TOutput>(
           namespaceId: scoped.namespaceId,
           resourceId: scoped.resourceId,
           ...(scoped.agentId !== undefined && { agentId: scoped.agentId }),
+          ...(ctx?.scope?.securityContext !== undefined && {
+            securityContext: ctx.scope.securityContext,
+          }),
           toolName: config.name,
           ...(ctx?.toolCallId !== undefined && { toolCallId: ctx.toolCallId }),
           action: entry.action,
@@ -733,8 +739,10 @@ export function tool<TInput, TOutput>(
 export interface ApprovalDecision {
   approved: boolean;
   reason?: string;
-  /** Who decided — recorded with the decision (the approval signal's `by`). */
+  /** Legacy display/audit id retained for signal compatibility. */
   by?: string;
+  /** Collision-safe identity of the authenticated approver. */
+  byPrincipal?: RunPrincipalRef;
 }
 
 export type AutoApprove =

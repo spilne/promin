@@ -25,7 +25,11 @@ import {
   StartClaimRequestSchema,
   StartParamsSchema,
 } from "../api-types.ts";
-import type { WorkflowStartClaimRef, WorkflowStartQueue } from "@promin/workflow/distributed";
+import type {
+  WorkflowStartClaimRef,
+  WorkflowStartQueue,
+  WorkflowStartRecord,
+} from "@promin/workflow/distributed";
 
 /**
  * `POST /api/worker-protocol/claim-starts`. `onClaimed` hears every claimed
@@ -34,6 +38,7 @@ import type { WorkflowStartClaimRef, WorkflowStartQueue } from "@promin/workflow
 export function claimWorkflowStarts(
   queue: WorkflowStartQueue,
   onClaimed?: (starts: ReadonlyArray<{ readonly workflowId: string }>) => void,
+  authorize?: (start: WorkflowStartRecord) => boolean | Promise<boolean>,
 ) {
   return async (req: Request): Promise<Response> => {
     const { workflowSpecs, workerId, limit, claimId } = await parseBody({
@@ -41,12 +46,38 @@ export function claimWorkflowStarts(
       schema: ClaimStartsRequestSchema,
     });
     if (workflowSpecs.length === 0) return json(200, { starts: [] });
-    const starts = await queue.claim({
+    const claimed = await queue.claim({
       workflowSpecs,
       ...(workerId !== undefined && { workerId }),
       ...(claimId !== undefined && { claimId }),
       limit: limit ?? 10,
     });
+    const starts: WorkflowStartRecord[] = [];
+    for (const start of claimed) {
+      let allowed = true;
+      if (authorize) {
+        try {
+          allowed = await authorize(start);
+        } catch {
+          // Storage/policy infrastructure failed before it could persist a
+          // terminal denial. Return the claim to the queue; never expose it
+          // to this worker and never silently consume the only start.
+          if (start.claimToken !== undefined) {
+            await queue.release({ id: start.id, claimToken: start.claimToken }).catch(() => false);
+          }
+          continue;
+        }
+      }
+      if (allowed) {
+        starts.push(start);
+        continue;
+      }
+      // The run guard terminalized the denied run. Consume this fenced
+      // start so it cannot be reclaimed and retried forever.
+      if (start.claimToken !== undefined) {
+        await queue.complete({ id: start.id, claimToken: start.claimToken }).catch(() => false);
+      }
+    }
     if (starts.length > 0) onClaimed?.(starts);
     return json(200, { starts });
   };

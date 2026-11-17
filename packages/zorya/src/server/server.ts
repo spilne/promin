@@ -31,6 +31,7 @@ import { RunWatcherPool } from "./run-poll-watcher.ts";
 import {
   DEFAULT_READINESS_TIMEOUT_MS,
   DEFAULT_SHUTDOWN_TIMEOUT_MS,
+  ZoryaInsecureConfigError,
   type ListenOptions,
   type Logger,
   type ZoryaServerConfig,
@@ -61,7 +62,7 @@ import {
   type ZoryaCluster,
 } from "./services/workflows/index.ts";
 import { mountAgents } from "./mount/mount-agents.ts";
-import { AuthPlanes, isProbePath } from "./mount/mount-auth.ts";
+import { AuthPlanes, isOperatorApiPath, isProbePath } from "./mount/mount-auth.ts";
 import { mountRemoteDeployments, mountWebhooks } from "./mount/mount-ingress.ts";
 import {
   InFlightRequests,
@@ -85,6 +86,21 @@ import { mountSchedules } from "./mount/mount-schedules.ts";
 import { mountStatic } from "./mount/mount-static.ts";
 import { mountWorkflowBuilder } from "./mount/mount-workflow-builder.ts";
 import { ZoryaServerBuilder } from "./server-builder.ts";
+import {
+  mountExtensionRoutes,
+  registerExtensionRetrievers,
+  validateChannel,
+  type ZoryaChannel,
+  type ZoryaLlmPolicy,
+} from "./extensions.ts";
+import {
+  OPERATOR_PRINCIPAL,
+  createApiKeySecurity,
+  createSecurityRouteAccessGuard,
+  principalRef,
+  setRequestPrincipal,
+  type ZoryaSecurity,
+} from "./security/index.ts";
 
 export class ZoryaServer {
   readonly workflows: ZoryaWorkflows;
@@ -143,6 +159,12 @@ export class ZoryaServer {
   readonly namespaces?: NamespaceRegistry;
   /** Deletes ended runs past their retention age. Present with `config.retention`. */
   readonly retention?: RunRetention;
+  /** Authentication and access policy for the operator API. */
+  readonly security: ZoryaSecurity;
+  /** Trusted channel packages attached to this server. */
+  readonly channels: ReadonlyArray<ZoryaChannel>;
+  /** Host-wide provider/model admission policy, when configured. */
+  readonly llmPolicy?: ZoryaLlmPolicy;
 
   private readonly planes: AuthPlanes;
   private readonly lifecycle: ServiceLifecycle;
@@ -165,6 +187,15 @@ export class ZoryaServer {
   }
 
   constructor(config: ZoryaServerConfig) {
+    if (
+      config.agents &&
+      config.insecure !== true &&
+      (config.agents as { readonly approvals?: unknown }).approvals === undefined
+    ) {
+      throw new TypeError(
+        "ZoryaServer requires ZoryaAgents to expose the PendingApprovalStore used by resolved agents",
+      );
+    }
     this.workflows = config.workflows;
     if (config.scheduler) this.scheduler = config.scheduler;
     if (config.agents) this.agents = config.agents;
@@ -178,6 +209,20 @@ export class ZoryaServer {
     if (config.workflowBuilder) this.workflowBuilder = config.workflowBuilder;
     if (config.secrets) this.secrets = config.secrets;
     if (config.namespaces) this.namespaces = config.namespaces;
+    this.channels = Object.freeze([...(config.channels ?? [])]);
+    const channelIds = new Set<string>();
+    for (const channel of this.channels) {
+      const id = validateChannel(channel);
+      if (channelIds.has(id)) throw new Error(`ZoryaServer: duplicate channel '${id}'`);
+      channelIds.add(id);
+    }
+    if (this.channels.some((channel) => channel.mapsExternalUsers) && !config.security) {
+      throw new Error("ZoryaServer: a channel that maps external users requires security");
+    }
+    if (this.channels.some((channel) => channel.mapsExternalUsers && !channel.runtime)) {
+      throw new Error("ZoryaServer: a channel that maps external users requires a channel runtime");
+    }
+    if (config.llmPolicy) this.llmPolicy = config.llmPolicy;
     const namespaces = this.namespaces;
     const clock: WallClock = config.clock ?? SystemWallClock;
     this.inFlight = new InFlightRequests(clock);
@@ -199,14 +244,60 @@ export class ZoryaServer {
     }
 
     this.logger = config.logger ?? console;
+    if (config.security && config.apiKeys !== undefined) {
+      throw new ZoryaInsecureConfigError(
+        "ZoryaServer: the security module replaces apiKeys; configure only one operator authentication path.",
+      );
+    }
     this.planes = new AuthPlanes({
       apiKeys: config.apiKeys,
       workerApiKeys: config.remoteWorkers?.apiKeys,
+      operatorSecurity: config.security !== undefined,
     });
+    this.security =
+      config.security ??
+      createApiKeySecurity({
+        operatorAuth: this.planes.operator,
+        workerAuth: this.planes.worker,
+        logger: this.logger,
+      });
     this.planes.assertConfigured({
       remoteWorkers: config.remoteWorkers !== undefined,
       insecure: config.insecure === true,
+      operatorSecurity: config.security !== undefined,
       logger: this.logger,
+    });
+    this.workflows.configureExecutionSecurity({
+      security: this.security,
+      clock,
+      logger: this.logger,
+      ...(config.security === undefined && {
+        legacyPrincipal: principalRef(OPERATOR_PRINCIPAL),
+      }),
+    });
+    this.scheduler?.configureExecutionSecurity({
+      security: this.security,
+      clock,
+      logger: this.logger,
+      ...(config.security === undefined && {
+        legacyPrincipal: principalRef(OPERATOR_PRINCIPAL),
+      }),
+    });
+    this.retainedSubagents?.configureExecutionSecurity({
+      security: this.security,
+      clock,
+      logger: this.logger,
+      ...(config.security === undefined && {
+        legacySecurityContext: { actor: principalRef(OPERATOR_PRINCIPAL) },
+      }),
+    });
+    this.agents?.configureKnowledgeSecurity({
+      security: this.security,
+      clock,
+      logger: this.logger,
+      ...(config.security === undefined && {
+        legacyPrincipal: principalRef(OPERATOR_PRINCIPAL),
+      }),
     });
     const readinessTimeoutMs = config.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS;
     this.shutdownTimeoutMs = config.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS;
@@ -246,6 +337,15 @@ export class ZoryaServer {
     this.lifecycle = new ServiceLifecycle({
       services: managedServices({
         workflows: this.workflows,
+        security: config.security && {
+          start: async () => this.security.start?.(),
+          stop: async () => this.security.stop?.(),
+        },
+        channels: this.channels.map((channel) => ({
+          id: channel.id,
+          start: async () => channel.start?.({ runtime: channel.runtime }),
+          stop: async () => channel.stop?.(),
+        })),
         scheduler: this.scheduler,
         agents: this.agents,
         retainedSubagents: this.retainedSubagents,
@@ -316,7 +416,15 @@ export class ZoryaServer {
       ...(config.sseIntervalMs !== undefined && { intervalMs: config.sseIntervalMs }),
     });
 
-    const router = (this.router = new Router({ logger: this.logger }));
+    const router = (this.router = new Router({
+      logger: this.logger,
+      accessGuard: createSecurityRouteAccessGuard({
+        security: this.security,
+        clock,
+        logger: this.logger,
+      }),
+    }));
+    this.security.mount?.(router);
     mountProbes({
       router,
       storage,
@@ -365,6 +473,7 @@ export class ZoryaServer {
         mcp: this.mcp,
         namespaces,
         evals: this.evals,
+        security: this.security,
         clock,
       });
     }
@@ -387,6 +496,10 @@ export class ZoryaServer {
         clock,
         namespaces,
         logger: this.logger,
+        security: this.security,
+        ...(config.security === undefined && {
+          legacySecurityContext: { actor: principalRef(OPERATOR_PRINCIPAL) },
+        }),
       });
     }
     if (config.remoteDeployments && this.agents) {
@@ -396,6 +509,7 @@ export class ZoryaServer {
         agents: this.agents,
         clock,
         logger: this.logger,
+        security: this.security,
       });
     }
     if (this.dags) mountDags({ router, dags: this.dags, namespaces });
@@ -423,6 +537,12 @@ export class ZoryaServer {
         workerRegistry: this.workerRegistry,
         advertisements,
         workflowStarts: queued?.workflowStarts,
+        ...(queued && {
+          authorizeWorkerStart: (workflowId: string) => queued.authorizeWorkerStart(workflowId),
+          authorizeWorkerLock: (workflowId: string) => queued.authorizeWorkerLock(workflowId),
+          authorizeWorkerChild: (child: Parameters<QueuedWorkflows["authorizeWorkerChild"]>[0]) =>
+            queued.authorizeWorkerChild(child),
+        }),
         storageCaller: (req) => this.planes.storageCaller(req),
         ...(this.workerWakeups && {
           onStartsClaimed: (starts: ReadonlyArray<{ readonly workflowId: string }>) =>
@@ -431,7 +551,13 @@ export class ZoryaServer {
       });
     }
     if (this.workflowBuilder) mountWorkflowBuilder({ router, builder: this.workflowBuilder });
+    mountExtensionRoutes(router, config.extensionRoutes ?? []);
     if (config.uiDir) mountStatic({ router, uiDir: config.uiDir });
+    router.assertSecurityCoverage();
+    registerExtensionRetrievers({
+      registry: this.agents?.retrievers,
+      entries: config.retrievers ?? [],
+    });
   }
 
   /**
@@ -443,10 +569,18 @@ export class ZoryaServer {
     const path = new URL(req.url).pathname;
     if (this.stopping && !isProbePath(path)) return jsonError(503, "shutting_down");
 
-    const denied = this.planes.authenticate({ req, path });
-    if (denied) return denied;
+    if (isOperatorApiPath({ method: req.method, path })) {
+      const principal = await this.security.authenticate({ request: req, plane: "operator" });
+      if (!principal) return jsonError(401, "unauthorized");
+      setRequestPrincipal({ req, principal });
+    } else {
+      const denied = this.planes.authenticate({ req, path });
+      if (denied) return denied;
+    }
 
-    return this.liveStreams.track(await this.router.handle(req));
+    const routed = await this.router.handle(req);
+    const secured = this.security.secureResponse?.({ request: req, response: routed }) ?? routed;
+    return this.liveStreams.track(secured);
   }
 
   /**

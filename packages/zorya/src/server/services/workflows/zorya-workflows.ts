@@ -19,10 +19,12 @@
 // cascade through the fallback.
 // ---------------------------------------------------------------------------
 
-import { WorkflowLockError } from "@promin/workflow";
+import { RunSecurityContextConflictError, WorkflowLockError } from "@promin/workflow";
 import type {
   CreateWorkflowResult,
+  RunSecurityContext,
   RunSource,
+  WallClock,
   Workflow,
   WorkflowStorage,
   WorkflowVersionRegistry,
@@ -30,6 +32,9 @@ import type {
 import type { WorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
 import { UnknownWorkflowError, WorkflowIdConflictError } from "./errors.ts";
 import { ZoryaClusterConfigError, type ZoryaCluster } from "./cluster.ts";
+import type { Logger } from "../../server-config.ts";
+import type { PrincipalRef, ZoryaSecurity } from "../../security/index.ts";
+import { RunExecutionSecurity } from "../../security/run-execution-security.ts";
 
 export interface TriggerOptions {
   readonly workflowId?: string;
@@ -39,6 +44,8 @@ export interface TriggerOptions {
   readonly version?: string;
   readonly runSource?: RunSource;
   readonly runSourceId?: string;
+  /** Stable actor/effective references persisted for every continuation. */
+  readonly securityContext?: RunSecurityContext;
   /**
    * Start an internal workflow (`LocalWorkflows.define(wf, { internal:
    * true })`). Only the service that owns it passes this; without it an
@@ -93,12 +100,35 @@ export function existingRunResult(params: {
 }
 
 /**
+ * Preserve trigger idempotency when a redelivery presents a different
+ * identity for an already-created run. The existing row is authoritative;
+ * callers may observe it, but never replace its durable starter identity.
+ */
+export async function createIdempotentRun(params: {
+  readonly storage: WorkflowStorage;
+  readonly workflowId: string;
+  readonly create: () => Promise<CreateWorkflowResult>;
+}): Promise<CreateWorkflowResult> {
+  try {
+    return await params.create();
+  } catch (error) {
+    if (!(error instanceof RunSecurityContextConflictError)) throw error;
+    const existing = await params.storage.loadWorkflow(params.workflowId);
+    if (!existing) throw error;
+    return { created: false, existing };
+  }
+}
+
+/**
  * `fromStep` and every step that depends on it, directly or transitively —
  * the steps a resume from `fromStep` resets. Throws for a step the
  * workflow doesn't have.
  */
 export function stepsFrom(params: {
-  readonly steps: ReadonlyArray<{ readonly name: string; readonly dependsOn: readonly string[] }>;
+  readonly steps: ReadonlyArray<{
+    readonly name: string;
+    readonly dependsOn: readonly string[];
+  }>;
   readonly fromStep: string;
   readonly workflowName: string;
 }): string[] {
@@ -185,6 +215,8 @@ export abstract class ZoryaWorkflows {
   /** Names of this layer's internal workflows (see `isInternal`). */
   protected readonly internalNames = new Set<string>();
   private started = false;
+  /** Host policy installed by ZoryaServer for durable execution admission. */
+  protected executionSecurity?: RunExecutionSecurity;
 
   constructor(config: ZoryaWorkflowsBaseConfig = {}) {
     if (config.definitions) this.definitions = config.definitions;
@@ -203,6 +235,54 @@ export abstract class ZoryaWorkflows {
   /** Every layer of the chain from this one down, in trigger order. */
   layers(): ZoryaWorkflows[] {
     return [this, ...(this.fallback?.layers() ?? [])];
+  }
+
+  /**
+   * Install durable execution policy on every layer in this chain. The
+   * concrete local layer also attaches it to its runner so child workflows
+   * and scanner/recovery resumes pass through the same admission hook.
+   */
+  configureExecutionSecurity(config: {
+    readonly security: ZoryaSecurity;
+    readonly clock: Pick<WallClock, "now">;
+    readonly logger: Pick<Logger, "error">;
+    readonly legacyPrincipal?: PrincipalRef;
+  }): void {
+    for (const layer of this.layers()) {
+      const executionSecurity = new RunExecutionSecurity({
+        storage: layer.storage,
+        security: config.security,
+        clock: config.clock,
+        logger: config.logger,
+        ...(config.legacyPrincipal !== undefined && {
+          legacyPrincipal: config.legacyPrincipal,
+        }),
+      });
+      layer.executionSecurity = executionSecurity;
+      layer.onExecutionSecurityConfigured(executionSecurity);
+    }
+  }
+
+  /** Layer-specific wiring (the local runner installs the admission hook). */
+  protected onExecutionSecurityConfigured(_security: RunExecutionSecurity): void {}
+
+  protected securityContextForTrigger(
+    requested: RunSecurityContext | undefined,
+  ): RunSecurityContext | undefined {
+    return this.executionSecurity?.contextForTrigger(requested) ?? requested;
+  }
+
+  /**
+   * Recheck the durable starter before an HTTP/capability route mutates a
+   * run. Unlike execution admission, this check never terminalizes the run.
+   */
+  async checkStoredRunSecurity(params: {
+    readonly workflowId: string;
+    readonly source: import("../../security/run-execution-security.ts").RunExecutionSource;
+    readonly tokenId?: string;
+  }): Promise<boolean> {
+    if (!this.executionSecurity) return false;
+    return this.executionSecurity.checkStoredRun(params);
   }
 
   /**

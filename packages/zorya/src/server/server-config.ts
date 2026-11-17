@@ -21,6 +21,13 @@ import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
 import type { ZoryaWorkflows } from "./services/workflows/index.ts";
 import type { RunRetentionConfig } from "./services/workflows/run-retention.ts";
+import type { ZoryaSecurity } from "./security/index.ts";
+import type {
+  ZoryaChannel,
+  ZoryaLlmPolicy,
+  ZoryaRetrieverExtension,
+  ZoryaRoutesExtension,
+} from "./extensions.ts";
 
 export interface Logger {
   log(message: string, ...args: unknown[]): void;
@@ -78,11 +85,26 @@ export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
 
 export interface ZoryaServerConfig extends AuthConfig {
   /**
-   * Allow running without keys. Without it the constructor throws
-   * `ZoryaInsecureConfigError` when `apiKeys` is empty, or when
-   * `remoteWorkers` is set without `remoteWorkers.apiKeys`. With it, each
-   * plane that has no keys is open to anyone who can reach the port, and
-   * the server logs a warning. Local development only.
+   * Replace operator API keys with a pluggable authenticator and access
+   * policy. Mutually exclusive with `apiKeys`; worker credentials remain on
+   * `remoteWorkers.apiKeys`.
+   */
+  security?: ZoryaSecurity;
+  /** Trusted in-process channels, started and stopped with the server. */
+  channels?: ReadonlyArray<ZoryaChannel>;
+  /** Host-wired external knowledge backends registered into the agents registry. */
+  retrievers?: ReadonlyArray<ZoryaRetrieverExtension>;
+  /** Protected route groups contributed by trusted extensions. */
+  extensionRoutes?: ReadonlyArray<ZoryaRoutesExtension>;
+  /** Host-wide provider/model admission policy. */
+  llmPolicy?: ZoryaLlmPolicy;
+  /**
+   * Allow running without operator keys or a security module. Without it
+   * the constructor throws `ZoryaInsecureConfigError` when neither operator
+   * authentication path is configured, or when `remoteWorkers` is set
+   * without `remoteWorkers.apiKeys`. With it, each plane that has no keys is
+   * open to anyone who can reach the port, and the server logs a warning.
+   * Local development only.
    */
   insecure?: boolean;
   /** Workflow execution + state. Required. */

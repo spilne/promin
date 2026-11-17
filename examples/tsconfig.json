@@ -13,6 +13,12 @@
       "path": "../packages/container"
     },
     {
+      "path": "../packages/zorya-client"
+    },
+    {
+      "path": "../packages/zorya"
+    },
+    {
       "path": "../packages/agent"
     },
     {

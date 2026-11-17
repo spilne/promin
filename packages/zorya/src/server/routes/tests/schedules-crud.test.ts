@@ -19,7 +19,9 @@ import { ZoryaServer } from "../../server.ts";
 import { LocalWorkflows } from "../../services/workflows/index.ts";
 import { ZoryaScheduler, type ZoryaSchedulerConfig } from "../../services/scheduler/index.ts";
 import type { ApiError } from "../../api-types.ts";
-import type { ScheduleDto, ScheduleEmitResponse } from "../schedules.ts";
+import { setRequestSecurityContext } from "../../security/index.ts";
+import { ScheduleAssignmentError } from "../../security/schedule-execution-security.ts";
+import { patchSchedule, type ScheduleDto, type ScheduleEmitResponse } from "../schedules.ts";
 
 const KEY = "operator-key-0123456789";
 
@@ -157,6 +159,105 @@ describe("POST /api/schedules — create-only", () => {
 });
 
 describe("PATCH /api/schedules/:id", () => {
+  it("revalidates service-account assignment when agent resource metadata changes", async () => {
+    const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+    const schedStorage = new InMemorySchedulerStorage({ clock });
+    await schedStorage.insertSchedule({
+      id: "agent-job",
+      intervalMs: 60_000,
+      namespace: "team",
+      metadata: { agentTrigger: true, resourceId: "alice" },
+      securityContext: { actor: { kind: "service-account", id: "scheduler-sa" } },
+    });
+    const assignments: unknown[] = [];
+    const handler = patchSchedule({
+      storage: schedStorage,
+      clock,
+      assignedSecurityContext: async (assignment) => {
+        assignments.push(assignment);
+        return {
+          actor: { kind: "service-account", id: "scheduler-sa" },
+          effective: { kind: "user", id: assignment.resourceId! },
+        };
+      },
+    });
+    const req = new Request("http://x/api/schedules/agent-job", {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ metadata: { resourceId: "bob" } }),
+    });
+    setRequestSecurityContext({
+      req,
+      context: {
+        actor: {
+          kind: "user",
+          id: "admin",
+          accessRoles: { team: ["admin"] },
+          canActFor: false,
+        },
+        effective: { kind: "user", id: "admin" },
+      },
+    });
+
+    expect((await handler(req, { id: "agent-job" })).status).toBe(200);
+    expect(assignments).toEqual([
+      expect.objectContaining({
+        scheduleId: "agent-job",
+        namespaceId: "team",
+        serviceAccountId: "scheduler-sa",
+        resourceId: "bob",
+      }),
+    ]);
+    expect((await schedStorage.loadSchedule("agent-job"))?.securityContext).toEqual({
+      actor: { kind: "service-account", id: "scheduler-sa" },
+      effective: { kind: "user", id: "bob" },
+    });
+  });
+
+  it("refuses executable changes when the caller cannot reuse the service account", async () => {
+    for (const patch of [{ workflowName: "other" }, { input: { privileged: true } }]) {
+      const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+      const storage = new InMemorySchedulerStorage({ clock });
+      await storage.insertSchedule({
+        id: "agent-job",
+        intervalMs: 60_000,
+        namespace: "team",
+        metadata: { workflowName: "hello", input: { privileged: false } },
+        securityContext: { actor: { kind: "service-account", id: "scheduler-sa" } },
+      });
+      const handler = patchSchedule({
+        storage,
+        clock,
+        assignedSecurityContext: async () => {
+          throw new ScheduleAssignmentError("assignment_denied");
+        },
+      });
+      const req = new Request("http://x/api/schedules/agent-job", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      setRequestSecurityContext({
+        req,
+        context: {
+          actor: {
+            kind: "user",
+            id: "editor",
+            accessRoles: { team: ["member"] },
+            canActFor: false,
+          },
+          effective: { kind: "user", id: "editor" },
+        },
+      });
+
+      expect((await handler(req, { id: "agent-job" })).status).toBe(403);
+      expect((await storage.loadSchedule("agent-job"))?.metadata).toEqual({
+        workflowName: "hello",
+        input: { privileged: false },
+      });
+    }
+  });
+
   it("changes the trigger and recomputes the next run", async () => {
     const { send, clock } = setup();
     await send("POST", "/api/schedules", { id: "s1", intervalMs: 60_000 });

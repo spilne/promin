@@ -24,6 +24,7 @@ import {
   type StepExecutionResult,
   type StepExecutor,
 } from "../../workflow-runner.ts";
+import { runChildWorkflow } from "../orchestrate.ts";
 
 const T0 = "2026-01-01T00:00:00.000Z";
 
@@ -114,6 +115,37 @@ describe("child workflows — inherit the parent's clock and executor", () => {
     .sleep("child-nap", 30_000)
     .step("double", ({ input }) => succeed(input.n * 2))
     .build();
+
+  it("does not reload a contextless parent when the caller passes the explicit marker", async () => {
+    const clock = FakeWallClock.create(T0);
+    const storage = new InMemoryWorkflowStorage({ clock });
+    await storage.createWorkflow({
+      workflowId: "contextless-parent",
+      workflowName: "parent",
+      workflowType: "dag",
+      input: null,
+    });
+    const loadWorkflow = storage.loadWorkflow.bind(storage);
+    let parentLoads = 0;
+    storage.loadWorkflow = async (workflowId) => {
+      if (workflowId === "contextless-parent") parentLoads += 1;
+      return loadWorkflow(workflowId);
+    };
+    const quickChild = workflow<number>({ name: "contextless-child" })
+      .step("done", ({ input }) => succeed(input))
+      .build();
+
+    await runChildWorkflow({
+      runtime: { storage, clock },
+      parentWorkflowId: "contextless-parent",
+      securityContext: null,
+      workflow: quickChild,
+      workflowId: "contextless-child-1",
+      input: 1,
+    });
+
+    expect(parentLoads).toBe(0);
+  });
 
   it(".subworkflow() runs the child through the executor on the fake clock", async () => {
     const parent = workflow<number>({ name: "parent-sub", version: "p1" })

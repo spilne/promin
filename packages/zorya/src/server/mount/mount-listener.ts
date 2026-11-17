@@ -14,6 +14,7 @@ import {
 } from "../request-limits.ts";
 import type { ListenOptions, Logger } from "../server-config.ts";
 import type { WorkerWebSocketServer } from "../services/worker-ws-server.ts";
+import { isWorkerWebSocketPath } from "../worker-plane.ts";
 import type { InFlightRequests } from "./mount-lifecycle.ts";
 
 /** The parts of a Bun server the ZoryaServer keeps. */
@@ -53,7 +54,7 @@ export function serveListener(params: {
         const upgradeResult = workerWs.upgradeIfWorkerWs({ req, server });
         if (upgradeResult !== undefined) return upgradeResult;
         const url = new URL(req.url);
-        if (url.pathname === "/ws/worker") return undefined;
+        if (isWorkerWebSocketPath(url.pathname)) return undefined;
         const limited = await limitRequestBody({
           req,
           maxBytes: bodyLimitFor({ path: url.pathname, maxRequestBodySize, maxWebhookBodySize }),

@@ -10,6 +10,7 @@ import type {
   WorkflowStatusSnapshot,
 } from "../workflow-state.ts";
 import type { FencedWrite } from "./fencing.ts";
+import type { RunSecurityContext } from "../run-security-context.ts";
 
 /** Params of `createWorkflow`. */
 export interface CreateWorkflowParams extends FencedWrite {
@@ -19,6 +20,8 @@ export interface CreateWorkflowParams extends FencedWrite {
   readonly workflowType?: string;
   readonly parentWorkflowId?: string;
   readonly namespace?: string;
+  /** Stable identity references to persist with the run. */
+  readonly securityContext?: RunSecurityContext;
   readonly metadata?: Record<string, unknown>;
   readonly version?: string;
   /**

@@ -3,7 +3,8 @@
 // thread turns are suspended on.
 //
 // When a thread turn reaches a tool that needs approval, the engine records
-// `{ namespaceId, threadId, toolCallId } → { workflowId, toolName, input,
+// `{ namespaceId, agentId, resourceId, threadId, toolCallId } →
+// { workflowId, toolName, input,
 // requestedAt, expiresAt }` here before the turn suspends on
 // `approve:<toolCallId>`. Approve / reject looks the row up by that exact
 // key, so finding the suspended turn never scans workflow storage, never
@@ -32,11 +33,25 @@
 // agrees on whether an approval has expired.
 // ---------------------------------------------------------------------------
 
+import type { RunPrincipalRef, RunSecurityContext } from "@promin/workflow";
+import { normalizeRunSecurityContext } from "@promin/workflow/storage-kit";
+
 /** Identifies one approval: the tool call a thread turn is waiting on. */
 export interface PendingApprovalKey {
   readonly namespaceId: string;
+  /** Agent recipe that owns the thread. */
+  readonly agentId: string | null;
+  /** Resource/instance that owns the thread. */
+  readonly resourceId: string | null;
   readonly threadId: string;
   readonly toolCallId: string;
+}
+
+/** Immutable authorization boundary expected by a conditional decision. */
+export interface PendingApprovalBoundary extends PendingApprovalKey {
+  readonly workflowId: string;
+  readonly elevated: boolean | null;
+  readonly requestContext: RunSecurityContext | null;
 }
 
 /**
@@ -46,7 +61,10 @@ export interface PendingApprovalKey {
 export type PendingApprovalStatus = "pending" | "approved" | "rejected" | "expired";
 
 /** One approval row. */
-export interface PendingApproval extends PendingApprovalKey {
+export interface PendingApproval {
+  readonly namespaceId: string;
+  readonly threadId: string;
+  readonly toolCallId: string;
   /** Resource that owns the thread, when the turn ran under one. */
   readonly resourceId: string | null;
   /** Agent (recipe id) that ran the turn. */
@@ -55,6 +73,13 @@ export interface PendingApproval extends PendingApprovalKey {
   readonly workflowId: string;
   readonly toolName: string;
   readonly input: unknown;
+  /**
+   * Elevated tools require approval.decide-elevated. Null marks a legacy
+   * row whose boundary is unknown and must be handled fail-closed.
+   */
+  readonly elevated: boolean | null;
+  /** Actor/effective identity that initiated the durable turn. Null only for legacy runs. */
+  readonly requestContext: RunSecurityContext | null;
   /** Unix ms, store time. */
   readonly requestedAt: number;
   /** Unix ms, store time. Null: never expires. */
@@ -62,6 +87,8 @@ export interface PendingApproval extends PendingApprovalKey {
   readonly status: PendingApprovalStatus;
   /** Who decided — the identity the approving caller was authorized as. */
   readonly decidedBy: string | null;
+  /** Full authenticated approver identity. Null only for legacy/undecided rows. */
+  readonly decidedByPrincipal: RunPrincipalRef | null;
   /** Unix ms, store time. Null while pending. */
   readonly decidedAt: number | null;
   /** The decision's reason, when one was given. */
@@ -75,18 +102,25 @@ export interface PendingApproval extends PendingApprovalKey {
 
 /** What `PendingApprovalStore.record` takes. */
 export interface RecordPendingApprovalParams extends PendingApprovalKey {
-  readonly resourceId?: string;
-  readonly agentId?: string;
   readonly workflowId: string;
   readonly toolName: string;
   readonly input: unknown;
+  /** Whether the requested tool is an elevated cross-scope tool. */
+  readonly elevated: boolean;
+  /** Durable initiating actor/effective identity, or null for an explicitly legacy run. */
+  readonly requestContext: RunSecurityContext | null;
   /** Expire the approval this long after it is recorded. Omitted: never. */
   readonly ttlMs?: number;
 }
 
 /** What `PendingApprovalStore.decide` takes. */
-export interface DecidePendingApprovalParams extends PendingApprovalKey {
+export interface DecidePendingApprovalParams {
+  /** Decide only if this exact pre-authorized approval still occupies the key. */
+  readonly expected: PendingApprovalBoundary;
   readonly approved: boolean;
+  /** Full authenticated identity recorded for new decisions. */
+  readonly decidedByPrincipal?: RunPrincipalRef;
+  /** Legacy id-only attribution retained for compatibility. */
   readonly decidedBy?: string;
   readonly reason?: string;
   /**
@@ -104,12 +138,15 @@ export type DecidePendingApprovalResult =
   | { readonly outcome: "decided"; readonly approval: PendingApproval }
   | { readonly outcome: "not_found" }
   | { readonly outcome: "already_decided"; readonly approval: PendingApproval }
+  | { readonly outcome: "conflict"; readonly approval: PendingApproval }
   | { readonly outcome: "expired"; readonly approval: PendingApproval }
   | { readonly outcome: "not_expired"; readonly approval: PendingApproval };
 
 /** What `PendingApprovalStore.list` takes. */
 export interface ListPendingApprovalsParams {
   readonly namespaceId: string;
+  readonly agentId: string | null;
+  readonly resourceId: string | null;
   /** Exact thread id (never a prefix). Omitted: every thread of the namespace. */
   readonly threadId?: string;
   /** Default `"pending"`. Ignored with `open`. */
@@ -125,7 +162,9 @@ export interface PendingApprovalStore {
    * Record an approval request. Idempotent for one workflow: recording the
    * same key and `workflowId` again returns the existing row unchanged (a
    * crash re-runs the recording activity). A row of the same key from a
-   * different workflow is replaced.
+   * different workflow is retained while it is open (`deliveredAt` null),
+   * preventing replacement between decision and delivery. A delivered row
+   * may be replaced by a different workflow.
    */
   record(params: RecordPendingApprovalParams): Promise<PendingApproval>;
   /** The row for `key`, whatever its status; null when absent. */
@@ -142,7 +181,39 @@ export interface PendingApprovalStore {
   /** Close the row: its decision reached the turn, or the turn ended. Idempotent. */
   markDelivered(key: PendingApprovalKey): Promise<void>;
   /** Drop every row of a thread (the thread was deleted). */
-  deleteThread(params: { readonly namespaceId: string; readonly threadId: string }): Promise<void>;
+  deleteThread(params: {
+    readonly namespaceId: string;
+    readonly agentId: string | null;
+    readonly resourceId: string | null;
+    readonly threadId: string;
+  }): Promise<void>;
+}
+
+/** Normalize and freeze the exact boundary authorized by the route. */
+export function snapshotPendingApprovalBoundary(
+  approval: PendingApproval,
+): PendingApprovalBoundary {
+  const namespaceId = approval.namespaceId;
+  const agentId = approval.agentId;
+  const resourceId = approval.resourceId;
+  const threadId = approval.threadId;
+  const toolCallId = approval.toolCallId;
+  const workflowId = approval.workflowId;
+  const elevated = approval.elevated;
+  const requestContext = approval.requestContext;
+  if (agentId === null) {
+    throw new TypeError("legacy approval has no authoritative agent boundary");
+  }
+  return Object.freeze({
+    namespaceId,
+    agentId,
+    resourceId,
+    threadId,
+    toolCallId,
+    workflowId,
+    elevated,
+    requestContext: requestContext === null ? null : normalizeRunSecurityContext(requestContext),
+  });
 }
 
 /** Thrown when approve / reject names an approval the thread is not waiting on. */
@@ -161,6 +232,16 @@ export class ApprovalAlreadyDecidedError extends Error {
   readonly _tag = "ApprovalAlreadyDecidedError";
   constructor(readonly approval: PendingApproval) {
     super(`Approval for tool call "${approval.toolCallId}" was already ${approval.status}.`);
+  }
+}
+
+/** Thrown when the row changed after the caller authorized its immutable boundary. */
+export class ApprovalBoundaryConflictError extends Error {
+  readonly _tag = "ApprovalBoundaryConflictError";
+  constructor(readonly approval: PendingApproval) {
+    super(
+      `Approval for tool call "${approval.toolCallId}" changed after authorization; reload and retry.`,
+    );
   }
 }
 

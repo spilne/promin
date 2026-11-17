@@ -212,6 +212,125 @@ export function storageTestSuite(
         }
       });
 
+      it("round-trips only immutable actor/effective security references", async () => {
+        const s = await getStorage();
+        const actor: {
+          kind: "service-account";
+          id: string;
+          token: string;
+        } = { kind: "service-account", id: "sa-1", token: "must-not-persist" };
+        const effective: {
+          kind: "user";
+          id: string;
+          email: string;
+        } = { kind: "user", id: "user-7", email: "must-not-persist@example.test" };
+        const requested = { actor, effective };
+        await s.createWorkflow({
+          workflowId: "security-context-1",
+          workflowName: "secured",
+          input: {},
+          securityContext: requested,
+        });
+
+        actor.id = "mutated-actor";
+        effective.id = "mutated-user";
+        const state = await s.loadWorkflow("security-context-1");
+        expect(state?.securityContext).toEqual({
+          actor: { kind: "service-account", id: "sa-1" },
+          effective: { kind: "user", id: "user-7" },
+        });
+        expect(state?.securityContext).not.toHaveProperty("actor.token");
+        expect(state?.securityContext).not.toHaveProperty("effective.email");
+
+        if (state?.securityContext !== undefined) {
+          try {
+            (state.securityContext as { actor: { id: string } }).actor.id = "mutated-return";
+          } catch (error) {
+            expect(error).toBeInstanceOf(TypeError);
+          }
+        }
+        expect((await s.loadWorkflow("security-context-1"))?.securityContext).toEqual({
+          actor: { kind: "service-account", id: "sa-1" },
+          effective: { kind: "user", id: "user-7" },
+        });
+
+        await s.startFreshRun({ workflowId: "security-context-1" });
+        expect((await s.loadWorkflow("security-context-1"))?.securityContext).toEqual({
+          actor: { kind: "service-account", id: "sa-1" },
+          effective: { kind: "user", id: "user-7" },
+        });
+
+        await s.createWorkflow({
+          workflowId: "security-context-self",
+          workflowName: "secured",
+          input: {},
+          securityContext: {
+            actor: { kind: "user", id: "user-9" },
+            effective: { kind: "user", id: "user-9" },
+          },
+        });
+        expect((await s.loadWorkflow("security-context-self"))?.securityContext).toEqual({
+          actor: { kind: "user", id: "user-9" },
+        });
+        const canonicalRepeat = await s.createWorkflow({
+          workflowId: "security-context-self",
+          workflowName: "secured",
+          input: {},
+          securityContext: { actor: { kind: "user", id: "user-9" } },
+        });
+        expect(canonicalRepeat.created).toBe(false);
+      });
+
+      it("rejects deterministic and idempotency-key attachment under another identity", async () => {
+        const s = await getStorage();
+        const expires = new Date(Date.now() + 60_000);
+        await s.createWorkflow({
+          workflowId: "security-conflict-1",
+          workflowName: "secured",
+          input: {},
+          securityContext: { actor: { kind: "service-account", id: "sa-1" } },
+          idempotencyKey: "security-conflict",
+          idempotencyExpiresAt: expires,
+        });
+
+        await expect(
+          s.createWorkflow({
+            workflowId: "security-conflict-1",
+            workflowName: "secured",
+            input: {},
+            securityContext: { actor: { kind: "service-account", id: "sa-2" } },
+          }),
+        ).rejects.toMatchObject({ _tag: "RunSecurityContextConflictError" });
+        await expect(
+          s.createWorkflow({
+            workflowId: "security-conflict-2",
+            workflowName: "secured",
+            input: {},
+            securityContext: { actor: { kind: "service-account", id: "sa-2" } },
+            idempotencyKey: "security-conflict",
+            idempotencyExpiresAt: expires,
+          }),
+        ).rejects.toMatchObject({ _tag: "RunSecurityContextConflictError" });
+
+        const repeat = await s.createWorkflow({
+          workflowId: "security-conflict-1",
+          workflowName: "secured",
+          input: {},
+          securityContext: { actor: { kind: "service-account", id: "sa-1" } },
+        });
+        expect(repeat.created).toBe(false);
+      });
+
+      it("keeps legacy rows without security context readable", async () => {
+        const s = await getStorage();
+        await s.createWorkflow({
+          workflowId: "legacy-security-1",
+          workflowName: "legacy",
+          input: {},
+        });
+        expect((await s.loadWorkflow("legacy-security-1"))?.securityContext).toBeUndefined();
+      });
+
       it("scopes idempotency-key creates by namespace", async () => {
         const s = await getStorage();
         const expires = new Date(Date.now() + 60_000);

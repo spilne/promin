@@ -39,12 +39,14 @@ import { LeaderLoop, forEachOrphanedRun, redeliverChildEndedSignals } from "./ru
 import {
   ZoryaWorkflows,
   existingRunResult,
+  createIdempotentRun,
   findDefinition,
   resetStepsUnderLock,
   stepsFrom,
   type TriggerOptions,
   type TriggerResult,
 } from "./zorya-workflows.ts";
+import type { RunExecutionSecurity } from "../../security/run-execution-security.ts";
 
 /** Where a background failure of `LocalWorkflows` came from. */
 export type LocalWorkflowsErrorSource = "sleep-scanner" | "signal-scanner" | "recovery";
@@ -92,6 +94,11 @@ export interface LocalWorkflowsConfig {
   /** Background failures. Default: `console.error`. */
   onError?: (event: LocalWorkflowsErrorEvent) => void;
 }
+
+/** Only trusted internal definitions may opt out of the host admission hook. */
+export type LocalWorkflowDefinitionOptions =
+  | { readonly internal?: false; readonly admissionExempt?: never }
+  | { readonly internal: true; readonly admissionExempt?: boolean };
 
 const DEFAULT_SCAN_MS = 2_000;
 const DEFAULT_RECOVERY_MS = 10_000;
@@ -210,15 +217,51 @@ export class LocalWorkflows extends ZoryaWorkflows {
     return Object.hasOwn(this.definitions, name);
   }
 
+  protected override onExecutionSecurityConfigured(security: RunExecutionSecurity): void {
+    if (!this.runner.setRunAdmissionGuard) {
+      throw new Error(
+        "LocalWorkflows: configured security requires a runner with setRunAdmissionGuard",
+      );
+    }
+    this.runner.setRunAdmissionGuard(security.admissionGuard);
+  }
+
   /**
    * Add or replace the in-process definition of `workflow.name` at runtime
    * (the workflow builder publishes this way). New runs start with it, or
    * with the promoted version; runs of other versions resolve through the
    * version registry, so register every version a run may need there.
    */
-  define(workflow: Workflow<unknown, unknown>, opts?: { readonly internal?: boolean }): void {
+  define(workflow: Workflow<unknown, unknown>, opts?: LocalWorkflowDefinitionOptions): void {
+    // Options can come from JavaScript, proxies or deliberately untyped
+    // callers. Snapshot each getter once so validation and commit cannot
+    // observe different values from the same object.
+    const internal = opts?.internal === true;
+    const admissionExempt = opts?.admissionExempt === true;
+    // Keep the runtime boundary for JavaScript and deliberately untyped
+    // callers too. Validate before changing the definition map or the
+    // internal-name set, so an invalid redefinition cannot downgrade an
+    // already exempt internal workflow into a public one.
+    if (admissionExempt && !internal) {
+      throw new Error("LocalWorkflows: admissionExempt requires internal: true");
+    }
+    if (admissionExempt && !this.runner.exemptInternalWorkflowFromRunAdmission) {
+      throw new Error(
+        "LocalWorkflows: admission-exempt internal workflows require a compatible runner",
+      );
+    }
+
+    // A custom runner hook may throw. Register the exact-object exemption
+    // before publishing the definition or changing its internal visibility,
+    // so a failed hook leaves the prior definition state intact.
+    if (admissionExempt) {
+      this.runner.exemptInternalWorkflowFromRunAdmission!(workflow);
+    }
+
+    // No potentially throwing extension point remains: publish the new
+    // definition and its visibility together from the snapshotted values.
     (this.definitions as Record<string, Workflow<unknown, unknown>>)[workflow.name] = workflow;
-    if (opts?.internal === true) this.internalNames.add(workflow.name);
+    if (internal) this.internalNames.add(workflow.name);
     else this.internalNames.delete(workflow.name);
   }
 
@@ -256,22 +299,29 @@ export class LocalWorkflows extends ZoryaWorkflows {
     // The definition's own type and metadata, as the runner would record them.
     const workflowType = opts?.workflowType ?? def._definition.type;
     const metadata = opts?.metadata ?? def._definition.metadata;
+    const securityContext = this.securityContextForTrigger(opts?.securityContext);
 
     // Create the row first, with the typed fields (namespace, metadata,
     // runSource) the runner's own create doesn't take. An id that already
     // exists is answered from storage: a redelivered schedule tick or a
     // retried trigger never runs the body again, and an id of another
     // workflow is a conflict. A fresh run of an ended one is `rerun`.
-    const created = await this.storage.createWorkflow({
+    const created = await createIdempotentRun({
+      storage: this.storage,
       workflowId,
-      workflowName: name,
-      input,
-      ...(workflowType !== undefined && { workflowType }),
-      ...(opts?.namespace !== undefined && { namespace: opts.namespace }),
-      ...(metadata !== undefined && { metadata }),
-      ...(opts?.runSource !== undefined && { runSource: opts.runSource }),
-      ...(opts?.runSourceId !== undefined && { runSourceId: opts.runSourceId }),
-      ...(version !== undefined && { version }),
+      create: () =>
+        this.storage.createWorkflow({
+          workflowId,
+          workflowName: name,
+          input,
+          ...(workflowType !== undefined && { workflowType }),
+          ...(opts?.namespace !== undefined && { namespace: opts.namespace }),
+          ...(metadata !== undefined && { metadata }),
+          ...(opts?.runSource !== undefined && { runSource: opts.runSource }),
+          ...(opts?.runSourceId !== undefined && { runSourceId: opts.runSourceId }),
+          ...(securityContext !== undefined && { securityContext }),
+          ...(version !== undefined && { version }),
+        }),
     });
     const existing = existingRunResult({ workflowName: name, workflowId, created });
     if (existing) return existing;

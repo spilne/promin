@@ -15,12 +15,14 @@ import {
   doublePrecision,
   index,
   uniqueIndex,
+  unique,
   primaryKey,
   foreignKey,
   check,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createLookupTable, type LookupBinding } from "./lookup-table.ts";
+import type { RunPrincipalRef, RunSecurityContext } from "@promin/workflow";
 import {
   WorkflowStatusIds,
   StepStatusIds,
@@ -59,6 +61,8 @@ export const workflows = pgTable(
     workflowName: text("workflow_name").notNull(),
     workflowType: text("workflow_type"),
     namespace: text("namespace"),
+    // Stable actor/effective references only; roles and credentials never persist here.
+    securityContext: jsonb("security_context"),
     version: text("version"),
     // Lineage: the parent run (child workflows) and what started this run.
     // `run_source` holds the small-int `RUN_SOURCE_CODES` value.
@@ -1221,7 +1225,7 @@ export const agentThreadLease = pgTable(
 
 // ---------------------------------------------------------------------------
 // Agent pending approval — the durable index of tool-call approvals that
-// thread turns are suspended on, keyed by (namespace, thread, tool call).
+// thread turns are suspended on, keyed by tenant/agent/resource/thread/tool.
 // The decision (status, decided_by, decided_at, reason) is recorded on the
 // row. Times are millisecond epochs stamped by the database server's clock.
 // ---------------------------------------------------------------------------
@@ -1237,19 +1241,43 @@ export const agentPendingApproval = pgTable(
     workflowId: text("workflow_id").notNull(),
     toolName: text("tool_name").notNull(),
     input: jsonb("input"),
+    // Nullable only for rows created before the approval-security migration.
+    elevated: boolean("elevated"),
+    requestContext: jsonb("request_context").$type<RunSecurityContext>(),
     requestedAt: bigint("requested_at", { mode: "number" }).notNull(),
     expiresAt: bigint("expires_at", { mode: "number" }),
     status: text("status").notNull(),
     decidedBy: text("decided_by"),
+    decidedByPrincipal: jsonb("decided_by_principal").$type<RunPrincipalRef>(),
     decidedAt: bigint("decided_at", { mode: "number" }),
     reason: text("reason"),
     deliveredAt: bigint("delivered_at", { mode: "number" }),
   },
   (t) => [
-    primaryKey({ columns: [t.namespaceId, t.threadId, t.toolCallId] }),
-    index("agent_pending_approval_ns_status_idx").on(t.namespaceId, t.status, t.requestedAt),
-    index("agent_pending_approval_thread_status_idx").on(t.namespaceId, t.threadId, t.status),
-    index("agent_pending_approval_thread_open_idx").on(t.namespaceId, t.threadId, t.deliveredAt),
+    unique("agent_pending_approval_scope_key")
+      .on(t.namespaceId, t.agentId, t.resourceId, t.threadId, t.toolCallId)
+      .nullsNotDistinct(),
+    index("agent_pending_approval_ns_status_idx").on(
+      t.namespaceId,
+      t.agentId,
+      t.resourceId,
+      t.status,
+      t.requestedAt,
+    ),
+    index("agent_pending_approval_thread_status_idx").on(
+      t.namespaceId,
+      t.agentId,
+      t.resourceId,
+      t.threadId,
+      t.status,
+    ),
+    index("agent_pending_approval_thread_open_idx").on(
+      t.namespaceId,
+      t.agentId,
+      t.resourceId,
+      t.threadId,
+      t.deliveredAt,
+    ),
   ],
 );
 

@@ -484,6 +484,8 @@ describe("worker wake-ups", () => {
       stepMs: 100,
     });
     expect(await dep.storage.loadWorkflow("ghost")).toBeNull();
-    expect(errors.some((e) => e.workflowId === "ghost" && e.phase === "run")).toBe(true);
+    // Admission now filters a missing run at the coordinator before it is
+    // exposed to the worker, so there is no worker-side run error to report.
+    expect(errors.some((e) => e.workflowId === "ghost" && e.phase === "run")).toBe(false);
   });
 });

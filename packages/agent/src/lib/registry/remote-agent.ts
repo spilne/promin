@@ -182,9 +182,10 @@ class RemoteTransport {
 
   /**
    * A streamed turn. The caller's `signal` or the turn timeout cancels it
-   * (`cancel()`); the deadline runs until the stream ends. `cancelRemote`
-   * cancels the run on the server first — for a thread stream, where
-   * closing the stream only detaches from the turn.
+   * (`cancel()`); the deadline runs until the stream ends. For a thread
+   * stream, `cancelRemote` also asks the server to cancel the turn. That
+   * best-effort request is bounded by the normal request timeout and never
+   * delays local cancellation or stream settlement.
    */
   stream(params: {
     path: string;
@@ -204,15 +205,19 @@ class RemoteTransport {
       body: params.body,
       signal: ctrl.signal,
     });
-    const out = buildSseRunOutput({
-      pending,
-      ctrl,
-      ...(params.cancelRemote !== undefined && { cancelRemote: params.cancelRemote }),
-      onSettled: () => deadline.release(),
-    });
+    let out: AgentRunOutput;
     const stop = (): void => {
       out.cancel().catch(() => {});
     };
+    out = buildSseRunOutput({
+      pending,
+      ctrl,
+      ...(params.cancelRemote !== undefined && { cancelRemote: params.cancelRemote }),
+      onSettled: () => {
+        deadline.ctrl.signal.removeEventListener("abort", stop);
+        deadline.release();
+      },
+    });
     if (deadline.ctrl.signal.aborted) stop();
     else deadline.ctrl.signal.addEventListener("abort", stop, { once: true });
     return out;
@@ -491,6 +496,65 @@ function buildStaticRunOutput(data: {
   };
 }
 
+const FINISH_REASONS: ReadonlySet<FinishReason> = new Set([
+  "stop",
+  "tool_use",
+  "length",
+  "max_steps",
+  "budget_exceeded",
+  "stalled",
+  "cancelled",
+  "error",
+]);
+
+function isFinishReason(value: unknown): value is FinishReason {
+  return typeof value === "string" && FINISH_REASONS.has(value as FinishReason);
+}
+
+function isUsageNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isUsageStats(value: unknown): value is UsageStats {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const usage = value as Record<string, unknown>;
+  return (
+    isUsageNumber(usage.inputTokens) &&
+    isUsageNumber(usage.outputTokens) &&
+    (usage.cacheReadTokens === undefined || isUsageNumber(usage.cacheReadTokens)) &&
+    (usage.cacheWriteTokens === undefined || isUsageNumber(usage.cacheWriteTokens))
+  );
+}
+
+function parseFinishFrame(data: string): {
+  readonly text: string;
+  readonly finishReason: FinishReason;
+  readonly usage: UsageStats;
+} {
+  let value: unknown;
+  try {
+    value = JSON.parse(data);
+  } catch {
+    throw new Error("RemoteAgent stream received malformed finish data");
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("RemoteAgent stream received invalid finish data");
+  }
+  const finish = value as Record<string, unknown>;
+  if (
+    typeof finish.text !== "string" ||
+    !isFinishReason(finish.finishReason) ||
+    !isUsageStats(finish.usage)
+  ) {
+    throw new Error("RemoteAgent stream received invalid finish data");
+  }
+  return {
+    text: finish.text,
+    finishReason: finish.finishReason,
+    usage: finish.usage,
+  };
+}
+
 /**
  * Build a live `AgentRunOutput` from a pending SSE fetch response.
  * Starts a background reader that fans events to:
@@ -520,6 +584,10 @@ function buildSseRunOutput(params: {
     resolveText = res;
     rejectText = rej;
   });
+  // `fullStream` and `finishReason` are complete error surfaces on their own.
+  // Mark the original text promise as observed for callers that choose those
+  // surfaces, without wrapping it: callers awaiting `text` still see rejection.
+  void textPromise.catch(() => {});
   const finishPromise = new Promise<FinishReason>((res) => {
     resolveFinish = res;
   });
@@ -533,8 +601,14 @@ function buildSseRunOutput(params: {
   let textNotify: (() => void) | null = null;
   let fullNotify: (() => void) | null = null;
   let eof = false;
+  let settled = false;
+  let finalized = false;
+  let cancellationStarted = false;
+  let accumulatedText = "";
+  const emptyUsage: UsageStats = { inputTokens: 0, outputTokens: 0 };
 
   const pushText = (d: string) => {
+    accumulatedText += d;
     textBuf.push(d);
     const fn = textNotify;
     textNotify = null;
@@ -552,15 +626,75 @@ function buildSseRunOutput(params: {
     fullNotify?.();
   };
 
+  const finalize = (): void => {
+    if (finalized) return;
+    finalized = true;
+    onSettled?.();
+    close();
+  };
+
+  const settleFinish = (params: {
+    text: string;
+    reason: FinishReason;
+    usage: UsageStats;
+  }): void => {
+    if (settled) return;
+    settled = true;
+    resolveText(params.text);
+    resolveFinish(params.reason);
+    resolveUsage(params.usage);
+    pushFull({ type: "finish", reason: params.reason, usage: params.usage });
+  };
+
+  const settleError = (error: unknown): void => {
+    if (settled) return;
+    settled = true;
+    const cause = error instanceof Error ? error : new Error(String(error));
+    rejectText(cause);
+    resolveFinish("error");
+    resolveUsage(emptyUsage);
+    pushFull({ type: "error", error: { message: cause.message } });
+  };
+
+  const settleCancelled = (): void => {
+    settleFinish({ text: accumulatedText, reason: "cancelled", usage: emptyUsage });
+  };
+
+  const cancel = (): Promise<void> => {
+    if (settled || cancellationStarted) return Promise.resolve();
+    cancellationStarted = true;
+    // Settle locally before any network work. The initial fetch may not have
+    // returned headers yet, and the remote cancel endpoint may be unavailable.
+    ctrl.abort();
+    settleCancelled();
+    finalize();
+    if (cancelRemote) {
+      // `cancelRemote` uses RemoteTransport.call, so it has the bounded
+      // non-turn request deadline. It is deliberately best-effort: a peer
+      // refusing or outliving that request must not reopen local settlement.
+      const turnIdAvailableNow = Promise.race([
+        turnId,
+        // Give an already-resolved response one microtask to publish its
+        // headers, then fall back to a thread-wide cancel. A fetch that
+        // ignores abort must never hold remote cancellation open forever.
+        Promise.resolve().then(() => undefined),
+      ]);
+      void turnIdAvailableNow.then(cancelRemote).catch(() => {});
+    }
+    return Promise.resolve();
+  };
+
   // Background SSE reader.
   void (async () => {
     try {
       const res = await pending;
+      if (settled) {
+        await res.body?.cancel().catch(() => {});
+        return;
+      }
       if (!res.ok || !res.body) {
         const msg = res.ok ? "no body" : `HTTP ${res.status}`;
-        rejectText(new Error(`RemoteAgent stream failed: ${msg}`));
-        resolveFinish("error");
-        resolveUsage({ inputTokens: 0, outputTokens: 0 });
+        settleError(new Error(`RemoteAgent stream failed: ${msg}`));
         return;
       }
       for await (const { event, data } of parseSseFrames(res)) {
@@ -577,47 +711,36 @@ function buildSseRunOutput(params: {
           }
         } else if (event === "finish") {
           try {
-            const p = JSON.parse(data) as {
-              text: string;
-              finishReason: FinishReason;
-              usage: UsageStats;
-            };
-            resolveText(p.text);
-            resolveFinish(p.finishReason);
-            resolveUsage(p.usage);
-            pushFull({ type: "finish", reason: p.finishReason, usage: p.usage });
-          } catch {
-            /* skip malformed */
+            const p = parseFinishFrame(data);
+            settleFinish({ text: p.text, reason: p.finishReason, usage: p.usage });
+          } catch (error) {
+            settleError(error);
           }
         } else if (event === "error") {
           try {
             const p = JSON.parse(data) as { message: string };
-            rejectText(new Error(p.message));
-            resolveFinish("error");
-            resolveUsage({ inputTokens: 0, outputTokens: 0 });
-            pushFull({ type: "error", error: { message: p.message } });
+            settleError(new Error(p.message));
           } catch {
             /* skip malformed */
           }
+        } else if (event === "suspended") {
+          settleFinish({ text: accumulatedText, reason: "stop", usage: emptyUsage });
         }
-        // thread / approval-requested / suspended frames are informational;
+        // thread / approval-requested frames are informational;
         // no AgentRunOutput surface for them in v1.
+        if (settled) break;
+      }
+      if (!settled) {
+        settleError(new Error("RemoteAgent stream ended without a terminal event"));
       }
     } catch (err) {
-      if ((err as Error).name !== "AbortError") {
-        rejectText(err);
-        resolveFinish("error");
-        resolveUsage({ inputTokens: 0, outputTokens: 0 });
-      }
-      // On abort (cancel, upstream signal or timeout) the fetch rejects
-      // with AbortError; the finally below settles every deferred promise.
+      if (ctrl.signal.aborted) settleCancelled();
+      else settleError(err);
     } finally {
-      // Ensure all deferred promises are settled so callers don't hang.
-      resolveText?.("");
-      resolveFinish?.("stop");
-      resolveUsage?.({ inputTokens: 0, outputTokens: 0 });
-      onSettled?.();
-      close();
+      // A reader must always produce an explicit terminal state. This is a
+      // protocol error rather than a successful empty answer.
+      if (!settled) settleError(new Error("RemoteAgent stream ended without settling"));
+      finalize();
     }
   })();
 
@@ -654,13 +777,7 @@ function buildSseRunOutput(params: {
     usage: usagePromise,
     finishReason: finishPromise,
     messages: Promise.resolve([] as Message[]),
-    cancel: async () => {
-      try {
-        if (cancelRemote) await cancelRemote(await turnId);
-      } finally {
-        ctrl.abort();
-      }
-    },
+    cancel,
   };
 }
 
@@ -694,6 +811,13 @@ async function* parseSseFrames(
       }
     }
   } finally {
+    try {
+      // Initiate cancellation, but do not let a non-compliant underlying body
+      // hold stream settlement open by never resolving its cancel promise.
+      void reader.cancel().catch(() => {});
+    } catch {
+      // The body may already have failed or been cancelled by the transport.
+    }
     reader.releaseLock();
   }
 }

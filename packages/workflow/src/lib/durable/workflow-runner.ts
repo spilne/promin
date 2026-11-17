@@ -29,20 +29,22 @@ import type {
   WorkflowHooks,
   WorkflowStatusInfo,
 } from "./durable-pipeline.ts";
-import { hasCapability, type WorkflowStorage } from "./workflow-storage.ts";
-import type { WorkflowFailure, WorkflowRunEvent } from "./workflow-state.ts";
+import { hasCapability, type FenceGuard, type WorkflowStorage } from "./workflow-storage.ts";
+import type { WorkflowFailure, WorkflowRunEvent, WorkflowState } from "./workflow-state.ts";
 import { failureOf } from "./workflow-failure.ts";
 import {
   StepError,
   WorkflowError,
   WorkflowDeadlineError,
   StepTimeoutError,
+  RunSecurityContextConflictError,
   WorkflowLockError,
   WorkflowTripwireError,
   TripwireStorageMissingError,
 } from "./durable-pipeline-error.ts";
 import type { WorkflowSuspendedError, WorkflowTimeoutError } from "./durable-pipeline-error.ts";
 import type { WorkflowVersionRegistry } from "./workflow-version-registry.ts";
+import { normalizeRunSecurityContext, type RunSecurityContext } from "./run-security-context.ts";
 import type { StepExecutor } from "./runner/step-executor.ts";
 import { emitTrace, type WorkflowTracer } from "./workflow-tracer.ts";
 import { recoverWorkflows, type RecoveryResult, type RecoveryStrategy } from "./runner/recovery.ts";
@@ -155,6 +157,8 @@ export type WorkflowRunnerRunParams =
       readonly force?: boolean;
       /** Optional namespace used for workflow creation and idempotency-key scoping. */
       readonly namespace?: string;
+      /** Stable actor/effective references persisted on first creation. */
+      readonly securityContext?: RunSecurityContext;
       /**
        * Per-call dedup key. The runner first looks up an existing workflow
        * by `(namespace, workflow.name, idempotencyKey)`; if a non-expired match
@@ -206,6 +210,8 @@ export type WorkflowRunnerRunParams =
       readonly force?: boolean;
       /** Optional namespace used for workflow creation and idempotency-key scoping. */
       readonly namespace?: string;
+      /** See the `{ workflow }` shape. */
+      readonly securityContext?: RunSecurityContext;
       readonly idempotencyKey?: string;
       readonly idempotencyKeyTTL?: number;
       /** See the `{ workflow }` shape. */
@@ -314,7 +320,24 @@ export interface WorkflowRunnerConfig {
    * one the engine does no tracing work.
    */
   readonly tracer?: WorkflowTracer;
+  /**
+   * Host admission check run under the workflow lock immediately before
+   * user code executes. Version drains, recovery and child workflows inherit
+   * it. Hosts may terminate the stored run and throw to refuse execution.
+   */
+  readonly runAdmissionGuard?: WorkflowRunAdmissionGuard;
 }
+
+export interface WorkflowRunAdmissionRequest {
+  /** Fresh state of the run that is about to execute. */
+  readonly state: WorkflowState;
+  /** Fence held by this driver, when the backend supplies one. */
+  readonly guard?: FenceGuard;
+}
+
+export type WorkflowRunAdmissionGuard = (
+  request: WorkflowRunAdmissionRequest,
+) => void | Promise<void>;
 
 /** What `WorkflowRunner.subscribe` takes. */
 export interface WorkflowSubscribeParams {
@@ -350,6 +373,19 @@ export interface WorkflowGetStatusParams {
 export interface WorkflowRunner {
   /** Storage the runner writes workflow state to. */
   readonly storage: WorkflowStorage;
+  /**
+   * Exempt one exact, host-owned workflow object from the admission hook.
+   * The exemption is identity-based: names, metadata and cloned/mutated
+   * definitions cannot select it. Intended only for internal workflows
+   * whose owner supplies an equivalent security boundary.
+   */
+  exemptInternalWorkflowFromRunAdmission?(workflow: Workflow<unknown, unknown>): void;
+  /**
+   * Install or replace the host admission guard. Optional for custom runner
+   * implementations; hosts that require guarded execution must refuse a
+   * runner that does not expose it.
+   */
+  setRunAdmissionGuard?(guard: WorkflowRunAdmissionGuard | undefined): void;
   /**
    * Run a workflow and throw on failure. For a `{ workflow }` call the result
    * is typed by the workflow's output, and it rejects with a
@@ -495,6 +531,8 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   private readonly lock?: RunLockOptions;
   private readonly defaultStepTimeoutMs?: number | null;
   private readonly tracer?: WorkflowTracer;
+  private runAdmissionGuard?: WorkflowRunAdmissionGuard;
+  private readonly runAdmissionExemptions = new WeakSet<Workflow<unknown, unknown>>();
 
   constructor(config: WorkflowRunnerConfig) {
     this.storage = config.storage;
@@ -505,9 +543,20 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     if (config.executorId !== undefined) this.executorId = config.executorId;
     if (config.lock !== undefined) this.lock = config.lock;
     if (config.tracer !== undefined) this.tracer = config.tracer;
+    if (config.runAdmissionGuard !== undefined) {
+      this.runAdmissionGuard = config.runAdmissionGuard;
+    }
     if (config.defaultStepTimeoutMs !== undefined) {
       this.defaultStepTimeoutMs = config.defaultStepTimeoutMs;
     }
+  }
+
+  setRunAdmissionGuard(guard: WorkflowRunAdmissionGuard | undefined): void {
+    this.runAdmissionGuard = guard;
+  }
+
+  exemptInternalWorkflowFromRunAdmission(workflow: Workflow<unknown, unknown>): void {
+    this.runAdmissionExemptions.add(workflow);
   }
 
   run<Output, E extends TaggedError = never>(
@@ -522,6 +571,8 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   private async _run(params: {
     run: WorkflowRunnerRunParams;
     gate?: StartGate;
+    /** A public boundary already snapshotted and normalized the caller's context. */
+    normalizedSecurityContext?: { readonly value: RunSecurityContext | undefined };
     /** Receives the failure of this run, for `runSafe`. */
     failureSink?: { failure?: WorkflowFailure };
   }): Promise<unknown> {
@@ -529,6 +580,16 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     const runParams = params.run;
     const storage = this.storage;
     const { input, force, namespace, idempotencyKey, idempotencyKeyTTL } = runParams;
+    const securityContext = (() => {
+      if (params.normalizedSecurityContext !== undefined) {
+        return params.normalizedSecurityContext.value;
+      }
+      // Snapshot the caller-controlled property before validation. A getter
+      // must not supply one value to the undefined check and another to the
+      // normalizer.
+      const requested = runParams.securityContext;
+      return requested === undefined ? undefined : normalizeRunSecurityContext(requested);
+    })();
 
     // Per-call idempotency key: resolve to an existing workflowId before
     // dispatching. The supplied workflowId is the create-fallback when the
@@ -580,6 +641,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       force,
       ...(gate !== undefined && { onLocked: gate.onLocked }),
       ...(namespace !== undefined && { namespace }),
+      ...(securityContext !== undefined && { securityContext }),
       ...(runParams.signal !== undefined && { signal: runParams.signal }),
       ...(runParams.useStoredInput === true && { useStoredInput: true }),
       ...(runParams.traceparent !== undefined && { traceparent: runParams.traceparent }),
@@ -621,6 +683,15 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
   async start<Input = unknown, Output = unknown, E extends TaggedError = never>(
     params: WorkflowRunnerStartParams<Input, Output, E>,
   ): Promise<WorkflowHandle<Output, E>> {
+    // Validate before launching the background promise. Otherwise start's
+    // lock/result race can turn a malformed or throwing caller-controlled
+    // context into an ignored background failure and still return a handle
+    // capable of observing another principal's stored result.
+    const requestedSecurityContext = params.securityContext;
+    const securityContext =
+      requestedSecurityContext === undefined
+        ? undefined
+        : normalizeRunSecurityContext(requestedSecurityContext);
     let workflowId = params.workflowId;
     let onInFlight: "reject" | "join" =
       "workflow" in params ? (params.workflow.idempotency?.onInFlight ?? "reject") : "reject";
@@ -634,6 +705,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     // reports it.
     const running = this._run({
       run: params as WorkflowRunnerRunParams,
+      normalizedSecurityContext: { value: securityContext },
       gate: {
         onResolved: (run) => {
           workflowId = run.workflowId;
@@ -652,6 +724,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     ]);
     void running.catch(() => undefined);
 
+    if (first.error instanceof RunSecurityContextConflictError) throw first.error;
     if (first.error instanceof WorkflowLockError && onInFlight === "reject") throw first.error;
     return this.handle<Output>(workflowId, { workflow: startedWorkflow });
   }
@@ -811,6 +884,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
     input: unknown;
     force?: boolean;
     namespace?: string;
+    securityContext?: RunSecurityContext;
     idempotencyKey?: string;
     idempotencyExpiresAt?: Date;
     /** Set by `start`: leave an in-flight run alone, and report taking the lock. */
@@ -830,6 +904,10 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
         ...(this.hooks !== undefined && { hooks: this.hooks }),
         ...(this.lock !== undefined && { lock: this.lock }),
         ...(this.tracer !== undefined && { tracer: this.tracer }),
+        ...(this.runAdmissionGuard !== undefined && {
+          runAdmissionGuard: this.runAdmissionGuard,
+        }),
+        runAdmissionExemptions: this.runAdmissionExemptions,
         ...(this.defaultStepTimeoutMs !== undefined && {
           defaultStepTimeoutMs: this.defaultStepTimeoutMs,
         }),
@@ -840,6 +918,7 @@ export class DefaultWorkflowRunner implements WorkflowRunner {
       input: params.input,
       force: params.force,
       namespace: params.namespace,
+      ...(params.securityContext !== undefined && { securityContext: params.securityContext }),
       ...(params.onLocked !== undefined && { onLocked: params.onLocked, rejectInFlight: true }),
       ...(params.signal !== undefined && { signal: params.signal }),
       ...(params.useStoredInput === true && { useStoredInput: true }),

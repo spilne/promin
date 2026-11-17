@@ -5,20 +5,68 @@ import {
   InMemoryUsageLedger,
   type LLMProvider,
 } from "@promin/agent";
-import { InMemoryWorkflowStorage } from "@promin/workflow";
+import { InMemoryWorkflowStorage, SystemWallClock } from "@promin/workflow";
 import { ZoryaServer } from "../../../server.ts";
+import {
+  principalRef,
+  type Principal,
+  type SecurityAuditEvent,
+  type ZoryaSecurity,
+} from "../../../security/index.ts";
 import { ZoryaAgents } from "../zorya-agents.ts";
 import { harness, overrideStorage, parent, waitFor } from "./retained-harness.ts";
+
+function mutableUserSecurity() {
+  const user: Principal = Object.freeze({
+    kind: "user",
+    id: "alice",
+    accessRoles: Object.freeze({ acme: Object.freeze(["member"]) }),
+    canActFor: false,
+  });
+  const state = {
+    enabled: true,
+    allowed: true,
+    auditThrows: false,
+    events: [] as SecurityAuditEvent[],
+  };
+  const security: ZoryaSecurity = {
+    authenticate: async () => (state.enabled ? user : undefined),
+    resolvePrincipal: async (ref) =>
+      state.enabled && ref.kind === user.kind && ref.id === user.id ? user : undefined,
+    resolveIdentity: async ({ actor, asserted }) =>
+      state.enabled ? { actor, effective: asserted ?? principalRef(actor) } : undefined,
+    identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
+    authorize: async () =>
+      state.enabled && state.allowed
+        ? { allowed: true, reason: "access_role_allow" }
+        : { allowed: false, reason: state.enabled ? "permission_denied" : "principal_disabled" },
+    recordAudit: async (event) => {
+      state.events.push(event);
+      if (state.auditThrows) throw new Error("audit unavailable");
+    },
+  };
+  return { user, state, security };
+}
+
+function deferred() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
 
 describe("retained subagents", () => {
   it("admits a child, preserves its inbox across a service restart, and isolates ownership", async () => {
     const h = await harness();
     await h.workflows.start();
+    const securityContext = { actor: { kind: "user" as const, id: "alice" } };
     const child = await h.retained.spawnAgent({
       parent,
       agentId: "worker",
       task: "initial",
       childId: "child-1",
+      securityContext,
     });
     expect(child.status).toBe("admitted");
     await waitFor(
@@ -27,6 +75,12 @@ describe("retained subagents", () => {
     );
     expect(await h.retained.listChildAgents(parent)).toHaveLength(1);
     await h.workflows.stop();
+    const storedBeforeRestart = await h.storage.loadWorkflow(child.workflowId);
+    expect(storedBeforeRestart).toBeDefined();
+    expect(storedBeforeRestart!.securityContext).toEqual(securityContext);
+    expect((storedBeforeRestart!.input as { securityContext?: unknown }).securityContext).toEqual(
+      securityContext,
+    );
     const restarted = h.make();
     await restarted.retained.reconcileMailboxes();
     await restarted.workflows.start();
@@ -68,6 +122,328 @@ describe("retained subagents", () => {
     ).rejects.toThrow();
     await restarted.retained.stopAgent(parent, child.childId);
     await restarted.workflows.stop();
+  });
+
+  it("blocks a retained mailbox turn after starter revocation before agent code runs", async () => {
+    const h = await harness();
+    const user: Principal = {
+      kind: "user",
+      id: "alice",
+      accessRoles: { acme: ["member"] },
+      canActFor: false,
+    };
+    let enabled = true;
+    const audits: SecurityAuditEvent[] = [];
+    const security: ZoryaSecurity = {
+      authenticate: async () => (enabled ? user : undefined),
+      resolvePrincipal: async (ref) =>
+        enabled && ref.kind === user.kind && ref.id === user.id ? user : undefined,
+      resolveIdentity: async ({ actor, asserted }) =>
+        enabled ? { actor, effective: asserted ?? principalRef(actor) } : undefined,
+      identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
+      authorize: async () =>
+        enabled
+          ? { allowed: true, reason: "access_role_allow" }
+          : { allowed: false, reason: "principal_disabled" },
+      recordAudit: async (event) => void audits.push(event),
+    };
+    h.workflows.configureExecutionSecurity({
+      security,
+      clock: SystemWallClock,
+      logger: { error: () => {} },
+    });
+    h.retained.configureExecutionSecurity({ security });
+    await expect(
+      h.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "missing identity",
+        childId: "missing-retained-identity",
+      }),
+    ).rejects.toMatchObject({ code: "forbidden" });
+    const missingIdentityAudit = audits.at(-1) as unknown as Record<string, unknown>;
+    expect(missingIdentityAudit.event).toBe("retained-agent.authorization");
+    expect("context" in missingIdentityAudit).toBe(false);
+    expect(missingIdentityAudit.decision).toEqual({
+      allowed: false,
+      reason: "identity_unknown",
+    });
+    expect(missingIdentityAudit.metadata).toMatchObject({
+      operation: "spawn",
+      denialReason: "missing_identity",
+      childId: "missing-retained-identity",
+      parentAgentId: "parent",
+      parentThreadId: "conversation",
+      actorId: null,
+      effectiveId: null,
+    });
+    expect(Object.isFrozen(missingIdentityAudit)).toBe(true);
+    expect(Object.isFrozen(missingIdentityAudit.metadata)).toBe(true);
+
+    const legacy = await harness();
+    const legacyChild = await legacy.retained.spawnAgent({
+      parent,
+      agentId: "worker",
+      task: "legacy contextless",
+      childId: "legacy-contextless-module-turn",
+    });
+    legacy.retained.configureExecutionSecurity({ security });
+    await expect(
+      legacy.retained.messageAgent({
+        parent,
+        childId: legacyChild.childId,
+        task: "must stay blocked",
+        messageId: "legacy-contextless-message",
+      }),
+    ).rejects.toMatchObject({ code: "forbidden" });
+    const missingTurnAudit = audits.findLast(
+      (event) =>
+        event.metadata?.childId === "legacy-contextless-module-turn" &&
+        event.metadata.operation === "message",
+    ) as unknown as Record<string, unknown>;
+    expect("context" in missingTurnAudit).toBe(false);
+    expect(missingTurnAudit.metadata).toMatchObject({
+      operation: "message",
+      denialReason: "missing_identity",
+      childId: "legacy-contextless-module-turn",
+    });
+    await h.workflows.start();
+    const child = await h.retained.spawnAgent({
+      parent,
+      agentId: "worker",
+      task: "initial",
+      childId: "revoked-starter",
+      securityContext: { actor: principalRef(user) },
+    });
+    await waitFor(
+      async () =>
+        (await h.retained.readAgentMessages(parent, child.childId)).transcript.length >= 2,
+    );
+    const before = (await h.retained.readAgentMessages(parent, child.childId)).transcript.length;
+    await h.workflows.stop();
+    await h.retained.messageAgent({
+      parent,
+      childId: child.childId,
+      task: "must not run",
+      messageId: "revoked-message",
+    });
+    enabled = false;
+    await h.workflows.start();
+    await waitFor(
+      async () => (await h.storage.loadWorkflow(child.workflowId))?.status === "failed",
+    );
+    expect((await h.retained.readAgentMessages(parent, child.childId)).transcript).toHaveLength(
+      before,
+    );
+    await h.workflows.stop();
+  });
+
+  it("reauthorizes after registry, resolver and thread awaits before the next side effect", async () => {
+    for (const phase of ["registry", "resolver", "thread"] as const) {
+      const auth = mutableUserSecurity();
+      const h = await harness();
+      h.workflows.configureExecutionSecurity({
+        security: auth.security,
+        clock: SystemWallClock,
+        logger: { error: () => {} },
+      });
+      h.retained.configureExecutionSecurity({
+        security: auth.security,
+        logger: { error: () => {} },
+      });
+      await h.workflows.start();
+      const child = await h.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "initial",
+        childId: `race-${phase}`,
+        securityContext: { actor: principalRef(auth.user) },
+      });
+      await waitFor(
+        async () =>
+          (await h.retained.readAgentMessages(parent, child.childId)).outcomes.length >= 1,
+      );
+      await h.workflows.stop();
+      await h.retained.messageAgent({
+        parent,
+        childId: child.childId,
+        task: `race ${phase}`,
+        messageId: `race-${phase}`,
+      });
+
+      const entered = deferred();
+      const release = deferred();
+      let workerResolveCalls = 0;
+      let withScopeCalls = 0;
+      let sendCalls = 0;
+      const originalResolve = h.agents.resolve.bind(h.agents);
+      Object.defineProperty(h.agents, "resolve", {
+        configurable: true,
+        value: async (
+          recipe: Parameters<typeof originalResolve>[0],
+          scope: Parameters<typeof originalResolve>[1],
+        ) => {
+          if (recipe.id !== "worker") return originalResolve(recipe, scope);
+          workerResolveCalls++;
+          const resolved = await originalResolve(recipe, scope);
+          if (phase === "resolver") {
+            entered.release();
+            await release.promise;
+          }
+          return new Proxy(resolved, {
+            get(target, property, receiver) {
+              if (property !== "withScope") return Reflect.get(target, property, receiver);
+              return (agentScope: Parameters<typeof target.withScope>[0]) => {
+                withScopeCalls++;
+                const scoped = target.withScope(agentScope);
+                if (phase !== "thread") return scoped;
+                return new Proxy(scoped, {
+                  get(scopedTarget, scopedProperty, scopedReceiver) {
+                    if (scopedProperty !== "thread") {
+                      return Reflect.get(scopedTarget, scopedProperty, scopedReceiver);
+                    }
+                    return async (...args: Parameters<typeof scopedTarget.thread>) => {
+                      const thread = await scopedTarget.thread(...args);
+                      entered.release();
+                      await release.promise;
+                      return new Proxy(thread, {
+                        get(threadTarget, threadProperty, threadReceiver) {
+                          if (threadProperty !== "send") {
+                            return Reflect.get(threadTarget, threadProperty, threadReceiver);
+                          }
+                          return (...sendArgs: Parameters<typeof threadTarget.send>) => {
+                            sendCalls++;
+                            return threadTarget.send(...sendArgs);
+                          };
+                        },
+                      });
+                    };
+                  },
+                });
+              };
+            },
+          });
+        },
+      });
+      if (phase === "registry") {
+        const originalGet = h.agents.registry.get.bind(h.agents.registry);
+        let blocked = false;
+        Object.defineProperty(h.agents.registry, "get", {
+          configurable: true,
+          value: async (query: Parameters<typeof originalGet>[0]) => {
+            if (!blocked && query.id === "worker" && query.version !== undefined) {
+              blocked = true;
+              entered.release();
+              await release.promise;
+            }
+            return originalGet(query);
+          },
+        });
+      }
+
+      await h.workflows.start();
+      await entered.promise;
+      auth.state.enabled = false;
+      release.release();
+      await waitFor(
+        async () =>
+          (await h.retained.readAgentMessages(parent, child.childId)).outcomes.length >= 2,
+      );
+      if (phase === "registry") expect(workerResolveCalls).toBe(0);
+      if (phase === "resolver") expect(withScopeCalls).toBe(0);
+      if (phase === "thread") expect(sendCalls).toBe(0);
+      const denial = auth.state.events.findLast(
+        (event) =>
+          event.event === "retained-agent.authorization" && event.decision?.allowed === false,
+      );
+      expect(denial?.metadata?.operation).toBe(
+        phase === "registry" ? "turn.resolve" : phase === "resolver" ? "turn.thread" : "turn.send",
+      );
+      expect(Object.isFrozen(denial)).toBe(true);
+      expect(Object.isFrozen(denial?.context)).toBe(true);
+      expect(Object.isFrozen(denial?.metadata)).toBe(true);
+      await h.workflows.stop();
+    }
+  });
+
+  it("audits retained operations immutably and never bypasses an unavailable audit sink", async () => {
+    const auth = mutableUserSecurity();
+    const h = await harness();
+    h.retained.configureExecutionSecurity({
+      security: auth.security,
+      logger: { error: () => {} },
+    });
+    const child = await h.retained.spawnAgent({
+      parent,
+      agentId: "worker",
+      task: "initial",
+      childId: "audited-operations",
+      securityContext: { actor: principalRef(auth.user) },
+    });
+    await h.retained.messageAgent({
+      parent,
+      childId: child.childId,
+      task: "queued",
+      messageId: "audited-message",
+    });
+    await h.retained.stopAgent(parent, child.childId);
+    const operations = auth.state.events
+      .filter((event) => event.event === "retained-agent.authorization")
+      .map((event) => event.metadata?.operation)
+      .filter((operation) => ["spawn", "message", "stop"].includes(String(operation)));
+    expect(operations).toEqual(["spawn", "message", "stop"]);
+    for (const event of auth.state.events) {
+      expect(Object.isFrozen(event)).toBe(true);
+      expect(Object.isFrozen(event.context)).toBe(true);
+      expect(Object.isFrozen(event.decision)).toBe(true);
+      expect(event.metadata?.childId).toBe(child.childId);
+      expect(event.metadata?.actorId).toBe("alice");
+      expect(event.metadata?.effectiveId).toBe("alice");
+    }
+
+    const auditDown = mutableUserSecurity();
+    auditDown.state.auditThrows = true;
+    const failClosed = await harness();
+    failClosed.retained.configureExecutionSecurity({
+      security: auditDown.security,
+      logger: { error: () => {} },
+    });
+    await expect(
+      failClosed.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "must not admit",
+        childId: "audit-down-allow",
+        securityContext: { actor: principalRef(auditDown.user) },
+      }),
+    ).rejects.toMatchObject({ code: "forbidden" });
+    expect(await failClosed.retained.listChildAgents(parent)).toEqual([]);
+
+    auditDown.state.allowed = false;
+    await expect(
+      failClosed.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "still denied",
+        childId: "audit-down-deny",
+        securityContext: { actor: principalRef(auditDown.user) },
+      }),
+    ).rejects.toMatchObject({ code: "forbidden" });
+    expect(auditDown.state.events.at(-1)?.decision?.allowed).toBe(false);
+    await expect(
+      failClosed.retained.spawnAgent({
+        parent,
+        agentId: "worker",
+        task: "missing and unauditable",
+        childId: "audit-down-missing",
+      }),
+    ).rejects.toMatchObject({ code: "forbidden" });
+    const missingAudit = auditDown.state.events.at(-1) as unknown as Record<string, unknown>;
+    expect("context" in missingAudit).toBe(false);
+    expect(missingAudit.metadata).toMatchObject({
+      denialReason: "missing_identity",
+      childId: "audit-down-missing",
+    });
   });
 
   it("enforces capability and depth policy", async () => {
@@ -120,11 +496,19 @@ describe("retained subagents", () => {
 
   it("exposes scoped HTTP admission and mailbox routes", async () => {
     const h = await harness();
+    const audit: Array<Record<string, unknown>> = [];
     const server = new ZoryaServer({
       insecure: true,
       workflows: h.workflows,
       agents: h.agents,
       retainedSubagents: h.retained,
+      logger: {
+        log: (message) => {
+          if (message.startsWith("{")) audit.push(JSON.parse(message) as Record<string, unknown>);
+        },
+        warn: () => {},
+        error: () => {},
+      },
     });
     const send = (method: string, path: string, body?: unknown) =>
       server.handle(
@@ -142,6 +526,46 @@ describe("retained subagents", () => {
     });
     expect(created.status).toBe(202);
     const { childId } = (await created.json()) as { childId: string };
+    const createdState = await h.storage.loadWorkflow(`retained-agent:${childId}`);
+    expect(createdState).toBeDefined();
+    expect(createdState!.securityContext).toEqual({
+      actor: { kind: "operator", id: "operator" },
+      effective: { kind: "user", id: "alice" },
+    });
+    expect((createdState!.input as { securityContext?: unknown }).securityContext).toEqual(
+      createdState!.securityContext,
+    );
+    expect(
+      (
+        await send("POST", `/api/agents/parent/threads/conversation/children/${childId}/messages`, {
+          namespaceId: "acme",
+          resourceId: "alice",
+          task: "follow up",
+        })
+      ).status,
+    ).toBe(202);
+    expect(
+      (
+        await send("POST", `/api/agents/parent/threads/conversation/children/${childId}/stop`, {
+          namespaceId: "acme",
+          resourceId: "alice",
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await send(
+          "DELETE",
+          `/api/agents/parent/threads/conversation/children/${childId}?namespaceId=acme&resourceId=alice`,
+        )
+      ).status,
+    ).toBe(200);
+    const mutationAudits = audit.filter((event) =>
+      ["/messages", "/stop", `/${childId}`].some((suffix) =>
+        String((event.metadata as { path?: string } | undefined)?.path).endsWith(suffix),
+      ),
+    );
+    expect(mutationAudits).toEqual([]);
     expect(
       (
         await send(
@@ -204,6 +628,73 @@ describe("retained subagents", () => {
     });
     expect(child.childId).toBe("reordered");
     await h.workflows.stop();
+  });
+
+  it("snapshots hostile stored input and security getters exactly once", async () => {
+    let hostile = false;
+    let repeated = false;
+    const reads = new Map<string, number>();
+    const count = (key: string) => reads.set(key, (reads.get(key) ?? 0) + 1);
+    const h = await harness({
+      wrapStorage: (storage) =>
+        overrideStorage(storage, "loadWorkflow", (original) => async (id: string) => {
+          const state = await original(id);
+          if (!hostile || !state || id !== "retained-agent:getter-safe") return state;
+          const stable = state.input as Record<string, unknown>;
+          const localReads = new Map<string, number>();
+          const input = Object.create(null) as Record<string, unknown>;
+          for (const key of [
+            "childId",
+            "agentId",
+            "agentVersion",
+            "parent",
+            "depth",
+            "task",
+            "securityContext",
+          ]) {
+            Object.defineProperty(input, key, {
+              enumerable: true,
+              get: () => {
+                count(`input.${key}`);
+                const localCount = (localReads.get(key) ?? 0) + 1;
+                localReads.set(key, localCount);
+                if (localCount > 1) repeated = true;
+                if (key === "agentId" && localCount > 1) return "attacker";
+                return stable[key];
+              },
+            });
+          }
+          return Object.defineProperties(
+            { ...state, input },
+            {
+              securityContext: {
+                enumerable: true,
+                get: () => {
+                  count("state.securityContext");
+                  const localCount = (localReads.get("state.securityContext") ?? 0) + 1;
+                  localReads.set("state.securityContext", localCount);
+                  if (localCount > 1) repeated = true;
+                  return state.securityContext;
+                },
+              },
+            },
+          );
+        }) as InMemoryWorkflowStorage,
+    });
+    const securityContext = { actor: { kind: "user" as const, id: "alice" } };
+    const child = await h.retained.spawnAgent({
+      parent,
+      agentId: "worker",
+      task: "initial",
+      childId: "getter-safe",
+      securityContext,
+    });
+    hostile = true;
+    expect((await h.retained.readAgentMessages(parent, child.childId)).transcript).toEqual([]);
+    expect(repeated).toBe(false);
+    expect(reads.get("input.agentId")).toBeGreaterThanOrEqual(1);
+    expect(reads.get("input.securityContext")).toBeGreaterThanOrEqual(1);
+    expect(reads.get("state.securityContext")).toBeGreaterThanOrEqual(1);
   });
 
   it("processes a message whose wake signal was lost and the ones after it", async () => {

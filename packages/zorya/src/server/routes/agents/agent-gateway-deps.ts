@@ -81,6 +81,7 @@ import type {
   AgentThreadSummary,
   AgentTurnGate,
   AgentTurnPolicy,
+  PendingApprovalStore,
   BudgetUsage,
   Message,
   RegisteredAgent,
@@ -88,10 +89,11 @@ import type {
   SecretsStorage,
   TurnBudget,
 } from "@promin/agent";
-import type { NamespaceRegistry, WallClock } from "@promin/workflow";
+import type { NamespaceRegistry, RunSecurityContext, WallClock } from "@promin/workflow";
 import type { McpRecipeChecker, ScopeAuthorizer } from "../agent-gateway-kit.ts";
 import type { PromotionGate } from "../evals.ts";
 import type { TurnStreamHub } from "./agent-sse.ts";
+import type { Principal, ZoryaSecurity } from "../../security/index.ts";
 
 // ---------------------------------------------------------------------------
 // Response DTOs — UI imports these for typing API responses. Re-export the
@@ -206,6 +208,8 @@ export interface PendingApprovalDto {
   toolCallId: string;
   toolName: string;
   input: unknown;
+  /** Elevated approvals require a distinct approver principal. */
+  elevated: boolean | null;
   /** Unix ms. */
   requestedAt: number;
   /** Unix ms; null when it never expires. */
@@ -231,6 +235,8 @@ export interface ThreadApprovalsResponse {
 
 export interface AgentGatewayDeps {
   readonly registry: AgentRegistry;
+  /** Durable approval index used for authoritative pre-authorization lookup. */
+  readonly approvals?: PendingApprovalStore;
   /**
    * Optional role registry. When set, `extract-role` can lift an agent's
    * inline role into it (and rebind the agent to a ref). Agent resolution
@@ -252,8 +258,15 @@ export interface AgentGatewayDeps {
    */
   readonly resolve: (
     recipe: RegisteredAgent,
-    scope?: { readonly namespaceId?: string; readonly resourceId?: string },
+    scope?: {
+      readonly namespaceId?: string;
+      readonly resourceId?: string;
+      readonly principal?: Principal;
+      readonly securityContext?: RunSecurityContext;
+    },
   ) => Agent | Promise<Agent>;
+  /** Authentication and coarse access policy for principal-derived agent scopes. */
+  readonly security?: ZoryaSecurity;
   /**
    * Optional. When set, callers may pass `ownerId` instead of
    * `resourceId`. The gateway resolves-or-creates an AgentInstance via

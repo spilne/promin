@@ -29,6 +29,11 @@ Resilient async actions (retry, timeout, circuit breaker, race, cache), stream c
 | 01-video-pipeline      | Download → transcribe → summarize (same code for dev and prod) |
 | 02-multi-queue-workers | Coordinator + GPU/AI/default workers, capability routing       |
 
+Docker topology examples live under `docker/`. In particular,
+`docker/zorya-distributed` runs a Zorya coordinator with four remote workflow
+workers and two self-registering remote agent nodes, including an end-to-end
+smoke/load check.
+
 ## 06-scheduler — Recurring tasks
 
 | File                   | Scenario                                             |

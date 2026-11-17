@@ -15,7 +15,7 @@
 // lease across a run or an LLM turn.
 // ---------------------------------------------------------------------------
 
-import type { WallClock } from "@promin/workflow";
+import type { RunSecurityContext, WallClock } from "@promin/workflow";
 import type {
   DurableScheduleConfig,
   ScheduleTick,
@@ -30,6 +30,12 @@ import {
   type SchedulerLoopErrorEvent,
 } from "../scheduler-loop.ts";
 import type { ZoryaWorkflows } from "../workflows/index.ts";
+import {
+  ScheduleExecutionSecurity,
+  type SecurityContext,
+  type AuthorizedScheduleIdentity,
+  type ScheduleExecutionSecurityConfig,
+} from "../../security/index.ts";
 
 /** A started agent turn; `done` settles when the turn ends and never rejects. */
 export interface AgentScheduleStart {
@@ -50,6 +56,8 @@ export interface AgentScheduleDispatcher {
   dispatchSchedule(
     tick: ScheduleTick,
     schedule: DurableScheduleConfig,
+    identity?: AuthorizedScheduleIdentity,
+    reauthorize?: () => Promise<void>,
   ): Promise<AgentScheduleStart>;
 }
 
@@ -112,6 +120,11 @@ export class ZoryaScheduler {
   private readonly namespaces: "all" | ReadonlySet<string | undefined>;
   private readonly loop: SchedulerLoop;
   private readonly onError: (event: SchedulerLoopErrorEvent) => void;
+  private executionSecurity?: ScheduleExecutionSecurity;
+  private readonly dispatchIdentities = new WeakMap<
+    DurableScheduleConfig,
+    AuthorizedScheduleIdentity
+  >();
   /** Agent turns started by this instance and still running, by run id. */
   private readonly turns = new Set<string>();
 
@@ -136,7 +149,18 @@ export class ZoryaScheduler {
         if (handled) return { handled: true };
       }
       if (agents && isAgentSchedule(schedule)) {
-        await this.startTurn({ agents, tick, schedule });
+        const executionSecurity = this.executionSecurity;
+        await this.startTurn({
+          agents,
+          tick,
+          schedule,
+          identity: this.dispatchIdentities.get(schedule),
+          ...(executionSecurity !== undefined && {
+            reauthorize: async () => {
+              await executionSecurity.authorizeDispatch(schedule);
+            },
+          }),
+        });
         return { handled: true };
       }
       return { handled: false }; // fall through to loop's default trigger path
@@ -146,6 +170,12 @@ export class ZoryaScheduler {
       storage: config.storage,
       trigger: (name, input, opts) => config.workflows.trigger(name, input, opts),
       fire,
+      prepareDispatch: async (_tick, schedule) => {
+        if (!this.executionSecurity) return schedule;
+        const authorized = await this.executionSecurity.authorizeDispatch(schedule);
+        this.dispatchIdentities.set(authorized.schedule, authorized.identity);
+        return authorized.schedule;
+      },
       onError: (event) => this.report(event),
     };
     if (config.instanceId !== undefined) loopConfig.instanceId = config.instanceId;
@@ -164,6 +194,24 @@ export class ZoryaScheduler {
     if (config.clock !== undefined) loopConfig.clock = config.clock;
 
     this.loop = new SchedulerLoop(loopConfig);
+  }
+
+  /** Installed by ZoryaServer once its security implementation is known. */
+  configureExecutionSecurity(config: ScheduleExecutionSecurityConfig): void {
+    this.executionSecurity = new ScheduleExecutionSecurity(config);
+  }
+
+  /** Resolve and authorize a service-account assignment for route writes. */
+  async assignedSecurityContext(params: {
+    readonly scheduleId: string;
+    readonly namespaceId: string;
+    readonly caller?: SecurityContext;
+    readonly serviceAccountId?: string;
+    readonly runAsUserId?: string;
+    readonly resourceId?: string;
+  }): Promise<RunSecurityContext | undefined> {
+    if (!this.executionSecurity) return undefined;
+    return await this.executionSecurity.assignedContext(params);
   }
 
   /**
@@ -204,6 +252,8 @@ export class ZoryaScheduler {
     agents: AgentScheduleDispatcher;
     tick: ScheduleTick;
     schedule: DurableScheduleConfig;
+    identity?: AuthorizedScheduleIdentity;
+    reauthorize?: () => Promise<void>;
   }): Promise<void> {
     const { agents, tick, schedule } = params;
     const runId = scheduleTickRunId(tick);
@@ -211,7 +261,7 @@ export class ZoryaScheduler {
     this.turns.add(runId);
     let started: AgentScheduleStart;
     try {
-      started = await agents.dispatchSchedule(tick, schedule);
+      started = await agents.dispatchSchedule(tick, schedule, params.identity, params.reauthorize);
     } catch (error) {
       this.turns.delete(runId);
       throw error;

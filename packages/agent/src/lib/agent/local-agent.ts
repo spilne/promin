@@ -44,8 +44,14 @@
 // ---------------------------------------------------------------------------
 
 import { createHash, randomUUID } from "node:crypto";
-import type { WorkflowRunner, WorkflowState, WorkflowStatus } from "@promin/workflow";
+import type {
+  RunSecurityContext,
+  WorkflowRunner,
+  WorkflowState,
+  WorkflowStatus,
+} from "@promin/workflow";
 import type { z } from "zod";
+import { normalizeRunSecurityContext, sameRunSecurityContext } from "@promin/workflow/storage-kit";
 import {
   agentAction,
   type AgentActionConfig,
@@ -63,11 +69,14 @@ import { composeApprovalSignal } from "../approvals/approve-signal.ts";
 import { InMemoryPendingApprovalStore } from "../approvals/in-memory-pending-approval-store.ts";
 import {
   ApprovalAlreadyDecidedError,
+  ApprovalBoundaryConflictError,
   ApprovalExpiredError,
   ApprovalNotFoundError,
   ApprovalNotReadyError,
   ThreadAwaitingApprovalError,
+  snapshotPendingApprovalBoundary,
   type PendingApproval,
+  type PendingApprovalBoundary,
   type PendingApprovalKey,
   type PendingApprovalStore,
 } from "../approvals/pending-approval-store.ts";
@@ -112,6 +121,7 @@ import { frameTask } from "./frame-task.ts";
 import {
   buildRetrieverContext,
   type AgentRetrievers,
+  type RetrieverAccessResolver,
   type RetrieverFailure,
 } from "./retriever-bindings.ts";
 import {
@@ -139,6 +149,7 @@ import type {
   AgentInput,
   AgentInputSource,
   AgentInvokeOpts,
+  ApprovalResumeOpts,
   AgentRunOutput,
   AgentScope,
   AgentThread,
@@ -502,6 +513,21 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     return new LocalAgent<TOutput>({ ...this.config, budgets });
   }
 
+  /** Attach a fresh, per-search authorization callback to every knowledge binding. */
+  withRetrieverAccess(resolveAccess: RetrieverAccessResolver): LocalAgent<TOutput> {
+    const retrievers = this.config.retrievers;
+    if (!retrievers || Object.keys(retrievers).length === 0) return this;
+    const secured: Record<string, import("./retriever-bindings.ts").AgentRetrieverBinding> = {};
+    for (const [id, bindingLike] of Object.entries(retrievers)) {
+      const binding = "retrieve" in bindingLike ? { retriever: bindingLike } : bindingLike;
+      secured[id] = Object.freeze({
+        ...binding,
+        resolveAccess: (securityContext?: RunSecurityContext) => resolveAccess(id, securityContext),
+      });
+    }
+    return new LocalAgent<TOutput>({ ...this.config, retrievers: Object.freeze(secured) });
+  }
+
   /** Recipe id this agent runs as (`config.agentId`, else the loop name). */
   private agentId(): string {
     return this.config.agentId ?? this.config.agent.name;
@@ -513,6 +539,10 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     threadId: string,
     opts: ThreadOptions = {},
   ): Promise<AgentThread<AgentInput, TOutput>> {
+    const securityContext =
+      opts.securityContext === undefined
+        ? undefined
+        : normalizeRunSecurityContext(opts.securityContext);
     const namespaceId = opts.namespaceId ?? this.config.namespaceId;
     const resourceId = opts.resourceId ?? this.config.resourceId;
     if (!namespaceId) {
@@ -578,6 +608,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       ...(this.config.approvalTtlMs !== undefined && { approvalTtlMs: this.config.approvalTtlMs }),
       created,
       agentId: this.agentId(),
+      ...(securityContext !== undefined && { securityContext }),
       autoCompact: this.config.autoCompact === false ? undefined : this.config.autoCompact,
       autoDistill: this.config.autoDistill === false ? undefined : this.config.autoDistill,
       consolidator: () => this.resolveConsolidator(),
@@ -931,6 +962,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
 
   private oneShotWorkflow(params: {
     namespaceId: string | undefined;
+    securityContext?: RunSecurityContext;
     bus: SessionEventBus;
     signal: AbortSignal;
     approvalIndex?: TurnApprovalIndex;
@@ -954,18 +986,23 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       }),
       ...(params.onApprovalRequired && { onApprovalRequired: params.onApprovalRequired }),
     };
-    return buildTurnWorkflow<TOutput>({
+    const workflow = buildTurnWorkflow<TOutput>({
       engine,
       bus: params.bus,
       scope: {
         ...(namespaceId !== undefined && { namespaceId }),
         ...(resourceId !== undefined && { resourceId }),
         agentId: this.agentId(),
+        ...(params.securityContext !== undefined && {
+          securityContext: params.securityContext,
+        }),
       },
       signal: params.signal,
       ...(params.approvalIndex && { approvalIndex: params.approvalIndex }),
       ...(params.usageRecorder && { usageRecorder: params.usageRecorder }),
     });
+    this.config.runner.exemptInternalWorkflowFromRunAdmission?.(workflow);
+    return workflow;
   }
 
   /**
@@ -976,10 +1013,12 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
    */
   private async turnInput(
     input: AgentInput,
+    securityContext?: RunSecurityContext,
   ): Promise<{ input: TurnInput; retrieverFailures: ReadonlyArray<RetrieverFailure> }> {
     const knowledge = await buildRetrieverContext({
       retrievers: this.config.retrievers,
       query: input.task,
+      ...(securityContext !== undefined && { securityContext }),
       ...(this.config.agent.clock && { clock: this.config.agent.clock }),
     });
     const messages: Message[] = [...(input.messages ?? [])];
@@ -1000,10 +1039,15 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
     bus.subscribe((e) => recordEvent(capture, e));
 
     const namespaceId = opts?.namespaceId ?? this.config.namespaceId;
+    const securityContext =
+      opts?.securityContext === undefined
+        ? undefined
+        : normalizeRunSecurityContext(opts.securityContext);
     // A one-shot run counts against its namespace's budget (it has no thread).
     const budgets = namespaceId !== undefined ? this.config.budgets : undefined;
     const wf = this.oneShotWorkflow({
       namespaceId,
+      ...(securityContext !== undefined && { securityContext }),
       bus,
       signal: capture.abort.signal,
       ...(opts?.onApprovalRequired && { onApprovalRequired: opts.onApprovalRequired }),
@@ -1031,16 +1075,20 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
         workflow: wf,
         workflowId,
         input: existing.input,
+        ...(namespaceId !== undefined && { namespace: namespaceId }),
+        ...(securityContext !== undefined && { securityContext }),
       })) as AgentResult;
     }
     const ceiling =
       budgets && namespaceId !== undefined ? await admitTurn({ budgets, namespaceId }) : undefined;
-    const prepared = await this.turnInput(input);
+    const prepared = await this.turnInput(input, securityContext);
     emitRetrieverFailures({ bus, failures: prepared.retrieverFailures });
     return (await this.config.runner.run({
       workflow: wf,
       workflowId,
       input: ceiling ? { ...prepared.input, budget: ceiling } : prepared.input,
+      ...(namespaceId !== undefined && { namespace: namespaceId }),
+      ...(securityContext !== undefined && { securityContext }),
     })) as AgentResult;
   }
 }
@@ -1086,6 +1134,8 @@ interface LocalAgentThreadDeps<TOutput> {
   readonly created: boolean;
   /** Recipe id surfaced as `ctx.scope.agentId` to scope-aware tools. */
   readonly agentId: string;
+  /** Identity persisted with newly-started durable turns. */
+  readonly securityContext?: RunSecurityContext;
   /** Auto-compaction config inherited from `LocalAgentConfig.autoCompact`. */
   readonly autoCompact?: AutoCompactConfig;
   /** Auto-distillation config inherited from `LocalAgentConfig.autoDistill`. */
@@ -1139,6 +1189,9 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       ...(this.deps.key.resourceId !== undefined && { resourceId: this.deps.key.resourceId }),
       threadId: this.deps.key.threadId,
       agentId: this.deps.agentId,
+      ...(this.deps.securityContext !== undefined && {
+        securityContext: this.deps.securityContext,
+      }),
     };
   }
 
@@ -1159,21 +1212,31 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
   async resume(
     callId: string,
     decision: ApprovalDecision,
-    opts?: AgentInvokeOpts,
+    opts?: ApprovalResumeOpts,
   ): Promise<AgentRunOutput<TOutput>> {
     const capture = makeCapture(opts?.signal);
-    const result = await this.resumeTurn({ callId, decision, capture });
+    const result = await this.resumeTurn({
+      callId,
+      decision,
+      capture,
+      ...(opts?.expectedApproval !== undefined && { expectedApproval: opts.expectedApproval }),
+    });
     return resolvedOutput<TOutput>({ result, capture });
   }
 
   resumeStream(
     callId: string,
     decision: ApprovalDecision,
-    opts?: AgentInvokeOpts,
+    opts?: ApprovalResumeOpts,
   ): AgentRunOutput<TOutput> {
     const capture = makeCapture(opts?.signal);
     return liveOutput<TOutput>({
-      promise: this.resumeTurn({ callId, decision, capture }),
+      promise: this.resumeTurn({
+        callId,
+        decision,
+        capture,
+        ...(opts?.expectedApproval !== undefined && { expectedApproval: opts.expectedApproval }),
+      }),
       capture,
     });
   }
@@ -1187,6 +1250,8 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
   async pendingApprovals(): Promise<PendingApproval[]> {
     return this.deps.approvals.list({
       namespaceId: this.deps.key.namespaceId,
+      agentId: this.deps.agentId,
+      resourceId: this.deps.key.resourceId ?? null,
       threadId: this.deps.key.threadId,
       open: true,
     });
@@ -1212,6 +1277,8 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     for (const row of await this.pendingApprovals()) {
       const key = {
         namespaceId: row.namespaceId,
+        agentId: row.agentId,
+        resourceId: row.resourceId,
         threadId: row.threadId,
         toolCallId: row.toolCallId,
       };
@@ -1238,7 +1305,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       let current = row;
       if (current.status === "pending") {
         const expired = await this.deps.approvals.decide({
-          ...key,
+          expected: snapshotPendingApprovalBoundary(current),
           approved: false,
           decidedBy: SYSTEM_DECIDER,
           reason: "approval expired",
@@ -1257,9 +1324,13 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
           decision: {
             approved: false,
             by: current.decidedBy ?? SYSTEM_DECIDER,
+            ...(current.decidedByPrincipal !== null && {
+              byPrincipal: current.decidedByPrincipal,
+            }),
             reason: "approval expired",
           },
           capture: makeCapture(),
+          expectedApproval: snapshotPendingApprovalBoundary(current),
         }).catch((err: unknown) => {
           // Not yet suspended on it: the turn still blocks this send (below).
           if (err instanceof ApprovalNotReadyError) return;
@@ -1338,12 +1409,14 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     }
     const key = {
       namespaceId: row.namespaceId,
+      agentId: row.agentId,
+      resourceId: row.resourceId,
       threadId: row.threadId,
       toolCallId: row.toolCallId,
     };
     if (row.status === "pending") {
       await this.deps.approvals.decide({
-        ...key,
+        expected: snapshotPendingApprovalBoundary(row),
         approved: false,
         decidedBy: SYSTEM_DECIDER,
         reason: "the turn ended without this approval",
@@ -1377,6 +1450,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     callId: string;
     decision: ApprovalDecision;
     capture: RunCapture;
+    expectedApproval?: PendingApprovalBoundary;
   }): Promise<AgentResult> {
     const { callId, decision, capture } = params;
     const storage = this.deps.runner.storage;
@@ -1389,11 +1463,19 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
 
     const key = {
       namespaceId: this.deps.key.namespaceId,
+      agentId: this.deps.agentId,
+      resourceId: this.deps.key.resourceId ?? null,
       threadId: this.deps.key.threadId,
       toolCallId: callId,
     };
     let entry = await this.deps.approvals.get(key);
     if (!entry) throw new ApprovalNotFoundError(key);
+    const expected = params.expectedApproval
+      ? snapshotExpectedApproval(params.expectedApproval)
+      : snapshotPendingApprovalBoundary(entry);
+    if (!sameApprovalBoundary(expected, entry)) {
+      throw new ApprovalBoundaryConflictError(entry);
+    }
     // The decision reached the turn already; the turn has moved on.
     if (entry.deliveredAt !== null) throw new ApprovalAlreadyDecidedError(entry);
     // An approval carried up from a sub-agent names the child's run and a
@@ -1427,12 +1509,18 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
 
     if (entry.status === "pending") {
       const decided = await this.deps.approvals.decide({
-        ...key,
+        expected,
         approved: decision.approved,
         ...(decision.by !== undefined && { decidedBy: decision.by }),
+        ...(decision.byPrincipal !== undefined && {
+          decidedByPrincipal: decision.byPrincipal,
+        }),
         ...(decision.reason !== undefined && { reason: decision.reason }),
       });
       if (decided.outcome === "not_found") throw new ApprovalNotFoundError(key);
+      if (decided.outcome === "conflict") {
+        throw new ApprovalBoundaryConflictError(decided.approval);
+      }
       if (decided.outcome === "expired") throw new ApprovalExpiredError(decided.approval);
       if (decided.outcome !== "decided") {
         throw new ApprovalAlreadyDecidedError(decided.approval);
@@ -1456,6 +1544,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       approved: entry.status === "approved",
       ...(entry.reason !== null && { reason: entry.reason }),
       ...(entry.decidedBy !== null && { by: entry.decidedBy }),
+      ...(entry.decidedByPrincipal !== null && { byPrincipal: entry.decidedByPrincipal }),
     };
     const waiting = waitingStep({ wf, signalName });
     if (waiting) {
@@ -1651,6 +1740,9 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     const knowledge = await buildRetrieverContext({
       retrievers: this.deps.retrievers,
       query: input.task,
+      ...(this.deps.securityContext !== undefined && {
+        securityContext: this.deps.securityContext,
+      }),
       ...(this.deps.engine.clock && { clock: this.deps.engine.clock }),
     });
     const seed: Message[] = [];
@@ -1702,7 +1794,16 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
         }),
       }),
     });
-    return (await this.deps.runner.run({ workflow: wf, workflowId, input })) as AgentResult;
+    this.deps.runner.exemptInternalWorkflowFromRunAdmission?.(wf);
+    return (await this.deps.runner.run({
+      workflow: wf,
+      workflowId,
+      input,
+      namespace: this.deps.key.namespaceId,
+      ...(this.deps.securityContext !== undefined && {
+        securityContext: this.deps.securityContext,
+      }),
+    })) as AgentResult;
   }
 
   /**
@@ -1761,16 +1862,19 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
         threadId: this.deps.key.threadId,
         agentId: this.deps.agentId,
       },
-      requested: async ({ workflowId, call }) => {
+      requested: async ({ workflowId, call, elevated }) => {
+        const run = await this.deps.runner.storage.loadWorkflow(workflowId);
         await this.deps.approvals.record({
           namespaceId: this.deps.key.namespaceId,
+          resourceId: this.deps.key.resourceId ?? null,
           threadId: this.deps.key.threadId,
           toolCallId: call.id,
-          ...(this.deps.key.resourceId !== undefined && { resourceId: this.deps.key.resourceId }),
           agentId: this.deps.agentId,
           workflowId,
           toolName: call.name,
           input: call.input,
+          elevated,
+          requestContext: run?.securityContext ?? null,
           ...(this.deps.approvalTtlMs !== undefined && { ttlMs: this.deps.approvalTtlMs }),
         });
       },
@@ -1918,11 +2022,55 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
     }
     await this.deps.approvals.deleteThread({
       namespaceId: this.deps.key.namespaceId,
+      agentId: this.deps.agentId,
+      resourceId: this.deps.key.resourceId ?? null,
       threadId: this.deps.key.threadId,
     });
     this.inMemoryMessages = [];
     this.inMemoryAppends.clear();
   }
+}
+
+// ---------------------------------------------------------------------------
+
+function snapshotExpectedApproval(value: PendingApprovalBoundary): PendingApprovalBoundary {
+  const namespaceId = value.namespaceId;
+  const agentId = value.agentId;
+  const resourceId = value.resourceId;
+  const threadId = value.threadId;
+  const toolCallId = value.toolCallId;
+  const workflowId = value.workflowId;
+  const elevated = value.elevated;
+  const requestContext = value.requestContext;
+  return Object.freeze({
+    namespaceId,
+    agentId,
+    resourceId,
+    threadId,
+    toolCallId,
+    workflowId,
+    elevated,
+    requestContext: requestContext === null ? null : normalizeRunSecurityContext(requestContext),
+  });
+}
+
+function sameApprovalBoundary(
+  expected: PendingApprovalBoundary,
+  current: PendingApproval,
+): boolean {
+  return (
+    expected.namespaceId === current.namespaceId &&
+    expected.agentId === current.agentId &&
+    expected.resourceId === current.resourceId &&
+    expected.threadId === current.threadId &&
+    expected.toolCallId === current.toolCallId &&
+    expected.workflowId === current.workflowId &&
+    expected.elevated === current.elevated &&
+    ((expected.requestContext === null && current.requestContext === null) ||
+      (expected.requestContext !== null &&
+        current.requestContext !== null &&
+        sameRunSecurityContext(expected.requestContext, current.requestContext)))
+  );
 }
 
 // ---------------------------------------------------------------------------

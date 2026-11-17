@@ -213,6 +213,48 @@ describe("LocalAgent — retriever bindings", () => {
     ]);
   });
 
+  it("reauthorizes a long-lived agent immediately before each context search", async () => {
+    const { runner } = makeRunner();
+    const { llm, calls } = recordingLLM([
+      { content: "first", finishReason: "stop" },
+      { content: "second", finishReason: "stop" },
+      { content: "third", finishReason: "stop" },
+    ]);
+    const seen: RetrieveRequest[] = [];
+    const retriever: Retriever = {
+      retrieve: async (request) => {
+        seen.push(request);
+        return [];
+      },
+    };
+    let allowed = true;
+    let roles: ReadonlyArray<string> = ["member"];
+    const securityContexts: unknown[] = [];
+    const agent = new LocalAgent({
+      agent: { name: "support", llm },
+      runner,
+      namespaceId: "acme",
+      retrievers: { docs: { mode: "context", retriever } },
+    }).withRetrieverAccess(async (_bindingId, securityContext) => {
+      securityContexts.push(securityContext);
+      return allowed ? { caller: { userId: "alice", accessRoles: roles, teams: [] } } : undefined;
+    });
+
+    await agent.invoke(
+      { task: "first" },
+      { securityContext: { actor: { kind: "user", id: "alice" } } },
+    );
+    roles = ["finance"];
+    await agent.invoke({ task: "second" });
+    allowed = false;
+    await agent.invoke({ task: "revoked" });
+
+    expect(seen.map((request) => request.caller?.accessRoles)).toEqual([["member"], ["finance"]]);
+    expect(seen.map((request) => request.query)).toEqual(["first", "second"]);
+    expect(calls[2]!.messages.some(isReferenceDataMessage)).toBe(false);
+    expect(securityContexts[0]).toEqual({ actor: { kind: "user", id: "alice" } });
+  });
+
   it("searches before every thread turn and never persists the knowledge block", async () => {
     const { runner } = makeRunner();
     const memory = new InMemoryMemoryStore();

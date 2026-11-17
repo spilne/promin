@@ -287,7 +287,11 @@ export interface TurnUsageRecorder {
  * `(workflowId, call.id)`.
  */
 export interface TurnApprovalIndex {
-  requested(params: { readonly workflowId: string; readonly call: ToolCall }): Promise<void>;
+  requested(params: {
+    readonly workflowId: string;
+    readonly call: ToolCall;
+    readonly elevated: boolean;
+  }): Promise<void>;
   /**
    * The agent thread the indexed approvals belong to — recorded with each
    * approval's start entry so signal routes can send a decider to the
@@ -519,6 +523,8 @@ interface ToolSnapshotEntry {
   readonly idempotent: boolean;
   /** A sub-agent tool: its calls run as child workflows. */
   readonly delegated: boolean;
+  /** Cross-scope tool requiring a different elevated approver. */
+  readonly elevated: boolean;
 }
 
 type RoundMode = "normal" | "force-respond" | "force-answer";
@@ -751,9 +757,13 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
               tools: Object.entries(resolveTools(config)).map(
                 ([name, t]): ToolSnapshotEntry => ({
                   name,
-                  requireApproval: t.requireApproval === true,
+                  // Elevated tools are approval-gated by definition. Journal
+                  // that boundary even when an author omitted the redundant
+                  // flag, so replay can never observe a live config downgrade.
+                  requireApproval: t.kind === "elevated" || t.requireApproval === true,
                   idempotent: t.idempotent === true,
                   delegated: t.delegation !== undefined,
+                  elevated: t.kind === "elevated",
                 }),
               ),
               compaction:
@@ -1065,13 +1075,20 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
           const toRun: Array<{ index: number; call: ToolCall; entry: ToolSnapshotEntry }> = [];
           // The autoApprove policy reads live config; journal its verdicts so
           // a policy changed while the turn is suspended can't alter replay.
-          const needsApproval = calls.some((c) => snapshotByName.get(c.name)?.requireApproval)
+          const needsApproval = calls.some((c) => {
+            const entry = snapshotByName.get(c.name);
+            return entry?.elevated === true || entry?.requireApproval === true;
+          })
             ? yield* ctx.activity(
                 `step-${step}-approvals`,
                 async () =>
                   calls.map((c) => {
                     const entry = snapshotByName.get(c.name);
-                    return entry?.requireApproval === true && !autoApproved(c, entry);
+                    return (
+                      entry !== undefined &&
+                      (entry.elevated || entry.requireApproval) &&
+                      !autoApproved(c, entry)
+                    );
                   }),
                 { idempotent: true },
               )
@@ -1083,7 +1100,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
               continue;
             }
             if (needsApproval[index]) {
-              const decision = yield* approve({ step, call });
+              const decision = yield* approve({ step, call, entry });
               if (!decision.approved) {
                 results[index] = errorResult(
                   call,
@@ -1293,8 +1310,9 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
       function* approve(params: {
         step: number;
         call: ToolCall;
+        entry: ToolSnapshotEntry;
       }): Generator<ActivityYield, ApprovalDecision, any> {
-        const { step, call } = params;
+        const { step, call, entry } = params;
         const prefix = `step-${step}-approval-${call.id}`;
         // The `-start` record carries the tool name + input:
         // `listPendingSignals` reads it to describe the pending approval.
@@ -1304,7 +1322,7 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
           `${prefix}-start`,
           async () => {
             const requestedAt = clock.currentTimeMs();
-            await approvalIndex?.requested({ workflowId, call });
+            await approvalIndex?.requested({ workflowId, call, elevated: entry.elevated });
             emit({
               type: "approval.requested",
               turn: 0,
@@ -1577,6 +1595,9 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
   }
 
   function autoApproved(call: ToolCall, entry: ToolSnapshotEntry): boolean {
+    // Elevated approval must always come from a distinct authenticated
+    // principal; a local auto-approval policy cannot satisfy that contract.
+    if (entry.elevated) return false;
     const live = resolveTools(config)[call.name];
     const toolDef: AgentTool<any, any> = live ?? {
       name: entry.name,

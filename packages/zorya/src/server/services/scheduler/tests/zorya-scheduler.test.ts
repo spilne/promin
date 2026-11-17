@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 import { describe, it, expect } from "bun:test";
-import { FakeWallClock, InMemoryWorkflowStorage } from "@promin/workflow";
+import { FakeWallClock, InMemoryWorkflowStorage, SystemWallClock } from "@promin/workflow";
 import {
   InMemorySchedulerStorage,
   type DurableScheduleConfig,
@@ -12,6 +12,7 @@ import {
 import { QueuedWorkflows } from "../../workflows/index.ts";
 import { ZoryaScheduler, type AgentScheduleDispatcher } from "../index.ts";
 import type { SchedulerLoopErrorEvent } from "../../scheduler-loop.ts";
+import type { ZoryaSecurity } from "../../../security/index.ts";
 
 async function seedSchedule(
   storage: InMemorySchedulerStorage,
@@ -88,7 +89,11 @@ describe("ZoryaScheduler.fireOnce", () => {
       },
     };
 
-    const scheduler = new ZoryaScheduler({ storage: schedStorage, workflows, agents });
+    const scheduler = new ZoryaScheduler({
+      storage: schedStorage,
+      workflows,
+      agents,
+    });
 
     // Agent-targeted schedule per @promin/agent isAgentSchedule
     await seedSchedule(schedStorage, {
@@ -109,6 +114,72 @@ describe("ZoryaScheduler.fireOnce", () => {
     // Workflow trigger should NOT have fired
     const runs = await wfStorage.listWorkflows({ limit: 10 });
     expect(runs.length).toBe(0);
+  });
+
+  it("provides a final agent reauthorization gate that catches revocation after dispatch awaits", async () => {
+    const wfStorage = new InMemoryWorkflowStorage();
+    const schedStorage = new InMemorySchedulerStorage();
+    const workflows = new QueuedWorkflows({ storage: wfStorage, acceptAny: true });
+    let allowed = true;
+    let agentCodeCalls = 0;
+    const serviceAccount = {
+      kind: "service-account" as const,
+      id: "agent-sa",
+      accessRoles: { team: ["member"] },
+      canActFor: false,
+    };
+    const security: ZoryaSecurity = {
+      authenticate: async () => undefined,
+      resolvePrincipal: async (ref) =>
+        ref.kind === serviceAccount.kind && ref.id === serviceAccount.id
+          ? serviceAccount
+          : undefined,
+      resolveIdentity: async ({ actor }) => ({
+        actor,
+        effective: { kind: actor.kind, id: actor.id },
+      }),
+      identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
+      authorize: async () =>
+        allowed
+          ? { allowed: true, reason: "access_role_allow" }
+          : { allowed: false, reason: "principal_disabled" },
+      recordAudit: async () => {},
+    };
+    const agents: AgentScheduleDispatcher = {
+      dispatchSchedule: async (_tick, _schedule, _identity, reauthorize) => {
+        await Promise.resolve(); // registry/resolver/thread work happened in the real dispatcher
+        allowed = false;
+        await reauthorize?.();
+        agentCodeCalls++;
+        return { done: Promise.resolve({ ok: true }) };
+      },
+    };
+    const scheduler = new ZoryaScheduler({
+      storage: schedStorage,
+      workflows,
+      agents,
+      onError: () => {},
+    });
+    scheduler.configureExecutionSecurity({
+      security,
+      clock: SystemWallClock,
+      logger: { error() {} },
+    });
+    await seedSchedule(schedStorage, {
+      id: "agent-revoked",
+      namespace: "team",
+      metadata: {
+        agentTrigger: true,
+        agentId: "echo-bot",
+        task: "say hello",
+        namespaceId: "team",
+        createdByAgent: "echo-bot",
+      },
+      securityContext: { actor: { kind: "service-account", id: "agent-sa" } },
+    });
+
+    await expect(scheduler.fireOnce("agent-revoked")).rejects.toThrow("not authorized");
+    expect(agentCodeCalls).toBe(0);
   });
 
   it("user fire override wins over both routes", async () => {

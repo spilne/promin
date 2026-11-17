@@ -20,6 +20,7 @@ import {
 import { FakeWallClock, InMemoryWorkflowStorage, createWorkflowRunner } from "@promin/workflow";
 import { LocalWorkflows, ZoryaAgents } from "../../../index.ts";
 import { ZoryaServer } from "../../server.ts";
+import type { ZoryaSecurity } from "../../security/index.ts";
 import { REDACTED_SECRET } from "../agent-gateway-kit.ts";
 import { RemoteDeploymentSweeper } from "../remote-deployments.ts";
 
@@ -43,6 +44,7 @@ async function boot(
     endpointPolicy?: OutboundPolicy;
     agentRegistry?: InMemoryAgentRegistry;
     canAutoPromote?: (params: { readonly id: string }) => boolean;
+    security?: ZoryaSecurity;
   } = {},
 ) {
   const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
@@ -73,6 +75,7 @@ async function boot(
       endpointPolicy: opts.endpointPolicy ?? PUBLIC_DNS,
       sweepIntervalMs: 1_000,
     },
+    ...(opts.security !== undefined && { security: opts.security }),
   });
   return { server, agentRegistry, deployments, clock };
 }
@@ -94,6 +97,29 @@ async function registerOk(server: ZoryaServer, body: unknown): Promise<string> {
 }
 
 const get = (server: ZoryaServer, path: string) => server.handle(new Request(`http://test${path}`));
+
+function gateSecurity(
+  allowed: (request: Parameters<ZoryaSecurity["authorize"]>[0]) => boolean,
+): ZoryaSecurity {
+  const principal = {
+    kind: "user" as const,
+    id: "admin",
+    accessRoles: { org: ["admin"] },
+    canActFor: false,
+  };
+  return {
+    authenticate: async () => principal,
+    resolvePrincipal: async (ref) =>
+      ref.kind === principal.kind && ref.id === principal.id ? principal : undefined,
+    resolveIdentity: async () => ({ actor: principal, effective: principal }),
+    identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
+    authorize: async (request) =>
+      allowed(request)
+        ? { allowed: true, reason: "access_role_allow" }
+        : { allowed: false, reason: "permission_denied" },
+    recordAudit: async () => {},
+  };
+}
 
 describe("remote-deployments — register", () => {
   it("writes an owner-tagged RemoteAgentBackend recipe per declared agent", async () => {
@@ -279,6 +305,77 @@ describe("remote-deployments — token redaction", () => {
 });
 
 describe("remote-deployments — heartbeat, unregister and expiry", () => {
+  it("authorizes stored deployment targets before heartbeat or unregister", async () => {
+    let allowed = true;
+    const { server, deployments } = await boot({
+      security: gateSecurity(() => allowed),
+    });
+    const id = await registerOk(server, {
+      endpoint: "https://a.example",
+      agents: ["bot"],
+    });
+    allowed = false;
+    const heartbeat = await server.handle(
+      new Request(`http://test/api/remote-deployments/${id}/heartbeat`, { method: "POST" }),
+    );
+    const missing = await server.handle(
+      new Request("http://test/api/remote-deployments/missing/heartbeat", { method: "POST" }),
+    );
+    const remove = await server.handle(
+      new Request(`http://test/api/remote-deployments/${id}`, { method: "DELETE" }),
+    );
+    expect([heartbeat.status, missing.status, remove.status]).toEqual([403, 403, 403]);
+    expect(await deployments.get(id)).not.toBeNull();
+  });
+
+  it("authorizes every stored agent id without aggregate or missing synthetic targets", async () => {
+    let deniedAgent: string | undefined;
+    const checked: Array<string | undefined> = [];
+    const { server, deployments } = await boot({
+      security: gateSecurity((request) => {
+        if (request.permission.action === "create") return true;
+        checked.push(request.resource.id);
+        return request.resource.id === undefined || request.resource.id !== deniedAgent;
+      }),
+    });
+    const id = await registerOk(server, {
+      endpoint: "https://a.example",
+      agents: ["beta", "alpha"],
+    });
+    checked.length = 0;
+    expect(
+      (
+        await server.handle(
+          new Request(`http://test/api/remote-deployments/${id}/heartbeat`, { method: "POST" }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(checked).toEqual(["beta", "alpha"]);
+
+    deniedAgent = "beta";
+    checked.length = 0;
+    expect(
+      (
+        await server.handle(
+          new Request(`http://test/api/remote-deployments/${id}`, { method: "DELETE" }),
+        )
+      ).status,
+    ).toBe(403);
+    expect(checked).toEqual(["beta"]);
+    expect(await deployments.get(id)).not.toBeNull();
+
+    deniedAgent = undefined;
+    checked.length = 0;
+    expect(
+      (
+        await server.handle(
+          new Request("http://test/api/remote-deployments/missing/heartbeat", { method: "POST" }),
+        )
+      ).status,
+    ).toBe(410);
+    expect(checked).toEqual([undefined]);
+  });
+
   it("heartbeat extends the TTL; unknown ids answer 410", async () => {
     const { server, deployments, clock } = await boot();
     const id = await registerOk(server, { endpoint: "https://a.example", agents: ["bot"] });

@@ -1491,6 +1491,49 @@ export function memoryStoreTestSuite(factory: () => MemoryStore | Promise<Memory
         expect(aThreads.map((t) => t.threadId)).toEqual(["t"]);
         expect(bThreads.map((t) => t.threadId)).toEqual(["t"]);
       });
+
+      it("the same thread id keeps messages, archive state and compacted context isolated", async () => {
+        const s = await make();
+        const a = { namespaceId: "tenant-a", resourceId: ALICE, threadId: "shared" };
+        const b = { namespaceId: "tenant-b", resourceId: ALICE, threadId: "shared" };
+        await s.appendMessages(a, [userMsg("question-a"), assistantMsg("answer-a")]);
+        await s.appendMessages(b, [userMsg("question-b"), assistantMsg("answer-b")]);
+        await s.setThreadWorking(a, "working-a");
+        await s.setThreadWorking(b, "working-b");
+        await s.appendThreadEpisode(a, {
+          summary: "compacted-a",
+          sourceMessageRange: { fromSeq: 1, toSeq: 2 },
+          metadata: { kind: "compact" },
+        });
+        await s.setThreadArchived(a, 1_000);
+
+        expect((await s.getMessages(a)).map((m) => m.content)).toEqual(["question-a", "answer-a"]);
+        expect((await s.getMessages(b)).map((m) => m.content)).toEqual(["question-b", "answer-b"]);
+        expect((await s.getThread(a))?.archivedAt).toBe(1_000);
+        expect((await s.getThread(b))?.archivedAt).toBeNull();
+        expect(
+          (
+            await s.listThreads({ namespaceId: "tenant-a", resourceId: ALICE, archived: false })
+          ).map((t) => t.threadId),
+        ).toEqual([]);
+        expect(
+          (
+            await s.listThreads({ namespaceId: "tenant-b", resourceId: ALICE, archived: false })
+          ).map((t) => t.threadId),
+        ).toEqual(["shared"]);
+
+        const aContext = await s.resolveContext(a, looseBudget);
+        const bContext = await s.resolveContext(b, looseBudget);
+        expect(aContext.reference).toContain("working-a");
+        expect(aContext.reference).toContain("compacted-a");
+        expect(aContext.reference).not.toContain("working-b");
+        expect(aContext.messages).toEqual([]);
+        expect(bContext.reference).toContain("working-b");
+        expect(bContext.reference).not.toContain("working-a");
+        expect(bContext.reference).not.toContain("compacted-a");
+        expect(bContext.messages.map((m) => m.content)).toEqual(["question-b", "answer-b"]);
+        expect(await s.listThreadEpisodes(b)).toEqual([]);
+      });
     });
   });
 }

@@ -40,6 +40,7 @@
 
 import {
   ApprovalAlreadyDecidedError,
+  ApprovalBoundaryConflictError,
   ApprovalExpiredError,
   ApprovalNotFoundError,
   ApprovalNotReadyError,
@@ -524,6 +525,8 @@ async function pumpAgentRun(params: {
       send("error", { error: "approval_not_found" });
     } else if (err instanceof ApprovalAlreadyDecidedError) {
       send("error", { error: "approval_already_decided" });
+    } else if (err instanceof ApprovalBoundaryConflictError) {
+      send("error", { error: "approval_changed" });
     } else if (err instanceof ApprovalExpiredError) {
       send("error", { error: "approval_expired" });
     } else if (err instanceof ApprovalNotReadyError) {

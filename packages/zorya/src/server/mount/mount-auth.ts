@@ -19,23 +19,28 @@
 
 import { Auth, bearerToken } from "../auth.ts";
 import { jsonError } from "../router.ts";
+import type { PrincipalKind } from "../security/index.ts";
 import { ZoryaInsecureConfigError, type Logger } from "../server-config.ts";
+import { isWorkerWebSocketPath } from "../worker-plane.ts";
 
 /** Who may call `/rpc/storage`: the full contract or the runner's methods only. */
-export type StorageCaller = "operator" | "worker";
+export type StorageCaller = Extract<PrincipalKind, "operator" | "worker">;
 
 export class AuthPlanes {
   /** Operator plane: `/api/*`. */
   readonly operator: Auth;
   /** Worker plane: `/ws/worker`, `/rpc/*`, advertisements, worker protocol. */
   readonly worker: Auth;
+  private readonly operatorSecurity: boolean;
 
   constructor(params: {
     apiKeys: ReadonlyArray<string> | undefined;
     workerApiKeys: ReadonlyArray<string> | undefined;
+    operatorSecurity?: boolean;
   }) {
     this.operator = new Auth({ apiKeys: params.apiKeys });
     this.worker = new Auth({ apiKeys: params.workerApiKeys });
+    this.operatorSecurity = params.operatorSecurity === true;
   }
 
   /**
@@ -43,9 +48,14 @@ export class AuthPlanes {
    * the operator opted into insecure mode; in insecure mode, warn about
    * each open plane.
    */
-  assertConfigured(params: { remoteWorkers: boolean; insecure: boolean; logger: Logger }): void {
+  assertConfigured(params: {
+    remoteWorkers: boolean;
+    insecure: boolean;
+    operatorSecurity: boolean;
+    logger: Logger;
+  }): void {
     const open: string[] = [];
-    if (!this.operator.isEnabled) open.push("/api (apiKeys)");
+    if (!params.operatorSecurity && !this.operator.isEnabled) open.push("/api (apiKeys)");
     if (params.remoteWorkers && !this.worker.isEnabled) {
       open.push("worker planes /ws/worker, /rpc/* (remoteWorkers.apiKeys)");
     }
@@ -93,13 +103,18 @@ export class AuthPlanes {
     if (this.worker.isEnabled) return this.worker.matches(token) ? "worker" : undefined;
     // Insecure: the worker plane is open. Everything is open when the
     // operator plane is too; otherwise anonymous callers get worker scope.
-    return this.operator.isEnabled ? "worker" : "operator";
+    return this.operator.isEnabled || this.operatorSecurity ? "worker" : "operator";
   }
 }
 
 /** Liveness and readiness probes: public, and answered while shutting down. */
 export function isProbePath(path: string): boolean {
   return path === "/api/health" || path === "/api/ready";
+}
+
+/** A non-public operator API path, excluding endpoints on the worker plane. */
+export function isOperatorApiPath(params: { method: string; path: string }): boolean {
+  return params.path.startsWith("/api/") && !isPublicRoute(params) && !isWorkerPath(params.path);
 }
 
 /** Routes that need no Zorya key: the probes and the bearer-checked signal-token routes. */
@@ -114,6 +129,7 @@ function isPublicRoute(params: { method: string; path: string }): boolean {
 /** Paths on the worker plane, gated by worker keys (`/rpc/storage` is handled separately). */
 function isWorkerPath(path: string): boolean {
   return (
+    isWorkerWebSocketPath(path) ||
     path.startsWith("/rpc/") ||
     path === "/api/advertisements" ||
     path.startsWith("/api/advertisements/") ||

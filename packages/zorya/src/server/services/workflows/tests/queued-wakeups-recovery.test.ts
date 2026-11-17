@@ -216,6 +216,33 @@ describe("QueuedWorkflows orphan recovery", () => {
     expect((await workflowStarts.list()).map((s) => s.workflowId)).toEqual(["t-1"]);
   });
 
+  it("requeues an existing secured id without replacing its starter identity", async () => {
+    const { storage, workflowStarts, queued } = setup({ maintenance: false });
+    await storage.createWorkflow({
+      workflowId: "secured-pending",
+      workflowName: "wf",
+      input: {},
+      securityContext: { actor: { kind: "user", id: "alice" } },
+    });
+
+    await expect(
+      queued.trigger(
+        "wf",
+        {},
+        {
+          workflowId: "secured-pending",
+          securityContext: { actor: { kind: "user", id: "mallory" } },
+        },
+      ),
+    ).resolves.toEqual({ workflowId: "secured-pending", existing: true });
+    expect((await storage.loadWorkflow("secured-pending"))?.securityContext).toEqual({
+      actor: { kind: "user", id: "alice" },
+    });
+    expect((await workflowStarts.list()).map((start) => start.workflowId)).toContain(
+      "secured-pending",
+    );
+  });
+
   it("drops the advertisements of workers the registry declares dead, and expired ones", async () => {
     const { clock, advertisements, workerRegistry, queued } = setup({ maintenance: false });
     await workerRegistry.register({ workerId: "w-dead", capabilities: [], concurrency: 1 });

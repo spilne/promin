@@ -1,0 +1,144 @@
+name: promin-zorya-distributed
+
+x-app: &app
+  build:
+    context: ../../../
+    dockerfile: examples/docker/zorya-distributed/Dockerfile
+  image: promin-zorya-distributed:local
+  restart: unless-stopped
+
+x-worker: &worker
+  <<: *app
+  command: ["bun", "--conditions=@promin/source", "run", "worker.ts"]
+  depends_on:
+    central:
+      condition: service_healthy
+  environment: &worker-environment
+    ZORYA_URL: http://central:4100
+    ZORYA_WORKER_API_KEY: ${ZORYA_WORKER_API_KEY:-dev-worker-key-change-me}
+    WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
+
+x-agent: &agent
+  <<: *app
+  command: ["bun", "--conditions=@promin/source", "run", "agent-node.ts"]
+  depends_on:
+    central:
+      condition: service_healthy
+  healthcheck:
+    test:
+      ["CMD", "bun", "-e", "process.exit((await fetch('http://127.0.0.1:4200/api/ready')).ok?0:1)"]
+    interval: 3s
+    timeout: 2s
+    retries: 20
+  environment: &agent-environment
+    PORT: "4200"
+    ZORYA_URL: http://central:4100
+    ZORYA_API_KEY: ${ZORYA_API_KEY:-dev-operator-key-change-me}
+
+services:
+  central:
+    <<: *app
+    command: ["bun", "--conditions=@promin/source", "run", "central.ts"]
+    ports:
+      - "${ZORYA_PORT:-4100}:4100"
+    environment:
+      PORT: "4100"
+      ZORYA_DB: /data/zorya.db
+      ZORYA_API_KEY: ${ZORYA_API_KEY:-dev-operator-key-change-me}
+      ZORYA_WORKER_API_KEY: ${ZORYA_WORKER_API_KEY:-dev-worker-key-change-me}
+      PROMIN_SECRETS_PASSPHRASE: ${PROMIN_SECRETS_PASSPHRASE:-dev-passphrase-change-me}
+      REMOTE_AGENT_HOSTS: agent-one,agent-two
+    volumes:
+      - central-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "process.exit((await fetch('http://127.0.0.1:4100/api/ready')).ok?0:1)",
+        ]
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  worker-one:
+    <<: *worker
+    environment:
+      <<: *worker-environment
+      WORKER_ID: worker-one
+
+  worker-two:
+    <<: *worker
+    environment:
+      <<: *worker-environment
+      WORKER_ID: worker-two
+
+  worker-three:
+    <<: *worker
+    environment:
+      <<: *worker-environment
+      WORKER_ID: worker-three
+
+  worker-four:
+    <<: *worker
+    environment:
+      <<: *worker-environment
+      WORKER_ID: worker-four
+
+  agent-one:
+    <<: *agent
+    environment:
+      <<: *agent-environment
+      AGENT_ID: research-agent
+      AGENT_API_KEY: ${AGENT_ONE_API_KEY:-dev-agent-one-key-change-me}
+      AGENT_PUBLIC_URL: http://agent-one:4200
+      ZORYA_DB: /data/agent.db
+    volumes:
+      - agent-one-data:/data
+    ports:
+      - "${AGENT_ONE_PORT:-4201}:4200"
+
+  agent-two:
+    <<: *agent
+    environment:
+      <<: *agent-environment
+      AGENT_ID: support-agent
+      AGENT_API_KEY: ${AGENT_TWO_API_KEY:-dev-agent-two-key-change-me}
+      AGENT_PUBLIC_URL: http://agent-two:4200
+      ZORYA_DB: /data/agent.db
+    volumes:
+      - agent-two-data:/data
+    ports:
+      - "${AGENT_TWO_PORT:-4202}:4200"
+
+  smoke:
+    <<: *app
+    profiles: ["test"]
+    restart: "no"
+    command: ["bun", "--conditions=@promin/source", "run", "smoke.ts"]
+    depends_on:
+      central:
+        condition: service_healthy
+      agent-one:
+        condition: service_healthy
+      agent-two:
+        condition: service_healthy
+      worker-one:
+        condition: service_started
+      worker-two:
+        condition: service_started
+      worker-three:
+        condition: service_started
+      worker-four:
+        condition: service_started
+    environment:
+      ZORYA_URL: http://central:4100
+      ZORYA_API_KEY: ${ZORYA_API_KEY:-dev-operator-key-change-me}
+      SMOKE_WORKFLOW_RUNS: ${SMOKE_WORKFLOW_RUNS:-64}
+      SMOKE_AGENT_INVOCATIONS: ${SMOKE_AGENT_INVOCATIONS:-40}
+
+volumes:
+  central-data:
+  agent-one-data:
+  agent-two-data:

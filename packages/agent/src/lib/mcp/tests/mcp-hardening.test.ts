@@ -501,6 +501,49 @@ describe("credential scopes", () => {
     await pool.closeAll();
   });
 
+  it("rotating one resource never retires another resource's equal global credential", async () => {
+    const log: string[] = [];
+    let serial = 0;
+    const pool = new McpClientPool({
+      connect: async ({ credential }) => {
+        const id = ++serial;
+        let closed = false;
+        log.push(`connect ${id}:${credential}`);
+        return {
+          get closed() {
+            return closed;
+          },
+          listTools: async () => [],
+          callTool: async () => textResult(`${id}:${credential}`),
+          close: async () => {
+            if (!closed) log.push(`close ${id}:${credential}`);
+            closed = true;
+          },
+        };
+      },
+    });
+    const shared = {
+      server: EVIL_SERVER,
+      namespaceId: "ns",
+      credential: "old",
+      credentialScope: "global",
+    };
+    const aliceOld = pool.server({ ...shared, resourceId: "alice" });
+    const bob = pool.server({ ...shared, resourceId: "bob" });
+    expect(await aliceOld.callTool({ name: "t", arguments: {} })).toEqual(textResult("1:old"));
+    expect(await bob.callTool({ name: "t", arguments: {} })).toEqual(textResult("2:old"));
+
+    const aliceFresh = pool.server({ ...shared, resourceId: "alice", credential: "new" });
+    expect(await aliceFresh.callTool({ name: "t", arguments: {} })).toEqual(textResult("3:new"));
+    await expect(aliceOld.callTool({ name: "t", arguments: {} })).rejects.toThrow(
+      McpCredentialRotatedError,
+    );
+    expect(await bob.callTool({ name: "t", arguments: {} })).toEqual(textResult("2:old"));
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(log).toEqual(["connect 1:old", "connect 2:old", "close 1:old", "connect 3:new"]);
+    await pool.closeAll();
+  });
+
   it("an older handle cannot bring back a rotated-out credential", async () => {
     const { pool, log } = counting();
     const scope = { server: EVIL_SERVER, namespaceId: "ns", credentialScope: "namespace:ns" };

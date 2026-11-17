@@ -98,4 +98,66 @@ describe(".subworkflow() — versioned child", () => {
     );
     expect(childState?.steps["spin.iter.0"]?.durationMs).toBe(100);
   });
+
+  it("inherits the parent's durable security context", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const child = workflow<number>({ name: "child-secured" })
+      .step("inc", ({ input }) => succeed(input + 1))
+      .build();
+    const parent = workflow<number>({ name: "parent-secured" })
+      .subworkflow("sub", child, { input: (p) => p, workflowId: () => "child-secured-1" })
+      .build();
+    const securityContext = {
+      actor: { kind: "service-account", id: "sa-1" },
+      effective: { kind: "user", id: "user-7" },
+    } as const;
+
+    await runner.run({
+      workflow: parent,
+      workflowId: "parent-secured-1",
+      input: 1,
+      securityContext,
+    });
+
+    expect((await storage.loadWorkflow("parent-secured-1"))?.securityContext).toEqual(
+      securityContext,
+    );
+    expect((await storage.loadWorkflow("child-secured-1"))?.securityContext).toEqual(
+      securityContext,
+    );
+  });
+
+  it("rejects resuming a deterministic id under a different identity", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const wf = workflow<number>({ name: "secured-resume" })
+      .step("identity", ({ input }) => succeed(input))
+      .build();
+    await runner.run({
+      workflow: wf,
+      workflowId: "secured-resume-1",
+      input: 1,
+      securityContext: { actor: { kind: "service-account", id: "sa-1" } },
+    });
+
+    await runner.run({
+      workflow: wf,
+      workflowId: "secured-resume-1",
+      input: 1,
+      useStoredInput: true,
+    });
+    expect((await storage.loadWorkflow("secured-resume-1"))?.securityContext).toEqual({
+      actor: { kind: "service-account", id: "sa-1" },
+    });
+
+    await expect(
+      runner.run({
+        workflow: wf,
+        workflowId: "secured-resume-1",
+        input: 1,
+        securityContext: { actor: { kind: "service-account", id: "sa-2" } },
+      }),
+    ).rejects.toMatchObject({ _tag: "RunSecurityContextConflictError" });
+  });
 });

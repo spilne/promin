@@ -25,9 +25,17 @@ export function mountProbes(params: {
   readonly isStopping: () => boolean;
 }): void {
   const { router, lifecycle } = params;
-  router
-    .get("/api/health", () => Response.json({ ok: true }))
-    .get("/api/ready", async () => {
+  router.route({
+    method: "GET",
+    path: "/api/health",
+    access: { kind: "public", purpose: "lifecycle" },
+    handler: () => Response.json({ ok: true }),
+  });
+  router.route({
+    method: "GET",
+    path: "/api/ready",
+    access: { kind: "public", purpose: "lifecycle" },
+    handler: async () => {
       const services = lifecycle.statuses();
       if (params.isStopping()) {
         return Response.json({ ready: false, reason: "stopping", services }, { status: 503 });
@@ -35,7 +43,8 @@ export function mountProbes(params: {
       const storage = await probeStorage(params);
       const ready = storage.ok && lifecycle.isReady;
       return Response.json({ ready, storage, services }, { status: ready ? 200 : 503 });
-    });
+    },
+  });
 }
 
 /** One cheap storage read, bounded by `readinessTimeoutMs`. */
@@ -70,6 +79,8 @@ interface Lifecycled {
 /** The background services the server starts, in start order. */
 export function managedServices(params: {
   readonly workflows: Lifecycled;
+  readonly security: Lifecycled | undefined;
+  readonly channels: ReadonlyArray<Lifecycled & { readonly id: string }>;
   readonly scheduler: Lifecycled | undefined;
   readonly agents: Lifecycled | undefined;
   readonly retainedSubagents: Lifecycled | undefined;
@@ -85,6 +96,10 @@ export function managedServices(params: {
   readonly namespaces: Lifecycled | undefined;
 }): ManagedService[] {
   const out: ManagedService[] = [{ name: "workflows", ...bindLifecycle(params.workflows) }];
+  if (params.security) out.push({ name: "security", ...bindLifecycle(params.security) });
+  for (const channel of params.channels) {
+    out.push({ name: `channel:${channel.id}`, ...bindLifecycle(channel) });
+  }
   if (params.namespaces) out.push({ name: "namespaces", ...bindLifecycle(params.namespaces) });
   if (params.scheduler) out.push({ name: "scheduler", ...bindLifecycle(params.scheduler) });
   if (params.agents) out.push({ name: "agents", ...bindLifecycle(params.agents) });

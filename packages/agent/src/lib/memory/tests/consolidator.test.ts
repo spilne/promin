@@ -201,6 +201,41 @@ describe("DefaultConsolidator", () => {
     expect(resourceEps.length).toBe(0);
   });
 
+  it("compactThread cannot change the same thread id in another namespace", async () => {
+    const store = new InMemoryMemoryStore();
+    const a = { namespaceId: "team-a", resourceId: "alice", threadId: "shared" };
+    const b = { namespaceId: "team-b", resourceId: "alice", threadId: "shared" };
+    const messages = (prefix: string) =>
+      Array.from({ length: 6 }, (_, index) => ({
+        role: (index % 2 === 0 ? "user" : "assistant") as "user" | "assistant",
+        content: `${prefix}-${index}`,
+      }));
+    await store.appendMessages(a, messages("a"));
+    await store.appendMessages(b, messages("b"));
+
+    const consolidator = new DefaultConsolidator({
+      store,
+      llm: fixedLLM({ summary: "team-a-summary", outcome: null, salience: 0.4, facts: [] }),
+    });
+    await consolidator.compactThread(a, { keepRecent: 2 });
+
+    expect((await store.listThreadEpisodes(a)).map((episode) => episode.summary)).toEqual([
+      "team-a-summary",
+    ]);
+    expect(await store.listThreadEpisodes(b)).toEqual([]);
+    expect((await store.getMessages(b)).map((message) => message.content)).toEqual(
+      messages("b").map((message) => message.content),
+    );
+    const aContext = await store.resolveContext(a, { maxMessageTokens: 1_000 });
+    const bContext = await store.resolveContext(b, { maxMessageTokens: 1_000 });
+    expect(aContext.reference).toContain("team-a-summary");
+    expect(aContext.messages.map((message) => message.content)).toEqual(["a-4", "a-5"]);
+    expect(bContext.reference).not.toContain("team-a-summary");
+    expect(bContext.messages.map((message) => message.content)).toEqual(
+      messages("b").map((message) => message.content),
+    );
+  });
+
   it("custom salienceFn overrides the default heuristic", async () => {
     const store = new InMemoryMemoryStore();
     const key = { namespaceId: "acme", resourceId: "alice", threadId: "t1" };

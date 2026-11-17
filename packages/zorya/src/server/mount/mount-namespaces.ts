@@ -21,6 +21,7 @@ import {
   updateNamespace,
   type NamespaceRoutesDeps,
 } from "../routes/namespaces.ts";
+import { protectedAccess } from "./route-security.ts";
 
 export function mountNamespaces(params: {
   readonly router: Router;
@@ -30,7 +31,12 @@ export function mountNamespaces(params: {
 }): void {
   const { router, registry } = params;
   if (!registry) {
-    router.get("/api/namespaces", listNamespacesUnconfigured());
+    router.route({
+      method: "GET",
+      path: "/api/namespaces",
+      access: protectedAccess({ resource: "namespace", action: "read" }),
+      handler: listNamespacesUnconfigured(),
+    });
     return;
   }
   const deps: NamespaceRoutesDeps = {
@@ -38,12 +44,41 @@ export function mountNamespaces(params: {
     storage: params.storage,
     ...(params.schedulerStorage !== undefined && { schedulerStorage: params.schedulerStorage }),
   };
-  router
-    .get("/api/namespaces", listNamespaces(deps))
-    .post("/api/namespaces", createNamespace(deps))
-    .get("/api/namespaces/:id", getNamespace(deps))
-    .patch("/api/namespaces/:id", updateNamespace(deps))
-    .delete("/api/namespaces/:id", deleteNamespace(deps));
+  const namespace = ({ params: route }: { readonly params: Readonly<Record<string, string>> }) => ({
+    kind: "namespace" as const,
+    namespaceId: route.id ?? "org",
+    ...(route.id !== undefined && { id: route.id }),
+  });
+  router.route({
+    method: "GET",
+    path: "/api/namespaces",
+    access: protectedAccess({ resource: "namespace", action: "read" }),
+    handler: listNamespaces(deps),
+  });
+  router.route({
+    method: "POST",
+    path: "/api/namespaces",
+    access: protectedAccess({ resource: "namespace", action: "create" }),
+    handler: createNamespace(deps),
+  });
+  router.route({
+    method: "GET",
+    path: "/api/namespaces/:id",
+    access: protectedAccess({ resource: "namespace", action: "read", target: namespace }),
+    handler: getNamespace(deps),
+  });
+  router.route({
+    method: "PATCH",
+    path: "/api/namespaces/:id",
+    access: protectedAccess({ resource: "namespace", action: "update", target: namespace }),
+    handler: updateNamespace(deps),
+  });
+  router.route({
+    method: "DELETE",
+    path: "/api/namespaces/:id",
+    access: protectedAccess({ resource: "namespace", action: "archive", target: namespace }),
+    handler: deleteNamespace(deps),
+  });
 }
 
 /**

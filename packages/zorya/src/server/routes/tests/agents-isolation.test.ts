@@ -24,6 +24,67 @@ async function aliceThread() {
 }
 
 describe("thread isolation — reads", () => {
+  it("the same thread id in two namespaces keeps messages, traces and archive state separate", async () => {
+    const replies = ["answer-a", "answer-b"];
+    const { server, memory } = await bootAgents({ reply: () => replies.shift() ?? "unexpected" });
+    for (const [namespaceId, task] of [
+      ["team-a", "question-a"],
+      ["team-b", "question-b"],
+    ] as const) {
+      const response = await server.handle(
+        req("POST", "/api/agents/support/threads/shared", {
+          task,
+          namespaceId,
+          resourceId: "alice",
+        }),
+      );
+      expect(response.status).toBe(200);
+    }
+
+    for (const [namespaceId, own, foreign] of [
+      ["team-a", ["question-a", "answer-a"], ["question-b", "answer-b"]],
+      ["team-b", ["question-b", "answer-b"], ["question-a", "answer-a"]],
+    ] as const) {
+      const query = `namespaceId=${namespaceId}&resourceId=alice`;
+      const messages = await server.handle(
+        req("GET", `/api/agents/support/threads/shared/messages?${query}`),
+      );
+      expect(messages.status).toBe(200);
+      const messageBody = await jsonOf<{ messages: Array<{ content: string }> }>(messages);
+      expect(messageBody.messages.map((message) => message.content)).toEqual([...own]);
+
+      const trace = await server.handle(
+        req("GET", `/api/agents/support/threads/shared/trace?${query}`),
+      );
+      expect(trace.status).toBe(200);
+      const traceText = JSON.stringify(await trace.json());
+      for (const text of own) expect(traceText).toContain(text);
+      for (const text of foreign) expect(traceText).not.toContain(text);
+    }
+
+    const archived = await server.handle(
+      req("POST", "/api/agents/support/threads/shared/archive", {
+        namespaceId: "team-a",
+        resourceId: "alice",
+      }),
+    );
+    expect(archived.status).toBe(200);
+    expect(
+      (await memory.getThread({ namespaceId: "team-a", threadId: "shared" }))?.archivedAt,
+    ).not.toBeNull();
+    expect(
+      (await memory.getThread({ namespaceId: "team-b", threadId: "shared" }))?.archivedAt,
+    ).toBeNull();
+    const activeB = await server.handle(
+      req("GET", "/api/agents/support/threads?namespaceId=team-b&resourceId=alice"),
+    );
+    expect(
+      (await jsonOf<{ threads: Array<{ id: string }> }>(activeB)).threads.map(
+        (thread) => thread.id,
+      ),
+    ).toEqual(["shared"]);
+  });
+
   it("another resource cannot read the thread's messages, trace or memory", async () => {
     const { server } = await aliceThread();
     for (const path of [

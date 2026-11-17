@@ -42,7 +42,7 @@ import type { FragmentRegistry } from "../fragments/types.ts";
 import type { RoleDefinition } from "../role/types.ts";
 import type { AgentRetrieverBinding } from "../agent/retriever-bindings.ts";
 import type { RetrieverRegistry } from "../rag/retriever-registry.ts";
-import type { Retriever } from "../rag/types.ts";
+import type { Retriever, RetrieverCaller } from "../rag/types.ts";
 import type { AgentBudgets } from "../budget/agent-budgets.ts";
 import type { ModelCostRegistry } from "../metrics/types.ts";
 
@@ -147,6 +147,10 @@ export interface ResolveLocalAgentDeps {
    * recipe naming an id that isn't here throws, like an unknown tool.
    */
   readonly retrievers?: Readonly<Record<string, Retriever>> | RetrieverRegistry;
+  /** Return false to leave a recipe's knowledge binding out for this caller. */
+  readonly knowledgeAccess?: (params: { readonly id: string }) => boolean | Promise<boolean>;
+  /** Authenticated caller passed to every bound retriever search. */
+  readonly knowledgeCaller?: RetrieverCaller;
   /**
    * Skill registry the auto-attached `loadSkill` tool reads bodies from.
    * Required for skills to work: a recipe's `backend.skills` is ignored
@@ -266,6 +270,8 @@ export async function resolveLocalAgent(
     knowledge: backend.knowledge,
     available: deps.retrievers,
     namespaceId: deps.namespaceId,
+    knowledgeAccess: deps.knowledgeAccess,
+    caller: deps.knowledgeCaller,
   });
 
   const config: LocalAgentConfig = {
@@ -351,11 +357,14 @@ async function resolveKnowledgeBindings(params: {
   knowledge: LocalAgentBackend["knowledge"];
   available: ResolveLocalAgentDeps["retrievers"];
   namespaceId: string | undefined;
+  knowledgeAccess: ResolveLocalAgentDeps["knowledgeAccess"];
+  caller: ResolveLocalAgentDeps["knowledgeCaller"];
 }): Promise<Record<string, AgentRetrieverBinding> | undefined> {
-  const { knowledge, available, namespaceId } = params;
+  const { knowledge, available, namespaceId, knowledgeAccess, caller } = params;
   if (!knowledge || knowledge.length === 0) return undefined;
   const out: Record<string, AgentRetrieverBinding> = {};
   for (const { id, ...options } of knowledge) {
+    if (knowledgeAccess && !(await knowledgeAccess({ id }))) continue;
     const retriever = await lookupRetriever({ available, id, namespaceId });
     if (!retriever) {
       throw new Error(
@@ -363,9 +372,13 @@ async function resolveKnowledgeBindings(params: {
           `provided in deps.retrievers${namespaceId !== undefined ? ` for namespace "${namespaceId}"` : ""}.`,
       );
     }
-    out[id] = { ...options, retriever };
+    out[id] = {
+      ...options,
+      retriever,
+      ...(caller !== undefined && { caller }),
+    };
   }
-  return out;
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 async function lookupRetriever(params: {

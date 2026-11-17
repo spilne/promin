@@ -4,6 +4,7 @@ export {
   RetainedSubagentError,
   RETAINED_AGENT_WORKFLOW,
   type RetainedSubagentsConfig,
+  type RetainedExecutionSecurityConfig,
   type RetainedParent,
   type RetainedChildHandle,
 } from "./retained-subagents.ts";

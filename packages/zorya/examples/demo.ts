@@ -1086,6 +1086,7 @@ const agents = new ZoryaAgents({
   registry: agentRegistry,
   resolve: resolveAgent,
   memory: memoryStore,
+  approvals: approvalStore,
   ...(turnGate !== undefined && { turnGate }),
   instances: instanceRegistry,
   models: modelCatalog,

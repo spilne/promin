@@ -71,7 +71,14 @@ export function retainedSubagentTools(
       // A crash after the child starts leaves the outcome unknown: the model
       // gets that error and checks list_subagents before spawning again.
       execute: async (input, ctx) =>
-        retained.spawnAgent({ parent: parentOf(ctx), agentId: input.agentId, task: input.task }),
+        retained.spawnAgent({
+          parent: parentOf(ctx),
+          agentId: input.agentId,
+          task: input.task,
+          ...(ctx?.scope?.securityContext !== undefined && {
+            securityContext: ctx.scope.securityContext,
+          }),
+        }),
     }),
     message_subagent: tool({
       name: "message_subagent",

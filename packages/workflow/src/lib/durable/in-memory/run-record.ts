@@ -16,6 +16,8 @@ import type {
   WorkflowStatus,
   WorkflowStatusSnapshot,
 } from "../workflow-state.ts";
+import type { RunSecurityContext } from "../run-security-context.ts";
+import { normalizeRunSecurityContext } from "../run-security-context.ts";
 
 /** Mutable internal workflow state — avoids spread-copy on every mutation. */
 export interface MutableWorkflow {
@@ -24,6 +26,7 @@ export interface MutableWorkflow {
   workflowType?: string;
   parentWorkflowId?: string;
   namespace?: string;
+  securityContext?: RunSecurityContext;
   status: WorkflowStatus;
   version?: string;
   run: number;
@@ -87,6 +90,9 @@ export function toWorkflowState(wf: MutableWorkflow): WorkflowState {
     workflowType: wf.workflowType,
     parentWorkflowId: wf.parentWorkflowId,
     namespace: wf.namespace,
+    ...(wf.securityContext !== undefined && {
+      securityContext: normalizeRunSecurityContext(wf.securityContext),
+    }),
     status: wf.status,
     version: wf.version,
     run: wf.run,

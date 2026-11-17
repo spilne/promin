@@ -115,6 +115,10 @@ export function schedulerStorageTestSuite(
           startAt,
           endAt,
           metadata: { workflowName: "report", tags: ["daily"] },
+          securityContext: {
+            actor: { kind: "service-account", id: "scheduler-report" },
+            effective: { kind: "user", id: "report-owner" },
+          },
         });
         const loaded = await s.loadSchedule("full-1");
         expect(loaded!.namespace).toBe("tenant-a");
@@ -124,6 +128,29 @@ export function schedulerStorageTestSuite(
         expect(loaded!.startAt?.getTime()).toBe(startAt.getTime());
         expect(loaded!.endAt?.getTime()).toBe(endAt.getTime());
         expect(loaded!.metadata).toEqual({ workflowName: "report", tags: ["daily"] });
+        expect(loaded!.securityContext).toEqual({
+          actor: { kind: "service-account", id: "scheduler-report" },
+          effective: { kind: "user", id: "report-owner" },
+        });
+      });
+
+      it("detaches assigned identity from caller and returned mutations", async () => {
+        const s = await getStorage();
+        const actor = { kind: "service-account" as const, id: "scheduler-writer" };
+        await s.upsertSchedule({
+          id: "identity-copy",
+          intervalMs: 5_000,
+          securityContext: { actor },
+        });
+        actor.id = "mutated-input";
+        const first = await s.loadSchedule("identity-copy");
+        expect(first!.securityContext?.actor.id).toBe("scheduler-writer");
+        expect(() => {
+          (first!.securityContext!.actor as { id: string }).id = "mutated-output";
+        }).toThrow();
+        expect((await s.loadSchedule("identity-copy"))!.securityContext?.actor.id).toBe(
+          "scheduler-writer",
+        );
       });
 
       it("upsertSchedule replaces fields on second call (real upsert, not insert-only)", async () => {

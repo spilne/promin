@@ -48,6 +48,14 @@ import { agentApprovalRefusal } from "./signals.ts";
 import type { WorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
 import { RunsService, type RunActionResult } from "../services/runs-service.ts";
 import { UnknownWorkflowError, WorkflowIdConflictError } from "../services/workflows/errors.ts";
+import { requestRunSecurityContext } from "../security/index.ts";
+import type { RunExecutionSource } from "../security/run-execution-security.ts";
+
+export type RunContinuationAuthorizer = (params: {
+  readonly workflowId: string;
+  readonly source: RunExecutionSource;
+  readonly tokenId?: string;
+}) => Promise<boolean>;
 
 export interface RunTrigger {
   (
@@ -64,6 +72,7 @@ export interface RunTrigger {
       runSource?: import("@promin/workflow").RunSource;
       /** Producer id corresponding to `runSource` (e.g. `scheduleId`). */
       runSourceId?: string;
+      securityContext?: import("@promin/workflow").RunSecurityContext;
     },
   ): Promise<{ workflowId: string; existing?: boolean }>;
 }
@@ -80,6 +89,8 @@ export interface RunRoutesDeps {
   namespaces?: NamespaceRegistry;
   /** Time source for a run's `waitingOnSummary`. */
   clock?: WallClock;
+  /** Freshly reauthorize the stored starter before signal/token mutation. */
+  authorizeRunContinuation?: RunContinuationAuthorizer;
 }
 
 /** `:id` of a run route. */
@@ -139,7 +150,10 @@ export function triggerRun(deps: RunRoutesDeps) {
     }
     const { name } = parseParams({ params, schema: WorkflowParamsSchema });
     const body = (await parseBody({ req, schema: TriggerRunRequestSchema.optional() })) ?? {};
-    await requireActiveNamespace({ registry: deps.namespaces, namespace: body.namespace });
+    await requireActiveNamespace({
+      registry: deps.namespaces,
+      namespace: body.namespace,
+    });
     let result: { workflowId: string; existing?: boolean };
     try {
       result = await deps.trigger(name, body.input, {
@@ -151,6 +165,7 @@ export function triggerRun(deps: RunRoutesDeps) {
         // A run started over HTTP without a tag is a manual fire.
         runSource: body.runSource ?? "manual",
         runSourceId: body.runSourceId,
+        securityContext: requestRunSecurityContext(req),
       });
     } catch (err) {
       if (err instanceof UnknownWorkflowError) {
@@ -162,10 +177,16 @@ export function triggerRun(deps: RunRoutesDeps) {
       throw err;
     }
     if (result.existing === true) {
-      const response: TriggerRunResponse = { workflowId: result.workflowId, existing: true };
+      const response: TriggerRunResponse = {
+        workflowId: result.workflowId,
+        existing: true,
+      };
       return new Response(JSON.stringify(response), {
         status: 200,
-        headers: { "content-type": "application/json", location: runLocation(result.workflowId) },
+        headers: {
+          "content-type": "application/json",
+          location: runLocation(result.workflowId),
+        },
       });
     }
     const response: TriggerRunResponse = { workflowId: result.workflowId };
@@ -181,7 +202,10 @@ export function cancelRun(deps: RunRoutesDeps) {
   const service = makeService(deps);
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const { id } = parseParams({ params, schema: RunParamsSchema });
-    const body = await parseBody({ req, schema: CancelRunRequestSchema.optional() });
+    const body = await parseBody({
+      req,
+      schema: CancelRunRequestSchema.optional(),
+    });
     const result = await service.cancel({ id, cascade: body?.cascade });
     return runActionResponse({ workflowId: id, result });
   };
@@ -191,7 +215,10 @@ export function cancelRun(deps: RunRoutesDeps) {
 export function markRunSuccess(runs: RunsService) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
     const { id } = parseParams({ params, schema: RunParamsSchema });
-    return runActionResponse({ workflowId: id, result: await runs.markSuccess(id) });
+    return runActionResponse({
+      workflowId: id,
+      result: await runs.markSuccess(id),
+    });
   };
 }
 
@@ -199,9 +226,15 @@ export function markRunSuccess(runs: RunsService) {
 export function markRunFailed(runs: RunsService) {
   return async (req: Request, params: Record<string, string>): Promise<Response> => {
     const { id } = parseParams({ params, schema: RunParamsSchema });
-    const body = await parseBody({ req, schema: MarkFailedRequestSchema.optional() });
+    const body = await parseBody({
+      req,
+      schema: MarkFailedRequestSchema.optional(),
+    });
     const reason = body?.reason ?? "marked failed";
-    return runActionResponse({ workflowId: id, result: await runs.markFailed({ id, reason }) });
+    return runActionResponse({
+      workflowId: id,
+      result: await runs.markFailed({ id, reason }),
+    });
   };
 }
 
@@ -258,6 +291,15 @@ export function sendSignal(deps: RunRoutesDeps) {
     if (isTerminalWorkflowStatus(run.status)) {
       return jsonError(409, "run_ended", `Run has already ended (status: ${run.status})`);
     }
+    if (
+      deps.authorizeRunContinuation &&
+      !(await deps.authorizeRunContinuation({
+        workflowId: id,
+        source: "http-signal",
+      }))
+    ) {
+      return jsonError(403, "forbidden");
+    }
 
     const agentApproval = await agentApprovalRefusal({
       storage: deps.storage,
@@ -266,7 +308,11 @@ export function sendSignal(deps: RunRoutesDeps) {
     });
     if (agentApproval) return agentApproval;
 
-    const mismatch = signalSchemaMismatch({ run, signalName: body.signalName, payload });
+    const mismatch = signalSchemaMismatch({
+      run,
+      signalName: body.signalName,
+      payload,
+    });
     if (mismatch !== undefined) return jsonError(400, "schema_mismatch", mismatch);
 
     if (body.ifAbsent === true) {
@@ -280,8 +326,27 @@ export function sendSignal(deps: RunRoutesDeps) {
       }
     }
 
-    await deps.storage.deliverSignal({ workflowId: id, signalName: body.signalName, payload });
-    const response: SignalDeliveryResponse = { workflowId: id, signalName: body.signalName };
+    // The checks above intentionally do asynchronous validation. Recheck at
+    // the write boundary so a revocation during that work cannot race a
+    // durable delivery.
+    if (
+      deps.authorizeRunContinuation &&
+      !(await deps.authorizeRunContinuation({
+        workflowId: id,
+        source: "http-signal",
+      }))
+    ) {
+      return jsonError(403, "forbidden");
+    }
+    await deps.storage.deliverSignal({
+      workflowId: id,
+      signalName: body.signalName,
+      payload,
+    });
+    const response: SignalDeliveryResponse = {
+      workflowId: id,
+      signalName: body.signalName,
+    };
     return accepted(response, runLocation(id));
   };
 }
@@ -327,7 +392,10 @@ export function sendUpdate(deps: RunRoutesDeps) {
     }
     const base = { workflowId: id, updateId: submitted.updateId };
     if (submitted.outcome !== undefined) {
-      return json(200, { ...base, outcome: submitted.outcome } satisfies UpdateResponse);
+      return json(200, {
+        ...base,
+        outcome: submitted.outcome,
+      } satisfies UpdateResponse);
     }
     if (body.wait !== true) return accepted(base satisfies UpdateResponse, runLocation(id));
     try {
@@ -363,10 +431,17 @@ export function sendUpdate(deps: RunRoutesDeps) {
 export function getUpdate(deps: RunRoutesDeps) {
   return async (_req: Request, params: Record<string, string>): Promise<Response> => {
     const { id } = parseParams({ params, schema: RunParamsSchema });
-    const { updateId } = parseParams({ params, schema: z.object({ updateId: IdSchema }) });
+    const { updateId } = parseParams({
+      params,
+      schema: z.object({ updateId: IdSchema }),
+    });
     let outcome;
     try {
-      outcome = await getUpdateOutcome({ storage: deps.storage, workflowId: id, updateId });
+      outcome = await getUpdateOutcome({
+        storage: deps.storage,
+        workflowId: id,
+        updateId,
+      });
     } catch (error) {
       if (error instanceof UpdateRejectedError) return jsonError(404, "not_found", error.message);
       throw error;
