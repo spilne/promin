@@ -37,10 +37,10 @@
 import {
   admitTurn,
   DagValidationError,
+  MAX_DAG_DEPTH,
   tightenBudget,
   TurnBudgetSchema,
   type AgentBudgets,
-  type AgentNode,
   type TurnBudget,
   type AgentRegistry,
   type DagRecipe,
@@ -139,6 +139,45 @@ export function listDags(deps: DagGatewayDeps) {
 
 function dagNotFound(id: string): Response {
   return jsonError(404, "dag_not_found", `DAG "${id}" not registered.`);
+}
+
+/** Collect every agent a run may reach through enabled sub-DAGs. */
+export async function collectRunTargets(params: {
+  readonly registry: DagRegistry;
+  readonly dag: RegisteredDag;
+}): Promise<{ readonly agentIds: Set<string> } | Response> {
+  const agentIds = new Set<string>();
+  const visitedAtDepth = new Map<string, number>();
+
+  async function visit(dag: RegisteredDag, depth: number): Promise<Response | undefined> {
+    const key = `${dag.id}@${dag.version}`;
+    const priorDepth = visitedAtDepth.get(key);
+    if (priorDepth !== undefined && priorDepth <= depth) return undefined;
+    visitedAtDepth.set(key, depth);
+
+    for (const node of dag.nodes) {
+      if (node.kind === "agent") {
+        agentIds.add(node.agentId);
+        continue;
+      }
+      if (node.kind !== "dag" || depth >= MAX_DAG_DEPTH) continue;
+      const child = await params.registry.get({ id: node.dagId, version: node.version });
+      if (!child) return dagNotFound(node.dagId);
+      if (!child.enabled) {
+        return jsonError(
+          410,
+          "dag_disabled",
+          `DAG "${node.dagId}" is disabled. Re-enable it before running.`,
+        );
+      }
+      const refusal = await visit(child, depth + 1);
+      if (refusal) return refusal;
+    }
+    return undefined;
+  }
+
+  const refusal = await visit(params.dag, 0);
+  return refusal ?? { agentIds };
 }
 
 export function getDag(deps: DagGatewayDeps) {
@@ -286,10 +325,9 @@ export function runDag(deps: DagGatewayDeps) {
     // Every node runs in the caller's scope, so the caller must be allowed
     // to invoke each node's agent there — the same checks as a direct
     // invocation. Nodes are re-checked for the kill switch as they run.
-    const agentIds = dag.nodes
-      .filter((node): node is AgentNode => node.kind === "agent")
-      .map((node) => node.agentId);
-    for (const agentId of new Set(agentIds)) {
+    const targets = await collectRunTargets({ registry: deps.registry, dag });
+    if (targets instanceof Response) return targets;
+    for (const agentId of targets.agentIds) {
       const recipe = await deps.agents.get({ id: agentId });
       if (!recipe) return agentNotFound(agentId);
       const disabled = disabled410(recipe);

@@ -46,6 +46,7 @@ import {
   parseMcpServersConfig,
 } from "../src/index.ts";
 import { researchSynthesisRecipe } from "./dags/research-synthesis.ts";
+import { draftReviewRecipe, draftReviewRoundRecipe } from "./dags/draft-review.ts";
 import { scriptedDagLlms } from "./dags/scripted-dag-llms.ts";
 import { MapActivityCatalog } from "@promin/workflow";
 import { ZoryaWorkflowBuilder } from "../src/index.ts";
@@ -1220,6 +1221,20 @@ const dagAgentRecipes = [
       "You are a senior research editor. Given a topic and multiple research findings, produce a " +
       "single synthesized 8-12 sentence report. Resolve contradictions explicitly.",
   },
+  {
+    id: "dag-writer",
+    description: "Writes and revises a concise draft from editorial feedback.",
+    systemPrompt:
+      "You are a concise writer. Draft on the requested topic and, when prior review output is " +
+      "present, revise the draft to address its notes.",
+  },
+  {
+    id: "dag-reviewer",
+    description: "Returns a typed pass-or-revise editorial verdict.",
+    systemPrompt:
+      "You are a strict editor. Review the draft and return a pass or revise verdict with concise " +
+      "notes. Pass only after the prior feedback has been addressed.",
+  },
 ] as const;
 
 for (const r of dagAgentRecipes) {
@@ -1250,6 +1265,8 @@ for (const r of dagAgentRecipes) {
   });
 }
 await dagRegistry.register(researchSynthesisRecipe);
+await dagRegistry.register(draftReviewRoundRecipe);
+await dagRegistry.register(draftReviewRecipe);
 
 // DAG nodes resolve through the agents service, so DAG runs share the same
 // credential / tool / memory machinery (and scope checks) as direct chat
@@ -1273,6 +1290,10 @@ const evals = new ZoryaEvals({
 console.log(
   `[zorya] DAG registered: ${researchSynthesisRecipe.id}@${researchSynthesisRecipe.version ?? "v1"} ` +
     `(${researchSynthesisRecipe.nodes.length} nodes, ${researchSynthesisRecipe.edges.length} edges)`,
+);
+console.log(
+  `[zorya] DAG registered: ${draftReviewRecipe.id}@${draftReviewRecipe.version ?? "v1"} ` +
+    `(sub-DAG ${draftReviewRoundRecipe.id}@${draftReviewRoundRecipe.version ?? "v1"})`,
 );
 
 const server = ZoryaServer.builder()

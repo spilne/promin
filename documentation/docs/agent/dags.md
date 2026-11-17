@@ -14,6 +14,7 @@ settlement is durable, so recovery replays completed work instead of repeating i
 Every node has a required `kind`:
 
 - `agent` invokes a registered agent as a child run.
+- `dag` invokes another registered graph as a child run.
 - `transform` applies deterministic operations such as `pick`, `compact`, `filter`, `sort` and
   `take` without an LLM call.
 
@@ -70,6 +71,119 @@ repeat: {
 
 Exhausting the iteration or budget limit normally produces `repeat_exhausted`. With
 `onExhausted: "continue"`, the last completed output is used instead.
+
+## Sub-graphs
+
+A `dag` node runs another registered graph and uses that child graph's terminal outputs as its
+output. Inputs mapped onto the node become the child graph's `initialInput`, and the run keeps the
+same scope and shared budget. Sub-graphs can use `forEach` and `repeat` just like agent nodes.
+
+```ts
+{
+  id: "round",
+  kind: "dag",
+  dagId: "draft-review-round",
+  version: "v1",
+  inputs: { topic: { kind: "initial", path: "topic" } },
+}
+```
+
+Nesting is limited to four levels. Ancestor cycles, missing or disabled graphs, and runs beyond the
+global 500-child ceiling fail before the child starts. The run route also checks every reachable
+agent's enabled state and scope authorization before starting the root graph.
+
+## Evaluator / optimizer loop
+
+The demo composes two recipes. `draft-review-round` is the optimizer/evaluator sub-graph: a writer
+produces a draft and a reviewer returns a typed `pass` or `revise` verdict. `draft-review` repeats
+that sub-graph up to three times. On later iterations, `previous` contains the prior round's terminal
+outputs, so the writer can address the review notes. The repeat stops when `review.verdict` is
+`pass`.
+
+<!-- @embed packages/zorya/examples/dags/draft-review.ts -->
+
+```ts
+// ---------------------------------------------------------------------------
+// draft-review DAG recipes — a sub-graph inside an evaluator/optimizer loop.
+//
+// One round drafts and reviews a topic. The parent repeats that round until
+// the reviewer passes it, carrying the prior round's outputs into the writer.
+// ---------------------------------------------------------------------------
+
+import type { RegisterDagInput } from "@promin/agent";
+
+export const draftReviewRoundRecipe: RegisterDagInput = {
+  id: "draft-review-round",
+  version: "v1",
+  metadata: {
+    description: "Write a draft, then return a typed editorial verdict.",
+    tags: ["demo", "evaluation", "sub-dag"],
+  },
+  nodes: [
+    {
+      id: "writer",
+      kind: "agent",
+      agentId: "dag-writer",
+      inputs: {
+        topic: { kind: "initial", path: "topic" },
+        previous: { kind: "initial", path: "previous" },
+      },
+    },
+    {
+      id: "review",
+      kind: "agent",
+      agentId: "dag-reviewer",
+      inputs: {
+        draft: { kind: "node", nodeId: "writer", path: "" },
+        previous: { kind: "initial", path: "previous" },
+      },
+      output: {
+        schema: {
+          type: "object",
+          properties: {
+            verdict: { type: "string", enum: ["pass", "revise"] },
+            notes: { type: "string" },
+          },
+          required: ["verdict", "notes"],
+        },
+      },
+    },
+  ],
+  edges: [{ from: "writer", to: "review" }],
+  entry: ["writer"],
+  terminals: ["writer", "review"],
+};
+
+export const draftReviewRecipe: RegisterDagInput = {
+  id: "draft-review",
+  version: "v1",
+  metadata: {
+    description: "Repeat the draft-review sub-graph until its reviewer passes.",
+    tags: ["demo", "evaluation", "repeat", "sub-dag"],
+  },
+  nodes: [
+    {
+      id: "round",
+      kind: "dag",
+      dagId: "draft-review-round",
+      version: "v1",
+      inputs: {
+        topic: { kind: "initial", path: "topic" },
+      },
+      repeat: {
+        until: { kind: "equals", path: "review.verdict", value: "pass" },
+        maxIterations: 3,
+        onExhausted: "continue",
+      },
+    },
+  ],
+  edges: [],
+  entry: ["round"],
+  terminals: ["round"],
+};
+```
+
+<!-- @end -->
 
 ## `join`
 

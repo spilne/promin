@@ -91,7 +91,7 @@ interface EndedRun {
     ok: boolean;
     outputs: Record<string, unknown>;
     nodeOutputs: Record<string, unknown>;
-    nodeStats: Record<string, { items?: number }>;
+    nodeStats: Record<string, { items?: number; iterations?: number }>;
   };
 }
 
@@ -340,6 +340,23 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
       expect(ended.result?.nodeOutputs.research).toHaveLength(3);
       expect(String(ended.result?.outputs.synthesizer)).toContain("3 findings");
       expect(ended.result?.nodeStats.research?.items).toBe(3);
+    });
+
+    it("runs the draft-review evaluator loop until the reviewer passes", async () => {
+      const run = await post("/api/dags/draft-review/run", {
+        namespaceId: "default",
+        resourceId: "e2e",
+        initialInput: { topic: "tea" },
+      });
+      expect(run.status).toBe(202);
+      const ended = await waitForRun(((await run.json()) as { workflowId: string }).workflowId);
+
+      expect(ended.status).toBe("completed");
+      expect(ended.result?.ok).toBe(true);
+      expect(ended.result?.nodeStats.round?.iterations).toBe(2);
+      expect(ended.result?.outputs.round).toMatchObject({
+        review: { verdict: "pass" },
+      });
     });
   });
 
