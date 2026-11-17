@@ -61,13 +61,13 @@ import {
   EMPTY_USAGE,
   parseTurnBudget,
   remainingBudget,
-  shareOfBudget,
   subtractBudget,
   type BudgetUsage,
   type TurnBudget,
 } from "../budget/budget.ts";
 import type { AgentInstanceRegistry } from "../instance/types.ts";
 import { checkBlockers, resolveNodeInputs } from "./dag-helpers.ts";
+import { emptyDimension, startShare, waitingWeight } from "./node-budget.ts";
 import { recipeIssues } from "./recipe-schema.ts";
 import { runAgentAttempt } from "./runners/agent-attempt.ts";
 import { childRunId, nodeKey, type AttemptOutcome, type NodeRunEnv } from "./runners/env.ts";
@@ -278,15 +278,14 @@ export function createDagWorkflow(
       let spent: BudgetUsage = EMPTY_USAGE;
       const held = new Map<string, TurnBudget>();
       /** A starting node's share: what is free, split with the nodes not started yet. */
-      const shareFor = (): TurnBudget | null => {
+      const shareFor = (node: DagNode): TurnBudget | null => {
         if (!runBudget) return null;
         let free = remainingBudget({ budget: runBudget, usage: spent });
         for (const taken of held.values()) free = subtractBudget({ budget: free, taken });
-        // Includes the starting node: it is neither settled nor holding a share yet.
-        const waiting = order.filter(
-          (id) => nodeById.get(id)!.kind === "agent" && !states.has(id) && !held.has(id),
-        ).length;
-        return shareOfBudget({ budget: free, parts: Math.max(1, waiting) });
+        const othersWaiting = order
+          .filter((id) => id !== node.id && !states.has(id) && !held.has(id))
+          .reduce((sum, id) => sum + waitingWeight(nodeById.get(id)!), 0);
+        return startShare({ free, weight: waitingWeight(node), othersWaiting });
       };
 
       const outputs = (): Record<string, unknown> => {
@@ -383,7 +382,7 @@ export function createDagWorkflow(
                 ? { start: false, budget: null, startedAt: clock.currentTimeMs() }
                 : {
                     start: true,
-                    budget: node.kind === "agent" ? shareFor() : null,
+                    budget: node.kind === "agent" ? shareFor(node) : null,
                     startedAt: clock.currentTimeMs(),
                   },
             { idempotent: true },
@@ -396,6 +395,17 @@ export function createDagWorkflow(
             });
           }
           const share = start.budget ?? undefined;
+          const empty = share && emptyDimension(share);
+          if (empty) {
+            return yield* settleNode({
+              node,
+              state: {
+                kind: "error",
+                error: `budget_exceeded: no ${empty} left for node "${node.id}"`,
+              },
+              startedAt: start.startedAt,
+            });
+          }
           if (share) held.set(node.id, share);
           let outcome: AttemptOutcome;
           if (node.kind === "agent") {
