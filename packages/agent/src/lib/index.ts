@@ -1012,6 +1012,8 @@ export type {
   DagNode,
   DagNodeStats,
   DagParentFrame,
+  DecideNode,
+  DecisionModelRef,
   SubDagNode,
   AgentNode,
   ForEach,
@@ -1028,6 +1030,7 @@ export { childRunId, nodeKey } from "./dag/runners/env.ts";
 export type { AttemptOutcome, AttemptParams, NodeRunEnv, RunAttempt } from "./dag/runners/env.ts";
 export { runAgentAttempt } from "./dag/runners/agent-attempt.ts";
 export { runSubDagAttempt } from "./dag/runners/sub-dag-attempt.ts";
+export { runDecide } from "./dag/runners/decide.ts";
 export {
   createDagWorkflow,
   DAG_WORKFLOW_NAME,
@@ -1059,3 +1062,13 @@ export {
 export type { SystemOneOptions } from "./decision/system-one-provider.ts";
 export { decideWithRetry } from "./decision/decide-with-retry.ts";
 export { createLlmDecisionProvider, DECIDE_TOOL_NAME } from "./decision/llm-decision-provider.ts";
+export {
+  createCatalogDecisionResolver,
+  DecisionModelRefusedError,
+  InMemoryDecisionModelCatalog,
+} from "./decision/decision-model-catalog.ts";
+export type {
+  DecisionModelCatalogItem,
+  DecisionResolver,
+  ResolvedDecisionModel,
+} from "./decision/decision-model-catalog.ts";

@@ -1,5 +1,6 @@
 import type { Agent, AgentScope } from "../agent/types.ts";
 import type { BudgetUsage } from "../budget/budget.ts";
+import type { DecisionQuestion } from "../decision/types.ts";
 import type {
   RegisterVersionInput,
   Versioned,
@@ -110,6 +111,18 @@ export interface SubDagNode extends NodeBase {
   readonly repeat?: Repeat;
 }
 
+export interface DecisionModelRef {
+  readonly provider: string;
+  readonly id: string;
+  readonly credentialRef?: string;
+}
+
+export interface DecideNode extends NodeBase {
+  readonly kind: "decide";
+  readonly model: DecisionModelRef;
+  readonly questions: Readonly<Record<string, DecisionQuestion>>;
+}
+
 /** Set on the input of a DAG run started by another DAG run. */
 export interface DagParentFrame {
   /** One for a child of a root run. */
@@ -141,7 +154,7 @@ export interface TransformNode extends NodeBase {
   readonly ops: ReadonlyArray<TransformOp>;
 }
 
-export type DagNode = AgentNode | TransformNode | SubDagNode;
+export type DagNode = AgentNode | TransformNode | SubDagNode | DecideNode;
 
 /** Durable accounting and timing for one settled DAG node. */
 export interface DagNodeStats {

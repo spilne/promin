@@ -1,6 +1,7 @@
 // ---------------------------------------------------------------------------
 // Durable DAG executor — walks a registered AgenticDagRecipe inside a
-// journaled workflow; every node runs its agent's turn as a child workflow.
+// journaled workflow. Agent and sub-DAG nodes run child workflows; pure
+// transform and decision nodes run as journaled activities.
 //
 // A run names its DAG by id + version; the recipe is read from the DAG
 // registry in the run's first journaled step (`load-dag`), so a run can
@@ -40,9 +41,9 @@
 // with a `usageRecorder`, records it (journaled `record-usage`; also when
 // the run fails after its nodes spent).
 //
-// Replay semantics: a node whose child finished replays its outcome; a DAG
-// run that stopped while a node ran (a crash, a restart) re-attaches to the
-// same child run and resumes it from its own journal.
+// Replay semantics: a finished node replays its journaled outcome. A DAG
+// run that stopped while a child ran re-attaches to that child and resumes
+// it from its own journal.
 //
 // Register the workflow once at boot under its fixed name, so recovery
 // and the run's scanners find its definition after a restart.
@@ -66,10 +67,12 @@ import {
   type TurnBudget,
 } from "../budget/budget.ts";
 import type { AgentInstanceRegistry } from "../instance/types.ts";
+import type { DecisionResolver } from "../decision/decision-model-catalog.ts";
 import { checkBlockers, resolveNodeInputs, resolveNodeInputSource } from "./dag-helpers.ts";
 import { emptyDimension, startShare, waitingWeight } from "./node-budget.ts";
 import { recipeIssues } from "./recipe-schema.ts";
 import { runAgentAttempt } from "./runners/agent-attempt.ts";
+import { runDecide } from "./runners/decide.ts";
 import { childRunId, nodeKey, type AttemptOutcome, type NodeRunEnv } from "./runners/env.ts";
 import { runFanOut } from "./runners/fan-out.ts";
 import { runRepeat } from "./runners/repeat.ts";
@@ -146,6 +149,8 @@ export interface CreateDagWorkflowConfig {
   /** Registry the run's DAG is read from (by `dagId` + `version`). */
   readonly registry: DagRegistry;
   readonly resolver: AgentResolver;
+  /** Resolves the model named by a decide node. */
+  readonly decisions?: DecisionResolver;
   /** Time source used for journaled node start and settlement timestamps. */
   readonly clock?: WallClock;
   /**
@@ -457,7 +462,7 @@ export function buildDagWorkflow(
           }
           let fanOutItems: ReadonlyArray<unknown> | undefined;
           let weight = waitingWeight(node);
-          if (node.kind !== "transform" && node.forEach !== undefined) {
+          if ((node.kind === "agent" || node.kind === "dag") && node.forEach !== undefined) {
             const resolved = resolveNodeInputSource({
               src: node.forEach.items,
               initial: input.initialInput,
@@ -535,7 +540,9 @@ export function buildDagWorkflow(
           }
           const share = start.budget ?? undefined;
           const empty =
-            weight > 0 && share && !(node.kind !== "transform" && node.repeat !== undefined)
+            weight > 0 &&
+            share &&
+            !((node.kind === "agent" || node.kind === "dag") && node.repeat !== undefined)
               ? emptyDimension(share)
               : undefined;
           if (empty) {
@@ -664,6 +671,13 @@ export function buildDagWorkflow(
               });
             }
             subDagSpend = addUsage(subDagSpend, outcome.spend);
+          } else if (node.kind === "decide") {
+            outcome = yield* runDecide(env, {
+              node,
+              nodeInput,
+              ...(share && { share }),
+              signal: abort.signal,
+            });
           } else {
             const transformed = yield* ctx.activity(
               `${key}-transform`,

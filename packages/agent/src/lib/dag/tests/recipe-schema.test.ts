@@ -131,4 +131,63 @@ describe("DAG recipe schema", () => {
       expect(issues.some((issue) => issue.startsWith("nodes[0].repeat"))).toBe(true);
     }
   });
+
+  it("checks decide question bounds and names", () => {
+    const decide = {
+      id: "triage",
+      kind: "decide",
+      model: { provider: "test", id: "m" },
+      inputs: {},
+      questions: {
+        team: {
+          type: "choice",
+          instructions: "Which team?",
+          options: [{ name: "billing" }, { name: "technical" }],
+        },
+        urgency: {
+          type: "score",
+          instructions: "How urgent?",
+          levels: ["low", "high"],
+        },
+        refund: { type: "yesno", instructions: "Refund?" },
+      },
+    };
+    expect(
+      recipeIssues({ ...ok, nodes: [decide], entry: ["triage"], terminals: ["triage"] }),
+    ).toEqual([]);
+
+    for (const questions of [
+      {},
+      { "bad.name": { type: "yesno", instructions: "Bad name" } },
+      {
+        team: {
+          type: "choice",
+          instructions: "Duplicate options",
+          options: [{ name: "same" }, { name: "same" }],
+        },
+      },
+      {
+        team: {
+          type: "choice",
+          instructions: "Too few options",
+          options: [{ name: "one" }],
+        },
+      },
+      {
+        urgency: {
+          type: "score",
+          instructions: "Too few levels",
+          levels: ["only"],
+        },
+      },
+    ]) {
+      const issues = recipeIssues({
+        ...ok,
+        nodes: [{ ...decide, questions }],
+        entry: ["triage"],
+        terminals: ["triage"],
+      });
+      expect(issues.some((issue) => issue.startsWith("nodes[0].questions"))).toBe(true);
+    }
+  });
 });

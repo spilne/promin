@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import { emptyDimension, splitShare, startShare, waitingWeight } from "../node-budget.ts";
-import type { AgentNode, SubDagNode, TransformNode } from "../types.ts";
+import type { AgentNode, DecideNode, SubDagNode, TransformNode } from "../types.ts";
 
 const agentNode: AgentNode = {
   id: "agent",
@@ -22,6 +22,14 @@ const subDagNode: SubDagNode = {
   kind: "dag",
   dagId: "child",
   version: "v1",
+  inputs: {},
+};
+
+const decideNode: DecideNode = {
+  id: "decide",
+  kind: "decide",
+  model: { provider: "test", id: "m" },
+  questions: { yes: { type: "yesno", instructions: "Yes?" } },
   inputs: {},
 };
 
@@ -57,5 +65,6 @@ describe("DAG node budget shares", () => {
     expect(waitingWeight(transformNode)).toBe(0);
     expect(waitingWeight(agentNode)).toBe(1);
     expect(waitingWeight(subDagNode)).toBe(1);
+    expect(waitingWeight(decideNode)).toBe(1);
   });
 });

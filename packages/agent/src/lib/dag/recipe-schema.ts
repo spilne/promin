@@ -2,10 +2,12 @@ import { z } from "zod";
 
 import { conditionDepth, MAX_CONDITION_DEPTH } from "./conditions.ts";
 import { compileOutputSchema, OutputSchemaError } from "./output-schema.ts";
+import type { DecisionQuestion } from "../decision/types.ts";
 import type {
   Condition,
   DagNode,
   DagRecipe,
+  DecisionModelRef,
   ForEach,
   NodeInputSource,
   Repeat,
@@ -139,10 +141,83 @@ const SubDagNodeSchema = z
   })
   .strict();
 
+const DecisionModelRefSchema: z.ZodType<DecisionModelRef> = z
+  .object({
+    provider: z.string(),
+    id: z.string(),
+    credentialRef: z.string().optional(),
+  })
+  .strict();
+
+const ChoiceQuestionSchema = z
+  .object({
+    type: z.literal("choice"),
+    instructions: z.string(),
+    options: z
+      .array(
+        z
+          .object({
+            name: z.string().regex(NODE_ID_PATTERN),
+            description: z.string().optional(),
+          })
+          .strict(),
+      )
+      .min(2)
+      .max(64),
+  })
+  .strict()
+  .superRefine((question, ctx) => {
+    const names = new Set<string>();
+    for (const [index, option] of question.options.entries()) {
+      if (names.has(option.name)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["options", index, "name"],
+          message: `duplicate option name "${option.name}"`,
+        });
+      }
+      names.add(option.name);
+    }
+  });
+
+const DecisionQuestionSchema: z.ZodType<DecisionQuestion> = z.discriminatedUnion("type", [
+  ChoiceQuestionSchema,
+  z
+    .object({
+      type: z.literal("score"),
+      instructions: z.string(),
+      levels: z.array(z.string()).min(2).max(10),
+    })
+    .strict(),
+  z.object({ type: z.literal("yesno"), instructions: z.string() }).strict(),
+]);
+
+const DecisionQuestionsSchema = z
+  .record(z.string().regex(NODE_ID_PATTERN), DecisionQuestionSchema)
+  .superRefine((questions, ctx) => {
+    const count = Object.keys(questions).length;
+    if (count < 1 || count > 16) {
+      ctx.addIssue({ code: "custom", message: "questions must contain between 1 and 16 entries" });
+    }
+  });
+
+const DecideNodeSchema = z
+  .object({
+    id: z.string().regex(NODE_ID_PATTERN),
+    kind: z.literal("decide"),
+    model: DecisionModelRefSchema,
+    questions: DecisionQuestionsSchema,
+    inputs: z.record(z.string(), NodeInputSourceSchema),
+    join: z.enum(["all", "any"]).optional(),
+    onError: z.enum(["abort", "skip"]).optional(),
+  })
+  .strict();
+
 const DagNodeSchema: z.ZodType<DagNode> = z.discriminatedUnion("kind", [
   AgentNodeSchema,
   TransformNodeSchema,
   SubDagNodeSchema,
+  DecideNodeSchema,
 ]);
 
 const DagEdgeSchema = z
