@@ -8,6 +8,7 @@ import type {
   DagRecipe,
   ForEach,
   NodeInputSource,
+  Repeat,
   TransformOp,
 } from "./types.ts";
 
@@ -69,6 +70,14 @@ const ForEachSchema: z.ZodType<ForEach> = z
   })
   .strict();
 
+const RepeatSchema: z.ZodType<Repeat> = z
+  .object({
+    until: ConditionSchema,
+    maxIterations: z.number().int().min(2).max(20),
+    onExhausted: z.enum(["fail", "continue"]).optional(),
+  })
+  .strict();
+
 const AgentNodeSchema = z
   .object({
     id: z.string().regex(NODE_ID_PATTERN),
@@ -80,6 +89,7 @@ const AgentNodeSchema = z
       .strict()
       .optional(),
     forEach: ForEachSchema.optional(),
+    repeat: RepeatSchema.optional(),
     join: z.enum(["all", "any"]).optional(),
     onError: z.enum(["abort", "skip"]).optional(),
   })

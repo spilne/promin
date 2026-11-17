@@ -38,7 +38,11 @@ export type NodeInputSource =
 export type ConditionScalar = string | number | boolean | null;
 
 export type Condition =
-  | { readonly kind: "equals"; readonly path: string; readonly value: ConditionScalar }
+  | {
+      readonly kind: "equals";
+      readonly path: string;
+      readonly value: ConditionScalar;
+    }
   | {
       readonly kind: "in";
       readonly path: string;
@@ -82,6 +86,12 @@ export interface ForEach {
   readonly onItemError?: "null" | "fail";
 }
 
+export interface Repeat {
+  readonly until: Condition;
+  readonly maxIterations: number;
+  readonly onExhausted?: "fail" | "continue";
+}
+
 export interface AgentNode extends NodeBase {
   readonly kind: "agent";
   /** Recipe id in the AgentRegistry. The executor resolves it at run time. */
@@ -89,6 +99,7 @@ export interface AgentNode extends NodeBase {
   /** A JSON Schema whose validated object becomes this node's output. */
   readonly output?: { readonly schema: Record<string, unknown> };
   readonly forEach?: ForEach;
+  readonly repeat?: Repeat;
 }
 
 export type TransformOp =
@@ -99,7 +110,11 @@ export type TransformOp =
   | { readonly op: "count" }
   | { readonly op: "dedupe"; readonly by?: string }
   | { readonly op: "filter"; readonly where: Condition }
-  | { readonly op: "sort"; readonly by: string; readonly order?: "asc" | "desc" }
+  | {
+      readonly op: "sort";
+      readonly by: string;
+      readonly order?: "asc" | "desc";
+    }
   | { readonly op: "take"; readonly count: number };
 
 export interface TransformNode extends NodeBase {

@@ -72,6 +72,7 @@ import { recipeIssues } from "./recipe-schema.ts";
 import { runAgentAttempt } from "./runners/agent-attempt.ts";
 import { childRunId, nodeKey, type AttemptOutcome, type NodeRunEnv } from "./runners/env.ts";
 import { runFanOut } from "./runners/fan-out.ts";
+import { runRepeat } from "./runners/repeat.ts";
 import { applyTransform } from "./transform.ts";
 import type { DagRegistry } from "./types.ts";
 import {
@@ -235,7 +236,10 @@ export function createDagWorkflow(
       const dag = yield* ctx.activity(
         "load-dag",
         async (): Promise<AgenticDagRecipe> => {
-          const found = await registry.get({ id: input.dagId, version: input.version });
+          const found = await registry.get({
+            id: input.dagId,
+            version: input.version,
+          });
           if (!found) {
             throw new Error(`dag_not_found: DAG "${input.dagId}" version ${input.version}`);
           }
@@ -335,7 +339,11 @@ export function createDagWorkflow(
           const upstream = incoming.get(node.id)!.map((e) => settles.get(e.from)!.promise);
           if (upstream.length > 0) {
             // Ordering only, not journaled: upstream outcomes are.
-            yield { _tag: "Activity", name: `await-${node.id}`, promise: Promise.all(upstream) };
+            yield {
+              _tag: "Activity",
+              name: `await-${node.id}`,
+              promise: Promise.all(upstream),
+            };
           }
           // Downstream of an abort, or of a node that never started: never starts.
           const stopped = incoming.get(node.id)!.some((e) => {
@@ -360,7 +368,11 @@ export function createDagWorkflow(
             skipped: skippedIds(),
           });
           if (blocked) {
-            return yield* settleNode({ node, state: { kind: "skipped" }, startedAt: null });
+            return yield* settleNode({
+              node,
+              state: { kind: "skipped" },
+              startedAt: null,
+            });
           }
           let nodeInput: Record<string, unknown>;
           try {
@@ -412,7 +424,11 @@ export function createDagWorkflow(
             `${key}-start`,
             async () =>
               abort.signal.aborted
-                ? { start: false, budget: null, startedAt: clock.currentTimeMs() }
+                ? {
+                    start: false,
+                    budget: null,
+                    startedAt: clock.currentTimeMs(),
+                  }
                 : {
                     start: true,
                     budget: node.kind === "agent" && weight > 0 ? shareFor(node, weight) : null,
@@ -428,7 +444,10 @@ export function createDagWorkflow(
             });
           }
           const share = start.budget ?? undefined;
-          const empty = weight > 0 && share ? emptyDimension(share) : undefined;
+          const empty =
+            weight > 0 && share && !(node.kind === "agent" && node.repeat !== undefined)
+              ? emptyDimension(share)
+              : undefined;
           if (empty) {
             return yield* settleNode({
               node,
@@ -458,6 +477,17 @@ export function createDagWorkflow(
                 items: fanOutItems.length,
                 failedItems: Object.keys(fanOut.itemErrors).length,
               };
+            } else if (node.repeat !== undefined) {
+              const repeated = yield* runRepeat(env, {
+                node,
+                repeat: node.repeat,
+                nodeInput,
+                ...(share && { share }),
+                signal: abort.signal,
+                attempt: runAgentAttempt,
+              });
+              outcome = repeated;
+              stats = { iterations: repeated.iterations };
             } else {
               outcome = yield* runAgentAttempt(env, {
                 node,
@@ -475,7 +505,10 @@ export function createDagWorkflow(
                 | { readonly ok: false; readonly error: string }
               > => {
                 try {
-                  return { ok: true, output: applyTransform({ node, inputs: nodeInput }) };
+                  return {
+                    ok: true,
+                    output: applyTransform({ node, inputs: nodeInput }),
+                  };
                 } catch (error) {
                   return { ok: false, error: formatToolError(error) };
                 }

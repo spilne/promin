@@ -37,9 +37,12 @@ describe("DAG recipe schema", () => {
   });
 
   it("rejects a node without kind", () => {
-    expect(recipeIssues({ ...ok, nodes: [{ id: "n1", agentId: "a", inputs: {} }] })[0]).toMatch(
-      /^nodes\[0\]/,
-    );
+    expect(
+      recipeIssues({
+        ...ok,
+        nodes: [{ id: "n1", agentId: "a", inputs: {} }],
+      })[0],
+    ).toMatch(/^nodes\[0\]/);
   });
 
   it("rejects the removed outputPath", () => {
@@ -65,7 +68,10 @@ describe("DAG recipe schema", () => {
       from: "x",
     };
     for (const node of [
-      { ...transform, ops: Array.from({ length: 17 }, () => ({ op: "count" })) },
+      {
+        ...transform,
+        ops: Array.from({ length: 17 }, () => ({ op: "count" })),
+      },
       { ...transform, ops: [] },
       { ...ok.nodes[0], join: "some" },
     ]) {
@@ -108,6 +114,21 @@ describe("DAG recipe schema", () => {
         nodes: [{ ...ok.nodes[0], forEach }],
       });
       expect(issues.some((issue) => issue.startsWith("nodes[0].forEach"))).toBe(true);
+    }
+  });
+
+  it("checks repeat bounds and its condition", () => {
+    for (const repeat of [
+      { until: { kind: "exists", path: "done" }, maxIterations: 1 },
+      { until: { kind: "exists", path: "done" }, maxIterations: 21 },
+      { until: { kind: "exists", path: "done" }, maxIterations: "2" },
+      { maxIterations: 2 },
+    ]) {
+      const issues = recipeIssues({
+        ...ok,
+        nodes: [{ ...ok.nodes[0], repeat }],
+      });
+      expect(issues.some((issue) => issue.startsWith("nodes[0].repeat"))).toBe(true);
     }
   });
 });

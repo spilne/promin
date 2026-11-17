@@ -145,6 +145,16 @@ export function validateDag(params: { dag: DagGraph; dagId?: string }): void {
         }
       }
     }
+    if (node.kind === "agent" && node.repeat !== undefined) {
+      if (node.forEach !== undefined) {
+        issues.push(`node ${node.id} cannot set both forEach and repeat`);
+      }
+      for (const reserved of ["iteration", "previous"]) {
+        if (reserved in node.inputs) {
+          issues.push(`node ${node.id} repeat input ${reserved} collides with a generated field`);
+        }
+      }
+    }
     if (node.kind === "transform") {
       const inputFields = new Set(Object.keys(node.inputs));
       if (node.from !== undefined && !inputFields.has(node.from)) {

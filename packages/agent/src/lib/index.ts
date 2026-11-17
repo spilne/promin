@@ -1013,6 +1013,7 @@ export type {
   DagNodeStats,
   AgentNode,
   ForEach,
+  Repeat,
   TransformNode,
   TransformOp,
   NodeBase,
