@@ -68,17 +68,21 @@ describe("LocalAgent thread turn — deterministic turn id", () => {
       threadId: "t-1",
       turnKey: "req-1",
     });
-    expect((await storage.loadWorkflow(workflowId))?.status).toBe("completed");
+    expect(await storage.loadWorkflow(workflowId)).toMatchObject({
+      status: "completed",
+      namespace: "acme",
+    });
   });
 
   it("an invoke retried with the same runId runs once", async () => {
     const llm = scriptedLLM([{ content: "pong", finishReason: "stop" }]);
-    const { agent } = makeAgent({ llm });
+    const { agent, storage } = makeAgent({ llm });
     const first = await agent.invoke({ task: "ping" }, { runId: "delivery-1" });
     const retry = await agent.invoke({ task: "ping" }, { runId: "delivery-1" });
     expect(await first.text).toBe("pong");
     expect(await retry.text).toBe("pong");
     expect(llm.calls).toHaveLength(1);
+    expect((await storage.loadWorkflow("delivery-1"))?.namespace).toBe("acme");
   });
 
   it("a turn key or run id reused for a different task is refused", async () => {

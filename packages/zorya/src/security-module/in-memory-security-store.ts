@@ -20,7 +20,7 @@ import type {
   SecurityPrincipalRef,
   SecurityServiceAccount,
   SecuritySession,
-  SecurityStoreV2,
+  SecurityStore,
   SecurityStoreTextLimit,
   SecurityStorePage,
   SecurityUser,
@@ -33,7 +33,7 @@ export interface InMemorySecurityStoreConfig {
 }
 
 /** Single-process security storage for tests and development hosts. */
-export class InMemorySecurityStore implements SecurityStoreV2 {
+export class InMemorySecurityStore implements SecurityStore {
   private readonly clock: WallClock;
   private readonly usersById = new Map<string, SecurityUser>();
   private readonly userIdByEmail = new Map<string, string>();
@@ -60,35 +60,8 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     this.clock = config.clock ?? SystemWallClock;
   }
 
-  async findOrCreateUser(params: {
-    readonly email: string;
-    readonly bindings: ReadonlyArray<Omit<AccessBinding, "userId">>;
-  }): Promise<{ user: SecurityUser; created: boolean }> {
-    const email = normalizeEmail(params.email);
-    const existingId = this.userIdByEmail.get(email);
-    if (existingId !== undefined) {
-      const existing = this.usersById.get(existingId);
-      if (existing !== undefined) return { user: clone(existing), created: false };
-    }
-    const initialBindings = normalizeInitialBindings(params.bindings);
-
-    // No await occurs before both indexes and the initial bindings are stored,
-    // so concurrent calls in this single-process implementation cannot create
-    // two users for the same normalized email.
-    const user = freeze<SecurityUser>({
-      id: crypto.randomUUID(),
-      email,
-      status: "active",
-    });
-    this.usersById.set(user.id, user);
-    this.userIdByEmail.set(email, user.id);
-    for (const binding of initialBindings) {
-      this.storeSubjectBinding({
-        subject: { kind: "user", id: user.id },
-        ...binding,
-      });
-    }
-    return { user: clone(user), created: true };
+  async currentTimeMs(): Promise<number> {
+    return integerTime(this.clock.currentTimeMs(), "store clock");
   }
 
   async getUser(id: string): Promise<SecurityUser | undefined> {
@@ -120,22 +93,6 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     );
   }
 
-  async putBinding(binding: AccessBinding): Promise<void> {
-    await this.putSubjectBinding({
-      subject: { kind: "user", id: binding.userId },
-      namespaceId: binding.namespaceId,
-      accessRole: binding.accessRole,
-    });
-  }
-
-  async removeBinding(binding: AccessBinding): Promise<void> {
-    await this.removeSubjectBinding({
-      subject: { kind: "user", id: binding.userId },
-      namespaceId: binding.namespaceId,
-      accessRole: binding.accessRole,
-    });
-  }
-
   async putKnowledgeGrant(grant: KnowledgeGrant): Promise<void> {
     await this.putKnowledgeAudienceGrant({
       namespaceId: grant.namespaceId,
@@ -150,52 +107,6 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
       baseId: grant.baseId,
       audience: { kind: "access-role", id: grant.accessRole },
     });
-  }
-
-  async listKnowledgeGrants(params: {
-    namespaceId: string;
-    baseId: string;
-  }): Promise<KnowledgeGrant[]> {
-    const grants = await this.listKnowledgeAudienceGrants(params);
-    return grants
-      .filter((grant) => grant.audience.kind === "access-role")
-      .map((grant) =>
-        freeze({
-          namespaceId: grant.namespaceId,
-          baseId: grant.baseId,
-          accessRole: grant.audience.id,
-        }),
-      );
-  }
-
-  async createSession(params: { tokenHash: string; userId: string; ttlMs: number }): Promise<void> {
-    const now = this.clock.currentTimeMs();
-    await this.putSession({
-      tokenHash: params.tokenHash,
-      principal: { kind: "user", id: params.userId },
-      createdAt: now,
-      expiresAt: finiteTimeSum(now, positiveTime(params.ttlMs, "session ttl"), "session expiry"),
-      authMethod: "oidc",
-    });
-  }
-
-  async getSession(tokenHash: string): Promise<{ userId: string } | undefined> {
-    const session = await this.getSessionRecord(tokenHash);
-    if (session === undefined) return undefined;
-    if (session.principal.kind !== "user") return undefined;
-    return freeze({ userId: session.principal.id });
-  }
-
-  async deleteSession(tokenHash: string): Promise<void> {
-    const key = requiredString(tokenHash, "session token hash", SECURITY_STORE_LIMITS.hash);
-    const existing = this.sessions.get(key);
-    if (!existing) return;
-    if (existing.authMethod === "break-glass") {
-      throw new Error("Break-glass sessions must be revoked transactionally");
-    }
-    if (existing.revokedAt === undefined) {
-      this.sessions.set(key, freeze({ ...existing, revokedAt: this.clock.currentTimeMs() }));
-    }
   }
 
   async findOrCreateProviderUser(params: {
@@ -510,6 +421,30 @@ export class InMemorySecurityStore implements SecurityStoreV2 {
     if (prepared.result === "already-exists") return prepared.result;
     this.commitAuditAppend(prepared);
     return "appended";
+  }
+
+  async appendAuditFromHead(params: {
+    readonly id: string;
+    readonly namespaceId: string;
+    readonly outbox?: { readonly nextAttemptAt: number };
+    readonly build: (head: SecurityAuditRecord | undefined) => SecurityAuditRecord;
+  }): Promise<{
+    readonly result: "appended" | "already-exists";
+    readonly record: SecurityAuditRecord;
+  }> {
+    const existing = this.auditById.get(requiredString(params.id, "event id"));
+    if (existing) return { result: "already-exists", record: clone(existing) };
+    const rows = this.auditRecords.get(requiredString(params.namespaceId, "namespace id")) ?? [];
+    const record = params.build(rows.at(-1));
+    const prepared = this.prepareAuditAppend({
+      record,
+      ...(params.outbox !== undefined && { outbox: params.outbox }),
+    });
+    if (prepared.result === "already-exists") {
+      return { result: prepared.result, record: clone(record) };
+    }
+    this.commitAuditAppend(prepared);
+    return { result: "appended", record: clone(record) };
   }
 
   async getAuditRecord(eventId: string): Promise<SecurityAuditRecord | undefined> {

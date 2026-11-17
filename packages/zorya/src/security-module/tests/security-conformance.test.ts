@@ -24,14 +24,14 @@ import {
   type SecurityConformanceFactory,
 } from "../../server/security/tests/security-conformance-suite.ts";
 import { InMemorySecurityStore } from "../in-memory-security-store.ts";
-import type { LoginProvider } from "../login-provider.ts";
+import type { DashboardLoginProvider } from "../../server/security/index.ts";
 import { DurableSecurityAudit } from "../security-audit.ts";
 import { createZoryaSecurity } from "../zorya-security.ts";
 
 const SECRET = "0123456789abcdef0123456789abcdef";
 const SERVICE_TOKEN = "channel-token";
 
-const unusedLoginProvider: LoginProvider = {
+const unusedLoginProvider: DashboardLoginProvider = {
   id: "test",
   authorizationUrl: async () => "http://identity.test/authorize",
   exchange: async () => {
@@ -56,6 +56,7 @@ const apiKeyFactory: SecurityConformanceFactory = {
     });
     return {
       security,
+      recordsAllowedAudit: false,
       validRequest: bearerRequest("operator-key"),
       invalidRequest: bearerRequest("invalid"),
       authenticated: principalRef(OPERATOR_PRINCIPAL),
@@ -133,13 +134,18 @@ const moduleFactory: SecurityConformanceFactory = {
   create: async (params = {}) => {
     const store = new InMemorySecurityStore();
     const represented = (
-      await store.findOrCreateUser({
+      await store.findOrCreateProviderUser({
+        identity: { providerId: "test", issuer: "https://id.test", subject: "represented" },
         email: "represented@example.com",
         bindings: [{ namespaceId: "team-a", accessRole: "member" }],
       })
     ).user;
-    const unbound = (await store.findOrCreateUser({ email: "unbound@example.com", bindings: [] }))
-      .user;
+    const unbound = (
+      await store.findOrCreateProviderUser({
+        identity: { providerId: "test", issuer: "https://id.test", subject: "unbound" },
+        email: "unbound@example.com",
+      })
+    ).user;
     await store.putKnowledgeGrant({
       namespaceId: "team-a",
       baseId: "docs",
@@ -566,13 +572,18 @@ describe("optional security module audit sink", () => {
   it("fails closed for allowed audit failure and preserves denial", async () => {
     const store = new InMemorySecurityStore();
     const adminUser = (
-      await store.findOrCreateUser({
+      await store.findOrCreateProviderUser({
+        identity: { providerId: "test", issuer: "https://id.test", subject: "admin" },
         email: "admin@example.com",
         bindings: [{ namespaceId: "team-a", accessRole: "admin" }],
       })
     ).user;
-    const deniedUser = (await store.findOrCreateUser({ email: "denied@example.com", bindings: [] }))
-      .user;
+    const deniedUser = (
+      await store.findOrCreateProviderUser({
+        identity: { providerId: "test", issuer: "https://id.test", subject: "denied" },
+        email: "denied@example.com",
+      })
+    ).user;
     const security = createZoryaSecurity({
       store,
       loginProviders: [unusedLoginProvider],

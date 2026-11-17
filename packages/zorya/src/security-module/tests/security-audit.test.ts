@@ -16,17 +16,13 @@ import {
   SecurityToolAuditBridge,
   verifySecurityAuditRecords,
 } from "../security-audit.ts";
-import type {
-  SecurityAuditRecord,
-  SecurityAuditScalar,
-  SecurityStoreV2,
-} from "../security-store.ts";
+import type { SecurityAuditRecord, SecurityAuditScalar, SecurityStore } from "../security-store.ts";
 
 const KEY_A = "a".repeat(32);
 const KEY_B = "b".repeat(32);
 
 function audit(
-  store: SecurityStoreV2,
+  store: SecurityStore,
   options: { keyId?: string; keys?: Readonly<Record<string, string>>; clock?: number } = {},
 ) {
   let nextId = 0;
@@ -40,12 +36,12 @@ function audit(
   });
 }
 
-async function rows(store: SecurityStoreV2, namespaceId = "acme"): Promise<SecurityAuditRecord[]> {
+async function rows(store: SecurityStore, namespaceId = "acme"): Promise<SecurityAuditRecord[]> {
   return [...(await store.listAuditRecords({ namespaceId, limit: 1_000 })).items];
 }
 
 describe("DurableSecurityAudit", () => {
-  test("concurrent replicas retry the atomic head boundary and survive restart/key rotation", async () => {
+  test("hundreds of concurrent replicas append against the locked head and survive restart", async () => {
     const store = new InMemorySecurityStore();
     let nextId = 0;
     const config = {
@@ -58,7 +54,7 @@ describe("DurableSecurityAudit", () => {
     const replicas = [new DurableSecurityAudit(config), new DurableSecurityAudit(config)];
 
     await Promise.all(
-      Array.from({ length: 40 }, (_, index) =>
+      Array.from({ length: 300 }, (_, index) =>
         replicas[index % 2]!.append({
           namespaceId: "acme",
           occurredAt: 1_000,
@@ -73,7 +69,7 @@ describe("DurableSecurityAudit", () => {
     const result = await restarted.verify("acme");
     expect(result.valid).toBe(true);
     expect((await rows(store)).map((row) => row.sequence)).toEqual(
-      Array.from({ length: 41 }, (_, index) => index + 1),
+      Array.from({ length: 301 }, (_, index) => index + 1),
     );
     expect((await rows(store)).at(-1)?.keyId).toBe("key-b");
   });
@@ -151,12 +147,13 @@ describe("DurableSecurityAudit", () => {
   });
 
   test("atomically creates optional delivery outbox rows", async () => {
-    const store = new InMemorySecurityStore();
+    const clock = FakeWallClock.create(2_000);
+    const store = new InMemorySecurityStore({ clock });
     const sink = new DurableSecurityAudit({
       store,
       activeKeyId: "key-a",
       keys: { "key-a": KEY_A },
-      clock: { currentTimeMs: () => 2_000 },
+      clock,
       idFactory: () => "with-outbox",
       outbox: { nextAttemptAt: (recordedAt) => recordedAt + 500 },
     });
@@ -183,7 +180,7 @@ describe("DurableSecurityAudit", () => {
     ).rejects.toThrow("Conflicting audit event: collision");
   });
 
-  test("looks up only the latest chain head and preserves empty metadata strings", async () => {
+  test("builds against the locked chain head and preserves empty metadata strings", async () => {
     const inner = new InMemorySecurityStore();
     let headReads = 0;
     let listReads = 0;
@@ -196,7 +193,7 @@ describe("DurableSecurityAudit", () => {
           };
         }
         if (property === "listAuditRecords") {
-          return async (params: Parameters<SecurityStoreV2["listAuditRecords"]>[0]) => {
+          return async (params: Parameters<SecurityStore["listAuditRecords"]>[0]) => {
             listReads++;
             return target.listAuditRecords(params);
           };
@@ -204,7 +201,7 @@ describe("DurableSecurityAudit", () => {
         const value = Reflect.get(target, property, receiver);
         return typeof value === "function" ? value.bind(target) : value;
       },
-    }) as SecurityStoreV2;
+    }) as SecurityStore;
     const sink = audit(store);
 
     await sink.append({
@@ -215,7 +212,7 @@ describe("DurableSecurityAudit", () => {
     });
     await sink.append({ namespaceId: "acme", occurredAt: 1_001, event: "next" });
 
-    expect(headReads).toBe(2);
+    expect(headReads).toBe(0);
     expect(listReads).toBe(0);
     expect((await inner.getAuditRecord("event-1"))?.metadata).toEqual({ optionalDetail: "" });
   });
@@ -339,12 +336,12 @@ describe("SecurityToolAuditBridge", () => {
     const store = new InMemorySecurityStore();
     const broken = new Proxy(store, {
       get(target, property, receiver) {
-        if (property === "appendAuditWithOutbox")
+        if (property === "appendAuditFromHead")
           return async () => Promise.reject(new Error("store offline"));
         const value = Reflect.get(target, property, receiver);
         return typeof value === "function" ? value.bind(target) : value;
       },
-    }) as SecurityStoreV2;
+    }) as SecurityStore;
     const bridge = new SecurityToolAuditBridge(audit(broken));
     const elevated = createElevatedTool({
       name: "dangerous",

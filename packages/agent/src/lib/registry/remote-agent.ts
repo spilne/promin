@@ -723,8 +723,10 @@ function buildSseRunOutput(params: {
           } catch {
             /* skip malformed */
           }
+        } else if (event === "suspended") {
+          settleFinish({ text: accumulatedText, reason: "stop", usage: emptyUsage });
         }
-        // thread / approval-requested / suspended frames are informational;
+        // thread / approval-requested frames are informational;
         // no AgentRunOutput surface for them in v1.
         if (settled) break;
       }

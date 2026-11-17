@@ -185,40 +185,19 @@ export interface BreakGlassGrant {
 }
 
 export interface SecurityStore {
-  /** Atomically find the email's user or create it with the initial bindings. */
-  findOrCreateUser(params: {
-    readonly email: string;
-    readonly bindings: ReadonlyArray<Omit<AccessBinding, "userId">>;
-  }): Promise<{ user: SecurityUser; created: boolean }>;
+  /** Authoritative clock for durable timestamps and expiries. */
+  currentTimeMs(): Promise<number>;
+
   getUser(id: string): Promise<SecurityUser | undefined>;
   listUsers(): Promise<SecurityUser[]>;
   /** Disabling a user also invalidates every session belonging to that user. */
   setUserStatus(params: { id: string; status: SecurityUser["status"] }): Promise<void>;
 
   listBindings(userId: string): Promise<AccessBinding[]>;
-  putBinding(binding: AccessBinding): Promise<void>;
-  removeBinding(binding: AccessBinding): Promise<void>;
 
   putKnowledgeGrant(grant: KnowledgeGrant): Promise<void>;
   removeKnowledgeGrant(grant: KnowledgeGrant): Promise<void>;
-  /** Grants on this base in the requested namespace and the org-wide namespace. */
-  listKnowledgeGrants(params: { namespaceId: string; baseId: string }): Promise<KnowledgeGrant[]>;
 
-  createSession(params: { tokenHash: string; userId: string; ttlMs: number }): Promise<void>;
-  /** The session owner, or undefined when the session is absent or expired. */
-  getSession(tokenHash: string): Promise<{ userId: string } | undefined>;
-  /** Idempotently revoke a non-break-glass session, including an existing tombstone. */
-  deleteSession(tokenHash: string): Promise<void>;
-}
-
-/**
- * Production-capable security persistence.  The legacy `SecurityStore`
- * methods remain while the module is migrated; new stores implement this
- * complete contract and may adapt the legacy user-only calls. Every timestamp
- * and duration is represented as safe-integer milliseconds; fractional or
- * unsafe numeric values must be rejected before mutation.
- */
-export interface SecurityStoreV2 extends SecurityStore {
   findOrCreateProviderUser(params: {
     readonly identity: Omit<ProviderIdentity, "userId">;
     readonly email: string;
@@ -290,6 +269,16 @@ export interface SecurityStoreV2 extends SecurityStore {
     readonly record: SecurityAuditRecord;
     readonly outbox?: { readonly nextAttemptAt: number };
   }): Promise<"appended" | "already-exists">;
+  /** Builds the next row after locking and reading the namespace head. */
+  appendAuditFromHead(params: {
+    readonly id: string;
+    readonly namespaceId: string;
+    readonly outbox?: { readonly nextAttemptAt: number };
+    readonly build: (head: SecurityAuditRecord | undefined) => SecurityAuditRecord;
+  }): Promise<{
+    readonly result: "appended" | "already-exists";
+    readonly record: SecurityAuditRecord;
+  }>;
   getAuditRecord(eventId: string): Promise<SecurityAuditRecord | undefined>;
   /** Latest row in a namespace chain, obtained without paging its history. */
   getAuditHead(namespaceId: string): Promise<SecurityAuditRecord | undefined>;

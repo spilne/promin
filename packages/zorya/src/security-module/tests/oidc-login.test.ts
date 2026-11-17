@@ -522,10 +522,12 @@ describe("OIDC security module", () => {
     const rawToken = active.sessionCookie?.slice("zorya_session=".length);
     if (!rawToken) throw new Error("login did not return a session cookie");
     await expect(
-      env.store.createSession({
+      env.store.putSession({
         tokenHash: hashSessionToken(rawToken),
-        userId: user.id,
-        ttlMs: SESSION_TTL_MS,
+        principal: { kind: "user", id: user.id },
+        createdAt: env.clock.currentTimeMs(),
+        expiresAt: env.clock.currentTimeMs() + SESSION_TTL_MS,
+        authMethod: "oidc",
       }),
     ).rejects.toThrow("Unknown or disabled user");
     expect(

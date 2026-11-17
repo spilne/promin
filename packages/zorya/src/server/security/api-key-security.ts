@@ -89,7 +89,9 @@ export function createApiKeySecurity(config: ApiKeySecurityConfig): ZoryaSecurit
     authorize: async (request) => (await authorizeEffective(request)).decision,
     authorizeEffective,
     recordAudit: async (event) => {
-      config.logger?.log(JSON.stringify({ component: "zorya.security", ...event }));
+      if (event.decision?.allowed === false) {
+        config.logger?.log(JSON.stringify({ component: "zorya.security", ...event }));
+      }
     },
   };
 }

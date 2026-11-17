@@ -209,7 +209,7 @@ describe("security contract", () => {
     ).toEqual({ kind: "namespace", namespaceId: "team-a" });
   });
 
-  it("records structured audit events through the host logger", async () => {
+  it("logs only denied audit decisions through the key-mode host logger", async () => {
     const messages: string[] = [];
     const adapter = security((message) => messages.push(message));
     await adapter.recordAudit({
@@ -220,11 +220,20 @@ describe("security contract", () => {
       permission: { resource: "agent", action: "invoke" },
       decision: { allowed: true, reason: "operator_allow" },
     });
+    expect(messages).toEqual([]);
+    await adapter.recordAudit({
+      event: "authorization",
+      occurredAt: "2026-11-15T00:00:00.000Z",
+      context: { actor: OPERATOR_PRINCIPAL, effective: OPERATOR_PRINCIPAL },
+      namespaceId: "team-a",
+      permission: { resource: "agent", action: "invoke" },
+      decision: { allowed: false, reason: "permission_denied" },
+    });
     expect(JSON.parse(messages[0]!)).toMatchObject({
       component: "zorya.security",
       event: "authorization",
       namespaceId: "team-a",
-      decision: { allowed: true, reason: "operator_allow" },
+      decision: { allowed: false, reason: "permission_denied" },
     });
   });
 

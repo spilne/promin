@@ -97,6 +97,55 @@ describe("ScheduleExecutionSecurity", () => {
     ]);
   });
 
+  it("dispatches key-mode resource schedules under operator act-for authority", async () => {
+    const guard = new ScheduleExecutionSecurity({
+      security: security({ principals: new Map([["operator:operator", OPERATOR_PRINCIPAL]]) }),
+      clock: SystemWallClock,
+      logger: quietLogger,
+      legacyPrincipal: principalRef(OPERATOR_PRINCIPAL),
+    });
+    const metadata = {
+      agentTrigger: true,
+      agentId: "writer",
+      task: "summarize",
+      namespaceId: "team",
+      resourceId: "alice",
+      createdByAgent: "writer",
+    };
+
+    await expect(
+      guard.authorizeDispatch({ id: "resource", intervalMs: 60_000, namespace: "team", metadata }),
+    ).resolves.toMatchObject({
+      identity: {
+        principal: { kind: "operator", id: "operator" },
+        runContext: {
+          actor: { kind: "operator", id: "operator" },
+          effective: { kind: "user", id: "alice" },
+        },
+      },
+    });
+    await expect(
+      guard.authorizeDispatch({
+        id: "owned",
+        intervalMs: 60_000,
+        namespace: "team",
+        metadata: { ...metadata, resourceId: "team:writer:alice" },
+        securityContext: {
+          actor: { kind: "operator", id: "operator" },
+          effective: { kind: "user", id: "alice" },
+        },
+      }),
+    ).resolves.toMatchObject({
+      identity: {
+        principal: { kind: "operator", id: "operator" },
+        runContext: {
+          actor: { kind: "operator", id: "operator" },
+          effective: { kind: "user", id: "alice" },
+        },
+      },
+    });
+  });
+
   it("re-resolves the assigned actor and current act-for authority on every dispatch", async () => {
     const serviceAccount = principal({ kind: "service-account", id: "nightly-sa" }, true);
     const user = principal({ kind: "user", id: "alice" });

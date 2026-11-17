@@ -1,9 +1,7 @@
 import { randomBytes } from "node:crypto";
-import type { WallClock } from "@promin/workflow";
-import { SystemWallClock } from "@promin/workflow";
 import { ORG_WIDE_NAMESPACE } from "../server/security/security.ts";
 import type { DurableSecurityAudit } from "./security-audit.ts";
-import type { BreakGlassGrant, SecurityPrincipalRef, SecurityStoreV2 } from "./security-store.ts";
+import type { BreakGlassGrant, SecurityPrincipalRef, SecurityStore } from "./security-store.ts";
 import {
   csrfCookie,
   csrfCookieName,
@@ -20,13 +18,12 @@ const TOKEN_PREFIX = "zbg_";
 const TOKEN_SECRET_CHARACTERS = 43;
 
 export interface BreakGlassAccessManagerConfig {
-  readonly store: SecurityStoreV2;
+  readonly store: SecurityStore;
   readonly audit: DurableSecurityAudit;
   readonly publicBaseUrl: string;
   readonly allowInsecureHttp?: boolean;
   readonly defaultTtlMs?: number;
   readonly maxTtlMs?: number;
-  readonly clock?: WallClock;
   /** Test seam. Production defaults to a 128-bit random identifier. */
   readonly idFactory?: () => string;
   /** Test seam. Production defaults to a 256-bit random credential. */
@@ -58,12 +55,11 @@ export interface IssuedBreakGlassAccess {
  * mint emergency access over the network.
  */
 export class BreakGlassAccessManager {
-  private readonly store: SecurityStoreV2;
+  private readonly store: SecurityStore;
   private readonly audit: DurableSecurityAudit;
   private readonly secure: boolean;
   private readonly defaultTtlMs: number;
   private readonly maxTtlMs: number;
-  private readonly clock: WallClock;
   private readonly idFactory: () => string;
   private readonly tokenSecretFactory: () => string;
 
@@ -85,7 +81,6 @@ export class BreakGlassAccessManager {
     if (this.defaultTtlMs > this.maxTtlMs) {
       throw new TypeError("BreakGlassAccessManager: default TTL exceeds maximum TTL");
     }
-    this.clock = config.clock ?? SystemWallClock;
     this.idFactory = config.idFactory ?? (() => randomBytes(16).toString("base64url"));
     this.tokenSecretFactory =
       config.tokenSecretFactory ?? (() => randomBytes(32).toString("base64url"));
@@ -113,7 +108,7 @@ export class BreakGlassAccessManager {
     );
     const token = `${TOKEN_PREFIX}${grantId}.${secret}`;
     const csrfToken = newCsrfToken();
-    const createdAt = this.clock.currentTimeMs();
+    const createdAt = await this.store.currentTimeMs();
     if (!Number.isSafeInteger(createdAt) || createdAt < 0) {
       throw new TypeError("BreakGlassAccessManager: clock returned an invalid time");
     }
@@ -166,7 +161,7 @@ export class BreakGlassAccessManager {
     const grant = await this.store.getBreakGlassGrant(params.grantId);
     if (!grant) throw new Error(`Unknown break-glass grant: ${params.grantId}`);
     if (grant.revokedAt !== undefined) return "already-revoked";
-    const revokedAt = this.clock.currentTimeMs();
+    const revokedAt = await this.store.currentTimeMs();
     try {
       return await this.audit.revokeBreakGlassAccess({
         grant,

@@ -16,7 +16,7 @@ import {
   type ZoryaSecurity,
 } from "../../server/security/index.ts";
 import { InMemorySecurityStore } from "../in-memory-security-store.ts";
-import type { LoginProvider } from "../login-provider.ts";
+import type { DashboardLoginProvider } from "../../server/security/index.ts";
 import type { SecurityUser } from "../security-store.ts";
 import { hashSessionToken } from "../sessions.ts";
 import { createZoryaSecurity, type ServiceAccountConfig } from "../zorya-security.ts";
@@ -24,7 +24,7 @@ import { createZoryaSecurity, type ServiceAccountConfig } from "../zorya-securit
 const SECRET = "0123456789abcdef0123456789abcdef";
 const BASE_URL = "http://zorya.test";
 
-const unusedLoginProvider: LoginProvider = {
+const unusedLoginProvider: DashboardLoginProvider = {
   id: "test",
   authorizationUrl: async () => "http://identity.test/authorize",
   exchange: async () => {
@@ -67,7 +67,12 @@ async function createUser(params: {
   readonly bindings?: ReadonlyArray<{ readonly namespaceId: string; readonly accessRole: string }>;
 }): Promise<SecurityUser> {
   return (
-    await params.env.store.findOrCreateUser({
+    await params.env.store.findOrCreateProviderUser({
+      identity: {
+        providerId: "test",
+        issuer: "https://id.test",
+        subject: params.email,
+      },
       email: params.email,
       bindings: params.bindings ?? [],
     })
@@ -356,9 +361,9 @@ describe("access-role administration", () => {
       body: { namespaceId: "team-b", baseId: "docs", accessRole: "member" },
     });
     expect(denied.status).toBe(403);
-    expect(await env.store.listKnowledgeGrants({ namespaceId: "team-b", baseId: "docs" })).toEqual(
-      [],
-    );
+    expect(
+      await env.store.listKnowledgeAudienceGrants({ namespaceId: "team-b", baseId: "docs" }),
+    ).toEqual([]);
   });
 
   it("rejects duplicate knowledge and secret scope queries before authorization can diverge", async () => {
@@ -446,8 +451,8 @@ describe("namespace and knowledge access", () => {
     });
     expect(Object.isFrozen(bound?.effective)).toBeTrue();
     expect(Object.isFrozen(bound?.effective?.accessRoles["team-a"])).toBeTrue();
-    await env.store.removeBinding({
-      userId: user.id,
+    await env.store.removeSubjectBinding({
+      subject: { kind: "user", id: user.id },
       namespaceId: "team-a",
       accessRole: "member",
     });
@@ -555,10 +560,13 @@ describe("namespace and knowledge access", () => {
     }
 
     const token = "prototype-namespace-session";
-    await env.store.createSession({
+    const createdAt = SystemWallClock.currentTimeMs();
+    await env.store.putSession({
       tokenHash: hashSessionToken(token),
-      userId: user.id,
-      ttlMs: 60_000,
+      principal: { kind: "user", id: user.id },
+      createdAt,
+      expiresAt: createdAt + 60_000,
+      authMethod: "oidc",
     });
     const authenticated = await authenticate(
       env,
@@ -995,10 +1003,13 @@ describe("disabled users", () => {
       bindings: [{ namespaceId: ORG_WIDE_NAMESPACE, accessRole: "member" }],
     });
     const token = "active-session-token";
-    await env.store.createSession({
+    const createdAt = SystemWallClock.currentTimeMs();
+    await env.store.putSession({
       tokenHash: hashSessionToken(token),
-      userId: user.id,
-      ttlMs: 60_000,
+      principal: { kind: "user", id: user.id },
+      createdAt,
+      expiresAt: createdAt + 60_000,
+      authMethod: "oidc",
     });
     const authenticated = () =>
       authenticate(

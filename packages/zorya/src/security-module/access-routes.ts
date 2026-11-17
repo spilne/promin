@@ -8,7 +8,7 @@ import {
   createServiceAccountWithCredential,
   issueServiceAccountCredential,
 } from "./service-account-credentials.ts";
-import type { SecurityStoreV2 } from "./security-store.ts";
+import type { SecurityStore } from "./security-store.ts";
 
 const BindingBodySchema = z
   .object({
@@ -61,7 +61,7 @@ const CredentialBodySchema = z.object({ expiresAt: z.number().int().safe().optio
 /** Mount access-role and knowledge-grant administration routes. */
 export function mountAccessRoutes(params: {
   readonly router: Router;
-  readonly store: SecurityStoreV2;
+  readonly store: SecurityStore;
   readonly credentialPepper: string;
   readonly clock: WallClock;
 }): void {
@@ -221,7 +221,7 @@ export function mountAccessRoutes(params: {
     access: protectedAccess({ resource: "service-account", action: "create" }),
     handler: async (req) => {
       const body = await parseBody({ req, schema: ServiceAccountBodySchema });
-      if (body.expiresAt !== undefined && body.expiresAt <= params.clock.currentTimeMs()) {
+      if (body.expiresAt !== undefined && body.expiresAt <= (await params.store.currentTimeMs())) {
         return json(400, { error: "invalid_credential_expiry" });
       }
       const serviceAccount = {
@@ -233,7 +233,6 @@ export function mountAccessRoutes(params: {
         store: params.store,
         account: serviceAccount,
         pepper: params.credentialPepper,
-        clock: params.clock,
         ...(body.expiresAt !== undefined && { expiresAt: body.expiresAt }),
       });
       if (!credential) return json(409, { error: "service_account_exists" });
@@ -250,7 +249,7 @@ export function mountAccessRoutes(params: {
     }),
     handler: async (req, route) => {
       const body = await parseBody({ req, schema: CredentialBodySchema });
-      if (body.expiresAt !== undefined && body.expiresAt <= params.clock.currentTimeMs()) {
+      if (body.expiresAt !== undefined && body.expiresAt <= (await params.store.currentTimeMs())) {
         return json(400, { error: "invalid_credential_expiry" });
       }
       const account = await params.store.getServiceAccount(route.id!);
@@ -261,7 +260,6 @@ export function mountAccessRoutes(params: {
         store: params.store,
         serviceAccountId: account.id,
         pepper: params.credentialPepper,
-        clock: params.clock,
         ...(body.expiresAt !== undefined && { expiresAt: body.expiresAt }),
       });
       return json(201, { credential });

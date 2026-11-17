@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { FakeWallClock } from "@promin/workflow";
 import {
   CoreChannelRuntime,
   InMemoryChannelStateStore,
@@ -67,7 +68,7 @@ function environment(
     channelId: "slack",
     actor,
     store: runtimeStore,
-    now: () => 1_800_000_000_000,
+    clock: FakeWallClock.create(1_800_000_000_000),
     security: {
       resolveIdentity: async () => {
         if (params.securityFails === "resolve") throw new Error("directory secret");

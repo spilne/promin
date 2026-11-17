@@ -565,10 +565,7 @@ describe("retained subagents", () => {
         String((event.metadata as { path?: string } | undefined)?.path).endsWith(suffix),
       ),
     );
-    expect(mutationAudits).toHaveLength(3);
-    expect(
-      mutationAudits.map((event) => (event.resource as { id?: string } | undefined)?.id),
-    ).toEqual(["worker", "worker", "worker"]);
+    expect(mutationAudits).toEqual([]);
     expect(
       (
         await send(

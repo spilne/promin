@@ -34,6 +34,8 @@ export interface SecurityConformanceFixture {
     };
   }>;
   readonly auditEvents: SecurityAuditEvent[];
+  /** Key mode intentionally suppresses allowed decisions from its default logger. */
+  readonly recordsAllowedAudit?: boolean;
   readonly revokeAllowedIdentity?: () => Promise<void>;
 }
 
@@ -139,7 +141,9 @@ export function securityConformanceSuite(name: string, factory: SecurityConforma
       setRequestSecurityContext({ req: denied, context: fixture.denied.context });
       expect((await router.handle(denied)).status).toBe(403);
       expect(handled).toBe(1);
-      expect(fixture.auditEvents.map((event) => event.decision?.allowed)).toEqual([true, false]);
+      expect(fixture.auditEvents.map((event) => event.decision?.allowed)).toEqual(
+        fixture.recordsAllowedAudit === false ? [false] : [true, false],
+      );
     });
 
     it("rechecks revocable identities when the adapter has a directory", async () => {
@@ -189,7 +193,10 @@ export function securityConformanceSuite(name: string, factory: SecurityConforma
         namespaceId: fixture.allowed.resource.namespaceId,
         resource: fixture.allowed.resource,
         permission: fixture.allowed.permission,
-        decision: { allowed: true, reason: fixture.allowedReason },
+        decision:
+          fixture.recordsAllowedAudit === false
+            ? { allowed: false, reason: fixture.deniedReason }
+            : { allowed: true, reason: fixture.allowedReason },
         metadata: { source: "conformance" },
       };
       await fixture.security.recordAudit(source);
@@ -197,7 +204,10 @@ export function securityConformanceSuite(name: string, factory: SecurityConforma
       expect(fixture.auditEvents[0]).toMatchObject({
         event: "authorization",
         namespaceId: fixture.allowed.resource.namespaceId,
-        decision: { allowed: true, reason: fixture.allowedReason },
+        decision:
+          fixture.recordsAllowedAudit === false
+            ? { allowed: false, reason: fixture.deniedReason }
+            : { allowed: true, reason: fixture.allowedReason },
         metadata: { source: "conformance" },
       });
 

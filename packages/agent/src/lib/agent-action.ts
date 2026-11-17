@@ -617,7 +617,6 @@ export function agentAction(config: AgentActionConfig<any>): Workflow<AgentInput
   const reportEngineUsage = config.reportEngineUsage === true || config.engineBudget !== undefined;
   return workflow<AgentInput>({
     name: config.name,
-    ...(config.scope?.namespaceId !== undefined && { namespace: config.scope.namespaceId }),
     ...(config.engineBudget !== undefined && { budget: config.engineBudget }),
   })
     .journaled("agent", function* (ctx, input) {

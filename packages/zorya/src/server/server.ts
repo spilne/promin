@@ -187,6 +187,15 @@ export class ZoryaServer {
   }
 
   constructor(config: ZoryaServerConfig) {
+    if (
+      config.agents &&
+      config.insecure !== true &&
+      (config.agents as { readonly approvals?: unknown }).approvals === undefined
+    ) {
+      throw new TypeError(
+        "ZoryaServer requires ZoryaAgents to expose the PendingApprovalStore used by resolved agents",
+      );
+    }
     this.workflows = config.workflows;
     if (config.scheduler) this.scheduler = config.scheduler;
     if (config.agents) this.agents = config.agents;

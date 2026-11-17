@@ -3,7 +3,7 @@ import { FakeWallClock } from "@promin/workflow";
 import { Router } from "../../server/router.ts";
 import type { ZoryaSecurity } from "../../server/security/index.ts";
 import { InMemorySecurityStore } from "../in-memory-security-store.ts";
-import type { LoginProvider } from "../login-provider.ts";
+import type { DashboardLoginProvider } from "../../server/security/index.ts";
 import {
   CSRF_COOKIE,
   CSRF_HEADER,
@@ -22,7 +22,7 @@ const SESSION_TOKEN = "browser-session-token";
 const CSRF_TOKEN = "browser-csrf-token";
 const SESSION_TTL_MS = 60_000;
 
-const unusedLoginProvider: LoginProvider = {
+const unusedLoginProvider: DashboardLoginProvider = {
   id: "test",
   authorizationUrl: async () => "https://identity.test/authorize",
   exchange: async () => {

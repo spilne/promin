@@ -76,7 +76,7 @@ export interface ZoryaAgentsConfig {
     },
   ) => Agent | Promise<Agent>;
   memory?: MemoryStore;
-  /** Durable approval index shared with the LocalAgents this service resolves. */
+  /** Durable approval index shared with the LocalAgents this service resolves. Required by secured servers. */
   approvals?: PendingApprovalStore;
   instances?: AgentInstanceRegistry;
   /**
@@ -246,7 +246,7 @@ export class ZoryaAgents implements AgentScheduleDispatcher {
       return agent;
     };
     if (config.memory) this.memory = config.memory;
-    if (config.approvals) this.approvals = config.approvals;
+    this.approvals = config.approvals;
     if (config.instances) this.instances = config.instances;
     if (config.models) this.models = config.models;
     if (config.toolCatalog) this.toolCatalog = config.toolCatalog;

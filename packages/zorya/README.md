@@ -511,7 +511,8 @@ PostgresLeaseStore({ db }) })`. `turnGate: false` turns it off. Scheduled
   a pending approval. `LocalAgent.forkThread` exposes the same operation to
   library callers with a configured `MemoryStore`.
 - **Approvals.** A turn suspended on a tool approval is recorded in a
-  `PendingApprovalStore`. Pass a durable one to `resolveLocalAgent({ approvals })`
+  `PendingApprovalStore`. Pass the same durable instance to both
+  `new ZoryaAgents({ approvals })` and `resolveLocalAgent({ approvals })`
   in `resolve` — `createSqliteZoryaStack` provides `pendingApprovalStore`;
   `PostgresPendingApprovalStore` is the Postgres one.
   `GET /api/agents/:id/threads/:threadId/approvals` lists the thread's pending
@@ -638,8 +639,9 @@ const retrievers = new InMemoryRetrieverRegistry([
 ]);
 const agents = new ZoryaAgents({
   registry,
+  approvals,
   retrievers,
-  resolve: (recipe) => resolveLocalAgent(recipe, { runner, llm, tools, retrievers }),
+  resolve: (recipe) => resolveLocalAgent(recipe, { runner, llm, tools, retrievers, approvals }),
 });
 ```
 
@@ -672,11 +674,13 @@ const mcp = new ZoryaMcpServers({
 });
 const agents = new ZoryaAgents({
   registry,
+  approvals,
   resolve: async (recipe, scope) =>
     resolveLocalAgent(recipe, {
       runner,
       llm,
       tools,
+      approvals,
       mcpTools: await mcp.loadTools({ recipe, scope }),
     }),
 });
@@ -731,6 +735,7 @@ const knowledgeBases = new ZoryaKnowledgeBases({
 const retrievers = knowledgeBases.registry;
 const agents = new ZoryaAgents({
   registry,
+  approvals,
   retrievers,
   // The registry re-reads the store for a base another replica created.
   resolve: (recipe, scope) =>
@@ -738,6 +743,7 @@ const agents = new ZoryaAgents({
       runner,
       llm,
       tools,
+      approvals,
       retrievers,
       ...(scope?.namespaceId !== undefined && { namespaceId: scope.namespaceId }),
     }),

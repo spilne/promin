@@ -740,9 +740,10 @@ describe("httpSchedulerClient.create", () => {
     expect(body).not.toHaveProperty("runAsUserId");
   });
 
-  it("refuses an in-process create without a durable identity", async () => {
+  it("allows a plain in-process host to create without a durable identity", async () => {
+    const storage = new InMemorySchedulerStorage();
     const client = inProcessSchedulerClient({
-      storage: new InMemorySchedulerStorage(),
+      storage,
       scope: {
         namespaceId: "acme",
         resourceId: "alice",
@@ -750,8 +751,9 @@ describe("httpSchedulerClient.create", () => {
         agentId: "writer",
       },
     });
-    await expect(client.create({ id: "slot-1", intervalMs: 60_000, metadata: {} })).rejects.toThrow(
-      "durable security context",
-    );
+    await expect(
+      client.create({ id: "slot-1", intervalMs: 60_000, metadata: {} }),
+    ).resolves.toEqual({ created: true, id: "slot-1" });
+    expect((await storage.loadSchedule("slot-1"))?.securityContext).toBeUndefined();
   });
 });

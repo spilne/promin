@@ -151,11 +151,6 @@ export function clearSessionCookies(secure: boolean): ReadonlyArray<string> {
   ];
 }
 
-/** @deprecated Use clearSessionCookies so the readable CSRF cookie is cleared too. */
-export function clearSessionCookie(secure: boolean): string {
-  return clearSessionCookies(secure)[0]!;
-}
-
 /**
  * Reads exactly one configured session cookie. Duplicate cookies are kept
  * distinct from an absent cookie so callers cannot fall through to bearer auth.

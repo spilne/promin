@@ -18,7 +18,7 @@ import {
   type SecurityAuditScalar,
   type SecuritySession,
   type SecurityStorePage,
-  type SecurityStoreV2,
+  type SecurityStore,
 } from "./security-store.ts";
 
 export type SecurityAuditHmacKey = string | Uint8Array;
@@ -45,7 +45,7 @@ export interface SecurityAuditEnvelope {
 }
 
 export interface DurableSecurityAuditConfig {
-  readonly store: SecurityStoreV2;
+  readonly store: SecurityStore;
   readonly activeKeyId: string;
   readonly keys: Readonly<Record<string, SecurityAuditHmacKey>>;
   readonly clock?: { readonly currentTimeMs: () => number };
@@ -56,7 +56,7 @@ export interface DurableSecurityAuditConfig {
 }
 
 export interface BoundedDenialAuditConfig {
-  readonly store: SecurityStoreV2;
+  readonly store: SecurityStore;
   readonly sink: SecurityAuditSink;
   /** Duration of one equivalence bucket. Default: 60 seconds. */
   readonly windowMs?: number;
@@ -70,7 +70,7 @@ export interface BoundedDenialAuditConfig {
  * validated identity/permission/resource fields, never request metadata or payload content.
  */
 export class BoundedDenialAudit implements SecurityAuditSink {
-  private readonly store: SecurityStoreV2;
+  private readonly store: SecurityStore;
   private readonly sink: SecurityAuditSink;
   private readonly windowMs: number;
   private readonly emitLimit: number;
@@ -139,7 +139,7 @@ export type SecurityAuditVerification =
  * the store serializes the head check and this sink retries a losing replica.
  */
 export class DurableSecurityAudit implements SecurityAuditSink {
-  private readonly store: SecurityStoreV2;
+  private readonly store: SecurityStore;
   private readonly activeKeyId: string;
   private readonly keys: Readonly<Record<string, SecurityAuditHmacKey>>;
   private readonly clock: { readonly currentTimeMs: () => number };
@@ -194,13 +194,17 @@ export class DurableSecurityAudit implements SecurityAuditSink {
   }
 
   async append(envelope: SecurityAuditEnvelope): Promise<SecurityAuditRecord> {
-    return this.appendAtomically(envelope, async ({ record, outbox }) => {
-      await this.store.appendAuditWithOutbox({
-        record,
-        ...(outbox !== undefined && { outbox }),
-      });
-      return record;
-    });
+    return this.appendAtomically(
+      envelope,
+      async ({ record, outbox }) => {
+        await this.store.appendAuditWithOutbox({
+          record,
+          ...(outbox !== undefined && { outbox }),
+        });
+        return record;
+      },
+      true,
+    );
   }
 
   /** Atomically creates the grant, session and first audit-chain row. */
@@ -272,6 +276,7 @@ export class DurableSecurityAudit implements SecurityAuditSink {
       readonly record: SecurityAuditRecord;
       readonly outbox?: { readonly nextAttemptAt: number };
     }) => Promise<T>,
+    buildAfterHeadLock = false,
   ): Promise<T> {
     const id = boundedRequired(
       envelope.id ?? this.idFactory(),
@@ -321,6 +326,76 @@ export class DurableSecurityAudit implements SecurityAuditSink {
     const metadata = sanitizeAuditMetadata(envelope.metadata);
     const activeKey = this.keys[this.activeKeyId]!;
 
+    const buildRecord = (head: SecurityAuditRecord | undefined): SecurityAuditRecord => {
+      const unsigned = {
+        id,
+        namespaceId,
+        sequence: (head?.sequence ?? 0) + 1,
+        occurredAt,
+        recordedAt,
+        event,
+        ...(actor !== undefined && { actor }),
+        ...(effective !== undefined && { effective }),
+        ...(permission !== undefined && { permission }),
+        ...(resource !== undefined && { resource }),
+        ...(decision !== undefined && { decision }),
+        ...(correlation !== undefined && { correlation }),
+        ...(metadata !== undefined && { metadata }),
+        ...(head !== undefined && { previousHash: head.hash }),
+        keyId: this.activeKeyId,
+      } satisfies Omit<SecurityAuditRecord, "hash">;
+      return Object.freeze({
+        ...unsigned,
+        hash: computeSecurityAuditHash(unsigned, activeKey),
+      });
+    };
+    const requestedNextAttemptAt = this.outbox?.nextAttemptAt?.(recordedAt) ?? recordedAt;
+    const outbox =
+      this.outbox === undefined
+        ? undefined
+        : {
+            nextAttemptAt: deadlineFromStoreClock({
+              storeTime: await this.store.currentTimeMs(),
+              sourceTime: recordedAt,
+              requestedTime: requestedNextAttemptAt,
+            }),
+          };
+
+    if (buildAfterHeadLock) {
+      const appended = await this.store.appendAuditFromHead({
+        id,
+        namespaceId,
+        ...(outbox !== undefined && { outbox }),
+        build: buildRecord,
+      });
+      if (
+        !existingMatchesEnvelope(appended.record, {
+          id,
+          namespaceId,
+          occurredAt,
+          recordedAt,
+          event,
+          actor,
+          effective,
+          permission,
+          resource,
+          decision,
+          correlation,
+          metadata,
+          keyId: this.activeKeyId,
+        })
+      ) {
+        throw new Error(`Conflicting audit event: ${id}`);
+      }
+      if (appended.result === "already-exists") {
+        await this.store.appendAuditWithOutbox({
+          record: appended.record,
+          ...(outbox !== undefined && { outbox }),
+        });
+      }
+      return appended.record as T;
+    }
+
     for (let attempt = 0; attempt < this.maxAppendAttempts; attempt += 1) {
       const existing = await this.store.getAuditRecord(id);
       if (existing !== undefined) {
@@ -343,41 +418,17 @@ export class DurableSecurityAudit implements SecurityAuditSink {
         ) {
           return commit({
             record: existing,
-            ...(this.outbox !== undefined && {
-              outbox: { nextAttemptAt: this.outbox.nextAttemptAt?.(recordedAt) ?? recordedAt },
-            }),
+            ...(outbox !== undefined && { outbox }),
           });
         }
         throw new Error(`Conflicting audit event: ${id}`);
       }
       const head = await this.store.getAuditHead(namespaceId);
-      const unsigned = {
-        id,
-        namespaceId,
-        sequence: (head?.sequence ?? 0) + 1,
-        occurredAt,
-        recordedAt,
-        event,
-        ...(actor !== undefined && { actor }),
-        ...(effective !== undefined && { effective }),
-        ...(permission !== undefined && { permission }),
-        ...(resource !== undefined && { resource }),
-        ...(decision !== undefined && { decision }),
-        ...(correlation !== undefined && { correlation }),
-        ...(metadata !== undefined && { metadata }),
-        ...(head !== undefined && { previousHash: head.hash }),
-        keyId: this.activeKeyId,
-      } satisfies Omit<SecurityAuditRecord, "hash">;
-      const record: SecurityAuditRecord = Object.freeze({
-        ...unsigned,
-        hash: computeSecurityAuditHash(unsigned, activeKey),
-      });
+      const record = buildRecord(head);
       try {
         return await commit({
           record,
-          ...(this.outbox !== undefined && {
-            outbox: { nextAttemptAt: this.outbox.nextAttemptAt?.(recordedAt) ?? recordedAt },
-          }),
+          ...(outbox !== undefined && { outbox }),
         });
       } catch (error) {
         if (!isChainBoundaryConflict(error)) throw error;
@@ -476,7 +527,7 @@ export interface SecurityAuditSearchFilter {
 /** Namespace-authorized, cursor-paged audit reads which audit their own sensitive access. */
 export class SecurityAuditReader {
   constructor(
-    private readonly store: SecurityStoreV2,
+    private readonly store: SecurityStore,
     private readonly authorizer: Authorizer,
     private readonly audit: DurableSecurityAudit,
     private readonly clock: { readonly currentTimeMs: () => number } = {
@@ -609,7 +660,7 @@ export class SecurityToolAuditBridge implements ToolAuditLogger {
 }
 
 async function allAuditRows(
-  store: SecurityStoreV2,
+  store: SecurityStore,
   namespaceId: string,
 ): Promise<SecurityAuditRecord[]> {
   const rows: SecurityAuditRecord[] = [];
@@ -823,6 +874,21 @@ function safeTime(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 0)
     throw new TypeError(`${label} must be a non-negative safe integer`);
   return value;
+}
+
+function deadlineFromStoreClock(params: {
+  readonly storeTime: number;
+  readonly sourceTime: number;
+  readonly requestedTime: number;
+}): number {
+  const storeTime = safeTime(params.storeTime, "store time");
+  const sourceTime = safeTime(params.sourceTime, "outbox source time");
+  const requestedTime = safeTime(params.requestedTime, "outbox next attempt");
+  const delay = requestedTime - sourceTime;
+  if (!Number.isSafeInteger(delay) || delay < 0) {
+    throw new TypeError("outbox next attempt must not precede the audit record");
+  }
+  return safeTime(storeTime + delay, "outbox next attempt");
 }
 
 function pageLimit(value: number | undefined): number {

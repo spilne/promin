@@ -464,11 +464,13 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
     if (!entry.requestContext) return jsonError(403, "forbidden");
     const currentActor = requestPrincipal(req);
     if (!currentActor) return jsonError(403, "forbidden");
+    const represented = entry.requestContext.effective ?? entry.requestContext.actor;
     if (
       entry.elevated !== false &&
       currentActor.kind !== "operator" &&
-      currentActor.kind === entry.requestContext.actor.kind &&
-      currentActor.id === entry.requestContext.actor.id
+      ((currentActor.kind === entry.requestContext.actor.kind &&
+        currentActor.id === entry.requestContext.actor.id) ||
+        (currentActor.kind === represented.kind && currentActor.id === represented.id))
     ) {
       return jsonError(403, "forbidden");
     }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
   InMemoryAgentInstanceRegistry,
   InMemoryAgentRegistry,
+  InMemoryPendingApprovalStore,
   type Agent,
   type RegisteredAgent,
 } from "@promin/agent";
@@ -137,6 +138,7 @@ async function boot(params: {
   const resolved: ResolveScope[] = [];
   const agents = new ZoryaAgents({
     registry,
+    approvals: new InMemoryPendingApprovalStore(),
     instances: new InMemoryAgentInstanceRegistry(),
     resolve: (_recipe: RegisteredAgent, scope?: ResolveScope) => {
       resolved.push(scope ?? {});

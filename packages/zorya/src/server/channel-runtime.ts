@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { SystemWallClock, type WallClock } from "@promin/workflow";
 import type {
   AuthorizationDecision,
   Principal,
@@ -116,7 +117,7 @@ export interface CoreChannelRuntimeConfig {
   readonly store: ChannelStateStore;
   readonly security: Pick<ZoryaSecurity, "resolveIdentity" | "authorize" | "recordAudit">;
   readonly invoker: ChannelTurnInvoker;
-  readonly now?: () => number;
+  readonly clock?: WallClock;
 }
 
 /**
@@ -129,7 +130,7 @@ export class CoreChannelRuntime implements ZoryaChannelRuntime {
   private readonly store: ChannelStateStore;
   private readonly security: CoreChannelRuntimeConfig["security"];
   private readonly invoker: ChannelTurnInvoker;
-  private readonly now: () => number;
+  private readonly clock: WallClock;
 
   constructor(config: CoreChannelRuntimeConfig) {
     this.channelId = requiredText(config.channelId, "channel id", 128);
@@ -140,7 +141,7 @@ export class CoreChannelRuntime implements ZoryaChannelRuntime {
     this.store = config.store;
     this.security = config.security;
     this.invoker = config.invoker;
-    this.now = config.now ?? Date.now;
+    this.clock = config.clock ?? SystemWallClock;
   }
 
   async handle(input: ChannelInboundEvent): Promise<ChannelRuntimeResult> {
@@ -150,7 +151,7 @@ export class CoreChannelRuntime implements ZoryaChannelRuntime {
       channelId: this.channelId,
       eventId: event.eventId,
       correlationId,
-      receivedAt: this.now(),
+      receivedAt: this.clock.currentTimeMs(),
     });
     if (!claimed) return { kind: "duplicate", correlationId };
 
@@ -266,7 +267,7 @@ export class CoreChannelRuntime implements ZoryaChannelRuntime {
     try {
       await this.security.recordAudit({
         event: "channel.event.authorization",
-        occurredAt: new Date(this.now()).toISOString(),
+        occurredAt: new Date(this.clock.currentTimeMs()).toISOString(),
         context: params.context,
         namespaceId: params.event.target.namespaceId,
         resource: {
@@ -297,7 +298,7 @@ export class CoreChannelRuntime implements ZoryaChannelRuntime {
       channelId: this.channelId,
       eventId,
       status,
-      completedAt: this.now(),
+      completedAt: this.clock.currentTimeMs(),
       ...(runId !== undefined && { runId }),
     });
   }

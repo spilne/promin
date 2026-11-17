@@ -3,7 +3,7 @@ import { SECURITY_STORE_LIMITS } from "./security-store.ts";
 import type {
   SecurityAuditOutboxRecord,
   SecurityAuditRecord,
-  SecurityStoreV2,
+  SecurityStore,
 } from "./security-store.ts";
 
 export interface SecurityAuditDestination {
@@ -31,7 +31,7 @@ export interface SecurityAuditOutboxMetrics extends SecurityAuditOutboxReport {
 }
 
 export interface SecurityAuditOutboxWorkerConfig {
-  readonly store: SecurityStoreV2;
+  readonly store: SecurityStore;
   readonly destination: SecurityAuditDestination;
   /** Stable replica identity recorded on leases. */
   readonly owner: string;
@@ -48,7 +48,7 @@ export interface SecurityAuditOutboxWorkerConfig {
 
 /** Lease-fenced, restart-safe delivery of the durable security audit outbox. */
 export class SecurityAuditOutboxWorker {
-  private readonly store: SecurityStoreV2;
+  private readonly store: SecurityStore;
   private readonly destination: SecurityAuditDestination;
   private readonly owner: string;
   private readonly clock: WallClock;
@@ -177,15 +177,16 @@ export class SecurityAuditOutboxWorker {
     }
   }
 
-  private release(
+  private async release(
     lease: SecurityAuditOutboxRecord,
     leaseToken: string,
     lastError: string,
   ): Promise<boolean> {
+    const now = await this.store.currentTimeMs();
     return this.store.releaseAuditOutbox({
       eventId: lease.eventId,
       leaseToken,
-      nextAttemptAt: safeSum(this.clock.currentTimeMs(), this.retryDelay(lease.attempts)),
+      nextAttemptAt: safeSum(now, this.retryDelay(lease.attempts)),
       lastError,
     });
   }

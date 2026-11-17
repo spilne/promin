@@ -18,11 +18,12 @@ import {
   type SecurityPermission,
   type SecurityResourceKind,
   type SecurityResourceRef,
+  type DashboardLoginIdentity,
+  type DashboardLoginProvider,
   type ZoryaSecurity,
 } from "../server/security/index.ts";
-import type { LoginIdentity, LoginProvider } from "./login-provider.ts";
 import { breakGlassGrantIdFromToken } from "./break-glass.ts";
-import type { SecuritySession, SecurityStoreV2, SecurityUser } from "./security-store.ts";
+import type { SecuritySession, SecurityStore, SecurityUser } from "./security-store.ts";
 import { authenticateServiceAccountCredential } from "./service-account-credentials.ts";
 import {
   clearLoginStateCookie,
@@ -59,8 +60,8 @@ export interface ServiceAccountConfig {
 }
 
 export interface ZoryaSecurityConfig {
-  readonly store: SecurityStoreV2;
-  readonly loginProviders: ReadonlyArray<LoginProvider>;
+  readonly store: SecurityStore;
+  readonly loginProviders: ReadonlyArray<DashboardLoginProvider>;
   readonly publicBaseUrl: string;
   readonly allowedDomains: ReadonlyArray<string>;
   readonly defaultAccessRole?: string;
@@ -156,7 +157,7 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
     throw new Error("createZoryaSecurity: allowedDomains must be domain names");
   }
   const admins = new Set((config.adminEmails ?? []).map(normalize));
-  const providers = new Map<string, LoginProvider>();
+  const providers = new Map<string, DashboardLoginProvider>();
   for (const provider of config.loginProviders) {
     if (!provider.id || providers.has(provider.id)) {
       throw new Error(`createZoryaSecurity: duplicate or empty login provider id "${provider.id}"`);
@@ -237,7 +238,7 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
     if (
       !grant ||
       grant.revokedAt !== undefined ||
-      grant.expiresAt <= clock.currentTimeMs() ||
+      grant.expiresAt <= (await config.store.currentTimeMs()) ||
       grant.tokenHash !== tokenHash ||
       params.session.tokenHash !== tokenHash ||
       !samePrincipal(grant.principal, params.session.principal)
@@ -465,7 +466,6 @@ export function createZoryaSecurity(config: ZoryaSecurityConfig): ZoryaSecurity 
         store: config.store,
         token,
         pepper: serviceAccountCredentialPepper,
-        clock,
       });
       if (durable) return principalForServiceAccount(durable.id);
       const presented = digest(token);
@@ -748,7 +748,7 @@ function samePrincipal(left: PrincipalRef, right: PrincipalRef): boolean {
 }
 
 async function principalAccessFor(
-  store: SecurityStoreV2,
+  store: SecurityStore,
   subject: { readonly kind: "user" | "service-account"; readonly id: string },
 ): Promise<{
   readonly accessRoles: Readonly<Record<string, ReadonlyArray<string>>>;
@@ -772,7 +772,7 @@ async function principalAccessFor(
 }
 
 async function accessAt(
-  store: SecurityStoreV2,
+  store: SecurityStore,
   principal: Principal,
   namespaceId: string,
 ): Promise<{
@@ -814,7 +814,7 @@ function ownRoles(
 function mountLoginRoutes(params: {
   readonly router: Router;
   readonly config: ZoryaSecurityConfig;
-  readonly providers: ReadonlyMap<string, LoginProvider>;
+  readonly providers: ReadonlyMap<string, DashboardLoginProvider>;
   readonly domains: ReadonlySet<string>;
   readonly admins: ReadonlySet<string>;
   readonly clock: WallClock;
@@ -864,7 +864,7 @@ function mountLoginRoutes(params: {
       const code = url.searchParams.get("code");
       if (!code) return jsonError(400, "invalid_callback");
 
-      let identity: LoginIdentity;
+      let identity: DashboardLoginIdentity;
       try {
         identity = await provider.exchange({
           code,
@@ -895,7 +895,7 @@ function mountLoginRoutes(params: {
 
       const token = newSessionToken();
       const csrf = newCsrfToken();
-      const createdAt = params.clock.currentTimeMs();
+      const createdAt = await params.config.store.currentTimeMs();
       await params.config.store.putSession({
         tokenHash: hashSessionToken(token),
         principal: { kind: "user", id: result.user.id },
@@ -944,7 +944,7 @@ function mountLoginRoutes(params: {
       }
       await params.config.store.revokeSession({
         tokenHash,
-        revokedAt: params.clock.currentTimeMs(),
+        revokedAt: await params.config.store.currentTimeMs(),
       });
       const headers = new Headers();
       for (const value of clearSessionCookies(params.secure)) headers.append("set-cookie", value);

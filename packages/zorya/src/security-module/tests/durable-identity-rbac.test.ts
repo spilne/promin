@@ -9,12 +9,12 @@ import {
   type Principal,
 } from "../../server/security/index.ts";
 import { InMemorySecurityStore } from "../in-memory-security-store.ts";
-import type { LoginProvider } from "../login-provider.ts";
+import type { DashboardLoginProvider } from "../../server/security/index.ts";
 import { createZoryaSecurity } from "../zorya-security.ts";
 
 const BASE_URL = "https://zorya.test";
 const SECRET = "0123456789abcdef0123456789abcdef";
-const provider: LoginProvider = {
+const provider: DashboardLoginProvider = {
   id: "test",
   authorizationUrl: async () => "https://identity.test/authorize",
   exchange: async () => {
@@ -55,7 +55,8 @@ function environment(
 
 async function createUser(env: ReturnType<typeof environment>, email: string, role?: string) {
   return (
-    await env.store.findOrCreateUser({
+    await env.store.findOrCreateProviderUser({
+      identity: { providerId: "test", issuer: "https://id.test", subject: email },
       email,
       bindings: role ? [{ namespaceId: ORG_WIDE_NAMESPACE, accessRole: role }] : [],
     })

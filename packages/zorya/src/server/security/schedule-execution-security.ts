@@ -206,9 +206,10 @@ export class ScheduleExecutionSecurity {
       return undefined;
     }
     const context = snapshotSecurityContext(resolved);
-    const principal = samePrincipal(context.actor, context.effective)
-      ? context.actor
-      : await this.security.resolvePrincipal(context.effective);
+    const principal =
+      context.actor.kind === "operator" || samePrincipal(context.actor, context.effective)
+        ? context.actor
+        : await this.security.resolvePrincipal(context.effective);
     if (!principal) {
       await this.auditDenied({
         params,
@@ -322,6 +323,9 @@ function bindAgentResource(
       : undefined;
   if (resourceId === undefined) return normalizeRunSecurityContext(context);
   const normalized = normalizeRunSecurityContext(context);
+  if (normalized.actor.kind === "operator" && normalized.effective !== undefined) {
+    return normalized;
+  }
   if (
     normalized.effective !== undefined &&
     (normalized.effective.kind !== "user" || normalized.effective.id !== resourceId)

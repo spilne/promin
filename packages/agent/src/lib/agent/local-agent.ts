@@ -1075,6 +1075,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
         workflow: wf,
         workflowId,
         input: existing.input,
+        ...(namespaceId !== undefined && { namespace: namespaceId }),
         ...(securityContext !== undefined && { securityContext }),
       })) as AgentResult;
     }
@@ -1086,6 +1087,7 @@ export class LocalAgent<TOutput = unknown> implements Agent<AgentInput, TOutput>
       workflow: wf,
       workflowId,
       input: ceiling ? { ...prepared.input, budget: ceiling } : prepared.input,
+      ...(namespaceId !== undefined && { namespace: namespaceId }),
       ...(securityContext !== undefined && { securityContext }),
     })) as AgentResult;
   }
@@ -1797,6 +1799,7 @@ class LocalAgentThread<TOutput = unknown> implements AgentThread<AgentInput, TOu
       workflow: wf,
       workflowId,
       input,
+      namespace: this.deps.key.namespaceId,
       ...(this.deps.securityContext !== undefined && {
         securityContext: this.deps.securityContext,
       }),

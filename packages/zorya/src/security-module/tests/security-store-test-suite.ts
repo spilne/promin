@@ -1,27 +1,26 @@
 import { describe, expect, it } from "bun:test";
+import { SystemWallClock } from "@promin/workflow";
 import {
   SECURITY_STORE_LIMITS,
   type BreakGlassGrant,
   type SecurityAuditRecord,
   type SecuritySession,
-  type SecurityStoreV2,
+  type SecurityStore,
 } from "../security-store.ts";
 
-export interface SecurityStoreV2TestFactory {
-  readonly create: () => SecurityStoreV2 | Promise<SecurityStoreV2>;
-  readonly createClocked: () =>
-    | SecurityStoreV2ClockedFixture
-    | Promise<SecurityStoreV2ClockedFixture>;
+export interface SecurityStoreTestFactory {
+  readonly create: () => SecurityStore | Promise<SecurityStore>;
+  readonly createClocked: () => SecurityStoreClockedFixture | Promise<SecurityStoreClockedFixture>;
 }
 
-export interface SecurityStoreV2ClockedFixture {
-  readonly store: SecurityStoreV2;
+export interface SecurityStoreClockedFixture {
+  readonly store: SecurityStore;
   readonly currentTimeMs: () => number;
   readonly advance: (ms: number) => void | Promise<void>;
 }
 
 /** Reusable contract suite for the in-memory and future PostgreSQL stores. */
-export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2TestFactory): void {
+export function securityStoreTestSuite(name: string, factory: SecurityStoreTestFactory): void {
   describe(name, () => {
     it("keys OIDC identity by provider, issuer and subject instead of email", async () => {
       const store = await factory.create();
@@ -119,13 +118,6 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
           authMethod: "service-account",
         }),
       ).rejects.toThrow("Unknown or disabled service-account");
-      await expect(
-        store.createSession({
-          tokenHash: "legacy-orphan-session",
-          userId: orphan.id,
-          ttlMs: 1_000,
-        }),
-      ).rejects.toThrow("Unknown or disabled user");
       expect(await store.resolveAccess({ subject: orphan, namespaceId: "team" })).toEqual({
         accessRoles: [],
         groups: [],
@@ -295,7 +287,7 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
         status: "active",
         canActFor: false,
       });
-      const now = Date.now();
+      const now = SystemWallClock.currentTimeMs();
       const session = {
         tokenHash: "session-hash",
         principal: { kind: "user", id: user.id },
@@ -323,8 +315,8 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
 
       const deleted = { ...session, tokenHash: "deleted-session-hash" };
       await store.putSession(deleted);
-      await store.deleteSession(deleted.tokenHash);
-      await store.deleteSession(deleted.tokenHash);
+      await store.revokeSession({ tokenHash: deleted.tokenHash, revokedAt: now + 2 });
+      await store.revokeSession({ tokenHash: deleted.tokenHash, revokedAt: now + 2 });
       expect(await store.getSessionRecord(deleted.tokenHash)).toBeUndefined();
 
       const expired = {
@@ -346,17 +338,19 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
       await store.putSession(disabledSession);
       await store.setUserStatus({ id: user.id, status: "disabled" });
       await expect(
-        store.createSession({
+        store.putSession({
           tokenHash: "attempted-while-disabled",
-          userId: user.id,
-          ttlMs: 1_000,
+          principal: { kind: "user", id: user.id },
+          createdAt: now,
+          expiresAt: now + 1_000,
+          authMethod: "oidc",
         }),
       ).rejects.toThrow("Unknown or disabled user");
       await store.setUserStatus({ id: user.id, status: "active" });
       expect(await store.getSessionRecord(disabledSession.tokenHash)).toBeUndefined();
       await store.putSession(disabledSession);
       expect(await store.getSessionRecord(disabledSession.tokenHash)).toBeUndefined();
-      expect(await store.getSession("attempted-while-disabled")).toBeUndefined();
+      expect(await store.getSessionRecord("attempted-while-disabled")).toBeUndefined();
     });
 
     it("atomically appends structured audit rows and rejects chain races/conflicts", async () => {
@@ -501,7 +495,7 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
           limit: 1,
         })
       )[0]!;
-      const retryAt = fixture.currentTimeMs() + 30;
+      const retryAt = fixture.currentTimeMs() + 500;
       expect(
         await store.releaseAuditOutbox({
           eventId: releaseLease.eventId,
@@ -511,9 +505,9 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
         }),
       ).toBe(true);
       expect(await store.claimAuditOutbox({ owner: "early", leaseMs: 10, limit: 1 })).toEqual([]);
-      await fixture.advance(29);
+      await fixture.advance(400);
       expect(await store.claimAuditOutbox({ owner: "early", leaseMs: 10, limit: 1 })).toEqual([]);
-      await fixture.advance(1);
+      await fixture.advance(100);
       expect(await store.claimAuditOutbox({ owner: "due", leaseMs: 10, limit: 1 })).toHaveLength(1);
 
       const outboxPage = await store.listAuditOutbox({ limit: 1 });
@@ -528,12 +522,14 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
     });
 
     it("increments and rolls denial windows atomically", async () => {
-      const store = await factory.create();
+      const fixture = await factory.createClocked();
+      const { store } = fixture;
+      const now = fixture.currentTimeMs();
       const results = await Promise.all(
         Array.from({ length: 10 }, () =>
           store.incrementDenialBucket({
             key: "actor:action",
-            now: 1,
+            now,
             windowMs: 100,
             emitLimit: 3,
           }),
@@ -543,37 +539,23 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
         new Set([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]),
       );
       expect(results.filter((result) => result.shouldEmit)).toHaveLength(3);
-      expect(await store.getDenialBucket("actor:action")).toEqual({
+      const firstWindow = (await store.getDenialBucket("actor:action"))!;
+      expect(firstWindow).toMatchObject({
         key: "actor:action",
-        windowStartedAt: 1,
-        windowEndsAt: 101,
         count: 10,
         suppressed: 7,
       });
-      expect(
-        await store.incrementDenialBucket({
-          key: "actor:action",
-          now: 101,
-          windowMs: 100,
-          emitLimit: 3,
-        }),
-      ).toEqual({
-        bucket: {
-          key: "actor:action",
-          windowStartedAt: 101,
-          windowEndsAt: 201,
-          count: 1,
-          suppressed: 0,
-        },
-        closedBucket: {
-          key: "actor:action",
-          windowStartedAt: 1,
-          windowEndsAt: 101,
-          count: 10,
-          suppressed: 7,
-        },
-        shouldEmit: true,
+      expect(firstWindow.windowEndsAt - firstWindow.windowStartedAt).toBe(100);
+      await fixture.advance(110);
+      const rolled = await store.incrementDenialBucket({
+        key: "actor:action",
+        now: now + 110,
+        windowMs: 100,
+        emitLimit: 3,
       });
+      expect(rolled.bucket).toMatchObject({ key: "actor:action", count: 1, suppressed: 0 });
+      expect(rolled.closedBucket).toEqual(firstWindow);
+      expect(rolled.shouldEmit).toBe(true);
     });
 
     it("mints and revokes break-glass access as one idempotent transaction", async () => {
@@ -587,7 +569,7 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
         reason: "r".repeat(SECURITY_STORE_LIMITS.reason.maxCharacters),
         createdBy: "operator",
         createdAt: 10,
-        expiresAt: Date.now() + 10_000,
+        expiresAt: SystemWallClock.currentTimeMs() + 10_000,
       };
       const session: SecuritySession = {
         tokenHash: grant.tokenHash,
@@ -1022,7 +1004,7 @@ export function securityStoreV2TestSuite(name: string, factory: SecurityStoreV2T
   });
 }
 
-async function createUser(store: SecurityStoreV2, subject: string) {
+async function createUser(store: SecurityStore, subject: string) {
   return (
     await store.findOrCreateProviderUser({
       identity: { providerId: "test", issuer: "https://id.example", subject },

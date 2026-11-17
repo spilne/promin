@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import type { LoginIdentity } from "../login-provider.ts";
+import type { DashboardLoginIdentity } from "../../server/security/index.ts";
 
 export type FakeTokenMode =
   | "wrong-key"
@@ -11,7 +11,7 @@ export type FakeTokenMode =
   | "valid";
 
 interface Authorization {
-  readonly identity: LoginIdentity;
+  readonly identity: DashboardLoginIdentity;
   readonly codeChallenge: string;
   readonly mode: FakeTokenMode;
 }
@@ -20,7 +20,7 @@ export interface FakeOidcIssuer {
   readonly issuer: string;
   readonly clientId: string;
   readonly clientSecret: string;
-  nextLogin(identity: Partial<LoginIdentity> & { readonly email: string }): void;
+  nextLogin(identity: Partial<DashboardLoginIdentity> & { readonly email: string }): void;
   signWith(mode: FakeTokenMode): void;
   rotateSigningKey(): Promise<void>;
   stop(): Promise<void>;
@@ -43,7 +43,7 @@ export async function startFakeOidcIssuer(
   let validJwk = await exportJWK(validKeys.publicKey);
   Object.assign(validJwk, { kid: `valid-${validKid}`, alg: "RS256", use: "sig" });
   const authorizations = new Map<string, Authorization>();
-  let nextIdentity: LoginIdentity = {
+  let nextIdentity: DashboardLoginIdentity = {
     subject: "default-subject",
     email: "user@example.com",
     emailVerified: true,

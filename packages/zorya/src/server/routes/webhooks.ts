@@ -217,8 +217,12 @@ export interface WebhookDeliveryStore {
     readonly token?: FenceToken;
     readonly error: string;
   }): Promise<void>;
-  /** Release a retryable claim without changing its durable attempt or outcome. */
-  release(params: { readonly key: string; readonly token?: FenceToken }): Promise<void>;
+  /** Release a retryable claim, optionally advancing its durable pre-invocation attempt. */
+  release(params: {
+    readonly key: string;
+    readonly token?: FenceToken;
+    readonly advanceAttempt?: boolean;
+  }): Promise<void>;
   /**
    * Deliveries claimed but neither completed nor failed — dispatches in
    * flight, or interrupted by a crash. Claiming one answers `in_flight`
@@ -388,11 +392,34 @@ export class WorkflowStorageWebhookDeliveryStore implements WebhookDeliveryStore
     await this.storage.releaseLock({ workflowId, ...guard });
   }
 
-  async release(params: { key: string; token?: FenceToken }): Promise<void> {
+  async release(params: {
+    key: string;
+    token?: FenceToken;
+    advanceAttempt?: boolean;
+  }): Promise<void> {
     const workflowId = deliveryWorkflowId(params.key);
+    const guard = params.token !== undefined ? { guard: { fenceToken: params.token } } : {};
+    if (params.advanceAttempt) {
+      const state = await this.storage.loadWorkflow(workflowId);
+      if (state) {
+        const stored = state.input as DeliveryRowInput;
+        await this.storage.failWorkflow({ workflowId, error: "webhook dispatch retry", ...guard });
+        await this.storage.startFreshRun({
+          workflowId,
+          nextInput: { value: { ...stored, attempt: stored.attempt + 1 } },
+          ...guard,
+        });
+        await this.storage.suspendWorkflow({
+          workflowId,
+          stepName: "dispatch",
+          stepUpdate: { status: "running" },
+          ...guard,
+        });
+      }
+    }
     await this.storage.releaseLock({
       workflowId,
-      ...(params.token !== undefined && { guard: { fenceToken: params.token } }),
+      ...guard,
     });
   }
 
@@ -569,11 +596,12 @@ export class InMemoryWebhookDeliveryStore implements WebhookDeliveryStore {
     });
   }
 
-  async release(params: { key: string }): Promise<void> {
+  async release(params: { key: string; advanceAttempt?: boolean }): Promise<void> {
     const row = this.rows.get(params.key);
     if (!row || row.state !== "in_flight") return;
     this.set(params.key, {
       ...row,
+      attempt: params.advanceAttempt ? row.attempt + 1 : row.attempt,
       expiresAt: this.clock.currentTimeMs(),
     });
   }
@@ -688,6 +716,8 @@ export class WebhookSecurityDeniedError extends Error {
 class WebhookPermanentDeliveryError extends Error {
   readonly _tag = "WebhookPermanentDeliveryError";
 }
+
+const MAX_PRE_INVOCATION_ATTEMPTS = 3;
 
 type WebhookAuthorizationStage = "ingest" | "dispatch" | "recovery" | "invoke";
 
@@ -946,10 +976,17 @@ async function dispatchDelivery(params: {
           error: "webhook dispatch failed",
         })
         .catch(() => {});
+    } else if (attempt >= MAX_PRE_INVOCATION_ATTEMPTS) {
+      await deps.deliveries
+        .terminate({
+          ...claimParams,
+          error: `webhook dispatch failed before invocation after ${attempt} attempts`,
+        })
+        .catch(() => {});
     } else {
-      // Pre-invocation infrastructure failures are safe to retry under the
-      // same attempt: no agent turn was started.
-      await deps.deliveries.release(claimParams).catch(() => {});
+      // Advance the durable attempt so repeated resolver/infrastructure
+      // failures are bounded instead of being reclaimed forever.
+      await deps.deliveries.release({ ...claimParams, advanceAttempt: true }).catch(() => {});
     }
     throw err;
   }

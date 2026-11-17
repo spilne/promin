@@ -472,16 +472,18 @@ export async function runChildWorkflow(params: {
   readonly input: unknown;
   /** The parent's namespace; a child created here is stored under it. */
   readonly namespace?: string;
-  /** The parent's stored identity; loaded from storage when omitted. */
-  readonly securityContext?: RunSecurityContext;
+  /** The parent's stored identity; `null` means the caller knows there is none. */
+  readonly securityContext?: RunSecurityContext | null;
   /** The parent's lock signal: the child stops when the parent loses (or abandons) its run. */
   readonly signal?: AbortSignal;
 }): Promise<unknown> {
   const { runtime, workflow, workflowId, input } = params;
   const def = workflow._definition;
   const inheritedSecurityContext =
-    params.securityContext ??
-    (await runtime.storage.loadWorkflow(params.parentWorkflowId))?.securityContext;
+    params.securityContext === null
+      ? undefined
+      : (params.securityContext ??
+        (await runtime.storage.loadWorkflow(params.parentWorkflowId))?.securityContext);
   const created = await runtime.storage.createWorkflow({
     workflowId,
     workflowName: workflow.name,
@@ -852,9 +854,7 @@ async function runCycleBody(cycle: CycleParams & { phase: CyclePhase }): Promise
         ...((state?.namespace ?? namespace) !== undefined && {
           namespace: state?.namespace ?? namespace,
         }),
-        ...(state?.securityContext !== undefined && {
-          securityContext: state.securityContext,
-        }),
+        securityContext: state?.securityContext ?? null,
         signal: lock.signal,
         ...child,
       }),

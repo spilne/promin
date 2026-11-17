@@ -1,7 +1,7 @@
 import { createRemoteJWKSet, customFetch, errors, jwtVerify } from "jose";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import { z } from "zod";
-import type { LoginIdentity, LoginProvider } from "./login-provider.ts";
+import type { DashboardLoginIdentity, DashboardLoginProvider } from "../server/security/index.ts";
 
 const DiscoverySchema = z.object({
   issuer: z.string().url(),
@@ -28,7 +28,7 @@ export interface OidcLoginProviderConfig {
 }
 
 /** Generic authorization-code OIDC provider with PKCE and verified ID tokens. */
-export function oidcLoginProvider(config: OidcLoginProviderConfig): LoginProvider {
+export function oidcLoginProvider(config: OidcLoginProviderConfig): DashboardLoginProvider {
   const id = config.id ?? "oidc";
   const issuer = config.issuer;
   const fetcher = config.fetch ?? fetch;
@@ -88,7 +88,7 @@ export function oidcLoginProvider(config: OidcLoginProviderConfig): LoginProvide
       url.searchParams.set("code_challenge_method", "S256");
       return url.toString();
     },
-    exchange: async (params): Promise<LoginIdentity> => {
+    exchange: async (params): Promise<DashboardLoginIdentity> => {
       const metadata = await discovery();
       const body = new URLSearchParams({
         grant_type: "authorization_code",

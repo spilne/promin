@@ -573,7 +573,10 @@ export function patchSchedule(deps: ScheduleRoutesDeps) {
     const assignmentChanged =
       patch.serviceAccountId !== undefined ||
       patch.runAsUserId !== undefined ||
-      (patch.metadata !== undefined && current.securityContext?.actor.kind === "service-account");
+      (current.securityContext?.actor.kind === "service-account" &&
+        (patch.metadata !== undefined ||
+          patch.workflowName !== undefined ||
+          patch.input !== undefined));
     let securedMerged = merged;
     if (assignmentChanged) {
       const assignment = await assignmentForWrite({

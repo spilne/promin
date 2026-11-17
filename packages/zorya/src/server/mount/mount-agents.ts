@@ -402,7 +402,7 @@ export function mountAgents(params: {
         { resource: "approval", action: "decide" },
         { resource: "approval", action: "decide-elevated" },
       ],
-      resolveTarget: approvalBodyTarget({ approvals: agentDeps.approvals }),
+      resolveTarget: approvalBodyTarget({ approvals: agents.approvals }),
     },
     streamThreadApproval(agentDeps),
   );

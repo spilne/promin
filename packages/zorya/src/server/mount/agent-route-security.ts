@@ -195,13 +195,8 @@ export function approvalBodyTarget(params: { readonly approvals?: PendingApprova
             })
           : undefined;
     const found =
-      params.approvals &&
-      agentId &&
-      resourceId &&
-      threadId &&
-      namespaceId !== "org" &&
-      toolCallId !== "unknown"
-        ? await params.approvals.get({
+      agentId && resourceId && threadId && namespaceId !== "org" && toolCallId !== "unknown"
+        ? await params.approvals?.get({
             namespaceId,
             agentId,
             resourceId,

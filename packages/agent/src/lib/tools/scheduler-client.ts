@@ -102,9 +102,6 @@ export function inProcessSchedulerClient(config: InProcessSchedulerClientConfig)
       : normalizeRunSecurityContext(scope.securityContext);
   return {
     async create(input) {
-      if (securityContext === undefined) {
-        throw new Error("scheduler create requires a durable security context");
-      }
       const dsConfig: DurableScheduleConfig = {
         id: input.id,
         ...(input.name !== undefined && { name: input.name }),
@@ -117,7 +114,7 @@ export function inProcessSchedulerClient(config: InProcessSchedulerClientConfig)
         ...(input.endAt !== undefined && { endAt: input.endAt }),
         enabled: true,
         metadata: input.metadata,
-        securityContext,
+        ...(securityContext !== undefined && { securityContext }),
       };
       // Insert-if-absent; it also seeds nextRun (now, or a later startAt)
       // so the schedule is visible to findDue right away.

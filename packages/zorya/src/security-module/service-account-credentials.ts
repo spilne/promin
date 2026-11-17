@@ -1,8 +1,7 @@
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import type { WallClock } from "@promin/workflow";
 import type {
   SecurityServiceAccount,
-  SecurityStoreV2,
+  SecurityStore,
   ServiceAccountCredential,
 } from "./security-store.ts";
 
@@ -21,27 +20,29 @@ export interface IssuedServiceAccountCredential {
 }
 
 export async function issueServiceAccountCredential(params: {
-  readonly store: SecurityStoreV2;
+  readonly store: SecurityStore;
   readonly serviceAccountId: string;
   readonly pepper: string;
-  readonly clock: WallClock;
   readonly expiresAt?: number;
 }): Promise<IssuedServiceAccountCredential> {
-  const material = credentialMaterial(params);
+  const material = credentialMaterial({
+    ...params,
+    createdAt: await params.store.currentTimeMs(),
+  });
   await params.store.putServiceAccountCredential(material.stored);
   return material.issued;
 }
 
 export async function createServiceAccountWithCredential(params: {
-  readonly store: SecurityStoreV2;
+  readonly store: SecurityStore;
   readonly account: SecurityServiceAccount;
   readonly pepper: string;
-  readonly clock: WallClock;
   readonly expiresAt?: number;
 }): Promise<IssuedServiceAccountCredential | undefined> {
   const material = credentialMaterial({
     ...params,
     serviceAccountId: params.account.id,
+    createdAt: await params.store.currentTimeMs(),
   });
   const created = await params.store.createServiceAccountWithCredential({
     account: params.account,
@@ -53,13 +54,13 @@ export async function createServiceAccountWithCredential(params: {
 function credentialMaterial(params: {
   readonly serviceAccountId: string;
   readonly pepper: string;
-  readonly clock: WallClock;
+  readonly createdAt: number;
   readonly expiresAt?: number;
 }): {
   readonly stored: ServiceAccountCredential;
   readonly issued: IssuedServiceAccountCredential;
 } {
-  const createdAt = params.clock.currentTimeMs();
+  const createdAt = params.createdAt;
   if (
     params.expiresAt !== undefined &&
     (!Number.isSafeInteger(params.expiresAt) || params.expiresAt <= createdAt)
@@ -88,10 +89,9 @@ function credentialMaterial(params: {
 }
 
 export async function authenticateServiceAccountCredential(params: {
-  readonly store: SecurityStoreV2;
+  readonly store: SecurityStore;
   readonly token: string;
   readonly pepper: string;
-  readonly clock: WallClock;
 }): Promise<SecurityServiceAccount | undefined> {
   const parsed = parseToken(params.token);
   if (!parsed) return undefined;
@@ -100,7 +100,7 @@ export async function authenticateServiceAccountCredential(params: {
   const presented = Buffer.from(credentialDigest(params.pepper, parsed.id, parsed.secret), "hex");
   const expected = digestBuffer(credential.secretHash);
   if (!expected || !timingSafeEqual(presented, expected)) return undefined;
-  const now = params.clock.currentTimeMs();
+  const now = await params.store.currentTimeMs();
   if (
     credential.revokedAt !== undefined ||
     (credential.expiresAt !== undefined && credential.expiresAt <= now)

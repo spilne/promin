@@ -1,9 +1,9 @@
 import { expect, it } from "bun:test";
-import { FakeWallClock } from "@promin/workflow";
+import { FakeWallClock, SystemWallClock } from "@promin/workflow";
 import { postgresDescribe } from "@promin/postgres/testing";
 import { type DrizzleDb, execRaw } from "@spilne/perfect-postgres";
 import { sql } from "drizzle-orm";
-import { securityStoreV2TestSuite } from "../../security-module/tests/security-store-v2-test-suite.ts";
+import { securityStoreTestSuite } from "../../security-module/tests/security-store-test-suite.ts";
 import { BreakGlassAccessManager } from "../../security-module/break-glass.ts";
 import { DurableSecurityAudit } from "../../security-module/security-audit.ts";
 import { issueServiceAccountCredential } from "../../security-module/service-account-credentials.ts";
@@ -36,18 +36,19 @@ postgresDescribe(
       );
     }
 
-    securityStoreV2TestSuite("v2 conformance", {
+    securityStoreTestSuite("conformance", {
       create: async () => {
         await reset();
         return new PostgresSecurityStore({ db: pg.db });
       },
       createClocked: async () => {
         await reset();
-        const clock = FakeWallClock.create(1_000);
         return {
-          store: new PostgresSecurityStore({ db: pg.db, clock }),
-          currentTimeMs: () => clock.currentTimeMs(),
-          advance: (ms: number) => clock.advance(ms),
+          store: new PostgresSecurityStore({ db: pg.db }),
+          currentTimeMs: () => SystemWallClock.currentTimeMs(),
+          advance: async (ms: number) => {
+            await execRaw(pg.db, sql`SELECT pg_catalog.pg_sleep(${ms / 1_000})`);
+          },
         };
       },
     });
@@ -70,8 +71,8 @@ postgresDescribe(
         store: writer,
         serviceAccountId: "restart-agent",
         pepper: "0123456789abcdef0123456789abcdef",
-        clock,
       });
+      expect(issued.createdAt).toBeGreaterThan(clock.currentTimeMs());
 
       const reader = new PostgresSecurityStore({ db: pg.db, clock });
       const security = createZoryaSecurity({
@@ -135,7 +136,6 @@ postgresDescribe(
         store: writer,
         audit: writerAudit,
         publicBaseUrl: "https://zorya.test",
-        clock,
         idFactory: () => "postgres_grant",
         tokenSecretFactory: () => "s".repeat(43),
       }).issue({
@@ -143,6 +143,7 @@ postgresDescribe(
         reason: "OIDC outage",
         createdBy: "host-operator",
       });
+      expect(issued.createdAt).toBeGreaterThan(clock.currentTimeMs());
 
       const reader = new PostgresSecurityStore({ db: pg.db, clock });
       const readerAudit = new DurableSecurityAudit({
@@ -181,7 +182,6 @@ postgresDescribe(
         store: reader,
         audit: readerAudit,
         publicBaseUrl: "https://zorya.test",
-        clock,
       });
       expect(
         await restartedManager.revoke({ grantId: issued.grantId, revokedBy: "recovery-operator" }),
@@ -207,11 +207,12 @@ postgresDescribe(
       });
       const csrf = "csrf-restart-token";
       const firstToken = "session-restart-token";
+      const firstCreatedAt = await writer.currentTimeMs();
       await writer.putSession({
         tokenHash: hashSessionToken(firstToken),
         principal: { kind: "user", id: user.id },
-        createdAt: 1_000,
-        expiresAt: 2_000,
+        createdAt: firstCreatedAt,
+        expiresAt: firstCreatedAt + 60_000,
         csrfTokenHash: hashCsrfToken(csrf),
         authMethod: "oidc",
       });
@@ -248,7 +249,7 @@ postgresDescribe(
       ).toMatchObject({ id: user.id, accessRoles: { team: ["member"] } });
       await writer.revokeSession({
         tokenHash: hashSessionToken(firstToken),
-        revokedAt: 1_001,
+        revokedAt: firstCreatedAt + 1,
       });
       expect(
         await security.authenticate({
@@ -258,11 +259,12 @@ postgresDescribe(
       ).toBeUndefined();
 
       const secondToken = "session-disabled-user-token";
+      const secondCreatedAt = await writer.currentTimeMs();
       await writer.putSession({
         tokenHash: hashSessionToken(secondToken),
         principal: { kind: "user", id: user.id },
-        createdAt: 1_001,
-        expiresAt: 2_000,
+        createdAt: secondCreatedAt,
+        expiresAt: secondCreatedAt + 60_000,
         csrfTokenHash: hashCsrfToken(csrf),
         authMethod: "oidc",
       });
@@ -512,7 +514,7 @@ postgresDescribe(
       const releaseRetryBlock = await holdLeaseRow(releaseLease.eventId);
       const retry = store.releaseAuditOutbox({
         ...releaseLease,
-        nextAttemptAt: Date.now() + 10_000,
+        nextAttemptAt: (await store.currentTimeMs()) + 10_000,
         lastError: "retry",
       });
       await Bun.sleep(300);

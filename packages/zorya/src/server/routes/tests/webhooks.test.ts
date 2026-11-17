@@ -1061,9 +1061,24 @@ describe("webhook enterprise identity", () => {
     expect(invocations).toEqual(["ran"]);
     expect(errors).toHaveLength(1);
     expect(await deliveries.listUnfinished({ limit: 10 })).toEqual([]);
+
+    available = false;
+    const permanentlyBroken: WebhookDelivery = {
+      ...recorded,
+      key: "security-infra-permanent",
+      scope: { ...recorded.scope, deliveryId: "security-infra-permanent" },
+    };
+    await deliveries.claim({ delivery: permanentlyBroken, leaseMs: 100 });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      clock.advance(101);
+      await recovery.tick();
+    }
+    expect(invocations).toEqual(["ran"]);
+    expect(errors).toHaveLength(4);
+    expect(await deliveries.listUnfinished({ limit: 10 })).toEqual([]);
   });
 
-  it("releases pre-invoke failures but advances failed agent turns", async () => {
+  it("advances retry attempts for both pre-invoke failures and failed agent turns", async () => {
     for (const failure of ["registry", "resolver", "invoke"] as const) {
       let failing = true;
       let releases = 0;
@@ -1112,7 +1127,7 @@ describe("webhook enterprise identity", () => {
       expect(dispatched.map((entry) => entry.runId)).toEqual([
         webhookRunId({
           key: JSON.stringify(["github", "echo-bot", "acme", null, `retry-${failure}`]),
-          attempt: failure === "invoke" ? 2 : 1,
+          attempt: 2,
         }),
       ]);
     }

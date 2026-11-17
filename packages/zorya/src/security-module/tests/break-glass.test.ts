@@ -34,7 +34,6 @@ async function fixture(role = "admin") {
     audit,
     publicBaseUrl: BASE_URL,
     allowInsecureHttp: true,
-    clock,
     idFactory: () => "grant_1",
     tokenSecretFactory: () => TOKEN_SECRET,
   });

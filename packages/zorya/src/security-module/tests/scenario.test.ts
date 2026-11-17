@@ -128,6 +128,7 @@ async function buildServer(mode: "module" | "api-keys"): Promise<ScenarioEnviron
       registry,
       retrievers,
       memory,
+      approvals,
       resolve: async (recipe: RegisteredAgent, scope) => {
         const namespaceId = scope?.namespaceId;
         return resolveLocalAgent(recipe, {

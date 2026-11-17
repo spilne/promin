@@ -20,6 +20,7 @@ import { LocalWorkflows } from "../../services/workflows/index.ts";
 import { ZoryaScheduler, type ZoryaSchedulerConfig } from "../../services/scheduler/index.ts";
 import type { ApiError } from "../../api-types.ts";
 import { setRequestSecurityContext } from "../../security/index.ts";
+import { ScheduleAssignmentError } from "../../security/schedule-execution-security.ts";
 import { patchSchedule, type ScheduleDto, type ScheduleEmitResponse } from "../schedules.ts";
 
 const KEY = "operator-key-0123456789";
@@ -211,6 +212,50 @@ describe("PATCH /api/schedules/:id", () => {
       actor: { kind: "service-account", id: "scheduler-sa" },
       effective: { kind: "user", id: "bob" },
     });
+  });
+
+  it("refuses executable changes when the caller cannot reuse the service account", async () => {
+    for (const patch of [{ workflowName: "other" }, { input: { privileged: true } }]) {
+      const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
+      const storage = new InMemorySchedulerStorage({ clock });
+      await storage.insertSchedule({
+        id: "agent-job",
+        intervalMs: 60_000,
+        namespace: "team",
+        metadata: { workflowName: "hello", input: { privileged: false } },
+        securityContext: { actor: { kind: "service-account", id: "scheduler-sa" } },
+      });
+      const handler = patchSchedule({
+        storage,
+        clock,
+        assignedSecurityContext: async () => {
+          throw new ScheduleAssignmentError("assignment_denied");
+        },
+      });
+      const req = new Request("http://x/api/schedules/agent-job", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      setRequestSecurityContext({
+        req,
+        context: {
+          actor: {
+            kind: "user",
+            id: "editor",
+            accessRoles: { team: ["member"] },
+            canActFor: false,
+          },
+          effective: { kind: "user", id: "editor" },
+        },
+      });
+
+      expect((await handler(req, { id: "agent-job" })).status).toBe(403);
+      expect((await storage.loadSchedule("agent-job"))?.metadata).toEqual({
+        workflowName: "hello",
+        input: { privileged: false },
+      });
+    }
   });
 
   it("changes the trigger and recomputes the next run", async () => {

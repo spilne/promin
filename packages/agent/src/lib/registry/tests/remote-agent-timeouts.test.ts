@@ -280,6 +280,26 @@ describe("RemoteAgent timeouts", () => {
     }
   });
 
+  it("settles a suspended approval stream as a successful stop", async () => {
+    const agent = new RemoteAgent({
+      endpoint: "https://peer.example",
+      remoteAgentId: "peer",
+      fetch: async () =>
+        new Response(
+          'data: {"delta":"partial"}\n\nevent: approval-requested\ndata: {}\n\nevent: suspended\ndata: {}\n\n',
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    });
+    const out = agent.stream({ task: "hello" });
+
+    expect(await out.text).toBe("partial");
+    expect(await out.finishReason).toBe("stop");
+    expect((await collect(out.fullStream)).at(-1)).toMatchObject({
+      type: "finish",
+      reason: "stop",
+    });
+  });
+
   it("does not leak an unhandled text rejection when error surfaces are fully consumed", async () => {
     const unhandled: unknown[] = [];
     const onUnhandled = (reason: unknown) => unhandled.push(reason);

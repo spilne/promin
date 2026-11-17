@@ -45,7 +45,15 @@ function enterpriseApprovalSecurity(): ZoryaSecurity {
         canActFor: true,
       },
     ],
-    ["alice", { kind: "user", id: "alice", accessRoles: { ns: ["member"] }, canActFor: false }],
+    [
+      "alice",
+      {
+        kind: "user",
+        id: "alice",
+        accessRoles: { ns: ["member", "approver"] },
+        canActFor: false,
+      },
+    ],
     [
       "human-approver",
       {
@@ -239,6 +247,19 @@ describe("agent SSE — approval resume", () => {
       ),
     );
     expect(selfApproval.status).toBe(403);
+    expect(deployed).toBe(0);
+
+    for (const approved of [true, false]) {
+      const representedUserDecision = await server.handle(
+        req(
+          "POST",
+          "/api/agents/deployer/threads/t1/approve",
+          { toolCallId: "call-1", approved, ...scope },
+          { "x-actor": "alice" },
+        ),
+      );
+      expect(representedUserDecision.status).toBe(403);
+    }
     expect(deployed).toBe(0);
 
     const resumed = await readSse(

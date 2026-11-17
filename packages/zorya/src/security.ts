@@ -8,7 +8,6 @@ export {
   InMemorySecurityStore,
   type InMemorySecurityStoreConfig,
 } from "./security-module/in-memory-security-store.ts";
-export type { LoginIdentity, LoginProvider } from "./security-module/login-provider.ts";
 export {
   oidcLoginProvider,
   type OidcLoginProviderConfig,
@@ -33,7 +32,6 @@ export type {
   SecurityStore,
   SecurityStorePage,
   SecurityStoreTextLimit,
-  SecurityStoreV2,
   SecurityUser,
   ServiceAccountCredential,
   SubjectAccessBinding,

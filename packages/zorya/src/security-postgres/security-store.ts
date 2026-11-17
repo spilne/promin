@@ -24,7 +24,7 @@ import type {
   SecuritySession,
   SecurityStorePage,
   SecurityStoreTextLimit,
-  SecurityStoreV2,
+  SecurityStore,
   SecurityUser,
   ServiceAccountCredential,
   SubjectAccessBinding,
@@ -39,7 +39,7 @@ export interface PostgresSecurityStoreOptions {
 type DbRow = Record<string, unknown>;
 
 /** PostgreSQL-backed durable implementation of the complete security-store contract. */
-export class PostgresSecurityStore implements SecurityStoreV2 {
+export class PostgresSecurityStore implements SecurityStore {
   private readonly db: DrizzleDb;
   private readonly clock?: WallClock;
 
@@ -48,38 +48,8 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     this.clock = config.clock;
   }
 
-  async findOrCreateUser(params: {
-    readonly email: string;
-    readonly bindings: ReadonlyArray<Omit<AccessBinding, "userId">>;
-  }): Promise<{ user: SecurityUser; created: boolean }> {
-    const email = normalizeEmail(params.email);
-    const bindings = normalizeInitialBindings(params.bindings);
-    return this.db.transaction(async (rawTx) => {
-      const tx = rawTx as unknown as DrizzleDb;
-      await lock(tx, `legacy-user:${email}`);
-      const [existing] = await execRaw(
-        tx,
-        sql`SELECT u.id, u.email, s.status FROM zorya_security_data.zsec_user u JOIN zorya_security_data.zsec_subject s ON s.kind = 'user' AND s.id = u.id WHERE u.email = ${email} ORDER BY u.id LIMIT 1`,
-      );
-      if (existing) return { user: userFromRow(existing), created: false };
-      const id = crypto.randomUUID();
-      const now = await this.now(tx);
-      await execRaw(
-        tx,
-        sql`INSERT INTO zorya_security_data.zsec_subject(kind,id,status,created_at,updated_at) VALUES ('user',${id},'active',${now},${now})`,
-      );
-      await execRaw(
-        tx,
-        sql`INSERT INTO zorya_security_data.zsec_user(subject_kind,id,email) VALUES ('user',${id},${email})`,
-      );
-      for (const binding of bindings) {
-        await execRaw(
-          tx,
-          sql`INSERT INTO zorya_security_data.zsec_access_binding(subject_kind,subject_id,namespace_id,access_role) VALUES ('user',${id},${binding.namespaceId},${binding.accessRole}) ON CONFLICT DO NOTHING`,
-        );
-      }
-      return { user: freeze({ id, email, status: "active" }), created: true };
-    });
+  async currentTimeMs(): Promise<number> {
+    return this.databaseNow(this.db);
   }
 
   async getUser(id: string): Promise<SecurityUser | undefined> {
@@ -129,22 +99,6 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     );
   }
 
-  async putBinding(binding: AccessBinding): Promise<void> {
-    await this.putSubjectBinding({
-      subject: { kind: "user", id: binding.userId },
-      namespaceId: binding.namespaceId,
-      accessRole: binding.accessRole,
-    });
-  }
-
-  async removeBinding(binding: AccessBinding): Promise<void> {
-    await this.removeSubjectBinding({
-      subject: { kind: "user", id: binding.userId },
-      namespaceId: binding.namespaceId,
-      accessRole: binding.accessRole,
-    });
-  }
-
   async putKnowledgeGrant(grant: KnowledgeGrant): Promise<void> {
     await this.putKnowledgeAudienceGrant({
       namespaceId: grant.namespaceId,
@@ -158,65 +112,6 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
       namespaceId: grant.namespaceId,
       baseId: grant.baseId,
       audience: { kind: "access-role", id: grant.accessRole },
-    });
-  }
-
-  async listKnowledgeGrants(params: {
-    namespaceId: string;
-    baseId: string;
-  }): Promise<KnowledgeGrant[]> {
-    return (await this.listKnowledgeAudienceGrants(params))
-      .filter((row) => row.audience.kind === "access-role")
-      .map((row) =>
-        freeze({
-          namespaceId: row.namespaceId,
-          baseId: row.baseId,
-          accessRole: row.audience.id,
-        }),
-      );
-  }
-
-  async createSession(params: { tokenHash: string; userId: string; ttlMs: number }): Promise<void> {
-    const tokenHash = requiredString(
-      params.tokenHash,
-      "session token hash",
-      SECURITY_STORE_LIMITS.hash,
-    );
-    const userId = requiredString(params.userId, "user id");
-    const ttl = positiveIntegerMs(params.ttlMs, "session ttl");
-    const now = await this.now(this.db);
-    await this.putSession({
-      tokenHash,
-      principal: { kind: "user", id: userId },
-      createdAt: now,
-      expiresAt: finiteSum(now, ttl, "session expiry"),
-      authMethod: "oidc",
-    });
-  }
-
-  async getSession(tokenHash: string): Promise<{ userId: string } | undefined> {
-    const row = await this.getSessionRecord(tokenHash);
-    return row?.principal.kind === "user" ? freeze({ userId: row.principal.id }) : undefined;
-  }
-
-  async deleteSession(tokenHash: string): Promise<void> {
-    const hash = requiredString(tokenHash, "session token hash", SECURITY_STORE_LIMITS.hash);
-    await this.db.transaction(async (rawTx) => {
-      const tx = rawTx as unknown as DrizzleDb;
-      await lock(tx, `session:${hash}`);
-      const [row] = await execRaw(
-        tx,
-        sql`SELECT auth_method FROM zorya_security_data.zsec_session WHERE token_hash=${hash}`,
-      );
-      if (!row) return;
-      if (row.auth_method === "break-glass") {
-        throw new Error("Break-glass sessions must be revoked transactionally");
-      }
-      const now = await this.now(tx);
-      await execRaw(
-        tx,
-        sql`UPDATE zorya_security_data.zsec_session SET revoked_at=COALESCE(revoked_at,${now}) WHERE token_hash=${hash}`,
-      );
     });
   }
 
@@ -360,7 +255,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     const subject = normalizePrincipalRef(value);
     const rows = await execRaw(
       this.db,
-      sql`SELECT g.id,s.status FROM zorya_security_data.zsec_group_membership m JOIN zorya_security_data.zsec_access_group g ON g.id=m.group_id JOIN zorya_security_data.zsec_subject s ON s.kind='group' AND s.id=g.id WHERE m.subject_kind=${subject.kind} AND m.subject_id=${subject.id} ORDER BY g.id`,
+      sql`SELECT g.id,s.status FROM zorya_security_data.zsec_group_membership m JOIN zorya_security_data.zsec_access_group g ON g.id=m.group_id JOIN zorya_security_data.zsec_subject s ON s.kind='group' AND s.id=g.id WHERE m.subject_kind=${subject.kind} AND m.subject_id=${subject.id} AND s.status='active' ORDER BY g.id`,
     );
     return rows.map((row) =>
       freeze({
@@ -676,7 +571,7 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
 
   async getSessionRecord(tokenHash: string): Promise<SecuritySession | undefined> {
     const hash = requiredString(tokenHash, "session token hash", SECURITY_STORE_LIMITS.hash);
-    const now = await this.now(this.db);
+    const now = await this.databaseNow(this.db);
     const [row] = await execRaw(
       this.db,
       sql`SELECT x.* FROM zorya_security_data.zsec_session x JOIN zorya_security_data.zsec_subject s ON s.kind=x.principal_kind AND s.id=x.principal_id AND s.status='active' WHERE x.token_hash=${hash} AND x.revoked_at IS NULL AND x.invalidated_at IS NULL AND x.expires_at>${now}`,
@@ -725,6 +620,42 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     return this.db.transaction(async (rawTx) => {
       const tx = rawTx as unknown as DrizzleDb;
       return this.appendAuditInTx(tx, record, outbox);
+    });
+  }
+
+  async appendAuditFromHead(params: {
+    readonly id: string;
+    readonly namespaceId: string;
+    readonly outbox?: { readonly nextAttemptAt: number };
+    readonly build: (head: SecurityAuditRecord | undefined) => SecurityAuditRecord;
+  }): Promise<{
+    readonly result: "appended" | "already-exists";
+    readonly record: SecurityAuditRecord;
+  }> {
+    const id = requiredString(params.id, "audit event id");
+    const namespaceId = requiredString(
+      params.namespaceId,
+      "audit namespace",
+      SECURITY_STORE_LIMITS.namespace,
+    );
+    return this.db.transaction(async (rawTx) => {
+      const tx = rawTx as unknown as DrizzleDb;
+      await lock(tx, `audit:${namespaceId}`);
+      const [existing] = await execRaw(
+        tx,
+        sql`SELECT * FROM zorya_security_data.zsec_audit_record WHERE id=${id}`,
+      );
+      if (existing) {
+        return { result: "already-exists" as const, record: auditFromRow(existing) };
+      }
+      const [headRow] = await execRaw(
+        tx,
+        sql`SELECT * FROM zorya_security_data.zsec_audit_record WHERE namespace_id=${namespaceId} ORDER BY sequence DESC LIMIT 1`,
+      );
+      const record = normalizeAuditRecord(params.build(headRow && auditFromRow(headRow)));
+      const outbox = params.outbox && pendingAuditOutbox(record.id, params.outbox.nextAttemptAt);
+      const result = await this.appendAuditInTx(tx, record, outbox, true);
+      return { result, record };
     });
   }
 
@@ -943,7 +874,8 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     readonly closedBucket?: SecurityDenialBucket;
   }> {
     const key = requiredString(params.key, "denial bucket key");
-    const now = integerMs(params.now, "denial time");
+    integerMs(params.now, "denial time");
+    const now = await this.databaseNow(this.db);
     const windowMs = positiveIntegerMs(params.windowMs, "denial window");
     const emitLimit = nonNegativeInteger(params.emitLimit, "denial emit limit");
     const windowEnd = finiteSum(now, windowMs, "denial window end");
@@ -962,10 +894,9 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
           window_ends_at=CASE WHEN ${now}>=zorya_security_data.zsec_denial_bucket.window_ends_at THEN ${windowEnd} ELSE zorya_security_data.zsec_denial_bucket.window_ends_at END,
           count=CASE WHEN ${now}>=zorya_security_data.zsec_denial_bucket.window_ends_at THEN 1 ELSE zorya_security_data.zsec_denial_bucket.count+1 END,
           suppressed=CASE WHEN ${now}>=zorya_security_data.zsec_denial_bucket.window_ends_at THEN ${emitLimit < 1 ? 1 : 0} WHEN zorya_security_data.zsec_denial_bucket.count+1>${emitLimit} THEN zorya_security_data.zsec_denial_bucket.suppressed+1 ELSE zorya_security_data.zsec_denial_bucket.suppressed END
-        WHERE ${now}>=zorya_security_data.zsec_denial_bucket.window_started_at
         RETURNING *`,
       );
-      if (!row) throw new Error("Denial time precedes the current window");
+      if (!row) throw new Error("Denial bucket update failed");
       const bucket = denialFromRow(row);
       const closedBucket = closedDenialFromRow(row, key);
       return freeze({
@@ -1124,6 +1055,10 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
 
   private async now(db: DrizzleDb): Promise<number> {
     if (this.clock !== undefined) return integerMs(this.clock.currentTimeMs(), "store clock");
+    return this.databaseNow(db);
+  }
+
+  private async databaseNow(db: DrizzleDb): Promise<number> {
     const [row] = await execRaw(
       db,
       sql`SELECT pg_catalog.floor(
@@ -1134,11 +1069,9 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
   }
 
   private nowExpression(): ReturnType<typeof sql> {
-    return this.clock === undefined
-      ? sql`pg_catalog.floor(
-          pg_catalog.date_part('epoch', pg_catalog.clock_timestamp()) * 1000
-        )::pg_catalog.float8`
-      : sql`${integerMs(this.clock.currentTimeMs(), "store clock")}`;
+    return sql`pg_catalog.floor(
+      pg_catalog.date_part('epoch', pg_catalog.clock_timestamp()) * 1000
+    )::pg_catalog.float8`;
   }
 
   private async assertActiveSubject(
@@ -1169,8 +1102,9 @@ export class PostgresSecurityStore implements SecurityStoreV2 {
     db: DrizzleDb,
     record: SecurityAuditRecord,
     outbox?: SecurityAuditOutboxRecord,
+    alreadyLocked = false,
   ): Promise<"appended" | "already-exists"> {
-    await lock(db, `audit:${record.namespaceId}`);
+    if (!alreadyLocked) await lock(db, `audit:${record.namespaceId}`);
     const [existing] = await execRaw(
       db,
       sql`SELECT * FROM zorya_security_data.zsec_audit_record WHERE id=${record.id}`,
