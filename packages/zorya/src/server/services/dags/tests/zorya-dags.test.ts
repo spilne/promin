@@ -11,12 +11,14 @@ import {
   DAG_WORKFLOW_NAME,
   InMemoryAgentRegistry,
   InMemoryDagRegistry,
+  InMemoryDecisionModelCatalog,
   resolveLocalAgent,
   type AgenticDagRecipe,
   type DurableDagInput,
   type LLMProvider,
   type Message,
 } from "@promin/agent";
+import { scriptedDecisionProvider } from "@promin/agent/testing";
 import {
   FakeWallClock,
   InMemoryWorkflowStorage,
@@ -26,6 +28,7 @@ import {
 import { ZoryaAgents } from "../../agents/zorya-agents.ts";
 import { UnknownWorkflowError } from "../../workflows/errors.ts";
 import { LocalWorkflows } from "../../workflows/local-workflows.ts";
+import { runDag as runDagRoute } from "../../../routes/dags.ts";
 import { ZoryaDags } from "../zorya-dags.ts";
 
 /** Past the in-memory lock lease and the orphan grace period. */
@@ -51,6 +54,25 @@ const chain: AgenticDagRecipe = {
   edges: [{ from: "n1", to: "n2" }],
   entry: ["n1"],
   terminals: ["n2"],
+};
+
+const decision: AgenticDagRecipe = {
+  id: "decision",
+  version: "v1",
+  nodes: [
+    {
+      id: "triage",
+      kind: "decide",
+      model: { provider: "test", id: "small" },
+      questions: {
+        refund: { type: "yesno", instructions: "Should this ticket be refunded?" },
+      },
+      inputs: { message: { kind: "initial", path: "message" } },
+    },
+  ],
+  edges: [],
+  entry: ["triage"],
+  terminals: ["triage"],
 };
 
 function lastUser(messages: ReadonlyArray<Message>): string {
@@ -199,5 +221,102 @@ describe("ZoryaDags — recovery", () => {
       }),
     ).rejects.toBeInstanceOf(UnknownWorkflowError);
     expect(await storage.listWorkflows({ limit: 10 })).toEqual([]);
+  });
+});
+
+describe("ZoryaDags — decision models", () => {
+  it("resolves a decide node's model from the configured catalogue", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const workflows = new LocalWorkflows({
+      storage,
+      runner,
+      definitions: {},
+      sleepScanIntervalMs: 0,
+      signalScanIntervalMs: 0,
+    });
+    const agentRegistry = new InMemoryAgentRegistry();
+    const agents = new ZoryaAgents({
+      registry: agentRegistry,
+      resolve: () => {
+        throw new Error("not used");
+      },
+    });
+    const dagRegistry = new InMemoryDagRegistry();
+    await dagRegistry.register(decision);
+    const decisionModels = new InMemoryDecisionModelCatalog([
+      {
+        provider: "test",
+        id: "small",
+        create: () =>
+          scriptedDecisionProvider(() => ({
+            refund: { yes: 0.98, probabilitySource: "model" },
+          })),
+      },
+    ]);
+    new ZoryaDags({ registry: dagRegistry, workflows, agents, decisionModels });
+
+    const { workflowId } = await workflows.trigger(
+      DAG_WORKFLOW_NAME,
+      {
+        dagId: decision.id,
+        version: decision.version,
+        initialInput: { message: "I was charged twice" },
+        scope: { namespaceId: "acme", resourceId: "ticket-1" },
+      },
+      { internal: true },
+    );
+    await yieldUntil(async () => {
+      const run = await storage.loadWorkflow(workflowId);
+      return run?.status === "completed" || run?.status === "failed";
+    });
+
+    const run = await storage.loadWorkflow(workflowId);
+    expect(run?.status).toBe("completed");
+    expect(
+      (run?.result as { nodeOutputs?: Record<string, unknown> } | undefined)?.nodeOutputs?.triage,
+    ).toEqual({ refund: { yes: 0.98, probabilitySource: "model" } });
+  });
+
+  it("refuses a run route when a decide node has no configured catalogue", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const workflows = new LocalWorkflows({
+      storage,
+      runner,
+      definitions: {},
+      sleepScanIntervalMs: 0,
+    });
+    const agentRegistry = new InMemoryAgentRegistry();
+    const agents = new ZoryaAgents({
+      registry: agentRegistry,
+      resolve: () => {
+        throw new Error("not used");
+      },
+    });
+    const dagRegistry = new InMemoryDagRegistry();
+    await dagRegistry.register(decision);
+    const dags = new ZoryaDags({ registry: dagRegistry, workflows, agents });
+
+    const response = await runDagRoute({
+      registry: dagRegistry,
+      workflows,
+      workflowName: dags.workflow.name,
+      agents: agentRegistry,
+    })(
+      new Request("http://localhost/api/dags/decision/run", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          namespaceId: "acme",
+          resourceId: "ticket-1",
+          initialInput: { message: "I was charged twice" },
+        }),
+      }),
+      { id: decision.id },
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: "decision_model_not_found" });
   });
 });

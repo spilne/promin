@@ -45,7 +45,9 @@ import {
   type AgentRegistry,
   type DagRecipe,
   type DagRegistry,
+  type DecisionModelRef,
   type DurableDagInput,
+  type InMemoryDecisionModelCatalog,
   type RegisteredDag,
 } from "@promin/agent";
 import type { NamespaceRegistry } from "@promin/workflow";
@@ -76,6 +78,8 @@ export interface DagGatewayDeps {
   readonly workflowName: string;
   /** Agent recipes the DAG nodes reference — checked before a run starts. */
   readonly agents: AgentRegistry;
+  /** Decision models referenced by `decide` nodes — checked before a run starts. */
+  readonly decisionModels?: InMemoryDecisionModelCatalog;
   /**
    * Binds a run's scope to the caller, once per node agent (403
    * `scope_forbidden`). See `ScopeAuthorizer`.
@@ -141,12 +145,20 @@ function dagNotFound(id: string): Response {
   return jsonError(404, "dag_not_found", `DAG "${id}" not registered.`);
 }
 
-/** Collect every agent a run may reach through enabled sub-DAGs. */
+/** Collect every agent and decision model a run may reach through enabled sub-DAGs. */
 export async function collectRunTargets(params: {
   readonly registry: DagRegistry;
   readonly dag: RegisteredDag;
-}): Promise<{ readonly agentIds: Set<string> } | Response> {
+}): Promise<
+  | {
+      readonly agentIds: Set<string>;
+      readonly decisionModels: Array<DecisionModelRef>;
+    }
+  | Response
+> {
   const agentIds = new Set<string>();
+  const decisionModels: DecisionModelRef[] = [];
+  const decisionModelKeys = new Set<string>();
   const visitedAtDepth = new Map<string, number>();
 
   async function visit(dag: RegisteredDag, depth: number): Promise<Response | undefined> {
@@ -158,6 +170,14 @@ export async function collectRunTargets(params: {
     for (const node of dag.nodes) {
       if (node.kind === "agent") {
         agentIds.add(node.agentId);
+        continue;
+      }
+      if (node.kind === "decide") {
+        const key = `${node.model.provider}\0${node.model.id}\0${node.model.credentialRef ?? ""}`;
+        if (!decisionModelKeys.has(key)) {
+          decisionModelKeys.add(key);
+          decisionModels.push(node.model);
+        }
         continue;
       }
       if (node.kind !== "dag" || depth >= MAX_DAG_DEPTH) continue;
@@ -177,7 +197,7 @@ export async function collectRunTargets(params: {
   }
 
   const refusal = await visit(params.dag, 0);
-  return refusal ?? { agentIds };
+  return refusal ?? { agentIds, decisionModels };
 }
 
 export function getDag(deps: DagGatewayDeps) {
@@ -327,6 +347,15 @@ export function runDag(deps: DagGatewayDeps) {
     // invocation. Nodes are re-checked for the kill switch as they run.
     const targets = await collectRunTargets({ registry: deps.registry, dag });
     if (targets instanceof Response) return targets;
+    for (const model of targets.decisionModels) {
+      if (deps.decisionModels?.get(model.provider, model.id) === undefined) {
+        return jsonError(
+          400,
+          "decision_model_not_found",
+          `Decision model "${model.provider}/${model.id}" is not configured.`,
+        );
+      }
+    }
     for (const agentId of targets.agentIds) {
       const recipe = await deps.agents.get({ id: agentId });
       if (!recipe) return agentNotFound(agentId);

@@ -1642,10 +1642,27 @@ export type DagNodeInputSourceDto =
   | { kind: "node"; nodeId: string; path: string }
   | { kind: "literal"; value: unknown };
 
+export interface DagDecisionModelRefDto {
+  provider: string;
+  id: string;
+  credentialRef?: string;
+}
+
+export type DagDecisionQuestionDto =
+  | {
+      type: "choice";
+      instructions: string;
+      options: Array<{ name: string; description?: string }>;
+    }
+  | { type: "score"; instructions: string; levels: string[] }
+  | { type: "yesno"; instructions: string };
+
 export interface DagNodeDto {
   id: string;
   kind: string;
   agentId?: string;
+  model?: DagDecisionModelRefDto;
+  questions?: Record<string, DagDecisionQuestionDto>;
   inputs: Record<string, DagNodeInputSourceDto>;
   onError?: "abort" | "skip";
   [key: string]: unknown;

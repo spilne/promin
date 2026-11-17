@@ -15,6 +15,8 @@ Every node has a required `kind`:
 
 - `agent` invokes a registered agent as a child run.
 - `dag` invokes another registered graph as a child run.
+- `decide` asks a configured decision model a fixed set of typed questions without running an
+  agent child.
 - `transform` applies deterministic operations such as `pick`, `compact`, `filter`, `sort` and
   `take` without an LLM call.
 
@@ -36,6 +38,164 @@ dot-separated `path` from the value it evaluates.
 An agent node's `output.schema` is a JSON Schema with an object root. The recipe is rejected if the
 schema is unusable. At runtime the agent must return a matching structured object; that validated
 object becomes the node output and can be addressed safely by downstream inputs.
+
+## Decisions
+
+A `decide` node sends its resolved input state and named typed questions to a decision provider.
+Questions may be `choice`, `score`, or `yesno`; the answers become the node output, so routes can
+address paths such as `team.choice` or `approved.yes`. The recipe references a model by provider
+and id, while the host supplies an `InMemoryDecisionModelCatalog` to `ZoryaDags`.
+
+```ts
+{
+  id: "triage",
+  kind: "decide",
+  model: { provider: "llm", id: "small" },
+  inputs: { ticket: { kind: "initial", path: "ticket" } },
+  questions: {
+    team: {
+      type: "choice",
+      instructions: "Which team owns this ticket?",
+      options: [{ name: "billing" }, { name: "technical" }, { name: "other" }],
+    },
+  },
+}
+```
+
+Three provider choices cover the common deployment shapes:
+
+- `createSystemOneDecisionProvider` calls a local or self-hosted System One endpoint.
+- TypeSafe's hosted Jev models use the same System One provider with `https://api.typesafe.ai` and
+  an API key.
+- `createLlmDecisionProvider` forces an existing chat model to answer through a typed decision
+  tool, which is useful when no specialized decision model is available.
+
+Provider answers report `probabilitySource`. A source of `"none"` means the adapter only knows the
+selected categorical answer and synthesizes certainty; probability thresholds are therefore not
+meaningful for that output. Thresholds also are not portable constants: tune and evaluate them for
+each model and question set before using them as a gate.
+
+### Router
+
+A decision model can route directly on a typed choice:
+
+```ts
+const nodes = [
+  {
+    id: "route",
+    kind: "decide",
+    model: { provider: "system-one", id: "tev1" },
+    inputs: { request: { kind: "initial", path: "request" } },
+    questions: {
+      team: {
+        type: "choice",
+        instructions: "Who should handle this request?",
+        options: [{ name: "sales" }, { name: "support" }],
+      },
+    },
+  },
+  { id: "sales", kind: "agent", agentId: "sales", inputs: {} },
+  { id: "support", kind: "agent", agentId: "support", inputs: {} },
+];
+const edges = [
+  {
+    from: "route",
+    to: "sales",
+    condition: { kind: "equals", path: "team.choice", value: "sales" },
+  },
+  {
+    from: "route",
+    to: "support",
+    condition: { kind: "equals", path: "team.choice", value: "support" },
+  },
+];
+```
+
+The equivalent agent recipe uses typed output when the routing step needs tools, memory, or a
+longer prompt:
+
+```ts
+const nodes = [
+  {
+    id: "route",
+    kind: "agent",
+    agentId: "request-router",
+    inputs: { request: { kind: "initial", path: "request" } },
+    output: {
+      schema: {
+        type: "object",
+        properties: { team: { type: "string", enum: ["sales", "support"] } },
+        required: ["team"],
+      },
+    },
+  },
+  { id: "sales", kind: "agent", agentId: "sales", inputs: {} },
+  { id: "support", kind: "agent", agentId: "support", inputs: {} },
+];
+const edges = [
+  { from: "route", to: "sales", condition: { kind: "equals", path: "team", value: "sales" } },
+  { from: "route", to: "support", condition: { kind: "equals", path: "team", value: "support" } },
+];
+```
+
+### Verifier gate
+
+A decision node can expose a calibrated yes/no probability for a gate and an unsure path:
+
+```ts
+const nodes = [
+  {
+    id: "verify",
+    kind: "decide",
+    model: { provider: "typesafe", id: "jev-1.14.0", credentialRef: "typesafe-key" },
+    inputs: { draft: { kind: "node", nodeId: "writer", path: "" } },
+    questions: { approved: { type: "yesno", instructions: "Is this draft ready to publish?" } },
+  },
+  { id: "publish", kind: "agent", agentId: "publisher", inputs: {} },
+  { id: "revise", kind: "agent", agentId: "reviser", inputs: {} },
+];
+const edges = [
+  {
+    from: "verify",
+    to: "publish",
+    condition: { kind: "compare", path: "approved.yes", op: "gte", value: 0.8 },
+  },
+  {
+    from: "verify",
+    to: "revise",
+    condition: { kind: "compare", path: "approved.yes", op: "lt", value: 0.8 },
+  },
+];
+```
+
+An agent can implement the same gate with a typed verdict when evaluation needs richer reasoning:
+
+```ts
+const nodes = [
+  {
+    id: "verify",
+    kind: "agent",
+    agentId: "draft-verifier",
+    inputs: { draft: { kind: "node", nodeId: "writer", path: "" } },
+    output: {
+      schema: {
+        type: "object",
+        properties: {
+          verdict: { type: "string", enum: ["pass", "revise"] },
+          notes: { type: "string" },
+        },
+        required: ["verdict", "notes"],
+      },
+    },
+  },
+  { id: "publish", kind: "agent", agentId: "publisher", inputs: {} },
+  { id: "revise", kind: "agent", agentId: "reviser", inputs: {} },
+];
+const edges = [
+  { from: "verify", to: "publish", condition: { kind: "equals", path: "verdict", value: "pass" } },
+  { from: "verify", to: "revise", condition: { kind: "equals", path: "verdict", value: "revise" } },
+];
+```
 
 ## `forEach`
 
@@ -90,7 +250,8 @@ same scope and shared budget. Sub-graphs can use `forEach` and `repeat` just lik
 
 Nesting is limited to four levels. Ancestor cycles, missing or disabled graphs, and runs beyond the
 global 500-child ceiling fail before the child starts. The run route also checks every reachable
-agent's enabled state and scope authorization before starting the root graph.
+agent's enabled state and scope authorization, and every reachable decision model, before starting
+the root graph.
 
 ## Evaluator / optimizer loop
 
@@ -193,10 +354,10 @@ for merging conditionally routed branches.
 
 ## Budget sharing
 
-A run budget is shared between work that can still start. A plain agent or repeat loop has weight 1;
-a `forEach` node uses its resolved item count and divides its share equally between items. Settled
-nodes return unused capacity to the pool. Repeat iterations receive what remains after earlier
-iterations' spend.
+A run budget is shared between work that can still start. A plain agent, decide node, or repeat loop
+has weight 1; a `forEach` node uses its resolved item count and divides its share equally between
+items. Settled nodes return unused capacity to the pool. Repeat iterations receive what remains
+after earlier iterations' spend.
 
 ## `nodeStats`
 

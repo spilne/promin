@@ -358,6 +358,23 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
         review: { verdict: "pass" },
       });
     });
+
+    it("runs the ticket-triage decision router end to end", async () => {
+      const run = await post("/api/dags/ticket-triage/run", {
+        namespaceId: "default",
+        resourceId: "e2e",
+        initialInput: { message: "I was charged twice" },
+      });
+      expect(run.status).toBe(202);
+      const ended = await waitForRun(((await run.json()) as { workflowId: string }).workflowId);
+
+      expect(ended.status).toBe("completed");
+      expect(ended.result?.ok).toBe(true);
+      expect(ended.result?.nodeOutputs.triage).toMatchObject({
+        team: { choice: "billing" },
+      });
+      expect(ended.result?.outputs.reply).toHaveLength(1);
+    });
   });
 
   describe("Designer UI metadata — /api/agents/_catalog/*", () => {

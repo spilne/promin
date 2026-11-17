@@ -13,9 +13,12 @@
 // ---------------------------------------------------------------------------
 
 import {
+  createCatalogDecisionResolver,
   createDagWorkflow,
   createRegistryAgentResolver,
   DAG_WORKFLOW_NAME,
+  type InMemoryDecisionModelCatalog,
+  type SecretsStorage,
   type AgentResolver,
   type DagRegistry,
   type DagUsageRecorder,
@@ -41,12 +44,17 @@ export interface ZoryaDagsConfig {
    * runs, and its `authorizeScope` decides who may start a run.
    */
   agents: ZoryaAgents;
+  /** Decision providers available to `decide` nodes, keyed by provider/id. */
+  decisionModels?: InMemoryDecisionModelCatalog;
+  /** Scoped credentials referenced by decision model entries. */
+  secrets?: SecretsStorage;
 }
 
 export class ZoryaDags {
   readonly registry: DagRegistry;
   readonly workflows: LocalWorkflows;
   readonly agents: ZoryaAgents;
+  readonly decisionModels: InMemoryDecisionModelCatalog | undefined;
   readonly resolver: AgentResolver;
   /** The DAG workflow, defined on `workflows` under `DAG_WORKFLOW_NAME`. */
   readonly workflow: Workflow<DurableDagInput, DurableDagOutput>;
@@ -55,6 +63,7 @@ export class ZoryaDags {
     this.registry = config.registry;
     this.workflows = config.workflows;
     this.agents = config.agents;
+    this.decisionModels = config.decisionModels;
     this.resolver = createRegistryAgentResolver({
       registry: config.agents.registry,
       resolve: config.agents.resolve,
@@ -62,6 +71,12 @@ export class ZoryaDags {
     this.workflow = createDagWorkflow({
       registry: config.registry,
       resolver: this.resolver,
+      ...(config.decisionModels !== undefined && {
+        decisions: createCatalogDecisionResolver({
+          catalog: config.decisionModels,
+          ...(config.secrets !== undefined && { secrets: config.secrets }),
+        }),
+      }),
       ...(config.agents.instances !== undefined && { instances: config.agents.instances }),
       // A run's spend counts against its namespace's budget, recorded under
       // the run id (its node turns record nothing themselves).

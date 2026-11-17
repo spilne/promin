@@ -47,7 +47,8 @@ import {
 } from "../src/index.ts";
 import { researchSynthesisRecipe } from "./dags/research-synthesis.ts";
 import { draftReviewRecipe, draftReviewRoundRecipe } from "./dags/draft-review.ts";
-import { scriptedDagLlms } from "./dags/scripted-dag-llms.ts";
+import { ticketTriageRecipe } from "./dags/ticket-triage.ts";
+import { scriptedDagLlms, scriptedTicketDecisionLlm } from "./dags/scripted-dag-llms.ts";
 import { MapActivityCatalog } from "@promin/workflow";
 import { ZoryaWorkflowBuilder } from "../src/index.ts";
 import { demoActivities } from "./workflow-steps/index.ts";
@@ -71,6 +72,9 @@ import {
   createFileToolRegistry,
   inProcessSchedulerClient,
   InMemoryModelCatalog,
+  InMemoryDecisionModelCatalog,
+  createLlmDecisionProvider,
+  createSystemOneDecisionProvider,
   catalogCostRegistry,
   DefaultAgentToolCatalog,
   type FragmentRegistry,
@@ -92,6 +96,7 @@ import {
   type MemoryStore,
   type UsageLedger,
   type ModelCatalogItem,
+  type DecisionModelCatalogItem,
   type PendingApprovalStore,
   AgentTurnGate,
   type RegisteredAgent,
@@ -1235,6 +1240,23 @@ const dagAgentRecipes = [
       "You are a strict editor. Review the draft and return a pass or revise verdict with concise " +
       "notes. Pass only after the prior feedback has been addressed.",
   },
+  {
+    id: "dag-billing-reply",
+    description: "Replies to billing and refund tickets.",
+    systemPrompt: "You are a billing support specialist. Reply with clear next steps.",
+  },
+  {
+    id: "dag-tech-reply",
+    description: "Replies to technical support tickets.",
+    systemPrompt:
+      "You are a technical support specialist. Reply with useful diagnostic next steps.",
+  },
+  {
+    id: "dag-general-reply",
+    description: "Replies to tickets outside billing and technical support.",
+    systemPrompt:
+      "You are a general support specialist. Acknowledge the request and route it clearly.",
+  },
 ] as const;
 
 for (const r of dagAgentRecipes) {
@@ -1267,11 +1289,54 @@ for (const r of dagAgentRecipes) {
 await dagRegistry.register(researchSynthesisRecipe);
 await dagRegistry.register(draftReviewRoundRecipe);
 await dagRegistry.register(draftReviewRecipe);
+await dagRegistry.register(ticketTriageRecipe);
+
+const decisionModelItems: DecisionModelCatalogItem[] = [
+  {
+    provider: "llm",
+    id: "demo",
+    displayName: "Scripted ticket triage",
+    pricing: { inputPerMillion: 0, outputPerMillion: 0 },
+    create: () => createLlmDecisionProvider({ llm: scriptedTicketDecisionLlm(), model: "demo" }),
+  },
+];
+const systemOneUrl = process.env.SYSTEM_ONE_URL;
+if (systemOneUrl !== undefined) {
+  const model = process.env.SYSTEM_ONE_MODEL ?? "tev1";
+  decisionModelItems.push({
+    provider: "system-one",
+    id: model,
+    displayName: `System One · ${model}`,
+    create: () => createSystemOneDecisionProvider({ baseUrl: systemOneUrl, model }),
+  });
+}
+const typesafeApiKey = process.env.TYPESAFE_API_KEY;
+if (typesafeApiKey !== undefined) {
+  decisionModelItems.push({
+    provider: "typesafe",
+    id: "jev-1.14.0",
+    displayName: "TypeSafe Jev 1.14.0",
+    pricing: { inputPerMillion: 0.042, outputPerMillion: 0 },
+    create: () =>
+      createSystemOneDecisionProvider({
+        baseUrl: "https://api.typesafe.ai",
+        model: "jev-1.14.0",
+        apiKey: typesafeApiKey,
+      }),
+  });
+}
+const decisionModels = new InMemoryDecisionModelCatalog(decisionModelItems);
 
 // DAG nodes resolve through the agents service, so DAG runs share the same
 // credential / tool / memory machinery (and scope checks) as direct chat
 // invocations.
-const dags = new ZoryaDags({ registry: dagRegistry, workflows, agents });
+const dags = new ZoryaDags({
+  registry: dagRegistry,
+  workflows,
+  agents,
+  decisionModels,
+  secrets: secretsStorage,
+});
 
 // Evals — the dashboard's Evals page. Suites, gates and run history live in
 // the SQLite db; the demo agents' suites (./evals/suites.ts, which CI also
@@ -1294,6 +1359,10 @@ console.log(
 console.log(
   `[zorya] DAG registered: ${draftReviewRecipe.id}@${draftReviewRecipe.version ?? "v1"} ` +
     `(sub-DAG ${draftReviewRoundRecipe.id}@${draftReviewRoundRecipe.version ?? "v1"})`,
+);
+console.log(
+  `[zorya] DAG registered: ${ticketTriageRecipe.id}@${ticketTriageRecipe.version ?? "v1"} ` +
+    `(${ticketTriageRecipe.nodes.length} nodes, decision model llm/demo)`,
 );
 
 const server = ZoryaServer.builder()
