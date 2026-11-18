@@ -2,7 +2,7 @@
 // draft-review DAG recipes — a sub-graph inside an evaluator/optimizer loop.
 //
 // One round drafts and reviews a topic. The parent repeats that round until
-// the reviewer passes it, carrying the prior round's outputs into the writer.
+// the reviewer passes it, then waits for a person to approve publication.
 // ---------------------------------------------------------------------------
 
 import type { RegisterDagInput } from "@promin/agent";
@@ -51,10 +51,10 @@ export const draftReviewRoundRecipe: RegisterDagInput = {
 
 export const draftReviewRecipe: RegisterDagInput = {
   id: "draft-review",
-  version: "v1",
+  version: "v2",
   metadata: {
-    description: "Repeat the draft-review sub-graph until its reviewer passes.",
-    tags: ["demo", "evaluation", "repeat", "sub-dag"],
+    description: "Repeat draft review until it passes, then request publication approval.",
+    tags: ["demo", "evaluation", "repeat", "sub-dag", "approval"],
   },
   nodes: [
     {
@@ -71,8 +71,34 @@ export const draftReviewRecipe: RegisterDagInput = {
         onExhausted: "continue",
       },
     },
+    {
+      id: "sign-off",
+      kind: "approval",
+      prompt: "Publish this draft?",
+      timeoutMs: 86_400_000,
+      inputs: {
+        draft: { kind: "node", nodeId: "round", path: "writer" },
+        review: { kind: "node", nodeId: "round", path: "review" },
+      },
+    },
+    {
+      id: "published",
+      kind: "transform",
+      inputs: {
+        draft: { kind: "node", nodeId: "round", path: "writer" },
+      },
+      from: "draft",
+      ops: [{ op: "pick", path: "" }],
+    },
   ],
-  edges: [],
+  edges: [
+    { from: "round", to: "sign-off" },
+    {
+      from: "sign-off",
+      to: "published",
+      condition: { kind: "equals", path: "approved", value: true },
+    },
+  ],
   entry: ["round"],
-  terminals: ["round"],
+  terminals: ["published"],
 };

@@ -93,6 +93,7 @@ const AgentNodeSchema = z
     id: z.string().regex(NODE_ID_PATTERN),
     kind: z.literal("agent"),
     agentId: z.string(),
+    approvals: z.enum(["refuse", "wait"]).optional(),
     inputs: z.record(z.string(), NodeInputSourceSchema),
     output: z
       .object({ schema: z.record(z.string(), z.unknown()) })

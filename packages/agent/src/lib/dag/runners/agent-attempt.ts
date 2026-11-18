@@ -20,6 +20,10 @@ async function refuseApproval(): Promise<ApprovalDecision> {
   return { approved: false, reason: DAG_APPROVAL_REFUSED };
 }
 
+function followedRejectedApproval(result: AgentResult): boolean {
+  return Boolean(result.trace?.spans.some((span) => span.kind === "approval" && !span.approved));
+}
+
 async function nodeScope(params: {
   readonly env: Parameters<RunAttempt<AgentNode>>[0];
   readonly agentId: string;
@@ -104,6 +108,11 @@ export const runAgentAttempt: RunAttempt<AgentNode> = function* (env, params) {
       {
         name: key,
         load: async () => {
+          if (params.signal.aborted) {
+            throw new ChildWorkflowGoneError({
+              message: `node "${node.id}" was cancelled before its child turn resumed`,
+            });
+          }
           let resolved: Agent;
           try {
             resolved = await env.config.resolver({
@@ -125,7 +134,9 @@ export const runAgentAttempt: RunAttempt<AgentNode> = function* (env, params) {
             agent,
             agentId: node.agentId,
             signal: params.signal,
-            onApprovalRequired: refuseApproval,
+            ...((node.approvals ?? "refuse") === "refuse" && {
+              onApprovalRequired: refuseApproval,
+            }),
           });
           return turn as unknown as Workflow<unknown, AgentResult>;
         },
@@ -141,6 +152,14 @@ export const runAgentAttempt: RunAttempt<AgentNode> = function* (env, params) {
       },
     );
   } catch (err) {
+    if (err instanceof ChildWorkflowGoneError && params.signal.aborted) {
+      return {
+        ok: false,
+        error: `node "${node.id}" was cancelled`,
+        retryable: false,
+        spend: EMPTY_USAGE,
+      };
+    }
     if (isChildControlFlow(err)) throw err;
     return {
       ok: false,
@@ -151,13 +170,14 @@ export const runAgentAttempt: RunAttempt<AgentNode> = function* (env, params) {
   }
 
   const spend = childSpend(result);
+  const retryable = !followedRejectedApproval(result);
   if (node.output !== undefined) {
     if (routed.kind === "turn") {
       if (result.finishReason === "output_invalid") {
         return {
           ok: false,
           error: `output_schema_mismatch: ${result.answer}`,
-          retryable: true,
+          retryable,
           spend,
         };
       }
@@ -165,7 +185,7 @@ export const runAgentAttempt: RunAttempt<AgentNode> = function* (env, params) {
         return {
           ok: false,
           error: `node "${node.id}" finished with ${result.finishReason}`,
-          retryable: true,
+          retryable,
           spend,
         };
       }
@@ -173,7 +193,7 @@ export const runAgentAttempt: RunAttempt<AgentNode> = function* (env, params) {
         return {
           ok: false,
           error: `output_schema_mismatch: node "${node.id}" returned no structured output`,
-          retryable: true,
+          retryable,
           spend,
         };
       }
@@ -184,7 +204,7 @@ export const runAgentAttempt: RunAttempt<AgentNode> = function* (env, params) {
       return {
         ok: false,
         error: `node "${node.id}" finished with ${result.finishReason}`,
-        retryable: true,
+        retryable,
         spend,
       };
     }
@@ -197,7 +217,7 @@ export const runAgentAttempt: RunAttempt<AgentNode> = function* (env, params) {
       return {
         ok: false,
         error: `output_schema_mismatch: ${formatToolError(error)}`,
-        retryable: true,
+        retryable,
         spend,
       };
     }

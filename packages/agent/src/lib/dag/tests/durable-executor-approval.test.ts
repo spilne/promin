@@ -8,10 +8,13 @@ import {
   completeSignal,
   createWorkflowRunner,
 } from "@promin/workflow";
+import { z } from "zod";
 
+import { LocalAgent } from "../../agent/local-agent.ts";
+import type { AgentTool } from "../../tool.ts";
 import { listPendingSignals } from "../../approvals/list-pending-signals.ts";
 import { InMemoryDagRegistry } from "../../versioned-registry/in-memory-registries.ts";
-import { deferred, reactiveLLM, until } from "../../tests/engine-harness.ts";
+import { deferred, lastMessage, reactiveLLM, until } from "../../tests/engine-harness.ts";
 import { createDagWorkflow } from "../durable-executor.ts";
 import type { AgentResolver, AgenticDagRecipe } from "../types.ts";
 import {
@@ -20,6 +23,7 @@ import {
   localAgents,
   makeResolver,
   stubAgent,
+  taskOf,
   textOnly,
 } from "./dag-test-kit.ts";
 
@@ -130,6 +134,137 @@ async function resume(params: {
     input: undefined,
     useStoredInput: true,
   });
+}
+
+function waitingAgentFixture(params: {
+  readonly runner: ReturnType<typeof createWorkflowRunner>;
+  readonly ran: string[];
+}): AgentResolver {
+  const guarded: AgentTool<{ value: string }, string> = {
+    name: "guarded",
+    description: "needs approval",
+    parameters: z.object({ value: z.string() }),
+    requireApproval: true,
+    execute: async ({ value }) => {
+      params.ran.push(value);
+      return `ran ${value}`;
+    },
+  };
+  const llm = reactiveLLM((messages) => {
+    const last = lastMessage(messages);
+    if (last?.role === "tool") {
+      if (String(last.content).startsWith("Rejected:")) {
+        return {
+          content: null,
+          finishReason: "tool_calls",
+          toolCalls: [{ id: "invalid-output", name: "_respond", input: {} }],
+        };
+      }
+      return { content: `done: ${String(last.content)}`, finishReason: "stop" };
+    }
+    const task = taskOf(messages);
+    const item = /"item"\s*:\s*(\d+)/.exec(task)?.[1];
+    const value = item === undefined ? "plain" : `item-${item}`;
+    return {
+      content: null,
+      finishReason: "tool_calls",
+      toolCalls: [{ id: `call-${value}`, name: "guarded", input: { value } }],
+    };
+  });
+  return async ({ scope }) =>
+    new LocalAgent({
+      ...(scope.namespaceId !== undefined && { namespaceId: scope.namespaceId }),
+      runner: params.runner,
+      agent: { name: "worker", llm, tools: { guarded }, structuredOutputRepairs: 0 },
+    });
+}
+
+function waitingAgentDag(params: {
+  readonly id: string;
+  readonly timeoutMs?: number;
+  readonly forEach?: {
+    readonly items: { readonly kind: "initial"; readonly path: string };
+    readonly as: string;
+    readonly maxItems: number;
+    readonly concurrency?: number;
+  };
+}): AgenticDagRecipe {
+  return {
+    id: params.id,
+    version: "v1",
+    nodes: [
+      {
+        id: "n1",
+        kind: "agent",
+        agentId: "worker",
+        approvals: "wait",
+        inputs: {},
+        ...(params.timeoutMs !== undefined && { timeoutMs: params.timeoutMs }),
+        ...(params.forEach !== undefined && { forEach: params.forEach }),
+      },
+    ],
+    edges: [],
+    entry: ["n1"],
+    terminals: ["n1"],
+  };
+}
+
+async function decidePending(params: {
+  readonly storage: InMemoryWorkflowStorage;
+  readonly workflowId: string;
+  readonly approved?: boolean;
+}): Promise<void> {
+  const pending = (await listPendingSignals(params.storage)).find(
+    (signal) => signal.workflowId === params.workflowId,
+  );
+  expect(pending).toBeDefined();
+  await params.storage.deliverSignal({
+    workflowId: params.workflowId,
+    signalName: pending!.signalName,
+    payload: { approved: params.approved ?? true },
+  });
+  await completeSignal({
+    storage: params.storage,
+    workflowId: params.workflowId,
+    stepName: pending!.stepName,
+    signalName: pending!.signalName,
+    value: { approved: params.approved ?? true },
+  });
+}
+
+async function startWaitingRun(params: {
+  readonly dag: AgenticDagRecipe;
+  readonly workflowId: string;
+  readonly initialInput?: Record<string, unknown>;
+  readonly extraDags?: ReadonlyArray<AgenticDagRecipe>;
+  readonly clock?: FakeWallClock;
+}) {
+  const storage = new InMemoryWorkflowStorage({ clock: params.clock });
+  const registry = new InMemoryDagRegistry();
+  for (const dag of params.extraDags ?? []) await registry.register(dag);
+  await registry.register(params.dag);
+  const runner = createWorkflowRunner({
+    storage,
+    ...(params.clock !== undefined && { clock: params.clock }),
+  });
+  const ran: string[] = [];
+  const workflow = createDagWorkflow({
+    registry,
+    resolver: waitingAgentFixture({ runner, ran }),
+    ...(params.clock !== undefined && { clock: params.clock }),
+  });
+  const first = await runner.runSafe({
+    workflow,
+    workflowId: params.workflowId,
+    input: {
+      dagId: params.dag.id,
+      version: params.dag.version,
+      initialInput: params.initialInput ?? {},
+      scope: SCOPE,
+    },
+  });
+  expect(first.error).toBeTruthy();
+  return { storage, registry, runner, workflow, ran };
 }
 
 describe("createDagWorkflow — approval nodes", () => {
@@ -477,5 +612,228 @@ describe("createDagWorkflow — approval nodes", () => {
     expect(result.ok).toBe(true);
     expect(llm.calls).toHaveLength(2);
     expect(result.spend.llmCalls).toBe(2);
+  });
+});
+
+describe("createDagWorkflow — agent tool approvals", () => {
+  it('waits for an approval when the agent node opts in with approvals: "wait"', async () => {
+    const run = await startWaitingRun({
+      dag: waitingAgentDag({ id: "agent-approval-wait" }),
+      workflowId: "agent-approval-wait",
+    });
+
+    await decidePending({ storage: run.storage, workflowId: "agent-approval-wait.node-n1" });
+    const result = await run.runner.run({
+      workflow: run.workflow,
+      workflowId: "agent-approval-wait",
+      input: undefined,
+      useStoredInput: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(run.ran).toEqual(["plain"]);
+  });
+
+  it("lists a waiting node under its child run with no agent thread", async () => {
+    const run = await startWaitingRun({
+      dag: waitingAgentDag({ id: "agent-approval-inbox" }),
+      workflowId: "agent-approval-inbox",
+    });
+
+    const pending = (await listPendingSignals(run.storage)).find(
+      (row) => row.workflowId === "agent-approval-inbox.node-n1",
+    );
+    expect(pending).toEqual(
+      expect.objectContaining({
+        workflowId: "agent-approval-inbox.node-n1",
+        toolName: "guarded",
+        toolInput: { value: "plain" },
+      }),
+    );
+    expect(pending?.agentThread).toBeUndefined();
+  });
+
+  it("parks a parent DAG while an agent inside its sub-DAG waits", async () => {
+    const child = waitingAgentDag({ id: "approval-child" });
+    const parent: AgenticDagRecipe = {
+      id: "approval-parent",
+      version: "v1",
+      nodes: [
+        {
+          id: "sub",
+          kind: "dag",
+          dagId: child.id,
+          version: child.version,
+          inputs: {},
+        },
+      ],
+      edges: [],
+      entry: ["sub"],
+      terminals: ["sub"],
+    };
+    const run = await startWaitingRun({
+      dag: parent,
+      extraDags: [child],
+      workflowId: "approval-parent",
+    });
+    expect((await run.storage.loadWorkflow("approval-parent"))?.status).toBe("suspended");
+    expect((await run.storage.loadWorkflow("approval-parent.node-sub"))?.status).toBe("suspended");
+
+    await decidePending({
+      storage: run.storage,
+      workflowId: "approval-parent.node-sub.node-n1",
+    });
+    const result = await run.runner.run({
+      workflow: run.workflow,
+      workflowId: "approval-parent",
+      input: undefined,
+      useStoredInput: true,
+    });
+
+    expect(result.ok).toBe(true);
+    expect((await run.storage.loadWorkflow("approval-parent.node-sub"))?.status).toBe("completed");
+  });
+
+  it("waits separately for every forEach item and resumes only the approved item", async () => {
+    const run = await startWaitingRun({
+      dag: waitingAgentDag({
+        id: "agent-approval-items",
+        forEach: {
+          items: { kind: "initial", path: "items" },
+          as: "item",
+          maxItems: 2,
+        },
+      }),
+      workflowId: "agent-approval-items",
+      initialInput: { items: [0, 1] },
+    });
+    expect(
+      (await listPendingSignals(run.storage))
+        .filter((row) => row.isApproval)
+        .map((row) => row.workflowId)
+        .sort(),
+    ).toEqual(["agent-approval-items.node-n1.item-0", "agent-approval-items.node-n1.item-1"]);
+
+    await decidePending({
+      storage: run.storage,
+      workflowId: "agent-approval-items.node-n1.item-0",
+    });
+    const partly = await run.runner.runSafe({
+      workflow: run.workflow,
+      workflowId: "agent-approval-items",
+      input: undefined,
+      useStoredInput: true,
+    });
+
+    expect(partly.error).toBeTruthy();
+    expect(run.ran).toEqual(["item-0"]);
+    expect((await run.storage.loadWorkflow("agent-approval-items.node-n1.item-0"))?.status).toBe(
+      "completed",
+    );
+    expect((await run.storage.loadWorkflow("agent-approval-items.node-n1.item-1"))?.status).toBe(
+      "suspended",
+    );
+  });
+
+  it("includes approval wait time in node duration", async () => {
+    const clock = FakeWallClock.create(0);
+    const run = await startWaitingRun({
+      dag: waitingAgentDag({ id: "agent-approval-duration" }),
+      workflowId: "agent-approval-duration",
+      clock,
+    });
+    clock.advance(60_000);
+    await decidePending({
+      storage: run.storage,
+      workflowId: "agent-approval-duration.node-n1",
+    });
+
+    const result = await run.runner.run({
+      workflow: run.workflow,
+      workflowId: "agent-approval-duration",
+      input: undefined,
+      useStoredInput: true,
+    });
+
+    expect(result.nodeStats.n1?.durationMs).toBeGreaterThanOrEqual(60_000);
+  });
+
+  it("counts approval wait time toward the node timeout", async () => {
+    const clock = FakeWallClock.create(0);
+    const run = await startWaitingRun({
+      dag: waitingAgentDag({ id: "agent-approval-timeout", timeoutMs: 60_000 }),
+      workflowId: "agent-approval-timeout",
+      clock,
+    });
+
+    clock.advance(60_000);
+    const result = await run.runner.run({
+      workflow: run.workflow,
+      workflowId: "agent-approval-timeout",
+      input: undefined,
+      useStoredInput: true,
+    });
+
+    expect(result.errors.n1).toMatch(/^node_timeout/);
+  });
+
+  it("does not retry a failed turn after its approval was rejected", async () => {
+    const dag: AgenticDagRecipe = {
+      id: "agent-approval-rejected",
+      version: "v1",
+      nodes: [
+        {
+          id: "n1",
+          kind: "agent",
+          agentId: "worker",
+          approvals: "wait",
+          inputs: {},
+          output: {
+            schema: {
+              type: "object",
+              properties: { ok: { type: "boolean" } },
+              required: ["ok"],
+              additionalProperties: false,
+            },
+          },
+          retry: { maxAttempts: 2 },
+        },
+      ],
+      edges: [],
+      entry: ["n1"],
+      terminals: ["n1"],
+    };
+    const run = await startWaitingRun({ dag, workflowId: dag.id });
+    await decidePending({ storage: run.storage, workflowId: `${dag.id}.node-n1`, approved: false });
+
+    const result = await run.runner.run({
+      workflow: run.workflow,
+      workflowId: dag.id,
+      input: undefined,
+      useStoredInput: true,
+    });
+
+    expect(result.errors.n1).toMatch(/^output_schema_mismatch/);
+    expect(result.nodeStats.n1?.attempts).toBeUndefined();
+    expect(await run.storage.loadWorkflow(`${dag.id}.node-n1.try-2`)).toBeNull();
+  });
+
+  it("does not start a queued forEach item while the active item waits", async () => {
+    const run = await startWaitingRun({
+      dag: waitingAgentDag({
+        id: "agent-approval-queued",
+        forEach: {
+          items: { kind: "initial", path: "items" },
+          as: "item",
+          maxItems: 2,
+          concurrency: 1,
+        },
+      }),
+      workflowId: "agent-approval-queued",
+      initialInput: { items: [0, 1] },
+    });
+
+    expect(await run.storage.loadWorkflow("agent-approval-queued.node-n1.item-0")).toBeDefined();
+    expect(await run.storage.loadWorkflow("agent-approval-queued.node-n1.item-1")).toBeNull();
   });
 });

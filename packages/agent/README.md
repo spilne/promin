@@ -551,10 +551,11 @@ the recipe from the `DagRegistry` in its first journaled step. A node starts as
 soon as its own upstream nodes have settled, and the result reports spend,
 duration, item counts and iteration counts in `nodeStats`. A node failing with
 `onError: "abort"` stops the running nodes and starts no new ones. Node turns
-never suspend on approvals: an approval-gated tool call is refused with
-"requires approval; not available in DAG runs". Register the DAG workflow once
-at boot under its fixed name (`DAG_WORKFLOW_NAME`) so recovery resumes a run
-after a restart.
+refuse approval-gated tool calls by default with "requires approval; not
+available in DAG runs". Set `approvals: "wait"` to suspend the node's child turn
+and decide it from the signals inbox. Graphs can also use an `approval` node as
+a zero-budget human gate. Register the DAG workflow once at boot under its fixed
+name (`DAG_WORKFLOW_NAME`) so recovery resumes a run after a restart.
 
 ---
 

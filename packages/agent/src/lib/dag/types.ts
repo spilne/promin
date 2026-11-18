@@ -102,6 +102,8 @@ export interface AgentNode extends NodeBase {
   readonly kind: "agent";
   /** Recipe id in the AgentRegistry. The executor resolves it at run time. */
   readonly agentId: string;
+  /** Approval-gated tools are refused by default; opt in to suspending the node turn. */
+  readonly approvals?: "refuse" | "wait";
   /** A JSON Schema whose validated object becomes this node's output. */
   readonly output?: { readonly schema: Record<string, unknown> };
   readonly forEach?: ForEach;

@@ -95,6 +95,10 @@ interface EndedRun {
   };
 }
 
+interface SignalInbox {
+  signals: ReadonlyArray<{ workflowId: string; signalName: string }>;
+}
+
 async function waitForRun(workflowId: string): Promise<EndedRun> {
   let ended: EndedRun = { status: "pending" };
   for (let i = 0; i < 200 && ended.status !== "completed" && ended.status !== "failed"; i++) {
@@ -102,6 +106,24 @@ async function waitForRun(workflowId: string): Promise<EndedRun> {
     ended = (await (await fetch(`${baseUrl}/api/runs/${workflowId}`)).json()) as typeof ended;
   }
   return ended;
+}
+
+async function waitForSignal(params: { workflowId: string; signalName: string }): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    const inbox = (await (await fetch(`${baseUrl}/api/signals`)).json()) as SignalInbox;
+    if (
+      inbox.signals.some(
+        (signal) =>
+          signal.workflowId === params.workflowId && signal.signalName === params.signalName,
+      )
+    ) {
+      return;
+    }
+    await Bun.sleep(50);
+  }
+  throw new Error(
+    `Signal ${params.signalName} for workflow ${params.workflowId} did not become pending`,
+  );
 }
 
 describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
@@ -342,21 +364,35 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
       expect(ended.result?.nodeStats.research?.items).toBe(3);
     });
 
-    it("runs the draft-review evaluator loop until the reviewer passes", async () => {
+    it("runs draft review, waits for publication approval, then completes", async () => {
       const run = await post("/api/dags/draft-review/run", {
         namespaceId: "default",
         resourceId: "e2e",
         initialInput: { topic: "tea" },
       });
       expect(run.status).toBe(202);
-      const ended = await waitForRun(((await run.json()) as { workflowId: string }).workflowId);
+      const { workflowId } = (await run.json()) as { workflowId: string };
+      await waitForSignal({ workflowId, signalName: "approve:sign-off" });
+      const decision = await post(`/api/runs/${workflowId}/signal`, {
+        signalName: "approve:sign-off",
+        payload: { approved: true, by: "e2e" },
+      });
+      expect(decision.status).toBe(202);
+      const ended = await waitForRun(workflowId);
 
       expect(ended.status).toBe("completed");
       expect(ended.result?.ok).toBe(true);
       expect(ended.result?.nodeStats.round?.iterations).toBe(2);
-      expect(ended.result?.outputs.round).toMatchObject({
+      expect(ended.result?.nodeOutputs.round).toMatchObject({
         review: { verdict: "pass" },
       });
+      expect(ended.result?.nodeOutputs["sign-off"]).toMatchObject({
+        approved: true,
+        decidedBy: "e2e",
+      });
+      expect(ended.result?.outputs.published).toBe(
+        (ended.result?.nodeOutputs.round as { writer?: unknown } | undefined)?.writer,
+      );
     });
 
     it("runs the ticket-triage decision router end to end", async () => {

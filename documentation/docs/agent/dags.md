@@ -259,6 +259,30 @@ limits, unrelated cancellation, or rejected approvals. Later attempts receive th
 minus all earlier spend. `maxAttempts` is 2 through 5, and `backoffMs` is a durable wait between 0
 and 60 seconds. With `forEach` or `repeat`, each item or iteration owns its retry sequence.
 
+## Approvals
+
+An `approval` node pauses the graph for a human decision without consuming an agent budget share.
+Its resolved inputs and optional prompt appear in the signals inbox as `approve:<node-id>`. The node
+outputs `{ approved, reason?, decidedBy?, timedOut }`, which downstream edge conditions can route
+on. Approval timeouts range from one minute to 30 days and reject by default; set
+`onTimeout: "fail"` to fail the node instead.
+
+```ts
+{
+  id: "sign-off",
+  kind: "approval",
+  prompt: "Publish this draft?",
+  timeoutMs: 86_400_000,
+  inputs: { draft: { kind: "node", nodeId: "writer", path: "" } },
+}
+```
+
+Agent nodes still refuse approval-gated tools by default. Set `approvals: "wait"` when the agent's
+turn should suspend instead. That approval is listed under the agent node's child run, such as
+`<dag-run>.node-writer`, and is decided from the same signals inbox. Approval wait time counts
+toward the node's duration and `timeoutMs`; fan-out items and sub-graphs remain durably parked while
+they wait.
+
 ## Sub-graphs
 
 A `dag` node runs another registered graph and uses that child graph's terminal outputs as its
@@ -295,7 +319,7 @@ outputs, so the writer can address the review notes. The repeat stops when `revi
 // draft-review DAG recipes — a sub-graph inside an evaluator/optimizer loop.
 //
 // One round drafts and reviews a topic. The parent repeats that round until
-// the reviewer passes it, carrying the prior round's outputs into the writer.
+// the reviewer passes it, then waits for a person to approve publication.
 // ---------------------------------------------------------------------------
 
 import type { RegisterDagInput } from "@promin/agent";
@@ -344,10 +368,10 @@ export const draftReviewRoundRecipe: RegisterDagInput = {
 
 export const draftReviewRecipe: RegisterDagInput = {
   id: "draft-review",
-  version: "v1",
+  version: "v2",
   metadata: {
-    description: "Repeat the draft-review sub-graph until its reviewer passes.",
-    tags: ["demo", "evaluation", "repeat", "sub-dag"],
+    description: "Repeat draft review until it passes, then request publication approval.",
+    tags: ["demo", "evaluation", "repeat", "sub-dag", "approval"],
   },
   nodes: [
     {
@@ -364,10 +388,36 @@ export const draftReviewRecipe: RegisterDagInput = {
         onExhausted: "continue",
       },
     },
+    {
+      id: "sign-off",
+      kind: "approval",
+      prompt: "Publish this draft?",
+      timeoutMs: 86_400_000,
+      inputs: {
+        draft: { kind: "node", nodeId: "round", path: "writer" },
+        review: { kind: "node", nodeId: "round", path: "review" },
+      },
+    },
+    {
+      id: "published",
+      kind: "transform",
+      inputs: {
+        draft: { kind: "node", nodeId: "round", path: "writer" },
+      },
+      from: "draft",
+      ops: [{ op: "pick", path: "" }],
+    },
   ],
-  edges: [],
+  edges: [
+    { from: "round", to: "sign-off" },
+    {
+      from: "sign-off",
+      to: "published",
+      condition: { kind: "equals", path: "approved", value: true },
+    },
+  ],
   entry: ["round"],
-  terminals: ["round"],
+  terminals: ["published"],
 };
 ```
 
