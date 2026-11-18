@@ -12,7 +12,7 @@ const DIMENSIONS: ReadonlyArray<BudgetDimension> = [
 
 /** How many equal parts of the free budget a node not yet started stands for. */
 export function waitingWeight(node: DagNode): number {
-  return node.kind === "transform" ? 0 : 1;
+  return node.kind === "transform" || node.kind === "approval" ? 0 : 1;
 }
 
 /** The share of a node starting now. */

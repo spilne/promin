@@ -1012,6 +1012,7 @@ export type {
   DagNode,
   DagNodeStats,
   DagParentFrame,
+  ApprovalNode,
   DecideNode,
   DecisionModelRef,
   SubDagNode,
@@ -1031,6 +1032,7 @@ export type { AttemptOutcome, AttemptParams, NodeRunEnv, RunAttempt } from "./da
 export { runAgentAttempt } from "./dag/runners/agent-attempt.ts";
 export { runSubDagAttempt } from "./dag/runners/sub-dag-attempt.ts";
 export { runDecide } from "./dag/runners/decide.ts";
+export { DAG_APPROVAL_TOOL_NAME, runApproval } from "./dag/runners/approval.ts";
 export {
   createDagWorkflow,
   DAG_WORKFLOW_NAME,

@@ -138,6 +138,15 @@ export interface DecideNode extends NodeBase {
   readonly timeoutMs?: number;
 }
 
+export interface ApprovalNode extends NodeBase {
+  readonly kind: "approval";
+  readonly prompt?: string;
+  /** How long to wait for a decision, from one minute through thirty days. */
+  readonly timeoutMs?: number;
+  /** A timeout is a rejection by default; opt in to failing the node. */
+  readonly onTimeout?: "reject" | "fail";
+}
+
 /** Set on the input of a DAG run started by another DAG run. */
 export interface DagParentFrame {
   /** One for a child of a root run. */
@@ -169,7 +178,7 @@ export interface TransformNode extends NodeBase {
   readonly ops: ReadonlyArray<TransformOp>;
 }
 
-export type DagNode = AgentNode | TransformNode | SubDagNode | DecideNode;
+export type DagNode = AgentNode | TransformNode | SubDagNode | DecideNode | ApprovalNode;
 
 /** Durable accounting and timing for one settled DAG node. */
 export interface DagNodeStats {

@@ -72,6 +72,7 @@ import { checkBlockers, resolveNodeInputs, resolveNodeInputSource } from "./dag-
 import { emptyDimension, startShare, waitingWeight } from "./node-budget.ts";
 import { recipeIssues } from "./recipe-schema.ts";
 import { runAgentAttempt } from "./runners/agent-attempt.ts";
+import { runApproval } from "./runners/approval.ts";
 import { withAttempts } from "./runners/attempts.ts";
 import { runDecide } from "./runners/decide.ts";
 import { childRunId, nodeKey, type AttemptOutcome, type NodeRunEnv } from "./runners/env.ts";
@@ -684,6 +685,8 @@ export function buildDagWorkflow(
               ...(share && { share }),
               signal: abort.signal,
             });
+          } else if (node.kind === "approval") {
+            outcome = yield* runApproval(env, { node, nodeInput });
           } else {
             const transformed = yield* ctx.activity(
               `${key}-transform`,

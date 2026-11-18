@@ -229,11 +229,25 @@ const DecideNodeSchema = z
   })
   .strict();
 
+const ApprovalNodeSchema = z
+  .object({
+    id: z.string().regex(NODE_ID_PATTERN),
+    kind: z.literal("approval"),
+    prompt: z.string().optional(),
+    timeoutMs: z.number().int().min(60_000).max(2_592_000_000).optional(),
+    onTimeout: z.enum(["reject", "fail"]).optional(),
+    inputs: z.record(z.string(), NodeInputSourceSchema),
+    join: z.enum(["all", "any"]).optional(),
+    onError: z.enum(["abort", "skip"]).optional(),
+  })
+  .strict();
+
 const DagNodeSchema: z.ZodType<DagNode> = z.discriminatedUnion("kind", [
   AgentNodeSchema,
   TransformNodeSchema,
   SubDagNodeSchema,
   DecideNodeSchema,
+  ApprovalNodeSchema,
 ]);
 
 const DagEdgeSchema = z
