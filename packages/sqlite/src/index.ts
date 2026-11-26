@@ -15,6 +15,7 @@ export {
   SqliteAgentRegistry,
   SqliteDagRegistry,
   SqliteFragmentRegistry,
+  SqliteMcpEndpointRegistry,
   SqliteRoleRegistry,
   SqliteSkillRegistry,
 } from "./lib/agent/registries.ts";

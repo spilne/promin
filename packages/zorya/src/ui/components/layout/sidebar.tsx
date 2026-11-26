@@ -34,6 +34,7 @@ const SECTIONS: Array<{ title?: string; items: NavItem[] }> = [
       { path: "/roles", label: "Roles", icon: "P" },
       { path: "/instances", label: "Instances", icon: "I" },
       { path: "/tools", label: "Tools", icon: "T" },
+      { path: "/mcp-endpoints", label: "MCP endpoints", icon: "M" },
       { path: "/skills", label: "Skills", icon: "K" },
       { path: "/fragments", label: "Fragments", icon: "F" },
       { path: "/dags", label: "DAGs", icon: "D" },

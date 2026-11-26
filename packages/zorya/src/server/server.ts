@@ -46,6 +46,7 @@ import type { ZoryaDags } from "./services/dags/index.ts";
 import type { ZoryaEvals } from "./services/evals/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
 import type { ZoryaKnowledgeBases } from "./services/knowledge/index.ts";
+import type { ZoryaMcpEndpoints } from "./services/mcp-endpoints/index.ts";
 import type { ZoryaMcpServers } from "./services/mcp/index.ts";
 import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
@@ -79,6 +80,7 @@ import {
 } from "./mount/mount-registries.ts";
 import { adoptStoredNamespaces, mountNamespaces } from "./mount/mount-namespaces.ts";
 import { mountEvals } from "./mount/mount-evals.ts";
+import { mountMcpEndpoints } from "./mount/mount-mcp-endpoints.ts";
 import { mountRpc } from "./mount/mount-rpc.ts";
 import { mountRuns } from "./mount/mount-runs.ts";
 import { mountSchedules } from "./mount/mount-schedules.ts";
@@ -99,6 +101,8 @@ export class ZoryaServer {
   readonly knowledgeBases?: ZoryaKnowledgeBases;
   /** The operator's MCP allowlist and client pool (`ZoryaServerConfig.mcp`). */
   readonly mcp?: ZoryaMcpServers;
+  /** MCP endpoints this server publishes (`ZoryaServerConfig.mcpEndpoints`). */
+  readonly mcpEndpoints?: ZoryaMcpEndpoints;
   /** The visual workflow builder, when configured (`/api/workflow-builder/*`). */
   readonly workflowBuilder?: ZoryaWorkflowBuilder;
   /**
@@ -175,6 +179,7 @@ export class ZoryaServer {
     if (config.evals) this.evals = config.evals;
     if (config.knowledgeBases) this.knowledgeBases = config.knowledgeBases;
     if (config.mcp) this.mcp = config.mcp;
+    if (config.mcpEndpoints) this.mcpEndpoints = config.mcpEndpoints;
     if (config.workflowBuilder) this.workflowBuilder = config.workflowBuilder;
     if (config.secrets) this.secrets = config.secrets;
     if (config.namespaces) this.namespaces = config.namespaces;
@@ -254,6 +259,7 @@ export class ZoryaServer {
         knowledgeBases: this.knowledgeBases,
         evals: this.evals,
         mcp: this.mcp,
+        mcpEndpoints: this.mcpEndpoints,
         workflowBuilder: this.workflowBuilder,
         retention: this.retention,
         namespaces: namespaces && {
@@ -413,6 +419,14 @@ export class ZoryaServer {
         knowledgeBases: this.knowledgeBases,
         agents: this.agents,
         namespaces,
+      });
+    }
+    if (this.mcpEndpoints) {
+      mountMcpEndpoints({
+        router,
+        endpoints: this.mcpEndpoints,
+        namespaces,
+        authorizeScope: this.agents?.authorizeScope,
       });
     }
     mountSchedules({ router, scheduler: this.scheduler, storage, clock, namespaces });

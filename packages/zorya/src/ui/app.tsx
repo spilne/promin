@@ -16,6 +16,7 @@ import { SecretsPage } from "./components/secrets/secrets-page.tsx";
 import { ToolsPage } from "./components/tools/tools-page.tsx";
 import { SkillsPage } from "./components/skills/skills-page.tsx";
 import { FragmentsPage } from "./components/fragments/fragments-page.tsx";
+import { McpEndpointsPage } from "./components/mcp-endpoints/mcp-endpoints-page.tsx";
 import { RolesPage } from "./components/roles/roles-page.tsx";
 import { DagsPage } from "./components/dags/dags-page.tsx";
 import { EvalsPage } from "./components/evals/evals-page.tsx";
@@ -98,6 +99,9 @@ function renderRoute(route: string, navigate: (p: string) => void) {
   }
   if (path === "/fragments") {
     return <FragmentsPage />;
+  }
+  if (path === "/mcp-endpoints") {
+    return <McpEndpointsPage />;
   }
   if (path === "/roles") {
     return <RolesPage />;

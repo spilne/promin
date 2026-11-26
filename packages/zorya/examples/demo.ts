@@ -37,6 +37,7 @@ import {
   ZoryaScheduler,
   ZoryaAgents,
   ZoryaSkills,
+  ZoryaMcpEndpoints,
   ZoryaFragments,
   ZoryaDags,
   ZoryaEvals,
@@ -1135,6 +1136,26 @@ const skills = new ZoryaSkills({
   },
 });
 
+// MCP endpoints — this server's own tools published over MCP. Endpoints
+// reference shared tools by name (listWorkflows + the ./tools folder) or
+// define their own; ./mcp is scanned like ./agents. A tenant connects at
+// /ns/<namespace>/mcp/<id>, an operator at /mcp/<id>.
+const mcpEndpoints = new ZoryaMcpEndpoints({
+  registry: stack.mcpEndpointRegistry,
+  tools: [{ listWorkflows: listWorkflowsTool }, toolRegistry],
+  scan: {
+    root: path.join(import.meta.dir, "mcp"),
+    intervalMs: 5_000,
+    onTick: (tick) => {
+      if (tick.added.length > 0) {
+        console.log(`[zorya] hot-reload: registered new MCP endpoints: ${tick.added.join(", ")}`);
+      }
+      for (const w of tick.warnings) console.warn(`[zorya] mcp-endpoint-scan: ${w}`);
+      for (const e of tick.errors) console.warn(`[zorya] mcp-endpoint-scan: ${e}`);
+    },
+  },
+});
+
 // Fragments service — scans examples/fragments/*.md on boot + on a tick;
 // the manager UI edits the same registry via /api/fragments CRUD.
 const fragmentScanRoot = path.join(import.meta.dir, "fragments");
@@ -1291,6 +1312,8 @@ const server = ZoryaServer.builder()
   // MCP allowlist: recipe writes are checked against it, the tool catalog
   // and the agent editor's MCP picker list it, stop() closes its clients.
   .mcp(mcp)
+  // MCP endpoints this server publishes (/api/mcp-endpoints, /ns/:ns/mcp/:id).
+  .mcpEndpoints(mcpEndpoints)
   // /api/namespaces, and the namespace checks on new work (seeded above).
   .namespaces(stack.namespaceRegistry)
   // Operator key for /api; worker key for /rpc/storage, /rpc/worker,

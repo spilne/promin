@@ -23,6 +23,7 @@ import {
   SqliteEvalSuiteRegistry,
   SqliteFragmentRegistry,
   SqliteKnowledgeBaseStore,
+  SqliteMcpEndpointRegistry,
   SqliteMemoryStore,
   SqliteNamespaceRegistry,
   SqlitePendingApprovalStore,
@@ -77,6 +78,8 @@ export interface SqliteZoryaStack {
   readonly roleRegistry: SqliteRoleRegistry;
   readonly skillRegistry: SqliteSkillRegistry;
   readonly fragmentRegistry: SqliteFragmentRegistry;
+  /** MCP endpoints this server publishes (`ZoryaMcpEndpoints`). */
+  readonly mcpEndpointRegistry: SqliteMcpEndpointRegistry;
   readonly knowledgeBaseStore: SqliteKnowledgeBaseStore;
   readonly memoryStore: SqliteMemoryStore;
   /**
@@ -150,6 +153,7 @@ export function createSqliteZoryaStack(config: SqliteZoryaStackConfig): SqliteZo
     roleRegistry: new SqliteRoleRegistry({ db: sqlite, clock }),
     skillRegistry: new SqliteSkillRegistry({ db: sqlite, clock }),
     fragmentRegistry: new SqliteFragmentRegistry({ db: sqlite, clock }),
+    mcpEndpointRegistry: new SqliteMcpEndpointRegistry({ db: sqlite, clock }),
     knowledgeBaseStore: SqliteKnowledgeBaseStore.make({ db: sqlite }),
     memoryStore: SqliteMemoryStore.make({ db: sqlite, now }),
     pendingApprovalStore: SqlitePendingApprovalStore.make({ db: sqlite, clock }),
