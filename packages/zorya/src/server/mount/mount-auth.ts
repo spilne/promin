@@ -13,6 +13,8 @@
 //   - /rpc/storage              worker keys, scoped to `RUNNER_STORAGE_METHODS`;
 //                               operator keys get the full storage contract
 //   - /webhooks/*               per-source HMAC signature (checked by the route)
+//   - /mcp/*, /ns/*/mcp/*       operator keys; the route then asks the
+//                               `ScopeAuthorizer` for the tenant (or global) scope
 // Keys travel only in `Authorization: Bearer <key>` (the worker WebSocket
 // upgrade included) and are compared in constant time.
 // ---------------------------------------------------------------------------
@@ -77,7 +79,7 @@ export class AuthPlanes {
     if (isWorkerPath(path)) {
       return this.worker.check(req) ? undefined : jsonError(401, "unauthorized_worker");
     }
-    if (path.startsWith("/api/")) {
+    if (path.startsWith("/api/") || isMcpEndpointPath(path)) {
       return this.operator.check(req) ? undefined : jsonError(401, "unauthorized");
     }
     return undefined;
@@ -119,4 +121,9 @@ function isWorkerPath(path: string): boolean {
     path.startsWith("/api/advertisements/") ||
     path.startsWith("/api/worker-protocol/")
   );
+}
+
+/** MCP endpoint serving paths: `/mcp/:id` and `/ns/:namespace/mcp/:id`. */
+function isMcpEndpointPath(path: string): boolean {
+  return path.startsWith("/mcp/") || path.startsWith("/ns/");
 }

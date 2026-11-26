@@ -7,6 +7,7 @@ import {
   AGENT_KIND,
   DAG_KIND,
   FRAGMENT_KIND,
+  MCP_ENDPOINT_KIND,
   ROLE_KIND,
   SKILL_KIND,
   type AgentFilter,
@@ -16,6 +17,9 @@ import {
   type DagRecipe,
   type FragmentFilter,
   type FragmentRecipe,
+  type McpEndpointFilter,
+  type McpEndpointRecipe,
+  type McpEndpointRecipeInput,
   type RoleFilter,
   type RoleRecipe,
   type RoleRecipeInput,
@@ -75,5 +79,15 @@ export class PostgresFragmentRegistry extends PostgresVersionedRegistry<
 > {
   constructor(config: PostgresRegistryConfig) {
     super({ ...config, kind: FRAGMENT_KIND });
+  }
+}
+
+export class PostgresMcpEndpointRegistry extends PostgresVersionedRegistry<
+  McpEndpointRecipe,
+  McpEndpointFilter,
+  McpEndpointRecipeInput
+> {
+  constructor(config: PostgresRegistryConfig) {
+    super({ ...config, kind: MCP_ENDPOINT_KIND });
   }
 }

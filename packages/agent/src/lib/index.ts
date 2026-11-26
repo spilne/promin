@@ -364,6 +364,7 @@ export {
   AGENT_KIND,
   DAG_KIND,
   FRAGMENT_KIND,
+  MCP_ENDPOINT_KIND,
   ROLE_KIND,
   SKILL_KIND,
 } from "./versioned-registry/kinds.ts";
@@ -375,6 +376,7 @@ export {
   InMemoryAgentRegistry,
   InMemoryDagRegistry,
   InMemoryFragmentRegistry,
+  InMemoryMcpEndpointRegistry,
   InMemoryRoleRegistry,
   InMemorySkillRegistry,
   type InMemoryRegistryConfig,
@@ -572,6 +574,21 @@ export type {
   ApplyDiscoveredFragmentsParams,
   FragmentScanLoopOptions,
 } from "./discovery/fragment-scanner.ts";
+export {
+  CODE_SOURCE,
+  McpEndpointScanner,
+  applyDiscoveredMcpEndpoints,
+  registerMcpEndpointDefinitions,
+  startMcpEndpointScanLoop,
+} from "./discovery/mcp-endpoint-scanner.ts";
+export type {
+  RegisterMcpEndpointDefinitionsParams,
+  McpEndpointSpec,
+  McpEndpointScannerOptions,
+  McpEndpointScanResult,
+  ApplyDiscoveredMcpEndpointsParams,
+  McpEndpointScanLoopOptions,
+} from "./discovery/mcp-endpoint-scanner.ts";
 
 // ThreadLeaseStore — coordination primitive for horizontally-scaled
 // agent runtimes. AgentTurnGate exposes strict-mode policy on top.
@@ -702,7 +719,49 @@ export {
   type ResolvedMcpCredential,
 } from "./mcp/load-mcp-tools-from-recipe.ts";
 
+// MCP endpoints — host tools served over MCP (the server side of ./mcp).
+export {
+  MCP_ENDPOINT_ID_PATTERN,
+  MCP_ENDPOINT_TOOL_NAME,
+  type McpEndpointFilter,
+  type McpEndpointMetadata,
+  type McpEndpointRecipe,
+  type McpEndpointRecipeInput,
+  type McpEndpointRegistry,
+  type McpEndpointResolvedTool,
+  type McpEndpointSkipCode,
+  type McpEndpointSkippedTool,
+  type McpEndpointToolBinding,
+  type McpEndpointToolSource,
+  type RegisteredMcpEndpoint,
+  type RegisterMcpEndpointInput,
+  type ResolvedMcpEndpointTools,
+} from "./mcp-endpoint/types.ts";
+export {
+  compileMcpEndpoint,
+  isMcpEndpointDefinition,
+  mcpEndpoint,
+  splitMcpEndpointTools,
+  type CompiledMcpEndpoint,
+  type McpEndpointDefinition,
+  type McpEndpointDefinitionInput,
+  type McpEndpointToolEntry,
+} from "./mcp-endpoint/define-mcp-endpoint.ts";
+export { McpEndpointPrivateTools } from "./mcp-endpoint/mcp-endpoint-private-tools.ts";
+export { McpEndpoint, McpEndpointBuilder } from "./mcp-endpoint/mcp-endpoint-builder.ts";
+export {
+  mergeToolSources,
+  readToolSource,
+  resolveMcpEndpointTools,
+} from "./mcp-endpoint/resolve-mcp-endpoint-tools.ts";
+export {
+  DEFAULT_MCP_ENDPOINT_TOOL_TIMEOUT_MS,
+  handleMcpEndpointRequest,
+  type HandleMcpEndpointRequestParams,
+} from "./mcp-endpoint/mcp-endpoint-handler.ts";
+
 export { tool, createScopedTool, createElevatedTool, filterToolsByCapability } from "./tool.ts";
+export { agentToolJsonSchema } from "./tool-json-schema.ts";
 export type {
   AgentTool,
   ApprovalDecision,

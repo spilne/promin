@@ -19,6 +19,7 @@ import type { ZoryaDags } from "./services/dags/index.ts";
 import type { ZoryaEvals } from "./services/evals/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
 import type { ZoryaKnowledgeBases } from "./services/knowledge/index.ts";
+import type { ZoryaMcpEndpoints } from "./services/mcp-endpoints/index.ts";
 import type { ZoryaMcpServers } from "./services/mcp/index.ts";
 import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
@@ -158,6 +159,11 @@ export class ZoryaServerBuilder {
   /** MCP allowlist and client pool recipes attach servers from. */
   mcp(mcp: ZoryaMcpServers): this {
     return this.set({ mcp });
+  }
+
+  /** MCP endpoints this server publishes: `/api/mcp-endpoints/*`, `/ns/:namespace/mcp/:id`, `/mcp/:id`. */
+  mcpEndpoints(mcpEndpoints: ZoryaMcpEndpoints): this {
+    return this.set({ mcpEndpoints });
   }
 
   /** Secrets vault: `/api/secrets` CRUD and agent credential resolution. */

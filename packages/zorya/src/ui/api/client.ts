@@ -73,6 +73,14 @@ import type {
   SkillsCatalogResponse,
 } from "../../server/routes/agent-catalog.ts";
 import type { MemoryInspectResponse } from "../../server/routes/memory.ts";
+import type {
+  McpEndpointCatalogResponse,
+  McpEndpointsListResponse,
+  McpEndpointToolBinding,
+  McpEndpointToolsResponse,
+  McpEndpointVersionsResponse,
+  RegisteredMcpEndpoint,
+} from "../../server/routes/mcp-endpoints.ts";
 import type { McpServersCatalogResponse } from "../../server/services/mcp/zorya-mcp-servers.ts";
 
 export type { McpServersCatalogResponse };
@@ -178,6 +186,17 @@ function versionedWrite<T>(params: {
     headers: { "content-type": "application/json", ...ifMatch(params.expectedVersion) },
     ...(params.body !== undefined && { body: JSON.stringify(params.body) }),
   });
+}
+
+/** Content fields of an MCP endpoint create or edit. */
+export interface McpEndpointEdit {
+  title?: string | null;
+  instructions?: string | null;
+  tools?: McpEndpointToolBinding[];
+  capabilities?: string[];
+  namespaces?: string[] | null;
+  trustClientApproval?: boolean;
+  metadata?: { description?: string | null; tags?: string[] };
 }
 
 /** Fields every versioned edit takes besides its content. */
@@ -1016,6 +1035,61 @@ export const api = {
   },
   listSkillSources(): Promise<SkillSourcesResponse> {
     return req<SkillSourcesResponse>(`/api/skills/_sources`);
+  },
+
+  // ---------------------------------------------------------------------
+  // MCP endpoints — tools this server publishes over MCP
+  // ---------------------------------------------------------------------
+  listMcpEndpoints(): Promise<McpEndpointsListResponse> {
+    return req<McpEndpointsListResponse>(`/api/mcp-endpoints`);
+  },
+  listMcpEndpointSources(): Promise<{ fileManaged: string[] }> {
+    return req<{ fileManaged: string[] }>(`/api/mcp-endpoints/_sources`);
+  },
+  mcpEndpointCatalog(): Promise<McpEndpointCatalogResponse> {
+    return req<McpEndpointCatalogResponse>(`/api/mcp-endpoints/_catalog`);
+  },
+  listMcpEndpointVersions(id: string): Promise<McpEndpointVersionsResponse> {
+    return req<McpEndpointVersionsResponse>(
+      `/api/mcp-endpoints/${encodeURIComponent(id)}/versions`,
+    );
+  },
+  listMcpEndpointTools(id: string): Promise<McpEndpointToolsResponse> {
+    return req<McpEndpointToolsResponse>(`/api/mcp-endpoints/${encodeURIComponent(id)}/tools`);
+  },
+  createMcpEndpoint(body: { id: string } & McpEndpointEdit): Promise<RegisteredMcpEndpoint> {
+    return req<RegisteredMcpEndpoint>(`/api/mcp-endpoints`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  },
+  /** Publish a new version built on `expectedVersion`, and/or flip the kill switch. */
+  updateMcpEndpoint(
+    id: string,
+    body: VersionedEditOptions & McpEndpointEdit & { enabled?: boolean },
+  ): Promise<RegisteredMcpEndpoint> {
+    const { expectedVersion, ...rest } = body;
+    return versionedWrite<RegisteredMcpEndpoint>({
+      method: "PATCH",
+      path: `/api/mcp-endpoints/${encodeURIComponent(id)}`,
+      body: rest,
+      ...(expectedVersion !== undefined && { expectedVersion }),
+    });
+  },
+  promoteMcpEndpoint(
+    id: string,
+    body: { version: string; expectedVersion?: string },
+  ): Promise<RegisteredMcpEndpoint> {
+    return versionedWrite<RegisteredMcpEndpoint>({
+      method: "POST",
+      path: `/api/mcp-endpoints/${encodeURIComponent(id)}/promote`,
+      body: { version: body.version },
+      ...(body.expectedVersion !== undefined && { expectedVersion: body.expectedVersion }),
+    });
+  },
+  deleteMcpEndpoint(id: string): Promise<void> {
+    return req<void>(`/api/mcp-endpoints/${encodeURIComponent(id)}`, { method: "DELETE" });
   },
 
   // ---------------------------------------------------------------------

@@ -315,9 +315,10 @@ export interface OperatorScope {
    * What the operator action touches: global secrets; (`eval-gate`) a
    * promotion gate, or promoting an agent version past a failing one;
    * (`eval-suite`) an eval suite; (`agent-feedback`) writing or deleting
-   * operator feedback, whose `expected` answers become regression cases.
+   * operator feedback, whose `expected` answers become regression cases;
+   * (`mcp-endpoint`) calling an MCP endpoint in the global scope (`/mcp/:id`).
    */
-  readonly resource: "secrets" | "eval-gate" | "eval-suite" | "agent-feedback";
+  readonly resource: "secrets" | "eval-gate" | "eval-suite" | "agent-feedback" | "mcp-endpoint";
 }
 
 /** The scope a request asks to act in. */

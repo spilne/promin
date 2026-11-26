@@ -7,10 +7,22 @@ import type { WallClock } from "@promin/workflow";
 import type { DagFilter, DagRecipe } from "../dag/types.ts";
 import type { FragmentFilter, FragmentRecipe } from "../fragments/types.ts";
 import type { AgentFilter, AgentRecipe, AgentRecipeInput } from "../registry/types.ts";
+import type {
+  McpEndpointFilter,
+  McpEndpointRecipe,
+  McpEndpointRecipeInput,
+} from "../mcp-endpoint/types.ts";
 import type { RoleFilter, RoleRecipe, RoleRecipeInput } from "../role/types.ts";
 import type { SkillFilter, SkillRecipe, SkillRecipeInput } from "../skills/types.ts";
 import { InMemoryVersionedRegistry } from "./in-memory-versioned-registry.ts";
-import { AGENT_KIND, DAG_KIND, FRAGMENT_KIND, ROLE_KIND, SKILL_KIND } from "./kinds.ts";
+import {
+  AGENT_KIND,
+  DAG_KIND,
+  FRAGMENT_KIND,
+  MCP_ENDPOINT_KIND,
+  ROLE_KIND,
+  SKILL_KIND,
+} from "./kinds.ts";
 
 export interface InMemoryRegistryConfig {
   /** Time source for `createdAt`. Default: `SystemWallClock`. */
@@ -59,5 +71,15 @@ export class InMemoryFragmentRegistry extends InMemoryVersionedRegistry<
 > {
   constructor(config: InMemoryRegistryConfig = {}) {
     super({ ...config, kind: FRAGMENT_KIND });
+  }
+}
+
+export class InMemoryMcpEndpointRegistry extends InMemoryVersionedRegistry<
+  McpEndpointRecipe,
+  McpEndpointFilter,
+  McpEndpointRecipeInput
+> {
+  constructor(config: InMemoryRegistryConfig = {}) {
+    super({ ...config, kind: MCP_ENDPOINT_KIND });
   }
 }

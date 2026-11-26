@@ -18,6 +18,7 @@ export {
   PostgresAgentRegistry,
   PostgresDagRegistry,
   PostgresFragmentRegistry,
+  PostgresMcpEndpointRegistry,
   PostgresRoleRegistry,
   PostgresSkillRegistry,
   type PostgresRegistryConfig,

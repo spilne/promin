@@ -15,6 +15,7 @@ import type { ZoryaDags } from "./services/dags/index.ts";
 import type { ZoryaEvals } from "./services/evals/index.ts";
 import type { ZoryaFragments } from "./services/fragments/index.ts";
 import type { ZoryaKnowledgeBases } from "./services/knowledge/index.ts";
+import type { ZoryaMcpEndpoints } from "./services/mcp-endpoints/index.ts";
 import type { ZoryaMcpServers } from "./services/mcp/index.ts";
 import type { ZoryaWorkflowBuilder } from "./services/workflow-builder/index.ts";
 import type { ZoryaScheduler } from "./services/scheduler/index.ts";
@@ -114,6 +115,14 @@ export interface ZoryaServerConfig extends AuthConfig {
    * server closes its clients on `stop()`.
    */
   mcp?: ZoryaMcpServers;
+  /**
+   * MCP endpoints this server publishes (zorya as an MCP server). Mounts
+   * `/api/mcp-endpoints/*` and serves each endpoint at
+   * `/ns/:namespace/mcp/:id` (a tenant) and `/mcp/:id` (the global scope,
+   * operator only). Calls are authenticated with the operator keys and
+   * authorized through `agents.authorizeScope` when agents are configured.
+   */
+  mcpEndpoints?: ZoryaMcpEndpoints;
   /** Optional DAG gateway service. Mounts /api/dags/* routes. */
   dags?: ZoryaDags;
   /**

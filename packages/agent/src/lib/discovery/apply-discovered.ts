@@ -44,6 +44,12 @@ export interface ApplyDiscoveredParams<TBody, TFilter, TInput> {
   readonly complete?: boolean;
   /** Only touch ids with this prefix. */
   readonly idPrefix?: string;
+  /**
+   * `source` this pass writes and owns. Default `FILE_SOURCE`. Code-defined
+   * entries (`"code"`) reconcile the same way, and `sync` only ever removes
+   * versions with this source.
+   */
+  readonly source?: string;
   /** Review state of versions this pass creates. Default `"trusted"`. */
   readonly trust?: VersionTrust;
   /** Called before a changed entry is registered (e.g. to warn about missing env). */
@@ -75,6 +81,7 @@ export async function applyDiscovered<TBody, TFilter, TInput>(
   params: ApplyDiscoveredParams<TBody, TFilter, TInput>,
 ): Promise<ApplyDiscoveredResult> {
   const { registry, idPrefix } = params;
+  const source = params.source ?? FILE_SOURCE;
   const inScope = (id: string): boolean => idPrefix === undefined || id.startsWith(idPrefix);
   const upserted: string[] = [];
   const added: string[] = [];
@@ -86,7 +93,7 @@ export async function applyDiscovered<TBody, TFilter, TInput>(
     if (!inScope(input.id)) continue;
     const versions = await registry.versions({ id: input.id });
     const active = versions.find((v) => v.active) ?? null;
-    const lastFile = versions.findLast((v) => v.source === FILE_SOURCE) ?? null;
+    const lastFile = versions.findLast((v) => v.source === source) ?? null;
     try {
       // Unchanged since the scanner last wrote it — or already what is
       // active (an operator published the same text).
@@ -102,7 +109,7 @@ export async function applyDiscovered<TBody, TFilter, TInput>(
       // A file edit replaces what a file published. An operator's choice of
       // active version (one they authored or promoted) stays active; the
       // file's new text waits as a draft.
-      const fileOwnsActive = active === null || active.source === FILE_SOURCE;
+      const fileOwnsActive = active === null || active.source === source;
       const gated =
         active !== null &&
         fileOwnsActive &&
@@ -114,7 +121,7 @@ export async function applyDiscovered<TBody, TFilter, TInput>(
         // Registry state is the scanner's to set, never the file's.
         expectedActive: undefined,
         enabled: undefined,
-        source: FILE_SOURCE,
+        source,
         trust: params.trust ?? "trusted",
         promote,
       });
@@ -147,7 +154,7 @@ export async function applyDiscovered<TBody, TFilter, TInput>(
     for (const entry of await listAllVersioned({ registry })) {
       if (!inScope(entry.id) || discovered.has(entry.id)) continue;
       const fileVersions = (await registry.versions({ id: entry.id })).filter(
-        (v) => v.source === FILE_SOURCE,
+        (v) => v.source === source,
       );
       for (const version of fileVersions) {
         await registry.unregister({ id: entry.id, version: version.version });

@@ -76,6 +76,20 @@ export {
   type ZoryaSkillsScanConfig,
 } from "./server/services/skills/index.ts";
 export {
+  ZoryaMcpEndpoints,
+  type ZoryaMcpEndpointsConfig,
+  type ZoryaMcpEndpointsScanConfig,
+} from "./server/services/mcp-endpoints/index.ts";
+export { MCP_RESOURCE_HEADER } from "./server/routes/mcp-endpoints.ts";
+export type {
+  McpEndpointCatalogResponse,
+  McpEndpointCatalogTool,
+  McpEndpointsListResponse,
+  McpEndpointToolsResponse,
+  McpEndpointToolView,
+  McpEndpointVersionsResponse,
+} from "./server/routes/mcp-endpoints.ts";
+export {
   ZoryaFragments,
   type ZoryaFragmentsConfig,
   type ZoryaFragmentsScanConfig,

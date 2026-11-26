@@ -79,6 +79,8 @@ export function managedServices(params: {
   readonly evals: Lifecycled | undefined;
   /** MCP client pool: stopping closes every client (stdio processes exit). */
   readonly mcp: Lifecycled | undefined;
+  /** MCP endpoints: starts the `mcp/` folder scan. */
+  readonly mcpEndpoints: Lifecycled | undefined;
   readonly workflowBuilder: Lifecycled | undefined;
   readonly retention: Lifecycled | undefined;
   /** One-shot adoption of stored namespaces into the registry. */
@@ -97,6 +99,9 @@ export function managedServices(params: {
   }
   if (params.evals) out.push({ name: "evals", ...bindLifecycle(params.evals) });
   if (params.mcp) out.push({ name: "mcp", ...bindLifecycle(params.mcp) });
+  if (params.mcpEndpoints) {
+    out.push({ name: "mcpEndpoints", ...bindLifecycle(params.mcpEndpoints) });
+  }
   if (params.workflowBuilder) {
     out.push({ name: "workflowBuilder", ...bindLifecycle(params.workflowBuilder) });
   }

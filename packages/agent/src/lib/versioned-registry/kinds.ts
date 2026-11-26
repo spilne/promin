@@ -19,6 +19,14 @@ import {
   type AgentRecipe,
   type AgentRecipeInput,
 } from "../registry/types.ts";
+import {
+  MCP_ENDPOINT_ID_PATTERN,
+  MCP_ENDPOINT_TOOL_NAME,
+  type McpEndpointFilter,
+  type McpEndpointRecipe,
+  type McpEndpointRecipeInput,
+  type McpEndpointToolBinding,
+} from "../mcp-endpoint/types.ts";
 import type { RoleFilter, RoleRecipe, RoleRecipeInput } from "../role/types.ts";
 import type { SkillFilter, SkillRecipe, SkillRecipeInput } from "../skills/types.ts";
 import { RegistryInputError, type FacetQuery, type RegistryKind } from "./types.ts";
@@ -163,4 +171,71 @@ export const FRAGMENT_KIND: RegistryKind<FragmentRecipe, FragmentFilter> = {
   },
   facets: () => [],
   query: () => ({ include: [], exclude: [] }),
+};
+
+export const MCP_ENDPOINT_KIND: RegistryKind<
+  McpEndpointRecipe,
+  McpEndpointFilter,
+  McpEndpointRecipeInput
+> = {
+  name: "mcp-endpoint",
+  prepare: ({ id, input }) => {
+    const fail = (message: string): never => {
+      throw new RegistryInputError(`mcp endpoint "${id}": ${message}`);
+    };
+    if (!MCP_ENDPOINT_ID_PATTERN.test(id)) {
+      fail("ids are 1-64 letters, digits, `_` or `-`, starting with a letter or digit");
+    }
+    if (!Array.isArray(input.tools)) fail("tools must be an array");
+    const tools = input.tools.map((raw): McpEndpointToolBinding => {
+      const b = raw as unknown as Record<string, unknown>;
+      if (typeof b !== "object" || b === null || typeof b.tool !== "string" || !b.tool) {
+        return fail("every tools entry needs a non-empty `tool` name");
+      }
+      if (
+        b.name !== undefined &&
+        (typeof b.name !== "string" || !MCP_ENDPOINT_TOOL_NAME.test(b.name))
+      ) {
+        return fail(`tool name override "${String(b.name)}" is not a valid MCP tool name`);
+      }
+      if (b.description !== undefined && typeof b.description !== "string") {
+        return fail("a tool description override must be a string");
+      }
+      if (b.private !== undefined && typeof b.private !== "boolean") {
+        return fail("a tool's `private` flag must be a boolean");
+      }
+      return {
+        tool: b.tool,
+        ...(b.private === true && { private: true }),
+        ...(typeof b.name === "string" && { name: b.name }),
+        ...(typeof b.description === "string" && { description: b.description }),
+      };
+    });
+    const namespaces = input.namespaces ?? null;
+    if (
+      namespaces !== null &&
+      (!Array.isArray(namespaces) || namespaces.some((n) => typeof n !== "string" || !n))
+    ) {
+      fail("namespaces must be null or an array of namespace ids");
+    }
+    const optionalText = (field: "title" | "instructions"): string | null => {
+      const v = input[field];
+      if (v === undefined || v === null) return null;
+      return typeof v === "string" ? v : fail(`${field} must be a string or null`);
+    };
+    return {
+      title: optionalText("title"),
+      instructions: optionalText("instructions"),
+      tools,
+      capabilities: stringList(input.capabilities),
+      namespaces: namespaces === null ? null : [...namespaces],
+      trustClientApproval: input.trustClientApproval === true,
+      metadata: {
+        description: input.metadata?.description ?? null,
+        tags: stringList(input.metadata?.tags),
+      },
+    };
+  },
+  facets: ({ body }) => facetsOf({ tags: body.metadata.tags }),
+  query: queryOf,
 };
