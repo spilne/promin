@@ -585,8 +585,18 @@ const SKILL_FIXTURE: VersionedRegistryKindFixture<SkillRecipe, SkillFilter, Skil
 function dagBody(n: number, tags?: ReadonlyArray<string>): DagRecipe {
   return {
     nodes: [
-      { id: "a", agentId: `agent-${n}`, inputs: { task: { kind: "initial", path: "task" } } },
-      { id: "b", agentId: "x", inputs: { task: { kind: "node", nodeId: "a", path: "" } } },
+      {
+        id: "a",
+        kind: "agent",
+        agentId: `agent-${n}`,
+        inputs: { task: { kind: "initial", path: "task" } },
+      },
+      {
+        id: "b",
+        kind: "agent",
+        agentId: "x",
+        inputs: { task: { kind: "node", nodeId: "a", path: "" } },
+      },
     ],
     edges: [{ from: "a", to: "b" }],
     entry: ["a"],
@@ -664,7 +674,7 @@ function kindSpecifics(factory: VersionedRegistryFactory): void {
       const err = await rejection(
         r.register({
           id: "bad",
-          nodes: [{ id: "a", agentId: "x", inputs: {} }],
+          nodes: [{ id: "a", kind: "agent", agentId: "x", inputs: {} }],
           edges: [{ from: "a", to: "ghost" }],
           entry: ["a"],
           terminals: ["a"],

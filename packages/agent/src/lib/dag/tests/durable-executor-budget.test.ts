@@ -14,18 +14,33 @@ import { createDagWorkflow, dagNodeRunId } from "../durable-executor.ts";
 import { createRegistryAgentResolver } from "../registry-agent-resolver.ts";
 import { InMemoryDagRegistry } from "../../versioned-registry/in-memory-registries.ts";
 import type { AgenticDagRecipe } from "../types.ts";
-
-const SCOPE = { namespaceId: "acme", resourceId: "r-1" } as const;
+import { SCOPE } from "./dag-test-kit.ts";
 
 const diamond: AgenticDagRecipe = {
   id: "diamond-budget",
   version: "v1",
   nodes: [
-    { id: "n1", agentId: "worker", inputs: { task: { kind: "initial", path: "task" } } },
-    { id: "a", agentId: "worker", inputs: { task: { kind: "node", nodeId: "n1", path: "" } } },
-    { id: "b", agentId: "worker", inputs: { task: { kind: "node", nodeId: "n1", path: "" } } },
+    {
+      id: "n1",
+      kind: "agent",
+      agentId: "worker",
+      inputs: { task: { kind: "initial", path: "task" } },
+    },
+    {
+      id: "a",
+      kind: "agent",
+      agentId: "worker",
+      inputs: { task: { kind: "node", nodeId: "n1", path: "" } },
+    },
+    {
+      id: "b",
+      kind: "agent",
+      agentId: "worker",
+      inputs: { task: { kind: "node", nodeId: "n1", path: "" } },
+    },
     {
       id: "c",
+      kind: "agent",
       agentId: "worker",
       inputs: {
         left: { kind: "node", nodeId: "a", path: "" },

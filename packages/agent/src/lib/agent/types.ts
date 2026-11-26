@@ -105,6 +105,7 @@ export type FinishReason =
   | "length"
   | "max_steps"
   | "budget_exceeded"
+  | "output_invalid"
   | "stalled"
   | "cancelled"
   | "error";

@@ -3,6 +3,7 @@ export {
   CANCELLED_ANSWER,
   RESPOND_TOOL_NAME,
   BUDGET_EXCEEDED_ANSWER,
+  OUTPUT_INVALID_ANSWER,
   STALLED_ANSWER,
   STEP_LIMIT_ANSWER,
   StructuredOutputParseError,
@@ -985,8 +986,18 @@ export type {
 
 // Agentic DAG — operator-authored multi-agent execution graph.
 export { pickPath } from "./dag/dag-helpers.ts";
+export { evaluateCondition, conditionDepth, MAX_CONDITION_DEPTH } from "./dag/conditions.ts";
+export { DagRecipeSchema, recipeIssues, NODE_ID_PATTERN } from "./dag/recipe-schema.ts";
 export { validateDag, topologicalOrder } from "./dag/validate.ts";
 export { AgentRefusedError, DagValidationError, isAgentRefusal } from "./dag/types.ts";
+export { applyTransform, TransformError } from "./dag/transform.ts";
+export {
+  compileOutputSchema,
+  extractJson,
+  MAX_OUTPUT_SCHEMA_BYTES,
+  OutputSchemaError,
+  schemaInstruction,
+} from "./dag/output-schema.ts";
 export { createRegistryAgentResolver } from "./dag/registry-agent-resolver.ts";
 export type {
   AgentResolver,
@@ -999,13 +1010,67 @@ export type {
   RegisterDagInput,
   DagRunScope,
   DagNode,
+  DagNodeStats,
+  DagParentFrame,
+  ApprovalNode,
+  DecideNode,
+  DecisionModelRef,
+  SubDagNode,
+  AgentNode,
+  ForEach,
+  Repeat,
+  TransformNode,
+  TransformOp,
+  NodeBase,
   DagEdge,
   NodeInputSource,
+  Condition,
+  ConditionScalar,
 } from "./dag/types.ts";
-export { createDagWorkflow, DAG_WORKFLOW_NAME, dagNodeRunId } from "./dag/durable-executor.ts";
+export { childRunId, nodeKey } from "./dag/runners/env.ts";
+export type { AttemptOutcome, AttemptParams, NodeRunEnv, RunAttempt } from "./dag/runners/env.ts";
+export { runAgentAttempt } from "./dag/runners/agent-attempt.ts";
+export { runSubDagAttempt } from "./dag/runners/sub-dag-attempt.ts";
+export { runDecide } from "./dag/runners/decide.ts";
+export { DAG_APPROVAL_TOOL_NAME, runApproval } from "./dag/runners/approval.ts";
+export {
+  createDagWorkflow,
+  DAG_WORKFLOW_NAME,
+  dagNodeRunId,
+  MAX_CHILD_RUNS,
+  MAX_DAG_DEPTH,
+} from "./dag/durable-executor.ts";
 export type {
   DurableDagInput,
   DurableDagOutput,
   CreateDagWorkflowConfig,
   DagUsageRecorder,
 } from "./dag/durable-executor.ts";
+
+// Typed decision providers.
+export { checkAnswers, DecisionAnswerError } from "./decision/types.ts";
+export type {
+  DecisionAnswer,
+  DecisionProvider,
+  DecisionQuestion,
+  DecisionRequest,
+  DecisionResult,
+  ProbabilitySource,
+} from "./decision/types.ts";
+export {
+  createSystemOneDecisionProvider,
+  DEFAULT_DECISION_TIMEOUT_MS,
+} from "./decision/system-one-provider.ts";
+export type { SystemOneOptions } from "./decision/system-one-provider.ts";
+export { decideWithRetry } from "./decision/decide-with-retry.ts";
+export { createLlmDecisionProvider, DECIDE_TOOL_NAME } from "./decision/llm-decision-provider.ts";
+export {
+  createCatalogDecisionResolver,
+  DecisionModelRefusedError,
+  InMemoryDecisionModelCatalog,
+} from "./decision/decision-model-catalog.ts";
+export type {
+  DecisionModelCatalogItem,
+  DecisionResolver,
+  ResolvedDecisionModel,
+} from "./decision/decision-model-catalog.ts";

@@ -14,6 +14,7 @@ import type {
   TriggerRunRequest,
   TriggerRunResponse,
 } from "../../server/api-types.ts";
+import type { DagNodeStats } from "@promin/agent";
 import type {
   ScheduleCreateRequest,
   ScheduleEmitResponse,
@@ -1641,18 +1642,36 @@ export type DagNodeInputSourceDto =
   | { kind: "node"; nodeId: string; path: string }
   | { kind: "literal"; value: unknown };
 
+export interface DagDecisionModelRefDto {
+  provider: string;
+  id: string;
+  credentialRef?: string;
+}
+
+export type DagDecisionQuestionDto =
+  | {
+      type: "choice";
+      instructions: string;
+      options: Array<{ name: string; description?: string }>;
+    }
+  | { type: "score"; instructions: string; levels: string[] }
+  | { type: "yesno"; instructions: string };
+
 export interface DagNodeDto {
   id: string;
-  agentId: string;
+  kind: string;
+  agentId?: string;
+  model?: DagDecisionModelRefDto;
+  questions?: Record<string, DagDecisionQuestionDto>;
   inputs: Record<string, DagNodeInputSourceDto>;
-  outputPath?: string;
   onError?: "abort" | "skip";
+  [key: string]: unknown;
 }
 
 export interface DagEdgeDto {
   from: string;
   to: string;
-  condition?: { kind: "equals"; path: string; value: string };
+  condition?: unknown;
 }
 
 export interface DagDto {
@@ -1688,6 +1707,7 @@ export interface DagRunResultDto {
     nodeOutputs: Record<string, unknown>;
     errors: Record<string, string>;
     skipped: string[];
+    nodeStats?: Record<string, DagNodeStats>;
   };
 }
 

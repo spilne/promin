@@ -77,6 +77,55 @@ async function waitForHealth(url: string, timeoutMs = 30_000): Promise<void> {
   );
 }
 
+async function post(pathname: string, body: unknown): Promise<Response> {
+  return fetch(`${baseUrl}${pathname}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+interface EndedRun {
+  status: string;
+  result?: {
+    ok: boolean;
+    outputs: Record<string, unknown>;
+    nodeOutputs: Record<string, unknown>;
+    nodeStats: Record<string, { items?: number; iterations?: number }>;
+  };
+}
+
+interface SignalInbox {
+  signals: ReadonlyArray<{ workflowId: string; signalName: string }>;
+}
+
+async function waitForRun(workflowId: string): Promise<EndedRun> {
+  let ended: EndedRun = { status: "pending" };
+  for (let i = 0; i < 200 && ended.status !== "completed" && ended.status !== "failed"; i++) {
+    await Bun.sleep(50);
+    ended = (await (await fetch(`${baseUrl}/api/runs/${workflowId}`)).json()) as typeof ended;
+  }
+  return ended;
+}
+
+async function waitForSignal(params: { workflowId: string; signalName: string }): Promise<void> {
+  for (let i = 0; i < 200; i++) {
+    const inbox = (await (await fetch(`${baseUrl}/api/signals`)).json()) as SignalInbox;
+    if (
+      inbox.signals.some(
+        (signal) =>
+          signal.workflowId === params.workflowId && signal.signalName === params.signalName,
+      )
+    ) {
+      return;
+    }
+    await Bun.sleep(50);
+  }
+  throw new Error(
+    `Signal ${params.signalName} for workflow ${params.workflowId} did not become pending`,
+  );
+}
+
 describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
   beforeAll(async () => {
     const port = await pickFreePort();
@@ -88,6 +137,7 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
         PORT: String(port),
         ZORYA_DB: ":memory:",
         ZORYA_INSECURE: "1",
+        ZORYA_DEMO_SCRIPTED_DAG: "1",
         // Unreachable Ollama URL — the demo only calls it lazily on a
         // chat turn, so this is safe and avoids hanging on real probes.
         OLLAMA_URL: "http://127.0.0.1:1",
@@ -113,6 +163,31 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
   });
 
   describe("DAG gateway — /api/dags/*", () => {
+    it("refuses a recipe whose node has no kind, naming the field", async () => {
+      const res = await fetch(`${baseUrl}/api/dags`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          id: `e2e-nokind-${crypto.randomUUID()}`,
+          version: "v1",
+          nodes: [
+            {
+              id: "n1",
+              agentId: "echo-bot",
+              inputs: { task: { kind: "initial", path: "task" } },
+            },
+          ],
+          edges: [],
+          entry: ["n1"],
+          terminals: ["n1"],
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; issues: string[] };
+      expect(body.error).toBe("invalid_dag");
+      expect(body.issues.some((issue) => issue.startsWith("nodes[0]"))).toBe(true);
+    });
+
     it("GET /api/dags lists the pre-registered research-synthesis recipe", async () => {
       const res = await fetch(`${baseUrl}/api/dags`);
       expect(res.status).toBe(200);
@@ -128,14 +203,14 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
       const body = (await res.json()) as {
         id: string;
         version: string;
-        nodes: ReadonlyArray<{ id: string; agentId: string }>;
+        nodes: ReadonlyArray<{ id: string; kind: string; agentId?: string }>;
         edges: ReadonlyArray<{ from: string; to: string }>;
         entry: ReadonlyArray<string>;
         terminals: ReadonlyArray<string>;
       };
       expect(body.id).toBe("research-synthesis");
-      expect(body.nodes.length).toBeGreaterThanOrEqual(5);
-      expect(body.edges.length).toBeGreaterThanOrEqual(5);
+      expect(body.nodes).toHaveLength(4);
+      expect(body.edges).toHaveLength(3);
       expect(body.entry).toContain("planner");
       expect(body.terminals).toContain("synthesizer");
       const agentIds = new Set(body.nodes.map((n) => n.agentId));
@@ -170,6 +245,7 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
           nodes: [
             {
               id: "n1",
+              kind: "agent",
               agentId: "echo-bot",
               inputs: { task: { kind: "initial", path: "task" } },
             },
@@ -204,8 +280,8 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
           version: "v1",
           // Cycle: a → b → a — the validator must reject.
           nodes: [
-            { id: "a", agentId: "echo-bot", inputs: {} },
-            { id: "b", agentId: "echo-bot", inputs: {} },
+            { id: "a", kind: "agent", agentId: "echo-bot", inputs: {} },
+            { id: "b", kind: "agent", agentId: "echo-bot", inputs: {} },
           ],
           edges: [
             { from: "a", to: "b" },
@@ -233,6 +309,7 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
           nodes: [
             {
               id: "echo",
+              kind: "agent",
               agentId: "echo-bot",
               inputs: { task: { kind: "initial", path: "topic" } },
             },
@@ -269,6 +346,70 @@ describe("demo e2e — DAG gateway + Designer UI catalog endpoints", () => {
       // demo.ts's echo-bot template: "echo-bot says: I heard '{task}' (turn #{n})"
       expect(echoOutput).toContain("echo-bot says");
       expect(echoOutput).toContain("hello dag");
+    });
+
+    it("runs the research-synthesis recipe end to end", async () => {
+      const run = await post("/api/dags/research-synthesis/run", {
+        namespaceId: "default",
+        resourceId: "e2e",
+        initialInput: { topic: "tea" },
+      });
+      expect(run.status).toBe(202);
+      const ended = await waitForRun(((await run.json()) as { workflowId: string }).workflowId);
+
+      expect(ended.status).toBe("completed");
+      expect(ended.result?.ok).toBe(true);
+      expect(ended.result?.nodeOutputs.research).toHaveLength(3);
+      expect(String(ended.result?.outputs.synthesizer)).toContain("3 findings");
+      expect(ended.result?.nodeStats.research?.items).toBe(3);
+    });
+
+    it("runs draft review, waits for publication approval, then completes", async () => {
+      const run = await post("/api/dags/draft-review/run", {
+        namespaceId: "default",
+        resourceId: "e2e",
+        initialInput: { topic: "tea" },
+      });
+      expect(run.status).toBe(202);
+      const { workflowId } = (await run.json()) as { workflowId: string };
+      await waitForSignal({ workflowId, signalName: "approve:sign-off" });
+      const decision = await post(`/api/runs/${workflowId}/signal`, {
+        signalName: "approve:sign-off",
+        payload: { approved: true, by: "e2e" },
+      });
+      expect(decision.status).toBe(202);
+      const ended = await waitForRun(workflowId);
+
+      expect(ended.status).toBe("completed");
+      expect(ended.result?.ok).toBe(true);
+      expect(ended.result?.nodeStats.round?.iterations).toBe(2);
+      expect(ended.result?.nodeOutputs.round).toMatchObject({
+        review: { verdict: "pass" },
+      });
+      expect(ended.result?.nodeOutputs["sign-off"]).toMatchObject({
+        approved: true,
+        decidedBy: "e2e",
+      });
+      expect(ended.result?.outputs.published).toBe(
+        (ended.result?.nodeOutputs.round as { writer?: unknown } | undefined)?.writer,
+      );
+    });
+
+    it("runs the ticket-triage decision router end to end", async () => {
+      const run = await post("/api/dags/ticket-triage/run", {
+        namespaceId: "default",
+        resourceId: "e2e",
+        initialInput: { message: "I was charged twice" },
+      });
+      expect(run.status).toBe(202);
+      const ended = await waitForRun(((await run.json()) as { workflowId: string }).workflowId);
+
+      expect(ended.status).toBe("completed");
+      expect(ended.result?.ok).toBe(true);
+      expect(ended.result?.nodeOutputs.triage).toMatchObject({
+        team: { choice: "billing" },
+      });
+      expect(ended.result?.outputs.reply).toHaveLength(1);
     });
   });
 

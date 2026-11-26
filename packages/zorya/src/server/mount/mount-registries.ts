@@ -141,6 +141,7 @@ export function mountDags(params: {
     workflows: dags.workflows,
     workflowName: dags.workflow.name,
     agents: agents.registry,
+    ...(dags.decisionModels !== undefined && { decisionModels: dags.decisionModels }),
     ...(agents.authorizeScope !== undefined && { authorizeScope: agents.authorizeScope }),
     ...(agents.budgets !== undefined && { budgets: agents.budgets }),
     ...(params.namespaces !== undefined && { namespaces: params.namespaces }),
