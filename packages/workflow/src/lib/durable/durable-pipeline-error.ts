@@ -200,6 +200,14 @@ export class WorkflowVersionMismatchError extends TaggedError("WorkflowVersionMi
   readonly message: string;
 }>() {}
 
+/** A caller tried to attach a different identity to an existing durable run. */
+export class RunSecurityContextConflictError extends TaggedError(
+  "RunSecurityContextConflictError",
+)<{
+  readonly workflowId: string;
+  readonly message: string;
+}>() {}
+
 /**
  * `run({ useStoredInput: true })` found no stored run to drive: the caller
  * drives runs created elsewhere and never creates one (it has no input).

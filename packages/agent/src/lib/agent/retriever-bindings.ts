@@ -3,17 +3,33 @@
 // can call, retrieved context injected before every turn, or both.
 // ---------------------------------------------------------------------------
 
-import { SystemWallClock, type WallClock } from "@promin/workflow";
+import { SystemWallClock, type RunSecurityContext, type WallClock } from "@promin/workflow";
 import type { AgentTool } from "../tool.ts";
 import { fenceReferenceData } from "../reference-data.ts";
 import { createRetrieverTool, formatRetrievedChunks } from "../rag/retriever-tool.ts";
 import { retrieverToolName } from "../rag/retriever-tool-name.ts";
-import type { Retriever, RetrieverFilter } from "../rag/types.ts";
+import {
+  mergeSnapshotFilters,
+  snapshotRetrieverAccess,
+  snapshotRetrieverCaller,
+  snapshotRetrieverFilter,
+} from "../rag/retrieval-access.ts";
+import type { Retriever, RetrieverCaller, RetrieverFilter } from "../rag/types.ts";
 import type { AgentKnowledgeMode } from "../registry/types.ts";
 
 /** A retriever plus how it is exposed to the model. */
 export interface AgentRetrieverBinding {
   readonly retriever: Retriever;
+  /** Authenticated caller passed to tool and context-mode retrievals. */
+  readonly caller?: RetrieverCaller;
+  /**
+   * Fresh authorization resolved immediately before every search. Returning
+   * `undefined` hides this binding for that search. Hosts use this for
+   * revocable identity/grant checks; it is never model-controlled.
+   */
+  readonly resolveAccess?: (
+    securityContext?: RunSecurityContext,
+  ) => Promise<RetrieverSearchAccess | undefined>;
   /** LLM-facing tool name. Default `retrieverToolName(id)`. */
   readonly name?: string;
   /** LLM-facing tool description. */
@@ -41,6 +57,18 @@ export interface AgentRetrieverBinding {
    */
   readonly timeoutMs?: number;
 }
+
+/** Security material resolved at the irreversible retriever boundary. */
+export interface RetrieverSearchAccess {
+  readonly caller?: RetrieverCaller;
+  readonly filter?: RetrieverFilter;
+}
+
+/** Host callback attached to every configured binding by its stable id. */
+export type RetrieverAccessResolver = (
+  bindingId: string,
+  securityContext?: RunSecurityContext,
+) => Promise<RetrieverSearchAccess | undefined>;
 
 /** Retriever bindings keyed by binding id; a bare `Retriever` is a `tool` binding. */
 export type AgentRetrievers = Readonly<Record<string, Retriever | AgentRetrieverBinding>>;
@@ -78,6 +106,8 @@ export function withRetrieverTools(params: {
     if (binding.toolName in merged) continue;
     merged[binding.toolName] = createRetrieverTool({
       retriever: binding.retriever,
+      ...(binding.caller !== undefined && { caller: binding.caller }),
+      ...(binding.resolveAccess !== undefined && { resolveAccess: binding.resolveAccess }),
       name: binding.toolName,
       ...(binding.description !== undefined && { description: binding.description }),
       ...(binding.topK !== undefined && { topK: binding.topK }),
@@ -120,6 +150,7 @@ export const DEFAULT_RETRIEVER_TIMEOUT_MS = 10_000;
 export async function buildRetrieverContext(params: {
   retrievers: AgentRetrievers | undefined;
   query: string;
+  securityContext?: RunSecurityContext;
   /** Time source of the per-binding timeout. Default `SystemWallClock`. */
   clock?: WallClock;
 }): Promise<RetrieverContext> {
@@ -130,15 +161,35 @@ export async function buildRetrieverContext(params: {
   const batches = await Promise.all(
     contextBindings.map(async (binding) => {
       try {
+        const resolveAccess = binding.resolveAccess;
+        const accessValue = resolveAccess ? await resolveAccess(params.securityContext) : undefined;
+        if (resolveAccess && accessValue === undefined) {
+          return { binding, results: [], failure: undefined };
+        }
+        const access = accessValue === undefined ? undefined : snapshotRetrieverAccess(accessValue);
+        const configuredCallerValue = binding.caller;
+        const configuredCaller =
+          configuredCallerValue === undefined
+            ? undefined
+            : snapshotRetrieverCaller(configuredCallerValue);
+        const configuredFilterValue = binding.filter;
+        const configuredFilter =
+          configuredFilterValue === undefined
+            ? undefined
+            : snapshotRetrieverFilter(configuredFilterValue);
+        const filter = mergeSnapshotFilters(configuredFilter, access?.filter);
         const results = await withTimeout({
           clock,
           ms: binding.timeoutMs ?? DEFAULT_RETRIEVER_TIMEOUT_MS,
           run: (signal) =>
             binding.retriever.retrieve({
               query: params.query,
+              ...((access?.caller ?? configuredCaller) !== undefined && {
+                caller: access?.caller ?? configuredCaller,
+              }),
               signal,
               ...(binding.topK !== undefined && { topK: binding.topK }),
-              ...(binding.filter !== undefined && { filter: binding.filter }),
+              ...(filter !== undefined && { filter }),
               ...(binding.maxChunkCharacters !== undefined && {
                 maxChunkCharacters: binding.maxChunkCharacters,
               }),

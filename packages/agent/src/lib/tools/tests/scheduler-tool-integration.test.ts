@@ -31,6 +31,10 @@ function mockLLM(responses: LLMResponse[]) {
 
 describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule", () => {
   it("agent creates a schedule via ctx.scope, dispatch re-invokes the agent with source=scheduled", async () => {
+    const securityContext = {
+      actor: { kind: "service-account" as const, id: "writer-scheduler" },
+      effective: { kind: "user" as const, id: "alice" },
+    };
     const schedulerStorage = new InMemorySchedulerStorage();
     const workflowStorage = new InMemoryWorkflowStorage();
     const runner = createWorkflowRunner({ storage: workflowStorage });
@@ -73,7 +77,7 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
       },
     });
 
-    const thread = await agent.thread("t1");
+    const thread = await agent.thread("t1", { securityContext });
     const out = await thread.send({ task: "Set up a Twitter check every hour" });
     expect(await out.text).toBe("Scheduled.");
 
@@ -90,6 +94,7 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
       threadId: "t1",
       createdByAgent: "writer",
     });
+    expect(sched.securityContext).toEqual(securityContext);
 
     // Now fire the schedule: dispatchAgentSchedule should re-invoke
     // the agent with source.kind === "scheduled" and the task wired
@@ -136,6 +141,49 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
     });
   });
 
+  it("one-shot invoke forwards its durable identity through ToolScope into the schedule", async () => {
+    const schedulerStorage = new InMemorySchedulerStorage();
+    const workflowStorage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage: workflowStorage });
+    const securityContext = {
+      actor: { kind: "service-account" as const, id: "writer-scheduler" },
+      effective: { kind: "user" as const, id: "alice" },
+    };
+    const schedulerTools = createDurableSchedulerTools({
+      getClient: (scope) => inProcessSchedulerClient({ storage: schedulerStorage, scope }),
+      requireApproval: false,
+    });
+    const agent = new LocalAgent({
+      namespaceId: "acme",
+      resourceId: "alice",
+      agentId: "writer",
+      runner,
+      agent: {
+        name: "writer",
+        llm: mockLLM([
+          {
+            content: null,
+            finishReason: "tool_calls",
+            toolCalls: [
+              {
+                id: "tc-security",
+                name: "schedulerCreate",
+                input: { task: "secure task", intervalMs: 3_600_000 },
+              },
+            ],
+          },
+          { content: "Scheduled.", finishReason: "stop" },
+        ]),
+        tools: { ...schedulerTools },
+      },
+    });
+
+    const out = await agent.invoke({ task: "schedule it" }, { securityContext });
+    expect(await out.text).toBe("Scheduled.");
+    const [stored] = await schedulerStorage.listSchedules({ namespace: "acme", limit: 5 });
+    expect(stored?.securityContext).toEqual(securityContext);
+  });
+
   it("dispatch passes a deterministic runId so a duplicate tick lands on the same run row", async () => {
     // Two firings of the same tick (e.g. brief leader race) must produce
     // the SAME runId. Schedule history's join is keyed on this id; if the
@@ -147,7 +195,14 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
     });
     await schedulerCreate.execute(
       { task: "ping", intervalMs: 60_000 },
-      { scope: { namespaceId: "acme", agentId: "writer", threadId: "t1" } },
+      {
+        scope: {
+          namespaceId: "acme",
+          agentId: "writer",
+          threadId: "t1",
+          securityContext: { actor: { kind: "service-account", id: "writer-scheduler" } },
+        },
+      },
     );
     const [sched] = await storage.listSchedules({ namespace: "acme", limit: 5 });
 
@@ -244,6 +299,10 @@ describe("scheduler tool — end-to-end via LocalAgent + dispatchAgentSchedule",
           resourceId: "alice",
           threadId: "t-x",
           agentId: "writer",
+          securityContext: {
+            actor: { kind: "service-account", id: "writer-scheduler" },
+            effective: { kind: "user", id: "alice" },
+          },
         },
       },
     );

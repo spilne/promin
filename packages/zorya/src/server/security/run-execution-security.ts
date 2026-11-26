@@ -1,0 +1,291 @@
+import {
+  hasCapability,
+  owesCancelRollback,
+  type FenceGuard,
+  type RunPrincipalRef,
+  type RunSecurityContext,
+  type WallClock,
+  type WorkflowRunAdmissionGuard,
+  type WorkflowState,
+  type WorkflowStorage,
+} from "@promin/workflow";
+import { normalizeRunSecurityContext } from "@promin/workflow/storage-kit";
+import type { Logger } from "../server-config.ts";
+import {
+  ORG_WIDE_NAMESPACE,
+  type AuthorizationDecision,
+  type Principal,
+  type PrincipalRef,
+  type SecurityAuditEvent,
+  type AuthorizationRequest,
+  type ZoryaSecurity,
+} from "./security.ts";
+import {
+  snapshotAuthorizationDecision,
+  snapshotSecurityContext,
+  snapshotSecurityPermission,
+  snapshotSecurityResource,
+} from "./route-access-guard.ts";
+
+export const RUN_SECURITY_BLOCKED_ERROR_TAG = "RunSecurityBlockedError";
+const RUN_SECURITY_BLOCKED_MESSAGE = "Run blocked by security policy";
+
+/** Stable terminal error surfaced for a durable run whose identity is no longer authorized. */
+export class RunSecurityBlockedError extends Error {
+  readonly _tag = RUN_SECURITY_BLOCKED_ERROR_TAG;
+  readonly workflowId: string;
+
+  constructor(workflowId: string) {
+    super(`${RUN_SECURITY_BLOCKED_MESSAGE} (${workflowId})`);
+    this.name = RUN_SECURITY_BLOCKED_ERROR_TAG;
+    this.workflowId = workflowId;
+  }
+}
+
+export interface RunExecutionSecurityConfig {
+  readonly storage: WorkflowStorage;
+  readonly security: ZoryaSecurity;
+  readonly clock: Pick<WallClock, "now">;
+  readonly logger: Pick<Logger, "error">;
+  /** Built-in key mode adopts contextless legacy rows as this principal. */
+  readonly legacyPrincipal?: PrincipalRef;
+}
+
+/**
+ * Re-resolves and authorizes a durable run immediately before execution.
+ * Policy denial is persisted as a terminal failure so scanners and workers
+ * never retry the same revoked identity forever.
+ */
+export class RunExecutionSecurity {
+  private readonly storage: WorkflowStorage;
+  private readonly security: ZoryaSecurity;
+  private readonly clock: Pick<WallClock, "now">;
+  private readonly logger: Pick<Logger, "error">;
+  private readonly legacyPrincipal?: PrincipalRef;
+
+  constructor(config: RunExecutionSecurityConfig) {
+    this.storage = config.storage;
+    this.security = config.security;
+    this.clock = config.clock;
+    this.logger = config.logger;
+    if (config.legacyPrincipal !== undefined) {
+      this.legacyPrincipal = Object.freeze({
+        kind: config.legacyPrincipal.kind,
+        id: config.legacyPrincipal.id,
+      });
+    }
+  }
+
+  /** Context persisted for a new trigger, including key-mode legacy adoption. */
+  contextForTrigger(requested: RunSecurityContext | undefined): RunSecurityContext | undefined {
+    if (requested !== undefined) return normalizeRunSecurityContext(requested);
+    if (this.legacyPrincipal === undefined) return undefined;
+    return normalizeRunSecurityContext({ actor: this.legacyPrincipal });
+  }
+
+  /** Workflow-engine hook: guarded, terminal and inherited by child runs. */
+  readonly admissionGuard: WorkflowRunAdmissionGuard = async ({ state, guard }) => {
+    if (await this.authorizeState({ state, source: "execute", guard })) return;
+    throw new RunSecurityBlockedError(state.workflowId);
+  };
+
+  /** Authorize a stored run before queueing/claiming it for a remote worker. */
+  async authorizeStoredRun(workflowId: string, source: RunExecutionSource): Promise<boolean> {
+    const state = await this.storage.loadWorkflow(workflowId);
+    if (!state) return false;
+    return this.authorizeState({ state, source });
+  }
+
+  /**
+   * Recheck a stored starter without changing the run's terminal state.
+   *
+   * HTTP signal and public capability routes call this before they mutate
+   * signal/token state. A revoked starter is denied, but the route must not
+   * consume a token (or turn a run terminal) merely by checking it.
+   */
+  async checkStoredRun(params: {
+    readonly workflowId: string;
+    readonly source: RunExecutionSource;
+    readonly tokenId?: string;
+  }): Promise<boolean> {
+    const workflowId = params.workflowId;
+    const source = params.source;
+    const tokenId = params.tokenId;
+    const state = await this.storage.loadWorkflow(workflowId);
+    if (!state) return false;
+    const runContext = this.contextForStored(state.securityContext);
+    if (!runContext) {
+      // A contextless row can only originate from trusted embedder code or
+      // pre-security durable state: HTTP triggers always stamp the request
+      // identity. Preserve those legacy/system runs instead of destroying
+      // them merely because module security was enabled later.
+      this.report("admitting trusted contextless run", workflowId);
+      return true;
+    }
+    return this.decide({
+      workflowId,
+      namespaceId: state.namespace ?? ORG_WIDE_NAMESPACE,
+      runContext,
+      source,
+      ...(tokenId !== undefined && { tokenId }),
+    });
+  }
+
+  /** Authorize a child create before a remote worker may persist it. */
+  async authorizeContext(params: {
+    readonly workflowId: string;
+    readonly namespace?: string;
+    readonly securityContext?: RunSecurityContext;
+    readonly source: RunExecutionSource;
+  }): Promise<boolean> {
+    const runContext = this.contextForStored(params.securityContext);
+    if (!runContext) {
+      this.report("admitting trusted contextless child run", params.workflowId);
+      return true;
+    }
+    return this.decide({
+      workflowId: params.workflowId,
+      namespaceId: params.namespace ?? ORG_WIDE_NAMESPACE,
+      runContext,
+      source: params.source,
+    });
+  }
+
+  private async authorizeState(params: {
+    readonly state: WorkflowState;
+    readonly source: RunExecutionSource;
+    readonly guard?: FenceGuard;
+  }): Promise<boolean> {
+    const runContext = this.contextForStored(params.state.securityContext);
+    if (!runContext) {
+      this.report("admitting trusted contextless run", params.state.workflowId);
+      return true;
+    }
+    const allowed = await this.decide({
+      workflowId: params.state.workflowId,
+      namespaceId: params.state.namespace ?? ORG_WIDE_NAMESPACE,
+      runContext,
+      source: params.source,
+    });
+    if (allowed) return true;
+    // A cancelled run that still owes rollback is already terminal, so a
+    // plain failWorkflow would be ignored. Reopen only its storage phase,
+    // execute no compensation, then replace the cancellation outcome with
+    // the stable security block and mark the cancel settled.
+    const replacesOwedCancel =
+      owesCancelRollback(params.state) && hasCapability(this.storage, "compensationLedger");
+    if (replacesOwedCancel) {
+      await this.storage.beginCompensation({
+        workflowId: params.state.workflowId,
+        error: RUN_SECURITY_BLOCKED_MESSAGE,
+        errorTag: RUN_SECURITY_BLOCKED_ERROR_TAG,
+        origin: "cancel",
+        ...(params.guard !== undefined && { guard: params.guard }),
+      });
+    }
+    await this.storage.failWorkflow({
+      workflowId: params.state.workflowId,
+      error: RUN_SECURITY_BLOCKED_MESSAGE,
+      errorTag: RUN_SECURITY_BLOCKED_ERROR_TAG,
+      ...(replacesOwedCancel && {
+        compensationOrigin: "cancel-settled" as const,
+      }),
+      ...(params.guard !== undefined && { guard: params.guard }),
+    });
+    return false;
+  }
+
+  private contextForStored(stored: RunSecurityContext | undefined): RunSecurityContext | undefined {
+    return this.contextForTrigger(stored);
+  }
+
+  private async decide(params: {
+    readonly workflowId: string;
+    readonly namespaceId: string;
+    readonly runContext: RunSecurityContext;
+    readonly source: RunExecutionSource;
+    readonly tokenId?: string;
+  }): Promise<boolean> {
+    const actorRef = toPrincipalRef(params.runContext.actor);
+    const effectiveRef = toPrincipalRef(params.runContext.effective ?? params.runContext.actor);
+    // Availability failures are operational, not policy denials. Let them
+    // propagate so a queued claim is released or local recovery retries;
+    // only an explicit, validated deny decision becomes terminal.
+    const actor: Principal | undefined = await this.security.resolvePrincipal(actorRef);
+    const context = snapshotSecurityContext({
+      actor: actor ?? unresolvedPrincipal(actorRef),
+      effective: effectiveRef,
+    });
+    const permission = snapshotSecurityPermission({
+      resource: "run",
+      action: "trigger",
+    });
+    const resource = snapshotSecurityResource({
+      kind: "run",
+      namespaceId: params.namespaceId,
+      id: params.workflowId,
+    });
+
+    const decision: AuthorizationDecision = snapshotAuthorizationDecision(
+      await this.security.authorize({
+        context,
+        permission,
+        resource,
+      } as AuthorizationRequest),
+    );
+
+    const event: SecurityAuditEvent = Object.freeze({
+      event: "run.execution.authorization",
+      occurredAt: this.clock.now().toISOString(),
+      context,
+      namespaceId: resource.namespaceId,
+      resource,
+      permission,
+      decision,
+      metadata: Object.freeze({
+        source: params.source,
+        ...(params.tokenId !== undefined && { tokenId: params.tokenId }),
+      }),
+    });
+    await this.security.recordAudit(event);
+    return decision.allowed;
+  }
+
+  private report(message: string, workflowId: string, error?: unknown): void {
+    try {
+      this.logger.error(
+        `[zorya] run security ${message} (run ${workflowId})`,
+        ...(error === undefined ? [] : [error]),
+      );
+    } catch {
+      // Observability never changes the fail-closed decision.
+    }
+  }
+}
+
+export type RunExecutionSource =
+  | "execute"
+  | "queue"
+  | "wake"
+  | "recovery"
+  | "worker-claim"
+  | "worker-lock"
+  | "child-create"
+  | "http-signal"
+  | "signal-token-mint"
+  | "signal-token-list"
+  | "signal-token-describe"
+  | "signal-token-complete";
+
+function toPrincipalRef(ref: RunPrincipalRef): PrincipalRef {
+  return Object.freeze({ kind: ref.kind, id: ref.id });
+}
+
+function unresolvedPrincipal(ref: PrincipalRef): Principal {
+  return Object.freeze({
+    kind: ref.kind,
+    id: ref.id,
+    accessRoles: Object.freeze({}),
+    canActFor: false,
+  });
+}

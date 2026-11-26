@@ -88,10 +88,11 @@ export function childTurnWiring(params: {
     const rootIndex = ROOT_INDEX.get(params.approvalIndex) ?? params.approvalIndex;
     approvalIndex = {
       ...(rootIndex.thread && { thread: rootIndex.thread }),
-      requested: ({ workflowId, call }) =>
+      requested: ({ workflowId, call, elevated }) =>
         rootIndex.requested({
           workflowId,
           call: { ...call, id: delegatedApprovalId({ workflowId, toolCallId: call.id }) },
+          elevated,
         }),
     };
     ROOT_INDEX.set(approvalIndex, rootIndex);

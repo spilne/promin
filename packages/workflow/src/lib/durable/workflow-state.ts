@@ -2,6 +2,8 @@
 // Workflow & Step state types
 // ---------------------------------------------------------------------------
 
+import type { RunSecurityContext } from "./run-security-context.ts";
+
 export type WorkflowStatus =
   | "pending"
   | "running"
@@ -218,6 +220,8 @@ export interface WorkflowState<Input = unknown, Result = unknown> {
   readonly workflowType?: string;
   readonly parentWorkflowId?: string;
   readonly namespace?: string;
+  /** Stable actor/effective references; authorization is always re-resolved by the host. */
+  readonly securityContext?: RunSecurityContext;
   readonly status: WorkflowStatus;
   readonly version?: string;
   readonly run: number;

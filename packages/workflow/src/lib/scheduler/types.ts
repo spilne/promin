@@ -2,6 +2,8 @@
 // Scheduler types
 // ---------------------------------------------------------------------------
 
+import type { RunSecurityContext } from "../durable/run-security-context.ts";
+
 /** A schedule definition — supports cron expressions, RRULE, or fixed intervals. */
 export interface ScheduleConfig {
   readonly id: string;
@@ -37,6 +39,15 @@ export interface ScheduleConfig {
   readonly jitterMs?: number;
   /** Arbitrary metadata passed through to ScheduleTick. */
   readonly metadata?: Record<string, unknown>;
+  /**
+   * Stable actor/effective references assigned to unattended work started by
+   * this schedule. Hosts re-resolve these references on every tick; roles,
+   * credentials and other authorization snapshots never belong here.
+   *
+   * Missing is a legacy schedule. Whether that is adopted by a built-in
+   * operator or refused is deliberately a host policy, not a scheduler one.
+   */
+  readonly securityContext?: RunSecurityContext;
 }
 
 /**

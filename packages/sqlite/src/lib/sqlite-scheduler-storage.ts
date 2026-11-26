@@ -10,7 +10,11 @@ import {
   type ScheduleTick,
 } from "@promin/workflow/scheduler";
 import { SystemWallClock } from "@promin/workflow";
-import { flattenLeafPaths } from "@promin/workflow/storage-kit";
+import {
+  decodeRunSecurityContext,
+  flattenLeafPaths,
+  normalizeRunSecurityContext,
+} from "@promin/workflow/storage-kit";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 import { SqliteLeaderLeaseStore } from "./sqlite-leader-lease-store.ts";
 
@@ -78,6 +82,7 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
         end_at          INTEGER,
         jitter_ms       INTEGER NOT NULL DEFAULT 0,
         metadata        TEXT,
+        security_context TEXT,
         max_catch_up    INTEGER NOT NULL DEFAULT 0,
         next_run        INTEGER,
         last_fired_at   INTEGER,
@@ -89,6 +94,10 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
         updated_at      INTEGER NOT NULL
       )
     `);
+    const columns = this.db.query<{ name: string }>(`PRAGMA table_info(${t})`).all();
+    if (!columns.some((column) => column.name === "security_context")) {
+      this.db.run(`ALTER TABLE ${t} ADD COLUMN security_context TEXT`);
+    }
     // (next_run, namespace) covers both findDue (single-namespace) and
     // findDueAcross (cross-namespace) — both want next_run as the leading
     // sortable key.
@@ -378,6 +387,7 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
         end_at         = excluded.end_at,
         jitter_ms      = excluded.jitter_ms,
         metadata       = excluded.metadata,
+        security_context = excluded.security_context,
         max_catch_up   = excluded.max_catch_up,
         next_run       = CASE WHEN excluded.enabled = 1
                               THEN COALESCE(${this._t}.next_run, excluded.next_run)
@@ -390,9 +400,9 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
         `
       INSERT INTO ${this._t}
         (id, namespace, name, cron, rrule, interval_ms, timezone, enabled,
-         start_at, end_at, jitter_ms, metadata, max_catch_up,
+         start_at, end_at, jitter_ms, metadata, security_context, max_catch_up,
          next_run, incarnation, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ${onConflict}
       RETURNING id
       `,
@@ -410,6 +420,9 @@ export class SqliteSchedulerStorage implements SchedulerStorage {
         config.endAt?.getTime() ?? null,
         config.jitterMs ?? 0,
         config.metadata ? JSON.stringify(config.metadata) : null,
+        config.securityContext
+          ? JSON.stringify(normalizeRunSecurityContext(config.securityContext))
+          : null,
         config.maxCatchUp ?? 0,
         // Due-tracking follows the enabled flag: disabled → NULL; enabled →
         // keep an existing next_run (ON CONFLICT above) or seed it at now,
@@ -562,6 +575,7 @@ interface ScheduleRow {
   end_at: number | null;
   jitter_ms: number;
   metadata: string | null;
+  security_context: string | null;
   max_catch_up: number;
   next_run: number | null;
   last_fired_at: number | null;
@@ -584,6 +598,9 @@ function rowToConfig(row: ScheduleRow): DurableScheduleConfig {
     endAt: row.end_at == null ? undefined : new Date(row.end_at),
     jitterMs: row.jitter_ms,
     metadata: row.metadata ? (JSON.parse(row.metadata) as Record<string, unknown>) : undefined,
+    securityContext: row.security_context
+      ? decodeRunSecurityContext(JSON.parse(row.security_context))
+      : undefined,
     maxCatchUp: row.max_catch_up,
   };
 }

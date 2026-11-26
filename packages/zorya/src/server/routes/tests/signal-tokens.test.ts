@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it } from "bun:test";
 import { FakeWallClock, InMemoryWorkflowStorage } from "@promin/workflow";
 import {
   completeSignalToken,
+  describeSignalToken,
   listSignalTokensForRun,
   mintSignalToken,
   type MintTokenResponse,
@@ -20,7 +21,10 @@ import { invoke } from "./invoke-handler.ts";
 
 const PUBLIC_BASE = "https://zorya.test";
 
-async function setup(): Promise<{ storage: InMemoryWorkflowStorage; workflowId: string }> {
+async function setup(): Promise<{
+  storage: InMemoryWorkflowStorage;
+  workflowId: string;
+}> {
   const storage = new InMemoryWorkflowStorage();
   const workflowId = "wf-signal-token-test";
   await storage.createWorkflow({
@@ -56,7 +60,9 @@ async function complete(
   value: unknown,
 ): Promise<{ status: number; body: any }> {
   const handler = completeSignalToken({ storage });
-  const headers: Record<string, string> = { "content-type": "application/json" };
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+  };
   if (bearer) headers.authorization = `Bearer ${bearer}`;
   const res = await handler(
     new Request(`http://x/api/signal-tokens/${tokenId}/complete`, {
@@ -72,6 +78,20 @@ async function complete(
 describe("signal-tokens routes", () => {
   let storage: InMemoryWorkflowStorage;
   let workflowId: string;
+
+  class MintAuthorizationGateStorage extends InMemoryWorkflowStorage {
+    revokeOnNextWorkflowLoad = false;
+    authorized = true;
+
+    override async loadWorkflow(id: string) {
+      const workflow = await super.loadWorkflow(id);
+      if (this.revokeOnNextWorkflowLoad) {
+        this.revokeOnNextWorkflowLoad = false;
+        this.authorized = false;
+      }
+      return workflow;
+    }
+  }
 
   beforeEach(async () => {
     ({ storage, workflowId } = await setup());
@@ -121,16 +141,87 @@ describe("signal-tokens routes", () => {
     });
   });
 
+  describe("mint authorization boundary", () => {
+    function mintRequest(id: string): Request {
+      return new Request(`http://x/api/runs/${id}/signals/approve:call/token`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ expiresInMs: 60_000 }),
+      });
+    }
+
+    it("rechecks after async approval lookup and creates no token after revocation", async () => {
+      const gated = new MintAuthorizationGateStorage();
+      const id = "wf-token-mint-revoked";
+      await gated.createWorkflow({ workflowId: id, workflowName: "approve-doc", input: {} });
+      let checks = 0;
+      const handler = mintSignalToken({
+        storage: gated,
+        authorizeRunContinuation: async () => {
+          checks++;
+          if (checks === 1) gated.revokeOnNextWorkflowLoad = true;
+          return gated.authorized;
+        },
+      });
+
+      const response = await invoke(handler, mintRequest(id), {
+        id,
+        name: "approve:call",
+      });
+
+      expect(response.status).toBe(403);
+      expect(checks).toBe(2);
+      expect(await gated.listSignalTokensForWorkflow(id)).toEqual([]);
+    });
+
+    it("keeps a final authorization outage retryable without creating a token", async () => {
+      const gated = new MintAuthorizationGateStorage();
+      const id = "wf-token-mint-auth-outage";
+      await gated.createWorkflow({ workflowId: id, workflowName: "approve-doc", input: {} });
+      let checks = 0;
+      let failFinal = true;
+      const handler = mintSignalToken({
+        storage: gated,
+        authorizeRunContinuation: async () => {
+          checks++;
+          if (checks % 2 === 1) gated.revokeOnNextWorkflowLoad = true;
+          if (checks % 2 === 0 && failFinal) throw new Error("authorizer unavailable");
+          return true;
+        },
+      });
+
+      const failed = await invoke(handler, mintRequest(id), {
+        id,
+        name: "approve:call",
+      });
+      expect(failed.status).toBe(500);
+      expect(await gated.listSignalTokensForWorkflow(id)).toEqual([]);
+
+      failFinal = false;
+      gated.authorized = true;
+      const retried = await invoke(handler, mintRequest(id), {
+        id,
+        name: "approve:call",
+      });
+      expect(retried.status).toBe(201);
+      expect(await gated.listSignalTokensForWorkflow(id)).toHaveLength(1);
+    });
+  });
+
   describe("bearer auth", () => {
     it("rejects missing bearer with 401", async () => {
-      const minted = await mint(storage, workflowId, "approve", { expiresInMs: 60_000 });
+      const minted = await mint(storage, workflowId, "approve", {
+        expiresInMs: 60_000,
+      });
       const completed = await complete(storage, minted.body.tokenId, null, "x");
       expect(completed.status).toBe(401);
       expect(completed.body.error).toBe("missing_bearer");
     });
 
     it("rejects wrong bearer with 401", async () => {
-      const minted = await mint(storage, workflowId, "approve", { expiresInMs: 60_000 });
+      const minted = await mint(storage, workflowId, "approve", {
+        expiresInMs: 60_000,
+      });
       const completed = await complete(storage, minted.body.tokenId, "wrong-bearer", "x");
       expect(completed.status).toBe(401);
       expect(completed.body.error).toBe("invalid_bearer");
@@ -145,7 +236,9 @@ describe("signal-tokens routes", () => {
 
   describe("expiry + idempotent re-submission", () => {
     it("returns 410 when the token has expired before completion", async () => {
-      const minted = await mint(storage, workflowId, "approve", { expiresInMs: 1 });
+      const minted = await mint(storage, workflowId, "approve", {
+        expiresInMs: 1,
+      });
       // Advance past expiry.
       await new Promise((r) => setTimeout(r, 5));
       const completed = await complete(storage, minted.body.tokenId, minted.body.bearer, "x");
@@ -154,7 +247,9 @@ describe("signal-tokens routes", () => {
     });
 
     it("returns 200 on bearer re-submission with the original value", async () => {
-      const minted = await mint(storage, workflowId, "approve", { expiresInMs: 60_000 });
+      const minted = await mint(storage, workflowId, "approve", {
+        expiresInMs: 60_000,
+      });
       const first = await complete(storage, minted.body.tokenId, minted.body.bearer, {
         approved: true,
       });
@@ -239,7 +334,9 @@ describe("signal-tokens routes", () => {
     });
 
     it("rejects complete without `value` in body (400)", async () => {
-      const minted = await mint(storage, workflowId, "approve", { expiresInMs: 60_000 });
+      const minted = await mint(storage, workflowId, "approve", {
+        expiresInMs: 60_000,
+      });
       const handler = completeSignalToken({ storage });
       const res = await invoke(
         handler,
@@ -263,7 +360,10 @@ describe("signal-tokens routes", () => {
         expiresInMs: 60_000,
         tags: ["approval"],
       });
-      await mint(storage, workflowId, "review", { expiresInMs: 60_000, tags: ["review"] });
+      await mint(storage, workflowId, "review", {
+        expiresInMs: 60_000,
+        tags: ["review"],
+      });
 
       const handler = listSignalTokensForRun({ storage });
       const res = await invoke(
@@ -292,7 +392,11 @@ describe("signal tokens — expiry on an injected clock", () => {
     const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
     const storage = new InMemoryWorkflowStorage({ clock });
     const workflowId = "wf-clock-token";
-    await storage.createWorkflow({ workflowId, workflowName: "approve-doc", input: {} });
+    await storage.createWorkflow({
+      workflowId,
+      workflowName: "approve-doc",
+      input: {},
+    });
 
     const mintRes = await mintSignalToken({ storage, clock })(
       new Request(`http://x/api/runs/${workflowId}/signals/approve/token`, {
@@ -328,7 +432,11 @@ describe("signal tokens — expiry on an injected clock", () => {
     const clock = FakeWallClock.create("2026-01-01T00:00:00Z");
     const storage = new InMemoryWorkflowStorage({ clock });
     const workflowId = "wf-clock-token-ok";
-    await storage.createWorkflow({ workflowId, workflowName: "approve-doc", input: {} });
+    await storage.createWorkflow({
+      workflowId,
+      workflowName: "approve-doc",
+      input: {},
+    });
 
     const mintRes = await mintSignalToken({ storage, clock })(
       new Request(`http://x/api/runs/${workflowId}/signals/approve/token`, {
@@ -373,7 +481,11 @@ describe("signal tokens — completion consumes the token only with its delivery
 
   async function mintOn(params: { storage: InMemoryWorkflowStorage; workflowId: string }) {
     const { storage, workflowId } = params;
-    await storage.createWorkflow({ workflowId, workflowName: "approve-doc", input: {} });
+    await storage.createWorkflow({
+      workflowId,
+      workflowName: "approve-doc",
+      input: {},
+    });
     const res = await mintSignalToken({ storage })(
       new Request(`http://x/api/runs/${workflowId}/signals/approve/token`, {
         method: "POST",
@@ -394,6 +506,41 @@ describe("signal tokens — completion consumes the token only with its delivery
       },
       body: JSON.stringify({ value: params.value }),
     });
+  }
+
+  class BodyHookRequest extends Request {
+    constructor(
+      input: string,
+      init: RequestInit,
+      private readonly afterRead: () => void,
+    ) {
+      super(input, init);
+    }
+
+    override async text(): Promise<string> {
+      const body = await super.text();
+      this.afterRead();
+      return body;
+    }
+  }
+
+  function gatedCompleteRequest(params: {
+    minted: MintTokenResponse;
+    value: unknown;
+    afterRead: () => void;
+  }): Request {
+    return new BodyHookRequest(
+      `http://x/api/signal-tokens/${params.minted.tokenId}/complete`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${params.minted.bearer}`,
+        },
+        body: JSON.stringify({ value: params.value }),
+      },
+      params.afterRead,
+    );
   }
 
   it("leaves the token completable when the delivery fails, then delivers on retry", async () => {
@@ -425,7 +572,9 @@ describe("signal tokens — completion consumes the token only with its delivery
 
     const responses = await Promise.all(
       Array.from({ length: 8 }, (_, i) =>
-        invoke(handler, completeRequest({ minted, value: i }), { tokenId: minted.tokenId }),
+        invoke(handler, completeRequest({ minted, value: i }), {
+          tokenId: minted.tokenId,
+        }),
       ),
     );
     const statuses = responses.map((r) => r.status);
@@ -438,5 +587,123 @@ describe("signal tokens — completion consumes the token only with its delivery
     const signals = await storage.loadSignals("wf-token-race");
     expect(signals.map((s) => [s.signalName, s.payload])).toEqual([["approve", value]]);
     expect((await storage.findSignalTokenById(minted.tokenId))!.completedValue).toBe(value);
+  });
+
+  it("rechecks after body validation and closes a revocation race at atomic completion", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const workflowId = "wf-token-revoked-at-completion";
+    const minted = await mintOn({ storage, workflowId });
+    let authorized = true;
+    let checks = 0;
+    const handler = completeSignalToken({
+      storage,
+      authorizeRunContinuation: async () => {
+        checks++;
+        return authorized;
+      },
+    });
+
+    const response = await invoke(
+      handler,
+      gatedCompleteRequest({
+        minted,
+        value: "must-not-land",
+        afterRead: () => {
+          authorized = false;
+        },
+      }),
+      { tokenId: minted.tokenId },
+    );
+
+    expect(response.status).toBe(403);
+    expect(checks).toBe(2);
+    expect((await storage.findSignalTokenById(minted.tokenId))!.completedAt).toBeNull();
+    expect(await storage.loadSignals(workflowId)).toEqual([]);
+  });
+
+  it("keeps a final authorization outage retryable without consuming or delivering", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const workflowId = "wf-token-final-auth-outage";
+    const minted = await mintOn({ storage, workflowId });
+    let outage = false;
+    const handler = completeSignalToken({
+      storage,
+      authorizeRunContinuation: async () => {
+        if (outage) throw new Error("authorizer unavailable");
+        return true;
+      },
+    });
+
+    const failed = await invoke(
+      handler,
+      gatedCompleteRequest({
+        minted,
+        value: "first",
+        afterRead: () => {
+          outage = true;
+        },
+      }),
+      { tokenId: minted.tokenId },
+    );
+    expect(failed.status).toBe(500);
+    expect((await storage.findSignalTokenById(minted.tokenId))!.completedAt).toBeNull();
+    expect(await storage.loadSignals(workflowId)).toEqual([]);
+
+    outage = false;
+    const retried = await invoke(handler, completeRequest({ minted, value: "second" }), {
+      tokenId: minted.tokenId,
+    });
+    expect(retried.status).toBe(202);
+    expect((await storage.findSignalTokenById(minted.tokenId))!.completedValue).toBe("second");
+    expect((await storage.loadSignals(workflowId)).map((s) => s.payload)).toEqual(["second"]);
+  });
+
+  it("does not consume or deliver when the stored starter is no longer authorized", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const workflowId = "wf-token-revoked";
+    const minted = await mintOn({ storage, workflowId });
+    const checked: unknown[] = [];
+    const handler = completeSignalToken({
+      storage,
+      authorizeRunContinuation: async (request) => {
+        checked.push(request);
+        return false;
+      },
+    });
+
+    const denied = await invoke(handler, completeRequest({ minted, value: "must-not-land" }), {
+      tokenId: minted.tokenId,
+    });
+
+    expect(denied.status).toBe(403);
+    expect(checked).toEqual([
+      {
+        workflowId,
+        source: "signal-token-complete",
+        tokenId: minted.tokenId,
+      },
+    ]);
+    expect((await storage.findSignalTokenById(minted.tokenId))!.completedAt).toBeNull();
+    expect(await storage.loadSignals(workflowId)).toEqual([]);
+  });
+
+  it("reauthorizes before returning bearer-protected metadata", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const workflowId = "wf-token-describe-revoked";
+    const minted = await mintOn({ storage, workflowId });
+    const handler = describeSignalToken({
+      storage,
+      authorizeRunContinuation: async () => false,
+    });
+
+    const response = await invoke(
+      handler,
+      new Request(`http://x/api/signal-tokens/${minted.tokenId}/describe`, {
+        headers: { authorization: `Bearer ${minted.bearer}` },
+      }),
+      { tokenId: minted.tokenId },
+    );
+
+    expect(response.status).toBe(403);
   });
 });

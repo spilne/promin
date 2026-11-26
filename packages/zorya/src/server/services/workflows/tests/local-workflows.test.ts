@@ -97,6 +97,143 @@ describe("LocalWorkflows.trigger", () => {
   });
 });
 
+describe("LocalWorkflows.define admission exemptions", () => {
+  it("accepts only internal exemptions and an invalid redefine cannot make one public", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const workflows = new LocalWorkflows({
+      storage,
+      runner: createWorkflowRunner({ storage }),
+      definitions: {},
+      sleepScanIntervalMs: 0,
+      signalScanIntervalMs: 0,
+    });
+    const internal = workflow<void>({ name: "owned-internal" })
+      .step("body", () => succeed(undefined))
+      .build();
+    const replacement = workflow<void>({ name: "owned-internal" })
+      .step("replacement", () => succeed(undefined))
+      .build();
+    const publicWorkflow = workflow<void>({ name: "public-exempt" })
+      .step("body", () => succeed(undefined))
+      .build();
+
+    workflows.define(internal, { internal: true, admissionExempt: true });
+    expect(workflows.isInternal(internal.name)).toBe(true);
+    expect(() =>
+      (
+        workflows.define as (
+          workflow: typeof internal,
+          options: { admissionExempt: boolean },
+        ) => void
+      )(replacement, { admissionExempt: true }),
+    ).toThrow("admissionExempt requires internal: true");
+    expect(workflows.definitions?.[internal.name]).toBe(internal);
+    expect(workflows.isInternal(internal.name)).toBe(true);
+    await expect(workflows.trigger(internal.name, undefined)).rejects.toThrow("Unknown workflow");
+
+    expect(() =>
+      (
+        workflows.define as (
+          workflow: typeof publicWorkflow,
+          options: { admissionExempt: boolean },
+        ) => void
+      )(publicWorkflow, { admissionExempt: true }),
+    ).toThrow("admissionExempt requires internal: true");
+    expect(workflows.definitions?.[publicWorkflow.name]).toBeUndefined();
+  });
+
+  it("snapshots stateful option getters exactly once", () => {
+    const storage = new InMemoryWorkflowStorage();
+    const workflows = new LocalWorkflows({
+      storage,
+      runner: createWorkflowRunner({ storage }),
+      definitions: {},
+      sleepScanIntervalMs: 0,
+      signalScanIntervalMs: 0,
+    });
+    const internal = workflow<void>({ name: "stateful-options" })
+      .step("body", () => succeed(undefined))
+      .build();
+    let internalReads = 0;
+    let exemptionReads = 0;
+    const stateful = Object.defineProperties(
+      {},
+      {
+        internal: {
+          get: () => ++internalReads === 1,
+        },
+        admissionExempt: {
+          get: () => ++exemptionReads === 1,
+        },
+      },
+    );
+
+    (
+      workflows.define as (
+        workflow: typeof internal,
+        options: { internal: boolean; admissionExempt: boolean },
+      ) => void
+    )(internal, stateful as { internal: boolean; admissionExempt: boolean });
+
+    expect({ internalReads, exemptionReads }).toEqual({ internalReads: 1, exemptionReads: 1 });
+    expect(workflows.definitions?.[internal.name]).toBe(internal);
+    expect(workflows.isInternal(internal.name)).toBe(true);
+  });
+
+  it("leaves the prior definition and visibility unchanged when a getter or hook throws", () => {
+    const storage = new InMemoryWorkflowStorage();
+    const runner = createWorkflowRunner({ storage });
+    const prior = workflow<void>({ name: "atomic-internal" })
+      .step("prior", () => succeed(undefined))
+      .build();
+    const replacement = workflow<void>({ name: "atomic-internal" })
+      .step("replacement", () => succeed(undefined))
+      .build();
+    const workflows = new LocalWorkflows({
+      storage,
+      runner,
+      definitions: {},
+      sleepScanIntervalMs: 0,
+      signalScanIntervalMs: 0,
+    });
+    workflows.define(prior, { internal: true });
+
+    const throwingOptions = Object.defineProperties(
+      {},
+      {
+        internal: { get: () => true },
+        admissionExempt: {
+          get: () => {
+            throw new Error("getter failed");
+          },
+        },
+      },
+    );
+    expect(() =>
+      (
+        workflows.define as (
+          workflow: typeof replacement,
+          options: { internal: boolean; admissionExempt: boolean },
+        ) => void
+      )(replacement, throwingOptions as { internal: boolean; admissionExempt: boolean }),
+    ).toThrow("getter failed");
+    expect(workflows.definitions?.[prior.name]).toBe(prior);
+    expect(workflows.isInternal(prior.name)).toBe(true);
+
+    Object.defineProperty(runner, "exemptInternalWorkflowFromRunAdmission", {
+      configurable: true,
+      value: () => {
+        throw new Error("hook failed");
+      },
+    });
+    expect(() => workflows.define(replacement, { internal: true, admissionExempt: true })).toThrow(
+      "hook failed",
+    );
+    expect(workflows.definitions?.[prior.name]).toBe(prior);
+    expect(workflows.isInternal(prior.name)).toBe(true);
+  });
+});
+
 describe("LocalWorkflows.trigger — existing workflowId", () => {
   const settle = async () => {
     for (let i = 0; i < 50; i++) await new Promise((r) => setTimeout(r, 0));
@@ -133,6 +270,40 @@ describe("LocalWorkflows.trigger — existing workflowId", () => {
       expect([executions, run?.run, run?.status]).toEqual([1, 1, "completed"]);
     });
   }
+
+  it("returns an existing secured run without replacing its starter identity", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    await storage.createWorkflow({
+      workflowId: "secured-existing",
+      workflowName: "w",
+      input: {},
+      securityContext: { actor: { kind: "user", id: "alice" } },
+    });
+    const wf = workflow<unknown>({ name: "w" })
+      .step("a", () => succeed("ok"))
+      .build();
+    const workflows = new LocalWorkflows({
+      storage,
+      runner: createWorkflowRunner({ storage }),
+      definitions: { w: wf as never },
+      sleepScanIntervalMs: 0,
+      signalScanIntervalMs: 0,
+    });
+
+    await expect(
+      workflows.trigger(
+        "w",
+        {},
+        {
+          workflowId: "secured-existing",
+          securityContext: { actor: { kind: "user", id: "mallory" } },
+        },
+      ),
+    ).resolves.toEqual({ workflowId: "secured-existing", existing: true });
+    expect((await storage.loadWorkflow("secured-existing"))?.securityContext).toEqual({
+      actor: { kind: "user", id: "alice" },
+    });
+  });
 });
 
 describe("LocalWorkflows.rerun", () => {

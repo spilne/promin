@@ -16,6 +16,7 @@ import { nextRetryDelayMs, type WorkflowRetryPolicy } from "../../shared/retry-p
 import { SystemWallClock, type WallClock } from "../../shared/wall-clock.ts";
 import {
   TripwireStorageMissingError,
+  RunSecurityContextConflictError,
   WorkflowError,
   WorkflowLockError,
   WorkflowTripwireError,
@@ -65,6 +66,11 @@ import type { WorkflowStorage } from "../workflow-storage.ts";
 import { errorMessage, errorTagOf } from "./step-body.ts";
 import { failureFromError, workflowFailure, type WorkflowFailure } from "../workflow-failure.ts";
 import {
+  assertRunSecurityContextCompatible,
+  normalizeRunSecurityContext,
+  type RunSecurityContext,
+} from "../run-security-context.ts";
+import {
   emitTrace,
   traceErrorOf,
   type WorkflowTraceRef,
@@ -77,6 +83,10 @@ import {
  * with a ~90s grace window for transient network hiccups.
  */
 const DEFAULT_LOCK_DURATION_MS = 120_000;
+
+/** Bounded wait for a lock winner to persist the row a secured join must validate. */
+const SECURITY_CONTEXT_JOIN_ROW_ATTEMPTS = 100;
+const SECURITY_CONTEXT_JOIN_ROW_DELAY_MS = 1;
 
 /** Hard cap on chained continue-as-new restarts, to catch infinite loops in user code. */
 const MAX_CONTINUE_AS_NEW_CHAIN = 1024;
@@ -91,6 +101,7 @@ interface RunParams {
   readonly input: unknown;
   readonly force?: boolean;
   readonly namespace?: string;
+  readonly securityContext?: RunSecurityContext;
   readonly idempotencyKey?: string;
   readonly idempotencyExpiresAt?: Date;
   /**
@@ -177,7 +188,11 @@ export async function runWorkflowOrchestration(
   ctx: WorkflowOrchestrationContext,
   params: RunParams,
 ): Promise<unknown> {
-  const { workflowId, input, force, namespace } = params;
+  const runParams: RunParams =
+    params.securityContext === undefined
+      ? params
+      : { ...params, securityContext: normalizeRunSecurityContext(params.securityContext) };
+  const { workflowId, input, force, namespace } = runParams;
   const clock = ctx.clock ?? SystemWallClock;
   const idempotency = force ? undefined : ctx.idempotency;
 
@@ -190,20 +205,32 @@ export async function runWorkflowOrchestration(
       input,
       force,
       namespace,
-      ...(params.drivenByParent && { drivenByParent: true }),
-      ...(params.failureSink !== undefined && { failureSink: params.failureSink }),
-      ...(params.onLocked !== undefined && { onLocked: params.onLocked }),
-      ...(params.rejectInFlight === true && { rejectInFlight: true }),
-      ...(params.signal !== undefined && { signal: params.signal }),
-      ...(params.useStoredInput === true && { useStoredInput: true }),
-      ...(params.traceparent !== undefined && { traceparent: params.traceparent }),
-      ...(params.parentWorkflowId !== undefined && { parentWorkflowId: params.parentWorkflowId }),
+      ...(runParams.securityContext !== undefined && {
+        securityContext: runParams.securityContext,
+      }),
+      ...(runParams.drivenByParent && { drivenByParent: true }),
+      ...(runParams.failureSink !== undefined && { failureSink: runParams.failureSink }),
+      ...(runParams.onLocked !== undefined && { onLocked: runParams.onLocked }),
+      ...(runParams.rejectInFlight === true && { rejectInFlight: true }),
+      ...(runParams.signal !== undefined && { signal: runParams.signal }),
+      ...(runParams.useStoredInput === true && { useStoredInput: true }),
+      ...(runParams.traceparent !== undefined && { traceparent: runParams.traceparent }),
+      ...(runParams.parentWorkflowId !== undefined && {
+        parentWorkflowId: runParams.parentWorkflowId,
+      }),
     });
   }
 
   // Idempotency check — return the cached outcome if within TTL.
   if (idempotency) {
     const existing = await ctx.storage.loadWorkflow(workflowId);
+    if (existing) {
+      assertRunSecurityContextCompatible({
+        workflowId,
+        stored: existing.securityContext,
+        requested: runParams.securityContext,
+      });
+    }
     const cached = existing ? cachedIdempotentOutcome({ ctx, state: existing, clock }) : undefined;
     if (cached) return cached.result;
   }
@@ -223,14 +250,21 @@ export async function runWorkflowOrchestration(
         clock,
         loadState: true,
         watchCancel: true,
-        ...(params.signal !== undefined && { signal: params.signal }),
+        ...(runParams.signal !== undefined && { signal: runParams.signal }),
       },
       fn: async (lock) => {
         // Before the try: a rejected in-flight run is someone else's, and
         // its query handlers stay registered.
-        if (params.rejectInFlight === true) {
+        if (runParams.rejectInFlight === true) {
           const stored =
             lock.state !== undefined ? lock.state : await ctx.storage.loadWorkflow(workflowId);
+          if (stored) {
+            assertRunSecurityContextCompatible({
+              workflowId,
+              stored: stored.securityContext,
+              requested: runParams.securityContext,
+            });
+          }
           if (stored && IN_FLIGHT_STATUSES.has(stored.status)) {
             throw new WorkflowLockError({
               workflowId,
@@ -238,17 +272,17 @@ export async function runWorkflowOrchestration(
             });
           }
         }
-        params.onLocked?.();
+        runParams.onLocked?.();
         const stopTracingLock = traceLock({
           ctx,
           lock,
           clock,
           workflowId,
-          namespace: params.namespace ?? lock.state?.namespace,
+          namespace: runParams.namespace ?? lock.state?.namespace,
         });
         const queries = openQueryScope(workflowId);
         try {
-          const result = await runChain({ ctx, params, lock, clock, loaded, queries });
+          const result = await runChain({ ctx, params: runParams, lock, clock, loaded, queries });
           queries.close();
           stopTracingLock();
           return result;
@@ -261,10 +295,56 @@ export async function runWorkflowOrchestration(
         }
       },
     });
+  } catch (error) {
+    // `start({ onInFlight: "join" })` turns a lock conflict into a handle.
+    // The lock may have been lost before `fn` ran, so validate against a
+    // fresh row here before the caller is allowed to join that run.
+    if (error instanceof WorkflowLockError && runParams.rejectInFlight === true) {
+      await assertSecuredJoinCompatible({
+        storage: ctx.storage,
+        workflowId,
+        requested: runParams.securityContext,
+        clock,
+      });
+    }
+    throw error;
   } finally {
     // After the lock is released, so the woken parent can drive the child.
-    if (!params.drivenByParent) await wakeParentIfEnded({ ctx, loaded, clock });
+    if (!runParams.drivenByParent) await wakeParentIfEnded({ ctx, loaded, clock });
   }
+}
+
+/**
+ * A lock loser can observe no row while the winner is between lock acquire
+ * and create. A caller that supplied identity may join only after that row
+ * exists and matches. If the winner dies before create, fail closed.
+ */
+async function assertSecuredJoinCompatible(params: {
+  storage: WorkflowStorage;
+  workflowId: string;
+  requested: RunSecurityContext | undefined;
+  clock: WallClock;
+}): Promise<void> {
+  if (params.requested === undefined) return;
+  for (let attempt = 0; attempt < SECURITY_CONTEXT_JOIN_ROW_ATTEMPTS; attempt++) {
+    const stored = await params.storage.loadWorkflow(params.workflowId);
+    if (stored) {
+      assertRunSecurityContextCompatible({
+        workflowId: params.workflowId,
+        stored: stored.securityContext,
+        requested: params.requested,
+      });
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      const timer = params.clock.setTimeout(resolve, SECURITY_CONTEXT_JOIN_ROW_DELAY_MS);
+      timer.unref?.();
+    });
+  }
+  throw new RunSecurityContextConflictError({
+    workflowId: params.workflowId,
+    message: `Cannot join workflow "${params.workflowId}" before its security context is durably available`,
+  });
 }
 
 /**
@@ -337,6 +417,9 @@ async function runChain(params: {
                 input,
                 force: true,
                 namespace: params.params.namespace,
+                ...(params.params.securityContext !== undefined && {
+                  securityContext: params.params.securityContext,
+                }),
                 ...(params.params.parentWorkflowId !== undefined && {
                   parentWorkflowId: params.params.parentWorkflowId,
                 }),
@@ -389,11 +472,18 @@ export async function runChildWorkflow(params: {
   readonly input: unknown;
   /** The parent's namespace; a child created here is stored under it. */
   readonly namespace?: string;
+  /** The parent's stored identity; `null` means the caller knows there is none. */
+  readonly securityContext?: RunSecurityContext | null;
   /** The parent's lock signal: the child stops when the parent loses (or abandons) its run. */
   readonly signal?: AbortSignal;
 }): Promise<unknown> {
   const { runtime, workflow, workflowId, input } = params;
   const def = workflow._definition;
+  const inheritedSecurityContext =
+    params.securityContext === null
+      ? undefined
+      : (params.securityContext ??
+        (await runtime.storage.loadWorkflow(params.parentWorkflowId))?.securityContext);
   const created = await runtime.storage.createWorkflow({
     workflowId,
     workflowName: workflow.name,
@@ -401,6 +491,9 @@ export async function runChildWorkflow(params: {
     workflowType: def.type,
     parentWorkflowId: params.parentWorkflowId,
     ...(params.namespace !== undefined && { namespace: params.namespace }),
+    ...(inheritedSecurityContext !== undefined && {
+      securityContext: inheritedSecurityContext,
+    }),
     metadata: def.metadata,
     version: workflow.version,
     guard: params.parentGuard,
@@ -417,6 +510,9 @@ export async function runChildWorkflow(params: {
     input,
     drivenByParent: true,
     parentWorkflowId: params.parentWorkflowId,
+    ...(inheritedSecurityContext !== undefined && {
+      securityContext: inheritedSecurityContext,
+    }),
     ...(rerunFailed && { force: true }),
     ...(params.signal !== undefined && { signal: params.signal }),
   });
@@ -543,6 +639,14 @@ async function runCycleBody(cycle: CycleParams & { phase: CyclePhase }): Promise
   let state =
     cycle.preloaded !== undefined ? cycle.preloaded : await ctx.storage.loadWorkflow(workflowId);
 
+  if (state !== null) {
+    assertRunSecurityContextCompatible({
+      workflowId,
+      stored: state.securityContext,
+      requested: cycle.params.securityContext,
+    });
+  }
+
   // Double-check idempotency under the lock — prevents a race with a
   // concurrent run that completed after the pre-check.
   if (idempotency && state?.completedAt) {
@@ -573,6 +677,9 @@ async function runCycleBody(cycle: CycleParams & { phase: CyclePhase }): Promise
       input,
       workflowType: ctx.type,
       ...(namespace !== undefined ? { namespace } : {}),
+      ...(cycle.params.securityContext !== undefined
+        ? { securityContext: cycle.params.securityContext }
+        : {}),
       metadata:
         ctx.tracer !== undefined && cycle.params.traceparent !== undefined
           ? { ...ctx.metadata, traceparent: cycle.params.traceparent }
@@ -626,6 +733,14 @@ async function runCycleBody(cycle: CycleParams & { phase: CyclePhase }): Promise
       // died) still owes its cancel: finish the rollback, or settle it when
       // the definition asks for none, and reject with the cancel.
       if (owesCancelRollback(state) && hasCapability(ctx.storage, "compensationLedger")) {
+        // Compensation callbacks are user code too. Reauthorize before
+        // reopening the cancelled run or executing any rollback handler.
+        if (
+          ctx.runAdmissionGuard &&
+          (!ctx.runAdmissionExempt || state.securityContext !== undefined)
+        ) {
+          await ctx.runAdmissionGuard({ state, ...(guard !== undefined && { guard }) });
+        }
         const traceRef =
           ctx.tracer !== undefined ? traceRunStart({ cycle, state, resumedRun: true }) : undefined;
         return settleCancelledRun({
@@ -644,6 +759,18 @@ async function runCycleBody(cycle: CycleParams & { phase: CyclePhase }): Promise
     state = await ctx.storage.loadWorkflow(workflowId);
     loaded.state = state;
     resumedRun = false;
+  }
+
+  // Host policy is checked after the authoritative row is loaded/created
+  // and after terminal replay handling, but before any user step executes.
+  // The callback runs under this driver's fence and is inherited by drains
+  // and children through the orchestration runtime.
+  if (
+    state &&
+    ctx.runAdmissionGuard &&
+    (!ctx.runAdmissionExempt || state.securityContext !== undefined)
+  ) {
+    await ctx.runAdmissionGuard({ state, ...(guard !== undefined && { guard }) });
   }
 
   // From here the run executes under this driver: a cancel it sees may roll
@@ -727,6 +854,7 @@ async function runCycleBody(cycle: CycleParams & { phase: CyclePhase }): Promise
         ...((state?.namespace ?? namespace) !== undefined && {
           namespace: state?.namespace ?? namespace,
         }),
+        securityContext: state?.securityContext ?? null,
         signal: lock.signal,
         ...child,
       }),

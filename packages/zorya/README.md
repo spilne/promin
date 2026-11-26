@@ -238,6 +238,77 @@ Use different keys for the two planes: a worker key cannot read or change
 runs through `/api`, and cannot reach storage methods beyond what a runner
 needs.
 
+### Enterprise security builder
+
+The optional `@promin/zorya/security` module replaces operator API keys with
+OIDC users, namespace access roles, rotatable service accounts, durable
+sessions and a tamper-evident audit chain. PostgreSQL persistence is opt-in
+through `@promin/zorya/security/postgres`:
+
+```ts
+import { ZoryaServer } from "@promin/zorya";
+import {
+  createZoryaSecurity,
+  DurableSecurityAudit,
+  oidcLoginProvider,
+} from "@promin/zorya/security";
+import { migrateSecurityStore, PostgresSecurityStore } from "@promin/zorya/security/postgres";
+
+await migrateSecurityStore(db);
+const securityStore = new PostgresSecurityStore({ db });
+const audit = new DurableSecurityAudit({
+  store: securityStore,
+  activeKeyId: "2026-11",
+  keys: { "2026-11": process.env.ZORYA_AUDIT_HMAC_KEY! },
+  outbox: {},
+});
+const security = createZoryaSecurity({
+  store: securityStore,
+  loginProviders: [
+    oidcLoginProvider({
+      issuer: process.env.OIDC_ISSUER!,
+      clientId: process.env.OIDC_CLIENT_ID!,
+      clientSecret: process.env.OIDC_CLIENT_SECRET!,
+    }),
+  ],
+  publicBaseUrl: "https://agents.example.com",
+  allowedDomains: ["example.com"],
+  adminEmails: ["platform-admin@example.com"],
+  auditSink: audit,
+  secret: process.env.ZORYA_SESSION_SECRET!,
+});
+
+const server = ZoryaServer.builder()
+  .workflows(workflows)
+  .agents(agents)
+  .knowledgeBases(knowledgeBases)
+  .security(security) // replaces .apiKeys(...)
+  .build();
+```
+
+For an identity-provider outage, the package also ships a host-local command.
+It requires an existing active principal with the org-wide `admin` access role;
+there is no HTTP mint endpoint. The plaintext credential and CSRF token are
+shown once, while PostgreSQL stores only their hashes:
+
+```bash
+export ZORYA_SECURITY_DATABASE_URL='postgres://...'
+export ZORYA_PUBLIC_BASE_URL='https://agents.example.com'
+export ZORYA_AUDIT_KEY_ID='2026-11'
+export ZORYA_AUDIT_HMAC_KEY='at-least-32-bytes-of-secret-key-material'
+
+zorya-break-glass issue \
+  --principal-kind user \
+  --principal-id emergency-admin \
+  --reason 'identity provider outage INC-1234' \
+  --created-by on-call@example.com \
+  --ttl-seconds 900
+
+zorya-break-glass revoke \
+  --grant-id GRANT_ID \
+  --revoked-by on-call@example.com
+```
+
 ## Configuration reference
 
 `new ZoryaServer(config: ZoryaServerConfig)`, or the same fields through
@@ -263,6 +334,7 @@ const server = ZoryaServer.builder()
 | --------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `workflows`           | required                | The `ZoryaWorkflows` chain (`LocalWorkflows`, `QueuedWorkflows`). Its storage backs every run route. The version registry, advertisements, definitions and cluster are found on the chain.                                                                                                                                             |
 | `apiKeys`             | none                    | Operator keys for `/api`. Required unless `insecure`.                                                                                                                                                                                                                                                                                  |
+| `security`            | none                    | Pluggable operator authentication, authorization and audit policy. Replaces `apiKeys`; use `createZoryaSecurity()` for OIDC/RBAC/service-account enterprise security.                                                                                                                                                                  |
 | `insecure`            | `false`                 | Allow planes without keys. Local development only.                                                                                                                                                                                                                                                                                     |
 | `remoteWorkers`       | not mounted             | Mounts the worker plane. `apiKeys`: worker keys. `workerRegistry`: the registry workers register into (default: the queued layer's, else in-memory). `wakeups`: "work available" messages to connected workers (`false` off; `{ coalesceMs, followUpMs }`, defaults 20 and 250).                                                       |
 | `scheduler`           | none                    | `ZoryaScheduler`: schedule CRUD, tick loop, emit-now. Without it `GET /api/schedules` answers `configured: false`.                                                                                                                                                                                                                     |
@@ -439,7 +511,8 @@ PostgresLeaseStore({ db }) })`. `turnGate: false` turns it off. Scheduled
   a pending approval. `LocalAgent.forkThread` exposes the same operation to
   library callers with a configured `MemoryStore`.
 - **Approvals.** A turn suspended on a tool approval is recorded in a
-  `PendingApprovalStore`. Pass a durable one to `resolveLocalAgent({ approvals })`
+  `PendingApprovalStore`. Pass the same durable instance to both
+  `new ZoryaAgents({ approvals })` and `resolveLocalAgent({ approvals })`
   in `resolve` — `createSqliteZoryaStack` provides `pendingApprovalStore`;
   `PostgresPendingApprovalStore` is the Postgres one.
   `GET /api/agents/:id/threads/:threadId/approvals` lists the thread's pending
@@ -566,8 +639,9 @@ const retrievers = new InMemoryRetrieverRegistry([
 ]);
 const agents = new ZoryaAgents({
   registry,
+  approvals,
   retrievers,
-  resolve: (recipe) => resolveLocalAgent(recipe, { runner, llm, tools, retrievers }),
+  resolve: (recipe) => resolveLocalAgent(recipe, { runner, llm, tools, retrievers, approvals }),
 });
 ```
 
@@ -600,11 +674,13 @@ const mcp = new ZoryaMcpServers({
 });
 const agents = new ZoryaAgents({
   registry,
+  approvals,
   resolve: async (recipe, scope) =>
     resolveLocalAgent(recipe, {
       runner,
       llm,
       tools,
+      approvals,
       mcpTools: await mcp.loadTools({ recipe, scope }),
     }),
 });
@@ -659,6 +735,7 @@ const knowledgeBases = new ZoryaKnowledgeBases({
 const retrievers = knowledgeBases.registry;
 const agents = new ZoryaAgents({
   registry,
+  approvals,
   retrievers,
   // The registry re-reads the store for a base another replica created.
   resolve: (recipe, scope) =>
@@ -666,6 +743,7 @@ const agents = new ZoryaAgents({
       runner,
       llm,
       tools,
+      approvals,
       retrievers,
       ...(scope?.namespaceId !== undefined && { namespaceId: scope.namespaceId }),
     }),

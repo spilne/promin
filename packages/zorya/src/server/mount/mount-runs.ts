@@ -12,7 +12,7 @@ import type {
   WorkflowVersionRegistry,
 } from "@promin/workflow";
 import type { WorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
-import type { Router } from "../router.ts";
+import type { Handler, RouteAccess, RouteTargetRequest, Router } from "../router.ts";
 import type { RunWatcherPool } from "../run-poll-watcher.ts";
 import type { AgentStreamHub } from "../services/agent-stream-hub.ts";
 import type { WorkerWebSocketServer } from "../services/worker-ws-server.ts";
@@ -64,6 +64,8 @@ import {
   type WorkflowVersionsRoutesDeps,
 } from "../routes/workflow-versions.ts";
 import { listWorkers, type WorkersProvider } from "../routes/workers.ts";
+import { ORG_WIDE_NAMESPACE, type SecurityResourceRef } from "../security/index.ts";
+import { orgTarget, protectedAccess, queryNamespaceTarget } from "./route-security.ts";
 
 export interface MountRunsParams {
   readonly router: Router;
@@ -100,6 +102,7 @@ export function mountRuns(params: MountRunsParams): void {
     ...(definitions !== undefined && { workflows: definitions }),
     ...(advertisements !== undefined && { advertisements }),
     ...(params.namespaces !== undefined && { namespaces: params.namespaces }),
+    authorizeRunContinuation: (request) => workflows.checkStoredRunSecurity(request),
   };
   const runActions = new RunsService({
     storage,
@@ -113,6 +116,57 @@ export function mountRuns(params: MountRunsParams): void {
     isInternal: (name: string) => workflows.isInternal(name),
     ...(sampleInput !== undefined && { sampleInput }),
     ...(advertisements !== undefined && { advertisements }),
+  };
+  const declared = (params: {
+    readonly method: string;
+    readonly path: string;
+    readonly access: RouteAccess;
+    readonly handler: Handler;
+  }): void => {
+    router.route(params);
+  };
+  const storedRun = async ({
+    params: route,
+  }: RouteTargetRequest): Promise<SecurityResourceRef<"run">> => {
+    const workflowId = route.id!;
+    const run = await storage.loadWorkflow(workflowId);
+    return {
+      kind: "run",
+      namespaceId: run?.namespace ?? ORG_WIDE_NAMESPACE,
+      id: workflowId,
+    };
+  };
+  const workflow = orgTarget({ kind: "workflow", idParam: "name" });
+  const triggerTarget = async ({ request, params: route }: RouteTargetRequest) => {
+    let namespaceId = ORG_WIDE_NAMESPACE;
+    try {
+      const body = (await request.clone().json()) as Record<string, unknown>;
+      if (typeof body.namespace === "string" && body.namespace.length > 0) {
+        namespaceId = body.namespace;
+      }
+    } catch {
+      // Handler-owned schema validation preserves the existing 4xx answer.
+    }
+    return { kind: "run" as const, namespaceId, id: route.name };
+  };
+  const runListTarget = queryNamespaceTarget({
+    kind: "run",
+    query: "namespace",
+  });
+  const workflowListTarget = queryNamespaceTarget({
+    kind: "workflow",
+    query: "namespace",
+  });
+  const tokenDeps = {
+    storage,
+    clock,
+    authorizeRunContinuation: deps.authorizeRunContinuation,
+    ...(params.signalTokenMaxTtlMs !== undefined && {
+      maxTtlMs: params.signalTokenMaxTtlMs,
+    }),
+    ...(params.publicBaseUrl !== undefined && {
+      publicBaseUrl: params.publicBaseUrl,
+    }),
   };
 
   // The version routes manage the registry the workflows layer dispatches
@@ -128,72 +182,399 @@ export function mountRuns(params: MountRunsParams): void {
       }
     : {};
 
-  router
-    .get("/api/runs", listRuns(deps))
-    .get("/api/workflows", listWorkflowNames(deps))
-    .get("/api/runs/:id", getRun(deps))
-    .get("/api/runs/:id/signals", getRunSignals(storage))
-    .get("/api/runs/:id/attempts", getRunAttempts(storage))
-    .get("/api/runs/:id/history", getRunHistory(storage))
-    .get("/api/runs/:id/children", getRunChildren(storage))
-    .get("/api/runs/:id/journal/:stepName", getRunStepJournal(storage))
-    .get("/api/signals", listSignals(storage))
-    .post("/api/runs/:id/mark-success", markRunSuccess(runActions))
-    .post("/api/runs/:id/mark-failed", markRunFailed(runActions))
-    .post("/api/runs/:id/rerun", rerunRun({ storage, rerun: (id) => workflows.rerun(id) }))
-    .post("/api/runs/:id/resume", resumeRun({ storage, runs: runActions, resume }))
-    // Start a run. Under the workflow (not `/api/runs/...`) so no workflow
-    // name can collide with a run action.
-    .post("/api/workflows/:name/runs", triggerRun(deps))
-    .get("/api/workflows/sparklines", getSparklines(storage))
-    .get("/api/workflows/definitions", listWorkflowDefs(defDeps))
-    .get("/api/workflows/:name/grid", getWorkflowGrid(storage))
-    .get("/api/workflows/:name/history", getWorkflowHistory(storage))
-    .get("/api/workflows/:name/definition", getWorkflowDef(defDeps))
-    .post("/api/runs/:id/cancel", cancelRun(deps))
-    .post("/api/runs/:id/signal", sendSignal(deps))
-    .post("/api/runs/:id/updates", sendUpdate(deps))
-    .get("/api/runs/:id/updates/:updateId", getUpdate(deps))
-    // Signal tokens — public-bearer auth for deliverSignal. Mint and list
-    // are auth-gated through the regular /api auth layer; /describe and
-    // /complete are reachable without Zorya credentials and validate the
-    // token bearer themselves.
-    .post(
-      "/api/runs/:id/signals/:name/token",
-      mintSignalToken({
-        storage,
-        clock,
-        ...(params.signalTokenMaxTtlMs !== undefined && { maxTtlMs: params.signalTokenMaxTtlMs }),
-        ...(params.publicBaseUrl !== undefined && { publicBaseUrl: params.publicBaseUrl }),
-      }),
-    )
-    .get("/api/runs/:id/signal-tokens", listSignalTokensForRun({ storage }))
-    .get("/api/signal-tokens/:tokenId/describe", describeSignalToken({ storage, clock }))
-    .post("/api/signal-tokens/:tokenId/complete", completeSignalToken({ storage, clock }))
-    // Workflow versions — thin layer over WorkflowVersionRegistry's
-    // lifecycle methods. Versions are a property of a workflow, so the
-    // routes nest under /api/workflows/:name/...
-    .get("/api/workflows/:name/versions", listWorkflowVersions(versionDeps))
-    .get("/api/workflows/:name/versions/active", getActiveWorkflowVersion(versionDeps))
-    .post("/api/workflows/:name/versions/:version/promote", promoteWorkflowVersion(versionDeps))
-    .post("/api/workflows/:name/rollback", rollbackWorkflow(versionDeps))
-    // Streams — generic typed channels per run. Output (workflow →
-    // subscribers) reads via the SSE handler; input (subscribers →
-    // workflow) appends via the POST handler.
-    .get(
-      "/api/runs/:id/streams/:streamId",
-      streamChunks({
-        storage,
-        clock,
-        watchers: runWatchers,
-        ...(sseIntervalMs !== undefined && { pollIntervalMs: sseIntervalMs }),
-      }),
-    )
-    .get("/api/runs/:id/streams/:streamId/chunks", getStreamChunks({ storage }))
-    .post("/api/runs/:id/streams/:streamId", sendStreamChunk({ storage }))
-    .get("/api/runs/:id/events", streamRunEvents({ storage, watchers: runWatchers, clock }))
-    .get("/api/runs/:id/agent-stream", streamAgentEvents(params.agentStreamHub))
-    .post("/api/runs/:id/query", queryRun({ workerWs: params.workerWs, clock }))
-    .get("/api/workers", listWorkers(params.workers))
-    .get("/api/metrics", getMetrics(params.metrics));
+  declared({
+    method: "GET",
+    path: "/api/runs",
+    access: protectedAccess({
+      resource: "run",
+      action: "read",
+      target: runListTarget,
+    }),
+    handler: listRuns(deps),
+  });
+  declared({
+    method: "GET",
+    path: "/api/workflows",
+    access: protectedAccess({
+      resource: "workflow",
+      action: "read",
+      target: workflowListTarget,
+    }),
+    handler: listWorkflowNames(deps),
+  });
+  declared({
+    method: "GET",
+    path: "/api/runs/:id",
+    access: protectedAccess({
+      resource: "run",
+      action: "read",
+      target: storedRun,
+    }),
+    handler: getRun(deps),
+  });
+  declared({
+    method: "GET",
+    path: "/api/runs/:id/signals",
+    access: protectedAccess({
+      resource: "run",
+      action: "read",
+      target: storedRun,
+    }),
+    handler: getRunSignals(storage),
+  });
+  declared({
+    method: "GET",
+    path: "/api/runs/:id/attempts",
+    access: protectedAccess({
+      resource: "run",
+      action: "read",
+      target: storedRun,
+    }),
+    handler: getRunAttempts(storage),
+  });
+  declared({
+    method: "GET",
+    path: "/api/runs/:id/history",
+    access: protectedAccess({
+      resource: "run",
+      action: "read",
+      target: storedRun,
+    }),
+    handler: getRunHistory(storage),
+  });
+  declared({
+    method: "GET",
+    path: "/api/runs/:id/children",
+    access: protectedAccess({
+      resource: "run",
+      action: "read",
+      target: storedRun,
+    }),
+    handler: getRunChildren(storage),
+  });
+  declared({
+    method: "GET",
+    path: "/api/runs/:id/journal/:stepName",
+    access: protectedAccess({
+      resource: "run",
+      action: "read",
+      target: storedRun,
+    }),
+    handler: getRunStepJournal(storage),
+  });
+  declared({
+    method: "GET",
+    path: "/api/signals",
+    access: protectedAccess({
+      resource: "run",
+      action: "read",
+      target: runListTarget,
+    }),
+    handler: listSignals(storage),
+  });
+  declared({
+    method: "POST",
+    path: "/api/runs/:id/mark-success",
+    access: protectedAccess({
+      resource: "run",
+      action: "cancel",
+      target: storedRun,
+    }),
+    handler: markRunSuccess(runActions),
+  });
+  declared({
+    method: "POST",
+    path: "/api/runs/:id/mark-failed",
+    access: protectedAccess({
+      resource: "run",
+      action: "cancel",
+      target: storedRun,
+    }),
+    handler: markRunFailed(runActions),
+  });
+  declared({
+    method: "POST",
+    path: "/api/runs/:id/rerun",
+    access: protectedAccess({
+      resource: "run",
+      action: "cancel",
+      target: storedRun,
+    }),
+    handler: rerunRun({ storage, rerun: (id) => workflows.rerun(id) }),
+  });
+  declared({
+    method: "POST",
+    path: "/api/runs/:id/resume",
+    access: protectedAccess({
+      resource: "run",
+      action: "cancel",
+      target: storedRun,
+    }),
+    handler: resumeRun({ storage, runs: runActions, resume }),
+  });
+  // Start a run. Under the workflow (not `/api/runs/...`) so no workflow
+  // name can collide with a run action.
+  declared({
+    method: "POST",
+    path: "/api/workflows/:name/runs",
+    access: protectedAccess({
+      resource: "run",
+      action: "trigger",
+      target: triggerTarget,
+    }),
+    handler: triggerRun(deps),
+  });
+  declared({
+    method: "GET",
+    path: "/api/workflows/sparklines",
+    access: protectedAccess({
+      resource: "workflow",
+      action: "read",
+      target: workflowListTarget,
+    }),
+    handler: getSparklines(storage),
+  });
+  declared({
+    method: "GET",
+    path: "/api/workflows/definitions",
+    access: protectedAccess({ resource: "workflow", action: "read" }),
+    handler: listWorkflowDefs(defDeps),
+  });
+  declared({
+    method: "GET",
+    path: "/api/workflows/:name/grid",
+    access: protectedAccess({
+      resource: "workflow",
+      action: "read",
+      target: workflow,
+    }),
+    handler: getWorkflowGrid(storage),
+  });
+  declared({
+    method: "GET",
+    path: "/api/workflows/:name/history",
+    access: protectedAccess({
+      resource: "workflow",
+      action: "read",
+      target: workflow,
+    }),
+    handler: getWorkflowHistory(storage),
+  });
+  declared({
+    method: "GET",
+    path: "/api/workflows/:name/definition",
+    access: protectedAccess({
+      resource: "workflow",
+      action: "read",
+      target: workflow,
+    }),
+    handler: getWorkflowDef(defDeps),
+  });
+  declared({
+    method: "POST",
+    path: "/api/runs/:id/cancel",
+    access: protectedAccess({
+      resource: "run",
+      action: "cancel",
+      target: storedRun,
+    }),
+    handler: cancelRun(deps),
+  });
+  declared({
+    method: "POST",
+    path: "/api/runs/:id/signal",
+    access: protectedAccess({
+      resource: "run",
+      action: "signal",
+      target: storedRun,
+    }),
+    handler: sendSignal(deps),
+  });
+  declared({
+    method: "POST",
+    path: "/api/runs/:id/updates",
+    access: protectedAccess({
+      resource: "run",
+      action: "signal",
+      target: storedRun,
+    }),
+    handler: sendUpdate(deps),
+  });
+  declared({
+    method: "GET",
+    path: "/api/runs/:id/updates/:updateId",
+    access: protectedAccess({
+      resource: "run",
+      action: "read",
+      target: storedRun,
+    }),
+    handler: getUpdate(deps),
+  });
+  // Signal tokens — public-bearer auth for deliverSignal. Mint and list
+  // are auth-gated through the regular /api auth layer; /describe and
+  // /complete are reachable without Zorya credentials and validate the
+  // token bearer themselves.
+  declared({
+    method: "POST",
+    path: "/api/runs/:id/signals/:name/token",
+    access: protectedAccess({
+      resource: "run",
+      action: "signal",
+      target: storedRun,
+    }),
+    handler: mintSignalToken(tokenDeps),
+  });
+  declared({
+    method: "GET",
+    path: "/api/runs/:id/signal-tokens",
+    access: protectedAccess({
+      resource: "run",
+      action: "signal",
+      target: storedRun,
+    }),
+    handler: listSignalTokensForRun(tokenDeps),
+  });
+  declared({
+    method: "GET",
+    path: "/api/signal-tokens/:tokenId/describe",
+    access: { kind: "signal-token" },
+    handler: describeSignalToken(tokenDeps),
+  });
+  declared({
+    method: "POST",
+    path: "/api/signal-tokens/:tokenId/complete",
+    access: { kind: "signal-token" },
+    handler: completeSignalToken(tokenDeps),
+  });
+  // Workflow versions — thin layer over WorkflowVersionRegistry's
+  // lifecycle methods. Versions are a property of a workflow, so the
+  // routes nest under /api/workflows/:name/...
+  declared({
+    method: "GET",
+    path: "/api/workflows/:name/versions",
+    access: protectedAccess({
+      resource: "workflow",
+      action: "read",
+      target: workflow,
+    }),
+    handler: listWorkflowVersions(versionDeps),
+  });
+  declared({
+    method: "GET",
+    path: "/api/workflows/:name/versions/active",
+    access: protectedAccess({
+      resource: "workflow",
+      action: "read",
+      target: workflow,
+    }),
+    handler: getActiveWorkflowVersion(versionDeps),
+  });
+  declared({
+    method: "POST",
+    path: "/api/workflows/:name/versions/:version/promote",
+    access: protectedAccess({
+      resource: "workflow",
+      action: "update",
+      target: workflow,
+    }),
+    handler: promoteWorkflowVersion(versionDeps),
+  });
+  declared({
+    method: "POST",
+    path: "/api/workflows/:name/rollback",
+    access: protectedAccess({
+      resource: "workflow",
+      action: "update",
+      target: workflow,
+    }),
+    handler: rollbackWorkflow(versionDeps),
+  });
+  // Streams — generic typed channels per run. Output (workflow →
+  // subscribers) reads via the SSE handler; input (subscribers →
+  // workflow) appends via the POST handler.
+  declared({
+    method: "GET",
+    path: "/api/runs/:id/streams/:streamId",
+    access: protectedAccess({
+      resource: "run",
+      action: "read",
+      target: storedRun,
+    }),
+    handler: streamChunks({
+      storage,
+      clock,
+      watchers: runWatchers,
+      ...(sseIntervalMs !== undefined && { pollIntervalMs: sseIntervalMs }),
+    }),
+  });
+  declared({
+    method: "GET",
+    path: "/api/runs/:id/streams/:streamId/chunks",
+    access: protectedAccess({
+      resource: "run",
+      action: "read",
+      target: storedRun,
+    }),
+    handler: getStreamChunks({ storage }),
+  });
+  declared({
+    method: "POST",
+    path: "/api/runs/:id/streams/:streamId",
+    access: protectedAccess({
+      resource: "run",
+      action: "signal",
+      target: storedRun,
+    }),
+    handler: sendStreamChunk({ storage }),
+  });
+  declared({
+    method: "GET",
+    path: "/api/runs/:id/events",
+    access: protectedAccess({
+      resource: "run",
+      action: "read",
+      target: storedRun,
+    }),
+    handler: streamRunEvents({ storage, watchers: runWatchers, clock }),
+  });
+  declared({
+    method: "GET",
+    path: "/api/runs/:id/agent-stream",
+    access: protectedAccess({
+      resource: "run",
+      action: "read",
+      target: storedRun,
+    }),
+    handler: streamAgentEvents(params.agentStreamHub),
+  });
+  declared({
+    method: "POST",
+    path: "/api/runs/:id/query",
+    access: protectedAccess({
+      resource: "run",
+      action: "signal",
+      target: storedRun,
+    }),
+    handler: queryRun({ workerWs: params.workerWs, clock }),
+  });
+  declared({
+    method: "GET",
+    path: "/api/workers",
+    access: protectedAccess({
+      resource: "worker",
+      action: "read",
+      target: orgTarget({ kind: "worker" }),
+    }),
+    handler: listWorkers(params.workers),
+  });
+  declared({
+    method: "GET",
+    path: "/api/metrics",
+    access: protectedAccess({
+      resource: "usage",
+      action: "read",
+      target: orgTarget({ kind: "usage" }),
+    }),
+    handler: getMetrics(params.metrics),
+  });
 }

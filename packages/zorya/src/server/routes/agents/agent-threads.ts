@@ -27,6 +27,7 @@ import {
   openThreadFromBody,
   openThreadFromQuery,
   parseLimitParam,
+  refusalResponse,
   scopeFromQuery,
 } from "./agent-scope.ts";
 
@@ -35,8 +36,8 @@ export function listAgentThreads(deps: AgentGatewayDeps) {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
     const url = new URL(req.url);
-    const scope = scopeFromQuery(url);
-    if ("error" in scope) return jsonError(400, scope.error);
+    const scope = scopeFromQuery({ req, url });
+    if ("error" in scope) return refusalResponse(scope);
     const scoped = await loadScopedAgent({ deps, req, id, scope, invoking: false });
     if (scoped instanceof Response) return scoped;
 

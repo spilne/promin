@@ -90,6 +90,9 @@ import {
   applyMetadataPatch,
   sameSignalTokenCreate,
   sameStoredValue,
+  normalizeRunSecurityContext,
+  decodeRunSecurityContext,
+  assertRunSecurityContextCompatible,
 } from "@promin/workflow/storage-kit";
 import type { SqliteDatabase } from "./sqlite-database.ts";
 
@@ -167,6 +170,7 @@ export class SqliteWorkflowStorage
         workflow_type        TEXT,
         parent_workflow_id   TEXT,
         namespace            TEXT,
+        security_context     TEXT,
         status               TEXT    NOT NULL DEFAULT 'pending',
         version              TEXT,
         run                  INTEGER NOT NULL DEFAULT 1,
@@ -196,6 +200,10 @@ export class SqliteWorkflowStorage
     // Tables created before step progress records lack theirs.
     if (!columns.some((c) => c.name === "step_progress")) {
       this.db.run(`ALTER TABLE ${t} ADD COLUMN step_progress TEXT`);
+    }
+    // Tables created before durable execution identity lack its column.
+    if (!columns.some((c) => c.name === "security_context")) {
+      this.db.run(`ALTER TABLE ${t} ADD COLUMN security_context TEXT`);
     }
     // Partial unique index on namespace-scoped idempotency keys for atomic claim-or-attach.
     this.db.run(
@@ -458,6 +466,9 @@ export class SqliteWorkflowStorage
       workflowType: row.workflow_type ?? undefined,
       parentWorkflowId: row.parent_workflow_id ?? undefined,
       namespace: row.namespace ?? undefined,
+      ...(row.security_context != null && {
+        securityContext: decodeRunSecurityContext(JSON.parse(row.security_context)),
+      }),
       status: row.status as WorkflowStatus,
       version: row.version ?? undefined,
       run: row.run,
@@ -933,7 +944,15 @@ export class SqliteWorkflowStorage
 	               LIMIT 1`,
             )
             .get(params.namespace ?? null, params.workflowName, params.idempotencyKey, now);
-          if (keyHit) return { created: false, existing: this._rowToState(keyHit) };
+          if (keyHit) {
+            const existing = this._rowToState(keyHit);
+            assertRunSecurityContextCompatible({
+              workflowId: existing.workflowId,
+              stored: existing.securityContext,
+              requested: params.securityContext,
+            });
+            return { created: false, existing };
+          }
           // An expired key no longer owns its slot in the unique index —
           // release it so this create can claim the key.
           this.db
@@ -949,16 +968,24 @@ export class SqliteWorkflowStorage
         const existing = this.db
           .query<WfRow>(`SELECT * FROM ${this._t} WHERE workflow_id = ?`)
           .get(params.workflowId);
-        if (existing) return { created: false, existing: this._rowToState(existing) };
+        if (existing) {
+          const state = this._rowToState(existing);
+          assertRunSecurityContextCompatible({
+            workflowId: state.workflowId,
+            stored: state.securityContext,
+            requested: params.securityContext,
+          });
+          return { created: false, existing: state };
+        }
 
         this.db
           .query(
             `INSERT INTO ${this._t}
-           (workflow_id, workflow_name, workflow_type, parent_workflow_id, namespace, status,
+           (workflow_id, workflow_name, workflow_type, parent_workflow_id, namespace, security_context, status,
             version, run, input, metadata, steps, run_source, run_source_id,
             idempotency_key, idempotency_expires_at,
             created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'pending', ?, 1, ?, ?, '{}', ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, 1, ?, ?, '{}', ?, ?, ?, ?, ?, ?)`,
           )
           .run(
             params.workflowId,
@@ -966,6 +993,9 @@ export class SqliteWorkflowStorage
             params.workflowType ?? null,
             params.parentWorkflowId ?? null,
             params.namespace ?? null,
+            params.securityContext !== undefined
+              ? JSON.stringify(normalizeRunSecurityContext(params.securityContext))
+              : null,
             params.version ?? null,
             JSON.stringify(params.input),
             params.metadata != null ? JSON.stringify(params.metadata) : null,
@@ -2583,6 +2613,7 @@ interface WfRow {
   workflow_type: string | null;
   parent_workflow_id: string | null;
   namespace: string | null;
+  security_context: string | null;
   status: string;
   version: string | null;
   run: number;

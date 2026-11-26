@@ -67,11 +67,15 @@ describe("LocalAgent.forkThread", () => {
     const { agent, memory, approvals } = await setup();
     await approvals.record({
       namespaceId: "ns",
+      agentId: "writer",
+      resourceId: "alice",
       threadId: "parent",
       toolCallId: "c1",
       workflowId: "wf",
       toolName: "deploy",
       input: {},
+      elevated: false,
+      requestContext: null,
     });
     await expect(agent.forkThread!("parent", "child")).rejects.toBeInstanceOf(
       ThreadAwaitingApprovalError,

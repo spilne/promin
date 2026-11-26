@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { snapshotPendingApprovalBoundary } from "@promin/agent";
 import { pendingApprovalStoreTestSuite } from "@promin/agent/testing";
 import { migrate } from "../../migrate.ts";
 import { PostgresPendingApprovalStore } from "../pending-approval-store.ts";
@@ -32,14 +33,27 @@ describe("PostgresPendingApprovalStore — Postgres-specific", () => {
     const b = new PostgresPendingApprovalStore({ db: pg.db });
     await a.record({
       namespaceId: "acme",
+      agentId: "ops-bot",
+      resourceId: "alice",
       threadId: "t",
       toolCallId: "c",
       workflowId: "wf",
       toolName: "deploy",
       input: null,
+      elevated: false,
+      requestContext: { actor: { kind: "user", id: "alice" } },
     });
-    const key = { namespaceId: "acme", threadId: "t", toolCallId: "c" };
-    expect((await b.decide({ ...key, approved: true, decidedBy: "bob" })).outcome).toBe("decided");
-    expect((await a.decide({ ...key, approved: false })).outcome).toBe("already_decided");
+    const key = {
+      namespaceId: "acme",
+      agentId: "ops-bot",
+      resourceId: "alice",
+      threadId: "t",
+      toolCallId: "c",
+    };
+    const expected = snapshotPendingApprovalBoundary((await b.get(key))!);
+    expect((await b.decide({ expected, approved: true, decidedBy: "bob" })).outcome).toBe(
+      "decided",
+    );
+    expect((await a.decide({ expected, approved: false })).outcome).toBe("already_decided");
   });
 });

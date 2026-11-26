@@ -207,6 +207,7 @@ export async function loadMcpToolsFromRecipe(
       const handle = params.pool.server({
         server,
         ...(params.scope.namespaceId !== undefined && { namespaceId: params.scope.namespaceId }),
+        ...(params.scope.resourceId !== undefined && { resourceId: params.scope.resourceId }),
         ...(credential !== undefined && {
           credential: credential.value,
           credentialScope: credential.scope,

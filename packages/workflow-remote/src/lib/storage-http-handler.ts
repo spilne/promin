@@ -74,6 +74,16 @@ export interface WorkflowStorageHandlerOptions {
    * without touching storage. Default: every method is allowed.
    */
   allow?: (params: { method: StorageMethod; req: Request }) => boolean;
+  /**
+   * Async, parameter-aware admission after decoding and method allowlisting,
+   * before storage is touched. Useful for host execution policy on lock and
+   * child-create boundaries. A false result answers 403.
+   */
+  authorize?: (params: {
+    method: StorageMethod;
+    params: unknown;
+    req: Request;
+  }) => boolean | Promise<boolean>;
 }
 
 /**
@@ -184,6 +194,24 @@ export function createWorkflowStorageHandler(
         { ok: false, error: `Method "${envelope.method}" is not allowed for this caller` },
         403,
       );
+    }
+    if (options.authorize) {
+      let authorized = false;
+      try {
+        authorized = await options.authorize({
+          method: envelope.method,
+          params: envelope.params,
+          req,
+        });
+      } catch {
+        authorized = false;
+      }
+      if (!authorized) {
+        return jsonResponse(
+          { ok: false, error: `Method "${envelope.method}" is not authorized for this caller` },
+          403,
+        );
+      }
     }
 
     try {

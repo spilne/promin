@@ -8,6 +8,7 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { tool, type LLMProvider } from "@promin/agent";
+import { principalRef, type Principal, type ZoryaSecurity } from "../../security/index.ts";
 import { bootAgents, jsonOf, localBackend, req } from "./agent-gateway-harness.ts";
 
 interface SseFrame {
@@ -33,19 +34,97 @@ async function readSse(res: Response): Promise<SseFrame[]> {
 
 const scope = { namespaceId: "ns", resourceId: "alice" };
 
+function enterpriseApprovalSecurity(): ZoryaSecurity {
+  const principals = new Map<string, Principal>([
+    [
+      "requester-sa",
+      {
+        kind: "service-account",
+        id: "requester-sa",
+        accessRoles: { ns: ["member", "approver"] },
+        canActFor: true,
+      },
+    ],
+    [
+      "alice",
+      {
+        kind: "user",
+        id: "alice",
+        accessRoles: { ns: ["member", "approver"] },
+        canActFor: false,
+      },
+    ],
+    [
+      "human-approver",
+      {
+        kind: "user",
+        id: "human-approver",
+        accessRoles: { ns: ["approver"] },
+        canActFor: false,
+      },
+    ],
+  ]);
+  return {
+    authenticate: async ({ request }) => principals.get(request.headers.get("x-actor") ?? ""),
+    resolvePrincipal: async (ref) => {
+      const value = principals.get(ref.id);
+      return value?.kind === ref.kind ? value : undefined;
+    },
+    resolveIdentity: async ({ actor, asserted }) => {
+      if (!asserted) return { actor, effective: principalRef(actor) };
+      if (!actor.canActFor) return undefined;
+      const effective = principals.get(asserted.id);
+      return effective ? { actor, effective: principalRef(effective) } : undefined;
+    },
+    identityFilter: async ({ namespaceId }) => ({ kind: "namespace", namespaceId }),
+    authorize: async ({ context, permission }) => {
+      if (
+        permission.resource === "run" &&
+        permission.action === "trigger" &&
+        context.actor.id === "requester-sa"
+      ) {
+        return { allowed: true, reason: "access_role_allow" };
+      }
+      if (
+        permission.resource === "approval" &&
+        permission.action === "decide-elevated" &&
+        context.actor.accessRoles.ns?.includes("approver")
+      ) {
+        return { allowed: true, reason: "access_role_allow" };
+      }
+      if (
+        context.effective.kind === "user" &&
+        context.effective.id === "alice" &&
+        ((permission.resource === "thread" && permission.action === "send") ||
+          (permission.resource === "agent" && permission.action === "invoke"))
+      ) {
+        return { allowed: true, reason: "access_role_allow" };
+      }
+      return { allowed: false, reason: "permission_denied" };
+    },
+    recordAudit: async () => {},
+  };
+}
+
 describe("agent SSE — approval resume", () => {
   it("streams the resumed turn to finish without re-sending the approval request", async () => {
     let deployed = 0;
-    const deploy = tool({
-      name: "deploy",
-      description: "deploy a service",
-      parameters: z.object({ env: z.string() }),
-      requireApproval: true,
-      execute: async ({ env }) => {
-        deployed++;
-        return `deployed to ${env}`;
-      },
-    });
+    let resumedToolContext: unknown;
+    const authorizedScopes: Array<{ readonly actor: string | null; readonly scope: unknown }> = [];
+    const deploy = {
+      ...tool({
+        name: "deploy",
+        description: "deploy a service",
+        parameters: z.object({ env: z.string() }),
+        requireApproval: true,
+        execute: async ({ env }, context) => {
+          deployed++;
+          resumedToolContext = context?.scope?.securityContext;
+          return `deployed to ${env}`;
+        },
+      }),
+      kind: "elevated" as const,
+    };
     const llm: LLMProvider = {
       chat: async ({ messages }) => {
         const last = messages[messages.length - 1];
@@ -58,18 +137,80 @@ describe("agent SSE — approval resume", () => {
             };
       },
     };
-    const { server, registry } = await bootAgents({ llm, tools: { deploy } });
+    const { server, registry, approvals } = await bootAgents({
+      llm,
+      tools: { deploy },
+      security: enterpriseApprovalSecurity(),
+      authorizeScope: ({ req, scope: checkedScope }) => {
+        authorizedScopes.push({ actor: req.headers.get("x-actor"), scope: checkedScope });
+        return true;
+      },
+      // Model a backend that can resume but cannot list pending approvals.
+      // Requester separation must be enforced from the preloaded durable row.
+      wrapAgent: (agent) => {
+        const wrap = (current: typeof agent): typeof agent =>
+          new Proxy(current, {
+            get(target, property, receiver) {
+              if (property === "withRetrieverAccess") {
+                return (...args: unknown[]) =>
+                  wrap(Reflect.apply(target.withRetrieverAccess, target, args));
+              }
+              if (property === "withScope") {
+                return (agentScope: unknown) => {
+                  const scoped = target.withScope(agentScope as never);
+                  return new Proxy(scoped, {
+                    get(scopedTarget, scopedProperty, scopedReceiver) {
+                      if (scopedProperty === "thread") {
+                        return async (...args: unknown[]) => {
+                          const thread = await scopedTarget.thread(...(args as [string, never]));
+                          return new Proxy(thread, {
+                            get(threadTarget, threadProperty, threadReceiver) {
+                              if (threadProperty === "pendingApprovals") return undefined;
+                              const value = Reflect.get(
+                                threadTarget,
+                                threadProperty,
+                                threadReceiver,
+                              );
+                              return typeof value === "function" ? value.bind(threadTarget) : value;
+                            },
+                          });
+                        };
+                      }
+                      const value = Reflect.get(scopedTarget, scopedProperty, scopedReceiver);
+                      return typeof value === "function" ? value.bind(scopedTarget) : value;
+                    },
+                  });
+                };
+              }
+              const value = Reflect.get(target, property, receiver);
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+        return wrap(agent);
+      },
+    });
     await registry.register({
       id: "deployer",
       backend: {
         ...localBackend,
-        role: { inline: { systemPrompt: "Deploys things", tools: ["deploy"] } },
+        role: {
+          inline: {
+            systemPrompt: "Deploys things",
+            tools: ["deploy"],
+            capabilities: ["elevated"],
+          },
+        },
       },
     });
 
     const first = await readSse(
       await server.handle(
-        req("POST", "/api/agents/deployer/threads/t1/stream", { task: "ship it", ...scope }),
+        req(
+          "POST",
+          "/api/agents/deployer/threads/t1/stream",
+          { task: "ship it", ...scope },
+          { "x-actor": "requester-sa" },
+        ),
       ),
     );
     const firstEvents = first.map((f) => f.event);
@@ -81,14 +222,58 @@ describe("agent SSE — approval resume", () => {
     expect(firstEvents).toContain("suspended");
     expect(firstEvents).not.toContain("finish");
     expect(deployed).toBe(0);
+    expect(
+      await approvals.get({
+        namespaceId: "ns",
+        agentId: "deployer",
+        resourceId: "alice",
+        threadId: "t1",
+        toolCallId: "call-1",
+      }),
+    ).toMatchObject({
+      elevated: true,
+      requestContext: {
+        actor: { kind: "service-account", id: "requester-sa" },
+        effective: { kind: "user", id: "alice" },
+      },
+    });
+
+    const selfApproval = await server.handle(
+      req(
+        "POST",
+        "/api/agents/deployer/threads/t1/approve",
+        { toolCallId: "call-1", approved: true, ...scope },
+        { "x-actor": "requester-sa" },
+      ),
+    );
+    expect(selfApproval.status).toBe(403);
+    expect(deployed).toBe(0);
+
+    for (const approved of [true, false]) {
+      const representedUserDecision = await server.handle(
+        req(
+          "POST",
+          "/api/agents/deployer/threads/t1/approve",
+          { toolCallId: "call-1", approved, ...scope },
+          { "x-actor": "alice" },
+        ),
+      );
+      expect(representedUserDecision.status).toBe(403);
+    }
+    expect(deployed).toBe(0);
 
     const resumed = await readSse(
       await server.handle(
-        req("POST", "/api/agents/deployer/threads/t1/approve", {
-          toolCallId: "call-1",
-          approved: true,
-          ...scope,
-        }),
+        req(
+          "POST",
+          "/api/agents/deployer/threads/t1/approve",
+          {
+            toolCallId: "call-1",
+            approved: true,
+            ...scope,
+          },
+          { "x-actor": "human-approver" },
+        ),
       ),
     );
     const resumedEvents = resumed.map((f) => f.event);
@@ -100,19 +285,187 @@ describe("agent SSE — approval resume", () => {
       finishReason: "stop",
     });
     expect(deployed).toBe(1);
+    expect(resumedToolContext).toEqual({
+      actor: { kind: "service-account", id: "requester-sa" },
+      effective: { kind: "user", id: "alice" },
+    });
+    expect(authorizedScopes).toContainEqual({
+      actor: "human-approver",
+      scope: {
+        namespaceId: "ns",
+        resourceId: "alice",
+        agentId: "deployer",
+      },
+    });
+    expect(
+      await approvals.get({
+        namespaceId: "ns",
+        agentId: "deployer",
+        resourceId: "alice",
+        threadId: "t1",
+        toolCallId: "call-1",
+      }),
+    ).toMatchObject({
+      decidedBy: "human-approver",
+      decidedByPrincipal: { kind: "user", id: "human-approver" },
+    });
+  });
+
+  it("rejects a replacement between route authorization and a backend without approval listing", async () => {
+    let deployed = 0;
+    let approvalStore: Awaited<ReturnType<typeof bootAgents>>["approvals"] | undefined;
+    const deploy = {
+      ...tool({
+        name: "deploy",
+        description: "deploy a service",
+        parameters: z.object({ env: z.string() }),
+        requireApproval: true,
+        execute: async () => {
+          deployed++;
+          return "deployed";
+        },
+      }),
+      kind: "elevated" as const,
+    };
+    const llm: LLMProvider = {
+      chat: async () => ({
+        content: null,
+        finishReason: "tool_calls",
+        toolCalls: [{ id: "call-race", name: "deploy", input: { env: "prod" } }],
+      }),
+    };
+    const booted = await bootAgents({
+      llm,
+      tools: { deploy },
+      security: enterpriseApprovalSecurity(),
+      wrapAgent: (agent) => {
+        const wrap = (current: typeof agent): typeof agent =>
+          new Proxy(current, {
+            get(target, property, receiver) {
+              if (property === "withRetrieverAccess") {
+                return (...args: unknown[]) =>
+                  wrap(Reflect.apply(target.withRetrieverAccess, target, args));
+              }
+              if (property === "withScope") {
+                return (agentScope: unknown) => {
+                  const scoped = target.withScope(agentScope as never);
+                  return new Proxy(scoped, {
+                    get(scopedTarget, scopedProperty, scopedReceiver) {
+                      if (scopedProperty === "thread") {
+                        return async (...args: unknown[]) => {
+                          const thread = await scopedTarget.thread(...(args as [string, never]));
+                          return new Proxy(thread, {
+                            get(threadTarget, threadProperty, threadReceiver) {
+                              if (threadProperty === "pendingApprovals") return undefined;
+                              const value = Reflect.get(
+                                threadTarget,
+                                threadProperty,
+                                threadReceiver,
+                              );
+                              if (
+                                threadProperty === "resumeStream" &&
+                                typeof value === "function"
+                              ) {
+                                return (...resumeArgs: unknown[]) => {
+                                  const store = approvalStore;
+                                  if (!store) throw new Error("approval store not initialized");
+                                  const key = {
+                                    namespaceId: "ns",
+                                    agentId: "deployer",
+                                    resourceId: "alice",
+                                    threadId: "t-race",
+                                    toolCallId: "call-race",
+                                  };
+                                  void store.markDelivered(key);
+                                  void store.record({
+                                    ...key,
+                                    workflowId: "replacement-workflow",
+                                    toolName: "deploy",
+                                    input: { env: "stage" },
+                                    elevated: true,
+                                    requestContext: {
+                                      actor: {
+                                        kind: "service-account",
+                                        id: "different-requester",
+                                      },
+                                    },
+                                  });
+                                  return Reflect.apply(value, threadTarget, resumeArgs);
+                                };
+                              }
+                              return typeof value === "function" ? value.bind(threadTarget) : value;
+                            },
+                          });
+                        };
+                      }
+                      const value = Reflect.get(scopedTarget, scopedProperty, scopedReceiver);
+                      return typeof value === "function" ? value.bind(scopedTarget) : value;
+                    },
+                  });
+                };
+              }
+              const value = Reflect.get(target, property, receiver);
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+        return wrap(agent);
+      },
+    });
+    approvalStore = booted.approvals;
+    await booted.registry.register({
+      id: "deployer",
+      backend: {
+        ...localBackend,
+        role: {
+          inline: {
+            systemPrompt: "Deploys things",
+            tools: ["deploy"],
+            capabilities: ["elevated"],
+          },
+        },
+      },
+    });
+
+    await readSse(
+      await booted.server.handle(
+        req(
+          "POST",
+          "/api/agents/deployer/threads/t-race/stream",
+          { task: "ship it", ...scope },
+          { "x-actor": "requester-sa" },
+        ),
+      ),
+    );
+    const resumed = await readSse(
+      await booted.server.handle(
+        req(
+          "POST",
+          "/api/agents/deployer/threads/t-race/approve",
+          { toolCallId: "call-race", approved: true, ...scope },
+          { "x-actor": "human-approver" },
+        ),
+      ),
+    );
+
+    expect(resumed).toContainEqual({ event: "error", data: { error: "approval_changed" } });
+    expect(resumed.map((frame) => frame.event)).not.toContain("finish");
+    expect(deployed).toBe(0);
   });
 });
 
 /** A deployer agent whose model asks to deploy on "ship it" and answers "hi" plainly. */
 async function bootDeployer() {
   let llmCalls = 0;
-  const deploy = tool({
-    name: "deploy",
-    description: "deploy a service",
-    parameters: z.object({ env: z.string() }),
-    requireApproval: true,
-    execute: async ({ env }) => `deployed to ${env}`,
-  });
+  const deploy = {
+    ...tool({
+      name: "deploy",
+      description: "deploy a service",
+      parameters: z.object({ env: z.string() }),
+      requireApproval: true,
+      execute: async ({ env }) => `deployed to ${env}`,
+    }),
+    kind: "elevated" as const,
+  };
   const llm: LLMProvider = {
     chat: async ({ messages }) => {
       llmCalls++;
@@ -133,7 +486,13 @@ async function bootDeployer() {
     id: "deployer",
     backend: {
       ...localBackend,
-      role: { inline: { systemPrompt: "Deploys things", tools: ["deploy"] } },
+      role: {
+        inline: {
+          systemPrompt: "Deploys things",
+          tools: ["deploy"],
+          capabilities: ["elevated"],
+        },
+      },
     },
   });
   return { ...booted, llmCalls: () => llmCalls };
@@ -179,8 +538,14 @@ describe("agent routes — pending-approval index", () => {
       ),
     );
     expect(
-      await approvals.get({ namespaceId: "ns", threadId: "t1", toolCallId: "call-1" }),
-    ).toMatchObject({ status: "approved", decidedBy: "alice" });
+      await approvals.get({
+        namespaceId: "ns",
+        agentId: "deployer",
+        resourceId: "alice",
+        threadId: "t1",
+        toolCallId: "call-1",
+      }),
+    ).toMatchObject({ status: "approved", decidedBy: "operator" });
     const after = await server.handle(
       req("GET", `/api/agents/deployer/threads/t1/approvals?${query}`),
     );
@@ -271,7 +636,13 @@ describe("agent routes — turn edge cases", () => {
         req("POST", "/api/agents/deployer/threads/t5/stream", { task: "ship it", ...scope }),
       ),
     );
-    const row = await approvals.get({ namespaceId: "ns", threadId: "t5", toolCallId: "call-1" });
+    const row = await approvals.get({
+      namespaceId: "ns",
+      agentId: "deployer",
+      resourceId: "alice",
+      threadId: "t5",
+      toolCallId: "call-1",
+    });
     const signals = await jsonOf<{ signals: Array<Record<string, unknown>> }>(
       await server.handle(req("GET", "/api/signals")),
     );
@@ -295,7 +666,15 @@ describe("agent routes — turn edge cases", () => {
     expect(token.status).toBe(409);
     expect((await jsonOf<{ error: string }>(token)).error).toBe("agent_approval");
     expect(
-      (await approvals.get({ namespaceId: "ns", threadId: "t5", toolCallId: "call-1" }))?.status,
+      (
+        await approvals.get({
+          namespaceId: "ns",
+          agentId: "deployer",
+          resourceId: "alice",
+          threadId: "t5",
+          toolCallId: "call-1",
+        })
+      )?.status,
     ).toBe("pending");
   });
 });

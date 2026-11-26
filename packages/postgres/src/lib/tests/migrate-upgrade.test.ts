@@ -6,6 +6,8 @@ import { postgresDescribe } from "../test-utils.ts";
 import { migrate } from "../migrate.ts";
 import { PgStepQueue } from "../pg-step-queue.ts";
 import { PostgresWorkflowStorage } from "../postgres-workflow-storage.ts";
+import { PostgresPendingApprovalStore } from "../agent/pending-approval-store.ts";
+import { PgSchedulerStorage } from "../pg-scheduler-storage.ts";
 
 // ---------------------------------------------------------------------------
 // A database that applied an earlier migration chain (the baseline alone, no
@@ -90,6 +92,11 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
   it("adds the retention index to a database at 0001, idempotently, and the sweep reads work", async () => {
     // Bring the database to the chain's state at 0001: everything through 0001 applied, 0002 not.
     await migrate(pg.db, { migrationsFolder: chainFolder(1) });
+    const retentionMigration = JSON.parse(
+      readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"),
+    ).entries.find((entry: { idx: number }) => entry.idx === 2) as { when: number };
+    await pg.sql`DELETE FROM drizzle.__drizzle_migrations
+      WHERE created_at >= ${retentionMigration.when}`;
     await pg.sql`DROP INDEX IF EXISTS wf_workflows_retention_idx`;
     const hasIndex = async () =>
       (await pg.sql`SELECT 1 FROM pg_indexes WHERE indexname = 'wf_workflows_retention_idx'`)
@@ -135,6 +142,180 @@ postgresDescribe("migrate() upgrades an existing database", {}, (pg) => {
     const claimed = await queue.claim({ workerId: "w", limit: 10 });
     expect(claimed.map((t) => t.workflowId).sort()).toEqual(["old-a", "old-c"]);
   });
+
+  it("adds nullable run security context to a database at 0004", async () => {
+    await migrate(pg.db, { migrationsFolder: chainFolder(4) });
+    const contextMigration = JSON.parse(
+      readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"),
+    ).entries.find((entry: { idx: number }) => entry.idx === 5) as { when: number };
+    await pg.sql`DELETE FROM drizzle.__drizzle_migrations
+      WHERE created_at >= ${contextMigration.when}`;
+    await pg.sql`ALTER TABLE wf_workflows DROP COLUMN IF EXISTS security_context`;
+    await pg.sql`INSERT INTO wf_workflows (workflow_id, workflow_name, input)
+      VALUES ('legacy-security-1', 'w', '{}'::jsonb)`;
+
+    await migrate(pg.db);
+    await migrate(pg.db);
+    const storage = await PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false });
+    expect((await storage.loadWorkflow("legacy-security-1"))?.securityContext).toBeUndefined();
+
+    await storage.createWorkflow({
+      workflowId: "secured-1",
+      workflowName: "w",
+      input: {},
+      securityContext: {
+        actor: { kind: "service-account", id: "sa-1" },
+        effective: { kind: "user", id: "user-7" },
+      },
+    });
+    expect((await storage.loadWorkflow("secured-1"))?.securityContext).toEqual({
+      actor: { kind: "service-account", id: "sa-1" },
+      effective: { kind: "user", id: "user-7" },
+    });
+  });
+
+  it("adds nullable schedule security context to a database at 0007", async () => {
+    await migrate(pg.db, { migrationsFolder: chainFolder(7) });
+    const contextMigration = JSON.parse(
+      readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"),
+    ).entries.find((entry: { idx: number }) => entry.idx === 8) as { when: number };
+    await pg.sql`DELETE FROM drizzle.__drizzle_migrations
+      WHERE created_at >= ${contextMigration.when}`;
+    await pg.sql`ALTER TABLE wf_schedules DROP COLUMN IF EXISTS security_context`;
+    await pg.sql`INSERT INTO wf_schedules (id, interval_ms, incarnation)
+      VALUES ('legacy-schedule', 60000, 'legacy-incarnation')`;
+
+    await migrate(pg.db);
+    await migrate(pg.db);
+    const storage = new PgSchedulerStorage({ db: pg.db });
+    expect((await storage.loadSchedule("legacy-schedule"))?.securityContext).toBeUndefined();
+
+    await storage.upsertSchedule({
+      id: "secured-schedule",
+      intervalMs: 60_000,
+      securityContext: {
+        actor: { kind: "service-account", id: "schedule-sa" },
+        effective: { kind: "user", id: "schedule-owner" },
+      },
+    });
+    expect((await storage.loadSchedule("secured-schedule"))?.securityContext).toEqual({
+      actor: { kind: "service-account", id: "schedule-sa" },
+      effective: { kind: "user", id: "schedule-owner" },
+    });
+  });
+
+  it("preserves legacy approvals as unknown while new rows are explicit", async () => {
+    await migrate(pg.db, { migrationsFolder: chainFolder(5) });
+    const approvalMigration = JSON.parse(
+      readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"),
+    ).entries.find((entry: { idx: number }) => entry.idx === 6) as { when: number };
+    await pg.sql`DELETE FROM drizzle.__drizzle_migrations
+      WHERE created_at >= ${approvalMigration.when}`;
+    await pg.sql`ALTER TABLE agent_pending_approval
+      DROP COLUMN IF EXISTS elevated, DROP COLUMN IF EXISTS request_context`;
+    await pg.sql`INSERT INTO agent_pending_approval
+      (namespace_id, thread_id, tool_call_id, workflow_id, tool_name, input, requested_at, status)
+      VALUES ('acme', 't', 'legacy', 'wf-old', 'deploy', '{}'::jsonb, 1, 'pending')`;
+
+    await migrate(pg.db);
+    const store = new PostgresPendingApprovalStore({ db: pg.db });
+    expect(
+      await store.get({
+        namespaceId: "acme",
+        agentId: null,
+        resourceId: null,
+        threadId: "t",
+        toolCallId: "legacy",
+      }),
+    ).toMatchObject({
+      elevated: null,
+      requestContext: null,
+    });
+    expect(
+      await store.record({
+        namespaceId: "acme",
+        agentId: "ops-bot",
+        resourceId: "alice",
+        threadId: "t",
+        toolCallId: "new",
+        workflowId: "wf-new",
+        toolName: "deploy",
+        input: {},
+        elevated: false,
+        requestContext: { actor: { kind: "user", id: "alice" } },
+      }),
+    ).toMatchObject({
+      elevated: false,
+      requestContext: { actor: { kind: "user", id: "alice" } },
+    });
+  });
+
+  it("migrates approval identity into the key without losing legacy rows", async () => {
+    await migrate(pg.db, { migrationsFolder: chainFolder(6) });
+    const scopeMigration = JSON.parse(
+      readFileSync(join(DRIZZLE, "meta", "_journal.json"), "utf8"),
+    ).entries.find((entry: { idx: number }) => entry.idx === 7) as { when: number };
+    await pg.sql`DELETE FROM drizzle.__drizzle_migrations
+      WHERE created_at >= ${scopeMigration.when}`;
+    await pg.sql`INSERT INTO agent_pending_approval
+      (namespace_id, thread_id, tool_call_id, workflow_id, tool_name, input,
+       elevated, request_context, requested_at, status)
+      VALUES ('acme', 'legacy-thread', 'same-call', 'wf-legacy', 'deploy', '{}'::jsonb,
+       NULL, NULL, 1, 'pending')`;
+
+    await migrate(pg.db);
+    await migrate(pg.db);
+    const store = new PostgresPendingApprovalStore({ db: pg.db });
+    expect(
+      await store.get({
+        namespaceId: "acme",
+        agentId: null,
+        resourceId: null,
+        threadId: "legacy-thread",
+        toolCallId: "same-call",
+      }),
+    ).toMatchObject({ workflowId: "wf-legacy", elevated: null, requestContext: null });
+
+    const base = {
+      namespaceId: "acme",
+      threadId: "shared",
+      toolCallId: "same-call",
+      toolName: "deploy",
+      input: {},
+      elevated: false,
+      requestContext: { actor: { kind: "user" as const, id: "alice" } },
+    };
+    await store.record({
+      ...base,
+      agentId: "ops-bot",
+      resourceId: "alice",
+      workflowId: "wf-alice",
+    });
+    await store.record({
+      ...base,
+      agentId: "other-bot",
+      resourceId: "bob",
+      workflowId: "wf-bob",
+    });
+    expect(
+      await store.get({
+        namespaceId: "acme",
+        agentId: "ops-bot",
+        resourceId: "alice",
+        threadId: "shared",
+        toolCallId: "same-call",
+      }),
+    ).toMatchObject({ workflowId: "wf-alice" });
+    expect(
+      await store.get({
+        namespaceId: "acme",
+        agentId: "other-bot",
+        resourceId: "bob",
+        threadId: "shared",
+        toolCallId: "same-call",
+      }),
+    ).toMatchObject({ workflowId: "wf-bob" });
+  });
 });
 
 const TIMER_SCAN_INDEXES = [
@@ -161,6 +342,10 @@ postgresDescribe(
       await migrate(pg.db, { migrationsFolder: chainFolder(3) });
       expect(await present()).toEqual([]);
 
+      // The current storage adapter also selects the later security-context
+      // column; add it without recording its migration so this test can keep
+      // exercising the pre-index database shape.
+      await pg.sql`ALTER TABLE wf_workflows ADD COLUMN IF NOT EXISTS security_context jsonb`;
       const storage = await PostgresWorkflowStorage.create({ db: pg.db, autoSeedLookups: false });
       for (const workflowId of ["old-a", "old-b", "old-c"]) {
         await storage.createWorkflow({ workflowId, workflowName: "w", input: {} });

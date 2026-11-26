@@ -24,10 +24,14 @@
 // ---------------------------------------------------------------------------
 
 import type { Message, ToolCall } from "../message.ts";
-import type { PendingApproval } from "../approvals/pending-approval-store.ts";
+import type {
+  PendingApproval,
+  PendingApprovalBoundary,
+} from "../approvals/pending-approval-store.ts";
 import type { ApprovalDecision } from "../tool.ts";
 import type { CompactThreadOptions, DistillThreadOptions } from "../memory/consolidator.ts";
 import type { EpisodicRecord } from "../memory/types.ts";
+import type { RunSecurityContext } from "@promin/workflow";
 
 /** Streaming + resolved view of one agent run. */
 export interface AgentRunOutput<Output = unknown> {
@@ -148,6 +152,8 @@ export interface AgentInvokeOpts {
   readonly namespaceId?: string;
   /** Free-form metadata that adapters may surface back on events. */
   readonly metadata?: Readonly<Record<string, unknown>>;
+  /** Durable initiating identity for unattended one-shot runs. */
+  readonly securityContext?: RunSecurityContext;
   /**
    * Deterministic identity for this run. Backends map this to their own
    * primitive (durable agents → workflow id; remote agents → forwarded as
@@ -181,6 +187,14 @@ export interface AgentInvokeOpts {
 }
 
 /**
+ * Resume-only options. Gateways pass the immutable approval boundary they
+ * authorized so a backend cannot decide a replacement that arrived later.
+ */
+export interface ApprovalResumeOpts extends AgentInvokeOpts {
+  readonly expectedApproval?: PendingApprovalBoundary;
+}
+
+/**
  * Thread-metadata key holding the id of the agent that owns the thread.
  * `LocalAgent` stamps it on every thread it creates (from
  * `LocalAgentConfig.agentId`) and keeps it across `setMetadata`, so a
@@ -198,6 +212,8 @@ export interface ThreadOptions {
   readonly resourceId?: string;
   /** Tenant key — wires to `MemoryStore` namespace layer. Defaults to the agent's bound namespace. */
   readonly namespaceId?: string;
+  /** Durable initiating identity for newly-created turns on this thread. */
+  readonly securityContext?: RunSecurityContext;
   /** Default `true`. When `false`, refuses to create a thread that doesn't exist. */
   readonly createIfMissing?: boolean;
   /**
@@ -398,7 +414,7 @@ export interface AgentThread<Input = AgentInput, Output = unknown> {
   resume?(
     callId: string,
     decision: ApprovalDecision,
-    opts?: AgentInvokeOpts,
+    opts?: ApprovalResumeOpts,
   ): Promise<AgentRunOutput<Output>>;
   /**
    * Approvals this thread's turns are suspended on, oldest first — lets a
@@ -418,7 +434,7 @@ export interface AgentThread<Input = AgentInput, Output = unknown> {
   resumeStream?(
     callId: string,
     decision: ApprovalDecision,
-    opts?: AgentInvokeOpts,
+    opts?: ApprovalResumeOpts,
   ): AgentRunOutput<Output>;
 
   /** Read the persisted message history (paginated). */

@@ -2,11 +2,11 @@
 // `McpClientPool` — shared MCP connections, isolated per tenant.
 //
 // A client is keyed by a hash of the full server config, the tenant
-// namespace and the resolved credential. Two recipes (or two tenants) that
-// both call their server "github" therefore never share a connection, a
-// spawned process, a token or a schema validator, while repeated calls
-// under the same (config, namespace, credential) reuse one connection.
-// When a server's credential for a namespace changes, the client holding
+// namespace/resource, the scope where its credential resolved and the
+// credential itself. Two recipes (or two callers) that both call their
+// server "github" therefore never share a connection across a resource
+// boundary, while repeated calls under the same complete scope reuse one.
+// When a server's credential for a caller scope changes, the client holding
 // the old one is closed once it is idle.
 //
 // Each client runs at most `maxConcurrentCalls` calls at once; the rest
@@ -59,10 +59,10 @@ export interface McpClientPoolConfig {
   readonly connect?: McpConnect;
 }
 
-/** The pool's view of one server for one tenant and credential. */
+/** The pool's view of one server for one caller scope and credential. */
 export interface McpServerHandle {
   readonly server: McpServerConfig;
-  /** Pool key: hash of server config, namespace and credential. */
+  /** Pool key: hash of server config, caller scope and credential. */
   readonly key: string;
   listTools(options?: McpCallOptions): Promise<McpToolDefinition[]>;
   callTool(params: {
@@ -96,7 +96,7 @@ const MAX_GROUPS = 10_000;
 
 interface PoolEntry {
   readonly key: string;
-  /** Hash of server config, namespace and credential scope: entries differing only in credential. */
+  /** Hash of server config and caller scope: entries differing only in credential. */
   readonly group: string;
   readonly server: McpServerConfig;
   readonly credential: string | undefined;
@@ -142,19 +142,20 @@ export class McpClientPool {
   }
 
   /**
-   * The handle for `server` under tenant `namespaceId` with `credential`
-   * (the resolved `credentialRef`, if any), freshly resolved at
-   * `credentialScope` (an opaque id of the scope it was found at, e.g.
+   * The handle for `server` under caller `namespaceId` / `resourceId` with
+   * `credential` (the resolved `credentialRef`, if any), freshly resolved
+   * at `credentialScope` (an opaque id of the scope it was found at, e.g.
    * `resource:u-1`). Cheap: nothing connects until the first call.
    *
-   * A credential for the same server, namespace and credential scope that
-   * differs from the last one handed in is a rotation: clients holding the
-   * old one are closed once idle, and older handles fail with
+   * A credential for the same server and complete caller scope that differs
+   * from the last one handed in is a rotation: clients holding the old one
+   * are closed once idle, and older handles fail with
    * `McpCredentialRotatedError` instead of reconnecting with it.
    */
   server(params: {
     readonly server: McpServerConfig;
     readonly namespaceId?: string;
+    readonly resourceId?: string;
     readonly credential?: string;
     readonly credentialScope?: string;
   }): McpServerHandle {
@@ -234,7 +235,7 @@ export class McpClientPool {
     return entry;
   }
 
-  /** A new credential for the same server, namespace and credential scope: drop the old clients. */
+  /** A new credential for the same server and caller scope: drop the old clients. */
   private retireGroup(params: { group: string; keep: string }): void {
     for (const entry of this.entries.values()) {
       if (entry.group !== params.group || entry.key === params.keep) continue;
@@ -352,18 +353,22 @@ async function closeEntry(entry: PoolEntry): Promise<void> {
   await client?.close();
 }
 
-/** Pool key for a server config under a tenant namespace and credential. */
+/** Pool key for a server config under a caller scope and credential. */
 export function mcpPoolKey(params: {
   readonly server: McpServerConfig;
   readonly namespaceId?: string;
+  readonly resourceId?: string;
   readonly credential?: string;
+  readonly credentialScope?: string;
 }): string {
   return createHash("sha256")
     .update(
       canonicalJson({
         server: params.server,
         namespaceId: params.namespaceId ?? null,
+        resourceId: params.resourceId ?? null,
         credential: params.credential ?? null,
+        credentialScope: params.credentialScope ?? null,
       }),
     )
     .digest("hex");
@@ -373,6 +378,7 @@ export function mcpPoolKey(params: {
 function mcpGroupKey(params: {
   readonly server: McpServerConfig;
   readonly namespaceId?: string;
+  readonly resourceId?: string;
   readonly credentialScope?: string;
 }): string {
   return createHash("sha256")
@@ -380,6 +386,7 @@ function mcpGroupKey(params: {
       canonicalJson({
         server: params.server,
         namespaceId: params.namespaceId ?? null,
+        resourceId: params.resourceId ?? null,
         credentialScope: params.credentialScope ?? null,
         group: true,
       }),

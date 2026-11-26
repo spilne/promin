@@ -61,6 +61,36 @@ describe("storage handler allow", () => {
     expect(seen).toEqual(["loadWorkflow:worker"]);
   });
 
+  it("runs decoded parameter-aware authorization before touching storage", async () => {
+    const backing = new InMemoryWorkflowStorage();
+    let loaded = false;
+    const original = backing.loadWorkflow.bind(backing);
+    backing.loadWorkflow = async (workflowId) => {
+      loaded = true;
+      return original(workflowId);
+    };
+    const seen: unknown[] = [];
+    const handler = createWorkflowStorageHandler(backing, {
+      authorize: async ({ method, params, req }) => {
+        seen.push({ method, params, role: req.headers.get("x-role") });
+        return false;
+      },
+    });
+    const res = await handler(
+      new Request("http://x/storage", {
+        method: "POST",
+        headers: { "x-role": "worker" },
+        body: JSON.stringify({ method: "loadWorkflow", params: { workflowId: "secret" } }),
+      }),
+    );
+
+    expect(res.status).toBe(403);
+    expect(loaded).toBe(false);
+    expect(seen).toEqual([
+      { method: "loadWorkflow", params: { workflowId: "secret" }, role: "worker" },
+    ]);
+  });
+
   it("answers 404, not a prototype lookup, for inherited names", async () => {
     const handler = createWorkflowStorageHandler(new InMemoryWorkflowStorage());
     const res = await handler(

@@ -8,6 +8,8 @@ import { ApiError, api } from "../client.ts";
 
 const realFetch = globalThis.fetch;
 const realStorage = (globalThis as { localStorage?: unknown }).localStorage;
+const realDocument = (globalThis as { document?: unknown }).document;
+const realLocation = (globalThis as { location?: unknown }).location;
 
 function stub(handler: (req: Request) => Response): Request[] {
   const seen: Request[] = [];
@@ -23,6 +25,8 @@ function stub(handler: (req: Request) => Response): Request[] {
 afterEach(() => {
   globalThis.fetch = realFetch;
   (globalThis as { localStorage?: unknown }).localStorage = realStorage;
+  (globalThis as { document?: unknown }).document = realDocument;
+  (globalThis as { location?: unknown }).location = realLocation;
 });
 
 describe("ApiError", () => {
@@ -55,6 +59,17 @@ describe("api", () => {
     expect(res).toEqual({ workflowId: "r-1" });
     expect(seen[0]!.method).toBe("POST");
     expect(new URL(seen[0]!.url).pathname).toBe("/api/workflows/mark-success/runs");
+  });
+
+  it("copies the readable session CSRF cookie into mutation requests", async () => {
+    (globalThis as { document?: unknown }).document = {
+      cookie: "theme=dark; zorya_csrf=session-bound-token",
+    };
+    (globalThis as { location?: unknown }).location = { protocol: "http:" };
+    const seen = stub(() => Response.json({ workflowId: "r-1" }, { status: 202 }));
+
+    await api.triggerWorkflow("csrf", { input: {} });
+    expect(seen[0]!.headers.get("x-zorya-csrf")).toBe("session-bound-token");
   });
 
   it("sends inbox decisions with ifAbsent and surfaces a 409 as an ApiError code", async () => {

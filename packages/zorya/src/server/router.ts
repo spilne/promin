@@ -13,16 +13,117 @@
 // `Allow` header; the static fallback only sees paths no route matches.
 // ---------------------------------------------------------------------------
 
+import {
+  SECURITY_ACTIONS,
+  type PrincipalRef,
+  type SecurityPermissionFor,
+  type SecurityResourceKind,
+  type SecurityResourceRef,
+} from "./security/security.ts";
+
 export type Handler = (
   req: Request,
   params: Record<string, string>,
 ) => Response | Promise<Response>;
 
+export interface RouteTarget<K extends SecurityResourceKind = SecurityResourceKind> {
+  readonly resource: SecurityResourceRef<K>;
+  /** A resolver may preload the protected object so the handler need not read it twice. */
+  readonly value?: unknown;
+}
+
+/** A target that selects one permission from a route's declared allowlist. */
+export interface DynamicRouteTarget<
+  K extends SecurityResourceKind = SecurityResourceKind,
+> extends RouteTarget<K> {
+  readonly permission: SecurityPermissionFor<K>;
+}
+
+export interface RouteTargetRequest {
+  readonly request: Request;
+  readonly params: Readonly<Record<string, string>>;
+}
+
+export type RouteTargetResolver<K extends SecurityResourceKind> = (
+  request: RouteTargetRequest,
+) => RouteTarget<K> | Promise<RouteTarget<K>>;
+
+export type DynamicRouteTargetResolver<K extends SecurityResourceKind> = (
+  request: RouteTargetRequest,
+) => DynamicRouteTarget<K> | Promise<DynamicRouteTarget<K>>;
+
+/** A protected declaration keeps its permission and resolved resource kind correlated. */
+export type ProtectedRouteAccess = {
+  readonly [K in SecurityResourceKind]:
+    | {
+        readonly kind: "protected";
+        readonly permission: SecurityPermissionFor<K>;
+        readonly resolveTarget: RouteTargetResolver<K>;
+      }
+    | {
+        readonly kind: "protected";
+        readonly permissions: readonly [SecurityPermissionFor<K>, ...SecurityPermissionFor<K>[]];
+        readonly resolveTarget: DynamicRouteTargetResolver<K>;
+      };
+}[SecurityResourceKind];
+
+/**
+ * Every declared route is either protected by RBAC or names the other
+ * credential boundary that admits it. Nothing is implicitly public.
+ */
+export type RouteAccess =
+  | ProtectedRouteAccess
+  | {
+      readonly kind: "public";
+      readonly purpose: "lifecycle" | "login" | "static-ui" | "not-found";
+    }
+  | { readonly kind: "worker" }
+  | { readonly kind: "signed-webhook" }
+  | { readonly kind: "signal-token" };
+
+export type ResolvedProtectedRouteAccess = {
+  readonly [K in SecurityResourceKind]: {
+    readonly kind: "protected";
+    readonly permission: SecurityPermissionFor<K>;
+    readonly target: RouteTarget<K>;
+  };
+}[SecurityResourceKind];
+
+export type ResolvedRouteAccess =
+  | ResolvedProtectedRouteAccess
+  | Exclude<RouteAccess, ProtectedRouteAccess>;
+
+export type DeclaredRouteHandler = (
+  req: Request,
+  params: Record<string, string>,
+  access: ResolvedRouteAccess,
+) => Response | Promise<Response>;
+
+export interface RouteDefinition {
+  readonly method: string;
+  readonly path: string;
+  readonly access: RouteAccess;
+  readonly handler: DeclaredRouteHandler;
+}
+
+export interface RouteAccessGuardRequest {
+  readonly request: Request;
+  readonly params: Readonly<Record<string, string>>;
+  readonly access: ResolvedRouteAccess;
+}
+
+/** Adapter-neutral admission hook run after target resolution and before a declared handler. */
+export type RouteAccessGuard = (
+  request: RouteAccessGuardRequest,
+) => Response | undefined | Promise<Response | undefined>;
+
 interface CompiledRoute {
   method: string;
+  pattern: string;
   regex: RegExp;
   keys: string[];
-  handler: Handler;
+  handler: Handler | DeclaredRouteHandler;
+  access?: RouteAccess;
 }
 
 /** Sink for errors the crash barrier catches. */
@@ -33,6 +134,8 @@ export interface RouterErrorLogger {
 export interface RouterConfig {
   /** Where unexpected handler errors are reported. Default: console. */
   logger?: RouterErrorLogger;
+  /** Admission policy for routes carrying explicit access metadata. */
+  accessGuard?: RouteAccessGuard;
 }
 
 /**
@@ -68,21 +171,66 @@ export interface ApiIssue {
 export class Router {
   private readonly routes: CompiledRoute[] = [];
   private readonly logger: RouterErrorLogger;
-  private staticHandler?: Handler;
-  private notFoundHandler: Handler = () => notFound();
+  private readonly accessGuard?: RouteAccessGuard;
+  private staticHandler?: Handler | DeclaredRouteHandler;
+  private staticAccess?: RouteAccess;
+  private notFoundHandler: Handler | DeclaredRouteHandler = () => notFound();
+  private notFoundAccess?: RouteAccess;
+  private hasCustomNotFound = false;
 
   constructor(config: RouterConfig = {}) {
     this.logger = config.logger ?? console;
+    this.accessGuard = config.accessGuard;
   }
 
-  add(method: string, pattern: string, handler: Handler): this {
-    const keys: string[] = [];
-    const regexSrc = pattern.replace(/:([^/]+)/g, (_m, k) => {
-      keys.push(k);
-      return "([^/]+)";
+  /**
+   * Register a route with mandatory, runtime-validated access metadata.
+   * New production routes should use this API.
+   */
+  route(definition: RouteDefinition): this {
+    const normalized = normalizeRouteDefinition(definition);
+    return this.compile({
+      method: normalized.method,
+      pattern: normalized.path,
+      handler: normalized.handler,
+      access: normalized.access,
     });
-    const regex = new RegExp(`^${regexSrc}$`);
-    this.routes.push({ method: method.toUpperCase(), regex, keys, handler });
+  }
+
+  /** Exact method/path registration check used to reject extension collisions. */
+  hasRoute(method: string, pattern: string): boolean {
+    const normalized = method.toUpperCase();
+    return this.routes.some((route) => route.method === normalized && route.pattern === pattern);
+  }
+
+  /**
+   * Compatibility registration for route groups not migrated yet. It is
+   * deliberately visible to `uncoveredRoutes`/`assertSecurityCoverage`.
+   */
+  addLegacy(method: string, pattern: string, handler: Handler): this {
+    return this.compile({ method, pattern, handler });
+  }
+
+  /** @deprecated Migrate to `route`; this registration is reported as uncovered. */
+  add(method: string, pattern: string, handler: Handler): this {
+    return this.addLegacy(method, pattern, handler);
+  }
+
+  private compile(params: {
+    readonly method: string;
+    readonly pattern: string;
+    readonly handler: Handler | DeclaredRouteHandler;
+    readonly access?: RouteAccess;
+  }): this {
+    const { keys, regex } = compileRoutePattern(params.pattern);
+    this.routes.push({
+      method: params.method.toUpperCase(),
+      pattern: params.pattern,
+      regex,
+      keys,
+      handler: params.handler,
+      ...(params.access !== undefined && { access: params.access }),
+    });
     return this;
   }
 
@@ -102,14 +250,51 @@ export class Router {
     return this.add("PUT", pattern, handler);
   }
 
+  /** Sorted route identities still using compatibility registration. */
+  uncoveredRoutes(): ReadonlyArray<string> {
+    const routes = this.routes
+      .filter((route) => route.access === undefined)
+      .map((route) => `${route.method} ${route.pattern}`);
+    if (this.staticHandler && this.staticAccess === undefined) routes.push("STATIC *");
+    if (this.hasCustomNotFound && this.notFoundAccess === undefined) routes.push("NOT_FOUND *");
+    return routes.sort();
+  }
+
+  /** Refuse startup once strict coverage is enabled and any route is undeclared. */
+  assertSecurityCoverage(): void {
+    const uncovered = this.uncoveredRoutes();
+    if (uncovered.length === 0) return;
+    throw new Error(`Routes missing access declarations:\n${uncovered.join("\n")}`);
+  }
+
   /** Fallback handler when no route matches (e.g. to serve static UI). */
   setStatic(handler: Handler): this {
     this.staticHandler = handler;
+    this.staticAccess = undefined;
+    return this;
+  }
+
+  /** Declared static fallback; normally explicit public `static-ui` access. */
+  setStaticRoute(access: RouteAccess, handler: DeclaredRouteHandler): this {
+    const normalized = normalizeDeclaredFallback({ access, handler });
+    this.staticHandler = normalized.handler;
+    this.staticAccess = normalized.access;
     return this;
   }
 
   setNotFound(handler: Handler): this {
     this.notFoundHandler = handler;
+    this.notFoundAccess = undefined;
+    this.hasCustomNotFound = true;
+    return this;
+  }
+
+  /** Declared custom fallback for paths that match no route. */
+  setNotFoundRoute(access: RouteAccess, handler: DeclaredRouteHandler): this {
+    const normalized = normalizeDeclaredFallback({ access, handler });
+    this.notFoundHandler = normalized.handler;
+    this.notFoundAccess = normalized.access;
+    this.hasCustomNotFound = true;
     return this;
   }
 
@@ -131,18 +316,276 @@ export class Router {
         allowed.add(r.method);
         continue;
       }
-      const params: Record<string, string> = {};
+      const params = emptyRouteParams();
       for (let i = 0; i < r.keys.length; i++) {
         const decoded = safeDecode(m[i + 1]!);
         if (decoded === undefined) return badRequest("bad_path", "Malformed URL encoding");
         params[r.keys[i]!] = decoded;
       }
-      return await r.handler(req, params);
+      if (r.access === undefined) return await (r.handler as Handler)(req, params);
+      const access = await resolveRouteAccess({
+        access: r.access,
+        request: req,
+        params,
+      });
+      const denied = await this.guardDeclaredRoute({ request: req, params, access });
+      if (denied) return denied;
+      return await (r.handler as DeclaredRouteHandler)(req, params, access);
     }
     if (allowed.size > 0) return methodNotAllowed([...allowed]);
-    if (this.staticHandler) return await this.staticHandler(req, {});
-    return await this.notFoundHandler(req, {});
+    if (this.staticHandler) {
+      const params = emptyRouteParams();
+      if (this.staticAccess === undefined) {
+        return await (this.staticHandler as Handler)(req, params);
+      }
+      const access = await resolveRouteAccess({
+        access: this.staticAccess,
+        request: req,
+        params,
+      });
+      const denied = await this.guardDeclaredRoute({ request: req, params, access });
+      if (denied) return denied;
+      return await (this.staticHandler as DeclaredRouteHandler)(req, params, access);
+    }
+    const params = emptyRouteParams();
+    if (this.notFoundAccess === undefined) {
+      return await (this.notFoundHandler as Handler)(req, params);
+    }
+    const access = await resolveRouteAccess({
+      access: this.notFoundAccess,
+      request: req,
+      params,
+    });
+    const denied = await this.guardDeclaredRoute({ request: req, params, access });
+    if (denied) return denied;
+    return await (this.notFoundHandler as DeclaredRouteHandler)(req, params, access);
   }
+
+  private async guardDeclaredRoute(
+    request: RouteAccessGuardRequest,
+  ): Promise<Response | undefined> {
+    if (!this.accessGuard) return undefined;
+    const result = await this.accessGuard(request);
+    if (result === undefined || result instanceof Response) return result;
+    throw new TypeError("Route access guard must return a Response or undefined");
+  }
+}
+
+function normalizeRouteDefinition(definition: RouteDefinition): RouteDefinition {
+  if (!definition || typeof definition !== "object") {
+    throw new TypeError("Route definition must be an object");
+  }
+  const source = definition as unknown as Record<string, unknown>;
+  const method = source.method;
+  const path = source.path;
+  const handler = source.handler;
+  const access = source.access;
+  if (typeof method !== "string" || method.length === 0) {
+    throw new TypeError("Route definition requires a method");
+  }
+  if (typeof path !== "string" || !path.startsWith("/")) {
+    throw new TypeError("Route definition requires an absolute path");
+  }
+  if (typeof handler !== "function") {
+    throw new TypeError("Route definition requires a handler");
+  }
+  return Object.freeze({
+    method,
+    path,
+    handler: handler as DeclaredRouteHandler,
+    access: normalizeRouteAccess(access as RouteAccess),
+  });
+}
+
+function normalizeDeclaredFallback(params: {
+  readonly access: RouteAccess;
+  readonly handler: DeclaredRouteHandler;
+}): { readonly access: RouteAccess; readonly handler: DeclaredRouteHandler } {
+  const handler = params.handler;
+  const access = params.access;
+  if (typeof handler !== "function") {
+    throw new TypeError("Declared fallback requires a handler");
+  }
+  const normalizedAccess = normalizeRouteAccess(access);
+  return Object.freeze({ access: normalizedAccess, handler });
+}
+
+function normalizeRouteAccess(access: RouteAccess): RouteAccess {
+  if (!access || typeof access !== "object") {
+    throw new TypeError("Route definition requires access metadata");
+  }
+  const source = access as unknown as Record<string, unknown>;
+  const kind = source.kind;
+  if (typeof kind !== "string") {
+    throw new TypeError("Route definition requires access metadata");
+  }
+  if (kind === "protected") {
+    const permissionSource = source.permission;
+    const permissionsSource = source.permissions;
+    const resolveTarget = source.resolveTarget;
+    if (typeof resolveTarget !== "function") {
+      throw new TypeError("Protected route requires a target resolver");
+    }
+    if (permissionSource !== undefined && permissionsSource !== undefined) {
+      throw new TypeError("Protected route cannot declare both permission forms");
+    }
+    if (permissionSource !== undefined) {
+      const permission = normalizeSecurityPermission(permissionSource);
+      return Object.freeze({
+        kind,
+        permission,
+        resolveTarget: resolveTarget as ProtectedRouteAccess["resolveTarget"],
+      }) as ProtectedRouteAccess;
+    }
+    if (!Array.isArray(permissionsSource) || permissionsSource.length === 0) {
+      throw new TypeError("Protected route requires a permission");
+    }
+    const permissions = Object.freeze(permissionsSource.map(normalizeSecurityPermission));
+    const resource = permissions[0]!.resource;
+    if (permissions.some((permission) => permission.resource !== resource)) {
+      throw new TypeError("Protected route dynamic permissions must share one resource");
+    }
+    return Object.freeze({
+      kind,
+      permissions,
+      resolveTarget: resolveTarget as ProtectedRouteAccess["resolveTarget"],
+    }) as ProtectedRouteAccess;
+  }
+  if (kind === "public") {
+    const purpose = source.purpose;
+    const normalized = Object.freeze({ kind, purpose });
+    if (
+      !(["lifecycle", "login", "static-ui", "not-found"] as ReadonlyArray<unknown>).includes(
+        purpose,
+      )
+    ) {
+      throw new TypeError("Public route requires an approved purpose");
+    }
+    return normalized as RouteAccess;
+  }
+  const normalized = Object.freeze({ kind });
+  if (kind !== "worker" && kind !== "signed-webhook" && kind !== "signal-token") {
+    throw new TypeError("Unknown route access kind");
+  }
+  return normalized as RouteAccess;
+}
+
+function normalizeSecurityPermission(source: unknown) {
+  if (!source || typeof source !== "object") {
+    throw new TypeError("Protected route requires a permission");
+  }
+  const record = source as Record<string, unknown>;
+  const resource = record.resource;
+  const action = record.action;
+  const actions =
+    typeof resource === "string" && Object.hasOwn(SECURITY_ACTIONS, resource)
+      ? SECURITY_ACTIONS[resource as SecurityResourceKind]
+      : undefined;
+  if (!actions?.includes(action as never)) {
+    throw new TypeError("Protected route permission is not in the approved vocabulary");
+  }
+  return Object.freeze({ resource, action }) as SecurityPermissionFor<SecurityResourceKind>;
+}
+
+async function resolveRouteAccess(params: {
+  readonly access: RouteAccess;
+  readonly request: Request;
+  readonly params: Readonly<Record<string, string>>;
+}): Promise<ResolvedRouteAccess> {
+  if (params.access.kind !== "protected") return params.access;
+  const target = await params.access.resolveTarget({
+    request: params.request,
+    params: params.params,
+  });
+  if (!target || typeof target !== "object") {
+    throw new Error("Protected route target does not match its permission");
+  }
+  const targetRecord = target as unknown as Record<string, unknown>;
+  const permission =
+    "permission" in params.access
+      ? params.access.permission
+      : normalizeSecurityPermission(targetRecord.permission);
+  if (
+    "permissions" in params.access &&
+    !params.access.permissions.some(
+      (allowed) => allowed.resource === permission.resource && allowed.action === permission.action,
+    )
+  ) {
+    throw new Error("Protected route selected an undeclared permission");
+  }
+  const resourceSource = targetRecord.resource;
+  const value = targetRecord.value;
+  if (!resourceSource || typeof resourceSource !== "object") {
+    throw new Error("Protected route target does not match its permission");
+  }
+  const resourceRecord = resourceSource as Record<string, unknown>;
+  const kind = resourceRecord.kind;
+  const namespaceId = resourceRecord.namespaceId;
+  const id = resourceRecord.id;
+  const principalSource = resourceRecord.principal;
+  const principalRecord =
+    principalSource !== null && typeof principalSource === "object"
+      ? (principalSource as Record<string, unknown>)
+      : undefined;
+  const principalKind = principalRecord?.kind;
+  const principalId = principalRecord?.id;
+  const resourceSnapshot = { kind, namespaceId, id, principalSource };
+  const targetSnapshot = { resource: resourceSnapshot, value };
+  if (
+    resourceSnapshot.kind !== permission.resource ||
+    typeof resourceSnapshot.namespaceId !== "string" ||
+    resourceSnapshot.namespaceId.length === 0 ||
+    (resourceSnapshot.id !== undefined &&
+      (typeof resourceSnapshot.id !== "string" || resourceSnapshot.id.length === 0)) ||
+    (resourceSnapshot.principalSource !== undefined &&
+      (!principalRecord ||
+        typeof principalKind !== "string" ||
+        typeof principalId !== "string" ||
+        principalId.length === 0))
+  ) {
+    throw new Error("Protected route target does not match its permission");
+  }
+  const normalizedResource = Object.freeze({
+    kind: resourceSnapshot.kind,
+    namespaceId: resourceSnapshot.namespaceId,
+    ...(resourceSnapshot.id !== undefined && { id: resourceSnapshot.id }),
+    ...(principalRecord !== undefined && {
+      principal: Object.freeze({ kind: principalKind, id: principalId }) as PrincipalRef,
+    }),
+  });
+  const normalizedTarget = Object.freeze({
+    resource: normalizedResource,
+    ...(targetSnapshot.value !== undefined && { value: targetSnapshot.value }),
+  });
+  return Object.freeze({
+    kind: "protected",
+    permission,
+    target: normalizedTarget,
+  }) as ResolvedProtectedRouteAccess;
+}
+
+const UNSAFE_ROUTE_PARAM_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+
+function compileRoutePattern(pattern: string): { readonly keys: string[]; readonly regex: RegExp } {
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  const regexSrc = pattern.replace(/:([^/]+)/g, (_match, key: string) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new TypeError("Invalid route parameter name: " + key);
+    }
+    if (UNSAFE_ROUTE_PARAM_KEYS.has(key)) {
+      throw new TypeError("Unsafe route parameter name: " + key);
+    }
+    if (seen.has(key)) throw new TypeError("Duplicate route parameter name: " + key);
+    seen.add(key);
+    keys.push(key);
+    return "([^/]+)";
+  });
+  return { keys, regex: new RegExp("^" + regexSrc + "$") };
+}
+
+function emptyRouteParams(): Record<string, string> {
+  return Object.create(null) as Record<string, string>;
 }
 
 /**
@@ -236,8 +679,14 @@ export function accepted(body: unknown, location?: string): Response {
 /** 405 naming the methods the path does accept. */
 export function methodNotAllowed(allow: ReadonlyArray<string>): Response {
   return new Response(
-    JSON.stringify({ error: "method_not_allowed", message: `Allowed: ${allow.join(", ")}` }),
-    { status: 405, headers: { "content-type": "application/json", allow: allow.join(", ") } },
+    JSON.stringify({
+      error: "method_not_allowed",
+      message: `Allowed: ${allow.join(", ")}`,
+    }),
+    {
+      status: 405,
+      headers: { "content-type": "application/json", allow: allow.join(", ") },
+    },
   );
 }
 

@@ -15,9 +15,11 @@ import {
   type WorkflowRunner,
 } from "@promin/workflow";
 import { ZoryaServer } from "../../server.ts";
+import { sendSignal } from "../runs.ts";
 import { LocalWorkflows, QueuedWorkflows } from "../../services/workflows/index.ts";
 import { InMemoryWorkflowAdvertisementRegistry } from "@promin/workflow/distributed";
 import { InMemoryWorkflowStartQueue } from "@promin/workflow/distributed";
+import { invoke } from "./invoke-handler.ts";
 
 /** Yield to the event loop until `predicate` holds, bounded by iterations. */
 async function until(predicate: () => boolean | Promise<boolean>): Promise<void> {
@@ -76,14 +78,21 @@ describe("POST /api/workflows/:name/runs — existing workflowId", () => {
     const charge = counted("charge");
     const { post, status, storage } = setup({ charge: charge.wf });
 
-    const first = await post("/api/workflows/charge/runs", { workflowId: "order-42" });
+    const first = await post("/api/workflows/charge/runs", {
+      workflowId: "order-42",
+    });
     expect(first.status).toBe(202);
     expect(await first.json()).toEqual({ workflowId: "order-42" });
     await until(async () => (await status("order-42")) === "completed");
 
-    const retry = await post("/api/workflows/charge/runs", { workflowId: "order-42" });
+    const retry = await post("/api/workflows/charge/runs", {
+      workflowId: "order-42",
+    });
     expect(retry.status).toBe(200);
-    expect(await retry.json()).toEqual({ workflowId: "order-42", existing: true });
+    expect(await retry.json()).toEqual({
+      workflowId: "order-42",
+      existing: true,
+    });
 
     for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
     expect(charge.counter.executions).toBe(1);
@@ -104,7 +113,10 @@ describe("POST /api/workflows/:name/runs — existing workflowId", () => {
   it("a workflowId of another workflow's run is a 409 and leaves that run alone", async () => {
     const hello = counted("hello");
     const other = counted("other");
-    const { post, status, storage } = setup({ hello: hello.wf, other: other.wf });
+    const { post, status, storage } = setup({
+      hello: hello.wf,
+      other: other.wf,
+    });
     await post("/api/workflows/hello/runs", { workflowId: "r1" });
     await until(async () => (await status("r1")) === "completed");
 
@@ -124,7 +136,9 @@ describe("POST /api/workflows/:name/runs — existing workflowId", () => {
     const { post, get, storage } = setup({ hello: hello.wf });
 
     for (const name of ["constructor", "toString", "__proto__", "hasOwnProperty"]) {
-      const res = await post(`/api/workflows/${name}/runs`, { workflowId: `p-${name}` });
+      const res = await post(`/api/workflows/${name}/runs`, {
+        workflowId: `p-${name}`,
+      });
       expect(res.status).toBe(404);
       expect(await storage.loadWorkflow(`p-${name}`)).toBeNull();
       expect((await get(`/api/workflows/${name}/definition`)).status).toBe(404);
@@ -232,7 +246,10 @@ describe("operator actions — mark-success, mark-failed, cancel", () => {
   it("an operator-failed child fails its parent with the child's reason", async () => {
     const child = waiting("child");
     const parent = workflow<unknown>({ name: "parent" })
-      .subworkflow("kid", child, { input: () => ({}), workflowId: () => "kid-1" })
+      .subworkflow("kid", child, {
+        input: () => ({}),
+        workflowId: () => "kid-1",
+      })
       .build() as Workflow<unknown, unknown>;
     const { post, status, storage, runner } = setup({ parent, child });
     await post("/api/workflows/parent/runs", { workflowId: "p-1" });
@@ -262,7 +279,10 @@ describe("operator actions — mark-success, mark-failed, cancel", () => {
     it(`${action} on a suspended child wakes its parent`, async () => {
       const child = waiting("child");
       const parent = workflow<unknown>({ name: "parent" })
-        .subworkflow("kid", child, { input: () => ({}), workflowId: () => "kid-1" })
+        .subworkflow("kid", child, {
+          input: () => ({}),
+          workflowId: () => "kid-1",
+        })
         .step("after", () => succeed("parent-done"))
         .build() as Workflow<unknown, unknown>;
       const { post, status, storage, runner } = setup({ parent, child });
@@ -289,7 +309,10 @@ describe("POST /api/runs/:id/cancel — cascade", () => {
   function family() {
     const child = waiting("child");
     const parent = workflow<unknown>({ name: "parent" })
-      .subworkflow("kid", child, { input: () => ({}), workflowId: () => "kid-1" })
+      .subworkflow("kid", child, {
+        input: () => ({}),
+        workflowId: () => "kid-1",
+      })
       .build() as Workflow<unknown, unknown>;
     return setup({ parent, child });
   }
@@ -322,7 +345,11 @@ describe("POST /api/runs/:id/cancel — cascade", () => {
 
   it("rejects an unknown body field with 400", async () => {
     const { post, status, storage } = family();
-    await storage.createWorkflow({ workflowId: "x-1", workflowName: "parent", input: {} });
+    await storage.createWorkflow({
+      workflowId: "x-1",
+      workflowName: "parent",
+      input: {},
+    });
     expect((await post("/api/runs/x-1/cancel", { cascade: "yes" })).status).toBe(400);
     expect((await post("/api/runs/x-1/cancel", { recursive: true })).status).toBe(400);
     expect(await status("x-1")).toBe("pending");
@@ -387,7 +414,10 @@ describe("POST /api/runs/:id/resume", () => {
     const res = await post("/api/runs/r-1/resume", { fromStep: "transform" });
     expect(res.status).toBe(202);
     expect(res.headers.get("location")).toBe("/api/runs/r-1");
-    expect(await res.json()).toEqual({ workflowId: "r-1", fromStep: "transform" });
+    expect(await res.json()).toEqual({
+      workflowId: "r-1",
+      fromStep: "transform",
+    });
     await until(async () => (await status("r-1")) === "completed");
 
     // load kept its result; transform and publish ran again; same run number.
@@ -429,7 +459,11 @@ describe("POST /api/runs/:id/resume", () => {
   it("is a 409 for a cancelled run, which stays cancelled", async () => {
     const p = pipeline();
     const { post, status, storage } = resumableSetup({ pipeline: p.wf });
-    await storage.createWorkflow({ workflowId: "rc-1", workflowName: "pipeline", input: {} });
+    await storage.createWorkflow({
+      workflowId: "rc-1",
+      workflowName: "pipeline",
+      input: {},
+    });
     await storage.cancelWorkflow({ workflowId: "rc-1" });
     const res = await post("/api/runs/rc-1/resume", { fromStep: "load" });
     expect(res.status).toBe(409);
@@ -491,7 +525,10 @@ describe("POST /api/runs/:id/resume", () => {
         input: undefined,
         useStoredInput: true,
       });
-      await workflowStarts.complete({ id: start!.id, claimToken: start!.claimToken! });
+      await workflowStarts.complete({
+        id: start!.id,
+        claimToken: start!.claimToken!,
+      });
     };
 
     await post("/api/workflows/pipeline/runs", { workflowId: "q-1" });
@@ -510,6 +547,113 @@ describe("POST /api/runs/:id/resume", () => {
 });
 
 describe("POST /api/runs/:id/signal", () => {
+  class SignalAuthorizationGateStorage extends InMemoryWorkflowStorage {
+    revokeOnNextSignalRead = false;
+    authorized = true;
+
+    override async loadSignals(workflowId: string) {
+      const signals = await super.loadSignals(workflowId);
+      if (this.revokeOnNextSignalRead) {
+        this.revokeOnNextSignalRead = false;
+        this.authorized = false;
+      }
+      return signals;
+    }
+  }
+
+  it("does not mutate signal state when the stored starter is revoked", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    await storage.createWorkflow({
+      workflowId: "revoked",
+      workflowName: "waiting",
+      input: null,
+    });
+    const handler = sendSignal({
+      storage,
+      authorizeRunContinuation: async () => false,
+    });
+
+    const response = await handler(
+      new Request("http://x/api/runs/revoked/signal", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ signalName: "go", payload: "blocked" }),
+      }),
+      { id: "revoked" },
+    );
+
+    expect(response.status).toBe(403);
+    expect(await storage.loadSignals("revoked")).toEqual([]);
+  });
+
+  it("rechecks after async validation and closes a revocation race at delivery", async () => {
+    const storage = new SignalAuthorizationGateStorage();
+    await storage.createWorkflow({
+      workflowId: "revoked-at-delivery",
+      workflowName: "waiting",
+      input: null,
+    });
+    let checks = 0;
+    const handler = sendSignal({
+      storage,
+      authorizeRunContinuation: async () => {
+        checks++;
+        if (checks === 1) storage.revokeOnNextSignalRead = true;
+        return storage.authorized;
+      },
+    });
+
+    const response = await handler(
+      new Request("http://x/api/runs/revoked-at-delivery/signal", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ signalName: "go", payload: "blocked", ifAbsent: true }),
+      }),
+      { id: "revoked-at-delivery" },
+    );
+
+    expect(response.status).toBe(403);
+    expect(checks).toBe(2);
+    expect(await storage.loadSignals("revoked-at-delivery")).toEqual([]);
+  });
+
+  it("keeps a final authorization outage retryable without delivering", async () => {
+    const storage = new SignalAuthorizationGateStorage();
+    await storage.createWorkflow({
+      workflowId: "signal-auth-outage",
+      workflowName: "waiting",
+      input: null,
+    });
+    let checks = 0;
+    let failFinal = true;
+    const handler = sendSignal({
+      storage,
+      authorizeRunContinuation: async () => {
+        checks++;
+        if (checks % 2 === 1) storage.revokeOnNextSignalRead = true;
+        if (checks % 2 === 0 && failFinal) throw new Error("authorizer unavailable");
+        return true;
+      },
+    });
+    const request = () =>
+      new Request("http://x/api/runs/signal-auth-outage/signal", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ signalName: "go", payload: "retry", ifAbsent: true }),
+      });
+
+    const failed = await invoke(handler, request(), { id: "signal-auth-outage" });
+    expect(failed.status).toBe(500);
+    expect(await storage.loadSignals("signal-auth-outage")).toEqual([]);
+
+    failFinal = false;
+    const retried = await invoke(handler, request(), { id: "signal-auth-outage" });
+    expect(retried.status).toBe(202);
+    expect((await storage.loadSignals("signal-auth-outage")).map((s) => s.payload)).toEqual([
+      "retry",
+    ]);
+  });
+
   it("404 for an unknown run, and no orphan signal is stored", async () => {
     const { post, storage } = setup({});
     const res = await post("/api/runs/nope/signal", { signalName: "go" });
@@ -533,7 +677,10 @@ describe("POST /api/runs/:id/signal", () => {
     await post("/api/workflows/w/runs", { workflowId: "w-1" });
     await until(async () => (await status("w-1")) === "suspended");
 
-    const res = await post("/api/runs/w-1/signal", { signalName: "go", payload: 1 });
+    const res = await post("/api/runs/w-1/signal", {
+      signalName: "go",
+      payload: 1,
+    });
     expect(res.status).toBe(202);
     expect((await storage.loadSignals("w-1")).map((s) => s.signalName)).toEqual(["go"]);
   });

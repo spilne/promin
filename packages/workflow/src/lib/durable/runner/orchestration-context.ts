@@ -21,6 +21,7 @@ import type { FailedWorkflowRecord } from "../workflow-state.ts";
 import { withDefaultStepTimeout } from "../step-policy.ts";
 import type { WorkflowTracer } from "../workflow-tracer.ts";
 import type { StepExecutor } from "./step-executor.ts";
+import type { WorkflowRunAdmissionGuard } from "../workflow-runner.ts";
 
 /** The run lock's lease, as `WorkflowRunnerConfig.lock` sets it. */
 export interface RunLockOptions {
@@ -106,6 +107,12 @@ export interface WorkflowOrchestrationContext {
   readonly defaultStepTimeoutMs?: number | null;
   /** Lifecycle tracer. Inherited by drains and child runs. */
   readonly tracer?: WorkflowTracer;
+  /** Host admission check inherited by drains and child workflows. */
+  readonly runAdmissionGuard?: WorkflowRunAdmissionGuard;
+  /** Exact workflow identities explicitly exempted by their trusted owner. */
+  readonly runAdmissionExemptions?: WeakSet<Workflow<unknown, unknown>>;
+  /** Whether this exact definition was explicitly exempted. */
+  readonly runAdmissionExempt?: boolean;
 }
 
 /**
@@ -132,6 +139,10 @@ export interface OrchestrationRuntime {
   readonly defaultStepTimeoutMs?: number | null;
   /** Lifecycle tracer (see `WorkflowTracer`). */
   readonly tracer?: WorkflowTracer;
+  /** Host admission check inherited by drains and child workflows. */
+  readonly runAdmissionGuard?: WorkflowRunAdmissionGuard;
+  /** Exact workflow identities explicitly exempted by their trusted owner. */
+  readonly runAdmissionExemptions?: WeakSet<Workflow<unknown, unknown>>;
 }
 
 /**
@@ -184,6 +195,13 @@ export function orchestrationContextFor(params: {
       defaultStepTimeoutMs: runtime.defaultStepTimeoutMs,
     }),
     ...(runtime.tracer !== undefined && { tracer: runtime.tracer }),
+    ...(runtime.runAdmissionGuard !== undefined && {
+      runAdmissionGuard: runtime.runAdmissionGuard,
+    }),
+    ...(runtime.runAdmissionExemptions !== undefined && {
+      runAdmissionExemptions: runtime.runAdmissionExemptions,
+      runAdmissionExempt: runtime.runAdmissionExemptions.has(workflow),
+    }),
   };
 }
 
@@ -201,5 +219,11 @@ export function runtimeOf(ctx: WorkflowOrchestrationContext): OrchestrationRunti
       defaultStepTimeoutMs: ctx.defaultStepTimeoutMs,
     }),
     ...(ctx.tracer !== undefined && { tracer: ctx.tracer }),
+    ...(ctx.runAdmissionGuard !== undefined && {
+      runAdmissionGuard: ctx.runAdmissionGuard,
+    }),
+    ...(ctx.runAdmissionExemptions !== undefined && {
+      runAdmissionExemptions: ctx.runAdmissionExemptions,
+    }),
   };
 }

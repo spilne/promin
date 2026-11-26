@@ -34,9 +34,13 @@ describe("ZoryaAgents.dispatchSchedule", () => {
     } as unknown as Parameters<typeof registry.register>[0]);
 
     const agent = makeAgent();
+    let resolvedScope: unknown;
     const agents = new ZoryaAgents({
       registry,
-      resolve: () => agent,
+      resolve: (_recipe, scope) => {
+        resolvedScope = scope;
+        return agent;
+      },
       memory: new InMemoryMemoryStore(),
     });
 
@@ -64,9 +68,24 @@ describe("ZoryaAgents.dispatchSchedule", () => {
       metadata: schedule.metadata,
     };
 
-    await agents.dispatchSchedule(tick, schedule);
+    const scheduledPrincipal = {
+      kind: "service-account" as const,
+      id: "digest-scheduler",
+      accessRoles: { "tenant-a": ["member"] },
+      canActFor: false,
+    };
+    await agents.dispatchSchedule(tick, schedule, {
+      context: { actor: scheduledPrincipal, effective: scheduledPrincipal },
+      principal: scheduledPrincipal,
+      runContext: { actor: { kind: "service-account", id: "digest-scheduler" } },
+    });
 
     expect(agent.calls).toEqual(["say hi"]);
+    expect(resolvedScope).toEqual({
+      namespaceId: "tenant-a",
+      principal: scheduledPrincipal,
+      securityContext: { actor: { kind: "service-account", id: "digest-scheduler" } },
+    });
   });
 });
 

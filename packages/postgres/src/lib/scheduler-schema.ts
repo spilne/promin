@@ -29,6 +29,8 @@ export const durableSchedules = pgTable(
     startAt: timestamp("start_at", { withTimezone: true }),
     endAt: timestamp("end_at", { withTimezone: true }),
     metadata: jsonb("metadata"),
+    /** Stable actor/effective references assigned to unattended ticks. */
+    securityContext: jsonb("security_context"),
     lastFiredAt: timestamp("last_fired_at", { withTimezone: true }),
     nextRun: timestamp("next_run", { withTimezone: true }),
     tickCount: bigint("tick_count", { mode: "number" }).notNull().default(0),

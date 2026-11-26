@@ -38,6 +38,7 @@ import {
   type WorkflowStorage,
   type WorkflowVersionRegistry,
 } from "@promin/workflow";
+import { normalizeRunSecurityContext, sameRunSecurityContext } from "@promin/workflow/storage-kit";
 import {
   InMemoryWorkerRegistry,
   createSignalScanner,
@@ -59,12 +60,14 @@ import { LeaderLoop, forEachOrphanedRun, redeliverChildEndedSignals } from "./ru
 import {
   ZoryaWorkflows,
   existingRunResult,
+  createIdempotentRun,
   findDefinition,
   resetStepsUnderLock,
   stepsFrom,
   type TriggerOptions,
   type TriggerResult,
 } from "./zorya-workflows.ts";
+import type { RunSecurityContext } from "@promin/workflow";
 
 /** Where a background failure of `QueuedWorkflows` came from. */
 export type QueuedWorkflowsErrorSource = "sleep-wake" | "signal-wake" | "maintenance";
@@ -274,17 +277,24 @@ export class QueuedWorkflows extends ZoryaWorkflows {
   ): Promise<TriggerResult> {
     const workflowId = opts?.workflowId ?? crypto.randomUUID();
     const version = await this.resolveVersion({ name, requested: opts?.version });
+    const securityContext = this.securityContextForTrigger(opts?.securityContext);
 
-    const created = await this.storage.createWorkflow({
+    const created = await createIdempotentRun({
+      storage: this.storage,
       workflowId,
-      workflowName: name,
-      input,
-      ...(opts?.workflowType !== undefined && { workflowType: opts.workflowType }),
-      ...(opts?.namespace !== undefined && { namespace: opts.namespace }),
-      ...(opts?.metadata !== undefined && { metadata: opts.metadata }),
-      ...(opts?.runSource !== undefined && { runSource: opts.runSource }),
-      ...(opts?.runSourceId !== undefined && { runSourceId: opts.runSourceId }),
-      ...(version !== undefined && { version }),
+      create: () =>
+        this.storage.createWorkflow({
+          workflowId,
+          workflowName: name,
+          input,
+          ...(opts?.workflowType !== undefined && { workflowType: opts.workflowType }),
+          ...(opts?.namespace !== undefined && { namespace: opts.namespace }),
+          ...(opts?.metadata !== undefined && { metadata: opts.metadata }),
+          ...(opts?.runSource !== undefined && { runSource: opts.runSource }),
+          ...(opts?.runSourceId !== undefined && { runSourceId: opts.runSourceId }),
+          ...(securityContext !== undefined && { securityContext }),
+          ...(version !== undefined && { version }),
+        }),
     });
     // An existing run is answered as-is. One still pending may have lost
     // its start (a crash between the create and the enqueue): queue it
@@ -292,7 +302,7 @@ export class QueuedWorkflows extends ZoryaWorkflows {
     const existing = existingRunResult({ workflowName: name, workflowId, created });
     if (existing) {
       if (!created.created && created.existing.status === "pending") {
-        await this.enqueue({ run: created.existing });
+        await this.enqueue({ run: created.existing, source: "queue" });
       }
       return existing;
     }
@@ -303,6 +313,7 @@ export class QueuedWorkflows extends ZoryaWorkflows {
         ...(opts?.metadata !== undefined && { metadata: opts.metadata }),
         ...(version !== undefined && { version }),
       },
+      source: "queue",
     });
     return { workflowId };
   }
@@ -314,7 +325,7 @@ export class QueuedWorkflows extends ZoryaWorkflows {
       throw new Error(`rerun: workflow "${workflowId}" not found`);
     }
     await this.storage.startFreshRun({ workflowId, expectedRun: state.run });
-    await this.enqueue({ run: state });
+    await this.enqueue({ run: state, source: "queue" });
   }
 
   /**
@@ -352,7 +363,7 @@ export class QueuedWorkflows extends ZoryaWorkflows {
       workflowName: state.workflowName,
     });
     await resetStepsUnderLock({ storage: this.storage, workflowId: params.workflowId, stepNames });
-    await this.enqueue({ run: state });
+    await this.enqueue({ run: state, source: "queue" });
   }
 
   /**
@@ -381,7 +392,7 @@ export class QueuedWorkflows extends ZoryaWorkflows {
       keepGoing,
       visit: async (run) => {
         if (!(await this.owns(run.workflowName))) return;
-        if (await this.enqueue({ run })) requeued++;
+        if (await this.enqueue({ run, source: "recovery" })) requeued++;
       },
     });
 
@@ -441,8 +452,15 @@ export class QueuedWorkflows extends ZoryaWorkflows {
       readonly metadata?: Record<string, unknown>;
     };
     readonly keepAvailableAt?: boolean;
+    readonly source: "queue" | "wake" | "recovery";
   }): Promise<boolean> {
     const { run } = params;
+    if (
+      this.executionSecurity &&
+      !(await this.executionSecurity.authorizeStoredRun(run.workflowId, params.source))
+    ) {
+      return false;
+    }
     const { created, claimable } = await this.workflowStarts.enqueue({
       workflowId: run.workflowId,
       workflowName: run.workflowName,
@@ -484,7 +502,52 @@ export class QueuedWorkflows extends ZoryaWorkflows {
     await this.enqueue({
       run,
       keepAvailableAt: run.reason !== "signal" && run.reason !== "update",
+      source: "wake",
     });
+  }
+
+  /** Recheck a claimed start immediately before exposing it to a worker. */
+  async authorizeWorkerStart(workflowId: string): Promise<boolean> {
+    return this.executionSecurity
+      ? this.executionSecurity.authorizeStoredRun(workflowId, "worker-claim")
+      : true;
+  }
+
+  /** Recheck a worker's lock acquisition even if it bypassed the start queue. */
+  async authorizeWorkerLock(workflowId: string): Promise<boolean> {
+    return this.executionSecurity
+      ? this.executionSecurity.authorizeStoredRun(workflowId, "worker-lock")
+      : true;
+  }
+
+  /** A remote child create must carry and pass the inherited identity. */
+  async authorizeWorkerChild(params: {
+    readonly workflowId: string;
+    readonly parentWorkflowId: string;
+    readonly namespace?: string;
+    readonly securityContext?: RunSecurityContext;
+  }): Promise<boolean> {
+    const parent = await this.storage.loadWorkflow(params.parentWorkflowId);
+    let requested: RunSecurityContext | undefined;
+    try {
+      requested =
+        params.securityContext === undefined
+          ? undefined
+          : normalizeRunSecurityContext(params.securityContext);
+    } catch {
+      return false;
+    }
+    if (!parent || !sameRunSecurityContext(parent.securityContext, requested)) {
+      return false;
+    }
+    return this.executionSecurity
+      ? this.executionSecurity.authorizeContext({
+          workflowId: params.workflowId,
+          ...(params.namespace !== undefined && { namespace: params.namespace }),
+          ...(requested !== undefined && { securityContext: requested }),
+          source: "child-create",
+        })
+      : true;
   }
 
   /**

@@ -36,7 +36,7 @@
 
 import type { ScheduleTick, DurableScheduleConfig } from "@promin/workflow/scheduler";
 import { scheduleTickRunId } from "@promin/workflow/scheduler";
-import { SystemWallClock, type WallClock } from "@promin/workflow";
+import { SystemWallClock, type RunSecurityContext, type WallClock } from "@promin/workflow";
 import { THREAD_AGENT_METADATA_KEY, type Agent } from "../agent/types.ts";
 import type { AgentTurnGate, AgentTurnLease } from "../lease/agent-turn-gate.ts";
 import type { AgentRegistry, RegisteredAgent } from "../registry/types.ts";
@@ -79,7 +79,11 @@ export interface DispatchAgentScheduleDeps {
    */
   readonly resolve: (
     recipe: RegisteredAgent,
-    scope?: { readonly namespaceId?: string; readonly resourceId?: string },
+    scope?: {
+      readonly namespaceId?: string;
+      readonly resourceId?: string;
+      readonly securityContext?: RunSecurityContext;
+    },
   ) => Agent | Promise<Agent>;
   /**
    * Optional hook fired BEFORE the agent invocation runs. Hosts can
@@ -87,6 +91,11 @@ export interface DispatchAgentScheduleDeps {
    * short-circuit by returning false (skip dispatch).
    */
   readonly beforeFire?: (ctx: ScheduleFireContext) => Promise<boolean | void> | boolean | void;
+  /**
+   * Final admission gate after recipe resolution, agent materialization,
+   * thread lookup and lease acquisition, immediately before invoke/send.
+   */
+  readonly beforeInvoke?: (ctx: ScheduleFireContext) => Promise<void> | void;
   /**
    * Optional hook fired after the agent invocation completes (or fails).
    */
@@ -173,6 +182,9 @@ export async function startAgentSchedule(
   const resolved = await deps.resolve(recipe, {
     namespaceId: meta.namespaceId,
     ...(meta.resourceId !== undefined && { resourceId: meta.resourceId }),
+    ...(schedule.securityContext !== undefined && {
+      securityContext: schedule.securityContext,
+    }),
   });
   const agent = resolved.withScope({
     namespaceId: meta.namespaceId,
@@ -210,10 +222,23 @@ export async function startAgentSchedule(
     const thread = meta.threadId
       ? await agent.thread(meta.threadId, {
           metadata: { [THREAD_AGENT_METADATA_KEY]: recipe.id },
+          ...(schedule.securityContext !== undefined && {
+            securityContext: schedule.securityContext,
+          }),
         })
       : undefined;
+    await deps.beforeInvoke?.(ctx);
     // Kick the turn off; only its outcome is awaited, in `done`.
-    turn = Promise.resolve(thread ? thread.send(input, { runId }) : agent.invoke(input, { runId }));
+    turn = Promise.resolve(
+      thread
+        ? thread.send(input, { runId })
+        : agent.invoke(input, {
+            runId,
+            ...(schedule.securityContext !== undefined && {
+              securityContext: schedule.securityContext,
+            }),
+          }),
+    );
   } catch (err) {
     await release();
     throw err;

@@ -32,19 +32,26 @@ async function boot(opts: HarnessOpts = {}) {
   const bound: AgentScope[] = [];
   const h = await bootAgents({
     authorizeScope,
-    wrapAgent: (agent) =>
-      new Proxy(agent, {
-        get(target, prop) {
-          if (prop === "withScope") {
-            return (scope: AgentScope) => {
-              bound.push(scope);
-              return target.withScope(scope);
-            };
-          }
-          const value = Reflect.get(target, prop, target);
-          return typeof value === "function" ? value.bind(target) : value;
-        },
-      }),
+    wrapAgent: (agent) => {
+      const wrap = (current: typeof agent): typeof agent =>
+        new Proxy(current, {
+          get(target, prop) {
+            if (prop === "withRetrieverAccess") {
+              return (...args: unknown[]) =>
+                wrap(Reflect.apply(target.withRetrieverAccess, target, args));
+            }
+            if (prop === "withScope") {
+              return (scope: AgentScope) => {
+                bound.push(scope);
+                return target.withScope(scope);
+              };
+            }
+            const value = Reflect.get(target, prop, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      return wrap(agent);
+    },
     ...opts,
   });
   return { ...h, bound };

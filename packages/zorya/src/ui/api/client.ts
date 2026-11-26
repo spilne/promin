@@ -144,7 +144,24 @@ function retryDelay(attempt: number): Promise<void> {
 /** The dashboard's stored operator key as an `authorization` header, if any. */
 export function authHeader(): Record<string, string> {
   const k = localStorage.getItem("zorya_api_key");
-  return k ? { authorization: `Bearer ${k}` } : {};
+  const headers: Record<string, string> = k ? { authorization: `Bearer ${k}` } : {};
+  const csrf = browserCsrfToken();
+  if (csrf) headers["x-zorya-csrf"] = csrf;
+  return headers;
+}
+
+/** Copy the readable, session-bound token into the unsafe-request header. */
+function browserCsrfToken(): string | undefined {
+  if (typeof document === "undefined") return undefined;
+  const secure = globalThis.location?.protocol === "https:";
+  const name = secure ? "__Host-zorya_csrf" : "zorya_csrf";
+  const prefix = `${name}=`;
+  const values = document.cookie
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part.startsWith(prefix))
+    .map((part) => part.slice(prefix.length));
+  return values.length === 1 && values[0] ? values[0] : undefined;
 }
 
 /**

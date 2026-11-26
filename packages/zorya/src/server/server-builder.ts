@@ -24,6 +24,15 @@ import type { ZoryaScheduler } from "./services/scheduler/index.ts";
 import type { ZoryaSkills } from "./services/skills/index.ts";
 import type { ZoryaWorkflowBuilder } from "./services/workflow-builder/index.ts";
 import type { RunRetentionConfig, ZoryaWorkflows } from "./services/workflows/index.ts";
+import type { ZoryaSecurity } from "./security/index.ts";
+import {
+  validateChannel,
+  type ZoryaChannel,
+  type ZoryaLlmPolicy,
+  type ZoryaRetrieverExtension,
+  type ZoryaRoutesExtension,
+  type ZoryaServerExtension,
+} from "./extensions.ts";
 
 /**
  * Fluent builder for a `ZoryaServer`; start one with `ZoryaServer.builder()`.
@@ -98,6 +107,75 @@ export class ZoryaServerBuilder {
   /** Operator API keys for the dashboard and `/api`. */
   apiKeys(apiKeys: ReadonlyArray<string>): this {
     return this.set({ apiKeys });
+  }
+
+  /** Pluggable operator authentication and access policy. Replaces `apiKeys`. */
+  security(security: ZoryaSecurity): this {
+    return this.set({ security });
+  }
+
+  /** Add one trusted in-process channel package. */
+  channel(channel: ZoryaChannel): this {
+    const id = validateChannel(channel);
+    const channels = this.config.channels ?? [];
+    if (channels.some((entry) => entry.id === id)) {
+      throw new Error(`ZoryaServer.builder(): duplicate channel '${id}'`);
+    }
+    return this.set({ channels: Object.freeze([...channels, channel]) });
+  }
+
+  /** Register one host-wired external knowledge backend. */
+  retriever(entry: ZoryaRetrieverExtension): this {
+    if (!entry?.id?.trim()) throw new TypeError("ZoryaServer.builder(): retriever id is required");
+    const retrievers = this.config.retrievers ?? [];
+    if (
+      retrievers.some((value) => value.id === entry.id && value.namespaceId === entry.namespaceId)
+    ) {
+      throw new Error(
+        `ZoryaServer.builder(): duplicate retriever '${entry.namespaceId ?? "global"}/${entry.id}'`,
+      );
+    }
+    return this.set({ retrievers: Object.freeze([...retrievers, entry]) });
+  }
+
+  /** Add protected routes through the same router and security guard as core routes. */
+  routes(register: ZoryaRoutesExtension): this {
+    if (typeof register !== "function") {
+      throw new TypeError("ZoryaServer.builder(): routes() requires a registration function");
+    }
+    return this.set({
+      extensionRoutes: Object.freeze([...(this.config.extensionRoutes ?? []), register]),
+    });
+  }
+
+  /** Set the single host-wide LLM provider/model admission policy. */
+  llmPolicy(policy: ZoryaLlmPolicy): this {
+    if (!policy || typeof policy.authorize !== "function") {
+      throw new TypeError("ZoryaServer.builder(): llmPolicy() requires an authorize function");
+    }
+    if (this.config.llmPolicy !== undefined && this.config.llmPolicy !== policy) {
+      throw new Error("ZoryaServer.builder(): llmPolicy() is already configured");
+    }
+    return this.set({ llmPolicy: policy });
+  }
+
+  /** Apply a synchronous bundle that composes any builder calls. */
+  use(extension: ZoryaServerExtension): this {
+    if (typeof extension !== "function") {
+      throw new TypeError("ZoryaServer.builder(): use() requires an extension function");
+    }
+    const before = this.config;
+    try {
+      const result = extension(this);
+      if (result !== undefined && result !== this) {
+        this.config = before;
+        throw new TypeError("ZoryaServer.builder(): extension must return this builder or void");
+      }
+      return this;
+    } catch (error) {
+      this.config = before;
+      throw error;
+    }
   }
 
   /** Allow planes without keys. Local development only. */
@@ -209,6 +287,19 @@ export class ZoryaServerBuilder {
   buildConfig(): ZoryaServerConfig {
     const { workflows } = this.config;
     if (!workflows) throw new Error("ZoryaServer.builder(): workflows() is required");
+    if (
+      this.config.channels?.some((channel) => channel.mapsExternalUsers) &&
+      !this.config.security
+    ) {
+      throw new Error(
+        "ZoryaServer.builder(): a channel that maps external users requires security()",
+      );
+    }
+    if (this.config.channels?.some((channel) => channel.mapsExternalUsers && !channel.runtime)) {
+      throw new Error(
+        "ZoryaServer.builder(): a channel that maps external users requires a channel runtime",
+      );
+    }
     return { ...this.config, workflows };
   }
 

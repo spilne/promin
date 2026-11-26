@@ -159,10 +159,24 @@ describe("turn lease — streaming", () => {
   });
 
   it("approve is gated by the same lease", async () => {
-    const { server, leaseStore } = await bootAgents({ turnGate: true });
+    const { server, leaseStore, approvals } = await bootAgents({ turnGate: true });
     expect((await server.handle(req("POST", "/api/agents/support/threads/t1", body))).status).toBe(
       200,
     );
+    await approvals.record({
+      ...key,
+      toolCallId: "c1",
+      resourceId: "alice",
+      agentId: "support",
+      workflowId: "pending-turn",
+      toolName: "confirm",
+      input: {},
+      elevated: false,
+      requestContext: {
+        actor: { kind: "operator", id: "operator" },
+        effective: { kind: "user", id: "alice" },
+      },
+    });
     await leaseStore.acquire({ key, ownerId: "elsewhere", ttlMs: 60_000 });
     const res = await server.handle(
       req("POST", "/api/agents/support/threads/t1/approve", {

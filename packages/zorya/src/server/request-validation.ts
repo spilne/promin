@@ -41,19 +41,42 @@ export async function parseBody<S extends z.ZodTypeAny>(params: {
 }
 
 /**
- * Parse the query string against `schema`. Each parameter arrives as a
- * string (the last one wins when repeated); schemas coerce.
+ * Parse the query string against `schema`. Query keys are single-valued:
+ * repeated keys are rejected instead of silently choosing a value that may
+ * differ from a route's authorization target.
  */
 export function parseQuery<S extends z.ZodTypeAny>(params: {
   req: Request;
   schema: S;
 }): z.output<S> {
   const url = new URL(params.req.url);
+  assertUniqueQueryParameters({ url });
   const raw: Record<string, string> = {};
   url.searchParams.forEach((value, key) => {
     raw[key] = value;
   });
   return check({ schema: params.schema, value: raw });
+}
+
+/** Reject repeated query keys, optionally limited to security-sensitive names. */
+export function assertUniqueQueryParameters(params: {
+  readonly url: URL;
+  readonly names?: ReadonlySet<string>;
+}): void {
+  const seen = new Set<string>();
+  for (const key of params.url.searchParams.keys()) {
+    if (params.names && !params.names.has(key)) continue;
+    if (!seen.has(key)) {
+      seen.add(key);
+      continue;
+    }
+    throw new HttpError({
+      status: 400,
+      code: "invalid_request",
+      message: `${key}: Duplicate query parameter`,
+      issues: [{ path: key, message: "Duplicate query parameter" }],
+    });
+  }
 }
 
 /** Parse decoded path params against `schema`. */

@@ -9,6 +9,7 @@
 import {
   admitTurn,
   ApprovalAlreadyDecidedError,
+  ApprovalBoundaryConflictError,
   ApprovalExpiredError,
   ApprovalNotFoundError,
   ApprovalNotReadyError,
@@ -17,9 +18,12 @@ import {
   TurnKeyConflictError,
   type AgentThread,
   type PendingApproval,
+  type PendingApprovalBoundary,
 } from "@promin/agent";
 import { WorkflowSuspendedError } from "@promin/workflow";
-import { json, jsonError, readJson } from "../../router.ts";
+import { sameRunSecurityContext } from "@promin/workflow/storage-kit";
+import { json, jsonError, readJson, type ResolvedRouteAccess } from "../../router.ts";
+import { requestPrincipal, requestSecurityContext } from "../../security/index.ts";
 import { internalError } from "../agent-gateway-kit.ts";
 import type {
   AgentGatewayDeps,
@@ -40,11 +44,13 @@ import {
   parseTurnKey,
   refusalResponse,
   type InvokeRequest,
+  type RequestRefusal,
   type ScopeFields,
   type ScopedAgent,
 } from "./agent-scope.ts";
 import { parseEventId, type TurnStream, type TurnStreamOwner } from "./agent-sse.ts";
 import { budgetRefusal } from "./agent-usage.ts";
+import type { ApprovalRouteTargetValue } from "../../mount/agent-route-security.ts";
 
 /**
  * Refuse a turn whose thread or namespace budget is used up (429) before a
@@ -72,6 +78,31 @@ async function budgetPreflight(params: {
   }
 }
 
+/**
+ * The route guard authorizes an immutable approval identity snapshot before
+ * the handler opens the thread. Refuse if the backend reports a different
+ * approval at the same key: otherwise a replacement between those steps
+ * could inherit the first row's permission decision.
+ */
+function sameApprovalSecurityBoundary(
+  authorized: PendingApprovalBoundary,
+  current: PendingApproval,
+): boolean {
+  return (
+    authorized.namespaceId === current.namespaceId &&
+    authorized.threadId === current.threadId &&
+    authorized.toolCallId === current.toolCallId &&
+    authorized.agentId === current.agentId &&
+    authorized.resourceId === current.resourceId &&
+    authorized.workflowId === current.workflowId &&
+    authorized.elevated === current.elevated &&
+    ((authorized.requestContext === null && current.requestContext === null) ||
+      (authorized.requestContext !== null &&
+        current.requestContext !== null &&
+        sameRunSecurityContext(authorized.requestContext, current.requestContext)))
+  );
+}
+
 // ---------------------------------------------------------------------------
 // One-shot invoke + stream
 // ---------------------------------------------------------------------------
@@ -81,7 +112,7 @@ export function invokeAgent(deps: AgentGatewayDeps) {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
 
-    const parsed = parseInvokeBody(await readJson<InvokeRequest>(req));
+    const parsed = parseInvokeBody({ req, body: await readJson<InvokeRequest>(req) });
     if ("error" in parsed) return refusalResponse(parsed);
     const scoped = await loadScopedAgent({ deps, req, id, scope: parsed, invoking: true });
     if (scoped instanceof Response) return scoped;
@@ -110,7 +141,7 @@ export function streamAgent(deps: AgentGatewayDeps) {
     const id = params.id;
     if (!id) return jsonError(400, "missing_id");
 
-    const parsed = parseInvokeBody(await readJson<InvokeRequest>(req));
+    const parsed = parseInvokeBody({ req, body: await readJson<InvokeRequest>(req) });
     if ("error" in parsed) return refusalResponse(parsed);
     const scoped = await loadScopedAgent({ deps, req, id, scope: parsed, invoking: true });
     if (scoped instanceof Response) return scoped;
@@ -140,7 +171,7 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
     if (!threadId) return jsonError(400, "missing_threadId");
 
     const body = await readJson<InvokeRequest>(req);
-    const parsed = parseInvokeBody(body);
+    const parsed = parseInvokeBody({ req, body });
     if ("error" in parsed) return refusalResponse(parsed);
     const turn = parseTurnKey({ req, body });
     if ("error" in turn) return jsonError(400, turn.error);
@@ -153,7 +184,14 @@ export function sendThreadMessage(deps: AgentGatewayDeps) {
     });
     if (lease instanceof Response) return lease;
     try {
-      const thread = await openOwnedThread({ scoped, threadId, create: true });
+      const thread = await openOwnedThread({
+        scoped,
+        threadId,
+        create: true,
+        ...(requestSecurityContext(req) !== undefined && {
+          securityContext: requestSecurityContext(req),
+        }),
+      });
       if (thread instanceof Response) return thread;
       const out = await thread.send({ task: parsed.task }, turn);
       const response: ThreadInvokeResponse = {
@@ -206,7 +244,7 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
     if (!threadId) return jsonError(400, "missing_threadId");
 
     const body = await readJson<InvokeRequest>(req);
-    const parsed = parseInvokeBody(body);
+    const parsed = parseInvokeBody({ req, body });
     if ("error" in parsed) return refusalResponse(parsed);
     const turn = parseTurnKey({ req, body });
     if ("error" in turn) return jsonError(400, turn.error);
@@ -236,7 +274,14 @@ export function streamThreadMessage(deps: AgentGatewayDeps) {
     });
     if (lease instanceof Response) return lease;
     try {
-      const thread = await openOwnedThread({ scoped, threadId, create: true });
+      const thread = await openOwnedThread({
+        scoped,
+        threadId,
+        create: true,
+        ...(requestSecurityContext(req) !== undefined && {
+          securityContext: requestSecurityContext(req),
+        }),
+      });
       if (thread instanceof Response) {
         await lease.release();
         return thread;
@@ -394,19 +439,64 @@ function threadMetaOf(params: {
  * then streams the resumed turn's events in the same SSE shape as the
  * user-task stream; an approval decided meanwhile, or approved after it
  * expired, ends the stream with an `error` frame naming why. The decision
- * is recorded with the identity the request was authorized as
- * (`ownerId`, else `resourceId`).
+ * is recorded with the authenticated actor, never the represented user.
  */
 export function streamThreadApproval(deps: AgentGatewayDeps) {
-  return async (req: Request, params: Record<string, string>): Promise<Response> => {
+  return async (
+    req: Request,
+    params: Record<string, string>,
+    access?: ResolvedRouteAccess,
+  ): Promise<Response> => {
     const id = params.id;
     const threadId = params.threadId;
     if (!id) return jsonError(400, "missing_id");
     if (!threadId) return jsonError(400, "missing_threadId");
 
-    const parsed = parseApprovalBody(await readJson<ApprovalRequest>(req));
-    if ("error" in parsed) return jsonError(400, parsed.error);
-    const scoped = await loadScopedAgent({ deps, req, id, scope: parsed, invoking: true });
+    const parsed = parseApprovalBody({ req, body: await readJson<ApprovalRequest>(req) });
+    if ("error" in parsed) return refusalResponse(parsed);
+    const authorized =
+      access?.kind === "protected"
+        ? (access.target.value as ApprovalRouteTargetValue | null)
+        : null;
+    const entry = authorized?.approval ?? null;
+    if (!authorized || !entry || entry.toolCallId !== parsed.toolCallId)
+      return jsonError(404, "approval_not_found");
+    if (!entry.requestContext) return jsonError(403, "forbidden");
+    const currentActor = requestPrincipal(req);
+    if (!currentActor) return jsonError(403, "forbidden");
+    const represented = entry.requestContext.effective ?? entry.requestContext.actor;
+    if (
+      entry.elevated !== false &&
+      currentActor.kind !== "operator" &&
+      ((currentActor.kind === entry.requestContext.actor.kind &&
+        currentActor.id === entry.requestContext.actor.id) ||
+        (currentActor.kind === represented.kind && currentActor.id === represented.id))
+    ) {
+      return jsonError(403, "forbidden");
+    }
+    const effectiveRef = entry.requestContext.effective ?? entry.requestContext.actor;
+    const resolvedEffective = await deps.security?.resolvePrincipal(effectiveRef);
+    const effectivePrincipal =
+      resolvedEffective ??
+      (entry.requestContext.actor.kind === "operator" && currentActor?.kind === "operator"
+        ? currentActor
+        : undefined);
+    if (!effectivePrincipal) return jsonError(403, "forbidden");
+    const scoped = await loadScopedAgent({
+      deps,
+      req,
+      id,
+      scope: {
+        namespaceId: entry.namespaceId,
+        ...(entry.resourceId !== null && entry.resourceId !== effectiveRef.id
+          ? { ownerId: effectiveRef.id }
+          : { resourceId: entry.resourceId ?? effectiveRef.id }),
+      },
+      invoking: true,
+      authoritativeScope: true,
+      authoritativeSecurityContext: entry.requestContext,
+      ...(effectivePrincipal !== undefined && { effectivePrincipal }),
+    });
     if (scoped instanceof Response) return scoped;
 
     const lease = await acquireTurnLease({
@@ -415,7 +505,12 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
     });
     if (lease instanceof Response) return lease;
     try {
-      const thread = await openOwnedThread({ scoped, threadId, create: false });
+      const thread = await openOwnedThread({
+        scoped,
+        threadId,
+        create: false,
+        securityContext: entry.requestContext,
+      });
       if (thread instanceof Response) {
         await lease.release();
         return thread;
@@ -433,18 +528,29 @@ export function streamThreadApproval(deps: AgentGatewayDeps) {
       let turnId = `approve-${crypto.randomUUID()}`;
       if (thread.pendingApprovals) {
         const pending = await thread.pendingApprovals();
-        const entry = pending.find((p) => p.toolCallId === parsed.toolCallId);
-        if (!entry) {
+        const currentEntry = pending.find((p) => p.toolCallId === parsed.toolCallId);
+        if (!currentEntry) {
           await lease.release();
           return jsonError(404, "approval_not_found");
         }
-        turnId = `${entry.workflowId}/approve/${entry.toolCallId}`;
+        if (!sameApprovalSecurityBoundary(authorized.expected, currentEntry)) {
+          await lease.release();
+          return jsonError(409, "approval_changed");
+        }
+        turnId = `${currentEntry.workflowId}/approve/${currentEntry.toolCallId}`;
       }
-      const out = thread.resumeStream(parsed.toolCallId, {
-        approved: parsed.approved,
-        by: parsed.ownerId ?? scoped.resourceId,
-        ...(parsed.reason !== undefined && { reason: parsed.reason }),
-      });
+      const out = thread.resumeStream(
+        parsed.toolCallId,
+        {
+          approved: parsed.approved,
+          by: currentActor.id,
+          byPrincipal: { kind: currentActor.kind, id: currentActor.id },
+          ...(parsed.reason !== undefined && { reason: parsed.reason }),
+        },
+        {
+          expectedApproval: authorized.expected,
+        },
+      );
       const stream = deps.turnStreams.start({
         id: turnId,
         owner: turnOwner({ scoped, threadId }),
@@ -476,14 +582,18 @@ interface ParsedApproval extends ScopeFields {
   readonly reason?: string;
 }
 
-function parseApprovalBody(body: ApprovalRequest | null): ParsedApproval | { error: string } {
-  if (!body) return { error: "missing_body" };
+function parseApprovalBody(params: {
+  readonly req: Request;
+  readonly body: ApprovalRequest | null;
+}): ParsedApproval | RequestRefusal {
+  const { body } = params;
+  if (!body) return { error: "missing_body", status: 400 };
   if (typeof body.toolCallId !== "string" || body.toolCallId.length === 0) {
-    return { error: "missing_toolCallId" };
+    return { error: "missing_toolCallId", status: 400 };
   }
-  if (typeof body.approved !== "boolean") return { error: "missing_approved" };
+  if (typeof body.approved !== "boolean") return { error: "missing_approved", status: 400 };
   const scope = parseScopeFields(body);
-  if ("error" in scope) return scope;
+  if ("error" in scope) return { error: scope.error, status: 400 };
   const reason = typeof body.reason === "string" ? body.reason : undefined;
   return {
     toolCallId: body.toolCallId,
@@ -513,6 +623,7 @@ function toPendingApprovalDto(p: PendingApproval): PendingApprovalDto {
     toolCallId: p.toolCallId,
     toolName: p.toolName,
     input: p.input,
+    elevated: p.elevated,
     requestedAt: p.requestedAt,
     expiresAt: p.expiresAt,
     status: p.status,
@@ -532,6 +643,7 @@ function approvalError(err: unknown): Response | null {
   if (err instanceof ThreadAwaitingApprovalError) return awaitingApproval409(err.pending);
   if (err instanceof ApprovalNotFoundError) return jsonError(404, "approval_not_found");
   if (err instanceof ApprovalAlreadyDecidedError) return jsonError(409, "approval_already_decided");
+  if (err instanceof ApprovalBoundaryConflictError) return jsonError(409, "approval_changed");
   if (err instanceof ApprovalExpiredError) return jsonError(410, "approval_expired");
   if (err instanceof ApprovalNotReadyError) {
     return jsonError(409, "approval_not_ready", "The turn is not ready for a decision yet; retry.");

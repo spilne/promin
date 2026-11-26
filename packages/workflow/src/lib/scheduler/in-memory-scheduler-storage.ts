@@ -16,6 +16,7 @@ import type {
 import { scheduleMetadataContains } from "./metadata-filter.ts";
 import { SystemWallClock, type WallClock } from "../shared/wall-clock.ts";
 import { InMemoryLeaderLeases, type LeaderLease } from "./leader-lease.ts";
+import { normalizeRunSecurityContext } from "../durable/run-security-context.ts";
 
 export interface InMemorySchedulerStorageConfig {
   /**
@@ -61,14 +62,15 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
   }
 
   async loadSchedule(id: string): Promise<DurableScheduleConfig | null> {
-    return this.schedules.get(id) ?? null;
+    const config = this.schedules.get(id);
+    return config ? copySchedule(config) : null;
   }
 
   async loadSchedules(ids: string[]): Promise<Map<string, DurableScheduleConfig>> {
     const out = new Map<string, DurableScheduleConfig>();
     for (const id of ids) {
       const cfg = this.schedules.get(id);
-      if (cfg) out.set(id, cfg);
+      if (cfg) out.set(id, copySchedule(cfg));
     }
     return out;
   }
@@ -175,7 +177,7 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
   async upsertSchedule(config: DurableScheduleConfig): Promise<void> {
     // Normalize: enabled defaults to true.
     const enabled = config.enabled !== false;
-    this.schedules.set(config.id, { ...config, enabled });
+    this.schedules.set(config.id, copySchedule({ ...config, enabled }));
     const prev = this.state.get(config.id);
     // An insert starts a new incarnation; a replace keeps it and the fire
     // state. The config changed either way, so its last error is moot.
@@ -216,7 +218,7 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
   async setEnabled(id: string, enabled: boolean): Promise<void> {
     const cfg = this.schedules.get(id);
     if (!cfg) return;
-    this.schedules.set(id, { ...cfg, enabled });
+    this.schedules.set(id, copySchedule({ ...cfg, enabled }));
     if (!enabled) this.nextRun.delete(id);
     else this.seedNextRun(cfg);
   }
@@ -239,7 +241,7 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     const filtered = this.applyFilters(params);
     const offset = params?.offset ?? 0;
     const limit = params?.limit ?? 100;
-    return filtered.slice(offset, offset + limit);
+    return filtered.slice(offset, offset + limit).map(copySchedule);
   }
 
   async countSchedules(params?: {
@@ -308,4 +310,16 @@ export class InMemorySchedulerStorage implements SchedulerStorage {
     due.sort((a, b) => a.nextRun - b.nextRun);
     return due.slice(0, params.limit).map(({ id, namespace }) => ({ id, namespace }));
   }
+}
+
+function copySchedule(config: DurableScheduleConfig): DurableScheduleConfig {
+  return {
+    ...config,
+    ...(config.metadata !== undefined && {
+      metadata: structuredClone(config.metadata),
+    }),
+    ...(config.securityContext !== undefined && {
+      securityContext: normalizeRunSecurityContext(config.securityContext),
+    }),
+  };
 }

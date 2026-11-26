@@ -14,12 +14,31 @@ import {
 import {
   hasCapability,
   runUsage,
+  SystemWallClock,
   workflow,
+  type RunSecurityContext,
   type UsageReport,
   type UsageTotals,
+  type WallClock,
   type Workflow,
   type WorkflowBudget,
+  type WorkflowState,
 } from "@promin/workflow";
+import { normalizeRunSecurityContext, sameRunSecurityContext } from "@promin/workflow/storage-kit";
+import {
+  snapshotAuthorizationDecision,
+  snapshotSecurityContext,
+  snapshotSecurityPermission,
+  snapshotSecurityResource,
+  type AuthorizationDecision,
+  type AuthorizationRequest,
+  type Principal,
+  type PrincipalRef,
+  type SecurityAuditEvent,
+  type SecurityContext,
+  type ZoryaSecurity,
+} from "../../security/index.ts";
+import type { Logger } from "../../server-config.ts";
 import type { LocalWorkflows } from "../workflows/local-workflows.ts";
 import type { ZoryaAgents } from "./zorya-agents.ts";
 
@@ -71,6 +90,16 @@ interface RetainedInput {
   readonly parent: RetainedParent;
   readonly depth: number;
   readonly task: string;
+  /** Starter identity persisted with both the retained input and durable run. */
+  readonly securityContext?: RunSecurityContext;
+}
+
+export interface RetainedExecutionSecurityConfig {
+  readonly security: ZoryaSecurity;
+  readonly clock?: Pick<WallClock, "now">;
+  readonly logger?: Pick<Logger, "error">;
+  /** Built-in key mode adopts contextless legacy/direct children as operator. */
+  readonly legacySecurityContext?: RunSecurityContext;
 }
 
 export interface RetainedSubagentsConfig {
@@ -130,20 +159,59 @@ export interface RetainedSubagentsConfig {
   readonly childBudget?: WorkflowBudget;
 }
 
+type RetainedRuntimeConfig = RetainedSubagentsConfig & {
+  readonly authorizeTurn: (
+    input: RetainedInput,
+    operation: RetainedSecurityOperation,
+  ) => Promise<{
+    readonly securityContext?: RunSecurityContext;
+    readonly principal?: Principal;
+  }>;
+};
+
+type RetainedSecurityOperation =
+  | "spawn"
+  | "spawn.commit"
+  | "message"
+  | "message.commit"
+  | "stop"
+  | "stop.commit"
+  | "turn.registry"
+  | "turn.resolve"
+  | "turn.thread"
+  | "turn.send";
+
+interface RetainedAuthorizationTarget {
+  readonly childId: string;
+  readonly agentId: string;
+  readonly parent: RetainedParent;
+  readonly securityContext?: RunSecurityContext;
+}
+
 /** Durable, retained child agents. One workflow holds each child's ordered inbox. */
 export class RetainedSubagents {
   private readonly config: RetainedSubagentsConfig;
+  private executionSecurity?: {
+    readonly security: ZoryaSecurity;
+    readonly clock: Pick<WallClock, "now">;
+    readonly logger: Pick<Logger, "error">;
+    readonly legacySecurityContext?: RunSecurityContext;
+  };
   readonly definition: Workflow<RetainedInput, void>;
 
   constructor(config: RetainedSubagentsConfig) {
     this.config = config;
+    const service: RetainedRuntimeConfig = {
+      ...config,
+      authorizeTurn: (input, operation) => this.authorizeStoredTurn(input, operation),
+    };
     this.definition = workflow<RetainedInput>({
       name: RETAINED_AGENT_WORKFLOW,
       type: "retained-agent",
       ...(config.childBudget !== undefined && { budget: config.childBudget }),
     })
-      .journaled("retained-agent", function* (ctx, input) {
-        const service = config;
+      .journaled("retained-agent", function* (ctx, storedInput) {
+        const input = decodeRetainedInput(storedInput);
         const pollMs = service.pollIntervalMs ?? 60_000;
         const maxIdlePolls = Math.max(1, Math.ceil((service.idleTtlMs ?? 3_600_000) / pollMs));
         const maxIterations = service.maxIterations ?? 1000;
@@ -178,7 +246,23 @@ export class RetainedSubagents {
         }
       })
       .build();
-    config.workflows.define(this.definition as Workflow<unknown, unknown>, { internal: true });
+    config.workflows.define(this.definition as Workflow<unknown, unknown>, {
+      internal: true,
+    });
+  }
+
+  /** Installed by ZoryaServer once its pluggable security implementation is known. */
+  configureExecutionSecurity(config: RetainedExecutionSecurityConfig): void {
+    const legacySecurityContext =
+      config.legacySecurityContext === undefined
+        ? undefined
+        : normalizeRunSecurityContext(config.legacySecurityContext);
+    this.executionSecurity = Object.freeze({
+      security: config.security,
+      clock: config.clock ?? SystemWallClock,
+      logger: config.logger ?? console,
+      ...(legacySecurityContext !== undefined && { legacySecurityContext }),
+    });
   }
 
   async start(): Promise<void> {
@@ -197,12 +281,25 @@ export class RetainedSubagents {
     readonly agentId: string;
     readonly task: string;
     readonly childId?: string;
+    /** Trusted caller identity; never read from model or HTTP request bodies. */
+    readonly securityContext?: RunSecurityContext;
   }): Promise<RetainedChildHandle> {
-    const key = `${params.parent.namespaceId}\u0000${params.parent.threadId}`;
+    const parent = decodeRetainedParent(params.parent);
+    const requestedSecurityContext = params.securityContext;
+    const admitted = Object.freeze({
+      parent,
+      agentId: params.agentId,
+      task: params.task,
+      ...(params.childId !== undefined && { childId: params.childId }),
+      ...(requestedSecurityContext !== undefined && {
+        securityContext: normalizeRunSecurityContext(requestedSecurityContext),
+      }),
+    });
+    const key = `${parent.namespaceId}\u0000${parent.threadId}`;
     const previous = this.spawnChains.get(key) ?? Promise.resolve();
     const run = previous.then(
-      () => this.admit(params),
-      () => this.admit(params),
+      () => this.admit(admitted),
+      () => this.admit(admitted),
     );
     const tail = run.catch(() => undefined);
     this.spawnChains.set(key, tail);
@@ -217,6 +314,7 @@ export class RetainedSubagents {
     readonly agentId: string;
     readonly task: string;
     readonly childId?: string;
+    readonly securityContext?: RunSecurityContext;
   }): Promise<RetainedChildHandle> {
     const { parent } = params;
     const gate = this.config.agents.turnGate;
@@ -237,6 +335,21 @@ export class RetainedSubagents {
     try {
       if (!params.task.trim())
         throw new RetainedSubagentError("invalid", "Subagent task must not be empty");
+      // Snapshot/validate the trusted starter identity before any registry,
+      // thread or delegation-policy work can run.
+      const securityContext = this.contextForSpawn(params.securityContext);
+      const childId = params.childId ?? randomUUID();
+      const target: RetainedAuthorizationTarget = {
+        childId,
+        agentId: params.agentId,
+        parent,
+        ...(securityContext !== undefined && { securityContext }),
+      };
+      if (this.executionSecurity && securityContext === undefined) {
+        await this.auditMissingIdentity(target, "spawn");
+        throw new RetainedSubagentError("forbidden", "Retained subagent identity is required");
+      }
+      await this.authorizeIdentity(target, "spawn");
       const parentThread = await this.ownedParent(parent);
       const allowed = await this.config.canDelegate(parent.agentId, params.agentId, {
         parent,
@@ -256,23 +369,25 @@ export class RetainedSubagents {
       const recipe = await this.config.agents.registry.get({ id: params.agentId });
       if (!recipe || !recipe.enabled)
         throw new RetainedSubagentError("not_found", "Child agent unavailable");
-      const childId = params.childId ?? randomUUID();
       const workflowId = `retained-agent:${childId}`;
       if (await this.config.workflows.storage.loadWorkflow(workflowId)) {
         throw new RetainedSubagentError("conflict", "Child id already exists");
       }
-      const input: RetainedInput = {
+      const input: RetainedInput = Object.freeze({
         childId,
         agentId: params.agentId,
         agentVersion: recipe.version,
-        parent,
+        parent: Object.freeze({ ...parent }),
         depth,
         task: params.task,
-      };
+        ...(securityContext !== undefined && { securityContext }),
+      });
+      await this.authorizeIdentity(input, "spawn.commit");
       await this.config.workflows.trigger(RETAINED_AGENT_WORKFLOW, input, {
         workflowId,
         namespace: parent.namespaceId,
         internal: true,
+        ...(securityContext !== undefined && { securityContext }),
         metadata: {
           childId,
           agentId: params.agentId,
@@ -284,16 +399,11 @@ export class RetainedSubagents {
         },
       });
       const admitted = await this.config.workflows.storage.loadWorkflow(workflowId);
-      // jsonb does not preserve key order: compare identity fields only.
-      const stored = admitted?.input as Partial<RetainedInput> | undefined;
-      if (
-        stored &&
-        (stored.childId !== input.childId ||
-          stored.agentId !== input.agentId ||
-          stored.agentVersion !== input.agentVersion ||
-          stored.task !== input.task ||
-          stored.parent?.threadId !== parent.threadId)
-      ) {
+      if (!admitted) {
+        throw new RetainedSubagentError("conflict", "Child workflow was not persisted");
+      }
+      const stored = decodeRetainedState(admitted);
+      if (!sameRetainedInput(stored, input)) {
         throw new RetainedSubagentError("conflict", "Child id already exists");
       }
       return {
@@ -310,6 +420,7 @@ export class RetainedSubagents {
   }
 
   async listChildAgents(parent: RetainedParent): Promise<RetainedChildHandle[]> {
+    parent = decodeRetainedParent(parent);
     await this.ownedParent(parent);
     const states = await this.config.workflows.storage.listWorkflows({
       name: RETAINED_AGENT_WORKFLOW,
@@ -320,21 +431,25 @@ export class RetainedSubagents {
         resourceId: parent.resourceId,
       },
     });
-    return states
-      .filter((state) => state.metadata?.deleted !== true)
-      .map((state) => {
-        const input = state.input as RetainedInput;
+    return states.flatMap((state) => {
+      try {
+        const input = decodeRetainedState(state);
         const usage = state.steps ? runUsage(state.steps) : undefined;
-        return {
-          childId: input.childId,
-          workflowId: state.workflowId,
-          agentId: input.agentId,
-          threadId: childThreadId(input.childId),
-          status: state.status,
-          depth: input.depth,
-          ...(usage && { usage }),
-        };
-      });
+        return [
+          {
+            childId: input.childId,
+            workflowId: state.workflowId,
+            agentId: input.agentId,
+            threadId: childThreadId(input.childId),
+            status: state.status,
+            depth: input.depth,
+            ...(usage && { usage }),
+          },
+        ];
+      } catch {
+        return [];
+      }
+    });
   }
 
   async messageAgent(params: {
@@ -344,7 +459,7 @@ export class RetainedSubagents {
     readonly mode?: DeliveryMode;
     readonly messageId?: string;
   }): Promise<{ readonly seq: number }> {
-    const input = await this.ownedChild(params.parent, params.childId);
+    const input = await this.ownedChild(params.parent, params.childId, "message");
     const state = await this.config.workflows.storage.loadWorkflow(workflowIdOf(params.childId));
     if (state && TERMINAL.includes(state.status)) {
       throw new RetainedSubagentError("conflict", "Child agent has stopped");
@@ -353,6 +468,7 @@ export class RetainedSubagents {
       throw new RetainedSubagentError("invalid", "Subagent message must not be empty");
     const mode = params.mode ?? "queued";
     const messageId = params.messageId ?? randomUUID();
+    await this.authorizeStoredTurn(input, "message.commit");
     const [stored] = await this.config.memory.appendMessages(
       inboxKey(input),
       [
@@ -403,8 +519,14 @@ export class RetainedSubagents {
     return { inbox, transcript, outcomes };
   }
 
+  /** Authoritative recipe behind an owned retained child, for route admission. */
+  async resolveOwnedChildAgentId(parent: RetainedParent, childId: string): Promise<string> {
+    return (await this.ownedChild(parent, childId)).agentId;
+  }
+
   async stopAgent(parent: RetainedParent, childId: string): Promise<void> {
-    await this.ownedChild(parent, childId);
+    const input = await this.ownedChild(parent, childId, "stop");
+    await this.authorizeStoredTurn(input, "stop.commit");
     await this.config.workflows.storage.cancelWorkflow({ workflowId: workflowIdOf(childId) });
   }
 
@@ -442,8 +564,13 @@ export class RetainedSubagents {
       name: RETAINED_AGENT_WORKFLOW,
     });
     for (const state of states) {
-      if (TERMINAL.includes(state.status) || state.metadata?.deleted === true) continue;
-      const input = state.input as RetainedInput;
+      if (TERMINAL.includes(state.status)) continue;
+      let input: RetainedInput;
+      try {
+        input = decodeRetainedState(state);
+      } catch {
+        continue;
+      }
       const consumed = new Set(
         (await this.config.memory.getMessages(outcomeKey(input))).map((m) =>
           "metadata" in m ? m.metadata?.seq : undefined,
@@ -461,6 +588,7 @@ export class RetainedSubagents {
   }
 
   private async ownedParent(parent: RetainedParent) {
+    parent = decodeRetainedParent(parent);
     const recipe = await this.config.agents.registry.get({ id: parent.agentId });
     if (!recipe) throw new RetainedSubagentError("not_found", "Parent agent unavailable");
     const agent = (await this.config.agents.resolve(recipe, parent)).withScope(parent);
@@ -471,21 +599,440 @@ export class RetainedSubagents {
     return thread;
   }
 
-  private async ownedChild(parent: RetainedParent, childId: string): Promise<RetainedInput> {
-    await this.ownedParent(parent);
+  private async ownedChild(
+    parent: RetainedParent,
+    childId: string,
+    operation?: "message" | "stop",
+  ): Promise<RetainedInput> {
+    parent = decodeRetainedParent(parent);
+    childId = requiredId(childId, "childId");
     const state = await this.config.workflows.storage.loadWorkflow(workflowIdOf(childId));
-    if (
-      !state ||
-      state.workflowName !== RETAINED_AGENT_WORKFLOW ||
-      state.namespace !== parent.namespaceId ||
-      state.metadata?.parentAgentId !== parent.agentId ||
-      state.metadata?.parentThreadId !== parent.threadId ||
-      state.metadata?.resourceId !== parent.resourceId ||
-      state.metadata?.deleted === true
-    )
+    if (!state) throw new RetainedSubagentError("not_found", "Child agent not found");
+    let input: RetainedInput;
+    try {
+      input = decodeRetainedState(state);
+    } catch {
       throw new RetainedSubagentError("not_found", "Child agent not found");
-    return state.input as RetainedInput;
+    }
+    if (input.childId !== childId || !sameRetainedParent(input.parent, parent)) {
+      throw new RetainedSubagentError("not_found", "Child agent not found");
+    }
+    if (operation !== undefined) await this.authorizeStoredTurn(input, operation);
+    await this.ownedParent(parent);
+    return input;
   }
+
+  private contextForSpawn(
+    requested: RunSecurityContext | undefined,
+  ): RunSecurityContext | undefined {
+    if (requested !== undefined) return normalizeRunSecurityContext(requested);
+    if (!this.executionSecurity) return undefined;
+    if (this.executionSecurity.legacySecurityContext !== undefined) {
+      return this.executionSecurity.legacySecurityContext;
+    }
+    return undefined;
+  }
+
+  /** Reload and bind the workflow's durable input/context at every side-effect boundary. */
+  private async authorizeStoredTurn(
+    expected: RetainedInput,
+    operation: RetainedSecurityOperation,
+  ): Promise<{
+    readonly securityContext?: RunSecurityContext;
+    readonly principal?: Principal;
+  }> {
+    const state = await this.config.workflows.storage.loadWorkflow(workflowIdOf(expected.childId));
+    if (!state) {
+      await this.auditBindingDenial(expected, operation);
+      throw new RetainedSubagentError("forbidden", "Retained child is unavailable");
+    }
+    let input: RetainedInput;
+    try {
+      input = decodeRetainedState(state);
+    } catch {
+      await this.auditBindingDenial(expected, operation);
+      throw new RetainedSubagentError("forbidden", "Retained child identity mismatch");
+    }
+    if (!sameRetainedInput(input, expected)) {
+      await this.auditBindingDenial(expected, operation);
+      throw new RetainedSubagentError("forbidden", "Retained child identity mismatch");
+    }
+    return this.authorizeIdentity(input, operation);
+  }
+
+  private async auditBindingDenial(
+    input: RetainedAuthorizationTarget,
+    operation: RetainedSecurityOperation,
+  ): Promise<void> {
+    if (!this.executionSecurity) return;
+    const runContext = this.contextForSpawn(input.securityContext);
+    if (!runContext) {
+      await this.auditMissingIdentity(input, operation);
+      return;
+    }
+    const actorRef = toPrincipalRef(runContext.actor);
+    await this.auditRetainedAuthorization(
+      input,
+      operation,
+      snapshotSecurityContext({
+        actor: unresolvedPrincipal(actorRef),
+        effective: toPrincipalRef(runContext.effective ?? runContext.actor),
+      }),
+      { allowed: false, reason: "identity_unknown" },
+    );
+  }
+
+  /** Resolve current actor/effective principal, authorize agent.invoke and immutably audit it. */
+  private async authorizeIdentity(
+    input: RetainedAuthorizationTarget,
+    operation: RetainedSecurityOperation,
+  ): Promise<{
+    readonly securityContext?: RunSecurityContext;
+    readonly principal?: Principal;
+  }> {
+    if (!this.executionSecurity) {
+      return input.securityContext === undefined
+        ? {}
+        : { securityContext: normalizeRunSecurityContext(input.securityContext) };
+    }
+    const runContext = this.contextForSpawn(input.securityContext);
+    if (!runContext) {
+      await this.auditMissingIdentity(input, operation);
+      throw new RetainedSubagentError("forbidden", "Retained subagent identity is required");
+    }
+    const actorRef = toPrincipalRef(runContext.actor);
+    const effectiveRef = toPrincipalRef(runContext.effective ?? runContext.actor);
+    const unresolved = snapshotSecurityContext({
+      actor: unresolvedPrincipal(actorRef),
+      effective: effectiveRef,
+    });
+    const actorRaw = await this.executionSecurity.security.resolvePrincipal(actorRef);
+    if (!actorRaw) {
+      await this.auditRetainedAuthorization(input, operation, unresolved, {
+        allowed: false,
+        reason: "identity_unknown",
+      });
+      throw new RetainedSubagentError("forbidden", "Retained starter unavailable");
+    }
+    const actorContext = snapshotSecurityContext({ actor: actorRaw, effective: effectiveRef });
+    if (!samePrincipalRef(actorContext.actor, actorRef)) {
+      await this.auditRetainedAuthorization(input, operation, unresolved, {
+        allowed: false,
+        reason: "identity_unknown",
+      });
+      throw new RetainedSubagentError("forbidden", "Retained starter unavailable");
+    }
+    const resolvedRaw = await this.executionSecurity.security.resolveIdentity({
+      actor: actorContext.actor,
+      asserted: effectiveRef,
+    });
+    const resolved = resolvedRaw === undefined ? undefined : snapshotSecurityContext(resolvedRaw);
+    if (
+      !resolved ||
+      !samePrincipalRef(resolved.actor, actorRef) ||
+      !samePrincipalRef(resolved.effective, effectiveRef)
+    ) {
+      await this.auditRetainedAuthorization(input, operation, actorContext, {
+        allowed: false,
+        reason: "identity_unknown",
+      });
+      throw new RetainedSubagentError("forbidden", "Retained starter unavailable");
+    }
+    let principal: Principal | undefined;
+    if (samePrincipalRef(resolved.actor, resolved.effective)) {
+      principal = resolved.actor;
+    } else {
+      const effectiveRaw = await this.executionSecurity.security.resolvePrincipal(
+        resolved.effective,
+      );
+      // Key-only mode intentionally has no user directory. Its operator is
+      // the resolver principal while the durable effective ref remains exact.
+      if (!effectiveRaw && resolved.actor.kind === "operator") principal = resolved.actor;
+      if (effectiveRaw) {
+        const effectiveSnapshot = snapshotSecurityContext({
+          actor: effectiveRaw,
+          effective: resolved.effective,
+        }).actor;
+        if (samePrincipalRef(effectiveSnapshot, resolved.effective)) principal = effectiveSnapshot;
+      }
+    }
+    if (!principal) {
+      await this.auditRetainedAuthorization(input, operation, resolved, {
+        allowed: false,
+        reason: "identity_unknown",
+      });
+      throw new RetainedSubagentError("forbidden", "Retained subject unavailable");
+    }
+
+    const permission = snapshotSecurityPermission({ resource: "agent", action: "invoke" });
+    const resource = snapshotSecurityResource({
+      kind: "agent",
+      namespaceId: input.parent.namespaceId,
+      id: input.agentId,
+    });
+    const decision = snapshotAuthorizationDecision(
+      await this.executionSecurity.security.authorize({
+        context: resolved,
+        permission,
+        resource,
+      } as AuthorizationRequest),
+    );
+    await this.auditRetainedAuthorization(input, operation, resolved, decision);
+    if (!decision.allowed) {
+      throw new RetainedSubagentError("forbidden", "Retained child authorization denied");
+    }
+    return { securityContext: runContext, principal };
+  }
+
+  private async auditRetainedAuthorization(
+    input: RetainedAuthorizationTarget,
+    operation: RetainedSecurityOperation,
+    context: SecurityContext,
+    decisionSource: AuthorizationDecision,
+  ): Promise<void> {
+    const executionSecurity = this.executionSecurity;
+    if (!executionSecurity) return;
+    const permission = snapshotSecurityPermission({ resource: "agent", action: "invoke" });
+    const resource = snapshotSecurityResource({
+      kind: "agent",
+      namespaceId: input.parent.namespaceId,
+      id: input.agentId,
+    });
+    const decision = snapshotAuthorizationDecision(decisionSource);
+    const event: SecurityAuditEvent = Object.freeze({
+      event: "retained-agent.authorization",
+      occurredAt: executionSecurity.clock.now().toISOString(),
+      context,
+      namespaceId: input.parent.namespaceId,
+      resource,
+      permission,
+      decision,
+      metadata: Object.freeze({
+        operation,
+        childId: input.childId,
+        parentAgentId: input.parent.agentId,
+        parentThreadId: input.parent.threadId,
+        parentResourceId: input.parent.resourceId,
+        actorKind: context.actor.kind,
+        actorId: context.actor.id,
+        effectiveKind: context.effective.kind,
+        effectiveId: context.effective.id,
+      }),
+    });
+    try {
+      await executionSecurity.security.recordAudit(event);
+    } catch (error) {
+      try {
+        executionSecurity.logger.error(
+          `[zorya] retained security audit failed for ${decision.allowed ? "allowed" : "denied"} ${operation}`,
+          error,
+        );
+      } catch {
+        // Observability never changes an already denied result.
+      }
+      if (decision.allowed) {
+        throw new RetainedSubagentError("forbidden", "Retained security audit unavailable");
+      }
+    }
+  }
+
+  /** Missing durable identity has no honest SecurityContext; never invent one for audit. */
+  private async auditMissingIdentity(
+    input: RetainedAuthorizationTarget,
+    operation: RetainedSecurityOperation,
+  ): Promise<void> {
+    const executionSecurity = this.executionSecurity;
+    if (!executionSecurity) return;
+    const permission = snapshotSecurityPermission({ resource: "agent", action: "invoke" });
+    const resource = snapshotSecurityResource({
+      kind: "agent",
+      namespaceId: input.parent.namespaceId,
+      id: input.agentId,
+    });
+    const decision = snapshotAuthorizationDecision({
+      allowed: false,
+      reason: "identity_unknown",
+    });
+    // Absence is the fact being audited, so never invent a context.
+    const event: SecurityAuditEvent = Object.freeze({
+      event: "retained-agent.authorization",
+      occurredAt: executionSecurity.clock.now().toISOString(),
+      namespaceId: input.parent.namespaceId,
+      resource,
+      permission,
+      decision,
+      metadata: Object.freeze({
+        operation,
+        denialReason: "missing_identity",
+        childId: input.childId,
+        parentAgentId: input.parent.agentId,
+        parentThreadId: input.parent.threadId,
+        parentResourceId: input.parent.resourceId,
+        actorKind: null,
+        actorId: null,
+        effectiveKind: null,
+        effectiveId: null,
+      }),
+    });
+    try {
+      await executionSecurity.security.recordAudit(event);
+    } catch (error) {
+      try {
+        executionSecurity.logger.error(
+          `[zorya] retained security audit failed for denied ${operation}`,
+          error,
+        );
+      } catch {
+        // Audit failure never changes the missing-identity denial.
+      }
+    }
+  }
+}
+
+function toPrincipalRef(ref: { readonly kind: string; readonly id: string }): PrincipalRef {
+  return Object.freeze({ kind: ref.kind as PrincipalRef["kind"], id: ref.id });
+}
+
+function samePrincipalRef(left: PrincipalRef, right: PrincipalRef): boolean {
+  return left.kind === right.kind && left.id === right.id;
+}
+
+function unresolvedPrincipal(ref: PrincipalRef): Principal {
+  return Object.freeze({
+    kind: ref.kind,
+    id: ref.id,
+    accessRoles: Object.freeze({}),
+    canActFor: false,
+  });
+}
+
+const INVALID_RETAINED_ID = /[\p{Cc}\p{Cf}]/u;
+
+function requiredId(value: unknown, label: string): string {
+  if (
+    typeof value !== "string" ||
+    value.trim().length === 0 ||
+    value.length > 1024 ||
+    INVALID_RETAINED_ID.test(value)
+  ) {
+    throw new RetainedSubagentError("invalid", `Invalid retained ${label}`);
+  }
+  return value;
+}
+
+function decodeRetainedParent(value: unknown): RetainedParent {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new RetainedSubagentError("invalid", "Invalid retained parent");
+  }
+  const source = value as Record<string, unknown>;
+  const namespaceId = source.namespaceId;
+  const resourceId = source.resourceId;
+  const agentId = source.agentId;
+  const threadId = source.threadId;
+  return Object.freeze({
+    namespaceId: requiredId(namespaceId, "parent namespaceId"),
+    resourceId: requiredId(resourceId, "parent resourceId"),
+    agentId: requiredId(agentId, "parent agentId"),
+    threadId: requiredId(threadId, "parent threadId"),
+  });
+}
+
+function decodeOptionalSecurityContext(value: unknown): RunSecurityContext | undefined {
+  return value === undefined ? undefined : normalizeRunSecurityContext(value as RunSecurityContext);
+}
+
+function decodeRetainedInput(value: unknown): RetainedInput {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new RetainedSubagentError("invalid", "Invalid retained input");
+  }
+  // Snapshot every getter once. All later authorization and execution uses
+  // only this detached, deeply frozen value.
+  const source = value as Record<string, unknown>;
+  const childId = source.childId;
+  const agentId = source.agentId;
+  const agentVersion = source.agentVersion;
+  const parent = source.parent;
+  const depth = source.depth;
+  const task = source.task;
+  const securityContext = source.securityContext;
+  if (!Number.isSafeInteger(depth) || (depth as number) < 1) {
+    throw new RetainedSubagentError("invalid", "Invalid retained depth");
+  }
+  if (typeof task !== "string" || task.trim().length === 0) {
+    throw new RetainedSubagentError("invalid", "Invalid retained task");
+  }
+  const decodedSecurityContext = decodeOptionalSecurityContext(securityContext);
+  return Object.freeze({
+    childId: requiredId(childId, "childId"),
+    agentId: requiredId(agentId, "agentId"),
+    agentVersion: requiredId(agentVersion, "agentVersion"),
+    parent: decodeRetainedParent(parent),
+    depth: depth as number,
+    task,
+    ...(decodedSecurityContext !== undefined && { securityContext: decodedSecurityContext }),
+  });
+}
+
+function decodeRetainedState(state: WorkflowState): RetainedInput {
+  // Snapshot the storage-owned fields once before decoding any nested data.
+  const workflowId = state.workflowId;
+  const workflowName = state.workflowName;
+  const namespace = state.namespace;
+  const inputValue = state.input;
+  const securityContextValue = state.securityContext;
+  const metadataValue = state.metadata;
+  const input = decodeRetainedInput(inputValue);
+  const securityContext = decodeOptionalSecurityContext(securityContextValue);
+  if (!metadataValue || typeof metadataValue !== "object" || Array.isArray(metadataValue)) {
+    throw new RetainedSubagentError("invalid", "Invalid retained metadata");
+  }
+  const metadata = metadataValue as Record<string, unknown>;
+  const childId = metadata.childId;
+  const agentId = metadata.agentId;
+  const agentVersion = metadata.agentVersion;
+  const parentAgentId = metadata.parentAgentId;
+  const parentThreadId = metadata.parentThreadId;
+  const resourceId = metadata.resourceId;
+  const depth = metadata.depth;
+  const deleted = metadata.deleted;
+  if (
+    workflowId !== workflowIdOf(input.childId) ||
+    workflowName !== RETAINED_AGENT_WORKFLOW ||
+    namespace !== input.parent.namespaceId ||
+    childId !== input.childId ||
+    agentId !== input.agentId ||
+    agentVersion !== input.agentVersion ||
+    parentAgentId !== input.parent.agentId ||
+    parentThreadId !== input.parent.threadId ||
+    resourceId !== input.parent.resourceId ||
+    depth !== input.depth ||
+    deleted === true ||
+    !sameRunSecurityContext(securityContext, input.securityContext)
+  ) {
+    throw new RetainedSubagentError("invalid", "Invalid retained state binding");
+  }
+  return input;
+}
+
+function sameRetainedParent(left: RetainedParent, right: RetainedParent): boolean {
+  return (
+    left.namespaceId === right.namespaceId &&
+    left.resourceId === right.resourceId &&
+    left.agentId === right.agentId &&
+    left.threadId === right.threadId
+  );
+}
+
+function sameRetainedInput(left: RetainedInput, right: RetainedInput): boolean {
+  return (
+    left.childId === right.childId &&
+    left.agentId === right.agentId &&
+    left.agentVersion === right.agentVersion &&
+    sameRetainedParent(left.parent, right.parent) &&
+    left.depth === right.depth &&
+    left.task === right.task &&
+    sameRunSecurityContext(left.securityContext, right.securityContext)
+  );
 }
 
 function workflowIdOf(childId: string): string {
@@ -549,7 +1096,7 @@ interface TurnReport {
  * is admitted against the parent's budgets and its spend is charged to them.
  */
 async function runAndRecord(
-  config: RetainedSubagentsConfig,
+  config: RetainedRuntimeConfig,
   input: RetainedInput,
   task: string,
   seq: number,
@@ -671,7 +1218,7 @@ async function hasSteerAfter(
 
 /** Process the inbox message at `seq` if it exists. */
 async function consume(
-  config: RetainedSubagentsConfig,
+  config: RetainedRuntimeConfig,
   input: RetainedInput,
   seq: number,
 ): Promise<{
@@ -697,30 +1244,55 @@ async function consume(
 }
 
 async function runChildTurn(params: {
-  readonly config: RetainedSubagentsConfig;
+  readonly config: RetainedRuntimeConfig;
   readonly input: RetainedInput;
   readonly task: string;
   readonly turnKey: string;
   readonly signal: AbortSignal;
 }): Promise<string> {
   const { config, input, task, turnKey, signal } = params;
+  // Reauthorize after every await that could race revocation. Each next
+  // side-effecting layer sees only the principal resolved at its boundary.
+  await config.authorizeTurn(input, "turn.registry");
   const recipe: RegisteredAgent | null = await config.agents.registry.get({
     id: input.agentId,
     version: input.agentVersion,
   });
   if (!recipe) throw new Error("Pinned child agent recipe unavailable");
-  const agent = (await config.agents.resolve(recipe, input.parent)).withScope({
+  const resolverIdentity = await config.authorizeTurn(input, "turn.resolve");
+  const resolvedAgent = await config.agents.resolve(recipe, {
+    ...input.parent,
+    ...(resolverIdentity.principal !== undefined && { principal: resolverIdentity.principal }),
+    ...(resolverIdentity.securityContext !== undefined && {
+      securityContext: resolverIdentity.securityContext,
+    }),
+  });
+  await config.authorizeTurn(input, "turn.thread");
+  const agent = resolvedAgent.withScope({
     namespaceId: input.parent.namespaceId,
     resourceId: input.parent.resourceId,
   });
   const thread = await agent.thread(childThreadId(input.childId), {
+    ...(resolverIdentity.securityContext !== undefined && {
+      securityContext: resolverIdentity.securityContext,
+    }),
     metadata: {
       retainedParentAgentId: input.parent.agentId,
       retainedParentThreadId: input.parent.threadId,
       retainedDepth: input.depth,
     },
   });
-  const result = await thread.send({ task }, { turnKey, signal });
+  const sendIdentity = await config.authorizeTurn(input, "turn.send");
+  const result = await thread.send(
+    { task },
+    {
+      turnKey,
+      signal,
+      ...(sendIdentity.securityContext !== undefined && {
+        securityContext: sendIdentity.securityContext,
+      }),
+    },
+  );
   await result.text;
   return await result.finishReason;
 }

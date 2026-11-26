@@ -270,7 +270,10 @@ export type {
   RetrieveRequest,
   RetrieveResult,
   Retriever,
+  RetrieverCaller,
   RetrieverFilter,
+  RetrieverSubject,
+  RetrieverSubjectKind,
   RetrieverKey,
   RetrieverRegistry,
   RetrieverToolConfig,
@@ -287,7 +290,11 @@ export type {
   AutoDistillConfig,
   AutoDistillSignals,
 } from "./agent/auto-consolidation.ts";
-export type { AgentRetrieverBinding } from "./agent/retriever-bindings.ts";
+export type {
+  AgentRetrieverBinding,
+  RetrieverAccessResolver,
+  RetrieverSearchAccess,
+} from "./agent/retriever-bindings.ts";
 
 // Universal Agent interface + LocalAgent backend.
 export type {
@@ -298,6 +305,7 @@ export type {
   AgentRunOutput,
   AgentEvent,
   AgentInvokeOpts,
+  ApprovalResumeOpts,
   ThreadOptions,
   ListThreadsParams as AgentListThreadsParams,
   ThreadSummary as AgentThreadSummary,
@@ -790,6 +798,7 @@ export {
 export type {
   PendingApprovalStore,
   PendingApproval,
+  PendingApprovalBoundary,
   PendingApprovalKey,
   PendingApprovalStatus,
   RecordPendingApprovalParams,
@@ -798,6 +807,8 @@ export type {
   ListPendingApprovalsParams,
 } from "./approvals/pending-approval-store.ts";
 export {
+  snapshotPendingApprovalBoundary,
+  ApprovalBoundaryConflictError,
   ApprovalNotFoundError,
   ApprovalNotReadyError,
   ApprovalAlreadyDecidedError,
