@@ -575,11 +575,14 @@ export type {
   FragmentScanLoopOptions,
 } from "./discovery/fragment-scanner.ts";
 export {
+  CODE_SOURCE,
   McpEndpointScanner,
   applyDiscoveredMcpEndpoints,
+  registerMcpEndpointDefinitions,
   startMcpEndpointScanLoop,
 } from "./discovery/mcp-endpoint-scanner.ts";
 export type {
+  RegisterMcpEndpointDefinitionsParams,
   McpEndpointSpec,
   McpEndpointScannerOptions,
   McpEndpointScanResult,
@@ -735,14 +738,17 @@ export {
   type ResolvedMcpEndpointTools,
 } from "./mcp-endpoint/types.ts";
 export {
+  compileMcpEndpoint,
   isMcpEndpointDefinition,
   mcpEndpoint,
   splitMcpEndpointTools,
+  type CompiledMcpEndpoint,
   type McpEndpointDefinition,
   type McpEndpointDefinitionInput,
   type McpEndpointToolEntry,
 } from "./mcp-endpoint/define-mcp-endpoint.ts";
 export { McpEndpointPrivateTools } from "./mcp-endpoint/mcp-endpoint-private-tools.ts";
+export { McpEndpoint, McpEndpointBuilder } from "./mcp-endpoint/mcp-endpoint-builder.ts";
 export {
   mergeToolSources,
   readToolSource,

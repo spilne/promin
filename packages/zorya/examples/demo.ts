@@ -81,6 +81,7 @@ import {
   InMemoryRoleRegistry,
   resolveRemoteAgent,
   tool,
+  McpEndpoint,
   type AgentTool,
   type LLMChatParams,
   type LLMProvider,
@@ -1143,6 +1144,33 @@ const skills = new ZoryaSkills({
 const mcpEndpoints = new ZoryaMcpEndpoints({
   registry: stack.mcpEndpointRegistry,
   tools: [{ listWorkflows: listWorkflowsTool }, toolRegistry],
+  // Declared in code (the ./mcp folder holds the file-defined ones): a
+  // builder endpoint mixing a shared tool with one that closes over demo
+  // state, which a file under ./mcp couldn't reach.
+  endpoints: [
+    McpEndpoint.builder("workflows")
+      .title("Workflow runs")
+      .instructions("Look at what this server is running and how recent runs ended.")
+      .tool("listWorkflows")
+      .tool(
+        tool({
+          name: "countRuns",
+          description: "Count stored runs by status.",
+          parameters: z.object({}),
+          idempotent: true,
+          execute: async () => {
+            const counts: Record<string, number> = {};
+            for (const run of await storage.listWorkflows({ limit: 500 })) {
+              counts[run.status] = (counts[run.status] ?? 0) + 1;
+            }
+            return counts;
+          },
+        }),
+      )
+      .description("Runs on this demo server, declared in demo.ts")
+      .tags(["demo"])
+      .build(),
+  ],
   scan: {
     root: path.join(import.meta.dir, "mcp"),
     intervalMs: 5_000,

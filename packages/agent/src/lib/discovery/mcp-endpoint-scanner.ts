@@ -25,17 +25,16 @@ import { basename, extname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { SystemWallClock, type WallClock } from "@promin/workflow";
 import {
+  compileMcpEndpoint,
   isAgentTool,
   isMcpEndpointDefinition,
-  splitMcpEndpointTools,
   type McpEndpointDefinition,
 } from "../mcp-endpoint/define-mcp-endpoint.ts";
 import type { McpEndpointPrivateTools } from "../mcp-endpoint/mcp-endpoint-private-tools.ts";
-import {
-  MCP_ENDPOINT_ID_PATTERN,
-  type McpEndpointRecipeInput,
-  type McpEndpointRegistry,
-  type RegisterMcpEndpointInput,
+import type {
+  McpEndpointRecipeInput,
+  McpEndpointRegistry,
+  RegisterMcpEndpointInput,
 } from "../mcp-endpoint/types.ts";
 import type { AgentTool } from "../tool.ts";
 import { applyDiscovered, type ApplyDiscoveredResult } from "./apply-discovered.ts";
@@ -230,57 +229,15 @@ export class McpEndpointScanner {
     absPath: string;
     out: McpEndpointScanResult;
   }): void {
-    const { definition, id, folderTools, absPath, out } = params;
-    if (!MCP_ENDPOINT_ID_PATTERN.test(id)) {
-      out.errors.push(
-        `${absPath}: "${id}" is not a valid endpoint id (letters, digits, _ and -, starting with a letter or digit)`,
-      );
-      return;
-    }
-    let split: ReturnType<typeof splitMcpEndpointTools>;
+    const { definition, folderTools, absPath, out } = params;
+    let spec: McpEndpointSpec;
     try {
-      split = splitMcpEndpointTools(definition.tools);
+      spec = compileMcpEndpoint({ definition, fallbackId: params.id, folderTools });
     } catch (err) {
-      out.errors.push(`${absPath}: endpoint "${id}": ${asMessage(err)}`);
+      out.errors.push(`${absPath}: endpoint "${params.id}": ${asMessage(err)}`);
       return;
     }
-    const privateTools: Record<string, AgentTool<any, any>> = { ...folderTools };
-    for (const [name, tool] of Object.entries(split.privateTools)) {
-      if (privateTools[name] !== undefined && privateTools[name] !== tool) {
-        out.errors.push(
-          `${absPath}: endpoint "${id}": inline tool "${name}" clashes with a tools/ file`,
-        );
-        return;
-      }
-      privateTools[name] = tool;
-    }
-    // A name that matches one of the folder's own tools means that tool
-    // (the closest one), not a shared tool of the same name.
-    const resolved = split.bindings.map((b) =>
-      !b.private && Object.hasOwn(folderTools, b.tool) ? { ...b, private: true } : b,
-    );
-    // Folder tools are part of the endpoint even when the definition does
-    // not list them: that is what putting a tool in `tools/` means.
-    const listed = new Set(resolved.filter((b) => b.private).map((b) => b.tool));
-    const bindings = [
-      ...resolved,
-      ...Object.keys(folderTools)
-        .filter((name) => !listed.has(name))
-        .sort()
-        .map((name) => ({ tool: name, private: true })),
-    ];
-    const input: McpEndpointRecipeInput = {
-      tools: bindings,
-      ...(definition.title !== undefined && { title: definition.title }),
-      ...(definition.instructions !== undefined && { instructions: definition.instructions }),
-      ...(definition.capabilities !== undefined && { capabilities: definition.capabilities }),
-      ...(definition.namespaces !== undefined && { namespaces: definition.namespaces }),
-      ...(definition.trustClientApproval !== undefined && {
-        trustClientApproval: definition.trustClientApproval,
-      }),
-      ...(definition.metadata !== undefined && { metadata: definition.metadata }),
-    };
-    const spec: McpEndpointSpec = { id, input, privateTools };
+    const id = spec.id;
     const existing = out.sources[id];
     if (existing !== undefined) {
       out.warnings.push(`duplicate mcp endpoint id "${id}": ${existing} vs ${absPath} — last wins`);
@@ -415,4 +372,50 @@ export function startMcpEndpointScanLoop(
 
 function asMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+// ---------------------------------------------------------------------------
+// Endpoints declared in host code.
+// ---------------------------------------------------------------------------
+
+/** `source` of every version `registerMcpEndpointDefinitions` writes. */
+export const CODE_SOURCE = "code";
+
+export interface RegisterMcpEndpointDefinitionsParams {
+  readonly registry: McpEndpointRegistry;
+  readonly privateTools: McpEndpointPrivateTools;
+  /** Definitions from `McpEndpoint.builder()` or `mcpEndpoint({...})`; each needs an `id`. */
+  readonly definitions: ReadonlyArray<McpEndpointDefinition>;
+}
+
+/**
+ * Register endpoints declared in host code, the way a scan registers files:
+ * their private tools are installed first, an unchanged definition costs no
+ * write (so a restart doesn't mint versions), a changed one becomes a new
+ * version with `source: "code"` — active unless an operator made another
+ * version active. Folder-scan `sync` never removes them. Throws before
+ * writing anything when a definition is invalid or two share an id.
+ */
+export async function registerMcpEndpointDefinitions(
+  params: RegisterMcpEndpointDefinitionsParams,
+): Promise<ApplyDiscoveredResult> {
+  const compiled = params.definitions.map((definition) => {
+    if (definition.id === undefined) {
+      throw new Error("an MCP endpoint defined in code needs an id");
+    }
+    return compileMcpEndpoint({ definition });
+  });
+  const seen = new Set<string>();
+  for (const c of compiled) {
+    if (seen.has(c.id)) throw new Error(`two MCP endpoints are defined with id "${c.id}"`);
+    seen.add(c.id);
+  }
+  for (const c of compiled) {
+    params.privateTools.define({ endpointId: c.id, tools: c.privateTools });
+  }
+  return applyDiscovered({
+    registry: params.registry,
+    discovered: compiled.map((c): RegisterMcpEndpointInput => ({ id: c.id, ...c.input })),
+    source: CODE_SOURCE,
+  });
 }

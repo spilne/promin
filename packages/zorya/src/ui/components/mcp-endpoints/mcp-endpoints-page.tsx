@@ -31,14 +31,13 @@ function blankEndpoint(): RegisteredMcpEndpoint {
   };
 }
 
+/** Who publishes the active version: the folder scan, host code, or an operator (null). */
+function managedBy(e: RegisteredMcpEndpoint): "file" | "code" | null {
+  return e.source === "file" || e.source === "code" ? e.source : null;
+}
+
 export function McpEndpointsPage() {
   const { data, loading, error, refresh } = useFetch(() => api.listMcpEndpoints(), [], 30_000);
-  const { data: sources, refresh: refreshSources } = useFetch(
-    () => api.listMcpEndpointSources(),
-    [],
-    30_000,
-  );
-  const fileManaged = useMemo(() => new Set(sources?.fileManaged ?? []), [sources]);
   const [query, setQuery] = useState("");
   const [editing, setEditing] = useState<{
     endpoint: RegisteredMcpEndpoint;
@@ -59,10 +58,7 @@ export function McpEndpointsPage() {
     return [...filtered].sort((a, b) => a.id.localeCompare(b.id));
   }, [data, query]);
 
-  const reload = () => {
-    refresh();
-    refreshSources();
-  };
+  const reload = () => refresh();
 
   return (
     <Page>
@@ -149,8 +145,17 @@ export function McpEndpointsPage() {
                         ) : (
                           <span class="badge badge-xs badge-error">disabled</span>
                         )}
-                        {fileManaged.has(e.id) && (
-                          <span class="badge badge-xs badge-ghost">file</span>
+                        {managedBy(e) !== null && (
+                          <span
+                            class="badge badge-xs badge-ghost"
+                            title={
+                              managedBy(e) === "file"
+                                ? "Defined in the mcp/ folder"
+                                : "Defined in host code (McpEndpoint.builder)"
+                            }
+                          >
+                            {managedBy(e)}
+                          </span>
                         )}
                       </div>
                     </td>
@@ -184,7 +189,7 @@ export function McpEndpointsPage() {
         <McpEndpointDrawer
           endpoint={editing.endpoint}
           mode={editing.mode}
-          fileManaged={fileManaged.has(editing.endpoint.id)}
+          managedBy={managedBy(editing.endpoint)}
           onClose={() => setEditing(null)}
           onSaved={() => {
             setEditing(null);
@@ -238,8 +243,8 @@ function DeleteDialog(props: {
             <h3 class="font-semibold">Delete MCP endpoint?</h3>
             <p class="text-sm text-base-content/70">
               Delete <span class="font-mono">{props.endpoint.id}</span> (all versions). Connected
-              clients start getting 404. A file-defined endpoint comes back on the next scan unless
-              its file is removed.
+              clients start getting 404. An endpoint defined in a file or in host code comes back on
+              the next scan or restart unless its definition is removed.
             </p>
             {error && <div class="alert alert-error text-xs">{error}</div>}
             <div class="flex justify-end gap-2">

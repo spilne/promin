@@ -22,7 +22,8 @@ import { VersionsPanel } from "../ui/versions-panel.tsx";
 interface Props {
   endpoint: RegisteredMcpEndpoint;
   mode: "create" | "edit";
-  fileManaged: boolean;
+  /** Who publishes the active version: the `mcp/` folder, host code, or nobody (operator). */
+  managedBy: "file" | "code" | null;
   onClose: () => void;
   onSaved: () => void;
 }
@@ -44,7 +45,7 @@ function bindingKey(b: { tool: string; private?: boolean }): string {
   return `${b.private === true ? "private" : "shared"}:${b.tool}`;
 }
 
-export function McpEndpointDrawer({ endpoint, mode, fileManaged, onClose, onSaved }: Props) {
+export function McpEndpointDrawer({ endpoint, mode, managedBy, onClose, onSaved }: Props) {
   const isCreate = mode === "create";
   const [endpointId, setEndpointId] = useState(endpoint.id);
   const id = isCreate ? endpointId.trim() : endpoint.id;
@@ -152,10 +153,11 @@ export function McpEndpointDrawer({ endpoint, mode, fileManaged, onClose, onSave
               {isCreate ? "New MCP endpoint" : "Edit MCP endpoint"}
             </div>
             <div class="font-mono text-sm truncate">{id || "—"}</div>
-            {fileManaged && (
+            {managedBy !== null && (
               <div class="text-[10px] text-warning mt-0.5">
-                Defined in a file. Saving here publishes a new version; later file changes wait as
-                drafts until promoted.
+                Defined {managedBy === "file" ? "in a file" : "in host code"}. Saving here publishes
+                a new version; later {managedBy === "file" ? "file" : "code"} changes wait as drafts
+                until promoted.
               </div>
             )}
           </div>

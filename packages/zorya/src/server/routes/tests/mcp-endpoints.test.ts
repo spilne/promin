@@ -11,6 +11,7 @@ import {
   createScopedTool,
   InMemoryAgentRegistry,
   InMemoryMcpEndpointRegistry,
+  McpEndpoint,
   tool,
 } from "@promin/agent";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -217,6 +218,49 @@ describe("serving MCP endpoints", () => {
     await registry.setEnabled({ id: "math", enabled: false });
     const disabled = await server.handle(initialize("/ns/acme/mcp/math", { "x-tenant": "acme" }));
     expect(disabled.status).toBe(410);
+  });
+});
+
+describe("endpoints defined in host code", () => {
+  it("registers builder endpoints on start and serves their inline tools", async () => {
+    const storage = new InMemoryWorkflowStorage();
+    const registry = new InMemoryMcpEndpointRegistry();
+    const echo = tool({
+      name: "echo",
+      description: "Echo the text back.",
+      parameters: z.object({ text: z.string() }),
+      execute: async ({ text }) => text,
+    });
+    const endpoints = new ZoryaMcpEndpoints({
+      registry,
+      tools: [{ add }],
+      endpoints: [
+        McpEndpoint.builder("toolkit")
+          .title("Toolkit")
+          .tool({ tool: "add", name: "plus" })
+          .tool(echo)
+          .build(),
+      ],
+    });
+    const server = new ZoryaServer({
+      apiKeys: [API_KEY],
+      workflows: new LocalWorkflows({
+        storage,
+        runner: createWorkflowRunner({ storage }),
+        definitions: {},
+        sleepScanIntervalMs: 0,
+      }),
+      mcpEndpoints: endpoints,
+    });
+    await endpoints.start();
+    expect((await registry.get({ id: "toolkit" }))?.source).toBe("code");
+
+    const client = await connect({ server, path: "/mcp/toolkit" });
+    expect((await client.listTools()).tools.map((t) => t.name)).toEqual(["plus", "echo"]);
+    const echoed = await client.callTool({ name: "echo", arguments: { text: "hi" } });
+    expect(echoed.content).toEqual([{ type: "text", text: "hi" }]);
+    await client.close();
+    await endpoints.stop();
   });
 });
 

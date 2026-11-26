@@ -19,7 +19,12 @@
 // ---------------------------------------------------------------------------
 
 import type { AgentTool } from "../tool.ts";
-import type { McpEndpointMetadata, McpEndpointToolBinding } from "./types.ts";
+import {
+  MCP_ENDPOINT_ID_PATTERN,
+  type McpEndpointMetadata,
+  type McpEndpointRecipeInput,
+  type McpEndpointToolBinding,
+} from "./types.ts";
 
 const BRAND = Symbol.for("promin.mcpEndpoint");
 
@@ -104,6 +109,68 @@ export function splitMcpEndpointTools(entries: ReadonlyArray<McpEndpointToolEntr
     }
   }
   return { bindings, privateTools };
+}
+
+/** A definition turned into what the registry stores plus the code it names. */
+export interface CompiledMcpEndpoint {
+  readonly id: string;
+  readonly input: McpEndpointRecipeInput;
+  readonly privateTools: Readonly<Record<string, AgentTool<any, any>>>;
+}
+
+/**
+ * Compile a definition: split its tools into stored bindings and private
+ * code, and fold in `folderTools` (a folder endpoint's `tools/`). A shared
+ * name that matches a folder tool binds the folder tool (the closest one),
+ * and folder tools the definition does not list are exposed too. Throws on
+ * a bad id, a clash between two private tools, or a nameless inline tool.
+ */
+export function compileMcpEndpoint(params: {
+  readonly definition: McpEndpointDefinitionInput;
+  /** Id when the definition has none (the file or folder name). */
+  readonly fallbackId?: string;
+  readonly folderTools?: Readonly<Record<string, AgentTool<any, any>>>;
+}): CompiledMcpEndpoint {
+  const { definition } = params;
+  const folderTools = params.folderTools ?? {};
+  const id = definition.id ?? params.fallbackId;
+  if (id === undefined) throw new Error("an MCP endpoint needs an id");
+  if (!MCP_ENDPOINT_ID_PATTERN.test(id)) {
+    throw new Error(
+      `"${id}" is not a valid endpoint id (letters, digits, _ and -, starting with a letter or digit)`,
+    );
+  }
+  const split = splitMcpEndpointTools(definition.tools);
+  const privateTools: Record<string, AgentTool<any, any>> = { ...folderTools };
+  for (const [name, tool] of Object.entries(split.privateTools)) {
+    if (privateTools[name] !== undefined && privateTools[name] !== tool) {
+      throw new Error(`inline tool "${name}" clashes with a tools/ file`);
+    }
+    privateTools[name] = tool;
+  }
+  const resolved = split.bindings.map((b) =>
+    !b.private && Object.hasOwn(folderTools, b.tool) ? { ...b, private: true } : b,
+  );
+  const listed = new Set(resolved.filter((b) => b.private).map((b) => b.tool));
+  const bindings = [
+    ...resolved,
+    ...Object.keys(folderTools)
+      .filter((name) => !listed.has(name))
+      .sort()
+      .map((name) => ({ tool: name, private: true })),
+  ];
+  const input: McpEndpointRecipeInput = {
+    tools: bindings,
+    ...(definition.title !== undefined && { title: definition.title }),
+    ...(definition.instructions !== undefined && { instructions: definition.instructions }),
+    ...(definition.capabilities !== undefined && { capabilities: definition.capabilities }),
+    ...(definition.namespaces !== undefined && { namespaces: definition.namespaces }),
+    ...(definition.trustClientApproval !== undefined && {
+      trustClientApproval: definition.trustClientApproval,
+    }),
+    ...(definition.metadata !== undefined && { metadata: definition.metadata }),
+  };
+  return { id, input, privateTools };
 }
 
 /** Structural check: an `AgentTool` has a name, an `execute` and `parameters`. */

@@ -14,9 +14,12 @@ import {
   listAllVersioned,
   McpEndpointPrivateTools,
   mergeToolSources,
+  registerMcpEndpointDefinitions,
   resolveMcpEndpointTools,
   startMcpEndpointScanLoop,
   type AgentTool,
+  type ApplyDiscoveredResult,
+  type McpEndpointDefinition,
   type McpEndpointRegistry,
   type McpEndpointToolSource,
   type RegisteredMcpEndpoint,
@@ -48,6 +51,12 @@ export interface ZoryaMcpEndpointsConfig {
    * hot-reloading registry is seen live.
    */
   tools?: ReadonlyArray<McpEndpointToolSource>;
+  /**
+   * Endpoints declared in host code (`McpEndpoint.builder(id)…build()`),
+   * registered on `start()` with `source: "code"`. More can be added later
+   * with `define()`.
+   */
+  endpoints?: ReadonlyArray<McpEndpointDefinition>;
   /** Folder scan of file-defined endpoints. Omit to disable. */
   scan?: ZoryaMcpEndpointsScanConfig;
   /** Per-call limit for tools that set none (ms). Default 60 000. */
@@ -72,6 +81,7 @@ export class ZoryaMcpEndpoints {
   readonly clock: WallClock | undefined;
   private readonly sources: ReadonlyArray<McpEndpointToolSource>;
   private readonly scanConfig: ZoryaMcpEndpointsScanConfig | undefined;
+  private readonly initial: ReadonlyArray<McpEndpointDefinition>;
   private readonly onToolErrorHook: ZoryaMcpEndpointsConfig["onToolError"];
   private scanHandle: ScanLoopHandle<ScanLoopTick> | undefined;
 
@@ -79,6 +89,7 @@ export class ZoryaMcpEndpoints {
     this.registry = config.registry;
     this.sources = config.tools ?? [];
     this.scanConfig = config.scan;
+    this.initial = config.endpoints ?? [];
     this.defaultTimeoutMs = config.defaultTimeoutMs;
     this.toolAuditLogger = config.toolAuditLogger;
     this.clock = config.clock;
@@ -114,6 +125,21 @@ export class ZoryaMcpEndpoints {
     );
   }
 
+  /**
+   * Register endpoints declared in host code: installs their private tools
+   * and stores a version when the definition changed (`source: "code"`).
+   * Throws before writing when one is invalid or lacks an id.
+   */
+  async define(
+    definitions: McpEndpointDefinition | ReadonlyArray<McpEndpointDefinition>,
+  ): Promise<ApplyDiscoveredResult> {
+    return registerMcpEndpointDefinitions({
+      registry: this.registry,
+      privateTools: this.privateTools,
+      definitions: isDefinitionList(definitions) ? definitions : [definitions],
+    });
+  }
+
   /** Ids whose active version a file scan wrote. */
   async fileManagedIds(): Promise<string[]> {
     const managed = await listAllVersioned({ registry: this.registry, source: FILE_SOURCE });
@@ -121,6 +147,7 @@ export class ZoryaMcpEndpoints {
   }
 
   async start(): Promise<void> {
+    if (this.initial.length > 0) await this.define(this.initial);
     if (this.scanHandle || !this.scanConfig) return;
     const scan = this.scanConfig;
     this.scanHandle = startMcpEndpointScanLoop({
@@ -141,4 +168,10 @@ export class ZoryaMcpEndpoints {
     this.scanHandle?.stop();
     this.scanHandle = undefined;
   }
+}
+
+function isDefinitionList(
+  value: McpEndpointDefinition | ReadonlyArray<McpEndpointDefinition>,
+): value is ReadonlyArray<McpEndpointDefinition> {
+  return Array.isArray(value);
 }
